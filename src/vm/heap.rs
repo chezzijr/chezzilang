@@ -301,14 +301,15 @@ pub enum Obj {
     /// so they are traced as GC children.
     Set(SetData),
     /// Fields stored POSITIONALLY in declaration order (hidden-class / `__slots__` layout — M19
-    /// memory-layout lever #1). No per-instance field-name strings: names are resolved on the cold
-    /// path (Display / error / probe miss) from `StructDef::fields` via `tid`/`name`, which is the
-    /// JIT groundwork — a flat `Vec<Value>` with constant, declaration-order field offsets. `tid` is
-    /// the struct type's dense layout id (`StructDef::tid`), stamped at construction so the field IC
-    /// can guard on a pure-int compare; `TID_NONE` for a struct whose name isn't a registered type
-    /// (never IC-cached). `name` is kept (consumed by method-dispatch / Display / arith / hash).
+    /// memory-layout lever #1). No per-instance field-name strings AND no per-instance type-name
+    /// string: names are resolved on the cold path (method-dispatch / Display / arith / hash / error /
+    /// wire / snap) from `tid` — the type name via `Program::struct_names` (`struct_name_of_tid`), the
+    /// field names from `StructDef::fields`. This is the JIT groundwork — a flat `Vec<Value>` with
+    /// constant, declaration-order field offsets. `tid` is the struct type's dense layout id
+    /// (`StructDef::tid`), stamped at construction so the field IC can guard on a pure-int compare;
+    /// `TID_NONE` for a struct whose name isn't a registered type (never IC-cached, resolves to `"?"`).
+    /// The struct analogue of `Enum.variant_id`. Saves one string alloc per instantiation.
     Struct {
-        name: Box<str>,
         tid: u32,
         fields: Fields,
     },
@@ -759,9 +760,9 @@ mod iter_obj_tests {
     }
 
     /// M19 lever #1: inline struct fields. `Fields` must fit in ≤32B (`[Value;3]`=24B + len:u8 + the
-    /// discriminant, packed into alignment padding) so `Obj::Struct`'s payload (Box<str>16 + tid 4 +
-    /// Fields) stays within the 56B cap → `Obj` stays 64. If this fails, the inline width is too big;
-    /// STOP rather than widen past `[Value;3]`.
+    /// discriminant, packed into alignment padding) so `Obj::Struct`'s payload (tid 4 + Fields) stays
+    /// within the 56B cap → `Obj` stays 64. If this fails, the inline width is too big; STOP rather
+    /// than widen past `[Value;3]`.
     #[test]
     fn fields_inline_width_fits() {
         assert!(
@@ -825,7 +826,6 @@ mod iter_obj_tests {
         let before = h.live_bytes();
         // 4-field Spill struct holding the heap Str among its fields.
         let sp = h.alloc(Obj::Struct {
-            name: "S".into(),
             tid: crate::vm::op::TID_NONE,
             fields: Fields::from_vec(vec![
                 Value::int(1),
@@ -854,7 +854,6 @@ mod iter_obj_tests {
         // Inline struct (2 fields) adds only the Obj slot — 0 extra heap.
         let base = h.live_bytes();
         let _inl = h.alloc(Obj::Struct {
-            name: "I".into(),
             tid: crate::vm::op::TID_NONE,
             fields: Fields::from_vec(vec![Value::int(1), Value::int(2)]),
         });

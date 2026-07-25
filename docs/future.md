@@ -211,9 +211,9 @@ mistaken for.
     downcast). **Why deferred — the runtime ERASES generics, so `cast` can only *honestly* witness what
     a runtime `Value` still carries:**
     - `Value` is `Int`/`Float`/`Bool`/`Nil`/`Obj` (`src/vm/value.rs`) — scalars and `str` witness fine.
-    - `Obj::List(Vec<Value>)` (`src/vm/heap.rs`) carries **no element type**; `Obj::Struct{name,…}`
-      carries only the **name**. So `cast` can witness a *bare container KIND* (is-it-a-list) and a
-      *named struct/enum BY NAME*, but **not** a parameterized target.
+    - `Obj::List(Vec<Value>)` (`src/vm/heap.rs`) carries **no element type**; `Obj::Struct{tid,…}`
+      carries only the **type id** (→ name via `struct_names`). So `cast` can witness a *bare container
+      KIND* (is-it-a-list) and a *named struct/enum BY NAME*, but **not** a parameterized target.
     - Therefore `cast[List[int]]`, `cast[Map[str,int]]`, `cast[Box[int]]`, … are **unsound and must be
       REJECTED** at the checker: `List[int]` and `List[str]` are the same runtime shape, and an empty
       list is ambiguous for *any* element type. Only `cast[Scalar]`, `cast[str]`, `cast[List]`-kind, and
@@ -569,19 +569,20 @@ The original M5 baseline was ~4–6.5× over the then-existing (now-removed) tre
 
 **Compact aggregate representation — drop per-instance redundancy (the real layout lever):**
 
-1. ✅ **Shared per-type struct layout (hidden-class / `__slots__`) — DONE (2026-06-16).**
-   `Obj::Struct { name: Box<str>, tid, fields: Fields }` (`heap.rs`; `Fields` was a flat `Vec<Value>`
-   until lever 3b inlined it) now stores fields **positionally** (declaration-order offsets) — no per-instance field-name
+1. ✅ **Shared per-type struct layout (hidden-class / `__slots__`) — DONE (2026-06-16); type-name drop DONE (2026-07-25).**
+   `Obj::Struct { tid, fields: Fields }` (`heap.rs`; `Fields` was a flat `Vec<Value>`
+   until lever 3b inlined it) stores fields **positionally** (declaration-order offsets) — no per-instance field-name
    strings. Names live only in `StructDef { fields: Vec<String>, tid }` (`op.rs:378`), resolved on the
    cold path (Display/stringify/probe-miss/wire/snap) by `name`→`StructDef`. Killed the N per-field
-   `Box<str>` allocs/instance + the `==`-name-clone (`mod.rs` struct-eq is now a by-position value
-   compare guarded by `na != nb`). The single top-level `name` is **kept** (consumed by ~8
-   dispatch/Display/arith/hash paths — dropping it would need a `tid`→name map everywhere; out of
-   scope for the primary win). The synthetic native structs `Match`/`Response` are now registered in
-   `Program.structs` (`compiler/mod.rs` `Compiler::new`) so the runtime can recover their field names.
-   Perf: bench-neutral (struct bench reuses instances, dispatch/alloc-bound) but a 4-field
-   struct-construction micro went **827 ms → 510 ms (−38%)**. Hands the JIT a constant field offset.
-   Interp left untouched (frozen oracle; parity by declaration order).
+   `Box<str>` allocs/instance. The single top-level `name: Box<str>` was **also dropped** (2026-07-25,
+   memory lever #7): it duplicated `tid`, so it now resolves from `tid` via the dense reverse index
+   `Program::struct_names` (`Vm::struct_name_of_tid`, O(1) — the struct analogue of enum `variants_by_id`),
+   and struct `==` is now a pure-`tid` int compare (subsumes the old `na != nb` name compare, as enum
+   equality compares `variant_id`). The synthetic native structs `Match`/`Response`/`ProcResult`/`FileInfo`
+   are registered in `Program.structs` (`compiler/mod.rs` `Compiler::new`) so the runtime can recover
+   their field names + type key. Perf: bench-neutral (struct bench reuses instances, dispatch/alloc-bound)
+   but a 4-field struct-construction micro went **827 ms → 510 ms (−38%)**, and the name drop is ~28% of
+   `many_struct` RSS (measured post-merge). Hands the JIT a constant field offset. Interp removed.
 2. **✅ DONE — Enum variant id instead of names.** Was `Obj::Enum { ty: Box<str>, variant: Box<str>,
    payload }` — two `Box<str>` per instance, both global (`Program::variants`). Now `Obj::Enum {
    variant_id: u32, payload }` (the enum analogue of `tid`); the type + variant names resolve from the

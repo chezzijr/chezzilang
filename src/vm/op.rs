@@ -602,6 +602,12 @@ pub struct Program {
     /// cold-path id→names resolution for Display / stringify / error / wire / snap, where the instance
     /// no longer carries the strings. Dense and gap-free (ids are assigned `0..n`).
     pub variants_by_id: Vec<VariantDef>,
+    /// M19 memory-layout lever — struct type IDENTITY KEYS indexed by their dense `tid`
+    /// (`struct_names[tid]` ⇒ the `structs` map key, e.g. `<main>::Point`). The reverse of `structs`:
+    /// O(1) cold-path tid→name resolution for method dispatch / Display / arith / hash / wire / snap,
+    /// where `Obj::Struct` no longer carries a per-instance `name: Box<str>` (the struct analogue of
+    /// `variants_by_id`). Dense and gap-free (tids are assigned `structs.len()` at each insert).
+    pub struct_names: Vec<Box<str>>,
     /// Modules in dependency order (deps first, entry last) — the run order.
     pub modules: Vec<ModuleProto>,
     /// M19 Phase 4 — number of struct-field inline-cache sites (dense ids `0..field_ic_sites`
@@ -662,5 +668,18 @@ impl Program {
     /// Map a module's stable id to its index in `modules` (for resolving import targets).
     pub fn module_index(&self, id: &ModuleId) -> Option<usize> {
         self.modules.iter().position(|m| &m.id == id)
+    }
+
+    /// M19 memory-layout lever — (re)build `struct_names` (the dense `tid`→identity-key reverse index)
+    /// from `structs`. Called once at program construction, AFTER every struct type is hoisted (tids
+    /// are dense `0..structs.len()`, so a flat `Vec` placing each key at `def.tid` is gap-free).
+    pub fn rebuild_struct_names(&mut self) {
+        let mut names: Vec<Box<str>> = vec![Box::from(""); self.structs.len()];
+        for (key, def) in &self.structs {
+            if let Some(slot) = names.get_mut(def.tid as usize) {
+                *slot = Box::from(key.as_str());
+            }
+        }
+        self.struct_names = names;
     }
 }

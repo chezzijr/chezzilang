@@ -2099,10 +2099,10 @@ impl Vm {
                 // becomes its cursor (so the seq path drains it); everything else passes through.
                 let v = self.pop();
                 let convert = if let Some(h) = v.as_obj()
-                    && let Obj::Struct { name, .. } = self.heap.get(h)
+                    && let Obj::Struct { tid, .. } = self.heap.get(h)
                 {
-                    let name = name.clone();
-                    self.program.structs.get(name.as_ref()).map(|d| {
+                    let name = self.struct_name_of_tid(*tid);
+                    self.program.structs.get(name).map(|d| {
                         (
                             !d.methods.contains_key("next") && d.methods.contains_key("iter"),
                             d.methods.get("iter").copied(),

@@ -731,12 +731,12 @@ impl Vm {
         debug_assert!(recv.is_obj(), "resolve_overload_method on non-obj");
         let h = recv.as_gcref();
         match self.heap.get(h) {
-            Obj::Struct { name, .. } => {
-                let name = name.clone();
+            Obj::Struct { tid, .. } => {
+                let name = self.struct_name_of_tid(*tid);
                 let def = self
                     .program
                     .structs
-                    .get(name.as_ref())
+                    .get(name)
                     .ok_or_else(|| self.err(format!("unknown struct type '{name}'"), span))?;
                 let proto = *def.methods.get(method).ok_or_else(|| {
                     self.err(
@@ -1169,13 +1169,14 @@ impl Vm {
     /// [`struct_compare`] (re-entrant via `run_proto`).
     pub(super) fn struct_hash(&mut self, v: Value, span: Span) -> Result<u64, RuntimeError> {
         let Some(h) = v.as_obj() else { unreachable!() };
-        let Obj::Struct { name, .. } = self.heap.get(h).clone() else {
+        let Obj::Struct { tid, .. } = self.heap.get(h) else {
             unreachable!()
         };
+        let name = self.struct_name_of_tid(*tid);
         let def = self
             .program
             .structs
-            .get(name.as_ref())
+            .get(name)
             .cloned()
             .ok_or_else(|| self.err(format!("unknown struct type '{name}'"), span))?;
         // A ZERO-FIELD struct with no `hash` method hashes to a constant (0): it has no state, so
@@ -1414,10 +1415,9 @@ impl Vm {
                 }
                 Value::obj(nh)
             }
-            Obj::Struct { name, tid, fields } => {
-                let (name, tid, fields) = (name.clone(), *tid, fields.clone());
+            Obj::Struct { tid, fields } => {
+                let (tid, fields) = (*tid, fields.clone());
                 let nh = self.heap.alloc(Obj::Struct {
-                    name,
                     tid,
                     fields: fields.clone(),
                 });
@@ -1811,20 +1811,19 @@ impl Vm {
                     }
                     (
                         Obj::Struct {
-                            name: na,
+                            tid: ta,
                             fields: fa,
-                            ..
                         },
                         Obj::Struct {
-                            name: nb,
+                            tid: tb,
                             fields: fb,
-                            ..
                         },
                     ) => {
-                        // Positional structural compare: the `na != nb` guard preserves type
-                        // distinction (same name ⇒ same StructDef ⇒ identical field order), so a
-                        // by-position value compare suffices — no per-field name clone needed.
-                        if na != nb || fa.len() != fb.len() {
+                        // Positional structural compare: the `ta != tb` guard preserves type
+                        // distinction (same tid ⇒ same StructDef ⇒ identical field order), so a
+                        // by-position value compare suffices — no per-field name clone needed. Equal
+                        // tid ⟹ same struct type (tids are dense per-type ids), one int compare.
+                        if ta != tb || fa.len() != fb.len() {
                             return Ok(false);
                         }
                         let fa: Vec<Value> = fa.as_slice().to_vec();

@@ -1751,6 +1751,7 @@ pub(crate) fn empty_program() -> Program {
         native_home: Default::default(),
         variants: Default::default(),
         variants_by_id: Vec::new(),
+        struct_names: Vec::new(),
         modules: vec![],
         field_ic_sites: 0,
         method_ic_sites: 0,
@@ -1903,7 +1904,6 @@ fn wire_roundtrip_preserves_value_equality() {
         .heap
         .alloc(Obj::Tuple(vec![Value::bool(true), Value::nil()]));
     let st = vm.heap.alloc(Obj::Struct {
-        name: "P".into(),
         tid: TID_NONE,
         fields: crate::vm::heap::Fields::from_vec(vec![Value::int(1), Value::obj(s)]),
     });
@@ -8585,14 +8585,16 @@ fn struct_positional_layout_no_per_instance_names() {
         panic!("expected struct obj")
     };
     match vm.heap.get(h) {
-        Obj::Struct { name, fields, .. } => {
-            assert_eq!(name.as_ref(), "<main>::Point");
+        Obj::Struct { tid, fields, .. } => {
+            let tid = *tid;
             // positional: NOT Vec<(Box<str>, Value)>
             assert_eq!(
                 fields.as_slice(),
                 &[Value::int(1), Value::int(2)],
                 "fields must be positional in declaration order, no per-instance names"
             );
+            // Name is resolved from tid (no per-instance `name` field), not stored on the instance.
+            assert_eq!(vm.struct_name_of_tid(tid), "<main>::Point");
         }
         _ => panic!("expected Obj::Struct"),
     }

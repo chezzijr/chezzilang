@@ -258,7 +258,6 @@ impl Vm {
         // strings, no zip with `def.fields`. `argc == def.fields.len()` is checked above.
         let fields: Vec<Value> = self.stack.split_off(at);
         let h = self.heap.alloc(Obj::Struct {
-            name: name.into(),
             tid: def.tid,
             fields: Fields::from_vec(fields),
         });
@@ -270,6 +269,18 @@ impl Vm {
     /// (native/ad-hoc structs) — such a struct never IC-caches, so it stays sound on the probe path.
     pub(super) fn struct_tid(&self, name: &str) -> u32 {
         self.program.structs.get(name).map_or(TID_NONE, |d| d.tid)
+    }
+
+    /// M19 memory-layout lever — resolve a struct `tid` back to its IDENTITY KEY (the `structs` map
+    /// key, e.g. `<main>::Point`) on the cold path (method dispatch / Display / arith / hash / wire /
+    /// snap), where `Obj::Struct` no longer carries a per-instance `name`. O(1) via `struct_names`.
+    /// Returns `"?"` for [`crate::vm::op::TID_NONE`] / an out-of-range id (defensive — every
+    /// source-constructed struct has a registered `def.tid`, so this is unreachable for Display).
+    pub(super) fn struct_name_of_tid(&self, tid: u32) -> &str {
+        self.program
+            .struct_names
+            .get(tid as usize)
+            .map_or("?", |s| s)
     }
 
     /// M19 lever #2 — resolve a `variant_id` back to its `(enum-type, variant)` names on the COLD path
@@ -375,21 +386,17 @@ impl Vm {
                     )),
                 }
             }
-            Obj::Struct {
-                name: sname,
-                tid,
-                fields,
-                ..
-            } => {
+            Obj::Struct { tid, fields, .. } => {
                 // Positional layout: the field name->index map lives in the StructDef (declaration
                 // order), not the instance. Resolve the slot there, then index the flat `fields`
                 // Vec. Capture both index + layout `tid` so the IC can cache them (Value is Copy,
                 // `tid` is a `u32`, so the heap borrow ends here, freeing `self` for the write).
                 let tid = *tid;
+                let sname = self.struct_name_of_tid(tid);
                 let idx = self
                     .program
                     .structs
-                    .get(sname.as_ref())
+                    .get(sname)
                     .and_then(|d| d.fields.iter().position(|f| f == name));
                 let found = idx.and_then(|i| fields.get(i).map(|v| (i, *v)));
                 match found {
@@ -535,14 +542,14 @@ impl Vm {
         args: Vec<Value>,
         span: Span,
     ) -> Result<Value, RuntimeError> {
-        let Obj::Struct { name, .. } = self.heap.get(h) else {
+        let Obj::Struct { tid, .. } = self.heap.get(h) else {
             unreachable!()
         };
-        let name = name.clone();
+        let name = self.struct_name_of_tid(*tid);
         let def = self
             .program
             .structs
-            .get(name.as_ref())
+            .get(name)
             .cloned()
             .ok_or_else(|| self.err(format!("unknown struct type '{name}'"), span))?;
         let proto = *def
@@ -740,13 +747,13 @@ impl Vm {
         }
         // Positional layout: resolve the field name->index from the StructDef (declaration order)
         // BEFORE the mutable heap borrow, then write the flat `fields` slot by index.
-        let sname = match self.heap.get(h) {
-            Obj::Struct { name, .. } => Some(name.clone()),
+        let stid = match self.heap.get(h) {
+            Obj::Struct { tid, .. } => Some(*tid),
             _ => None,
         };
-        let idx = sname
-            .as_ref()
-            .and_then(|n| self.program.structs.get(n.as_ref()))
+        let idx = stid
+            .map(|t| self.struct_name_of_tid(t))
+            .and_then(|n| self.program.structs.get(n))
             .and_then(|d| d.fields.iter().position(|f| f == name));
         let found;
         match self.heap.get_mut(h) {
@@ -1184,12 +1191,12 @@ impl Vm {
         }
         let step = match self.heap.get(h) {
             Obj::Generator(_) => Step::Generator,
-            Obj::Struct { name, .. } => {
-                let name = name.clone();
+            Obj::Struct { tid, .. } => {
+                let name = self.struct_name_of_tid(*tid);
                 let def = self
                     .program
                     .structs
-                    .get(name.as_ref())
+                    .get(name)
                     .cloned()
                     .ok_or_else(|| self.err(format!("unknown struct type '{name}'"), span))?;
                 let proto = *def.methods.get("next").ok_or_else(|| {
@@ -1950,21 +1957,20 @@ impl Vm {
                         Ok(format!("{{{}}}", parts.join(", ")))
                     }
                 }
-                Obj::Struct { name, fields, .. } => {
+                Obj::Struct { tid, fields, .. } => {
                     // Positional layout: recover declaration-order field names from the StructDef
-                    // (cold display path). Snapshot name + values first to drop the heap borrow.
-                    let name = name.clone();
+                    // (cold display path). Resolve the type key from `tid`; snapshot values to drop
+                    // the heap borrow.
+                    let name = self.struct_name_of_tid(*tid);
                     let vals: Vec<Value> = fields.as_slice().to_vec();
                     // ROOT REDESIGN — render the BARE display name (not the qualified identity key);
                     // `name` is the key the StructDef is stored under. Fall back to stripping the key.
                     let (display, names): (String, Vec<String>) = self
                         .program
                         .structs
-                        .get(name.as_ref())
+                        .get(name)
                         .map(|d| (d.display_name.clone(), d.fields.clone()))
-                        .unwrap_or_else(|| {
-                            (crate::compiler::bare_display(name.as_ref()), Vec::new())
-                        });
+                        .unwrap_or_else(|| (crate::compiler::bare_display(name), Vec::new()));
                     let mut parts = Vec::with_capacity(vals.len());
                     for (i, v) in vals.iter().enumerate() {
                         let k = names.get(i).cloned().unwrap_or_else(|| i.to_string());
@@ -2432,9 +2438,10 @@ impl Vm {
                     out.push('}');
                 }
             }
-            Obj::Struct {
-                name, mut fields, ..
-            } => {
+            Obj::Struct { tid, mut fields } => {
+                // Resolve the type key from `tid` (owned — the `str` hook below takes `&mut self`,
+                // so a `&self` borrow of the name can't live across it). Cold stringify path.
+                let name = self.struct_name_of_tid(tid).to_string();
                 // A self-only `str(self)` overrides the default repr — but ONLY when it actually
                 // conforms to `Stringable`, i.e. it returns a `str`. Bug B: `str` is a normal user
                 // method that may legitimately return anything (e.g. `-> S` returning the struct
@@ -2444,7 +2451,7 @@ impl Vm {
                 // ONLY when it is a `str`. A non-`str` result must NOT be re-stringified: that
                 // re-enters this arm, re-invokes the hook, and recurses forever (uncatchable native
                 // stack overflow). It falls through to the default repr, like a wrong-arity `str`.
-                let def = self.program.structs.get(name.as_ref()).cloned();
+                let def = self.program.structs.get(name.as_str()).cloned();
                 if let Some(def) = &def
                     && let Some(&proto) = def.methods.get("str")
                     && self.program.protos[proto].arity == 1
@@ -2470,7 +2477,7 @@ impl Vm {
                 let display = def
                     .as_ref()
                     .map(|d| d.display_name.clone())
-                    .unwrap_or_else(|| crate::compiler::bare_display(name.as_ref()));
+                    .unwrap_or_else(|| crate::compiler::bare_display(&name));
                 let _ = write!(out, "{display}(");
                 for (i, fv) in fields.iter().enumerate() {
                     if i > 0 {
