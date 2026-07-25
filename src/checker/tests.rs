@@ -11960,6 +11960,33 @@ fn extern_struct_with_str_field_is_rejected() {
 }
 
 #[test]
+fn extern_struct_with_no_fields_is_rejected() {
+    // W6-5 — a ZERO-field struct at an extern boundary used to pass `check` and then PANIC the VM
+    // unrecoverably (libffi's `prep_cif` → `Typedef`, `recover:` cannot catch a Rust panic). C itself
+    // has no empty struct (GCC/Clang size-1 extension), and libffi cannot build a CIF for one, so
+    // reject it at check time like the other 7 marshalling rejects. BOTH directions (the guard lives
+    // in the shared `struct_fields_marshallable`, which both flow through).
+    rejects(
+        "struct Empty:\n    pass\n\nextern \"libc.so.6\":\n    fn abs(x: int) -> Empty\n",
+        "has no fields",
+    );
+    rejects(
+        "struct Empty:\n    pass\n\nextern \"libc.so.6\":\n    fn abs(x: Empty) -> int\n",
+        "has no fields",
+    );
+    // …and on the graph path, where the struct is keyed `main::Empty` — the message must still render
+    // the BARE name.
+    let errs = check_entry(
+        "struct Empty:\n    pass\n\nextern \"libc.so.6\":\n    fn abs(x: int) -> Empty\n",
+    );
+    assert!(
+        errs.iter()
+            .any(|e| e.message.contains("struct 'Empty' has no fields")),
+        "expected a bare-named zero-field reject, got: {errs:?}"
+    );
+}
+
+#[test]
 fn extern_struct_with_nested_struct_field_is_rejected() {
     // A struct field that is itself a struct (nested by value) is deferred in v1 — reject with the
     // struct + field named.
@@ -12283,12 +12310,111 @@ fn extern_named_after_struct_rejected() {
 }
 
 #[test]
+fn extern_named_after_struct_rejected_entry_path() {
+    // W6-6 — the bare-keyed single-module `ok()`/`rejects()` helper CANNOT catch this class: the CLI
+    // graph path keys `self.structs` module-scoped (`main::S`), so a bare `structs.contains_key(name)`
+    // lookup always missed and `struct strlen` + `extern fn strlen` silently called the CTOR. The
+    // sweep now consults `struct_names` (the BARE-visible ctor set), which is bare in BOTH paths.
+    // Both decl orders, because the sweep runs after the hoist loop.
+    entry_rejects(
+        "extern \"libc.so.6\":\n    fn strlen(s: str) -> int\n\nstruct strlen:\n    s: str\n",
+        "builtin/reserved name",
+    );
+    entry_rejects(
+        "struct S:\n    a: int\n\nextern \"libc.so.6\":\n    fn S(x: int) -> int\n",
+        "builtin/reserved name",
+    );
+}
+
+#[test]
+fn extern_named_after_unimported_native_struct_ok() {
+    // Deliberate delta of the W6-6 fix: `seed_stdlib_structs` seeds the `Match`/`Response`/
+    // `ProcResult`/`FileInfo` LAYOUTS into `self.structs` bare-keyed and UN-licensed, so keying the
+    // sweep off `self.structs` would over-reject. With no `import std.regex`, bare `Match(...)` is
+    // `unknown type 'Match'; import it from std.regex` — nothing shadows the extern, so it is
+    // reachable and must be ACCEPTED. (Paired with the imported case below.)
+    entry_ok("extern \"libc.so.6\":\n    fn Match(x: int) -> int\n");
+}
+
+#[test]
+fn extern_named_after_imported_native_struct_rejected() {
+    // …and the import DOES license the bare ctor name (`struct_names.insert` on the is_std arm), so
+    // the collision still fires there. This pins that the `struct_names` predicate did not widen the
+    // hole open.
+    entry_rejects(
+        "import std.regex\n\nextern \"libc.so.6\":\n    fn Match(x: int) -> int\n",
+        "builtin/reserved name",
+    );
+}
+
+#[test]
 fn extern_named_after_variant_rejected() {
     // An enum variant is keyed globally and resolved as a constructor before a plain call.
     rejects(
         "extern \"libc.so.6\":\n    fn Leaf(x: int) -> int\n\nenum Tree:\n    Leaf\n    Node\n",
         "builtin/reserved name",
     );
+}
+
+#[test]
+fn extern_reserved_name_reported_once() {
+    // W6-16 — a name that is BOTH in `RESERVED_CALLABLE` *and* a prelude `native struct` landing in
+    // the module's bare tables (`str`/`bytes`/`bytearray`/`Channel`/`List`/`Map`/`Set`) was reported
+    // by BOTH the in-loop reserved guard and the post-loop collision sweep → doubled diagnostics,
+    // incl. under `--errors=json` (doubled LSP squiggles). Report it exactly once.
+    for n in [
+        "str",
+        "bytes",
+        "bytearray",
+        "Channel",
+        "List",
+        "Map",
+        "Set",
+        // …and the already-single ones stay single.
+        "int",
+        "print",
+    ] {
+        let errs = check_entry(&format!(
+            "extern \"libm.so.6\":\n    fn {n}(x: int) -> int\n"
+        ));
+        assert_eq!(
+            errs.iter()
+                .filter(|e| e.message.contains("builtin/reserved name"))
+                .count(),
+            1,
+            "expected exactly one reserved-name diagnostic for {n:?}, got: {errs:?}"
+        );
+    }
+}
+
+#[test]
+fn extern_named_after_builtin_variant_rejected() {
+    // W6-11 — the four BUILTIN variant ctors (`Result`/`Option`'s) are resolved as ctors before a
+    // plain call exactly like a user enum's variants, but they are absent from `variant_owners`
+    // (their identity stays in `resolve_type`), so the sweep missed them. Probe that filed it:
+    // `extern fn Ok(x: float) -> float` then `y: float = Ok(2.0)` → "cannot assign Result[float] to
+    // variable of type float" — i.e. the call site resolves to the VARIANT, the extern is dead.
+    for v in ["Ok", "Err", "Some", "None"] {
+        rejects(
+            &format!("extern \"libm.so.6\":\n    fn {v}(x: float) -> float\n"),
+            "builtin/reserved name",
+        );
+    }
+    entry_rejects(
+        "extern \"libm.so.6\":\n    fn Ok(x: float) -> float\n",
+        "builtin/reserved name",
+    );
+}
+
+#[test]
+fn extern_named_after_result_option_type_ok() {
+    // …but the builtin TYPE names `Result`/`Option` are NOT callable, so an extern taking one is
+    // genuinely reachable and must stay ACCEPTED — the same rule as `extern_named_after_enum_type_ok`
+    // below. Probe: `extern fn Result(x: float) -> float` then `y: float = Result(2.0)` type-checks
+    // (and `run` dlsym-errors on the missing C symbol, i.e. it really dispatches to the extern),
+    // unlike the `Ok` probe above. Rejecting these would be a NEW over-rejection.
+    ok("extern \"libm.so.6\":\n    fn Result(x: float) -> float\n");
+    ok("extern \"libm.so.6\":\n    fn Option(x: float) -> float\n");
 }
 
 #[test]

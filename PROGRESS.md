@@ -4,6 +4,37 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 **Legend:** ⬜ not started · 🟦 in progress · ✅ done
 
+> **✅ BUG-HUNT (2026-07-25, wave 6, `auto-task/extern-guards`) — the `extern "lib":` name-collision +
+> struct-marshallability guards (gaps.md W6-5/W6-6/W6-11/W6-16, all FIXED).** Four filed defects, ONE
+> checker seam (`src/checker/setup.rs`), two conditions changed — checker-only, reject-direction, no VM/
+> compiler/native touch, so parity is structurally unaffected (nothing new runs). **W6-6 (P0)** — the
+> extern/struct collision guard was DEAD CODE on the CLI path: the sweep looked up the bare `extern_names`
+> spelling in `self.structs`, which the graph path keys MODULE-SCOPED (`main::S`), so `struct strlen` +
+> `extern fn strlen` type-checked and silently called the **struct ctor** while `docs/syntax.md` promised a
+> reject (the tracked `checker-test-helper-key-divergence` class — the bare-keyed `rejects()` helper passed).
+> Fixed by keying the sweep off **`struct_names`**, the BARE-visible ctor set (the same predicate the
+> nested-fn guard uses), which is bare in BOTH paths. Deliberate delta: an UN-imported stdlib layout name
+> (`Match`/`Response`/`ProcResult`/`FileInfo`, parked bare + un-licensed in `self.structs` by
+> `seed_stdlib_structs`) is no longer rejected — with no `import std.regex`, bare `Match(...)` is `unknown
+> type 'Match'`, so nothing shadows the extern; `import std.regex` still licenses the bare ctor and still
+> rejects. Both directions pinned. **W6-11** — `Ok`/`Err`/`Some`/`None` are now rejected too (builtin
+> variant ctors, absent from `variant_owners`); `Result`/`Option` stay **accepted** — probe-verified
+> reachable as extern names (a TYPE name is not callable), same rule as `extern_named_after_enum_type_ok`.
+> **W6-5 (P0)** — a ZERO-field struct at an extern boundary passed `check` then PANICKED the VM
+> unrecoverably (libffi `prep_cif: Typedef`, `recover:` can't catch a Rust panic); now one guard in the
+> shared `struct_fields_marshallable`, so it covers the param AND return direction, rendering the BARE
+> struct name. **W6-16** — the duplicate reserved-name diagnostic (`str`/`bytes`/`bytearray`/`Channel`/
+> `List`/`Map`/`Set`, doubled LSP squiggles) FELL OUT of the W6-6 fix: the second report came from those
+> prelude `native struct` layouts sitting bare-keyed in `self.structs`; every reserved name now reports
+> exactly once (also under `--errors=json`). +5 checker tests (graph/entry path where the bare-keyed helper
+> is blind, both decl orders, imported-vs-un-imported native struct, the four variants, `Result`/`Option`
+> ok, once-only count, zero-field param+return+entry). Controls re-verified on `target/release/chezzi`,
+> `--serial` == default M:N byte-identical: `examples/ffi{,_struct,_str,_int}.chz`, a plain `extern strlen`,
+> and a `struct Cplx{re,im}` + `cabs` by-value-struct extern. Docs: `docs/syntax.md` extern section (the
+> promise now true + names the variant ctors, the accepted TYPE-name cases, and the zero-field limit).
+> Left OPEN as its own follow-up (not one of the four): `newtype N = int` + `extern fn N` is the same
+> silent-shadow hole.
+
 > **✅ TEST RUNNER (2026-07-24) — `chezzi test` selection + output ergonomics batch (docs/future.md §3b
 > #5/#6/#7).** Seven opt-in, low-risk CLI+formatting flags on the runner — NO VM/checker/compiler touch,
 > pure `cmd_test` (flag parse) + `test_runner.rs` (formatting/filtering/timing). **Central refactor:** a

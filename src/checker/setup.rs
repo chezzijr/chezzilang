@@ -2791,11 +2791,23 @@ impl Checker {
         // only populated on unix (the `#[cfg(unix)]` arm above); on other targets the extern was
         // already rejected wholesale, so the sweep is a no-op.
         for (name, span) in &extern_names {
-            // Struct names and enum *variant* names register backend-resolved constructors; an
-            // enum *type* name does not (it is not callable in either engine), so it is NOT a
-            // collision — `extern fn Foo` alongside `enum Foo` resolves to the extern, exactly as
-            // a plain `fn Foo` alongside `enum Foo` does.
-            if self.structs.contains_key(name) || self.variant_owners.contains_key(name) {
+            // The predicate is the BARE-VISIBLE CTOR SET — exactly "what the backends resolve before
+            // a plain call" — which is `struct_names` (NOT `self.structs`: that map is keyed
+            // MODULE-SCOPED (`main::S`) on the graph/CLI path, so the old `structs.contains_key(name)`
+            // against the bare `extern_names` spelling was DEAD CODE there, and `seed_stdlib_structs`
+            // additionally parks UN-LICENSED stdlib layouts (`Match`/`Response`/…) in it, which would
+            // over-reject an extern whose owning std module was never imported). Same predicate the
+            // nested-fn collision guard uses. Plus enum *variant* names (`variant_owners`) and the four
+            // BUILTIN `Result`/`Option` variant ctors (absent from `variant_owners` — their identity
+            // lives in `resolve_type`). NOT a collision: an enum/`Result`/`Option` *type* name (not
+            // callable in either engine, so `extern fn Foo` alongside `enum Foo` resolves to the
+            // extern, exactly as a plain `fn Foo` does), nor an un-imported stdlib layout name.
+            // Keeping this off `is_reserved_name` also means a reserved-callable name is reported
+            // ONCE, by the in-loop guard above.
+            if self.struct_names.contains(name)
+                || self.variant_owners.contains_key(name)
+                || crate::checker::is_builtin_variant(name)
+            {
                 self.error(
                     *span,
                     format!("'{name}' is a builtin/reserved name and cannot be an extern fn"),
@@ -2997,7 +3009,9 @@ impl Checker {
     /// Whether every field of struct `name` is a marshallable C *scalar* — the v1 by-value-struct
     /// rule (flat scalar fields only). On a non-scalar field (str/owned_str, a nested struct, a
     /// generic `Ty::Param`, a list/map/…) emits a clear error naming the struct AND the offending
-    /// field, and returns `false`. `visited` breaks a (defensive) field-type cycle without overflow.
+    /// field, and returns `false`. A ZERO-field struct is rejected outright (libffi cannot build a CIF
+    /// for an empty aggregate — it panics). `visited` breaks a (defensive) field-type cycle without
+    /// overflow.
     pub(super) fn struct_fields_marshallable(
         &mut self,
         name: &str,
@@ -3020,6 +3034,22 @@ impl Checker {
             Some(info) => info.fields.clone(),
             None => return false,
         };
+        // A ZERO-field struct has no C counterpart — C has no empty struct (GCC/Clang give it size 1
+        // as an extension) and libffi's `prep_cif` errors `Typedef` on an empty element list, which
+        // libffi-rs `unwrap`s into a Rust PANIC (unrecoverable — `recover:` can't catch it). Reject it
+        // here, alongside the other marshalling rejects, so the panic path is statically unreachable.
+        if fields.is_empty() {
+            self.error(
+                span,
+                format!(
+                    "struct '{}' has no fields and cannot be C-marshallable (an extern struct \
+                     requires at least one flat scalar field) in extern fn '{fn_name}'",
+                    crate::compiler::bare_display(name)
+                ),
+            );
+            visited.remove(name);
+            return false;
+        }
         let mut all_ok = true;
         for (fname, fty) in &fields {
             // Only true C *scalars* are valid struct fields (NOT `Str` — str by value is deferred).

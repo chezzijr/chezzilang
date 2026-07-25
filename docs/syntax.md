@@ -2840,7 +2840,9 @@ print(r.rem)    # 2
 **v1 limit — flat scalar fields only.** Every field must itself be an already-marshallable **scalar**
 (`int`/`float`/`bool`/`ptr`/the `int8`..`uint64` widths). A struct with a **`str` field** or a **nested
 struct** field is rejected with an error naming the struct *and* the offending field; **generic
-structs** (`Pair[int]`) have no fixed C layout and are rejected. (A transparent `type P = Point` alias
+structs** (`Pair[int]`) have no fixed C layout and are rejected. A **zero-field** struct (`struct Empty:
+pass`) is rejected too (*struct 'Empty' has no fields and cannot be C-marshallable*) — C has no empty
+struct and libffi cannot build a call interface for one. (A transparent `type P = Point` alias
 to a flat struct works exactly like the bare struct.) The struct may be declared **before or after** the
 `extern` block. A struct (or a width alias like `type Len = int32`) declared in another **module** may be
 named at the extern boundary either by **named import** (`import DivT from core.cdefs`, then bare `DivT`)
@@ -3020,9 +3022,12 @@ their width is platform-dependent (LP64 vs LLP64); deferred to a future task. Se
 An `extern "lib":` block is a **top-level declaration only** — it is bound at module init, so nesting
 it inside `if`/`for`/`fn` is a parse error. An extern fn also may **not** be named after a builtin
 (`range`/`int`/`float`/`str`/`ord`/`chr`/`set`/`panic`), `print`, a constructor
-(`Channel`/`Shared`/`RwShared`/`Atomic`/`AtomicInt`/`timer`/`Executor`), or any of your `struct`/enum-variant names — those
-resolve to a special op before a plain call, so the extern would be silently shadowed; the checker
-rejects the collision (*'…' is a builtin/reserved name*).
+(`Channel`/`Shared`/`RwShared`/`Atomic`/`AtomicInt`/`timer`/`Executor`), any of your `struct`/enum-variant
+names, or a **builtin variant ctor** (`Ok`/`Err`/`Some`/`None`) — those resolve to a special op before a
+plain call, so the extern would be silently shadowed; the checker rejects the collision (*'…' is a
+builtin/reserved name*), in either declaration order and reported exactly **once**. A **type** name is
+*not* a collision and is accepted: an `enum`'s own name, `Result`/`Option`, and a std-module layout name
+whose module you never imported (`Match`) are not callable, so nothing shadows the extern.
 
 **Known v1 limits (see `docs/spec.md` for detail):**
 - **C `int` width:** bare Chezzi `int` (i64) marshals as C **`long`** — 64-bit on supported **LP64 unix**
