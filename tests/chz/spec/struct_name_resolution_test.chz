@@ -1,0 +1,38 @@
+# tests/chz/spec/struct_name_resolution_test.chz — behavior lock for the tid->name resolution lever.
+#
+# `Obj::Struct` no longer stores a per-instance `name: Box<str>`; the type name is resolved from the
+# instance's `tid` via `Program::struct_name_of_tid`. This exercises that resolution on the three
+# paths it touches: (a) LOCAL Display/str, (b) METHOD dispatch, (c) CROSS-HEAP (Channel across a
+# spawned task). Asserts on RECEIVED VALUES (never inter-task print order) so it stays serial==M:N.
+# Runs on BOTH engines via test_runner::chz_suite_passes_both_engines.
+import std.concurrency
+
+struct Point:
+    x: int
+    y: int
+
+    fn sum(self) -> int:
+        return self.x + self.y
+
+# (a) LOCAL Display resolves the type name from tid.
+test fn local_display_resolves_name():
+    p := Point(1, 2)
+    assert str(p) == "Point(x=1, y=2)"
+
+# (b) METHOD dispatch keys the method table by the tid-resolved name.
+test fn method_dispatch_resolves_name():
+    p := Point(3, 4)
+    assert p.sum() == 7
+
+# (c) CROSS-HEAP: struct crosses a Channel into a spawned task; the receiver resolves the name from
+# the SHARED Program's tid, so Display + method both stay correct on the other side.
+test fn cross_heap_resolves_name():
+    ch := Channel[Point](1)
+    result := Shared("")
+    p := Point(1, 2)
+    ch.send(p)
+    parallel:
+        spawn:
+            q := ch.recv()
+            result.set(str(q) + "|" + str(q.sum()))
+    assert result.get() == "Point(x=1, y=2)|3"

@@ -488,7 +488,6 @@ impl Vm {
                     None => lowered.into_iter().map(|(_, v)| v).collect(),
                 };
                 Value::obj(self.heap.alloc(Obj::Struct {
-                    name: name.into_boxed_str(),
                     tid,
                     fields: Fields::from_vec(fs),
                 }))
@@ -730,7 +729,6 @@ impl Vm {
                 // field/method lookups + `struct_tid` hit the right layout); display renders bare.
                 let tid = self.struct_tid(key);
                 let h = self.heap.alloc(Obj::Struct {
-                    name: key.clone().into_boxed_str(),
                     tid,
                     fields: Fields::from_vec(field_vals),
                 });
@@ -1195,9 +1193,10 @@ impl Vm {
                 self.stack.extend(args);
                 self.do_call(argc, span)
             }
-            Obj::Struct {
-                name, tid, fields, ..
-            } => {
+            Obj::Struct { tid, fields, .. } => {
+                // Resolve the type IDENTITY KEY from the instance's dense `tid` (O(1) index) — the
+                // instance no longer carries a per-instance `name`. Warm method-dispatch path.
+                let name = self.struct_name_of_tid(tid);
                 // Fix A — resolve `(proto, module_idx)` WITHOUT cloning the whole StructDef (its
                 // `fields` Vec + `methods` HashMap). On a megamorphic / sticky-generic site this slow
                 // path runs per call, so the per-miss StructDef clone dwarfed the dispatch itself. We
@@ -1206,7 +1205,7 @@ impl Vm {
                 let prog = Arc::clone(&self.program);
                 let def = prog
                     .structs
-                    .get(name.as_ref())
+                    .get(name)
                     .ok_or_else(|| self.err(format!("unknown struct type '{name}'"), span))?;
                 let resolved = def.methods.get(method).copied();
                 let def_module_idx = def.module_idx;
@@ -1281,7 +1280,7 @@ impl Vm {
                 let fidx = self
                     .program
                     .structs
-                    .get(name.as_ref())
+                    .get(name)
                     .and_then(|d| d.fields.iter().position(|f| f == method));
                 if let Some(fval) = fidx.and_then(|i| fields.get(i).copied()) {
                     let v = self.invoke_value(fval, args, span)?;
@@ -1298,7 +1297,7 @@ impl Vm {
                     && self
                         .program
                         .structs
-                        .get(name.as_ref())
+                        .get(name)
                         .is_some_and(|d| d.methods.contains_key("next"))
                 {
                     self.push(recv);
@@ -1308,9 +1307,9 @@ impl Vm {
                 let display = self
                     .program
                     .structs
-                    .get(name.as_ref())
+                    .get(name)
                     .map(|d| d.display_name.clone())
-                    .unwrap_or_else(|| crate::compiler::bare_display(name.as_ref()));
+                    .unwrap_or_else(|| crate::compiler::bare_display(name));
                 Err(self.err(format!("struct '{display}' has no method '{method}'"), span))
             }
             // Enum method dispatch (name-resolved, like structs). Enums are type-erased — no `tid`,

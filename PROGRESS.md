@@ -5715,6 +5715,27 @@ conformance` green.
   serial==M:N parity (full `cargo test` incl. `chz_suite_passes_both_engines` + `conformance`, all
   GC-stress rooting green), clippy clean. RSS delta measured post-merge.
 
+- **Memory layout #7 — drop `Obj::Struct.name: Box<str>`, resolve the type name from `tid`.** Every
+  struct instance carried a per-instance `name: Box<str>` (the type IDENTITY KEY, e.g. `<main>::Point`)
+  allocated fresh at construction — a **second heap alloc per struct** on top of the slot, ~28% of RSS on
+  the 2M-struct `benches/chz/many_struct.chz` (probe: nulling the name alloc took `many_struct`
+  205.6→148.9 MB). It was redundant: `tid: u32` already identifies the type. Mirrored the shipped enum
+  lever (`variant_id`): dropped the field (`Obj::Struct { tid, fields }`), added a dense reverse index
+  `Program::struct_names: Vec<Box<str>>` (`struct_names[tid]` ⇒ the `structs` map key, built once at
+  program construction from `program.structs` via `rebuild_struct_names`), and a resolver
+  `Vm::struct_name_of_tid(tid) -> &str` (O(1) index, mirrors `enum_names`). The ~14 name-read sites
+  resolve from `tid` on the cold path (method dispatch / Display / stringify / arith-overload / hash /
+  wire / snap); the warm method-dispatch (`call.rs`) + overload (`arith.rs`) paths index `struct_names`
+  in O(1) (never a scan). Struct **equality** now compares `tid` (same tid ⇒ same StructDef ⇒ identical
+  field order — one int compare, subsuming the old name compare, exactly as enum equality compares
+  `variant_id`). Wire/snap format UNCHANGED: `WireValue::Struct`/`SnapValue::Struct` still carry the name
+  string (resolved from `tid` at the send site, receiver re-derives `tid` via `struct_tid`) → byte-
+  identical cross-worker crossing, workers share `Arc<Program>` so `tid` is stable. `Obj` stays 64B
+  (`MapData`/`SetData` still cap the payload at 56; guard-pinned `obj_iter_within_size_cap`). Mechanical
+  VM-only change (checker never names `Obj`); behavior-preserving + serial==M:N parity (full `cargo test`
+  incl. `chz_suite_passes_both_engines` + `conformance` + all `*_gc_stress`), clippy clean. RSS delta
+  measured post-merge.
+
 **Remaining / blocked levers:**
 
 - **NaN-boxing `Value` is BLOCKED by full 64-bit ints, not "next."** `Value::Int` is a full `i64`; an

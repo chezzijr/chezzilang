@@ -2363,7 +2363,7 @@ impl Vm {
                 }
                 // Identity-preserved container (see `Obj::List`): a self-referential struct
                 // (`a.next = b; b.next = a`) back-references instead of overflowing the cap.
-                Obj::Struct { name, fields, .. } => {
+                Obj::Struct { tid, fields, .. } => {
                     if let Some(&id) = memo.path.get(&h) {
                         WireValue::Backref(id)
                     } else {
@@ -2372,7 +2372,9 @@ impl Vm {
                         memo.path.insert(h, id);
                         // Positional layout: recover the declaration-order field names from the
                         // StructDef (cold cross-task path) so the WireValue encoding is unchanged.
-                        let name = name.clone();
+                        // The instance carries only `tid`; resolve the type key from it (owned — the
+                        // wire format still carries the name string, receiver re-derives its tid).
+                        let name: Box<str> = self.struct_name_of_tid(*tid).into();
                         let names: Vec<Box<str>> = self
                             .program
                             .structs
@@ -2769,7 +2771,6 @@ impl Vm {
                 // them so), so rebuild positionally — the carried names are discarded.
                 let tid = self.struct_tid(&name);
                 let h = self.heap.alloc(Obj::Struct {
-                    name,
                     tid,
                     fields: Fields::from_vec(Vec::new()),
                 });
@@ -3641,9 +3642,12 @@ impl Vm {
                 }
                 SnapValue::Tuple(out)
             }
-            Obj::Struct { name, fields, .. } => {
+            Obj::Struct { tid, fields, .. } => {
                 // Positional layout: recover declaration-order field names from the StructDef so
                 // the SnapValue encoding (which carries names) is unchanged (cold cross-task path).
+                // The instance carries only `tid`; resolve the type key from it (the snap format
+                // still carries the name string, replay re-derives its tid).
+                let name: Box<str> = self.struct_name_of_tid(tid).into();
                 let names: Vec<Box<str>> = self
                     .program
                     .structs
@@ -3880,7 +3884,6 @@ impl Vm {
                 let f: Vec<Value> = fields.iter().map(|(_, fv)| self.replay_snap(fv)).collect();
                 let tid = self.struct_tid(name);
                 Value::obj(self.heap.alloc(Obj::Struct {
-                    name: name.clone(),
                     tid,
                     fields: Fields::from_vec(f),
                 }))

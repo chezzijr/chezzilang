@@ -65,6 +65,12 @@ Levers, ranked for this gap:
   slot's `obj` to find garbage — the bitset does not avoid that; the win is the per-slot byte + tighter
   mark test-and-set locality, not a sweep-scan cache win.) VM/GC-internal, no observable change; all
   GC-stress + two-engine parity green. RSS delta measured post-merge.
+- **drop struct name → resolve from `tid`** ✅ DONE → removed the per-instance `name: Box<str>` from
+  `Obj::Struct` (the type IDENTITY KEY, a **second heap alloc per struct**), resolving it from `tid` via
+  `Program::struct_names` on the cold path (mirrors the enum `variant_id` lever). Probe: nulling the name
+  alloc took `many_struct` 205.6→148.9 MB (~28% of RSS), `many_map` 187→163 MB. `Obj` stays 64B.
+  VM-only, behavior-preserving, all `*_gc_stress` + two-engine parity green. RSS delta measured
+  post-merge (predicted ~−57MB `many_struct` / ~−24MB `many_map`).
 - **value-struct representation** (Go-style inline-in-container) → closes 4.9×→~1.5×, but a deep
   change to the every-object-is-a-`GcRef` aliasing model. Its own milestone. See `future.md §4`.
 

@@ -103,6 +103,7 @@ pub fn compile_graph(graph: &ModuleGraph) -> Result<Program, CompileError> {
     }
     c.program.field_ic_sites = c.field_ic_next;
     c.program.method_ic_sites = c.method_ic_next;
+    c.program.rebuild_struct_names();
     Ok(c.program)
 }
 
@@ -155,6 +156,7 @@ pub fn compile_module_standalone(module: &Module) -> Result<Program, CompileErro
     });
     c.program.field_ic_sites = c.field_ic_next;
     c.program.method_ic_sites = c.method_ic_next;
+    c.program.rebuild_struct_names();
     Ok(c.program)
 }
 
@@ -556,6 +558,7 @@ impl Compiler {
             native_home: HashMap::new(),
             variants: HashMap::new(),
             variants_by_id: Vec::new(),
+            struct_names: Vec::new(),
             modules: Vec::new(),
             field_ic_sites: 0,
             method_ic_sites: 0,
