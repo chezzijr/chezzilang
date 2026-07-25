@@ -11084,8 +11084,8 @@ main()
 /// opens a NESTED `parallel:` gives its grandchild the TASK's CURRENT view (1), at every depth, on both
 /// engines. The old `0` was a MEMOIZATION ARTIFACT, not design: `ensure_snapshot` memoized the first
 /// nursery's snapshot forever and every later worker/nested nursery replayed that frozen `Arc` (decision
-/// G1), so the grandchild read the pre-mutation value. A nursery now snapshots FRESH when its first task
-/// is spawned, from the view of whoever opened it — so the nested rule is uniform and Go-like. Per-task
+/// G1), so the grandchild read the pre-mutation value. A task now snapshots FRESH at its own `spawn`,
+/// from the view of whoever spawned it — so the nested rule is uniform and Go-like. Per-task
 /// ISOLATION is unchanged (`nested_serial_spawn_module_global_isolates_parity` still reads `0`).
 #[test]
 fn nested_serial_spawn_mutation_before_nested_reads_fresh_parity() {
@@ -11127,13 +11127,13 @@ fn spawn_task_first_global_access_is_write_parity() {
     assert_eq!(parity_entry(src), "worker g = 99\nparent g = 1\n");
 }
 
-/// W6-2 — the PIN INSTANT: a nursery snapshots the module globals ONCE, when its FIRST task is spawned,
-/// and every later task of that same nursery (including a nested nursery's early-enlisted outer siblings)
-/// replays that one view. Here `A`'s spawn precedes `g = 2`, so both `A` and the nested `B` read `1`
-/// while the parent reads `2` — on BOTH engines. Without the pin the engines diverge on the INSTANT:
-/// serial prepares `A`'s tasks at `A`'s own join (post-mutation → 2) while M:N early-enlists them at
-/// `B`'s join (pre-mutation → 1). Observed through `Shared` and printed once after the join, because the
-/// print ORDER of this shape already differs per engine (a bare-`print` variant is not byte-identical).
+/// W6-2 — the PIN INSTANT, and the reason it exists: a task's view is pinned at its own `spawn`, so an
+/// OUTER nursery's queued task keeps that view even though the two engines PREPARE it at different
+/// program points — serial at the outer nursery's own join (post-`g = 2`), M:N at the nested nursery's
+/// join via `early_enlist_outer` (pre-`g = 2`). Both `A` (outer, spawned before the mutation) and the
+/// nested `B` therefore read `1` while the parent reads `2`, byte-identically. Without the pin this shape
+/// diverges 2 vs 1. Observed through `Shared` and printed once after the join, because the print ORDER of
+/// this shape already differs per engine (a bare-`print` variant is not byte-identical).
 #[test]
 fn nursery_snapshot_pins_at_first_spawn_parity() {
     let src = "\
