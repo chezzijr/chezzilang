@@ -11,6 +11,13 @@ cross-cutting **root causes** that were each recorded as unrelated footnotes, an
 and never de-staled**. Re-audit periodically: a gap backlog nobody re-reads rots into a to-do list for
 work already done.
 
+**Pre-freeze bug-hunt waves:** 1–5 (2026-07-11 → 07-13), then 2026-07-18, 07-20, 07-22, and three on
+07-23. **Wave 6 (2026-07-25)** is the largest single haul (**18 findings, all OPEN — 6 P0/high**) and the
+first to sweep the two surfaces the wave-5 residual named as never-audited (FFI: 4 defects; GC + new
+object layout: clean). Read its session log before touching `io`/`process`/FFI/`RwShared`/module-snapshot
+code. Its meta-finding — **5 of 6 P0s are "a fix applied to SOME arms of an N-way set"** — is the
+highest-yield remaining lever.
+
 ## Checker / type system
 
 ### Generic methods on RESERVED built-in receiver types — turbofish + bodied-method inference (found 2026-07-22, **1a/1b/2 RESOLVED 2026-07-22**)
@@ -216,6 +223,392 @@ parked_slot_nonsendable_rejects,in_data_cycle_rejects,unreached_nonsendable_runs
   cross the airlock BY VALUE / shared `Arc`, exactly like a builtin fn; see the 2026-07-23 session log.)
 - **Multi-frame / pending-`defer` suspended generators** — checker-UNREACHABLE (item 3 arms a/c); no valid
   program constructs them. The rejects are defensive guards, not a user-visible limit — nothing to build.
+
+## Session log — 2026-07-25 (bug-hunt wave 6: 18 findings, ALL OPEN — 6 P0/high, 2 never-hunted surfaces swept)
+
+Pre-freeze adversarial hunt, 5 disjoint parallel domains, weighted at the two surfaces the wave-5
+residual named as never audited (**FFI**, **GC + `unsafe`**) plus the concurrency code that landed
+*after* every prior wave (`RwShared` read-views `3156f76`/`cc07f77`/`3fedb34`/`04796a3`, `chezzi test`
+flags+caps `109bfb6`..`5ccf7a0`). ~1200 probes. **Every repro below was re-verified by the main loop on
+the real `target/release/chezzi`, both engines**, before filing; one subagent claim was dropped as a
+false positive (an FFI `str`-param lifetime UAF via `putenv` — CPython ctypes is equally UB there, and
+`store_str` is an existing documented deferral, so the differential was luck, not a contract).
+
+**None of the 18 is a serial≠M:N divergence** — every one is byte-identical on both engines, i.e. the
+parity oracle is structurally blind to all of them. That is now the dominant shape of what's left.
+
+### THE META-FINDING — 5 of the 6 P0s are ONE class: a fix applied to SOME arms of an N-way set
+This is the same completeness/partial-coverage class the 2026-07-23 sweep found 3 instances of. It is
+still the highest-yield lever in the repo and it is cheap: **enumerate the arms, assert each one.**
+- W6-3: `compare`/`str` intercepted on scalar receivers, the other ~9 intrinsic protocol grants not.
+- W6-4: R1 swept `Socket`/`io`/`request`/`crypto` off `from_utf8_lossy`, missed `std.process`.
+- W6-1: `flush_core`'s non-empty-buffer arm flushes the inner core, its empty-buffer arm doesn't.
+- W6-6: the extern-collision guard fires for bare-keyed enum variants, not module-keyed structs.
+- W6-9: `write_bytes` is byte-exact on the `File` arm, lossy on the `Stdout`/`Stderr` arms.
+
+### W6-1. `Writer.close()`/`flush()` on a `buffered` writer SILENTLY DOES NOT PERSIST — durability contract broken — P0
+```chezzi
+import std.io
+fn main():
+    match io.create("min.txt"):
+        Ok(w0):
+            w := io.buffered(w0, 4)
+            w.write("abcdefgh")                      # 8 bytes > cap 4 -> mid-write drain
+            print("close =", str(w.close()))         # Ok(nil)
+            print("file  =", str(io.read_file("min.txt")))   # Ok()   <- EMPTY
+        Err(e): print(e.message())
+main()
+```
+Both engines, rc=0. Persists correctly **iff the buffer never filled**: cap4/len3 → `Ok(abc)`; cap4/len4,
+len5, len8, cap1/len2, cap0 → all empty after a *successful* `close()`. Same for `flush()`. The bytes only
+reach the fd when the heap is dropped at process exit, so an in-program reader, a `process.cmd` child, or a
+sibling process sees a truncated/empty file after `close()` returned `Ok`, and a SIGKILL/abort after
+`close()` loses the data outright — the exact guarantee `flush`/`close` exist to provide.
+Reference (Python owns buffered-file semantics; Go `bufio` identical):
+`python3 -c "f=open('py.txt','wb',buffering=4); f.write(b'abcdefgh'); f.close()"` → file is `b'abcdefgh'`.
+**Root cause** `src/vm/fileio.rs:88-96`: the `Backing::Buffered` arm of `flush_core` returns `None` when
+`buf.is_empty()`, short-circuiting the `self.flush_core(&inner)` at `:101` that the non-empty path DOES run.
+A mid-write drain (`write_to_core`, `:58-64`) pushes bytes into the inner `BufWriter<File>` **without
+flushing it** and empties `buf`, so the later `close()` flushes nothing; `close()` drops only the outer
+`Backing::Buffered` (the program still holds `w0`, so the inner `WriterCore` isn't dropped either).
+**Docs contradicted:** `docs/stdlib.md:415` (`close` = "Flush + close the handle"), `:417` ("Forgetting
+`flush`/`close` … loses the tail — Go's footgun. Mitigated…"), and `flush_core`'s OWN doc-comment
+("`Buffered` → drain the in-VM buffer to the inner core, THEN flush the inner (so `buffered(create(f))` is
+durable on disk)"). Fix is one-line-class: recurse into the inner core even when `buf` is empty.
+
+### W6-2. A module global FIRST INITIALIZED AFTER the first nursery reads as `nil` inside later tasks — check-OK-then-run-fault + silently-wrong — P0
+```chezzi
+import std.concurrency
+tot := AtomicInt(0)
+parallel:
+    spawn: tot.add(1)
+n: int = 42
+parallel:
+    spawn: print("task sees n =", n)   # -> nil        rc=0 (!)
+    # spawn: print(n + 1)              # -> runtime error: cannot apply Add to nil and int   rc=1
+print("parent sees n =", n)            # -> 42
+```
+Byte-identical both engines. Three fault shapes confirmed: `n + 1` → `cannot apply Add to nil and int`;
+`q.len()` → `type nil has no method 'len'`; `p.x` → `cannot read field 'x' of nil`. Reproduces with
+`parallel:`/`spawn` and with a second `Executor`; does NOT reproduce when every global is declared before
+the first nursery, nor with a second `submit` on the same executor.
+**Root cause** `src/vm/sched.rs:3483-3499`: `ensure_snapshot` memoizes the `ModuleSnapshot` forever
+(`snapshot_memo` is invalidated nowhere) and every later nursery/worker replays that frozen `Arc`
+(`sched.rs:268-279`). A global whose `:=`/`=` had not yet executed when the memo was built is snapshotted
+as an absent slot and replays as `Value::nil()`.
+**Why this is NOT the documented limit.** `docs/concurrency.md:94` documents *staleness* — "a mutation by
+ordinary sequential code between two nurseries … is NOT seen by tasks that read the global afterward" — and
+that behavior is correct and verified (`n: int = 1` then `n = 42` → task sees `1`, a legal `int`). What is
+undocumented and unsound is that an **un-initialized-at-snapshot-time** global replays as `nil`: a value the
+checker has statically proven impossible for an `int`/`List[int]`/struct-typed slot. Go (a goroutine
+launched later reading a package-level var) and Python threads both see the current value.
+
+### W6-3. A protocol method a built-in satisfies INTRINSICALLY is not callable at runtime — check-OK-then-run-fault, ~11 methods — P0
+```chezzi
+fn total[T: Add](xs: List[T], zero: T) -> T:
+    acc := zero
+    for x in xs:
+        acc = acc.add(x)
+    return acc
+print(total([1, 2, 3], 0))
+# check: ok  |  both engines: runtime error (line 4, col 15): type int has no method 'add'
+```
+Confirmed faults: `.add`/`.sub`/`.mul`/`.div`/`.mod`/`.neg`/`.hash` on `int`; the arith set on `float`;
+`.hash` on `bool`/`str`/`bytes`; `.add`/`.sub` on a numeric newtype; `.index`/`.set_index`/`.slice` on
+`list`/`map`/`str`; `.hash` on a zero-field struct. Also reachable WITHOUT generics: `x: Hashable = 5` then
+`x.hash()` (check rc=0, same fault). **Controls green** — the operator forms all work (`a + b` on `T: Add`,
+`-a` on `T: Neg`, `c[0]`/`c[0:2]` on `T: Index`/`Slice`), a real generic-`Hashable` Map key works (implicit
+hash), `.compare()`/`.str()` on scalars work, and user structs defining the method work. So the break is
+exactly the **explicit protocol-method call in an erased generic body** — the idiomatic Rust/Go shape.
+**Root cause** — partial coverage, 2 of ~11 arms. `src/vm/call.rs:871` and `:885` are hand-written
+interceptions for exactly `compare` and `str` on a scalar receiver. No sibling exists for the other
+intrinsic grants: `src/checker/proto.rs:970` (`Hashable`), `:1028` (`Index`/`IndexSet`/`Slice`), `:1075`
+(`Add`…`Neg`), `:1119-1155` (numeric-newtype operators), `:973` (zero-field-struct `Hashable`) — so the
+receiver falls through to `has no method` at `call.rs:900` (scalars) / `:1367`,`:1416` (containers).
+The grant site at `proto.rs:960` *documents the contract it doesn't uphold*: "the erased body's `v.str()`
+is dispatched by the scalar `str` branch in `Vm::do_method_call`". Every intrinsic grant needs that pairing.
+Reference: Rust `T: Add` makes `a.add(b)` callable — it IS the trait method; Go's interface method set is
+likewise callable through the interface value. `std/prelude.chz:257` declares `Add.add` as the protocol's
+method, so a type the checker says satisfies `Add` must answer `.add`.
+
+### W6-4. `std.process` silently CORRUPTS non-UTF-8 child output (`from_utf8_lossy`), with no bytes hatch — the unswept B1/R1 sibling — P0
+```chezzi
+import std.process as pr
+fn main():
+    match pr.run("printf 'A\\377B'"):
+        Ok(p): print("len=", p.stdout.len(), "bytes=", str(p.stdout.encode()))
+        Err(e): print(e.message())
+main()
+# both engines: len= 3 bytes= b'A\xef\xbf\xbdB'      rc=0
+# python3 subprocess: b'A\xffB'   (text mode raises UnicodeDecodeError rather than mangling)
+```
+**Root cause** `src/native/process.rs:34,39,58,59` — four raw `String::from_utf8_lossy` calls.
+**This is definitively a defect, not a design choice**, because the identical pattern is tracked in this
+file as **[B1](#b1-socketread-silently-corrupts-data-from_utf8_lossy--p0--fixed-2026-07-14-r1) (P0)** and
+was ratified in R1 with a *different* answer: the `str` seam returns a **sticky `Err` that names
+`read_bytes`** rather than mangling, and every affected module got a bytes twin (`Socket.read_bytes`,
+`io.read_bytes`, `request.get_bytes`, `crypto.*_bytes`). `std.process` was missed by that sweep: no
+`run_bytes`/`stdout_bytes` twin exists, `docs/stdlib.md` documents `stdout: str` with no lossy warning, and
+this file had no entry. Go's `Output()` returns `[]byte`.
+
+### W6-5. A zero-field struct at an `extern` boundary PANICS the VM — `recover:` cannot catch it — P0
+```chezzi
+struct Empty:
+    pass
+
+extern "libc.so.6":
+    fn abs(x: int) -> Empty
+
+print(abs(1))
+```
+`check` → `ok: no type errors`. Both engines:
+```
+thread '<unnamed>' panicked at libffi-3.2.0/src/middle/mod.rs:129:10: low::prep_cif: Typedef
+thread 'main' panicked at src/vm/mod.rs:4175:10: VM thread panicked: Any { .. }      rc=101
+```
+Wrapping the call in `recover:` still panics — it is **not** a recoverable fault. The param direction
+(`fn abs(x: Empty) -> int`) is identical.
+**Root cause** `src/checker/setup.rs:3023-3040`: `struct_fields_marshallable` loops over fields and returns
+`true` **vacuously for an empty field list** — no zero-field reject. That reaches
+`src/native/cffi.rs:163` (`CType::Struct{fields} => Type::structure(…)`) and libffi-rs's `Cif::new` unwraps
+`prep_cif`'s `Typedef` error. C rejects an empty struct outright (GCC/Clang size-1 extension); either way
+libffi cannot build a CIF for it. Fix: reject an empty field list where the other 7 marshalling rejects fire.
+
+### W6-6. `struct X` + `extern fn X` SILENTLY calls the struct constructor — the guard is DEAD CODE, and the docs promise a reject — P0
+```chezzi
+struct strlen:
+    s: str
+
+extern "libc.so.6":
+    fn strlen(s: str) -> int
+
+print(strlen("hello"))     # -> strlen(s=hello)   <- the CTOR, not libc.  check rc=0, run rc=0
+```
+`docs/syntax.md:3024` promises the opposite in as many words: "An extern fn also may **not** be named after
+… any of your `struct`/enum-variant names — those resolve to a special op before a plain call, so the extern
+would be silently shadowed; **the checker rejects the collision**."
+**Root cause — key-format mismatch.** The guard exists and runs (`src/checker/setup.rs:2798`,
+`if self.structs.contains_key(name) || self.variant_owners.contains_key(name)`), but `extern_names` holds
+the **bare** source spelling while `self.structs` is keyed **module-scoped** (`bare_key`/`type_keys`) —
+proved directly: a marshalling error on the same struct prints `struct 'f4::S'`, so `contains_key("S")` is
+always false. `variant_owners` IS bare-keyed, so the enum-variant half still fires — a one-file asymmetry
+(`extern fn cosV` alongside `enum {cosV}` rejects; `extern fn sqrtS` alongside `struct sqrtS` passes).
+This is the [[checker-test-helper-key-divergence]] class: the bare-keyed single-module `ok()` test helper
+makes the unit test pass while the CLI graph path misses it. Fix: key the lookup with `bare_key(name)`.
+
+### W6-7. The `RwShared` zero-copy read-view is O(N²) — every GC re-walks the whole off-heap wire payload — HIGH (perf, flagship new API)
+Measured, `--serial` (M:N identical within noise), `for_each` over an `RwShared(List[int])` vs the same work
+in a plain `for` loop:
+
+| n | `RwShared.for_each` | plain `for` |
+|---|---|---|
+| 100 000 | 0.335 s | 0.058 s |
+| 200 000 | 1.428 s | 0.154 s |
+| 400 000 | 5.673 s | 0.579 s |
+
+4× per 2× n — quadratic; the control is linear. At 1 M: 6.82 s vs 0.45 s. Isolated to the *holder* (same
+200k-allocation loop, same live 200k-int container): plain `List` 0.107 s, `RwShared` 1.364 s (12.7×),
+`Shared` 1.383 s, `Channel.send` 1.356 s, no holder 0.033 s — so it is the **wire-payload holder**, not the
+read-view API itself.
+**Root cause** `src/vm/heap.rs:627-651`: `mark_children` traces `Obj::Channel`/`Shared`/`RwShared`/`Atomic`/
+`Executor` by calling `crate::vm::core::collect_core_gcrefs` (`src/vm/core.rs:296`) over the **entire**
+stored `WireValue` tree on **every** GC pass — no "this subtree holds no `Handle`" short-circuit, no
+memoization. And because the GC threshold is object-COUNT based (`next_gc = 2*live`) while a big wire
+container is **one** heap slot, `live` stays tiny → GC runs constantly → cost is O(allocations × wire size).
+`RwShared.for_each` allocates once per element via `from_wire` (`src/vm/netio.rs:2096`), so a walk is O(N²).
+**Why it's a bug, not a known cost:** `docs/concurrency.md` sells the read-view as "fan a 1M-element shared
+list out to 8 workers, each scanning/reducing in O(1) memory". Memory IS O(1); **time is O(N²)** and 10-15×
+worse than not sharing at all. Go's `sync.RWMutex`+slice and Rust's `Arc<RwLock<Vec<_>>>` cost the runtime
+nothing per traversal. Landed after the last perf pass, so no bench covers it. Same accounting seam as W6-10.
+
+### W6-8. A STORED FFI callback dangles → SIGSEGV from checker-clean code (a "deferred" feature implemented as UB)
+```chezzi
+extern "libc.so.6":
+    fn signal(sig: int, h: fn(int) -> int) -> ptr
+    fn raise(sig: int) -> int
+fn handler(sig: int) -> int:
+    print("handler", sig)
+    return 0
+h := signal(10, handler)
+print(raise(10))
+# check: ok    both engines: rc=139 (SIGSEGV, core dumped)
+```
+Stored/cross-thread callbacks ARE listed as deferred (`docs/syntax.md:2872`, `docs/ffi-and-packaging.md §1b`)
+— but the deferral is implemented as **UB rather than a rejection**, and nothing in the checker flags a
+callback param. Root cause `src/native/cffi.rs:104` ("the closure is freed before `call` returns") +
+`CallbackClosure::drop` (`:541`) run at `:957`/`:1106`. Unlike CPython ctypes — where holding a reference to
+the `CFUNCTYPE` object is a documented, achievable idiom — Chezzi offers **no way to keep the trampoline
+alive**, so there is no correct program: every C API that retains a function pointer (`signal`, `atexit`,
+GLib/GTK, `pthread_cleanup_*`) is a guaranteed segfault. A general check-time reject is impossible (the same
+`fn(int)->int` param is legal for `qsort`), so the realistic options are keeping the closure alive for the
+process (leak / heap-root it) or a loud doc + diagnostic. Precedent for taking FFI UB seriously:
+[[ffi-callback-cif-heap-pin]].
+
+### W6-9. `Writer.write_bytes` is byte-exact on a file but LOSSY on `io.stdout()`/`io.stderr()`, and returns a count that doesn't match what was emitted
+`io.stdout().write_bytes(b"\xff\xfe")` emits `ef bf bd ef bf bd` (two U+FFFD) and returns `Ok(2)`; the same
+method on a FILE writer emits `ff fe`. Python `sys.stdout.buffer.write(b'\xff\xfe')` and Go `os.Stdout.Write`
+both emit the raw bytes. Docs: "`write_bytes(data: bytes) -> Result[int]` — Write **raw bytes**; returns
+bytes written." **Root cause** `src/vm/fileio.rs:48-55` — the `Backing::Stdout`/`Stderr` arms of
+`write_to_core` do `String::from_utf8_lossy(data)` because the `emit_out`/`emit_err` sink is `&str`-typed
+(the comment concedes "the byte-exact common path is `write(str)`"). Same lossy class as W6-4 / B1.
+
+### W6-10. `chezzi test --max-heap` does not count off-heap wire storage — 195 MB RSS passes a 200 KB cap
+A `test fn` that sends 120 000 `[i,i,i,i,i,i,i,i]` lists into a `Channel[List[int]](200000)`:
+`chezzi test tw --max-heap=200000 -v` → **PASS**, rc=0, sampled peak `VmHWM` = 195 484 kB.
+**Root cause**: the cap is `Heap::live_bytes() > mem_cap` sampled in `sweep()` (`src/vm/heap.rs:690`), and
+`live_bytes` accounts only for in-`Heap` `Obj` slots and their owned `Vec`s. Values moved across the airlock
+into a `Channel`/`Shared`/`RwShared` core live as `WireValue`s in an `Arc` **outside every `Heap`**, so they
+are counted nowhere. **Distinct from the one documented escape** (`docs/future.md §1b`: "a loop growing a
+single container of inline scalars … allocates no `Obj`s, never sweeps, and so never trips") — here EVERY
+send allocates a `List` `Obj`, GC boundaries are hit constantly, and `live_bytes` is sampled hundreds of
+times; the cap simply never sees the 195 MB. So the documented guarantee ("any single execution context
+whose live heap exceeds `N` is aborted — a real runaway trips") is false for the most natural *concurrent*
+runaway: an unbounded/large-cap channel backlog, or data parked in a `Shared`/`RwShared`. Same accounting
+seam as W6-7. (The documented inline-scalar escape was separately re-confirmed and is NOT re-filed.)
+
+### W6-11. `Ok`/`Err`/`Some`/`None`/`Result`/`Option` are accepted as `extern fn` names — same silent-shadow class as W6-6
+`extern "libm.so.6": fn Ok(x: float) -> float` → 0 errors, unlike every other reserved name. `return Ok(x)`
+still resolves to the variant, so the extern is unreachable by its own name.
+
+### W6-12. `datetime.parse_iso8601` accepts a non-4-digit YEAR while every other field enforces exact width
+`"24-01-01"` → `year=24`; also `"4-01-01"`→4, `"024-01-01"`→24, `"20244-01-01"`→20244, `"202400-01-01"`→202400
+(only >9 digits `Err`s). Python `d.fromisoformat("24-01-01")` → `Invalid isoformat string`. **Asymmetric
+inside one function:** `"2024-1-1"` (2-digit month) correctly `Err`s. **Root cause** `std/datetime.chz:229-236`
+— the year is guarded only by `all_digits` + `len() > 9`; month/day/hour/min/sec go through `field2()`
+(`:200-203`, exact `len() != 2`). No `len() == 4` check on the year. Docs claim (`docs/stdlib.md`,
+`parse_iso8601`): "matches Python `datetime.fromisoformat`" and "…**wrong widths**… are a clean `Err`".
+**Corollary in the same cluster:** the documented total "Round-trips: `parse_iso8601(to_iso8601(dt)) == dt`"
+is false at the top of the range — `to_iso8601(from_epoch(i64::MAX))` = `"292277026596-12-04T15:30:07Z"`,
+which `parse_iso8601` rejects (`Err(year out of range …)`).
+
+### W6-13. `datetime.days_in_month` returns 31 for ANY out-of-range month
+`days_in_month(2024, 13)` → `31`; same for month 0, -1, 100. Python `calendar.monthrange(2024,13)` →
+`IllegalMonthError`. **Root cause** `std/datetime.chz:59-67` — the fall-through `return 31` has no
+month-domain guard (the `# (1..12)` doc-comment is unenforced). Silently-wrong value: a plausible caller
+(`if d > days_in_month(y, m)` date validation) accepts month 13 day 31.
+
+### W6-14. `ffi.load_str` silently maps invalid UTF-8 to U+FFFD, undocumented
+Bytes `65 255 66` read back as codepoints `65 65533 66`. Same on the extern `str`/`owned_str`/`str?` return
+path (a `strchr` landing mid-UTF-8-sequence returns a mangled `str`, no error). **Root cause**
+`src/native/ffi.rs:435` (`load_str_impl`) + `src/native/cffi.rs:629`/`1005`/`1029` — `to_string_lossy()`.
+Memory-safe but lossy. Go's `C.GoString` preserves the bytes verbatim; ctypes hands you `bytes` and raises
+on `.decode()`. `docs/stdlib.md:662` states only a NUL-termination precondition. Same class as W6-4/W6-9.
+
+### W6-15. `nan` loses per-element identity in containers (CPython drift)
+```chezzi
+nan := (1.0e308 * 10.0) - (1.0e308 * 10.0)
+xs := [nan]
+print(xs == xs)          # true
+print([nan] == [nan])    # false   <- CPython: True
+print(nan in xs)         # false   <- CPython: True
+print(xs.index_of(nan))  # -1      <- CPython: 0
+```
+CPython's container compare and `in`/`index` do an identity check per element before `==`. **Root cause**
+`src/vm/arith.rs:1728` — the `if ha == hb { return Ok(true) }` shortcut sits inside the
+`(ValueView::Obj, ValueView::Obj)` arm only; the numeric arm (`:1721-1723`) returns raw IEEE
+`as_f64(l) == as_f64(r)` with no same-`Value` shortcut. Pre-existing (not from the 8B-`Value` or layout
+work). Blast radius narrow: `float` is not `Hashable`, so NaN map/set keys are unreachable.
+
+### W6-16..18 — cosmetic / diagnostic
+- **W6-16.** Duplicate diagnostic: `extern "libm.so.6": fn str(x: int) -> int` emits the identical error
+  **twice** (also `bytes`/`bytearray`/`Channel`/`List`/`Map`/`Set`), including under `--errors=json` →
+  doubled LSP squiggles. Single for `int`/`float`/`bool`/`Shared`/`print`/`ord`/`chr`/`panic`/`range`/
+  `timer`/`Executor`/`Atomic`.
+- **W6-17.** Turbofish over-rejected on the `RwShared` read-view's genuinely-generic `fold`/`fold_entries`:
+  `r.fold[int](0, fn(a,x): a+x)` → `method 'fold' takes no type argument(s) (it declares no own type
+  parameters)` + 2 cascaded infer errors, while the un-turbofished form works and harvested
+  `[1,2].fold[int](…)` works. Sibling hole of "FIX 1a" above: `method_has_own_type_params`
+  (`src/checker/expr.rs:1920`) answers from the harvested `self.structs` table, but the read-view methods
+  from `cc07f77` are **arm-only** (`expr.rs:2751-2772`, E/K/V aren't nameable in `RwShared[T]`). Safe
+  direction (over-rejection).
+- **W6-18.** `io.open()` on a DIRECTORY returns `Ok(Reader)`; the failure is deferred to every read, and
+  `read_line`'s message advises `Reader.read_bytes`, which also fails (`Is a directory (os error 21)`).
+  `io.read_file(dir)` correctly `Err`s at the call. Python `open(dir)` → `IsADirectoryError`.
+
+### Extra safe-direction observations — NOT filed as bugs
+- `x: Any = if c: 1 else: 2.5` → `1.0`, and the `match`-expression form → `7.0` (also under an `Any` fn
+  param / struct field / `List[Any]` element). Same design as the tracked wave-4 `List[Any]` gap and
+  **explicitly documented** at `docs/syntax.md:416-417`+`1960-1966`. Noted only because
+  `compiler/mod.rs:if_chain_numeric_mix` + `checker/pattern.rs:993` are a **second, non-container code
+  path** for that corruption — if the deferred fix is scoped to the list peephole, it will miss this one.
+- Two LATENT layout traps with no live trigger: `TID_NONE` collapses struct `==` type identity
+  (`src/vm/arith.rs:1825` — two different *unregistered* struct types now compare equal if their fields
+  match; before `c3b7b1c` the per-instance `name` distinguished them; unreachable today because every
+  `NativeRet::Struct` producer names a registered key), and `rebuild_struct_names` assumes no duplicate
+  `structs` key (`src/vm/op.rs:676-680` — an overwriting insert would silently leave the type name `""`).
+  Traps for any future native that emits an unregistered struct name.
+- Shift error says `shift amount 64 out of range (0..64)` — 64 IS rejected, so the printed range is wrong.
+- `i64::MIN % -1` faults `integer overflow in Mod`; Go and Python both give a representable `0`.
+- `fs.glob("d/*")` includes dotfiles, Python's `glob` excludes them — undocumented either way.
+- `docs/stdlib.md` §`std.json` writes `decode[T](s)` as "a generic builtin", but the bare form is rejected
+  (`'decode' takes no type arguments`) — the real spelling is `json.decode[T](s)`.
+- `List[<numeric newtype>].sum()` is rejected at check while `.sort()`/`.min()`/`.max()` on the same type
+  work — a post-fix asymmetry vs the 2026-07-23 numeric-newtype gap. Safe direction.
+- Embedded-protocol method through an interface value is a **clean reject at check** (`type Person has no
+  method 'name'`), not accept-then-fault — confirms the wave-3 observation is safe.
+- `RwShared`/`Shared` nested same-box write (serial loses the inner write, M:N HANGS) — already tracked +
+  documented as the reentrancy limit; re-confirmed, not re-filed.
+
+### Domains that came back CLEAN (and are now no longer "never hunted")
+- **GC + the freshly-rewritten object layout** (`c1f4d0e` inline ≤3 fields, `c3b7b1c` `Struct.name`→`tid`,
+  `e66a1f5` mark bitset, `0100153` boxed `Obj::Module`, the 8B `Value`) — **~250 program runs + a
+  220-program randomized differential fuzz: 0 divergences, 0 crashes, 0 wrong values.** Covered: the
+  `Fields` inline/spill boundary (0,1,2,3,4,5 and 300 fields; megamorphic IC across 7 shapes straddling
+  3/4), struct as Map/Set key both shapes with an allocating `hash` after 200k-alloc churn, self-referential
+  and cyclic structs (depth cap faults *recoverably* on both engines and inside `chezzi test`),
+  `tid`→name resolution (same-named structs in 2 modules, user structs shadowing `Match`/`Response`/
+  `ProcResult`/`FileInfo`, generics/newtype/enum-payload, the `str`/`hash` hook home resolved *inside a
+  spawned task*), boxed-module values, rooting under pressure in 10 holders (closure cell, `defer`,
+  mid-`match`, operand stack across a method call, native re-entry, Channel buffer, `Shared`, `Atomic`,
+  suspended generator frame), airlock of inline+spill+cyclic structs at `--threads=1,2,4,8`, and 8B-`Value`
+  boundaries (`i64::MIN/MAX`, `-0.0`, `±inf`, NaN). Source-audited clean too: the `marks` bitset can't
+  desync from `slots`, `ChzStr` SSO's `from_utf8_unchecked`, `run_until`'s `*const Program`, `str_intern`.
+  **The two never-audited surfaces from the wave-5 residual are now swept** — GC came back clean; FFI did
+  not (W6-5, W6-8, W6-14, and the extern-name holes W6-6/W6-11).
+- **`RwShared` read-view CORRECTNESS** — 33 programs, serial==M:N on every one: nested read-views on the
+  same box inside a `for_each` closure (no deadlock, no torn read — `3fedb34`'s per-element re-lock holds),
+  mutation during the walk, all bounds cases byte-identical to plain indexing, **wrong constructor kind all
+  rejected at CHECK** (`RwShared[int]`/`[str]`/`[MyStruct]`/tuple, `at`/`slice` on Map/Set, unconstrained
+  `RwShared[T]`), faulting struct `hash` → clean recoverable `Err` with the box surviving (`04796a3`'s
+  rooting holds), 600k allocations across 20 walks, concurrent writer vs walker on M:N, `slice` is a genuine
+  deep copy, self-recursive `for_each` hits the recursion guard cleanly. Only the O(N²) *cost* is wrong (W6-7).
+- **`chezzi test` selection/output flags + caps** — ~30 invocations: `-k`/`--filter` (substring, `Suite::method`,
+  zero-match → rc=1 as documented), `--fail-fast`, `-q`/`-v` mutual exclusion, `--show-output`,
+  `--errors=json` well-formed (`jq`) under a crashing test, a non-compiling file, and filenames containing
+  `"`/`\`; `--timeout` shows the REAL cap for the body, a `recover:`-wrapped spin, a spawned task and a test
+  with a `defer` (defer still runs, a runaway defer is re-tripped, an inner `recover:` can't swallow it, no
+  deadline/marker leak into later tests); `--max-heap` recover-proof and correctly erroring with `--serial`;
+  **identical verdicts `chezzi test --serial` vs bare `chezzi test`** on every suite built.
+- **`Shared`/`Atomic`/`AtomicInt`/`RwShared` RMW** — 3 tasks × 2000 contended `update`/`add`/`write` →
+  exactly 6000 each on both engines; `cas` and overflow faults correct.
+- **stdlib breadth** — ~700 Python/Go-differential assertions: `std.path` (40 vs `posixpath`/Go
+  `path.Clean`), string free-fn↔native-method pairwise parity (**~340 comparisons, zero mismatches**) + 20
+  Python assertions, strings/bytes edges (~60: `\0`, combining marks, emoji, `ß`/`İ`/`ǳ` case ops, negative/
+  reversed/OOB slices, `bytearray` aliasing), format specs + float `repr` (25, byte-identical to CPython
+  f-strings incl. banker's rounding), numbers at every i64 boundary (13, all clean *recoverable* faults, no
+  wrap), `std.math` (~35), collections (~45 incl. NaN total order, `sort_by` stability, Map insertion order
+  across remove+reinsert, mutation-during-iteration snapshot), comprehensions (14), `std.json` (65),
+  `std.regex` (17 — empty-match iteration follows Rust, no doc claim breached), `std.encoding`+`std.crypto`
+  (24 known-answer vectors vs `hashlib`/`hmac`/`base64`), `std.duration` (29, Go `ParseDuration` parity),
+  `std.flag` (24, Go `flag` parity), `std.collections`/`bisect`/`memoize` (25), `std.iter` laziness (20),
+  `std.csv` (14 + **linear** scaling 4k/8k/16k rows, no O(n²)), `std.fs`/`std.os` (24), `std.io Reader` (12),
+  core language (~60: `match` guards/range/struct patterns/as-expression, `defer` LIFO + latest-value,
+  closure capture, `?` on both, `recover:` over 8 fault kinds, newtype/protocol/operator/static dispatch).
+- **FFI sub-areas clean** (~60 probes): library/symbol resolution, boundary arity+type checking, `str` param
+  edges (interior NUL caught; 20 000-char multibyte correct), fixed-width ints + a 21-arg CIF, ptr guards
+  (8 assertions), ptr value semantics + identity across the airlock + a 300-node C-memory list under GC
+  pressure, struct-by-value (SSE-class `cabs`/`conj` exact; all 7 documented rejects fire),
+  `owned_str`/`str?` (no leak/double-free), **sync scalar callbacks** (9: fault re-raised and `recover:`-able,
+  `defer` inside a faulting callback runs, 400-elem qsort under GC churn, nested re-entrant FFI, 200-deep
+  recursion, captured-upvalue closure), **callbacks × concurrency** (4: 8 concurrent workers each running
+  qsort-with-Chezzi-comparator, callback doing `Channel.send`, callback opening a nursery, callback blocking
+  → clean deadlock error — all byte-identical serial vs M:N), airlock of FFI fn values (3 — confirms
+  `f6e5ec3` is complete), native-decl seam (6 — `native fn` in a user file rejected; `ptr`/`int32`/
+  `owned_str` correctly reserved; **no reserved-type hole**), extern nesting/duplicates (3).
+- **Not probed, needs a helper `.so`:** C `_Bool` 1-byte marshalling, mixed INTEGER+SSE struct classes
+  (`struct{int32; double}`), struct-by-value >16 bytes (hidden-pointer return), genuinely cross-thread
+  callbacks. Also unspellable today: a **void-returning callback** (`fn(ptr, ptr)` without `->` is a parse
+  error), which locks out most real C callback APIs — `docs/syntax.md §12b` never mentions this.
 
 ## Session log — 2026-07-24 (design consistency: `List.min()`/`.max()` fault on empty while sibling accessors return `Option` — OPEN, breaking change)
 
@@ -2361,17 +2754,26 @@ A separate **module namespace** (module names legal only in field position) rema
 and would remove the collision entirely, but it is a resolver change and buys only the loss of an alias
 keystroke. Not planned.
 
-### 5. Never-hunted surfaces (the two biggest remaining pre-JIT risks)
-Five hunt waves have now swept the typed feature surface, the stdlib, concurrency, and the front-end.
-**Two surfaces have never been audited at all**, and they are the memory-fragile ones:
-- **GC + `unsafe` under Miri / ASan / TSan** — Tier-1 lever #3 in [`bug-discovery.md`](bug-discovery.md),
-  still **unbuilt**. The GC and the OS-thread engine are the most `unsafe`-dense code in the repo.
-- **FFI** — zero adversarial coverage. Precedent exists: a libffi `Cif` heap-pin bug already caused a
-  **SIGSEGV** (FFI UB is layout-dependent, so it is invisible to the value-level oracles).
+### 5. Never-hunted surfaces (the two biggest remaining pre-JIT risks) — **BOTH SWEPT 2026-07-25 (wave 6); the SANITIZER half is still unbuilt**
+Five hunt waves had swept the typed feature surface, the stdlib, concurrency, and the front-end, leaving
+**two surfaces never audited at all** — the memory-fragile ones. **Wave 6 (2026-07-25) swept both at the
+value level.** Status now:
+- **GC + `unsafe`** — swept at the value level and came back **CLEAN**: ~250 targeted programs over the
+  freshly-rewritten layout (`Fields` inline/spill, `tid`→name, mark bitset, boxed `Obj::Module`, 8B
+  `Value`) + a 220-program randomized `--serial`-vs-M:N differential fuzz, 0 divergences / 0 crashes /
+  0 wrong values, plus a source audit of the bitset, SSO `from_utf8_unchecked`, and `str_intern`. Two
+  LATENT (currently unreachable) traps recorded in the wave-6 session log. **Still unbuilt and still the
+  real residual risk: Miri / ASan / TSan** — Tier-1 lever #3 in [`bug-discovery.md`](bug-discovery.md). A
+  value-level sweep cannot see UB or a data race; clean here means "no observable wrong value", not "no UB".
+- **FFI** — swept, and it **did NOT come back clean**: 4 real defects (a `recover:`-proof VM panic on a
+  zero-field struct at the boundary, a SIGSEGV on any *stored* callback, silent UTF-8 mangling in
+  `load_str`, and two dead/absent extern-name collision guards), plus a void-returning callback being
+  unspellable at all. See the 2026-07-25 session log (W6-5, W6-8, W6-14, W6-6, W6-11). The libffi `Cif`
+  heap-pin SIGSEGV precedent held: FFI UB is layout-dependent and invisible to the value-level oracles.
 
-Neither is reachable by the panic-fuzzer, the CPython differential, the DSA judge, or two-engine parity
-— all four are *value*-level oracles and cannot see UB or a data race. **This is where I would look next
-before freezing.**
+Neither surface is reachable by the panic-fuzzer, the CPython differential, the DSA judge, or two-engine
+parity — all four are *value*-level oracles. **Next before freezing: build the sanitizer lever** (it is the
+only thing that can clear the GC/OS-thread `unsafe` surface, which wave 6 could only clear behaviorally).
 
 ## Dependency versions (as of 2026-07-07)
 All four are **major (semver-incompatible)** bumps — cargo shows them but won't auto-take. `cargo audit`
