@@ -134,6 +134,7 @@ impl Vm {
             module_snapshot: None,
             module_faulted: Vec::new(),
             snapshot_memo: None,
+            snapshot_builds: 0,
             pinned_module_roots: Vec::new(),
             mn: None,
         }
@@ -2194,6 +2195,15 @@ impl Vm {
                 return Err(self.err(format!("no match arm for variant '{variant}'"), span));
             }
             Op::EnterNursery => {
+                // W6-2 — invalidation rule 2: a nursery's tasks must see module globals as of THIS open,
+                // and a global holding a mutable aggregate can have been mutated IN PLACE (`q.push(1)`,
+                // `m[k] = v`, `p.x = 1`) since the cached snapshot was built, with no module-slot write
+                // for rule 1 (`set_global_slot`/`module_define`) to catch. So drop a non-`reusable` cache
+                // entry here; an all-immutable view keeps its one snapshot for the whole run (a
+                // nursery-in-a-loop program builds exactly one). See `ModuleSnapshot::reusable`.
+                if self.snapshot_memo.as_ref().is_some_and(|s| !s.reusable) {
+                    self.snapshot_memo = None;
+                }
                 self.nurseries.push(Vec::new());
                 self.mn_scopes.push(None); // lockstep — set Some(scope_id) only if early-enlisted
                 // TASK B — capture this parallel body's defer floor so a recover-scoped `?` can run

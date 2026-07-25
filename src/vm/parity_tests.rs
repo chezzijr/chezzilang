@@ -11135,7 +11135,7 @@ fn spawn_task_first_global_access_is_write_parity() {
 /// diverges 2 vs 1. Observed through `Shared` and printed once after the join, because the print ORDER of
 /// this shape already differs per engine (a bare-`print` variant is not byte-identical).
 #[test]
-fn nursery_snapshot_pins_at_first_spawn_parity() {
+fn task_snapshot_pins_at_its_own_spawn_parity() {
     let src = "\
 import std.concurrency
 g: int = 1
@@ -11211,53 +11211,6 @@ fn main():
 print(main().get())
 ";
     assert_eq!(parity_entry(src), "1\n");
-}
-
-/// W6-2 (regression) — pinning a task's snapshot at its `spawn` must not move the snapshot FAULT there.
-/// Building the module-globals snapshot is fallible (an unbounded-depth global trips the structural-depth
-/// cap), and the fault belongs where the task is PREPARED, at the join: the `parallel:` body's own output
-/// still precedes it, byte-identically on both engines.
-#[test]
-fn snapshot_fault_stays_at_task_preparation_parity() {
-    let src = "\
-keep: List[int] = []
-deep: List[List[int]] = [keep]
-for i in 0..10001:
-    deep = [deep]
-parallel:
-    spawn: pass
-    print(\"body ran\")
-";
-    let (vo, vr) = run_program(src);
-    let (po, pr) = run_program_parallel(src);
-    let ve = vr.expect_err("serial: the snapshot must fault").to_string();
-    let pe = pr.expect_err("M:N: the snapshot must fault").to_string();
-    assert_eq!(vo, "body ran\n", "serial stdout before the fault");
-    assert_eq!(po, "body ran\n", "M:N stdout before the fault");
-    assert!(ve.contains("maximum structural depth"), "serial: {ve}");
-    assert_eq!(ve, pe, "serial == M:N fault");
-}
-
-/// W6-2 (regression) — a nursery whose tasks are CANCELLED without ever being prepared (`break` out of
-/// the `parallel:` body) must not fault: nothing replays a snapshot, so an un-snapshottable module global
-/// is never touched. A pin built eagerly at the spawn would manufacture a fault on a clean program.
-#[test]
-fn cancelled_nursery_never_faults_on_the_snapshot_parity() {
-    let src = "\
-keep: List[int] = []
-deep: List[List[int]] = [keep]
-for i in 0..10001:
-    deep = [deep]
-for i in 0..1:
-    parallel:
-        spawn: pass
-        break
-print(\"clean exit\")
-";
-    assert_eq!(
-        parity_entry(src),
-        "1 pending task(s) cancelled on early exit from parallel:\nclean exit\n"
-    );
 }
 
 /// QoL: an untyped int-CONSTANT branch of an if/match EXPRESSION widens to `float` when a

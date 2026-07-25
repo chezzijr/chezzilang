@@ -486,21 +486,26 @@ impl PendingCall {
 
 /// A task queued on a nursery: the call itself plus the [`ModuleSnapshot`] PINNED at its `spawn`.
 ///
-/// W6-2 — the pin is per TASK, resolved in [`Vm::register_task`] from the module view live at the
-/// spawn, and replayed when the task is prepared (at its nursery's join on the serial engine, at
-/// that join OR at a nested nursery's `early_enlist_outer` on M:N). Pinning at the spawn is what
-/// makes the two engines agree: `spawn` is a source position both reach, an early-enlist is not.
-/// It is also the Go rule — a goroutine sees the globals current when `go` ran.
+/// W6-2 — the pin is per TASK, resolved EAGERLY in [`Vm::register_task`] (never deferred to a later
+/// hook), and replayed when the task is prepared (at its nursery's join on the serial engine, at that
+/// join OR at a nested nursery's `early_enlist_outer` on M:N). Resolving it at the `spawn` is what
+/// makes the two engines agree: `spawn` is a source position both reach, while "the next module-slot
+/// write, else the join" is not — the M:N per-connection EAGER nursery prepares a task the moment it
+/// is spawned, so a deferred pin diverged (serial 2 / M:N 1, flipping again on `--threads=1`).
 ///
-/// `None` means the snapshot BUILD failed at the spawn (a cyclic/over-deep global, a frame-holding
-/// generator). The error is deliberately NOT raised there: preparing a task is where that fault
-/// belongs, so it is re-derived (deterministically, same view) when the task is prepared — which
-/// keeps the body's output ordering and leaves a nursery whose tasks are all cancelled without ever
-/// being prepared (`break`/`return` out of `parallel:`) faultless, exactly as before W6-2.
+/// The snapshot itself comes from [`Vm::ensure_snapshot`]'s cache, so consecutive spawns with no
+/// intervening cache invalidation (a global (re)binding, or a nursery open when the view holds a
+/// mutable aggregate) share ONE build — that is what keeps a spawn storm O(1) per spawn instead of
+/// O(all module globals).
+///
+/// `Err` = the snapshot BUILD failed at the spawn (an over-deep/cyclic global, a frame-holding
+/// generator). The error is CARRIED, not raised there: preparing a task is where that fault belongs,
+/// so a nursery whose tasks are all cancelled without ever being prepared (`break`/`return` out of
+/// `parallel:`) stays faultless, exactly as before W6-2, and the body's output still precedes it.
 #[derive(Clone)]
 struct QueuedTask {
     call: PendingCall,
-    snap: Option<Arc<ModuleSnapshot>>,
+    snap: Result<Arc<ModuleSnapshot>, RuntimeError>,
 }
 
 impl QueuedTask {
@@ -819,12 +824,23 @@ pub struct Vm {
     /// D1 — parallel to `module_objs` on a worker VM: whether module `i` has been faulted in yet
     /// (its globals replayed from `module_snapshot`). Empty on the top-level / cooperative VM.
     module_faulted: Vec<bool>,
-    /// W6-2 — CACHE of the snapshot of THIS view's module graph, so repeated nurseries in a
-    /// mutation-free program build exactly one. Invalidated by a module-slot write
-    /// (`set_global_slot`/`module_define`) and never populated for a view holding a mutable aggregate
-    /// global (`ModuleSnapshot::reusable` — in-place mutation writes no slot). Swapped per fiber with
-    /// `module_snapshot`: it describes the swapped-in view, not the VM. See [`Vm::ensure_snapshot`].
+    /// W6-2 — CACHE of the snapshot of THIS view's module graph, so consecutive `spawn`s (and repeated
+    /// nurseries in a mutation-free program) build exactly one. Invalidated by exactly two rules:
+    ///
+    /// 1. a module-slot write — `set_global_slot`/`module_define`, the only two slot mutators;
+    /// 2. `Op::EnterNursery`, iff the cached snapshot is NOT `reusable` — i.e. some global holds a
+    ///    mutable aggregate, which can be mutated IN PLACE (`q.push(1)`) with no slot write for rule 1
+    ///    to see. So every nursery re-snapshots such a view, while an all-immutable view keeps one
+    ///    snapshot for the whole run.
+    ///
+    /// Swapped per fiber with `module_snapshot`: it describes the swapped-in view, not the VM. See
+    /// [`Vm::ensure_snapshot`].
     snapshot_memo: Option<Arc<ModuleSnapshot>>,
+    /// W6-2 — how many snapshots this VM has BUILT (cache misses). A `usize` bump on a cold path, and the
+    /// only direct probe that the cache short-circuits: a timing bench can hint, this counts. Read by
+    /// `vm::tests::snapshot_cache_*`. NOT swapped per fiber — it is a per-VM statistic, not part of the
+    /// module view.
+    snapshot_builds: usize,
     /// Task 1 — GC pin for the shell's REAL `module_objs` while they are swapped OUT of
     /// `self.module_objs` during a serial child-modules window (`with_serial_child_modules` /
     /// `prepare_serial_child`). `collect()` roots `self.module_objs` (the child copy) but not the
@@ -1207,17 +1223,17 @@ impl Lowered {
 /// `modules` is parallel to the parent's `module_objs` by index, so a callable's `home` /
 /// `module_idx` (already an index under the airlock — see [`Vm::home_index`]) lines up directly
 /// with the worker's pre-allocated (empty) module objects. Built at a task's pin instant by
-/// [`Vm::snapshot_modules`] and cached in `snapshot_memo` when `reusable`.
+/// [`Vm::snapshot_modules`] and cached in `snapshot_memo`.
 struct ModuleSnapshot {
     modules: Vec<ModuleSnap>,
-    /// W6-2 — may this snapshot be CACHED (`snapshot_memo`) and replayed by a later nursery? True iff
-    /// every module-global slot holds an immutable leaf or an `Arc`-shared core
-    /// ([`Vm::slot_snapshot_reusable`]) — i.e. nothing whose CONTENTS can change without a module-slot
-    /// write (the two hooked mutators `set_global_slot` / `module_define`). A module global holding a
-    /// mutable aggregate (`List`/`Map`/`Set`/`Struct`/…) is mutated IN PLACE (`q.push(1)`, `m[k] = v`,
-    /// `p.x = 1`) with no slot write for the hooks to see, so such a snapshot is never cached and each
-    /// nursery rebuilds — conservative, never stale. A WHITELIST, so a future `Obj` variant defaults to
-    /// "rebuild" (slower, never unsound).
+    /// W6-2 — may this snapshot's cache entry SURVIVE a nursery open? True iff every module-global slot
+    /// holds an immutable leaf or an `Arc`-shared core ([`Vm::slot_snapshot_reusable`]) — i.e. nothing
+    /// whose CONTENTS can change without a module-slot write (the two hooked mutators `set_global_slot`
+    /// / `module_define`). A module global holding a mutable aggregate (`List`/`Map`/`Set`/`Struct`/…) is
+    /// mutated IN PLACE (`q.push(1)`, `m[k] = v`, `p.x = 1`) with no slot write for the hooks to see, so
+    /// a snapshot holding one is dropped from the cache at every `Op::EnterNursery` and the nursery
+    /// re-snapshots — conservative, never stale between nurseries. A WHITELIST, so a future `Obj`
+    /// variant defaults to "rebuild" (slower, never unsound).
     reusable: bool,
 }
 

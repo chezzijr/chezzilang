@@ -147,8 +147,9 @@ impl Vm {
     /// Otherwise (lazy/top-level) push the [`QueuedTask`] for the join to drain. The checker guarantees
     /// a `parallel:` is open, but we guard for parity with the serial-VM oracle's runtime error.
     ///
-    /// W6-2 — a lazily-queued task is pushed with NO snapshot: its view is pinned only when it must be
-    /// (a module-slot write, or the join that prepares it) — see [`Vm::pin_unpinned_tasks`].
+    /// W6-2 — THE PIN INSTANT: the task's module view is snapshotted HERE, at its own `spawn`, on both
+    /// engines and on both the eager and the lazy path. `ensure_snapshot`'s cache makes consecutive
+    /// spawns cheap; a build failure is CARRIED on the task and raised where it is prepared.
     pub(super) fn register_task(
         &mut self,
         task: PendingCall,
@@ -158,57 +159,21 @@ impl Vm {
         let Some(i) = self.nurseries.len().checked_sub(1) else {
             return Err(self.err("spawn must be inside a parallel: block".to_string(), span));
         };
+        let snap = self.ensure_snapshot(span);
         // Eager innermost nursery → inject a live fiber. Clone the sched Arc, drop the borrow so
         // `prepare_worker` can take `&mut self`; `inject` assigns the real slot index under its lock
         // (the `0` placeholder is overwritten), so no caller-side index bookkeeping is needed.
         if let Some(Some(scope)) = self.eager_scheds.last() {
             let sched = Arc::clone(&scope.sched);
             // The eager nursery owns its OWN sched (a single scope 0 — see `activate_eager_nursery`);
-            // `inject` overwrites the `0` placeholder `task_index` under its lock. It prepares the task
-            // right here, so `None` = "snapshot at prepare time" IS the spawn instant (and its build
-            // fault surfaces at the spawn, as it always has).
-            let fiber = self.prepare_worker(task, None)?.into_fiber(0, 0);
+            // `inject` overwrites the `0` placeholder `task_index` under its lock. This path PREPARES the
+            // task right here, so a snapshot build failure surfaces right here too (prepare instant).
+            let fiber = self.prepare_worker(task, Some(snap?))?.into_fiber(0, 0);
             sched.inject(fiber, 0);
             return Ok(());
         }
-        self.nurseries[i].push(QueuedTask {
-            call: task,
-            snap: None,
-        });
+        self.nurseries[i].push(QueuedTask { call: task, snap });
         Ok(())
-    }
-
-    /// W6-2 — pin the module view of every queued task that has not been pinned yet (`extra` = a task
-    /// list already popped off `nurseries`, so one build covers it too). Called from exactly two places,
-    /// which together define the pin INSTANT:
-    ///
-    /// 1. [`Vm::set_global_slot`], BEFORE the write lands — so a task spawned earlier keeps the value it
-    ///    was spawned with instead of time-travelling to a later assignment (the Go rule).
-    /// 2. [`Vm::join_nursery`], for a join that is about to prepare tasks — the instant M:N's
-    ///    [`Vm::early_enlist_outer`] prepares an OUTER nursery's tasks, which serial never reaches. Both
-    ///    engines pin there, so the two stay byte-identical.
-    ///
-    /// A snapshot BUILD failure (a cyclic/over-deep global, a frame-holding generator) is swallowed here
-    /// and left `None`: the fault belongs where the task is PREPARED, so it is re-derived there. That
-    /// keeps a faulting program's body output ordered as before and — since a cancelled nursery never
-    /// prepares anything — keeps `break`/`return` out of `parallel:` faultless AND snapshot-free.
-    pub(super) fn pin_unpinned_tasks(&mut self, extra: &mut [QueuedTask]) {
-        let unpinned = self
-            .nurseries
-            .iter()
-            .flatten()
-            .chain(extra.iter())
-            .find(|t| t.snap.is_none())
-            .map(|t| t.span());
-        let Some(span) = unpinned else { return }; // nothing pending — the common case, no build
-        let Ok(snap) = self.ensure_snapshot(span) else {
-            return;
-        };
-        for t in self.nurseries.iter_mut().flatten().chain(extra.iter_mut()) {
-            if t.snap.is_none() {
-                t.snap = Some(Arc::clone(&snap));
-            }
-        }
     }
 
     /// `parallel:` dedent — run the nursery's spawned tasks as cooperative fibers (B1/B2). The
@@ -299,12 +264,6 @@ impl Vm {
         if tasks.is_empty() {
             return Ok(());
         }
-        // W6-2 — THE PIN INSTANT for anything still unpinned: this nursery's own tasks AND every task
-        // queued on an OUTER nursery, because M:N is about to EARLY-ENLIST those outer tasks (an instant
-        // the serial engine never reaches). Pinning both here, on both engines, is what keeps them
-        // byte-identical. Gated behind the `is_empty` returns above so it fires exactly when M:N enlists.
-        let mut tasks = tasks;
-        self.pin_unpinned_tasks(&mut tasks);
         // D2b: under `--parallel`, run the tasks as lightweight M:N fibers on the OS-thread pool
         // (park-on-`recv`), instead of cooperative fibers (decision A keeps the cooperative path the
         // default below).
@@ -316,18 +275,15 @@ impl Vm {
         // its private copy → invisible to the parent → `serial == M:N` by construction.
         // W6-2 — each task replays the snapshot PINNED at its own `spawn` (`register_task`), the one
         // instant both engines share. Snapshotting HERE instead would diverge: M:N may prepare a
-        // nursery's tasks earlier, at a nested nursery's join (`early_enlist_outer`). A task whose pin
-        // failed to build falls back to a snapshot taken now — where the fault (a module-global
-        // generator with a non-sendable parked slot or reference cycle, a cyclic global) surfaces
-        // re-stamped with the spawn-site span, exactly as it did before the pin existed.
+        // nursery's tasks earlier, at a nested nursery's join (`early_enlist_outer`) or — for an eager
+        // per-connection nursery — at the spawn itself. A task whose pin FAILED to build raises that
+        // error here, at its preparation (a module-global generator with a non-sendable parked slot or
+        // reference cycle, an over-deep global), already stamped with the spawn-site span.
         let mut children: Vec<Fiber> = Vec::with_capacity(tasks.len());
         for (i, t) in tasks.into_iter().enumerate() {
             let span = t.span();
-            let snap = match t.snap {
-                Some(s) => s,
-                None => self.ensure_snapshot(span)?,
-            };
-            let (pending, module_objs, module_faulted) = self.prepare_serial_child(t.call, snap)?;
+            let (pending, module_objs, module_faulted) =
+                self.prepare_serial_child(t.call, t.snap?)?;
             children.push(Fiber {
                 span,
                 ctx: FiberCtx {
@@ -436,7 +392,7 @@ impl Vm {
         for (i, t) in tasks.into_iter().enumerate() {
             // W6-2 — each task replays the snapshot pinned at its own spawn (the serial engine replays
             // the same one). scope 0 — the outermost nursery.
-            fibers.push(self.prepare_worker(t.call, t.snap)?.into_fiber(i, 0));
+            fibers.push(self.prepare_worker(t.call, Some(t.snap?))?.into_fiber(i, 0));
         }
         let deadlock_err = self.err(DEADLOCK_MSG.to_string(), Span { line: 1, col: 1 });
         // Worker count must account for the early-enlisted OUTER scopes' tasks too (case-A: `main`'s `O`),
@@ -516,7 +472,7 @@ impl Vm {
         let cancel = Arc::new(AtomicBool::new(false));
         let mut workers = Vec::with_capacity(tasks.len());
         for t in tasks {
-            workers.push(self.prepare_worker(t.call, t.snap)?);
+            workers.push(self.prepare_worker(t.call, Some(t.snap?))?);
         }
         let scope_id =
             sched.register_scope_seeded(Arc::clone(&cancel), self.scope_ancestors(), workers);
@@ -557,7 +513,7 @@ impl Vm {
             // so snapshotting here would diverge for a global mutated in between.
             let mut prepared = Vec::with_capacity(total);
             for t in clones {
-                prepared.push(self.prepare_worker(t.call, t.snap)?);
+                prepared.push(self.prepare_worker(t.call, Some(t.snap?))?);
             }
             // COMMIT — nothing fallible remains. Discard the originals (the clones became the fibers),
             // register + seed the scope, and record it for its OWN `JoinNursery` to reduce.
@@ -3077,10 +3033,10 @@ impl Vm {
     /// can be moved to a pool thread and `run()`. Everything that reads the parent heap happens here;
     /// nothing in `ReadyWorker::run` touches `self`.
     ///
-    /// W6-2 — `snap` is the task's PIN, the module view snapshotted at its `spawn` ([`QueuedTask`]).
-    /// `None` = "snapshot the current view here", which is both the pre-W6-2 behaviour and the right
-    /// instant for the paths that prepare a task the moment it is spawned (the eager per-connection
-    /// nursery, `run_task_isolated`) or that must re-derive a pin whose build failed.
+    /// W6-2 — `snap` is the task's PIN, the module view snapshotted at its `spawn` ([`QueuedTask`]), which
+    /// every nursery path (lazy, early-enlisted, eager per-connection) now passes in. `None` = "snapshot
+    /// the current view here", left for the nursery-less callers whose prepare instant IS now:
+    /// `run_task_isolated` (B3.3) and the `Executor` drain (`prepare_worker_from_wire`).
     pub(super) fn prepare_worker(
         &mut self,
         task: PendingCall,
@@ -3501,14 +3457,14 @@ impl Vm {
     /// D1 — the read-only [`ModuleSnapshot`] of the module graph THIS view currently sees, replayed
     /// into each worker/child it prepares.
     ///
-    /// W6-2 — this is FRESH per task (pinned at its `spawn`, see [`Vm::pin_unpinned_tasks`]), not frozen
-    /// for the run. `snapshot_memo` is a CACHE with two
-    /// invalidation rules, not a forever-memo: a module-slot write drops it (`set_global_slot` /
-    /// `module_define`), and a snapshot whose globals include a mutable aggregate is never cached at all
-    /// (`ModuleSnapshot::reusable` — in-place mutation writes no slot). So a global initialized or
-    /// mutated after an earlier nursery is SEEN by later tasks (it used to replay as the frozen
-    /// first-nursery copy, or as `nil` if it had not been initialized yet), while a program whose globals
-    /// are only scalars / `Channel` / `Shared` / `Atomic` still builds exactly one snapshot for the run.
+    /// W6-2 — this is resolved per task at its `spawn` ([`Vm::register_task`]), not frozen for the run.
+    /// `snapshot_memo` is a CACHE with two invalidation rules, not a forever-memo: a module-slot write
+    /// drops it (`set_global_slot` / `module_define`), and `Op::EnterNursery` drops it when the cached
+    /// snapshot is not `reusable` (some global holds a mutable aggregate, which in-place mutation changes
+    /// with no slot write). So a global initialized or mutated after an earlier nursery is SEEN by later
+    /// tasks (it used to replay as the frozen first-nursery copy, or as `nil` if it had not been
+    /// initialized yet), while a program whose globals are only scalars / `Channel` / `Shared` / `Atomic`
+    /// still builds exactly one snapshot for the run, and a spawn storm inside one nursery builds one.
     ///
     /// On a WORKER/fiber view the globals fault in lazily, so materialize the whole view first: without
     /// that a re-snapshot would read EMPTY slots and recreate W6-2 one level down. Free on the top-level
@@ -3535,9 +3491,11 @@ impl Vm {
             self.snapshot_modules()
                 .map_err(|e| self.err(e.message, span))?,
         );
-        if snap.reusable {
-            self.snapshot_memo = Some(Arc::clone(&snap));
-        }
+        self.snapshot_builds += 1;
+        // Cache unconditionally: consecutive `spawn`s into one nursery must not each rebuild the whole
+        // view (that is O(all module globals) per spawn — measured 84× on a spawn storm with a big
+        // aggregate global). Freshness comes from the two invalidation rules, not from refusing to cache.
+        self.snapshot_memo = Some(Arc::clone(&snap));
         Ok(snap)
     }
 
@@ -3868,12 +3826,11 @@ impl Vm {
         }
         self.module_faulted = vec![false; snap.modules.len()];
         // W6-2 — seed the cache from the snapshot being installed: this view IS a faithful replay of
-        // `snap`, so until it mutates a slot (which drops the cache) a nested nursery can reuse it for
-        // free. Only when `reusable` — an aggregate global can be mutated in place with no slot write,
-        // and that view must be re-snapshotted (see `slot_snapshot_reusable`).
-        if snap.reusable {
-            self.snapshot_memo = Some(Arc::clone(&snap));
-        }
+        // `snap`, so a nested `spawn` that changed nothing reuses it for free instead of materializing
+        // + re-walking every global. The two invalidation rules still apply to it: a slot write drops it,
+        // and a nested `parallel:` drops it unless `reusable` — which is what makes a task that mutated
+        // its own copy in place re-snapshot for its children (`slot_snapshot_reusable`).
+        self.snapshot_memo = Some(Arc::clone(&snap));
         self.module_snapshot = Some(snap);
     }
 

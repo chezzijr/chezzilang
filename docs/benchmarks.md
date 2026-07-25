@@ -82,48 +82,53 @@ Re-run `many_struct`/`many_map` after each lever to track the close.
 
 Not a lever — a P0 correctness fix (a task now snapshots the module globals fresh, pinned at its own
 `spawn`, at every depth, instead of replaying the first nursery's frozen `Arc` forever). Measured because
-it puts work back on the nursery path. Machine as above; `chezzi` mean of hyperfine runs, before = `main`
-@ `2c9bd0d`.
+it puts work back on the nursery path. Machine as above; best-of-3 wall clock per row, `before` = `main`
+@ `12cb25a`, release binaries, one at a time.
 
 | bench       | before  | after   | delta   |
 |-------------|--------:|--------:|--------:|
-| fib         |  247.5  |  239.6  |  −3.2%  |
-| str         |  165.3  |  161.2  |  −2.5%  |
-| primes      |  614.5  |  579.7  |  −5.7%  |
-| loop        |  940.5  |  901.0  |  −4.2%  |
-| list        |  363.1  |  358.8  |  −1.2%  |
-| struct      |  421.3  |  402.5  |  −4.5%  |
-| poly_method | 1207    | 1194    |  −1.1%  |
-| map         |  130.0  |  130.9  |  +0.7%  |
-| empty       |    2.1  |    2.0  |  −4.8%  |
+| fib         |  246.1  |  248.1  |  +0.8%  |
+| str         |  165.2  |  165.0  |  −0.1%  |
+| primes      |  588.1  |  598.9  |  +1.8%  |
+| loop        |  906.6  |  930.4  |  +2.6%  |
+| list        |  386.4  |  368.9  |  −4.5%  |
+| struct      |  416.8  |  405.3  |  −2.8%  |
+| poly_method | 1198    | 1194    |  −0.3%  |
+| map         |  132.7  |  134.3  |  +1.2%  |
+| empty       |    1.9  |    1.9  |    0%   |
 
-All ms, all **within noise** (σ 2–6%; every row moved the same direction, which is itself a noise/thermal
-signature): none of the 9 benches opens a nursery, so flat is the expected result and this table is a
-no-regression check, not a delta.
+All ms (hyperfine mean, `--warmup 2`), all **within noise** (σ 2–8%; `map` re-measured with `-m 20` in
+both directions: 132.7/136.0 before vs 134.3/133.7 after). None of the 9 benches opens a nursery, so flat
+is the expected result and this table is a no-regression check, not a delta.
 
-The cost lives where it should — a **nursery-in-a-loop** micro-bench (200 000 nurseries × 1 task,
-`hyperfine -N --warmup 2 -r 10`), measured on `--serial` because the default M:N engine's per-nursery pool
-overhead dilutes everything.
+The cost lives where it should — on the nursery path. Micro-benches, release binaries, best-of-3;
+`2nd cut` is the rejected review-fix revision (pin deferred to the next slot write / the join) kept in the
+table because it is what the current shape had to beat:
 
-| micro (200k nurseries × 1 task, `--serial`)  | before  | after   | delta   |
-|----------------------------------------------|--------:|--------:|--------:|
-| scalar/`str`/`AtomicInt` globals only         | 890.2ms | 876.5ms |  −1.5%  |
-| + one 200-element `List[int]` global          | 1.661s  | 2.632s  | **+58%** |
-| a global REASSIGNED before each spawn         | 761.4ms | 843.7ms | **+10.8%** |
-| 10M global writes, NO nursery (`g = i` loop)  | 1.113s  | 1.049s  |  −5.7%  |
+| micro                                                                   | main    | this fix       | 2nd cut (rejected) |
+|-------------------------------------------------------------------------|--------:|---------------:|-------------------:|
+| 200k nurseries × 1 task, scalar/`str` globals only, `--serial`          | 0.598s  | 0.594s         | 0.608s             |
+| …+ one 20-element `List[int]` global (the aggregate case)                | 0.799s  | 0.842s (+5.4%) | 1.000s (+25%)      |
+| 40k spawns + 40k global writes in one nursery, `--serial`                | 0.074s  | 0.090s         | 1.721s (23×)       |
+| 2k spawns + 200k global writes in one nursery, `--serial`               | 0.026s  | 0.026s         | 0.231s (8.9×)      |
+| 3000 EAGER spawns, 20000-element `List[int]` global, M:N (server shape)  | 0.014s  | 0.018s         | 1.272s (91×)       |
+| the same nested shape on `--serial` (3000 tasks × 20000-element copies)  | 4.03s   | 4.46s (+10.6%) | 4.06s              |
+| 200k nurseries × 1 task, M:N (pool overhead dominates)                   | 8.58s   | 8.66s (+0.9%)  | 8.46s              |
 
-Row 1 is the dirty flag doing its job — ONE snapshot for the whole run, asserted on the cache field
-directly (`vm::tests::snapshot_cache_short_circuits_only_for_immutable_globals`) rather than by timing.
-Row 2 is the price of the conservative whitelist: an aggregate global can be mutated in place
-(`q.push(1)`) with no module-slot write to invalidate on, so that view is never cached and every nursery
-rebuilds (the same case on M:N is +17%: 913ms → 1.073s at 20k nurseries). Row 3 is correctness work, not
-overhead — each task must see the value it was spawned with, so a reassignment with a task pending forces
-one build, and `before` printed the WRONG answer there (`0` instead of `199990000`). Row 4 guards the new
-`set_global_slot` hook: it is behind a `nurseries.is_empty()` fast path, so a hot global-write loop with no
-nursery open pays nothing (WITHOUT that guard, constructing the scan's iterator chain per write cost
-**+12%** on this row — measured, then fixed). Precise per-mutation invalidation (hooking the mutating
-intrinsics in `src/vm/call.rs`) is the recorded follow-up in `docs/gaps.md §W6-2`, with row 2's +58% as
-its bar.
+Row 1 is the snapshot cache short-circuiting: ONE build for the whole run, asserted by build COUNT
+(`vm::tests::snapshot_cache_short_circuits_per_epoch_not_per_spawn`) rather than by timing. Row 2 is the
+designed price of fresh-per-nursery when a global holds a mutable aggregate: in-place mutation
+(`q.push(1)`) writes no module slot to invalidate on, so the cache is dropped at every `EnterNursery` and
+each nursery rebuilds once. Rows 3–5 are the rejected cut's regressions (a per-write O(pending-tasks) scan,
+and a per-spawn full rebuild on the eager per-connection path) — gone: the pin now reads the cache.
+Row 6 is the one measurable regression left, +10.6% on a pathological shape (a nested nursery, 3000 tasks,
+a 20000-element global ⇒ 10GB of per-task deep copies): the snapshot is built at the first `spawn` instead
+of at the join, and the changed allocation ORDER costs ~10% there. It is **not** extra snapshot work — the
+build count is 2 either way (measured), peak RSS is identical (10.10 vs 10.10GB), and neither disabling the
+`EnterNursery` rule nor the `install_snapshot` cache seed moves it; with a realistically-sized global
+(20 elements) the same shape is 0.015s vs 0.016s. Precise per-mutation invalidation (hooking the mutating
+intrinsics in `src/vm/call.rs`, unfenced now that W6-3 has merged) is the recorded follow-up in
+`docs/gaps.md §W6-2`, with row 2's +5.4% as its bar.
 
 ## Baseline — 2026-06-11
 

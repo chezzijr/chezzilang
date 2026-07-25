@@ -348,14 +348,11 @@ Three increments at the one choke point (`ensure_snapshot`):
    and a shell draining several scopes faults each fiber from its OWN snapshot. Consequence: a shell no
    longer needs a snapshot at all → `spawn_shell` lost its `snap` parameter, deleting 5 `ensure_snapshot`
    call sites including both `.expect("no fault possible")` teardown panic vectors.
-3. **A per-TASK PIN** (`QueuedTask.snap`), materialized LAZILY at exactly two program points — which
-   together are the pin INSTANT (`Vm::pin_unpinned_tasks`):
-   - `set_global_slot`, **before** the write lands: an already-spawned task keeps the value it was
-     spawned with instead of time-travelling to a later assignment.
-   - `join_nursery`, for a join that is about to prepare tasks: this pins the joining nursery's own
-     tasks AND every task queued on an OUTER nursery, because that is the instant M:N
-     `early_enlist_outer` prepares those outer tasks and the serial engine never reaches it. Both
-     engines pin there, so they stay byte-identical.
+3. **A per-TASK PIN** (`QueuedTask.snap`), resolved EAGERLY in `Vm::register_task` — at the `spawn`
+   itself, on both engines and on both the lazy and the EAGER (per-connection) path. The pin is a
+   `Result<Arc<ModuleSnapshot>, RuntimeError>`: a build failure is CARRIED on the task and raised where
+   the task is PREPARED, so a nursery whose tasks are all cancelled by a `break`/`return` stays faultless
+   and the `parallel:` body's own output still precedes the fault (pre-W6-2 behaviour).
 
    Why per-TASK and not per-nursery: a bare `spawn` binds to the **implicit** nursery, whose
    `EnterNursery` the compiler emits at the TOP of the module/function body (`Span{1,1}`) and whose join
@@ -363,48 +360,78 @@ Three increments at the one choke point (`ensure_snapshot`):
    — reintroducing W6-2's `nil` for every global declared later in that body (`spawn: …` / `n: int = 42`
    / `spawn: print(n)` → `nil`; a `List` global → `type nil has no method 'len'`). The first cut of this
    fix did exactly that and was rejected in review for it.
-   Why LAZY and not built at the spawn: building is fallible (an over-deep/cyclic global) and eager
-   building moved the FAULT to the spawn — reordering it before the `parallel:` body's own output, and
-   manufacturing a fault in a nursery whose tasks are all cancelled by a `break`/`return` and never
-   prepared (a clean rc=0 program became rc=1). Lazily pinning keeps the fault at the preparation point
-   and keeps a cancelled nursery snapshot-free. A pin whose build fails is left `None` and re-derived
-   where the task is prepared, which is where it always faulted.
 
-**Residual, documented:** in-place mutation of an aggregate global writes no module slot, so it cannot
-trigger the pin. If a task's `spawn` is followed by an in-place mutation (`q.push(1)`, `m[k]=v`, `p.x=1`)
-and no reassignment of any global before the pin point, the task sees the mutation. Reassignment is
-exact. Same-engine on both, and covered by `aggregate_mutated_in_place_between_nurseries` /
-`map_and_struct_globals_in_place` for the between-nursery shape that matters.
+   Why EAGER and not "at the next slot write, else the join": the second cut deferred the pin to those
+   two hooks and was rejected for **serial ≠ M:N**. The M:N EAGER nursery (a `parallel:`/bare `spawn`
+   inside a running task — the `std.net` per-connection `serve` shape, gated on ≥2 hardware threads)
+   PREPARES its task at the spawn, so it pinned there, while the serial engine queued and pinned at the
+   next write or the join. An in-place aggregate mutation between the two instants writes no slot, so the
+   engines snapshotted different views: `q: List[int] = [1]` + `spawn` + `q.push(2)` + `spawn` printed
+   `first=2 second=2` on `--serial` and `first=1 second=2` on bare `run`, flipping back on `--threads=1`
+   — i.e. output depended on the worker-pool width. The same deferral also (a) made every module-global
+   write inside an open nursery scan the whole pending-task list (O(tasks × writes): 40k spawns + 40k
+   writes went 0.083s → 1.761s), and (b) fired the hook while an `Executor` job's PRIVATE child module
+   view was installed but the PARENT's task list was pending, handing the job's view to a sibling task (a
+   task saw the job's `q.push(7)` on `--serial`, not on M:N — an isolation break too).
 
-**Cost measured** (hyperfine `-N --warmup 2 -r 10`; the 9 `benches/run.chz` benches moved only within
-noise, −5.7%…+0.7%, none of them opens a nursery). Nursery-in-a-loop, 200k nurseries × 1 task,
-`--serial` (the sensitive engine — the M:N pool overhead dilutes everything):
+   With the pin resolved at the spawn, freshness comes from the two cache-invalidation rules, and the
+   cache is what keeps the eager path cheap: a spawn storm inside one nursery builds ONE snapshot
+   (asserted by build COUNT in `vm::tests::snapshot_cache_short_circuits_per_epoch_not_per_spawn`), where
+   the second cut rebuilt per spawn (3000 eager spawns with a 20000-element `List[int]` global: 0.014s →
+   1.272s, 91×). Rule 2 (`Op::EnterNursery` drops a non-`reusable` cache entry) is what makes a nursery —
+   including a nested one inside a task that mutated its own copy in place — re-snapshot.
 
-| micro (200k nurseries × 1 task, `--serial`)  | before  | after   | delta   |
-|----------------------------------------------|--------:|--------:|--------:|
-| scalar/`str`/`AtomicInt` globals only         | 890.2ms | 876.5ms |  −1.5%  |
-| + one 200-element `List[int]` global          | 1.661s  | 2.632s  | **+58%** |
-| a global REASSIGNED before each spawn         | 761.4ms | 843.7ms | **+10.8%** |
-| 10M global writes, NO nursery (`g = i` loop)  | 1.113s  | 1.049s  |  −5.7%  |
+**Residual, documented** (`docs/concurrency.md` §2): in-place mutation of an aggregate global writes no
+module slot, so it cannot refresh the cache mid-nursery. Within ONE nursery, consecutive `spawn`s share
+one build, refreshed by a global ASSIGNMENT (rule 1) or by a new nursery (rule 2) but not by
+`q.push(1)`/`m[k]=v`/`p.x=1`. So `spawn` → `q.push(2)` → `spawn` (same nursery, no assignment between)
+gives the second task the pre-`push` view. Every task's view is ONE coherent instant (never a mix of old
+and new values) and the same instant on both engines at every `--threads`; only its freshness stops at the
+last assignment / nursery open. The between-nursery shape — the one that matters and the one this fix was
+asked for — IS exact (`aggregate_mutated_in_place_between_nurseries`,
+`map_and_struct_globals_in_place`), and the same-nursery residual is pinned by
+`in_place_mutation_between_two_spawns_of_one_nursery` +
+`nested_nursery_in_a_task_pins_at_its_first_spawn`.
 
-Row 1 is the dirty flag short-circuiting: one snapshot for the whole run (asserted directly, not by
-timing, in `vm::tests::snapshot_cache_short_circuits_only_for_immutable_globals`). Row 2 is the price of
-the conservative whitelist — an aggregate global's view is never cached, so every nursery rebuilds; the
-same case on the default M:N engine is +17% (913ms → 1.073s at 20k nurseries), the pool overhead
-absorbing the rest. Row 3 is correctness work, not overhead: each task must see its own value, so a
-reassignment with a task pending forces one build — and `before` printed the WRONG answer there (`0`
-instead of `199990000`, every task replaying the frozen first view). Row 4 is the `set_global_slot` hook
-itself: gated on `!nurseries.is_empty()`, so a global-write loop with no nursery open pays nothing —
-without that guard the per-write iterator-chain construction cost **+12%** here (measured, then fixed).
+**Cost measured** (best-of-3/5 wall clock, release binaries; the 9 `benches/run.chz` benches moved only
+within noise — largest |delta| `loop` +2.6%, `map` re-measured 132.7 vs 134.3ms, none of them opens a
+nursery):
+
+| micro                                                                   | main    | this fix | 2nd cut (rejected) |
+|-------------------------------------------------------------------------|--------:|---------:|-------------------:|
+| 200k nurseries × 1 task, scalar/`str` globals only, `--serial`          | 0.598s  | 0.594s   | 0.608s             |
+| …+ one 20-element `List[int]` global (the aggregate case)                | 0.799s  | 0.842s (+5.4%) | 1.000s (+25%) |
+| 40k spawns + 40k global writes in one nursery, `--serial`                | 0.074s  | 0.090s   | 1.721s (23×)       |
+| 2k spawns + 200k global writes in one nursery, `--serial`               | 0.026s  | 0.026s   | 0.231s (8.9×)      |
+| 3000 EAGER spawns, 20000-element `List[int]` global, M:N (server shape)  | 0.014s  | 0.018s   | 1.272s (91×)       |
+| the same nested shape on `--serial` (3000 tasks × 20000-element copies)  | 4.03s   | 4.46s (+10.6%) | 4.06s        |
+
+Row 1 is the cache short-circuiting (ONE build for the whole run, asserted by count, not by timing).
+Row 2 is the price of fresh-per-nursery for an aggregate global — one rebuild per nursery, as designed.
+Rows 3–5 are the rejected cut's regressions, gone. Row 6 is the one measurable regression: the snapshot
+is built at the first spawn instead of at the join, and on that pathological shape (10GB of per-task deep
+copies) the changed ALLOCATION ORDER costs ~10%. It is not extra snapshot work — the build count is 2 in
+both cases (measured directly), the peak RSS is identical (10.10 vs 10.10 GB), and disabling rule 2 or the
+`install_snapshot` cache seed does not move it; the same shape with a realistically-sized global
+(20 elements) is 0.015s vs 0.016s. Recorded rather than chased further.
+
+**Note (pre-existing, NOT introduced):** `to_snap`'s slow arm re-attempts a full `to_wire` per level, so
+snapshotting a module global deeper than `MAX_STRUCTURAL_DEPTH` (a ~5100-link recursive `struct Node:
+next: Option[Node]` chain) is O(n²) — seconds in release, minutes in a debug build, and `main` behaves the
+same. That is why the snapshot-BUILD-failure contract is gated by a white-box unit test
+(`a_carried_snapshot_build_error_is_raised_at_task_preparation`) instead of a runnable fixture: the two
+parity tests the rejected cut used for it ran source the CHECKER REJECTS (`deep: List[List[int]]` +
+`deep = [deep]` → `cannot assign List[List[List[int]]] to List[List[int]]`) and only passed because
+`run_program` skips the checker.
 
 **FOLLOW-UP (not implemented, deliberately).** `src/vm/call.rs` was fenced while this landed (W6-3 in
 flight; it has since merged), so the aggregate case is handled by the coarse whitelist rather than by
 precise invalidation. The mutating intrinsics (`List.push`/`pop`/`insert`/…, map/set store, `SetField`, `SetIndex`) can
 drop the cache only when the mutated object is reachable from a module slot, letting an aggregate-holding
 program cache like a scalar one — which would also close the in-place residual above. Justified only if a
-real workload shows the gap: the bar is row 2's **+61%** (a nursery-loop with an aggregate global)
-shrinking to row 1's ≈+2%, i.e. >5% of real throughput on a nursery-heavy program, not a micro-bench
-alone.
+real workload shows the gap: the bar is row 2's **+5.4%** (a nursery-loop with an aggregate global)
+shrinking to row 1's ≈0%, i.e. >5% of real throughput on a nursery-heavy program, not a micro-bench
+alone. That same precise invalidation is also what would close the same-nursery in-place residual above.
 
 ### W6-3. A protocol method a built-in satisfies INTRINSICALLY is not callable at runtime — check-OK-then-run-fault, ~11 methods — P0 — **FIXED (2026-07-25)**
 ```chezzi

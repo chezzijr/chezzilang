@@ -13913,32 +13913,85 @@ fn intrinsic_grants_all_have_vm_arms() {
     }
 }
 
-/// W6-2 — compile + run `src` on the serial engine and report whether a module-globals snapshot is left
-/// CACHED (`snapshot_memo`) afterwards. Reaches a private field, so it lives here rather than in a
-/// Chezzi test; a timing bench can only hint at what this asserts directly.
-fn snapshot_cached_after_run(src: &str) -> bool {
+/// W6-2 — compile + run `src` on the serial engine and report how many module-global SNAPSHOTS it built
+/// (`snapshot_builds`, bumped on every `ensure_snapshot` cache MISS). Reaches a private counter, so it
+/// lives here rather than in a Chezzi test; a timing bench can only hint at what this counts exactly.
+fn snapshot_builds_for(src: &str) -> usize {
     let tokens = crate::lexer::tokenize(src).expect("lex");
     let module = crate::parser::parse(tokens).expect("parse");
     let program = crate::compiler::compile_module_standalone(&module).expect("compile");
     let mut vm = Vm::new(Arc::new(program));
     vm.run().expect("run");
-    vm.snapshot_memo.is_some()
+    vm.snapshot_builds
 }
 
-/// W6-2 — the snapshot cache must actually SHORT-CIRCUIT, not just be correct. A program whose module
-/// globals are all immutable / `Arc`-shared keeps its snapshot cached across nurseries (N nurseries build
-/// ONE snapshot); adding a mutable aggregate global disables the cache entirely (each nursery rebuilds),
-/// because an in-place `q.push(..)` writes no module slot for the invalidation hooks to see. That is the
-/// measured cost of the conservative whitelist — recorded in `docs/benchmarks.md`.
+/// W6-2 — the snapshot cache must actually SHORT-CIRCUIT, not merely be correct: a fix that re-snapshots
+/// per `spawn` passes every correctness test and quietly costs O(all module globals) per spawn (measured
+/// 84x on a spawn storm with a big aggregate global). The two invalidation rules give exactly:
+///
+/// * all-immutable globals (`reusable`) → ONE build for the whole run, however many nurseries;
+/// * a mutable aggregate global → one build per NURSERY (rule 2 drops the cache at `EnterNursery`,
+///   because `q.push(..)` writes no module slot for rule 1 to see) — and, crucially, still only ONE
+///   build for N spawns into the SAME nursery;
+/// * a global ASSIGNMENT between spawns (rule 1) → one build per assignment-then-spawn.
 #[test]
-fn snapshot_cache_short_circuits_only_for_immutable_globals() {
-    let nurseries = "\nfor i in range(3):\n    parallel:\n        spawn: pass\n";
-    assert!(
-        snapshot_cached_after_run(&format!("n: int = 1\ns := \"x\"{nurseries}")),
-        "scalar/str-only globals must leave the snapshot cached (one build for N nurseries)"
+fn snapshot_cache_short_circuits_per_epoch_not_per_spawn() {
+    let three_nurseries = "\nfor i in range(3):\n    parallel:\n        spawn: pass\n";
+    assert_eq!(
+        snapshot_builds_for(&format!("n: int = 1\ns := \"x\"{three_nurseries}")),
+        1,
+        "all-immutable globals: 3 nurseries must share ONE build"
     );
-    assert!(
-        !snapshot_cached_after_run(&format!("n: int = 1\nq: List[int] = [1]{nurseries}")),
-        "a mutable aggregate global must disable the cache (in-place mutation writes no slot)"
+    assert_eq!(
+        snapshot_builds_for(&format!("n: int = 1\nq: List[int] = [1]{three_nurseries}")),
+        3,
+        "an aggregate global: one build per nursery (in-place mutation writes no slot)"
     );
+    assert_eq!(
+        snapshot_builds_for(
+            "q: List[int] = [1]\nparallel:\n    for i in range(50):\n        spawn: pass\n"
+        ),
+        1,
+        "50 spawns into ONE nursery must share ONE build, aggregate global or not"
+    );
+    assert_eq!(
+        snapshot_builds_for("g: int = 0\nparallel:\n    spawn: pass\n    g = 1\n    spawn: pass\n"),
+        2,
+        "a global assignment between two spawns must refresh the view (one build each)"
+    );
+}
+
+/// W6-2 — a snapshot BUILD failure is CARRIED on the queued task and raised where the task is PREPARED
+/// (its nursery's join), never at the `spawn`: that is what keeps a nursery whose tasks are all cancelled
+/// (`break` out of `parallel:`) faultless, and what keeps the `parallel:` body's own output ahead of the
+/// fault. White-box because the only program-level trigger is a module global deeper than
+/// `MAX_STRUCTURAL_DEPTH`, and `to_snap`'s slow arm is O(n^2) on such a chain (~5100 links) — minutes in a
+/// debug build, on `main` as much as here, so it cannot live in the test suite.
+#[test]
+fn a_carried_snapshot_build_error_is_raised_at_task_preparation() {
+    let program = crate::compiler::compile_module_standalone(
+        &crate::parser::parse(crate::lexer::tokenize("x := 1\n").expect("lex")).expect("parse"),
+    )
+    .expect("compile");
+    let mut vm = Vm::new(Arc::new(program));
+    let span = Span { line: 7, col: 3 };
+    let carried = vm.err("simulated snapshot build failure".to_string(), span);
+    // Open a nursery by hand (`Op::EnterNursery`'s lockstep stacks) and queue a task whose pin FAILED.
+    vm.nurseries.push(Vec::new());
+    vm.mn_scopes.push(None);
+    vm.nursery_defer_floors.push(0);
+    vm.eager_scheds.push(None);
+    vm.nurseries[0].push(QueuedTask {
+        call: PendingCall::Call {
+            callee: Value::nil(),
+            args: Vec::new(),
+            span,
+        },
+        snap: Err(carried.clone()),
+    });
+    let raised = vm
+        .join_nursery()
+        .expect_err("the carried build error must surface at the join, which prepares the task");
+    assert_eq!(raised.message, carried.message);
+    assert_eq!(raised.span, span, "the error keeps its spawn-site span");
 }

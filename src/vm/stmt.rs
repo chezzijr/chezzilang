@@ -1822,20 +1822,12 @@ impl Vm {
         // right answer. Rooted here (the sole slot-write helper) so both write ops and any future caller
         // are covered; a free no-op on the top-level / cooperative engines (no snapshot installed).
         self.ensure_module_faulted(module);
-        // W6-2 — a module-slot write invalidates the snapshot CACHE: the next nursery must snapshot the
-        // NEW value instead of replaying a frozen earlier copy. One of exactly two module-slot mutators
-        // (with `module_define`), so this pair is the whole invalidation surface for slot rebinding.
-        // And it is the PIN INSTANT: an already-spawned task must keep the value it was spawned with, so
-        // pin every unpinned queued task's view BEFORE the new value lands. (Only here, not in
-        // `module_define`: that one also runs during a worker's snapshot REPLAY, where re-entering
-        // `ensure_snapshot` would be circular. A replay/import-bind reaching an unpinned task later is
-        // harmless — reading a global before its declaration is a CHECK error, so there is no `nil` to
-        // observe, only a newer value.)
-        if !self.nurseries.is_empty() {
-            // Fast path: with no nursery open there is nothing to pin, which is the whole cost of this
-            // hook on a hot global-write loop (one `Vec::is_empty`).
-            self.pin_unpinned_tasks(&mut []);
-        }
+        // W6-2 — a module-slot write invalidates the snapshot CACHE: the next `spawn` must snapshot the
+        // NEW value instead of replaying an earlier copy. One of exactly two module-slot mutators (with
+        // `module_define`), so this pair is the whole invalidation surface for slot rebinding. Already-
+        // queued tasks are unaffected — each carries the snapshot pinned at its own `spawn`
+        // (`register_task`), so a later assignment never time-travels into a task that predates it.
+        // One store; no scan of anything.
         self.snapshot_memo = None;
         if let Obj::Module(m) = self.heap.get_mut(module) {
             m.slots[slot as usize] = value;

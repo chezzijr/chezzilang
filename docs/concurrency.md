@@ -95,18 +95,21 @@ module global (and of every captured local) — mutating one inside a task never
 **The copy is taken FRESH, per task, at its `spawn` — at every depth.** A task sees the values current
 when it was spawned (the Go rule: a goroutine reads whatever a package-level var holds when `go` runs).
 So a global first initialized *after* an earlier nursery is visible, a mutation by ordinary sequential
-code *between* two nurseries is visible to the second nursery's tasks, two spawns straddling a mutation
-see the old and the new value respectively, and a task that mutates its own copy and then opens a
-**nested** `parallel:` gives its children the **task's** current view, not the parent module's. In-place
-mutation of an aggregate global (`q.push(x)`, `m[k] = v`, `p.x = 1`) counts too. An `Executor` job has no
-nursery, so it sees the globals as of the **drain** (`shutdown`, or the auto-drain at exit) — the instant
-it actually runs. Identical on both engines.
+code *between* two nurseries is visible to the second nursery's tasks, two spawns straddling a global
+assignment see the old and the new value respectively, and a task that mutates its own copy and then
+opens a **nested** `parallel:` gives its children the **task's** current view, not the parent module's.
+In-place mutation of an aggregate global (`q.push(x)`, `m[k] = v`, `p.x = 1`) is picked up by the next
+nursery too. An `Executor` job has no nursery, so it sees the globals as of the **drain** (`shutdown`, or
+the auto-drain at exit) — the instant it actually runs. Identical on both engines, at every `--threads`.
 
-One sub-statement caveat, because in-place aggregate mutation is not tracked per-`spawn` (nothing writes
-a module slot for the runtime to notice): if a task's `spawn` is followed by an in-place mutation of an
-aggregate global and no reassignment of any global, the task may see that mutation. Reassignment
-(`g = …`, including `q = […]`) is exact. To thread a value into a task unambiguously, pass it as a spawn
-argument or send it through a `Channel`.
+One sub-statement caveat, because in-place aggregate mutation writes no module slot for the runtime to
+notice: **within one nursery**, consecutive `spawn`s share one view, which is refreshed by a global
+*assignment* (`g = …`, `q = […]`) but not by an in-place mutation. So if a `spawn` is followed by
+`q.push(x)` and then another `spawn` into the SAME nursery — with no assignment in between — the second
+task still sees the pre-`push` `q`. Every task's view is a single coherent instant (never a mix of old
+and new values), and it is the same instant on both engines; only its freshness stops at the last
+assignment / nursery open. Open a new `parallel:`, assign the global, pass the value as a spawn argument,
+or send it through a `Channel` if a task must see an in-place mutation made mid-nursery.
 To actually **share** mutable cross-task state, use `Shared[T]` / `RwShared[T]` / `Atomic[T]` (below) or a
 `Channel[T]` — those cross by shared handle, not by copy, so a task-side write IS visible to the parent.
 

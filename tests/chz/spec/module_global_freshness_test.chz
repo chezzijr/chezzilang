@@ -101,6 +101,59 @@ test fn map_and_struct_globals_in_place():
     assert a.get() == 2, "task saw map len {a.get()}"
     assert b.get() == 7, "task saw p.x {b.get()}"
 
+# --- the pin instant is a SOURCE POSITION (one build per epoch, both engines) -------------------
+#
+# In-place mutation writes no module slot, so nothing REFRESHES a task's view mid-nursery: every spawn
+# between two cache invalidations (a global assignment, or a nursery open) replays ONE build. Both
+# tasks below therefore see len 1 — the view built at the first spawn — on serial AND M:N, at every
+# `--threads`. An earlier cut refreshed the view at "the next slot write, else the join" instead, which
+# made the M:N EAGER per-connection path pin at the spawn and the lazy path pin later: `--serial`
+# printed 2, bare `run` 1, and `--threads=1` flipped it back to 2.
+aq: List[int] = [1]
+
+test fn in_place_mutation_between_two_spawns_of_one_nursery():
+    a := Shared(0)
+    b := Shared(0)
+    parallel:
+        spawn: a.set(aq.len())
+        aq.push(2)
+        spawn: b.set(aq.len())
+    assert a.get() == 1, "first task saw len {a.get()}"
+    assert b.get() == 1, "second task saw len {b.get()}"
+    assert aq.len() == 2, "parent saw len {aq.len()}"
+
+# The same shape one level down — a nursery NESTED inside a task, which on M:N with >= 2 hardware
+# threads is the EAGER per-connection path (the `std.net` `serve` shape: accept, spawn a handler, append
+# to a log global). The eager path prepares the task AT the spawn, so its pin must be taken there too.
+nq: List[int] = [1]
+
+fn nested_pin_worker(out: Shared[int]):
+    parallel:
+        spawn: out.set(nq.len())
+        nq.push(2)
+
+test fn nested_nursery_in_a_task_pins_at_its_first_spawn():
+    out := Shared(0)
+    parallel:
+        spawn nested_pin_worker(out)
+    assert out.get() == 1, "nested task saw len {out.get()}"
+    assert nq.len() == 1, "task mutation leaked: {nq.len()}"
+
+# A global ASSIGNMENT between two spawns of one nursery DOES refresh the view (rule 1 — the slot write
+# drops the cache), so the second task sees the new value. Same on both engines: the write is a source
+# position, not a scheduling artifact.
+sg: int = 1
+
+test fn assignment_between_two_spawns_refreshes_the_view():
+    a := Shared(0)
+    b := Shared(0)
+    parallel:
+        spawn: a.set(sg)
+        sg = 2
+        spawn: b.set(sg)
+    assert a.get() == 1, "first task saw {a.get()}"
+    assert b.get() == 2, "second task saw {b.get()}"
+
 # --- ISOLATION control (must stay green: the fix removes staleness, NOT isolation) -------------
 
 test fn task_side_mutation_does_not_reach_parent():
@@ -139,6 +192,32 @@ test fn executor_task_sees_globals_as_of_the_drain():
     exg = 123
     ex.shutdown()
     assert seen.get() == 123, "executor job saw {seen.get()}"
+
+# An `Executor` job runs against its OWN private module view (the same deep copy a task gets), so its
+# in-place mutation must never reach a sibling nursery task. It used to: the view-refresh hook fired
+# while the job's private view was installed but the PARENT's task list was still pending, handing the
+# job's view to a parent task (`--serial` saw the job's `push`, M:N did not — a parity break AND an
+# isolation break).
+eq: List[int] = []
+eqn: int = 0
+
+fn eq_job():
+    eq.push(7)
+    eqn = 5
+
+test fn an_executor_jobs_private_mutation_never_reaches_a_nursery_task():
+    seenq := Shared(-1)
+    seenn := Shared(-1)
+    ex := Executor()
+    parallel:
+        spawn: seenq.set(eq.len())
+        spawn: seenn.set(eqn)
+        ex.submit(eq_job)
+        ex.shutdown()
+    assert seenq.get() == 0, "task saw the job's private push: len {seenq.get()}"
+    assert seenn.get() == 0, "task saw the job's private write: {seenn.get()}"
+    assert eq.len() == 0, "job mutation leaked to the parent: {eq.len()}"
+    assert eqn == 0, "job write leaked to the parent: {eqn}"
 
 test fn executor_alongside_a_nursery():
     a := Shared(0)

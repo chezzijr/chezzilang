@@ -15,19 +15,25 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > TASK's current view.** Per-task ISOLATION is unchanged (a task-side write never propagates out;
 > `Shared`/`RwShared`/`Atomic`/`Channel` stay the only sharing), and an `Executor` job sees the globals as
 > of the drain. `snapshot_memo` became a CACHE — dropped on any module-slot write (`set_global_slot` /
-> `module_define`, the only two slot mutators) and never populated for a view holding a mutable aggregate
-> global (a conservative whitelist: in-place `q.push(1)` / `m[k]=v` / `p.x=1` writes no slot for a hook to
-> see) — and it plus `module_snapshot` moved into `FiberCtx` so a shell draining several scopes faults each
-> fiber from ITS OWN snapshot. A per-TASK PIN (`QueuedTask.snap`) keeps both engines snapshotting at the
-> same program point — serial prepares a lazy nursery's tasks at its own join while M:N may early-enlist
-> them at a nested join. It is materialized LAZILY at exactly two points (`pin_unpinned_tasks`): before a
-> `set_global_slot` write lands, and at a join that is about to prepare tasks (which is also where M:N
-> early-enlists, so both engines pin together). Per-TASK, not per-nursery, because a bare `spawn` binds to
-> the IMPLICIT nursery that spans a whole module/function body — any per-nursery pin freezes that body at
-> its first bare `spawn` and re-creates W6-2's `nil` for every global declared later in it (the rejected
-> first cut of this fix did exactly that). LAZY, because eager building moved the snapshot FAULT to the
-> spawn: ahead of the `parallel:` body's own output, and onto nurseries whose tasks a `break` cancels
-> without ever preparing (rc=0 → rc=1). Falls out: a shell needs no
+> `module_define`, the only two slot mutators) and dropped at every `Op::EnterNursery` when the cached view
+> holds a mutable aggregate global (a conservative whitelist: in-place `q.push(1)` / `m[k]=v` / `p.x=1`
+> writes no slot for a hook to see, so such a view re-snapshots per nursery while an all-immutable one
+> keeps ONE snapshot for the run) — and it plus `module_snapshot` moved into `FiberCtx` so a shell draining
+> several scopes faults each fiber from ITS OWN snapshot. A per-TASK PIN (`QueuedTask.snap`) keeps both
+> engines snapshotting at the same program point — serial prepares a lazy nursery's tasks at its own join
+> while M:N may early-enlist them at a nested join, or (an eager per-connection nursery) prepare at the
+> spawn itself. It is resolved EAGERLY in `register_task`, from the cache, so the instant is the `spawn`
+> statement on every path; a build failure is CARRIED on the task (`Result`) and raised where the task is
+> PREPARED, which keeps a `break`-cancelled nursery faultless and the body's output ahead of the fault.
+> Per-TASK, not per-nursery, because a bare `spawn` binds to the IMPLICIT nursery that spans a whole
+> module/function body — any per-nursery pin freezes that body at its first bare `spawn` and re-creates
+> W6-2's `nil` for every global declared later in it (the rejected first cut of this fix did exactly that).
+> EAGER, because deferring the pin to "the next slot write, else the join" (the rejected second cut) made
+> the M:N eager per-connection path pin at the spawn and the serial engine pin later — a byte divergence
+> whose value also flipped with `--threads` — plus an O(pending-tasks)-per-write scan and an `Executor`
+> isolation leak. Residual, documented: within ONE nursery consecutive spawns share one build, so an
+> in-place aggregate mutation between two spawns with no assignment after it is not seen by the second task
+> (each view is still ONE coherent instant, identical on both engines). Falls out: a shell needs no
 > snapshot at all, so `spawn_shell` LOST its `snap` param, deleting 5 `ensure_snapshot` call sites and both
 > `.expect("no fault possible")` teardown panic vectors. This **overrides decision G1** ("module globals are
 > frozen under `--parallel`"), which was a memoization artifact, not design. **W6-19** (found while fixing
@@ -35,23 +41,27 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > WRITE arms did not, so a task whose first global touch was `g = 99` indexed an empty `slots` vec:
 > `thread 'chezzi-pool' panicked … index out of bounds: the len is 0` → `internal error: a parallel task
 > panicked`, rc=1, while `--serial` printed the right answer. One `ensure_module_faulted` at the root of
-> `set_global_slot`. **Tests:** new Chezzi suite `tests/chz/spec/module_global_freshness_test.chz` (16 tests
-> — repro, between-nursery, aggregate in-place, bare `spawn`/implicit nursery, nested, `Executor`
-> drain-instant, the teardown/cancel matrix, and the isolation control; each test owns its own globals so no
-> expectation depends on declaration order), 7 new parity tests (the per-spawn instant, bare `spawn` at
-> module and function level, the snapshot-fault ordering, and the cancelled-nursery no-fault case), 1 unit
-> test asserting the cache actually short-circuits; the two parity tests that PINNED the frozen rule were
-> flipped to the fresh expectation with the reason recorded in place. **Docs:** `docs/concurrency.md`
+> `set_global_slot`. **Tests:** new Chezzi suite `tests/chz/spec/module_global_freshness_test.chz` (20 tests
+> — repro, between-nursery, aggregate in-place, the same-nursery pin instant (both flat and nested inside a
+> task, i.e. the M:N eager path), bare `spawn`/implicit nursery, nested, `Executor` drain-instant + job
+> isolation, the teardown/cancel matrix, and the isolation control; each test owns its own globals so no
+> expectation depends on declaration order), 5 new parity tests (the per-spawn instant, bare `spawn` at
+> module and function level), and 2 unit tests: the cache's BUILD COUNT per epoch (one build for N spawns
+> in a nursery, one per nursery for an aggregate view, one per assignment) and the carried build error
+> surfacing at task preparation; the two parity tests that PINNED the frozen rule were flipped to the fresh
+> expectation with the reason recorded in place. **Docs:** `docs/concurrency.md`
 > §2/§7 rewritten (the frozen-snapshot rule AND the long-retired G1 compile-error claim), `docs/spec.md`,
 > `docs/concurrency-tier-d.md`, `docs/concurrency-b3.md` (annotated as history). **Perf:** the 9
-> `benches/run.chz` benches moved only within noise (−5.7%…+0.7%, no nurseries in any of them); a
-> 200k-nursery `--serial` loop is FLAT with scalar-only globals (−1.5%: the cache short-circuits — one
-> snapshot for the whole run), **+58%** with a 200-element `List[int]` global (the conservative whitelist
-> never caches an aggregate-holding view; +17% on M:N), and **+10.8%** when a global is reassigned before
-> each spawn — where the old code printed the WRONG answer. A 10M-write global loop with no nursery open is
-> flat (the new `set_global_slot` hook sits behind a `nurseries.is_empty()` fast path; without it that row
-> cost +12%). Full table in `docs/benchmarks.md`; the
-> precise-invalidation refinement is a recorded follow-up in `docs/gaps.md` (it needs `src/vm/call.rs`).
+> `benches/run.chz` benches moved only within noise (−4.5%…+2.6%, no nurseries in any of them); a
+> 200k-nursery `--serial` loop is FLAT with scalar-only globals (0.598s → 0.594s: the cache short-circuits
+> — one snapshot for the whole run, asserted by build count) and **+5.4%** with a `List[int]` global (one
+> rebuild per nursery, the designed price of fresh-per-nursery). Spawn-storm shapes stay flat because the
+> pin reads the cache: 3000 eager spawns with a 20000-element global global is 0.014s → 0.018s (the rejected
+> cut: 1.272s, 91×), and 40k spawns + 40k global writes 0.074s → 0.090s (rejected cut: 1.721s, 23×). One
+> measurable regression, recorded: the same nested storm on `--serial` (3000 tasks × 20000-element copies,
+> 10GB churn) is +10.6% from the changed allocation order — same build count (2), same peak RSS, and flat at
+> realistic global sizes. Full table in `docs/benchmarks.md`; the precise per-mutation invalidation
+> refinement (now that `src/vm/call.rs` is unfenced) is a recorded follow-up in `docs/gaps.md`.
 
 > **✅ FIX (2026-07-25, gaps.md W6-1, P0) — `Writer.flush()`/`close()` on a `buffered` writer now
 > actually persists.** `flush_core`'s `Backing::Buffered` arm returned `None` on an empty in-VM buffer,
