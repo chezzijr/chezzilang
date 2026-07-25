@@ -590,7 +590,7 @@ impl Vm {
         let in_set =
             |vm: &Vm, set: &[(u64, Value)], he: u64, e: Value| -> Result<bool, RuntimeError> {
                 for &(h2, e2) in set {
-                    if h2 == he && vm.values_equal_guarded(e2, e, 0, span)? {
+                    if h2 == he && vm.elem_equal(e2, e, 0, span)? {
                         return Ok(true);
                     }
                 }
@@ -1668,6 +1668,29 @@ impl Vm {
             .unwrap_or(false)
     }
 
+    /// Per-ELEMENT equality inside a container: CPython's `x is y or x == y`. The raw-word compare
+    /// IS identity here — a float is heap-boxed per alloc (`Obj::FloatBox` behind its own Float tag),
+    /// so ONE `nan` value stored into two containers carries the same word and compares equal, while
+    /// two independently-computed NaNs keep distinct boxes and stay unequal. NaN is the only behavior
+    /// change: for every other value raw-word equality already implied `==`.
+    ///
+    /// NOT for the `==` OPERATOR — bare `nan == nan` must stay false (Python parity). Use this only
+    /// where an element/field/entry is being matched (`in`, `index_of`, `has`, and the recursive arms
+    /// of [`Self::values_equal_guarded`]); the operator's own entry point calls the worker directly.
+    #[inline]
+    pub(super) fn elem_equal(
+        &self,
+        l: Value,
+        r: Value,
+        depth: usize,
+        span: Span,
+    ) -> Result<bool, RuntimeError> {
+        if l == r {
+            return Ok(true);
+        }
+        self.values_equal_guarded(l, r, depth, span)
+    }
+
     /// First index in `hay` structurally-equal to `needle`, or `None`. Depth-fault propagating
     /// (`?`), so a cyclic operand raises the same recoverable "maximum structural depth" fault as
     /// `==` instead of silently comparing unequal. Allocation-free flat scan.
@@ -1679,7 +1702,7 @@ impl Vm {
         span: Span,
     ) -> Result<Option<usize>, RuntimeError> {
         for (i, v) in hay.iter().enumerate() {
-            if self.values_equal_guarded(*v, needle, 0, span)? {
+            if self.elem_equal(*v, needle, 0, span)? {
                 return Ok(Some(i));
             }
         }
@@ -1698,7 +1721,7 @@ impl Vm {
         span: Span,
     ) -> Result<Option<usize>, RuntimeError> {
         for &p in cands {
-            if self.values_equal_guarded(entries[p].1, key, 0, span)? {
+            if self.elem_equal(entries[p].1, key, 0, span)? {
                 return Ok(Some(p));
             }
         }
@@ -1717,7 +1740,7 @@ impl Vm {
         span: Span,
     ) -> Result<Option<usize>, RuntimeError> {
         for &p in cands {
-            if self.values_equal_guarded(entries[p].1, key, 0, span)? {
+            if self.elem_equal(entries[p].1, key, 0, span)? {
                 return Ok(Some(p));
             }
         }
@@ -1770,7 +1793,7 @@ impl Vm {
                         }
                         let (a, b): (Vec<Value>, Vec<Value>) = (a.clone(), b.clone());
                         for (x, y) in a.iter().zip(&b) {
-                            if !self.values_equal_guarded(*x, *y, depth + 1, span)? {
+                            if !self.elem_equal(*x, *y, depth + 1, span)? {
                                 return Ok(false);
                             }
                         }
@@ -1782,7 +1805,7 @@ impl Vm {
                         }
                         let (a, b): (Vec<Value>, Vec<Value>) = (a.clone(), b.clone());
                         for (x, y) in a.iter().zip(&b) {
-                            if !self.values_equal_guarded(*x, *y, depth + 1, span)? {
+                            if !self.elem_equal(*x, *y, depth + 1, span)? {
                                 return Ok(false);
                             }
                         }
@@ -1801,8 +1824,8 @@ impl Vm {
                         for (ka, va) in &ae {
                             let mut found = false;
                             for (kb, vb) in &be {
-                                if self.values_equal_guarded(*ka, *kb, depth + 1, span)?
-                                    && self.values_equal_guarded(*va, *vb, depth + 1, span)?
+                                if self.elem_equal(*ka, *kb, depth + 1, span)?
+                                    && self.elem_equal(*va, *vb, depth + 1, span)?
                                 {
                                     found = true;
                                     break;
@@ -1824,7 +1847,7 @@ impl Vm {
                         for x in &ae {
                             let mut found = false;
                             for y in &be {
-                                if self.values_equal_guarded(*x, *y, depth + 1, span)? {
+                                if self.elem_equal(*x, *y, depth + 1, span)? {
                                     found = true;
                                     break;
                                 }
@@ -1855,7 +1878,7 @@ impl Vm {
                         let fa: Vec<Value> = fa.as_slice().to_vec();
                         let fb: Vec<Value> = fb.as_slice().to_vec();
                         for (va, vb) in fa.iter().zip(&fb) {
-                            if !self.values_equal_guarded(*va, *vb, depth + 1, span)? {
+                            if !self.elem_equal(*va, *vb, depth + 1, span)? {
                                 return Ok(false);
                             }
                         }
@@ -1880,7 +1903,7 @@ impl Vm {
                         let pa: Vec<Value> = pa.clone();
                         let pb: Vec<Value> = pb.clone();
                         for (x, y) in pa.iter().zip(&pb) {
-                            if !self.values_equal_guarded(*x, *y, depth + 1, span)? {
+                            if !self.elem_equal(*x, *y, depth + 1, span)? {
                                 return Ok(false);
                             }
                         }
@@ -1902,7 +1925,7 @@ impl Vm {
                             return Ok(false);
                         }
                         let (ia, ib) = (*ia, *ib);
-                        self.values_equal_guarded(ia, ib, depth + 1, span)
+                        self.elem_equal(ia, ib, depth + 1, span)
                     }
                     // Two opaque `ptr` handles are equal iff they hold the same raw address (identity).
                     // Distinct heap slots can wrap the same address (e.g. a re-`from_wire`'d handle or

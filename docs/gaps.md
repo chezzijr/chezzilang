@@ -224,7 +224,7 @@ parked_slot_nonsendable_rejects,in_data_cycle_rejects,unreached_nonsendable_runs
 - **Multi-frame / pending-`defer` suspended generators** — checker-UNREACHABLE (item 3 arms a/c); no valid
   program constructs them. The rejects are defensive guards, not a user-visible limit — nothing to build.
 
-## Session log — 2026-07-25 (bug-hunt wave 6: 19 findings — W6-19 found while FIXING W6-2 — 9 FIXED (W6-1, W6-2, W6-3, W6-4, W6-5, W6-6, W6-11, W6-16, W6-19), 10 open + 3 carve-outs filed (W6-3b/c/d) — 2 never-hunted surfaces swept)
+## Session log — 2026-07-25 (bug-hunt wave 6: 19 findings — W6-19 found while FIXING W6-2 — 15 FIXED (W6-1..W6-6, W6-11..W6-19 as listed below), 4 open + 3 carve-outs filed (W6-3b/c/d) — 2 never-hunted surfaces swept)
 
 Pre-freeze adversarial hunt, 5 disjoint parallel domains, weighted at the two surfaces the wave-5
 residual named as never audited (**FFI**, **GC + `unsafe`**) plus the concurrency code that landed
@@ -774,7 +774,7 @@ seam as W6-7. (The documented inline-scalar escape was separately re-confirmed a
 `extern "libm.so.6": fn Ok(x: float) -> float` → 0 errors, unlike every other reserved name. `return Ok(x)`
 still resolves to the variant, so the extern is unreachable by its own name.
 
-### W6-12. `datetime.parse_iso8601` accepts a non-4-digit YEAR while every other field enforces exact width
+### W6-12. `datetime.parse_iso8601` accepts a non-4-digit YEAR while every other field enforces exact width — **FIXED (2026-07-26)**
 `"24-01-01"` → `year=24`; also `"4-01-01"`→4, `"024-01-01"`→24, `"20244-01-01"`→20244, `"202400-01-01"`→202400
 (only >9 digits `Err`s). Python `d.fromisoformat("24-01-01")` → `Invalid isoformat string`. **Asymmetric
 inside one function:** `"2024-1-1"` (2-digit month) correctly `Err`s. **Root cause** `std/datetime.chz:229-236`
@@ -784,21 +784,37 @@ inside one function:** `"2024-1-1"` (2-digit month) correctly `Err`s. **Root cau
 **Corollary in the same cluster:** the documented total "Round-trips: `parse_iso8601(to_iso8601(dt)) == dt`"
 is false at the top of the range — `to_iso8601(from_epoch(i64::MAX))` = `"292277026596-12-04T15:30:07Z"`,
 which `parse_iso8601` rejects (`Err(year out of range …)`).
+**Fix:** a `dc[0].len() < 4` guard beside the existing `> 9` cap. The bound MIRRORS the emitter
+(`pad_year` writes >=4 digits, more for an extended year), NOT Python's exact 4 — a strict `== 4`
+would reject what this module itself emits. The >9-digit corollary stands by design (the cap is the
+`to_epoch` overflow guard); `docs/stdlib.md` now states the round-trip's real domain instead of
+claiming it total. Tests: `t_parse_year_width` in `tests/chz/suites/datetime_test.chz`.
 
-### W6-13. `datetime.days_in_month` returns 31 for ANY out-of-range month
+### W6-13. `datetime.days_in_month` returns 31 for ANY out-of-range month — **FIXED (2026-07-26)**
 `days_in_month(2024, 13)` → `31`; same for month 0, -1, 100. Python `calendar.monthrange(2024,13)` →
 `IllegalMonthError`. **Root cause** `std/datetime.chz:59-67` — the fall-through `return 31` has no
 month-domain guard (the `# (1..12)` doc-comment is unenforced). Silently-wrong value: a plausible caller
 (`if d > days_in_month(y, m)` date validation) accepts month 13 day 31.
+**Fix:** a `panic("days_in_month: month out of range: …")` domain guard — the std idiom for a domain
+violation in a non-`Result` helper (`std/string.chz:35`, `std/iter.chz:75`), recoverable via `recover:`,
+and it keeps `-> int` so no caller changes. The only in-tree caller (`:289`) range-checks `m` first.
+Test: `t_days_in_month_domain`.
 
-### W6-14. `ffi.load_str` silently maps invalid UTF-8 to U+FFFD, undocumented
+### W6-14. `ffi.load_str` silently maps invalid UTF-8 to U+FFFD, undocumented — **FIXED (2026-07-26)**
 Bytes `65 255 66` read back as codepoints `65 65533 66`. Same on the extern `str`/`owned_str`/`str?` return
 path (a `strchr` landing mid-UTF-8-sequence returns a mangled `str`, no error). **Root cause**
 `src/native/ffi.rs:435` (`load_str_impl`) + `src/native/cffi.rs:629`/`1005`/`1029` — `to_string_lossy()`.
 Memory-safe but lossy. Go's `C.GoString` preserves the bytes verbatim; ctypes hands you `bytes` and raises
 on `.decode()`. `docs/stdlib.md:662` states only a NUL-termination precondition. Same class as W6-4/W6-9.
+**Fix:** `to_str()` instead of `to_string_lossy()` at all four sites, behind one shared message helper
+(`ffi::non_utf8_err`) naming the bad offset and the `ffi.load_uint8_at` raw-byte hatch. Chosen over
+doc-only for consistency with the IO contract (`Socket.read` already refuses a binary payload rather
+than decoding it lossily); no `load_bytes` accessor — that stays its own milestone. `owned_str` still
+frees the buffer BEFORE the fault propagates (no leak on the error path). Verified on the real binary,
+both engines: `strchr("café", 169)` (a pointer landing mid-codepoint) now `Err`s instead of returning
+a mangled `str`. Test: `load_str_rejects_invalid_utf8`.
 
-### W6-15. `nan` loses per-element identity in containers (CPython drift)
+### W6-15. `nan` loses per-element identity in containers (CPython drift) — **FIXED (2026-07-26)**
 ```chezzi
 nan := (1.0e308 * 10.0) - (1.0e308 * 10.0)
 xs := [nan]
@@ -812,6 +828,15 @@ CPython's container compare and `in`/`index` do an identity check per element be
 `(ValueView::Obj, ValueView::Obj)` arm only; the numeric arm (`:1721-1723`) returns raw IEEE
 `as_f64(l) == as_f64(r)` with no same-`Value` shortcut. Pre-existing (not from the 8B-`Value` or layout
 work). Blast radius narrow: `float` is not `Hashable`, so NaN map/set keys are unreachable.
+**Fix:** one `Vm::elem_equal` helper (`identity or ==`, identity being the raw `Value` word — a float is
+heap-boxed per alloc, so one nan stored twice shares a box while two computed nans do not) used at every
+ELEMENT compare: `seq_slot`/`set_slot`/`map_slot`, the recursive List/Tuple/Map/Set/Struct/Enum/NewType
+arms, the set-op `in_set` walk, and `dedup` (which is defined by the same equality `in` is). The `==`
+OPERATOR entry point (`arith.rs:176`, `exec.rs:1665/1671`) is deliberately untouched: bare `nan == nan`
+stays false. The `RwShared` read-view walks (`netio.rs:2188/2230/2278`) keep plain `==` — their elements
+are `from_wire`'d fresh per entry, so identity can never hold there anyway. Test:
+`tests/chz/spec/nan_identity_test.chz` (3 of its 6 tests fail without the VM change; the two boundary
+tests pass either way).
 
 ### W6-16..18 — cosmetic / diagnostic
 - **W6-16 — FIXED (2026-07-25).** Duplicate diagnostic: `extern "libm.so.6": fn str(x: int) -> int` emitted
@@ -820,16 +845,23 @@ work). Blast radius narrow: `float` is not `Hashable`, so NaN map/set keys are u
   `panic`/`range`/`timer`/`Executor`/`Atomic`. **Fell out of the W6-6 fix** rather than needing its own
   change: keying the collision sweep off `struct_names` (not `is_reserved_name`) means a reserved-callable
   name is reported ONCE, by the in-loop guard. Now single for every name in both lists.
-- **W6-17.** Turbofish over-rejected on the `RwShared` read-view's genuinely-generic `fold`/`fold_entries`:
+- **W6-17 — FIXED (2026-07-26).** Turbofish over-rejected on the `RwShared` read-view's genuinely-generic `fold`/`fold_entries`:
   `r.fold[int](0, fn(a,x): a+x)` → `method 'fold' takes no type argument(s) (it declares no own type
   parameters)` + 2 cascaded infer errors, while the un-turbofished form works and harvested
   `[1,2].fold[int](…)` works. Sibling hole of "FIX 1a" above: `method_has_own_type_params`
   (`src/checker/expr.rs:1920`) answers from the harvested `self.structs` table, but the read-view methods
   from `cc07f77` are **arm-only** (`expr.rs:2751-2772`, E/K/V aren't nameable in `RwShared[T]`). Safe
-  direction (over-rejection).
-- **W6-18.** `io.open()` on a DIRECTORY returns `Ok(Reader)`; the failure is deferred to every read, and
+  direction (over-rejection). **Fix:** the `Ty::RwShared` branch of that helper answers `true` for exactly
+  `fold`/`fold_entries` before the table lookup — they already route through `infer_generic_method` WITH
+  `type_args`, only the pre-gate rejected. Boundary kept: `rw.len[int]()` still rejects, and a non-container
+  element still falls through to the resolver's "no method".
+- **W6-18 — FIXED (2026-07-26).** `io.open()` on a DIRECTORY returns `Ok(Reader)`; the failure is deferred to every read, and
   `read_line`'s message advises `Reader.read_bytes`, which also fails (`Is a directory (os error 21)`).
   `io.read_file(dir)` correctly `Err`s at the call. Python `open(dir)` → `IsADirectoryError`.
+  **Fix:** `io_open_reader` rejects an `is_dir()` handle at the call. The message text comes from a real
+  1-byte probe read, so it is the OS's own wording — byte-identical to what `io.read_file(dir)` already
+  emits (`/tmp: Is a directory (os error 21)`), not a second spelling of one condition. Test:
+  `tests/chz/stdlib/io_open_dir_test.chz`.
 
 ### W6-19. A spawned task whose FIRST module-global access is a WRITE PANICS the M:N pool — host panic + serial≠M:N — P0 — **FIXED (2026-07-25)**
 Found while fixing W6-2 (the mandated nested-nursery test could not even be written without tripping it).
@@ -938,7 +970,7 @@ Regression: `parity_tests::spawn_task_first_global_access_is_write_parity`.
   callbacks. Also unspellable today: a **void-returning callback** (`fn(ptr, ptr)` without `->` is a parse
   error), which locks out most real C callback APIs — `docs/syntax.md §12b` never mentions this.
 
-## Session log — 2026-07-24 (design consistency: `List.min()`/`.max()` fault on empty while sibling accessors return `Option` — OPEN, breaking change)
+## Session log — 2026-07-24 (design consistency: `List.min()`/`.max()`/`min_by`/`max_by` fault on empty while sibling accessors return `Option` — OPEN, breaking change; re-confirmed 2026-07-26)
 
 API-consistency drift found while documenting the test system (`[].min()` used as a fault-path
 example). **Not a bug** (no crash — `min()`/`max()` raise a clean recoverable fault, `runtime error:
@@ -967,10 +999,17 @@ coherent method family:
 - **Recommendation: `.min()`/`.max()` → `Option[T]`** (`None` on empty), matching `first`/`last`/`pop`
   and Rust.
 - **Why OPEN/deferred — breaking change, own milestone.** Return type `T` → `Option[T]` touches:
-  `std/prelude.chz` sigs; the VM `min`/`max` arm (`src/vm/call.rs:~1956`, return `None` instead of
-  `self.err("min()/max() of empty list")`); EVERY caller (now `.min().unwrap()` / `match` / `?`); tests;
-  `docs/stdlib.md` + `docs/spec.md`. A checker↔runtime API-consistency fix, not a cleanup — schedule it
-  as its own milestone with failing-then-green tests on both engines and a caller migration.
+  `std/prelude.chz` sigs; the VM `min`/`max` arm (`list_reduce_extreme`, `src/vm/call.rs:2021`, return
+  `None` instead of `self.err("min()/max() of empty list")`); EVERY caller (now `.min().unwrap()` /
+  `match` / `?`); tests; `docs/stdlib.md` + `docs/spec.md`. A checker↔runtime API-consistency fix, not a
+  cleanup — schedule it as its own milestone with failing-then-green tests on both engines and a caller
+  migration.
+- **Re-raised 2026-07-26** (by the user, while batching the wave-6 fixes) and **re-confirmed OPEN** — the
+  point stands that the `-> T` signature HIDES the fault, so a caller can write the crash without the
+  type system saying anything. Two corrections to the scope above: the family also includes **`min_by`/
+  `max_by`** (`std/prelude.chz:74-75`, same `-> T`, same `list_min_max_by` empty fault), and the caller
+  migration is small — **23 call sites** across `std/`, `examples/`, `tests/`, `docs/`. Deliberately kept
+  OUT of the wave-6 fix batch: that batch is behavior-scoped, this is a surface break.
 
 ## Session log — 2026-07-23 (bug-hunt wave 4: 1 finding — `List[Any]` mixed-numeric literal silently widens int→float — OPEN, deferred pre-freeze)
 

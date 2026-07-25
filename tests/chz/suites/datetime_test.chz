@@ -141,3 +141,26 @@ test fn t_parse_err():
         match datetime.parse_iso8601(bad):
             Ok(_): assert false, "expected Err for '{bad}'"
             Err(_): assert true
+
+# W6-12 — the YEAR is width-checked like every other field: a short year was silently accepted
+# ("24-01-01" parsed as year 24) while "2024-1-1" (short month) correctly Err'd.
+test fn t_parse_year_width():
+    for bad in ["24-01-01", "4-01-01", "024-01-01", "-24-01-01", "24-01-01T00:00:00Z"]:
+        match datetime.parse_iso8601(bad):
+            Ok(_): assert false, "expected Err for short year '{bad}'"
+            Err(_): assert true
+    # The bound MIRRORS the emitter (`pad_year` writes >=4 digits, more for an extended year), so a
+    # padded, a negative-padded and an oversized-but-<=9-digit year all still parse.
+    for good in ["0999-01-01", "-0044-03-15", "0000-01-01", "20244-01-01"]:
+        match datetime.parse_iso8601(good):
+            Ok(_): assert true
+            Err(msg): assert false, "expected Ok for '{good}', got: {msg}"
+
+# W6-13 — a month outside 1..12 is a domain violation: it FAULTS (recoverable), instead of returning
+# a plausible-looking 31 that a `if d > days_in_month(y, m)` validator would silently accept.
+test fn t_days_in_month_domain():
+    for bad in [13, 0, -1, 100]:
+        r := recover: datetime.days_in_month(2024, bad)
+        match r:
+            Ok(_): assert false, "expected a fault for month {bad}"
+            Err(e): assert e.message().contains("month out of range"), "wrong message: {e.message()}"

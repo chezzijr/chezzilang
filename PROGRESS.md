@@ -4,6 +4,29 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 **Legend:** ⬜ not started · 🟦 in progress · ✅ done
 
+> **✅ FIX (2026-07-26, gaps.md W6-12/13/14/15/17/18) — the wave-6 tail, six independent findings on
+> disjoint seams, one batch.** All behavior-scoped (no new API surface); serial==M:N verified on the
+> release binary for every repro.
+> **W6-12** — `parse_iso8601` width-checks the YEAR like every other field (`"24-01-01"` parsed as year
+> 24 while `"2024-1-1"` correctly `Err`'d). The bound is **4+ digits**, mirroring the emitter `pad_year`
+> (>=4, more for an extended year) rather than Python's exact 4, which would reject this module's own
+> output. **W6-13** — `days_in_month(y, m)` faults on a month outside `1..12` instead of returning a
+> plausible-looking `31` that a `if d > days_in_month(y, m)` validator silently accepts. **W6-15** — a
+> container now matches elements by **`identity or ==`** (CPython's rule) via one `Vm::elem_equal`, so
+> one `nan` stored in a list is found by `==`/`in`/`index_of`/`unique`; the bare `==` operator is
+> untouched (`nan == nan` stays false) and two separately-computed NaNs stay unequal. **W6-17** —
+> the turbofish gate stopped over-rejecting the `RwShared` read-view's genuinely-generic
+> `fold`/`fold_entries` (arm-only sigs, absent from the `structs` table the gate consults).
+> **W6-18** — `io.open(<dir>)` `Err`s **at the call** with the OS's own wording, byte-identical to
+> `io.read_file(dir)`, instead of handing back an `Ok(Reader)` whose every read fails. **W6-14** — a
+> non-UTF-8 C string is a clean fault naming the bad offset and the `ffi.load_uint8_at` hatch, on
+> `ffi.load_str`/`_at` and the extern `str`/`owned_str`/`str?` returns alike (was a silent U+FFFD
+> mangle); `owned_str` still frees before the fault propagates. Chosen over doc-only to match the IO
+> contract (`Socket.read` refuses a binary payload rather than decoding it lossily). Still OPEN and
+> deliberately out of this batch: `List.min`/`max`/`min_by`/`max_by` faulting on empty while
+> `first`/`last`/`pop` return `Option[T]` — a surface break, own milestone (gaps.md 2026-07-24 entry,
+> re-confirmed 2026-07-26).
+
 > **✅ FIX (2026-07-25, gaps.md W6-2 + W6-19, both P0) — a task now snapshots the module globals FRESH at
 > its own `spawn`, at every depth; and a task's first-touch global WRITE no longer panics the M:N pool.**
 > **W6-2** — `ensure_snapshot` memoized the `ModuleSnapshot` FOREVER (`snapshot_memo` was invalidated

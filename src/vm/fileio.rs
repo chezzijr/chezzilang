@@ -396,6 +396,20 @@ impl Vm {
         };
         match std::fs::File::open(&path) {
             Ok(f) => {
+                // `File::open` SUCCEEDS on a directory (Linux), which deferred the real failure to
+                // every subsequent read — with `read_line` advising `read_bytes`, which fails too.
+                // Reject at the call like `io.read_file` does (Python `open(dir)` → IsADirectoryError).
+                // The error text comes from a real 1-byte read, so it is the OS's own wording — the
+                // same string `io.read_file(dir)` already produces ("Is a directory (os error 21)"),
+                // not a second spelling of the same condition.
+                if f.metadata().is_ok_and(|m| m.is_dir()) {
+                    let mut probe = [0u8; 1];
+                    let msg = match std::io::Read::read(&mut &f, &mut probe) {
+                        Err(e) => format!("{e}"),
+                        Ok(_) => format!("{}", std::io::ErrorKind::IsADirectory),
+                    };
+                    return Ok(self.sock_err(format!("{path}: {msg}")));
+                }
                 let core = Arc::new(ReaderCore {
                     inner: Mutex::new(Some(std::io::BufReader::new(f))),
                     key: core::next_poll_key(),

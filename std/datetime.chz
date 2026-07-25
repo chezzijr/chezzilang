@@ -55,8 +55,13 @@ struct DateTime:
 fn is_leap_year(y: int) -> bool:
     return (y % 4 == 0) and ((y % 100 != 0) or (y % 400 == 0))
 
-# Number of days in month `m` (1..12) of year `y`. February is leap-aware.
+# Number of days in month `m` (1..12) of year `y`. February is leap-aware. A month outside 1..12 is a
+# domain violation, not a value: it FAULTS (recoverable via `recover:`), matching Python's
+# `calendar.monthrange` IllegalMonthError. Without the guard the fall-through `return 31` made
+# `days_in_month(y, 13)` a plausible-looking 31 — silently wrong for a date-validating caller.
 fn days_in_month(y: int, m: int) -> int:
+    if m < 1 or m > 12:
+        panic("days_in_month: month out of range: " + str(m))
     if m == 2:
         if is_leap_year(y):
             return 29
@@ -228,6 +233,12 @@ fn parse_iso8601(input: str) -> Result[DateTime]:
         return Err("date must be YYYY-MM-DD, got '" + date_part + "'")
     if not all_digits(dc[0]):
         return Err("invalid year '" + dc[0] + "'")
+    # Enforce the year's WIDTH like every other field (month/day/… go through `field2`'s exact-2).
+    # The lower bound MIRRORS the emitter: `pad_year` writes >=4 digits ("0999", "-0044"), and more
+    # for an extended year — so >=4 (not ==4, which would break the round-trip on what this module
+    # itself emits). Without it "24-01-01" silently parsed as year 24.
+    if dc[0].len() < 4:
+        return Err("year must be 4+ digits, got '" + dc[0] + "'")
     # Bound the year before conversion: an oversized all-digit year would overflow i64 in `to_uint`
     # or downstream `to_epoch` (days * 86400) — a fault, not the clean Err the contract requires.
     # <=9 digits (max 999_999_999) can never overflow to_epoch; every realistic/padded year fits.

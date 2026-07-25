@@ -1959,6 +1959,16 @@ impl Checker {
             | Ty::Listener
             | Ty::Writer
             | Ty::Reader => {
+                // ARM-ONLY generics: the `RwShared` read-view `fold`/`fold_entries` are hand-built in
+                // the `Ty::RwShared` dispatch arm (their `R` is not nameable in `RwShared[T]`'s
+                // harvested surface), so they are absent from the `structs` table the lookup below
+                // consults — which rejected their turbofish outright. They ARE genuinely generic and
+                // already route through `infer_generic_method` WITH `type_args` (see `fold_sig`).
+                // A wrong receiver element (`RwShared[int].fold[int]`) still rejects downstream, via
+                // the native handle resolver's "no method".
+                if matches!(recv_ty, Ty::RwShared(_)) && matches!(method, "fold" | "fold_entries") {
+                    return true;
+                }
                 let bare = match recv_ty {
                     Ty::List(_) => "List",
                     Ty::Map(_, _) => "Map",

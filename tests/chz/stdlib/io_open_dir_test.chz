@@ -1,0 +1,41 @@
+# tests/chz/stdlib/io_open_dir_test.chz — W6-18: `io.open(<dir>)` fails AT THE CALL.
+#
+# `File::open` succeeds on a directory, so `io.open` used to hand back an `Ok(Reader)` whose every
+# read failed — and `read_line`'s message advised `read_bytes`, which fails too. `io.read_file(dir)`
+# already Err'd at the call; `io.open` now matches it (and Python's `IsADirectoryError`).
+# Run: `cargo run -- test tests/chz/`. Serial==M:N guarded by the dual-engine gate.
+
+import std.io
+import std.os
+import std.fs
+
+test fn open_directory_errs_at_the_call():
+    d := os.temp_dir()
+    match io.open(d):
+        Ok(_): assert false, "io.open on a directory must Err at the call, not defer to reads"
+        Err(e): assert e.message().contains("Is a directory"), "wrong message: {e.message()}"
+
+test fn open_directory_matches_read_file():
+    # The two entry points agree: neither hands back a usable handle for a directory.
+    d := os.temp_dir()
+    match io.read_file(d):
+        Ok(_): assert false, "io.read_file on a directory must Err"
+        Err(_): assert true
+
+# Write a file, then read its first line back through `io.open` — the control path that must stay Ok.
+fn write_then_read_line(p: str) -> Result[str]:
+    io.write_file(p, "hello\n")?
+    r := io.open(p)?
+    line := ""
+    match r.read_line():          # Option[str], newline stripped
+        Some(l): line = l
+        None: return Err("unexpected EOF on a non-empty file")
+    r.close()?
+    return Ok(line)
+
+test fn open_regular_file_still_ok():
+    p := os.temp_dir() + "/chz_w6_18_" + str(os.getpid()) + ".txt"
+    defer fs.remove_file(p)
+    match write_then_read_line(p):
+        Ok(line): assert line == "hello", "got: {line}"
+        Err(e): assert false, e.message()

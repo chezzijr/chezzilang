@@ -1,0 +1,63 @@
+# tests/chz/spec/nan_identity_test.chz — W6-15: a container compares its elements with CPython's
+# `x is y or x == y`, so ONE nan value stored in a container is found by `in` / `index_of` / `==`,
+# even though bare `nan == nan` stays false (IEEE, Python parity).
+#
+# Identity here is the raw `Value` word: a float is heap-boxed per alloc, so copying one nan into two
+# containers keeps the same box, while two independently-computed nans keep distinct boxes.
+
+import std.math
+
+fn make_nan() -> float:
+    big := 1.0e308
+    return (big * 10.0) - (big * 10.0)
+
+struct Box:
+    v: float
+
+test fn t_nan_is_still_not_equal_to_itself():
+    # BOUNDARY — the `==` OPERATOR is untouched: IEEE says nan != nan, and so does Python.
+    n := make_nan()
+    assert math.is_nan(n)
+    assert (n == n) == false
+    assert n != n
+
+test fn t_nan_element_identity_in_list():
+    n := make_nan()
+    xs := [n]
+    assert xs == xs
+    assert [n] == [n]
+    assert n in xs
+    assert xs.index_of(n) == 0
+    assert [1.0, n, 2.0] == [1.0, n, 2.0]
+
+test fn t_nan_element_identity_nested():
+    n := make_nan()
+    # tuple, struct field, map value, and a nested list all route through the same element compare.
+    assert (1, n) == (1, n)
+    assert Box(n) == Box(n)
+    assert {"k": n} == {"k": n}
+    assert [[n]] == [[n]]
+    assert Some(n) == Some(n)
+
+test fn t_nan_dedup_uses_element_identity():
+    n := make_nan()
+    # `unique`/`dedup` are DEFINED by the same element equality as `in`, so they must agree with it.
+    assert [n, n].unique().len() == 1
+    assert [n, n].dedup().len() == 1
+
+test fn t_distinct_nans_stay_unequal():
+    # BOUNDARY — two SEPARATELY computed nans are distinct values (distinct boxes), so no identity
+    # shortcut fires and IEEE inequality stands, exactly as in CPython.
+    a := make_nan()
+    b := make_nan()
+    assert ([a] == [b]) == false
+    assert (a in [b]) == false
+    assert [a, b].unique().len() == 2
+
+test fn t_non_nan_floats_unaffected():
+    xs := [0.0, 1.5, -0.0]
+    assert 1.5 in xs
+    assert 0.0 in xs
+    assert -0.0 in xs          # 0.0 == -0.0 by value, unchanged by the identity shortcut
+    assert xs.index_of(1.5) == 1
+    assert [1.5] == [1.5]      # two independently-boxed equal floats: value-equal, as before

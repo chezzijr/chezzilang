@@ -396,7 +396,7 @@ fn load_str(h: &mut dyn Host) -> Result<NativeRet, HostError> {
     #[cfg(unix)]
     {
         let addr = base_addr(h, "load_str")?;
-        Ok(load_str_impl(addr, 0))
+        load_str_impl(addr, 0, "ffi.load_str")
     }
     #[cfg(not(unix))]
     {
@@ -417,7 +417,7 @@ fn load_str_at(h: &mut dyn Host) -> Result<NativeRet, HostError> {
                 message: "ffi.load_str_at: negative offset".into(),
             });
         }
-        Ok(load_str_impl(addr, off as usize))
+        load_str_impl(addr, off as usize, "ffi.load_str_at")
     }
     #[cfg(not(unix))]
     {
@@ -426,18 +426,34 @@ fn load_str_at(h: &mut dyn Host) -> Result<NativeRet, HostError> {
     }
 }
 
+/// The one wording for "a C string crossing into Chezzi is not UTF-8". A Chezzi `str` IS UTF-8, so a
+/// non-UTF-8 C buffer is a clean fault, never a silently-mangled string — the same contract
+/// `Socket.read` already holds (a binary payload is an `Err`, never silent U+FFFD). `load_uint8_at`
+/// is the raw-byte escape hatch.
+pub(crate) fn non_utf8_err(what: &str, e: std::str::Utf8Error) -> HostError {
+    HostError {
+        message: format!(
+            "{what}: C string is not valid UTF-8 (first bad byte at offset {}); read the raw bytes \
+             with ffi.load_uint8_at",
+            e.valid_up_to()
+        ),
+    }
+}
+
 #[cfg(unix)]
-fn load_str_impl(addr: usize, off: usize) -> NativeRet {
+fn load_str_impl(addr: usize, off: usize, what: &str) -> Result<NativeRet, HostError> {
     // SAFETY: `addr` is non-null (base_addr) and C-sourced; the caller guarantees a NUL-terminated C
     // string begins at `addr + off` within the C allocation. `CStr::from_ptr` scans to the first NUL
-    // (no max-length cap — a non-terminated buffer is documented UB) and `to_string_lossy().into_owned`
-    // copies the bytes into an owned `String` (the C buffer is borrowed, never freed).
+    // (no max-length cap — a non-terminated buffer is documented UB); `to_str` VALIDATES the bytes
+    // (a non-UTF-8 buffer faults instead of mangling to U+FFFD) and `to_owned` copies them into an
+    // owned `String` (the C buffer is borrowed, never freed).
     let s = unsafe {
         std::ffi::CStr::from_ptr((addr + off) as *const std::os::raw::c_char)
-            .to_string_lossy()
-            .into_owned()
+            .to_str()
+            .map_err(|e| non_utf8_err(what, e))?
+            .to_owned()
     };
-    NativeRet::Str(s)
+    Ok(NativeRet::Str(s))
 }
 
 // --- STORE: write a Chezzi value into C-owned memory at the pointer's natural C width. ---
@@ -1039,6 +1055,34 @@ mod tests {
         assert_eq!(
             load_str_at(&mut ArgHost::default().ptr(base).int(2)),
             Ok(NativeRet::Str("llo".into()))
+        );
+    }
+
+    /// W6-14 — a non-UTF-8 C buffer FAULTS instead of silently mapping the bad byte to U+FFFD (which
+    /// handed back a mangled `str` with no error). A Chezzi `str` is UTF-8; the raw-byte hatch is
+    /// `load_uint8_at`, which the message names.
+    #[test]
+    fn load_str_rejects_invalid_utf8() {
+        let cs = std::ffi::CString::new([0x41u8, 0xFF, 0x42]).unwrap();
+        let base = cs.as_ptr() as usize;
+        let err = load_str(&mut ArgHost::default().ptr(base)).unwrap_err();
+        assert!(
+            err.message.contains("not valid UTF-8") && err.message.contains("load_uint8_at"),
+            "unexpected message: {}",
+            err.message
+        );
+        // The offset form faults alike, and the reported offset is relative to the read start.
+        let err_at = load_str_at(&mut ArgHost::default().ptr(base).int(1)).unwrap_err();
+        assert!(
+            err_at.message.contains("offset 0"),
+            "unexpected message: {}",
+            err_at.message
+        );
+        // A valid multi-byte string still crosses intact (the check is validation, not ASCII-only).
+        let ok = std::ffi::CString::new("héllo ☃").unwrap();
+        assert_eq!(
+            load_str(&mut ArgHost::default().ptr(ok.as_ptr() as usize)),
+            Ok(NativeRet::Str("héllo ☃".into()))
         );
     }
 

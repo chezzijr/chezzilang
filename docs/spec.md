@@ -471,7 +471,10 @@ root marker (all fields default to unset, so `entrypoint` is required only for t
   `/0`, `%0`). (Casting a non-finite float back to `int` — `int(1.0/0.0)` — still faults: `inf`/`NaN`
   have no integer value.) **Ordered comparisons involving `NaN` are total too:** `< <= > >=` against
   a `NaN` always evaluate to `false` (never a fault), matching IEEE-754 / Python / Rust; equality is
-  unchanged (`nan == nan` is `false`, `nan != nan` is `true`). Sorting is deterministic with `NaN`:
+  unchanged (`nan == nan` is `false`, `nan != nan` is `true`). **Inside a container an element is
+  matched by `identity or ==`** (Python's rule), so ONE `nan` value stored in a list is still found by
+  `==` / `in` / `index_of` / `unique` (`n := nan_expr; xs := [n]` ⇒ `[n] == [n]`, `n in xs`), while two
+  SEPARATELY computed `NaN`s stay unequal — the bare `==` operator is untouched. Sorting is deterministic with `NaN`:
   `sort()` and `sort_by_key` use a total order (`f64::total_cmp`, `NaN` sorts to one end) instead of
   faulting. **One-way `int`→`float` widening — UNTYPED CONSTANTS only (Go's rule):** an untyped int
   *constant* expression adapts to a `float` context and is converted to a real `f64`; a **typed** `int`

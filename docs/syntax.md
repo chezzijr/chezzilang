@@ -2970,6 +2970,13 @@ match getenv("HOME"):
     None: print("unset")
 ```
 
+**Every `char*` return is UTF-8-validated.** A Chezzi `str` is UTF-8, so a non-UTF-8 buffer — a
+latin-1 payload, or a `strchr`-style pointer landing mid-codepoint — is a clean **fault** naming the
+offending byte offset, on `str`, `owned_str`, `str?` and `owned_str?` alike (an `owned_str` buffer is
+still freed before the fault propagates, so there is no leak). It is never a silently mangled string
+with U+FFFD in place of the bad bytes. Read raw/binary bytes with `std.ffi`'s `load_uint8_at` instead.
+This matches `Socket.read`, which likewise refuses a binary payload rather than lossily decoding it.
+
 `free` is resolved once (via `dlsym("free")` on the loaded library, which finds libc `free`); a custom
 user-named deallocator is **not** supported. **Caveat (C trust boundary):** `owned_str` asserts the
 returned buffer is genuinely `malloc`'d — declaring a **static / string-literal** return `owned_str`
@@ -3068,7 +3075,8 @@ whose module you never imported (`Match`) are not callable, so nothing shadows t
   `sqlite3*` checking — passing the wrong handle is C-level UB, the author's assertion) and is **never
   auto-freed** (call the library's own destroy; forgetting **leaks**). The `ptr` is opaque *as a value*
   (cannot be forged from an int), but its **memory is readable/writable** via `std.ffi`
-  `load_*`/`store_*` (every C scalar width + `load_str`, each with an `_at(p, off)` byte-offset form) —
+  `load_*`/`store_*` (every C scalar width + `load_str`, which UTF-8-validates like an extern `str`
+  return, each with an `_at(p, off)` byte-offset form) —
   for struct fields, return buffers, and C output-params. You can also **make your own C-laid-out
   buffer** via `std.ffi` `alloc(nbytes)`/`alloc_zeroed(nbytes)` (libc `malloc`/`calloc` → a raw `ptr`)
   and release it with `free(p)` (**manually freed** — `defer ffi.free(p)`; never auto-freed). Unsafe

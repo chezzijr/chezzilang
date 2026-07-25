@@ -621,12 +621,19 @@ impl Cffi {
     }
 
     /// Copy a non-null `char*` return into an owned Chezzi `String`, then free the C buffer with the
-    /// cached libc `free` (if resolved). The copy happens BEFORE the free, so the data is safe.
+    /// cached libc `free` (if resolved). The copy happens BEFORE the free, so the data is safe — and
+    /// a non-UTF-8 buffer still frees before its fault propagates (no leak on the error path).
     /// SAFETY: `p` must be a non-null pointer to a NUL-terminated, malloc'd buffer (the `owned_str`
     /// user assertion across the C trust boundary). `free_addr`, if present, is the standard libc
     /// `void free(void*)`.
-    unsafe fn copy_and_free_owned(&self, p: *const std::os::raw::c_char) -> String {
-        let s = unsafe { CStr::from_ptr(p) }.to_string_lossy().into_owned();
+    unsafe fn copy_and_free_owned(
+        &self,
+        p: *const std::os::raw::c_char,
+    ) -> Result<String, HostError> {
+        let s = unsafe { CStr::from_ptr(p) }
+            .to_str()
+            .map(str::to_owned)
+            .map_err(|e| super::ffi::non_utf8_err(&format!("extern fn '{}'", self.name), e));
         if let Some(free) = self.free_addr {
             let free_code = CodePtr::from_ptr(free as *const c_void);
             let free_cif = Cif::new([Type::pointer()], Type::void());
@@ -1002,7 +1009,15 @@ impl Cffi {
                     }
                     // Copy immediately into an owned Chezzi str. A borrowed return: we never `free`
                     // the pointer (use `owned_str` for a malloc'd buffer Chezzi should own + free).
-                    NativeRet::Str(CStr::from_ptr(p).to_string_lossy().into_owned())
+                    // `to_str` VALIDATES: a non-UTF-8 buffer is a fault, never a mangled `str`.
+                    NativeRet::Str(
+                        CStr::from_ptr(p)
+                            .to_str()
+                            .map_err(|e| {
+                                super::ffi::non_utf8_err(&format!("extern fn '{}'", self.name), e)
+                            })?
+                            .to_owned(),
+                    )
                 }
                 Some(CType::OwnedStr) => {
                     // RETURN-ONLY owned `char*`: same non-null rule as `str` (NULL faults — use
@@ -1016,7 +1031,7 @@ impl Cffi {
                             ),
                         });
                     }
-                    NativeRet::Str(self.copy_and_free_owned(p))
+                    NativeRet::Str(self.copy_and_free_owned(p)?)
                 }
                 Some(CType::OptStr) => {
                     // RETURN-ONLY nullable `char*`: NULL → None, non-null → Some(copied str). The
@@ -1026,7 +1041,15 @@ impl Cffi {
                         NativeRet::None
                     } else {
                         NativeRet::Some(Box::new(NativeRet::Str(
-                            CStr::from_ptr(p).to_string_lossy().into_owned(),
+                            CStr::from_ptr(p)
+                                .to_str()
+                                .map_err(|e| {
+                                    super::ffi::non_utf8_err(
+                                        &format!("extern fn '{}'", self.name),
+                                        e,
+                                    )
+                                })?
+                                .to_owned(),
                         )))
                     }
                 }
@@ -1037,7 +1060,7 @@ impl Cffi {
                     if p.is_null() {
                         NativeRet::None
                     } else {
-                        NativeRet::Some(Box::new(NativeRet::Str(self.copy_and_free_owned(p))))
+                        NativeRet::Some(Box::new(NativeRet::Str(self.copy_and_free_owned(p)?)))
                     }
                 }
                 Some(CType::Ptr) => {

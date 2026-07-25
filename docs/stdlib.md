@@ -399,7 +399,7 @@ error naming them const): `math.pi`, `math.e`, `math.inf` (positive infinity), `
 | `stdout` | `() -> Writer` | A fresh write handle over the process stdout sink (same sink as `print`). |
 | `stderr` | `() -> Writer` | A fresh write handle over the process stderr sink (same sink as `eprint`). |
 | `buffered` | `(w: Writer, size: int = 8192) -> Writer` | Wrap a writer so writes accumulate in-VM and reach the host in **one** call per `flush` / buffer-full / `close` (the Go `bufio.NewWriter` escape hatch; 8 KiB default). |
-| `open` | `(path: str) -> Result[Reader]` | Open a **read-only** file handle for line/chunk streaming (past the 64 MB whole-file `read_file` cap). |
+| `open` | `(path: str) -> Result[Reader]` | Open a **read-only** file handle for line/chunk streaming (past the 64 MB whole-file `read_file` cap). A directory is an `Err` **at the call** (Python `IsADirectoryError`), same message as `read_file` — never an `Ok(Reader)` whose every read fails. |
 
 **`Writer` (R2) — write-only file / stream handle.** A sendable native handle (like `Socket`), the
 buffered-output escape hatch Chezzi's unbuffered stdout default was missing. Two openers, not a mode
@@ -686,7 +686,10 @@ the value). Loads:
 - `load_bool(p)` / `_at -> bool` (1 byte, nonzero = true).
 - `load_ptr(p)` / `_at -> ptr` — deref a `void**` (the result may itself be NULL).
 - `load_str(p)` / `_at -> str` — copy a NUL-terminated C string (the buffer is **not** freed; the
-  precondition is a well-formed, NUL-terminated string — there is no max-length cap).
+  precondition is a well-formed, NUL-terminated string — there is no max-length cap). The bytes are
+  **validated**: a Chezzi `str` is UTF-8, so a non-UTF-8 buffer is a clean **fault** naming the bad
+  offset, never a silently mangled string (same contract as `Socket.read`). Read raw/binary bytes
+  with `load_uint8_at` instead. The `str`/`owned_str`/`str?` **extern return** paths validate alike.
 
 Stores mirror every width except `str` (a `store_str` is deferred — an unbounded write into a caller
 buffer is a footgun). Each returns `nil`:
@@ -919,14 +922,14 @@ struct DateTime:
 | `days_from_civil` | `(y, m, d) -> int` | Days since 1970-01-01 (Hinnant). `(1970,1,1)`→0, `(1969,12,31)`→-1, `(2024,2,29)`→19782. |
 | `civil_from_days` | `(z) -> (int, int, int)` | Inverse: `(year, month, day)` tuple. `0`→`(1970,1,1)`, `-1`→`(1969,12,31)`. |
 | `is_leap_year` | `(y) -> bool` | Proleptic Gregorian: `2000`→true, `1900`→false, `2024`→true. |
-| `days_in_month` | `(y, m) -> int` | Leap-aware. `(2024,2)`→29, `(2023,2)`→28, `(2024,4)`→30. |
+| `days_in_month` | `(y, m) -> int` | Leap-aware. `(2024,2)`→29, `(2023,2)`→28, `(2024,4)`→30. A month outside `1..12` is a domain violation and **faults** (recoverable via `recover:`), like Python `calendar.monthrange` — it never returns a plausible-looking 31. |
 | `weekday` | `(epoch: int) -> int` | Weekday (Sunday=0..Saturday=6) of an epoch value. `weekday(0)`→4 (Thu). |
 | `weekday_name` | `(wd: int) -> str` | English name: `weekday_name(0)`→`"Sunday"`, `weekday_name(4)`→`"Thursday"`. |
 | `to_iso8601` | `(dt) -> str` | `"YYYY-MM-DDTHH:MM:SSZ"`. `from_epoch(0)`→`"1970-01-01T00:00:00Z"`. |
 | `to_date_string` | `(dt) -> str` | `"YYYY-MM-DD"`. |
 | `to_time_string` | `(dt) -> str` | `"HH:MM:SS"`. |
 | `to_string` | `(dt) -> str` | `std.time.format` style `"YYYY-MM-DD HH:MM:SS"`. |
-| `parse_iso8601` | `(s: str) -> Result[DateTime]` | The **inverse** of `to_iso8601`: parse ISO-8601 / RFC-3339 (matches Python `datetime.fromisoformat`). Accepts `"YYYY-MM-DD"` (date-only, midnight), `"YYYY-MM-DDTHH:MM:SS"` (naive == UTC), a `'T'` **or** `' '` date/time separator, an optional trailing `'Z'` or `'+HH:MM'`/`'-HH:MM'` offset (**normalized to UTC**, per Go `time.Parse`), and an optional `.fff` fractional part (**validated then truncated** — `DateTime.second` is an int, no sub-second storage). Malformed or out-of-range fields (month 13, day 32, hour 25, second 60, non-digits, wrong widths) are a **clean `Err`**, never a fault. Round-trips: `parse_iso8601(to_iso8601(dt)) == dt`. |
+| `parse_iso8601` | `(s: str) -> Result[DateTime]` | The **inverse** of `to_iso8601`: parse ISO-8601 / RFC-3339 (matches Python `datetime.fromisoformat`). Accepts `"YYYY-MM-DD"` (date-only, midnight), `"YYYY-MM-DDTHH:MM:SS"` (naive == UTC), a `'T'` **or** `' '` date/time separator, an optional trailing `'Z'` or `'+HH:MM'`/`'-HH:MM'` offset (**normalized to UTC**, per Go `time.Parse`), and an optional `.fff` fractional part (**validated then truncated** — `DateTime.second` is an int, no sub-second storage). Malformed or out-of-range fields (month 13, day 32, hour 25, second 60, non-digits, wrong widths) are a **clean `Err`**, never a fault. Every field is **width-checked**: month/day/time are exactly 2 digits and the year is **4+** digits (mirroring `to_iso8601`, which pads to 4 and emits more for an extended year) — so `"24-01-01"` is an `Err`, not year 24. Round-trips: `parse_iso8601(to_iso8601(dt)) == dt` for every year of 9 digits or fewer (a wider year — only reachable from an epoch near the `int` limit — exceeds the parser's overflow bound and `Err`s). |
 | `add_seconds` | `(epoch, n) -> int` | `epoch + n`. |
 | `add_days` | `(epoch, n) -> int` | `epoch + n*86400` (negative `n` subtracts). |
 | `diff_seconds` | `(a, b) -> int` | `a - b`. |

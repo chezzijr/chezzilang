@@ -18909,6 +18909,43 @@ fn reserved_receiver_nongeneric_method_turbofish_rejected() {
     );
 }
 
+// ===== W6-17 — FIX 1a's sibling hole: the `RwShared` read-view `fold`/`fold_entries` are genuinely
+// generic in `R` but ARM-ONLY (hand-built in the `Ty::RwShared` dispatch arm, since `R` is not
+// nameable in `RwShared[T]`'s harvested surface), so `method_has_own_type_params`' `structs` lookup
+// answered false and the turbofish gate rejected them — while the un-turbofished form and the
+// harvested `[1,2].fold[int](…)` both worked. Over-rejection, so the fix only ACCEPTS more. =====
+#[test]
+fn rwshared_readview_fold_turbofish_ok() {
+    entry_ok(
+        "import std.concurrency\n\
+         fn main():\n\
+         \x20   rw := RwShared([1, 2, 3])\n\
+         \x20   print(rw.fold[int](0, fn(a, x): a + x))\n\
+         main()\n",
+    );
+    entry_ok(
+        "import std.concurrency\n\
+         fn main():\n\
+         \x20   m := RwShared({\"a\": 1})\n\
+         \x20   print(m.fold_entries[int](0, fn(a, k, v): a + v))\n\
+         main()\n",
+    );
+}
+
+/// W6-17 boundary — a NON-generic read-view method still rejects a turbofish. The fix names exactly
+/// `fold`/`fold_entries`, it does not blanket-accept turbofish on every `RwShared` method.
+#[test]
+fn rwshared_readview_nongeneric_method_turbofish_rejected() {
+    rejects(
+        "import std.concurrency\n\
+         fn main():\n\
+         \x20   rw := RwShared([1, 2, 3])\n\
+         \x20   print(rw.len[int]())\n\
+         main()\n",
+        "takes no type argument(s)",
+    );
+}
+
 // ===== FIX 1b — a BODIED generic method on a concurrency handle (`Executor.submit_result[T]`) opens
 // its own `[T]` and infers T from the closure return, instead of failing "expected fn()->T, found
 // fn()->int". Before the fix the `Ty::Executor` arm only `native_handle_method`+`check_args_range`,

@@ -3028,7 +3028,7 @@ impl Vm {
                             // differs from the previously-kept one.
                             for v in items {
                                 let keep = match out.last() {
-                                    Some(&p) => !self.values_equal_guarded(p, v, 0, span)?,
+                                    Some(&p) => !self.elem_equal(p, v, 0, span)?,
                                     None => true,
                                 };
                                 if keep {
