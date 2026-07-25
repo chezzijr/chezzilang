@@ -144,49 +144,71 @@ impl Vm {
     /// the same airlock copy `do_spawn`'s `deep_clone` does) and [`MnSched::inject`] it straight into
     /// the running sched — it runs concurrently with the rest of the body. The `task_index` is the
     /// scope's monotonic `next_index` (spawn order), so Decision-F output stays deterministic.
-    /// Otherwise (lazy/top-level) push the `PendingCall` for the join to drain. The checker guarantees
+    /// Otherwise (lazy/top-level) push the [`QueuedTask`] for the join to drain. The checker guarantees
     /// a `parallel:` is open, but we guard for parity with the serial-VM oracle's runtime error.
     ///
-    /// W6-2 — THE PIN INSTANT: the innermost nursery's [`ModuleSnapshot`] is resolved here, on its FIRST
-    /// spawn, and every later task of that nursery replays it ([`Vm::nursery_snap`]).
+    /// W6-2 — a lazily-queued task is pushed with NO snapshot: its view is pinned only when it must be
+    /// (a module-slot write, or the join that prepares it) — see [`Vm::pin_unpinned_tasks`].
     pub(super) fn register_task(
         &mut self,
         task: PendingCall,
         span: Span,
     ) -> Result<(), RuntimeError> {
-        // The innermost open nursery (`nurseries`, `eager_scheds` and `nursery_snaps` are lockstep).
+        // The innermost open nursery (`nurseries`, `mn_scopes` and `eager_scheds` are lockstep).
         let Some(i) = self.nurseries.len().checked_sub(1) else {
             return Err(self.err("spawn must be inside a parallel: block".to_string(), span));
         };
-        let snap = self.nursery_snap(i, span)?;
         // Eager innermost nursery → inject a live fiber. Clone the sched Arc, drop the borrow so
         // `prepare_worker` can take `&mut self`; `inject` assigns the real slot index under its lock
         // (the `0` placeholder is overwritten), so no caller-side index bookkeeping is needed.
         if let Some(Some(scope)) = self.eager_scheds.last() {
             let sched = Arc::clone(&scope.sched);
             // The eager nursery owns its OWN sched (a single scope 0 — see `activate_eager_nursery`);
-            // `inject` overwrites the `0` placeholder `task_index` under its lock.
-            let fiber = self.prepare_worker(task, &snap)?.into_fiber(0, 0);
+            // `inject` overwrites the `0` placeholder `task_index` under its lock. It prepares the task
+            // right here, so `None` = "snapshot at prepare time" IS the spawn instant (and its build
+            // fault surfaces at the spawn, as it always has).
+            let fiber = self.prepare_worker(task, None)?.into_fiber(0, 0);
             sched.inject(fiber, 0);
             return Ok(());
         }
-        self.nurseries[i].push(task);
+        self.nurseries[i].push(QueuedTask {
+            call: task,
+            snap: None,
+        });
         Ok(())
     }
 
-    /// W6-2 — the [`ModuleSnapshot`] PINNED for nursery `i`: filled on first use (its first `spawn`) from
-    /// the CURRENT module view, reused by every later task of that nursery so all of them replay one
-    /// view on both engines. See [`Vm::nursery_snaps`] for why the pin exists and why it is not taken at
-    /// `EnterNursery`.
-    fn nursery_snap(&mut self, i: usize, span: Span) -> Result<Arc<ModuleSnapshot>, RuntimeError> {
-        if let Some(Some(s)) = self.nursery_snaps.get(i) {
-            return Ok(Arc::clone(s));
+    /// W6-2 — pin the module view of every queued task that has not been pinned yet (`extra` = a task
+    /// list already popped off `nurseries`, so one build covers it too). Called from exactly two places,
+    /// which together define the pin INSTANT:
+    ///
+    /// 1. [`Vm::set_global_slot`], BEFORE the write lands — so a task spawned earlier keeps the value it
+    ///    was spawned with instead of time-travelling to a later assignment (the Go rule).
+    /// 2. [`Vm::join_nursery`], for a join that is about to prepare tasks — the instant M:N's
+    ///    [`Vm::early_enlist_outer`] prepares an OUTER nursery's tasks, which serial never reaches. Both
+    ///    engines pin there, so the two stay byte-identical.
+    ///
+    /// A snapshot BUILD failure (a cyclic/over-deep global, a frame-holding generator) is swallowed here
+    /// and left `None`: the fault belongs where the task is PREPARED, so it is re-derived there. That
+    /// keeps a faulting program's body output ordered as before and — since a cancelled nursery never
+    /// prepares anything — keeps `break`/`return` out of `parallel:` faultless AND snapshot-free.
+    pub(super) fn pin_unpinned_tasks(&mut self, extra: &mut [QueuedTask]) {
+        let unpinned = self
+            .nurseries
+            .iter()
+            .flatten()
+            .chain(extra.iter())
+            .find(|t| t.snap.is_none())
+            .map(|t| t.span());
+        let Some(span) = unpinned else { return }; // nothing pending — the common case, no build
+        let Ok(snap) = self.ensure_snapshot(span) else {
+            return;
+        };
+        for t in self.nurseries.iter_mut().flatten().chain(extra.iter_mut()) {
+            if t.snap.is_none() {
+                t.snap = Some(Arc::clone(&snap));
+            }
         }
-        let snap = self.ensure_snapshot(span)?;
-        if let Some(slot) = self.nursery_snaps.get_mut(i) {
-            *slot = Some(Arc::clone(&snap));
-        }
-        Ok(snap)
     }
 
     /// `parallel:` dedent — run the nursery's spawned tasks as cooperative fibers (B1/B2). The
@@ -212,7 +234,6 @@ impl Vm {
         }
         while self.nurseries.len() > from_len {
             self.nursery_defer_floors.pop(); // lockstep with `nurseries`
-            self.nursery_snaps.pop(); // lockstep — W6-2 per-nursery snapshot pin
             let mn_scope = self.mn_scopes.pop().flatten(); // lockstep — Some if early-enlisted
             let nursery = self.nurseries.pop().unwrap_or_default();
             // Cross-nursery flat scheduler — an EARLY-ENLISTED nursery's tasks are LIVE fibers already
@@ -248,9 +269,6 @@ impl Vm {
         // end) keeps the parent's `Handler::nursery_len` accounting correct on a later fault.
         self.nursery_defer_floors.pop(); // keep the parallel floor stack in lockstep with `nurseries`
         let mn_scope = self.mn_scopes.pop().flatten(); // lockstep — Some if early-enlisted
-        // W6-2 — the snapshot pinned at this nursery's first spawn (lockstep pop, at the top with
-        // `mn_scopes` so every early-return arm below is covered). `None` only if it never spawned.
-        let pin = self.nursery_snaps.pop().flatten();
         let tasks = self.nurseries.pop().unwrap_or_default();
         // Per-connection spawn — pop the eager scope in lockstep. An eager nursery injected its tasks
         // live (so `tasks` is empty); its join drains the handlers it spawned, not a queued list.
@@ -281,32 +299,35 @@ impl Vm {
         if tasks.is_empty() {
             return Ok(());
         }
+        // W6-2 — THE PIN INSTANT for anything still unpinned: this nursery's own tasks AND every task
+        // queued on an OUTER nursery, because M:N is about to EARLY-ENLIST those outer tasks (an instant
+        // the serial engine never reaches). Pinning both here, on both engines, is what keeps them
+        // byte-identical. Gated behind the `is_empty` returns above so it fires exactly when M:N enlists.
+        let mut tasks = tasks;
+        self.pin_unpinned_tasks(&mut tasks);
         // D2b: under `--parallel`, run the tasks as lightweight M:N fibers on the OS-thread pool
         // (park-on-`recv`), instead of cooperative fibers (decision A keeps the cooperative path the
         // default below).
         if self.parallel {
-            return self.run_mn_nursery(tasks, pin);
+            return self.run_mn_nursery(tasks);
         }
         // Task 1 — deep-copy the module globals into each child's OWN `module_objs` view (in the shared
         // heap) via `prepare_serial_child`, exactly as M:N does per worker. A cooperative child mutates
         // its private copy → invisible to the parent → `serial == M:N` by construction.
-        // W6-2 — replay the snapshot PINNED when this nursery's first task was spawned, which is the same
-        // instant M:N pins (`register_task`). Snapshotting HERE instead would diverge: M:N may prepare a
-        // nursery's tasks earlier, at a nested nursery's join (`early_enlist_outer`), so a global mutated
-        // in between would be seen by one engine and not the other. The `None` fallback is unreachable
-        // for a non-empty `tasks` (the pin is filled at every spawn) and only keeps this infallible.
-        // Faults (a module-global generator with a non-sendable parked slot or reference cycle, a cyclic
-        // global) surface re-stamped with the spawn-site span inside `ensure_snapshot`, identical to M:N.
-        let nursery_span = tasks
-            .first()
-            .map(|t| t.span())
-            .unwrap_or(Span { line: 1, col: 1 });
-        let snap = self.pinned_or_fresh(pin, nursery_span)?;
+        // W6-2 — each task replays the snapshot PINNED at its own `spawn` (`register_task`), the one
+        // instant both engines share. Snapshotting HERE instead would diverge: M:N may prepare a
+        // nursery's tasks earlier, at a nested nursery's join (`early_enlist_outer`). A task whose pin
+        // failed to build falls back to a snapshot taken now — where the fault (a module-global
+        // generator with a non-sendable parked slot or reference cycle, a cyclic global) surfaces
+        // re-stamped with the spawn-site span, exactly as it did before the pin existed.
         let mut children: Vec<Fiber> = Vec::with_capacity(tasks.len());
         for (i, t) in tasks.into_iter().enumerate() {
             let span = t.span();
-            let (pending, module_objs, module_faulted) =
-                self.prepare_serial_child(t, Arc::clone(&snap))?;
+            let snap = match t.snap {
+                Some(s) => s,
+                None => self.ensure_snapshot(span)?,
+            };
+            let (pending, module_objs, module_faulted) = self.prepare_serial_child(t.call, snap)?;
             children.push(Fiber {
                 span,
                 ctx: FiberCtx {
@@ -368,11 +389,7 @@ impl Vm {
     /// [`MnSched::take_runnable`] (no barrier-confirm needed under a single coordinator). Residual
     /// hangs (decision D): deadlocks spanning nurseries or involving `Executor` work — `MnSched.parked`
     /// is per-nursery, so a cross-nursery `send` delivers the message but does not wake across scheds.
-    pub(super) fn run_mn_nursery(
-        &mut self,
-        tasks: Vec<PendingCall>,
-        pin: Option<Arc<ModuleSnapshot>>,
-    ) -> Result<(), RuntimeError> {
+    pub(super) fn run_mn_nursery(&mut self, tasks: Vec<QueuedTask>) -> Result<(), RuntimeError> {
         // Cross-nursery flat scheduler — the OUTERMOST nursery (`self.mn.is_none()`) builds the ONE
         // global sched + farms helpers; a NESTED nursery (`self.mn.is_some()`) REUSES it (register a
         // scope, enlist into the same global run queue, run its inline owner scope-scoped). Because the
@@ -391,24 +408,9 @@ impl Vm {
         // trailing scope reduces inline at its own join (it is NOT counted in `mn_enlisted`), exactly like
         // a nested nursery. Only when no sched is held do we build a fresh outermost sched.
         match (self.mn.clone(), self.mn_enlist_sched.clone()) {
-            (Some(sched), _) => self.run_mn_nursery_nested(&sched, tasks, pin),
-            (None, Some(held)) => self.run_mn_nursery_nested(&held, tasks, pin),
-            (None, None) => self.run_mn_nursery_outermost(tasks, pin),
-        }
-    }
-
-    /// W6-2 — resolve a nursery's pinned snapshot at its join: the pin from its first `spawn`, or (for a
-    /// nursery whose pin was somehow never filled) a fresh one stamped with the nursery span. The
-    /// fallback is unreachable for a non-empty task list — `register_task` fills the pin at every spawn —
-    /// and only keeps the join paths from having to unwrap.
-    fn pinned_or_fresh(
-        &mut self,
-        pin: Option<Arc<ModuleSnapshot>>,
-        span: Span,
-    ) -> Result<Arc<ModuleSnapshot>, RuntimeError> {
-        match pin {
-            Some(s) => Ok(s),
-            None => self.ensure_snapshot(span),
+            (Some(sched), _) => self.run_mn_nursery_nested(&sched, tasks),
+            (None, Some(held)) => self.run_mn_nursery_nested(&held, tasks),
+            (None, None) => self.run_mn_nursery_outermost(tasks),
         }
     }
 
@@ -426,24 +428,15 @@ impl Vm {
     /// until the LAST of them joins (`join_enlisted_scope` tears it down).
     pub(super) fn run_mn_nursery_outermost(
         &mut self,
-        tasks: Vec<PendingCall>,
-        pin: Option<Arc<ModuleSnapshot>>,
+        tasks: Vec<QueuedTask>,
     ) -> Result<(), RuntimeError> {
         let total = tasks.len();
         let cancel = Arc::new(AtomicBool::new(false));
-        // Peek a real nursery-site span BEFORE consuming `tasks` — a module-global generator faults
-        // here (a nursery snapshots all globals) and must report a real location.
-        let nursery_span = tasks
-            .first()
-            .map(|t| t.span())
-            .unwrap_or(Span { line: 1, col: 1 });
-        // W6-2 — replay the snapshot pinned at this nursery's first spawn (the serial engine pins at the
-        // same instant), not a fresh one taken here at the join.
-        let snap = self.pinned_or_fresh(pin, nursery_span)?;
         let mut fibers = Vec::with_capacity(total);
         for (i, t) in tasks.into_iter().enumerate() {
-            // scope 0 — the outermost nursery
-            fibers.push(self.prepare_worker(t, &snap)?.into_fiber(i, 0));
+            // W6-2 — each task replays the snapshot pinned at its own spawn (the serial engine replays
+            // the same one). scope 0 — the outermost nursery.
+            fibers.push(self.prepare_worker(t.call, t.snap)?.into_fiber(i, 0));
         }
         let deadlock_err = self.err(DEADLOCK_MSG.to_string(), Span { line: 1, col: 1 });
         // Worker count must account for the early-enlisted OUTER scopes' tasks too (case-A: `main`'s `O`),
@@ -509,17 +502,10 @@ impl Vm {
     pub(super) fn run_mn_nursery_nested(
         &mut self,
         sched: &Arc<MnSched>,
-        tasks: Vec<PendingCall>,
-        pin: Option<Arc<ModuleSnapshot>>,
+        tasks: Vec<QueuedTask>,
     ) -> Result<(), RuntimeError> {
-        // W6-2 — the snapshot pinned at this nursery's first spawn: on a worker fiber that is a FRESH
-        // snapshot of the TASK's own (possibly mutated) view, not the parent module's frozen copy. Span
-        // peeked before consuming `tasks`, for the fallback build.
-        let nursery_span = tasks
-            .first()
-            .map(|t| t.span())
-            .unwrap_or(Span { line: 1, col: 1 });
-        let snap = self.pinned_or_fresh(pin, nursery_span)?;
+        // W6-2 — each task replays the snapshot pinned at its own spawn: on a worker fiber that is a
+        // FRESH snapshot of the TASK's own (possibly mutated) view, not the parent module's frozen copy.
         // This nursery's OWN scope. Prepare every worker FIRST (the fallible/heap-heavy step — touches no
         // scheduler state), THEN register the scope and seed its fibers atomically. Doing the prepare
         // BEFORE registration is what makes `register_scope_seeded` race-free: there is no window where the
@@ -530,7 +516,7 @@ impl Vm {
         let cancel = Arc::new(AtomicBool::new(false));
         let mut workers = Vec::with_capacity(tasks.len());
         for t in tasks {
-            workers.push(self.prepare_worker(t, &snap)?);
+            workers.push(self.prepare_worker(t.call, t.snap)?);
         }
         let scope_id =
             sched.register_scope_seeded(Arc::clone(&cancel), self.scope_ancestors(), workers);
@@ -565,18 +551,13 @@ impl Vm {
             // `?` here must not leave a half-state). On `Err` the nursery is untouched (originals still in
             // `self.nurseries[i]`), no scope is registered (so no unseeded scope can hang `wait_for_scope`)
             // and `mn_scopes`/`mn_enlisted` are unbumped — the fault propagates cleanly, matching coop.
-            let clones: Vec<PendingCall> = self.nurseries[i].clone();
-            // W6-2 — this OUTER nursery replays ITS OWN pin (taken at its first spawn), not one taken
-            // here: enlisting happens at a NESTED nursery's join, an instant the serial engine never
-            // reaches, so snapshotting here would diverge for a global mutated in between.
-            let enlist_span = clones
-                .first()
-                .map(|t| t.span())
-                .unwrap_or(Span { line: 1, col: 1 });
-            let snap = self.nursery_snap(i, enlist_span)?;
+            let clones: Vec<QueuedTask> = self.nurseries[i].clone();
+            // W6-2 — each OUTER task replays the pin taken at ITS OWN spawn, never one taken here:
+            // enlisting happens at a NESTED nursery's join, an instant the serial engine never reaches,
+            // so snapshotting here would diverge for a global mutated in between.
             let mut prepared = Vec::with_capacity(total);
             for t in clones {
-                prepared.push(self.prepare_worker(t, &snap)?);
+                prepared.push(self.prepare_worker(t.call, t.snap)?);
             }
             // COMMIT — nothing fallible remains. Discard the originals (the clones became the fibers),
             // register + seed the scope, and record it for its OWN `JoinNursery` to reduce.
@@ -3087,8 +3068,7 @@ impl Vm {
         &mut self,
         task: PendingCall,
     ) -> Result<WorkerResult, RuntimeError> {
-        let snap = self.ensure_snapshot(task.span())?;
-        self.prepare_worker(task, &snap)?.run()
+        self.prepare_worker(task, None)?.run()
     }
 
     /// B3.3-threads — the parent-thread half of [`Vm::run_task_isolated`]: lower the task to a `Send`
@@ -3097,12 +3077,14 @@ impl Vm {
     /// can be moved to a pool thread and `run()`. Everything that reads the parent heap happens here;
     /// nothing in `ReadyWorker::run` touches `self`.
     ///
-    /// W6-2 — `snap` is the caller's nursery PIN (`register_task` / the join paths), not a snapshot taken
-    /// here: every task of one nursery must replay one view, at the same instant on both engines.
+    /// W6-2 — `snap` is the task's PIN, the module view snapshotted at its `spawn` ([`QueuedTask`]).
+    /// `None` = "snapshot the current view here", which is both the pre-W6-2 behaviour and the right
+    /// instant for the paths that prepare a task the moment it is spawned (the eager per-connection
+    /// nursery, `run_task_isolated`) or that must re-derive a pin whose build failed.
     pub(super) fn prepare_worker(
         &mut self,
         task: PendingCall,
-        snap: &Arc<ModuleSnapshot>,
+        snap: Option<Arc<ModuleSnapshot>>,
     ) -> Result<ReadyWorker, RuntimeError> {
         // 1. Lower the task to a `Send` description in THIS (parent) heap (read-only serialize),
         //    rejecting any value that can't cross a heap boundary as-is.
@@ -3113,8 +3095,12 @@ impl Vm {
         //    per task. 3. rebuild the callable/receiver + args into the worker heap (a `home` index
         //    resolves to a pre-alloced empty module that faults on first global read). The actual
         //    invoke is `ReadyWorker::run`.
+        let snap = match snap {
+            Some(s) => s,
+            None => self.ensure_snapshot(lowered.span())?,
+        };
         let mut worker = self.spawn_worker();
-        worker.install_snapshot(Arc::clone(snap));
+        worker.install_snapshot(snap);
         let (call, span) = worker.rebuild_ready(lowered);
         Ok(ReadyWorker { worker, call, span })
     }

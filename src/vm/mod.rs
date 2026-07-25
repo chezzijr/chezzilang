@@ -484,6 +484,37 @@ impl PendingCall {
     }
 }
 
+/// A task queued on a nursery: the call itself plus the [`ModuleSnapshot`] PINNED at its `spawn`.
+///
+/// W6-2 — the pin is per TASK, resolved in [`Vm::register_task`] from the module view live at the
+/// spawn, and replayed when the task is prepared (at its nursery's join on the serial engine, at
+/// that join OR at a nested nursery's `early_enlist_outer` on M:N). Pinning at the spawn is what
+/// makes the two engines agree: `spawn` is a source position both reach, an early-enlist is not.
+/// It is also the Go rule — a goroutine sees the globals current when `go` ran.
+///
+/// `None` means the snapshot BUILD failed at the spawn (a cyclic/over-deep global, a frame-holding
+/// generator). The error is deliberately NOT raised there: preparing a task is where that fault
+/// belongs, so it is re-derived (deterministically, same view) when the task is prepared — which
+/// keeps the body's output ordering and leaves a nursery whose tasks are all cancelled without ever
+/// being prepared (`break`/`return` out of `parallel:`) faultless, exactly as before W6-2.
+#[derive(Clone)]
+struct QueuedTask {
+    call: PendingCall,
+    snap: Option<Arc<ModuleSnapshot>>,
+}
+
+impl QueuedTask {
+    /// The GcRefs this pending task keeps alive — see [`PendingCall::roots`].
+    fn roots(&self) -> impl Iterator<Item = GcRef> + '_ {
+        self.call.roots()
+    }
+
+    /// The spawning span of this task (D2b — carried onto the fiber for fault attribution).
+    fn span(&self) -> Span {
+        self.call.span()
+    }
+}
+
 /// M19 Phase 4/5b — a struct-field inline-cache cell: the field `idx` last resolved at this call
 /// site, plus the `tid` (struct layout id) it was resolved against. Holds plain ints (no `GcRef`), so
 /// it is invisible to GC, snapshots, and `swap_ctx`. A hit requires `tid == obj.tid` (a pure-int
@@ -631,11 +662,11 @@ pub struct Vm {
     /// inherit it (see [`Vm::spawn_worker`]) so nested `parallel:` recurses onto the pool too.
     parallel: bool,
     /// Active `parallel:` nurseries (C4), innermost last. `EnterNursery` pushes; each `spawn`
-    /// registers a [`PendingCall`] on the innermost list; `JoinNursery` drains it FIFO at the
+    /// registers a [`QueuedTask`] on the innermost list; `JoinNursery` drains it FIFO at the
     /// dedent. Tasks are GC roots while pending. A `recover:` boundary truncates this stack back to
     /// its install-time length on catch (see [`Handler::nursery_len`]), so a fault in the nursery
     /// body or a task can't leave a stale entry.
-    nurseries: Vec<Vec<PendingCall>>,
+    nurseries: Vec<Vec<QueuedTask>>,
     /// Cross-nursery flat scheduler (M:N) — parallel to [`Vm::nurseries`] (lockstep, swapped per-fiber):
     /// `Some(scope_id)` if this nursery was EARLY-ENLISTED into the one global sched (its sibling tasks
     /// already seeded as a scope so a *nested* nursery's owner can run them — the case-A cross-nursery
@@ -794,17 +825,6 @@ pub struct Vm {
     /// global (`ModuleSnapshot::reusable` — in-place mutation writes no slot). Swapped per fiber with
     /// `module_snapshot`: it describes the swapped-in view, not the VM. See [`Vm::ensure_snapshot`].
     snapshot_memo: Option<Arc<ModuleSnapshot>>,
-    /// W6-2 — parallel to `nurseries` (lockstep push/pop): the [`ModuleSnapshot`] PINNED for nursery
-    /// `i`, filled on its FIRST `spawn` ([`Vm::nursery_snap`]) and replayed by every task of that
-    /// nursery. `None` until then (a `parallel:` that never spawns builds no snapshot at all).
-    ///
-    /// Why pin: both engines must snapshot at the same program point. Serial prepares a lazy nursery's
-    /// tasks at its own join, while M:N may EARLY-ENLIST them at a nested nursery's join — an earlier
-    /// instant. Pinning at the first spawn makes the instant a source position, identical on both.
-    /// Pinning at `EnterNursery` instead would be too early: the compiler emits the IMPLICIT nursery's
-    /// `EnterNursery` at the top of the module/function body, before any global is initialized (which is
-    /// how W6-2's `nil` arose in the first place).
-    nursery_snaps: Vec<Option<Arc<ModuleSnapshot>>>,
     /// Task 1 — GC pin for the shell's REAL `module_objs` while they are swapped OUT of
     /// `self.module_objs` during a serial child-modules window (`with_serial_child_modules` /
     /// `prepare_serial_child`). `collect()` roots `self.module_objs` (the child copy) but not the
@@ -939,7 +959,7 @@ struct FiberCtx {
     call_depth: usize,
     cur_base: usize,
     handlers: Vec<Handler>,
-    nurseries: Vec<Vec<PendingCall>>,
+    nurseries: Vec<Vec<QueuedTask>>,
     /// Cross-nursery flat scheduler (M:N) — parallel to [`Vm::nurseries`] (lockstep): `Some(scope_id)`
     /// if this nursery was EARLY-ENLISTED into the one global sched (its sibling tasks already seeded as
     /// a scope so a *nested* nursery's owner can run them — the case-A cross-nursery wake), else `None`
@@ -987,9 +1007,6 @@ struct FiberCtx {
     /// nothing for them. `None`/`None` for a cooperative child (eager-faulted at the spawn boundary).
     module_snapshot: Option<Arc<ModuleSnapshot>>,
     snapshot_memo: Option<Arc<ModuleSnapshot>>,
-    /// W6-2 — parallel to `nurseries` (lockstep): see [`Vm::nursery_snaps`]. Travels with the fiber's
-    /// nurseries across a park like `mn_scopes`/`nursery_defer_floors`.
-    nursery_snaps: Vec<Option<Arc<ModuleSnapshot>>>,
     /// D2b — the fiber's `Executor` handles (GC roots into its own heap; same heap-keyed argument as
     /// `module_objs`). Empty for cooperative fibers.
     executors: Vec<GcRef>,
@@ -1167,6 +1184,18 @@ enum Lowered {
         args: Vec<WireValue>,
         span: Span,
     },
+}
+
+impl Lowered {
+    /// The spawn-site span carried on every variant — used to re-stamp a module-global snapshot fault.
+    fn span(&self) -> Span {
+        match self {
+            Lowered::Closure { span, .. }
+            | Lowered::Func { span, .. }
+            | Lowered::Builtin { span, .. }
+            | Lowered::Method { span, .. } => *span,
+        }
+    }
 }
 
 /// D1 — a heap-independent, read-only snapshot of the parent's initialized module graph, shared

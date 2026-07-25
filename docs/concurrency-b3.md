@@ -310,8 +310,8 @@ is a known low-rate timing flake under heavy full-suite parallel load; passes in
      rewritten. (1) The generator **reach-gate** itself was retired on 2026-07-21: a module-global
      generator now crosses BY VALUE and a non-sendable one snapshots as an inert `Nil` that faults only
      when reached. (2) The "**frozen** module snapshot" this reasoning rests on — one snapshot for the
-     whole run — was retired on 2026-07-25 (W6-2): every nursery snapshots FRESH at its first `spawn`, at
-     every depth, pinned so both engines snapshot at the same program point. The frozen-vs-live window
+     whole run — was retired on 2026-07-25 (W6-2): each task snapshots FRESH, pinned at its own `spawn`,
+     at every depth, so both engines snapshot at the same program point. The frozen-vs-live window
      described below therefore no longer exists.)*
      The gate runs at **four** choke points to keep serial == M:N: (a) `register_task` (the single
      common spawn choke — covers eager nurseries, whose worker + snapshot are built at spawn time); (b)

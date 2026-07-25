@@ -112,8 +112,8 @@ never runs `run_scheduler`. See `src/vm/mod.rs` (`run_scheduler` / `run_child` /
 + an `Arc` to a read-only module snapshot**, faulted in lazily — not a full `Vm`.
 
 **Landed (lazy-module-snapshot half):** the eager per-task `build_worker_modules` is replaced by a
-heap-independent read-only `Arc<ModuleSnapshot>` (`snapshot_modules`/`to_snap`) shared by one nursery's
-tasks and faulted into each worker heap lazily, one module at a time on first global access
+heap-independent read-only `Arc<ModuleSnapshot>` (`snapshot_modules`/`to_snap`) pinned at each task's
+`spawn` and faulted into each worker heap lazily, one module at a time on first global access
 (`install_snapshot`/`fault_module`/`ensure_module_faulted`, gated by `module_faulted`). FIFO pool
 unchanged → observably identical except faster. **The `Heap`-into-`FiberCtx` half was intentionally
 deferred to D2a** — under the unchanged FIFO pool it has no observable effect and would risk the

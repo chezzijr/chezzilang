@@ -1,12 +1,11 @@
 # Module-global FRESHNESS across nurseries (gaps.md W6-2 + W6-19).
 #
-# A nursery takes a FRESH snapshot of the module globals when its first task is spawned, at EVERY
-# depth — so a task sees the values current at that instant, including a global first initialized
-# AFTER an earlier nursery (which used to replay as `nil`) and a value mutated between two nurseries
-# (which used to replay the frozen first-nursery copy). Per-task ISOLATION is unchanged: a task
-# mutates its OWN deep copy and never writes through to the parent; `Shared`/`RwShared`/`Atomic`/
-# `Channel` stay the only real sharing. A NESTED `parallel:` inside a task snapshots the TASK's
-# current view, not the parent module's.
+# A task sees the module globals as they were when IT was spawned, at EVERY depth — including a
+# global first initialized AFTER an earlier nursery (which used to replay as `nil`) and a value
+# mutated between two nurseries (which used to replay the frozen first-nursery copy). Per-task
+# ISOLATION is unchanged: a task mutates its OWN deep copy and never writes through to the parent;
+# `Shared`/`RwShared`/`Atomic`/`Channel` stay the only real sharing. A NESTED `parallel:` inside a
+# task sees the TASK's current view, not the parent module's.
 # Gated serial==M:N by chz_suite_passes_both_engines.
 import std.concurrency
 
@@ -17,10 +16,14 @@ parallel:
 
 n: int = 42
 
-# Per-test mutable globals (each test owns its own, so tests stay order-independent).
+# Per-test mutable globals — each test owns its OWN, so no test's absolute expectation depends on
+# another having run first (the runner drives free tests sequentially in declaration order, which is
+# NOT something a test should lean on).
 m: int = 1
-fn set_m(v: int):
-    m = v
+exg: int = 1
+exg2: int = 1
+bsg: int = 1
+egg: int = 1
 
 q: List[int] = [1]
 mp: Map[str, int] = {"a": 1}
@@ -132,8 +135,8 @@ test fn nested_nursery_sees_the_tasks_current_view():
 test fn executor_task_sees_globals_as_of_the_drain():
     seen := Shared(0)
     ex := Executor()
-    ex.submit(fn(): seen.set(m))
-    m = 123
+    ex.submit(fn(): seen.set(exg))
+    exg = 123
     ex.shutdown()
     assert seen.get() == 123, "executor job saw {seen.get()}"
 
@@ -141,12 +144,46 @@ test fn executor_alongside_a_nursery():
     a := Shared(0)
     b := Shared(0)
     ex := Executor()
-    ex.submit(fn(): a.set(m))
+    ex.submit(fn(): a.set(exg2))
     parallel:
-        spawn: b.set(m)
+        spawn: b.set(exg2)
+    exg2 = 5
     ex.shutdown()
-    assert a.get() == m, "executor job saw {a.get()}"
-    assert b.get() == m, "nursery task saw {b.get()}"
+    assert a.get() == 5, "executor job saw {a.get()} (drain instant)"
+    assert b.get() == 1, "nursery task saw {b.get()} (spawn instant)"
+
+# --- bare `spawn` (the IMPLICIT nursery) -------------------------------------------------------
+
+# A bare `spawn` binds to the implicit nursery the compiler opens at the TOP of the body and joins at
+# its end — so the snapshot instant has to be the SPAWN, not the nursery: a per-nursery pin would
+# freeze the whole body at its first bare `spawn` and replay every later global as `nil`.
+fn bare_spawn_pair(a: Shared[int], b: Shared[int]):
+    spawn: a.set(bsg)
+    bsg = 42
+    spawn: b.set(bsg)
+
+test fn bare_spawns_see_the_global_live_at_their_own_spawn():
+    a := Shared(0)
+    b := Shared(0)
+    bare_spawn_pair(a, b)
+    assert a.get() == 1, "first bare spawn saw {a.get()}"
+    assert b.get() == 42, "second bare spawn saw {b.get()}"
+
+# A bare `spawn` with an explicit `parallel:` after it: the inner join is where M:N EARLY-ENLISTS the
+# outer implicit nursery's task, so both engines pin there and a LATER write reaches neither task.
+fn bare_then_nested(a: Shared[int], b: Shared[int]):
+    spawn: a.set(egg)
+    parallel:
+        spawn: b.set(egg)
+    egg = 7
+
+test fn bare_spawn_alongside_a_nested_nursery():
+    a := Shared(0)
+    b := Shared(0)
+    bare_then_nested(a, b)
+    assert a.get() == 1, "outer (bare) task saw {a.get()}"
+    assert b.get() == 1, "inner task saw {b.get()}"
+    assert egg == 7, "parent saw {egg}"
 
 # --- teardown / cancel matrix (this subsystem produced the N1–N9 cascade) ----------------------
 
@@ -203,7 +240,8 @@ test fn defer_reads_a_global_during_teardown():
         spawn defer_reads_global(out)
     assert out.get() == 42, "defer saw {out.get()}"
 
-# A nursery in a LOOP: the pin is per-iteration, so each task sees that iteration's value.
+# A nursery in a LOOP: each iteration's task is pinned at its own spawn, so it sees that
+# iteration's value.
 test fn nursery_in_a_loop_pins_per_iteration():
     seen := Shared(0)
     total := 0

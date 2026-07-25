@@ -134,7 +134,6 @@ impl Vm {
             module_snapshot: None,
             module_faulted: Vec::new(),
             snapshot_memo: None,
-            nursery_snaps: Vec::new(),
             pinned_module_roots: Vec::new(),
             mn: None,
         }
@@ -196,15 +195,14 @@ impl Vm {
         // by construction. (For M:N these `GcRef`s index the fiber's own heap swapped just below; for a
         // cooperative fiber they index the shared heap. Either way they travel WITH the fiber.) The
         // parent's REAL modules move into `ctx.module_objs` on its swap-out and are GC-rooted there by
-        // `root_ctx`. W6-2 — `module_snapshot` + `snapshot_memo` swap WITH them: snapshots are
-        // per-nursery now, so one shell drains fibers built from DIFFERENT snapshots and each must fault
-        // (and re-snapshot) from its OWN. They carry no `GcRef` (heap-independent `SnapValue`), so
-        // `root_ctx` is unaffected.
+        // `root_ctx`. W6-2 — `module_snapshot` + `snapshot_memo` swap WITH them: a snapshot describes a
+        // module VIEW, and one shell drains fibers holding DIFFERENT views, so each must fault in (and
+        // re-snapshot) from its OWN. They carry no `GcRef` (heap-independent `SnapValue`), so `root_ctx`
+        // is unaffected.
         std::mem::swap(&mut self.module_objs, &mut ctx.module_objs);
         std::mem::swap(&mut self.module_faulted, &mut ctx.module_faulted);
         std::mem::swap(&mut self.module_snapshot, &mut ctx.module_snapshot);
         std::mem::swap(&mut self.snapshot_memo, &mut ctx.snapshot_memo);
-        std::mem::swap(&mut self.nursery_snaps, &mut ctx.nursery_snaps); // lockstep with `nurseries`
         // D2a — an M:N fiber (`Some`) owns its heap; swap it with the host's. A cooperative fiber
         // (`None`) shares the single `Vm::heap` (decision A), so its heap is left untouched and the
         // cooperative engine stays byte-identical by construction. D2b — the same `Some` gate carries
@@ -2198,10 +2196,6 @@ impl Vm {
             Op::EnterNursery => {
                 self.nurseries.push(Vec::new());
                 self.mn_scopes.push(None); // lockstep — set Some(scope_id) only if early-enlisted
-                // W6-2 — lockstep: this nursery's module-global snapshot, PINNED on its first `spawn`
-                // (`register_task`). Not taken here: the implicit nursery's `EnterNursery` sits at the top
-                // of the module/function body, before any global is initialized.
-                self.nursery_snaps.push(None);
                 // TASK B — capture this parallel body's defer floor so a recover-scoped `?` can run
                 // the body's defers before the cancel-report (see `nursery_defer_floors`).
                 let floor = self.frames.last().map(|f| f.deferred.len()).unwrap_or(0);

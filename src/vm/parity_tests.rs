@@ -11153,12 +11153,13 @@ main()
     assert_eq!(parity_entry(src), "A=1 B=1 parent=2\n");
 }
 
-/// W6-2 — the pin is per-NURSERY, not per-spawn: two spawns into the SAME nursery straddling a global
-/// mutation both read the pinned (first-spawn) value, identically on both engines. This is the one
-/// documented residual divergence from Go (which would give the second goroutine the newer value) and it
-/// falls out of "a nursery takes A snapshot" — pinned here so a later change can't silently move it.
+/// W6-2 — the pin is per-TASK, at its own `spawn`: two spawns into the SAME nursery straddling a global
+/// mutation read the value live when EACH ran, identically on both engines. That is the Go rule (a
+/// goroutine sees the globals current when `go` ran) and it is what makes the IMPLICIT nursery — which
+/// spans a whole module/function body — behave, since a per-NURSERY pin would freeze the whole body at
+/// its first bare `spawn` (see `bare_spawn_implicit_nursery_pins_per_spawn_parity`).
 #[test]
-fn two_spawns_one_nursery_share_the_pinned_view_parity() {
+fn two_spawns_one_nursery_pin_at_their_own_spawn_parity() {
     let src = "\
 import std.concurrency
 g: int = 1
@@ -11172,7 +11173,91 @@ fn main():
     print(\"A={a.get()} B={b.get()} parent={g}\")
 main()
 ";
-    assert_eq!(parity_entry(src), "A=1 B=1 parent=2\n");
+    assert_eq!(parity_entry(src), "A=1 B=2 parent=2\n");
+}
+
+/// W6-2 (regression) — a bare `spawn` binds to the IMPLICIT nursery, which the compiler opens at the top
+/// of the module / function body (`Span{1,1}`) and joins at its end. So the snapshot instant must be the
+/// SPAWN, never the nursery: pinning per-nursery would freeze the whole body at its first bare `spawn`,
+/// replaying every global initialized later as `nil` — the very W6-2 class. Here the second task reads
+/// `n`, declared AFTER the first bare `spawn`, and a `List` global's method (the `nil` shape that faults
+/// rather than printing wrong).
+#[test]
+fn bare_spawn_implicit_nursery_pins_per_spawn_parity() {
+    let src = "\
+import std.concurrency
+tot := AtomicInt(0)
+spawn: tot.add(1)
+n: int = 42
+q: List[int] = [1, 2, 3]
+spawn: print(\"n = {n} len = {q.len()} sum = {n + 1}\")
+";
+    assert_eq!(parity_entry(src), "n = 42 len = 3 sum = 43\n");
+}
+
+/// W6-2 — the same, one level down: a bare `spawn` inside a FUNCTION body sees the globals live at the
+/// spawn, and a later mutation in that body is NOT time-travelled back into it (pre-W6-2 the snapshot was
+/// built at the body-end join, so the task read the POST-mutation value).
+#[test]
+fn bare_spawn_in_a_function_body_pins_per_spawn_parity() {
+    let src = "\
+import std.concurrency
+g: int = 1
+fn main():
+    seen := Shared(0)
+    spawn: seen.set(g)
+    g = 2
+    return seen
+print(main().get())
+";
+    assert_eq!(parity_entry(src), "1\n");
+}
+
+/// W6-2 (regression) — pinning a task's snapshot at its `spawn` must not move the snapshot FAULT there.
+/// Building the module-globals snapshot is fallible (an unbounded-depth global trips the structural-depth
+/// cap), and the fault belongs where the task is PREPARED, at the join: the `parallel:` body's own output
+/// still precedes it, byte-identically on both engines.
+#[test]
+fn snapshot_fault_stays_at_task_preparation_parity() {
+    let src = "\
+keep: List[int] = []
+deep: List[List[int]] = [keep]
+for i in 0..10001:
+    deep = [deep]
+parallel:
+    spawn: pass
+    print(\"body ran\")
+";
+    let (vo, vr) = run_program(src);
+    let (po, pr) = run_program_parallel(src);
+    let ve = vr.expect_err("serial: the snapshot must fault").to_string();
+    let pe = pr.expect_err("M:N: the snapshot must fault").to_string();
+    assert_eq!(vo, "body ran\n", "serial stdout before the fault");
+    assert_eq!(po, "body ran\n", "M:N stdout before the fault");
+    assert!(ve.contains("maximum structural depth"), "serial: {ve}");
+    assert_eq!(ve, pe, "serial == M:N fault");
+}
+
+/// W6-2 (regression) — a nursery whose tasks are CANCELLED without ever being prepared (`break` out of
+/// the `parallel:` body) must not fault: nothing replays a snapshot, so an un-snapshottable module global
+/// is never touched. A pin built eagerly at the spawn would manufacture a fault on a clean program.
+#[test]
+fn cancelled_nursery_never_faults_on_the_snapshot_parity() {
+    let src = "\
+keep: List[int] = []
+deep: List[List[int]] = [keep]
+for i in 0..10001:
+    deep = [deep]
+for i in 0..1:
+    parallel:
+        spawn: pass
+        break
+print(\"clean exit\")
+";
+    assert_eq!(
+        parity_entry(src),
+        "1 pending task(s) cancelled on early exit from parallel:\nclean exit\n"
+    );
 }
 
 /// QoL: an untyped int-CONSTANT branch of an if/match EXPRESSION widens to `float` when a

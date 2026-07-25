@@ -92,19 +92,21 @@ print(counter)                     # 0  — to actually share, use a Shared[int]
 module global (and of every captured local) — mutating one inside a task never propagates out, on
 `--serial` or the default M:N engine alike (they snapshot identically; `serial == M:N` by construction).
 
-**Each nursery snapshots FRESH, at every depth.** The copy a task reads is taken when its nursery's
-**first `spawn`** runs, from the view of whoever opened that nursery — so a task sees the values current
-at that moment, including a global first initialized *after* an earlier nursery. A mutation by ordinary
-sequential code *between* two nurseries IS seen by the second nursery's tasks, and a task that mutates
-its own copy and then opens a **nested** `parallel:` gives its children the **task's** current view, not
-the parent module's. In-place mutation of an aggregate global (`q.push(x)`, `m[k] = v`, `p.x = 1`) counts
-too. An `Executor` job sees the globals as of the **drain** (`shutdown`, or the auto-drain at exit), the
-instant it actually runs. Identical on both engines, and the same rule Go and Python threads follow.
+**The copy is taken FRESH, per task, at its `spawn` — at every depth.** A task sees the values current
+when it was spawned (the Go rule: a goroutine reads whatever a package-level var holds when `go` runs).
+So a global first initialized *after* an earlier nursery is visible, a mutation by ordinary sequential
+code *between* two nurseries is visible to the second nursery's tasks, two spawns straddling a mutation
+see the old and the new value respectively, and a task that mutates its own copy and then opens a
+**nested** `parallel:` gives its children the **task's** current view, not the parent module's. In-place
+mutation of an aggregate global (`q.push(x)`, `m[k] = v`, `p.x = 1`) counts too. An `Executor` job has no
+nursery, so it sees the globals as of the **drain** (`shutdown`, or the auto-drain at exit) — the instant
+it actually runs. Identical on both engines.
 
-The pin is per **nursery**, not per `spawn`: two spawns into the *same* nursery that straddle a mutation
-both read the view pinned at the first one (the one documented divergence from Go, which would hand the
-second goroutine the newer value). To thread a *newer* value into a task without opening a new nursery,
-pass it as a spawn argument or send it through a `Channel`.
+One sub-statement caveat, because in-place aggregate mutation is not tracked per-`spawn` (nothing writes
+a module slot for the runtime to notice): if a task's `spawn` is followed by an in-place mutation of an
+aggregate global and no reassignment of any global, the task may see that mutation. Reassignment
+(`g = …`, including `q = […]`) is exact. To thread a value into a task unambiguously, pass it as a spawn
+argument or send it through a `Channel`.
 To actually **share** mutable cross-task state, use `Shared[T]` / `RwShared[T]` / `Atomic[T]` (below) or a
 `Channel[T]` — those cross by shared handle, not by copy, so a task-side write IS visible to the parent.
 
@@ -910,7 +912,7 @@ sees EOF after leg 1 drains the input. Don't use `--check-parity` on programs th
 
 **The model — spawning a task copies its environment (fork-like).** A `spawn`ed task does not share the
 parent's heap. It receives its **own isolated copy** of everything it captures — captured locals are
-deep-copied, module globals are snapshot-copied per nursery (fresh at its first `spawn`, [§2](#2-the-model))
+deep-copied, module globals are snapshot-copied per task (fresh at its `spawn`, [§2](#2-the-model))
 — much like a forked child copies the parent's address space. Two deliberate differences from a real
 `fork`:
 1. It copies only the **reachable captured environment**, not the whole heap.
@@ -937,7 +939,7 @@ engines, **never UB**):
 Crossing a task boundary (a `spawn` capture or a `Channel.send`) is gated on **sendability**. A
 captured **local** crosses as an independent per-task **copy** — a task may reassign it (the write
 stays on the isolated copy, invisible to the parent); a **module global** behaves the same way: a task
-may reassign it or mutate it in place, and the write lands on that task's own per-nursery copy,
+may reassign it or mutate it in place, and the write lands on that task's own copy,
 invisible to the parent and to sibling tasks. (The earlier G1 checker rule — a compile error for both —
 was retired when module globals started deep-copying per task on both engines.)
 

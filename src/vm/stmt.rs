@@ -1825,6 +1825,13 @@ impl Vm {
         // W6-2 — a module-slot write invalidates the snapshot CACHE: the next nursery must snapshot the
         // NEW value instead of replaying a frozen earlier copy. One of exactly two module-slot mutators
         // (with `module_define`), so this pair is the whole invalidation surface for slot rebinding.
+        // And it is the PIN INSTANT: an already-spawned task must keep the value it was spawned with, so
+        // pin every unpinned queued task's view BEFORE the new value lands. (Only here, not in
+        // `module_define`: that one also runs during a worker's snapshot REPLAY, where re-entering
+        // `ensure_snapshot` would be circular. A replay/import-bind reaching an unpinned task later is
+        // harmless — reading a global before its declaration is a CHECK error, so there is no `nil` to
+        // observe, only a newer value.)
+        self.pin_unpinned_tasks(&mut []);
         self.snapshot_memo = None;
         if let Obj::Module(m) = self.heap.get_mut(module) {
             m.slots[slot as usize] = value;

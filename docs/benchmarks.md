@@ -78,44 +78,49 @@ Levers, ranked for this gap:
 
 Re-run `many_struct`/`many_map` after each lever to track the close.
 
-## Fresh per-nursery module-global snapshot (gaps.md W6-2) — 2026-07-25 — correctness fix, cost measured
+## Fresh per-task module-global snapshot (gaps.md W6-2) — 2026-07-25 — correctness fix, cost measured
 
-Not a lever — a P0 correctness fix (a nursery now snapshots the module globals fresh, at every depth,
-instead of replaying the first nursery's frozen `Arc` forever). Measured because it puts work back on the
-nursery path. Machine as above; `chezzi` mean of hyperfine runs, before = `main` @ `2c9bd0d`.
+Not a lever — a P0 correctness fix (a task now snapshots the module globals fresh, pinned at its own
+`spawn`, at every depth, instead of replaying the first nursery's frozen `Arc` forever). Measured because
+it puts work back on the nursery path. Machine as above; `chezzi` mean of hyperfine runs, before = `main`
+@ `2c9bd0d`.
 
 | bench       | before  | after   | delta   |
 |-------------|--------:|--------:|--------:|
-| fib         |  247.2  |  238.7  |  −3.4%  |
-| str         |  171.6  |  165.2  |  −3.7%  |
-| primes      |  583.7  |  595.2  |  +2.0%  |
-| loop        |  991.6  |  945.3  |  −4.7%  |
-| list        |  364.4  |  375.4  |  +3.0%  |
-| struct      |  431.3  |  419.3  |  −2.8%  |
-| poly_method | 1251    | 1196    |  −4.4%  |
-| map         |  148.2  |  142.8  |  −3.6%  |
-| empty       |    2.0  |    2.0  |   flat  |
+| fib         |  247.5  |  239.6  |  −3.2%  |
+| str         |  165.3  |  161.2  |  −2.5%  |
+| primes      |  614.5  |  579.7  |  −5.7%  |
+| loop        |  940.5  |  901.0  |  −4.2%  |
+| list        |  363.1  |  358.8  |  −1.2%  |
+| struct      |  421.3  |  402.5  |  −4.5%  |
+| poly_method | 1207    | 1194    |  −1.1%  |
+| map         |  130.0  |  130.9  |  +0.7%  |
+| empty       |    2.1  |    2.0  |  −4.8%  |
 
-All ms, all **within noise** (σ 2–6%, movement in both directions): none of the 9 benches opens a nursery,
-so flat is the expected result and this table is a no-regression check, not a delta.
+All ms, all **within noise** (σ 2–6%; every row moved the same direction, which is itself a noise/thermal
+signature): none of the 9 benches opens a nursery, so flat is the expected result and this table is a
+no-regression check, not a delta.
 
-The cost lives where it should — a **nursery-in-a-loop** micro-bench (200 000 nurseries × 1 task, `hyperfine
--N --warmup 2`). Measured on `--serial`: the default M:N engine's per-nursery pool overhead (~43 µs) swamps
-the snapshot entirely, showing **no** measurable change at all, so the serial engine is the sensitive probe.
+The cost lives where it should — a **nursery-in-a-loop** micro-bench (200 000 nurseries × 1 task,
+`hyperfine -N --warmup 2 -r 10`), measured on `--serial` because the default M:N engine's per-nursery pool
+overhead dilutes everything.
 
-| micro (200k nurseries, `--serial`) | before  | after   | delta   |
-|------------------------------------|--------:|--------:|--------:|
-| scalar/`str`-only globals          | 689.9   | 713.6   | **+3.4%** |
-| + one `List[int]` global           | 831.5   | 951.5   | **+14.4%** |
+| micro (200k nurseries × 1 task, `--serial`) | before  | after   | delta   |
+|---------------------------------------------|--------:|--------:|--------:|
+| scalar/`str`/`AtomicInt` globals only        | 860.7ms | 874.7ms | **+1.6%** |
+| + one 200-element `List[int]` global         | 1.630s  | 2.624s  | **+61%** |
+| a global REASSIGNED before each spawn        | 754.6ms | 852.1ms | **+12.9%** |
 
-The +3.4% is the pin bookkeeping (one `nursery_snaps` push/pop per nursery + one memo-hit `ensure_snapshot`
-per spawn); the snapshot itself is built ONCE for the whole run, which `vm::tests::
-snapshot_cache_short_circuits_only_for_immutable_globals` asserts directly on the cache field rather than by
-timing. The second row is the price of the conservative whitelist: an aggregate global can be mutated in
-place (`q.push(1)`) with no module-slot write to invalidate on, so that view is never cached and every
-nursery rebuilds — after the fix the aggregate case is **1.33×** the scalar case. Precise per-mutation
-invalidation (hooking the mutating intrinsics in `src/vm/call.rs`, fenced at the time) is the recorded
-follow-up in `docs/gaps.md §W6-2`, with that 1.33× as its bar.
+Row 1 is the dirty flag doing its job — ONE snapshot for the whole run, asserted on the cache field
+directly (`vm::tests::snapshot_cache_short_circuits_only_for_immutable_globals`) rather than by timing;
+the +1.6% is the per-join `pin_unpinned_tasks` scan. Row 2 is the price of the conservative whitelist: an
+aggregate global can be mutated in place (`q.push(1)`) with no module-slot write to invalidate on, so that
+view is never cached and every nursery rebuilds (the same case on M:N is +17%: 913ms → 1.073s at 20k
+nurseries). Row 3 is correctness work, not overhead — each task must see the value it was spawned with, so
+a reassignment with a task pending forces one build, and `before` printed the WRONG answer there (`0`
+instead of `199990000`). Precise per-mutation invalidation (hooking the mutating intrinsics in
+`src/vm/call.rs`, fenced at the time) is the recorded follow-up in `docs/gaps.md §W6-2`, with row 2's
++61% as its bar.
 
 ## Baseline — 2026-06-11
 
