@@ -417,7 +417,7 @@ stderr as the message, `Err` on a spawn failure, and the text seam pinned as a l
 view), serial==M:N. Shell lines in the suite single-quote their temp paths (a `TMPDIR` with a space or a
 glob must not word-split — verified with `TMPDIR="/tmp/my dir"`).
 
-### W6-5. A zero-field struct at an `extern` boundary PANICS the VM — `recover:` cannot catch it — P0
+### W6-5. A zero-field struct at an `extern` boundary PANICS the VM — `recover:` cannot catch it — P0 — **FIXED (2026-07-25)**
 ```chezzi
 struct Empty:
     pass
@@ -440,7 +440,7 @@ Wrapping the call in `recover:` still panics — it is **not** a recoverable fau
 `prep_cif`'s `Typedef` error. C rejects an empty struct outright (GCC/Clang size-1 extension); either way
 libffi cannot build a CIF for it. Fix: reject an empty field list where the other 7 marshalling rejects fire.
 
-### W6-6. `struct X` + `extern fn X` SILENTLY calls the struct constructor — the guard is DEAD CODE, and the docs promise a reject — P0
+### W6-6. `struct X` + `extern fn X` SILENTLY calls the struct constructor — the guard is DEAD CODE, and the docs promise a reject — P0 — **FIXED (2026-07-25)**
 ```chezzi
 struct strlen:
     s: str
@@ -460,7 +460,21 @@ proved directly: a marshalling error on the same struct prints `struct 'f4::S'`,
 always false. `variant_owners` IS bare-keyed, so the enum-variant half still fires — a one-file asymmetry
 (`extern fn cosV` alongside `enum {cosV}` rejects; `extern fn sqrtS` alongside `struct sqrtS` passes).
 This is the [[checker-test-helper-key-divergence]] class: the bare-keyed single-module `ok()` test helper
-makes the unit test pass while the CLI graph path misses it. Fix: key the lookup with `bare_key(name)`.
+makes the unit test pass while the CLI graph path misses it.
+**FIX AS SHIPPED — better than the `bare_key(name)` this entry originally proposed.** The sweep now keys off
+`struct_names` (the BARE-visible ctor set, bare in BOTH paths) rather than `bare_key`-ing into `self.structs`,
+because `seed_stdlib_structs` also parks **un-licensed** stdlib layouts (`Match`/`Response`/`ProcResult`/
+`FileInfo`) in `self.structs` — so a `bare_key` lookup would have OVER-rejected `extern fn Match` in a file
+that never imported `std.regex`. Pinned both ways: `extern_named_after_unimported_native_struct_ok` (accepted
+without the import — nothing shadows it) and `extern_named_after_imported_native_struct_rejected` (the import
+licenses the bare ctor, so the collision fires).
+**AND the first cut of this fix was ITSELF partial-coverage** — caught by the adversarial review, confirmed by
+hand on the real binary, remediated in `7abe925`. The new predicate enumerated `struct_names` +
+`variant_owners` + builtin variants but omitted **`newtype_names`**: a newtype registers a bare-visible
+one-arg ctor too, so `newtype abs = int` + `extern fn abs(x: int) -> int` checked OK and then called the CTOR,
+printing `abs(-7)` instead of `7` on both engines. Lesson, third time in this file: **when you fix a
+partial-coverage bug, enumerate the WHOLE set — the fix's own predicate is the next place the class hides.**
+Test: `extern_named_after_newtype_rejected` (both decl orders, single-module + graph path, non-colliding control).
 
 ### W6-7. The `RwShared` zero-copy read-view is O(N²) — every GC re-walks the whole off-heap wire payload — HIGH (perf, flagship new API)
 Measured, `--serial` (M:N identical within noise), `for_each` over an `RwShared(List[int])` vs the same work
@@ -532,7 +546,7 @@ whose live heap exceeds `N` is aborted — a real runaway trips") is false for t
 runaway: an unbounded/large-cap channel backlog, or data parked in a `Shared`/`RwShared`. Same accounting
 seam as W6-7. (The documented inline-scalar escape was separately re-confirmed and is NOT re-filed.)
 
-### W6-11. `Ok`/`Err`/`Some`/`None`/`Result`/`Option` are accepted as `extern fn` names — same silent-shadow class as W6-6
+### W6-11. `Ok`/`Err`/`Some`/`None`/`Result`/`Option` are accepted as `extern fn` names — same silent-shadow class as W6-6 — **FIXED (2026-07-25)**
 `extern "libm.so.6": fn Ok(x: float) -> float` → 0 errors, unlike every other reserved name. `return Ok(x)`
 still resolves to the variant, so the extern is unreachable by its own name.
 
@@ -576,10 +590,12 @@ CPython's container compare and `in`/`index` do an identity check per element be
 work). Blast radius narrow: `float` is not `Hashable`, so NaN map/set keys are unreachable.
 
 ### W6-16..18 — cosmetic / diagnostic
-- **W6-16.** Duplicate diagnostic: `extern "libm.so.6": fn str(x: int) -> int` emits the identical error
-  **twice** (also `bytes`/`bytearray`/`Channel`/`List`/`Map`/`Set`), including under `--errors=json` →
-  doubled LSP squiggles. Single for `int`/`float`/`bool`/`Shared`/`print`/`ord`/`chr`/`panic`/`range`/
-  `timer`/`Executor`/`Atomic`.
+- **W6-16 — FIXED (2026-07-25).** Duplicate diagnostic: `extern "libm.so.6": fn str(x: int) -> int` emitted
+  the identical error **twice** (also `bytes`/`bytearray`/`Channel`/`List`/`Map`/`Set`), including under
+  `--errors=json` → doubled LSP squiggles. Single for `int`/`float`/`bool`/`Shared`/`print`/`ord`/`chr`/
+  `panic`/`range`/`timer`/`Executor`/`Atomic`. **Fell out of the W6-6 fix** rather than needing its own
+  change: keying the collision sweep off `struct_names` (not `is_reserved_name`) means a reserved-callable
+  name is reported ONCE, by the in-loop guard. Now single for every name in both lists.
 - **W6-17.** Turbofish over-rejected on the `RwShared` read-view's genuinely-generic `fold`/`fold_entries`:
   `r.fold[int](0, fn(a,x): a+x)` → `method 'fold' takes no type argument(s) (it declares no own type
   parameters)` + 2 cascaded infer errors, while the un-turbofished form works and harvested
