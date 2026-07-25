@@ -36,8 +36,9 @@ Chezzi is near Go parity. The real gap shows with **many separate boxed objects*
 (`base` = pre-fix; `after #1` = `0100153` (`Obj` 88→64B); `after #2` = `c1f4d0e` (inline ≤3 `fields`).
 #2's −61.2MB off `many_struct` matches the predicted ~61MB field-buffer kill exactly. `many_list` is
 flat under #2 — its elements are lists, not structs, so `Fields` never touches them (scope respected).
-`many_map` also drops under #2 because its *values* are structs. The remaining Go gap is the ~137MB
-`Slot` array (2M × 72B) — only the structural value-struct lever (#3) touches that.)
+`many_map` also drops under #2 because its *values* are structs. The remaining Go gap is the ~128MB
+`Slot` array (2M × 64B, after the mark bit moved to a parallel bitset — was 72B) — only the structural
+value-struct lever (#3) touches the per-object-is-a-`Slot` model itself.)
 
 Root cause is **structural, not slot padding**: Go stores `P{x,y}` INLINE in the slice
 (2M×16B, zero per-element heap objects). Chezzi boxes every struct as its own GC `Slot`
@@ -45,8 +46,8 @@ Root cause is **structural, not slot padding**: Go stores `P{x,y}` INLINE in the
 The `fields` buffer's separate malloc is now GONE for ≤3-field structs (lever "inline small `fields`":
 `Fields::Inline` folds them into the 64B `Obj` slot); only `>3`-field structs still spill to a boxed
 slice. So 2M `P{x,y}` (2 fields) = the `Slot` array + the outer 16MB list, no per-struct field buffer.
-The `Slot` array (2M × 72B ≈ 137MB) is now the dominant remaining cost — only the structural #3 lever
-shrinks it. `many_list` is only 1.4× because Go also heap-allocates each inner slice — the gap shrinks
+The `Slot` array (2M × 64B ≈ 128MB, after the GC mark bit moved to a parallel `marks: Vec<u64>` bitset
+— was 72B/137MB) is now the dominant remaining cost — only the structural #3 lever shrinks it further. `many_list` is only 1.4× because Go also heap-allocates each inner slice — the gap shrinks
 wherever Go can't inline either.
 
 Levers, ranked for this gap:
@@ -58,6 +59,11 @@ Levers, ranked for this gap:
   stays 64B (`size_of::<Fields>() == 32`). Measured (`c1f4d0e`): −22% (−61.2MB) `many_struct`, −13%
   `many_map`, ±0% `many_list` — matched the ~61MB prediction. Doesn't close the 3.3× (that's the `Slot`
   array now, → #3).
+- **mark bit → parallel bitset** ✅ DONE → dropped the `mark: bool` field from `Slot`, moved the GC
+  mark to a dense `marks: Vec<u64>` bitset on `Heap`. `Slot` 72→64B (`Option<Obj>` niche-packs `None`
+  free; the bool was pure padding), ≈16MB off `many_struct`'s 2M-slot array, and the sweep mark-scan
+  now iterates a compact bit array instead of touching each 64B payload. VM/GC-internal, no observable
+  change; all GC-stress + two-engine parity green. RSS delta measured post-merge.
 - **value-struct representation** (Go-style inline-in-container) → closes 4.9×→~1.5×, but a deep
   change to the every-object-is-a-`GcRef` aliasing model. Its own milestone. See `future.md §4`.
 
