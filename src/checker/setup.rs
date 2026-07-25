@@ -2797,14 +2797,21 @@ impl Checker {
             // against the bare `extern_names` spelling was DEAD CODE there, and `seed_stdlib_structs`
             // additionally parks UN-LICENSED stdlib layouts (`Match`/`Response`/…) in it, which would
             // over-reject an extern whose owning std module was never imported). Same predicate the
-            // nested-fn collision guard uses. Plus enum *variant* names (`variant_owners`) and the four
+            // nested-fn collision guard uses. Plus enum *variant* names (`variant_owners`), the four
             // BUILTIN `Result`/`Option` variant ctors (absent from `variant_owners` — their identity
-            // lives in `resolve_type`). NOT a collision: an enum/`Result`/`Option` *type* name (not
-            // callable in either engine, so `extern fn Foo` alongside `enum Foo` resolves to the
-            // extern, exactly as a plain `fn Foo` does), nor an un-imported stdlib layout name.
-            // Keeping this off `is_reserved_name` also means a reserved-callable name is reported
-            // ONCE, by the in-loop guard above.
+            // lives in `resolve_type`), and `newtype_names` — a newtype registers a bare-visible
+            // one-arg ctor too (`newtype Meters = int` makes `Meters(5)` callable), so it shadows an
+            // extern identically: `newtype abs = int` + `extern fn abs(x: int) -> int` used to check
+            // OK and then call the CTOR, printing `abs(-7)` instead of `7`. ENUMERATE the whole
+            // bare-visible ctor set here — a predicate that covers only SOME of its sources is the
+            // very partial-coverage class this sweep exists to close.
+            // NOT a collision: an enum/`Result`/`Option` *type* name (not callable in either engine,
+            // so `extern fn Foo` alongside `enum Foo` resolves to the extern, exactly as a plain
+            // `fn Foo` does), nor an un-imported stdlib layout name. Keeping this off
+            // `is_reserved_name` also means a reserved-callable name is reported ONCE, by the in-loop
+            // guard above.
             if self.struct_names.contains(name)
+                || self.newtype_names.contains(name)
                 || self.variant_owners.contains_key(name)
                 || crate::checker::is_builtin_variant(name)
             {

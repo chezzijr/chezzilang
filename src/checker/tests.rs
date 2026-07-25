@@ -12327,6 +12327,30 @@ fn extern_named_after_struct_rejected_entry_path() {
 }
 
 #[test]
+fn extern_named_after_newtype_rejected() {
+    // W6-6, sibling arm: a `newtype` registers a bare-visible one-arg ctor exactly like a struct, so
+    // it shadows an extern the same way. Pre-fix this checked OK and then silently called the CTOR:
+    // `newtype abs = int` + `extern fn abs(x: int) -> int` printed `abs(-7)` instead of `7` on BOTH
+    // engines. Caught by the adversarial review of the first cut of this fix, whose predicate covered
+    // `struct_names` but not `newtype_names` — the same partial-coverage class the sweep closes.
+    entry_rejects(
+        "newtype abs = int\n\nextern \"libc.so.6\":\n    fn abs(x: int) -> int\n",
+        "builtin/reserved name",
+    );
+    // Both decl orders (the sweep runs after the hoist loop, so it must be order-independent).
+    entry_rejects(
+        "extern \"libc.so.6\":\n    fn abs(x: int) -> int\n\nnewtype abs = int\n",
+        "builtin/reserved name",
+    );
+    rejects(
+        "newtype abs = int\n\nextern \"libc.so.6\":\n    fn abs(x: int) -> int\n",
+        "builtin/reserved name",
+    );
+    // Control: a newtype whose name collides with NOTHING leaves the extern reachable.
+    entry_ok("newtype Meters = int\n\nextern \"libc.so.6\":\n    fn abs(x: int) -> int\n");
+}
+
+#[test]
 fn extern_named_after_unimported_native_struct_ok() {
     // Deliberate delta of the W6-6 fix: `seed_stdlib_structs` seeds the `Match`/`Response`/
     // `ProcResult`/`FileInfo` LAYOUTS into `self.structs` bare-keyed and UN-licensed, so keying the

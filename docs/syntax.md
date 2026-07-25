@@ -3022,8 +3022,8 @@ their width is platform-dependent (LP64 vs LLP64); deferred to a future task. Se
 An `extern "lib":` block is a **top-level declaration only** — it is bound at module init, so nesting
 it inside `if`/`for`/`fn` is a parse error. An extern fn also may **not** be named after a builtin
 (`range`/`int`/`float`/`str`/`ord`/`chr`/`set`/`panic`), `print`, a constructor
-(`Channel`/`Shared`/`RwShared`/`Atomic`/`AtomicInt`/`timer`/`Executor`), any of your `struct`/enum-variant
-names, or a **builtin variant ctor** (`Ok`/`Err`/`Some`/`None`) — those resolve to a special op before a
+(`Channel`/`Shared`/`RwShared`/`Atomic`/`AtomicInt`/`timer`/`Executor`), any of your `struct`/`newtype`/
+enum-variant names, or a **builtin variant ctor** (`Ok`/`Err`/`Some`/`None`) — those resolve to a special op before a
 plain call, so the extern would be silently shadowed; the checker rejects the collision (*'…' is a
 builtin/reserved name*), in either declaration order and reported exactly **once**. A **type** name is
 *not* a collision and is accepted: an `enum`'s own name, `Result`/`Option`, and a std-module layout name
