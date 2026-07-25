@@ -812,7 +812,7 @@ pub struct Vm {
     /// (which runs no code of its own — every fiber brings its own view).
     ///
     /// W6-2 — part of the [`FiberCtx`] swap group with `module_objs`/`module_faulted`: snapshots are
-    /// per-NURSERY now, so a shell draining the global run queue can hold fibers from different scopes
+    /// per-TASK now, so a shell draining the global run queue can hold fibers from different scopes
     /// built from DIFFERENT snapshots. Faulting a fiber's modules from another scope's snapshot would
     /// replay the wrong values, so the snapshot travels WITH the fiber.
     module_snapshot: Option<Arc<ModuleSnapshot>>,
@@ -1003,7 +1003,7 @@ struct FiberCtx {
     /// W6-2 — the snapshot this fiber's `module_objs` fault in from, and the cache of the snapshot of
     /// its CURRENT view. Both describe the module view above, so they travel with it (see
     /// [`Vm::module_snapshot`]): a shell drains fibers from several scopes, each built from its own
-    /// per-nursery snapshot. Heap-independent ([`SnapValue`] carries no `GcRef`), so `root_ctx` needs
+    /// per-task snapshot. Heap-independent ([`SnapValue`] carries no `GcRef`), so `root_ctx` needs
     /// nothing for them. `None`/`None` for a cooperative child (eager-faulted at the spawn boundary).
     module_snapshot: Option<Arc<ModuleSnapshot>>,
     snapshot_memo: Option<Arc<ModuleSnapshot>>,
@@ -1206,7 +1206,7 @@ impl Lowered {
 ///
 /// `modules` is parallel to the parent's `module_objs` by index, so a callable's `home` /
 /// `module_idx` (already an index under the airlock — see [`Vm::home_index`]) lines up directly
-/// with the worker's pre-allocated (empty) module objects. Built per nursery by
+/// with the worker's pre-allocated (empty) module objects. Built at a task's pin instant by
 /// [`Vm::snapshot_modules`] and cached in `snapshot_memo` when `reusable`.
 struct ModuleSnapshot {
     modules: Vec<ModuleSnap>,

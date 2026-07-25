@@ -3501,7 +3501,8 @@ impl Vm {
     /// D1 — the read-only [`ModuleSnapshot`] of the module graph THIS view currently sees, replayed
     /// into each worker/child it prepares.
     ///
-    /// W6-2 — this is FRESH per nursery, not frozen for the run. `snapshot_memo` is a CACHE with two
+    /// W6-2 — this is FRESH per task (pinned at its `spawn`, see [`Vm::pin_unpinned_tasks`]), not frozen
+    /// for the run. `snapshot_memo` is a CACHE with two
     /// invalidation rules, not a forever-memo: a module-slot write drops it (`set_global_slot` /
     /// `module_define`), and a snapshot whose globals include a mutable aggregate is never cached at all
     /// (`ModuleSnapshot::reusable` — in-place mutation writes no slot). So a global initialized or
