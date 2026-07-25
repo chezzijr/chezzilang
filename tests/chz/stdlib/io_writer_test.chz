@@ -55,3 +55,55 @@ test fn buffered_cap1_two_writes_persist():
     match write_then_read(p, 1, "ab", true):
         Ok(s): assert s == "ab", "cap1: got " + s
         Err(e): assert false, "cap1: " + e.message()
+
+test fn nested_buffered_chain_flushes_every_level():
+    # The recursion is the whole point: a `buffered(buffered(file))` chain must flush EVERY core
+    # beneath the receiver, both when the outer buffer holds the tail (3 < cap 4) and after a drain.
+    p := scratch("nested")
+    defer fs.remove_file(p)
+    match write_then_read2(p, 8, 4, "abc"):
+        Ok(s): assert s == "abc", "nested (tail in the outer buf): got " + s
+        Err(e): assert false, "nested: " + e.message()
+    match write_then_read2(p, 8, 4, "abcdefghij"):
+        Ok(s): assert s == "abcdefghij", "nested (mid-write drain): got " + s
+        Err(e): assert false, "nested drain: " + e.message()
+
+# Two-level chain: `buffered(buffered(create(p), inner_cap), outer_cap)`.
+fn write_then_read2(p: str, inner_cap: int, outer_cap: int, text: str) -> Result[str]:
+    w1 := io.buffered(io.create(p)?, inner_cap)
+    w2 := io.buffered(w1, outer_cap)
+    w2.write(text)?
+    w2.flush()?
+    return io.read_file(p)
+
+test fn flush_through_a_closed_inner_is_a_clean_err_naming_the_inner():
+    # A flush that provably persisted nothing must NOT report success (that is the W6-1 shape), and the
+    # message must name the INNER handle — the receiver `w` is wide open, it is `w0` that is closed.
+    p := scratch("closed_inner")
+    defer fs.remove_file(p)
+    match io.create(p):
+        Ok(w0):
+            w := io.buffered(w0, 8)
+            _ := w.write("abc")
+            _ := w0.close()
+            match w.flush():
+                Ok(_): assert false, "flush into a closed inner must be Err"
+                Err(e): assert e.message().contains("inner writer"), e.message()
+            # `close()` must not mask it either.
+            match w.close():
+                Ok(_): assert false, "close over a closed inner must be Err"
+                Err(e): assert e.message().contains("inner writer"), e.message()
+        Err(e): assert false, "create: " + e.message()
+
+test fn write_that_drains_into_a_closed_inner_names_the_inner_too():
+    # Sibling arm: `write_to_core`'s drain recursion carries the same wrong-handle risk.
+    p := scratch("closed_inner_w")
+    defer fs.remove_file(p)
+    match io.create(p):
+        Ok(w0):
+            w := io.buffered(w0, 2)
+            _ := w0.close()
+            match w.write("abcd"):        # 4 > cap 2 ⇒ drains into the closed inner
+                Ok(_): assert false, "a drain into a closed inner must be Err"
+                Err(e): assert e.message().contains("inner writer"), e.message()
+        Err(e): assert false, "create: " + e.message()

@@ -14,6 +14,20 @@ enum WriteErr {
     Io(String),
 }
 
+/// W6-1 — re-key an error raised by a core BENEATH the receiver. `writer_method` renders `Closed`
+/// receiver-relatively ("write/flush on a closed writer"), which is a lie when it is the *inner*
+/// handle a `buffered(...)` writer drains into that was closed — the receiver is wide open. Demote it
+/// to `Io` so the message names the right handle AND `close()` (which masks `Closed` for idempotence)
+/// cannot report success for a flush that provably persisted nothing.
+fn from_inner(e: WriteErr) -> WriteErr {
+    match e {
+        WriteErr::Closed => {
+            WriteErr::Io("the inner writer this buffer drains into is closed".into())
+        }
+        io => io,
+    }
+}
+
 impl Vm {
     /// R2 — clone out the shared `Arc<WriterCore>` behind a `Writer` handle (refcount bump), mirroring
     /// [`Vm::socket_core`]. Held only for the calling method, so locking the backing does not borrow
@@ -66,7 +80,7 @@ impl Vm {
             }
         };
         if let Some((inner, drained)) = drain {
-            self.write_to_core(&inner, &drained)?;
+            self.write_to_core(&inner, &drained).map_err(from_inner)?;
         }
         Ok(data.len())
     }
@@ -100,9 +114,9 @@ impl Vm {
             // Guard the WRITE, not the flush: an empty `write_to_core` on a `Stdout`/`Stderr` inner
             // would hand `emit_out("")` to the parity-oracle sink / stream queue.
             if !drained.is_empty() {
-                self.write_to_core(&inner, &drained)?;
+                self.write_to_core(&inner, &drained).map_err(from_inner)?;
             }
-            self.flush_core(&inner)?;
+            self.flush_core(&inner).map_err(from_inner)?;
         }
         Ok(())
     }

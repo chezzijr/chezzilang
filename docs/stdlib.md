@@ -411,14 +411,20 @@ streams, and parity-checks identically. `buffered(...)` batches host/fd writes.
 |--------|-----------|-------|
 | `write` | `(data: str) -> Result[int]` | UTF-8-encode + write; returns bytes written. |
 | `write_bytes` | `(data: bytes) -> Result[int]` | Write raw bytes; returns bytes written. |
-| `flush` | `() -> Result[nil]` | Drain a `buffered` writer's in-VM buffer **and** flush every core beneath it (one host/fd write per level), so once `flush()` returns `Ok` the bytes are visible to any other observer — an in-process `io.read_file`, a `process.run` child, a sibling process. Like `fs.atomic_write` this is **not** `fsync`'d: observer visibility, **not** crash/power-loss durability. A no-op on unbuffered `stdout`/`stderr` (that sink is already unbuffered). |
+| `flush` | `() -> Result[nil]` | Drain a `buffered` writer's in-VM buffer **and** flush every core beneath it (one host/fd write per level). On a **file**-backed chain (`buffered(create(p))`, nested `buffered` included) an `Ok` means the bytes are on the fd — visible to an in-process `io.read_file`, a `process.run` child, a sibling process. Like `fs.atomic_write` this is **not** `fsync`'d: observer visibility, **not** crash/power-loss durability. A no-op on unbuffered `stdout`/`stderr`; on a `buffered(stdout())` writer the drained bytes go to the same background stdout queue as `print` (nothing in the program ever waits on that consumer, and that sink is `str`-typed, so non-UTF-8 bytes are replaced with U+FFFD) — `Ok` there means *queued*, not *written*. |
 | `close` | `() -> Result[nil]` | Flush (same full-chain guarantee as `flush`) + close the handle. Use-after-close is a clean `Err`, never a fault. |
 
-- **An explicit `flush()`/`close()` always persists** (Python `open(p,'wb',buffering=n)` / Go `bufio`
-  semantics), including after a write larger than the buffer, which drains mid-write.
+- **An explicit `flush()`/`close()` on a file-backed buffered writer always persists** (Python
+  `open(p,'wb',buffering=n)` / Go `bufio` semantics), including after a write larger than the buffer,
+  which drains mid-write.
+- **Flushing/writing *through* a handle whose inner writer was closed is a clean `Err`** naming the inner
+  (`the inner writer this buffer drains into is closed`) — a flush that persisted nothing never reports
+  `Ok`, and `close()` does not mask it either. (`w0 := io.create(p)?; w := io.buffered(w0, 8); w0.close()`
+  ⇒ `w.flush()` is that `Err`.)
 - **Forgetting `flush`/`close` on a `buffered` writer loses the tail** — Go's footgun. Mitigated
   best-effort: a **file**-backed buffered writer flushes its tail when the handle is dropped (program
-  exit / GC). A **stdout/stderr**-backed buffered writer's tail is *not* recovered on drop — call
+  exit / GC), a nested `buffered(buffered(create(p)))` chain included (each level cascades into the one
+  below). A **stdout/stderr**-backed buffered writer's tail is *not* recovered on drop — call
   `flush()`/`close()` explicitly. A plain `create`/`append` writer never loses data (its `BufWriter`
   flushes on drop).
 - **Cross-task write ordering to one shared `Writer` is unspecified** (Go's `bufio`-not-goroutine-safe
@@ -573,14 +579,19 @@ any argument comes from untrusted input.
 (and `cmd`'s return) are `str`, so `cmd`/`run`/`run_args` decode the child's output as UTF-8 *lossily*:
 an undecodable byte is rendered `U+FFFD`. That is deliberate, and it is why the twins exist:
 `run_bytes(line: str) -> Result[bytes]` / `run_args_bytes(prog: str, args: List[str]) -> Result[bytes]`
-hand back the child's stdout **byte-exactly** (Go `cmd.Output()` shape), with the **same `Ok`/`Err`
-partition as `run`/`run_args`** — a non-zero exit is still `Ok` (captured bytes are never thrown away),
-only a spawn failure is `Err`. Reach for them for any binary output. (Why not fail the text call the way
-`Socket.read` does? `Socket.read` can only afford that because the undecodable bytes stay carried on the
-socket for `read_bytes` to return; a finished child has no carry, so Err-ing would DESTROY the captured
-stdout, stderr and exit code and the only "recovery" would be re-running a side-effecting command. Same
-shape as `request.get`'s lossy `body` + byte-exact `request.get_bytes`.) The bytes path carries **stdout
-only** — merge with `2>&1` for stderr's bytes, and use `run` for the exit code.
+hand back the child's stdout **byte-exactly**. Reach for them for any binary output. Their `Ok`/`Err`
+partition is **`cmd`'s, not `run`'s**: `Result[bytes]` has no status channel, so **any failed child is
+`Err`** — a non-zero exit (message = the child's stderr, or `command exited with status N` if it wrote
+none) as well as a spawn failure. `Ok(bytes)` therefore means "the command succeeded and these are its
+bytes"; a failure can never pose as a successful command that printed nothing (the same rule
+`request.get_bytes` follows for a non-2xx). A command that legitimately exits non-zero **and** has
+meaningful stdout (`grep`, `diff`) belongs on `run`/`run_args`, which carry `code` + both streams (or, on
+the shell form, `run_bytes("cmd; exit 0")`). (Why not fail the *text* call the way `Socket.read` does?
+`Socket.read` can only afford that because the undecodable bytes stay carried on the socket for
+`read_bytes` to return; a finished child has no carry, so Err-ing `run` would DESTROY the captured
+stdout, stderr and exit code. Same shape as `request.get`'s lossy `body` + byte-exact
+`request.get_bytes`.) The bytes path carries **stdout only** — there is no byte-exact stderr on either
+form.
 All five are blocking subprocess I/O (offloaded under the OS-thread engine). `ProcResult` is **owned
 by `std.process`**: you can read its fields (`.stdout`/`.stderr`/`.code`) off a returned value with no
 import, but to name the type or construct it directly (`p: ProcResult` / `ProcResult(...)`) you must

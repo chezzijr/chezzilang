@@ -12,34 +12,54 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > drop, so an in-process reader, a child process, or a SIGKILL saw an empty file). The arm now ALWAYS
 > recurses (`src/vm/fileio.rs`); the WRITE, not the flush, is guarded by `!drained.is_empty()` so an empty
 > `write_to_core` never hands `emit_out("")` to a `Stdout`/`Stderr` inner. Python
-> `open(p,'wb',buffering=n)` / Go `bufio` semantics restored — observer-visible in-process, not just at
-> exit (still not `fsync`, same caveat as `fs.atomic_write`). Sibling arms enumerated: `flush_core`'s
-> `File`/`Stdout`/`Stderr` and `write_to_core`'s `File`/`Buffered` were already correct; `WriterCore::Drop`
-> (`src/vm/core.rs`) carries the identical `buf.is_empty()` short-circuit but is benign (the inner
-> `BufWriter`'s own drop flushes) and is left untouched; the `Stdout`/`Stderr` lossy `write_bytes` is
-> W6-9, a separate open entry. Tests: `tests/chz/stdlib/io_writer_test.chz` (5 `test fn`s — flush + close
-> after a mid-write drain, never-filled control, exactly-at-cap, cap=1), serial==M:N.
+> `open(p,'wb',buffering=n)` / Go `bufio` semantics restored for a **file**-backed chain —
+> observer-visible in-process, not just at exit (still not `fsync`, same caveat as `fs.atomic_write`; a
+> `buffered(stdout())` flush only *queues*, on the never-awaited stdout writer thread, and through the
+> `str`-typed W6-9-lossy sink — the docs now say so instead of promising universal visibility).
+> Sibling arms enumerated, and **two of them were also broken**: (1) `WriterCore::Drop`
+> (`src/vm/core.rs`) wrote its drained tail only when the inner was `Backing::File`, so a nested
+> `buffered(buffered(create(p)))` chain lost its tail permanently — it now handles all four inner
+> backings (`Buffered` → append to the inner's buf, which cascades on that core's own drop); (2) the new
+> recursion made `WriteErr::Closed` reachable from a core BENEATH the receiver, which `writer_method`
+> renders receiver-relatively ("flush on a closed writer") and `close()` MASKS — so both recursion sites
+> now `map_err(from_inner)`, turning an inner `Closed` into `Io("the inner writer this buffer drains
+> into is closed")`: the right handle is named and a flush that persisted nothing can no longer report
+> `Ok`. The `Stdout`/`Stderr` lossy `write_bytes` is W6-9, a separate open entry, NOT touched.
+> Tests: `tests/chz/stdlib/io_writer_test.chz` (8 `test fn`s — flush + close after a mid-write drain,
+> never-filled control, exactly-at-cap, cap=1, a nested two-level chain, closed-inner `Err` on `flush`
+> and on a draining `write`), serial==M:N, plus the Rust
+> `vm::core::tests::drop_flushes_a_nested_buffered_chain_to_the_file` (drop timing isn't `assert`-able).
 >
 > **✅ FIX (2026-07-25, gaps.md W6-4, P0) — `std.process` gets its byte-exact hatch: `run_bytes` /
 > `run_args_bytes`.** `std.process` was the arm R1's B1 sweep missed: `ProcResult`'s fields (and `cmd`'s
 > return) are `str`, so child output went through `String::from_utf8_lossy` with no way to reach the real
 > bytes (`A\xffB` → `b'A\xef\xbf\xbdB'`). Added `process.run_bytes(line) -> Result[bytes]` and
-> `process.run_args_bytes(prog, args) -> Result[bytes]` — byte-exact stdout, Go `cmd.Output()` shape, the
-> **same `Ok`/`Err` partition as `run`/`run_args`** (a non-zero exit is `Ok` — captured bytes are never
-> thrown away; only a spawn failure is `Err`), both registered `is_blocking` (D5 — else a subprocess wait
-> pins a core M:N worker). **The text seam deliberately stays a documented lossy VIEW and does NOT Err.**
+> `process.run_args_bytes(prog, args) -> Result[bytes]` — byte-exact stdout on success, and **`cmd`'s
+> `Ok`/`Err` partition, not `run`'s**: `Result[bytes]` has no status channel, so ANY failed child is `Err`
+> (stderr as the message, else `command exited with status N`, via a `failure_msg` helper now shared with
+> `cmd`). That is the ratified R1 bytes-twin rule verbatim from `request.rs::lower_result_bytes` ("a
+> non-2xx status here MUST become `Err` — otherwise a 404/500 HTML error page comes back as `Ok(bytes)`
+> and a caller writes it to disk as if the download succeeded"): an `Ok(b"")` from a failed child is
+> byte-indistinguishable from a command that printed nothing, so `run_bytes("gzip -dc missing.gz")` would
+> write a 0-byte file as if it worked. Non-zero-with-meaningful-stdout (`grep`/`diff`) belongs on
+> `run`/`run_args` (or `run_bytes("cmd; exit 0")`). Both registered `is_blocking` (D5 — else a subprocess
+> wait pins a core M:N worker).
+> **The text seam deliberately stays a documented lossy VIEW and does NOT Err.**
 > The ratified B1/R1 contract is not "Err" but **non-destructive** (`src/vm/netio.rs` `decode_carry`: "a
 > recoverable `Err` that silently drops already-received payload would just be a different flavour of the
 > corruption B1 fixes") — `Socket.read` can only afford a strict `Err` because the bytes stay in
-> `SocketCore::carry` for `read_bytes` to hand back. A finished child has NO carry: Err-ing would destroy
-> the captured stdout, stderr AND exit code, and the only "recovery" would be re-running an arbitrary,
+> `SocketCore::carry` for `read_bytes` to hand back. A finished child has NO carry: Err-ing `run` would
+> destroy the captured stdout, stderr AND exit code (the bytes twins can afford `Err` precisely because
+> they have no `code`/`stderr` to destroy), and the only "recovery" would be re-running an arbitrary,
 > side-effecting command line. So `std.process` follows the in-tree precedent for a carry-less seam —
 > `request.get`'s lossy `body: str` + byte-exact `request.get_bytes` (asserted on purpose by
 > `request.rs`'s `into_string_corrupts_but_get_bytes_is_exact`). `run`/`run_args`/`cmd`'s Ok/Err contract
 > is therefore UNCHANGED, so no caller is reclassified (e.g. `judge/run.chz`'s spawn-failure branch).
 > **Residual:** the bytes path carries stdout only — a bytes-carrying structured result would need a new
-> native struct through `seed_stdlib_structs` (checker-owned, out of scope); `2>&1` merges stderr. Tests:
-> `tests/chz/stdlib/process_test.chz` (6 `test fn`s), serial==M:N.
+> native struct through `seed_stdlib_structs` (checker-owned, out of scope). No `2>&1` workaround is
+> advertised: it would splice stderr TEXT into the byte-exact stream, and `run_args_bytes` has no shell.
+> Tests: `tests/chz/stdlib/process_test.chz` (6 `test fn`s; shell lines single-quote their temp paths so a
+> `TMPDIR` with a space/glob can't word-split), serial==M:N.
 >
 > **✅ TEST RUNNER (2026-07-24) — `chezzi test` selection + output ergonomics batch (docs/future.md §3b
 > #5/#6/#7).** Seven opt-in, low-risk CLI+formatting flags on the runner — NO VM/checker/compiler touch,

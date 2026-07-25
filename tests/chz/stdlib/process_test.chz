@@ -2,10 +2,13 @@
 #
 # `ProcResult`'s fields (and `cmd`'s return) are `str`, so the text seam decodes the child's output
 # LOSSILY — deliberately, and pinned here: a finished child has no carry (unlike `Socket.read`), so
-# Err-ing the call would DESTROY the captured stdout/stderr/code, which is the very data loss B1's
-# non-destructive rule forbids. The byte-exact hatch is additive: `run_bytes` / `run_args_bytes`.
+# Err-ing `run` would DESTROY the captured stdout/stderr/code, which is the very data loss B1's
+# non-destructive rule forbids. The byte-exact hatch is additive: `run_bytes` / `run_args_bytes`, and
+# those DO Err on a failed child (the ratified R1 bytes-twin contract — `request.get_bytes` Errs on a
+# non-2xx precisely so a failure cannot pose as a successful empty download).
 # The undecodable byte is SYNTHESIZED with `io.write_bytes` — `printf '\377'` is shell/locale dependent.
-# Temp paths carry the pid (the suite runs concurrently with other `cargo test` / `chezzi test` runs).
+# Temp paths carry the pid (the suite runs concurrently with other `cargo test` / `chezzi test` runs)
+# and are SINGLE-QUOTED into any shell line (TMPDIR may contain a space/glob).
 # Run: `cargo run -- test tests/chz/`. Serial==M:N guarded by the dual-engine gate.
 
 import std.process as pr
@@ -24,29 +27,31 @@ fn bad_bytes_file(name: str) -> str:
 test fn run_bytes_is_byte_exact():
     p := bad_bytes_file("run_bytes")
     defer fs.remove_file(p)
-    match pr.run_bytes("cat " + p):
+    match pr.run_bytes("cat '" + p + "'"):
         Ok(b): assert b == b"A\xffB", "run_bytes must be byte-exact"
         Err(e): assert false, "run_bytes: " + e.message()
 
 test fn run_args_bytes_is_byte_exact():
-    # The injection-safe argv form needs the same hatch (no shell to `2>&1` through).
+    # The injection-safe argv form needs the same hatch (there is no shell on this path at all).
     p := bad_bytes_file("run_args_bytes")
     defer fs.remove_file(p)
     match pr.run_args_bytes("cat", [p]):
         Ok(b): assert b == b"A\xffB", "run_args_bytes must be byte-exact"
         Err(e): assert false, "run_args_bytes: " + e.message()
 
-test fn bytes_twins_keep_stdout_on_a_non_zero_exit():
-    # NON-DESTRUCTIVE (B1's rule) + the `run`/`run_args` Ok/Err partition + Go `cmd.Output()`: captured
-    # bytes are handed back even though the child failed.
+test fn bytes_twins_err_on_a_non_zero_exit():
+    # The bytes twins carry NO status channel, so a failed child MUST be `Err` — else a failure is
+    # byte-indistinguishable from a successful command that printed nothing (`request.get_bytes`
+    # Errs on a non-2xx for exactly this reason; `cmd`, the other status-channel-less form, Errs too).
     match pr.run_bytes("printf out; exit 3"):
-        Ok(b): assert b == b"out", "a non-zero exit must not throw the captured bytes away"
-        Err(e): assert false, "run_bytes: " + e.message()
-    match pr.run_args_bytes("sh", ["-c", "printf out; exit 3"]):
-        Ok(b): assert b == b"out", "a non-zero exit must not throw the captured bytes away"
-        Err(e): assert false, "run_args_bytes: " + e.message()
+        Ok(_): assert false, "a non-zero exit must be Err on the bytes twin"
+        Err(e): assert e.message().contains("status 3"), e.message()
+    # stderr becomes the message when the child wrote one (same rendering as `cmd`).
+    match pr.run_args_bytes("sh", ["-c", "printf boom 1>&2; exit 3"]):
+        Ok(_): assert false, "a non-zero exit must be Err on the bytes twin"
+        Err(e): assert e.message() == "boom", e.message()
 
-test fn bytes_twins_err_only_on_a_spawn_failure():
+test fn bytes_twins_err_on_a_spawn_failure():
     match pr.run_args_bytes("definitely-no-such-prog-xyz", []):
         Ok(_): assert false, "a spawn failure must be Err"
         Err(e): assert e.message().contains("failed to run command"), e.message()
@@ -56,13 +61,13 @@ test fn text_seam_is_a_documented_lossy_view_never_a_loss():
     # undecodable byte is rendered as U+FFFD, with `run_bytes` beside it for the exact bytes.
     p := bad_bytes_file("text_view")
     defer fs.remove_file(p)
-    match pr.run("cat " + p + "; exit 1"):
+    match pr.run("cat '" + p + "'; exit 1"):
         Ok(r):
             assert r.code == 1, "the exit code must survive an undecodable stream"
             assert r.stdout.encode() == b"A\xef\xbf\xbdB", str(r.stdout.encode())
         Err(e): assert false, "the text seam must not destroy the capture: " + e.message()
     # Same shape when it is stderr that cannot decode.
-    match pr.run("cat " + p + " 1>&2; exit 1"):
+    match pr.run("cat '" + p + "' 1>&2; exit 1"):
         Ok(r):
             assert r.code == 1
             assert r.stderr.encode() == b"A\xef\xbf\xbdB", str(r.stderr.encode())

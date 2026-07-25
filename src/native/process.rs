@@ -23,10 +23,18 @@
 //! already consumed, so Err-ing the call would DESTROY the captured stdout/stderr/exit code and the only
 //! "recovery" would be re-running an arbitrary, side-effecting command line. So the text seam stays
 //! lossy-but-documented, and the byte-exact hatch is additive: `run_bytes(line)` / `run_args_bytes(prog,
-//! args)` return the child's stdout as raw `bytes`, same `Ok`/`Err` partition as `run`/`run_args`
-//! (a non-zero exit is `Ok` — the bytes are never thrown away; only a spawn failure is `Err`).
+//! args)` return the child's stdout as raw `bytes`.
+//! The twins carry NO status channel (a bare `Result[bytes]`), so they follow `cmd`'s partition, NOT
+//! `run`'s: **any failed child is `Err`** (stderr as the message, a status line if it wrote none) —
+//! `Ok(bytes)` means "the command succeeded and these are its bytes". That is the ratified R1
+//! bytes-twin rule, stated verbatim by `request.rs`'s `lower_result_bytes` ("a non-2xx status here MUST
+//! become `Err` — otherwise a 404/500 HTML error page comes back as `Ok(bytes)` and a caller writes it
+//! to disk as if the download succeeded"). Returning `Ok` for a failed child would make
+//! `run_bytes("gzip -dc missing.gz")` indistinguishable from a command that legitimately printed
+//! nothing. A command that exits non-zero *and* has meaningful stdout (`grep`, `diff`) belongs on
+//! `run`/`run_args`, which carry `code` + both streams.
 //! Residual: the bytes path carries stdout only (a `bytes`-carrying structured result would need a new
-//! native struct through `seed_stdlib_structs`) — merge with `2>&1` if you need stderr's bytes.
+//! native struct through `seed_stdlib_structs`); there is no byte-exact stderr on either form.
 //!
 //! `run(line)` / `run_args(prog, args)` are the structured forms: both return `Result[ProcResult]`
 //! where `ProcResult{stdout: str, stderr: str, code: int}` carries BOTH streams and the exit code.
@@ -55,31 +63,41 @@ fn cmd(h: &mut dyn Host) -> Result<NativeRet, HostError> {
                 let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
                 Ok(NativeRet::Ok(Box::new(NativeRet::Str(stdout))))
             } else {
-                // Non-zero exit: report stderr. Fall back to a status line if it wrote nothing
-                // there, so the error is never an empty string.
-                let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
-                let msg = if stderr.is_empty() {
-                    match out.status.code() {
-                        Some(c) => format!("command exited with status {c}"),
-                        None => "command terminated by signal".to_string(),
-                    }
-                } else {
-                    stderr
-                };
-                Ok(NativeRet::Err(msg))
+                Ok(NativeRet::Err(failure_msg(&out)))
             }
         }
         Err(e) => Ok(NativeRet::Err(format!("failed to run command: {e}"))),
     }
 }
 
-/// W6-4 — the bytes twin's result: the child's stdout, byte-exact, in Go `cmd.Output()` shape (which
-/// likewise hands the collected bytes back next to a non-zero-status error). Same `Ok`/`Err` partition as
-/// `run`/`run_args`: a non-zero exit is a normal `Ok` (dropping already-captured bytes because the child
-/// exited 1 would be the very data loss B1 forbids — and `run_args` already documents a non-zero exit as
-/// `Ok`); only a spawn failure is `Err`. stdout ONLY (see the module doc's residual).
+/// The `Err` payload for a child that exited non-zero, shared by `cmd` and the W6-4 bytes twins (the
+/// three status-channel-less forms). stderr is the message; fall back to a status line if it wrote
+/// nothing there, so the error is never an empty string. Decoded lossily — this is a DIAGNOSTIC
+/// rendering, not user payload (the payload path is `Ok(bytes)`), so U+FFFD here loses nothing.
+fn failure_msg(out: &std::process::Output) -> String {
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    if stderr.is_empty() {
+        match out.status.code() {
+            Some(c) => format!("command exited with status {c}"),
+            None => "command terminated by signal".to_string(),
+        }
+    } else {
+        stderr
+    }
+}
+
+/// W6-4 — the bytes twin's result: the child's stdout, byte-exact, on SUCCESS only. `Result[bytes]` has
+/// no status channel, so a failed child MUST be `Err` (`cmd`'s partition, and the ratified R1 rule
+/// `request.rs::lower_result_bytes` states verbatim) — otherwise `Ok(b"")` for a failed command is
+/// byte-identical to a successful one that printed nothing and the caller writes a 0-byte file believing
+/// it succeeded. Use `run`/`run_args` when a non-zero exit still has meaningful stdout (`grep`, `diff`).
+/// stdout ONLY (see the module doc's residual).
 fn stdout_bytes_ret(out: std::process::Output) -> NativeRet {
-    NativeRet::Ok(Box::new(NativeRet::Bytes(out.stdout)))
+    if out.status.success() {
+        NativeRet::Ok(Box::new(NativeRet::Bytes(out.stdout)))
+    } else {
+        NativeRet::Err(failure_msg(&out))
+    }
 }
 
 fn run_bytes(h: &mut dyn Host) -> Result<NativeRet, HostError> {
@@ -105,8 +123,9 @@ fn run_args_bytes(h: &mut dyn Host) -> Result<NativeRet, HostError> {
 
 /// Build a `Result[ProcResult]` from a finished command's captured output. A signal-killed process
 /// (no exit code) reports `code = -1`. Output is decoded LOSSILY as UTF-8 (the fields are `str`), which
-/// is why `run_bytes`/`run_args_bytes` exist — see the module doc's W6-4 note for why this seam must not
-/// Err instead (Err would destroy the captured output, which B1's non-destructive rule forbids).
+/// is why `run_bytes`/`run_args_bytes` exist — see the module doc's W6-4 note for why THIS seam must not
+/// Err instead (Err would destroy the captured output, which B1's non-destructive rule forbids; the
+/// bytes twins can afford `Err` because they have no `code`/`stderr` to destroy).
 fn proc_result_ret(out: std::process::Output) -> NativeRet {
     let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
     let stderr = String::from_utf8_lossy(&out.stderr).into_owned();

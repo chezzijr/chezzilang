@@ -24,8 +24,9 @@ native fn run(command: str) -> Result[ProcResult]
 native fn run_args(command: str, args: List[str]) -> Result[ProcResult]
 
 # W6-4 — byte-exact stdout capture. `ProcResult`'s fields are `str`, so `cmd`/`run`/`run_args` decode
-# lossily (an undecodable byte → U+FFFD); these twins never decode. SAME `Ok`/`Err` partition as
-# `run`/`run_args` (a non-zero exit is `Ok` — captured bytes are never thrown away; only a spawn failure
-# is `Err`), Go `cmd.Output()` shape. stdout ONLY: for stderr's bytes merge it with `2>&1`.
+# lossily (an undecodable byte → U+FFFD); these twins never decode. `Result[bytes]` has NO status
+# channel, so they follow `cmd`'s partition, not `run`'s: any failed child is `Err` (stderr as the
+# message, else a status line) — `Ok(bytes)` means the command SUCCEEDED. Non-zero-with-stdout
+# (`grep`/`diff`) belongs on `run`/`run_args`. stdout ONLY: there is no byte-exact stderr.
 native fn run_bytes(command: str) -> Result[bytes]
 native fn run_args_bytes(command: str, args: List[str]) -> Result[bytes]

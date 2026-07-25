@@ -281,14 +281,28 @@ durable on disk)"). Fix is one-line-class: recurse into the inner core even when
 `Stdout`/`Stderr` inner would otherwise hand `emit_out("")` to the parity sink / stream queue. All four
 `Backing` arms of BOTH fns were enumerated: `flush_core`'s `File`/`Stdout`/`Stderr` were already correct
 (the new unconditional recursion reaches the std-stream arms and stays an honest no-op), and
-`write_to_core`'s `File`/`Buffered` arms are correct as-is. Two siblings deliberately NOT touched:
-`WriterCore::Drop` (`src/vm/core.rs`) carries the identical `if buf.is_empty() { return; }`
-short-circuit but is benign (the inner `BufWriter`'s own drop flushes — which is exactly why the repro
-still landed the bytes *after* exit), and the `Stdout`/`Stderr` lossy `write_bytes` is W6-9 (still open).
-Tests: `tests/chz/stdlib/io_writer_test.chz`, serial==M:N. Docs: `docs/stdlib.md`'s `flush`/`close` rows
-now state the full-chain guarantee at OBSERVER level (visible to any other reader — an in-process
-`read_file`, a child, a sibling process), NOT `fsync` durability — the same careful wording
-`fs.atomic_write` already uses.
+`write_to_core`'s `File`/`Buffered` arms are correct as-is.
+Two more siblings surfaced by the enumeration, both fixed with it:
+* **`WriterCore::Drop` (`src/vm/core.rs`) was NOT benign** — its `Buffered` arm wrote the drained tail
+  only when the inner was `Backing::File`, so a **nested** `buffered(buffered(create(p)))` chain dropped
+  its tail on the floor forever (`docs/stdlib.md` promises a *file*-backed buffered writer drop-flushes,
+  and a transitively file-backed chain is file-backed). The arm now handles all four inner backings:
+  `File` → write+flush, `Buffered` → append to the inner's own buf (its `Drop` cascades one level down),
+  `Stdout`/`Stderr`/`None` → the documented no-op. Rust test (drop timing isn't `assert`-able):
+  `vm::core::tests::drop_flushes_a_nested_buffered_chain_to_the_file`.
+* **the recursion made `WriteErr::Closed` reachable from a core BENEATH the receiver**, which
+  `writer_method` renders receiver-relatively ("flush on a closed writer") — a lie when it is the inner
+  handle that was closed, and `close()` masks `Closed`, so it would have reported success for a flush
+  that persisted nothing. Both recursion sites now `map_err(from_inner)`: an inner `Closed` becomes
+  `Io("the inner writer this buffer drains into is closed")` — right handle named, not maskable.
+The `Stdout`/`Stderr` lossy `write_bytes` is W6-9 (still open, NOT touched).
+Tests: `tests/chz/stdlib/io_writer_test.chz` (mid-write drain via flush + close, never-filled control,
+at-cap, cap=1, a nested two-level chain, and the closed-inner `Err` on both `flush` and `write`),
+serial==M:N. Docs: `docs/stdlib.md`'s `flush`/`close` rows state the full-chain guarantee at OBSERVER
+level for a **file**-backed chain (an in-process `read_file`, a child, a sibling process), NOT `fsync`
+durability — and explicitly do NOT claim it for a `buffered(stdout())` writer, whose drained bytes go to
+the same never-awaited background stdout queue as `print` and through the same `str`-typed (W6-9 lossy)
+sink, so `Ok` there means *queued*, not *written*.
 
 ### W6-2. A module global FIRST INITIALIZED AFTER the first nursery reads as `nil` inside later tasks — check-OK-then-run-fault + silently-wrong — P0
 ```chezzi
@@ -367,14 +381,23 @@ this file had no entry. Go's `Output()` returns `[]byte`.
 **FIXED (2026-07-25) — the hatch landed; the text seam stays a DOCUMENTED lossy view, on purpose.**
 `process.run_bytes(line) -> Result[bytes]` and `process.run_args_bytes(prog, args) -> Result[bytes]`
 (`src/native/process.rs`, declared in `std/process.chz`, both `is_blocking`) return the child's stdout
-**byte-exactly**, in Go `cmd.Output()` shape and with the SAME `Ok`/`Err` partition as `run`/`run_args`:
-a non-zero exit is `Ok` (captured bytes are never discarded), only a spawn failure is `Err`.
+**byte-exactly** on success. Their partition is **`cmd`'s, not `run`'s**: `Result[bytes]` carries NO
+status channel, so **any failed child is `Err`** — a non-zero exit (stderr as the message, else
+`command exited with status N`, the same rendering `cmd` uses, via a shared `failure_msg`) as well as a
+spawn failure. That is the ratified R1 bytes-twin rule stated verbatim by `request.rs::lower_result_bytes`
+("a non-2xx status here MUST become `Err` — otherwise a 404/500 HTML error page comes back as `Ok(bytes)`
+and a caller writes it to disk as if the download succeeded"): `Ok(b"")` for a failed child would be
+byte-indistinguishable from a successful command that printed nothing, so
+`run_bytes("gzip -dc missing.gz")` would write a 0-byte file as if it had worked. A command that
+legitimately exits non-zero *and* has meaningful stdout (`grep`, `diff`) belongs on `run`/`run_args`,
+which carry `code` + both streams (shell form: `run_bytes("cmd; exit 0")`).
 **Why the `str` seam does NOT Err the way `Socket.read` does.** The ratified B1 answer is not "Err", it
 is **NON-DESTRUCTIVE**: `decode_carry`'s own contract says "a recoverable `Err` that silently drops
 already-received payload would just be a different flavour of the corruption B1 fixes", and `Socket.read`
 can only afford its strict `Err` *because* the undecodable bytes stay in `SocketCore::carry` for
 `read_bytes` to hand back byte-exactly. A finished child has NO carry — its `Output` is already
-consumed — so Err-ing `run` would DESTROY the captured stdout, stderr AND exit code, and the advertised
+consumed — so Err-ing `run` would DESTROY the captured stdout, stderr AND exit code (the bytes twins can
+afford `Err` precisely because they have no `code`/`stderr` to destroy), and the advertised
 "recovery" would be **re-running an arbitrary, side-effecting command line** (`git push`, a deploy, a
 `timeout`). That is a worse failure than the U+FFFD it replaces, and it would also widen `run`'s
 documented Ok/Err partition (`judge/run.chz` maps any `run` Err to a spawn-failure verdict). So
@@ -386,9 +409,13 @@ byte-exact twin named beside it, so nothing is *silent* any more.
 **RESIDUAL (open, low):** the bytes path carries **stdout only** — no byte-exact stderr, and no
 bytes-carrying structured result (binary stdout + stderr + code in one value). That needs a new native
 struct/field through `seed_stdlib_structs` (`src/checker/setup.rs`) plus the two other hand-built
-`ProcResult` layout copies; recorded in `docs/stdlib.md`'s "Not yet". Shell callers merge with `2>&1`.
-Tests: `tests/chz/stdlib/process_test.chz` (byte-exactness of both twins, bytes kept on a non-zero exit,
-Err only on a spawn failure, and the text seam pinned as a lossy-but-non-destructive view), serial==M:N.
+`ProcResult` layout copies; recorded in `docs/stdlib.md`'s "Not yet". No `2>&1` workaround is advertised:
+splicing stderr TEXT into a byte-exact stdout stream would corrupt it, and `run_args_bytes` has no shell
+to express it in.
+Tests: `tests/chz/stdlib/process_test.chz` (byte-exactness of both twins, `Err` on a non-zero exit with
+stderr as the message, `Err` on a spawn failure, and the text seam pinned as a lossy-but-non-destructive
+view), serial==M:N. Shell lines in the suite single-quote their temp paths (a `TMPDIR` with a space or a
+glob must not word-split — verified with `TMPDIR="/tmp/my dir"`).
 
 ### W6-5. A zero-field struct at an `extern` boundary PANICS the VM — `recover:` cannot catch it — P0
 ```chezzi
