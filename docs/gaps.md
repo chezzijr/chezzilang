@@ -224,7 +224,7 @@ parked_slot_nonsendable_rejects,in_data_cycle_rejects,unreached_nonsendable_runs
 - **Multi-frame / pending-`defer` suspended generators** — checker-UNREACHABLE (item 3 arms a/c); no valid
   program constructs them. The rejects are defensive guards, not a user-visible limit — nothing to build.
 
-## Session log — 2026-07-25 (bug-hunt wave 6: 18 findings — 3 FIXED (W6-1, W6-3, W6-4), 15 open + 3 carve-outs filed (W6-3b/c/d) — 2 never-hunted surfaces swept)
+## Session log — 2026-07-25 (bug-hunt wave 6: 18 findings — 7 FIXED (W6-1, W6-3, W6-4, W6-5, W6-6, W6-11, W6-16), 11 open + 3 carve-outs filed (W6-3b/c/d) — 2 never-hunted surfaces swept)
 
 Pre-freeze adversarial hunt, 5 disjoint parallel domains, weighted at the two surfaces the wave-5
 residual named as never audited (**FFI**, **GC + `unsafe`**) plus the concurrency code that landed
