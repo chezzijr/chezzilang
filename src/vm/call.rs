@@ -896,6 +896,13 @@ impl Vm {
             }
         }
         let Some(h) = recv.as_obj() else {
+            // W6-3 — an inline scalar (int/float/bool/nil) receiver: the checker grants int/float the
+            // arith operator protocols and int/bool `Hashable` intrinsically, so answer those here.
+            // Miss-only, so this costs nothing for any resolvable call.
+            if let Some(v) = self.intrinsic_proto_method(recv, method, &args, span)? {
+                self.push(v);
+                return Ok(());
+            }
             return Err(self.err(
                 format!("type {} has no method '{method}'", self.type_name(recv)),
                 span,
@@ -1150,28 +1157,48 @@ impl Vm {
             self.push(Value::obj(cursor));
             return Ok(());
         }
-        // Core-type methods (M6): built-in methods on `str` / `list`. Handled before the clone-match
-        // so `list.push` mutates the heap object in place (the match below clones the Obj). Mirrors
-        // `interp::builtins::call_method` exactly — error strings included (parity-tested).
-        if matches!(
-            self.heap.get(h),
-            Obj::Str(_) | Obj::List(_) | Obj::Map(_) | Obj::Set(_)
-        ) {
-            let result = self.core_method(h, method, &args, span)?;
-            self.push(result);
-            return Ok(());
+        // Built-in container methods, dispatched off the handle BEFORE the clone-match below so
+        // `list.push`/`bytearray.push` mutate the heap object in place (the match clones the Obj):
+        //   `str`/`list`/`map`/`set` → `core_method` (M6; mirrors `interp::builtins::call_method`
+        //                              exactly — error strings included, parity-tested),
+        //   `bytes`                  → `bytes_method` (immutable: only `decode() -> str`),
+        //   `bytearray`              → `bytearray_method` (`len`/`push`/`pop`/`extend`/`decode`;
+        //                              separate from `core_method`, same in-place `get_mut` discipline).
+        enum Container {
+            Core,
+            Bytes,
+            ByteArray,
         }
-        // `bytes` methods (immutable byte sequence): only `decode() -> str` (UTF-8). Routed off the
-        // handle like the other core-type methods.
-        if matches!(self.heap.get(h), Obj::Bytes(_)) {
-            let result = self.bytes_method(h, method, &args, span)?;
-            self.push(result);
-            return Ok(());
-        }
-        // `bytearray` methods (mutable buffer): `len`/`push`/`pop`/`extend`/`decode`. Routed separately
-        // (not `core_method`) but with the same in-place-via-`get_mut` discipline as `list`.
-        if matches!(self.heap.get(h), Obj::ByteArray(_)) {
-            let result = self.bytearray_method(h, method, &args, span)?;
+        let container = match self.heap.get(h) {
+            Obj::Str(_) | Obj::List(_) | Obj::Map(_) | Obj::Set(_) => Some(Container::Core),
+            Obj::Bytes(_) => Some(Container::Bytes),
+            Obj::ByteArray(_) => Some(Container::ByteArray),
+            _ => None,
+        };
+        if let Some(container) = container {
+            let dispatched = match container {
+                Container::Core => self.core_method(h, method, &args, span),
+                Container::Bytes => self.bytes_method(h, method, &args, span),
+                Container::ByteArray => self.bytearray_method(h, method, &args, span),
+            };
+            let result = match dispatched {
+                Ok(v) => v,
+                // W6-3 — MISS-only fallback to the intrinsic `Index`/`IndexSet`/`Slice`/`Hashable`
+                // methods the checker grants these built-ins. NAME-GATED because a dispatcher error
+                // is not necessarily a name miss (`Set.add` on a cyclic key, `list.pop` on empty…)
+                // and rewriting an existing fault message would be a regression; none of the three
+                // dispatchers owns these four names, so the gate is exact. Zero cost unless the
+                // dispatch already failed.
+                Err(e) => {
+                    if !matches!(method, "index" | "set_index" | "slice" | "hash") {
+                        return Err(e);
+                    }
+                    match self.intrinsic_proto_method(recv, method, &args, span)? {
+                        Some(v) => v,
+                        None => return Err(e),
+                    }
+                }
+            };
             self.push(result);
             return Ok(());
         }
@@ -1304,12 +1331,21 @@ impl Vm {
                     return Ok(());
                 }
                 // ROOT REDESIGN — render the BARE display name (not the identity key) in the error.
+                // Resolved BEFORE the W6-3 fallback below so the `name` borrow of `self` ends here.
                 let display = self
                     .program
                     .structs
                     .get(name)
                     .map(|d| d.display_name.clone())
                     .unwrap_or_else(|| crate::compiler::bare_display(name));
+                // W6-3 — a ZERO-FIELD struct with no `hash` method is intrinsically `Hashable`
+                // (`proto.rs`), so `x.hash()` in an erased `[T: Hashable]` body must answer with the
+                // SAME constant `struct_hash` gives it as a Map/Set key. Miss-only, so a struct that
+                // DEFINES `hash` (or any other protocol method) already dispatched above.
+                if let Some(v) = self.intrinsic_proto_method(recv, method, &args, span)? {
+                    self.push(v);
+                    return Ok(());
+                }
                 Err(self.err(format!("struct '{display}' has no method '{method}'"), span))
             }
             // Enum method dispatch (name-resolved, like structs). Enums are type-erased — no `tid`,
@@ -1412,13 +1448,31 @@ impl Vm {
                     self.push(v);
                     return Ok(());
                 }
+                // W6-3 — a SCALAR-underlying newtype intrinsically satisfies `Add`/`Sub`/`Mul`/`Div`/
+                // `Mod`/`Comparable` (`proto.rs`: its same-type `+`/`<` auto-flow to the underlying's
+                // native op, with no user method), so `a.add(b)`/`a.compare(b)` in an erased body must
+                // answer with exactly what `a + b` / `a < b` produce. Miss-only: the newtype's own
+                // methods resolved above.
+                if let Some(v) = self.intrinsic_proto_method(recv, method, &args, span)? {
+                    self.push(v);
+                    return Ok(());
+                }
                 let display = crate::compiler::bare_display(&nt_key);
                 Err(self.err(format!("type {display} has no method '{method}'"), span))
             }
-            _ => Err(self.err(
-                format!("type {} has no method '{method}'", self.type_name(recv)),
-                span,
-            )),
+            // W6-3 — a BOXED scalar (`Obj::BigInt`, and any other Obj-tagged scalar) is Obj-tagged, so
+            // it never reaches the inline-scalar miss above and lands here instead: it must answer the
+            // same intrinsic arith/`Hashable`/`Comparable` methods its inline twin does.
+            _ => {
+                if let Some(v) = self.intrinsic_proto_method(recv, method, &args, span)? {
+                    self.push(v);
+                    return Ok(());
+                }
+                Err(self.err(
+                    format!("type {} has no method '{method}'", self.type_name(recv)),
+                    span,
+                ))
+            }
         }
     }
 
@@ -2273,6 +2327,125 @@ impl Vm {
                 span,
             )),
         }
+    }
+
+    /// W6-3 — dispatch an **intrinsic** protocol method: one the checker grants a BUILT-IN with no
+    /// user method behind it (`src/checker/proto.rs::satisfies_args_d`'s `grant_intrinsic` early-outs
+    /// — `Add`/`Sub`/`Mul`/`Div`/`Mod`/`Neg` + `Comparable` on int/float/numeric-newtype, `Hashable`
+    /// on int/str/bytes/bool/zero-field-struct, `Index`/`IndexSet`/`Slice` on list/map/str/bytes/
+    /// bytearray). An erased `[T: Add]` body may write `a.add(b)`, so the VM must answer it.
+    ///
+    /// EVERY arm **delegates** to the exact primitive the operator form uses — `arith` for
+    /// `add`..`mod`, `neg_value` for `neg`, `hash_value` (the Map/Set key hash) for `hash`,
+    /// `compare` for `compare`, `get_index`/`set_index`/`get_slice` for the indexing trio — so
+    /// `a.add(b)` ≡ `a + b` and `c.index(k)` ≡ `c[k]` by CONSTRUCTION: same value, same int/float
+    /// coercion, same overflow / divide-by-zero / out-of-bounds fault text. Nothing is
+    /// reimplemented here.
+    ///
+    /// Returns `Ok(None)` when `(method, argc)` is not an intrinsic pair, so the caller re-raises its
+    /// original `has no method` error unchanged. Called ONLY from a method-resolution MISS, so a
+    /// struct/enum/newtype that DEFINES `add`/`hash`/`index`/… always gets ITS method (it resolves
+    /// first) and this costs nothing on any successful dispatch.
+    ///
+    /// NOT covered (no VM arm is possible): `Iterator[E]`'s `next` — see `INTRINSIC_UNPAIRED` in
+    /// `src/checker/proto.rs`.
+    pub(super) fn intrinsic_proto_method(
+        &mut self,
+        recv: Value,
+        method: &str,
+        args: &[Value],
+        span: Span,
+    ) -> Result<Option<Value>, RuntimeError> {
+        // `Add`/`Sub`/`Mul`/`Div`/`Mod` → the binary-arith primitive (which itself routes a
+        // same-newtype pair through `newtype_arith`, so the numeric-newtype grant lands here too).
+        let bin = match method {
+            "add" => Some(Op::Add),
+            "sub" => Some(Op::Sub),
+            "mul" => Some(Op::Mul),
+            "div" => Some(Op::Div),
+            "mod" => Some(Op::Mod),
+            _ => None,
+        };
+        if let Some(bin) = bin
+            && args.len() == 1
+        {
+            self.push(recv);
+            self.push(args[0]);
+            self.arith(&bin, span)?;
+            return Ok(Some(self.pop()));
+        }
+        match (method, args.len()) {
+            ("neg", 0) => Ok(Some(self.neg_value(recv, span)?)),
+            // `Hashable` → the SAME hash a Map/Set key gets, so `x.hash()` can never disagree with
+            // `m[x]` / `s.has(x)` membership. Routes a zero-field struct through `struct_hash`'s
+            // `fields.is_empty() && !methods.contains_key("hash")` guard, which is the runtime mirror
+            // of the checker's zero-field `Hashable` grant. `recv` stays rooted across the (possibly
+            // re-entrant, possibly allocating) hash + the result box.
+            ("hash", 0) => {
+                self.push(recv);
+                let hv = self.hash_value(recv, span)?;
+                let n = self.make_int(hv as i64);
+                self.pop();
+                Ok(Some(n))
+            }
+            // `Comparable` — needed for the numeric-NEWTYPE grant (the scalar receivers are already
+            // intercepted before dispatch). `compare` unwraps a newtype to the UNDERLYING's native
+            // ordering, which is exactly what `<` uses (`compare_op`'s same-newtype fast path); the
+            // newtype's own `compare` method is deliberately never an operator (see proto.rs).
+            ("compare", 1) => Ok(self
+                .compare(recv, args[0])
+                .map(|ord| Value::int(ord as i64))),
+            ("index", 1) => {
+                self.push(recv);
+                self.push(args[0]);
+                self.get_index(span)?;
+                Ok(Some(self.pop()))
+            }
+            // `set_index` returns `nil` per the protocol; `Vm::set_index` pushes nothing.
+            ("set_index", 2) => {
+                self.push(recv);
+                self.push(args[0]);
+                self.push(args[1]);
+                self.set_index(span)?;
+                Ok(Some(Value::nil()))
+            }
+            // `Slice[R]`'s components are `int?` (`Option[int]`) VALUES, while `get_slice` reads the
+            // raw `Nil`/`Int` form both engines push for `c[a:b:c]` — so unwrap each `Some(n)`/`None`
+            // (by the FIXED native variant ids, never a name compare, mirroring `stmt.rs`'s `opt`
+            // closure inverted). A non-Option component is left as-is so `get_slice` raises its own
+            // `expected int, found X`.
+            ("slice", 3) => {
+                self.push(recv);
+                for a in args {
+                    let c = self.unwrap_opt_int(*a);
+                    self.push(c);
+                }
+                self.get_slice(span)?;
+                Ok(Some(self.pop()))
+            }
+            _ => Ok(None),
+        }
+    }
+
+    /// `Option[int]` → the raw `Nil`/`Int` slice component `Vm::get_slice` expects. Gated on the
+    /// fixed `VID_SOME`/`VID_NONE_VARIANT` ids (a user enum shadowing `Some`/`None` gets its own
+    /// ids), mirroring `src/vm/stmt.rs`'s `opt` closure in reverse.
+    fn unwrap_opt_int(&self, v: Value) -> Value {
+        use crate::vm::op::{VID_NONE_VARIANT, VID_SOME};
+        if let Some(h) = v.as_obj()
+            && let Obj::Enum {
+                variant_id,
+                payload,
+            } = self.heap.get(h)
+        {
+            if *variant_id == VID_SOME && payload.len() == 1 {
+                return payload[0];
+            }
+            if *variant_id == VID_NONE_VARIANT {
+                return Value::nil();
+            }
+        }
+        v
     }
 
     pub(super) fn core_method(

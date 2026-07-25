@@ -224,7 +224,7 @@ parked_slot_nonsendable_rejects,in_data_cycle_rejects,unreached_nonsendable_runs
 - **Multi-frame / pending-`defer` suspended generators** — checker-UNREACHABLE (item 3 arms a/c); no valid
   program constructs them. The rejects are defensive guards, not a user-visible limit — nothing to build.
 
-## Session log — 2026-07-25 (bug-hunt wave 6: 18 findings — 2 FIXED (W6-1, W6-4), 16 open — 6 P0/high, 2 never-hunted surfaces swept)
+## Session log — 2026-07-25 (bug-hunt wave 6: 18 findings — 3 FIXED (W6-1, W6-3, W6-4), 15 open + 1 carve-out filed (W6-3b) — 2 never-hunted surfaces swept)
 
 Pre-freeze adversarial hunt, 5 disjoint parallel domains, weighted at the two surfaces the wave-5
 residual named as never audited (**FFI**, **GC + `unsafe`**) plus the concurrency code that landed
@@ -240,7 +240,7 @@ parity oracle is structurally blind to all of them. That is now the dominant sha
 ### THE META-FINDING — 5 of the 6 P0s are ONE class: a fix applied to SOME arms of an N-way set
 This is the same completeness/partial-coverage class the 2026-07-23 sweep found 3 instances of. It is
 still the highest-yield lever in the repo and it is cheap: **enumerate the arms, assert each one.**
-- W6-3: `compare`/`str` intercepted on scalar receivers, the other ~9 intrinsic protocol grants not.
+- W6-3: `compare`/`str` intercepted on scalar receivers, the other ~9 intrinsic protocol grants not. **FIXED.**
 - W6-4: R1 swept `Socket`/`io`/`request`/`crypto` off `from_utf8_lossy`, missed `std.process`. **FIXED.**
 - W6-1: `flush_core`'s non-empty-buffer arm flushes the inner core, its empty-buffer arm doesn't. **FIXED.**
 - W6-6: the extern-collision guard fires for bare-keyed enum variants, not module-keyed structs.
@@ -331,7 +331,7 @@ undocumented and unsound is that an **un-initialized-at-snapshot-time** global r
 checker has statically proven impossible for an `int`/`List[int]`/struct-typed slot. Go (a goroutine
 launched later reading a package-level var) and Python threads both see the current value.
 
-### W6-3. A protocol method a built-in satisfies INTRINSICALLY is not callable at runtime — check-OK-then-run-fault, ~11 methods — P0
+### W6-3. A protocol method a built-in satisfies INTRINSICALLY is not callable at runtime — check-OK-then-run-fault, ~11 methods — P0 — **FIXED (2026-07-25)**
 ```chezzi
 fn total[T: Add](xs: List[T], zero: T) -> T:
     acc := zero
@@ -358,6 +358,59 @@ is dispatched by the scalar `str` branch in `Vm::do_method_call`". Every intrins
 Reference: Rust `T: Add` makes `a.add(b)` callable — it IS the trait method; Go's interface method set is
 likewise callable through the interface value. `std/prelude.chz:257` declares `Add.add` as the protocol's
 method, so a type the checker says satisfies `Add` must answer `.add`.
+**FIXED (2026-07-25) — every intrinsic grant now has a runtime arm, and the pairing is RATCHETED.**
+One new `Vm::intrinsic_proto_method` (`src/vm/call.rs`) answers the whole set, and every arm **delegates**
+to the exact primitive the operator form already uses, so equivalence is by construction (verified
+observationally, both engines, value AND fault text): `add`/`sub`/`mul`/`div`/`mod` → `arith` (which
+itself routes a same-newtype pair through `newtype_arith`, so the numeric-newtype grant needs no separate
+code), `neg` → a new `Vm::neg_value` (`Op::Neg`'s body extracted verbatim into `src/vm/arith.rs`, now
+single-sourced), `hash` → `hash_value` (**the Map/Set key hash** — so `x.hash()` can never disagree with
+`m[x]`/`s.has(x)`, and a zero-field struct routes through `struct_hash`'s
+`fields.is_empty() && !methods.contains_key("hash")` guard, the runtime mirror of `proto.rs`'s grant),
+`compare` → `compare` (the underlying's NATIVE order, which is what `<` uses — never a newtype's own
+`compare` method, per proto.rs's soundness note), `index`/`set_index`/`slice` → `get_index`/`set_index`/
+`get_slice` (with the `Option[int]` → raw `Nil`/`Int` unwrap `Slice`'s protocol signature requires, gated
+on the fixed `VID_SOME`/`VID_NONE_VARIANT` ids). Nothing is reimplemented.
+It is wired at **five MISS sites** in `do_method_call` — inline-scalar miss, the merged built-in-container
+dispatch (`core_method`/`bytes_method`/`bytearray_method`, name-gated on the four container-intrinsic
+names so an existing fault message like `Set.add`'s cyclic-key depth cap is never rewritten), struct miss,
+newtype miss, and the catch-all `_ =>` (which is where a **boxed** `Obj::BigInt` scalar lands — it is
+Obj-tagged and never reaches the inline-scalar arm). Miss-only ⇒ a user method always wins (it resolves
+first) and the added per-call cost for an ordinary struct/handle method call is **zero**; the only
+always-on change is that the three container-dispatch `matches!` probes collapsed into one `match`.
+Benches re-measured: within run-to-run noise (the baseline itself flip-flops `loop` 1.01×↔1.00× and
+`struct` 2.49×↔2.62× between samples); `struct`/`poly_method` neutral-to-better.
+Full grant↔arm pairing, now machine-checked: `Comparable`→`compare`, `Stringable`→`str`,
+`Hashable`→`hash`, `Error`→`message`, `Iterable`→`iter`, `Index`→`index`, `IndexSet`→`index`+`set_index`,
+`Slice`→`slice`, `Add`/`Sub`/`Mul`/`Div`/`Mod`→`add`…`mod`, `Neg`→`neg`. **The ratchet** (worth more than
+the fix): `checker::proto::INTRINSIC_PROTO_METHODS` is the single table of intrinsic (protocol, method)
+pairs; every intrinsic `return Ok(())` in `satisfies_args_d` now returns through `grant_intrinsic`, which
+`debug_assert`s the protocol is registered, and `vm::tests::intrinsic_grants_all_have_vm_arms` runs one
+Chezzi snippet **per pair on BOTH engines** and asserts its snippet table covers the const exactly — so a
+newly-added grant with no VM arm fails the suite instead of shipping a check-OK-then-run-fault (verified
+by temporarily adding an unpaired pair: the test fails).
+Not shipped: `Iterator`→`next`, filed as **W6-3b** below and registered in `INTRINSIC_UNPAIRED` with a test
+asserting it still faults. Tests: `tests/chz/spec/intrinsic_proto_methods_test.chz` (17 `test fn` —
+arith/neg/hash/index/set_index/slice/newtype/boxed-scalar/protocol-value, operator-equivalence AND
+fault-message equality via `recover:`, plus user-method-wins controls), serial==M:N.
+
+### W6-3b. `Iterator[E]`'s `next` is granted to a RAW collection but has no runtime arm — check-OK-then-run-fault — carved out of W6-3, low
+```chezzi
+fn f[T: Iterator[int]](c: T):
+    print(str(c.next()))
+f([1, 2, 3])
+# check: ok  |  both engines: runtime error: type list has no method 'next'
+```
+The one intrinsic grant W6-3 could NOT pair. `proto.rs`'s `Iterator` arm keys conformance on `iter_elem`
+("can be iterated"), so a raw `list`/`map`/`str`/`set` is granted it — but `next(self) -> Option[E]` is
+inherently STATEFUL and a raw collection holds no cursor position, so there is no value-preserving VM arm
+(minting a fresh cursor per call would return element 0 forever — silently wrong, worse than the fault).
+The coherent fix is on the CHECKER side: narrow the `Iterator` grant to real cursors/generators
+(`Obj::Iter`/generator types) and let a raw collection satisfy only `Iterable` (whose `iter()` DOES work),
+which is what Rust (`IntoIterator` vs `Iterator`) and Go (`range` vs an iterator value) both do. That is a
+grant-set change, so it was out of W6-3's scope. Registered as `checker::proto::INTRINSIC_UNPAIRED` with
+`vm::tests::intrinsic_grants_all_have_vm_arms` asserting it STILL faults, so the carve-out can't rot: when
+this is fixed, retire the const entry, this section, and the assertion together.
 
 ### W6-4. `std.process` silently CORRUPTS non-UTF-8 child output (`from_utf8_lossy`), with no bytes hatch — the unswept B1/R1 sibling — P0 — **FIXED (2026-07-25)**
 ```chezzi

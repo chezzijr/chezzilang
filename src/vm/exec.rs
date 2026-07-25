@@ -1639,26 +1639,7 @@ impl Vm {
             Op::Add | Op::Sub | Op::Mul | Op::Div | Op::Mod => self.arith(op, span)?,
             Op::Neg => {
                 let v = self.pop();
-                let r = if let Some(n) = self.int_val(v) {
-                    let neg = n.checked_neg().ok_or_else(|| {
-                        self.err("integer overflow in negation".to_string(), span)
-                    })?;
-                    self.make_int(neg)
-                } else if v.is_float() {
-                    let f = self.float_of(v);
-                    self.box_float(-f)
-                } else if let Some(h) = v.as_obj()
-                    && matches!(self.heap.get(h), Obj::Struct { .. } | Obj::Enum { .. })
-                {
-                    // M22: unary `-` on a struct/enum dispatches to its `neg(self) -> Self` method
-                    // (the `Neg` protocol). Mirrors `struct_arith`, but self-only (no `other`).
-                    let (proto, home) = self.resolve_overload_method(v, "neg", span)?;
-                    self.guarded(|vm| vm.run_proto(proto, home, None, vec![v], true, false, span))?
-                } else {
-                    return Err(
-                        self.err(format!("cannot apply Neg to {}", self.type_name(v)), span)
-                    );
-                };
+                let r = self.neg_value(v, span)?;
                 self.push(r);
             }
             Op::Not => {

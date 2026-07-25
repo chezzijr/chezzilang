@@ -13630,3 +13630,150 @@ main()
 ";
     assert_mc_parity(src, "3\n0\n255\n1\n");
 }
+
+/// **W6-3 structural ratchet — every intrinsic protocol grant must have a runnable VM arm.**
+///
+/// The checker grants built-ins protocol conformance INTRINSICALLY (no user method) at the
+/// `grant_intrinsic` early-outs in `checker::proto::satisfies_args_d`, and the granted method must
+/// therefore be CALLABLE at runtime from an erased generic body. That pairing was honored for 2 of
+/// ~11 grants and broke the rest (`type int has no method 'add'` after `check: ok`).
+///
+/// This test pins the pairing: one Chezzi snippet per `(protocol, method)` pair in
+/// `INTRINSIC_PROTO_METHODS`, RUN on both engines (serial oracle + M:N) and asserted identical. The
+/// snippets-cover-the-table assertion is the ratchet: adding a grant without a runnable VM arm fails
+/// HERE instead of shipping a check-OK-then-run-fault.
+#[test]
+fn intrinsic_grants_all_have_vm_arms() {
+    use crate::checker::proto::{INTRINSIC_PROTO_METHODS, INTRINSIC_UNPAIRED};
+    // (protocol, method, program, expected stdout) — each program calls the granted method on a
+    // BUILT-IN receiver through an erased `[T: Protocol]` body.
+    let snippets: &[(&str, &str, &str, &str)] = &[
+        (
+            "Comparable",
+            "compare",
+            "fn f[T: Comparable](a: T, b: T) -> int:\n    return a.compare(b)\nprint(f(1, 2) < 0)\nprint(f(2, 2))\n",
+            "true\n0\n",
+        ),
+        (
+            "Stringable",
+            "str",
+            "fn f[T: Stringable](a: T) -> str:\n    return a.str()\nprint(f(5))\nprint(f(true))\n",
+            "5\ntrue\n",
+        ),
+        (
+            "Hashable",
+            "hash",
+            "fn f[T: Hashable](a: T) -> int:\n    return a.hash()\nprint(f(3) == f(3))\nprint(f(\"a\") != f(\"b\"))\n",
+            "true\ntrue\n",
+        ),
+        (
+            "Error",
+            "message",
+            "fn f[T: Error](e: T) -> str:\n    return e.message()\nprint(f(\"boom\"))\n",
+            "boom\n",
+        ),
+        (
+            "Iterable",
+            "iter",
+            "fn f[T: Iterable[int]](c: T) -> int:\n    n := 0\n    for x in c.iter():\n        n = n + x\n    return n\nprint(f([1, 2, 3]))\n",
+            "6\n",
+        ),
+        (
+            "Index",
+            "index",
+            "fn f[T: Index[int, int]](c: T) -> int:\n    return c.index(1)\nprint(f([7, 8, 9]))\n",
+            "8\n",
+        ),
+        (
+            "IndexSet",
+            "index",
+            "fn f[T: IndexSet[int, int]](c: T) -> int:\n    return c.index(1)\nprint(f([7, 8, 9]))\n",
+            "8\n",
+        ),
+        (
+            "IndexSet",
+            "set_index",
+            "fn f[T: IndexSet[int, int]](c: T):\n    c.set_index(0, 42)\nxs := [1, 2]\nf(xs)\nprint(xs[0])\n",
+            "42\n",
+        ),
+        (
+            "Slice",
+            "slice",
+            "fn f[T: Slice[List[int]]](c: T) -> List[int]:\n    return c.slice(Some(0), Some(2), None)\nprint(str(f([1, 2, 3])))\n",
+            "[1, 2]\n",
+        ),
+        (
+            "Add",
+            "add",
+            "fn f[T: Add](a: T, b: T) -> T:\n    return a.add(b)\nprint(f(2, 3))\nprint(f(1.5, 0.5))\n",
+            "5\n2.0\n",
+        ),
+        (
+            "Sub",
+            "sub",
+            "fn f[T: Sub](a: T, b: T) -> T:\n    return a.sub(b)\nprint(f(7, 2))\n",
+            "5\n",
+        ),
+        (
+            "Mul",
+            "mul",
+            "fn f[T: Mul](a: T, b: T) -> T:\n    return a.mul(b)\nprint(f(6, 7))\n",
+            "42\n",
+        ),
+        (
+            "Div",
+            "div",
+            "fn f[T: Div](a: T, b: T) -> T:\n    return a.div(b)\nprint(f(9, 2))\n",
+            "4\n",
+        ),
+        (
+            "Mod",
+            "mod",
+            "fn f[T: Mod](a: T, b: T) -> T:\n    return a.mod(b)\nprint(f(9, 2))\n",
+            "1\n",
+        ),
+        (
+            "Neg",
+            "neg",
+            "fn f[T: Neg](a: T) -> T:\n    return a.neg()\nprint(f(5))\nprint(f(-2.5))\n",
+            "-5\n2.5\n",
+        ),
+    ];
+    // The ratchet: the snippet table must cover INTRINSIC_PROTO_METHODS exactly, both ways.
+    for pair in INTRINSIC_PROTO_METHODS {
+        assert!(
+            snippets.iter().any(|(p, m, _, _)| (*p, *m) == *pair),
+            "intrinsic grant {pair:?} has no snippet in intrinsic_grants_all_have_vm_arms — add a \
+             `Vm::intrinsic_proto_method` arm for it AND a snippet here (W6-3)"
+        );
+    }
+    for (p, m, _, _) in snippets {
+        assert!(
+            INTRINSIC_PROTO_METHODS.contains(&(*p, *m)),
+            "snippet for ({p:?}, {m:?}) is not a registered intrinsic grant"
+        );
+    }
+    assert_eq!(
+        snippets.len(),
+        INTRINSIC_PROTO_METHODS.len(),
+        "one snippet per intrinsic (protocol, method) pair"
+    );
+    for (p, m, src, want) in snippets {
+        let serial = run_capture(src).unwrap_or_else(|e| {
+            panic!("{p}.{m} intrinsic method faulted on the serial engine: {e}")
+        });
+        assert_eq!(serial, *want, "{p}.{m} intrinsic method (serial)");
+        let mn = run_capture_parallel(src)
+            .unwrap_or_else(|e| panic!("{p}.{m} intrinsic method faulted on the M:N engine: {e}"));
+        assert_eq!(mn, *want, "{p}.{m} intrinsic method (M:N)");
+    }
+    // The documented carve-out must STAY a fault (see `INTRINSIC_UNPAIRED`) — if a later change makes
+    // it work, the const + its `docs/gaps.md` follow-up entry must be retired with it.
+    assert_eq!(INTRINSIC_UNPAIRED, &[("Iterator", "next")]);
+    let unpaired = "fn f[T: Iterator[int]](c: T):\n    print(str(c.next()))\nf([1, 2, 3])\n";
+    let err = run_capture(unpaired).expect_err("Iterator.next on a raw list still faults");
+    assert!(
+        err.to_string().contains("has no method 'next'"),
+        "unexpected Iterator.next fault: {err}"
+    );
+}

@@ -6472,6 +6472,36 @@ no longer a non-goal — complete VM-only support shipped** (see below).
 One bullet per milestone/epic. Full landing detail (TDD notes, review-panel findings, test-count deltas,
 branch names) is in the git log.
 
+- **Fix — an intrinsic protocol method on a built-in is now CALLABLE (2026-07-25, bug-hunt wave-6 W6-3,
+  P0).** `fn total[T: Add](xs: List[T], zero: T) -> T` with `acc.add(x)` passed `chezzi check` and then
+  faulted `type int has no method 'add'` on BOTH engines — the idiomatic Rust/Go generic shape, broken.
+  The checker grants built-ins ~12 protocol conformances *intrinsically* (no user method), but the VM
+  hand-intercepted only 2 of them (`compare`, `str`); everything else — `add`/`sub`/`mul`/`div`/`mod`/
+  `neg`/`hash` on `int`/`float`, `hash` on `bool`/`str`/`bytes`/a zero-field struct, the arith set +
+  `compare` on a numeric `newtype`, `index`/`set_index`/`slice` on `list`/`map`/`str`/`bytes`/`bytearray`
+  — fell through to `has no method`. Also reachable without generics via a protocol-typed value
+  (`x: Hashable = 5`). Parity-blind (byte-identical on both engines), and the repo's **dominant defect
+  class**: a fix applied to SOME arms of an N-way set.
+  Fix: one `Vm::intrinsic_proto_method` (`src/vm/call.rs`) that **delegates** to the exact primitive each
+  operator form already uses — `arith` (which covers the numeric-newtype grant for free via
+  `newtype_arith`), a newly extracted `Vm::neg_value` (`Op::Neg`'s body, now single-sourced in
+  `src/vm/arith.rs`), `hash_value` (literally the Map/Set key hash, so `x.hash()` can never disagree with
+  `m[x]`/`s.has(x)`), `compare`, and `get_index`/`set_index`/`get_slice` (with the `Option[int]` → raw
+  `Nil`/`Int` unwrap `Slice`'s signature needs). Nothing reimplemented ⇒ `a.add(b)` ≡ `a + b` and
+  `c.index(k)` ≡ `c[k]` by construction, fault text included. Wired at 5 **miss** sites (inline scalar,
+  the merged built-in-container dispatch, struct, newtype, and the catch-all where a boxed `BigInt`
+  lands), so a user method always wins and an ordinary struct method call pays **zero** added cost
+  (`do_method_call` stays a Tier-1 perf target); benches re-measured within run-to-run noise.
+  **The ratchet, worth more than the fix:** `checker::proto::INTRINSIC_PROTO_METHODS` is now the single
+  (protocol, method) table, every intrinsic grant returns through `grant_intrinsic` (which
+  `debug_assert`s registration), and `vm::tests::intrinsic_grants_all_have_vm_arms` runs one Chezzi
+  snippet **per pair on both engines** and asserts the snippet table covers the const exactly — a new
+  grant without a VM arm now fails the suite. One documented carve-out, `Iterator`→`next` on a raw
+  collection (stateful, no cursor position; needs a checker grant-narrowing) is registered in
+  `INTRINSIC_UNPAIRED` with a test asserting it still faults, and filed as **W6-3b**.
+  Tests: `tests/chz/spec/intrinsic_proto_methods_test.chz` (17 `test fn`, operator-equivalence AND
+  fault-message equality via `recover:`, plus user-method-wins controls), serial==M:N. Docs:
+  `docs/gaps.md` (W6-3 FIXED + new W6-3b), `docs/spec.md`, `docs/syntax.md`.
 - **Diagnostic — recursive *local* fn crossing the airlock (2026-07-18, bug-hunt).** A nested (local)
   recursive `fn` sent across a task boundary used to fault with the misleading `maximum structural depth
   (10000) exceeded (cyclic data structure?)` — there is no cyclic *data*, just the compiler letrec's

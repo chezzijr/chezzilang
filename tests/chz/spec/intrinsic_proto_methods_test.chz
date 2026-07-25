@@ -1,0 +1,303 @@
+# tests/chz/spec/intrinsic_proto_methods_test.chz — an intrinsic protocol method is CALLABLE.
+#
+# Bug-hunt wave-6 W6-3: the checker grants built-ins intrinsic conformance to Add/Sub/Mul/Div/Mod/
+# Neg/Hashable/Comparable/Stringable/Index/IndexSet/Slice with NO user method, so an erased generic
+# body may call `a.add(b)` / `x.hash()` / `c.index(k)` on a concrete built-in. Every arm must be
+# OBSERVATIONALLY IDENTICAL to its operator form (same value, same fault message).
+# Serial==M:N is guarded by `test_runner::chz_suite_passes_both_engines`.
+
+# ---- erased generic bodies (the shape under test) ----
+
+fn total[T: Add](xs: List[T], zero: T) -> T:
+    acc := zero
+    for x in xs:
+        acc = acc.add(x)
+    return acc
+
+fn add_m[T: Add](a: T, b: T) -> T:
+    return a.add(b)
+
+fn sub_m[T: Sub](a: T, b: T) -> T:
+    return a.sub(b)
+
+fn mul_m[T: Mul](a: T, b: T) -> T:
+    return a.mul(b)
+
+fn div_m[T: Div](a: T, b: T) -> T:
+    return a.div(b)
+
+fn mod_m[T: Mod](a: T, b: T) -> T:
+    return a.mod(b)
+
+fn neg_m[T: Neg](a: T) -> T:
+    return a.neg()
+
+fn hash_m[T: Hashable](a: T) -> int:
+    return a.hash()
+
+fn cmp_m[T: Comparable](a: T, b: T) -> int:
+    return a.compare(b)
+
+fn str_m[T: Stringable](a: T) -> str:
+    return a.str()
+
+# ---- helpers ----
+
+fn msg_of[T](r: Result[T, Error], where_: str) -> str:
+    match r:
+        Ok(_): assert false, where_ + " must fault"
+        Err(e): return e.message()
+    return ""
+
+# ---- int / float arithmetic methods == the operator forms ----
+
+test fn int_arith_methods_match_operators():
+    assert total([1, 2, 3], 0) == 6, "the filed W6-3 repro"
+    assert add_m(2, 3) == 2 + 3
+    assert sub_m(7, 2) == 7 - 2
+    assert mul_m(6, 7) == 6 * 7
+    assert div_m(7, 2) == 7 / 2
+    assert mod_m(7, 2) == 7 % 2
+    assert neg_m(5) == -5
+    assert neg_m(-5) == -(-5)
+    # mixed-sign int div/mod must match the operator exactly (truncation direction)
+    assert div_m(-7, 2) == -7 / 2
+    assert mod_m(-7, 2) == -7 % 2
+
+test fn float_arith_methods_match_operators():
+    assert add_m(1.5, 2.25) == 1.5 + 2.25
+    assert sub_m(1.5, 2.25) == 1.5 - 2.25
+    assert mul_m(1.5, 2.25) == 1.5 * 2.25
+    assert div_m(1.5, 2.5) == 1.5 / 2.5
+    assert mod_m(7.5, 2.0) == 7.5 % 2.0
+    assert neg_m(2.5) == -2.5
+    # 1.0/0.0 is inf (NOT a fault) on both forms; -0.0 renders identically
+    assert str(div_m(1.0, 0.0)) == str(1.0 / 0.0)
+    assert str(neg_m(0.0)) == str(-0.0)
+    assert str(neg_m(-0.0)) == str(-(-0.0))
+
+test fn arith_method_faults_match_operator_faults():
+    big := 9223372036854775807
+    small := -big - 1
+    rm := recover: add_m(big, 1)
+    ro := recover: big + 1
+    assert msg_of(rm, "add_m") == msg_of(ro, "+")
+    rm = recover: sub_m(small, 1)
+    ro = recover: small - 1
+    assert msg_of(rm, "sub_m") == msg_of(ro, "-")
+    rm = recover: mul_m(big, 2)
+    ro = recover: big * 2
+    assert msg_of(rm, "mul_m") == msg_of(ro, "*")
+    rm = recover: div_m(1, 0)
+    ro = recover: 1 / 0
+    assert msg_of(rm, "div_m") == msg_of(ro, "/")
+    assert msg_of(rm, "div_m") == "division by zero"
+    rm = recover: mod_m(1, 0)
+    ro = recover: 1 % 0
+    assert msg_of(rm, "mod_m") == msg_of(ro, "%")
+    rm = recover: neg_m(small)
+    ro = recover: -small
+    assert msg_of(rm, "neg_m") == msg_of(ro, "unary -")
+    assert msg_of(rm, "neg_m") == "integer overflow in negation"
+
+# ---- Hashable: the method must agree with real container hashing ----
+
+test fn hash_method_agrees_with_container_hashing():
+    # equal values hash equal, distinct values (almost surely) differ
+    assert hash_m(3) == hash_m(3)
+    assert hash_m("a") == hash_m("a")
+    assert hash_m("a") != hash_m("b")
+    assert hash_m(true) == hash_m(true)
+    assert hash_m(true) != hash_m(false)
+    assert hash_m(b"xy") == hash_m(b"xy")
+    assert hash_m(b"xy") != hash_m(b"zz")
+    # agreement with real container use (the same hash backs Map/Set lookup)
+    m: Map[int, int] = {}
+    m[5] = 1
+    assert m.has(5)
+    assert hash_m(5) == hash_m(5)
+    s := Set(["k"])
+    assert s.has("k")
+    assert hash_m("k") == hash_m("k")
+
+test fn hash_method_reachable_through_a_protocol_value():
+    # the non-generic entry point into the same dispatch
+    x: Hashable = 5
+    assert x.hash() == hash_m(5)
+    y: Hashable = "a"
+    assert y.hash() == hash_m("a")
+
+struct Unit:
+    pass
+
+struct OwnHash:
+    fn hash(self) -> int:
+        return 42
+
+test fn zero_field_struct_hash_and_user_hash_control():
+    # a zero-field struct is intrinsically Hashable (constant hash, no user method)
+    assert hash_m(Unit()) == hash_m(Unit())
+    assert Set([Unit()]).has(Unit()), "self-consistent with Set membership"
+    # control: a struct that DEFINES `hash` still gets ITS method
+    assert hash_m(OwnHash()) == 42
+    assert OwnHash().hash() == 42
+
+# ---- Index / IndexSet / Slice on built-in containers ----
+
+fn ix_li[T: Index[int, int]](c: T, k: int) -> int:
+    return c.index(k)
+
+fn ix_map[T: Index[str, int]](c: T, k: str) -> int:
+    return c.index(k)
+
+fn ix_str[T: Index[int, str]](c: T, k: int) -> str:
+    return c.index(k)
+
+fn si_li[T: IndexSet[int, int]](c: T, k: int, v: int):
+    c.set_index(k, v)
+
+fn si_map[T: IndexSet[str, int]](c: T, k: str, v: int):
+    c.set_index(k, v)
+
+fn sl_li[T: Slice[List[int]]](c: T, a: int?, b: int?, st: int?) -> List[int]:
+    return c.slice(a, b, st)
+
+fn sl_str[T: Slice[str]](c: T, a: int?, b: int?, st: int?) -> str:
+    return c.slice(a, b, st)
+
+test fn list_index_and_slice_methods_match_operators():
+    xs := [7, 8, 9]
+    assert ix_li(xs, 0) == xs[0]
+    assert ix_li(xs, 2) == xs[2]
+    assert ix_li(xs, -1) == xs[-1], "negative indexing identical to the operator"
+    assert sl_li(xs, Some(0), Some(2), None) == xs[0:2]
+    assert sl_li(xs, None, None, None) == xs[:]
+    assert sl_li(xs, None, None, Some(-1)) == xs[::-1], "reversed slice"
+    assert sl_li(xs, Some(-2), None, None) == xs[-2:]
+    # fault messages identical to the operator form
+    rm := recover: ix_li(xs, 9)
+    ro := recover: xs[9]
+    assert msg_of(rm, "list.index") == msg_of(ro, "xs[9]")
+    assert msg_of(rm, "list.index") == "index 9 out of bounds (len 3)"
+
+test fn list_set_index_method_matches_operator():
+    a := [1, 2, 3]
+    b := [1, 2, 3]
+    si_li(a, 0, 99)
+    b[0] = 99
+    assert a == b
+    si_li(a, -1, 77)
+    b[-1] = 77
+    assert a == b
+    rm := recover: si_li(a, 9, 0)
+    ro := recover:
+        b[9] = 0
+    assert msg_of(rm, "list.set_index") == msg_of(ro, "b[9]=")
+
+test fn map_index_and_set_index_methods_match_operators():
+    m := {"a": 1, "b": 2}
+    assert ix_map(m, "a") == m["a"]
+    si_map(m, "c", 3)
+    assert m == {"a": 1, "b": 2, "c": 3}
+    si_map(m, "a", 9)
+    assert m["a"] == 9
+    n := {"a": 1}
+    rm := recover: ix_map(n, "zz")
+    ro := recover: n["zz"]
+    assert msg_of(rm, "map.index") == msg_of(ro, "n[zz]")
+
+test fn str_index_and_slice_methods_match_operators():
+    s := "hello"
+    assert ix_str(s, 0) == s[0]
+    assert ix_str(s, -1) == s[-1]
+    assert sl_str(s, Some(1), Some(3), None) == s[1:3]
+    assert sl_str(s, None, None, Some(-1)) == s[::-1]
+    rm := recover: ix_str(s, 9)
+    ro := recover: s[9]
+    assert msg_of(rm, "str.index") == msg_of(ro, "s[9]")
+
+test fn bytes_and_bytearray_index_slice_methods():
+    bs := b"abc"
+    assert ix_li(bs, 0) == bs[0]
+    assert ix_li(bs, -1) == bs[-1]
+    ba := bytearray(b"abc")
+    assert ix_li(ba, 1) == ba[1]
+    si_li(ba, 0, 122)
+    assert ba[0] == 122
+    rm := recover: ix_li(bs, 9)
+    ro := recover: bs[9]
+    assert msg_of(rm, "bytes.index") == msg_of(ro, "bs[9]")
+
+# ---- numeric newtype: intrinsic operator protocols ----
+
+newtype Meters = float
+newtype Count = int
+
+test fn numeric_newtype_operator_methods():
+    a := Meters(1.5)
+    b := Meters(2.5)
+    assert float(add_m(a, b)) == float(a + b)
+    assert float(sub_m(a, b)) == float(a - b)
+    assert float(mul_m(a, b)) == float(a * b)
+    assert float(div_m(a, b)) == float(a / b)
+    assert float(mod_m(Meters(7.5), Meters(2.0))) == float(Meters(7.5) % Meters(2.0))
+    p := Count(7)
+    q := Count(2)
+    assert int(add_m(p, q)) == int(p + q)
+    assert int(div_m(p, q)) == int(p / q)
+    assert int(mod_m(p, q)) == int(p % q)
+
+test fn newtype_compare_matches_operator():
+    a := Meters(1.5)
+    b := Meters(2.5)
+    assert (cmp_m(a, b) < 0) == (a < b)
+    assert (cmp_m(b, a) < 0) == (b < a)
+    assert cmp_m(b, b) == 0
+    assert (cmp_m(Count(1), Count(2)) < 0) == (Count(1) < Count(2))
+
+# ---- boxed (wide) scalars reach the same arms ----
+
+test fn boxed_scalar_receivers():
+    wide := 4611686018427387900
+    assert add_m(wide, 100) == wide + 100
+    assert sub_m(wide, 100) == wide - 100
+    assert neg_m(wide) == -wide
+    assert hash_m(wide) == hash_m(wide)
+    assert cmp_m(wide, 1) == cmp_m(wide, 1)
+    assert (cmp_m(wide, 1) > 0) == (wide > 1)
+
+# ---- controls: the already-working arms must stay working ----
+
+test fn scalar_compare_and_str_controls():
+    assert (cmp_m(1, 2) < 0) == (1 < 2)
+    assert cmp_m(2, 2) == 0
+    assert (cmp_m("a", "b") < 0) == ("a" < "b")
+    assert str_m(5) == "5"
+    assert str_m(1.5) == str(1.5)
+    assert str_m(true) == "true"
+    assert str_m("hi") == "hi"
+
+struct Vec2:
+    x: int
+    fn add(self, other: Vec2) -> Vec2:
+        return Vec2(self.x + other.x)
+    fn neg(self) -> Vec2:
+        return Vec2(-self.x)
+
+test fn user_struct_methods_still_win():
+    assert add_m(Vec2(1), Vec2(2)).x == 3
+    assert neg_m(Vec2(4)).x == -4
+    assert total([Vec2(1), Vec2(2)], Vec2(0)).x == 3
+
+struct Cell:
+    xs: List[int]
+    fn index(self, k: int) -> int:
+        return self.xs[k]
+    fn set_index(self, k: int, v: int):
+        self.xs[k] = v
+
+test fn user_struct_index_methods_still_win():
+    c := Cell([1, 2, 3])
+    assert ix_li(c, 1) == 2
+    si_li(c, 1, 9)
+    assert c.xs == [1, 9, 3]

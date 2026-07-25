@@ -3,7 +3,74 @@
 
 use super::*;
 
+/// **The intrinsic-grant ↔ VM-arm pairing table (W6-3's structural ratchet).**
+///
+/// Every `(protocol, method)` pair a built-in type is granted conformance to *intrinsically* — i.e.
+/// with NO user method behind it — by the `grant_intrinsic` early-outs in [`Checker::satisfies_args_d`].
+/// A grant here is a PROMISE that an erased generic body may CALL that method on the granted
+/// built-in, so each pair MUST have a matching runtime arm in `Vm::intrinsic_proto_method`
+/// (`src/vm/call.rs`) or the program type-checks and then faults `has no method` (bug-hunt wave-6
+/// W6-3, the check-OK-then-run-fault class).
+///
+/// The pairing is enforced two ways, so a NEW grant cannot silently skip its VM arm:
+/// * [`Checker::grant_intrinsic`] `debug_assert`s that the protocol it is granting is listed here (or
+///   in [`INTRINSIC_UNPAIRED`]) — copying a sibling grant arm inherits the check;
+/// * `vm::tests::intrinsic_grants_all_have_vm_arms` RUNS one Chezzi snippet per pair on BOTH engines
+///   and asserts its snippet table covers this table exactly.
+///
+/// Many-to-many on purpose: `IndexSet` contributes two methods, and `Index`/`IndexSet` share `index`.
+/// Not listed (deliberately, they grant no method of their own): the pure-embed-bundle short-circuit
+/// (`Arithmetic` — its methods come from its embeds, each listed here) and the protocol-existential
+/// self-match arm (the value's methods come from the concrete value it carries).
+pub const INTRINSIC_PROTO_METHODS: &[(&str, &str)] = &[
+    ("Comparable", "compare"),
+    ("Stringable", "str"),
+    ("Hashable", "hash"),
+    ("Error", "message"),
+    ("Iterable", "iter"),
+    ("Index", "index"),
+    ("IndexSet", "index"),
+    ("IndexSet", "set_index"),
+    ("Slice", "slice"),
+    ("Add", "add"),
+    ("Sub", "sub"),
+    ("Mul", "mul"),
+    ("Div", "div"),
+    ("Mod", "mod"),
+    ("Neg", "neg"),
+];
+
+/// Intrinsic grants that have NO runtime arm and CANNOT get one — a KNOWN check-OK/run-fault, kept
+/// here (rather than silently absent) so the carve-out is asserted instead of rotting.
+///
+/// `Iterator[E]`'s `next(self) -> Option[E]` is granted to raw `list`/`map`/`str`/`set` (the grant is
+/// keyed on `iter_elem`, i.e. "can be iterated"), but `next` is inherently STATEFUL and a raw
+/// collection holds no cursor position — minting a fresh cursor per call would return element 0
+/// forever, which is worse than faulting. The coherent fix narrows the checker grant to real
+/// cursors/generators (a `Ty` change, tracked in `docs/gaps.md`), not a VM arm.
+/// `vm::tests::intrinsic_grants_all_have_vm_arms` asserts each pair here STILL faults.
+pub const INTRINSIC_UNPAIRED: &[(&str, &str)] = &[("Iterator", "next")];
+
 impl Checker {
+    /// Grant `protocol` conformance INTRINSICALLY (no user method) — the single funnel every
+    /// intrinsic early-out in [`Checker::satisfies_args_d`] returns through. It exists for the
+    /// [`INTRINSIC_PROTO_METHODS`] `debug_assert`: a new intrinsic grant for a protocol whose method
+    /// has no `Vm::intrinsic_proto_method` arm trips here in the test suite instead of shipping a
+    /// check-OK-then-run-fault. Behaviorally it is `Ok(())` (the assert is debug-only), and it does
+    /// NOT decide conformance — every caller already did.
+    fn grant_intrinsic(&self, protocol: &str) -> Result<(), String> {
+        debug_assert!(
+            INTRINSIC_PROTO_METHODS
+                .iter()
+                .chain(INTRINSIC_UNPAIRED)
+                .any(|(p, _)| *p == protocol),
+            "intrinsic conformance granted for protocol '{protocol}' with no entry in \
+             INTRINSIC_PROTO_METHODS — add the (protocol, method) pair AND the matching \
+             Vm::intrinsic_proto_method arm, or register it in INTRINSIC_UNPAIRED (W6-3)"
+        );
+        Ok(())
+    }
+
     /// Register a `protocol` declaration's method signatures. `Self` resolves to `Ty::Param("Self")`.
     pub(super) fn hoist_protocol(
         &mut self,
@@ -953,7 +1020,7 @@ impl Checker {
             }
         }
         if protocol == "Comparable" && matches!(ty, Ty::Int | Ty::Float | Ty::Str) {
-            return Ok(());
+            return self.grant_intrinsic(protocol);
         }
         // `Stringable` (sole method `str(self) -> str`) is satisfied intrinsically by every scalar —
         // all four stringify (int/float/bool/str), so a `[T: Stringable]` generic accepts them (the
@@ -962,13 +1029,13 @@ impl Checker {
         // Structs/enums/newtypes still fall through to the structural `satisfies_methods` below (a type
         // WITHOUT a `str(self) -> str` method stays correctly rejected; newtypes stay opt-in).
         if protocol == "Stringable" && matches!(ty, Ty::Int | Ty::Float | Ty::Bool | Ty::Str) {
-            return Ok(());
+            return self.grant_intrinsic(protocol);
         }
         // `Hashable` is satisfied intrinsically by the scalar key types (mirrors the map/set key
         // restriction; float is excluded — its equality is a hazard). Struct conformance falls
         // through to the structural check (needs a `hash(self) -> int` method).
         if protocol == "Hashable" && matches!(ty, Ty::Int | Ty::Str | Ty::Bytes | Ty::Bool) {
-            return Ok(());
+            return self.grant_intrinsic(protocol);
         }
         // A ZERO-FIELD struct WITHOUT an explicit `hash(self)` method is intrinsically `Hashable`: it
         // has no state to hash, so both engines return a constant hash for it (with `==`'s type-tag
@@ -987,11 +1054,11 @@ impl Checker {
                 .get(name)
                 .is_some_and(|d| d.fields.is_empty() && !d.methods.contains_key("hash"))
         {
-            return Ok(());
+            return self.grant_intrinsic(protocol);
         }
         // `str` conforms to `Error` intrinsically (Go-style: its message is itself).
         if protocol == "Error" && matches!(ty, Ty::Str) {
-            return Ok(());
+            return self.grant_intrinsic(protocol);
         }
         // `Iterator` conformance is exactly "can be iterated" — built-in collections intrinsically,
         // a user struct via its structural `next(self) -> Option[E]`. Reusing `iter_elem` keeps this
@@ -1000,7 +1067,7 @@ impl Checker {
         // another iterator-generic call), since `iter_elem` can't see through a bare param.
         if protocol == "Iterator" && !matches!(ty, Ty::Param(_)) {
             return if self.iter_elem(ty).is_some() {
-                Ok(())
+                self.grant_intrinsic(protocol)
             } else {
                 Err(format!("type {ty} does not satisfy Iterator"))
             };
@@ -1023,7 +1090,7 @@ impl Checker {
             {
                 return Err(format!("type {ty} does not satisfy Iterable"));
             }
-            return Ok(());
+            return self.grant_intrinsic(protocol);
         }
         // `Index`/`IndexSet`/`Slice` — built-in `list`/`map`/`str` conform intrinsically (a struct
         // conforms structurally, falling through to the matcher below; a `Ty::Param` forwards to its
@@ -1054,7 +1121,7 @@ impl Checker {
                     return Err(format!("type {ty} does not satisfy {protocol}"));
                 }
             }
-            return Ok(());
+            return self.grant_intrinsic(protocol);
         }
         // A protocol existential value satisfies a protocol iff it IS that protocol AND its carried
         // args match the required ones (arity + arg-wise `compatible`). This enforces strict
@@ -1075,7 +1142,7 @@ impl Checker {
         if matches!(protocol, "Add" | "Sub" | "Mul" | "Div" | "Mod" | "Neg")
             && matches!(ty, Ty::Int | Ty::Float)
         {
-            return Ok(());
+            return self.grant_intrinsic(protocol);
         }
         // A bound type parameter satisfies a protocol if that protocol is among its declared bounds —
         // this is what lets a generic forward its `T: P` value into another `[U: P]` call. For a
@@ -1134,7 +1201,7 @@ impl Checker {
                         "Add" | "Sub" | "Mul" | "Div" | "Mod" | "Comparable"
                     )
                 {
-                    return Ok(());
+                    return self.grant_intrinsic(protocol);
                 }
                 // SOUNDNESS: a newtype operator overload defined as a METHOD is NEVER dispatched at
                 // runtime — the same-newtype operator arm (vm `newtype_arith` / `compare_op`, interp

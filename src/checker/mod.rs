@@ -1865,7 +1865,9 @@ struct Checker {
 
 mod expr;
 mod pattern;
-mod proto;
+// `pub(crate)` for `proto::INTRINSIC_PROTO_METHODS` — the intrinsic-grant ↔ VM-arm pairing table,
+// which `vm::tests::intrinsic_grants_all_have_vm_arms` reads to assert the pairing (W6-3).
+pub(crate) mod proto;
 mod setup;
 mod sig;
 

@@ -1597,6 +1597,18 @@ intrinsic scalar arms of `Comparable`/`Hashable`/`Add`). Inside the erased body 
 scalar renders exactly as `str(v)` does. (Like the other intrinsic protocols, this is bound-only:
 a direct `(5).str()` on a concrete scalar is still a compile error — use the free `str(5)` builtin.)
 
+**Every intrinsic grant is callable, and equals its operator form.** The same holds for *all* the
+protocols a built-in satisfies intrinsically, not just `Stringable`: inside an erased `[T: P]` body (or
+through a protocol-typed value like `x: Hashable = 5`) you may call `a.add(b)`/`a.sub(b)`/`a.mul(b)`/
+`a.div(b)`/`a.mod(b)`/`a.neg()` on `int`/`float`/a numeric `newtype`, `a.compare(b)`, `x.hash()` on
+`int`/`str`/`bytes`/`bool`/a zero-field struct, and `c.index(k)`/`c.set_index(k, v)`/`c.slice(s, e, st)`
+on `list`/`map`/`str`/`bytes`/`bytearray`. Each is **defined as** the operator form — `a.add(b)` ≡
+`a + b` (same overflow / divide-by-zero fault), `c.index(k)` ≡ `c[k]` (negative indexing and the same
+out-of-bounds message), `c.slice(Some(0), Some(2), None)` ≡ `c[0:2]` (the three components are `int?`),
+`x.hash()` is exactly the hash `x` gets as a map/set key. A type that defines the method itself always
+gets its own. Still bound-only, and still one gap: `Iterator`'s `next` on a *raw* collection faults (no
+cursor position) — use `for`, or `.iter()` for a real cursor.
+
 **Display-hook resolution.** `print`/`str()`/interpolation use your `str` method as the display hook
 **only when it conforms to `Stringable`** — a single `self` parameter and a **`str` return** (whether
 that return type is written explicitly, inferred from the body, or a `str` type-alias). `str` is
@@ -1622,7 +1634,11 @@ The prebuilt **`Hashable`** protocol (`hash(self) -> int`) governs `map` keys an
 int`. `map`/`set` are real insertion-ordered hash tables, so **any `Hashable` type can be a key or
 element** — a struct key is hashed via its `hash()` and the probe confirmed by structural `==`.
 `float` is rejected (NaN footgun). Contract: two structurally-equal structs must return the same
-`hash()` (the implementor owns this, like Rust's `Hash`/`Eq`).
+`hash()` (the implementor owns this, like Rust's `Hash`/`Eq`). `bytes` and a zero-field struct (no state
+to hash) also satisfy it intrinsically. In an erased `[T: Hashable]` body `x.hash()` returns exactly the
+hash the container uses, so the method and membership can never disagree; the numeric value itself is
+**unspecified** (a build-dependent 64-bit hash, possibly negative) — rely on consistency, not on a
+literal.
 
 **Keys are value types (Go model).** A `struct`/`enum`/`newtype` key or element is **snapshotted
 (deep-copied) when it is stored**, so mutating your original value *after* the insert can never reach

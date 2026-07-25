@@ -483,6 +483,32 @@ impl Vm {
         Ok(())
     }
 
+    /// Unary `-v` — the single source of truth for [`Op::Neg`] AND for the intrinsic `Neg` protocol
+    /// method (`v.neg()` in an erased `[T: Neg]` body, dispatched by `Vm::intrinsic_proto_method`).
+    /// Extracted verbatim from the `Op::Neg` handler so the two forms are observationally identical:
+    /// same `integer overflow in negation`, same `-0.0` float behavior, same `cannot apply Neg to X`,
+    /// same struct/enum `neg(self)` overload dispatch.
+    pub(super) fn neg_value(&mut self, v: Value, span: Span) -> Result<Value, RuntimeError> {
+        if let Some(n) = self.int_val(v) {
+            let neg = n
+                .checked_neg()
+                .ok_or_else(|| self.err("integer overflow in negation".to_string(), span))?;
+            Ok(self.make_int(neg))
+        } else if v.is_float() {
+            let f = self.float_of(v);
+            Ok(self.box_float(-f))
+        } else if let Some(h) = v.as_obj()
+            && matches!(self.heap.get(h), Obj::Struct { .. } | Obj::Enum { .. })
+        {
+            // M22: unary `-` on a struct/enum dispatches to its `neg(self) -> Self` method
+            // (the `Neg` protocol). Mirrors `struct_arith`, but self-only (no `other`).
+            let (proto, home) = self.resolve_overload_method(v, "neg", span)?;
+            self.guarded(|vm| vm.run_proto(proto, home, None, vec![v], true, false, span))
+        } else {
+            Err(self.err(format!("cannot apply Neg to {}", self.type_name(v)), span))
+        }
+    }
+
     /// `[elem...] * n` — repeat the list `n` times into a fresh list (gap #3). `n <= 0` → empty.
     /// Guards the allocation against capacity overflow (a giant `n` would otherwise abort the
     /// process via Vec's panic) — raises a RECOVERABLE fault, mirroring `str.repeat`. Mirrored

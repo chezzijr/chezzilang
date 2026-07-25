@@ -569,6 +569,16 @@ root marker (all fields default to unset, so `entrypoint` is required only for t
   (a `[T: Stringable]` generic accepts them, and the erased body's `v.str()` dispatches to the scalar
   render), closing the last inconsistency where every other scalar-friendly builtin protocol
   (`Comparable`/`Hashable`/`Add`/…) already had an intrinsic scalar arm but `Stringable` did not.
+- **Shipped (bug-hunt wave-6 W6-3):** *every* intrinsically-granted protocol method is now **callable**
+  from an erased generic body, not just `compare`/`str` — `add`/`sub`/`mul`/`div`/`mod`/`neg` on
+  `int`/`float`/a numeric `newtype`, `hash` on `int`/`str`/`bytes`/`bool`/a zero-field struct, and
+  `index`/`set_index`/`slice` on `list`/`map`/`str`/`bytes`/`bytearray`. Each dispatches to the **same
+  primitive its operator form uses**, so `a.add(b)` ≡ `a + b`, `c.index(k)` ≡ `c[k]`, `c.slice(…)` ≡
+  `c[a:b:c]` and `x.hash()` is exactly the hash `x` gets as a map/set key — same values, same faults.
+  The checker↔VM pairing is machine-checked (`checker::proto::INTRINSIC_PROTO_METHODS` +
+  `vm::tests::intrinsic_grants_all_have_vm_arms`), so a future grant cannot ship without its arm. One
+  documented carve-out: `Iterator`'s stateful `next` on a *raw* collection still faults (a raw
+  collection has no cursor position) — see `docs/gaps.md` W6-3b.
 - **Shipped since (post-M18 stdlib batch):** `std.request` custom headers + non-GET/POST verbs
   (`put`/`patch`/`delete`/`head` + a general `request(method, url, body, headers)`), carried off-heap
   via a new `NativeArg::Map` so the headers form stays blocking-pool-offloadable under `--parallel`;
@@ -884,6 +894,23 @@ everything else is methods-only. See the M21 note above.
 **Stringable** — every scalar (`int`/`float`/`bool`/`str`) intrinsically satisfies the `Stringable`
 protocol, so `[T: Stringable]` generics accept them (an erased `v.str()` body dispatches to the same
 native `stringify` that `str(x)` uses). Structs/enums/newtypes opt in with their own `str(self) -> str`.
+
+**Intrinsic conformance implies a callable method.** Wherever a built-in satisfies a protocol
+*intrinsically* (no user method), the protocol's method is callable on it inside an erased generic body
+or through a protocol-typed value — and it is defined as **exactly** the operator/primitive form:
+`a.add(b)` ≡ `a + b` (same overflow / divide-by-zero faults, same int↔float coercion), `a.neg()` ≡ `-a`,
+`a.compare(b)` is what `<` orders by, `c.index(k)` ≡ `c[k]`, `c.set_index(k, v)` ≡ `c[k] = v` (returns
+`nil`), `c.slice(s, e, st)` ≡ `c[s:e:st]` (its three components are `int?`, i.e. `Option[int]`), and
+`x.hash()` is exactly the hash `x` gets as a map/set key. `hash()`'s numeric value itself is
+**unspecified** (a build-dependent 64-bit hash, possibly negative) — only its consistency is
+guaranteed: equal values hash equally, and it agrees with container membership.
+
+The intrinsic grants and their methods are: `Comparable`→`compare`, `Stringable`→`str`,
+`Hashable`→`hash`, `Error`→`message`, `Iterable`→`iter`, `Index`→`index`, `IndexSet`→`index`+`set_index`,
+`Slice`→`slice`, `Add`/`Sub`/`Mul`/`Div`/`Mod`→`add`/`sub`/`mul`/`div`/`mod`, `Neg`→`neg`. A type that
+DEFINES the method always gets its own (intrinsic dispatch is a resolution fallback, never a shadow).
+Known gap: `Iterator`'s `next` on a *raw* collection is granted but faults — a raw collection holds no
+cursor position (`docs/gaps.md` W6-3b); iterate it with `for`, or call `.iter()` for a real cursor.
 
 **What does NOT exist (current boundaries):**
 
