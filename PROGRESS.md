@@ -89,8 +89,15 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > `--serial` == default M:N byte-identical: `examples/ffi{,_struct,_str,_int}.chz`, a plain `extern strlen`,
 > and a `struct Cplx{re,im}` + `cabs` by-value-struct extern. Docs: `docs/syntax.md` extern section (the
 > promise now true + names the variant ctors, the accepted TYPE-name cases, and the zero-field limit).
-> Left OPEN as its own follow-up (not one of the four): `newtype N = int` + `extern fn N` is the same
-> silent-shadow hole.
+> **Fifth arm, folded in (`7abe925`) rather than deferred:** the first cut left `newtype N = int` +
+> `extern fn N` OPEN as "its own follow-up" — but two of three adversarial reviewers charged the
+> deferral, and rightly: a newtype registers a bare-visible one-arg ctor exactly like a struct, so
+> `newtype abs = int` + `extern fn abs(x: int) -> int` checked OK and then called the CTOR, printing
+> `abs(-7)` instead of `7` on both engines (verified on the real binary). Leaving a KNOWN instance of
+> the class inside the very predicate being rewritten is not a follow-up — `newtype_names` joined the
+> predicate, so it is now the whole bare-visible ctor set (`struct_names` + `newtype_names` +
+> `variant_owners` + builtin variants). Test: `extern_named_after_newtype_rejected` (both decl orders,
+> single-module + graph path, plus a non-colliding control).
 
 > **✅ TEST RUNNER (2026-07-24) — `chezzi test` selection + output ergonomics batch (docs/future.md §3b
 > #5/#6/#7).** Seven opt-in, low-risk CLI+formatting flags on the runner — NO VM/checker/compiler touch,
