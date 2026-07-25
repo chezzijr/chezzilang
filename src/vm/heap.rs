@@ -423,11 +423,12 @@ pub enum Obj {
     Generator(Box<super::GeneratorCore>),
 }
 
-/// One heap slot: the object (or a hole, for swept/free slots) + its GC mark bit.
+/// One heap slot: the object, or a hole for swept/free slots. Exactly 64B (`Option<Obj>` niche-packs
+/// `None` free). The GC mark bit is NOT here — it lives in [`Heap::marks`], a dense parallel bitset,
+/// so the mark/sweep scan iterates a compact bit array without pulling each `Obj` payload into cache.
 #[derive(Debug)]
 struct Slot {
     obj: Option<Obj>,
-    mark: bool,
 }
 
 /// Smallest GC threshold — don't collect until at least this many objects have been allocated
@@ -444,6 +445,10 @@ const MIN_GC_THRESHOLD: usize = 256;
 #[derive(Debug)]
 pub struct Heap {
     slots: Vec<Slot>,
+    /// GC mark bits, one per slot index (bit `i & 63` of word `i >> 6`). A dense parallel bitset
+    /// grown in lockstep with `slots`, so the sweep mark-scan touches a compact bit array instead of
+    /// each 64B `Obj` slot. Post-sweep invariant: all bits 0 (survivors cleared, holes never marked).
+    marks: Vec<u64>,
     free: Vec<u32>,
     /// Live (allocated, not freed) object count.
     live: usize,
@@ -468,6 +473,7 @@ impl Default for Heap {
     fn default() -> Self {
         Heap {
             slots: Vec::new(),
+            marks: Vec::new(),
             free: Vec::new(),
             live: 0,
             since_gc: 0,
@@ -484,21 +490,43 @@ impl Heap {
         Heap::default()
     }
 
+    /// Test the mark bit for slot `i` (absent word → unmarked).
+    #[inline]
+    fn is_marked(&self, i: usize) -> bool {
+        self.marks
+            .get(i >> 6)
+            .is_some_and(|w| (w >> (i & 63)) & 1 == 1)
+    }
+
+    /// Set the mark bit for slot `i` (word `i >> 6` must already exist — grown at alloc).
+    #[inline]
+    fn set_mark(&mut self, i: usize) {
+        self.marks[i >> 6] |= 1u64 << (i & 63);
+    }
+
+    /// Clear the mark bit for slot `i` (no-op if the word is absent).
+    #[inline]
+    fn clear_mark(&mut self, i: usize) {
+        if let Some(w) = self.marks.get_mut(i >> 6) {
+            *w &= !(1u64 << (i & 63));
+        }
+    }
+
     /// Allocate an object, returning its handle. Reuses a free slot when available.
     pub fn alloc(&mut self, obj: Obj) -> GcRef {
         self.live += 1;
         self.since_gc += 1;
         if let Some(idx) = self.free.pop() {
-            let slot = &mut self.slots[idx as usize];
-            slot.obj = Some(obj);
-            slot.mark = false;
+            self.slots[idx as usize].obj = Some(obj);
+            self.clear_mark(idx as usize); // defensive: already 0 post-sweep (matches old mark=false)
             GcRef(idx)
         } else {
             let idx = self.slots.len() as u32;
-            self.slots.push(Slot {
-                obj: Some(obj),
-                mark: false,
-            });
+            self.slots.push(Slot { obj: Some(obj) });
+            // Grow `marks` in lockstep so word `idx>>6` exists for a later `set_mark`.
+            while self.marks.len() <= (idx as usize) >> 6 {
+                self.marks.push(0);
+            }
             GcRef(idx)
         }
     }
@@ -531,11 +559,11 @@ impl Heap {
     /// Mark one object reachable. Returns `true` if it was *newly* marked (caller should then
     /// trace its children), `false` if already marked (a cycle / shared reference — stop).
     pub fn mark(&mut self, h: GcRef) -> bool {
-        let slot = &mut self.slots[h.0 as usize];
-        if slot.mark {
+        let i = h.0 as usize;
+        if self.is_marked(i) {
             false
         } else {
-            slot.mark = true;
+            self.set_mark(i);
             true
         }
     }
@@ -630,12 +658,12 @@ impl Heap {
     /// Free every unmarked object and clear all marks for the next cycle. Resets the allocation
     /// counter and grows the next-collection threshold relative to the surviving set.
     pub fn sweep(&mut self) {
-        for (idx, slot) in self.slots.iter_mut().enumerate() {
-            if slot.obj.is_some() {
-                if slot.mark {
-                    slot.mark = false;
+        for idx in 0..self.slots.len() {
+            if self.slots[idx].obj.is_some() {
+                if self.is_marked(idx) {
+                    self.clear_mark(idx);
                 } else {
-                    slot.obj = None;
+                    self.slots[idx].obj = None;
                     self.free.push(idx as u32);
                     self.live -= 1;
                 }
@@ -717,6 +745,15 @@ mod iter_obj_tests {
     #[test]
     fn obj_iter_within_size_cap() {
         assert_eq!(std::mem::size_of::<Obj>(), 64);
+    }
+
+    /// The per-slot `Vec` element must be exactly 64B — the mark bit lives in the parallel `marks`
+    /// bitset, not padding the slot. `Option<Obj>` is 64B (Obj's spare-discriminant niche makes
+    /// `None` free), so with `mark` gone the slot is exactly one 64B `Obj` wide, and the mark/sweep
+    /// scan never pulls a payload into cache to read a bool.
+    #[test]
+    fn slot_element_is_64b() {
+        assert_eq!(std::mem::size_of::<Slot>(), 64);
     }
 
     /// M19 lever #1: inline struct fields. `Fields` must fit in ≤32B (`[Value;3]`=24B + len:u8 + the

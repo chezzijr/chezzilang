@@ -622,11 +622,17 @@ The original M5 baseline was ~4–6.5× over the then-existing (now-removed) tre
 
 **Heap-slot layout (GC-side; principled, low priority — GC moves no bench):**
 
-4. **Separate the mark bit from the object.** `Slot { obj: Option<Obj>, mark: bool }` (`heap.rs:234`)
-   interleaves a 1-byte mark with the 88-byte `Obj`, so the sweep walks 88 B+ slots to read 1 bit and
-   scans the whole `slots` Vec even on a sparse heap. A packed mark **bitvec** (1 bit/obj, 64/word) makes
-   the sweep a dense sequential bitscan. Only worth it if GC becomes hot (generational/incremental
-   territory — already #8, low-ROI).
+4. **✅ DONE — Separate the mark bit from the object.** Was `Slot { obj: Option<Obj>, mark: bool }` —
+   the `mark: bool` padded the slot to **72 B** (`Option<Obj>` is already 64 B: `Obj`'s spare-discriminant
+   niche makes `None` free), so the sweep pulled each full 64 B `Obj` into cache to read/write 1 bit. Now
+   `Slot { obj: Option<Obj> }` (exactly 64 B, guard-pinned `size_of::<Slot>() == 64`) + a dense parallel
+   `marks: Vec<u64>` bitset on `Heap` (bit `i&63` of word `i>>6`), grown in lockstep with `slots` at the
+   new-slot alloc arm. Three one-line helpers `is_marked`/`set_mark`/`clear_mark`; `mark()`/`sweep()`
+   rewired to the bitset, EXACT current mark-then-sweep-and-clear protocol (survivors cleared in the
+   sweep pass, holes never marked → post-sweep all bits 0). VM/GC-internal, no observable/checker change;
+   all GC-stress rooting + two-engine parity green. Saves the 8 B mark padding per slot (≈16 MB on the 2M
+   `many_struct` bench) and lets the sweep mark-scan iterate a compact bit array. RSS delta measured
+   post-merge. See `docs/benchmarks.md`.
 5. **Shrink `Obj` below 64 B.** ✅ DONE for `Module`: boxed to `Box<ModuleData>`, so
    `size_of::<Obj>()` dropped 88→**64 B** (guard, `chzstr.rs:205` / `heap.rs`); `MapData`/`SetData`
    (56 B payload + 8 B discriminant) now cap it. To go below 64 B you'd have to box `MapData`/`SetData`
@@ -645,7 +651,7 @@ The original M5 baseline was ~4–6.5× over the then-existing (now-removed) tre
 **Land order:** **#1 ✅ → #3 ✅ → #2 ✅ — sequence complete** as **JIT groundwork** (the positional
 layouts the JIT codegen wants), each measured against `struct`/`hof`/`enum` (read suite-neutral — they're
 dispatch-bound, see caveat — with strong micro deltas: #1 −38%, #3 −45%, #2 −20%).
-#4/#5/#6 are principled cleanups, post-JIT. Same discipline throughout: failing-then-green parity test →
+#4 ✅ done (mark bit → parallel bitset, `Slot` 72→64 B). #5/#6 are principled cleanups, post-JIT. Same discipline throughout: failing-then-green parity test →
 keep two-engine parity → measure (`benches/run.chz`) → record the delta in `docs/benchmarks.md`.
 
 **Highest payoff-per-effort (original M19 batch, all landed):** superinstructions + inline caching +

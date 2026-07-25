@@ -5701,6 +5701,20 @@ conformance` green.
   VM-only change (checker never names `Obj`); behavior-preserving + serial==M:N parity (full `cargo test`
   incl. `chz_suite_passes_both_engines` + `conformance`). RSS delta measured post-merge.
 
+- **Memory layout #6 — GC mark bit → parallel bitset.** `Slot` was `{ obj: Option<Obj>, mark: bool }`
+  — `Option<Obj>` is already 64B (`Obj`'s spare-discriminant niche makes `None` free), so the `mark: bool`
+  was pure padding pushing the slot to **72B**, and every mark/sweep scan pulled the full 64B `Obj` into
+  cache just to touch 1 bit. Dropped the field (`Slot { obj: Option<Obj> }`, guard-pinned
+  `slot_element_is_64b` = 64B) and moved the mark to a dense `marks: Vec<u64>` bitset on `Heap` (bit
+  `i&63` of word `i>>6`), grown in lockstep with `slots` at the new-slot alloc arm. Three one-line
+  helpers `is_marked`/`set_mark`/`clear_mark`; `mark()`/`sweep()` rewired to the bitset, reproducing the
+  EXACT mark-then-sweep-and-clear protocol (survivors cleared in the sweep pass, holes never marked →
+  post-sweep invariant: all bits 0). Saves the 8B mark padding per slot (≈16MB on the 2M `many_struct`
+  bench) and lets the sweep mark-scan iterate a compact bit array instead of touching each payload.
+  `src/vm/heap.rs` GC-internal only — no `Obj`/`Fields`/checker/observable change; behavior-preserving +
+  serial==M:N parity (full `cargo test` incl. `chz_suite_passes_both_engines` + `conformance`, all
+  GC-stress rooting green), clippy clean. RSS delta measured post-merge.
+
 **Remaining / blocked levers:**
 
 - **NaN-boxing `Value` is BLOCKED by full 64-bit ints, not "next."** `Value::Int` is a full `i64`; an
