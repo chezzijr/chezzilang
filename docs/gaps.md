@@ -224,7 +224,7 @@ parked_slot_nonsendable_rejects,in_data_cycle_rejects,unreached_nonsendable_runs
 - **Multi-frame / pending-`defer` suspended generators** — checker-UNREACHABLE (item 3 arms a/c); no valid
   program constructs them. The rejects are defensive guards, not a user-visible limit — nothing to build.
 
-## Session log — 2026-07-25 (bug-hunt wave 6: 18 findings, ALL OPEN — 6 P0/high, 2 never-hunted surfaces swept)
+## Session log — 2026-07-25 (bug-hunt wave 6: 18 findings — 2 FIXED (W6-1, W6-4), 16 open — 6 P0/high, 2 never-hunted surfaces swept)
 
 Pre-freeze adversarial hunt, 5 disjoint parallel domains, weighted at the two surfaces the wave-5
 residual named as never audited (**FFI**, **GC + `unsafe`**) plus the concurrency code that landed
@@ -241,12 +241,12 @@ parity oracle is structurally blind to all of them. That is now the dominant sha
 This is the same completeness/partial-coverage class the 2026-07-23 sweep found 3 instances of. It is
 still the highest-yield lever in the repo and it is cheap: **enumerate the arms, assert each one.**
 - W6-3: `compare`/`str` intercepted on scalar receivers, the other ~9 intrinsic protocol grants not.
-- W6-4: R1 swept `Socket`/`io`/`request`/`crypto` off `from_utf8_lossy`, missed `std.process`.
-- W6-1: `flush_core`'s non-empty-buffer arm flushes the inner core, its empty-buffer arm doesn't.
+- W6-4: R1 swept `Socket`/`io`/`request`/`crypto` off `from_utf8_lossy`, missed `std.process`. **FIXED.**
+- W6-1: `flush_core`'s non-empty-buffer arm flushes the inner core, its empty-buffer arm doesn't. **FIXED.**
 - W6-6: the extern-collision guard fires for bare-keyed enum variants, not module-keyed structs.
 - W6-9: `write_bytes` is byte-exact on the `File` arm, lossy on the `Stdout`/`Stderr` arms.
 
-### W6-1. `Writer.close()`/`flush()` on a `buffered` writer SILENTLY DOES NOT PERSIST — durability contract broken — P0
+### W6-1. `Writer.close()`/`flush()` on a `buffered` writer SILENTLY DOES NOT PERSIST — durability contract broken — P0 — **FIXED (2026-07-25)**
 ```chezzi
 import std.io
 fn main():
@@ -275,6 +275,20 @@ flushing it** and empties `buf`, so the later `close()` flushes nothing; `close(
 `flush`/`close` … loses the tail — Go's footgun. Mitigated…"), and `flush_core`'s OWN doc-comment
 ("`Buffered` → drain the in-VM buffer to the inner core, THEN flush the inner (so `buffered(create(f))` is
 durable on disk)"). Fix is one-line-class: recurse into the inner core even when `buf` is empty.
+**FIXED (2026-07-25).** `flush_core`'s `Backing::Buffered` arm now ALWAYS yields
+`Some((inner, mem::take(buf)))`, and the recursion site guards the WRITE instead of the flush
+(`if !drained.is_empty() { write_to_core(..) } flush_core(&inner)`) — an empty `write_to_core` on a
+`Stdout`/`Stderr` inner would otherwise hand `emit_out("")` to the parity sink / stream queue. All four
+`Backing` arms of BOTH fns were enumerated: `flush_core`'s `File`/`Stdout`/`Stderr` were already correct
+(the new unconditional recursion reaches the std-stream arms and stays an honest no-op), and
+`write_to_core`'s `File`/`Buffered` arms are correct as-is. Two siblings deliberately NOT touched:
+`WriterCore::Drop` (`src/vm/core.rs`) carries the identical `if buf.is_empty() { return; }`
+short-circuit but is benign (the inner `BufWriter`'s own drop flushes — which is exactly why the repro
+still landed the bytes *after* exit), and the `Stdout`/`Stderr` lossy `write_bytes` is W6-9 (still open).
+Tests: `tests/chz/stdlib/io_writer_test.chz`, serial==M:N. Docs: `docs/stdlib.md`'s `flush`/`close` rows
+now state the full-chain guarantee at OBSERVER level (visible to any other reader — an in-process
+`read_file`, a child, a sibling process), NOT `fsync` durability — the same careful wording
+`fs.atomic_write` already uses.
 
 ### W6-2. A module global FIRST INITIALIZED AFTER the first nursery reads as `nil` inside later tasks — check-OK-then-run-fault + silently-wrong — P0
 ```chezzi
