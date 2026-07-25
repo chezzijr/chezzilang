@@ -3,17 +3,30 @@
 //! `cmd(line)` runs `line` through `sh -c`, so a full command line works (pipes, redirects,
 //! arguments). The result mirrors how you read a command at a terminal: exit status 0 yields
 //! `Ok(stdout)`, any other status (or a spawn failure) yields `Err(stderr)` — note that on failure
-//! stdout is discarded (only stderr is surfaced). This hits the real process table directly (like
-//! `std.io.read_file` hits the real filesystem); it does not route through the injected `HostConfig`.
-//!
-//! W6-4 — the `str`-returning forms NEVER decode lossily: an undecodable stream is a clean `Err`
-//! naming the bytes twin (`cmd_bytes` for the shell form, `run_args_bytes` for the argv form), the same
-//! answer B1/R1 ratified for `Socket.read`/`io.read_file`. The twins are Go `cmd.Output()`-shaped:
-//! `Ok(stdout: bytes)` on a zero exit, `Err` on a non-zero exit or a spawn failure.
+//! stdout is discarded (only stderr is surfaced). Output is decoded lossily as UTF-8. This hits the
+//! real process table directly (like `std.io.read_file` hits the real filesystem); it does not
+//! route through the injected `HostConfig`.
 //!
 //! SECURITY: because the line is handed to the shell (`shell=True`-style, like Python's
 //! `subprocess`), interpolating untrusted input into it is a shell-injection vector. Callers must
 //! sanitize or avoid building `cmd` strings from untrusted data.
+//!
+//! W6-4 — TEXT vs BYTES. `ProcResult`'s fields (and `cmd`'s return) are `str`, so the text seam decodes
+//! the child's output with `from_utf8_lossy`: an undecodable byte becomes U+FFFD. That is DELIBERATE
+//! here, and it is the ratified B1/R1 shape for a seam with no carry — `request.get` keeps its lossy
+//! `body: str` and ships the byte-exact `request.get_bytes` beside it (asserted on purpose by
+//! `request.rs`'s `into_string_corrupts_but_get_bytes_is_exact`). The B1 invariant is
+//! **NON-DESTRUCTIVE** (`src/vm/netio.rs` `decode_carry`: "a recoverable `Err` that silently drops
+//! already-received payload would just be a different flavour of the corruption B1 fixes") — and
+//! `Socket.read` can only afford its strict `Err` because the undecodable bytes stay in
+//! `SocketCore::carry` for `read_bytes` to hand back. A finished child has NO carry: its `Output` is
+//! already consumed, so Err-ing the call would DESTROY the captured stdout/stderr/exit code and the only
+//! "recovery" would be re-running an arbitrary, side-effecting command line. So the text seam stays
+//! lossy-but-documented, and the byte-exact hatch is additive: `run_bytes(line)` / `run_args_bytes(prog,
+//! args)` return the child's stdout as raw `bytes`, same `Ok`/`Err` partition as `run`/`run_args`
+//! (a non-zero exit is `Ok` — the bytes are never thrown away; only a spawn failure is `Err`).
+//! Residual: the bytes path carries stdout only (a `bytes`-carrying structured result would need a new
+//! native struct through `seed_stdlib_structs`) — merge with `2>&1` if you need stderr's bytes.
 //!
 //! `run(line)` / `run_args(prog, args)` are the structured forms: both return `Result[ProcResult]`
 //! where `ProcResult{stdout: str, stderr: str, code: int}` carries BOTH streams and the exit code.
@@ -25,7 +38,7 @@
 
 use super::{Host, HostError, NativeFn, NativeRet, expect_args};
 
-/// Run `line` through `sh -c` and capture both streams (the shell form of `cmd`/`run`/`cmd_bytes`).
+/// Run `line` through `sh -c` and capture both streams (the shell form: `cmd`/`run`/`run_bytes`).
 fn spawn_shell(line: &str) -> std::io::Result<std::process::Output> {
     std::process::Command::new("sh")
         .arg("-c")
@@ -33,65 +46,44 @@ fn spawn_shell(line: &str) -> std::io::Result<std::process::Output> {
         .output()
 }
 
-/// W6-4 — decode a child stream as UTF-8, or a clean `Err` NAMING the bytes twin. A `str`-typed seam
-/// must never mangle bytes into U+FFFD: that is the ratified B1/R1 answer (`Socket.read` points at
-/// `Socket.read_bytes`, `io.read_file` at `io.read_bytes`), and it is what both owning ancestors do —
-/// Python's `subprocess` text mode raises `UnicodeDecodeError`, Go's `cmd.Output()` hands back
-/// `[]byte`. `which` is the stream name, `twin` the bytes fn that CAN carry the payload.
-fn decode_stream(which: &str, twin: &str, bytes: Vec<u8>) -> Result<String, String> {
-    String::from_utf8(bytes).map_err(|e| {
-        format!(
-            "child {which} is not valid utf-8 ({}) — capture binary output with process.{twin}",
-            e.utf8_error()
-        )
-    })
-}
-
-/// The `Err` message for a command that ran but exited non-zero: its stderr, falling back to a status
-/// line so the error is never an empty string. This renders a DIAGNOSTIC, not user payload, so it stays
-/// `from_utf8_lossy` on purpose (W6-4 covers the payload seams; an error message has nowhere to point).
-fn status_err_msg(out: &std::process::Output) -> String {
-    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
-    if !stderr.is_empty() {
-        return stderr;
-    }
-    match out.status.code() {
-        Some(c) => format!("command exited with status {c}"),
-        None => "command terminated by signal".to_string(),
-    }
-}
-
 fn cmd(h: &mut dyn Host) -> Result<NativeRet, HostError> {
     expect_args(h, "cmd", 1)?;
     let line = h.arg_str(0)?;
     match spawn_shell(&line) {
         Ok(out) => {
-            if !out.status.success() {
-                return Ok(NativeRet::Err(status_err_msg(&out)));
+            if out.status.success() {
+                let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+                Ok(NativeRet::Ok(Box::new(NativeRet::Str(stdout))))
+            } else {
+                // Non-zero exit: report stderr. Fall back to a status line if it wrote nothing
+                // there, so the error is never an empty string.
+                let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+                let msg = if stderr.is_empty() {
+                    match out.status.code() {
+                        Some(c) => format!("command exited with status {c}"),
+                        None => "command terminated by signal".to_string(),
+                    }
+                } else {
+                    stderr
+                };
+                Ok(NativeRet::Err(msg))
             }
-            Ok(match decode_stream("stdout", "cmd_bytes", out.stdout) {
-                Ok(stdout) => NativeRet::Ok(Box::new(NativeRet::Str(stdout))),
-                Err(msg) => NativeRet::Err(msg),
-            })
         }
         Err(e) => Ok(NativeRet::Err(format!("failed to run command: {e}"))),
     }
 }
 
-/// W6-4 — the bytes twin's result, in Go `cmd.Output()` shape: `Ok(stdout)` as raw `bytes` on a zero
-/// exit, `Err` on any other status (a failed command's output can't pose as a successful capture —
-/// same rule as `io.read_bytes` / `request.get_bytes`). stderr + the code are unreachable on this path
-/// (a `ProcResult` cannot carry `bytes` — see the gaps.md residual); use `run` when you need them.
+/// W6-4 — the bytes twin's result: the child's stdout, byte-exact, in Go `cmd.Output()` shape (which
+/// likewise hands the collected bytes back next to a non-zero-status error). Same `Ok`/`Err` partition as
+/// `run`/`run_args`: a non-zero exit is a normal `Ok` (dropping already-captured bytes because the child
+/// exited 1 would be the very data loss B1 forbids — and `run_args` already documents a non-zero exit as
+/// `Ok`); only a spawn failure is `Err`. stdout ONLY (see the module doc's residual).
 fn stdout_bytes_ret(out: std::process::Output) -> NativeRet {
-    if out.status.success() {
-        NativeRet::Ok(Box::new(NativeRet::Bytes(out.stdout)))
-    } else {
-        NativeRet::Err(status_err_msg(&out))
-    }
+    NativeRet::Ok(Box::new(NativeRet::Bytes(out.stdout)))
 }
 
-fn cmd_bytes(h: &mut dyn Host) -> Result<NativeRet, HostError> {
-    expect_args(h, "cmd_bytes", 1)?;
+fn run_bytes(h: &mut dyn Host) -> Result<NativeRet, HostError> {
+    expect_args(h, "run_bytes", 1)?;
     let line = h.arg_str(0)?;
     Ok(match spawn_shell(&line) {
         Ok(out) => stdout_bytes_ret(out),
@@ -112,20 +104,13 @@ fn run_args_bytes(h: &mut dyn Host) -> Result<NativeRet, HostError> {
 }
 
 /// Build a `Result[ProcResult]` from a finished command's captured output. A signal-killed process
-/// (no exit code) reports `code = -1`. W6-4 — either stream failing to decode fails the WHOLE call
-/// (`ProcResult`'s fields are `str`; there is nowhere to put the bytes), naming `twin` as the hatch.
-fn proc_result_ret(out: std::process::Output, twin: &str) -> NativeRet {
+/// (no exit code) reports `code = -1`. Output is decoded LOSSILY as UTF-8 (the fields are `str`), which
+/// is why `run_bytes`/`run_args_bytes` exist — see the module doc's W6-4 note for why this seam must not
+/// Err instead (Err would destroy the captured output, which B1's non-destructive rule forbids).
+fn proc_result_ret(out: std::process::Output) -> NativeRet {
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
     let code = out.status.code().unwrap_or(-1) as i64;
-    let (stdout, stderr) = match (
-        decode_stream("stdout", twin, out.stdout),
-        decode_stream("stderr", twin, out.stderr),
-    ) {
-        (Ok(o), Ok(e)) => (o, e),
-        // The code is the only other thing the caller would have got; carry it in the message.
-        (Err(msg), _) | (Ok(_), Err(msg)) => {
-            return NativeRet::Err(format!("{msg} (the child exited with code {code})"));
-        }
-    };
     NativeRet::Ok(Box::new(NativeRet::Struct {
         name: "ProcResult".into(),
         fields: vec![
@@ -140,7 +125,7 @@ fn proc_result_ret(out: std::process::Output, twin: &str) -> NativeRet {
 /// carried); only a spawn failure is `Err`.
 fn do_run(line: &str) -> NativeRet {
     match spawn_shell(line) {
-        Ok(out) => proc_result_ret(out, "cmd_bytes"),
+        Ok(out) => proc_result_ret(out),
         Err(e) => NativeRet::Err(format!("failed to run command: {e}")),
     }
 }
@@ -149,7 +134,7 @@ fn do_run(line: &str) -> NativeRet {
 /// (injection-safe). Non-zero exit is `Ok` (code carried); only a spawn failure is `Err`.
 fn do_run_args(prog: &str, args: &[String]) -> NativeRet {
     match std::process::Command::new(prog).args(args).output() {
-        Ok(out) => proc_result_ret(out, "run_args_bytes"),
+        Ok(out) => proc_result_ret(out),
         Err(e) => NativeRet::Err(format!("failed to run command: {e}")),
     }
 }
@@ -172,7 +157,7 @@ pub const MEMBERS: &[(&str, NativeFn)] = &[
     ("cmd", cmd),
     ("run", run),
     ("run_args", run_args),
-    ("cmd_bytes", cmd_bytes),
+    ("run_bytes", run_bytes),
     ("run_args_bytes", run_args_bytes),
 ];
 

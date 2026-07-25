@@ -6488,7 +6488,7 @@ fn harvest_optional_tail_from_trailing_default() {
     assert_eq!(gs.min_params, 2, "no defaults → min_params == len");
 }
 
-/// PROVENANCE + exact sigs — std.process's 3 fns + the `ProcResult` StructInfo come from the
+/// PROVENANCE + exact sigs — std.process's 5 fns + the `ProcResult` StructInfo come from the
 /// file-backed `std/process.chz` (harvested), byte-identical to the deleted hand-built arm.
 #[test]
 fn process_fn_sigs_exact() {
@@ -6503,8 +6503,8 @@ fn process_fn_sigs_exact() {
             Ty::result(proc()),
             2,
         ),
-        // W6-4 — the bytes twins of the two spawn forms.
-        ("cmd_bytes", vec![Ty::Str], Ty::result(Ty::Bytes), 1),
+        // W6-4 — the byte-exact stdout twins of the two spawn forms.
+        ("run_bytes", vec![Ty::Str], Ty::result(Ty::Bytes), 1),
         (
             "run_args_bytes",
             vec![Ty::Str, Ty::list(Ty::Str)],
@@ -6643,7 +6643,7 @@ fn procresult_chz_matches_handbuilt_layouts() {
     assert!(harvested.type_params.is_empty());
     assert!(harvested.methods.is_empty());
     assert!(matches!(harvested.origin, StructOrigin::Builtin));
-    // 3 str-returning fns + the 2 W6-4 bytes twins (`cmd_bytes` / `run_args_bytes`).
+    // 3 str-returning fns + the 2 W6-4 bytes twins (`run_bytes` / `run_args_bytes`).
     assert_eq!(sig.functions.len(), 5, "std/process.chz must harvest 5 fns");
     // seed_stdlib_structs's copy must agree.
     let seeded = c.structs.get("ProcResult").expect("ProcResult seeded");

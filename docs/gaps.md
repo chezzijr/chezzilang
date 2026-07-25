@@ -331,7 +331,7 @@ Reference: Rust `T: Add` makes `a.add(b)` callable — it IS the trait method; G
 likewise callable through the interface value. `std/prelude.chz:257` declares `Add.add` as the protocol's
 method, so a type the checker says satisfies `Add` must answer `.add`.
 
-### W6-4. `std.process` silently CORRUPTS non-UTF-8 child output (`from_utf8_lossy`), with no bytes hatch — the unswept B1/R1 sibling — P0
+### W6-4. `std.process` silently CORRUPTS non-UTF-8 child output (`from_utf8_lossy`), with no bytes hatch — the unswept B1/R1 sibling — P0 — **FIXED (2026-07-25)**
 ```chezzi
 import std.process as pr
 fn main():
@@ -350,6 +350,31 @@ was ratified in R1 with a *different* answer: the `str` seam returns a **sticky 
 `io.read_bytes`, `request.get_bytes`, `crypto.*_bytes`). `std.process` was missed by that sweep: no
 `run_bytes`/`stdout_bytes` twin exists, `docs/stdlib.md` documents `stdout: str` with no lossy warning, and
 this file had no entry. Go's `Output()` returns `[]byte`.
+**FIXED (2026-07-25) — the hatch landed; the text seam stays a DOCUMENTED lossy view, on purpose.**
+`process.run_bytes(line) -> Result[bytes]` and `process.run_args_bytes(prog, args) -> Result[bytes]`
+(`src/native/process.rs`, declared in `std/process.chz`, both `is_blocking`) return the child's stdout
+**byte-exactly**, in Go `cmd.Output()` shape and with the SAME `Ok`/`Err` partition as `run`/`run_args`:
+a non-zero exit is `Ok` (captured bytes are never discarded), only a spawn failure is `Err`.
+**Why the `str` seam does NOT Err the way `Socket.read` does.** The ratified B1 answer is not "Err", it
+is **NON-DESTRUCTIVE**: `decode_carry`'s own contract says "a recoverable `Err` that silently drops
+already-received payload would just be a different flavour of the corruption B1 fixes", and `Socket.read`
+can only afford its strict `Err` *because* the undecodable bytes stay in `SocketCore::carry` for
+`read_bytes` to hand back byte-exactly. A finished child has NO carry — its `Output` is already
+consumed — so Err-ing `run` would DESTROY the captured stdout, stderr AND exit code, and the advertised
+"recovery" would be **re-running an arbitrary, side-effecting command line** (`git push`, a deploy, a
+`timeout`). That is a worse failure than the U+FFFD it replaces, and it would also widen `run`'s
+documented Ok/Err partition (`judge/run.chz` maps any `run` Err to a spawn-failure verdict). So
+`std.process` follows the in-tree precedent for a CARRY-LESS seam instead: `request.get` keeps its lossy
+`body: str` beside the byte-exact `request.get_bytes` — asserted on purpose by `request.rs`'s
+`into_string_corrupts_but_get_bytes_is_exact`. The lossy decode is now stated at every statement of the
+contract (`docs/stdlib.md` §std.process, the `process.rs` module doc, `std/process.chz`) with the
+byte-exact twin named beside it, so nothing is *silent* any more.
+**RESIDUAL (open, low):** the bytes path carries **stdout only** — no byte-exact stderr, and no
+bytes-carrying structured result (binary stdout + stderr + code in one value). That needs a new native
+struct/field through `seed_stdlib_structs` (`src/checker/setup.rs`) plus the two other hand-built
+`ProcResult` layout copies; recorded in `docs/stdlib.md`'s "Not yet". Shell callers merge with `2>&1`.
+Tests: `tests/chz/stdlib/process_test.chz` (byte-exactness of both twins, bytes kept on a non-zero exit,
+Err only on a spawn failure, and the text seam pinned as a lossy-but-non-destructive view), serial==M:N.
 
 ### W6-5. A zero-field struct at an `extern` boundary PANICS the VM — `recover:` cannot catch it — P0
 ```chezzi

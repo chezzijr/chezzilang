@@ -521,11 +521,11 @@ pub fn is_blocking(name: &str) -> bool {
         // `get_bytes` is the binary-download twin of `get` (str arg, `Ok(Bytes)`/`Err` primitive
         // return — off-heap-safe); it MUST offload too or a slow/large download pins a core worker.
         // `run`/`run_args` are the structured subprocess forms (alongside `cmd`); `run_args` offloads
-        // its `list[str]` argv via `NativeArg::List` (off-heap-safe). W6-4: `cmd_bytes`/`run_args_bytes`
-        // are the binary-capture twins — same subprocess wait, so they MUST offload too or a slow child
-        // pins a core M:N worker (D5).
+        // its `list[str]` argv via `NativeArg::List` (off-heap-safe). W6-4: `run_bytes`/`run_args_bytes`
+        // are the byte-exact stdout twins — same subprocess wait, so they MUST offload too or a slow
+        // child pins a core M:N worker (D5).
         | "get" | "get_bytes" | "post" | "request" | "put" | "patch" | "delete" | "head" | "cmd" | "run" | "run_args"
-        | "cmd_bytes" | "run_args_bytes"
+        | "run_bytes" | "run_args_bytes"
     )
 }
 
@@ -945,8 +945,9 @@ mod tests {
         }
     }
 
-    /// `std.process` exposes exactly `cmd`/`run`/`run_args` and all three are blocking subprocess I/O
-    /// (must offload to the dirty pool under `--parallel`).
+    /// `std.process` exposes exactly `cmd`/`run`/`run_args` + the W6-4 bytes twins
+    /// `run_bytes`/`run_args_bytes`, and all five are blocking subprocess I/O (must offload to the
+    /// dirty pool under `--parallel`).
     #[test]
     fn native_process_members_and_blocking() {
         let names: Vec<&str> = native_members("std.process")
@@ -955,9 +956,9 @@ mod tests {
             .collect();
         assert_eq!(
             names,
-            vec!["cmd", "run", "run_args", "cmd_bytes", "run_args_bytes"]
+            vec!["cmd", "run", "run_args", "run_bytes", "run_args_bytes"]
         );
-        for name in ["cmd", "run", "run_args", "cmd_bytes", "run_args_bytes"] {
+        for name in ["cmd", "run", "run_args", "run_bytes", "run_args_bytes"] {
             assert!(is_blocking(name), "{name} should be blocking");
         }
     }

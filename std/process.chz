@@ -23,9 +23,9 @@ native fn cmd(command: str) -> Result[str]
 native fn run(command: str) -> Result[ProcResult]
 native fn run_args(command: str, args: List[str]) -> Result[ProcResult]
 
-# W6-4 — binary-capture twins. The `str` forms above NEVER decode lossily: an undecodable stream is a
-# clean `Err` naming the twin (`cmd_bytes` for the shell form, `run_args_bytes` for the argv form), the
-# ratified B1/R1 answer. Go `cmd.Output()` shape: `Ok(stdout)` on a zero exit, `Err` on a non-zero exit
-# or a spawn failure — stderr and the exit code are NOT carried on the bytes path (use `run` for those).
-native fn cmd_bytes(command: str) -> Result[bytes]
+# W6-4 — byte-exact stdout capture. `ProcResult`'s fields are `str`, so `cmd`/`run`/`run_args` decode
+# lossily (an undecodable byte → U+FFFD); these twins never decode. SAME `Ok`/`Err` partition as
+# `run`/`run_args` (a non-zero exit is `Ok` — captured bytes are never thrown away; only a spawn failure
+# is `Err`), Go `cmd.Output()` shape. stdout ONLY: for stderr's bytes merge it with `2>&1`.
+native fn run_bytes(command: str) -> Result[bytes]
 native fn run_args_bytes(command: str, args: List[str]) -> Result[bytes]
