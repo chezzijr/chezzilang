@@ -45,10 +45,12 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > §2/§7 rewritten (the frozen-snapshot rule AND the long-retired G1 compile-error claim), `docs/spec.md`,
 > `docs/concurrency-tier-d.md`, `docs/concurrency-b3.md` (annotated as history). **Perf:** the 9
 > `benches/run.chz` benches moved only within noise (−5.7%…+0.7%, no nurseries in any of them); a
-> 200k-nursery `--serial` loop costs **+1.6%** with scalar-only globals (the cache short-circuits — one
-> snapshot for the whole run), **+61%** with a 200-element `List[int]` global (the conservative whitelist
-> never caches an aggregate-holding view; +17% on M:N), and **+12.9%** when a global is reassigned before
-> each spawn — where the old code printed the WRONG answer. Full table in `docs/benchmarks.md`; the
+> 200k-nursery `--serial` loop is FLAT with scalar-only globals (−1.5%: the cache short-circuits — one
+> snapshot for the whole run), **+58%** with a 200-element `List[int]` global (the conservative whitelist
+> never caches an aggregate-holding view; +17% on M:N), and **+10.8%** when a global is reassigned before
+> each spawn — where the old code printed the WRONG answer. A 10M-write global loop with no nursery open is
+> flat (the new `set_global_slot` hook sits behind a `nurseries.is_empty()` fast path; without it that row
+> cost +12%). Full table in `docs/benchmarks.md`; the
 > precise-invalidation refinement is a recorded follow-up in `docs/gaps.md` (it needs `src/vm/call.rs`).
 
 > **✅ FIX (2026-07-25, gaps.md W6-1, P0) — `Writer.flush()`/`close()` on a `buffered` writer now

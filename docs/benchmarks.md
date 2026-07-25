@@ -105,22 +105,25 @@ The cost lives where it should — a **nursery-in-a-loop** micro-bench (200 000 
 `hyperfine -N --warmup 2 -r 10`), measured on `--serial` because the default M:N engine's per-nursery pool
 overhead dilutes everything.
 
-| micro (200k nurseries × 1 task, `--serial`) | before  | after   | delta   |
-|---------------------------------------------|--------:|--------:|--------:|
-| scalar/`str`/`AtomicInt` globals only        | 860.7ms | 874.7ms | **+1.6%** |
-| + one 200-element `List[int]` global         | 1.630s  | 2.624s  | **+61%** |
-| a global REASSIGNED before each spawn        | 754.6ms | 852.1ms | **+12.9%** |
+| micro (200k nurseries × 1 task, `--serial`)  | before  | after   | delta   |
+|----------------------------------------------|--------:|--------:|--------:|
+| scalar/`str`/`AtomicInt` globals only         | 890.2ms | 876.5ms |  −1.5%  |
+| + one 200-element `List[int]` global          | 1.661s  | 2.632s  | **+58%** |
+| a global REASSIGNED before each spawn         | 761.4ms | 843.7ms | **+10.8%** |
+| 10M global writes, NO nursery (`g = i` loop)  | 1.113s  | 1.049s  |  −5.7%  |
 
 Row 1 is the dirty flag doing its job — ONE snapshot for the whole run, asserted on the cache field
-directly (`vm::tests::snapshot_cache_short_circuits_only_for_immutable_globals`) rather than by timing;
-the +1.6% is the per-join `pin_unpinned_tasks` scan. Row 2 is the price of the conservative whitelist: an
-aggregate global can be mutated in place (`q.push(1)`) with no module-slot write to invalidate on, so that
-view is never cached and every nursery rebuilds (the same case on M:N is +17%: 913ms → 1.073s at 20k
-nurseries). Row 3 is correctness work, not overhead — each task must see the value it was spawned with, so
-a reassignment with a task pending forces one build, and `before` printed the WRONG answer there (`0`
-instead of `199990000`). Precise per-mutation invalidation (hooking the mutating intrinsics in
-`src/vm/call.rs`, fenced at the time) is the recorded follow-up in `docs/gaps.md §W6-2`, with row 2's
-+61% as its bar.
+directly (`vm::tests::snapshot_cache_short_circuits_only_for_immutable_globals`) rather than by timing.
+Row 2 is the price of the conservative whitelist: an aggregate global can be mutated in place
+(`q.push(1)`) with no module-slot write to invalidate on, so that view is never cached and every nursery
+rebuilds (the same case on M:N is +17%: 913ms → 1.073s at 20k nurseries). Row 3 is correctness work, not
+overhead — each task must see the value it was spawned with, so a reassignment with a task pending forces
+one build, and `before` printed the WRONG answer there (`0` instead of `199990000`). Row 4 guards the new
+`set_global_slot` hook: it is behind a `nurseries.is_empty()` fast path, so a hot global-write loop with no
+nursery open pays nothing (WITHOUT that guard, constructing the scan's iterator chain per write cost
+**+12%** on this row — measured, then fixed). Precise per-mutation invalidation (hooking the mutating
+intrinsics in `src/vm/call.rs`) is the recorded follow-up in `docs/gaps.md §W6-2`, with row 2's +58% as
+its bar.
 
 ## Baseline — 2026-06-11
 

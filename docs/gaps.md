@@ -380,11 +380,12 @@ exact. Same-engine on both, and covered by `aggregate_mutated_in_place_between_n
 noise, −5.7%…+0.7%, none of them opens a nursery). Nursery-in-a-loop, 200k nurseries × 1 task,
 `--serial` (the sensitive engine — the M:N pool overhead dilutes everything):
 
-| micro (200k nurseries × 1 task, `--serial`) | before  | after   | delta   |
-|---------------------------------------------|--------:|--------:|--------:|
-| scalar/`str`/`AtomicInt` globals only        | 860.7ms | 874.7ms | **+1.6%** |
-| + one 200-element `List[int]` global         | 1.630s  | 2.624s  | **+61%** |
-| a global REASSIGNED before each spawn        | 754.6ms | 852.1ms | **+12.9%** |
+| micro (200k nurseries × 1 task, `--serial`)  | before  | after   | delta   |
+|----------------------------------------------|--------:|--------:|--------:|
+| scalar/`str`/`AtomicInt` globals only         | 890.2ms | 876.5ms |  −1.5%  |
+| + one 200-element `List[int]` global          | 1.661s  | 2.632s  | **+58%** |
+| a global REASSIGNED before each spawn         | 761.4ms | 843.7ms | **+10.8%** |
+| 10M global writes, NO nursery (`g = i` loop)  | 1.113s  | 1.049s  |  −5.7%  |
 
 Row 1 is the dirty flag short-circuiting: one snapshot for the whole run (asserted directly, not by
 timing, in `vm::tests::snapshot_cache_short_circuits_only_for_immutable_globals`). Row 2 is the price of
@@ -392,11 +393,13 @@ the conservative whitelist — an aggregate global's view is never cached, so ev
 same case on the default M:N engine is +17% (913ms → 1.073s at 20k nurseries), the pool overhead
 absorbing the rest. Row 3 is correctness work, not overhead: each task must see its own value, so a
 reassignment with a task pending forces one build — and `before` printed the WRONG answer there (`0`
-instead of `199990000`, every task replaying the frozen first view).
+instead of `199990000`, every task replaying the frozen first view). Row 4 is the `set_global_slot` hook
+itself: gated on `!nurseries.is_empty()`, so a global-write loop with no nursery open pays nothing —
+without that guard the per-write iterator-chain construction cost **+12%** here (measured, then fixed).
 
-**FOLLOW-UP (not implemented, deliberately).** `src/vm/call.rs` was fenced (W6-3 in flight), so the
-aggregate case is handled by the coarse whitelist rather than by precise invalidation. Once `call.rs` is
-free, the mutating intrinsics (`List.push`/`pop`/`insert`/…, map/set store, `SetField`, `SetIndex`) can
+**FOLLOW-UP (not implemented, deliberately).** `src/vm/call.rs` was fenced while this landed (W6-3 in
+flight; it has since merged), so the aggregate case is handled by the coarse whitelist rather than by
+precise invalidation. The mutating intrinsics (`List.push`/`pop`/`insert`/…, map/set store, `SetField`, `SetIndex`) can
 drop the cache only when the mutated object is reachable from a module slot, letting an aggregate-holding
 program cache like a scalar one — which would also close the in-place residual above. Justified only if a
 real workload shows the gap: the bar is row 2's **+61%** (a nursery-loop with an aggregate global)

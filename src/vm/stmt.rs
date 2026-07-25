@@ -1831,7 +1831,11 @@ impl Vm {
         // `ensure_snapshot` would be circular. A replay/import-bind reaching an unpinned task later is
         // harmless — reading a global before its declaration is a CHECK error, so there is no `nil` to
         // observe, only a newer value.)
-        self.pin_unpinned_tasks(&mut []);
+        if !self.nurseries.is_empty() {
+            // Fast path: with no nursery open there is nothing to pin, which is the whole cost of this
+            // hook on a hot global-write loop (one `Vec::is_empty`).
+            self.pin_unpinned_tasks(&mut []);
+        }
         self.snapshot_memo = None;
         if let Obj::Module(m) = self.heap.get_mut(module) {
             m.slots[slot as usize] = value;
