@@ -13912,3 +13912,33 @@ fn intrinsic_grants_all_have_vm_arms() {
         );
     }
 }
+
+/// W6-2 — compile + run `src` on the serial engine and report whether a module-globals snapshot is left
+/// CACHED (`snapshot_memo`) afterwards. Reaches a private field, so it lives here rather than in a
+/// Chezzi test; a timing bench can only hint at what this asserts directly.
+fn snapshot_cached_after_run(src: &str) -> bool {
+    let tokens = crate::lexer::tokenize(src).expect("lex");
+    let module = crate::parser::parse(tokens).expect("parse");
+    let program = crate::compiler::compile_module_standalone(&module).expect("compile");
+    let mut vm = Vm::new(Arc::new(program));
+    vm.run().expect("run");
+    vm.snapshot_memo.is_some()
+}
+
+/// W6-2 — the snapshot cache must actually SHORT-CIRCUIT, not just be correct. A program whose module
+/// globals are all immutable / `Arc`-shared keeps its snapshot cached across nurseries (N nurseries build
+/// ONE snapshot); adding a mutable aggregate global disables the cache entirely (each nursery rebuilds),
+/// because an in-place `q.push(..)` writes no module slot for the invalidation hooks to see. That is the
+/// measured cost of the conservative whitelist — recorded in `docs/benchmarks.md`.
+#[test]
+fn snapshot_cache_short_circuits_only_for_immutable_globals() {
+    let nurseries = "\nfor i in range(3):\n    parallel:\n        spawn: pass\n";
+    assert!(
+        snapshot_cached_after_run(&format!("n: int = 1\ns := \"x\"{nurseries}")),
+        "scalar/str-only globals must leave the snapshot cached (one build for N nurseries)"
+    );
+    assert!(
+        !snapshot_cached_after_run(&format!("n: int = 1\nq: List[int] = [1]{nurseries}")),
+        "a mutable aggregate global must disable the cache (in-place mutation writes no slot)"
+    );
+}

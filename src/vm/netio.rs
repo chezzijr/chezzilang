@@ -2590,9 +2590,10 @@ impl Vm {
                         // Pop under the lock, then DROP the guard before the re-entrant call.
                         let task = core.inner.lock().unwrap().queue.pop_front();
                         let Some(task) = task else { break };
-                        // Task 1 — freeze the module globals ONCE (memoized `ensure_snapshot`, matching
-                        // the M:N drain via `prepare_worker_from_wire`) and give this task its OWN
-                        // deep-copied module-global view in the shared heap. Both the `from_wire` rebuild
+                        // Task 1 — snapshot the module globals as of THIS DRAIN (`ensure_snapshot`,
+                        // matching the M:N drain via `prepare_worker_from_wire`: both engines drain at the
+                        // same program point, so the instant is parity-identical) and give this task its
+                        // OWN deep-copied module-global view in the shared heap. Both the `from_wire` rebuild
                         // of the closure AND its `invoke_value` run under that view, so a module global
                         // mutated by the submitted task hits its private copy — invisible to the parent,
                         // `serial == M:N` by construction. `Shared`/`Atomic`/`Channel`/`Cffi` globals

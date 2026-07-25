@@ -78,6 +78,45 @@ Levers, ranked for this gap:
 
 Re-run `many_struct`/`many_map` after each lever to track the close.
 
+## Fresh per-nursery module-global snapshot (gaps.md W6-2) — 2026-07-25 — correctness fix, cost measured
+
+Not a lever — a P0 correctness fix (a nursery now snapshots the module globals fresh, at every depth,
+instead of replaying the first nursery's frozen `Arc` forever). Measured because it puts work back on the
+nursery path. Machine as above; `chezzi` mean of hyperfine runs, before = `main` @ `2c9bd0d`.
+
+| bench       | before  | after   | delta   |
+|-------------|--------:|--------:|--------:|
+| fib         |  247.2  |  238.7  |  −3.4%  |
+| str         |  171.6  |  165.2  |  −3.7%  |
+| primes      |  583.7  |  595.2  |  +2.0%  |
+| loop        |  991.6  |  945.3  |  −4.7%  |
+| list        |  364.4  |  375.4  |  +3.0%  |
+| struct      |  431.3  |  419.3  |  −2.8%  |
+| poly_method | 1251    | 1196    |  −4.4%  |
+| map         |  148.2  |  142.8  |  −3.6%  |
+| empty       |    2.0  |    2.0  |   flat  |
+
+All ms, all **within noise** (σ 2–6%, movement in both directions): none of the 9 benches opens a nursery,
+so flat is the expected result and this table is a no-regression check, not a delta.
+
+The cost lives where it should — a **nursery-in-a-loop** micro-bench (200 000 nurseries × 1 task, `hyperfine
+-N --warmup 2`). Measured on `--serial`: the default M:N engine's per-nursery pool overhead (~43 µs) swamps
+the snapshot entirely, showing **no** measurable change at all, so the serial engine is the sensitive probe.
+
+| micro (200k nurseries, `--serial`) | before  | after   | delta   |
+|------------------------------------|--------:|--------:|--------:|
+| scalar/`str`-only globals          | 689.9   | 713.6   | **+3.4%** |
+| + one `List[int]` global           | 831.5   | 951.5   | **+14.4%** |
+
+The +3.4% is the pin bookkeeping (one `nursery_snaps` push/pop per nursery + one memo-hit `ensure_snapshot`
+per spawn); the snapshot itself is built ONCE for the whole run, which `vm::tests::
+snapshot_cache_short_circuits_only_for_immutable_globals` asserts directly on the cache field rather than by
+timing. The second row is the price of the conservative whitelist: an aggregate global can be mutated in
+place (`q.push(1)`) with no module-slot write to invalidate on, so that view is never cached and every
+nursery rebuilds — after the fix the aggregate case is **1.33×** the scalar case. Precise per-mutation
+invalidation (hooking the mutating intrinsics in `src/vm/call.rs`, fenced at the time) is the recorded
+follow-up in `docs/gaps.md §W6-2`, with that 1.33× as its bar.
+
 ## Baseline — 2026-06-11
 
 - **Machine:** 11th Gen Intel Core i5-11400H @ 2.70GHz (12 threads)

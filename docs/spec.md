@@ -246,7 +246,8 @@ reusing an exhausted one yields nothing.
 > the **task boundary**: a plain captured local — **and every module global** — sent across
 > `spawn`/`parallel:` is snapshot-copied into an independent per-task view (F1 — the sole deliberate
 > divergence from Go, byte-identical serial vs M:N; module globals are deep-copied per task at the spawn
-> boundary on BOTH engines as of 2026-07-21, replacing the earlier frozen-module-global checker rule), so
+> boundary on BOTH engines as of 2026-07-21, replacing the earlier frozen-module-global checker rule, and
+> the copy is taken FRESH per nursery — at its first `spawn`, at every depth — as of 2026-07-25), so
 > cross-task shared mutation still requires `Shared[T]` et al. Internally a captured local is
 > boxed into a VM `Obj::Cell` (type-invisible — a boxed `x: int` still types as `int`). This reverses
 > the earlier snapshot-by-value decision. See `PROGRESS.md` "Uniform by-reference capture" and `docs/syntax.md`

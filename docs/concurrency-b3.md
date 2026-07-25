@@ -306,6 +306,13 @@ is a known low-rate timing flake under heavy full-suite parallel load; passes in
      whenever some operator-overload / `hash` hook could reach a generator — see the `hook_hazard`
      note below). Nursery-management ops (`EnterNursery`/`JoinNursery`/
      `ReclaimNursery`) are inert (the tasks they run were registered by the followed `Spawn*` ops).
+     *(HISTORY — two premises below have since changed, and the record is kept as written rather than
+     rewritten. (1) The generator **reach-gate** itself was retired on 2026-07-21: a module-global
+     generator now crosses BY VALUE and a non-sendable one snapshots as an inert `Nil` that faults only
+     when reached. (2) The "**frozen** module snapshot" this reasoning rests on — one snapshot for the
+     whole run — was retired on 2026-07-25 (W6-2): every nursery snapshots FRESH at its first `spawn`, at
+     every depth, pinned so both engines snapshot at the same program point. The frozen-vs-live window
+     described below therefore no longer exists.)*
      The gate runs at **four** choke points to keep serial == M:N: (a) `register_task` (the single
      common spawn choke — covers eager nurseries, whose worker + snapshot are built at spawn time); (b)
      the **lazy nursery join** (`join_nursery`, before the serial-cooperative vs M:N split), against the

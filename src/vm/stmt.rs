@@ -1816,6 +1816,16 @@ impl Vm {
 
     /// M19 Phase 2b — write a module global by compile-time slot (`DefineGlobalSlot`/`SetGlobalSlot`).
     pub(super) fn set_global_slot(&mut self, module: GcRef, slot: u32, value: Value) {
+        // W6-19 — a WRITE can be a task's FIRST module-global access (`fn worker(): g = 99`), and on a
+        // worker the module's slots fault in LAZILY: without this the write indexed an empty `slots` vec
+        // and PANICKED the pool thread (`index out of bounds: the len is 0`) while `--serial` printed the
+        // right answer. Rooted here (the sole slot-write helper) so both write ops and any future caller
+        // are covered; a free no-op on the top-level / cooperative engines (no snapshot installed).
+        self.ensure_module_faulted(module);
+        // W6-2 — a module-slot write invalidates the snapshot CACHE: the next nursery must snapshot the
+        // NEW value instead of replaying a frozen earlier copy. One of exactly two module-slot mutators
+        // (with `module_define`), so this pair is the whole invalidation surface for slot rebinding.
+        self.snapshot_memo = None;
         if let Obj::Module(m) = self.heap.get_mut(module) {
             m.slots[slot as usize] = value;
         }
@@ -1827,6 +1837,10 @@ impl Vm {
     /// fresh slot is appended (native-module population + worker fault replay both build up modules
     /// this way, growing slots in the same order the parent assigned them).
     pub(super) fn module_define(&mut self, module: GcRef, name: &str, value: Value) {
+        // W6-2 — the by-name twin of `set_global_slot`: invalidate the snapshot cache (import binding,
+        // native-module population, worker fault replay). `fault_module` take/restores the memo around
+        // its replay loop, since a replay REPRODUCES the snapshot rather than mutating the view.
+        self.snapshot_memo = None;
         if let Obj::Module(m) = self.heap.get_mut(module) {
             match m.index.get(name) {
                 Some(&i) => m.slots[i as usize] = value,

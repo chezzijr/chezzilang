@@ -190,7 +190,7 @@ frame-local one (F3 path C) — the reach-gate + Option-B poison→`nil` model i
 fast path no longer excludes generator-embedding values (`!value_embeds_generator` clause dropped), so a
 handle-free module-global generator with all-sendable parked slots rides the `SnapValue::Wire(to_wire…)`
 lane. Its slow `Obj::Generator` arm, however, must **NOT** re-raise the `to_wire` reject: `snapshot_modules`
-walks EVERY module global once at the first `spawn`, reached or not, so eager-faulting there aborts any
+walks EVERY module global of a nursery's snapshot, reached or not, so eager-faulting there aborts any
 program that merely *holds* a non-sendable module-global generator it never sends (a regression vs the old
 poison→`nil`-then-reach-gate model). Instead the slow arm snapshots a non-sendable generator (non-sendable
 parked slot / reference cycle / parked host handle) as an inert **`Nil` placeholder** — the untouched-global
@@ -224,7 +224,7 @@ parked_slot_nonsendable_rejects,in_data_cycle_rejects,unreached_nonsendable_runs
 - **Multi-frame / pending-`defer` suspended generators** — checker-UNREACHABLE (item 3 arms a/c); no valid
   program constructs them. The rejects are defensive guards, not a user-visible limit — nothing to build.
 
-## Session log — 2026-07-25 (bug-hunt wave 6: 18 findings — 7 FIXED (W6-1, W6-3, W6-4, W6-5, W6-6, W6-11, W6-16), 11 open + 3 carve-outs filed (W6-3b/c/d) — 2 never-hunted surfaces swept)
+## Session log — 2026-07-25 (bug-hunt wave 6: 19 findings — W6-19 found while FIXING W6-2 — 9 FIXED (W6-1, W6-2, W6-3, W6-4, W6-5, W6-6, W6-11, W6-16, W6-19), 10 open + 3 carve-outs filed (W6-3b/c/d) — 2 never-hunted surfaces swept)
 
 Pre-freeze adversarial hunt, 5 disjoint parallel domains, weighted at the two surfaces the wave-5
 residual named as never audited (**FFI**, **GC + `unsafe`**) plus the concurrency code that landed
@@ -234,8 +234,10 @@ the real `target/release/chezzi`, both engines**, before filing; one subagent cl
 false positive (an FFI `str`-param lifetime UAF via `putenv` — CPython ctypes is equally UB there, and
 `store_str` is an existing documented deferral, so the differential was luck, not a contract).
 
-**None of the 18 is a serial≠M:N divergence** — every one is byte-identical on both engines, i.e. the
-parity oracle is structurally blind to all of them. That is now the dominant shape of what's left.
+**None of the original 18 is a serial≠M:N divergence** — every one is byte-identical on both engines, i.e.
+the parity oracle is structurally blind to all of them. That is now the dominant shape of what's left.
+(The one exception, **W6-19**, was found later, while FIXING W6-2 — not by the hunt: it needs a task whose
+first module-global touch is a write, which no probe happened to write.)
 
 ### THE META-FINDING — 5 of the 6 P0s are ONE class: a fix applied to SOME arms of an N-way set
 This is the same completeness/partial-coverage class the 2026-07-23 sweep found 3 instances of. It is
@@ -304,7 +306,7 @@ durability — and explicitly do NOT claim it for a `buffered(stdout())` writer,
 the same never-awaited background stdout queue as `print` and through the same `str`-typed (W6-9 lossy)
 sink, so `Ok` there means *queued*, not *written*.
 
-### W6-2. A module global FIRST INITIALIZED AFTER the first nursery reads as `nil` inside later tasks — check-OK-then-run-fault + silently-wrong — P0
+### W6-2. A module global FIRST INITIALIZED AFTER the first nursery reads as `nil` inside later tasks — check-OK-then-run-fault + silently-wrong — P0 — **FIXED (2026-07-25)**
 ```chezzi
 import std.concurrency
 tot := AtomicInt(0)
@@ -330,6 +332,45 @@ that behavior is correct and verified (`n: int = 1` then `n = 42` → task sees 
 undocumented and unsound is that an **un-initialized-at-snapshot-time** global replays as `nil`: a value the
 checker has statically proven impossible for an `int`/`List[int]`/struct-typed slot. Go (a goroutine
 launched later reading a package-level var) and Python threads both see the current value.
+
+**FIX (2026-07-25).** The staleness itself is gone, not just the `nil` hole — **a nursery snapshots the
+module globals FRESH, at every depth**, pinned at its first `spawn`. Per-task isolation is unchanged.
+Three increments at the one choke point (`ensure_snapshot`):
+1. **`snapshot_memo` becomes a CACHE, not a forever-memo.** Invalidated by a module-slot write (hooked in
+   `set_global_slot` + `module_define` — the only two slot mutators), and never populated at all for a
+   view holding a **mutable aggregate** global (`ModuleSnapshot::reusable` / `slot_snapshot_reusable`, a
+   conservative WHITELIST: scalars, `str`/`bytes`, `Func`/`Native`/`Builtin`/`Cffi`, the `Arc`-shared
+   cores `Channel`/`Shared`/`RwShared`/`Atomic`/`Executor`/socket/`Writer`/`Reader`, and an import-alias
+   `Module`). That closes in-place mutation (`q.push(1)`, `m[k]=v`, `p.x=1`), which writes no slot for a
+   hook to see, without touching the mutating intrinsics in the (then-fenced) `src/vm/call.rs`.
+2. **The cache + the snapshot became per-module-VIEW** (`FiberCtx`, swapped with
+   `module_objs`/`module_faulted`), so a nested nursery inside a task snapshots the TASK's current view,
+   and a shell draining several scopes faults each fiber from its OWN snapshot. Consequence: a shell no
+   longer needs a snapshot at all → `spawn_shell` lost its `snap` parameter, deleting 5 `ensure_snapshot`
+   call sites including both `.expect("no fault possible")` teardown panic vectors.
+3. **A per-nursery PIN** (`nursery_snaps`, lockstep with `nurseries`), filled at the first `spawn`. Needed
+   because the engines otherwise snapshot at different program points: serial prepares a lazy nursery's
+   tasks at its own join, M:N may EARLY-ENLIST them at a nested nursery's join. Pinned at `EnterNursery`
+   would be too early (the implicit nursery's `EnterNursery` sits at line 1, before any global is
+   initialized — that is precisely how the `nil` arose).
+
+**Residual, documented:** two spawns into the SAME nursery straddling a mutation both read the pinned
+(first-spawn) view — Go would give the second goroutine the newer value. That falls out of "a nursery takes
+A snapshot" and is pinned by `two_spawns_one_nursery_share_the_pinned_view_parity`.
+
+**Cost measured** (nursery-in-a-loop, 200k nurseries × 1 task, `--serial`, the sensitive engine; the M:N
+engine's pool overhead swamps it entirely — no measurable change there, and the 9 `benches/run.chz` benches
+moved only within noise): scalar-only globals 689.9 → 713.6 ms (**+3.4%**, the pin bookkeeping). WITH an
+aggregate global 831.5 → 951.5 ms (**+14.4%**), i.e. after the fix the aggregate case is **1.33×** the
+scalar case — the price of the conservative whitelist, on a program that does nothing but open nurseries.
+
+**FOLLOW-UP (not implemented, deliberately).** `src/vm/call.rs` was fenced (W6-3 in flight), so the
+aggregate case is handled by the coarse whitelist rather than by precise invalidation. Once `call.rs` is
+free, the mutating intrinsics (`List.push`/`pop`/`insert`/…, map/set store, `SetField`, `SetIndex`) can drop
+the cache only when the mutated object is reachable from a module slot, letting an aggregate-holding program
+cache like a scalar one. Justified only if a real workload shows the gap: the bar is the 1.33× above (a
+nursery-loop with an aggregate global vs the scalar variant) shrinking to ≈1.0×, i.e. >5% of real
+throughput on a nursery-heavy program, not a micro-bench alone.
 
 ### W6-3. A protocol method a built-in satisfies INTRINSICALLY is not callable at runtime — check-OK-then-run-fault, ~11 methods — P0 — **FIXED (2026-07-25)**
 ```chezzi
@@ -725,6 +766,28 @@ work). Blast radius narrow: `float` is not `Hashable`, so NaN map/set keys are u
 - **W6-18.** `io.open()` on a DIRECTORY returns `Ok(Reader)`; the failure is deferred to every read, and
   `read_line`'s message advises `Reader.read_bytes`, which also fails (`Is a directory (os error 21)`).
   `io.read_file(dir)` correctly `Err`s at the call. Python `open(dir)` → `IsADirectoryError`.
+
+### W6-19. A spawned task whose FIRST module-global access is a WRITE PANICS the M:N pool — host panic + serial≠M:N — P0 — **FIXED (2026-07-25)**
+Found while fixing W6-2 (the mandated nested-nursery test could not even be written without tripping it).
+```chezzi
+g: int = 1
+fn worker():
+    g = 99                     # the task's FIRST touch of a module global is a WRITE
+    print("worker g =", g)
+fn main():
+    parallel:
+        spawn worker()
+    print("parent g =", g)
+main()
+```
+`--serial`: `worker g = 99` / `parent g = 1`, rc=0 (correct). Default M:N: `thread 'chezzi-pool' panicked at
+src/vm/stmt.rs:1820: index out of bounds: the len is 0 but the index is 2` → `internal error: a parallel task
+panicked`, rc=1. **The wave's one serial≠M:N divergence, and a host panic `recover:` cannot catch.**
+**Root cause** `src/vm/exec.rs`: `Op::GetGlobalSlot` calls `ensure_module_faulted(home)` but the write arms
+(`DefineGlobalSlot`/`SetGlobalSlot`) do not, so a worker whose modules fault in LAZILY indexed an empty
+`slots` vec. **Fix:** one `ensure_module_faulted(module)` at the root, in `set_global_slot` — covering both
+write ops and any future caller; free on the top-level/cooperative engines (no snapshot installed).
+Regression: `parity_tests::spawn_task_first_global_access_is_write_parity`.
 
 ### Extra safe-direction observations — NOT filed as bugs
 - `x: Any = if c: 1 else: 2.5` → `1.0`, and the `match`-expression form → `7.0` (also under an `Any` fn
@@ -1385,6 +1448,10 @@ worker + nested nursery reuses that frozen `Arc` (invalidated nowhere), so a glo
 nursery — by sequential parent code between nurseries, or by a task before it opens a nested `parallel:` —
 is invisible to later tasks; serial freezes at the same instant from the same memo, else it would read the
 live post-mutation copy and diverge.
+> **RETIRED 2026-07-25 (W6-2).** That frozen-forever memo was the bug: a global not yet initialized when it
+> was built replayed as `nil`. A nursery now snapshots FRESH at its first `spawn`, at every depth, pinned so
+> both engines still snapshot at the same program point. The per-task deep copy / isolation described above
+> is unchanged. See `### W6-2` in the 2026-07-25 log.
 
 Every task-entry path snapshots — not just the nursery. `Executor.submit` closures also mutate their OWN
 module-global copy on both engines: the cooperative `Executor.shutdown` inline drain

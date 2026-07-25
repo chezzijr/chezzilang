@@ -775,22 +775,36 @@ pub struct Vm {
     /// without this counter the first checkpoint inside the first deferred call would eat it.
     /// See [`Vm::cancel_requested`].
     deferring: usize,
-    /// D1 — on a `--parallel` **worker** VM, the read-only [`ModuleSnapshot`] of the parent's module
-    /// graph that this worker faults into its own heap lazily, one module at a time, on first global
-    /// access ([`Vm::fault_module`]). `None` on the top-level VM and the cooperative engine (which
-    /// never fault — the top-level's `module_objs` are the real, fully-populated modules; a worker's
-    /// start empty and fill on demand). A nested `spawn` inside a worker hands this same `Arc` down
-    /// (its faulted graph is identical to the snapshot — module globals are read-only under
-    /// `--parallel`), so the snapshot propagates across worker generations with stable indices.
+    /// D1 — on a `--parallel` **worker** fiber, the read-only [`ModuleSnapshot`] its `module_objs` were
+    /// built from and fault into its own heap lazily, one module at a time, on first global access
+    /// ([`Vm::fault_module`]). `None` on the top-level VM, the cooperative engine, and a worker SHELL
+    /// (which runs no code of its own — every fiber brings its own view).
+    ///
+    /// W6-2 — part of the [`FiberCtx`] swap group with `module_objs`/`module_faulted`: snapshots are
+    /// per-NURSERY now, so a shell draining the global run queue can hold fibers from different scopes
+    /// built from DIFFERENT snapshots. Faulting a fiber's modules from another scope's snapshot would
+    /// replay the wrong values, so the snapshot travels WITH the fiber.
     module_snapshot: Option<Arc<ModuleSnapshot>>,
     /// D1 — parallel to `module_objs` on a worker VM: whether module `i` has been faulted in yet
     /// (its globals replayed from `module_snapshot`). Empty on the top-level / cooperative VM.
     module_faulted: Vec<bool>,
-    /// D1 — the top-level VM's memoized snapshot of its own (real) module graph, built once on the
-    /// first `spawn`/`submit` drain and shared by every worker it prepares. Read-only after build
-    /// (module globals are frozen under `--parallel`, decision G1), so one build serves the whole
-    /// run. A worker reuses its `module_snapshot` instead of this (see [`Vm::ensure_snapshot`]).
+    /// W6-2 — CACHE of the snapshot of THIS view's module graph, so repeated nurseries in a
+    /// mutation-free program build exactly one. Invalidated by a module-slot write
+    /// (`set_global_slot`/`module_define`) and never populated for a view holding a mutable aggregate
+    /// global (`ModuleSnapshot::reusable` — in-place mutation writes no slot). Swapped per fiber with
+    /// `module_snapshot`: it describes the swapped-in view, not the VM. See [`Vm::ensure_snapshot`].
     snapshot_memo: Option<Arc<ModuleSnapshot>>,
+    /// W6-2 — parallel to `nurseries` (lockstep push/pop): the [`ModuleSnapshot`] PINNED for nursery
+    /// `i`, filled on its FIRST `spawn` ([`Vm::nursery_snap`]) and replayed by every task of that
+    /// nursery. `None` until then (a `parallel:` that never spawns builds no snapshot at all).
+    ///
+    /// Why pin: both engines must snapshot at the same program point. Serial prepares a lazy nursery's
+    /// tasks at its own join, while M:N may EARLY-ENLIST them at a nested nursery's join — an earlier
+    /// instant. Pinning at the first spawn makes the instant a source position, identical on both.
+    /// Pinning at `EnterNursery` instead would be too early: the compiler emits the IMPLICIT nursery's
+    /// `EnterNursery` at the top of the module/function body, before any global is initialized (which is
+    /// how W6-2's `nil` arose in the first place).
+    nursery_snaps: Vec<Option<Arc<ModuleSnapshot>>>,
     /// Task 1 — GC pin for the shell's REAL `module_objs` while they are swapped OUT of
     /// `self.module_objs` during a serial child-modules window (`with_serial_child_modules` /
     /// `prepare_serial_child`). `collect()` roots `self.module_objs` (the child copy) but not the
@@ -966,6 +980,16 @@ struct FiberCtx {
     /// cooperative fibers (eager-faulted, `module_snapshot` cleared) but still swaps for symmetry.
     module_objs: Vec<GcRef>,
     module_faulted: Vec<bool>,
+    /// W6-2 — the snapshot this fiber's `module_objs` fault in from, and the cache of the snapshot of
+    /// its CURRENT view. Both describe the module view above, so they travel with it (see
+    /// [`Vm::module_snapshot`]): a shell drains fibers from several scopes, each built from its own
+    /// per-nursery snapshot. Heap-independent ([`SnapValue`] carries no `GcRef`), so `root_ctx` needs
+    /// nothing for them. `None`/`None` for a cooperative child (eager-faulted at the spawn boundary).
+    module_snapshot: Option<Arc<ModuleSnapshot>>,
+    snapshot_memo: Option<Arc<ModuleSnapshot>>,
+    /// W6-2 — parallel to `nurseries` (lockstep): see [`Vm::nursery_snaps`]. Travels with the fiber's
+    /// nurseries across a park like `mn_scopes`/`nursery_defer_floors`.
+    nursery_snaps: Vec<Option<Arc<ModuleSnapshot>>>,
     /// D2b — the fiber's `Executor` handles (GC roots into its own heap; same heap-keyed argument as
     /// `module_objs`). Empty for cooperative fibers.
     executors: Vec<GcRef>,
@@ -1145,18 +1169,6 @@ enum Lowered {
     },
 }
 
-impl Lowered {
-    /// The spawn-site span carried on every variant — used to re-stamp a module-global snapshot fault.
-    fn span(&self) -> Span {
-        match self {
-            Lowered::Closure { span, .. }
-            | Lowered::Func { span, .. }
-            | Lowered::Builtin { span, .. }
-            | Lowered::Method { span, .. } => *span,
-        }
-    }
-}
-
 /// D1 — a heap-independent, read-only snapshot of the parent's initialized module graph, shared
 /// across a nursery's workers via `Arc` (like `Arc<Program>`) and **faulted into each worker heap
 /// lazily, one module at a time, on first global access** (see [`Vm::fault_module`]). It replaces
@@ -1165,9 +1177,19 @@ impl Lowered {
 ///
 /// `modules` is parallel to the parent's `module_objs` by index, so a callable's `home` /
 /// `module_idx` (already an index under the airlock — see [`Vm::home_index`]) lines up directly
-/// with the worker's pre-allocated (empty) module objects. Built once by [`Vm::snapshot_modules`].
+/// with the worker's pre-allocated (empty) module objects. Built per nursery by
+/// [`Vm::snapshot_modules`] and cached in `snapshot_memo` when `reusable`.
 struct ModuleSnapshot {
     modules: Vec<ModuleSnap>,
+    /// W6-2 — may this snapshot be CACHED (`snapshot_memo`) and replayed by a later nursery? True iff
+    /// every module-global slot holds an immutable leaf or an `Arc`-shared core
+    /// ([`Vm::slot_snapshot_reusable`]) — i.e. nothing whose CONTENTS can change without a module-slot
+    /// write (the two hooked mutators `set_global_slot` / `module_define`). A module global holding a
+    /// mutable aggregate (`List`/`Map`/`Set`/`Struct`/…) is mutated IN PLACE (`q.push(1)`, `m[k] = v`,
+    /// `p.x = 1`) with no slot write for the hooks to see, so such a snapshot is never cached and each
+    /// nursery rebuilds — conservative, never stale. A WHITELIST, so a future `Obj` variant defaults to
+    /// "rebuild" (slower, never unsound).
+    reusable: bool,
 }
 
 /// D1 — one module in a [`ModuleSnapshot`]: its name plus its top-level globals as heap-independent
@@ -3146,6 +3168,11 @@ impl ReadyWorker {
             heap: Some(worker.heap),
             module_objs: worker.module_objs,
             module_faulted: worker.module_faulted,
+            // W6-2 — carry the snapshot the modules above fault in from (it used to be DROPPED here,
+            // which only worked while every snapshot was the same frozen `Arc`; snapshots are
+            // per-nursery now, so the shell's cannot substitute for this fiber's).
+            module_snapshot: worker.module_snapshot,
+            snapshot_memo: worker.snapshot_memo,
             executors: worker.executors,
             // M19 Phase 3 — the intern cache indexes `worker.heap`, which becomes `ctx.heap`; carry it
             // so the heap-keyed invariant holds (its `GcRef`s stay valid against the heap they travel with).

@@ -10754,7 +10754,9 @@ fn closure_returned_across_task_typechecks() {
     );
 }
 
-// ----- G1 (B3.3b): module globals are read-only across tasks (`--parallel`) -----
+// ----- G1 (B3.3b), RETIRED: these now just assert the checker ACCEPTS every shape. The read-only rule
+// was deleted in 2026-07-21 (module globals deep-copy per task on both engines, so a task write lands on
+// its own copy); W6-2 then made the copy fresh per nursery. Kept as accept-regressions. -----
 
 #[test]
 fn sequential_global_mutation_ok() {

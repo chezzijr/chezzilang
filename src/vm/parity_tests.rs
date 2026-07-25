@@ -11080,27 +11080,26 @@ main()
     assert_eq!(parity_entry(src), "task sees 1 got 7\nparent sees 0\n");
 }
 
-/// Task 1 (regression) — a task that mutates a module global and THEN opens a NESTED `parallel:` must
-/// give its grandchild the SAME frozen view on both engines. M:N freezes globals at the first nursery
-/// (`ensure_snapshot` memoizes, never invalidated) and every worker/nested nursery reuses that snapshot,
-/// so the grandchild reads the PRE-mutation value (0). Serial must reuse the identical memoized snapshot
-/// — a FRESH per-nursery `snapshot_modules()` would read the parent-task's live mutated copy and diverge
-/// (serial 1 / M:N 0). Distinct from `nested_serial_spawn_module_global_isolates_parity`, which mutates
-/// AFTER the nested spawn (so the memo-vs-fresh difference never bites).
+/// W6-2 (was: …`reads_frozen_parity`, expecting `0`) — a task that mutates a module global and THEN
+/// opens a NESTED `parallel:` gives its grandchild the TASK's CURRENT view (1), at every depth, on both
+/// engines. The old `0` was a MEMOIZATION ARTIFACT, not design: `ensure_snapshot` memoized the first
+/// nursery's snapshot forever and every later worker/nested nursery replayed that frozen `Arc` (decision
+/// G1), so the grandchild read the pre-mutation value. A nursery now snapshots FRESH when its first task
+/// is spawned, from the view of whoever opened it — so the nested rule is uniform and Go-like. Per-task
+/// ISOLATION is unchanged (`nested_serial_spawn_module_global_isolates_parity` still reads `0`).
 #[test]
-fn nested_serial_spawn_mutation_before_nested_reads_frozen_parity() {
+fn nested_serial_spawn_mutation_before_nested_reads_fresh_parity() {
     let src = "g := 0\nfn worker():\n    g = g + 1\n    parallel:\n        spawn:\n            print(g)\nfn main():\n    parallel:\n        spawn worker()\nmain()\n";
-    assert_eq!(parity_entry(src), "0\n");
+    assert_eq!(parity_entry(src), "1\n");
 }
 
-/// Task 1 (regression) — TWO sequential top-level nurseries with ordinary (non-task) parent code mutating
-/// a module global BETWEEN them. M:N snapshots globals ONCE at the first nursery (`ensure_snapshot`
-/// memo, invalidated nowhere), so the second nursery's task reads the FROZEN first-nursery value, not the
-/// mutated one. Serial must reuse the same memo — a fresh per-nursery snapshot would see the between-
-/// nursery mutation live and diverge (serial reads the mutated value / M:N reads the frozen one). Both
-/// tasks read the frozen count (0), so the second prints 0 (not 200).
+/// W6-2 (was: …`reads_frozen_parity`, expecting `0\n0\n`) — TWO sequential top-level nurseries with
+/// ordinary (non-task) parent code mutating an imported module's global BETWEEN them: the second
+/// nursery's task sees the MUTATED value (2 * 100). The old frozen `0` came from the never-invalidated
+/// `snapshot_memo`; a module-slot write now drops the cache, so each nursery snapshots fresh. Both
+/// engines agree by construction (they share the one `ensure_snapshot` choke point).
 #[test]
-fn sequential_mutation_between_nurseries_reads_frozen_parity() {
+fn sequential_mutation_between_nurseries_reads_fresh_parity() {
     let out = assert_parity_file(
         &[
             (
@@ -11114,7 +11113,66 @@ fn sequential_mutation_between_nurseries_reads_frozen_parity() {
         ],
         "main.chz",
     );
-    assert_eq!(out, "0\n0\n");
+    assert_eq!(out, "0\n200\n");
+}
+
+/// W6-19 — a spawned task whose FIRST module-global access is a WRITE. `Op::GetGlobalSlot` calls
+/// `ensure_module_faulted`, but `DefineGlobalSlot`/`SetGlobalSlot` did not, so on M:N the write indexed
+/// an unfaulted (empty-slots) worker module and PANICKED the pool thread
+/// (`index out of bounds: the len is 0`) → `internal error: a parallel task panicked`, while `--serial`
+/// printed the right answer. Rooted at `set_global_slot` (one guard, all callers).
+#[test]
+fn spawn_task_first_global_access_is_write_parity() {
+    let src = "g: int = 1\nfn worker():\n    g = 99\n    print(\"worker g =\", g)\nfn main():\n    parallel:\n        spawn worker()\n    print(\"parent g =\", g)\nmain()\n";
+    assert_eq!(parity_entry(src), "worker g = 99\nparent g = 1\n");
+}
+
+/// W6-2 — the PIN INSTANT: a nursery snapshots the module globals ONCE, when its FIRST task is spawned,
+/// and every later task of that same nursery (including a nested nursery's early-enlisted outer siblings)
+/// replays that one view. Here `A`'s spawn precedes `g = 2`, so both `A` and the nested `B` read `1`
+/// while the parent reads `2` — on BOTH engines. Without the pin the engines diverge on the INSTANT:
+/// serial prepares `A`'s tasks at `A`'s own join (post-mutation → 2) while M:N early-enlists them at
+/// `B`'s join (pre-mutation → 1). Observed through `Shared` and printed once after the join, because the
+/// print ORDER of this shape already differs per engine (a bare-`print` variant is not byte-identical).
+#[test]
+fn nursery_snapshot_pins_at_first_spawn_parity() {
+    let src = "\
+import std.concurrency
+g: int = 1
+fn main():
+    a := Shared(0)
+    b := Shared(0)
+    parallel:
+        spawn: a.set(g)
+        parallel:
+            spawn: b.set(g)
+        g = 2
+    print(\"A={a.get()} B={b.get()} parent={g}\")
+main()
+";
+    assert_eq!(parity_entry(src), "A=1 B=1 parent=2\n");
+}
+
+/// W6-2 — the pin is per-NURSERY, not per-spawn: two spawns into the SAME nursery straddling a global
+/// mutation both read the pinned (first-spawn) value, identically on both engines. This is the one
+/// documented residual divergence from Go (which would give the second goroutine the newer value) and it
+/// falls out of "a nursery takes A snapshot" — pinned here so a later change can't silently move it.
+#[test]
+fn two_spawns_one_nursery_share_the_pinned_view_parity() {
+    let src = "\
+import std.concurrency
+g: int = 1
+fn main():
+    a := Shared(0)
+    b := Shared(0)
+    parallel:
+        spawn: a.set(g)
+        g = 2
+        spawn: b.set(g)
+    print(\"A={a.get()} B={b.get()} parent={g}\")
+main()
+";
+    assert_eq!(parity_entry(src), "A=1 B=1 parent=2\n");
 }
 
 /// QoL: an untyped int-CONSTANT branch of an if/match EXPRESSION widens to `float` when a

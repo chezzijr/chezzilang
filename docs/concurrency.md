@@ -91,11 +91,20 @@ print(counter)                     # 0  — to actually share, use a Shared[int]
 **Module globals isolate per task on both engines.** A `spawn`ed task gets its own deep copy of every
 module global (and of every captured local) — mutating one inside a task never propagates out, on
 `--serial` or the default M:N engine alike (they snapshot identically; `serial == M:N` by construction).
-The snapshot is taken **once, at the first nursery**, and reused for every later task and nested nursery
-(module globals are effectively frozen thereafter): a mutation by ordinary sequential code *between* two
-nurseries, or by a task *before* it opens a nested `parallel:`, is NOT seen by tasks that read the global
-afterward — again identical on both engines. (To thread a fresh value into a task, pass it as a spawn
-argument or through a `Channel`.)
+
+**Each nursery snapshots FRESH, at every depth.** The copy a task reads is taken when its nursery's
+**first `spawn`** runs, from the view of whoever opened that nursery — so a task sees the values current
+at that moment, including a global first initialized *after* an earlier nursery. A mutation by ordinary
+sequential code *between* two nurseries IS seen by the second nursery's tasks, and a task that mutates
+its own copy and then opens a **nested** `parallel:` gives its children the **task's** current view, not
+the parent module's. In-place mutation of an aggregate global (`q.push(x)`, `m[k] = v`, `p.x = 1`) counts
+too. An `Executor` job sees the globals as of the **drain** (`shutdown`, or the auto-drain at exit), the
+instant it actually runs. Identical on both engines, and the same rule Go and Python threads follow.
+
+The pin is per **nursery**, not per `spawn`: two spawns into the *same* nursery that straddle a mutation
+both read the view pinned at the first one (the one documented divergence from Go, which would hand the
+second goroutine the newer value). To thread a *newer* value into a task without opening a new nursery,
+pass it as a spawn argument or send it through a `Channel`.
 To actually **share** mutable cross-task state, use `Shared[T]` / `RwShared[T]` / `Atomic[T]` (below) or a
 `Channel[T]` — those cross by shared handle, not by copy, so a task-side write IS visible to the parent.
 
@@ -901,8 +910,9 @@ sees EOF after leg 1 drains the input. Don't use `--check-parity` on programs th
 
 **The model — spawning a task copies its environment (fork-like).** A `spawn`ed task does not share the
 parent's heap. It receives its **own isolated copy** of everything it captures — captured locals are
-deep-copied, module globals are snapshot-copied once at the first nursery — much like a forked child
-copies the parent's address space. Two deliberate differences from a real `fork`:
+deep-copied, module globals are snapshot-copied per nursery (fresh at its first `spawn`, [§2](#2-the-model))
+— much like a forked child copies the parent's address space. Two deliberate differences from a real
+`fork`:
 1. It copies only the **reachable captured environment**, not the whole heap.
 2. **Explicit concurrency handles cross by SHARED reference, not by copy** — `Channel`, `Shared`,
    `RwShared`, `Atomic`, `Executor`, and the socket/reader/writer handles carry their one underlying
@@ -926,9 +936,10 @@ engines, **never UB**):
 
 Crossing a task boundary (a `spawn` capture or a `Channel.send`) is gated on **sendability**. A
 captured **local** crosses as an independent per-task **copy** — a task may reassign it (the write
-stays on the isolated copy, invisible to the parent); a captured **module global** is **frozen** and
-both **reassigning** it AND **mutating it in place** (`.push`/`m[k]=v`/`s.field=x` on a module-global
-aggregate) inside a task is a **compile error** (see below).
+stays on the isolated copy, invisible to the parent); a **module global** behaves the same way: a task
+may reassign it or mutate it in place, and the write lands on that task's own per-nursery copy,
+invisible to the parent and to sibling tasks. (The earlier G1 checker rule — a compile error for both —
+was retired when module globals started deep-copying per task on both engines.)
 
 - **Sendable:** scalars (`int`/`float`/`bool`), `str`, containers + structs whose contents are all
   sendable, **`Channel`** itself (reply channels), an **`Atomic[T]`** handle, an **`AtomicInt`** handle,
@@ -1025,7 +1036,7 @@ aggregate) inside a task is a **compile error** (see below).
   generator each drive their **own** copy (and the parent keeps its own). Memory safety rests on `from_wire`
   rebuilding a fresh `GeneratorCore` on the worker heap (never a shared cross-heap `GcRef`). A **non-sendable**
   module-global generator (a non-sendable parked slot, a value cycle, a parked host handle) differs from the
-  frame-local case in ONE way: `snapshot_modules` walks **every** global once at the first `spawn`, reached
+  frame-local case in ONE way: `snapshot_modules` walks **every** global of the nursery's snapshot, reached
   or not, so it must NOT eager-fault on a generator the program merely *holds*. Instead `to_snap`'s slow arm
   snapshots such a generator as an inert **`Nil` placeholder** — a task that never touches it runs **clean**,
   and one that **reaches** it faults recoverably **at the use site** (`cannot iterate over nil`), byte-identical
@@ -1033,18 +1044,14 @@ aggregate) inside a task is a **compile error** (see below).
   `to_wire` serialize point because it crosses only the value actually sent.) (The earlier **Option-B
   reach-gate** model — which scanned each task for a *possible* reach and faulted it — is **retired**:
   by-value crossing removes the "why can a frame-local generator cross but not a module-global one?" drift.)
-- **Captured locals are isolated copies; module globals are frozen.** Reassigning (or in-place mutating)
-  a captured **local** inside a task is fine — it mutates that task's own copy, invisible to the parent (so
-  it can't share state by accident). Both **reassigning** a captured **module global** AND **mutating it in
-  place** (`.push`/`.add`/`m[k]=v`/`s.field=x` on a module-global aggregate — B3) inside a task are a
-  **compile error** (they would diverge — shared on the serial engine, a worker snapshot on M:N), with the
-  fix in the message (`use a Shared or Channel`). Either way, to produce output visible to the parent, use a
-  `Channel` or a `Shared`. (Reads of both are always fine.) The in-place-mutation gate covers the direct
-  `spawn:` block, `Executor.submit` closures, and closures declared inside a `spawn:` block; a handful of
-  fully indirect forms (a top-level-bound closure spawned by name, a closure reached through a captured
-  struct field, callee-form *method*-mutation reached transitively through a `spawn f()` free fn, and a
-  method-mutation through a task-local alias of the global — `local := xs; local.push(..)`) remain a
-  documented v1 gap — see `docs/gaps.md §B3`.
+- **Captured locals AND module globals are isolated copies.** Reassigning — or mutating in place
+  (`.push`/`.add`/`m[k]=v`/`s.field=x`) — a captured **local** or a **module global** inside a task is
+  fine: the write lands on that task's own copy, invisible to the parent and to sibling tasks, on both
+  engines. To produce output visible to the parent, use a `Channel` or a `Shared`. (Reads are always
+  fine, and a task reads the values current when its nursery opened — [§2](#2-the-model).) *(History: a
+  G1 checker rule once made both a **compile error**, because the serial engine shared the globals while
+  M:N snapshotted them. Deep-copying per task on BOTH engines removed the divergence, and the rule — and
+  its partially-covered indirect forms — was retired with it.)*
 - **Cyclic sendables round-trip (identity-preserving copy).** The airlock copies a sendable by a
   structural deep walk (`spawn` arg / `Channel.send` / `Shared(...)` / worker return / module-global
   snapshot). A value that is sendable-by-type but contains a **reference cycle** (e.g. `a.next = b;

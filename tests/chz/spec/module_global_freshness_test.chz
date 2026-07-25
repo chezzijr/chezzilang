@@ -1,0 +1,215 @@
+# Module-global FRESHNESS across nurseries (gaps.md W6-2 + W6-19).
+#
+# A nursery takes a FRESH snapshot of the module globals when its first task is spawned, at EVERY
+# depth — so a task sees the values current at that instant, including a global first initialized
+# AFTER an earlier nursery (which used to replay as `nil`) and a value mutated between two nurseries
+# (which used to replay the frozen first-nursery copy). Per-task ISOLATION is unchanged: a task
+# mutates its OWN deep copy and never writes through to the parent; `Shared`/`RwShared`/`Atomic`/
+# `Channel` stay the only real sharing. A NESTED `parallel:` inside a task snapshots the TASK's
+# current view, not the parent module's.
+# Gated serial==M:N by chz_suite_passes_both_engines.
+import std.concurrency
+
+# --- W6-2 repro: a first nursery BEFORE `n` is initialized ------------------------------------
+tot := AtomicInt(0)
+parallel:
+    spawn: tot.add(1)
+
+n: int = 42
+
+# Per-test mutable globals (each test owns its own, so tests stay order-independent).
+m: int = 1
+fn set_m(v: int):
+    m = v
+
+q: List[int] = [1]
+mp: Map[str, int] = {"a": 1}
+
+struct P:
+    x: int
+p := P(1)
+
+f: int = 1
+fn set_f(v: int):
+    f = v
+
+loopg: int = 0
+esc: int = 1
+tg: int = 1
+xg: int = 1
+
+# --- the repro ---------------------------------------------------------------------------------
+
+# A global declared AFTER the first nursery used to replay as `nil` inside every later task.
+test fn task_sees_global_declared_after_first_nursery():
+    seen := Shared(0)
+    parallel:
+        spawn: seen.set(n)
+    assert seen.get() == 42, "task saw {seen.get()}"
+
+# --- staleness between nurseries ---------------------------------------------------------------
+
+# A scalar global mutated by sequential parent code BETWEEN two nurseries: the second nursery's task
+# sees the NEW value (it used to see the frozen first-nursery copy).
+test fn global_mutated_between_nurseries():
+    a := Shared(0)
+    b := Shared(0)
+    parallel:
+        spawn: a.set(m)
+    m = 42
+    parallel:
+        spawn: b.set(m)
+    assert a.get() == 1, "first task saw {a.get()}"
+    assert b.get() == 42, "second task saw {b.get()}"
+
+# The same, but the global is written by a FUNCTION rather than at top level.
+test fn global_written_by_a_function():
+    a := Shared(0)
+    b := Shared(0)
+    parallel:
+        spawn: a.set(f)
+    set_f(77)
+    parallel:
+        spawn: b.set(f)
+    assert a.get() == 1, "first task saw {a.get()}"
+    assert b.get() == 77, "second task saw {b.get()}"
+
+# --- in-place mutation of an aggregate global (never writes the module slot) --------------------
+
+test fn aggregate_mutated_in_place_between_nurseries():
+    a := Shared(0)
+    b := Shared(0)
+    parallel:
+        spawn: a.set(q.len())
+    q.push(2)
+    parallel:
+        spawn: b.set(q.len())
+    assert a.get() == 1, "first task saw len {a.get()}"
+    assert b.get() == 2, "second task saw len {b.get()}"
+
+test fn map_and_struct_globals_in_place():
+    a := Shared(0)
+    b := Shared(0)
+    mp["b"] = 2
+    p.x = 7
+    parallel:
+        spawn: a.set(mp.len())
+        spawn: b.set(p.x)
+    assert a.get() == 2, "task saw map len {a.get()}"
+    assert b.get() == 7, "task saw p.x {b.get()}"
+
+# --- ISOLATION control (must stay green: the fix removes staleness, NOT isolation) -------------
+
+test fn task_side_mutation_does_not_reach_parent():
+    xg = 1
+    parallel:
+        spawn: set_x(5)
+    assert xg == 1, "task mutation leaked: {xg}"
+
+fn set_x(v: int):
+    xg = v
+
+# --- the NESTED rule ---------------------------------------------------------------------------
+
+# A task mutates its OWN copy, then opens a nested `parallel:`: its children must see the TASK's
+# current view (99), not the parent module's (1). Also exercises W6-19 (a task whose FIRST module-
+# global access is a WRITE used to panic the M:N pool on an unfaulted module).
+fn nested_worker(out: Shared[int]):
+    tg = 99
+    parallel:
+        spawn: out.set(tg)
+
+test fn nested_nursery_sees_the_tasks_current_view():
+    out := Shared(0)
+    parallel:
+        spawn nested_worker(out)
+    assert out.get() == 99, "nested task saw {out.get()}"
+    assert tg == 1, "nested task mutation leaked: {tg}"
+
+# --- Executor ----------------------------------------------------------------------------------
+
+# A submitted job runs at the DRAIN, so it sees the globals as of the drain instant.
+test fn executor_task_sees_globals_as_of_the_drain():
+    seen := Shared(0)
+    ex := Executor()
+    ex.submit(fn(): seen.set(m))
+    m = 123
+    ex.shutdown()
+    assert seen.get() == 123, "executor job saw {seen.get()}"
+
+test fn executor_alongside_a_nursery():
+    a := Shared(0)
+    b := Shared(0)
+    ex := Executor()
+    ex.submit(fn(): a.set(m))
+    parallel:
+        spawn: b.set(m)
+    ex.shutdown()
+    assert a.get() == m, "executor job saw {a.get()}"
+    assert b.get() == m, "nursery task saw {b.get()}"
+
+# --- teardown / cancel matrix (this subsystem produced the N1–N9 cascade) ----------------------
+
+fn boom():
+    panic("task blew up")
+
+# A task fault still propagates with its own message.
+test fn a_faulting_task_still_propagates():
+    r := recover:
+        parallel:
+            spawn boom()
+    match r:
+        Ok(_): assert false, "expected a fault"
+        Err(e): assert e.message().contains("task blew up"), "got {e.message()}"
+
+# A `?`-style escape out of a nursery: the escape propagates and the scope tears down cleanly.
+fn escape_out() -> Result[int, Error]:
+    parallel:
+        spawn: esc = 2
+        return Err("bail")
+    return Ok(0)
+
+test fn escape_out_of_a_nursery_tears_down():
+    r := escape_out()
+    match r:
+        Ok(_): assert false, "expected the escape"
+        Err(e): assert e.message() == "bail"
+
+# A nested nursery inside a task that then faults: teardown must not desync the per-nursery pin.
+fn nested_then_fault(out: Shared[int]):
+    parallel:
+        spawn: out.set(n)
+    panic("after nested")
+
+test fn nested_nursery_inside_a_faulting_task():
+    out := Shared(0)
+    r := recover:
+        parallel:
+            spawn nested_then_fault(out)
+    match r:
+        Ok(_): assert false, "expected a fault"
+        Err(e): assert e.message().contains("after nested"), "got {e.message()}"
+    assert out.get() == 42, "nested task saw {out.get()}"
+
+# A `defer` that reads a module global while running during teardown.
+fn defer_reads_global(out: Shared[int]):
+    defer out.set(n)
+    parallel:
+        spawn: tot.add(1)
+
+test fn defer_reads_a_global_during_teardown():
+    out := Shared(0)
+    parallel:
+        spawn defer_reads_global(out)
+    assert out.get() == 42, "defer saw {out.get()}"
+
+# A nursery in a LOOP: the pin is per-iteration, so each task sees that iteration's value.
+test fn nursery_in_a_loop_pins_per_iteration():
+    seen := Shared(0)
+    total := 0
+    for i in range(10):
+        loopg = i
+        parallel:
+            spawn: seen.set(loopg)
+        total = total + seen.get()
+    assert total == 45, "sum of per-iteration views was {total}"
