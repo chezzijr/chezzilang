@@ -27,18 +27,20 @@ Machine: i5-11400H, x86_64, Linux; Go 1.26.5, rustc 1.97.0 (release).
 The single-big-object benches above are GENTLE — each keeps one heap object alive, so
 Chezzi is near Go parity. The real gap shows with **many separate boxed objects**:
 
-| bench                       |  Go MB | base  | #1 box Module | #2 inline fields | #3 mark bitset | cum. vs base | vs Go |
-|-----------------------------|-------:|------:|--------------:|-----------------:|---------------:|-------------:|------:|
-| many_struct (2M `P{x,y}`)   |   67.4 | 327.6 |  281.9 (−14%) |    220.7 (−22%)  |  205.6 (−7%)   |    −37%      | 3.1×  |
-| many_map   (1M int→struct)  |   66.9 | 242.9 |  222.1 (−9%)  |    194.2 (−13%)  |  187.1 (−4%)   |    −23%      | 2.8×  |
-| many_list  (2M `[i,i]`)     |  163.1 | 266.5 |  220.7 (−17%) |    220.9 (±0%)   |  205.8 (−7%)   |    −23%      | 1.3×  |
+| bench                       |  Go MB | base  | #1 box Module | #2 inline fields | #3 mark bitset | #4 drop name | cum. vs base | vs Go |
+|-----------------------------|-------:|------:|--------------:|-----------------:|---------------:|-------------:|-------------:|------:|
+| many_struct (2M `P{x,y}`)   |   67.4 | 327.6 |  281.9 (−14%) |    220.7 (−22%)  |  205.6 (−7%)   |  148.9 (−28%) |    −55%      | 2.2×  |
+| many_map   (1M int→struct)  |   66.9 | 242.9 |  222.1 (−9%)  |    194.2 (−13%)  |  187.1 (−4%)   |  163.5 (−13%) |    −33%      | 2.4×  |
+| many_list  (2M `[i,i]`)     |  163.1 | 266.5 |  220.7 (−17%) |    220.9 (±0%)   |  205.8 (−7%)   |  205.8 (±0%)  |    −23%      | 1.3×  |
 
 (`base` = pre-fix; `#1` = `0100153` (`Obj` 88→64B); `#2` = `c1f4d0e` (inline ≤3 `fields`); `#3` = `e66a1f5`
-(`Slot` 72→64B, mark→bitset). #2's −61.2MB and #3's −15.1MB off `many_struct` matched their predictions
-(~61MB field buffers, ~16MB mark padding). `many_list` is flat under #2 (its elements are lists, not
-structs — scope respected) but drops under #1/#3 (it has 2M slots too). `many_map` drops throughout
-because its *values* are structs. Cumulative **−37% / −23% / −23%**, Go gap 4.9×→3.1×. The ~128MB
-`Slot` array (2M × 64B) is now the floor — only the structural value-struct lever closes the rest.)
+(`Slot` 72→64B, mark→bitset); `#4` = `c3b7b1c` (drop per-instance `Obj::Struct.name`, resolve from `tid`).
+#4 is the biggest single lever: dropping the `name: Box<str>` allocated per struct killed 2M name-string
+mallocs → −56.7MB (−28%) `many_struct`, −13% `many_map`, byte-identical output (== and Display now
+resolve name from `tid`, mirroring the enum `variant_id` lever). `many_list` flat under #2/#4 (its
+elements are lists, not structs). Cumulative **−55% / −33% / −23%**, Go gap 4.9×→**2.2×**. The ~128MB
+`Slot` array (2M × 64B) — live struct data — is now the floor; only the structural value-struct lever
+(inline-in-container) closes the rest.)
 
 Root cause is **structural, not slot padding**: Go stores `P{x,y}` INLINE in the slice
 (2M×16B, zero per-element heap objects). Chezzi boxes every struct as its own GC `Slot`
