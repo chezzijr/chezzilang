@@ -411,9 +411,11 @@ streams, and parity-checks identically. `buffered(...)` batches host/fd writes.
 |--------|-----------|-------|
 | `write` | `(data: str) -> Result[int]` | UTF-8-encode + write; returns bytes written. |
 | `write_bytes` | `(data: bytes) -> Result[int]` | Write raw bytes; returns bytes written. |
-| `flush` | `() -> Result[nil]` | Drain a `buffered` writer's in-VM buffer (one host/fd write). A no-op on unbuffered `stdout`/`stderr` (that sink is already unbuffered) and on a plain file writer beyond flushing its OS buffer. |
-| `close` | `() -> Result[nil]` | Flush + close the handle. Use-after-close is a clean `Err`, never a fault. |
+| `flush` | `() -> Result[nil]` | Drain a `buffered` writer's in-VM buffer **and** flush every core beneath it (one host/fd write per level), so a `buffered(create(p))` is durable on disk the moment `flush()` returns `Ok` — an in-process reader, a `process.cmd` child, or a sibling process sees the bytes. A no-op on unbuffered `stdout`/`stderr` (that sink is already unbuffered). |
+| `close` | `() -> Result[nil]` | Flush (same full-chain guarantee as `flush`) + close the handle. Use-after-close is a clean `Err`, never a fault. |
 
+- **An explicit `flush()`/`close()` always persists** (Python `open(p,'wb',buffering=n)` / Go `bufio`
+  semantics), including after a write larger than the buffer drained mid-write.
 - **Forgetting `flush`/`close` on a `buffered` writer loses the tail** — Go's footgun. Mitigated
   best-effort: a **file**-backed buffered writer flushes its tail when the handle is dropped (program
   exit / GC). A **stdout/stderr**-backed buffered writer's tail is *not* recovered on drop — call

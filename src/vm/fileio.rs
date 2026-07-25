@@ -87,17 +87,21 @@ impl Vm {
                     None
                 }
                 Backing::Stdout | Backing::Stderr => None,
+                // W6-1 — ALWAYS recurse, even with an empty in-VM buffer: an empty `buf` does NOT mean
+                // the inner core is clean. A mid-write drain (`write_to_core`) already `write_all`'d
+                // into the inner `BufWriter` WITHOUT flushing it and emptied `buf`, so the old
+                // `if buf.is_empty() { None }` short-circuit made `flush`/`close` persist nothing.
                 Backing::Buffered { inner, buf, .. } => {
-                    if buf.is_empty() {
-                        None
-                    } else {
-                        Some((Arc::clone(inner), std::mem::take(buf)))
-                    }
+                    Some((Arc::clone(inner), std::mem::take(buf)))
                 }
             }
         };
         if let Some((inner, drained)) = drain {
-            self.write_to_core(&inner, &drained)?;
+            // Guard the WRITE, not the flush: an empty `write_to_core` on a `Stdout`/`Stderr` inner
+            // would hand `emit_out("")` to the parity-oracle sink / stream queue.
+            if !drained.is_empty() {
+                self.write_to_core(&inner, &drained)?;
+            }
             self.flush_core(&inner)?;
         }
         Ok(())

@@ -4,6 +4,19 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 **Legend:** ⬜ not started · 🟦 in progress · ✅ done
 
+> **✅ FIX (2026-07-25, gaps.md W6-1, P0) — `Writer.flush()`/`close()` on a `buffered` writer now
+> actually persists.** `flush_core`'s `Backing::Buffered` arm returned `None` on an empty in-VM buffer,
+> short-circuiting the recursion into the inner core — but a mid-write drain (`write` larger than `cap`)
+> had already `write_all`'d into the inner `BufWriter` *without* flushing it and emptied `buf`, so
+> `flush()`/`close()` returned `Ok` and persisted NOTHING (the bytes only reached the fd at process-exit
+> drop). The arm now ALWAYS recurses (`src/vm/fileio.rs`); the write, not the flush, is guarded by
+> `!drained.is_empty()` so an empty `write_to_core` never hands `emit_out("")` to a `Stdout`/`Stderr`
+> inner. Python `open(p,'wb',buffering=n)` / Go `bufio` semantics restored — durable in-process, not
+> just at exit. Sibling arms audited: `File`/`Stdout`/`Stderr` in both `flush_core` and `write_to_core`
+> were already correct (W6-9's lossy `write_bytes` on the std streams is a separate, still-open entry).
+> Tests: `tests/chz/stdlib/io_writer_test.chz` (5 `test fn`s — flush + close after a mid-write drain,
+> never-filled control, exactly-at-cap, cap=1), serial==M:N.
+
 > **✅ TEST RUNNER (2026-07-24) — `chezzi test` selection + output ergonomics batch (docs/future.md §3b
 > #5/#6/#7).** Seven opt-in, low-risk CLI+formatting flags on the runner — NO VM/checker/compiler touch,
 > pure `cmd_test` (flag parse) + `test_runner.rs` (formatting/filtering/timing). **Central refactor:** a

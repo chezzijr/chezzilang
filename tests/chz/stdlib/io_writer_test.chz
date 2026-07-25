@@ -1,0 +1,52 @@
+# tests/chz/stdlib/io_writer_test.chz — std.io `Writer` durability (W6-1).
+#
+# `flush()`/`close()` on a `buffered(create(p))` writer must make the bytes readable FROM WITHIN THE
+# SAME PROGRAM, not merely at process exit (the drop-flush). W6-1: a mid-write drain (write > cap)
+# emptied the in-VM buffer and left the drained bytes sitting unflushed in the inner `BufWriter`, so a
+# later flush/close saw an empty buffer, returned early, and persisted NOTHING.
+# Run: `cargo run -- test tests/chz/`. Serial==M:N guarded by the dual-engine gate.
+
+import std.io
+import std.os
+import std.fs
+
+# Write `text` through `buffered(create(p), cap)`, then flush (or close), then read the file back
+# in-process. Returns the file's contents.
+fn write_then_read(p: str, cap: int, text: str, use_close: bool) -> Result[str]:
+    w0 := io.create(p)?
+    w := io.buffered(w0, cap)
+    w.write(text)?
+    if use_close:
+        w.close()?
+    else:
+        w.flush()?
+    return io.read_file(p)
+
+fn check(name: str, cap: int, text: str, use_close: bool):
+    p := os.temp_dir() + "/chz_w6_1_" + name + ".txt"
+    match write_then_read(p, cap, text, use_close):
+        Ok(s): assert s == text, name + ": expected " + text + ", got " + s
+        Err(e): assert false, name + ": " + e.message()
+    _ := fs.remove_file(p)
+
+test fn buffered_flush_persists_after_mid_write_drain():
+    # 8 bytes into a cap-4 buffer ⇒ mid-write drain, then flush.
+    check("flush_drain", 4, "abcdefgh", false)
+
+test fn buffered_close_persists_after_mid_write_drain():
+    check("close_drain", 4, "abcdefgh", true)
+
+test fn buffered_never_filled_still_persists():
+    # Control: the buffer never reached cap — this path always worked, it must stay green.
+    check("never_filled", 4, "abc", false)
+
+test fn buffered_exactly_at_cap_persists():
+    # The boundary: len == cap drains, so the tail is in the inner core, not the in-VM buffer.
+    check("at_cap", 4, "abcd", true)
+
+test fn buffered_cap1_two_writes_persist():
+    p := os.temp_dir() + "/chz_w6_1_cap1.txt"
+    match write_then_read(p, 1, "ab", true):
+        Ok(s): assert s == "ab", "cap1: got " + s
+        Err(e): assert false, "cap1: " + e.message()
+    _ := fs.remove_file(p)
