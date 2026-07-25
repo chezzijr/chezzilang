@@ -56,7 +56,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > 200k-nursery `--serial` loop is FLAT with scalar-only globals (0.598s → 0.594s: the cache short-circuits
 > — one snapshot for the whole run, asserted by build count) and **+5.4%** with a `List[int]` global (one
 > rebuild per nursery, the designed price of fresh-per-nursery). Spawn-storm shapes stay flat because the
-> pin reads the cache: 3000 eager spawns with a 20000-element global global is 0.014s → 0.018s (the rejected
+> pin reads the cache: 3000 eager spawns with a 20000-element global is 0.014s → 0.018s (the rejected
 > cut: 1.272s, 91×), and 40k spawns + 40k global writes 0.074s → 0.090s (rejected cut: 1.721s, 23×). One
 > measurable regression, recorded: the same nested storm on `--serial` (3000 tasks × 20000-element copies,
 > 10GB churn) is +10.6% from the changed allocation order — same build count (2), same peak RSS, and flat at

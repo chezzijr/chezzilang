@@ -336,13 +336,16 @@ launched later reading a package-level var) and Python threads both see the curr
 **FIX (2026-07-25).** The staleness itself is gone, not just the `nil` hole — **each task snapshots the
 module globals FRESH, pinned at its own `spawn`, at every depth**. Per-task isolation is unchanged.
 Three increments at the one choke point (`ensure_snapshot`):
-1. **`snapshot_memo` becomes a CACHE, not a forever-memo.** Invalidated by a module-slot write (hooked in
-   `set_global_slot` + `module_define` — the only two slot mutators), and never populated at all for a
-   view holding a **mutable aggregate** global (`ModuleSnapshot::reusable` / `slot_snapshot_reusable`, a
-   conservative WHITELIST: scalars, `str`/`bytes`, `Func`/`Native`/`Builtin`/`Cffi`, the `Arc`-shared
-   cores `Channel`/`Shared`/`RwShared`/`Atomic`/`Executor`/socket/`Writer`/`Reader`, and an import-alias
-   `Module`). That closes in-place mutation (`q.push(1)`, `m[k]=v`, `p.x=1`), which writes no slot for a
-   hook to see, without touching the mutating intrinsics in the (then-fenced) `src/vm/call.rs`.
+1. **`snapshot_memo` becomes a CACHE, not a forever-memo**, with exactly two invalidation rules:
+   (a) a module-slot write (hooked in `set_global_slot` + `module_define` — the only two slot mutators);
+   (b) `Op::EnterNursery`, when the cached snapshot is not `reusable` — i.e. some global holds a **mutable
+   aggregate** (`ModuleSnapshot::reusable` / `slot_snapshot_reusable`, a conservative WHITELIST: scalars,
+   `str`/`bytes`, `Func`/`Native`/`Builtin`/`Cffi`, the `Arc`-shared cores
+   `Channel`/`Shared`/`RwShared`/`Atomic`/`Executor`/socket/`Writer`/`Reader`, and an import-alias
+   `Module`). Rule (b) is what closes in-place mutation (`q.push(1)`, `m[k]=v`, `p.x=1`) between
+   nurseries — it writes no slot for rule (a) to see — without touching the mutating intrinsics in the
+   (then-fenced) `src/vm/call.rs`, and it keeps the cost at ONE rebuild per nursery instead of one per
+   `spawn` (which is what the rejected second cut paid: 91× on a spawn storm).
 2. **The cache + the snapshot became per-module-VIEW** (`FiberCtx`, swapped with
    `module_objs`/`module_faulted`), so a nested nursery inside a task snapshots the TASK's current view,
    and a shell draining several scopes faults each fiber from its OWN snapshot. Consequence: a shell no
