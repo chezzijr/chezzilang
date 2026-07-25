@@ -4,6 +4,24 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 **Legend:** ⬜ not started · 🟦 in progress · ✅ done
 
+> **✅ FIX (2026-07-25, gaps.md W6-4, P0) — `std.process` no longer mangles non-UTF-8 child output; two
+> bytes twins added.** Four raw `String::from_utf8_lossy` calls in `src/native/process.rs` silently turned
+> every undecodable child byte into U+FFFD (`pr.run("cat bin")` → `b'A\xef\xbf\xbdB'` for `A\xffB`).
+> `std.process` was the arm R1's B1 sweep missed. Now, matching the ratified `Socket.read`/`io.read_file`
+> answer (and both owning ancestors — Python `subprocess` text mode *raises* `UnicodeDecodeError`, Go's
+> `cmd.Output()` returns `[]byte`): `cmd`/`run`/`run_args` decode **strictly** and return a clean `Err`
+> naming the twin (`child stdout is not valid utf-8 (…) — capture binary output with process.cmd_bytes`;
+> for `run`/`run_args` the whole call fails, exit code carried in the message text, since `ProcResult`'s
+> fields are `str`). New `process.cmd_bytes(line) -> Result[bytes]` / `run_args_bytes(prog, args) ->
+> Result[bytes]` are the byte-exact hatch in Go `cmd.Output()` shape (`Ok(stdout)` on a zero exit, `Err`
+> on non-zero/spawn failure); both registered `is_blocking` (D5 — else a subprocess wait pins a core M:N
+> worker). The one remaining lossy call renders the non-zero-exit **Err message** (a diagnostic, not
+> payload) and is commented as such. **Behavior break, deliberate:** a child emitting binary on either
+> stream now Errs where it used to hand back mangled text. **Residual:** no bytes-carrying structured
+> result (binary stdout + stderr + code in one value) — that needs a new native struct through
+> `seed_stdlib_structs`, out of scope here; noted in `docs/stdlib.md` "Not yet". Tests:
+> `tests/chz/stdlib/process_test.chz` (7 `test fn`s), serial==M:N.
+>
 > **✅ FIX (2026-07-25, gaps.md W6-1, P0) — `Writer.flush()`/`close()` on a `buffered` writer now
 > actually persists.** `flush_core`'s `Backing::Buffered` arm returned `None` on an empty in-VM buffer,
 > short-circuiting the recursion into the inner core — but a mid-write drain (`write` larger than `cap`)

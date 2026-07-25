@@ -521,8 +521,11 @@ pub fn is_blocking(name: &str) -> bool {
         // `get_bytes` is the binary-download twin of `get` (str arg, `Ok(Bytes)`/`Err` primitive
         // return — off-heap-safe); it MUST offload too or a slow/large download pins a core worker.
         // `run`/`run_args` are the structured subprocess forms (alongside `cmd`); `run_args` offloads
-        // its `list[str]` argv via `NativeArg::List` (off-heap-safe).
+        // its `list[str]` argv via `NativeArg::List` (off-heap-safe). W6-4: `cmd_bytes`/`run_args_bytes`
+        // are the binary-capture twins — same subprocess wait, so they MUST offload too or a slow child
+        // pins a core M:N worker (D5).
         | "get" | "get_bytes" | "post" | "request" | "put" | "patch" | "delete" | "head" | "cmd" | "run" | "run_args"
+        | "cmd_bytes" | "run_args_bytes"
     )
 }
 
@@ -950,8 +953,11 @@ mod tests {
             .iter()
             .map(|(n, _)| *n)
             .collect();
-        assert_eq!(names, vec!["cmd", "run", "run_args"]);
-        for name in ["cmd", "run", "run_args"] {
+        assert_eq!(
+            names,
+            vec!["cmd", "run", "run_args", "cmd_bytes", "run_args_bytes"]
+        );
+        for name in ["cmd", "run", "run_args", "cmd_bytes", "run_args_bytes"] {
             assert!(is_blocking(name), "{name} should be blocking");
         }
     }

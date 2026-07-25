@@ -1,0 +1,88 @@
+# tests/chz/stdlib/process_test.chz — std.process output decoding (W6-4).
+#
+# The `str`-typed seam (`cmd`/`run`/`run_args`) must NEVER lossily decode a child's output into U+FFFD:
+# an undecodable stream is a clean `Err` naming the bytes twin, matching the ratified B1/R1 answer for
+# `Socket.read` / `io.read_file`. `cmd_bytes`/`run_args_bytes` are the byte-exact hatch (Go
+# `cmd.Output()` shape: stdout bytes on success, `Err` on spawn failure or a non-zero exit).
+# The undecodable byte is SYNTHESIZED with `io.write_bytes` — `printf '\377'` is shell/locale dependent.
+# Run: `cargo run -- test tests/chz/`. Serial==M:N guarded by the dual-engine gate.
+
+import std.process as pr
+import std.io
+import std.os
+import std.fs
+
+# Write the 3 bytes `A \xff B` to a scratch file and return its path.
+fn bad_bytes_file(name: str) -> str:
+    p := os.temp_dir() + "/chz_w6_4_" + name + ".bin"
+    match io.write_bytes(p, b"A\xffB"):
+        Ok(_): pass
+        Err(e): assert false, "setup: " + e.message()
+    return p
+
+test fn run_errs_on_undecodable_stdout():
+    p := bad_bytes_file("run_out")
+    match pr.run("cat " + p):
+        Ok(_): assert false, "undecodable child stdout must not decode"
+        Err(e):
+            assert e.message().contains("not valid utf-8"), e.message()
+            assert e.message().contains("cmd_bytes"), e.message()
+    _ := fs.remove_file(p)
+
+test fn run_errs_on_undecodable_stderr():
+    p := bad_bytes_file("run_err")
+    match pr.run("cat " + p + " 1>&2"):
+        Ok(_): assert false, "undecodable child stderr must not decode"
+        Err(e): assert e.message().contains("not valid utf-8"), e.message()
+    _ := fs.remove_file(p)
+
+test fn run_args_errs_on_undecodable_stdout():
+    p := bad_bytes_file("run_args_out")
+    match pr.run_args("cat", [p]):
+        Ok(_): assert false, "undecodable child stdout must not decode"
+        Err(e):
+            assert e.message().contains("not valid utf-8"), e.message()
+            assert e.message().contains("run_args_bytes"), e.message()
+    _ := fs.remove_file(p)
+
+test fn cmd_errs_on_undecodable_stdout():
+    p := bad_bytes_file("cmd_out")
+    match pr.cmd("cat " + p):
+        Ok(_): assert false, "undecodable child stdout must not decode"
+        Err(e):
+            assert e.message().contains("not valid utf-8"), e.message()
+            assert e.message().contains("cmd_bytes"), e.message()
+    _ := fs.remove_file(p)
+
+test fn text_results_unchanged():
+    # Control: the ordinary decodable path is untouched.
+    match pr.run("printf hi"):
+        Ok(r):
+            assert r.stdout == "hi"
+            assert r.stderr == ""
+            assert r.code == 0
+        Err(e): assert false, e.message()
+    match pr.run("exit 3"):
+        Ok(r): assert r.code == 3, "a non-zero exit stays Ok with the code"
+        Err(e): assert false, e.message()
+    match pr.cmd("printf hi"):
+        Ok(s): assert s == "hi"
+        Err(e): assert false, e.message()
+
+test fn bytes_twins_are_byte_exact():
+    p := bad_bytes_file("twins")
+    match pr.cmd_bytes("cat " + p):
+        Ok(b): assert b == b"A\xffB", "cmd_bytes must be byte-exact"
+        Err(e): assert false, "cmd_bytes: " + e.message()
+    match pr.run_args_bytes("cat", [p]):
+        Ok(b): assert b == b"A\xffB", "run_args_bytes must be byte-exact"
+        Err(e): assert false, "run_args_bytes: " + e.message()
+    _ := fs.remove_file(p)
+
+test fn bytes_twins_err_on_nonzero_exit_and_spawn_failure():
+    match pr.cmd_bytes("exit 3"):
+        Ok(_): assert false, "a non-zero exit must not pose as a successful download"
+        Err(e): assert e.message().contains("3"), e.message()
+    match pr.run_args_bytes("definitely-no-such-prog-xyz", []):
+        Ok(_): assert false, "a spawn failure must be Err"
+        Err(e): assert e.message().contains("failed to run command"), e.message()

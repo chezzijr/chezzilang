@@ -569,7 +569,18 @@ permission denied) is `Err`. A signal-killed process has no exit code and report
 argv vector, **NO shell** — so metacharacters in `args` (`$(...)`, `;`, `&&`, …) are passed literally
 and are **injection-safe**. Same `Ok`/`Err` contract as `run`. Prefer `run_args` over `run`/`cmd` when
 any argument comes from untrusted input.
-All three are blocking subprocess I/O (offloaded under the OS-thread engine). `ProcResult` is **owned
+**Text vs binary — the `str` forms never mangle.** `cmd`/`run`/`run_args` decode the child's output as
+UTF-8 **strictly**: an undecodable stream is a clean `Err` naming the bytes twin, never a U+FFFD
+replacement (the `Socket.read` / `io.read_file` rule; Python's `subprocess` text mode raises
+`UnicodeDecodeError`, Go's `Output()` hands back `[]byte`). For `run`/`run_args` the whole call fails —
+`ProcResult`'s fields are `str`, so there is nowhere to put the bytes — and the exit code is carried in
+the `Err` message text.
+`cmd_bytes(line: str) -> Result[bytes]` / `run_args_bytes(prog: str, args: List[str]) -> Result[bytes]`
+— the binary hatch, in Go `cmd.Output()` shape: `Ok(stdout)` as raw `bytes` on a **zero** exit, `Err` on
+a non-zero exit (its stderr, or a status line) or a spawn failure — a failed command's output can never
+pose as a successful capture (`io.read_bytes` / `request.get_bytes` semantics). stdout **only**: stderr
+and the numeric exit code are not carried on the bytes path — use `run` when you need them.
+All five are blocking subprocess I/O (offloaded under the OS-thread engine). `ProcResult` is **owned
 by `std.process`**: you can read its fields (`.stdout`/`.stderr`/`.code`) off a returned value with no
 import, but to name the type or construct it directly (`p: ProcResult` / `ProcResult(...)`) you must
 import the module (`import std.process`, then `ProcResult(...)` or qualified `process.ProcResult(...)`;
@@ -577,7 +588,8 @@ or `import ProcResult from std.process`). It is **not** a reserved program-globa
 `struct ProcResult` (without the import) is your own type.
 **Security:** `cmd`/`run` hand `line` to the shell — never interpolate untrusted input (shell-injection
 risk); use `run_args` instead.
-**Not yet:** stdin piping, output streaming, per-process env/cwd overrides.
+**Not yet:** stdin piping, output streaming, per-process env/cwd overrides, a bytes-carrying structured
+result (binary stdout *plus* stderr *plus* the code in one value).
 
 ### `std.rand`
 Pseudo-random scalars (SplitMix64 PRNG). `seed(n: int) -> nil` (reseed deterministically) ·

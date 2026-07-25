@@ -6503,6 +6503,14 @@ fn process_fn_sigs_exact() {
             Ty::result(proc()),
             2,
         ),
+        // W6-4 — the bytes twins of the two spawn forms.
+        ("cmd_bytes", vec![Ty::Str], Ty::result(Ty::Bytes), 1),
+        (
+            "run_args_bytes",
+            vec![Ty::Str, Ty::list(Ty::Str)],
+            Ty::result(Ty::Bytes),
+            2,
+        ),
     ];
     assert_eq!(sig.functions.len(), expected.len(), "std.process fn count");
     for (name, params, ret, minp) in &expected {
@@ -6635,7 +6643,8 @@ fn procresult_chz_matches_handbuilt_layouts() {
     assert!(harvested.type_params.is_empty());
     assert!(harvested.methods.is_empty());
     assert!(matches!(harvested.origin, StructOrigin::Builtin));
-    assert_eq!(sig.functions.len(), 3, "std/process.chz must harvest 3 fns");
+    // 3 str-returning fns + the 2 W6-4 bytes twins (`cmd_bytes` / `run_args_bytes`).
+    assert_eq!(sig.functions.len(), 5, "std/process.chz must harvest 5 fns");
     // seed_stdlib_structs's copy must agree.
     let seeded = c.structs.get("ProcResult").expect("ProcResult seeded");
     assert_eq!(seeded.fields, expected, "seeded ProcResult drifted");
