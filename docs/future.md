@@ -624,14 +624,15 @@ The original M5 baseline was ~4–6.5× over the then-existing (now-removed) tre
 
 4. **✅ DONE — Separate the mark bit from the object.** Was `Slot { obj: Option<Obj>, mark: bool }` —
    the `mark: bool` padded the slot to **72 B** (`Option<Obj>` is already 64 B: `Obj`'s spare-discriminant
-   niche makes `None` free), so the sweep pulled each full 64 B `Obj` into cache to read/write 1 bit. Now
+   niche makes `None` free), so the mark bit cost 8 B of padding on every slot. Now
    `Slot { obj: Option<Obj> }` (exactly 64 B, guard-pinned `size_of::<Slot>() == 64`) + a dense parallel
    `marks: Vec<u64>` bitset on `Heap` (bit `i&63` of word `i>>6`), grown in lockstep with `slots` at the
    new-slot alloc arm. Three one-line helpers `is_marked`/`set_mark`/`clear_mark`; `mark()`/`sweep()`
    rewired to the bitset, EXACT current mark-then-sweep-and-clear protocol (survivors cleared in the
    sweep pass, holes never marked → post-sweep all bits 0). VM/GC-internal, no observable/checker change;
    all GC-stress rooting + two-engine parity green. Saves the 8 B mark padding per slot (≈16 MB on the 2M
-   `many_struct` bench) and lets the sweep mark-scan iterate a compact bit array. RSS delta measured
+   `many_struct` bench); the mark test-and-set also touches a compact word rather than a scattered slot
+   byte. (Sweep still scans every slot's `obj` — the bitset does not avoid that.) RSS delta measured
    post-merge. See `docs/benchmarks.md`.
 5. **Shrink `Obj` below 64 B.** ✅ DONE for `Module`: boxed to `Box<ModuleData>`, so
    `size_of::<Obj>()` dropped 88→**64 B** (guard, `chzstr.rs:205` / `heap.rs`); `MapData`/`SetData`

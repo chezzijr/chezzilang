@@ -425,7 +425,8 @@ pub enum Obj {
 
 /// One heap slot: the object, or a hole for swept/free slots. Exactly 64B (`Option<Obj>` niche-packs
 /// `None` free). The GC mark bit is NOT here — it lives in [`Heap::marks`], a dense parallel bitset,
-/// so the mark/sweep scan iterates a compact bit array without pulling each `Obj` payload into cache.
+/// so the `mark:bool` no longer pads the slot from 64B to 72B (the memory win). (Sweep still scans
+/// every slot's `obj` to find garbage — the bitset does not avoid that; it saves the per-slot byte.)
 #[derive(Debug)]
 struct Slot {
     obj: Option<Obj>,
@@ -446,8 +447,9 @@ const MIN_GC_THRESHOLD: usize = 256;
 pub struct Heap {
     slots: Vec<Slot>,
     /// GC mark bits, one per slot index (bit `i & 63` of word `i >> 6`). A dense parallel bitset
-    /// grown in lockstep with `slots`, so the sweep mark-scan touches a compact bit array instead of
-    /// each 64B `Obj` slot. Post-sweep invariant: all bits 0 (survivors cleared, holes never marked).
+    /// grown in lockstep with `slots` — pulling the bit out of `Slot` drops it 72B→64B (the mark
+    /// test-and-set also touches a compact word rather than a scattered slot byte). Post-sweep
+    /// invariant: all bits 0 (survivors cleared, holes never marked).
     marks: Vec<u64>,
     free: Vec<u32>,
     /// Live (allocated, not freed) object count.
