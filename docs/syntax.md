@@ -1609,12 +1609,13 @@ on `list`/`map`/`str`/`bytes`/`bytearray`. Each is **defined as** the operator f
 `a + b` (same overflow / divide-by-zero fault), `c.index(k)` ≡ `c[k]` (negative indexing and the same
 out-of-bounds message), `c.slice(Some(0), Some(2), None)` ≡ `c[0:2]` (the three components are `int?`),
 `x.hash()` is exactly the hash `x` gets as a map/set key. A type that defines the method itself always
-gets its own. Still bound-only, and with three documented exceptions (`docs/gaps.md` W6-3b/c/d):
+gets its own. Still bound-only, and with two documented exceptions (`docs/gaps.md` W6-3b/d):
 `Iterator`'s `next` on a *raw* collection faults (no cursor position — use `for`, or `.iter()` for a real
-cursor); `a.compare(b)` on a **NaN** operand faults `cannot compare NaN (compare has no unordered
-result)` because `compare -> int` has no "unordered" value while `<` is total; and a numeric `newtype`
-that DEFINES `add`/`compare`/… gets its own method from `a.add(b)` while `a + b` keeps auto-flowing to
-the underlying's native op, so the two spellings disagree for that type only.
+cursor); and a numeric `newtype` that DEFINES `add`/`compare`/… gets its own method from `a.add(b)` while
+`a + b` keeps auto-flowing to the underlying's native op, so the two spellings disagree for that type
+only. `a.compare(b)` on a **NaN** operand never faults — it answers the same **total order** `sort()` /
+`.min()` / `.max()` use (`f64::total_cmp`, NaN to one end), while `<`/`<=`/`>`/`>=` stay IEEE (`false` for
+every NaN comparison): one shared order, one rule.
 
 **Display-hook resolution.** `print`/`str()`/interpolation use your `str` method as the display hook
 **only when it conforms to `Stringable`** — a single `self` parameter and a **`str` return** (whether

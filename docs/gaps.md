@@ -224,7 +224,7 @@ parked_slot_nonsendable_rejects,in_data_cycle_rejects,unreached_nonsendable_runs
 - **Multi-frame / pending-`defer` suspended generators** — checker-UNREACHABLE (item 3 arms a/c); no valid
   program constructs them. The rejects are defensive guards, not a user-visible limit — nothing to build.
 
-## Session log — 2026-07-25 (bug-hunt wave 6: 19 findings — W6-19 found while FIXING W6-2 — 15 FIXED (W6-1..W6-6, W6-11..W6-19 as listed below), 4 open + 3 carve-outs filed (W6-3b/c/d) — 2 never-hunted surfaces swept)
+## Session log — 2026-07-25 (bug-hunt wave 6: 19 findings — W6-19 found while FIXING W6-2 — 15 FIXED (W6-1..W6-6, W6-11..W6-19 as listed below), 4 open + 3 carve-outs filed (W6-3b/c/d, of which **W6-3c is now FIXED (2026-07-26)** — 2 carve-outs remain) — 2 never-hunted surfaces swept)
 
 Pre-freeze adversarial hunt, 5 disjoint parallel domains, weighted at the two surfaces the wave-5
 residual named as never audited (**FFI**, **GC + `unsafe`**) plus the concurrency code that landed
@@ -243,6 +243,8 @@ first module-global touch is a write, which no probe happened to write.)
 This is the same completeness/partial-coverage class the 2026-07-23 sweep found 3 instances of. It is
 still the highest-yield lever in the repo and it is cheap: **enumerate the arms, assert each one.**
 - W6-3: `compare`/`str` intercepted on scalar receivers, the other ~9 intrinsic protocol grants not. **FIXED.**
+  (Its NaN carve-out W6-3c is **FIXED (2026-07-26)** too: `.compare()` now answers the same total order
+  `sort()`/`.min()`/`.max()` use instead of faulting — ONE order, one divergence, no fault.)
 - W6-4: R1 swept `Socket`/`io`/`request`/`crypto` off `from_utf8_lossy`, missed `std.process`. **FIXED.**
 - W6-1: `flush_core`'s non-empty-buffer arm flushes the inner core, its empty-buffer arm doesn't. **FIXED.**
 - W6-6: the extern-collision guard fires for bare-keyed enum variants, not module-keyed structs.
@@ -472,8 +474,9 @@ code), `neg` → a new `Vm::neg_value` (`Op::Neg`'s body extracted verbatim into
 single-sourced), `hash` → `hash_value` (**the Map/Set key hash** — so `x.hash()` can never disagree with
 `m[x]`/`s.has(x)`, and a zero-field struct routes through `struct_hash`'s
 `fields.is_empty() && !methods.contains_key("hash")` guard, the runtime mirror of `proto.rs`'s grant),
-`compare` → `compare` (the underlying's NATIVE order, which is what `<` uses; see W6-3c/W6-3d for the two
-receivers where `compare` cannot match `<`), `index`/`set_index`/`slice` → `get_index`/`set_index`/
+`compare` → `compare` (the underlying's NATIVE order, which is what `<` uses; on a NaN operand it answers
+`sort()`'s total order via `order_key` — W6-3c, FIXED; see W6-3d for the one receiver where `compare`
+still cannot match `<`), `index`/`set_index`/`slice` → `get_index`/`set_index`/
 `get_slice` (with the `Option[int]` → raw `Nil`/`Int` unwrap `Slice`'s protocol signature requires, gated
 on the fixed `VID_SOME`/`VID_NONE_VARIANT` ids). Nothing is reimplemented.
 It is wired at **five MISS sites** in `do_method_call` — inline-scalar miss, the merged built-in-container
@@ -507,11 +510,13 @@ narrower than the checker's grant set, so a protocol-keyed table could not have 
    the `Comparable` grant — the review's exact trigger, and a widening the previous protocol-keyed ratchet
    passed — now fails with `intrinsic conformance granted for (Comparable, bytes) with no row`.
 Not shipped, filed instead of silently held: `Iterator`→`next` on a raw collection (**W6-3b**, registered
-in `INTRINSIC_UNPAIRED`), `compare` on a NaN operand (**W6-3c**), and the numeric-newtype-with-its-own-
-operator-method divergence (**W6-3d**) — all three below.
+in `INTRINSIC_UNPAIRED`) and the numeric-newtype-with-its-own-operator-method divergence (**W6-3d**) —
+both below. (**W6-3c**, `compare` on a NaN operand, was also filed here and is now **FIXED (2026-07-26)**
+— it answers `sort()`'s total order.)
 Tests: `tests/chz/spec/intrinsic_proto_methods_test.chz` (19 `test fn` —
 arith/neg/hash/index/set_index/slice/newtype/boxed-scalar/protocol-value, operator-equivalence AND
-fault-message equality via `recover:`, plus user-method-wins controls and the two divergence pins),
+fault-message equality via `recover:`, plus user-method-wins controls, the W6-3d divergence pin and the
+NaN total-order pin),
 serial==M:N.
 
 ### W6-3b. `Iterator[E]`'s `next` is granted to a RAW collection but has no runtime arm — check-OK-then-run-fault — carved out of W6-3, low
@@ -532,28 +537,39 @@ grant-set change, so it was out of W6-3's scope. Registered as `checker::proto::
 `vm::tests::intrinsic_grants_all_have_vm_arms` asserting it STILL faults, so the carve-out can't rot: when
 this is fixed, retire the const entry, this section, and the assertion together.
 
-### W6-3c. `Comparable.compare` cannot answer a NaN operand — the protocol has no "unordered" — carved out of W6-3, low
+### W6-3c. `Comparable.compare` on a NaN operand — **FIXED (2026-07-26)**: it answers `sort()`'s total order
 ```chezzi
 fn cmp_m[T: Comparable](a: T, b: T) -> int:
     return a.compare(b)
 nan := 0.0 / 0.0
-print(nan < 1.0)        # false — the operator form is TOTAL
-print(cmp_m(nan, 1.0))  # runtime error: cannot compare NaN (compare has no unordered result)
+print(nan < 1.0)        # false — the OPERATORS stay IEEE
+print(cmp_m(nan, 1.0))  # -1 (x86) — the METHOD answers the total order, no fault
 ```
 `float` is an intrinsically-granted `Comparable` type, but `compare(self, other) -> int`
 (`std/prelude.chz`) has **no int encoding for "unordered"**: `<`/`<=`/`>`/`>=` all answer `false` for a
 NaN operand (`Vm::ordered_bool`'s `None if both numeric => false`, IEEE-754/Python/Rust parity), and no
 single int makes all four false. So `.compare()` cannot be observationally identical to its operator form.
-Shipped answer: an explicit, RECOVERABLE value-domain fault
-(`cannot compare NaN (compare has no unordered result)`) — same class as `division by zero`, and the same
-position Rust takes (`f64` implements `PartialOrd`, not `Ord`). It replaces what the first W6-3 cut left
-here, which was W6-3's own headline symptom surviving inside the fix (`type float has no method 'compare'`
-after `check: ok` — the arm answered `Ok(None)` and the caller re-raised its name error).
-The real fix is a protocol-level decision, hence out of scope: either `compare -> int?`/an `Ordering`-like
-enum with an unordered case (a prelude + checker change), or narrow the `Comparable` grant to exclude
-`float` (which would break every `[T: Comparable]` generic over floats). Until then a generic
-`min`/`max`/`sort` written with `.compare()` faults on NaN data where the `<` spelling silently orders it
-— pinned by `compare_on_nan_faults_explicitly` in `tests/chz/spec/intrinsic_proto_methods_test.chz`
+The first cut raised a recoverable `cannot compare NaN (compare has no unordered result)` fault. That is
+now **replaced by the total order the rest of the language already sorts by**: the `("compare", 1)` arm's
+NaN branch (`src/vm/call.rs`) delegates to **`Vm::order_key`** — the single ordering site behind
+`sort()` / `sort_by_key` / `.min()` / `.max()` (`f64::total_cmp`, NaN deterministically at one end,
+numeric-`newtype` layers unwrapped first, so `Meters(nan)` behaves exactly like bare `float`).
+The point is the **rule count**: there is now ONE total order shared by `compare`/`sort`/`min`/`max` and
+exactly ONE documented divergence (total order for the method, IEEE for the operators) instead of two
+orderings plus a fault. `docs/spec.md` already documented that total order for `sort()`; `.compare()` now
+obeys the same rule. A generic `min`/`max`/`sort` written with `.compare()` therefore orders NaN data the
+same way the `<` spelling's `sort()` does, instead of faulting on it.
+Deliberately NOT changed: `Vm::compare`/`Vm::ordered_bool` (`src/vm/arith.rs`) — the operators stay IEEE,
+which is the Python/Rust/IEEE-754 contract and no part of this fix. The protocol signature stays
+`compare(self, other: Self) -> int`; the ledger's own candidate fixes (`compare -> int?`, an `Ordering`
+enum with an unordered case) were rejected as milestone-sized and breaking for every `.compare()` caller.
+Caveats, both pinned by assertion: `cmp_m(n, n) == 0` while `n == n` is `false` (`total_cmp` on identical
+bits is Equal — the total order's definition), and only the **NaN** branch routes to `order_key`, so a
+`±0.0` pair still answers via `self.compare` as IEEE-Equal (`cmp_m(-1.0 * 0.0, 0.0) == 0`) — i.e. the
+shared total order is claimed for NaN, not for every float pair. The NaN END is target-dependent (the
+signbit of `0.0/0.0` is negative on x86 SSE2 ⇒ NaN ranks below `-inf` ⇒ sorts FIRST, `compare < 0`), so
+the test pins the ordering relative to `sort()` + antisymmetry rather than a hardcoded `-1`.
+Pinned by `compare_on_nan_uses_the_total_order` in `tests/chz/spec/intrinsic_proto_methods_test.chz`
 (both engines, byte-identical).
 
 ### W6-3d. A numeric `newtype` with its OWN `add`/`compare` disagrees with `+`/`<` — carved out of W6-3, low

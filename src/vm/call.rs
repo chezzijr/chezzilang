@@ -2349,9 +2349,12 @@ impl Vm {
     /// struct/enum/newtype that DEFINES `add`/`hash`/`index`/… always gets ITS method (it resolves
     /// first) and this costs nothing on any successful dispatch.
     ///
-    /// **Two documented limits on the "≡ the operator form" claim** (both in `docs/gaps.md`):
-    /// * `compare` on a NaN operand — `<` is total, `compare -> int` has no unordered value, so this
-    ///   raises a value-domain fault instead (W6-3c; see the arm below);
+    /// `compare` on a NaN operand is the one arm that delegates somewhere ELSE than the operator: it
+    /// answers the total order `sort()`/`.min()`/`.max()` use (via [`Vm::order_key`]) rather than
+    /// faulting, so `compare`/`sort`/`min`/`max` share ONE order while `<`/`<=`/`>`/`>=` stay IEEE
+    /// (false for every NaN comparison). See the arm below.
+    ///
+    /// **One documented limit on the "≡ the operator form" claim** (`docs/gaps.md`):
     /// * a numeric `newtype` that DEFINES `add`/`sub`/`mul`/`div`/`mod`/`compare` — being miss-only,
     ///   the method form correctly dispatches the USER method while `+`/`<` still auto-flow to the
     ///   underlying's native op, so for THAT receiver the two spellings differ (W6-3d). Never
@@ -2404,22 +2407,29 @@ impl Vm {
             // unwraps a newtype to the UNDERLYING's native ordering, which is exactly what `<` uses
             // (`compare_op`'s same-newtype fast path).
             //
-            // NaN is the ONE intrinsic grant that cannot be made observationally identical to its
-            // operator form: `<`/`<=`/`>`/`>=` are TOTAL for two numerics (`ordered_bool` answers
-            // `false` for every NaN comparison, IEEE-754/Python/Rust parity), but `Comparable`'s
-            // `compare(self, other) -> int` has NO int encoding for "unordered" — any value we
-            // returned would make some of the four ops true. So raise an explicit, RECOVERABLE
-            // value-domain fault (like `division by zero`) instead of a bogus
-            // `type float has no method 'compare'`, which was W6-3's own symptom surviving inside the
-            // fix. Rust takes the same position (`f64` implements `PartialOrd`, not `Ord`).
-            // `docs/gaps.md` W6-3c tracks the protocol-level fix (an unordered result).
+            // NaN is TOTAL here, and by the SAME order the rest of the language sorts by: route the
+            // pair through [`Vm::order_key`] — the one ordering site behind `sort()` / `sort_by_key` /
+            // `.min()` / `.max()` (`f64::total_cmp`, NaN deterministically at one end, numeric-newtype
+            // layers unwrapped first). So there is exactly ONE total order shared by
+            // `compare`/`sort`/`min`/`max`, and exactly ONE documented divergence left: that total
+            // order (the method) vs IEEE (the operators — `ordered_bool` answers `false` for every NaN
+            // comparison, IEEE-754/Python/Rust parity, arith.rs; untouched by design). Not two
+            // orderings plus a fault, as W6-3c originally shipped.
+            //
+            // The NaN END is not fixed by spec: the signbit of `0.0/0.0` is target-dependent (negative
+            // on x86 SSE2 ⇒ NaN ranks below `-inf` ⇒ sorts FIRST, `compare < 0`). The guarantee is
+            // "same end `sort()` puts it", which is why this delegates instead of re-deriving.
+            //
+            // Reached only from the `None` (NaN) branch, never unconditionally: `order_key`'s struct
+            // branch calls `struct_compare` (a USER `compare`), and intrinsic dispatch must stay
+            // miss-only so a user method always wins. A `±0.0` pair therefore still answers via
+            // `self.compare` (IEEE-Equal) exactly as before — only NaN comes through here.
+            // `order_key`'s terminal `Err` is unreachable behind the `numeric_unwrapped` gate.
             ("compare", 1) => match self.compare(recv, args[0]) {
                 Some(ord) => Ok(Some(Value::int(ord as i64))),
                 None if self.numeric_unwrapped(recv) && self.numeric_unwrapped(args[0]) => {
-                    Err(self.err(
-                        "cannot compare NaN (compare has no unordered result)".to_string(),
-                        span,
-                    ))
+                    let other = args[0];
+                    Ok(Some(Value::int(self.order_key(recv, other, span)? as i64)))
                 }
                 // Genuinely incomparable TYPES (unreachable from well-typed source): leave the
                 // caller's `has no method` error standing, exactly as before.
@@ -2458,7 +2468,8 @@ impl Vm {
     }
 
     /// Is `v` numeric AFTER unwrapping any `newtype` layers? The predicate `Vm::ordered_bool` applies
-    /// to decide "a `None` from `compare` means NaN, not incomparable types" — but applied to the
+    /// to decide "a `None` from `compare` means NaN → answer the total order, not incomparable types →
+    /// leave the caller's `has no method` standing" — but applied to the
     /// values as `compare` sees them (it recurses through `Obj::NewType`, and `compare_op` unwraps a
     /// same-newtype pair before calling `ordered_bool`), so `newtype M = float` answers like `float`.
     fn numeric_unwrapped(&self, v: Value) -> bool {

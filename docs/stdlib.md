@@ -1099,6 +1099,12 @@ serial vs M:N **as long as you await in a fixed (e.g. submission) order**. There
 ### `std.cmp` — ordering generics (`Comparable`)
 `max[T: Comparable](a, b) -> T` · `min[T: Comparable](a, b) -> T` ·
 `clamp[T: Comparable](x, lo, hi) -> T`.
+`Comparable`'s method — `compare(self, other: Self) -> int` — is **total on floats**: a `NaN` operand
+returns an ordering int (never a fault), using the same total order `List.sort()`/`sort_by_key`/`min`/
+`max` use (`f64::total_cmp`, `NaN` to one end). The `<`/`<=`/`>`/`>=` *operators* stay IEEE (`false` for
+every `NaN` comparison) — that is the one divergence. These three `std.cmp` fns are written with `<`, so
+they follow the **operator** rule, not the total order: with a `NaN` argument `min`/`max` return whichever
+side the `false` comparison selects and `clamp` likewise — filter `NaN` first if that matters.
 
 ### `std.bisect` — binary search & sorted-insert (Python `bisect`)
 Over an ascending-sorted `List[T: Comparable]` (compares with `<` → dispatches through `Comparable`).

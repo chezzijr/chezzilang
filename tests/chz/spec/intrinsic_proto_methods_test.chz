@@ -302,37 +302,51 @@ test fn user_struct_index_methods_still_win():
     si_li(c, 1, 9)
     assert c.xs == [1, 9, 3]
 
-# ---- NaN: the ONE arm that cannot equal its operator form (W6-3c) ----
+# ---- NaN: `.compare()` is TOTAL, the operators stay IEEE (W6-3c) ----
 #
-# `<`/`<=`/`>`/`>=` are TOTAL on two numerics (every NaN comparison is `false`, IEEE-754/Python/Rust
-# parity), but `Comparable`'s `compare(self, other) -> int` has no int encoding for "unordered" — any
-# value would make some of the four ops true. So `.compare()` raises an explicit, RECOVERABLE
-# value-domain fault (like `division by zero`) rather than answering wrong, and — the point — rather
-# than re-raising the bogus `type float has no method 'compare'` that was W6-3's own symptom.
+# ONE order, one documented divergence. `.compare()` on a NaN operand answers the SAME total order
+# `sort()` / `sort_by_key` / `.min()` / `.max()` already use (`f64::total_cmp`, NaN deterministically at
+# one end) — it never faults. The operators `<`/`<=`/`>`/`>=` stay IEEE-754/Python/Rust: every NaN
+# comparison is `false`. So the only rule to remember is "the method uses the total order, the
+# operators use IEEE" — not that plus a value-domain fault.
+#
+# The NaN END is deliberately NOT hardcoded: the signbit of `0.0/0.0` is target-dependent (negative on
+# x86 SSE2 ⇒ NaN ranks below `-inf` ⇒ sorts FIRST, `compare < 0`). The asserts below pin the ordering
+# RELATIVE to `sort()` plus antisymmetry, which is the actual guarantee.
 
 fn nan() -> float:
     z := 0.0
     return z / z
 
-test fn compare_on_nan_faults_explicitly():
+test fn compare_on_nan_uses_the_total_order():
     n := nan()
-    # the operator form stays total and unfaulting
+    # the operator form stays IEEE — false, never a fault
     assert (n < 1.0) == false
     assert (n > 1.0) == false
     assert (n <= 1.0) == false
     assert (n >= 1.0) == false
-    # the method form faults — with a NAMED value-domain message, never `has no method`
-    r := recover: cmp_m(n, 1.0)
-    assert msg_of(r, "cmp_m(nan)") == "cannot compare NaN (compare has no unordered result)"
-    r = recover: cmp_m(1.0, n)
-    assert msg_of(r, "cmp_m(_, nan)") == "cannot compare NaN (compare has no unordered result)"
-    # a numeric newtype over float behaves identically (its `<` unwraps to the underlying)
+    # the method form is TOTAL: a strict ordering int, never a fault
+    c := cmp_m(n, 1.0)
+    assert c == -1 or c == 1, "compare answers a strict ordering of magnitude 1"
+    assert cmp_m(1.0, n) == -c, "the total order is antisymmetric"
+    # THE POINT: `compare` and `sort()` share ONE order — NaN lands on the same side of 1.0 in both
+    xs := [1.0, n]
+    xs.sort()
+    assert (xs[0] != 1.0) == (c < 0), "compare and sort share ONE order"
+    # `total_cmp` on identical bits is Equal, while IEEE `==` on NaN stays false — the total order's
+    # definition, not a bug
+    assert cmp_m(n, n) == 0
+    assert (n == n) == false
+    # a numeric newtype over float behaves identically, both spellings (order_key unwraps it)
     m := Meters(nan())
     assert (m < Meters(1.0)) == false
-    r = recover: cmp_m(m, Meters(1.0))
-    assert msg_of(r, "cmp_m(Meters(nan))") == "cannot compare NaN (compare has no unordered result)"
-    # non-NaN floats still compare normally
+    assert cmp_m(m, Meters(1.0)) == c
+    # unchanged: non-NaN floats, ints, and the ±0.0 pair (only NaN routes to the total order)
     assert (cmp_m(1.0, 2.0) < 0) == (1.0 < 2.0)
+    assert cmp_m(3, 3) == 0
+    assert cmp_m(2, 1) == 1
+    nz := -1.0 * 0.0
+    assert cmp_m(nz, 0.0) == 0, "non-NaN pairs unchanged: ±0.0 stay IEEE-Equal"
 
 # ---- a numeric newtype with its OWN operator-named method: method != operator (W6-3d) ----
 #

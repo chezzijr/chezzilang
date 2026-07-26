@@ -476,7 +476,12 @@ root marker (all fields default to unset, so `entrypoint` is required only for t
   `==` / `in` / `index_of` / `unique` (`n := nan_expr; xs := [n]` ⇒ `[n] == [n]`, `n in xs`), while two
   SEPARATELY computed `NaN`s stay unequal — the bare `==` operator is untouched. Sorting is deterministic with `NaN`:
   `sort()` and `sort_by_key` use a total order (`f64::total_cmp`, `NaN` sorts to one end) instead of
-  faulting. **One-way `int`→`float` widening — UNTYPED CONSTANTS only (Go's rule):** an untyped int
+  faulting. **`Comparable`'s `.compare()` shares that SAME total order** — `a.compare(b)` on a `NaN`
+  operand returns an ordering int (never a fault), landing `NaN` on exactly the side `sort()` puts it, so
+  `compare`/`sort`/`sort_by_key`/`.min()`/`.max()` are all one order. The *operators* stay IEEE, and that
+  is the single divergence: `nan < 1.0` is `false` while `nan.compare(1.0)` is nonzero. (Two corollaries:
+  `a.compare(a)` is `0` for a `NaN` `a` although `a == a` is `false`; and only `NaN` takes the total-order
+  path, so `(-0.0).compare(0.0)` is `0` even though `sort()` orders `-0.0 < +0.0`.) **One-way `int`→`float` widening — UNTYPED CONSTANTS only (Go's rule):** an untyped int
   *constant* expression adapts to a `float` context and is converted to a real `f64`; a **typed** `int`
   *value* never implicitly converts (write `float(x)`), and the reverse is always a lossy type error. An
   untyped int constant is an int literal, unary `-`, and `+ - * / %` composed over those — anything with
@@ -582,10 +587,11 @@ root marker (all fields default to unset, so `entrypoint` is required only for t
   The checker↔runtime pairing is machine-checked per **(protocol × receiver type)**
   (`checker::proto::INTRINSIC_PROTO_METHODS` + `vm::tests::intrinsic_grants_all_have_vm_arms`, which
   sweeps the whole cross product), and a bare `return Ok(())` grant no longer compiles — so neither a
-  new grant nor a WIDENED one can ship without its arm. Three documented exceptions: `Iterator`'s
-  stateful `next` on a *raw* collection (no cursor position, W6-3b), `compare` on a NaN operand (no
-  "unordered" int, W6-3c), and a numeric `newtype` that defines its own operator-named method (the
-  method form gets the user method, the operator form the underlying's native op, W6-3d).
+  new grant nor a WIDENED one can ship without its arm. Two documented exceptions: `Iterator`'s
+  stateful `next` on a *raw* collection (no cursor position, W6-3b), and a numeric `newtype` that defines
+  its own operator-named method (the method form gets the user method, the operator form the underlying's
+  native op, W6-3d). On a **NaN** operand `compare` is total, but by `sort()`'s total order rather than
+  the operators' IEEE rule — one order, one divergence (see the `Comparable` note below).
 - **Shipped since (post-M18 stdlib batch):** `std.request` custom headers + non-GET/POST verbs
   (`put`/`patch`/`delete`/`head` + a general `request(method, url, body, headers)`), carried off-heap
   via a new `NativeArg::Map` so the headers form stays blocking-pool-offloadable under `--parallel`;
@@ -917,15 +923,18 @@ The intrinsic grants and their methods are: `Comparable`→`compare`, `Stringabl
 `Slice`→`slice`, `Add`/`Sub`/`Mul`/`Div`/`Mod`→`add`/`sub`/`mul`/`div`/`mod`, `Neg`→`neg`. A type that
 DEFINES the method always gets its own (intrinsic dispatch is a resolution fallback, never a shadow).
 
-**Three documented exceptions to the equivalence** (each with a `docs/gaps.md` entry):
+`a.compare(b)` on a **NaN** operand never faults: it answers the same **total order** `sort()` /
+`sort_by_key` / `.min()` / `.max()` use (`f64::total_cmp`, NaN deterministically at one end), while
+`<`/`<=`/`>`/`>=` stay IEEE (every NaN comparison is `false`). So there is ONE order shared by
+`compare`/`sort`/`min`/`max` and exactly one rule to remember: the method uses the total order, the
+operators use IEEE. Consequences worth knowing: `a.compare(a)` is `0` for a NaN `a` even though `a == a`
+is `false` (`total_cmp` on identical bits is Equal), and only NaN takes the total-order path — a `±0.0`
+pair still compares Equal by the method (`sort()` orders `-0.0 < +0.0`).
+
+**Two documented exceptions to the equivalence** (each with a `docs/gaps.md` entry):
 
 - `Iterator`'s `next` on a *raw* collection is granted but faults — a raw collection holds no cursor
   position (W6-3b); iterate it with `for`, or call `.iter()` for a real cursor.
-- `a.compare(b)` with a **NaN** operand raises `cannot compare NaN (compare has no unordered result)`.
-  `<`/`<=`/`>`/`>=` are total on floats (every NaN comparison is `false`), but `compare(self, other) ->
-  int` has no encoding for "unordered", so the method faults rather than answer wrong — a recoverable
-  value-domain fault like `division by zero`, same position Rust takes (`f64` is `PartialOrd`, not
-  `Ord`). Order NaN-bearing data with the operators, or filter NaN first (W6-3c).
 - A numeric `newtype` that **defines** `add`/`sub`/`mul`/`div`/`mod`/`compare` diverges: the method form
   dispatches ITS method (never shadowed — that rule wins) while `+`/`<` still auto-flow to the
   underlying's native op (see the newtype note in `docs/syntax.md`). Don't write both spellings over
