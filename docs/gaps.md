@@ -596,6 +596,38 @@ operator still wouldn't). Pinned as-is by
 `newtype_own_method_wins_and_diverges_from_the_operator` in `tests/chz/spec/intrinsic_proto_methods_test.chz`
 so whichever way it is resolved, the change is visible.
 
+**ATTEMPTED AND REJECTED — candidate (b) makes `<` INTRANSITIVE (2026-07-26).** An auto-task run
+implemented (b) (a numeric newtype's own `add`/`compare`/… dispatches as the operator too) on branch
+`auto-task/newtype-op-method-dispatch`; it self-rejected after 2 remediation rounds, and BOTH blockers
+were re-verified by hand on the branch binary vs `main`, on both engines. **The first blocker is
+STRUCTURAL, not an implementation slip** — do not re-attempt (b) without resolving it:
+```chezzi
+newtype Ranked = int:
+    fn compare(self, o: Ranked) -> int:
+        return int(o) - int(self)          # a DESCENDING user order
+fn lt[T: Comparable](a: T, b: T) -> bool:
+    return a < b
+xs: List[Comparable] = [Ranked(3), Ranked(1), 2]
+print(lt(xs[0], xs[1]), lt(xs[1], xs[2]), lt(xs[2], xs[0]))
+# main:   false true true   (total order)
+# (b):    true  true true   <- a < b < c < a, a strict CYCLE
+```
+Cause: under (b) a SAME-newtype pair takes the user's (here descending) order, while a CROSS-type pair
+under the `Comparable` existential (`Ranked(1) < 2`) cannot — the user's `compare(self, o: Ranked)` does
+not accept an `int` — so it falls back to the native ascending order. One list then carries two orders
+and transitivity is gone; `.min()`/`.max()` (which decide ONCE PER COLLECTION) keep answering
+`Ranked(1)`/`Ranked(3)` while `<` (which decides PER PAIR) says every element is less than every other.
+Any `<`-based algorithm (`std.bisect`, a user sort) inherits the intransitive comparator, silently, with
+no fault. (b) is therefore incompatible with heterogeneous `List[Comparable]` unless such mixing is ALSO
+banned for a compare-defining type — which is a strictly larger design change than the carve-out.
+Second blocker (an ordinary regression, but it shows the checker-side cost): gating on the bound
+protocol's `compare` second parameter being literally `Self` after substitution broke a protocol whose
+`compare` takes the CONCRETE conformer type — `protocol OrdS: fn compare(self, o: S) -> int` with
+`fn lt[T: OrdS](a: T, b: T): return a < b` prints `true` on `main` and is rejected on the branch with
+`cannot compare T and T`. Branch discarded, not merged; `main` is unchanged and the divergence stands.
+**This moves candidate (a) (reject the declaration) ahead of (b)**: it is the only candidate that makes
+the two-orders situation unrepresentable rather than reconciling it after the fact.
+
 ### W6-4. `std.process` silently CORRUPTS non-UTF-8 child output (`from_utf8_lossy`), with no bytes hatch — the unswept B1/R1 sibling — P0 — **FIXED (2026-07-25)**
 ```chezzi
 import std.process as pr
