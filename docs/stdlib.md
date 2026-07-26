@@ -1222,8 +1222,8 @@ not an infinite spin) · `chain(a, b) -> Iterator[T]` (all of `a` then all of `b
 v1) · `islice(it, stop) -> Iterator[T]` (the first `stop` elements of any iterator; `stop<=0` = empty)
 · `imap(it, f) -> Iterator[U]` / `ifilter(it, pred) -> Iterator[T]` (the **lazy** siblings of the eager
 `map`/`filter` — named `imap`/`ifilter` since Chezzi has no overloading). The `it`-taking adapters
-(`islice`/`imap`/`ifilter`) accept **any** `Iterator[T]` — a list, set, str, user `next()` struct, or
-another generator — via the `[S: Iterator[T], T]` bound.
+(`islice`/`imap`/`ifilter`) accept **any iterable** — a list, set, str, user `next()` struct, a
+`.iter()` cursor, or another generator — via the `[S: Iterable[T], T]` bound.
 
 Random helpers (call `std.rand`; seed via `rand.seed(n)` for reproducibility — these are pure-Chezzi
 because the native seam can't return a generic `List[T]`):

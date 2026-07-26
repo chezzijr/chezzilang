@@ -8369,18 +8369,19 @@ struct Counter:
 
 #[test]
 fn iterator_bound_over_list_ok() {
-    // `[S: Iterator[T], T]` accepts a list and recovers its element type.
+    // `[S: Iterator[T], T]` accepts a list CURSOR and recovers its element type. (A raw list is
+    // `Iterable`, not `Iterator` — see `raw_collection_does_not_satisfy_iterator`.)
     ok(
-        "fn first[S: Iterator[T], T](xs: S, d: T) -> T:\n    for x in xs:\n        return x\n    return d\nv := first([1, 2, 3], 0)\n",
+        "fn first[S: Iterator[T], T](xs: S, d: T) -> T:\n    for x in xs:\n        return x\n    return d\nv := first([1, 2, 3].iter(), 0)\n",
     );
 }
 
 #[test]
 fn iterator_bound_recovers_element_type() {
-    // first([1,2,3], 0) is int, so binding the result to a str must be rejected — proves T = int
+    // first([1,2,3].iter(), 0) is int, so binding the result to a str must be rejected — proves T = int
     // flowed out of the iterand's element type, not stayed erased.
     rejects(
-        "fn first[S: Iterator[T], T](xs: S, d: T) -> T:\n    for x in xs:\n        return x\n    return d\ns: str = first([1, 2, 3], 0)\n",
+        "fn first[S: Iterator[T], T](xs: S, d: T) -> T:\n    for x in xs:\n        return x\n    return d\ns: str = first([1, 2, 3].iter(), 0)\n",
         "cannot assign",
     );
 }
@@ -8390,6 +8391,59 @@ fn iterator_bound_over_noniterable_rejected() {
     rejects(
         "fn first[S: Iterator[T], T](xs: S, d: T) -> T:\n    return d\nv := first(5, 0)\n",
         "does not satisfy Iterator",
+    );
+}
+
+#[test]
+fn raw_collection_does_not_satisfy_iterator() {
+    // W6-3b: a RAW collection holds no cursor position, so `next` on it can never work (it faulted at
+    // runtime). `Iterator` now means cursor / generator / `next`-struct; a raw collection satisfies
+    // only `Iterable`. The element arg matches the receiver's element type in each probe, so the ONE
+    // error is the grant refusal, not an element-recovery mismatch.
+    for (elem, recv) in [
+        ("int", "[1, 2, 3]"),
+        ("int", "Set([1, 2])"),
+        ("str", "{\"a\": 1}"), // a map's element is its KEY
+        ("str", "\"abc\""),
+        ("int", "b\"abc\""),
+        ("int", "bytearray(b\"abc\")"),
+    ] {
+        rejects(
+            &format!("fn f[T: Iterator[{elem}]](c: T):\n    pass\nf({recv})\n"),
+            "Iterable",
+        );
+    }
+}
+
+#[test]
+fn iterator_bound_accepts_cursor_generator_and_next_struct() {
+    // The narrowed grant's ACCEPT side: a `.iter()` cursor, a generator, a structural `next` struct.
+    ok("fn f[T: Iterator[int]](c: T):\n    pass\nf([1, 2, 3].iter())\n");
+    ok("fn f[T: Iterator[int]](c: T):\n    pass\nfn g() -> Iterator[int]:\n    yield 1\nf(g())\n");
+    ok(&format!(
+        "{COUNTER}fn f[T: Iterator[int]](c: T):\n    pass\nf(Counter(3))\n"
+    ));
+    // `for` over a raw collection is untouched.
+    ok("for x in [1, 2, 3]:\n    print(x)\n");
+}
+
+#[test]
+fn iterable_bound_recovers_element_type() {
+    // W6-3b's migration target: `[S: Iterable[T], T]` must recover T from the iterand, exactly like
+    // the `Iterator` bound did — otherwise there is nowhere for the raw-collection callers to go.
+    ok(
+        "fn count[S: Iterable[T], T](xs: S) -> int:\n    n := 0\n    for _ in xs:\n        n = n + 1\n    return n\nv := count([1, 2, 3])\n",
+    );
+    // The `List[str]` annotation proves T=str was really recovered, not erased to Unknown.
+    ok(
+        "fn to_list[S: Iterable[T], T](xs: S) -> List[T]:\n    out := []\n    for x in xs:\n        out.push(x)\n    return out\nr: List[str] = to_list(\"ab\")\n",
+    );
+    // …and a WRONG element still rejects — the recovered `int` is checked against the already-pinned
+    // `str` (widening the bound must not widen what conforms). RED before the `Iterable` recovery: the
+    // element check never ran for an `Iterable` bound, so this message did not exist.
+    rejects(
+        "fn f[S: Iterable[T], T](xs: S, d: T):\n    print(d)\nf([1, 2, 3], \"a\")\n",
+        "iterator element type int does not match the declared element type str",
     );
 }
 
@@ -8451,7 +8505,7 @@ struct Take[I: Iterator[T], T]:
         self.left -= 1
         return self.inner.next()
 fn main():
-    t := Take([1, 2, 3], 2)
+    t := Take([1, 2, 3].iter(), 2)
     for x in t:
         print(x)
 main()
@@ -8465,16 +8519,16 @@ fn iterator_bound_forwards_into_another_iterator_call_ok() {
     // (the `Ty::Param` declared-bounds path), not be rejected. Regression for the satisfies/for-loop
     // drift.
     ok(
-        "fn count[S: Iterator[T], T](xs: S) -> int:\n    n := 0\n    for _ in xs:\n        n = n + 1\n    return n\nfn wrap[S: Iterator[T], T](xs: S) -> int:\n    return count(xs)\nv := wrap([1, 2, 3])\n",
+        "fn count[S: Iterator[T], T](xs: S) -> int:\n    n := 0\n    for _ in xs:\n        n = n + 1\n    return n\nfn wrap[S: Iterator[T], T](xs: S) -> int:\n    return count(xs)\nv := wrap([1, 2, 3].iter())\n",
     );
 }
 
 #[test]
 fn iterator_conflicting_explicit_element_arg_rejected() {
-    // Explicit `[List[int], str]` pins T=str, but the list element is int — the recovered element
+    // Explicit `[Iterator[int], str]` pins T=str, but the cursor's element is int — the recovered element
     // must conflict (unsound otherwise: static List[str], runtime List[int]).
     rejects(
-        "fn to_list[S: Iterator[T], T](xs: S) -> List[T]:\n    out := []\n    for x in xs:\n        out.push(x)\n    return out\nr := to_list[List[int], str]([1, 2, 3])\n",
+        "fn to_list[S: Iterator[T], T](xs: S) -> List[T]:\n    out := []\n    for x in xs:\n        out.push(x)\n    return out\nr := to_list[Iterator[int], str]([1, 2, 3].iter())\n",
         "does not match the declared element type",
     );
 }
@@ -8496,7 +8550,7 @@ struct Bad[I: Iterator[T], T]:
     fn next(self) -> T?:
         return Some(\"x\")
 fn main():
-    b := Bad([1, 2, 3])
+    b := Bad([1, 2, 3].iter())
     for x in b:
         print(x)
 main()
@@ -13127,7 +13181,7 @@ fn iterator_bound_forwards_into_iterable_bound() {
     // Every Iterator IS Iterable: an `[S: Iterator[T]]` value must satisfy an `[U: Iterable[T]]`
     // bound it is forwarded into (the cross-protocol relationship the spec promises).
     ok(
-        "fn use_iterable[U: Iterable[int]](xs: U) -> int:\n    n := 0\n    for x in xs.iter():\n        n = n + 1\n    return n\nfn pass_through[S: Iterator[int]](xs: S) -> int:\n    return use_iterable(xs)\nfn main():\n    print(pass_through([1, 2, 3]))\nmain()\n",
+        "fn use_iterable[U: Iterable[int]](xs: U) -> int:\n    n := 0\n    for x in xs.iter():\n        n = n + 1\n    return n\nfn pass_through[S: Iterator[int]](xs: S) -> int:\n    return use_iterable(xs)\nfn main():\n    print(pass_through([1, 2, 3].iter()))\nmain()\n",
     );
 }
 

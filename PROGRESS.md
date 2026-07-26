@@ -24,6 +24,30 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > `docs/stdlib.md` (incl. the honest note that `std.cmp`'s `min`/`max`/`clamp` are written with `<`, so
 > they follow the operator rule, not the total order).
 
+> **✅ FIX (2026-07-26, gaps.md W6-3b) — `Iterator` now means CURSOR; a raw collection satisfies only
+> `Iterable`.** `fn f[T: Iterator[int]](c: T)` accepted `f([1, 2, 3])` and then faulted at runtime with
+> `type list has no method 'next'` — the checker keyed `Iterator` conformance on `iter_elem` ("can be
+> iterated"), but `next` is STATEFUL and a raw collection holds no position (minting a fresh cursor per
+> call would hand back element 0 forever, worse than the fault). Narrowed to the two forms that DO hold a
+> position: an `Iterator[E]` cursor (`.iter()` / a generator result) or a struct with structural
+> `next(self) -> Option[E]`; the new message points at `for`, `.iter()`, and the migration bound. The
+> companion widening is what makes the migration possible: **element recovery now runs for `Iterable[T]`
+> bounds too**, so `[S: Iterable[T], T]` accepts any iterable AND recovers `T` exactly like the old
+> `Iterator` bound did — the accept set of the *iterating* form is unchanged. This is a **rename, not a
+> retraction**: every shipped user of the bound (`examples/iterator_bound.chz`, `std.iter`'s
+> `islice`/`imap`/`ifilter`) iterates with `for`, none called `.next()`, so all migrated to `Iterable`
+> with **byte-identical** `.expected` output. Only `.next()` on a raw collection stops type-checking —
+> and that was broken at runtime. Recovery is deliberately NOT total for `Iterable`: a struct with only
+> `iter(self) -> Iterator[E]` still needs a concrete-arg bound (`[S: Iterable[int]]`). Retires the LAST
+> `checker::proto::INTRINSIC_UNPAIRED` row — the const is now empty (both `vm::tests` ratchet loops stay,
+> re-arming on the next carve-out). The 165-cell grant matrix
+> (`vm::tests::intrinsic_grants_all_have_vm_arms`) went RED on the narrowing and green on the retirement,
+> exactly as designed. 3 new checker tests (6 rejects + accept controls for cursor/generator/`next`-struct
+> + `Iterable` recovery incl. a wrong-element boundary reject) + 1 `tests/chz/spec` `test fn` (both
+> engines). Docs: `docs/syntax.md` (teaches `Iterable` vs `Iterator` = Rust `IntoIterator` vs `Iterator`,
+> Go `range` vs an iterator value), `docs/spec.md` M13, `docs/stdlib.md § std.iter`, `docs/grammar.bnf`,
+> `docs/gaps.md` (W6-3b retired).
+
 > **✅ FIX (2026-07-26, gaps.md W6-12/13/14/15/17/18) — the wave-6 tail, six independent findings on
 > disjoint seams, one batch.** All behavior-scoped (no new API surface); serial==M:N verified on the
 > release binary for every repro.
@@ -1278,8 +1302,9 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > **empty list = immediately-done, not an infinite spin**), `chain(a, b)` (a then b; two-arg only in
 > v1), `islice(it, stop)` (lazy prefix; `stop<=0` = empty — the terminator, via `break` inside the
 > generator's `for`), and the lazy `imap`/`ifilter` (named to dodge the eager `map`/`filter` — Chezzi
-> has no overloading). The `it`-taking adapters use the proven `[S: Iterator[T], T]` bound so they
-> accept any iterable (list/set/str/user-`next()`/generator). Laziness proven: `count()` (infinite) →
+> has no overloading). The `it`-taking adapters use the `[S: Iterable[T], T]` bound so they
+> accept any iterable (list/set/str/user-`next()`/generator). (Originally `[S: Iterator[T], T]`; migrated
+> by the 2026-07-26 W6-3b fix, which narrowed `Iterator` to real cursors — same accept set.) Laziness proven: `count()` (infinite) →
 > `islice(_, 5)` terminates; `imap`/`ifilter` compose over `count()` and terminate under `islice`.
 > Pure-Chezzi ⇒ serial-VM == M:N automatically; 5 inline `parity_entry` tests (both engines) in a
 > labeled block. Dropped: `take(it, n)` alias (collides with eager `take`; `islice` covers it). Docs:
@@ -6607,14 +6632,16 @@ branch names) is in the git log.
   call probe RUNS on both engines. Verified RED both ways: a bare `Ok(())` grant fails to compile, and
   widening `Comparable` to `bytes` (which the earlier protocol-keyed ratchet passed) now fails the suite.
   Three carve-outs FILED rather than silently shipped: `Iterator`→`next` on a raw collection (**W6-3b**,
-  stateful, no cursor position), `compare` on a **NaN** operand (**W6-3c** — first shipped as an explicit
-  recoverable fault instead of W6-3's own `has no method` symptom; **now FIXED (2026-07-26)**, it answers
-  `sort()`'s total order — see the wave-6 tail entry below), and a numeric `newtype` that
+  stateful, no cursor position — **since FIXED, 2026-07-26: the grant was narrowed to real cursors and
+  `INTRINSIC_UNPAIRED` is now empty; see the top entry**), `compare` on a **NaN** operand (**W6-3c** —
+  first shipped as an explicit recoverable fault instead of W6-3's own `has no method` symptom; **now
+  FIXED (2026-07-26)**, it answers `sort()`'s total order — see the wave-6 tail entry below), and a
+  numeric `newtype` that
   DEFINES `add`/`compare` (**W6-3d** — the method form gets the user method, the operator form the
   underlying's native op; reqs "≡ the operator" and "never shadow a user method" genuinely conflict there).
-  Tests: `tests/chz/spec/intrinsic_proto_methods_test.chz` (19 `test fn`, operator-equivalence AND
-  fault-message equality via `recover:`, user-method-wins controls, plus the W6-3d divergence pin and the
-  NaN total-order pin),
+  Tests: `tests/chz/spec/intrinsic_proto_methods_test.chz` (20 `test fn`, operator-equivalence AND
+  fault-message equality via `recover:`, user-method-wins controls, plus the W6-3d divergence pin, the
+  NaN total-order pin and the Iterator-is-a-cursor pin),
   serial==M:N. Docs: `docs/gaps.md` (W6-3 FIXED + new W6-3b/c/d), `docs/spec.md`, `docs/syntax.md`.
 - **Diagnostic — recursive *local* fn crossing the airlock (2026-07-18, bug-hunt).** A nested (local)
   recursive `fn` sent across a task boundary used to fault with the misleading `maximum structural depth

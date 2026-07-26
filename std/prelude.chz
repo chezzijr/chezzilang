@@ -285,7 +285,8 @@ protocol Iterator[Elem]:
 # reserved `Iterator[T]` value type (`Ty::Struct("Iterator",[Elem])`), which `resolve_type` accepts
 # in return position (the dedicated `Iterator[T]` value arm), so the SHAPE ports cleanly. Conformance
 # stays special-cased (`satisfies_args`: built-in collections + any `Iterator[T]` intrinsically — every
-# Iterator IS Iterable via `iter() == self` — plus a user struct with a structural `iter`), and the
+# Iterator IS Iterable via `iter() == self` — plus a user struct with a structural `iter`; the reverse is
+# NOT true, `Iterator` needs a real cursor and a raw collection does not satisfy it — W6-3b), and the
 # bound's `[Elem]` recovers the element type at call sites (`infer_method_call`'s `Iterable.iter` case).
 protocol Iterable[Elem]:
     fn iter(self) -> Iterator[Elem]

@@ -184,7 +184,7 @@
            | "DOTDOTDOT" "IDENT" "COLON" <type>
 
 # Generic type parameters on a fn/struct declaration: `[T]`, `[T: Comparable]`, `[A, B]`, or a
-# parameterized bound `[S: Iterator[T]]` (only `Iterator` gives its type args meaning).
+# parameterized bound `[S: Iterator[T]]` (only `Iterator`/`Iterable` give their type args meaning).
 <typeParams>    ::= "LBRACKET" <typeParamList> "RBRACKET"
 <typeParamList> ::= <typeParam> | <typeParam> "COMMA" <typeParamList>
 <typeParam>     ::= "IDENT" | "IDENT" "COLON" <boundList>

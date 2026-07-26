@@ -1,25 +1,31 @@
-# `Iterator[T]` — the language's one parameterized protocol bound.
+# `Iterable[T]` / `Iterator[T]` — the two parameterized protocol bounds, and which one to reach for.
 #
-# A generic function can accept ANY iterable and recover its element type `T`:
-#   - built-in list / set / str  (they satisfy Iterator intrinsically, like int satisfies Add)
-#   - any user struct with `next(self) -> Option[T]`
+# `[S: Iterable[T], T]` = "give me anything I can iterate" (Rust's `IntoIterator`, Go's `range`):
+#   - built-in list / set / map / str / bytes / bytearray
+#   - a cursor from `.iter()`, or a generator's `Iterator[T]`
+#   - any user struct with `next(self) -> Option[T]` or `iter(self) -> Iterator[T]`
+#   Its body iterates with `for` — that is what this file's three functions do.
 #
-# `T` is inferred by unifying the iterand's element type into the bound's arg — so it flows out into
-# return types (`-> T`, `-> List[T]`) and into the loop variable inside the body.
+# `[S: Iterator[T], T]` = "give me a CURSOR" (Rust's `Iterator`): something that HOLDS a position, so
+# the body may call `s.next()` directly. A raw list does NOT satisfy it — a fresh cursor per call
+# would hand back element 0 forever. Take one with `.iter()`, or use a generator / a `next` struct.
+#
+# Either way `T` is inferred by unifying the iterand's element type into the bound's arg — so it flows
+# out into return types (`-> T`, `-> List[T]`) and into the loop variable inside the body.
 
-fn first_or[S: Iterator[T], T](xs: S, default: T) -> T:
+fn first_or[S: Iterable[T], T](xs: S, default: T) -> T:
     for x in xs:
         return x
     return default
 
 # `T` here is recovered ONLY from the bound (it appears in no parameter), proving element recovery.
-fn count[S: Iterator[T], T](xs: S) -> int:
+fn count[S: Iterable[T], T](xs: S) -> int:
     n := 0
     for _ in xs:
         n = n + 1
     return n
 
-fn to_list[S: Iterator[T], T](xs: S) -> List[T]:
+fn to_list[S: Iterable[T], T](xs: S) -> List[T]:
     out := []
     for x in xs:
         out.push(x)

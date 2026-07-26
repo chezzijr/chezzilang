@@ -2088,9 +2088,10 @@ fn prebuilt_protocols() -> HashMap<String, ProtocolInfo> {
         },
     );
     // `Iterator[T]` — the language's one parameterized protocol. The method shape mirrors the
-    // structural detection (`next(self) -> Option[T]`); conformance is decided in `satisfies` via
-    // `iter_elem` (built-ins intrinsically, user structs via their `next`), NOT the generic structural
-    // loop, and the bound's `[T]` arg recovers the element type at call sites.
+    // structural detection (`next(self) -> Option[T]`); conformance is decided in `satisfies` — a cursor
+    // (`.iter()` / a generator result) or a user struct with a structural `next`, NOT a raw collection
+    // (which holds no position and satisfies only `Iterable`, W6-3b) and NOT the generic structural
+    // loop. The bound's `[T]` arg recovers the element type at call sites.
     m.insert(
         "Iterator".to_string(),
         ProtocolInfo {
@@ -2113,6 +2114,8 @@ fn prebuilt_protocols() -> HashMap<String, ProtocolInfo> {
     // user struct with a structural `iter`), NOT the generic structural loop, and the bound's `[T]`
     // recovers the element type at call sites (`infer_method_call`'s `Iterable.iter` special-case).
     // Distinct from `Iterator[T]`: an `Iterable` only promises a cursor; an `Iterator` also has `next`.
+    // So `[S: Iterable[T], T]` is the bound that accepts ANY iterable (Rust's `IntoIterator`), and
+    // `[S: Iterator[T], T]` is the one that needs a real cursor (Rust's `Iterator`).
     m.insert(
         "Iterable".to_string(),
         ProtocolInfo {

@@ -175,7 +175,7 @@ fn chain[T](a: List[T], b: List[T]) -> Iterator[T]:
 
 # The first `stop` elements of an iterator, lazily (a prefix; `stop <= 0` = empty). Pulls at most
 # `stop` elements from its source, so it terminates an infinite source (Python `itertools.islice`).
-fn islice[S: Iterator[T], T](it: S, stop: int) -> Iterator[T]:
+fn islice[S: Iterable[T], T](it: S, stop: int) -> Iterator[T]:
     # Consume the source EXACTLY `stop` times (CPython itertools.islice contract): break right after
     # yielding the stop-th element, before the `for` pulls the (stop+1)-th. The `stop > 0` guard makes
     # stop<=0 an empty iterator without a bare generator `return`.
@@ -189,13 +189,13 @@ fn islice[S: Iterator[T], T](it: S, stop: int) -> Iterator[T]:
 
 # Lazy `map`: apply `f` to each element of an iterator, yielding results (the lazy sibling of the
 # eager list `map`). Named `imap` because `map` is taken.
-fn imap[S: Iterator[T], T, U](it: S, f: fn(T) -> U) -> Iterator[U]:
+fn imap[S: Iterable[T], T, U](it: S, f: fn(T) -> U) -> Iterator[U]:
     for x in it:
         yield f(x)
 
 # Lazy `filter`: keep the elements for which `pred` holds, yielding them (the lazy sibling of the
 # eager list `filter`). Named `ifilter` because `filter` is taken.
-fn ifilter[S: Iterator[T], T](it: S, pred: fn(T) -> bool) -> Iterator[T]:
+fn ifilter[S: Iterable[T], T](it: S, pred: fn(T) -> bool) -> Iterator[T]:
     for x in it:
         if pred(x):
             yield x

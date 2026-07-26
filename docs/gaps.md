@@ -224,7 +224,7 @@ parked_slot_nonsendable_rejects,in_data_cycle_rejects,unreached_nonsendable_runs
 - **Multi-frame / pending-`defer` suspended generators** — checker-UNREACHABLE (item 3 arms a/c); no valid
   program constructs them. The rejects are defensive guards, not a user-visible limit — nothing to build.
 
-## Session log — 2026-07-25 (bug-hunt wave 6: 19 findings — W6-19 found while FIXING W6-2 — 15 FIXED (W6-1..W6-6, W6-11..W6-19 as listed below), 4 open + 3 carve-outs filed (W6-3b/c/d, of which **W6-3c is now FIXED (2026-07-26)** — 2 carve-outs remain) — 2 never-hunted surfaces swept)
+## Session log — 2026-07-25 (bug-hunt wave 6: 19 findings — W6-19 found while FIXING W6-2 — 15 FIXED (W6-1..W6-6, W6-11..W6-19 as listed below), 4 open + 3 carve-outs filed (W6-3b/c/d, of which **W6-3b and W6-3c are now FIXED (2026-07-26)** — 1 carve-out, W6-3d, remains) — 2 never-hunted surfaces swept)
 
 Pre-freeze adversarial hunt, 5 disjoint parallel domains, weighted at the two surfaces the wave-5
 residual named as never audited (**FFI**, **GC + `unsafe`**) plus the concurrency code that landed
@@ -502,40 +502,37 @@ narrower than the checker's grant set, so a protocol-keyed table could not have 
    grants no callable method"). Verified: adding a bare `Ok(())` grant arm gives
    `expected \`Grant\`, found \`()\``.
 2. `grant_intrinsic(protocol, ty)` `debug_assert`s that `(protocol, intrinsic_recv_kind(ty))` has a row in
-   `INTRINSIC_PROTO_METHODS` (or `INTRINSIC_UNPAIRED`) — 51 paired rows + 6 carve-out rows.
+   `INTRINSIC_PROTO_METHODS` (or `INTRINSIC_UNPAIRED`) — 51 paired rows + 0 carve-out rows
+   (`INTRINSIC_UNPAIRED` is now EMPTY — W6-3b retired its only entry — but the const and its assertions stay
+   so the ratchet re-arms the moment a new unpairable grant is added).
 3. `vm::tests::intrinsic_grants_all_have_vm_arms` sweeps the **full (protocol × kind) cross product**
    (15 × 11 = 165 cells): it type-checks a `fn probe[T: P](a: T)` bound probe per cell and asserts the set
    of cells the checker ACCEPTS equals the registered row set, then RUNS a generated call probe per paired
    row on BOTH engines (and asserts every carve-out row still faults). Verified RED: adding `Ty::Bytes` to
    the `Comparable` grant — the review's exact trigger, and a widening the previous protocol-keyed ratchet
    passed — now fails with `intrinsic conformance granted for (Comparable, bytes) with no row`.
-Not shipped, filed instead of silently held: `Iterator`→`next` on a raw collection (**W6-3b**, registered
-in `INTRINSIC_UNPAIRED`) and the numeric-newtype-with-its-own-operator-method divergence (**W6-3d**) —
-both below. (**W6-3c**, `compare` on a NaN operand, was also filed here and is now **FIXED (2026-07-26)**
-— it answers `sort()`'s total order.)
-Tests: `tests/chz/spec/intrinsic_proto_methods_test.chz` (19 `test fn` —
+Not shipped, filed instead of silently held: only the numeric-newtype-with-its-own-operator-method
+divergence (**W6-3d**, below). The other two are FIXED: **W6-3c** (`compare` on a NaN operand — it now
+answers `sort()`'s total order) and **W6-3b** (`Iterator`→`next` on a raw collection — the grant was
+narrowed to real cursors), both **2026-07-26**; see their sections.
+Tests: `tests/chz/spec/intrinsic_proto_methods_test.chz` (20 `test fn` —
 arith/neg/hash/index/set_index/slice/newtype/boxed-scalar/protocol-value, operator-equivalence AND
 fault-message equality via `recover:`, plus user-method-wins controls, the W6-3d divergence pin and the
 NaN total-order pin),
 serial==M:N.
 
-### W6-3b. `Iterator[E]`'s `next` is granted to a RAW collection but has no runtime arm — check-OK-then-run-fault — carved out of W6-3, low
-```chezzi
-fn f[T: Iterator[int]](c: T):
-    print(str(c.next()))
-f([1, 2, 3])
-# check: ok  |  both engines: runtime error: type list has no method 'next'
-```
-The one intrinsic grant W6-3 could NOT pair. `proto.rs`'s `Iterator` arm keys conformance on `iter_elem`
-("can be iterated"), so a raw `list`/`map`/`str`/`set` is granted it — but `next(self) -> Option[E]` is
-inherently STATEFUL and a raw collection holds no cursor position, so there is no value-preserving VM arm
-(minting a fresh cursor per call would return element 0 forever — silently wrong, worse than the fault).
-The coherent fix is on the CHECKER side: narrow the `Iterator` grant to real cursors/generators
-(`Obj::Iter`/generator types) and let a raw collection satisfy only `Iterable` (whose `iter()` DOES work),
-which is what Rust (`IntoIterator` vs `Iterator`) and Go (`range` vs an iterator value) both do. That is a
-grant-set change, so it was out of W6-3's scope. Registered as `checker::proto::INTRINSIC_UNPAIRED` with
-`vm::tests::intrinsic_grants_all_have_vm_arms` asserting it STILL faults, so the carve-out can't rot: when
-this is fixed, retire the const entry, this section, and the assertion together.
+### W6-3b. `Iterator[E]`'s `next` was granted to a RAW collection but had no runtime arm — **FIXED (2026-07-26)**
+The last `INTRINSIC_UNPAIRED` row is gone: `Iterator` conformance was narrowed from `iter_elem` ("can be
+iterated") to "HOLDS a cursor position" — an `Iterator[E]` cursor (`.iter()` / a generator result) or a
+struct with structural `next(self) -> Option[E]`. `fn f[T: Iterator[int]](c: T)` + `f([1, 2, 3])` is now a
+TYPE error naming `Iterable` instead of a runtime `type list has no method 'next'`. A raw collection
+satisfies only `Iterable` — the split Rust (`IntoIterator` vs `Iterator`) and Go (`range` vs an iterator
+value) both make. The companion widening: element recovery (`recover_iter_elems`) now runs for
+`Iterable[T]` bounds too, so `[S: Iterable[T], T]` is a drop-in for the iterating form and every shipped
+caller (`examples/iterator_bound.chz`, `std.iter`'s `islice`/`imap`/`ifilter`) migrated with
+byte-identical output. Recovery is NOT total for `Iterable`: an `iter()`-only struct still needs a
+concrete-arg bound. `INTRINSIC_UNPAIRED` is now `&[]` (kept, with both `vm::tests` loops, so the ratchet
+re-arms on the next carve-out). See `PROGRESS.md` (2026-07-26).
 
 ### W6-3c. `Comparable.compare` on a NaN operand — **FIXED (2026-07-26)**: it answers `sort()`'s total order
 ```chezzi
