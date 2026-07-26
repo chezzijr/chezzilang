@@ -4,6 +4,26 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 **Legend:** ⬜ not started · 🟦 in progress · ✅ done
 
+> **✅ FIX (2026-07-26, gaps.md W6-3c) — `Comparable.compare` is now TOTAL on a NaN operand, by the order
+> `sort()` already uses.** The carve-out shipped a recoverable `cannot compare NaN (…)` fault; that string
+> is gone. The `("compare", 1)` intrinsic arm's NaN branch (`src/vm/call.rs`) delegates to **`Vm::order_key`**
+> — the single ordering site behind `sort()`/`sort_by_key`/`.min()`/`.max()` (`f64::total_cmp`, NaN
+> deterministically at one end, numeric-`newtype` layers unwrapped, so `Meters(nan)` ≡ bare `float`). Net
+> effect is the RULE COUNT: **one** total order shared by `compare`/`sort`/`min`/`max` and **one**
+> documented divergence (total order for the method, IEEE for the operators) instead of two orderings plus
+> a fault. `<`/`<=`/`>`/`>=` are untouched — `Vm::compare`/`ordered_bool` (`src/vm/arith.rs`) still answer
+> `false` for every NaN comparison (IEEE-754/Python/Rust), and no checker change was needed
+> (`(Comparable, float)` was already a paired intrinsic row). Two pinned corollaries: `x.compare(x)` is `0`
+> for a NaN `x` although `x == x` is `false` (`total_cmp` on identical bits is Equal), and only the NaN
+> branch routes to `order_key`, so a `±0.0` pair still compares Equal by the method even though `sort()`
+> orders `-0.0 < +0.0`. Test: `compare_on_nan_uses_the_total_order` (rewritten from
+> `compare_on_nan_faults_explicitly`, `tests/chz/spec/intrinsic_proto_methods_test.chz`) — it pins the NaN
+> end RELATIVE to `sort()` plus antisymmetry rather than hardcoding `-1`, since the signbit of `0.0/0.0` is
+> target-dependent (x86: NaN sorts FIRST). serial==M:N, verified on the release binary both engines.
+> Docs: `docs/gaps.md` (W6-3c retired FIXED — 2 carve-outs left), `docs/spec.md`, `docs/syntax.md`,
+> `docs/stdlib.md` (incl. the honest note that `std.cmp`'s `min`/`max`/`clamp` are written with `<`, so
+> they follow the operator rule, not the total order).
+
 > **✅ FIX (2026-07-26, gaps.md W6-12/13/14/15/17/18) — the wave-6 tail, six independent findings on
 > disjoint seams, one batch.** All behavior-scoped (no new API surface); serial==M:N verified on the
 > release binary for every repro.
@@ -6587,13 +6607,14 @@ branch names) is in the git log.
   call probe RUNS on both engines. Verified RED both ways: a bare `Ok(())` grant fails to compile, and
   widening `Comparable` to `bytes` (which the earlier protocol-keyed ratchet passed) now fails the suite.
   Three carve-outs FILED rather than silently shipped: `Iterator`→`next` on a raw collection (**W6-3b**,
-  stateful, no cursor position), `compare` on a **NaN** operand (**W6-3c** — `<` is total but
-  `compare -> int` has no "unordered" value, so it now raises an explicit recoverable
-  `cannot compare NaN (…)` instead of W6-3's own `has no method` symptom), and a numeric `newtype` that
+  stateful, no cursor position), `compare` on a **NaN** operand (**W6-3c** — first shipped as an explicit
+  recoverable fault instead of W6-3's own `has no method` symptom; **now FIXED (2026-07-26)**, it answers
+  `sort()`'s total order — see the wave-6 tail entry below), and a numeric `newtype` that
   DEFINES `add`/`compare` (**W6-3d** — the method form gets the user method, the operator form the
   underlying's native op; reqs "≡ the operator" and "never shadow a user method" genuinely conflict there).
   Tests: `tests/chz/spec/intrinsic_proto_methods_test.chz` (19 `test fn`, operator-equivalence AND
-  fault-message equality via `recover:`, user-method-wins controls, plus the two divergence pins),
+  fault-message equality via `recover:`, user-method-wins controls, plus the W6-3d divergence pin and the
+  NaN total-order pin),
   serial==M:N. Docs: `docs/gaps.md` (W6-3 FIXED + new W6-3b/c/d), `docs/spec.md`, `docs/syntax.md`.
 - **Diagnostic — recursive *local* fn crossing the airlock (2026-07-18, bug-hunt).** A nested (local)
   recursive `fn` sent across a task boundary used to fault with the misleading `maximum structural depth
