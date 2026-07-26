@@ -12,11 +12,35 @@ and never de-staled**. Re-audit periodically: a gap backlog nobody re-reads rots
 work already done.
 
 **Pre-freeze bug-hunt waves:** 1–5 (2026-07-11 → 07-13), then 2026-07-18, 07-20, 07-22, and three on
-07-23. **Wave 6 (2026-07-25)** is the largest single haul (**18 findings, all OPEN — 6 P0/high**) and the
-first to sweep the two surfaces the wave-5 residual named as never-audited (FFI: 4 defects; GC + new
-object layout: clean). Read its session log before touching `io`/`process`/FFI/`RwShared`/module-snapshot
-code. Its meta-finding — **5 of 6 P0s are "a fix applied to SOME arms of an N-way set"** — is the
-highest-yield remaining lever.
+07-23. **Wave 6 (2026-07-25)** is the largest single haul (**19 findings**) and the first to sweep the two
+surfaces the wave-5 residual named as never-audited (FFI: 4 defects; GC + new object layout: clean). As of
+2026-07-26 it stands at **17 fixed, 4 open, 1 carve-out open** — see the index below. Read its session log
+before touching `io`/`process`/FFI/`RwShared`/module-snapshot code. Its meta-finding — **5 of 6 P0s are "a
+fix applied to SOME arms of an N-way set"** — is the highest-yield remaining lever.
+
+## OPEN ITEMS — the whole backlog at a glance (updated 2026-07-26)
+
+Everything still open, roughly by severity (memory-unsafety first). Anything NOT listed here is either fixed or a
+safe-direction observation. **Keep this table in sync when a section is retired** — the reason it exists
+is that "which of these is still open?" previously required reading 1400 lines of chronological log.
+
+| item | gaps.md | what | why it is still open |
+|---|---|---|---|
+| **W6-8** | `:797` | A **stored** FFI callback dangles → SIGSEGV from checker-clean code | The only memory-unsafety left in the ledger. A "deferred" feature implemented as UB rather than rejected; the fix is a checker/marshal reject of a callback in a storing position |
+| **W6-7** | `:772` | `RwShared` zero-copy read-view is **O(N²)** — every GC re-walks the whole off-heap wire payload (200k `for_each`: 1.428 s vs 0.154 s) | Perf, on a flagship new API. Needs a GC/wire-payload change, own task |
+| **W6-9** | `:820` | `Writer.write_bytes` byte-exact on a file but **lossy on `io.stdout()`/`stderr()`**, and returns a count that doesn't match what was emitted | Last surviving member of the lossy-byte family (B1/R1/W6-4/W6-14, all fixed). Blocked on the `emit_out`/`emit_err` sink being `&str`-typed |
+| **W6-10** | `:828` | `chezzi test --max-heap` ignores off-heap wire storage — 195 MB RSS passes a 200 KB cap | `live_bytes` counts only in-`Heap` slots; airlocked `WireValue`s live outside every `Heap` |
+| **W6-3d** | `:596` | A numeric `newtype` with its own `add`/`compare` disagrees with `+`/`<` | Candidate **(b) was attempted 2026-07-26 and REJECTED — it makes `<` intransitive** (verified, both engines). Candidate (a) now leads. Needs a design ruling, not an implementation |
+| `min`/`max` → `Option` | `:1042` | `List.min`/`max`/`min_by`/`max_by` fault on empty while `first`/`last`/`pop` return `Option[T]` | Breaking surface change: 23 call sites + docs + examples. Own milestone |
+| `List[Any]` widening | `:1083` | `List[Any] = [1, 3.0]` silently widens the int to `1.0` | Deferred pre-freeze (wave 4) |
+| **N10** | `:1299` | A `wait:` timer arm makes `--serial` inline-sleep instead of yielding to a runnable sibling (serial ≠ M:N) | Deliberate pre-freeze known-limit; fix is folded into the post-freeze serial-engine removal |
+| protocol embeds | `:1155` | A protocol-embedded method isn't callable through the interface value (`p: Person` can't call embedded `name()`) despite `spec.md:973` "flattened at bound sites" | Filed as a safe-direction observation in wave 3; never triaged — doc and behavior contradict each other either way |
+
+**Known limits that are documented, not bugs** (listed so they aren't re-filed): `Iterable[T]` element
+recovery does not fire for a struct with only `iter` and no `next` — bound that one concretely
+(`syntax.md`); `.compare()` answers the operator's verdict wherever the operator has one and only falls
+back to `sort()`'s total order for NaN, so a `±0.0` pair compares Equal by the method while `sort()`
+orders `-0.0 < +0.0` (`spec.md`); `--max-heap`/`--timeout` are M:N-only by design.
 
 ## Checker / type system
 
@@ -1083,7 +1107,7 @@ parity-blind** (both engines agree on the wrong value; not serial≠M:N):
   (This RE-FRAMES the wave-3 "safe-direction observation" below — the asymmetry was noted, but the silent
   int→float *corruption* is new: the prior note only saw that `List[Any]=[1,3.0]` is *accepted*.)
 
-## Session log — 2026-07-23 (bug-hunt wave 3: 4 findings — `Channel.trip()` type-hole + native `count`/`split` empty-arg FIXED; 1 finding OPEN)
+## Session log — 2026-07-23 (bug-hunt wave 3: 4 findings — ALL FOUR FIXED; the residue is one untriaged safe-direction observation, see the end of this section)
 
 Pre-freeze adversarial hunt, 5 disjoint domains (~248 probes, both engines). **3 domains CLEAN** (airlock 22,
 cancel/defer/recover 37, checker⊋compiler ~40 — the productive class is exhausted). 4 findings survived

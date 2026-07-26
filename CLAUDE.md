@@ -102,6 +102,14 @@ UPDATE_EDITOR_ASSETS=1 cargo test --test editor_tmlanguage    # regenerate the V
 - After merging an auto-task branch (post-gate ships): delete the branch + prune its worktree
   (`git worktree remove --force <wt>; git worktree prune; git branch -D <branch>`). Stale worktree
   `target/` dirs (~1.6G each) accumulate and fill the disk. Delete rejected branches too.
+- **Two auto-task runs in parallel MUST NOT share a release target dir.** Both writing the same warm
+  `CARGO_TARGET_DIR` (e.g. `~/.cache/chezzi-target`) means one run's `release/chezzi` overwrites the
+  other's, cargo then reports "up to date", and the binary you verify SILENTLY LACKS your change — a
+  green two-engine run proving nothing (hit 2026-07-26). Give each concurrent run its own
+  `CARGO_TARGET_DIR`, or confirm the binary really contains the change (`strings … | grep <new msg>`).
+  Same family as the worktree stale-binary trap: when verifying, also beware that a `cd` into a worktree
+  PERSISTS across shell calls, so a later `./target/release/chezzi` silently means the worktree's binary
+  — use absolute paths for any main-vs-branch comparison.
 - Unit tests live next to the code in `#[cfg(test)] mod tests`.
 - **Testing is HYBRID — write the test in Chezzi if you can, fall back to Rust only when you can't.**
   A test that asserts a program's **observable behavior** (a value, a collection, a fault message)

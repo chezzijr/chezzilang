@@ -4,6 +4,25 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 **Legend:** ⬜ not started · 🟦 in progress · ✅ done
 
+> **❌ ATTEMPTED AND REJECTED (2026-07-26, gaps.md W6-3d) — candidate (b) for the numeric-newtype
+> operator divergence makes `<` INTRANSITIVE. Branch discarded, `main` unchanged, the divergence
+> stands.** (b) was "a numeric newtype's own `add`/`compare`/… dispatches as the operator too, so `+`
+> and `.add()` agree". It does that — and breaks a deeper invariant. With a DESCENDING user `compare` on
+> `newtype Ranked = int` and `xs: List[Comparable] = [Ranked(3), Ranked(1), 2]`, the branch answers
+> `a<b`, `b<c` AND `c<a` all true — a strict cycle — where `main` gives a total order. Cause: a
+> same-newtype pair takes the user's order, but a CROSS-type pair under the `Comparable` existential
+> (`Ranked(1) < 2`) cannot — `compare(self, o: Ranked)` does not accept an `int` — so it falls back to
+> the native ascending order. One list, two orders, no transitivity; `.min()`/`.max()` (which decide once
+> per collection) then disagree with `<` (which decides per pair), silently and with no fault. **This is
+> structural, not an implementation slip: (b) is incompatible with heterogeneous `List[Comparable]`
+> unless such mixing is ALSO banned for a compare-defining type.** A second, ordinary regression showed
+> the checker-side cost: requiring the bound protocol's `compare` second param to be literally `Self`
+> after substitution broke a protocol whose `compare` takes the CONCRETE conformer type (compiles and
+> prints `true` on `main`, rejected on the branch). Both re-verified by hand on the branch binary vs
+> `main`, both engines. **Candidate (a) — reject the declaration — now leads**: it makes the two-orders
+> situation unrepresentable instead of reconciling it after the fact. Needs a design ruling before any
+> further attempt; do not re-run (b).
+
 > **✅ FIX (2026-07-26, gaps.md W6-3c) — `Comparable.compare` is now TOTAL on a NaN operand, by the order
 > `sort()` already uses.** The carve-out shipped a recoverable `cannot compare NaN (…)` fault; that string
 > is gone. The `("compare", 1)` intrinsic arm's NaN branch (`src/vm/call.rs`) delegates to **`Vm::order_key`**
