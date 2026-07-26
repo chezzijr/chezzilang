@@ -8415,6 +8415,41 @@ fn raw_collection_does_not_satisfy_iterator() {
     }
 }
 
+/// W6-3b review (charge `correctness-1`) — the migration advice is only appended for a receiver the
+/// advice APPLIES to. A raw collection is iterable-but-position-less, so `for` / `.iter()` /
+/// `[S: Iterable[T], T]` are all real remedies. A NON-iterable receiver (`int`, a plain struct) can do
+/// none of them, so it keeps the bare pre-W6-3b message instead of being misdirected.
+#[test]
+fn iterator_bound_advice_only_when_the_receiver_is_iterable() {
+    let joined = |src: &str| -> String {
+        let errs = check_src(src);
+        assert!(!errs.is_empty(), "expected a type error for: {src:?}");
+        errs.iter()
+            .map(|e| e.message.clone())
+            .collect::<Vec<_>>()
+            .join(" | ")
+    };
+    let msg_list = joined("fn f[T: Iterator[int]](c: T):\n    pass\nf([1, 2, 3])\n");
+    assert!(
+        msg_list.contains("Iterable") && msg_list.contains(".iter()"),
+        "an iterable receiver should get the migration advice, got: {msg_list}"
+    );
+    for src in [
+        "fn f[T: Iterator[int]](c: T):\n    pass\nf(42)\n",
+        "struct P:\n    v: int\nfn f[T: Iterator[int]](c: T):\n    pass\nf(P(1))\n",
+    ] {
+        let msg = joined(src);
+        assert!(
+            msg.contains("does not satisfy Iterator"),
+            "expected the plain refusal, got: {msg}"
+        );
+        assert!(
+            !msg.contains(".iter()") && !msg.contains("Iterable"),
+            "a NON-iterable receiver must not be told to use `for`/`.iter()`/`Iterable`, got: {msg}"
+        );
+    }
+}
+
 #[test]
 fn iterator_bound_accepts_cursor_generator_and_next_struct() {
     // The narrowed grant's ACCEPT side: a `.iter()` cursor, a generator, a structural `next` struct.

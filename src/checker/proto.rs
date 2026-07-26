@@ -1195,12 +1195,18 @@ impl Checker {
             let is_cursor = matches!(ty, Ty::Struct(n, a) if n == "Iterator" && a.len() == 1);
             return if is_cursor || self.struct_iter_elem(ty).is_some() {
                 self.grant_intrinsic(protocol, ty)
-            } else {
+            } else if self.iter_elem(ty).is_some() {
+                // ITERABLE but position-less (a raw collection): every remedy below actually applies
+                // to it, so spell them out — this is the W6-3b migration path.
                 Err(format!(
                     "type {ty} does not satisfy Iterator — `next` needs a cursor that holds a \
                      position. Iterate it with `for`, take a cursor with `.iter()`, or bound the \
                      parameter `[S: Iterable[T], T]`"
                 ))
+            } else {
+                // NOT iterable at all (`int`, a plain struct): `for`/`.iter()`/`Iterable` are all dead
+                // ends for it, so appending that advice would misdirect. Keep the bare pre-W6-3b text.
+                Err(format!("type {ty} does not satisfy Iterator"))
             };
         }
         // `Iterable` conformance is "can produce a fresh cursor". Built-in collections satisfy it

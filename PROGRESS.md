@@ -20,7 +20,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > `compare_on_nan_faults_explicitly`, `tests/chz/spec/intrinsic_proto_methods_test.chz`) — it pins the NaN
 > end RELATIVE to `sort()` plus antisymmetry rather than hardcoding `-1`, since the signbit of `0.0/0.0` is
 > target-dependent (x86: NaN sorts FIRST). serial==M:N, verified on the release binary both engines.
-> Docs: `docs/gaps.md` (W6-3c retired FIXED — 2 carve-outs left), `docs/spec.md`, `docs/syntax.md`,
+> Docs: `docs/gaps.md` (W6-3c retired FIXED — 1 carve-out left, W6-3d), `docs/spec.md`, `docs/syntax.md`,
 > `docs/stdlib.md` (incl. the honest note that `std.cmp`'s `min`/`max`/`clamp` are written with `<`, so
 > they follow the operator rule, not the total order).
 
@@ -6626,7 +6626,7 @@ branch names) is in the git log.
   early-out written the way every pre-existing one was — a bare `return Ok(())` — **does not compile**; the
   author must pick `grant_intrinsic` (registers the grant) or `Grant::no_intrinsic_method`;
   (2) `grant_intrinsic(protocol, ty)` `debug_assert`s that `(protocol, intrinsic_recv_kind(ty))` has a row
-  in `INTRINSIC_PROTO_METHODS` (51 paired rows) or `INTRINSIC_UNPAIRED` (6 carve-out rows);
+  in `INTRINSIC_PROTO_METHODS` (51 paired rows) or `INTRINSIC_UNPAIRED` (0 carve-out rows — W6-3b emptied it; registering one is still the only legal way to ship an unpaired grant);
   (3) `vm::tests::intrinsic_grants_all_have_vm_arms` sweeps the whole **(protocol × kind) cross product**
   (165 cells): the accepted-cell set must equal the registered rows, then every paired row's generated
   call probe RUNS on both engines. Verified RED both ways: a bare `Ok(())` grant fails to compile, and

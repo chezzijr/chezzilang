@@ -1463,8 +1463,9 @@ explicitly; only these two recover them.) The two differ in WHAT they accept —
 
 * `[S: Iterable[T], T]` — **anything you can iterate.** Built-in `list`/`set`/`map`/`str`/`bytes`/
   `bytearray` (str → str, map → its keys) intrinsically, plus a `.iter()` cursor, a generator's
-  `Iterator[T]`, and any struct with `next(self) -> Option[T]` or `iter(self) -> Iterator[T]`. Use this
-  whenever the body just does `for x in xs`. **This is the one you want by default.**
+  `Iterator[T]`, and any struct with `next(self) -> Option[T]`. Use this whenever the body just does
+  `for x in xs`. **This is the one you want by default.** (A struct with ONLY `iter` satisfies the
+  protocol but does not get `T` recovered — see the mechanics below.)
 * `[S: Iterator[T], T]` — **a cursor**: something that HOLDS a position, so the body may call
   `s.next()` directly. A `.iter()` cursor, a generator, or a struct with `next`. A RAW collection does
   NOT satisfy it (a fresh cursor per `next()` would hand back element 0 forever) — pass `xs.iter()`.

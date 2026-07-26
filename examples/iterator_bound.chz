@@ -3,7 +3,9 @@
 # `[S: Iterable[T], T]` = "give me anything I can iterate" (Rust's `IntoIterator`, Go's `range`):
 #   - built-in list / set / map / str / bytes / bytearray
 #   - a cursor from `.iter()`, or a generator's `Iterator[T]`
-#   - any user struct with `next(self) -> Option[T]` or `iter(self) -> Iterator[T]`
+#   - any user struct with `next(self) -> Option[T]`
+#     (a struct with ONLY `iter(self) -> Iterator[T]` is for-iterable and satisfies `Iterable`, but the
+#      `T` RECOVERY does not fire for it — bound that one concretely, e.g. `[S: Iterable[int]]`)
 #   Its body iterates with `for` — that is what this file's three functions do.
 #
 # `[S: Iterator[T], T]` = "give me a CURSOR" (Rust's `Iterator`): something that HOLDS a position, so
