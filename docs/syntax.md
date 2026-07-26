@@ -881,9 +881,10 @@ struct Counter:
 for x in Counter(0, 5):    # x binds the element type (int); single loop variable only
     print(x)
 
-# `Iterator[T]` is a real protocol bound: a generic fn can take ANY iterable — built-in
-# list/set/str (intrinsically) or a user struct with `next` — and recover its element type `T`.
-fn first_or[S: Iterator[T], T](xs: S, default: T) -> T:
+# `Iterable[T]` is a real protocol bound: a generic fn can take ANY iterable — built-in
+# list/set/map/str/bytes, a `.iter()` cursor, a generator, or a user struct with `next`/`iter` — and
+# recover its element type `T`. (`Iterator[T]` is the stricter sibling: a CURSOR, see below.)
+fn first_or[S: Iterable[T], T](xs: S, default: T) -> T:
     for x in xs:           # x is typed `T`
         return x
     return default
@@ -1454,15 +1455,22 @@ does **not** conform to it — supply the args (`Container[int]`) to use it as a
 > within its defining module; share cross-module contracts via a concrete type or a function parameter.
 > (Cross-module protocol *export* is a possible future milestone, not a current feature.)
 
-The prebuilt **`Iterator[T]`** is a parameterized bound with extra magic: `[S: Iterator[T], T]`
-accepts any iterable `S` and **recovers** `T` from the iterand's element (by unifying it), rather
-than requiring it written out. It is satisfied **intrinsically** by `list`/`set`/`str`/`map`
-(str → str, map → its keys) and **structurally** by any struct with `next(self) -> Option[T]`. `T`
+The prebuilt **`Iterable[T]`** and **`Iterator[T]`** are parameterized bounds with extra magic: they
+**recover** `T` from the iterand's element (by unifying it), rather than requiring it written out. `T`
 then flows into the body's loop variable and the return type. (User protocols take their args
-explicitly; only `Iterator` recovers them.)
+explicitly; only these two recover them.) The two differ in WHAT they accept — the same split as Rust's
+`IntoIterator` vs `Iterator`, or Go's `range` vs an iterator value:
+
+* `[S: Iterable[T], T]` — **anything you can iterate.** Built-in `list`/`set`/`map`/`str`/`bytes`/
+  `bytearray` (str → str, map → its keys) intrinsically, plus a `.iter()` cursor, a generator's
+  `Iterator[T]`, and any struct with `next(self) -> Option[T]` or `iter(self) -> Iterator[T]`. Use this
+  whenever the body just does `for x in xs`. **This is the one you want by default.**
+* `[S: Iterator[T], T]` — **a cursor**: something that HOLDS a position, so the body may call
+  `s.next()` directly. A `.iter()` cursor, a generator, or a struct with `next`. A RAW collection does
+  NOT satisfy it (a fresh cursor per `next()` would hand back element 0 forever) — pass `xs.iter()`.
 
 ```chezzi
-fn to_list[S: Iterator[T], T](xs: S) -> List[T]:
+fn to_list[S: Iterable[T], T](xs: S) -> List[T]:
     out := []
     for x in xs:            # x : T
         out.push(x)
@@ -1470,12 +1478,13 @@ fn to_list[S: Iterator[T], T](xs: S) -> List[T]:
 to_list("ab")              # ["a", "b"]   (T = str)
 ```
 
-The prebuilt **`Iterable[T]`** is the looser sibling: it promises only `.iter() -> Iterator[T]` (a
-fresh cursor), where `Iterator[T]` additionally promises `.next()`. Every `Iterator` IS `Iterable`
-(its `iter()` returns self), so a generator and a user `next`-struct both satisfy `[S: Iterable[T]]`;
-a struct with only `iter(self) -> Iterator[E]` (no `next`) satisfies it too and is for-iterable via a
-one-time `.iter()`. Like `Iterator[T]`, `T` is recovered from the iterand's element. The cursor's type
-is the existing `Iterator[T]` existential — there is no new value type.
+Mechanically: `Iterable[T]` promises only `.iter() -> Iterator[T]` (a fresh cursor), where
+`Iterator[T]` additionally promises `.next()`. Every `Iterator` IS `Iterable` (its `iter()` returns
+self), so a generator and a user `next`-struct satisfy `[S: Iterable[T]]` too; a struct with only
+`iter(self) -> Iterator[E]` (no `next`) satisfies it as well and is for-iterable via a one-time
+`.iter()` — though for THAT one the element recovery does not fire, so bound it with a concrete arg
+(`[S: Iterable[int]]`). The cursor's type is the existing `Iterator[T]` existential — there is no new
+value type.
 
 **Type aliases** name an existing type transparently — `type Name =
 <type>` makes `Name` interchangeable with the aliased type everywhere (structural, not a distinct

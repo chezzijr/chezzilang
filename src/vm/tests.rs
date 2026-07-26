@@ -13891,8 +13891,10 @@ fn intrinsic_grants_all_have_vm_arms() {
             }
         }
     }
-    // The documented carve-out must STAY a fault (see `INTRINSIC_UNPAIRED`) — if a later change makes
-    // it work, the const + its `docs/gaps.md` W6-3b entry must be retired with it.
+    // A registered carve-out must STAY a fault (see `INTRINSIC_UNPAIRED`) — if a later change makes it
+    // work, the row must be retired with it. `INTRINSIC_UNPAIRED` is EMPTY since W6-3b (the raw-
+    // collection `Iterator` grant was narrowed away), so this loop and the disjointness loop below are
+    // currently no-ops; they stay so the ratchet re-arms the moment a new unpairable grant is added.
     for (p, m, kind) in INTRINSIC_UNPAIRED {
         let src = probe(m, kind)
             .unwrap_or_else(|| panic!("no probe for unpaired grant ({p}, {m}, {kind})"));

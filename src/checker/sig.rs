@@ -1298,7 +1298,8 @@ impl Checker {
                     ("Option", [inner]) => Ty::option(self.resolve_type(inner, span)),
                     // `Iterator[T]` as a *value* type — the result of calling a generator function.
                     // Represented as `Ty::Struct("Iterator", [T])`, an existential iterator whose element
-                    // type `iter_elem` recovers (so `for`-loops and `[S: Iterator[T]]` bounds accept it).
+                    // type `iter_elem` recovers (so `for`-loops and `[S: Iterator[T]]` bounds accept it —
+                    // a cursor is exactly what the `Iterator` bound requires).
                     // Experimental: only generators produce these; ordinary code still uses adapter
                     // structs / built-in collections.
                     ("Iterator", [elem]) => {
@@ -3399,8 +3400,10 @@ impl Checker {
     /// What iterating `ty` yields per step — the `Iterator` element type. Built-in collections yield
     /// intrinsically (list/set → element, str → str, map → key, matching the single-variable `for`);
     /// a user struct yields via its structural `next(self) -> Option[E]`. `None` ⇒ not iterable. This
-    /// is the single source of truth shared by `for`-binding, `satisfies(Iterator)`, and the
-    /// `Iterator[T]` element-recovery in `infer_generic_call`.
+    /// is the single source of truth shared by `for`-binding, `satisfies(Iterable)`, and the
+    /// `Iterator[T]`/`Iterable[T]` element-recovery in `infer_generic_call`. NOT
+    /// `satisfies(Iterator)` — that one needs a cursor, so it uses the narrower
+    /// [`struct_iter_elem`](Self::struct_iter_elem) plus the `Iterator[E]` existential (W6-3b).
     pub(super) fn iter_elem(&self, ty: &Ty) -> Option<Ty> {
         match ty {
             Ty::List(e) | Ty::Set(e) => Some((**e).clone()),

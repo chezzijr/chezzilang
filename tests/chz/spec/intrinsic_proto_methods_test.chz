@@ -372,3 +372,58 @@ test fn newtype_own_method_wins_and_diverges_from_the_operator():
     assert (a < b) == true, "the operator orders by the underlying"
     # the divergence is the point: these two are NOT equal for this receiver
     assert (cmp_m(a, b) < 0) != (a < b)
+
+# ---- `Iterator` = a cursor, `Iterable` = anything you can iterate (W6-3b) ----
+#
+# `next` is STATEFUL, so the `Iterator` bound only accepts something that HOLDS a position: a `.iter()`
+# cursor, a generator's `Iterator[T]`, or a user struct with `next(self) -> Option[T]`. A raw collection
+# used to satisfy it too and then faulted with `type list has no method 'next'`; it now satisfies only
+# `Iterable`, and `[S: Iterable[T], T]` is the bound that accepts everything. The reject side is a
+# checker diagnostic (`checker::tests::raw_collection_does_not_satisfy_iterator`); what is asserted here
+# is that every ACCEPTED form really works on both engines.
+
+fn next_m[S: Iterator[T], T](it: S) -> Option[T]:
+    return it.next()
+
+fn n_of[S: Iterable[T], T](xs: S) -> int:
+    n := 0
+    for _ in xs:
+        n = n + 1
+    return n
+
+fn ones() -> Iterator[int]:
+    yield 1
+    yield 1
+
+struct Down:
+    n: int
+    fn next(self) -> Option[int]:
+        if self.n <= 0:
+            return None
+        self.n = self.n - 1
+        return Some(self.n)
+
+test fn iterator_bound_is_cursors_iterable_bound_is_collections():
+    # a cursor minted from a raw list — `.next()` advances it
+    c := [10, 20].iter()
+    assert next_m(c) == Some(10)
+    assert next_m(c) == Some(20)
+    assert next_m(c) == None
+    # a generator result is a cursor too
+    g := ones()
+    assert next_m(g) == Some(1)
+    # …and so is a user struct with `next`
+    d := Down(2)
+    assert next_m(d) == Some(1)
+    assert next_m(d) == Some(0)
+    assert next_m(d) == None
+    # a RAW collection goes through the `Iterable` bound, which recovers its element type
+    assert n_of([1, 2, 3]) == 3
+    assert n_of("abc") == 3
+    assert n_of({1, 2}) == 2
+    assert n_of(ones()) == 2, "every Iterator IS Iterable"
+    # `for` over a raw collection is unchanged
+    s := 0
+    for x in [1, 2, 3]:
+        s = s + x
+    assert s == 6

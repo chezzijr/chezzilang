@@ -65,8 +65,8 @@ pub const INTRINSIC_PROTO_METHODS: &[(&str, &str, &str)] = &[
     ("Iterable", "iter", "bytes"),
     ("Iterable", "iter", "bytearray"),
     ("Iterable", "iter", "struct"),
-    // Iterator — only a struct/cursor holds the position `next` needs; the raw-collection rows are
-    // the documented carve-out in `INTRINSIC_UNPAIRED`.
+    // Iterator — only a struct/cursor holds the position `next` needs (W6-3b: a raw collection does
+    // NOT satisfy `Iterator`, only `Iterable`).
     ("Iterator", "next", "struct"),
     // Index / IndexSet / Slice — the built-in containers `index_kv`/`slice_result` accept
     // (`IndexSet` excludes the immutable `str`/`bytes`; `Slice` excludes `map`).
@@ -109,21 +109,17 @@ pub const INTRINSIC_PROTO_METHODS: &[(&str, &str, &str)] = &[
 /// Intrinsic grants that have NO runtime arm and CANNOT get one — a KNOWN check-OK/run-fault, kept
 /// here (rather than silently absent) so the carve-out is asserted instead of rotting.
 ///
-/// `Iterator[E]`'s `next(self) -> Option[E]` is granted to every RAW collection (the grant is keyed on
-/// `iter_elem`, i.e. "can be iterated"), but `next` is inherently STATEFUL and a raw collection holds
-/// no cursor position — minting a fresh cursor per call would return element 0 forever, which is worse
-/// than faulting. The coherent fix narrows the checker grant to real cursors/generators (a grant-set
-/// change, tracked in `docs/gaps.md` as W6-3b), not a runtime arm.
-/// `vm::tests::intrinsic_grants_all_have_vm_arms` asserts each row here is still granted and STILL
-/// faults.
-pub const INTRINSIC_UNPAIRED: &[(&str, &str, &str)] = &[
-    ("Iterator", "next", "list"),
-    ("Iterator", "next", "set"),
-    ("Iterator", "next", "map"),
-    ("Iterator", "next", "str"),
-    ("Iterator", "next", "bytes"),
-    ("Iterator", "next", "bytearray"),
-];
+/// **Currently none.** W6-3b retired the only entry: `Iterator[E]`'s `next` used to be granted to every
+/// RAW collection (the grant was keyed on `iter_elem`, i.e. "can be iterated"), but `next` is stateful
+/// and a raw collection holds no cursor position, so it check-OK'd and then faulted. The fix was the
+/// coherent one — narrow the checker grant to real cursors/generators/`next`-structs (see
+/// `satisfies_args_d`'s `Iterator` arm); a raw collection satisfies only `Iterable`.
+///
+/// The const and both `vm::tests` loops over it stay so the ratchet RE-ARMS the moment a new unpairable
+/// grant is added: registering a row here (instead of in [`INTRINSIC_PROTO_METHODS`]) is the only way to
+/// ship a grant with no runtime arm, and `vm::tests::intrinsic_grants_all_have_vm_arms` then asserts the
+/// row is still granted and STILL faults.
+pub const INTRINSIC_UNPAIRED: &[(&str, &str, &str)] = &[];
 
 /// Proof that a conformance decision went through one of [`Checker::satisfies_args_d`]'s documented
 /// grant paths — the compile-time half of the W6-3 ratchet. The field is private to this module, so a
@@ -1186,16 +1182,25 @@ impl Checker {
         if protocol == "Error" && matches!(ty, Ty::Str) {
             return self.grant_intrinsic(protocol, ty);
         }
-        // `Iterator` conformance is exactly "can be iterated" — built-in collections intrinsically,
-        // a user struct via its structural `next(self) -> Option[E]`. Reusing `iter_elem` keeps this
-        // in lockstep with what `for` accepts (single source of truth, no drift). A `Ty::Param` falls
-        // through to the declared-bounds check below (so a `[S: Iterator[T]]` value forwards into
-        // another iterator-generic call), since `iter_elem` can't see through a bare param.
+        // `Iterator` conformance is "HOLDS a cursor position" — a real cursor/generator
+        // (`Ty::Struct("Iterator", [E])`, minted by `.iter()` or returned by a generator) or a user
+        // struct with a structural `next(self) -> Option[E]`. NOT a raw collection: `next` is stateful
+        // and a bare list/set/map/str/bytes holds no position, so the old `iter_elem` ("can be
+        // iterated") predicate check-OK'd `c.next()` and then faulted at runtime (W6-3b). A raw
+        // collection satisfies `Iterable` instead — `[S: Iterable[T], T]` is the migration form, and it
+        // recovers `T` the same way (see `recover_iter_elems`). A `Ty::Param` falls through to the
+        // declared-bounds check below (so a `[S: Iterator[T]]` value forwards into another
+        // iterator-generic call), since neither predicate can see through a bare param.
         if protocol == "Iterator" && !matches!(ty, Ty::Param(_)) {
-            return if self.iter_elem(ty).is_some() {
+            let is_cursor = matches!(ty, Ty::Struct(n, a) if n == "Iterator" && a.len() == 1);
+            return if is_cursor || self.struct_iter_elem(ty).is_some() {
                 self.grant_intrinsic(protocol, ty)
             } else {
-                Err(format!("type {ty} does not satisfy Iterator"))
+                Err(format!(
+                    "type {ty} does not satisfy Iterator — `next` needs a cursor that holds a \
+                     position. Iterate it with `for`, take a cursor with `.iter()`, or bound the \
+                     parameter `[S: Iterable[T], T]`"
+                ))
             };
         }
         // `Iterable` conformance is "can produce a fresh cursor". Built-in collections satisfy it
@@ -1842,10 +1847,16 @@ impl Checker {
         sub
     }
 
-    /// Recover element types from parameterized `Iterator[T]` bounds: for each type param already
-    /// bound to a concrete iterand in `sub`, bind the bound's element arg `T` to the iterand's element
-    /// type. Mutates `sub` (collects first to avoid borrowing it while iterating). Shared by every
-    /// generic-call site (free fn, struct constructor, enum variant).
+    /// Recover element types from parameterized `Iterator[T]` / `Iterable[T]` bounds: for each type
+    /// param already bound to a concrete iterand in `sub`, bind the bound's element arg `T` to the
+    /// iterand's element type. Mutates `sub` (collects first to avoid borrowing it while iterating).
+    /// Shared by every generic-call site (free fn, struct constructor, enum variant).
+    ///
+    /// `Iterable` is in scope since W6-3b: `[S: Iterable[T], T]` is what a raw-collection caller
+    /// migrates to, and without recovery `T` would stay free and the bound check would then reject the
+    /// very iterand it was given. The predicate stays [`iter_elem`](Self::iter_elem) (NOT
+    /// `iterable_elem`): recovery is deliberately NOT total for `Iterable` — a struct with only
+    /// `iter(self) -> Iterator[E]` still needs a concrete-arg bound (`[S: Iterable[int]]`).
     pub(super) fn recover_iter_elems(
         &mut self,
         tps: &[TypeParam],
@@ -1856,7 +1867,7 @@ impl Checker {
         for tp in tps {
             if let Some(concrete) = sub.get(&tp.name).cloned() {
                 for b in &tp.bounds {
-                    if b.name == "Iterator"
+                    if (b.name == "Iterator" || b.name == "Iterable")
                         && let Some(arg) = b.args.first()
                         && let Some(elem) = self.iter_elem(&concrete)
                     {

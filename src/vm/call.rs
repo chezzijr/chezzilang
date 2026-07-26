@@ -2361,8 +2361,8 @@ impl Vm {
     ///   shadowing a user method wins over the equivalence; the divergence pre-dates this function and
     ///   its real fix is a checker/grant decision.
     ///
-    /// NOT covered (no VM arm is possible): `Iterator[E]`'s `next` on a raw collection — see
-    /// `INTRINSIC_UNPAIRED` in `src/checker/proto.rs`.
+    /// There is currently NO unpairable grant — `INTRINSIC_UNPAIRED` in `src/checker/proto.rs` is empty
+    /// (W6-3b narrowed `Iterator` so a raw collection no longer claims `next`).
     pub(super) fn intrinsic_proto_method(
         &mut self,
         recv: Value,
