@@ -2577,6 +2577,42 @@ impl Checker {
                             );
                         }
                     }
+                    // An OPERATOR-NAMED method on a NUMERIC newtype is rejected at the decl site
+                    // (gaps.md W6-3d). Same reason as the static-method reject above — the dispatch
+                    // path does not exist: same-newtype `+`/`-`/`<`/… always auto-flow to the
+                    // UNDERLYING's native op (vm `newtype_arith` / `compare_op`'s `same_newtype_keys`
+                    // fast path), and a newtype's own `add`/`compare` is never dispatched as an
+                    // operator (`docs/syntax.md`). But the intrinsic numeric grant is unconditional on
+                    // such a method existing, and intrinsic dispatch is MISS-ONLY, so `a.add(b)` would
+                    // get the user's method while `a + b` got the native op: two spellings of one
+                    // protocol operation answering differently for the same receiver, silently.
+                    //
+                    // Ruling (a) of three candidates (2026-07-27). (b) — make the method dispatch as
+                    // the operator too — was implemented and REJECTED 2026-07-26: under a
+                    // heterogeneous `List[Comparable]` a same-newtype pair takes the user's order while
+                    // a cross-type pair cannot (the user's `compare(self, o: Self)` does not accept an
+                    // `int`), so one list carries two orders and `<` becomes INTRANSITIVE with no
+                    // fault. (c) — drop the grant when such a method exists — leaves `+` diverging
+                    // still. Only (a) makes the two-orders state unrepresentable. Cost: a numeric
+                    // newtype can no longer define these names at all, even to call deliberately.
+                    // Non-numeric/generic newtypes are NOT affected: they have no operator to disagree
+                    // with (`satisfies` already rejects the operator protocols for them).
+                    if type_params.is_empty() && under_ty.is_numeric() {
+                        for m in methods {
+                            if matches!(
+                                m.name.as_str(),
+                                "add" | "sub" | "mul" | "div" | "mod" | "neg" | "compare"
+                            ) {
+                                self.error(
+                                    m.name_span,
+                                    format!(
+                                        "operator method '{}' on a numeric newtype is never dispatched as an operator — a numeric newtype inherits {under_ty}'s operators, so '.{}()' and the operator would disagree; use a struct if you need your own arithmetic",
+                                        m.name, m.name
+                                    ),
+                                );
+                            }
+                        }
+                    }
                     // `Self` in a method sig resolves to this concrete newtype (parameterized by its
                     // own type params — `newtype_type_params` isn't inserted yet, so build the self-ty
                     // from the in-scope `type_params`, matching `newtype_self_ty`'s shape).

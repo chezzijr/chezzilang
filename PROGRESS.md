@@ -4,6 +4,27 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 **Legend:** ⬜ not started · 🟦 in progress · ✅ done
 
+> **✅ RULING (2026-07-27, gaps.md W6-3d) — a NUMERIC newtype may no longer define an operator-named
+> method; the declaration is a compile error.** `newtype Score = int:` with an `add`/`compare` method
+> type-checked, then answered TWO different values for one protocol operation: `.add()` / a `[T: Add]`
+> bound dispatched the user's method (the miss-only intrinsic never shadows one) while `+` auto-flowed
+> to `int`'s native op — `99` vs `3`, silently, with `cmp(a,b) == 42` claiming `a > b` while `a < b` was
+> `true`. Of three candidates, **(b)** (dispatch the method as the operator) had already been
+> implemented and REJECTED — under a heterogeneous `List[Comparable]` a same-newtype pair takes the
+> user's order while a cross-type pair cannot, so `<` becomes INTRANSITIVE with no fault — and **(c)**
+> (drop the grant when such a method exists) leaves `+` diverging. **(a)** rejects the declaration,
+> making the two-orders state unrepresentable, and matches Go (a defined type inherits its underlying's
+> operators; Go has no operator overloading, so the conflict cannot arise there). Landed in
+> `src/checker/setup.rs` beside the existing static-method reject, which defers for the same reason —
+> the dispatch path does not exist. NARROW on purpose: ordinary methods are untouched, and non-numeric
+> / generic newtypes are unaffected (`satisfies` already rejects the operator protocols for them).
+> One-way ratchet, accepted: code deliberately calling `.add()` on a numeric newtype stops compiling.
+> Tests: `checker::tests::numeric_newtype_operator_named_method_is_rejected` (all 7 names) +
+> `…_ordinary_method_and_non_numeric_operator_name_still_ok` (the boundary); the old Chezzi pin that
+> asserted the divergence was REWRITTEN (not deleted) as
+> `numeric_newtype_operator_auto_flows_and_ordinary_methods_still_work`. Docs: `docs/syntax.md`,
+> `docs/gaps.md` (W6-3d RESOLVED, index row removed — **wave 6 now carries no open items**).
+>
 > **✅ FIX (2026-07-27, gaps.md W6-9) — `Writer.write_bytes` is byte-exact on `io.stdout()`/`io.stderr()`
 > too; the VM's buffered output sink is now `Vec<u8>` end to end.** `io.stdout().write_bytes(b"\xff\xfe")`
 > emitted `ef bf bd ef bf bd` (two U+FFFD) while the SAME method on a file writer emitted `ff fe` — Python's

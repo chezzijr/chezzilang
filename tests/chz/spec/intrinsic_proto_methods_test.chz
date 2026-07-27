@@ -348,30 +348,34 @@ test fn compare_on_nan_uses_the_total_order():
     nz := -1.0 * 0.0
     assert cmp_m(nz, 0.0) == 0, "non-NaN pairs unchanged: ±0.0 stay IEEE-Equal"
 
-# ---- a numeric newtype with its OWN operator-named method: method != operator (W6-3d) ----
+# ---- a numeric newtype may NOT define an operator-named method (W6-3d, RESOLVED 2026-07-27) ----
 #
-# The intrinsic numeric-newtype grant is UNCONDITIONAL on such a method existing, and intrinsic
-# dispatch is miss-only, so `a.add(b)` gets the USER method (never shadowed — that is the stronger
-# rule) while `a + b` always auto-flows to the underlying's native op (documented in syntax.md: a
-# newtype's own `add`/`compare` is never dispatched as an operator). The two spellings therefore
-# DIVERGE for this one receiver. Pinned here so the real behaviour is asserted rather than assumed
-# equal; reconciling it is a checker/grant decision (docs/gaps.md W6-3d).
+# This used to pin a real divergence: the intrinsic numeric grant is unconditional on such a method
+# existing and intrinsic dispatch is miss-only, so `a.add(b)` dispatched the USER method (99) while
+# `a + b` auto-flowed to the underlying's native op (3) — two spellings of one protocol operation
+# disagreeing for the same receiver, silently. Ruling (a) resolved it by making that state
+# UNREPRESENTABLE: `newtype Score = int:` with an `add`/`sub`/`mul`/`div`/`mod`/`neg`/`compare`
+# method is now a CHECKER ERROR at the decl site, so the program below no longer compiles and the
+# assertions it made are moot. The reject is a compile-time diagnostic, so it is pinned in Rust
+# (`checker::tests::numeric_newtype_operator_named_method_is_rejected`) — `assert` cannot express it.
+# What stays asserted HERE is the other half of the ruling: the operator still auto-flows for a
+# numeric newtype that defines NO such method, and ordinary methods on one are still fine.
+#
+# (b) — dispatching the method as the operator — was implemented and rejected: it makes `<`
+# intransitive under a heterogeneous `List[Comparable]`. See docs/gaps.md W6-3d.
 
 newtype Score = int:
-    fn add(self, o: Score) -> Score:
-        return Score(99)
-    fn compare(self, o: Score) -> int:
-        return 42
+    fn doubled(self) -> Score:
+        return Score(int(self) * 2)
 
-test fn newtype_own_method_wins_and_diverges_from_the_operator():
+test fn numeric_newtype_operator_auto_flows_and_ordinary_methods_still_work():
     a := Score(1)
     b := Score(2)
-    assert int(add_m(a, b)) == 99, "the user method is dispatched, never shadowed"
     assert int(a + b) == 3, "the operator auto-flows to the underlying's native op"
-    assert cmp_m(a, b) == 42, "the user compare is dispatched"
     assert (a < b) == true, "the operator orders by the underlying"
-    # the divergence is the point: these two are NOT equal for this receiver
-    assert (cmp_m(a, b) < 0) != (a < b)
+    assert cmp_m(a, b) == -1, "the intrinsic Comparable grant answers the operator's verdict"
+    assert int(a.doubled()) == 2, "an ordinary method on a numeric newtype is unaffected"
+    assert int(add_m(a, b)) == 3, "the [T: Add] bound uses the intrinsic grant, not a user method"
 
 # ---- `Iterator` = a cursor, `Iterable` = anything you can iterate (W6-3b) ----
 #

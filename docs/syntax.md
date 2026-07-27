@@ -1544,6 +1544,23 @@ underlying supplies them — a numeric newtype satisfies `Add`/`Sub`/`Mul`/`Div`
 intrinsically (native same-type ops above), while a `newtype Name = str` with an `add` (or `compare`)
 method does **not** pass `fn twice[T: Add](x: T)` (or `fn sorted[T: Comparable](xs: T)`) — its `<`
 would silently use the underlying's native ordering, never the method, so the checker rejects it.
+
+Because of that, a **numeric** newtype may not *define* an operator-named method at all
+(`add`/`sub`/`mul`/`div`/`mod`/`neg`/`compare`) — it is a **compile error at the declaration**:
+
+```chezzi
+newtype Score = int:
+    fn add(self, o: Score) -> Score:      # error: operator method 'add' on a numeric newtype
+        return Score(99)                  # is never dispatched as an operator …
+    fn doubled(self) -> Score:            # fine — ordinary methods are unaffected
+        return Score(int(self) * 2)
+```
+
+Without the rule the two spellings disagreed for that receiver: `.add()` dispatched the user's method
+(the miss-only intrinsic never shadows one) while `+` auto-flowed to `int`'s native op, so
+`twice(Score(1), Score(2))` gave `99` and `Score(1) + Score(2)` gave `3`. A numeric newtype inherits
+its underlying's operators; **use a `struct` if you need your own arithmetic.** The rule is narrow —
+non-numeric and generic newtypes are unaffected, since they have no operator to disagree with.
 The one sharp edge: a **numeric** newtype that nonetheless defines `add`/`compare`/… keeps both — a
 direct or generic `a.add(b)` calls ITS method (a user method is never shadowed), while `a + b` still
 auto-flows to the native op, so the two spellings disagree. Pick one (`docs/gaps.md` W6-3d).

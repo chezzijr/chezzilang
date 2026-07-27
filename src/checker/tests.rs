@@ -3861,6 +3861,38 @@ fn newtype_static_method_is_rejected_with_clear_message() {
     );
 }
 
+/// gaps.md W6-3d, ruling (a). A NUMERIC newtype may not define an operator-named method: the
+/// operator always auto-flows to the underlying's native op while `.add()` would dispatch the user
+/// method, so the two spellings of one protocol operation would silently disagree for that receiver.
+/// Rejected at the decl site — the alternative (make the method dispatch as the operator) was
+/// implemented and rejected because it makes `<` intransitive under a heterogeneous `List[Comparable]`.
+#[test]
+fn numeric_newtype_operator_named_method_is_rejected() {
+    for name in ["add", "sub", "mul", "div", "mod", "neg", "compare"] {
+        let src =
+            format!("newtype Score = int:\n    fn {name}(self, o: Score) -> int: return 42\n");
+        let errs = check_src(&src);
+        assert!(
+            errs.iter().any(|e| {
+                e.message.contains("operator method")
+                    && e.message.contains("numeric newtype")
+                    && e.message.contains(name)
+            }),
+            "expected the W6-3d reject for '{name}', got: {errs:?}"
+        );
+    }
+}
+
+/// The W6-3d reject is NARROW on purpose — it must not become "a numeric newtype may not have
+/// methods". An ordinary method is still fine, and so is an operator-named method on a NON-numeric
+/// or GENERIC newtype (no operator exists there to disagree with).
+#[test]
+fn numeric_newtype_ordinary_method_and_non_numeric_operator_name_still_ok() {
+    ok("newtype Score = int:\n    fn double(self) -> Score: return Score(int(self) * 2)\n");
+    ok("newtype Name = str:\n    fn add(self, o: Name) -> Name: return self\n");
+    ok("newtype Box[T] = T:\n    fn add(self, o: Box[T]) -> Box[T]: return self\n");
+}
+
 #[test]
 fn dup_method_diagnostic_is_clear_not_return_mismatch() {
     // The duplicate-method error must be the headline, not the misleading return-type cascade.

@@ -28,7 +28,6 @@ chronological log.
 
 | item | gaps.md | what | why it is still open |
 |---|---|---|---|
-| **W6-3d** | `:596` | A numeric `newtype` with its own `add`/`compare` disagrees with `+`/`<` | Candidate **(b) was attempted 2026-07-26 and REJECTED — it makes `<` intransitive** (verified, both engines). Candidate (a) now leads. Needs a design ruling, not an implementation |
 | `min`/`max` → `Option` | `:1392` | `List.min`/`max`/`min_by`/`max_by` fault on empty while `first`/`last`/`pop` return `Option[T]` | Breaking surface change: 23 call sites + docs + examples. Own milestone |
 | `List[Any]` widening | `:1309` | `List[Any] = [1, 3.0]` silently widens the int to `1.0` | Deferred pre-freeze (wave 4) |
 | **N10** | `:3158` | A `wait:` timer arm makes `--serial` inline-sleep instead of yielding to a runnable sibling (serial ≠ M:N) | Deliberate pre-freeze known-limit; fix is folded into the post-freeze serial-engine removal |
@@ -248,7 +247,7 @@ parked_slot_nonsendable_rejects,in_data_cycle_rejects,unreached_nonsendable_runs
 - **Multi-frame / pending-`defer` suspended generators** — checker-UNREACHABLE (item 3 arms a/c); no valid
   program constructs them. The rejects are defensive guards, not a user-visible limit — nothing to build.
 
-## Session log — 2026-07-25 (bug-hunt wave 6: 19 findings — W6-19 found while FIXING W6-2 — W6-1..W6-19 all FIXED as of 2026-07-27, the last being W6-9; of the 3 carve-outs filed (W6-3b/c/d), **W6-3b and W6-3c are FIXED (2026-07-26)** and only the W6-3d design ruling remains — see the OPEN ITEMS table at the top, which is the authority — 2 never-hunted surfaces swept)
+## Session log — 2026-07-25 (bug-hunt wave 6: 19 findings — W6-19 found while FIXING W6-2 — W6-1..W6-19 all FIXED as of 2026-07-27, the last being W6-9; of the 3 carve-outs filed (W6-3b/c/d), **W6-3b and W6-3c are FIXED (2026-07-26)** and **W6-3d was RESOLVED 2026-07-27 by ruling (a)** — so wave 6 carries NO open items; what remains under `--max-heap` are the two disclosed residuals W6-10s/W6-10r, filed as their own rows. See the OPEN ITEMS table at the top, which is the authority — 2 never-hunted surfaces swept)
 
 Pre-freeze adversarial hunt, 5 disjoint parallel domains, weighted at the two surfaces the wave-5
 residual named as never audited (**FFI**, **GC + `unsafe`**) plus the concurrency code that landed
@@ -593,7 +592,7 @@ the test pins the ordering relative to `sort()` + antisymmetry rather than a har
 Pinned by `compare_on_nan_uses_the_total_order` in `tests/chz/spec/intrinsic_proto_methods_test.chz`
 (both engines, byte-identical).
 
-### W6-3d. A numeric `newtype` with its OWN `add`/`compare` disagrees with `+`/`<` — carved out of W6-3, low
+### W6-3d. A numeric `newtype` with its OWN `add`/`compare` disagrees with `+`/`<` — carved out of W6-3, low — **RESOLVED (2026-07-27) by ruling (a): the declaration is now REJECTED**
 ```chezzi
 newtype Score = int:
     fn add(self, o: Score) -> Score:
@@ -651,6 +650,38 @@ protocol's `compare` second parameter being literally `Self` after substitution 
 `cannot compare T and T`. Branch discarded, not merged; `main` is unchanged and the divergence stands.
 **This moves candidate (a) (reject the declaration) ahead of (b)**: it is the only candidate that makes
 the two-orders situation unrepresentable rather than reconciling it after the fact.
+
+**RESOLVED 2026-07-27 — ruling (a) landed.** A **numeric, non-generic** newtype may no longer define
+`add`/`sub`/`mul`/`div`/`mod`/`neg`/`compare`; it is a compile error at the DECL site
+(`src/checker/setup.rs`, beside the existing static-method reject, which defers for the same reason —
+the dispatch path does not exist):
+```
+type error (line 2, col 8): operator method 'add' on a numeric newtype is never dispatched as an
+operator — a numeric newtype inherits int's operators, so '.add()' and the operator would disagree;
+use a struct if you need your own arithmetic
+```
+Why (a) and not the others: **(b)** was implemented and rejected (the intransitivity above — a
+STRUCTURAL conflict with heterogeneous `List[Comparable]`, not an implementation slip). **(c)** (drop
+the intrinsic grant when such a method exists) makes `.add()` and the `[T: Add]` bound agree with each
+other but leaves `+` still auto-flowing to the native op, so it narrows the hole without closing it.
+Only (a) makes the two-orders state unrepresentable. It also matches the Go ancestor
+([[no-drift-from-popular-languages]]): a Go defined type inherits its underlying's operators and Go has
+no operator overloading, so the conflict cannot arise there — Chezzi manufactured it by letting the
+protocol operation also be spelled as a method.
+**Cost, accepted:** a one-way ratchet — any program deliberately calling `.add()` on a numeric newtype
+stops compiling. Deliberately NARROW: ordinary methods (`fn doubled`) are untouched, and non-numeric
+(`newtype Name = str`) and generic (`newtype Box[T] = T`) newtypes are unaffected — `satisfies` already
+rejects the operator protocols for them, so there is no operator there to disagree with.
+**Tests:** the reject is a compile-time diagnostic, so it is pinned in Rust —
+`checker::tests::numeric_newtype_operator_named_method_is_rejected` (all seven names) plus
+`numeric_newtype_ordinary_method_and_non_numeric_operator_name_still_ok` (the narrowness boundary). The
+old Chezzi pin `newtype_own_method_wins_and_diverges_from_the_operator` asserted the divergence and
+could no longer compile; it was REWRITTEN, not deleted, as
+`numeric_newtype_operator_auto_flows_and_ordinary_methods_still_work` in
+`tests/chz/spec/intrinsic_proto_methods_test.chz` — it now asserts the other half of the ruling (`+`,
+`<`, the `[T: Add]` bound and an ordinary method all agree: `3 3 8 true`, byte-identical on both
+engines). Docs: `docs/syntax.md` gained the rule + example beside the existing operator-protocol
+paragraph.
 
 ### W6-4. `std.process` silently CORRUPTS non-UTF-8 child output (`from_utf8_lossy`), with no bytes hatch — the unswept B1/R1 sibling — P0 — **FIXED (2026-07-25)**
 ```chezzi
