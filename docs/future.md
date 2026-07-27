@@ -320,10 +320,27 @@ render ERROR too (whole file, before any test runs), counted separately as `file
    split — the N heaps' totals do not sum to RSS), and a payload reachable only through a **nested** core
    whose last alias slot has been swept is counted **nowhere** (gaps.md `W6-10r`, still OPEN). This is a
    **different hole from the inline-scalar escape below, which also remains OPEN.**
+   **GC pacing is byte-aware WHEN A CAP IS SET (round 3, 2026-07-27).** Counting the off-heap bytes was
+   not enough on its own: `over_cap` is evaluated only inside `sweep()`, and `sweep()` used to run
+   purely on `Obj`-count growth, so a program pushing megabytes across the airlock while allocating ~2
+   `Obj`s per iteration never swept, never sampled the cap and **passed** (304 MB against an 8 MB cap;
+   a 200k-int sibling at 3369 MB). `should_collect()` now also fires on charged off-heap bytes —
+   `mem_cap != 0 && since_gc_wire_bytes >= (mem_cap/4).max(64*1024)`, charged at `Vm::to_wire_crossable`
+   (the one helper every cross-heap value store routes through) and reset in `sweep()` beside
+   `since_gc`. It is a monotonic pacing HINT, never accounting (`live_bytes` stays the sole measure):
+   a replacing store charges, a `recv` never decrements — net tracking would let a steady send/recv
+   pipeline stall the trigger forever, i.e. fail open again. **Gated on `mem_cap != 0`**, so cap-off
+   pacing (every `chezzi run`, every bench, the whole parity gate) is bit-for-bit unchanged; a capped
+   run pays extra sweeps plus a second `wire_summary` walk per store (+11% measured, `docs/benchmarks.md`).
+   Residual SAMPLING escapes are listed in gaps.md `W6-10s` — notably the by-hand airlock paths (spawn
+   args, closure captures, `Executor.submit`) which grow off-heap storage without charging it.
    **v1 limits (deterministic, documented):** the
-   trip fires only at a **GC boundary**, and GC triggers on `Obj`-count growth — a loop growing a single
-   container of **inline scalars** (e.g. `xs.push(i)` for int `i`) allocates no `Obj`s, never sweeps, and
-   so never trips (push a heap value to guard it) — **still open**; the check is a high-water on `live_bytes` which
+   trip fires only at a **GC boundary**, and GC triggers on `Obj`-count growth (plus charged off-heap
+   wire bytes when a cap is set) — a loop growing a single
+   container of **inline scalars** (e.g. `xs.push(i)` for int `i`) allocates no `Obj`s **and charges no
+   wire bytes**, so neither trigger fires: it never sweeps and
+   so never trips (push a heap value to guard it) — **still open, and byte-aware pacing does not close
+   it**; the check is a high-water on `live_bytes` which
    **undermeasures** true RSS and can overshoot ~2× `N` before firing (`next_gc = 2*live`). **The cap is
    PER-HEAP, so its guarantee is: any single execution context (the test's own heap; a `spawn`'d worker's
    heap on M:N) whose live heap — including the off-heap wire payloads it can REACH, which a worker that

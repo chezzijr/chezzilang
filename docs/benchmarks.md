@@ -1083,7 +1083,10 @@ re-walked that entire tree on **every** GC pass, and because the GC threshold is
 (`next_gc = 2*live`) while a big wire container is ONE heap slot, `live` stayed tiny → GC ran constantly →
 O(allocations × payload). Each core now caches `(approximate owned bytes, can-this-payload-root-a-heap-object)`
 at store time; a payload with no `Handle` and no nested core is **skipped**, so the per-pass cost is O(1).
-GC pacing (`next_gc`) was deliberately left untouched — the short-circuit alone restored linearity.
+The short-circuit alone restored linearity, so this lever needed no pacing change. GC pacing (`next_gc`)
+was later made byte-aware for W6-10's sampling half, but **only when `chezzi test --max-heap` sets a cap**
+(`mem_cap != 0`) — with no cap the trigger is bit-for-bit the object count it has always been, which is why
+the table below (cap-off, `chezzi run`) is unmoved by that change.
 
 Bespoke microbench (NOT in `benches/run.chz`, which is Chezzi-vs-CPython peers only). Release, `--serial`,
 best of 3, same machine + session. A 200k-int container is built, handed to a holder, then a sibling loop
@@ -1150,6 +1153,31 @@ Same change also closes gaps.md **W6-10**: the cached byte half of the summary f
 pass a 200 KB cap). Those bytes are charged **once per core per heap** (by `Arc` identity) — charging once
 per `Obj` alias slot multiplied a shared payload by the fan-out and produced spurious OVER-MEMORY verdicts.
 One residual escape stays open (a nested core with no surviving alias slot) — gaps.md `W6-10r`.
+
+### Round 3 — byte-aware GC pacing under a cap (2026-07-27), the half that was wrongly marked done
+
+Counting the bytes did nothing on the natural runaway, because the cap was never **sampled**: `over_cap` is
+assigned only inside `sweep()`, and `sweep()` only ran on a heap-OBJECT count. A program sending a ~1 MB
+string 300 times (payload built ONCE, ~2 `Obj`s per iteration) PASSED at **304 MB RSS under an 8 MB cap**;
+a 200k-int list sent 100 times PASSED at **3369 MB**. `Heap::should_collect` now also fires on charged
+off-heap bytes — `mem_cap != 0 && since_gc_wire_bytes >= (mem_cap/4).max(64*1024)` — charged in
+`Vm::to_wire_crossable` and reset in `sweep()`. Both repros are now `OVER-MEMORY` rc=1 at 15 MB / 46 MB.
+
+**Cap-off is untouched, by construction and by measurement.** The byte term short-circuits on
+`mem_cap != 0`, so `chezzi run` (and therefore `benches/run.chz` and the serial==M:N parity gate) pays one
+load+branch per `should_collect` and never walks. Direct A/B of the two release binaries, cap-off, best-of-5,
+two independent rounds: `loop` −2.5% / +1.4% · `fib` +0.6% / +2.9% · `primes` +3.8% / +2.5% · `list`
++5.0% / −0.2% · `struct` +1.0% / +1.6% — sign flips between rounds, i.e. run-to-run noise, no consistent
+direction. The W6-7 microbench is likewise unmoved (same session, best-of-3, `--serial`): `RwShared` holder
+0.116/0.207/0.647 s before → 0.114/0.214/0.651 s after at n = 100k/200k/400k, still tracking the plain-`List`
+control (0.082/0.176/0.631 → 0.082/0.176/0.617) and still linear.
+
+**`chezzi test --max-heap` gets slower — stated, not hidden.** A capped run now sweeps on off-heap growth
+(more sweeps, each an O(live slots) `live_bytes`) and walks `wire_summary` a second time per store (the
+send path walks again to cache the core's summary). Measured on 100 sends of a 200k-int list under a cap
+generous enough to PASS (4 GB), best-of-3: **1.649 s → 1.828 s (+11%)**; the same program with no cap:
+1.669 s → 1.676 s. Eliminating the second walk would need a precomputed summary threaded through
+`MnSched::send_wake`'s signature — not worth a signature change for a CI/debug guard.
 
 ### Round 2 — the fix's own two regressions (2026-07-27)
 

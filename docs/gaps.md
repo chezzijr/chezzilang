@@ -32,7 +32,8 @@ is that "which of these is still open?" previously required reading 1400 lines o
 | `min`/`max` → `Option` | `:1042` | `List.min`/`max`/`min_by`/`max_by` fault on empty while `first`/`last`/`pop` return `Option[T]` | Breaking surface change: 23 call sites + docs + examples. Own milestone |
 | `List[Any]` widening | `:1083` | `List[Any] = [1, 3.0]` silently widens the int to `1.0` | Deferred pre-freeze (wave 4) |
 | **N10** | `:1299` | A `wait:` timer arm makes `--serial` inline-sleep instead of yielding to a runnable sibling (serial ≠ M:N) | Deliberate pre-freeze known-limit; fix is folded into the post-freeze serial-engine removal |
-| **W6-10r** | `:828` | `--max-heap` residual: a payload reachable ONLY through a **nested** core (a `Channel` inside a `Shared`, once the nested core's last `Obj` alias slot is swept) is counted nowhere | Left open by the W6-10 fix on purpose. `live_bytes` reaches a core's bytes through its `Obj::*` alias slot; a nested core has none. Closing it needs cross-core byte recursion with `Arc` de-dup — narrow trigger, not worth the machinery yet |
+| **W6-10s** | `:963` | `--max-heap` residual **sampling** escapes left after the byte-aware pacing fix | Pacing samples the cap on charged off-heap bytes, but only for stores routed through `to_wire_crossable` and only per heap. Still not sampled: the documented inline-scalar loop (`future.md §1b` — no `Obj`s, no wire bytes), the by-hand airlock paths (spawn args, closure captures, `Executor.submit`), and a heap that HOLDS a huge core without storing to it |
+| **W6-10r** | `:1000` | `--max-heap` residual: a payload reachable ONLY through a **nested** core (a `Channel` inside a `Shared`, once the nested core's last `Obj` alias slot is swept) is counted nowhere | Left open by the W6-10 fix on purpose. `live_bytes` reaches a core's bytes through its `Obj::*` alias slot; a nested core has none. Closing it needs cross-core byte recursion with `Arc` de-dup — narrow trigger, not worth the machinery yet |
 | protocol embeds | `:1155` | A protocol-embedded method isn't callable through the interface value (`p: Person` can't call embedded `name()`) despite `spec.md:973` "flattened at bound sites" | Filed as a safe-direction observation in wave 3; never triaged — doc and behavior contradict each other either way |
 
 **Known limits that are documented, not bugs** (listed so they aren't re-filed): `Iterable[T]` element
@@ -817,9 +818,10 @@ Test: `extern_named_after_newtype_rejected` (both decl orders, single-module + g
 > control at every n** (the control's own jump at 400k is a pre-existing heap-growth effect, identical
 > before and after). Holder isolation at n = 200k: `RwShared` 1.766 → **0.218 s**, `Shared` 2.051 →
 > **0.204 s**, `Channel.send` 2.050 → **0.220 s**, plain `List` 0.181 → 0.195 s, no holder 0.196 →
-> 0.201 s — the holder penalty is gone on the GC/read side. GC **pacing** was deliberately left
-> untouched (the short-circuit alone restored linearity, and `next_gc` is a timing-observable global
-> with parity blast radius). Full table: `docs/benchmarks.md`. Tests:
+> 0.201 s — the holder penalty is gone on the GC/read side. The short-circuit alone restored
+> linearity, so W6-7 needed no pacing change; pacing was later made byte-aware **for W6-10's sampling
+> half**, but only when `--max-heap` is set (`mem_cap != 0`) — with no cap `next_gc` behaves exactly
+> as it always has, so this table is cap-off and unmoved. Full table: `docs/benchmarks.md`. Tests:
 > `vm::heap::core_payload_walk_is_memoized`, `dirty_core_payload_is_still_traced`,
 > `live_bytes_counts_offheap_wire_payload`, `live_bytes_sums_every_distinct_core`,
 > `vm::core::wire_summary_*`, `vm::gc_tests::gc_stress_values_parked_in_cores`.
@@ -896,9 +898,88 @@ bytes written." **Root cause** `src/vm/fileio.rs:48-55` — the `Backing::Stdout
 `write_to_core` do `String::from_utf8_lossy(data)` because the `emit_out`/`emit_err` sink is `&str`-typed
 (the comment concedes "the byte-exact common path is `write(str)`"). Same lossy class as W6-4 / B1.
 
-### W6-10. `chezzi test --max-heap` does not count off-heap wire storage — 195 MB RSS passes a 200 KB cap — **FIXED (found 2026-07-26, fixed 2026-07-27)**
+### W6-10. `chezzi test --max-heap` does not count off-heap wire storage — 195 MB RSS passes a 200 KB cap — **FIXED in TWO parts (found 2026-07-26; accounting fixed 2026-07-27, sampling fixed 2026-07-27 round-3)**
 
-> **Fix — `live_bytes` now counts the off-heap wire payload**, via the same per-core cached summary
+> **TWO SEPARATE FAILURES, and the first commit only fixed one of them.**
+>
+> 1. **ACCOUNTING** — `live_bytes()` did not count a core's off-heap `WireValue` payload at all
+>    (fixed first; the write-up below).
+> 2. **SAMPLING** — `over_cap` is assigned ONLY inside `Heap::sweep()`, and `sweep()` runs only when
+>    `Heap::should_collect()` fires, which was `self.since_gc >= self.next_gc` — a pure heap-OBJECT
+>    count with `next_gc = (live*2).max(256)`. A program that pushes megabytes across the airlock
+>    while allocating ~2 `Obj`s per iteration never reaches the object threshold, so it **never
+>    sweeps, never samples the cap, and passes** — counting the bytes correctly changes nothing if
+>    nobody ever looks. The round-2 review of this branch marked W6-10 FIXED on the accounting half
+>    alone; that claim was **wrong**, and the shape that broke it is the natural one:
+>
+>    ```chezzi
+>    test fn msg():
+>        parts: List[str] = []
+>        for i in range(100000):
+>            parts.push("0123456789")
+>        blob := "".join(parts)          # ~1 MB, built ONCE
+>        ch := Channel[str](10000)
+>        for i in range(300):
+>            ch.send(blob)               # ~300 MB off-heap, ~2 heap allocs per iteration
+>        assert true
+>    ```
+>    `chezzi test --max-heap=8000000 msg_test.chz` → **PASS, rc=0, peak RSS 304 MB** against an 8 MB
+>    cap. Appending junk allocations to the same program flipped it to OVER-MEMORY, which is what
+>    proved the discriminator was GC pacing, not byte accounting. Sibling shape (a 200k-int list sent
+>    100 times, same cap): PASS at **3369 MB**. The earlier note that "GC pacing was deliberately left
+>    untouched" is **retracted** — that declination is exactly what left the guard failing open.
+>
+> **Fix (sampling half) — byte-aware GC pacing, gated on a live cap.** `Heap` gained
+> `since_gc_wire_bytes`, the `since_gc` sibling for growth that allocates no `Obj`s;
+> `should_collect()` is now
+> `since_gc >= next_gc || (mem_cap != 0 && since_gc_wire_bytes >= (mem_cap/4).max(64*1024))`, and
+> `sweep()` resets it beside `since_gc`. The `cap/4` term bounds how far off-heap growth can overshoot
+> between samples; the 64 KB floor stops a tiny cap from forcing a GC per store. The bytes are charged
+> in `Vm::to_wire_crossable` (`src/vm/sched.rs`) — the one helper every cross-heap VALUE store routes
+> through (`Channel.send`/`try_send`, `Shared`/`RwShared`/`Atomic` construct/set/update/store/CAS), so
+> a new store path physically cannot forget the charge, the same argument that put `ensure_crossable`
+> there.
+>
+> **Why the `mem_cap != 0` gate.** With no cap `over_cap` is meaningless, so the byte term exists only
+> on the one path where it can matter: a cap-off run (every `chezzi run`, every bench, the whole
+> serial==M:N parity gate) pays one `!= 0` load+branch per `should_collect` and ZERO extra walks, and
+> pacing is bit-for-bit what it has always been. `mem_cap` is set once per test before the run and
+> never changes mid-run, so the gated counter is never stale.
+>
+> **`since_gc_wire_bytes` is a pacing HINT, not accounting** — `live_bytes()` remains the sole measure
+> of what is live. It is charged monotonically: a REPLACING store (`Shared.set`, `Atomic.store`)
+> charges even though net live bytes may not grow, and a `recv`/`pop` never decrements. Net tracking
+> would let a steady send/recv pipeline stall the trigger forever, i.e. fail OPEN again — the exact
+> bug being fixed. Over-triggering costs an extra sweep under a cap and nothing else.
+>
+> **Accepted cost (measured, not claimed away):** the charge walks `wire_summary` a second time (the
+> send path walks again when it caches the core's summary). Removing it would mean threading a
+> precomputed summary through `MnSched::send_wake`'s signature for a CI/debug guard, so it was not
+> done. Measured on a store-heavy program under a cap generous enough to PASS (200k-int list, 100
+> sends, 4 GB cap, best of 3): **1.649 s → 1.828 s (+11%)** — the second walk plus the extra sweeps.
+> Cap-OFF on the same program: 1.669 s → 1.676 s (noise). `benches/run.chz` and the W6-7 microbench
+> are unmoved (both run cap-off; A/B of the two release binaries stays inside run-to-run noise).
+>
+> **Residual SAMPLING escapes (distinct from `W6-10r`, which is an ACCOUNTING hole):**
+> - the documented inline-scalar case (`docs/future.md §1b`) — a loop growing one container of inline
+>   scalars allocates no `Obj`s AND charges no wire bytes, so neither trigger fires. Still open; this
+>   fix does not touch it.
+> - the by-hand airlock paths that pair `to_wire_at` + `ensure_crossable` instead of routing through
+>   `to_wire_crossable` (spawn args, closure captures, `Executor.submit`) grow off-heap storage
+>   without charging it.
+> - pacing is PER HEAP under M:N, matching the existing per-heap cap semantics: a parent holding a
+>   huge core but storing nothing still samples only on its own object churn. This narrows the escape;
+>   it does not eliminate every shape.
+>
+> Tests: `vm::heap::wire_bytes_pace_a_sweep_only_under_a_cap` (cap-off ignores wire bytes / cap-on
+> collects at `cap/4` / the 64 KB floor / `sweep()` resets) and
+> `test_runner::over_memory_trips_without_object_churn` (both shapes above, both engines — each builds
+> its payload ONCE, so object churn cannot be doing the work). Verified on the real release binary:
+> the `msg` repro is now `OVER-MEMORY`, rc=1, peak RSS 15 MB (was PASS at 304 MB); the 200k-int
+> sibling `OVER-MEMORY`, rc=1, 46 MB (was PASS at 3369 MB); the original 120000-list repro under
+> `--max-heap=200000` `OVER-MEMORY`, rc=1.
+
+> **Fix (accounting half) — `live_bytes` now counts the off-heap wire payload**, via the same per-core cached summary
 > that fixes W6-7 (see above). `Heap::live_bytes`'s `_ => 0` blackout gained explicit
 > `Obj::Channel`/`Shared`/`RwShared`/`Atomic`/`Executor` arms adding the core's cached byte count, so
 > `sweep()`'s existing `over_cap = mem_cap != 0 && lb > mem_cap` finally sees a channel backlog / a
