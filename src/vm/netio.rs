@@ -1344,7 +1344,9 @@ impl Vm {
             let key = self.channel_core_ptr(h);
             sched.send_wake(key, &core, w);
         } else {
-            core.q.lock().unwrap().push(w);
+            // W6-7/W6-10 — summarise OFF-LOCK (it is O(payload); see `ChanState::push`).
+            let sum = crate::vm::core::wire_summary(&w);
+            core.q.lock().unwrap().push(sum, w);
             core.cv.notify_all();
             self.wake_on_send(h);
         }
@@ -1426,10 +1428,11 @@ impl Vm {
             let key = self.channel_core_ptr(h);
             return sched.send_wake_bounded(key, core, w, cap);
         }
+        let sum = crate::vm::core::wire_summary(&w); // OFF-LOCK — see `ChanState::push`
         let enqueued = {
             let mut g = core.q.lock().unwrap();
             if g.len() < cap {
-                g.push(w);
+                g.push(sum, w);
                 true
             } else {
                 false
@@ -2567,7 +2570,10 @@ impl Vm {
                     // isolated closure over this same heap home. Queued captures stay rooted via the
                     // executor handle's `children()` (the `Closure` arm of `collect_core_gcrefs`).
                     let w = self.wire_callable(args[0], span)?;
-                    g.push(w);
+                    // Summarised under the executor's OWN lock (not the scheduler's) and right next
+                    // to `wire_callable`'s much larger walk of the same closure — no hoist needed.
+                    let sum = crate::vm::core::wire_summary(&w);
+                    g.push(sum, w);
                 }
                 Ok(Value::nil())
             }

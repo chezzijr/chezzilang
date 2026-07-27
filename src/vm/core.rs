@@ -77,7 +77,11 @@ pub struct ChanState {
     /// never go stale. A stale `dirty == false` would stop the GC tracing a live handle queued in
     /// this channel — a use-after-free. Rust module privacy is what makes "did I catch every push
     /// site?" a compile error instead of a code review.
-    queue: VecDeque<WireValue>,
+    ///
+    /// Each message carries its own [`wire_summary`] byte count so `pop` is O(1): these queues are
+    /// popped under the GLOBAL `MnSched` lock (`sched.rs` demote paths), and re-deriving the count
+    /// on removal would put an O(payload) walk in that critical section.
+    queue: VecDeque<(usize, WireValue)>,
     /// Approximate owned bytes of the queued messages (see [`wire_summary`]) — the off-heap storage
     /// `Heap::live_bytes` could not see before W6-10.
     bytes: usize,
@@ -88,16 +92,21 @@ pub struct ChanState {
 }
 
 impl ChanState {
-    pub fn push(&mut self, w: WireValue) {
-        let (b, d) = wire_summary(&w);
-        self.bytes += b;
-        self.dirty |= d;
-        self.queue.push_back(w);
+    /// Enqueue a message with its PRE-COMPUTED [`wire_summary`].
+    ///
+    /// The summary MUST be computed by the caller **before taking any lock**: `send_wake` /
+    /// `send_wake_bounded` hold `MnSched::core` — the process-wide lock that serializes every
+    /// fiber's park/wake/finish — across this call, and `wire_summary` is O(payload). Global-lock
+    /// hold time must not scale with user payload size.
+    pub fn push(&mut self, sum: (usize, bool), w: WireValue) {
+        self.bytes += sum.0;
+        self.dirty |= sum.1;
+        self.queue.push_back((sum.0, w));
     }
 
     pub fn pop(&mut self) -> Option<WireValue> {
-        let w = self.queue.pop_front()?;
-        self.bytes = self.bytes.saturating_sub(wire_summary(&w).0);
+        let (b, w) = self.queue.pop_front()?;
+        self.bytes = self.bytes.saturating_sub(b);
         if self.queue.is_empty() {
             self.bytes = 0;
             self.dirty = false;
@@ -120,7 +129,7 @@ impl ChanState {
     }
 
     pub fn iter(&self) -> impl Iterator<Item = &WireValue> {
-        self.queue.iter()
+        self.queue.iter().map(|(_, w)| w)
     }
 
     /// Cached GC summary of the queued messages: `(approximate owned bytes, can-root-a-heap-object)`.
@@ -378,23 +387,23 @@ impl Drop for WriterCore {
 #[derive(Debug, Default)]
 pub struct ExecState {
     /// PRIVATE on purpose — see [`ChanState::queue`].
-    queue: VecDeque<WireValue>,
+    queue: VecDeque<(usize, WireValue)>,
     bytes: usize,
     dirty: bool,
     pub shut: bool,
 }
 
 impl ExecState {
-    pub fn push(&mut self, w: WireValue) {
-        let (b, d) = wire_summary(&w);
-        self.bytes += b;
-        self.dirty |= d;
-        self.queue.push_back(w);
+    /// Enqueue a task with its PRE-COMPUTED [`wire_summary`] — see [`ChanState::push`].
+    pub fn push(&mut self, sum: (usize, bool), w: WireValue) {
+        self.bytes += sum.0;
+        self.dirty |= sum.1;
+        self.queue.push_back((sum.0, w));
     }
 
     pub fn pop(&mut self) -> Option<WireValue> {
-        let w = self.queue.pop_front()?;
-        self.bytes = self.bytes.saturating_sub(wire_summary(&w).0);
+        let (b, w) = self.queue.pop_front()?;
+        self.bytes = self.bytes.saturating_sub(b);
         if self.queue.is_empty() {
             self.bytes = 0;
             self.dirty = false;
@@ -406,7 +415,7 @@ impl ExecState {
     pub fn take_all(&mut self) -> Vec<WireValue> {
         self.bytes = 0;
         self.dirty = false;
-        self.queue.drain(..).collect()
+        self.queue.drain(..).map(|(_, w)| w).collect()
     }
 
     pub fn clear(&mut self) {
@@ -424,7 +433,7 @@ impl ExecState {
     }
 
     pub fn iter(&self) -> impl Iterator<Item = &WireValue> {
-        self.queue.iter()
+        self.queue.iter().map(|(_, w)| w)
     }
 
     /// Cached GC summary of the queued tasks: `(approximate owned bytes, can-root-a-heap-object)`.
@@ -612,8 +621,13 @@ impl WireSummary {
 /// `Channel`/`Shared`/`RwShared`/`Atomic`/`Executor` arms — those cross by shared `Arc`. [`collect_core_gcrefs`]
 /// (right above) *recurses into* them, because a nested core may be reachable only through its parent and
 /// its embedded handles would dangle otherwise. So a cached `has_handle` verdict would be a use-after-free.
-/// Here a nested core is therefore **always dirty**, and the walk STOPS at that boundary (which also settles
-/// the byte question: a nested core's bytes are counted once, by its own summary, never twice).
+/// Here a nested core is therefore **always dirty**, and the walk STOPS at that boundary.
+///
+/// The byte half of that stop is an ACCEPTED HOLE, not a proof of correctness (gaps.md `W6-10r`,
+/// still open): a nested core's bytes are reached by `Heap::live_bytes` only through that core's own
+/// `Obj::*` alias slot, so a nested core whose last alias slot has been swept — it survives inside
+/// this payload's `Arc` — is counted NOWHERE. Closing it needs cross-core byte recursion with `Arc`
+/// de-dup; deliberately not built. Rooting is unaffected: `collect_core_gcrefs` does recurse.
 ///
 /// Keep the arms in lockstep with [`collect_core_gcrefs`] — a new `WireValue` variant must be added to both.
 pub fn wire_summary(w: &WireValue) -> (usize, bool) {

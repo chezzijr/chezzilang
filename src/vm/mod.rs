@@ -2319,13 +2319,16 @@ impl MnSched {
         w: WireValue,
         cap: usize,
     ) -> bool {
+        // W6-7/W6-10 — summarise the message BEFORE taking core lock A: `wire_summary` is
+        // O(payload), and this critical section serializes every fiber's park/wake/finish.
+        let sum = crate::vm::core::wire_summary(&w);
         let mut c = self.lock();
         {
             let mut q = core.q.lock().unwrap_or_else(|e| e.into_inner());
             if q.len() >= cap {
                 return false; // full — caller parks (both guards drop on return)
             }
-            q.push(w);
+            q.push(sum, w);
         }
         self.wake_bucket(&mut c, key);
         drop(c);
@@ -2566,8 +2569,13 @@ impl MnSched {
     }
 
     fn send_wake(&self, key: usize, core: &Arc<ChannelCore>, w: WireValue) {
+        // Summarised BEFORE core lock A — see `send_wake_bounded`.
+        let sum = crate::vm::core::wire_summary(&w);
         let mut c = self.lock();
-        core.q.lock().unwrap_or_else(|e| e.into_inner()).push(w);
+        core.q
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(sum, w);
         self.wake_bucket(&mut c, key);
         drop(c);
         self.cv.notify_all();

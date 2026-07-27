@@ -1223,6 +1223,36 @@ struct Suite:
         }
     }
 
+    /// W6-10 review — the NEGATIVE direction, which matters just as much: a program comfortably
+    /// UNDER the cap must still PASS while holding a shared core. A core's payload is ONE `Arc`
+    /// allocation, but `from_wire` mints a FRESH `Obj::Shared` alias slot for every crossing, so 50
+    /// receives of the same handle used to charge that payload 50 times and fire a spurious
+    /// OVER-MEMORY at ~1/50th of the real footprint — a resource cap whose false-positive rate grows
+    /// with fan-out. Bytes are now charged once per CORE per heap.
+    #[test]
+    fn under_cap_still_passes_with_many_handles_to_one_core() {
+        let d = TmpDir::new();
+        // ~1 MB parked off-heap, 50 live reconstructed handles to that ONE core, 8 MB cap.
+        let f = d.write(
+            "alias_test.chz",
+            "import std.concurrency\n\ntest fn alias():\n    xs := []\n    \
+             for i in range(20000):\n        xs.push(i)\n    s := Shared(xs)\n    \
+             ch := Channel[Shared[List[int]]](100)\n    for i in range(50):\n        ch.send(s)\n    \
+             hs := []\n    for i in range(50):\n        hs.push(ch.recv())\n    \
+             junk := []\n    for i in range(5000):\n        junk = [i]\n    \
+             assert hs.len() == 50\n",
+        );
+        for parallel in [false, true] {
+            let report = run_tests_capped(&f, parallel, 8_000_000);
+            assert!(
+                report.text.contains("PASS alias"),
+                "50 handles to one core must not multiply its payload (parallel={parallel}); \
+                 report:\n{}",
+                report.text
+            );
+        }
+    }
+
     // ---- `--timeout` wall-clock cap (M:N-engine-only; tests run parallel=true) ----
     // Robust to CI timing: a CLEARLY-infinite loop under a SHORT timeout, or a CLEARLY-fast test
     // under a GENEROUS timeout — never near-boundary.

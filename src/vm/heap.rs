@@ -738,6 +738,19 @@ impl Heap {
     /// but stable enough to compare before/after on a fixed workload.
     pub fn live_bytes(&self) -> usize {
         let mut total = 0usize;
+        // W6-10 — an off-heap wire payload belongs to ONE `Arc` core, but `from_wire` mints a FRESH
+        // `Obj::Channel`/`Shared`/… slot for every crossing, so a heap can hold K alias slots for one
+        // core. Charge each core's bytes ONCE per heap (by `Arc` pointer identity), or K handles to a
+        // 100 MB payload report 1 GB and the cap fires OVER-MEMORY on a program using 1/K of it.
+        // Linear scan: core slots are a handful; it stays allocation-free until one shows up.
+        let mut cores: Vec<usize> = Vec::new();
+        let mut once = |ptr: usize| {
+            let fresh = !cores.contains(&ptr);
+            if fresh {
+                cores.push(ptr);
+            }
+            fresh
+        };
         for slot in &self.slots {
             let Some(obj) = &slot.obj else { continue };
             total += std::mem::size_of::<Obj>();
@@ -756,15 +769,27 @@ impl Heap {
                 Obj::Set(s) => s.entries.capacity() * std::mem::size_of::<(u64, Value)>(),
                 // W6-10 — an airlocked value lives as a `WireValue` in an `Arc` OUTSIDE every
                 // `Heap`, so it used to be counted nowhere and a 195 MB channel backlog sailed past
-                // a 200 KB `--max-heap` cap. Two accepted approximations: (1) the byte walk stops at
-                // a NESTED core boundary (that core's own summary owns those bytes), and (2) one
-                // `Arc` core aliased by N worker heaps under M:N is counted in all N — an OVER-count,
-                // so the cap only ever trips EARLIER, never later.
-                Obj::Channel(core) => core.q.lock().unwrap().summary().0,
-                Obj::Executor(core) => core.inner.lock().unwrap().summary().0,
-                Obj::Shared(core) => core.summary.bytes(),
-                Obj::RwShared(core) => core.summary.bytes(),
-                Obj::Atomic(core) => core.summary.bytes(),
+                // a 200 KB `--max-heap` cap. Each core's cached byte count is charged ONCE per heap
+                // (`once`, by `Arc` identity — K handles to one core are K views of one allocation,
+                // not K allocations). What this number means: **bytes reachable from THIS heap**. A
+                // core shared by N M:N worker heaps therefore appears in each of them — correct for
+                // a per-heap reachability cap (each worker really can reach it), but it is not an
+                // ownership split, so the N heaps' totals do not add up to process RSS.
+                //
+                // KNOWN GAP (gaps.md W6-10 residual, still OPEN): the byte walk stops at a NESTED
+                // core boundary — those bytes are owned by that core's own summary, and reached here
+                // only through ITS `Obj::*` alias slot. A nested core whose last alias slot has been
+                // swept (it survives inside the parent's `WireValue`) is counted NOWHERE. Closing it
+                // needs cross-core byte recursion with `Arc` de-dup; deliberately not built.
+                Obj::Channel(core) if once(Arc::as_ptr(core) as usize) => {
+                    core.q.lock().unwrap().summary().0
+                }
+                Obj::Executor(core) if once(Arc::as_ptr(core) as usize) => {
+                    core.inner.lock().unwrap().summary().0
+                }
+                Obj::Shared(core) if once(Arc::as_ptr(core) as usize) => core.summary.bytes(),
+                Obj::RwShared(core) if once(Arc::as_ptr(core) as usize) => core.summary.bytes(),
+                Obj::Atomic(core) if once(Arc::as_ptr(core) as usize) => core.summary.bytes(),
                 _ => 0,
             };
         }
@@ -1069,9 +1094,10 @@ mod iter_obj_tests {
         assert!(h.children(sr).contains(&kept), "DIRTY must re-walk");
 
         let cc = Arc::new(ChannelCore::default());
+        let hw = crate::vm::wire::WireValue::Handle(kept);
         cc.q.lock()
             .unwrap()
-            .push(crate::vm::wire::WireValue::Handle(kept));
+            .push(crate::vm::core::wire_summary(&hw), hw);
         let cr = h.alloc(Obj::Channel(Arc::clone(&cc)));
         assert!(h.children(cr).contains(&kept));
         assert!(h.children(cr).contains(&kept));
@@ -1131,7 +1157,10 @@ mod iter_obj_tests {
         let cr = h.alloc(Obj::Channel(Arc::clone(&cc)));
         let before = h.live_bytes();
         for _ in 0..100 {
-            cc.q.lock().unwrap().push(wlist(50));
+            let w = wlist(50);
+            cc.q.lock()
+                .unwrap()
+                .push(crate::vm::core::wire_summary(&w), w);
         }
         let queued = h.live_bytes();
         assert!(queued > before + 100 * 50 * std::mem::size_of::<crate::vm::wire::WireValue>());
@@ -1142,5 +1171,134 @@ mod iter_obj_tests {
             "a drained queue must return to zero"
         );
         let _ = cr;
+    }
+
+    /// W6-10 review — a core's payload is ONE `Arc` allocation, but `from_wire` mints a FRESH
+    /// `Obj::Shared`/`Obj::Channel` alias slot for every crossing, so a heap can hold K slots for
+    /// one core. Charging the payload once per SLOT multiplies it by K and makes `--max-heap` report
+    /// memory the process does not hold — a false-positive OVER-MEMORY at ~footprint/K, and the
+    /// false-positive rate grows with fan-out. Bytes are counted once per CORE per heap.
+    #[test]
+    fn live_bytes_counts_a_shared_core_once_per_heap() {
+        let mut h = Heap::new();
+        let core = Arc::new(SharedCore {
+            v: Mutex::new(wlist(10_000)),
+            ..Default::default()
+        });
+        let first = h.alloc(Obj::Shared(Arc::clone(&core)));
+        h.children(first); // fill the lazy summary
+        let one_alias = h.live_bytes();
+
+        // Nine more handles to the SAME core (what `hs.push(ch.recv())` × K produces).
+        for _ in 0..9 {
+            h.alloc(Obj::Shared(Arc::clone(&core)));
+        }
+        let ten_aliases = h.live_bytes();
+        assert!(
+            ten_aliases - one_alias < 10 * std::mem::size_of::<Obj>() + 4096,
+            "10 handles to one core must not multiply its payload: {one_alias} -> {ten_aliases}"
+        );
+
+        // Same for a queue core.
+        let cc = Arc::new(ChannelCore::default());
+        for _ in 0..100 {
+            let w = wlist(50);
+            cc.q.lock()
+                .unwrap()
+                .push(crate::vm::core::wire_summary(&w), w);
+        }
+        let c1 = h.alloc(Obj::Channel(Arc::clone(&cc)));
+        let one_chan = h.live_bytes();
+        for _ in 0..9 {
+            h.alloc(Obj::Channel(Arc::clone(&cc)));
+        }
+        assert!(
+            h.live_bytes() - one_chan < 10 * std::mem::size_of::<Obj>() + 4096,
+            "10 handles to one channel must not multiply its backlog"
+        );
+        let _ = c1;
+    }
+
+    /// W6-7 review — THE trap. `Shared`/`RwShared`/`Atomic` payloads are REPLACED (`set`/`update`/
+    /// `write`/`store`/`exchange`/`cas`/`add`/`sub`), so a store that forgets to refresh the memo
+    /// leaves a stale `WS_CLEAN` next to a handle-bearing payload → the GC stops tracing it →
+    /// use-after-free. Every replacing store path must survive a memoized-CLEAN core. Deleting any
+    /// `summary.set` in `vm::core`'s `store`/`store_guarded` turns this RED.
+    #[test]
+    fn replacing_store_refreshes_the_gc_summary() {
+        use crate::vm::core::{AtomicCore, RwSharedCore, WS_CLEAN};
+        use crate::vm::wire::WireValue;
+        let mut h = Heap::new();
+        let kept = h.alloc(Obj::Str("kept".into()));
+        let handle = || WireValue::List {
+            id: 0,
+            items: vec![WireValue::Handle(kept)],
+        };
+
+        // Shared::set / Shared::update write-back.
+        let sc = Arc::new(SharedCore {
+            v: Mutex::new(wlist(4)),
+            ..Default::default()
+        });
+        let sr = h.alloc(Obj::Shared(Arc::clone(&sc)));
+        assert!(h.children(sr).is_empty());
+        assert_eq!(sc.summary.state(), WS_CLEAN, "memoized CLEAN");
+        sc.store(handle());
+        assert!(
+            h.children(sr).contains(&kept),
+            "SharedCore::store must refresh the memo"
+        );
+
+        // RwShared::set / RwShared::write write-back.
+        let rc = Arc::new(RwSharedCore {
+            v: std::sync::RwLock::new(wlist(4)),
+            ..Default::default()
+        });
+        let rr = h.alloc(Obj::RwShared(Arc::clone(&rc)));
+        assert!(h.children(rr).is_empty());
+        assert_eq!(rc.summary.state(), WS_CLEAN);
+        rc.store(handle());
+        assert!(
+            h.children(rr).contains(&kept),
+            "RwSharedCore::store must refresh the memo"
+        );
+
+        // Atomic::store, and the guarded RMW paths (exchange / cas / add|sub).
+        let ac = Arc::new(AtomicCore {
+            v: Mutex::new(wlist(4)),
+            ..Default::default()
+        });
+        let ar = h.alloc(Obj::Atomic(Arc::clone(&ac)));
+        assert!(h.children(ar).is_empty());
+        assert_eq!(ac.summary.state(), WS_CLEAN);
+        ac.store(handle());
+        assert!(
+            h.children(ar).contains(&kept),
+            "AtomicCore::store must refresh the memo"
+        );
+        ac.store(wlist(4)); // back to CLEAN
+        assert!(h.children(ar).is_empty());
+        {
+            let mut g = ac.v.lock().unwrap();
+            ac.store_guarded(&mut g, handle());
+        }
+        assert!(
+            h.children(ar).contains(&kept),
+            "AtomicCore::store_guarded must refresh the memo"
+        );
+
+        // …and the payload actually SURVIVES a collection rooted only through the core.
+        for r in [sr, rr, ar] {
+            let mut stack = vec![r];
+            while let Some(x) = stack.pop() {
+                if h.mark(x) {
+                    stack.extend(h.children(x));
+                }
+            }
+        }
+        h.sweep();
+        // `get` PANICS on a collected slot ("dangling GcRef"), so this line is the assertion: a
+        // value live ONLY through a core payload must survive the sweep.
+        assert!(matches!(h.get(kept), Obj::Str(s) if s.as_str() == "kept"));
     }
 }

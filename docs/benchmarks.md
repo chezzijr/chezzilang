@@ -1114,6 +1114,25 @@ elements are themselves heap objects (an `RwShared[List[str]]` fold) were alread
 (their own `Obj`s keep `live` high, so GC rarely fires) and are unchanged: 0.062/0.116/0.233 → 0.063/0.118/0.242
 at n = 100k/200k/400k, within noise.
 
+**The cost this buys: one `wire_summary` walk per channel `send`** (the `recv` side is free — each
+message's byte count is stored *with* the message in the queue, so `pop` is O(1)). Both queue-lock
+sections stay O(1): the send-side walk is hoisted **before** `MnSched::core` is taken, because that lock
+serializes every fiber's park/wake/finish and its hold time must not scale with user payload size.
+`benches/run.chz` has no channel bench, so this path was previously unmeasured. Bespoke, release,
+best-of-5 (base = `main` @ 8a913d0, both binaries built in their own target dirs):
+
+| channel bench | base | after |
+|---|---|---|
+| 2 000 round-trips × 2 000-element list, `--serial` | 0.163 s | 0.174 s (+7%) |
+| 2 000 round-trips × 2 000-element list, M:N | 0.165 s | 0.172 s (+4%) |
+| 200 round-trips × **20 000**-element list, `--serial` | 0.333 s | 0.336 s (+0.8%) |
+| 4 producers + 1 consumer, 2 000 × 2 000-element list, M:N | 0.129 s | 0.126 s (flat) |
+
+The overhead does **not** scale with message size the way a second full traversal would — 10× bigger
+messages cost +0.8%, not +7% — because `wire_summary` is a pointer-chasing sum next to `to_wire`'s much
+more expensive allocate-and-clone walk on the same tree. The M:N fan-out case (the one that would show a
+global-lock regression) is flat.
+
 **No regression on the common (no-core) path.** `benches/run.chz` allocates no cores, so nothing should
 move. Direct before→after, same machine + session, 7 runs each, min / median seconds:
 `map` 0.135/0.181 → **0.119/0.129** · `str` 0.157/0.161 → 0.156/0.160 · `primes` 0.564/0.590 →
@@ -1121,6 +1140,11 @@ move. Direct before→after, same machine + session, 7 runs each, min / median s
 run-to-run noise — **flat**, as expected (the five new `live_bytes`/`children` arms are on `Obj` variants
 the benches never allocate). `CHEZZI_HEAP_STATS` peak is byte-identical before and after.
 
+Re-verified on the final binary (after the review fixes below), n = 200 000, best-of-5: `RwShared` holder
+**1.534 s → 0.218 s** (7.0×), plain-`List` control 0.198 → 0.193 s — the holder now matches the control.
+
 Same change also closes gaps.md **W6-10**: the cached byte half of the summary feeds `Heap::live_bytes`, so
 `chezzi test --max-heap` finally sees an off-heap channel backlog / `Shared`-parked data (195 MB used to
-pass a 200 KB cap).
+pass a 200 KB cap). Those bytes are charged **once per core per heap** (by `Arc` identity) — charging once
+per `Obj` alias slot multiplied a shared payload by the fan-out and produced spurious OVER-MEMORY verdicts.
+One residual escape stays open (a nested core with no surviving alias slot) — gaps.md `W6-10r`.

@@ -3486,7 +3486,10 @@ fn deadlock_predicate_vetoed_by_queued_value_on_demoted_channel() {
     sched.blocked_native.fetch_add(1, Ordering::Relaxed);
     c.register_demoted(ptr, &core);
     // A sibling already queued a value on the demoted fiber's channel: it will pop + progress.
-    core.q.lock().unwrap().push(WireValue::Int(7));
+    core.q.lock().unwrap().push(
+        crate::vm::core::wire_summary(&WireValue::Int(7)),
+        WireValue::Int(7),
+    );
     assert!(
         !sched.is_deadlocked(&c),
         "a queued value on a demoted channel must veto the deadlock fire (#1 false-positive)"
@@ -3524,7 +3527,10 @@ fn demoted_channel_registry_is_refcounted_for_two_fibers_on_one_channel() {
     c.register_demoted(ptr, &core);
     c.register_demoted(ptr, &core); // refcount now 2
     // A value queued on the shared channel → at least one demoted fiber pops + progresses.
-    core.q.lock().unwrap().push(WireValue::Int(7));
+    core.q.lock().unwrap().push(
+        crate::vm::core::wire_summary(&WireValue::Int(7)),
+        WireValue::Int(7),
+    );
     assert!(
         !sched.is_deadlocked(&c),
         "queued value on the shared demoted channel vetoes deadlock"
@@ -3540,7 +3546,10 @@ fn demoted_channel_registry_is_refcounted_for_two_fibers_on_one_channel() {
     );
     // A fresh value for the surviving fiber re-vetoes via the retained entry (proves it wasn't
     // dropped at the first unregister).
-    core.q.lock().unwrap().push(WireValue::Int(9));
+    core.q.lock().unwrap().push(
+        crate::vm::core::wire_summary(&WireValue::Int(9)),
+        WireValue::Int(9),
+    );
     assert!(
         !sched.is_deadlocked(&c),
         "the retained refcount-1 entry still peeks the queue (entry not dropped at refcount 1)"
@@ -5887,7 +5896,10 @@ fn mnsched_park_requeues_when_message_already_waiting() {
     sched.seed(vec![mk_fiber(0)]);
     let f = take_run(&sched);
     // Simulate a send that landed in the gap (message queued, but this fiber wasn't parked yet).
-    core.q.lock().unwrap().push(WireValue::Int(7));
+    core.q.lock().unwrap().push(
+        crate::vm::core::wire_summary(&WireValue::Int(7)),
+        WireValue::Int(7),
+    );
     sched.park(key, &core, f);
     let c = sched.lock();
     assert_eq!(c.parked_n, 0, "must not park behind a waiting message");

@@ -32,6 +32,7 @@ is that "which of these is still open?" previously required reading 1400 lines o
 | `min`/`max` → `Option` | `:1042` | `List.min`/`max`/`min_by`/`max_by` fault on empty while `first`/`last`/`pop` return `Option[T]` | Breaking surface change: 23 call sites + docs + examples. Own milestone |
 | `List[Any]` widening | `:1083` | `List[Any] = [1, 3.0]` silently widens the int to `1.0` | Deferred pre-freeze (wave 4) |
 | **N10** | `:1299` | A `wait:` timer arm makes `--serial` inline-sleep instead of yielding to a runnable sibling (serial ≠ M:N) | Deliberate pre-freeze known-limit; fix is folded into the post-freeze serial-engine removal |
+| **W6-10r** | `:828` | `--max-heap` residual: a payload reachable ONLY through a **nested** core (a `Channel` inside a `Shared`, once the nested core's last `Obj` alias slot is swept) is counted nowhere | Left open by the W6-10 fix on purpose. `live_bytes` reaches a core's bytes through its `Obj::*` alias slot; a nested core has none. Closing it needs cross-core byte recursion with `Arc` de-dup — narrow trigger, not worth the machinery yet |
 | protocol embeds | `:1155` | A protocol-embedded method isn't callable through the interface value (`p: Person` can't call embedded `name()`) despite `spec.md:973` "flattened at bound sites" | Filed as a safe-direction observation in wave 3; never triaged — doc and behavior contradict each other either way |
 
 **Known limits that are documented, not bugs** (listed so they aren't re-filed): `Iterable[T]` element
@@ -782,16 +783,26 @@ Test: `extern_named_after_newtype_rejected` (both decl orders, single-module + g
 >
 > **The trap this design had to survive:** `Shared`/`RwShared`/`Atomic` payloads are *replaced*
 > (`set`/`update`/`write`/`store`/`exchange`/`cas`/`add`/`sub`), so a stale `CLEAN` after a store that
-> introduced a handle would stop the GC tracing it. Three defences: (1) the queue cores' `queue` field
+> introduced a handle would stop the GC tracing it. Four defences: (1) the queue cores' `queue` field
 > is now **private** to `vm::core` — every push/pop must go through `ChanState`/`ExecState` helpers
 > that maintain the summary, so a missed site is a *compile error*, not a review miss; (2) the
 > single-value stores route through `SharedCore::store` / `RwSharedCore::store` /
 > `AtomicCore::store`/`store_guarded`, which refresh the summary **under the same value lock** as the
 > write; (3) a `debug_assert` in `Heap::mark_core_payload` re-derives the verdict on every debug-build
-> GC pass, so any future store path that forgets to refresh trips the whole test suite. The `Default`
+> GC pass, so any future store path that forgets to refresh trips the whole test suite; (4)
+> `vm::heap::replacing_store_refreshes_the_gc_summary` drives each of those four store methods on an
+> ALREADY-memoized-CLEAN core with a `Handle`-bearing payload and then mark-sweeps — deleting any one
+> `summary.set` turns it RED (verified by mutation). The `Default`
 > state is `WS_UNKNOWN` = "walk once, then memoize", so a core built outside a store path (the
 > `..Default::default()` constructors in `src/vm/exec.rs`) degrades to the old behaviour rather than
 > under-rooting.
+>
+> Note what defence (4) had to be, and why the *Chezzi-level* stress test
+> (`vm::gc_tests::gc_stress_values_parked_in_cores`) cannot stand in for it: `WireValue::Handle` is
+> produced by exactly one arm (`Obj::Module` → `sched.rs:2230`) and every core store funnels through
+> `to_wire_crossable`/`wire_callable` → `ensure_crossable`, which REJECTS a handle-bearing value — so
+> no program can park a `Handle` in a core, and the stress test's payloads are all provably CLEAN. It
+> is a useful smoke test, not a proof; the memo's soundness is proven at the Rust unit level.
 >
 > **Measured** (`--serial`, release, same machine/session; the holder-isolation repro below, scaled by
 > n — a 200k-int container held by X while a sibling loop allocates n times):
@@ -880,18 +891,33 @@ bytes written." **Root cause** `src/vm/fileio.rs:48-55` — the `Backing::Stdout
 > the `to_wire`/`from_wire` already there — re-summing the whole queue per sweep would just be a
 > different quadratic); single-value cores refresh it at store time.
 >
-> **Two documented approximations.** (1) The byte walk **stops at a nested-core boundary** — those
-> bytes belong to that core's own summary, so they are counted once rather than twice, and a payload
-> reachable *only* through a nested core is uncounted (narrow; nested cores are exotic). (2) One `Arc`
-> core aliased by N worker heaps under M:N is counted in **all N** — an OVER-count, so the cap only
-> ever trips EARLIER, never later. The guarantee is unchanged in kind: it is still a per-heap
-> high-water, not a global RSS total.
+> **What the number means: bytes REACHABLE FROM THIS HEAP.** A core's payload is ONE `Arc`
+> allocation, but `from_wire` mints a FRESH `Obj::Shared`/`Obj::Channel` alias slot on every crossing
+> (`src/vm/sched.rs:2641`), so a single heap can hold K alias slots for one core. `live_bytes`
+> therefore charges each core's bytes **once per heap, by `Arc` pointer identity** — charging per
+> *slot* multiplied a 100 MB payload by K and produced a spurious OVER-MEMORY at ~footprint/K, with
+> the false-positive rate growing with fan-out (exactly backwards for a resource cap). A core shared
+> by N M:N worker heaps still appears in each of them, which is correct for a per-heap *reachability*
+> cap (each worker really can reach it) but means the N heaps' totals are not an ownership split of
+> RSS. Test: `vm::heap::live_bytes_counts_a_shared_core_once_per_heap`.
+>
+> **RESIDUAL, STILL OPEN (`W6-10r` in the index table).** The byte walk stops at a **nested-core
+> boundary**: those bytes are owned by that core's own summary, and `live_bytes` reaches a core's
+> summary only through an `Obj::*` alias slot. A nested core whose last alias slot has been swept —
+> e.g. `s := Shared(ch)`, then the local `ch` binding dies, then backlog through `s.get().send(...)`
+> — survives inside the parent's `WireValue` with no slot of its own, so its backlog is counted
+> **nowhere** and sails past the cap exactly as before. Closing it needs cross-core byte recursion
+> with `Arc` de-dup; deliberately not built (narrow trigger, real machinery). The earlier claim that
+> "that core's own summary owns those bytes" makes the case safe was **wrong** and is retracted.
 >
 > **Observable change (the point of the fix):** `--max-heap` now trips where it previously passed.
 > Nothing else moves — the dual-engine byte-identity gate runs cap-OFF, and `live_bytes` is otherwise
 > only sampled for the peak probe. Test: `test_runner::over_memory_counts_offheap_wire_payload` (a
 > `Channel` backlog and a `Shared`-parked list, both engines, under a cap far above anything either
-> program keeps in its own `Heap` — so only the off-heap storage can reach it).
+> program keeps in its own `Heap` — so only the off-heap storage can reach it), plus the negative
+> direction `under_cap_still_passes_with_many_handles_to_one_core` (50 reconstructed handles to one
+> ~700 KB core under an 8 MB cap must still PASS — mutation-verified: removing the per-core de-dup
+> turns it OVER-MEMORY).
 
 <details><summary>Original report</summary>
 

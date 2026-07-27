@@ -311,17 +311,23 @@ render ERROR too (whole file, before any test runs), counted separately as `file
    used to count it nowhere and a 195 MB channel backlog sailed past a 200 KB cap. Each core now caches
    its payload's approximate byte size (the same summary that makes the GC skip pure-data payloads —
    see gaps.md W6-7) and `live_bytes` adds it in, so the natural *concurrent* runaway — an unbounded
-   backlog, or data parked in a `Shared` — trips like any other. Two documented approximations: the byte
-   walk **stops at a nested-core boundary** (those bytes belong to that core's own summary, counted once
-   rather than twice), and one `Arc` core aliased by N worker heaps under M:N is counted in **all N** —
-   an OVER-count, so the cap only ever trips EARLIER, never later. This is a **different hole from the
-   inline-scalar escape below, which remains OPEN.** **v1 limits (deterministic, documented):** the
+   backlog, or data parked in a `Shared` — trips like any other. A core's bytes are charged **once per
+   core per heap** (by `Arc` pointer identity): `from_wire` mints a fresh `Obj::Shared`/`Obj::Channel`
+   alias slot on every crossing, so charging per *slot* would multiply one payload by the number of live
+   handles and fire OVER-MEMORY on a program using a fraction of the cap. Two things follow, and they
+   sharpen the per-heap guarantee below rather than restate it: a core reachable from N M:N worker heaps
+   is counted in **each** of them (the number is "bytes **reachable from** this heap", not an ownership
+   split — the N heaps' totals do not sum to RSS), and a payload reachable only through a **nested** core
+   whose last alias slot has been swept is counted **nowhere** (gaps.md `W6-10r`, still OPEN). This is a
+   **different hole from the inline-scalar escape below, which also remains OPEN.**
+   **v1 limits (deterministic, documented):** the
    trip fires only at a **GC boundary**, and GC triggers on `Obj`-count growth — a loop growing a single
    container of **inline scalars** (e.g. `xs.push(i)` for int `i`) allocates no `Obj`s, never sweeps, and
    so never trips (push a heap value to guard it) — **still open**; the check is a high-water on `live_bytes` which
    **undermeasures** true RSS and can overshoot ~2× `N` before firing (`next_gc = 2*live`). **The cap is
    PER-HEAP, so its guarantee is: any single execution context (the test's own heap; a `spawn`'d worker's
-   heap on M:N) whose live heap exceeds `N` is aborted — a real runaway trips on whichever heap runs it,
+   heap on M:N) whose live heap — including the off-heap wire payloads it can REACH, which a worker that
+   allocated nothing itself may still hold a handle to — exceeds `N` is aborted — a real runaway trips on whichever heap runs it,
    the SAME verdict for a real runaway.** **M:N ENGINE ONLY — `--max-heap` errors if combined with
    `--serial`**, which is what makes the cap sound-by-construction. The cooperative `--serial` engine
    shares ONE heap across the parent + every `spawn`/`parallel:` fiber (so its `live_bytes` is

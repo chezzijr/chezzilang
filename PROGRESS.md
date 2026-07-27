@@ -22,8 +22,12 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > `write`/`store`/`exchange`/`cas`/`add`, so a stale CLEAN under-roots the GC) is closed three ways:
 > `ChanState`/`ExecState`'s `queue` is now **private** so a missed push/pop site is a compile error;
 > the single-value stores route through `SharedCore::store`/`RwSharedCore::store`/`AtomicCore::store`
-> +`store_guarded`, refreshing the summary **under the same value lock** as the write; and a
-> `debug_assert` in `Heap::mark_core_payload` re-derives the verdict on every debug-build GC pass.
+> +`store_guarded`, refreshing the summary **under the same value lock** as the write; a
+> `debug_assert` in `Heap::mark_core_payload` re-derives the verdict on every debug-build GC pass; and
+> `vm::heap::replacing_store_refreshes_the_gc_summary` drives all four store methods on an
+> already-memoized-CLEAN core with a handle payload, then mark-sweeps (mutation-verified RED when any
+> `summary.set` is deleted — the Chezzi-level stress test CANNOT prove this, since `ensure_crossable`
+> rejects handle-bearing values so no program can park a `Handle` in a core).
 > `Default` is `WS_UNKNOWN` = walk-once-then-memoize, so a core built outside a store path (the
 > `..Default::default()` constructors in `exec.rs`) degrades to the old behaviour, never under-roots.
 > **Measured** (`--serial`, release, 200k-int container + n allocations): `RwShared` holder
@@ -31,12 +35,20 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > tracking the plain-`List` control (0.061/0.196/1.203 s) at every n. Holder isolation at 200k:
 > `RwShared` 1.766→**0.218 s**, `Shared` 2.051→**0.204 s**, `Channel.send` 2.050→**0.220 s** — the
 > holder penalty is gone. GC **pacing** deliberately untouched (timing-observable, parity blast
-> radius); no `benches/run.chz` movement (it uses no cores). **Only observable change: `--max-heap`
+> radius); no `benches/run.chz` movement (it uses no cores). The cost bought is **one `wire_summary`
+> walk per channel `send`**, hoisted OFF the global `MnSched` lock (the `recv` side is free — each
+> message's byte count rides in the queue next to it, so `pop` is O(1)): +7% on 2 000 round-trips of a
+> 2 000-element list, +0.8% on 10× bigger messages, flat on a 4-producer M:N fan-out — measured, since
+> `benches/run.chz` has no channel bench. `live_bytes` charges a core's bytes **once per core per
+> heap** (`Arc` identity); per-*slot* charging multiplied a shared payload by the live-handle count and
+> fired spurious OVER-MEMORY. One residual escape stays OPEN: a nested core with no surviving alias
+> slot is counted nowhere (gaps.md `W6-10r`). **Only observable change: `--max-heap`
 > now trips where it previously passed** — which is the point of W6-10. Tests:
 > `vm::core::wire_summary_bytes_and_dirtiness`/`wire_summary_state_transitions`,
 > `vm::heap::core_payload_walk_is_memoized`/`dirty_core_payload_is_still_traced`/
-> `live_bytes_counts_offheap_wire_payload`, `vm::gc_tests::gc_stress_values_parked_in_cores`,
-> `test_runner::over_memory_counts_offheap_wire_payload`. Docs: `docs/gaps.md` (both retired FIXED +
+> `live_bytes_counts_offheap_wire_payload`/`live_bytes_counts_a_shared_core_once_per_heap`/
+> `replacing_store_refreshes_the_gc_summary`, `vm::gc_tests::gc_stress_values_parked_in_cores`,
+> `test_runner::over_memory_counts_offheap_wire_payload`/`under_cap_still_passes_with_many_handles_to_one_core`. Docs: `docs/gaps.md` (both retired FIXED +
 > dropped from the open-items index), `docs/benchmarks.md`, `docs/concurrency.md` (the read-view's
 > O(1)-memory claim kept; the false *time* implication corrected), `docs/future.md §1b` (the cap now
 > counts off-heap wire bytes — the inline-scalar escape in that same section is a DIFFERENT hole and
