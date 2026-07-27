@@ -115,3 +115,58 @@ fn check_parity_reports_divergence() {
         "report shows both sides, stderr:\n{stderr}"
     );
 }
+
+// ===== W6-9 — the oracle compares RAW BYTES, not a lossily-decoded capture =====
+//
+// The sink is `Vec<u8>` so `write_bytes` is byte-exact (W6-9), which means a program can now emit
+// non-UTF-8 — and `String::from_utf8_lossy` is NOT injective: `ff` and `fe` both become one U+FFFD.
+// Comparing DECODED captures would report `parity OK` for a run whose engines put different bytes on
+// fd 1, i.e. the feature would have degraded its own detector. `--check-parity` promises
+// "byte-identical stdout", so it (and the in-tree `assert_file_parity` it mirrors) diffs bytes.
+
+/// Run `chezzi run --check-parity <file>` to completion.
+fn check_parity(entry: &PathBuf) -> std::process::Output {
+    Command::new(env!("CARGO_BIN_EXE_chezzi"))
+        .args(["run", "--check-parity"])
+        .arg(entry)
+        .output()
+        .expect("spawn chezzi")
+}
+
+#[test]
+fn check_parity_reports_a_byte_only_divergence() {
+    // The channel orders the two tasks, so each engine's byte order is deterministic: serial prints
+    // live (`fe ff`), M:N flushes each task's slot in task order (`ff fe`). Both decode to "\u{FFFD}
+    // \u{FFFD}" — only a byte-level diff can see it.
+    let t = TmpDir::new();
+    let entry = t.write(
+        "main.chz",
+        "import std.io\n\nfn main():\n    ch := Channel[int]()\n    parallel:\n        spawn:\n            _ := ch.recv()\n            _ := io.stdout().write_bytes(b\"\\xff\")\n        spawn:\n            _ := io.stdout().write_bytes(b\"\\xfe\")\n            ch.send(1)\nmain()\n",
+    );
+    let out = check_parity(&entry);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_ne!(out.status.code(), Some(0), "divergence must exit non-zero");
+    assert!(
+        stderr.contains("parity DIVERGENCE"),
+        "a divergence visible only in the RAW bytes must not decode away, stderr:\n{stderr}"
+    );
+}
+
+#[test]
+fn check_parity_echoes_the_captured_bytes_unchanged() {
+    let t = TmpDir::new();
+    let entry = t.write(
+        "main.chz",
+        "import std.io\n\n_ := io.stdout().write_bytes(b\"\\xff\\xfe\")\n",
+    );
+    let out = check_parity(&entry);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(0), "parity holds here:\n{stderr}");
+    assert!(stderr.contains("parity OK"), "stderr:\n{stderr}");
+    // The tool must reproduce the output of the command it checks — `chezzi run` emits `ff fe`.
+    assert_eq!(
+        out.stdout,
+        vec![0xff, 0xfe],
+        "check-parity re-encoded the capture it echoes"
+    );
+}

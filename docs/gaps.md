@@ -1040,18 +1040,35 @@ last surviving member of the family.
 > **serial == M:N is preserved by construction**: concatenating `Vec<u8>` per task slot in the same
 > index order is byte-identical to concatenating `String`. Nothing was sorted or normalised.
 >
+> **…and the ORACLE had to be widened with it (adversarial-review finding, fixed in the same entry).**
+> The first cut left both parity oracles comparing the LOSSILY-DECODED capture, which is exactly the
+> mechanism that hides a byte divergence: `from_utf8_lossy` is not injective, so a run whose serial leg
+> emits `ff` where the M:N leg emits `fe` decodes to the same `U+FFFD U+FFFD` on both sides and
+> `chezzi run --check-parity` printed `parity OK (serial == M:N)` with exit 0 — a detector degraded by
+> the very feature it guards, and only reachable BECAUSE `write_bytes` went byte-exact. Fix:
+> `vm::run_file_bytes` → `vm::RunOutputRaw` (the `RunOutput` shape minus the decode), taken by
+> `run_check_parity` (`src/main.rs`) and by `assert_file_parity` (`src/vm/parity_tests.rs`), which now
+> asserts the text (readable failure) AND the bytes. `--check-parity` also echoes the agreed capture
+> with `write_all` instead of `print!`, so the tool reproduces the output of the command it checks, and
+> its divergence report hex-dumps a line that is not valid UTF-8 (`serial: [fe, ff]` / `M:N: [ff, fe]`).
+>
 > **Residual, deliberate:** the CAPTURE boundary (`Vm::take_out`, the `run_*` helpers, `RunOutput`)
-> still decodes with `from_utf8_lossy` in one shared `captured()` helper, because `chezzi test`,
-> `chezzi run --check-parity` and lib embedders hand stdout back to Rust as a `String`. A non-UTF-8
-> byte therefore still shows as U+FFFD *there*. Both engines decode identically, so parity is
-> unaffected, and the in-language contract — `chezzi run`, the only path a program's stdout actually
-> reaches a console/pipe/file — is byte-exact. Widening `RunOutput` to `Vec<u8>` is the follow-up if
-> an embedder ever needs it (~316 consumer sites for a display-only gain today).
+> still decodes with `from_utf8_lossy` in one shared `captured()` helper, because `chezzi test` and lib
+> embedders hand stdout back to Rust as a `String`. A non-UTF-8 byte therefore still shows as U+FFFD
+> *there* — a DISPLAY path, not a comparison one (the oracles no longer route through it) — while the
+> in-language contract, `chezzi run`, the only path a program's stdout actually reaches a
+> console/pipe/file, is byte-exact. Widening `RunOutput` to `Vec<u8>` is the follow-up if an embedder
+> ever needs it (~316 consumer sites for a display-only gain today). Note the `run_capture*` /
+> `run_program*` unit helpers still compare decoded `String`s: fine today (no in-tree unit source emits
+> non-UTF-8), but a NEW two-engine test that writes raw bytes must use `run_file_bytes`.
 >
 > Tests: `tests/interactive.rs::{stdout,stderr,buffered_stdout}_write_bytes_is_byte_exact_{mn,serial}`
 > (real child processes — the only way to witness the bytes on fd 1/2, since the in-VM runner captures
 > as a `String`) plus four in-language pins in `tests/chz/stdlib/io_writer_test.chz` (return count on
-> stdout/stderr, the file arm's non-UTF-8 round-trip, a 200 KB write's full count). The N1 dead-pipe
+> stdout/stderr, the file arm's non-UTF-8 round-trip, a 200 KB write's full count), and two on the
+> oracle itself in `tests/check_parity.rs`: a channel-ordered program whose engines emit `ff`/`fe` in
+> different order must report DIVERGENCE with a non-zero exit, and an agreed non-UTF-8 capture must be
+> echoed unchanged. The N1 dead-pipe
 > contract (`emit_*` a no-op, `stream_halt` re-raised at the call site) is unchanged and still guarded
 > by `broken_pipe_terminates_with_fault_{mn,serial}`.
 

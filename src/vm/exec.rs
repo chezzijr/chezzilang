@@ -29,7 +29,8 @@ impl Vm {
     /// `Writer.write_bytes` on an `io.stdout()` backing lands here so `b"\xff\xfe"` reaches the real
     /// handle unchanged (W6-9: it used to be decoded with `from_utf8_lossy` and emit two U+FFFD).
     /// The buffered sink is a `Vec<u8>` for the same reason; it decodes ONCE, at the Rust capture
-    /// boundary ([`Vm::take_out`] and the `run_*` helpers).
+    /// boundary ([`Vm::take_out`] and the `run_*` helpers) — never where two engines are COMPARED
+    /// (the parity oracles diff `vm::run_file_bytes`' raw bytes; a lossy decode is not injective).
     pub(super) fn emit_out_bytes(&mut self, b: &[u8]) {
         if self.host.stream {
             stream::write_out(b);
@@ -675,7 +676,8 @@ impl Vm {
     ///
     /// The buffered sink is bytes (W6-9); this is one of the CAPTURE boundaries where Rust needs a
     /// `String`, so it decodes lossily here. `chezzi run` (the path a program's stdout actually
-    /// reaches an fd) never passes through it and stays byte-exact.
+    /// reaches an fd) never passes through it and stays byte-exact. Not for comparing two engines'
+    /// output — that takes `vm::run_file_bytes` (see `vm::RunOutputRaw`).
     pub fn take_out(&mut self) -> String {
         String::from_utf8_lossy(&std::mem::take(&mut self.out)).into_owned()
     }

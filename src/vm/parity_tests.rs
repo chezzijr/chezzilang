@@ -4855,10 +4855,32 @@ fn fixture(rel: &str) -> PathBuf {
 /// Run a file through both engines and assert identical (stdout, error).
 fn assert_file_parity(rel: &str) {
     let path = fixture(rel);
-    let (vm_out, vm_err, vm_res, _) = run_file(&path);
-    let (ip_out, ip_err, ip_res, _) = run_file_p(&path);
-    assert_eq!(vm_out, ip_out, "stdout divergence for {rel}");
-    assert_eq!(vm_err, ip_err, "stderr divergence for {rel}");
+    // RAW BYTES on both legs (see `RunOutputRaw`): a `String` compare would fold a genuine
+    // non-UTF-8 divergence (`ff` vs `fe`) into equal U+FFFDs and pass a byte-divergent run.
+    let raw = |parallel| {
+        crate::vm::run_file_bytes(
+            &path,
+            crate::native::HostConfig::default(),
+            parallel,
+            None,
+            None,
+        )
+    };
+    let (vm_out, vm_err, vm_res, _) = raw(false);
+    let (ip_out, ip_err, ip_res, _) = raw(true);
+    // Text compare first (readable failure), then the byte compare that catches a divergence a
+    // lossy decode would erase.
+    let text = |b: &[u8]| String::from_utf8_lossy(b).into_owned();
+    assert_eq!(text(&vm_out), text(&ip_out), "stdout divergence for {rel}");
+    assert_eq!(
+        vm_out, ip_out,
+        "stdout BYTE divergence for {rel} (equal only after a lossy decode)"
+    );
+    assert_eq!(text(&vm_err), text(&ip_err), "stderr divergence for {rel}");
+    assert_eq!(
+        vm_err, ip_err,
+        "stderr BYTE divergence for {rel} (equal only after a lossy decode)"
+    );
     assert_eq!(
         vm_res.err().map(|e| e.to_string()),
         ip_res.err().map(|e| e.to_string()),

@@ -24,15 +24,24 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > by construction**: concatenating `Vec<u8>` per task slot in the same index order is byte-identical to
 > concatenating `String`; nothing was sorted or normalised. The N1 dead-pipe contract is unchanged
 > (`emit_*` stays a no-op that never touches `pending_exit`; `stream_halt` is still raised at the call
-> sites) and W6-8's fd-2 poison-abort path is deliberately untouched. **Recorded residual:** the CAPTURE
-> boundary (`Vm::take_out`, the `run_*` helpers, `RunOutput`) still decodes with `from_utf8_lossy` in one
-> shared `captured()` helper, so `chezzi test` / `--check-parity` / lib embedders still show U+FFFD for a
-> non-UTF-8 byte — identically on both engines, so parity is unaffected, and `chezzi run` (the only path a
-> program's stdout reaches an fd) is byte-exact. Tests:
+> sites) and W6-8's fd-2 poison-abort path is deliberately untouched. **The parity ORACLES compare RAW
+> BYTES**, not the decoded capture: `from_utf8_lossy` is not injective (`ff` and `fe` both become one
+> U+FFFD), so once a program can emit non-UTF-8 a decoded compare would report `parity OK` for a run
+> whose engines put different bytes on fd 1 — the feature would have degraded its own detector. Both
+> `chezzi run --check-parity` (`src/main.rs`, which also echoes the capture with `write_all`, so it
+> reproduces the output of the command it checks) and the in-tree `assert_file_parity` now take
+> `vm::run_file_bytes` → `vm::RunOutputRaw`. **Recorded residual:** the CAPTURE boundary (`Vm::take_out`,
+> the `run_*` helpers, `RunOutput`) still decodes with `from_utf8_lossy` in one shared `captured()`
+> helper, so `chezzi test` and lib embedders still show U+FFFD for a non-UTF-8 byte; that is a DISPLAY
+> path, not a comparison one, and `chezzi run` (the only path a program's stdout reaches an fd) is
+> byte-exact. Tests:
 > `tests/interactive.rs::{stdout,stderr,buffered_stdout}_write_bytes_is_byte_exact_{mn,serial}` (real child
 > processes — the in-VM runner captures as a `String`, so only a subprocess can witness fd 1/2) plus four
 > in-language pins in `tests/chz/stdlib/io_writer_test.chz` (return count on stdout/stderr, the file arm's
-> non-UTF-8 round-trip, a 200 KB write's full count).
+> non-UTF-8 round-trip, a 200 KB write's full count), plus
+> `tests/check_parity.rs::{check_parity_reports_a_byte_only_divergence,check_parity_echoes_the_captured_bytes_unchanged}`
+> pinning the oracle itself (a channel-ordered program whose engines emit `ff`/`fe` in different order
+> must still report DIVERGENCE and exit non-zero).
 
 > **✅ FIX (2026-07-27, gaps.md W6-8) — a STORED FFI callback aborts loudly instead of segfaulting.**
 > **This was the last memory-unsafety in `docs/gaps.md`.** `signal(10, handler)`

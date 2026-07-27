@@ -604,8 +604,9 @@ pub struct Vm {
     /// Captured stdout. BYTES, not `String` (W6-9): `Writer.write_bytes` on an `io.stdout()` backing
     /// must be byte-exact like Python's `sys.stdout.buffer.write` / Go's `os.Stdout.Write`, and a
     /// `String` buffer forced a `from_utf8_lossy` hop. Decoded once, at the Rust capture boundary
-    /// ([`Vm::take_out`] and the `run_*` helpers) — both engines decode identically, so serial == M:N
-    /// is untouched.
+    /// ([`Vm::take_out`] and the `run_*` helpers) — and NEVER where two engines are compared: the
+    /// serial==M:N oracles diff these raw bytes via [`run_file_bytes`] ([`RunOutputRaw`]), because a
+    /// lossy decode maps `ff` and `fe` alike and would pass a byte-divergent run.
     out: Vec<u8>,
     /// Captured stderr (written by `std.io.eprint`). Separate from `out` so streams don't mix.
     stderr: Vec<u8>,
@@ -3783,9 +3784,13 @@ fn format_float(x: f64) -> String {
 
 /// W6-9 — the CAPTURE boundary. The buffered sink is BYTES (so `Writer.write_bytes` reaches an
 /// `io.stdout()` backing unchanged), but every test helper and embedder API hands stdout back as a
-/// `String`. Decode lossily here — the ONLY place a `U+FFFD` can now appear, and it applies
-/// identically on both engines, so `serial == M:N` is untouched. `chezzi run` STREAMS (the path a
-/// program's bytes actually reach an fd) and never passes through this.
+/// `String`. Decode lossily here — the ONLY place a `U+FFFD` can now appear. `chezzi run` STREAMS
+/// (the path a program's bytes actually reach an fd) and never passes through this.
+///
+/// This decode is NOT a comparison boundary: it is lossy AND not injective (`ff` and `fe` both
+/// become one U+FFFD), so an oracle diffing its output would pass a byte-divergent run. The
+/// serial==M:N oracles (`--check-parity`, `assert_file_parity`) take the raw [`RunOutputRaw`] path
+/// instead. Anything comparing two engines' output must do the same.
 fn captured(buf: Vec<u8>) -> String {
     String::from_utf8_lossy(&buf).into_owned()
 }
@@ -4209,12 +4214,26 @@ pub fn run_file_entry(entry: &std::path::Path, entry_fn: &str) -> RunOutput {
 /// so `outcome` is `Ok`); `None` for a normal end or a runtime error.
 pub type RunOutput = (String, String, Result<(), RunError>, Option<i32>);
 
+/// [`RunOutput`] with the sink's RAW BYTES — what the program actually emitted, before the lossy
+/// [`captured`] decode. The serial==M:N ORACLES take this one: `from_utf8_lossy` is not injective
+/// (`ff` and `fe` both become one U+FFFD), so diffing decoded captures would report `parity OK` for
+/// a run whose two engines put DIFFERENT bytes on fd 1 — and `Writer.write_bytes` (W6-9) is exactly
+/// what makes a non-UTF-8 capture reachable. Used by `chezzi run --check-parity` (`src/main.rs`) and
+/// the in-tree `assert_file_parity`; everything else keeps the `String` shape.
+pub type RunOutputRaw = (Vec<u8>, Vec<u8>, Result<(), RunError>, Option<i32>);
+
+/// The [`captured`] decode applied to a whole [`RunOutputRaw`] — the one place the `Vec<u8>` sink
+/// becomes the `String` every test helper and embedder consumes.
+fn to_str_output((out, err, res, code): RunOutputRaw) -> RunOutput {
+    (captured(out), captured(err), res, code)
+}
+
 /// Like [`run_file`], but with an explicit [`crate::native::HostConfig`] (args/env/stdin) for the
 /// native std modules. Test-only convenience over [`run_file_with_entry`] (entry-fn `None`); the
 /// CLI calls [`run_file_with_entry`] directly so a `module:function` entrypoint can name a function.
 #[cfg(test)]
 pub fn run_file_with(entry: &std::path::Path, cfg: crate::native::HostConfig) -> RunOutput {
-    run_file_engine(entry, cfg, false, None, None)
+    to_str_output(run_file_engine(entry, cfg, false, None, None))
 }
 
 /// Like [`run_file_with`], but runs on the **B3.3-threads `--parallel` engine** (real OS-thread
@@ -4222,7 +4241,7 @@ pub fn run_file_with(entry: &std::path::Path, cfg: crate::native::HostConfig) ->
 /// it to exercise the OS-thread engine.
 #[cfg(test)]
 pub fn run_file_parallel(entry: &std::path::Path, cfg: crate::native::HostConfig) -> RunOutput {
-    run_file_engine(entry, cfg, true, None, None)
+    to_str_output(run_file_engine(entry, cfg, true, None, None))
 }
 
 /// Resolve, compile, and run a program from its entry path on the dedicated VM thread, then — if
@@ -4242,6 +4261,18 @@ pub fn run_file_with_entry(
     entry_fn: Option<&str>,
     root: Option<std::path::PathBuf>,
 ) -> RunOutput {
+    to_str_output(run_file_bytes(entry, cfg, parallel, entry_fn, root))
+}
+
+/// [`run_file_with_entry`] without the lossy decode — the parity ORACLES' entry point (see
+/// [`RunOutputRaw`]). `chezzi run --check-parity` and `assert_file_parity` diff these bytes.
+pub fn run_file_bytes(
+    entry: &std::path::Path,
+    cfg: crate::native::HostConfig,
+    parallel: bool,
+    entry_fn: Option<&str>,
+    root: Option<std::path::PathBuf>,
+) -> RunOutputRaw {
     run_file_engine(entry, cfg, parallel, entry_fn.map(str::to_string), root)
 }
 
@@ -4251,7 +4282,7 @@ fn run_file_engine(
     parallel: bool,
     entry_fn: Option<String>,
     root: Option<std::path::PathBuf>,
-) -> RunOutput {
+) -> RunOutputRaw {
     let entry = entry.to_path_buf();
     std::thread::Builder::new()
         .stack_size(VM_STACK_BYTES)
@@ -4267,7 +4298,7 @@ fn run_file_inner(
     parallel: bool,
     entry_fn: Option<&str>,
     root: Option<std::path::PathBuf>,
-) -> RunOutput {
+) -> RunOutputRaw {
     let build = match root {
         Some(r) => crate::resolver::build_graph_with_root(entry, r),
         None => crate::resolver::build_graph(entry),
@@ -4276,8 +4307,8 @@ fn run_file_inner(
         Ok(g) => g,
         Err(e) => {
             return (
-                String::new(),
-                String::new(),
+                Vec::new(),
+                Vec::new(),
                 Err(RunError::plain(RuntimeError {
                     message: e.message,
                     span: e.span,
@@ -4293,8 +4324,8 @@ fn run_file_inner(
         Ok(p) => p,
         Err(e) => {
             return (
-                String::new(),
-                String::new(),
+                Vec::new(),
+                Vec::new(),
                 Err(RunError::plain(RuntimeError {
                     message: e.message,
                     span: e.span,
@@ -4335,12 +4366,12 @@ fn run_file_inner(
     // A pending exit means `result` is the `exit()` unwind sentinel, not a fault: report the
     // requested code as a clean halt.
     if let Some(code) = vm.pending_exit {
-        return (captured(vm.out), captured(vm.stderr), Ok(()), Some(code));
+        return (vm.out, vm.stderr, Ok(()), Some(code));
     }
     // The stack trace was captured at the uncaught fault (before frames unwound); attach it.
     let trace = vm.fault_trace.take().unwrap_or_default();
     let result = result.map_err(|e| RunError::from_error(e, trace));
-    (captured(vm.out), captured(vm.stderr), result, None)
+    (vm.out, vm.stderr, result, None)
 }
 
 #[cfg(test)]
