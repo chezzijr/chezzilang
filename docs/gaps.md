@@ -14,7 +14,9 @@ work already done.
 **Pre-freeze bug-hunt waves:** 1–5 (2026-07-11 → 07-13), then 2026-07-18, 07-20, 07-22, and three on
 07-23. **Wave 6 (2026-07-25)** is the largest single haul (**19 findings**) and the first to sweep the two
 surfaces the wave-5 residual named as never-audited (FFI: 4 defects; GC + new object layout: clean). As of
-2026-07-26 it stands at **17 fixed, 4 open, 1 carve-out open** — see the index below. Read its session log
+2026-07-28 all 19 + the 3 carve-outs are fixed, plus one follow-up found by adversarial review of the
+W6-9 branch (**`W6-9b`**, the half-byte-exact parity oracle, fixed 2026-07-28); what remains are the
+three disclosed residuals `W6-9r` / `W6-10s` / `W6-10r` — see the index below. Read its session log
 before touching `io`/`process`/FFI/`RwShared`/module-snapshot code. Its meta-finding — **5 of 6 P0s are "a
 fix applied to SOME arms of an N-way set"** — is the highest-yield remaining lever.
 
@@ -31,8 +33,9 @@ chronological log.
 | `min`/`max` → `Option` | `:1392` | `List.min`/`max`/`min_by`/`max_by` fault on empty while `first`/`last`/`pop` return `Option[T]` | Breaking surface change: 23 call sites + docs + examples. Own milestone |
 | `List[Any]` widening | `:1309` | `List[Any] = [1, 3.0]` silently widens the int to `1.0` | Deferred pre-freeze (wave 4) |
 | **N10** | `:3158` | A `wait:` timer arm makes `--serial` inline-sleep instead of yielding to a runnable sibling (serial ≠ M:N) | Deliberate pre-freeze known-limit; fix is folded into the post-freeze serial-engine removal |
-| **W6-10s** | `:1120` | `--max-heap` residual **sampling** escapes left after the byte-aware pacing fix | Pacing samples the cap on charged off-heap bytes, but only for stores routed through `to_wire_crossable` and only per heap. Still not sampled: the documented inline-scalar loop (`future.md §1b` — no `Obj`s, no wire bytes), the by-hand airlock paths (spawn args, closure captures, `Executor.submit`), and a heap that HOLDS a huge core without storing to it |
-| **W6-10r** | `:1157` | `--max-heap` residual: a payload reachable ONLY through a **nested** core (a `Channel` inside a `Shared`, once the nested core's last `Obj` alias slot is swept) is counted nowhere | Left open by the W6-10 fix on purpose. `live_bytes` reaches a core's bytes through its `Obj::*` alias slot; a nested core has none. Closing it needs cross-core byte recursion with `Arc` de-dup — narrow trigger, not worth the machinery yet |
+| **W6-10s** | `:1179` | `--max-heap` residual **sampling** escapes left after the byte-aware pacing fix | Pacing samples the cap on charged off-heap bytes, but only for stores routed through `to_wire_crossable` and only per heap. Still not sampled: the documented inline-scalar loop (`future.md §1b` — no `Obj`s, no wire bytes), the by-hand airlock paths (spawn args, closure captures, `Executor.submit`), and a heap that HOLDS a huge core without storing to it |
+| **W6-9r** | `:1303` | Parity-oracle residual left by the `W6-9b` fix: ~31 hand-rolled `run_file_p` + `run_file` cross-engine compares in `parity_tests.rs` still diff LOSSILY-DECODED strings, and `parity_entry_cfg_lines` compares stdout as an order-insensitive line multiset | The three SHARED comparators were fixed at the helper level (0 call sites touched); converting the hand-rolled ones means rewriting ~31 call sites. UTF-8-only today, so nothing is failing — but a new byte-emitting test added at one of those sites inherits the blindness. Use `vm::run_file_bytes` there |
+| **W6-10r** | `:1216` | `--max-heap` residual: a payload reachable ONLY through a **nested** core (a `Channel` inside a `Shared`, once the nested core's last `Obj` alias slot is swept) is counted nowhere | Left open by the W6-10 fix on purpose. `live_bytes` reaches a core's bytes through its `Obj::*` alias slot; a nested core has none. Closing it needs cross-core byte recursion with `Arc` de-dup — narrow trigger, not worth the machinery yet |
 | protocol embeds | `:1505` | A protocol-embedded method isn't callable through the interface value (`p: Person` can't call embedded `name()`) despite `spec.md:973` "flattened at bound sites" | Filed as a safe-direction observation in wave 3; never triaged — doc and behavior contradict each other either way |
 
 **Known limits that are documented, not bugs** (listed so they aren't re-filed): `Iterable[T]` element
@@ -247,7 +250,10 @@ parked_slot_nonsendable_rejects,in_data_cycle_rejects,unreached_nonsendable_runs
 - **Multi-frame / pending-`defer` suspended generators** — checker-UNREACHABLE (item 3 arms a/c); no valid
   program constructs them. The rejects are defensive guards, not a user-visible limit — nothing to build.
 
-## Session log — 2026-07-25 (bug-hunt wave 6: 19 findings — W6-19 found while FIXING W6-2 — W6-1..W6-19 all FIXED as of 2026-07-27, the last being W6-9; of the 3 carve-outs filed (W6-3b/c/d), **W6-3b and W6-3c are FIXED (2026-07-26)** and **W6-3d was RESOLVED 2026-07-27 by ruling (a)** — so wave 6 carries NO open items; what remains under `--max-heap` are the two disclosed residuals W6-10s/W6-10r, filed as their own rows. See the OPEN ITEMS table at the top, which is the authority — 2 never-hunted surfaces swept)
+## Session log — 2026-07-25 (bug-hunt wave 6: 19 findings — W6-19 found while FIXING W6-2 — W6-1..W6-19 all FIXED as of 2026-07-27, the last being W6-9; of the 3 carve-outs filed (W6-3b/c/d), **W6-3b and W6-3c are FIXED (2026-07-26)** and **W6-3d was RESOLVED 2026-07-27 by ruling (a)**; a follow-up to W6-9 — **W6-9b**, the capture-based
+parity comparators still diffing a lossy decode — was found by adversarial review and FIXED 2026-07-28. So
+wave 6 carries no open DEFECTS; what remains are three disclosed residuals W6-9r/W6-10s/W6-10r, filed as
+their own rows. See the OPEN ITEMS table at the top, which is the authority — 2 never-hunted surfaces swept)
 
 Pre-freeze adversarial hunt, 5 disjoint parallel domains, weighted at the two surfaces the wave-5
 residual named as never audited (**FFI**, **GC + `unsafe`**) plus the concurrency code that landed
@@ -1095,12 +1101,17 @@ last surviving member of the family.
 > **Residual, deliberate:** the CAPTURE boundary (`Vm::take_out`, the `run_*` helpers, `RunOutput`)
 > still decodes with `from_utf8_lossy` in one shared `captured()` helper, because `chezzi test` and lib
 > embedders hand stdout back to Rust as a `String`. A non-UTF-8 byte therefore still shows as U+FFFD
-> *there* — a DISPLAY path, not a comparison one (the oracles no longer route through it) — while the
-> in-language contract, `chezzi run`, the only path a program's stdout actually reaches a
-> console/pipe/file, is byte-exact. Widening `RunOutput` to `Vec<u8>` is the follow-up if an embedder
-> ever needs it (~316 consumer sites for a display-only gain today). Note the `run_capture*` /
-> `run_program*` unit helpers still compare decoded `String`s: fine today (no in-tree unit source emits
-> non-UTF-8), but a NEW two-engine test that writes raw bytes must use `run_file_bytes`.
+> *there* — a DISPLAY path — while the in-language contract, `chezzi run`, the only path a program's
+> stdout actually reaches a console/pipe/file, is byte-exact. Widening `RunOutput` to `Vec<u8>` is the
+> follow-up if an embedder ever needs it (~316 consumer sites for a display-only gain today).
+>
+> **CORRECTION (see `W6-9b`).** The claim above once read "the oracles no longer route through it" and
+> that was FALSE when written: only the two comparators this entry names (`--check-parity`,
+> `assert_file_parity`) were converted. Three MORE cross-engine comparators — `assert_parity` (the
+> ~82-site capture path), `assert_parity_file`/`parity_entry` and `parity_entry_cfg` — kept diffing
+> `captured()` output, so the majority of the parity suite stayed blind to exactly the divergence class
+> `write_bytes` had just made reachable. That is filed and fixed as its own entry, **`W6-9b`** below;
+> it is NOT covered by this entry's FIXED claim.
 >
 > Tests: `tests/interactive.rs::{stdout,stderr,buffered_stdout}_write_bytes_is_byte_exact_{mn,serial}`
 > (real child processes — the only way to witness the bytes on fd 1/2, since the in-VM runner captures
@@ -1245,6 +1256,75 @@ runaway: an unbounded/large-cap channel backlog, or data parked in a `Shared`/`R
 seam as W6-7. (The documented inline-scalar escape was separately re-confirmed and is NOT re-filed —
 it is a DIFFERENT hole and remains OPEN.)
 </details>
+
+### W6-9b. The serial==M:N parity oracle was only HALF byte-exact — the CAPTURE-based comparators still diffed a lossy decode — **FIXED (2026-07-28)**
+Found by adversarial review of the W6-9 branch (charge "C1"), upheld by an independent defender that
+reproduced it. W6-9 retyped the VM output sink `String` → `Vec<u8>` so `Writer.write_bytes` is byte-exact
+on stdout, and in the SAME commit converted two comparators to diff raw bytes: `assert_file_parity`
+(`src/vm/parity_tests.rs`) and the `--check-parity` CLI (`src/main.rs`). It did **not** convert the
+capture-based path, which is the MAJORITY of the parity suite.
+
+`captured()` is `String::from_utf8_lossy`, which is **not injective**: two engines emitting DIFFERENT
+invalid UTF-8 (`ff fe` vs `fe ff`) both decode to the same two-U+FFFD string. Every comparator that
+diffed `captured()` output therefore reported *parity OK* on a byte-divergent run. Three of them were
+left blind:
+
+| comparator | `parity_tests.rs` | reach |
+|---|---|---|
+| `assert_parity` (via `vm_outcome`/`parallel_outcome`) | `:18` | ~82 single-file sites (`run_capture` vs `run_capture_parallel`) |
+| `assert_parity_file` / `parity_entry` | `:203` | the multi-file + std-module oracle |
+| `parity_entry_cfg` | `:4077` | the `HostConfig` (args/env/stdin) oracle |
+
+This was a **DETECTOR gap, not a live divergence** — no in-tree test emits non-UTF-8 through these
+helpers, so nothing was failing. It matters because `write_bytes` going byte-exact is precisely what
+CREATED the divergence surface, W6-9 is documented as having closed the class, and the remaining
+blindness was therefore invisible. `tests/check_parity.rs::check_parity_reports_a_byte_only_divergence`
+already proved such a program is constructible on this same path.
+
+**Fix — strictly additive, at the HELPER level so no call site changed.** `src/vm/mod.rs` grew byte
+siblings that hold the real bodies, with the existing `String` helpers demoted to one-line decode
+wrappers: `run_program_bytes` (← `run_program`), `run_capture_bytes` (← `run_capture`),
+`run_capture_parallel_bytes` (← `run_capture_parallel`); `run_program_inner` now returns `(Vec<u8>, …)`.
+Every public signature (`run_capture`, `run_program`, `run_program_parallel`, `run_file_p`) is
+UNCHANGED, so `src/vm/tests.rs`, `src/gc/tests.rs`, `src/checker/tests.rs` and `src/native/cffi.rs` are
+untouched. In `parity_tests.rs` one shared `assert_stream_parity(a, b, what, label)` does **text compare
+first** (a readable failure) **then the RAW BYTE compare on top** — the shape `assert_file_parity`
+already used, whose body is now deduped onto it with its messages verbatim. `assert_parity` goes through
+a new `assert_outcome_parity` over `vm_outcome_bytes`/`parallel_outcome_bytes`; `assert_parity_file` and
+`parity_entry_cfg` take both legs from the existing `vm::run_file_bytes(..)` (byte-exact equivalents of
+`run_file`/`run_file_p`/`run_file_with`/`run_file_parallel`, all of which are just
+`to_str_output(run_file_engine(..))` — identical argument lists, `mk_cfg()` still called once per engine
+for a fresh stdin queue) and return `captured(out)` so their `-> String` signature and every caller stay
+put. **No existing assertion was removed, relaxed, sorted, normalised or made conditional** — the byte
+`assert_eq!` is an EXTRA one after each existing one, and ordinary UTF-8 output is bit-for-bit
+unaffected (byte-equality implies text-equality).
+
+**Tests (failing-first, both RED before the fix):** `parity_tests::file_parity_catches_a_byte_only_divergence`
+runs the channel-ordered fixture from `tests/check_parity.rs:137` through `parity_entry` under
+`catch_unwind` and asserts it PANICS — the serial engine prints live (`fe ff`), M:N flushes task slots in
+task order (`ff fe`), both decode to two U+FFFD, so only a byte diff sees it. It is a CANARY: if M:N slot
+ordering ever changes so the two engines agree, it flips to failing — fix the ordering or the fixture,
+do not weaken the compare (the CLI pin moves with it). The capture path cannot be reached by a real
+program (`run_capture*` compiles via `compile_module_standalone`, no module resolution, hence no
+`import std.io`), so its proof is the direct helper test
+`parity_tests::outcome_parity_catches_a_byte_only_divergence` on `ff fe` vs `fe ff`.
+
+> **Residuals, disclosed (`W6-9r` in the index table), all pre-existing and all UTF-8-only today:**
+> 1. ~31 hand-rolled `run_file_p` + `run_file` cross-engine compares in `parity_tests.rs` (e.g. `:782`,
+>    `:891`, `:4144`) still diff decoded `String`s. Converting them means rewriting call sites, which
+>    the fix's shape constraint (helper-level only) forbids. A future byte-emitting test added at one of
+>    those sites would inherit the blindness — use `run_file_bytes` there.
+> 2. `parity_entry_cfg_lines` (`:4100`) compares stdout as an order-insensitive line MULTISET
+>    (`assert_same_lines`) and stderr as decoded text. The multiset is a pre-existing, deliberate
+>    weakening (shared consumable stdin: which task reads which line is nondeterministic by design) —
+>    left completely untouched so no reviewer can read a change near it as a loosened assertion. Same
+>    for `assert_fault_same_lines` (`src/vm/tests.rs:489`).
+> 3. `vm_outcome`/`parallel_outcome` keep the `String` shape. They are SINGLE-ENGINE assertion helpers
+>    (~60 sites comparing against a literal / `contains` / the fn-pointer array at `:9900`), not
+>    oracles — a decode cannot hide anything when the other side is a UTF-8 literal. Their doc comment
+>    now says so, and points at `assert_outcome_parity` as the oracle.
+> 4. The `captured()` DISPLAY boundary itself (`chezzi test`, lib embedders) is unchanged — that is
+>    W6-9's own residual and stays open on the same terms.
 
 ### W6-11. `Ok`/`Err`/`Some`/`None`/`Result`/`Option` are accepted as `extern fn` names — same silent-shadow class as W6-6 — **FIXED (2026-07-25)**
 `extern "libm.so.6": fn Ok(x: float) -> float` → 0 errors, unlike every other reserved name. `return Ok(x)`
