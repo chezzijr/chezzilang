@@ -5,7 +5,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 **Legend:** ⬜ not started · 🟦 in progress · ✅ done
 
 > **✅ FIX (2026-07-27, gaps.md W6-8) — a STORED FFI callback aborts loudly instead of segfaulting.**
-> (The *cross-thread* half of the same deferred feature stays open as `W6-8r`.) `signal(10, handler)`
+> **This was the last memory-unsafety in `docs/gaps.md`.** `signal(10, handler)`
 > then `raise(10)` — checker-clean
 > — used to give `rc=139` (SIGSEGV, core dumped, empty stderr) on both engines: `CallbackClosure::drop`
 > `ffi_closure_free`d the libffi trampoline when the extern call returned, while C still held its code
@@ -13,19 +13,29 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > pointer (`signal`, `atexit`, GLib/GTK, `pthread_cleanup_*`) was a guaranteed segfault, and no
 > check-time reject is possible — the identical `fn(int) -> int` param is correct for `qsort`, which
 > invokes the callback *during* the call. **Fix: leak the trampoline, POISON it.** `Drop` no longer
-> frees; it detaches the VM back-pointer (`ctx.host = None`) and leaks the `ffi_closure` + `Box<Cif>` +
-> boxed `TrampolineCtx` (`ManuallyDrop<Box<…>>` fields). `callback_trampoline` now resolves `ctx.host`
-> **first** — ahead of the `params`/`ret` derefs and ahead of `catch_unwind` — and on `None` writes
+> frees; it clears an **`AtomicBool` armed flag** and leaks the `ffi_closure` + `Box<Cif>` +
+> boxed `TrampolineCtx` (`ManuallyDrop<Box<…>>` fields). `callback_trampoline` now checks that flag
+> **first** — ahead of the `params`/`ret` derefs and ahead of `catch_unwind` — and on a cleared flag writes
 > `chezzi FFI: callback invoked after the extern call that received it returned; stored/cross-thread
 > callbacks are not supported` to fd 2 and `abort()`s. Verified on the real release binary, both engines:
-> `rc=134` (SIGABRT) with that message. All three allocations must leak, not just the handle — libffi
+> `rc=134` (SIGABRT) with that message. **The cross-thread case is covered too:** the flag is atomic
+> (`Release`/`Acquire`, so the trampoline's load never races the poison store — a plain `bool` there was
+> a data race, and a foreign thread reading a stale `true` would have dereferenced a dead VM pointer),
+> and the trampoline additionally compares `pthread_self()` against the `owner` recorded at ctx
+> construction (write-once ⇒ race-free) and aborts on a mismatch with `…invoked from a thread other than
+> the one that made the extern call…`. Every combination is defined: owner+during = live, owner+after =
+> abort, any other thread = abort. The abort also **drains `vm::flush_stream()`** before dying (a bare
+> `abort()` discarded whatever the `src/vm/stream.rs` writer thread had not yet written — measured, a
+> 20k-line program lost everything past the 64 kB pipe buffer, differently per run and per engine), and
+> the message goes out through a short-count/`EINTR`/`EAGAIN` retry loop (one bare `write(2)` is dropped
+> entirely on a non-blocking fd 2, leaving a bare SIGABRT with empty stderr). All three allocations must leak, not just the handle — libffi
 > derefs the prepped `ffi_cif` and loads the userdata BEFORE our Rust fn runs, so freeing either would
 > relocate the SIGSEGV into `classify_argument` (the `Box<Cif>` heap-pin bug again); `_cif` stays a `Box`
 > under the `ManuallyDrop` and the compile-time guard asserts `&**c._cif`. `abort()` not a panic: the
 > realistic site is a C signal handler, and unwinding into a C frame is itself UB. During-the-call
 > callbacks are untouched — `examples/ffi_qsort.chz` is byte-identical to its golden on both engines and
 > the whole `native::cffi` callback suite (fault re-raise, panic-caught, 2-/3-engine parity) is green.
-> Only an **armed** trampoline leaks: `ctx.host.is_some()` is the armed flag, so a call that bailed
+> Only an **armed** trampoline leaks: `ctx.armed` is set as the last act before `ffi_call`, so a call that bailed
 > during arg marshalling (interior-NUL `str`, return-only C type — all `recover:`-able) never handed C
 > the code pointer and is still freed. **Accepted ceiling** (`ponytail:`-marked): one trampoline + CIF +
 > ctx leaks per **callback-passing** extern call — ~400 B RSS, but as a W^X page PAIR out of libffi's
@@ -36,11 +46,12 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > pool is the recoverable error `the FFI closure pool is exhausted`, never a crash. Upgrade path: one
 > cached trampoline per (closure identity, signature). Callback-free extern calls never build a
 > `CallbackClosure`, so no perf change there. Stored/cross-thread callbacks stay DEFERRED — the deferral
-> is just loud now, and a C-spawned thread calling back *during* the extern call is still unguarded
-> (open as `W6-8r`). Tests: `tests/ffi_stored_callback.rs` — the repro, the unarmed-free RSS-growth
-> check, and a self-`RLIMIT_AS`-capped pool-exhaustion run (subprocess tests: the repro dies on SIGABRT
-> so it can never be a stdout golden, and FFI UB is layout-dependent; children run with `RLIMIT_CORE=1`
-> so the deliberate abort leaves no core dumps). Docs: `docs/gaps.md` (W6-8 FIXED, `W6-8r` row added),
+> is just loud now, on every thread. Tests: `tests/ffi_stored_callback.rs` — the repro, a cross-thread
+> (`pthread_create`) callback, the queued-stdout-survives-the-abort check, the unarmed-free RSS-growth
+> check, and a self-`RLIMIT_AS`-capped pool-exhaustion run — plus a `write_all_fd` unit test against a
+> full non-blocking fd (subprocess tests: the repro dies on SIGABRT so it can never be a stdout golden,
+> and FFI UB is layout-dependent; children run with `RLIMIT_CORE=1` so the deliberate abort leaves no
+> core dumps). Docs: `docs/gaps.md` (W6-8 FIXED, open-items table row removed — no memory-unsafety left),
 > `docs/syntax.md`, `docs/ffi-and-packaging.md §1b`.
 
 > **❌ ATTEMPTED AND REJECTED (2026-07-26, gaps.md W6-3d) — candidate (b) for the numeric-newtype

@@ -160,7 +160,7 @@ Recorded so a revisit starts from a plan, not a blank page:
    extern call returns and/or from *its own* thread.
 
    **Until then the deferral is LOUD, not UB (gaps.md W6-8).** The trampoline is deliberately leaked
-   and its VM back-pointer detached when the extern call returns, so a later invocation from C writes
+   and disarmed when the extern call returns, so a later invocation from C writes
 
    ```
    chezzi FFI: callback invoked after the extern call that received it returned; stored/cross-thread callbacks are not supported
@@ -177,10 +177,16 @@ Recorded so a revisit starts from a plan, not a blank page:
    `qsort` in a hot loop grows both. When the pool cannot grow, the next callback-passing call fails
    with the ordinary recoverable error `cannot allocate a callback trampoline for argument N to 'f':
    the FFI closure pool is exhausted` — a `recover:`-able fault, never a crash. Accepted to kill the UB;
-   the upgrade path is caching one trampoline per (closure identity, signature). **This does NOT make
-   all misuse safe:** a C library that spawns a thread and calls the callback *during* the extern call
-   finds a live VM back-pointer and re-enters the engine from the wrong thread — still unguarded
-   (gaps.md `W6-8r`), and exactly what the two pieces below exist to fix.
+   the upgrade path is caching one trampoline per (closure identity, signature).
+
+   **Cross-thread is covered by the same abort.** The armed flag is an `AtomicBool` (so the
+   trampoline's load never races the poison store — a plain `bool` there was a data race, and a stale
+   read would have dereferenced a dead VM pointer), and the trampoline also compares `pthread_self()`
+   against the thread that made the call, aborting on a mismatch with `chezzi FFI: callback invoked
+   from a thread other than the one that made the extern call; stored/cross-thread callbacks are not
+   supported`. A library that spawns a thread and calls back *during* the extern call therefore aborts
+   too, instead of re-entering the engine off-thread. That is a hard "unsupported", not support — which
+   is what the two pieces below exist to change.
 
    Needs **two** new pieces:
    - a **callback registry** that GC-roots the closure (+ its upvalues) until an explicit `unregister`,

@@ -2914,10 +2914,18 @@ chezzi FFI: callback invoked after the extern call that received it returned; st
 
 on stderr, and dies on **SIGABRT** (shell status 134). This is a defined, diagnosable failure, not a
 crash: the trampoline is deliberately **leaked and poisoned** rather than freed, so it can never
-execute freed memory (it used to segfault — gaps.md W6-8). The check is a *runtime* one; the checker
+execute freed memory (it used to segfault — gaps.md W6-8). The program's own output is drained before
+the abort, so the lines leading up to it are not lost. The check is a *runtime* one; the checker
 cannot reject it, because the identical `fn(int) -> int` param is correct for `qsort`, which invokes
-the callback *during* the call. One residual hole the abort does **not** cover: a C library that
-spawns a thread and calls back *while the extern call is still running* still races the engine.
+the callback *during* the call.
+
+A callback invoked on **any thread other than the one that made the extern call** — a library that
+spawns its own thread, a signal delivered elsewhere — aborts the same way, whether or not the call has
+returned:
+
+```
+chezzi FFI: callback invoked from a thread other than the one that made the extern call; stored/cross-thread callbacks are not supported
+```
 
 The price of that guarantee is a **leak**: every extern call that actually hands C a callback leaks its
 trampoline (~400 B, plus a W^X page pair from libffi's closure pool), so a callback-passing extern call
