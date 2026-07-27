@@ -24,10 +24,14 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > and the trampoline additionally compares `pthread_self()` against the `owner` recorded at ctx
 > construction (write-once ⇒ race-free) and aborts on a mismatch with `…invoked from a thread other than
 > the one that made the extern call…`. Every combination is defined: owner+during = live, owner+after =
-> abort, any other thread = abort. The abort also **drains `vm::flush_stream()`** before dying (a bare
-> `abort()` discarded whatever the `src/vm/stream.rs` writer thread had not yet written — measured, a
-> 20k-line program lost everything past the 64 kB pipe buffer, differently per run and per engine), and
-> the message goes out through a short-count/`EINTR`/`EAGAIN` retry loop (one bare `write(2)` is dropped
+> abort, any other thread = abort. The abort path calls **nothing but `write(2)` and `abort()`**, both
+> async-signal-safe. An earlier cut drained `vm::flush_stream()` first so the program's queued stdout
+> would survive; review rejected it and it was removed — that drain is an unbounded blocking rendezvous
+> serviced only by the `src/vm/stream.rs` writer thread, so it HUNG (verified, both engines) when the
+> poisoned callback fired on that writer thread, or when the writer was parked on a full unread pipe:
+> no SIGABRT, no exit, no core — worse than the SIGSEGV it replaced. Buffered stdout is therefore
+> discarded on this path, like on any crash. The message goes out through a short-count/`EINTR`/`EAGAIN`
+> retry loop (one bare `write(2)` is dropped
 > entirely on a non-blocking fd 2, leaving a bare SIGABRT with empty stderr). All three allocations must leak, not just the handle — libffi
 > derefs the prepped `ffi_cif` and loads the userdata BEFORE our Rust fn runs, so freeing either would
 > relocate the SIGSEGV into `classify_argument` (the `Box<Cif>` heap-pin bug again); `_cif` stays a `Box`
