@@ -18,15 +18,16 @@ surfaces the wave-5 residual named as never-audited (FFI: 4 defects; GC + new ob
 before touching `io`/`process`/FFI/`RwShared`/module-snapshot code. Its meta-finding — **5 of 6 P0s are "a
 fix applied to SOME arms of an N-way set"** — is the highest-yield remaining lever.
 
-## OPEN ITEMS — the whole backlog at a glance (updated 2026-07-26)
+## OPEN ITEMS — the whole backlog at a glance (updated 2026-07-27)
 
-Everything still open, roughly by severity (memory-unsafety first). Anything NOT listed here is either fixed or a
-safe-direction observation. **Keep this table in sync when a section is retired** — the reason it exists
-is that "which of these is still open?" previously required reading 1400 lines of chronological log.
+Everything still open, roughly by severity. **No memory-unsafety is left in the ledger** — W6-8, the
+last one, was fixed 2026-07-27. Anything NOT listed here is either fixed or a safe-direction
+observation. **Keep this table in sync when a section is retired** — the
+reason it exists is that "which of these is still open?" previously required reading 1400 lines of
+chronological log.
 
 | item | gaps.md | what | why it is still open |
 |---|---|---|---|
-| **W6-8** | `:797` | A **stored** FFI callback dangles → SIGSEGV from checker-clean code | The only memory-unsafety left in the ledger. A "deferred" feature implemented as UB rather than rejected; the fix is a checker/marshal reject of a callback in a storing position |
 | **W6-7** | `:772` | `RwShared` zero-copy read-view is **O(N²)** — every GC re-walks the whole off-heap wire payload (200k `for_each`: 1.428 s vs 0.154 s) | Perf, on a flagship new API. Needs a GC/wire-payload change, own task |
 | **W6-9** | `:820` | `Writer.write_bytes` byte-exact on a file but **lossy on `io.stdout()`/`stderr()`**, and returns a count that doesn't match what was emitted | Last surviving member of the lossy-byte family (B1/R1/W6-4/W6-14, all fixed). Blocked on the `emit_out`/`emit_err` sink being `&str`-typed |
 | **W6-10** | `:828` | `chezzi test --max-heap` ignores off-heap wire storage — 195 MB RSS passes a 200 KB cap | `live_bytes` counts only in-`Heap` slots; airlocked `WireValue`s live outside every `Heap` |
@@ -794,7 +795,7 @@ list out to 8 workers, each scanning/reducing in O(1) memory". Memory IS O(1); *
 worse than not sharing at all. Go's `sync.RWMutex`+slice and Rust's `Arc<RwLock<Vec<_>>>` cost the runtime
 nothing per traversal. Landed after the last perf pass, so no bench covers it. Same accounting seam as W6-10.
 
-### W6-8. A STORED FFI callback dangles → SIGSEGV from checker-clean code (a "deferred" feature implemented as UB)
+### W6-8. A STORED FFI callback dangles → SIGSEGV from checker-clean code (a "deferred" feature implemented as UB) — **FIXED (2026-07-27)**
 ```chezzi
 extern "libc.so.6":
     fn signal(sig: int, h: fn(int) -> int) -> ptr
@@ -816,6 +817,128 @@ GLib/GTK, `pthread_cleanup_*`) is a guaranteed segfault. A general check-time re
 `fn(int)->int` param is legal for `qsort`), so the realistic options are keeping the closure alive for the
 process (leak / heap-root it) or a loud doc + diagnostic. Precedent for taking FFI UB seriously:
 [[ffi-callback-cif-heap-pin]].
+
+**FIXED: leak the trampoline, POISON it.** Stored/cross-thread callbacks stay deferred — but the
+deferral is now a **defined, loud abort** instead of undefined behavior. `CallbackClosure::drop` no
+longer calls `libffi::low::closure_free`. It clears the ctx's `armed` flag (the exact inverse of the
+arming store `Cffi::call` applies before `ffi_call`) and leaks
+the `ffi_closure` allocation + the `Box<Cif>` + the boxed `TrampolineCtx` (fields are now
+`ManuallyDrop<Box<…>>`). `callback_trampoline` checks `armed` **first** — before the
+`ctx.host`/`ctx.params`/`ctx.ret` derefs and before `catch_unwind` — and on a cleared flag calls
+`callback_poison_abort()`: a `write(2)` (retried, see below) of
+`chezzi FFI: callback invoked after the extern call that received it returned; stored/cross-thread callbacks are not supported`
+then `std::process::abort()`. Verified on the real release binary, **both engines**: was `rc=139`
+(SIGSEGV, empty stderr), now that message + `rc=134` (SIGABRT). `examples/ffi_qsort.chz` (a
+during-the-call callback) is byte-identical to its golden on both engines.
+
+Four things are load-bearing and were each nearly a second bug:
+- **All three allocations must leak, not just the closure handle.** libffi's generated trampoline
+  derefs the prepped `ffi_cif` to marshal args and loads the userdata pointer BEFORE our Rust fn runs,
+  so freeing the CIF or the ctx would just relocate the SIGSEGV into `classify_argument` — that is
+  3038f67 / [[ffi-callback-cif-heap-pin]] again. `_cif` stays a `Box` **under** the `ManuallyDrop`; the
+  compile-time guard in `boxed_callback_cif_address_is_stable_across_moves` now asserts `&**c._cif`,
+  so reverting the field to a by-value `Cif` still breaks the build.
+- **Guard PLACEMENT.** The old `ctx.host.expect(…)` sat INSIDE `catch_unwind`; leaving it there would
+  turn a dead-owner invocation into a caught panic whose handler writes a `HostError` through
+  `ctx.fault` — which points into `Cffi::call`'s `Box<Option<HostError>>`, freed when that call
+  returned, so the write lands in freed heap. A quieter second UB.
+- **`abort()`, not a panic or a Chezzi fault.** The realistic invocation site is a C signal handler
+  (this very repro); unwinding from Rust into a C frame is itself UB, and Rust's stdio lock is not
+  async-signal-safe — hence raw `write(2)` rather than `eprintln!`.
+- **`qsort`-style during-the-call callbacks are untouched.** The `callback_fault.take()` re-raise still
+  reads the fault BEFORE the drop on all three teardown sites, and the fix lives in the single `Drop`
+  impl rather than per-call-site.
+
+**Shape chosen: poison-in-place, not re-prep-to-a-stub.** Retargeting the live trampoline at a
+VM-free stub via a second `ffi_prep_closure_loc` was considered and rejected: that call can return
+`!= FFI_OK` on hardened W^X / static-trampoline platforms with no safe recovery (freeing restores the
+UB; leaving the old trampoline pointing at a freed ctx is UB again), so a correct version of it is
+"re-prep **plus** poison-in-place". Poison alone is the whole fix, is strictly smaller, adds zero work
+to the `qsort` teardown path, and does not depend on undocumented libffi re-prep-in-place semantics.
+
+**Only an ARMED trampoline leaks.** `Cffi::call` sets `ctx.armed` as its last act before `ffi_call`, so
+a cleared flag at drop means the call bailed during arg marshalling (an
+interior-NUL `str`, a return-only C type, a failed closure alloc for a later callback arg — all
+`recover:`-able) and C provably never saw the code pointer. Those are still `ffi_closure_free`d. Leaking
+them would make the cost per *attempt*, so a `recover:` retry loop that never enters C would grow the
+pool for nothing (measured, pre-refinement: 200k faulting attempts leaked 72 MB and ~3100 mappings).
+
+**Accepted ceiling (`ponytail:`-marked in `CallbackClosure::drop`):** one trampoline + CIF + ctx leaks
+per **callback-passing** extern call — ~400 B of RSS, but it comes out of libffi's exec pool as a W^X
+page PAIR, so it also consumes `vm.max_map_count` (~1 new VMA per ~130 calls; measured 200k `qsort`
+calls → 90 MB peak RSS / 3168 VMAs vs a flat 11.5 MB / 46 before). A `qsort` in a hot loop therefore
+grows memory *and* mapping count. **The exhaustion end of that is defined, not a crash:** the allocation
+goes through `libffi::raw::ffi_closure_alloc` with an explicit NULL check, so a dry pool raises the
+recoverable Chezzi error `cannot allocate a callback trampoline for argument N to 'f': the FFI closure
+pool is exhausted`. `libffi::low::closure_alloc()` is deliberately NOT used: on failure it
+`assume_init()`s a code pointer `ffi_closure_alloc` never wrote (uninit read = UB) and hands
+`ffi_prep_closure_loc` a NULL handle to write through — i.e. the naive leak would have swapped a SIGSEGV
+on an *unsupported* stored callback for a SIGSEGV on the *supported* during-the-call one. Upgrade path:
+cache and reuse one trampoline per (closure identity, signature), freed when the owning closure is
+collected. Callback-free extern calls never construct a `CallbackClosure`, so nothing else pays.
+
+**The CROSS-THREAD half aborts too, and the guard is race-free.** A first cut poisoned by writing
+`ctx.host = None` — a plain, unsynchronised write read by the trampoline from whatever thread C
+invokes it on. That is a data race (UB regardless of the hardware), and a foreign thread observing
+the pre-poison `Some` would deref a `*mut dyn Host` into `Cffi::call`'s dead frame: W6-8 again, just
+narrower. Two changes close it:
+- the armed flag is now an **`AtomicBool`** (`Release` on arm and on poison, `Acquire` in the
+  trampoline), so the load/store pair is not a race and the arming writes are properly published.
+  `ctx.host` is written ONCE, before C can see the code pointer, and never touched again — poisoning
+  clears the flag instead of the pointer;
+- an atomic still cannot stop a foreign thread reading a **stale `true`**, so the trampoline also
+  compares `pthread_self()` against the `owner` recorded at ctx construction (write-once ⇒ no race,
+  and `pthread_equal` is async-signal-safe) and aborts with
+  `chezzi FFI: callback invoked from a thread other than the one that made the extern call; stored/cross-thread callbacks are not supported`.
+
+Every combination is now defined: owner thread + during the call = the live path; owner thread +
+after the call = `armed == false` by program order; any other thread, armed or not = abort. That also
+covers the case the first cut left open (a C library that spawns a thread and calls back *while* the
+extern call is still running) — it is unsupported by the [`CType::Callback`] contract, and now says so
+instead of re-entering the engine off-thread. Demonstrated by widening the armed window with a 300 ms
+sleep before the drop: pre-fix the C-spawned thread ran the Chezzi callback body and the program exited
+`0`; post-fix it aborts on the cross-thread message.
+
+**The abort DISCARDS the program's queued stdout, on purpose — draining it first deadlocks.** `chezzi
+run` queues every `print` to a background writer thread (`src/vm/stream.rs`), so a bare `abort()` loses
+whatever is still queued (measured: a 20k-line program truncates past the 64 kB pipe buffer, at a
+run-dependent line). An earlier cut of this fix therefore drained the sink first via
+`vm::flush_stream()`. **That was rejected in review and removed**: `flush_stream` is an unbounded
+blocking rendezvous (`Msg::Flush(ack)` on an `mpsc`, then `rx.recv()` with no timeout) whose ONLY
+servicer is the writer thread, so it wedges in two deterministic ways. (1) The poisoned trampoline
+fires *on* the writer thread — an async signal (`signal(SIGALRM, h)` + `alarm`, SIGINT from the tty)
+goes to any thread that has not blocked it, and `std::thread::spawn`ed writers inherit an unblocked
+mask — so it queues a Flush for itself and waits on itself. (2) The writer is parked in `write_all` on
+a full 64 kB pipe with no reader draining (`chezzi run p.chz | (sleep 60; cat)`), so the Flush queues
+behind the stuck write. Either way the process HANGS: no SIGABRT, no exit status, no core — strictly
+worse than the SIGSEGV this change exists to replace. `flush_stream`'s own contract already said so
+(`src/vm/stream.rs`: "Called by `main` AFTER the VM has finished (never from a fiber)"); a C signal
+handler is further outside that precondition than a fiber is. Independently, `mpsc::channel()` + `send`
+both allocate and glibc `malloc` is not async-signal-safe, so a handler that interrupted an allocation
+self-deadlocks on the arena lock. `callback_poison_abort` now calls nothing but `write(2)` and
+`abort()`, both async-signal-safe. Losing buffered stdout on a crash is what every other runtime does
+(CPython loses it on SIGSEGV/`abort`), and the diagnostic itself is never at risk — it goes straight to
+fd 2 and never touches the queue.
+
+**The message is written with a retry loop**, not one best-effort `write(2)`: on a non-blocking fd 2
+(an inherited-`O_NONBLOCK` tty, a CI harness) or on a signal arriving mid-syscall, a single `write`
+returns `EAGAIN`/`EINTR` and the process dies on a bare SIGABRT with EMPTY stderr — indistinguishable
+from the SIGSEGV this fix replaces, and the message is the entire value of the change. `write_all_fd`
+loops over short counts, `EINTR` and `EAGAIN` (1 ms back-off, ~2 s cap).
+
+Tests: `tests/ffi_stored_callback.rs` — `stored_callback_aborts_loudly_on_both_engines` (the repro),
+`cross_thread_stored_callback_aborts_without_entering_the_vm` (a `pthread_create` worker),
+`abort_diagnoses_even_with_a_full_unread_stdout_pipe` (20k lines behind a pipe held unread across the
+abort, polling for exit without draining — a re-added queue drain fails it as a 10 s timeout),
+`unarmed_callback_trampoline_is_freed_not_leaked` (peak-RSS growth over 50k never-armed attempts — it
+asserts the `/proc/self/status` probe actually WORKED, or the growth delta would compare two sentinels
+and pass vacuously), and
+`exhausted_closure_pool_faults_cleanly_instead_of_crashing` (the program caps its own `RLIMIT_AS` via
+libc, drains the pool, and must get the clean fault rather than a signal), plus the `write_all_fd` unit
+test in `src/native/cffi.rs` against a full non-blocking fd. All subprocess tests — the
+first program dies on SIGABRT so it can never be a stdout golden, and FFI UB is layout-dependent. Each
+child runs with `RLIMIT_CORE = 1` so a deliberately-aborting test never litters the host with core
+dumps.
 
 ### W6-9. `Writer.write_bytes` is byte-exact on a file but LOSSY on `io.stdout()`/`io.stderr()`, and returns a count that doesn't match what was emitted
 `io.stdout().write_bytes(b"\xff\xfe")` emits `ef bf bd ef bf bd` (two U+FFFD) and returns `Ok(2)`; the same
@@ -3208,8 +3331,12 @@ value level.** Status now:
 - **FFI** — swept, and it **did NOT come back clean**: 4 real defects (a `recover:`-proof VM panic on a
   zero-field struct at the boundary, a SIGSEGV on any *stored* callback, silent UTF-8 mangling in
   `load_str`, and two dead/absent extern-name collision guards), plus a void-returning callback being
-  unspellable at all. See the 2026-07-25 session log (W6-5, W6-8, W6-14, W6-6, W6-11). The libffi `Cif`
-  heap-pin SIGSEGV precedent held: FFI UB is layout-dependent and invisible to the value-level oracles.
+  unspellable at all. See the 2026-07-25 session log (W6-5, W6-8, W6-14, W6-6, W6-11) — **all now
+  fixed**, the stored-callback SIGSEGV last (W6-8, 2026-07-27: the trampoline is leaked + poisoned, so
+  the still-deferred feature aborts with a named message instead of executing freed memory, on the
+  calling thread and on any other). The libffi
+  `Cif` heap-pin SIGSEGV precedent held: FFI UB is layout-dependent and invisible to the value-level
+  oracles — W6-8's fix is likewise gated on a real-binary subprocess test, not a stdout golden.
 
 Neither surface is reachable by the panic-fuzzer, the CPython differential, the DSA judge, or two-engine
 parity — all four are *value*-level oracles. **Next before freezing: build the sanitizer lever** (it is the

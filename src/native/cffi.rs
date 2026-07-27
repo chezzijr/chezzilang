@@ -36,6 +36,7 @@
 //!   the cheap `Cif::new` (`prep_cif`) is rebuilt per call from the `Send` [`CType`] signature.
 
 use std::ffi::{CStr, CString, c_void};
+use std::mem::ManuallyDrop;
 
 use libffi::middle::{Cif, CodePtr, Type, arg};
 use libloading::Library;
@@ -100,8 +101,11 @@ pub enum CType {
     /// A C function pointer passed as a PARAM (callbacks #4): a Chezzi closure marshalled into a
     /// libffi closure trampoline whose code address is the `void*` C receives. Params and the return
     /// are restricted to C SCALARS only (`is_scalar`) — no `str`/struct/nested callback. Sync +
-    /// same-thread: the trampoline only fires inside the extern call on the calling thread (the
-    /// closure is freed before `call` returns — no GC rooting, no cross-thread re-entry). RETURN
+    /// same-thread, and now ENFORCED as such: the trampoline is NOT freed when `call` returns — it is
+    /// POISONED (its armed flag cleared) and LEAKED, and it also checks the invoking thread, so a C
+    /// library that STORED the pointer (`signal`, `atexit`, GLib) and calls back later — or calls it
+    /// from its own thread at any time — hits a named `abort()` instead of executing freed memory or
+    /// re-entering the engine off-thread (gaps.md W6-8). See [`CallbackClosure`]. RETURN
     /// position is rejected by the checker (a callback can only be a parameter). The C signature is a
     /// plain `void*` to libffi, so `ffi_type` is `Type::pointer()`.
     Callback {
@@ -427,17 +431,122 @@ unsafe fn write_c_result(slot: *mut c_void, ct: &CType, v: &NativeRet) {
 /// `&mut dyn Host` is live one Rust frame up), the extern arg index of the closure, the callback's
 /// param/return signature (borrowed from the live `Cffi`), and a fault out-slot the trampoline stashes
 /// a host error / caught panic into for [`Cffi::call`] to re-raise. NOT stored, never sent across a
-/// thread: built on the `call` stack, freed when `call` returns.
+/// thread: built on the `call` stack, DISARMED (`armed = false`) and leaked when `call` returns — see
+/// [`CallbackClosure`]'s `Drop`.
 struct TrampolineCtx<'h> {
+    /// The ARMED flag, and the ONLY field ever written after C can see the code pointer. `Cffi::call`
+    /// sets it (`Release`) as its last act before `ffi_call`; `CallbackClosure::drop` clears it
+    /// (`Release`) once the call returns, which POISONS the leaked trampoline.
+    ///
+    /// ATOMIC, not a plain `bool`: a C library that STORED the pointer can invoke the trampoline from
+    /// ANOTHER thread (`signal`+`alarm` delivers to an arbitrary thread; GLib/libuv/ALSA call back on
+    /// their own), so that load races this store. A plain read/write pair there is a data race — UB
+    /// in the abstract machine no matter what the hardware does. The `Release`/`Acquire` pairing also
+    /// publishes the `host`/`params`/`ret`/`fault` writes below to whatever thread does fire.
+    armed: std::sync::atomic::AtomicBool,
+    /// The thread that built this ctx — i.e. the one that will make the `ffi_call`. Written once at
+    /// construction, BEFORE the code pointer exists in C, and never mutated: no race to read it.
+    ///
+    /// An atomic `armed` still cannot stop a foreign thread from observing a STALE `true` in the
+    /// window around the poison store, so this is the race-free half of the guard: the callback
+    /// contract is same-thread-during-the-call (see [`CType::Callback`]), so an invocation on any
+    /// other thread aborts unconditionally rather than dereferencing `host`.
+    owner: libc::pthread_t,
     // Filled in AFTER the whole arg-reading loop finishes (see `Cffi::call`): deriving this raw
     // pointer from the `&mut dyn Host` param mid-loop would be invalidated by the later `host.arg_*`
     // reborrows for trailing params (Stacked/Tree Borrows), so we capture it as the final use of
-    // `host`. `None` only in the window before that patch; always `Some` by the time C can fire.
+    // `host`. Written once, immediately before `armed` is set; never written again (poisoning clears
+    // `armed` instead — a plain write here would race the trampoline's read).
     host: Option<*mut (dyn Host + 'h)>,
     arg_index: usize,
     params: *const [CType],
     ret: *const CType,
     fault: *mut Option<HostError>,
+}
+
+/// The message a poisoned (stored) callback aborts with. Kept as a `const` so the integration test
+/// `tests/ffi_stored_callback.rs` and the docs quote one string.
+const POISON_MSG: &[u8] = b"chezzi FFI: callback invoked after the extern call that received it \
+returned; stored/cross-thread callbacks are not supported\n";
+
+/// Same, for a callback invoked on a thread other than the one that made the extern call. Shares the
+/// `stored/cross-thread callbacks are not supported` tail so one substring covers both.
+const CROSS_THREAD_MSG: &[u8] =
+    b"chezzi FFI: callback invoked from a thread other than the one that \
+made the extern call; stored/cross-thread callbacks are not supported\n";
+
+/// `write(2)` the WHOLE buffer, retrying a short count, `EINTR` and `EAGAIN`. Async-signal-safe (no
+/// allocation, no lock, no Rust stdio). A single bare `write` loses the message outright on a
+/// non-blocking fd 2 (an inherited-`O_NONBLOCK` tty, a CI harness) or on any signal arriving
+/// mid-syscall — and the message is the entire value of the abort path.
+///
+/// ponytail: the `EAGAIN` back-off is a 1 ms sleep, capped at ~2 s total, instead of `poll(POLLOUT)`.
+/// If a stuck reader ever needs to block us for longer, swap the sleep for a `poll`.
+fn write_all_fd(fd: i32, buf: &[u8]) {
+    let mut off = 0usize;
+    let mut spins = 0u32;
+    while off < buf.len() {
+        // SAFETY: writing `buf.len() - off` bytes from within `buf`'s own allocation to a raw fd.
+        let n = unsafe { libc::write(fd, buf[off..].as_ptr() as *const c_void, buf.len() - off) };
+        if n > 0 {
+            off += n as usize;
+            continue;
+        }
+        if n == 0 {
+            return; // cannot happen for a non-empty buffer; treat as a dead fd rather than spin
+        }
+        let e = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
+        if e != libc::EINTR && e != libc::EAGAIN && e != libc::EWOULDBLOCK {
+            return; // EPIPE / EBADF / ENOSPC: unrecoverable, the abort below is all that's left
+        }
+        spins += 1;
+        if spins > 2000 {
+            return;
+        }
+        if e != libc::EINTR {
+            let ts = libc::timespec {
+                tv_sec: 0,
+                tv_nsec: 1_000_000,
+            };
+            // SAFETY: async-signal-safe sleep on a stack timespec; no out-param.
+            unsafe { libc::nanosleep(&ts, std::ptr::null_mut()) };
+        }
+    }
+}
+
+/// A trampoline that must not re-enter the VM — either its `Cffi::call` already returned (the VM
+/// back-pointer is stale) or it fired on a foreign thread. Report and `abort()`.
+///
+/// `abort` rather than a panic/fault: we are on a C stack (the realistic site is a C signal handler
+/// — the W6-8 repro is `signal`/`raise`), unwinding from Rust into a C frame is itself UB, and a
+/// panic here would be swallowed by the surrounding `catch_unwind`, whose handler would then write a
+/// `HostError` through `ctx.fault` — which points at `Cffi::call`'s `Box<Option<HostError>>`, a HEAP
+/// allocation freed when that call returned, so the write lands in freed heap (a use-after-free, not
+/// a stack scribble). A second and quieter UB. Raw `write(2)` rather than `eprintln!` because Rust's
+/// stdio lock is not async-signal-safe.
+///
+/// The program's own QUEUED stdout is deliberately DISCARDED here — this path calls nothing but
+/// `write(2)` and `abort()`, both async-signal-safe. Draining the streamed sink first (an earlier
+/// cut of this fix called `vm::stream::flush_stream`) is not merely unsafe-in-principle, it HANGS:
+/// `flush_stream` pushes `Msg::Flush(ack)` on an `mpsc` and blocks on `rx.recv()` with no timeout,
+/// and the only thread that can service that message is the stream writer itself. Two deterministic
+/// wedges follow. (1) The poisoned trampoline fires ON the writer thread — an async signal
+/// (`signal(SIGALRM, h)` + `alarm`, SIGINT from the tty) is delivered to any thread that has not
+/// blocked it, and `std::thread::spawn`ed writers inherit an unblocked mask — so it sends a Flush
+/// into the queue it is itself the sole consumer of and waits on itself, forever. (2) The writer is
+/// parked in `write_all` on a full 64 kB stdout pipe whose reader never drains (`chezzi run p.chz |
+/// (sleep 60; cat)`), so the Flush queues behind the stuck write. Either way: no SIGABRT, no exit,
+/// no core — strictly worse than the SIGSEGV this whole change exists to replace. `flush_stream`'s
+/// own contract says as much (`src/vm/stream.rs`: "Called by `main` AFTER the VM has finished (never
+/// from a fiber)"); a C signal handler is further outside that precondition than a fiber is.
+/// Separately, its `mpsc::channel()` + `send` both allocate, and glibc `malloc` is not
+/// async-signal-safe — re-entering the allocator from a handler that interrupted it self-deadlocks
+/// on the arena lock. Losing buffered stdout on a crash is what every other runtime does too
+/// (CPython loses it on SIGSEGV/`abort`); the diagnostic itself is never lost, because it goes
+/// straight to fd 2 and never touches the queue.
+fn callback_poison_abort(msg: &[u8]) -> ! {
+    write_all_fd(2, msg);
+    std::process::abort()
 }
 
 /// The libffi closure handler (one shared `extern "C"` fn; the per-callback distinction is the
@@ -463,6 +572,35 @@ unsafe extern "C" fn callback_trampoline(
     // erased at runtime — reading it through any concrete `'h` is sound because the trampoline only
     // uses `ctx.host` synchronously within this call, while the original `&mut dyn Host` is live.
     let ctx = unsafe { &*(userdata as *const TrampolineCtx<'_>) };
+    // POISON GUARD — FIRST, before every other field is touched. Once `Cffi::call` returned, its
+    // `CallbackClosure::drop` cleared `armed` and leaked this ctx; `host` is stale, `params`/`ret`
+    // point into a possibly-freed `Cffi` and `fault` into a freed heap slot, so reading ANY of them
+    // (or entering `catch_unwind`, whose error path writes through `fault`) would be UB. This is the
+    // whole W6-8 fix: a stored callback aborts loudly instead of executing freed memory.
+    //
+    // TWO checks, because one cannot cover both threads:
+    //  * `armed` (Acquire, pairing with both `Release` stores) is exact on the calling thread —
+    //    program order means a post-return invocation ALWAYS sees `false`. Off-thread it is merely
+    //    race-FREE: a foreign reader may still observe a stale `true` around the poison store.
+    //  * the owner-thread check closes exactly that hole, and needs no synchronisation of its own
+    //    (`owner` is write-once, before C ever sees the code pointer). The callback contract is
+    //    same-thread-during-the-call, so any other thread is unsupported by construction — that also
+    //    covers a C library that hands the pointer to its own worker thread WHILE the call runs.
+    if !ctx.armed.load(std::sync::atomic::Ordering::Acquire) {
+        callback_poison_abort(POISON_MSG);
+    }
+    // SAFETY: `pthread_self`/`pthread_equal` are async-signal-safe and read no shared state.
+    if unsafe { libc::pthread_equal(libc::pthread_self(), ctx.owner) } == 0 {
+        callback_poison_abort(CROSS_THREAD_MSG);
+    }
+    // SAFETY: `armed` was true and we are the owning thread, so `Cffi::call` has not returned and
+    // `host` (a plain `Copy` raw pointer, published by the `Release` store) is live.
+    // (`abort`, not `expect`: unreachable, but a panic HERE would unwind into the C frame — the one
+    // thing this whole path exists to prevent.)
+    let host_ptr = match ctx.host {
+        Some(p) => p,
+        None => callback_poison_abort(POISON_MSG),
+    };
     // SAFETY: `ctx.params` is a slice pointer into the live `Cffi`'s signature (valid for the call).
     let params: &[CType] = unsafe { &*ctx.params };
     // SAFETY: `ctx.ret` points at the live callback return CType.
@@ -477,14 +615,11 @@ unsafe extern "C" fn callback_trampoline(
             let slot = unsafe { *args.add(i) } as *const c_void;
             native_args.push(unsafe { read_c_arg(slot, p) });
         }
-        // SAFETY: `ctx.host` is the raw pointer captured as the FINAL use of the `&mut dyn Host` param
-        // (after every `host.arg_*` read), so no later reborrow has invalidated it. The trampoline
-        // fires synchronously inside the same `ffi_call`, on the same thread, while that borrow is
-        // dormant one frame up; the engine is single-threaded so no other alias is active. `expect`
-        // can't trip: `Cffi::call` always patches `host` to `Some` before `ffi_call`.
-        let host_ptr = ctx
-            .host
-            .expect("trampoline host pointer set before ffi_call");
+        // SAFETY: `host_ptr` (resolved by the poison guard above) is the raw pointer captured as the
+        // FINAL use of the `&mut dyn Host` param (after every `host.arg_*` read), so no later
+        // reborrow has invalidated it. `armed` + the owner-thread check mean `Cffi::call` has not
+        // returned yet AND we are its thread, so the trampoline is firing synchronously inside that
+        // same `ffi_call` while the borrow is dormant one frame up; no other alias is active.
         let host: &mut dyn Host = unsafe { &mut *host_ptr };
         host.invoke_callback(ctx.arg_index, &native_args)
     }));
@@ -498,7 +633,9 @@ unsafe extern "C" fn callback_trampoline(
         Ok(Err(host_err)) => {
             // SAFETY: zero the result so C unwinds with a defined value.
             unsafe { write_c_result(result, ret_ct, &NativeRet::Int(0)) };
-            // SAFETY: `ctx.fault` is the live `Option<HostError>` out-slot on `Cffi::call`'s stack.
+            // SAFETY: `ctx.fault` points into `Cffi::call`'s live `Box<Option<HostError>>` out-slot
+            // (heap, freed when that call returns — the poison guard above is what keeps a
+            // post-return invocation from writing through it).
             unsafe { *ctx.fault = Some(host_err) };
         }
         Err(panic_payload) => {
@@ -509,7 +646,7 @@ unsafe extern "C" fn callback_trampoline(
                 .map(|s| s.to_string())
                 .or_else(|| panic_payload.downcast_ref::<String>().cloned())
                 .unwrap_or_else(|| "callback panicked".to_string());
-            // SAFETY: as above — the fault out-slot is live.
+            // SAFETY: as above — the boxed fault out-slot is live for the duration of the call.
             unsafe {
                 *ctx.fault = Some(HostError {
                     message: format!("callback panicked: {msg}"),
@@ -519,19 +656,20 @@ unsafe extern "C" fn callback_trampoline(
     }
 }
 
-/// A live libffi closure backing one callback arg: the allocated closure handle (freed on drop), its
-/// code pointer (the `void*` C receives), the CIF (libffi reads through it during the call, so it must
-/// outlive the call), and the boxed [`TrampolineCtx`] userdata (must outlive the call too). Dropping
-/// frees the closure via `ffi_closure_free` — done only AFTER `ffi_call` returns (sync scope).
+/// A live libffi closure backing one callback arg: the allocated closure handle, the CIF (libffi
+/// reads through it whenever the closure is invoked) and the boxed [`TrampolineCtx`] userdata.
+/// Dropping either FREES all three (the trampoline was never armed, so C never saw the code pointer)
+/// or POISONS and LEAKS them (it was) — see the `Drop` impl.
 struct CallbackClosure<'h> {
     handle: *mut libffi::raw::ffi_closure,
-    _cif: Box<Cif>,
-    // Patched (its `host` field) after the arg loop, then read by libffi during the call via the
-    // userdata pointer; kept alive until drop. Not `_`-prefixed because `Cffi::call` writes it.
-    ctx: Box<TrampolineCtx<'h>>,
+    _cif: ManuallyDrop<Box<Cif>>,
+    // Patched (its `host` field, then `armed`) after the arg loop, then read by libffi during the
+    // call via the userdata pointer. Not `_`-prefixed because `Cffi::call` writes it; `ctx.armed` is
+    // the ARMED flag the `Drop` impl reads.
+    ctx: ManuallyDrop<Box<TrampolineCtx<'h>>>,
 }
 
-// NOTE: `_cif` is `Box<Cif>`, NOT `Cif`. `ffi_prep_closure_loc` stores a raw pointer to the `Cif`'s
+// NOTE: `_cif` is `ManuallyDrop<Box<Cif>>`, NOT `Cif`. `ffi_prep_closure_loc` stores a raw pointer to the `Cif`'s
 // inner `ffi_cif`; libffi dereferences it when C later invokes the closure. A by-value `Cif` here
 // would be MOVED (into this struct, then into the `callback_closures` Vec, which can reallocate),
 // relocating the `ffi_cif` and dangling that stored pointer → `classify_argument` reads freed memory
@@ -539,10 +677,59 @@ struct CallbackClosure<'h> {
 // the `ffi_cif` at a stable heap address across every move, exactly like `ctx` above.
 
 impl Drop for CallbackClosure<'_> {
+    /// POISON, don't free (gaps.md **W6-8**). C may have STORED the code pointer (`signal`,
+    /// `atexit`, GLib, `pthread_cleanup_*`) — it used to be `ffi_closure_free`d here, so the next
+    /// invocation from C executed freed memory: a SIGSEGV reachable from checker-clean code. A
+    /// check-time reject is impossible (the identical `fn(int) -> int` param is correct for
+    /// `qsort`, which invokes DURING the call), so instead:
+    ///
+    /// - clear the ARMED flag (`armed = false`, `Release`) — the trampoline's first act is to load
+    ///   it (`Acquire`) and `abort()`, so the stale `host` back-pointer is never dereferenced. The
+    ///   flag is atomic because a stored callback can fire on another thread, which would make a
+    ///   plain write/read pair a data race;
+    /// - leak the `ffi_closure` allocation + `_cif` + `ctx`. ALL THREE must survive: libffi's generated trampoline
+    ///   derefs the prepped `ffi_cif` to marshal args and loads the userdata pointer BEFORE our
+    ///   Rust fn runs, so freeing the cif or the ctx would just relocate the SIGSEGV into
+    ///   `classify_argument` (that is the 3038f67 bug again).
+    ///
+    /// …but ONLY for a trampoline that was actually ARMED. `Cffi::call` sets `ctx.armed` as its last
+    /// act before `ffi_call`; an unset flag here means the call bailed during arg
+    /// marshalling (an interior-NUL `str`, a return-only C type, a failed closure alloc for a later
+    /// callback arg — all `recover:`-able), so `ffi_call` never ran and C provably never saw the code
+    /// pointer. Nothing to protect: free it. Leaking those would leak per *attempt*, and a
+    /// `recover:` retry loop that never calls into C would grow the pool for nothing.
+    ///
+    /// ponytail: an ARMED trampoline leaks one closure + cif + ctx per callback-passing extern call.
+    /// That is ~400 B of RSS, but it comes out of libffi's exec pool as a W^X page PAIR, so it also
+    /// consumes `vm.max_map_count` (~1 new VMA per ~130 calls). A `qsort` in a hot loop therefore
+    /// grows memory AND mapping count; when the pool can no longer grow, the next callback-passing
+    /// call fails with the recoverable "cannot allocate a callback trampoline" error raised at the
+    /// `ffi_closure_alloc` site (never a crash — that NULL is checked precisely because this leak
+    /// makes exhaustion reachable). Accepted trade for killing the UB. Upgrade path: cache and reuse
+    /// one trampoline per (closure identity, signature) instead of allocating per call, and free it
+    /// when the owning closure is collected.
     fn drop(&mut self) {
-        // SAFETY: `handle` was returned by `ffi_closure_alloc` (via `low::closure_alloc`) and is freed
-        // exactly once here, after the extern `ffi_call` that may have used `code` has returned.
-        unsafe { libffi::low::closure_free(self.handle) };
+        // `Relaxed`: only this thread ever sets the flag, and it is the thread that armed it.
+        if !self.ctx.armed.load(std::sync::atomic::Ordering::Relaxed) {
+            // Never armed → `ffi_call` never ran → free everything, no leak.
+            // SAFETY: `handle` came from `ffi_closure_alloc` and is freed exactly once (here); no C
+            // code holds the code pointer, since the extern call never happened.
+            unsafe { libffi::low::closure_free(self.handle) };
+            // SAFETY: both `ManuallyDrop` fields are live and dropped exactly once (this is the only
+            // `Drop` for them), after the closure that referenced them is gone.
+            unsafe {
+                ManuallyDrop::drop(&mut self._cif);
+                ManuallyDrop::drop(&mut self.ctx);
+            }
+            return;
+        }
+        // Armed: C may have stored the code pointer. Poison (the exact inverse of `Cffi::call`'s
+        // arming store) and leak. `Release` so a trampoline that loads `false` also sees every write
+        // this thread made before it; `host` itself is deliberately LEFT ALONE — writing it here
+        // would race a concurrent trampoline's read of the same field.
+        self.ctx
+            .armed
+            .store(false, std::sync::atomic::Ordering::Release);
     }
 }
 
@@ -690,9 +877,10 @@ impl Cffi {
         // a plain `Vec<u8>` only guarantees 1. The `Vec<u64>` owns its allocation, so its address is
         // stable as this outer `Vec` grows; the `Arg` points at the first word (the struct's first byte).
         let mut struct_bufs: Vec<Vec<u64>> = Vec::new();
-        // Live libffi closures backing any callback args. Each owns its closure handle, CIF, and
-        // boxed userdata; all kept alive until AFTER `ffi_call` returns, then dropped (which frees
-        // the closure). The `void*` code pointer pushed as the arg is stored in `cb_codes`.
+        // Live libffi closures backing any callback args. Each holds the CIF + boxed userdata libffi
+        // reads through; all kept alive until AFTER `ffi_call` returns, then dropped — which POISONS
+        // and LEAKS an armed one (and frees an unarmed one): `CallbackClosure::drop`, gaps.md W6-8.
+        // The `void*` code pointer pushed as the arg is stored in `cb_codes`.
         let mut callback_closures: Vec<CallbackClosure<'_>> = Vec::new();
         let mut cb_codes: Vec<*mut c_void> = Vec::new();
         // A fault out-slot the trampoline stashes a callback error / caught panic into; drained after
@@ -836,6 +1024,9 @@ impl Cffi {
                     // captured here — it is patched in after the loop (as the final use of `host`), so
                     // a trailing `host.arg_*` reborrow can't invalidate it (Stacked/Tree Borrows).
                     let mut ctx = Box::new(TrampolineCtx {
+                        armed: std::sync::atomic::AtomicBool::new(false),
+                        // SAFETY: `pthread_self` is async-signal-safe and reads no shared state.
+                        owner: unsafe { libc::pthread_self() },
                         host: None,
                         arg_index: i,
                         params: params.as_slice() as *const [CType],
@@ -851,8 +1042,37 @@ impl Cffi {
                         params.iter().map(|p| p.ffi_type()),
                         ret.ffi_type(),
                     ));
-                    let (handle, code) = libffi::low::closure_alloc();
-                    // SAFETY: `handle`/`code` are a fresh closure pair from `closure_alloc`; `cb_cif`
+                    // NOT `libffi::low::closure_alloc()`: on failure `ffi_closure_alloc` returns NULL
+                    // WITHOUT writing the code pointer, and that wrapper `assume_init()`s the
+                    // still-uninitialised slot (uninit read = UB) and hands back a NULL handle
+                    // `ffi_prep_closure_loc` then writes through (NULL-deref SIGSEGV). Exhausting the
+                    // exec-closure pool is REACHABLE here — an armed trampoline is leaked, not freed
+                    // (see `CallbackClosure`'s `Drop`) — so the NULL must become a clean, recoverable
+                    // Chezzi error instead of the crash the leak would otherwise walk into.
+                    let mut code: *mut c_void = std::ptr::null_mut();
+                    // SAFETY: the libffi entry point `low::closure_alloc` wraps; it writes `code` and
+                    // returns the writable closure handle, or returns NULL having written nothing.
+                    let handle = unsafe {
+                        libffi::raw::ffi_closure_alloc(
+                            std::mem::size_of::<libffi::raw::ffi_closure>(),
+                            &mut code,
+                        )
+                    } as *mut libffi::raw::ffi_closure;
+                    if handle.is_null() || code.is_null() {
+                        if !handle.is_null() {
+                            // SAFETY: allocated just above and never handed to C.
+                            unsafe { libffi::low::closure_free(handle) };
+                        }
+                        return Err(HostError {
+                            message: format!(
+                                "cannot allocate a callback trampoline for argument {i} to '{}': \
+                                 the FFI closure pool is exhausted (one trampoline leaks per \
+                                 callback-passing extern call — see gaps.md W6-8)",
+                                self.name
+                            ),
+                        });
+                    }
+                    // SAFETY: `handle`/`code` are a fresh closure pair from `ffi_closure_alloc`; `cb_cif`
                     // is the callback's CIF (kept alive in `CallbackClosure`); `callback_trampoline`
                     // matches libffi's `RawCallback` shape; `&mut *ctx` is the live boxed userdata
                     // (also kept alive in `CallbackClosure`, address stable behind the `Box`).
@@ -862,7 +1082,7 @@ impl Cffi {
                             cb_cif.as_raw_ptr(),
                             Some(callback_trampoline),
                             &mut *ctx as *mut TrampolineCtx<'_> as *mut c_void,
-                            code.as_mut_ptr(),
+                            code,
                         )
                     };
                     if status != libffi::raw::ffi_status_FFI_OK {
@@ -875,13 +1095,16 @@ impl Cffi {
                             ),
                         });
                     }
-                    let code_ptr = code.as_mut_ptr();
+                    // `ManuallyDrop` because an ARMED closure is POISONED-AND-LEAKED, not freed, when
+                    // the call returns (see `CallbackClosure::drop`, which still frees an unarmed
+                    // one). The `Box`es stay — they are what pins the `ffi_cif`/userdata addresses
+                    // libffi stored above.
                     callback_closures.push(CallbackClosure {
                         handle,
-                        _cif: cb_cif,
-                        ctx,
+                        _cif: ManuallyDrop::new(cb_cif),
+                        ctx: ManuallyDrop::new(ctx),
                     });
-                    cb_codes.push(code_ptr);
+                    cb_codes.push(code);
                     slots.push(Slot::Callback(cb_codes.len() - 1));
                 }
                 // `OwnedStr`/`OptStr`/`OptOwnedStr` are RETURN-ONLY (the checker rejects them as
@@ -908,6 +1131,12 @@ impl Cffi {
             let host_ptr: *mut (dyn Host + '_) = host;
             for cc in &mut callback_closures {
                 cc.ctx.host = Some(host_ptr);
+                // ARM last, with `Release`: this publishes `host` (and every other ctx field) to
+                // whatever thread ends up invoking the trampoline, and is the flag `Drop` clears to
+                // poison the leaked allocation.
+                cc.ctx
+                    .armed
+                    .store(true, std::sync::atomic::Ordering::Release);
             }
         }
 
@@ -959,7 +1188,7 @@ impl Cffi {
         {
             let r = self.call_struct_return(&cif, code, &ffi_args, name, field_names, fields);
             // A callback fired during the call may have stashed a fault; re-raise it over the result.
-            // Keep the closures alive until after the call returns, then drop (frees them).
+            // Read the fault BEFORE dropping the closures, then drop (poisons + leaks an armed one).
             if let Some(err) = callback_fault.take() {
                 drop(callback_closures);
                 return Err(err);
@@ -1125,7 +1354,8 @@ impl Cffi {
             }
         };
         // `cstrings` / `struct_bufs` (and the other storage) are dropped here, after the call returns
-        // — never before. The callback closures are dropped last (freed) — also only after the call.
+        // — never before. The callback closures are dropped last (an armed one is poisoned + leaked,
+        // NOT freed — see `CallbackClosure::drop`) — also only after the call.
         drop(cstrings);
         drop(struct_bufs);
         drop(callback_closures);
@@ -1239,11 +1469,14 @@ mod tests {
     /// across exactly those moves. A by-value `Cif` here makes this assertion fail.
     #[test]
     fn boxed_callback_cif_address_is_stable_across_moves() {
-        // (1) Production tie-in: this only compiles while `CallbackClosure::_cif` DEREFS to `Cif`
-        // (i.e. is `Box<Cif>`, not a by-value `Cif`). If someone reverts the field to a bare `Cif`,
-        // `*c._cif` stops compiling and this regression test breaks the build — the whole point.
+        // (1) Production tie-in: this only compiles while `CallbackClosure::_cif` derefs TWICE to a
+        // `Cif` (i.e. is `ManuallyDrop<Box<Cif>>`, not a by-value `Cif` or a `ManuallyDrop<Cif>`).
+        // If someone reverts the field to a bare `Cif`, `**c._cif` stops compiling and this
+        // regression test breaks the build — the whole point. The pin now also covers the LEAKED
+        // cif: `Drop` no longer frees the closure, so libffi may deref that `ffi_cif` long after
+        // `Cffi::call` returned, and it must still sit at the address `ffi_prep_closure_loc` stored.
         fn _cif_is_heap_pinned(c: &CallbackClosure<'_>) -> *const Cif {
-            &*c._cif
+            &**c._cif
         }
         let _ = _cif_is_heap_pinned; // reference it so the compile-time guard isn't dead code
         // (2) The property that fix relies on: a `Box<Cif>` keeps its `ffi_cif` at a stable address
@@ -2135,5 +2368,57 @@ print(ffi.load_int32_at(p, 0))\n",
         assert_eq!(vm_out, "0\n0\n0\n0\n", "vm stdout");
         assert_eq!(interp_out, "0\n0\n0\n0\n", "interp stdout");
         assert_eq!(vm_out, interp_out, "two-engine parity");
+    }
+
+    /// The poison abort's only value is its message, and it goes out through a raw `write(2)` (Rust's
+    /// stdio lock is not async-signal-safe). A single bare `write` drops it entirely on a
+    /// non-blocking fd — an inherited-`O_NONBLOCK` tty, an editor/CI harness — leaving a bare SIGABRT
+    /// with empty stderr, barely distinguishable from the SIGSEGV W6-8 replaced. `write_all_fd` must
+    /// therefore ride out `EAGAIN` and short counts.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn write_all_fd_delivers_through_a_full_nonblocking_fd() {
+        let mut fds = [0i32; 2];
+        // SAFETY: `pipe` fills the two-element array with the read/write fds.
+        assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0, "pipe()");
+        let (rfd, wfd) = (fds[0], fds[1]);
+        // SAFETY: plain fcntl on our own fd — the inherited-O_NONBLOCK stderr case.
+        unsafe { libc::fcntl(wfd, libc::F_SETFL, libc::O_NONBLOCK) };
+        // Fill the pipe buffer so the next write is guaranteed to hit EAGAIN.
+        let filler = [b'x'; 4096];
+        loop {
+            // SAFETY: writing our own buffer to our own fd.
+            let n = unsafe { libc::write(wfd, filler.as_ptr() as *const c_void, filler.len()) };
+            if n < 0 {
+                break;
+            }
+        }
+        let reader = std::thread::spawn(move || {
+            // Stay blocked long enough that a non-retrying writer has already given up.
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            let mut buf = [0u8; 8192];
+            let mut all: Vec<u8> = Vec::new();
+            loop {
+                // SAFETY: reading into our own buffer from our own fd.
+                let n = unsafe { libc::read(rfd, buf.as_mut_ptr() as *mut c_void, buf.len()) };
+                if n <= 0 {
+                    break;
+                }
+                all.extend_from_slice(&buf[..n as usize]);
+            }
+            // SAFETY: closing our own fd, once.
+            unsafe { libc::close(rfd) };
+            all
+        });
+        write_all_fd(wfd, POISON_MSG);
+        // SAFETY: closing our own fd, once — gives the reader its EOF.
+        unsafe { libc::close(wfd) };
+        let all = reader.join().expect("reader thread");
+        assert!(
+            all.ends_with(POISON_MSG),
+            "the poison message must survive a full non-blocking fd; got {} bytes ending {:?}",
+            all.len(),
+            String::from_utf8_lossy(&all[all.len().saturating_sub(60)..]).into_owned()
+        );
     }
 }

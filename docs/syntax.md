@@ -2904,10 +2904,43 @@ If the Chezzi callback faults (or panics), the error is **re-raised** as the ext
 `0`. Both engines run the callback identically (two-engine parity), and it fires on the calling thread
 under `--parallel` (no cross-thread hand-off).
 
+**A callback C STORES is not supported — and says so, loudly.** The trampoline is only valid for the
+duration of the extern call that received it. If C keeps the pointer (`signal`, `atexit`, GLib/GTK,
+`pthread_cleanup_*`) and invokes it *later*, the process aborts with:
+
+```
+chezzi FFI: callback invoked after the extern call that received it returned; stored/cross-thread callbacks are not supported
+```
+
+on stderr, and dies on **SIGABRT** (shell status 134). This is a defined, diagnosable failure, not a
+crash: the trampoline is deliberately **leaked and poisoned** rather than freed, so it can never
+execute freed memory (it used to segfault — gaps.md W6-8). The abort path calls nothing but `write(2)`
+and `abort()` — both async-signal-safe, since the realistic caller is a C signal handler — so the
+program's own **buffered stdout is discarded**, exactly as on any other crash (CPython loses it on
+`abort` too). The diagnostic itself is never lost: it goes straight to fd 2 and is never queued. The
+check is a *runtime* one; the checker
+cannot reject it, because the identical `fn(int) -> int` param is correct for `qsort`, which invokes
+the callback *during* the call.
+
+A callback invoked on **any thread other than the one that made the extern call** — a library that
+spawns its own thread, a signal delivered elsewhere — aborts the same way, whether or not the call has
+returned:
+
+```
+chezzi FFI: callback invoked from a thread other than the one that made the extern call; stored/cross-thread callbacks are not supported
+```
+
+The price of that guarantee is a **leak**: every extern call that actually hands C a callback leaks its
+trampoline (~400 B, plus a W^X page pair from libffi's closure pool), so a callback-passing extern call
+in a hot loop grows both memory and mapping count. It degrades cleanly — when the pool can no longer
+grow, the call raises the ordinary recoverable error `cannot allocate a callback trampoline for
+argument N to 'f': the FFI closure pool is exhausted`, catchable with `recover:`.
+
 **Deferred FFI features (with design notes + the callback feasibility ladder in
 [`docs/ffi-and-packaging.md §1b`](ffi-and-packaging.md)):** the **rest of callbacks** (#4 — *stored* /
-*cross-thread* callbacks a C library keeps and calls later or from its own thread; harder than in
-Python because `--parallel` has no GIL to serialize the re-entry, plus they need a GC-rooting registry)
+*cross-thread* callbacks a C library keeps and calls later or from its own thread — these **abort**
+loudly today, see above; harder than in Python because `--parallel` has no GIL to serialize the
+re-entry, plus they need a GC-rooting registry)
 and **pointer-deref builtins** (to deref a `void*` callback arg → unlocks `qsort`/`bsearch`); and
 **varargs** (#5 — rare; `printf`-family + a few syscalls, most of which you bind with a concrete
 *fixed-arity* signature today, caveat: float varargs / non-x86-64 aren't ABI-portable that way). `bool`
@@ -3095,7 +3128,7 @@ whose module you never imported (`Match`) are not callable, so nothing shadows t
   NULL base pointer is guarded (recoverable error). See `stdlib.md §std.ffi`.
 
 **Deferred (v1 limits):** *stored / cross-thread* callbacks (sync scalar callbacks **shipped** — see
-above), varargs, a **GC-tracked auto-freed owned-buffer type** + bulk-copy helpers + `realloc` (the
+above; a stored one **aborts** with a named message on SIGABRT rather than segfaulting), varargs, a **GC-tracked auto-freed owned-buffer type** + bulk-copy helpers + `realloc` (the
 manual `ffi.alloc`/`alloc_zeroed`/`free` layer **shipped** — see above), the rich Rust `Box<dyn Any>`
 userdata handle (for compiled-in Rust libraries), a **custom user-named deallocator** (only libc `free`
 backs `owned_str`), and — within structs-by-value — **nested structs** and **`str`/`owned_str` fields**.

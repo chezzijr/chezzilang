@@ -108,8 +108,10 @@ extern call), the trampoline reads the C scalar args, re-enters the engine throu
 seam (`Host::invoke_callback`, keyed by arg index so no engine `Value` leaks across the FFI layer),
 and writes the Chezzi result back into C's return slot. Wired on the VM (via
 `guarded`+`invoke_value`) and consistent under `--parallel` (a sync callback fires
-on the calling worker thread, no cross-thread hand-off). The closure is freed when the extern call
-returns (sync scope ⇒ **no** GC rooting). Example:
+on the calling worker thread, no cross-thread hand-off). The closure is valid only for the duration of
+the extern call (sync scope ⇒ **no** GC rooting). When the call returns the trampoline is **poisoned
+and leaked**, not freed: if C stored the pointer and invokes it later, it hits a named `abort()`
+instead of executing freed memory (§1b item 4). Example:
 
 ```chezzi
 extern "libapply.so":
@@ -155,7 +157,38 @@ Recorded so a revisit starts from a plan, not a blank page:
    `examples/ffi_qsort.chz` capstone golden, run on both engines). Still deferred from this slice: a
    **GC-tracked / auto-freed owned-buffer type**, bulk-copy helpers, and `ffi.realloc`.
 4. **(its own milestone) Stored + cross-thread callbacks** — a callback C keeps and calls *after* the
-   extern call returns and/or from *its own* thread. Needs **two** new pieces:
+   extern call returns and/or from *its own* thread.
+
+   **Until then the deferral is LOUD, not UB (gaps.md W6-8).** The trampoline is deliberately leaked
+   and disarmed when the extern call returns, so a later invocation from C writes
+
+   ```
+   chezzi FFI: callback invoked after the extern call that received it returned; stored/cross-thread callbacks are not supported
+   ```
+
+   to stderr and `abort()`s (**SIGABRT**, shell status 134). It previously `ffi_closure_free`d the
+   trampoline while C still held the code pointer — a guaranteed segfault from checker-clean code, for
+   every C API that retains a function pointer (`signal`, `atexit`, GLib/GTK, `pthread_cleanup_*`).
+   The abort is `abort()` rather than a Chezzi fault because unwinding out of Rust into a C frame (the
+   realistic site is a C signal handler) is itself UB. **Cost:** one trampoline + CIF + userdata leaks
+   per callback-passing extern call that actually reached C (a call that bailed while marshalling a
+   later argument never handed C the pointer and is still freed). That is ~400 B of RSS *and* a W^X page
+   pair out of libffi's exec pool, i.e. ~1 extra mapping per ~130 calls against `vm.max_map_count`, so a
+   `qsort` in a hot loop grows both. When the pool cannot grow, the next callback-passing call fails
+   with the ordinary recoverable error `cannot allocate a callback trampoline for argument N to 'f':
+   the FFI closure pool is exhausted` — a `recover:`-able fault, never a crash. Accepted to kill the UB;
+   the upgrade path is caching one trampoline per (closure identity, signature).
+
+   **Cross-thread is covered by the same abort.** The armed flag is an `AtomicBool` (so the
+   trampoline's load never races the poison store — a plain `bool` there was a data race, and a stale
+   read would have dereferenced a dead VM pointer), and the trampoline also compares `pthread_self()`
+   against the thread that made the call, aborting on a mismatch with `chezzi FFI: callback invoked
+   from a thread other than the one that made the extern call; stored/cross-thread callbacks are not
+   supported`. A library that spawns a thread and calls back *during* the extern call therefore aborts
+   too, instead of re-entering the engine off-thread. That is a hard "unsupported", not support — which
+   is what the two pieces below exist to change.
+
+   Needs **two** new pieces:
    - a **callback registry** that GC-roots the closure (+ its upvalues) until an explicit `unregister`,
      since there is no "done" signal. *Python ref:* `ctypes` punts this onto the user — its docs warn
      *"Make sure you keep references to `CFUNCTYPE` objects as long as they are used from C code.
@@ -340,7 +373,7 @@ A registry serving native packages needs one of:
 |---|---|---|
 | **A. Recompile-the-world** (Zig-like) | native pkg = vendored Rust crate + glue; `chezzi build` links a **project-specific binary** | ABI-safe, simple; every native dep = a Rust rebuild; needs the Rust toolchain on the user machine |
 | **B. Dynamic plugins** (CPython C-ext model) | pkg ships a prebuilt `cdylib` (`.so`); `chezzi` `dlopen`s it at module-init | no user rebuild — but needs a **frozen `repr(C)` ABI** for the seam |
-| **C. C-ABI wrapper** (`extern "lib":`) | pkg = manifest → a system `.so` + Chezzi wrapper source | already largely built; scalars, handles, flat structs by value, **sync scalar callbacks**, **pointer-deref `load_*`/`store_*` builtins**, and the **C-buffer alloc layer** (`ffi.alloc`/`alloc_zeroed`/`free` — `qsort`/`bsearch` of a Chezzi list now fully works) today (stored/cross-thread callbacks + variadics deferred) |
+| **C. C-ABI wrapper** (`extern "lib":`) | pkg = manifest → a system `.so` + Chezzi wrapper source | already largely built; scalars, handles, flat structs by value, **sync scalar callbacks**, **pointer-deref `load_*`/`store_*` builtins**, and the **C-buffer alloc layer** (`ffi.alloc`/`alloc_zeroed`/`free` — `qsort`/`bsearch` of a Chezzi list now fully works) today (stored/cross-thread callbacks + variadics deferred — a stored callback aborts with a named message, see §1b item 4) |
 
 ### 6.3 The gotcha that decides it: Rust has no stable ABI
 Model B's blocker: the `Host`/`NativeRet`/`Arc<dyn Any>` seam is a **Rust** ABI — `String`, `Vec`,
