@@ -4,6 +4,36 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 **Legend:** ⬜ not started · 🟦 in progress · ✅ done
 
+> **✅ FIX (2026-07-27, gaps.md W6-8) — a STORED FFI callback aborts loudly instead of segfaulting; the
+> LAST memory-unsafety in the ledger is closed.** `signal(10, handler)` then `raise(10)` — checker-clean
+> — used to give `rc=139` (SIGSEGV, core dumped, empty stderr) on both engines: `CallbackClosure::drop`
+> `ffi_closure_free`d the libffi trampoline when the extern call returned, while C still held its code
+> pointer, so the next invocation from C executed freed memory. Every C API that RETAINS a function
+> pointer (`signal`, `atexit`, GLib/GTK, `pthread_cleanup_*`) was a guaranteed segfault, and no
+> check-time reject is possible — the identical `fn(int) -> int` param is correct for `qsort`, which
+> invokes the callback *during* the call. **Fix: leak the trampoline, POISON it.** `Drop` no longer
+> frees; it detaches the VM back-pointer (`ctx.host = None`) and leaks the `ffi_closure` + `Box<Cif>` +
+> boxed `TrampolineCtx` (`ManuallyDrop<Box<…>>` fields). `callback_trampoline` now resolves `ctx.host`
+> **first** — ahead of the `params`/`ret` derefs and ahead of `catch_unwind` — and on `None` writes
+> `chezzi FFI: callback invoked after the extern call that received it returned; stored/cross-thread
+> callbacks are not supported` to fd 2 and `abort()`s. Verified on the real release binary, both engines:
+> `rc=134` (SIGABRT) with that message. All three allocations must leak, not just the handle — libffi
+> derefs the prepped `ffi_cif` and loads the userdata BEFORE our Rust fn runs, so freeing either would
+> relocate the SIGSEGV into `classify_argument` (the `Box<Cif>` heap-pin bug again); `_cif` stays a `Box`
+> under the `ManuallyDrop` and the compile-time guard asserts `&**c._cif`. `abort()` not a panic: the
+> realistic site is a C signal handler, and unwinding into a C frame is itself UB. During-the-call
+> callbacks are untouched — `examples/ffi_qsort.chz` is byte-identical to its golden on both engines and
+> the whole `native::cffi` callback suite (fault re-raise, panic-caught, 2-/3-engine parity) is green.
+> **Accepted ceiling** (`ponytail:`-marked): one trampoline + CIF + ctx (a few hundred bytes) leaks per
+> **callback-passing** extern call, so a `qsort` in a hot loop grows memory — traded for killing the UB;
+> upgrade path is one cached trampoline per (closure identity, signature). Callback-free extern calls
+> never build a `CallbackClosure`, so no perf change there. Stored/cross-thread callbacks stay DEFERRED —
+> the deferral is just loud now, and the docs are explicit that a C-spawned thread calling back *during*
+> the extern call is still unguarded. Test: `tests/ffi_stored_callback.rs` (subprocess — the program dies
+> on SIGABRT, so it can never be a stdout golden, and FFI UB is layout-dependent). Docs: `docs/gaps.md`
+> (W6-8 FIXED + removed from the open-items table, which now leads with "no memory-unsafety left"),
+> `docs/syntax.md`, `docs/ffi-and-packaging.md §1b`.
+
 > **❌ ATTEMPTED AND REJECTED (2026-07-26, gaps.md W6-3d) — candidate (b) for the numeric-newtype
 > operator divergence makes `<` INTRANSITIVE. Branch discarded, `main` unchanged, the divergence
 > stands.** (b) was "a numeric newtype's own `add`/`compare`/… dispatches as the operator too, so `+`
