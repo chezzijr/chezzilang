@@ -20,15 +20,14 @@ fix applied to SOME arms of an N-way set"** — is the highest-yield remaining l
 
 ## OPEN ITEMS — the whole backlog at a glance (updated 2026-07-27)
 
-Everything still open, roughly by severity. **No memory-unsafety is left in the ledger** — the last one
-(W6-8, a stored FFI callback dangling into a SIGSEGV) was fixed 2026-07-27 by leaking + poisoning the
-libffi trampoline, so the deferral is now a named `abort()` instead of UB. Anything NOT listed here is
-either fixed or a safe-direction observation. **Keep this table in sync when a section is retired** — the
+Everything still open, roughly by severity (memory-unsafety first). Anything NOT listed here is either
+fixed or a safe-direction observation. **Keep this table in sync when a section is retired** — the
 reason it exists is that "which of these is still open?" previously required reading 1400 lines of
 chronological log.
 
 | item | gaps.md | what | why it is still open |
 |---|---|---|---|
+| **W6-8r** | `:797` | **Memory-unsafety.** A C library that spawns its own thread and calls a Chezzi callback **while the extern call is still running** re-enters the VM off-thread (the trampoline's `ctx.host` is live during the call, and nothing checks the thread) | The *after-return* half of W6-8 is FIXED (2026-07-27: the trampoline is leaked + poisoned, so a stored callback aborts loudly). This half needs thread-safe VM re-entry — a mini-GIL or thread-marshalling — i.e. the deferred stored/cross-thread-callback milestone (`docs/ffi-and-packaging.md §1b` item 4) |
 | **W6-7** | `:772` | `RwShared` zero-copy read-view is **O(N²)** — every GC re-walks the whole off-heap wire payload (200k `for_each`: 1.428 s vs 0.154 s) | Perf, on a flagship new API. Needs a GC/wire-payload change, own task |
 | **W6-9** | `:820` | `Writer.write_bytes` byte-exact on a file but **lossy on `io.stdout()`/`stderr()`**, and returns a count that doesn't match what was emitted | Last surviving member of the lossy-byte family (B1/R1/W6-4/W6-14, all fixed). Blocked on the `emit_out`/`emit_err` sink being `&str`-typed |
 | **W6-10** | `:828` | `chezzi test --max-heap` ignores off-heap wire storage — 195 MB RSS passes a 200 KB cap | `live_bytes` counts only in-`Heap` slots; airlocked `WireValue`s live outside every `Heap` |
@@ -841,7 +840,8 @@ Four things are load-bearing and were each nearly a second bug:
   so reverting the field to a by-value `Cif` still breaks the build.
 - **Guard PLACEMENT.** The old `ctx.host.expect(…)` sat INSIDE `catch_unwind`; leaving it there would
   turn a dead-owner invocation into a caught panic whose handler writes a `HostError` through
-  `ctx.fault` — a dangling pointer into `Cffi::call`'s dead stack frame. A quieter second UB.
+  `ctx.fault` — which points into `Cffi::call`'s `Box<Option<HostError>>`, freed when that call
+  returned, so the write lands in freed heap. A quieter second UB.
 - **`abort()`, not a panic or a Chezzi fault.** The realistic invocation site is a C signal handler
   (this very repro); unwinding from Rust into a C frame is itself UB, and Rust's stdio lock is not
   async-signal-safe — hence raw `write(2)` rather than `eprintln!`.
@@ -856,19 +856,40 @@ UB; leaving the old trampoline pointing at a freed ctx is UB again), so a correc
 "re-prep **plus** poison-in-place". Poison alone is the whole fix, is strictly smaller, adds zero work
 to the `qsort` teardown path, and does not depend on undocumented libffi re-prep-in-place semantics.
 
-**Accepted ceiling (`ponytail:`-marked in `CallbackClosure::drop`):** one trampoline + CIF + ctx (a few
-hundred bytes) leaks per **callback-passing** extern call, so a `qsort` in a hot loop grows memory.
-Traded knowingly for killing the UB. Upgrade path: cache and reuse one trampoline per (closure
-identity, signature), freed when the owning closure is collected. Callback-free extern calls never
-construct a `CallbackClosure`, so nothing else pays.
+**Only an ARMED trampoline leaks.** `ctx.host.is_some()` doubles as the armed flag: `Cffi::call` patches
+it as its last act before `ffi_call`, so `None` at drop means the call bailed during arg marshalling (an
+interior-NUL `str`, a return-only C type, a failed closure alloc for a later callback arg — all
+`recover:`-able) and C provably never saw the code pointer. Those are still `ffi_closure_free`d. Leaking
+them would make the cost per *attempt*, so a `recover:` retry loop that never enters C would grow the
+pool for nothing (measured, pre-refinement: 200k faulting attempts leaked 72 MB and ~3100 mappings).
 
-**Still not covered, and the docs say so:** a C library that spawns a thread and invokes the callback
-*while the extern call is still running* finds a live `ctx.host` and re-enters the engine off-thread.
-That is the cross-thread half of the deferred feature (`docs/ffi-and-packaging.md §1b` item 4), which
-needs thread-safe VM re-entry (a mini-GIL or thread-marshalling) — not this fix.
+**Accepted ceiling (`ponytail:`-marked in `CallbackClosure::drop`):** one trampoline + CIF + ctx leaks
+per **callback-passing** extern call — ~400 B of RSS, but it comes out of libffi's exec pool as a W^X
+page PAIR, so it also consumes `vm.max_map_count` (~1 new VMA per ~130 calls; measured 200k `qsort`
+calls → 90 MB peak RSS / 3168 VMAs vs a flat 11.5 MB / 46 before). A `qsort` in a hot loop therefore
+grows memory *and* mapping count. **The exhaustion end of that is defined, not a crash:** the allocation
+goes through `libffi::raw::ffi_closure_alloc` with an explicit NULL check, so a dry pool raises the
+recoverable Chezzi error `cannot allocate a callback trampoline for argument N to 'f': the FFI closure
+pool is exhausted`. `libffi::low::closure_alloc()` is deliberately NOT used: on failure it
+`assume_init()`s a code pointer `ffi_closure_alloc` never wrote (uninit read = UB) and hands
+`ffi_prep_closure_loc` a NULL handle to write through — i.e. the naive leak would have swapped a SIGSEGV
+on an *unsupported* stored callback for a SIGSEGV on the *supported* during-the-call one. Upgrade path:
+cache and reuse one trampoline per (closure identity, signature), freed when the owning closure is
+collected. Callback-free extern calls never construct a `CallbackClosure`, so nothing else pays.
 
-Test: `tests/ffi_stored_callback.rs::stored_callback_aborts_loudly_on_both_engines` (a subprocess test
-— the program dies on SIGABRT, so it can never be a stdout golden, and FFI UB is layout-dependent).
+**Still not covered, and the docs say so (tracked as `W6-8r` in the OPEN ITEMS table):** a C library
+that spawns a thread and invokes the callback *while the extern call is still running* finds a live
+`ctx.host` and re-enters the engine off-thread. That is the cross-thread half of the deferred feature
+(`docs/ffi-and-packaging.md §1b` item 4), which needs thread-safe VM re-entry (a mini-GIL or
+thread-marshalling) — not this fix.
+
+Tests: `tests/ffi_stored_callback.rs` — `stored_callback_aborts_loudly_on_both_engines` (the repro),
+`unarmed_callback_trampoline_is_freed_not_leaked` (peak-RSS growth over 50k never-armed attempts), and
+`exhausted_closure_pool_faults_cleanly_instead_of_crashing` (the program caps its own `RLIMIT_AS` via
+libc, drains the pool, and must get the clean fault rather than a signal). All subprocess tests — the
+first program dies on SIGABRT so it can never be a stdout golden, and FFI UB is layout-dependent. Each
+child runs with `RLIMIT_CORE = 1` so a deliberately-aborting test never litters the host with core
+dumps.
 
 ### W6-9. `Writer.write_bytes` is byte-exact on a file but LOSSY on `io.stdout()`/`io.stderr()`, and returns a count that doesn't match what was emitted
 `io.stdout().write_bytes(b"\xff\xfe")` emits `ef bf bd ef bf bd` (two U+FFFD) and returns `Ok(2)`; the same
@@ -3263,7 +3284,8 @@ value level.** Status now:
   `load_str`, and two dead/absent extern-name collision guards), plus a void-returning callback being
   unspellable at all. See the 2026-07-25 session log (W6-5, W6-8, W6-14, W6-6, W6-11) — **all now
   fixed**, the stored-callback SIGSEGV last (W6-8, 2026-07-27: the trampoline is leaked + poisoned, so
-  the still-deferred feature aborts with a named message instead of executing freed memory). The libffi
+  the still-deferred feature aborts with a named message instead of executing freed memory — its
+  cross-thread half stays open as `W6-8r`). The libffi
   `Cif` heap-pin SIGSEGV precedent held: FFI UB is layout-dependent and invisible to the value-level
   oracles — W6-8's fix is likewise gated on a real-binary subprocess test, not a stdout golden.
 

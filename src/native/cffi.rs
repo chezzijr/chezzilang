@@ -458,9 +458,10 @@ returned; stored/cross-thread callbacks are not supported\n";
 /// `abort` rather than a panic/fault: we are on a C stack (the realistic site is a C signal handler
 /// — the W6-8 repro is `signal`/`raise`), unwinding from Rust into a C frame is itself UB, and a
 /// panic here would be swallowed by the surrounding `catch_unwind`, whose handler would then write a
-/// `HostError` through `ctx.fault` — a dangling pointer into the dead `Cffi::call` stack frame, a
-/// second and quieter UB. Raw `write(2)` rather than `eprintln!` for the same reason Rust's stdio
-/// lock is not async-signal-safe.
+/// `HostError` through `ctx.fault` — which points at `Cffi::call`'s `Box<Option<HostError>>`, a HEAP
+/// allocation freed when that call returned, so the write lands in freed heap (a use-after-free, not
+/// a stack scribble). A second and quieter UB. Raw `write(2)` rather than `eprintln!` because Rust's
+/// stdio lock is not async-signal-safe.
 fn callback_poison_abort() -> ! {
     // SAFETY: a plain `write(2)` of a static buffer to fd 2; async-signal-safe, ignores the result.
     unsafe {
@@ -535,7 +536,9 @@ unsafe extern "C" fn callback_trampoline(
         Ok(Err(host_err)) => {
             // SAFETY: zero the result so C unwinds with a defined value.
             unsafe { write_c_result(result, ret_ct, &NativeRet::Int(0)) };
-            // SAFETY: `ctx.fault` is the live `Option<HostError>` out-slot on `Cffi::call`'s stack.
+            // SAFETY: `ctx.fault` points into `Cffi::call`'s live `Box<Option<HostError>>` out-slot
+            // (heap, freed when that call returns — the poison guard above is what keeps a
+            // post-return invocation from writing through it).
             unsafe { *ctx.fault = Some(host_err) };
         }
         Err(panic_payload) => {
@@ -546,7 +549,7 @@ unsafe extern "C" fn callback_trampoline(
                 .map(|s| s.to_string())
                 .or_else(|| panic_payload.downcast_ref::<String>().cloned())
                 .unwrap_or_else(|| "callback panicked".to_string());
-            // SAFETY: as above — the fault out-slot is live.
+            // SAFETY: as above — the boxed fault out-slot is live for the duration of the call.
             unsafe {
                 *ctx.fault = Some(HostError {
                     message: format!("callback panicked: {msg}"),
@@ -556,15 +559,16 @@ unsafe extern "C" fn callback_trampoline(
     }
 }
 
-/// A live libffi closure backing one callback arg: the CIF (libffi reads through it whenever the
-/// closure is invoked) and the boxed [`TrampolineCtx`] userdata. Dropping POISONS and LEAKS it — see
-/// the `Drop` impl. The `ffi_closure` allocation itself is not tracked here at all: nothing ever
-/// frees it, so there is no handle to hold (`Cffi::call` keeps the local `handle` only for the
-/// `ffi_prep_closure_loc` failure bail-out, where C never saw the code pointer).
+/// A live libffi closure backing one callback arg: the allocated closure handle, the CIF (libffi
+/// reads through it whenever the closure is invoked) and the boxed [`TrampolineCtx`] userdata.
+/// Dropping either FREES all three (the trampoline was never armed, so C never saw the code pointer)
+/// or POISONS and LEAKS them (it was) — see the `Drop` impl.
 struct CallbackClosure<'h> {
+    handle: *mut libffi::raw::ffi_closure,
     _cif: ManuallyDrop<Box<Cif>>,
     // Patched (its `host` field) after the arg loop, then read by libffi during the call via the
-    // userdata pointer. Not `_`-prefixed because `Cffi::call` writes it.
+    // userdata pointer. Not `_`-prefixed because `Cffi::call` writes it. `host.is_some()` doubles as
+    // the ARMED flag the `Drop` impl reads.
     ctx: ManuallyDrop<Box<TrampolineCtx<'h>>>,
 }
 
@@ -589,12 +593,38 @@ impl Drop for CallbackClosure<'_> {
     ///   Rust fn runs, so freeing the cif or the ctx would just relocate the SIGSEGV into
     ///   `classify_argument` (that is the 3038f67 bug again).
     ///
-    /// ponytail: this LEAKS one trampoline + cif + ctx (a few hundred bytes) per callback-passing
-    /// extern call, so a `qsort` in a hot loop grows memory. Accepted trade for killing the UB.
-    /// Upgrade path: cache and reuse one trampoline per (closure identity, signature) instead of
-    /// allocating per call, and free it when the owning closure is collected.
+    /// …but ONLY for a trampoline that was actually ARMED. `Cffi::call` patches `ctx.host` to
+    /// `Some` as its last act before `ffi_call`; a `None` here means the call bailed during arg
+    /// marshalling (an interior-NUL `str`, a return-only C type, a failed closure alloc for a later
+    /// callback arg — all `recover:`-able), so `ffi_call` never ran and C provably never saw the code
+    /// pointer. Nothing to protect: free it. Leaking those would leak per *attempt*, and a
+    /// `recover:` retry loop that never calls into C would grow the pool for nothing.
+    ///
+    /// ponytail: an ARMED trampoline leaks one closure + cif + ctx per callback-passing extern call.
+    /// That is ~400 B of RSS, but it comes out of libffi's exec pool as a W^X page PAIR, so it also
+    /// consumes `vm.max_map_count` (~1 new VMA per ~130 calls). A `qsort` in a hot loop therefore
+    /// grows memory AND mapping count; when the pool can no longer grow, the next callback-passing
+    /// call fails with the recoverable "cannot allocate a callback trampoline" error raised at the
+    /// `ffi_closure_alloc` site (never a crash — that NULL is checked precisely because this leak
+    /// makes exhaustion reachable). Accepted trade for killing the UB. Upgrade path: cache and reuse
+    /// one trampoline per (closure identity, signature) instead of allocating per call, and free it
+    /// when the owning closure is collected.
     fn drop(&mut self) {
-        // The exact inverse of `Cffi::call`'s `cc.ctx.host = Some(host_ptr)` patch.
+        if self.ctx.host.is_none() {
+            // Never armed → `ffi_call` never ran → free everything, no leak.
+            // SAFETY: `handle` came from `ffi_closure_alloc` and is freed exactly once (here); no C
+            // code holds the code pointer, since the extern call never happened.
+            unsafe { libffi::low::closure_free(self.handle) };
+            // SAFETY: both `ManuallyDrop` fields are live and dropped exactly once (this is the only
+            // `Drop` for them), after the closure that referenced them is gone.
+            unsafe {
+                ManuallyDrop::drop(&mut self._cif);
+                ManuallyDrop::drop(&mut self.ctx);
+            }
+            return;
+        }
+        // Armed: C may have stored the code pointer. Poison (the exact inverse of `Cffi::call`'s
+        // `cc.ctx.host = Some(host_ptr)` patch) and leak.
         self.ctx.host = None;
     }
 }
@@ -744,9 +774,9 @@ impl Cffi {
         // stable as this outer `Vec` grows; the `Arg` points at the first word (the struct's first byte).
         let mut struct_bufs: Vec<Vec<u64>> = Vec::new();
         // Live libffi closures backing any callback args. Each holds the CIF + boxed userdata libffi
-        // reads through; all kept alive until AFTER `ffi_call` returns, then dropped (which POISONS
-        // and LEAKS them — `CallbackClosure::drop`, gaps.md W6-8). The `void*` code pointer pushed as
-        // the arg is stored in `cb_codes`.
+        // reads through; all kept alive until AFTER `ffi_call` returns, then dropped — which POISONS
+        // and LEAKS an armed one (and frees an unarmed one): `CallbackClosure::drop`, gaps.md W6-8.
+        // The `void*` code pointer pushed as the arg is stored in `cb_codes`.
         let mut callback_closures: Vec<CallbackClosure<'_>> = Vec::new();
         let mut cb_codes: Vec<*mut c_void> = Vec::new();
         // A fault out-slot the trampoline stashes a callback error / caught panic into; drained after
@@ -905,8 +935,37 @@ impl Cffi {
                         params.iter().map(|p| p.ffi_type()),
                         ret.ffi_type(),
                     ));
-                    let (handle, code) = libffi::low::closure_alloc();
-                    // SAFETY: `handle`/`code` are a fresh closure pair from `closure_alloc`; `cb_cif`
+                    // NOT `libffi::low::closure_alloc()`: on failure `ffi_closure_alloc` returns NULL
+                    // WITHOUT writing the code pointer, and that wrapper `assume_init()`s the
+                    // still-uninitialised slot (uninit read = UB) and hands back a NULL handle
+                    // `ffi_prep_closure_loc` then writes through (NULL-deref SIGSEGV). Exhausting the
+                    // exec-closure pool is REACHABLE here — an armed trampoline is leaked, not freed
+                    // (see `CallbackClosure`'s `Drop`) — so the NULL must become a clean, recoverable
+                    // Chezzi error instead of the crash the leak would otherwise walk into.
+                    let mut code: *mut c_void = std::ptr::null_mut();
+                    // SAFETY: the libffi entry point `low::closure_alloc` wraps; it writes `code` and
+                    // returns the writable closure handle, or returns NULL having written nothing.
+                    let handle = unsafe {
+                        libffi::raw::ffi_closure_alloc(
+                            std::mem::size_of::<libffi::raw::ffi_closure>(),
+                            &mut code,
+                        )
+                    } as *mut libffi::raw::ffi_closure;
+                    if handle.is_null() || code.is_null() {
+                        if !handle.is_null() {
+                            // SAFETY: allocated just above and never handed to C.
+                            unsafe { libffi::low::closure_free(handle) };
+                        }
+                        return Err(HostError {
+                            message: format!(
+                                "cannot allocate a callback trampoline for argument {i} to '{}': \
+                                 the FFI closure pool is exhausted (one trampoline leaks per \
+                                 callback-passing extern call — see gaps.md W6-8)",
+                                self.name
+                            ),
+                        });
+                    }
+                    // SAFETY: `handle`/`code` are a fresh closure pair from `ffi_closure_alloc`; `cb_cif`
                     // is the callback's CIF (kept alive in `CallbackClosure`); `callback_trampoline`
                     // matches libffi's `RawCallback` shape; `&mut *ctx` is the live boxed userdata
                     // (also kept alive in `CallbackClosure`, address stable behind the `Box`).
@@ -916,7 +975,7 @@ impl Cffi {
                             cb_cif.as_raw_ptr(),
                             Some(callback_trampoline),
                             &mut *ctx as *mut TrampolineCtx<'_> as *mut c_void,
-                            code.as_mut_ptr(),
+                            code,
                         )
                     };
                     if status != libffi::raw::ffi_status_FFI_OK {
@@ -929,15 +988,16 @@ impl Cffi {
                             ),
                         });
                     }
-                    let code_ptr = code.as_mut_ptr();
-                    // `ManuallyDrop` because the closure is POISONED-AND-LEAKED, not freed, when the
-                    // call returns (see `CallbackClosure::drop`). The `Box`es stay — they are what
-                    // pins the `ffi_cif`/userdata addresses libffi stored above.
+                    // `ManuallyDrop` because an ARMED closure is POISONED-AND-LEAKED, not freed, when
+                    // the call returns (see `CallbackClosure::drop`, which still frees an unarmed
+                    // one). The `Box`es stay — they are what pins the `ffi_cif`/userdata addresses
+                    // libffi stored above.
                     callback_closures.push(CallbackClosure {
+                        handle,
                         _cif: ManuallyDrop::new(cb_cif),
                         ctx: ManuallyDrop::new(ctx),
                     });
-                    cb_codes.push(code_ptr);
+                    cb_codes.push(code);
                     slots.push(Slot::Callback(cb_codes.len() - 1));
                 }
                 // `OwnedStr`/`OptStr`/`OptOwnedStr` are RETURN-ONLY (the checker rejects them as
@@ -1015,7 +1075,7 @@ impl Cffi {
         {
             let r = self.call_struct_return(&cif, code, &ffi_args, name, field_names, fields);
             // A callback fired during the call may have stashed a fault; re-raise it over the result.
-            // Read the fault BEFORE dropping the closures, then drop (poisons + leaks them).
+            // Read the fault BEFORE dropping the closures, then drop (poisons + leaks an armed one).
             if let Some(err) = callback_fault.take() {
                 drop(callback_closures);
                 return Err(err);
@@ -1181,8 +1241,8 @@ impl Cffi {
             }
         };
         // `cstrings` / `struct_bufs` (and the other storage) are dropped here, after the call returns
-        // — never before. The callback closures are dropped last (poisoned + leaked, NOT freed — see
-        // `CallbackClosure::drop`) — also only after the call.
+        // — never before. The callback closures are dropped last (an armed one is poisoned + leaked,
+        // NOT freed — see `CallbackClosure::drop`) — also only after the call.
         drop(cstrings);
         drop(struct_bufs);
         drop(callback_closures);

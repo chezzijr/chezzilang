@@ -4,8 +4,9 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 **Legend:** ⬜ not started · 🟦 in progress · ✅ done
 
-> **✅ FIX (2026-07-27, gaps.md W6-8) — a STORED FFI callback aborts loudly instead of segfaulting; the
-> LAST memory-unsafety in the ledger is closed.** `signal(10, handler)` then `raise(10)` — checker-clean
+> **✅ FIX (2026-07-27, gaps.md W6-8) — a STORED FFI callback aborts loudly instead of segfaulting.**
+> (The *cross-thread* half of the same deferred feature stays open as `W6-8r`.) `signal(10, handler)`
+> then `raise(10)` — checker-clean
 > — used to give `rc=139` (SIGSEGV, core dumped, empty stderr) on both engines: `CallbackClosure::drop`
 > `ffi_closure_free`d the libffi trampoline when the extern call returned, while C still held its code
 > pointer, so the next invocation from C executed freed memory. Every C API that RETAINS a function
@@ -24,14 +25,22 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > realistic site is a C signal handler, and unwinding into a C frame is itself UB. During-the-call
 > callbacks are untouched — `examples/ffi_qsort.chz` is byte-identical to its golden on both engines and
 > the whole `native::cffi` callback suite (fault re-raise, panic-caught, 2-/3-engine parity) is green.
-> **Accepted ceiling** (`ponytail:`-marked): one trampoline + CIF + ctx (a few hundred bytes) leaks per
-> **callback-passing** extern call, so a `qsort` in a hot loop grows memory — traded for killing the UB;
-> upgrade path is one cached trampoline per (closure identity, signature). Callback-free extern calls
-> never build a `CallbackClosure`, so no perf change there. Stored/cross-thread callbacks stay DEFERRED —
-> the deferral is just loud now, and the docs are explicit that a C-spawned thread calling back *during*
-> the extern call is still unguarded. Test: `tests/ffi_stored_callback.rs` (subprocess — the program dies
-> on SIGABRT, so it can never be a stdout golden, and FFI UB is layout-dependent). Docs: `docs/gaps.md`
-> (W6-8 FIXED + removed from the open-items table, which now leads with "no memory-unsafety left"),
+> Only an **armed** trampoline leaks: `ctx.host.is_some()` is the armed flag, so a call that bailed
+> during arg marshalling (interior-NUL `str`, return-only C type — all `recover:`-able) never handed C
+> the code pointer and is still freed. **Accepted ceiling** (`ponytail:`-marked): one trampoline + CIF +
+> ctx leaks per **callback-passing** extern call — ~400 B RSS, but as a W^X page PAIR out of libffi's
+> exec pool, so it also eats `vm.max_map_count` (~1 VMA per ~130 calls); a `qsort` in a hot loop grows
+> memory and mappings. That exhaustion is **defined**: the alloc goes through
+> `libffi::raw::ffi_closure_alloc` with an explicit NULL check (`libffi::low::closure_alloc()`
+> `assume_init()`s an uninit code pointer and feeds a NULL handle to `ffi_prep_closure_loc`), so a dry
+> pool is the recoverable error `the FFI closure pool is exhausted`, never a crash. Upgrade path: one
+> cached trampoline per (closure identity, signature). Callback-free extern calls never build a
+> `CallbackClosure`, so no perf change there. Stored/cross-thread callbacks stay DEFERRED — the deferral
+> is just loud now, and a C-spawned thread calling back *during* the extern call is still unguarded
+> (open as `W6-8r`). Tests: `tests/ffi_stored_callback.rs` — the repro, the unarmed-free RSS-growth
+> check, and a self-`RLIMIT_AS`-capped pool-exhaustion run (subprocess tests: the repro dies on SIGABRT
+> so it can never be a stdout golden, and FFI UB is layout-dependent; children run with `RLIMIT_CORE=1`
+> so the deliberate abort leaves no core dumps). Docs: `docs/gaps.md` (W6-8 FIXED, `W6-8r` row added),
 > `docs/syntax.md`, `docs/ffi-and-packaging.md §1b`.
 
 > **❌ ATTEMPTED AND REJECTED (2026-07-26, gaps.md W6-3d) — candidate (b) for the numeric-newtype

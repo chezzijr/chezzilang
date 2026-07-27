@@ -170,12 +170,17 @@ Recorded so a revisit starts from a plan, not a blank page:
    trampoline while C still held the code pointer — a guaranteed segfault from checker-clean code, for
    every C API that retains a function pointer (`signal`, `atexit`, GLib/GTK, `pthread_cleanup_*`).
    The abort is `abort()` rather than a Chezzi fault because unwinding out of Rust into a C frame (the
-   realistic site is a C signal handler) is itself UB. Cost: one trampoline + CIF + userdata (a few
-   hundred bytes) leaks per callback-passing extern call, so a `qsort` in a hot loop grows memory —
-   accepted to kill the UB; the upgrade path is caching one trampoline per (closure identity,
-   signature). **This does NOT make all misuse safe:** a C library that spawns a thread and calls the
-   callback *during* the extern call finds a live VM back-pointer and re-enters the engine from the
-   wrong thread — still unguarded, and exactly what the two pieces below exist to fix.
+   realistic site is a C signal handler) is itself UB. **Cost:** one trampoline + CIF + userdata leaks
+   per callback-passing extern call that actually reached C (a call that bailed while marshalling a
+   later argument never handed C the pointer and is still freed). That is ~400 B of RSS *and* a W^X page
+   pair out of libffi's exec pool, i.e. ~1 extra mapping per ~130 calls against `vm.max_map_count`, so a
+   `qsort` in a hot loop grows both. When the pool cannot grow, the next callback-passing call fails
+   with the ordinary recoverable error `cannot allocate a callback trampoline for argument N to 'f':
+   the FFI closure pool is exhausted` — a `recover:`-able fault, never a crash. Accepted to kill the UB;
+   the upgrade path is caching one trampoline per (closure identity, signature). **This does NOT make
+   all misuse safe:** a C library that spawns a thread and calls the callback *during* the extern call
+   finds a live VM back-pointer and re-enters the engine from the wrong thread — still unguarded
+   (gaps.md `W6-8r`), and exactly what the two pieces below exist to fix.
 
    Needs **two** new pieces:
    - a **callback registry** that GC-roots the closure (+ its upvalues) until an explicit `unregister`,

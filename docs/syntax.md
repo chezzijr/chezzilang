@@ -2919,6 +2919,12 @@ cannot reject it, because the identical `fn(int) -> int` param is correct for `q
 the callback *during* the call. One residual hole the abort does **not** cover: a C library that
 spawns a thread and calls back *while the extern call is still running* still races the engine.
 
+The price of that guarantee is a **leak**: every extern call that actually hands C a callback leaks its
+trampoline (~400 B, plus a W^X page pair from libffi's closure pool), so a callback-passing extern call
+in a hot loop grows both memory and mapping count. It degrades cleanly — when the pool can no longer
+grow, the call raises the ordinary recoverable error `cannot allocate a callback trampoline for
+argument N to 'f': the FFI closure pool is exhausted`, catchable with `recover:`.
+
 **Deferred FFI features (with design notes + the callback feasibility ladder in
 [`docs/ffi-and-packaging.md §1b`](ffi-and-packaging.md)):** the **rest of callbacks** (#4 — *stored* /
 *cross-thread* callbacks a C library keeps and calls later or from its own thread — these **abort**
