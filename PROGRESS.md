@@ -34,8 +34,15 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > 0.447/1.946/7.916 s at n=100k/200k/400k (4.35× per 2× n — quadratic) → **0.069/0.203/1.101 s**, now
 > tracking the plain-`List` control (0.061/0.196/1.203 s) at every n. Holder isolation at 200k:
 > `RwShared` 1.766→**0.218 s**, `Shared` 2.051→**0.204 s**, `Channel.send` 2.050→**0.220 s** — the
-> holder penalty is gone. GC **pacing** deliberately untouched (timing-observable, parity blast
-> radius); no `benches/run.chz` movement (it uses no cores). The cost bought is **one `wire_summary`
+> holder penalty is gone on the GC/read side. GC **pacing** deliberately untouched (timing-observable,
+> parity blast radius); no `benches/run.chz` movement (it uses no cores). **Round 2 fixed the fix's own
+> two regressions** (adversarial review): `live_bytes` de-duped cores with a linear `Vec::contains` per
+> core slot → O(D²) in DISTINCT live cores, on every `sweep()` (40 000 `Channel`s: 0.102→1.239 s) — now
+> an `FxHashSet`, **0.109 s and flat in K**; and the `wire_summary` walk sat INSIDE the value lock for
+> `Shared`/`RwShared`/`Atomic` (an exclusive-lock reader stall on the flagship read view) — the stores
+> now summarise the caller-owned value **before** taking the lock, `store_guarded` takes the
+> pre-computed summary. Store-side cost stays (one walk per store, +21% on 50 × `RwShared.set` of a
+> 100k list) and is documented, not claimed away. The cost bought is **one `wire_summary`
 > walk per channel `send`**, hoisted OFF the global `MnSched` lock (the `recv` side is free — each
 > message's byte count rides in the queue next to it, so `pop` is O(1)): +7% on 2 000 round-trips of a
 > 2 000-element list, +0.8% on 10× bigger messages, flat on a 4-producer M:N fan-out — measured, since
@@ -47,6 +54,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > `vm::core::wire_summary_bytes_and_dirtiness`/`wire_summary_state_transitions`,
 > `vm::heap::core_payload_walk_is_memoized`/`dirty_core_payload_is_still_traced`/
 > `live_bytes_counts_offheap_wire_payload`/`live_bytes_counts_a_shared_core_once_per_heap`/
+> `live_bytes_sums_every_distinct_core`/
 > `replacing_store_refreshes_the_gc_summary`, `vm::gc_tests::gc_stress_values_parked_in_cores`,
 > `test_runner::over_memory_counts_offheap_wire_payload`/`under_cap_still_passes_with_many_handles_to_one_core`. Docs: `docs/gaps.md` (both retired FIXED +
 > dropped from the open-items index), `docs/benchmarks.md`, `docs/concurrency.md` (the read-view's

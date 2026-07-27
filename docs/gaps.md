@@ -817,11 +817,26 @@ Test: `extern_named_after_newtype_rejected` (both decl orders, single-module + g
 > control at every n** (the control's own jump at 400k is a pre-existing heap-growth effect, identical
 > before and after). Holder isolation at n = 200k: `RwShared` 1.766 → **0.218 s**, `Shared` 2.051 →
 > **0.204 s**, `Channel.send` 2.050 → **0.220 s**, plain `List` 0.181 → 0.195 s, no holder 0.196 →
-> 0.201 s — the holder penalty is gone. GC **pacing** was deliberately left untouched (the
-> short-circuit alone restored linearity, and `next_gc` is a timing-observable global with parity blast
-> radius). Full table: `docs/benchmarks.md`. Tests: `vm::heap::core_payload_walk_is_memoized`,
-> `dirty_core_payload_is_still_traced`, `live_bytes_counts_offheap_wire_payload`,
+> 0.201 s — the holder penalty is gone on the GC/read side. GC **pacing** was deliberately left
+> untouched (the short-circuit alone restored linearity, and `next_gc` is a timing-observable global
+> with parity blast radius). Full table: `docs/benchmarks.md`. Tests:
+> `vm::heap::core_payload_walk_is_memoized`, `dirty_core_payload_is_still_traced`,
+> `live_bytes_counts_offheap_wire_payload`, `live_bytes_sums_every_distinct_core`,
 > `vm::core::wire_summary_*`, `vm::gc_tests::gc_stress_values_parked_in_cores`.
+>
+> **Round-2 (2026-07-27) — the first cut had two regressions of its own; both fixed before merge.**
+> (1) `Heap::live_bytes` de-duped cores by a linear `Vec::contains` scan re-run per core slot, so it was
+> O(D²) in the number of DISTINCT live cores — and it runs on **every** `sweep()` (the `peak_live_bytes`
+> probe, not gated on `--max-heap`). Same failure shape as W6-7 on a different axis, invisible to a
+> microbench with one holder core and to `benches/run.chz` (no cores). K = 40 000 `Channel[int]()` +
+> 500k allocations: base 0.102 s → 1.239 s. Fixed with `FxHashSet` (`src/vm/fxhash.rs`; `HashSet::default`
+> does not allocate, so the no-core path is untouched) → **0.109 s, flat in K** up to 80 000.
+> (2) The `wire_summary` walk ran INSIDE the value lock for `Shared`/`RwShared`/`Atomic` — for `RwShared`
+> inside the EXCLUSIVE write lock, stalling every concurrent reader of the read view for a full payload
+> walk per `set`. The channel paths already hoist theirs off `MnSched::core`; these did not. `*Core::store`
+> now summarises the caller-owned value **before** taking the lock, and `AtomicCore::store_guarded` takes
+> the pre-computed summary so `exchange` hoists too. Store-side cost remains (one walk per store, +21% on
+> 50 × `RwShared.set` of a 100k list) and is now stated in `docs/concurrency.md` rather than claimed away.
 
 <details><summary>Original report</summary>
 

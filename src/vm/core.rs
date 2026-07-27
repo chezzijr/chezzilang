@@ -162,9 +162,15 @@ impl SharedCore {
     /// Replace the payload AND refresh the cached GC summary **under the same lock** (W6-7/W6-10).
     /// Every write path (`set`, `update`'s write-back) must go through here: a stale `WS_CLEAN`
     /// would stop the GC tracing a handle stored into this box — a use-after-free.
+    ///
+    /// The O(payload) [`wire_summary`] walk runs BEFORE the lock is taken (`w` is caller-owned at
+    /// that point, so the result is exact); only the two atomic stores + the move happen inside.
+    /// Same rule as [`ChanState::push`]: lock hold time must not scale with user payload size —
+    /// here it is a *reader* stall, since `RwShared`'s whole contract is many concurrent readers.
     pub fn store(&self, w: WireValue) {
+        let sum = wire_summary(&w);
         let mut g = self.v.lock().unwrap();
-        self.summary.set(&w);
+        self.summary.store(sum.0, sum.1);
         *g = w;
     }
 }
@@ -195,10 +201,11 @@ pub struct RwSharedCore {
 
 impl RwSharedCore {
     /// Replace the payload AND refresh the cached GC summary under the same write lock — see
-    /// [`SharedCore::store`].
+    /// [`SharedCore::store`] (the walk is hoisted OFF the exclusive lock for the same reason).
     pub fn store(&self, w: WireValue) {
+        let sum = wire_summary(&w);
         let mut g = self.v.write().unwrap();
-        self.summary.set(&w);
+        self.summary.store(sum.0, sum.1);
         *g = w;
     }
 }
@@ -217,18 +224,24 @@ pub struct AtomicCore {
 
 impl AtomicCore {
     /// Replace the payload AND refresh the cached GC summary under the same lock — see
-    /// [`SharedCore::store`].
+    /// [`SharedCore::store`] (the walk is hoisted OFF the lock for the same reason).
     pub fn store(&self, w: WireValue) {
+        let sum = wire_summary(&w);
         let mut g = self.v.lock().unwrap();
-        self.summary.set(&w);
+        self.summary.store(sum.0, sum.1);
         *g = w;
     }
 
     /// Replace the payload through an ALREADY-held guard (the `exchange` / `cas` / `add`|`sub`
     /// read-modify-write paths, which must not drop the lock between compare and swap), returning
     /// the previous value. Refreshes the summary in the same critical section.
-    pub fn store_guarded(&self, g: &mut WireValue, w: WireValue) -> WireValue {
-        self.summary.set(&w);
+    ///
+    /// `sum` is the caller's PRE-COMPUTED [`wire_summary`] of `w` — passed in, not derived here, so
+    /// the O(payload) walk can sit OUTSIDE the lock wherever the new value is known before it is
+    /// taken (`exchange`). The two RMW paths that genuinely build their value under the lock
+    /// (`cas`'s `to_wire` is already O(payload) under it; `add`/`sub` are scalars) compute it inline.
+    pub fn store_guarded(&self, g: &mut WireValue, w: WireValue, sum: (usize, bool)) -> WireValue {
+        self.summary.store(sum.0, sum.1);
         std::mem::replace(g, w)
     }
 }

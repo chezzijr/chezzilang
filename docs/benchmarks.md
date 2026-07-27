@@ -1109,7 +1109,9 @@ Holder isolation at n = 200 000 (same allocation loop, same live 200k-int contai
 | `Channel.send` | 2.050 s | **0.220 s** (9.3×) |
 | no holder | 0.196 s | 0.201 s |
 
-The holder penalty is **gone** — every core now costs the same as a plain `List`. Traversals whose payload
+The holder penalty is **gone** on the GC/read side — holding a big container in a core now costs the same
+per GC pass as holding it in a plain `List`. (The *store* side is not free: each `set`/`send`/`store` adds
+one `wire_summary` walk of the new payload — quantified below.) Traversals whose payload
 elements are themselves heap objects (an `RwShared[List[str]]` fold) were already linear before the fix
 (their own `Obj`s keep `live` high, so GC rarely fires) and are unchanged: 0.062/0.116/0.233 → 0.063/0.118/0.242
 at n = 100k/200k/400k, within noise.
@@ -1148,3 +1150,48 @@ Same change also closes gaps.md **W6-10**: the cached byte half of the summary f
 pass a 200 KB cap). Those bytes are charged **once per core per heap** (by `Arc` identity) — charging once
 per `Obj` alias slot multiplied a shared payload by the fan-out and produced spurious OVER-MEMORY verdicts.
 One residual escape stays open (a nested core with no surviving alias slot) — gaps.md `W6-10r`.
+
+### Round 2 — the fix's own two regressions (2026-07-27)
+
+Adversarial review caught the first cut reintroducing the same *shape* of problem on two different axes.
+Both are fixed; measured on release binaries, `--serial`, best-of-7, base = `main` @ 8a913d0 built in its
+own target dir.
+
+**(1) `live_bytes` was O(D²) in the number of DISTINCT live cores.** Charging a core's bytes once per
+core (not once per alias slot) needs a de-dup; the first cut used a linear `Vec::contains` scan re-run for
+every core slot. `Heap::live_bytes` runs on **every** `sweep()` (the `peak_live_bytes` probe — not gated on
+`--max-heap`), so a program holding D distinct cores paid ~D²/2 comparisons per GC pass. That is the exact
+failure shape W6-7 exists to remove, on the "how many cores" axis instead of the "how big is one payload"
+axis — and neither the microbench above (ONE holder core) nor `benches/run.chz` (no cores at all) could see
+it. Go-idiomatic mailbox-per-connection / actor-per-entity code hits it. Fixed: `FxHashSet` (already
+vendored in `src/vm/fxhash.rs`; `HashSet::default` does not allocate, so the no-core path is untouched).
+
+Repro — `for i in range(K): chs.push(Channel[int]())`, then 500 000 list allocations:
+
+| K distinct cores | base (`main`) | round-1 branch | fixed |
+|---|---|---|---|
+| 10 000 | 0.100 s | 0.351 s | **0.105 s** |
+| 20 000 | 0.100 s | 0.665 s | **0.105 s** |
+| 40 000 | 0.102 s | 1.239 s | **0.109 s** |
+| 80 000 | 0.118 s | 2.669 s | **0.125 s** |
+
+Round-1 grew linearly in K (quadratic per pass); fixed is **flat in K**, ~+5% over base — the constant
+cost of five extra `match` arms + one uncontended core lock per distinct core per sweep. Same with
+`Shared(i)` (no queue mutex involved, isolating the scan): K = 40 000 base 0.111 s, round-1 1.224 s,
+fixed **0.124 s**. Control (`chs.push([i])`, plain lists, no cores): 0.105 → 0.101 s, flat.
+
+**(2) The `wire_summary` walk sat INSIDE the value lock** for `Shared`/`RwShared`/`Atomic` — for
+`RwShared` inside the EXCLUSIVE write lock, so every concurrent reader of the flagship zero-copy read view
+stalled for a full payload walk on each `set`/`write` write-back. The channel paths already hoist their
+walk off `MnSched::core` for exactly this reason ("lock hold time must not scale with user payload size");
+the single-value cores did not. Fixed: `SharedCore::store` / `RwSharedCore::store` / `AtomicCore::store`
+summarise the caller-owned value **before** taking the lock; `AtomicCore::store_guarded` now *takes* the
+pre-computed summary, so `exchange` hoists too (`cas` builds its value under the lock by necessity — its
+`to_wire` is already O(payload) there — and `add`/`sub` are scalars).
+
+Single-thread wall time is unchanged by the hoist (same work, reordered), so the win is invisible to
+`--serial` and to the parity gate — it is purely reader-stall time on M:N. The store-side cost of the
+summary itself remains and is the design's price: `rw := RwShared(<100 000-int list>)` then 50 × `rw.set`
+is **0.221 s base → 0.268 s (+21%)**, one extra read-only traversal next to `to_wire`'s allocate-and-clone
+traversal of the same tree. Not eliminated (fusing the count into `to_wire` would thread an out-param
+through every `to_wire` call site); documented instead — reads are O(1), each store pays one walk.

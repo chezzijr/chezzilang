@@ -521,9 +521,14 @@ On a non-container element (or a Tuple) these methods are a checker "no method" 
 > on **every** GC pass — so a traversal that allocates per step paid O(payload) per collection and the
 > read-view came out **quadratic** in the container's size (a 200k-element box: 1.77 s vs 0.18 s for the
 > same work on a plain `List`). Each core now caches whether its payload can root a heap object at all;
-> a pure-data payload is **skipped**, so the per-pass cost is O(1) and holding a big container in a
-> `Shared`/`RwShared`/`Channel` costs the same as holding it in a plain `List`. Memory was, and stays,
-> O(1) per traversal.
+> a pure-data payload is **skipped**, so the per-pass cost is O(1) and *holding* a big container in a
+> `Shared`/`RwShared`/`Channel` costs the same per GC pass as holding it in a plain `List`. Memory was,
+> and stays, O(1) per traversal.
+>
+> **Reads are O(1); each *store* pays one walk.** `set`/`write`/`send`/`store` summarises the new payload
+> once (O(payload), ~+20% on a 100k-element `RwShared.set` — measured in `docs/benchmarks.md`), so a
+> rebind into a box is *not* as cheap as rebinding a plain `List`. The walk runs **before** the value lock
+> is taken, so it never lengthens the window in which a writer blocks the readers.
 
 **Ergonomic wrappers — `std.concurrency.collection`.** Raw `RwShared[Map[...]]` is the right primitive
 for a shared table, but the `read`/`write` closures are verbose and the *compound* mutations

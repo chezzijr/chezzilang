@@ -742,15 +742,14 @@ impl Heap {
         // `Obj::Channel`/`Shared`/… slot for every crossing, so a heap can hold K alias slots for one
         // core. Charge each core's bytes ONCE per heap (by `Arc` pointer identity), or K handles to a
         // 100 MB payload report 1 GB and the cap fires OVER-MEMORY on a program using 1/K of it.
-        // Linear scan: core slots are a handful; it stays allocation-free until one shows up.
-        let mut cores: Vec<usize> = Vec::new();
-        let mut once = |ptr: usize| {
-            let fresh = !cores.contains(&ptr);
-            if fresh {
-                cores.push(ptr);
-            }
-            fresh
-        };
+        //
+        // A HASH set, not a linear scan: `live_bytes` runs on EVERY `sweep()` (the `peak_live_bytes`
+        // probe, cap or no cap), so an O(distinct cores) membership scan per core slot would make the
+        // GC pass O(D²) — the exact quadratic W6-7 exists to remove, just on a different axis
+        // (Go-idiomatic mailbox-per-connection code holds thousands of distinct cores). It stays
+        // allocation-free until the first core slot shows up (`HashSet::default` does not allocate).
+        let mut cores: super::fxhash::FxHashSet<usize> = Default::default();
+        let mut once = |ptr: usize| cores.insert(ptr);
         for slot in &self.slots {
             let Some(obj) = &slot.obj else { continue };
             total += std::mem::size_of::<Obj>();
@@ -1219,6 +1218,33 @@ mod iter_obj_tests {
         let _ = c1;
     }
 
+    /// W6-7/W6-10 round-2 review — the de-dup must key on the CORE, so K aliases of one core count
+    /// once (the test above) but D *distinct* cores all count. It is a hash set, not a linear scan:
+    /// `live_bytes` runs on every `sweep()`, so an O(D) membership scan per core slot would be an
+    /// O(D²) GC pass (measured: 40 000 channels + 500 k allocations went 0.11 s → 1.24 s).
+    #[test]
+    fn live_bytes_sums_every_distinct_core() {
+        let mut h = Heap::new();
+        let base = h.live_bytes();
+        let mut one = 0usize;
+        for i in 0..64 {
+            let core = Arc::new(SharedCore {
+                v: Mutex::new(wlist(100)),
+                ..Default::default()
+            });
+            let r = h.alloc(Obj::Shared(Arc::clone(&core)));
+            h.children(r); // fill the lazy summary
+            if i == 0 {
+                one = h.live_bytes() - base;
+            }
+        }
+        let all = h.live_bytes() - base;
+        assert!(
+            all > 60 * one,
+            "64 DISTINCT cores must each be charged: one={one}, all={all}"
+        );
+    }
+
     /// W6-7 review — THE trap. `Shared`/`RwShared`/`Atomic` payloads are REPLACED (`set`/`update`/
     /// `write`/`store`/`exchange`/`cas`/`add`/`sub`), so a store that forgets to refresh the memo
     /// leaves a stale `WS_CLEAN` next to a handle-bearing payload → the GC stops tracing it →
@@ -1279,8 +1305,10 @@ mod iter_obj_tests {
         ac.store(wlist(4)); // back to CLEAN
         assert!(h.children(ar).is_empty());
         {
+            let w = handle();
+            let sum = crate::vm::core::wire_summary(&w);
             let mut g = ac.v.lock().unwrap();
-            ac.store_guarded(&mut g, handle());
+            ac.store_guarded(&mut g, w, sum);
         }
         assert!(
             h.children(ar).contains(&kept),

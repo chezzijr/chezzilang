@@ -2401,10 +2401,13 @@ impl Vm {
             "exchange" => {
                 self.arity_err("exchange", args, 1, span)?;
                 let new_w = self.to_wire_crossable(args[0], span)?;
+                // Summarise BEFORE taking the value lock (the walk is O(payload)) — see
+                // `SharedCore::store`.
+                let sum = crate::vm::core::wire_summary(&new_w);
                 let core = self.atomic_core(h);
                 let old = {
                     let mut g = core.v.lock().unwrap();
-                    core.store_guarded(&mut g, new_w)
+                    core.store_guarded(&mut g, new_w, sum)
                 };
                 Ok(self.from_wire(old))
             }
@@ -2425,7 +2428,8 @@ impl Vm {
                     // box unchanged (recoverable, no partial write). `ensure_crossable` borrows `&self`
                     // not the guard `g`, so it is safe to call under the value lock.
                     let next = self.to_wire_crossable(args[1], span)?;
-                    core.store_guarded(&mut g, next);
+                    let sum = crate::vm::core::wire_summary(&next);
+                    core.store_guarded(&mut g, next, sum);
                 }
                 Ok(Value::bool(swapped))
             }
@@ -2456,7 +2460,8 @@ impl Vm {
                         return Err(self.err(format!("type Atomic has no method '{method}'"), span));
                     }
                 };
-                core.store_guarded(&mut g, new.clone());
+                let sum = crate::vm::core::wire_summary(&new);
+                core.store_guarded(&mut g, new.clone(), sum);
                 drop(g);
                 Ok(self.from_wire(new))
             }
