@@ -12,6 +12,7 @@ use super::core::{
 use super::fxhash::FxHashMap;
 use super::op::ProtoId;
 use super::value::{GcRef, Value};
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -457,6 +458,15 @@ pub struct Heap {
     live: usize,
     /// Allocations since the last collection — drives the growth-threshold trigger.
     since_gc: usize,
+    /// Off-heap wire bytes charged since the last collection — the `since_gc` sibling for growth
+    /// that allocates (almost) no `Obj`s. A monotonic pacing **HINT**, never accounting: it only
+    /// decides WHEN to sample, `live_bytes()` remains the sole measure of what is live (so a
+    /// replacing store charges, and a `recv`/`pop` never decrements — under-triggering leaves the
+    /// `--max-heap` guard failing open, over-triggering just costs a sweep). Read by
+    /// [`should_collect`](Heap::should_collect) ONLY when `mem_cap != 0`, so cap-off pacing is
+    /// bit-for-bit the object-count trigger it has always been. `Cell` because the sole charge
+    /// point (`Vm::to_wire_crossable`) holds `&self`.
+    since_gc_wire_bytes: Cell<usize>,
     /// Collect once `since_gc` reaches this; grows with the live set after each collection.
     next_gc: usize,
     /// Peak of `live_bytes()` sampled at each `sweep()` — the memory probe's high-water mark
@@ -480,6 +490,7 @@ impl Default for Heap {
             free: Vec::new(),
             live: 0,
             since_gc: 0,
+            since_gc_wire_bytes: Cell::new(0),
             next_gc: MIN_GC_THRESHOLD,
             peak_live_bytes: 0,
             mem_cap: 0,
@@ -554,9 +565,32 @@ impl Heap {
         self.live
     }
 
+    /// Charge off-heap wire bytes against the collection trigger (see `since_gc_wire_bytes`).
+    /// Called from `Vm::to_wire_crossable`, the one helper every cross-heap value store routes
+    /// through, and only when a `--max-heap` cap is live.
+    #[inline]
+    pub fn charge_wire_bytes(&self, n: usize) {
+        self.since_gc_wire_bytes
+            .set(self.since_gc_wire_bytes.get().saturating_add(n));
+    }
+
+    /// How many charged off-heap bytes force a sweep under a live cap: a quarter of the cap bounds
+    /// the overshoot between samples, and the 64 KB floor stops a tiny cap from GC-ing per store.
+    fn wire_gc_threshold(&self) -> usize {
+        (self.mem_cap / 4).max(64 * 1024)
+    }
+
     /// Whether enough has been allocated since the last collection to warrant one.
+    ///
+    /// W6-10 (sampling half): under a live `--max-heap` cap, off-heap wire growth ALSO paces a
+    /// sweep. Without it a program that pushes megabytes across the airlock while allocating ~2
+    /// `Obj`s per iteration never reaches the object-count threshold, so `sweep()` never runs,
+    /// `over_cap` is never evaluated and the cap fails OPEN (counting the bytes correctly in
+    /// `live_bytes` does nothing if nobody ever looks). Gated on `mem_cap != 0`: with no cap
+    /// `over_cap` is meaningless anyway, and pacing stays bit-for-bit unchanged.
     pub fn should_collect(&self) -> bool {
         self.since_gc >= self.next_gc
+            || (self.mem_cap != 0 && self.since_gc_wire_bytes.get() >= self.wire_gc_threshold())
     }
 
     /// Mark one object reachable. Returns `true` if it was *newly* marked (caller should then
@@ -722,6 +756,7 @@ impl Heap {
             }
         }
         self.since_gc = 0;
+        self.since_gc_wire_bytes.set(0);
         self.next_gc = (self.live * 2).max(MIN_GC_THRESHOLD);
         let lb = self.live_bytes();
         if lb > self.peak_live_bytes {
@@ -1020,6 +1055,43 @@ mod iter_obj_tests {
         // clear_over_cap resets the latch for the next per-test lifecycle.
         h.clear_over_cap();
         assert!(!h.over_cap());
+    }
+
+    /// W6-10 sampling half: off-heap wire bytes pace a sweep ONLY when a `--max-heap` cap is live.
+    /// Cap OFF must be bit-for-bit today's object-count pacing; cap ON must sample before the
+    /// off-heap growth can overshoot; `sweep()` must reset the counter like `since_gc`.
+    #[test]
+    fn wire_bytes_pace_a_sweep_only_under_a_cap() {
+        // (a) cap OFF: any amount of charged off-heap growth must NOT force a collection.
+        let h = Heap::new();
+        h.charge_wire_bytes(64 * 1024 * 1024);
+        assert!(!h.should_collect(), "cap-off pacing must ignore wire bytes");
+
+        // (b) cap ON: sub-threshold does not collect, threshold does. cap/4 = 2 MB here.
+        let mut h = Heap::new();
+        h.set_mem_cap(8_000_000);
+        h.charge_wire_bytes(1024);
+        assert!(!h.should_collect(), "sub-threshold charge must not collect");
+        h.charge_wire_bytes(2_000_000);
+        assert!(
+            h.should_collect(),
+            "cap/4 of charged wire bytes must collect"
+        );
+
+        // (c) the counter resets at sweep, like `since_gc`.
+        h.sweep();
+        assert!(
+            !h.should_collect(),
+            "sweep must reset the wire-byte counter"
+        );
+
+        // (d) the 64 KB floor: a tiny cap must not force a GC on every small store.
+        let mut h = Heap::new();
+        h.set_mem_cap(1000);
+        h.charge_wire_bytes(32 * 1024);
+        assert!(!h.should_collect(), "64 KB floor must survive a tiny cap");
+        h.charge_wire_bytes(32 * 1024);
+        assert!(h.should_collect());
     }
 
     use std::sync::Mutex;

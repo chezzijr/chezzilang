@@ -1223,6 +1223,53 @@ struct Suite:
         }
     }
 
+    /// W6-10 review, the SAMPLING half: counting the off-heap bytes is worthless if the cap is
+    /// never sampled. `over_cap` is only evaluated inside `sweep()`, and `sweep()` only runs when
+    /// `should_collect()` fires — which used to be a pure heap-OBJECT count. A program that pushes
+    /// megabytes across the airlock while allocating ~2 `Obj`s per iteration therefore never swept,
+    /// never sampled, and PASSED at hundreds of MB against an 8 MB cap. Both shapes below build
+    /// their payload ONCE and then only re-send it, so object churn cannot be doing the work.
+    #[test]
+    fn over_memory_trips_without_object_churn() {
+        const CAP: usize = 8_000_000;
+        let d = TmpDir::new();
+        let d2 = TmpDir::new();
+        // ~1 MB string built once, 300 sends = ~300 MB off-heap (peak RSS 297 MB pre-fix).
+        let msg = d.write(
+            "msg_test.chz",
+            "test fn msg():\n    parts: List[str] = []\n    \
+             for i in range(100000):\n        parts.push(\"0123456789\")\n    \
+             blob := \"\".join(parts)\n    ch := Channel[str](10000)\n    \
+             for i in range(300):\n        ch.send(blob)\n    assert true\n",
+        );
+        // The sibling shape: a 200k-int list built once, sent 100 times (3369 MB RSS pre-fix).
+        let ints = d2.write(
+            "ints_test.chz",
+            "test fn ints():\n    big: List[int] = []\n    \
+             for i in range(200000):\n        big.push(i)\n    \
+             ch := Channel[List[int]](1000)\n    for i in range(100):\n        ch.send(big)\n    \
+             assert true\n",
+        );
+        for (label, f) in [("msg", &msg), ("ints", &ints)] {
+            for parallel in [false, true] {
+                let report = run_tests_capped(f, parallel, CAP);
+                assert!(
+                    report.text.contains(&format!("OVER-MEMORY {label}")),
+                    "off-heap growth must PACE a sweep so the cap is sampled ({label}, \
+                     parallel={parallel}); report:\n{}",
+                    report.text
+                );
+                assert!(
+                    !report.text.contains(&format!("FAIL {label}"))
+                        && !report.text.contains(&format!("ERROR {label}")),
+                    "must be OVER-MEMORY, not FAIL/ERROR ({label}, parallel={parallel}); \
+                     report:\n{}",
+                    report.text
+                );
+            }
+        }
+    }
+
     /// W6-10 review — the NEGATIVE direction, which matters just as much: a program comfortably
     /// UNDER the cap must still PASS while holding a shared core. A core's payload is ONE `Arc`
     /// allocation, but `from_wire` mints a FRESH `Obj::Shared` alias slot for every crossing, so 50

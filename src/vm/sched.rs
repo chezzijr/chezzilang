@@ -2108,6 +2108,23 @@ impl Vm {
     ) -> Result<WireValue, RuntimeError> {
         let w = self.to_wire_at(v, span)?;
         self.ensure_crossable(&w, span)?;
+        // W6-10 (sampling half) — charge the payload's off-heap bytes against the GC trigger so a
+        // live `--max-heap` cap actually gets SAMPLED. `over_cap` is only evaluated in `sweep()`,
+        // and `sweep()` only runs when `should_collect()` fires; a store loop that pushes megabytes
+        // across the airlock while allocating ~2 `Obj`s per iteration never reached the object-count
+        // threshold, so the cap failed OPEN. This is the one helper every cross-heap value store
+        // routes through, so a new store path can't forget the charge (same argument as the
+        // `ensure_crossable` guard above). GATED on a live cap: a cap-off run (every `chezzi run`,
+        // every bench, the whole parity gate) pays one `!= 0` branch and zero extra walks — the
+        // walk here is a SECOND `wire_summary` pass (the send path walks again when it caches the
+        // core's summary), accepted rather than threading a precomputed summary through
+        // `MnSched::send_wake`'s signature for a debug/CI guard. Monotonic pacing HINT, not
+        // accounting (`live_bytes()` stays the sole measure): a replacing store charges too and a
+        // `recv` never decrements, because under-triggering means a guard that fails open.
+        if self.heap.mem_cap() != 0 {
+            self.heap
+                .charge_wire_bytes(crate::vm::core::wire_summary(&w).0);
+        }
         Ok(w)
     }
 
