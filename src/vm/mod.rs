@@ -3788,9 +3788,12 @@ fn format_float(x: f64) -> String {
 /// (the path a program's bytes actually reach an fd) and never passes through this.
 ///
 /// This decode is NOT a comparison boundary: it is lossy AND not injective (`ff` and `fe` both
-/// become one U+FFFD), so an oracle diffing its output would pass a byte-divergent run. The
-/// serial==M:N oracles (`--check-parity`, `assert_file_parity`) take the raw [`RunOutputRaw`] path
-/// instead. Anything comparing two engines' output must do the same.
+/// become one U+FFFD), so an oracle diffing its output would pass a byte-divergent run. EVERY
+/// serial==M:N oracle takes a raw-bytes path instead — `--check-parity` and `assert_file_parity`
+/// via [`RunOutputRaw`]/[`run_file_bytes`] (W6-9), and the capture-based `assert_parity` /
+/// `assert_parity_file` / `parity_entry_cfg` via [`run_capture_bytes`] /
+/// [`run_capture_parallel_bytes`] / [`run_file_bytes`] (W6-9b). Anything comparing two engines'
+/// output must do the same: decode for a readable message, then assert on the BYTES.
 fn captured(buf: Vec<u8>) -> String {
     String::from_utf8_lossy(&buf).into_owned()
 }
@@ -3799,6 +3802,14 @@ fn captured(buf: Vec<u8>) -> String {
 /// far + the outcome (test entry point, mirroring `interp::run_program`).
 #[cfg(test)]
 pub fn run_program(src: &str) -> (String, Result<(), RuntimeError>) {
+    let (out, result) = run_program_bytes(src);
+    (captured(out), result)
+}
+
+/// [`run_program`] without the lossy [`captured`] decode — the raw sink bytes, for a cross-engine
+/// comparison (W6-9b).
+#[cfg(test)]
+pub fn run_program_bytes(src: &str) -> (Vec<u8>, Result<(), RuntimeError>) {
     let src = src.to_string();
     std::thread::Builder::new()
         .stack_size(VM_STACK_BYTES)
@@ -3809,12 +3820,12 @@ pub fn run_program(src: &str) -> (String, Result<(), RuntimeError>) {
 }
 
 #[cfg(test)]
-fn run_program_inner(src: &str) -> (String, Result<(), RuntimeError>) {
+fn run_program_inner(src: &str) -> (Vec<u8>, Result<(), RuntimeError>) {
     let tokens = match lexer::tokenize(src) {
         Ok(t) => t,
         Err(e) => {
             return (
-                String::new(),
+                Vec::new(),
                 Err(RuntimeError {
                     message: e.to_string(),
                     span: Span { line: 1, col: 1 },
@@ -3829,7 +3840,7 @@ fn run_program_inner(src: &str) -> (String, Result<(), RuntimeError>) {
         Ok(m) => m,
         Err(e) => {
             return (
-                String::new(),
+                Vec::new(),
                 Err(RuntimeError {
                     message: e.message,
                     span: e.span,
@@ -3844,7 +3855,7 @@ fn run_program_inner(src: &str) -> (String, Result<(), RuntimeError>) {
         Ok(p) => p,
         Err(e) => {
             return (
-                String::new(),
+                Vec::new(),
                 Err(RuntimeError {
                     message: e.message,
                     span: e.span,
@@ -3859,7 +3870,7 @@ fn run_program_inner(src: &str) -> (String, Result<(), RuntimeError>) {
     let result = vm
         .run()
         .and_then(|()| vm.drain_live_executors(Span { line: 1, col: 1 }));
-    (captured(vm.out), result)
+    (vm.out, result)
 }
 
 /// Assert two program outputs contain the SAME lines regardless of order. For a concurrency test
@@ -3882,7 +3893,14 @@ pub fn assert_same_lines(cooperative: &str, mn: &str) {
 /// Run a single-file program and return its full stdout, or the error (test helper).
 #[cfg(test)]
 pub fn run_capture(src: &str) -> Result<String, RuntimeError> {
-    let (out, result) = run_program(src);
+    run_capture_bytes(src).map(captured)
+}
+
+/// [`run_capture`] without the lossy [`captured`] decode — the serial leg of the capture-based
+/// parity oracle (`assert_parity`, W6-9b).
+#[cfg(test)]
+pub fn run_capture_bytes(src: &str) -> Result<Vec<u8>, RuntimeError> {
+    let (out, result) = run_program_bytes(src);
     result.map(|()| out)
 }
 
@@ -3891,6 +3909,13 @@ pub fn run_capture(src: &str) -> Result<String, RuntimeError> {
 /// unit tests/goldens drive this (decision A: the cooperative default stays the parity oracle).
 #[cfg(test)]
 pub fn run_capture_parallel(src: &str) -> Result<String, RuntimeError> {
+    run_capture_parallel_bytes(src).map(captured)
+}
+
+/// [`run_capture_parallel`] without the lossy [`captured`] decode — the M:N leg of the
+/// capture-based parity oracle (`assert_parity`, W6-9b).
+#[cfg(test)]
+pub fn run_capture_parallel_bytes(src: &str) -> Result<Vec<u8>, RuntimeError> {
     let src = src.to_string();
     std::thread::Builder::new()
         .stack_size(VM_STACK_BYTES)
@@ -3921,7 +3946,7 @@ pub fn run_capture_parallel(src: &str) -> Result<String, RuntimeError> {
             vm.parallel = true;
             vm.run()
                 .and_then(|()| vm.drain_live_executors(Span { line: 1, col: 1 }))
-                .map(|()| captured(vm.out))
+                .map(|()| vm.out)
         })
         .expect("failed to spawn VM thread")
         .join()

@@ -23,7 +23,8 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > `…_ordinary_method_and_non_numeric_operator_name_still_ok` (the boundary); the old Chezzi pin that
 > asserted the divergence was REWRITTEN (not deleted) as
 > `numeric_newtype_operator_auto_flows_and_ordinary_methods_still_work`. Docs: `docs/syntax.md`,
-> `docs/gaps.md` (W6-3d RESOLVED, index row removed — **wave 6 now carries no open items**).
+> `docs/gaps.md` (W6-3d RESOLVED, index row removed — wave 6 carries no open DEFECTS; three disclosed
+> residuals remain as their own index rows: `W6-9r`, `W6-10s`, `W6-10r`).
 >
 > **✅ FIX (2026-07-27, gaps.md W6-9) — `Writer.write_bytes` is byte-exact on `io.stdout()`/`io.stderr()`
 > too; the VM's buffered output sink is now `Vec<u8>` end to end.** `io.stdout().write_bytes(b"\xff\xfe")`
@@ -63,6 +64,30 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > `tests/check_parity.rs::{check_parity_reports_a_byte_only_divergence,check_parity_echoes_the_captured_bytes_unchanged}`
 > pinning the oracle itself (a channel-ordered program whose engines emit `ff`/`fe` in different order
 > must still report DIVERGENCE and exit non-zero).
+>
+> **FOLLOW-UP — ✅ FIX (2026-07-28, gaps.md W6-9b): the oracle above was only HALF byte-exact.** Found by
+> adversarial review of this branch. The two comparators W6-9 converted (`--check-parity`,
+> `assert_file_parity`) are a MINORITY of the parity suite; three MORE cross-engine comparators kept
+> diffing the lossy `captured()` decode — `assert_parity` (the ~82-site `run_capture` vs
+> `run_capture_parallel` path), `assert_parity_file`/`parity_entry` (the multi-file + std-module oracle),
+> and `parity_entry_cfg` (the `HostConfig` oracle). A detector gap, not a live divergence (no in-tree test
+> emits non-UTF-8 through them), but `write_bytes` going byte-exact is what created the surface, so the
+> blindness was invisible behind a FIXED claim. **Fix is strictly additive and helper-level — 0 call sites
+> changed:** `src/vm/mod.rs` grew `run_program_bytes` / `run_capture_bytes` / `run_capture_parallel_bytes`
+> holding the real bodies, with `run_program`/`run_capture`/`run_capture_parallel` demoted to one-line
+> `captured()` wrappers (every public signature unchanged, so `src/vm/tests.rs`, `src/gc/tests.rs`,
+> `src/checker/tests.rs` and `src/native/cffi.rs` are untouched); in `src/vm/parity_tests.rs` one shared
+> `assert_stream_parity` does the TEXT compare first (readable failure) then the RAW BYTE compare ON TOP,
+> `assert_file_parity` is deduped onto it verbatim, and the three blind comparators now route through it /
+> `assert_outcome_parity` / `vm::run_file_bytes`. No existing assertion was removed, relaxed, sorted or
+> made conditional. Failing-first proofs, both RED before the fix:
+> `parity_tests::file_parity_catches_a_byte_only_divergence` (the real channel-ordered `ff`/`fe` program
+> through `parity_entry` under `catch_unwind` — a CANARY on M:N slot ordering) and
+> `parity_tests::outcome_parity_catches_a_byte_only_divergence` (direct on the helper; the capture path
+> compiles standalone, so no real program can reach it with non-UTF-8). Disclosed residuals (`W6-9r`):
+> ~31 hand-rolled `run_file_p` + `run_file` compares still diff decoded strings, `parity_entry_cfg_lines`
+> keeps its by-design line-multiset stdout compare, and `vm_outcome`/`parallel_outcome` keep the `String`
+> shape for the single-engine literal/`contains` sites.
 
 > **✅ FIX (2026-07-27, gaps.md W6-8) — a STORED FFI callback aborts loudly instead of segfaulting.**
 > **This was the last memory-unsafety in `docs/gaps.md`.** `signal(10, handler)`

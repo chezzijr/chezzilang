@@ -7,19 +7,59 @@
 use super::*;
 use std::path::PathBuf;
 
-/// Outcome of a run, normalized so the serial and M:N VM results compare directly.
+/// Outcome of a run in the sink's RAW BYTES — what the ORACLE compares (see
+/// [`assert_outcome_parity`]). `from_utf8_lossy` is not injective, so a decoded compare would pass a
+/// run whose two engines emitted DIFFERENT invalid UTF-8 (W6-9b).
+fn parallel_outcome_bytes(src: &str) -> Result<Vec<u8>, String> {
+    run_capture_parallel_bytes(src).map_err(|e| e.to_string())
+}
+fn vm_outcome_bytes(src: &str) -> Result<Vec<u8>, String> {
+    run_capture_bytes(src).map_err(|e| e.to_string())
+}
+
+/// The decoded shape, for SINGLE-ENGINE assertions only — `assert_eq!(vm_outcome(src).unwrap(),
+/// "6\n")`, `.contains(..)`, the fn-pointer arrays. These are NOT oracles: they pin one engine's
+/// output against a literal, so the decode can't hide anything. The cross-engine oracle is
+/// [`assert_outcome_parity`], which compares bytes.
 fn parallel_outcome(src: &str) -> Result<String, String> {
-    run_capture_parallel(src).map_err(|e| e.to_string())
+    parallel_outcome_bytes(src).map(captured)
 }
 fn vm_outcome(src: &str) -> Result<String, String> {
-    run_capture(src).map_err(|e| e.to_string())
+    vm_outcome_bytes(src).map(captured)
+}
+
+/// Cross-engine compare of two capture outcomes: text first (a readable failure), then the RAW
+/// BYTES on top — the compare that catches a divergence the lossy decode erases. Mirrors
+/// [`assert_file_parity`]/[`assert_stream_parity`].
+fn assert_outcome_parity(vm: &Result<Vec<u8>, String>, mn: &Result<Vec<u8>, String>, src: &str) {
+    let text = |r: &Result<Vec<u8>, String>| {
+        r.as_ref()
+            .map(|b| captured(b.clone()))
+            .map_err(String::clone)
+    };
+    assert_eq!(text(vm), text(mn), "VM/interp divergence for:\n{src}");
+    assert_eq!(
+        vm, mn,
+        "VM/interp BYTE divergence for:\n{src} (equal only after a lossy decode)"
+    );
 }
 
 fn assert_parity(src: &str) {
-    assert_eq!(
-        vm_outcome(src),
-        parallel_outcome(src),
-        "VM/interp divergence for:\n{src}"
+    assert_outcome_parity(&vm_outcome_bytes(src), &parallel_outcome_bytes(src), src);
+}
+
+/// W6-9b — the capture oracle must diff BYTES. Two engines emitting different invalid UTF-8
+/// (`ff fe` vs `fe ff`) decode to the same U+FFFD run, so a `String` compare reports parity OK on a
+/// byte-divergent run. Direct on the helper: `run_capture*` compiles standalone (no module graph,
+/// hence no `import std.io`), so no real program can reach this path with non-UTF-8 output — the
+/// file oracle's end-to-end proof is `file_parity_catches_a_byte_only_divergence`.
+#[test]
+fn outcome_parity_catches_a_byte_only_divergence() {
+    let a: Result<Vec<u8>, String> = Ok(vec![0xff, 0xfe]);
+    let b: Result<Vec<u8>, String> = Ok(vec![0xfe, 0xff]);
+    assert!(
+        std::panic::catch_unwind(|| assert_outcome_parity(&a, &b, "<synthetic>")).is_err(),
+        "a byte-only divergence must FAIL the capture parity oracle"
     );
 }
 
@@ -196,6 +236,19 @@ fn type_param_named_like_reserved_rejected_at_check() {
     }
 }
 
+/// Cross-engine compare of ONE captured stream (stdout or stderr): text first (a readable failure),
+/// then the RAW BYTES on top — the compare that catches a divergence the lossy `captured` decode
+/// erases (`ff fe` vs `fe ff` both decode to two U+FFFD). Shared by every file-based oracle
+/// (`assert_parity_file`, `parity_entry_cfg`, `assert_file_parity`) so they can't drift apart.
+fn assert_stream_parity(a: &[u8], b: &[u8], what: &str, label: &str) {
+    let text = |x: &[u8]| String::from_utf8_lossy(x).into_owned();
+    assert_eq!(text(a), text(b), "{what} divergence {label}");
+    assert_eq!(
+        a, b,
+        "{what} BYTE divergence {label} (equal only after a lossy decode)"
+    );
+}
+
 /// Run a multi-file program (one or more `.chz` files) through BOTH engines via `run_file`,
 /// assert they agree on stdout and on ok/err, and return the agreed stdout. `files` is
 /// `(relative_path, contents)`; `entry` names the file to run. Needed because the single-file
@@ -210,13 +263,23 @@ fn assert_parity_file(files: &[(&str, &str)], entry: &str) -> String {
         }
     }
     let entry_path = entry_path.expect("entry must be one of the files");
-    let (io, ie_out, ir, _) = run_file_p(&entry_path);
-    let (vo, ve_out, vr, _) = run_file(&entry_path);
-    assert_eq!(io, vo, "stdout divergence (interp vs vm) for entry {entry}");
-    assert_eq!(
-        ie_out, ve_out,
-        "stderr divergence (interp vs vm) for entry {entry}"
-    );
+    // RAW BYTES on both legs (W6-9b): `run_file_p`/`run_file` hand back the lossily-decoded capture,
+    // which would fold a genuine non-UTF-8 divergence (`ff` vs `fe`) into equal U+FFFDs. Same
+    // arguments as those two wrappers (default `HostConfig`, no entry fn, no pinned root).
+    let raw = |parallel| {
+        crate::vm::run_file_bytes(
+            &entry_path,
+            crate::native::HostConfig::default(),
+            parallel,
+            None,
+            None,
+        )
+    };
+    let (io, ie_out, ir, _) = raw(true);
+    let (vo, ve_out, vr, _) = raw(false);
+    let label = format!("(interp vs vm) for entry {entry}");
+    assert_stream_parity(&io, &vo, "stdout", &label);
+    assert_stream_parity(&ie_out, &ve_out, "stderr", &label);
     match (&ir, &vr) {
         (Ok(()), Ok(())) => {}
         (Err(ie), Err(ve)) => {
@@ -228,12 +291,29 @@ fn assert_parity_file(files: &[(&str, &str)], entry: &str) -> String {
         }
         _ => panic!("ok/err divergence: interp={ir:?} vm={vr:?}"),
     }
-    io
+    captured(io)
 }
 
 /// Convenience: a single entry file (the common std-module case).
 fn parity_entry(src: &str) -> String {
     assert_parity_file(&[("main.chz", src)], "main.chz")
+}
+
+/// W6-9b, end-to-end — the FILE oracle on a REAL byte-divergent program (the fixture
+/// `tests/check_parity.rs::check_parity_reports_a_byte_only_divergence` already pins through the
+/// CLI). The channel orders the two tasks, so each engine's byte order is deterministic: serial
+/// prints live (`fe ff`), M:N flushes each task's slot in task order (`ff fe`). Both decode to two
+/// U+FFFD, so only a byte-level diff sees it. CANARY: if M:N slot ordering ever changes so the
+/// engines agree, this flips to failing — fix the ordering or the fixture, do NOT weaken the
+/// compare (the CLI pin would move with it).
+#[test]
+fn file_parity_catches_a_byte_only_divergence() {
+    let src = "import std.io\n\nfn main():\n    ch := Channel[int]()\n    parallel:\n        spawn:\n            _ := ch.recv()\n            _ := io.stdout().write_bytes(b\"\\xff\")\n        spawn:\n            _ := io.stdout().write_bytes(b\"\\xfe\")\n            ch.send(1)\nmain()\n";
+    let src = src.to_string();
+    assert!(
+        std::panic::catch_unwind(move || parity_entry(&src)).is_err(),
+        "a byte-only divergence must FAIL the file parity oracle"
+    );
 }
 
 /// Like [`parity_entry`], but for a program that must FAULT on BOTH engines: runs the graph path on
@@ -4077,16 +4157,18 @@ fn parallel_finished_task_leaves_sibling_deadlocked() {
 fn parity_entry_cfg(src: &str, mk_cfg: impl Fn() -> crate::native::HostConfig) -> String {
     let t = TmpDir::new();
     let entry = t.write("main.chz", src);
-    let (io, ie_out, ir, _ic) = run_file_parallel(&entry, mk_cfg());
-    let (vo, ve_out, vr, _vc) = run_file_with(&entry, mk_cfg());
-    assert_eq!(io, vo, "stdout divergence (interp vs vm)");
-    assert_eq!(ie_out, ve_out, "stderr divergence (interp vs vm)");
+    // RAW BYTES on both legs (W6-9b) — same arguments `run_file_parallel`/`run_file_with` pass,
+    // minus their lossy decode. `mk_cfg()` still runs ONCE PER ENGINE (fresh stdin queue).
+    let (io, ie_out, ir, _ic) = crate::vm::run_file_bytes(&entry, mk_cfg(), true, None, None);
+    let (vo, ve_out, vr, _vc) = crate::vm::run_file_bytes(&entry, mk_cfg(), false, None, None);
+    assert_stream_parity(&io, &vo, "stdout", "(interp vs vm)");
+    assert_stream_parity(&ie_out, &ve_out, "stderr", "(interp vs vm)");
     assert_eq!(
         ir.is_ok(),
         vr.is_ok(),
         "ok/err divergence: interp={ir:?} vm={vr:?}"
     );
-    io
+    captured(io)
 }
 
 /// Like [`parity_entry_cfg`], but for a program whose stdout is a deterministic MULTISET with a
@@ -4870,17 +4952,9 @@ fn assert_file_parity(rel: &str) {
     let (ip_out, ip_err, ip_res, _) = raw(true);
     // Text compare first (readable failure), then the byte compare that catches a divergence a
     // lossy decode would erase.
-    let text = |b: &[u8]| String::from_utf8_lossy(b).into_owned();
-    assert_eq!(text(&vm_out), text(&ip_out), "stdout divergence for {rel}");
-    assert_eq!(
-        vm_out, ip_out,
-        "stdout BYTE divergence for {rel} (equal only after a lossy decode)"
-    );
-    assert_eq!(text(&vm_err), text(&ip_err), "stderr divergence for {rel}");
-    assert_eq!(
-        vm_err, ip_err,
-        "stderr BYTE divergence for {rel} (equal only after a lossy decode)"
-    );
+    let label = format!("for {rel}");
+    assert_stream_parity(&vm_out, &ip_out, "stdout", &label);
+    assert_stream_parity(&vm_err, &ip_err, "stderr", &label);
     assert_eq!(
         vm_res.err().map(|e| e.to_string()),
         ip_res.err().map(|e| e.to_string()),
