@@ -1234,7 +1234,7 @@ struct Suite:
         const CAP: usize = 8_000_000;
         let d = TmpDir::new();
         let d2 = TmpDir::new();
-        // ~1 MB string built once, 300 sends = ~300 MB off-heap (peak RSS 297 MB pre-fix).
+        // ~1 MB string built once, 300 sends = ~300 MB off-heap (peak RSS 304 MB pre-fix).
         let msg = d.write(
             "msg_test.chz",
             "test fn msg():\n    parts: List[str] = []\n    \
