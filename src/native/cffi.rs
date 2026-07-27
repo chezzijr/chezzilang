@@ -525,19 +525,27 @@ fn write_all_fd(fd: i32, buf: &[u8]) {
 /// a stack scribble). A second and quieter UB. Raw `write(2)` rather than `eprintln!` because Rust's
 /// stdio lock is not async-signal-safe.
 ///
-/// The message goes out FIRST, then the streamed sink is drained: under `chezzi run` every `print`
-/// is a queue push handed to a background writer thread (`vm::stream`), whose stated invariant is
-/// "a killed program keeps every byte it produced" — a bare `abort()` here would silently truncate
-/// the program's own stdout at a nondeterministic point, i.e. destroy the context the diagnostic is
-/// supposed to explain.
-///
-/// ponytail: `flush_stream` is NOT async-signal-safe (it pushes on an `mpsc` and waits for the
-/// writer's ack), so a signal that interrupted an allocation could in principle stall here. It runs
-/// AFTER the `write(2)` precisely so that stall can never eat the diagnostic. Upgrade path: a
-/// signal-safe drain (writer-owned ring buffer + `write(2)`) if that stall is ever observed.
+/// The program's own QUEUED stdout is deliberately DISCARDED here — this path calls nothing but
+/// `write(2)` and `abort()`, both async-signal-safe. Draining the streamed sink first (an earlier
+/// cut of this fix called `vm::stream::flush_stream`) is not merely unsafe-in-principle, it HANGS:
+/// `flush_stream` pushes `Msg::Flush(ack)` on an `mpsc` and blocks on `rx.recv()` with no timeout,
+/// and the only thread that can service that message is the stream writer itself. Two deterministic
+/// wedges follow. (1) The poisoned trampoline fires ON the writer thread — an async signal
+/// (`signal(SIGALRM, h)` + `alarm`, SIGINT from the tty) is delivered to any thread that has not
+/// blocked it, and `std::thread::spawn`ed writers inherit an unblocked mask — so it sends a Flush
+/// into the queue it is itself the sole consumer of and waits on itself, forever. (2) The writer is
+/// parked in `write_all` on a full 64 kB stdout pipe whose reader never drains (`chezzi run p.chz |
+/// (sleep 60; cat)`), so the Flush queues behind the stuck write. Either way: no SIGABRT, no exit,
+/// no core — strictly worse than the SIGSEGV this whole change exists to replace. `flush_stream`'s
+/// own contract says as much (`src/vm/stream.rs`: "Called by `main` AFTER the VM has finished (never
+/// from a fiber)"); a C signal handler is further outside that precondition than a fiber is.
+/// Separately, its `mpsc::channel()` + `send` both allocate, and glibc `malloc` is not
+/// async-signal-safe — re-entering the allocator from a handler that interrupted it self-deadlocks
+/// on the arena lock. Losing buffered stdout on a crash is what every other runtime does too
+/// (CPython loses it on SIGSEGV/`abort`); the diagnostic itself is never lost, because it goes
+/// straight to fd 2 and never touches the queue.
 fn callback_poison_abort(msg: &[u8]) -> ! {
     write_all_fd(2, msg);
-    crate::vm::flush_stream();
     std::process::abort()
 }
 

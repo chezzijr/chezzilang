@@ -6,7 +6,10 @@
 //! Stored/cross-thread callbacks stay DEFERRED — but the deferral is now a LOUD, defined abort
 //! instead of undefined behavior: an ARMED trampoline is leaked and POISONED (its atomic armed flag
 //! cleared), so a later invocation from C — or one on any thread other than the caller — writes a
-//! named message to stderr, drains the program's queued stdout, and `abort()`s.
+//! named message straight to fd 2 and `abort()`s. That path calls nothing else: it may run from a C
+//! signal handler, where only async-signal-safe calls are legal, and where the earlier queued-stdout
+//! drain deadlocked against the stream writer thread (see `callback_poison_abort`). The program's own
+//! buffered stdout is therefore discarded on this path, exactly as it is on any other crash.
 //!
 //! The leak that buys that guarantee has to stay inside its stated ceiling, which is what the other
 //! tests here pin:
@@ -148,17 +151,22 @@ fn stored_callback_aborts_loudly_on_both_engines() {
     }
 }
 
-/// The abort is a DIAGNOSTIC, so it must not destroy the context it is diagnosing. Under `chezzi run`
-/// every `print` is a queue push drained by a background writer thread (`src/vm/stream.rs`), whose
-/// stated invariant is "a killed program keeps every byte it produced" — a bare `abort()` from the
-/// poison stub truncates the program's own stdout at a nondeterministic point (different per run and
-/// per engine). The stub therefore drains the streamed sink before aborting.
+/// The poison path must reach `abort()` even when the stream writer thread is WEDGED — it may call
+/// nothing but `write(2)` and `abort()`. An earlier cut drained the streamed sink first
+/// (`vm::stream::flush_stream`) so the program's queued stdout would survive the abort; that is an
+/// unbounded blocking rendezvous (`Msg::Flush(ack)` + `rx.recv()` with no timeout) whose only
+/// servicer is the writer thread, so with the writer parked in `write_all` on a full pipe the poison
+/// stub waited forever: no SIGABRT, no exit, no core — strictly worse than the SIGSEGV it replaced.
+/// This test pins the no-hang property by holding the child's stdout pipe FULL and UNREAD across the
+/// abort and never draining it until the child has already exited. Re-adding any queue drain to
+/// `callback_poison_abort` fails here as a timeout. The program's buffered stdout is discarded on
+/// this path by design; the diagnostic goes straight to fd 2 and is never queued.
 #[test]
-fn abort_path_keeps_the_programs_queued_stdout() {
+fn abort_diagnoses_even_with_a_full_unread_stdout_pipe() {
     // 20k numbered lines is ~108 kB — well past a 64 kB pipe buffer — and this test deliberately
     // does NOT read the child's stdout until the child is long past its last `print`. The writer
     // thread therefore blocks on a full pipe with the tail of the program still sitting in the
-    // queue: exactly the state a bare `abort()` discards.
+    // queue: exactly the state that wedged the drain.
     const SRC: &str = r#"import std.ffi
 
 extern "libc.so.6":
@@ -177,31 +185,41 @@ r := raise(10)
     for serial in [false, true] {
         let t = TmpDir::new();
         let entry = t.write("main.chz", SRC);
-        let child = chezzi_cmd(serial, &entry)
+        let mut child = chezzi_cmd(serial, &entry)
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .spawn()
             .expect("spawn chezzi");
-        // Let the child run to (and past) its `raise` with its stdout pipe unread and full.
-        std::thread::sleep(std::time::Duration::from_millis(500));
-        let out = child.wait_with_output().expect("wait chezzi");
         let engine = if serial { "--serial" } else { "M:N" };
-        let stdout = String::from_utf8_lossy(&out.stdout);
+        // Poll for exit WITHOUT reading stdout, so the writer thread stays parked on the full pipe
+        // for the whole window. A poison path that waits on that writer never exits and trips the
+        // deadline; `write(2)` + `abort()` exits promptly regardless of the pipe's state.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let status = loop {
+            match child.try_wait().expect("try_wait chezzi") {
+                Some(s) => break s,
+                None if std::time::Instant::now() >= deadline => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    panic!(
+                        "[{engine}] the poison abort HUNG with the stdout pipe full and unread — \
+                         `callback_poison_abort` must call nothing but write(2) and abort()"
+                    );
+                }
+                None => std::thread::sleep(std::time::Duration::from_millis(25)),
+            }
+        };
+        // Only now drain the pipes (the child is already gone, so this cannot rescue a hang).
+        let out = child.wait_with_output().expect("wait chezzi");
         let stderr = String::from_utf8_lossy(&out.stderr);
         assert_eq!(
-            out.status.signal(),
+            status.signal(),
             Some(libc::SIGABRT),
             "[{engine}] expected the poison abort; stderr: {stderr}"
         );
         assert!(
             stderr.contains("stored/cross-thread callbacks are not supported"),
             "[{engine}] the abort must name the unsupported feature; stderr: {stderr}"
-        );
-        assert!(
-            stdout.ends_with("about to raise\n") && stdout.starts_with("0\n1\n"),
-            "[{engine}] the abort lost the program's queued stdout: {} bytes, tail {:?}",
-            stdout.len(),
-            &stdout[stdout.len().saturating_sub(40)..]
         );
     }
 }

@@ -899,13 +899,26 @@ instead of re-entering the engine off-thread. Demonstrated by widening the armed
 sleep before the drop: pre-fix the C-spawned thread ran the Chezzi callback body and the program exited
 `0`; post-fix it aborts on the cross-thread message.
 
-**The abort drains the streamed sink first.** `chezzi run` queues every `print` to a background writer
-thread (`src/vm/stream.rs`), whose stated invariant is "a killed program keeps every byte it produced".
-A bare `abort()` from the poison stub broke exactly that — measured: a 20k-line program lost everything
-past the 64 kB pipe buffer, truncating at a run-dependent line, differently per engine. So
-`callback_poison_abort` writes its message, calls `vm::flush_stream()`, and only then aborts (message
-FIRST so a stalled drain can never eat the diagnostic; the drain itself is not async-signal-safe, and
-is `ponytail:`-marked as such).
+**The abort DISCARDS the program's queued stdout, on purpose — draining it first deadlocks.** `chezzi
+run` queues every `print` to a background writer thread (`src/vm/stream.rs`), so a bare `abort()` loses
+whatever is still queued (measured: a 20k-line program truncates past the 64 kB pipe buffer, at a
+run-dependent line). An earlier cut of this fix therefore drained the sink first via
+`vm::flush_stream()`. **That was rejected in review and removed**: `flush_stream` is an unbounded
+blocking rendezvous (`Msg::Flush(ack)` on an `mpsc`, then `rx.recv()` with no timeout) whose ONLY
+servicer is the writer thread, so it wedges in two deterministic ways. (1) The poisoned trampoline
+fires *on* the writer thread — an async signal (`signal(SIGALRM, h)` + `alarm`, SIGINT from the tty)
+goes to any thread that has not blocked it, and `std::thread::spawn`ed writers inherit an unblocked
+mask — so it queues a Flush for itself and waits on itself. (2) The writer is parked in `write_all` on
+a full 64 kB pipe with no reader draining (`chezzi run p.chz | (sleep 60; cat)`), so the Flush queues
+behind the stuck write. Either way the process HANGS: no SIGABRT, no exit status, no core — strictly
+worse than the SIGSEGV this change exists to replace. `flush_stream`'s own contract already said so
+(`src/vm/stream.rs`: "Called by `main` AFTER the VM has finished (never from a fiber)"); a C signal
+handler is further outside that precondition than a fiber is. Independently, `mpsc::channel()` + `send`
+both allocate and glibc `malloc` is not async-signal-safe, so a handler that interrupted an allocation
+self-deadlocks on the arena lock. `callback_poison_abort` now calls nothing but `write(2)` and
+`abort()`, both async-signal-safe. Losing buffered stdout on a crash is what every other runtime does
+(CPython loses it on SIGSEGV/`abort`), and the diagnostic itself is never at risk — it goes straight to
+fd 2 and never touches the queue.
 
 **The message is written with a retry loop**, not one best-effort `write(2)`: on a non-blocking fd 2
 (an inherited-`O_NONBLOCK` tty, a CI harness) or on a signal arriving mid-syscall, a single `write`
@@ -915,7 +928,8 @@ loops over short counts, `EINTR` and `EAGAIN` (1 ms back-off, ~2 s cap).
 
 Tests: `tests/ffi_stored_callback.rs` — `stored_callback_aborts_loudly_on_both_engines` (the repro),
 `cross_thread_stored_callback_aborts_without_entering_the_vm` (a `pthread_create` worker),
-`abort_path_keeps_the_programs_queued_stdout` (20k lines behind an unread pipe),
+`abort_diagnoses_even_with_a_full_unread_stdout_pipe` (20k lines behind a pipe held unread across the
+abort, polling for exit without draining — a re-added queue drain fails it as a 10 s timeout),
 `unarmed_callback_trampoline_is_freed_not_leaked` (peak-RSS growth over 50k never-armed attempts — it
 asserts the `/proc/self/status` probe actually WORKED, or the growth delta would compare two sentinels
 and pass vacuously), and
