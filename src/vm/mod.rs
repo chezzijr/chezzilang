@@ -2250,7 +2250,7 @@ impl MnSched {
         // re-run to observe `closed` and end its `for`/fault, not park forever), or cancel was tripped.
         let (message_waiting, closed) = {
             let g = core.q.lock().unwrap_or_else(|e| e.into_inner());
-            (!g.queue.is_empty(), g.closed)
+            (!g.is_empty(), g.closed)
         };
         // A concurrent `trip()` (between `recv`'s empty-check and here) sets `done_latch` then runs
         // `close_wake`, which finds no parked fiber yet — so close the gap by re-checking the latch too
@@ -2289,7 +2289,7 @@ impl MnSched {
         let cap = core.cap.expect("park_send on an unbounded channel");
         let (space, closed) = {
             let g = core.q.lock().unwrap_or_else(|e| e.into_inner());
-            (g.queue.len() < cap, g.closed)
+            (g.len() < cap, g.closed)
         };
         let cancelled = c.scopes[fiber.scope_id].cancel.load(Ordering::Relaxed);
         if space || closed || cancelled {
@@ -2322,10 +2322,10 @@ impl MnSched {
         let mut c = self.lock();
         {
             let mut q = core.q.lock().unwrap_or_else(|e| e.into_inner());
-            if q.queue.len() >= cap {
+            if q.len() >= cap {
                 return false; // full — caller parks (both guards drop on return)
             }
-            q.queue.push_back(w);
+            q.push(w);
         }
         self.wake_bucket(&mut c, key);
         drop(c);
@@ -2373,14 +2373,14 @@ impl MnSched {
                     if *is_send {
                         // SEND arm: ready with a FREE slot (bounded below cap, or unbounded) OR on
                         // close (the send then FAULTS, matching op_wait_poll's ready-then-fault).
-                        g.closed || core.cap.is_none_or(|cap| g.queue.len() < cap)
+                        g.closed || core.cap.is_none_or(|cap| g.len() < cap)
                     } else {
                         // RECV arm: ready ONLY with a queued value (a closed channel still drains its
                         // buffered messages). A closed+EMPTY recv arm is DEAD — op_wait_poll SKIPS it
                         // (it only counts toward `all_closed`), so treating `closed` as ready HERE spins
                         // requeue→re-poll(skip)→re-park forever (parity-perf-0). Close-to-signal is done
                         // via `done_latch` (checked below), not a plain channel close.
-                        !g.queue.is_empty()
+                        !g.is_empty()
                     }
                 };
                 // A tripped `done_latch` (a concurrent `trip()`) makes this arm ready, same as a queued
@@ -2567,11 +2567,7 @@ impl MnSched {
 
     fn send_wake(&self, key: usize, core: &Arc<ChannelCore>, w: WireValue) {
         let mut c = self.lock();
-        core.q
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .queue
-            .push_back(w);
+        core.q.lock().unwrap_or_else(|e| e.into_inner()).push(w);
         self.wake_bucket(&mut c, key);
         drop(c);
         self.cv.notify_all();
@@ -2833,14 +2829,10 @@ impl MnSched {
         // counters above (a `send` doesn't bump `runnable` for a demoted fiber), but that fiber WILL pop
         // it on its next poll and make progress — so this is NOT a deadlock. Without this peek, a sibling
         // `send` racing the quiesce could spuriously fault an innocent PARKED sibling.
-        if c.demoted_chans.values().any(|(core, _)| {
-            !core
-                .q
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .queue
-                .is_empty()
-        }) {
+        if c.demoted_chans
+            .values()
+            .any(|(core, _)| !core.q.lock().unwrap_or_else(|e| e.into_inner()).is_empty())
+        {
             return false;
         }
         true

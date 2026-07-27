@@ -473,3 +473,66 @@ fn main():
 main()";
     assert_eq!(run_capture_stress(src), "true\ntrue\n20\n");
 }
+
+/// W6-7 — the GC now SHORT-CIRCUITS a core whose cached summary says its wire payload holds no
+/// `Handle` and no nested core. That memo is only sound if EVERY store refreshes it, and the
+/// `Shared`/`RwShared`/`Atomic` payload is *replaced* (`set`/`update`/`write`/`store`/`exchange`/
+/// `cas`/`add`), not mutated in place. Under GC stress a stale `CLEAN` would free a value that is
+/// live only through the core. Handle-bearing payloads (closures) and nested cores are the arms
+/// that must stay DIRTY.
+#[test]
+fn gc_stress_values_parked_in_cores() {
+    let src = "\
+import std.concurrency
+
+struct Bag:
+    xs: List[str]
+
+fn main():
+    # REPLACING stores on every single-value core, interleaved with allocation.
+    s := Shared(Bag([str(1)]))
+    for i in range(20):
+        s.update(fn(b): Bag(b.xs + [str(i)]))
+        junk := [str(i), str(i + 1)]
+    print(s.get().xs.len())
+
+    rw := RwShared([str(0)])
+    for i in range(20):
+        rw.write(fn(xs): xs + [str(i)])
+        junk := [str(i)]
+    print(rw.get().len())
+
+    a := Atomic([str(9)])
+    for i in range(10):
+        a.store([str(i), str(i)])
+        junk := [str(i)]
+    print(a.load()[0])
+
+    # A payload that DOES root the heap: a closure with captures, parked in a channel.
+    ch := Channel[fn() -> str]()
+    tag := str(42)
+    ch.send(fn() -> str: tag)
+    filler := []
+    for i in range(30):
+        filler.push([str(i)])
+    f := ch.recv()
+    print(f())
+
+    # A NESTED core inside a core: the outer must stay DIRTY so the inner's contents stay rooted.
+    inner := Channel[str]()
+    inner.send(str(7))
+    outer := Shared(inner)
+    for i in range(30):
+        junk := [str(i)]
+    print(outer.get().recv())
+
+    # An Executor queue holding submitted closures across a stressed run.
+    ex := Executor(1)
+    note := str(5)
+    ex.submit(fn(): print(note))
+    for i in range(20):
+        junk := [str(i)]
+    ex.shutdown()
+main()";
+    assert_eq!(run_capture_stress(src), "21\n21\n9\n42\n7\n5\n");
+}

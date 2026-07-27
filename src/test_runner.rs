@@ -1178,6 +1178,51 @@ struct Suite:
         }
     }
 
+    /// gaps.md W6-10 — a value moved across the airlock into a `Channel`/`Shared` core lives as a
+    /// `WireValue` in an `Arc` OUTSIDE every `Heap`, so `live_bytes` counted it nowhere and a
+    /// 195 MB channel backlog sailed straight past a 200 KB `--max-heap` cap (PASS, rc=0). The
+    /// cached per-core byte summary now feeds `live_bytes`, so the natural *concurrent* runaway —
+    /// an unbounded backlog, or data parked in a `Shared` — trips the cap like any other.
+    #[test]
+    fn over_memory_counts_offheap_wire_payload() {
+        let d = TmpDir::new();
+        // The cap is deliberately far above anything either program keeps in its own `Heap` — only
+        // the off-heap wire storage can reach it, so the assertion isolates W6-10.
+        const CAP: usize = 8_000_000;
+        let d2 = TmpDir::new();
+        let backlog = d.write(
+            "backlog_test.chz",
+            "test fn backlog():\n    ch := Channel[List[int]](200000)\n    \
+             for i in range(40000):\n        ch.send([i, i, i, i, i, i, i, i])\n",
+        );
+        // The sibling single-value path: a big list parked in a `Shared` (a REPLACING store — the
+        // summary is refreshed by `SharedCore::store`, not only at construction).
+        let parked = d2.write(
+            "parked_test.chz",
+            "import std.concurrency\n\ntest fn parked():\n    s := Shared([0])\n    \
+             xs := []\n    for i in range(150000):\n        xs.push(i)\n    s.set(xs)\n    \
+             zs := []\n    for i in range(2000):\n        zs = [i]\n",
+        );
+        for (label, f) in [("backlog", &backlog), ("parked", &parked)] {
+            for parallel in [false, true] {
+                let report = run_tests_capped(f, parallel, CAP);
+                assert!(
+                    report.text.contains(&format!("OVER-MEMORY {label}")),
+                    "off-heap wire storage must trip the cap ({label}, parallel={parallel}); \
+                     report:\n{}",
+                    report.text
+                );
+                assert!(
+                    !report.text.contains(&format!("FAIL {label}"))
+                        && !report.text.contains(&format!("ERROR {label}")),
+                    "must be OVER-MEMORY, not FAIL/ERROR ({label}, parallel={parallel}); \
+                     report:\n{}",
+                    report.text
+                );
+            }
+        }
+    }
+
     // ---- `--timeout` wall-clock cap (M:N-engine-only; tests run parallel=true) ----
     // Robust to CI timing: a CLEARLY-infinite loop under a SHORT timeout, or a CLEARLY-fast test
     // under a GENEROUS timeout — never near-boundary.

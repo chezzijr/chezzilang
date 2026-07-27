@@ -2036,10 +2036,7 @@ impl Vm {
                 } else {
                     "<ptr>".to_string()
                 }),
-                Obj::Channel(core) => Ok(format!(
-                    "Channel(len={})",
-                    core.q.lock().unwrap().queue.len()
-                )),
+                Obj::Channel(core) => Ok(format!("Channel(len={})", core.q.lock().unwrap().len())),
                 // B3.1: the box holds the wire form; render it directly (`display` is `&self` and
                 // cannot `from_wire`, which allocates — `display_wire` is the read-only equivalent).
                 Obj::Shared(core) => Ok(format!(
@@ -2060,7 +2057,7 @@ impl Vm {
                 )),
                 Obj::Executor(core) => Ok(format!(
                     "Executor(pending={})",
-                    core.inner.lock().unwrap().queue.len()
+                    core.inner.lock().unwrap().len()
                 )),
                 // D6: render open/closed without exposing the fd; matches no interp counterpart (net
                 // is VM-only) but mirrors the core handles' structural `Display`.
@@ -2198,7 +2195,7 @@ impl Vm {
                 format!("{display}({})", self.display_wire(inner))
             }
             WireValue::Channel(core) => {
-                format!("Channel(len={})", core.q.lock().unwrap().queue.len())
+                format!("Channel(len={})", core.q.lock().unwrap().len())
             }
             WireValue::Shared(core) => {
                 format!("Shared({})", self.display_wire(&core.v.lock().unwrap()))
@@ -2215,10 +2212,9 @@ impl Vm {
                     core.v.load(std::sync::atomic::Ordering::SeqCst)
                 )
             }
-            WireValue::Executor(core) => format!(
-                "Executor(pending={})",
-                core.inner.lock().unwrap().queue.len()
-            ),
+            WireValue::Executor(core) => {
+                format!("Executor(pending={})", core.inner.lock().unwrap().len())
+            }
             // D6: render open/closed without exposing the fd (mirrors the heap `Display`).
             WireValue::Socket(core) => {
                 format!(

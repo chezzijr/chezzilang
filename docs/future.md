@@ -305,10 +305,20 @@ render ERROR too (whole file, before any test runs), counted separately as `file
    `recover:` whenever the marker is set, and `verdict_from_fault` reads `e.is_over_memory` first to
    bucket it. `spawn`/`parallel:` tasks are covered on M:N too — `spawn_worker` threads `mem_cap` onto
    the worker's own heap, so a **runaway** alloc in a task trips and buckets on both engines. VM + runner
-   + `main.rs` flag only — no checker/compiler change. **v1 limits (deterministic, documented):** the
+   + `main.rs` flag only — no checker/compiler change. **Off-heap wire storage IS counted (gaps.md
+   W6-10, fixed 2026-07-27).** A value moved across the airlock into a `Channel`/`Shared`/`RwShared`/
+   `Atomic`/`Executor` core lives as a `WireValue` in an `Arc` **outside every `Heap`**, so `live_bytes`
+   used to count it nowhere and a 195 MB channel backlog sailed past a 200 KB cap. Each core now caches
+   its payload's approximate byte size (the same summary that makes the GC skip pure-data payloads —
+   see gaps.md W6-7) and `live_bytes` adds it in, so the natural *concurrent* runaway — an unbounded
+   backlog, or data parked in a `Shared` — trips like any other. Two documented approximations: the byte
+   walk **stops at a nested-core boundary** (those bytes belong to that core's own summary, counted once
+   rather than twice), and one `Arc` core aliased by N worker heaps under M:N is counted in **all N** —
+   an OVER-count, so the cap only ever trips EARLIER, never later. This is a **different hole from the
+   inline-scalar escape below, which remains OPEN.** **v1 limits (deterministic, documented):** the
    trip fires only at a **GC boundary**, and GC triggers on `Obj`-count growth — a loop growing a single
    container of **inline scalars** (e.g. `xs.push(i)` for int `i`) allocates no `Obj`s, never sweeps, and
-   so never trips (push a heap value to guard it); the check is a high-water on `live_bytes` which
+   so never trips (push a heap value to guard it) — **still open**; the check is a high-water on `live_bytes` which
    **undermeasures** true RSS and can overshoot ~2× `N` before firing (`next_gc = 2*live`). **The cap is
    PER-HEAP, so its guarantee is: any single execution context (the test's own heap; a `spawn`'d worker's
    heap on M:N) whose live heap exceeds `N` is aborted — a real runaway trips on whichever heap runs it,

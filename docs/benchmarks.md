@@ -1074,3 +1074,53 @@ discarded generic `AtomicI64`-fast-path attempt measured (it was capped by the t
 sniffing it had to do). **Uncontended** (single task) the two are within run-to-run noise — the win is
 purely a contention story, exactly as predicted. No M19 bench (`fib`/`loop`/`primes`) is affected;
 AtomicInt is a new stdlib construct, not a VM-wide lever.
+
+## Cached wire-core GC summary — gaps.md W6-7 (2026-07-27) — correctness-shaped perf fix
+
+Holding a big container in a `Shared`/`RwShared`/`Channel`/`Atomic`/`Executor` used to make the whole
+program **quadratic**: the stored value lives outside the GC heap as one `WireValue` tree, `Heap::children`
+re-walked that entire tree on **every** GC pass, and because the GC threshold is object-COUNT based
+(`next_gc = 2*live`) while a big wire container is ONE heap slot, `live` stayed tiny → GC ran constantly →
+O(allocations × payload). Each core now caches `(approximate owned bytes, can-this-payload-root-a-heap-object)`
+at store time; a payload with no `Handle` and no nested core is **skipped**, so the per-pass cost is O(1).
+GC pacing (`next_gc`) was deliberately left untouched — the short-circuit alone restored linearity.
+
+Bespoke microbench (NOT in `benches/run.chz`, which is Chezzi-vs-CPython peers only). Release, `--serial`,
+best of 3, same machine + session. A 200k-int container is built, handed to a holder, then a sibling loop
+allocates n times (each allocation is a GC-threshold tick):
+
+| n | `RwShared` holder — before | after | plain `List` control |
+|---|---|---|---|
+| 100 000 | 0.447 s | **0.069 s** (6.5×) | 0.061 s |
+| 200 000 | 1.946 s | **0.203 s** (9.6×) | 0.196 s |
+| 400 000 | 7.916 s | **1.101 s** (7.2×) | 1.203 s |
+
+Before: **4.35× / 4.07× per 2× n — quadratic**. After: the wire-payload holder **tracks the plain-`List`
+control at every n**. (The control's own jump at 400k is a pre-existing heap-growth effect — identical
+before and after — not part of this lever.)
+
+Holder isolation at n = 200 000 (same allocation loop, same live 200k-int container, only the holder differs):
+
+| holder | before | after |
+|---|---|---|
+| plain `List` | 0.181 s | 0.195 s |
+| `RwShared` | 1.766 s | **0.218 s** (8.1×) |
+| `Shared` | 2.051 s | **0.204 s** (10.0×) |
+| `Channel.send` | 2.050 s | **0.220 s** (9.3×) |
+| no holder | 0.196 s | 0.201 s |
+
+The holder penalty is **gone** — every core now costs the same as a plain `List`. Traversals whose payload
+elements are themselves heap objects (an `RwShared[List[str]]` fold) were already linear before the fix
+(their own `Obj`s keep `live` high, so GC rarely fires) and are unchanged: 0.062/0.116/0.233 → 0.063/0.118/0.242
+at n = 100k/200k/400k, within noise.
+
+**No regression on the common (no-core) path.** `benches/run.chz` allocates no cores, so nothing should
+move. Direct before→after, same machine + session, 7 runs each, min / median seconds:
+`map` 0.135/0.181 → **0.119/0.129** · `str` 0.157/0.161 → 0.156/0.160 · `primes` 0.564/0.590 →
+0.551/0.601 · `fib` 0.226/0.248 → 0.228/0.237 · `loop` 0.852/0.936 → 0.850/0.876. All min-times within
+run-to-run noise — **flat**, as expected (the five new `live_bytes`/`children` arms are on `Obj` variants
+the benches never allocate). `CHEZZI_HEAP_STATS` peak is byte-identical before and after.
+
+Same change also closes gaps.md **W6-10**: the cached byte half of the summary feeds `Heap::live_bytes`, so
+`chezzi test --max-heap` finally sees an off-heap channel backlog / `Shared`-parked data (195 MB used to
+pass a 200 KB cap).

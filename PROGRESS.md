@@ -4,6 +4,44 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 **Legend:** ⬜ not started · 🟦 in progress · ✅ done
 
+> **✅ FIX (2026-07-27, gaps.md W6-7 + W6-10 — ONE root cause) — a wire core now caches its payload's
+> GC summary, so the collector stops re-walking it and `--max-heap` finally sees it.** A value moved
+> across the airlock into a `Channel`/`Shared`/`RwShared`/`Atomic`/`Executor` lives as a `WireValue`
+> tree in an `Arc` **outside every `Heap`**, with no cached summary — so the GC treated it wrong in
+> both directions. **W6-7 (perf):** `Heap::children` re-walked the ENTIRE tree on every GC pass, and
+> because the threshold is object-COUNT based (`next_gc = 2*live`) while a big wire container is ONE
+> heap slot, `live` stayed tiny → GC ran constantly → O(allocations × payload). **W6-10 (cap):**
+> `live_bytes` counted only in-`Heap` slots, so a 195 MB channel backlog passed a 200 KB
+> `--max-heap`. Both are now answered by ONE new walk, `vm::core::wire_summary` (beside
+> `collect_core_gcrefs`, arm-for-arm), yielding `(approximate owned bytes, can-this-payload-root-a-heap-object)`:
+> `children` skips a payload with no `Handle` and no nested core (O(payload) → **O(1)** per pass; a
+> rooting payload is still walked in full, every pass, never memoized), and `live_bytes` adds the byte
+> half. `wire_summary` is deliberately NOT `WireValue::has_handle()` — that answers the *airlock*
+> question and calls the nested-core arms clean, which `collect_core_gcrefs` recurses into; caching
+> its verdict would be a use-after-free. **The trap** (payloads are REPLACED by `set`/`update`/
+> `write`/`store`/`exchange`/`cas`/`add`, so a stale CLEAN under-roots the GC) is closed three ways:
+> `ChanState`/`ExecState`'s `queue` is now **private** so a missed push/pop site is a compile error;
+> the single-value stores route through `SharedCore::store`/`RwSharedCore::store`/`AtomicCore::store`
+> +`store_guarded`, refreshing the summary **under the same value lock** as the write; and a
+> `debug_assert` in `Heap::mark_core_payload` re-derives the verdict on every debug-build GC pass.
+> `Default` is `WS_UNKNOWN` = walk-once-then-memoize, so a core built outside a store path (the
+> `..Default::default()` constructors in `exec.rs`) degrades to the old behaviour, never under-roots.
+> **Measured** (`--serial`, release, 200k-int container + n allocations): `RwShared` holder
+> 0.447/1.946/7.916 s at n=100k/200k/400k (4.35× per 2× n — quadratic) → **0.069/0.203/1.101 s**, now
+> tracking the plain-`List` control (0.061/0.196/1.203 s) at every n. Holder isolation at 200k:
+> `RwShared` 1.766→**0.218 s**, `Shared` 2.051→**0.204 s**, `Channel.send` 2.050→**0.220 s** — the
+> holder penalty is gone. GC **pacing** deliberately untouched (timing-observable, parity blast
+> radius); no `benches/run.chz` movement (it uses no cores). **Only observable change: `--max-heap`
+> now trips where it previously passed** — which is the point of W6-10. Tests:
+> `vm::core::wire_summary_bytes_and_dirtiness`/`wire_summary_state_transitions`,
+> `vm::heap::core_payload_walk_is_memoized`/`dirty_core_payload_is_still_traced`/
+> `live_bytes_counts_offheap_wire_payload`, `vm::gc_tests::gc_stress_values_parked_in_cores`,
+> `test_runner::over_memory_counts_offheap_wire_payload`. Docs: `docs/gaps.md` (both retired FIXED +
+> dropped from the open-items index), `docs/benchmarks.md`, `docs/concurrency.md` (the read-view's
+> O(1)-memory claim kept; the false *time* implication corrected), `docs/future.md §1b` (the cap now
+> counts off-heap wire bytes — the inline-scalar escape in that same section is a DIFFERENT hole and
+> remains OPEN).
+
 > **❌ ATTEMPTED AND REJECTED (2026-07-26, gaps.md W6-3d) — candidate (b) for the numeric-newtype
 > operator divergence makes `<` INTRANSITIVE. Branch discarded, `main` unchanged, the divergence
 > stands.** (b) was "a numeric newtype's own `add`/`compare`/… dispatches as the operator too, so `+`
