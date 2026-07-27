@@ -4,6 +4,36 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 **Legend:** ⬜ not started · 🟦 in progress · ✅ done
 
+> **✅ FIX (2026-07-27, gaps.md W6-9) — `Writer.write_bytes` is byte-exact on `io.stdout()`/`io.stderr()`
+> too; the VM's buffered output sink is now `Vec<u8>` end to end.** `io.stdout().write_bytes(b"\xff\xfe")`
+> emitted `ef bf bd ef bf bd` (two U+FFFD) while the SAME method on a file writer emitted `ff fe` — Python's
+> `sys.stdout.buffer.write` and Go's `os.Stdout.Write` both emit the raw bytes, so this was the last
+> surviving member of the lossy-byte family (B1/R1/W6-4/W6-14, all previously fixed). **Root cause**
+> `src/vm/fileio.rs` — the `Backing::Stdout`/`Stderr` arms of `write_to_core` called
+> `String::from_utf8_lossy(data)`, because the sink was `&str`-typed. The `&str` signature was only the
+> surface: the real constraint was **`Vm.out: String`**, the per-task buffer the whole serial-vs-M:N
+> output-ordering seam is built on (`Vm`, `FiberCtx`, `WorkerResult`, all four `TaskOutcome` variants, the
+> M:N join plumbing, and `reduce_task_slots`' task-order concatenation). **Fix: widen the sink to bytes end
+> to end** — `Msg::Write(Vec<u8>)` + `stream::write_out`/`write_err(&[u8])` (`src/vm/stream.rs`); new
+> `Vm::emit_out_bytes`/`emit_err_bytes` holding the logic with `emit_out`/`emit_err(&str)` kept as one-line
+> wrappers, so every `print`/interpolation/native call site and the `Host` trait are untouched
+> (`src/vm/exec.rs`); `out`/`stderr` retyped to `Vec<u8>` with `push_str` → `extend_from_slice` and the slot
+> ORDER untouched (`src/vm/mod.rs`, `src/vm/sched.rs`); and the two `write_to_core` arms now pass `data`
+> straight through. `Ok(data.len())` is unchanged and now truthful — no backing can short-write
+> (`write_all` / in-memory / an unbounded queue) — which is also what Python returns. **serial == M:N holds
+> by construction**: concatenating `Vec<u8>` per task slot in the same index order is byte-identical to
+> concatenating `String`; nothing was sorted or normalised. The N1 dead-pipe contract is unchanged
+> (`emit_*` stays a no-op that never touches `pending_exit`; `stream_halt` is still raised at the call
+> sites) and W6-8's fd-2 poison-abort path is deliberately untouched. **Recorded residual:** the CAPTURE
+> boundary (`Vm::take_out`, the `run_*` helpers, `RunOutput`) still decodes with `from_utf8_lossy` in one
+> shared `captured()` helper, so `chezzi test` / `--check-parity` / lib embedders still show U+FFFD for a
+> non-UTF-8 byte — identically on both engines, so parity is unaffected, and `chezzi run` (the only path a
+> program's stdout reaches an fd) is byte-exact. Tests:
+> `tests/interactive.rs::{stdout,stderr,buffered_stdout}_write_bytes_is_byte_exact_{mn,serial}` (real child
+> processes — the in-VM runner captures as a `String`, so only a subprocess can witness fd 1/2) plus four
+> in-language pins in `tests/chz/stdlib/io_writer_test.chz` (return count on stdout/stderr, the file arm's
+> non-UTF-8 round-trip, a 200 KB write's full count).
+
 > **✅ FIX (2026-07-27, gaps.md W6-8) — a STORED FFI callback aborts loudly instead of segfaulting.**
 > **This was the last memory-unsafety in `docs/gaps.md`.** `signal(10, handler)`
 > then `raise(10)` — checker-clean
@@ -284,8 +314,8 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > `write_to_core` never hands `emit_out("")` to a `Stdout`/`Stderr` inner. Python
 > `open(p,'wb',buffering=n)` / Go `bufio` semantics restored for a **file**-backed chain —
 > observer-visible in-process, not just at exit (still not `fsync`, same caveat as `fs.atomic_write`; a
-> `buffered(stdout())` flush only *queues*, on the never-awaited stdout writer thread, and through the
-> `str`-typed W6-9-lossy sink — the docs now say so instead of promising universal visibility).
+> `buffered(stdout())` flush only *queues*, on the never-awaited stdout writer thread — the docs now say
+> so instead of promising universal visibility).
 > Sibling arms enumerated, and **two of them were also broken**: (1) `WriterCore::Drop`
 > (`src/vm/core.rs`) wrote its drained tail only when the inner was `Backing::File`, so a nested
 > `buffered(buffered(create(p)))` chain lost its tail permanently — it now handles all four inner
@@ -294,7 +324,8 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > renders receiver-relatively ("flush on a closed writer") and `close()` MASKS — so both recursion sites
 > now `map_err(from_inner)`, turning an inner `Closed` into `Io("the inner writer this buffer drains
 > into is closed")`: the right handle is named and a flush that persisted nothing can no longer report
-> `Ok`. The `Stdout`/`Stderr` lossy `write_bytes` is W6-9, a separate open entry, NOT touched.
+> `Ok`. The `Stdout`/`Stderr` lossy `write_bytes` was W6-9, a separate entry, NOT touched here — fixed
+> 2026-07-27 (below).
 > Tests: `tests/chz/stdlib/io_writer_test.chz` (8 `test fn`s — flush + close after a mid-write drain,
 > never-filled control, exactly-at-cap, cap=1, a nested two-level chain, closed-inner `Err` on `flush`
 > and on a draining `write`), serial==M:N, plus the Rust

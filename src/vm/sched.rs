@@ -1501,8 +1501,8 @@ impl Vm {
         self.trip_cancel();
         TaskOutcome::Fault {
             err: panic_to_fault(p, span),
-            out: String::new(),
-            stderr: String::new(),
+            out: Vec::new(),
+            stderr: Vec::new(),
         }
     }
 
@@ -1579,8 +1579,8 @@ impl Vm {
                 let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| rw.run_outcome()))
                     .unwrap_or_else(|p| TaskOutcome::Fault {
                         err: panic_to_fault(p, span),
-                        out: String::new(),
-                        stderr: String::new(),
+                        out: Vec::new(),
+                        stderr: Vec::new(),
                     });
                 results.lock().unwrap_or_else(|e| e.into_inner())[i] = Some(r);
             }));
@@ -1593,8 +1593,8 @@ impl Vm {
             let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| rw.run_outcome()))
                 .unwrap_or_else(|p| TaskOutcome::Fault {
                     err: panic_to_fault(p, span),
-                    out: String::new(),
-                    stderr: String::new(),
+                    out: Vec::new(),
+                    stderr: Vec::new(),
                 });
             results.lock().unwrap_or_else(|e| e.into_inner())[i] = Some(r);
         }
@@ -1655,12 +1655,12 @@ impl Vm {
         for slot in slots {
             match slot.expect("every task slot was filled before join returned") {
                 TaskOutcome::Done(wr) => {
-                    self.out.push_str(&wr.out);
-                    self.stderr.push_str(&wr.stderr);
+                    self.out.extend_from_slice(&wr.out);
+                    self.stderr.extend_from_slice(&wr.stderr);
                 }
                 TaskOutcome::Exit { code, out, stderr } => {
-                    self.out.push_str(&out);
-                    self.stderr.push_str(&stderr);
+                    self.out.extend_from_slice(&out);
+                    self.stderr.extend_from_slice(&stderr);
                     if first_exit.is_none() {
                         first_exit = Some(code);
                     }
@@ -1686,8 +1686,8 @@ impl Vm {
                     // pre-existing nondeterminism, not asserted as parity (see the single-task test
                     // `parallel_faulting_task_flushes_partial_output_3engine`).
                     if first_fault.is_none() {
-                        self.out.push_str(&out);
-                        self.stderr.push_str(&stderr);
+                        self.out.extend_from_slice(&out);
+                        self.stderr.extend_from_slice(&stderr);
                         first_fault = Some(err);
                     }
                 }
@@ -1701,8 +1701,8 @@ impl Vm {
                     // `terminate` before the detector fires, but the terminal `match` below applies a
                     // strict `Exit` > `Fault` > `Deadlocked` precedence so a mixed vector (were one to
                     // arise under a race) still resolves deterministically.
-                    self.out.push_str(&out);
-                    self.stderr.push_str(&stderr);
+                    self.out.extend_from_slice(&out);
+                    self.stderr.extend_from_slice(&stderr);
                     if deadlock_err.is_none() {
                         deadlock_err = Some(err);
                     }
@@ -1712,8 +1712,8 @@ impl Vm {
                     // printed those bytes — with cancellation points a started task always completes
                     // its prologue), matching serial, which prints live and cannot un-print. Cross-task
                     // ORDER stays nondeterministic on both engines; the line SET is the contract.
-                    self.out.push_str(&out);
-                    self.stderr.push_str(&stderr);
+                    self.out.extend_from_slice(&out);
+                    self.stderr.extend_from_slice(&stderr);
                 }
             }
         }

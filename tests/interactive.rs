@@ -944,3 +944,112 @@ fn fully_drained_output_stays_success_mn() {
 fn fully_drained_output_stays_success_serial() {
     fully_drained_output_stays_success(true);
 }
+
+// ===== W6-9 — `Writer.write_bytes` on `io.stdout()`/`io.stderr()` must be BYTE-EXACT =====
+//
+// `write_bytes(b"\xff\xfe")` on a FILE writer was already byte-exact; on the console backings it
+// round-tripped through `String::from_utf8_lossy` and emitted `ef bf bd ef bf bd` (two U+FFFD).
+// Python (`sys.stdout.buffer.write`) and Go (`os.Stdout.Write`) both emit the raw bytes.
+//
+// These live here rather than in `tests/chz/` because the in-VM test runner hands stdout back as a
+// Rust `String`: only a real child process can witness the bytes that actually reach fd 1/2.
+
+/// Run `chezzi run [--serial] <file>` to completion, returning its raw stdout/stderr bytes.
+fn run_bytes(entry: &PathBuf, serial: bool) -> (Vec<u8>, Vec<u8>, std::process::ExitStatus) {
+    // `wait_with_output` closes our end of the child's stdin first, so a program that never reads
+    // stdin cannot deadlock here.
+    let out = spawn(entry, serial)
+        .wait_with_output()
+        .expect("wait_with_output");
+    (out.stdout, out.stderr, out.status)
+}
+
+fn stdout_write_bytes_is_byte_exact(serial: bool) {
+    let t = TmpDir::new();
+    let entry = t.write(
+        "main.chz",
+        "import std.io\n\nw := io.stdout()\nw.write_bytes(b\"\\xff\\xfe\")\n",
+    );
+    let (out, err, status) = run_bytes(&entry, serial);
+    assert!(
+        status.success(),
+        "exit: {status:?}, stderr: {}",
+        String::from_utf8_lossy(&err)
+    );
+    assert_eq!(
+        out,
+        vec![0xff, 0xfe],
+        "stdout().write_bytes must be byte-exact (lossy UTF-8 round-trip?)"
+    );
+}
+
+#[test]
+fn stdout_write_bytes_is_byte_exact_mn() {
+    stdout_write_bytes_is_byte_exact(false);
+}
+
+#[test]
+fn stdout_write_bytes_is_byte_exact_serial() {
+    stdout_write_bytes_is_byte_exact(true);
+}
+
+/// The sibling arm — a fix applied to only SOME arms of an N-way set is the recurring meta-finding.
+fn stderr_write_bytes_is_byte_exact(serial: bool) {
+    let t = TmpDir::new();
+    let entry = t.write(
+        "main.chz",
+        "import std.io\n\nw := io.stderr()\nw.write_bytes(b\"\\xff\\xfe\")\n",
+    );
+    let (out, err, status) = run_bytes(&entry, serial);
+    assert!(status.success(), "exit: {status:?}");
+    assert!(out.is_empty(), "nothing was written to stdout: {out:?}");
+    assert_eq!(
+        err,
+        vec![0xff, 0xfe],
+        "stderr().write_bytes must be byte-exact"
+    );
+}
+
+#[test]
+fn stderr_write_bytes_is_byte_exact_mn() {
+    stderr_write_bytes_is_byte_exact(false);
+}
+
+#[test]
+fn stderr_write_bytes_is_byte_exact_serial() {
+    stderr_write_bytes_is_byte_exact(true);
+}
+
+/// `io.buffered(io.stdout(), n)` reaches the `Stdout` backing through `write_to_core`'s drain
+/// recursion (buffer-full) AND `flush_core`'s (explicit flush) — both must stay byte-exact. 6 bytes
+/// through a cap-4 buffer, then 2 more + `flush()`, exercises each path in order.
+fn buffered_stdout_write_bytes_is_byte_exact(serial: bool) {
+    let t = TmpDir::new();
+    let entry = t.write(
+        "main.chz",
+        "import std.io\n\nw := io.buffered(io.stdout(), 4)\n\
+         w.write_bytes(b\"\\xff\\xfe\\x00\\x01\\x80\\x81\")\n\
+         w.write_bytes(b\"\\xfd\\xfc\")\nw.flush()\n",
+    );
+    let (out, err, status) = run_bytes(&entry, serial);
+    assert!(
+        status.success(),
+        "exit: {status:?}, stderr: {}",
+        String::from_utf8_lossy(&err)
+    );
+    assert_eq!(
+        out,
+        vec![0xff, 0xfe, 0x00, 0x01, 0x80, 0x81, 0xfd, 0xfc],
+        "buffered(stdout()) must drain byte-exactly, in order"
+    );
+}
+
+#[test]
+fn buffered_stdout_write_bytes_is_byte_exact_mn() {
+    buffered_stdout_write_bytes_is_byte_exact(false);
+}
+
+#[test]
+fn buffered_stdout_write_bytes_is_byte_exact_serial() {
+    buffered_stdout_write_bytes_is_byte_exact(true);
+}

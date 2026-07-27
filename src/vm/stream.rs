@@ -32,7 +32,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Sender};
 
 enum Msg {
-    Write(String),
+    /// Raw BYTES, never `String`: `Writer.write_bytes(b"\xff\xfe")` must reach the real handle
+    /// unchanged (W6-9 — a `String` hop round-tripped it through `from_utf8_lossy`).
+    Write(Vec<u8>),
     /// Flush the real handle, then ack. Only [`flush_stream`] (i.e. `main`, after the VM has
     /// finished) waits on this — a fiber must never block on stdout's consumer.
     Flush(Sender<()>),
@@ -58,7 +60,7 @@ fn spawn_writer<W: Write + Send + 'static>(mut w: W, is_stdout: bool) -> Sender<
             let r = match msg {
                 // write + flush: the streamed handles are UNBUFFERED (`Stdout` is a `LineWriter`,
                 // which would sit on a `print(x, end="")` until the next newline).
-                Msg::Write(s) => w.write_all(s.as_bytes()).and_then(|()| w.flush()),
+                Msg::Write(v) => w.write_all(&v).and_then(|()| w.flush()),
                 Msg::Flush(ack) => {
                     let r = w.flush();
                     let _ = ack.send(());
@@ -79,11 +81,11 @@ fn spawn_writer<W: Write + Send + 'static>(mut w: W, is_stdout: bool) -> Sender<
     tx
 }
 
-/// Queue `s` for the process's real stdout (the writer thread does the syscall). Once stdout is dead
+/// Queue `b` for the process's real stdout (the writer thread does the syscall). Once stdout is dead
 /// the bytes are dropped; the run is halted separately by [`super::Vm::stream_halt`] at the print site.
-pub(super) fn write_out(s: &str) {
+pub(super) fn write_out(b: &[u8]) {
     let tx = OUT.get_or_init(|| spawn_writer(std::io::stdout(), true));
-    let _ = tx.send(Msg::Write(s.to_string()));
+    let _ = tx.send(Msg::Write(b.to_vec()));
 }
 
 /// Why the streamed stdout is dead, as the message of the fault a print site raises — `None` while it
@@ -99,10 +101,10 @@ pub fn out_dead_reason() -> Option<String> {
     })
 }
 
-/// Queue `s` for the process's real stderr. A failure there is swallowed (diagnostic channel).
-pub(super) fn write_err(s: &str) {
+/// Queue `b` for the process's real stderr. A failure there is swallowed (diagnostic channel).
+pub(super) fn write_err(b: &[u8]) {
     let tx = ERR.get_or_init(|| spawn_writer(std::io::stderr(), false));
-    let _ = tx.send(Msg::Write(s.to_string()));
+    let _ = tx.send(Msg::Write(b.to_vec()));
 }
 
 /// Drain + flush both streamed handles, blocking until the writer threads confirm. Called by `main`

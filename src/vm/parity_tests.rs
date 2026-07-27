@@ -4329,7 +4329,7 @@ fn vm_run_file_stress(src: &str, cfg: crate::native::HostConfig) -> String {
     vm.host = cfg;
     vm.run()
         .unwrap_or_else(|e| panic!("unexpected error under GC stress: {e}"));
-    vm.out
+    captured(vm.out)
 }
 
 /// Task 1 — the SERIAL `Executor` PROGRAM-EXIT drain (`drain_live_executors`) runs each queued job
@@ -4372,7 +4372,7 @@ main()";
     vm.host = crate::native::HostConfig::default();
     vm.run().unwrap();
     vm.drain_live_executors(Span { line: 1, col: 1 }).unwrap();
-    assert_eq!(vm.out, "");
+    assert_eq!(vm.out, b"");
 }
 
 /// Bug 3 — a module-qualified generic fn (`geo.empty_list[int]()`) type-checks AND runs on both
@@ -6576,7 +6576,7 @@ fn multi_file_identical_under_gc_stress() {
     let mut vm = Vm::new(Arc::new(program));
     vm.gc_stress = true;
     vm.run().unwrap();
-    assert_eq!(vm.out, expected);
+    assert_eq!(captured(vm.out), expected);
 }
 
 // ----- map / dictionary parity (gap #5) -----

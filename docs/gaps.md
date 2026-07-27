@@ -28,14 +28,13 @@ chronological log.
 
 | item | gaps.md | what | why it is still open |
 |---|---|---|---|
-| **W6-9** | `:820` | `Writer.write_bytes` byte-exact on a file but **lossy on `io.stdout()`/`stderr()`**, and returns a count that doesn't match what was emitted | Last surviving member of the lossy-byte family (B1/R1/W6-4/W6-14, all fixed). Blocked on the `emit_out`/`emit_err` sink being `&str`-typed |
 | **W6-3d** | `:596` | A numeric `newtype` with its own `add`/`compare` disagrees with `+`/`<` | Candidate **(b) was attempted 2026-07-26 and REJECTED — it makes `<` intransitive** (verified, both engines). Candidate (a) now leads. Needs a design ruling, not an implementation |
-| `min`/`max` → `Option` | `:1042` | `List.min`/`max`/`min_by`/`max_by` fault on empty while `first`/`last`/`pop` return `Option[T]` | Breaking surface change: 23 call sites + docs + examples. Own milestone |
-| `List[Any]` widening | `:1083` | `List[Any] = [1, 3.0]` silently widens the int to `1.0` | Deferred pre-freeze (wave 4) |
-| **N10** | `:1299` | A `wait:` timer arm makes `--serial` inline-sleep instead of yielding to a runnable sibling (serial ≠ M:N) | Deliberate pre-freeze known-limit; fix is folded into the post-freeze serial-engine removal |
-| **W6-10s** | `:963` | `--max-heap` residual **sampling** escapes left after the byte-aware pacing fix | Pacing samples the cap on charged off-heap bytes, but only for stores routed through `to_wire_crossable` and only per heap. Still not sampled: the documented inline-scalar loop (`future.md §1b` — no `Obj`s, no wire bytes), the by-hand airlock paths (spawn args, closure captures, `Executor.submit`), and a heap that HOLDS a huge core without storing to it |
-| **W6-10r** | `:1000` | `--max-heap` residual: a payload reachable ONLY through a **nested** core (a `Channel` inside a `Shared`, once the nested core's last `Obj` alias slot is swept) is counted nowhere | Left open by the W6-10 fix on purpose. `live_bytes` reaches a core's bytes through its `Obj::*` alias slot; a nested core has none. Closing it needs cross-core byte recursion with `Arc` de-dup — narrow trigger, not worth the machinery yet |
-| protocol embeds | `:1155` | A protocol-embedded method isn't callable through the interface value (`p: Person` can't call embedded `name()`) despite `spec.md:973` "flattened at bound sites" | Filed as a safe-direction observation in wave 3; never triaged — doc and behavior contradict each other either way |
+| `min`/`max` → `Option` | `:1392` | `List.min`/`max`/`min_by`/`max_by` fault on empty while `first`/`last`/`pop` return `Option[T]` | Breaking surface change: 23 call sites + docs + examples. Own milestone |
+| `List[Any]` widening | `:1309` | `List[Any] = [1, 3.0]` silently widens the int to `1.0` | Deferred pre-freeze (wave 4) |
+| **N10** | `:3158` | A `wait:` timer arm makes `--serial` inline-sleep instead of yielding to a runnable sibling (serial ≠ M:N) | Deliberate pre-freeze known-limit; fix is folded into the post-freeze serial-engine removal |
+| **W6-10s** | `:1120` | `--max-heap` residual **sampling** escapes left after the byte-aware pacing fix | Pacing samples the cap on charged off-heap bytes, but only for stores routed through `to_wire_crossable` and only per heap. Still not sampled: the documented inline-scalar loop (`future.md §1b` — no `Obj`s, no wire bytes), the by-hand airlock paths (spawn args, closure captures, `Executor.submit`), and a heap that HOLDS a huge core without storing to it |
+| **W6-10r** | `:1157` | `--max-heap` residual: a payload reachable ONLY through a **nested** core (a `Channel` inside a `Shared`, once the nested core's last `Obj` alias slot is swept) is counted nowhere | Left open by the W6-10 fix on purpose. `live_bytes` reaches a core's bytes through its `Obj::*` alias slot; a nested core has none. Closing it needs cross-core byte recursion with `Arc` de-dup — narrow trigger, not worth the machinery yet |
+| protocol embeds | `:1505` | A protocol-embedded method isn't callable through the interface value (`p: Person` can't call embedded `name()`) despite `spec.md:973` "flattened at bound sites" | Filed as a safe-direction observation in wave 3; never triaged — doc and behavior contradict each other either way |
 
 **Known limits that are documented, not bugs** (listed so they aren't re-filed): `Iterable[T]` element
 recovery does not fire for a struct with only `iter` and no `next` — bound that one concretely
@@ -249,7 +248,7 @@ parked_slot_nonsendable_rejects,in_data_cycle_rejects,unreached_nonsendable_runs
 - **Multi-frame / pending-`defer` suspended generators** — checker-UNREACHABLE (item 3 arms a/c); no valid
   program constructs them. The rejects are defensive guards, not a user-visible limit — nothing to build.
 
-## Session log — 2026-07-25 (bug-hunt wave 6: 19 findings — W6-19 found while FIXING W6-2 — 15 FIXED (W6-1..W6-6, W6-11..W6-19 as listed below), 4 open + 3 carve-outs filed (W6-3b/c/d, of which **W6-3b and W6-3c are now FIXED (2026-07-26)** — 1 carve-out, W6-3d, remains) — 2 never-hunted surfaces swept)
+## Session log — 2026-07-25 (bug-hunt wave 6: 19 findings — W6-19 found while FIXING W6-2 — W6-1..W6-19 all FIXED as of 2026-07-27, the last being W6-9; of the 3 carve-outs filed (W6-3b/c/d), **W6-3b and W6-3c are FIXED (2026-07-26)** and only the W6-3d design ruling remains — see the OPEN ITEMS table at the top, which is the authority — 2 never-hunted surfaces swept)
 
 Pre-freeze adversarial hunt, 5 disjoint parallel domains, weighted at the two surfaces the wave-5
 residual named as never audited (**FFI**, **GC + `unsafe`**) plus the concurrency code that landed
@@ -273,7 +272,7 @@ still the highest-yield lever in the repo and it is cheap: **enumerate the arms,
 - W6-4: R1 swept `Socket`/`io`/`request`/`crypto` off `from_utf8_lossy`, missed `std.process`. **FIXED.**
 - W6-1: `flush_core`'s non-empty-buffer arm flushes the inner core, its empty-buffer arm doesn't. **FIXED.**
 - W6-6: the extern-collision guard fires for bare-keyed enum variants, not module-keyed structs.
-- W6-9: `write_bytes` is byte-exact on the `File` arm, lossy on the `Stdout`/`Stderr` arms.
+- W6-9: `write_bytes` is byte-exact on the `File` arm, lossy on the `Stdout`/`Stderr` arms. **FIXED.**
 
 ### W6-1. `Writer.close()`/`flush()` on a `buffered` writer SILENTLY DOES NOT PERSIST — durability contract broken — P0 — **FIXED (2026-07-25)**
 ```chezzi
@@ -324,13 +323,13 @@ Two more siblings surfaced by the enumeration, both fixed with it:
   handle that was closed, and `close()` masks `Closed`, so it would have reported success for a flush
   that persisted nothing. Both recursion sites now `map_err(from_inner)`: an inner `Closed` becomes
   `Io("the inner writer this buffer drains into is closed")` — right handle named, not maskable.
-The `Stdout`/`Stderr` lossy `write_bytes` is W6-9 (still open, NOT touched).
+The `Stdout`/`Stderr` lossy `write_bytes` was W6-9, filed separately and **FIXED 2026-07-27** (the sink is `Vec<u8>` now).
 Tests: `tests/chz/stdlib/io_writer_test.chz` (mid-write drain via flush + close, never-filled control,
 at-cap, cap=1, a nested two-level chain, and the closed-inner `Err` on both `flush` and `write`),
 serial==M:N. Docs: `docs/stdlib.md`'s `flush`/`close` rows state the full-chain guarantee at OBSERVER
 level for a **file**-backed chain (an in-process `read_file`, a child, a sibling process), NOT `fsync`
 durability — and explicitly do NOT claim it for a `buffered(stdout())` writer, whose drained bytes go to
-the same never-awaited background stdout queue as `print` and through the same `str`-typed (W6-9 lossy)
+the same never-awaited background stdout queue as `print` and through the same (now byte-typed — W6-9)
 sink, so `Ok` there means *queued*, not *written*.
 
 ### W6-2. A module global FIRST INITIALIZED AFTER the first nursery reads as `nil` inside later tasks — check-OK-then-run-fault + silently-wrong — P0 — **FIXED (2026-07-25)**
@@ -1013,13 +1012,48 @@ first program dies on SIGABRT so it can never be a stdout golden, and FFI UB is 
 child runs with `RLIMIT_CORE = 1` so a deliberately-aborting test never litters the host with core
 dumps.
 
-### W6-9. `Writer.write_bytes` is byte-exact on a file but LOSSY on `io.stdout()`/`io.stderr()`, and returns a count that doesn't match what was emitted
-`io.stdout().write_bytes(b"\xff\xfe")` emits `ef bf bd ef bf bd` (two U+FFFD) and returns `Ok(2)`; the same
-method on a FILE writer emits `ff fe`. Python `sys.stdout.buffer.write(b'\xff\xfe')` and Go `os.Stdout.Write`
+### W6-9. `Writer.write_bytes` is byte-exact on a file but LOSSY on `io.stdout()`/`io.stderr()`, and returns a count that doesn't match what was emitted — **FIXED (2026-07-27)**
+`io.stdout().write_bytes(b"\xff\xfe")` emitted `ef bf bd ef bf bd` (two U+FFFD) and returned `Ok(2)`; the same
+method on a FILE writer emitted `ff fe`. Python `sys.stdout.buffer.write(b'\xff\xfe')` and Go `os.Stdout.Write`
 both emit the raw bytes. Docs: "`write_bytes(data: bytes) -> Result[int]` — Write **raw bytes**; returns
 bytes written." **Root cause** `src/vm/fileio.rs:48-55` — the `Backing::Stdout`/`Stderr` arms of
-`write_to_core` do `String::from_utf8_lossy(data)` because the `emit_out`/`emit_err` sink is `&str`-typed
-(the comment concedes "the byte-exact common path is `write(str)`"). Same lossy class as W6-4 / B1.
+`write_to_core` did `String::from_utf8_lossy(data)` because the `emit_out`/`emit_err` sink was `&str`-typed
+(the comment conceded "the byte-exact common path is `write(str)`"). Same lossy class as W6-4 / B1 — the
+last surviving member of the family.
+
+> **The `&str` signature was the surface; `out: String` was the constraint.** `emit_out` routes to
+> either `stream::write_out` (the streamed sink, `chezzi run`) or `self.out.push_str` — and `Vm.out`
+> is the per-task buffer the whole serial-vs-M:N output-ordering seam is built on, recurring on
+> `Vm`, `FiberCtx`, `WorkerResult` and all four `TaskOutcome` variants, moved through the M:N join
+> plumbing and concatenated in task order by `reduce_task_slots`.
+>
+> **Fix** — widen the sink to bytes END TO END: `Msg::Write(Vec<u8>)` + `stream::write_out`/`write_err(&[u8])`
+> (`src/vm/stream.rs`); new `Vm::emit_out_bytes`/`emit_err_bytes` holding the real logic, with
+> `emit_out`/`emit_err(&str)` kept as one-line wrappers so the ~8 `&str` call sites (print,
+> interpolation, natives) and the `Host` trait are untouched (`src/vm/exec.rs`); `out`/`stderr`
+> retyped `String` → `Vec<u8>` on every struct above, `push_str` → `extend_from_slice` in
+> `reduce_task_slots` with the slot ORDER untouched (`src/vm/sched.rs`); and the two `write_to_core`
+> arms now pass `data` straight through (`src/vm/fileio.rs`). `Ok(data.len())` is unchanged and now
+> truthful — no backing can short-write (`write_all` / in-memory / an unbounded queue) — and it is
+> what Python returns too.
+>
+> **serial == M:N is preserved by construction**: concatenating `Vec<u8>` per task slot in the same
+> index order is byte-identical to concatenating `String`. Nothing was sorted or normalised.
+>
+> **Residual, deliberate:** the CAPTURE boundary (`Vm::take_out`, the `run_*` helpers, `RunOutput`)
+> still decodes with `from_utf8_lossy` in one shared `captured()` helper, because `chezzi test`,
+> `chezzi run --check-parity` and lib embedders hand stdout back to Rust as a `String`. A non-UTF-8
+> byte therefore still shows as U+FFFD *there*. Both engines decode identically, so parity is
+> unaffected, and the in-language contract — `chezzi run`, the only path a program's stdout actually
+> reaches a console/pipe/file — is byte-exact. Widening `RunOutput` to `Vec<u8>` is the follow-up if
+> an embedder ever needs it (~316 consumer sites for a display-only gain today).
+>
+> Tests: `tests/interactive.rs::{stdout,stderr,buffered_stdout}_write_bytes_is_byte_exact_{mn,serial}`
+> (real child processes — the only way to witness the bytes on fd 1/2, since the in-VM runner captures
+> as a `String`) plus four in-language pins in `tests/chz/stdlib/io_writer_test.chz` (return count on
+> stdout/stderr, the file arm's non-UTF-8 round-trip, a 200 KB write's full count). The N1 dead-pipe
+> contract (`emit_*` a no-op, `stream_halt` re-raised at the call site) is unchanged and still guarded
+> by `broken_pipe_terminates_with_fault_{mn,serial}`.
 
 ### W6-10. `chezzi test --max-heap` does not count off-heap wire storage — 195 MB RSS passes a 200 KB cap — **FIXED in TWO parts (found 2026-07-26; accounting fixed 2026-07-27, sampling fixed 2026-07-27 round-3)**
 

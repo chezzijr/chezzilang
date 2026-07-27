@@ -601,9 +601,14 @@ pub struct Vm {
     heap: Heap,
     stack: Vec<Value>,
     frames: Vec<CallFrame>,
-    out: String,
+    /// Captured stdout. BYTES, not `String` (W6-9): `Writer.write_bytes` on an `io.stdout()` backing
+    /// must be byte-exact like Python's `sys.stdout.buffer.write` / Go's `os.Stdout.Write`, and a
+    /// `String` buffer forced a `from_utf8_lossy` hop. Decoded once, at the Rust capture boundary
+    /// ([`Vm::take_out`] and the `run_*` helpers) — both engines decode identically, so serial == M:N
+    /// is untouched.
+    out: Vec<u8>,
     /// Captured stderr (written by `std.io.eprint`). Separate from `out` so streams don't mix.
-    stderr: String,
+    stderr: Vec<u8>,
     /// Runtime configuration the native std modules read (args/env/stdin). Default = inert.
     host: crate::native::HostConfig,
     call_depth: usize,
@@ -1004,9 +1009,9 @@ struct FiberCtx {
     /// D2b — per-task output buffers (Decision F: each task's stdout/stderr flushes in task order at
     /// join, never interleaved live). An M:N worker shell runs many fibers in turn, so these MUST
     /// travel with the fiber rather than living on the shell `Vm`. Swapped only for M:N fibers
-    /// (`heap.is_some()`); a cooperative fiber keeps `String::new()` and aliases the shell's buffers.
-    out: String,
-    stderr: String,
+    /// (`heap.is_some()`); a cooperative fiber keeps `Vec::new()` and aliases the shell's buffers.
+    out: Vec<u8>,
+    stderr: Vec<u8>,
     /// D2b / Task 1 — the fiber's module-namespace objects + lazy-fault flags (D1). For an M:N fiber
     /// each is a `GcRef` into the fiber's OWN heap (travels via `heap` above). For a COOPERATIVE fiber
     /// (Task 1) it is the fiber's own DEEP COPY of the module globals in the SHARED heap, built by
@@ -1158,8 +1163,8 @@ struct Handler {
 #[derive(Debug)]
 struct WorkerResult {
     value: WireValue,
-    out: String,
-    stderr: String,
+    out: Vec<u8>,
+    stderr: Vec<u8>,
 }
 
 /// B3.2 — a spawned task lowered to a `Send` description (no parent-heap `GcRef`s), ready to rebuild
@@ -1362,20 +1367,20 @@ enum TaskOutcome {
     /// always runs its prologue, so those bytes really were printed — and serial (which prints live
     /// into the shared buffer) cannot un-print them. Dropping them here was a capture-mode-only
     /// divergence from the serial engine's line SET.
-    Cancelled { out: String, stderr: String },
+    Cancelled { out: Vec<u8>, stderr: Vec<u8> },
     /// Called `std.os.exit(code)`. Buffered output is flushed, then the parent hard-halts with `code`.
     Exit {
         code: i32,
-        out: String,
-        stderr: String,
+        out: Vec<u8>,
+        stderr: Vec<u8>,
     },
     /// Faulted (runtime error or caught panic). The lowest-index fault propagates out of the join; its
     /// buffered output is flushed at its task-order slot (a Rust-panic-to-fault path may carry empty
     /// buffers — the shell buffer is not safely reachable there).
     Fault {
         err: RuntimeError,
-        out: String,
-        stderr: String,
+        out: Vec<u8>,
+        stderr: Vec<u8>,
     },
     /// The M:N deadlock detector aborted a nursery: EVERY still-parked fiber was recorded with this
     /// synthetic `DEADLOCK_MSG` outcome (see [`SchedCore::flag_deadlock`]). It is DISTINCT from
@@ -1389,8 +1394,8 @@ enum TaskOutcome {
     /// race) still resolves deterministically.
     Deadlocked {
         err: RuntimeError,
-        out: String,
-        stderr: String,
+        out: Vec<u8>,
+        stderr: Vec<u8>,
     },
 }
 
@@ -3776,6 +3781,15 @@ fn format_float(x: f64) -> String {
 
 // ===== entry points =====
 
+/// W6-9 — the CAPTURE boundary. The buffered sink is BYTES (so `Writer.write_bytes` reaches an
+/// `io.stdout()` backing unchanged), but every test helper and embedder API hands stdout back as a
+/// `String`. Decode lossily here — the ONLY place a `U+FFFD` can now appear, and it applies
+/// identically on both engines, so `serial == M:N` is untouched. `chezzi run` STREAMS (the path a
+/// program's bytes actually reach an fd) and never passes through this.
+fn captured(buf: Vec<u8>) -> String {
+    String::from_utf8_lossy(&buf).into_owned()
+}
+
 /// Run a single-file program from source on the dedicated VM thread; returns output produced so
 /// far + the outcome (test entry point, mirroring `interp::run_program`).
 #[cfg(test)]
@@ -3840,7 +3854,7 @@ fn run_program_inner(src: &str) -> (String, Result<(), RuntimeError>) {
     let result = vm
         .run()
         .and_then(|()| vm.drain_live_executors(Span { line: 1, col: 1 }));
-    (vm.out, result)
+    (captured(vm.out), result)
 }
 
 /// Assert two program outputs contain the SAME lines regardless of order. For a concurrency test
@@ -3902,7 +3916,7 @@ pub fn run_capture_parallel(src: &str) -> Result<String, RuntimeError> {
             vm.parallel = true;
             vm.run()
                 .and_then(|()| vm.drain_live_executors(Span { line: 1, col: 1 }))
-                .map(|()| vm.out)
+                .map(|()| captured(vm.out))
         })
         .expect("failed to spawn VM thread")
         .join()
@@ -3969,7 +3983,7 @@ pub fn run_program_parallel(src: &str) -> (String, Result<(), RuntimeError>) {
             let result = vm
                 .run()
                 .and_then(|()| vm.drain_live_executors(Span { line: 1, col: 1 }));
-            (vm.out, result)
+            (captured(vm.out), result)
         })
         .expect("failed to spawn VM thread")
         .join()
@@ -4043,7 +4057,7 @@ pub fn run_with(src: &str, stress: bool) -> (Result<String, RuntimeError>, usize
                 .run()
                 .and_then(|()| vm.drain_live_executors(Span { line: 1, col: 1 }));
             let live = vm.heap.live();
-            (result.map(|()| vm.out), live)
+            (result.map(|()| captured(vm.out)), live)
         })
         .expect("failed to spawn VM thread")
         .join()
@@ -4085,7 +4099,7 @@ pub fn run_capture_on_stack(src: &str, stack_bytes: usize) -> Result<String, Run
             let mut vm = Vm::new(Arc::new(program));
             vm.run()
                 .and_then(|()| vm.drain_live_executors(Span { line: 1, col: 1 }))
-                .map(|()| vm.out)
+                .map(|()| captured(vm.out))
         })
         .expect("failed to spawn VM thread")
         .join()
@@ -4160,7 +4174,7 @@ pub fn run_capture_nursery_len(src: &str) -> (Result<String, RuntimeError>, usiz
                 .run()
                 .and_then(|()| vm.drain_live_executors(Span { line: 1, col: 1 }));
             let nursery_depth = vm.nurseries.len();
-            (result.map(|()| vm.out), nursery_depth)
+            (result.map(|()| captured(vm.out)), nursery_depth)
         })
         .expect("failed to spawn VM thread")
         .join()
@@ -4321,12 +4335,12 @@ fn run_file_inner(
     // A pending exit means `result` is the `exit()` unwind sentinel, not a fault: report the
     // requested code as a clean halt.
     if let Some(code) = vm.pending_exit {
-        return (vm.out, vm.stderr, Ok(()), Some(code));
+        return (captured(vm.out), captured(vm.stderr), Ok(()), Some(code));
     }
     // The stack trace was captured at the uncaught fault (before frames unwound); attach it.
     let trace = vm.fault_trace.take().unwrap_or_default();
     let result = result.map_err(|e| RunError::from_error(e, trace));
-    (vm.out, vm.stderr, result, None)
+    (captured(vm.out), captured(vm.stderr), result, None)
 }
 
 #[cfg(test)]
