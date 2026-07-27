@@ -516,6 +516,20 @@ same box may be observed mid-walk; use `read`/`get` if you need a consistent sna
 **different** box — an `AtomicInt` counter or a local accumulator — which is the fan-out pattern anyway.
 On a non-container element (or a Tuple) these methods are a checker "no method" error.
 
+> **GC cost of holding a big container in a box (gaps.md W6-7, fixed 2026-07-27).** The stored value
+> lives outside the GC heap as one wire payload, and the collector used to re-walk that whole payload
+> on **every** GC pass — so a traversal that allocates per step paid O(payload) per collection and the
+> read-view came out **quadratic** in the container's size (a 200k-element box: 1.77 s vs 0.18 s for the
+> same work on a plain `List`). Each core now caches whether its payload can root a heap object at all;
+> a pure-data payload is **skipped**, so the per-pass cost is O(1) and *holding* a big container in a
+> `Shared`/`RwShared`/`Channel` costs the same per GC pass as holding it in a plain `List`. Memory was,
+> and stays, O(1) per traversal.
+>
+> **Reads are O(1); each *store* pays one walk.** `set`/`write`/`send`/`store` summarises the new payload
+> once (O(payload), ~+20% on a 100k-element `RwShared.set` — measured in `docs/benchmarks.md`), so a
+> rebind into a box is *not* as cheap as rebinding a plain `List`. The walk runs **before** the value lock
+> is taken, so it never lengthens the window in which a writer blocks the readers.
+
 **Ergonomic wrappers — `std.concurrency.collection`.** Raw `RwShared[Map[...]]` is the right primitive
 for a shared table, but the `read`/`write` closures are verbose and the *compound* mutations
 (insert-if-absent, increment a count) must be done inside a **single** `write` lock or they race. The

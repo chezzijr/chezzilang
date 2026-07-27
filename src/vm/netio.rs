@@ -76,8 +76,11 @@ impl Vm {
         // with the `NewAtomic` span — the box is a shared cross-thread cell.
         let init = self.to_wire_crossable(init, span)?;
         Ok(Value::obj(self.heap.alloc(Obj::Atomic(Arc::new(
+            // The summary starts `WS_UNKNOWN` (like every other core constructor): the first GC
+            // pass walks the initial payload once and memoizes it.
             AtomicCore {
                 v: Mutex::new(init),
+                ..Default::default()
             },
         )))))
     }
@@ -1244,7 +1247,7 @@ impl Vm {
                 // `Option`: `Some(v)` if queued, `None` if empty. Mirrors `interp::eval_channel_method`.
                 self.arity_err("try_recv", args, 0, span)?;
                 let core = self.channel_core(h);
-                let popped = core.q.lock().unwrap().queue.pop_front();
+                let popped = core.q.lock().unwrap().pop();
                 if popped.is_some() {
                     self.wake_senders(h); // a real pop freed a slot — wake a parked bounded sender
                 }
@@ -1310,7 +1313,7 @@ impl Vm {
             }
             "len" => {
                 self.arity_err("len", args, 0, span)?;
-                let n = self.channel_core(h).q.lock().unwrap().queue.len();
+                let n = self.channel_core(h).q.lock().unwrap().len();
                 Ok(Value::int(n as i64))
             }
             // `cap()` reports the channel's capacity: `Channel[T](n)` → `n`; unbounded `Channel[T]()` → 0.
@@ -1341,7 +1344,9 @@ impl Vm {
             let key = self.channel_core_ptr(h);
             sched.send_wake(key, &core, w);
         } else {
-            core.q.lock().unwrap().queue.push_back(w);
+            // W6-7/W6-10 — summarise OFF-LOCK (it is O(payload); see `ChanState::push`).
+            let sum = crate::vm::core::wire_summary(&w);
+            core.q.lock().unwrap().push(sum, w);
             core.cv.notify_all();
             self.wake_on_send(h);
         }
@@ -1423,10 +1428,11 @@ impl Vm {
             let key = self.channel_core_ptr(h);
             return sched.send_wake_bounded(key, core, w, cap);
         }
+        let sum = crate::vm::core::wire_summary(&w); // OFF-LOCK — see `ChanState::push`
         let enqueued = {
             let mut g = core.q.lock().unwrap();
-            if g.queue.len() < cap {
-                g.queue.push_back(w);
+            if g.len() < cap {
+                g.push(sum, w);
                 true
             } else {
                 false
@@ -1497,7 +1503,7 @@ impl Vm {
         {
             let core = self.channel_core(h);
             if core.done_latch.load(Ordering::Relaxed) {
-                if let Some(w) = core.q.lock().unwrap().queue.pop_front() {
+                if let Some(w) = core.q.lock().unwrap().pop() {
                     return Ok(RecvStep::Got(w));
                 }
                 return Ok(RecvStep::Got(WireValue::Bool(true)));
@@ -1511,7 +1517,7 @@ impl Vm {
             let core = self.channel_core(h);
             if let Some(deadline) = core.timer {
                 // A prior park's timer `send` may already have delivered — consume it first.
-                if let Some(w) = core.q.lock().unwrap().queue.pop_front() {
+                if let Some(w) = core.q.lock().unwrap().pop() {
                     return Ok(RecvStep::Got(w));
                 }
                 let now = std::time::Instant::now();
@@ -1556,7 +1562,7 @@ impl Vm {
         if self.mn.is_some() && self.native_reentry == 0 {
             let core = self.channel_core(h);
             let mut g = core.q.lock().unwrap();
-            if let Some(w) = g.queue.pop_front() {
+            if let Some(w) = g.pop() {
                 return Ok(RecvStep::Got(w));
             }
             if g.closed {
@@ -1569,7 +1575,7 @@ impl Vm {
         // Cooperative / no-scheduler path. Pop + closed read are atomic under one lock.
         let core = self.channel_core(h);
         let mut g = core.q.lock().unwrap();
-        if let Some(w) = g.queue.pop_front() {
+        if let Some(w) = g.pop() {
             return Ok(RecvStep::Got(w));
         }
         let closed = g.closed;
@@ -1664,7 +1670,7 @@ impl Vm {
             }
             let (popped, closed) = {
                 let mut g = core.q.lock().unwrap();
-                (g.queue.pop_front(), g.closed)
+                (g.pop(), g.closed)
             };
             if let Some(w) = popped {
                 self.wake_senders(h); // a `wait:` arm freed a slot — wake a parked bounded sender
@@ -1865,7 +1871,7 @@ impl Vm {
             "set" => {
                 self.arity_err("set", args, 1, span)?;
                 let w = self.to_wire_crossable(args[0], span)?;
-                *self.shared_core(h).v.lock().unwrap() = w;
+                self.shared_core(h).store(w);
                 Ok(Value::nil())
             }
             "update" => {
@@ -1893,7 +1899,7 @@ impl Vm {
                 self.pop();
                 let next = next?;
                 let stored = self.to_wire_crossable(next, span)?;
-                *core.v.lock().unwrap() = stored;
+                core.store(stored);
                 Ok(Value::nil())
             }
             _ => Err(self.err(format!("type Shared has no method '{method}'"), span)),
@@ -1929,7 +1935,7 @@ impl Vm {
             "set" => {
                 self.arity_err("set", args, 1, span)?;
                 let w = self.to_wire_crossable(args[0], span)?;
-                *self.rwshared_core(h).v.write().unwrap() = w;
+                self.rwshared_core(h).store(w);
                 Ok(Value::nil())
             }
             "read" => {
@@ -1972,7 +1978,7 @@ impl Vm {
                 self.pop();
                 let next = next?;
                 let stored = self.to_wire_crossable(next, span)?;
-                *core.v.write().unwrap() = stored;
+                core.store(stored);
                 Ok(Value::nil())
             }
             // Zero-copy READ-view methods on a CONTAINER element of `RwShared[T]` — `List[E]`
@@ -2389,16 +2395,19 @@ impl Vm {
             "store" => {
                 self.arity_err("store", args, 1, span)?;
                 let w = self.to_wire_crossable(args[0], span)?;
-                *self.atomic_core(h).v.lock().unwrap() = w;
+                self.atomic_core(h).store(w);
                 Ok(Value::nil())
             }
             "exchange" => {
                 self.arity_err("exchange", args, 1, span)?;
                 let new_w = self.to_wire_crossable(args[0], span)?;
+                // Summarise BEFORE taking the value lock (the walk is O(payload)) — see
+                // `SharedCore::store`.
+                let sum = crate::vm::core::wire_summary(&new_w);
                 let core = self.atomic_core(h);
                 let old = {
                     let mut g = core.v.lock().unwrap();
-                    std::mem::replace(&mut *g, new_w)
+                    core.store_guarded(&mut g, new_w, sum)
                 };
                 Ok(self.from_wire(old))
             }
@@ -2418,7 +2427,9 @@ impl Vm {
                     // Reject a non-crossable store BEFORE the assignment — a failed store leaves the
                     // box unchanged (recoverable, no partial write). `ensure_crossable` borrows `&self`
                     // not the guard `g`, so it is safe to call under the value lock.
-                    *g = self.to_wire_crossable(args[1], span)?;
+                    let next = self.to_wire_crossable(args[1], span)?;
+                    let sum = crate::vm::core::wire_summary(&next);
+                    core.store_guarded(&mut g, next, sum);
                 }
                 Ok(Value::bool(swapped))
             }
@@ -2449,7 +2460,8 @@ impl Vm {
                         return Err(self.err(format!("type Atomic has no method '{method}'"), span));
                     }
                 };
-                *g = new.clone();
+                let sum = crate::vm::core::wire_summary(&new);
+                core.store_guarded(&mut g, new.clone(), sum);
                 drop(g);
                 Ok(self.from_wire(new))
             }
@@ -2563,7 +2575,10 @@ impl Vm {
                     // isolated closure over this same heap home. Queued captures stay rooted via the
                     // executor handle's `children()` (the `Closure` arm of `collect_core_gcrefs`).
                     let w = self.wire_callable(args[0], span)?;
-                    g.queue.push_back(w);
+                    // Summarised under the executor's OWN lock (not the scheduler's) and right next
+                    // to `wire_callable`'s much larger walk of the same closure — no hoist needed.
+                    let sum = crate::vm::core::wire_summary(&w);
+                    g.push(sum, w);
                 }
                 Ok(Value::nil())
             }
@@ -2576,8 +2591,7 @@ impl Vm {
                     // B3.6: drain the whole queue under the lock (drop the guard before running any
                     // task — never hold the core lock across an invoke), then run the tasks on the
                     // bounded pool. Output flushes in submission order; the first fault propagates.
-                    let tasks: Vec<WireValue> =
-                        core.inner.lock().unwrap().queue.drain(..).collect();
+                    let tasks: Vec<WireValue> = core.inner.lock().unwrap().take_all();
                     self.drain_executor_on_pool(tasks, span)?;
                 } else {
                     // Cooperative engine: inline FIFO drain. Root the executor handle across the drain
@@ -2588,7 +2602,7 @@ impl Vm {
                     self.push(Value::obj(h));
                     loop {
                         // Pop under the lock, then DROP the guard before the re-entrant call.
-                        let task = core.inner.lock().unwrap().queue.pop_front();
+                        let task = core.inner.lock().unwrap().pop();
                         let Some(task) = task else { break };
                         // Task 1 — snapshot the module globals as of THIS DRAIN (`ensure_snapshot`,
                         // matching the M:N drain via `prepare_worker_from_wire`: both engines drain at the
@@ -2630,7 +2644,7 @@ impl Vm {
                 let core = self.executor_core(h);
                 let mut g = core.inner.lock().unwrap();
                 g.shut = true;
-                g.queue.clear();
+                g.clear();
                 Ok(Value::nil())
             }
             _ => Err(self.err(format!("type Executor has no method '{method}'"), span)),

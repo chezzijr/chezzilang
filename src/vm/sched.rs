@@ -829,7 +829,7 @@ impl Vm {
             {
                 let mut c = sched.lock();
                 let mut qg = core.q.lock().unwrap_or_else(|e| e.into_inner());
-                let popped = qg.queue.pop_front();
+                let popped = qg.pop();
                 if let Some(w) = popped {
                     c.running += 1;
                     sched.blocked_native.fetch_sub(1, Ordering::Relaxed);
@@ -911,7 +911,7 @@ impl Vm {
             }
             // --- wait on the channel's OWN condvar (q-only; core lock A released) ---
             let q = core.q.lock().unwrap_or_else(|e| e.into_inner());
-            if q.queue.is_empty() {
+            if q.is_empty() {
                 let _ = core.cv.wait_timeout(q, DEMOTE_POLL_BACKOFF);
             }
         }
@@ -992,7 +992,7 @@ impl Vm {
                 let mut all_closed = true;
                 for (idx, (_, core)) in arms.iter().enumerate() {
                     let mut qg = core.q.lock().unwrap_or_else(|e| e.into_inner());
-                    if let Some(w) = qg.queue.pop_front() {
+                    if let Some(w) = qg.pop() {
                         drop(qg);
                         un_account(&mut c);
                         drop(c);
@@ -1054,7 +1054,7 @@ impl Vm {
             // other arm is observed within `DEMOTE_POLL_BACKOFF` (the documented lower-throughput path).
             let first = &arms[0].1;
             let q = first.q.lock().unwrap_or_else(|e| e.into_inner());
-            if q.queue.is_empty() {
+            if q.is_empty() {
                 // Clamp the backoff to the timer deadline so the loop re-polls and fires the timer arm
                 // by its deadline (saturating, so a deadline that already passed yields ~zero wait).
                 let backoff = match timer {
@@ -2108,6 +2108,23 @@ impl Vm {
     ) -> Result<WireValue, RuntimeError> {
         let w = self.to_wire_at(v, span)?;
         self.ensure_crossable(&w, span)?;
+        // W6-10 (sampling half) — charge the payload's off-heap bytes against the GC trigger so a
+        // live `--max-heap` cap actually gets SAMPLED. `over_cap` is only evaluated in `sweep()`,
+        // and `sweep()` only runs when `should_collect()` fires; a store loop that pushes megabytes
+        // across the airlock while allocating ~2 `Obj`s per iteration never reached the object-count
+        // threshold, so the cap failed OPEN. This is the one helper every cross-heap value store
+        // routes through, so a new store path can't forget the charge (same argument as the
+        // `ensure_crossable` guard above). GATED on a live cap: a cap-off run (every `chezzi run`,
+        // every bench, the whole parity gate) pays one `!= 0` branch and zero extra walks — the
+        // walk here is a SECOND `wire_summary` pass (the send path walks again when it caches the
+        // core's summary), accepted rather than threading a precomputed summary through
+        // `MnSched::send_wake`'s signature for a debug/CI guard. Monotonic pacing HINT, not
+        // accounting (`live_bytes()` stays the sole measure): a replacing store charges too and a
+        // `recv` never decrements, because under-triggering means a guard that fails open.
+        if self.heap.mem_cap() != 0 {
+            self.heap
+                .charge_wire_bytes(crate::vm::core::wire_summary(&w).0);
+        }
         Ok(w)
     }
 

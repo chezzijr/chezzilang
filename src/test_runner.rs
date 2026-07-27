@@ -1178,6 +1178,128 @@ struct Suite:
         }
     }
 
+    /// gaps.md W6-10 — a value moved across the airlock into a `Channel`/`Shared` core lives as a
+    /// `WireValue` in an `Arc` OUTSIDE every `Heap`, so `live_bytes` counted it nowhere and a
+    /// 195 MB channel backlog sailed straight past a 200 KB `--max-heap` cap (PASS, rc=0). The
+    /// cached per-core byte summary now feeds `live_bytes`, so the natural *concurrent* runaway —
+    /// an unbounded backlog, or data parked in a `Shared` — trips the cap like any other.
+    #[test]
+    fn over_memory_counts_offheap_wire_payload() {
+        let d = TmpDir::new();
+        // The cap is deliberately far above anything either program keeps in its own `Heap` — only
+        // the off-heap wire storage can reach it, so the assertion isolates W6-10.
+        const CAP: usize = 8_000_000;
+        let d2 = TmpDir::new();
+        let backlog = d.write(
+            "backlog_test.chz",
+            "test fn backlog():\n    ch := Channel[List[int]](200000)\n    \
+             for i in range(40000):\n        ch.send([i, i, i, i, i, i, i, i])\n",
+        );
+        // The sibling single-value path: a big list parked in a `Shared` (a REPLACING store — the
+        // summary is refreshed by `SharedCore::store`, not only at construction).
+        let parked = d2.write(
+            "parked_test.chz",
+            "import std.concurrency\n\ntest fn parked():\n    s := Shared([0])\n    \
+             xs := []\n    for i in range(150000):\n        xs.push(i)\n    s.set(xs)\n    \
+             zs := []\n    for i in range(2000):\n        zs = [i]\n",
+        );
+        for (label, f) in [("backlog", &backlog), ("parked", &parked)] {
+            for parallel in [false, true] {
+                let report = run_tests_capped(f, parallel, CAP);
+                assert!(
+                    report.text.contains(&format!("OVER-MEMORY {label}")),
+                    "off-heap wire storage must trip the cap ({label}, parallel={parallel}); \
+                     report:\n{}",
+                    report.text
+                );
+                assert!(
+                    !report.text.contains(&format!("FAIL {label}"))
+                        && !report.text.contains(&format!("ERROR {label}")),
+                    "must be OVER-MEMORY, not FAIL/ERROR ({label}, parallel={parallel}); \
+                     report:\n{}",
+                    report.text
+                );
+            }
+        }
+    }
+
+    /// W6-10 review, the SAMPLING half: counting the off-heap bytes is worthless if the cap is
+    /// never sampled. `over_cap` is only evaluated inside `sweep()`, and `sweep()` only runs when
+    /// `should_collect()` fires — which used to be a pure heap-OBJECT count. A program that pushes
+    /// megabytes across the airlock while allocating ~2 `Obj`s per iteration therefore never swept,
+    /// never sampled, and PASSED at hundreds of MB against an 8 MB cap. Both shapes below build
+    /// their payload ONCE and then only re-send it, so object churn cannot be doing the work.
+    #[test]
+    fn over_memory_trips_without_object_churn() {
+        const CAP: usize = 8_000_000;
+        let d = TmpDir::new();
+        let d2 = TmpDir::new();
+        // ~1 MB string built once, 300 sends = ~300 MB off-heap (peak RSS 304 MB pre-fix).
+        let msg = d.write(
+            "msg_test.chz",
+            "test fn msg():\n    parts: List[str] = []\n    \
+             for i in range(100000):\n        parts.push(\"0123456789\")\n    \
+             blob := \"\".join(parts)\n    ch := Channel[str](10000)\n    \
+             for i in range(300):\n        ch.send(blob)\n    assert true\n",
+        );
+        // The sibling shape: a 200k-int list built once, sent 100 times (3369 MB RSS pre-fix).
+        let ints = d2.write(
+            "ints_test.chz",
+            "test fn ints():\n    big: List[int] = []\n    \
+             for i in range(200000):\n        big.push(i)\n    \
+             ch := Channel[List[int]](1000)\n    for i in range(100):\n        ch.send(big)\n    \
+             assert true\n",
+        );
+        for (label, f) in [("msg", &msg), ("ints", &ints)] {
+            for parallel in [false, true] {
+                let report = run_tests_capped(f, parallel, CAP);
+                assert!(
+                    report.text.contains(&format!("OVER-MEMORY {label}")),
+                    "off-heap growth must PACE a sweep so the cap is sampled ({label}, \
+                     parallel={parallel}); report:\n{}",
+                    report.text
+                );
+                assert!(
+                    !report.text.contains(&format!("FAIL {label}"))
+                        && !report.text.contains(&format!("ERROR {label}")),
+                    "must be OVER-MEMORY, not FAIL/ERROR ({label}, parallel={parallel}); \
+                     report:\n{}",
+                    report.text
+                );
+            }
+        }
+    }
+
+    /// W6-10 review — the NEGATIVE direction, which matters just as much: a program comfortably
+    /// UNDER the cap must still PASS while holding a shared core. A core's payload is ONE `Arc`
+    /// allocation, but `from_wire` mints a FRESH `Obj::Shared` alias slot for every crossing, so 50
+    /// receives of the same handle used to charge that payload 50 times and fire a spurious
+    /// OVER-MEMORY at ~1/50th of the real footprint — a resource cap whose false-positive rate grows
+    /// with fan-out. Bytes are now charged once per CORE per heap.
+    #[test]
+    fn under_cap_still_passes_with_many_handles_to_one_core() {
+        let d = TmpDir::new();
+        // ~1 MB parked off-heap, 50 live reconstructed handles to that ONE core, 8 MB cap.
+        let f = d.write(
+            "alias_test.chz",
+            "import std.concurrency\n\ntest fn alias():\n    xs := []\n    \
+             for i in range(20000):\n        xs.push(i)\n    s := Shared(xs)\n    \
+             ch := Channel[Shared[List[int]]](100)\n    for i in range(50):\n        ch.send(s)\n    \
+             hs := []\n    for i in range(50):\n        hs.push(ch.recv())\n    \
+             junk := []\n    for i in range(5000):\n        junk = [i]\n    \
+             assert hs.len() == 50\n",
+        );
+        for parallel in [false, true] {
+            let report = run_tests_capped(&f, parallel, 8_000_000);
+            assert!(
+                report.text.contains("PASS alias"),
+                "50 handles to one core must not multiply its payload (parallel={parallel}); \
+                 report:\n{}",
+                report.text
+            );
+        }
+    }
+
     // ---- `--timeout` wall-clock cap (M:N-engine-only; tests run parallel=true) ----
     // Robust to CI timing: a CLEARLY-infinite loop under a SHORT timeout, or a CLEARLY-fast test
     // under a GENEROUS timeout — never near-boundary.

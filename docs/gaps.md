@@ -28,13 +28,13 @@ chronological log.
 
 | item | gaps.md | what | why it is still open |
 |---|---|---|---|
-| **W6-7** | `:772` | `RwShared` zero-copy read-view is **O(N²)** — every GC re-walks the whole off-heap wire payload (200k `for_each`: 1.428 s vs 0.154 s) | Perf, on a flagship new API. Needs a GC/wire-payload change, own task |
 | **W6-9** | `:820` | `Writer.write_bytes` byte-exact on a file but **lossy on `io.stdout()`/`stderr()`**, and returns a count that doesn't match what was emitted | Last surviving member of the lossy-byte family (B1/R1/W6-4/W6-14, all fixed). Blocked on the `emit_out`/`emit_err` sink being `&str`-typed |
-| **W6-10** | `:828` | `chezzi test --max-heap` ignores off-heap wire storage — 195 MB RSS passes a 200 KB cap | `live_bytes` counts only in-`Heap` slots; airlocked `WireValue`s live outside every `Heap` |
 | **W6-3d** | `:596` | A numeric `newtype` with its own `add`/`compare` disagrees with `+`/`<` | Candidate **(b) was attempted 2026-07-26 and REJECTED — it makes `<` intransitive** (verified, both engines). Candidate (a) now leads. Needs a design ruling, not an implementation |
 | `min`/`max` → `Option` | `:1042` | `List.min`/`max`/`min_by`/`max_by` fault on empty while `first`/`last`/`pop` return `Option[T]` | Breaking surface change: 23 call sites + docs + examples. Own milestone |
 | `List[Any]` widening | `:1083` | `List[Any] = [1, 3.0]` silently widens the int to `1.0` | Deferred pre-freeze (wave 4) |
 | **N10** | `:1299` | A `wait:` timer arm makes `--serial` inline-sleep instead of yielding to a runnable sibling (serial ≠ M:N) | Deliberate pre-freeze known-limit; fix is folded into the post-freeze serial-engine removal |
+| **W6-10s** | `:963` | `--max-heap` residual **sampling** escapes left after the byte-aware pacing fix | Pacing samples the cap on charged off-heap bytes, but only for stores routed through `to_wire_crossable` and only per heap. Still not sampled: the documented inline-scalar loop (`future.md §1b` — no `Obj`s, no wire bytes), the by-hand airlock paths (spawn args, closure captures, `Executor.submit`), and a heap that HOLDS a huge core without storing to it |
+| **W6-10r** | `:1000` | `--max-heap` residual: a payload reachable ONLY through a **nested** core (a `Channel` inside a `Shared`, once the nested core's last `Obj` alias slot is swept) is counted nowhere | Left open by the W6-10 fix on purpose. `live_bytes` reaches a core's bytes through its `Obj::*` alias slot; a nested core has none. Closing it needs cross-core byte recursion with `Arc` de-dup — narrow trigger, not worth the machinery yet |
 | protocol embeds | `:1155` | A protocol-embedded method isn't callable through the interface value (`p: Person` can't call embedded `name()`) despite `spec.md:973` "flattened at bound sites" | Filed as a safe-direction observation in wave 3; never triaged — doc and behavior contradict each other either way |
 
 **Known limits that are documented, not bugs** (listed so they aren't re-filed): `Iterable[T]` element
@@ -770,7 +770,79 @@ printing `abs(-7)` instead of `7` on both engines. Lesson, third time in this fi
 partial-coverage bug, enumerate the WHOLE set — the fix's own predicate is the next place the class hides.**
 Test: `extern_named_after_newtype_rejected` (both decl orders, single-module + graph path, non-colliding control).
 
-### W6-7. The `RwShared` zero-copy read-view is O(N²) — every GC re-walks the whole off-heap wire payload — HIGH (perf, flagship new API)
+### W6-7. The `RwShared` zero-copy read-view is O(N²) — every GC re-walks the whole off-heap wire payload — **FIXED (found 2026-07-26, fixed 2026-07-27)**
+
+> **Fix — one cached GC summary per wire core, computed at STORE time.** Every core
+> (`Channel`/`Shared`/`RwShared`/`Atomic`/`Executor`) now carries `(approximate owned bytes, "can this
+> payload root a heap object")`, derived by ONE new walk `crate::vm::core::wire_summary` (beside
+> `collect_core_gcrefs`, arm-for-arm). `Heap::children` asks the summary first: a payload with **no
+> `Handle` and no nested core** is skipped outright, so the per-GC-pass cost of a pure-data payload
+> goes O(payload) → **O(1)**. A payload that CAN root is still walked in full, every pass, never
+> memoized. `wire_summary` is deliberately **NOT** `WireValue::has_handle()` (`src/vm/wire.rs`): that
+> one answers the *airlock* question and returns `false` for the nested-core arms that
+> `collect_core_gcrefs` *recurses into* — caching its verdict would be a use-after-free. Here any
+> nested core is unconditionally dirty and the walk stops at that boundary.
+>
+> **The trap this design had to survive:** `Shared`/`RwShared`/`Atomic` payloads are *replaced*
+> (`set`/`update`/`write`/`store`/`exchange`/`cas`/`add`/`sub`), so a stale `CLEAN` after a store that
+> introduced a handle would stop the GC tracing it. Four defences: (1) the queue cores' `queue` field
+> is now **private** to `vm::core` — every push/pop must go through `ChanState`/`ExecState` helpers
+> that maintain the summary, so a missed site is a *compile error*, not a review miss; (2) the
+> single-value stores route through `SharedCore::store` / `RwSharedCore::store` /
+> `AtomicCore::store`/`store_guarded`, which refresh the summary **under the same value lock** as the
+> write; (3) a `debug_assert` in `Heap::mark_core_payload` re-derives the verdict on every debug-build
+> GC pass, so any future store path that forgets to refresh trips the whole test suite; (4)
+> `vm::heap::replacing_store_refreshes_the_gc_summary` drives each of those four store methods on an
+> ALREADY-memoized-CLEAN core with a `Handle`-bearing payload and then mark-sweeps — deleting any one
+> `summary.set` turns it RED (verified by mutation). The `Default`
+> state is `WS_UNKNOWN` = "walk once, then memoize", so a core built outside a store path (the
+> `..Default::default()` constructors in `src/vm/exec.rs`) degrades to the old behaviour rather than
+> under-rooting.
+>
+> Note what defence (4) had to be, and why the *Chezzi-level* stress test
+> (`vm::gc_tests::gc_stress_values_parked_in_cores`) cannot stand in for it: `WireValue::Handle` is
+> produced by exactly one arm (`Obj::Module` → `sched.rs:2230`) and every core store funnels through
+> `to_wire_crossable`/`wire_callable` → `ensure_crossable`, which REJECTS a handle-bearing value — so
+> no program can park a `Handle` in a core, and the stress test's payloads are all provably CLEAN. It
+> is a useful smoke test, not a proof; the memo's soundness is proven at the Rust unit level.
+>
+> **Measured** (`--serial`, release, same machine/session; the holder-isolation repro below, scaled by
+> n — a 200k-int container held by X while a sibling loop allocates n times):
+>
+> | n | `RwShared` holder — before | after | plain `List` control |
+> |---|---|---|---|
+> | 100 000 | 0.447 s | **0.069 s** (6.5×) | 0.061 s |
+> | 200 000 | 1.946 s | **0.203 s** (9.6×) | 0.196 s |
+> | 400 000 | 7.916 s | **1.101 s** (7.2×) | 1.203 s |
+>
+> Before: 4.35× / 4.07× per 2× n — quadratic. After: the wire-payload holder **tracks the plain-`List`
+> control at every n** (the control's own jump at 400k is a pre-existing heap-growth effect, identical
+> before and after). Holder isolation at n = 200k: `RwShared` 1.766 → **0.218 s**, `Shared` 2.051 →
+> **0.204 s**, `Channel.send` 2.050 → **0.220 s**, plain `List` 0.181 → 0.195 s, no holder 0.196 →
+> 0.201 s — the holder penalty is gone on the GC/read side. The short-circuit alone restored
+> linearity, so W6-7 needed no pacing change; pacing was later made byte-aware **for W6-10's sampling
+> half**, but only when `--max-heap` is set (`mem_cap != 0`) — with no cap `next_gc` behaves exactly
+> as it always has, so this table is cap-off and unmoved. Full table: `docs/benchmarks.md`. Tests:
+> `vm::heap::core_payload_walk_is_memoized`, `dirty_core_payload_is_still_traced`,
+> `live_bytes_counts_offheap_wire_payload`, `live_bytes_sums_every_distinct_core`,
+> `vm::core::wire_summary_*`, `vm::gc_tests::gc_stress_values_parked_in_cores`.
+>
+> **Round-2 (2026-07-27) — the first cut had two regressions of its own; both fixed before merge.**
+> (1) `Heap::live_bytes` de-duped cores by a linear `Vec::contains` scan re-run per core slot, so it was
+> O(D²) in the number of DISTINCT live cores — and it runs on **every** `sweep()` (the `peak_live_bytes`
+> probe, not gated on `--max-heap`). Same failure shape as W6-7 on a different axis, invisible to a
+> microbench with one holder core and to `benches/run.chz` (no cores). K = 40 000 `Channel[int]()` +
+> 500k allocations: base 0.102 s → 1.239 s. Fixed with `FxHashSet` (`src/vm/fxhash.rs`; `HashSet::default`
+> does not allocate, so the no-core path is untouched) → **0.109 s, flat in K** up to 80 000.
+> (2) The `wire_summary` walk ran INSIDE the value lock for `Shared`/`RwShared`/`Atomic` — for `RwShared`
+> inside the EXCLUSIVE write lock, stalling every concurrent reader of the read view for a full payload
+> walk per `set`. The channel paths already hoist theirs off `MnSched::core`; these did not. `*Core::store`
+> now summarises the caller-owned value **before** taking the lock, and `AtomicCore::store_guarded` takes
+> the pre-computed summary so `exchange` hoists too. Store-side cost remains (one walk per store, +21% on
+> 50 × `RwShared.set` of a 100k list) and is now stated in `docs/concurrency.md` rather than claimed away.
+
+<details><summary>Original report</summary>
+
 Measured, `--serial` (M:N identical within noise), `for_each` over an `RwShared(List[int])` vs the same work
 in a plain `for` loop:
 
@@ -794,6 +866,7 @@ container is **one** heap slot, `live` stays tiny → GC runs constantly → cos
 list out to 8 workers, each scanning/reducing in O(1) memory". Memory IS O(1); **time is O(N²)** and 10-15×
 worse than not sharing at all. Go's `sync.RWMutex`+slice and Rust's `Arc<RwLock<Vec<_>>>` cost the runtime
 nothing per traversal. Landed after the last perf pass, so no bench covers it. Same accounting seam as W6-10.
+</details>
 
 ### W6-8. A STORED FFI callback dangles → SIGSEGV from checker-clean code (a "deferred" feature implemented as UB) — **FIXED (2026-07-27)**
 ```chezzi
@@ -948,7 +1021,125 @@ bytes written." **Root cause** `src/vm/fileio.rs:48-55` — the `Backing::Stdout
 `write_to_core` do `String::from_utf8_lossy(data)` because the `emit_out`/`emit_err` sink is `&str`-typed
 (the comment concedes "the byte-exact common path is `write(str)`"). Same lossy class as W6-4 / B1.
 
-### W6-10. `chezzi test --max-heap` does not count off-heap wire storage — 195 MB RSS passes a 200 KB cap
+### W6-10. `chezzi test --max-heap` does not count off-heap wire storage — 195 MB RSS passes a 200 KB cap — **FIXED in TWO parts (found 2026-07-26; accounting fixed 2026-07-27, sampling fixed 2026-07-27 round-3)**
+
+> **TWO SEPARATE FAILURES, and the first commit only fixed one of them.**
+>
+> 1. **ACCOUNTING** — `live_bytes()` did not count a core's off-heap `WireValue` payload at all
+>    (fixed first; the write-up below).
+> 2. **SAMPLING** — `over_cap` is assigned ONLY inside `Heap::sweep()`, and `sweep()` runs only when
+>    `Heap::should_collect()` fires, which was `self.since_gc >= self.next_gc` — a pure heap-OBJECT
+>    count with `next_gc = (live*2).max(256)`. A program that pushes megabytes across the airlock
+>    while allocating ~2 `Obj`s per iteration never reaches the object threshold, so it **never
+>    sweeps, never samples the cap, and passes** — counting the bytes correctly changes nothing if
+>    nobody ever looks. The round-2 review of this branch marked W6-10 FIXED on the accounting half
+>    alone; that claim was **wrong**, and the shape that broke it is the natural one:
+>
+>    ```chezzi
+>    test fn msg():
+>        parts: List[str] = []
+>        for i in range(100000):
+>            parts.push("0123456789")
+>        blob := "".join(parts)          # ~1 MB, built ONCE
+>        ch := Channel[str](10000)
+>        for i in range(300):
+>            ch.send(blob)               # ~300 MB off-heap, ~2 heap allocs per iteration
+>        assert true
+>    ```
+>    `chezzi test --max-heap=8000000 msg_test.chz` → **PASS, rc=0, peak RSS 304 MB** against an 8 MB
+>    cap. Appending junk allocations to the same program flipped it to OVER-MEMORY, which is what
+>    proved the discriminator was GC pacing, not byte accounting. Sibling shape (a 200k-int list sent
+>    100 times, same cap): PASS at **3369 MB**. The earlier note that "GC pacing was deliberately left
+>    untouched" is **retracted** — that declination is exactly what left the guard failing open.
+>
+> **Fix (sampling half) — byte-aware GC pacing, gated on a live cap.** `Heap` gained
+> `since_gc_wire_bytes`, the `since_gc` sibling for growth that allocates no `Obj`s;
+> `should_collect()` is now
+> `since_gc >= next_gc || (mem_cap != 0 && since_gc_wire_bytes >= (mem_cap/4).max(64*1024))`, and
+> `sweep()` resets it beside `since_gc`. The `cap/4` term bounds how far off-heap growth can overshoot
+> between samples; the 64 KB floor stops a tiny cap from forcing a GC per store. The bytes are charged
+> in `Vm::to_wire_crossable` (`src/vm/sched.rs`) — the one helper every cross-heap VALUE store routes
+> through (`Channel.send`/`try_send`, `Shared`/`RwShared`/`Atomic` construct/set/update/store/CAS), so
+> a new store path physically cannot forget the charge, the same argument that put `ensure_crossable`
+> there.
+>
+> **Why the `mem_cap != 0` gate.** With no cap `over_cap` is meaningless, so the byte term exists only
+> on the one path where it can matter: a cap-off run (every `chezzi run`, every bench, the whole
+> serial==M:N parity gate) pays one `!= 0` load+branch per `should_collect` and ZERO extra walks, and
+> pacing is bit-for-bit what it has always been. `mem_cap` is set once per test before the run and
+> never changes mid-run, so the gated counter is never stale.
+>
+> **`since_gc_wire_bytes` is a pacing HINT, not accounting** — `live_bytes()` remains the sole measure
+> of what is live. It is charged monotonically: a REPLACING store (`Shared.set`, `Atomic.store`)
+> charges even though net live bytes may not grow, and a `recv`/`pop` never decrements. Net tracking
+> would let a steady send/recv pipeline stall the trigger forever, i.e. fail OPEN again — the exact
+> bug being fixed. Over-triggering costs an extra sweep under a cap and nothing else.
+>
+> **Accepted cost (measured, not claimed away):** the charge walks `wire_summary` a second time (the
+> send path walks again when it caches the core's summary). Removing it would mean threading a
+> precomputed summary through `MnSched::send_wake`'s signature for a CI/debug guard, so it was not
+> done. Measured on a store-heavy program under a cap generous enough to PASS (200k-int list, 100
+> sends, 4 GB cap, best of 3): **1.649 s → 1.828 s (+11%)** — the second walk plus the extra sweeps.
+> Cap-OFF on the same program: 1.669 s → 1.676 s (noise). `benches/run.chz` and the W6-7 microbench
+> are unmoved (both run cap-off; A/B of the two release binaries stays inside run-to-run noise).
+>
+> **Residual SAMPLING escapes (distinct from `W6-10r`, which is an ACCOUNTING hole):**
+> - the documented inline-scalar case (`docs/future.md §1b`) — a loop growing one container of inline
+>   scalars allocates no `Obj`s AND charges no wire bytes, so neither trigger fires. Still open; this
+>   fix does not touch it.
+> - the by-hand airlock paths that pair `to_wire_at` + `ensure_crossable` instead of routing through
+>   `to_wire_crossable` (spawn args, closure captures, `Executor.submit`) grow off-heap storage
+>   without charging it.
+> - pacing is PER HEAP under M:N, matching the existing per-heap cap semantics: a parent holding a
+>   huge core but storing nothing still samples only on its own object churn. This narrows the escape;
+>   it does not eliminate every shape.
+>
+> Tests: `vm::heap::wire_bytes_pace_a_sweep_only_under_a_cap` (cap-off ignores wire bytes / cap-on
+> collects at `cap/4` / the 64 KB floor / `sweep()` resets) and
+> `test_runner::over_memory_trips_without_object_churn` (both shapes above, both engines — each builds
+> its payload ONCE, so object churn cannot be doing the work). Verified on the real release binary:
+> the `msg` repro is now `OVER-MEMORY`, rc=1, peak RSS 15 MB (was PASS at 304 MB); the 200k-int
+> sibling `OVER-MEMORY`, rc=1, 46 MB (was PASS at 3369 MB); the original 120000-list repro under
+> `--max-heap=200000` `OVER-MEMORY`, rc=1.
+
+> **Fix (accounting half) — `live_bytes` now counts the off-heap wire payload**, via the same per-core cached summary
+> that fixes W6-7 (see above). `Heap::live_bytes`'s `_ => 0` blackout gained explicit
+> `Obj::Channel`/`Shared`/`RwShared`/`Atomic`/`Executor` arms adding the core's cached byte count, so
+> `sweep()`'s existing `over_cap = mem_cap != 0 && lb > mem_cap` finally sees a channel backlog / a
+> list parked in a `Shared`. Queue cores keep the count incrementally at push/pop (O(message), next to
+> the `to_wire`/`from_wire` already there — re-summing the whole queue per sweep would just be a
+> different quadratic); single-value cores refresh it at store time.
+>
+> **What the number means: bytes REACHABLE FROM THIS HEAP.** A core's payload is ONE `Arc`
+> allocation, but `from_wire` mints a FRESH `Obj::Shared`/`Obj::Channel` alias slot on every crossing
+> (`src/vm/sched.rs:2641`), so a single heap can hold K alias slots for one core. `live_bytes`
+> therefore charges each core's bytes **once per heap, by `Arc` pointer identity** — charging per
+> *slot* multiplied a 100 MB payload by K and produced a spurious OVER-MEMORY at ~footprint/K, with
+> the false-positive rate growing with fan-out (exactly backwards for a resource cap). A core shared
+> by N M:N worker heaps still appears in each of them, which is correct for a per-heap *reachability*
+> cap (each worker really can reach it) but means the N heaps' totals are not an ownership split of
+> RSS. Test: `vm::heap::live_bytes_counts_a_shared_core_once_per_heap`.
+>
+> **RESIDUAL, STILL OPEN (`W6-10r` in the index table).** The byte walk stops at a **nested-core
+> boundary**: those bytes are owned by that core's own summary, and `live_bytes` reaches a core's
+> summary only through an `Obj::*` alias slot. A nested core whose last alias slot has been swept —
+> e.g. `s := Shared(ch)`, then the local `ch` binding dies, then backlog through `s.get().send(...)`
+> — survives inside the parent's `WireValue` with no slot of its own, so its backlog is counted
+> **nowhere** and sails past the cap exactly as before. Closing it needs cross-core byte recursion
+> with `Arc` de-dup; deliberately not built (narrow trigger, real machinery). The earlier claim that
+> "that core's own summary owns those bytes" makes the case safe was **wrong** and is retracted.
+>
+> **Observable change (the point of the fix):** `--max-heap` now trips where it previously passed.
+> Nothing else moves — the dual-engine byte-identity gate runs cap-OFF, and `live_bytes` is otherwise
+> only sampled for the peak probe. Test: `test_runner::over_memory_counts_offheap_wire_payload` (a
+> `Channel` backlog and a `Shared`-parked list, both engines, under a cap far above anything either
+> program keeps in its own `Heap` — so only the off-heap storage can reach it), plus the negative
+> direction `under_cap_still_passes_with_many_handles_to_one_core` (50 reconstructed handles to one
+> ~700 KB core under an 8 MB cap must still PASS — mutation-verified: removing the per-core de-dup
+> turns it OVER-MEMORY).
+
+<details><summary>Original report</summary>
+
 A `test fn` that sends 120 000 `[i,i,i,i,i,i,i,i]` lists into a `Channel[List[int]](200000)`:
 `chezzi test tw --max-heap=200000 -v` → **PASS**, rc=0, sampled peak `VmHWM` = 195 484 kB.
 **Root cause**: the cap is `Heap::live_bytes() > mem_cap` sampled in `sweep()` (`src/vm/heap.rs:690`), and
@@ -960,7 +1151,9 @@ send allocates a `List` `Obj`, GC boundaries are hit constantly, and `live_bytes
 times; the cap simply never sees the 195 MB. So the documented guarantee ("any single execution context
 whose live heap exceeds `N` is aborted — a real runaway trips") is false for the most natural *concurrent*
 runaway: an unbounded/large-cap channel backlog, or data parked in a `Shared`/`RwShared`. Same accounting
-seam as W6-7. (The documented inline-scalar escape was separately re-confirmed and is NOT re-filed.)
+seam as W6-7. (The documented inline-scalar escape was separately re-confirmed and is NOT re-filed —
+it is a DIFFERENT hole and remains OPEN.)
+</details>
 
 ### W6-11. `Ok`/`Err`/`Some`/`None`/`Result`/`Option` are accepted as `extern fn` names — same silent-shadow class as W6-6 — **FIXED (2026-07-25)**
 `extern "libm.so.6": fn Ok(x: float) -> float` → 0 errors, unlike every other reserved name. `return Ok(x)`

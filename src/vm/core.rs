@@ -16,7 +16,7 @@ use super::value::GcRef;
 use super::wire::{WireGenState, WireValue};
 use std::collections::VecDeque;
 use std::net::{TcpListener, TcpStream};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, RwLock};
 
 /// `Channel[T]` core (B3.1): the shared mailbox, a FIFO of wire-form messages. `send` locks +
@@ -72,8 +72,70 @@ pub struct ChannelCore {
 /// drained. `close()` wakes every parked/demoted receiver via `cv` + the scheduler.
 #[derive(Debug, Default)]
 pub struct ChanState {
-    pub queue: VecDeque<WireValue>,
+    /// PRIVATE on purpose (W6-7/W6-10): every mutation must go through [`push`](Self::push) /
+    /// [`pop`](Self::pop) / [`clear`](Self::clear) so the cached GC summary (`bytes`/`dirty`) can
+    /// never go stale. A stale `dirty == false` would stop the GC tracing a live handle queued in
+    /// this channel — a use-after-free. Rust module privacy is what makes "did I catch every push
+    /// site?" a compile error instead of a code review.
+    ///
+    /// Each message carries its own [`wire_summary`] byte count so `pop` is O(1): these queues are
+    /// popped under the GLOBAL `MnSched` lock (`sched.rs` demote paths), and re-deriving the count
+    /// on removal would put an O(payload) walk in that critical section.
+    queue: VecDeque<(usize, WireValue)>,
+    /// Approximate owned bytes of the queued messages (see [`wire_summary`]) — the off-heap storage
+    /// `Heap::live_bytes` could not see before W6-10.
+    bytes: usize,
+    /// True while ANY queued message can root a heap object (a `Handle` or a nested core). Cleared
+    /// only when the queue empties, so it is conservative (over-walk = safe) and self-healing.
+    dirty: bool,
     pub closed: bool,
+}
+
+impl ChanState {
+    /// Enqueue a message with its PRE-COMPUTED [`wire_summary`].
+    ///
+    /// The summary MUST be computed by the caller **before taking any lock**: `send_wake` /
+    /// `send_wake_bounded` hold `MnSched::core` — the process-wide lock that serializes every
+    /// fiber's park/wake/finish — across this call, and `wire_summary` is O(payload). Global-lock
+    /// hold time must not scale with user payload size.
+    pub fn push(&mut self, sum: (usize, bool), w: WireValue) {
+        self.bytes += sum.0;
+        self.dirty |= sum.1;
+        self.queue.push_back((sum.0, w));
+    }
+
+    pub fn pop(&mut self) -> Option<WireValue> {
+        let (b, w) = self.queue.pop_front()?;
+        self.bytes = self.bytes.saturating_sub(b);
+        if self.queue.is_empty() {
+            self.bytes = 0;
+            self.dirty = false;
+        }
+        Some(w)
+    }
+
+    pub fn clear(&mut self) {
+        self.queue.clear();
+        self.bytes = 0;
+        self.dirty = false;
+    }
+
+    pub fn len(&self) -> usize {
+        self.queue.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.queue.is_empty()
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = &WireValue> {
+        self.queue.iter().map(|(_, w)| w)
+    }
+
+    /// Cached GC summary of the queued messages: `(approximate owned bytes, can-root-a-heap-object)`.
+    pub fn summary(&self) -> (usize, bool) {
+        (self.bytes, self.dirty)
+    }
 }
 
 /// `Shared[T]` core (B3.1): the one box every task reaches. `get` locks + clones out; `set` locks +
@@ -92,6 +154,25 @@ pub struct ChanState {
 pub struct SharedCore {
     pub v: Mutex<WireValue>,
     pub update_lock: Mutex<()>,
+    /// W6-7/W6-10 — cached GC summary of `v`. MUST be re-`set` under `v`'s lock by every store.
+    pub summary: WireSummary,
+}
+
+impl SharedCore {
+    /// Replace the payload AND refresh the cached GC summary **under the same lock** (W6-7/W6-10).
+    /// Every write path (`set`, `update`'s write-back) must go through here: a stale `WS_CLEAN`
+    /// would stop the GC tracing a handle stored into this box — a use-after-free.
+    ///
+    /// The O(payload) [`wire_summary`] walk runs BEFORE the lock is taken (`w` is caller-owned at
+    /// that point, so the result is exact); only the two atomic stores + the move happen inside.
+    /// Same rule as [`ChanState::push`]: lock hold time must not scale with user payload size —
+    /// here it is a *reader* stall, since `RwShared`'s whole contract is many concurrent readers.
+    pub fn store(&self, w: WireValue) {
+        let sum = wire_summary(&w);
+        let mut g = self.v.lock().unwrap();
+        self.summary.store(sum.0, sum.1);
+        *g = w;
+    }
 }
 
 /// `RwShared[T]` core: the read-write counterpart to [`SharedCore`]. The value lives behind a
@@ -114,6 +195,19 @@ pub struct SharedCore {
 pub struct RwSharedCore {
     pub v: RwLock<WireValue>,
     pub update_lock: Mutex<()>,
+    /// W6-7/W6-10 — cached GC summary of `v`. MUST be re-`set` under `v`'s write lock by every store.
+    pub summary: WireSummary,
+}
+
+impl RwSharedCore {
+    /// Replace the payload AND refresh the cached GC summary under the same write lock — see
+    /// [`SharedCore::store`] (the walk is hoisted OFF the exclusive lock for the same reason).
+    pub fn store(&self, w: WireValue) {
+        let sum = wire_summary(&w);
+        let mut g = self.v.write().unwrap();
+        self.summary.store(sum.0, sum.1);
+        *g = w;
+    }
 }
 
 /// `Atomic[T]` core: the cross-task atomic box. Like [`SharedCore`] (one boxed wire value behind a
@@ -124,6 +218,32 @@ pub struct RwSharedCore {
 #[derive(Debug, Default)]
 pub struct AtomicCore {
     pub v: Mutex<WireValue>,
+    /// W6-7/W6-10 — cached GC summary of `v`. MUST be re-`set` under `v`'s lock by every store.
+    pub summary: WireSummary,
+}
+
+impl AtomicCore {
+    /// Replace the payload AND refresh the cached GC summary under the same lock — see
+    /// [`SharedCore::store`] (the walk is hoisted OFF the lock for the same reason).
+    pub fn store(&self, w: WireValue) {
+        let sum = wire_summary(&w);
+        let mut g = self.v.lock().unwrap();
+        self.summary.store(sum.0, sum.1);
+        *g = w;
+    }
+
+    /// Replace the payload through an ALREADY-held guard (the `exchange` / `cas` / `add`|`sub`
+    /// read-modify-write paths, which must not drop the lock between compare and swap), returning
+    /// the previous value. Refreshes the summary in the same critical section.
+    ///
+    /// `sum` is the caller's PRE-COMPUTED [`wire_summary`] of `w` — passed in, not derived here, so
+    /// the O(payload) walk can sit OUTSIDE the lock wherever the new value is known before it is
+    /// taken (`exchange`). The two RMW paths that genuinely build their value under the lock
+    /// (`cas`'s `to_wire` is already O(payload) under it; `add`/`sub` are scalars) compute it inline.
+    pub fn store_guarded(&self, g: &mut WireValue, w: WireValue, sum: (usize, bool)) -> WireValue {
+        self.summary.store(sum.0, sum.1);
+        std::mem::replace(g, w)
+    }
 }
 
 /// `AtomicInt` core: the monomorphic, LOCK-FREE int atomic (Rust `AtomicI64` / Java `AtomicInteger` /
@@ -279,8 +399,60 @@ impl Drop for WriterCore {
 /// (one `Mutex` for both, so `submit`/`shutdown` see a consistent view and to avoid a `Mutex<bool>`).
 #[derive(Debug, Default)]
 pub struct ExecState {
-    pub queue: VecDeque<WireValue>,
+    /// PRIVATE on purpose — see [`ChanState::queue`].
+    queue: VecDeque<(usize, WireValue)>,
+    bytes: usize,
+    dirty: bool,
     pub shut: bool,
+}
+
+impl ExecState {
+    /// Enqueue a task with its PRE-COMPUTED [`wire_summary`] — see [`ChanState::push`].
+    pub fn push(&mut self, sum: (usize, bool), w: WireValue) {
+        self.bytes += sum.0;
+        self.dirty |= sum.1;
+        self.queue.push_back((sum.0, w));
+    }
+
+    pub fn pop(&mut self) -> Option<WireValue> {
+        let (b, w) = self.queue.pop_front()?;
+        self.bytes = self.bytes.saturating_sub(b);
+        if self.queue.is_empty() {
+            self.bytes = 0;
+            self.dirty = false;
+        }
+        Some(w)
+    }
+
+    /// Drain the whole queue (the `shutdown` FIFO drain) — also a free resync point.
+    pub fn take_all(&mut self) -> Vec<WireValue> {
+        self.bytes = 0;
+        self.dirty = false;
+        self.queue.drain(..).map(|(_, w)| w).collect()
+    }
+
+    pub fn clear(&mut self) {
+        self.queue.clear();
+        self.bytes = 0;
+        self.dirty = false;
+    }
+
+    pub fn len(&self) -> usize {
+        self.queue.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.queue.is_empty()
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = &WireValue> {
+        self.queue.iter().map(|(_, w)| w)
+    }
+
+    /// Cached GC summary of the queued tasks: `(approximate owned bytes, can-root-a-heap-object)`.
+    pub fn summary(&self) -> (usize, bool) {
+        (self.bytes, self.dirty)
+    }
 }
 
 /// `Executor` core (B3.1 / C5 escape hatch): the explicitly-owned work queue. `submit` enqueues a
@@ -348,7 +520,6 @@ pub fn collect_core_gcrefs(w: &WireValue, out: &mut Vec<GcRef>, seen: &mut Vec<u
             core.q
                 .lock()
                 .unwrap()
-                .queue
                 .iter()
                 .for_each(|w| collect_core_gcrefs(w, out, s))
         }),
@@ -367,7 +538,6 @@ pub fn collect_core_gcrefs(w: &WireValue, out: &mut Vec<GcRef>, seen: &mut Vec<u
             core.inner
                 .lock()
                 .unwrap()
-                .queue
                 .iter()
                 .for_each(|w| collect_core_gcrefs(w, out, s))
         }),
@@ -408,6 +578,152 @@ pub fn collect_core_gcrefs(w: &WireValue, out: &mut Vec<GcRef>, seen: &mut Vec<u
         | WireValue::Func { .. }
         | WireValue::Nil => {}
     }
+}
+
+/// [`WireSummary`] state: never walked (or invalidated) — the GC must walk and then memoize. This is
+/// the `Default`, so any core built without going through a store path degrades to today's behaviour
+/// (a full walk) rather than to an under-rooted heap.
+pub const WS_UNKNOWN: u8 = 0;
+/// [`WireSummary`] state: the payload provably holds no `Handle` and no nested core — the GC skips it.
+pub const WS_CLEAN: u8 = 1;
+/// [`WireSummary`] state: the payload may root a heap object — walk it, every pass, never memoize.
+pub const WS_DIRTY: u8 = 2;
+
+/// W6-7/W6-10 — the cached GC summary of a single-value core's payload (`Shared`/`RwShared`/`Atomic`).
+///
+/// `state` answers "can the GC skip this subtree?" and `bytes` feeds `--max-heap` (an airlocked
+/// `WireValue` lives in an `Arc` **outside** every [`Heap`](super::heap::Heap), so `live_bytes` used to
+/// count it nowhere). Both are computed by ONE [`wire_summary`] walk at STORE time — the payload of
+/// these cores is *replaced*, not mutated in place, so every write path must call [`set`](Self::set)
+/// **while holding the same value lock as the write**: a stale `CLEAN` would stop the GC tracing a live
+/// handle. A `debug_assert` in `Heap::children` re-verifies the memo on every debug-build GC pass.
+#[derive(Debug, Default)]
+pub struct WireSummary {
+    state: AtomicU8,
+    bytes: AtomicUsize,
+}
+
+impl WireSummary {
+    pub fn state(&self) -> u8 {
+        self.state.load(Ordering::Relaxed)
+    }
+
+    pub fn bytes(&self) -> usize {
+        self.bytes.load(Ordering::Relaxed)
+    }
+
+    /// Record the summary of a payload that has just been stored (absolute, not incremental).
+    pub fn set(&self, w: &WireValue) {
+        let (b, dirty) = wire_summary(w);
+        self.store(b, dirty);
+    }
+
+    /// Record an already-computed summary (the lazy GC fill path).
+    pub fn store(&self, bytes: usize, dirty: bool) {
+        self.bytes.store(bytes, Ordering::Relaxed);
+        self.state
+            .store(if dirty { WS_DIRTY } else { WS_CLEAN }, Ordering::Relaxed);
+    }
+}
+
+/// W6-7/W6-10 — ONE walk of a stored wire payload yielding both GC facts: `(approximate owned bytes,
+/// can-root-a-heap-object)`.
+///
+/// **This is NOT [`WireValue::has_handle`]**, and the two must never be merged. `has_handle` answers an
+/// *airlock* question ("may this value cross?") and deliberately returns `false` for the nested
+/// `Channel`/`Shared`/`RwShared`/`Atomic`/`Executor` arms — those cross by shared `Arc`. [`collect_core_gcrefs`]
+/// (right above) *recurses into* them, because a nested core may be reachable only through its parent and
+/// its embedded handles would dangle otherwise. So a cached `has_handle` verdict would be a use-after-free.
+/// Here a nested core is therefore **always dirty**, and the walk STOPS at that boundary.
+///
+/// The byte half of that stop is an ACCEPTED HOLE, not a proof of correctness (gaps.md `W6-10r`,
+/// still open): a nested core's bytes are reached by `Heap::live_bytes` only through that core's own
+/// `Obj::*` alias slot, so a nested core whose last alias slot has been swept — it survives inside
+/// this payload's `Arc` — is counted NOWHERE. Closing it needs cross-core byte recursion with `Arc`
+/// de-dup; deliberately not built. Rooting is unaffected: `collect_core_gcrefs` does recurse.
+///
+/// Keep the arms in lockstep with [`collect_core_gcrefs`] — a new `WireValue` variant must be added to both.
+pub fn wire_summary(w: &WireValue) -> (usize, bool) {
+    fn walk(acc: &mut (usize, bool), x: &WireValue) {
+        let (b, d) = wire_summary(x);
+        acc.0 += b;
+        acc.1 |= d;
+    }
+    let mut acc = (std::mem::size_of::<WireValue>(), false);
+    match w {
+        WireValue::Handle(_) => acc.1 = true,
+        WireValue::List { items: xs, .. } | WireValue::Tuple { items: xs, .. } => {
+            xs.iter().for_each(|x| walk(&mut acc, x))
+        }
+        WireValue::Map { entries, .. } => entries.iter().for_each(|(_, k, v)| {
+            acc.0 += std::mem::size_of::<u64>();
+            walk(&mut acc, k);
+            walk(&mut acc, v);
+        }),
+        WireValue::Set { entries, .. } => entries.iter().for_each(|(_, e)| {
+            acc.0 += std::mem::size_of::<u64>();
+            walk(&mut acc, e);
+        }),
+        WireValue::Struct { name, fields, .. } => {
+            acc.0 += name.len();
+            fields.iter().for_each(|(n, v)| {
+                acc.0 += n.len();
+                walk(&mut acc, v);
+            })
+        }
+        WireValue::Enum { payload, .. } => payload.iter().for_each(|x| walk(&mut acc, x)),
+        WireValue::NewType {
+            type_key, inner, ..
+        } => {
+            acc.0 += type_key.len();
+            walk(&mut acc, inner)
+        }
+        WireValue::Cell { inner, .. } => walk(&mut acc, inner),
+        WireValue::Iter { items, .. } => items.iter().for_each(|x| walk(&mut acc, x)),
+        WireValue::Generator { closure, state, .. } => {
+            if let Some(c) = closure {
+                walk(&mut acc, c);
+            }
+            match state {
+                WireGenState::Pending(args) => args.iter().for_each(|x| walk(&mut acc, x)),
+                WireGenState::Suspended { stack, .. } => {
+                    stack.iter().for_each(|x| walk(&mut acc, x))
+                }
+                WireGenState::Done => {}
+            }
+        }
+        WireValue::Closure { captured, .. } => captured.iter().for_each(|(n, v)| {
+            acc.0 += n.len();
+            walk(&mut acc, v);
+        }),
+        // A nested core: conservatively dirty (a store on the INNER core can introduce a handle
+        // without ever touching this one's cache), and the walk stops here.
+        WireValue::Channel(_)
+        | WireValue::Shared(_)
+        | WireValue::RwShared(_)
+        | WireValue::Atomic(_)
+        | WireValue::Executor(_) => acc.1 = true,
+        WireValue::Str(s) => acc.0 += s.len(),
+        WireValue::Bytes(b) | WireValue::ByteArray(b) => acc.0 += b.len(),
+        // Leaves — root nothing, own no extra bytes. `Backref` also TERMINATES a cyclic wire graph
+        // (exactly like `collect_core_gcrefs`).
+        WireValue::Backref(_)
+        | WireValue::AtomicInt(_)
+        | WireValue::Int(_)
+        | WireValue::Float(_)
+        | WireValue::Bool(_)
+        | WireValue::Socket(_)
+        | WireValue::Listener(_)
+        | WireValue::Writer(_)
+        | WireValue::Reader(_)
+        | WireValue::Ptr(_)
+        | WireValue::Builtin(_)
+        | WireValue::Native { .. }
+        | WireValue::Cffi(_)
+        | WireValue::Func { .. }
+        | WireValue::Nil => {}
+    }
+    acc
 }
 
 /// Run `f` over a not-yet-visited core (by `Arc`-pointer identity), recording it in `seen` first so a
@@ -489,5 +805,74 @@ mod tests {
         let got = std::fs::read(&path).unwrap();
         let _ = std::fs::remove_file(&path);
         assert_eq!(got, b"abc", "a nested buffered chain must drop-flush");
+    }
+}
+
+#[cfg(test)]
+mod summary_tests {
+    use super::*;
+
+    fn list(items: Vec<WireValue>) -> WireValue {
+        WireValue::List { id: 0, items }
+    }
+
+    /// W6-7/W6-10 — one walk yields both GC facts: approximate owned bytes, and whether the payload
+    /// can root a heap object (a `Handle`, or ANY nested core that might come to hold one).
+    #[test]
+    fn wire_summary_bytes_and_dirtiness() {
+        let node = std::mem::size_of::<WireValue>();
+        let (b, d) = wire_summary(&list((0..1000).map(WireValue::Int).collect()));
+        assert!(b >= 1000 * node, "1000 ints must be counted: {b}");
+        assert!(!d, "pure ints root nothing");
+
+        let (_, d) = wire_summary(&list(vec![WireValue::Handle(GcRef(0))]));
+        assert!(d, "a nested Handle is dirty");
+
+        // A nested core is ALWAYS dirty (it may gain a handle via its OWN store, invisible here)
+        // and its bytes stop at the boundary.
+        let inner = Arc::new(SharedCore {
+            v: Mutex::new(list((0..1000).map(WireValue::Int).collect())),
+            ..Default::default()
+        });
+        let (b, d) = wire_summary(&list(vec![WireValue::Shared(inner)]));
+        assert!(d, "a nested core is conservatively dirty");
+        assert!(
+            b < 1000 * node,
+            "nested-core bytes must NOT be included: {b}"
+        );
+
+        // A self-cycle terminates on `Backref` (this test completing IS the assertion).
+        let (_, _) = wire_summary(&WireValue::List {
+            id: 1,
+            items: vec![WireValue::Backref(1)],
+        });
+
+        // Owned bytes of the by-value scalar arms are counted.
+        let (b, _) = wire_summary(&WireValue::Str("hello".into()));
+        assert_eq!(b, node + 5);
+        let (b, _) = wire_summary(&WireValue::Bytes(vec![1u8; 32].into()));
+        assert_eq!(b, node + 32);
+        let (b, _) = wire_summary(&WireValue::ByteArray(vec![1u8; 7].into()));
+        assert_eq!(b, node + 7);
+    }
+
+    /// The cached summary: `Default` is UNKNOWN (walk), a store is absolute, and it is fail-safe in
+    /// the UNKNOWN direction only.
+    #[test]
+    fn wire_summary_state_transitions() {
+        let s = WireSummary::default();
+        assert_eq!(s.state(), WS_UNKNOWN);
+        assert_eq!(s.bytes(), 0);
+
+        s.set(&list((0..10).map(WireValue::Int).collect()));
+        assert_eq!(s.state(), WS_CLEAN);
+        assert!(s.bytes() > 0);
+
+        s.set(&list(vec![WireValue::Handle(GcRef(3))]));
+        assert_eq!(s.state(), WS_DIRTY);
+
+        // A store is ABSOLUTE — a dirty payload replaced by a clean one goes back to CLEAN.
+        s.set(&WireValue::Int(1));
+        assert_eq!(s.state(), WS_CLEAN);
     }
 }

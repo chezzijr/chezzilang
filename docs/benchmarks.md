@@ -1074,3 +1074,152 @@ discarded generic `AtomicI64`-fast-path attempt measured (it was capped by the t
 sniffing it had to do). **Uncontended** (single task) the two are within run-to-run noise — the win is
 purely a contention story, exactly as predicted. No M19 bench (`fib`/`loop`/`primes`) is affected;
 AtomicInt is a new stdlib construct, not a VM-wide lever.
+
+## Cached wire-core GC summary — gaps.md W6-7 (2026-07-27) — correctness-shaped perf fix
+
+Holding a big container in a `Shared`/`RwShared`/`Channel`/`Atomic`/`Executor` used to make the whole
+program **quadratic**: the stored value lives outside the GC heap as one `WireValue` tree, `Heap::children`
+re-walked that entire tree on **every** GC pass, and because the GC threshold is object-COUNT based
+(`next_gc = 2*live`) while a big wire container is ONE heap slot, `live` stayed tiny → GC ran constantly →
+O(allocations × payload). Each core now caches `(approximate owned bytes, can-this-payload-root-a-heap-object)`
+at store time; a payload with no `Handle` and no nested core is **skipped**, so the per-pass cost is O(1).
+The short-circuit alone restored linearity, so this lever needed no pacing change. GC pacing (`next_gc`)
+was later made byte-aware for W6-10's sampling half, but **only when `chezzi test --max-heap` sets a cap**
+(`mem_cap != 0`) — with no cap the trigger is bit-for-bit the object count it has always been, which is why
+the table below (cap-off, `chezzi run`) is unmoved by that change.
+
+Bespoke microbench (NOT in `benches/run.chz`, which is Chezzi-vs-CPython peers only). Release, `--serial`,
+best of 3, same machine + session. A 200k-int container is built, handed to a holder, then a sibling loop
+allocates n times (each allocation is a GC-threshold tick):
+
+| n | `RwShared` holder — before | after | plain `List` control |
+|---|---|---|---|
+| 100 000 | 0.447 s | **0.069 s** (6.5×) | 0.061 s |
+| 200 000 | 1.946 s | **0.203 s** (9.6×) | 0.196 s |
+| 400 000 | 7.916 s | **1.101 s** (7.2×) | 1.203 s |
+
+Before: **4.35× / 4.07× per 2× n — quadratic**. After: the wire-payload holder **tracks the plain-`List`
+control at every n**. (The control's own jump at 400k is a pre-existing heap-growth effect — identical
+before and after — not part of this lever.)
+
+Holder isolation at n = 200 000 (same allocation loop, same live 200k-int container, only the holder differs):
+
+| holder | before | after |
+|---|---|---|
+| plain `List` | 0.181 s | 0.195 s |
+| `RwShared` | 1.766 s | **0.218 s** (8.1×) |
+| `Shared` | 2.051 s | **0.204 s** (10.0×) |
+| `Channel.send` | 2.050 s | **0.220 s** (9.3×) |
+| no holder | 0.196 s | 0.201 s |
+
+The holder penalty is **gone** on the GC/read side — holding a big container in a core now costs the same
+per GC pass as holding it in a plain `List`. (The *store* side is not free: each `set`/`send`/`store` adds
+one `wire_summary` walk of the new payload — quantified below.) Traversals whose payload
+elements are themselves heap objects (an `RwShared[List[str]]` fold) were already linear before the fix
+(their own `Obj`s keep `live` high, so GC rarely fires) and are unchanged: 0.062/0.116/0.233 → 0.063/0.118/0.242
+at n = 100k/200k/400k, within noise.
+
+**The cost this buys: one `wire_summary` walk per channel `send`** (the `recv` side is free — each
+message's byte count is stored *with* the message in the queue, so `pop` is O(1)). Both queue-lock
+sections stay O(1): the send-side walk is hoisted **before** `MnSched::core` is taken, because that lock
+serializes every fiber's park/wake/finish and its hold time must not scale with user payload size.
+`benches/run.chz` has no channel bench, so this path was previously unmeasured. Bespoke, release,
+best-of-5 (base = `main` @ 8a913d0, both binaries built in their own target dirs):
+
+| channel bench | base | after |
+|---|---|---|
+| 2 000 round-trips × 2 000-element list, `--serial` | 0.163 s | 0.174 s (+7%) |
+| 2 000 round-trips × 2 000-element list, M:N | 0.165 s | 0.172 s (+4%) |
+| 200 round-trips × **20 000**-element list, `--serial` | 0.333 s | 0.336 s (+0.8%) |
+| 4 producers + 1 consumer, 2 000 × 2 000-element list, M:N | 0.129 s | 0.126 s (flat) |
+
+The overhead does **not** scale with message size the way a second full traversal would — 10× bigger
+messages cost +0.8%, not +7% — because `wire_summary` is a pointer-chasing sum next to `to_wire`'s much
+more expensive allocate-and-clone walk on the same tree. The M:N fan-out case (the one that would show a
+global-lock regression) is flat.
+
+**No regression on the common (no-core) path.** `benches/run.chz` allocates no cores, so nothing should
+move. Direct before→after, same machine + session, 7 runs each, min / median seconds:
+`map` 0.135/0.181 → **0.119/0.129** · `str` 0.157/0.161 → 0.156/0.160 · `primes` 0.564/0.590 →
+0.551/0.601 · `fib` 0.226/0.248 → 0.228/0.237 · `loop` 0.852/0.936 → 0.850/0.876. All min-times within
+run-to-run noise — **flat**, as expected (the five new `live_bytes`/`children` arms are on `Obj` variants
+the benches never allocate). `CHEZZI_HEAP_STATS` peak is byte-identical before and after.
+
+Re-verified on the final binary (after the review fixes below), n = 200 000, best-of-5: `RwShared` holder
+**1.534 s → 0.218 s** (7.0×), plain-`List` control 0.198 → 0.193 s — the holder now matches the control.
+
+Same change also closes gaps.md **W6-10**: the cached byte half of the summary feeds `Heap::live_bytes`, so
+`chezzi test --max-heap` finally sees an off-heap channel backlog / `Shared`-parked data (195 MB used to
+pass a 200 KB cap). Those bytes are charged **once per core per heap** (by `Arc` identity) — charging once
+per `Obj` alias slot multiplied a shared payload by the fan-out and produced spurious OVER-MEMORY verdicts.
+One residual escape stays open (a nested core with no surviving alias slot) — gaps.md `W6-10r`.
+
+### Round 3 — byte-aware GC pacing under a cap (2026-07-27), the half that was wrongly marked done
+
+Counting the bytes did nothing on the natural runaway, because the cap was never **sampled**: `over_cap` is
+assigned only inside `sweep()`, and `sweep()` only ran on a heap-OBJECT count. A program sending a ~1 MB
+string 300 times (payload built ONCE, ~2 `Obj`s per iteration) PASSED at **304 MB RSS under an 8 MB cap**;
+a 200k-int list sent 100 times PASSED at **3369 MB**. `Heap::should_collect` now also fires on charged
+off-heap bytes — `mem_cap != 0 && since_gc_wire_bytes >= (mem_cap/4).max(64*1024)` — charged in
+`Vm::to_wire_crossable` and reset in `sweep()`. Both repros are now `OVER-MEMORY` rc=1 at 15 MB / 46 MB.
+
+**Cap-off is untouched, by construction and by measurement.** The byte term short-circuits on
+`mem_cap != 0`, so `chezzi run` (and therefore `benches/run.chz` and the serial==M:N parity gate) pays one
+load+branch per `should_collect` and never walks. Direct A/B of the two release binaries, cap-off, best-of-5,
+two independent rounds: `loop` −2.5% / +1.4% · `fib` +0.6% / +2.9% · `primes` +3.8% / +2.5% · `list`
++5.0% / −0.2% · `struct` +1.0% / +1.6% — sign flips between rounds, i.e. run-to-run noise, no consistent
+direction. The W6-7 microbench is likewise unmoved (same session, best-of-3, `--serial`): `RwShared` holder
+0.116/0.207/0.647 s before → 0.114/0.214/0.651 s after at n = 100k/200k/400k, still tracking the plain-`List`
+control (0.082/0.176/0.631 → 0.082/0.176/0.617) and still linear.
+
+**`chezzi test --max-heap` gets slower — stated, not hidden.** A capped run now sweeps on off-heap growth
+(more sweeps, each an O(live slots) `live_bytes`) and walks `wire_summary` a second time per store (the
+send path walks again to cache the core's summary). Measured on 100 sends of a 200k-int list under a cap
+generous enough to PASS (4 GB), best-of-3: **1.649 s → 1.828 s (+11%)**; the same program with no cap:
+1.669 s → 1.676 s. Eliminating the second walk would need a precomputed summary threaded through
+`MnSched::send_wake`'s signature — not worth a signature change for a CI/debug guard.
+
+### Round 2 — the fix's own two regressions (2026-07-27)
+
+Adversarial review caught the first cut reintroducing the same *shape* of problem on two different axes.
+Both are fixed; measured on release binaries, `--serial`, best-of-7, base = `main` @ 8a913d0 built in its
+own target dir.
+
+**(1) `live_bytes` was O(D²) in the number of DISTINCT live cores.** Charging a core's bytes once per
+core (not once per alias slot) needs a de-dup; the first cut used a linear `Vec::contains` scan re-run for
+every core slot. `Heap::live_bytes` runs on **every** `sweep()` (the `peak_live_bytes` probe — not gated on
+`--max-heap`), so a program holding D distinct cores paid ~D²/2 comparisons per GC pass. That is the exact
+failure shape W6-7 exists to remove, on the "how many cores" axis instead of the "how big is one payload"
+axis — and neither the microbench above (ONE holder core) nor `benches/run.chz` (no cores at all) could see
+it. Go-idiomatic mailbox-per-connection / actor-per-entity code hits it. Fixed: `FxHashSet` (already
+vendored in `src/vm/fxhash.rs`; `HashSet::default` does not allocate, so the no-core path is untouched).
+
+Repro — `for i in range(K): chs.push(Channel[int]())`, then 500 000 list allocations:
+
+| K distinct cores | base (`main`) | round-1 branch | fixed |
+|---|---|---|---|
+| 10 000 | 0.100 s | 0.351 s | **0.105 s** |
+| 20 000 | 0.100 s | 0.665 s | **0.105 s** |
+| 40 000 | 0.102 s | 1.239 s | **0.109 s** |
+| 80 000 | 0.118 s | 2.669 s | **0.125 s** |
+
+Round-1 grew linearly in K (quadratic per pass); fixed is **flat in K**, ~+5% over base — the constant
+cost of five extra `match` arms + one uncontended core lock per distinct core per sweep. Same with
+`Shared(i)` (no queue mutex involved, isolating the scan): K = 40 000 base 0.111 s, round-1 1.224 s,
+fixed **0.124 s**. Control (`chs.push([i])`, plain lists, no cores): 0.105 → 0.101 s, flat.
+
+**(2) The `wire_summary` walk sat INSIDE the value lock** for `Shared`/`RwShared`/`Atomic` — for
+`RwShared` inside the EXCLUSIVE write lock, so every concurrent reader of the flagship zero-copy read view
+stalled for a full payload walk on each `set`/`write` write-back. The channel paths already hoist their
+walk off `MnSched::core` for exactly this reason ("lock hold time must not scale with user payload size");
+the single-value cores did not. Fixed: `SharedCore::store` / `RwSharedCore::store` / `AtomicCore::store`
+summarise the caller-owned value **before** taking the lock; `AtomicCore::store_guarded` now *takes* the
+pre-computed summary, so `exchange` hoists too (`cas` builds its value under the lock by necessity — its
+`to_wire` is already O(payload) there — and `add`/`sub` are scalars).
+
+Single-thread wall time is unchanged by the hoist (same work, reordered), so the win is invisible to
+`--serial` and to the parity gate — it is purely reader-stall time on M:N. The store-side cost of the
+summary itself remains and is the design's price: `rw := RwShared(<100 000-int list>)` then 50 × `rw.set`
+is **0.221 s base → 0.268 s (+21%)**, one extra read-only traversal next to `to_wire`'s allocate-and-clone
+traversal of the same tree. Not eliminated (fusing the count into `to_wire` would thread an out-param
+through every `to_wire` call site); documented instead — reads are O(1), each store pays one walk.
