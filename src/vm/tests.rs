@@ -1485,7 +1485,7 @@ fn poly_ic_site_latches_sticky_on_5th_type() {
     let program = crate::compiler::compile_module_standalone(&module).unwrap();
     let mut vm = Vm::new(Arc::new(program));
     vm.run().expect("run");
-    assert_eq!(vm.out, "15\n");
+    assert_eq!(vm.out, b"15\n");
     // Exactly one method-call site (the `x.id()` in `sum`), and it must have gone sticky with all
     // 4 ways filled by the first four distinct tids.
     let sticky_sites = vm.method_ic.iter().filter(|s| s.sticky).count();
@@ -2746,8 +2746,8 @@ fn swap_ctx_round_trips_an_mn_fiber_heap() {
 fn mn_swap_ctx_round_trips_fiber_side_state() {
     let mut vm = Vm::new(Arc::new(empty_program()));
     vm.parallel = true;
-    vm.out.push_str("host-out");
-    vm.stderr.push_str("host-err");
+    vm.out.extend_from_slice(b"host-out");
+    vm.stderr.extend_from_slice(b"host-err");
     let host_mod = vm.heap.alloc(Obj::Str("host-mod".into()));
     let host_exec = vm.heap.alloc(Obj::Str("host-exec".into()));
     vm.module_objs = vec![host_mod];
@@ -2763,8 +2763,8 @@ fn mn_swap_ctx_round_trips_fiber_side_state() {
     let fib_str = fiber_heap.alloc(Obj::Str("fiber-str".into()));
     let mut ctx = FiberCtx {
         heap: Some(fiber_heap),
-        out: "fiber-out".to_string(),
-        stderr: "fiber-err".to_string(),
+        out: b"fiber-out".to_vec(),
+        stderr: b"fiber-err".to_vec(),
         module_objs: vec![fib_mod],
         module_faulted: vec![false],
         executors: vec![fib_exec],
@@ -2774,26 +2774,26 @@ fn mn_swap_ctx_round_trips_fiber_side_state() {
 
     // Schedule in: the fiber's side state becomes live; the shell's parks into the ctx.
     vm.swap_ctx(&mut ctx);
-    assert_eq!(vm.out, "fiber-out");
-    assert_eq!(vm.stderr, "fiber-err");
+    assert_eq!(vm.out, b"fiber-out");
+    assert_eq!(vm.stderr, b"fiber-err");
     assert_eq!(vm.module_objs, vec![fib_mod]);
     assert_eq!(vm.module_faulted, vec![false]);
     assert_eq!(vm.executors, vec![fib_exec]);
     assert_eq!(vm.str_intern.get(&0x20), Some(&fib_str));
     assert_eq!(vm.str_intern.get(&0x10), None);
-    assert_eq!(ctx.out, "host-out");
+    assert_eq!(ctx.out, b"host-out");
     assert_eq!(ctx.module_objs, vec![host_mod]);
     assert_eq!(ctx.str_intern.get(&0x10), Some(&host_str));
 
     // Park out: the shell's side state is restored; the fiber keeps its own.
     vm.swap_ctx(&mut ctx);
-    assert_eq!(vm.out, "host-out");
-    assert_eq!(vm.stderr, "host-err");
+    assert_eq!(vm.out, b"host-out");
+    assert_eq!(vm.stderr, b"host-err");
     assert_eq!(vm.module_objs, vec![host_mod]);
     assert_eq!(vm.module_faulted, vec![true]);
     assert_eq!(vm.executors, vec![host_exec]);
     assert_eq!(vm.str_intern.get(&0x10), Some(&host_str));
-    assert_eq!(ctx.out, "fiber-out");
+    assert_eq!(ctx.out, b"fiber-out");
     assert_eq!(ctx.module_objs, vec![fib_mod]);
     assert_eq!(ctx.str_intern.get(&0x20), Some(&fib_str));
 }
@@ -2855,13 +2855,13 @@ fn eager_scope_round_trips_with_fiber_ctx() {
 #[test]
 fn mn_swap_ctx_swaps_module_objs_but_not_heap_gated_state_for_cooperative_fiber() {
     let mut vm = Vm::new(Arc::new(empty_program()));
-    vm.out.push_str("host-out");
+    vm.out.extend_from_slice(b"host-out");
     let host_mod = vm.heap.alloc(Obj::Str("host-mod".into()));
     vm.module_objs = vec![host_mod];
     let mut ctx = FiberCtx::default();
     vm.swap_ctx(&mut ctx);
     // Heap-gated state (out) stays on the shell for a cooperative fiber.
-    assert_eq!(vm.out, "host-out");
+    assert_eq!(vm.out, b"host-out");
     assert!(
         ctx.out.is_empty(),
         "swap must not give a cooperative fiber heap-gated side state"
@@ -2982,8 +2982,8 @@ fn mnsched_runnable_tracks_single_queue() {
         f.task_index,
         0,
         TaskOutcome::Cancelled {
-            out: String::new(),
-            stderr: String::new(),
+            out: Vec::new(),
+            stderr: Vec::new(),
         },
     );
     assert_eq!(
@@ -3105,8 +3105,8 @@ fn mn_finish_routes_done_to_scope_via_fiber() {
         1,
         1,
         TaskOutcome::Cancelled {
-            out: String::new(),
-            stderr: String::new(),
+            out: Vec::new(),
+            stderr: Vec::new(),
         },
     ); // finish scope 1's fiber (flat slot 1)
     {
@@ -3120,8 +3120,8 @@ fn mn_finish_routes_done_to_scope_via_fiber() {
         0,
         0,
         TaskOutcome::Cancelled {
-            out: String::new(),
-            stderr: String::new(),
+            out: Vec::new(),
+            stderr: Vec::new(),
         },
     );
     assert!(
@@ -3139,8 +3139,8 @@ fn mn_take_scope_slots_drains_only_its_range() {
         let mut c = sched.lock();
         for i in 0..4 {
             c.slots[i] = Some(TaskOutcome::Cancelled {
-                out: String::new(),
-                stderr: String::new(),
+                out: Vec::new(),
+                stderr: Vec::new(),
             });
         }
     }
@@ -6013,8 +6013,8 @@ fn mnsched_cancelled_scope_whose_only_fiber_is_demoted_is_deadlock() {
         0,
         TaskOutcome::Fault {
             err: dl_err(),
-            out: String::new(),
-            stderr: String::new(),
+            out: Vec::new(),
+            stderr: Vec::new(),
         },
     );
     let c = sched.lock();
@@ -6065,8 +6065,8 @@ fn mnsched_demoted_fiber_with_a_tripped_cancel_is_not_deadlock() {
         0,
         TaskOutcome::Fault {
             err: dl_err(),
-            out: String::new(),
-            stderr: String::new(),
+            out: Vec::new(),
+            stderr: Vec::new(),
         },
     );
     {
@@ -6119,8 +6119,8 @@ fn mnsched_cancelled_scope_with_a_parked_and_a_demoted_fiber_is_not_deadlock() {
         0,
         TaskOutcome::Fault {
             err: dl_err(),
-            out: String::new(),
-            stderr: String::new(),
+            out: Vec::new(),
+            stderr: Vec::new(),
         },
     );
     let c = sched.lock();
@@ -6145,8 +6145,8 @@ fn mnsched_finish_writes_slot_and_terminates_at_total() {
         a.task_index,
         0,
         TaskOutcome::Cancelled {
-            out: String::new(),
-            stderr: String::new(),
+            out: Vec::new(),
+            stderr: Vec::new(),
         },
     );
     {
@@ -6158,8 +6158,8 @@ fn mnsched_finish_writes_slot_and_terminates_at_total() {
         b.task_index,
         0,
         TaskOutcome::Cancelled {
-            out: String::new(),
-            stderr: String::new(),
+            out: Vec::new(),
+            stderr: Vec::new(),
         },
     );
     {
@@ -6488,11 +6488,11 @@ fn worker_returns_value_and_out() {
     ]);
     let res = vm.run_task_isolated(task).expect("isolated task runs");
     assert_eq!(
-        res.out, "hi from worker\n",
+        res.out, b"hi from worker\n",
         "worker stdout returns on the result"
     );
     assert_eq!(
-        res.stderr, "",
+        res.stderr, b"",
         "stderr is captured separately and empty here"
     );
     assert_eq!(
@@ -6501,7 +6501,7 @@ fn worker_returns_value_and_out() {
         "return value crosses back"
     );
     assert_eq!(
-        vm.out, "",
+        vm.out, b"",
         "worker output must not leak into the parent's stdout"
     );
 }

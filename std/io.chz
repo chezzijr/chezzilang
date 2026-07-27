@@ -41,7 +41,8 @@ native fn write_bytes(path: str, data: bytes) -> Result[nil]
 #
 # Two verbs, not a mode string: `create` = truncate+create, `append` = append (create-if-absent,
 # never truncates) — Go-consistent (`os.Create`). Text vs binary is per-CALL: `write(str)` UTF-8-
-# encodes, `write_bytes(bytes)` is raw. `stdout()`/`stderr()` route through the SAME sink as
+# encodes, `write_bytes(bytes)` is raw — byte-exact on EVERY backing, console included (W6-9), like
+# Python's `sys.stdout.buffer.write` / Go's `os.Stdout.Write`. `stdout()`/`stderr()` route through the SAME sink as
 # `io.print` (byte-identical to `io.print(s, end="")`), NOT a raw fd. `buffered(w, size = 8192)` is
 # the Go `bufio.NewWriter` escape hatch: it accumulates in the VM and does ONE host/fd write per
 # `flush` / buffer-full / `close` (8 KiB default). Forgetting `flush`/`close` on a buffered writer

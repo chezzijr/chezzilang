@@ -95,6 +95,60 @@ test fn flush_through_a_closed_inner_is_a_clean_err_naming_the_inner():
                 Err(e): assert e.message().contains("inner writer"), e.message()
         Err(e): assert false, "create: " + e.message()
 
+# ===== W6-9 — `write_bytes` is BYTE-EXACT and returns the input length =====
+#
+# The raw stdout/stderr BYTES can only be witnessed by a real child process (the `chezzi test`
+# runner captures output in-process and hands it back as a Rust `String`), so those assertions live
+# in `tests/interactive.rs::{stdout,stderr,buffered_stdout}_write_bytes_is_byte_exact`. What IS
+# expressible here — and what pins the retype from the in-language side — is the RETURN COUNT on
+# every backing plus the file arm's byte-exactness, which the console arm now matches.
+
+test fn stdout_write_bytes_returns_the_input_length():
+    match io.stdout().write_bytes(b"\xff\xfe"):
+        Ok(n): assert n == 2, "stdout write_bytes returned " + str(n)
+        Err(e): assert false, "stdout write_bytes: " + e.message()
+
+test fn stderr_write_bytes_returns_the_input_length():
+    match io.stderr().write_bytes(b"\xff\xfe"):
+        Ok(n): assert n == 2, "stderr write_bytes returned " + str(n)
+        Err(e): assert false, "stderr write_bytes: " + e.message()
+
+test fn file_write_bytes_round_trips_non_utf8():
+    # The file arm was ALREADY byte-exact; pin it so the sink retype cannot regress it.
+    p := scratch("nonutf8")
+    defer fs.remove_file(p)
+    raw := b"\xff\xfe\x00A\x80"
+    match io.create(p):
+        Ok(w):
+            match w.write_bytes(raw):
+                Ok(n): assert n == 5, "file write_bytes returned " + str(n)
+                Err(e): assert false, "file write_bytes: " + e.message()
+            _ := w.close()
+        Err(e): assert false, "create: " + e.message()
+    match io.read_bytes(p):
+        Ok(got): assert got == raw, "non-UTF-8 bytes did not round-trip"
+        Err(e): assert false, "read_bytes: " + e.message()
+
+test fn large_write_bytes_returns_the_full_count():
+    # Nothing in `write_to_core` can short-write (write_all / in-memory / an unbounded queue), so the
+    # count is the input length at every size — this is the only "partial write" case expressible.
+    p := scratch("large")
+    defer fs.remove_file(p)
+    ba := bytearray()
+    for i in range(200000):
+        ba.push(255)
+    big := bytes(ba)
+    match io.create(p):
+        Ok(w):
+            match w.write_bytes(big):
+                Ok(n): assert n == 200000, "large write_bytes returned " + str(n)
+                Err(e): assert false, "large write_bytes: " + e.message()
+            _ := w.close()
+        Err(e): assert false, "create: " + e.message()
+    match io.read_bytes(p):
+        Ok(got): assert got.len() == 200000, "short file: " + str(got.len())
+        Err(e): assert false, "read_bytes: " + e.message()
+
 test fn write_that_drains_into_a_closed_inner_names_the_inner_too():
     # Sibling arm: `write_to_core`'s drain recursion carries the same wrong-handle risk.
     p := scratch("closed_inner_w")

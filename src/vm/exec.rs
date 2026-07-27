@@ -22,10 +22,20 @@ impl Vm {
     /// on a program that then indexes out of bounds reported SUCCESS with no trace — a red CI going
     /// green. A dead stdout is not an exit request, so it does not borrow the exit channel.
     pub(super) fn emit_out(&mut self, s: &str) {
+        self.emit_out_bytes(s.as_bytes());
+    }
+
+    /// The byte-level stdout sink [`Vm::emit_out`] delegates to — same contract, no UTF-8 hop.
+    /// `Writer.write_bytes` on an `io.stdout()` backing lands here so `b"\xff\xfe"` reaches the real
+    /// handle unchanged (W6-9: it used to be decoded with `from_utf8_lossy` and emit two U+FFFD).
+    /// The buffered sink is a `Vec<u8>` for the same reason; it decodes ONCE, at the Rust capture
+    /// boundary ([`Vm::take_out`] and the `run_*` helpers) — never where two engines are COMPARED
+    /// (the parity oracles diff `vm::run_file_bytes`' raw bytes; a lossy decode is not injective).
+    pub(super) fn emit_out_bytes(&mut self, b: &[u8]) {
         if self.host.stream {
-            stream::write_out(s);
+            stream::write_out(b);
         } else {
-            self.out.push_str(s);
+            self.out.extend_from_slice(b);
         }
     }
 
@@ -57,10 +67,15 @@ impl Vm {
     /// The stderr sink — same contract as [`Vm::emit_out`], on a SEPARATE writer + lock (so a task's
     /// `print` and `eprint` can reorder relative to each other, exactly like Python's).
     pub(super) fn emit_err(&mut self, s: &str) {
+        self.emit_err_bytes(s.as_bytes());
+    }
+
+    /// The byte-level stderr sink — the twin of [`Vm::emit_out_bytes`] (W6-9).
+    pub(super) fn emit_err_bytes(&mut self, b: &[u8]) {
         if self.host.stream {
-            stream::write_err(s);
+            stream::write_err(b);
         } else {
-            self.stderr.push_str(s);
+            self.stderr.extend_from_slice(b);
         }
     }
 
@@ -82,8 +97,8 @@ impl Vm {
             heap: Heap::new(),
             stack: Vec::new(),
             frames: Vec::new(),
-            out: String::new(),
-            stderr: String::new(),
+            out: Vec::new(),
+            stderr: Vec::new(),
             host: crate::native::HostConfig::default(),
             call_depth: 0,
             module_objs: Vec::new(),
@@ -658,8 +673,13 @@ impl Vm {
 
     /// `chezzi test` — take + clear whatever a test printed to stdout, resetting the buffer so the
     /// next test starts clean (the runner currently discards it; the report is Rust-formatted).
+    ///
+    /// The buffered sink is bytes (W6-9); this is one of the CAPTURE boundaries where Rust needs a
+    /// `String`, so it decodes lossily here. `chezzi run` (the path a program's stdout actually
+    /// reaches an fd) never passes through it and stays byte-exact. Not for comparing two engines'
+    /// output — that takes `vm::run_file_bytes` (see `vm::RunOutputRaw`).
     pub fn take_out(&mut self) -> String {
-        std::mem::take(&mut self.out)
+        String::from_utf8_lossy(&std::mem::take(&mut self.out)).into_owned()
     }
 
     /// `chezzi test` — drain anything the program left running (e.g. an Executor a test forgot to

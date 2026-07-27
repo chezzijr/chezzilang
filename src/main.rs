@@ -400,13 +400,18 @@ fn run_check_parity(
     entry_fn: Option<&str>,
     root: Option<std::path::PathBuf>,
 ) -> ExitCode {
+    use std::io::Write;
     let p = std::path::Path::new(path);
     // `stream` stays false (the `from_process` default) so out/err come back FULLY BUFFERED. Each leg
     // needs its own config: `HostConfig` is not `Clone` and `from_process` consumes the Vec.
     let cfg1 = native::HostConfig::from_process(prog_args.clone());
     let cfg2 = native::HostConfig::from_process(prog_args);
-    let (o1, e1, r1, _) = vm::run_file_with_entry(p, cfg1, false, entry_fn, root.clone());
-    let (o2, e2, r2, _) = vm::run_file_with_entry(p, cfg2, true, entry_fn, root);
+    // RAW BYTES, not the lossily-decoded capture: `from_utf8_lossy` is not injective, so two
+    // engines emitting DIFFERENT non-UTF-8 bytes (reachable since `write_bytes` went byte-exact,
+    // W6-9) would decode to the same U+FFFD run and be reported as parity OK. The flag's documented
+    // contract is byte-identical stdout, so it diffs bytes.
+    let (o1, e1, r1, _) = vm::run_file_bytes(p, cfg1, false, entry_fn, root.clone());
+    let (o2, e2, r2, _) = vm::run_file_bytes(p, cfg2, true, entry_fn, root);
     // Compare terminal faults EXACTLY as the in-tree parity oracle does — `RunError`'s `Display`
     // (`to_string()` = "runtime error ({span}): {message}"), NOT the full stack trace. The trace frames
     // (`at <fn> (called at <site>)`) can legitimately differ between engines when M:N picks a different
@@ -416,8 +421,10 @@ fn run_check_parity(
     let err2 = r2.err().map(|e| e.to_string());
 
     if o1 == o2 && e1 == e2 && err1 == err2 {
-        print!("{o1}");
-        eprint!("{e1}");
+        // Echo the capture as BYTES — the tool must reproduce the output of the command it checks.
+        let _ = std::io::stdout().write_all(&o1);
+        let _ = std::io::stdout().flush();
+        let _ = std::io::stderr().write_all(&e1);
         if let Some(m) = &err1 {
             eprintln!("{m}");
         }
@@ -444,24 +451,37 @@ fn run_check_parity(
 /// Emit a greppable side-by-side report for a stream that differs between the two engines: the first
 /// differing line index, then both sides. Handles differing line counts (a missing line shows as
 /// `<none>`).
-fn report_stream_diff(stream: &str, serial: &str, mn: &str) {
-    let a: Vec<&str> = serial.lines().collect();
-    let b: Vec<&str> = mn.lines().collect();
+fn report_stream_diff(stream: &str, serial: &[u8], mn: &[u8]) {
+    let a: Vec<&[u8]> = serial.split(|&b| b == b'\n').collect();
+    let b: Vec<&[u8]> = mn.split(|&b| b == b'\n').collect();
     let n = a.len().max(b.len());
     for i in 0..n {
         let la = a.get(i).copied();
         let lb = b.get(i).copied();
         if la != lb {
             eprintln!("  {stream} differs at line {}:", i + 1);
-            eprintln!("    serial: {}", la.unwrap_or("<none>"));
-            eprintln!("    M:N:    {}", lb.unwrap_or("<none>"));
+            eprintln!("    serial: {}", show_line(la));
+            eprintln!("    M:N:    {}", show_line(lb));
             return;
         }
     }
-    // Streams differ only in a trailing newline (no differing line) — report at the boundary.
+    // Splitting on `\n` is injective, so differing streams always differ in some segment; keep a
+    // fallback rather than a panic.
     eprintln!("  {stream} differs (trailing content):");
-    eprintln!("    serial: {serial:?}");
-    eprintln!("    M:N:    {mn:?}");
+    eprintln!("    serial: {serial:02x?}");
+    eprintln!("    M:N:    {mn:02x?}");
+}
+
+/// Render one side of a diverging line: the text when it is valid UTF-8, else a hex dump — a
+/// divergence can now be in bytes a lossy decode would erase (`ff` vs `fe` → the same U+FFFD).
+fn show_line(line: Option<&[u8]>) -> String {
+    match line {
+        None => "<none>".to_string(),
+        Some(l) => match std::str::from_utf8(l) {
+            Ok(s) => s.to_string(),
+            Err(_) => format!("{l:02x?}"),
+        },
+    }
 }
 
 /// Resolve what to run for a bare `chezzi run` (no file argument): find the project root by walking

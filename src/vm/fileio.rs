@@ -40,10 +40,11 @@ impl Vm {
     }
 
     /// R2 — write `data` to a writer core. `File` → `write_all` on the `BufWriter`; `Stdout`/`Stderr` →
-    /// route through the [`Vm::emit_out`]/[`Vm::emit_err`] sink (the parity oracle — NEVER a raw fd),
-    /// decoding via `from_utf8_lossy` (the sink is `&str`-typed; the byte-exact common path is
-    /// `write(str)`); `Buffered` → append to the in-VM buffer and drain to the inner core once it
-    /// reaches `cap`. Returns the byte count on success.
+    /// hand the RAW bytes to the [`Vm::emit_out_bytes`]/[`Vm::emit_err_bytes`] sink (the parity oracle
+    /// — NEVER a raw fd), which is byte-typed end to end, so `write_bytes(b"\xff\xfe")` is byte-exact
+    /// on the console exactly as it already was on a file (W6-9); `Buffered` → append to the in-VM
+    /// buffer and drain to the inner core once it reaches `cap`. Returns the byte count on success —
+    /// no backing can short-write (`write_all` / in-memory / an unbounded queue).
     fn write_to_core(&mut self, core: &WriterCore, data: &[u8]) -> Result<usize, WriteErr> {
         // Take the drain decision under the lock, then route to the inner core with the lock RELEASED
         // (the inner core has its own Mutex; a Stdout inner needs `&mut self`).
@@ -60,13 +61,11 @@ impl Vm {
                     None
                 }
                 Backing::Stdout => {
-                    let s = String::from_utf8_lossy(data).into_owned();
-                    self.emit_out(&s);
+                    self.emit_out_bytes(data);
                     None
                 }
                 Backing::Stderr => {
-                    let s = String::from_utf8_lossy(data).into_owned();
-                    self.emit_err(&s);
+                    self.emit_err_bytes(data);
                     None
                 }
                 Backing::Buffered { inner, buf, cap } => {
