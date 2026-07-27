@@ -1545,8 +1545,8 @@ intrinsically (native same-type ops above), while a `newtype Name = str` with an
 method does **not** pass `fn twice[T: Add](x: T)` (or `fn sorted[T: Comparable](xs: T)`) — its `<`
 would silently use the underlying's native ordering, never the method, so the checker rejects it.
 
-Because of that, a **numeric** newtype may not *define* an operator-named method at all
-(`add`/`sub`/`mul`/`div`/`mod`/`neg`/`compare`) — it is a **compile error at the declaration**:
+Because of that, a **numeric** newtype may not *define* a method named after an operator it actually
+inherits (`add`/`sub`/`mul`/`div`/`mod`/`compare`) — it is a **compile error at the declaration**:
 
 ```chezzi
 newtype Score = int:
@@ -1561,9 +1561,9 @@ Without the rule the two spellings disagreed for that receiver: `.add()` dispatc
 `twice(Score(1), Score(2))` gave `99` and `Score(1) + Score(2)` gave `3`. A numeric newtype inherits
 its underlying's operators; **use a `struct` if you need your own arithmetic.** The rule is narrow —
 non-numeric and generic newtypes are unaffected, since they have no operator to disagree with.
-The one sharp edge: a **numeric** newtype that nonetheless defines `add`/`compare`/… keeps both — a
-direct or generic `a.add(b)` calls ITS method (a user method is never shadowed), while `a + b` still
-auto-flows to the native op, so the two spellings disagree. Pick one (`docs/gaps.md` W6-3d).
+`neg` is the one operator-named method a numeric newtype MAY still define, because unary `-` has no
+newtype path at all (`-m` on a `newtype Meters = float` is already the error `cannot negate Meters`).
+With no operator to disagree with, a `neg` method is simply the only spelling of negation available.
 
 ```chezzi
 newtype Meters = float:

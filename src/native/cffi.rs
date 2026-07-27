@@ -480,11 +480,24 @@ made the extern call; stored/cross-thread callbacks are not supported\n";
 /// non-blocking fd 2 (an inherited-`O_NONBLOCK` tty, a CI harness) or on any signal arriving
 /// mid-syscall — and the message is the entire value of the abort path.
 ///
-/// ponytail: the `EAGAIN` back-off is a 1 ms sleep, capped at ~2 s total, instead of `poll(POLLOUT)`.
-/// If a stuck reader ever needs to block us for longer, swap the sleep for a `poll`.
+/// The two retryable errnos get SEPARATE budgets, because only one of them sleeps. `EAGAIN` backs
+/// off 1 ms per spin, so 2000 spins really is the ~2 s cap it claims. `EINTR` does NOT sleep (the
+/// fd is writable; we were merely interrupted), so a shared counter would let a repeating signal —
+/// `setitimer`/`SIGPROF`, or the `signal`+`alarm` shape this abort path exists for — burn the whole
+/// budget in microseconds of pure syscall churn and return with NOTHING written, leaving a bare
+/// SIGABRT and an empty stderr: precisely the failure this retry loop was added to prevent. An
+/// `EINTR` that keeps recurring is also cheap to keep retrying, so it gets its own, larger budget.
+///
+/// ponytail: the `EAGAIN` back-off is a 1 ms sleep instead of `poll(POLLOUT)`. If a stuck reader
+/// ever needs to block us for longer, swap the sleep for a `poll`.
 fn write_all_fd(fd: i32, buf: &[u8]) {
+    /// ~2 s at 1 ms per spin.
+    const MAX_AGAIN: u32 = 2000;
+    /// No sleep on this path, so the bound is on syscall churn, not wall-clock.
+    const MAX_INTR: u32 = 100_000;
     let mut off = 0usize;
-    let mut spins = 0u32;
+    let mut again_spins = 0u32;
+    let mut intr_spins = 0u32;
     while off < buf.len() {
         // SAFETY: writing `buf.len() - off` bytes from within `buf`'s own allocation to a raw fd.
         let n = unsafe { libc::write(fd, buf[off..].as_ptr() as *const c_void, buf.len() - off) };
@@ -499,18 +512,23 @@ fn write_all_fd(fd: i32, buf: &[u8]) {
         if e != libc::EINTR && e != libc::EAGAIN && e != libc::EWOULDBLOCK {
             return; // EPIPE / EBADF / ENOSPC: unrecoverable, the abort below is all that's left
         }
-        spins += 1;
-        if spins > 2000 {
+        if e == libc::EINTR {
+            intr_spins += 1;
+            if intr_spins > MAX_INTR {
+                return;
+            }
+            continue; // writable, just interrupted — retry immediately, do NOT spend the sleep budget
+        }
+        again_spins += 1;
+        if again_spins > MAX_AGAIN {
             return;
         }
-        if e != libc::EINTR {
-            let ts = libc::timespec {
-                tv_sec: 0,
-                tv_nsec: 1_000_000,
-            };
-            // SAFETY: async-signal-safe sleep on a stack timespec; no out-param.
-            unsafe { libc::nanosleep(&ts, std::ptr::null_mut()) };
-        }
+        let ts = libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 1_000_000,
+        };
+        // SAFETY: async-signal-safe sleep on a stack timespec; no out-param.
+        unsafe { libc::nanosleep(&ts, std::ptr::null_mut()) };
     }
 }
 

@@ -652,7 +652,7 @@ protocol's `compare` second parameter being literally `Self` after substitution 
 the two-orders situation unrepresentable rather than reconciling it after the fact.
 
 **RESOLVED 2026-07-27 — ruling (a) landed.** A **numeric, non-generic** newtype may no longer define
-`add`/`sub`/`mul`/`div`/`mod`/`neg`/`compare`; it is a compile error at the DECL site
+`add`/`sub`/`mul`/`div`/`mod`/`compare`; it is a compile error at the DECL site
 (`src/checker/setup.rs`, beside the existing static-method reject, which defers for the same reason —
 the dispatch path does not exist):
 ```
@@ -668,6 +668,15 @@ Only (a) makes the two-orders state unrepresentable. It also matches the Go ance
 ([[no-drift-from-popular-languages]]): a Go defined type inherits its underlying's operators and Go has
 no operator overloading, so the conflict cannot arise there — Chezzi manufactured it by letting the
 protocol operation also be spelled as a method.
+**`neg` is EXCLUDED from the reject list** — caught by adversarial review 2026-07-28 (charged
+independently by all three prosecutors, upheld by the defender, who built both revisions and showed
+`fn neg` compiled before the rule and errored after). Unary `-` has NO newtype path at all: `Neg` is
+absent from the intrinsic grant and `satisfies`'s newtype arm returns `Err` for it, so `-m` on a
+numeric newtype is already `cannot negate Meters`. With no operator to disagree with, a `neg` method
+is the ONLY spelling of negation available — the first cut of this rule deleted working code and
+justified it with a conflict that cannot occur. The rule now covers exactly the names a numeric
+newtype genuinely *inherits* an operator for. Boundary pinned by the `ok(...)` case in
+`checker::tests::numeric_newtype_ordinary_method_and_non_numeric_operator_name_still_ok`.
 **Cost, accepted:** a one-way ratchet — any program deliberately calling `.add()` on a numeric newtype
 stops compiling. Deliberately NARROW: ordinary methods (`fn doubled`) are untouched, and non-numeric
 (`newtype Name = str`) and generic (`newtype Box[T] = T`) newtypes are unaffected — `satisfies` already

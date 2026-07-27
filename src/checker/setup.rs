@@ -2597,11 +2597,17 @@ impl Checker {
                     // newtype can no longer define these names at all, even to call deliberately.
                     // Non-numeric/generic newtypes are NOT affected: they have no operator to disagree
                     // with (`satisfies` already rejects the operator protocols for them).
+                    // `neg` is deliberately NOT in this list. Unary `-` has no newtype path at all
+                    // (`Neg` is absent from the intrinsic grant — `proto.rs`, and `satisfies`'s
+                    // newtype arm returns `Err` for it), so `-m` on a numeric newtype is ALREADY a
+                    // type error ("cannot negate Meters"). There is therefore no operator for a
+                    // `neg` method to disagree with — it is the only spelling of negation available,
+                    // and rejecting it would delete working code under a false premise.
                     if type_params.is_empty() && under_ty.is_numeric() {
                         for m in methods {
                             if matches!(
                                 m.name.as_str(),
-                                "add" | "sub" | "mul" | "div" | "mod" | "neg" | "compare"
+                                "add" | "sub" | "mul" | "div" | "mod" | "compare"
                             ) {
                                 self.error(
                                     m.name_span,

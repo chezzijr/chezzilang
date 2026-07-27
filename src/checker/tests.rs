@@ -3868,7 +3868,7 @@ fn newtype_static_method_is_rejected_with_clear_message() {
 /// implemented and rejected because it makes `<` intransitive under a heterogeneous `List[Comparable]`.
 #[test]
 fn numeric_newtype_operator_named_method_is_rejected() {
-    for name in ["add", "sub", "mul", "div", "mod", "neg", "compare"] {
+    for name in ["add", "sub", "mul", "div", "mod", "compare"] {
         let src =
             format!("newtype Score = int:\n    fn {name}(self, o: Score) -> int: return 42\n");
         let errs = check_src(&src);
@@ -3891,6 +3891,11 @@ fn numeric_newtype_ordinary_method_and_non_numeric_operator_name_still_ok() {
     ok("newtype Score = int:\n    fn double(self) -> Score: return Score(int(self) * 2)\n");
     ok("newtype Name = str:\n    fn add(self, o: Name) -> Name: return self\n");
     ok("newtype Box[T] = T:\n    fn add(self, o: Box[T]) -> Box[T]: return self\n");
+    // `neg` is NOT rejected: unary `-` has no newtype path (`Neg` is never granted — see
+    // `proto.rs`), so `-m` is already a type error and a `neg` method is the ONLY spelling of
+    // negation on a numeric newtype. Rejecting it would delete working code with no operator to
+    // disagree with. This case is the boundary that keeps the rule honest to its own premise.
+    ok("newtype Meters = float:\n    fn neg(self) -> Meters: return Meters(0.0 - float(self))\n");
 }
 
 #[test]

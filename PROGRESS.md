@@ -24,6 +24,13 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > asserted the divergence was REWRITTEN (not deleted) as
 > `numeric_newtype_operator_auto_flows_and_ordinary_methods_still_work`. Docs: `docs/syntax.md`,
 > `docs/gaps.md` (W6-3d RESOLVED, index row removed — **wave 6 now carries no open items**).
+> **Corrected 2026-07-28 by adversarial review:** the first cut also rejected `neg`, which was WRONG
+> and has been removed from the list. Unary `-` has no newtype path (`Neg` is never granted), so `-m`
+> is already `cannot negate Meters` — there is no operator for a `neg` method to disagree with, and
+> the rule was deleting working code under a false premise. All three prosecutors charged it
+> independently; the defender confirmed by building both revisions. The reject now covers exactly
+> `add`/`sub`/`mul`/`div`/`mod`/`compare` — the names a numeric newtype actually inherits an operator
+> for — and an `ok()` boundary case pins `fn neg` as legal so the rule stays honest to its premise.
 >
 > **✅ FIX (2026-07-27, gaps.md W6-9) — `Writer.write_bytes` is byte-exact on `io.stdout()`/`io.stderr()`
 > too; the VM's buffered output sink is now `Vec<u8>` end to end.** `io.stdout().write_bytes(b"\xff\xfe")`
