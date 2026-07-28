@@ -46,6 +46,9 @@ chronological log.
 | **W6-9r** | `:1303` | Parity-oracle residual left by the `W6-9b` fix: ~31 hand-rolled `run_file_p` + `run_file` cross-engine compares in `parity_tests.rs` still diff LOSSILY-DECODED strings, and `parity_entry_cfg_lines` compares stdout as an order-insensitive line multiset | The three SHARED comparators were fixed at the helper level (0 call sites touched); converting the hand-rolled ones means rewriting ~31 call sites. UTF-8-only today, so nothing is failing — but a new byte-emitting test added at one of those sites inherits the blindness. Use `vm::run_file_bytes` there |
 | **W6-10r** | `:1216` | `--max-heap` residual: a payload reachable ONLY through a **nested** core (a `Channel` inside a `Shared`, once the nested core's last `Obj` alias slot is swept) is counted nowhere | Left open by the W6-10 fix on purpose. `live_bytes` reaches a core's bytes through its `Obj::*` alias slot; a nested core has none. Closing it needs cross-core byte recursion with `Arc` de-dup — narrow trigger, not worth the machinery yet |
 | protocol embeds | `:1505` | A protocol-embedded method isn't callable through the interface value (`p: Person` can't call embedded `name()`) despite `spec.md:973` "flattened at bound sites" | Filed as a safe-direction observation in wave 3; never triaged — doc and behavior contradict each other either way |
+| **W7-5** | `:3800` | The M:N `Executor` drain does not abort the remaining jobs after a faulting job (serial does), and `submit_result` discards the result of a job it ran | **Needs its own milestone — two fix attempts were rejected.** Sequential drain is correct but costs 4× (0.30s → 1.20s on 4 overlapping jobs); "run all" removes the drain's per-drain cancel flag, which is the ONLY kill switch — it breaks `os.exit` hard-halt, lets a faulting job leave a runaway sibling unkillable, defeats dead-stdout promptness, and creates a NEW serial≠M:N line-set divergence via `reduce_task_slots`' non-lowest-index fault flush |
+| **W7-5b** | `:3800` | An `Executor` created INSIDE an M:N task is silently discarded — its jobs never run, never reap, no fault | Found while prosecuting the W7-5 fix. It registers in the throwaway worker `Vm.executors`, which `run_outcome`/`into_fiber` drop; `drain_live_executors` only snapshots the PARENT `Vm`. Arguably worse than W7-5 itself; belongs to the same Executor milestone |
+| **W7-5c** | `:3800` | `reduce_task_slots` flushes a faulting task's buffered output only `if first_fault.is_none()` (`sched.rs:1688`), so a second faulting task's stdout is dropped on M:N | Latent today (the drain's cancel flag makes siblings `Cancelled`, which flushes); becomes live the moment two tasks can fault in one drain. Same milestone |
 
 **Known limits that are documented, not bugs** (listed so they aren't re-filed): `Iterable[T]` element
 recovery does not fire for a struct with only `iter` and no `next` — bound that one concretely
@@ -3833,3 +3836,53 @@ leaves all four `test fn`s byte-identical on both engines — with no handler ab
 fault returns `Err` either way. The conjunct is kept as the **conservative** arm (it preserves the
 bypass in more cases, so a cancelled task is more likely to die), not because a test discriminates
 it.
+
+### W7-2 — `Channel.close()` lost the wakeup for a `wait:`-parked fiber → spurious `deadlock:` on M:N (**FIXED 2026-07-28**)
+
+**Symptom.** A fiber parked in a multi-arm `wait:` whose channel is `close()`d concurrently was never
+woken; the deadlock detector then (correctly) reaped a genuinely unreachable fiber, so a valid program
+faulted. `--serial` 0/20; `--threads=8` **6/40**, rising with parallelism.
+
+```chezzi
+a := Channel[int]()
+fn w(a: Channel[int]):
+    r := recover:
+        wait:
+            v := a.recv(): print("got", v)
+    print("waiter done")
+parallel:
+    spawn w(a)
+    spawn: a.close()
+```
+
+**The discriminating table** (what localised it — `close` is the ONLY wake path that lost it):
+
+| waker racing the `wait:` park | failures @ `--threads=8` |
+|---|---|
+| `a.close()` | **6/40** |
+| `a.send(1)` (recv-arm wake) | 0/40 |
+| `a.recv()` (send-arm wake) | 0/40 |
+| `a.trip()` | 0/40 |
+| plain blocking `a.recv()` (no `wait:`) racing `close` | 0/40 |
+
+**Root cause — NOT where the hunt's report guessed.** The report proposed "`close_wake` does not
+claim/sweep the `Wait` token the way `send_wake` does". That is **false**: `send_wake` and `close_wake`
+both funnel through the same `wake_bucket`, whose `ParkedEntry::Wait` arm does the claimed-CAS + sweep
+identically, and both walk `wake_parent_chain` (B5). The real cause is the N-arm **gap re-check** in
+`MnSched::park_wait` (`src/vm/mod.rs:2378`): its recv-arm readiness predicate was `!g.is_empty()` and
+deliberately ignored `g.closed` — an in-code `parity-perf-0` note records that a previous attempt at
+`closed == ready` was reverted because it live-locked (requeue → re-poll → `op_wait_poll` SKIPS the
+closed arm → re-park). So a `close()` landing between `op_wait_poll`'s empty poll and `park_wait` fired
+`close_wake` against a still-empty bucket, and the fiber then parked on a key nothing could ever wake.
+`send`/`recv`/`trip` each leave a signal the re-check DOES read (a queued value, a free slot, the
+`done_latch`), which is exactly why they never reproduced.
+
+**Fix.** Make the arm accounting **three-way**, mirroring `op_wait_poll` instead of contradicting it:
+READY (take it now) / **DEAD** (a `closed && empty && non-timer` recv arm — nothing can ever make it
+ready) / LIVE. Requeue when any arm is ready **or when every arm is dead**. The all-dead requeue
+terminates — the re-run `WaitPoll` hits `all_closed` and faults `wait: all channels closed`, which is
+what the serial engine already does — so it does not reintroduce the `parity-perf-0` spin, and
+one-dead-among-live still parks. The deadlock detector is untouched.
+
+**Verified.** 0/60 failures at `--threads=8` (main: 3/60); a genuine all-parked nursery still faults
+`deadlock:` promptly; `wait:` over all-closed channels faults identically on both engines.

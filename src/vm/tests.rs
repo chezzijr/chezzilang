@@ -3360,6 +3360,102 @@ fn mn_wait_park_lone_fiber_is_deadlock() {
     );
 }
 
+/// W7-2 — the `close()`-vs-`wait:`-park lost wakeup. `op_wait_poll` treats a closed+EMPTY recv arm
+/// as DEAD (skipped, counted only toward `all_closed`), so if EVERY arm is dead the poll faults
+/// "wait: all channels closed". `park_wait`'s gap re-check must classify arms the SAME way: a
+/// `close()` landing between the empty poll and the park runs `close_wake` against a bucket that is
+/// still empty, so the re-check is the only thing left that can see it. Pre-fix the recv predicate
+/// was `!g.is_empty()` alone → not ready → park on a key nothing will ever wake → the deadlock
+/// detector (correctly) reaps a genuinely unreachable fiber, i.e. a SPURIOUS `deadlock:` fault.
+#[test]
+fn mn_park_wait_all_recv_arms_closed_requeues_instead_of_parking() {
+    let sched = mk_sched(1);
+    sched.seed(vec![mk_fiber(0)]);
+    let f0 = take_run(&sched); // running 1
+    let c1 = empty_core();
+    let c2 = empty_core();
+    for c in [&c1, &c2] {
+        c.q.lock().unwrap().closed = true;
+    }
+    sched.park_wait(
+        vec![
+            (core_key(&c1), Arc::clone(&c1), false),
+            (core_key(&c2), Arc::clone(&c2), false),
+        ],
+        f0,
+    );
+    {
+        let c = sched.lock();
+        assert_eq!(c.parked_n, 0, "an all-dead wait must NOT park");
+        assert_eq!(c.global.len(), 1, "it is requeued Ready to re-poll");
+    }
+    assert_eq!(
+        take_run(&sched).task_index,
+        0,
+        "the fiber re-runs WaitPoll, which faults `wait: all channels closed`"
+    );
+}
+
+/// W7-2 anti-over-fire fence (green before AND after the fix): ONE closed arm among LIVE arms must
+/// still PARK. Treating a closed+empty recv arm as *ready* was tried and reverted (parity-perf-0):
+/// the re-poll SKIPS that arm, finds the live one still empty, and re-parks → requeue→re-poll→re-park
+/// live-lock. Only an ALL-dead wait may requeue (its re-poll terminates in the all-closed fault).
+/// Also pins that the deadlock detector stays sharp on the partially-closed park.
+#[test]
+fn mn_park_wait_one_closed_one_live_still_parks_and_is_deadlock() {
+    let sched = mk_sched(1);
+    sched.seed(vec![mk_fiber(0)]);
+    let f0 = take_run(&sched);
+    let closed = empty_core();
+    closed.q.lock().unwrap().closed = true;
+    let live = empty_core();
+    sched.park_wait(
+        vec![
+            (core_key(&closed), Arc::clone(&closed), false),
+            (core_key(&live), Arc::clone(&live), false),
+        ],
+        f0,
+    );
+    let c = sched.lock();
+    assert_eq!(c.parked_n, 1, "a live arm remains — the fiber parks");
+    assert!(
+        sched.is_deadlocked(&c),
+        "a lone wait-parked fiber with no possible waker is still a deadlock"
+    );
+}
+
+/// W7-2 end-to-end (RACY — loop it): a `close()` racing a sibling's `wait:` park must never produce
+/// a spurious `deadlock:` fault. `--serial` never fails; pre-fix the M:N engine lost the wakeup
+/// whenever the `close` landed inside the poll→park window.
+///
+/// PRE-FIX MEASURED (this exact 200-iteration loop, `park_wait` reverted to the pre-fix predicate,
+/// `cargo test --lib -- --test-threads=1`, 12-core box): **43 / 45 / 50 / 56 failures out of 200**
+/// over four consecutive runs — ~25%, so ≥1 failure is essentially certain and the fence really is
+/// RED without the fix. It is a RATE, not a fixed count; quote the range, not a single number.
+#[test]
+fn wait_park_close_race_no_spurious_deadlock_parallel() {
+    let src = "fn w(a: Channel[int]):\n    r := recover:\n        wait:\n            v := a.recv(): print(\"got\", v)\n    print(\"waiter done\")\nfn main():\n    a := Channel[int]()\n    parallel:\n        spawn w(a)\n        spawn: a.close()\n    print(\"end\")\nmain()\n";
+    let mut failures = Vec::new();
+    for i in 0..200 {
+        match run_capture_parallel(src) {
+            Ok(out) => {
+                if !out.contains("waiter done") || !out.contains("end") {
+                    failures.push(format!("iter {i}: missing lines in {out:?}"));
+                }
+            }
+            Err(e) => failures.push(format!("iter {i}: {}", e.message)),
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "close() racing a wait: park lost the wakeup (pre-fix this loop failed 43-56/200 across four \
+         runs with `deadlock: every task in this parallel: block is blocked...` on a 12-core box); \
+         {} failures, first: {}",
+        failures.len(),
+        failures.first().map_or("", |s| s.as_str())
+    );
+}
+
 /// D4b: a `LocalQ` pops `runnext` first (locality), then the ring in FIFO order, then `None`.
 #[test]
 fn localq_runnext_then_ring_order() {
@@ -9656,12 +9752,40 @@ fn vm_wait_all_closed_no_else_faults() {
     assert!(err.contains("all channels closed"), "{err}");
 }
 
+/// W7-2 contract fence — the observable an ALL-DEAD `park_wait` requeue lands on is this fault, and
+/// it must be byte-identical on both engines for a MULTI-arm wait (the single-arm case above only
+/// exercises the poll, never the park-gap re-check).
+#[test]
+fn vm_wait_all_closed_multi_arm_faults_both_engines() {
+    let src = "fn main():\n    a := Channel[int]()\n    b := Channel[int]()\n    a.close()\n    b.close()\n    wait:\n        v := a.recv(): print(v)\n        w := b.recv(): print(w)\nmain()\n";
+    let serial = run_err(src);
+    assert!(serial.contains("all channels closed"), "{serial}");
+    let mn = match run_capture_parallel(src) {
+        Ok(o) => panic!("expected a fault, got {o:?}"),
+        Err(e) => e.message,
+    };
+    assert_eq!(serial, mn, "serial vs M:N wait all-closed fault divergence");
+}
+
 #[test]
 fn vm_wait_live_empty_no_else_top_level_deadlocks() {
     let err = run_err(
         "fn main():\n    ch := Channel[int]()\n    wait:\n        v := ch.recv(): print(v)\nmain()\n",
     );
     assert!(err.contains("deadlock"), "{err}");
+}
+
+/// W7-2 anti-detector-weakening fence: a GENUINE all-parked nursery (a `wait:` on live, empty
+/// channels with no possible waker) must still be reported promptly as a deadlock on M:N. The W7-2
+/// fix must deliver the missing wakeup, never blunt the detector.
+#[test]
+fn vm_wait_real_deadlock_still_reported_parallel() {
+    let src = "fn w(a: Channel[int], b: Channel[int]):\n    wait:\n        v := a.recv(): print(v)\n        u := b.recv(): print(u)\nfn main():\n    a := Channel[int]()\n    b := Channel[int]()\n    parallel:\n        spawn w(a, b)\nmain()\n";
+    let mn = match run_capture_parallel(src) {
+        Ok(o) => panic!("expected a deadlock fault, got {o:?}"),
+        Err(e) => e.message,
+    };
+    assert!(mn.contains("deadlock"), "{mn}");
 }
 
 /// VM-only (the interp would deadlock): a spawned consumer `wait`s on two empty channels and
