@@ -137,7 +137,9 @@ registered before anything can kill it and **always** runs on the cancel unwind 
 on `--serial`. Every spawned task starts, even into an already-cancelled scope. A CPU loop stays
 promptly cancellable (the back-edge is a checkpoint); **loop-free recursion is not a checkpoint** and
 runs to completion first (Trio's model — pure CPU code is not interrupted). A **`defer` is never itself cancelled**: no checkpoint fires inside a deferred call, so every
-registered `defer` runs in full (LIFO). Cancelling a scope also cancels its **nested** scopes. A `recover:` *inside* a
+registered `defer` runs in full (LIFO) — and a `recover:` installed *inside* a defer body catches faults
+raised beneath it, so a panic in cleanup step 1 does not skip cleanup step 2 (it buys the defer body, not
+the task's life). Cancelling a scope also cancels its **nested** scopes. A `recover:` *outside* the defer in a
 cancelled task never catches the cancel (a cancelled task must die). `std.os.exit` is the one thing that
 skips `defer`s by design. Genuine deadlock is the one known limit (`docs/gaps.md` N5). **Cross-task
 stdout order is nondeterministic on both engines** (one `print` = one locked, line-atomic write); the

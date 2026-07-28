@@ -4,6 +4,31 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 **Legend:** ⬜ not started · 🟦 in progress · ✅ done
 
+> **✅ FIX (2026-07-28, gaps.md W7-3) — a `recover:` installed INSIDE a `defer` body now catches while
+> the task is being torn down by a nursery cancel.** A cancelled task's `defer` that did
+> `r := recover: panic(...)` lost the handler: the fault escaped and the rest of the cleanup was silently
+> skipped (both engines, identical) — violating concurrency.md's "a `defer` is never itself cancelled"
+> and Go's rule that a deferred function running during a panic completes and its own `recover()` works.
+> Half-broken, which is why it survived: the same defer in an UNcancelled task worked, and a
+> `?`-propagated `Err` in the cancelled task's defer was caught — only the fault/panic path broke. **Root
+> cause** `src/vm/exec.rs:1189`, the post-step `Err` funnel:
+> `if self.cancelled || rte.is_over_memory || rte.is_timed_out` bypasses the `recover:` handler stack,
+> and `self.cancelled` is a task-wide LATCH still set while the cancelled task's defers run — the funnel
+> was never gated on `self.deferring`, while the sibling predicate `cancel_suppressed()` (`exec.rs:1489`)
+> already was. Wave 6's meta-finding shape again: **a fix applied to SOME arms of an N-way set**. **Fix:
+> the (a) `self.cancelled` marker ONLY** — `cancel_bypass = self.cancelled && !(self.deferring > 0 &&
+> caught_here)`, reusing the already-computed `handlers.last().frame_len > base_level` test (hoisted
+> above the `if`). A defer body runs in its own nested `run_until`, so a handler installed INSIDE it owns
+> the fault while one OUTSIDE sits at/below `base_level` and still cannot defeat the cancel; once the
+> body finishes the pending cancel resumes travelling up (the task dies, the nursery still reports the
+> original sibling fault, `rc` unchanged). **(b) `is_over_memory` / (c) `is_timed_out` deliberately keep
+> bypassing UNCONDITIONALLY** — `chezzi test --max-heap` / `--timeout` aborts stay recover-proof inside a
+> defer too, and neither ever sets `self.cancelled`, so the (a)-only gate cannot weaken them. Tests:
+> `tests/chz/spec/cancel_defer_recover_test.chz` (RED-first driver + the two fences
+> `recover_outside_defer_cannot_defeat_cancel` and `faulting_defer_does_not_swallow_lifo_next` (N6d),
+> serial==M:N gated) + `test_runner::recover_inside_defer_does_not_catch_timeout` pinning (b)/(c). Docs:
+> `docs/concurrency.md`, `docs/gaps.md` (new wave-7 session log; nothing added to OPEN ITEMS — ships fixed).
+>
 > **✅ RULING (2026-07-27, gaps.md W6-3d) — a NUMERIC newtype may no longer define an operator-named
 > method; the declaration is a compile error.** `newtype Score = int:` with an `add`/`compare` method
 > type-checked, then answered TWO different values for one protocol operation: `.add()` / a `[T: Add]`

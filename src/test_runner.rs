@@ -1371,6 +1371,26 @@ struct Suite:
     }
 
     #[test]
+    fn recover_inside_defer_does_not_catch_timeout() {
+        // W7-3 boundary: the cancel-bypass carve-out is (a)-ONLY. A `recover:` installed inside a
+        // `defer` body now catches a CANCEL-time fault, but a `--timeout` wall-clock abort is still
+        // recover-proof there too — `is_timed_out` is not gated on `deferring`, so the trailing
+        // `assert false` never runs and the test lands TimedOut.
+        let d = TmpDir::new();
+        let f = d.write(
+            "recdefertimeout_test.chz",
+            "test fn t():\n    defer:\n        r := recover:\n            while true:\n                pass\n        assert false\n    while true:\n        pass\n",
+        );
+        let report = run_tests_timed(&f, true, 0, 50);
+        assert!(!report.passed, "report:\n{}", report.text);
+        assert!(
+            report.text.contains("TIMED-OUT t"),
+            "a recover: INSIDE a defer must NOT catch a timeout abort; report:\n{}",
+            report.text
+        );
+    }
+
+    #[test]
     fn timed_out_across_spawn() {
         // A hang inside a `spawn`ed task must bucket TimedOut on the M:N engine: the worker runs on its
         // own VM, so the absolute deadline must be threaded onto it, and its loop's back-edge trips the
