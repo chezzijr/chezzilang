@@ -61,7 +61,14 @@ NOTE: flags must come BEFORE the file path. Anything after the file is passed
 ";
 
 fn main() -> ExitCode {
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    // `args_os`, not `args`: `std::env::args()` PANICS on a non-UTF-8 argument, so hostile bytes in
+    // argv (or in the script path) aborted the CLI with rc=101 before the program ever started.
+    // Decoding is LOSSY (invalid bytes → U+FFFD) — argv reaches Chezzi as `str`; documented in
+    // docs/stdlib.md under std.os.
+    let args: Vec<String> = std::env::args_os()
+        .skip(1)
+        .map(|a| a.to_string_lossy().into_owned())
+        .collect();
     let cmd = args.first().map(String::as_str).unwrap_or("help");
 
     match cmd {

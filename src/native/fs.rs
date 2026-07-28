@@ -299,12 +299,41 @@ fn rename(h: &mut dyn Host) -> Result<NativeRet, HostError> {
     }
 }
 
+/// Do `a` and `b` name the SAME file? Inode identity (dev+ino), not a path-string compare — a
+/// symlink or a hardlink reaches one inode under two names. A missing side is never "the same",
+/// so a copy to a new destination falls straight through.
+fn same_file(a: &str, b: &str) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        match (std::fs::metadata(a), std::fs::metadata(b)) {
+            (Ok(x), Ok(y)) => x.dev() == y.dev() && x.ino() == y.ino(),
+            _ => false,
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+            (Ok(x), Ok(y)) => x == y,
+            _ => false,
+        }
+    }
+}
+
 /// Copy a file's contents (file-only). Faults if the source is missing. The byte count is dropped
 /// for parity-simplicity with `write_file`'s `Result[nil]` shape.
+///
+/// Refuses a SAME-FILE copy (same path, or via a symlink/hardlink to one inode) with an `Err`,
+/// leaving the file untouched — `std::fs::copy` opens the destination `O_TRUNC`, so without this
+/// guard `copy(p, p)` returned `Ok` after wiping the file. Matches Python `shutil.copyfile`'s
+/// `SameFileError` and coreutils `cp a a`.
 fn copy(h: &mut dyn Host) -> Result<NativeRet, HostError> {
     expect_args(h, "copy", 2)?;
     let from = h.arg_str(0)?;
     let to = h.arg_str(1)?;
+    if same_file(&from, &to) {
+        return Ok(NativeRet::Err(format!("{from} -> {to}: are the same file")));
+    }
     match std::fs::copy(&from, &to) {
         Ok(_) => Ok(NativeRet::Ok(Box::new(NativeRet::Nil))),
         Err(e) => Ok(NativeRet::Err(format!("{from} -> {to}: {e}"))),
