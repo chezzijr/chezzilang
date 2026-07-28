@@ -808,6 +808,16 @@ fn serve(tok: Token, io: Channel[str]):
 > enclosing cancel, so its children run to completion (they are still cancellable by their *own*
 > nursery's faults). Both engines.
 >
+> **A `recover:` INSIDE a defer body catches — even while the task is being torn down.** Since no
+> cancellation point fires inside a deferred call, a fault raised *beneath* a `recover:` that the defer
+> body itself installed is caught there, and the rest of the cleanup runs: a panic in cleanup step 1
+> does not silently skip cleanup step 2 (Go's rule — a deferred function running during a panic
+> completes normally and its own `recover()` works). It buys the **defer body**, not the task's life:
+> once the body finishes the pending cancel resumes travelling up — the task still dies and the nursery
+> still reports the original sibling fault, unchanged. A `recover:` **outside** the defer still cannot
+> defeat a cancel. `chezzi test`'s `--timeout` / `--max-heap` hard aborts stay **un-swallowable
+> everywhere**, inside a defer included. (`docs/gaps.md` **W7-3**.)
+>
 > **…so cleanup that blocks, blocks the teardown.** A `defer` that sleeps, waits on a socket or sends a
 > last message is *uninterruptible*: it delays the nursery join by exactly as long as it takes, on both
 > engines, with no cap (`defer time.sleep_ms(10000)` in a cancelled task = a 10s join). That is

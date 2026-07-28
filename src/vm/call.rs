@@ -3577,10 +3577,21 @@ impl Vm {
         // it: `deferring > 0` ⇒ `cancel_requested()` is false (exec.rs). It must be raised BEFORE
         // `guarded` (whose own checkpoint would otherwise eat this very call) and lowered on every
         // exit path, including a fault thrown by the deferred body itself.
+        // Panic-safe, same reasoning as `guarded`'s `native_reentry` (exec.rs): `run_one_deferred_inner`
+        // calls `guarded`, which CATCHES a re-entered FFI callback's Rust panic and `resume_unwind`s it,
+        // so a plain `-= 1` after the call would be skipped on that unwind and leak `deferring` at +1 for
+        // the VM's lifetime. Since W7-3 that leak is worse than "the task stops hitting checkpoints": it
+        // would also permanently disable the cancel bypass, letting an ordinary outer `recover:` defeat a
+        // nursery cancel. A `Drop` guard can't be used (it would alias `self` across the call).
         self.deferring += 1;
-        let r = self.run_one_deferred_inner(d);
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.run_one_deferred_inner(d)
+        }));
         self.deferring -= 1;
-        r
+        match r {
+            Ok(v) => v,
+            Err(payload) => std::panic::resume_unwind(payload),
+        }
     }
 
     fn run_one_deferred_inner(&mut self, d: Deferred) -> Result<(), RuntimeError> {

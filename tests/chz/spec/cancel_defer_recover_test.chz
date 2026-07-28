@@ -1,0 +1,95 @@
+# tests/chz/spec/cancel_defer_recover_test.chz — W7-3: the `recover:` / cancel-teardown boundary.
+#
+# A `defer` is never itself cancelled (docs/concurrency.md), so a `recover:` installed INSIDE a
+# defer body must catch faults raised beneath it even while the task is being torn down by a
+# nursery cancel — while a `recover:` OUTSIDE the defer still must NOT defeat the cancel, and the
+# pending cancel must resume travelling up once the defer body finishes.
+#
+# Asserts on a Shared accumulator read AFTER the join (never inter-task print order), and uses a
+# sleeping sibling + a blocking `recv` (never a busy loop — N8). Runs on BOTH engines via
+# test_runner::chz_suite_passes_both_engines.
+import std.time
+import std.concurrency
+
+# (a) THE FIX: a `recover:` inside a cancelled task's defer body catches, so the rest of the defer
+# body still runs ("AB", not "A") — and the original sibling fault still surfaces at the nursery.
+test fn recover_inside_defer_of_cancelled_task_catches():
+    log := Shared("")
+    outer := recover:
+        ch := Channel[int]()
+        parallel:
+            spawn:
+                defer:
+                    log.update(fn(s: str) -> str: s + "A")
+                    r := recover: panic("cleanup step 1 failed")
+                    assert "{r}" == "Err(cleanup step 1 failed)"
+                    log.update(fn(s: str) -> str: s + "B")
+                _ := ch.recv()
+            spawn:
+                time.sleep_ms(20)
+                panic("sibling-fault")
+        0
+    assert log.get() == "AB", "log={log.get()} outer={outer}"
+    assert "{outer}" == "Err(sibling-fault)", "outer={outer}"
+
+# (b) FENCE: a `recover:` OUTSIDE the defer body still cannot defeat the cancel — the statement
+# after it never runs.
+test fn recover_outside_defer_cannot_defeat_cancel():
+    log := Shared("")
+    ch := Channel[int]()
+    outer := recover:
+        parallel:
+            spawn:
+                defer:
+                    log.update(fn(s: str) -> str: s + "D")
+                r := recover: ch.recv()
+                log.update(fn(s: str) -> str: s + "X")
+            spawn:
+                time.sleep_ms(20)
+                panic("sibling-fault")
+        0
+    assert log.get() == "D", "log={log.get()} outer={outer}"
+
+# (b2) FENCE — a fault raised INSIDE the defer body (`deferring > 0`) while the only live `recover:`
+# sits OUTSIDE the defer must NOT resume the cancelled task. This pins the observable CONTRACT, not
+# the `caught_here` term: measured on the real binary, replacing `!(deferring > 0 && caught_here)`
+# with `!(deferring > 0)` leaves every test here byte-identical, so no program we could construct
+# distinguishes the term. It is kept as the conservative arm (it preserves the bypass in MORE cases,
+# i.e. a cancelled task is more likely to die), not because a test can tell the difference.
+test fn recover_outside_defer_cannot_catch_a_fault_raised_inside_it():
+    log := Shared("")
+    ch := Channel[int]()
+    outer := recover:
+        parallel:
+            spawn:
+                defer:
+                    log.update(fn(s: str) -> str: s + "E")
+                    xs: List[int] = []
+                    _ := xs[9]                                   # faults INSIDE the defer body
+                    log.update(fn(s: str) -> str: s + "NOPE")    # must never run
+                _ := ch.recv()
+            spawn:
+                time.sleep_ms(20)
+                panic("sibling-fault")
+        0
+    assert log.get() == "E", "log={log.get()} outer={outer}"
+    assert "{outer}" != "Ok(0)", "an outer recover: resumed a CANCELLED task; outer={outer}"
+
+# (c) FENCE (N6d): a faulting defer does not swallow the LIFO-next defer of a cancelled task.
+test fn faulting_defer_does_not_swallow_lifo_next():
+    log := Shared("")
+    ch := Channel[int]()
+    outer := recover:
+        parallel:
+            spawn:
+                defer:
+                    log.update(fn(s: str) -> str: s + "1")
+                defer:
+                    log.update(fn(s: str) -> str: s + "2")
+                    panic("boom in defer")
+                _ := ch.recv()
+            spawn:
+                time.sleep_ms(20)
+                panic("sibling-fault")
+        0
+    assert log.get() == "21", "log={log.get()} outer={outer}"

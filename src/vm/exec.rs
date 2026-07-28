@@ -1186,7 +1186,28 @@ impl Vm {
                 // `--timeout`: identical treatment for the `is_timed_out` marker — a wall-clock abort
                 // raised at a back-edge in a nested `run_until` (a HOF callback's own loop) bubbles
                 // here and must keep bypassing `recover:` the same way.
-                if self.cancelled || rte.is_over_memory || rte.is_timed_out {
+                //
+                // W7-3 CARVE-OUT — the (a) `self.cancelled` marker ONLY. `self.cancelled` is a
+                // task-wide LATCH that stays set while the cancelled task's `defer`s run, but "a
+                // `defer` is never itself cancelled" (docs/concurrency.md) and `cancel_suppressed`
+                // already carries the same `deferring > 0` suppression. So a `recover:` owned by
+                // THIS nested dispatch loop (`frame_len > base_level` — i.e. installed inside the
+                // defer body, not outside it) catches while `deferring > 0`. A `recover:` OUTSIDE
+                // the defer sits at/below `base_level`, so it still cannot defeat the cancel, and
+                // once the defer body finishes the pending cancel resumes travelling up.
+                // (b) `is_over_memory` and (c) `is_timed_out` are NOT gated: a `--max-heap` /
+                // `--timeout` abort stays recover-proof everywhere, including inside a defer.
+                //
+                // `caught_here` is the CONSERVATIVE arm, not a load-bearing one: measured on the real
+                // binary, dropping it (`!(self.deferring > 0)`) leaves every test in
+                // `tests/chz/spec/cancel_defer_recover_test.chz` byte-identical on both engines — with
+                // no handler above `base_level` the fault returns `Err` either way. It is kept because
+                // it preserves the bypass in MORE cases (a cancelled task is more likely to die), which
+                // is the safe direction. Do not "simplify" it away without re-deriving that.
+                let caught_here =
+                    matches!(self.handlers.last().copied(), Some(h) if h.frame_len > base_level);
+                let cancel_bypass = self.cancelled && !(self.deferring > 0 && caught_here);
+                if cancel_bypass || rte.is_over_memory || rte.is_timed_out {
                     let over_mem = rte.is_over_memory;
                     let timed = rte.is_timed_out;
                     let rte = self.unwind_deferred(base_level, false).unwrap_or(rte);
@@ -1199,8 +1220,6 @@ impl Vm {
                 // first, and a deeper deferred-call fault (run while its frame is still live) replaces
                 // it. A fault this loop CAN catch resets the capture below, so no stale trace survives
                 // a `recover:`.
-                let caught_here =
-                    matches!(self.handlers.last().copied(), Some(h) if h.frame_len > base_level);
                 if !caught_here && self.frames.len() > self.fault_trace_depth {
                     self.fault_trace = Some(self.capture_trace());
                     self.fault_trace_depth = self.frames.len();

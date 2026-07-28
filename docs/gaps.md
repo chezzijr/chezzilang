@@ -21,7 +21,9 @@ surfaces the wave-5 residual named as never-audited (FFI: 4 defects; GC + new ob
 W6-9 branch (**`W6-9b`**, the half-byte-exact parity oracle, fixed 2026-07-28); what remains are the
 three disclosed residuals `W6-9r` / `W6-10s` / `W6-10r` — see the index below. Read its session log
 before touching `io`/`process`/FFI/`RwShared`/module-snapshot code. Its meta-finding — **5 of 6 P0s are "a
-fix applied to SOME arms of an N-way set"** — is the highest-yield remaining lever.
+fix applied to SOME arms of an N-way set"** — is the highest-yield remaining lever. **Wave 7
+(2026-07-28)** is running against exactly that lever; `W7-3` (a `recover:` inside a cancelled task's
+`defer` was bypassed) was another instance of it and is **fixed** — session log at the end of this file.
 
 ## OPEN ITEMS — the whole backlog at a glance (updated 2026-07-28)
 
@@ -3765,3 +3767,69 @@ speculatively during the perf milestone.
 - **ureq** 2→3 — a real API rewrite of `std.request`; do as its own task when 2.x nears EOL, with
   request tests + `--parallel` verify.
 - **socket2** 0.5→0.6, **libloading** 0.8→0.9 — skip until a needed feature forces it.
+
+## Bug-hunt wave 7 (2026-07-28)
+
+### W7-3 — a `recover:` inside a `defer` body was bypassed while the task was being cancelled (**FIXED 2026-07-28**)
+
+**Symptom.** A cancelled task's `defer` that installs its own `recover:` lost it: the fault was not
+caught and the rest of the cleanup was silently skipped. Both engines, identical.
+
+```chezzi
+parallel:
+    spawn:
+        defer:
+            r := recover: panic("cleanup step 1 failed")
+            print("recovered: {r}")
+            print("CRITICAL CLEANUP")     # never printed
+        _ := ch.recv()
+    spawn:
+        time.sleep_ms(20)
+        panic("sibling-fault")
+```
+
+Half-broken: the same defer in an UNcancelled task worked, the nursery body's own defer worked, and a
+`?`-propagated `Err` inside the cancelled task's defer was caught — only the fault/panic path broke.
+Also reproduced with an ordinary runtime fault and with `defer cleanup()` (not a `defer:`-block artifact).
+
+**Root cause** — `src/vm/exec.rs:1189`, the post-step `Err` funnel:
+`if self.cancelled || rte.is_over_memory || rte.is_timed_out { … return Err(rte) }` bypasses the
+`recover:` handler stack. `self.cancelled` is a task-wide **latch** that stays set while the cancelled
+task's defers run, and the funnel was not gated on `self.deferring` — while the sibling predicate
+`cancel_suppressed()` (`exec.rs:1489`) already was. Wave 6's meta-finding shape exactly: **a fix applied
+to SOME arms of an N-way set**. Contract violated: concurrency.md's "A `defer` is never itself
+cancelled" + syntax.md's "`recover:` catches any panic occurring transitively beneath it".
+
+**Fix** — gate the **(a) `self.cancelled` marker ONLY**:
+`let cancel_bypass = self.cancelled && !(self.deferring > 0 && caught_here);` where `caught_here` is the
+already-computed `handlers.last().frame_len > base_level` test (hoisted above the `if`). A defer body
+runs in its own nested `run_until`, so a handler installed INSIDE it owns the fault; one installed
+OUTSIDE sits at/below `base_level` and still cannot defeat the cancel. After the defer body finishes the
+pending cancel resumes travelling up — the task dies, the nursery still reports the sibling fault, `rc`
+unchanged.
+
+**(b) `is_over_memory` / (c) `is_timed_out` were deliberately LEFT ALONE** — both keep bypassing
+unconditionally, so `chezzi test --max-heap` / `--timeout` aborts stay recover-proof inside a defer too.
+Neither ever sets `self.cancelled` (`exec.rs:1017-1035` re-observes `over_cap()` per GC boundary,
+`exec.rs:1437-1447` re-checks the deadline per back-edge), so the (a)-only gate cannot weaken them.
+Requiring `caught_here` (rather than the simpler `deferring == 0`) also keeps the handler-LESS
+defer-fault path byte-identical — the simple form would have re-routed it onto the `report_escaped =
+true` branch, a stderr change in the N6/N6h machinery.
+
+**Fences** — `tests/chz/spec/cancel_defer_recover_test.chz` (4 `test fn`s, serial==M:N gated): the
+driver, `recover_outside_defer_cannot_defeat_cancel`,
+`recover_outside_defer_cannot_catch_a_fault_raised_inside_it`, and
+`faulting_defer_does_not_swallow_lifo_next` (N6d). Plus
+`test_runner::recover_inside_defer_does_not_catch_timeout` pinning (b)/(c) — its load-bearing
+assertion is the absent `SWALLOWED` marker, **not** the `TIMED-OUT` bucket: the outer `--timeout`
+fires in the test body (`deferring == 0`), takes the unconditional bypass, and the funnel re-stamps
+`.timed_out()` onto whatever emerges, so the bucket is `TimedOut` whether or not the in-defer
+`recover:` swallowed the abort (adversarial-review fix — the first cut asserted only the bucket and
+so could not fail).
+
+**What the fences do NOT pin, stated honestly:** the `caught_here` conjunct in `cancel_bypass`.
+Measured on the real binary, replacing `!(deferring > 0 && caught_here)` with `!(deferring > 0)`
+leaves all four `test fn`s byte-identical on both engines — with no handler above `base_level` the
+fault returns `Err` either way. The conjunct is kept as the **conservative** arm (it preserves the
+bypass in more cases, so a cancelled task is more likely to die), not because a test discriminates
+it.
