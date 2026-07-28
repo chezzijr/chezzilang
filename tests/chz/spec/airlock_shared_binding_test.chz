@@ -1,0 +1,315 @@
+# W7-4 — a captured local is ONE BINDING, so two sibling closures over it must still share ONE cell
+# after crossing the airlock. `docs/syntax.md` says a write through a capture is visible "across
+# sibling closures", and a crossing snapshot-copies the binding into ONE independent per-task cell —
+# per BINDING, not per reference. The serializer used to re-serialize an off-DFS-stack cell as a fresh
+# `WireValue::Cell`, so `d.inc()` and `d.get()` landed on TWO cells and the shared binding silently
+# split (`d.get()` read 1 where 2 was written).
+#
+# The contrast that must NOT change: a DATA DAG alias (`pair := [xs, xs]`) is still two independent
+# deep copies (docs/concurrency.md) — a cell is a binding's identity, a list is a value.
+# Gated serial==M:N by chz_suite_passes_both_engines.
+import std.concurrency
+
+struct Ctr:
+    inc: fn() -> nil
+    get: fn() -> int
+
+fn make() -> Ctr:
+    n := 0
+    fn inc():
+        n = n + 1
+    fn get() -> int:
+        return n
+    return Ctr(inc, get)
+
+# Module globals: two closures over ONE function-local cell, reached through the module SNAPSHOT path.
+_w74c := make()
+_w74i := _w74c.inc
+_w74g := _w74c.get
+
+# A module-global generator inside a REFERENCE CYCLE (it is parked in the very list it closes over), so
+# its snapshot walk is DISCARDED (`to_wire` Errs → inert Nil) AFTER it has already reached the local
+# cell holding `_w74cyc`'s list. `_w74size` then reaches that same cell. If the discarded walk's cell
+# ids are not rolled back out of the shared per-module memo, `_w74size` emits a `Backref` to an id no
+# `WireValue::Cell` ever defines and the replay panics on `from_wire_memo`'s `.expect`.
+struct CycPair:
+    it: Iterator[int]
+    size: fn() -> int
+
+fn _w74mk() -> CycPair:
+    xs: List[Iterator[int]] = []
+    fn g() -> Iterator[int]:
+        yield xs.len()
+    fn size() -> int:
+        return xs.len()
+    it := g()
+    xs.push(it)
+    return CycPair(it, size)
+
+_w74pair := _w74mk()
+_w74cyc := _w74pair.it
+_w74size := _w74pair.size
+
+# W7-4 REVIEW — fixtures for `spawn_serializes_args_before_the_callee` (below): a struct chain deeper
+# than the 10000 structural cap (a non-crossable ARG), and a generator parked on a reference cycle
+# through the module-global list it reads (a non-crossable CALLEE CAPTURE). Two DIFFERENT reject
+# messages, so serialization ORDER is observable.
+struct _W74Deep:
+    next: List[_W74Deep]
+
+_w74hold: List[Iterator[int]] = []
+
+fn _w74deep(k: int) -> _W74Deep:
+    n := _W74Deep([])
+    i := 0
+    while i < k:
+        n = _W74Deep([n])
+        i = i + 1
+    return n
+
+fn _w74gen() -> Iterator[int]:
+    me := _w74hold[0]
+    yield 1
+    yield 2
+
+# Headline repro — no concurrency at all, just a Channel round-trip inside one task.
+test fn channel_send_keeps_one_binding():
+    c := make()
+    c.inc()
+    assert c.get() == 1
+    ch := Channel[Ctr](1)
+    ch.send(c)
+    d := ch.recv()
+    d.inc()
+    assert d.get() == 2
+
+# The pair reached through a STRUCT FIELD after crossing (same cell, two field-held closures).
+test fn struct_field_keeps_one_binding():
+    ch := Channel[Ctr](1)
+    ch.send(make())
+    d := ch.recv()
+    d.inc()
+    d.inc()
+    d.inc()
+    assert d.get() == 3
+
+# A cursor snapshot carrying both closures — the `Obj::Iter` airlock arm.
+test fn cursor_keeps_one_binding():
+    c := make()
+    # `inc` returns nil, so wrap it to keep the cursor homogeneous (`fn() -> int`).
+    fn bump() -> int:
+        c.inc()
+        return 0
+    ch := Channel[Iterator[fn() -> int]](1)
+    ch.send([bump, c.get].iter())
+    fs: List[fn() -> int] = []
+    for f in ch.recv():
+        fs.push(f)
+    fs[0]()
+    fs[0]()
+    assert fs[1]() == 2
+
+# A `Shared` box is a cross-heap VALUE STORE (its own airlock arm).
+test fn shared_keeps_one_binding():
+    box := Shared(make())
+    d := box.get()
+    d.inc()
+    d.inc()
+    assert d.get() == 2
+
+# `spawn f(g, h)` — two closures arriving as two SEPARATE spawn args must still share the binding.
+test fn spawn_named_args_keep_one_binding():
+    c := make()
+    r := Channel[int](1)
+    fn work(i: fn() -> nil, g: fn() -> int, out: Channel[int]):
+        i()
+        i()
+        out.send(g())
+    parallel:
+        spawn work(c.inc, c.get, r)
+    assert r.recv() == 2
+
+# `spawn:` block with TWO separate captured locals over one cell.
+test fn spawn_block_two_captures_keeps_one_binding():
+    c := make()
+    gi := c.inc
+    gg := c.get
+    r := Channel[int](1)
+    parallel:
+        spawn:
+            gi()
+            gi()
+            r.send(gg())
+    assert r.recv() == 2
+
+# The module-GLOBAL snapshot serializer (`to_snap`): two globals over one factory-local cell.
+test fn module_global_snapshot_keeps_one_binding():
+    r := Channel[int](1)
+    parallel:
+        spawn:
+            _w74i()
+            _w74i()
+            r.send(_w74g())
+    assert r.recv() == 2
+
+# W7-4 — the per-module snapshot memo is SHARED across globals, so a global whose speculative `to_wire`
+# is DISCARDED must roll its minted cell ids back out of it (see `_w74mk` above). The cycle-parked
+# generator crosses as an inert Nil and only faults when reached; the sibling closure over the same
+# local must still snapshot cleanly.
+test fn discarded_snapshot_walk_rolls_back_its_cell_ids():
+    r := Channel[int](1)
+    parallel:
+        spawn:
+            r.send(_w74size())
+    assert r.recv() == 1
+
+# FENCE — the DATA DAG rule is deliberate and must NOT change: an acyclic alias reached twice is two
+# independent deep copies, never collapsed into one shared node (docs/concurrency.md). Green before
+# and after the cell fix; it goes red only under an over-broad "preserve everything" memo.
+test fn data_dag_alias_stays_two_copies():
+    xs := [1]
+    pair := [xs, xs]
+    ch := Channel[List[List[int]]](1)
+    ch.send(pair)
+    p := ch.recv()
+    p[0].push(2)
+    assert p[0].len() == 2
+    assert p[1].len() == 1
+
+# FENCE — the OTHER boundary of the new rule: identity is preserved within ONE crossing, never BETWEEN
+# crossings. Two separate tasks each snapshot the binding independently (F1 per-task isolation,
+# docs/syntax.md rule 2), and the parent never sees a task's write. Goes red if the cell memo is ever
+# widened to Vm-lived state.
+test fn separate_tasks_each_get_their_own_binding():
+    c := make()
+    r := Channel[int](1)
+    parallel:
+        spawn:
+            c.inc()
+            c.inc()
+    parallel:
+        spawn:
+            r.send(c.get())
+    assert r.recv() == 0
+    assert c.get() == 0
+
+# FENCE — the THIRD boundary, and the one the persistent cell memo actually creates: ONE TASK reached
+# through TWO serializations still gets two bindings. A `spawn:` block's captures and the module-global
+# snapshot cross into the same task at the same instant but are separate serializations (per-task memo
+# vs per-module memo, rebuilt at different times — the snapshot faults in LAZILY on first module access,
+# so their rebuild maps cannot be unified without `Vm`-lived state across GC-visible points). So a
+# module global and a captured local over ONE factory-local cell still split: the task's `_w74i()`
+# writes the snapshot's cell, its `gg()` reads the capture's. Known ceiling, same family as the
+# cross-MODULE one — see docs/gaps.md W7-4c.
+test fn module_global_plus_local_capture_still_split():
+    gg := _w74c.get
+    r := Channel[int](1)
+    parallel:
+        spawn:
+            _w74i()
+            _w74i()
+            r.send(gg())
+    assert r.recv() == 0
+
+# W7-4 REGRESSION — `RwShared`'s zero-copy read views DRAIN one stored wire through many independent
+# `from_wire` rebuilds, so the persistent cell memo made a `Backref` reach across sibling elements for
+# the first time and every one of these methods hit a host PANIC (`a wire Backref always targets an
+# already-reconstructed node id`), not a catchable fault. A whole-container `get()` is ONE crossing and
+# still shares the binding; a per-element copy-out view is an independent copy (two `at()` calls are two
+# crossings and can never share), and `slice` — one call returning a container — shares within itself.
+test fn rwshared_views_over_sibling_closures():
+    n := 0
+    fn inc() -> int:
+        n = n + 1
+        return n
+    fn get() -> int:
+        return n
+    s := RwShared([inc, get])
+    both := s.get()          # whole container, one crossing → one binding
+    both[0]()
+    assert both[1]() == 1
+    assert s.at(1)() == 0    # per-element view → its own copy of the binding
+    sl := s.slice(0, 2)      # one call, one container → shared within the slice
+    sl[0]()
+    assert sl[1]() == 1
+    calls := 0
+    fn tick(f: fn() -> int):
+        f()
+        calls = calls + 1
+    s.for_each(tick)
+    assert calls == 2
+    # per-element again: the `inc` copy returns 1, the `get` copy reads its OWN (untouched) cell → 0.
+    assert s.fold(0, fn(a: int, f: fn() -> int) -> int: a + f()) == 1
+    m := RwShared({"i": inc, "g": get})
+    assert m.has("i")
+    match m.get_key("g"):
+        Some(f): assert f() == 0
+        None: assert false
+    m.for_each_entry(fn(k: str, f: fn() -> int): f())
+    assert m.fold_entries(0, fn(a: int, k: str, f: fn() -> int) -> int: a + 1) == 2
+    # (`contains` shares the code path but is unreachable with closures — a `fn` is not Hashable, so a
+    # Set can never hold two sibling closures.)
+
+# FENCE — same rule across two SEPARATE spawn args (the seam a shared serialize memo could collapse).
+test fn data_dag_alias_across_spawn_args_stays_two_copies():
+    xs := [1]
+    r := Channel[str](1)
+    fn work(a: List[int], b: List[int], out: Channel[str]):
+        a.push(2)
+        out.send("{a.len()} {b.len()}")
+    parallel:
+        spawn work(xs, xs, r)
+    assert r.recv() == "2 1"
+
+# W7-4 REVIEW (charge 1/5/7) — a `RwShared` read VIEW run CONCURRENTLY with a writer. The first cut
+# resolved a piece's `Backref` by RE-READING `core.v` after dropping the read guard, so a `set` in that
+# window swapped the stored wire for a fresh serialization whose ids are unrelated: the piece's backref
+# then hit `from_wire_memo`'s `.expect` — a HOST PANIC on a legal program (write-preferring `RwLock`,
+# so the queued writer wins the window: reproduced at every thread count). Stored wires are now
+# self-contained per element, so a view never needs a second read. The reader's `at(1)` copy is its own
+# binding either way; what is asserted is that the program completes at all.
+test fn rwshared_view_survives_a_concurrent_writer():
+    n := 0
+    fn inc() -> int:
+        n = n + 1
+        return n
+    fn get() -> int:
+        return n
+    fn zero() -> int:
+        return 0
+    s := RwShared([inc, get])
+    d := Channel[int](2)
+    parallel:
+        spawn:
+            for i in range(0, 20000):
+                s.set([zero, zero])
+                s.set([inc, get])
+            d.send(1)
+        spawn:
+            hits := 0
+            for i in range(0, 20000):
+                f := s.at(1)
+                hits = hits + f()
+            d.send(2)
+    assert d.recv() + d.recv() == 3
+
+# W7-4 REVIEW (charge 3) — SPAWN FAULT ORDERING. `do_spawn` batches the callee/receiver and the args
+# into ONE serialization; the args must still be serialized FIRST, as they were before the batch, or a
+# non-crossable callee pre-empts a non-crossable argument and the reported message changes. Here the
+# ARG trips the depth cap and the CALLEE's capture is a generator in a reference cycle: the arg's fault
+# is the one that must surface.
+test fn spawn_serializes_args_before_the_callee():
+    it := _w74gen()
+    _w74hold.push(it)
+    for x in it:
+        break
+    fn callee(d: _W74Deep):
+        for y in it:
+            break
+    d := _w74deep(11000)
+    r := recover:
+        parallel:
+            spawn callee(d)
+    match r:
+        Ok(_): assert false
+        Err(e): assert e.message() == "maximum structural depth (10000) exceeded (cyclic data structure?)"

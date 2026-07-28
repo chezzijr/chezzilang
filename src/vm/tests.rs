@@ -12681,6 +12681,82 @@ main()
     assert_eq!(run_capture_stress(src), run(src));
 }
 
+/// W7-4 REVIEW (perf cliff, regression lock) — an `RwShared` read VIEW must stay O(element), never
+/// O(whole container). The first cut resolved a piece's cross-element `Backref` by rebuilding the
+/// ENTIRE stored container once PER ELEMENT, so `for_each`/`fold`/`at` over a container of closures
+/// sharing one binding went quadratic (measured on the pre-fix release binary: n=4000 → 3.7s, n=12000
+/// → 34s, versus 0.02s before W7-4). Stored wires are now self-contained per element, so no view ever
+/// re-materializes the whole. A coarse CLIFF detector, not a benchmark: the budget is ~50× the actual
+/// debug-build cost and the pre-fix code blew it (measured: 10.5s debug, versus 0.03s fixed).
+#[test]
+fn rwshared_view_over_shared_bindings_is_not_quadratic() {
+    let src = "\
+import std.concurrency
+fn main():
+    n := 0
+    fn inc() -> int:
+        n = n + 1
+        return n
+    fs: List[fn() -> int] = [inc]
+    for i in range(0, 3000):
+        fs.push(inc)
+    s := RwShared(fs)
+    c := 0
+    fn tick(f: fn() -> int):
+        c = c + 1
+    s.for_each(tick)
+    print(c)
+main()
+";
+    let t = std::time::Instant::now();
+    assert_eq!(run_capture(src).unwrap(), "3001\n");
+    let el = t.elapsed();
+    assert!(
+        el < std::time::Duration::from_secs(5),
+        "RwShared.for_each over 3001 sibling-binding closures took {el:?} — the view is materializing \
+         the whole container per element again"
+    );
+}
+
+/// W7-4 memory-safety lock for the module-scoped REBUILD MAP: `fault_module` now keeps one wire-`id`
+/// → `GcRef` map alive ACROSS the whole `module_define` loop (so two globals over one captured local
+/// rebuild ONE cell). A `GcRef` parked in that map between globals must stay rooted — if it did not, a
+/// collection would panic ("dangling GcRef") or the second global would tie to a recycled slot. Run it
+/// under GC STRESS with junk allocation around the crossing, and assert the shared binding actually
+/// held (`2`, not `0`) as well as `stress == non-stress`.
+#[test]
+fn airlock_module_global_shared_binding_survives_gc_stress() {
+    let src = "\
+struct Ctr:
+    inc: fn() -> nil
+    get: fn() -> int
+fn make() -> Ctr:
+    n := 0
+    fn inc():
+        n = n + 1
+    fn get() -> int:
+        return n
+    return Ctr(inc, get)
+c := make()
+gi := c.inc
+gg := c.get
+pad := [1, 2, 3, 4, 5]
+fn main():
+    junk := [1, 2, 3]
+    r := Channel[int]()
+    parallel:
+        spawn:
+            gi()
+            gi()
+            r.send(gg())
+    more := [junk, junk]
+    print(\"ok: {r.recv()}\")
+main()
+";
+    assert_eq!(run_capture_stress(src), "ok: 2\n");
+    assert_eq!(run_capture_stress(src), run(src));
+}
+
 /// Control (regression lock, rc=0) — the SAME recursive `fn` HOISTED to module scope IS sendable: it
 /// crosses as `Obj::Func` (no captures; recursion resolves via its home-global slot), never entering
 /// the `Obj::Closure` serialization arm, so the new self-ref diagnostic never fires and the send works.

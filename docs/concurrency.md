@@ -1013,11 +1013,62 @@ was retired when module globals started deep-copying per task on both engines.)
   module-global snapshot) and **round-trips** — every container `WireValue` arm carries a per-serialization
   `id` + a `WireValue::Backref(id)` for a back-edge, exactly like `Cell`/`Closure`. `from_wire` ties the
   knot on the receiver (placeholder-alloc → register `id` → recurse → patch); `Map`/`Set` reuse the carried
-  hash so a cyclic key is never re-hashed. **Byte-identical on both engines.** The identity is **back-edge-
-  only** (a node is popped off the serialize DFS stack on exit), so an acyclic **DAG alias** (the same node
-  appearing twice off the cycle) is re-serialized as **two independent deep copies**, never collapsed into
-  one shared node (mutating one copy in a task leaves the other untouched). The depth cap (`maximum
-  structural depth …`) stays **only** as the backstop for a genuinely-unbounded **acyclic** nest.
+  hash so a cyclic key is never re-hashed. **Byte-identical on both engines.** For **data** the identity is
+  **back-edge-only** (a node is popped off the serialize DFS stack on exit), so an acyclic **DAG alias**
+  (the same node appearing twice off the cycle) is re-serialized as **two independent deep copies**, never
+  collapsed into one shared node (mutating one copy in a task leaves the other untouched). The depth cap
+  (`maximum structural depth …`) stays **only** as the backstop for a genuinely-unbounded **acyclic** nest.
+- **A captured BINDING keeps its identity across the whole crossing — the one deliberate exception to the
+  DAG rule above.** The `Cell` that backs a by-reference-captured local is memoized for the ENTIRE
+  serialization, not just the current DFS stack, so **two sibling closures over one local still share one
+  cell after crossing**:
+
+  ```
+  struct Ctr:
+      inc: fn() -> nil
+      get: fn() -> int
+  fn make() -> Ctr:
+      n := 0
+      fn inc():
+          n = n + 1
+      fn get() -> int:
+          return n
+      return Ctr(inc, get)
+  ch := Channel[Ctr]()
+  ch.send(make())
+  d := ch.recv()
+  d.inc()
+  print(d.get())          # 2 after two incs — ONE binding, not one per reference
+  ```
+
+  **Why the two rules differ:** a list is a *value*, a cell is a *binding's identity*. The language's own
+  rule ([`syntax.md`](syntax.md)) is that a write through a capture is visible in the defining scope **and
+  across sibling closures**; crossing the airlock snapshot-copies that binding into **one** independent
+  per-task cell — one per **binding**, not one per reference — so the sharing rule survives inside the
+  task (Go behaves the same). Data aliasing keeps the deep-copy-independence contract unchanged: only
+  `Obj::Cell` uses the persistent memo, every container and the closure VALUES themselves still pop on DFS
+  exit. One serialization spans everything that crosses together — a `spawn`'s callee/receiver + all args,
+  a `spawn:` block's captures, and one module's globals in the snapshot.
+
+  **Known ceilings** — all of the shape "two *independent* serializations reach the same cell", which is
+  exactly where identity stops:
+  - **One task, two serializations.** A `spawn:` block's captures and the module-global snapshot cross
+    into the same task at the same instant but are serialized separately (per-task memo vs per-module
+    memo, and the snapshot is rebuilt LAZILY on the task's first module access, so the two rebuild maps
+    cannot be unified without `Vm`-lived state across GC-visible points). So a module global and a
+    captured local over one factory-local cell still split inside one task.
+  - **Cross-module.** Cell identity is per-module in the module snapshot: two globals in *different*
+    modules over one cell still split.
+  - **`RwShared` copy-out views.** `at`/`for_each`/`fold`/`get_key`/`has`/`for_each_entry`/
+    `fold_entries` rebuild ONE piece of the stored container per step, so each piece is an independent
+    copy of the binding — two `at()` calls are two crossings and can never share. A whole-container
+    `get()`/`read()`, and `slice` (one call returning a container), are one crossing and DO share.
+    (Mechanically: a value stored in a cross-heap box is serialized so every **depth-1 subtree** is
+    self-contained — a cell reached from two of them carries its full definition in both, and the
+    rebuild collapses the repeat back to one cell. That is what lets a piece be drained on its own
+    without ever re-reading the box.)
+  - **Handle-bearing cell.** A cell whose inner value carries a residual module/native/FFI handle falls
+    to the snapshot's slow arm, which has no back-reference encoding.
 - **A recursive *local* `fn` IS sendable (identity-preserving airlock).** A nested `fn` that calls itself
   captures its own name for recursion — the compiler's letrec gives it a self-cell, so the closure's
   capture graph is **cyclic** (`Closure → Cell → Closure`). The same `id` + `Backref` machinery (above)

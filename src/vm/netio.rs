@@ -2051,12 +2051,17 @@ impl Vm {
                 // collects, but rooting matches the list-HOF precedent and is future-proof).
                 let res_h = self.heap.alloc(Obj::List(Vec::new()));
                 self.push(Value::obj(res_h));
+                // W7-4: ONE rebuild map across the sliced-out elements — `slice` is a SINGLE crossing
+                // that returns a container (like `get`), so two sliced-out closures over the same
+                // captured local land on ONE cell. A per-element view (`at`, `for_each`) is its own
+                // crossing and keeps its own copy.
+                let mut rb = super::fxhash::FxHashMap::<u32, GcRef>::default();
                 for idx in idxs {
                     let ew = match &*g {
                         WireValue::List { items, .. } => items[idx].clone(),
                         _ => unreachable!(),
                     };
-                    let elem = self.from_wire(ew);
+                    let elem = self.from_wire_memo(ew, &mut rb);
                     if let Obj::List(items) = self.heap.get_mut(res_h) {
                         items.push(elem);
                     }

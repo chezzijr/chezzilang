@@ -4,6 +4,95 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 **Legend:** ⬜ not started · 🟦 in progress · ✅ done
 
+> **✅ BUG-HUNT (2026-07-29, wave 7, gaps.md W7-4) — two sibling closures over one captured local now
+> keep ONE binding across the airlock; they used to silently split into two cells.** `Ctr(inc, get)`
+> built over a factory-local `n`, sent through a `Channel` and driven on the far side, read `1` after
+> two `inc()`s. **No concurrency needed to reproduce** (a plain `send`/`recv` round-trip inside `main`),
+> and identical on `--serial`, on M:N, and at `--threads=1/2/4/8` — the parity oracle is *structurally*
+> blind to it (both engines share one serializer). Every airlock arm reproduced: `Channel.send`,
+> `Shared`, struct-field, `.iter()` cursor, `spawn f(g, h)` args, `spawn:` block capture, and the
+> module-global snapshot.
+> - **Root cause** (`src/vm/sched.rs`): `WireMemo` is deliberately **back-edge-only** — a node is popped
+>   off the serialize DFS stack on exit — so an `Obj::Cell` revisited *off* the stack, which is exactly
+>   what two sibling closures produce, was re-serialized as a fresh `WireValue::Cell` and `from_wire`
+>   built two. Cycles round-tripped; shared bindings did not.
+> - **Why it is a bug and not the DAG rule:** the off-path-alias-becomes-two-copies rule is documented
+>   and deliberate **for DATA** (`docs/concurrency.md`; `pair := [xs, xs]` gives `2 1`, a knowing
+>   divergence from CPython `deepcopy`). **A cell is not a data node — it is a BINDING's identity.**
+>   `docs/syntax.md` already says a write through a capture is visible "across sibling closures", and
+>   the crossing snapshot-copies a captured local into **one** per-task cell — one per *binding*, not
+>   per reference. Go agrees (`f(); f(); g()` inside a goroutine prints `2`).
+> - **Fix:** `Obj::Cell` alone moves to a **persistent** `WireMemo::cells` map (never popped); every
+>   container and the closure VALUES keep the pop-on-DFS-exit `path` discipline, so the data-DAG
+>   contract is byte-untouched. Plus one serialization per *logical* crossing wherever several roots
+>   cross together: `do_spawn` (callee/receiver + args, via a new `deep_clone_all`), `do_spawn_block`
+>   (all captures), `lower_task`↔`rebuild_ready` (captures **then** args — serialize order must equal
+>   reconstruct order or a `Backref` hits `from_wire_memo`'s `.expect`), and `snapshot_modules`↔
+>   `fault_module` (one memo + one rebuild map **per module**). `to_snap_depth`'s speculative fast path
+>   ROLLS THE MEMO BACK when discarded — a discarded attempt must leave no cell id
+>   (rebuild panic) and no `Backref` shortcut that could hide a handle from a later `has_handle`.
+> - **Intended contract flip:** `airlock_aliased_closure_stays_independent` (`[bump, bump]`) →
+>   `airlock_aliased_closure_shares_its_binding`, `1` → `2`. The closure *values* are still two
+>   independent copies; the one *binding* they close over is now one cell.
+> - **Stated ceilings** (`ponytail:` comments + `docs/gaps.md`), all the same shape — *two independent
+>   serializations reaching one cell*: (a) **one task, two serializations** — a `spawn:` block's captures
+>   and the module-global snapshot cross into the same task but are separate memos rebuilt at different
+>   times (the snapshot faults in lazily), so a module global + a captured local over one factory-local
+>   cell still split (fenced by `module_global_plus_local_capture_still_split`); (b) **cross-module** —
+>   cell identity is per module in the snapshot; (c) **`RwShared` copy-out views** — `at`/`for_each`/
+>   `fold`/`get_key`/`has`/`for_each_entry`/`fold_entries` rebuild one piece per step, so each piece is
+>   an independent copy (a whole `get()`/`read()`, and `slice`, are one crossing and DO share); (d) a
+>   cell whose inner value carries a residual module/native/FFI handle falls to `SnapValue::Cell`, which
+>   has no `Backref` encoding.
+> - **Review rounds 2–3 (2026-07-29) — four defects fixed on the branch.** (1) **CRITICAL, host PANIC +
+>   silent wrong node:** a persistent cell memo makes a `Backref` legal BETWEEN SIBLING pieces of one
+>   stored wire for the first time, and `RwShared`'s zero-copy read views DRAIN one stored wire through
+>   many independent `from_wire`s — `RwShared([inc, get]).at(1)` aborted on `from_wire_memo`'s `.expect`
+>   (no concurrency, both engines). Round 2 patched it by re-reading `core.v` to seed a whole-container
+>   rebuild map, which was **worse**: the piece and the re-read came from TWO separate read guards, so a
+>   concurrent `set` in the window (a write-preferring `RwLock` hands the lock straight to the queued
+>   writer) resolved the piece against an unrelated serialization — reproduced as both the `.expect`
+>   abort and a `CellLoad on a non-cell object` wrong-node abort, on M:N only, i.e. parity-blind. It was
+>   also **O(n²)**: `for_each`/`fold`/… rebuilt the whole container ONCE PER ELEMENT (measured 3.7 s for
+>   a 4000-element `for_each`, 34 s at 12000, versus 0.02 s on main). Round 3 deletes that whole path
+>   (`from_wire_view`/`view_rebuild_map`/`WireValue::has_backref` are gone; `src/vm/netio.rs` is back to
+>   main's `from_wire`) and fixes it at the SOURCE instead: `to_wire_crossable` — the single chokepoint
+>   every cross-heap store routes through — serializes with `WireMemo::elem_split`, re-emitting a cell's
+>   full definition once per **depth-1 subtree**, and `from_wire_memo` DEDUPES a repeated definition by
+>   id. Every stored piece is then self-contained (no lock re-read, no whole rebuild), while a
+>   whole-value rebuild (`Channel.recv`/`Shared.get`/`RwShared.get`/`slice`) still ties every reference
+>   to ONE cell. Cost is a little wire size for a cell reached from 2+ depth-1 subtrees, nothing else.
+>   (2) `do_spawn` now serializes **args before** the callee/receiver — the batch had flipped the
+>   pre-refactor order, so a non-crossable callee pre-empted a non-crossable argument and the reported
+>   fault message changed (`lower_task` already documents the same args-first rule). (3) `lower_task`'s
+>   `wire_args` had been moved BELOW the callee classification purely for memo order, silently dropping
+>   argument crossing-validation on the non-callable-callee path — moved back to the top (= main's
+>   position); `rebuild_ready` reconstructs a `Closure`'s args before its captures to match. (4)
+>   `to_snap_depth`'s speculative fast path cloned the whole `WireMemo` at EVERY node, making a module
+>   with K cell-bearing globals O(M·K) — replaced by an exact rollback (restore `next_id`, drop ids
+>   `>= next_id`, clear `path`/`gens_on_stack`), O(1) on the kept path. The two `WireValue::Backref`
+>   docs that still asserted the pre-W7-4 invariant were corrected in the same pass.
+> - **Perf (re-measured 2026-07-29, round 3).** `benches/run.chz` unchanged (no airlock on those
+>   paths). 100k `Channel.send`/`recv` round-trips: main 127 ms → 124 ms. 20k-`spawn` storm: 221 ms →
+>   217 ms. `RwShared.for_each` over 4000 sibling-binding closures: main 0.011 s → round-2 branch
+>   **3.7 s** → round 3 **0.012 s** (the quadratic view rebuild is gone; fenced by
+>   `rwshared_view_over_shared_bindings_is_not_quadratic`). Snapshot stress (400 module-global closures
+>   over distinct cells × 1000 `parallel:` nurseries): main 1.084 s → memo-clone 1.243 s (**+15%**) →
+>   after the rollback 1.110 s (**+2.4%** vs main).
+> - **Where the rule stops** (checked, fenced, not a residual): identity holds within ONE crossing,
+>   never BETWEEN crossings — two separate tasks over one local (two `spawn:` blocks, or two
+>   `Executor.submit` calls) each still snapshot the binding independently, which is the documented F1
+>   per-task isolation. A single `submit` whose one closure holds both sides WAS the bug and is fixed.
+> - **Tests:** `tests/chz/spec/airlock_shared_binding_test.chz` — 7 arms + the `RwShared`-views
+>   regression + a view run CONCURRENTLY with a writer (round 3; pre-fix it aborted the pool thread) +
+>   the spawn args-before-callee fault-ordering pin + the discarded-snapshot-walk rollback fence +
+>   **4 fences** (`[xs, xs]` through a `Channel` and across two `spawn` args, both must stay `2 1`; the
+>   per-task-isolation boundary; the one-task-two-serializations ceiling), 15 tests under the
+>   serial==M:N gate, also swept at `--threads=1/2/4/8`. Rust: the flipped fence, a new
+>   `airlock_cross_arg_data_alias_stays_independent` (the seam the shared memo creates),
+>   `airlock_module_global_shared_binding_survives_gc_stress` (the module-scoped rebuild map now lives
+>   across `module_define`), and `rwshared_view_over_shared_bindings_is_not_quadratic` (the perf cliff).
+
 > **✅ BUG-HUNT (2026-07-28, wave 7, gaps.md W7-2) — `Channel.close()` no longer loses the wakeup for a
 > `wait:`-parked fiber, so a valid program stops faulting `deadlock:` on M:N.** A fiber parked in a
 > multi-arm `wait:` whose channel was `close()`d concurrently was never woken (`--serial` 0/20;

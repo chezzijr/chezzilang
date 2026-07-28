@@ -7322,14 +7322,16 @@ main()";
     assert_parity_out(src, "100\n");
 }
 
-/// Deep-copy-independence contract (regression lock): a list holding the SAME closure twice (`[f, f]`,
-/// f closing over a mutable outer local) crosses the airlock. The two list slots are an ACYCLIC alias
-/// (off the serialize DFS stack), so each is re-serialized as an INDEPENDENT deep copy — never shared.
-/// After crossing, calling slot 0 (increments its OWN count) then reading slot 1 yields `1`, not `2`:
-/// the mutation is not observed through the other reference. Pins the back-edge-only memo design
-/// (`WireMemo` pops on DFS exit) against a plain-visited-set that would SHARE the alias.
+/// W7-4 (was `airlock_aliased_closure_stays_independent`, which asserted `1`): a list holding the SAME
+/// closure twice (`[f, f]`, f closing over the mutable outer local `count`) crosses the airlock. The
+/// closure VALUES are still two independent deep copies (the `Closure` arm keeps the back-edge-only,
+/// pop-on-DFS-exit `path` discipline) — but the ONE BINDING they close over is now ONE cell on the far
+/// side, because a cell is a binding's identity, not a value (`WireMemo::cells` is never popped). So
+/// `pair[0]()` then `pair[1]()` reads `2`, matching the language's own sibling-closure sharing rule
+/// (docs/syntax.md) and Go. Contrast `airlock_struct_dag_alias_stays_independent` below, which pins the
+/// unchanged DATA rule: an acyclic DAG alias is still two independent copies.
 #[test]
-fn airlock_aliased_closure_stays_independent() {
+fn airlock_aliased_closure_shares_its_binding() {
     let src = "\
 fn main():
     count := 0
@@ -7345,7 +7347,7 @@ fn main():
             r.send(b)
     print(r.recv())
 main()";
-    assert_parity_out(src, "1\n");
+    assert_parity_out(src, "2\n");
 }
 
 /// Identity-preserving airlock, DATA path — a self-referential `struct` (`a.next = [b]; b.next = [a]`,
@@ -7430,7 +7432,8 @@ fn airlock_mixed_struct_closure_cycle_round_trips_both() {
 /// A shared-vs-duplicated node is stdout-identical on both engines, so this asserts INDEPENDENCE
 /// explicitly: mutate one alias in the task, observe the other is UNAFFECTED (`9 1`, not `9 9`). Guards
 /// against a future visited-set regression collapsing DAG aliases into one shared node (mirror
-/// `airlock_aliased_closure_stays_independent` for the data path).
+/// `airlock_aliased_closure_shares_its_binding` for the closure/BINDING path, which deliberately does
+/// NOT share this rule). UNCHANGED by W7-4 — only `Obj::Cell` became persistent-memo.
 #[test]
 fn airlock_struct_dag_alias_stays_independent() {
     let src = "\
@@ -7448,6 +7451,28 @@ fn main():
     print(r.recv())
 main()";
     assert_parity_out(src, "9 1\n");
+}
+
+/// W7-4 fence for the SEAM the fix creates: `do_spawn`/`lower_task` now serialize the callee, ALL args
+/// and the receiver under ONE `WireMemo` (so sibling closures keep their one binding). The same list
+/// passed as TWO SEPARATE args must nonetheless stay TWO INDEPENDENT deep copies — the data-DAG rule
+/// is per-serialization, not per-root, and only `Obj::Cell` is exempt. Mutating arg `a` in the task
+/// must leave arg `b` untouched (`2 1`, not `2 2`). This is the exact case a careless
+/// "share the whole memo for everything" widening would collapse.
+#[test]
+fn airlock_cross_arg_data_alias_stays_independent() {
+    let src = "\
+fn work(a: List[int], b: List[int], r: Channel[str]):
+    a.push(2)
+    r.send(\"{a.len()} {b.len()}\")
+fn main():
+    xs := [1]
+    r := Channel[str]()
+    parallel:
+        spawn work(xs, xs, r)
+    print(r.recv())
+main()";
+    assert_parity_out(src, "2 1\n");
 }
 
 /// NF#5 — capture READ (same task): a nested fn reads an outer local by reference; a write to that

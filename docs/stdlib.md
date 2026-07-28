@@ -246,6 +246,10 @@ the same box — and a GC pass inside the callback — are deadlock-free. Trade-
 atomic snapshot** (a concurrent/in-callback `set`/`write` to the same box may be seen mid-walk; use
 `read`/`get` for a stable snapshot). Reduce into a **different** box (an `AtomicInt`/local) — the real use
 case. On a non-container element (or a Tuple) these methods cleanly report "no method" (checker-gated).
+Second trade-off: each piece is copied out **independently**, so two sibling closures over one captured
+local do NOT share their binding when pulled out one at a time (two `at()` calls are two crossings); a
+whole-container `get()`/`read()`, and `slice` (one call returning a container), are one crossing and do
+share — see [`concurrency.md`](concurrency.md) §airlock.
 
 ### `Atomic[T]` — cross-task atomic (numeric `T` for add/sub)
 `load() -> T` · `store(x: T) -> nil` · `exchange(x: T) -> T` · `cas(expected: T, new: T) -> bool` ·

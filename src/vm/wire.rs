@@ -137,9 +137,18 @@ pub enum WireValue {
     /// or a mixed struct+closure cycle. Serialize assigns each such node an `id` on first visit and, on a
     /// REVISIT of a node still on the stack (a true back-edge), emits `Backref(id)` and stops the descent;
     /// a node revisited OFF the stack (an acyclic DAG alias) is re-serialized as an independent deep copy
-    /// — preserving the deep-copy-independence contract for BOTH closures and data. `from_wire` resolves
-    /// it to the placeholder registered under that `id`, tying the knot. Holds no `GcRef` and terminates
-    /// the walk, so `has_handle` leaves it `false`.
+    /// — preserving the deep-copy-independence contract for closures and data alike.
+    ///
+    /// **W7-4 — [`Cell`](WireValue::Cell) is the ONE exception**: a cell is a BINDING's identity, not a
+    /// value, so its id is memoized for the whole serialization scope and an OFF-stack revisit ALSO
+    /// emits `Backref(id)` (two sibling closures over one captured local must land on one cell — the
+    /// language's own "visible across sibling closures" rule). Cross-heap STORES additionally re-emit a
+    /// cell's full definition once per depth-1 subtree (`WireMemo::elem_split`) so `RwShared`'s
+    /// piecewise read views never see a `Backref` into a sibling piece; a repeated definition dedupes
+    /// on rebuild, so a whole-value rebuild still ties every reference to one cell.
+    ///
+    /// `from_wire` resolves a `Backref` to the placeholder registered under that `id`, tying the knot.
+    /// Holds no `GcRef` and terminates the walk, so `has_handle` leaves it `false`.
     Backref(u32),
     /// A by-reference object carried across the airlock as its existing heap handle (single-thread /
     /// same heap). As of B3.3 this wraps only the object that genuinely CANNOT cross an OS-thread heap
