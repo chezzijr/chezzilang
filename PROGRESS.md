@@ -38,8 +38,13 @@ Single source of truth for "what am I doing next." Update after every work sessi
 >   snapshot (two globals in *different* modules over one cell still split — it needs Vm-lived rebuild
 >   state across lazy faults), and a cell whose inner value carries a residual module/native/FFI handle
 >   falls to `SnapValue::Cell`, which has no `Backref` encoding.
-> - **Tests:** `tests/chz/spec/airlock_shared_binding_test.chz` — 7 arms + **2 data-DAG fences**
->   (`[xs, xs]` through a `Channel` and across two `spawn` args, both must stay `2 1`), under the
+> - **Where the rule stops** (checked, fenced, not a residual): identity holds within ONE crossing,
+>   never BETWEEN crossings — two separate tasks over one local (two `spawn:` blocks, or two
+>   `Executor.submit` calls) each still snapshot the binding independently, which is the documented F1
+>   per-task isolation. A single `submit` whose one closure holds both sides WAS the bug and is fixed.
+> - **Tests:** `tests/chz/spec/airlock_shared_binding_test.chz` — 7 arms + **3 fences** (`[xs, xs]`
+>   through a `Channel` and across two `spawn` args, both must stay `2 1`; plus the per-task-isolation
+>   boundary), under the
 >   serial==M:N gate. Rust: the flipped fence, a new `airlock_cross_arg_data_alias_stays_independent`
 >   (the seam the shared memo creates), and `airlock_module_global_shared_binding_survives_gc_stress`
 >   (the module-scoped rebuild map now lives across `module_define`). **Perf: no change** — `benches/

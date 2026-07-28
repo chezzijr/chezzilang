@@ -120,6 +120,23 @@ test fn data_dag_alias_stays_two_copies():
     assert p[0].len() == 2
     assert p[1].len() == 1
 
+# FENCE — the OTHER boundary of the new rule: identity is preserved within ONE crossing, never BETWEEN
+# crossings. Two separate tasks each snapshot the binding independently (F1 per-task isolation,
+# docs/syntax.md rule 2), and the parent never sees a task's write. Goes red if the cell memo is ever
+# widened to Vm-lived state.
+test fn separate_tasks_each_get_their_own_binding():
+    c := make()
+    r := Channel[int](1)
+    parallel:
+        spawn:
+            c.inc()
+            c.inc()
+    parallel:
+        spawn:
+            r.send(c.get())
+    assert r.recv() == 0
+    assert c.get() == 0
+
 # FENCE — same rule across two SEPARATE spawn args (the seam a shared serialize memo could collapse).
 test fn data_dag_alias_across_spawn_args_stays_two_copies():
     xs := [1]

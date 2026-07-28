@@ -3960,7 +3960,15 @@ engines:
 `airlock_aliased_closure_shares_its_binding`, `1` → `2`. The closure *values* are still two independent
 copies; the one *binding* is now one cell.
 
-**Verified.** `tests/chz/spec/airlock_shared_binding_test.chz` — 7 arms + 2 data-DAG fences, green on
+**Where the rule STOPS (checked, not a residual).** Identity is preserved within ONE crossing, never
+BETWEEN crossings. Two separate tasks over one local — two `parallel: spawn:` blocks, or two
+`Executor.submit` calls — still each snapshot the binding independently, and the parent sees neither
+write. That is the documented F1 per-task isolation (`syntax.md` rule 2), not a leftover arm of this
+bug; it is now fenced by `separate_tasks_each_get_their_own_binding` so a future "make the cell memo
+`Vm`-lived" over-reach goes red. A single `Executor.submit` whose one closure holds both sides of a
+pair WAS the bug and is fixed (`0` → `2`).
+
+**Verified.** `tests/chz/spec/airlock_shared_binding_test.chz` — 7 arms + 3 fences, green on
 both engines under `chz_suite_passes_both_engines`; thread sweep `1/2/4/8`; the full 26-test `airlock_`
 panel (cycles on every container arm, recursive/mutually-recursive local `fn`, the generator
 `reference cycle` reject, the depth cap, handle `Arc` identity, the module-global inert-`Nil`
