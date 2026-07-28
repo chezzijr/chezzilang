@@ -24,7 +24,11 @@ use panicfuzz::run::Config;
 use std::time::Duration;
 
 fn main() {
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    // `args_os` + lossy: `std::env::args()` panics on a non-UTF-8 argument (see src/main.rs).
+    let args: Vec<String> = std::env::args_os()
+        .skip(1)
+        .map(|a| a.to_string_lossy().into_owned())
+        .collect();
     let mut start = 0u64;
     let mut end = 100_000u64;
     let mut timeout_ms = 10_000u64;

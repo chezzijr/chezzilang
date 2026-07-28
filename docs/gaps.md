@@ -11,8 +11,11 @@ cross-cutting **root causes** that were each recorded as unrelated footnotes, an
 and never de-staled**. Re-audit periodically: a gap backlog nobody re-reads rots into a to-do list for
 work already done.
 
-**Pre-freeze bug-hunt waves:** 1–5 (2026-07-11 → 07-13), then 2026-07-18, 07-20, 07-22, and three on
-07-23. **Wave 6 (2026-07-25)** is the largest single haul (**19 findings**) and the first to sweep the two
+**Pre-freeze bug-hunt waves:** 1–5 (2026-07-11 → 07-13), then 2026-07-18, 07-20, 07-22, three on
+07-23, and **wave 7 (2026-07-28)** — batch A swept the **host boundary** (the native/CLI seam where raw
+OS bytes become Chezzi values): 3 findings, all FIXED, and it re-confirmed wave 6's meta-finding
+(the panicking `std::env::args()` had three call sites, not the one the report named).
+**Wave 6 (2026-07-25)** is the largest single haul (**19 findings**) and the first to sweep the two
 surfaces the wave-5 residual named as never-audited (FFI: 4 defects; GC + new object layout: clean). As of
 2026-07-28 all 19 + the 3 carve-outs are fixed, plus one follow-up found by adversarial review of the
 W6-9 branch (**`W6-9b`**, the half-byte-exact parity oracle, fixed 2026-07-28); what remains are the
@@ -20,11 +23,15 @@ three disclosed residuals `W6-9r` / `W6-10s` / `W6-10r` — see the index below.
 before touching `io`/`process`/FFI/`RwShared`/module-snapshot code. Its meta-finding — **5 of 6 P0s are "a
 fix applied to SOME arms of an N-way set"** — is the highest-yield remaining lever.
 
-## OPEN ITEMS — the whole backlog at a glance (updated 2026-07-27)
+## OPEN ITEMS — the whole backlog at a glance (updated 2026-07-28)
 
 Everything still open, roughly by severity. **No memory-unsafety is left in the ledger** — W6-8, the
 last one, was fixed 2026-07-27. Anything NOT listed here is either fixed or a safe-direction
-observation. **Keep this table in sync when a section is retired** — the
+observation. **Wave 7 batch A (2026-07-28) adds no row** — its three host-boundary findings
+(`W7-1`/`W7-6`/`W7-7`) all landed FIXED; see its session log. Its deliberately-deferred sibling —
+**lossy path DECODE** in `fs.list_dir`/`walk`/`glob`/`canonicalize` and `os.getcwd`, which hands back a
+path string that does not open — is filed separately and is not in batch A.
+**Keep this table in sync when a section is retired** — the
 reason it exists is that "which of these is still open?" previously required reading 1400 lines of
 chronological log.
 
@@ -249,6 +256,49 @@ parked_slot_nonsendable_rejects,in_data_cycle_rejects,unreached_nonsendable_runs
   cross the airlock BY VALUE / shared `Arc`, exactly like a builtin fn; see the 2026-07-23 session log.)
 - **Multi-frame / pending-`defer` suspended generators** — checker-UNREACHABLE (item 3 arms a/c); no valid
   program constructs them. The rejects are defensive guards, not a user-visible limit — nothing to build.
+
+## Session log — 2026-07-28 (bug-hunt wave 7 — batch A: 3 host-boundary findings, ALL FIXED, no open rows)
+
+Three defects at the **host boundary** (the native/CLI seam where raw OS bytes become Chezzi values) —
+one P0 data-loss, two P1 host-panics. All three are fixed in this batch; **batch A adds NO row to the
+OPEN ITEMS table**. Batch A deliberately does NOT fix the separately-filed **lossy path DECODE**
+(`fs.list_dir`/`walk`/`glob`/`canonicalize`, `os.getcwd` decode a directory entry lossily and hand back a
+path that does not exist) — it is uncoupled from these three and is its own later task.
+
+- **W7-1 (P0, DATA LOSS) — `fs.copy(p, p)` truncated the file to 0 bytes and returned `Ok(nil)`. FIXED.**
+  `std::fs::copy` opens the DESTINATION `O_TRUNC`, so a self-copy wiped the file and reported success —
+  check-OK, run-OK, data gone, byte-identical on both engines (parity-blind, like most of wave 6). It
+  also fired when the two paths reached one inode through a **symlink**, so a path-string compare is not
+  a fix. `copy` (`src/native/fs.rs`) now guards on **inode identity** (`dev`+`ino` via
+  `MetadataExt`, `canonicalize` on non-unix) BEFORE the copy and returns a recoverable
+  `Err("{from} -> {to}: are the same file")`, leaving the bytes untouched — matching Python
+  `shutil.copyfile`'s `SameFileError` and coreutils `cp a a`. A missing destination is never "the same
+  file", so copy-to-a-new-path is unchanged. `rename` needs no guard (POSIX `rename(p,p)` is a no-op);
+  `copy` is the only truncating *pair* in the tree. Pinned by `tests/chz/stdlib/fs_copy_test.chz`
+  (4 tests: same-path, symlink, plus two controls) on both engines.
+- **W7-6 (P1) — a non-UTF-8 CLI argument or script path host-panicked the CLI, rc=101. FIXED.**
+  `std::env::args()` PANICS on a non-UTF-8 item, so `chezzi run hello.chz "$(printf 'A\xffB')"` aborted
+  at `library/std/src/env.rs:876` **before the program started**, on both engines, regardless of imports
+  — a HOST panic, so `recover:` could not see it. `src/main.rs` now uses `args_os()` + a lossy decode.
+- **W7-7 (P1) — a non-UTF-8 environment variable host-panicked at startup, rc=101. FIXED.**
+  Same shape one layer down: `HostConfig::from_process` snapshots the whole environment with
+  `std::env::vars()`, which panics at `env.rs:162` on one hostile variable — killing even a
+  `print("hi")` program that never touches `std.os`. `src/native/mod.rs` now uses `vars_os()` + a lossy
+  per-key/value decode. `os.environ`'s **sorted-by-key** lowering is downstream (`src/vm/mod.rs`) and was
+  not touched; re-verified by running its existing golden.
+
+**Decoding rule chosen (documented in `docs/stdlib.md`, not silent):** argv and env reach Chezzi as
+`str`, so they are decoded **lossily** (invalid byte → `U+FFFD`; two raw env keys can collide, last
+wins). The bar this batch sets is "the CLI never host-panics on hostile bytes", not byte-fidelity.
+**v1 ceiling, stated:** a script whose PATH is not valid UTF-8 still cannot be RUN — it now fails
+cleanly (`cannot read '…'`, rc=1) instead of rc=101. Threading a real `OsString`/`PathBuf` through
+would change `read_source`/`type_check`/module-graph-root signatures (resolver + checker), out of scope
+for a host-boundary batch.
+
+**Same meta-finding as wave 6 (an N-way set, fixed on only some arms):** the two panicking calls had
+**three** siblings, not two — `src/bin/difffuzz.rs` and `src/bin/panicfuzz.rs` carried the identical
+`std::env::args()`. Swapped too (dev-only drivers, no test); `grep -rn 'std::env::args()' src/` and the
+`vars()` equivalent now return zero live call sites, which is the guard.
 
 ## Session log — 2026-07-25 (bug-hunt wave 6: 19 findings — W6-19 found while FIXING W6-2 — W6-1..W6-19 all FIXED as of 2026-07-27, the last being W6-9; of the 3 carve-outs filed (W6-3b/c/d), **W6-3b and W6-3c are FIXED (2026-07-26)** and **W6-3d was RESOLVED 2026-07-27 by ruling (a)**; a follow-up to W6-9 — **W6-9b**, the capture-based
 parity comparators still diffing a lossy decode — was found by adversarial review and FIXED 2026-07-28. So

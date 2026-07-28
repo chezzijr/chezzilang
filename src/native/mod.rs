@@ -240,7 +240,21 @@ impl HostConfig {
     pub fn from_process(args: Vec<String>) -> Self {
         HostConfig {
             args,
-            env: std::sync::Arc::new(std::sync::Mutex::new(std::env::vars().collect())),
+            // `vars_os`, not `vars`: `std::env::vars()` PANICS on a non-UTF-8 key or value, so one
+            // hostile variable anywhere in the environment aborted startup with rc=101 — even for a
+            // program that never touches `std.os`. Decoding is LOSSY (invalid bytes → U+FFFD, so two
+            // raw keys can collide, last wins); documented in docs/stdlib.md under std.os.
+            // Collection ORDER is irrelevant here — `os.environ` sorts by key before lowering.
+            env: std::sync::Arc::new(std::sync::Mutex::new(
+                std::env::vars_os()
+                    .map(|(k, v)| {
+                        (
+                            k.to_string_lossy().into_owned(),
+                            v.to_string_lossy().into_owned(),
+                        )
+                    })
+                    .collect(),
+            )),
             stdin: Stdin::Real,
             stream: false,
         }

@@ -4,6 +4,39 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 **Legend:** ⬜ not started · 🟦 in progress · ✅ done
 
+> **✅ BUG-HUNT (2026-07-28, wave 7 batch A, gaps.md W7-1/W7-6/W7-7) — three HOST-BOUNDARY fixes: the
+> CLI no longer host-panics on hostile OS bytes, and `fs.copy` no longer eats a file.** All three live
+> in the native/CLI seam where raw OS bytes become Chezzi values; none touch `src/vm/*` or
+> `src/checker/*`, and none is a serial≠M:N divergence (the parity oracle was blind to all three).
+> - **W7-1 (P0, DATA LOSS)** — `fs.copy(p, p)` returned `Ok(nil)` after truncating the file to 0 bytes:
+>   `std::fs::copy` opens the destination `O_TRUNC`. It fired through a **symlink** too, so a
+>   path-string compare is not a fix. `copy` (`src/native/fs.rs`) now tests **inode identity**
+>   (`dev`+`ino`; `canonicalize` on non-unix) before the copy and returns a recoverable
+>   `Err("… are the same file")` with the bytes untouched — Python `shutil.copyfile`'s `SameFileError` /
+>   coreutils `cp a a`. A missing destination is never "the same file", so copy-to-a-new-path is
+>   unchanged. Note it also refuses **hardlinked** distinct paths, which truncate identically.
+> - **W7-6 / W7-7 (P1)** — `std::env::args()` and `std::env::vars()` PANIC on a non-UTF-8 item, so one
+>   hostile argument, script path, or environment variable aborted `chezzi` with rc=101 at
+>   `library/std/src/env.rs` **before the program started** — a host panic `recover:` cannot see, hitting
+>   even a `print("hi")` program with no imports. Now `args_os()` (`src/main.rs`) / `vars_os()`
+>   (`src/native/mod.rs`) with a **lossy** decode (invalid byte → `U+FFFD`; two raw env keys can collide,
+>   last wins) — documented in `docs/stdlib.md §std.os`, not silent. `os.environ`'s sorted-by-key
+>   lowering lives downstream in `src/vm/mod.rs`, was NOT touched, and its golden was re-run.
+>   **A path is never taken from a lossy decode** (adversarial-review fix): `U+FFFD` substitution is not
+>   injective, so a raw `sc\xffipt.chz` and a real `sc\u{FFFD}ipt.chz` decode alike — opening the alias
+>   would silently run a DIFFERENT program with rc=0, strictly worse than the rc=101 it replaced. Any
+>   path argument containing `U+FFFD` is refused (`reject_lossy_path`, `src/main.rs`) with rc=1, on
+>   `run`/`check`/`ast`/`tokens`/`test`. **Stated v1 ceiling:** a script whose PATH is not valid UTF-8
+>   cannot be run at all — threading a real `OsString` through would change `read_source`/`type_check`/
+>   module-graph-root signatures (resolver + checker), its own milestone, out of scope here.
+> - **Wave 6's meta-finding re-confirmed:** the panicking `std::env::args()` had **three** call sites,
+>   not the one the report named — `src/bin/difffuzz.rs` and `src/bin/panicfuzz.rs` too. All swapped;
+>   `grep -rn 'std::env::args()' src/` now returns zero live call sites.
+> - Tests: `tests/chz/stdlib/fs_copy_test.chz` (4 `test fn`s — same-path, symlink, and two controls;
+>   dual-engine-gated) + `tests/host_bytes_cli.rs` (3 spawned-process tests, `#![cfg(unix)]` — a host
+>   panic is invisible to any in-VM assertion). **Deliberately NOT fixed here:** the separately-filed
+>   lossy path DECODE (`fs.list_dir`/`walk`/`glob`/`canonicalize`, `os.getcwd`), which is uncoupled.
+
 > **✅ RULING (2026-07-27, gaps.md W6-3d) — a NUMERIC newtype may no longer define an operator-named
 > method; the declaration is a compile error.** `newtype Score = int:` with an `add`/`compare` method
 > type-checked, then answered TWO different values for one protocol operation: `.add()` / a `[T: Add]`

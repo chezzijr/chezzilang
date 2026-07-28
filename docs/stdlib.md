@@ -497,9 +497,9 @@ the whole remainder (so a later read in any task sees EOF), `read_char` consumes
 ### `std.os`
 | Function | Signature | Notes |
 |----------|-----------|-------|
-| `args` | `() -> List[str]` | Program args (the positionals after the script path). |
+| `args` | `() -> List[str]` | Program args (the positionals after the script path). Decoded **lossily** — see the decoding note. |
 | `env` | `(key: str) -> Option[str]` | Environment variable (reads the injected env — see note). |
-| `environ` | `() -> Map[str, str]` | ALL environment variables, **sorted by key** (deterministic across runs + engines). Same source as `env`. |
+| `environ` | `() -> Map[str, str]` | ALL environment variables, **sorted by key** (deterministic across runs + engines). Same source as `env`. Keys + values are decoded **lossily** — see the decoding note. |
 | `setenv` | `(key: str, value: str) -> nil` | Set an env var. Observed by both `env` and `environ`, and **visible across tasks** (the env map is shared by all M:N workers — process-global, like Python `os.environ` / Go `os.Setenv`). Writes the injected env map — **not** a child's real env; `process.cmd` still inherits the real process env. |
 | `getpid` | `() -> int` | Current process id. |
 | `platform` | `() -> str` | OS name: `"linux"` / `"macos"` / `"windows"` / … (`std::env::consts::OS`). |
@@ -511,6 +511,25 @@ the whole remainder (so a later read in any task sees EOF), `read_char` consumes
 | `exit` | `(code: int) -> never` | Hard, uncatchable halt, unwinding past any `recover:`. **Does NOT run `defer`s.** The process status is the **low 8 bits** of `code` (`code & 0xff`), exactly like POSIX `exit(3)` / bash / Python / Go: `os.exit(-1)` → **255**, `os.exit(300)` → **44**, `os.exit(0)` → `0`. (It is a *mask*, not a clamp — a negative code must never report SUCCESS.) |
 
 **Env source:** `env` / `environ` / `setenv` all read/write the engine's injected env config (deterministic + testable). The env map is **shared** across M:N workers (an `Arc<Mutex<…>>`, not a per-worker copy), so a `setenv` from inside a task is visible to the parent + siblings — process-global, matching the serial engine (one Vm, one map) and Python/Go. `environ` sorts by key so both engines emit identical output. A `setenv` is **not** seen by a child spawned via `process.cmd` (which inherits the real process env). `getpid` / `platform` / `hostname` / `home_dir` / `temp_dir` are engine-agnostic queries (serial == M:N).
+
+**Non-UTF-8 argv / env (v1 decoding rule):** the OS hands argv and the environment over as raw bytes,
+which need not be valid UTF-8. Chezzi `str` is UTF-8, so the CLI decodes both **lossily** at startup —
+an invalid byte becomes `U+FFFD` (`args()` returns `"A�B"` where the shell passed `A\xffB`).
+This is like Python's `surrogateescape` except it is **not reversible**: the original bytes are gone,
+and two raw env keys that decode to the same string collide (last one wins). The guarantee that
+matters is that hostile bytes **never crash the CLI** — reading them used to abort the process with a
+Rust panic (rc=101) before the program started, where `recover:` could not see it.
+
+**A path is never taken from a lossy decode.** Because `U+FFFD` substitution is *not* injective, a raw
+path `sc\xffipt.chz` and a real file literally named `sc\u{FFFD}ipt.chz` decode to the same string —
+opening the alias would silently run a *different* program with rc=0, strictly worse than the panic it
+replaced. So any path argument containing `U+FFFD` is **refused** (`cannot use '…' as a path — it
+contains U+FFFD …`, rc=1), on `run` / `check` / `ast` / `tokens` / `test`. The check is on the
+character, not on the original bytes, so a file *genuinely* named with a literal `U+FFFD` is refused
+too — safe direction, and the price of a one-line guard.
+**v1 ceiling:** a script whose *path* is not valid UTF-8 therefore cannot be run at all (it fails
+cleanly, never a panic, and never runs the wrong file); supporting one needs `OsString` threaded
+through the resolver and module graph — its own milestone, tracked in `docs/gaps.md` (W7-6).
 
 ### `std.fs`
 **Queries:** `list_dir(path) -> Result[List[str]]` (sorted names) · `exists(path) -> bool` ·
@@ -541,7 +560,11 @@ are created, an existing dir is a no-op/idempotent) ·
 `remove_dir(path) -> Result[nil]` — delete an **empty** directory; **non-recursive** (`Err` on a
 non-empty dir — there is intentionally no silent `rm -rf`) ·
 `rename(from, to) -> Result[nil]` — move/rename a path ·
-`copy(from, to) -> Result[nil]` — copy a file's contents (file-only; the byte count is dropped) ·
+`copy(from, to) -> Result[nil]` — copy a file's contents (file-only; the byte count is dropped).
+**`Err`s, leaving the file untouched, when `from` and `to` are the SAME FILE** — the same path, or two
+names reaching one inode via a symlink or a hardlink (identity is `dev`+`ino`, not a string compare).
+The destination is opened truncating, so without the guard a self-copy would silently wipe the file;
+Python `shutil.copyfile` raises `SameFileError` and coreutils `cp a a` errors the same way ·
 `append(path, contents) -> Result[nil]` — append a string to a file, creating it if absent and
 **never truncating** (complements `std.io.write_file`, which overwrites) ·
 `chmod(path, mode: int) -> Result[nil]` — set unix permission bits (e.g. `0o755`). **Unix-only** (on a
