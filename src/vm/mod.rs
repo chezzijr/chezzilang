@@ -2375,21 +2375,29 @@ impl MnSched {
         // bounded channel below capacity, or unbounded — always) / on close. Using the recv predicate
         // for a full send arm would (wrongly) call it "ready" and spin requeue→re-poll→still-full→re-park.
         let mut ready_now = c.scopes[fiber.scope_id].cancel.load(Ordering::Relaxed);
+        // W7-2 — arm accounting is THREE-way, mirroring `op_wait_poll` exactly: READY (take the arm
+        // now), DEAD (closed+empty recv arm — the poll SKIPS it and only counts it toward
+        // `all_closed`), or LIVE (empty but still wakeable). `any_live` tracks the third.
+        let mut any_live = false;
         if !ready_now {
             for (_, core, is_send) in &arms {
-                let ready = {
+                let (ready, dead) = {
                     let g = core.q.lock().unwrap_or_else(|e| e.into_inner());
                     if *is_send {
                         // SEND arm: ready with a FREE slot (bounded below cap, or unbounded) OR on
                         // close (the send then FAULTS, matching op_wait_poll's ready-then-fault).
-                        g.closed || core.cap.is_none_or(|cap| g.len() < cap)
+                        // A full bounded send arm is never dead — a receiver frees a slot.
+                        (g.closed || core.cap.is_none_or(|cap| g.len() < cap), false)
                     } else {
                         // RECV arm: ready ONLY with a queued value (a closed channel still drains its
-                        // buffered messages). A closed+EMPTY recv arm is DEAD — op_wait_poll SKIPS it
-                        // (it only counts toward `all_closed`), so treating `closed` as ready HERE spins
-                        // requeue→re-poll(skip)→re-park forever (parity-perf-0). Close-to-signal is done
-                        // via `done_latch` (checked below), not a plain channel close.
-                        !g.is_empty()
+                        // buffered messages). A closed+EMPTY non-timer recv arm is DEAD — nothing can
+                        // ever make it ready again. It is NOT "ready": op_wait_poll SKIPS a dead arm,
+                        // so requeueing on ONE dead arm among live ones spins requeue→re-poll(skip)→
+                        // re-park forever (the reverted parity-perf-0 live-lock).
+                        (
+                            !g.is_empty(),
+                            g.closed && g.is_empty() && core.timer.is_none(),
+                        )
                     }
                 };
                 // A tripped `done_latch` (a concurrent `trip()`) makes this arm ready, same as a queued
@@ -2399,7 +2407,18 @@ impl MnSched {
                     ready_now = true;
                     break;
                 }
+                any_live |= !dead;
             }
+        }
+        // W7-2 — if EVERY arm is dead, requeue instead of parking. A `close()` that lands in the
+        // window between `op_wait_poll`'s empty poll and this park runs `close_wake` against a bucket
+        // that is still empty, so this re-check is the last chance to observe it; parking here strands
+        // the fiber on a key nothing will ever wake and the deadlock detector (correctly) reaps it —
+        // a SPURIOUS `deadlock:` fault. The requeue TERMINATES: the re-run `WaitPoll` hits `all_closed`
+        // and faults "wait: all channels closed" (what the serial engine already does), so unlike the
+        // one-dead-among-live case there is no requeue→re-park spin.
+        if !ready_now && !arms.is_empty() && !any_live {
+            ready_now = true;
         }
         if ready_now {
             fiber.state = FiberState::Ready;

@@ -4,6 +4,32 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 **Legend:** ⬜ not started · 🟦 in progress · ✅ done
 
+> **✅ BUG-HUNT (2026-07-28, wave 7, gaps.md W7-2) — `Channel.close()` no longer loses the wakeup for a
+> `wait:`-parked fiber, so a valid program stops faulting `deadlock:` on M:N.** A fiber parked in a
+> multi-arm `wait:` whose channel was `close()`d concurrently was never woken (`--serial` 0/20;
+> `--threads=8` 6/40, rising with parallelism); the detector then correctly reaped a genuinely
+> unreachable fiber. **Root cause was NOT the reported one** — `close_wake` and `send_wake` share
+> `wake_bucket` and its `Wait`-token CAS+sweep is fine. It was the gap re-check in `MnSched::park_wait`
+> (`src/vm/mod.rs:2378`), whose recv predicate was `!g.is_empty()` and deliberately ignored `closed`
+> (an in-code `parity-perf-0` note records an earlier `closed == ready` attempt reverted for
+> live-locking). A `close()` landing between `op_wait_poll`'s empty poll and the park therefore woke an
+> empty bucket. `send`/`recv`/`trip` all leave a signal the re-check DOES read, which is why only
+> `close` reproduced. **Fix:** three-way arm accounting mirroring `op_wait_poll` — READY / DEAD
+> (`closed && empty && non-timer` recv arm) / LIVE — requeue when any arm is ready OR every arm is
+> dead. That requeue TERMINATES (the re-poll faults `wait: all channels closed`), so no spin; one dead
+> arm among live ones still parks; the detector is untouched. Verified 0/60 at `--threads=8` (main
+> 3/60), real deadlocks still reported.
+>
+> **W7-5 (the M:N `Executor` drain) is NOT in this commit — it needs its own milestone.** Two fix
+> attempts were prosecuted and rejected. A sequential drain honours the documented "first fault aborts
+> the rest" but costs 4× (4 overlapping jobs: 0.30s → 1.20s), gutting the pool. "Run all" keeps the
+> parallelism but deletes the per-drain cancel flag — the drain's ONLY kill switch — which breaks
+> `os.exit` hard-halt (0.006s → 18.9s, or a permanent hang), lets a faulting job leave a runaway
+> sibling unkillable, defeats dead-stdout promptness (`| head -1`), and creates a NEW serial≠M:N
+> line-set divergence through `reduce_task_slots`' lowest-index-fault-only flush. Prosecuting those
+> attempts also surfaced **W7-5b** (an `Executor` created inside an M:N task is silently discarded —
+> jobs never run, no fault) and **W7-5c**. All three are filed in `docs/gaps.md` OPEN ITEMS.
+
 > **✅ BUG-HUNT (2026-07-28, wave 7 batch A, gaps.md W7-1/W7-6/W7-7) — three HOST-BOUNDARY fixes: the
 > CLI no longer host-panics on hostile OS bytes, and `fs.copy` no longer eats a file.** All three live
 > in the native/CLI seam where raw OS bytes become Chezzi values; none touch `src/vm/*` or

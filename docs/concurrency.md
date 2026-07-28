@@ -650,9 +650,12 @@ per-arm slot cursor keyed on `WaitMeta.is_send`) — polls source order, and jum
 `else`, handles a live `timer` arm (see below), faults all-closed / send-to-closed, or parks. The cooperative
 multi-channel park files the fiber under every arm key (`run_child` reads `wait_suspend`, a
 `Vec<(handle, is_send)>`) and sweeps the index out of the other buckets on resume; the M:N park (below) does
-the same with an `Arc<WaitPark>` token. The park-gap re-check is **kind-aware**: a recv-arm is ready with a
-queued value / on close, a send-arm with a **free slot** (`queue.len() < cap`, or unbounded) / on close — using
-the recv predicate for a full send-arm would spin requeue→re-poll→re-park.)*
+the same with an `Arc<WaitPark>` token. The park-gap re-check is **kind-aware**, classifying each arm
+READY / DEAD / LIVE exactly as the poll does: a recv-arm is ready with a queued value (a closed+empty
+recv-arm is **DEAD**, not ready — it is skipped by the re-poll), a send-arm with a **free slot**
+(`queue.len() < cap`, or unbounded) or on close. Using the recv predicate for a full send-arm, or calling a
+dead recv-arm ready, would spin requeue→re-poll→re-park; but an **all-dead** re-check must requeue, or a
+`close()` landing in the poll→park window is a lost wakeup (W7-2) — see §6d.)*
 
 > **v1 limitation — send-arm inside a native callback.** A **full bounded** send-arm reached *inside a
 > native callback* (a `Shared.update` closure, a list-HOF, an `Executor` task) can only block, and neither
@@ -686,8 +689,18 @@ the recv predicate for a full send-arm would spin requeue→re-poll→re-park.)*
   `WaitPark { fiber: Mutex<Option<Fiber>>, keys, claimed: AtomicBool }` held once behind an `Arc`, with a
   `ParkedEntry::Wait(token)` filed in every `parked[key]` (the bucket is now
   `HashMap<usize, Vec<ParkedEntry>>` where `ParkedEntry` is `Recv(Fiber)` or `Wait(Arc<WaitPark>)`).
-  `MnSched::park_wait` does the N-key gap re-check (any arm ready/closed/cancel → requeue, not park) and
-  files all N tokens + `parked_n += 1` (ONE fiber) under one core-lock hold. The first waker (in
+  `MnSched::park_wait` does the N-key gap re-check and files all N tokens + `parked_n += 1` (ONE fiber)
+  under one core-lock hold. The re-check is **kind-aware, with three outcomes per arm** (mirroring
+  `op_wait_poll` exactly, or the two disagree — that was **W7-2**): **READY** (a recv arm with a queued
+  value / a tripped `done_latch`; a send arm with a free slot or a close) → requeue; **DEAD** (a
+  closed+empty non-timer recv arm — the re-poll *skips* it, it only counts toward `all_closed`); else
+  **LIVE**. Cancel → requeue. A dead arm is deliberately NOT "ready": requeueing on one dead arm among
+  live ones would spin requeue→re-poll(skip)→re-park. But if **every** arm is dead the fiber must be
+  requeued, because a `close()` landing in the poll→park window wakes an empty bucket and nothing will
+  ever wake that key again — parking there is a stranded fiber the deadlock detector then (correctly)
+  reaps as a spurious `deadlock:` fault. The all-dead requeue terminates: the re-run `WaitPoll` hits
+  `all_closed` and faults `wait: all channels closed`, matching the serial engine byte-for-byte. The
+  first waker (in
   `send_wake`/`close_wake`/`cancel_drain`/`flag_deadlock`) CASes `claimed`, `take()`s the fiber, and
   removes its token from every other bucket by `Arc::ptr_eq` — all under the one lock, serialized with
   `park_wait`'s gap re-check (lost-wakeup-safe). Routed via `Disp::WaitPark(Vec<(key, core)>)` captured
