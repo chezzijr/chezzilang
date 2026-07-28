@@ -44,36 +44,54 @@ Single source of truth for "what am I doing next." Update after every work sessi
 >   an independent copy (a whole `get()`/`read()`, and `slice`, are one crossing and DO share); (d) a
 >   cell whose inner value carries a residual module/native/FFI handle falls to `SnapValue::Cell`, which
 >   has no `Backref` encoding.
-> - **Review round 2 (2026-07-29) — three defects fixed on the branch.** (1) **CRITICAL, host PANIC:**
->   a persistent cell memo makes a `Backref` legal BETWEEN SIBLING pieces of one stored wire for the
->   first time, and `RwShared`'s zero-copy read views DRAIN one stored wire through many independent
->   `from_wire`s — `RwShared([inc, get]).at(1)` aborted on `from_wire_memo`'s `.expect` (no concurrency,
->   both engines). Fixed by `WireValue::has_backref` + `Vm::from_wire_view`/`view_rebuild_map`
->   (`src/vm/sched.rs`), applied at all 12 partial-rebuild sites in `src/vm/netio.rs`; the fast path
->   (no `Backref`) is the old `from_wire` unchanged. (2) `lower_task`'s `wire_args` had been moved
->   BELOW the callee classification purely for memo order, silently dropping argument crossing-validation
->   on the non-callable-callee path and letting a capture fault pre-empt an arg fault — moved back to
->   the top (= main's position); `rebuild_ready` now reconstructs a `Closure`'s args before its captures
->   to match. (3) `to_snap_depth`'s speculative fast path cloned the whole `WireMemo` at EVERY node,
->   making a module with K cell-bearing globals O(M·K) — replaced by an exact rollback (restore
->   `next_id`, drop ids `>= next_id`, clear `path`/`gens_on_stack`), O(1) on the kept path.
-> - **Perf (re-measured 2026-07-29).** `benches/run.chz` unchanged (no airlock on those paths). 100k
->   `Channel.send`/`recv`: 94 ms on main, on the branch pre-fix, and after — flat. Snapshot stress (400
->   module-global closures over distinct cells × 1000 `parallel:` nurseries): main 1.084 s → branch
->   pre-fix (memo clone) 1.243 s (**+15%**) → after the rollback 1.110 s (**+2.4%** vs main) — the
->   complexity regression is gone.
+> - **Review rounds 2–3 (2026-07-29) — four defects fixed on the branch.** (1) **CRITICAL, host PANIC +
+>   silent wrong node:** a persistent cell memo makes a `Backref` legal BETWEEN SIBLING pieces of one
+>   stored wire for the first time, and `RwShared`'s zero-copy read views DRAIN one stored wire through
+>   many independent `from_wire`s — `RwShared([inc, get]).at(1)` aborted on `from_wire_memo`'s `.expect`
+>   (no concurrency, both engines). Round 2 patched it by re-reading `core.v` to seed a whole-container
+>   rebuild map, which was **worse**: the piece and the re-read came from TWO separate read guards, so a
+>   concurrent `set` in the window (a write-preferring `RwLock` hands the lock straight to the queued
+>   writer) resolved the piece against an unrelated serialization — reproduced as both the `.expect`
+>   abort and a `CellLoad on a non-cell object` wrong-node abort, on M:N only, i.e. parity-blind. It was
+>   also **O(n²)**: `for_each`/`fold`/… rebuilt the whole container ONCE PER ELEMENT (measured 3.7 s for
+>   a 4000-element `for_each`, 34 s at 12000, versus 0.02 s on main). Round 3 deletes that whole path
+>   (`from_wire_view`/`view_rebuild_map`/`WireValue::has_backref` are gone; `src/vm/netio.rs` is back to
+>   main's `from_wire`) and fixes it at the SOURCE instead: `to_wire_crossable` — the single chokepoint
+>   every cross-heap store routes through — serializes with `WireMemo::elem_split`, re-emitting a cell's
+>   full definition once per **depth-1 subtree**, and `from_wire_memo` DEDUPES a repeated definition by
+>   id. Every stored piece is then self-contained (no lock re-read, no whole rebuild), while a
+>   whole-value rebuild (`Channel.recv`/`Shared.get`/`RwShared.get`/`slice`) still ties every reference
+>   to ONE cell. Cost is a little wire size for a cell reached from 2+ depth-1 subtrees, nothing else.
+>   (2) `do_spawn` now serializes **args before** the callee/receiver — the batch had flipped the
+>   pre-refactor order, so a non-crossable callee pre-empted a non-crossable argument and the reported
+>   fault message changed (`lower_task` already documents the same args-first rule). (3) `lower_task`'s
+>   `wire_args` had been moved BELOW the callee classification purely for memo order, silently dropping
+>   argument crossing-validation on the non-callable-callee path — moved back to the top (= main's
+>   position); `rebuild_ready` reconstructs a `Closure`'s args before its captures to match. (4)
+>   `to_snap_depth`'s speculative fast path cloned the whole `WireMemo` at EVERY node, making a module
+>   with K cell-bearing globals O(M·K) — replaced by an exact rollback (restore `next_id`, drop ids
+>   `>= next_id`, clear `path`/`gens_on_stack`), O(1) on the kept path. The two `WireValue::Backref`
+>   docs that still asserted the pre-W7-4 invariant were corrected in the same pass.
+> - **Perf (re-measured 2026-07-29, round 3).** `benches/run.chz` unchanged (no airlock on those
+>   paths). 100k `Channel.send`/`recv` round-trips: main 127 ms → 124 ms. 20k-`spawn` storm: 221 ms →
+>   217 ms. `RwShared.for_each` over 4000 sibling-binding closures: main 0.011 s → round-2 branch
+>   **3.7 s** → round 3 **0.012 s** (the quadratic view rebuild is gone; fenced by
+>   `rwshared_view_over_shared_bindings_is_not_quadratic`). Snapshot stress (400 module-global closures
+>   over distinct cells × 1000 `parallel:` nurseries): main 1.084 s → memo-clone 1.243 s (**+15%**) →
+>   after the rollback 1.110 s (**+2.4%** vs main).
 > - **Where the rule stops** (checked, fenced, not a residual): identity holds within ONE crossing,
 >   never BETWEEN crossings — two separate tasks over one local (two `spawn:` blocks, or two
 >   `Executor.submit` calls) each still snapshot the binding independently, which is the documented F1
 >   per-task isolation. A single `submit` whose one closure holds both sides WAS the bug and is fixed.
 > - **Tests:** `tests/chz/spec/airlock_shared_binding_test.chz` — 7 arms + the `RwShared`-views
->   regression + the discarded-snapshot-walk rollback fence + **4 fences** (`[xs, xs]` through a
->   `Channel` and across two `spawn` args, both must stay `2 1`; the per-task-isolation boundary; the
->   one-task-two-serializations ceiling), 13 tests under the serial==M:N gate, also swept at
->   `--threads=1/2/4/8`. Rust: the flipped fence, a new
->   `airlock_cross_arg_data_alias_stays_independent` (the seam the shared memo creates), and
+>   regression + a view run CONCURRENTLY with a writer (round 3; pre-fix it aborted the pool thread) +
+>   the spawn args-before-callee fault-ordering pin + the discarded-snapshot-walk rollback fence +
+>   **4 fences** (`[xs, xs]` through a `Channel` and across two `spawn` args, both must stay `2 1`; the
+>   per-task-isolation boundary; the one-task-two-serializations ceiling), 15 tests under the
+>   serial==M:N gate, also swept at `--threads=1/2/4/8`. Rust: the flipped fence, a new
+>   `airlock_cross_arg_data_alias_stays_independent` (the seam the shared memo creates),
 >   `airlock_module_global_shared_binding_survives_gc_stress` (the module-scoped rebuild map now lives
->   across `module_define`).
+>   across `module_define`), and `rwshared_view_over_shared_bindings_is_not_quadratic` (the perf cliff).
 
 > **✅ BUG-HUNT (2026-07-28, wave 7, gaps.md W7-2) — `Channel.close()` no longer loses the wakeup for a
 > `wait:`-parked fiber, so a valid program stops faulting `deadlock:` on M:N.** A fiber parked in a

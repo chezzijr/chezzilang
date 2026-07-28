@@ -50,6 +50,28 @@ _w74pair := _w74mk()
 _w74cyc := _w74pair.it
 _w74size := _w74pair.size
 
+# W7-4 REVIEW — fixtures for `spawn_serializes_args_before_the_callee` (below): a struct chain deeper
+# than the 10000 structural cap (a non-crossable ARG), and a generator parked on a reference cycle
+# through the module-global list it reads (a non-crossable CALLEE CAPTURE). Two DIFFERENT reject
+# messages, so serialization ORDER is observable.
+struct _W74Deep:
+    next: List[_W74Deep]
+
+_w74hold: List[Iterator[int]] = []
+
+fn _w74deep(k: int) -> _W74Deep:
+    n := _W74Deep([])
+    i := 0
+    while i < k:
+        n = _W74Deep([n])
+        i = i + 1
+    return n
+
+fn _w74gen() -> Iterator[int]:
+    me := _w74hold[0]
+    yield 1
+    yield 2
+
 # Headline repro — no concurrency at all, just a Channel round-trip inside one task.
 test fn channel_send_keeps_one_binding():
     c := make()
@@ -238,3 +260,56 @@ test fn data_dag_alias_across_spawn_args_stays_two_copies():
     parallel:
         spawn work(xs, xs, r)
     assert r.recv() == "2 1"
+
+# W7-4 REVIEW (charge 1/5/7) — a `RwShared` read VIEW run CONCURRENTLY with a writer. The first cut
+# resolved a piece's `Backref` by RE-READING `core.v` after dropping the read guard, so a `set` in that
+# window swapped the stored wire for a fresh serialization whose ids are unrelated: the piece's backref
+# then hit `from_wire_memo`'s `.expect` — a HOST PANIC on a legal program (write-preferring `RwLock`,
+# so the queued writer wins the window: reproduced at every thread count). Stored wires are now
+# self-contained per element, so a view never needs a second read. The reader's `at(1)` copy is its own
+# binding either way; what is asserted is that the program completes at all.
+test fn rwshared_view_survives_a_concurrent_writer():
+    n := 0
+    fn inc() -> int:
+        n = n + 1
+        return n
+    fn get() -> int:
+        return n
+    fn zero() -> int:
+        return 0
+    s := RwShared([inc, get])
+    d := Channel[int](2)
+    parallel:
+        spawn:
+            for i in range(0, 20000):
+                s.set([zero, zero])
+                s.set([inc, get])
+            d.send(1)
+        spawn:
+            hits := 0
+            for i in range(0, 20000):
+                f := s.at(1)
+                hits = hits + f()
+            d.send(2)
+    assert d.recv() + d.recv() == 3
+
+# W7-4 REVIEW (charge 3) — SPAWN FAULT ORDERING. `do_spawn` batches the callee/receiver and the args
+# into ONE serialization; the args must still be serialized FIRST, as they were before the batch, or a
+# non-crossable callee pre-empts a non-crossable argument and the reported message changes. Here the
+# ARG trips the depth cap and the CALLEE's capture is a generator in a reference cycle: the arg's fault
+# is the one that must surface.
+test fn spawn_serializes_args_before_the_callee():
+    it := _w74gen()
+    _w74hold.push(it)
+    for x in it:
+        break
+    fn callee(d: _W74Deep):
+        for y in it:
+            break
+    d := _w74deep(11000)
+    r := recover:
+        parallel:
+            spawn callee(d)
+    match r:
+        Ok(_): assert false
+        Err(e): assert e.message() == "maximum structural depth (10000) exceeded (cyclic data structure?)"

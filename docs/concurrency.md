@@ -1063,6 +1063,10 @@ was retired when module globals started deep-copying per task on both engines.)
     `fold_entries` rebuild ONE piece of the stored container per step, so each piece is an independent
     copy of the binding — two `at()` calls are two crossings and can never share. A whole-container
     `get()`/`read()`, and `slice` (one call returning a container), are one crossing and DO share.
+    (Mechanically: a value stored in a cross-heap box is serialized so every **depth-1 subtree** is
+    self-contained — a cell reached from two of them carries its full definition in both, and the
+    rebuild collapses the repeat back to one cell. That is what lets a piece be drained on its own
+    without ever re-reading the box.)
   - **Handle-bearing cell.** A cell whose inner value carries a residual module/native/FFI handle falls
     to the snapshot's slow arm, which has no back-reference encoding.
 - **A recursive *local* `fn` IS sendable (identity-preserving airlock).** A nested `fn` that calls itself

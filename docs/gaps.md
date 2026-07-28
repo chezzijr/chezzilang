@@ -53,6 +53,7 @@ chronological log.
 | **W7-8** | `:3860` | `fs.list_dir`/`walk`/`glob`/`canonicalize` + `os.getcwd` decode paths LOSSILY, so the path they hand back does not open — a **dead** path with no diagnostic | The last unswept member of the lossy-byte family (B1/R1/W6-4/W6-14 all fixed). Fixing it properly means a `bytes`-carrying path seam, i.e. the same `OsString`-through-the-resolver work the W7-6 v1 ceiling names — its own milestone, not a patch |
 | **W7-9** | `:3860` | `Reader.read_line`'s non-UTF-8 fault is **DESTRUCTIVE**: the bad line is consumed, and the `read_bytes` its own message recommends returns the NEXT line | Breaches the ratified B1/R1 rule ("a recoverable `Err` that silently drops already-received payload is just a different flavour of the corruption B1 fixes"). `Socket.read` keeps the undecodable bytes in `SocketCore::carry` for exactly this; `Reader` needs the same carry, which is a `Reader`-lifecycle change |
 | **W7-10** | `:3860` | `csv.parse` SILENTLY DELETES a bare `"` inside an unquoted field (`a,b"c` → `bc`) | Needs a policy decision first: CPython keeps it literally, Go `encoding/csv` errors — Chezzi currently picks a silent third answer, and `parse` returns a bare `List[List[str]]` with no error channel, so "error like Go" also needs a signature change |
+| **W7-11** | `:3901` | A `RwShared` holding a container with an element that back-references the CONTAINER (`a.next = xs; RwShared(xs).at(0)`) aborts the host on `from_wire_memo`'s `.expect("a wire Backref always targets an already-reconstructed node id")` — a legal program, no concurrency, both engines | **Pre-existing on main**, not a W7-4 regression (verified on 5960052): a copy-out view drains ONE depth-1 piece, and a piece whose cycle closes through the ROOT container can never be self-contained — the definition it needs IS the container. `elem_split` fixes the sibling-CELL case, not this ancestor case. Closing it means either a catchable fault instead of the `.expect` (`from_wire_memo` returns a `Value`, so that is a signature change through every rebuild arm) or a same-guard whole-container fallback at all 12 view sites |
 | **W7-4a** | `:3901` | Airlock cell identity is preserved **per module** in the snapshot, so two globals in DIFFERENT modules over one shared cell still arrive as two cells | Residual disclosed by the W7-4 fix. Closing it needs `Vm`-lived rebuild state kept (and rooted) across the lazy per-module faults; the reported repro is same-module and is fixed |
 | **W7-4b** | `:3901` | A cell whose inner value carries a residual `Module`/`Native`/`Cffi` handle falls to `SnapValue::Cell`, which has no `Backref` encoding, so its identity is not preserved across a module snapshot | Residual disclosed by the W7-4 fix, and the same limit the `SnapValue::Closure` slow arm already documents. Closing it is a snapshot FORMAT change (id/`Backref` arms on `SnapValue`), out of proportion to a residual this narrow |
 | **W7-4c** | `:3901` | ONE TASK reached through TWO serializations still gets two bindings: a `spawn:` block's captures and the module-global snapshot cross into the same task but are separate memos, rebuilt at different times (the snapshot faults in lazily) | Residual disclosed by the W7-4 fix; same family as W7-4a. Closing it needs `Vm`-lived rebuild state across GC-visible points. Fenced by `module_global_plus_local_capture_still_split` and stated in `syntax.md` rule 2 |
@@ -3962,11 +3963,20 @@ engines:
   neither a cell id nothing defines (rebuild panic) nor a `Backref` shortcut that could hide a residual
   handle from a later `has_handle`/`ensure_crossable`. Rollback, not a memo clone — the clone ran at
   EVERY node and made a module with K cell-bearing globals O(M·K).
-- **`RwShared`'s zero-copy read views** are the one place ONE serialize memo is drained by MANY
-  independent `from_wire`s, so the persistent cell memo made a `Backref` legal BETWEEN SIBLING pieces
-  for the first time and `RwShared([inc, get]).at(1)` hit that `.expect` — a host PANIC, no concurrency,
-  both engines. `WireValue::has_backref` + `Vm::from_wire_view`/`view_rebuild_map` route only a
-  `Backref`-bearing piece to a whole-container rebuild; the fast path is the old `from_wire` unchanged.
+- **Cross-heap STORES serialize with `WireMemo::elem_split`** (`to_wire_crossable`, the single
+  chokepoint every store routes through). `RwShared`'s zero-copy read views are the one place ONE
+  serialize memo is drained by MANY independent `from_wire`s, so the persistent cell memo made a
+  `Backref` legal BETWEEN SIBLING pieces of a stored wire for the first time and
+  `RwShared([inc, get]).at(1)` hit that `.expect` — a host PANIC, no concurrency, both engines. Fix:
+  a stored wire re-emits a cell's FULL definition once per **depth-1 subtree** (same id), and
+  `from_wire_memo` DEDUPES a repeated definition by id. Every drained piece is therefore
+  self-contained, and a whole-value rebuild still ties every reference to one cell. Cost is a little
+  wire size (only for a cell reached from 2+ depth-1 subtrees), and `src/vm/netio.rs` keeps main's
+  plain `from_wire` per piece. **The rejected alternative** (round 2) was to resolve a piece's backrefs
+  by RE-READING `core.v` to rebuild the whole container: two separate read guards → a concurrent `set`
+  in the window resolved the piece against an unrelated serialization (`.expect` abort, or a
+  `CellLoad on a non-cell object` wrong-node abort, M:N-only = parity-blind), and it was O(n²) — a
+  4000-element `for_each` went 0.011 s → 3.7 s, 12000 → 34 s.
 
 **Intended contract flip:** `airlock_aliased_closure_stays_independent` (`[bump, bump]`) →
 `airlock_aliased_closure_shares_its_binding`, `1` → `2`. The closure *values* are still two independent
@@ -3980,16 +3990,20 @@ bug; it is now fenced by `separate_tasks_each_get_their_own_binding` so a future
 `Vm`-lived" over-reach goes red. A single `Executor.submit` whose one closure holds both sides of a
 pair WAS the bug and is fixed (`0` → `2`).
 
-**Verified.** `tests/chz/spec/airlock_shared_binding_test.chz` — 13 tests (7 arms, the `RwShared`-views
-regression, the discarded-snapshot-walk rollback fence, 4 fences), green on both engines under
+**Verified.** `tests/chz/spec/airlock_shared_binding_test.chz` — 15 tests (7 arms, the `RwShared`-views
+regression, a view run CONCURRENTLY with a writer, the spawn args-before-callee fault-ordering pin, the
+discarded-snapshot-walk rollback fence, 4 fences), green on both engines under
 `chz_suite_passes_both_engines`; thread sweep `1/2/4/8`; the full 26-test `airlock_` panel (cycles on
 every container arm, recursive/mutually-recursive local `fn`, the generator `reference cycle` reject,
 the depth cap, handle `Arc` identity, the module-global inert-`Nil` generator) unchanged; a new
 `airlock_cross_arg_data_alias_stays_independent` fence and a new
-`airlock_module_global_shared_binding_survives_gc_stress` rooting lock. **Perf** — `benches/run.chz`
-flat on all 9 (no airlock there); 100k `Channel.send`/`recv` 94 ms on main, pre-fix and after; snapshot
-stress (400 module-global closures over distinct cells × 1000 nurseries) main 1.084 s → memo-clone
-1.243 s (+15%) → rollback 1.110 s (+2.4% vs main).
+`airlock_module_global_shared_binding_survives_gc_stress` rooting lock, plus
+`rwshared_view_over_shared_bindings_is_not_quadratic` (a coarse cliff detector: 10.5 s pre-fix debug,
+0.03 s after). **Perf** — `benches/run.chz` flat on all 9 (no airlock there); 100k `Channel.send`/`recv`
+round-trips 127 ms → 124 ms; 20k-`spawn` storm 221 ms → 217 ms; `RwShared.for_each` over 4000
+sibling-binding closures main 0.011 s → round-2 branch 3.7 s → 0.012 s; snapshot stress (400
+module-global closures over distinct cells × 1000 nurseries) main 1.084 s → memo-clone 1.243 s (+15%)
+→ rollback 1.110 s (+2.4% vs main).
 
 **Residual ceilings, shipped as documented known limits** (`ponytail:` comments at the sites). All the
 same shape — TWO INDEPENDENT SERIALIZATIONS reach one cell; identity is per serialization:

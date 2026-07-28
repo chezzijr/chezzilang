@@ -26,21 +26,46 @@ use super::*;
 /// sibling closures over the same local (`Ctr(inc, get)`) reach that cell off each other's DFS stack,
 /// so it was re-serialized twice and the shared binding silently SPLIT on the far side. So cells live
 /// in the separate `cells` map, which is NEVER popped: one `WireValue::Cell` per cell per
-/// serialization, every later reach emitting `Backref`. Everything else keeps `path` exactly as it
-/// was — the documented DATA rule (an acyclic DAG alias is two independent deep copies, never
+/// serialization *scope*, every later reach emitting `Backref`. Everything else keeps `path` exactly as
+/// it was — the documented DATA rule (an acyclic DAG alias is two independent deep copies, never
 /// collapsed) is deliberate and unchanged.
+///
+/// **`elem_split` — cell scope for a value STORED in a cross-heap box.** `RwShared`'s zero-copy read
+/// views drain ONE stored wire through MANY independent `from_wire` rebuilds, so a depth-1 element
+/// carrying a `Backref` to a cell defined in a SIBLING element would hit `from_wire_memo`'s `.expect`
+/// (a host panic) — the id is not in that piece's rebuild map. So every cross-heap STORE
+/// ([`Vm::to_wire_crossable`]) serializes with `elem_split`: `gen` bumps on entry to each depth-1
+/// node, and a cell is re-emitted as a FULL `WireValue::Cell` (same id) the first time each depth-1
+/// subtree reaches it. Every depth-1 subtree is then self-contained, and `from_wire_memo` DEDUPES by
+/// id (second definition resolves to the first rebuild), so a whole-value rebuild (`Channel.recv`,
+/// `Shared.get`, `RwShared.get`) still ties every reference to ONE cell.
+///
+/// ponytail: the ceiling is WIRE SIZE — a cell reached from k depth-1 subtrees is serialized k times
+/// (its inner graph re-expands, though only once per subtree, so it stays linear in k). Only a stored
+/// value whose top-level elements share a binding pays it. Upgrade path if it ever matters: hoist cell
+/// definitions into a side table on the stored wire so a piece can resolve ids without carrying them.
+/// A piece whose cycle closes through the ROOT container still cannot be self-contained (the node it
+/// needs IS the container) — a pre-existing `.expect` abort in the copy-out views, ledgered as W7-11.
 #[derive(Default)]
 struct WireMemo {
     /// GcRef of an identity-preserved node (`Closure`/container) currently on the serialize DFS
     /// stack → the `id` assigned on its first visit. A revisit while still in `path` is a true back-edge
     /// → `Backref(id)`; removed on DFS exit so an off-stack alias is deep-copied independently.
     path: super::fxhash::FxHashMap<GcRef, u32>,
-    /// W7-4 — GcRef of every `Obj::Cell` seen ANYWHERE in this serialization → its `id`. Never removed:
-    /// a cell is a binding, so reaching it a second time (off-stack sibling closure, or on-stack
-    /// letrec back-edge) always emits `Backref` and the far side rebuilds exactly one cell per binding.
-    /// Scope discipline: a serialize memo's lifetime must equal its `from_wire_memo` rebuild map's, or
-    /// a `Backref` minted under one memo hits the other's `.expect` — see [`Vm::to_wire_memo_at`].
+    /// W7-4 — GcRef of every `Obj::Cell` seen ANYWHERE in this serialization → (its `id`, the `gen` it
+    /// was last EMITTED under). Never removed: a cell is a binding, so reaching it again under the same
+    /// `gen` (off-stack sibling closure, or on-stack letrec back-edge) emits `Backref` and the far side
+    /// rebuilds exactly one cell per binding. Scope discipline: a serialize memo's lifetime must equal
+    /// its `from_wire_memo` rebuild map's, or a `Backref` minted under one memo hits the other's
+    /// `.expect` — see [`Vm::to_wire_memo_at`].
     cells: super::fxhash::FxHashMap<GcRef, u32>,
+    /// Ids from `cells` already EMITTED (as a full `WireValue::Cell`) under the current `gen`. Equal to
+    /// `cells`' id set unless `elem_split` is on.
+    emitted: super::fxhash::FxHashMap<u32, u32>,
+    /// Bumped on entry to each depth-1 node when `elem_split` — see the type doc.
+    elem_gen: u32,
+    /// Re-emit a cell's full definition once per depth-1 subtree (cross-heap stores only).
+    elem_split: bool,
     next_id: u32,
     /// GcRefs of `Obj::Generator`s currently on the serialize DFS stack. A generator carries no id (its
     /// parked frame can't be a `Backref` target), so re-entering one still on the stack is a cycle
@@ -69,19 +94,23 @@ impl Vm {
         // REFERENCE, silently splitting the binding. A capture-free `spawn f(…)` callee still keeps
         // the cheap shared handle (see [`spawn_callee_crosses_deep`](Vm::spawn_callee_crosses_deep)),
         // so it stays out of the batch.
+        //
+        // ARGS FIRST, receiver/callee LAST — the pre-batch order (every arg was `deep_clone`d, then the
+        // receiver / `cross_spawn_callee`). Serialization order is observable when two of them are
+        // non-crossable in DIFFERENT ways (a depth-cap arg vs a reference-cycle callee): the first
+        // failure is the reported fault. `lower_task` keeps the same args-before-captures order.
         let cross_head = method.is_some() || self.spawn_callee_crosses_deep(head);
-        let mut batch = Vec::with_capacity(raw_args.len() + 1);
+        let mut batch = raw_args;
         if cross_head {
             batch.push(head);
         }
-        batch.extend(raw_args);
         let mut crossed = self.deep_clone_all(batch, span)?;
-        let args = if cross_head {
-            crossed.split_off(1)
+        let head = if cross_head {
+            crossed.pop().expect("the head was pushed last")
         } else {
-            std::mem::take(&mut crossed)
+            head
         };
-        let head = if cross_head { crossed[0] } else { head };
+        let args = crossed;
         let task = match method {
             Some(name) => PendingCall::Method {
                 recv: head,
@@ -2171,12 +2200,23 @@ impl Vm {
     /// native / FFI handle silently crossing a channel was serial≠M:N + cross-heap corruption). Legit
     /// `Channel`/`Shared`/`Executor`/socket handles map to shared-`Arc` wire arms (`has_handle()` ==
     /// false), so they still cross unchanged.
+    ///
+    /// W7-4: serializes with [`WireMemo::elem_split`], because a STORED wire is the one wire that gets
+    /// drained PIECEWISE (`RwShared`'s zero-copy read views take one depth-1 element at a time, each
+    /// with its own rebuild map). Each depth-1 subtree therefore carries its own full definition of
+    /// every cell it reaches, and a whole-value rebuild dedupes them back to one cell — so
+    /// `Channel.recv`/`Shared.get`/`RwShared.get` keep the shared binding while a per-element view is
+    /// (as always) an independent copy.
     pub(super) fn to_wire_crossable(
         &self,
         v: Value,
         span: Span,
     ) -> Result<WireValue, RuntimeError> {
-        let w = self.to_wire_at(v, span)?;
+        let mut memo = WireMemo {
+            elem_split: true,
+            ..Default::default()
+        };
+        let w = self.to_wire_memo_at(v, span, &mut memo)?;
         self.ensure_crossable(&w, span)?;
         // W6-10 (sampling half) — charge the payload's off-heap bytes against the GC trigger so a
         // live `--max-heap` cap actually gets SAMPLED. `over_cap` is only evaluated in `sweep()`,
@@ -2240,6 +2280,11 @@ impl Vm {
     ) -> Result<WireValue, RuntimeError> {
         if depth > MAX_STRUCTURAL_DEPTH {
             return Err(self.depth_exceeded_err(Span { line: 0, col: 0 }));
+        }
+        // W7-4: a cross-heap STORE re-emits each cell's full definition once per depth-1 subtree, so
+        // every piece an `RwShared` read view drains alone is self-contained (see [`WireMemo`]).
+        if memo.elem_split && depth == 1 {
+            memo.elem_gen += 1;
         }
         Ok(match v.view() {
             ValueView::Int(n) => WireValue::Int(n),
@@ -2629,14 +2674,24 @@ impl Vm {
                 // get)` over one local `n` — as well as an on-stack letrec/mutual-recursion back-edge)
                 // emits `Backref(id)` and the far side ties both references to the one rebuilt cell.
                 // Data containers keep the pop-on-exit `path` discipline above, so the documented
-                // DAG-alias-is-two-independent-copies contract is untouched.
+                // DAG-alias-is-two-independent-copies contract is untouched. The `id` is stable per
+                // cell for the whole serialization; `emitted` (which `elem_split` scopes per depth-1
+                // subtree — see [`WireMemo`]) decides definition-vs-`Backref`, and a repeated
+                // definition DEDUPES on rebuild, so identity is unchanged either way.
                 Obj::Cell(v) => {
-                    if let Some(&id) = memo.cells.get(&h) {
+                    let id = match memo.cells.get(&h) {
+                        Some(&id) => id,
+                        None => {
+                            let id = memo.next_id;
+                            memo.next_id += 1;
+                            memo.cells.insert(h, id);
+                            id
+                        }
+                    };
+                    if memo.emitted.get(&id) == Some(&memo.elem_gen) {
                         WireValue::Backref(id)
                     } else {
-                        let id = memo.next_id;
-                        memo.next_id += 1;
-                        memo.cells.insert(h, id);
+                        memo.emitted.insert(id, memo.elem_gen);
                         let inner = self.to_wire_depth(*v, depth + 1, memo)?;
                         WireValue::Cell {
                             id,
@@ -2693,53 +2748,6 @@ impl Vm {
         // value cycle back together.
         let mut rebuild = super::fxhash::FxHashMap::<u32, GcRef>::default();
         self.from_wire_memo(w, &mut rebuild)
-    }
-
-    /// W7-4 — rebuild ONE PIECE of an `RwShared`'s stored container wire (its zero-copy read views:
-    /// `at`/`slice`/`for_each`/`fold`/`contains`/`get_key`/`has`/`for_each_entry`/`fold_entries`).
-    ///
-    /// Those views are the one place a single [`WireMemo`]'s output is DRAINED by many independent
-    /// `from_wire` calls — memo scope no longer equals rebuild scope, the invariant [`deep_clone_all`]
-    /// (Vm::deep_clone_all) states. That was safe only while a `Backref` was a true DFS back-edge
-    /// (always intra-piece); W7-4 memoizes a `Cell`'s id for the WHOLE serialization, so element `k>0`
-    /// can now `Backref` a cell first reached under element `0` and a per-piece rebuild map would hit
-    /// `from_wire_memo`'s `.expect` — a host PANIC, not a catchable fault.
-    ///
-    /// Fast path (no `Backref` in the piece — everything that isn't a shared binding) is exactly the old
-    /// `from_wire`. Otherwise rebuild the whole stored wire under ONE map first so every id is defined,
-    /// then rebuild the piece against it. A copy-out view is an INDEPENDENT deep copy either way (two
-    /// `at()` calls can never share — they are separate crossings), so the throwaway whole is only
-    /// there to give the piece's back-references something to resolve to; it is unreachable garbage
-    /// (safe: `Heap::alloc` never collects, and the returned value roots what it needs).
-    ///
-    /// ponytail: the slow path is O(whole container) per rebuild map, so a `for_each` over a container
-    /// of sibling closures is O(n²), and pieces drained under SEPARATE maps (successive `for_each`
-    /// steps, a map entry's key vs its value) do not share a cell with each other. Both only bite the
-    /// shared-binding case. Upgrade path if it ever matters: cache the rebuilt whole across the walk.
-    #[allow(clippy::wrong_self_convention)]
-    pub(super) fn from_wire_view(&mut self, core: &RwSharedCore, piece: WireValue) -> Value {
-        let mut rebuild = self.view_rebuild_map(core, piece.has_backref());
-        self.from_wire_memo(piece, &mut rebuild)
-    }
-
-    /// The rebuild map [`from_wire_view`](Vm::from_wire_view) drains a piece against. `seed` (any piece
-    /// about to be drained under it carries a `Backref`) pre-registers every id by rebuilding the WHOLE
-    /// stored wire into it; the rebuilt whole is unreachable garbage that exists only to give those
-    /// back-references a target. Pieces sharing ONE map share their cells (`slice` returns its elements
-    /// in one crossing, like `get`); a fresh map per piece keeps them independent.
-    pub(super) fn view_rebuild_map(
-        &mut self,
-        core: &RwSharedCore,
-        seed: bool,
-    ) -> super::fxhash::FxHashMap<u32, GcRef> {
-        let mut rebuild = super::fxhash::FxHashMap::<u32, GcRef>::default();
-        if seed {
-            // The caller has already DROPPED the shared guard (never re-lock `core.v` under it — the
-            // write-preferring `RwLock` deadlocks a recursive read behind a queued writer).
-            let whole = core.v.read().unwrap().clone();
-            let _ = self.from_wire_memo(whole, &mut rebuild);
-        }
-        rebuild
     }
 
     /// Worker behind [`Vm::from_wire`] — reconstructs into this heap, threading `rebuild` (wire `id` →
@@ -2928,10 +2936,14 @@ impl Vm {
                 }
                 Value::obj(h)
             }
-            // A back-reference closes a serialized value cycle: resolve it to the placeholder registered
-            // under this `id` (always present — `to_wire` assigns the id and inserts it into the
-            // serialize memo BEFORE emitting any back-edge to it, and `from_wire_memo` registers the
-            // placeholder BEFORE recursing children, so the target is alloc'd by the time we get here).
+            // A back-reference closes a serialized value cycle (or, for a `Cell`, ties a second
+            // reference to the one binding — W7-4): resolve it to the placeholder registered under this
+            // `id`. Present whenever the rebuild map spans the SAME scope the serialize memo did —
+            // `to_wire` emits the defining node before any `Backref` to it, and `from_wire_memo`
+            // registers the placeholder BEFORE recursing children. Keeping those two scopes equal is
+            // the caller's job (see [`deep_clone_all`](Vm::deep_clone_all)); a wire drained PIECEWISE
+            // (`RwShared`'s read views) is served by [`to_wire_crossable`](Vm::to_wire_crossable)'s
+            // `elem_split`, which makes every depth-1 piece self-contained.
             WireValue::Backref(id) => Value::obj(
                 *rebuild
                     .get(&id)
@@ -2943,7 +2955,14 @@ impl Vm {
             // (the self-cell a recursive local `fn` closes) resolves to this exact handle; then patch
             // the placeholder with the reconstructed inner. `Heap::alloc` never collects, so no GC runs
             // between the placeholder and the patch.
+            // W7-4: a wire may carry the SAME cell definition more than once (`elem_split` re-emits it
+            // per depth-1 subtree so each is self-contained) — the first rebuild wins and every later
+            // definition of that id resolves to it, exactly like a `Backref`. That is what keeps
+            // `Channel.recv`/`Shared.get`/`RwShared.get` on ONE cell per binding.
             WireValue::Cell { id, inner } => {
+                if let Some(&prev) = rebuild.get(&id) {
+                    return Value::obj(prev);
+                }
                 let h = self.heap.alloc(Obj::Cell(Value::nil()));
                 rebuild.insert(id, h);
                 let inner = self.from_wire_memo(*inner, rebuild);
@@ -3816,6 +3835,7 @@ impl Vm {
             Ok(w) if keep(&w) => Some(w),
             _ => {
                 memo.cells.retain(|_, id| *id < mint_from);
+                memo.emitted.retain(|id, _| *id < mint_from);
                 memo.next_id = mint_from;
                 memo.path.clear();
                 memo.gens_on_stack.clear();

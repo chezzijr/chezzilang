@@ -2029,10 +2029,7 @@ impl Vm {
                     },
                     _ => return Err(self.err("RwShared.at requires a list element".into(), span)),
                 };
-                // W7-4: DROP the guard before `from_wire_view` — its shared-binding slow path re-reads
-                // `core.v`, and a recursive read on a write-preferring `RwLock` can deadlock.
-                drop(g);
-                Ok(self.from_wire_view(&core, ew))
+                Ok(self.from_wire(ew))
             }
             "slice" => {
                 self.arity_err("slice", args, 2, span)?;
@@ -2049,26 +2046,21 @@ impl Vm {
                         return Err(self.err("RwShared.slice requires a list element".into(), span));
                     }
                 };
-                // W7-4: clone the selected element wires out and DROP the guard before rebuilding —
-                // `from_wire_view`'s shared-binding slow path re-reads `core.v` (see `at`). Same memory
-                // order as before: only [lo:hi] is ever materialized.
-                let ews: Vec<WireValue> = match &*g {
-                    WireValue::List { items, .. } => {
-                        idxs.iter().map(|&i| items[i].clone()).collect()
-                    }
-                    _ => unreachable!(),
-                };
-                drop(g);
-                // ONE rebuild map for the whole slice — it is a single crossing that returns a
-                // container, like `get`, so two sliced-out closures over one binding still share it.
-                let seed = ews.iter().any(WireValue::has_backref);
-                let mut rb = self.view_rebuild_map(&core, seed);
                 // Materialize ONLY [lo:hi] into a fresh list, rooted on the operand stack across the
                 // per-element `from_wire`s (defensive — `from_wire` only allocs and `alloc` never
                 // collects, but rooting matches the list-HOF precedent and is future-proof).
                 let res_h = self.heap.alloc(Obj::List(Vec::new()));
                 self.push(Value::obj(res_h));
-                for ew in ews {
+                // W7-4: ONE rebuild map across the sliced-out elements — `slice` is a SINGLE crossing
+                // that returns a container (like `get`), so two sliced-out closures over the same
+                // captured local land on ONE cell. A per-element view (`at`, `for_each`) is its own
+                // crossing and keeps its own copy.
+                let mut rb = super::fxhash::FxHashMap::<u32, GcRef>::default();
+                for idx in idxs {
+                    let ew = match &*g {
+                        WireValue::List { items, .. } => items[idx].clone(),
+                        _ => unreachable!(),
+                    };
                     let elem = self.from_wire_memo(ew, &mut rb);
                     if let Obj::List(items) = self.heap.get_mut(res_h) {
                         items.push(elem);
@@ -2112,7 +2104,7 @@ impl Vm {
                         }
                         _ => break, // replaced by a non-container under a concurrent set — stop
                     };
-                    let elem = self.from_wire_view(&core, ew);
+                    let elem = self.from_wire(ew);
                     self.guarded(|vm| vm.invoke_value(f, vec![elem], span))?;
                 }
                 self.pop();
@@ -2153,7 +2145,7 @@ impl Vm {
                         }
                         _ => break,
                     };
-                    let elem = self.from_wire_view(&core, ew);
+                    let elem = self.from_wire(ew);
                     let acc = self.stack[acc_slot];
                     let new = self.guarded(|vm| vm.invoke_value(f, vec![acc, elem], span))?;
                     self.stack[acc_slot] = new;
@@ -2203,7 +2195,7 @@ impl Vm {
                         }
                         entries[i].1.clone() // clone the element wire; guard drops at block end
                     };
-                    let e = self.from_wire_view(&core, ew);
+                    let e = self.from_wire(ew);
                     if self.values_equal_guarded(e, needle, 0, span)? {
                         found = true;
                         break;
@@ -2245,7 +2237,7 @@ impl Vm {
                         }
                         entries[i].1.clone()
                     };
-                    let k = self.from_wire_view(&core, kw);
+                    let k = self.from_wire(kw);
                     if self.values_equal_guarded(k, key, 0, span)? {
                         found = true;
                         break;
@@ -2293,9 +2285,9 @@ impl Vm {
                         }
                         (entries[i].1.clone(), entries[i].2.clone())
                     };
-                    let k = self.from_wire_view(&core, kv.0);
+                    let k = self.from_wire(kv.0);
                     if self.values_equal_guarded(k, key, 0, span)? {
-                        let v = self.from_wire_view(&core, kv.1);
+                        let v = self.from_wire(kv.1);
                         result = Some(v);
                         break;
                     }
@@ -2332,11 +2324,11 @@ impl Vm {
                         }
                         _ => break,
                     };
-                    let k = self.from_wire_view(&core, kv.0);
+                    let k = self.from_wire(kv.0);
                     // Root the reconstructed key while building the value (both alloc; `alloc` never
                     // collects, but rooting matches the receiver-rooting precedent and is future-proof).
                     self.push(k);
-                    let v = self.from_wire_view(&core, kv.1);
+                    let v = self.from_wire(kv.1);
                     let k = self.pop();
                     self.guarded(|vm| vm.invoke_value(f, vec![k, v], span))?;
                 }
@@ -2370,9 +2362,9 @@ impl Vm {
                         }
                         _ => break,
                     };
-                    let k = self.from_wire_view(&core, kv.0);
+                    let k = self.from_wire(kv.0);
                     self.push(k); // root key while reconstructing value
-                    let v = self.from_wire_view(&core, kv.1);
+                    let v = self.from_wire(kv.1);
                     let k = self.pop();
                     let acc = self.stack[acc_slot];
                     let new = self.guarded(|vm| vm.invoke_value(f, vec![acc, k, v], span))?;
