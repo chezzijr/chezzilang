@@ -24,9 +24,17 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > original sibling fault, `rc` unchanged). **(b) `is_over_memory` / (c) `is_timed_out` deliberately keep
 > bypassing UNCONDITIONALLY** — `chezzi test --max-heap` / `--timeout` aborts stay recover-proof inside a
 > defer too, and neither ever sets `self.cancelled`, so the (a)-only gate cannot weaken them. Tests:
-> `tests/chz/spec/cancel_defer_recover_test.chz` (RED-first driver + the two fences
-> `recover_outside_defer_cannot_defeat_cancel` and `faulting_defer_does_not_swallow_lifo_next` (N6d),
-> serial==M:N gated) + `test_runner::recover_inside_defer_does_not_catch_timeout` pinning (b)/(c). Docs:
+> `tests/chz/spec/cancel_defer_recover_test.chz` (RED-first driver + three fences —
+> `recover_outside_defer_cannot_defeat_cancel`,
+> `recover_outside_defer_cannot_catch_a_fault_raised_inside_it`, and
+> `faulting_defer_does_not_swallow_lifo_next` (N6d) — serial==M:N gated) +
+> `test_runner::recover_inside_defer_does_not_catch_timeout` pinning (b)/(c), whose load-bearing
+> assertion is the ABSENT `SWALLOWED` marker, not the `TIMED-OUT` bucket (the outer abort re-stamps
+> that bucket either way — adversarial-review fix). Also made `run_one_deferred` panic-safe: the
+> `deferring` counter now restores on an unwind like `guarded`'s `native_reentry`, because since this
+> change a leaked `deferring` would also permanently disable the cancel bypass. Honest limit: the
+> `caught_here` conjunct is the conservative arm and no constructible program distinguishes it from
+> `deferring == 0` — see `docs/gaps.md`. Docs:
 > `docs/concurrency.md`, `docs/gaps.md` (new wave-7 session log; nothing added to OPEN ITEMS — ships fixed).
 >
 > **✅ RULING (2026-07-27, gaps.md W6-3d) — a NUMERIC newtype may no longer define an operator-named

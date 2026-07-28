@@ -3766,6 +3766,20 @@ Requiring `caught_here` (rather than the simpler `deferring == 0`) also keeps th
 defer-fault path byte-identical — the simple form would have re-routed it onto the `report_escaped =
 true` branch, a stderr change in the N6/N6h machinery.
 
-**Fences** — `tests/chz/spec/cancel_defer_recover_test.chz` (3 `test fn`s, serial==M:N gated): the
-driver, `recover_outside_defer_cannot_defeat_cancel`, and `faulting_defer_does_not_swallow_lifo_next`
-(N6d). Plus `test_runner::recover_inside_defer_does_not_catch_timeout` pinning (b)/(c).
+**Fences** — `tests/chz/spec/cancel_defer_recover_test.chz` (4 `test fn`s, serial==M:N gated): the
+driver, `recover_outside_defer_cannot_defeat_cancel`,
+`recover_outside_defer_cannot_catch_a_fault_raised_inside_it`, and
+`faulting_defer_does_not_swallow_lifo_next` (N6d). Plus
+`test_runner::recover_inside_defer_does_not_catch_timeout` pinning (b)/(c) — its load-bearing
+assertion is the absent `SWALLOWED` marker, **not** the `TIMED-OUT` bucket: the outer `--timeout`
+fires in the test body (`deferring == 0`), takes the unconditional bypass, and the funnel re-stamps
+`.timed_out()` onto whatever emerges, so the bucket is `TimedOut` whether or not the in-defer
+`recover:` swallowed the abort (adversarial-review fix — the first cut asserted only the bucket and
+so could not fail).
+
+**What the fences do NOT pin, stated honestly:** the `caught_here` conjunct in `cancel_bypass`.
+Measured on the real binary, replacing `!(deferring > 0 && caught_here)` with `!(deferring > 0)`
+leaves all four `test fn`s byte-identical on both engines — with no handler above `base_level` the
+fault returns `Err` either way. The conjunct is kept as the **conservative** arm (it preserves the
+bypass in more cases, so a cancelled task is more likely to die), not because a test discriminates
+it.

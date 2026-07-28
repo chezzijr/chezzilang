@@ -1197,6 +1197,13 @@ impl Vm {
                 // once the defer body finishes the pending cancel resumes travelling up.
                 // (b) `is_over_memory` and (c) `is_timed_out` are NOT gated: a `--max-heap` /
                 // `--timeout` abort stays recover-proof everywhere, including inside a defer.
+                //
+                // `caught_here` is the CONSERVATIVE arm, not a load-bearing one: measured on the real
+                // binary, dropping it (`!(self.deferring > 0)`) leaves every test in
+                // `tests/chz/spec/cancel_defer_recover_test.chz` byte-identical on both engines — with
+                // no handler above `base_level` the fault returns `Err` either way. It is kept because
+                // it preserves the bypass in MORE cases (a cancelled task is more likely to die), which
+                // is the safe direction. Do not "simplify" it away without re-deriving that.
                 let caught_here =
                     matches!(self.handlers.last().copied(), Some(h) if h.frame_len > base_level);
                 let cancel_bypass = self.cancelled && !(self.deferring > 0 && caught_here);

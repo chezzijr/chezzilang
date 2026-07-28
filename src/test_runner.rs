@@ -1374,15 +1374,25 @@ struct Suite:
     fn recover_inside_defer_does_not_catch_timeout() {
         // W7-3 boundary: the cancel-bypass carve-out is (a)-ONLY. A `recover:` installed inside a
         // `defer` body now catches a CANCEL-time fault, but a `--timeout` wall-clock abort is still
-        // recover-proof there too — `is_timed_out` is not gated on `deferring`, so the trailing
-        // `assert false` never runs and the test lands TimedOut.
+        // recover-proof there too — `is_timed_out` is not gated on `deferring`.
+        //
+        // The TimedOut BUCKET alone does not discriminate: the outer `--timeout` fires in the test
+        // body (`deferring == 0`), takes the unconditional bypass, and the funnel re-stamps
+        // `.timed_out()` onto whatever error emerges (exec.rs), so the bucket is TimedOut either way.
+        // The load-bearing assertion is therefore the SWALLOWED marker: it can only appear if the
+        // in-defer `recover:` caught the abort and execution continued past it.
         let d = TmpDir::new();
         let f = d.write(
             "recdefertimeout_test.chz",
-            "test fn t():\n    defer:\n        r := recover:\n            while true:\n                pass\n        assert false\n    while true:\n        pass\n",
+            "test fn t():\n    defer:\n        r := recover:\n            while true:\n                pass\n        assert false, \"SWALLOWED-{r}\"\n    while true:\n        pass\n",
         );
         let report = run_tests_timed(&f, true, 0, 50);
         assert!(!report.passed, "report:\n{}", report.text);
+        assert!(
+            !report.text.contains("SWALLOWED"),
+            "a recover: INSIDE a defer CAUGHT the timeout abort — execution continued past it; report:\n{}",
+            report.text
+        );
         assert!(
             report.text.contains("TIMED-OUT t"),
             "a recover: INSIDE a defer must NOT catch a timeout abort; report:\n{}",
