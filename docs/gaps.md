@@ -23,9 +23,10 @@ three disclosed residuals `W6-9r` / `W6-10s` / `W6-10r` — see the index below.
 before touching `io`/`process`/FFI/`RwShared`/module-snapshot code. Its meta-finding — **5 of 6 P0s are "a
 fix applied to SOME arms of an N-way set"** — is the highest-yield remaining lever. **Wave 7
 (2026-07-28)** is running against exactly that lever; `W7-3` (a `recover:` inside a cancelled task's
-`defer` was bypassed) was another instance of it and is **fixed** — session log at the end of this file.
+`defer` was bypassed) and `W7-4` (two sibling closures over one captured local got separate cells across
+the airlock) were both instances of it and are **fixed** — session logs at the end of this file.
 
-## OPEN ITEMS — the whole backlog at a glance (updated 2026-07-28)
+## OPEN ITEMS — the whole backlog at a glance (updated 2026-07-29)
 
 Everything still open, roughly by severity. **No memory-unsafety is left in the ledger** — W6-8, the
 last one, was fixed 2026-07-27. Anything NOT listed here is either fixed or a safe-direction
@@ -52,6 +53,8 @@ chronological log.
 | **W7-8** | `:3860` | `fs.list_dir`/`walk`/`glob`/`canonicalize` + `os.getcwd` decode paths LOSSILY, so the path they hand back does not open — a **dead** path with no diagnostic | The last unswept member of the lossy-byte family (B1/R1/W6-4/W6-14 all fixed). Fixing it properly means a `bytes`-carrying path seam, i.e. the same `OsString`-through-the-resolver work the W7-6 v1 ceiling names — its own milestone, not a patch |
 | **W7-9** | `:3860` | `Reader.read_line`'s non-UTF-8 fault is **DESTRUCTIVE**: the bad line is consumed, and the `read_bytes` its own message recommends returns the NEXT line | Breaches the ratified B1/R1 rule ("a recoverable `Err` that silently drops already-received payload is just a different flavour of the corruption B1 fixes"). `Socket.read` keeps the undecodable bytes in `SocketCore::carry` for exactly this; `Reader` needs the same carry, which is a `Reader`-lifecycle change |
 | **W7-10** | `:3860` | `csv.parse` SILENTLY DELETES a bare `"` inside an unquoted field (`a,b"c` → `bc`) | Needs a policy decision first: CPython keeps it literally, Go `encoding/csv` errors — Chezzi currently picks a silent third answer, and `parse` returns a bare `List[List[str]]` with no error channel, so "error like Go" also needs a signature change |
+| **W7-4a** | `:3901` | Airlock cell identity is preserved **per module** in the snapshot, so two globals in DIFFERENT modules over one shared cell still arrive as two cells | Residual disclosed by the W7-4 fix. Closing it needs `Vm`-lived rebuild state kept (and rooted) across the lazy per-module faults; the reported repro is same-module and is fixed |
+| **W7-4b** | `:3901` | A cell whose inner value carries a residual `Module`/`Native`/`Cffi` handle falls to `SnapValue::Cell`, which has no `Backref` encoding, so its identity is not preserved across a module snapshot | Residual disclosed by the W7-4 fix, and the same limit the `SnapValue::Closure` slow arm already documents. Closing it is a snapshot FORMAT change (id/`Backref` arms on `SnapValue`), out of proportion to a residual this narrow |
 
 **Known limits that are documented, not bugs** (listed so they aren't re-filed): `Iterable[T]` element
 recovery does not fire for a struct with only `iter` and no `next` — bound that one concretely
@@ -3889,6 +3892,91 @@ one-dead-among-live still parks. The deadlock detector is untouched.
 
 **Verified.** 0/60 failures at `--threads=8` (main: 3/60); a genuine all-parked nursery still faults
 `deadlock:` promptly; `wait:` over all-closed channels faults identically on both engines.
+
+### W7-4 — two sibling closures over one captured local got SEPARATE cells across the airlock (**FIXED 2026-07-29**)
+
+```chezzi
+struct Ctr:
+    inc: fn() -> nil
+    get: fn() -> int
+fn make() -> Ctr:
+    n := 0
+    fn inc():
+        n = n + 1
+    fn get() -> int:
+        return n
+    return Ctr(inc, get)
+fn main():
+    c := make()
+    c.inc()
+    print(c.get())            # 1 — no airlock yet, the cell IS shared
+    ch := Channel[Ctr]()
+    ch.send(c)
+    d := ch.recv()
+    d.inc()
+    print(d.get())            # was 1 — EXPECTED 2
+main()
+```
+`chezzi check` clean. **No concurrency needed** — a `Channel` round-trip inside `main` is enough — and
+identical on `--serial`, on M:N, and at `--threads=1/2/4/8`, so the parity oracle is **structurally
+blind** (both engines share one serializer; there is no `src/interp/` any more). Reproduced on every
+arm: `Channel.send`, `Shared`, struct-field, `.iter()` cursor, `spawn f(g, h)` args, `spawn:` block
+capture, and the module-global snapshot (`to_snap`). **Another "some arms of an N-way set"** — a
+module-GLOBAL aggregate reached twice already kept one identity, but a function-local **cell** did not.
+
+**Root cause** (`src/vm/sched.rs`, `Obj::Cell` arm of `to_wire_depth`): `WireMemo` is deliberately
+**back-edge-only** — a node is inserted into `memo.path` before recursing and removed on DFS exit — so a
+cell revisited *off* the current DFS stack, exactly what two sibling closures produce, was re-serialized
+as a fresh `WireValue::Cell` with a new `id` and `from_wire` built TWO cells. Cycles round-tripped;
+shared bindings did not.
+
+**Why this is a bug and not the documented DAG rule.** The off-path-alias-becomes-two-copies rule IS
+deliberate **for DATA** (`docs/concurrency.md`): `pair := [xs, xs]` through a `Channel` gives `2 1`, a
+knowing divergence from CPython's `deepcopy` memo (`2 2`). **A `Cell` is not a data node — it is a
+BINDING's identity.** `docs/syntax.md` already states a write through a capture is visible in the
+defining scope *and across sibling closures*, and that crossing the airlock snapshot-copies a captured
+local into **an independent per-task cell** — *one* cell per binding, i.e. the sibling-sharing rule is
+meant to survive inside the task. Go agrees (`f := func(){n++}; g := func()int{return n}; go func(){
+f(); f(); fmt.Println(g()) }()` prints `2`).
+
+**Fix.** `Obj::Cell` alone moves to a **persistent** `WireMemo::cells` map (never popped, so every later
+reach emits `Backref`); every container arm and the closure VALUES keep the pop-on-DFS-exit `path`
+discipline, leaving the data-DAG contract byte-untouched. Plus **one serialization per logical
+crossing** wherever several roots cross together — otherwise the fix is undone downstream on both
+engines:
+- `do_spawn` — callee/receiver + all args through a new `deep_clone_all` (the old `cross_spawn_callee`
+  round-trip folded into that batch; its only extra was `ensure_crossable`, which `lower_task` applies
+  to the same captures with the same span).
+- `do_spawn_block` — all captures in one batch.
+- `lower_task` ↔ `rebuild_ready` — one memo / one rebuild map, and the arg walk MOVED below the capture
+  walk: **serialize order must equal reconstruct order**, or a `Backref` hits `from_wire_memo`'s
+  `.expect("…already-reconstructed node id")` (a panic, not a fault).
+- `snapshot_modules` ↔ `fault_module` — one memo and one rebuild map **per module**.
+- `to_snap_depth`'s speculative fast path now runs against a memo CLONE and commits only on the kept
+  branch: a discarded attempt must leave neither a cell id nothing defines (rebuild panic) nor a
+  `Backref` shortcut that could hide a residual handle from a later `has_handle`/`ensure_crossable`.
+
+**Intended contract flip:** `airlock_aliased_closure_stays_independent` (`[bump, bump]`) →
+`airlock_aliased_closure_shares_its_binding`, `1` → `2`. The closure *values* are still two independent
+copies; the one *binding* is now one cell.
+
+**Verified.** `tests/chz/spec/airlock_shared_binding_test.chz` — 7 arms + 2 data-DAG fences, green on
+both engines under `chz_suite_passes_both_engines`; thread sweep `1/2/4/8`; the full 26-test `airlock_`
+panel (cycles on every container arm, recursive/mutually-recursive local `fn`, the generator
+`reference cycle` reject, the depth cap, handle `Arc` identity, the module-global inert-`Nil`
+generator) unchanged; a new `airlock_cross_arg_data_alias_stays_independent` fence and a new
+`airlock_module_global_shared_binding_survives_gc_stress` rooting lock. **Perf unchanged** —
+`benches/run.chz` flat within noise on all 9, 100k `Channel.send`/`recv` 199 → 197 ms, a 200k
+closure-over-a-cell send loop 644 → 653 ms (+1.4%, inside run-to-run spread).
+
+**Two residual ceilings, shipped as documented known limits** (`ponytail:` comments at the sites):
+- **W7-4a** — cell identity is **per module** in the snapshot: two globals in DIFFERENT modules over one
+  shared cell still split. Closing it needs `Vm`-lived rebuild state kept across the lazy per-module
+  faults (and rooted); the repro is same-module.
+- **W7-4b** — a cell whose own inner value carries a residual `Module`/`Native`/`Cffi` handle falls to
+  the `SnapValue::Cell` slow arm, which has no id/`Backref` encoding, so identity there stays wire-only
+  (the same limit the `SnapValue::Closure` slow arm already documents). Closing it is a snapshot FORMAT
+  change, out of proportion to a residual this narrow.
 
 ## Session log — 2026-07-28 (bug-hunt wave 7 — the P2 tier: 3 findings, ALL OPEN, filed for a later milestone)
 

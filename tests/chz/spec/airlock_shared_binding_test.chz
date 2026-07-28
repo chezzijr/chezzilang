@@ -1,0 +1,132 @@
+# W7-4 — a captured local is ONE BINDING, so two sibling closures over it must still share ONE cell
+# after crossing the airlock. `docs/syntax.md` says a write through a capture is visible "across
+# sibling closures", and a crossing snapshot-copies the binding into ONE independent per-task cell —
+# per BINDING, not per reference. The serializer used to re-serialize an off-DFS-stack cell as a fresh
+# `WireValue::Cell`, so `d.inc()` and `d.get()` landed on TWO cells and the shared binding silently
+# split (`d.get()` read 1 where 2 was written).
+#
+# The contrast that must NOT change: a DATA DAG alias (`pair := [xs, xs]`) is still two independent
+# deep copies (docs/concurrency.md) — a cell is a binding's identity, a list is a value.
+# Gated serial==M:N by chz_suite_passes_both_engines.
+import std.concurrency
+
+struct Ctr:
+    inc: fn() -> nil
+    get: fn() -> int
+
+fn make() -> Ctr:
+    n := 0
+    fn inc():
+        n = n + 1
+    fn get() -> int:
+        return n
+    return Ctr(inc, get)
+
+# Module globals: two closures over ONE function-local cell, reached through the module SNAPSHOT path.
+_w74c := make()
+_w74i := _w74c.inc
+_w74g := _w74c.get
+
+# Headline repro — no concurrency at all, just a Channel round-trip inside one task.
+test fn channel_send_keeps_one_binding():
+    c := make()
+    c.inc()
+    assert c.get() == 1
+    ch := Channel[Ctr](1)
+    ch.send(c)
+    d := ch.recv()
+    d.inc()
+    assert d.get() == 2
+
+# The pair reached through a STRUCT FIELD after crossing (same cell, two field-held closures).
+test fn struct_field_keeps_one_binding():
+    ch := Channel[Ctr](1)
+    ch.send(make())
+    d := ch.recv()
+    d.inc()
+    d.inc()
+    d.inc()
+    assert d.get() == 3
+
+# A cursor snapshot carrying both closures — the `Obj::Iter` airlock arm.
+test fn cursor_keeps_one_binding():
+    c := make()
+    # `inc` returns nil, so wrap it to keep the cursor homogeneous (`fn() -> int`).
+    fn bump() -> int:
+        c.inc()
+        return 0
+    ch := Channel[Iterator[fn() -> int]](1)
+    ch.send([bump, c.get].iter())
+    fs: List[fn() -> int] = []
+    for f in ch.recv():
+        fs.push(f)
+    fs[0]()
+    fs[0]()
+    assert fs[1]() == 2
+
+# A `Shared` box is a cross-heap VALUE STORE (its own airlock arm).
+test fn shared_keeps_one_binding():
+    box := Shared(make())
+    d := box.get()
+    d.inc()
+    d.inc()
+    assert d.get() == 2
+
+# `spawn f(g, h)` — two closures arriving as two SEPARATE spawn args must still share the binding.
+test fn spawn_named_args_keep_one_binding():
+    c := make()
+    r := Channel[int](1)
+    fn work(i: fn() -> nil, g: fn() -> int, out: Channel[int]):
+        i()
+        i()
+        out.send(g())
+    parallel:
+        spawn work(c.inc, c.get, r)
+    assert r.recv() == 2
+
+# `spawn:` block with TWO separate captured locals over one cell.
+test fn spawn_block_two_captures_keeps_one_binding():
+    c := make()
+    gi := c.inc
+    gg := c.get
+    r := Channel[int](1)
+    parallel:
+        spawn:
+            gi()
+            gi()
+            r.send(gg())
+    assert r.recv() == 2
+
+# The module-GLOBAL snapshot serializer (`to_snap`): two globals over one factory-local cell.
+test fn module_global_snapshot_keeps_one_binding():
+    r := Channel[int](1)
+    parallel:
+        spawn:
+            _w74i()
+            _w74i()
+            r.send(_w74g())
+    assert r.recv() == 2
+
+# FENCE — the DATA DAG rule is deliberate and must NOT change: an acyclic alias reached twice is two
+# independent deep copies, never collapsed into one shared node (docs/concurrency.md). Green before
+# and after the cell fix; it goes red only under an over-broad "preserve everything" memo.
+test fn data_dag_alias_stays_two_copies():
+    xs := [1]
+    pair := [xs, xs]
+    ch := Channel[List[List[int]]](1)
+    ch.send(pair)
+    p := ch.recv()
+    p[0].push(2)
+    assert p[0].len() == 2
+    assert p[1].len() == 1
+
+# FENCE — same rule across two SEPARATE spawn args (the seam a shared serialize memo could collapse).
+test fn data_dag_alias_across_spawn_args_stays_two_copies():
+    xs := [1]
+    r := Channel[str](1)
+    fn work(a: List[int], b: List[int], out: Channel[str]):
+        a.push(2)
+        out.send("{a.len()} {b.len()}")
+    parallel:
+        spawn work(xs, xs, r)
+    assert r.recv() == "2 1"

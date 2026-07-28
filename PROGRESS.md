@@ -4,6 +4,48 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 **Legend:** ⬜ not started · 🟦 in progress · ✅ done
 
+> **✅ BUG-HUNT (2026-07-29, wave 7, gaps.md W7-4) — two sibling closures over one captured local now
+> keep ONE binding across the airlock; they used to silently split into two cells.** `Ctr(inc, get)`
+> built over a factory-local `n`, sent through a `Channel` and driven on the far side, read `1` after
+> two `inc()`s. **No concurrency needed to reproduce** (a plain `send`/`recv` round-trip inside `main`),
+> and identical on `--serial`, on M:N, and at `--threads=1/2/4/8` — the parity oracle is *structurally*
+> blind to it (both engines share one serializer). Every airlock arm reproduced: `Channel.send`,
+> `Shared`, struct-field, `.iter()` cursor, `spawn f(g, h)` args, `spawn:` block capture, and the
+> module-global snapshot.
+> - **Root cause** (`src/vm/sched.rs`): `WireMemo` is deliberately **back-edge-only** — a node is popped
+>   off the serialize DFS stack on exit — so an `Obj::Cell` revisited *off* the stack, which is exactly
+>   what two sibling closures produce, was re-serialized as a fresh `WireValue::Cell` and `from_wire`
+>   built two. Cycles round-tripped; shared bindings did not.
+> - **Why it is a bug and not the DAG rule:** the off-path-alias-becomes-two-copies rule is documented
+>   and deliberate **for DATA** (`docs/concurrency.md`; `pair := [xs, xs]` gives `2 1`, a knowing
+>   divergence from CPython `deepcopy`). **A cell is not a data node — it is a BINDING's identity.**
+>   `docs/syntax.md` already says a write through a capture is visible "across sibling closures", and
+>   the crossing snapshot-copies a captured local into **one** per-task cell — one per *binding*, not
+>   per reference. Go agrees (`f(); f(); g()` inside a goroutine prints `2`).
+> - **Fix:** `Obj::Cell` alone moves to a **persistent** `WireMemo::cells` map (never popped); every
+>   container and the closure VALUES keep the pop-on-DFS-exit `path` discipline, so the data-DAG
+>   contract is byte-untouched. Plus one serialization per *logical* crossing wherever several roots
+>   cross together: `do_spawn` (callee/receiver + args, via a new `deep_clone_all`), `do_spawn_block`
+>   (all captures), `lower_task`↔`rebuild_ready` (captures **then** args — serialize order must equal
+>   reconstruct order or a `Backref` hits `from_wire_memo`'s `.expect`), and `snapshot_modules`↔
+>   `fault_module` (one memo + one rebuild map **per module**). `to_snap_depth`'s speculative fast path
+>   now runs on a memo CLONE and commits only when kept — a discarded attempt must leave no cell id
+>   (rebuild panic) and no `Backref` shortcut that could hide a handle from a later `has_handle`.
+> - **Intended contract flip:** `airlock_aliased_closure_stays_independent` (`[bump, bump]`) →
+>   `airlock_aliased_closure_shares_its_binding`, `1` → `2`. The closure *values* are still two
+>   independent copies; the one *binding* they close over is now one cell.
+> - **Stated ceilings** (`ponytail:` comments + `docs/gaps.md`): cell identity is **per module** in the
+>   snapshot (two globals in *different* modules over one cell still split — it needs Vm-lived rebuild
+>   state across lazy faults), and a cell whose inner value carries a residual module/native/FFI handle
+>   falls to `SnapValue::Cell`, which has no `Backref` encoding.
+> - **Tests:** `tests/chz/spec/airlock_shared_binding_test.chz` — 7 arms + **2 data-DAG fences**
+>   (`[xs, xs]` through a `Channel` and across two `spawn` args, both must stay `2 1`), under the
+>   serial==M:N gate. Rust: the flipped fence, a new `airlock_cross_arg_data_alias_stays_independent`
+>   (the seam the shared memo creates), and `airlock_module_global_shared_binding_survives_gc_stress`
+>   (the module-scoped rebuild map now lives across `module_define`). **Perf: no change** — `benches/
+>   run.chz` flat within noise on all 9, a 100k `Channel.send`/`recv` loop 199ms→197ms, a 200k
+>   closure-over-a-cell send loop 644ms→653ms (+1.4%, inside run-to-run spread).
+
 > **✅ BUG-HUNT (2026-07-28, wave 7, gaps.md W7-2) — `Channel.close()` no longer loses the wakeup for a
 > `wait:`-parked fiber, so a valid program stops faulting `deadlock:` on M:N.** A fiber parked in a
 > multi-arm `wait:` whose channel was `close()`d concurrently was never woken (`--serial` 0/20;

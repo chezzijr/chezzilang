@@ -12681,6 +12681,45 @@ main()
     assert_eq!(run_capture_stress(src), run(src));
 }
 
+/// W7-4 memory-safety lock for the module-scoped REBUILD MAP: `fault_module` now keeps one wire-`id`
+/// → `GcRef` map alive ACROSS the whole `module_define` loop (so two globals over one captured local
+/// rebuild ONE cell). A `GcRef` parked in that map between globals must stay rooted — if it did not, a
+/// collection would panic ("dangling GcRef") or the second global would tie to a recycled slot. Run it
+/// under GC STRESS with junk allocation around the crossing, and assert the shared binding actually
+/// held (`2`, not `0`) as well as `stress == non-stress`.
+#[test]
+fn airlock_module_global_shared_binding_survives_gc_stress() {
+    let src = "\
+struct Ctr:
+    inc: fn() -> nil
+    get: fn() -> int
+fn make() -> Ctr:
+    n := 0
+    fn inc():
+        n = n + 1
+    fn get() -> int:
+        return n
+    return Ctr(inc, get)
+c := make()
+gi := c.inc
+gg := c.get
+pad := [1, 2, 3, 4, 5]
+fn main():
+    junk := [1, 2, 3]
+    r := Channel[int]()
+    parallel:
+        spawn:
+            gi()
+            gi()
+            r.send(gg())
+    more := [junk, junk]
+    print(\"ok: {r.recv()}\")
+main()
+";
+    assert_eq!(run_capture_stress(src), "ok: 2\n");
+    assert_eq!(run_capture_stress(src), run(src));
+}
+
 /// Control (regression lock, rc=0) — the SAME recursive `fn` HOISTED to module scope IS sendable: it
 /// crosses as `Obj::Func` (no captures; recursion resolves via its home-global slot), never entering
 /// the `Obj::Closure` serialization arm, so the new self-ref diagnostic never fires and the send works.

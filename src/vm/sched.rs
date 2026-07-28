@@ -18,12 +18,29 @@ use super::*;
 /// depth cap no longer trips on such a cycle, and re-serializing the generator would silently DUPLICATE
 /// it — the e8dcad7 wrong-result class. The documented backstop is thus two-pronged: an acyclic parked
 /// slot too deep trips the depth cap; a generator inside a value cycle trips `gens_on_stack`.
-#[derive(Default)]
+///
+/// **W7-4 — `Obj::Cell` is the ONE exception to back-edge-only.** A cell is not a data node, it is a
+/// *binding's identity*: the language rule (docs/syntax.md) is that a write through a capture is
+/// visible "across sibling closures", and a crossing snapshot-copies the binding into ONE independent
+/// per-task cell — one per BINDING, not one per reference. Under the pop-on-exit `path` discipline two
+/// sibling closures over the same local (`Ctr(inc, get)`) reach that cell off each other's DFS stack,
+/// so it was re-serialized twice and the shared binding silently SPLIT on the far side. So cells live
+/// in the separate `cells` map, which is NEVER popped: one `WireValue::Cell` per cell per
+/// serialization, every later reach emitting `Backref`. Everything else keeps `path` exactly as it
+/// was — the documented DATA rule (an acyclic DAG alias is two independent deep copies, never
+/// collapsed) is deliberate and unchanged.
+#[derive(Default, Clone)]
 struct WireMemo {
-    /// GcRef of an identity-preserved node (`Cell`/`Closure`/container) currently on the serialize DFS
+    /// GcRef of an identity-preserved node (`Closure`/container) currently on the serialize DFS
     /// stack → the `id` assigned on its first visit. A revisit while still in `path` is a true back-edge
     /// → `Backref(id)`; removed on DFS exit so an off-stack alias is deep-copied independently.
     path: super::fxhash::FxHashMap<GcRef, u32>,
+    /// W7-4 — GcRef of every `Obj::Cell` seen ANYWHERE in this serialization → its `id`. Never removed:
+    /// a cell is a binding, so reaching it a second time (off-stack sibling closure, or on-stack
+    /// letrec back-edge) always emits `Backref` and the far side rebuilds exactly one cell per binding.
+    /// Scope discipline: a serialize memo's lifetime must equal its `from_wire_memo` rebuild map's, or
+    /// a `Backref` minted under one memo hits the other's `.expect` — see [`Vm::to_wire_memo_at`].
+    cells: super::fxhash::FxHashMap<GcRef, u32>,
     next_id: u32,
     /// GcRefs of `Obj::Generator`s currently on the serialize DFS stack. A generator carries no id (its
     /// parked frame can't be a `Backref` target), so re-entering one still on the stack is a cycle
@@ -46,22 +63,34 @@ impl Vm {
         let at = self.stack.len() - argc;
         let raw_args: Vec<Value> = self.stack.split_off(at);
         let head = self.pop();
-        let mut args: Vec<Value> = Vec::with_capacity(raw_args.len());
-        for a in raw_args {
-            args.push(self.deep_clone(a, span)?);
+        // W7-4: everything that crosses here crosses in ONE serialization, so two sibling closures
+        // over the SAME captured local (`spawn work(c.inc, c.get)`) still share their one binding on
+        // the far side. Root-by-root `deep_clone` gave each its own [`WireMemo`] → one cell per
+        // REFERENCE, silently splitting the binding. A capture-free `spawn f(…)` callee still keeps
+        // the cheap shared handle (see [`spawn_callee_crosses_deep`](Vm::spawn_callee_crosses_deep)),
+        // so it stays out of the batch.
+        let cross_head = method.is_some() || self.spawn_callee_crosses_deep(head);
+        let mut batch = Vec::with_capacity(raw_args.len() + 1);
+        if cross_head {
+            batch.push(head);
         }
+        batch.extend(raw_args);
+        let mut crossed = self.deep_clone_all(batch, span)?;
+        let args = if cross_head {
+            crossed.split_off(1)
+        } else {
+            std::mem::take(&mut crossed)
+        };
+        let head = if cross_head { crossed[0] } else { head };
         let task = match method {
-            Some(name) => {
-                let recv = self.deep_clone(head, span)?;
-                PendingCall::Method {
-                    recv,
-                    name,
-                    args,
-                    span,
-                }
-            }
+            Some(name) => PendingCall::Method {
+                recv: head,
+                name,
+                args,
+                span,
+            },
             None => PendingCall::Call {
-                callee: self.cross_spawn_callee(head, span)?,
+                callee: head,
                 args,
                 span,
             },
@@ -69,29 +98,30 @@ impl Vm {
         self.register_task(task, span)
     }
 
-    /// Cross a `spawn f()` **callee** over the task boundary. A closure that captures locals holds them
-    /// (uniformly) as `Obj::Cell` handles; sharing that closure by handle would let the task alias the
-    /// parent's cells — a serial-vs-M:N divergence, since the M:N engine's `prepare_worker`/`to_snap`
-    /// path already deep-copies a task closure's captures into fresh cells. So a *capture-bearing*
-    /// closure crosses by DEEP value here too (via the existing `wire_callable` → `from_wire`
-    /// round-trip, the same serializer M:N uses), snapshotting its cells at spawn time on BOTH engines.
-    /// A capture-free callable (plain `Obj::Func`, a builtin, or a closure with no captures) keeps the
-    /// cheap shared handle — it holds no mutable captured state, so sharing is observationally identical
-    /// to copying (and preserves the closure hot path). `Shared`/`RwShared`/`Atomic`/`Channel` captures
-    /// still cross by reference (their `Arc` core is deep-copied as the same `Arc`), so `Shared`-based
-    /// cross-task sharing is unaffected.
-    fn cross_spawn_callee(&mut self, callee: Value, span: Span) -> Result<Value, RuntimeError> {
-        let deep = match callee.as_obj() {
+    /// Does a `spawn f()` **callee** have to cross the task boundary by DEEP value? A closure that
+    /// captures locals holds them (uniformly) as `Obj::Cell` handles; sharing that closure by handle
+    /// would let the task alias the parent's cells — a serial-vs-M:N divergence, since the M:N engine's
+    /// `prepare_worker`/`to_snap` path already deep-copies a task closure's captures into fresh cells.
+    /// So a *capture-bearing* closure joins the [`deep_clone_all`](Vm::deep_clone_all) batch in
+    /// [`do_spawn`](Vm::do_spawn), snapshotting its cells at spawn time on BOTH engines. A capture-free
+    /// callable (plain `Obj::Func`, a builtin, or a closure with no captures) keeps the cheap shared
+    /// handle — it holds no mutable captured state, so sharing is observationally identical to copying
+    /// (and preserves the closure hot path). `Shared`/`RwShared`/`Atomic`/`Channel` captures still cross
+    /// by reference (their `Arc` core is deep-copied as the same `Arc`), so `Shared`-based cross-task
+    /// sharing is unaffected.
+    ///
+    /// W7-4 folded the old `cross_spawn_callee` (a SEPARATE `wire_callable` → `from_wire` round-trip)
+    /// into that batch so a callee and an arg closing over the same local keep one cell. The
+    /// `wire_callable` step's only extra was `ensure_crossable`; [`lower_task`](Vm::lower_task) applies
+    /// it to every one of this closure's captures with the same span, and a `Closure` wire's
+    /// `has_handle` is exactly the OR over its captures' — so nothing is dropped (and the guard is
+    /// source-unreachable anyway: `module` is not a nameable type).
+    fn spawn_callee_crosses_deep(&self, callee: Value) -> bool {
+        match callee.as_obj() {
             Some(h) => {
                 matches!(self.heap.get(h), Obj::Closure { captured, .. } if !captured.is_empty())
             }
             None => false,
-        };
-        if deep {
-            let w = self.wire_callable(callee, span)?;
-            Ok(self.from_wire(w))
-        } else {
-            Ok(callee)
         }
     }
 
@@ -120,10 +150,13 @@ impl Vm {
                     })
                     .unwrap_or(Value::nil()),
             };
-            // Deep-copy across the airlock: the task can't share mutable state with the parent.
-            // Positional (lever #3): slot order matches the synthetic block proto's `capture_names`.
-            captured.push(self.deep_clone(v, span)?);
+            captured.push(v);
         }
+        // Deep-copy across the airlock: the task can't share mutable state with the parent.
+        // Positional (lever #3): slot order matches the synthetic block proto's `capture_names`.
+        // W7-4: ONE serialization for all captures — two captured closures over the same local
+        // (`gi := c.inc; gg := c.get`) must reach the task sharing their single binding.
+        let captured = self.deep_clone_all(captured, span)?;
         let h = self.heap.alloc(Obj::Closure {
             proto,
             captured,
@@ -2079,9 +2112,46 @@ impl Vm {
     /// HARD ARMS `to_wire` rejects — a generator suspended mid-`recover:` (live handler) or with a
     /// pending `defer`, or one whose parked slot is itself non-sendable — each re-stamped with the real
     /// spawn-site `span` (the caller has it) via `to_wire_at`, a catchable error instead of a panic.
-    pub(super) fn deep_clone(&mut self, v: Value, span: Span) -> Result<Value, RuntimeError> {
-        let w = self.to_wire_at(v, span)?;
-        Ok(self.from_wire(w))
+    ///
+    /// W7-4 — takes the whole LIST of values that form ONE logical crossing (a `spawn`'s
+    /// callee/receiver + args, a `spawn:` block's captures), because cloning them one at a time gave
+    /// each its own [`WireMemo`]: two sibling closures over the SAME captured local then arrived as two
+    /// cells and the shared binding silently split. One memo spans the whole serialize pass and ONE
+    /// rebuild map spans the whole reconstruct pass. (The old single-value `deep_clone` had no callers
+    /// left once every crossing became a batch, so it is gone rather than kept as a trap.)
+    ///
+    /// **Scope invariant** (the loud failure mode): a serialize memo's lifetime must equal its rebuild
+    /// map's. A `Backref` minted under memo A but reconstructed under a fresh rebuild map hits
+    /// `from_wire_memo`'s `.expect("…already-reconstructed node id")` — a panic, not a fault. Both
+    /// passes here are local to this call, so they match by construction.
+    pub(super) fn deep_clone_all(
+        &mut self,
+        vs: Vec<Value>,
+        span: Span,
+    ) -> Result<Vec<Value>, RuntimeError> {
+        let mut memo = WireMemo::default();
+        let mut ws = Vec::with_capacity(vs.len());
+        for v in vs {
+            ws.push(self.to_wire_memo_at(v, span, &mut memo)?);
+        }
+        let mut rebuild = super::fxhash::FxHashMap::<u32, GcRef>::default();
+        Ok(ws
+            .into_iter()
+            .map(|w| self.from_wire_memo(w, &mut rebuild))
+            .collect())
+    }
+
+    /// [`to_wire_at`](Vm::to_wire_at) against a CALLER-OWNED [`WireMemo`], so several roots that cross
+    /// together share one serialization (see [`deep_clone_all`](Vm::deep_clone_all) for the
+    /// memo-scope == rebuild-scope invariant this obliges the caller to keep).
+    pub(super) fn to_wire_memo_at(
+        &self,
+        v: Value,
+        span: Span,
+        memo: &mut WireMemo,
+    ) -> Result<WireValue, RuntimeError> {
+        self.to_wire_depth(v, 0, memo)
+            .map_err(|e| self.err(e.message, span))
     }
 
     /// `to_wire` re-stamped with a real call-site `span`. `to_wire`'s `Err`s (a generator HARD ARM —
@@ -2143,9 +2213,12 @@ impl Vm {
     /// `to_wire_at`/`deep_clone`/`ensure_snapshot`). Every other arm is infallible (the `?` only
     /// forwards the generator error up through container recursion).
     pub(super) fn to_wire(&self, v: Value) -> Result<WireValue, RuntimeError> {
-        // Fresh memo per root: a cell sent as two separate spawn args stays independent (each is its
-        // own serialization). The memo is back-edge-only (see [`WireMemo`]), so within one root a
-        // Cell/Closure cycle round-trips while an off-path alias is deep-copied.
+        // Fresh memo per root — correct for a SINGLE-root crossing (`Channel.send`, a `Shared` store).
+        // A crossing whose roots belong together (a `spawn`'s args, a `spawn:` block's captures, one
+        // module's globals) must instead share one memo via `to_wire_memo_at`/`deep_clone_all`, or two
+        // sibling closures over the same local arrive as two cells (W7-4). Within a memo: containers +
+        // closures are back-edge-only (an off-path alias is deep-copied), cells are preserved
+        // throughout (see [`WireMemo`]).
         let mut memo = WireMemo::default();
         self.to_wire_depth(v, 0, &mut memo)
     }
@@ -2548,22 +2621,23 @@ impl Vm {
                 }
                 // A `Cell` (a by-reference-captured local's box) crosses the airlock by value as a
                 // DEEP COPY: wire its inner value; `from_wire` rebuilds a FRESH independent cell, so a
-                // plain captured local sent into a task is an isolated copy (design §4 F1).
+                // plain captured local sent into a task is an isolated copy (design §4 F1) — ONE fresh
+                // cell per BINDING, not per reference.
                 //
-                // Identity preservation (see the `Obj::Closure` arm): assign `h` an `id` and record it
-                // in `memo.path` BEFORE recursing `inner`, so a nested back-edge to this cell (the
-                // letrec self-cell a recursive local `fn`, or a mutual-recursion loop, closes) emits
-                // `WireValue::Backref(id)` and stops. Removed from `path` on exit, so an off-path alias
-                // is deep-copied independently (the deep-copy-independence contract holds).
+                // W7-4: unlike every other arm this uses `memo.cells`, which is never popped. A cell is
+                // a binding's identity, so ANY later reach (an off-stack sibling closure — `Ctr(inc,
+                // get)` over one local `n` — as well as an on-stack letrec/mutual-recursion back-edge)
+                // emits `Backref(id)` and the far side ties both references to the one rebuilt cell.
+                // Data containers keep the pop-on-exit `path` discipline above, so the documented
+                // DAG-alias-is-two-independent-copies contract is untouched.
                 Obj::Cell(v) => {
-                    if let Some(&id) = memo.path.get(&h) {
+                    if let Some(&id) = memo.cells.get(&h) {
                         WireValue::Backref(id)
                     } else {
                         let id = memo.next_id;
                         memo.next_id += 1;
-                        memo.path.insert(h, id);
+                        memo.cells.insert(h, id);
                         let inner = self.to_wire_depth(*v, depth + 1, memo)?;
-                        memo.path.remove(&h);
                         WireValue::Cell {
                             id,
                             inner: Box::new(inner),
@@ -3083,10 +3157,19 @@ impl Vm {
     /// crossing value goes through `to_wire`/`ensure_crossable` (rejecting a non-isolable callee). Split
     /// out of [`Vm::prepare_worker`] so the serial engine can reuse the exact M:N lowering
     /// ([`Vm::prepare_serial_child`]) — a behavior-preserving extraction.
+    ///
+    /// W7-4: ONE [`WireMemo`] spans the whole lowering (closure captures + args, or receiver + args),
+    /// matched by ONE rebuild map in [`rebuild_ready`](Vm::rebuild_ready). Per-value memos re-split a
+    /// shared binding here even after `do_spawn` unified it, on BOTH engines (the serial child goes
+    /// through this same lowering). See [`deep_clone_all`](Vm::deep_clone_all) for the scope invariant.
+    /// **Serialize order must equal `rebuild_ready`'s reconstruct order** (captures/receiver, THEN
+    /// args): whichever walk reaches a shared cell first emits its `WireValue::Cell` and the later one
+    /// emits a `Backref`, so rebuilding in the other order would hit `from_wire_memo`'s `.expect` with
+    /// an unregistered id. That is why the arg walk moved BELOW the capture walk here.
     pub(super) fn lower_task(&mut self, task: PendingCall) -> Result<Lowered, RuntimeError> {
+        let mut memo = WireMemo::default();
         let lowered = match task {
             PendingCall::Call { callee, args, span } => {
-                let wargs = self.wire_args(args, span)?;
                 match callee.as_obj() {
                     Some(h) => match self.heap.get(h).clone() {
                         Obj::Closure {
@@ -3099,11 +3182,12 @@ impl Vm {
                             let names = self.program.protos[proto].capture_names.clone();
                             let mut wcap = Vec::with_capacity(captured.len());
                             for (i, v) in captured.into_iter().enumerate() {
-                                let w = self.to_wire_at(v, span)?;
+                                let w = self.to_wire_memo_at(v, span, &mut memo)?;
                                 self.ensure_crossable(&w, span)?;
                                 let name = names.get(i).cloned().unwrap_or_default();
                                 wcap.push((name, w));
                             }
+                            let wargs = self.wire_args(args, span, &mut memo)?;
                             Lowered::Closure {
                                 proto,
                                 captured: wcap,
@@ -3114,7 +3198,7 @@ impl Vm {
                         }
                         Obj::Func { proto, home } => Lowered::Func {
                             proto,
-                            args: wargs,
+                            args: self.wire_args(args, span, &mut memo)?,
                             home: self.home_index(home),
                             span,
                         },
@@ -3122,7 +3206,7 @@ impl Vm {
                         // it by name; the worker re-allocs a fresh `Obj::Builtin`. Mirrors `Func`.
                         Obj::Builtin(name) => Lowered::Builtin {
                             name,
-                            args: wargs,
+                            args: self.wire_args(args, span, &mut memo)?,
                             span,
                         },
                         _ => {
@@ -3155,9 +3239,9 @@ impl Vm {
                 args,
                 span,
             } => {
-                let wrecv = self.to_wire_at(recv, span)?;
+                let wrecv = self.to_wire_memo_at(recv, span, &mut memo)?;
                 self.ensure_crossable(&wrecv, span)?;
-                let wargs = self.wire_args(args, span)?;
+                let wargs = self.wire_args(args, span, &mut memo)?;
                 Lowered::Method {
                     recv: wrecv,
                     name,
@@ -3174,7 +3258,12 @@ impl Vm {
     /// Split out of [`Vm::prepare_worker`] so both the M:N worker (into its own heap) and the serial
     /// child (into the shared heap, under a per-child module view — [`Vm::prepare_serial_child`]) reuse
     /// the identical reconstruction. Infallible (all crossing checks happened in [`Vm::lower_task`]).
+    ///
+    /// W7-4: ONE rebuild map spans the whole `Lowered`, mirroring `lower_task`'s single [`WireMemo`]
+    /// (and reconstructing in the same order: captures/receiver, then args), so a cell shared between a
+    /// capture and an arg is rebuilt once and both references tie to it.
     pub(super) fn rebuild_ready(&mut self, lowered: Lowered) -> (ReadyCall, Span) {
+        let rb = &mut super::fxhash::FxHashMap::<u32, GcRef>::default();
         match lowered {
             Lowered::Closure {
                 proto,
@@ -3187,14 +3276,17 @@ impl Vm {
                 // Lever #3: rebuild positionally (slot order), discarding the carried names.
                 let cap: Vec<Value> = captured
                     .into_iter()
-                    .map(|(_k, w)| self.from_wire(w))
+                    .map(|(_k, w)| self.from_wire_memo(w, rb))
                     .collect();
                 let callee = Value::obj(self.heap.alloc(Obj::Closure {
                     proto,
                     captured: cap,
                     home,
                 }));
-                let args = args.into_iter().map(|w| self.from_wire(w)).collect();
+                let args = args
+                    .into_iter()
+                    .map(|w| self.from_wire_memo(w, rb))
+                    .collect();
                 (ReadyCall::Invoke { callee, args }, span)
             }
             Lowered::Func {
@@ -3205,12 +3297,18 @@ impl Vm {
             } => {
                 let home = self.worker_home(home);
                 let callee = Value::obj(self.heap.alloc(Obj::Func { proto, home }));
-                let args = args.into_iter().map(|w| self.from_wire(w)).collect();
+                let args = args
+                    .into_iter()
+                    .map(|w| self.from_wire_memo(w, rb))
+                    .collect();
                 (ReadyCall::Invoke { callee, args }, span)
             }
             Lowered::Builtin { name, args, span } => {
                 let callee = Value::obj(self.heap.alloc(Obj::Builtin(name)));
-                let args = args.into_iter().map(|w| self.from_wire(w)).collect();
+                let args = args
+                    .into_iter()
+                    .map(|w| self.from_wire_memo(w, rb))
+                    .collect();
                 (ReadyCall::Invoke { callee, args }, span)
             }
             Lowered::Method {
@@ -3219,8 +3317,11 @@ impl Vm {
                 args,
                 span,
             } => {
-                let recv = self.from_wire(recv);
-                let args = args.into_iter().map(|w| self.from_wire(w)).collect();
+                let recv = self.from_wire_memo(recv, rb);
+                let args = args
+                    .into_iter()
+                    .map(|w| self.from_wire_memo(w, rb))
+                    .collect();
                 (ReadyCall::Method { recv, name, args }, span)
             }
         }
@@ -3409,16 +3510,20 @@ impl Vm {
     }
 
     /// Serialize a task's argument list across the airlock (read-only walk of this heap), rejecting any
-    /// argument that can't cross a heap boundary as-is (see [`Vm::ensure_crossable`]).
+    /// argument that can't cross a heap boundary as-is (see [`Vm::ensure_crossable`]). W7-4: the caller
+    /// supplies the [`WireMemo`], because the args share one serialization with the callee's captures
+    /// (and the matching rebuild map in [`rebuild_ready`](Vm::rebuild_ready)) — see
+    /// [`deep_clone_all`](Vm::deep_clone_all) for the scope invariant.
     pub(super) fn wire_args(
         &self,
         args: Vec<Value>,
         span: Span,
+        memo: &mut WireMemo,
     ) -> Result<Vec<WireValue>, RuntimeError> {
         args.into_iter()
             .map(|a| {
-                // `to_wire_at` re-stamps a generator's placeholder span with this call site's `span`.
-                let w = self.to_wire_at(a, span)?;
+                // `to_wire_memo_at` re-stamps a generator's placeholder span with this call site's.
+                let w = self.to_wire_memo_at(a, span, memo)?;
                 self.ensure_crossable(&w, span)?;
                 Ok(w)
             })
@@ -3535,9 +3640,16 @@ impl Vm {
             // Fallible: a module global that is a frame-holding generator faults here (graceful,
             // re-stamped with the nursery span by `ensure_snapshot`) instead of panicking in `to_snap`.
             let mut snapped = Vec::with_capacity(globals.len());
+            // W7-4: ONE [`WireMemo`] per MODULE, matching the one rebuild map `fault_module` uses for
+            // that module's replay loop (scope invariant — see `deep_clone_all`). Two globals holding
+            // sibling closures over one function-local cell (`gi := c.inc; gg := c.get`) then arrive in
+            // a task sharing their single binding, instead of one cell each. Slot order is the same on
+            // both sides, so whichever global defines the `WireValue::Cell` is replayed before the one
+            // that back-references it. Cross-MODULE cell identity stays split — see `fault_module`.
+            let mut memo = WireMemo::default();
             for (k, v) in globals {
                 reusable &= self.slot_snapshot_reusable(v);
-                snapped.push((k, self.to_snap(v)?));
+                snapped.push((k, self.to_snap(v, &mut memo)?));
             }
             modules.push(ModuleSnap {
                 name,
@@ -3614,8 +3726,35 @@ impl Vm {
     /// nest / reference cycle) as an inert `Nil` placeholder — so a module that merely *holds* a
     /// non-sendable generator it never sends still spawns cleanly (fault only when a task REACHES it,
     /// at the use site). The old Option-B reach-gate is gone; safety is by-value deep copy or `Nil`.
-    pub(super) fn to_snap(&self, v: Value) -> Result<SnapValue, RuntimeError> {
-        self.to_snap_depth(v, 0)
+    pub(super) fn to_snap(&self, v: Value, memo: &mut WireMemo) -> Result<SnapValue, RuntimeError> {
+        self.to_snap_depth(v, 0, memo)
+    }
+
+    /// W7-4 — run a SPECULATIVE `to_wire_depth` that the caller may discard, against a CLONE of `memo`,
+    /// committing only when the result is kept. Load-bearing for two separate invariants:
+    ///  1. **id hygiene** — a discarded attempt that left cell ids in the shared memo would make a later
+    ///     global emit `Backref(id)` for an id no emitted `WireValue::Cell` ever defines, and
+    ///     `from_wire_memo`'s `.expect` would PANIC on replay.
+    ///  2. **handle detection** — a discarded attempt that left a `Backref` shortcut could hide a
+    ///     residual `Module`/`Native`/`Cffi` handle from a LATER global's `has_handle()` check, letting a
+    ///     parent `GcRef` replay on a worker heap.
+    ///
+    /// `keep` decides; on `false` (or `Err`) the caller's memo is untouched.
+    fn try_wire_speculative(
+        &self,
+        v: Value,
+        depth: usize,
+        memo: &mut WireMemo,
+        keep: impl Fn(&WireValue) -> bool,
+    ) -> Option<WireValue> {
+        let mut spec = memo.clone();
+        match self.to_wire_depth(v, depth, &mut spec) {
+            Ok(w) if keep(&w) => {
+                *memo = spec;
+                Some(w)
+            }
+            _ => None,
+        }
     }
 
     /// Depth-counted worker behind [`Vm::to_snap`] — the serial engine never snapshots, so this is the
@@ -3624,14 +3763,20 @@ impl Vm {
     /// (re-stamped with the real nursery span by `ensure_snapshot`) rather than a host `SIGABRT`. The
     /// fast path threads `depth` into `to_wire_depth` and every slow arm recurses at `depth + 1`, so
     /// the shared budget keeps `to_snap` and `to_wire` in lockstep.
-    fn to_snap_depth(&self, v: Value, depth: usize) -> Result<SnapValue, RuntimeError> {
+    fn to_snap_depth(
+        &self,
+        v: Value,
+        depth: usize,
+        memo: &mut WireMemo,
+    ) -> Result<SnapValue, RuntimeError> {
         if depth > MAX_STRUCTURAL_DEPTH {
             return Err(self.depth_exceeded_err(Span { line: 0, col: 0 }));
         }
         let h = match v.as_obj() {
             Some(h) => h,
             // A scalar (inline Int/Bool/Nil) or a boxed float (Float tag) is always sendable — never
-            // `Obj::Generator`, so this `.expect` is unreachable for a generator.
+            // `Obj::Generator`, so this `.expect` is unreachable for a generator. It mints no id, so a
+            // throwaway memo is fine here.
             None => {
                 return Ok(SnapValue::Wire(
                     self.to_wire_depth(v, depth, &mut WireMemo::default())
@@ -3648,9 +3793,9 @@ impl Vm {
         // memory-safe AND `serial == M:N` by construction (each task already gets its own frozen
         // per-task module-global snapshot — F1). A non-sendable parked slot / reference cycle makes
         // `to_wire` Err → we fall to the slow arm, which re-raises that real reject.
-        if let Ok(w) = self.to_wire_depth(v, depth, &mut WireMemo::default())
-            && !w.has_handle()
-        {
+        // W7-4: SPECULATIVE — the attempt is discarded when the value carries a handle, so it runs
+        // against a memo clone and only commits on the kept branch (`try_wire_speculative`).
+        if let Some(w) = self.try_wire_speculative(v, depth, memo, |w| !w.has_handle()) {
             return Ok(SnapValue::Wire(w));
         }
         Ok(match self.heap.get(h).clone() {
@@ -3670,7 +3815,7 @@ impl Vm {
                 let names = &self.program.protos[proto].capture_names;
                 let mut snapped = Vec::with_capacity(captured.len());
                 for (i, cv) in captured.iter().enumerate() {
-                    snapped.push((names.get(i).cloned().unwrap_or_default(), self.to_snap_depth(*cv, depth + 1)?));
+                    snapped.push((names.get(i).cloned().unwrap_or_default(), self.to_snap_depth(*cv, depth + 1, memo)?));
                 }
                 SnapValue::Closure { proto, captured: snapped, home: self.home_index(home) }
             }
@@ -3683,7 +3828,7 @@ impl Vm {
                     let ModuleData { name, slots, index } = *m;
                     let mut globals = Vec::new();
                     for (k, mv) in module_slot_pairs(&slots, &index) {
-                        globals.push((k, self.to_snap_depth(mv, depth + 1)?));
+                        globals.push((k, self.to_snap_depth(mv, depth + 1, memo)?));
                     }
                     SnapValue::ModuleInline { name, globals }
                 }
@@ -3700,14 +3845,14 @@ impl Vm {
             Obj::List(items) => {
                 let mut out = Vec::with_capacity(items.len());
                 for x in &items {
-                    out.push(self.to_snap_depth(*x, depth + 1)?);
+                    out.push(self.to_snap_depth(*x, depth + 1, memo)?);
                 }
                 SnapValue::List(out)
             }
             Obj::Tuple(items) => {
                 let mut out = Vec::with_capacity(items.len());
                 for x in &items {
-                    out.push(self.to_snap_depth(*x, depth + 1)?);
+                    out.push(self.to_snap_depth(*x, depth + 1, memo)?);
                 }
                 SnapValue::Tuple(out)
             }
@@ -3726,14 +3871,14 @@ impl Vm {
                 let mut out = Vec::with_capacity(fields.len());
                 for (i, fv) in fields.iter().enumerate() {
                     let k = names.get(i).cloned().unwrap_or_else(|| i.to_string().into_boxed_str());
-                    out.push((k, self.to_snap_depth(*fv, depth + 1)?));
+                    out.push((k, self.to_snap_depth(*fv, depth + 1, memo)?));
                 }
                 SnapValue::Struct { name, fields: out }
             }
             Obj::Enum { variant_id, payload } => {
                 let mut out = Vec::with_capacity(payload.len());
                 for x in &payload {
-                    out.push(self.to_snap_depth(*x, depth + 1)?);
+                    out.push(self.to_snap_depth(*x, depth + 1, memo)?);
                 }
                 // M19 lever #2 — carry the dense `variant_id` directly on the cold snap path (mirrors
                 // `to_wire`); replay reuses it as-is against the shared program.
@@ -3741,15 +3886,15 @@ impl Vm {
             }
             Obj::NewType { type_key, inner } => SnapValue::NewType {
                 type_key,
-                inner: Box::new(self.to_snap_depth(inner, depth + 1)?),
+                inner: Box::new(self.to_snap_depth(inner, depth + 1, memo)?),
             },
             Obj::Map(m) => {
                 let mut out = Vec::with_capacity(m.entries.len());
                 for (hash, k, val) in &m.entries {
                     out.push((
                         *hash,
-                        self.to_snap_depth(*k, depth + 1)?,
-                        self.to_snap_depth(*val, depth + 1)?,
+                        self.to_snap_depth(*k, depth + 1, memo)?,
+                        self.to_snap_depth(*val, depth + 1, memo)?,
                     ));
                 }
                 SnapValue::Map(out)
@@ -3757,7 +3902,7 @@ impl Vm {
             Obj::Set(s) => {
                 let mut out = Vec::with_capacity(s.entries.len());
                 for (hash, e) in &s.entries {
-                    out.push((*hash, self.to_snap_depth(*e, depth + 1)?));
+                    out.push((*hash, self.to_snap_depth(*e, depth + 1, memo)?));
                 }
                 SnapValue::Set(out)
             }
@@ -3804,20 +3949,29 @@ impl Vm {
             //     generator runs clean, and one that DOES reach it faults at the use site (iterating a
             //     `Nil` is not iterable) — "fault only when reached", `serial == M:N` by construction
             //     (both engines snapshot from the same memoized frozen copy).
-            Obj::Generator(_) => match self.to_wire_depth(v, depth, &mut WireMemo::default()) {
-                Ok(w) if !w.has_handle() => SnapValue::Wire(w),
-                _ => SnapValue::Wire(WireValue::Nil),
-            },
+            // W7-4: also SPECULATIVE (the `Nil` branch discards it) — same clone/commit discipline, and
+            // it must use the SHARED memo on the kept branch or its ids would collide with the ones the
+            // module's other globals minted, aliasing unrelated nodes on replay.
+            Obj::Generator(_) => SnapValue::Wire(
+                self.try_wire_speculative(v, depth, memo, |w| !w.has_handle())
+                    .unwrap_or(WireValue::Nil),
+            ),
             // A `Cell` embedding a handle snaps like a 1-field box (its inner recursively snapped) —
             // replayed as a FRESH independent cell (design §4 F1). A pure-data cell took the `to_wire`
             // fast path above (`WireValue::Cell`).
-            Obj::Cell(v) => SnapValue::Cell(Box::new(self.to_snap_depth(v, depth + 1)?)),
+            // ponytail: KNOWN CEILING — `SnapValue::Cell` carries no id/`Backref` encoding, so a cell
+            // whose own inner value still holds a residual `Module`/`Native`/`Cffi` handle is NOT
+            // identity-preserved across a module snapshot (W7-4 identity is wire-only, same limit the
+            // `Obj::Closure` slow arm already documents). Upgrade path if it ever bites: give
+            // `SnapValue` its own id/`Backref` arms — a snapshot FORMAT change, out of proportion to a
+            // residual this narrow.
+            Obj::Cell(v) => SnapValue::Cell(Box::new(self.to_snap_depth(v, depth + 1, memo)?)),
             // A cursor snapshots like a `List`: its items (recursively snapped) + `pos`. Only a
             // handle-bearing cursor reaches here; a pure-data cursor took the `to_wire` fast path.
             Obj::Iter { items, pos } => {
                 let mut out = Vec::with_capacity(items.len());
                 for x in &items {
-                    out.push(self.to_snap_depth(*x, depth + 1)?);
+                    out.push(self.to_snap_depth(*x, depth + 1, memo)?);
                 }
                 SnapValue::Iter { items: out, pos }
             }
@@ -3869,8 +4023,20 @@ impl Vm {
         // W6-2 — a replay REPRODUCES the snapshot, it does not mutate the view, so its `module_define`s
         // must not drop the cache this view was seeded with (`install_snapshot`).
         let memo = self.snapshot_memo.take();
+        // W7-4: ONE rebuild map for this module's whole replay loop, mirroring the one `WireMemo`
+        // `snapshot_modules` used for the module (scope invariant — see `deep_clone_all`), so two
+        // globals over one captured local rebuild ONE cell. Slot order matches on both sides, so a
+        // `Backref` always resolves against an id already registered. GC-safe: `Heap::alloc` never
+        // collects (only `run_until` does) and every `GcRef` here is reachable from the rooted module
+        // it was just `module_define`d into.
+        //
+        // ponytail: KNOWN CEILING — the map is per MODULE, so cell identity is NOT preserved for two
+        // globals in DIFFERENT modules over one shared cell (they fault in lazily at different times,
+        // which would need Vm-lived rebuild state kept across GC-visible points). Upgrade path if it
+        // bites: hang the map off the `Vm` beside `module_snapshot` and root it.
+        let mut rb = super::fxhash::FxHashMap::<u32, GcRef>::default();
         for (name, sv) in &snap.modules[idx].globals {
-            let val = self.replay_snap(sv);
+            let val = self.replay_snap(sv, &mut rb);
             self.module_define(module, name, val);
         }
         self.snapshot_memo = memo;
@@ -3894,9 +4060,16 @@ impl Vm {
     /// snapshot is shared behind an `Arc`, so this borrows and clones leaf data (`WireValue`, fn
     /// pointer) rather than moving. `ModuleAlias(idx)` resolves to the pre-alloced `module_objs[idx]`
     /// — which faults its own globals lazily on first access, so no eager cascade.
-    pub(super) fn replay_snap(&mut self, snap: &SnapValue) -> Value {
+    /// W7-4: `rb` is the module-scoped wire-`id` → placeholder `GcRef` rebuild map (see
+    /// [`fault_module`](Vm::fault_module)); it must span exactly the globals whose serialization shared
+    /// one [`WireMemo`], or a `Backref` hits `from_wire_memo`'s `.expect`.
+    pub(super) fn replay_snap(
+        &mut self,
+        snap: &SnapValue,
+        rb: &mut super::fxhash::FxHashMap<u32, GcRef>,
+    ) -> Value {
         match snap {
-            SnapValue::Wire(w) => self.from_wire(w.clone()),
+            SnapValue::Wire(w) => self.from_wire_memo(w.clone(), rb),
             SnapValue::Func { proto, home } => {
                 let whome = self.worker_home(*home);
                 Value::obj(self.heap.alloc(Obj::Func {
@@ -3913,7 +4086,7 @@ impl Vm {
                 // Lever #3: rebuild positionally (slot order), discarding the carried names.
                 let cap: Vec<Value> = captured
                     .iter()
-                    .map(|(_k, cv)| self.replay_snap(cv))
+                    .map(|(_k, cv)| self.replay_snap(cv, rb))
                     .collect();
                 Value::obj(self.heap.alloc(Obj::Closure {
                     proto: *proto,
@@ -3929,7 +4102,7 @@ impl Vm {
                     index: std::collections::HashMap::new(),
                 })));
                 for (k, gv) in globals {
-                    let val = self.replay_snap(gv);
+                    let val = self.replay_snap(gv, rb);
                     self.module_define(wm, k, val);
                 }
                 Value::obj(wm)
@@ -3943,24 +4116,27 @@ impl Vm {
             // Re-alloc from the SAME shared `Arc<Cffi>` — no re-dlopen (shared address space).
             SnapValue::Cffi(c) => Value::obj(self.heap.alloc(Obj::Cffi(Arc::clone(c)))),
             SnapValue::List(xs) => {
-                let v = xs.iter().map(|x| self.replay_snap(x)).collect();
+                let v = xs.iter().map(|x| self.replay_snap(x, rb)).collect();
                 Value::obj(self.heap.alloc(Obj::List(v)))
             }
             SnapValue::Iter { items, pos } => {
-                let v = items.iter().map(|x| self.replay_snap(x)).collect();
+                let v = items.iter().map(|x| self.replay_snap(x, rb)).collect();
                 Value::obj(self.heap.alloc(Obj::Iter {
                     items: v,
                     pos: *pos,
                 }))
             }
             SnapValue::Tuple(xs) => {
-                let v = xs.iter().map(|x| self.replay_snap(x)).collect();
+                let v = xs.iter().map(|x| self.replay_snap(x, rb)).collect();
                 Value::obj(self.heap.alloc(Obj::Tuple(v)))
             }
             SnapValue::Struct { name, fields } => {
                 // Positional layout: the snap fields are in declaration order (to_snap emits them
                 // so), so rebuild positionally — the carried names are discarded.
-                let f: Vec<Value> = fields.iter().map(|(_, fv)| self.replay_snap(fv)).collect();
+                let f: Vec<Value> = fields
+                    .iter()
+                    .map(|(_, fv)| self.replay_snap(fv, rb))
+                    .collect();
                 let tid = self.struct_tid(name);
                 Value::obj(self.heap.alloc(Obj::Struct {
                     tid,
@@ -3971,7 +4147,7 @@ impl Vm {
                 variant_id,
                 payload,
             } => {
-                let p = payload.iter().map(|x| self.replay_snap(x)).collect();
+                let p = payload.iter().map(|x| self.replay_snap(x, rb)).collect();
                 // M19 lever #2 — the dense `variant_id` was carried directly (mirrors `from_wire`);
                 // replay it as-is against the shared program — no lossy name re-resolution.
                 Value::obj(self.heap.alloc(Obj::Enum {
@@ -3980,7 +4156,7 @@ impl Vm {
                 }))
             }
             SnapValue::NewType { type_key, inner } => {
-                let inner = self.replay_snap(inner);
+                let inner = self.replay_snap(inner, rb);
                 Value::obj(self.heap.alloc(Obj::NewType {
                     type_key: type_key.clone(),
                     inner,
@@ -3988,13 +4164,13 @@ impl Vm {
             }
             // Rebuild a FRESH independent cell on the worker (deep copy, never shared) — design §4 F1.
             SnapValue::Cell(inner) => {
-                let inner = self.replay_snap(inner);
+                let inner = self.replay_snap(inner, rb);
                 Value::obj(self.heap.alloc(Obj::Cell(inner)))
             }
             SnapValue::Map(entries) => {
                 let mut out = MapData::default();
                 for (hash, k, val) in entries {
-                    let (ck, cv) = (self.replay_snap(k), self.replay_snap(val));
+                    let (ck, cv) = (self.replay_snap(k, rb), self.replay_snap(val, rb));
                     out.push(*hash, ck, cv);
                 }
                 Value::obj(self.heap.alloc(Obj::Map(out)))
@@ -4002,7 +4178,7 @@ impl Vm {
             SnapValue::Set(entries) => {
                 let mut out = SetData::default();
                 for (hash, e) in entries {
-                    let ce = self.replay_snap(e);
+                    let ce = self.replay_snap(e, rb);
                     out.push(*hash, ce);
                 }
                 Value::obj(self.heap.alloc(Obj::Set(out)))

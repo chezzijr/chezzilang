@@ -280,7 +280,10 @@ Two rules cover everything:
    `for i in [0,1,2]: fns.push(fn() -> int: i)` yields closures that return `0`, `1`, `2` — not three
    `2`s. A variable declared *outside* the loop stays one shared cell.
 2. **The task boundary is the one place sharing stops.** Across `spawn` / `parallel:` (a real OS
-   thread) a plain captured local is **snapshot-copied** into an independent per-task cell — writes in
+   thread) a plain captured local is **snapshot-copied** into an independent per-task cell — one cell
+   per **binding**, not one per reference, so *sibling closures still share it inside the task* (rule 1
+   survives the crossing: two closures over one local, sent through a `Channel` or handed to a `spawn`
+   as two separate args, read and write the same cell on the far side, exactly as in Go). Writes in
    the task are **not** visible to the parent. This is the one deliberate divergence from Go
    (`x := 0; parallel: spawn: x = x + 1; print(x)` → `0`, not `1`); it is the memory-safety line.
    For genuine cross-task shared mutation use `Shared[T]` / `RwShared[T]` / `Atomic` / `Channel[T]`,
