@@ -362,4 +362,44 @@ impl WireValue {
             _ => false,
         }
     }
+
+    /// W7-4 — does this value graph contain a [`Backref`](WireValue::Backref) anywhere?
+    ///
+    /// Only [`Vm::from_wire_view`](super::Vm) needs this: `RwShared`'s zero-copy read views DRAIN one
+    /// stored wire through MANY independent `from_wire` rebuilds, and since W7-4 a `Cell`'s id is
+    /// memoized for the whole serialization, so a `Backref` can target a `Cell` defined in a SIBLING
+    /// piece — an id a per-piece rebuild map has never registered. A `true` here routes that piece to
+    /// the whole-container rebuild instead of `from_wire_memo`'s `.expect` panic.
+    ///
+    /// Same arms as [`has_handle`](WireValue::has_handle) minus the `Handle` leaf. Conservative: a
+    /// piece whose `Backref` is INTERNAL (a self-referential element) also answers `true` and takes the
+    /// slower path — still correct, just not free.
+    pub fn has_backref(&self) -> bool {
+        match self {
+            WireValue::Backref(_) => true,
+            WireValue::List { items: xs, .. }
+            | WireValue::Tuple { items: xs, .. }
+            | WireValue::Enum { payload: xs, .. } => xs.iter().any(WireValue::has_backref),
+            WireValue::Map { entries, .. } => entries
+                .iter()
+                .any(|(_, k, v)| k.has_backref() || v.has_backref()),
+            WireValue::Set { entries, .. } => entries.iter().any(|(_, e)| e.has_backref()),
+            WireValue::Struct { fields, .. } => fields.iter().any(|(_, v)| v.has_backref()),
+            WireValue::NewType { inner, .. } => inner.has_backref(),
+            WireValue::Iter { items, .. } => items.iter().any(WireValue::has_backref),
+            WireValue::Closure { captured, .. } => captured.iter().any(|(_, v)| v.has_backref()),
+            WireValue::Cell { inner, .. } => inner.has_backref(),
+            WireValue::Generator { closure, state, .. } => {
+                closure.as_ref().is_some_and(|c| c.has_backref())
+                    || match state {
+                        WireGenState::Pending(args) => args.iter().any(WireValue::has_backref),
+                        WireGenState::Suspended { stack, .. } => {
+                            stack.iter().any(WireValue::has_backref)
+                        }
+                        WireGenState::Done => false,
+                    }
+            }
+            _ => false,
+        }
+    }
 }

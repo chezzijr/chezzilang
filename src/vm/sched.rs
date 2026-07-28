@@ -29,7 +29,7 @@ use super::*;
 /// serialization, every later reach emitting `Backref`. Everything else keeps `path` exactly as it
 /// was — the documented DATA rule (an acyclic DAG alias is two independent deep copies, never
 /// collapsed) is deliberate and unchanged.
-#[derive(Default, Clone)]
+#[derive(Default)]
 struct WireMemo {
     /// GcRef of an identity-preserved node (`Closure`/container) currently on the serialize DFS
     /// stack → the `id` assigned on its first visit. A revisit while still in `path` is a true back-edge
@@ -2695,6 +2695,53 @@ impl Vm {
         self.from_wire_memo(w, &mut rebuild)
     }
 
+    /// W7-4 — rebuild ONE PIECE of an `RwShared`'s stored container wire (its zero-copy read views:
+    /// `at`/`slice`/`for_each`/`fold`/`contains`/`get_key`/`has`/`for_each_entry`/`fold_entries`).
+    ///
+    /// Those views are the one place a single [`WireMemo`]'s output is DRAINED by many independent
+    /// `from_wire` calls — memo scope no longer equals rebuild scope, the invariant [`deep_clone_all`]
+    /// (Vm::deep_clone_all) states. That was safe only while a `Backref` was a true DFS back-edge
+    /// (always intra-piece); W7-4 memoizes a `Cell`'s id for the WHOLE serialization, so element `k>0`
+    /// can now `Backref` a cell first reached under element `0` and a per-piece rebuild map would hit
+    /// `from_wire_memo`'s `.expect` — a host PANIC, not a catchable fault.
+    ///
+    /// Fast path (no `Backref` in the piece — everything that isn't a shared binding) is exactly the old
+    /// `from_wire`. Otherwise rebuild the whole stored wire under ONE map first so every id is defined,
+    /// then rebuild the piece against it. A copy-out view is an INDEPENDENT deep copy either way (two
+    /// `at()` calls can never share — they are separate crossings), so the throwaway whole is only
+    /// there to give the piece's back-references something to resolve to; it is unreachable garbage
+    /// (safe: `Heap::alloc` never collects, and the returned value roots what it needs).
+    ///
+    /// ponytail: the slow path is O(whole container) per rebuild map, so a `for_each` over a container
+    /// of sibling closures is O(n²), and pieces drained under SEPARATE maps (successive `for_each`
+    /// steps, a map entry's key vs its value) do not share a cell with each other. Both only bite the
+    /// shared-binding case. Upgrade path if it ever matters: cache the rebuilt whole across the walk.
+    #[allow(clippy::wrong_self_convention)]
+    pub(super) fn from_wire_view(&mut self, core: &RwSharedCore, piece: WireValue) -> Value {
+        let mut rebuild = self.view_rebuild_map(core, piece.has_backref());
+        self.from_wire_memo(piece, &mut rebuild)
+    }
+
+    /// The rebuild map [`from_wire_view`](Vm::from_wire_view) drains a piece against. `seed` (any piece
+    /// about to be drained under it carries a `Backref`) pre-registers every id by rebuilding the WHOLE
+    /// stored wire into it; the rebuilt whole is unreachable garbage that exists only to give those
+    /// back-references a target. Pieces sharing ONE map share their cells (`slice` returns its elements
+    /// in one crossing, like `get`); a fresh map per piece keeps them independent.
+    pub(super) fn view_rebuild_map(
+        &mut self,
+        core: &RwSharedCore,
+        seed: bool,
+    ) -> super::fxhash::FxHashMap<u32, GcRef> {
+        let mut rebuild = super::fxhash::FxHashMap::<u32, GcRef>::default();
+        if seed {
+            // The caller has already DROPPED the shared guard (never re-lock `core.v` under it — the
+            // write-preferring `RwLock` deadlocks a recursive read behind a queued writer).
+            let whole = core.v.read().unwrap().clone();
+            let _ = self.from_wire_memo(whole, &mut rebuild);
+        }
+        rebuild
+    }
+
     /// Worker behind [`Vm::from_wire`] — reconstructs into this heap, threading `rebuild` (wire `id` →
     /// placeholder `GcRef`) so any value cycle (a recursive local `fn`, a self-referential struct/list/
     /// map, a mixed struct+closure cycle) round-trips. Every identity-preserved arm (`Cell`/`Closure`
@@ -2704,7 +2751,7 @@ impl Vm {
     /// never collects (heap.rs), so no GC fires between placeholder-alloc and the patch, and `GcRef` is
     /// a GC-traced index (never a raw pointer) — the placeholder can never dangle or alias.
     #[allow(clippy::wrong_self_convention)]
-    fn from_wire_memo(
+    pub(super) fn from_wire_memo(
         &mut self,
         w: WireValue,
         rebuild: &mut super::fxhash::FxHashMap<u32, GcRef>,
@@ -3162,14 +3209,19 @@ impl Vm {
     /// matched by ONE rebuild map in [`rebuild_ready`](Vm::rebuild_ready). Per-value memos re-split a
     /// shared binding here even after `do_spawn` unified it, on BOTH engines (the serial child goes
     /// through this same lowering). See [`deep_clone_all`](Vm::deep_clone_all) for the scope invariant.
-    /// **Serialize order must equal `rebuild_ready`'s reconstruct order** (captures/receiver, THEN
-    /// args): whichever walk reaches a shared cell first emits its `WireValue::Cell` and the later one
-    /// emits a `Backref`, so rebuilding in the other order would hit `from_wire_memo`'s `.expect` with
-    /// an unregistered id. That is why the arg walk moved BELOW the capture walk here.
+    /// **Serialize order must equal `rebuild_ready`'s reconstruct order**: whichever walk reaches a
+    /// shared cell first emits its `WireValue::Cell` and the later one emits a `Backref`, so rebuilding
+    /// in the other order would hit `from_wire_memo`'s `.expect` with an unregistered id. Here that
+    /// order is ARGS, then the callee's captures — `wire_args` stays where it always was, at the top of
+    /// the `Call` arm, because it is the only site applying `ensure_crossable` to spawn arguments and
+    /// moving it below the callee classification would (a) skip argument validation entirely for a
+    /// non-callable callee and (b) let a capture fault pre-empt an argument fault. `rebuild_ready`
+    /// matches by reconstructing a `Closure`'s args before its captures.
     pub(super) fn lower_task(&mut self, task: PendingCall) -> Result<Lowered, RuntimeError> {
         let mut memo = WireMemo::default();
         let lowered = match task {
             PendingCall::Call { callee, args, span } => {
+                let wargs = self.wire_args(args, span, &mut memo)?;
                 match callee.as_obj() {
                     Some(h) => match self.heap.get(h).clone() {
                         Obj::Closure {
@@ -3187,7 +3239,6 @@ impl Vm {
                                 let name = names.get(i).cloned().unwrap_or_default();
                                 wcap.push((name, w));
                             }
-                            let wargs = self.wire_args(args, span, &mut memo)?;
                             Lowered::Closure {
                                 proto,
                                 captured: wcap,
@@ -3198,7 +3249,7 @@ impl Vm {
                         }
                         Obj::Func { proto, home } => Lowered::Func {
                             proto,
-                            args: self.wire_args(args, span, &mut memo)?,
+                            args: wargs,
                             home: self.home_index(home),
                             span,
                         },
@@ -3206,7 +3257,7 @@ impl Vm {
                         // it by name; the worker re-allocs a fresh `Obj::Builtin`. Mirrors `Func`.
                         Obj::Builtin(name) => Lowered::Builtin {
                             name,
-                            args: self.wire_args(args, span, &mut memo)?,
+                            args: wargs,
                             span,
                         },
                         _ => {
@@ -3260,8 +3311,10 @@ impl Vm {
     /// the identical reconstruction. Infallible (all crossing checks happened in [`Vm::lower_task`]).
     ///
     /// W7-4: ONE rebuild map spans the whole `Lowered`, mirroring `lower_task`'s single [`WireMemo`]
-    /// (and reconstructing in the same order: captures/receiver, then args), so a cell shared between a
-    /// capture and an arg is rebuilt once and both references tie to it.
+    /// and reconstructing in the SAME order it serialized (a `Call`'s args before the callee's
+    /// captures; a `Method`'s receiver before its args), so a cell shared between an arg and a capture
+    /// is rebuilt once and both references tie to it — and no `Backref` is ever reached before the
+    /// `WireValue::Cell` that defines it.
     pub(super) fn rebuild_ready(&mut self, lowered: Lowered) -> (ReadyCall, Span) {
         let rb = &mut super::fxhash::FxHashMap::<u32, GcRef>::default();
         match lowered {
@@ -3273,6 +3326,12 @@ impl Vm {
                 span,
             } => {
                 let home = self.worker_home(home);
+                // ARGS FIRST — `lower_task` serializes them first (see its doc), so the defining
+                // `WireValue::Cell` of a cell shared with a capture lives here.
+                let args: Vec<Value> = args
+                    .into_iter()
+                    .map(|w| self.from_wire_memo(w, rb))
+                    .collect();
                 // Lever #3: rebuild positionally (slot order), discarding the carried names.
                 let cap: Vec<Value> = captured
                     .into_iter()
@@ -3283,10 +3342,6 @@ impl Vm {
                     captured: cap,
                     home,
                 }));
-                let args = args
-                    .into_iter()
-                    .map(|w| self.from_wire_memo(w, rb))
-                    .collect();
                 (ReadyCall::Invoke { callee, args }, span)
             }
             Lowered::Func {
@@ -3730,8 +3785,8 @@ impl Vm {
         self.to_snap_depth(v, 0, memo)
     }
 
-    /// W7-4 — run a SPECULATIVE `to_wire_depth` that the caller may discard, against a CLONE of `memo`,
-    /// committing only when the result is kept. Load-bearing for two separate invariants:
+    /// W7-4 — run a SPECULATIVE `to_wire_depth` that the caller may discard, ROLLING BACK `memo` when
+    /// it is. Load-bearing for two separate invariants:
     ///  1. **id hygiene** — a discarded attempt that left cell ids in the shared memo would make a later
     ///     global emit `Backref(id)` for an id no emitted `WireValue::Cell` ever defines, and
     ///     `from_wire_memo`'s `.expect` would PANIC on replay.
@@ -3739,7 +3794,15 @@ impl Vm {
     ///     residual `Module`/`Native`/`Cffi` handle from a LATER global's `has_handle()` check, letting a
     ///     parent `GcRef` replay on a worker heap.
     ///
-    /// `keep` decides; on `false` (or `Err`) the caller's memo is untouched.
+    /// `keep` decides; on `false` (or `Err`) the caller's memo is restored to its entry state.
+    ///
+    /// Rollback, not a clone: `to_snap_depth` calls this at EVERY node, so cloning the caller's memo
+    /// (which for the module snapshot is module-scoped and grows with every cell already emitted) would
+    /// make snapshotting a module with K cell-bearing globals O(M·K) instead of O(M). The undo is
+    /// exact — every id this attempt minted is `>= next_id` on entry, and `path`/`gens_on_stack` are
+    /// empty on entry (only `to_wire_depth` touches them and it pops on every `Ok` arm; an `Err` can
+    /// leave residue, which is exactly what is cleared here). Cost is O(cells) on the DISCARD path
+    /// only — a handle-bearing or generator global — and O(1) on the kept path.
     fn try_wire_speculative(
         &self,
         v: Value,
@@ -3747,13 +3810,17 @@ impl Vm {
         memo: &mut WireMemo,
         keep: impl Fn(&WireValue) -> bool,
     ) -> Option<WireValue> {
-        let mut spec = memo.clone();
-        match self.to_wire_depth(v, depth, &mut spec) {
-            Ok(w) if keep(&w) => {
-                *memo = spec;
-                Some(w)
+        debug_assert!(memo.path.is_empty() && memo.gens_on_stack.is_empty());
+        let mint_from = memo.next_id;
+        match self.to_wire_depth(v, depth, memo) {
+            Ok(w) if keep(&w) => Some(w),
+            _ => {
+                memo.cells.retain(|_, id| *id < mint_from);
+                memo.next_id = mint_from;
+                memo.path.clear();
+                memo.gens_on_stack.clear();
+                None
             }
-            _ => None,
         }
     }
 
@@ -3793,8 +3860,8 @@ impl Vm {
         // memory-safe AND `serial == M:N` by construction (each task already gets its own frozen
         // per-task module-global snapshot — F1). A non-sendable parked slot / reference cycle makes
         // `to_wire` Err → we fall to the slow arm, which re-raises that real reject.
-        // W7-4: SPECULATIVE — the attempt is discarded when the value carries a handle, so it runs
-        // against a memo clone and only commits on the kept branch (`try_wire_speculative`).
+        // W7-4: SPECULATIVE — the attempt is discarded when the value carries a handle, so the memo
+        // must be rolled back on that branch (`try_wire_speculative`).
         if let Some(w) = self.try_wire_speculative(v, depth, memo, |w| !w.has_handle()) {
             return Ok(SnapValue::Wire(w));
         }
@@ -3949,7 +4016,7 @@ impl Vm {
             //     generator runs clean, and one that DOES reach it faults at the use site (iterating a
             //     `Nil` is not iterable) — "fault only when reached", `serial == M:N` by construction
             //     (both engines snapshot from the same memoized frozen copy).
-            // W7-4: also SPECULATIVE (the `Nil` branch discards it) — same clone/commit discipline, and
+            // W7-4: also SPECULATIVE (the `Nil` branch discards it) — same rollback discipline, and
             // it must use the SHARED memo on the kept branch or its ids would collide with the ones the
             // module's other globals minted, aliasing unrelated nodes on replay.
             Obj::Generator(_) => SnapValue::Wire(

@@ -55,6 +55,8 @@ chronological log.
 | **W7-10** | `:3860` | `csv.parse` SILENTLY DELETES a bare `"` inside an unquoted field (`a,b"c` → `bc`) | Needs a policy decision first: CPython keeps it literally, Go `encoding/csv` errors — Chezzi currently picks a silent third answer, and `parse` returns a bare `List[List[str]]` with no error channel, so "error like Go" also needs a signature change |
 | **W7-4a** | `:3901` | Airlock cell identity is preserved **per module** in the snapshot, so two globals in DIFFERENT modules over one shared cell still arrive as two cells | Residual disclosed by the W7-4 fix. Closing it needs `Vm`-lived rebuild state kept (and rooted) across the lazy per-module faults; the reported repro is same-module and is fixed |
 | **W7-4b** | `:3901` | A cell whose inner value carries a residual `Module`/`Native`/`Cffi` handle falls to `SnapValue::Cell`, which has no `Backref` encoding, so its identity is not preserved across a module snapshot | Residual disclosed by the W7-4 fix, and the same limit the `SnapValue::Closure` slow arm already documents. Closing it is a snapshot FORMAT change (id/`Backref` arms on `SnapValue`), out of proportion to a residual this narrow |
+| **W7-4c** | `:3901` | ONE TASK reached through TWO serializations still gets two bindings: a `spawn:` block's captures and the module-global snapshot cross into the same task but are separate memos, rebuilt at different times (the snapshot faults in lazily) | Residual disclosed by the W7-4 fix; same family as W7-4a. Closing it needs `Vm`-lived rebuild state across GC-visible points. Fenced by `module_global_plus_local_capture_still_split` and stated in `syntax.md` rule 2 |
+| **W7-4d** | `:3901` | An `RwShared` COPY-OUT VIEW (`at`/`for_each`/`fold`/`get_key`/`has`/`for_each_entry`/`fold_entries`) rebuilds one piece per step, so two sibling closures pulled out separately do not share their binding | Inherent to a copy-out API — two `at()` calls are two crossings. A whole `get()`/`read()`, and `slice`, are one crossing and DO share. Not a residual of the fix, documented in `concurrency.md` §airlock |
 
 **Known limits that are documented, not bugs** (listed so they aren't re-filed): `Iterable[T]` element
 recovery does not fire for a struct with only `iter` and no `next` — bound that one concretely
@@ -3948,13 +3950,23 @@ engines:
   round-trip folded into that batch; its only extra was `ensure_crossable`, which `lower_task` applies
   to the same captures with the same span).
 - `do_spawn_block` — all captures in one batch.
-- `lower_task` ↔ `rebuild_ready` — one memo / one rebuild map, and the arg walk MOVED below the capture
-  walk: **serialize order must equal reconstruct order**, or a `Backref` hits `from_wire_memo`'s
-  `.expect("…already-reconstructed node id")` (a panic, not a fault).
+- `lower_task` ↔ `rebuild_ready` — one memo / one rebuild map. **Serialize order must equal reconstruct
+  order**, or a `Backref` hits `from_wire_memo`'s `.expect("…already-reconstructed node id")` (a panic,
+  not a fault). That order is ARGS then captures: `wire_args` stays at the top of the `Call` arm (it is
+  the only site applying `ensure_crossable` to spawn arguments — moving it below the callee
+  classification skipped argument validation for a non-callable callee and let a capture fault pre-empt
+  an arg fault), and `rebuild_ready` reconstructs a `Closure`'s args before its captures to match.
 - `snapshot_modules` ↔ `fault_module` — one memo and one rebuild map **per module**.
-- `to_snap_depth`'s speculative fast path now runs against a memo CLONE and commits only on the kept
-  branch: a discarded attempt must leave neither a cell id nothing defines (rebuild panic) nor a
-  `Backref` shortcut that could hide a residual handle from a later `has_handle`/`ensure_crossable`.
+- `to_snap_depth`'s speculative fast path ROLLS THE MEMO BACK when the attempt is discarded (restore
+  `next_id`, drop every id `>= next_id`, clear `path`/`gens_on_stack`): a discarded attempt must leave
+  neither a cell id nothing defines (rebuild panic) nor a `Backref` shortcut that could hide a residual
+  handle from a later `has_handle`/`ensure_crossable`. Rollback, not a memo clone — the clone ran at
+  EVERY node and made a module with K cell-bearing globals O(M·K).
+- **`RwShared`'s zero-copy read views** are the one place ONE serialize memo is drained by MANY
+  independent `from_wire`s, so the persistent cell memo made a `Backref` legal BETWEEN SIBLING pieces
+  for the first time and `RwShared([inc, get]).at(1)` hit that `.expect` — a host PANIC, no concurrency,
+  both engines. `WireValue::has_backref` + `Vm::from_wire_view`/`view_rebuild_map` route only a
+  `Backref`-bearing piece to a whole-container rebuild; the fast path is the old `from_wire` unchanged.
 
 **Intended contract flip:** `airlock_aliased_closure_stays_independent` (`[bump, bump]`) →
 `airlock_aliased_closure_shares_its_binding`, `1` → `2`. The closure *values* are still two independent
@@ -3968,16 +3980,19 @@ bug; it is now fenced by `separate_tasks_each_get_their_own_binding` so a future
 `Vm`-lived" over-reach goes red. A single `Executor.submit` whose one closure holds both sides of a
 pair WAS the bug and is fixed (`0` → `2`).
 
-**Verified.** `tests/chz/spec/airlock_shared_binding_test.chz` — 7 arms + 3 fences, green on
-both engines under `chz_suite_passes_both_engines`; thread sweep `1/2/4/8`; the full 26-test `airlock_`
-panel (cycles on every container arm, recursive/mutually-recursive local `fn`, the generator
-`reference cycle` reject, the depth cap, handle `Arc` identity, the module-global inert-`Nil`
-generator) unchanged; a new `airlock_cross_arg_data_alias_stays_independent` fence and a new
-`airlock_module_global_shared_binding_survives_gc_stress` rooting lock. **Perf unchanged** —
-`benches/run.chz` flat within noise on all 9, 100k `Channel.send`/`recv` 199 → 197 ms, a 200k
-closure-over-a-cell send loop 644 → 653 ms (+1.4%, inside run-to-run spread).
+**Verified.** `tests/chz/spec/airlock_shared_binding_test.chz` — 13 tests (7 arms, the `RwShared`-views
+regression, the discarded-snapshot-walk rollback fence, 4 fences), green on both engines under
+`chz_suite_passes_both_engines`; thread sweep `1/2/4/8`; the full 26-test `airlock_` panel (cycles on
+every container arm, recursive/mutually-recursive local `fn`, the generator `reference cycle` reject,
+the depth cap, handle `Arc` identity, the module-global inert-`Nil` generator) unchanged; a new
+`airlock_cross_arg_data_alias_stays_independent` fence and a new
+`airlock_module_global_shared_binding_survives_gc_stress` rooting lock. **Perf** — `benches/run.chz`
+flat on all 9 (no airlock there); 100k `Channel.send`/`recv` 94 ms on main, pre-fix and after; snapshot
+stress (400 module-global closures over distinct cells × 1000 nurseries) main 1.084 s → memo-clone
+1.243 s (+15%) → rollback 1.110 s (+2.4% vs main).
 
-**Two residual ceilings, shipped as documented known limits** (`ponytail:` comments at the sites):
+**Residual ceilings, shipped as documented known limits** (`ponytail:` comments at the sites). All the
+same shape — TWO INDEPENDENT SERIALIZATIONS reach one cell; identity is per serialization:
 - **W7-4a** — cell identity is **per module** in the snapshot: two globals in DIFFERENT modules over one
   shared cell still split. Closing it needs `Vm`-lived rebuild state kept across the lazy per-module
   faults (and rooted); the repro is same-module.
@@ -3985,6 +4000,19 @@ closure-over-a-cell send loop 644 → 653 ms (+1.4%, inside run-to-run spread).
   the `SnapValue::Cell` slow arm, which has no id/`Backref` encoding, so identity there stays wire-only
   (the same limit the `SnapValue::Closure` slow arm already documents). Closing it is a snapshot FORMAT
   change, out of proportion to a residual this narrow.
+- **W7-4c** — ONE TASK reached through TWO serializations still gets two bindings: a `spawn:` block's
+  captures and the module-global snapshot cross into the same task at the same instant, but are
+  separate memos rebuilt at DIFFERENT times (the snapshot faults in lazily on the task's first module
+  access), so their rebuild maps cannot be unified without `Vm`-lived state across GC-visible points.
+  `c := make()` at module level with `gi := c.inc` a global and `gg := c.get` a local captured by the
+  block reads `0`, not `2`. Same family as W7-4a; fenced by
+  `module_global_plus_local_capture_still_split` and stated in `docs/syntax.md` rule 2 +
+  `docs/concurrency.md` §airlock.
+- **W7-4d** — an `RwShared` COPY-OUT VIEW is per-piece independent: `at`/`for_each`/`fold`/`get_key`/
+  `has`/`for_each_entry`/`fold_entries` rebuild one piece per step, so two sibling closures pulled out
+  separately do not share their binding (two `at()` calls are two crossings — they never could). A
+  whole-container `get()`/`read()`, and `slice` (one call returning a container), ARE one crossing and
+  do share. Inherent to a copy-out API, not a residual of the fix.
 
 ## Session log — 2026-07-28 (bug-hunt wave 7 — the P2 tier: 3 findings, ALL OPEN, filed for a later milestone)
 

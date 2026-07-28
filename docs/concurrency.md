@@ -1048,10 +1048,23 @@ was retired when module globals started deep-copying per task on both engines.)
   task (Go behaves the same). Data aliasing keeps the deep-copy-independence contract unchanged: only
   `Obj::Cell` uses the persistent memo, every container and the closure VALUES themselves still pop on DFS
   exit. One serialization spans everything that crosses together — a `spawn`'s callee/receiver + all args,
-  a `spawn:` block's captures, and one module's globals in the snapshot. **Known ceilings:** cell identity
-  is per-module in the module snapshot (two globals in *different* modules over one cell still split), and
-  a cell whose inner value carries a residual module/native/FFI handle falls to the snapshot's slow arm,
-  which has no back-reference encoding.
+  a `spawn:` block's captures, and one module's globals in the snapshot.
+
+  **Known ceilings** — all of the shape "two *independent* serializations reach the same cell", which is
+  exactly where identity stops:
+  - **One task, two serializations.** A `spawn:` block's captures and the module-global snapshot cross
+    into the same task at the same instant but are serialized separately (per-task memo vs per-module
+    memo, and the snapshot is rebuilt LAZILY on the task's first module access, so the two rebuild maps
+    cannot be unified without `Vm`-lived state across GC-visible points). So a module global and a
+    captured local over one factory-local cell still split inside one task.
+  - **Cross-module.** Cell identity is per-module in the module snapshot: two globals in *different*
+    modules over one cell still split.
+  - **`RwShared` copy-out views.** `at`/`for_each`/`fold`/`get_key`/`has`/`for_each_entry`/
+    `fold_entries` rebuild ONE piece of the stored container per step, so each piece is an independent
+    copy of the binding — two `at()` calls are two crossings and can never share. A whole-container
+    `get()`/`read()`, and `slice` (one call returning a container), are one crossing and DO share.
+  - **Handle-bearing cell.** A cell whose inner value carries a residual module/native/FFI handle falls
+    to the snapshot's slow arm, which has no back-reference encoding.
 - **A recursive *local* `fn` IS sendable (identity-preserving airlock).** A nested `fn` that calls itself
   captures its own name for recursion — the compiler's letrec gives it a self-cell, so the closure's
   capture graph is **cyclic** (`Closure → Cell → Closure`). The same `id` + `Backref` machinery (above)
