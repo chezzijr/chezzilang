@@ -49,6 +49,9 @@ chronological log.
 | **W7-5** | `:3800` | The M:N `Executor` drain does not abort the remaining jobs after a faulting job (serial does), and `submit_result` discards the result of a job it ran | **Needs its own milestone — two fix attempts were rejected.** Sequential drain is correct but costs 4× (0.30s → 1.20s on 4 overlapping jobs); "run all" removes the drain's per-drain cancel flag, which is the ONLY kill switch — it breaks `os.exit` hard-halt, lets a faulting job leave a runaway sibling unkillable, defeats dead-stdout promptness, and creates a NEW serial≠M:N line-set divergence via `reduce_task_slots`' non-lowest-index fault flush |
 | **W7-5b** | `:3800` | An `Executor` created INSIDE an M:N task is silently discarded — its jobs never run, never reap, no fault | Found while prosecuting the W7-5 fix. It registers in the throwaway worker `Vm.executors`, which `run_outcome`/`into_fiber` drop; `drain_live_executors` only snapshots the PARENT `Vm`. Arguably worse than W7-5 itself; belongs to the same Executor milestone |
 | **W7-5c** | `:3800` | `reduce_task_slots` flushes a faulting task's buffered output only `if first_fault.is_none()` (`sched.rs:1688`), so a second faulting task's stdout is dropped on M:N | Latent today (the drain's cancel flag makes siblings `Cancelled`, which flushes); becomes live the moment two tasks can fault in one drain. Same milestone |
+| **W7-8** | `:3860` | `fs.list_dir`/`walk`/`glob`/`canonicalize` + `os.getcwd` decode paths LOSSILY, so the path they hand back does not open — a **dead** path with no diagnostic | The last unswept member of the lossy-byte family (B1/R1/W6-4/W6-14 all fixed). Fixing it properly means a `bytes`-carrying path seam, i.e. the same `OsString`-through-the-resolver work the W7-6 v1 ceiling names — its own milestone, not a patch |
+| **W7-9** | `:3860` | `Reader.read_line`'s non-UTF-8 fault is **DESTRUCTIVE**: the bad line is consumed, and the `read_bytes` its own message recommends returns the NEXT line | Breaches the ratified B1/R1 rule ("a recoverable `Err` that silently drops already-received payload is just a different flavour of the corruption B1 fixes"). `Socket.read` keeps the undecodable bytes in `SocketCore::carry` for exactly this; `Reader` needs the same carry, which is a `Reader`-lifecycle change |
+| **W7-10** | `:3860` | `csv.parse` SILENTLY DELETES a bare `"` inside an unquoted field (`a,b"c` → `bc`) | Needs a policy decision first: CPython keeps it literally, Go `encoding/csv` errors — Chezzi currently picks a silent third answer, and `parse` returns a bare `List[List[str]]` with no error channel, so "error like Go" also needs a signature change |
 
 **Known limits that are documented, not bugs** (listed so they aren't re-filed): `Iterable[T]` element
 recovery does not fire for a struct with only `iter` and no `next` — bound that one concretely
@@ -3886,3 +3889,99 @@ one-dead-among-live still parks. The deadlock detector is untouched.
 
 **Verified.** 0/60 failures at `--threads=8` (main: 3/60); a genuine all-parked nursery still faults
 `deadlock:` promptly; `wait:` over all-closed channels faults identically on both engines.
+
+## Session log — 2026-07-28 (bug-hunt wave 7 — the P2 tier: 3 findings, ALL OPEN, filed for a later milestone)
+
+These three came out of the same wave-7 hunt as W7-1…W7-7. They are **not fixed** — each needs a
+design decision or a seam change bigger than a patch, so they are filed rather than rushed before the
+JIT freeze. All three were **re-verified on `main` after the wave-7 fixes landed** (2026-07-28), both
+engines identical, `chezzi check` clean on every repro. None is a serial≠M:N divergence — the parity
+oracle is blind to all three, which is why they needed a differential against CPython/Go to surface.
+
+### W7-8 — `fs`/`os` hand back a LOSSILY-DECODED path that does not open (**OPEN**)
+
+`fs.list_dir` / `fs.walk` / `fs.glob` / `fs.canonicalize` and `os.getcwd()` run the OS bytes through
+`to_string_lossy`, so a non-UTF-8 name comes back with `U+FFFD` substituted — a path that names
+nothing. The program gets no diagnostic; the next `exists`/`open` on that name simply fails.
+
+```chezzi
+import std.fs
+fn main():
+    match fs.list_dir("/tmp/bd"):        # dir holds b"A\xffB.txt" and "ok.txt"
+        Ok(xs):
+            for n in xs:
+                print(str(n.encode()), "exists =", str(fs.exists("/tmp/bd/" + n)))
+        Err(e): print(e.message())
+main()
+```
+```
+b'A\xef\xbf\xbdB.txt' exists = false      <- U+FFFD; the path does not exist
+b'ok.txt' exists = true
+```
+`io.read_file` on it → `Err(… No such file or directory)`. Same for a non-UTF-8 cwd
+(`cwd = Ok(/tmp/cw�dir)`, `fs.exists(cwd) = false`). **Python** hands back the exact bytes
+(`os.listdir(b'…')`, `os.getcwdb()`).
+
+**Sites:** `src/native/fs.rs:37,144,160,239,469`, `src/native/os.rs:63`.
+**Why open:** this is the last unswept member of the lossy-byte family — B1 (`Socket.read`), R1, W6-4
+(`std.process`) and W6-14 (`ffi.load_str`) were each fixed by giving the seam a `bytes` path. Doing the
+same here means a `bytes`-carrying path API, which is the same `OsString`-through-the-resolver work the
+W7-6 v1 ceiling already names. One milestone should close both.
+
+### W7-9 — `Reader.read_line`'s non-UTF-8 fault CONSUMES the line it could not decode (**OPEN**)
+
+The fault is recoverable, but the bytes are gone: the `read_bytes` the error message itself recommends
+returns the *next* line, not the one that failed.
+
+```chezzi
+import std.io                    # /tmp/bin.dat == b"line1\nA\xffB\nline3\n"
+fn main():
+    match io.open("/tmp/bin.dat"):
+        Ok(r):
+            print("l1 =", str(r.read_line()))
+            x := recover: r.read_line()
+            match x:
+                Ok(l): print("l2 =", str(l))
+                Err(e): print("l2 FAULT:", e.message())
+            print("rest =", str(r.read_bytes(100)))
+        Err(e): print(e.message())
+main()
+```
+```
+l1 = Some(line1)
+l2 FAULT: stream did not contain valid UTF-8 — read binary files with Reader.read_bytes
+rest = Ok(b'line3\n')          <- b"A\xffB\n" is gone forever
+```
+**Why it matters:** it breaches the rule ratified with B1/R1 and quoted in the W6-4 entry — *"a
+recoverable `Err` that silently drops already-received payload would just be a different flavour of the
+corruption B1 fixes."* `Socket.read` keeps undecodable bytes in `SocketCore::carry` precisely so
+`read_bytes` can recover them; `Reader` has no carry. Same "advice that doesn't work" shape as W6-18.
+`docs/stdlib.md` ("a clean **fault** pointing at `read_bytes`") implies recovery is possible.
+**Why open:** the fix is a `Reader`-lifecycle change (a carry buffer + every read path taught about it),
+not a one-liner.
+
+### W7-10 — `csv.parse` silently DELETES a bare `"` inside an unquoted field (**OPEN**)
+
+```chezzi
+import std.csv
+fn t(s: str):
+    print(str(s.encode()), "=>", str(csv.parse(s)))
+fn main():
+    t("a,b\"c")
+    t("a,b\"c\"d")
+    t("a,b\"\"c")
+main()
+```
+```
+b'a,b"c'   => [[a, bc]]
+b'a,b"c"d' => [[a, bcd]]
+b'a,b""c'  => [[a, bc]]
+```
+**CPython** `csv.reader` keeps them literally (`['a','b"c']`, `['a','b"c"d']`, `['a','b""c']`);
+**Go** `encoding/csv` errors (`bare " in non-quoted-field`). Chezzi picks a silent third answer.
+The hole is narrow — the quote-*starts*-the-field cases (`a,"b"c` → `bc`, `"a"b,c` → `ab`) match
+CPython exactly. `docs/stdlib.md` says only "RFC 4180 quote state machine" and never mentions bare
+quotes.
+**Why open:** needs a policy call before a patch. "Keep it literally" (CPython) is a one-line state-
+machine change; "error" (Go) needs a signature change, because `parse` returns a bare `List[List[str]]`
+with no error channel.
