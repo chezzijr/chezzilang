@@ -518,9 +518,18 @@ an invalid byte becomes `U+FFFD` (`args()` returns `"A�B"` where the shell pas
 This is like Python's `surrogateescape` except it is **not reversible**: the original bytes are gone,
 and two raw env keys that decode to the same string collide (last one wins). The guarantee that
 matters is that hostile bytes **never crash the CLI** — reading them used to abort the process with a
-Rust panic (rc=101) before the program started, where `recover:` could not see it. **v1 ceiling:** a
-script whose *path* is not valid UTF-8 cannot be run — the lossy path no longer names a real file, so
-it fails cleanly with `cannot read '…'` and rc=1 (never a panic).
+Rust panic (rc=101) before the program started, where `recover:` could not see it.
+
+**A path is never taken from a lossy decode.** Because `U+FFFD` substitution is *not* injective, a raw
+path `sc\xffipt.chz` and a real file literally named `sc\u{FFFD}ipt.chz` decode to the same string —
+opening the alias would silently run a *different* program with rc=0, strictly worse than the panic it
+replaced. So any path argument containing `U+FFFD` is **refused** (`cannot use '…' as a path — it
+contains U+FFFD …`, rc=1), on `run` / `check` / `ast` / `tokens` / `test`. The check is on the
+character, not on the original bytes, so a file *genuinely* named with a literal `U+FFFD` is refused
+too — safe direction, and the price of a one-line guard.
+**v1 ceiling:** a script whose *path* is not valid UTF-8 therefore cannot be run at all (it fails
+cleanly, never a panic, and never runs the wrong file); supporting one needs `OsString` threaded
+through the resolver and module graph — its own milestone, tracked in `docs/gaps.md` (W7-6).
 
 ### `std.fs`
 **Queries:** `list_dir(path) -> Result[List[str]]` (sorted names) · `exists(path) -> bool` ·

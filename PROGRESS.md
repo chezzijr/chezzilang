@@ -22,9 +22,13 @@ Single source of truth for "what am I doing next." Update after every work sessi
 >   (`src/native/mod.rs`) with a **lossy** decode (invalid byte → `U+FFFD`; two raw env keys can collide,
 >   last wins) — documented in `docs/stdlib.md §std.os`, not silent. `os.environ`'s sorted-by-key
 >   lowering lives downstream in `src/vm/mod.rs`, was NOT touched, and its golden was re-run.
->   **Stated v1 ceiling:** a script whose PATH is not valid UTF-8 still cannot be run, but now fails
->   cleanly (`cannot read '…'`, rc=1) instead of rc=101 — threading a real `OsString` through would
->   change `read_source`/`type_check`/module-graph-root signatures (resolver + checker), out of scope.
+>   **A path is never taken from a lossy decode** (adversarial-review fix): `U+FFFD` substitution is not
+>   injective, so a raw `sc\xffipt.chz` and a real `sc\u{FFFD}ipt.chz` decode alike — opening the alias
+>   would silently run a DIFFERENT program with rc=0, strictly worse than the rc=101 it replaced. Any
+>   path argument containing `U+FFFD` is refused (`reject_lossy_path`, `src/main.rs`) with rc=1, on
+>   `run`/`check`/`ast`/`tokens`/`test`. **Stated v1 ceiling:** a script whose PATH is not valid UTF-8
+>   cannot be run at all — threading a real `OsString` through would change `read_source`/`type_check`/
+>   module-graph-root signatures (resolver + checker), its own milestone, out of scope here.
 > - **Wave 6's meta-finding re-confirmed:** the panicking `std::env::args()` had **three** call sites,
 >   not the one the report named — `src/bin/difffuzz.rs` and `src/bin/panicfuzz.rs` too. All swapped;
 >   `grep -rn 'std::env::args()' src/` now returns zero live call sites.

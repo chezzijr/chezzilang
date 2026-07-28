@@ -639,7 +639,12 @@ fn cmd_test(args: &[String]) -> ExitCode {
                 eprintln!("chezzi test: unknown flag '{other}'");
                 return ExitCode::FAILURE;
             }
-            other if path.is_none() => path = Some(other.to_string()),
+            other if path.is_none() => {
+                if reject_lossy_path(other) {
+                    return ExitCode::FAILURE;
+                }
+                path = Some(other.to_string())
+            }
             _ => {
                 eprintln!("chezzi test: unexpected extra argument");
                 return ExitCode::FAILURE;
@@ -1020,7 +1025,31 @@ fn parse_file_and_flags(cmd: &str, args: &[String]) -> Option<(String, bool)> {
     }
 }
 
+/// Reject a path that reached us through a **lossy** argv decode (W7-6).
+///
+/// `OsStr::to_string_lossy` is NOT injective: every invalid byte becomes `U+FFFD`, so the raw path
+/// `sc\xffipt.chz` and a real file literally named `sc\u{FFFD}ipt.chz` decode to the same string. A
+/// path selects *which code runs*, so silently opening the alias would be strictly worse than the
+/// rc=101 host panic `args_os()` replaced — it would run a different program and exit 0. Argv and env
+/// values surfaced to Chezzi as `str` stay lossy (they select nothing); a path does not.
+///
+/// ponytail: refusing is the v1 ceiling — running a genuinely non-UTF-8-named script needs `OsString`
+/// threaded through the resolver and module graph, its own milestone (docs/gaps.md W7-6).
+fn reject_lossy_path(path: &str) -> bool {
+    if path.contains('\u{FFFD}') {
+        eprintln!(
+            "chezzi: cannot use '{path}' as a path — it contains U+FFFD, which is how a non-UTF-8 \
+             argument decodes, so it may not name the file you meant"
+        );
+        return true;
+    }
+    false
+}
+
 fn read_source(path: &str) -> Option<String> {
+    if reject_lossy_path(path) {
+        return None;
+    }
     match std::fs::read_to_string(path) {
         Ok(s) => Some(s),
         Err(e) => {

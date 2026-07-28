@@ -82,7 +82,7 @@ fn non_utf8_program_arg_does_not_host_panic() {
 #[test]
 fn non_utf8_script_path_does_not_host_panic() {
     // A script whose PATH is not valid UTF-8 cannot be RUN (the path plumbing is `String`), but it
-    // must fail CLEANLY — a read error, never a host panic.
+    // must fail CLEANLY — a refusal, never a host panic.
     let t = TmpDir::new();
     let mut raw = t.0.clone().into_os_string().into_vec();
     raw.extend_from_slice(b"/sc\xffipt.chz");
@@ -94,6 +94,53 @@ fn non_utf8_script_path_does_not_host_panic() {
         .output()
         .expect("spawn chezzi");
     assert_no_host_panic(&out, "non-UTF-8 script path");
+    assert_eq!(out.status.code(), Some(1), "must fail cleanly, not succeed");
+}
+
+/// The lossy decode must never SELECT A DIFFERENT FILE (W7-6, adversarial-review fix).
+///
+/// `to_string_lossy` is not injective, so the raw path `sc\xffipt.chz` and a real file literally
+/// named `sc\u{FFFD}ipt.chz` decode to the same string. Opening the alias would run the *other*
+/// program and exit 0 — strictly worse than the rc=101 host panic `args_os()` replaced. Pre-fix this
+/// test printed "WRONG FILE RAN" with rc=0.
+#[test]
+fn non_utf8_script_path_never_runs_the_utf8_decoy() {
+    let t = TmpDir::new();
+
+    // The file actually asked for: raw byte 0xFF in its name.
+    let mut raw = t.0.clone().into_os_string().into_vec();
+    raw.extend_from_slice(b"/sc\xffipt.chz");
+    let intended = OsString::from_vec(raw);
+    std::fs::write(&intended, "print(\"INTENDED\")\n").unwrap();
+
+    // The decoy: a *valid UTF-8* file whose name is what the lossy decode produces.
+    let decoy = t.0.join("sc\u{FFFD}ipt.chz");
+    std::fs::write(&decoy, "print(\"WRONG FILE RAN\")\n").unwrap();
+    assert_ne!(
+        std::fs::read(&intended).unwrap(),
+        std::fs::read(&decoy).unwrap(),
+        "the two files must be distinct for this test to mean anything"
+    );
+
+    for serial in [true, false] {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_chezzi"));
+        cmd.arg("run");
+        if serial {
+            cmd.arg("--serial");
+        }
+        let out = cmd.arg(&intended).output().expect("spawn chezzi");
+        assert_no_host_panic(&out, "non-UTF-8 script path with a U+FFFD decoy");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            !stdout.contains("WRONG FILE RAN"),
+            "the CLI ran the U+FFFD-named DECOY instead of the path it was given: {stdout}"
+        );
+        assert_eq!(
+            out.status.code(),
+            Some(1),
+            "a lossy path must be refused, not silently resolved: {stdout}"
+        );
+    }
 }
 
 #[test]
