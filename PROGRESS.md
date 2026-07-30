@@ -4,6 +4,57 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 **Legend:** ⬜ not started · 🟦 in progress · ✅ done
 
+> **✅ BUG-HUNT (2026-07-31, wave 7, gaps.md W7-8 — CLOSED) — a non-UTF-8 filename now round-trips:
+> the `PathLike` protocol + the `path.Path` type.** `fs.list_dir`/`walk`/`glob`/`canonicalize` and
+> `os.getcwd()` ran the OS bytes through `to_string_lossy`, so a name like `b"A\xffB.txt"` came back
+> `U+FFFD`-substituted — a path that names **nothing**, with no diagnostic (`fs.exists` on it returned
+> **false**). This was the LAST unswept member of the lossy-byte family (B1 / R1 / W6-4 / W6-9 / W6-14
+> all previously fixed by giving the seam a `bytes` path); the family now has no unswept member.
+> Design doc: `~/.claude/plans/2026-07-31-path-pathlike-design.md`.
+> - **INPUT — `PathLike`**, a new RESERVED universe protocol (the 20th), sole method
+>   `as_path(self) -> bytes`. `str`/`bytes`/`bytearray` satisfy it **intrinsically** (three rows in
+>   `INTRINSIC_PROTO_METHODS` + a miss-only `("as_path", 0)` arm in `Vm::intrinsic_proto_method`, so the
+>   W6-3 ratchet's generated probe passes on both engines); `path.Path` satisfies it structurally.
+>   **NOT a breaking change:** `fs.exists("x")` / `io.open(f)` still compile with a bare `str` literal,
+>   no annotation, no turbofish.
+> - **OUTPUT — `path.Path`**, an ORDINARY Chezzi struct over `raw: bytes` (deliberately not a `native
+>   struct`: that would have cost a `NativeRet::Struct` cross-module construction and a fourth
+>   hand-maintained positional layout copy). DISPLAY and CONVERSION are two methods, as in Rust (whose
+>   `Path` implements no `Display`): `p.str()` is LOSSY and never faults (`Stringable`), `p.decode()` is
+>   EXACT with a recoverable fault, `p.bytes()` is raw. `os.getcwd() -> Result[path.Path]` — a CONCRETE
+>   return type, which is what removes the erasure blocker that made `os.getcwd[bytes]()`
+>   unimplementable (type args are erased before `Vm::call_native`).
+> - **SEAM** — every path-taking native is now `_`-prefixed and typed `bytes` (`_exists`, `_list_dir`,
+>   `_getcwd`, …, documented once in `docs/stdlib.md` as the internal byte seam); the public name is a
+>   bodied pure-Chezzi wrapper doing `_native(p.as_path())` and re-wrapping into `path.Path`. All four
+>   production decodes are byte-exact via `OsStrExt`, and `glob`'s matcher runs over `&[u8]` (so an
+>   ASCII pattern matches a non-UTF-8 name; `?` now counts one BYTE). Lossy rendering survives ONLY in
+>   human-facing error text (`Path::display()`) — the same semantics `p.str()` ratifies.
+>   `is_blocking` strips a leading `_` so the D5 offload classification travelled with the rename.
+> - **`std.path`** — all 10 lexical helpers moved `str -> str` ⇒ `PathLike -> Path` (option A), so a
+>   non-UTF-8 name survives `basename`/`join`/`normalize` too. Ops CHAIN; convert once at the end.
+>   New `bytes.decode_lossy()` (Python `errors="replace"`) backs `Path.str()` instead of hand-rolling a
+>   UTF-8 substitution rule in Chezzi.
+> - **THREE enabling front-end defects, all latent on main, all of the recorded
+>   checker-superset-of-compiler class:** (1) `Compiler::collect_globals` reserved no slot for a
+>   `native fn`, so a bodied fn in a native module could not call a native sibling — it PANICKED
+>   `global '_exists' has no slot`; (2) the checker's native-module arm bound imports only inside its
+>   `has_bodied` branch, i.e. AFTER `harvest_native_module` had resolved every signature, so a native
+>   module's SIGNATURES could not name a type from a module it imports; (3) `Vm::do_method_call`'s
+>   Module arm called the FRAME-FLATTENING `do_call` unconditionally — safe only while every module
+>   member was a native, and `defer fs.remove_file(p)` (re-entrant, `NO_IC`, no running dispatch loop)
+>   then ran off the end of the proto. It now takes the synchronous `invoke_value` path on `NO_IC`,
+>   exactly like the struct/enum arms.
+> - **Container invariance is UNCHANGED** and fenced: `List[int]→List[Any]`, `List[Sq]→List[Shape]`,
+>   `Map[str,int]→Map[str,Any]`, `List[int]→Iterable[Any]` all still reject (the grant is a VALUE-level
+>   early-out keyed on `Ty::Str|Bytes|ByteArray`, unreachable from any container element comparison).
+> - Tests: `tests/chz/stdlib/fs_bytes_roundtrip_test.chz` (the repro of record — 6 `test fn`s incl. the
+>   spawn-airlock crossing), `tests/chz/stdlib/path_type_test.chz`, `tests/chz/spec/pathlike_test.chz`,
+>   the migrated `tests/chz/suites/path_test.chz` (+ `t_byte_exact` / `t_pathlike_inputs_and_chaining`),
+>   and Rust `ok()`/`rejects()` fences incl. the user-redeclaration diagnostic. Hand-verified on the
+>   release binary on BOTH engines, byte-identical: `fs.exists` on the recovered name is **true** (it is
+>   **false** on the pre-fix binary). No VM hot path touched — no perf delta expected or measured.
+
 > **✅ BUG-HUNT (2026-07-30, wave 7, gaps.md W7-9 + W7-10) — two stdlib paths that silently LOST bytes
 > the program already had.** Both were "the data is gone and nothing says so"; both are now fenced by
 > Chezzi-native tests (`tests/chz/stdlib/io_reader_carry_test.chz`, `csv_bare_quote_test.chz`, 10
@@ -29,8 +80,9 @@ Single source of truth for "what am I doing next." Update after every work sessi
 >   `a,b""c` → `["a","b\"\"c"]` (two literal quotes — `""` collapses only *inside* a quoted field). The
 >   quote-*starts*-the-field cases (`a,"b"c` → `["a","bc"]`, `"a"b,c` → `["ab","c"]`) already matched
 >   CPython and are unchanged, now fenced. O(n) pre-collected-chars structure untouched.
-> - **Still open from the same P2 tier: W7-8** (`fs`/`os` lossily-decoded paths) — deliberately out of
->   scope here; it needs a `bytes`-carrying path seam, i.e. its own milestone.
+> - **Also from the same P2 tier: W7-8** (`fs`/`os` lossily-decoded paths) — out of scope in THAT
+>   session; it needed a `bytes`-carrying path seam, which landed **2026-07-31** as `PathLike` +
+>   `path.Path` (top entry). W7-8 is CLOSED.
 
 > **✅ BUG-HUNT (2026-07-29, wave 7, gaps.md W7-4) — two sibling closures over one captured local now
 > keep ONE binding across the airlock; they used to silently split into two cells.** `Ctr(inc, get)`
@@ -178,7 +230,8 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > - Tests: `tests/chz/stdlib/fs_copy_test.chz` (4 `test fn`s — same-path, symlink, and two controls;
 >   dual-engine-gated) + `tests/host_bytes_cli.rs` (3 spawned-process tests, `#![cfg(unix)]` — a host
 >   panic is invisible to any in-VM assertion). **Deliberately NOT fixed here:** the separately-filed
->   lossy path DECODE (`fs.list_dir`/`walk`/`glob`/`canonicalize`, `os.getcwd`), which is uncoupled.
+>   lossy path DECODE (`fs.list_dir`/`walk`/`glob`/`canonicalize`, `os.getcwd`), which is uncoupled —
+>   it landed later as W7-8 (2026-07-31, `PathLike` + `path.Path`; top entry).
 
 > **✅ FIX (2026-07-28, gaps.md W7-3) — a `recover:` installed INSIDE a `defer` body now catches while
 > the task is being torn down by a nursery cancel.** A cancelled task's `defer` that did

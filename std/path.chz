@@ -1,8 +1,12 @@
-# std.path — unix path-STRING manipulation written in Chezzi (pure-Chezzi dogfood).
+# std.path — unix path manipulation written in Chezzi (pure-Chezzi dogfood).
 #
-# Filesystem PATH-STRING ops only — NO filesystem I/O (that's std.fs). Every function here is pure
-# string manipulation built on the core `str` methods (split/starts_with/ends_with) and the `str`
-# `join` receiver — no native code, no seam.
+# LEXICAL path ops only — NO filesystem I/O (that's std.fs). No native code, no seam.
+#
+# W7-8 — every helper is `PathLike -> Path`: it takes anything spelled as a path (a bare `str`
+# literal, a `bytes`, a `bytearray`, another `Path`) and hands back a `Path`. The algorithms operate on
+# RAW OS BYTES, so a filename that is not valid UTF-8 survives a `basename`/`join`/`normalize` that a
+# `str`-typed layer could not even represent. Ops CHAIN (`path.join([d, "sub"]).with_ext("txt")`), so
+# the ergonomic tax on the all-UTF-8 case is one `.str()` at the very end.
 #
 # SEPARATOR POLICY: unix '/' ONLY. The repo targets unix; there is no Windows '\' handling.
 #
@@ -10,56 +14,134 @@
 # dirname/split/ext/splitext) and Go `path.Clean` for `normalize` (the one fully-specified lexical
 # algorithm). Each function's contract is documented inline and in docs/stdlib.md §5.
 
-# Is `p` absolute (starts with '/')? Empty string is NOT absolute.
-fn is_abs(p: str) -> bool:
-    return p.starts_with("/")
+# `Path` (W7-8) — the OUTPUT position of the filesystem surface: what `fs.list_dir`/`walk`/`glob`/
+# `canonicalize` and `os.getcwd()` hand back. An ORDINARY Chezzi struct over the RAW OS bytes, so a
+# non-UTF-8 filename survives a round-trip that a validated-UTF-8 `str` would destroy (`fs.exists` on
+# a U+FFFD-substituted name is FALSE — the W7-8 bug).
+#
+# DISPLAY and CONVERSION are deliberately two different methods (Rust makes the same split — its
+# `Path` implements no `Display`):
+#   p.str()    lossy display, U+FFFD substituted, NEVER faults  (satisfies `Stringable`)
+#   p.decode() EXACT, recoverable fault on non-UTF-8            (inherits `bytes.decode()` verbatim)
+#   p.bytes()  the raw OS bytes                                 (never faults)
+# `as_path` makes it satisfy `PathLike` STRUCTURALLY, so `fs.exists(p)` takes it directly — which is
+# what keeps the natural spelling off the lossy `fs.exists(p.str())` route.
+# There is no `bytearray` conversion method: `bytearray(p.bytes())` already works.
+struct Path:
+    raw: bytes
+
+    # `PathLike` — hand back the raw OS bytes unchanged.
+    fn as_path(self) -> bytes:
+        return self.raw
+
+    # The raw OS bytes. Byte-exact, never faults.
+    fn bytes(self) -> bytes:
+        return self.raw
+
+    # EXACT conversion to `str`. Faults (recoverably, catchable with `recover:`) on a non-UTF-8 path —
+    # the same fault `bytes.decode()` raises, inherited rather than re-worded.
+    fn decode(self) -> str:
+        return self.raw.decode()
+
+    # LOSSY display (`Stringable`): each maximal invalid UTF-8 subsequence becomes one U+FFFD, so
+    # `print(p)` / interpolation always work and never fault. Delegates to `bytes.decode_lossy()`
+    # rather than re-deriving the substitution rule here.
+    fn str(self) -> str:
+        return self.raw.decode_lossy()
+
+# --- private byte helpers -----------------------------------------------------------------
+# `bytes` has no `split`/`join`/`starts_with`/`ends_with` and no `+`, so these four are the whole
+# toolbox the helpers below are written against. Concatenation goes through a `bytearray` (the one
+# route that exists). They are `_`-prefixed by convention only — there is no privacy mechanism.
+
+SEP := 47    # '/'
+DOT := 46    # '.'
+
+fn _cat(a: bytes, b: bytes) -> bytes:
+    ba := bytearray(a)
+    for x in b:
+        ba.push(x)
+    return bytes(ba)
+
+# `str.split` semantics: n separators yield n+1 (possibly empty) pieces.
+fn _split(b: bytes, sep: int) -> List[bytes]:
+    out: List[bytes] = []
+    start := 0
+    i := 0
+    while i < b.len():
+        if b[i] == sep:
+            out.push(b[start : i])
+            start = i + 1
+        i += 1
+    out.push(b[start : b.len()])
+    return out
+
+# `sep.join(parts)` semantics: no leading/trailing separator, one between each pair.
+fn _join(parts: List[bytes], sep: int) -> bytes:
+    ba := bytearray(b"")
+    first := true
+    for p in parts:
+        if not first:
+            ba.push(sep)
+        first = false
+        for x in p:
+            ba.push(x)
+    return bytes(ba)
+
+# --- the lexical surface ------------------------------------------------------------------
+
+# Is `p` absolute (starts with '/')? The empty path is NOT absolute.
+fn is_abs(p: PathLike) -> bool:
+    raw := p.as_path()
+    return raw.len() > 0 and raw[0] == SEP
 
 # Is `p` relative (not absolute)? Trivial complement of is_abs.
-fn is_rel(p: str) -> bool:
+fn is_rel(p: PathLike) -> bool:
     return not is_abs(p)
 
-# Final path component (Python os.path.basename on the RAW string, no pre-normalize):
+# Final path component (Python os.path.basename on the RAW path, no pre-normalize):
 # the part after the last '/'. A trailing slash yields "" (empty final component).
 #   basename("a/b") -> "b" · basename("a/b/") -> "" · basename("/") -> "" ·
 #   basename("") -> "" · basename("a") -> "a"
-fn basename(p: str) -> str:
-    parts := p.split("/")
-    return parts[parts.len() - 1]
+fn basename(p: PathLike) -> Path:
+    parts := _split(p.as_path(), SEP)
+    return Path(parts[parts.len() - 1])
 
 # Everything before the final component (Python os.path.dirname): the head up to the last '/',
 # with a trailing slash stripped EXCEPT when the head is all slashes (then it stays "/").
 #   dirname("a/b") -> "a" · dirname("a/b/") -> "a/b" · dirname("/a") -> "/" ·
 #   dirname("a") -> "" · dirname("/") -> "/" · dirname("") -> ""
-fn dirname(p: str) -> str:
+fn dirname(p: PathLike) -> Path:
+    raw := p.as_path()
     # index of the last '/'
     cut := -1
     i := 0
-    while i < p.len():
-        if p[i] == "/":
+    while i < raw.len():
+        if raw[i] == SEP:
             cut = i
         i += 1
     if cut < 0:
-        return ""            # no slash -> no directory
-    head := p[0 : cut]       # everything before the last '/'
+        return Path(b"")         # no slash -> no directory
+    head := raw[0 : cut]         # everything before the last '/'
     # strip a trailing slash on the head unless the head is entirely slashes
     allslash := head.len() > 0
     j := 0
     while j < head.len():
-        if head[j] != "/":
+        if head[j] != SEP:
             allslash = false
         j += 1
     if head.len() == 0 or allslash:
-        return p[0 : cut + 1]   # keep the slashes (e.g. "/a" -> "/")
+        return Path(raw[0 : cut + 1])   # keep the slashes (e.g. "/a" -> "/")
     # strip ALL redundant trailing slashes on the head ("a//b" -> head "a/" -> "a")
     end := head.len()
-    while end > 0 and head[end - 1] == "/":
+    while end > 0 and head[end - 1] == SEP:
         end -= 1
-    return head[0 : end]
+    return Path(head[0 : end])
 
 # Split `p` into (head, tail) so that head == dirname(p) and tail == basename(p)
 # (Python os.path.split). split("a/b") -> ("a", "b") · split("a/b/") -> ("a/b", "") ·
 # split("/a") -> ("/", "a").
-fn split(p: str) -> (str, str):
+fn split(p: PathLike) -> (Path, Path):
     return (dirname(p), basename(p))
 
 # File extension of the final component, INCLUDING the leading dot, FINAL extension only
@@ -67,50 +149,51 @@ fn split(p: str) -> (str, str):
 # the first char of the basename). Only the basename is inspected, never the dirname.
 #   ext("a/b.tar.gz") -> ".gz" · ext("a.txt") -> ".txt" · ext("README") -> "" ·
 #   ext(".bashrc") -> "" · ext("a.") -> "." · ext("dir.d/file") -> "" · ext("..gitignore") -> ""
-fn ext(p: str) -> str:
-    b := basename(p)
+fn ext(p: PathLike) -> Path:
+    b := basename(p).bytes()
     dot := -1
     i := 0
     while i < b.len():
-        if b[i] == ".":
+        if b[i] == DOT:
             dot = i
         i += 1
     if dot <= 0:             # no dot, or dot is the first char (hidden file) -> no ext
-        return ""
+        return Path(b"")
     # Python splitext: the last dot separates an extension only if some char before
     # it is not a dot — a name that is all leading dots (`..gitignore`, `..`) has none.
     j := 0
     while j < dot:
-        if b[j] != ".":
-            return b[dot : b.len()]
+        if b[j] != DOT:
+            return Path(b[dot : b.len()])
         j += 1
-    return ""
+    return Path(b"")
 
 # Final component with its extension removed.
 #   stem("a/b.tar.gz") -> "b.tar" · stem(".bashrc") -> ".bashrc" · stem("a.txt") -> "a" ·
 #   stem("a/b") -> "b"
-fn stem(p: str) -> str:
-    b := basename(p)
-    e := ext(p)
+fn stem(p: PathLike) -> Path:
+    b := basename(p).bytes()
+    e := ext(p).bytes()
     if e.len() == 0:
-        return b
-    return b[0 : b.len() - e.len()]
+        return Path(b)
+    return Path(b[0 : b.len() - e.len()])
 
 # Replace the final extension of `p` with `e`. `e` is normalized to exactly one leading dot when
 # non-empty ("md" and ".md" both yield ".md"); an empty `e` strips the extension.
 #   with_ext("a/b.txt", ".md") -> "a/b.md" · with_ext("a/b", ".md") -> "a/b.md" ·
 #   with_ext("a/b.txt", "") -> "a/b" · with_ext("a/b.txt", "md") -> "a/b.md"
-fn with_ext(p: str, e: str) -> str:
-    ne := e
-    if ne.len() > 0 and not ne.starts_with("."):
-        ne = "." + ne
-    d := dirname(p)
-    newbase := stem(p) + ne
+fn with_ext(p: PathLike, e: PathLike) -> Path:
+    ne := e.as_path()
+    if ne.len() > 0 and ne[0] != DOT:
+        ne = _cat(b".", ne)
+    d := dirname(p).bytes()
+    newbase := _cat(stem(p).bytes(), ne)
     if d.len() == 0:
-        return newbase
-    if d == "/" or d.ends_with("/"):
-        return d + newbase
-    return d + "/" + newbase
+        return Path(newbase)
+    # A head that already ends in '/' (including the root "/") takes no extra separator.
+    if d[d.len() - 1] == SEP:
+        return Path(_cat(d, newbase))
+    return Path(_cat(_cat(d, b"/"), newbase))
 
 # Lexically clean `p` (Go path.Clean): collapse runs of '/', drop "." elements, resolve ".."
 # against the preceding real element WITHOUT touching the filesystem. The empty path cleans to ".".
@@ -121,38 +204,40 @@ fn with_ext(p: str, e: str) -> str:
 #   normalize("..") -> ".." · normalize("a/b/../c") -> "a/c" · normalize("a/./b") -> "a/b" ·
 #   normalize("a/b/") -> "a/b" · normalize("./a") -> "a" · normalize("/..") -> "/" ·
 #   normalize("/a/../../b") -> "/b" · normalize("a/../../b") -> "../b"
-fn normalize(p: str) -> str:
-    abs := is_abs(p)
-    stack := []
-    for seg in p.split("/"):
-        if seg == "" or seg == ".":
+fn normalize(p: PathLike) -> Path:
+    raw := p.as_path()
+    abs := is_abs(raw)
+    stack: List[bytes] = []
+    for seg in _split(raw, SEP):
+        if seg.len() == 0 or seg == b".":
             continue                       # collapse '//' and drop '.'
-        if seg == "..":
+        if seg == b"..":
             n := stack.len()
-            if n > 0 and stack[n - 1] != "..":
+            if n > 0 and stack[n - 1] != b"..":
                 stack.pop()                # resolve against a real preceding element
             elif not abs:
-                stack.push("..")         # relative: leading ".." is preserved
+                stack.push(b"..")        # relative: leading ".." is preserved
             # absolute && nothing to pop: ".." past root is dropped
             continue
         stack.push(seg)
-    body := "/".join(stack)
+    body := _join(stack, SEP)
     if abs:
-        return "/" + body                  # "/" + "" == "/" for the root case
+        return Path(_cat(b"/", body))      # "/" + "" == "/" for the root case
     if body.len() == 0:
-        return "."                         # empty relative result is the current dir
-    return body
+        return Path(b".")                  # empty relative result is the current dir
+    return Path(body)
 
 # Join path components with '/' (Go path.Join style — NOT Python's absolute-resets-earlier
 # behavior): drop empty parts, join the rest with '/', then `normalize` the result. An all-empty
 # input yields "".
 #   join(["a","b","c"]) -> "a/b/c" · join(["a/","b"]) -> "a/b" · join(["","b"]) -> "b" ·
 #   join([]) -> "" · join(["a","","c"]) -> "a/c" · join(["/a","b"]) -> "/a/b"
-fn join(parts: List[str]) -> str:
-    kept := []
+fn join(parts: List[PathLike]) -> Path:
+    kept: List[bytes] = []
     for part in parts:
-        if part.len() > 0:
-            kept.push(part)
+        raw := part.as_path()
+        if raw.len() > 0:
+            kept.push(raw)
     if kept.len() == 0:
-        return ""
-    return normalize("/".join(kept))
+        return Path(b"")
+    return normalize(_join(kept, SEP))

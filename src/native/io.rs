@@ -107,23 +107,25 @@ fn input(h: &mut dyn Host) -> Result<NativeRet, HostError> {
 
 fn read_file(h: &mut dyn Host) -> Result<NativeRet, HostError> {
     expect_args(h, "read_file", 1)?;
-    let path = h.arg_str(0)?;
+    // W7-8 — the path is RAW OS bytes; only the error TEXT is lossily rendered (`Path::display()`).
+    let path = crate::native::fs::arg_path(h, 0)?;
+    let shown = path.display();
     let file = match std::fs::File::open(&path) {
         Ok(f) => f,
-        Err(e) => return Ok(NativeRet::Err(format!("{path}: {e}"))),
+        Err(e) => return Ok(NativeRet::Err(format!("{shown}: {e}"))),
     };
     // Read at most the cap + 1 byte: if we got more than the cap, the file is over-limit.
     let mut buf = String::new();
     match file.take(MAX_READ_FILE_BYTES + 1).read_to_string(&mut buf) {
         Ok(_) if buf.len() as u64 > MAX_READ_FILE_BYTES => Ok(NativeRet::Err(format!(
-            "{path}: file exceeds the {MAX_READ_FILE_BYTES}-byte read limit"
+            "{shown}: file exceeds the {MAX_READ_FILE_BYTES}-byte read limit"
         ))),
         Ok(_) => Ok(NativeRet::Ok(Box::new(NativeRet::Str(buf)))),
         // R1 — a non-UTF-8 file is not a mystery I/O error: point at the binary reader.
         Err(e) if e.kind() == std::io::ErrorKind::InvalidData => Ok(NativeRet::Err(format!(
-            "{path}: {e} — use io.read_bytes for binary files"
+            "{shown}: {e} — use io.read_bytes for binary files"
         ))),
-        Err(e) => Ok(NativeRet::Err(format!("{path}: {e}"))),
+        Err(e) => Ok(NativeRet::Err(format!("{shown}: {e}"))),
     }
 }
 
@@ -131,18 +133,19 @@ fn read_file(h: &mut dyn Host) -> Result<NativeRet, HostError> {
 /// fails on any binary file). Same `MAX_READ_FILE_BYTES` read cap.
 fn read_bytes(h: &mut dyn Host) -> Result<NativeRet, HostError> {
     expect_args(h, "read_bytes", 1)?;
-    let path = h.arg_str(0)?;
+    let path = crate::native::fs::arg_path(h, 0)?;
+    let shown = path.display();
     let file = match std::fs::File::open(&path) {
         Ok(f) => f,
-        Err(e) => return Ok(NativeRet::Err(format!("{path}: {e}"))),
+        Err(e) => return Ok(NativeRet::Err(format!("{shown}: {e}"))),
     };
     let mut buf = Vec::new();
     match file.take(MAX_READ_FILE_BYTES + 1).read_to_end(&mut buf) {
         Ok(_) if buf.len() as u64 > MAX_READ_FILE_BYTES => Ok(NativeRet::Err(format!(
-            "{path}: file exceeds the {MAX_READ_FILE_BYTES}-byte read limit"
+            "{shown}: file exceeds the {MAX_READ_FILE_BYTES}-byte read limit"
         ))),
         Ok(_) => Ok(NativeRet::Ok(Box::new(NativeRet::Bytes(buf)))),
-        Err(e) => Ok(NativeRet::Err(format!("{path}: {e}"))),
+        Err(e) => Ok(NativeRet::Err(format!("{shown}: {e}"))),
     }
 }
 
@@ -150,21 +153,21 @@ fn read_bytes(h: &mut dyn Host) -> Result<NativeRet, HostError> {
 /// is read-side only: the writer already holds the data in memory).
 fn write_bytes(h: &mut dyn Host) -> Result<NativeRet, HostError> {
     expect_args(h, "write_bytes", 2)?;
-    let path = h.arg_str(0)?;
+    let path = crate::native::fs::arg_path(h, 0)?;
     let data = h.arg_bytes(1)?;
     match std::fs::write(&path, &data) {
         Ok(()) => Ok(NativeRet::Ok(Box::new(NativeRet::Nil))),
-        Err(e) => Ok(NativeRet::Err(format!("{path}: {e}"))),
+        Err(e) => Ok(NativeRet::Err(format!("{}: {e}", path.display()))),
     }
 }
 
 fn write_file(h: &mut dyn Host) -> Result<NativeRet, HostError> {
     expect_args(h, "write_file", 2)?;
-    let path = h.arg_str(0)?;
+    let path = crate::native::fs::arg_path(h, 0)?;
     let contents = h.arg_str(1)?;
     match std::fs::write(&path, &contents) {
         Ok(()) => Ok(NativeRet::Ok(Box::new(NativeRet::Nil))),
-        Err(e) => Ok(NativeRet::Err(format!("{path}: {e}"))),
+        Err(e) => Ok(NativeRet::Err(format!("{}: {e}", path.display()))),
     }
 }
 
@@ -193,14 +196,14 @@ pub const MEMBERS: &[(&str, NativeFn)] = &[
     ("isatty_stdin", isatty_stdin),
     ("isatty_stderr", isatty_stderr),
     ("input", input),
-    ("read_file", read_file),
-    ("write_file", write_file),
-    ("read_bytes", read_bytes),
-    ("write_bytes", write_bytes),
-    ("create", intercepted),
-    ("append", intercepted),
+    ("_read_file", read_file),
+    ("_write_file", write_file),
+    ("_read_bytes", read_bytes),
+    ("_write_bytes", write_bytes),
+    ("_create", intercepted),
+    ("_append", intercepted),
     ("stdout", intercepted),
     ("stderr", intercepted),
     ("buffered", intercepted),
-    ("open", intercepted),
+    ("_open", intercepted),
 ];

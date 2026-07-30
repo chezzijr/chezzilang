@@ -1,0 +1,122 @@
+# tests/chz/stdlib/fs_bytes_roundtrip_test.chz — the W7-8 repro of record.
+#
+# `fs.list_dir`/`walk`/`glob`/`canonicalize` used to decode OS filenames through `to_string_lossy`, so a
+# non-UTF-8 name came back with U+FFFD substituted — a path that names NOTHING, with no diagnostic
+# (`fs.exists` on it was FALSE). They now hand back `path.Path` (raw bytes), so the name round-trips.
+# Temp dirs carry the pid AND the test name (the suite runs concurrently under M:N).
+# Run: `cargo run -- test tests/chz/`. Serial==M:N guarded by the dual-engine gate.
+
+import std.fs
+import std.io
+import std.os
+import std.path
+import std.concurrency
+
+# The undecodable filename under test: `A<0xff>B.txt`.
+BAD := b"A\xffB.txt"
+
+# `bytes` has no `+` — accumulate through a `bytearray` (the one concatenation route that exists).
+fn cat(a: bytes, b: bytes) -> bytes:
+    ba := bytearray(a)
+    for x in b:
+        ba.push(x)
+    return bytes(ba)
+
+# `Result` unwrappers that ASSERT instead of propagating (a `test fn` returns nil, so `?` is out).
+fn paths(r: Result[List[path.Path]]) -> List[path.Path]:
+    match r:
+        Ok(v): return v
+        Err(e):
+            assert false, "expected Ok, got Err: " + e.message()
+            return []
+
+fn one(r: Result[path.Path]) -> path.Path:
+    match r:
+        Ok(v): return v
+        Err(e):
+            assert false, "expected Ok, got Err: " + e.message()
+            return path.Path(b"")
+
+fn ok_nil(r: Result[nil], what: str):
+    match r:
+        Ok(_): pass
+        Err(e): assert false, what + ": " + e.message()
+
+# Make a per-test scratch dir holding exactly one file named BAD; hand back the dir path (raw bytes).
+fn fixture(name: str) -> bytes:
+    d := os.temp_dir() + "/chz_w7_8_" + name + "_" + str(os.getpid())
+    ok_nil(fs.mkdir(d), "mkdir")
+    ok_nil(io.write_bytes(cat(cat(d.encode(), b"/"), BAD), b"hi"), "write_bytes")
+    return d.encode()
+
+fn cleanup(d: bytes):
+    for p in paths(fs.list_dir(d)):
+        fs.remove_file(cat(cat(d, b"/"), p.bytes()))
+    fs.remove_dir(d)
+
+test fn list_dir_round_trips_a_non_utf8_name():
+    d := fixture("list_dir")
+    defer cleanup(d)
+    names := paths(fs.list_dir(d))
+    assert names.len() == 1, "expected exactly one entry"
+    # THE BUG: this used to be b"A\xef\xbf\xbdB.txt" (U+FFFD), not the real name.
+    assert names[0].bytes() == BAD, "list_dir must be byte-exact"
+    # ...and the recovered name must actually NAME the file again.
+    assert fs.exists(cat(cat(d, b"/"), names[0].bytes())), "the recovered name must exist"
+
+test fn walk_round_trips_a_non_utf8_name():
+    d := fixture("walk")
+    defer cleanup(d)
+    found := paths(fs.walk(d))
+    assert found.len() == 1
+    assert found[0].bytes() == cat(cat(d, b"/"), BAD)
+    # `walk` hands back FULL paths, so this is the round-trip with no re-joining.
+    assert fs.exists(found[0]), "the walked path must exist"
+    assert fs.is_file(found[0])
+
+test fn glob_round_trips_a_non_utf8_name():
+    d := fixture("glob")
+    defer cleanup(d)
+    hits := paths(fs.glob(cat(d, b"/*.txt")))
+    assert hits.len() == 1
+    assert hits[0].bytes() == cat(cat(d, b"/"), BAD)
+    assert fs.exists(hits[0])
+
+test fn canonicalize_round_trips_a_non_utf8_name():
+    d := fixture("canon")
+    defer cleanup(d)
+    c := one(fs.canonicalize(cat(cat(d, b"/"), BAD)))
+    assert fs.exists(c), "the canonical path must exist"
+    # The final component is the undecodable name, byte-exact.
+    raw := c.bytes()
+    assert raw[raw.len() - BAD.len() : raw.len()] == BAD
+
+# The stat + whole-file read paths take the same byte path unchanged.
+test fn stat_and_reads_take_a_non_utf8_path():
+    d := fixture("stat")
+    defer cleanup(d)
+    f := cat(cat(d, b"/"), BAD)
+    match fs.stat(f):
+        Ok(info):
+            assert info.size == 2
+            assert info.is_file
+        Err(e): assert false, "stat: " + e.message()
+    match fs.size(f):
+        Ok(n): assert n == 2
+        Err(e): assert false, "size: " + e.message()
+    match io.read_bytes(f):
+        Ok(b): assert b == b"hi"
+        Err(e): assert false, "read_bytes: " + e.message()
+    match io.read_file(f):
+        Ok(s): assert s == "hi"
+        Err(e): assert false, "read_file: " + e.message()
+
+# A `Path` crosses the airlock (spawn) by value like any other struct over immutable `bytes`.
+test fn path_crosses_a_spawn_airlock():
+    d := fixture("spawn")
+    defer cleanup(d)
+    out := Shared(b"")
+    parallel:
+        spawn:
+            out.set(paths(fs.walk(d))[0].bytes())
+    assert out.get() == cat(cat(d, b"/"), BAD)

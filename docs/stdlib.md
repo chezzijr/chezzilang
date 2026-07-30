@@ -155,6 +155,7 @@ Index a map with `m[k]` (read/write); iterate with `for k, v in m:`.
 | Type | Method | Signature | Notes |
 |------|--------|-----------|-------|
 | both | `decode` | `() -> str` | UTF-8 decode (recoverable fault on invalid UTF-8). |
+| `bytes` | `decode_lossy` | `() -> str` | UTF-8 decode with each **maximal invalid subsequence** replaced by `U+FFFD` — Python's `b.decode(errors="replace")`, Rust's `String::from_utf8_lossy`. **Never faults**, so it is the DISPLAY twin of `decode` (it is what `path.Path.str()` is built on). Not injective: use `decode` when the exact bytes matter. |
 | both | `len` | `() -> int` | Byte count. |
 | `bytearray` | `push` | `(byte: int) -> nil` | *mutates* — append a byte (0–255). |
 | `bytearray` | `pop` | `() -> Option[int]` | *mutates* — remove & return last byte. |
@@ -394,16 +395,16 @@ error naming them const): `math.pi`, `math.e`, `math.inf` (positive infinity), `
 | `isatty` | `() -> bool` | `true` when **stdout** is a real terminal, `false` when piped/redirected (via `std::io::IsTerminal`). Python `sys.stdout.isatty()` / Go `isatty`. Lets a CLI colorize only when not piped. |
 | `isatty_stdin` | `() -> bool` | Same, over **stdin**. |
 | `isatty_stderr` | `() -> bool` | Same, over **stderr**. |
-| `read_file` | `(path: str) -> Result[str]` | Whole file as text (≤ 64 MB — larger files: stream with `open(...)` → `Reader`). **Decodes UTF-8** — a binary file is an `Err` pointing at `read_bytes`. |
-| `write_file` | `(path: str, contents: str) -> Result[nil]` | Write / overwrite. |
-| `read_bytes` | `(path: str) -> Result[bytes]` | Whole file as raw bytes (≤ 64 MB) — binary files. |
-| `write_bytes` | `(path: str, data: bytes) -> Result[nil]` | Write / overwrite raw bytes; no size cap, like `write_file`. |
-| `create` | `(path: str) -> Result[Writer]` | Open a **truncating** write handle (create-or-truncate). |
-| `append` | `(path: str) -> Result[Writer]` | Open an **append** write handle (create-if-absent, never truncates). |
+| `read_file` | `(p: PathLike) -> Result[str]` | Whole file as text (≤ 64 MB — larger files: stream with `open(...)` → `Reader`). **Decodes UTF-8** — a binary file is an `Err` pointing at `read_bytes`. |
+| `write_file` | `(p: PathLike, contents: str) -> Result[nil]` | Write / overwrite. |
+| `read_bytes` | `(p: PathLike) -> Result[bytes]` | Whole file as raw bytes (≤ 64 MB) — binary files. |
+| `write_bytes` | `(p: PathLike, data: bytes) -> Result[nil]` | Write / overwrite raw bytes; no size cap, like `write_file`. |
+| `create` | `(p: PathLike) -> Result[Writer]` | Open a **truncating** write handle (create-or-truncate). |
+| `append` | `(p: PathLike) -> Result[Writer]` | Open an **append** write handle (create-if-absent, never truncates). |
 | `stdout` | `() -> Writer` | A fresh write handle over the process stdout sink (same sink as `print`). |
 | `stderr` | `() -> Writer` | A fresh write handle over the process stderr sink (same sink as `eprint`). |
 | `buffered` | `(w: Writer, size: int = 8192) -> Writer` | Wrap a writer so writes accumulate in-VM and reach the host in **one** call per `flush` / buffer-full / `close` (the Go `bufio.NewWriter` escape hatch; 8 KiB default). |
-| `open` | `(path: str) -> Result[Reader]` | Open a **read-only** file handle for line/chunk streaming (past the 64 MB whole-file `read_file` cap). A directory is an `Err` **at the call** (Python `IsADirectoryError`), same message as `read_file` — never an `Ok(Reader)` whose every read fails. |
+| `open` | `(p: PathLike) -> Result[Reader]` | Open a **read-only** file handle for line/chunk streaming (past the 64 MB whole-file `read_file` cap). A directory is an `Err` **at the call** (Python `IsADirectoryError`), same message as `read_file` — never an `Ok(Reader)` whose every read fails. |
 
 **`Writer` (R2) — write-only file / stream handle.** A sendable native handle (like `Socket`), the
 buffered-output escape hatch Chezzi's unbuffered stdout default was missing. Two openers, not a mode
@@ -539,8 +540,8 @@ the whole remainder (so a later read in any task sees EOF), `read_char` consumes
 | `hostname` | `() -> str` | System hostname (`""` on the rare failure). |
 | `home_dir` | `() -> Option[str]` | User home (`$HOME`; `None` if unset). Unix-focused. |
 | `temp_dir` | `() -> str` | System temp directory. |
-| `getcwd` | `() -> Result[str]` | Current working directory (real process cwd). |
-| `chdir` | `(path: str) -> Result[nil]` | Change the **real process cwd** (`Err` on failure). **Process-global** — shared by all M:N workers, so a task's `chdir` shifts sibling tasks' relative paths (Python/Go have the same ceiling). |
+| `getcwd` | `() -> Result[path.Path]` | Current working directory (real process cwd), as **raw OS bytes** wrapped in a [`path.Path`](#pathpath) (W7-8) — a non-UTF-8 cwd used to come back `U+FFFD`-substituted, naming nothing. No type argument, no turbofish. `import std.path` to name the type. |
+| `chdir` | `(p: PathLike) -> Result[nil]` | Change the **real process cwd** (`Err` on failure). **Process-global** — shared by all M:N workers, so a task's `chdir` shifts sibling tasks' relative paths (Python/Go have the same ceiling). |
 | `exit` | `(code: int) -> never` | Hard, uncatchable halt, unwinding past any `recover:`. **Does NOT run `defer`s.** The process status is the **low 8 bits** of `code` (`code & 0xff`), exactly like POSIX `exit(3)` / bash / Python / Go: `os.exit(-1)` → **255**, `os.exit(300)` → **44**, `os.exit(0)` → `0`. (It is a *mask*, not a clamp — a negative code must never report SUCCESS.) |
 
 **Env source:** `env` / `environ` / `setenv` all read/write the engine's injected env config (deterministic + testable). The env map is **shared** across M:N workers (an `Arc<Mutex<…>>`, not a per-worker copy), so a `setenv` from inside a task is visible to the parent + siblings — process-global, matching the serial engine (one Vm, one map) and Python/Go. `environ` sorts by key so both engines emit identical output. A `setenv` is **not** seen by a child spawned via `process.cmd` (which inherits the real process env). `getpid` / `platform` / `hostname` / `home_dir` / `temp_dir` are engine-agnostic queries (serial == M:N).
@@ -552,6 +553,14 @@ This is like Python's `surrogateescape` except it is **not reversible**: the ori
 and two raw env keys that decode to the same string collide (last one wins). The guarantee that
 matters is that hostile bytes **never crash the CLI** — reading them used to abort the process with a
 Rust panic (rc=101) before the program started, where `recover:` could not see it.
+
+<a id="pathpath-input"></a>
+**`PathLike` — the path INPUT position (W7-8).** A reserved universe protocol, sole method
+`as_path(self) -> bytes`. `str` / `bytes` / `bytearray` satisfy it **intrinsically**; `path.Path`
+satisfies it structurally. Every path-taking fn in `std.fs` / `std.io` / `std.os` / `std.path` takes
+one, so a raw byte path never has to round-trip through the validated-UTF-8 `str` that cannot
+represent it. (This closed the last unswept member of the lossy-byte family — the `fs`/`os` path
+DECODE. `argv`/`env` below are a separate, still-lossy surface by design.)
 
 **A path is never taken from a lossy decode.** Because `U+FFFD` substitution is *not* injective, a raw
 path `sc\xffipt.chz` and a real file literally named `sc\u{FFFD}ipt.chz` decode to the same string —
@@ -565,10 +574,26 @@ cleanly, never a panic, and never runs the wrong file); supporting one needs `Os
 through the resolver and module graph — its own milestone, tracked in `docs/gaps.md` (W7-6).
 
 ### `std.fs`
-**Queries:** `list_dir(path) -> Result[List[str]]` (sorted names) · `exists(path) -> bool` ·
-`is_file(path) -> bool` · `is_dir(path) -> bool` · `size(path) -> Result[int]` ·
-`glob(pattern) -> Result[List[str]]` (`*`/`?` in the final path component) ·
-`canonicalize(path) -> Result[str]` — resolve symlinks + `.`/`..` against the **real filesystem** to
+
+**Every path argument is a [`PathLike`](#pathpath-input) and every path RESULT is a
+[`path.Path`](#pathpath) (W7-8).** A bare `str` literal still works with no annotation and no
+turbofish; `bytes`, `bytearray` and `path.Path` work too. The returned `Path` carries the **raw OS
+bytes**, so a filename that is not valid UTF-8 round-trips (`fs.exists(fs.list_dir(d)?[0])` is
+`true`) instead of coming back `U+FFFD`-substituted and naming nothing.
+
+> **Internal byte seam.** Each path-taking native is declared once, `_`-prefixed and typed `bytes`
+> (`_exists`, `_list_dir`, `_read_file`, `_getcwd`, …); the public name is a bodied pure-Chezzi
+> wrapper that does `_native(p.as_path())` and re-wraps a returned path into `path.Path`. The `_` is
+> **convention only** — there is no privacy mechanism, so `from std.fs import _exists` works. Call the
+> public name.
+
+**Queries:** `list_dir(p) -> Result[List[Path]]` (entry names, sorted by raw bytes) ·
+`exists(p) -> bool` ·
+`is_file(p) -> bool` · `is_dir(p) -> bool` · `size(p) -> Result[int]` ·
+`glob(pattern) -> Result[List[Path]]` (`*`/`?` in the final path component; matched over **raw
+bytes**, so an ASCII pattern still matches a non-UTF-8 filename — and `?` counts one **byte**, not one
+Unicode scalar) ·
+`canonicalize(p) -> Result[Path]` — resolve symlinks + `.`/`..` against the **real filesystem** to
 an absolute real path. Unlike the purely lexical `path.normalize` (no I/O), this hits the filesystem
 and so **requires the path to exist** (`Err` on a nonexistent path) ·
 `stat(path) -> Result[FileInfo]` — read filesystem metadata into a
@@ -579,8 +604,8 @@ size/mtime/mode/is_dir/is_file (matching `stat`/Python `os.stat`); `is_symlink` 
 (so a symlink-to-file has `is_file == true` **and** `is_symlink == true`). `Err` on a missing/unreadable
 path (a broken symlink included). `FileInfo` is **owned by `std.fs`** — read its fields off a returned
 value with no import, but to name the type you must `import std.fs` (or `import FileInfo from std.fs`) ·
-`walk(path) -> Result[List[str]]` — recursively list **every** entry (files + dirs) strictly under
-`path` as full path strings, in a **deterministic** order: each directory's entries are sorted by name,
+`walk(p) -> Result[List[Path]]` — recursively list **every** entry (files + dirs) strictly under
+`p` as full paths, in a **deterministic** order: each directory's entries are sorted by name,
 a directory is listed before its children (pre-order). A **symlinked directory is listed but not
 descended** (cycle guard). `Err` on an unreadable root. (The sorted order is required for
 serial == M:N engine parity.)
@@ -934,23 +959,55 @@ The case fns are ASCII-guaranteed; exotic full-Unicode case-folding follows Rust
 - **Deferred v1 follow-ups** (YAGNI): streaming/Reader-based parsing, header→`Map` row mapping, and a
   custom-delimiter/TSV `parse_sep(text, sep)`.
 
-### `std.path` — unix path-STRING manipulation
-Pure string ops on **unix `/` paths** — **NO filesystem I/O** (that is `std.fs`). Separator policy:
+### `std.path` — unix lexical path manipulation
+Pure lexical ops on **unix `/` paths** — **NO filesystem I/O** (that is `std.fs`). Separator policy:
 `/` only; there is no Windows `\` handling. Edge-case semantics follow Python `os.path` (basename/
 dirname/split/splitext) and Go `path.Clean` (`normalize`). `import std.path` (or `as p`).
 
+**`PathLike` in, `Path` out.** Every helper takes a `PathLike` (a bare `str` literal, a `bytes`, a
+`bytearray`, or another `Path` — no annotation, no turbofish) and returns a **`path.Path`**. The
+algorithms operate on the **raw OS bytes**, so a filename that is not valid UTF-8 survives a
+`basename`/`join`/`normalize` that a `str`-typed layer could not even represent. Ops therefore
+**chain** — `path.join([d, "sub"]).with_ext("txt")` — and you convert **once at the end**
+(`.str()` lossy display / `.decode()` exact / `.bytes()` raw; see [`path.Path`](#pathpath) below).
+The table's `-> str` examples show the value of `.str()` on the returned `Path`.
+
 | fn | signature | semantics |
 | --- | --- | --- |
-| `is_abs` | `(p) -> bool` | `p` starts with `/`. `""` → `false`. |
-| `is_rel` | `(p) -> bool` | `not is_abs(p)`. |
-| `basename` | `(p) -> str` | Final component (after the last `/`), on the **raw** string. A trailing slash yields `""`: `basename("a/b/")` → `""`, `basename("a/b")` → `"b"`, `basename("/")` → `""`, `basename("")` → `""`, `basename("a")` → `"a"`. |
-| `dirname` | `(p) -> str` | Everything before the final component; the head's trailing slash is stripped **unless** the head is all slashes. `dirname("a/b")` → `"a"`, `dirname("a/b/")` → `"a/b"`, `dirname("/a")` → `"/"`, `dirname("a")` → `""`, `dirname("/")` → `"/"`, `dirname("")` → `""`. |
-| `split` | `(p) -> (str, str)` | `(dirname(p), basename(p))` as a 2-tuple, so `d, b := path.split(p)`. `split("a/b/")` → `("a/b", "")`. |
-| `ext` | `(p) -> str` | Final extension of the basename, **including the leading dot**. A leading-dot-only hidden file has **no** ext, and only the basename is inspected: `ext("a/b.tar.gz")` → `".gz"`, `ext("a.txt")` → `".txt"`, `ext("README")` → `""`, `ext(".bashrc")` → `""`, `ext("a.")` → `"."`, `ext("dir.d/file")` → `""`. |
-| `stem` | `(p) -> str` | `basename` with its `ext` removed: `stem("a/b.tar.gz")` → `"b.tar"`, `stem(".bashrc")` → `".bashrc"`, `stem("a.txt")` → `"a"`. |
-| `with_ext` | `(p, e) -> str` | Replace the final ext with `e`; `e` is normalized to exactly one leading dot when non-empty (`"md"` ≡ `".md"`), `""` strips it: `with_ext("a/b.txt", ".md")` → `"a/b.md"`, `with_ext("a/b", ".md")` → `"a/b.md"`, `with_ext("a/b.txt", "")` → `"a/b"`. |
-| `normalize` | `(p) -> str` | Go `path.Clean` lexical clean (no filesystem): collapse `//`, drop `.`, resolve `..` against the preceding real element. `""` → `"."`; leading `..` is **preserved** on a relative path but a `..` past root on an **absolute** path is dropped. `normalize("/")` → `"/"`, `normalize("//")` → `"/"`, `normalize("..")` → `".."`, `normalize("a/b/../c")` → `"a/c"`, `normalize("a/./b")` → `"a/b"`, `normalize("a/b/")` → `"a/b"`, `normalize("./a")` → `"a"`, `normalize("/..")` → `"/"`, `normalize("/a/../../b")` → `"/b"`, `normalize("a/../../b")` → `"../b"`. |
-| `join` | `(parts: List[str]) -> str` | **Go `path.Join` style** (NOT Python's absolute-resets-earlier behavior): drop empty parts, join with `/`, then `normalize`. All-empty → `""`: `join(["a","b","c"])` → `"a/b/c"`, `join(["a/","b"])` → `"a/b"`, `join(["","b"])` → `"b"`, `join([])` → `""`, `join(["a","","c"])` → `"a/c"`, `join(["/a","b"])` → `"/a/b"`. |
+| `is_abs` | `(p: PathLike) -> bool` | `p` starts with `/`. `""` → `false`. |
+| `is_rel` | `(p: PathLike) -> bool` | `not is_abs(p)`. |
+| `basename` | `(p: PathLike) -> Path` | Final component (after the last `/`), on the **raw** string. A trailing slash yields `""`: `basename("a/b/")` → `""`, `basename("a/b")` → `"b"`, `basename("/")` → `""`, `basename("")` → `""`, `basename("a")` → `"a"`. |
+| `dirname` | `(p: PathLike) -> Path` | Everything before the final component; the head's trailing slash is stripped **unless** the head is all slashes. `dirname("a/b")` → `"a"`, `dirname("a/b/")` → `"a/b"`, `dirname("/a")` → `"/"`, `dirname("a")` → `""`, `dirname("/")` → `"/"`, `dirname("")` → `""`. |
+| `split` | `(p: PathLike) -> (Path, Path)` | `(dirname(p), basename(p))` as a 2-tuple, so `d, b := path.split(p)`. `split("a/b/")` → `("a/b", "")`. |
+| `ext` | `(p: PathLike) -> Path` | Final extension of the basename, **including the leading dot**. A leading-dot-only hidden file has **no** ext, and only the basename is inspected: `ext("a/b.tar.gz")` → `".gz"`, `ext("a.txt")` → `".txt"`, `ext("README")` → `""`, `ext(".bashrc")` → `""`, `ext("a.")` → `"."`, `ext("dir.d/file")` → `""`. |
+| `stem` | `(p: PathLike) -> Path` | `basename` with its `ext` removed: `stem("a/b.tar.gz")` → `"b.tar"`, `stem(".bashrc")` → `".bashrc"`, `stem("a.txt")` → `"a"`. |
+| `with_ext` | `(p: PathLike, e: PathLike) -> Path` | Replace the final ext with `e`; `e` is normalized to exactly one leading dot when non-empty (`"md"` ≡ `".md"`), `""` strips it: `with_ext("a/b.txt", ".md")` → `"a/b.md"`, `with_ext("a/b", ".md")` → `"a/b.md"`, `with_ext("a/b.txt", "")` → `"a/b"`. |
+| `normalize` | `(p: PathLike) -> Path` | Go `path.Clean` lexical clean (no filesystem): collapse `//`, drop `.`, resolve `..` against the preceding real element. `""` → `"."`; leading `..` is **preserved** on a relative path but a `..` past root on an **absolute** path is dropped. `normalize("/")` → `"/"`, `normalize("//")` → `"/"`, `normalize("..")` → `".."`, `normalize("a/b/../c")` → `"a/c"`, `normalize("a/./b")` → `"a/b"`, `normalize("a/b/")` → `"a/b"`, `normalize("./a")` → `"a"`, `normalize("/..")` → `"/"`, `normalize("/a/../../b")` → `"/b"`, `normalize("a/../../b")` → `"../b"`. |
+| `join` | `(parts: List[PathLike]) -> Path` | **Go `path.Join` style** (NOT Python's absolute-resets-earlier behavior): drop empty parts, join with `/`, then `normalize`. All-empty → `""`: `join(["a","b","c"])` → `"a/b/c"`, `join(["a/","b"])` → `"a/b"`, `join(["","b"])` → `"b"`, `join([])` → `""`, `join(["a","","c"])` → `"a/c"`, `join(["/a","b"])` → `"/a/b"`. |
+
+<a id="pathpath"></a>
+#### `path.Path` — the OUTPUT position of the filesystem surface (W7-8)
+
+An **ordinary Chezzi struct** over the raw OS bytes (`raw: bytes`). It is what `fs.list_dir`/`walk`/
+`glob`/`canonicalize`, `os.getcwd()` and every `std.path` helper hand back, and it satisfies
+`PathLike` structurally — so `fs.exists(p)` takes it directly, with no conversion.
+
+| method | signature | semantics |
+| --- | --- | --- |
+| `bytes` | `(self) -> bytes` | The raw OS bytes. Byte-exact, never faults. |
+| `decode` | `(self) -> str` | **EXACT** conversion. Recoverable **fault** on a non-UTF-8 path (`invalid UTF-8 in decode()`) — the same fault `bytes.decode()` raises. |
+| `str` | `(self) -> str` | **LOSSY display** (`Stringable`): each maximal invalid UTF-8 subsequence → one `U+FFFD`. **Never faults**, so `print(p)` / interpolation always work. |
+| `as_path` | `(self) -> bytes` | `PathLike` conformance. |
+
+`Path` is DISPLAY (`str`) vs CONVERSION (`decode`) split on purpose — Rust makes the same split (its
+`Path` implements no `Display`). Construct one directly with `path.Path(b"…")`; convert to a mutable
+buffer with `bytearray(p.bytes())` (there is no `bytearray` method).
+
+> **Residual hazard, documented not prevented:** `fs.exists(p.str())` on a non-UTF-8 path re-creates
+> the W7-8 bug by hand — the lossy display names a *different* (usually nonexistent) file. It is
+> mitigated by the fact that `PathLike` accepts a `Path` **directly**, so the natural spelling
+> (`fs.exists(p)`) never round-trips through `str` at all. Only reach for `.str()` when you are
+> *displaying*.
 
 ### `std.datetime` — civil-calendar date/time (UTC-only)
 Pure-Chezzi civil-calendar decomposition / construction / duration arithmetic layered on the native

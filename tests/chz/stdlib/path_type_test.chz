@@ -1,0 +1,68 @@
+# tests/chz/stdlib/path_type_test.chz — `path.Path`, the OUTPUT position of the fs/os path surface
+# (W7-8), plus the NON-BREAKING fence that every path-taking fn still takes a bare `str` literal.
+#
+# `Path` is an ORDINARY Chezzi struct over `raw: bytes`. DISPLAY and CONVERSION are deliberately two
+# different methods (Rust makes the same split — `Path` has no `Display`):
+#   p.str()    lossy, U+FFFD substituted, NEVER faults  (Stringable)
+#   p.decode() exact, recoverable fault on non-UTF-8     (mirrors `bytes.decode()`)
+#   p.bytes()  the raw OS bytes                          (never faults)
+# Run: `cargo run -- test tests/chz/`. Serial==M:N guarded by the dual-engine gate.
+
+import std.path
+import std.fs
+import std.io
+import std.os
+
+test fn path_bytes_is_exact():
+    assert path.Path(b"A\xffB.txt").bytes() == b"A\xffB.txt"
+    assert path.Path(b"ok").bytes() == b"ok"
+
+test fn path_decode_is_exact_and_recoverable():
+    assert path.Path(b"ok/dir").decode() == "ok/dir"
+    r := recover: path.Path(b"A\xffB").decode()
+    match r:
+        Ok(_): assert false, "decode() on non-UTF-8 must fault"
+        Err(e): assert e.message().contains("invalid UTF-8"), "got: " + e.message()
+
+test fn path_str_is_lossy_and_never_faults():
+    # ASCII round-trips unchanged.
+    assert path.Path(b"ok/dir").str() == "ok/dir"
+    # A lone 0xff is not valid UTF-8 — substituted with U+FFFD (ef bf bd), no fault. Compared as
+    # BYTES: a lossy decode is not injective, so a text-only compare can pass a byte-divergent run.
+    s := path.Path(b"A\xffB").str()
+    assert s.len() == 3, "one replacement char per invalid byte, got " + str(s.len())
+    assert s.encode() == b"A\xef\xbf\xbdB"
+    # Valid multi-byte UTF-8 survives the lossy path intact.
+    assert path.Path(b"\xc3\xa9").str().encode() == b"\xc3\xa9"
+
+# `Path` satisfies `Stringable`, so interpolation / `str()` reach the lossy display.
+test fn path_is_stringable():
+    p := path.Path(b"A\xffB")
+    assert str(p) == p.str()
+
+# ---- the NON-BREAKING fence: a bare `str` literal, no annotation, no turbofish ----
+
+test fn path_fns_still_take_a_bare_str_literal():
+    assert fs.exists("/")
+    assert fs.is_dir("/")
+    assert not fs.is_file("/")
+    assert not fs.exists("/definitely/not/here/w78")
+    match io.read_file("/definitely/not/here/w78"):
+        Ok(_): assert false, "a missing file must Err"
+        Err(e): pass
+
+test fn path_fns_take_bytes_and_path_too():
+    assert fs.exists(b"/")
+    assert fs.exists(bytearray(b"/"))
+    assert fs.exists(path.Path(b"/"))
+    assert fs.is_dir(path.Path(b"/"))
+
+# `os.getcwd()` is `Result[Path]` — NO type argument, NO turbofish.
+test fn getcwd_returns_a_path():
+    match os.getcwd():
+        Ok(p):
+            assert p.bytes().len() > 0
+            # On a normal (UTF-8) cwd the exact and the lossy conversion agree.
+            assert p.decode() == p.str()
+            assert fs.is_dir(p)
+        Err(e): assert false, "getcwd: " + e.message()

@@ -1,0 +1,39 @@
+# tests/chz/spec/pathlike_test.chz — the `PathLike` universe protocol (W7-8).
+#
+# `PathLike` (sole method `as_path(self) -> bytes`) is the INPUT position of every path-taking std fn.
+# `str`/`bytes`/`bytearray` satisfy it INTRINSICALLY (a grant row in `INTRINSIC_PROTO_METHODS` — they
+# have no `as_path` method of their own), so the grant must be genuinely CALLABLE from an erased
+# generic body (`Vm::intrinsic_proto_method`) or the program type-checks and then faults `has no
+# method`. `path.Path` satisfies it STRUCTURALLY through its own `as_path`.
+# Run: `cargo run -- test tests/chz/`. Serial==M:N guarded by the dual-engine gate.
+
+import std.path
+
+# Erased generic body — `x.as_path()` here is exactly what the intrinsic grant promises.
+fn raw[T: PathLike](x: T) -> bytes:
+    return x.as_path()
+
+# Protocol-typed VALUE position (not a generic param) — the other way the grant is reached.
+fn raw_val(x: PathLike) -> bytes:
+    return x.as_path()
+
+test fn str_satisfies_pathlike_intrinsically():
+    assert raw("a/b") == b"a/b"
+    assert raw_val("a/b") == b"a/b"
+
+test fn bytes_satisfies_pathlike_intrinsically():
+    assert raw(b"a\xffb") == b"a\xffb"
+    assert raw_val(b"a\xffb") == b"a\xffb"
+
+test fn bytearray_satisfies_pathlike_intrinsically():
+    assert raw(bytearray(b"a\xffb")) == b"a\xffb"
+    assert raw_val(bytearray(b"a\xffb")) == b"a\xffb"
+
+test fn path_satisfies_pathlike_structurally():
+    p := path.Path(b"a\xffb")
+    assert raw(p) == b"a\xffb"
+    assert raw_val(p) == b"a\xffb"
+
+# A non-ASCII `str` encodes as UTF-8 (the same bytes the OS layer would see).
+test fn str_as_path_is_utf8():
+    assert raw("é") == b"\xc3\xa9"

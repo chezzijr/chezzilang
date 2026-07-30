@@ -183,6 +183,9 @@ native struct str:
 # `len()` (byte count). `extend` is NOT a bytes method (bytes is immutable).
 native struct bytes:
     native fn decode(self) -> str
+    # W7-8 — the DISPLAY twin of `decode()`: each maximal invalid UTF-8 subsequence becomes one U+FFFD
+    # (Python `b.decode(errors="replace")`), so it NEVER faults. `path.Path.str()` is built on it.
+    native fn decode_lossy(self) -> str
     native fn len(self) -> int
 
 # `bytearray` (mutable byte buffer): `len`, `push(int)` (appends one byte, 0-255 validated at runtime),
@@ -217,7 +220,7 @@ native enum Result[T, E]:
     Ok(T)
     Err(E)
 
-# The builtin/reserved STRUCTURAL PROTOCOLS' shape (phase 5c-protocols). These 16 are UNIVERSE protocols
+# The builtin/reserved STRUCTURAL PROTOCOLS' shape (phase 5c-protocols). These 20 are UNIVERSE protocols
 # (always in scope, usable as a generic bound — `[T: Comparable]` / `[T: Arithmetic]` — but never
 # redeclarable by a user program: `is_reserved_protocol` rejects a user `protocol Comparable:`). Only the
 # SHAPE (method sigs + `+`-joined embeds) is file-backed here, as an ADDITIVE, DRIFT-GUARDED MIRROR: the
@@ -319,3 +322,12 @@ protocol Convert[S]:
 # struct/enum satisfies it structurally. `Item` (the element type) is recovered at the `in` site.
 protocol Contains[Item]:
     fn contains(self, item: Item) -> bool
+
+# `PathLike` (W7-8) — the INPUT position of every path-taking std fn (Python `os.PathLike`, Rust
+# `AsRef<Path>`): `as_path(self) -> bytes` hands back the RAW OS bytes, so a non-UTF-8 filename never
+# round-trips through the validated-UTF-8 `str`. `str`/`bytes`/`bytearray` conform INTRINSICALLY (grant
+# rows in `INTRINSIC_PROTO_METHODS`); `path.Path` — what `fs`/`os` hand BACK — conforms structurally
+# through its own `as_path`. Deliberately distinct from a byte-DATA `as_bytes` so a type satisfying
+# both has no method ambiguity.
+protocol PathLike:
+    fn as_path(self) -> bytes

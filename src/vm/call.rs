@@ -1190,7 +1190,8 @@ impl Vm {
                 // dispatchers owns these four names, so the gate is exact. Zero cost unless the
                 // dispatch already failed.
                 Err(e) => {
-                    if !matches!(method, "index" | "set_index" | "slice" | "hash") {
+                    // W7-8 adds `as_path` (the `PathLike` grant on str/bytes/bytearray) to the gate.
+                    if !matches!(method, "index" | "set_index" | "slice" | "hash" | "as_path") {
                         return Err(e);
                     }
                     match self.intrinsic_proto_method(recv, method, &args, span)? {
@@ -1216,9 +1217,22 @@ impl Vm {
                             span,
                         )
                     })?;
-                self.stack.push(member);
-                self.stack.extend(args);
-                self.do_call(argc, span)
+                // W7-8 — a module member can now be a BODIED Chezzi fn (`std.fs`'s `PathLike`
+                // wrappers), not only an `Obj::Native`. `do_call` FLATTENS such a callee (installs the
+                // frame for the *running* `run_until` to execute), which is only correct on the real
+                // dispatch-loop path. A re-entrant caller passes `NO_IC` (`defer fs.remove_file(p)`
+                // runs during frame teardown, with no loop to hand the frame to) — it must use the
+                // synchronous `invoke_value`, exactly like the struct/enum arms below. Before this the
+                // arm was unconditional and safe only because every module member was a native.
+                if ic != NO_IC {
+                    self.stack.push(member);
+                    self.stack.extend(args);
+                    self.do_call(argc, span)
+                } else {
+                    let v = self.invoke_value(member, args, span)?;
+                    self.push(v);
+                    Ok(())
+                }
             }
             Obj::Struct { tid, fields, .. } => {
                 // Resolve the type IDENTITY KEY from the instance's dense `tid` (O(1) index) — the
@@ -2435,6 +2449,25 @@ impl Vm {
                 // caller's `has no method` error standing, exactly as before.
                 None => Ok(None),
             },
+            // W7-8 `PathLike` → the RAW OS bytes of a path spelled as a `str`/`bytes`/`bytearray`.
+            // `str` hands back its UTF-8 encoding (exactly what `str.encode()` yields), `bytes` IS the
+            // answer (returned unchanged — no copy), and a `bytearray` is COPIED into a fresh immutable
+            // `bytes` (the explicit `bytes(ba)` semantics: a later mutation of the buffer must not
+            // change a path already handed over). Miss-only dispatch, so a user type with its own
+            // `as_path` — including `path.Path` — never reaches here.
+            ("as_path", 0) => {
+                let Some(h) = recv.as_obj() else {
+                    return Ok(None);
+                };
+                let raw: Vec<u8> = match self.heap.get(h) {
+                    Obj::Str(s) => s.as_bytes().to_vec(),
+                    Obj::Bytes(_) => return Ok(Some(recv)),
+                    Obj::ByteArray(b) => b.clone(),
+                    _ => return Ok(None),
+                };
+                let r = self.heap.alloc(Obj::Bytes(raw.into()));
+                Ok(Some(Value::obj(r)))
+            }
             ("index", 1) => {
                 self.push(recv);
                 self.push(args[0]);
@@ -3426,6 +3459,18 @@ impl Vm {
                 };
                 let bytes = b.clone();
                 self.decode_utf8(&bytes, span)
+            }
+            // W7-8 `decode_lossy() -> str`: UTF-8 decode with each maximal invalid subsequence
+            // replaced by U+FFFD (Python's `b.decode(errors="replace")`, Rust's
+            // `String::from_utf8_lossy`). NEVER faults — it is the DISPLAY twin of `decode()`, and it
+            // is what `path.Path.str()` (a `Stringable`, which cannot fail) is built on.
+            "decode_lossy" => {
+                self.arity_err("decode_lossy", args, 0, span)?;
+                let Obj::Bytes(b) = self.heap.get(h) else {
+                    unreachable!()
+                };
+                let s = String::from_utf8_lossy(b).into_owned();
+                Ok(self.alloc_str(s))
             }
             "len" => {
                 self.arity_err("len", args, 0, span)?;

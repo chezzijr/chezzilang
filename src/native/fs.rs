@@ -24,49 +24,92 @@ static ATOMIC_SEQ: AtomicU64 = AtomicU64::new(0);
 #[cfg(test)]
 pub(crate) static FS_SCRATCH_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+/// W7-8 — read argument `i` as RAW OS path bytes. Every path-taking `std.fs`/`std.io`/`std.os` native
+/// takes a `bytes` param now (the public `PathLike` wrapper in the `.chz` calls `p.as_path()` first),
+/// so a non-UTF-8 filename reaches the syscall byte-exactly instead of through a `str` that cannot
+/// represent it. On unix the bytes ARE the path (`OsStringExt`); elsewhere there is no byte-exact
+/// `OsString`, so a lossy build is the only option (and non-unix is out of scope for this repo).
+pub(crate) fn arg_path(h: &mut dyn Host, i: usize) -> Result<std::path::PathBuf, HostError> {
+    let raw = h.arg_bytes(i)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStringExt;
+        Ok(std::path::PathBuf::from(std::ffi::OsString::from_vec(raw)))
+    }
+    #[cfg(not(unix))]
+    {
+        Ok(std::path::PathBuf::from(
+            String::from_utf8_lossy(&raw).into_owned(),
+        ))
+    }
+}
+
+/// The raw OS bytes of a path, for handing one BACK to Chezzi as `path.Path`'s `raw` field.
+/// Byte-exact on unix — this is the half W7-8 was losing.
+pub(crate) fn path_bytes(p: &Path) -> Vec<u8> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        p.as_os_str().as_bytes().to_vec()
+    }
+    #[cfg(not(unix))]
+    {
+        p.to_string_lossy().into_owned().into_bytes()
+    }
+}
+
+/// A path rendered for a HUMAN-facing error message. LOSSY on purpose — this is `Path::display()`'s
+/// model (and `path.Path.str()`'s), NOT a missed decode: the value that gets USED is always the raw
+/// bytes, and only the diagnostic text is substituted.
+fn shown(p: &Path) -> std::path::Display<'_> {
+    p.display()
+}
+
 fn list_dir(h: &mut dyn Host) -> Result<NativeRet, HostError> {
     expect_args(h, "list_dir", 1)?;
-    let path = h.arg_str(0)?;
+    let path = arg_path(h, 0)?;
     let rd = match std::fs::read_dir(&path) {
         Ok(rd) => rd,
-        Err(e) => return Ok(NativeRet::Err(format!("{path}: {e}"))),
+        Err(e) => return Ok(NativeRet::Err(format!("{}: {e}", shown(&path)))),
     };
-    let mut names: Vec<String> = Vec::new();
+    // Sorted as RAW BYTES (not decoded strings) so the order stays deterministic — required for
+    // serial==M:N parity — and is well-defined for a name that is not UTF-8 at all.
+    let mut names: Vec<Vec<u8>> = Vec::new();
     for entry in rd {
         match entry {
-            Ok(e) => names.push(e.file_name().to_string_lossy().into_owned()),
-            Err(e) => return Ok(NativeRet::Err(format!("{path}: {e}"))),
+            Ok(e) => names.push(path_bytes(Path::new(&e.file_name()))),
+            Err(e) => return Ok(NativeRet::Err(format!("{}: {e}", shown(&path)))),
         }
     }
     names.sort();
-    let items = names.into_iter().map(NativeRet::Str).collect();
+    let items = names.into_iter().map(NativeRet::Bytes).collect();
     Ok(NativeRet::Ok(Box::new(NativeRet::List(items))))
 }
 
 fn exists(h: &mut dyn Host) -> Result<NativeRet, HostError> {
     expect_args(h, "exists", 1)?;
-    let path = h.arg_str(0)?;
-    Ok(NativeRet::Bool(Path::new(&path).exists()))
+    let path = arg_path(h, 0)?;
+    Ok(NativeRet::Bool(path.exists()))
 }
 
 fn is_file(h: &mut dyn Host) -> Result<NativeRet, HostError> {
     expect_args(h, "is_file", 1)?;
-    let path = h.arg_str(0)?;
-    Ok(NativeRet::Bool(Path::new(&path).is_file()))
+    let path = arg_path(h, 0)?;
+    Ok(NativeRet::Bool(path.is_file()))
 }
 
 fn is_dir(h: &mut dyn Host) -> Result<NativeRet, HostError> {
     expect_args(h, "is_dir", 1)?;
-    let path = h.arg_str(0)?;
-    Ok(NativeRet::Bool(Path::new(&path).is_dir()))
+    let path = arg_path(h, 0)?;
+    Ok(NativeRet::Bool(path.is_dir()))
 }
 
 fn size(h: &mut dyn Host) -> Result<NativeRet, HostError> {
     expect_args(h, "size", 1)?;
-    let path = h.arg_str(0)?;
+    let path = arg_path(h, 0)?;
     match std::fs::metadata(&path) {
         Ok(m) => Ok(NativeRet::Ok(Box::new(NativeRet::Int(m.len() as i64)))),
-        Err(e) => Ok(NativeRet::Err(format!("{path}: {e}"))),
+        Err(e) => Ok(NativeRet::Err(format!("{}: {e}", shown(&path)))),
     }
 }
 
@@ -78,10 +121,10 @@ fn size(h: &mut dyn Host) -> Result<NativeRet, HostError> {
 /// `mode` is the raw unix `st_mode` (perm + type bits) on unix, `0` elsewhere.
 fn stat(h: &mut dyn Host) -> Result<NativeRet, HostError> {
     expect_args(h, "stat", 1)?;
-    let path = h.arg_str(0)?;
+    let path = arg_path(h, 0)?;
     let m = match std::fs::metadata(&path) {
         Ok(m) => m,
-        Err(e) => return Ok(NativeRet::Err(format!("{path}: {e}"))),
+        Err(e) => return Ok(NativeRet::Err(format!("{}: {e}", shown(&path)))),
     };
     let mtime = m
         .modified()
@@ -123,25 +166,25 @@ fn stat(h: &mut dyn Host) -> Result<NativeRet, HostError> {
 /// LISTED but NOT descended (cycle guard). An unreadable root (or subdir) returns a recoverable `Err`.
 fn walk(h: &mut dyn Host) -> Result<NativeRet, HostError> {
     expect_args(h, "walk", 1)?;
-    let root = h.arg_str(0)?;
-    let mut out: Vec<String> = Vec::new();
-    if let Err(e) = walk_into(Path::new(&root), &mut out) {
-        return Ok(NativeRet::Err(format!("{root}: {e}")));
+    let root = arg_path(h, 0)?;
+    let mut out: Vec<Vec<u8>> = Vec::new();
+    if let Err(e) = walk_into(&root, &mut out) {
+        return Ok(NativeRet::Err(format!("{}: {e}", shown(&root))));
     }
-    let items = out.into_iter().map(NativeRet::Str).collect();
+    let items = out.into_iter().map(NativeRet::Bytes).collect();
     Ok(NativeRet::Ok(Box::new(NativeRet::List(items))))
 }
 
 /// Recursion helper for [`walk`]: sort each directory's entries by file name, then push each entry's
 /// full path and recurse into it only if it is a real (non-symlink) directory.
-fn walk_into(dir: &Path, out: &mut Vec<String>) -> std::io::Result<()> {
+fn walk_into(dir: &Path, out: &mut Vec<Vec<u8>>) -> std::io::Result<()> {
     let mut entries: Vec<std::fs::DirEntry> =
         std::fs::read_dir(dir)?.collect::<Result<Vec<_>, _>>()?;
     entries.sort_by_key(|e| e.file_name());
     for e in entries {
         let ft = e.file_type()?; // does NOT follow symlinks — is_symlink is accurate
         let p = e.path();
-        out.push(p.to_string_lossy().into_owned());
+        out.push(path_bytes(&p));
         if ft.is_dir() && !ft.is_symlink() {
             walk_into(&p, out)?;
         }
@@ -154,12 +197,10 @@ fn walk_into(dir: &Path, out: &mut Vec<String>) -> std::io::Result<()> {
 /// REQUIRES the path to exist — a nonexistent path faults (recoverable `Result[str]` error).
 fn canonicalize(h: &mut dyn Host) -> Result<NativeRet, HostError> {
     expect_args(h, "canonicalize", 1)?;
-    let path = h.arg_str(0)?;
+    let path = arg_path(h, 0)?;
     match std::fs::canonicalize(&path) {
-        Ok(p) => Ok(NativeRet::Ok(Box::new(NativeRet::Str(
-            p.to_string_lossy().into_owned(),
-        )))),
-        Err(e) => Ok(NativeRet::Err(format!("{path}: {e}"))),
+        Ok(p) => Ok(NativeRet::Ok(Box::new(NativeRet::Bytes(path_bytes(&p))))),
+        Err(e) => Ok(NativeRet::Err(format!("{}: {e}", shown(&path)))),
     }
 }
 
@@ -168,14 +209,14 @@ fn canonicalize(h: &mut dyn Host) -> Result<NativeRet, HostError> {
 /// non-unix target this always faults with "chmod is unix-only".
 fn chmod(h: &mut dyn Host) -> Result<NativeRet, HostError> {
     expect_args(h, "chmod", 2)?;
-    let path = h.arg_str(0)?;
+    let path = arg_path(h, 0)?;
     let mode = h.arg_int(1)?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         match std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode as u32)) {
             Ok(()) => Ok(NativeRet::Ok(Box::new(NativeRet::Nil))),
-            Err(e) => Ok(NativeRet::Err(format!("{path}: {e}"))),
+            Err(e) => Ok(NativeRet::Err(format!("{}: {e}", shown(&path)))),
         }
     }
     #[cfg(not(unix))]
@@ -195,9 +236,9 @@ fn chmod(h: &mut dyn Host) -> Result<NativeRet, HostError> {
 /// otherwise the fresh umask-default temp inode would silently widen a restrictive (e.g. `0o600`) file.
 fn atomic_write(h: &mut dyn Host) -> Result<NativeRet, HostError> {
     expect_args(h, "atomic_write", 2)?;
-    let path = h.arg_str(0)?;
+    let path = arg_path(h, 0)?;
     let contents = h.arg_str(1)?;
-    let parent = Path::new(&path)
+    let parent = path
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
         .map(Path::to_path_buf)
@@ -215,42 +256,64 @@ fn atomic_write(h: &mut dyn Host) -> Result<NativeRet, HostError> {
         Ok(()) => Ok(NativeRet::Ok(Box::new(NativeRet::Nil))),
         Err(e) => {
             let _ = std::fs::remove_file(&tmp);
-            Ok(NativeRet::Err(format!("{path}: {e}")))
+            Ok(NativeRet::Err(format!("{}: {e}", shown(&path))))
         }
     }
 }
 
 fn glob(h: &mut dyn Host) -> Result<NativeRet, HostError> {
     expect_args(h, "glob", 1)?;
-    let pattern = h.arg_str(0)?;
+    // W7-8 — the PATTERN is raw bytes too, and matching runs over bytes: an ASCII pattern must be able
+    // to match a non-UTF-8 filename (`*.txt` over `A\xffB.txt`), and re-attaching the caller's
+    // directory prefix must be byte-exact or the fix would be undone one layer up.
+    let pattern = h.arg_bytes(0)?;
+    let shown_pat = String::from_utf8_lossy(&pattern).into_owned(); // human-facing text only
     // Split into the directory to scan and the wildcard for the final component.
-    let (dir, pat) = match pattern.rfind('/') {
+    let (dir, pat): (&[u8], &[u8]) = match pattern.iter().rposition(|&b| b == b'/') {
         Some(i) => (&pattern[..i], &pattern[i + 1..]),
-        None => (".", pattern.as_str()),
+        None => (b".", &pattern[..]),
     };
-    let scan = if dir.is_empty() { "/" } else { dir };
-    let rd = match std::fs::read_dir(scan) {
+    let scan: &[u8] = if dir.is_empty() { b"/" } else { dir };
+    let rd = match std::fs::read_dir(bytes_path(scan)) {
         Ok(rd) => rd,
-        Err(e) => return Ok(NativeRet::Err(format!("{pattern}: {e}"))),
+        Err(e) => return Ok(NativeRet::Err(format!("{shown_pat}: {e}"))),
     };
-    let mut hits: Vec<String> = Vec::new();
+    let has_slash = pattern.contains(&b'/');
+    let mut hits: Vec<Vec<u8>> = Vec::new();
     for entry in rd {
         let name = match entry {
-            Ok(e) => e.file_name().to_string_lossy().into_owned(),
-            Err(e) => return Ok(NativeRet::Err(format!("{pattern}: {e}"))),
+            Ok(e) => path_bytes(Path::new(&e.file_name())),
+            Err(e) => return Ok(NativeRet::Err(format!("{shown_pat}: {e}"))),
         };
         if wildcard_match(pat, &name) {
             // Re-attach the directory prefix the caller wrote, so results are usable paths.
-            if pattern.contains('/') {
-                hits.push(format!("{dir}/{name}"));
+            if has_slash {
+                let mut full = dir.to_vec();
+                full.push(b'/');
+                full.extend_from_slice(&name);
+                hits.push(full);
             } else {
                 hits.push(name);
             }
         }
     }
     hits.sort();
-    let items = hits.into_iter().map(NativeRet::Str).collect();
+    let items = hits.into_iter().map(NativeRet::Bytes).collect();
     Ok(NativeRet::Ok(Box::new(NativeRet::List(items))))
+}
+
+/// Raw OS bytes → an owned `PathBuf` (byte-exact on unix, lossy elsewhere). The `&[u8]` twin of
+/// [`arg_path`], for a path already in hand (a glob's scan dir, the VM-intercepted `io` openers).
+pub(crate) fn bytes_path(b: &[u8]) -> std::path::PathBuf {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        std::path::PathBuf::from(std::ffi::OsStr::from_bytes(b))
+    }
+    #[cfg(not(unix))]
+    {
+        std::path::PathBuf::from(String::from_utf8_lossy(b).into_owned())
+    }
 }
 
 // --- Mutations (M8+). All return `Result[nil]`, faulting (never panicking) on an I/O error,
@@ -261,48 +324,52 @@ fn glob(h: &mut dyn Host) -> Result<NativeRet, HostError> {
 /// directory is a no-op (idempotent). Faults only on a real error (e.g. a parent component is a file).
 fn mkdir(h: &mut dyn Host) -> Result<NativeRet, HostError> {
     expect_args(h, "mkdir", 1)?;
-    let path = h.arg_str(0)?;
+    let path = arg_path(h, 0)?;
     match std::fs::create_dir_all(&path) {
         Ok(()) => Ok(NativeRet::Ok(Box::new(NativeRet::Nil))),
-        Err(e) => Ok(NativeRet::Err(format!("{path}: {e}"))),
+        Err(e) => Ok(NativeRet::Err(format!("{}: {e}", shown(&path)))),
     }
 }
 
 /// Delete a single file. Faults if the path is missing or is a directory (use `remove_dir` for dirs).
 fn remove_file(h: &mut dyn Host) -> Result<NativeRet, HostError> {
     expect_args(h, "remove_file", 1)?;
-    let path = h.arg_str(0)?;
+    let path = arg_path(h, 0)?;
     match std::fs::remove_file(&path) {
         Ok(()) => Ok(NativeRet::Ok(Box::new(NativeRet::Nil))),
-        Err(e) => Ok(NativeRet::Err(format!("{path}: {e}"))),
+        Err(e) => Ok(NativeRet::Err(format!("{}: {e}", shown(&path)))),
     }
 }
 
 /// Delete an EMPTY directory (non-recursive — faults on a non-empty dir, avoiding a silent `rm -rf`).
 fn remove_dir(h: &mut dyn Host) -> Result<NativeRet, HostError> {
     expect_args(h, "remove_dir", 1)?;
-    let path = h.arg_str(0)?;
+    let path = arg_path(h, 0)?;
     match std::fs::remove_dir(&path) {
         Ok(()) => Ok(NativeRet::Ok(Box::new(NativeRet::Nil))),
-        Err(e) => Ok(NativeRet::Err(format!("{path}: {e}"))),
+        Err(e) => Ok(NativeRet::Err(format!("{}: {e}", shown(&path)))),
     }
 }
 
 /// Move/rename a path. Faults if the source is missing (or a cross-device move is unsupported).
 fn rename(h: &mut dyn Host) -> Result<NativeRet, HostError> {
     expect_args(h, "rename", 2)?;
-    let from = h.arg_str(0)?;
-    let to = h.arg_str(1)?;
+    let from = arg_path(h, 0)?;
+    let to = arg_path(h, 1)?;
     match std::fs::rename(&from, &to) {
         Ok(()) => Ok(NativeRet::Ok(Box::new(NativeRet::Nil))),
-        Err(e) => Ok(NativeRet::Err(format!("{from} -> {to}: {e}"))),
+        Err(e) => Ok(NativeRet::Err(format!(
+            "{} -> {}: {e}",
+            shown(&from),
+            shown(&to)
+        ))),
     }
 }
 
 /// Do `a` and `b` name the SAME file? Inode identity (dev+ino), not a path-string compare — a
 /// symlink or a hardlink reaches one inode under two names. A missing side is never "the same",
 /// so a copy to a new destination falls straight through.
-fn same_file(a: &str, b: &str) -> bool {
+fn same_file(a: &Path, b: &Path) -> bool {
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
@@ -329,14 +396,22 @@ fn same_file(a: &str, b: &str) -> bool {
 /// `SameFileError` and coreutils `cp a a`.
 fn copy(h: &mut dyn Host) -> Result<NativeRet, HostError> {
     expect_args(h, "copy", 2)?;
-    let from = h.arg_str(0)?;
-    let to = h.arg_str(1)?;
+    let from = arg_path(h, 0)?;
+    let to = arg_path(h, 1)?;
     if same_file(&from, &to) {
-        return Ok(NativeRet::Err(format!("{from} -> {to}: are the same file")));
+        return Ok(NativeRet::Err(format!(
+            "{} -> {}: are the same file",
+            shown(&from),
+            shown(&to)
+        )));
     }
     match std::fs::copy(&from, &to) {
         Ok(_) => Ok(NativeRet::Ok(Box::new(NativeRet::Nil))),
-        Err(e) => Ok(NativeRet::Err(format!("{from} -> {to}: {e}"))),
+        Err(e) => Ok(NativeRet::Err(format!(
+            "{} -> {}: {e}",
+            shown(&from),
+            shown(&to)
+        ))),
     }
 }
 
@@ -345,7 +420,7 @@ fn copy(h: &mut dyn Host) -> Result<NativeRet, HostError> {
 fn append(h: &mut dyn Host) -> Result<NativeRet, HostError> {
     use std::io::Write;
     expect_args(h, "append", 2)?;
-    let path = h.arg_str(0)?;
+    let path = arg_path(h, 0)?;
     let contents = h.arg_str(1)?;
     let result = std::fs::OpenOptions::new()
         .create(true)
@@ -354,24 +429,30 @@ fn append(h: &mut dyn Host) -> Result<NativeRet, HostError> {
         .and_then(|mut f| f.write_all(contents.as_bytes()));
     match result {
         Ok(()) => Ok(NativeRet::Ok(Box::new(NativeRet::Nil))),
-        Err(e) => Ok(NativeRet::Err(format!("{path}: {e}"))),
+        Err(e) => Ok(NativeRet::Err(format!("{}: {e}", shown(&path)))),
     }
 }
 
 /// Match a single path component against a `*`/`?` wildcard. `*` matches any run (including empty),
-/// `?` matches exactly one character; every other character is literal. Uses the classic greedy
-/// two-pointer algorithm with a single backtrack mark — linear-ish, no exponential blowup on
-/// adversarial patterns like `*a*a*a…b`.
-fn wildcard_match(pat: &str, name: &str) -> bool {
-    let p: Vec<char> = pat.chars().collect();
-    let n: Vec<char> = name.chars().collect();
+/// `?` matches exactly one BYTE; every other byte is literal. Uses the classic greedy two-pointer
+/// algorithm with a single backtrack mark — linear-ish, no exponential blowup on adversarial patterns
+/// like `*a*a*a…b`.
+///
+/// W7-8 — matching is over BYTES, not chars: a filename need not be valid UTF-8 at all, and decoding
+/// it first is exactly the bug this closes. The visible consequence is that `?` counts one byte rather
+/// than one Unicode scalar (Go's `filepath.Match` counts runes, Python's `fnmatch` counts chars); for
+/// the ASCII patterns this matcher targets the two agree, and a byte-oriented `?` is the only rule
+/// that is defined at all for a non-UTF-8 name.
+fn wildcard_match(pat: &[u8], name: &[u8]) -> bool {
+    let p = pat;
+    let n = name;
     let (mut pi, mut ni) = (0, 0);
     let (mut star, mut mark) = (None, 0);
     while ni < n.len() {
-        if pi < p.len() && (p[pi] == '?' || p[pi] == n[ni]) {
+        if pi < p.len() && (p[pi] == b'?' || p[pi] == n[ni]) {
             pi += 1;
             ni += 1;
-        } else if pi < p.len() && p[pi] == '*' {
+        } else if pi < p.len() && p[pi] == b'*' {
             star = Some(pi);
             mark = ni;
             pi += 1;
@@ -384,31 +465,36 @@ fn wildcard_match(pat: &str, name: &str) -> bool {
             return false;
         }
     }
-    while pi < p.len() && p[pi] == '*' {
+    while pi < p.len() && p[pi] == b'*' {
         pi += 1;
     }
     pi == p.len()
 }
 
 /// Callable members. `(name, fn)`.
+///
+/// W7-8 — every path-taking member is `_`-prefixed and takes RAW `bytes`. It is the INTERNAL byte
+/// seam: the PUBLIC name (`fs.exists`) is a bodied pure-Chezzi wrapper in `std/fs.chz` that takes a
+/// `PathLike`, calls `p.as_path()`, and re-wraps a returned path into `path.Path`. The `_` is
+/// convention only (there is no privacy mechanism) — documented once in docs/stdlib.md, not per name.
 pub const MEMBERS: &[(&str, NativeFn)] = &[
-    ("list_dir", list_dir),
-    ("exists", exists),
-    ("is_file", is_file),
-    ("is_dir", is_dir),
-    ("size", size),
-    ("stat", stat),
-    ("walk", walk),
-    ("canonicalize", canonicalize),
-    ("glob", glob),
-    ("chmod", chmod),
-    ("atomic_write", atomic_write),
-    ("mkdir", mkdir),
-    ("remove_file", remove_file),
-    ("remove_dir", remove_dir),
-    ("rename", rename),
-    ("copy", copy),
-    ("append", append),
+    ("_list_dir", list_dir),
+    ("_exists", exists),
+    ("_is_file", is_file),
+    ("_is_dir", is_dir),
+    ("_size", size),
+    ("_stat", stat),
+    ("_walk", walk),
+    ("_canonicalize", canonicalize),
+    ("_glob", glob),
+    ("_chmod", chmod),
+    ("_atomic_write", atomic_write),
+    ("_mkdir", mkdir),
+    ("_remove_file", remove_file),
+    ("_remove_dir", remove_dir),
+    ("_rename", rename),
+    ("_copy", copy),
+    ("_append", append),
 ];
 
 #[cfg(test)]
@@ -447,6 +533,16 @@ mod tests {
                 message: "missing arg".into(),
             })
         }
+        // W7-8 — the path-taking natives read their path through `arg_bytes` now. This unit host still
+        // stores paths as `String` (every fixture it builds is UTF-8), so serve their UTF-8 bytes.
+        fn arg_bytes(&mut self, i: usize) -> Result<Vec<u8>, HostError> {
+            self.strs
+                .get(i)
+                .map(|s| s.as_bytes().to_vec())
+                .ok_or(HostError {
+                    message: "missing arg".into(),
+                })
+        }
         fn arg_str_map(&mut self, _i: usize) -> Result<Vec<(String, String)>, HostError> {
             Err(HostError {
                 message: "no map args".into(),
@@ -463,8 +559,8 @@ mod tests {
         fn os_env(&self, _key: &str) -> Option<String> {
             None
         }
-        fn os_getcwd(&self) -> Result<String, HostError> {
-            Ok("/".into())
+        fn os_getcwd(&self) -> Result<Vec<u8>, HostError> {
+            Ok(b"/".to_vec())
         }
     }
 
@@ -573,36 +669,46 @@ mod tests {
 
     #[test]
     fn wildcard_star_and_question() {
-        assert!(wildcard_match("*.txt", "a.txt"));
-        assert!(wildcard_match("*.txt", ".txt"));
-        assert!(!wildcard_match("*.txt", "a.md"));
-        assert!(wildcard_match("a?c", "abc"));
-        assert!(!wildcard_match("a?c", "ac"));
-        assert!(wildcard_match("*", "anything"));
-        assert!(wildcard_match("foo*bar", "fooXYZbar"));
-        assert!(!wildcard_match("foo*bar", "fooXYZbaz"));
-        assert!(wildcard_match("exact", "exact"));
-        assert!(!wildcard_match("exact", "exacted"));
+        assert!(wildcard_match(b"*.txt", b"a.txt"));
+        assert!(wildcard_match(b"*.txt", b".txt"));
+        assert!(!wildcard_match(b"*.txt", b"a.md"));
+        assert!(wildcard_match(b"a?c", b"abc"));
+        assert!(!wildcard_match(b"a?c", b"ac"));
+        assert!(wildcard_match(b"*", b"anything"));
+        assert!(wildcard_match(b"foo*bar", b"fooXYZbar"));
+        assert!(!wildcard_match(b"foo*bar", b"fooXYZbaz"));
+        assert!(wildcard_match(b"exact", b"exact"));
+        assert!(!wildcard_match(b"exact", b"exacted"));
+    }
+
+    /// W7-8 — the matcher runs over BYTES, so an ASCII pattern still matches a filename that is not
+    /// valid UTF-8 at all (the whole point: decoding it first is the bug being closed).
+    #[test]
+    fn wildcard_matches_a_non_utf8_name() {
+        assert!(wildcard_match(b"*.txt", b"A\xffB.txt"));
+        assert!(wildcard_match(b"A?B.txt", b"A\xffB.txt"));
+        assert!(!wildcard_match(b"*.md", b"A\xffB.txt"));
     }
 
     /// Regression (review): a multi-star pattern against a long non-matching name must not blow up
     /// exponentially. The greedy two-pointer matcher returns near-instantly.
     #[test]
     fn wildcard_no_catastrophic_backtracking() {
-        let pat = "*a*a*a*a*a*a*a*a*a*a*b";
-        let name = "a".repeat(64); // no 'b' → never matches
+        let pat = b"*a*a*a*a*a*a*a*a*a*a*b";
+        let name = vec![b'a'; 64]; // no 'b' → never matches
         assert!(!wildcard_match(pat, &name));
-        assert!(wildcard_match("*a*a*b", "aaaaaaab"));
+        assert!(wildcard_match(b"*a*a*b", b"aaaaaaab"));
     }
 
-    /// Unwrap an `Ok(Str)` NativeRet's payload, else panic.
+    /// Unwrap an `Ok(Bytes)` NativeRet's path payload into a `String` (W7-8 — the path-returning
+    /// natives hand back RAW bytes now; every fixture here is UTF-8, so the decode is exact).
     fn ok_str(r: NativeRet) -> String {
         match r {
             NativeRet::Ok(inner) => match *inner {
-                NativeRet::Str(s) => s,
-                other => panic!("expected Ok(Str), got Ok({other:?})"),
+                NativeRet::Bytes(b) => String::from_utf8(b).expect("utf-8 fixture path"),
+                other => panic!("expected Ok(Bytes), got Ok({other:?})"),
             },
-            other => panic!("expected Ok(Str), got {other:?}"),
+            other => panic!("expected Ok(Bytes), got {other:?}"),
         }
     }
 
@@ -732,15 +838,15 @@ mod tests {
         assert_eq!(fields[5].1, NativeRet::Bool(true)); // is_symlink
     }
 
-    /// Unwrap `Ok(List(Str…))` into the path strings, else panic.
+    /// Unwrap `Ok(List(Bytes…))` into the path strings, else panic (W7-8 — raw bytes now).
     fn ok_str_list(r: NativeRet) -> Vec<String> {
         match r {
             NativeRet::Ok(inner) => match *inner {
                 NativeRet::List(items) => items
                     .into_iter()
                     .map(|it| match it {
-                        NativeRet::Str(s) => s,
-                        other => panic!("expected Str item, got {other:?}"),
+                        NativeRet::Bytes(b) => String::from_utf8(b).expect("utf-8 fixture path"),
+                        other => panic!("expected Bytes item, got {other:?}"),
                     })
                     .collect(),
                 other => panic!("expected Ok(List), got Ok({other:?})"),

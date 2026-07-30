@@ -5,11 +5,14 @@
 # real file (keeping the `native` marker); the checker harvests the `native fn` decls below as the
 # module's SIGNATURE source — retiring the hand-built `native_module_sig` fs arm.
 #
-# Every declaration is BODY-LESS: the implementations stay native (name-keyed in `src/native/fs.rs`,
-# dispatched via `native_members("std.fs")`). The backends compile NOTHING for a `native fn`.
+# HYBRID module: the `_`-prefixed decls are BODY-LESS natives (name-keyed in `src/native/fs.rs`,
+# dispatched via `native_members("std.fs")`); the public functions are BODIED pure-Chezzi wrappers over
+# them. The backends compile NOTHING for a `native fn`.
 #
 # Mutations are all `Result[nil]`. `mkdir` is recursive (mkdir -p); `remove_dir` is non-recursive
 # (faults on a non-empty dir); `append` creates-if-absent + never truncates.
+
+import std.path
 
 # FileInfo — filesystem metadata read by `stat`. FIELD ORDER IS LOAD-BEARING: it is positional across
 # the hand-built runtime layout copies (compiler `Compiler::new`, checker `seed_stdlib_structs`,
@@ -23,29 +26,105 @@ native struct FileInfo:
     is_file: bool
     is_symlink: bool
 
-native fn list_dir(path: str) -> Result[List[str]]
-native fn exists(path: str) -> bool
-native fn is_file(path: str) -> bool
-native fn is_dir(path: str) -> bool
-native fn size(path: str) -> Result[int]
+# --- the INTERNAL byte seam (W7-8) ---
+#
+# Every `_`-prefixed decl below takes/returns RAW OS `bytes`; the PUBLIC function under the same name
+# without the underscore is a bodied pure-Chezzi wrapper that takes a `PathLike` (so a bare `str`
+# literal, a `bytes`, a `bytearray` or a `path.Path` all work with no annotation) and re-wraps a
+# returned path into `path.Path`. Going through bytes is what makes a non-UTF-8 filename survive: it
+# used to be decoded lossily and come back U+FFFD-substituted, naming nothing (W7-8).
+# The `_` is CONVENTION ONLY — there is no privacy mechanism, so `from std.fs import _exists` works.
+native fn _list_dir(path: bytes) -> Result[List[bytes]]
+native fn _exists(path: bytes) -> bool
+native fn _is_file(path: bytes) -> bool
+native fn _is_dir(path: bytes) -> bool
+native fn _size(path: bytes) -> Result[int]
+native fn _stat(path: bytes) -> Result[FileInfo]
+native fn _walk(path: bytes) -> Result[List[bytes]]
+native fn _glob(pattern: bytes) -> Result[List[bytes]]
+native fn _canonicalize(path: bytes) -> Result[bytes]
+native fn _mkdir(path: bytes) -> Result[nil]
+native fn _remove_file(path: bytes) -> Result[nil]
+native fn _remove_dir(path: bytes) -> Result[nil]
+native fn _rename(src: bytes, dst: bytes) -> Result[nil]
+native fn _copy(src: bytes, dst: bytes) -> Result[nil]
+native fn _append(path: bytes, text: str) -> Result[nil]
+native fn _chmod(path: bytes, mode: int) -> Result[nil]
+native fn _atomic_write(path: bytes, contents: str) -> Result[nil]
+
+# --- the PUBLIC surface: `PathLike` in, `path.Path` out ---
+
+# list_dir returns entry NAMES (not full paths), sorted by raw bytes for determinism.
+fn list_dir(p: PathLike) -> Result[List[path.Path]]:
+    return _wrap_many(_list_dir(p.as_path()))
+
+fn exists(p: PathLike) -> bool:
+    return _exists(p.as_path())
+
+fn is_file(p: PathLike) -> bool:
+    return _is_file(p.as_path())
+
+fn is_dir(p: PathLike) -> bool:
+    return _is_dir(p.as_path())
+
+fn size(p: PathLike) -> Result[int]:
+    return _size(p.as_path())
+
 # stat reads filesystem metadata into a FileInfo (FOLLOWS symlinks like `stat`/os.stat; is_symlink is
 # reported separately). Errs (recoverable) on a missing/unreadable path.
-native fn stat(path: str) -> Result[FileInfo]
-# walk recursively lists every entry (files + dirs) under `path` as full path strings, in a
-# deterministic per-directory-sorted, dir-before-children order. Does NOT follow symlinked dirs.
-native fn walk(path: str) -> Result[List[str]]
-native fn glob(pattern: str) -> Result[List[str]]
+fn stat(p: PathLike) -> Result[FileInfo]:
+    return _stat(p.as_path())
+
+# walk recursively lists every entry (files + dirs) under `path` as full paths, in a deterministic
+# per-directory-sorted, dir-before-children order. Does NOT follow symlinked dirs.
+fn walk(p: PathLike) -> Result[List[path.Path]]:
+    return _wrap_many(_walk(p.as_path()))
+
+# glob matches `*`/`?` in the FINAL component only. The pattern is matched over raw BYTES, so an ASCII
+# pattern still matches a non-UTF-8 filename (and `?` counts one byte, not one Unicode scalar).
+fn glob(pattern: PathLike) -> Result[List[path.Path]]:
+    return _wrap_many(_glob(pattern.as_path()))
+
 # canonicalize resolves symlinks + `.`/`..` against the REAL filesystem (unlike the purely lexical
 # path.normalize) → an absolute real path; the path must EXIST (errs otherwise).
-native fn canonicalize(path: str) -> Result[str]
-native fn mkdir(path: str) -> Result[nil]
-native fn remove_file(path: str) -> Result[nil]
-native fn remove_dir(path: str) -> Result[nil]
-native fn rename(src: str, dst: str) -> Result[nil]
-native fn copy(src: str, dst: str) -> Result[nil]
-native fn append(path: str, text: str) -> Result[nil]
+fn canonicalize(p: PathLike) -> Result[path.Path]:
+    match _canonicalize(p.as_path()):
+        Ok(b): return Ok(path.Path(b))
+        Err(e): return Err(e)
+
+fn mkdir(p: PathLike) -> Result[nil]:
+    return _mkdir(p.as_path())
+
+fn remove_file(p: PathLike) -> Result[nil]:
+    return _remove_file(p.as_path())
+
+fn remove_dir(p: PathLike) -> Result[nil]:
+    return _remove_dir(p.as_path())
+
+fn rename(src: PathLike, dst: PathLike) -> Result[nil]:
+    return _rename(src.as_path(), dst.as_path())
+
+fn copy(src: PathLike, dst: PathLike) -> Result[nil]:
+    return _copy(src.as_path(), dst.as_path())
+
+fn append(p: PathLike, text: str) -> Result[nil]:
+    return _append(p.as_path(), text)
+
 # chmod sets unix permission bits (e.g. 0o755); unix-only (errs "chmod is unix-only" elsewhere).
-native fn chmod(path: str, mode: int) -> Result[nil]
+fn chmod(p: PathLike, mode: int) -> Result[nil]:
+    return _chmod(p.as_path(), mode)
+
 # atomic_write = write a same-dir temp then rename over `path` (a concurrent reader sees old-or-new,
 # never a half-written file; preserves the target's mode). Not fsync'd — no crash-durability guarantee.
-native fn atomic_write(path: str, contents: str) -> Result[nil]
+fn atomic_write(p: PathLike, contents: str) -> Result[nil]:
+    return _atomic_write(p.as_path(), contents)
+
+# Shared tail of the three list-returning wrappers: re-wrap each raw byte path into a `path.Path`.
+fn _wrap_many(r: Result[List[bytes]]) -> Result[List[path.Path]]:
+    match r:
+        Ok(raws):
+            out: List[path.Path] = []
+            for b in raws:
+                out.push(path.Path(b))
+            return Ok(out)
+        Err(e): return Err(e)

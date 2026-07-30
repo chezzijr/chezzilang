@@ -463,8 +463,10 @@ pub trait Host {
     fn os_args(&self) -> Vec<String>;
     /// An environment variable from the injected environment.
     fn os_env(&self, key: &str) -> Option<String>;
-    /// The current working directory.
-    fn os_getcwd(&self) -> Result<String, HostError>;
+    /// The current working directory, as RAW OS bytes (W7-8). NOT a `String`: the cwd can be any byte
+    /// sequence the OS allows, and decoding it here (`display().to_string()`, lossy) was the last
+    /// member of the W7-8 lossy-path family — `os.getcwd()` handed back a `str` naming nothing.
+    fn os_getcwd(&self) -> Result<Vec<u8>, HostError>;
     /// ALL environment variables (from the same injected env `os_env` reads), sorted by key so the
     /// map is deterministic on both engines (the backing store is a `HashMap` with per-instance
     /// random iteration order). DEFAULTED to empty so only the real `VmHost` overrides — test/off-heap
@@ -516,6 +518,11 @@ impl HostError {
 /// (primitive `str` args, primitive `Struct`/`Ok`/`Err` returns, no heap/stdio touch during the call),
 /// so they offload like the rest instead of pinning a core worker on network / subprocess I/O.
 pub fn is_blocking(name: &str) -> bool {
+    // W7-8 — the path-taking natives were renamed to a `_`-prefixed INTERNAL byte seam (the public
+    // `PathLike` name is a bodied Chezzi wrapper). Strip the prefix so the classification travels with
+    // the rename: without this every `std.fs` syscall would silently stop offloading and pin a core
+    // M:N worker (the D5 starvation this set exists to prevent). No non-seam native starts with `_`.
+    let name = name.strip_prefix('_').unwrap_or(name);
     matches!(
         name,
         // std.io (file I/O only — print/eprint/read_line touch host stdio, run inline; even under the
@@ -734,8 +741,8 @@ mod tests {
         fn os_env(&self, _key: &str) -> Option<String> {
             None
         }
-        fn os_getcwd(&self) -> Result<String, HostError> {
-            Ok("/".into())
+        fn os_getcwd(&self) -> Result<Vec<u8>, HostError> {
+            Ok(b"/".to_vec())
         }
     }
 
@@ -1051,10 +1058,12 @@ mod tests {
                 // so they never reach `is_blocking` — the bare-name soundness this guard protects is
                 // unaffected. `append` in particular collides with `fs.append` on purpose (the func-ptr
                 // intercept distinguishes them); exempt the five here so the collision isn't a false fail.
+                // (W7-8 renamed the path-taking openers to the `_`-prefixed byte seam; `_append` still
+                // collides with `fs._append` for exactly the same, still-benign reason.)
                 if module == "std.io"
                     && matches!(
                         *name,
-                        "create" | "append" | "stdout" | "stderr" | "buffered" | "open"
+                        "_create" | "_append" | "stdout" | "stderr" | "buffered" | "_open"
                     )
                 {
                     continue;

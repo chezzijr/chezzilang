@@ -25,10 +25,14 @@ fn env(h: &mut dyn Host) -> Result<NativeRet, HostError> {
     }
 }
 
+/// `getcwd()` — the real working directory as RAW OS bytes (W7-8). `std/os.chz`'s bodied wrapper
+/// re-wraps them into a `path.Path`, so the public signature is `Result[path.Path]` — a concrete
+/// return type with NO type argument and no turbofish (a type-arg-dependent return is unimplementable
+/// here: type args are erased before `Vm::call_native`).
 fn getcwd(h: &mut dyn Host) -> Result<NativeRet, HostError> {
     expect_args(h, "getcwd", 0)?;
     match h.os_getcwd() {
-        Ok(p) => Ok(NativeRet::Ok(Box::new(NativeRet::Str(p)))),
+        Ok(p) => Ok(NativeRet::Ok(Box::new(NativeRet::Bytes(p)))),
         Err(e) => Ok(NativeRet::Err(e.message)),
     }
 }
@@ -115,7 +119,7 @@ fn setenv(h: &mut dyn Host) -> Result<NativeRet, HostError> {
 /// layer, not worth it.
 fn chdir(h: &mut dyn Host) -> Result<NativeRet, HostError> {
     expect_args(h, "chdir", 1)?;
-    let p = h.arg_str(0)?;
+    let p = super::fs::arg_path(h, 0)?;
     match std::env::set_current_dir(&p) {
         Ok(()) => Ok(NativeRet::Ok(Box::new(NativeRet::Nil))),
         Err(e) => Ok(NativeRet::Err(e.to_string())),
@@ -138,7 +142,9 @@ fn exit(h: &mut dyn Host) -> Result<NativeRet, HostError> {
 pub const MEMBERS: &[(&str, NativeFn)] = &[
     ("args", args),
     ("env", env),
-    ("getcwd", getcwd),
+    // W7-8 — `_`-prefixed = the INTERNAL byte seam (raw `bytes` in/out); the public `getcwd`/`chdir`
+    // are bodied `PathLike`/`path.Path` wrappers in `std/os.chz`.
+    ("_getcwd", getcwd),
     ("exit", exit),
     ("getpid", getpid),
     ("platform", platform),
@@ -147,5 +153,5 @@ pub const MEMBERS: &[(&str, NativeFn)] = &[
     ("temp_dir", temp_dir),
     ("environ", environ),
     ("setenv", setenv),
-    ("chdir", chdir),
+    ("_chdir", chdir),
 ];
