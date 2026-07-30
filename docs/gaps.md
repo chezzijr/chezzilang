@@ -4103,6 +4103,17 @@ Design doc: `~/.claude/plans/2026-07-31-path-pathlike-design.md`.
   then ran off the end of the proto. It now takes the synchronous `invoke_value` path when
   `ic == NO_IC`, exactly like the struct/enum arms.
 
+**Two findings from the manual adversarial panel, fixed in the same commit:**
+* `os.temp_dir()` was still lossily decoded (`src/native/os.rs`, `.display().to_string()`) — a
+  path-RETURNING API the original W7-8 report never named, through which a `U+FFFD` path stayed
+  constructible. Now `-> path.Path` over raw bytes, so the "no unswept member" claim above is true.
+  (`os.home_dir()` deliberately stays `Option[str]`: it reads the HostConfig env map, which is the
+  documented, separately-scoped lossy argv/env surface.)
+* porting `glob`'s matcher to bytes had silently made `?` count one BYTE rather than one Unicode
+  scalar, so `glob("a?c")` would have stopped matching `aéc` — a drift from Python `fnmatch` / Go
+  `filepath.Match`. `?` now consumes one full UTF-8 scalar wherever the name is valid UTF-8, falling
+  back to one byte only where no valid sequence starts (the only rule defined there at all).
+
 **Verified by hand on the release binary, BOTH engines, byte-identical** (`b"A\xffB.txt"` fixture):
 `list_dir`/`walk`/`glob`/`canonicalize` all return the exact bytes and `fs.exists` on the recovered
 name is **true** (it was **false** on the pre-fix binary, which returned `b'A\xef\xbf\xbdB.txt'`).

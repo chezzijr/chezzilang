@@ -438,18 +438,40 @@ fn append(h: &mut dyn Host) -> Result<NativeRet, HostError> {
 /// algorithm with a single backtrack mark — linear-ish, no exponential blowup on adversarial patterns
 /// like `*a*a*a…b`.
 ///
-/// W7-8 — matching is over BYTES, not chars: a filename need not be valid UTF-8 at all, and decoding
-/// it first is exactly the bug this closes. The visible consequence is that `?` counts one byte rather
-/// than one Unicode scalar (Go's `filepath.Match` counts runes, Python's `fnmatch` counts chars); for
-/// the ASCII patterns this matcher targets the two agree, and a byte-oriented `?` is the only rule
-/// that is defined at all for a non-UTF-8 name.
+/// Length in bytes of the UTF-8 scalar starting at `n[i]`, or `1` when `i` begins no valid sequence.
+/// This is what keeps `glob`'s `?` counting CHARACTERS (Python `fnmatch` / Go `filepath.Match`) on a
+/// normal filename while staying defined on a non-UTF-8 one — where "one character" has no meaning and
+/// one byte is the only honest answer.
+fn utf8_len_at(n: &[u8], i: usize) -> usize {
+    let want = match n[i] {
+        b if b < 0x80 => 1,
+        b if b >> 5 == 0b110 => 2,
+        b if b >> 4 == 0b1110 => 3,
+        b if b >> 3 == 0b11110 => 4,
+        _ => return 1, // a continuation byte or an invalid lead: not a sequence start
+    };
+    if i + want <= n.len() && std::str::from_utf8(&n[i..i + want]).is_ok() {
+        want
+    } else {
+        1 // truncated or over-long: consume one byte so the walk always advances
+    }
+}
+
+/// W7-8 — matching is over BYTES, not a decoded string: a filename need not be valid UTF-8 at all, and
+/// decoding it first is exactly the bug this closes. `?` still consumes one **Unicode scalar** wherever
+/// the name actually is valid UTF-8 (Go's `filepath.Match` and Python's `fnmatch` both count
+/// characters, and drifting from them would be its own bug — see [`utf8_len_at`]); it falls back to one
+/// byte only for a byte that begins no valid sequence, which is the only rule defined there at all.
 fn wildcard_match(pat: &[u8], name: &[u8]) -> bool {
     let p = pat;
     let n = name;
     let (mut pi, mut ni) = (0, 0);
     let (mut star, mut mark) = (None, 0);
     while ni < n.len() {
-        if pi < p.len() && (p[pi] == b'?' || p[pi] == n[ni]) {
+        if pi < p.len() && p[pi] == b'?' {
+            pi += 1;
+            ni += utf8_len_at(n, ni); // one CHARACTER, like Python/Go
+        } else if pi < p.len() && p[pi] == n[ni] {
             pi += 1;
             ni += 1;
         } else if pi < p.len() && p[pi] == b'*' {
@@ -688,6 +710,20 @@ mod tests {
         assert!(wildcard_match(b"*.txt", b"A\xffB.txt"));
         assert!(wildcard_match(b"A?B.txt", b"A\xffB.txt"));
         assert!(!wildcard_match(b"*.md", b"A\xffB.txt"));
+    }
+
+    /// W7-8 (review) — `?` must still count one **Unicode scalar**, not one byte, on a name that IS
+    /// valid UTF-8: Python `fnmatch` and Go `filepath.Match` both count characters, and a byte-counting
+    /// `?` would silently stop matching every non-ASCII filename.
+    #[test]
+    fn wildcard_question_counts_one_character_not_one_byte() {
+        assert!(wildcard_match("a?c".as_bytes(), "aéc".as_bytes())); // é is 2 bytes
+        assert!(wildcard_match("?".as_bytes(), "😀".as_bytes())); // 4 bytes, one scalar
+        assert!(wildcard_match("a??".as_bytes(), "aéf".as_bytes()));
+        assert!(!wildcard_match("a?".as_bytes(), "aéf".as_bytes())); // one scalar left over
+        // ...and it degrades to ONE byte only where no valid sequence starts.
+        assert!(wildcard_match(b"a?c", b"a\xffc"));
+        assert!(!wildcard_match(b"a?c", b"a\xff\xfec"));
     }
 
     /// Regression (review): a multi-star pattern against a long non-matching name must not blow up

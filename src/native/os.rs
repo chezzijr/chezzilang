@@ -82,9 +82,16 @@ fn home_dir(h: &mut dyn Host) -> Result<NativeRet, HostError> {
 }
 
 /// `temp_dir()` — the system temp directory (`std::env::temp_dir()`). Engine-agnostic.
+///
+/// W7-8 (review) — RAW OS bytes, like `getcwd`. `std::env::temp_dir()` reads `$TMPDIR` through
+/// `var_os`, so it is byte-exact at the source; the old `.display().to_string()` threw that away and
+/// left a path-RETURNING API through which a `U+FFFD` path was still constructible — the same defect
+/// class W7-8 closes, in a site its original report did not name.
 fn temp_dir(h: &mut dyn Host) -> Result<NativeRet, HostError> {
     expect_args(h, "temp_dir", 0)?;
-    Ok(NativeRet::Str(std::env::temp_dir().display().to_string()))
+    Ok(NativeRet::Bytes(super::fs::path_bytes(
+        &std::env::temp_dir(),
+    )))
 }
 
 /// `environ()` — ALL environment variables from the SAME HostConfig env map `env` reads (shared by
@@ -150,7 +157,7 @@ pub const MEMBERS: &[(&str, NativeFn)] = &[
     ("platform", platform),
     ("hostname", hostname),
     ("home_dir", home_dir),
-    ("temp_dir", temp_dir),
+    ("_temp_dir", temp_dir),
     ("environ", environ),
     ("setenv", setenv),
     ("_chdir", chdir),

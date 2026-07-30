@@ -35,7 +35,15 @@ native fn getpid() -> int
 native fn platform() -> str
 native fn hostname() -> str
 native fn home_dir() -> Option[str]
-native fn temp_dir() -> str
+# `temp_dir()` hands back a `path.Path` for the same reason `getcwd()` does (W7-8): `$TMPDIR` is raw
+# OS bytes, so decoding it would leave a path-returning API through which a U+FFFD path — one that
+# names nothing — is still constructible. `.str()` for display, `.decode()` for an exact `str`.
+# (`home_dir()` stays `Option[str]`: it reads the HostConfig env map, which is a DELIBERATELY lossy
+# surface — see the argv/env decoding rule in docs/stdlib.md.)
+native fn _temp_dir() -> bytes
+
+fn temp_dir() -> path.Path:
+    return path.Path(_temp_dir())
 # `environ()` (sorted by key) reads the SAME HostConfig env map `env` reads, and `setenv` WRITES it —
 # so a `setenv` is observed by both `env` and `environ` (no third disagreeing source). The map is
 # shared across M:N workers, so a `setenv` from inside a task is visible to the parent + siblings

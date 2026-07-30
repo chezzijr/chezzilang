@@ -538,8 +538,8 @@ the whole remainder (so a later read in any task sees EOF), `read_char` consumes
 | `getpid` | `() -> int` | Current process id. |
 | `platform` | `() -> str` | OS name: `"linux"` / `"macos"` / `"windows"` / … (`std::env::consts::OS`). |
 | `hostname` | `() -> str` | System hostname (`""` on the rare failure). |
-| `home_dir` | `() -> Option[str]` | User home (`$HOME`; `None` if unset). Unix-focused. |
-| `temp_dir` | `() -> str` | System temp directory. |
+| `home_dir` | `() -> Option[str]` | User home (`$HOME`; `None` if unset). Unix-focused. **Stays `str`** — unlike `getcwd`/`temp_dir` it reads the HostConfig env map, which is a deliberately lossy surface (see the argv/env rule above). |
+| `temp_dir` | `() -> path.Path` | System temp directory, as **raw OS bytes** wrapped in a [`path.Path`](#pathpath) (W7-8) — same reason as `getcwd`: `$TMPDIR` need not be valid UTF-8, and decoding it would leave a path-returning API that can hand back a name that names nothing. |
 | `getcwd` | `() -> Result[path.Path]` | Current working directory (real process cwd), as **raw OS bytes** wrapped in a [`path.Path`](#pathpath) (W7-8) — a non-UTF-8 cwd used to come back `U+FFFD`-substituted, naming nothing. No type argument, no turbofish. `import std.path` to name the type. |
 | `chdir` | `(p: PathLike) -> Result[nil]` | Change the **real process cwd** (`Err` on failure). **Process-global** — shared by all M:N workers, so a task's `chdir` shifts sibling tasks' relative paths (Python/Go have the same ceiling). |
 | `exit` | `(code: int) -> never` | Hard, uncatchable halt, unwinding past any `recover:`. **Does NOT run `defer`s.** The process status is the **low 8 bits** of `code` (`code & 0xff`), exactly like POSIX `exit(3)` / bash / Python / Go: `os.exit(-1)` → **255**, `os.exit(300)` → **44**, `os.exit(0)` → `0`. (It is a *mask*, not a clamp — a negative code must never report SUCCESS.) |

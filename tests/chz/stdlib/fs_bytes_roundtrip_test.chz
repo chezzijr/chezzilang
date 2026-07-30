@@ -44,7 +44,7 @@ fn ok_nil(r: Result[nil], what: str):
 
 # Make a per-test scratch dir holding exactly one file named BAD; hand back the dir path (raw bytes).
 fn fixture(name: str) -> bytes:
-    d := os.temp_dir() + "/chz_w7_8_" + name + "_" + str(os.getpid())
+    d := os.temp_dir().str() + "/chz_w7_8_" + name + "_" + str(os.getpid())
     ok_nil(fs.mkdir(d), "mkdir")
     ok_nil(io.write_bytes(cat(cat(d.encode(), b"/"), BAD), b"hi"), "write_bytes")
     return d.encode()

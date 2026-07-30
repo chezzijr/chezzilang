@@ -25,7 +25,7 @@ fn write_then_read(p: str, cap: int, text: str, use_close: bool) -> Result[str]:
 
 # A per-process scratch path: two concurrent suite runs must not truncate/delete each other's file.
 fn scratch(name: str) -> str:
-    return os.temp_dir() + "/chz_w6_1_" + name + "_" + str(os.getpid()) + ".txt"
+    return os.temp_dir().str() + "/chz_w6_1_" + name + "_" + str(os.getpid()) + ".txt"
 
 fn check(name: str, cap: int, text: str, use_close: bool):
     p := scratch(name)

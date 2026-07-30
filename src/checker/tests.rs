@@ -6883,7 +6883,12 @@ fn math_io_os_rand_fs_representative_sigs_exact() {
         os.functions.get("home_dir").unwrap().ret,
         Ty::option(Ty::Str)
     );
-    assert_eq!(os.functions.get("temp_dir").unwrap().ret, Ty::Str);
+    // W7-8 (review) — `temp_dir` hands back a `path.Path` too: `$TMPDIR` is raw OS bytes, and
+    // decoding it left a path-RETURNING API through which a U+FFFD path was still constructible.
+    assert_eq!(
+        os.functions.get("temp_dir").unwrap().ret,
+        Ty::Struct("Path".into(), vec![])
+    );
     assert_eq!(
         os.functions.get("environ").unwrap().ret,
         Ty::map(Ty::Str, Ty::Str)
@@ -6892,8 +6897,8 @@ fn math_io_os_rand_fs_representative_sigs_exact() {
     assert_eq!(setenv.params, vec![Ty::Str, Ty::Str]);
     assert_eq!(setenv.ret, Ty::Nil);
     assert_eq!(os.functions.get("chdir").unwrap().ret, Ty::result(Ty::Nil));
-    // 12 public fns + the 2 `_`-prefixed internal byte-seam natives (W7-8).
-    assert_eq!(os.functions.len(), 14);
+    // 12 public fns + the 3 `_`-prefixed internal byte-seam natives (W7-8).
+    assert_eq!(os.functions.len(), 15);
 
     let rand = native_module_sig_via_graph("rand");
     let ri = rand.functions.get("int").expect("rand.int");

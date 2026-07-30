@@ -48,6 +48,14 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > - **Container invariance is UNCHANGED** and fenced: `List[int]→List[Any]`, `List[Sq]→List[Shape]`,
 >   `Map[str,int]→Map[str,Any]`, `List[int]→Iterable[Any]` all still reject (the grant is a VALUE-level
 >   early-out keyed on `Ty::Str|Bytes|ByteArray`, unreachable from any container element comparison).
+> - **Two findings from the manual adversarial panel, both fixed in the same commit:** (a)
+>   `os.temp_dir()` was STILL a lossily-decoded path (`$TMPDIR` is raw OS bytes, and
+>   `.display().to_string()` threw them away) — a site W7-8's own report never named, through which a
+>   `U+FFFD` path stayed constructible; it is `-> path.Path` now, so the "no unswept member" claim is
+>   actually true. (b) porting `glob`'s matcher to bytes had silently made `?` count one BYTE instead of
+>   one Unicode scalar, so `glob("a?c")` would have stopped matching `aéc` — a drift from Python
+>   `fnmatch` / Go `filepath.Match`; `?` now consumes one full UTF-8 scalar wherever the name is valid
+>   UTF-8 and degrades to one byte only where no valid sequence starts.
 > - Tests: `tests/chz/stdlib/fs_bytes_roundtrip_test.chz` (the repro of record — 6 `test fn`s incl. the
 >   spawn-airlock crossing), `tests/chz/stdlib/path_type_test.chz`, `tests/chz/spec/pathlike_test.chz`,
 >   the migrated `tests/chz/suites/path_test.chz` (+ `t_byte_exact` / `t_pathlike_inputs_and_chaining`),
