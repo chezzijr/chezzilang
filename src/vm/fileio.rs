@@ -283,10 +283,20 @@ impl Vm {
     ///   at EOF. Matches the existing module-level `io.read_line()` shape (anti-drift). An IO error or a
     ///   non-UTF-8 file is a clean runtime FAULT pointing at `read_bytes` (Option can't carry an Err —
     ///   mirrors `read_file`'s non-UTF-8 fault); a read on a CLOSED reader is likewise a clean fault.
+    ///   W7-9: the non-UTF-8 fault is NON-DESTRUCTIVE — the refused line's raw bytes stay in
+    ///   [`ReaderCore::carry`], so it is STICKY (a re-read re-faults, never skips) until `read_bytes`
+    ///   drains it or `close` discards it.
     /// * `read_bytes(n) -> Result[bytes]` — at-most-`n` bytes (exactly-`n` until a short final chunk);
     ///   empty bytes = EOF; `Err` on closed/IO. `n <= 0` clamps to `Ok(b"")`. The binary + error-
-    ///   distinguishing escape hatch.
-    /// * `close() -> Result[nil]` — idempotent: take + drop the `BufReader` (the fd closes on drop).
+    ///   distinguishing escape hatch — and the carry drain: a pending carry is served first, without
+    ///   touching the fd (a carry-only short read, the `socket_read_bytes` shape).
+    /// * `close() -> Result[nil]` — idempotent: take + drop the `BufReader` (the fd closes on drop),
+    ///   and discard any carry. Every read arm checks `inner.is_none()` BEFORE serving the carry, so
+    ///   a carry can neither leak past `close` nor resurrect after EOF.
+    ///
+    /// These three are the WHOLE Reader dispatch surface (`call.rs` routes every `Reader` method
+    /// here; an unknown one faults below). The fourth read path, `lines()`, is a BODIED pure-Chezzi
+    /// generator over `read_line` (`std/io.chz`) — it inherits the carry and the stickiness for free.
     ///
     /// No netpoller park — file reads block synchronously (regular files are always epoll-ready).
     ///
@@ -306,23 +316,45 @@ impl Vm {
                 let core = self.reader_core(h);
                 let outcome = {
                     use std::io::BufRead;
+                    // LOCK ORDER: `carry` OUTER, `inner` INNER (see `ReaderCore::carry`).
+                    let mut carry = core.carry.lock().unwrap_or_else(|e| e.into_inner());
                     let mut guard = core.inner.lock().unwrap_or_else(|e| e.into_inner());
                     match guard.as_mut() {
-                        None => Err(None), // closed
+                        None => Err(None), // closed (checked BEFORE the carry is served)
                         Some(br) => {
-                            let mut line = String::new();
-                            match br.read_line(&mut line) {
+                            // W7-9: read RAW. `BufRead::read_line(&mut String)` consumes the line off
+                            // the reader and then errs with the bytes already dropped — the decode has
+                            // to happen where the bytes can still be retained. A pending carry is
+                            // re-decoded first (sticky), so a refused line is never skipped.
+                            let mut buf = std::mem::take(&mut *carry);
+                            let taken = if buf.is_empty() {
+                                br.read_until(b'\n', &mut buf)
+                            } else {
+                                Ok(buf.len())
+                            };
+                            match taken {
                                 Ok(0) => Ok(None), // EOF
-                                Ok(_) => {
-                                    // Strip the line terminator the same way the module-level
-                                    // io.read_line does (native/mod.rs): trailing '\n' then '\r'
-                                    // UNCONDITIONALLY — a bare/classic-Mac '\r' must not survive,
-                                    // or Reader.read_line drifts from its owning ancestor.
-                                    let end =
-                                        line.trim_end_matches('\n').trim_end_matches('\r').len();
-                                    line.truncate(end);
-                                    Ok(Some(line))
-                                }
+                                Ok(_) => match String::from_utf8(buf) {
+                                    Ok(mut line) => {
+                                        // Strip the line terminator the same way the module-level
+                                        // io.read_line does (native/mod.rs): trailing '\n' then '\r'
+                                        // UNCONDITIONALLY — a bare/classic-Mac '\r' must not survive,
+                                        // or Reader.read_line drifts from its owning ancestor.
+                                        let end = line
+                                            .trim_end_matches('\n')
+                                            .trim_end_matches('\r')
+                                            .len();
+                                        line.truncate(end);
+                                        Ok(Some(line))
+                                    }
+                                    Err(e) => {
+                                        // Retain the raw line, terminator included: `read_bytes`
+                                        // hands it back byte-exactly.
+                                        *carry = e.into_bytes();
+                                        Err(Some("stream did not contain valid UTF-8".to_string()))
+                                    }
+                                },
+                                // A genuine IO error carries nothing — nothing was received.
                                 Err(e) => Err(Some(e.to_string())),
                             }
                         }
@@ -350,9 +382,19 @@ impl Vm {
                 let core = self.reader_core(h);
                 let outcome = {
                     use std::io::Read;
+                    // LOCK ORDER: `carry` OUTER, `inner` INNER (see `ReaderCore::carry`).
+                    let mut carry = core.carry.lock().unwrap_or_else(|e| e.into_inner());
                     let mut guard = core.inner.lock().unwrap_or_else(|e| e.into_inner());
                     match guard.as_mut() {
-                        None => Err(None), // closed
+                        None => Err(None), // closed (checked BEFORE the carry is served)
+                        // W7-9: a pending carry is drained FIRST and the fd is not touched — a
+                        // carry-only SHORT read ("at most n" licenses it), byte-identical to
+                        // `socket_read_bytes`. Empty-means-EOF survives: we never return empty
+                        // while the carry is non-empty.
+                        Some(_) if !carry.is_empty() => {
+                            let take = (n as usize).min(carry.len());
+                            Ok(carry.drain(..take).collect::<Vec<u8>>())
+                        }
                         Some(br) => {
                             let mut buf = Vec::new();
                             match br.take(n).read_to_end(&mut buf) {
@@ -375,7 +417,13 @@ impl Vm {
                 self.arity_err("close", args, 0, span)?;
                 let core = self.reader_core(h);
                 // Take + drop the reader (closing the fd). Idempotent: an already-closed reader is Ok.
+                // LOCK ORDER: `carry` OUTER, `inner` INNER — the one ordering `ReaderCore::carry`
+                // forbids is inner-then-carry, so close takes the carry first. Closed is closed: the
+                // carry is discarded with the fd (W7-9).
+                let mut carry = core.carry.lock().unwrap_or_else(|e| e.into_inner());
                 *core.inner.lock().unwrap_or_else(|e| e.into_inner()) = None;
+                carry.clear();
+                drop(carry);
                 Ok(self.sock_ok(Value::nil()))
             }
             _ => Err(self.err(format!("type Reader has no method '{method}'"), span)),
@@ -412,6 +460,7 @@ impl Vm {
                 let core = Arc::new(ReaderCore {
                     inner: Mutex::new(Some(std::io::BufReader::new(f))),
                     key: core::next_poll_key(),
+                    carry: Mutex::new(Vec::new()),
                 });
                 let v = Value::obj(self.heap.alloc(Obj::Reader(core)));
                 Ok(self.sock_ok(v))
