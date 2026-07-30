@@ -326,7 +326,7 @@ impl Vm {
                             // the reader and then errs with the bytes already dropped — the decode has
                             // to happen where the bytes can still be retained. A pending carry is
                             // re-decoded first (sticky), so a refused line is never skipped.
-                            let mut buf = std::mem::take(&mut *carry);
+                            let mut buf: Vec<u8> = std::mem::take(&mut *carry).into();
                             let taken = if buf.is_empty() {
                                 br.read_until(b'\n', &mut buf)
                             } else {
@@ -350,12 +350,20 @@ impl Vm {
                                     Err(e) => {
                                         // Retain the raw line, terminator included: `read_bytes`
                                         // hands it back byte-exactly.
-                                        *carry = e.into_bytes();
+                                        *carry = e.into_bytes().into();
                                         Err(Some("stream did not contain valid UTF-8".to_string()))
                                     }
                                 },
-                                // A genuine IO error carries nothing — nothing was received.
-                                Err(e) => Err(Some(e.to_string())),
+                                Err(e) => {
+                                    // An IO error mid-line is NOT empty-handed: `read_until`
+                                    // documents that everything it read before the error is left in
+                                    // `buf`, and those bytes are already off the `BufReader`.
+                                    // Dropping them is the same silent loss W7-9 exists to kill, so
+                                    // they go in the carry too. (A later read serves them: it is a
+                                    // partial line, but the fd errored — there is no more of it.)
+                                    *carry = buf.into();
+                                    Err(Some(e.to_string()))
+                                }
                             }
                         }
                     }
@@ -460,7 +468,7 @@ impl Vm {
                 let core = Arc::new(ReaderCore {
                     inner: Mutex::new(Some(std::io::BufReader::new(f))),
                     key: core::next_poll_key(),
-                    carry: Mutex::new(Vec::new()),
+                    carry: Mutex::new(std::collections::VecDeque::new()),
                 });
                 let v = Value::obj(self.heap.alloc(Obj::Reader(core)));
                 Ok(self.sock_ok(v))

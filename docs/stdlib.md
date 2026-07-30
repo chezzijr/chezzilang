@@ -462,6 +462,8 @@ opened by `open(path)`): stream a large file line- or chunk-by-chunk instead of 
     if that remainder decodes, the next `read_line` returns it as the line.
   - `close()` discards the carry (closed is closed), and a carry is never served after `close` or
     resurrected after EOF.
+  - A **mid-line I/O error** carries too: whatever the read delivered before the error is retained the
+    same way, so `read_bytes` gets it back instead of it vanishing with the fault.
 
   ```chezzi
   # /tmp/bin.dat == b"line1\nA\xffB\nline3\n"
