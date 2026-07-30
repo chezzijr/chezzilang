@@ -431,3 +431,128 @@ test fn iterator_bound_is_cursors_iterable_bound_is_collections():
     for x in [1, 2, 3]:
         s = s + x
     assert s == 6
+
+# ---- `Iterable[T]` in TYPE position (an annotated param), not only as a bound ----
+#
+# The narrower `Iterator[T]` already worked as a value type (it is what a generator returns); the
+# broader `Iterable[T]` did not — the checker accepted the annotation AND the `List[int]` argument,
+# then refused the one operation the protocol promises (`cannot iterate over Iterable[int]`).
+# Reject side (bare `Iterable`, `for i, v in`, `.next()`, the invariance fences) is in
+# `checker::tests::iterable_type_position_*`; what is asserted here is that every accepted shape
+# really iterates, on both engines.
+
+struct Wrap:
+    xs: List[int]
+    fn iter(self) -> Iterator[int]:
+        return self.xs.iter()
+
+fn sum_it(xs: Iterable[int]) -> int:
+    n := 0
+    for v in xs:
+        n = n + v
+    return n
+
+fn count_it(xs: Iterable[str]) -> int:
+    n := 0
+    for v in xs:
+        n = n + 1
+    return n
+
+fn doubled(xs: Iterable[int]) -> List[int]:
+    return [v * 2 for v in xs]
+
+fn copied(xs: Iterable[int]) -> List[int]:
+    return List(xs)
+
+fn to_cursor(xs: Iterable[int]) -> Iterator[int]:
+    return xs.iter()
+
+test fn iterable_in_type_position_iterates_every_shape():
+    assert sum_it([1, 2, 3]) == 6, "List"
+    assert sum_it({1, 2, 3}) == 6, "Set"
+    assert sum_it([1, 2].iter()) == 3, "a cursor"
+    assert sum_it(ones()) == 2, "a generator"
+    assert sum_it(Down(3)) == 3, "a struct with next (2 + 1 + 0)"
+    assert sum_it(Wrap([4, 5])) == 9, "a struct with only iter"
+    assert count_it({"a": 1, "b": 2}) == 2, "a Map iterates its keys"
+    assert count_it("abc") == 3, "a str"
+    # the same value type drives a comprehension and a `List()` ctor, not just `for`
+    assert doubled([1, 2]) == [2, 4]
+    assert copied([7]) == [7]
+
+test fn iterable_typed_cursor_is_stateful_once():
+    # a cursor behind an `Iterable[T]` annotation is still ONE position: iterating it drains it.
+    c := [1, 2, 3].iter()
+    assert sum_it(c) == 6
+    assert sum_it(c) == 0, "the cursor is drained; a second pass yields nothing"
+    # a raw collection, by contrast, is re-iterable
+    xs := [1, 2, 3]
+    assert sum_it(xs) == 6
+    assert sum_it(xs) == 6
+
+test fn iterable_typed_value_still_mints_a_cursor():
+    # the pre-fix workaround (`.iter()` first) keeps working and still yields a real cursor
+    c := to_cursor([8, 9])
+    assert c.next() == Some(8)
+    assert c.next() == Some(9)
+    assert c.next() == None
+
+# ---- the CROSS PRODUCT: every `Iterable`-consuming ctor x the `iter`-only-struct witness ----
+#
+# `iter_elem` gates `for` AND `List()`/`Set()`/`Map()`/`.iter()`, but only the `for` lowering emits
+# `Op::IterableToCursor`. So the ctors type-checked an `Iterable[T]`-annotated value and then faulted
+# ("cannot iterate over struct (no `next` method)") whenever the runtime witness was a struct with
+# `iter` and no `next` — check-OK-then-broken on BOTH engines. `drain_iterable` now does the same
+# one-time conversion, so checker-accepts stays a subset of runtime-can-lower.
+
+struct Pairs:
+    xs: List[(str, int)]
+    fn iter(self) -> Iterator[(str, int)]:
+        return self.xs.iter()
+
+fn as_set(xs: Iterable[int]) -> Set[int]:
+    return Set(xs)
+
+fn as_map(xs: Iterable[(str, int)]) -> Map[str, int]:
+    return Map(xs)
+
+fn cursor_of(xs: Iterable[int]) -> Iterator[int]:
+    return xs.iter()
+
+test fn iterable_typed_iter_only_struct_feeds_every_consumer():
+    assert copied(Wrap([1, 2])) == [1, 2], "List() over an iter-only struct"
+    assert as_set(Wrap([3, 3, 4])) == {3, 4}, "Set() over an iter-only struct"
+    assert as_map(Pairs([("a", 1), ("b", 2)])) == {"a": 1, "b": 2}, "Map() over an iter-only struct"
+    assert doubled(Wrap([5])) == [10], "a comprehension over an iter-only struct"
+    c := cursor_of(Wrap([6, 7]))
+    assert c.next() == Some(6), ".iter() over an iter-only struct"
+    assert c.next() == Some(7)
+    assert c.next() == None
+    # the ctors are unchanged for every other witness
+    assert as_set([1, 1, 2]) == {1, 2}
+    assert as_map([("k", 9)]) == {"k": 9}
+
+# ---- checker↔runtime PROTOCOL SELECTION agrees on a struct with BOTH `next` and `iter` ----
+#
+# The runtime picks by NAME PRESENCE (`next` present ⇒ drive `next`, never convert via `iter`); the
+# checker's `iterable_elem` puts `struct_iter_elem` (`next`) first for the same reason. `Both`'s two
+# methods deliberately yield DIFFERENT elements, so every consumer of one `Iterable[int]` value must
+# agree on `next`'s 2,1,0 — never `iter`'s [9]. (A struct whose `next` is MALFORMED is rejected at
+# check time now; that fence is `checker::tests::struct_with_nonconforming_next_is_not_iterable`.)
+
+struct Both:
+    n: int
+    ys: List[int]
+    fn next(self) -> Option[int]:
+        if self.n <= 0:
+            return None
+        self.n = self.n - 1
+        return Some(self.n)
+    fn iter(self) -> Iterator[int]:
+        return self.ys.iter()
+
+test fn next_wins_over_iter_for_every_iterable_consumer():
+    assert sum_it(Both(3, [9])) == 3, "for: 2 + 1 + 0, not 9"
+    assert copied(Both(3, [9])) == [2, 1, 0], "List()"
+    assert as_set(Both(3, [9])) == {0, 1, 2}, "Set()"
+    assert doubled(Both(2, [9])) == [2, 0], "a comprehension"

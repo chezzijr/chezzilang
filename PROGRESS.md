@@ -530,6 +530,54 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > `docs/stdlib.md` (incl. the honest note that `std.cmp`'s `min`/`max`/`clamp` are written with `<`, so
 > they follow the operator rule, not the total order).
 
+> **✅ FIX (2026-07-30, gaps.md W6-3e) — `Iterable[T]` works in TYPE position, not only as a bound.**
+> `fn f(xs: Iterable[int])` type-checked, and `f([1, 2, 3])` conformed at the call site, but the body's
+> `for v in xs` was rejected with `cannot iterate over Iterable[int]` — check-OK-then-broken, and
+> backwards: the NARROWER `Iterator[T]` worked as a value type while the broader one did not. Root cause
+> is a **representation asymmetry**, not a missing string: `resolve_type` intercepts the reserved name
+> `Iterator[T]` into `Ty::Struct("Iterator", [T])`, while every other protocol name (`Iterable[T]`
+> included) becomes `Ty::Protocol`; both iteration unions matched only the `Ty::Struct` spelling. Fix is
+> **checker + one VM arm** (the compiler is untouched — the `for` lowering is type-erased and branches at
+> RUNTIME on the heap `Obj` via `Op::IterableToCursor`). One
+> `Ty::Protocol(n, args) if (n == "Iterable" || n == "Iterator") && args.len() == 1`
+> arm in `iter_elem` (the arity guard keeps a BARE `Iterable` non-iterable), plus the two duplicated
+> trailing `for`-binding arms collapsed into one that consults `iterable_elem` — so the iteration union is
+> ONE predicate, closing the wave-6 "a fix applied to SOME arms of an N-way set" meta-finding rather than
+> re-committing it. Every other consulter (the three comprehension arms, the `.iter()` fast path,
+> `List()`/`Set()`/`Map()`, `satisfies(Iterable)`, `recover_iter_elems`) routes through those two helpers
+> and inherited it, so an `Iterable[int]`-annotated param also forwards into `[S: Iterable[T], T]`.
+> **The VM half — the same N-way set one rung down:** only the `for` lowering emits
+> `Op::IterableToCursor`, so `List()`/`Set()`/`Map()`/`.iter()` inherited the static acceptance without
+> the runtime conversion and faulted (`cannot iterate over struct (no `next` method)`) when the witness
+> behind the annotation was an `iter`-only struct. That conversion is now the shared
+> `Vm::iterable_to_cursor` (`src/vm/stmt.rs`), called by BOTH `Op::IterableToCursor` and
+> `drain_iterable` — `iter_elem`'s declared runtime peer — so checker-accepts is a subset of
+> runtime-can-lower again.
+> `satisfies_args` grew ONE guard: a `Ty::Protocol` subject skips the intrinsic `Iterable` arm and is
+> decided by the protocol-existential arm below it, exactly as `Ty::Param` already was — that arm is where
+> the strict arg invariance lives. **Nothing widened**: `List[int]` → `Iterable[Any]`, `Iterable[int]` →
+> `Iterable[Any]`, `List[int]` → `List[Any]`, `List[Sq]` → `List[Shape]`, `Map[str, int]` →
+> `Map[str, Any]` all stay rejected (read-only covariance is deliberately out of the model), and
+> `Iterable[T]` still cannot call `.next()` (W6-3b intact). Edge decided + fenced both ways: an
+> `iter`-only struct passed to a param ANNOTATED `Iterable[int]` now WORKS (the annotation IS the element
+> type), while the documented non-recovery under an `[S: Iterable[T], T]` BOUND is unchanged. 9 new
+> checker tests (incl. 4 invariance fences that were verified GREEN pre-fix, so they pin behavior the fix
+> must not move) + 5 `tests/chz/spec` `test fn`s covering list/set/map/str/cursor/generator/`next`-struct/
+> `iter`-only-struct, a comprehension, the stateful-cursor drain, and the full cross product of
+> `List()`/`Set()`/`Map()`/`.iter()` × the `iter`-only witness. serial==M:N, verified on
+> the release binary both engines. Docs: `docs/syntax.md`, `docs/spec.md`, `docs/gaps.md` (W6-3e FIXED,
+> the "Known limits" line scoped to BOUND position, plus a filed cosmetic diagnostic-wording drift).
+> **Round 2** closed the protocol-SELECTION half of the same N-way set: the checker admitted a struct as
+> `Iterable` by WELL-FORMEDNESS while the runtime picks by NAME PRESENCE, so a struct with a MALFORMED
+> `next` plus a conforming `iter` was admitted via `iter` and then driven through the bad `next` —
+> silently wrong elements (`[1, 2, 3]` instead of `[9, 9]`), or a nil bound into a declared-`int` param,
+> identical on BOTH engines (parity-blind). `struct_iterable_elem` now refuses any struct that declares a
+> `next` at all — `next` wins by NAME, exactly as `Vm::iterable_to_cursor` decides — so such a struct is
+> non-iterable at CHECK time instead of check-OK-then-wrong. The collapsed `for`-binding arm's diagnostic
+> was widened along with it too: a two-name `for k, v` over an `Iterable[E]` annotation (or an
+> `[S: Iterable[T]]` bound) claimed "a struct iterator" with no struct in the program — it now names the
+> type (`` `for k, v` requires a map, found Iterable[str] ``); a real struct keeps the struct wording.
+
 > **✅ FIX (2026-07-26, gaps.md W6-3b) — `Iterator` now means CURSOR; a raw collection satisfies only
 > `Iterable`.** `fn f[T: Iterator[int]](c: T)` accepted `f([1, 2, 3])` and then faulted at runtime with
 > `type list has no method 'next'` — the checker keyed `Iterator` conformance on `iter_elem` ("can be

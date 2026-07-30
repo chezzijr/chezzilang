@@ -13279,6 +13279,228 @@ fn iterator_bound_forwards_into_iterable_bound() {
     );
 }
 
+/// `Iterable[T]` in TYPE position (an annotated param/local) is for-iterable — the operation the
+/// protocol exists to promise. It resolves to `Ty::Protocol("Iterable", [T])` (only the reserved
+/// `Iterator[T]` is intercepted into a `Ty::Struct`), so the iteration union needs a `Ty::Protocol`
+/// arm; without it the checker accepted the annotation AND the `List[int]` -> `Iterable[int]` call
+/// site, then refused the `for`.
+#[test]
+fn iterable_in_type_position_is_for_iterable() {
+    // List
+    ok(
+        "fn f(xs: Iterable[int]) -> int:\n    n := 0\n    for v in xs:\n        n += v\n    return n\nfn main():\n    print(str(f([1, 2, 3])))\nmain()\n",
+    );
+    // Set
+    ok(
+        "fn f(xs: Iterable[int]) -> int:\n    n := 0\n    for v in xs:\n        n += v\n    return n\nfn main():\n    print(str(f({1, 2, 3})))\nmain()\n",
+    );
+    // Map iterates its KEYS (single-variable `for`), so a Map[str,int] is an Iterable[str].
+    ok(
+        "fn f(xs: Iterable[str]) -> int:\n    n := 0\n    for v in xs:\n        n += v.len()\n    return n\nfn main():\n    print(str(f({\"a\": 1})))\nmain()\n",
+    );
+    // str iterates to str
+    ok(
+        "fn f(xs: Iterable[str]) -> int:\n    n := 0\n    for v in xs:\n        n += v.len()\n    return n\nfn main():\n    print(str(f(\"abc\")))\nmain()\n",
+    );
+    // a cursor
+    ok(
+        "fn f(xs: Iterable[int]) -> int:\n    n := 0\n    for v in xs:\n        n += v\n    return n\nfn main():\n    print(str(f([1, 2].iter())))\nmain()\n",
+    );
+    // a generator result
+    ok(
+        "fn gen() -> Iterator[int]:\n    yield 1\n    yield 2\nfn f(xs: Iterable[int]) -> int:\n    n := 0\n    for v in xs:\n        n += v\n    return n\nfn main():\n    print(str(f(gen())))\nmain()\n",
+    );
+    // a comprehension over an `Iterable[T]` param, and `List(xs)` — the other `iter_elem` consumers.
+    ok(
+        "fn f(xs: Iterable[int]) -> int:\n    ys := [v * 2 for v in xs]\n    return ys[0]\nfn main():\n    print(str(f([1, 2])))\nmain()\n",
+    );
+    ok(
+        "fn f(xs: Iterable[int]) -> int:\n    return List(xs)[0]\nfn main():\n    print(str(f([1, 2])))\nmain()\n",
+    );
+    // The pre-fix workaround (`xs.iter()` first) must keep working identically — it now takes the
+    // `iter_elem` fast path instead of the Protocol method arm; both yield `Iterator[int]`.
+    ok(
+        "fn f(xs: Iterable[int]) -> Option[int]:\n    return xs.iter().next()\nfn main():\n    print(f([1, 2]))\nmain()\n",
+    );
+}
+
+/// The shapes that must STAY rejected around the new arm.
+#[test]
+fn iterable_type_position_rejects_bad_shapes() {
+    // (a) a BARE `Iterable` is an existential with unbound params — not iterable (the arity guard).
+    rejects(
+        "fn f(xs: Iterable) -> int:\n    n := 0\n    for v in xs:\n        n += 1\n    return n\nfn main():\n    print(str(f([1, 2])))\nmain()\n",
+        "cannot iterate over Iterable",
+    );
+    // (b) the two-variable `for i, v in` form: an existential carries no key/index. (The message names
+    // the annotated type — see `two_var_for_over_iterable_annotation_names_the_type`.)
+    rejects(
+        "fn f(xs: Iterable[int]) -> int:\n    n := 0\n    for i, v in xs:\n        n += v\n    return n\nfn main():\n    print(str(f([1, 2])))\nmain()\n",
+        "`for k, v` requires a map, found Iterable[int]",
+    );
+    // (c) W6-3b: `Iterable` is NOT `Iterator` — an `Iterable[T]` value still cannot call `.next()`.
+    rejects(
+        "fn f(xs: Iterable[int]) -> Option[int]:\n    return xs.next()\nfn main():\n    print(f([1, 2]))\nmain()\n",
+        "next",
+    );
+    // (d) and it still cannot satisfy an `[S: Iterator[T]]` bound.
+    rejects(
+        "fn g[S: Iterator[int]](xs: S) -> Option[int]:\n    return xs.next()\nfn f(xs: Iterable[int]) -> Option[int]:\n    return g(xs)\nfn main():\n    print(f([1, 2]))\nmain()\n",
+        "Iterator",
+    );
+}
+
+/// CONTAINER INVARIANCE MUST NOT WIDEN. Read-only covariance is deliberately NOT part of making
+/// `Iterable[T]` iterable — `List[int]` -> `Iterable[Any]` stays rejected. (The `List[Any]` /
+/// `Map[str, Any]` / `Box[Speaker]` fences live in the mutable-container invariance block below.)
+#[test]
+fn container_invariance_stays_rejected_for_iterable() {
+    // List[int] -> Iterable[Any]
+    entry_rejects(
+        "fn f(xs: Iterable[Any]) -> int:\n    return 0\nfn main():\n    ys: List[int] = [1, 2]\n    print(f(ys))\nmain()\n",
+        "expected Iterable[Any], found List[int]",
+    );
+    // List[Sq] -> List[Shape] (a struct that DOES satisfy the protocol)
+    entry_rejects(
+        "protocol Shape:\n    fn area(self) -> int\nstruct Sq:\n    s: int\n    fn area(self) -> int:\n        return self.s * self.s\nfn f(xs: List[Shape]) -> int:\n    return 0\nfn main():\n    ys: List[Sq] = [Sq(2)]\n    print(f(ys))\nmain()\n",
+        "expected List[Shape], found List[Sq]",
+    );
+    // Iterable[int] -> Iterable[Any] (the NEW neighbour: protocol args stay invariant)
+    entry_rejects(
+        "fn wide(xs: Iterable[Any]) -> int:\n    return 0\nfn f(xs: Iterable[int]) -> int:\n    return wide(xs)\nfn main():\n    print(f([1, 2]))\nmain()\n",
+        "expected Iterable[Any], found Iterable[int]",
+    );
+    // Iterable[int] -> Iterable[str] (plain mismatch)
+    entry_rejects(
+        "fn other(xs: Iterable[str]) -> int:\n    return 0\nfn f(xs: Iterable[int]) -> int:\n    return other(xs)\nfn main():\n    print(f([1, 2]))\nmain()\n",
+        "expected Iterable[str], found Iterable[int]",
+    );
+}
+
+/// VALUE-LEVEL widening still works: struct -> protocol, and protocol -> wider protocol.
+#[test]
+fn value_level_widening_still_ok() {
+    entry_ok(
+        "protocol Shape:\n    fn area(self) -> int\nstruct Sq:\n    s: int\n    fn area(self) -> int:\n        return self.s * self.s\nfn f(x: Shape) -> int:\n    return x.area()\nfn main():\n    print(f(Sq(3)))\nmain()\n",
+    );
+    entry_ok(
+        "protocol Shape:\n    fn area(self) -> int\nstruct Sq:\n    s: int\n    fn area(self) -> int:\n        return self.s * self.s\nfn wide(x: Any) -> int:\n    return 0\nfn f(x: Shape) -> int:\n    return wide(x)\nfn main():\n    print(f(Sq(3)))\nmain()\n",
+    );
+}
+
+/// An `Iterable[T]`-ANNOTATED param forwards into an `[S: Iterable[T], T]` bound, and the bound
+/// recovers `T` from it (`satisfies_args`/`recover_iter_elems` both route through `iter_elem`).
+#[test]
+fn iterable_annotated_param_forwards_into_iterable_bound() {
+    ok(
+        "fn g[S: Iterable[T], T](xs: S) -> int:\n    n := 0\n    for v in xs:\n        n += 1\n    return n\nfn f(xs: Iterable[int]) -> int:\n    return g(xs)\nfn main():\n    print(str(f([1, 2, 3])))\nmain()\n",
+    );
+    // the recovered `T` is usable as `int`…
+    ok(
+        "fn g[S: Iterable[T], T](xs: S, d: T) -> int:\n    return 1\nfn f(xs: Iterable[int]) -> int:\n    return g(xs, 1)\nfn main():\n    print(str(f([1, 2, 3])))\nmain()\n",
+    );
+    // …and a wrong-element neighbour still rejects.
+    rejects(
+        "fn g[S: Iterable[T], T](xs: S, d: T) -> int:\n    return 1\nfn f(xs: Iterable[int]) -> int:\n    return g(xs, \"a\")\nfn main():\n    print(str(f([1, 2, 3])))\nmain()\n",
+        "does not match the declared element type",
+    );
+}
+
+/// The DOCUMENTED bound forms (syntax.md:894, spec.md:205) are unchanged.
+#[test]
+fn documented_iterable_bound_forms_unchanged() {
+    ok(
+        "fn first_or[S: Iterable[T], T](xs: S, default: T) -> T:\n    for v in xs:\n        return v\n    return default\nfn main():\n    print(str(first_or([1, 2], 0)))\nmain()\n",
+    );
+    ok(
+        "fn f[C: Iterable[int]](xs: C) -> int:\n    n := 0\n    for v in xs:\n        n += v\n    return n\nfn main():\n    print(str(f([1, 2])))\nmain()\n",
+    );
+}
+
+/// THE EDGE, fenced in both directions. A struct with ONLY `iter` (no `next`):
+/// - under an `[S: Iterable[T], T]` BOUND, `T` is still not recovered (the documented known limit —
+///   `iter_elem` is None for it and only `struct_iterable_elem` sees it; unchanged by this fix);
+/// - passed to a param ANNOTATED `Iterable[int]` it now WORKS, because the annotation is the source
+///   of truth for `T` and the runtime drives it through the same `IterableToCursor` conversion.
+#[test]
+fn iter_only_struct_bound_recovery_still_not_total() {
+    // BOUND position: element type not recovered -> still rejects (the documented shape).
+    rejects(
+        "struct Wrap:\n    xs: List[int]\n    fn iter(self) -> Iterator[int]:\n        return self.xs.iter()\nfn to_list[S: Iterable[T], T](xs: S) -> List[T]:\n    out := []\n    for x in xs:\n        out.push(x)\n    return out\nfn main():\n    print(to_list(Wrap([1, 2])))\nmain()\n",
+        "type Wrap does not satisfy Iterable",
+    );
+    // …and the concrete-arg workaround the docs prescribe still works.
+    ok(
+        "struct Wrap:\n    xs: List[int]\n    fn iter(self) -> Iterator[int]:\n        return self.xs.iter()\nfn count[S: Iterable[int]](xs: S) -> int:\n    n := 0\n    for x in xs:\n        n += x\n    return n\nfn main():\n    print(str(count(Wrap([1, 2]))))\nmain()\n",
+    );
+    // ANNOTATION position: works (the edge decision).
+    ok(
+        "struct Wrap:\n    xs: List[int]\n    fn iter(self) -> Iterator[int]:\n        return self.xs.iter()\nfn f(xs: Iterable[int]) -> int:\n    n := 0\n    for v in xs:\n        n += v\n    return n\nfn main():\n    print(str(f(Wrap([1, 2]))))\nmain()\n",
+    );
+}
+
+/// CHECKER↔RUNTIME PROTOCOL-SELECTION PARITY. The runtime picks a struct's iteration protocol by NAME
+/// PRESENCE (`iterable_to_cursor`: has `next` ⇒ drive `next`, else convert via `iter`), so the checker
+/// must admit a struct as `Iterable` on the SAME rule. `struct_iterable_elem` therefore refuses any
+/// struct that declares a `next` at all: a NON-conforming `next` (wrong arity, or a non-`Option`
+/// return) plus a conforming `iter` used to be admitted via `iter` and then driven through the
+/// malformed `next` — silently yielding different elements than the contract the checker signed off on.
+#[test]
+fn struct_with_nonconforming_next_is_not_iterable() {
+    // (a) extra param on `next` + a conforming `iter`: rejected everywhere, not admitted via `iter`.
+    let odd = "struct Odd:\n    xs: List[int]\n    n: int\n    fn next(self, k: int) -> Option[int]:\n        self.n += 1\n        if self.n > 3:\n            return None\n        return Some(self.n)\n    fn iter(self) -> Iterator[int]:\n        return self.xs.iter()\n";
+    rejects(
+        &format!(
+            "{odd}fn viaList(xs: Iterable[int]) -> List[int]:\n    return List(xs)\nfn main():\n    print(str(viaList(Odd([9, 9], 0))))\nmain()\n"
+        ),
+        "expected Iterable[int], found Odd",
+    );
+    rejects(
+        &format!("{odd}fn main():\n    for v in Odd([9, 9], 0):\n        print(str(v))\nmain()\n"),
+        "cannot iterate over Odd",
+    );
+    rejects(
+        &format!(
+            "{odd}fn count[S: Iterable[int]](xs: S) -> int:\n    return 0\nfn main():\n    print(str(count(Odd([9, 9], 0))))\nmain()\n"
+        ),
+        "does not satisfy Iterable",
+    );
+    // (b) a non-`Option` return on `next` is the same class.
+    rejects(
+        "struct Bad:\n    xs: List[int]\n    fn next(self) -> int:\n        return 1\n    fn iter(self) -> Iterator[int]:\n        return self.xs.iter()\nfn f(xs: Iterable[int]) -> List[int]:\n    return List(xs)\nfn main():\n    print(str(f(Bad([1, 2]))))\nmain()\n",
+        "expected Iterable[int], found Bad",
+    );
+    // (c) a CONFORMING `next` alongside `iter` still works — and `next` wins, matching the runtime.
+    ok(
+        "struct Both:\n    n: int\n    xs: List[int]\n    fn next(self) -> Option[int]:\n        if self.n <= 0:\n            return None\n        self.n -= 1\n        return Some(self.n)\n    fn iter(self) -> Iterator[int]:\n        return self.xs.iter()\nfn f(xs: Iterable[int]) -> int:\n    n := 0\n    for v in xs:\n        n += v\n    return n\nfn main():\n    print(str(f(Both(3, [9]))))\nmain()\n",
+    );
+}
+
+/// A two-name `for` over a non-struct iterand must not be told it has a struct. The trailing
+/// `iterable_elem` arm is reached by protocol existentials too, so the legacy struct wording is kept
+/// only for actual structs.
+#[test]
+fn two_var_for_over_iterable_annotation_names_the_type() {
+    rejects(
+        "fn pairs(xs: Iterable[(str, int)]) -> int:\n    n := 0\n    for k, v in xs:\n        n += v\n    return n\nfn main():\n    print(str(pairs([(\"a\", 1)])))\nmain()\n",
+        "`for k, v` requires a map, found Iterable[(str, int)]",
+    );
+    rejects(
+        "fn kv(xs: Iterable[str]) -> int:\n    n := 0\n    for i, v in xs:\n        n += 1\n    return n\nfn main():\n    print(str(kv([\"a\"])))\nmain()\n",
+        "`for k, v` requires a map, found Iterable[str]",
+    );
+    // the same for an `[S: Iterable[T]]` BOUND — the other spelling of the same existential.
+    rejects(
+        "fn g[S: Iterable[int]](xs: S) -> int:\n    for i, v in xs:\n        return v\n    return 0\nfn main():\n    print(str(g([1, 2])))\nmain()\n",
+        "`for k, v` requires a map, found S",
+    );
+    // a real struct keeps the struct wording.
+    rejects(
+        "struct Counter:\n    n: int\n    fn next(self) -> Option[int]:\n        return None\nfn main():\n    for k, v in Counter(0):\n        print(str(k))\nmain()\n",
+        "a struct iterator binds a single loop variable",
+    );
+}
+
 // ===== non-void fn must return a value on every path (Option B) =====
 
 #[test]

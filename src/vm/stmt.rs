@@ -1127,6 +1127,46 @@ impl Vm {
         }))
     }
 
+    /// One-time `Iterable` → cursor conversion: a PURE-`Iterable` struct (has `iter`, lacks `next`)
+    /// becomes its cursor by running `iter(self)`; EVERYTHING else passes through unchanged (so it is
+    /// safe to call on any value). Shared by `Op::IterableToCursor` (the `for` lowering) and
+    /// [`drain_iterable`](Self::drain_iterable) (`List()`/`Set()`/`Map()`/`.iter()`), which must accept
+    /// the same witnesses — the checker's `iterable_elem` admits an `iter`-only struct, and an
+    /// `Iterable[T]` ANNOTATION hands one to every consumer, not only to `for`.
+    ///
+    /// The `next`-lacks test is by NAME, and the checker mirrors it: `struct_iterable_elem` refuses any
+    /// struct that DECLARES a `next`, so a struct whose `next` is malformed is rejected at check time
+    /// rather than admitted via `iter` here and then driven through that `next` by `drain_iterable`.
+    pub(super) fn iterable_to_cursor(
+        &mut self,
+        v: Value,
+        span: Span,
+    ) -> Result<Value, RuntimeError> {
+        let convert = if let Some(h) = v.as_obj()
+            && let Obj::Struct { tid, .. } = self.heap.get(h)
+        {
+            let name = self.struct_name_of_tid(*tid);
+            self.program
+                .structs
+                .get(name)
+                .filter(|d| !d.methods.contains_key("next"))
+                .and_then(|d| d.methods.get("iter").map(|p| (*p, d.module_idx)))
+        } else {
+            None
+        };
+        let Some((proto, module_idx)) = convert else {
+            return Ok(v);
+        };
+        let home = self.module_objs[module_idx];
+        // Re-enter the VM to run `iter(self)`; it returns the cursor (the body calls `self.xs.iter()`).
+        // Root the receiver across the call (guarded GC).
+        self.push(v);
+        let cursor =
+            self.guarded(|vm| vm.run_proto(proto, home, None, vec![v], true, false, span))?;
+        self.pop(); // unroot receiver
+        Ok(cursor)
+    }
+
     /// Drain ANY for-iterable into a `Vec<Value>` of its elements — the runtime peer of the checker's
     /// `iter_elem` (the single source of truth for "what `for x in X` accepts"). Built-in collections
     /// copy their elements directly (list/set elems, str→per-char str, bytes/bytearray→per-byte int,
@@ -1141,6 +1181,10 @@ impl Vm {
         v: Value,
         span: Span,
     ) -> Result<Vec<Value>, RuntimeError> {
+        // A pure-`Iterable` struct (`iter`, no `next`) is converted ONCE to its cursor first — the same
+        // step the `for` lowering emits as `Op::IterableToCursor`. Without it `List(xs)`/`Set(xs)`/
+        // `Map(xs)` on an `Iterable[T]`-annotated param would type-check and then fault on that witness.
+        let v = self.iterable_to_cursor(v, span)?;
         // A cursor (`Obj::Iter`) is CONSUMED in place: clone its REMAINING items (`items[pos..]`),
         // then advance `pos` to the end so the same cursor yields nothing on a second drain — keeping
         // `List(it)`/`Set(it)`/`for` consistent with `.next()` (which also advances the shared cursor)
