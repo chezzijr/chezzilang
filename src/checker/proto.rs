@@ -1215,8 +1215,12 @@ impl Checker {
         // the predicate. A user struct with a structural `iter(self) -> Iterator[E]` (but no `next`)
         // is caught by the `iterable_elem` helper. The bound's `[T]` arg, if supplied and concrete,
         // must match the element type (mirrors the parameterized-`Index` arg check). A `Ty::Param`
-        // falls through to the declared-bounds check below (so `[S: Iterable[T]]` forwards).
-        if protocol == "Iterable" && !matches!(ty, Ty::Param(_)) {
+        // falls through to the declared-bounds check below (so `[S: Iterable[T]]` forwards), and so
+        // does a `Ty::Protocol` existential (an `Iterable[T]`-ANNOTATED value): its runtime receiver
+        // is whatever concrete thing witnesses it, whose own intrinsic row already exists, so it is
+        // decided by the protocol-existential arm below — `Iterable[int]` satisfies `Iterable[int]`
+        // and nothing wider (that arm is where the strict arg invariance lives).
+        if protocol == "Iterable" && !matches!(ty, Ty::Param(_) | Ty::Protocol(..)) {
             let Some(elem) = self.iterable_elem(ty) else {
                 return Err(format!("type {ty} does not satisfy Iterable"));
             };

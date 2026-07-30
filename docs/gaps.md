@@ -58,8 +58,12 @@ chronological log.
 | **W7-4d** | `:3901` | An `RwShared` COPY-OUT VIEW (`at`/`for_each`/`fold`/`get_key`/`has`/`for_each_entry`/`fold_entries`) rebuilds one piece per step, so two sibling closures pulled out separately do not share their binding | Inherent to a copy-out API — two `at()` calls are two crossings. A whole `get()`/`read()`, and `slice`, are one crossing and DO share. Not a residual of the fix, documented in `concurrency.md` §airlock |
 
 **Known limits that are documented, not bugs** (listed so they aren't re-filed): `Iterable[T]` element
-recovery does not fire for a struct with only `iter` and no `next` — bound that one concretely
-(`syntax.md`); `.compare()` answers the operator's verdict wherever the operator has one and only falls
+recovery does not fire for a struct with only `iter` and no `next` **in BOUND position** — bound that
+one concretely (`[S: Iterable[int]]`) or annotate the parameter `Iterable[int]`, where the annotation IS
+the element type and nothing has to be recovered (`syntax.md`); read-only covariance is deliberately NOT
+part of the model, so `List[int]` → `Iterable[Any]` (and `Iterable[int]` → `Iterable[Any]`) is REJECTED —
+a protocol existential is strictly invariant in its args, same as `List`/`Map`/a user generic struct;
+`.compare()` answers the operator's verdict wherever the operator has one and only falls
 back to `sort()`'s total order for NaN, so a `±0.0` pair compares Equal by the method while `sort()`
 orders `-0.0 < +0.0` (`spec.md`); `--max-heap`/`--timeout` are M:N-only by design.
 
@@ -624,6 +628,49 @@ caller (`examples/iterator_bound.chz`, `std.iter`'s `islice`/`imap`/`ifilter`) m
 byte-identical output. Recovery is NOT total for `Iterable`: an `iter()`-only struct still needs a
 concrete-arg bound. `INTRINSIC_UNPAIRED` is now `&[]` (kept, with both `vm::tests` loops, so the ratchet
 re-arms on the next carve-out). See `PROGRESS.md` (2026-07-26).
+
+### W6-3e. `Iterable[T]` in TYPE position could not be iterated (the narrower `Iterator[T]` could) — **FIXED (2026-07-30)**
+```chezzi
+fn f(xs: Iterable[int]) -> int:      # accepted
+    n := 0
+    for v in xs:                     # type error (line 3, col 14): cannot iterate over Iterable[int]
+        n += v
+    return n
+print(str(f([1, 2, 3])))             # …and the List[int] -> Iterable[int] argument ALREADY conformed
+```
+Check-OK-then-broken, and backwards: a raw collection satisfies `Iterable` but only a cursor satisfies
+`Iterator` (W6-3b), yet only the narrower one worked as a value type. Root cause is a **representation
+asymmetry**, not a missing string: `resolve_type` intercepts the reserved name `Iterator[T]` into
+`Ty::Struct("Iterator", [T])`, while every other protocol name — `Iterable[T]` included — falls to the
+generic-protocol arm and becomes `Ty::Protocol("Iterable", [Int])`. Both iteration unions matched only
+`Ty::Struct(n, _) if n == "Iterator"`, so the annotated form fell to `cannot iterate over {other}`. Fix
+(checker-only, no VM/compiler change — the lowering is type-erased and the runtime value is always a real
+list/set/map/str/cursor/generator/struct it already drains): one `Ty::Protocol(n, args) if (n ==
+"Iterable" || n == "Iterator") && args.len() == 1` arm in `iter_elem`, and the two duplicated trailing
+`for`-binding arms collapsed into one that consults `iterable_elem` (so the whole union is one predicate,
+the wave-6 "fix applied to SOME arms of an N-way set" meta-finding). Every other consulter — the
+comprehension arms, the `.iter()` fast path, `List()`/`Set()`/`Map()`, `satisfies(Iterable)` and
+`recover_iter_elems` — routes through those two helpers and inherited it, so an `Iterable[int]`-annotated
+param now also forwards into an `[S: Iterable[T], T]` bound. `satisfies_args` grew ONE guard: a
+`Ty::Protocol` subject now skips the intrinsic `Iterable` arm and is decided by the protocol-existential
+arm (where the strict arg invariance lives), same as `Ty::Param` already did.
+**Nothing widened**: `List[int]` → `Iterable[Any]`, `Iterable[int]` → `Iterable[Any]`, `List[int]` →
+`List[Any]`, `List[Sq]` → `List[Shape]` and `Map[str, int]` → `Map[str, Any]` all stay REJECTED —
+read-only covariance is deliberately not part of the model, **do not re-file it as a bug** (fenced by
+`checker::tests::container_invariance_stays_rejected_for_iterable`). `Iterable[T]` still cannot call
+`.next()` (W6-3b intact). Edge decided: an `iter`-only struct passed to a param ANNOTATED `Iterable[int]`
+now WORKS (the annotation is the element type); the documented non-recovery limit is about BOUND position
+and is unchanged — the "Known limits" line above was scoped, not deleted.
+Tests: `checker::tests::iterable_*` / `container_invariance_stays_rejected_for_iterable` /
+`iter_only_struct_bound_recovery_still_not_total`, and three `test fn`s in
+`tests/chz/spec/intrinsic_proto_methods_test.chz` (list/set/map/str/cursor/generator/`next`-struct/
+`iter`-only-struct, a comprehension, `List()`, and the stateful-cursor drain), serial==M:N.
+
+**Diagnostic-wording drift (cosmetic, not fixed)** — passing a concrete `str` into a `List[T]` inside
+`fn f[T](xs: List[T])` reports "the collection's element type was pinned to `T` by an earlier push" when
+it was pinned by the PARAMETER's annotation, not a push. No soundness issue. Distinguishing the two needs
+provenance the site does not carry (`expr.rs`'s in-scope-`Ty::Param` branch was deliberately chosen in a
+prior fix), so it is a real change, not a wording tweak.
 
 ### W6-3c. `Comparable.compare` on a NaN operand — **FIXED (2026-07-26)**: it answers `sort()`'s total order
 ```chezzi

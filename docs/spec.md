@@ -211,6 +211,9 @@ typed as the existing `Iterator[T]` existential (no new value type), with `.next
 then idempotent None). This lets a plain `list` flow into the same Take/Mapped adapter pipeline as a
 hand-written struct iterator (`examples/iterable.chz`). A generator, a user `next`-struct, and a struct
 with only `iter(self) -> Iterator[E]` (driven by a one-time `.iter()`) all satisfy `[S: Iterable[T]]`.
+`Iterable[T]` is usable in **type position** as well as a bound — `fn f(xs: Iterable[int])` accepts any
+of those and its body may `for`/comprehend/`List()` it, with `T` taken from the annotation; like every
+protocol existential it is strictly invariant in its args (`List[int]` → `Iterable[Any]` is rejected).
 The cursor is **sendable** — it crosses the `spawn`/channel airlock as a deep copy (an independent
 snapshot + position on the receiver), exactly like a `list`. A frame-holding **generator** is likewise
 **sendable BY VALUE** — whether held in a frame **local** (F3 path C) or in a **module global**

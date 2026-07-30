@@ -3389,8 +3389,9 @@ impl Checker {
     }
 
     /// The element type of ANY `Iterable` value — the single source of truth for `Iterable`
-    /// conformance and the `Iterable`-driven `for`. A built-in collection, an `Iterator[T]`
-    /// existential, or a struct with structural `next` all flow through [`iter_elem`](Self::iter_elem)
+    /// conformance and the `Iterable`-driven `for`. A built-in collection, an `Iterator[T]`/
+    /// `Iterable[T]` existential (a generator result or an ANNOTATED param), or a struct with
+    /// structural `next` all flow through [`iter_elem`](Self::iter_elem)
     /// (every `Iterator` is `Iterable` via `iter() == self`); a struct with only `iter` flows through
     /// [`struct_iterable_elem`](Self::struct_iterable_elem). `None` ⇒ not iterable.
     pub(super) fn iterable_elem(&self, ty: &Ty) -> Option<Ty> {
@@ -3399,7 +3400,8 @@ impl Checker {
 
     /// What iterating `ty` yields per step — the `Iterator` element type. Built-in collections yield
     /// intrinsically (list/set → element, str → str, map → key, matching the single-variable `for`);
-    /// a user struct yields via its structural `next(self) -> Option[E]`. `None` ⇒ not iterable. This
+    /// a user struct yields via its structural `next(self) -> Option[E]`; an `Iterator[T]`/`Iterable[T]`
+    /// existential yields its single type argument. `None` ⇒ not iterable. This
     /// is the single source of truth shared by `for`-binding, `satisfies(Iterable)`, and the
     /// `Iterator[T]`/`Iterable[T]` element-recovery in `infer_generic_call`. NOT
     /// `satisfies(Iterator)` — that one needs a cursor, so it uses the narrower
@@ -3413,6 +3415,18 @@ impl Checker {
             Ty::Map(k, _) => Some((**k).clone()),
             // `Iterator[T]` value (a generator result): element type is its single type argument.
             Ty::Struct(name, args) if name == "Iterator" && args.len() == 1 => {
+                Some(args[0].clone())
+            }
+            // The SAME existential written in TYPE position. Representation asymmetry: `resolve_type`
+            // intercepts the reserved name `Iterator[T]` into `Ty::Struct` (see its `("Iterator",
+            // [elem])` arm), while every other protocol name — `Iterable[T]` included — falls to the
+            // generic-protocol arm and becomes `Ty::Protocol`. Both spell "an existential I can
+            // iterate", so both recover their element from the single type argument. The arity guard
+            // is load-bearing: a BARE `Iterable` is `Ty::Protocol("Iterable", [])`, an existential
+            // with unbound params, and stays non-iterable.
+            Ty::Protocol(name, args)
+                if (name == "Iterable" || name == "Iterator") && args.len() == 1 =>
+            {
                 Some(args[0].clone())
             }
             _ => self.struct_iter_elem(ty),
@@ -3662,25 +3676,13 @@ impl Checker {
                 }
                 vec![(vars[0].clone(), args[0].clone())]
             }
-            _ if self.struct_iter_elem(&it).is_some() => {
-                // A user struct with `next(self) -> Option[E]` is iterable; it binds a single element.
-                // Checked FIRST so a struct with BOTH `next` and `iter` keeps the existing `next()`
-                // fast path (back-compat precedence).
-                let elem = self
-                    .struct_iter_elem(&it)
-                    .expect("guarded by the match arm");
-                if vars.len() != 1 {
-                    self.error(iter.span, "a struct iterator binds a single loop variable");
-                    return unknowns(vars);
-                }
-                vec![(vars[0].clone(), elem)]
-            }
-            _ if self.struct_iterable_elem(&it).is_some() => {
-                // A pure-`Iterable` struct: `iter(self) -> Iterator[E]` but NO `next`. Driven by a
-                // one-time `.iter()` then the cursor's `next()` (the additive `Iterable` for-case).
-                let elem = self
-                    .struct_iterable_elem(&it)
-                    .expect("guarded by the match arm");
+            _ if self.iterable_elem(&it).is_some() => {
+                // Everything else `iterable_elem` admits, binding a single element: a user struct with
+                // `next(self) -> Option[E]`; a pure-`Iterable` struct (`iter(self) -> Iterator[E]`, no
+                // `next`) driven by a one-time `.iter()`; and an `Iterable[E]` ANNOTATION. `next`
+                // before `iter` (a struct with BOTH keeps the `next()` fast path) is `iterable_elem`'s
+                // own `iter_elem().or_else(struct_iterable_elem)` precedence.
+                let elem = self.iterable_elem(&it).expect("guarded by the match arm");
                 if vars.len() != 1 {
                     self.error(iter.span, "a struct iterator binds a single loop variable");
                     return unknowns(vars);

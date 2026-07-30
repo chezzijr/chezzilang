@@ -2151,7 +2151,10 @@ impl Vm {
                     }
                     // Not a pure-Iterable struct (a struct with `next`, a generator, a collection, …):
                     // unchanged. (A pure-Iterable struct whose `iter` is somehow missing is impossible
-                    // — the checker bound it via `struct_iterable_elem`, which requires `iter`.)
+                    // — the checker admitted it either via `struct_iterable_elem`, which requires
+                    // `iter`, or through an `Iterable[T]` ANNOTATION, whose call site conformed the
+                    // same way. This lowering is type-erased either way: the branch is on the heap
+                    // `Obj`, not on how the checker spelled the static type.)
                     _ => self.push(v),
                 }
             }

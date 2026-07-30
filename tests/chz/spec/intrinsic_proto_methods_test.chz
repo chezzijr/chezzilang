@@ -431,3 +431,68 @@ test fn iterator_bound_is_cursors_iterable_bound_is_collections():
     for x in [1, 2, 3]:
         s = s + x
     assert s == 6
+
+# ---- `Iterable[T]` in TYPE position (an annotated param), not only as a bound ----
+#
+# The narrower `Iterator[T]` already worked as a value type (it is what a generator returns); the
+# broader `Iterable[T]` did not — the checker accepted the annotation AND the `List[int]` argument,
+# then refused the one operation the protocol promises (`cannot iterate over Iterable[int]`).
+# Reject side (bare `Iterable`, `for i, v in`, `.next()`, the invariance fences) is in
+# `checker::tests::iterable_type_position_*`; what is asserted here is that every accepted shape
+# really iterates, on both engines.
+
+struct Wrap:
+    xs: List[int]
+    fn iter(self) -> Iterator[int]:
+        return self.xs.iter()
+
+fn sum_it(xs: Iterable[int]) -> int:
+    n := 0
+    for v in xs:
+        n = n + v
+    return n
+
+fn count_it(xs: Iterable[str]) -> int:
+    n := 0
+    for v in xs:
+        n = n + 1
+    return n
+
+fn doubled(xs: Iterable[int]) -> List[int]:
+    return [v * 2 for v in xs]
+
+fn copied(xs: Iterable[int]) -> List[int]:
+    return List(xs)
+
+fn to_cursor(xs: Iterable[int]) -> Iterator[int]:
+    return xs.iter()
+
+test fn iterable_in_type_position_iterates_every_shape():
+    assert sum_it([1, 2, 3]) == 6, "List"
+    assert sum_it({1, 2, 3}) == 6, "Set"
+    assert sum_it([1, 2].iter()) == 3, "a cursor"
+    assert sum_it(ones()) == 2, "a generator"
+    assert sum_it(Down(3)) == 3, "a struct with next (2 + 1 + 0)"
+    assert sum_it(Wrap([4, 5])) == 9, "a struct with only iter"
+    assert count_it({"a": 1, "b": 2}) == 2, "a Map iterates its keys"
+    assert count_it("abc") == 3, "a str"
+    # the same value type drives a comprehension and a `List()` ctor, not just `for`
+    assert doubled([1, 2]) == [2, 4]
+    assert copied([7]) == [7]
+
+test fn iterable_typed_cursor_is_stateful_once():
+    # a cursor behind an `Iterable[T]` annotation is still ONE position: iterating it drains it.
+    c := [1, 2, 3].iter()
+    assert sum_it(c) == 6
+    assert sum_it(c) == 0, "the cursor is drained; a second pass yields nothing"
+    # a raw collection, by contrast, is re-iterable
+    xs := [1, 2, 3]
+    assert sum_it(xs) == 6
+    assert sum_it(xs) == 6
+
+test fn iterable_typed_value_still_mints_a_cursor():
+    # the pre-fix workaround (`.iter()` first) keeps working and still yields a real cursor
+    c := to_cursor([8, 9])
+    assert c.next() == Some(8)
+    assert c.next() == Some(9)
+    assert c.next() == None
