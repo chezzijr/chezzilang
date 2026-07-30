@@ -644,14 +644,23 @@ asymmetry**, not a missing string: `resolve_type` intercepts the reserved name `
 `Ty::Struct("Iterator", [T])`, while every other protocol name — `Iterable[T]` included — falls to the
 generic-protocol arm and becomes `Ty::Protocol("Iterable", [Int])`. Both iteration unions matched only
 `Ty::Struct(n, _) if n == "Iterator"`, so the annotated form fell to `cannot iterate over {other}`. Fix
-(checker-only, no VM/compiler change — the lowering is type-erased and the runtime value is always a real
-list/set/map/str/cursor/generator/struct it already drains): one `Ty::Protocol(n, args) if (n ==
+(checker + ONE VM arm; the compiler is untouched — the `for` lowering is type-erased and branches at
+RUNTIME on the heap `Obj`): one `Ty::Protocol(n, args) if (n ==
 "Iterable" || n == "Iterator") && args.len() == 1` arm in `iter_elem`, and the two duplicated trailing
 `for`-binding arms collapsed into one that consults `iterable_elem` (so the whole union is one predicate,
 the wave-6 "fix applied to SOME arms of an N-way set" meta-finding). Every other consulter — the
 comprehension arms, the `.iter()` fast path, `List()`/`Set()`/`Map()`, `satisfies(Iterable)` and
 `recover_iter_elems` — routes through those two helpers and inherited it, so an `Iterable[int]`-annotated
-param now also forwards into an `[S: Iterable[T], T]` bound. `satisfies_args` grew ONE guard: a
+param now also forwards into an `[S: Iterable[T], T]` bound.
+**The VM half (the N-way set again, one rung down):** `iter_elem` gates `for` AND the
+`List()`/`Set()`/`Map()`/`.iter()` consumers, but only the `for` lowering emits `Op::IterableToCursor`,
+so those ctors inherited the STATIC acceptance without the runtime conversion — `List(xs)` on an
+`Iterable[int]` param whose witness is an `iter`-only struct checked clean and then faulted
+(`cannot iterate over struct (no `next` method)`) on both engines. The conversion is now a shared
+`Vm::iterable_to_cursor` (`src/vm/stmt.rs`) called by BOTH `Op::IterableToCursor` and `drain_iterable`
+(the declared runtime peer of `iter_elem`), so checker-accepts is again a subset of runtime-can-lower.
+Fenced by `tests/chz/spec` `iterable_typed_iter_only_struct_feeds_every_consumer` (every ctor ×
+the `iter`-only witness). `satisfies_args` grew ONE guard: a
 `Ty::Protocol` subject now skips the intrinsic `Iterable` arm and is decided by the protocol-existential
 arm (where the strict arg invariance lives), same as `Ty::Param` already did.
 **Nothing widened**: `List[int]` → `Iterable[Any]`, `Iterable[int]` → `Iterable[Any]`, `List[int]` →

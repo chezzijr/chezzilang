@@ -476,15 +476,22 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > is a **representation asymmetry**, not a missing string: `resolve_type` intercepts the reserved name
 > `Iterator[T]` into `Ty::Struct("Iterator", [T])`, while every other protocol name (`Iterable[T]`
 > included) becomes `Ty::Protocol`; both iteration unions matched only the `Ty::Struct` spelling. Fix is
-> **checker-only** — the `for` lowering is type-erased and branches at RUNTIME on the heap `Obj`
-> (`Op::IterableToCursor`), so the VM already drains the real list/set/map/str/cursor/generator/struct the
-> value always was. One `Ty::Protocol(n, args) if (n == "Iterable" || n == "Iterator") && args.len() == 1`
+> **checker + one VM arm** (the compiler is untouched — the `for` lowering is type-erased and branches at
+> RUNTIME on the heap `Obj` via `Op::IterableToCursor`). One
+> `Ty::Protocol(n, args) if (n == "Iterable" || n == "Iterator") && args.len() == 1`
 > arm in `iter_elem` (the arity guard keeps a BARE `Iterable` non-iterable), plus the two duplicated
 > trailing `for`-binding arms collapsed into one that consults `iterable_elem` — so the iteration union is
 > ONE predicate, closing the wave-6 "a fix applied to SOME arms of an N-way set" meta-finding rather than
 > re-committing it. Every other consulter (the three comprehension arms, the `.iter()` fast path,
 > `List()`/`Set()`/`Map()`, `satisfies(Iterable)`, `recover_iter_elems`) routes through those two helpers
 > and inherited it, so an `Iterable[int]`-annotated param also forwards into `[S: Iterable[T], T]`.
+> **The VM half — the same N-way set one rung down:** only the `for` lowering emits
+> `Op::IterableToCursor`, so `List()`/`Set()`/`Map()`/`.iter()` inherited the static acceptance without
+> the runtime conversion and faulted (`cannot iterate over struct (no `next` method)`) when the witness
+> behind the annotation was an `iter`-only struct. That conversion is now the shared
+> `Vm::iterable_to_cursor` (`src/vm/stmt.rs`), called by BOTH `Op::IterableToCursor` and
+> `drain_iterable` — `iter_elem`'s declared runtime peer — so checker-accepts is a subset of
+> runtime-can-lower again.
 > `satisfies_args` grew ONE guard: a `Ty::Protocol` subject skips the intrinsic `Iterable` arm and is
 > decided by the protocol-existential arm below it, exactly as `Ty::Param` already was — that arm is where
 > the strict arg invariance lives. **Nothing widened**: `List[int]` → `Iterable[Any]`, `Iterable[int]` →
@@ -494,8 +501,9 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > `iter`-only struct passed to a param ANNOTATED `Iterable[int]` now WORKS (the annotation IS the element
 > type), while the documented non-recovery under an `[S: Iterable[T], T]` BOUND is unchanged. 7 new
 > checker tests (incl. 4 invariance fences that were verified GREEN pre-fix, so they pin behavior the fix
-> must not move) + 3 `tests/chz/spec` `test fn`s covering list/set/map/str/cursor/generator/`next`-struct/
-> `iter`-only-struct, a comprehension, `List()`, and the stateful-cursor drain. serial==M:N, verified on
+> must not move) + 4 `tests/chz/spec` `test fn`s covering list/set/map/str/cursor/generator/`next`-struct/
+> `iter`-only-struct, a comprehension, the stateful-cursor drain, and the full cross product of
+> `List()`/`Set()`/`Map()`/`.iter()` × the `iter`-only witness. serial==M:N, verified on
 > the release binary both engines. Docs: `docs/syntax.md`, `docs/spec.md`, `docs/gaps.md` (W6-3e FIXED,
 > the "Known limits" line scoped to BOUND position, plus a filed cosmetic diagnostic-wording drift).
 

@@ -496,3 +496,38 @@ test fn iterable_typed_value_still_mints_a_cursor():
     assert c.next() == Some(8)
     assert c.next() == Some(9)
     assert c.next() == None
+
+# ---- the CROSS PRODUCT: every `Iterable`-consuming ctor x the `iter`-only-struct witness ----
+#
+# `iter_elem` gates `for` AND `List()`/`Set()`/`Map()`/`.iter()`, but only the `for` lowering emits
+# `Op::IterableToCursor`. So the ctors type-checked an `Iterable[T]`-annotated value and then faulted
+# ("cannot iterate over struct (no `next` method)") whenever the runtime witness was a struct with
+# `iter` and no `next` — check-OK-then-broken on BOTH engines. `drain_iterable` now does the same
+# one-time conversion, so checker-accepts stays a subset of runtime-can-lower.
+
+struct Pairs:
+    xs: List[(str, int)]
+    fn iter(self) -> Iterator[(str, int)]:
+        return self.xs.iter()
+
+fn as_set(xs: Iterable[int]) -> Set[int]:
+    return Set(xs)
+
+fn as_map(xs: Iterable[(str, int)]) -> Map[str, int]:
+    return Map(xs)
+
+fn cursor_of(xs: Iterable[int]) -> Iterator[int]:
+    return xs.iter()
+
+test fn iterable_typed_iter_only_struct_feeds_every_consumer():
+    assert copied(Wrap([1, 2])) == [1, 2], "List() over an iter-only struct"
+    assert as_set(Wrap([3, 3, 4])) == {3, 4}, "Set() over an iter-only struct"
+    assert as_map(Pairs([("a", 1), ("b", 2)])) == {"a": 1, "b": 2}, "Map() over an iter-only struct"
+    assert doubled(Wrap([5])) == [10], "a comprehension over an iter-only struct"
+    c := cursor_of(Wrap([6, 7]))
+    assert c.next() == Some(6), ".iter() over an iter-only struct"
+    assert c.next() == Some(7)
+    assert c.next() == None
+    # the ctors are unchanged for every other witness
+    assert as_set([1, 1, 2]) == {1, 2}
+    assert as_map([("k", 9)]) == {"k": 9}

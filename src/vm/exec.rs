@@ -2122,41 +2122,11 @@ impl Vm {
             Op::IterableToCursor => {
                 // One-time `for`-entry conversion: a PURE-`Iterable` struct (has `iter`, lacks `next`)
                 // becomes its cursor (so the seq path drains it); everything else passes through.
+                // Shared with `drain_iterable` (`List()`/`Set()`/`Map()`/`.iter()`) so every consumer
+                // of the checker's `Iterable` admission set accepts the same witnesses.
                 let v = self.pop();
-                let convert = if let Some(h) = v.as_obj()
-                    && let Obj::Struct { tid, .. } = self.heap.get(h)
-                {
-                    let name = self.struct_name_of_tid(*tid);
-                    self.program.structs.get(name).map(|d| {
-                        (
-                            !d.methods.contains_key("next") && d.methods.contains_key("iter"),
-                            d.methods.get("iter").copied(),
-                            d.module_idx,
-                        )
-                    })
-                } else {
-                    None
-                };
-                match convert {
-                    Some((true, Some(proto), module_idx)) => {
-                        let home = self.module_objs[module_idx];
-                        // Re-enter the VM to run `iter(self)`; it returns the cursor (the body calls
-                        // `self.xs.iter()`). Root the receiver across the call (guarded GC).
-                        self.push(v);
-                        let cursor = self.guarded(|vm| {
-                            vm.run_proto(proto, home, None, vec![v], true, false, span)
-                        })?;
-                        self.pop(); // unroot receiver
-                        self.push(cursor);
-                    }
-                    // Not a pure-Iterable struct (a struct with `next`, a generator, a collection, …):
-                    // unchanged. (A pure-Iterable struct whose `iter` is somehow missing is impossible
-                    // — the checker admitted it either via `struct_iterable_elem`, which requires
-                    // `iter`, or through an `Iterable[T]` ANNOTATION, whose call site conformed the
-                    // same way. This lowering is type-erased either way: the branch is on the heap
-                    // `Obj`, not on how the checker spelled the static type.)
-                    _ => self.push(v),
-                }
+                let cursor = self.iterable_to_cursor(v, span)?;
+                self.push(cursor);
             }
             Op::Yield => {
                 // Experimental generator suspend. The yielded value is already on the stack top; flag
