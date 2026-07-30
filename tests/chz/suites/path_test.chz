@@ -100,6 +100,26 @@ test fn t_join():
     assert path.join(["a", "", "c"]).str() == "a/c"
     assert path.join(["/a", "b"]).str() == "/a/b"
 
+# W7-8 review — `join` is the one helper whose path sits inside a CONTAINER, and Chezzi containers are
+# INVARIANT. A `parts: List[PathLike]` parameter was therefore callable ONLY with a list LITERAL: no
+# `List[str]` variable, no `List[bytes]`, and not even `join`'s own sibling output (`fs.list_dir` hands
+# back `List[path.Path]`) could ever be passed — a hard regression against the old `List[str]` signature
+# that a literal-only test table cannot see. `join` is generic over the element type with a `PathLike`
+# BOUND instead, so every homogeneous list is callable and invariance is untouched.
+# (A HETEROGENEOUS literal — `[a_path, "sub"]` — has no single element type and is rejected at the
+# literal itself, exactly as for any other list; spell the components in one type.)
+test fn t_join_of_variables():
+    xs: List[str] = ["a", "b"]
+    assert path.join(xs).str() == "a/b"
+    # …including a list handed over by another fn, not written out here.
+    assert path.join("/a/b/c.txt".split("/")).str() == "a/b/c.txt"
+    bs: List[bytes] = [b"a", b"A\xffB"]
+    assert path.join(bs).bytes() == b"a/A\xffB"
+    ps: List[path.Path] = [path.Path(b"x"), path.Path(b"A\xffB")]
+    assert path.join(ps).bytes() == b"x/A\xffB"
+    # the empty list still needs no element type to infer
+    assert path.join([]).str() == ""
+
 # W7-8 — the whole point of `PathLike -> Path`: the lexical ops are BYTE-EXACT, so a filename that is
 # not valid UTF-8 survives them. Asserted on BYTES (a lossy decode is not injective, so a text-only
 # compare could pass a byte-divergent run).

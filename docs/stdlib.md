@@ -591,8 +591,9 @@ bytes**, so a filename that is not valid UTF-8 round-trips (`fs.exists(fs.list_d
 `exists(p) -> bool` ·
 `is_file(p) -> bool` · `is_dir(p) -> bool` · `size(p) -> Result[int]` ·
 `glob(pattern) -> Result[List[Path]]` (`*`/`?` in the final path component; matched over **raw
-bytes**, so an ASCII pattern still matches a non-UTF-8 filename — and `?` counts one **byte**, not one
-Unicode scalar) ·
+bytes**, so an ASCII pattern still matches a non-UTF-8 filename — and `?` counts one **Unicode
+scalar** wherever the name is valid UTF-8, like Go `filepath.Match` / Python `fnmatch`, falling back
+to one byte only for a byte that begins no valid sequence) ·
 `canonicalize(p) -> Result[Path]` — resolve symlinks + `.`/`..` against the **real filesystem** to
 an absolute real path. Unlike the purely lexical `path.normalize` (no I/O), this hits the filesystem
 and so **requires the path to exist** (`Err` on a nonexistent path) ·
@@ -968,7 +969,7 @@ dirname/split/splitext) and Go `path.Clean` (`normalize`). `import std.path` (or
 `bytearray`, or another `Path` — no annotation, no turbofish) and returns a **`path.Path`**. The
 algorithms operate on the **raw OS bytes**, so a filename that is not valid UTF-8 survives a
 `basename`/`join`/`normalize` that a `str`-typed layer could not even represent. Ops therefore
-**chain** — `path.join([d, "sub"]).with_ext("txt")` — and you convert **once at the end**
+**chain** — `path.with_ext(path.join(parts), "txt")` — and you convert **once at the end**
 (`.str()` lossy display / `.decode()` exact / `.bytes()` raw; see [`path.Path`](#pathpath) below).
 The table's `-> str` examples show the value of `.str()` on the returned `Path`.
 
@@ -983,7 +984,7 @@ The table's `-> str` examples show the value of `.str()` on the returned `Path`.
 | `stem` | `(p: PathLike) -> Path` | `basename` with its `ext` removed: `stem("a/b.tar.gz")` → `"b.tar"`, `stem(".bashrc")` → `".bashrc"`, `stem("a.txt")` → `"a"`. |
 | `with_ext` | `(p: PathLike, e: PathLike) -> Path` | Replace the final ext with `e`; `e` is normalized to exactly one leading dot when non-empty (`"md"` ≡ `".md"`), `""` strips it: `with_ext("a/b.txt", ".md")` → `"a/b.md"`, `with_ext("a/b", ".md")` → `"a/b.md"`, `with_ext("a/b.txt", "")` → `"a/b"`. |
 | `normalize` | `(p: PathLike) -> Path` | Go `path.Clean` lexical clean (no filesystem): collapse `//`, drop `.`, resolve `..` against the preceding real element. `""` → `"."`; leading `..` is **preserved** on a relative path but a `..` past root on an **absolute** path is dropped. `normalize("/")` → `"/"`, `normalize("//")` → `"/"`, `normalize("..")` → `".."`, `normalize("a/b/../c")` → `"a/c"`, `normalize("a/./b")` → `"a/b"`, `normalize("a/b/")` → `"a/b"`, `normalize("./a")` → `"a"`, `normalize("/..")` → `"/"`, `normalize("/a/../../b")` → `"/b"`, `normalize("a/../../b")` → `"../b"`. |
-| `join` | `(parts: List[PathLike]) -> Path` | **Go `path.Join` style** (NOT Python's absolute-resets-earlier behavior): drop empty parts, join with `/`, then `normalize`. All-empty → `""`: `join(["a","b","c"])` → `"a/b/c"`, `join(["a/","b"])` → `"a/b"`, `join(["","b"])` → `"b"`, `join([])` → `""`, `join(["a","","c"])` → `"a/c"`, `join(["/a","b"])` → `"/a/b"`. |
+| `join` | `[T](parts: List[T]) -> Path where T: PathLike` | **Go `path.Join` style** (NOT Python's absolute-resets-earlier behavior): drop empty parts, join with `/`, then `normalize`. All-empty → `""`: `join(["a","b","c"])` → `"a/b/c"`, `join(["a/","b"])` → `"a/b"`, `join(["","b"])` → `"b"`, `join([])` → `""`, `join(["a","","c"])` → `"a/c"`, `join(["/a","b"])` → `"/a/b"`. **Generic over the element type, not `List[PathLike]`** — Chezzi containers are invariant, so a `List[PathLike]` parameter would take a list *literal* and nothing else (no `List[str]` variable, not even `fs.list_dir`'s own `List[Path]`). Any **homogeneous** list works: `path.join(xs)` for `xs: List[str]`, `path.join(names)` for `names: List[Path]`. A *heterogeneous* literal (`[a_path, "sub"]`) has no single element type and is rejected at the literal, as for any other list. |
 
 <a id="pathpath"></a>
 #### `path.Path` — the OUTPUT position of the filesystem surface (W7-8)

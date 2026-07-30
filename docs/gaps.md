@@ -4164,7 +4164,10 @@ Design doc: `~/.claude/plans/2026-07-31-path-pathlike-design.md`.
   `p.str()` semantics.
 * **`std.path`** — all 10 lexical helpers moved from `str -> str` to `PathLike -> Path` (option A in
   the design doc), so a non-UTF-8 name survives `basename`/`join`/`normalize` too. Ops chain and you
-  convert once at the end.
+  convert once at the end. `join` — the one helper whose path sits in a CONTAINER — is
+  `[T](parts: List[T]) -> Path where T: PathLike`, **not** `List[PathLike]`: containers are invariant
+  (unchanged by this work), so the `List[PathLike]` spelling would have been callable with a list
+  LITERAL and nothing else. See the second-panel findings below.
 * **Two enabling front-end defects had to be fixed first** (both of the recorded
   checker-superset-of-compiler class, both latent on main):
   1. `Compiler::collect_globals` never reserved a slot for a `native fn`, so a **bodied fn in a native
@@ -4188,6 +4191,26 @@ Design doc: `~/.claude/plans/2026-07-31-path-pathlike-design.md`.
   scalar, so `glob("a?c")` would have stopped matching `aéc` — a drift from Python `fnmatch` / Go
   `filepath.Match`. `?` now consumes one full UTF-8 scalar wherever the name is valid UTF-8, falling
   back to one byte only where no valid sequence starts (the only rule defined there at all).
+
+**Three findings from the SECOND adversarial panel, fixed on the same branch:**
+* `path.join(parts: List[PathLike])` was **uncallable with any list variable** — container invariance
+  (which this work explicitly preserves) rejects `List[str] -> List[PathLike]` *and*
+  `List[path.Path] -> List[PathLike]`, so only an inline literal type-checked. A hard regression
+  against main's `List[str]` (`path.join(s.split("/"))`, `path.join(xs)` both stopped compiling), and
+  the new API did not compose with its own output (`fs.list_dir` hands back `List[path.Path]`). The
+  whole test table used literals, so the suite was structurally blind. Now generic over the element
+  type with a `PathLike` bound; invariance is untouched and fenced both directions in
+  `pathlike_grant_does_not_widen_container_invariance`, and `t_join_of_variables` +
+  `list_dir_round_trips_a_non_utf8_name` exercise `List[str]`/`List[bytes]`/`List[Path]` variables.
+* Both `glob` doc sites (`docs/stdlib.md`, `std/fs.chz`) still stated `?` counts one **byte** — the
+  behavior the panel finding above had already reversed, so the published contract contradicted the
+  code and its own unit test. Corrected, and pinned end-to-end by `glob_question_matches_one_scalar`
+  on a real `aéc.txt`.
+* The byte-exact `std.path` rewrite cost **2.70×** against main's native-`str` module (`bytes` has no
+  `split`/`join`/`+`, so the first cut ran per-BYTE `bytearray.push` loops in the VM) and landed with
+  no `docs/benchmarks.md` entry. `bytearray.extend` + one shared `_last_idx` backwards scan bring it
+  to **1.73× vs main (1.56× faster than the first cut)**; measured and recorded. The residual is
+  `_split`'s per-byte loop — a native `bytes.split(sep)` is the named upgrade path.
 
 **Verified by hand on the release binary, BOTH engines, byte-identical** (`b"A\xffB.txt"` fixture):
 `list_dir`/`walk`/`glob`/`canonicalize` all return the exact bytes and `fs.exists` on the recovered

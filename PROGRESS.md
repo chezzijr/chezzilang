@@ -28,7 +28,8 @@ Single source of truth for "what am I doing next." Update after every work sessi
 >   `_getcwd`, …, documented once in `docs/stdlib.md` as the internal byte seam); the public name is a
 >   bodied pure-Chezzi wrapper doing `_native(p.as_path())` and re-wrapping into `path.Path`. All four
 >   production decodes are byte-exact via `OsStrExt`, and `glob`'s matcher runs over `&[u8]` (so an
->   ASCII pattern matches a non-UTF-8 name; `?` now counts one BYTE). Lossy rendering survives ONLY in
+>   ASCII pattern matches a non-UTF-8 name; `?` still counts one Unicode SCALAR — see the panel
+>   findings below). Lossy rendering survives ONLY in
 >   human-facing error text (`Path::display()`) — the same semantics `p.str()` ratifies.
 >   `is_blocking` strips a leading `_` so the D5 offload classification travelled with the rename.
 > - **`std.path`** — all 10 lexical helpers moved `str -> str` ⇒ `PathLike -> Path` (option A), so a
@@ -61,7 +62,26 @@ Single source of truth for "what am I doing next." Update after every work sessi
 >   the migrated `tests/chz/suites/path_test.chz` (+ `t_byte_exact` / `t_pathlike_inputs_and_chaining`),
 >   and Rust `ok()`/`rejects()` fences incl. the user-redeclaration diagnostic. Hand-verified on the
 >   release binary on BOTH engines, byte-identical: `fs.exists` on the recovered name is **true** (it is
->   **false** on the pre-fix binary). No VM hot path touched — no perf delta expected or measured.
+>   **false** on the pre-fix binary). No VM hot path touched, so no M19 bench moves.
+> - **Three more findings from the second adversarial panel, fixed on the same branch:** (c)
+>   `path.join` was `(parts: List[PathLike])` — and since Chezzi containers are INVARIANT (which this
+>   change explicitly preserves), that signature was callable with a list LITERAL and **nothing else**:
+>   no `List[str]` variable, no `path.join(s.split("/"))`, not even `fs.list_dir`'s own `List[Path]`.
+>   A hard regression against main's `List[str]`, and the API did not compose with its own output. It
+>   is **generic over the element type with a `PathLike` bound** now — `[T](parts: List[T]) -> Path
+>   where T: PathLike` — which keeps every homogeneous list callable and touches invariance not at all
+>   (fenced both ways in `pathlike_grant_does_not_widen_container_invariance` and by the Chezzi
+>   `t_join_of_variables`). The literal-only test table that hid this grew variable-typed cases.
+>   (d) Both doc sites for `glob` (`docs/stdlib.md`, `std/fs.chz`) still claimed `?` counts one BYTE —
+>   the pre-panel behavior that finding (b) had already reversed; a user following them would write
+>   `a??c` and match nothing. Corrected, and pinned end-to-end by a Chezzi test on a real `aéc.txt`.
+>   (e) The byte-exact rewrite cost `std.path` **2.70×** against main's native-`str` module and shipped
+>   with no `docs/benchmarks.md` entry. `bytearray.extend` (one native memcpy per piece) replaces the
+>   per-byte `push` loops and one shared `_last_idx` backwards scan replaces three duplicate forward
+>   scans plus a whole `_split` allocation in `basename` → **1.56× faster, 1.73× vs main**, measured
+>   and recorded in `docs/benchmarks.md`. The residual is `_split`'s per-byte VM loop; `bytes` has no
+>   native `split`, so a `bytes.split(sep)` (natural companion to the `ByteSeq` milestone) is the
+>   named upgrade path.
 
 > **✅ BUG-HUNT (2026-07-30, wave 7, gaps.md W7-9 + W7-10) — two stdlib paths that silently LOST bytes
 > the program already had.** Both were "the data is gone and nothing says so"; both are now fenced by

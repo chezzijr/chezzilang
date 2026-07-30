@@ -17922,8 +17922,10 @@ fn param_protocol_nesting_accepts_and_wrong_rejects() {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// W7-8 — `str`/`bytes`/`bytearray` satisfy `PathLike` INTRINSICALLY (they have no `as_path` method
-/// of their own), through an erased generic bound, a protocol-typed value slot, and a `List[PathLike]`
-/// element slot. `path.Path` satisfies it structurally.
+/// of their own), through a protocol-typed value slot and an erased generic bound. `path.Path`
+/// satisfies it structurally. NOT through a container element slot — see
+/// [`pathlike_grant_does_not_widen_container_invariance`], which is why `path.join` is generic over
+/// its element type instead of taking a `List[PathLike]`.
 #[test]
 fn pathlike_is_satisfied_by_the_three_byte_spellings() {
     ok("fn f(p: PathLike) -> bytes:\n    return p.as_path()\nprint(f(\"a\").len())\n");
@@ -17972,6 +17974,17 @@ fn pathlike_grant_does_not_widen_container_invariance() {
     entry_rejects(
         "fn f(xs: Iterable[Any]):\n    print(xs)\nfn main():\n    ns: List[int] = [1]\n    f(ns)\nmain()\n",
         "Iterable[Any]",
+    );
+    // The grant does NOT reach a container element either: `List[str]` is not `List[PathLike]`. This
+    // is precisely why `path.join` is `[T](List[T]) where T: PathLike` — a `List[PathLike]` parameter
+    // would be callable with a list LITERAL and with no variable at all (W7-8 review).
+    entry_rejects(
+        "fn f(xs: List[PathLike]):\n    print(xs.len())\nfn main():\n    ss: List[str] = [\"a\"]\n    f(ss)\nmain()\n",
+        "expected List[PathLike], found List[str]",
+    );
+    // ...and the generic-bound spelling that replaced it DOES accept that same variable.
+    entry_ok(
+        "fn f[T](xs: List[T]) -> int where T: PathLike:\n    return xs[0].as_path().len()\nfn main():\n    ss: List[str] = [\"ab\"]\n    print(f(ss))\nmain()\n",
     );
 }
 

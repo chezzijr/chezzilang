@@ -1223,3 +1223,37 @@ summary itself remains and is the design's price: `rw := RwShared(<100 000-int l
 is **0.221 s base → 0.268 s (+21%)**, one extra read-only traversal next to `to_wire`'s allocate-and-clone
 traversal of the same tree. Not eliminated (fusing the count into `to_wire` would thread an out-param
 through every `to_wire` call site); documented instead — reads are O(1), each store pays one walk.
+
+## `std.path` byte-exact rewrite — the cost of losing the native `str` ops, and clawing it back (W7-8, 2026-07-31)
+
+W7-8 moved every `std.path` helper from `str -> str` to `PathLike -> Path`, so the algorithms now run
+over RAW OS BYTES (that is the whole point — a non-UTF-8 filename must survive `basename`/`join`/
+`normalize`). The price is real and was not measured when the rewrite landed: `str.split` / `"/".join(..)`
+/ `str + str` are single NATIVE calls, while `bytes` has none of them, so the first cut replaced each
+with a per-BYTE interpreted `bytearray.push` loop driven by the VM.
+
+Microbench (not in `benches/run.chz` — this compares two spellings of one std module, not Chezzi vs
+CPython): 20 000 × `path.normalize("/usr/local/../share/doc/./readme.txt")` + `path.with_ext("/a/b/c.txt",
+"md")`, release binary, `--serial`, median of 3, same binary for every row (`CHEZZI_STD` swap, so only the
+std source differs):
+
+| `std.path` source | median | vs main |
+|---|---|---|
+| `main` — the old `str -> str` module (native `split`/`join`/`+`) | **0.296 s** | 1.00× |
+| W7-8 first cut — per-byte `ba.push(x)` loops | 0.799 s | 2.70× slower |
+| W7-8 fixed — `ba.extend(b)` + one shared `_last_idx` scan | **0.511 s** | 1.73× slower |
+
+**1.56× faster than the first cut**, and the remaining 1.73× is the honest cost of byte-exactness on
+today's `bytes` surface:
+
+* `_cat`/`_join` now use `bytearray.extend` (ONE native memcpy per piece) instead of a VM loop per byte —
+  that is the whole 1.56×.
+* `basename`/`dirname`/`ext` share one backwards `_last_idx` scan. `basename` used to run a full `_split`
+  (allocating one slice per component) purely to take the last piece; `dirname` and `ext` each carried
+  their own duplicate forward scan.
+* What is LEFT is `_split`'s per-byte `while` loop, which `normalize` runs once per call. `bytes` has no
+  native `split`, so this is the floor until one exists. **Upgrade path:** a native `bytes.split(sep)`
+  (the natural companion to the `ByteSeq` milestone that retires the five `collect_bytes_arg` branches)
+  would close most of the remaining gap; it is new builtin surface and was deliberately out of W7-8's scope.
+
+No M19 bench moves — `std.path` is a lexical helper module that no bench imports.

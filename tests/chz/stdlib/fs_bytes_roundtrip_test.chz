@@ -63,6 +63,24 @@ test fn list_dir_round_trips_a_non_utf8_name():
     assert names[0].bytes() == BAD, "list_dir must be byte-exact"
     # ...and the recovered name must actually NAME the file again.
     assert fs.exists(cat(cat(d, b"/"), names[0].bytes())), "the recovered name must exist"
+    # W7-8 review — the returned `List[path.Path]` must COMPOSE with std.path's own container-taking
+    # helper. (`join(List[PathLike])` could not: containers are invariant, so `List[path.Path]` was
+    # not assignable to it and this line was a compile error.)
+    assert path.join(names).bytes() == BAD
+
+# W7-8 review — `glob`'s `?` consumes one Unicode SCALAR wherever the name is valid UTF-8 (and one raw
+# BYTE only inside a byte run that is not), which is what the matcher does and what the docs must say.
+test fn glob_question_matches_one_scalar():
+    d := os.temp_dir().str() + "/chz_w7_8_globq_" + str(os.getpid())
+    ok_nil(fs.mkdir(d), "mkdir")
+    defer fs.remove_dir(d)
+    # `aéc.txt` — the é is TWO bytes (c3 a9), so a byte-counting `?` could not match it.
+    f := cat(d.encode(), b"/a\xc3\xa9c.txt")
+    ok_nil(io.write_bytes(f, b"hi"), "write_bytes")
+    defer fs.remove_file(f)
+    hits := paths(fs.glob(cat(d.encode(), b"/a?c.txt")))
+    assert hits.len() == 1, "one `?` must consume the whole 2-byte scalar"
+    assert hits[0].bytes() == f
 
 test fn walk_round_trips_a_non_utf8_name():
     d := fixture("walk")

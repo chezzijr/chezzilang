@@ -5,8 +5,11 @@
 # W7-8 — every helper is `PathLike -> Path`: it takes anything spelled as a path (a bare `str`
 # literal, a `bytes`, a `bytearray`, another `Path`) and hands back a `Path`. The algorithms operate on
 # RAW OS BYTES, so a filename that is not valid UTF-8 survives a `basename`/`join`/`normalize` that a
-# `str`-typed layer could not even represent. Ops CHAIN (`path.join([d, "sub"]).with_ext("txt")`), so
-# the ergonomic tax on the all-UTF-8 case is one `.str()` at the very end.
+# `str`-typed layer could not even represent. Ops CHAIN (`path.with_ext(path.join(parts), "txt")`), so
+# the ergonomic tax on the all-UTF-8 case is one `.str()` at the very end. (`join` is the one helper
+# whose path sits in a CONTAINER, so it is generic over the element type with a `PathLike` bound —
+# containers are invariant, and `List[PathLike]` would have been callable with a literal and nothing
+# else. See its comment below.)
 #
 # SEPARATOR POLICY: unix '/' ONLY. The repo targets unix; there is no Windows '\' handling.
 #
@@ -59,8 +62,7 @@ DOT := 46    # '.'
 
 fn _cat(a: bytes, b: bytes) -> bytes:
     ba := bytearray(a)
-    for x in b:
-        ba.push(x)
+    ba.extend(b)
     return bytes(ba)
 
 # `str.split` semantics: n separators yield n+1 (possibly empty) pieces.
@@ -76,6 +78,16 @@ fn _split(b: bytes, sep: int) -> List[bytes]:
     out.push(b[start : b.len()])
     return out
 
+# Index of the LAST `byte` in `b`, or -1 if absent — the one backwards scan `basename`/`dirname`/`ext`
+# share (a full `_split` just to take the last piece allocates a slice per component).
+fn _last_idx(b: bytes, byte: int) -> int:
+    i := b.len() - 1
+    while i >= 0:
+        if b[i] == byte:
+            return i
+        i -= 1
+    return -1
+
 # `sep.join(parts)` semantics: no leading/trailing separator, one between each pair.
 fn _join(parts: List[bytes], sep: int) -> bytes:
     ba := bytearray(b"")
@@ -84,8 +96,7 @@ fn _join(parts: List[bytes], sep: int) -> bytes:
         if not first:
             ba.push(sep)
         first = false
-        for x in p:
-            ba.push(x)
+        ba.extend(p)
     return bytes(ba)
 
 # --- the lexical surface ------------------------------------------------------------------
@@ -104,8 +115,8 @@ fn is_rel(p: PathLike) -> bool:
 #   basename("a/b") -> "b" · basename("a/b/") -> "" · basename("/") -> "" ·
 #   basename("") -> "" · basename("a") -> "a"
 fn basename(p: PathLike) -> Path:
-    parts := _split(p.as_path(), SEP)
-    return Path(parts[parts.len() - 1])
+    raw := p.as_path()
+    return Path(raw[_last_idx(raw, SEP) + 1 : raw.len()])
 
 # Everything before the final component (Python os.path.dirname): the head up to the last '/',
 # with a trailing slash stripped EXCEPT when the head is all slashes (then it stays "/").
@@ -113,13 +124,7 @@ fn basename(p: PathLike) -> Path:
 #   dirname("a") -> "" · dirname("/") -> "/" · dirname("") -> ""
 fn dirname(p: PathLike) -> Path:
     raw := p.as_path()
-    # index of the last '/'
-    cut := -1
-    i := 0
-    while i < raw.len():
-        if raw[i] == SEP:
-            cut = i
-        i += 1
+    cut := _last_idx(raw, SEP)
     if cut < 0:
         return Path(b"")         # no slash -> no directory
     head := raw[0 : cut]         # everything before the last '/'
@@ -151,12 +156,7 @@ fn split(p: PathLike) -> (Path, Path):
 #   ext(".bashrc") -> "" · ext("a.") -> "." · ext("dir.d/file") -> "" · ext("..gitignore") -> ""
 fn ext(p: PathLike) -> Path:
     b := basename(p).bytes()
-    dot := -1
-    i := 0
-    while i < b.len():
-        if b[i] == DOT:
-            dot = i
-        i += 1
+    dot := _last_idx(b, DOT)
     if dot <= 0:             # no dot, or dot is the first char (hidden file) -> no ext
         return Path(b"")
     # Python splitext: the last dot separates an extension only if some char before
@@ -232,7 +232,13 @@ fn normalize(p: PathLike) -> Path:
 # input yields "".
 #   join(["a","b","c"]) -> "a/b/c" · join(["a/","b"]) -> "a/b" · join(["","b"]) -> "b" ·
 #   join([]) -> "" · join(["a","","c"]) -> "a/c" · join(["/a","b"]) -> "/a/b"
-fn join(parts: List[PathLike]) -> Path:
+#
+# GENERIC over the element type with a `PathLike` BOUND, not `List[PathLike]`: Chezzi containers are
+# INVARIANT, so a `List[PathLike]` parameter would accept a list LITERAL and nothing else — no
+# `List[str]` variable, no `List[bytes]`, and not even `fs.list_dir`'s own `List[path.Path]`. The bound
+# keeps every HOMOGENEOUS list callable while leaving invariance alone. (A heterogeneous literal like
+# `[a_path, "sub"]` has no single element type and is rejected at the literal, as for any other list.)
+fn join[T](parts: List[T]) -> Path where T: PathLike:
     kept: List[bytes] = []
     for part in parts:
         raw := part.as_path()
