@@ -1503,6 +1503,11 @@ with a concrete arg (`[S: Iterable[int]]`) or annotate the parameter `Iterable[i
 the element type, so nothing has to be recovered). The cursor's type is the existing `Iterator[T]`
 existential — there is no new value type.
 
+**`next` wins by NAME.** A struct that declares a `next` at all is iterated through `next`, never
+through `iter` — that is how the runtime picks, so it is how the type-checker picks. A struct that
+declares a MALFORMED `next` (extra params, or a return that isn't `Option[E]`) is therefore **not
+iterable at all**; it does not silently fall back to its `iter`. Drop the bad `next`, or fix it.
+
 `Iterable[T]` also works in **TYPE position**, not only as a bound: `fn f(xs: Iterable[int])` takes any
 iterable as a plain (non-generic) parameter, and the body may `for v in xs`, comprehend `[v for v in
 xs]`, or `List(xs)` it. `T` comes from the annotation. Like every other protocol existential it is

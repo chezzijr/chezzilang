@@ -531,3 +531,28 @@ test fn iterable_typed_iter_only_struct_feeds_every_consumer():
     # the ctors are unchanged for every other witness
     assert as_set([1, 1, 2]) == {1, 2}
     assert as_map([("k", 9)]) == {"k": 9}
+
+# ---- checker↔runtime PROTOCOL SELECTION agrees on a struct with BOTH `next` and `iter` ----
+#
+# The runtime picks by NAME PRESENCE (`next` present ⇒ drive `next`, never convert via `iter`); the
+# checker's `iterable_elem` puts `struct_iter_elem` (`next`) first for the same reason. `Both`'s two
+# methods deliberately yield DIFFERENT elements, so every consumer of one `Iterable[int]` value must
+# agree on `next`'s 2,1,0 — never `iter`'s [9]. (A struct whose `next` is MALFORMED is rejected at
+# check time now; that fence is `checker::tests::struct_with_nonconforming_next_is_not_iterable`.)
+
+struct Both:
+    n: int
+    ys: List[int]
+    fn next(self) -> Option[int]:
+        if self.n <= 0:
+            return None
+        self.n = self.n - 1
+        return Some(self.n)
+    fn iter(self) -> Iterator[int]:
+        return self.ys.iter()
+
+test fn next_wins_over_iter_for_every_iterable_consumer():
+    assert sum_it(Both(3, [9])) == 3, "for: 2 + 1 + 0, not 9"
+    assert copied(Both(3, [9])) == [2, 1, 0], "List()"
+    assert as_set(Both(3, [9])) == {0, 1, 2}, "Set()"
+    assert doubled(Both(2, [9])) == [2, 0], "a comprehension"

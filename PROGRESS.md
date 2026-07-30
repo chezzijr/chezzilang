@@ -499,13 +499,23 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > `Map[str, Any]` all stay rejected (read-only covariance is deliberately out of the model), and
 > `Iterable[T]` still cannot call `.next()` (W6-3b intact). Edge decided + fenced both ways: an
 > `iter`-only struct passed to a param ANNOTATED `Iterable[int]` now WORKS (the annotation IS the element
-> type), while the documented non-recovery under an `[S: Iterable[T], T]` BOUND is unchanged. 7 new
+> type), while the documented non-recovery under an `[S: Iterable[T], T]` BOUND is unchanged. 9 new
 > checker tests (incl. 4 invariance fences that were verified GREEN pre-fix, so they pin behavior the fix
-> must not move) + 4 `tests/chz/spec` `test fn`s covering list/set/map/str/cursor/generator/`next`-struct/
+> must not move) + 5 `tests/chz/spec` `test fn`s covering list/set/map/str/cursor/generator/`next`-struct/
 > `iter`-only-struct, a comprehension, the stateful-cursor drain, and the full cross product of
 > `List()`/`Set()`/`Map()`/`.iter()` × the `iter`-only witness. serial==M:N, verified on
 > the release binary both engines. Docs: `docs/syntax.md`, `docs/spec.md`, `docs/gaps.md` (W6-3e FIXED,
 > the "Known limits" line scoped to BOUND position, plus a filed cosmetic diagnostic-wording drift).
+> **Round 2** closed the protocol-SELECTION half of the same N-way set: the checker admitted a struct as
+> `Iterable` by WELL-FORMEDNESS while the runtime picks by NAME PRESENCE, so a struct with a MALFORMED
+> `next` plus a conforming `iter` was admitted via `iter` and then driven through the bad `next` —
+> silently wrong elements (`[1, 2, 3]` instead of `[9, 9]`), or a nil bound into a declared-`int` param,
+> identical on BOTH engines (parity-blind). `struct_iterable_elem` now refuses any struct that declares a
+> `next` at all — `next` wins by NAME, exactly as `Vm::iterable_to_cursor` decides — so such a struct is
+> non-iterable at CHECK time instead of check-OK-then-wrong. The collapsed `for`-binding arm's diagnostic
+> was widened along with it too: a two-name `for k, v` over an `Iterable[E]` annotation (or an
+> `[S: Iterable[T]]` bound) claimed "a struct iterator" with no struct in the program — it now names the
+> type (`` `for k, v` requires a map, found Iterable[str] ``); a real struct keeps the struct wording.
 
 > **✅ FIX (2026-07-26, gaps.md W6-3b) — `Iterator` now means CURSOR; a raw collection satisfies only
 > `Iterable`.** `fn f[T: Iterator[int]](c: T)` accepted `f([1, 2, 3])` and then faulted at runtime with

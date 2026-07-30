@@ -3366,6 +3366,13 @@ impl Checker {
     /// Sibling of [`struct_iter_elem`](Self::struct_iter_elem); used so a struct with `iter` but no
     /// `next` is recognised as `Iterable` and bound in `for`. `Iterator` is not a registered struct,
     /// so this only matches real user structs.
+    ///
+    /// "no `next`" is by NAME, not by conformance, and that is load-bearing: the runtime peer
+    /// ([`Vm::iterable_to_cursor`]) picks the iteration protocol by name presence — a struct that
+    /// declares `next` is driven through `next`, never converted via `iter`. Admitting a struct whose
+    /// `next` is MALFORMED (wrong arity, non-`Option` return) on the strength of its `iter` would sign
+    /// off on an element type the runtime never produces. So a declared `next` disqualifies this path
+    /// outright; a well-formed one is picked up by `struct_iter_elem` in `iterable_elem`'s first half.
     pub(super) fn struct_iterable_elem(&self, ty: &Ty) -> Option<Ty> {
         let Ty::Struct(name, targs) = ty else {
             return None;
@@ -3374,6 +3381,9 @@ impl Checker {
             return None; // the existential cursor — handled by `iter_elem`, not as a user struct
         }
         let info = self.structs.get(name)?;
+        if info.methods.contains_key("next") {
+            return None; // the runtime would drive `next`; only `struct_iter_elem` may admit it
+        }
         let sig = info.methods.get("iter")?;
         if sig.params.len() != 1 {
             return None; // (self) only
@@ -3655,7 +3665,7 @@ impl Checker {
                 });
                 match arg {
                     Some(_) if vars.len() != 1 => {
-                        self.error(iter.span, "a struct iterator binds a single loop variable");
+                        self.error(iter.span, format!("`for k, v` requires a map, found {it}"));
                         unknowns(vars)
                     }
                     Some(t) => vec![(vars[0].clone(), self.resolve_type(&t, iter.span))],
@@ -3684,7 +3694,13 @@ impl Checker {
                 // own `iter_elem().or_else(struct_iterable_elem)` precedence.
                 let elem = self.iterable_elem(&it).expect("guarded by the match arm");
                 if vars.len() != 1 {
-                    self.error(iter.span, "a struct iterator binds a single loop variable");
+                    // The arm is reached by protocol EXISTENTIALS too (an `Iterable[E]` annotation),
+                    // so only an actual struct gets told it is one; everything else is named.
+                    if matches!(it, Ty::Struct(..)) {
+                        self.error(iter.span, "a struct iterator binds a single loop variable");
+                    } else {
+                        self.error(iter.span, format!("`for k, v` requires a map, found {it}"));
+                    }
                     return unknowns(vars);
                 }
                 vec![(vars[0].clone(), elem)]

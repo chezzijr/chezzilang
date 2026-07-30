@@ -1133,6 +1133,10 @@ impl Vm {
     /// [`drain_iterable`](Self::drain_iterable) (`List()`/`Set()`/`Map()`/`.iter()`), which must accept
     /// the same witnesses — the checker's `iterable_elem` admits an `iter`-only struct, and an
     /// `Iterable[T]` ANNOTATION hands one to every consumer, not only to `for`.
+    ///
+    /// The `next`-lacks test is by NAME, and the checker mirrors it: `struct_iterable_elem` refuses any
+    /// struct that DECLARES a `next`, so a struct whose `next` is malformed is rejected at check time
+    /// rather than admitted via `iter` here and then driven through that `next` by `drain_iterable`.
     pub(super) fn iterable_to_cursor(
         &mut self,
         v: Value,

@@ -671,9 +671,28 @@ read-only covariance is deliberately not part of the model, **do not re-file it 
 now WORKS (the annotation is the element type); the documented non-recovery limit is about BOUND position
 and is unchanged — the "Known limits" line above was scoped, not deleted.
 Tests: `checker::tests::iterable_*` / `container_invariance_stays_rejected_for_iterable` /
-`iter_only_struct_bound_recovery_still_not_total`, and three `test fn`s in
+`iter_only_struct_bound_recovery_still_not_total`, and five `test fn`s in
 `tests/chz/spec/intrinsic_proto_methods_test.chz` (list/set/map/str/cursor/generator/`next`-struct/
 `iter`-only-struct, a comprehension, `List()`, and the stateful-cursor drain), serial==M:N.
+
+**Round 2 (adversarial review) — the protocol-SELECTION half of the same N-way set.** The first cut
+admitted a struct as `Iterable` by WELL-FORMEDNESS (`struct_iter_elem`, else fall back to
+`struct_iterable_elem`'s `iter`) while the runtime picks by NAME PRESENCE (`iterable_to_cursor`: a
+declared `next` ⇒ drive `next`, never convert via `iter`). A struct with a MALFORMED `next` (extra
+params, or a non-`Option` return) plus a conforming `iter` was therefore admitted via `iter` and then
+driven through the bad `next`: `viaList(Odd([9, 9], 0))` with `fn viaList(xs: Iterable[int])` returned
+`[1, 2, 3]`, and a `next(self, k: int)` had `k` bound to nil (`drain_iterable`'s `run_proto` does not
+arity-check) → `cannot apply Add to nil and int`. Identical on BOTH engines, so parity was blind to it.
+Fixed by making the checker's rule the runtime's rule: `struct_iterable_elem` refuses any struct that
+declares a `next`, so such a struct is non-iterable at check time (`syntax.md`, "`next` wins by NAME").
+Two diagnostics were also widened wrongly along with the collapsed `for`-binding arm: a two-name
+`for k, v` over an `Iterable[E]` ANNOTATION (or an `[S: Iterable[T]]` bound) reported "a struct iterator
+binds a single loop variable" with no struct in the program — it now names the type
+(`` `for k, v` requires a map, found Iterable[(str, int)] ``); a real struct keeps the struct wording.
+Fences: `checker::tests::struct_with_nonconforming_next_is_not_iterable`,
+`two_var_for_over_iterable_annotation_names_the_type`, and `tests/chz/spec`'s
+`next_wins_over_iter_for_every_iterable_consumer` (a struct whose `next` and `iter` yield DIFFERENT
+elements — every consumer must agree on `next`).
 
 **Diagnostic-wording drift (cosmetic, not fixed)** — passing a concrete `str` into a `List[T]` inside
 `fn f[T](xs: List[T])` reports "the collection's element type was pinned to `T` by an earlier push" when
