@@ -3463,7 +3463,7 @@ impl crate::native::Host for OffloadHost {
     fn os_env(&self, _key: &str) -> Option<String> {
         unreachable!("offloaded blocking native must not read env (off-heap host)")
     }
-    fn os_getcwd(&self) -> Result<String, crate::native::HostError> {
+    fn os_getcwd(&self) -> Result<Vec<u8>, crate::native::HostError> {
         unreachable!("offloaded blocking native must not read cwd (off-heap host)")
     }
 }
@@ -3774,9 +3774,11 @@ impl crate::native::Host for VmHost<'_> {
             .unwrap_or_else(|e| e.into_inner())
             .insert(key, value);
     }
-    fn os_getcwd(&self) -> Result<String, crate::native::HostError> {
+    fn os_getcwd(&self) -> Result<Vec<u8>, crate::native::HostError> {
+        // W7-8 — RAW bytes, not `display().to_string()`: a non-UTF-8 cwd used to come back U+FFFD-
+        // substituted, naming nothing.
         std::env::current_dir()
-            .map(|p| p.display().to_string())
+            .map(|p| crate::native::fs::path_bytes(&p))
             .map_err(|e| crate::native::HostError {
                 message: e.to_string(),
             })

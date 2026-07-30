@@ -15,7 +15,7 @@ import std.os
 import std.fs
 
 fn scratch(name: str) -> str:
-    return os.temp_dir() + "/chz_w7_9_" + name + "_" + str(os.getpid()) + ".dat"
+    return os.temp_dir().str() + "/chz_w7_9_" + name + "_" + str(os.getpid()) + ".dat"
 
 # Write a fixture and hand back its path.
 fn make(name: str, data: bytes) -> str:

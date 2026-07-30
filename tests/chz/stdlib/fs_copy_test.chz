@@ -17,7 +17,7 @@ import std.os
 import std.process as pr
 
 fn scratch(name: str) -> str:
-    return os.temp_dir() + "/chz_w7_1_" + name + "_" + str(os.getpid()) + ".txt"
+    return os.temp_dir().str() + "/chz_w7_1_" + name + "_" + str(os.getpid()) + ".txt"
 
 fn seed(p: str, text: str):
     match io.write_file(p, text):

@@ -1,5 +1,8 @@
-# tests/chz/suites/path_test.chz — TDD table for std.path (unix '/' path-STRING ops).
+# tests/chz/suites/path_test.chz — TDD table for std.path (unix '/' lexical path ops).
 # Edge cases mirror Python os.path / Go path.Clean. Run: `cargo run -- test tests/chz/suites/path_test.chz`.
+# W7-8 — the helpers are `PathLike -> Path` now, so each assertion converts once with `.str()` (the
+# lossy display; every fixture here is ASCII, so it is exact). `t_byte_exact` below is the case a
+# `str`-typed layer could not represent at all.
 
 import std.path
 
@@ -12,87 +15,130 @@ test fn t_is_abs():
     assert path.is_rel("/a") == false
 
 test fn t_basename():
-    assert path.basename("a/b") == "b"
-    assert path.basename("a/b/") == ""
-    assert path.basename("/") == ""
-    assert path.basename("") == ""
-    assert path.basename("a") == "a"
-    assert path.basename("/a/b.txt") == "b.txt"
+    assert path.basename("a/b").str() == "b"
+    assert path.basename("a/b/").str() == ""
+    assert path.basename("/").str() == ""
+    assert path.basename("").str() == ""
+    assert path.basename("a").str() == "a"
+    assert path.basename("/a/b.txt").str() == "b.txt"
 
 test fn t_dirname():
-    assert path.dirname("a/b") == "a"
-    assert path.dirname("a/b/") == "a/b"
-    assert path.dirname("/a") == "/"
-    assert path.dirname("a") == ""
-    assert path.dirname("/") == "/"
-    assert path.dirname("") == ""
-    assert path.dirname("/a/b") == "/a"
+    assert path.dirname("a/b").str() == "a"
+    assert path.dirname("a/b/").str() == "a/b"
+    assert path.dirname("/a").str() == "/"
+    assert path.dirname("a").str() == ""
+    assert path.dirname("/").str() == "/"
+    assert path.dirname("").str() == ""
+    assert path.dirname("/a/b").str() == "/a"
     # redundant interior/trailing slashes in the head are collapsed (posixpath)
-    assert path.dirname("a//b") == "a"
-    assert path.dirname("a///b") == "a"
-    assert path.dirname("a///") == "a"
-    assert path.dirname("/a//b") == "/a"
+    assert path.dirname("a//b").str() == "a"
+    assert path.dirname("a///b").str() == "a"
+    assert path.dirname("a///").str() == "a"
+    assert path.dirname("/a//b").str() == "/a"
 
 test fn t_split():
     d, b := path.split("a/b")
-    assert d == "a"
-    assert b == "b"
+    assert d.str() == "a"
+    assert b.str() == "b"
     d2, b2 := path.split("a/b/")
-    assert d2 == "a/b"
-    assert b2 == ""
+    assert d2.str() == "a/b"
+    assert b2.str() == ""
     d3, b3 := path.split("/a")
-    assert d3 == "/"
-    assert b3 == "a"
+    assert d3.str() == "/"
+    assert b3.str() == "a"
     d4, b4 := path.split("a//b")
-    assert d4 == "a"
-    assert b4 == "b"
+    assert d4.str() == "a"
+    assert b4.str() == "b"
 
 test fn t_ext():
-    assert path.ext("a/b.tar.gz") == ".gz"
-    assert path.ext("a.txt") == ".txt"
-    assert path.ext("README") == ""
-    assert path.ext(".bashrc") == ""
-    assert path.ext("a.") == "."
-    assert path.ext("dir.d/file") == ""
+    assert path.ext("a/b.tar.gz").str() == ".gz"
+    assert path.ext("a.txt").str() == ".txt"
+    assert path.ext("README").str() == ""
+    assert path.ext(".bashrc").str() == ""
+    assert path.ext("a.").str() == "."
+    assert path.ext("dir.d/file").str() == ""
     # multiple leading dots are all part of the (dot-only) name — no extension (Python splitext)
-    assert path.ext("..gitignore") == ""
-    assert path.ext("..") == ""
-    assert path.ext("...") == ""
-    assert path.ext("..a.txt") == ".txt"
+    assert path.ext("..gitignore").str() == ""
+    assert path.ext("..").str() == ""
+    assert path.ext("...").str() == ""
+    assert path.ext("..a.txt").str() == ".txt"
 
 test fn t_stem():
-    assert path.stem("a/b.tar.gz") == "b.tar"
-    assert path.stem(".bashrc") == ".bashrc"
-    assert path.stem("a.txt") == "a"
-    assert path.stem("a/b") == "b"
-    assert path.stem("..gitignore") == "..gitignore"
+    assert path.stem("a/b.tar.gz").str() == "b.tar"
+    assert path.stem(".bashrc").str() == ".bashrc"
+    assert path.stem("a.txt").str() == "a"
+    assert path.stem("a/b").str() == "b"
+    assert path.stem("..gitignore").str() == "..gitignore"
 
 test fn t_with_ext():
-    assert path.with_ext("a/b.txt", ".md") == "a/b.md"
-    assert path.with_ext("a/b", ".md") == "a/b.md"
-    assert path.with_ext("a/b.txt", "") == "a/b"
-    assert path.with_ext("a/b.txt", "md") == "a/b.md"
+    assert path.with_ext("a/b.txt", ".md").str() == "a/b.md"
+    assert path.with_ext("a/b", ".md").str() == "a/b.md"
+    assert path.with_ext("a/b.txt", "").str() == "a/b"
+    assert path.with_ext("a/b.txt", "md").str() == "a/b.md"
     # the filename must not be dropped for a dot-only-prefixed name
-    assert path.with_ext("..gitignore", "bak") == "..gitignore.bak"
+    assert path.with_ext("..gitignore", "bak").str() == "..gitignore.bak"
 
 test fn t_normalize():
-    assert path.normalize("") == "."
-    assert path.normalize("/") == "/"
-    assert path.normalize("//") == "/"
-    assert path.normalize(".") == "."
-    assert path.normalize("..") == ".."
-    assert path.normalize("a/b/../c") == "a/c"
-    assert path.normalize("a/./b") == "a/b"
-    assert path.normalize("a/b/") == "a/b"
-    assert path.normalize("./a") == "a"
-    assert path.normalize("/..") == "/"
-    assert path.normalize("/a/../../b") == "/b"
-    assert path.normalize("a/../../b") == "../b"
+    assert path.normalize("").str() == "."
+    assert path.normalize("/").str() == "/"
+    assert path.normalize("//").str() == "/"
+    assert path.normalize(".").str() == "."
+    assert path.normalize("..").str() == ".."
+    assert path.normalize("a/b/../c").str() == "a/c"
+    assert path.normalize("a/./b").str() == "a/b"
+    assert path.normalize("a/b/").str() == "a/b"
+    assert path.normalize("./a").str() == "a"
+    assert path.normalize("/..").str() == "/"
+    assert path.normalize("/a/../../b").str() == "/b"
+    assert path.normalize("a/../../b").str() == "../b"
 
 test fn t_join():
-    assert path.join(["a", "b", "c"]) == "a/b/c"
-    assert path.join(["a/", "b"]) == "a/b"
-    assert path.join(["", "b"]) == "b"
-    assert path.join([]) == ""
-    assert path.join(["a", "", "c"]) == "a/c"
-    assert path.join(["/a", "b"]) == "/a/b"
+    assert path.join(["a", "b", "c"]).str() == "a/b/c"
+    assert path.join(["a/", "b"]).str() == "a/b"
+    assert path.join(["", "b"]).str() == "b"
+    assert path.join([]).str() == ""
+    assert path.join(["a", "", "c"]).str() == "a/c"
+    assert path.join(["/a", "b"]).str() == "/a/b"
+
+# W7-8 review — `join` is the one helper whose path sits inside a CONTAINER, and Chezzi containers are
+# INVARIANT. A `parts: List[PathLike]` parameter was therefore callable ONLY with a list LITERAL: no
+# `List[str]` variable, no `List[bytes]`, and not even `join`'s own sibling output (`fs.list_dir` hands
+# back `List[path.Path]`) could ever be passed — a hard regression against the old `List[str]` signature
+# that a literal-only test table cannot see. `join` is generic over the element type with a `PathLike`
+# BOUND instead, so every homogeneous list is callable and invariance is untouched.
+# (A HETEROGENEOUS literal — `[a_path, "sub"]` — has no single element type and is rejected at the
+# literal itself, exactly as for any other list; spell the components in one type.)
+test fn t_join_of_variables():
+    xs: List[str] = ["a", "b"]
+    assert path.join(xs).str() == "a/b"
+    # …including a list handed over by another fn, not written out here.
+    assert path.join("/a/b/c.txt".split("/")).str() == "a/b/c.txt"
+    bs: List[bytes] = [b"a", b"A\xffB"]
+    assert path.join(bs).bytes() == b"a/A\xffB"
+    ps: List[path.Path] = [path.Path(b"x"), path.Path(b"A\xffB")]
+    assert path.join(ps).bytes() == b"x/A\xffB"
+    # the empty list still needs no element type to infer
+    assert path.join([]).str() == ""
+
+# W7-8 — the whole point of `PathLike -> Path`: the lexical ops are BYTE-EXACT, so a filename that is
+# not valid UTF-8 survives them. Asserted on BYTES (a lossy decode is not injective, so a text-only
+# compare could pass a byte-divergent run).
+test fn t_byte_exact():
+    assert path.basename(b"a/A\xffB.txt").bytes() == b"A\xffB.txt"
+    assert path.dirname(b"a/A\xffB.txt").bytes() == b"a"
+    assert path.ext(b"A\xffB.tar.gz").bytes() == b".gz"
+    assert path.stem(b"A\xffB.txt").bytes() == b"A\xffB"
+    assert path.normalize(b"a/../A\xffB").bytes() == b"A\xffB"
+    assert path.join([b"a", b"A\xffB"]).bytes() == b"a/A\xffB"
+    assert path.with_ext(b"d/A\xffB.txt", "md").bytes() == b"d/A\xffB.md"
+    assert path.is_abs(b"/A\xffB")
+
+# Every input spelling reaches the same result, and the ops CHAIN (a `Path` is itself `PathLike`),
+# converting once at the very end.
+test fn t_pathlike_inputs_and_chaining():
+    assert path.basename("a/b.txt").str() == "b.txt"
+    assert path.basename(b"a/b.txt").str() == "b.txt"
+    assert path.basename(bytearray(b"a/b.txt")).str() == "b.txt"
+    assert path.basename(path.Path(b"a/b.txt")).str() == "b.txt"
+    assert path.with_ext(path.join(["d", "sub", "f"]), "txt").str() == "d/sub/f.txt"
+    assert path.stem(path.basename(path.normalize("x/./y/z.tar.gz"))).str() == "z.tar"

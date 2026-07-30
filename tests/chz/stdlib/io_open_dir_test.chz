@@ -34,7 +34,7 @@ fn write_then_read_line(p: str) -> Result[str]:
     return Ok(line)
 
 test fn open_regular_file_still_ok():
-    p := os.temp_dir() + "/chz_w6_18_" + str(os.getpid()) + ".txt"
+    p := os.temp_dir().str() + "/chz_w6_18_" + str(os.getpid()) + ".txt"
     defer fs.remove_file(p)
     match write_then_read_line(p):
         Ok(line): assert line == "hello", "got: {line}"

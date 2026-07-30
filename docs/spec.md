@@ -560,7 +560,9 @@ root marker (all fields default to unset, so `entrypoint` is required only for t
 - **Std modules — M8 (shipped):** `std.json` (pure-Chezzi `Json` enum + `parse`/`stringify`/
   accessors **and** type-directed `json.decode[T](s)` into a struct/map/list/scalar);
   `std.process` (`cmd(s) -> Result[str]`); `std.fs` (`list_dir`/`exists`/`is_file`/`is_dir`/
-  `size`/`glob`); `std.time` (`now`/`monotonic`/`sleep_ms`/`format`). Plus the **`set`** type
+  `size`/`glob` — since W7-8 every path argument is a **`PathLike`** and every path result a
+  **`path.Path`** over the raw OS bytes, so a non-UTF-8 filename round-trips instead of coming back
+  `U+FFFD`-substituted); `std.time` (`now`/`monotonic`/`sleep_ms`/`format`). Plus the **`set`** type
   (`{a, b, c}`), **`s.chars()`** + iterable strings (Python-style; no `char` type).
 - **Std modules — M9 (shipped):** `std.regex` (the `regex` crate; stateless `is_match`/`find`/
   `find_all`/`replace_all`/`split`, returning a `Match` struct `{text, start, end, groups}` — spans

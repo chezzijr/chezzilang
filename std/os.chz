@@ -11,10 +11,23 @@
 # `exit(code)` never returns, but the checker has no `never` type; `nil` is the closest void-ish
 # result and lets (unreachable) statements follow it.
 
+import std.path
+
 native fn args() -> List[str]
 native fn env(key: str) -> Option[str]
-native fn getcwd() -> Result[str]
 native fn exit(code: int) -> nil
+
+# W7-8 — the INTERNAL byte seam (raw OS `bytes` in/out); see std/fs.chz for the convention.
+native fn _getcwd() -> Result[bytes]
+native fn _chdir(path: bytes) -> Result[nil]
+
+# `getcwd()` hands back a `path.Path` — the raw cwd bytes, NOT a lossily-decoded `str` (a non-UTF-8
+# cwd used to come back U+FFFD-substituted, naming nothing). CONCRETE return type: no type argument,
+# no turbofish, no `getcwd_bytes` twin.
+fn getcwd() -> Result[path.Path]:
+    match _getcwd():
+        Ok(b): return Ok(path.Path(b))
+        Err(e): return Err(e)
 
 # System queries (gaps §6). getpid/platform/hostname/temp_dir are engine-agnostic process reads;
 # home_dir reads the HostConfig `HOME` (same source as `env`), so it's None when unset.
@@ -22,7 +35,15 @@ native fn getpid() -> int
 native fn platform() -> str
 native fn hostname() -> str
 native fn home_dir() -> Option[str]
-native fn temp_dir() -> str
+# `temp_dir()` hands back a `path.Path` for the same reason `getcwd()` does (W7-8): `$TMPDIR` is raw
+# OS bytes, so decoding it would leave a path-returning API through which a U+FFFD path — one that
+# names nothing — is still constructible. `.str()` for display, `.decode()` for an exact `str`.
+# (`home_dir()` stays `Option[str]`: it reads the HostConfig env map, which is a DELIBERATELY lossy
+# surface — see the argv/env decoding rule in docs/stdlib.md.)
+native fn _temp_dir() -> bytes
+
+fn temp_dir() -> path.Path:
+    return path.Path(_temp_dir())
 # `environ()` (sorted by key) reads the SAME HostConfig env map `env` reads, and `setenv` WRITES it —
 # so a `setenv` is observed by both `env` and `environ` (no third disagreeing source). The map is
 # shared across M:N workers, so a `setenv` from inside a task is visible to the parent + siblings
@@ -32,4 +53,5 @@ native fn environ() -> Map[str, str]
 native fn setenv(key: str, value: str) -> nil
 # `chdir` mutates the REAL process cwd (like `getcwd` reads it). Process-global: shared by all M:N
 # workers, so a task's `chdir` affects sibling tasks' relative paths (Python/Go have the same ceiling).
-native fn chdir(path: str) -> Result[nil]
+fn chdir(p: PathLike) -> Result[nil]:
+    return _chdir(p.as_path())

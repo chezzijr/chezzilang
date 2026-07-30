@@ -2790,6 +2790,22 @@ impl Checker {
                         );
                     } else {
                         self.register_native_decl(decl);
+                        // W7-8 — a HYBRID std module's bodied fn may CALL a `native fn` sibling
+                        // (`std.fs`'s `exists` wrapper calls `_exists`). The graph path repopulates
+                        // `functions` from the harvested `ModuleSig`, but the SINGLE-MODULE path
+                        // (standalone `chezzi check <std file>`) only had `native_prelude_sigs`, which
+                        // bare-name resolution does not consult — the call read `unknown name`.
+                        // Register the sig as an ordinary module function so both paths agree.
+                        // Skipped for a `native ctor` (not first-class), for a universe builtin (its
+                        // dispatch is the `PRELUDE` table's, not a module function's), and for
+                        // `timer` (opcode-backed, bare-callable only — same carve-out the harvest makes).
+                        if decl.kind == crate::ast::NativeKind::Fn
+                            && decl.name != "timer"
+                            && crate::checker::prelude_fn(&decl.name).is_none()
+                        {
+                            let fsig = self.harvest_native_fn_sig(decl, false);
+                            self.functions.insert(decl.name.clone(), fsig);
+                        }
                     }
                 }
                 StmtKind::NativeStruct { span, .. } => {

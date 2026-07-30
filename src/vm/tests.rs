@@ -13963,6 +13963,7 @@ fn intrinsic_grants_all_have_vm_arms() {
         ("str", "{r}.str()"),
         ("hash", "{r}.hash()"),
         ("message", "{r}.message()"),
+        ("as_path", "{r}.as_path()"),
         ("iter", "{r}.iter()"),
         ("next", "{r}.next()"),
         ("index", "{r}.index({k})"),

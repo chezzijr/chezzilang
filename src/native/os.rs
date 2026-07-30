@@ -25,10 +25,14 @@ fn env(h: &mut dyn Host) -> Result<NativeRet, HostError> {
     }
 }
 
+/// `getcwd()` — the real working directory as RAW OS bytes (W7-8). `std/os.chz`'s bodied wrapper
+/// re-wraps them into a `path.Path`, so the public signature is `Result[path.Path]` — a concrete
+/// return type with NO type argument and no turbofish (a type-arg-dependent return is unimplementable
+/// here: type args are erased before `Vm::call_native`).
 fn getcwd(h: &mut dyn Host) -> Result<NativeRet, HostError> {
     expect_args(h, "getcwd", 0)?;
     match h.os_getcwd() {
-        Ok(p) => Ok(NativeRet::Ok(Box::new(NativeRet::Str(p)))),
+        Ok(p) => Ok(NativeRet::Ok(Box::new(NativeRet::Bytes(p)))),
         Err(e) => Ok(NativeRet::Err(e.message)),
     }
 }
@@ -78,9 +82,16 @@ fn home_dir(h: &mut dyn Host) -> Result<NativeRet, HostError> {
 }
 
 /// `temp_dir()` — the system temp directory (`std::env::temp_dir()`). Engine-agnostic.
+///
+/// W7-8 (review) — RAW OS bytes, like `getcwd`. `std::env::temp_dir()` reads `$TMPDIR` through
+/// `var_os`, so it is byte-exact at the source; the old `.display().to_string()` threw that away and
+/// left a path-RETURNING API through which a `U+FFFD` path was still constructible — the same defect
+/// class W7-8 closes, in a site its original report did not name.
 fn temp_dir(h: &mut dyn Host) -> Result<NativeRet, HostError> {
     expect_args(h, "temp_dir", 0)?;
-    Ok(NativeRet::Str(std::env::temp_dir().display().to_string()))
+    Ok(NativeRet::Bytes(super::fs::path_bytes(
+        &std::env::temp_dir(),
+    )))
 }
 
 /// `environ()` — ALL environment variables from the SAME HostConfig env map `env` reads (shared by
@@ -115,7 +126,7 @@ fn setenv(h: &mut dyn Host) -> Result<NativeRet, HostError> {
 /// layer, not worth it.
 fn chdir(h: &mut dyn Host) -> Result<NativeRet, HostError> {
     expect_args(h, "chdir", 1)?;
-    let p = h.arg_str(0)?;
+    let p = super::fs::arg_path(h, 0)?;
     match std::env::set_current_dir(&p) {
         Ok(()) => Ok(NativeRet::Ok(Box::new(NativeRet::Nil))),
         Err(e) => Ok(NativeRet::Err(e.to_string())),
@@ -138,14 +149,16 @@ fn exit(h: &mut dyn Host) -> Result<NativeRet, HostError> {
 pub const MEMBERS: &[(&str, NativeFn)] = &[
     ("args", args),
     ("env", env),
-    ("getcwd", getcwd),
+    // W7-8 — `_`-prefixed = the INTERNAL byte seam (raw `bytes` in/out); the public `getcwd`/`chdir`
+    // are bodied `PathLike`/`path.Path` wrappers in `std/os.chz`.
+    ("_getcwd", getcwd),
     ("exit", exit),
     ("getpid", getpid),
     ("platform", platform),
     ("hostname", hostname),
     ("home_dir", home_dir),
-    ("temp_dir", temp_dir),
+    ("_temp_dir", temp_dir),
     ("environ", environ),
     ("setenv", setenv),
-    ("chdir", chdir),
+    ("_chdir", chdir),
 ];

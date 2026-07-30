@@ -57,6 +57,11 @@ pub const INTRINSIC_PROTO_METHODS: &[(&str, &str, &str)] = &[
     ("Hashable", "hash", "struct"),
     // Error — `str`'s message is itself (Go model).
     ("Error", "message", "str"),
+    // PathLike (W7-8) — the three byte-ish scalars a path can be spelled as. None of them HAS an
+    // `as_path` method, so the grant is the only seam; `path.Path` conforms structurally instead.
+    ("PathLike", "as_path", "str"),
+    ("PathLike", "as_path", "bytes"),
+    ("PathLike", "as_path", "bytearray"),
     // Iterable — everything `iterable_elem` accepts.
     ("Iterable", "iter", "list"),
     ("Iterable", "iter", "set"),
@@ -1180,6 +1185,15 @@ impl Checker {
         }
         // `str` conforms to `Error` intrinsically (Go-style: its message is itself).
         if protocol == "Error" && matches!(ty, Ty::Str) {
+            return self.grant_intrinsic(protocol, ty);
+        }
+        // W7-8 — `PathLike` is satisfied intrinsically by the three byte-ish spellings of a path: a
+        // `str` (UTF-8-encoded), a `bytes` (itself), a `bytearray` (copied). This is a VALUE-level
+        // early-out keyed on the concrete scalar `Ty` alone — it can never widen a CONTAINER (a
+        // `List[str]` is compared element-wise by `compatible`, which does not route here), so
+        // `List[int] -> List[Any]` and friends stay rejected exactly as before. `path.Path` is a
+        // struct and falls through to the structural check against its own `as_path(self) -> bytes`.
+        if protocol == "PathLike" && matches!(ty, Ty::Str | Ty::Bytes | Ty::ByteArray) {
             return self.grant_intrinsic(protocol, ty);
         }
         // `Iterator` conformance is "HOLDS a cursor position" — a real cursor/generator

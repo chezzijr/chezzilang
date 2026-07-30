@@ -18,7 +18,7 @@ import std.fs
 
 # Write the 3 bytes `A \xff B` to a per-process scratch file and return its path.
 fn bad_bytes_file(name: str) -> str:
-    p := os.temp_dir() + "/chz_w6_4_" + name + "_" + str(os.getpid()) + ".bin"
+    p := os.temp_dir().str() + "/chz_w6_4_" + name + "_" + str(os.getpid()) + ".bin"
     match io.write_bytes(p, b"A\xffB"):
         Ok(_): pass
         Err(e): assert false, "setup: " + e.message()

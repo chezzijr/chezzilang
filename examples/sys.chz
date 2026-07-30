@@ -4,7 +4,17 @@
 
 import std.process
 import std.fs
+import std.path
 import std.time
+
+# W7-8 — the fs listing fns hand back `path.Path` (raw OS bytes), so a non-UTF-8 filename survives.
+# Convert to `str` for display here: `p.str()` is the LOSSY display (it never faults); `p.decode()`
+# is the exact conversion that faults on a name that is not valid UTF-8.
+fn shown(ps: List[path.Path]) -> str:
+    out: List[str] = []
+    for p in ps:
+        out.push(p.str())
+    return ",".join(out)
 
 # --- std.process: a command's output comes back as Result[str] (Ok=stdout, Err=stderr) ---
 match process.cmd("echo hello from the shell"):
@@ -22,11 +32,11 @@ print("is_dir(examples): " + str(fs.is_dir("examples")))
 print("is_file(examples): " + str(fs.is_file("examples")))
 
 match fs.list_dir("examples/sysfixture"):
-    Ok(names): print("list: " + ",".join(names))
+    Ok(names): print("list: " + shown(names))
     Err(e): print("error: " + e.message())
 
 match fs.glob("examples/sysfixture/*.txt"):
-    Ok(hits): print("glob: " + ",".join(hits))
+    Ok(hits): print("glob: " + shown(hits))
     Err(e): print("error: " + e.message())
 
 match fs.size("examples/sysfixture/a.txt"):

@@ -90,7 +90,7 @@ pub fn compile_graph(graph: &ModuleGraph) -> Result<Program, CompileError> {
     // only its `test fn`s / suites are recorded for `chezzi test` discovery.
     let entry_idx = graph.modules.len().saturating_sub(1);
     for (idx, lm) in graph.modules.iter().enumerate() {
-        let toplevel = c.compile_module(idx, &lm.ast, &lm.imports, idx == entry_idx)?;
+        let toplevel = c.compile_module(idx, &lm.ast, &lm.imports, idx == entry_idx, lm.native)?;
         let global_slots = std::mem::take(&mut c.global_slots);
         c.program.modules.push(ModuleProto {
             id: lm.id.clone(),
@@ -142,7 +142,7 @@ pub fn compile_module_standalone(module: &Module) -> Result<Program, CompileErro
     // multi-file CLI uses (no second backend resolver exists). The backend reads this table verbatim.
     c.extern_sigs = crate::checker::resolve_extern_signatures_standalone(&module.stmts);
     c.keyword_calls = crate::checker::resolve_keyword_calls_standalone(&module.stmts);
-    let toplevel = c.compile_module(0, module, &[], true)?;
+    let toplevel = c.compile_module(0, module, &[], true, None)?;
     let global_slots = std::mem::take(&mut c.global_slots);
     // A synthetic module id so the run driver has something to key the namespace cache on.
     let id = crate::resolver::ModuleId(std::path::PathBuf::from("<main>"));
@@ -794,7 +794,15 @@ impl Compiler {
     /// code is emitted, so forward references (a fn body reading a global declared later, an import
     /// used before its line) resolve to a stable slot. Order: imports, then top-level `fn`s, then
     /// top-level `let`s — only internal consistency matters (the run driver reads the same list).
-    fn collect_globals(&mut self, imports: &[ResolvedImport], stmts: &[Stmt]) {
+    ///
+    /// `native` is the module's native-std name (`Some("std.fs")`) — a HYBRID native module's
+    /// `native fn`s are module globals too, see the `StmtKind::Native` arm below.
+    fn collect_globals(
+        &mut self,
+        imports: &[ResolvedImport],
+        stmts: &[Stmt],
+        native: Option<&'static str>,
+    ) {
         use crate::ast::Import;
         self.globals.clear();
         self.global_slots.clear();
@@ -829,6 +837,24 @@ impl Compiler {
                 add(decl.name.clone(), &mut self.globals, &mut self.global_slots);
                 // Same-module top-level fn — licenses the generic-fn-as-value turbofish erase below.
                 self.fn_names.insert(decl.name.clone());
+            }
+            // W7-8 — a `native fn` in a HYBRID native module (`std.fs`'s `_exists`) is a module global
+            // too: `Vm::run_module` injects its Rust `NativeFn` BY NAME and `module_define` reuses an
+            // existing index, so reserving the slot here is exactly what lets a BODIED sibling in the
+            // same file call it (`fs.exists`'s `PathLike` wrapper calling `_exists`). Without the slot
+            // the call compiled to `global_slot` → the "global has no slot" panic.
+            // Restricted to names the runtime actually injects (`native_members`), so an OPCODE-backed
+            // decl (`std.time.timer`) still gets no slot and no nil global; `native ctor` is not
+            // first-class and never takes one. NOT added to `self.fn_names` — that licenses the
+            // generic-fn-as-value turbofish erase, which a native fn is not.
+            if let Some(nat) = native
+                && let StmtKind::Native(d) = &stmt.kind
+                && d.kind == crate::ast::NativeKind::Fn
+                && crate::native::native_members(nat)
+                    .iter()
+                    .any(|(n, _)| *n == d.name)
+            {
+                add(d.name.clone(), &mut self.globals, &mut self.global_slots);
             }
             // Each extern C fn is a module global bound at init (like a top-level `fn`).
             if let StmtKind::Extern { fns, .. } = &stmt.kind {
@@ -939,10 +965,11 @@ impl Compiler {
         module: &Module,
         imports: &[ResolvedImport],
         is_entry: bool,
+        native: Option<&'static str>,
     ) -> Result<ProtoId, CompileError> {
         // M19 Phase 2b: assign a stable slot to every module global before emitting any code, so
         // forward references (method/fn bodies, imports used before their line) resolve to a slot.
-        self.collect_globals(imports, &module.stmts);
+        self.collect_globals(imports, &module.stmts, native);
         // Module-scoped types: record this module's index + its imported module bindings, so a
         // qualified `geo.Point(...)` resolves to the right module's runtime key.
         self.current_module_idx = module_idx;

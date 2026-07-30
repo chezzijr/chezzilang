@@ -25,14 +25,28 @@ native fn isatty() -> bool
 native fn isatty_stdin() -> bool
 native fn isatty_stderr() -> bool
 native fn input(prompt: str) -> Option[str]
-native fn read_file(path: str) -> Result[str]
-native fn write_file(path: str, text: str) -> Result[nil]
+# W7-8 — the INTERNAL byte seam (raw OS `bytes` path in); see std/fs.chz for the convention. The
+# PUBLIC wrappers below take a `PathLike`, so a bare `str` literal still works with no annotation.
+native fn _read_file(path: bytes) -> Result[str]
+native fn _write_file(path: bytes, text: str) -> Result[nil]
+native fn _read_bytes(path: bytes) -> Result[bytes]
+native fn _write_bytes(path: bytes, data: bytes) -> Result[nil]
+
+fn read_file(p: PathLike) -> Result[str]:
+    return _read_file(p.as_path())
+
+fn write_file(p: PathLike, text: str) -> Result[nil]:
+    return _write_file(p.as_path(), text)
+
 # Binary whole-file I/O (R1). `read_file` DECODES UTF-8, so it errs on a binary file — `read_bytes`
 # is the escape hatch. Same 64 MB read cap as `read_file`; `write_bytes` (like `write_file`) has none.
-# `write_bytes` takes a `bytes` — convert a `bytearray` buffer with `bytes(ba)` (an explicit copy,
-# like CPython's `bytes(ba)`; `bytearray` is deliberately NOT assignable to a `bytes` sink).
-native fn read_bytes(path: str) -> Result[bytes]
-native fn write_bytes(path: str, data: bytes) -> Result[nil]
+# `write_bytes` takes a `bytes` DATA arg — convert a `bytearray` buffer with `bytes(ba)` (an explicit
+# copy, like CPython's `bytes(ba)`; `bytearray` is deliberately NOT assignable to a `bytes` sink).
+fn read_bytes(p: PathLike) -> Result[bytes]:
+    return _read_bytes(p.as_path())
+
+fn write_bytes(p: PathLike, data: bytes) -> Result[nil]:
+    return _write_bytes(p.as_path(), data)
 
 # Writer / file-handle type (R2) — buffered + streaming write-only output. `Writer` is a RESERVED
 # opaque VM handle (`Ty::Writer`, NOT a nominal struct — no field layout), and the openers + methods
@@ -55,8 +69,15 @@ native struct Writer:
     native fn flush(self) -> Result[nil]
     native fn close(self) -> Result[nil]
 
-native fn create(path: str) -> Result[Writer]
-native fn append(path: str) -> Result[Writer]
+native fn _create(path: bytes) -> Result[Writer]
+native fn _append(path: bytes) -> Result[Writer]
+
+fn create(p: PathLike) -> Result[Writer]:
+    return _create(p.as_path())
+
+fn append(p: PathLike) -> Result[Writer]:
+    return _append(p.as_path())
+
 native fn stdout() -> Writer
 native fn stderr() -> Writer
 native fn buffered(w: Writer, size: int = 8192) -> Writer
@@ -97,4 +118,7 @@ native struct Reader:
                 Some(l): yield l
                 None: break
 
-native fn open(path: str) -> Result[Reader]
+native fn _open(path: bytes) -> Result[Reader]
+
+fn open(p: PathLike) -> Result[Reader]:
+    return _open(p.as_path())

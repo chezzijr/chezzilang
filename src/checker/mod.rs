@@ -469,6 +469,7 @@ fn is_reserved_protocol(name: &str) -> bool {
             | "Slice"
             | "Convert"
             | "Contains"
+            | "PathLike"
     )
 }
 
@@ -989,6 +990,23 @@ impl Checker {
                 // a MINIMAL arm carrying only the `timer` opcode-license in `sig.types` (harvest then
                 // fills its 4 real fns on top). Same predicate as the resolver's `visit_native_file`
                 // gate — lockstep by construction.
+                // W7-8 — a native `.chz` may `import` a sibling std module and NAME ITS TYPES in the
+                // harvested SIGNATURES (`std.fs`'s `list_dir(p: PathLike) -> Result[List[path.Path]]`).
+                // The harvest RESOLVES those types, so the imports must be bound BEFORE it — the
+                // `has_bodied` bind below (which exists for bodied BODIES) runs far too late and the
+                // signature errored `unknown module 'path'`. `begin_module` first, so the harvest sees
+                // the same clean, stdlib-seeded env `check_module` gives an AST module rather than
+                // whatever the previously-checked module left behind.
+                // Gated on actually HAVING an import, so every pure-native module's live-table state is
+                // byte-identical to before this change.
+                if !lm.imports.is_empty() {
+                    c.begin_module(Some(lm.label()));
+                    c.current_module_is_stdlib = true;
+                    c.push_scope(); // `bind_import` declares the bound name — it needs a live scope
+                    for imp in &lm.imports {
+                        c.bind_import(imp);
+                    }
+                }
                 if crate::native::is_file_backed_native(name) {
                     c.harvest_native_module(&lm.ast, &mut sig);
                 }
@@ -1106,6 +1124,14 @@ impl Checker {
                             c.exit_type_params(saved);
                         }
                     }
+                }
+                // The native arm is the ONE module path that never ends on a `begin_module`, so drop
+                // this module's import bindings explicitly: a leaked `imported_modules`/`structs` entry
+                // would make an UNIMPORTED type resolve by accident in the NEXT native module harvested
+                // (an AST module clears them itself). Same `!imports.is_empty()` gate, so a pure-native
+                // module's post-state is untouched.
+                if !lm.imports.is_empty() {
+                    c.begin_module(None);
                 }
                 c.module_sigs.insert(lm.id.clone(), sig);
                 continue;
@@ -2005,6 +2031,25 @@ fn prebuilt_protocols() -> HashMap<String, ProtocolInfo> {
         },
     );
     m.insert(
+        // W7-8 — `PathLike`: the INPUT position of every path-taking std fn (Python's `os.PathLike`,
+        // Rust's `AsRef<Path>`). Its sole method `as_path(self) -> bytes` hands back the RAW OS bytes,
+        // so a non-UTF-8 filename never has to round-trip through the validated-UTF-8 `str`.
+        // `str`/`bytes`/`bytearray` conform INTRINSICALLY (they have no `as_path` of their own — the
+        // grant rows in `INTRINSIC_PROTO_METHODS` + the `satisfies_args_d` early-out are the only
+        // seam); `path.Path` conforms STRUCTURALLY through its own `as_path`.
+        // Deliberately DISTINCT from the future byte-DATA protocol's `as_bytes`, so a type satisfying
+        // both has no method ambiguity.
+        "PathLike".to_string(),
+        ProtocolInfo {
+            type_params: Vec::new(),
+            embeds: Vec::new(),
+            methods: vec![(
+                "as_path".to_string(),
+                FnSig::plain(vec![Ty::Unknown], Ty::Bytes),
+            )],
+        },
+    );
+    m.insert(
         "Hashable".to_string(),
         ProtocolInfo {
             type_params: Vec::new(),
@@ -2776,7 +2821,7 @@ const LISTENER_METHODS: &[&str] = &["accept", "addr", "close"];
 const WRITER_METHODS: &[&str] = &["write", "write_bytes", "flush", "close"];
 const READER_METHODS: &[&str] = &["read_line", "read_bytes", "close"];
 const EXECUTOR_METHODS: &[&str] = &["submit", "shutdown", "shutdown_now"];
-const BYTES_METHODS: &[&str] = &["decode", "len"];
+const BYTES_METHODS: &[&str] = &["decode", "decode_lossy", "len"];
 const BYTEARRAY_METHODS: &[&str] = &["len", "push", "pop", "decode"];
 
 // The bespoke `str_method_sig` / `bytes_method_sig` / `bytearray_method_sig` arms are RETIRED (phase

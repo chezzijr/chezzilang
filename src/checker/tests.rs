@@ -6151,9 +6151,10 @@ fn native_fs_predicates_are_bool_and_size_is_result_int() {
 }
 
 #[test]
-fn native_fs_list_dir_returns_result_list_str() {
+fn native_fs_list_dir_returns_result_list_path() {
+    // W7-8 — `list_dir` hands back `Result[List[path.Path]]`; `.str()` is the lossy display.
     entry_ok(
-        "import std.fs\nfn main():\n    match fs.list_dir(\".\"):\n        Ok(xs): print(\",\".join(xs))\n        Err(e): print(e)\n",
+        "import std.fs\nimport std.path\nfn main():\n    match fs.list_dir(\".\"):\n        Ok(xs): print(xs[0].str())\n        Err(e): print(e)\n",
     );
 }
 
@@ -6786,12 +6787,17 @@ fn math_io_os_rand_fs_representative_sigs_exact() {
         "std.math must export exactly 32 fns (31 native + bodied `divmod`)"
     );
 
+    /// W7-8 — the `PathLike` protocol `Ty`: the param type of every path-taking std fn.
+    fn pathlike() -> Ty {
+        Ty::Protocol("PathLike".into(), vec![])
+    }
     let io = native_module_sig_via_graph("io");
     let print = io.functions.get("print").expect("io.print");
     assert_eq!(print.params, vec![Ty::Str]);
     assert_eq!(print.ret, Ty::Nil, "io.print must return nil, not Unknown");
+    // W7-8 — every path param is `PathLike` now (a bare `str` literal still binds to it).
     let write_file = io.functions.get("write_file").expect("io.write_file");
-    assert_eq!(write_file.params, vec![Ty::Str, Ty::Str]);
+    assert_eq!(write_file.params, vec![pathlike(), Ty::Str]);
     assert_eq!(write_file.ret, Ty::result(Ty::Nil));
     assert_eq!(
         io.functions.get("read_line").unwrap().ret,
@@ -6802,14 +6808,14 @@ fn math_io_os_rand_fs_representative_sigs_exact() {
     assert_eq!(io.functions.get("flush").unwrap().ret, Ty::Nil);
     // R1 — the binary whole-file twins.
     let read_bytes = io.functions.get("read_bytes").expect("io.read_bytes");
-    assert_eq!(read_bytes.params, vec![Ty::Str]);
+    assert_eq!(read_bytes.params, vec![pathlike()]);
     assert_eq!(read_bytes.ret, Ty::result(Ty::Bytes));
     let write_bytes = io.functions.get("write_bytes").expect("io.write_bytes");
-    assert_eq!(write_bytes.params, vec![Ty::Str, Ty::Bytes]);
+    assert_eq!(write_bytes.params, vec![pathlike(), Ty::Bytes]);
     assert_eq!(write_bytes.ret, Ty::result(Ty::Nil));
     // R2 — the Writer openers/handles. `create`/`append` -> Result[Writer]; `stdout`/`stderr` -> Writer;
     // `buffered(w, size = 8192)` -> Writer (optional-tail size ⇒ min_params 1).
-    assert_eq!(io.functions.get("create").unwrap().params, vec![Ty::Str]);
+    assert_eq!(io.functions.get("create").unwrap().params, vec![pathlike()]);
     assert_eq!(
         io.functions.get("create").unwrap().ret,
         Ty::result(Ty::Writer)
@@ -6835,7 +6841,7 @@ fn math_io_os_rand_fs_representative_sigs_exact() {
     );
     // R2b — the Reader opener + method table. `open` -> Result[Reader]; `read_line` -> Option[str];
     // `read_bytes(n)` -> Result[bytes]; `close` -> Result[nil].
-    assert_eq!(io.functions.get("open").unwrap().params, vec![Ty::Str]);
+    assert_eq!(io.functions.get("open").unwrap().params, vec![pathlike()]);
     assert_eq!(
         io.functions.get("open").unwrap().ret,
         Ty::result(Ty::Reader)
@@ -6855,10 +6861,15 @@ fn math_io_os_rand_fs_representative_sigs_exact() {
     );
     assert_eq!(io.functions.get("isatty").unwrap().params, Vec::<Ty>::new());
     assert_eq!(io.functions.get("isatty").unwrap().ret, Ty::Bool);
-    assert_eq!(io.functions.len(), 20);
+    // 20 public fns + the 7 `_`-prefixed internal byte-seam natives (W7-8).
+    assert_eq!(io.functions.len(), 27);
 
     let os = native_module_sig_via_graph("os");
-    assert_eq!(os.functions.get("getcwd").unwrap().ret, Ty::result(Ty::Str));
+    // W7-8 — `getcwd` hands back a `path.Path` (raw OS bytes), NOT a lossily-decoded `str`.
+    assert_eq!(
+        os.functions.get("getcwd").unwrap().ret,
+        Ty::result(Ty::Struct("Path".into(), vec![]))
+    );
     assert_eq!(os.functions.get("args").unwrap().ret, Ty::list(Ty::Str));
     assert_eq!(os.functions.get("env").unwrap().ret, Ty::option(Ty::Str));
     let exit = os.functions.get("exit").expect("os.exit");
@@ -6872,7 +6883,12 @@ fn math_io_os_rand_fs_representative_sigs_exact() {
         os.functions.get("home_dir").unwrap().ret,
         Ty::option(Ty::Str)
     );
-    assert_eq!(os.functions.get("temp_dir").unwrap().ret, Ty::Str);
+    // W7-8 (review) — `temp_dir` hands back a `path.Path` too: `$TMPDIR` is raw OS bytes, and
+    // decoding it left a path-RETURNING API through which a U+FFFD path was still constructible.
+    assert_eq!(
+        os.functions.get("temp_dir").unwrap().ret,
+        Ty::Struct("Path".into(), vec![])
+    );
     assert_eq!(
         os.functions.get("environ").unwrap().ret,
         Ty::map(Ty::Str, Ty::Str)
@@ -6881,7 +6897,8 @@ fn math_io_os_rand_fs_representative_sigs_exact() {
     assert_eq!(setenv.params, vec![Ty::Str, Ty::Str]);
     assert_eq!(setenv.ret, Ty::Nil);
     assert_eq!(os.functions.get("chdir").unwrap().ret, Ty::result(Ty::Nil));
-    assert_eq!(os.functions.len(), 12);
+    // 12 public fns + the 3 `_`-prefixed internal byte-seam natives (W7-8).
+    assert_eq!(os.functions.len(), 15);
 
     let rand = native_module_sig_via_graph("rand");
     let ri = rand.functions.get("int").expect("rand.int");
@@ -6893,20 +6910,24 @@ fn math_io_os_rand_fs_representative_sigs_exact() {
     assert_eq!(rand.functions.len(), 4);
 
     let fs = native_module_sig_via_graph("fs");
+    // W7-8 — `PathLike` in, `path.Path` out.
     let list_dir = fs.functions.get("list_dir").expect("fs.list_dir");
-    assert_eq!(list_dir.params, vec![Ty::Str]);
-    assert_eq!(list_dir.ret, Ty::result(Ty::list(Ty::Str)));
+    assert_eq!(list_dir.params, vec![pathlike()]);
+    assert_eq!(
+        list_dir.ret,
+        Ty::result(Ty::list(Ty::Struct("Path".into(), vec![])))
+    );
     assert_eq!(fs.functions.get("exists").unwrap().ret, Ty::Bool);
     assert_eq!(fs.functions.get("size").unwrap().ret, Ty::result(Ty::Int));
     assert_eq!(fs.functions.get("mkdir").unwrap().ret, Ty::result(Ty::Nil));
     // fs-trio (fs grab-bag): canonicalize -> Result[str], chmod(str,int) -> Result[nil], atomic_write.
     assert_eq!(
         fs.functions.get("canonicalize").unwrap().ret,
-        Ty::result(Ty::Str)
+        Ty::result(Ty::Struct("Path".into(), vec![]))
     );
     assert_eq!(
         fs.functions.get("chmod").unwrap().params,
-        vec![Ty::Str, Ty::Int]
+        vec![pathlike(), Ty::Int]
     );
     assert_eq!(
         fs.functions.get("atomic_write").unwrap().ret,
@@ -6914,7 +6935,8 @@ fn math_io_os_rand_fs_representative_sigs_exact() {
     );
     // --- fs.stat/fs.walk (gaps §6 metadata READ + recursive walk): 15 + stat + walk = 17.
     // (FileInfo is a native struct, not a function — not counted here.)
-    assert_eq!(fs.functions.len(), 17);
+    // 17 public fns + the 17 `_`-prefixed internal byte-seam natives + the `_wrap_many` helper (W7-8).
+    assert_eq!(fs.functions.len(), 35);
 }
 
 /// Hybrid native+Chezzi module: a BODIED `fn` (`math.divmod`) declared alongside the bodyless
@@ -17898,6 +17920,73 @@ fn param_protocol_nesting_accepts_and_wrong_rejects() {
 // rejected; these lock the covariant direction shut. All use the REAL graph
 // helpers (entry_ok/entry_rejects), NOT single-module check_src.
 // ─────────────────────────────────────────────────────────────────────────────
+
+/// W7-8 — `str`/`bytes`/`bytearray` satisfy `PathLike` INTRINSICALLY (they have no `as_path` method
+/// of their own), through a protocol-typed value slot and an erased generic bound. `path.Path`
+/// satisfies it structurally. NOT through a container element slot — see
+/// [`pathlike_grant_does_not_widen_container_invariance`], which is why `path.join` is generic over
+/// its element type instead of taking a `List[PathLike]`.
+#[test]
+fn pathlike_is_satisfied_by_the_three_byte_spellings() {
+    ok("fn f(p: PathLike) -> bytes:\n    return p.as_path()\nprint(f(\"a\").len())\n");
+    ok("fn f(p: PathLike) -> bytes:\n    return p.as_path()\nprint(f(b\"a\").len())\n");
+    ok("fn f(p: PathLike) -> bytes:\n    return p.as_path()\nprint(f(bytearray(b\"a\")).len())\n");
+    ok("fn f[T: PathLike](p: T) -> bytes:\n    return p.as_path()\nprint(f(\"a\").len())\n");
+    // A struct with its OWN `as_path(self) -> bytes` conforms structurally (this is `path.Path`).
+    ok(
+        "struct P:\n    raw: bytes\n    fn as_path(self) -> bytes:\n        return self.raw\nfn f(p: PathLike) -> bytes:\n    return p.as_path()\nprint(f(P(b\"a\")).len())\n",
+    );
+    // ...and a type WITHOUT one still does not.
+    rejects(
+        "struct Q:\n    n: int\nfn f(p: PathLike) -> bytes:\n    return p.as_path()\nprint(f(Q(1)).len())\n",
+        "PathLike",
+    );
+}
+
+/// W7-8 — `PathLike` is a RESERVED universe protocol, so a user redeclaration is a clean compile-time
+/// diagnostic, never an accept-then-runtime-trap (the recorded `is_reserved_type` hole).
+#[test]
+fn pathlike_is_reserved_against_user_redeclaration() {
+    rejects(
+        "protocol PathLike:\n    fn as_path(self) -> bytes\nprint(1)\n",
+        "reserved",
+    );
+}
+
+/// W7-8 REGRESSION FENCE — the `PathLike` grant is a VALUE-level early-out keyed on the concrete
+/// scalar `Ty`, so it must be UNREACHABLE from any container element comparison. These four were
+/// rejected before the grant landed and must stay rejected: a leak here would be a silent widening of
+/// container invariance, which this task changes NOTHING about.
+#[test]
+fn pathlike_grant_does_not_widen_container_invariance() {
+    entry_rejects(
+        "fn poison(xs: List[Any]):\n    xs.push(\"s\")\nfn main():\n    ns: List[int] = [1]\n    poison(ns)\nmain()\n",
+        "expected List[Any], found List[int]",
+    );
+    entry_rejects(
+        "protocol Shape:\n    fn area(self) -> int\nstruct Sq:\n    s: int\n    fn area(self) -> int:\n        return self.s * self.s\nfn f(xs: List[Shape]):\n    print(xs.len())\nfn main():\n    sqs: List[Sq] = [Sq(2)]\n    f(sqs)\nmain()\n",
+        "expected List[Shape], found List[Sq]",
+    );
+    entry_rejects(
+        "fn stash(m: Map[str, Any]):\n    m[\"x\"] = 1\nfn main():\n    d: Map[str, int] = {\"a\": 1}\n    stash(d)\nmain()\n",
+        "expected Map[str, Any], found Map[str, int]",
+    );
+    entry_rejects(
+        "fn f(xs: Iterable[Any]):\n    print(xs)\nfn main():\n    ns: List[int] = [1]\n    f(ns)\nmain()\n",
+        "Iterable[Any]",
+    );
+    // The grant does NOT reach a container element either: `List[str]` is not `List[PathLike]`. This
+    // is precisely why `path.join` is `[T](List[T]) where T: PathLike` — a `List[PathLike]` parameter
+    // would be callable with a list LITERAL and with no variable at all (W7-8 review).
+    entry_rejects(
+        "fn f(xs: List[PathLike]):\n    print(xs.len())\nfn main():\n    ss: List[str] = [\"a\"]\n    f(ss)\nmain()\n",
+        "expected List[PathLike], found List[str]",
+    );
+    // ...and the generic-bound spelling that replaced it DOES accept that same variable.
+    entry_ok(
+        "fn f[T](xs: List[T]) -> int where T: PathLike:\n    return xs[0].as_path().len()\nfn main():\n    ss: List[str] = [\"ab\"]\n    print(f(ss))\nmain()\n",
+    );
+}
 
 /// Repro A (was check-ok → runtime trap): passing a `List[Cat]` VARIABLE where
 /// `List[Any]` is expected must REJECT (the callee can `.push` a non-Cat).

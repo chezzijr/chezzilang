@@ -32,8 +32,10 @@ Everything still open, roughly by severity. **No memory-unsafety is left in the 
 last one, was fixed 2026-07-27. Anything NOT listed here is either fixed or a safe-direction
 observation. **Wave 7 batch A (2026-07-28) adds no row** — its three host-boundary findings
 (`W7-1`/`W7-6`/`W7-7`) all landed FIXED; see its session log. Its deliberately-deferred sibling —
-**lossy path DECODE** in `fs.list_dir`/`walk`/`glob`/`canonicalize` and `os.getcwd`, which hands back a
-path string that does not open — is filed separately and is not in batch A.
+the **lossy path DECODE** in `fs.list_dir`/`walk`/`glob`/`canonicalize` and `os.getcwd` — was filed as
+**W7-8** and is **FIXED 2026-07-31** (the `PathLike` protocol + `path.Path` type; see its session-log
+section). The lossy-byte family now has **no unswept member**: B1, R1, W6-4, W6-9, W6-14 and W7-8 are
+all closed. (`argv`/`env` remain a deliberately lossy surface — see `docs/stdlib.md`.)
 **Keep this table in sync when a section is retired** — the
 reason it exists is that "which of these is still open?" previously required reading 1400 lines of
 chronological log.
@@ -50,7 +52,6 @@ chronological log.
 | **W7-5** | `:3800` | The M:N `Executor` drain does not abort the remaining jobs after a faulting job (serial does), and `submit_result` discards the result of a job it ran | **Needs its own milestone — two fix attempts were rejected.** Sequential drain is correct but costs 4× (0.30s → 1.20s on 4 overlapping jobs); "run all" removes the drain's per-drain cancel flag, which is the ONLY kill switch — it breaks `os.exit` hard-halt, lets a faulting job leave a runaway sibling unkillable, defeats dead-stdout promptness, and creates a NEW serial≠M:N line-set divergence via `reduce_task_slots`' non-lowest-index fault flush |
 | **W7-5b** | `:3800` | An `Executor` created INSIDE an M:N task is silently discarded — its jobs never run, never reap, no fault | Found while prosecuting the W7-5 fix. It registers in the throwaway worker `Vm.executors`, which `run_outcome`/`into_fiber` drop; `drain_live_executors` only snapshots the PARENT `Vm`. Arguably worse than W7-5 itself; belongs to the same Executor milestone |
 | **W7-5c** | `:3800` | `reduce_task_slots` flushes a faulting task's buffered output only `if first_fault.is_none()` (`sched.rs:1688`), so a second faulting task's stdout is dropped on M:N | Latent today (the drain's cancel flag makes siblings `Cancelled`, which flushes); becomes live the moment two tasks can fault in one drain. Same milestone |
-| **W7-8** | `:3860` | `fs.list_dir`/`walk`/`glob`/`canonicalize` + `os.getcwd` decode paths LOSSILY, so the path they hand back does not open — a **dead** path with no diagnostic | The last unswept member of the lossy-byte family (B1/R1/W6-4/W6-14 all fixed). Fixing it properly means a `bytes`-carrying path seam, i.e. the same `OsString`-through-the-resolver work the W7-6 v1 ceiling names — its own milestone, not a patch |
 | **W7-11** | `:3901` | A `RwShared` holding a container with an element that back-references the CONTAINER (`a.next = xs; RwShared(xs).at(0)`) aborts the host on `from_wire_memo`'s `.expect("a wire Backref always targets an already-reconstructed node id")` — a legal program, no concurrency, both engines | **Pre-existing on main**, not a W7-4 regression (verified on 5960052): a copy-out view drains ONE depth-1 piece, and a piece whose cycle closes through the ROOT container can never be self-contained — the definition it needs IS the container. `elem_split` fixes the sibling-CELL case, not this ancestor case. Closing it means either a catchable fault instead of the `.expect` (`from_wire_memo` returns a `Value`, so that is a signature change through every rebuild arm) or a same-guard whole-container fallback at all 12 view sites |
 | **W7-4a** | `:3901` | Airlock cell identity is preserved **per module** in the snapshot, so two globals in DIFFERENT modules over one shared cell still arrive as two cells | Residual disclosed by the W7-4 fix. Closing it needs `Vm`-lived rebuild state kept (and rooted) across the lazy per-module faults; the reported repro is same-module and is fixed |
 | **W7-4b** | `:3901` | A cell whose inner value carries a residual `Module`/`Native`/`Cffi` handle falls to `SnapValue::Cell`, which has no `Backref` encoding, so its identity is not preserved across a module snapshot | Residual disclosed by the W7-4 fix, and the same limit the `SnapValue::Closure` slow arm already documents. Closing it is a snapshot FORMAT change (id/`Backref` arms on `SnapValue`), out of proportion to a residual this narrow |
@@ -279,7 +280,8 @@ Three defects at the **host boundary** (the native/CLI seam where raw OS bytes b
 one P0 data-loss, two P1 host-panics. All three are fixed in this batch; **batch A adds NO row to the
 OPEN ITEMS table**. Batch A deliberately does NOT fix the separately-filed **lossy path DECODE**
 (`fs.list_dir`/`walk`/`glob`/`canonicalize`, `os.getcwd` decode a directory entry lossily and hand back a
-path that does not exist) — it is uncoupled from these three and is its own later task.
+path that does not exist) — it is uncoupled from these three and was its own later task, filed as
+**W7-8** and **FIXED 2026-07-31**.
 
 - **W7-1 (P0, DATA LOSS) — `fs.copy(p, p)` truncated the file to 0 bytes and returned `Ok(nil)`. FIXED.**
   `std::fs::copy` opens the DESTINATION `O_TRUNC`, so a self-copy wiped the file and reported success —
@@ -4101,18 +4103,18 @@ same shape — TWO INDEPENDENT SERIALIZATIONS reach one cell; identity is per se
   whole-container `get()`/`read()`, and `slice` (one call returning a container), ARE one crossing and
   do share. Inherent to a copy-out API, not a residual of the fix.
 
-## Session log — 2026-07-28 (bug-hunt wave 7 — the P2 tier: 3 findings; W7-9 + W7-10 FIXED 2026-07-30, W7-8 still open)
+## Session log — 2026-07-28 (bug-hunt wave 7 — the P2 tier: 3 findings; ALL THREE FIXED — W7-9 + W7-10 2026-07-30, W7-8 2026-07-31)
 
 These three came out of the same wave-7 hunt as W7-1…W7-7 and were filed rather than rushed, each
 needing a design decision or a seam change bigger than a patch. **Two have since been fixed
 (2026-07-30): W7-9** (the `Reader` carry) **and W7-10** (the csv bare-quote policy call — CPython
-"keep it literally"). **W7-8 remains OPEN** — it is the one that really does need a new
-`bytes`-carrying path seam, i.e. its own milestone. All three were **re-verified on `main` after the
+"keep it literally"), and **W7-8 followed 2026-07-31** — it did need the new `bytes`-carrying path
+seam, which landed as the `PathLike` protocol + `path.Path` type. All three were **re-verified on `main` after the
 wave-7 fixes landed** (2026-07-28), both engines identical, `chezzi check` clean on every repro. None
 is a serial≠M:N divergence — the parity oracle is blind to all three, which is why they needed a
 differential against CPython/Go to surface.
 
-### W7-8 — `fs`/`os` hand back a LOSSILY-DECODED path that does not open (**OPEN**)
+### W7-8 — `fs`/`os` hand back a LOSSILY-DECODED path that does not open (**FIXED 2026-07-31**)
 
 `fs.list_dir` / `fs.walk` / `fs.glob` / `fs.canonicalize` and `os.getcwd()` run the OS bytes through
 `to_string_lossy`, so a non-UTF-8 name comes back with `U+FFFD` substituted — a path that names
@@ -4136,11 +4138,84 @@ b'ok.txt' exists = true
 (`cwd = Ok(/tmp/cw�dir)`, `fs.exists(cwd) = false`). **Python** hands back the exact bytes
 (`os.listdir(b'…')`, `os.getcwdb()`).
 
-**Sites:** `src/native/fs.rs:37,144,160,239,469`, `src/native/os.rs:63`.
-**Why open:** this is the last unswept member of the lossy-byte family — B1 (`Socket.read`), R1, W6-4
-(`std.process`) and W6-14 (`ffi.load_str`) were each fixed by giving the seam a `bytes` path. Doing the
-same here means a `bytes`-carrying path API, which is the same `OsString`-through-the-resolver work the
-W7-6 v1 ceiling already names. One milestone should close both.
+**Sites (corrected — the original list was stale on two counts):** `src/native/fs.rs:37,144,160,239`
+were the four production decodes; **`fs.rs:469` is a `#[cfg(test)]` helper host, not a bug**, and
+**`os.rs:63` is `hostname`'s decode** (a display string, correctly lossy) — `getcwd`'s decode actually
+lived in `Host::os_getcwd` at `src/native/mod.rs:467`, whose return type was `String`.
+
+**FIXED 2026-07-31 — the `bytes`-carrying path seam landed, as `PathLike` + `path.Path`.**
+Design doc: `~/.claude/plans/2026-07-31-path-pathlike-design.md`.
+
+* **INPUT** — a new reserved universe protocol `PathLike` (sole method `as_path(self) -> bytes`), the
+  20th. `str`/`bytes`/`bytearray` satisfy it **intrinsically** (three grant rows in
+  `INTRINSIC_PROTO_METHODS` + a miss-only `("as_path", 0)` arm in `Vm::intrinsic_proto_method`);
+  `path.Path` satisfies it structurally. Every path-taking fn in `std.fs`/`std.io`/`std.os`/`std.path`
+  takes one, so `fs.exists("x")` still compiles with a bare `str` literal — **not a breaking change**.
+* **OUTPUT** — `path.Path`, an **ordinary Chezzi struct** over `raw: bytes` (deliberately not a
+  `native struct`: no `NativeRet::Struct`, no fourth hand-maintained positional layout copy).
+  DISPLAY and CONVERSION are separate: `p.str()` is lossy and never faults (`Stringable`), `p.decode()`
+  is exact with a recoverable fault, `p.bytes()` is raw. Rust makes the same split (`Path` has no
+  `Display`). `os.getcwd() -> Result[path.Path]` — a CONCRETE return type, so the erasure blocker that
+  killed `os.getcwd[bytes]()` (type args are erased before `Vm::call_native`) never arises.
+* **SEAM** — each path-taking native is `_`-prefixed and typed `bytes` (`_exists`, `_list_dir`,
+  `_getcwd`, …); the public name is a bodied pure-Chezzi wrapper doing `_native(p.as_path())`. All
+  four production decodes are byte-exact (`OsStrExt`), and `glob`'s matcher runs over `&[u8]`. Lossy
+  rendering survives ONLY in human-facing error text (`Path::display()`), which is the ratified
+  `p.str()` semantics.
+* **`std.path`** — all 10 lexical helpers moved from `str -> str` to `PathLike -> Path` (option A in
+  the design doc), so a non-UTF-8 name survives `basename`/`join`/`normalize` too. Ops chain and you
+  convert once at the end. `join` — the one helper whose path sits in a CONTAINER — is
+  `[T](parts: List[T]) -> Path where T: PathLike`, **not** `List[PathLike]`: containers are invariant
+  (unchanged by this work), so the `List[PathLike]` spelling would have been callable with a list
+  LITERAL and nothing else. See the second-panel findings below.
+* **Two enabling front-end defects had to be fixed first** (both of the recorded
+  checker-superset-of-compiler class, both latent on main):
+  1. `Compiler::collect_globals` never reserved a slot for a `native fn`, so a **bodied fn in a native
+     module could not call a native sibling** — it panicked `global '_exists' has no slot`.
+  2. the checker's native-module arm bound a module's imports only INSIDE its `has_bodied` branch, i.e.
+     AFTER `harvest_native_module` had already resolved every signature — so a native module's
+     **signatures could not name a type from a module it imports** (`unknown module 'path'`).
+  A third surfaced during the port: `Vm::do_method_call`'s Module arm called `do_call`
+  unconditionally, which FLATTENS the callee frame for the running dispatch loop — correct only while
+  every module member was a native. A `defer fs.remove_file(p)` (re-entrant, `NO_IC`, no running loop)
+  then ran off the end of the proto. It now takes the synchronous `invoke_value` path when
+  `ic == NO_IC`, exactly like the struct/enum arms.
+
+**Two findings from the manual adversarial panel, fixed in the same commit:**
+* `os.temp_dir()` was still lossily decoded (`src/native/os.rs`, `.display().to_string()`) — a
+  path-RETURNING API the original W7-8 report never named, through which a `U+FFFD` path stayed
+  constructible. Now `-> path.Path` over raw bytes, so the "no unswept member" claim above is true.
+  (`os.home_dir()` deliberately stays `Option[str]`: it reads the HostConfig env map, which is the
+  documented, separately-scoped lossy argv/env surface.)
+* porting `glob`'s matcher to bytes had silently made `?` count one BYTE rather than one Unicode
+  scalar, so `glob("a?c")` would have stopped matching `aéc` — a drift from Python `fnmatch` / Go
+  `filepath.Match`. `?` now consumes one full UTF-8 scalar wherever the name is valid UTF-8, falling
+  back to one byte only where no valid sequence starts (the only rule defined there at all).
+
+**Three findings from the SECOND adversarial panel, fixed on the same branch:**
+* `path.join(parts: List[PathLike])` was **uncallable with any list variable** — container invariance
+  (which this work explicitly preserves) rejects `List[str] -> List[PathLike]` *and*
+  `List[path.Path] -> List[PathLike]`, so only an inline literal type-checked. A hard regression
+  against main's `List[str]` (`path.join(s.split("/"))`, `path.join(xs)` both stopped compiling), and
+  the new API did not compose with its own output (`fs.list_dir` hands back `List[path.Path]`). The
+  whole test table used literals, so the suite was structurally blind. Now generic over the element
+  type with a `PathLike` bound; invariance is untouched and fenced both directions in
+  `pathlike_grant_does_not_widen_container_invariance`, and `t_join_of_variables` +
+  `list_dir_round_trips_a_non_utf8_name` exercise `List[str]`/`List[bytes]`/`List[Path]` variables.
+* Both `glob` doc sites (`docs/stdlib.md`, `std/fs.chz`) still stated `?` counts one **byte** — the
+  behavior the panel finding above had already reversed, so the published contract contradicted the
+  code and its own unit test. Corrected, and pinned end-to-end by `glob_question_matches_one_scalar`
+  on a real `aéc.txt`.
+* The byte-exact `std.path` rewrite cost **2.70×** against main's native-`str` module (`bytes` has no
+  `split`/`join`/`+`, so the first cut ran per-BYTE `bytearray.push` loops in the VM) and landed with
+  no `docs/benchmarks.md` entry. `bytearray.extend` + one shared `_last_idx` backwards scan bring it
+  to **1.73× vs main (1.56× faster than the first cut)**; measured and recorded. The residual is
+  `_split`'s per-byte loop — a native `bytes.split(sep)` is the named upgrade path.
+
+**Verified by hand on the release binary, BOTH engines, byte-identical** (`b"A\xffB.txt"` fixture):
+`list_dir`/`walk`/`glob`/`canonicalize` all return the exact bytes and `fs.exists` on the recovered
+name is **true** (it was **false** on the pre-fix binary, which returned `b'A\xef\xbf\xbdB.txt'`).
+A non-UTF-8 cwd likewise round-trips through `os.getcwd()`.
 
 ### W7-9 — `Reader.read_line`'s non-UTF-8 fault CONSUMES the line it could not decode (**FIXED 2026-07-30**)
 

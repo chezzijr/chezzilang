@@ -194,9 +194,12 @@ impl Vm {
         args: Vec<Value>,
         span: Span,
     ) -> Result<Value, RuntimeError> {
+        // W7-8 — the path-taking openers are the `_`-prefixed INTERNAL byte seam (`_create`/`_append`/
+        // `_open`); the public names are `PathLike` wrappers in `std/io.chz`. `stdout`/`stderr`/
+        // `buffered` take no path and kept their names.
         match name {
-            "create" | "append" => self.io_open(name, &args, span),
-            "open" => self.io_open_reader(&args, span),
+            "_create" | "_append" => self.io_open(&name[1..], &args, span),
+            "_open" => self.io_open_reader(&args, span),
             "stdout" => Ok(self.io_std_handle(Backing::Stdout)),
             "stderr" => Ok(self.io_std_handle(Backing::Stderr)),
             "buffered" => self.io_buffered(&args, span),
@@ -207,13 +210,15 @@ impl Vm {
     /// R2 — `io.create(path)` = truncate + create; `io.append(path)` = append, create-if-absent (never
     /// truncates). Returns `Ok(Writer)` or a clean `Err` (perms, missing dir).
     fn io_open(&mut self, verb: &str, args: &[Value], span: Span) -> Result<Value, RuntimeError> {
+        // W7-8 — the opener's path arg is RAW `bytes` now (the public `PathLike` wrapper in
+        // `std/io.chz` calls `p.as_path()` first), so a non-UTF-8 filename opens byte-exactly.
         let path = if let Some(v) = args.first()
             && let Some(sh) = v.as_obj()
-            && let Obj::Str(s) = self.heap.get(sh)
+            && let Obj::Bytes(b) = self.heap.get(sh)
         {
-            s.to_string()
+            crate::native::fs::bytes_path(b)
         } else {
-            return Err(self.err(format!("io.{verb} expects a path string"), span));
+            return Err(self.err(format!("io.{verb} expects a path"), span));
         };
         let opened = match verb {
             "create" => std::fs::File::create(&path),
@@ -232,7 +237,7 @@ impl Vm {
                 let v = Value::obj(self.heap.alloc(Obj::Writer(core)));
                 Ok(self.sock_ok(v))
             }
-            Err(e) => Ok(self.sock_err(format!("{path}: {e}"))),
+            Err(e) => Ok(self.sock_err(format!("{}: {e}", path.display()))),
         }
     }
 
@@ -457,13 +462,14 @@ impl Vm {
     /// R2b — `io.open(path)` = open a file read-only. Returns `Ok(Reader)` or a clean `Err` (missing
     /// file, perms). The read twin of `io.create`/`io.append`.
     fn io_open_reader(&mut self, args: &[Value], span: Span) -> Result<Value, RuntimeError> {
+        // W7-8 — raw `bytes` path (see `io_open`).
         let path = if let Some(v) = args.first()
             && let Some(sh) = v.as_obj()
-            && let Obj::Str(s) = self.heap.get(sh)
+            && let Obj::Bytes(b) = self.heap.get(sh)
         {
-            s.to_string()
+            crate::native::fs::bytes_path(b)
         } else {
-            return Err(self.err("io.open expects a path string".into(), span));
+            return Err(self.err("io.open expects a path".into(), span));
         };
         match std::fs::File::open(&path) {
             Ok(f) => {
@@ -479,7 +485,7 @@ impl Vm {
                         Err(e) => format!("{e}"),
                         Ok(_) => format!("{}", std::io::ErrorKind::IsADirectory),
                     };
-                    return Ok(self.sock_err(format!("{path}: {msg}")));
+                    return Ok(self.sock_err(format!("{}: {msg}", path.display())));
                 }
                 let core = Arc::new(ReaderCore {
                     inner: Mutex::new(Some(std::io::BufReader::new(f))),
@@ -489,7 +495,7 @@ impl Vm {
                 let v = Value::obj(self.heap.alloc(Obj::Reader(core)));
                 Ok(self.sock_ok(v))
             }
-            Err(e) => Ok(self.sock_err(format!("{path}: {e}"))),
+            Err(e) => Ok(self.sock_err(format!("{}: {e}", path.display()))),
         }
     }
 }

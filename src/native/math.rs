@@ -426,8 +426,8 @@ mod tests {
         fn os_env(&self, _key: &str) -> Option<String> {
             None
         }
-        fn os_getcwd(&self) -> Result<String, HostError> {
-            Ok("/".into())
+        fn os_getcwd(&self) -> Result<Vec<u8>, HostError> {
+            Ok(b"/".to_vec())
         }
     }
 
