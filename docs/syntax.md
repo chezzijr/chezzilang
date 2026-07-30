@@ -897,6 +897,14 @@ fn first_or[S: Iterable[T], T](xs: S, default: T) -> T:
     return default
 first_or([10, 20], 0)      # 10   (T = int, recovered from the list element)
 first_or("hi", "?")        # "h"  (T = str)
+# The bound is not the only spelling — `Iterable[T]` works in TYPE position too, as a plain
+# (non-generic) parameter whose element type comes from the annotation:
+fn total(xs: Iterable[int]) -> int:
+    n := 0
+    for v in xs:           # v is typed `int`
+        n += v
+    return n
+total([1, 2, 3])           # 6   (a set, a map's keys, a cursor or a generator work the same)
 # Lazy sequences are normally built as adapter structs over this protocol (Rust-style; see
 # examples/iter_adapters.chz for Take/Mapped) — the parity-clean, recommended form.
 
@@ -1490,9 +1498,24 @@ Mechanically: `Iterable[T]` promises only `.iter() -> Iterator[T]` (a fresh curs
 `Iterator[T]` additionally promises `.next()`. Every `Iterator` IS `Iterable` (its `iter()` returns
 self), so a generator and a user `next`-struct satisfy `[S: Iterable[T]]` too; a struct with only
 `iter(self) -> Iterator[E]` (no `next`) satisfies it as well and is for-iterable via a one-time
-`.iter()` — though for THAT one the element recovery does not fire, so bound it with a concrete arg
-(`[S: Iterable[int]]`). The cursor's type is the existing `Iterator[T]` existential — there is no new
-value type.
+`.iter()` — though for THAT one the element recovery does not fire **in BOUND position**, so bound it
+with a concrete arg (`[S: Iterable[int]]`) or annotate the parameter `Iterable[int]` (the annotation IS
+the element type, so nothing has to be recovered). The cursor's type is the existing `Iterator[T]`
+existential — there is no new value type.
+
+**`next` wins by NAME.** A struct that declares a `next` at all is iterated through `next`, never
+through `iter` — that is how the runtime picks, so it is how the type-checker picks. A struct that
+declares a MALFORMED `next` (extra params, or a return that isn't `Option[E]`) is therefore **not
+iterable at all**; it does not silently fall back to its `iter`. Drop the bad `next`, or fix it.
+
+`Iterable[T]` also works in **TYPE position**, not only as a bound: `fn f(xs: Iterable[int])` takes any
+iterable as a plain (non-generic) parameter, and the body may `for v in xs`, comprehend `[v for v in
+xs]`, or `List(xs)` it. `T` comes from the annotation. Like every other protocol existential it is
+strictly **invariant** in its args — a `List[int]` is an `Iterable[int]` and NOT an `Iterable[Any]`
+(read-only covariance is deliberately not part of the model; a bare `Iterable` with no arg is an
+existential with unbound params and is not iterable at all). `Iterator[T]` in type position is
+unchanged and still additionally allows `.next()`; an `Iterable[T]`-typed value does not (take a cursor
+with `xs.iter()` first).
 
 **Type aliases** name an existing type transparently — `type Name =
 <type>` makes `Name` interchangeable with the aliased type everywhere (structural, not a distinct
