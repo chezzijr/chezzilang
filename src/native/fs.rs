@@ -433,11 +433,6 @@ fn append(h: &mut dyn Host) -> Result<NativeRet, HostError> {
     }
 }
 
-/// Match a single path component against a `*`/`?` wildcard. `*` matches any run (including empty),
-/// `?` matches exactly one BYTE; every other byte is literal. Uses the classic greedy two-pointer
-/// algorithm with a single backtrack mark — linear-ish, no exponential blowup on adversarial patterns
-/// like `*a*a*a…b`.
-///
 /// Length in bytes of the UTF-8 scalar starting at `n[i]`, or `1` when `i` begins no valid sequence.
 /// This is what keeps `glob`'s `?` counting CHARACTERS (Python `fnmatch` / Go `filepath.Match`) on a
 /// normal filename while staying defined on a non-UTF-8 one — where "one character" has no meaning and
@@ -457,6 +452,11 @@ fn utf8_len_at(n: &[u8], i: usize) -> usize {
     }
 }
 
+/// Match a single path component against a `*`/`?` wildcard. `*` matches any run of bytes (including
+/// empty), `?` matches exactly one character; every other byte is literal. Uses the classic greedy
+/// two-pointer algorithm with a single backtrack mark — linear-ish, no exponential blowup on
+/// adversarial patterns like `*a*a*a…b`.
+///
 /// W7-8 — matching is over BYTES, not a decoded string: a filename need not be valid UTF-8 at all, and
 /// decoding it first is exactly the bug this closes. `?` still consumes one **Unicode scalar** wherever
 /// the name actually is valid UTF-8 (Go's `filepath.Match` and Python's `fnmatch` both count
