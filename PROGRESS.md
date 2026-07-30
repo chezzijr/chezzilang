@@ -4,6 +4,34 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 **Legend:** ⬜ not started · 🟦 in progress · ✅ done
 
+> **✅ BUG-HUNT (2026-07-30, wave 7, gaps.md W7-9 + W7-10) — two stdlib paths that silently LOST bytes
+> the program already had.** Both were "the data is gone and nothing says so"; both are now fenced by
+> Chezzi-native tests (`tests/chz/stdlib/io_reader_carry_test.chz`, `csv_bare_quote_test.chz`, 10
+> `test fn`s), identical on `run` and `run --serial`.
+> - **W7-9 — `Reader.read_line`'s non-UTF-8 fault was DESTRUCTIVE.** It faulted recoverably pointing at
+>   `read_bytes`, but the undecodable line was already consumed, so that very `read_bytes` returned the
+>   *next* line. Root cause was the read shape, not a missing buffer: `BufRead::read_line(&mut String)`
+>   takes the line off the `BufReader` and only *then* returns `InvalidData`. `read_line` now does
+>   `read_until(b'\n')` + `String::from_utf8` and retains the raw refused line (terminator included) in
+>   a new `ReaderCore::carry`, mirroring `SocketCore::carry` (`carry` OUTER, `inner` INNER, one
+>   critical section). `read_bytes` drains the carry first without touching the fd (carry-only *short*
+>   read); `close` discards it; every arm checks closed BEFORE serving it, so no leak past `close` and
+>   no resurrection after EOF. All four read paths covered — the three native arms plus the pure-Chezzi
+>   `lines()` generator, which inherits it for free. The fault is now **sticky** (a re-read re-faults
+>   rather than skipping the bad line) and **self-healing** (a partial drain lets the remainder decode
+>   as the next line) — the ratified `Socket.read` behaviour. `rest = Ok(b'A\xffB\n')`, was
+>   `Ok(b'line3\n')`.
+> - **W7-10 — `csv.parse` silently DELETED a bare `"` in an unquoted field** (`a,b"c` → `["a","bc"]`, a
+>   third answer neither CPython nor Go gives). **Policy call: CPython** — keep it literally; Go's
+>   `bare " in non-quoted-field` error was rejected because `parse -> List[List[str]]` has no error
+>   channel. A per-field `field_start` flag in `std/csv.chz` gates the quote-opens-a-quoted-field
+>   branch, so a quote elsewhere falls through to the ordinary-char arm: `a,b"c` → `["a","b\"c"]`,
+>   `a,b""c` → `["a","b\"\"c"]` (two literal quotes — `""` collapses only *inside* a quoted field). The
+>   quote-*starts*-the-field cases (`a,"b"c` → `["a","bc"]`, `"a"b,c` → `["ab","c"]`) already matched
+>   CPython and are unchanged, now fenced. O(n) pre-collected-chars structure untouched.
+> - **Still open from the same P2 tier: W7-8** (`fs`/`os` lossily-decoded paths) — deliberately out of
+>   scope here; it needs a `bytes`-carrying path seam, i.e. its own milestone.
+
 > **✅ BUG-HUNT (2026-07-29, wave 7, gaps.md W7-4) — two sibling closures over one captured local now
 > keep ONE binding across the airlock; they used to silently split into two cells.** `Ctr(inc, get)`
 > built over a factory-local `n`, sent through a `Channel` and driven on the far side, read `1` after

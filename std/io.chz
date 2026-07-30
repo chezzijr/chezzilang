@@ -73,11 +73,20 @@ native fn buffered(w: Writer, size: int = 8192) -> Writer
 # the fd (idempotent). A method on a closed reader is clean: `read_bytes`/`close` return `Result::Err` /
 # `Ok`, `read_line` faults cleanly (an `Option` can't carry the error).
 #
+# The non-UTF-8 fault is NON-DESTRUCTIVE (W7-9): the line `read_line` could not decode is CARRIED —
+# its raw bytes, terminator included — and `read_bytes` hands them back byte-exactly as a carry-only
+# SHORT read (the fd is untouched until the carry drains), exactly like `Socket.read`'s carry. So the
+# fault's advice actually works. The carry makes the fault STICKY (a re-read re-decodes and re-faults,
+# it never skips the bad line — draining it with `read_bytes`, or `close`, is how you move on) and
+# SELF-HEALING (a partial drain leaves a remainder that, if it decodes, becomes the next line).
+# `close()` discards the carry; a carry is never served after close nor resurrected after EOF.
+#
 # `lines()` (Python `for l in f` / Go `bufio.Scanner` / Rust `BufRead::lines`) is the idiomatic method
 # form of line-streaming: a BODIED Chezzi generator method on the native handle (mixing Rust-backed
 # `native fn` sigs with a pure-Chezzi `fn` on one native struct). It streams lazily over `read_line()`
 # — the file is NOT snapshotted; the generator suspends between lines. A mid-read non-UTF-8 fault
-# surfaces from the underlying `read_line()` exactly as the `while` form.
+# surfaces from the underlying `read_line()` exactly as the `while` form — carry and stickiness
+# included, so a `lines()` loop cannot step over an undecodable line (drain it with `read_bytes`).
 native struct Reader:
     native fn read_line(self) -> Option[str]
     native fn read_bytes(self, n: int) -> Result[bytes]

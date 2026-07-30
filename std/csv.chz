@@ -8,6 +8,12 @@
 # * SEPARATOR: comma. Fields are separated by `,`, records by CRLF or LF (parse accepts both;
 #   format emits CRLF per RFC 4180). A field wrapped in double-quotes may contain commas, CR, LF
 #   and escaped quotes (`""` inside a quoted field = one literal `"`).
+# * BARE QUOTES (W7-10): a `"` opens a quoted field ONLY at FIELD START. Anywhere else it is an
+#   ORDINARY character kept LITERALLY — `a,b"c` -> ["a", "b\"c"], `a,b""c` -> ["a", "b\"\"c"] (two
+#   literal quotes: `""` collapses to one only INSIDE a quoted field). This is CPython
+#   `csv.reader` parity; Go's `bare " in non-quoted-field` error was rejected because `parse`
+#   returns a bare `List[List[str]]` with no error channel. A quote that STARTS the field still
+#   opens a quoted one, so `a,"b"c` -> ["a", "bc"] and `"a"b,c` -> ["ab", "c"] are unchanged.
 # * SPACES are significant — never trimmed (leading/trailing spaces are ordinary chars).
 # * A trailing record separator does NOT produce a spurious empty final record.
 # * EMPTY input -> [] (empty list); format([]) -> "".
@@ -31,6 +37,9 @@ fn parse(text: str) -> List[List[str]]:
     field: List[str] = []   # current field's chars — joined once per field (O(k), not O(k^2) concat)
     in_quotes := false
     started := false   # governs ONLY the EOF flush: a trailing separator leaves started=false
+    # W7-10: PER-FIELD, unlike the record-level `started` (which a `,` also sets). A `"` opens a
+    # quoted field ONLY at field start (CPython csv.reader); anywhere else it is an ordinary char.
+    field_start := true
     # Pre-collect codepoints into a List once so indexing is O(1). Slicing `text[i:i+1]` per char
     # re-collects the whole char vec each time → O(n^2); a moderately large CSV would hang. Fields
     # accumulate into a `List[str]` buffer + one `"".join` per field, so the whole parse is O(n)
@@ -54,14 +63,16 @@ fn parse(text: str) -> List[List[str]]:
                 field.push(c)              # commas / CR / LF are literal inside quotes
                 i += 1
         else:
-            if c == "\"":
+            if c == "\"" and field_start:
                 in_quotes = true
                 started = true
+                field_start = false
                 i += 1
             elif c == ",":
                 row.push("".join(field))
                 field = []
                 started = true
+                field_start = true
                 i += 1
             elif c == "\r":
                 row.push("".join(field))
@@ -69,6 +80,7 @@ fn parse(text: str) -> List[List[str]]:
                 rows.push(row)
                 row = []
                 started = false
+                field_start = true
                 if i + 1 < n and chars[i + 1] == "\n":
                     i += 2                 # consume the LF of a CRLF pair
                 else:
@@ -79,10 +91,12 @@ fn parse(text: str) -> List[List[str]]:
                 rows.push(row)
                 row = []
                 started = false
+                field_start = true
                 i += 1
             else:
-                field.push(c)
+                field.push(c)               # incl. a BARE `"` mid-field — kept literally (W7-10)
                 started = true
+                field_start = false
                 i += 1
     if started:                            # flush an unterminated final record (no trailing sep)
         row.push("".join(field))

@@ -1,0 +1,129 @@
+# tests/chz/stdlib/io_reader_carry_test.chz — `Reader`'s non-UTF-8 carry (W7-9).
+#
+# `read_line()`'s non-UTF-8 fault used to be DESTRUCTIVE: the undecodable line was consumed off the
+# `BufReader` and dropped, so the very `read_bytes` the fault message recommends returned the NEXT
+# line. `Reader` now carries the failed line's RAW bytes (terminator included) exactly like
+# `SocketCore::carry`, so `read_bytes` hands them back byte-exactly.
+# Every Reader read path shares the carry: `read_line` (sticky — it re-decodes and re-faults rather
+# than skipping), `read_bytes` (drains it, a carry-only short read), `lines()` (a pure-Chezzi
+# generator over `read_line`, so it inherits both), `close()` (discards it).
+# Temp paths carry the pid AND the test name (the suite runs concurrently under M:N).
+# Run: `cargo run -- test tests/chz/`. Serial==M:N guarded by the dual-engine gate.
+
+import std.io
+import std.os
+import std.fs
+
+fn scratch(name: str) -> str:
+    return os.temp_dir() + "/chz_w7_9_" + name + "_" + str(os.getpid()) + ".dat"
+
+# Write a fixture and hand back its path.
+fn make(name: str, data: bytes) -> str:
+    p := scratch(name)
+    match io.write_bytes(p, data):
+        Ok(_): pass
+        Err(e): assert false, "fixture " + name + ": " + e.message()
+    return p
+
+fn eqb(res: Result[bytes], want: bytes) -> bool:
+    match res:
+        Ok(b): return b == want
+        Err(e): return false
+
+# Drain `r.lines()` into a List — used under `recover:` so the generator's fault is catchable.
+fn collect_lines(r: io.Reader) -> List[str]:
+    out: List[str] = []
+    for l in r.lines():
+        out.push(l)
+    return out
+
+test fn read_line_fault_is_recoverable_and_non_destructive():
+    p := make("nondestr", b"line1\nA\xffB\nline3\n")
+    defer fs.remove_file(p)
+    match io.open(p):
+        Err(e): assert false, e.message()
+        Ok(r):
+            assert str(r.read_line()) == "Some(line1)", "first line"
+            x := recover: r.read_line()
+            match x:
+                Ok(_): assert false, "expected a fault on the undecodable line"
+                Err(e): assert e.message().contains("read_bytes"), e.message()
+            # THE BUG: this used to be Ok(b'line3\n') — b"A\xffB\n" was gone forever.
+            assert eqb(r.read_bytes(100), b"A\xffB\n"), "the failed line's bytes must come back first"
+            assert eqb(r.read_bytes(100), b"line3\n"), "the next line follows the drained carry"
+            assert eqb(r.read_bytes(100), b""), "then EOF"
+
+test fn read_line_fault_is_sticky_not_skipping():
+    p := make("sticky", b"line1\nA\xffB\nline3\n")
+    defer fs.remove_file(p)
+    match io.open(p):
+        Err(e): assert false, e.message()
+        Ok(r):
+            r.read_line()
+            x := recover: r.read_line()
+            match x:
+                Ok(_): assert false, "expected a fault"
+                Err(e): pass
+            # A second read_line re-decodes the SAME carried bytes and re-faults — it must not skip
+            # ahead to line3 (that would be the same data loss, one call later).
+            y := recover: r.read_line()
+            match y:
+                Ok(l): assert false, "the fault must be sticky, got " + str(l)
+                Err(e): assert e.message().contains("read_bytes"), e.message()
+            assert eqb(r.read_bytes(100), b"A\xffB\n"), "the bytes were never skipped"
+
+test fn read_bytes_drain_lets_read_line_resume():
+    # Self-healing: once the invalid prefix is drained, the remaining carry decodes and is a line.
+    p := make("resume", b"A\xffB\nline2\n")
+    defer fs.remove_file(p)
+    match io.open(p):
+        Err(e): assert false, e.message()
+        Ok(r):
+            x := recover: r.read_line()
+            match x:
+                Ok(_): assert false, "expected a fault"
+                Err(e): pass
+            assert eqb(r.read_bytes(2), b"A\xff"), "partial carry drain"
+            assert str(r.read_line()) == "Some(B)", "the rest of the carry decodes as a line"
+            assert str(r.read_line()) == "Some(line2)", "and the fd continues"
+
+test fn lines_inherits_the_carry():
+    # The N-way arm that is NOT native: `lines()` is a pure-Chezzi generator over read_line, so it
+    # must inherit the carry (a carry only `read_bytes` drained, while lines() skipped, is the bug).
+    p := make("lines", b"line1\nA\xffB\nline3\n")
+    defer fs.remove_file(p)
+    match io.open(p):
+        Err(e): assert false, e.message()
+        Ok(r):
+            got := recover: collect_lines(r)
+            match got:
+                Ok(xs): assert false, "expected the generator to propagate the fault"
+                Err(e): assert e.message().contains("read_bytes"), e.message()
+            assert eqb(r.read_bytes(100), b"A\xffB\n"), "lines() must not consume-and-drop the line"
+
+test fn close_discards_the_carry():
+    p := make("close", b"A\xffB\nline2\n")
+    defer fs.remove_file(p)
+    match io.open(p):
+        Err(e): assert false, e.message()
+        Ok(r):
+            x := recover: r.read_line()
+            match x:
+                Ok(_): assert false, "expected a fault"
+                Err(e): pass
+            r.close()
+            match r.read_bytes(100):
+                Ok(b): assert false, "a carry must not be served past close, got " + str(b)
+                Err(e): assert e.message().contains("closed"), e.message()
+
+test fn eof_does_not_resurrect_a_carry():
+    p := make("eof", b"a\nb\n")
+    defer fs.remove_file(p)
+    match io.open(p):
+        Err(e): assert false, e.message()
+        Ok(r):
+            assert str(r.read_line()) == "Some(a)", "a"
+            assert str(r.read_line()) == "Some(b)", "b"
+            assert str(r.read_line()) == "None", "EOF"
+            assert eqb(r.read_bytes(100), b""), "EOF stays EOF"
+            assert str(r.read_line()) == "None", "and read_line stays None"

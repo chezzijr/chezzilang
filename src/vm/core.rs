@@ -328,6 +328,31 @@ pub fn new_in_flight() -> Arc<AtomicBool> {
 pub struct ReaderCore {
     pub inner: Mutex<Option<std::io::BufReader<std::fs::File>>>,
     pub key: usize,
+    /// W7-9 — the RAW bytes of a line `read_line` pulled off the fd but could not decode as UTF-8
+    /// (terminator INCLUDED). `read_line -> Option[str]` is a str-only seam, so an undecodable line
+    /// is not returnable — but it was already taken off the `BufReader`, and dropping it is the
+    /// silent data loss B1/R1 exist to kill (the fault's own message recommends `read_bytes`, which
+    /// used to hand back the NEXT line). Retained HERE so `read_bytes` gives them back byte-exactly,
+    /// exactly like [`SocketCore::carry`]. Consequences, both deliberate:
+    ///   * STICKY — while the carry is non-empty `read_line` re-decodes it and re-faults instead of
+    ///     advancing; skipping would be the same loss one call later.
+    ///   * SELF-HEALING — once a partial `read_bytes` drains the invalid prefix, the remaining carry
+    ///     decodes and is returned as the line.
+    ///
+    /// `close()` discards it (closed is closed), and every read arm checks `inner.is_none()` BEFORE
+    /// serving the carry, so it can neither leak past close nor resurrect after EOF.
+    ///
+    /// LOCK ORDER — `carry` is the OUTER lock, same rule as [`SocketCore::carry`]: take `carry`,
+    /// then `inner`, do the fd read AND the carry update in ONE critical section, drop both. Two
+    /// fibers may alias one `Reader`; splitting the two would let B take bytes off the fd before A
+    /// stores the line it refused. Nothing may take `inner` then `carry`.
+    ///
+    /// A `VecDeque`, NOT a `Vec`, unlike [`SocketCore::carry`]: that one is bounded (<= 3 bytes off
+    /// the happy path, one `MAX_SOCKET_READ` chunk at worst), this one is bounded only by the
+    /// distance to the next `\n`, i.e. the whole file. A `Vec` front-drain memmoves the remainder on
+    /// every call, so the chunked `read_bytes` recovery the fault message prescribes would be
+    /// O(n^2) in the refused line (measured pre-fix: 64 MB -> 19.5s). Deque front-drain is O(taken).
+    pub carry: Mutex<std::collections::VecDeque<u8>>,
 }
 
 /// R2 — `Writer` core: a write-only file/stream handle, the shared half of an `Obj::Writer`. Same

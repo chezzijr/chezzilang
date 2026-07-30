@@ -51,8 +51,6 @@ chronological log.
 | **W7-5b** | `:3800` | An `Executor` created INSIDE an M:N task is silently discarded — its jobs never run, never reap, no fault | Found while prosecuting the W7-5 fix. It registers in the throwaway worker `Vm.executors`, which `run_outcome`/`into_fiber` drop; `drain_live_executors` only snapshots the PARENT `Vm`. Arguably worse than W7-5 itself; belongs to the same Executor milestone |
 | **W7-5c** | `:3800` | `reduce_task_slots` flushes a faulting task's buffered output only `if first_fault.is_none()` (`sched.rs:1688`), so a second faulting task's stdout is dropped on M:N | Latent today (the drain's cancel flag makes siblings `Cancelled`, which flushes); becomes live the moment two tasks can fault in one drain. Same milestone |
 | **W7-8** | `:3860` | `fs.list_dir`/`walk`/`glob`/`canonicalize` + `os.getcwd` decode paths LOSSILY, so the path they hand back does not open — a **dead** path with no diagnostic | The last unswept member of the lossy-byte family (B1/R1/W6-4/W6-14 all fixed). Fixing it properly means a `bytes`-carrying path seam, i.e. the same `OsString`-through-the-resolver work the W7-6 v1 ceiling names — its own milestone, not a patch |
-| **W7-9** | `:3860` | `Reader.read_line`'s non-UTF-8 fault is **DESTRUCTIVE**: the bad line is consumed, and the `read_bytes` its own message recommends returns the NEXT line | Breaches the ratified B1/R1 rule ("a recoverable `Err` that silently drops already-received payload is just a different flavour of the corruption B1 fixes"). `Socket.read` keeps the undecodable bytes in `SocketCore::carry` for exactly this; `Reader` needs the same carry, which is a `Reader`-lifecycle change |
-| **W7-10** | `:3860` | `csv.parse` SILENTLY DELETES a bare `"` inside an unquoted field (`a,b"c` → `bc`) | Needs a policy decision first: CPython keeps it literally, Go `encoding/csv` errors — Chezzi currently picks a silent third answer, and `parse` returns a bare `List[List[str]]` with no error channel, so "error like Go" also needs a signature change |
 | **W7-11** | `:3901` | A `RwShared` holding a container with an element that back-references the CONTAINER (`a.next = xs; RwShared(xs).at(0)`) aborts the host on `from_wire_memo`'s `.expect("a wire Backref always targets an already-reconstructed node id")` — a legal program, no concurrency, both engines | **Pre-existing on main**, not a W7-4 regression (verified on 5960052): a copy-out view drains ONE depth-1 piece, and a piece whose cycle closes through the ROOT container can never be self-contained — the definition it needs IS the container. `elem_split` fixes the sibling-CELL case, not this ancestor case. Closing it means either a catchable fault instead of the `.expect` (`from_wire_memo` returns a `Value`, so that is a signature change through every rebuild arm) or a same-guard whole-container fallback at all 12 view sites |
 | **W7-4a** | `:3901` | Airlock cell identity is preserved **per module** in the snapshot, so two globals in DIFFERENT modules over one shared cell still arrive as two cells | Residual disclosed by the W7-4 fix. Closing it needs `Vm`-lived rebuild state kept (and rooted) across the lazy per-module faults; the reported repro is same-module and is fixed |
 | **W7-4b** | `:3901` | A cell whose inner value carries a residual `Module`/`Native`/`Cffi` handle falls to `SnapValue::Cell`, which has no `Backref` encoding, so its identity is not preserved across a module snapshot | Residual disclosed by the W7-4 fix, and the same limit the `SnapValue::Closure` slow arm already documents. Closing it is a snapshot FORMAT change (id/`Backref` arms on `SnapValue`), out of proportion to a residual this narrow |
@@ -4028,13 +4026,16 @@ same shape — TWO INDEPENDENT SERIALIZATIONS reach one cell; identity is per se
   whole-container `get()`/`read()`, and `slice` (one call returning a container), ARE one crossing and
   do share. Inherent to a copy-out API, not a residual of the fix.
 
-## Session log — 2026-07-28 (bug-hunt wave 7 — the P2 tier: 3 findings, ALL OPEN, filed for a later milestone)
+## Session log — 2026-07-28 (bug-hunt wave 7 — the P2 tier: 3 findings; W7-9 + W7-10 FIXED 2026-07-30, W7-8 still open)
 
-These three came out of the same wave-7 hunt as W7-1…W7-7. They are **not fixed** — each needs a
-design decision or a seam change bigger than a patch, so they are filed rather than rushed before the
-JIT freeze. All three were **re-verified on `main` after the wave-7 fixes landed** (2026-07-28), both
-engines identical, `chezzi check` clean on every repro. None is a serial≠M:N divergence — the parity
-oracle is blind to all three, which is why they needed a differential against CPython/Go to surface.
+These three came out of the same wave-7 hunt as W7-1…W7-7 and were filed rather than rushed, each
+needing a design decision or a seam change bigger than a patch. **Two have since been fixed
+(2026-07-30): W7-9** (the `Reader` carry) **and W7-10** (the csv bare-quote policy call — CPython
+"keep it literally"). **W7-8 remains OPEN** — it is the one that really does need a new
+`bytes`-carrying path seam, i.e. its own milestone. All three were **re-verified on `main` after the
+wave-7 fixes landed** (2026-07-28), both engines identical, `chezzi check` clean on every repro. None
+is a serial≠M:N divergence — the parity oracle is blind to all three, which is why they needed a
+differential against CPython/Go to surface.
 
 ### W7-8 — `fs`/`os` hand back a LOSSILY-DECODED path that does not open (**OPEN**)
 
@@ -4066,7 +4067,7 @@ b'ok.txt' exists = true
 same here means a `bytes`-carrying path API, which is the same `OsString`-through-the-resolver work the
 W7-6 v1 ceiling already names. One milestone should close both.
 
-### W7-9 — `Reader.read_line`'s non-UTF-8 fault CONSUMES the line it could not decode (**OPEN**)
+### W7-9 — `Reader.read_line`'s non-UTF-8 fault CONSUMES the line it could not decode (**FIXED 2026-07-30**)
 
 The fault is recoverable, but the bytes are gone: the `read_bytes` the error message itself recommends
 returns the *next* line, not the one that failed.
@@ -4095,10 +4096,35 @@ recoverable `Err` that silently drops already-received payload would just be a d
 corruption B1 fixes."* `Socket.read` keeps undecodable bytes in `SocketCore::carry` precisely so
 `read_bytes` can recover them; `Reader` has no carry. Same "advice that doesn't work" shape as W6-18.
 `docs/stdlib.md` ("a clean **fault** pointing at `read_bytes`") implies recovery is possible.
-**Why open:** the fix is a `Reader`-lifecycle change (a carry buffer + every read path taught about it),
-not a one-liner.
 
-### W7-10 — `csv.parse` silently DELETES a bare `"` inside an unquoted field (**OPEN**)
+**FIXED 2026-07-30.** `ReaderCore` grew a `carry: Mutex<Vec<u8>>` mirroring `SocketCore::carry` (same
+`carry`-OUTER/`inner`-INNER lock order, one critical section per read). The root cause was not a
+missing buffer but the *read shape*: `BufRead::read_line(&mut String)` consumes the line off the
+`BufReader` and only then returns `InvalidData`, with the bytes already dropped — so `read_line` now
+does `read_until(b'\n')` + `String::from_utf8`, and on a decode failure stashes the RAW line
+(terminator included) in the carry before faulting. The fault message and the terminator-strip are
+byte-for-byte unchanged. `read_bytes` drains a pending carry FIRST without touching the fd (a
+carry-only *short* read, the `socket_read_bytes` shape at `netio.rs:470`); `close` takes the carry lock
+first, clears it, and drops the fd; every read arm checks `inner.is_none()` BEFORE serving the carry,
+so a carry can neither leak past `close` nor resurrect after EOF. **All FOUR read paths** were taught
+about it — the three native arms (`read_line`, `read_bytes`, `close`; `reader_method` in
+`src/vm/fileio.rs` is the whole Reader dispatch, there is no `read_all`) plus the bodied pure-Chezzi
+generator `lines()` (`std/io.chz`), which inherits carry and stickiness for free by looping
+`read_line`. Two deliberate consequences, both documented: the fault is **sticky** (a re-read
+re-decodes the same bytes and re-faults, never skips — a `lines()` loop must drain with `read_bytes`
+or `close` to move on, exactly the ratified `Socket.read` behaviour) and **self-healing** (a partial
+drain leaves a remainder that, if it decodes, becomes the next line). New observed output, identical
+on `run` and `run --serial`:
+```
+l1 = Some(line1)
+l2 FAULT: stream did not contain valid UTF-8 — read binary files with Reader.read_bytes
+rest = Ok(b'A\xffB\n')     <- was Ok(b'line3\n'); the refused line, byte-exact
+then = Ok(b'line3\n')
+```
+Fenced by `tests/chz/stdlib/io_reader_carry_test.chz` (6 `test fn`s: non-destructive recovery,
+stickiness, partial-drain resume, the `lines()` arm, close-discards-the-carry, EOF-does-not-resurrect).
+
+### W7-10 — `csv.parse` silently DELETES a bare `"` inside an unquoted field (**FIXED 2026-07-30**)
 
 ```chezzi
 import std.csv
@@ -4120,6 +4146,20 @@ b'a,b""c'  => [[a, bc]]
 The hole is narrow — the quote-*starts*-the-field cases (`a,"b"c` → `bc`, `"a"b,c` → `ab`) match
 CPython exactly. `docs/stdlib.md` says only "RFC 4180 quote state machine" and never mentions bare
 quotes.
-**Why open:** needs a policy call before a patch. "Keep it literally" (CPython) is a one-line state-
-machine change; "error" (Go) needs a signature change, because `parse` returns a bare `List[List[str]]`
-with no error channel.
+**FIXED 2026-07-30 — policy: CPython.** A `"` opens a quoted field ONLY at FIELD START; anywhere else
+it is an ordinary character kept literally. Go's `bare " in non-quoted-field` error was rejected
+precisely because `parse -> List[List[str]]` has no error channel, and adding one is a signature
+change. The patch is a per-FIELD `field_start` flag in `std/csv.chz`'s state machine (the record-level
+`started` is NOT reusable — a `,` sets it too, and a `field.len() == 0` heuristic gets `""x"y` wrong):
+the quote-opens branch is gated on `and field_start`, and a non-field-start quote falls through the
+existing elif chain into the ordinary-char `else`, which already pushes the char and sets
+`started = true`. The pre-collected `chars: List[str]` + `field: List[str]` O(n) structure is
+untouched (no `text[i:i+1]` per char). New output, identical on `run` and `run --serial`:
+```
+b'a,b"c'   => [[a, b"c]]      b'a,"b"c' => [[a, bc]]     <- fences, UNCHANGED
+b'a,b"c"d' => [[a, b"c"d]]    b'"a"b,c' => [[ab, c]]
+b'a,b""c'  => [[a, b""c]]     <- TWO literal quotes; `""` collapses only INSIDE a quoted field
+```
+Fenced by `tests/chz/stdlib/csv_bare_quote_test.chz` (4 `test fn`s: the three bare-quote cases, both
+quote-starts-the-field regression fences, RFC 4180 embedded comma/newline/`""`-inside-a-quoted-field,
+and the total round-trip).

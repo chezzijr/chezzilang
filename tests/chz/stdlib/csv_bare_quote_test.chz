@@ -1,0 +1,33 @@
+# tests/chz/stdlib/csv_bare_quote_test.chz — std.csv bare-quote policy (W7-10).
+#
+# A `"` opens a quoted field ONLY at FIELD START (CPython `csv.reader` parity). Anywhere else it is
+# an ORDINARY character kept literally. Before the fix `a,b"c` parsed as [["a","bc"]] — the quote was
+# silently DELETED, a third answer neither CPython (keep it) nor Go (error) gives.
+# Pure compute, no IO — serial==M:N by construction. Run: `cargo run -- test tests/chz/`.
+
+import std.csv
+
+test fn bare_quote_is_kept_literally():
+    # The W7-10 repro. Today: [[a, bc]] / [[a, bcd]] / [[a, bc]].
+    assert csv.parse("a,b\"c") == [["a", "b\"c"]], "a,b\"c"
+    assert csv.parse("a,b\"c\"d") == [["a", "b\"c\"d"]], "a,b\"c\"d"
+    # TWO bare quotes mid-field are TWO literal quotes — `""` only collapses INSIDE a quoted field.
+    assert csv.parse("a,b\"\"c") == [["a", "b\"\"c"]], "a,b\"\"c"
+
+test fn quote_at_field_start_still_opens_a_quoted_field():
+    # REGRESSION FENCE: these already matched CPython exactly and must not move.
+    assert csv.parse("a,\"b\"c") == [["a", "bc"]], "a,\"b\"c"
+    assert csv.parse("\"a\"b,c") == [["ab", "c"]], "\"a\"b,c"
+
+test fn rfc4180_quoted_fields_still_work():
+    assert csv.parse("\"x,y\",z") == [["x,y", "z"]], "embedded comma"
+    assert csv.parse("\"l1\nl2\",z") == [["l1\nl2", "z"]], "embedded newline"
+    # `""` INSIDE a quoted field is ONE literal quote — do not confuse with the bare-"" case above.
+    assert csv.parse("\"p\"\"q\"") == [["p\"q"]], "escaped quote inside a quoted field"
+    assert csv.parse("a,b\r\nc,d\r\n") == [["a", "b"], ["c", "d"]], "CRLF records"
+
+test fn round_trip_stays_total_for_a_bare_quote_field():
+    rows := [["b\"c"]]
+    assert csv.parse(csv.format(rows)) == rows, "round trip"
+    rows2 := [["a", "b\"\"c"], ["x,y", "z"]]
+    assert csv.parse(csv.format(rows2)) == rows2, "round trip 2"

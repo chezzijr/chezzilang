@@ -442,10 +442,37 @@ opened by `open(path)`): stream a large file line- or chunk-by-chunk instead of 
 
 | Method | Signature | Notes |
 |--------|-----------|-------|
-| `read_line` | `() -> Option[str]` | One line; trailing `\n` (and a preceding `\r`) **stripped**; `None` at EOF. Matches the module-level `read_line()`. A mid-read I/O error or non-UTF-8 file is a clean **fault** pointing at `read_bytes` (an `Option` can't carry the error, like `read_file`). |
-| `read_bytes` | `(n: int) -> Result[bytes]` | At-most-`n` bytes (exactly `n` until a short final chunk); **empty bytes = EOF**; `Err` on closed / I/O. The binary + error-distinguishing escape hatch. `n <= 0` → `Ok(b"")`. |
-| `close` | `() -> Result[nil]` | Release the fd. Idempotent; a read after `close` is a clean `Err` (`read_bytes`) / fault (`read_line`), never a panic. |
-| `lines` | `() -> Iterator[str]` | **Lazy** line stream — `for ln in r.lines():` (Python `for l in f` / Go `bufio.Scanner` / Rust `BufRead::lines`). A generator over `read_line()`: each line is fetched on demand (the file is **not** snapshotted; an early `break` stops reading), trailing `\n`/`\r` stripped, ends at EOF. A mid-read non-UTF-8 fault surfaces exactly as `read_line`. |
+| `read_line` | `() -> Option[str]` | One line; trailing `\n` (and a preceding `\r`) **stripped**; `None` at EOF. Matches the module-level `read_line()`. A mid-read I/O error or non-UTF-8 file is a clean **fault** pointing at `read_bytes` (an `Option` can't carry the error, like `read_file`). The non-UTF-8 fault is **non-destructive** — see the carry rule below. |
+| `read_bytes` | `(n: int) -> Result[bytes]` | At-most-`n` bytes (exactly `n` until a short final chunk); **empty bytes = EOF**; `Err` on closed / I/O. The binary + error-distinguishing escape hatch. `n <= 0` → `Ok(b"")`. Drains a pending **carry** first, without touching the fd. |
+| `close` | `() -> Result[nil]` | Release the fd, and discard any carry. Idempotent; a read after `close` is a clean `Err` (`read_bytes`) / fault (`read_line`), never a panic. |
+| `lines` | `() -> Iterator[str]` | **Lazy** line stream — `for ln in r.lines():` (Python `for l in f` / Go `bufio.Scanner` / Rust `BufRead::lines`). A generator over `read_line()`: each line is fetched on demand (the file is **not** snapshotted; an early `break` stops reading), trailing `\n`/`\r` stripped, ends at EOF. A mid-read non-UTF-8 fault surfaces exactly as `read_line`, carry included. |
+
+- **The non-UTF-8 fault is NON-DESTRUCTIVE (W7-9)** — recovery actually works. The line `read_line`
+  could not decode is **carried**: its raw bytes, line terminator included, are retained on the reader,
+  and `read_bytes` hands them back **byte-exactly** as a carry-only *short* read (the fd is not touched
+  until the carry is empty, so `read_bytes(100)` after the fault yields exactly the failed line, and the
+  *next* `read_bytes` continues the file). Same rule, same reason as `Socket.read`'s carry: a
+  recoverable `Err` that silently drops already-received payload is just a different flavour of data
+  loss. Consequences, both deliberate:
+  - **Sticky.** While a carry is pending, `read_line` re-decodes it and re-faults — it never skips
+    ahead. So `for ln in r.lines():` cannot step over a bad line: drain it with `read_bytes` (or
+    `close`) to make progress. `lines()` inherits the carry and the stickiness, being a generator over
+    `read_line`.
+  - **Self-healing.** A *partial* `read_bytes` that drains the invalid prefix leaves the rest carried;
+    if that remainder decodes, the next `read_line` returns it as the line.
+  - `close()` discards the carry (closed is closed), and a carry is never served after `close` or
+    resurrected after EOF.
+  - A **mid-line I/O error** carries too: whatever the read delivered before the error is retained the
+    same way, so `read_bytes` gets it back instead of it vanishing with the fault.
+
+  ```chezzi
+  # /tmp/bin.dat == b"line1\nA\xffB\nline3\n"
+  r := io.open("/tmp/bin.dat")?
+  r.read_line()                     # Some(line1)
+  x := recover: r.read_line()       # Err: stream did not contain valid UTF-8 — read binary files with Reader.read_bytes
+  r.read_bytes(100)                 # Ok(b'A\xffB\n')   <- the refused line, byte-exact
+  r.read_bytes(100)                 # Ok(b'line3\n')
+  ```
 
 - **Cross-task read ordering to one shared `Reader` is unspecified** — two tasks reading one handle race
   the file offset (Go's `bufio`-not-goroutine-safe rule). Each single read is one atomic critical section;
@@ -886,6 +913,14 @@ The case fns are ASCII-guaranteed; exotic full-Unicode case-folding follows Rust
   record separator produces **no** spurious empty final record. Empty input → `[]`. A blank interior
   line → a single-empty-field record `[""]` (this differs from Python's `csv`, which maps a blank line
   to `[]` — chosen so `parse(format(rows)) == rows` holds).
+- **Bare quotes (W7-10).** A `"` opens a quoted field **only at FIELD START**. Anywhere else it is an
+  ordinary character kept **literally**: `parse("a,b\"c")` → `[["a", "b\"c"]]`,
+  `parse("a,b\"c\"d")` → `[["a", "b\"c\"d"]]`, `parse("a,b\"\"c")` → `[["a", "b\"\"c"]]` — **two**
+  literal quotes there, because `""` collapses to one only *inside* a quoted field. This is CPython
+  `csv.reader` parity; Go's `bare " in non-quoted-field` **error** was rejected because `parse`
+  returns a bare `List[List[str]]` with no error channel (an error would be a signature change). A
+  quote that *starts* the field still opens a quoted one, so `parse("a,\"b\"c")` → `[["a", "bc"]]`
+  and `parse("\"a\"b,c")` → `[["ab", "c"]]`.
 - `format` — the inverse. A field is quoted **iff** it contains a `,`, `"`, CR, or LF; embedded quotes
   are doubled. Each record is **terminated** by CRLF (`\r\n`, per RFC 4180) — not separator-joined —
   so `format([["a","b"]])` == `"a,b\r\n"`; `parse` accepts CRLF or LF either way. `format([])` → `""`.
