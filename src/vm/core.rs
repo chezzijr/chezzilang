@@ -339,6 +339,11 @@ pub struct ReaderCore {
     ///   * SELF-HEALING — once a partial `read_bytes` drains the invalid prefix, the remaining carry
     ///     decodes and is returned as the line.
     ///
+    /// An IO error mid-line carries too ([`ReaderCarry::io_err`]) — `read_until` leaves everything it
+    /// read before the error in the buffer, and those bytes are already off the `BufReader`. That
+    /// carry is NOT self-healing: an interrupted line is a TRUNCATED one, and handing it back as a
+    /// whole line would trade the old silent loss for a silent lie. It re-faults until drained.
+    ///
     /// `close()` discards it (closed is closed), and every read arm checks `inner.is_none()` BEFORE
     /// serving the carry, so it can neither leak past close nor resurrect after EOF.
     ///
@@ -352,7 +357,28 @@ pub struct ReaderCore {
     /// distance to the next `\n`, i.e. the whole file. A `Vec` front-drain memmoves the remainder on
     /// every call, so the chunked `read_bytes` recovery the fault message prescribes would be
     /// O(n^2) in the refused line (measured pre-fix: 64 MB -> 19.5s). Deque front-drain is O(taken).
-    pub carry: Mutex<std::collections::VecDeque<u8>>,
+    pub carry: Mutex<ReaderCarry>,
+}
+
+/// The [`ReaderCore::carry`] payload: the retained bytes plus, when they came from a failed READ
+/// rather than a failed DECODE, the IO error that produced them.
+#[derive(Debug, Default)]
+pub struct ReaderCarry {
+    pub bytes: std::collections::VecDeque<u8>,
+    /// `Some(msg)` = these bytes are the truncated head of a line the fd failed to finish. `read_line`
+    /// re-raises `msg` while it is set instead of decoding the bytes into a line that was never whole;
+    /// `read_bytes` still hands them back, and clears this once the carry is empty.
+    pub io_err: Option<String>,
+}
+
+impl ReaderCarry {
+    /// Drop the carry AND its capacity. A refused line is bounded only by the file, so leaving a
+    /// drained deque's buffer allocated pins that many bytes for the `Reader`'s whole lifetime —
+    /// invisible to `Heap::live_bytes` and to `--max-heap`, since these bytes are off-heap.
+    pub fn reset(&mut self) {
+        self.bytes = std::collections::VecDeque::new();
+        self.io_err = None;
+    }
 }
 
 /// R2 — `Writer` core: a write-only file/stream handle, the shared half of an `Obj::Writer`. Same

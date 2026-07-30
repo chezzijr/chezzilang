@@ -28,6 +28,13 @@ fn from_inner(e: WriteErr) -> WriteErr {
     }
 }
 
+/// Strip the line terminator the same way the module-level `io.read_line` does (native/mod.rs):
+/// trailing `'\n'` then `'\r'` UNCONDITIONALLY — a bare/classic-Mac `'\r'` must not survive, or
+/// `Reader.read_line` drifts from its owning ancestor.
+fn strip_eol(line: &str) -> &str {
+    line.trim_end_matches('\n').trim_end_matches('\r')
+}
+
 impl Vm {
     /// R2 — clone out the shared `Arc<WriterCore>` behind a `Writer` handle (refcount bump), mirroring
     /// [`Vm::socket_core`]. Held only for the calling method, so locking the backing does not borrow
@@ -321,36 +328,40 @@ impl Vm {
                     let mut guard = core.inner.lock().unwrap_or_else(|e| e.into_inner());
                     match guard.as_mut() {
                         None => Err(None), // closed (checked BEFORE the carry is served)
+                        // W7-9: the carry left by a failed READ is the truncated head of a line, so
+                        // it re-faults until drained. Decoding it into a line would present a
+                        // fragment as a whole record — a silent lie in place of the silent loss.
+                        Some(_) if carry.io_err.is_some() => {
+                            Err(Some(carry.io_err.clone().unwrap_or_default()))
+                        }
+                        // A carry left by a failed DECODE is re-decoded IN PLACE — moving it out to
+                        // a `Vec` would memmove the whole (file-sized) buffer on every probe of the
+                        // documented drain-and-retry loop. `make_contiguous` pays that once.
+                        Some(_) if !carry.bytes.is_empty() => {
+                            match std::str::from_utf8(carry.bytes.make_contiguous()) {
+                                Ok(s) => {
+                                    let line = strip_eol(s).to_string();
+                                    carry.reset();
+                                    Ok(Some(line))
+                                }
+                                Err(_) => {
+                                    Err(Some("stream did not contain valid UTF-8".to_string()))
+                                }
+                            }
+                        }
                         Some(br) => {
                             // W7-9: read RAW. `BufRead::read_line(&mut String)` consumes the line off
                             // the reader and then errs with the bytes already dropped — the decode has
-                            // to happen where the bytes can still be retained. A pending carry is
-                            // re-decoded first (sticky), so a refused line is never skipped.
-                            let mut buf: Vec<u8> = std::mem::take(&mut *carry).into();
-                            let taken = if buf.is_empty() {
-                                br.read_until(b'\n', &mut buf)
-                            } else {
-                                Ok(buf.len())
-                            };
-                            match taken {
+                            // to happen where the bytes can still be retained.
+                            let mut buf: Vec<u8> = Vec::new();
+                            match br.read_until(b'\n', &mut buf) {
                                 Ok(0) => Ok(None), // EOF
                                 Ok(_) => match String::from_utf8(buf) {
-                                    Ok(mut line) => {
-                                        // Strip the line terminator the same way the module-level
-                                        // io.read_line does (native/mod.rs): trailing '\n' then '\r'
-                                        // UNCONDITIONALLY — a bare/classic-Mac '\r' must not survive,
-                                        // or Reader.read_line drifts from its owning ancestor.
-                                        let end = line
-                                            .trim_end_matches('\n')
-                                            .trim_end_matches('\r')
-                                            .len();
-                                        line.truncate(end);
-                                        Ok(Some(line))
-                                    }
+                                    Ok(line) => Ok(Some(strip_eol(&line).to_string())),
                                     Err(e) => {
                                         // Retain the raw line, terminator included: `read_bytes`
                                         // hands it back byte-exactly.
-                                        *carry = e.into_bytes().into();
+                                        carry.bytes = e.into_bytes().into();
                                         Err(Some("stream did not contain valid UTF-8".to_string()))
                                     }
                                 },
@@ -359,9 +370,10 @@ impl Vm {
                                     // documents that everything it read before the error is left in
                                     // `buf`, and those bytes are already off the `BufReader`.
                                     // Dropping them is the same silent loss W7-9 exists to kill, so
-                                    // they go in the carry too. (A later read serves them: it is a
-                                    // partial line, but the fd errored — there is no more of it.)
-                                    *carry = buf.into();
+                                    // they go in the carry too — flagged, so the truncated head is
+                                    // recoverable via `read_bytes` but never served as a line.
+                                    carry.bytes = buf.into();
+                                    carry.io_err = Some(e.to_string());
                                     Err(Some(e.to_string()))
                                 }
                             }
@@ -397,11 +409,15 @@ impl Vm {
                         None => Err(None), // closed (checked BEFORE the carry is served)
                         // W7-9: a pending carry is drained FIRST and the fd is not touched — a
                         // carry-only SHORT read ("at most n" licenses it), byte-identical to
-                        // `socket_read_bytes`. Empty-means-EOF survives: we never return empty
-                        // while the carry is non-empty.
-                        Some(_) if !carry.is_empty() => {
-                            let take = (n as usize).min(carry.len());
-                            Ok(carry.drain(..take).collect::<Vec<u8>>())
+                        // `socket_read_bytes`. `n <= 0` still clamps to `Ok(b"")` here, exactly as it
+                        // does off the fd — that is the documented clamp, not an EOF claim.
+                        Some(_) if !carry.bytes.is_empty() => {
+                            let take = (n as usize).min(carry.bytes.len());
+                            let out = carry.bytes.drain(..take).collect::<Vec<u8>>();
+                            if carry.bytes.is_empty() {
+                                carry.reset(); // release the (file-sized) buffer, clear the IO flag
+                            }
+                            Ok(out)
                         }
                         Some(br) => {
                             let mut buf = Vec::new();
@@ -430,7 +446,7 @@ impl Vm {
                 // carry is discarded with the fd (W7-9).
                 let mut carry = core.carry.lock().unwrap_or_else(|e| e.into_inner());
                 *core.inner.lock().unwrap_or_else(|e| e.into_inner()) = None;
-                carry.clear();
+                carry.reset();
                 drop(carry);
                 Ok(self.sock_ok(Value::nil()))
             }
@@ -468,7 +484,7 @@ impl Vm {
                 let core = Arc::new(ReaderCore {
                     inner: Mutex::new(Some(std::io::BufReader::new(f))),
                     key: core::next_poll_key(),
-                    carry: Mutex::new(std::collections::VecDeque::new()),
+                    carry: Mutex::new(core::ReaderCarry::default()),
                 });
                 let v = Value::obj(self.heap.alloc(Obj::Reader(core)));
                 Ok(self.sock_ok(v))

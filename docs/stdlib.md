@@ -463,7 +463,9 @@ opened by `open(path)`): stream a large file line- or chunk-by-chunk instead of 
   - `close()` discards the carry (closed is closed), and a carry is never served after `close` or
     resurrected after EOF.
   - A **mid-line I/O error** carries too: whatever the read delivered before the error is retained the
-    same way, so `read_bytes` gets it back instead of it vanishing with the fault.
+    same way, so `read_bytes` gets it back instead of it vanishing with the fault. That carry is
+    **not** self-healing — an interrupted line is a *truncated* one, so `read_line` re-raises the I/O
+    error until the bytes are drained rather than handing back a fragment as if it were a whole line.
 
   ```chezzi
   # /tmp/bin.dat == b"line1\nA\xffB\nline3\n"
