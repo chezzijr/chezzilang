@@ -1068,10 +1068,16 @@ mod tests {
                 {
                     continue;
                 }
-                if let Some(prev) = seen.insert(name, module) {
+                // W7-8 — key on the STRIPPED name, because that is the domain `is_blocking` now
+                // classifies on (it does `strip_prefix('_')`). Checking raw names would let `_foo`
+                // in one module and `foo` in another both classify as `foo` while this guard saw two
+                // distinct names and stayed green — the exact soundness hole it exists to catch.
+                let key = name.strip_prefix('_').unwrap_or(name);
+                if let Some(prev) = seen.insert(key, module) {
                     panic!(
-                        "native member name `{name}` is defined in both `{prev}` and `{module}` — \
-                         bare-name `is_blocking` classification is no longer sound (see is_blocking docs)"
+                        "native member name `{name}` (classified as `{key}`) collides with one in \
+                         `{prev}`, now also `{module}` — bare-name `is_blocking` classification is no \
+                         longer sound (see is_blocking docs)"
                     );
                 }
             }

@@ -52,6 +52,43 @@ struct Path:
     fn str(self) -> str:
         return self.raw.decode_lossy()
 
+    # `Hashable` — so `Set[Path]` and `Map[Path, V]` work, which they did when these fns returned
+    # `str`. Computed over the RAW bytes, never the lossy display: two distinct paths that both
+    # decode to the same U+FFFD-substituted string must not be forced to collide. A polynomial
+    # rolling hash mod a prime, kept under the modulus every step so `h * 31` can never overflow i64.
+    # `bytes` has no callable `.hash()` to delegate to, so this is written out.
+    # ponytail: O(n) per hash in Chezzi; move it to a native byte-hash if path-keyed maps get hot.
+    fn hash(self) -> int:
+        h := 0
+        i := 0
+        n := self.raw.len()
+        while i < n:
+            h = (h * 31 + self.raw[i]) % 1000000007
+            i += 1
+        return h
+
+    # `Comparable` — so `List[Path].sort()` works, which it did when these fns returned `str`.
+    # Lexicographic over the raw bytes (unsigned 0-255), which is also the ordering the OS and
+    # `LC_ALL=C sort` use for filenames. Byte order, NOT decoded-text order: a non-UTF-8 name has no
+    # text order to speak of, and ordering by the lossy form would make distinct paths compare Equal.
+    fn compare(self, other: Path) -> int:
+        a := self.raw
+        b := other.raw
+        n := a.len()
+        m := b.len()
+        i := 0
+        while i < n and i < m:
+            if a[i] != b[i]:
+                if a[i] < b[i]:
+                    return -1
+                return 1
+            i += 1
+        if n < m:
+            return -1
+        if n > m:
+            return 1
+        return 0
+
 # --- private byte helpers -----------------------------------------------------------------
 # `bytes` has no `split`/`join`/`starts_with`/`ends_with` and no `+`, so these four are the whole
 # toolbox the helpers below are written against. Concatenation goes through a `bytearray` (the one
@@ -238,6 +275,14 @@ fn normalize(p: PathLike) -> Path:
 # `List[str]` variable, no `List[bytes]`, and not even `fs.list_dir`'s own `List[path.Path]`. The bound
 # keeps every HOMOGENEOUS list callable while leaving invariance alone. (A heterogeneous literal like
 # `[a_path, "sub"]` has no single element type and is rejected at the literal, as for any other list.)
+#
+# COST, accepted: being generic costs `join` its FIRST-CLASS-VALUE spelling — a generic fn cannot be
+# passed into an `fn(...)`-typed slot and has no turbofish to pin it, so `apply(path.join, parts)` no
+# longer compiles where the old `str`-typed `join` did. That is an instance of the pre-existing
+# generic-fn-as-value gap (a bare same-module generic fn in a user-HOF param slot), not something this
+# module can fix locally; wrap it in a lambda at the call site. The alternative — a monomorphic
+# `join(List[Path])` — would break the ordinary `join(["a","b"])` spelling under invariance, which is
+# far the worse trade.
 fn join[T](parts: List[T]) -> Path where T: PathLike:
     kept: List[bytes] = []
     for part in parts:
