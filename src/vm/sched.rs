@@ -1694,11 +1694,11 @@ impl Vm {
     /// result, flushing output and applying `Exit`-over-`Fault` precedence. Shared by the legacy pool
     /// engine ([`run_workers_on_pool`]) and the M:N engine ([`run_mn_nursery`]).
     ///
-    /// `Done`/`Exit` output is flushed in task order (decision F). The terminal (lowest-index
-    /// propagating) `Fault` ALSO flushes its buffered output at its slot — matching the cooperative/
-    /// interp oracle, which writes a faulting task's partial output before the fault unwinds. Higher-
-    /// index racy `Fault`s and `Cancelled` still drop (no deterministic slot — the work is incomplete /
-    /// ran past the terminal fault's cancel). The fault-free goldens only ever hit `Done`, so they stay
+    /// `Done`/`Exit` output is flushed in task order (decision F). Every `Fault` slot ALSO flushes its
+    /// buffered output at its slot (W7-5c) — matching the cooperative/interp oracle, which writes a
+    /// faulting task's partial output before the fault unwinds; only the lowest-index `Fault`'s error
+    /// propagates. `Cancelled` still drops (no deterministic slot — the work is incomplete / ran past
+    /// the terminal fault's cancel). The fault-free goldens only ever hit `Done`, so they stay
     /// byte-identical. A `Deadlocked` slot (the M:N deadlock-abort synthetic outcome — every parked
     /// fiber gets one; a real `Fault`/`Exit` normally trips `terminate` first, and the precedence below
     /// resolves any mix deterministically) is different: ALL parked
@@ -1743,8 +1743,8 @@ impl Vm {
                     // The terminal (lowest-index propagating) fault flushes its buffered output at its
                     // task-order slot — after lower-index Done/Exit, before the fault propagates —
                     // so a faulting task's partial output is no longer silently dropped. Higher-index
-                    // racy faults still drop (they ran concurrently past the terminal fault's cancel;
-                    // no deterministic slot position).
+                    // faults now flush too (W7-5c); their errors are still discarded in favour of the
+                    // lowest index.
                     //
                     // RESIDUAL RACE (intentionally not chased here — applies ONLY to a genuine
                     // multi-printer REAL-fault reduce; the multi-parked DEADLOCK case is handled by
@@ -1762,9 +1762,14 @@ impl Vm {
                     if first_hard_fault.is_none() && executor_hard_halt(&err) {
                         first_hard_fault = Some(err.clone());
                     }
+                    // W7-5c — EVERY faulting task's buffered output flushes at its task-order slot,
+                    // like the `Deadlocked` arm. Under the W7-5 run-all drain a second fault is
+                    // ordinary, not a race artifact, so gating the flush on `first_fault.is_none()`
+                    // deleted real output that serial printed live. Only the LOWEST-index error
+                    // still propagates.
+                    self.out.extend_from_slice(&out);
+                    self.stderr.extend_from_slice(&stderr);
                     if first_fault.is_none() {
-                        self.out.extend_from_slice(&out);
-                        self.stderr.extend_from_slice(&stderr);
                         first_fault = Some(err);
                     }
                 }

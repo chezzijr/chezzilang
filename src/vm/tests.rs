@@ -11656,6 +11656,47 @@ fn executor_fault_during_drain_still_runs_every_sibling() {
     // drain ordering differs — not a serial-vs-M:N parity comparison.
 }
 
+/// W7-5c — `reduce_task_slots` used to flush a faulting task's buffered output only for the FIRST
+/// fault (`if first_fault.is_none()`), so with run-all drains (W7-5) a second faulting job's stdout
+/// vanished on M:N while serial printed it live. Both faulters' lines must survive; only the
+/// lowest-index error propagates.
+#[test]
+fn executor_second_faulting_job_keeps_its_output_both_engines() {
+    let src = r#"
+import std.concurrency
+
+fn boom_a():
+    print("a-before-fault")
+    panic("boom a")
+
+fn boom_b():
+    print("b-before-fault")
+    panic("boom b")
+
+fn main():
+    ex := Executor()
+    ex.submit(boom_a)
+    ex.submit(boom_b)
+    r := recover: ex.shutdown()
+    match r:
+        Ok(_): print("no fault")
+        Err(e): print("fault: {e.message()}")
+
+main()
+"#;
+    let serial = run_capture(src).expect("serial run");
+    let mn = run_capture_parallel(src).expect("M:N run");
+    for out in [&serial, &mn] {
+        assert!(out.contains("a-before-fault"), "lost job 0's output: {out}");
+        assert!(out.contains("b-before-fault"), "lost job 1's output: {out}");
+        assert!(
+            out.contains("fault: boom a"),
+            "lowest index must propagate: {out}"
+        );
+    }
+    assert_same_lines(&serial, &mn);
+}
+
 #[test]
 fn executor_reentrant_shutdown_now_during_drain() {
     // A task that calls `shutdown_now()` mid-drain discards the remaining siblings on BOTH
