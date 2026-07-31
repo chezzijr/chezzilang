@@ -2595,7 +2595,8 @@ impl Vm {
                 if self.parallel {
                     // B3.6: drain the whole queue under the lock (drop the guard before running any
                     // task — never hold the core lock across an invoke), then run the tasks on the
-                    // bounded pool. Output flushes in submission order; the first fault propagates.
+                    // bounded pool. Output flushes in submission order; the lowest-index fault
+                    // propagates.
                     let tasks: Vec<WireValue> = core.inner.lock().unwrap().take_all();
                     self.drain_executor_on_pool(tasks, span)?;
                 } else {
@@ -2645,11 +2646,16 @@ impl Vm {
                         self.fault_trace_depth = outer_depth;
                         if let Err(e) = r {
                             let hard = executor_hard_halt(&e);
+                            // W7-5 review Fix 1: a hard halt must overwrite an earlier ordinary
+                            // fault before breaking, or a later `--max-heap`/`--timeout` abort is
+                            // silently discarded in favor of an earlier catchable fault — which lets
+                            // `recover:` swallow a hard halt it must never be able to catch.
+                            if hard {
+                                first_err = Some(e);
+                                break;
+                            }
                             if first_err.is_none() {
                                 first_err = Some(e);
-                            }
-                            if hard {
-                                break;
                             }
                         }
                         if self.pending_exit.is_some() {

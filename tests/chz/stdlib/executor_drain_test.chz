@@ -88,11 +88,15 @@ test fn the_queue_is_empty_after_a_faulting_drain():
     assert c.load() == 1, "the second reap must not re-run anything, got " + str(c.load())
 
 test fn a_token_gives_back_the_early_stop_opt_in():
-    # The abort-siblings behaviour is not gone, it moved into the caller's hands.
+    # The abort-siblings behaviour is not gone, it moved into the caller's hands. Cancel the token on
+    # the main task BEFORE submitting/shutting down the queued jobs — no cancelling job is queued, so
+    # there is nothing to race: `guarded_bump` observes an already-cancelled token deterministically on
+    # both engines, unlike submitting `tok.cancel()` as job 0 and racing jobs 1/2 against it (M:N farms
+    # `ready[1..]` to the pool before running `ready[0]` inline, so a hot pool thread can win that race).
     ex := Executor()
     tok := cancel.manual()
+    tok.cancel()
     c := AtomicInt(0)
-    ex.submit(fn(): tok.cancel())
     ex.submit(fn(): guarded_bump(tok, c))
     ex.submit(fn(): guarded_bump(tok, c))
     ex.shutdown()

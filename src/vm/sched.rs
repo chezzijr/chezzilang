@@ -1705,14 +1705,26 @@ impl Vm {
     /// buffers flush in task order (not just the lowest-index one), matching serial's live prints, and
     /// ONE deadlock error propagates. Precedence: an `os.exit` is an UNCONDITIONAL hard halt, so the lowest-index
     /// `Exit` wins over any `Fault` regardless of index — otherwise a lower-index recoverable fault
-    /// could demote a child's `os.exit` to a catchable error. Within a kind, the lowest index wins
-    /// (scan order + `is_none()`).
+    /// could demote a child's `os.exit` to a catchable error. W7-5 review Fix 1: a lowest-index
+    /// [`executor_hard_halt`]-marked `Fault` (over-memory/timeout/dead-stdout) likewise wins over any
+    /// ordinary `Fault` regardless of index, for the same reason — an Executor drain's hard halt must
+    /// never be demoted to a catchable error by an earlier sibling's plain fault. Full precedence:
+    /// `Exit` > hard-halt `Fault` > ordinary `Fault` > `Deadlocked`, lowest index winning within each
+    /// kind (scan order + `is_none()`).
     pub(super) fn reduce_task_slots(
         &mut self,
         slots: Vec<Option<TaskOutcome>>,
     ) -> Result<(), RuntimeError> {
         let mut first_exit: Option<i32> = None;
         let mut first_fault: Option<RuntimeError> = None;
+        // W7-5 review Fix 1: the lowest-index HARD-HALT fault (`executor_hard_halt` —
+        // over-memory/timeout/dead-stdout), tracked separately from `first_fault` above. It must win
+        // final propagation over an earlier ordinary fault, or a later `--max-heap`/`--timeout` abort
+        // gets demoted to a catchable error by an earlier sibling's plain fault (letting `recover:`
+        // swallow a hard halt it must never be able to catch — `exec.rs`'s cancel-bypass check is
+        // keyed on these markers). This does NOT change which fault's output is flushed above (still
+        // strictly lowest-index, via `first_fault`) — only which error `reduce_task_slots` returns.
+        let mut first_hard_fault: Option<RuntimeError> = None;
         let mut deadlock_err: Option<RuntimeError> = None;
         for slot in slots {
             match slot.expect("every task slot was filled before join returned") {
@@ -1747,6 +1759,9 @@ impl Vm {
                     // sequential stop-at-fault, so multi-task-with-fault output ordering is a separate,
                     // pre-existing nondeterminism, not asserted as parity (see the single-task test
                     // `parallel_faulting_task_flushes_partial_output_3engine`).
+                    if first_hard_fault.is_none() && executor_hard_halt(&err) {
+                        first_hard_fault = Some(err.clone());
+                    }
                     if first_fault.is_none() {
                         self.out.extend_from_slice(&out);
                         self.stderr.extend_from_slice(&stderr);
@@ -1779,7 +1794,12 @@ impl Vm {
                 }
             }
         }
-        match (first_exit, first_fault, deadlock_err) {
+        // W7-5 review Fix 1: `first_hard_fault` (if any) wins over `first_fault` here — the
+        // precedence is `Exit` > hard-halt-marked `Fault` > ordinary `Fault` > `Deadlocked`, lowest
+        // index winning within each kind. This changes ONLY which error propagates; it does not
+        // touch the `Exit`-over-`Fault` rule above or the nursery's abort semantics (every fault
+        // still trips the shared cancel flag the same way it always did).
+        match (first_exit, first_hard_fault.or(first_fault), deadlock_err) {
             // A child `os.exit` hard-halts the parent: set `pending_exit` and return the exit
             // sentinel. The op→`step`→`run_until` chain sees `pending_exit` and unwinds past every
             // `recover:` to the driver, which reports `code` as the process exit status (decision C).
@@ -1788,7 +1808,9 @@ impl Vm {
                 self.pending_exit = Some(code);
                 Err(self.err("exit".to_string(), Span { line: 1, col: 1 }))
             }
-            // A real fault propagates normally so an outer `recover:` can still catch it.
+            // A real fault propagates normally so an outer `recover:` can still catch it (unless it
+            // carries a hard-halt marker, in which case `first_hard_fault` already selected it above
+            // and `exec.rs`'s cancel-bypass check keeps `recover:` from swallowing it anyway).
             (None, Some(e), _) => Err(e),
             // Deadlock abort: all parked buffers already flushed above; propagate ONE deadlock error.
             (None, None, Some(e)) => Err(e),

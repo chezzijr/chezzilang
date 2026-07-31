@@ -1427,6 +1427,37 @@ struct Suite:
     }
 
     #[test]
+    fn executor_timeout_not_demoted_by_earlier_ordinary_fault() {
+        // W7-5 review Fix 1: `Executor.shutdown()`'s M:N drain (`reduce_task_slots`) must select the
+        // lowest-index HARD-HALT fault over an earlier ordinary one, not just the lowest index overall
+        // — else a `--timeout`/`--max-heap` abort gets demoted to a plain catchable error by an
+        // earlier sibling's fault. Job 0 faults immediately (ordinary); job 1 spins past the wall-clock
+        // cap (hard halt, `is_timed_out`). PRE-FIX: `reduce_task_slots` picks job 0's error purely by
+        // index, `recover:` catches it (it carries no hard-halt marker), and control falls through to
+        // the trailing assert — the test lands FAIL, not TIMED-OUT. POST-FIX: job 1's `is_timed_out`
+        // fault wins selection, bypasses `recover:` entirely (the marker-keyed bypass in `exec.rs`),
+        // and the test lands TIMED-OUT with control never reaching the trailing assert.
+        let d = TmpDir::new();
+        let f = d.write(
+            "exhalt_test.chz",
+            "import std.concurrency\nfn boom():\n    panic(\"ordinary\")\nfn spin():\n    while true:\n        pass\ntest fn t():\n    ex := Executor()\n    ex.submit(boom)\n    ex.submit(spin)\n    r := recover: ex.shutdown()\n    assert false, \"SWALLOWED\"\n",
+        );
+        let report = run_tests_timed(&f, true, 0, 50);
+        assert!(!report.passed, "report:\n{}", report.text);
+        assert!(
+            !report.text.contains("SWALLOWED"),
+            "an earlier ordinary fault demoted the later hard-halt timeout to a catchable error; \
+             report:\n{}",
+            report.text
+        );
+        assert!(
+            report.text.contains("TIMED-OUT t"),
+            "the hard-halt fault must win selection and bucket TIMED-OUT; report:\n{}",
+            report.text
+        );
+    }
+
+    #[test]
     fn over_memory_control_passes_under_generous_cap() {
         // A small alloc under a generous cap passes normally — the cap only trips on runaway growth.
         let d = TmpDir::new();

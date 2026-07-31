@@ -11640,10 +11640,15 @@ fn executor_autodrain_survives_gc_stress() {
 }
 
 #[test]
-fn executor_fault_during_drain_leaves_siblings_for_reap() {
-    // A task that faults mid-drain leaves the not-yet-run siblings in the queue; `defer
-    // ex.shutdown()` then reaps them on the fault exit path. Both engines must drain the *live*
-    // queue (not a snapshot) so leftover work survives — pins the C1 parity fix.
+fn executor_fault_during_drain_still_runs_every_sibling() {
+    // W7-5 run-all review Fix 3: this used to pin the OLD abort contract (a mid-drain fault leaves
+    // not-yet-run siblings queued; `defer ex.shutdown()` then reaps them on the fault exit path).
+    // That contract is gone — under run-all semantics an ordinary fault does not stop the drain, so
+    // the explicit `ex.shutdown()` call itself runs `C` (the fault it raises is merely the
+    // lowest-submission-index one propagating after every job has already run), and the `defer
+    // ex.shutdown()` reap finds an empty queue and is a clean no-op. The string this asserts is
+    // unchanged from the old contract, but WHY it's produced is not — it now pins "every submitted
+    // job runs, in one drain, even when an earlier one faults" instead of a reap-on-unwind path.
     let src = "fn boom():\n    x := [1]\n    print(x[9])\nfn run():\n    ex := Executor()\n    defer ex.shutdown()\n    ex.submit(fn(): print(\"A\"))\n    ex.submit(fn(): boom())\n    ex.submit(fn(): print(\"C\"))\n    ex.shutdown()\nfn main():\n    r := recover:\n        run()\n        0\n    print(\"done\")\nmain()\n";
     let vm = run_capture(src).expect("vm run");
     assert_eq!(vm, "A\nC\ndone\n");
