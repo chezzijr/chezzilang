@@ -1694,23 +1694,24 @@ impl Vm {
     /// result, flushing output and applying `Exit`-over-`Fault` precedence. Shared by the legacy pool
     /// engine ([`run_workers_on_pool`]) and the M:N engine ([`run_mn_nursery`]).
     ///
-    /// `Done`/`Exit` output is flushed in task order (decision F). Every `Fault` slot ALSO flushes its
-    /// buffered output at its slot (W7-5c) — matching the cooperative/interp oracle, which writes a
-    /// faulting task's partial output before the fault unwinds; only the lowest-index `Fault`'s error
-    /// propagates. `Cancelled` still drops (no deterministic slot — the work is incomplete / ran past
-    /// the terminal fault's cancel). The fault-free goldens only ever hit `Done`, so they stay
+    /// Every slot flushes its buffered output at its task-order slot, unconditionally, regardless of
+    /// outcome kind: `Done`, `Exit` (decision F), `Fault` (W7-5c — EVERY faulting task's output flushes,
+    /// not just the lowest-index one), `Cancelled`, and `Deadlocked` all write their bytes. This matches
+    /// the cooperative/interp oracle, which prints a task's partial output live before it
+    /// unwinds/cancels/aborts and can't un-print it. The outcome kinds differ only in which error (if
+    /// any) they contribute to the terminal result — `Cancelled` never contributes one; see the
+    /// precedence below for the rest. The fault-free goldens only ever hit `Done`, so they stay
     /// byte-identical. A `Deadlocked` slot (the M:N deadlock-abort synthetic outcome — every parked
     /// fiber gets one; a real `Fault`/`Exit` normally trips `terminate` first, and the precedence below
-    /// resolves any mix deterministically) is different: ALL parked
-    /// buffers flush in task order (not just the lowest-index one), matching serial's live prints, and
-    /// ONE deadlock error propagates. Precedence: an `os.exit` is an UNCONDITIONAL hard halt, so the lowest-index
-    /// `Exit` wins over any `Fault` regardless of index — otherwise a lower-index recoverable fault
-    /// could demote a child's `os.exit` to a catchable error. W7-5 review Fix 1: a lowest-index
-    /// [`executor_hard_halt`]-marked `Fault` (over-memory/timeout/dead-stdout) likewise wins over any
-    /// ordinary `Fault` regardless of index, for the same reason — an Executor drain's hard halt must
-    /// never be demoted to a catchable error by an earlier sibling's plain fault. Full precedence:
-    /// `Exit` > hard-halt `Fault` > ordinary `Fault` > `Deadlocked`, lowest index winning within each
-    /// kind (scan order + `is_none()`).
+    /// resolves any mix deterministically) reports one deadlock error per parked fiber, of which only
+    /// the lowest-index one propagates. Precedence: an `os.exit` is an UNCONDITIONAL hard halt, so the
+    /// lowest-index `Exit` wins over any `Fault` regardless of index — otherwise a lower-index
+    /// recoverable fault could demote a child's `os.exit` to a catchable error. W7-5 review Fix 1: a
+    /// lowest-index [`executor_hard_halt`]-marked `Fault` (over-memory/timeout/dead-stdout) likewise
+    /// wins over any ordinary `Fault` regardless of index, for the same reason — an Executor drain's
+    /// hard halt must never be demoted to a catchable error by an earlier sibling's plain fault. Full
+    /// precedence: `Exit` > hard-halt `Fault` > ordinary `Fault` > `Deadlocked`, lowest index winning
+    /// within each kind (scan order + `is_none()`).
     pub(super) fn reduce_task_slots(
         &mut self,
         slots: Vec<Option<TaskOutcome>>,
@@ -1722,8 +1723,8 @@ impl Vm {
         // final propagation over an earlier ordinary fault, or a later `--max-heap`/`--timeout` abort
         // gets demoted to a catchable error by an earlier sibling's plain fault (letting `recover:`
         // swallow a hard halt it must never be able to catch — `exec.rs`'s cancel-bypass check is
-        // keyed on these markers). This does NOT change which fault's output is flushed above (still
-        // strictly lowest-index, via `first_fault`) — only which error `reduce_task_slots` returns.
+        // keyed on these markers). This does NOT change flush behavior — every fault flushes its
+        // buffered output regardless of index (W7-5c) — only which error `reduce_task_slots` returns.
         let mut first_hard_fault: Option<RuntimeError> = None;
         let mut deadlock_err: Option<RuntimeError> = None;
         for slot in slots {
@@ -1740,11 +1741,13 @@ impl Vm {
                     }
                 }
                 TaskOutcome::Fault { err, out, stderr } => {
-                    // The terminal (lowest-index propagating) fault flushes its buffered output at its
-                    // task-order slot — after lower-index Done/Exit, before the fault propagates —
-                    // so a faulting task's partial output is no longer silently dropped. Higher-index
-                    // faults now flush too (W7-5c); their errors are still discarded in favour of the
-                    // lowest index.
+                    // EVERY faulting task flushes its buffered output at its task-order slot,
+                    // unconditionally (W7-5c) — after lower-index Done/Exit, before the fault
+                    // propagates — like the `Deadlocked` arm below. Under the W7-5 run-all drain a
+                    // second fault is ordinary, not a race artifact, so gating the flush on
+                    // `first_fault.is_none()` would delete real output that serial printed live. Only
+                    // the LOWEST-index error still propagates (subject to the hard-halt-over-ordinary
+                    // precedence in `reduce_task_slots`'s doc comment).
                     //
                     // RESIDUAL RACE (intentionally not chased here — applies ONLY to a genuine
                     // multi-printer REAL-fault reduce; the multi-parked DEADLOCK case is handled by
@@ -1762,11 +1765,6 @@ impl Vm {
                     if first_hard_fault.is_none() && executor_hard_halt(&err) {
                         first_hard_fault = Some(err.clone());
                     }
-                    // W7-5c — EVERY faulting task's buffered output flushes at its task-order slot,
-                    // like the `Deadlocked` arm. Under the W7-5 run-all drain a second fault is
-                    // ordinary, not a race artifact, so gating the flush on `first_fault.is_none()`
-                    // deleted real output that serial printed live. Only the LOWEST-index error
-                    // still propagates.
                     self.out.extend_from_slice(&out);
                     self.stderr.extend_from_slice(&stderr);
                     if first_fault.is_none() {
