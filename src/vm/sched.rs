@@ -3543,8 +3543,10 @@ impl Vm {
     }
 
     /// B3.6 — drain a shut `Executor`'s pending tasks onto the bounded pool under `--parallel`. Each
-    /// queued closure becomes a [`ReadyWorker`] sharing a fresh per-drain cancel flag (first fault
-    /// aborts siblings, matching the cooperative inline `r?`); **no** deadlock watch (decision D — an
+    /// queued closure becomes a [`ReadyWorker`] sharing a fresh per-drain cancel flag. W7-5 — that flag
+    /// is now a HARD-HALT switch only (`os.exit` / over-memory / timeout / dead stdout, see
+    /// [`executor_hard_halt`]); an ordinary job fault no longer trips it, so every queued job runs and
+    /// the join raises the lowest-index fault. **no** deadlock watch (decision D — an
     /// `Executor`-spanning deadlock hangs, as documented). Output is flushed in submission (queue) order
     /// by [`run_workers_on_pool`] (decision F).
     pub(super) fn drain_executor_on_pool(

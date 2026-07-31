@@ -2604,7 +2604,12 @@ impl Vm {
                     // across its re-entrant call. A submitted task runs INLINE on the entry `Vm`, so
                     // it reads the one shared `host.stdin` — which is exactly the contract (the M:N
                     // drain's workers get the same source via `spawn_worker`).
+                    //
+                    // W7-5 — run EVERY queued job, then raise the FIRST fault in submission order.
+                    // The loop breaks early only for a hard halt (`os.exit` via `pending_exit`, or
+                    // `executor_hard_halt`), matching the M:N drain's cancel-flag rule exactly.
                     self.push(Value::obj(h));
+                    let mut first_err: Option<RuntimeError> = None;
                     loop {
                         // Pop under the lock, then DROP the guard before the re-entrant call.
                         let task = core.inner.lock().unwrap().pop();
@@ -2638,9 +2643,23 @@ impl Vm {
                         });
                         self.fault_trace = outer_trace;
                         self.fault_trace_depth = outer_depth;
-                        r?;
+                        if let Err(e) = r {
+                            let hard = executor_hard_halt(&e);
+                            if first_err.is_none() {
+                                first_err = Some(e);
+                            }
+                            if hard {
+                                break;
+                            }
+                        }
+                        if self.pending_exit.is_some() {
+                            break; // a drained job called os.exit — hard halt
+                        }
                     }
                     self.pop(); // the executor root
+                    if let Some(e) = first_err {
+                        return Err(e);
+                    }
                 }
                 Ok(Value::nil())
             }

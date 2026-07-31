@@ -85,6 +85,15 @@ impl RuntimeError {
     }
 }
 
+/// W7-5 — the ONLY conditions under which an `Executor` drain still stops early. An ordinary job
+/// fault no longer aborts its siblings (the drain runs every queued job and raises the lowest-index
+/// fault), but a hard halt must stay un-swallowable: a `chezzi test --max-heap` / `--timeout` abort,
+/// or a fault raised while stdout is dead (`chezzi run x.chz | head -1` must not spin the whole
+/// queue). `os.exit` is NOT here — it arrives as `pending_exit`, handled by its own arm.
+pub(super) fn executor_hard_halt(err: &RuntimeError) -> bool {
+    err.is_over_memory || err.is_timed_out || crate::vm::stream::out_dead_reason().is_some()
+}
+
 impl std::fmt::Display for RuntimeError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "runtime error ({}): {}", self.span, self.message)
@@ -3158,8 +3167,9 @@ impl ReadyWorker {
     }
 
     /// B3.4 — the `--parallel` join's entry point: run the task and classify how it ended into a
-    /// [`TaskOutcome`]. On any abnormal end (fault, panic-as-fault upstream, or `os.exit`) it trips
-    /// the nursery cancel flag so running siblings abort at their next back-edge / blocked `recv`.
+    /// [`TaskOutcome`]. W7-5 — an ordinary fault does NOT trip the cancel flag: the drain runs every
+    /// queued job and the join raises the lowest-index fault. Only a hard halt trips it — `os.exit`
+    /// (the `pending_exit` arm) or [`executor_hard_halt`] (over-memory / timeout / dead stdout).
     /// Precedence: a deliberate `os.exit` (worker `pending_exit`) → `Exit`; an observed sibling
     /// cancel (`worker.cancelled`) → `Cancelled` (swallowed); else the invoke result maps to
     /// `Fault`/`Done`. Output buffers are moved out only on the paths that flush them.
@@ -3185,7 +3195,9 @@ impl ReadyWorker {
         } else {
             match res {
                 Err(e) => {
-                    self.worker.trip_cancel();
+                    if executor_hard_halt(&e) {
+                        self.worker.trip_cancel();
+                    }
                     TaskOutcome::Fault {
                         err: e,
                         out: std::mem::take(&mut self.worker.out),
@@ -3205,7 +3217,9 @@ impl ReadyWorker {
                             stderr: std::mem::take(&mut self.worker.stderr),
                         }),
                         Err(e) => {
-                            self.worker.trip_cancel();
+                            if executor_hard_halt(&e) {
+                                self.worker.trip_cancel();
+                            }
                             TaskOutcome::Fault {
                                 err: e,
                                 out: std::mem::take(&mut self.worker.out),

@@ -1,0 +1,108 @@
+# tests/chz/stdlib/executor_drain_test.chz — `Executor.shutdown` drain semantics (W7-5).
+#
+# Contract (`docs/concurrency.md` §8): `shutdown` drains the queue FIFO at the reap point, RUNS EVERY
+# QUEUED JOB, and then raises the FIRST fault in SUBMISSION order (lowest index — not first-to-fail,
+# which would be nondeterministic). A faulting job costs its own result, never a sibling's work.
+# Early-stop is opt-in via a `std.cancel.Token`, not a drain mode.
+#
+# These assert on an `AtomicInt` accumulator read AFTER the drain returns, never on inter-task print
+# order (N9 / nondeterministic cross-task ordering). Gated serial==M:N by
+# `test_runner::chz_suite_passes_both_engines`.
+# Run: `cargo run -- test tests/chz/stdlib/executor_drain_test.chz`
+
+import std.concurrency
+import std.cancel
+
+fn bump(c: AtomicInt, by: int):
+    c.add(by)
+
+fn blow_up():
+    panic("boom")
+
+fn blow_up_late():
+    panic("late boom")
+
+fn guarded_bump(tok: cancel.Token, c: AtomicInt):
+    if tok.cancelled():
+        return
+    c.add(1)
+
+# NOTE ON JOB ORDER: the faulting job is submitted FIRST in every test below. That is deliberate and
+# verified — with the fault at a LATER index, today's M:N drain often finishes the good jobs before the
+# cancel bites, so the test passes by luck and is flaky. Fault-first is deterministically red on the
+# pre-fix binary (3/3 runs).
+test fn every_queued_job_runs_despite_a_fault():
+    ex := Executor()
+    c := AtomicInt(0)
+    ex.submit(blow_up)
+    ex.submit(fn(): bump(c, 1))
+    ex.submit(fn(): bump(c, 10))
+    ex.submit(fn(): bump(c, 100))
+    r := recover: ex.shutdown()
+    match r:
+        Ok(_): assert false, "the faulting job must propagate out of shutdown()"
+        Err(e): assert e.message().contains("boom"), e.message()
+    assert c.load() == 111, "every non-faulting job must run, got " + str(c.load())
+
+test fn the_lowest_index_fault_wins_not_the_first_to_fail():
+    # Both jobs fault; job 0's error must propagate on both engines because it was submitted first —
+    # not whichever failed first in wall-clock, which would be nondeterministic. "late boom" also
+    # contains "boom", so assert on the discriminator.
+    ex := Executor()
+    ex.submit(blow_up)
+    ex.submit(blow_up_late)
+    r := recover: ex.shutdown()
+    match r:
+        Ok(_): assert false, "a faulting job must propagate"
+        Err(e): assert not e.message().contains("late"), "lowest submission index must win, got " + e.message()
+
+test fn a_later_jobs_result_survives_an_earlier_fault():
+    # THE headline W7-5 defect, and the only test here that is red on BOTH engines pre-fix. The
+    # mechanism on M:N is a cancel window: `submit_result` lowers to `submit(fn(): ch.send(f()))`, so a
+    # worker can finish `f()` — its side effects land — and then observe the sibling's cancel at the
+    # next back-edge, BEFORE the wrapper's `ch.send` runs. The work is paid for and the result is lost.
+    ex := Executor()
+    ex.submit(blow_up)
+    ch := ex.submit_result(fn() -> int: 7)
+    r := recover: ex.shutdown()
+    match r:
+        Ok(_): assert false, "the faulting job must propagate"
+        Err(e): assert e.message().contains("boom"), e.message()
+    assert ch.len() == 1, "a job that RAN must not have its result discarded"
+    assert ch.recv() == 7, "the surviving result must be the job's real value"
+
+test fn the_queue_is_empty_after_a_faulting_drain():
+    # Run-all means nothing is left behind for a later reap: a second shutdown is a clean no-op.
+    ex := Executor()
+    c := AtomicInt(0)
+    ex.submit(blow_up)
+    ex.submit(fn(): bump(c, 1))
+    r := recover: ex.shutdown()
+    match r:
+        Ok(_): assert false, "the faulting job must propagate"
+        Err(e): assert e.message().contains("boom"), e.message()
+    r2 := recover: ex.shutdown()
+    match r2:
+        Ok(_): pass
+        Err(e): assert false, "the second reap must be a clean no-op: " + e.message()
+    assert c.load() == 1, "the second reap must not re-run anything, got " + str(c.load())
+
+test fn a_token_gives_back_the_early_stop_opt_in():
+    # The abort-siblings behaviour is not gone, it moved into the caller's hands.
+    ex := Executor()
+    tok := cancel.manual()
+    c := AtomicInt(0)
+    ex.submit(fn(): tok.cancel())
+    ex.submit(fn(): guarded_bump(tok, c))
+    ex.submit(fn(): guarded_bump(tok, c))
+    ex.shutdown()
+    assert c.load() == 0, "a cancelled token must stop the later jobs, got " + str(c.load())
+
+test fn an_uncancelled_token_is_a_no_op():
+    ex := Executor()
+    tok := cancel.manual()
+    c := AtomicInt(0)
+    ex.submit(fn(): guarded_bump(tok, c))
+    ex.submit(fn(): guarded_bump(tok, c))
+    ex.shutdown()
+    assert c.load() == 2, "no cancel means every job runs, got " + str(c.load())
