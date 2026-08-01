@@ -26,7 +26,7 @@ fix applied to SOME arms of an N-way set"** — is the highest-yield remaining l
 `defer` was bypassed) and `W7-4` (two sibling closures over one captured local got separate cells across
 the airlock) were both instances of it and are **fixed** — session logs at the end of this file.
 
-## OPEN ITEMS — the whole backlog at a glance (updated 2026-07-29)
+## OPEN ITEMS — the whole backlog at a glance (updated 2026-08-01)
 
 Everything still open, roughly by severity. **No memory-unsafety is left in the ledger** — W6-8, the
 last one, was fixed 2026-07-27. Anything NOT listed here is either fixed or a safe-direction
@@ -36,6 +36,12 @@ the **lossy path DECODE** in `fs.list_dir`/`walk`/`glob`/`canonicalize` and `os.
 **W7-8** and is **FIXED 2026-07-31** (the `PathLike` protocol + `path.Path` type; see its session-log
 section). The lossy-byte family now has **no unswept member**: B1, R1, W6-4, W6-9, W6-14 and W7-8 are
 all closed. (`argv`/`env` remain a deliberately lossy surface — see `docs/stdlib.md`.)
+**The Executor drain milestone (W7-5/W7-5b/W7-5c) is PARTIALLY closed 2026-08-01**: `W7-5` (run-all
+drain, lowest-index-fault propagation) and `W7-5c` (every faulting task's output flushes) are **FIXED**
+— see the W7-5 session-log section. `W7-5b` (an `Executor` created inside an M:N task is silently
+discarded) is **RE-SCOPED, still open** — the fix was deliberately stopped when the project owner
+decided to move `Executor` to eager execution, which dissolves this bug rather than needing it fixed
+against a queueing model that is going away; see `docs/future.md` for the eager-execution decision.
 **Keep this table in sync when a section is retired** — the
 reason it exists is that "which of these is still open?" previously required reading 1400 lines of
 chronological log.
@@ -49,9 +55,8 @@ chronological log.
 | **W6-9r** | `:1303` | Parity-oracle residual left by the `W6-9b` fix: ~31 hand-rolled `run_file_p` + `run_file` cross-engine compares in `parity_tests.rs` still diff LOSSILY-DECODED strings, and `parity_entry_cfg_lines` compares stdout as an order-insensitive line multiset | The three SHARED comparators were fixed at the helper level (0 call sites touched); converting the hand-rolled ones means rewriting ~31 call sites. UTF-8-only today, so nothing is failing — but a new byte-emitting test added at one of those sites inherits the blindness. Use `vm::run_file_bytes` there |
 | **W6-10r** | `:1216` | `--max-heap` residual: a payload reachable ONLY through a **nested** core (a `Channel` inside a `Shared`, once the nested core's last `Obj` alias slot is swept) is counted nowhere | Left open by the W6-10 fix on purpose. `live_bytes` reaches a core's bytes through its `Obj::*` alias slot; a nested core has none. Closing it needs cross-core byte recursion with `Arc` de-dup — narrow trigger, not worth the machinery yet |
 | protocol embeds | `:1505` | A protocol-embedded method isn't callable through the interface value (`p: Person` can't call embedded `name()`) despite `spec.md:973` "flattened at bound sites" | Filed as a safe-direction observation in wave 3; never triaged — doc and behavior contradict each other either way |
-| **W7-5** | `:3800` | The M:N `Executor` drain does not abort the remaining jobs after a faulting job (serial does), and `submit_result` discards the result of a job it ran | **Needs its own milestone — two fix attempts were rejected.** Sequential drain is correct but costs 4× (0.30s → 1.20s on 4 overlapping jobs); "run all" removes the drain's per-drain cancel flag, which is the ONLY kill switch — it breaks `os.exit` hard-halt, lets a faulting job leave a runaway sibling unkillable, defeats dead-stdout promptness, and creates a NEW serial≠M:N line-set divergence via `reduce_task_slots`' non-lowest-index fault flush |
-| **W7-5b** | `:3800` | An `Executor` created INSIDE an M:N task is silently discarded — its jobs never run, never reap, no fault | Found while prosecuting the W7-5 fix. It registers in the throwaway worker `Vm.executors`, which `run_outcome`/`into_fiber` drop; `drain_live_executors` only snapshots the PARENT `Vm`. Arguably worse than W7-5 itself; belongs to the same Executor milestone |
-| **W7-5c** | `:3800` | `reduce_task_slots` flushes a faulting task's buffered output only `if first_fault.is_none()` (`sched.rs:1688`), so a second faulting task's stdout is dropped on M:N | Latent today (the drain's cancel flag makes siblings `Cancelled`, which flushes); becomes live the moment two tasks can fault in one drain. Same milestone |
+| **W7-5b** | `:4384` | An `Executor` created INSIDE an M:N task is silently discarded — its jobs never run, never reap, no fault | **Still live — deliberately deferred, not forgotten.** The fix was stopped mid-milestone: eager execution deletes the queue this bug loses, so W7-5b is folded into that milestone instead of being fixed against a model that is going away. The verified M:N-half patch is preserved at `.superpowers/sdd/task-3-mn-half.patch` if the milestone slips. The bug is on **both** engines, not just M:N — serial reaps a task-created executor only at program exit, long after the nursery join |
+| **W7-5d** | `:4413` | A hard halt (over-memory/timeout/dead-stdout) firing mid-`shutdown()` does NOT run every queued job the way an ordinary fault does — `--serial` stops popping the queue the instant one fires (later-queued jobs never run at all); M:N has already dispatched every job to the pool before a hard halt can fire, but that is not a per-job guarantee under a thread-starved pool | Found while adversarially reviewing this milestone's own docs. Live and reproduced on the built binary (`Executor().submit(spew-until-dead-stdout)` then two marker jobs, piped through `head -1`: M:N runs both markers, `--serial` runs neither), but untested — `tests/chz/stdlib/executor_drain_test.chz`'s 6 tests only use `panic()` faults, never a hard-halt kind. `executor_hard_halt` was deliberately built as an unconditional kill switch (W7-5), so this is arguably correct-by-design on both engines individually, but the exact SHAPE of "what still doesn't run" differs by engine and neither engine's shape is pinned by a test |
 | **W7-11** | `:3901` | A `RwShared` holding a container with an element that back-references the CONTAINER (`a.next = xs; RwShared(xs).at(0)`) aborts the host on `from_wire_memo`'s `.expect("a wire Backref always targets an already-reconstructed node id")` — a legal program, no concurrency, both engines | **Pre-existing on main**, not a W7-4 regression (verified on 5960052): a copy-out view drains ONE depth-1 piece, and a piece whose cycle closes through the ROOT container can never be self-contained — the definition it needs IS the container. `elem_split` fixes the sibling-CELL case, not this ancestor case. Closing it means either a catchable fault instead of the `.expect` (`from_wire_memo` returns a `Value`, so that is a signature change through every rebuild arm) or a same-guard whole-container fallback at all 12 view sites |
 | **W7-4a** | `:3901` | Airlock cell identity is preserved **per module** in the snapshot, so two globals in DIFFERENT modules over one shared cell still arrive as two cells | Residual disclosed by the W7-4 fix. Closing it needs `Vm`-lived rebuild state kept (and rooted) across the lazy per-module faults; the reported repro is same-module and is fixed |
 | **W7-4b** | `:3901` | A cell whose inner value carries a residual `Module`/`Native`/`Cffi` handle falls to `SnapValue::Cell`, which has no `Backref` encoding, so its identity is not preserved across a module snapshot | Residual disclosed by the W7-4 fix, and the same limit the `SnapValue::Closure` slow arm already documents. Closing it is a snapshot FORMAT change (id/`Backref` arms on `SnapValue`), out of proportion to a residual this narrow |
@@ -4313,3 +4318,178 @@ b'a,b""c'  => [[a, b""c]]     <- TWO literal quotes; `""` collapses only INSIDE 
 Fenced by `tests/chz/stdlib/csv_bare_quote_test.chz` (4 `test fn`s: the three bare-quote cases, both
 quote-starts-the-field regression fences, RFC 4180 embedded comma/newline/`""`-inside-a-quoted-field,
 and the total round-trip).
+
+## Session log — 2026-08-01 (Executor drain milestone: W7-5 + W7-5c FIXED, W7-5b deferred to eager execution)
+
+### W7-5 — the M:N `Executor` drain did not abort remaining jobs after a fault, and dropped a completed job's result (**FIXED 2026-08-01**)
+
+**Decision: run every queued job; raise the lowest-submission-index fault.** Two prior fix attempts
+were prosecuted and rejected (see `PROGRESS.md`'s superseded note and the safe-direction observation
+below on why one of the two rejections was itself measuring the wrong thing). The landed fix keeps
+run-all — an ordinary job fault no longer aborts its siblings — which matches three independent
+reference models, none of which abort siblings by default: Python's `ThreadPoolExecutor` (a fault in
+one submitted job does not cancel the others; `as_completed`/`result()` surfaces each job's own
+outcome), Java's `ExecutorService` (`submit` isolates each task's exception behind its own `Future`;
+`shutdown()`+`awaitTermination()` does not abort in-flight work on a sibling's failure), and Go's
+`errgroup.Group` (the default `Group` — as opposed to `WithContext`'s opt-in cancellation — lets every
+goroutine run to completion and returns the first non-nil error). Early-stop is available but is now
+**opt-in in the caller**, via `std.cancel.Token` threaded through the closures — the same split Go
+itself uses (`errgroup.WithContext` layers cancellation ON TOP of the plain `Group`, it is not the
+default).
+
+**What both prior (rejected) attempts got wrong: conflating the drain's per-drain cancel flag with the
+run-all decision.** The cancel flag is not one on/off switch — it has to split into two different
+questions: "should an ordinary sibling fault stop other jobs" (no, per the decision above) vs "should a
+HARD halt still stop other jobs" (yes, unconditionally — a `--max-heap`/`--timeout` abort, or a fault
+raised while stdout is dead, must stay un-swallowable, or `chezzi run x.chz | head -1` spins the whole
+queue instead of exiting promptly). The fix keeps the cancel flag exactly for the second case
+(`executor_hard_halt`, gating `trip_cancel()` in `ReadyWorker::run_outcome`) and removes it for the
+first — the earlier attempts either kept the flag for both (matching the old abort-on-any-fault
+behavior, defeating run-all) or removed it for both (defeating the hard-halt kill switch). `os.exit`
+(`pending_exit`) is a third, separate case — an unconditional hard halt regardless of the
+`executor_hard_halt` predicate, handled by its own arm, untouched by this fix.
+
+**All four of the original rejection's charges, accounted for — three answered, one upheld.** The
+`os.exit` "0.006s → 18.9s" measurement is a misattribution (see the safe-direction observation below);
+dead-stdout promptness is kept (the hard-halt cancel flag above); the `reduce_task_slots` line-set
+divergence is fixed by W7-5c below. The fourth — **"lets a faulting job leave a runaway sibling
+unkillable"** — is **upheld and accepted by design, not fixed**. Run-all means a sibling that never
+reaches a cancellation point (a tight loop with no I/O, a blocking sleep) now blocks `shutdown()` even
+after another job has already faulted, on both engines. Reproduced on this HEAD:
+```
+ex.submit(boom); ex.submit(fn(): while true: n = n + 1); recover: ex.shutdown()
+→ rc=124 (hangs) on BOTH engines
+```
+Pre-fix, the sibling's fault tripped the drain's own cancel flag and the spinner died at its next
+back-edge — exactly the fast-fail behavior run-all deliberately removes for ordinary faults. The
+correct remedy is caller-driven early-stop via `std.cancel.Token` (see the decision above), not a
+return of the drain's own abort. Say this plainly rather than let three answered charges read as if
+all four were answered.
+
+**Measured pre-fix baseline (`6691b565`).** M:N's drain already ran every queued job's side effects —
+a fault-first test with three good sibling jobs summing `1 + 10 + 100` already read back `111` — but
+`submit_result`'s result-channel wrapper lost the result of a job it had just finished: a worker could
+complete `f()` (side effects landed) and then observe a sibling's cancel at the next back-edge, BEFORE
+the wrapper's `ch.send` ran, discarding it. So the pre-fix M:N shape was doing the queued jobs' work and
+then still handing back 0 results for at least one of them — the drain's cancel flag was undoing work
+it had already let happen, rather than preventing it. Serial's failure was the more visible half:
+`--serial` genuinely aborted remaining siblings on the first fault, running 0 of the 3 good jobs where
+M:N ran all 3.
+
+**Landed:** `0127cfd7` (`src/vm/mod.rs` `executor_hard_halt` + `run_outcome` gating,
+`src/vm/netio.rs` serial drain loop, `src/vm/sched.rs` doc comment), `af3fb10b` (review fixes: hard
+halt now outranks an earlier ordinary fault when selecting which error `reduce_task_slots` propagates,
+via a second `first_hard_fault` accumulator alongside the existing `first_fault`). Acceptance:
+`tests/chz/stdlib/executor_drain_test.chz`, gated serial==M:N by
+`test_runner::tests::chz_suite_passes_both_engines`.
+
+### W7-5c — `reduce_task_slots` flushed a faulting task's buffered output only for the lowest-index fault (**FIXED 2026-08-01**)
+
+Under the old abort-on-first-fault semantics this was latent: the drain's cancel flag made every other
+task `Cancelled`, and the `Cancelled` arm always flushed, so a second task's output never had a chance
+to go missing via the gated `Fault` arm. W7-5's run-all decision made it live — two jobs can now
+genuinely both reach `TaskOutcome::Fault` in one drain, and the second one's buffered stdout/stderr was
+being silently dropped (`sched.rs`, `reduce_task_slots`, gated `if first_fault.is_none()`). Fixed by
+moving the flush out of that gate so every faulting task's buffered output flushes at its task-order
+slot, unconditionally — matching the `Cancelled`/`Deadlocked` arms' shape. Which error PROPAGATES is
+unchanged: still strictly the lowest-index fault (subject to W7-5's hard-halt-over-ordinary
+precedence). `reduce_task_slots` is shared by 7 call sites including the `parallel:` nursery paths, so
+this also closes the same latent gap on the nursery paths — plausible but unpinned: a nursery trips its
+cancel flag on the first fault, so a second slot landing `Fault` (rather than the already-flushing
+`Cancelled`) needs two tasks to fault before the cancel can take effect, which is inherently racy to
+force deterministically, and no such test exists today. Landed: `05204777` (the fix), `0611f8ae`
+(docblock-accuracy review fixes,
+comment-only). Acceptance: `executor_second_faulting_job_keeps_its_output_both_engines`
+(`src/vm/tests.rs`).
+
+### W7-5b — an `Executor` created INSIDE a task is still silently discarded — **STILL OPEN, deferred to the eager-execution milestone, NOT fixed**
+
+Found while prosecuting the W7-5 fix: an M:N task registers a nested `Executor` in its own throwaway
+worker `Vm.executors`, which `run_outcome`/`into_fiber` drop when the task finishes — the nested
+executor's jobs never run, are never reaped, and no fault is raised. `drain_live_executors` only ever
+snapshots the PARENT `Vm`'s list, so it never sees the child's. Investigation (Task 3, uncommitted)
+found the bug is **not M:N-only**: on `--serial` the nested executor's jobs DO eventually run, but only
+via `drain_live_executors` at **program exit**, long after the enclosing `parallel:` nursery has
+already joined — a task-order surprise, not silent loss, but still wrong relative to "reaped when its
+task ends." A briefed M:N-only fix (drain a fiber's own executors at `Disp::Finish`, reusing
+`drain_live_executors`) was implemented and verified correct — no scheduler lock held at the insertion
+point, no deadlock across the 8-test acceptance file under a `timeout` wrapper — but making serial agree
+requires moving `swap_ctx`'s `executors` field out from under its `ctx.heap`-only gate, which drags in
+GC-rooting machinery the codebase doesn't have yet for a parked parent ctx (the same class of hazard the
+existing `pinned_module_roots` workaround was built for). That crossed the task's explicit STOP
+condition on `swap_ctx` field-set changes, so **Task 3 stopped without committing**.
+
+**The fix is deliberately not being finished against the current queueing model.** The project owner
+decided, in the same session, to move `Executor` to eager execution (`docs/future.md`) — `submit`
+starts the job immediately rather than enqueuing it for a later drain. Eager execution deletes the
+queue W7-5b's bug loses jobs out of, so the "when does a task-owned executor get reaped" question
+becomes "wait for in-flight work", a materially smaller problem than today's "run the backlog", and is
+better solved once inside that milestone than legislated twice against a model already being replaced.
+
+The verified M:N-only patch (source diff + the two `test fn`s it makes pass) is preserved at
+`.superpowers/sdd/task-3-mn-half.patch` — `git apply` it to restore exactly what was measured, if the
+eager-execution milestone slips and W7-5b needs a stopgap fix against the current model instead.
+
+### W7-5d — a hard halt mid-`shutdown()` doesn't run every queued job the way an ordinary fault does, and the two engines diverge on WHICH jobs still don't run — **OPEN, found during this milestone's own doc review, NOT fixed**
+
+Found adversarially reviewing this milestone's docs, not while implementing W7-5/W7-5c. The run-all
+guarantee (every queued job runs; §8 above) is explicitly for an ORDINARY job fault. A **hard halt**
+(`Vm::executor_hard_halt` — over-memory, timeout, or a fault raised while stdout is dead) is, by
+design (W7-5's whole point), a separate, unconditional kill switch — but its effect on the REST of the
+queue is not symmetric between engines, and neither shape is pinned by a test:
+
+- **`--serial`** (`src/vm/netio.rs`, the cooperative `"shutdown"` branch): the pop-loop `break`s the
+  instant a hard halt fires, before popping any still-queued task. Those tasks never run at all.
+- **M:N** (`src/vm/sched.rs`, `drain_executor_on_pool` → `run_workers_on_pool`): the WHOLE queue is
+  taken up front (`take_all()`) and every job is dispatched to a worker (inline or pool) unconditionally
+  — there is no hard-halt short-circuit on this path. In a live repro (`Executor().submit(spew)` — a
+  job that prints until stdout dies — followed by two file-writing marker jobs, `shutdown()`, piped
+  through `head -1`), both markers ran on M:N (both files written) while neither ran on `--serial`
+  (neither file written).
+
+Whether M:N's "already dispatched" is a hard per-job guarantee under a thread-starved pool (fewer
+worker threads than queued jobs) is unverified — `ReadyWorker::run_outcome`'s pre-call
+`cancel_requested()` checkpoint (the same mechanism `--os.exit` timing races through, per the W7-5
+implementation report) could in principle let a farmed-but-not-yet-started job observe an
+already-tripped cancel flag and skip its body without ever truly running it, the same class of
+thread-count-sensitive race documented for the `os.exit` case. Not chased further here — this is a docs
+task, not a VM fix.
+
+**Why this isn't rolled into W7-5's "fixed."** `executor_hard_halt` doing exactly this — stopping the
+drain early — is correct BY DESIGN (that's the whole reason the cancel flag was kept for hard halts).
+The gap is that the docs claimed an unqualified "every queued job runs" without the hard-halt carve-out
+this implies, and that carve-out's precise shape differs by engine and has zero test coverage
+(`tests/chz/stdlib/executor_drain_test.chz`'s 6 tests use only `panic()` faults). Closing it needs
+either a same-shape fix (make `--serial` also farm-then-dispatch instead of pop-then-run, or make M:N
+also stop dispatching once a hard halt fires) or an accepted-asymmetry test pinning what each engine
+actually does — a decision for whoever next touches the Executor drain, likely inside the
+eager-execution milestone (`docs/future.md` §2c) rather than against the current queueing model.
+
+### Safe-direction observations (not filed as bugs)
+- **`PROGRESS.md`'s claim that the second (rejected) W7-5 fix attempt (`8c32fda6`) broke the `os.exit`
+  hard halt "0.006s → 18.9s" is very likely a misattribution.** That stall reproduces IDENTICALLY on
+  pre-fix `main` (verified by rebuilding both binaries): a job blocked in `time.sleep_ms` never reaches
+  a cancellation point, so the join waits the sleep out regardless of the cancel flag's state — the flag
+  was never the variable that mattered for that measurement. With CPU-loop siblings instead of a sleep,
+  the hard halt is `0.006s`/`rc=3` at every thread count, on every attempt. One of the four reasons this
+  milestone was rejected twice was measuring sleep-cancellability (a pre-existing, unrelated limit — a
+  blocking OS sleep has no in-flight cancellation point once entered) rather than the kill switch the
+  attempt was actually supposed to be judged on.
+- **Serial's hand-written mirror `Vm::drain_cancelled_children` (`src/vm/sched.rs:1925`) lacks the
+  hard-halt precedence Task 1 added to `reduce_task_slots`.** Unreachable today — `--max-heap` and
+  `--timeout` are M:N-only (`src/main.rs:685`, `:693`) and the dead-stdout marker is uniform across all
+  fault kinds — but it becomes a real serial-vs-M:N divergence the moment any serial-observable
+  hard-halt marker is added. Worth a grep-and-mirror pass if that ever happens; not worth pre-emptively
+  duplicating logic for a marker that doesn't exist yet.
+- **`std/cancel.chz` — `kids` only ever grows.** `derive()` registers a child into every ancestor's
+  `kids` list and nothing ever unlinks it. Go's `context.WithCancel` returns a `CancelFunc` precisely so
+  `defer cancel()` detaches the child from its parent; there is no detach here at all. A long-lived root
+  token with a token derived per job retains one channel per job forever, plus an O(depth) `update()`
+  read-modify-write lock per `derive()` call as the tree grows. Narrow trigger today (nothing yet derives
+  tokens at volume against one long-lived root), but a real leak shape once something does.
+- **`std/cancel.chz` — `cancelled()` recurses the parent chain at POLL time** (one `Shared.get()` per
+  level plus a `monotonic()` call), while Go pushes cancellation DOWN at `cancel()` time so `ctx.Done()`
+  is a single channel read. The push machinery already exists here — `cancel()` already fans out to
+  `kids` — it just carries a `Channel[bool]` wakeup rather than also writing the child's own `flag`.
+  Storing the child's `Shared[bool]` in the parent's registry too (not just the wakeup channel) would
+  collapse `cancelled()` to one local read, cheaper and less code than the current recursive walk.

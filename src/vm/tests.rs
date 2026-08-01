@@ -11640,15 +11640,62 @@ fn executor_autodrain_survives_gc_stress() {
 }
 
 #[test]
-fn executor_fault_during_drain_leaves_siblings_for_reap() {
-    // A task that faults mid-drain leaves the not-yet-run siblings in the queue; `defer
-    // ex.shutdown()` then reaps them on the fault exit path. Both engines must drain the *live*
-    // queue (not a snapshot) so leftover work survives — pins the C1 parity fix.
-    let src = "fn boom():\n    x := [1]\n    print(x[9])\nfn run():\n    ex := Executor()\n    defer ex.shutdown()\n    ex.submit(fn(): print(\"A\"))\n    ex.submit(fn(): boom())\n    ex.submit(fn(): print(\"C\"))\n    ex.shutdown()\nfn main():\n    r := recover:\n        run()\n        0\n    print(\"done\")\nmain()\n";
+fn executor_fault_during_drain_still_runs_every_sibling() {
+    // W7-5 run-all review Fix 3: this used to pin the OLD abort contract (a mid-drain fault leaves
+    // not-yet-run siblings queued; a `defer ex.shutdown()` then reaps them on the fault exit path,
+    // which produces the SAME "A\nC\ndone\n" string as the new contract — that version of this test
+    // could not discriminate between the two contracts). With the `defer` removed, `ex.shutdown()`'s
+    // own explicit call is the only drain: under run-all it runs `A`, then `boom` (fault noted, not
+    // yet raised), then `C`, and only then raises the lowest-submission-index fault (`boom`'s) out of
+    // `shutdown()` — genuinely pinning "every submitted job runs, in one drain, even when an earlier
+    // one faults". Pre-fix (abort-on-first-fault) this would print only `A` (the drain stops at
+    // `boom`, `C` never runs, and there is no `defer` left to reap it on the fault exit path).
+    let src = "fn boom():\n    x := [1]\n    print(x[9])\nfn run():\n    ex := Executor()\n    ex.submit(fn(): print(\"A\"))\n    ex.submit(fn(): boom())\n    ex.submit(fn(): print(\"C\"))\n    ex.shutdown()\nfn main():\n    r := recover:\n        run()\n        0\n    print(\"done\")\nmain()\n";
     let vm = run_capture(src).expect("vm run");
     assert_eq!(vm, "A\nC\ndone\n");
     // Cooperative-engine invariant: the M:N engine runs the Executor on a real thread pool, so its
     // drain ordering differs — not a serial-vs-M:N parity comparison.
+}
+
+/// W7-5c — `reduce_task_slots` used to flush a faulting task's buffered output only for the FIRST
+/// fault (`if first_fault.is_none()`), so with run-all drains (W7-5) a second faulting job's stdout
+/// vanished on M:N while serial printed it live. Both faulters' lines must survive; only the
+/// lowest-index error propagates.
+#[test]
+fn executor_second_faulting_job_keeps_its_output_both_engines() {
+    let src = r#"
+import std.concurrency
+
+fn boom_a():
+    print("a-before-fault")
+    panic("boom a")
+
+fn boom_b():
+    print("b-before-fault")
+    panic("boom b")
+
+fn main():
+    ex := Executor()
+    ex.submit(boom_a)
+    ex.submit(boom_b)
+    r := recover: ex.shutdown()
+    match r:
+        Ok(_): print("no fault")
+        Err(e): print("fault: {e.message()}")
+
+main()
+"#;
+    let serial = run_capture(src).expect("serial run");
+    let mn = run_capture_parallel(src).expect("M:N run");
+    for out in [&serial, &mn] {
+        assert!(out.contains("a-before-fault"), "lost job 0's output: {out}");
+        assert!(out.contains("b-before-fault"), "lost job 1's output: {out}");
+        assert!(
+            out.contains("fault: boom a"),
+            "lowest index must propagate: {out}"
+        );
+    }
+    assert_same_lines(&serial, &mn);
 }
 
 #[test]

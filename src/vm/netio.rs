@@ -2595,7 +2595,8 @@ impl Vm {
                 if self.parallel {
                     // B3.6: drain the whole queue under the lock (drop the guard before running any
                     // task — never hold the core lock across an invoke), then run the tasks on the
-                    // bounded pool. Output flushes in submission order; the first fault propagates.
+                    // bounded pool. Output flushes in submission order; the lowest-index fault
+                    // propagates.
                     let tasks: Vec<WireValue> = core.inner.lock().unwrap().take_all();
                     self.drain_executor_on_pool(tasks, span)?;
                 } else {
@@ -2604,7 +2605,12 @@ impl Vm {
                     // across its re-entrant call. A submitted task runs INLINE on the entry `Vm`, so
                     // it reads the one shared `host.stdin` — which is exactly the contract (the M:N
                     // drain's workers get the same source via `spawn_worker`).
+                    //
+                    // W7-5 — run EVERY queued job, then raise the FIRST fault in submission order.
+                    // The loop breaks early only for a hard halt (`os.exit` via `pending_exit`, or
+                    // `executor_hard_halt`), matching the M:N drain's cancel-flag rule exactly.
                     self.push(Value::obj(h));
+                    let mut first_err: Option<RuntimeError> = None;
                     loop {
                         // Pop under the lock, then DROP the guard before the re-entrant call.
                         let task = core.inner.lock().unwrap().pop();
@@ -2638,9 +2644,28 @@ impl Vm {
                         });
                         self.fault_trace = outer_trace;
                         self.fault_trace_depth = outer_depth;
-                        r?;
+                        if let Err(e) = r {
+                            let hard = executor_hard_halt(&e);
+                            // W7-5 review Fix 1: a hard halt must overwrite an earlier ordinary
+                            // fault before breaking, or a later `--max-heap`/`--timeout` abort is
+                            // silently discarded in favor of an earlier catchable fault — which lets
+                            // `recover:` swallow a hard halt it must never be able to catch.
+                            if hard {
+                                first_err = Some(e);
+                                break;
+                            }
+                            if first_err.is_none() {
+                                first_err = Some(e);
+                            }
+                        }
+                        if self.pending_exit.is_some() {
+                            break; // a drained job called os.exit — hard halt
+                        }
                     }
                     self.pop(); // the executor root
+                    if let Some(e) = first_err {
+                        return Err(e);
+                    }
                 }
                 Ok(Value::nil())
             }
@@ -2658,9 +2683,10 @@ impl Vm {
 
     /// Mirrors `interp::Interp::drain_live_executors` (C5 / A2): at a clean program end, gracefully
     /// drain every `Executor` created but never explicitly `shutdown`/`shutdown_now`-ed, in creation
-    /// order, reusing the shipped `shutdown` path (FIFO, first-fault-aborts-siblings). A hard
-    /// `std.os.exit` is not drained (the caller gates on `pending_exit`); a task that calls
-    /// `os.exit` mid-drain stops the remaining drain.
+    /// order, reusing the shipped `shutdown` path (FIFO, run-all — every queued job runs and the
+    /// lowest-submission-index fault propagates, W7-5). A hard `std.os.exit` is not drained (the
+    /// caller gates on `pending_exit`); a task that calls `os.exit` mid-drain stops the remaining
+    /// drain.
     pub(super) fn drain_live_executors(&mut self, span: Span) -> Result<(), RuntimeError> {
         if self.pending_exit.is_some() {
             return Ok(());

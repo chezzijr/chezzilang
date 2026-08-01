@@ -267,7 +267,8 @@ import gate + reserved name as `Atomic`. Constructed `AtomicInt(v)` (one int arg
 type error).
 
 ### `Executor` — task pool
-`submit(task: fn() -> _) -> nil` (detached, fire-and-forget) · `shutdown() -> nil` (drain) ·
+`submit(task: fn() -> _) -> nil` (detached, fire-and-forget) · `shutdown() -> nil` (drain — runs every
+queued job; raises the lowest-index fault, see `concurrency.md` §8) ·
 `shutdown_now() -> nil` (abandon pending) ·
 `submit_result[T](f: fn() -> T) -> Channel[T]` — submit `f` and get back a cap-1 `Channel[T]` carrying
 its result (`.recv()` it after the pool drains). This is the result-returning primitive
