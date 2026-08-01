@@ -104,22 +104,68 @@ mistaken for.
 > submit-only-enqueues model is the drift that manufactured the never-run backlog, the reap-point
 > question, the A2 auto-drain rescue, and W7-5b.
 
-**What it dissolves:** W7-5b (`docs/gaps.md`, no queue to lose), the whole "when is a task-created
-executor reaped" question, and the need to legislate run-all (every job runs by construction, there is
-no backlog left to decide a policy for).
+**The queue does NOT go away — that was an early misreading, corrected during design.** Python's
+`ThreadPoolExecutor` has a work queue too. The drift was never queue-vs-no-queue; it is *who drains it
+and when* — continuously by workers, versus only at the reap call. Chezzi already owns the machinery:
+`src/vm/pool.rs` is a process-wide bounded pool with a FIFO job queue and condvar-parked threads that
+live for the process.
 
-**What survives and must be re-decided inside it:** an executor whose jobs are still **in flight** when
-its creating task ends still needs a join point — "wait for in-flight", a smaller question than "run
-the backlog". Also A2's fate: program-exit auto-drain becomes "wait for in-flight" rather than "run
-work nobody ran", which may make `examples/executor_autodrain.chz` and `docs/concurrency.md`
-`:1216`/`:1264`/`:1368` obsolete.
+**Consequence: eager execution does NOT dissolve W7-5b.** A task-created executor can still hold
+queued-but-unstarted jobs when its task ends, so it must still be visible to the join. W7-5b's fix is
+folded into this milestone because the two share the same join machinery, **not** because the bug
+disappears.
 
-**The serial engine is NOT the constraint.** Project-owner decision, same session: `--serial` is the
-parity oracle, not a concurrency model, and it is removed post-JIT-freeze (§2b above) — so the oracle
-bends and the language does not. Serial can implement eager submit cooperatively (an eagerly-submitted
-job becomes a runnable fiber in the coop scheduler, exactly how `spawn` already works there,
-`run_scheduler` being the cooperative join), and where it cannot match M:N exactly, the executor timing
-gate relaxes rather than the model contorting.
+### Settled decisions (project owner, 2026-08-01) — do not re-litigate
+
+- **D1 — Lifetime: detached, joined at program exit.** The executor outlives its creating scope;
+  outstanding work keeps running and the program waits for it at exit. Matches Python and Java. A2
+  survives, reworded from "run the backlog nobody ran" to "wait for in-flight work".
+- **D2 — Concurrency: shared process pool, no size parameter.** `Executor()` keeps its zero-argument
+  constructor and shares the pool with `parallel:`, bounded by `--threads`. **Accepted known limit:**
+  executor jobs now hold pool threads for their whole lifetime and can starve nurseries, and the old
+  parent-participation mitigation (the joining thread ran one job inline) is gone because eager submit
+  has no join to participate in. `Executor(max_workers)` stays an additive door if it bites; not built
+  on speculation.
+- **D3 — `--serial` is unchanged.** It keeps queueing at submit and draining at `shutdown()`. This is
+  nearly free: under the canonical `submit … shutdown() … assert` shape both engines reach the same
+  post-shutdown state, so the two-engine gate stays green. The divergence is observable only by a
+  program that inspects a job's effect **between** submit and shutdown. Documented known limit, with
+  the test-shape rule: **assert after `shutdown()`, never between.** (Supersedes this section's earlier
+  suggestion that serial implement eager submit cooperatively — that was written before D3.)
+- **D4 — `shutdown()` waits for queued and running.** `shutdown_now()` drops queued work and trips the
+  cooperative cancel flag so running jobs die at their next back-edge — Java's "attempts to stop",
+  **cooperative, not preemptive**. `submit` after either remains a fault.
+- **D5 — The W7-5 fault contract is frozen.** Faults latch; `shutdown()` raises the lowest-index fault
+  in submission order; a faulting job costs only its own result; early-stop stays the opt-in
+  `std.cancel.Token`. `tests/chz/stdlib/executor_drain_test.chz` must keep passing unchanged — a
+  failure there is a regression, not expected churn.
+
+### What the first implementation attempt proved (auto-task run, 2026-08-01, REJECTED)
+
+An 18-agent autonomous run built this and was rejected across three review rounds (final: 8 blockers,
+10 charges upheld, 0 dismissed). Its branch was deleted; the findings are the salvage:
+
+- **The hard part is the DEADLOCK DETECTOR, not GC rooting.** Rooting turned out to be a non-issue: a
+  wired closure that passed `ensure_crossable` provably carries no `GcRef` (only a module handle is
+  non-crossable), so an in-flight job holds nothing in the creating heap. What actually broke was that
+  an eagerly dispatched job changes what *"no runnable task can send"* means. The attempt invented a
+  veto keyed on `exec_outstanding > exec_cores.len()`; `exec_cores` is only ever pushed to and never
+  pruned, so it counts ancestor executor *memberships*, not live jobs. Six of the ten upheld charges
+  trace to that one predicate. **Start here, and treat the detector as its own reviewed unit.**
+- **Regression it shipped:** a lone job doing `ch.recv()` for a value the main thread sends later
+  faulted `recv on an empty channel: deadlock`, where the pre-change engine returns the value.
+- **The saved `task-3-mn-half.patch` implements the WRONG lifetime under D1.** It drains a fiber's
+  executors at `Disp::Finish` — i.e. at *task end*, the scope-bound model that was explicitly
+  rejected. Under D1, serial's existing *program-exit* reap is already correct, and W7-5b is M:N-only
+  silent loss; the fix is to make a task-created executor visible to the program-exit join, not to
+  drain it when its task ends. The attempt reaped at task end on both engines, which also broke D3.
+
+**Also breaks, and must ship in the same commit:** `examples/executor_autodrain.chz` and its golden
+(it prints `main() done` before the jobs precisely because nothing ran until exit; under eager the
+interleaving is racy, so it cannot survive as an exact-match golden), the A2/C5 prose in
+`docs/concurrency.md`, and the module-snapshot instant at `docs/concurrency.md:102` — the airlock
+crossing point moves from drain time to submit time, so a job observes globals as of the **submit**,
+not as of the drain.
 
 **Reframing:** under eager execution the `Executor` is a bounded-concurrency nursery with a detached
 lifetime — which is the model the ancestors (Python/Java) already have.

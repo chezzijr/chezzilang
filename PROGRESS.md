@@ -237,10 +237,13 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > `examples/executor_results.chz`. Commits `0127cfd7`/`af3fb10b` (W7-5), `05204777`/`0611f8ae` (W7-5c).
 > **W7-5b** (an `Executor` created inside an M:N task is silently discarded) is explicitly **deferred,
 > not fixed** — the project owner decided mid-milestone to move `Executor` to eager execution
-> (`docs/future.md` §2c), which dissolves the queue W7-5b's bug loses jobs out of, so finishing W7-5b
-> against the current queueing model was stopped rather than shipped against a model already being
-> replaced. Still tracked open in `docs/gaps.md` OPEN ITEMS; the verified (uncommitted) M:N-only patch is
-> preserved at `.superpowers/sdd/task-3-mn-half.patch`. **W7-5d** (new, filed adversarially reviewing
+> (`docs/future.md` §2c), and W7-5b was folded into that milestone because the two share the same join
+> machinery. (Corrected 2026-08-01: eager execution does **not** dissolve the queue — Python's
+> `ThreadPoolExecutor` has a work queue too; the drift is *who drains it and when*. And under decision
+> D1 — detached lifetime, joined at **program exit** — serial's existing program-exit reap already IS
+> the right semantics, so W7-5b is **M:N-only**.) Still tracked open in `docs/gaps.md` OPEN ITEMS. The
+> uncommitted patch at `.superpowers/sdd/task-3-mn-half.patch` drains at *task end*, the scope-bound
+> lifetime D1 rejected — keep it as a code reference, not a drop-in fix. **W7-5d** (new, filed adversarially reviewing
 > this doc pass): the run-all guarantee is for an ORDINARY fault only — a HARD halt mid-`shutdown()`
 > stops `--serial`'s drain from popping the rest of the queue at all, while M:N has already dispatched
 > every job before the halt can fire; the exact asymmetry is unverified under a thread-starved pool and
