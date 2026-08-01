@@ -56,6 +56,7 @@ chronological log.
 | **W6-10r** | `:1216` | `--max-heap` residual: a payload reachable ONLY through a **nested** core (a `Channel` inside a `Shared`, once the nested core's last `Obj` alias slot is swept) is counted nowhere | Left open by the W6-10 fix on purpose. `live_bytes` reaches a core's bytes through its `Obj::*` alias slot; a nested core has none. Closing it needs cross-core byte recursion with `Arc` de-dup — narrow trigger, not worth the machinery yet |
 | protocol embeds | `:1505` | A protocol-embedded method isn't callable through the interface value (`p: Person` can't call embedded `name()`) despite `spec.md:973` "flattened at bound sites" | Filed as a safe-direction observation in wave 3; never triaged — doc and behavior contradict each other either way |
 | **W7-5b** | `:4384` | An `Executor` created INSIDE an M:N task is silently discarded — its jobs never run, never reap, no fault | **Still live — deliberately deferred, not forgotten.** The fix was stopped mid-milestone: eager execution deletes the queue this bug loses, so W7-5b is folded into that milestone instead of being fixed against a model that is going away. The verified M:N-half patch is preserved at `.superpowers/sdd/task-3-mn-half.patch` if the milestone slips. The bug is on **both** engines, not just M:N — serial reaps a task-created executor only at program exit, long after the nursery join |
+| **W7-5d** | `:4413` | A hard halt (over-memory/timeout/dead-stdout) firing mid-`shutdown()` does NOT run every queued job the way an ordinary fault does — `--serial` stops popping the queue the instant one fires (later-queued jobs never run at all); M:N has already dispatched every job to the pool before a hard halt can fire, but that is not a per-job guarantee under a thread-starved pool | Found while adversarially reviewing this milestone's own docs. Live and reproduced on the built binary (`Executor().submit(spew-until-dead-stdout)` then two marker jobs, piped through `head -1`: M:N runs both markers, `--serial` runs neither), but untested — `tests/chz/stdlib/executor_drain_test.chz`'s 6 tests only use `panic()` faults, never a hard-halt kind. `executor_hard_halt` was deliberately built as an unconditional kill switch (W7-5), so this is arguably correct-by-design on both engines individually, but the exact SHAPE of "what still doesn't run" differs by engine and neither engine's shape is pinned by a test |
 | **W7-11** | `:3901` | A `RwShared` holding a container with an element that back-references the CONTAINER (`a.next = xs; RwShared(xs).at(0)`) aborts the host on `from_wire_memo`'s `.expect("a wire Backref always targets an already-reconstructed node id")` — a legal program, no concurrency, both engines | **Pre-existing on main**, not a W7-4 regression (verified on 5960052): a copy-out view drains ONE depth-1 piece, and a piece whose cycle closes through the ROOT container can never be self-contained — the definition it needs IS the container. `elem_split` fixes the sibling-CELL case, not this ancestor case. Closing it means either a catchable fault instead of the `.expect` (`from_wire_memo` returns a `Value`, so that is a signature change through every rebuild arm) or a same-guard whole-container fallback at all 12 view sites |
 | **W7-4a** | `:3901` | Airlock cell identity is preserved **per module** in the snapshot, so two globals in DIFFERENT modules over one shared cell still arrive as two cells | Residual disclosed by the W7-4 fix. Closing it needs `Vm`-lived rebuild state kept (and rooted) across the lazy per-module faults; the reported repro is same-module and is fixed |
 | **W7-4b** | `:3901` | A cell whose inner value carries a residual `Module`/`Native`/`Cffi` handle falls to `SnapValue::Cell`, which has no `Backref` encoding, so its identity is not preserved across a module snapshot | Residual disclosed by the W7-4 fix, and the same limit the `SnapValue::Closure` slow arm already documents. Closing it is a snapshot FORMAT change (id/`Backref` arms on `SnapValue`), out of proportion to a residual this narrow |
@@ -4408,6 +4409,41 @@ better solved once inside that milestone than legislated twice against a model a
 The verified M:N-only patch (source diff + the two `test fn`s it makes pass) is preserved at
 `.superpowers/sdd/task-3-mn-half.patch` — `git apply` it to restore exactly what was measured, if the
 eager-execution milestone slips and W7-5b needs a stopgap fix against the current model instead.
+
+### W7-5d — a hard halt mid-`shutdown()` doesn't run every queued job the way an ordinary fault does, and the two engines diverge on WHICH jobs still don't run — **OPEN, found during this milestone's own doc review, NOT fixed**
+
+Found adversarially reviewing this milestone's docs, not while implementing W7-5/W7-5c. The run-all
+guarantee (every queued job runs; §8 above) is explicitly for an ORDINARY job fault. A **hard halt**
+(`Vm::executor_hard_halt` — over-memory, timeout, or a fault raised while stdout is dead) is, by
+design (W7-5's whole point), a separate, unconditional kill switch — but its effect on the REST of the
+queue is not symmetric between engines, and neither shape is pinned by a test:
+
+- **`--serial`** (`src/vm/netio.rs`, the cooperative `"shutdown"` branch): the pop-loop `break`s the
+  instant a hard halt fires, before popping any still-queued task. Those tasks never run at all.
+- **M:N** (`src/vm/sched.rs`, `drain_executor_on_pool` → `run_workers_on_pool`): the WHOLE queue is
+  taken up front (`take_all()`) and every job is dispatched to a worker (inline or pool) unconditionally
+  — there is no hard-halt short-circuit on this path. In a live repro (`Executor().submit(spew)` — a
+  job that prints until stdout dies — followed by two file-writing marker jobs, `shutdown()`, piped
+  through `head -1`), both markers ran on M:N (both files written) while neither ran on `--serial`
+  (neither file written).
+
+Whether M:N's "already dispatched" is a hard per-job guarantee under a thread-starved pool (fewer
+worker threads than queued jobs) is unverified — `ReadyWorker::run_outcome`'s pre-call
+`cancel_requested()` checkpoint (the same mechanism `--os.exit` timing races through, per the W7-5
+implementation report) could in principle let a farmed-but-not-yet-started job observe an
+already-tripped cancel flag and skip its body without ever truly running it, the same class of
+thread-count-sensitive race documented for the `os.exit` case. Not chased further here — this is a docs
+task, not a VM fix.
+
+**Why this isn't rolled into W7-5's "fixed."** `executor_hard_halt` doing exactly this — stopping the
+drain early — is correct BY DESIGN (that's the whole reason the cancel flag was kept for hard halts).
+The gap is that the docs claimed an unqualified "every queued job runs" without the hard-halt carve-out
+this implies, and that carve-out's precise shape differs by engine and has zero test coverage
+(`tests/chz/stdlib/executor_drain_test.chz`'s 6 tests use only `panic()` faults). Closing it needs
+either a same-shape fix (make `--serial` also farm-then-dispatch instead of pop-then-run, or make M:N
+also stop dispatching once a hard halt fires) or an accepted-asymmetry test pinning what each engine
+actually does — a decision for whoever next touches the Executor drain, likely inside the
+eager-execution milestone (`docs/future.md` §2c) rather than against the current queueing model.
 
 ### Safe-direction observations (not filed as bugs)
 - **`PROGRESS.md`'s claim that the second (rejected) W7-5 fix attempt (`8c32fda6`) broke the `os.exit`

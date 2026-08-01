@@ -1211,8 +1211,13 @@ supervised tasks) — Go's float-free `go` is the model both ecosystems *rejecte
 > the caller: thread a `std.cancel.Token` through the closures and poll `tok.cancelled()` (§6e) — the
 > same split Go uses (`errgroup` + `context`), and the reason there is no abort flag on the Executor.
 > For structured first-fault-aborts-everything semantics, use a `parallel:` nursery, which is the
-> primitive that means that. `shutdown_now` discards pending work; `submit` after either is a fault.
-> Reap with `defer ex.shutdown()` as shown.
+> primitive that means that. **The run-all guarantee is for an ORDINARY job fault** — a hard halt (an
+> over-memory/timeout abort, or a fault raised while stdout is dead) is a separate, unconditional kill
+> switch that trumps it: `--serial` stops popping the queue the instant one fires, so later-queued jobs
+> never run; M:N has already dispatched every job before a hard halt can fire but is not a hard
+> per-job guarantee under a thread-starved pool. This asymmetry is untested and tracked as
+> `docs/gaps.md` **W7-5d**, not fixed by this milestone. `shutdown_now` discards pending work; `submit`
+> after either is a fault. Reap with `defer ex.shutdown()` as shown.
 > **Program-exit auto-drain now ships too (both engines):** an executor never explicitly
 > `shutdown`/`shutdown_now`-ed is gracefully drained at a clean program exit (a per-engine executor
 > registry that doubles as a GC root reaps each live executor FIFO in creation order — its submitted
@@ -1252,7 +1257,7 @@ fn main():
 | Method | Behaviour |
 |--------|-----------|
 | `submit(f)` | enqueue a detached, side-effect-only task (results leave via a `Channel`, like `spawn`); returns immediately |
-| `shutdown()` | **graceful** — stop accepting new work, **await** submitted work to drain (every queued job runs; W7-5's fault contract above governs which error propagates), then reap |
+| `shutdown()` | **graceful** — stop accepting new work, **await** submitted work to drain (every queued job runs on an ordinary fault, per W7-5's fault contract above; a hard halt is a separate kill switch — see the engine-asymmetry note above and `docs/gaps.md` **W7-5d**), then reap |
 | `shutdown_now()` | **cancel** pending work and reap immediately (Java `shutdownNow`) — a caller-issued pre-emption, unaffected by the W7-5 run-all-jobs contract above (that contract governs `shutdown()`'s drain, not a `shutdown_now()` cancel) |
 
 - **`defer` is the lifetime knob.** A task "persists through scopes" because its *owner* — the

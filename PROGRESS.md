@@ -237,7 +237,11 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > (`docs/future.md` §2c), which dissolves the queue W7-5b's bug loses jobs out of, so finishing W7-5b
 > against the current queueing model was stopped rather than shipped against a model already being
 > replaced. Still tracked open in `docs/gaps.md` OPEN ITEMS; the verified (uncommitted) M:N-only patch is
-> preserved at `.superpowers/sdd/task-3-mn-half.patch`.
+> preserved at `.superpowers/sdd/task-3-mn-half.patch`. **W7-5d** (new, filed adversarially reviewing
+> this doc pass): the run-all guarantee is for an ORDINARY fault only — a HARD halt mid-`shutdown()`
+> stops `--serial`'s drain from popping the rest of the queue at all, while M:N has already dispatched
+> every job before the halt can fire; the exact asymmetry is unverified under a thread-starved pool and
+> has zero test coverage. `docs/gaps.md` OPEN ITEMS.
 
 > **✅ BUG-HUNT (2026-07-28, wave 7 batch A, gaps.md W7-1/W7-6/W7-7) — three HOST-BOUNDARY fixes: the
 > CLI no longer host-panics on hostile OS bytes, and `fs.copy` no longer eats a file.** All three live
