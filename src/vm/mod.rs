@@ -90,6 +90,11 @@ impl RuntimeError {
 /// fault), but a hard halt must stay un-swallowable: a `chezzi test --max-heap` / `--timeout` abort,
 /// or a fault raised while stdout is dead (`chezzi run x.chz | head -1` must not spin the whole
 /// queue). `os.exit` is NOT here — it arrives as `pending_exit`, handled by its own arm.
+///
+/// Not Executor-only despite the name: it is also `reduce_task_slots`'s hard-halt-over-ordinary error
+/// precedence predicate (W7-5 review Fix 1), and `reduce_task_slots` is shared by every M:N nursery
+/// join (`parallel:`, `spawn`) as well as the Executor drain — seven call sites total. Read every use
+/// of this predicate as "is this fault a hard halt", not "is this an Executor".
 pub(super) fn executor_hard_halt(err: &RuntimeError) -> bool {
     err.is_over_memory || err.is_timed_out || crate::vm::stream::out_dead_reason().is_some()
 }

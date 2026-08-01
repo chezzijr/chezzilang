@@ -1671,17 +1671,17 @@ impl Vm {
             }
         }
         // 4b. Flush worker output in task order (decision F) and select the terminal outcome.
-        //     `Done`/`Exit` output is flushed; the terminal (lowest-index propagating) `Fault` flushes
-        //     its buffered output at its slot too (oracle parity — a faulting task's partial output is
-        //     emitted before the fault unwinds); higher-index racy `Fault`s + `Cancelled` still drop
-        //     (no deterministic slot). The fault-free goldens only ever hit `Done`, so byte-identical.
+        //     `Done`/`Exit` output is flushed; EVERY `Fault` flushes its buffered output at its slot
+        //     too, unconditionally (W7-5c — not just the lowest-index one; see `reduce_task_slots`,
+        //     which this call reduces into). The fault-free goldens only ever hit `Done`, so
+        //     byte-identical.
         //
         //     Precedence: an `os.exit` is an UNCONDITIONAL hard halt, so the lowest-index `Exit`
         //     wins over any `Fault` regardless of index — otherwise a recoverable sibling fault at a
         //     lower index could demote a child's `os.exit` to a catchable error (a `recover:` around
         //     the `parallel:` would swallow it and the process would not exit). Within a kind, the
-        //     lowest index wins (scan order + `is_none()` guard), matching the cooperative engine's
-        //     first-fault rule.
+        //     lowest index wins (scan order + `is_none()` guard) — see `reduce_task_slots` for the
+        //     full precedence (hard-halt fault also outranks an ordinary one, W7-5 review Fix 1).
         // Take the slots out under the lock rather than `Arc::try_unwrap`: a just-finished pool
         // thread bumps the `done` counter (in `DoneSignal::drop`) *before* its closure environment —
         // which still owns a `results` `Arc` clone — is dropped, so the joiner can wake with
@@ -3571,7 +3571,7 @@ impl Vm {
     /// queued closure becomes a [`ReadyWorker`] sharing a fresh per-drain cancel flag. W7-5 — that flag
     /// is now a HARD-HALT switch only (`os.exit` / over-memory / timeout / dead stdout, see
     /// [`executor_hard_halt`]); an ordinary job fault no longer trips it, so every queued job runs and
-    /// the join raises the lowest-index fault. **no** deadlock watch (decision D — an
+    /// the join raises the lowest-index fault. **No deadlock watch** (decision D — an
     /// `Executor`-spanning deadlock hangs, as documented). Output is flushed in submission (queue) order
     /// by [`run_workers_on_pool`] (decision F).
     pub(super) fn drain_executor_on_pool(

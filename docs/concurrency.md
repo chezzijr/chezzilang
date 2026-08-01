@@ -1218,6 +1218,12 @@ supervised tasks) — Go's float-free `go` is the model both ecosystems *rejecte
 > per-job guarantee under a thread-starved pool. This asymmetry is untested and tracked as
 > `docs/gaps.md` **W7-5d**, not fixed by this milestone. `shutdown_now` discards pending work; `submit`
 > after either is a fault. Reap with `defer ex.shutdown()` as shown.
+> **A non-terminating sibling still blocks `shutdown()`, by design.** Run-all deliberately drops the
+> old fast-fail: if one submitted job faults but another never reaches a cancellation point (a tight
+> loop, a blocking sleep with no polling), `shutdown()` now waits for it on both engines instead of
+> killing it — the old abort-on-first-fault contract would have ended it at its next back-edge. This
+> is accepted, matching Python/Java/Go's run-all default above; reach for a `std.cancel.Token` (§6e) if
+> a submitted job needs to notice a sibling's fault and stop itself.
 > **Program-exit auto-drain now ships too (both engines):** an executor never explicitly
 > `shutdown`/`shutdown_now`-ed is gracefully drained at a clean program exit (a per-engine executor
 > registry that doubles as a GC root reaps each live executor FIFO in creation order — its submitted

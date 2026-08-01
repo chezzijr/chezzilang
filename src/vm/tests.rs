@@ -11642,14 +11642,15 @@ fn executor_autodrain_survives_gc_stress() {
 #[test]
 fn executor_fault_during_drain_still_runs_every_sibling() {
     // W7-5 run-all review Fix 3: this used to pin the OLD abort contract (a mid-drain fault leaves
-    // not-yet-run siblings queued; `defer ex.shutdown()` then reaps them on the fault exit path).
-    // That contract is gone — under run-all semantics an ordinary fault does not stop the drain, so
-    // the explicit `ex.shutdown()` call itself runs `C` (the fault it raises is merely the
-    // lowest-submission-index one propagating after every job has already run), and the `defer
-    // ex.shutdown()` reap finds an empty queue and is a clean no-op. The string this asserts is
-    // unchanged from the old contract, but WHY it's produced is not — it now pins "every submitted
-    // job runs, in one drain, even when an earlier one faults" instead of a reap-on-unwind path.
-    let src = "fn boom():\n    x := [1]\n    print(x[9])\nfn run():\n    ex := Executor()\n    defer ex.shutdown()\n    ex.submit(fn(): print(\"A\"))\n    ex.submit(fn(): boom())\n    ex.submit(fn(): print(\"C\"))\n    ex.shutdown()\nfn main():\n    r := recover:\n        run()\n        0\n    print(\"done\")\nmain()\n";
+    // not-yet-run siblings queued; a `defer ex.shutdown()` then reaps them on the fault exit path,
+    // which produces the SAME "A\nC\ndone\n" string as the new contract — that version of this test
+    // could not discriminate between the two contracts). With the `defer` removed, `ex.shutdown()`'s
+    // own explicit call is the only drain: under run-all it runs `A`, then `boom` (fault noted, not
+    // yet raised), then `C`, and only then raises the lowest-submission-index fault (`boom`'s) out of
+    // `shutdown()` — genuinely pinning "every submitted job runs, in one drain, even when an earlier
+    // one faults". Pre-fix (abort-on-first-fault) this would print only `A` (the drain stops at
+    // `boom`, `C` never runs, and there is no `defer` left to reap it on the fault exit path).
+    let src = "fn boom():\n    x := [1]\n    print(x[9])\nfn run():\n    ex := Executor()\n    ex.submit(fn(): print(\"A\"))\n    ex.submit(fn(): boom())\n    ex.submit(fn(): print(\"C\"))\n    ex.shutdown()\nfn main():\n    r := recover:\n        run()\n        0\n    print(\"done\")\nmain()\n";
     let vm = run_capture(src).expect("vm run");
     assert_eq!(vm, "A\nC\ndone\n");
     // Cooperative-engine invariant: the M:N engine runs the Executor on a real thread pool, so its

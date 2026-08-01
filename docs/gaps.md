@@ -4349,6 +4349,23 @@ behavior, defeating run-all) or removed it for both (defeating the hard-halt kil
 (`pending_exit`) is a third, separate case — an unconditional hard halt regardless of the
 `executor_hard_halt` predicate, handled by its own arm, untouched by this fix.
 
+**All four of the original rejection's charges, accounted for — three answered, one upheld.** The
+`os.exit` "0.006s → 18.9s" measurement is a misattribution (see the safe-direction observation below);
+dead-stdout promptness is kept (the hard-halt cancel flag above); the `reduce_task_slots` line-set
+divergence is fixed by W7-5c below. The fourth — **"lets a faulting job leave a runaway sibling
+unkillable"** — is **upheld and accepted by design, not fixed**. Run-all means a sibling that never
+reaches a cancellation point (a tight loop with no I/O, a blocking sleep) now blocks `shutdown()` even
+after another job has already faulted, on both engines. Reproduced on this HEAD:
+```
+ex.submit(boom); ex.submit(fn(): while true: n = n + 1); recover: ex.shutdown()
+→ rc=124 (hangs) on BOTH engines
+```
+Pre-fix, the sibling's fault tripped the drain's own cancel flag and the spinner died at its next
+back-edge — exactly the fast-fail behavior run-all deliberately removes for ordinary faults. The
+correct remedy is caller-driven early-stop via `std.cancel.Token` (see the decision above), not a
+return of the drain's own abort. Say this plainly rather than let three answered charges read as if
+all four were answered.
+
 **Measured pre-fix baseline (`6691b565`).** M:N's drain already ran every queued job's side effects —
 a fault-first test with three good sibling jobs summing `1 + 10 + 100` already read back `111` — but
 `submit_result`'s result-channel wrapper lost the result of a job it had just finished: a worker could
@@ -4377,8 +4394,11 @@ moving the flush out of that gate so every faulting task's buffered output flush
 slot, unconditionally — matching the `Cancelled`/`Deadlocked` arms' shape. Which error PROPAGATES is
 unchanged: still strictly the lowest-index fault (subject to W7-5's hard-halt-over-ordinary
 precedence). `reduce_task_slots` is shared by 7 call sites including the `parallel:` nursery paths, so
-this also fixes the same silent-output-drop for two-or-more spawned tasks faulting in one nursery join,
-not just the Executor drain. Landed: `05204777` (the fix), `0611f8ae` (docblock-accuracy review fixes,
+this also closes the same latent gap on the nursery paths — plausible but unpinned: a nursery trips its
+cancel flag on the first fault, so a second slot landing `Fault` (rather than the already-flushing
+`Cancelled`) needs two tasks to fault before the cancel can take effect, which is inherently racy to
+force deterministically, and no such test exists today. Landed: `05204777` (the fix), `0611f8ae`
+(docblock-accuracy review fixes,
 comment-only). Acceptance: `executor_second_faulting_job_keeps_its_output_both_engines`
 (`src/vm/tests.rs`).
 

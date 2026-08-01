@@ -226,7 +226,10 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > `ExecutorService` / Go `errgroup` all agree) and splits the drain's cancel flag in two: gone for an
 > ordinary fault, kept for a HARD halt (`--max-heap`/`--timeout`/dead-stdout) via a new
 > `Vm::executor_hard_halt` predicate, so the dead-stdout/`os.exit` kill switches survive un-swallowable.
-> Early-stop is now opt-in in the caller via `std.cancel.Token` (`docs/concurrency.md` §6e/§8). **W7-5c**
+> Early-stop is now opt-in in the caller via `std.cancel.Token` (`docs/concurrency.md` §6e/§8). Of the
+> original rejection's four charges, three are answered above and by W7-5c below; the fourth — a
+> faulting job leaves a non-terminating sibling unkillable — is **upheld and accepted by design**
+> (run-all's whole point), not fixed; see `docs/gaps.md`'s W7-5 session log. **W7-5c**
 > (a second faulting task's buffered output was silently dropped once two jobs could fault in one
 > drain — latent under the old abort-on-first-fault semantics, live under run-all) is fixed alongside
 > it: every faulting task's output now flushes at its task-order slot. Acceptance test:

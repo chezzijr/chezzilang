@@ -2683,9 +2683,10 @@ impl Vm {
 
     /// Mirrors `interp::Interp::drain_live_executors` (C5 / A2): at a clean program end, gracefully
     /// drain every `Executor` created but never explicitly `shutdown`/`shutdown_now`-ed, in creation
-    /// order, reusing the shipped `shutdown` path (FIFO, first-fault-aborts-siblings). A hard
-    /// `std.os.exit` is not drained (the caller gates on `pending_exit`); a task that calls
-    /// `os.exit` mid-drain stops the remaining drain.
+    /// order, reusing the shipped `shutdown` path (FIFO, run-all — every queued job runs and the
+    /// lowest-submission-index fault propagates, W7-5). A hard `std.os.exit` is not drained (the
+    /// caller gates on `pending_exit`); a task that calls `os.exit` mid-drain stops the remaining
+    /// drain.
     pub(super) fn drain_live_executors(&mut self, span: Span) -> Result<(), RuntimeError> {
         if self.pending_exit.is_some() {
             return Ok(());
