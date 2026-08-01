@@ -217,15 +217,27 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > arm among live ones still parks; the detector is untouched. Verified 0/60 at `--threads=8` (main
 > 3/60), real deadlocks still reported.
 >
-> **W7-5 (the M:N `Executor` drain) is NOT in this commit — it needs its own milestone.** Two fix
-> attempts were prosecuted and rejected. A sequential drain honours the documented "first fault aborts
-> the rest" but costs 4× (4 overlapping jobs: 0.30s → 1.20s), gutting the pool. "Run all" keeps the
-> parallelism but deletes the per-drain cancel flag — the drain's ONLY kill switch — which breaks
-> `os.exit` hard-halt (0.006s → 18.9s, or a permanent hang), lets a faulting job leave a runaway
-> sibling unkillable, defeats dead-stdout promptness (`| head -1`), and creates a NEW serial≠M:N
-> line-set divergence through `reduce_task_slots`' lowest-index-fault-only flush. Prosecuting those
-> attempts also surfaced **W7-5b** (an `Executor` created inside an M:N task is silently discarded —
-> jobs never run, no fault) and **W7-5c**. All three are filed in `docs/gaps.md` OPEN ITEMS.
+> **✅ W7-5 + W7-5c (the M:N `Executor` drain) — FIXED 2026-08-01: every queued job now runs, and
+> `shutdown()` raises the lowest-submission-index fault.** The two earlier fix attempts logged here were
+> superseded, not vindicated — see `docs/gaps.md`'s W7-5 session-log section for why both were rejected
+> on a measurement (`os.exit` "0.006s → 18.9s") that turned out to reproduce identically on pre-fix
+> `main` and is very likely a misattribution to an unrelated sleep-cancellability limit. The landed fix
+> keeps run-all (an ordinary job fault no longer aborts its siblings — Python `ThreadPoolExecutor` / Java
+> `ExecutorService` / Go `errgroup` all agree) and splits the drain's cancel flag in two: gone for an
+> ordinary fault, kept for a HARD halt (`--max-heap`/`--timeout`/dead-stdout) via a new
+> `Vm::executor_hard_halt` predicate, so the dead-stdout/`os.exit` kill switches survive un-swallowable.
+> Early-stop is now opt-in in the caller via `std.cancel.Token` (`docs/concurrency.md` §6e/§8). **W7-5c**
+> (a second faulting task's buffered output was silently dropped once two jobs could fault in one
+> drain — latent under the old abort-on-first-fault semantics, live under run-all) is fixed alongside
+> it: every faulting task's output now flushes at its task-order slot. Acceptance test:
+> `tests/chz/stdlib/executor_drain_test.chz`, gated serial==M:N. Example:
+> `examples/executor_results.chz`. Commits `0127cfd7`/`af3fb10b` (W7-5), `05204777`/`0611f8ae` (W7-5c).
+> **W7-5b** (an `Executor` created inside an M:N task is silently discarded) is explicitly **deferred,
+> not fixed** — the project owner decided mid-milestone to move `Executor` to eager execution
+> (`docs/future.md` §2c), which dissolves the queue W7-5b's bug loses jobs out of, so finishing W7-5b
+> against the current queueing model was stopped rather than shipped against a model already being
+> replaced. Still tracked open in `docs/gaps.md` OPEN ITEMS; the verified (uncommitted) M:N-only patch is
+> preserved at `.superpowers/sdd/task-3-mn-half.patch`.
 
 > **✅ BUG-HUNT (2026-07-28, wave 7 batch A, gaps.md W7-1/W7-6/W7-7) — three HOST-BOUNDARY fixes: the
 > CLI no longer host-panics on hostile OS bytes, and `fs.copy` no longer eats a file.** All three live

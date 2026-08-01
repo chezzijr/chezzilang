@@ -1,0 +1,35 @@
+# The Executor fault contract (W7-5): EVERY submitted job runs, and `shutdown()` then raises the first
+# fault in SUBMISSION order. A bad job costs you that job's result — never its siblings' work. Results
+# are read back through `Task` handles in submission order, so the printed order is fixed however the
+# pool threads interleave. Want the siblings to stop early instead? Thread a `std.cancel.Token`
+# (docs/concurrency.md §6e). Run with: chezzi run examples/executor_results.chz
+
+import std.concurrency
+import std.concurrency.task
+
+fn score(row: str) -> int:
+    if row == "":
+        panic("empty row")
+    return row.len()
+
+fn main():
+    rows := ["alpha", "", "beta", "gamma"]
+    ex := Executor()
+
+    handles := []
+    for r in rows:
+        handles.push(task.submit_task(ex, fn() -> int: score(r)))
+
+    reaped := recover: ex.shutdown()
+    match reaped:
+        Ok(_):  print("all jobs clean")
+        Err(e): print("first fault: {e.message()}")
+
+    for i in 0..rows.len():
+        h := handles[i]
+        if h.done():
+            print("{rows[i]} -> {h.get()}")
+        else:
+            print("{rows[i]} -> no result")
+
+main()

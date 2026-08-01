@@ -1203,9 +1203,16 @@ supervised tasks) — Go's float-free `go` is the model both ecosystems *rejecte
 
 > **Status (shipped, sequential subset — both engines):** `Executor()` + `submit` / `shutdown` /
 > `shutdown_now` run on the sequential executor today. `submit` enqueues; `shutdown` drains the queue
-> FIFO to completion at the reap point (the first task to fault aborts the rest and propagates, like a
-> nursery), leaving any not-yet-run siblings in place for a later reap; `shutdown_now` discards
-> pending work; `submit` after either is a fault. Reap with `defer ex.shutdown()` as shown.
+> FIFO to completion at the reap point: **every queued job runs**, and the **first fault in submission
+> order** (lowest index — not first-to-fail, which would be nondeterministic) propagates out of
+> `shutdown()`. A faulting job costs its own result, never a sibling's work; the queue is empty
+> afterwards. This matches Python's `ThreadPoolExecutor` / Java's `ExecutorService` / Go's `errgroup`,
+> none of which abort siblings by default. **Want the siblings to stop?** That is opt-in and lives in
+> the caller: thread a `std.cancel.Token` through the closures and poll `tok.cancelled()` (§6e) — the
+> same split Go uses (`errgroup` + `context`), and the reason there is no abort flag on the Executor.
+> For structured first-fault-aborts-everything semantics, use a `parallel:` nursery, which is the
+> primitive that means that. `shutdown_now` discards pending work; `submit` after either is a fault.
+> Reap with `defer ex.shutdown()` as shown.
 > **Program-exit auto-drain now ships too (both engines):** an executor never explicitly
 > `shutdown`/`shutdown_now`-ed is gracefully drained at a clean program exit (a per-engine executor
 > registry that doubles as a GC root reaps each live executor FIFO in creation order — its submitted
@@ -1245,8 +1252,8 @@ fn main():
 | Method | Behaviour |
 |--------|-----------|
 | `submit(f)` | enqueue a detached, side-effect-only task (results leave via a `Channel`, like `spawn`); returns immediately |
-| `shutdown()` | **graceful** — stop accepting new work, **await** submitted work to drain, then reap |
-| `shutdown_now()` | **cancel** pending work and reap immediately (Java `shutdownNow`) |
+| `shutdown()` | **graceful** — stop accepting new work, **await** submitted work to drain (every queued job runs; W7-5's fault contract above governs which error propagates), then reap |
+| `shutdown_now()` | **cancel** pending work and reap immediately (Java `shutdownNow`) — a caller-issued pre-emption, unaffected by the W7-5 run-all-jobs contract above (that contract governs `shutdown()`'s drain, not a `shutdown_now()` cancel) |
 
 - **`defer` is the lifetime knob.** A task "persists through scopes" because its *owner* — the
   `Executor` — does. Bind that owner's reaping to any scope with `defer ex.shutdown()` (a function, a

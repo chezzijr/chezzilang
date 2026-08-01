@@ -95,6 +95,37 @@ mistaken for.
 
 ---
 
+## 2c. `Executor` moves to eager execution (planned — decided 2026-08-01, not yet implemented)
+
+> **Decision (2026-08-01):** `Executor.submit(f)` will execute eagerly — the job starts immediately
+> rather than being queued for the drain — and `shutdown()` waits for in-flight work. This matches
+> Python `ThreadPoolExecutor` (`submit` schedules at once; `shutdown(wait=True)` blocks) and Java
+> `ExecutorService` (`execute`/`submit` run at once; `shutdown` + `awaitTermination`). Chezzi's
+> submit-only-enqueues model is the drift that manufactured the never-run backlog, the reap-point
+> question, the A2 auto-drain rescue, and W7-5b.
+
+**What it dissolves:** W7-5b (`docs/gaps.md`, no queue to lose), the whole "when is a task-created
+executor reaped" question, and the need to legislate run-all (every job runs by construction, there is
+no backlog left to decide a policy for).
+
+**What survives and must be re-decided inside it:** an executor whose jobs are still **in flight** when
+its creating task ends still needs a join point — "wait for in-flight", a smaller question than "run
+the backlog". Also A2's fate: program-exit auto-drain becomes "wait for in-flight" rather than "run
+work nobody ran", which may make `examples/executor_autodrain.chz` and `docs/concurrency.md`
+`:1216`/`:1264`/`:1368` obsolete.
+
+**The serial engine is NOT the constraint.** Project-owner decision, same session: `--serial` is the
+parity oracle, not a concurrency model, and it is removed post-JIT-freeze (§2b above) — so the oracle
+bends and the language does not. Serial can implement eager submit cooperatively (an eagerly-submitted
+job becomes a runnable fiber in the coop scheduler, exactly how `spawn` already works there,
+`run_scheduler` being the cooperative join), and where it cannot match M:N exactly, the executor timing
+gate relaxes rather than the model contorting.
+
+**Reframing:** under eager execution the `Executor` is a bounded-concurrency nursery with a detached
+lifetime — which is the model the ancestors (Python/Java) already have.
+
+---
+
 ## 3. Missing features (ranked by leverage for scripting) → **mostly shipped (M12–M18)**
 
 > Comprehensions, slicing, the iterator protocol, concat/merge, hex/bin/oct literals, optional
