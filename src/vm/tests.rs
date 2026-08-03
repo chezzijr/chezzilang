@@ -11849,6 +11849,12 @@ print(\"end\")
 /// So the verdict is now restricted to `outstanding == 1`, where there is no sibling to hand off with
 /// and the counters cannot be misread. This test is the fence, and it LOOPS because one pass proves
 /// nothing about a race — the buggy form passed most runs.
+///
+/// M:N-ONLY, and not for lack of trying: on `--serial` this program faults `send on a full channel`
+/// regardless of anything W7-12 touches, because that engine queues at `submit` (decision D3) and runs
+/// the producer to completion before the consumer exists. Adding a serial arm would go red for an
+/// unrelated reason. A progress-counter variant of the predicate that would have allowed multi-job
+/// verdicts was tried and measured to fail this very test (6/40) — see `docs/gaps.md` W7-12.
 #[test]
 fn executor_bounded_pipeline_is_not_mistaken_for_a_deadlock() {
     let src = "
