@@ -3502,10 +3502,12 @@ impl Vm {
     /// does NOT trip that flag ([`ReadyWorker::run_outcome`]), only `os.exit` / [`executor_hard_halt`]
     /// do, so siblings keep running and `shutdown` raises the lowest SUBMISSION-INDEX fault.
     ///
-    /// **No deadlock watch** (decision D — an `Executor`-spanning deadlock hangs, as documented, and
-    /// no scheduler predicate reads eager-job state). What eager execution DOES change is that a
-    /// blocking op inside a job can no longer assume its submitter is stuck in the drain — see
-    /// [`Vm::eager_block_recv`].
+    /// The worker also carries the executor CORE, so a job that blocks can ask whether its submitter
+    /// is still running or already inside `shutdown()` waiting for it (W7-12,
+    /// [`Vm::eager_join_deadlocked`]). No SCHEDULER predicate reads eager-job state — `is_deadlocked`
+    /// is untouched — and an `Executor`-spanning deadlock outside that narrow local check is still an
+    /// accepted hang (decision D). What eager execution DOES change is that a blocking op inside a job
+    /// can no longer assume its submitter is stuck in the drain — see [`Vm::eager_block_recv`].
     pub(super) fn prepare_eager_job(
         &mut self,
         core: &Arc<ExecutorCore>,
@@ -3517,7 +3519,7 @@ impl Vm {
         // takes `core.inner`. It is also the fallible half (`ensure_snapshot` on a frame-holding
         // generator global), and that fault must surface out of `submit` before any slot is reserved.
         let mut rw = self.prepare_worker_from_wire(task, span)?;
-        rw.worker.eager_job = true;
+        rw.worker.eager_core = Some(Arc::clone(core));
         rw.worker.cancel = Some(Arc::clone(&core.cancel));
         Ok(rw)
     }

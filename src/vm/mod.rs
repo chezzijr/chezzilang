@@ -17,8 +17,8 @@ pub mod value;
 pub mod wire;
 
 use core::{
-    AtomicCore, AtomicIntCore, Backing, ChannelCore, ExecRegistry, ExecutorCore, ListenerCore,
-    ReaderCore, RwSharedCore, SharedCore, SocketCore, WriterCore,
+    AtomicCore, AtomicIntCore, Backing, BlockGuard, ChannelCore, ExecRegistry, ExecutorCore,
+    JoinGuard, ListenerCore, ReaderCore, RwSharedCore, SharedCore, SocketCore, WriterCore,
 };
 use heap::{Fields, Heap, MapData, ModuleData, Obj, SetData};
 use op::{CapEntry, CapSrc, NO_IC, Op, Program, ProtoId, TID_NONE, WaitMeta};
@@ -815,16 +815,29 @@ pub struct Vm {
     /// tell a swallowed cooperative abort apart from a real fault (a cancelled task is dropped, not
     /// reported). Not in [`FiberCtx`] — like `pending_exit`, cancellation is a per-VM concern.
     cancelled: bool,
-    /// Set only on the worker `Vm` of an EAGERLY-dispatched `Executor` job (M:N). Such a worker has
-    /// no nursery scheduler and no [`MnSched`], so a blocking op falls to the "no scheduler" arm of
-    /// `chan_recv_step` / `send` / `wait:`, which faults `deadlock — no runnable task can send`. That
-    /// verdict was true while jobs only ran at the drain (the submitter was blocked inside
-    /// `shutdown()`, so nobody COULD send) and is a LIE once jobs start at `submit` — the submitter is
-    /// still running and may well send next statement. When this is set those arms block on the
-    /// channel's own condvar instead ([`Vm::eager_block_recv`]), matching Python. A job blocked on a
-    /// value that never arrives hangs, which is decision D (an `Executor`-spanning deadlock is an
-    /// accepted hang) — unchanged, and no deadlock predicate reads this field.
-    eager_job: bool,
+    /// Set only on the worker `Vm` of an EAGERLY-dispatched `Executor` job (M:N) — to that job's own
+    /// executor core. Such a worker has no nursery scheduler and no [`MnSched`], so a blocking op
+    /// falls to the "no scheduler" arm of `chan_recv_step` / `send` / `wait:`, which faults
+    /// `deadlock — no runnable task can send`. That verdict was true while jobs only ran at the drain
+    /// (the submitter was blocked inside `shutdown()`, so nobody COULD send) and is a LIE once jobs
+    /// start at `submit` — the submitter is still running and may well send next statement. When this
+    /// is `Some` those arms block on the channel's own condvar instead ([`Vm::eager_block_recv`]),
+    /// matching Python.
+    ///
+    /// It carries the CORE (not a bare flag) because W7-12 needs to ask one more question while
+    /// blocked: is that submitter still running, or is it already inside `shutdown()` waiting for me?
+    /// The latter can never be fed, so it faults rather than hangs — see
+    /// [`Vm::eager_join_deadlocked`]. `Executor`-spanning deadlocks NOT covered by that local
+    /// predicate remain an accepted hang (decision D); the sound successor is the wait-for graph in
+    /// `docs/future.md` §2d.
+    eager_core: Option<Arc<ExecutorCore>>,
+    /// W7-12 — one positive [`Vm::eager_join_deadlocked`] observation, awaiting confirmation by a
+    /// second. The deadlock verdict fires only on two CONSECUTIVE positives, because the failed
+    /// `pop`/`enqueue`/re-poll in between is what proves no value arrived: `main` doing
+    /// `ch.send(7)` then `ex.shutdown()` can otherwise be observed as "joining, and I am blocked" by
+    /// a job whose `pop` failed a microsecond BEFORE the send landed. Cleared whenever a block
+    /// completes successfully, so it never leaks into a later, unrelated block.
+    eager_block_suspect: bool,
     /// `chezzi test --timeout=<MS>` — the per-test wall-clock cap in ms (`0` = OFF, the default; the
     /// `chezzi run` engine never sets it). Kept only for the abort message. VM config, NOT part of
     /// [`FiberCtx`] (not swapped): armed once per invoke entry and threaded onto M:N workers.

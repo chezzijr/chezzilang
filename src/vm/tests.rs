@@ -11692,6 +11692,96 @@ print("done")
     assert_eq!(mn_plain.expect("mn run"), want);
 }
 
+/// W7-12 — the MIRROR of the test above: a job blocked on a channel that only its own joiner could
+/// have filled must FAULT, not hang. `main` sends only after `shutdown()`, so it is stuck waiting for
+/// the job while the job waits for it — a real deadlock, and the caller's mistake.
+///
+/// Eager execution (§2c) regressed this from "faults in 0s on both engines" to "faults on `--serial`,
+/// hangs forever on M:N": the `recv` arm decides by "am I inside a scheduler?", which cannot tell this
+/// program apart from the one above. The fix asks the one question that can — is this executor already
+/// being JOINED, with every job it still owes parked — so the two programs keep their opposite verdicts.
+///
+/// Asserted on BOTH engines with the SAME text: the M:N fault now travels out of a worker `Vm` through
+/// `reduce_task_slots` rather than an inline drain, so byte-identity with `--serial` (and so with the
+/// pre-eager behaviour) is a real claim, not a formality.
+///
+/// Watchdogged: getting this wrong is a hang, which would otherwise stall the suite rather than fail it.
+#[test]
+fn executor_job_blocked_during_shutdown_faults_both_engines() {
+    let src = r#"
+ch := Channel[int](1)
+ex := Executor()
+ex.submit(fn(): print("job got {ch.recv()}"))
+ex.shutdown()
+ch.send(42)
+"#;
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send((run_capture(src), run_capture_parallel(src)));
+    });
+    let (serial, mn) = rx
+        .recv_timeout(std::time::Duration::from_secs(60))
+        .expect("a job blocked on its own joiner must fault, not hang");
+    let serial = serial
+        .expect_err("serial: this program is a deadlock")
+        .message;
+    let mn = mn.expect_err("M:N: this program is a deadlock").message;
+    assert!(
+        serial.contains("recv on an empty channel: deadlock"),
+        "serial fault was: {serial}"
+    );
+    assert_eq!(serial, mn, "the deadlock verdict must be engine-identical");
+}
+
+/// W7-12's BOUNDARY, and the reason its join predicate asks who is joining rather than just whether
+/// anyone is: a `shutdown()` running inside a nursery task says nothing about whether a value can
+/// still arrive, because a SIBLING task can be the producer. Here `spawn: ex.shutdown()` runs while
+/// `spawn: … ch.send(42)` is one handshake away from sending, so the job must still WAIT.
+///
+/// Caught by review, not by the suite: the first cut armed the predicate at every explicit
+/// `shutdown()`, which made this exact program fault on M:N while `--serial` printed `job got 42` —
+/// re-opening, in a new place, precisely the engine divergence W7-12 exists to close. Asserted on both
+/// engines for that reason.
+///
+/// Run through the FILE helpers, not `run_capture`, for one reason: the producer has to be slower
+/// than the verdict's own debounce (2 × `DEMOTE_POLL_BACKOFF`) or the send lands first and the program
+/// would pass even with the bug present — verified by mutation. That needs a real `timer`, and
+/// `std.time` only resolves through a module graph.
+#[test]
+fn executor_job_keeps_waiting_when_shutdown_runs_beside_a_live_producer() {
+    let src = "
+import std.concurrency
+import std.time
+ch: Channel[int] = Channel[int](1)
+ex := Executor()
+ex.submit(fn(): print(\"job got {ch.recv()}\"))
+parallel:
+    spawn:
+        timer(200).recv()
+        ch.send(42)
+    spawn:
+        ex.shutdown()
+print(\"end\")
+";
+    let entry = write_temp_chz("w712_sibling_producer", src);
+    let (tx, rx) = std::sync::mpsc::channel();
+    let e = entry.clone();
+    std::thread::spawn(move || {
+        let cfg = crate::native::HostConfig::default;
+        let (so, _se, sr, _sc) = run_file_with(&e, cfg());
+        let (mo, _me, mr, _mc) = run_file_p(&e);
+        let _ = tx.send((so, sr, mo, mr));
+    });
+    let (so, sr, mo, mr) = rx
+        .recv_timeout(std::time::Duration::from_secs(60))
+        .expect("a live sibling producer must keep the job waiting, not hang it");
+    let _ = std::fs::remove_file(&entry);
+    assert!(sr.is_ok(), "serial run faulted: {sr:?}");
+    assert!(mr.is_ok(), "M:N run faulted: {mr:?}");
+    assert_eq!(so, "job got 42\nend\n", "serial output");
+    assert_eq!(mo, so, "the two engines must agree");
+}
+
 /// W7-5b — an `Executor` constructed INSIDE a task, never explicitly shut down, must still have its
 /// work run and waited for at program exit.
 ///

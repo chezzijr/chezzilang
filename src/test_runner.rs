@@ -1470,14 +1470,29 @@ struct Suite:
         // one channel's condvar, while `wait:` has N arms and no single condvar to wait on, so it
         // bounded-polls. The `wait:` arm is the one that would silently spin forever if the shared
         // halt check were dropped from it.
+        //
+        // The SPINNING sibling job is load-bearing since W7-12: with the blocked job alone, `shutdown`
+        // marks the executor as being joined and the job now faults `deadlock` instead of hanging, so
+        // the fixture would stop testing the deadline at all. A second, never-parked job keeps
+        // `blocked < outstanding`, the case W7-12's local predicate declines to judge (gaps.md
+        // `W7-12r`), which restores the accepted hang this test exists for.
+        //
+        // Honest limit, verified by mutation (stub out the deadline read in `Vm::eager_halt_check` and
+        // this still passes): what it now pins is the END-TO-END guarantee — a test whose `shutdown()`
+        // is blocked still reaches a verdict, and control never falls through — not the eager path's
+        // OWN deadline read in isolation. The spinner hard-halts on the deadline at its back-edge,
+        // which trips the executor's cancel flag, and the blocked job can exit through THAT arm of the
+        // same check. Isolating the eager read again needs a one-worker pool so the sibling never runs
+        // at all, and `chezzi test` has no `--threads` (the pool is a process-wide `OnceLock`, so it
+        // cannot be resized in-process either) — see gaps.md `W7-12r`.
         for (name, body) in [
             (
                 "blockrecv_test.chz",
-                "import std.concurrency\nch: Channel[int] = Channel[int](1)\nfn w():\n    print(ch.recv())\ntest fn t():\n    ex := Executor()\n    ex.submit(w)\n    ex.shutdown()\n    assert false, \"SWALLOWED\"\n",
+                "import std.concurrency\nch: Channel[int] = Channel[int](1)\nfn w():\n    print(ch.recv())\nfn spin():\n    while true:\n        pass\ntest fn t():\n    ex := Executor()\n    ex.submit(w)\n    ex.submit(spin)\n    ex.shutdown()\n    assert false, \"SWALLOWED\"\n",
             ),
             (
                 "blockwait_test.chz",
-                "import std.concurrency\na: Channel[int] = Channel[int](1)\nb: Channel[int] = Channel[int](1)\nfn w():\n    wait:\n        v := a.recv(): print(v)\n        v := b.recv(): print(v)\ntest fn t():\n    ex := Executor()\n    ex.submit(w)\n    ex.shutdown()\n    assert false, \"SWALLOWED\"\n",
+                "import std.concurrency\na: Channel[int] = Channel[int](1)\nb: Channel[int] = Channel[int](1)\nfn w():\n    wait:\n        v := a.recv(): print(v)\n        v := b.recv(): print(v)\nfn spin():\n    while true:\n        pass\ntest fn t():\n    ex := Executor()\n    ex.submit(w)\n    ex.submit(spin)\n    ex.shutdown()\n    assert false, \"SWALLOWED\"\n",
             ),
         ] {
             let d = TmpDir::new();
@@ -1492,6 +1507,12 @@ struct Suite:
             assert!(
                 !report.text.contains("SWALLOWED"),
                 "{name}: control must never fall through the blocked shutdown; report:\n{}",
+                report.text
+            );
+            assert!(
+                !report.text.contains("deadlock"),
+                "{name}: W7-12's predicate must stay silent while a sibling job is still runnable — \
+                 this shape is the accepted hang the deadline exists to reach; report:\n{}",
                 report.text
             );
         }

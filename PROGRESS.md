@@ -2,19 +2,17 @@
 
 Single source of truth for "what am I doing next." Update after every work session.
 
-> **▶ NEXT SESSION, START HERE (2026-08-03).** Branch **`eager-executor`** (2 commits, **unmerged**):
-> `217f9ffc` ships eager `Executor` execution (`docs/future.md` §2c), `5983af49` documents the
-> follow-ups. Full gate is green on it (`cargo test` 3790+126 pass, clippy clean, `tests/chz` 284/284 on
-> BOTH engines, all 6 executor goldens byte-identical) — but it carries **one known open regression,
-> `W7-12`**, deliberately left unfixed so it could be handed over rather than rushed.
+> **▶ NEXT SESSION, START HERE (2026-08-03).** Branch **`eager-executor`** (**unmerged**): `217f9ffc`
+> ships eager `Executor` execution (`docs/future.md` §2c), `5983af49` documents the follow-ups, and the
+> newest commit closes **`W7-12`** — the one regression §2c introduced (a job blocked on a channel only
+> its own joiner could fill hung on M:N while `--serial` faulted). Both engines now fault in 0s with
+> byte-identical text; the fix and its four stated residuals are written up in `docs/gaps.md` (section
+> `W7-12`, ledger row `W7-12r`).
 >
-> 1. **Implement `W7-12`'s interim fix.** The complete recipe — fields, `file:line` call sites, which
->    fault strings to reuse, the accepted residual, and the repro — is in `docs/gaps.md`'s W7-12
->    session-log section. It is fully designed and owner-approved; **do not re-derive it**.
-> 2. Then re-run the gate and consider merging. This milestone was rejected once before as an
->    18-agent auto-task run, so budget a manual `adversarial-review` (see `auto-task-review-unreliable`)
->    rather than trusting a post-merge panel.
-> 3. **Do NOT** apply `.superpowers/sdd/task-3-mn-half.patch` (wrong lifetime, superseded), change any
+> 1. **Run a manual `adversarial-review` before merging.** This milestone was rejected once as an
+>    18-agent auto-task run, and per `auto-task-review-unreliable` a post-merge panel is not a
+>    substitute. Then merge.
+> 2. **Do NOT** apply `.superpowers/sdd/task-3-mn-half.patch` (wrong lifetime, superseded), change any
 >    deadlock predicate (`MnSched::is_deadlocked` is untouched by this milestone and should stay that
 >    way), or grow W7-12's local predicate — the principled successor is the wait-for-graph detector
 >    designed in `docs/future.md` **§2d**, which is its own milestone and best sequenced AFTER §2b
@@ -262,14 +260,18 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > poll on the channel condvar mirroring `demote_recv_block`'s settle order), which is what makes
 > `submit(recv) … send … shutdown()` work rather than fault — the exact regression the rejected attempt
 > shipped. Blocking `send`-on-full and `wait:` get the same treatment.
-> **Open regression this milestone introduced — `W7-12`, see `docs/gaps.md` + `future.md` §2d.** The
+> **Regression this milestone introduced, and CLOSED in it — `W7-12`, see `docs/gaps.md`.** The
 > blocking fix is right for a job waiting on a value `main` sends next line, and WRONG for a job waiting
 > on a value only its own joiner could send (`ex.submit(fn(): ch.recv()); ex.shutdown(); ch.send(42)`):
-> that faulted in 0s on both engines pre-eager and now HANGS on M:N while `--serial` still faults.
-> Interim fix agreed: fault when an executor is being joined and every outstanding job is blocked.
-> The principled successor is a wait-for-graph (AND-OR knot) detector — designed in `docs/future.md`
-> **§2d**, which also records why the `netio.rs` "no scheduler ⇒ no sender" arms cannot decide this at
-> all, and how Go/Python/Java/Rust/Erlang handle it.
+> that faulted in 0s on both engines pre-eager and then HUNG on M:N while `--serial` still faulted. Now
+> fixed by asking the one question the `netio.rs` arms could not: is this executor already being JOINED,
+> with every job it still owes parked? (`ExecutorCore::joining`/`blocked` + `Vm::eager_join_deadlocked`,
+> two consecutive observations required, existing fault text reused so M:N == `--serial` byte for byte.)
+> Deliberately LOCAL and left narrow — four residuals in `docs/gaps.md` row `W7-12r`, chiefly that a
+> program with no explicit `shutdown()` still hangs at the exit drain. The principled successor is a
+> wait-for-graph (AND-OR knot) detector — designed in `docs/future.md` **§2d**, which also records why
+> the "no scheduler ⇒ no sender" arms cannot decide this at all, and how Go/Python/Java/Rust/Erlang
+> handle it.
 > **Second hazard, found by self-review:** `submit` must not hold the executor's `core.inner` lock while
 > a dispatched job runs — the GC's `Obj::Executor` mark arm takes the same non-reentrant lock, so a
 > closure capturing its own executor deadlocks when the job's worker collects. Restructured to prepare

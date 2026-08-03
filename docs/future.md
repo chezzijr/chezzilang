@@ -197,11 +197,18 @@ running jobs outside any scheduler, and both of §2c's bugs are that one stale a
 
 * a job blocking on a value `main` sends next line → arm faulted, wrongly (fixed in §2c by blocking);
 * a job blocking on a value `main` can never send, because `main` is inside `shutdown()` waiting for
-  that job → arm now blocks, wrongly (a program that faulted in 0s on both engines pre-§2c hangs
+  that job → arm then blocked, wrongly (a program that faulted in 0s on both engines pre-§2c hung
   forever on M:N after it).
 
 Neither is fixable *in that arm*, because the arm has no way to tell the two apart. Both need a real
 answer to **"can anyone still send on this channel?"**
+
+The second one shipped an INTERIM answer for one narrow shape (gaps.md `W7-12`): a job faults if its own
+executor is being joined by an explicit `shutdown()` and every job that executor still owes is parked.
+That is a local predicate over one executor — it does not observe `parallel:` tasks, other executors, or
+`main`, and gaps.md row `W7-12r` lists the four programs it therefore still gets wrong. It is a
+placeholder for this section, not a down payment on it: the graph below subsumes it, and closing
+`W7-12r` by growing the local predicate instead is explicitly the wrong move.
 
 ### The proposal (project owner, 2026-08-03): a wait-for graph
 

@@ -57,7 +57,7 @@ chronological log.
 | **W6-10r** | `:1216` | `--max-heap` residual: a payload reachable ONLY through a **nested** core (a `Channel` inside a `Shared`, once the nested core's last `Obj` alias slot is swept) is counted nowhere | Left open by the W6-10 fix on purpose. `live_bytes` reaches a core's bytes through its `Obj::*` alias slot; a nested core has none. Closing it needs cross-core byte recursion with `Arc` de-dup — narrow trigger, not worth the machinery yet |
 | protocol embeds | `:1505` | A protocol-embedded method isn't callable through the interface value (`p: Person` can't call embedded `name()`) despite `spec.md:973` "flattened at bound sites" | Filed as a safe-direction observation in wave 3; never triaged — doc and behavior contradict each other either way |
 | **W7-5d** | `:4413` | A hard halt (over-memory/timeout/dead-stdout) firing mid-`shutdown()` does NOT run every queued job the way an ordinary fault does — `--serial` stops popping the queue the instant one fires (later-queued jobs never run at all); M:N has already dispatched every job to the pool before a hard halt can fire, but that is not a per-job guarantee under a thread-starved pool | Found while adversarially reviewing this milestone's own docs. Live and reproduced on the built binary (`Executor().submit(spew-until-dead-stdout)` then two marker jobs, piped through `head -1`: M:N runs both markers, `--serial` runs neither), but untested — `tests/chz/stdlib/executor_drain_test.chz`'s 6 tests only use `panic()` faults, never a hard-halt kind. `executor_hard_halt` was deliberately built as an unconditional kill switch (W7-5), so this is arguably correct-by-design on both engines individually, but the exact SHAPE of "what still doesn't run" differs by engine and neither engine's shape is pinned by a test |
-| **W7-12** | `future.md §2d` | An eager `Executor` job blocked on a channel that only its own joiner could fill HANGS on M:N, where both engines faulted in 0s before eager execution — and `--serial` still faults, so the engines disagree | Introduced by §2c's blocking fix, which is right for the case it targeted (a job waiting on a value `main` sends next line) and wrong here (`main` is inside `shutdown()` waiting for that very job, so no send can ever come). Neither behaviour is fixable in the `netio.rs` fault arm: it decides by "am I inside a scheduler?" and cannot tell the two apart. Interim fix agreed 2026-08-03 — fault when an executor is being joined AND every outstanding job is blocked, which restores the pre-eager error for this shape and leaves no program worse than `main`. The principled successor is the wait-for-graph detector designed in `docs/future.md` **§2d** |
+| **W7-12r** | `:4442` | Residuals of the W7-12 interim fix (**the gap itself is FIXED 2026-08-03**): its predicate is LOCAL to one executor, so it stays silent when (a) a job could only have been fed by an outside `parallel:` task — it faults instead of waiting, matching what that program already does on `main`; (b) `--threads=1` (or a 1-core box) leaves a second job queued behind the blocked one, so `blocked < outstanding` and it still hangs; (c) a `wait:`-blocked sibling makes `blocked` flicker, so detection there is probabilistic; (d) a program with NO explicit `shutdown()` still hangs at the program-exit drain | Kept narrow on purpose — the same species of local predicate that sank the first eager attempt. Do NOT grow it (in particular, do not add a "started" counter for (b)): the sound successor is the process-wide AND-OR wait-for graph designed in `docs/future.md` **§2d**, which is its own milestone and is best sequenced after §2b retires `--serial` |
 | **W7-11** | `:3901` | A `RwShared` holding a container with an element that back-references the CONTAINER (`a.next = xs; RwShared(xs).at(0)`) aborts the host on `from_wire_memo`'s `.expect("a wire Backref always targets an already-reconstructed node id")` — a legal program, no concurrency, both engines | **Pre-existing on main**, not a W7-4 regression (verified on 5960052): a copy-out view drains ONE depth-1 piece, and a piece whose cycle closes through the ROOT container can never be self-contained — the definition it needs IS the container. `elem_split` fixes the sibling-CELL case, not this ancestor case. Closing it means either a catchable fault instead of the `.expect` (`from_wire_memo` returns a `Value`, so that is a signature change through every rebuild arm) or a same-guard whole-container fallback at all 12 view sites |
 | **W7-4a** | `:3901` | Airlock cell identity is preserved **per module** in the snapshot, so two globals in DIFFERENT modules over one shared cell still arrive as two cells | Residual disclosed by the W7-4 fix. Closing it needs `Vm`-lived rebuild state kept (and rooted) across the lazy per-module faults; the reported repro is same-module and is fixed |
 | **W7-4b** | `:3901` | A cell whose inner value carries a residual `Module`/`Native`/`Cffi` handle falls to `SnapValue::Cell`, which has no `Backref` encoding, so its identity is not preserved across a module snapshot | Residual disclosed by the W7-4 fix, and the same limit the `SnapValue::Closure` slow arm already documents. Closing it is a snapshot FORMAT change (id/`Backref` arms on `SnapValue`), out of proportion to a residual this narrow |
@@ -4439,20 +4439,19 @@ shared bug into a live serial-vs-M:N divergence. Both engines now re-scan until 
 remains, terminating on the `shut` flag `shutdown` sets before it runs anything. Acceptance:
 `executor_created_by_a_joined_job_is_also_joined_both_engines`.
 
-### W7-12 — an eager `Executor` job blocked on a channel only its own joiner could fill HANGS on M:N — **OPEN, interim fix designed and approved, NOT implemented**
+### W7-12 — an eager `Executor` job blocked on a channel only its own joiner could fill HANGS on M:N — **FIXED 2026-08-03**
 
-Found by the project owner while reviewing the eager-execution milestone (§2c). **Pick this up first
-next session — everything needed to do it is below; do not re-derive it.**
+Found by the project owner while reviewing the eager-execution milestone (§2c).
 
 **The program** (`ex.submit(fn(): ch.recv())` → `ex.shutdown()` → `ch.send(42)`): the job blocks on an
 empty `recv`; `shutdown()` waits for the job; `main` can never reach its `send` because it is inside
 that wait. A genuine deadlock, and genuinely the caller's mistake — the complaint is only about how it
 is REPORTED.
 
-| | pre-eager (`b6cb9201`) | after §2c |
-|---|---|---|
-| M:N | faults in 0s | **hangs forever** |
-| `--serial` | faults in 0s | faults in 0s |
+| | pre-eager (`b6cb9201`) | after §2c | after the fix |
+|---|---|---|---|
+| M:N | faults in 0s | **hangs forever** | faults in 0s |
+| `--serial` | faults in 0s | faults in 0s | faults in 0s |
 
 Both legs measured on built binaries, not reasoned. So §2c traded a clear instant error for a silent
 hang on the default engine AND opened a serial-vs-M:N divergence.
@@ -4468,32 +4467,84 @@ wrong half the time. Reverting re-breaks the producer/consumer shape the milesto
 * job blocks while `main` is inside `shutdown()` waiting for it, and no sibling job is runnable →
   nobody can send → fault.
 
-**Interim fix, approved 2026-08-03 — implement exactly this:**
+**The interim fix, as shipped.** Two counters on the shared `ExecutorCore` (`src/vm/core.rs`) —
+`joining` (threads inside an explicit `shutdown()` join, bumped by `JoinGuard`) and `blocked` (jobs of
+this executor parked in an eager blocking loop, bumped by `BlockGuard`) — plus
+`Vm::eager_core: Option<Arc<ExecutorCore>>`, which REPLACES the old `eager_job: bool` (the bool was
+exactly `eager_core.is_some()`, so carrying both would only invite drift). `Vm::prepare_eager_job` sets
+it, and `Vm::eager_join_deadlocked` (`src/vm/netio.rs`) asks
+`joining > 0 && outstanding > 0 && blocked >= outstanding`. `Vm::eager_halt_check` checks it AFTER the
+`--timeout` and cancel halts, so both still outrank it, and it therefore covers all three eager
+blocking sites at once (`eager_wait_tick` serves the empty-`recv` and full-`send` loops; the `wait:` arm
+calls it directly). Each site passes its OWN pre-existing message, now hoisted to consts beside
+`FULL_SEND_DEADLOCK` — `EMPTY_RECV_DEADLOCK` and `EMPTY_WAIT_DEADLOCK` — so the restored fault is
+byte-identical to `--serial`'s (verified by running the repro on both engines and diffing, not by
+reading).
 
-1. `src/vm/core.rs:568` — add to `ExecutorCore` beside `cancel` (`:579`):
-   `pub joining: AtomicUsize` (threads currently inside the join) and `pub blocked: AtomicUsize` (jobs
-   currently parked in an eager blocking loop).
-2. `src/vm/mod.rs:827` — add `eager_core: Option<Arc<ExecutorCore>>` beside `eager_job`; init `None` at
-   `src/vm/exec.rs:146`; set it in `Vm::prepare_eager_job` (`src/vm/sched.rs:3509`) alongside
-   `eager_job`/`cancel`, so a blocked job can reach its own executor.
-3. `Vm::join_eager_jobs` (`src/vm/sched.rs:3534`) — increment `joining` before the condvar wait loop and
-   decrement after it, BEFORE `reduce_task_slots` (which can return `Err`). Use an RAII guard so a
-   fault cannot leak the count.
-4. `src/vm/netio.rs` — the three eager blocking sites (`:1389` full-`send`, `:1608` empty-`recv` via
-   `eager_block_recv` `:1690`, `:1929` `wait:`). Hold `blocked` for the duration of a block (RAII guard;
-   for the `wait:` arm, which re-executes the op rather than looping, hold it only across the sleep —
-   the check simply converges over a few ticks). After each tick, fault if
-   `joining > 0 && blocked >= outstanding`.
-5. **Reuse the EXISTING fault strings** (the `recv` arm's message, `FULL_SEND_DEADLOCK`, the `wait:`
-   message) so this shape becomes byte-identical to pre-§2c rather than introducing new text. Extract
-   the `recv` one to a const next to `FULL_SEND_DEADLOCK` (`src/vm/netio.rs:24`) instead of duplicating.
+Four details that are load-bearing and were NOT in the original recipe (found by stress-testing it
+against the code before implementing):
 
-**Accepted residual, stated deliberately:** a job waiting on a channel that an OUTSIDE `parallel:` task
-would have filled, while `shutdown()` runs concurrently, will fault instead of waiting. That program
-ALSO faults on `main` today, so nothing regresses relative to pre-§2c — that property is what made this
-acceptable as an interim. It is still a LOCAL predicate, the same species as the one that sank the first
-eager attempt, so keep it narrow and do not grow it opportunistically. The sound successor (a
-process-wide AND-OR wait-for graph, knot detection, partial-deadlock capable) is designed in
+* **`joining` is bumped at the `shutdown` CALL SITE, not inside `Vm::join_eager_jobs`.** That function
+  also serves `drain_live_executors`, which joins live executors one at a time in REGISTRY order, so
+  bumping there would let the registry order decide which executor's job gets the fault.
+  `shutdown_now` needs no bump either: it trips `cancel` first, and the cancel halt pre-empts this
+  check.
+* **…and only when the joiner has no live siblings** (`Vm::join_has_no_live_siblings`: no `MnSched`, no
+  inline `parallel:` builder, no cooperative nursery, not itself an eager job, not in a native
+  callback). Without this gate the fix RE-OPENED an engine divergence in a new place — found by
+  adversarial review, not by the suite, and measured:
+  `parallel: { spawn: timer(200); ch.send(42) } { spawn: ex.shutdown() }` printed `job got 42` on
+  `--serial` and faulted on M:N. A `shutdown()` running inside a nursery task says nothing about
+  whether a value can still arrive, because a SIBLING task can be the producer. Regression test:
+  `executor_job_keeps_waiting_when_shutdown_runs_beside_a_live_producer` (mutation-verified — it fails
+  when the gate is stubbed out, and it needs a real `timer` producer, slower than the debounce, or it
+  passes with the bug present).
+* **The `wait:` arm arms its `BlockGuard` BEFORE the halt check**, or the observing job does not count
+  itself (`blocked` 0 vs `outstanding` 1) and a lone `wait:`-blocked job could never fault.
+* **The full-`send` arm attempts `enqueue_bounded` ONCE outside the guard.** `submit_result`
+  (`std/concurrency.chz`) ends every job with a cap-1 send that always has space; arming first would
+  make `blocked == outstanding` transiently on every one of those jobs.
+* **A two-observation debounce** (`Vm::eager_block_suspect`): the verdict fires only on two CONSECUTIVE
+  positive observations, because `main` doing `ch.send(7)` then `ex.shutdown()` can otherwise be seen as
+  "joining, and I am blocked" by a job whose `pop` failed a microsecond BEFORE the send landed. The
+  failed re-`pop` / re-`enqueue` / `wait:` re-poll between the two observations is what proves no value
+  arrived. Cleared when a block completes successfully — NOT on entry, since the `wait:` arm has no loop
+  to enter and would reset it every tick.
+
+**Accepted residuals, stated deliberately** (ledger row `W7-12r`): (a) a job whose producer lives in
+ANOTHER executor's job — `x.submit(consumer)` / `y.submit(producer)` then `x.shutdown()` — faults
+instead of waiting, and this IS a regression against §2c's M:N behaviour (that program printed its
+value before this change; measured, not reasoned). It is accepted, narrowly, because the same program
+faults on `--serial` too, so it costs no ENGINE agreement, and because the verdict is what pre-§2c M:N
+also gave. Note the shape of the cost honestly: the outcome is wall-clock-sensitive — a producer that
+sends within ~2 × `DEMOTE_POLL_BACKOFF` still wins, a slower one faults, so this class is timing- and
+load-dependent rather than a clean rule. That is the strongest argument for doing §2d properly and
+against extending this predicate one case at a time; (b) under `--threads=1` (or on a 1-core box) a
+second submitted job queued behind the blocked one keeps `blocked < outstanding`, so that program still
+hangs — do NOT close this with a "started" counter; (c) a `wait:`-blocked sibling makes `blocked`
+flicker (its guard drops between op invocations), so detection there converges by phase drift rather
+than by a bound; (d) a program with no explicit `shutdown()` still hangs at the exit drain, per the
+first bullet above.
+
+**Test coverage this fix RETIRED, stated rather than quietly dropped.**
+`test_runner::tests::timeout_reaches_a_job_blocked_on_a_channel_and_on_wait` used to prove that the
+eager blocking paths read `--timeout` THEMSELVES (a blocked job never reaches `jump_checked`'s
+back-edge, where every other path observes the deadline). Its fixture was W7-12's repro, so it now
+faults instead of hanging. It was reworked — a spinning sibling keeps `blocked < outstanding`, which
+the predicate declines to judge — and still pins the end-to-end guarantee, but **no longer isolates
+that deadline read**: verified by mutation (stub the read out and the reworked test still passes),
+because the spinner's own hard halt trips the executor cancel flag and the blocked job leaves through
+the cancel arm of the same check. Isolating it again needs a ONE-worker pool so the sibling never
+starts, and `chezzi test` has no `--threads` (only `chezzi run` reads it / `CHEZZI_THREADS`), while the
+pool is a process-wide `OnceLock` that cannot be resized in-process. Closing this means giving the test
+runner a worker-count knob — a real flag with real docs, not a test-only hack, so it is filed here
+rather than smuggled into this fix. The deadline read stays in place meanwhile: it is cheap, and every
+argument that it is now redundant runs through the cancel cascade, which is a different mechanism.
+
+**The standing rule for this predicate.** It is LOCAL — the same species as the one that sank the first
+eager attempt — so keep it narrow and do not grow it opportunistically; adversarial review already
+caught one over-reach (the missing sibling gate) that the whole green gate had not. The sound successor
+(a process-wide AND-OR wait-for graph, knot detection, partial-deadlock capable) is designed in
 `docs/future.md` **§2d**; that is the real fix, and it is its own milestone.
 
 **Repro (both engines, on a release build):**
@@ -4505,10 +4556,16 @@ ex.submit(fn(): print("job got {ch.recv()}"))
 ex.shutdown()
 ch.send(42)
 ```
-`timeout 15 ./target/release/chezzi run <f>` → hangs (rc 124). `--serial` → faults in 0s. After the fix
-BOTH must fault in 0s. Also keep green: `executor_job_blocking_recv_waits_for_a_later_send`
-(`src/vm/tests.rs`) — the case that must still BLOCK — and the whole
-`tests/chz/stdlib/executor_drain_test.chz` (frozen by decision D5).
+`timeout 15 ./target/release/chezzi run <f>` → before the fix, hangs (rc 124); `--serial` → faults in
+0s. Both now fault in 0s with identical text. Acceptance:
+`executor_job_blocked_during_shutdown_faults_both_engines` (`src/vm/tests.rs`, watchdogged — the
+failure mode of getting it wrong is a hang), with its mirror
+`executor_job_blocking_recv_waits_for_a_later_send` — the case that must still BLOCK — kept green, and
+the whole `tests/chz/stdlib/executor_drain_test.chz` (frozen by decision D5) unchanged. The `wait:` and
+full-`send` sites were verified the same way on the CLI (a job whose only `wait:` arm, or whose second
+cap-1 `send`, can only be served by its own joiner now faults identically on both engines). The
+boundary — a `shutdown()` running beside a live sibling producer, which must still WAIT — is pinned by
+`executor_job_keeps_waiting_when_shutdown_runs_beside_a_live_producer`.
 
 ### W7-5d — a hard halt mid-`shutdown()` doesn't run every queued job the way an ordinary fault does, and the two engines diverge on WHICH jobs still don't run — **OPEN, found during this milestone's own doc review, NOT fixed**
 
