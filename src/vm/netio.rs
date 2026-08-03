@@ -1691,9 +1691,30 @@ impl Vm {
     /// the comparison is deliberately conservative: it under-fires (a job queued behind a saturated
     /// pool keeps the count above `blocked`) and never over-fires for that reason.
     ///
-    /// Lock discipline: takes `core.eager` and NOTHING else, which is a suffix of the one nesting in
-    /// this file (`inner` → `eager`), and no caller holds a `ChannelCore::q` guard here — the halt
-    /// check runs before `eager_wait_tick` locks the queue.
+    /// **And no OTHER live executor may still owe work.** Executors are independent, so a job of `y`
+    /// can be the producer for a job of `x` — and `x.shutdown()` says nothing about `y`:
+    ///
+    /// ```text
+    /// x.submit(consumer)   # blocks on ch.recv()
+    /// y.submit(producer)   # sleeps, then ch.send(1)
+    /// x.shutdown()
+    /// ```
+    ///
+    /// Python's `ThreadPoolExecutor` runs that to completion (`got 1`), and so did Chezzi before this
+    /// check was added — reporting a deadlock there is simply a WRONG ANSWER about a live program, not
+    /// a tolerable engine difference. The registry sweep is what keeps the verdict honest: if any other
+    /// executor still owes a job, somebody may yet send, and we wait. The price is the other direction
+    /// — two mutually-deadlocked executors now HANG instead of faulting — which is decision D's
+    /// accepted hang and the right way to be wrong: never answer, rather than answer incorrectly.
+    ///
+    /// Still not sound (that needs `future.md` §2d): a producer reachable through neither an executor
+    /// nor the joiner is invisible here. It is merely no longer wrong about the shapes an ancestor
+    /// language runs successfully.
+    ///
+    /// Lock discipline: takes `exec_registry`, then one `eager` per core, never both at once and never
+    /// while holding `ChannelCore::q` (the halt check runs before `eager_wait_tick` locks the queue).
+    /// `eager` is a suffix of this file's one nesting (`inner` → `eager`), and nothing anywhere takes
+    /// the registry while holding a core lock, so this adds no cycle.
     fn eager_join_deadlocked(&self) -> bool {
         let Some(core) = &self.eager_core else {
             return false;
@@ -1706,7 +1727,25 @@ impl Vm {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .outstanding();
-        outstanding > 0 && core.blocked.load(Ordering::Relaxed) >= outstanding
+        if outstanding == 0 || core.blocked.load(Ordering::Relaxed) < outstanding {
+            return false;
+        }
+        // Snapshot the registry and DROP its lock before touching any core lock.
+        let others: Vec<Arc<ExecutorCore>> = self
+            .exec_registry
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .filter(|c| !Arc::ptr_eq(c, core))
+            .map(Arc::clone)
+            .collect();
+        !others.iter().any(|c| {
+            c.eager
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .outstanding()
+                > 0
+        })
     }
 
     /// W7-12 — may THIS `shutdown()` caller's join license the "nobody can send" verdict?

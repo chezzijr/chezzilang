@@ -11782,6 +11782,59 @@ print(\"end\")
     assert_eq!(mo, so, "the two engines must agree");
 }
 
+/// W7-12's other boundary, and the one that matters most: `x.shutdown()` says nothing about whether a
+/// job of a DIFFERENT executor `y` is about to send. Executors are independent.
+///
+/// The measure of correct here is the ancestor, not the parity oracle. Python's `ThreadPoolExecutor`
+/// runs this program to completion — `x.submit(consumer)`, `y.submit(producer)`, `x.shutdown()` prints
+/// `got 1` — so reporting a deadlock is a WRONG ANSWER about a live program, not a tolerable engine
+/// difference. The first cut of this fix did exactly that, and was defended with "`--serial` faults
+/// there too", which is an argument about agreement and not about correctness.
+///
+/// So the predicate also sweeps the executor registry and stays silent while any OTHER executor still
+/// owes work. The accepted cost is the opposite error: two mutually-deadlocked executors HANG rather
+/// than fault (decision D), which is the right way to be wrong — never answer, rather than answer
+/// incorrectly.
+///
+/// M:N-only for the same reason as its sibling above: `--serial` queues at `submit` (decision D3), so
+/// x's consumer does not exist until `x.shutdown()` drains it, and this shape faults there regardless
+/// of anything W7-12 touches.
+#[test]
+fn executor_job_keeps_waiting_while_another_executor_still_owes_work() {
+    let src = "
+import std.concurrency
+import std.time
+ch: Channel[int] = Channel[int](1)
+fn consumer():
+    print(\"got {ch.recv()}\")
+fn producer():
+    timer(200).recv()
+    ch.send(1)
+x := Executor()
+y := Executor()
+x.submit(consumer)
+y.submit(producer)
+x.shutdown()
+y.shutdown()
+print(\"end\")
+";
+    let entry = write_temp_chz("w712_cross_executor", src);
+    let (tx, rx) = std::sync::mpsc::channel();
+    let e = entry.clone();
+    std::thread::spawn(move || {
+        let _ = tx.send(run_file_p(&e));
+    });
+    let (mo, _me, mr, _mc) = rx
+        .recv_timeout(std::time::Duration::from_secs(60))
+        .expect("a live producer in another executor must keep the job waiting, not hang it");
+    let _ = std::fs::remove_file(&entry);
+    assert!(
+        mr.is_ok(),
+        "M:N run faulted where CPython completes: {mr:?}"
+    );
+    assert_eq!(mo, "got 1\nend\n");
+}
+
 /// W7-5b — an `Executor` constructed INSIDE a task, never explicitly shut down, must still have its
 /// work run and waited for at program exit.
 ///
