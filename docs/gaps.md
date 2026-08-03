@@ -36,12 +36,13 @@ the **lossy path DECODE** in `fs.list_dir`/`walk`/`glob`/`canonicalize` and `os.
 **W7-8** and is **FIXED 2026-07-31** (the `PathLike` protocol + `path.Path` type; see its session-log
 section). The lossy-byte family now has **no unswept member**: B1, R1, W6-4, W6-9, W6-14 and W7-8 are
 all closed. (`argv`/`env` remain a deliberately lossy surface — see `docs/stdlib.md`.)
-**The Executor drain milestone (W7-5/W7-5b/W7-5c) is PARTIALLY closed 2026-08-01**: `W7-5` (run-all
-drain, lowest-index-fault propagation) and `W7-5c` (every faulting task's output flushes) are **FIXED**
-— see the W7-5 session-log section. `W7-5b` (an `Executor` created inside an M:N task is silently
-discarded) is **RE-SCOPED, still open** — the fix was deliberately stopped when the project owner
-decided to move `Executor` to eager execution, which dissolves this bug rather than needing it fixed
-against a queueing model that is going away; see `docs/future.md` for the eager-execution decision.
+**The Executor drain milestone (W7-5/W7-5b/W7-5c) is CLOSED 2026-08-03**: `W7-5` (run-all drain,
+lowest-index-fault propagation) and `W7-5c` (every faulting task's output flushes) were fixed 2026-08-01
+— see the W7-5 session-log section — and **`W7-5b` is FIXED 2026-08-03** by the eager-execution
+milestone (`docs/future.md` §2c). Note the correction: eager execution did *not* dissolve W7-5b by
+deleting the queue (it kept one). It dissolved it by changing what the program-exit join walks — a
+heap-independent registry of `ExecutorCore` `Arc`s shared with every worker, instead of the per-`Vm`
+`Vec<GcRef>` that died with its task's heap. `W7-5d` remains open.
 **Keep this table in sync when a section is retired** — the
 reason it exists is that "which of these is still open?" previously required reading 1400 lines of
 chronological log.
@@ -55,7 +56,6 @@ chronological log.
 | **W6-9r** | `:1303` | Parity-oracle residual left by the `W6-9b` fix: ~31 hand-rolled `run_file_p` + `run_file` cross-engine compares in `parity_tests.rs` still diff LOSSILY-DECODED strings, and `parity_entry_cfg_lines` compares stdout as an order-insensitive line multiset | The three SHARED comparators were fixed at the helper level (0 call sites touched); converting the hand-rolled ones means rewriting ~31 call sites. UTF-8-only today, so nothing is failing — but a new byte-emitting test added at one of those sites inherits the blindness. Use `vm::run_file_bytes` there |
 | **W6-10r** | `:1216` | `--max-heap` residual: a payload reachable ONLY through a **nested** core (a `Channel` inside a `Shared`, once the nested core's last `Obj` alias slot is swept) is counted nowhere | Left open by the W6-10 fix on purpose. `live_bytes` reaches a core's bytes through its `Obj::*` alias slot; a nested core has none. Closing it needs cross-core byte recursion with `Arc` de-dup — narrow trigger, not worth the machinery yet |
 | protocol embeds | `:1505` | A protocol-embedded method isn't callable through the interface value (`p: Person` can't call embedded `name()`) despite `spec.md:973` "flattened at bound sites" | Filed as a safe-direction observation in wave 3; never triaged — doc and behavior contradict each other either way |
-| **W7-5b** | `:4384` | An `Executor` created INSIDE an M:N task is silently discarded — its jobs never run, never reap, no fault | **Still live — deliberately deferred, not forgotten.** Folded into the eager-execution milestone (`future.md §2c`) because the two share the same join machinery — **not** because eager execution deletes the queue; it does not (Python has a work queue too). **Scope corrected 2026-08-01 after decision D1** (detached lifetime, joined at *program exit*): serial's existing program-exit reap already IS D1's semantics, so this is **M:N-only silent loss**, and the fix is to make a task-created executor visible to the program-exit join. The preserved `.superpowers/sdd/task-3-mn-half.patch` drains at *fiber end* — the scope-bound lifetime D1 rejected — so it is a code reference, **not** a drop-in fix |
 | **W7-5d** | `:4413` | A hard halt (over-memory/timeout/dead-stdout) firing mid-`shutdown()` does NOT run every queued job the way an ordinary fault does — `--serial` stops popping the queue the instant one fires (later-queued jobs never run at all); M:N has already dispatched every job to the pool before a hard halt can fire, but that is not a per-job guarantee under a thread-starved pool | Found while adversarially reviewing this milestone's own docs. Live and reproduced on the built binary (`Executor().submit(spew-until-dead-stdout)` then two marker jobs, piped through `head -1`: M:N runs both markers, `--serial` runs neither), but untested — `tests/chz/stdlib/executor_drain_test.chz`'s 6 tests only use `panic()` faults, never a hard-halt kind. `executor_hard_halt` was deliberately built as an unconditional kill switch (W7-5), so this is arguably correct-by-design on both engines individually, but the exact SHAPE of "what still doesn't run" differs by engine and neither engine's shape is pinned by a test |
 | **W7-11** | `:3901` | A `RwShared` holding a container with an element that back-references the CONTAINER (`a.next = xs; RwShared(xs).at(0)`) aborts the host on `from_wire_memo`'s `.expect("a wire Backref always targets an already-reconstructed node id")` — a legal program, no concurrency, both engines | **Pre-existing on main**, not a W7-4 regression (verified on 5960052): a copy-out view drains ONE depth-1 piece, and a piece whose cycle closes through the ROOT container can never be self-contained — the definition it needs IS the container. `elem_split` fixes the sibling-CELL case, not this ancestor case. Closing it means either a catchable fault instead of the `.expect` (`from_wire_memo` returns a `Value`, so that is a signature change through every rebuild arm) or a same-guard whole-container fallback at all 12 view sites |
 | **W7-4a** | `:3901` | Airlock cell identity is preserved **per module** in the snapshot, so two globals in DIFFERENT modules over one shared cell still arrive as two cells | Residual disclosed by the W7-4 fix. Closing it needs `Vm`-lived rebuild state kept (and rooted) across the lazy per-module faults; the reported repro is same-module and is fixed |
@@ -4319,7 +4319,7 @@ Fenced by `tests/chz/stdlib/csv_bare_quote_test.chz` (4 `test fn`s: the three ba
 quote-starts-the-field regression fences, RFC 4180 embedded comma/newline/`""`-inside-a-quoted-field,
 and the total round-trip).
 
-## Session log — 2026-08-01 (Executor drain milestone: W7-5 + W7-5c FIXED, W7-5b deferred to eager execution)
+## Session log — 2026-08-01 (Executor drain milestone: W7-5 + W7-5c FIXED; W7-5b FIXED 2026-08-03 by eager execution)
 
 ### W7-5 — the M:N `Executor` drain did not abort remaining jobs after a fault, and dropped a completed job's result (**FIXED 2026-08-01**)
 
@@ -4402,44 +4402,41 @@ force deterministically, and no such test exists today. Landed: `05204777` (the 
 comment-only). Acceptance: `executor_second_faulting_job_keeps_its_output_both_engines`
 (`src/vm/tests.rs`).
 
-### W7-5b — an `Executor` created INSIDE a task is still silently discarded — **STILL OPEN, deferred to the eager-execution milestone, NOT fixed**
+### W7-5b — an `Executor` created INSIDE a task was silently discarded — **FIXED 2026-08-03 (eager-execution milestone)**
 
-Found while prosecuting the W7-5 fix: an M:N task registers a nested `Executor` in its own throwaway
+Found while prosecuting the W7-5 fix: an M:N task registered a nested `Executor` in its own throwaway
 worker `Vm.executors`, which `run_outcome`/`into_fiber` drop when the task finishes — the nested
-executor's jobs never run, are never reaped, and no fault is raised. `drain_live_executors` only ever
-snapshots the PARENT `Vm`'s list, so it never sees the child's. Investigation (Task 3, uncommitted)
-found the bug is **not M:N-only**: on `--serial` the nested executor's jobs DO eventually run, but only
-via `drain_live_executors` at **program exit**, long after the enclosing `parallel:` nursery has
-already joined — a task-order surprise, not silent loss, but still wrong relative to "reaped when its
-task ends." A briefed M:N-only fix (drain a fiber's own executors at `Disp::Finish`, reusing
-`drain_live_executors`) was implemented and verified correct — no scheduler lock held at the insertion
-point, no deadlock across the 8-test acceptance file under a `timeout` wrapper — but making serial agree
-requires moving `swap_ctx`'s `executors` field out from under its `ctx.heap`-only gate, which drags in
-GC-rooting machinery the codebase doesn't have yet for a parked parent ctx (the same class of hazard the
-existing `pinned_module_roots` workaround was built for). That crossed the task's explicit STOP
-condition on `swap_ctx` field-set changes, so **Task 3 stopped without committing**.
+executor's jobs never ran, were never reaped, and no fault was raised. `drain_live_executors` only ever
+snapshotted the PARENT `Vm`'s list, so it never saw the child's. Reproduced on the pre-change binary
+(`5960052`): a `spawn:` that builds an `Executor` and submits two printing jobs prints neither line on
+M:N (`main done` alone) while `--serial` prints both.
 
-> **SCOPE CORRECTED 2026-08-01, after the eager-execution design settled decision D1** (lifetime is
-> *detached*: outstanding work is joined at **program exit**, matching Python/Java — `future.md §2c`).
-> Under D1, serial's program-exit reap is **already the correct semantics**, not a "task-order
-> surprise" — so W7-5b is **M:N-only silent loss** after all, and the paragraph above overstates the
-> serial half. The fix is to make a task-created executor visible to the **program-exit** join, NOT to
-> drain it when its task ends. That also means the preserved `task-3-mn-half.patch` (which drains at
-> `Disp::Finish`, i.e. task end) implements the **scope-bound lifetime D1 rejected**: keep it as a
-> code reference for the insertion mechanics, do not apply it as the fix. The first eager-execution
-> implementation attempt did exactly that and reaped at task end on both engines, breaking D1 and D3
-> together — see `future.md §2c` for the full salvage from that rejected run.
+**Why the first two attempts stalled, and what actually fixed it.** Both tried to make the per-`Vm`
+handle list work: drain a fiber's own executors at `Disp::Finish` (task end — the scope-bound lifetime
+decision D1 rejected), which then needed `swap_ctx`'s `executors` field moved out from under its
+`ctx.heap`-only gate to make serial agree, dragging in GC rooting for a parked parent ctx that does not
+exist. That was the explicit STOP condition Task 3 halted at, and the first eager-execution attempt
+re-broke D1 and D3 together by reaping at task end on both engines.
 
-**The fix is deliberately not being finished against the current queueing model.** The project owner
-decided, in the same session, to move `Executor` to eager execution (`docs/future.md`) — `submit`
-starts the job immediately rather than enqueuing it for a later drain. Eager execution deletes the
-queue W7-5b's bug loses jobs out of, so the "when does a task-owned executor get reaped" question
-becomes "wait for in-flight work", a materially smaller problem than today's "run the backlog", and is
-better solved once inside that milestone than legislated twice against a model already being replaced.
+The fix does not touch that gate at all. It changes **what the exit join walks**: a heap-independent
+`ExecRegistry` (`Arc<Mutex<Vec<Arc<ExecutorCore>>>>`, `src/vm/core.rs`) that `spawn_worker` SHARES with
+every worker. A core lives outside every heap by construction (B3.1), so an executor created anywhere
+in the run is reachable by the one join regardless of which heap made it — no fiber-lifetime question,
+no rooting question. `Vm.executors` is untouched and still drives the `--serial` reap, which drains
+through the handle. The preserved `.superpowers/sdd/task-3-mn-half.patch` was **not** applied; it
+implements the rejected lifetime and is now only of historical interest.
 
-The verified M:N-only patch (source diff + the two `test fn`s it makes pass) is preserved at
-`.superpowers/sdd/task-3-mn-half.patch` — `git apply` it to restore exactly what was measured, if the
-eager-execution milestone slips and W7-5b needs a stopgap fix against the current model instead.
+Acceptance: `executor_created_inside_a_task_is_joined_at_exit_both_engines` (`src/vm/tests.rs`),
+compared as a line set on both engines under a watchdog.
+
+**A sibling bug fell out of fixing this, and is also fixed.** The exit reap iterated a SNAPSHOT of the
+executor list taken before it began, so an `Executor` created by a job that the reap was ITSELF running
+was never in that snapshot and its work vanished — silently, on BOTH engines (verified on the
+pre-change binary). Same symptom as W7-5b, different cause: W7-5b is heap visibility, this is iteration
+order. Fixing either would have left the other, and fixing only the M:N side would have converted a
+shared bug into a live serial-vs-M:N divergence. Both engines now re-scan until no un-shut executor
+remains, terminating on the `shut` flag `shutdown` sets before it runs anything. Acceptance:
+`executor_created_by_a_joined_job_is_also_joined_both_engines`.
 
 ### W7-5d — a hard halt mid-`shutdown()` doesn't run every queued job the way an ordinary fault does, and the two engines diverge on WHICH jobs still don't run — **OPEN, found during this milestone's own doc review, NOT fixed**
 

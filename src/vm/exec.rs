@@ -121,6 +121,7 @@ impl Vm {
             eager_scheds: Vec::new(),
             nursery_defer_floors: Vec::new(),
             executors: Vec::new(),
+            exec_registry: Arc::new(Mutex::new(Vec::new())),
             suspend: None,
             wait_suspend: None,
             send_suspend: None,
@@ -142,6 +143,7 @@ impl Vm {
             cancel: None,
             cancel_outer: Vec::new(),
             cancelled: false,
+            eager_job: false,
             timeout_ms: 0,
             deadline: None,
             deadline_tick: 0,
@@ -2313,11 +2315,18 @@ impl Vm {
                 self.push(v);
             }
             Op::NewExecutor => {
-                let h = self
-                    .heap
-                    .alloc(Obj::Executor(Arc::new(ExecutorCore::default())));
+                let core = Arc::new(ExecutorCore::default());
+                // Heap-independent registration for the program-exit join (W7-5b) — this is the one
+                // that survives its creating task/heap. Creation order across the whole run.
+                self.exec_registry
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .push(Arc::clone(&core));
+                let h = self.heap.alloc(Obj::Executor(core));
                 // Register for the program-exit auto-drain; the handle is also a GC root, so the
-                // executor's queued work survives even after every in-program handle is gone.
+                // executor's queued work survives even after every in-program handle is gone. Still
+                // the SERIAL engine's reap list (it drains through the handle, which it re-roots on
+                // the operand stack); on M:N the join goes through `exec_registry` instead.
                 self.executors.push(h);
                 self.push(Value::obj(h));
             }

@@ -1458,6 +1458,46 @@ struct Suite:
     }
 
     #[test]
+    fn timeout_reaches_a_job_blocked_on_a_channel_and_on_wait() {
+        // Eager execution makes a blocking `Executor` job WAIT for a value instead of declaring a
+        // deadlock, which is correct (its submitter is still running and may send) but means a job
+        // waiting on a value that never comes hangs by design — decision D's accepted hang. That is
+        // only tolerable because `--timeout` can still reach it. It can only reach it because the
+        // eager blocking paths check the deadline THEMSELVES: a blocked job never reaches
+        // `jump_checked`'s loop back-edge, where every other path observes it.
+        //
+        // Both blocking shapes are covered because they use different mechanisms — `recv` waits on the
+        // one channel's condvar, while `wait:` has N arms and no single condvar to wait on, so it
+        // bounded-polls. The `wait:` arm is the one that would silently spin forever if the shared
+        // halt check were dropped from it.
+        for (name, body) in [
+            (
+                "blockrecv_test.chz",
+                "import std.concurrency\nch: Channel[int] = Channel[int](1)\nfn w():\n    print(ch.recv())\ntest fn t():\n    ex := Executor()\n    ex.submit(w)\n    ex.shutdown()\n    assert false, \"SWALLOWED\"\n",
+            ),
+            (
+                "blockwait_test.chz",
+                "import std.concurrency\na: Channel[int] = Channel[int](1)\nb: Channel[int] = Channel[int](1)\nfn w():\n    wait:\n        v := a.recv(): print(v)\n        v := b.recv(): print(v)\ntest fn t():\n    ex := Executor()\n    ex.submit(w)\n    ex.shutdown()\n    assert false, \"SWALLOWED\"\n",
+            ),
+        ] {
+            let d = TmpDir::new();
+            let f = d.write(name, body);
+            let report = run_tests_timed(&f, true, 0, 300);
+            assert!(!report.passed, "{name} report:\n{}", report.text);
+            assert!(
+                report.text.contains("TIMED-OUT t"),
+                "{name}: --timeout must reach a job blocked in an eager Executor; report:\n{}",
+                report.text
+            );
+            assert!(
+                !report.text.contains("SWALLOWED"),
+                "{name}: control must never fall through the blocked shutdown; report:\n{}",
+                report.text
+            );
+        }
+    }
+
+    #[test]
     fn over_memory_control_passes_under_generous_cap() {
         // A small alloc under a generous cap passes normally — the cap only trips on runaway growth.
         let d = TmpDir::new();

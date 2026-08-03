@@ -344,10 +344,45 @@ main()";
     // thus the printed list — is not deterministic. GC survival, the point here, is cooperative.)
 }
 
-/// Executor: submitted task closures (queued in the heap obj) and the popped task drained at
-/// `shutdown` must survive GC firing between submit and drain, and across each task's re-entrant
-/// call. Each task allocates a string into a Channel — a missing root would corrupt the output or
+/// Executor: a submitted task closure must survive GC firing between the `submit` and the job's
+/// completion, and across each task's re-entrant call. On `--serial` the closure sits in the heap obj's
+/// queue until the drain; on the default engine it has already crossed into its own worker heap at the
+/// `submit`, so this covers both sides of the wire. Each task allocates a string into a Channel — a missing root would corrupt the output or
 /// dangle a `GcRef`.
+/// Eager `Executor` + GC stress on the M:N engine, where the dispatch actually happens.
+///
+/// The specific hazard: `submit` rebuilds the closure into a fresh worker heap, and a closure that
+/// CAPTURED the executor puts an `Obj::Executor` over the SAME core into that heap — whose GC mark arm
+/// (`Heap`, the `Obj::Executor` case) takes `core.inner.lock()`. `std::sync::Mutex` is not reentrant,
+/// so doing that rebuild while the submitting thread holds `core.inner` self-deadlocks. `submit`
+/// therefore prepares the worker with NO executor lock held and takes the lock only for the
+/// allocation-free reserve-and-dispatch. Under `gc_stress` every allocation collects, so this is the
+/// shape that would hang if that ordering is ever reintroduced.
+///
+/// Watchdogged: the regression is a HANG, which would otherwise stall the whole test binary.
+#[test]
+fn eager_executor_self_capturing_closure_survives_gc_stress_parallel() {
+    let src = "\
+fn main():
+    ch := Channel[str]()
+    ex := Executor()
+    ex.submit(fn(): ch.send(\"saw {ex}\"))
+    ex.shutdown()
+    print(ch.recv())
+main()";
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(run_capture_stress_parallel(src));
+    });
+    let got = rx
+        .recv_timeout(std::time::Duration::from_secs(60))
+        .expect("submit must not hold the executor lock across the worker rebuild (deadlock)");
+    // `pending=1` is the job counting ITSELF: it is outstanding while it runs, and `Display` now sums
+    // the serial queue with the eager in-flight count instead of reading the (always-empty on M:N)
+    // queue alone. Reading `0` here would mean the display is lying about running work.
+    assert_eq!(got, "saw Executor(pending=1)\n");
+}
+
 #[test]
 fn executor_tasks_survive_gc_stress() {
     let src = "\

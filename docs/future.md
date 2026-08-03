@@ -95,80 +95,84 @@ mistaken for.
 
 ---
 
-## 2c. `Executor` moves to eager execution (planned — decided 2026-08-01, not yet implemented)
+## 2c. `Executor` moves to eager execution — ✅ **SHIPPED 2026-08-03**
 
-> **Decision (2026-08-01):** `Executor.submit(f)` will execute eagerly — the job starts immediately
-> rather than being queued for the drain — and `shutdown()` waits for in-flight work. This matches
-> Python `ThreadPoolExecutor` (`submit` schedules at once; `shutdown(wait=True)` blocks) and Java
-> `ExecutorService` (`execute`/`submit` run at once; `shutdown` + `awaitTermination`). Chezzi's
-> submit-only-enqueues model is the drift that manufactured the never-run backlog, the reap-point
-> question, the A2 auto-drain rescue, and W7-5b.
+`Executor.submit(f)` executes eagerly on the default M:N engine — the job starts immediately rather
+than waiting for the drain — and `shutdown()` waits for in-flight work. This matches Python
+`ThreadPoolExecutor` (`submit` schedules at once; `shutdown(wait=True)` blocks) and Java
+`ExecutorService`. `--serial` keeps queue-at-`submit` / drain-at-`shutdown` (decision D3).
 
-**The queue does NOT go away — that was an early misreading, corrected during design.** Python's
-`ThreadPoolExecutor` has a work queue too. The drift was never queue-vs-no-queue; it is *who drains it
-and when* — continuously by workers, versus only at the reap call. Chezzi already owns the machinery:
-`src/vm/pool.rs` is a process-wide bounded pool with a FIFO job queue and condvar-parked threads that
-live for the process.
+**The queue did not go away.** Python's `ThreadPoolExecutor` has a work queue too; the drift was never
+queue-vs-no-queue but *who drains it and when* — continuously by pool workers, versus only at the reap
+call. `src/vm/pool.rs` (a process-wide bounded pool with a FIFO queue and condvar-parked threads) was
+already the right machinery and is what jobs are now dispatched onto.
 
-**Consequence: eager execution does NOT dissolve W7-5b.** A task-created executor can still hold
-queued-but-unstarted jobs when its task ends, so it must still be visible to the join. W7-5b's fix is
-folded into this milestone because the two share the same join machinery, **not** because the bug
-disappears.
+### Settled decisions (project owner, 2026-08-01) — as shipped
 
-### Settled decisions (project owner, 2026-08-01) — do not re-litigate
+- **D1 — Lifetime: detached, joined at program exit.** Shipped. A2 is reworded from "run the backlog
+  nobody ran" to "wait for in-flight work".
+- **D2 — Concurrency: shared process pool, no size parameter.** Shipped; `Executor()` stays zero-arg.
+  **Accepted known limits:** executor jobs hold pool threads for their whole lifetime and can starve
+  nurseries; the old parent-participation mitigation is gone with the batch join; and a job that calls
+  `shutdown()` on an executor (its own, or another) blocks a pool thread while it waits — self-join
+  hangs, exactly as Python's `shutdown(wait=True)` from inside a worker does. `Executor(max_workers)`
+  stays an additive door if it bites.
+- **D3 — `--serial` is unchanged.** Shipped. The divergence is observable only between `submit` and
+  `shutdown()`; the test-shape rule is **assert after `shutdown()`, never between**.
+- **D4 — `shutdown()` waits for queued and running.** Shipped. `shutdown_now()` drops work that has not
+  started, trips the per-core cooperative cancel flag, **then waits** — the wait is a deliberate
+  deviation from Java, whose `shutdownNow` returns the never-started tasks and expects a follow-up
+  `awaitTermination` that Chezzi has no spelling for; without it a `shut` executor's still-running jobs
+  would be skipped by the exit join and the program could exit mid-job.
+- **D5 — The W7-5 fault contract is frozen.** Shipped unchanged: `shutdown()` hands its
+  submission-ordered outcome slots to the same `reduce_task_slots`, so lowest-index-fault selection,
+  hard-halt precedence and W7-5c's per-slot output flush are inherited rather than reimplemented.
+  `tests/chz/stdlib/executor_drain_test.chz` passes untouched.
 
-- **D1 — Lifetime: detached, joined at program exit.** The executor outlives its creating scope;
-  outstanding work keeps running and the program waits for it at exit. Matches Python and Java. A2
-  survives, reworded from "run the backlog nobody ran" to "wait for in-flight work".
-- **D2 — Concurrency: shared process pool, no size parameter.** `Executor()` keeps its zero-argument
-  constructor and shares the pool with `parallel:`, bounded by `--threads`. **Accepted known limit:**
-  executor jobs now hold pool threads for their whole lifetime and can starve nurseries, and the old
-  parent-participation mitigation (the joining thread ran one job inline) is gone because eager submit
-  has no join to participate in. `Executor(max_workers)` stays an additive door if it bites; not built
-  on speculation.
-- **D3 — `--serial` is unchanged.** It keeps queueing at submit and draining at `shutdown()`. This is
-  nearly free: under the canonical `submit … shutdown() … assert` shape both engines reach the same
-  post-shutdown state, so the two-engine gate stays green. The divergence is observable only by a
-  program that inspects a job's effect **between** submit and shutdown. Documented known limit, with
-  the test-shape rule: **assert after `shutdown()`, never between.** (Supersedes this section's earlier
-  suggestion that serial implement eager submit cooperatively — that was written before D3.)
-- **D4 — `shutdown()` waits for queued and running.** `shutdown_now()` drops queued work and trips the
-  cooperative cancel flag so running jobs die at their next back-edge — Java's "attempts to stop",
-  **cooperative, not preemptive**. `submit` after either remains a fault.
-- **D5 — The W7-5 fault contract is frozen.** Faults latch; `shutdown()` raises the lowest-index fault
-  in submission order; a faulting job costs only its own result; early-stop stays the opt-in
-  `std.cancel.Token`. `tests/chz/stdlib/executor_drain_test.chz` must keep passing unchanged — a
-  failure there is a regression, not expected churn.
+### What shipped, and the two corrections to the plan above
 
-### What the first implementation attempt proved (auto-task run, 2026-08-01, REJECTED)
+- **`W7-5b` is FIXED, not merely folded in.** The plan said eager execution would not dissolve it. That
+  assumed the exit join stays list-based. It does not: the join now walks a heap-independent
+  `ExecRegistry` (`Arc<Mutex<Vec<Arc<ExecutorCore>>>>`) that `spawn_worker` shares with every worker, so
+  an executor created inside a task is visible no matter which heap made it. That needed **no** change
+  to `swap_ctx`'s `ctx.heap`-only gate — the STOP condition the previous attempt halted at.
+- **`exec_cores` / `exec_outstanding` never existed.** The rejected attempt's post-mortem blamed a
+  predicate keyed on them; no such identifiers are in the repo — it *invented* that state. The real
+  scheduler state is `MnSched::{runnable, inflight, blocked_native}` + `SchedCore::parked_n`, and the
+  existing contract is that `Executor` work stays **outside** the detector (decision D,
+  `src/vm/sched.rs`: "**No deadlock watch**"). **This milestone changed no deadlock predicate.**
 
-An 18-agent autonomous run built this and was rejected across three review rounds (final: 8 blockers,
-10 charges upheld, 0 dismissed). Its branch was deleted; the findings are the salvage:
+**The real hazard, and what it actually was.** An eagerly dispatched job has no scheduler, so a blocking
+op falls to the "no scheduler" arms of `chan_recv_step` / `send` / `wait:`, which declare a deadlock.
+That verdict was TRUE while jobs ran only at the drain (the submitter was blocked inside `shutdown()`,
+so nobody could send) and becomes a LIE once jobs start at `submit`. This is why the rejected attempt
+regressed `ch.recv()`-in-a-job. Fixed by having such a job BLOCK (`Vm::eager_block_recv`, a bounded
+poll on the channel's own condvar, mirroring `demote_recv_block`'s settle order) rather than fault —
+Python's behaviour. A job blocked on a value that never arrives hangs: decision D, unchanged.
 
-- **The hard part is the DEADLOCK DETECTOR, not GC rooting.** Rooting turned out to be a non-issue: a
-  wired closure that passed `ensure_crossable` provably carries no `GcRef` (only a module handle is
-  non-crossable), so an in-flight job holds nothing in the creating heap. What actually broke was that
-  an eagerly dispatched job changes what *"no runnable task can send"* means. The attempt invented a
-  veto keyed on `exec_outstanding > exec_cores.len()`; `exec_cores` is only ever pushed to and never
-  pruned, so it counts ancestor executor *memberships*, not live jobs. Six of the ten upheld charges
-  trace to that one predicate. **Start here, and treat the detector as its own reviewed unit.**
-- **Regression it shipped:** a lone job doing `ch.recv()` for a value the main thread sends later
-  faulted `recv on an empty channel: deadlock`, where the pre-change engine returns the value.
-- **The saved `task-3-mn-half.patch` implements the WRONG lifetime under D1.** It drains a fiber's
-  executors at `Disp::Finish` — i.e. at *task end*, the scope-bound model that was explicitly
-  rejected. Under D1, serial's existing *program-exit* reap is already correct, and W7-5b is M:N-only
-  silent loss; the fix is to make a task-created executor visible to the program-exit join, not to
-  drain it when its task ends. The attempt reaped at task end on both engines, which also broke D3.
+**The second hazard, found by self-review and reproduced:** `submit` must NOT hold the executor's
+`core.inner` lock while a dispatched job is running. The GC's `Obj::Executor` mark arm takes that same
+lock, so a closure that captured its own executor (`ex.submit(fn(): … ex …)`) deadlocks the moment the
+job's worker GCs — `std::sync::Mutex` is not reentrant. The first cut of this milestone held the lock
+across the dispatch and was vulnerable; it now prepares the worker with no lock held and takes the lock
+only for the allocation-free re-check-`shut`-and-reserve. Proved by restoring the bad order, which
+hangs `eager_executor_self_capturing_closure_survives_gc_stress_parallel` (60s watchdog) — worth
+knowing that the natural window is narrow, so this would have shipped as a rare mystery hang.
 
-**Also breaks, and must ship in the same commit:** `examples/executor_autodrain.chz` and its golden
-(it prints `main() done` before the jobs precisely because nothing ran until exit; under eager the
-interleaving is racy, so it cannot survive as an exact-match golden), the A2/C5 prose in
-`docs/concurrency.md`, and the module-snapshot instant at `docs/concurrency.md:102` — the airlock
-crossing point moves from drain time to submit time, so a job observes globals as of the **submit**,
-not as of the drain.
+**Known limit disclosed by the work:** the top-level program itself is not an eager job, so a `recv` in
+*main* on a channel only a job will fill still faults `deadlock` instead of waiting. The sanctioned
+shape is unaffected (`submit_result` then `recv` after `shutdown()`), but a `Channel` handshake from
+main into a running job is not expressible. Closing it would need main to know whether any eager job is
+outstanding — not built on speculation.
 
-**Reframing:** under eager execution the `Executor` is a bounded-concurrency nursery with a detached
-lifetime — which is the model the ancestors (Python/Java) already have.
+**Shipped with:** `examples/executor.chz` and `examples/executor_autodrain.chz` rewritten (both had
+"nothing has run yet" as their point) plus goldens; `tests/chz/spec/module_global_freshness_test.chz`'s
+two drain-instant tests re-expressed; `run_workers_on_pool` + `TaskSlots` + `DoneSignal` deleted (the
+`Executor` drain was their last caller); A2/C5 prose in `docs/concurrency.md` and the module-snapshot
+instant at §"module globals" — the airlock crossing point moves from drain time to **submit** time.
+
+**Reframing:** the `Executor` is a bounded-concurrency nursery with a detached lifetime — the model the
+ancestors (Python/Java) already have.
 
 ---
 

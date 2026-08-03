@@ -1605,91 +1605,6 @@ impl Vm {
         }
     }
 
-    /// B3.3-threads / B3.6 — the engine-agnostic farm/join/flush core: run a vector of already-prepared
-    /// [`ReadyWorker`]s on the bounded pool and reduce their outcomes. The caller wires each worker's
-    /// `cancel` / `deadlock` token first ([`run_parallel_nursery`] sets both; the `Executor` pool drain
-    /// sets `cancel` only — an `Executor`-spanning deadlock is an accepted hang, decision D). Farms
-    /// `ready[1..]` to the pool, runs `ready[0]` inline (parent participates — decision B), joins on the
-    /// `DoneSignal` counter, flushes `Done`/`Exit` output in **task order** (decision F), and applies the
-    /// `Exit`-over-`Fault` precedence (an `os.exit` hard-halts the parent; a fault unwinds for an outer
-    /// `recover:`). A `Cancelled` outcome is swallowed.
-    pub(super) fn run_workers_on_pool(
-        &mut self,
-        ready: Vec<ReadyWorker>,
-    ) -> Result<(), RuntimeError> {
-        let n = ready.len();
-        // Per-task outcome slots (task order) + a finished-count condvar the pool bumps.
-        let results: TaskSlots = Arc::new(Mutex::new((0..n).map(|_| None).collect()));
-        let done: Arc<(Mutex<usize>, std::sync::Condvar)> =
-            Arc::new((Mutex::new(0), std::sync::Condvar::new()));
-
-        // 2. Farm tasks[1..] to the pool; keep tasks[0] to run inline. Every farmed job runs under a
-        //    `DoneSignal` guard whose `Drop` bumps the completion counter + wakes the joiner on EVERY
-        //    exit path — including a Rust panic unwinding through `rw.run()` (a worker-VM `unwrap` /
-        //    poisoned core lock). Without it a panicking task would leave the counter short and hang
-        //    the join forever; with it the panic is caught, converted to a fault slot, and joined like
-        //    any other error. (Review: panic→hang was the one blocking defect.)
-        let mut iter = ready.into_iter().enumerate();
-        let first = iter.next();
-        for (i, rw) in iter {
-            let results = Arc::clone(&results);
-            let done = Arc::clone(&done);
-            let span = rw.span;
-            pool::submit(Box::new(move || {
-                // Drop runs LAST (declared first), so the slot is committed before the counter bumps.
-                let _signal = DoneSignal(done);
-                let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| rw.run_outcome()))
-                    .unwrap_or_else(|p| TaskOutcome::Fault {
-                        err: panic_to_fault(p, span),
-                        out: Vec::new(),
-                        stderr: Vec::new(),
-                    });
-                results.lock().unwrap_or_else(|e| e.into_inner())[i] = Some(r);
-            }));
-        }
-        // 3. Parent participates: run task[0] on this thread (it may block on `recv`, woken by a pool
-        //    sibling's `send`). Caught the same way so an inline-task panic still joins the pool tasks
-        //    and reports rather than unwinding past the still-pending wait.
-        if let Some((i, rw)) = first {
-            let span = rw.span;
-            let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| rw.run_outcome()))
-                .unwrap_or_else(|p| TaskOutcome::Fault {
-                    err: panic_to_fault(p, span),
-                    out: Vec::new(),
-                    stderr: Vec::new(),
-                });
-            results.lock().unwrap_or_else(|e| e.into_inner())[i] = Some(r);
-        }
-        // 4a. Wait for the farmed tasks (n-1) to finish (the `DoneSignal` guard guarantees the counter
-        //     reaches `pool_count` even if some tasks panicked).
-        let pool_count = n.saturating_sub(1);
-        {
-            let (lock, cv) = &*done;
-            let mut g = lock.lock().unwrap_or_else(|e| e.into_inner());
-            while *g < pool_count {
-                g = cv.wait(g).unwrap_or_else(|e| e.into_inner());
-            }
-        }
-        // 4b. Flush worker output in task order (decision F) and select the terminal outcome.
-        //     `Done`/`Exit` output is flushed; EVERY `Fault` flushes its buffered output at its slot
-        //     too, unconditionally (W7-5c — not just the lowest-index one; see `reduce_task_slots`,
-        //     which this call reduces into). The fault-free goldens only ever hit `Done`, so
-        //     byte-identical.
-        //
-        //     Precedence: an `os.exit` is an UNCONDITIONAL hard halt, so the lowest-index `Exit`
-        //     wins over any `Fault` regardless of index — otherwise a recoverable sibling fault at a
-        //     lower index could demote a child's `os.exit` to a catchable error (a `recover:` around
-        //     the `parallel:` would swallow it and the process would not exit). Within a kind, the
-        //     lowest index wins (scan order + `is_none()` guard) — see `reduce_task_slots` for the
-        //     full precedence (hard-halt fault also outranks an ordinary one, W7-5 review Fix 1).
-        // Take the slots out under the lock rather than `Arc::try_unwrap`: a just-finished pool
-        // thread bumps the `done` counter (in `DoneSignal::drop`) *before* its closure environment —
-        // which still owns a `results` `Arc` clone — is dropped, so the joiner can wake with
-        // `strong_count > 1` and `try_unwrap` would spuriously fail. `mem::take` needs only the lock.
-        let slots = std::mem::take(&mut *results.lock().unwrap_or_else(|e| e.into_inner()));
-        self.reduce_task_slots(slots)
-    }
-
     /// B3.3-threads / D2b — reduce a nursery's per-task outcome slots (task order) into the join's
     /// result, flushing output and applying `Exit`-over-`Fault` precedence. Shared by the legacy pool
     /// engine ([`run_workers_on_pool`]) and the M:N engine ([`run_mn_nursery`]).
@@ -3150,6 +3065,10 @@ impl Vm {
         // Workers run on the pool too, so a nested `parallel:` inside a task recurses onto threads
         // (and a worker's `recv` blocks on the condvar, not a fiber). B3.3-threads.
         worker.parallel = self.parallel;
+        // W7-5b — SHARE (not copy) the run's executor registry, so an `Executor` constructed inside a
+        // task is still reachable by the program-exit join after this worker's heap is gone. This is
+        // the whole fix: the parallel `Vm.executors` list is heap-keyed and dies with the task.
+        worker.exec_registry = Arc::clone(&self.exec_registry);
         // B3.3-threads: thread the parent's host state (process args + env) through so a
         // `--parallel` task reading `std.os.args` / an env var sees the same values instead of inert
         // defaults (the B3.2 silent-divergence owe). `args` is read-only (deep-cloned). `env` is
@@ -3545,9 +3464,12 @@ impl Vm {
     /// but `ensure_snapshot` can fault if a module global is a frame-holding generator — so this
     /// forwards that snapshot fault (re-stamped with `span`) rather than panicking. `--parallel` only.
     ///
-    /// W6-2 — an `Executor` has no nursery, so there is no pin: the snapshot is taken at the DRAIN, which
-    /// is the instant the job actually runs. Both engines drain at the same program point (an explicit
-    /// `shutdown` / `drain_live_executors` at clean exit), so the instant is parity-identical.
+    /// W6-2 — an `Executor` has no nursery, so there is no pin: the snapshot is taken where this is
+    /// called, which is the instant the job actually starts. Under EAGER execution that is the
+    /// `submit` (a job observes the globals as of its submission), where the pre-eager queueing model
+    /// took it at the drain. `--serial` still queues and still snapshots at the drain (decision D3),
+    /// so this instant is one of the two deliberate serial-vs-M:N divergences — observable only by a
+    /// program that inspects a job's effect BETWEEN `submit` and `shutdown()`.
     pub(super) fn prepare_worker_from_wire(
         &mut self,
         task: WireValue,
@@ -3567,29 +3489,57 @@ impl Vm {
         })
     }
 
-    /// B3.6 — drain a shut `Executor`'s pending tasks onto the bounded pool under `--parallel`. Each
-    /// queued closure becomes a [`ReadyWorker`] sharing a fresh per-drain cancel flag. W7-5 — that flag
-    /// is now a HARD-HALT switch only (`os.exit` / over-memory / timeout / dead stdout, see
-    /// [`executor_hard_halt`]); an ordinary job fault no longer trips it, so every queued job runs and
-    /// the join raises the lowest-index fault. **No deadlock watch** (decision D — an
-    /// `Executor`-spanning deadlock hangs, as documented). Output is flushed in submission (queue) order
-    /// by [`run_workers_on_pool`] (decision F).
-    pub(super) fn drain_executor_on_pool(
+    /// EAGER `submit` (M:N), the fallible half — build the worker for ONE submitted closure. Paired
+    /// with the free [`dispatch_eager_job`], which is the part that runs under the executor lock.
+    ///
+    /// This is the ancestor model (Python `ThreadPoolExecutor.submit`, Java `ExecutorService.submit`):
+    /// work starts at once and `shutdown()` waits for it, rather than nothing running until the reap
+    /// point.
+    ///
+    /// The job takes the executor's PER-CORE cancel flag (not a per-drain one — there was no such
+    /// thing to share when jobs only ran inside one drain call), so `shutdown_now` can trip work that
+    /// is already running (decision D4, cooperative). W7-5 is untouched: an ordinary job fault still
+    /// does NOT trip that flag ([`ReadyWorker::run_outcome`]), only `os.exit` / [`executor_hard_halt`]
+    /// do, so siblings keep running and `shutdown` raises the lowest SUBMISSION-INDEX fault.
+    ///
+    /// **No deadlock watch** (decision D — an `Executor`-spanning deadlock hangs, as documented, and
+    /// no scheduler predicate reads eager-job state). What eager execution DOES change is that a
+    /// blocking op inside a job can no longer assume its submitter is stuck in the drain — see
+    /// [`Vm::eager_block_recv`].
+    pub(super) fn prepare_eager_job(
         &mut self,
-        tasks: Vec<WireValue>,
+        core: &Arc<ExecutorCore>,
+        task: WireValue,
         span: Span,
-    ) -> Result<(), RuntimeError> {
-        if tasks.is_empty() {
-            return Ok(());
-        }
-        let cancel = Arc::new(AtomicBool::new(false));
-        let mut ready = Vec::with_capacity(tasks.len());
-        for t in tasks {
-            let mut rw = self.prepare_worker_from_wire(t, span)?;
-            rw.worker.cancel = Some(Arc::clone(&cancel));
-            ready.push(rw);
-        }
-        self.run_workers_on_pool(ready)
+    ) -> Result<ReadyWorker, RuntimeError> {
+        // MUST run with no executor lock held — see the call site in `executor_method`: this rebuilds
+        // the closure into the worker's heap, which can GC, and the GC's `Obj::Executor` mark arm
+        // takes `core.inner`. It is also the fallible half (`ensure_snapshot` on a frame-holding
+        // generator global), and that fault must surface out of `submit` before any slot is reserved.
+        let mut rw = self.prepare_worker_from_wire(task, span)?;
+        rw.worker.eager_job = true;
+        rw.worker.cancel = Some(Arc::clone(&core.cancel));
+        Ok(rw)
+    }
+
+    /// EAGER `shutdown`/`shutdown_now` (M:N) — wait for every in-flight job, then reduce the
+    /// submission-ordered outcome slots (decision D1: the executor is detached, and this is the join).
+    /// Reuses [`Vm::reduce_task_slots`] verbatim, so the W7-5 fault contract, W7-5c's unconditional
+    /// per-slot output flush and decision F's task-order flush all carry over unchanged.
+    ///
+    /// The wait is a plain condvar wait, NOT a bounded poll: `finish` always runs (see
+    /// `dispatch_eager_job`'s panic note), so a missed wakeup is not a hazard. It does mean a job
+    /// blocked forever blocks `shutdown` forever — decision D's accepted hang, and the same shape
+    /// `--serial`'s inline drain already has.
+    pub(super) fn join_eager_jobs(&mut self, core: &Arc<ExecutorCore>) -> Result<(), RuntimeError> {
+        let slots = {
+            let mut g = core.eager.lock().unwrap_or_else(|e| e.into_inner());
+            while g.outstanding() > 0 {
+                g = core.eager_cv.wait(g).unwrap_or_else(|e| e.into_inner());
+            }
+            g.take_slots()
+        };
+        self.reduce_task_slots(slots)
     }
 
     /// Reject a wired value that still carries a by-reference [`Handle`](WireValue::has_handle) — a
@@ -4299,4 +4249,42 @@ impl Vm {
             }
         }
     }
+}
+
+/// EAGER `submit` (M:N), the atomic half — reserve this job's submission slot and hand it to the
+/// bounded pool. Called with the executor's `inner` lock HELD (see `Vm::executor_method`), so it must
+/// stay allocation-free and must not re-enter the VM: it takes only the separate `eager` lock, giving
+/// a fixed inner → eager order that a finishing job (which takes `eager` alone) can never invert.
+///
+/// The slot is reserved BEFORE the job reaches the pool, so [`EagerState`]'s slots are in SUBMISSION
+/// order regardless of completion order — that is what lets `shutdown` reduce them with the shared
+/// [`Vm::reduce_task_slots`] and inherit the whole W7-5/W7-5c contract (decision F output order,
+/// lowest-index fault, hard-halt precedence, per-slot flush) instead of re-deriving it.
+pub(super) fn dispatch_eager_job(core: &Arc<ExecutorCore>, rw: ReadyWorker) {
+    let span = rw.span;
+    let idx = core
+        .eager
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .reserve();
+    let core = Arc::clone(core);
+    pool::submit(Box::new(move || {
+        // A Rust panic in the worker VM becomes a `Fault` slot rather than unwinding into the pool
+        // thread and leaving `outstanding` short — which would hang `shutdown`'s condvar wait forever.
+        // Everything after the `catch_unwind` is panic-free (an in-range `Vec` index; the lock is
+        // poison-tolerant), so the outcome is always recorded and `outstanding` always reaches 0.
+        // This is the invariant B3.3-threads' retired `DoneSignal` guard used to carry for the batch
+        // join; `executor_faulting_job_does_not_hang_shutdown` covers it.
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| rw.run_outcome()))
+            .unwrap_or_else(|p| TaskOutcome::Fault {
+                err: panic_to_fault(p, span),
+                out: Vec::new(),
+                stderr: Vec::new(),
+            });
+        core.eager
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .finish(idx, outcome);
+        core.eager_cv.notify_all();
+    }));
 }

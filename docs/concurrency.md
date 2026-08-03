@@ -99,8 +99,11 @@ code *between* two nurseries is visible to the second nursery's tasks, two spawn
 assignment see the old and the new value respectively, and a task that mutates its own copy and then
 opens a **nested** `parallel:` gives its children the **task's** current view, not the parent module's.
 In-place mutation of an aggregate global (`q.push(x)`, `m[k] = v`, `p.x = 1`) is picked up by the next
-nursery too. An `Executor` job has no nursery, so it sees the globals as of the **drain** (`shutdown`, or
-the auto-drain at exit) — the instant it actually runs. Identical on both engines, at every `--threads`.
+nursery too. An `Executor` job has no nursery, so it sees the globals as of the instant it **starts** —
+which is the **`submit`** on the default engine (a job starts at once) and the **drain** on `--serial`,
+which still queues (decision D3, §C5). The two agree unless a global is mutated between the `submit`
+and the `shutdown()`; that window is the documented serial-vs-M:N divergence, not a parity bug. Within
+an engine it is identical at every `--threads`.
 
 One sub-statement caveat, because in-place aggregate mutation writes no module slot for the runtime to
 notice: **within one nursery**, consecutive `spawn`s share one view, which is refreshed by a global
@@ -305,11 +308,12 @@ into each task by value. See `docs/stdlib.md` for signatures.
 
 Bare `Executor.submit(f)` is fire-and-forget — nothing comes back. The result-returning primitive is
 `Executor.submit_result[T](f: fn() -> T) -> Channel[T]`: submit `f` and get a cap-1 `Channel[T]` you
-`.recv()` for its result after the pool drains. `std.concurrency.task` wraps that channel in a
+`.recv()` for its result after `shutdown()`. `std.concurrency.task` wraps that channel in a
 future-style handle (memoization + readiness poll):
 
 - `submit_task[T](ex, f) -> Task[T]` — submit `f` detached, get a handle (builds over
-  `ex.submit_result(f)`). The work runs when `ex` drains (`shutdown()` or exit).
+  `ex.submit_result(f)`). The work starts at the `submit` and is waited for by `shutdown()` (or the
+  program-exit join); on `--serial` it runs at that wait instead. Read the result AFTER that call.
 - `Task.get() -> T` — block until the result lands, then return it; **memoized** (idempotent).
 - `Task.done() -> bool` — non-blocking readiness poll.
 
@@ -1201,39 +1205,54 @@ supervised tasks) — Go's float-free `go` is the model both ecosystems *rejecte
 
 ### The escape hatch (C5): `Executor` — a separately-owned work queue
 
-> **Status (shipped, sequential subset — both engines):** `Executor()` + `submit` / `shutdown` /
-> `shutdown_now` run on the sequential executor today. `submit` enqueues; `shutdown` drains the queue
-> FIFO to completion at the reap point: **every queued job runs**, and the **first fault in submission
-> order** (lowest index — not first-to-fail, which would be nondeterministic) propagates out of
-> `shutdown()`. A faulting job costs its own result, never a sibling's work; the queue is empty
-> afterwards. This matches Python's `ThreadPoolExecutor` / Java's `ExecutorService` / Go's `errgroup`,
-> none of which abort siblings by default. **Want the siblings to stop?** That is opt-in and lives in
+> **Status (shipped — EAGER on the default engine, queued on `--serial`):** `submit` **starts the job
+> immediately** on the shared pool and `shutdown()` **waits** for the submitted work — the
+> `ThreadPoolExecutor` / `ExecutorService` model. `--serial` keeps the older queue-at-`submit`,
+> drain-at-`shutdown` behaviour (decision D3), which is why the two engines can disagree about a job's
+> effect *between* those two calls and about nothing else. **The test/usage shape that keeps you on
+> the agreed side: read or assert after `shutdown()`, never between it and the `submit`.**
+>
+> The fault contract is unchanged by eager execution: **every submitted job runs**, and the **first
+> fault in submission order** (lowest index — not first-to-fail, which would be nondeterministic)
+> propagates out of `shutdown()`. A faulting job costs its own result, never a sibling's work. This
+> matches Python's `ThreadPoolExecutor` / Java's `ExecutorService` / Go's `errgroup`, none of which
+> abort siblings by default.
+>
+> **The queue did not go away** — the shared pool has one, and a submitted job waits in it when every
+> worker is busy. What changed is *who drains it and when*: continuously by pool workers, rather than
+> only at the reap call. **Want the siblings to stop?** That is opt-in and lives in
 > the caller: thread a `std.cancel.Token` through the closures and poll `tok.cancelled()` (§6e) — the
 > same split Go uses (`errgroup` + `context`), and the reason there is no abort flag on the Executor.
 > For structured first-fault-aborts-everything semantics, use a `parallel:` nursery, which is the
 > primitive that means that. **The run-all guarantee is for an ORDINARY job fault** — a hard halt (an
 > over-memory/timeout abort, or a fault raised while stdout is dead) is a separate, unconditional kill
 > switch that trumps it: `--serial` stops popping the queue the instant one fires, so later-queued jobs
-> never run; M:N has already dispatched every job before a hard halt can fire but is not a hard
-> per-job guarantee under a thread-starved pool. This asymmetry is untested and tracked as
-> `docs/gaps.md` **W7-5d**, not fixed by this milestone. `shutdown_now` discards pending work; `submit`
-> after either is a fault. Reap with `defer ex.shutdown()` as shown.
+> never run; on the default engine every job was dispatched at its `submit`, so a hard halt stops the
+> ones that have not yet reached a cancellation point. This asymmetry is untested and tracked as
+> `docs/gaps.md` **W7-5d**, not fixed by this milestone. `shutdown_now` drops work that has not started
+> and asks running jobs to stop — **cooperatively, at their next cancellation point**, exactly like
+> Java's `shutdownNow`; a job with no such point still runs to completion, so on the default engine
+> `shutdown_now` is not a guarantee that a submitted job did not run. `submit` after either is a fault.
+> Reap with `defer ex.shutdown()` as shown.
 > **A non-terminating sibling still blocks `shutdown()`, by design.** Run-all deliberately drops the
 > old fast-fail: if one submitted job faults but another never reaches a cancellation point (a tight
 > loop, a blocking sleep with no polling), `shutdown()` now waits for it on both engines instead of
 > killing it — the old abort-on-first-fault contract would have ended it at its next back-edge. This
 > is accepted, matching Python/Java/Go's run-all default above; reach for a `std.cancel.Token` (§6e) if
 > a submitted job needs to notice a sibling's fault and stop itself.
-> **Program-exit auto-drain now ships too (both engines):** an executor never explicitly
-> `shutdown`/`shutdown_now`-ed is gracefully drained at a clean program exit (a per-engine executor
-> registry that doubles as a GC root reaps each live executor FIFO in creation order — its submitted
-> work runs instead of silently vanishing). A hard `std.os.exit` skips it (consistent with how it
-> skips `defer`); a faulting program is not auto-drained (it is already erroring).
+> **Program-exit join (A2, both engines):** an `Executor` is **detached** — it outlives the scope that
+> created it — so an executor never explicitly `shutdown`/`shutdown_now`-ed is joined at a clean program
+> exit, in creation order: the default engine waits for its in-flight work, `--serial` runs its queue.
+> Either way the submitted work completes instead of the program exiting out from under it. A hard
+> `std.os.exit` skips it (consistent with how it skips `defer`); a faulting program is not joined (it is
+> already erroring). This holds for an executor created **inside a task** too, which it did not before
+> (`docs/gaps.md` **W7-5b**): the join walks a heap-independent registry of executor cores shared by
+> every worker, rather than the per-`Vm` handle list that died with its task's heap.
 > **Captures cross by value on both engines:** `submit` wires the closure through the same by-value
 > airlock (`wire_callable` → `to_wire`) that `spawn` uses, so its captures are deep-copied and isolated
 > at submit time and the generator sendability enforcement runs — identically on the
 > cooperative default and `--parallel` (serial == M:N for every submitted closure). A mutation of a
-> captured collection between `submit` and the drain is NOT observed by the job.
+> captured collection after the `submit` is NOT observed by the job.
 
 The sanctioned tool for "a task that **outlives its scope** / runs in the background" is **not** a
 nursery and **not** an unscoped `spawn` — it is a distinct, **explicitly-owned `Executor`**: a
@@ -1262,9 +1281,9 @@ fn main():
 
 | Method | Behaviour |
 |--------|-----------|
-| `submit(f)` | enqueue a detached, side-effect-only task (results leave via a `Channel`, like `spawn`); returns immediately |
-| `shutdown()` | **graceful** — stop accepting new work, **await** submitted work to drain (every queued job runs on an ordinary fault, per W7-5's fault contract above; a hard halt is a separate kill switch — see the engine-asymmetry note above and `docs/gaps.md` **W7-5d**), then reap |
-| `shutdown_now()` | **cancel** pending work and reap immediately (Java `shutdownNow`) — a caller-issued pre-emption, unaffected by the W7-5 run-all-jobs contract above (that contract governs `shutdown()`'s drain, not a `shutdown_now()` cancel) |
+| `submit(f)` | **start** a detached, side-effect-only job at once on the shared pool (results leave via a `Channel`, like `spawn`); returns immediately without waiting for it. `--serial` enqueues it for the drain instead (D3) |
+| `shutdown()` | **graceful** — stop accepting new work, then **wait** for the submitted work (every job runs on an ordinary fault, per W7-5's fault contract above; a hard halt is a separate kill switch — see the engine-asymmetry note above and `docs/gaps.md` **W7-5d**) |
+| `shutdown_now()` | **attempt to stop** — drop work that has not started and ask running jobs to stop at their next cancellation point, then wait for them (Java `shutdownNow`). **Cooperative, not pre-emptive:** a job with no cancellation point still finishes, so on the default engine this is not a guarantee the job did not run. Unaffected by the W7-5 run-all contract above |
 
 - **`defer` is the lifetime knob.** A task "persists through scopes" because its *owner* — the
   `Executor` — does. Bind that owner's reaping to any scope with `defer ex.shutdown()` (a function, a
@@ -1272,9 +1291,9 @@ fn main():
   fall-through, `?`, `break`/`continue`, return, or panic. The task may outlive inner `parallel:`
   blocks, but it is **still deterministically reaped** — the leak becomes *your explicit, scoped
   decision*, never an accident.
-- **Program exit ⇒ graceful shutdown** of any `Executor` not already shut down (submitted work
-  drains; matches `defer`-at-top-level semantics). `std.os.exit` is still a hard halt and does **not**
-  drain (consistent with how it skips `defer`).
+- **Program exit ⇒ graceful shutdown** of any `Executor` not already shut down (the program waits for
+  its submitted work; matches `defer`-at-top-level semantics). `std.os.exit` is still a hard halt and
+  does **not** join (consistent with how it skips `defer`).
 - **Still no floating tasks.** Even fire-and-forget work has a definite owner and a definite reap
   point — the safety property the whole model rests on is preserved. Submission is gated on the same
   **sendability** rules as a `spawn` capture ([§7](#7-sendability)).
@@ -1376,7 +1395,7 @@ and shippable now; Group B is gated on **B1**. The surface of `spawn` / `paralle
 
 | # | Item | Status |
 |---|------|--------|
-| **A2** | `Executor` **program-exit auto-drain** — reap any executor never explicitly `shutdown`-ed at a clean exit (per-engine registry that doubles as a GC root; FIFO creation order; `os.exit` skips it; a faulting program is not drained). | ✅ **done, both engines** (see [§8](#the-escape-hatch-c5-executor--a-separately-owned-work-queue)) |
+| **A2** | `Executor` **program-exit join** — wait for any executor never explicitly `shutdown`-ed at a clean exit (creation order; `os.exit` skips it; a faulting program is not joined). Covers an executor created inside a task (W7-5b). | ✅ **done, both engines** (see [§8](#the-escape-hatch-c5-executor--a-separately-owned-work-queue)) |
 | **A3a** | Reject a non-sendable **read through a nested closure** inside a `spawn:` block. | ✅ **enforced for a non-sendable local** — emergent from the persistent `capture_floors` + the `infer_ident` read gate. **Updated (B3.3 / Task 2a):** a plain **closure** read through a nested closure is now *accepted* (closures cross by value), so the pin is `read_captured_capturefree_closure_through_nested_closure_in_spawn_block_ok`. |
 | **A1** | `Channel.try_recv() -> T?` — a **non-blocking poll** (`Some(v)`/`None`, never blocks/faults/suspends). Originally deferred (its motivating mid-flight-producer scenario needed the engine), un-deferred once B1/B2 landed. | ✅ **done, both engines, parity-tested** (it never suspends, so both engines run it identically — see [§5](#5-channelt--a-mailbox-outside-every-heap)). |
 

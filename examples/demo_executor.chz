@@ -1,6 +1,6 @@
 # `Executor` — DETACHED work queue (the escape hatch when work outlives a `parallel:` scope).
-# Same task as demo_spawn.chz. `submit` enqueues a detached job; nothing runs until the queue is
-# drained by `shutdown()` (FIFO). No lexical scope ties the tasks — you own the reap point.
+# Same task as demo_spawn.chz. `submit` STARTS a detached job at once; `shutdown()` waits for the
+# submitted work. No lexical scope ties the jobs — you own the wait point.
 
 import std.concurrency
 
@@ -10,12 +10,12 @@ fn square_into(n: int, out: Channel[int]):
 fn main():
     ch := Channel[int]()
     ex := Executor()
-    ex.submit(fn(): square_into(1, ch))   # enqueued, not yet run
+    ex.submit(fn(): square_into(1, ch))   # starts now, on the pool
     ex.submit(fn(): square_into(2, ch))
     ex.submit(fn(): square_into(3, ch))
     ex.submit(fn(): square_into(4, ch))
     ex.submit(fn(): square_into(5, ch))
-    ex.shutdown()                          # drains: every submitted job runs here
+    ex.shutdown()                          # waits: every submitted job has finished after this
     total := 0
     for _ in 0..5:
         total += ch.recv()

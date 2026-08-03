@@ -17,8 +17,8 @@ pub mod value;
 pub mod wire;
 
 use core::{
-    AtomicCore, AtomicIntCore, Backing, ChannelCore, ExecutorCore, ListenerCore, ReaderCore,
-    RwSharedCore, SharedCore, SocketCore, WriterCore,
+    AtomicCore, AtomicIntCore, Backing, ChannelCore, ExecRegistry, ExecutorCore, ListenerCore,
+    ReaderCore, RwSharedCore, SharedCore, SocketCore, WriterCore,
 };
 use heap::{Fields, Heap, MapData, ModuleData, Obj, SetData};
 use op::{CapEntry, CapSrc, NO_IC, Op, Program, ProtoId, TID_NONE, WaitMeta};
@@ -713,6 +713,12 @@ pub struct Vm {
     /// are GC roots (see [`Vm::collect`]) so an un-shut executor's queued work survives until the
     /// program-exit auto-drain (C5 / A2) reaps any executor never explicitly shut down.
     executors: Vec<GcRef>,
+    /// Every `Executor` core created during this RUN, heap-independently — see [`ExecRegistry`].
+    /// Shared (not copied) with every worker `Vm` by [`Vm::spawn_worker`], which is what lets the
+    /// program-exit join reach an executor created inside a task (W7-5b). Per-run rather than
+    /// process-global on purpose: the test harness runs many programs concurrently in one process, and
+    /// a static would let one run's join reach into another run's executors.
+    exec_registry: ExecRegistry,
     /// Concurrency B1/B2: set by a blocking `recv` (empty channel) running inside an active nursery
     /// scheduler. It records the channel handle the running fiber is waiting on; `run_until` and the
     /// re-entrant call path break (without unwinding defers) when it is set, returning control to the
@@ -809,6 +815,16 @@ pub struct Vm {
     /// tell a swallowed cooperative abort apart from a real fault (a cancelled task is dropped, not
     /// reported). Not in [`FiberCtx`] — like `pending_exit`, cancellation is a per-VM concern.
     cancelled: bool,
+    /// Set only on the worker `Vm` of an EAGERLY-dispatched `Executor` job (M:N). Such a worker has
+    /// no nursery scheduler and no [`MnSched`], so a blocking op falls to the "no scheduler" arm of
+    /// `chan_recv_step` / `send` / `wait:`, which faults `deadlock — no runnable task can send`. That
+    /// verdict was true while jobs only ran at the drain (the submitter was blocked inside
+    /// `shutdown()`, so nobody COULD send) and is a LIE once jobs start at `submit` — the submitter is
+    /// still running and may well send next statement. When this is set those arms block on the
+    /// channel's own condvar instead ([`Vm::eager_block_recv`]), matching Python. A job blocked on a
+    /// value that never arrives hangs, which is decision D (an `Executor`-spanning deadlock is an
+    /// accepted hang) — unchanged, and no deadlock predicate reads this field.
+    eager_job: bool,
     /// `chezzi test --timeout=<MS>` — the per-test wall-clock cap in ms (`0` = OFF, the default; the
     /// `chezzi run` engine never sets it). Kept only for the abort message. VM config, NOT part of
     /// [`FiberCtx`] (not swapped): armed once per invoke entry and threaded onto M:N workers.
@@ -1414,24 +1430,13 @@ enum TaskOutcome {
     },
 }
 
-/// B3.3-threads — the per-task outcome slots a `--parallel` nursery collects (task order; `None`
-/// until that task finishes). Shared with the pool threads via `Arc`; each fills its own index.
-type TaskSlots = Arc<Mutex<Vec<Option<TaskOutcome>>>>;
-
-/// B3.3-threads — a completion guard for a farmed pool task: its `Drop` bumps the nursery's
-/// finished-count and wakes the joining thread **on every exit path**, including a panic unwinding
-/// through the task body. This is what makes [`Vm::run_parallel_nursery`]'s join robust — without it
-/// a panicking worker would leave the counter short and hang the joiner forever (the join's wait loop
-/// would never see `count == pool_count`). Poison-tolerant so a poisoned counter can't re-panic here.
-struct DoneSignal(Arc<(Mutex<usize>, std::sync::Condvar)>);
-
-impl Drop for DoneSignal {
-    fn drop(&mut self) {
-        let (lock, cv) = &*self.0;
-        *lock.lock().unwrap_or_else(|e| e.into_inner()) += 1;
-        cv.notify_all();
-    }
-}
+// B3.3-threads had a `TaskSlots` alias + a `DoneSignal` completion guard here, both owned by the
+// batch farm/join helper `run_workers_on_pool`. Eager `Executor` execution retired that helper (its
+// last caller was the `Executor` drain — the legacy `run_parallel_nursery` was already gone, and the
+// M:N nursery joins through `MnSched`), so both went with it. The panic-safety invariant they existed
+// for is unchanged and now lives inline in `Vm::dispatch_eager_job`: a Rust panic in a job's worker VM
+// becomes a `Fault` slot instead of leaving `EagerState::outstanding` short and hanging `shutdown`
+// forever. Covered by `executor_faulting_job_does_not_hang_shutdown`.
 
 /// The `deadlock` fault message, shared by the cooperative scheduler ([`Vm::run_scheduler`]) and
 /// the `--parallel` M:N detector ([`MnSched::take_runnable`]) so the error is byte-identical across
@@ -4072,6 +4077,19 @@ pub fn run_file_p(entry: &std::path::Path) -> RunOutput {
 /// allocation-threshold trigger drives collection (test helper for GC assertions).
 #[cfg(test)]
 pub fn run_with(src: &str, stress: bool) -> (Result<String, RuntimeError>, usize) {
+    run_with_cfg(src, stress, false)
+}
+
+/// [`run_with`] with the engine selectable, so a GC-stress test can run on the M:N engine too. The
+/// eager `Executor` path needs that: its hazards (a submitted closure rebuilt into a worker heap while
+/// the parent holds the executor's core lock) exist only on that engine, and the serial-only
+/// [`run_capture_stress`] cannot reach them.
+#[cfg(test)]
+pub fn run_with_cfg(
+    src: &str,
+    stress: bool,
+    parallel: bool,
+) -> (Result<String, RuntimeError>, usize) {
     let src = src.to_string();
     std::thread::Builder::new()
         .stack_size(VM_STACK_BYTES)
@@ -4123,6 +4141,7 @@ pub fn run_with(src: &str, stress: bool) -> (Result<String, RuntimeError>, usize
             };
             let mut vm = Vm::new(Arc::new(program));
             vm.gc_stress = stress;
+            vm.parallel = parallel;
             let result = vm
                 .run()
                 .and_then(|()| vm.drain_live_executors(Span { line: 1, col: 1 }));
@@ -4180,6 +4199,14 @@ pub fn run_capture_on_stack(src: &str, stack_bytes: usize) -> Result<String, Run
 #[cfg(test)]
 pub fn run_capture_stress(src: &str) -> String {
     run_with(src, true)
+        .0
+        .unwrap_or_else(|e| panic!("unexpected runtime error under GC stress: {e}"))
+}
+
+/// [`run_capture_stress`] on the M:N engine — the leg that exercises the eager `Executor` dispatch.
+#[cfg(test)]
+pub fn run_capture_stress_parallel(src: &str) -> String {
+    run_with_cfg(src, true, true)
         .0
         .unwrap_or_else(|e| panic!("unexpected runtime error under GC stress: {e}"))
 }

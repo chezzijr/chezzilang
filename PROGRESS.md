@@ -217,6 +217,44 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > arm among live ones still parks; the detector is untouched. Verified 0/60 at `--threads=8` (main
 > 3/60), real deadlocks still reported.
 >
+> **✅ EAGER `Executor` — SHIPPED 2026-08-03 (`docs/future.md` §2c, decisions D1–D5).** `submit(f)` now
+> **starts the job immediately** on the shared pool and `shutdown()` **waits** for it — the Python
+> `ThreadPoolExecutor` / Java `ExecutorService` model, replacing the submit-only-enqueues drift that
+> manufactured the never-run backlog, the reap-point question, the A2 auto-drain rescue and W7-5b.
+> `--serial` deliberately keeps queue-at-`submit` (D3), so the engines differ only *between* `submit`
+> and `shutdown()`; the usage/test rule is **read or assert after `shutdown()`, never between**.
+> The W7-5 fault contract is inherited verbatim (D5): `shutdown()` hands submission-ordered outcome
+> slots to the same `reduce_task_slots`, so lowest-index fault, hard-halt precedence and W7-5c's
+> per-slot flush are unchanged and `executor_drain_test.chz` passes untouched.
+> **W7-5b falls out FIXED**: the program-exit join now walks a heap-independent `ExecRegistry`
+> (`Arc<Mutex<Vec<Arc<ExecutorCore>>>>`) that `spawn_worker` shares with every worker, so an executor
+> created inside a task is reachable whichever heap made it — no change to `swap_ctx`'s `ctx.heap`-only
+> gate, which is the STOP condition two previous attempts halted at. Verified against the pre-change
+> binary: M:N lost both jobs, serial ran them. **A sibling bug fell out and is fixed too:** the exit reap
+> iterated a snapshot of the executor list, so an `Executor` created by a job the reap was itself running
+> was lost — silently on BOTH engines pre-change, and it would have become a live engine divergence if
+> only the M:N side had been fixed. Both now re-scan until none is left un-shut.
+> **The one real hazard was NOT the deadlock detector** (no predicate changed; `Executor` work stays
+> outside it by decision D — and the rejected attempt's `exec_cores`/`exec_outstanding` post-mortem
+> named identifiers that do not exist in this repo). It is that a job's blocking op falls to the
+> "no scheduler" arms, whose `deadlock — no runnable task can send` verdict is true only while the
+> submitter is stuck in the drain. Eager jobs now BLOCK there instead (`Vm::eager_block_recv`, a bounded
+> poll on the channel condvar mirroring `demote_recv_block`'s settle order), which is what makes
+> `submit(recv) … send … shutdown()` work rather than fault — the exact regression the rejected attempt
+> shipped. Blocking `send`-on-full and `wait:` get the same treatment.
+> **Second hazard, found by self-review:** `submit` must not hold the executor's `core.inner` lock while
+> a dispatched job runs — the GC's `Obj::Executor` mark arm takes the same non-reentrant lock, so a
+> closure capturing its own executor deadlocks when the job's worker collects. Restructured to prepare
+> the worker lock-free and hold the lock only for the allocation-free reserve; proved by restoring the
+> bad order (`eager_executor_self_capturing_closure_survives_gc_stress_parallel` hangs).
+> **Deleted with it:** `run_workers_on_pool` + `TaskSlots` + `DoneSignal` (the drain was their last
+> caller). **Known limits, documented not fixed:** an executor job that calls `shutdown()` blocks a pool
+> thread (self-join hangs, as in Python); and *main* is not an eager job, so a `recv` in main on a
+> channel only a job will fill still faults instead of waiting. **W7-5d stays open.**
+> Rewritten in the same commit: `examples/executor.chz` + `executor_autodrain.chz` (+ goldens),
+> `module_global_freshness_test.chz`'s two drain-instant tests, A2/C5 prose, and the module-snapshot
+> instant (crossing moves from drain time to **submit** time).
+
 > **✅ W7-5 + W7-5c (the M:N `Executor` drain) — FIXED 2026-08-01: every queued job now runs, and
 > `shutdown()` raises the lowest-submission-index fault.** The two earlier fix attempts logged here were
 > superseded, not vindicated — see `docs/gaps.md`'s W7-5 session-log section for why both were rejected
@@ -235,15 +273,8 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > it: every faulting task's output now flushes at its task-order slot. Acceptance test:
 > `tests/chz/stdlib/executor_drain_test.chz`, gated serial==M:N. Example:
 > `examples/executor_results.chz`. Commits `0127cfd7`/`af3fb10b` (W7-5), `05204777`/`0611f8ae` (W7-5c).
-> **W7-5b** (an `Executor` created inside an M:N task is silently discarded) is explicitly **deferred,
-> not fixed** — the project owner decided mid-milestone to move `Executor` to eager execution
-> (`docs/future.md` §2c), and W7-5b was folded into that milestone because the two share the same join
-> machinery. (Corrected 2026-08-01: eager execution does **not** dissolve the queue — Python's
-> `ThreadPoolExecutor` has a work queue too; the drift is *who drains it and when*. And under decision
-> D1 — detached lifetime, joined at **program exit** — serial's existing program-exit reap already IS
-> the right semantics, so W7-5b is **M:N-only**.) Still tracked open in `docs/gaps.md` OPEN ITEMS. The
-> uncommitted patch at `.superpowers/sdd/task-3-mn-half.patch` drains at *task end*, the scope-bound
-> lifetime D1 rejected — keep it as a code reference, not a drop-in fix. **W7-5d** (new, filed adversarially reviewing
+> **W7-5b** (an `Executor` created inside an M:N task was silently discarded) is **FIXED 2026-08-03** by
+> the eager-execution milestone below, not by the queueing model it was filed against. **W7-5d** (new, filed adversarially reviewing
 > this doc pass): the run-all guarantee is for an ORDINARY fault only — a HARD halt mid-`shutdown()`
 > stops `--serial`'s drain from popping the rest of the queue at all, while M:N has already dispatched
 > every job before the halt can fire; the exact asymmetry is unverified under a thread-starved pool and
@@ -677,7 +708,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > `spawn` — the Go rule — at every depth, including a NESTED `parallel:` inside a task, which sees the
 > TASK's current view.** Per-task ISOLATION is unchanged (a task-side write never propagates out;
 > `Shared`/`RwShared`/`Atomic`/`Channel` stay the only sharing), and an `Executor` job sees the globals as
-> of the drain. `snapshot_memo` became a CACHE — dropped on any module-slot write (`set_global_slot` /
+> of the instant it STARTS — the `submit` on the default engine (eager), the drain on `--serial` (D3). `snapshot_memo` became a CACHE — dropped on any module-slot write (`set_global_slot` /
 > `module_define`, the only two slot mutators) and dropped at every `Op::EnterNursery` when the cached view
 > holds a mutable aggregate global (a conservative whitelist: in-place `q.push(1)` / `m[k]=v` / `p.x=1`
 > writes no slot for a hook to see, so such a view re-snapshots per nursery while an all-immutable one

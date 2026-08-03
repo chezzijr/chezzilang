@@ -1380,6 +1380,20 @@ impl Vm {
             self.cancelled = true;
             return Err(self.err("cancelled".to_string(), span));
         }
+        // EAGER `Executor` job: block until a receiver frees a slot, the mirror of the empty-`recv`
+        // case in `chan_recv_step` ([`Vm::eager_wait_tick`]). Handled BEFORE the shared attempt below
+        // because a retry needs the wire value again and the shared path moves it — the `clone` is
+        // per attempt and only on this path, so an ordinary bounded `send` is untouched. Retries the
+        // ONE atomic `enqueue_bounded` rather than check-then-enqueue, so a racing sender still can't
+        // push either send past `cap`.
+        if self.eager_job {
+            loop {
+                if self.enqueue_bounded(h, &core, cap, w.clone()) {
+                    return Ok(SendStep::Sent);
+                }
+                self.eager_wait_tick(&core, span)?;
+            }
+        }
         // Atomic space-check + enqueue + receiver-wake (shared with `try_send` — see
         // [`Vm::enqueue_bounded`]). On success the value is delivered; on `false` the channel was full
         // and we decide how to block.
@@ -1589,6 +1603,11 @@ impl Vm {
             self.park_recv(h);
             return Ok(RecvStep::Parked);
         }
+        // An EAGERLY-dispatched `Executor` job has no scheduler either, but its submitter IS still
+        // running and may send next statement — so it blocks rather than declaring a deadlock.
+        if self.eager_job {
+            return self.eager_block_recv(&core, span);
+        }
         // No scheduler (top level / single fiber) or a native callback on the cooperative engine: no
         // sibling could ever fill the channel — a real deadlock.
         Err(self.err(
@@ -1610,6 +1629,86 @@ impl Vm {
         self.push(Value::obj(h));
         self.frames.last_mut().unwrap().ip -= 1;
         self.suspend = Some(h);
+    }
+
+    /// EAGER `Executor` job — one tick of a blocking wait: honour the halts, then wait up to
+    /// [`DEMOTE_POLL_BACKOFF`]. Shared by [`Vm::eager_block_recv`] and the blocking full-`send`.
+    ///
+    /// A job dispatched by an eager `submit` has no nursery scheduler and no [`MnSched`], so its
+    /// blocking ops fall to the "no scheduler" arms, which declare a deadlock. That verdict was TRUE
+    /// while jobs only ran at the drain — the submitter was blocked inside `shutdown()`, so no runnable
+    /// task could send — and became a LIE the moment jobs start at `submit`, because the submitter is
+    /// still running and may send on the very next statement. So an eager job BLOCKS here instead,
+    /// which is also what Python's `ThreadPoolExecutor` does. **No deadlock predicate reads this
+    /// path** (decision D — an `Executor`-spanning deadlock is an accepted hang, matching Python).
+    ///
+    /// The wait is a BOUNDED poll, not an untimed `cv.wait`, for the same reason
+    /// [`Vm::demote_recv_block`]'s is: a lost wakeup then costs latency instead of the whole run, and
+    /// the two halts that must stay un-swallowable get re-checked every tick. `--timeout` is checked
+    /// here explicitly because a blocked job never reaches `jump_checked`'s loop back-edge, which is
+    /// where every other path observes the deadline — without this, `chezzi test --timeout` could not
+    /// kill a job blocked forever on a channel, which is exactly the hang eager execution makes easier
+    /// to write.
+    fn eager_wait_tick(&mut self, core: &Arc<ChannelCore>, span: Span) -> Result<(), RuntimeError> {
+        self.eager_halt_check(span)?;
+        let q = core.q.lock().unwrap_or_else(|e| e.into_inner());
+        let _ = core.cv.wait_timeout(q, DEMOTE_POLL_BACKOFF);
+        Ok(())
+    }
+
+    /// The halts an eagerly-dispatched job must observe while blocked. Split out of
+    /// [`Vm::eager_wait_tick`] so the multi-channel `wait:` path — which polls N arms instead of
+    /// waiting on one condvar, and so cannot share the tick — honours exactly the same two, rather
+    /// than being the one blocking op a `--timeout` cannot reach.
+    fn eager_halt_check(&mut self, span: Span) -> Result<(), RuntimeError> {
+        // Checked HERE because a blocked job never reaches `jump_checked`'s loop back-edge, which is
+        // where every other path observes the deadline. Without it `chezzi test --timeout` could not
+        // kill a job blocked forever on a channel — exactly the hang eager execution makes easier to
+        // write. No `deadline_tick` throttle: this runs once per `DEMOTE_POLL_BACKOFF`, not per op.
+        if let Some(dl) = self.deadline
+            && std::time::Instant::now() >= dl
+        {
+            return Err(self
+                .err(
+                    format!("test exceeded --timeout ({}ms)", self.timeout_ms),
+                    span,
+                )
+                .timed_out());
+        }
+        // `shutdown_now`'s cooperative stop (D4) and an enclosing scope's cancel both arrive here.
+        if self.cancel_requested() {
+            self.cancelled = true;
+            return Err(self.err("cancelled".to_string(), span));
+        }
+        Ok(())
+    }
+
+    /// EAGER `Executor` job — block on an empty `recv` until a value arrives, instead of declaring a
+    /// deadlock (see [`Vm::eager_wait_tick`]). The settle order matches [`Vm::demote_recv_block`]'s
+    /// exactly — a queued value beats a `trip()` latch, which beats closed-and-drained, which beats a
+    /// cancel — so the two blocking-in-place paths cannot disagree about what a channel is saying.
+    pub(super) fn eager_block_recv(
+        &mut self,
+        core: &Arc<ChannelCore>,
+        span: Span,
+    ) -> Result<RecvStep, RuntimeError> {
+        loop {
+            {
+                let mut q = core.q.lock().unwrap_or_else(|e| e.into_inner());
+                if let Some(w) = q.pop() {
+                    return Ok(RecvStep::Got(w));
+                }
+                let closed = q.closed;
+                drop(q);
+                if core.done_latch.load(Ordering::Relaxed) {
+                    return Ok(RecvStep::Got(WireValue::Bool(true)));
+                }
+                if closed {
+                    return Ok(RecvStep::ClosedEmpty);
+                }
+            }
+            self.eager_wait_tick(core, span)?;
+        }
     }
 
     /// `wait:` runtime (§6d) — execute [`Op::WaitPoll`]. The `n` arm channel handles are on the
@@ -1820,6 +1919,17 @@ impl Vm {
             // every live arm channel via `wait_suspend` (consumed by `run_child`).
             self.frames.last_mut().unwrap().ip -= 1; // re-run this WaitPoll on resume
             self.wait_suspend = Some(keys);
+            return Ok(());
+        }
+        // EAGER `Executor` job — block instead of declaring a deadlock, like the empty-`recv` and
+        // full-`send` cases. There are N arm condvars and no single one to block on, so this is a
+        // bounded poll (the same trade [`Vm::demote_wait_block`] makes): sleep a tick, then REWIND so
+        // the dispatch loop re-runs this `WaitPoll` and re-polls every arm. Rewinding rather than
+        // looping in place also means the halts land on the ordinary back-edge checkpoint.
+        if self.eager_job {
+            self.eager_halt_check(span)?;
+            std::thread::sleep(DEMOTE_POLL_BACKOFF);
+            self.frames.last_mut().unwrap().ip -= 1;
             return Ok(());
         }
         // No scheduler (top level / single fiber) or inside a native callback: no sibling could ever
@@ -2557,7 +2667,60 @@ impl Vm {
             "submit" => {
                 self.arity_err("submit", args, 1, span)?;
                 let core = self.executor_core(h);
-                {
+                // Cheap early reject so a shut executor costs no wiring work. Re-checked below under
+                // the lock — this one is advisory, the one that decides is the atomic one.
+                if core.inner.lock().unwrap().shut {
+                    return Err(self.err(
+                        "submit on a shut-down Executor (it no longer accepts work)".to_string(),
+                        span,
+                    ));
+                }
+                // The task closure crosses the airlock **by value** on BOTH engines
+                // (`wire_callable` → `to_wire`: proto + deep-copied captures + home index), exactly
+                // like plain `spawn` (`cross_spawn_callee`). This is the sole serial==M:N invariant:
+                // routing coop through the SAME wire path runs the generator airlock
+                // enforcement on the cooperative engine too, and isolates captures at submit time, so
+                // serial and M:N behave identically for every submitted closure. (Earlier the coop
+                // branch queued the callable's own `Handle` — captures shared by reference, bypassing
+                // `to_wire` — to mirror the tree-walk `interp` oracle; that oracle has been removed, so
+                // the by-handle preservation was pure serial-vs-M:N divergence and is retired.)
+                // Under `--parallel` a pool thread runs the closure the moment it is submitted; under
+                // the cooperative engine the inline drain (`from_wire` at `shutdown`) rebuilds an
+                // isolated closure over this same heap home. Queued captures stay rooted via the
+                // executor handle's `children()` (the `Closure` arm of `collect_core_gcrefs`) — which
+                // on M:N now roots nothing, since nothing sits in the queue.
+                let w = self.wire_callable(args[0], span)?;
+                if self.parallel {
+                    // EAGER (D1/D2): start the job NOW on the shared pool. The queue stays empty on
+                    // this engine — the work lives in the core's `eager` slots instead.
+                    //
+                    // Building the worker happens with **NO executor lock held**, deliberately.
+                    // `prepare_worker_from_wire` rebuilds the closure into the worker's heap, and a
+                    // closure that captured this executor puts an `Obj::Executor` over THIS core into
+                    // that heap — so a GC there marks the core, and `Heap`'s mark arm takes
+                    // `core.inner.lock()`. `std::sync::Mutex` is not reentrant, so holding it across
+                    // the rebuild would self-deadlock on `ex.submit(fn(): ex.…)` under GC pressure.
+                    // Faulting here (`ensure_snapshot` on a frame-holding generator global) must also
+                    // happen BEFORE a slot is reserved, or the reservation would leave `outstanding`
+                    // permanently short and hang `shutdown` forever.
+                    let rw = self.prepare_eager_job(&core, w, span)?;
+                    // Now the atomic part: re-check `shut` and reserve the submission slot under ONE
+                    // lock, so a job racing an `ex.shutdown()` is either rejected or is counted by
+                    // that shutdown's join — never dispatched into a shut executor nobody waits for.
+                    // Lock order is inner → eager; a finishing job takes only `eager`, so it can never
+                    // contend here.
+                    let g = core.inner.lock().unwrap();
+                    if g.shut {
+                        return Err(self.err(
+                            "submit on a shut-down Executor (it no longer accepts work)"
+                                .to_string(),
+                            span,
+                        ));
+                    }
+                    crate::vm::sched::dispatch_eager_job(&core, rw);
+                    drop(g);
+                } else {
+                    // `--serial` keeps queue-at-submit / drain-at-`shutdown` (decision D3).
                     let mut g = core.inner.lock().unwrap();
                     if g.shut {
                         return Err(self.err(
@@ -2566,20 +2729,6 @@ impl Vm {
                             span,
                         ));
                     }
-                    // The task closure crosses the airlock **by value** on BOTH engines
-                    // (`wire_callable` → `to_wire`: proto + deep-copied captures + home index), exactly
-                    // like plain `spawn` (`cross_spawn_callee`). This is the sole serial==M:N invariant:
-                    // routing coop through the SAME wire path runs the generator airlock
-                    // enforcement on the cooperative engine too, and isolates captures at submit time, so
-                    // serial and M:N behave identically for every submitted closure. (Earlier the coop
-                    // branch queued the callable's own `Handle` — captures shared by reference, bypassing
-                    // `to_wire` — to mirror the tree-walk `interp` oracle; that oracle has been removed, so
-                    // the by-handle preservation was pure serial-vs-M:N divergence and is retired.)
-                    // Under `--parallel` a pool-thread drain rebuilds the closure from the wire value;
-                    // under the cooperative engine the inline drain (`from_wire` at `shutdown`) rebuilds an
-                    // isolated closure over this same heap home. Queued captures stay rooted via the
-                    // executor handle's `children()` (the `Closure` arm of `collect_core_gcrefs`).
-                    let w = self.wire_callable(args[0], span)?;
                     // Summarised under the executor's OWN lock (not the scheduler's) and right next
                     // to `wire_callable`'s much larger walk of the same closure — no hoist needed.
                     let sum = crate::vm::core::wire_summary(&w);
@@ -2593,12 +2742,11 @@ impl Vm {
                 // Mark shut first so a task that re-enters this executor (submit/shutdown) sees it.
                 core.inner.lock().unwrap().shut = true;
                 if self.parallel {
-                    // B3.6: drain the whole queue under the lock (drop the guard before running any
-                    // task — never hold the core lock across an invoke), then run the tasks on the
-                    // bounded pool. Output flushes in submission order; the lowest-index fault
-                    // propagates.
-                    let tasks: Vec<WireValue> = core.inner.lock().unwrap().take_all();
-                    self.drain_executor_on_pool(tasks, span)?;
+                    // EAGER (D1/D4): every job started at its `submit`, so there is no queue to
+                    // drain — `shutdown` is purely the JOIN. Wait for in-flight work, then reduce the
+                    // submission-ordered slots: output flushes in submission order and the
+                    // lowest-index fault propagates, exactly as the drain did.
+                    self.join_eager_jobs(&core)?;
                 } else {
                     // Cooperative engine: inline FIFO drain. Root the executor handle across the drain
                     // (its remaining queue is traced via it); each popped task is rooted on the stack
@@ -2672,9 +2820,28 @@ impl Vm {
             "shutdown_now" => {
                 self.arity_err("shutdown_now", args, 0, span)?;
                 let core = self.executor_core(h);
-                let mut g = core.inner.lock().unwrap();
-                g.shut = true;
-                g.clear();
+                {
+                    let mut g = core.inner.lock().unwrap();
+                    g.shut = true;
+                    g.clear(); // the serial queue; empty on M:N (eager submit never fills it)
+                }
+                if self.parallel {
+                    // D4 — "attempts to stop", COOPERATIVE not preemptive: trip the per-core cancel
+                    // flag so a job already running dies at its next back-edge, and one the pool has
+                    // not started yet observes it in its prologue. A job with no cancellation point
+                    // still runs to completion; that is Java's contract too.
+                    core.cancel
+                        .store(true, std::sync::atomic::Ordering::Relaxed);
+                    // …then JOIN, exactly like `shutdown`. Java's `shutdownNow` returns without
+                    // waiting because it hands back the never-started tasks and you follow up with
+                    // `awaitTermination`; Chezzi has no such follow-up call, so not waiting here
+                    // would leave detached jobs running past a `shut` executor that the program-exit
+                    // join deliberately SKIPS (`drain_live_executors` short-circuits on `shut`) — the
+                    // program could exit mid-job. Cancelled jobs are swallowed by `reduce_task_slots`
+                    // (their output still flushes at their slot), so this raises a fault only if a
+                    // job genuinely faulted before the trip landed.
+                    self.join_eager_jobs(&core)?;
+                }
                 Ok(Value::nil())
             }
             _ => Err(self.err(format!("type Executor has no method '{method}'"), span)),
@@ -2691,14 +2858,53 @@ impl Vm {
         if self.pending_exit.is_some() {
             return Ok(());
         }
-        // Snapshot the handles: a drained task may create new executors; reap only those alive at
-        // exit (parity with the serial-VM oracle's `Vec<Rc>` snapshot).
-        let execs = self.executors.clone();
-        for h in execs {
-            let shut = self.executor_core(h).inner.lock().unwrap().shut;
-            if shut {
-                continue;
+        if self.parallel {
+            // EAGER (D1) — the executor is DETACHED: its work is already running, and this is where
+            // the program waits for it. Walk the heap-independent registry, not `self.executors`:
+            // that list is heap-keyed, so an executor created inside a task never reached it and its
+            // work was silently lost (W7-5b). Creation order, matching the serial reap below.
+            //
+            // Re-scan from the top each round rather than snapshotting: a job joined here can itself
+            // construct and submit to a NEW executor, which must also be joined. Marking `shut`
+            // before joining is what makes that terminate — a joined executor is never re-picked.
+            loop {
+                let next = self
+                    .exec_registry
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .iter()
+                    .find(|c| !c.inner.lock().unwrap_or_else(|e| e.into_inner()).shut)
+                    .map(Arc::clone);
+                let Some(core) = next else { break };
+                core.inner.lock().unwrap_or_else(|e| e.into_inner()).shut = true;
+                self.join_eager_jobs(&core)?;
+                if self.pending_exit.is_some() {
+                    break; // a joined job called os.exit — hard halt, stop joining
+                }
             }
+            return Ok(());
+        }
+        // `--serial` (D3) still queues at `submit` and drains at the reap point, through the HANDLE
+        // (the inline drain re-roots it on the operand stack), so it keeps the handle list. Same
+        // re-scan shape as the M:N join above, and for the same reason: a job run BY this drain can
+        // itself create and submit to a new executor, and that one owes the same reap. This used to
+        // iterate a SNAPSHOT of the list taken before the drain, so such an executor was missed and
+        // its work silently vanished — pre-existing on both engines, and it would have become a live
+        // serial-vs-M:N divergence the moment the M:N side learned to re-scan. Terminates because
+        // `shutdown` marks the core `shut` before running anything, so a reaped executor is never
+        // re-picked.
+        loop {
+            let next = {
+                let mut found = None;
+                for &h in &self.executors {
+                    if !self.executor_core(h).inner.lock().unwrap().shut {
+                        found = Some(h);
+                        break;
+                    }
+                }
+                found
+            };
+            let Some(h) = next else { break };
             self.executor_method(h, "shutdown", &[], span)?;
             if self.pending_exit.is_some() {
                 break; // a drained task called os.exit — hard halt, stop draining

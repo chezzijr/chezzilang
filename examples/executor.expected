@@ -1,7 +1,7 @@
-submitted; nothing has run yet
+submitted; both jobs are already running
 job 1 ran
 job 2 ran
 drained
-inside deferred(), before reap
-job 3 ran
-discarded; job 99 never ran
+inside deferred(), before the wait
+after deferred() returned, the job had run: 3
+asked to stop; job 99 may or may not have run

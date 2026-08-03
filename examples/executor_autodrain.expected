@@ -1,3 +1,2 @@
 main() done; executor never shut down
-job 1 ran (auto-drained at exit)
-job 2 ran (auto-drained at exit)
+all 3 units of work finished before exit
