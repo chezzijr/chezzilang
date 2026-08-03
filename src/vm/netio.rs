@@ -1769,9 +1769,9 @@ impl Vm {
     /// on `--serial` and faulted on M:N, i.e. the fix re-opened, in a new place, exactly the kind of
     /// engine divergence W7-12 exists to close.
     ///
-    /// This does NOT make the predicate sound — a producer living in ANOTHER executor's job still
-    /// gets over-ruled (gaps.md `W7-12r` (a)), which is tolerable only because that program faults on
-    /// `--serial` too, so no engine disagrees. Soundness needs the wait-for graph (`future.md` §2d).
+    /// This gate is one of three narrowings, none of which make the predicate SOUND — the registry
+    /// sweep and `outstanding == 1` are the others, and everything they decline to judge hangs
+    /// (gaps.md `W7-12r`). Soundness needs the wait-for graph (`future.md` §2d).
     fn join_has_no_live_siblings(&self) -> bool {
         self.mn.is_none()
             && self.mn_enlist_sched.is_none()
@@ -2094,9 +2094,10 @@ impl Vm {
         // looping in place also means the halts land on the ordinary back-edge checkpoint.
         if self.eager_core.is_some() {
             // W7-12 — armed FIRST, before the halt check, so this job counts ITSELF as blocked; armed
-            // after it, a lone `wait:`-blocked job would forever see `blocked (0) < outstanding (1)`
-            // and never fault. Held only across the sleep because this arm rewinds instead of looping
-            // — the predicate converges over a few ticks.
+            // after it, a LONE `wait:`-blocked job (the only shape the verdict now judges) would
+            // forever see `blocked (0) < outstanding (1)` and never fault. Re-armed per invocation
+            // because this arm rewinds instead of looping; harmless now that the verdict requires
+            // `outstanding == 1`, so there is no sibling whose sample could catch the gap.
             let _blocked = self.eager_block_guard();
             self.eager_halt_check(EMPTY_WAIT_DEADLOCK, span)?;
             std::thread::sleep(DEMOTE_POLL_BACKOFF);

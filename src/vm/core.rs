@@ -594,7 +594,7 @@ pub struct ExecutorCore {
 /// Armed at the `shutdown` call site rather than inside `Vm::join_eager_jobs`, because that function
 /// also serves `drain_live_executors`, which joins every live executor ONE AT A TIME in registry
 /// order — so a bump there would make the REGISTRY ORDER decide which executor's job gets the fault.
-/// A deadlock with no `shutdown()` therefore still hangs at exit; that is W7-12's stated residual (d).
+/// A deadlock with no `shutdown()` therefore still hangs at exit; that is W7-12's stated residual (c).
 /// `shutdown_now` needs no bump either: it trips `cancel` first, and the cancel halt pre-empts this.
 ///
 /// What the call-site placement does NOT buy, stated plainly because an earlier revision of this
