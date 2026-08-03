@@ -176,6 +176,116 @@ ancestors (Python/Java) already have.
 
 ---
 
+## 2d. Deadlock detection: from quiescence counting to a wait-for graph (planned — NOT started)
+
+> **Why this is filed (2026-08-03).** Eager `Executor` execution (§2c) exposed that Chezzi has *two*
+> unrelated things called "deadlock", and the weak one does most of the work. Read this before touching
+> either.
+
+### What exists today
+
+| | `MnSched::is_deadlocked` (`src/vm/mod.rs`) | the fault arms in `src/vm/netio.rs` |
+|---|---|---|
+| decides by | live state: `running`/`runnable`/`inflight`/`blocked_native`/`parked_n`, plus veto terms | **nothing** — an unconditional `else` |
+| the question it asks | "can anything in this nursery still move?" | "am I inside a scheduler? no → therefore nobody can ever send" |
+| scope | one nursery | any blocked party with no scheduler: top-level `main`, an `Executor` job, a native callback |
+| catches | total quiescence of a nursery | nothing; it *asserts* |
+
+The second one is a **proxy that no longer tracks its own premise**. "I have no scheduler" meant "no
+sender can exist" only while every concurrent construct was scheduler-backed. Eager execution put
+running jobs outside any scheduler, and both of §2c's bugs are that one stale assumption, mirrored:
+
+* a job blocking on a value `main` sends next line → arm faulted, wrongly (fixed in §2c by blocking);
+* a job blocking on a value `main` can never send, because `main` is inside `shutdown()` waiting for
+  that job → arm now blocks, wrongly (a program that faulted in 0s on both engines pre-§2c hangs
+  forever on M:N after it).
+
+Neither is fixable *in that arm*, because the arm has no way to tell the two apart. Both need a real
+answer to **"can anyone still send on this channel?"**
+
+### The proposal (project owner, 2026-08-03): a wait-for graph
+
+Give every blocked party an outgoing "waits-for" edge and look for a cycle. This is the classic
+wait-for-graph (WFG) deadlock detection from OS/DBMS lock managers, and it is the right direction. One
+adaptation is essential, and it is the whole design difficulty:
+
+**A channel is not an owned resource.** With a mutex the edge is exact — `A → B` because B *holds* the
+lock. A blocked `recv` does not wait for a specific fiber; it waits for **whoever sends next**, which is
+any fiber that can reach that channel. So the edge is `A → {set of possible senders}`, and the graph is
+an **AND-OR graph**, where deadlock is a **knot** (a set S from which every outgoing option leads back
+into S), not a simple cycle. Knot detection is still polynomial; the point is that "find a cycle" will
+silently give the wrong answer here.
+
+**Node set — must include non-fibers, or it misses the reported bug.** Nodes are not just fibers:
+* a fiber parked on `recv`/`send`/`wait:`,
+* a worker DEMOTED in place (`demote_recv_block`) — blocked but not parked,
+* **a joiner**: the thread inside `Vm::join_eager_jobs` or a nursery join. `main` blocked in
+  `shutdown()` is exactly the node whose absence makes today's arms unable to see the bug.
+
+**Edge kinds:**
+| blocked on | edges to |
+|---|---|
+| empty `recv` on `ch` | every party that could `send` on `ch` |
+| full `send` on `ch` | every party that could `recv` on `ch` |
+| `wait:` over N arms | OR-edges, one per arm (ready on ANY arm ⇒ progress) |
+| a join (`shutdown()`, nursery barrier) | every outstanding job/task it waits for |
+
+**Approximate the sender set in the SAFE direction.** Computing "who could send on `ch`" exactly is
+undecidable; approximate it by reachability (who holds a handle). Over-approximating ADDS edges, which
+means fewer knots, which means the detector **under-reports** — it misses deadlocks rather than
+inventing them. That is the correct failure direction and must be stated in the code, because the
+opposite instinct is what sank the first eager-execution attempt (`§2c`): it invented a veto keyed on
+`exec_outstanding > exec_cores.len()`, where `exec_cores` counted ancestor *memberships* rather than
+live jobs, and six of ten upheld review charges traced to that one predicate.
+
+A cheap sound special case worth landing FIRST, no graph required: if a blocked receiver holds the only
+live handle to the channel's core (`Arc::strong_count` on the `ChannelCore`), no other party can ever
+send — provable deadlock, O(1), zero false positives. It covers a large share of real mistakes and is a
+useful stepping stone that the graph later subsumes.
+
+**Keep every veto `is_deadlocked` already earned.** They encode real races that cost real bugs, and a
+new detector that drops them re-opens them: pending IO/timers/blocking-pool work (`inflight`), a cancel
+in flight that would wake a demoted fiber, a scope mid-teardown, and a value racing into a queue the
+predicate is about to read. Each is an edge to the outside world — i.e. an escape from the knot.
+
+**Cost control.** Run the analysis only when quiescence is *suspected* (a blocked count changed and
+nothing is runnable), never per poll tick; O(V+E) every `DEMOTE_POLL_BACKOFF` would be a tax on every
+blocking program.
+
+### How the ancestors do it — and why Chezzi can do better
+
+* **Go** — the only mainstream runtime that aborts: `fatal error: all goroutines are asleep -
+  deadlock!`. It builds no graph. It counts: nothing runnable and nothing in a syscall/timer/netpoll ⇒
+  everything is stuck. Sound and O(1), but it only ever reports **total** quiescence, and a goroutine in
+  a syscall, a network read, or `time.Sleep` suppresses it entirely. Unrecoverable (fatal, not a panic).
+* **Python** — no detector. `q.get()` blocks forever; a `ThreadPoolExecutor` worker waiting on something
+  `main` never sends simply hangs. The answer is user-side timeouts (`q.get(timeout=…)`).
+* **Java** — no auto-abort. Detection is *tooling*: `ThreadMXBean.findDeadlockedThreads()`, jstack,
+  JConsole. The runtime answer is `awaitTermination(timeout)`.
+* **Rust** — none in std; `parking_lot` has an opt-in `deadlock_detection` feature for lock cycles.
+* **Erlang/BEAM** — none; `receive … after Timeout` bakes the timeout into the syntax.
+
+Chezzi's `is_deadlocked` is already Go's rule, scoped per nursery. **The WFG's payoff over Go is
+PARTIAL deadlock** — a subset stuck while the rest of the program runs happily, which Go structurally
+cannot report. Both bugs found in §2c are partial deadlocks, so this is not a theoretical gain.
+
+### Ordering
+
+1. `Arc::strong_count` sole-handle rule (sound, O(1), no graph) — good first cut.
+2. Unify the blocked-party registry process-wide (fibers + demoted workers + joiners). Today blocked
+   state is per-`MnSched`, so no one can see `main`-in-`shutdown()`. Overlaps the cross-nursery flat
+   scheduler work (`docs/cross-nursery-flat-scheduler.md`) and §2b's serial-engine removal — sequence
+   with those rather than against them.
+3. AND-OR knot detection over that registry, keeping every existing veto, run only on suspicion.
+4. Retire the `netio.rs` "no scheduler ⇒ no sender" arms; they become unreachable.
+
+**Sequencing note:** §2b removes `--serial` after the JIT freeze. Do that FIRST if both are in play — a
+detector that has to stay byte-identical across two engines is a much harder problem than one written
+against a single engine, and the serial engine's blocked state (a `BTreeSet` of ready children with no
+counters at all) shares nothing with M:N's.
+
+---
+
 ## 3. Missing features (ranked by leverage for scripting) → **mostly shipped (M12–M18)**
 
 > Comprehensions, slicing, the iterator protocol, concat/merge, hex/bin/oct literals, optional

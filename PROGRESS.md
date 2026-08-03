@@ -242,6 +242,14 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > poll on the channel condvar mirroring `demote_recv_block`'s settle order), which is what makes
 > `submit(recv) … send … shutdown()` work rather than fault — the exact regression the rejected attempt
 > shipped. Blocking `send`-on-full and `wait:` get the same treatment.
+> **Open regression this milestone introduced — `W7-12`, see `docs/gaps.md` + `future.md` §2d.** The
+> blocking fix is right for a job waiting on a value `main` sends next line, and WRONG for a job waiting
+> on a value only its own joiner could send (`ex.submit(fn(): ch.recv()); ex.shutdown(); ch.send(42)`):
+> that faulted in 0s on both engines pre-eager and now HANGS on M:N while `--serial` still faults.
+> Interim fix agreed: fault when an executor is being joined and every outstanding job is blocked.
+> The principled successor is a wait-for-graph (AND-OR knot) detector — designed in `docs/future.md`
+> **§2d**, which also records why the `netio.rs` "no scheduler ⇒ no sender" arms cannot decide this at
+> all, and how Go/Python/Java/Rust/Erlang handle it.
 > **Second hazard, found by self-review:** `submit` must not hold the executor's `core.inner` lock while
 > a dispatched job runs — the GC's `Obj::Executor` mark arm takes the same non-reentrant lock, so a
 > closure capturing its own executor deadlocks when the job's worker collects. Restructured to prepare
