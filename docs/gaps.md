@@ -4512,17 +4512,36 @@ against the code before implementing):
   to enter and would reset it every tick.
 
 **The correctness bar this fix is held to, because it was got wrong once.** The first cut faulted on
-`x.submit(consumer)` / `y.submit(producer)` / `x.shutdown()` — a program **Python's
-`ThreadPoolExecutor` runs to completion** (`got 1`), and which §2c's M:N ran to completion too. That
-was defended in this file with "the same program faults on `--serial`, so no engine disagrees", which
-is an argument about AGREEMENT and not about CORRECTNESS: two engines can agree on a wrong answer, and
-`--serial` faults there only because of its own queue-at-`submit` model (D3). Reporting a deadlock in a
-program that has none is a wrong answer about a live program — the [[no-drift-from-popular-languages]]
-rule, and precisely the failure mode of bending the language to keep the oracle tidy. Fixed by the
-registry sweep in `Vm::eager_join_deadlocked` (silent while any OTHER executor still owes work); pinned
-by `executor_job_keeps_waiting_while_another_executor_still_owes_work`. **The standing bar: when this
-predicate is unsure, it must HANG, never fault.** An accepted hang on a real deadlock (decision D) is a
-missing answer; a fault on a working program is a wrong one.
+`x.submit(consumer)` / `y.submit(producer)` / `x.shutdown()` — a program **both ancestors run to
+completion**, and which §2c's M:N ran to completion too. That was defended in this file with "the same
+program faults on `--serial`, so no engine disagrees", which is an argument about AGREEMENT and not
+about CORRECTNESS: two engines can agree on a wrong answer, and `--serial` faults there only because of
+its own queue-at-`submit` model (D3) — an engine that is scheduled for REMOVAL (`future.md` §2b) can
+never be the standard of correct. Reporting a deadlock in a program that has none is a wrong answer
+about a live program — the [[no-drift-from-popular-languages]] rule, and precisely the failure mode of
+bending the language to keep the oracle tidy. Fixed by the registry sweep in
+`Vm::eager_join_deadlocked` (silent while any OTHER executor still owes work); pinned by
+`executor_job_keeps_waiting_while_another_executor_still_owes_work`.
+
+**Measured against the ancestors** (Go 1.26 + CPython, run on 2026-08-03, not reasoned). Go is the
+concurrency ancestor and therefore the baseline for the deadlock VERDICT; `Executor` itself is
+Python/Java lineage:
+
+| program | Go | CPython | Chezzi (after the fix) |
+|---|---|---|---|
+| this gap's repro (job blocked, only its joiner could send) | `fatal error: all goroutines are asleep - deadlock!` | **hangs forever** | **faults** — Go-correct, and strictly better than Python |
+| producer in ANOTHER executor | `got 1 / end` | `got 1 / end` | `got 1 / end` |
+| producer is a sibling task, the `shutdown` itself in a task | `job got 42 / end` | — | `job got 42 / end` |
+| two groups deadlocking EACH OTHER | `fatal error: … deadlock!` | hangs | **hangs** — Go is stricter; residual (a) |
+
+Two things follow. The fault this gap restores is not merely "what pre-§2c did" — it is what Go does,
+so the verdict is right on its own merits. And residual (a) is a MEASURED gap against Go rather than a
+self-declared trade: Go reports that deadlock and we do not. Note also that Go's detector is exactly
+the process-wide "all goroutines asleep" quiescence check `future.md` **§2d** proposes — the ancestor
+already validates that roadmap, which is another reason not to keep widening this local predicate.
+
+**The standing bar meanwhile: when this predicate is unsure, it must HANG, never fault.** An accepted
+hang on a real deadlock (decision D) is a missing answer; a fault on a working program is a wrong one.
 
 **Accepted residuals, stated deliberately** (ledger row `W7-12r`): (a) two executors that genuinely
 deadlock each other now HANG rather than fault, because the registry sweep silences the verdict
