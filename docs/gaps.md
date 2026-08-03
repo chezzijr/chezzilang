@@ -4439,6 +4439,77 @@ shared bug into a live serial-vs-M:N divergence. Both engines now re-scan until 
 remains, terminating on the `shut` flag `shutdown` sets before it runs anything. Acceptance:
 `executor_created_by_a_joined_job_is_also_joined_both_engines`.
 
+### W7-12 — an eager `Executor` job blocked on a channel only its own joiner could fill HANGS on M:N — **OPEN, interim fix designed and approved, NOT implemented**
+
+Found by the project owner while reviewing the eager-execution milestone (§2c). **Pick this up first
+next session — everything needed to do it is below; do not re-derive it.**
+
+**The program** (`ex.submit(fn(): ch.recv())` → `ex.shutdown()` → `ch.send(42)`): the job blocks on an
+empty `recv`; `shutdown()` waits for the job; `main` can never reach its `send` because it is inside
+that wait. A genuine deadlock, and genuinely the caller's mistake — the complaint is only about how it
+is REPORTED.
+
+| | pre-eager (`b6cb9201`) | after §2c |
+|---|---|---|
+| M:N | faults in 0s | **hangs forever** |
+| `--serial` | faults in 0s | faults in 0s |
+
+Both legs measured on built binaries, not reasoned. So §2c traded a clear instant error for a silent
+hang on the default engine AND opened a serial-vs-M:N divergence.
+
+**Why it is not a simple revert.** §2c's change (an eager job BLOCKS on an empty `recv` instead of
+faulting) is correct for the case it targeted — a job waiting on a value `main` sends on the next line,
+which faults pre-§2c and works in Python/Go. The `netio.rs` arm decides by "am I inside a scheduler?",
+which cannot distinguish the two programs, so both the old always-fault and the new always-block are
+wrong half the time. Reverting re-breaks the producer/consumer shape the milestone existed to fix.
+
+**The distinguishing question is "is this executor already being JOINED?"**
+* job blocks while `main` is still running → a send may yet come → block (correct today).
+* job blocks while `main` is inside `shutdown()` waiting for it, and no sibling job is runnable →
+  nobody can send → fault.
+
+**Interim fix, approved 2026-08-03 — implement exactly this:**
+
+1. `src/vm/core.rs:568` — add to `ExecutorCore` beside `cancel` (`:579`):
+   `pub joining: AtomicUsize` (threads currently inside the join) and `pub blocked: AtomicUsize` (jobs
+   currently parked in an eager blocking loop).
+2. `src/vm/mod.rs:827` — add `eager_core: Option<Arc<ExecutorCore>>` beside `eager_job`; init `None` at
+   `src/vm/exec.rs:146`; set it in `Vm::prepare_eager_job` (`src/vm/sched.rs:3509`) alongside
+   `eager_job`/`cancel`, so a blocked job can reach its own executor.
+3. `Vm::join_eager_jobs` (`src/vm/sched.rs:3534`) — increment `joining` before the condvar wait loop and
+   decrement after it, BEFORE `reduce_task_slots` (which can return `Err`). Use an RAII guard so a
+   fault cannot leak the count.
+4. `src/vm/netio.rs` — the three eager blocking sites (`:1389` full-`send`, `:1608` empty-`recv` via
+   `eager_block_recv` `:1690`, `:1929` `wait:`). Hold `blocked` for the duration of a block (RAII guard;
+   for the `wait:` arm, which re-executes the op rather than looping, hold it only across the sleep —
+   the check simply converges over a few ticks). After each tick, fault if
+   `joining > 0 && blocked >= outstanding`.
+5. **Reuse the EXISTING fault strings** (the `recv` arm's message, `FULL_SEND_DEADLOCK`, the `wait:`
+   message) so this shape becomes byte-identical to pre-§2c rather than introducing new text. Extract
+   the `recv` one to a const next to `FULL_SEND_DEADLOCK` (`src/vm/netio.rs:24`) instead of duplicating.
+
+**Accepted residual, stated deliberately:** a job waiting on a channel that an OUTSIDE `parallel:` task
+would have filled, while `shutdown()` runs concurrently, will fault instead of waiting. That program
+ALSO faults on `main` today, so nothing regresses relative to pre-§2c — that property is what made this
+acceptable as an interim. It is still a LOCAL predicate, the same species as the one that sank the first
+eager attempt, so keep it narrow and do not grow it opportunistically. The sound successor (a
+process-wide AND-OR wait-for graph, knot detection, partial-deadlock capable) is designed in
+`docs/future.md` **§2d**; that is the real fix, and it is its own milestone.
+
+**Repro (both engines, on a release build):**
+```
+import std.concurrency
+ex := Executor()
+ch := Channel[int](1)
+ex.submit(fn(): print("job got {ch.recv()}"))
+ex.shutdown()
+ch.send(42)
+```
+`timeout 15 ./target/release/chezzi run <f>` → hangs (rc 124). `--serial` → faults in 0s. After the fix
+BOTH must fault in 0s. Also keep green: `executor_job_blocking_recv_waits_for_a_later_send`
+(`src/vm/tests.rs`) — the case that must still BLOCK — and the whole
+`tests/chz/stdlib/executor_drain_test.chz` (frozen by decision D5).
+
 ### W7-5d — a hard halt mid-`shutdown()` doesn't run every queued job the way an ordinary fault does, and the two engines diverge on WHICH jobs still don't run — **OPEN, found during this milestone's own doc review, NOT fixed**
 
 Found adversarially reviewing this milestone's docs, not while implementing W7-5/W7-5c. The run-all
