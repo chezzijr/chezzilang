@@ -9,16 +9,26 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > byte-identical text; the fix and its four stated residuals are written up in `docs/gaps.md` (section
 > `W7-12`, ledger row `W7-12r`).
 >
-> 1. **Run a manual `adversarial-review` before merging.** This milestone was rejected once as an
->    18-agent auto-task run, and per `auto-task-review-unreliable` a post-merge panel is not a
->    substitute. Then merge.
-> 2. **Do NOT** apply `.superpowers/sdd/task-3-mn-half.patch` (wrong lifetime, superseded), change any
->    deadlock predicate (`MnSched::is_deadlocked` is untouched by this milestone and should stay that
->    way), or grow W7-12's local predicate — the principled successor is the wait-for-graph detector
->    designed in `docs/future.md` **§2d**, which is its own milestone and best sequenced AFTER §2b
->    retires `--serial`.
+> 1. **Merge it.** `adversarial-review` has been run three times over this branch and every round found
+>    a real wrong-answer bug the full green gate had no opinion on (see `docs/gaps.md` W7-12); all are
+>    fixed. Re-verify by repro on the merged-HEAD binary, both engines, per
+>    `auto-task-review-unreliable`.
+> 2. **Then the agreed next milestone: a PROCESS-WIDE quiescence detector — `docs/future.md` §2d,
+>    step 0.** Decision 2026-08-04, owner: *"we should not let it hang; what could be done should be
+>    done."* Lift `MnSched::is_deadlocked` from per-nursery to process-wide and count JOINERS as blocked
+>    parties. That is Go's exact rule, it catches every shape W7-12 still hangs on (all of them are
+>    total quiescence), and it DELETES W7-12's whole interim predicate. Build it M:N-only — the old
+>    "wait for §2b to remove `--serial` first" constraint is lifted, since correctness now outranks
+>    engine agreement. The AND-OR knot graph stays a later step and buys only PARTIAL deadlock.
+>    **Write the Go/CPython comparison programs and the looping tests BEFORE the detector**: the vetoes
+>    (timer, socket, netpoll, blocking-pool, value-in-flight) are the entire correctness surface, and
+>    mis-vetoing is exactly how W7-12's predicate produced three false alarms on healthy programs.
+> 3. **Do NOT** apply `.superpowers/sdd/task-3-mn-half.patch` (wrong lifetime, superseded), and do NOT
+>    grow W7-12's local predicate one case at a time — that is what step 0 above replaces wholesale.
 >
-> Still open and NOT part of this: `W7-5d` (hard halt mid-`shutdown()` engine asymmetry).
+> Still open and NOT part of this: `W7-5d` (hard halt mid-`shutdown()` engine asymmetry — note its M:N
+> half is written against `run_workers_on_pool`, which eager execution DELETED, so re-derive it before
+> closing it) and `W7-13` (the eager block's missed wakeup / 5 ms poll stall).
 
 **Legend:** ⬜ not started · 🟦 in progress · ✅ done
 

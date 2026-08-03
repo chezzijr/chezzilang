@@ -276,20 +276,48 @@ Chezzi's `is_deadlocked` is already Go's rule, scoped per nursery. **The WFG's p
 PARTIAL deadlock** — a subset stuck while the rest of the program runs happily, which Go structurally
 cannot report. Both bugs found in §2c are partial deadlocks, so this is not a theoretical gain.
 
-### Ordering
+### Ordering — REVISED 2026-08-04, and this is where the next session starts
 
-1. `Arc::strong_count` sole-handle rule (sound, O(1), no graph) — good first cut.
-2. Unify the blocked-party registry process-wide (fibers + demoted workers + joiners). Today blocked
-   state is per-`MnSched`, so no one can see `main`-in-`shutdown()`. Overlaps the cross-nursery flat
-   scheduler work (`docs/cross-nursery-flat-scheduler.md`) and §2b's serial-engine removal — sequence
-   with those rather than against them.
-3. AND-OR knot detection over that registry, keeping every existing veto, run only on suspicion.
+The original plan opened with the `Arc::strong_count` rule and treated the graph as the payoff. Working
+W7-12 to a conclusion changed the ranking, for one reason: **every program that hangs today is TOTAL
+quiescence, which is the cheap case, not the hard one.** `main` parked inside `shutdown()`, both jobs
+parked, nothing runnable, nothing in flight — that is precisely Go's rule, and Go answers it by
+COUNTING, with no graph at all. W7-12's local predicate went wrong three times (`W7-12r`) because it
+asked "is this executor stuck?" — a question no per-executor counter can answer — when the answerable
+question was the process-wide one all along.
+
+0. **Lift `MnSched::is_deadlocked` from per-nursery to PROCESS-WIDE.** This is the whole fix for
+   `W7-12r`, it is Go's exact rule, and it subsumes and DELETES W7-12's interim predicate
+   (`eager_join_deadlocked`, `join_has_no_live_siblings`, `ExecutorCore::joining`/`blocked`, the
+   `eager_block_suspect` debounce, and the registry sweep — all of it). The one thing today's rule
+   cannot see is a **joiner**: a thread inside `Vm::join_eager_jobs` or a nursery barrier is blocked but
+   is counted nowhere, so `main`-in-`shutdown()` is invisible. Add joiners as blocked parties and the
+   rule reaches every W7-12 shape.
+1. `Arc::strong_count` sole-handle rule (sound, O(1), no graph) — still worth landing, but it is
+   narrower than it looks: it fires only when the blocked receiver holds the ONLY handle, so it misses
+   the common case where the channel is a module global `main` also holds. Do it after step 0, not
+   before.
+2. Unify the blocked-party registry process-wide (fibers + demoted workers + joiners) — the data
+   structure step 0 needs anyway. Overlaps `docs/cross-nursery-flat-scheduler.md`.
+3. AND-OR knot detection over that registry, keeping every existing veto, run only on suspicion. **This
+   buys PARTIAL deadlock only** — a subset stuck while the rest of the program runs on, which Go
+   structurally cannot report. Real, but extra credit on top of step 0, not a prerequisite for it.
 4. Retire the `netio.rs` "no scheduler ⇒ no sender" arms; they become unreachable.
 
-**Sequencing note:** §2b removes `--serial` after the JIT freeze. Do that FIRST if both are in play — a
-detector that has to stay byte-identical across two engines is a much harder problem than one written
-against a single engine, and the serial engine's blocked state (a `BTreeSet` of ready children with no
-counters at all) shares nothing with M:N's.
+**THE RISK, stated first because it is the one that has already bitten three times.** The vetoes are the
+whole correctness surface. A job sleeping on a `timer`, blocked on a socket, waiting on netpoll or
+blocking-pool work, or racing a value into a queue is NOT deadlocked, and counting it as such is a false
+alarm on a working program — the exact failure W7-12 shipped three times (see `gaps.md` W7-12 and the
+memory `parked-is-not-stuck`). So: write the Go/CPython comparison programs and the LOOPING regression
+tests BEFORE the detector, keep every veto `is_deadlocked` already earned, and put the whole thing
+through `adversarial-review` — a full green gate had no opinion on any of the three false positives.
+
+**Sequencing note — RELAXED 2026-08-04.** This previously said "do §2b (remove `--serial`) first,
+because a detector that must stay byte-identical across two engines is much harder". That constraint is
+gone: correctness now outranks engine agreement (project `CLAUDE.md`), and `--serial` is scheduled for
+deletion regardless, so **build the detector M:N-only and let the serial engine keep its crude arms
+until it is removed.** A temporary, documented engine difference on a doomed engine is a far smaller
+cost than either hanging or waiting on §2b.
 
 ---
 
