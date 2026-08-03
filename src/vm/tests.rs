@@ -11835,6 +11835,63 @@ print(\"end\")
     assert_eq!(mo, "got 1\nend\n");
 }
 
+/// W7-12's sharpest boundary: **parked is not unfeedable.** A bounded producer/consumer pipeline
+/// inside ONE executor spends its whole life with one job parked on a full `send` and the other on a
+/// momentarily-empty `recv` — that is the healthy steady state of a cap-1 handshake, and the two jobs
+/// feed EACH OTHER.
+///
+/// The predicate's first form (`blocked >= outstanding`, i.e. "every job this executor owes is
+/// parked") read that as a deadlock and faulted `send on a full channel` in 2–7 of 30 runs of this
+/// exact program — a NONDETERMINISTIC wrong answer on code Go and CPython run to completion, and the
+/// worst outcome available. The two-observation debounce does not help: consecutive 5 ms samples both
+/// land in successive parked windows.
+///
+/// So the verdict is now restricted to `outstanding == 1`, where there is no sibling to hand off with
+/// and the counters cannot be misread. This test is the fence, and it LOOPS because one pass proves
+/// nothing about a race — the buggy form passed most runs.
+#[test]
+fn executor_bounded_pipeline_is_not_mistaken_for_a_deadlock() {
+    let src = "
+import std.concurrency
+a: Channel[int] = Channel[int](1)
+fn prod():
+    for i in range(0, 50):
+        a.send(i)
+    a.close()
+fn cons():
+    s := 0
+    for v in a:
+        s = s + v
+    print(\"sum {s}\")
+ex := Executor()
+ex.submit(prod)
+ex.submit(cons)
+ex.shutdown()
+";
+    let entry = write_temp_chz("w712_bounded_pipeline", src);
+    let (tx, rx) = std::sync::mpsc::channel();
+    let e = entry.clone();
+    std::thread::spawn(move || {
+        let mut bad = Vec::new();
+        for _ in 0..12 {
+            let (o, _e2, r, _c) = run_file_p(&e);
+            if r.is_err() || o != "sum 1225\n" {
+                bad.push(format!("{r:?} / out={o:?}"));
+            }
+        }
+        let _ = tx.send(bad);
+    });
+    let bad = rx
+        .recv_timeout(std::time::Duration::from_secs(120))
+        .expect("a bounded pipeline must not hang");
+    let _ = std::fs::remove_file(&entry);
+    assert!(
+        bad.is_empty(),
+        "a healthy cap-1 handshake was reported as a deadlock in {}/12 runs: {bad:#?}",
+        bad.len()
+    );
+}
+
 /// W7-5b — an `Executor` constructed INSIDE a task, never explicitly shut down, must still have its
 /// work run and waited for at program exit.
 ///

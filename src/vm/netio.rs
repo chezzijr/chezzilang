@@ -1682,14 +1682,25 @@ impl Vm {
     ///
     /// `joining > 0` means a thread is inside an explicit `Executor.shutdown()` for this core, i.e.
     /// the submitter is parked waiting for this very job and can no longer reach the `send` that
-    /// would free it. `blocked >= outstanding` means every job the executor still owes is parked too,
-    /// so no sibling can send either. Together: nobody left who could feed us — the pre-§2c verdict,
-    /// restored for exactly the shape that regressed, without re-breaking the producer/consumer shape
-    /// eager execution exists to support (there `joining` is 0 while `main` is still running).
+    /// would free it. `outstanding == 1` means this blocked job is the executor's ONLY remaining work.
+    /// Together: nobody left who could feed us — the pre-§2c verdict, restored for exactly the shape
+    /// that regressed, without re-breaking the producer/consumer shape eager execution exists to
+    /// support (there `joining` is 0 while `main` is still running).
     ///
-    /// `outstanding` counts reserved-but-unfinished jobs, INCLUDING ones the pool has not started, so
-    /// the comparison is deliberately conservative: it under-fires (a job queued behind a saturated
-    /// pool keeps the count above `blocked`) and never over-fires for that reason.
+    /// **Why `outstanding == 1` and not `blocked >= outstanding`.** The general form is WRONG, and
+    /// measurably so: PARKED IS NOT UNFEEDABLE. Two jobs on opposite ends of a cap-1 channel — one
+    /// parked on a full `send`, one parked on the momentarily-empty `recv` — are the healthy steady
+    /// state of a bounded pipeline, and they feed EACH OTHER. `blocked >= outstanding` reads that
+    /// handshake as a deadlock, and the debounce does not save it because two consecutive 5 ms
+    /// observations land in successive parked windows. Caught by review, on a textbook program Go and
+    /// CPython run to completion: `prod`/`cons` over `Channel[int](1)` faulted
+    /// `send on a full channel: deadlock` in 2–7 of 30 runs. A nondeterministic wrong answer is the
+    /// worst outcome available here, so the counters are only trusted where they cannot be
+    /// misinterpreted — a single outstanding job has no sibling to hand off with.
+    ///
+    /// The cost is under-firing: any multi-job deadlock inside one executor now HANGS instead of
+    /// faulting (residuals (a)–(c)). That is the correct direction — decline, never answer wrong —
+    /// and telling those apart needs the wait-for graph in `future.md` §2d, not a cleverer counter.
     ///
     /// **And no OTHER live executor may still owe work.** Executors are independent, so a job of `y`
     /// can be the producer for a job of `x` — and `x.shutdown()` says nothing about `y`:
@@ -1727,7 +1738,7 @@ impl Vm {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .outstanding();
-        if outstanding == 0 || core.blocked.load(Ordering::Relaxed) < outstanding {
+        if outstanding != 1 || core.blocked.load(Ordering::Relaxed) == 0 {
             return false;
         }
         // Snapshot the registry and DROP its lock before touching any core lock.

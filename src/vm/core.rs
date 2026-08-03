@@ -597,12 +597,11 @@ pub struct ExecutorCore {
 /// A deadlock with no `shutdown()` therefore still hangs at exit; that is W7-12's stated residual (d).
 /// `shutdown_now` needs no bump either: it trips `cancel` first, and the cancel halt pre-empts this.
 ///
-/// What the call-site placement does NOT buy, stated plainly because the first cut claimed it did:
-/// it does not stop a producer living in ANOTHER executor from being over-ruled. `x.submit(consumer)`
-/// / `y.submit(producer)` then `x.shutdown()` DOES write the join, and x's job faults while y's
-/// producer is still live (gaps.md `W7-12r` (a)). That is tolerated only because the same program
-/// faults on `--serial` too, so no engine disagrees — and the sibling gate exists precisely because
-/// the shapes where the engines WOULD disagree are not tolerable.
+/// What the call-site placement does NOT buy, stated plainly because an earlier revision of this
+/// comment claimed it did: on its own it does not stop a producer living in ANOTHER executor from
+/// being over-ruled — `x.submit(consumer)` / `y.submit(producer)` then `x.shutdown()` DOES write the
+/// join. That program is kept correct by the registry sweep in `Vm::eager_join_deadlocked`, not by
+/// this placement, and it now completes (`got 1`) as it does in Go and CPython.
 pub(super) struct JoinGuard(Arc<ExecutorCore>);
 
 impl JoinGuard {

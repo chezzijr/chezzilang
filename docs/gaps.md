@@ -57,7 +57,7 @@ chronological log.
 | **W6-10r** | `:1216` | `--max-heap` residual: a payload reachable ONLY through a **nested** core (a `Channel` inside a `Shared`, once the nested core's last `Obj` alias slot is swept) is counted nowhere | Left open by the W6-10 fix on purpose. `live_bytes` reaches a core's bytes through its `Obj::*` alias slot; a nested core has none. Closing it needs cross-core byte recursion with `Arc` de-dup — narrow trigger, not worth the machinery yet |
 | protocol embeds | `:1505` | A protocol-embedded method isn't callable through the interface value (`p: Person` can't call embedded `name()`) despite `spec.md:973` "flattened at bound sites" | Filed as a safe-direction observation in wave 3; never triaged — doc and behavior contradict each other either way |
 | **W7-5d** | `:4413` | A hard halt (over-memory/timeout/dead-stdout) firing mid-`shutdown()` does NOT run every queued job the way an ordinary fault does — `--serial` stops popping the queue the instant one fires (later-queued jobs never run at all); M:N has already dispatched every job to the pool before a hard halt can fire, but that is not a per-job guarantee under a thread-starved pool | Found while adversarially reviewing this milestone's own docs. Live and reproduced on the built binary (`Executor().submit(spew-until-dead-stdout)` then two marker jobs, piped through `head -1`: M:N runs both markers, `--serial` runs neither), but untested — `tests/chz/stdlib/executor_drain_test.chz`'s 6 tests only use `panic()` faults, never a hard-halt kind. `executor_hard_halt` was deliberately built as an unconditional kill switch (W7-5), so this is arguably correct-by-design on both engines individually, but the exact SHAPE of "what still doesn't run" differs by engine and neither engine's shape is pinned by a test |
-| **W7-12r** | `:4442` | Residuals of the W7-12 interim fix (**the gap itself is FIXED 2026-08-03**): its predicate is LOCAL, so it declines to judge — and therefore HANGS rather than faults — when (a) two executors deadlock each other (the registry sweep silences it whenever another executor still owes work, which is what keeps it from faulting programs CPython runs to completion); (b) `--threads=1` (or a 1-core box) leaves a second job queued behind the blocked one, so `blocked < outstanding` and it still hangs; (c) a `wait:`-blocked sibling makes `blocked` flicker, so detection there is probabilistic; (d) a program with NO explicit `shutdown()` still hangs at the program-exit drain | Kept narrow on purpose — the same species of local predicate that sank the first eager attempt. Do NOT grow it (in particular, do not add a "started" counter for (b)): the sound successor is the process-wide AND-OR wait-for graph designed in `docs/future.md` **§2d**, which is its own milestone and is best sequenced after §2b retires `--serial` |
+| **W7-12r** | `:4442` | Residuals of the W7-12 interim fix (**the gap itself is FIXED 2026-08-03**): the verdict only fires for an executor whose ONLY outstanding job is blocked, with no other executor still owing work — everything else DECLINES, i.e. hangs rather than faults. So (a) any multi-job deadlock inside one executor, (b) two executors deadlocking each other, and (c) a program with no explicit `shutdown()` all still hang. Go reports (a) and (b) (`all goroutines are asleep`), so these are measured gaps against the concurrency ancestor | Deliberately under-fires. `blocked >= outstanding` was tried and is WRONG: a bounded cap-1 pipeline is permanently "all jobs parked" while being perfectly healthy (the two jobs feed each other), and it faulted 2–7 of 30 runs on a program Go and CPython complete — fenced now by `executor_bounded_pipeline_is_not_mistaken_for_a_deadlock`. Parked ≠ unfeedable, and no counter can tell those apart; do NOT try again with a cleverer counter. The sound successor is the process-wide AND-OR wait-for graph in `docs/future.md` **§2d** (which is what Go's own detector is), its own milestone, best sequenced after §2b retires `--serial` |
 | **W7-11** | `:3901` | A `RwShared` holding a container with an element that back-references the CONTAINER (`a.next = xs; RwShared(xs).at(0)`) aborts the host on `from_wire_memo`'s `.expect("a wire Backref always targets an already-reconstructed node id")` — a legal program, no concurrency, both engines | **Pre-existing on main**, not a W7-4 regression (verified on 5960052): a copy-out view drains ONE depth-1 piece, and a piece whose cycle closes through the ROOT container can never be self-contained — the definition it needs IS the container. `elem_split` fixes the sibling-CELL case, not this ancestor case. Closing it means either a catchable fault instead of the `.expect` (`from_wire_memo` returns a `Value`, so that is a signature change through every rebuild arm) or a same-guard whole-container fallback at all 12 view sites |
 | **W7-4a** | `:3901` | Airlock cell identity is preserved **per module** in the snapshot, so two globals in DIFFERENT modules over one shared cell still arrive as two cells | Residual disclosed by the W7-4 fix. Closing it needs `Vm`-lived rebuild state kept (and rooted) across the lazy per-module faults; the reported repro is same-module and is fixed |
 | **W7-4b** | `:3901` | A cell whose inner value carries a residual `Module`/`Native`/`Cffi` handle falls to `SnapValue::Cell`, which has no `Backref` encoding, so its identity is not preserved across a module snapshot | Residual disclosed by the W7-4 fix, and the same limit the `SnapValue::Closure` slow arm already documents. Closing it is a snapshot FORMAT change (id/`Backref` arms on `SnapValue`), out of proportion to a residual this narrow |
@@ -4543,15 +4543,15 @@ already validates that roadmap, which is another reason not to keep widening thi
 **The standing bar meanwhile: when this predicate is unsure, it must HANG, never fault.** An accepted
 hang on a real deadlock (decision D) is a missing answer; a fault on a working program is a wrong one.
 
-**Accepted residuals, stated deliberately** (ledger row `W7-12r`): (a) two executors that genuinely
-deadlock each other now HANG rather than fault, because the registry sweep silences the verdict
-whenever another executor still owes work — the deliberate direction of the trade above; (b) under
-`--threads=1` (or on a 1-core box) a
-second submitted job queued behind the blocked one keeps `blocked < outstanding`, so that program still
-hangs — do NOT close this with a "started" counter; (c) a `wait:`-blocked sibling makes `blocked`
-flicker (its guard drops between op invocations), so detection there converges by phase drift rather
-than by a bound; (d) a program with no explicit `shutdown()` still hangs at the exit drain, per the
-first bullet above.
+**Accepted residuals, stated deliberately** (ledger row `W7-12r`) — all four are the SAME decision,
+"decline rather than answer wrong": (a) any executor holding MORE THAN ONE outstanding job hangs
+instead of faulting, however plainly it is deadlocked, because `outstanding == 1` is the only shape
+these counters can read without mistaking a healthy cap-1 handshake for a deadlock (see above); this
+subsumes the earlier `--threads=1` and `wait:`-flicker residuals, which were both multi-job cases;
+(b) two executors deadlocking each other likewise hang — the registry sweep silences the verdict while
+any other executor still owes work; (c) Go DOES report both of those (`all goroutines are asleep`), so
+these are measured gaps against the concurrency ancestor, not merely untested corners; (d) a program
+with no explicit `shutdown()` still hangs at the exit drain, per the first bullet above.
 
 **Test coverage this fix RETIRED, stated rather than quietly dropped.**
 `test_runner::tests::timeout_reaches_a_job_blocked_on_a_channel_and_on_wait` used to prove that the
@@ -4584,7 +4584,10 @@ ex.shutdown()
 ch.send(42)
 ```
 `timeout 15 ./target/release/chezzi run <f>` → before the fix, hangs (rc 124); `--serial` → faults in
-0s. Both now fault in 0s with identical text. Acceptance:
+0s. Both now fault in 0s with identical text. Scope that claim exactly: it holds for the program AS
+WRITTEN, with the explicit `ex.shutdown()`. Delete that line and the executor is joined by the exit
+drain instead, which deliberately does not arm the predicate — M:N then still hangs while `--serial`
+faults, i.e. residual (d) is a still-live engine divergence, not merely an untested corner. Acceptance:
 `executor_job_blocked_during_shutdown_faults_both_engines` (`src/vm/tests.rs`, watchdogged — the
 failure mode of getting it wrong is a hang), with its mirror
 `executor_job_blocking_recv_waits_for_a_later_send` — the case that must still BLOCK — kept green, and
