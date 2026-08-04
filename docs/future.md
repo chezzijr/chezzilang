@@ -146,9 +146,11 @@ already the right machinery and is what jobs are now dispatched onto.
 op falls to the "no scheduler" arms of `chan_recv_step` / `send` / `wait:`, which declare a deadlock.
 That verdict was TRUE while jobs ran only at the drain (the submitter was blocked inside `shutdown()`,
 so nobody could send) and becomes a LIE once jobs start at `submit`. This is why the rejected attempt
-regressed `ch.recv()`-in-a-job. Fixed by having such a job BLOCK (`Vm::eager_block_recv`, a bounded
+regressed `ch.recv()`-in-a-job. Fixed by having such a job BLOCK (`Vm::block_recv`, a bounded
 poll on the channel's own condvar, mirroring `demote_recv_block`'s settle order) rather than fault —
-Python's behaviour. A job blocked on a value that never arrives hangs: decision D, unchanged.
+Python's behaviour. (Decision D — "a job blocked on a value that never arrives hangs" — was the
+milestone's own answer and stood for one day; §2d **step 0**, landed 2026-08-04, replaced it with the
+process-wide verdict, so such a job now faults once nothing in the run can move.)
 
 **The second hazard, found by self-review and reproduced:** `submit` must NOT hold the executor's
 `core.inner` lock while a dispatched job is running. The GC's `Obj::Executor` mark arm takes that same
@@ -205,10 +207,13 @@ answer to **"can anyone still send on this channel?"**
 
 The second one shipped an INTERIM answer for one narrow shape (gaps.md `W7-12`): a job faults if its own
 executor is being joined by an explicit `shutdown()` and every job that executor still owes is parked.
-That is a local predicate over one executor — it does not observe `parallel:` tasks, other executors, or
-`main`, and gaps.md row `W7-12r` lists the four programs it therefore still gets wrong. It is a
-placeholder for this section, not a down payment on it: the graph below subsumes it, and closing
-`W7-12r` by growing the local predicate instead is explicitly the wrong move.
+That was a local predicate over one executor — it observed neither `parallel:` tasks, other executors,
+nor `main`, and gaps.md row `W7-12r` listed the programs it therefore still got wrong.
+
+**Step 0 below landed 2026-08-04 and DELETED it**, replacing it with the process-wide count described
+there (`src/vm/quiesce.rs`). Both arms above now block and let that verdict decide, so the stale proxy
+is gone from the `recv`/`send`/`wait:` paths for every party that owns its own OS thread; only the
+native-callback arm, which genuinely cannot block, still faults on the spot.
 
 ### The proposal (project owner, 2026-08-03): a wait-for graph
 
@@ -276,33 +281,51 @@ Chezzi's `is_deadlocked` is already Go's rule, scoped per nursery. **The WFG's p
 PARTIAL deadlock** — a subset stuck while the rest of the program runs happily, which Go structurally
 cannot report. Both bugs found in §2c are partial deadlocks, so this is not a theoretical gain.
 
-### Ordering — REVISED 2026-08-04, and this is where the next session starts
+### Ordering — step 0 SHIPPED 2026-08-04; steps 1–4 remain
 
 The original plan opened with the `Arc::strong_count` rule and treated the graph as the payoff. Working
-W7-12 to a conclusion changed the ranking, for one reason: **every program that hangs today is TOTAL
+W7-12 to a conclusion changed the ranking, for one reason: **every program that hung was TOTAL
 quiescence, which is the cheap case, not the hard one.** `main` parked inside `shutdown()`, both jobs
 parked, nothing runnable, nothing in flight — that is precisely Go's rule, and Go answers it by
 COUNTING, with no graph at all. W7-12's local predicate went wrong three times (`W7-12r`) because it
 asked "is this executor stuck?" — a question no per-executor counter can answer — when the answerable
 question was the process-wide one all along.
 
-0. **Lift `MnSched::is_deadlocked` from per-nursery to PROCESS-WIDE.** This is the whole fix for
-   `W7-12r`, it is Go's exact rule, and it subsumes and DELETES W7-12's interim predicate
-   (`eager_join_deadlocked`, `join_has_no_live_siblings`, `ExecutorCore::joining`/`blocked`, the
-   `eager_block_suspect` debounce, and the registry sweep — all of it). The one thing today's rule
-   cannot see is a **joiner**: a thread inside `Vm::join_eager_jobs` or a nursery barrier is blocked but
-   is counted nowhere, so `main`-in-`shutdown()` is invisible. Add joiners as blocked parties and the
-   rule reaches every W7-12 shape.
+0. **Process-wide quiescence — DONE 2026-08-04 (`src/vm/quiesce.rs`), and it closed `W7-12r`.**
+   Landed NOT by lifting `MnSched::is_deadlocked` (which stays per-nursery, with every veto it earned
+   intact) but as a second, independent layer over the parties that scheduler never accounted:
+   `main` and each eager `Executor` job. `live = 1 + Σ ExecutorCore::outstanding`; a party registers a
+   `PartyWait` while blocked; the verdict is "every counted party registered AND none satisfiable".
+   It DELETED W7-12's interim predicate whole — `eager_join_deadlocked`, `join_has_no_live_siblings`,
+   `ExecutorCore::joining`/`blocked`, the `eager_block_suspect` debounce and the registry sweep. It
+   added the missing **joiner** node (`Vm::join_eager_jobs` registers `PartyWait::Join`), which is what
+   makes `main`-in-`shutdown()` visible, and it also fixed a wrong answer the ledger had not recorded:
+   `main` blocking on a channel an eager job was about to fill used to FAULT where Go and CPython both
+   print the value.
+
+   Three things are worth carrying forward to steps 1–4, each learned the hard way here:
+   * **The verdict must be ONE observation.** A first cut snapshotted the party list, released the
+     lock, then read the channels — and reported a producer and a consumer parked on empty channels
+     that were never empty at the same instant. Holding the party lock across the channel reads fixed
+     it. A wait-for graph is a bigger version of exactly this hazard.
+   * **A party must not be registered across its own attempt.** `pop()` and un-registering are not one
+     atomic step, so a party still registered while it consumes a value reads as parked at the instant
+     it made progress. Registration is scoped to the wait, never to the retry.
+   * **Satisfiability is what replaced the debounce.** "Is this wait already over?" is a direct
+     question with a direct answer; "has nothing moved recently?" is a guess, and it is the guess that
+     faulted a healthy cap-1 pipeline 6/40 runs.
 1. `Arc::strong_count` sole-handle rule (sound, O(1), no graph) — still worth landing, but it is
    narrower than it looks: it fires only when the blocked receiver holds the ONLY handle, so it misses
-   the common case where the channel is a module global `main` also holds. Do it after step 0, not
-   before.
-2. Unify the blocked-party registry process-wide (fibers + demoted workers + joiners) — the data
-   structure step 0 needs anyway. Overlaps `docs/cross-nursery-flat-scheduler.md`.
+   the common case where the channel is a module global `main` also holds.
+2. Unify the blocked-party registry with the SCHEDULER's parties — nursery fibers and demoted workers,
+   which step 0 deliberately left out (a live nursery is currently covered only indirectly, by its
+   owner being an unregistered live party). Overlaps `docs/cross-nursery-flat-scheduler.md`.
 3. AND-OR knot detection over that registry, keeping every existing veto, run only on suspicion. **This
    buys PARTIAL deadlock only** — a subset stuck while the rest of the program runs on, which Go
-   structurally cannot report. Real, but extra credit on top of step 0, not a prerequisite for it.
-4. Retire the `netio.rs` "no scheduler ⇒ no sender" arms; they become unreachable.
+   structurally cannot report, and which step 0 also cannot. Real, but extra credit on top of step 0.
+4. Retire the remaining `netio.rs` "no scheduler ⇒ no sender" arm. Step 0 already retired it for every
+   party that owns an OS thread; what is left is the native-callback case, which faults because it
+   genuinely cannot block, not because of the stale premise.
 
 **THE RISK, stated first because it is the one that has already bitten three times.** The vetoes are the
 whole correctness surface. A job sleeping on a `timer`, blocked on a socket, waiting on netpoll or
@@ -311,13 +334,18 @@ alarm on a working program — the exact failure W7-12 shipped three times (see 
 memory `parked-is-not-stuck`). So: write the Go/CPython comparison programs and the LOOPING regression
 tests BEFORE the detector, keep every veto `is_deadlocked` already earned, and put the whole thing
 through `adversarial-review` — a full green gate had no opinion on any of the three false positives.
+Step 0 followed that order and it paid: the Go/CPython table came first, and the two false positives it
+did hit were caught by an existing looping fence (a 300-handoff pipeline), not by reasoning.
 
-**Sequencing note — RELAXED 2026-08-04.** This previously said "do §2b (remove `--serial`) first,
-because a detector that must stay byte-identical across two engines is much harder". That constraint is
-gone: correctness now outranks engine agreement (project `CLAUDE.md`), and `--serial` is scheduled for
-deletion regardless, so **build the detector M:N-only and let the serial engine keep its crude arms
-until it is removed.** A temporary, documented engine difference on a doomed engine is a far smaller
-cost than either hanging or waiting on §2b.
+**Sequencing note — RELAXED 2026-08-04, and step 0 confirmed it was right.** This previously said "do
+§2b (remove `--serial`) first, because a detector that must stay byte-identical across two engines is
+much harder". That constraint is gone: correctness now outranks engine agreement (project `CLAUDE.md`),
+and `--serial` is scheduled for deletion regardless, so **build the detector M:N-only and let the
+serial engine keep its crude arms until it is removed.** In the event the shared code degenerated
+correctly on `--serial` anyway (`live` is 1 there, since that engine queues at `submit` and has no
+eager jobs, so a top-level block faults on its first halt check exactly as it always did) — the only
+divergence step 0 introduced is that M:N now RUNS the programs `--serial` still faults on, which is the
+direction that matters. Its acceptance tests are M:N-only and say so.
 
 ---
 

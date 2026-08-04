@@ -29,9 +29,9 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > **▶ NEXT SESSION, START HERE (2026-08-04).** Branch **`eager-executor`** is **MERGED** into `main`
 > (`5af067d9`, `--no-ff`): `217f9ffc` ships eager `Executor` execution (`docs/future.md` §2c),
 > `5983af49` documents the follow-ups, and `0787e39d` closes **`W7-12`** — the one regression §2c
-> introduced (a job blocked on a channel only its own joiner could fill hung on M:N while `--serial`
-> faulted). Both engines now fault in 0s with byte-identical text; the fix and its four stated
-> residuals are written up in `docs/gaps.md` (section `W7-12`, ledger row `W7-12r`).
+> introduced (a job blocked on a channel only its own joiner could fill hung on M:N). Its residuals
+> (`W7-12r`) are since CLOSED by the process-wide quiescence detector — see item 5 below and
+> `docs/gaps.md` section `W7-12r / W7-15`.
 >
 > 1. ✅ **Merged and re-verified on the merged-HEAD binary** (per `auto-task-review-unreliable`), not
 >    just on the branch: full `cargo test` green (3794 lib + 121 across the other targets, 0 failed),
@@ -85,18 +85,45 @@ Single source of truth for "what am I doing next." Update after every work sessi
 >    consumer to arrive first fixed it (0.01 s green vs 1.55 s red). **Mutation-verify every timing
 >    test — "it passes" is not evidence it executes the code you think it does.**
 >
-> 5. **Next milestone: a PROCESS-WIDE quiescence detector — `docs/future.md` §2d,
->    step 0.** Decision 2026-08-04, owner: *"we should not let it hang; what could be done should be
->    done."* Lift `MnSched::is_deadlocked` from per-nursery to process-wide and count JOINERS as blocked
->    parties. That is Go's exact rule, it catches every shape W7-12 still hangs on (all of them are
->    total quiescence), and it DELETES W7-12's whole interim predicate. Build it M:N-only — the old
->    "wait for §2b to remove `--serial` first" constraint is lifted, since correctness now outranks
->    engine agreement. The AND-OR knot graph stays a later step and buys only PARTIAL deadlock.
->    **Write the Go/CPython comparison programs and the looping tests BEFORE the detector**: the vetoes
->    (timer, socket, netpoll, blocking-pool, value-in-flight) are the entire correctness surface, and
->    mis-vetoing is exactly how W7-12's predicate produced three false alarms on healthy programs.
+> 5. ✅ **PROCESS-WIDE quiescence detector SHIPPED 2026-08-04 — `docs/future.md` §2d step 0, and it
+>    closes `W7-12r` + a new `W7-15`.** Owner's call: *"we should not let it hang; what could be done
+>    should be done."* `src/vm/quiesce.rs`. It did NOT lift `MnSched::is_deadlocked` (that stays
+>    per-nursery, with every veto it earned intact) — it added a second, independent layer over the
+>    parties that scheduler never accounted: `main` and each eager `Executor` job. `live = 1 +
+>    Σ ExecutorCore::outstanding`; a party registers a `PartyWait` while blocked; deadlock ⇔ every
+>    counted party is registered **and none of their waits is satisfiable**. Joiners are parties too
+>    (`join_eager_jobs`), which is the node whose absence made `main`-in-`shutdown()` invisible.
+>    It DELETED W7-12's predicate whole: `eager_join_deadlocked`, `join_has_no_live_siblings`,
+>    `ExecutorCore::joining`/`blocked`, `JoinGuard`/`BlockGuard`, the `eager_block_suspect` debounce
+>    and the registry sweep.
+>
+>    Measured (Go compiled + CPython, before writing code): (a) two blocked jobs in one executor,
+>    (b) two executors deadlocking each other, (c) a blocked job with no `shutdown()` — all HUNG, all
+>    now fault in <10 ms; Go reports (a) and (b), and for (c) neither ancestor faults (Go abandons the
+>    goroutine, CPython hangs), so pairing Chezzi's CPython-style exit join with Go's verdict is
+>    stricter than both, deliberately. **`W7-15`, new and previously unfiled**: `main` blocking on a
+>    channel an eager job was about to fill used to FAULT where Go and CPython both print the value —
+>    a wrong answer, not a hang, which by our own bar outranks (a)–(c) together.
+>
+>    **Five bugs found building it, none by reasoning** — three by the existing 300-handoff `wait:`
+>    fence, and **two by `adversarial-review` on an already-green gate**. Carry these into §2d steps
+>    1–4: (i) a party must not stay registered across its own retry (`pop()` and un-registering are not
+>    atomic, so it reads as parked at the instant it made progress — faulted 6/10); (ii) **the verdict
+>    must be ONE observation** — the first cut cloned the party list and released the lock before
+>    reading channels, judging channel states against a party set that never existed at any single
+>    instant; (iii) satisfiability ("is this wait already over?") replacing the debounce is a semantic
+>    upgrade, not a tuning one; (iv) **`closed` means opposite things for a single `recv` (progress)
+>    and a `wait:` recv arm (the poll SKIPS it)** — one variant for both was a HANG regression, rc 1 →
+>    rc 124; (v) **a wait predicate that answers a CONSTANT is a bug waiting for a window** — `Join`
+>    answering a flat "never satisfiable" faulted an already-drained `shutdown()` on a LIVE program,
+>    2/20 runs. Both review findings now have mutation-verified fences. The generalisable rule from
+>    (iv)+(v): a satisfiability arm must mirror what its own site SETTLES on, condition for condition.
+>    Health fences all green,
+>    cap-1 pipeline 0/40 false faults (the rejected progress counter was 6/40). Four new watchdogged
+>    M:N tests, each mutation-verified. Residuals in `docs/gaps.md`: an all-joiner cycle, bounded-pool
+>    starvation, partial deadlock (§2d step 3), scheduler parties (§2d step 2).
 > 6. **Do NOT** apply `.superpowers/sdd/task-3-mn-half.patch` (wrong lifetime, superseded), and do NOT
->    grow W7-12's local predicate one case at a time — that is what step 5 above replaces wholesale.
+>    re-grow a local per-executor predicate — step 5 replaced that wholesale.
 >    And do NOT read W7-13's fix as licensing progress-rate reasoning in the detector: the `W7-13r`
 >    `wait:` block still observes every non-arm-0 arm only once per tick, and `parked-is-not-stuck`
 >    is a semantic objection, not a latency one.

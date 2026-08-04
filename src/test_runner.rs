@@ -1471,13 +1471,13 @@ struct Suite:
         // bounded-polls. The `wait:` arm is the one that would silently spin forever if the shared
         // halt check were dropped from it.
         //
-        // The SPINNING sibling job is load-bearing since W7-12: with the blocked job alone, `shutdown`
-        // marks the executor as being joined and the job now faults `deadlock` instead of hanging, so
-        // the fixture would stop testing the deadline at all. A second, never-parked job keeps
-        // `blocked < outstanding`, the case W7-12's local predicate declines to judge (gaps.md
-        // `W7-12r`), which restores the accepted hang this test exists for.
+        // The SPINNING sibling job is load-bearing since W7-12: with the blocked job alone, the
+        // deadlock verdict fires and the job faults instead of hanging, so the fixture would stop
+        // testing the deadline at all. A second, never-parked job is a LIVE party that never registers
+        // as blocked, so the process-wide verdict declines (`blocked < live` — see `vm::quiesce`),
+        // which restores the accepted hang this test exists for.
         //
-        // Honest limit, verified by mutation (stub out the deadline read in `Vm::eager_halt_check` and
+        // Honest limit, verified by mutation (stub out the deadline read in `Vm::block_halt_check` and
         // this still passes): what it now pins is the END-TO-END guarantee — a test whose `shutdown()`
         // is blocked still reaches a verdict, and control never falls through — not the eager path's
         // OWN deadline read in isolation. The spinner hard-halts on the deadline at its back-edge,
@@ -1511,8 +1511,9 @@ struct Suite:
             );
             assert!(
                 !report.text.contains("deadlock"),
-                "{name}: W7-12's predicate must stay silent while a sibling job is still runnable — \
-                 this shape is the accepted hang the deadline exists to reach; report:\n{}",
+                "{name}: the deadlock verdict must stay silent while a sibling job is still \
+                 runnable — this shape is the accepted hang the deadline exists to reach; \
+                 report:\n{}",
                 report.text
             );
         }

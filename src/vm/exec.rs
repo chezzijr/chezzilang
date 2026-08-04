@@ -145,7 +145,7 @@ impl Vm {
             cancel_outer: Vec::new(),
             cancelled: false,
             eager_core: None,
-            eager_block_suspect: false,
+            quiesce: Arc::new(crate::vm::quiesce::QuiesceState::default()),
             timeout_ms: 0,
             deadline: None,
             deadline_tick: 0,

@@ -577,62 +577,6 @@ pub struct ExecutorCore {
     /// already-started jobs die at their next back-edge (decision D4 — "attempts to stop",
     /// cooperative, not preemptive), and a hard halt inside a job trips it via `run_outcome`.
     pub cancel: Arc<AtomicBool>,
-    /// W7-12 — threads currently inside an EXPLICIT `Executor.shutdown()` join of this core
-    /// ([`JoinGuard`]). Read only by [`Vm::eager_join_deadlocked`]: a job blocked while its own
-    /// joiner waits for it, with no sibling left to run, can never be fed and must fault instead of
-    /// hanging. The program-exit drain deliberately does NOT bump this — see the guard's doc.
-    pub joining: AtomicUsize,
-    /// W7-12 — jobs of this executor currently parked in an eager blocking loop ([`BlockGuard`]).
-    /// `blocked <= outstanding` always holds, so `blocked >= outstanding` means "every reserved job
-    /// is parked".
-    pub blocked: AtomicUsize,
-}
-
-/// W7-12 — RAII bump of [`ExecutorCore::joining`] for the duration of an EXPLICIT `shutdown()` join,
-/// and only when that join is the whole program (`Vm::join_has_no_live_siblings`).
-///
-/// Armed at the `shutdown` call site rather than inside `Vm::join_eager_jobs`, because that function
-/// also serves `drain_live_executors`, which joins every live executor ONE AT A TIME in registry
-/// order — so a bump there would make the REGISTRY ORDER decide which executor's job gets the fault.
-/// A deadlock with no `shutdown()` therefore still hangs at exit; that is W7-12's stated residual (c).
-/// `shutdown_now` needs no bump either: it trips `cancel` first, and the cancel halt pre-empts this.
-///
-/// What the call-site placement does NOT buy, stated plainly because an earlier revision of this
-/// comment claimed it did: on its own it does not stop a producer living in ANOTHER executor from
-/// being over-ruled — `x.submit(consumer)` / `y.submit(producer)` then `x.shutdown()` DOES write the
-/// join. That program is kept correct by the registry sweep in `Vm::eager_join_deadlocked`, not by
-/// this placement, and it now completes (`got 1`) as it does in Go and CPython.
-pub(super) struct JoinGuard(Arc<ExecutorCore>);
-
-impl JoinGuard {
-    pub(super) fn new(core: &Arc<ExecutorCore>) -> Self {
-        core.joining.fetch_add(1, Ordering::Relaxed);
-        Self(Arc::clone(core))
-    }
-}
-
-impl Drop for JoinGuard {
-    fn drop(&mut self) {
-        self.0.joining.fetch_sub(1, Ordering::Relaxed);
-    }
-}
-
-/// W7-12 — RAII bump of [`ExecutorCore::blocked`] for the duration of one eager job's block. Held
-/// across the whole blocking loop for `recv`/`send`; the `wait:` arm rewinds `ip` instead of looping,
-/// so it re-arms per tick (the predicate simply converges over a few of them).
-pub(super) struct BlockGuard(Arc<ExecutorCore>);
-
-impl BlockGuard {
-    pub(super) fn new(core: &Arc<ExecutorCore>) -> Self {
-        core.blocked.fetch_add(1, Ordering::Relaxed);
-        Self(Arc::clone(core))
-    }
-}
-
-impl Drop for BlockGuard {
-    fn drop(&mut self) {
-        self.0.blocked.fetch_sub(1, Ordering::Relaxed);
-    }
 }
 
 /// Every `ExecutorCore` created during one run, in creation order — the list the program-exit join

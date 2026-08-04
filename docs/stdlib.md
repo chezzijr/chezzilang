@@ -283,6 +283,13 @@ An `Executor` is **detached**: it outlives the scope that made it, and the progr
 outstanding work at exit. **Read results after `shutdown()`, never between it and the `submit`** —
 that window is the one place the two engines deliberately disagree.
 
+A blocking `recv`/`send`/`wait:` inside a job, or in `main` while jobs are running, **blocks and waits**
+— it does not assume "no scheduler means nobody can send". A `deadlock` fault is raised only once the
+whole run is stuck: every party blocked, none of their waits satisfiable. That is Go's rule
+(`all goroutines are asleep`), so `ex.submit(fn(): ch.recv())` with nobody to send faults in
+milliseconds instead of hanging, while `ex.submit(fn(): ch.send(42))` then `ch.recv()` in `main` simply
+works. Details and the residual cases in `docs/gaps.md` (`W7-12r / W7-15`) and `future.md` §2d.
+
 ### `Socket` / `Listener` — from `std.net` (see §4)
 - `Socket`: `read(n: int, timeout_ms?: int) -> Result[str]` · `write(s: str, timeout_ms?: int) -> Result[int]` ·
   `read_bytes(n: int, timeout_ms?: int) -> Result[bytes]` · `write_bytes(b: bytes, timeout_ms?: int) -> Result[int]` ·

@@ -1265,6 +1265,20 @@ supervised tasks) — Go's float-free `go` is the model both ecosystems *rejecte
 > already erroring). This holds for an executor created **inside a task** too, which it did not before
 > (`docs/gaps.md` **W7-5b**): the join walks a heap-independent registry of executor cores shared by
 > every worker, rather than the per-`Vm` handle list that died with its task's heap.
+> **Blocking inside a job, and the deadlock verdict (`future.md` §2d step 0, 2026-08-04).** An eager
+> job has no scheduler to park a fiber into, and neither does the top-level `main` thread, so both
+> BLOCK IN PLACE on an empty `recv` / full `send` / `wait:` — they no longer read "I have no scheduler"
+> as "nobody can ever send", which was true only while every concurrent construct was scheduler-backed.
+> A `deadlock` fault is now a **process-wide** verdict (`src/vm/quiesce.rs`): every counted party
+> (`main`, plus each outstanding job) is registered as blocked AND none of their waits is already
+> satisfiable. That is Go's `all goroutines are asleep` rule, so a genuinely stuck executor faults in
+> milliseconds instead of hanging — two jobs deadlocked in one executor, two executors deadlocked on
+> each other, and a blocked job with no `shutdown()` at all — while a job whose producer is still
+> running keeps waiting, and `ex.submit(fn(): ch.send(42))` followed by `ch.recv()` in `main` simply
+> works (it used to fault; Go and CPython both print the value). Under-reporting is deliberate wherever
+> the verdict is unsure: an accepted hang is a missing answer, a false fault is a wrong one. Residuals
+> — an all-joiner cycle, bounded-pool starvation, and PARTIAL deadlock (a subset stuck while the rest
+> runs on, which Go cannot report either) — are in `docs/gaps.md` `W7-12r / W7-15`.
 > **Captures cross by value on both engines:** `submit` wires the closure through the same by-value
 > airlock (`wire_callable` → `to_wire`) that `spawn` uses, so its captures are deep-copied and isolated
 > at submit time and the generator sendability enforcement runs — identically on the

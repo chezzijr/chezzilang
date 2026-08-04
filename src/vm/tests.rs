@@ -11733,6 +11733,257 @@ ch.send(42)
     assert_eq!(serial, mn, "the deadlock verdict must be engine-identical");
 }
 
+/// `W7-12r` residual (a), CLOSED by the process-wide verdict (`future.md` §2d step 0): TWO jobs of one
+/// executor both blocked on an empty channel, with `main` inside `shutdown()`, must fault.
+///
+/// W7-12's per-executor predicate could only judge `outstanding == 1` — anything with a sibling job
+/// was declined, because no counter can tell a parked cap-1 handshake from an unfeedable one — so this
+/// program, the commonest accidental executor deadlock there is, hung forever on M:N. Go reports it
+/// (`fatal error: all goroutines are asleep - deadlock!`, measured, rc=2, two goroutines on one empty
+/// channel behind a `WaitGroup`); CPython hangs. We now match Go.
+///
+/// M:N-only: `--serial` queues at `submit` (decision D3), so it faults here for an unrelated reason and
+/// is not evidence about anything this change touches (`--serial` is scheduled for removal, §2b).
+///
+/// **Needs ≥2 free pool threads.** With one, the second job is reserved but never dispatched, so it
+/// counts toward `live` while never registering as blocked and the verdict correctly declines — the
+/// bounded-pool starvation hazard `pool.rs` documents (risk G3), unchanged by this detector and
+/// verified at `--threads=1` on the CLI. Same constraint as
+/// `eager_send_blocked_on_a_full_channel_faults_when_the_channel_is_closed`.
+///
+/// Watchdogged — the failure mode is a hang, which would stall the suite rather than fail it.
+#[test]
+fn two_blocked_jobs_in_one_executor_fault_instead_of_hanging() {
+    let src = r#"
+ch := Channel[int](1)
+ex := Executor()
+ex.submit(fn(): print("j1 {ch.recv()}"))
+ex.submit(fn(): print("j2 {ch.recv()}"))
+ex.shutdown()
+"#;
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(run_capture_parallel(src));
+    });
+    let mn = rx.recv_timeout(std::time::Duration::from_secs(60)).expect(
+        "two jobs deadlocked in one executor must fault, not hang — or this host has <2 free \
+             pool threads, in which case the second job is queued-but-undispatched and the verdict \
+             correctly declines (pool.rs risk G3)",
+    );
+    let msg = mn
+        .expect_err("both jobs wait on a channel nobody can fill — a deadlock")
+        .message;
+    assert!(
+        msg.contains("recv on an empty channel: deadlock"),
+        "fault was: {msg}"
+    );
+}
+
+/// `W7-12r` residual (b), CLOSED: two executors deadlocking EACH OTHER must fault.
+///
+/// W7-12's predicate swept the executor registry and went silent while any other executor still owed
+/// work — necessary then, because "y still owes a job" was the only available proxy for "y might yet
+/// send", and over-ruling it faulted a program both ancestors complete (kept green by
+/// `executor_job_keeps_waiting_while_another_executor_still_owes_work`). The process-wide verdict does
+/// not need the proxy: it asks whether y's job is itself BLOCKED with nothing satisfiable, so a live
+/// producer in y still vetoes while a deadlocked one does not. Go reports this program (measured,
+/// rc=2); CPython hangs.
+///
+/// M:N-only, for the same D3 reason as the test above, and it needs ≥2 free pool threads for the same
+/// reason too. Watchdogged.
+#[test]
+fn two_executors_deadlocking_each_other_fault() {
+    let src = r#"
+c1 := Channel[int](1)
+c2 := Channel[int](1)
+x := Executor()
+y := Executor()
+x.submit(fn(): c1.send(c2.recv()))
+y.submit(fn(): c2.send(c1.recv()))
+x.shutdown()
+y.shutdown()
+"#;
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(run_capture_parallel(src));
+    });
+    let mn = rx.recv_timeout(std::time::Duration::from_secs(60)).expect(
+        "two mutually-deadlocked executors must fault, not hang — or this host has <2 free pool \
+             threads (see the sibling test above)",
+    );
+    let msg = mn
+        .expect_err("each executor's job waits for the other's — a deadlock")
+        .message;
+    assert!(
+        msg.contains("recv on an empty channel: deadlock"),
+        "fault was: {msg}"
+    );
+}
+
+/// `W7-12r` residual (c), CLOSED: a blocked job with NO explicit `shutdown()` must fault at the
+/// program-exit drain rather than hang there.
+///
+/// W7-12's `JoinGuard` was armed at the `shutdown()` call site and deliberately NOT at the exit drain,
+/// because the drain joins every live executor one at a time and a per-executor verdict would have let
+/// REGISTRY ORDER decide whose job faulted. A process-wide verdict has no such ordering problem, so
+/// `join_eager_jobs` registers its party for every join, this one included.
+///
+/// Neither ancestor faults here, and that is stated rather than glossed: Go returns from `main` and
+/// ABANDONS the goroutine (measured, rc=0), CPython's `ThreadPoolExecutor` joins its non-daemon
+/// threads at exit and hangs (measured, rc=124). Chezzi joins at exit (decision D1 — CPython's model),
+/// so with CPython's join and Go's verdict rule the answer here is stricter than both, deliberately.
+///
+/// M:N-only (D3). Watchdogged.
+#[test]
+fn blocked_job_with_no_shutdown_faults_at_the_exit_drain() {
+    let src = r#"
+ch := Channel[int](1)
+ex := Executor()
+ex.submit(fn(): print("job got {ch.recv()}"))
+"#;
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(run_capture_parallel(src));
+    });
+    let mn = rx
+        .recv_timeout(std::time::Duration::from_secs(60))
+        .expect("the exit drain must fault on a deadlocked job, not hang");
+    let msg = mn
+        .expect_err("the job waits on a channel nobody can fill — a deadlock")
+        .message;
+    assert!(
+        msg.contains("recv on an empty channel: deadlock"),
+        "fault was: {msg}"
+    );
+}
+
+/// The WRONG ANSWER the process-wide verdict also fixes, found while measuring `W7-12r`: `main`
+/// blocking on a channel an eager `Executor` job is about to fill used to FAULT.
+///
+/// ```text
+/// ex.submit(fn(): ch.send(42))
+/// print("main got {ch.recv()}")     # ← used to be: recv on an empty channel: deadlock
+/// ```
+///
+/// Both ancestors print `main got 42` (measured: CPython `ThreadPoolExecutor` + `queue.Queue(1)`, and
+/// Go with a goroutine over a buffered channel). Chezzi faulted, on BOTH engines. The cause is the
+/// stale premise `future.md` §2d names: `chan_recv_step`'s "I have no scheduler ⇒ nobody can ever
+/// send" `else` arm, which stopped being true the moment eager execution put running jobs outside
+/// every scheduler. `main` now blocks there like any other counted party, and the verdict declines
+/// while the job is live.
+///
+/// M:N-only, and the divergence is recorded rather than defended: `--serial` queues at `submit` (D3),
+/// so the job cannot run before `main`'s `recv` and it still faults there. That engine is scheduled
+/// for removal (§2b) and is not a standard of correctness.
+#[test]
+fn main_recv_completes_when_an_eager_job_sends() {
+    let src = r#"
+ch := Channel[int](1)
+ex := Executor()
+ex.submit(fn(): ch.send(42))
+print("main got {ch.recv()}")
+ex.shutdown()
+"#;
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(run_capture_parallel(src));
+    });
+    let out = rx
+        .recv_timeout(std::time::Duration::from_secs(60))
+        .expect("main must receive the job's value, not hang")
+        .expect("this program has no deadlock — both ancestors run it");
+    assert_eq!(out, "main got 42\n");
+}
+
+/// The process-wide verdict's HANG regression, caught by adversarial review of the change that
+/// introduced it: a `wait:` with a CLOSED arm must still reach its deadlock fault.
+///
+/// `closed` means opposite things at the two blocking sites. A single `recv` on a closed channel makes
+/// progress — it returns `ClosedEmpty`, so a `for v in ch:` ends and a bare `recv` faults. But the
+/// `wait:` poll SKIPS a closed+empty recv arm (W7-13r(a)), so that arm is not progress at all. Folding
+/// both into one `PartyWait` made the closed arm answer "satisfiable" forever, which vetoed the
+/// verdict permanently: this program faults in 0 ms before the detector and HUNG with the variants
+/// merged (measured on built binaries, both engines, rc 1 → rc 124).
+///
+/// Both engines, because neither has an executor in play and the fault text is the same.
+#[test]
+fn a_wait_with_a_closed_arm_still_reports_the_deadlock() {
+    let src = r#"
+c1 := Channel[int](1)
+c2 := Channel[int](1)
+c1.close()
+wait:
+    v := c1.recv():
+        print("c1 {v}")
+    w := c2.recv():
+        print("c2 {w}")
+"#;
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send((run_capture(src), run_capture_parallel(src)));
+    });
+    let (serial, mn) = rx
+        .recv_timeout(std::time::Duration::from_secs(60))
+        .expect("a closed arm must not veto the deadlock verdict forever");
+    for (engine, r) in [("serial", serial), ("M:N", mn)] {
+        let msg = r
+            .expect_err("nothing can feed c2 — this is a deadlock")
+            .message;
+        assert!(
+            msg.contains("wait on channels that are all empty: deadlock"),
+            "{engine} fault was: {msg}"
+        );
+    }
+}
+
+/// The process-wide verdict's FALSE-FAULT regression, also caught by adversarial review: an
+/// already-drained `shutdown()` must not be read as a blocked joiner.
+///
+/// `join_eager_jobs` registers its `PartyWait::Join` before it can take the executor lock, so a join
+/// with nothing outstanding — `Executor(); e.shutdown()`, and the whole window while the last job's
+/// `finish` wakes a real joiner — briefly puts a party in the registry for a thread that is about to
+/// return and keep running. While `Join` answered a flat "never satisfiable", a sibling sampling in
+/// that window faulted a LIVE program: measured 2/20 runs on this shape, where Go and CPython both
+/// print `got 1`. A join's wait condition is exactly `outstanding() == 0`, so that is what it answers.
+///
+/// The loop is the amplifier — one drained shutdown is a nanosecond-wide window; 20 000 of them beside
+/// a genuinely blocked consumer hit it reliably enough to have shown 2/20, and the whole program still
+/// runs in ~16 ms. Repeated here for the same reason.
+#[test]
+fn a_drained_shutdown_is_not_mistaken_for_a_blocked_joiner() {
+    let src = r#"
+c := Channel[int](1)
+exA := Executor()
+exA.submit(fn(): print("got {c.recv()}"))
+i := 0
+while i < 20000:
+    e := Executor()
+    e.shutdown()
+    i = i + 1
+c.send(1)
+exA.shutdown()
+"#;
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut bad = Vec::new();
+        for _ in 0..15 {
+            match run_capture_parallel(src) {
+                Ok(o) if o == "got 1\n" => {}
+                other => bad.push(format!("{other:?}")),
+            }
+        }
+        let _ = tx.send(bad);
+    });
+    let bad = rx
+        .recv_timeout(std::time::Duration::from_secs(120))
+        .expect("a drained shutdown must not hang either");
+    assert!(
+        bad.is_empty(),
+        "a live program was reported deadlocked in {}/15 runs: {bad:#?}",
+        bad.len()
+    );
+}
+
 /// W7-12's BOUNDARY, and the reason its join predicate asks who is joining rather than just whether
 /// anyone is: a `shutdown()` running inside a nursery task says nothing about whether a value can
 /// still arrive, because a SIBLING task can be the producer. Here `spawn: ex.shutdown()` runs while
@@ -11791,10 +12042,11 @@ print(\"end\")
 /// difference. The first cut of this fix did exactly that, and was defended with "`--serial` faults
 /// there too", which is an argument about agreement and not about correctness.
 ///
-/// So the predicate also sweeps the executor registry and stays silent while any OTHER executor still
-/// owes work. The accepted cost is the opposite error: two mutually-deadlocked executors HANG rather
-/// than fault (decision D), which is the right way to be wrong — never answer, rather than answer
-/// incorrectly.
+/// W7-12's predicate bought that by sweeping the executor registry and going silent while any OTHER
+/// executor still owed work — at the cost of the opposite error, two mutually-deadlocked executors
+/// HANGING. The process-wide verdict keeps this program correct WITHOUT the proxy: it asks whether
+/// y's job is itself blocked with nothing satisfiable, so a live producer vetoes and a deadlocked one
+/// does not, and the cost is gone (`two_executors_deadlocking_each_other_fault`).
 ///
 /// M:N-only for the same reason as its sibling above: `--serial` queues at `submit` (decision D3), so
 /// x's consumer does not exist until `x.shutdown()` drains it, and this shape faults there regardless

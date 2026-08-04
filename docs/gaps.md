@@ -60,7 +60,8 @@ chronological log.
 | **W7-5d** | `:4413` | A hard halt (over-memory/timeout/dead-stdout) firing mid-`shutdown()` does NOT run every queued job the way an ordinary fault does — `--serial` stops popping the queue the instant one fires (later-queued jobs never run at all); M:N has already dispatched every job to the pool before a hard halt can fire, but that is not a per-job guarantee under a thread-starved pool | Found while adversarially reviewing this milestone's own docs. Live and reproduced on the built binary (`Executor().submit(spew-until-dead-stdout)` then two marker jobs, piped through `head -1`: M:N runs both markers, `--serial` runs neither), but untested — `tests/chz/stdlib/executor_drain_test.chz`'s 6 tests only use `panic()` faults, never a hard-halt kind. `executor_hard_halt` was deliberately built as an unconditional kill switch (W7-5), so this is arguably correct-by-design on both engines individually, but the exact SHAPE of "what still doesn't run" differs by engine and neither engine's shape is pinned by a test |
 | **W7-14** | `:4619` | **`WAIT-1` unfixed on the `Executor` path.** A `wait:` timer arm inside an `Executor` job inline-sleeps to the deadline and takes the timer, ignoring a sibling value that arrives sooner: `timer(300)` beats a value at 50 ms. The SAME `wait:` in a `parallel:`/`spawn:` nursery correctly takes the value at 54 ms | `0b72ad60` (WAIT-1) fixed exactly this, but its branch is gated on `self.mn.is_some()` and an `Executor` job has `mn == None`, so it falls through to the cooperative inline-sleep. **Not an eager-execution regression** — pre-eager `main` (`b6cb9201`) measures the same 305 ms; the `Executor` path never had the fix. WAIT-1's recipe does not port unchanged: it submits the background deadline send into `self.mn`, which an eager job does not have |
 | ~~**W7-13r**~~ | `:4619` | **ALL THREE RESIDUALS FIXED 2026-08-04**, with W7-13 itself: (a) the eager `wait:` arm was a blind `thread::sleep` — now waits on arm 0's condvar, 300 wakeups **1020 ms → 5 ms**; (b) `trip()` set `done_latch` outside `core.q` — now under it; (c) a blocked eager `send` never observed `close()` — was a HANG, now faults `send on a closed channel` at 105 ms (Go, compiled: 104 ms) | Kept for the lessons, not the status. (a) was deferred as "needs its own design primitive" — **wrong**, `demote_wait_block` (`sched.rs:1114`) already had the four-line trick. (b) is deliberately UNFENCED: the window is nanoseconds and measured 5–6 ms both ways, so a timing test would assert nothing. (c) left a DELIBERATE engine divergence (`--serial` keeps `FULL_SEND_DEADLOCK`: its drain runs jobs one at a time and cannot interleave them) and needs ≥2 pool threads, unchanged by the fix. Note the original W7-13 diagnosis (a *missing* `wake_senders`) was WRONG: that wake already fires on all six pop paths; the bug was a LOST wakeup — `eager_wait_tick` waited with no predicate, so a `notify_all` arriving while the lock was free hit a condvar nobody was on yet |
-| **W7-12r** | `:4442` | Residuals of the W7-12 interim fix (**the gap itself is FIXED 2026-08-03**): the verdict only fires for an executor whose ONLY outstanding job is blocked, with no other executor still owing work — everything else DECLINES, i.e. hangs rather than faults. So (a) any multi-job deadlock inside one executor, (b) two executors deadlocking each other, and (c) a program with no explicit `shutdown()` all still hang. Go reports (a) and (b) (`all goroutines are asleep`), so these are measured gaps against the concurrency ancestor — **and they are live serial-vs-M:N divergences too**: two jobs both blocked on an empty `recv` faults in 0s on `--serial` and hangs forever on M:N, so the engine disagreement is closed only for the single-job shape | Deliberately under-fires. `blocked >= outstanding` was tried and is WRONG: a bounded cap-1 pipeline is permanently "all jobs parked" while being perfectly healthy (the two jobs feed each other), and it faulted 2–7 of 30 runs on a program Go and CPython complete — fenced now by `executor_bounded_pipeline_is_not_mistaken_for_a_deadlock`. Parked ≠ unfeedable, and no counter can tell those apart; do NOT try again with a cleverer counter. The sound successor is the process-wide AND-OR wait-for graph in `docs/future.md` **§2d** (which is what Go's own detector is), its own milestone, best sequenced after §2b retires `--serial` |
+| ~~**W7-15**~~ | `:5142` | **FIXED 2026-08-04**, found while measuring `W7-12r` and previously unfiled. `main` blocking on a channel an eager `Executor` job was about to fill FAULTED `recv on an empty channel: deadlock` where Go and CPython both print the value — a WRONG ANSWER, not a hang, on a three-line program. Cause: `chan_recv_step`'s "I have no scheduler ⇒ nobody can ever send" `else` arm, the stale premise `future.md` §2d names, which stopped being true when eager execution put running jobs outside every scheduler. `main` now blocks like any other counted party | — |
+| ~~**W7-12r**~~ | `:4442` | **FIXED 2026-08-04** by the process-wide quiescence detector (`src/vm/quiesce.rs`, `future.md` §2d **step 0**), which DELETED W7-12's per-executor predicate whole. All three residuals close — (a) two blocked jobs in one executor, (b) two executors deadlocking each other, and (c) a blocked job with no explicit `shutdown()` all fault in <10 ms where they hung forever. The same change fixed an unfiled WRONG ANSWER found while measuring them (`W7-15`, below): `main` blocking on a channel an eager job was about to fill used to fault. Kept for the lessons | Three, all about *when* a verdict may be formed. (1) The verdict must be ONE observation — a first cut cloned the party list and released the lock before reading channels, and reported a producer and consumer parked on channels that were never both empty at any single instant. (2) A party must not stay registered across its own retry: `pop()` and un-registering are not atomic, so it reads as parked at the instant it made progress (both caught by the existing 300-handoff `wait:` fence, not by reasoning). (3) SATISFIABILITY ("is this wait already over?") is what replaced the debounce — a direct question, where "has nothing moved recently?" was a guess that faulted a healthy cap-1 pipeline 6/40 runs |
 | ~~**W7-11**~~ | `:4771` | **FIXED 2026-08-04** by the same-guard whole-container fallback (`Vm::from_wire_piece`), plus `at(i) -> Option[E]`. A dangling `Backref` no longer `.expect`s: it flags, and the view re-rebuilds the whole container and returns the piece by its wire id, so the cycle survives — CPython's measured answer. Kept for the two lessons: the W7-4 round-2 rejection of "rebuild the whole container" did **not** transfer (it fired on EVERY piece and re-read the box under a SECOND guard; this fires only on a dangling backref and borrows the caller's guard), and the `.expect` was reachable from a legal single-threaded program for months because no test ran a cyclic value THROUGH a copy-out view | — |
 | **W7-4a** | `:3901` | Airlock cell identity is preserved **per module** in the snapshot, so two globals in DIFFERENT modules over one shared cell still arrive as two cells | Residual disclosed by the W7-4 fix. Closing it needs `Vm`-lived rebuild state kept (and rooted) across the lazy per-module faults; the reported repro is same-module and is fixed |
 | **W7-4b** | `:3901` | A cell whose inner value carries a residual `Module`/`Native`/`Cffi` handle falls to `SnapValue::Cell`, which has no `Backref` encoding, so its identity is not preserved across a module snapshot | Residual disclosed by the W7-4 fix, and the same limit the `SnapValue::Closure` slow arm already documents. Closing it is a snapshot FORMAT change (id/`Backref` arms on `SnapValue`), out of proportion to a residual this narrow |
@@ -4543,10 +4544,15 @@ self-declared trade: Go reports that deadlock and we do not. Note also that Go's
 the process-wide "all goroutines asleep" quiescence check `future.md` **§2d** proposes — the ancestor
 already validates that roadmap, which is another reason not to keep widening this local predicate.
 
-**The standing bar meanwhile: when this predicate is unsure, it must HANG, never fault.** An accepted
-hang on a real deadlock (decision D) is a missing answer; a fault on a working program is a wrong one.
+**The standing bar throughout: when a verdict is unsure, it must HANG, never fault.** An accepted hang
+on a real deadlock is a missing answer; a fault on a working program is a wrong one. That ranking
+survives the fix below unchanged — it is what the new detector's error-direction table encodes.
 
-**Accepted residuals, stated deliberately** (ledger row `W7-12r`) — all of them the SAME decision,
+**The residuals below are CLOSED (2026-08-04) — see the `W7-12r` section further down.** They are kept
+here as written, because the reasoning that made them necessary is exactly what the successor had to
+answer, and because two of them were re-derived (and re-broken) while building it.
+
+**Accepted residuals as they stood 2026-08-03** (ledger row `W7-12r`) — all of them the SAME decision,
 "decline rather than answer wrong": (a) any executor holding MORE THAN ONE outstanding job hangs
 instead of faulting, however plainly it is deadlocked, because `outstanding == 1` is the only shape
 these counters can read without mistaking a healthy cap-1 handshake for a deadlock (see above); this
@@ -4555,13 +4561,11 @@ subsumes the earlier `--threads=1` and `wait:`-flicker residuals, which were bot
 any other executor still owes work; (c) a program with no explicit `shutdown()` still hangs at the exit
 drain, per the first bullet above.
 
-**State the cost of (a) and (b) at full strength, because "it hangs" undersells it.** Both are MEASURED
-gaps against Go, which reports them (`all goroutines are asleep - deadlock!`), and both are ALSO live
-serial-vs-M:N divergences: `ex.submit(w); ex.submit(w); ex.shutdown()` with two jobs on an empty `recv`
-— the commonest accidental executor deadlock there is — faults in 0s on `--serial` and hangs forever on
-M:N. So this fix does not close the engine disagreement in general; it closes it for the single-job
-shape and leaves it open for the rest. That is a deliberate ranking (a missing answer beats a wrong
-one), not a claim of completeness, and it is the strongest single argument for scheduling §2d.
+**The cost of (a) and (b) at full strength, because "it hangs" undersold it.** Both were MEASURED gaps
+against Go, which reports them (`all goroutines are asleep - deadlock!`): `ex.submit(w); ex.submit(w);
+ex.shutdown()` with two jobs on an empty `recv` — the commonest accidental executor deadlock there is —
+hung forever. That was a deliberate ranking (a missing answer beats a wrong one), not a claim of
+completeness, and it was the strongest single argument for scheduling §2d.
 
 **Rejected experiment, recorded so it is not retried blind.** The obvious repair for (a) is a PROGRESS
 counter: tick an `ExecutorCore::progress` on every completed channel handoff and fault only when every
@@ -5133,3 +5137,142 @@ eager-execution milestone (`docs/future.md` §2c) rather than against the curren
   `kids` — it just carries a `Channel[bool]` wakeup rather than also writing the child's own `flag`.
   Storing the child's `Shared[bool]` in the parent's registry too (not just the wakeup channel) would
   collapse `cancelled()` to one local read, cheaper and less code than the current recursive walk.
+
+### W7-12r / W7-15 — the process-wide quiescence detector (`future.md` §2d **step 0**) — **FIXED 2026-08-04**
+
+Closes every residual of W7-12's interim predicate, and one wrong answer that predicate never reached.
+
+**Measured first, on built binaries, before any code was written** (Go 1.26 compiled, CPython 3, and
+`target/release/chezzi` at `8c401e8f`, all under a `timeout`). Go is the concurrency ancestor and so
+the baseline for the deadlock VERDICT; `Executor` itself is Python/Java lineage. `--serial` is not
+consulted — it is scheduled for removal (`future.md` §2b) and a doomed engine cannot be a standard of
+correct.
+
+| program | Go | CPython | Chezzi before | Chezzi after |
+|---|---|---|---|---|
+| (a) two jobs of one executor on an empty `recv`, `shutdown()` | `all goroutines are asleep` (rc 2) | hangs | **hangs** | **faults, 9 ms** |
+| (b) two executors deadlocking each other | `all goroutines are asleep` (rc 2) | hangs | **hangs** | **faults, 9 ms** |
+| (c) one blocked job, no `shutdown()` (exit drain) | rc 0 — **abandons** the goroutine | hangs | **hangs** | **faults, 4 ms** |
+| (d) = **W7-15**: `main` `recv`s while an eager job `send`s | `main got 42` | `main got 42` | **faults** | `main got 42` |
+| cap-1 pipeline, 50 handoffs (health fence) | completes | completes | completes | completes, **0/40 false faults** |
+| producer in ANOTHER executor (health fence) | `got 1` | `got 1` | `got 1` | `got 1` |
+| `shutdown()` in a `spawn:` beside a live producer (health fence) | `job got 42` | — | `job got 42` | `job got 42` |
+
+Two things follow. (c) is **not** a measured gap against either ancestor — Go abandons the goroutine at
+`main`'s return, CPython's `ThreadPoolExecutor` joins its non-daemon threads and hangs. Chezzi joins at
+exit (decision D1, CPython's model), so pairing CPython's join with Go's verdict rule is stricter than
+both, deliberately. And (d) — filed here as **W7-15**, previously unrecorded — was a WRONG ANSWER
+rather than a hang, which by this project's own bar outranks (a)–(c) put together.
+
+**The rule.** Go's own detector, with one adaptation:
+
+> deadlock ⇔ every counted party is registered as blocked **AND** no registered party's wait condition
+> is already satisfiable.
+
+The second clause is the adaptation, and it is what every counter-only attempt lacked. A bounded cap-1
+pipeline is permanently "all parties parked" while perfectly healthy — but with `cap == 1` the channel
+is either non-empty (the parked RECEIVER is satisfiable) or has a free slot (the parked SENDER is), and
+never neither. Two jobs on a genuinely empty channel are both unsatisfiable. **Satisfiability separates
+parked from unfeedable**, which no progress counter or debounce window could (see W7-12's rejected
+experiment above, and the `parked-is-not-stuck` memory).
+
+**Counted parties, and why the count is sound.** `live = 1 (main) + Σ ExecutorCore::outstanding` over
+the run's `ExecRegistry` — no new counter, deliberately: `outstanding` is bumped at `reserve()` (at
+`submit`, before dispatch) and dropped at `finish()`, by the code that owns job lifetime. A thread that
+is NOT a counted party — an `MnSched` worker, netpoller/timer callback, blocking-pool thread — can only
+run user code while some counted party sits inside a nursery or a native call, and such a party is live
+and unregistered, so `blocked < live` vetoes. **An uncounted sender therefore always implies a veto**,
+which is why no "is a scheduler alive?" global is needed and why `MnSched::is_deadlocked` was left
+completely alone, with every veto it earned intact. `Vm::is_counted_party` is the corollary: register
+only with no scheduler of any kind and no native-callback frame.
+
+The error directions are asymmetric and all fall the safe way — a missed registration or an
+over-generous satisfiability check costs a HANG; only an under-count of `live` could fault a live
+program, and that is the one quantity not hand-maintained.
+
+**What it deleted.** `Vm::eager_join_deadlocked`, `Vm::join_has_no_live_siblings`,
+`ExecutorCore::joining`/`blocked`, `JoinGuard`, `BlockGuard`, `Vm::eager_block_suspect` and its
+two-observation debounce, and the registry sweep — the whole interim predicate, not a layer over it.
+`Vm::join_eager_jobs` registers a `PartyWait::Join` instead, for EVERY join: the explicit `shutdown()`
+and the program-exit drain alike, which is what closes residual (c). W7-12 could not arm its guard at
+the drain because a per-executor verdict would have let registry ORDER decide whose job faulted; a
+process-wide verdict has no such ordering problem.
+
+**Five bugs found while building it, each a lesson for §2d steps 1–4.** The first three were caught by
+an existing looping fence — `an_eager_wait_block_is_woken_by_its_arm_not_by_the_poll_timeout`, a
+300-handoff gate/data pipeline — and the last two by `adversarial-review`, on a change whose whole
+gate was already green. None by reasoning:
+
+1. **A party must not stay registered across its own retry.** `pop()` and un-registering are not one
+   atomic step, so a party still registered while it consumes a value reads as *parked at the very
+   instant it made progress*. Registration is now scoped to the wait, never the attempt. Faulted 6/10.
+2. **The verdict must be ONE observation.** The first cut cloned the party list, released the lock, then
+   read the channels — so it judged channel states against a party set that never existed at any single
+   instant (a party can register, be fed, un-register and run on while the stale clone still names it).
+   It reported a producer parked on `gate` and a consumer parked on `data` with both empty — a state
+   that program cannot reach, since whichever parked second must have fed the other first. The party
+   lock is now held across the whole verdict. Lock order is `parties` → `exec_registry`/`eager` →
+   `ChannelCore::q`, and nothing anywhere takes `parties` while holding a channel or executor lock.
+3. **Satisfiability replaced the debounce, and that is a semantic upgrade, not a tuning one.** "Is this
+   wait already over?" has a direct answer; "has nothing moved recently?" is a guess, and it is the
+   guess that faulted a healthy pipeline 6/40 runs.
+4. **`closed` means OPPOSITE things at the two recv sites, and folding them was a HANG regression.** A
+   single `recv` on a closed channel makes progress (`ClosedEmpty` — the `for` ends, a bare `recv`
+   faults), but the `wait:` poll *SKIPS* a closed+empty recv arm (W7-13r(a)), so that arm is not
+   progress at all. One `PartyWait::Recv` covering both made a closed arm answer "satisfiable"
+   forever, vetoing the verdict permanently: `c1.close(); wait: c1.recv() / c2.recv()` faulted in 0 ms
+   before this detector and hung after (measured rc 1 → rc 124, both engines). Split into `Recv` and
+   `Wait`. **The general rule, and it is W7-13r(a)'s rule re-learned in a new place: a satisfiability
+   arm must mirror what its site actually SETTLES on, condition for condition — not what changed.**
+5. **A wait predicate that answers a CONSTANT is a bug waiting for a window.** `PartyWait::Join`
+   answered a flat "never satisfiable", which is wrong for an already-drained join: `join_eager_jobs`
+   registers before it can take the executor lock, so `Executor(); e.shutdown()` — and the whole
+   window while the last job's `finish` wakes a real joiner — left a permanently-unsatisfiable party
+   in the registry for a thread about to return and keep running. A sibling sampling there faulted a
+   LIVE program, 2/20 runs. A join's condition is `outstanding() == 0`; it now answers that. Fenced by
+   `a_drained_shutdown_is_not_mistaken_for_a_blocked_joiner` (15 runs per invocation — the mutation
+   fails it 3/3, where the CLI shape showed the bug only 2/20).
+
+**Residuals, stated deliberately.**
+* **A cycle made only of joiners hangs.** A joiner never self-faults (the jobs it waits for do), and it
+  waits untimed, so a hypothetical cycle in which *every* party is a `Join` has nobody to form the
+  verdict. Needs `main` → job → executor → job → executor → `main`, all joins and no channel block.
+  Rare enough to decline rather than add a polling joiner and a fault message for it.
+* **Bounded-pool starvation hangs, and it bounds two of the acceptance tests.** A job reserved but
+  never dispatched (pool full of blocked jobs) counts live forever, so the verdict declines — correct
+  by the error-direction table, and it hung before too (`pool.rs` risk G3, pre-existing). Measured:
+  shapes (a) and (b) fault at `--threads=4` and hang at `--threads=1`, because the second job never
+  gets a thread. So `two_blocked_jobs_in_one_executor_fault_instead_of_hanging` and
+  `two_executors_deadlocking_each_other_fault` **need ≥2 free pool threads** and say so in their
+  watchdog messages; a single-core host would see them time out. Shapes (c) and (d) are fine at one
+  thread.
+* **Partial deadlock is still out of reach** — a subset stuck while the rest of the program runs on.
+  That is §2d step 3 (AND-OR knot detection) and always was; step 0 buys TOTAL quiescence only, exactly
+  as Go's own rule does.
+* **A live nursery is covered only indirectly**, by its owner being an unregistered live party. Folding
+  scheduler parties into the same registry is §2d step 2.
+* **`--serial` keeps its old answer on all four shapes** (it queues at `submit`, decision D3, so no job
+  can run before `main` blocks). Recorded as a §2b-pending artifact, not a contract: the acceptance
+  tests are M:N-only and say so.
+
+* **The verdict is O(parties + executors + arms) under one global lock, per blocked party, per 5 ms
+  tick.** Accepted: it runs only on threads that are already blocked, never on a hot path, and the
+  single lock is a correctness requirement (lesson 2 above), not an oversight. `exec_registry` is
+  push-only, so a program that constructs very many executors and then blocks pays for all of them —
+  the same push-only bound `ExecRegistry` already documents.
+
+**Acceptance** (`src/vm/tests.rs`, all watchdogged — the failure mode is a hang — and all
+mutation-verified: stubbing `quiesced()` to `false` fails the first three, and restoring the old
+`eager_core.is_some()` recv gate fails the fourth):
+`two_blocked_jobs_in_one_executor_fault_instead_of_hanging`,
+`two_executors_deadlocking_each_other_fault`,
+`blocked_job_with_no_shutdown_faults_at_the_exit_drain`,
+`main_recv_completes_when_an_eager_job_sends`, plus the two review regressions
+`a_wait_with_a_closed_arm_still_reports_the_deadlock` and
+`a_drained_shutdown_is_not_mistaken_for_a_blocked_joiner`. The health fences
+`executor_bounded_pipeline_is_not_mistaken_for_a_deadlock` (re-run 40× on the CLI: 0 false faults),
+`executor_job_keeps_waiting_when_shutdown_runs_beside_a_live_producer`,
+`executor_job_keeps_waiting_while_another_executor_still_owes_work`,
+`executor_job_blocking_recv_waits_for_a_later_send` and
+`executor_job_blocked_during_shutdown_faults_both_engines` all stay green unchanged, as does
+`tests/chz/stdlib/executor_drain_test.chz` (frozen by decision D5).

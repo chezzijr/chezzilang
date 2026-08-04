@@ -3195,6 +3195,9 @@ impl Vm {
         // task is still reachable by the program-exit join after this worker's heap is gone. This is
         // the whole fix: the parallel `Vm.executors` list is heap-keyed and dies with the task.
         worker.exec_registry = Arc::clone(&self.exec_registry);
+        // …and the blocked-party registry with it, for the same reason: the process-wide deadlock
+        // verdict must see every party of THIS run and none of any other's (`future.md` §2d step 0).
+        worker.quiesce = Arc::clone(&self.quiesce);
         // B3.3-threads: thread the parent's host state (process args + env) through so a
         // `--parallel` task reading `std.os.args` / an env var sees the same values instead of inert
         // defaults (the B3.2 silent-divergence owe). `args` is read-only (deep-cloned). `env` is
@@ -3628,12 +3631,13 @@ impl Vm {
     /// does NOT trip that flag ([`ReadyWorker::run_outcome`]), only `os.exit` / [`executor_hard_halt`]
     /// do, so siblings keep running and `shutdown` raises the lowest SUBMISSION-INDEX fault.
     ///
-    /// The worker also carries the executor CORE, so a job that blocks can ask whether its submitter
-    /// is still running or already inside `shutdown()` waiting for it (W7-12,
-    /// [`Vm::eager_join_deadlocked`]). No SCHEDULER predicate reads eager-job state — `is_deadlocked`
-    /// is untouched — and an `Executor`-spanning deadlock outside that narrow local check is still an
-    /// accepted hang (decision D). What eager execution DOES change is that a blocking op inside a job
-    /// can no longer assume its submitter is stuck in the drain — see [`Vm::eager_block_recv`].
+    /// The worker also carries the executor CORE, which owns the job's outcome slot and its cancel
+    /// flag. Whether a blocked job is DEADLOCKED is not asked of that core: it is the process-wide
+    /// question in [`crate::vm::quiesce`] (`future.md` §2d step 0), which counts this job through
+    /// `outstanding` and sees it park through the blocked-party registry. No SCHEDULER predicate reads
+    /// eager-job state — `is_deadlocked` is untouched. What eager execution DOES change is that a
+    /// blocking op inside a job can no longer assume its submitter is stuck in the drain — see
+    /// [`Vm::block_recv`].
     pub(super) fn prepare_eager_job(
         &mut self,
         core: &Arc<ExecutorCore>,
@@ -3656,10 +3660,22 @@ impl Vm {
     /// per-slot output flush and decision F's task-order flush all carry over unchanged.
     ///
     /// The wait is a plain condvar wait, NOT a bounded poll: `finish` always runs (see
-    /// `dispatch_eager_job`'s panic note), so a missed wakeup is not a hazard. It does mean a job
-    /// blocked forever blocks `shutdown` forever — decision D's accepted hang, and the same shape
-    /// `--serial`'s inline drain already has.
+    /// `dispatch_eager_job`'s panic note), so a missed wakeup is not a hazard.
+    ///
+    /// **A joiner is a blocked party** (`future.md` §2d step 0), and registering it here is what makes
+    /// the process-wide verdict able to see `main` inside `shutdown()` — the node whose absence left
+    /// W7-12's arms unable to tell "my submitter may still send" from "my submitter is waiting for
+    /// me". It is registered for EVERY join, the explicit `shutdown()` and the program-exit drain
+    /// alike, which is what closes W7-12r's residual (c); the old `JoinGuard` could not be armed at
+    /// the drain because the verdict was per-executor and registry ORDER would then have decided
+    /// whose job faulted. A `Join` wait is never satisfiable on its own — the jobs it waits for fault
+    /// themselves, which fills their slots and releases this wait normally.
+    ///
+    /// A joiner running inside a nursery task is NOT a counted party and so does not register: a
+    /// sibling task may be the very producer the blocked job needs (pinned by
+    /// `executor_job_keeps_waiting_when_shutdown_runs_beside_a_live_producer`).
     pub(super) fn join_eager_jobs(&mut self, core: &Arc<ExecutorCore>) -> Result<(), RuntimeError> {
+        let _party = self.block_party_guard(crate::vm::quiesce::PartyWait::Join(Arc::clone(core)));
         let slots = {
             let mut g = core.eager.lock().unwrap_or_else(|e| e.into_inner());
             while g.outstanding() > 0 {
@@ -3667,6 +3683,7 @@ impl Vm {
             }
             g.take_slots()
         };
+        drop(_party);
         self.reduce_task_slots(slots)
     }
 
