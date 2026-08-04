@@ -2792,9 +2792,13 @@ impl Checker {
                                 self.check_args_range("len", &[], 0, args, span);
                                 return Ty::Int;
                             }
+                            // `at(i) -> Option[E]`: out of range is `None`, never a fault, matching the
+                            // language's other named accessors (`get_key -> Option[V]` below,
+                            // `std.json.at -> Option[Json]`). `RwShared` has no `[]` of its own (it
+                            // does not satisfy `Index`), so this is its only read accessor.
                             "at" => {
                                 self.check_args_range("at", &[Ty::Int], 1, args, span);
-                                return e;
+                                return Ty::option(e);
                             }
                             "slice" => {
                                 self.check_args_range("slice", &[Ty::Int, Ty::Int], 2, args, span);

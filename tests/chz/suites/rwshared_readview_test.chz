@@ -4,20 +4,19 @@
 # chz_suite_passes_both_engines gate runs this file on BOTH engines and asserts identical verdicts.
 import std.concurrency
 
-# len / at (incl. negative index) / slice, plus an OOB fault caught by recover:.
+# len / at (incl. negative index) / slice. `at` is the SAFE index: out of range is None, never a
+# fault (`[]` is the dangerous one). Same split as `get_key` below and `std.json.at`.
 test fn read_view_indexing():
     box := RwShared(List(range(1, 1001)))   # [1, 2, ..., 1000]
     assert box.len() == 1000
-    assert box.at(0) == 1
-    assert box.at(999) == 1000
-    assert box.at(-1) == 1000
-    assert box.at(-1000) == 1
+    assert box.at(0) == Some(1)
+    assert box.at(999) == Some(1000)
+    assert box.at(-1) == Some(1000)
+    assert box.at(-1000) == Some(1)
     assert box.slice(2, 5) == [3, 4, 5]
     assert box.slice(0, 0) == []
-    r := recover: box.at(5000)
-    match r:
-        Ok(v): assert false, "expected OOB fault, got " + str(v)
-        Err(e): assert e.message().contains("out of bounds"), e.message()
+    assert box.at(5000) == None
+    assert box.at(-5000) == None
 
 # for_each: side-effect scan accumulating into an AtomicInt (its own box, no reentrancy).
 test fn read_view_for_each():
@@ -53,6 +52,15 @@ test fn read_view_fold_under_parallel():
 # write-preferring std RwLock then blocks the recursive read behind the queued writer -> M:N deadlock
 # (serial completes -> parity divergence + hang). Per-element re-lock (guard dropped before the
 # callback) makes the nested read fine. Reliably deadlocked the old code; completes fast now.
+#
+# `at` returns `Option[E]`, and `Option` carries no methods, so the nested read goes through this
+# named helper rather than an inline expression. The writer always stores the same 50-element list,
+# so `None` is unreachable — if it ever fired, the `s == 50` assert below would catch it.
+fn nested_first(b: RwShared[List[int]]) -> int:
+    match b.at(0):
+        Some(v): return v
+        None: return 0
+
 test fn read_view_nested_read_under_writer():
     box := RwShared(List(range(1, 51)))
     done := AtomicInt(0)
@@ -60,7 +68,7 @@ test fn read_view_nested_read_under_writer():
         spawn:                                   # walker: nested read of the SAME box inside the walk
             for _round in range(0, 20):
                 box.for_each(fn(x): box.len())   # closure re-reads the same box (return discarded)
-                s := box.fold(0, fn(a, x): a + box.at(0))
+                s := box.fold(0, fn(a, x): a + nested_first(box))
                 assert s == 50
             done.add(1)
         spawn:                                   # writer: hammer the same box's write lock concurrently
@@ -207,6 +215,180 @@ test fn set_read_view_nested_read_under_writer():
             for _round in range(0, 2000):
                 box.set(Set([1, 2, 3, 4, 5]))
     assert done.load() == 1
+
+# ---- W7-11: a stored element whose cycle closes through the ROOT container ----
+#
+# `RwShared` stores its value as a flat wire; `RwShared([a])` with `a.back = [a]`'s own list gives
+#     List{id:0, items:[ Struct{id:1, back: Backref(0)} ]}
+# A copy-out view rebuilds ONE piece with its own id->object map, where id 0 (the container, which the
+# view never copied) is undefined. That used to hit a `.expect` and ABORT THE HOST — not a fault, the
+# process died — on a legal single-threaded program, while `get()` on the same box worked.
+#
+# The view now rebuilds the whole container and returns the piece out of it, so the cycle survives.
+# That is CPython's measured answer for the same shape:
+#     b = copy.deepcopy(xs[0]); b.val = 42; b.next[0].val   -> 42
+# `elem_split` cannot cover this: it re-emits CELL definitions per piece, and the missing node is a
+# container. Every assert below dies with the process, not with a red test, if the fix regresses.
+
+struct Cyc:
+    val: int
+    back: List[Cyc]
+
+struct CycMap:
+    val: int
+    back: Map[str, CycMap]
+
+struct CycHash:                # Set/Map-key shapes need a non-recursing `hash`
+    val: int
+    back: List[CycHash]
+    fn hash(self) -> int:
+        return self.val
+
+fn cyclic_list() -> List[Cyc]:
+    a := Cyc(1, [])
+    xs := [a, Cyc(2, [])]
+    a.back = xs                # element 0 points back at the list that holds it
+    return xs
+
+test fn cyclic_element_at_returns_the_piece_with_its_cycle_intact():
+    box := RwShared(cyclic_list())
+    match box.at(0):
+        Some(e):
+            assert e.val == 1
+            assert e.back.len() == 2
+            # walk the cycle: the copied element is reachable from its own back-reference
+            assert e.back[0].back[0].back[0].val == 1
+            # identity, not just shape — mutating the copy is visible through its own cycle,
+            # exactly as CPython's deepcopy reports (`b.next[0] is b` -> True)
+            e.val = 42
+            assert e.back[0].val == 42
+            assert e.back[0].back[0].back[0].val == 42
+        None: assert false, "at(0) on a 2-element list must be Some"
+    # the acyclic sibling in the same container is unaffected
+    match box.at(1):
+        Some(e): assert e.val == 2 and e.back.len() == 0
+        None: assert false, "at(1) must be Some"
+
+test fn cyclic_element_slice_for_each_fold():
+    box := RwShared(cyclic_list())
+    sliced := box.slice(0, 1)
+    assert sliced.len() == 1
+    assert sliced[0].back[0].back[0].val == 1
+    n := AtomicInt(0)
+    box.for_each(fn(x): n.add(x.val + x.back.len()))   # 1+2 then 2+0
+    assert n.load() == 5
+    assert box.fold(0, fn(a, x): a + x.back.len()) == 2
+
+test fn cyclic_map_value_views():
+    b := CycMap(7, {})
+    m := {"k": b}
+    b.back = m                 # the value points back at the map that holds it
+    box := RwShared(m)
+    match box.get_key("k"):
+        Some(v):
+            assert v.val == 7
+            assert v.back.len() == 1
+            v.val = 9
+            assert v.back["k"].val == 9        # identity through the cycle
+        None: assert false, "get_key must be Some"
+    t := AtomicInt(0)
+    box.for_each_entry(fn(k, v): t.add(v.val + v.back.len()))
+    assert t.load() == 8
+    assert box.fold_entries(0, fn(a, k, v): a + v.back["k"].back["k"].val) == 7
+
+test fn cyclic_set_element_views():
+    e := CycHash(1, [])
+    xs := [e]
+    e.back = xs
+    box := RwShared(Set(xs))
+    n := AtomicInt(0)
+    box.for_each(fn(x): n.add(x.val + x.back.len()))
+    assert n.load() == 2
+    assert box.fold(0, fn(a, x): a + x.back[0].back[0].val) == 1
+
+# ADVERSARIAL REVIEW, charge 1 (the first cut of the W7-11 fix shipped this, and it was WORSE than the
+# crash it replaced). `slice` shares ONE rebuild map across its elements, deliberately, so sibling
+# closures land on one cell. The first fix ATTEMPTED each piece and reacted to the miss afterwards —
+# so element 0's half-finished attempt left a `Cell` holding the inert placeholder in that shared map,
+# and element 1 hit the cell's first-wins dedupe and got `nil`:
+#   sl[1]()  ->  runtime error: type nil has no method 'len'
+# The check is now a PRE-check (`WireValue::backrefs_resolvable`): nothing is allocated until the piece
+# is known to be rebuildable, so the map is never poisoned. Both engines agreed on the wrong answer,
+# so parity could not have caught it.
+test fn cyclic_slice_shared_map_is_not_poisoned_by_a_piece_that_needs_the_container():
+    xs: List[fn() -> int] = []
+    f := fn() -> int: xs.len()
+    g := fn() -> int: xs.len() + 100
+    xs.push(f)
+    xs.push(g)
+    sl := RwShared(xs).slice(0, 2)
+    assert sl[0]() == 2
+    assert sl[1]() == 102
+
+# ADVERSARIAL REVIEW, charge 2 — `slice` is ONE call returning a container, so it shares within itself
+# (`concurrency.md` §airlock). That must hold on cyclic data too: the whole-container rebuild goes into
+# the CALLER's map, so every later piece is served from that same container instead of a private copy.
+test fn cyclic_slice_shares_within_itself_like_get():
+    a := Cyc(1, [])
+    b := Cyc(2, [])
+    xs := [a, b]
+    a.back = xs
+    b.back = xs
+    box := RwShared(xs)
+    sl := box.slice(0, 2)
+    sl[1].val = 99
+    assert sl[0].back[1].val == 99, "slice must share within itself, like get()"
+    g := box.get()
+    g[1].val = 77
+    assert g[0].back[1].val == 77
+
+# ADVERSARIAL REVIEW round 2 — the same contract, with only a LATER element cyclic. This is the case
+# the test above cannot reach, and the second cut of the fix got it wrong: the whole-container rebuild
+# went into the shared map at element 1, and `from_wire_memo`'s container arms have no first-wins
+# dedupe (only `Cell` does), so it OVERWROTE the entry for element 0 — already materialized and already
+# pushed into the result. `sl[1].back[0]` was then a different object than `sl[0]`, i.e. identity
+# depended on element ORDER. Measured against CPython on the same shape:
+#   sl[0].val = 55  ->  sl[1].back[0].val   CPython 55 (`is sl[0]` -> True), Chezzi gave 1.
+# `slice` now decides once, before the first element.
+test fn cyclic_slice_shares_when_only_a_LATER_element_is_cyclic():
+    a := Cyc(1, [])
+    b := Cyc(2, [])
+    xs := [a, b]
+    b.back = xs                # element 0 is self-contained; only element 1 needs the container
+    sl := RwShared(xs).slice(0, 2)
+    sl[0].val = 55
+    assert sl[1].back[0].val == 55, "slice identity must not depend on element order"
+
+# ADVERSARIAL REVIEW, charge 3 — a `Generator` carries NO wire id (its parked frame can never be a
+# `Backref` target), but it CAN contain one through its backing closure. The first cut read "no id" as
+# "cannot dangle" and handed back the degraded placeholder; the generator then faulted on `nil`.
+test fn cyclic_generator_element_rebuilds_against_the_whole_container():
+    xs: List[Iterator[int]] = []
+    fn g() -> Iterator[int]:
+        yield xs.len()
+        yield 99
+    xs.push(g())
+    match RwShared(xs).at(0):
+        Some(it):
+            got := []
+            for v in it:
+                got.push(v)
+            assert got == [1, 99], str(got)
+        None: assert false, "at(0) must be Some"
+
+# `contains`/`has` rebuild the piece and then compare it — the rebuild no longer aborts, and what is
+# left is the PRE-EXISTING, documented limit that structural `==` on cyclic data trips the depth cap
+# (same as `cyclic_equality_errors_not_crashes`). Asserted as a catchable fault so a future regression
+# back to a host abort is caught here: an abort kills the process instead of failing this test.
+test fn cyclic_set_contains_faults_recoverably_instead_of_aborting():
+    e := CycHash(1, [])
+    xs := [e]
+    e.back = xs
+    box := RwShared(Set(xs))
+    r := recover: box.contains(e)
+    match r:
+        Ok(v): assert false, "expected the cyclic-equality depth fault, got " + str(v)
+        Err(err): assert err.message().contains("maximum structural depth"), err.message()
 
 # AB-BA cross-box: W1 walks map A calling B.set; W2 walks set B calling A.set.
 test fn map_set_read_view_cross_box_no_deadlock():

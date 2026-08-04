@@ -31,8 +31,8 @@ native struct Shared[T]:
 # A `RwShared[T]` whose element `T` is a CONTAINER ALSO gains ZERO-COPY read-view methods (checker
 # arm-resolved, NOT harvested here — E/K/V are not nameable in the `RwShared[T]` surface). Gated by a
 # constructor-kind `where T: List/Map/Set` bound to the container HEAD (Tuple EXCLUDED — heterogeneous):
-#   `RwShared[List[E]]`: `len(self) -> int`, `at(self, i: int) -> E` (bounds-checked, negative index
-#     like `xs[i]`; OOB = recoverable fault), `slice(self, lo, hi) -> List[E]`,
+#   `RwShared[List[E]]`: `len(self) -> int`, `at(self, i: int) -> Option[E]` (the SAFE index — out of
+#     range is `None`, never a fault; negative index normalizes like `xs[i]`), `slice(self, lo, hi) -> List[E]`,
 #     `for_each(self, f: fn(E) -> _) -> nil`, `fold(self, init: R, f: fn(R, E) -> R) -> R`.
 #   `RwShared[Map[K,V]]`: `len(self) -> int`, `get_key(self, k: K) -> Option[V]`, `has(self, k: K) -> bool`,
 #     `for_each_entry(self, f: fn(K, V) -> _) -> nil`, `fold_entries(self, init: R, f: fn(R, K, V) -> R) -> R`.

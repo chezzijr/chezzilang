@@ -371,4 +371,109 @@ impl WireValue {
             _ => false,
         }
     }
+
+    /// W7-11 — this node's per-serialization identity, if it has one: every identity-preserved arm
+    /// (the containers, `Cell`, `Closure`) plus [`Backref`](WireValue::Backref), whose id names the
+    /// node it points at. `None` for a leaf (scalar/`Str`/`bytes`/handle/generator), which by
+    /// construction cannot carry a `Backref` either.
+    ///
+    /// Used by [`from_wire_piece`](crate::vm::Vm::from_wire_piece) to find the just-rebuilt piece
+    /// inside a whole-container rebuild: the ids are the same wire's, so the piece's own id is the
+    /// key into that rebuild's map. **Not every arm has one** — a `Generator` carries no id (its
+    /// parked frame can never be a `Backref` target), yet it CAN contain a `Backref` through its
+    /// backing closure or a parked slot, so "no id" must never be read as "cannot dangle".
+    pub fn node_id(&self) -> Option<u32> {
+        match self {
+            WireValue::List { id, .. }
+            | WireValue::Tuple { id, .. }
+            | WireValue::Map { id, .. }
+            | WireValue::Set { id, .. }
+            | WireValue::Iter { id, .. }
+            | WireValue::Struct { id, .. }
+            | WireValue::Enum { id, .. }
+            | WireValue::NewType { id, .. }
+            | WireValue::Cell { id, .. }
+            | WireValue::Closure { id, .. }
+            | WireValue::Backref(id) => Some(*id),
+            _ => None,
+        }
+    }
+
+    /// W7-11 — can this wire be rebuilt **on its own**, with only `known` already in the rebuild map?
+    /// True iff every `Backref` it contains names an id that is either defined earlier within this
+    /// wire or already in `known`.
+    ///
+    /// This is a **pre-check, not a post-mortem**, and that is the whole point: an attempt that
+    /// discovers the miss halfway has already written partial nodes (including a `Cell` holding the
+    /// inert placeholder) into the caller's map, and a caller that shares one map across several
+    /// pieces — `RwShared.slice` — then serves the NEXT piece out of those poisoned entries via the
+    /// `Cell` first-wins dedupe. So the miss must be known before a single node is allocated.
+    ///
+    /// **Mirrors [`Vm::from_wire_memo`]'s arms exactly**, and has to stay mirrored: a node registers
+    /// its id BEFORE recursing children (so a self-cycle resolves), and the `Cell` arm short-circuits
+    /// on an id already present WITHOUT descending (so a re-emitted cell whose first definition is
+    /// already built is resolvable regardless of its contents).
+    pub fn backrefs_resolvable(&self, known: &super::fxhash::FxHashMap<u32, GcRef>) -> bool {
+        fn walk(
+            w: &WireValue,
+            defined: &mut super::fxhash::FxHashSet<u32>,
+            known: &super::fxhash::FxHashMap<u32, GcRef>,
+        ) -> bool {
+            let all = |xs: &[WireValue], d: &mut super::fxhash::FxHashSet<u32>| {
+                xs.iter().all(|x| walk(x, d, known))
+            };
+            match w {
+                WireValue::Backref(id) => defined.contains(id) || known.contains_key(id),
+                WireValue::List { id, items }
+                | WireValue::Tuple { id, items }
+                | WireValue::Iter { id, items, .. }
+                | WireValue::Enum {
+                    id, payload: items, ..
+                } => {
+                    defined.insert(*id);
+                    all(items, defined)
+                }
+                WireValue::Map { id, entries } => {
+                    defined.insert(*id);
+                    entries
+                        .iter()
+                        .all(|(_, k, v)| walk(k, defined, known) && walk(v, defined, known))
+                }
+                WireValue::Set { id, entries } => {
+                    defined.insert(*id);
+                    entries.iter().all(|(_, e)| walk(e, defined, known))
+                }
+                WireValue::Struct { id, fields, .. } => {
+                    defined.insert(*id);
+                    fields.iter().all(|(_, v)| walk(v, defined, known))
+                }
+                WireValue::NewType { id, inner, .. } => {
+                    defined.insert(*id);
+                    walk(inner, defined, known)
+                }
+                // The rebuild short-circuits on a known id without descending — so must this.
+                WireValue::Cell { id, inner } => {
+                    if known.contains_key(id) || !defined.insert(*id) {
+                        return true;
+                    }
+                    walk(inner, defined, known)
+                }
+                WireValue::Closure { id, captured, .. } => {
+                    defined.insert(*id);
+                    captured.iter().all(|(_, v)| walk(v, defined, known))
+                }
+                // No id of its own, but its backing closure and parked slots can carry a `Backref`.
+                WireValue::Generator { closure, state, .. } => {
+                    closure.as_ref().is_none_or(|c| walk(c, defined, known))
+                        && match state {
+                            WireGenState::Pending(args) => all(args, defined),
+                            WireGenState::Suspended { stack, .. } => all(stack, defined),
+                            WireGenState::Done => true,
+                        }
+                }
+                _ => true, // leaves: scalars, Str/bytes, Func/Native/Cffi/Builtin, shared-core arms
+            }
+        }
+        walk(self, &mut super::fxhash::FxHashSet::default(), known)
+    }
 }

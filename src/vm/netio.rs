@@ -2413,6 +2413,16 @@ impl Vm {
             // GC's mark of `Obj::RwShared`, which re-locks `core.v`), so a nested read/write of the SAME
             // box, an AB-BA cross-box walk, and a GC pass triggered inside the closure can't deadlock —
             // the write-preferring `std::sync::RwLock` never sees a recursive read behind a queued writer.
+            //
+            // W7-11 — every per-piece rebuild goes through [`Vm::from_wire_piece`] rather than
+            // `from_wire`, because a piece whose cycle closes through the ROOT container is not
+            // self-contained and used to ABORT THE HOST. The helper takes `&WireValue` (the caller's
+            // live guard), never the core: it must not re-acquire `core.v`, and the guard must still be
+            // held across the rebuild so its fallback resolves the piece against the SAME serialization
+            // it was cloned from (a second acquisition is the torn read `docs/gaps.md` W7-4 round 2 hit).
+            // Holding it across `from_wire*` is safe and is exactly the window `at`/`slice` already
+            // held: it allocs and nothing else, and `Heap::alloc` never collects, so no GC can re-lock
+            // `core.v` underneath. The guard is still DROPPED before any user code (closure/hash/eq).
             "len" => {
                 self.arity_err("len", args, 0, span)?;
                 let core = self.rwshared_core(h);
@@ -2429,6 +2439,13 @@ impl Vm {
                 };
                 Ok(self.make_int(n))
             }
+            // `at(i) -> Option[E]` — out of range is `None`, not a fault, matching the language's
+            // other named-accessor spellings: `get_key(k) -> Option[V]` below and
+            // `std.json.at -> Option[Json]`. (`RwShared` itself has no `[]` — it does not satisfy the
+            // `Index` protocol, since a view walks the stored wire and has no heap object to dispatch
+            // a user `index()` on — so this is the ONLY read accessor here, and it reports absence
+            // rather than faulting.) A wrong container HEAD is still a fault: that is a type error,
+            // not a missing element. Negative indexing (`at(-1)`) is unchanged — `norm_index` first.
             "at" => {
                 self.arity_err("at", args, 1, span)?;
                 let i = self.int_of(args[0]);
@@ -2439,15 +2456,16 @@ impl Vm {
                     {
                         Some(u) => items[u].clone(),
                         None => {
-                            return Err(self.err(
-                                format!("index {i} out of bounds (len {})", items.len()),
-                                span,
-                            ));
+                            drop(g);
+                            return Ok(self.alloc_enum("Option", "None", vec![]));
                         }
                     },
                     _ => return Err(self.err("RwShared.at requires a list element".into(), span)),
                 };
-                Ok(self.from_wire(ew))
+                let mut rb = super::fxhash::FxHashMap::<u32, GcRef>::default();
+                let v = self.from_wire_piece(&g, ew, &mut rb);
+                drop(g); // the rebuild is done — release before the `Option` wrapper allocs
+                Ok(self.alloc_enum("Option", "Some", vec![v]))
             }
             "slice" => {
                 self.arity_err("slice", args, 2, span)?;
@@ -2474,12 +2492,27 @@ impl Vm {
                 // captured local land on ONE cell. A per-element view (`at`, `for_each`) is its own
                 // crossing and keeps its own copy.
                 let mut rb = super::fxhash::FxHashMap::<u32, GcRef>::default();
+                // W7-11 — the whole-container decision is made ONCE, before the first element, and
+                // that is load-bearing (adversarial review, round 2). `from_wire_piece`'s fallback
+                // rebuilds the container into this shared map, and the container arms of
+                // `from_wire_memo` have NO first-wins dedupe (only `Cell` does) — so a fallback taken
+                // at element k OVERWRITES `rb` for elements 0..k, orphaning the copies already pushed
+                // into the result. Identity then depended on element ORDER: with only element 1
+                // cyclic, `sl[1].back[0]` was a different object than `sl[0]` (CPython: the same one).
+                // Deciding up front means every element is served from one container, whichever of
+                // them needs it.
+                if idxs.iter().any(|&i| match &*g {
+                    WireValue::List { items, .. } => !items[i].backrefs_resolvable(&rb),
+                    _ => false,
+                }) {
+                    let _whole = self.from_wire_memo((*g).clone(), &mut rb);
+                }
                 for idx in idxs {
                     let ew = match &*g {
                         WireValue::List { items, .. } => items[idx].clone(),
                         _ => unreachable!(),
                     };
-                    let elem = self.from_wire_memo(ew, &mut rb);
+                    let elem = self.from_wire_piece(&g, ew, &mut rb);
                     if let Obj::List(items) = self.heap.get_mut(res_h) {
                         items.push(elem);
                     }
@@ -2505,9 +2538,12 @@ impl Vm {
                 };
                 self.push(Value::obj(h)); // root the receiver across nested GC
                 for i in 0..n {
-                    // RE-ACQUIRE the shared guard, clone ONE element, DROP it before the closure —
-                    // never hold `core.v` across `invoke_value`/GC (see the arm's header comment).
-                    let ew = match &*core.v.read().unwrap() {
+                    // RE-ACQUIRE the shared guard, clone ONE element, rebuild it, DROP the guard
+                    // before the closure — never hold `core.v` across `invoke_value`/GC (see the
+                    // arm's header comment). The rebuild stays INSIDE the guard so W7-11's fallback
+                    // resolves the piece against the same serialization it was cloned from.
+                    let g = core.v.read().unwrap();
+                    let ew = match &*g {
                         WireValue::List { items, .. } => {
                             if i >= items.len() {
                                 break; // the list shrank under a concurrent write — stop
@@ -2522,7 +2558,9 @@ impl Vm {
                         }
                         _ => break, // replaced by a non-container under a concurrent set — stop
                     };
-                    let elem = self.from_wire(ew);
+                    let mut rb = super::fxhash::FxHashMap::<u32, GcRef>::default();
+                    let elem = self.from_wire_piece(&g, ew, &mut rb);
+                    drop(g);
                     self.guarded(|vm| vm.invoke_value(f, vec![elem], span))?;
                 }
                 self.pop();
@@ -2547,8 +2585,10 @@ impl Vm {
                 self.push(init); // root the accumulator; its slot sits below every nested frame's base
                 let acc_slot = self.stack.len() - 1;
                 for i in 0..n {
-                    // RE-ACQUIRE per element + DROP before the closure (see the arm's header comment).
-                    let ew = match &*core.v.read().unwrap() {
+                    // RE-ACQUIRE per element, rebuild under the guard, DROP before the closure (see
+                    // the arm's header comment).
+                    let g = core.v.read().unwrap();
+                    let ew = match &*g {
                         WireValue::List { items, .. } => {
                             if i >= items.len() {
                                 break;
@@ -2563,7 +2603,9 @@ impl Vm {
                         }
                         _ => break,
                     };
-                    let elem = self.from_wire(ew);
+                    let mut rb = super::fxhash::FxHashMap::<u32, GcRef>::default();
+                    let elem = self.from_wire_piece(&g, ew, &mut rb);
+                    drop(g);
                     let acc = self.stack[acc_slot];
                     let new = self.guarded(|vm| vm.invoke_value(f, vec![acc, elem], span))?;
                     self.stack[acc_slot] = new;
@@ -2599,7 +2641,9 @@ impl Vm {
                 self.push(needle); // root the query element across from_wire/eq (may GC)
                 let mut found = false;
                 for i in 0..n {
-                    let ew = {
+                    // Clone AND rebuild the element under ONE guard (W7-11 — see the arm header), then
+                    // drop it at block end, before the `eq` probe re-enters the VM.
+                    let e = {
                         let g = core.v.read().unwrap();
                         let entries = match &*g {
                             WireValue::Set { entries, .. } => entries,
@@ -2611,9 +2655,10 @@ impl Vm {
                         if entries[i].0 != qh {
                             continue; // hash miss — keep scanning
                         }
-                        entries[i].1.clone() // clone the element wire; guard drops at block end
+                        let ew = entries[i].1.clone();
+                        let mut rb = super::fxhash::FxHashMap::<u32, GcRef>::default();
+                        self.from_wire_piece(&g, ew, &mut rb)
                     };
-                    let e = self.from_wire(ew);
                     if self.values_equal_guarded(e, needle, 0, span)? {
                         found = true;
                         break;
@@ -2641,7 +2686,8 @@ impl Vm {
                 self.push(key);
                 let mut found = false;
                 for i in 0..n {
-                    let kw = {
+                    // Clone AND rebuild the key under ONE guard (W7-11 — see the arm header).
+                    let k = {
                         let g = core.v.read().unwrap();
                         let entries = match &*g {
                             WireValue::Map { entries, .. } => entries,
@@ -2653,9 +2699,10 @@ impl Vm {
                         if entries[i].0 != qh {
                             continue;
                         }
-                        entries[i].1.clone()
+                        let kw = entries[i].1.clone();
+                        let mut rb = super::fxhash::FxHashMap::<u32, GcRef>::default();
+                        self.from_wire_piece(&g, kw, &mut rb)
                     };
-                    let k = self.from_wire(kw);
                     if self.values_equal_guarded(k, key, 0, span)? {
                         found = true;
                         break;
@@ -2687,9 +2734,15 @@ impl Vm {
                 self.push(key);
                 let mut result: Option<Value> = None;
                 for i in 0..n {
-                    // Clone BOTH key and value wire on a hash-match (one lock acquire), DROP the guard,
-                    // then eq the reconstructed key — if it matches, the value is already in hand.
-                    let kv = {
+                    // Clone AND rebuild BOTH key and value on a hash-match under ONE lock acquire
+                    // (W7-11 — the rebuild must see the same serialization the wires came from), DROP
+                    // the guard, then eq the reconstructed key — if it matches, the value is in hand.
+                    // The value is rebuilt eagerly rather than after the eq, which is what keeps this
+                    // to one guard; the cost is one extra rebuild per hash COLLISION that then fails
+                    // eq (rare by construction) and the wires were already cloned eagerly for the same
+                    // reason. No rooting is needed across the eq: `values_equal_guarded` takes `&self`
+                    // (`arith.rs:1752`), so it cannot allocate or collect.
+                    let (k, v) = {
                         let g = core.v.read().unwrap();
                         let entries = match &*g {
                             WireValue::Map { entries, .. } => entries,
@@ -2701,11 +2754,13 @@ impl Vm {
                         if entries[i].0 != qh {
                             continue;
                         }
-                        (entries[i].1.clone(), entries[i].2.clone())
+                        let (kw, vw) = (entries[i].1.clone(), entries[i].2.clone());
+                        let mut rb = super::fxhash::FxHashMap::<u32, GcRef>::default();
+                        let k = self.from_wire_piece(&g, kw, &mut rb);
+                        let mut rb = super::fxhash::FxHashMap::<u32, GcRef>::default();
+                        (k, self.from_wire_piece(&g, vw, &mut rb))
                     };
-                    let k = self.from_wire(kv.0);
                     if self.values_equal_guarded(k, key, 0, span)? {
-                        let v = self.from_wire(kv.1);
                         result = Some(v);
                         break;
                     }
@@ -2733,21 +2788,28 @@ impl Vm {
                 };
                 self.push(Value::obj(h));
                 for i in 0..n {
-                    let kv = match &*core.v.read().unwrap() {
-                        WireValue::Map { entries, .. } => {
-                            if i >= entries.len() {
-                                break;
+                    // Clone AND rebuild both halves of the entry under ONE guard, dropped before the
+                    // closure (W7-11 — see the arm header).
+                    let (k, v) = {
+                        let g = core.v.read().unwrap();
+                        let (kw, vw) = match &*g {
+                            WireValue::Map { entries, .. } => {
+                                if i >= entries.len() {
+                                    break;
+                                }
+                                (entries[i].1.clone(), entries[i].2.clone())
                             }
-                            (entries[i].1.clone(), entries[i].2.clone())
-                        }
-                        _ => break,
+                            _ => break,
+                        };
+                        let mut rb = super::fxhash::FxHashMap::<u32, GcRef>::default();
+                        let k = self.from_wire_piece(&g, kw, &mut rb);
+                        // Root the reconstructed key while building the value (both alloc; `alloc`
+                        // never collects, but rooting matches the receiver-rooting precedent).
+                        self.push(k);
+                        let mut rb = super::fxhash::FxHashMap::<u32, GcRef>::default();
+                        let v = self.from_wire_piece(&g, vw, &mut rb);
+                        (self.pop(), v)
                     };
-                    let k = self.from_wire(kv.0);
-                    // Root the reconstructed key while building the value (both alloc; `alloc` never
-                    // collects, but rooting matches the receiver-rooting precedent and is future-proof).
-                    self.push(k);
-                    let v = self.from_wire(kv.1);
-                    let k = self.pop();
                     self.guarded(|vm| vm.invoke_value(f, vec![k, v], span))?;
                 }
                 self.pop();
@@ -2771,19 +2833,25 @@ impl Vm {
                 self.push(init); // root the accumulator
                 let acc_slot = self.stack.len() - 1;
                 for i in 0..n {
-                    let kv = match &*core.v.read().unwrap() {
-                        WireValue::Map { entries, .. } => {
-                            if i >= entries.len() {
-                                break;
+                    // One guard for the clone AND both rebuilds, dropped before the closure (W7-11).
+                    let (k, v) = {
+                        let g = core.v.read().unwrap();
+                        let (kw, vw) = match &*g {
+                            WireValue::Map { entries, .. } => {
+                                if i >= entries.len() {
+                                    break;
+                                }
+                                (entries[i].1.clone(), entries[i].2.clone())
                             }
-                            (entries[i].1.clone(), entries[i].2.clone())
-                        }
-                        _ => break,
+                            _ => break,
+                        };
+                        let mut rb = super::fxhash::FxHashMap::<u32, GcRef>::default();
+                        let k = self.from_wire_piece(&g, kw, &mut rb);
+                        self.push(k); // root key while reconstructing value
+                        let mut rb = super::fxhash::FxHashMap::<u32, GcRef>::default();
+                        let v = self.from_wire_piece(&g, vw, &mut rb);
+                        (self.pop(), v)
                     };
-                    let k = self.from_wire(kv.0);
-                    self.push(k); // root key while reconstructing value
-                    let v = self.from_wire(kv.1);
-                    let k = self.pop();
                     let acc = self.stack[acc_slot];
                     let new = self.guarded(|vm| vm.invoke_value(f, vec![acc, k, v], span))?;
                     self.stack[acc_slot] = new;

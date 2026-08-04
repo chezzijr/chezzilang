@@ -228,7 +228,10 @@ test fn rwshared_views_over_sibling_closures():
     both := s.get()          # whole container, one crossing → one binding
     both[0]()
     assert both[1]() == 1
-    assert s.at(1)() == 0    # per-element view → its own copy of the binding
+    # per-element view → its own copy of the binding (`at` is the SAFE index: `Option[E]`)
+    match s.at(1):
+        Some(f): assert f() == 0
+        None: assert false, "at(1) on a 2-element list must be Some"
     sl := s.slice(0, 2)      # one call, one container → shared within the slice
     sl[0]()
     assert sl[1]() == 1
@@ -288,8 +291,9 @@ test fn rwshared_view_survives_a_concurrent_writer():
         spawn:
             hits := 0
             for i in range(0, 20000):
-                f := s.at(1)
-                hits = hits + f()
+                match s.at(1):
+                    Some(f): hits = hits + f()
+                    None: assert false, "the writer always stores a 2-element list"
             d.send(2)
     assert d.recv() + d.recv() == 3
 

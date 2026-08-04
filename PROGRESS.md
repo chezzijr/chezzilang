@@ -2,6 +2,30 @@
 
 Single source of truth for "what am I doing next." Update after every work session.
 
+> **✅ W7-11 FIXED 2026-08-04 — the last ledger item that ABORTED THE HOST is gone.** An `RwShared`
+> copy-out view (`at`/`slice`/`for_each`/`fold`/`get_key`/`has`/`for_each_entry`/`fold_entries`/
+> `contains`) of an element whose cycle closes through the ROOT container killed the process on a
+> legal, single-threaded, checker-clean program — `a.back = xs; RwShared(xs).at(0)` — while `get()` on
+> the same box worked. The piece rebuild hit `from_wire_memo`'s `.expect`, because the id its
+> `Backref` names is the container, which the view never copied. `elem_split` could not cover it: it
+> re-emits CELL definitions per piece, and the missing node is a CONTAINER.
+>
+> **Fix:** `from_wire_memo` flags a dangling `Backref` instead of `.expect`ing, and the new
+> `Vm::from_wire_piece` re-rebuilds the WHOLE container under **the caller's own read guard** and
+> returns the piece by its wire id (`WireValue::node_id()`). The cycle survives, byte-identically to
+> CPython (`copy.deepcopy(xs[0])` follows the cycle; `b.next[0] is b` → `True`; `pickle` agrees).
+> Read `docs/gaps.md` **W7-11** before touching the airlock rebuild — especially the table showing why
+> the W7-4 round-2 rejection of "rebuild the whole container" does **not** transfer (that one fired on
+> every piece and re-read the box under a SECOND guard).
+>
+> Shipped alongside, requested in the same session: **`RwShared.at(i) -> Option[E]`** — it was the only
+> `at` in the language that faulted, against `std.json.at` and its own `get_key`. `[]` stays the
+> dangerous index; `at` is the safe one. Not the `min`/`max` → `Option` milestone.
+>
+> Method note worth keeping: the residual was documented in FOUR comments (including `WireMemo`'s own
+> type doc, which named this exact shape) and fenced by nothing — no test ran a **cyclic** value
+> through a **copy-out view**. A documented residual is not a fenced one.
+>
 > **▶ NEXT SESSION, START HERE (2026-08-04).** Branch **`eager-executor`** is **MERGED** into `main`
 > (`5af067d9`, `--no-ff`): `217f9ffc` ships eager `Executor` execution (`docs/future.md` §2c),
 > `5983af49` documents the follow-ups, and `0787e39d` closes **`W7-12`** — the one regression §2c

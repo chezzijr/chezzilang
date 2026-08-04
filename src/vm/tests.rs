@@ -13499,6 +13499,74 @@ main()
     assert_eq!(run_capture_stress(src), run(src));
 }
 
+/// W7-11 — an `RwShared` copy-out view of an element whose cycle closes through the ROOT container
+/// used to ABORT THE HOST: the piece rebuild hit `from_wire_memo`'s
+/// `.expect("a wire Backref always targets an already-reconstructed node id")` on a legal,
+/// single-threaded, checker-clean program, while `get()` on the same box worked. `elem_split` cannot
+/// cover it — it re-emits CELL definitions per depth-1 subtree, and the missing node is a CONTAINER.
+///
+/// **This test's failure mode is a dead process, not a red assert** — which is exactly why it is in
+/// Rust and not only in `tests/chz/`: a regression takes libtest down with it.
+///
+/// The expected output is CPython's, measured on the same shape:
+/// ```text
+/// b = copy.deepcopy(xs[0]); b.val = 42; b.next[0].val            -> 42
+/// b.next[0].next[0].next[0].val                                  -> 42
+/// ```
+#[test]
+fn rwshared_view_of_a_container_cycling_element_does_not_abort_the_host() {
+    let src = "\
+import std.concurrency
+struct Node:
+    val: int
+    back: List[Node]
+fn main():
+    a := Node(1, [])
+    xs := [a, Node(2, [])]
+    a.back = xs
+    s := RwShared(xs)
+    print(\"get {s.get()[0].val}\")
+    match s.at(0):
+        Some(e):
+            print(\"walk {e.back[0].back[0].back[0].val}\")
+            e.val = 42
+            print(\"identity {e.back[0].val} {e.back[0].back[0].back[0].val}\")
+        None: print(\"WRONG: at(0) was None\")
+    match s.at(9):
+        Some(v): print(\"WRONG: at(9) was Some({v.val})\")
+        None: print(\"oob None\")
+main()
+";
+    assert_mc_parity(src, "get 1\nwalk 1\nidentity 42 42\noob None\n");
+}
+
+/// W7-11 under GC STRESS — the fallback rebuilds the WHOLE container and hands back one node out of
+/// it, so the returned element's own cycle is the only thing keeping the rest reachable. If that
+/// rooting were wrong, a collection between the rebuild and the caller's use would surface here
+/// (dangling `GcRef` panic or a wrong value), not in the plain run above.
+#[test]
+fn rwshared_cyclic_view_round_trips_under_gc_stress() {
+    let src = "\
+import std.concurrency
+struct Node:
+    val: int
+    back: List[Node]
+fn main():
+    junk := [1, 2, 3, 4, 5]
+    a := Node(1, [])
+    xs := [a, Node(2, [])]
+    a.back = xs
+    s := RwShared(xs)
+    match s.at(0):
+        Some(e): print(\"ok: {e.val} {e.back[0].back[0].val} {e.back.len()}\")
+        None: print(\"WRONG\")
+    more := [a]
+main()
+";
+    assert_eq!(run_capture_stress(src), "ok: 1 1 2\n");
+    assert_eq!(run_capture_stress(src), run(src));
+}
+
 /// W7-4 REVIEW (perf cliff, regression lock) — an `RwShared` read VIEW must stay O(element), never
 /// O(whole container). The first cut resolved a piece's cross-element `Backref` by rebuilding the
 /// ENTIRE stored container once PER ELEMENT, so `for_each`/`fold`/`at` over a container of closures

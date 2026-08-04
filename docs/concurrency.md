@@ -1071,6 +1071,15 @@ was retired when module globals started deep-copying per task on both engines.)
     self-contained — a cell reached from two of them carries its full definition in both, and the
     rebuild collapses the repeat back to one cell. That is what lets a piece be drained on its own
     without ever re-reading the box.)
+    **One shape cannot be made self-contained: an element whose cycle closes through the ROOT
+    container** (`a.back = xs; RwShared(xs).at(0)`) — the node its back-reference needs *is* the
+    container. There, and only there, the view rebuilds the **whole** container under the same read
+    guard and hands back the piece out of it, so the cycle survives: `at(0)`'s copy is reachable from
+    its own back-reference, and mutating it is visible through that cycle. This matches CPython —
+    `copy.deepcopy(xs[0])` on the same shape follows the cycle and copies the container too. The
+    ceiling is that such a view costs O(container) *on cyclic data only* (CPython pays the same); a
+    piece with no dangling back-reference never enters that path. Before this, the piece rebuild
+    aborted the host process (`docs/gaps.md` W7-11).
   - **Handle-bearing cell.** A cell whose inner value carries a residual module/native/FFI handle falls
     to the snapshot's slow arm, which has no back-reference encoding.
 - **A recursive *local* `fn` IS sendable (identity-preserving airlock).** A nested `fn` that calls itself

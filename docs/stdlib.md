@@ -229,9 +229,10 @@ value-first: `RwShared(v)`; an optional turbofish pins (and is checked against) 
 
 **Zero-copy read-view (container element).** Gated by a constructor-kind `where T: List/Map/Set` bound
 to the element's HEAD constructor (Tuple **excluded** — heterogeneous):
-- `RwShared[List[E]]`: `len() -> int` · `at(i: int) -> E` (bounds-checked, negative index like `xs[i]`;
-  OOB = recoverable fault) · `slice(lo: int, hi: int) -> List[E]` · `for_each(f: fn(E) -> _) -> nil` ·
-  `fold(init: R, f: fn(R, E) -> R) -> R`.
+- `RwShared[List[E]]`: `len() -> int` · `at(i: int) -> Option[E]` (out of range is `None`, never a
+  fault — same as `get_key` below and `std.json.at`; negative index normalizes like `xs[i]`. `RwShared`
+  has no `[]` of its own, so this is its only read accessor) · `slice(lo: int, hi: int) -> List[E]` ·
+  `for_each(f: fn(E) -> _) -> nil` · `fold(init: R, f: fn(R, E) -> R) -> R`.
 - `RwShared[Map[K,V]]`: `len() -> int` · `get_key(k: K) -> Option[V]` · `has(k: K) -> bool` ·
   `for_each_entry(f: fn(K, V) -> _) -> nil` · `fold_entries(init: R, f: fn(R, K, V) -> R) -> R`.
 - `RwShared[Set[E]]`: `len() -> int` · `contains(e: E) -> bool` · `for_each(f: fn(E) -> _) -> nil` ·

@@ -45,7 +45,11 @@ use super::*;
 /// value whose top-level elements share a binding pays it. Upgrade path if it ever matters: hoist cell
 /// definitions into a side table on the stored wire so a piece can resolve ids without carrying them.
 /// A piece whose cycle closes through the ROOT container still cannot be self-contained (the node it
-/// needs IS the container) — a pre-existing `.expect` abort in the copy-out views, ledgered as W7-11.
+/// needs IS the container). That used to `.expect`-abort the host in the copy-out views (W7-11); it is
+/// now handled on the REBUILD side by [`Vm::from_wire_piece`], which rebuilds the whole container for
+/// that one case. Do NOT try to fix it here by re-emitting container definitions the way `elem_split`
+/// re-emits cells: a container re-emitted into every depth-1 subtree is O(n²) wire size, which is the
+/// cliff `rwshared_view_over_shared_bindings_is_not_quadratic` exists to catch.
 #[derive(Default)]
 struct WireMemo {
     /// GcRef of an identity-preserved node (`Closure`/container) currently on the serialize DFS
@@ -2101,9 +2105,11 @@ impl Vm {
     /// left once every crossing became a batch, so it is gone rather than kept as a trap.)
     ///
     /// **Scope invariant** (the loud failure mode): a serialize memo's lifetime must equal its rebuild
-    /// map's. A `Backref` minted under memo A but reconstructed under a fresh rebuild map hits
-    /// `from_wire_memo`'s `.expect("…already-reconstructed node id")` — a panic, not a fault. Both
-    /// passes here are local to this call, so they match by construction.
+    /// map's. A `Backref` minted under memo A but reconstructed under a fresh rebuild map resolves to
+    /// nothing — caught by the `debug_assert` in [`from_wire`](Vm::from_wire) (it used to be an
+    /// `.expect` that aborted the host; W7-11). Both passes here are local to this call, so they match
+    /// by construction. A caller that genuinely CANNOT match them (a piecewise drain) must use
+    /// [`from_wire_piece`](Vm::from_wire_piece) instead.
     pub(super) fn deep_clone_all(
         &mut self,
         vs: Vec<Value>,
@@ -2157,7 +2163,9 @@ impl Vm {
     /// with its own rebuild map). Each depth-1 subtree therefore carries its own full definition of
     /// every cell it reaches, and a whole-value rebuild dedupes them back to one cell — so
     /// `Channel.recv`/`Shared.get`/`RwShared.get` keep the shared binding while a per-element view is
-    /// (as always) an independent copy.
+    /// (as always) an independent copy. `elem_split` covers CELLS only; a piece back-referencing the
+    /// ROOT container is handled on the rebuild side by [`from_wire_piece`](Vm::from_wire_piece)
+    /// (W7-11).
     pub(super) fn to_wire_crossable(
         &self,
         v: Value,
@@ -2698,7 +2706,103 @@ impl Vm {
         // inside resolves to the already-alloc'd (and about-to-be-patched) node — tying a serialized
         // value cycle back together.
         let mut rebuild = super::fxhash::FxHashMap::<u32, GcRef>::default();
-        self.from_wire_memo(w, &mut rebuild)
+        let v = self.from_wire_memo(w, &mut rebuild);
+        // W7-11 — every caller of `from_wire` rebuilds a WHOLE crossing, so its rebuild map spans the
+        // same scope the serialize memo did and a `Backref` can never dangle. A piecewise drain goes
+        // through [`from_wire_piece`](Vm::from_wire_piece) instead. Keep the invariant loud where it is
+        // genuinely a bug; in release a dangling ref degrades to `nil` rather than aborting the host.
+        debug_assert!(
+            !self.wire_backref_missing,
+            "from_wire: a whole-value rebuild hit a dangling Backref — memo scope != rebuild scope \
+             (a piecewise drain must call from_wire_piece)"
+        );
+        v
+    }
+
+    /// W7-11 — rebuild ONE depth-1 piece of a stored wire (`RwShared`'s copy-out read views).
+    ///
+    /// A piece is normally self-contained: [`to_wire_crossable`](Vm::to_wire_crossable) serializes
+    /// stores with [`WireMemo::elem_split`], which re-emits every `Obj::Cell` definition the piece
+    /// reaches. But `elem_split` only covers CELLS — a piece whose cycle closes through the ROOT
+    /// container (`a.next = xs; RwShared(xs).at(0)`) carries a `Backref` to the container itself, which
+    /// the piece by definition does not contain. That used to abort the host.
+    ///
+    /// When the piece cannot stand alone, this rebuilds the WHOLE `root` **into the caller's map** and
+    /// returns the piece out of it by its wire id — the node it wanted is now defined and the cycle is
+    /// tied. That is CPython's answer, measured: `copy.deepcopy(xs[0])` on the same shape follows the
+    /// cycle and copies the container too (`b.next[0] is b` → `True`); `pickle` agrees across a process
+    /// boundary.
+    ///
+    /// **The check is a PRE-check, and that is load-bearing** — attempting the rebuild and reacting to
+    /// the miss afterwards is wrong, and shipped once. A half-finished attempt has already written its
+    /// partial nodes into `rebuild`, including an `Obj::Cell` still holding the inert placeholder;
+    /// `slice`, which deliberately shares ONE map across its elements, then served the NEXT element out
+    /// of that poisoned cell via the `Cell` first-wins dedupe and handed user code a `nil` — a WRONG
+    /// VALUE where the bug being fixed had only crashed. Nothing may be allocated until the piece is
+    /// known to be rebuildable.
+    ///
+    /// Rebuilding the whole container into the CALLER's map (not a private one) is what keeps `slice`'s
+    /// "one call, one container, shares within itself" contract on cyclic data: every later piece finds
+    /// its id already there and is served from the same container.
+    ///
+    /// `root` is borrowed from the CALLER'S read guard on purpose. Re-acquiring `core.v` here would be
+    /// a SECOND guard, and the window between the two let a concurrent `set` swap in an unrelated
+    /// serialization whose ids mean different nodes — the torn read that sank the first attempt at this
+    /// (`docs/gaps.md` W7-4 round 2: `.expect` abort or a wrong-node `CellLoad` abort, M:N-only, so
+    /// parity-blind). Holding one guard across the rebuild is safe because `Heap::alloc` never
+    /// collects, so no GC (which would re-lock `core.v` to mark `Obj::RwShared`) can run underneath.
+    ///
+    /// ponytail: the ceiling is O(root) per view call ON CYCLIC DATA ONLY. A non-cyclic piece pays one
+    /// extra non-allocating walk (`backrefs_resolvable`), which is what keeps
+    /// `rwshared_view_over_shared_bindings_is_not_quadratic` green.
+    ///
+    /// State that ceiling precisely, because an earlier draft of this comment overclaimed and review
+    /// caught it. For a SINGLE piece (`at`, `get_key`) the cost is CPython's: `copy.deepcopy` of one
+    /// cyclic element copies the container too. For a WHOLE-CONTAINER WALK it is not — `for_each`/
+    /// `fold` over a container where many elements back-reference the root rebuild it once per element,
+    /// so they are O(n²) where CPython's `for x in deepcopy(xs)` is O(n) (measured: n = 500 / 1000 /
+    /// 2000 → 0.068 / 0.28 / 1.17 s). `slice` is exempt — it decides once per call and shares one map.
+    /// Upgrade path when that matters: memoize the whole rebuild per (core, store generation) across
+    /// one walk, which is exactly what `slice` now does by hand.
+    #[allow(clippy::wrong_self_convention)]
+    pub(super) fn from_wire_piece(
+        &mut self,
+        root: &WireValue,
+        piece: WireValue,
+        rebuild: &mut super::fxhash::FxHashMap<u32, GcRef>,
+    ) -> Value {
+        let id = piece.node_id();
+        // Already materialized — by an earlier piece of THIS call that took the fallback below and
+        // rebuilt the whole container. Only reachable through that path: distinct depth-1 elements
+        // carry distinct ids (`to_wire` pops `path` on DFS exit, so an off-stack alias is re-serialized
+        // with a fresh id), so a piece's own id is never in the map for any other reason.
+        if let Some(&h) = id.and_then(|i| rebuild.get(&i)) {
+            return Value::obj(h);
+        }
+        if piece.backrefs_resolvable(rebuild) {
+            let v = self.from_wire_memo(piece, rebuild);
+            debug_assert!(
+                !self.wire_backref_missing,
+                "from_wire_piece: backrefs_resolvable said yes and the rebuild disagreed — the \
+                 pre-check has drifted from from_wire_memo's arms"
+            );
+            return v;
+        }
+        self.wire_backref_missing = false;
+        let _root_v = self.from_wire_memo(root.clone(), rebuild);
+        debug_assert!(
+            !self.wire_backref_missing,
+            "from_wire_piece: the WHOLE stored wire has a dangling Backref — the store side is broken"
+        );
+        self.wire_backref_missing = false; // never leave it set for the next caller's assert
+        match id.and_then(|i| rebuild.get(&i)) {
+            Some(&h) => Value::obj(h),
+            // An id-LESS piece — only a `Generator`, which carries no wire id because its parked frame
+            // can never be a `Backref` TARGET. It still had to wait for the whole rebuild, because its
+            // closure/parked slots can back-reference the container. Rebuilding it now resolves against
+            // the complete map; it is a fresh node, which is right — it has no identity to preserve.
+            None => self.from_wire_memo(piece, rebuild),
+        }
     }
 
     /// Worker behind [`Vm::from_wire`] — reconstructs into this heap, threading `rebuild` (wire `id` →
@@ -2894,12 +2998,23 @@ impl Vm {
             // registers the placeholder BEFORE recursing children. Keeping those two scopes equal is
             // the caller's job (see [`deep_clone_all`](Vm::deep_clone_all)); a wire drained PIECEWISE
             // (`RwShared`'s read views) is served by [`to_wire_crossable`](Vm::to_wire_crossable)'s
-            // `elem_split`, which makes every depth-1 piece self-contained.
-            WireValue::Backref(id) => Value::obj(
-                *rebuild
-                    .get(&id)
-                    .expect("a wire Backref always targets an already-reconstructed node id"),
-            ),
+            // `elem_split`, which makes every depth-1 piece self-contained — EXCEPT for a piece whose
+            // cycle closes through the ROOT container, which no per-piece re-emission can make
+            // self-contained (the node it needs IS the container).
+            //
+            // W7-11 — that last case used to `.expect` here and ABORT THE HOST on a legal program
+            // (`a.next = xs; RwShared(xs).at(0)`). It now flags the miss and hands back an inert
+            // placeholder; [`from_wire_piece`](Vm::from_wire_piece) sees the flag and re-does the
+            // rebuild over the WHOLE container, which defines the id. The placeholder is never
+            // observable: the only caller that can legitimately trip the flag discards this whole
+            // result, and every other caller is `debug_assert`ed in [`from_wire`](Vm::from_wire).
+            WireValue::Backref(id) => match rebuild.get(&id) {
+                Some(&h) => Value::obj(h),
+                None => {
+                    self.wire_backref_missing = true;
+                    Value::nil()
+                }
+            },
             // Rebuild a FRESH, independent `Obj::Cell` on this side (deep copy, never a shared box) —
             // the receiving task owns its own cell (design §4 F1). TIE THE KNOT: alloc a placeholder
             // `Cell(Nil)` and register its `id` BEFORE recursing `inner`, so a nested `Backref(id)`

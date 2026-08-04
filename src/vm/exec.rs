@@ -128,6 +128,7 @@ impl Vm {
             offload: None,
             poll_park: None,
             pending_connect: None,
+            wire_backref_missing: false, // W7-11
             poll_timed_out: false,
             poll_deadline: None,
             poll_partial: None,

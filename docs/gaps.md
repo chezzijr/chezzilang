@@ -26,10 +26,11 @@ fix applied to SOME arms of an N-way set"** — is the highest-yield remaining l
 `defer` was bypassed) and `W7-4` (two sibling closures over one captured local got separate cells across
 the airlock) were both instances of it and are **fixed** — session logs at the end of this file.
 
-## OPEN ITEMS — the whole backlog at a glance (updated 2026-08-01)
+## OPEN ITEMS — the whole backlog at a glance (updated 2026-08-04)
 
 Everything still open, roughly by severity. **No memory-unsafety is left in the ledger** — W6-8, the
-last one, was fixed 2026-07-27. Anything NOT listed here is either fixed or a safe-direction
+last one, was fixed 2026-07-27 — and as of 2026-08-04 **nothing left in the ledger aborts the host
+process**: W7-11, the last one, was fixed that day (`:4771`). Anything NOT listed here is either fixed or a safe-direction
 observation. **Wave 7 batch A (2026-07-28) adds no row** — its three host-boundary findings
 (`W7-1`/`W7-6`/`W7-7`) all landed FIXED; see its session log. Its deliberately-deferred sibling —
 the **lossy path DECODE** in `fs.list_dir`/`walk`/`glob`/`canonicalize` and `os.getcwd` — was filed as
@@ -60,7 +61,7 @@ chronological log.
 | **W7-14** | `:4619` | **`WAIT-1` unfixed on the `Executor` path.** A `wait:` timer arm inside an `Executor` job inline-sleeps to the deadline and takes the timer, ignoring a sibling value that arrives sooner: `timer(300)` beats a value at 50 ms. The SAME `wait:` in a `parallel:`/`spawn:` nursery correctly takes the value at 54 ms | `0b72ad60` (WAIT-1) fixed exactly this, but its branch is gated on `self.mn.is_some()` and an `Executor` job has `mn == None`, so it falls through to the cooperative inline-sleep. **Not an eager-execution regression** — pre-eager `main` (`b6cb9201`) measures the same 305 ms; the `Executor` path never had the fix. WAIT-1's recipe does not port unchanged: it submits the background deadline send into `self.mn`, which an eager job does not have |
 | ~~**W7-13r**~~ | `:4619` | **ALL THREE RESIDUALS FIXED 2026-08-04**, with W7-13 itself: (a) the eager `wait:` arm was a blind `thread::sleep` — now waits on arm 0's condvar, 300 wakeups **1020 ms → 5 ms**; (b) `trip()` set `done_latch` outside `core.q` — now under it; (c) a blocked eager `send` never observed `close()` — was a HANG, now faults `send on a closed channel` at 105 ms (Go, compiled: 104 ms) | Kept for the lessons, not the status. (a) was deferred as "needs its own design primitive" — **wrong**, `demote_wait_block` (`sched.rs:1114`) already had the four-line trick. (b) is deliberately UNFENCED: the window is nanoseconds and measured 5–6 ms both ways, so a timing test would assert nothing. (c) left a DELIBERATE engine divergence (`--serial` keeps `FULL_SEND_DEADLOCK`: its drain runs jobs one at a time and cannot interleave them) and needs ≥2 pool threads, unchanged by the fix. Note the original W7-13 diagnosis (a *missing* `wake_senders`) was WRONG: that wake already fires on all six pop paths; the bug was a LOST wakeup — `eager_wait_tick` waited with no predicate, so a `notify_all` arriving while the lock was free hit a condvar nobody was on yet |
 | **W7-12r** | `:4442` | Residuals of the W7-12 interim fix (**the gap itself is FIXED 2026-08-03**): the verdict only fires for an executor whose ONLY outstanding job is blocked, with no other executor still owing work — everything else DECLINES, i.e. hangs rather than faults. So (a) any multi-job deadlock inside one executor, (b) two executors deadlocking each other, and (c) a program with no explicit `shutdown()` all still hang. Go reports (a) and (b) (`all goroutines are asleep`), so these are measured gaps against the concurrency ancestor — **and they are live serial-vs-M:N divergences too**: two jobs both blocked on an empty `recv` faults in 0s on `--serial` and hangs forever on M:N, so the engine disagreement is closed only for the single-job shape | Deliberately under-fires. `blocked >= outstanding` was tried and is WRONG: a bounded cap-1 pipeline is permanently "all jobs parked" while being perfectly healthy (the two jobs feed each other), and it faulted 2–7 of 30 runs on a program Go and CPython complete — fenced now by `executor_bounded_pipeline_is_not_mistaken_for_a_deadlock`. Parked ≠ unfeedable, and no counter can tell those apart; do NOT try again with a cleverer counter. The sound successor is the process-wide AND-OR wait-for graph in `docs/future.md` **§2d** (which is what Go's own detector is), its own milestone, best sequenced after §2b retires `--serial` |
-| **W7-11** | `:3901` | A `RwShared` holding a container with an element that back-references the CONTAINER (`a.next = xs; RwShared(xs).at(0)`) aborts the host on `from_wire_memo`'s `.expect("a wire Backref always targets an already-reconstructed node id")` — a legal program, no concurrency, both engines | **Pre-existing on main**, not a W7-4 regression (verified on 5960052): a copy-out view drains ONE depth-1 piece, and a piece whose cycle closes through the ROOT container can never be self-contained — the definition it needs IS the container. `elem_split` fixes the sibling-CELL case, not this ancestor case. Closing it means either a catchable fault instead of the `.expect` (`from_wire_memo` returns a `Value`, so that is a signature change through every rebuild arm) or a same-guard whole-container fallback at all 12 view sites |
+| ~~**W7-11**~~ | `:4771` | **FIXED 2026-08-04** by the same-guard whole-container fallback (`Vm::from_wire_piece`), plus `at(i) -> Option[E]`. A dangling `Backref` no longer `.expect`s: it flags, and the view re-rebuilds the whole container and returns the piece by its wire id, so the cycle survives — CPython's measured answer. Kept for the two lessons: the W7-4 round-2 rejection of "rebuild the whole container" did **not** transfer (it fired on EVERY piece and re-read the box under a SECOND guard; this fires only on a dangling backref and borrows the caller's guard), and the `.expect` was reachable from a legal single-threaded program for months because no test ran a cyclic value THROUGH a copy-out view | — |
 | **W7-4a** | `:3901` | Airlock cell identity is preserved **per module** in the snapshot, so two globals in DIFFERENT modules over one shared cell still arrive as two cells | Residual disclosed by the W7-4 fix. Closing it needs `Vm`-lived rebuild state kept (and rooted) across the lazy per-module faults; the reported repro is same-module and is fixed |
 | **W7-4b** | `:3901` | A cell whose inner value carries a residual `Module`/`Native`/`Cffi` handle falls to `SnapValue::Cell`, which has no `Backref` encoding, so its identity is not preserved across a module snapshot | Residual disclosed by the W7-4 fix, and the same limit the `SnapValue::Closure` slow arm already documents. Closing it is a snapshot FORMAT change (id/`Backref` arms on `SnapValue`), out of proportion to a residual this narrow |
 | **W7-4c** | `:3901` | ONE TASK reached through TWO serializations still gets two bindings: a `spawn:` block's captures and the module-global snapshot cross into the same task but are separate memos, rebuilt at different times (the snapshot faults in lazily) | Residual disclosed by the W7-4 fix; same family as W7-4a. Closing it needs `Vm`-lived rebuild state across GC-visible points. Fenced by `module_global_plus_local_capture_still_split` and stated in `syntax.md` rule 2 |
@@ -4767,6 +4768,168 @@ why the fence is a 300-iteration aggregate rather than a single run.
 `an_eager_wait_with_a_closed_arm_still_takes_the_live_arm` pins the live-lock shape's semantics. It
 CANNOT catch the spin itself: `cargo test` asserts verdicts, not CPU, and every variant of that bug
 printed the right answer. The executable guard is the derivation comment at the predicate.
+
+### W7-11 — an `RwShared` copy-out view of an element whose cycle closes through the ROOT container ABORTED THE HOST — **FIXED 2026-08-04**
+
+The only ledger item that killed the process from a legal, single-threaded, checker-clean program.
+Pre-existing on `main` (not a W7-4 regression, verified on `5960052`).
+
+```chezzi
+import std.concurrency
+struct N:
+    val: int
+    back: List[N]
+a := N(1, [])
+xs := [a]
+a.back = xs                  # the cycle closes through the ROOT container
+rw := RwShared(xs)
+rw.get()[0].val              # 1   — works, and always did
+rw.at(0)                     # thread panicked: a wire Backref always targets an
+                             # already-reconstructed node id   → rc=101, BOTH engines
+```
+
+**Mechanism.** `RwShared(xs)` stores a flat wire, `List{id:0, items:[Struct{id:1, back: Backref(0)}]}`.
+A copy-out view clones `items[0]` and rebuilds it with its own empty `id -> GcRef` map, where id 0 —
+the container, which the view never copied — is undefined. `elem_split` cannot help: it re-emits
+**cell** definitions per depth-1 subtree, and the missing node is a **container**, which stays on the
+pop-on-DFS-exit `path` discipline. Nothing on the store side was wrong; `get()`/`read()` rebuild the
+same wire whole and tie the knot correctly.
+
+**Fix** — `from_wire_memo`'s `Backref` arm no longer `.expect`s, and every piecewise drain goes
+through one new entry point, `Vm::from_wire_piece(root, piece, rb)`:
+
+1. **`WireValue::backrefs_resolvable(known)` is a PRE-check** — walk the piece and answer "can this be
+   rebuilt alone, given what the map already holds?" *before* allocating anything;
+2. resolvable → ordinary rebuild (the fast path, byte-identical to before);
+3. not resolvable → rebuild the WHOLE `root` **into the caller's map** and return the piece by its wire
+   id (`WireValue::node_id()`), so the node the back-reference wanted exists and the cycle is tied;
+4. all 12 piece-draining sites in `rwshared_method` route through it, holding **the caller's** guard
+   across the rebuild;
+5. `Vm::wire_backref_missing` survives only as a backstop, asserted in `from_wire` and after the whole
+   rebuild — it is no longer the control-flow signal.
+
+**Points 1 and 3 are not cosmetic — they are the adversarial review's two findings, and the first cut
+shipped both bugs.** Recorded because each was WORSE than the crash it replaced (silent wrong answers,
+both engines agreeing, so parity-blind):
+
+* **Attempt-then-react poisoned a shared rebuild map.** The first cut rebuilt the piece, noticed the
+  flag, and *discarded* the result. But a half-finished attempt has already written partial nodes into
+  the caller's map — including an `Obj::Cell` still holding the inert placeholder. `slice` shares ONE
+  map across its elements by design (W7-4, so sibling closures land on one cell), so the next element
+  hit the `Cell` first-wins dedupe and got the poisoned cell. Measured: `sl[0]() == 2` then
+  `sl[1]() -> runtime error: type nil has no method 'len'`. Hence the pre-check: **nothing may be
+  allocated until the piece is known to be rebuildable.**
+* **A private map for the whole rebuild broke `slice`'s own contract.** `slice` is one call returning a
+  container and is documented to share within itself; resolving the fallback into a private map made
+  each cyclic element a separate copy. Measured: `sl[1].val = 99` then `sl[0].back[1].val == 2` where
+  `get()` gives `99`. Rebuilding into the caller's map fixes it and makes every later piece resolve
+  out of the same container.
+* A third: **`node_id() == None` is not "cannot dangle".** A `Generator` carries no wire id (its parked
+  frame can never be a `Backref` *target*) but reaches one through its backing closure, so the first
+  cut returned the degraded placeholder for it. The pre-check is keyed on backrefs, not on ids, so it
+  catches the generator; the fallback then rebuilds it against the completed map (a fresh node, which
+  is right — it has no identity to preserve).
+
+**Round 2 of the review found one more, in the fix for the second bug above.** "Rebuild into the
+caller's map" is right, but *when* it happens decides the answer: `from_wire_memo`'s container arms
+have **no** first-wins dedupe (only `Cell` does), so a whole-container rebuild triggered at element k
+re-allocs and OVERWRITES `rebuild[id]` for elements `0..k` — which `slice` has already materialized and
+pushed into its result. Identity therefore depended on element **ORDER**:
+
+```text
+only element 1 cyclic:   sl[0].val = 55  ->  sl[1].back[0].val
+   CPython deepcopy:     55   (`sl[1].back[0] is sl[0]` -> True)
+   Chezzi, second cut:   1    (orphaned copy — and `get()` on the same box says 55)
+   Chezzi, shipped:      55
+```
+
+`slice` now makes the whole-container decision **once, before the first element** (`netio.rs`, one
+`backrefs_resolvable` sweep over the selected indices), so every element is served from one container
+whichever of them needs it. `at`/`for_each`/`fold`/… are unaffected — each is its own crossing with a
+fresh map, which is their documented contract. Fenced by
+`cyclic_slice_shares_when_only_a_LATER_element_is_cyclic`, mutation-verified; note that the earlier
+`cyclic_slice_shares_within_itself_like_get` makes BOTH elements cyclic, so the fallback fires on
+element 0 and it cannot catch this — the test that "already covers it" often doesn't.
+
+Round 2 also corrected two claims this write-up made and one dead line: `at` is **not** the safe half of
+a safe/dangerous pair on `RwShared` (there is no `RwShared[i]` — it does not satisfy `Index`; `at` is
+simply its only read accessor, and it reports absence instead of faulting); the O(n) cost is CPython's
+for a SINGLE piece but **not** for a whole-container walk (`for_each`/`fold` over a container where many
+elements cycle is O(n²) — measured 0.068 / 0.28 / 1.17 s at n = 500 / 1000 / 2000 — where CPython's
+`for x in deepcopy(xs)` is O(n); stated now on `from_wire_piece`); and a `push`/`pop` added around
+`get_key`'s equality probe was dead, since `values_equal_guarded` takes `&self` and cannot collect.
+
+**Why "rebuild the whole container", when W7-4 round 2 (`:4058`) rejected exactly that phrase.** It is
+not the same fallback, and the two objections both dissolve:
+
+| | W7-4 round 2 (rejected) | this |
+|---|---|---|
+| fires on | **every** piece (cell backrefs = ordinary data) | only a piece with a **dangling** backref = cyclic data |
+| measured | 4000-elem `for_each` 0.011 s → 3.7 s; 12000 → 34 s | fast path unchanged; `rwshared_view_over_shared_bindings_is_not_quadratic` green untouched |
+| torn read | re-read `core.v` under a **SECOND** guard → resolved a piece against an unrelated serialization (ids restart per serialization, so this was a wrong-NODE abort, M:N-only ⇒ parity-blind) | borrows the caller's live guard; the signature (`root: &WireValue`) makes a second acquisition impossible to write |
+
+Holding one read guard across the rebuild is safe and is the window `at`/`slice` already held:
+`from_wire*` allocs and nothing else, and `Heap::alloc` never collects, so no GC can run underneath and
+re-lock `core.v` to mark `Obj::RwShared`. The guard is still dropped before any user code.
+
+**The answer is CPython's, measured — not reasoned.** Chezzi must *copy* here (isolated heaps for the
+M:N airlock), which puts it in CPython's position; Go and Rust never face the question because a shared
+container hands out a pointer/`Rc`, not a copy.
+
+```text
+CPython:  b = copy.deepcopy(xs[0]); b.val = 42
+          b.next[0].val                 -> 42     (b.next[0] IS b)
+          b.next[0].next[0].next[0].val -> 42
+          copy.deepcopy(one of 5)       -> copied list len 5   (the container came along)
+Chezzi:   identity 42 42                           byte-identical, both engines
+```
+
+`pickle` agrees across a process boundary, so this is not a `deepcopy` quirk. The residual cost —
+O(container) per view call **on cyclic data only** — is CPython's cost too, and is recorded as the
+`ponytail:` ceiling on `from_wire_piece` (upgrade path: memoize the whole rebuild per (core, store
+generation) across one walk).
+
+**Shipped with it: `at(i) -> Option[E]`** (unrelated to the crash, requested in the same session).
+`RwShared.at` was the only `at` in the language that faulted, against `std.json.at -> Option[Json]` and
+its own sibling `get_key -> Option[V]`. Now `[]` is the dangerous index and `at` is the safe one; out
+of range is `None`, negative indexing still normalizes, and a wrong container HEAD is still a fault
+(that is a type error, not a missing element). 11 call sites, 4 files. This is NOT the
+`min`/`max` → `Option` row above (23 call sites, still its own milestone).
+
+**What did NOT change, and is worth knowing:** `contains`/`has` on a cyclic element/key still fault —
+but now with the *catchable* `maximum structural depth (10000) exceeded`, from structural `==` on
+cyclic data (the pre-existing documented limit, `cyclic_equality_errors_not_crashes`), reached only
+because the rebuild in front of it no longer aborts.
+
+**Fences.** `tests/chz/suites/rwshared_readview_test.chz` — 9 new `test fn`s covering every
+piece-draining view (list `at`/`slice`/`for_each`/`fold`, map `get_key`/`for_each_entry`/
+`fold_entries`, set `for_each`/`fold`, and `contains`'s recoverable fault) plus one per review finding
+(`cyclic_slice_shared_map_is_not_poisoned_by_a_piece_that_needs_the_container`,
+`cyclic_slice_shares_within_itself_like_get`,
+`cyclic_generator_element_rebuilds_against_the_whole_container`,
+`cyclic_slice_shares_when_only_a_LATER_element_is_cyclic`), gated serial==M:N by
+`chz_suite_passes_both_engines`; identity is asserted by MUTATING the copy and reading it back through
+its own cycle, not by `==` (which trips the depth cap on cyclic data). All four review fences are
+mutation-verified against the exact code they came from: reverting the pre-check fails 2, reverting the
+caller's-map rebuild fails a third, reverting `slice`'s decide-once fails the fourth. Rust:
+`rwshared_view_of_a_container_cycling_element_does_not_abort_the_host` (two-engine parity) and
+`rwshared_cyclic_view_round_trips_under_gc_stress` — both in Rust precisely because **the failure mode
+is a dead process, not a red assert**. Mutation-verified: forcing `from_wire_piece`'s early return
+makes the parity test fail with `cannot index nil`.
+
+**Two method notes, both worth more than the fix.**
+
+1. **The bug survived because the residual was documented, not fenced.** The piecewise-drain contract
+   was written up in four places — `WireMemo`'s own type doc named this exact shape — and tested
+   nowhere: no test ran a **cyclic** value through a **copy-out view**. Every existing cyclic test
+   crossed a whole value (`spawn` arg, `Channel.send`, `Shared(...)`, `RwShared.get`); every existing
+   view test used acyclic data. A documented residual is not a fenced one.
+2. **The first cut passed the entire green gate and was still wrong.** 3801 unit tests, the full
+   two-engine chz suite, conformance, clippy, the perf lock, plus a hand-written CPython comparison —
+   all green on code that returned `nil` to user data. Two independent adversarial-review prosecutors
+   found it within minutes, each with a running repro, because they attacked the SHARED-map caller
+   (`slice`) that the fix's own author had only read, never exercised. The green gate measures what the
+   suite already knows to ask.
 
 ### W7-14 — **WAIT-1, unfixed on the `Executor` path**: a `wait:` timer arm inside an `Executor` job inline-sleeps to the deadline and cannot take a sibling value that arrives sooner — **OPEN, found 2026-08-04 while reviewing W7-13r(a), NOT fixed**
 

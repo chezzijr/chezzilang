@@ -763,6 +763,16 @@ pub struct Vm {
     /// field just holds it while the fiber is swapped in. The resumed `net.connect` re-run takes it to
     /// finish the connect. `None` whenever no connect is mid-flight.
     pending_connect: Option<ConnectInProgress>,
+    /// W7-11 — set by [`Vm::from_wire_memo`] when a `WireValue::Backref` targets an id that is NOT in
+    /// the rebuild map. That is only legitimate for a PIECEWISE drain (`RwShared`'s copy-out views take
+    /// one depth-1 element of a stored wire at a time, each with its own rebuild map, so a piece whose
+    /// cycle closes through the ROOT container cannot be self-contained); every other caller pairs the
+    /// serialize memo's scope with the rebuild map's by construction, so a trip there is a BUG (see the
+    /// `debug_assert` in [`Vm::from_wire`]). [`Vm::from_wire_piece`] clears it before each attempt and
+    /// re-rebuilds the whole container when it trips. This used to be a `.expect` that ABORTED THE HOST
+    /// on a legal program. Pure scratch — cleared and read inside one helper call, never across a park,
+    /// so it is a `Vm` field and NOT part of [`FiberCtx`].
+    wire_backref_missing: bool,
     /// D6c — live mirror of [`FiberCtx::poll_timed_out`] while the fiber is swapped in: set by the poll
     /// thread on the detached fiber's ctx when a socket op's `timeout_ms` deadline elapsed before the
     /// fd became ready, swapped in here on schedule-in. `socket_method`/`listener_method` consume it at
