@@ -2,18 +2,22 @@
 
 Single source of truth for "what am I doing next." Update after every work session.
 
-> **▶ NEXT SESSION, START HERE (2026-08-03).** Branch **`eager-executor`** (**unmerged**): `217f9ffc`
-> ships eager `Executor` execution (`docs/future.md` §2c), `5983af49` documents the follow-ups, and the
-> newest commit closes **`W7-12`** — the one regression §2c introduced (a job blocked on a channel only
-> its own joiner could fill hung on M:N while `--serial` faulted). Both engines now fault in 0s with
-> byte-identical text; the fix and its four stated residuals are written up in `docs/gaps.md` (section
-> `W7-12`, ledger row `W7-12r`).
+> **▶ NEXT SESSION, START HERE (2026-08-04).** Branch **`eager-executor`** is **MERGED** into `main`
+> (`5af067d9`, `--no-ff`): `217f9ffc` ships eager `Executor` execution (`docs/future.md` §2c),
+> `5983af49` documents the follow-ups, and `0787e39d` closes **`W7-12`** — the one regression §2c
+> introduced (a job blocked on a channel only its own joiner could fill hung on M:N while `--serial`
+> faulted). Both engines now fault in 0s with byte-identical text; the fix and its four stated
+> residuals are written up in `docs/gaps.md` (section `W7-12`, ledger row `W7-12r`).
 >
-> 1. **Merge it.** `adversarial-review` has been run three times over this branch and every round found
->    a real wrong-answer bug the full green gate had no opinion on (see `docs/gaps.md` W7-12); all are
->    fixed. Re-verify by repro on the merged-HEAD binary, both engines, per
->    `auto-task-review-unreliable`.
-> 2. **Then the agreed next milestone: a PROCESS-WIDE quiescence detector — `docs/future.md` §2d,
+> 1. ✅ **Merged and re-verified on the merged-HEAD binary** (per `auto-task-review-unreliable`), not
+>    just on the branch: full `cargo test` green (3794 lib + 121 across the other targets, 0 failed),
+>    `cargo clippy -- -D warnings` clean, the W7-12 repro faults in 0s **byte-identically** on M:N and
+>    `--serial`, and both false-alarm fences hold under repetition on the real binary — the bounded
+>    cap-1 pipeline 30/30 and the live-sibling-producer shape 20/20, plus `--serial`. (Looping matters:
+>    the predicate this replaced faulted only 2–7 of 30 runs.) `adversarial-review` had already run
+>    three times over the branch, each round finding a real wrong-answer bug the green gate had no
+>    opinion on; all fixed.
+> 2. **Next milestone: a PROCESS-WIDE quiescence detector — `docs/future.md` §2d,
 >    step 0.** Decision 2026-08-04, owner: *"we should not let it hang; what could be done should be
 >    done."* Lift `MnSched::is_deadlocked` from per-nursery to process-wide and count JOINERS as blocked
 >    parties. That is Go's exact rule, it catches every shape W7-12 still hangs on (all of them are
@@ -28,7 +32,8 @@ Single source of truth for "what am I doing next." Update after every work sessi
 >
 > Still open and NOT part of this: `W7-5d` (hard halt mid-`shutdown()` engine asymmetry — note its M:N
 > half is written against `run_workers_on_pool`, which eager execution DELETED, so re-derive it before
-> closing it) and `W7-13` (the eager block's missed wakeup / 5 ms poll stall).
+> closing it) and `W7-13` (the eager block's missed wakeup / 5 ms poll stall — small, and worth doing
+> BEFORE step 2, since it is why "no progress recently" is useless as deadlock evidence).
 
 **Legend:** ⬜ not started · 🟦 in progress · ✅ done
 
