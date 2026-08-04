@@ -1960,12 +1960,11 @@ impl Vm {
             // The three are NOT equally well served, and the difference is the writer's lock, not this
             // predicate. A queued value and `closed` are both written under `core.q` (`ChanState::push`
             // and `close`'s `q.lock().closed = true`), so re-checking them under the guard the wait
-            // consumes genuinely closes the window. `done_latch` is a bare relaxed atomic written
-            // OUTSIDE `q` by `trip()`, so a `trip()` landing between this evaluation and the wait's
-            // atomic release-and-enqueue is still lost and still costs a full tick — including it here
-            // narrows the race but cannot close it. Closing it means moving the latch under `q`
-            // (`gaps.md` W7-13r). It is included anyway because it strictly shrinks the window and the
-            // loop head acts on it.
+            // consumes genuinely closes the window. `done_latch` closes it too **since W7-13r(b)**:
+            // `trip()` now stores the latch while holding `core.q`, exactly as `close()` has always
+            // set `closed`, so a `trip()` can no longer land between this evaluation and the wait's
+            // atomic release-and-enqueue. (Before that it was a bare atomic written outside `q`, and
+            // this term narrowed the race without closing it.)
             self.eager_wait_tick(core, EMPTY_RECV_DEADLOCK, span, |g| {
                 !g.is_empty() || g.closed || core.done_latch.load(Ordering::Relaxed)
             })?;
@@ -2199,29 +2198,47 @@ impl Vm {
             // single one to block on, so it cannot be a plain targeted wait — but it does not have to
             // be a blind sleep either: wait on the FIRST arm's condvar with the tick as the timeout,
             // exactly as [`Vm::demote_wait_block`] already does. Arm 0 then wakes promptly and every
-            // other arm is still observed within a tick, so this is strictly better than the sleep and
-            // never worse. (An earlier note claimed fixing this needed a new multi-channel wait
-            // primitive; that was wrong — the precedent was already in the tree.)
+            // other arm is still observed within a tick. (An earlier note claimed fixing this needed a
+            // new multi-channel wait primitive; that was wrong — the precedent was already in the
+            // tree.) It is better than the sleep for every arm-0 wake and no slower otherwise — but
+            // "strictly better, never worse" was the FIRST draft's claim and it was false, because a
+            // wrong predicate makes it a live-lock rather than a slower sleep. See below.
             let (h0, is_send0) = keys[0]; // non-empty: an all-closed arm set returned above
             let first = self.channel_core(h0);
             let cap0 = first.cap;
-            // Clamp to the soonest timer deadline so a timer arm still fires on time (saturating, so
-            // an already-passed deadline yields ~no wait) — the same clamp `demote_wait_block` uses.
-            let backoff = match soonest {
-                Some((_, d)) => {
-                    DEMOTE_POLL_BACKOFF.min(d.saturating_duration_since(std::time::Instant::now()))
-                }
-                None => DEMOTE_POLL_BACKOFF,
-            };
-            // Readiness for ARM 0 only, evaluated under the guard the wait consumes (W7-13's rule): a
-            // recv arm wants a value/close/latch, a send arm wants a free slot or a close. Every other
-            // arm is covered by the timeout, as before.
+            // Readiness for ARM 0 only, evaluated under the guard the wait consumes (W7-13's rule).
+            // Every other arm is covered by the timeout, exactly as under the old blind sleep.
+            //
+            // **The predicate must mirror what the poll above SETTLES on, arm kind by arm kind — not
+            // what merely "changed".** Getting this wrong is a live-lock, not a latency bug, and the
+            // first version of this fix shipped it: a recv arm read `|| g.closed`, but the poll SKIPS
+            // a closed+empty recv arm (the `else if !closed` branch), so the predicate said ready, the
+            // wait returned instantly, `ip -= 1` re-polled, the arm was skipped again — a 100% CPU
+            // spin on Go's ordinary `select { case <-done: ; case v := <-work: }` with `done` closed.
+            // Measured 0.01 s user / 0% CPU before, 3.00 s user / 99% CPU after. That is the same
+            // live-lock `MnSched::park_wait` already warns about ("the reverted parity-perf-0
+            // live-lock") — the rule was written down, and the first draft broke it anyway.
+            //
+            // So, taken from the poll's own arms:
+            //   * RECV ready == a queued value, or a `trip()` latch. NOT `closed` (the poll skips a
+            //     dead arm), and a timer's deadline is left to the timeout.
+            //   * SEND ready == space to enqueue, or `closed` — a closed send arm IS acted on: the
+            //     poll faults `CLOSED_SEND` (Go's panic-on-send-to-closed).
+            // An all-closed arm set costs one tick before the `wait: all channels closed` fault, which
+            // is exactly what the blind sleep cost.
+            //
+            // No timer clamp here, deliberately: `soonest` is provably `None` at this point, because
+            // the cooperative inline-sleep above returns for every `soonest.is_some()` case and an
+            // eager job never takes the `self.mn.is_some()` branch. (A clamp WAS written here at
+            // first; it was dead code. The inline-sleep's own limit — an eager `wait:` sleeps to the
+            // timer deadline and cannot take a sibling value that arrives sooner, where Go's `select`
+            // would — is filed as `docs/gaps.md` W7-14, not something this predicate can reach.)
             let q = first.q.lock().unwrap_or_else(|e| e.into_inner());
-            let _ = first.cv.wait_timeout_while(q, backoff, |g| {
+            let _ = first.cv.wait_timeout_while(q, DEMOTE_POLL_BACKOFF, |g| {
                 let ready = if is_send0 {
                     cap0.is_none_or(|c| g.len() < c) || g.closed
                 } else {
-                    !g.is_empty() || g.closed || first.done_latch.load(Ordering::Relaxed)
+                    !g.is_empty() || first.done_latch.load(Ordering::Relaxed)
                 };
                 !ready
             });

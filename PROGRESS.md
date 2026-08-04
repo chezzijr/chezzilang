@@ -74,7 +74,8 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > 6. **Do NOT** apply `.superpowers/sdd/task-3-mn-half.patch` (wrong lifetime, superseded), and do NOT
 >    grow W7-12's local predicate one case at a time — that is what step 5 above replaces wholesale.
 >    And do NOT read W7-13's fix as licensing progress-rate reasoning in the detector: the `W7-13r`
->    `wait:` residual still stalls, and `parked-is-not-stuck` is a semantic objection, not a latency one.
+>    `wait:` block still observes every non-arm-0 arm only once per tick, and `parked-is-not-stuck`
+>    is a semantic objection, not a latency one.
 >
 > Still open and NOT part of this: `W7-5d` (hard halt mid-`shutdown()` engine asymmetry — note its M:N
 > half is written against `run_workers_on_pool`, which eager execution DELETED, so re-derive it before

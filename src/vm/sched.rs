@@ -1116,16 +1116,27 @@ impl Vm {
             // other arm is observed within `DEMOTE_POLL_BACKOFF` (the documented lower-throughput path).
             let first = &arms[0].1;
             let q = first.q.lock().unwrap_or_else(|e| e.into_inner());
-            if q.is_empty() {
-                // Clamp the backoff to the timer deadline so the loop re-polls and fires the timer arm
-                // by its deadline (saturating, so a deadline that already passed yields ~zero wait).
-                let backoff = match timer {
-                    Some((_, d)) => DEMOTE_POLL_BACKOFF
-                        .min(d.saturating_duration_since(std::time::Instant::now())),
-                    None => DEMOTE_POLL_BACKOFF,
-                };
-                let _ = first.cv.wait_timeout(q, backoff);
-            }
+            // Clamp the backoff to the timer deadline so the loop re-polls and fires the timer arm
+            // by its deadline (saturating, so a deadline that already passed yields ~zero wait).
+            let backoff = match timer {
+                Some((_, d)) => {
+                    DEMOTE_POLL_BACKOFF.min(d.saturating_duration_since(std::time::Instant::now()))
+                }
+                None => DEMOTE_POLL_BACKOFF,
+            };
+            // W7-13r(b) — arm 0 is ready on a queued value OR a `trip()` latch, and the latch belongs
+            // here for the same reason it belongs in the eager `wait:` predicate: the poll above
+            // SETTLES on `done_latch`, so sleeping through one costs a full tick on a channel that is
+            // permanently ready. The old form tested `q.is_empty()` only, which is why `trip()` moving
+            // under `core.q` did not by itself make every waiter prompt.
+            //
+            // `closed` is deliberately NOT a ready condition: the poll SKIPS a closed+empty recv arm,
+            // so reporting ready would return instantly, re-poll, skip, and spin — the parity-perf-0
+            // live-lock, which the eager `wait:` predicate reintroduced once already. (Send arms never
+            // reach this function: an in-callback `wait:` with a send arm faults before the demote.)
+            let _ = first.cv.wait_timeout_while(q, backoff, |g| {
+                !(!g.is_empty() || first.done_latch.load(Ordering::Relaxed))
+            });
         }
     }
 

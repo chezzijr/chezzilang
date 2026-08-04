@@ -57,6 +57,7 @@ chronological log.
 | **W6-10r** | `:1216` | `--max-heap` residual: a payload reachable ONLY through a **nested** core (a `Channel` inside a `Shared`, once the nested core's last `Obj` alias slot is swept) is counted nowhere | Left open by the W6-10 fix on purpose. `live_bytes` reaches a core's bytes through its `Obj::*` alias slot; a nested core has none. Closing it needs cross-core byte recursion with `Arc` de-dup — narrow trigger, not worth the machinery yet |
 | protocol embeds | `:1505` | A protocol-embedded method isn't callable through the interface value (`p: Person` can't call embedded `name()`) despite `spec.md:973` "flattened at bound sites" | Filed as a safe-direction observation in wave 3; never triaged — doc and behavior contradict each other either way |
 | **W7-5d** | `:4413` | A hard halt (over-memory/timeout/dead-stdout) firing mid-`shutdown()` does NOT run every queued job the way an ordinary fault does — `--serial` stops popping the queue the instant one fires (later-queued jobs never run at all); M:N has already dispatched every job to the pool before a hard halt can fire, but that is not a per-job guarantee under a thread-starved pool | Found while adversarially reviewing this milestone's own docs. Live and reproduced on the built binary (`Executor().submit(spew-until-dead-stdout)` then two marker jobs, piped through `head -1`: M:N runs both markers, `--serial` runs neither), but untested — `tests/chz/stdlib/executor_drain_test.chz`'s 6 tests only use `panic()` faults, never a hard-halt kind. `executor_hard_halt` was deliberately built as an unconditional kill switch (W7-5), so this is arguably correct-by-design on both engines individually, but the exact SHAPE of "what still doesn't run" differs by engine and neither engine's shape is pinned by a test |
+| **W7-14** | `:4619` | An eager `wait:` with a timer arm inline-sleeps to the deadline and takes the timer, ignoring a sibling value that arrives sooner (`timer(300)` beats a value at 50 ms). Go's `select` takes the value — so a timeout arm beats the thing it is timing out | **Pre-existing** (identical 304/305 ms before and after W7-13r(a)); surfaced by that fix's dead timer clamp. Not reachable from the wait predicate: the cooperative inline-sleep above the eager block swallows every live timer arm before the block is entered. Fix = let the eager path block with the timer as an ordinary arm, clamped to its deadline |
 | ~~**W7-13r**~~ | `:4619` | **ALL THREE RESIDUALS FIXED 2026-08-04**, with W7-13 itself: (a) the eager `wait:` arm was a blind `thread::sleep` — now waits on arm 0's condvar, 300 wakeups **1020 ms → 5 ms**; (b) `trip()` set `done_latch` outside `core.q` — now under it; (c) a blocked eager `send` never observed `close()` — was a HANG, now faults `send on a closed channel` at 105 ms (Go, compiled: 104 ms) | Kept for the lessons, not the status. (a) was deferred as "needs its own design primitive" — **wrong**, `demote_wait_block` (`sched.rs:1114`) already had the four-line trick. (b) is deliberately UNFENCED: the window is nanoseconds and measured 5–6 ms both ways, so a timing test would assert nothing. (c) left a DELIBERATE engine divergence (`--serial` keeps `FULL_SEND_DEADLOCK`: its drain runs jobs one at a time and cannot interleave them) and needs ≥2 pool threads, unchanged by the fix. Note the original W7-13 diagnosis (a *missing* `wake_senders`) was WRONG: that wake already fires on all six pop paths; the bug was a LOST wakeup — `eager_wait_tick` waited with no predicate, so a `notify_all` arriving while the lock was free hit a condvar nobody was on yet |
 | **W7-12r** | `:4442` | Residuals of the W7-12 interim fix (**the gap itself is FIXED 2026-08-03**): the verdict only fires for an executor whose ONLY outstanding job is blocked, with no other executor still owing work — everything else DECLINES, i.e. hangs rather than faults. So (a) any multi-job deadlock inside one executor, (b) two executors deadlocking each other, and (c) a program with no explicit `shutdown()` all still hang. Go reports (a) and (b) (`all goroutines are asleep`), so these are measured gaps against the concurrency ancestor — **and they are live serial-vs-M:N divergences too**: two jobs both blocked on an empty `recv` faults in 0s on `--serial` and hangs forever on M:N, so the engine disagreement is closed only for the single-job shape | Deliberately under-fires. `blocked >= outstanding` was tried and is WRONG: a bounded cap-1 pipeline is permanently "all jobs parked" while being perfectly healthy (the two jobs feed each other), and it faulted 2–7 of 30 runs on a program Go and CPython complete — fenced now by `executor_bounded_pipeline_is_not_mistaken_for_a_deadlock`. Parked ≠ unfeedable, and no counter can tell those apart; do NOT try again with a cleverer counter. The sound successor is the process-wide AND-OR wait-for graph in `docs/future.md` **§2d** (which is what Go's own detector is), its own milestone, best sequenced after §2b retires `--serial` |
 | **W7-11** | `:3901` | A `RwShared` holding a container with an element that back-references the CONTAINER (`a.next = xs; RwShared(xs).at(0)`) aborts the host on `from_wire_memo`'s `.expect("a wire Backref always targets an already-reconstructed node id")` — a legal program, no concurrency, both engines | **Pre-existing on main**, not a W7-4 regression (verified on 5960052): a copy-out view drains ONE depth-1 piece, and a piece whose cycle closes through the ROOT container can never be self-contained — the definition it needs IS the container. `elem_split` fixes the sibling-CELL case, not this ancestor case. Closing it means either a catchable fault instead of the `.expect` (`from_wire_memo` returns a `Value`, so that is a signature change through every rebuild arm) or a same-guard whole-container fallback at all 12 view sites |
@@ -4696,18 +4697,52 @@ regression of this fix. Kept here because each says something the next reader ne
 Why it mattered beyond speed: it is what made "no progress in the last N ms" useless as evidence of
 deadlock (see W7-12's rejected experiment), which is why it was fixed BEFORE the process-wide
 quiescence detector (`future.md` §2d). Note that it does **not** make progress-rate reasoning sound —
-the `wait:` residual above still stalls, and `parked-is-not-stuck` is a semantic objection, not a
+the eager `wait:` block now wakes on arm 0 but every OTHER arm is still only observed once per
+tick, and `parked-is-not-stuck` is a semantic objection, not a
 latency one.
 
 ### W7-13r(a) — the eager `wait:` block was a blind sleep, so every wake cost a full 5 ms tick — **FIXED 2026-08-04**
 
 `op_wait_poll`'s eager branch was `std::thread::sleep(DEMOTE_POLL_BACKOFF)` — no condvar at all, so a
 `wait:` paid a whole tick however fast its value arrived. Fixed by waiting on **arm 0's** condvar with
-the tick as the timeout: arm 0 wakes promptly, every other arm is still observed within a tick, and
-the wait is clamped to the soonest timer deadline so a timer arm still fires on time. Strictly better
-than the sleep, never worse. Arm 0's readiness is evaluated under the guard the wait consumes
-(W7-13's rule), with the right predicate per direction — a recv arm wants a value / close / latch, a
-send arm wants a free slot or a close.
+the tick as the timeout: arm 0 wakes promptly, every other arm is still observed within a tick. Arm
+0's readiness is evaluated under the guard the wait consumes (W7-13's rule).
+
+**The predicate must mirror what the poll SETTLES on, arm kind by arm kind, and the first draft got
+this wrong in the worst available way — a live-lock.** It read a recv arm as ready on `|| g.closed`,
+but the poll *skips* a closed+empty recv arm. So the wait returned instantly, `ip -= 1` re-polled, the
+arm was skipped, and the loop ran at CPU speed on Go's most ordinary `select`:
+
+```text
+wait:
+    d := done.recv(): ...     # `done` is closed — a broadcast cancel
+    v := work.recv(): ...     # the live arm
+```
+
+| | user CPU, 3 s wait |
+|---|---|
+| before the fix (blind sleep) | 0.01 s, **0%** |
+| first draft of the fix | 3.00 s, **99%** |
+| shipped | 0.01 s, **0%** |
+
+Every variant printed the *right answer*, so no verdict-based test could see it. `MnSched::park_wait`
+already documented the rule — "a closed+EMPTY non-timer recv arm is DEAD… op_wait_poll SKIPS a dead
+arm, so requeueing on ONE dead arm among live ones spins… (the reverted parity-perf-0 live-lock)" —
+and it was broken anyway. So the shipped predicate is derived from the poll's own arms:
+
+* **RECV** ready == a queued value, or a `trip()` latch. **Not** `closed`, and a timer deadline is
+  left to the timeout.
+* **SEND** ready == space to enqueue, or `closed` — a closed send arm *is* acted on (the poll faults
+  `CLOSED_SEND`, Go's panic-on-send-to-closed).
+
+An earlier draft also claimed the wait was "strictly better than the sleep, never worse". It is better
+for every arm-0 wake and no slower otherwise, but that phrasing is what stops a reviewer checking the
+closed case — and the closed case was the live-lock.
+
+**No timer clamp**, deliberately: a clamp to the soonest deadline was written here at first and was
+**dead code**. `soonest` is provably `None` at this point (the cooperative inline-sleep above returns
+for every `soonest.is_some()` case, and an eager job never takes the `mn.is_some()` branch); measured
+identical timer behaviour with and without it, 304 ms vs 305 ms.
 
 This is `demote_wait_block`'s existing trick (`sched.rs:1114-1128`), which is the point: the residual
 was originally deferred as "needs a shared multi-channel wait primitive, a design change of its own",
@@ -4723,8 +4758,39 @@ review caught the false claim, not the suite.
 Fenced by `an_eager_wait_block_is_woken_by_its_arm_not_by_the_poll_timeout` (mutation-verified
 in-process: 0.01 s green, 1.55 s red). **The `gate` handshake in that test is load-bearing** — the
 first version let the producer race ahead, so every `wait:` found its value already queued, the block
-branch was never reached, and the test passed even with the blind sleep stubbed back in. A `wait:`
-test that does not force the consumer to arrive first is measuring nothing.
+branch was never reached, and the test passed even with the blind sleep stubbed back in. Note what
+the gate does and does not give: `gate` is a buffered `Channel[bool](1)`, so the send returns without
+a rendezvous and the guarantee is **statistical, not structural** — it bounds the producer to one
+iteration ahead, which is enough to make the block branch overwhelmingly likely, not certain. That is
+why the fence is a 300-iteration aggregate rather than a single run.
+
+`an_eager_wait_with_a_closed_arm_still_takes_the_live_arm` pins the live-lock shape's semantics. It
+CANNOT catch the spin itself: `cargo test` asserts verdicts, not CPU, and every variant of that bug
+printed the right answer. The executable guard is the derivation comment at the predicate.
+
+### W7-14 — an eager `wait:` with a timer arm inline-sleeps to the deadline and cannot take a sibling value that arrives sooner — **OPEN, found 2026-08-04 while reviewing W7-13r(a), NOT fixed**
+
+Not introduced by W7-13r(a); surfaced by it (the dead timer clamp is what exposed the control flow).
+An eager job never takes the `mn.is_some()` branch of `op_wait_poll`, so a live timer arm is consumed
+by the **cooperative inline-sleep** above the eager block — which sleeps to the deadline and takes the
+timer arm, without ever looking at the other arms again.
+
+```text
+cons:  t := time.timer(300)
+       wait:
+           _ := t.recv():      -> "timer"     # ALWAYS wins
+           v := work.recv():   -> "value {v}" # even though it arrives at 50 ms
+prod:  sleep 50ms; work.send(9)
+```
+
+Measured, release binary: prints `timer` at **304 ms**. Go's `select` takes the 50 ms value — this is
+the timeout arm beating the thing it is supposed to be a timeout *for*, i.e. a `wait:` with any timer
+arm degenerates into a plain sleep for an eager job. Identical before and after W7-13r(a) (305 ms vs
+304 ms), so it is pre-existing.
+
+The fix is not in the wait predicate: the eager path must stop letting the inline-sleep swallow the
+timer arm and instead block with the timer as one more arm, clamping the wait to its deadline — which
+is what the clamp W7-13r(a) removed was *written for* before it turned out to be unreachable.
 
 ### W7-13r(b) — `trip()` set `done_latch` outside `core.q`, so a waiter could still miss it — **FIXED 2026-08-04**
 
@@ -4742,6 +4808,11 @@ it essentially never fires. Measured, 200 sequential trip-handshakes with a `gat
 to arrive first: **5–6 ms before, 5–6 ms after** — no signal. A timing test here would assert nothing
 and flake; the fix is correct by construction (it makes `trip()` obey the discipline `close()` already
 follows), and that is the whole of its justification.
+
+**The store alone was not sufficient, which review caught:** a waiter only benefits if it re-checks the
+latch under `q`. `demote_wait_block` did not — it waited on the bare `q.is_empty()`, so a `trip()` cost
+it a full tick regardless of where the store happened. Its predicate now includes `done_latch` too.
+`closed` is deliberately absent from BOTH waiters' recv predicates, for W7-13r(a)'s live-lock reason.
 
 ### W7-13r(c) — an eager job blocked on a FULL channel never observed a `close()`, so it hung — **FIXED 2026-08-04**
 

@@ -12156,6 +12156,69 @@ print(done.recv())
     );
 }
 
+/// W7-13r(a)'s LIVE-LOCK fence — a CLOSED arm 0 beside a live arm must not spin the eager `wait:`.
+///
+/// Go's most ordinary `select` is `case <-done:` / `case v := <-work:` with `done` closed as a
+/// broadcast cancel. `op_wait_poll` SKIPS a closed+empty recv arm, so "closed" is NOT a ready
+/// condition — but the first version of the arm-0 predicate included `|| g.closed`, so the wait
+/// returned instantly, `ip -= 1` re-polled, the arm was skipped, and round it went at full speed:
+///
+/// | | user CPU |
+/// |---|---|
+/// | before (blind sleep) | 0.01 s, **0%** |
+/// | the broken predicate | 3.00 s, **99%** |
+///
+/// `MnSched::park_wait` already documents the rule ("the reverted parity-perf-0 live-lock"), and it
+/// was broken anyway — so this test exists to make the rule executable rather than advisory.
+///
+/// **What this test can and cannot catch.** It pins the SEMANTICS: with arm 0 closed, the live arm's
+/// value must still be delivered, and the run must not hang. It does NOT measure CPU — `cargo test`
+/// asserts verdicts, and every variant of this bug printed the right answer. A future predicate that
+/// spins would still pass here. The honest fence for that is the rule in the comment at the predicate.
+#[test]
+fn an_eager_wait_with_a_closed_arm_still_takes_the_live_arm() {
+    let src = "
+import std.concurrency
+import std.time
+done: Channel[bool] = Channel[bool](1)
+work: Channel[int] = Channel[int](1)
+out: Channel[int] = Channel[int](1)
+fn cons():
+    wait:
+        d := done.recv():
+            out.send(-1)
+        v := work.recv():
+            out.send(v)
+fn prod():
+    _ := time.timer(60).recv()
+    work.send(7)
+done.close()
+ex := Executor()
+ex.submit(cons)
+ex.submit(prod)
+ex.shutdown()
+print(out.recv())
+";
+    let entry = write_temp_chz("w713a_closed_arm0", src);
+    let (tx, rx) = std::sync::mpsc::channel();
+    let e = entry.clone();
+    std::thread::spawn(move || {
+        let (o, _e2, r, _c) = run_file_p(&e);
+        let _ = tx.send((o, format!("{r:?}"), r.is_err()));
+    });
+    let outcome = rx.recv_timeout(std::time::Duration::from_secs(30));
+    let _ = std::fs::remove_file(&entry);
+    let (out, rdbg, failed) = outcome.expect(
+        "a `wait:` with one closed arm hung — either the dead arm is being waited on as if live, or \
+         <2 free pool threads",
+    );
+    assert!(!failed, "the live arm must be taken: out={out:?} r={rdbg}");
+    assert_eq!(
+        out, "7\n",
+        "the closed arm must be SKIPPED (not taken, not blocking) and the live arm's value delivered"
+    );
+}
+
 /// W7-13r(c)'s ORDERING fence — the closed-check must come AFTER the enqueue retry, never before.
 ///
 /// This is the regression the first draft of that fix shipped, caught by adversarial review and not
