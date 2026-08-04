@@ -506,14 +506,152 @@ impl ExecState {
     }
 }
 
-/// `Executor` core (B3.1 / C5 escape hatch): the explicitly-owned work queue. `submit` enqueues a
-/// wire-form task closure (rejected once `shut`); `shutdown` drains FIFO; `shutdown_now` discards.
+/// The eager (M:N) half of an [`ExecutorCore`] — see [`EagerState`]. Empty/zero on `--serial`, which
+/// keeps the queue-at-submit / drain-at-`shutdown` model (decision D3).
+///
+/// `slots` is indexed by SUBMISSION ORDER, which is the whole reason eager execution keeps the W7-5
+/// fault contract for free: `shutdown` hands this vector straight to `Vm::reduce_task_slots`, so
+/// lowest-index-fault selection, hard-halt-over-ordinary precedence and the unconditional per-slot
+/// output flush (W7-5c) are inherited rather than re-implemented.
+#[derive(Debug, Default)]
+pub struct EagerState {
+    /// Submitted-but-not-yet-finished jobs. `shutdown` waits for this to reach 0.
+    outstanding: usize,
+    /// One slot per `submit`, in submission order; `None` until that job finishes.
+    slots: Vec<Option<super::TaskOutcome>>,
+}
+
+impl EagerState {
+    /// Claim the next submission-order slot. Called under the core lock at `submit`, BEFORE the job
+    /// is handed to the pool, so slot order is submission order even when jobs finish out of order.
+    pub(super) fn reserve(&mut self) -> usize {
+        self.outstanding += 1;
+        self.slots.push(None);
+        self.slots.len() - 1
+    }
+
+    /// Record a finished job's outcome. The caller must `notify_all` the core's `eager_cv` after
+    /// dropping the guard so a waiting `shutdown` re-checks.
+    pub(super) fn finish(&mut self, idx: usize, outcome: super::TaskOutcome) {
+        // `take_slots` empties the vector, which would invalidate a live job's index. It only ever runs
+        // at `outstanding == 0` (the join waits for that first) and `submit` reserves under the `shut`
+        // check, so no job can be holding a stale index here. Asserted rather than defended: the
+        // failure mode is a panic on a pool thread AFTER its `catch_unwind`, which would leave
+        // `outstanding` short and hang `shutdown` forever — worth catching in tests, not papering over.
+        debug_assert!(
+            idx < self.slots.len(),
+            "eager slot {idx} was taken while a job was still outstanding"
+        );
+        self.slots[idx] = Some(outcome);
+        self.outstanding -= 1;
+    }
+
+    /// Take the collected outcomes, leaving the slot vector empty. A second `shutdown` therefore
+    /// reduces an empty vector — a clean no-op, matching the serial engine's drained queue.
+    pub(super) fn take_slots(&mut self) -> Vec<Option<super::TaskOutcome>> {
+        std::mem::take(&mut self.slots)
+    }
+
+    pub fn outstanding(&self) -> usize {
+        self.outstanding
+    }
+}
+
+/// `Executor` core (B3.1 / C5 escape hatch): the explicitly-owned work queue. On `--serial`, `submit`
+/// enqueues a wire-form task closure (rejected once `shut`); `shutdown` drains FIFO; `shutdown_now`
+/// discards. On the M:N engine `submit` runs EAGERLY (the job goes straight to the pool, matching
+/// Python's `ThreadPoolExecutor` / Java's `ExecutorService`) and the queue stays empty — the pending
+/// work lives in `eager` instead.
 /// `shut` lives in the **shared** core, so any handle aliasing this core sees the same shutdown state
 /// (this is what prevents a `from_wire`'d alias from being drained twice at program exit).
 #[derive(Debug, Default)]
 pub struct ExecutorCore {
     pub inner: Mutex<ExecState>,
+    /// Eager (M:N) execution state. Guarded by its OWN lock, never `inner`'s: a finishing pool job
+    /// touches only this one, so it can never contend with a `submit` mid-`wire_callable`.
+    pub eager: Mutex<EagerState>,
+    /// Signalled whenever a job finishes; `shutdown` waits on it for `outstanding == 0`.
+    pub eager_cv: Condvar,
+    /// The cooperative cancel flag shared by every job this executor has dispatched. Per-CORE, not
+    /// per-drain (the pre-eager model had no running jobs to cancel): `shutdown_now` trips it so
+    /// already-started jobs die at their next back-edge (decision D4 — "attempts to stop",
+    /// cooperative, not preemptive), and a hard halt inside a job trips it via `run_outcome`.
+    pub cancel: Arc<AtomicBool>,
+    /// W7-12 — threads currently inside an EXPLICIT `Executor.shutdown()` join of this core
+    /// ([`JoinGuard`]). Read only by [`Vm::eager_join_deadlocked`]: a job blocked while its own
+    /// joiner waits for it, with no sibling left to run, can never be fed and must fault instead of
+    /// hanging. The program-exit drain deliberately does NOT bump this — see the guard's doc.
+    pub joining: AtomicUsize,
+    /// W7-12 — jobs of this executor currently parked in an eager blocking loop ([`BlockGuard`]).
+    /// `blocked <= outstanding` always holds, so `blocked >= outstanding` means "every reserved job
+    /// is parked".
+    pub blocked: AtomicUsize,
 }
+
+/// W7-12 — RAII bump of [`ExecutorCore::joining`] for the duration of an EXPLICIT `shutdown()` join,
+/// and only when that join is the whole program (`Vm::join_has_no_live_siblings`).
+///
+/// Armed at the `shutdown` call site rather than inside `Vm::join_eager_jobs`, because that function
+/// also serves `drain_live_executors`, which joins every live executor ONE AT A TIME in registry
+/// order — so a bump there would make the REGISTRY ORDER decide which executor's job gets the fault.
+/// A deadlock with no `shutdown()` therefore still hangs at exit; that is W7-12's stated residual (c).
+/// `shutdown_now` needs no bump either: it trips `cancel` first, and the cancel halt pre-empts this.
+///
+/// What the call-site placement does NOT buy, stated plainly because an earlier revision of this
+/// comment claimed it did: on its own it does not stop a producer living in ANOTHER executor from
+/// being over-ruled — `x.submit(consumer)` / `y.submit(producer)` then `x.shutdown()` DOES write the
+/// join. That program is kept correct by the registry sweep in `Vm::eager_join_deadlocked`, not by
+/// this placement, and it now completes (`got 1`) as it does in Go and CPython.
+pub(super) struct JoinGuard(Arc<ExecutorCore>);
+
+impl JoinGuard {
+    pub(super) fn new(core: &Arc<ExecutorCore>) -> Self {
+        core.joining.fetch_add(1, Ordering::Relaxed);
+        Self(Arc::clone(core))
+    }
+}
+
+impl Drop for JoinGuard {
+    fn drop(&mut self) {
+        self.0.joining.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+/// W7-12 — RAII bump of [`ExecutorCore::blocked`] for the duration of one eager job's block. Held
+/// across the whole blocking loop for `recv`/`send`; the `wait:` arm rewinds `ip` instead of looping,
+/// so it re-arms per tick (the predicate simply converges over a few of them).
+pub(super) struct BlockGuard(Arc<ExecutorCore>);
+
+impl BlockGuard {
+    pub(super) fn new(core: &Arc<ExecutorCore>) -> Self {
+        core.blocked.fetch_add(1, Ordering::Relaxed);
+        Self(Arc::clone(core))
+    }
+}
+
+impl Drop for BlockGuard {
+    fn drop(&mut self) {
+        self.0.blocked.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+/// Every `ExecutorCore` created during one run, in creation order — the list the program-exit join
+/// walks (decision D1: an executor is detached, and the program waits for its work at exit).
+///
+/// **Why this exists alongside `Vm.executors`** (W7-5b). `Vm.executors` is a `Vec<GcRef>`: heap-keyed,
+/// so it is swapped per fiber with its heap (`swap_ctx`) and an executor created INSIDE an M:N task
+/// lands in that task's throwaway worker list, which is dropped when the task finishes. The top-level
+/// join therefore never saw it, and its work was silently lost. An `ExecutorCore` lives OUTSIDE every
+/// heap (B3.1), so a list of `Arc`s is heap-independent by construction: `spawn_worker` hands the SAME
+/// list to every worker, and an executor created anywhere in the run is visible to the one join.
+/// That is why closing W7-5b needs no change to `swap_ctx`'s heap-only gate — the change that a
+/// previous attempt stopped at because it drags in GC rooting for a parked parent ctx.
+///
+/// Strong `Arc`s, not `Weak`: the whole point is to join work whose creating heap is already gone, so
+/// the core must outlive its `Obj::Executor` handle. Entries are never pruned — same shape (and same
+/// bound: one small struct per `Executor` the program constructs) as `Vm.executors`, whose
+/// "reap only those alive at exit" snapshot has always been push-only too.
+pub type ExecRegistry = Arc<Mutex<Vec<Arc<ExecutorCore>>>>;
 
 /// B3.1 GC support — collect every `GcRef` reachable from a core's wire contents into `out`, so the
 /// heap's `children()` can keep those heap objects rooted. A core's `WireValue`s can still carry

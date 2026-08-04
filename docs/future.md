@@ -95,80 +95,229 @@ mistaken for.
 
 ---
 
-## 2c. `Executor` moves to eager execution (planned — decided 2026-08-01, not yet implemented)
+## 2c. `Executor` moves to eager execution — ✅ **SHIPPED 2026-08-03**
 
-> **Decision (2026-08-01):** `Executor.submit(f)` will execute eagerly — the job starts immediately
-> rather than being queued for the drain — and `shutdown()` waits for in-flight work. This matches
-> Python `ThreadPoolExecutor` (`submit` schedules at once; `shutdown(wait=True)` blocks) and Java
-> `ExecutorService` (`execute`/`submit` run at once; `shutdown` + `awaitTermination`). Chezzi's
-> submit-only-enqueues model is the drift that manufactured the never-run backlog, the reap-point
-> question, the A2 auto-drain rescue, and W7-5b.
+`Executor.submit(f)` executes eagerly on the default M:N engine — the job starts immediately rather
+than waiting for the drain — and `shutdown()` waits for in-flight work. This matches Python
+`ThreadPoolExecutor` (`submit` schedules at once; `shutdown(wait=True)` blocks) and Java
+`ExecutorService`. `--serial` keeps queue-at-`submit` / drain-at-`shutdown` (decision D3).
 
-**The queue does NOT go away — that was an early misreading, corrected during design.** Python's
-`ThreadPoolExecutor` has a work queue too. The drift was never queue-vs-no-queue; it is *who drains it
-and when* — continuously by workers, versus only at the reap call. Chezzi already owns the machinery:
-`src/vm/pool.rs` is a process-wide bounded pool with a FIFO job queue and condvar-parked threads that
-live for the process.
+**The queue did not go away.** Python's `ThreadPoolExecutor` has a work queue too; the drift was never
+queue-vs-no-queue but *who drains it and when* — continuously by pool workers, versus only at the reap
+call. `src/vm/pool.rs` (a process-wide bounded pool with a FIFO queue and condvar-parked threads) was
+already the right machinery and is what jobs are now dispatched onto.
 
-**Consequence: eager execution does NOT dissolve W7-5b.** A task-created executor can still hold
-queued-but-unstarted jobs when its task ends, so it must still be visible to the join. W7-5b's fix is
-folded into this milestone because the two share the same join machinery, **not** because the bug
-disappears.
+### Settled decisions (project owner, 2026-08-01) — as shipped
 
-### Settled decisions (project owner, 2026-08-01) — do not re-litigate
+- **D1 — Lifetime: detached, joined at program exit.** Shipped. A2 is reworded from "run the backlog
+  nobody ran" to "wait for in-flight work".
+- **D2 — Concurrency: shared process pool, no size parameter.** Shipped; `Executor()` stays zero-arg.
+  **Accepted known limits:** executor jobs hold pool threads for their whole lifetime and can starve
+  nurseries; the old parent-participation mitigation is gone with the batch join; and a job that calls
+  `shutdown()` on an executor (its own, or another) blocks a pool thread while it waits — self-join
+  hangs, exactly as Python's `shutdown(wait=True)` from inside a worker does. `Executor(max_workers)`
+  stays an additive door if it bites.
+- **D3 — `--serial` is unchanged.** Shipped. The divergence is observable only between `submit` and
+  `shutdown()`; the test-shape rule is **assert after `shutdown()`, never between**.
+- **D4 — `shutdown()` waits for queued and running.** Shipped. `shutdown_now()` drops work that has not
+  started, trips the per-core cooperative cancel flag, **then waits** — the wait is a deliberate
+  deviation from Java, whose `shutdownNow` returns the never-started tasks and expects a follow-up
+  `awaitTermination` that Chezzi has no spelling for; without it a `shut` executor's still-running jobs
+  would be skipped by the exit join and the program could exit mid-job.
+- **D5 — The W7-5 fault contract is frozen.** Shipped unchanged: `shutdown()` hands its
+  submission-ordered outcome slots to the same `reduce_task_slots`, so lowest-index-fault selection,
+  hard-halt precedence and W7-5c's per-slot output flush are inherited rather than reimplemented.
+  `tests/chz/stdlib/executor_drain_test.chz` passes untouched.
 
-- **D1 — Lifetime: detached, joined at program exit.** The executor outlives its creating scope;
-  outstanding work keeps running and the program waits for it at exit. Matches Python and Java. A2
-  survives, reworded from "run the backlog nobody ran" to "wait for in-flight work".
-- **D2 — Concurrency: shared process pool, no size parameter.** `Executor()` keeps its zero-argument
-  constructor and shares the pool with `parallel:`, bounded by `--threads`. **Accepted known limit:**
-  executor jobs now hold pool threads for their whole lifetime and can starve nurseries, and the old
-  parent-participation mitigation (the joining thread ran one job inline) is gone because eager submit
-  has no join to participate in. `Executor(max_workers)` stays an additive door if it bites; not built
-  on speculation.
-- **D3 — `--serial` is unchanged.** It keeps queueing at submit and draining at `shutdown()`. This is
-  nearly free: under the canonical `submit … shutdown() … assert` shape both engines reach the same
-  post-shutdown state, so the two-engine gate stays green. The divergence is observable only by a
-  program that inspects a job's effect **between** submit and shutdown. Documented known limit, with
-  the test-shape rule: **assert after `shutdown()`, never between.** (Supersedes this section's earlier
-  suggestion that serial implement eager submit cooperatively — that was written before D3.)
-- **D4 — `shutdown()` waits for queued and running.** `shutdown_now()` drops queued work and trips the
-  cooperative cancel flag so running jobs die at their next back-edge — Java's "attempts to stop",
-  **cooperative, not preemptive**. `submit` after either remains a fault.
-- **D5 — The W7-5 fault contract is frozen.** Faults latch; `shutdown()` raises the lowest-index fault
-  in submission order; a faulting job costs only its own result; early-stop stays the opt-in
-  `std.cancel.Token`. `tests/chz/stdlib/executor_drain_test.chz` must keep passing unchanged — a
-  failure there is a regression, not expected churn.
+### What shipped, and the two corrections to the plan above
 
-### What the first implementation attempt proved (auto-task run, 2026-08-01, REJECTED)
+- **`W7-5b` is FIXED, not merely folded in.** The plan said eager execution would not dissolve it. That
+  assumed the exit join stays list-based. It does not: the join now walks a heap-independent
+  `ExecRegistry` (`Arc<Mutex<Vec<Arc<ExecutorCore>>>>`) that `spawn_worker` shares with every worker, so
+  an executor created inside a task is visible no matter which heap made it. That needed **no** change
+  to `swap_ctx`'s `ctx.heap`-only gate — the STOP condition the previous attempt halted at.
+- **`exec_cores` / `exec_outstanding` never existed.** The rejected attempt's post-mortem blamed a
+  predicate keyed on them; no such identifiers are in the repo — it *invented* that state. The real
+  scheduler state is `MnSched::{runnable, inflight, blocked_native}` + `SchedCore::parked_n`, and the
+  existing contract is that `Executor` work stays **outside** the detector (decision D,
+  `src/vm/sched.rs`: "**No deadlock watch**"). **This milestone changed no deadlock predicate.**
 
-An 18-agent autonomous run built this and was rejected across three review rounds (final: 8 blockers,
-10 charges upheld, 0 dismissed). Its branch was deleted; the findings are the salvage:
+**The real hazard, and what it actually was.** An eagerly dispatched job has no scheduler, so a blocking
+op falls to the "no scheduler" arms of `chan_recv_step` / `send` / `wait:`, which declare a deadlock.
+That verdict was TRUE while jobs ran only at the drain (the submitter was blocked inside `shutdown()`,
+so nobody could send) and becomes a LIE once jobs start at `submit`. This is why the rejected attempt
+regressed `ch.recv()`-in-a-job. Fixed by having such a job BLOCK (`Vm::eager_block_recv`, a bounded
+poll on the channel's own condvar, mirroring `demote_recv_block`'s settle order) rather than fault —
+Python's behaviour. A job blocked on a value that never arrives hangs: decision D, unchanged.
 
-- **The hard part is the DEADLOCK DETECTOR, not GC rooting.** Rooting turned out to be a non-issue: a
-  wired closure that passed `ensure_crossable` provably carries no `GcRef` (only a module handle is
-  non-crossable), so an in-flight job holds nothing in the creating heap. What actually broke was that
-  an eagerly dispatched job changes what *"no runnable task can send"* means. The attempt invented a
-  veto keyed on `exec_outstanding > exec_cores.len()`; `exec_cores` is only ever pushed to and never
-  pruned, so it counts ancestor executor *memberships*, not live jobs. Six of the ten upheld charges
-  trace to that one predicate. **Start here, and treat the detector as its own reviewed unit.**
-- **Regression it shipped:** a lone job doing `ch.recv()` for a value the main thread sends later
-  faulted `recv on an empty channel: deadlock`, where the pre-change engine returns the value.
-- **The saved `task-3-mn-half.patch` implements the WRONG lifetime under D1.** It drains a fiber's
-  executors at `Disp::Finish` — i.e. at *task end*, the scope-bound model that was explicitly
-  rejected. Under D1, serial's existing *program-exit* reap is already correct, and W7-5b is M:N-only
-  silent loss; the fix is to make a task-created executor visible to the program-exit join, not to
-  drain it when its task ends. The attempt reaped at task end on both engines, which also broke D3.
+**The second hazard, found by self-review and reproduced:** `submit` must NOT hold the executor's
+`core.inner` lock while a dispatched job is running. The GC's `Obj::Executor` mark arm takes that same
+lock, so a closure that captured its own executor (`ex.submit(fn(): … ex …)`) deadlocks the moment the
+job's worker GCs — `std::sync::Mutex` is not reentrant. The first cut of this milestone held the lock
+across the dispatch and was vulnerable; it now prepares the worker with no lock held and takes the lock
+only for the allocation-free re-check-`shut`-and-reserve. Proved by restoring the bad order, which
+hangs `eager_executor_self_capturing_closure_survives_gc_stress_parallel` (60s watchdog) — worth
+knowing that the natural window is narrow, so this would have shipped as a rare mystery hang.
 
-**Also breaks, and must ship in the same commit:** `examples/executor_autodrain.chz` and its golden
-(it prints `main() done` before the jobs precisely because nothing ran until exit; under eager the
-interleaving is racy, so it cannot survive as an exact-match golden), the A2/C5 prose in
-`docs/concurrency.md`, and the module-snapshot instant at `docs/concurrency.md:102` — the airlock
-crossing point moves from drain time to submit time, so a job observes globals as of the **submit**,
-not as of the drain.
+**Known limit disclosed by the work:** the top-level program itself is not an eager job, so a `recv` in
+*main* on a channel only a job will fill still faults `deadlock` instead of waiting. The sanctioned
+shape is unaffected (`submit_result` then `recv` after `shutdown()`), but a `Channel` handshake from
+main into a running job is not expressible. Closing it would need main to know whether any eager job is
+outstanding — not built on speculation.
 
-**Reframing:** under eager execution the `Executor` is a bounded-concurrency nursery with a detached
-lifetime — which is the model the ancestors (Python/Java) already have.
+**Shipped with:** `examples/executor.chz` and `examples/executor_autodrain.chz` rewritten (both had
+"nothing has run yet" as their point) plus goldens; `tests/chz/spec/module_global_freshness_test.chz`'s
+two drain-instant tests re-expressed; `run_workers_on_pool` + `TaskSlots` + `DoneSignal` deleted (the
+`Executor` drain was their last caller); A2/C5 prose in `docs/concurrency.md` and the module-snapshot
+instant at §"module globals" — the airlock crossing point moves from drain time to **submit** time.
+
+**Reframing:** the `Executor` is a bounded-concurrency nursery with a detached lifetime — the model the
+ancestors (Python/Java) already have.
+
+---
+
+## 2d. Deadlock detection: from quiescence counting to a wait-for graph (planned — NOT started)
+
+> **Why this is filed (2026-08-03).** Eager `Executor` execution (§2c) exposed that Chezzi has *two*
+> unrelated things called "deadlock", and the weak one does most of the work. Read this before touching
+> either.
+
+### What exists today
+
+| | `MnSched::is_deadlocked` (`src/vm/mod.rs`) | the fault arms in `src/vm/netio.rs` |
+|---|---|---|
+| decides by | live state: `running`/`runnable`/`inflight`/`blocked_native`/`parked_n`, plus veto terms | **nothing** — an unconditional `else` |
+| the question it asks | "can anything in this nursery still move?" | "am I inside a scheduler? no → therefore nobody can ever send" |
+| scope | one nursery | any blocked party with no scheduler: top-level `main`, an `Executor` job, a native callback |
+| catches | total quiescence of a nursery | nothing; it *asserts* |
+
+The second one is a **proxy that no longer tracks its own premise**. "I have no scheduler" meant "no
+sender can exist" only while every concurrent construct was scheduler-backed. Eager execution put
+running jobs outside any scheduler, and both of §2c's bugs are that one stale assumption, mirrored:
+
+* a job blocking on a value `main` sends next line → arm faulted, wrongly (fixed in §2c by blocking);
+* a job blocking on a value `main` can never send, because `main` is inside `shutdown()` waiting for
+  that job → arm then blocked, wrongly (a program that faulted in 0s on both engines pre-§2c hung
+  forever on M:N after it).
+
+Neither is fixable *in that arm*, because the arm has no way to tell the two apart. Both need a real
+answer to **"can anyone still send on this channel?"**
+
+The second one shipped an INTERIM answer for one narrow shape (gaps.md `W7-12`): a job faults if its own
+executor is being joined by an explicit `shutdown()` and every job that executor still owes is parked.
+That is a local predicate over one executor — it does not observe `parallel:` tasks, other executors, or
+`main`, and gaps.md row `W7-12r` lists the four programs it therefore still gets wrong. It is a
+placeholder for this section, not a down payment on it: the graph below subsumes it, and closing
+`W7-12r` by growing the local predicate instead is explicitly the wrong move.
+
+### The proposal (project owner, 2026-08-03): a wait-for graph
+
+Give every blocked party an outgoing "waits-for" edge and look for a cycle. This is the classic
+wait-for-graph (WFG) deadlock detection from OS/DBMS lock managers, and it is the right direction. One
+adaptation is essential, and it is the whole design difficulty:
+
+**A channel is not an owned resource.** With a mutex the edge is exact — `A → B` because B *holds* the
+lock. A blocked `recv` does not wait for a specific fiber; it waits for **whoever sends next**, which is
+any fiber that can reach that channel. So the edge is `A → {set of possible senders}`, and the graph is
+an **AND-OR graph**, where deadlock is a **knot** (a set S from which every outgoing option leads back
+into S), not a simple cycle. Knot detection is still polynomial; the point is that "find a cycle" will
+silently give the wrong answer here.
+
+**Node set — must include non-fibers, or it misses the reported bug.** Nodes are not just fibers:
+* a fiber parked on `recv`/`send`/`wait:`,
+* a worker DEMOTED in place (`demote_recv_block`) — blocked but not parked,
+* **a joiner**: the thread inside `Vm::join_eager_jobs` or a nursery join. `main` blocked in
+  `shutdown()` is exactly the node whose absence makes today's arms unable to see the bug.
+
+**Edge kinds:**
+| blocked on | edges to |
+|---|---|
+| empty `recv` on `ch` | every party that could `send` on `ch` |
+| full `send` on `ch` | every party that could `recv` on `ch` |
+| `wait:` over N arms | OR-edges, one per arm (ready on ANY arm ⇒ progress) |
+| a join (`shutdown()`, nursery barrier) | every outstanding job/task it waits for |
+
+**Approximate the sender set in the SAFE direction.** Computing "who could send on `ch`" exactly is
+undecidable; approximate it by reachability (who holds a handle). Over-approximating ADDS edges, which
+means fewer knots, which means the detector **under-reports** — it misses deadlocks rather than
+inventing them. That is the correct failure direction and must be stated in the code, because the
+opposite instinct is what sank the first eager-execution attempt (`§2c`): it invented a veto keyed on
+`exec_outstanding > exec_cores.len()`, where `exec_cores` counted ancestor *memberships* rather than
+live jobs, and six of ten upheld review charges traced to that one predicate.
+
+A cheap sound special case worth landing FIRST, no graph required: if a blocked receiver holds the only
+live handle to the channel's core (`Arc::strong_count` on the `ChannelCore`), no other party can ever
+send — provable deadlock, O(1), zero false positives. It covers a large share of real mistakes and is a
+useful stepping stone that the graph later subsumes.
+
+**Keep every veto `is_deadlocked` already earned.** They encode real races that cost real bugs, and a
+new detector that drops them re-opens them: pending IO/timers/blocking-pool work (`inflight`), a cancel
+in flight that would wake a demoted fiber, a scope mid-teardown, and a value racing into a queue the
+predicate is about to read. Each is an edge to the outside world — i.e. an escape from the knot.
+
+**Cost control.** Run the analysis only when quiescence is *suspected* (a blocked count changed and
+nothing is runnable), never per poll tick; O(V+E) every `DEMOTE_POLL_BACKOFF` would be a tax on every
+blocking program.
+
+### How the ancestors do it — and why Chezzi can do better
+
+* **Go** — the only mainstream runtime that aborts: `fatal error: all goroutines are asleep -
+  deadlock!`. It builds no graph. It counts: nothing runnable and nothing in a syscall/timer/netpoll ⇒
+  everything is stuck. Sound and O(1), but it only ever reports **total** quiescence, and a goroutine in
+  a syscall, a network read, or `time.Sleep` suppresses it entirely. Unrecoverable (fatal, not a panic).
+* **Python** — no detector. `q.get()` blocks forever; a `ThreadPoolExecutor` worker waiting on something
+  `main` never sends simply hangs. The answer is user-side timeouts (`q.get(timeout=…)`).
+* **Java** — no auto-abort. Detection is *tooling*: `ThreadMXBean.findDeadlockedThreads()`, jstack,
+  JConsole. The runtime answer is `awaitTermination(timeout)`.
+* **Rust** — none in std; `parking_lot` has an opt-in `deadlock_detection` feature for lock cycles.
+* **Erlang/BEAM** — none; `receive … after Timeout` bakes the timeout into the syntax.
+
+Chezzi's `is_deadlocked` is already Go's rule, scoped per nursery. **The WFG's payoff over Go is
+PARTIAL deadlock** — a subset stuck while the rest of the program runs happily, which Go structurally
+cannot report. Both bugs found in §2c are partial deadlocks, so this is not a theoretical gain.
+
+### Ordering — REVISED 2026-08-04, and this is where the next session starts
+
+The original plan opened with the `Arc::strong_count` rule and treated the graph as the payoff. Working
+W7-12 to a conclusion changed the ranking, for one reason: **every program that hangs today is TOTAL
+quiescence, which is the cheap case, not the hard one.** `main` parked inside `shutdown()`, both jobs
+parked, nothing runnable, nothing in flight — that is precisely Go's rule, and Go answers it by
+COUNTING, with no graph at all. W7-12's local predicate went wrong three times (`W7-12r`) because it
+asked "is this executor stuck?" — a question no per-executor counter can answer — when the answerable
+question was the process-wide one all along.
+
+0. **Lift `MnSched::is_deadlocked` from per-nursery to PROCESS-WIDE.** This is the whole fix for
+   `W7-12r`, it is Go's exact rule, and it subsumes and DELETES W7-12's interim predicate
+   (`eager_join_deadlocked`, `join_has_no_live_siblings`, `ExecutorCore::joining`/`blocked`, the
+   `eager_block_suspect` debounce, and the registry sweep — all of it). The one thing today's rule
+   cannot see is a **joiner**: a thread inside `Vm::join_eager_jobs` or a nursery barrier is blocked but
+   is counted nowhere, so `main`-in-`shutdown()` is invisible. Add joiners as blocked parties and the
+   rule reaches every W7-12 shape.
+1. `Arc::strong_count` sole-handle rule (sound, O(1), no graph) — still worth landing, but it is
+   narrower than it looks: it fires only when the blocked receiver holds the ONLY handle, so it misses
+   the common case where the channel is a module global `main` also holds. Do it after step 0, not
+   before.
+2. Unify the blocked-party registry process-wide (fibers + demoted workers + joiners) — the data
+   structure step 0 needs anyway. Overlaps `docs/cross-nursery-flat-scheduler.md`.
+3. AND-OR knot detection over that registry, keeping every existing veto, run only on suspicion. **This
+   buys PARTIAL deadlock only** — a subset stuck while the rest of the program runs on, which Go
+   structurally cannot report. Real, but extra credit on top of step 0, not a prerequisite for it.
+4. Retire the `netio.rs` "no scheduler ⇒ no sender" arms; they become unreachable.
+
+**THE RISK, stated first because it is the one that has already bitten three times.** The vetoes are the
+whole correctness surface. A job sleeping on a `timer`, blocked on a socket, waiting on netpoll or
+blocking-pool work, or racing a value into a queue is NOT deadlocked, and counting it as such is a false
+alarm on a working program — the exact failure W7-12 shipped three times (see `gaps.md` W7-12 and the
+memory `parked-is-not-stuck`). So: write the Go/CPython comparison programs and the LOOPING regression
+tests BEFORE the detector, keep every veto `is_deadlocked` already earned, and put the whole thing
+through `adversarial-review` — a full green gate had no opinion on any of the three false positives.
+
+**Sequencing note — RELAXED 2026-08-04.** This previously said "do §2b (remove `--serial`) first,
+because a detector that must stay byte-identical across two engines is much harder". That constraint is
+gone: correctness now outranks engine agreement (project `CLAUDE.md`), and `--serial` is scheduled for
+deletion regardless, so **build the detector M:N-only and let the serial engine keep its crude arms
+until it is removed.** A temporary, documented engine difference on a doomed engine is a far smaller
+cost than either hanging or waiting on §2b.
 
 ---
 

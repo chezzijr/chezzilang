@@ -1458,6 +1458,67 @@ struct Suite:
     }
 
     #[test]
+    fn timeout_reaches_a_job_blocked_on_a_channel_and_on_wait() {
+        // Eager execution makes a blocking `Executor` job WAIT for a value instead of declaring a
+        // deadlock, which is correct (its submitter is still running and may send) but means a job
+        // waiting on a value that never comes hangs by design — decision D's accepted hang. That is
+        // only tolerable because `--timeout` can still reach it. It can only reach it because the
+        // eager blocking paths check the deadline THEMSELVES: a blocked job never reaches
+        // `jump_checked`'s loop back-edge, where every other path observes it.
+        //
+        // Both blocking shapes are covered because they use different mechanisms — `recv` waits on the
+        // one channel's condvar, while `wait:` has N arms and no single condvar to wait on, so it
+        // bounded-polls. The `wait:` arm is the one that would silently spin forever if the shared
+        // halt check were dropped from it.
+        //
+        // The SPINNING sibling job is load-bearing since W7-12: with the blocked job alone, `shutdown`
+        // marks the executor as being joined and the job now faults `deadlock` instead of hanging, so
+        // the fixture would stop testing the deadline at all. A second, never-parked job keeps
+        // `blocked < outstanding`, the case W7-12's local predicate declines to judge (gaps.md
+        // `W7-12r`), which restores the accepted hang this test exists for.
+        //
+        // Honest limit, verified by mutation (stub out the deadline read in `Vm::eager_halt_check` and
+        // this still passes): what it now pins is the END-TO-END guarantee — a test whose `shutdown()`
+        // is blocked still reaches a verdict, and control never falls through — not the eager path's
+        // OWN deadline read in isolation. The spinner hard-halts on the deadline at its back-edge,
+        // which trips the executor's cancel flag, and the blocked job can exit through THAT arm of the
+        // same check. Isolating the eager read again needs a one-worker pool so the sibling never runs
+        // at all, and `chezzi test` has no `--threads` (the pool is a process-wide `OnceLock`, so it
+        // cannot be resized in-process either) — see gaps.md `W7-12r`.
+        for (name, body) in [
+            (
+                "blockrecv_test.chz",
+                "import std.concurrency\nch: Channel[int] = Channel[int](1)\nfn w():\n    print(ch.recv())\nfn spin():\n    while true:\n        pass\ntest fn t():\n    ex := Executor()\n    ex.submit(w)\n    ex.submit(spin)\n    ex.shutdown()\n    assert false, \"SWALLOWED\"\n",
+            ),
+            (
+                "blockwait_test.chz",
+                "import std.concurrency\na: Channel[int] = Channel[int](1)\nb: Channel[int] = Channel[int](1)\nfn w():\n    wait:\n        v := a.recv(): print(v)\n        v := b.recv(): print(v)\nfn spin():\n    while true:\n        pass\ntest fn t():\n    ex := Executor()\n    ex.submit(w)\n    ex.submit(spin)\n    ex.shutdown()\n    assert false, \"SWALLOWED\"\n",
+            ),
+        ] {
+            let d = TmpDir::new();
+            let f = d.write(name, body);
+            let report = run_tests_timed(&f, true, 0, 300);
+            assert!(!report.passed, "{name} report:\n{}", report.text);
+            assert!(
+                report.text.contains("TIMED-OUT t"),
+                "{name}: --timeout must reach a job blocked in an eager Executor; report:\n{}",
+                report.text
+            );
+            assert!(
+                !report.text.contains("SWALLOWED"),
+                "{name}: control must never fall through the blocked shutdown; report:\n{}",
+                report.text
+            );
+            assert!(
+                !report.text.contains("deadlock"),
+                "{name}: W7-12's predicate must stay silent while a sibling job is still runnable — \
+                 this shape is the accepted hang the deadline exists to reach; report:\n{}",
+                report.text
+            );
+        }
+    }
+
+    #[test]
     fn over_memory_control_passes_under_generous_cap() {
         // A small alloc under a generous cap passes normally — the cap only trips on runaway growth.
         let d = TmpDir::new();

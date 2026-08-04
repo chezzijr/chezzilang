@@ -184,12 +184,20 @@ test fn nested_nursery_sees_the_tasks_current_view():
 
 # --- Executor ----------------------------------------------------------------------------------
 
-# A submitted job runs at the DRAIN, so it sees the globals as of the drain instant.
-test fn executor_task_sees_globals_as_of_the_drain():
+# A submitted job sees the globals as of the instant it STARTS. That instant is engine-specific: the
+# `submit` on the default engine (eager execution — the job is already running) and the drain on
+# `--serial`, which still queues at `submit` (decision D3). The two agree whenever nothing mutates in
+# between, which is exactly the documented test shape for an `Executor`: **assert after `shutdown()`,
+# never between**. The engine-specific instant itself is pinned in Rust, where a per-engine
+# expectation is expressible (`executor_job_sees_globals_as_of_the_submit_on_mn`).
+#
+# What this still catches on both engines: a job that snapshots a global at DECLARATION time (`1`)
+# rather than at its start would read `1` here.
+test fn executor_task_sees_globals_as_of_its_start():
     seen := Shared(0)
+    exg = 123
     ex := Executor()
     ex.submit(fn(): seen.set(exg))
-    exg = 123
     ex.shutdown()
     assert seen.get() == 123, "executor job saw {seen.get()}"
 
@@ -219,17 +227,23 @@ test fn an_executor_jobs_private_mutation_never_reaches_a_nursery_task():
     assert eq.len() == 0, "job mutation leaked to the parent: {eq.len()}"
     assert eqn == 0, "job write leaked to the parent: {eqn}"
 
+# An `Executor` job and a nursery task side by side. Before eager execution these pinned DIFFERENT
+# instants — the task at its `spawn`, the job at the later drain — and the test's job was to contrast
+# them. Eager execution collapses that difference on the default engine (a job starts at its `submit`,
+# so both now pin "when this work started"), and `--serial` still drains late, so the contrast is no
+# longer an engine-agnostic property. What is: BOTH paths must snapshot the CURRENT value of the
+# global, never its declaration-time one — a stale snapshot in either path reads `1` here.
 test fn executor_alongside_a_nursery():
     a := Shared(0)
     b := Shared(0)
+    exg2 = 5
     ex := Executor()
     ex.submit(fn(): a.set(exg2))
     parallel:
         spawn: b.set(exg2)
-    exg2 = 5
     ex.shutdown()
-    assert a.get() == 5, "executor job saw {a.get()} (drain instant)"
-    assert b.get() == 1, "nursery task saw {b.get()} (spawn instant)"
+    assert a.get() == 5, "executor job saw {a.get()}"
+    assert b.get() == 5, "nursery task saw {b.get()}"
 
 # --- bare `spawn` (the IMPLICIT nursery) -------------------------------------------------------
 

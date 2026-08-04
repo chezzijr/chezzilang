@@ -10264,7 +10264,9 @@ fn executor_submitted_closure_captures_by_value() {
 
 /// A submitted closure crosses the airlock **by value** on BOTH engines: it isolates its captures at
 /// `submit` time (`wire_callable` → `to_wire` deep-copies), so a mutation of a captured collection
-/// *between* `submit` and the program-exit drain is NOT observed by the job. The cooperative engine
+/// after the `submit` is NOT observed by the job. Eager execution shrank that window to nothing on the
+/// default engine (the job is already running), but the isolation is what makes the two engines agree
+/// here regardless — it has always been keyed to the `submit`, never to when the job runs. The cooperative engine
 /// used to share captures by reference (queuing the closure's own `Handle`) to mirror the tree-walk
 /// `interp` oracle; that oracle has been removed and serial==M:N is now the sole invariant, so coop
 /// isolates identically to M:N — both print `[1]` here (not `[1, 2]`).
@@ -10294,23 +10296,32 @@ fn parallel_nested_nursery_on_pool() {
     assert_eq!(run_capture_parallel(src).expect("parallel run"), "4\n");
 }
 
-/// B3.3-threads (review C1): the per-task `DoneSignal` guard bumps the nursery's completion
-/// counter even when the task body **panics** — so a panicking `--parallel` worker can't leave the
-/// joining thread waiting forever. Proves the `Drop`-runs-on-unwind contract the join relies on.
+/// Eager `Executor` — the successor to B3.3-threads' `done_signal_bumps_counter_on_panic`. That test
+/// constructed the retired `DoneSignal` guard directly and asserted its `Drop` bumped the batch join's
+/// counter on unwind. Eager execution replaced the batch farm/join (`run_workers_on_pool`) with a
+/// per-job dispatch, so the invariant is now `EagerState::outstanding` always reaching 0 — and it is
+/// testable on the REAL path instead of on a guard in isolation: a job that ends abnormally must still
+/// record its outcome, or `shutdown`'s condvar wait never wakes and the program hangs forever.
+///
+/// The watchdog is the point: without it a regression here HANGS the test binary instead of failing it
+/// (the failure mode of the whole eager milestone), so assert on a bounded `recv_timeout`.
 #[test]
-fn done_signal_bumps_counter_on_panic() {
-    let done = Arc::new((Mutex::new(0usize), std::sync::Condvar::new()));
-    let d2 = Arc::clone(&done);
-    let h = std::thread::spawn(move || {
-        let _sig = DoneSignal(d2);
-        panic!("boom in a task");
+fn executor_faulting_job_does_not_hang_shutdown() {
+    let src = "import std.concurrency\n\
+               ex := Executor()\n\
+               ex.submit(fn(): panic(\"boom\"))\n\
+               r := recover: ex.shutdown()\n\
+               match r:\n    \
+                   Ok(_): print(\"no fault\")\n    \
+                   Err(e): print(\"caught: {e.message()}\")\n";
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(run_capture_parallel(src));
     });
-    let _ = h.join(); // swallow the panic
-    assert_eq!(
-        *done.0.lock().unwrap(),
-        1,
-        "DoneSignal::drop must bump the counter even on panic"
-    );
+    let got = rx
+        .recv_timeout(std::time::Duration::from_secs(30))
+        .expect("shutdown() must not hang when a job ends abnormally");
+    assert_eq!(got.unwrap(), "caught: boom\n");
 }
 
 /// B3.3-threads (decision F, review coverage gap): each worker buffers its own stdout and the join
@@ -11592,11 +11603,387 @@ fn executor_submit_after_shutdown_errors() {
     assert_eq!(err, interp, "VM/interp error divergence");
 }
 
+/// `shutdown_now` is "attempts to stop" (decision D4) — COOPERATIVE, not preemptive, exactly like
+/// Java's `shutdownNow`. The two engines therefore give it different reach, and that difference is
+/// deliberate rather than a parity break:
+///
+/// * `--serial` still queues at `submit` (decision D3), so the job has provably not started and
+///   `shutdown_now` discards it outright. This leg is byte-exact and unchanged from the pre-eager era.
+/// * The default M:N engine starts the job at its `submit`, so by the time `shutdown_now` trips the
+///   cancel flag the job may already have run to completion — a job with no cancellation point in it
+///   (this one is a single `print`) cannot be stopped at all. So the only thing assertable across both
+///   engines is that `shutdown_now` returns promptly and the program finishes.
+///
+/// Asserting the M:N leg as a SET rather than a sequence is what keeps this honest: pinning it to
+/// either outcome would encode a race as a guarantee.
 #[test]
-fn executor_shutdown_now_discards_pending() {
+fn executor_shutdown_now_is_cooperative_not_preemptive() {
     let src = "fn j():\n    print(99)\nfn main():\n    ex := Executor()\n    ex.submit(fn(): j())\n    ex.shutdown_now()\n    print(0)\nmain()\n";
-    assert_eq!(run(src), "0\n");
-    assert_eq!(run(src), run_capture_parallel(src).expect("interp run"));
+    assert_eq!(run(src), "0\n", "serial discards work that never started");
+    let mn = run_capture_parallel(src).expect("mn run");
+    assert!(
+        mn == "0\n" || mn == "99\n0\n",
+        "M:N must either stop the job or let it finish, never anything else; got {mn:?}"
+    );
+}
+
+/// EAGER execution, the headline regression guard. A job that blocks on an empty `recv` must WAIT for
+/// a value its submitter sends later — it must not declare a deadlock.
+///
+/// This is the exact program the first (rejected) attempt at eager execution broke: it faulted
+/// `recv on an empty channel: deadlock — no runnable task can send`. That verdict is true only while
+/// jobs run at the drain, where the submitter really is stuck inside `shutdown()`; once a job starts
+/// at its `submit` the submitter is still running and may send on the very next line, so the fault is
+/// a lie.
+///
+/// The `ready` handshake is what gets the job to the blocking `recv` FIRST — without it the main
+/// thread usually wins the race, queues the value, and the empty-`recv` path is never exercised at
+/// all (that is why the CLI repro for this looked green until a sleep was added; `std.time` is not
+/// resolvable through the single-module test helper, so a handshake stands in for the sleep). If main
+/// wins anyway the assertion still holds, so it costs coverage in the rare case, never a flake.
+///
+/// The handshake leg is M:N-ONLY, and that is the point rather than a gap: on `--serial` the job does
+/// not exist until `shutdown()` (decision D3), so `ready.recv()` at top level has genuinely nobody to
+/// send to it and deadlocks — correctly. The second program drops the handshake and pins the same
+/// end state on BOTH engines.
+///
+/// Watchdogged because the failure mode of getting this wrong the OTHER way (never waking) is a hang.
+#[test]
+fn executor_job_blocking_recv_waits_for_a_later_send() {
+    // Eager-only: the job reaches its blocking `recv` before the value is sent.
+    let handshake = r#"
+ch := Channel[int](1)
+ready := Atomic(0)
+fn worker():
+    ready.add(1)
+    print("job got {ch.recv()}")
+ex := Executor()
+ex.submit(worker)
+spins := 0
+while ready.load() == 0:
+    spins = spins + 1
+ch.send(7)
+ex.shutdown()
+print("done")
+"#;
+    // Engine-agnostic: whenever the job reaches the `recv`, the value is there or it waits for it.
+    let plain = r#"
+ch := Channel[int](1)
+ex := Executor()
+ex.submit(fn(): print("job got {ch.recv()}"))
+ch.send(7)
+ex.shutdown()
+print("done")
+"#;
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send((
+            run_capture_parallel(handshake),
+            run_capture(plain),
+            run_capture_parallel(plain),
+        ));
+    });
+    let (mn_handshake, serial_plain, mn_plain) = rx
+        .recv_timeout(std::time::Duration::from_secs(60))
+        .expect("a blocking job must wake on the send, not hang");
+    let want = "job got 7\ndone\n";
+    assert_eq!(mn_handshake.expect("mn handshake run"), want);
+    assert_eq!(serial_plain.expect("serial run"), want);
+    assert_eq!(mn_plain.expect("mn run"), want);
+}
+
+/// W7-12 — the MIRROR of the test above: a job blocked on a channel that only its own joiner could
+/// have filled must FAULT, not hang. `main` sends only after `shutdown()`, so it is stuck waiting for
+/// the job while the job waits for it — a real deadlock, and the caller's mistake.
+///
+/// Eager execution (§2c) regressed this from "faults in 0s on both engines" to "faults on `--serial`,
+/// hangs forever on M:N": the `recv` arm decides by "am I inside a scheduler?", which cannot tell this
+/// program apart from the one above. The fix asks the one question that can — is this executor already
+/// being JOINED, with every job it still owes parked — so the two programs keep their opposite verdicts.
+///
+/// Asserted on BOTH engines with the SAME text: the M:N fault now travels out of a worker `Vm` through
+/// `reduce_task_slots` rather than an inline drain, so byte-identity with `--serial` (and so with the
+/// pre-eager behaviour) is a real claim, not a formality.
+///
+/// Watchdogged: getting this wrong is a hang, which would otherwise stall the suite rather than fail it.
+#[test]
+fn executor_job_blocked_during_shutdown_faults_both_engines() {
+    let src = r#"
+ch := Channel[int](1)
+ex := Executor()
+ex.submit(fn(): print("job got {ch.recv()}"))
+ex.shutdown()
+ch.send(42)
+"#;
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send((run_capture(src), run_capture_parallel(src)));
+    });
+    let (serial, mn) = rx
+        .recv_timeout(std::time::Duration::from_secs(60))
+        .expect("a job blocked on its own joiner must fault, not hang");
+    let serial = serial
+        .expect_err("serial: this program is a deadlock")
+        .message;
+    let mn = mn.expect_err("M:N: this program is a deadlock").message;
+    assert!(
+        serial.contains("recv on an empty channel: deadlock"),
+        "serial fault was: {serial}"
+    );
+    assert_eq!(serial, mn, "the deadlock verdict must be engine-identical");
+}
+
+/// W7-12's BOUNDARY, and the reason its join predicate asks who is joining rather than just whether
+/// anyone is: a `shutdown()` running inside a nursery task says nothing about whether a value can
+/// still arrive, because a SIBLING task can be the producer. Here `spawn: ex.shutdown()` runs while
+/// `spawn: … ch.send(42)` is one handshake away from sending, so the job must still WAIT.
+///
+/// Caught by review, not by the suite: the first cut armed the predicate at every explicit
+/// `shutdown()`, which made this exact program fault on M:N while `--serial` printed `job got 42` —
+/// re-opening, in a new place, precisely the engine divergence W7-12 exists to close. Asserted on both
+/// engines for that reason.
+///
+/// Run through the FILE helpers, not `run_capture`, for one reason: the producer has to be slower
+/// than the verdict's own debounce (2 × `DEMOTE_POLL_BACKOFF`) or the send lands first and the program
+/// would pass even with the bug present — verified by mutation. That needs a real `timer`, and
+/// `std.time` only resolves through a module graph.
+#[test]
+fn executor_job_keeps_waiting_when_shutdown_runs_beside_a_live_producer() {
+    let src = "
+import std.concurrency
+import std.time
+ch: Channel[int] = Channel[int](1)
+ex := Executor()
+ex.submit(fn(): print(\"job got {ch.recv()}\"))
+parallel:
+    spawn:
+        timer(200).recv()
+        ch.send(42)
+    spawn:
+        ex.shutdown()
+print(\"end\")
+";
+    let entry = write_temp_chz("w712_sibling_producer", src);
+    let (tx, rx) = std::sync::mpsc::channel();
+    let e = entry.clone();
+    std::thread::spawn(move || {
+        let cfg = crate::native::HostConfig::default;
+        let (so, _se, sr, _sc) = run_file_with(&e, cfg());
+        let (mo, _me, mr, _mc) = run_file_p(&e);
+        let _ = tx.send((so, sr, mo, mr));
+    });
+    let (so, sr, mo, mr) = rx
+        .recv_timeout(std::time::Duration::from_secs(60))
+        .expect("a live sibling producer must keep the job waiting, not hang it");
+    let _ = std::fs::remove_file(&entry);
+    assert!(sr.is_ok(), "serial run faulted: {sr:?}");
+    assert!(mr.is_ok(), "M:N run faulted: {mr:?}");
+    assert_eq!(so, "job got 42\nend\n", "serial output");
+    assert_eq!(mo, so, "the two engines must agree");
+}
+
+/// W7-12's other boundary, and the one that matters most: `x.shutdown()` says nothing about whether a
+/// job of a DIFFERENT executor `y` is about to send. Executors are independent.
+///
+/// The measure of correct here is the ancestor, not the parity oracle. Python's `ThreadPoolExecutor`
+/// runs this program to completion — `x.submit(consumer)`, `y.submit(producer)`, `x.shutdown()` prints
+/// `got 1` — so reporting a deadlock is a WRONG ANSWER about a live program, not a tolerable engine
+/// difference. The first cut of this fix did exactly that, and was defended with "`--serial` faults
+/// there too", which is an argument about agreement and not about correctness.
+///
+/// So the predicate also sweeps the executor registry and stays silent while any OTHER executor still
+/// owes work. The accepted cost is the opposite error: two mutually-deadlocked executors HANG rather
+/// than fault (decision D), which is the right way to be wrong — never answer, rather than answer
+/// incorrectly.
+///
+/// M:N-only for the same reason as its sibling above: `--serial` queues at `submit` (decision D3), so
+/// x's consumer does not exist until `x.shutdown()` drains it, and this shape faults there regardless
+/// of anything W7-12 touches.
+#[test]
+fn executor_job_keeps_waiting_while_another_executor_still_owes_work() {
+    let src = "
+import std.concurrency
+import std.time
+ch: Channel[int] = Channel[int](1)
+fn consumer():
+    print(\"got {ch.recv()}\")
+fn producer():
+    timer(200).recv()
+    ch.send(1)
+x := Executor()
+y := Executor()
+x.submit(consumer)
+y.submit(producer)
+x.shutdown()
+y.shutdown()
+print(\"end\")
+";
+    let entry = write_temp_chz("w712_cross_executor", src);
+    let (tx, rx) = std::sync::mpsc::channel();
+    let e = entry.clone();
+    std::thread::spawn(move || {
+        let _ = tx.send(run_file_p(&e));
+    });
+    let (mo, _me, mr, _mc) = rx
+        .recv_timeout(std::time::Duration::from_secs(60))
+        .expect("a live producer in another executor must keep the job waiting, not hang it");
+    let _ = std::fs::remove_file(&entry);
+    assert!(
+        mr.is_ok(),
+        "M:N run faulted where CPython completes: {mr:?}"
+    );
+    assert_eq!(mo, "got 1\nend\n");
+}
+
+/// W7-12's sharpest boundary: **parked is not unfeedable.** A bounded producer/consumer pipeline
+/// inside ONE executor spends its whole life with one job parked on a full `send` and the other on a
+/// momentarily-empty `recv` — that is the healthy steady state of a cap-1 handshake, and the two jobs
+/// feed EACH OTHER.
+///
+/// The predicate's first form (`blocked >= outstanding`, i.e. "every job this executor owes is
+/// parked") read that as a deadlock and faulted `send on a full channel` in 2–7 of 30 runs of this
+/// exact program — a NONDETERMINISTIC wrong answer on code Go and CPython run to completion, and the
+/// worst outcome available. The two-observation debounce does not help: consecutive 5 ms samples both
+/// land in successive parked windows.
+///
+/// So the verdict is now restricted to `outstanding == 1`, where there is no sibling to hand off with
+/// and the counters cannot be misread. This test is the fence, and it LOOPS because one pass proves
+/// nothing about a race — the buggy form passed most runs.
+///
+/// M:N-ONLY, and not for lack of trying: on `--serial` this program faults `send on a full channel`
+/// regardless of anything W7-12 touches, because that engine queues at `submit` (decision D3) and runs
+/// the producer to completion before the consumer exists. Adding a serial arm would go red for an
+/// unrelated reason. A progress-counter variant of the predicate that would have allowed multi-job
+/// verdicts was tried and measured to fail this very test (6/40) — see `docs/gaps.md` W7-12.
+#[test]
+fn executor_bounded_pipeline_is_not_mistaken_for_a_deadlock() {
+    let src = "
+import std.concurrency
+a: Channel[int] = Channel[int](1)
+fn prod():
+    for i in range(0, 50):
+        a.send(i)
+    a.close()
+fn cons():
+    s := 0
+    for v in a:
+        s = s + v
+    print(\"sum {s}\")
+ex := Executor()
+ex.submit(prod)
+ex.submit(cons)
+ex.shutdown()
+";
+    let entry = write_temp_chz("w712_bounded_pipeline", src);
+    let (tx, rx) = std::sync::mpsc::channel();
+    let e = entry.clone();
+    std::thread::spawn(move || {
+        let mut bad = Vec::new();
+        for _ in 0..12 {
+            let (o, _e2, r, _c) = run_file_p(&e);
+            if r.is_err() || o != "sum 1225\n" {
+                bad.push(format!("{r:?} / out={o:?}"));
+            }
+        }
+        let _ = tx.send(bad);
+    });
+    let bad = rx
+        .recv_timeout(std::time::Duration::from_secs(120))
+        .expect("a bounded pipeline must not hang");
+    let _ = std::fs::remove_file(&entry);
+    assert!(
+        bad.is_empty(),
+        "a healthy cap-1 handshake was reported as a deadlock in {}/12 runs: {bad:#?}",
+        bad.len()
+    );
+}
+
+/// W7-5b — an `Executor` constructed INSIDE a task, never explicitly shut down, must still have its
+/// work run and waited for at program exit.
+///
+/// It did not before: `Vm.executors` is a `Vec<GcRef>`, heap-keyed and swapped per fiber, so a nested
+/// executor landed in the task's throwaway worker list and was dropped when the task finished — its
+/// jobs never ran, were never reaped, and raised no fault. Verified on the pre-change binary: M:N
+/// printed `main done` alone while `--serial` (one shared heap, so its list survived) ran both jobs.
+/// The fix is the heap-independent `ExecRegistry`, which every worker shares.
+///
+/// The jobs print their own evidence rather than a counter being read at the end, because the exit
+/// join happens AFTER the last top-level statement — a `print` of an accumulator would race the jobs
+/// it is trying to observe. Compared as a line SET: the jobs are concurrent, so their order is free.
+#[test]
+fn executor_created_inside_a_task_is_joined_at_exit_both_engines() {
+    let src = r#"
+parallel:
+    spawn:
+        inner := Executor()
+        inner.submit(fn(): print("inner job A"))
+        inner.submit(fn(): print("inner job B"))
+print("main done")
+"#;
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send((run_capture(src), run_capture_parallel(src)));
+    });
+    let (serial, mn) = rx
+        .recv_timeout(std::time::Duration::from_secs(60))
+        .expect("the exit join must not hang");
+    let mut want = ["inner job A", "inner job B", "main done"];
+    want.sort_unstable();
+    for (engine, got) in [("serial", serial), ("mn", mn)] {
+        let mut lines: Vec<&str> = got
+            .as_deref()
+            .expect("run")
+            .lines()
+            .filter(|l| !l.is_empty())
+            .collect();
+        lines.sort_unstable();
+        assert_eq!(lines, want, "{engine}: a task-created executor lost work");
+    }
+}
+
+/// An `Executor` created BY a job that the program-exit join is itself running must also be joined.
+///
+/// Pre-existing on both engines and silent: the exit reap iterated a SNAPSHOT of the executor list
+/// taken before it started, so an executor born during the reap was never in it and its work simply
+/// vanished (verified on the pre-change binary — neither engine printed the inner line). Both sides
+/// now re-scan until no un-shut executor is left, which terminates because `shutdown` marks a core
+/// `shut` before running anything.
+///
+/// Worth a test of its own rather than folding into the W7-5b case: that one is about an executor
+/// created inside a TASK (a heap-visibility problem), this one is about an executor created inside the
+/// JOIN (an iteration-order problem). Fixing either does not fix the other.
+#[test]
+fn executor_created_by_a_joined_job_is_also_joined_both_engines() {
+    let src = r#"
+fn makes_another():
+    inner := Executor()
+    inner.submit(fn(): print("job created BY a job"))
+ex := Executor()
+ex.submit(makes_another)
+print("main done")
+"#;
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send((run_capture(src), run_capture_parallel(src)));
+    });
+    let (serial, mn) = rx
+        .recv_timeout(std::time::Duration::from_secs(60))
+        .expect("the exit join must not hang");
+    let mut want = ["job created BY a job", "main done"];
+    want.sort_unstable();
+    for (engine, got) in [("serial", serial), ("mn", mn)] {
+        let mut lines: Vec<&str> = got
+            .as_deref()
+            .expect("run")
+            .lines()
+            .filter(|l| !l.is_empty())
+            .collect();
+        lines.sort_unstable();
+        assert_eq!(
+            lines, want,
+            "{engine}: an executor born during the join was lost"
+        );
+    }
 }
 
 // ----- C5 (A2): program-exit auto-drain (VM parity) -----

@@ -267,12 +267,20 @@ import gate + reserved name as `Atomic`. Constructed `AtomicInt(v)` (one int arg
 type error).
 
 ### `Executor` — task pool
-`submit(task: fn() -> _) -> nil` (detached, fire-and-forget) · `shutdown() -> nil` (drain — runs every
-queued job; raises the lowest-index fault, see `concurrency.md` §8) ·
-`shutdown_now() -> nil` (abandon pending) ·
+`submit(task: fn() -> _) -> nil` — **starts the job immediately** on the shared pool (detached,
+fire-and-forget), like Python's `ThreadPoolExecutor.submit`; `--serial` queues it for `shutdown()`
+instead (`concurrency.md` §8, decision D3) ·
+`shutdown() -> nil` (**wait** for the submitted work — every job runs; raises the lowest-index fault,
+see `concurrency.md` §8) ·
+`shutdown_now() -> nil` (drop work that has not started, ask running jobs to stop **cooperatively**,
+then wait — Java `shutdownNow`; a job with no cancellation point still finishes) ·
 `submit_result[T](f: fn() -> T) -> Channel[T]` — submit `f` and get back a cap-1 `Channel[T]` carrying
-its result (`.recv()` it after the pool drains). This is the result-returning primitive
+its result (`.recv()` it **after** `shutdown()`). This is the result-returning primitive
 `std.concurrency.task.submit_task` / `Task[T]` wraps.
+
+An `Executor` is **detached**: it outlives the scope that made it, and the program waits for its
+outstanding work at exit. **Read results after `shutdown()`, never between it and the `submit`** —
+that window is the one place the two engines deliberately disagree.
 
 ### `Socket` / `Listener` — from `std.net` (see §4)
 - `Socket`: `read(n: int, timeout_ms?: int) -> Result[str]` · `write(s: str, timeout_ms?: int) -> Result[int]` ·
@@ -1210,7 +1218,7 @@ gap that bare `Executor.submit(f)` is fire-and-forget (returns nothing).
 
 | item | signature | semantics |
 | --- | --- | --- |
-| `submit_task` | `submit_task[T](ex: Executor, f: fn() -> T) -> Task[T]` | submit `f` to `ex` for detached execution and get a handle for its result. The work runs when `ex` drains (`shutdown()` or program-exit). |
+| `submit_task` | `submit_task[T](ex: Executor, f: fn() -> T) -> Task[T]` | submit `f` to `ex` for detached execution and get a handle for its result. The work STARTS at the submit and is waited for by `shutdown()` (or the program-exit join); `--serial` runs it at that wait instead. |
 | `Task.get` | `get(self) -> T` | block until the result is available, then return it. **Memoized** — idempotent, safe to call repeatedly (a second call returns the cache, not a second `recv`). |
 | `Task.done` | `done(self) -> bool` | whether the result has landed yet. Never blocks. |
 

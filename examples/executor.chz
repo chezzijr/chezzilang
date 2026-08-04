@@ -1,37 +1,52 @@
 # C5 concurrency: `Executor` — the escape hatch for detached work that outlives a `parallel:` scope.
-# An Executor is an explicitly-owned work queue: `submit` enqueues a detached task, `shutdown`
-# gracefully drains it (FIFO), `shutdown_now` discards pending work. Reap it deterministically with
-# `defer ex.shutdown()`. Under the sequential executor submitted work runs at the reap point, not in
-# the background — same surface as real-concurrency C5, deterministic semantics now.
+# An Executor is an explicitly-owned pool handle: `submit` starts a detached job right away,
+# `shutdown` waits for the submitted work, `shutdown_now` asks it to stop early. Same shape as
+# Python's `ThreadPoolExecutor` and Java's `ExecutorService`. Reap it deterministically with
+# `defer ex.shutdown()`, or let the program-exit join reap it (see examples/executor_autodrain.chz).
+#
+# Because jobs run CONCURRENTLY with the code that submitted them, the order in which their side
+# effects land is not fixed. So this example never prints from inside a job: each job puts its result
+# on its OWN channel, and the results are read back in SUBMISSION order after `shutdown()`. That is
+# the shape to copy — read (or assert) after `shutdown()`, never between it and the `submit`.
+# `ex.submit_result(f)` packages exactly this pattern into one call.
 
 import std.concurrency
 
-fn job(id: int):
-    print("job {id} ran")
+fn job(id: int) -> str:
+    return "job {id} ran"
 
-# `defer ex.shutdown()` ties the reap to this function's exit: submitted work runs after the rest of
-# the body, on every exit path.
-fn deferred():
+# `defer ex.shutdown()` ties the wait to this function's exit: the body continues while the job runs,
+# and the function will not return until the job is done, on every exit path. Note the job's result is
+# read by the CALLER, after `deferred()` has returned — reading it inside the body would be reading
+# before the wait, and would block forever if the job had not finished yet.
+fn deferred(seen: Atomic[int]):
     ex := Executor()
     defer ex.shutdown()
-    ex.submit(fn(): job(3))
-    print("inside deferred(), before reap")
+    ex.submit(fn(): seen.add(3))
+    print("inside deferred(), before the wait")
 
 fn main():
-    # Graceful drain: submitted tasks run at shutdown(), FIFO — not when submitted.
     ex := Executor()
-    ex.submit(fn(): job(1))
-    ex.submit(fn(): job(2))
-    print("submitted; nothing has run yet")
-    ex.shutdown()
+    r1 := Channel[str](1)
+    r2 := Channel[str](1)
+    ex.submit(fn(): r1.send(job(1)))
+    ex.submit(fn(): r2.send(job(2)))
+    print("submitted; both jobs are already running")
+    ex.shutdown() # waits for the submitted work
+    print(r1.recv())
+    print(r2.recv())
     print("drained")
 
-    deferred()
+    seen := Atomic(0)
+    deferred(seen)
+    print("after deferred() returned, the job had run: {seen.load()}")
 
-    # shutdown_now discards pending work without running it.
+    # `shutdown_now` asks pending work to stop: work not yet started is dropped, and a job already
+    # running is CANCELLED COOPERATIVELY — it stops at its next cancellation point, so a job with none
+    # still finishes. This is "attempts to stop", exactly like Java's `shutdownNow`; it is not a kill.
     ex2 := Executor()
     ex2.submit(fn(): job(99))
     ex2.shutdown_now()
-    print("discarded; job 99 never ran")
+    print("asked to stop; job 99 may or may not have run")
 
 main()

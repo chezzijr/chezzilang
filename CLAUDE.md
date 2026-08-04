@@ -130,6 +130,19 @@ UPDATE_EDITOR_ASSETS=1 cargo test --test editor_tmlanguage    # regenerate the V
   scheduler differs. Test helpers: `run_capture`/`run_program`/`run_file` are the serial engine;
   `run_capture_parallel`/`run_program_parallel`/`run_file_p` are the M:N oracle. Keep them in sync —
   a VM change that diverges serial vs M:N is a bug.
+- **CORRECTNESS OUTRANKS ENGINE AGREEMENT — always, and never the reverse.** Parity is a *detector*
+  for accidental divergence, never the definition of right. Two engines can agree on a wrong answer,
+  and `--serial` is **scheduled for removal** (`docs/future.md` §2b), so it can never be the standard
+  of correct. Whenever behavior is in question, judge it against the ancestor that owns the feature and
+  **run the reference program** rather than reasoning about it: **Go** for concurrency/interfaces,
+  **Python** for scripting feel + `Executor`-family semantics, **Rust** for enums/errors/control flow.
+  If Chezzi disagrees with the owning ancestor and the difference isn't a documented deliberate
+  decision, that is a **bug** — including when the drift exists to keep the parity oracle tidy.
+  "Both engines agree" / "`--serial` does it too" is NOT a defense of a behavior; state the ancestor's
+  measured output instead. Corollary for any heuristic verdict (deadlock detection, resource caps,
+  inference fallbacks): when unsure it must **decline** (hang / stay silent / ask), never emit a
+  confident wrong answer — a missing answer is recoverable, a wrong one teaches distrust of every
+  answer. Worked example + measured Go/CPython table: `docs/gaps.md` **W7-12**.
 
 ## Where things stand
 

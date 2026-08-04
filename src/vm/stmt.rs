@@ -2099,9 +2099,18 @@ impl Vm {
                     "AtomicInt({})",
                     core.v.load(std::sync::atomic::Ordering::SeqCst)
                 )),
+                // Work not yet finished, on EITHER engine: `--serial` keeps it in the queue,
+                // the eager M:N engine has already dispatched it and counts it as outstanding. Summing
+                // both is what keeps this honest — reading only the queue would report `pending=0`
+                // while jobs are running. Exactly one term is ever non-zero for a given executor.
                 Obj::Executor(core) => Ok(format!(
                     "Executor(pending={})",
                     core.inner.lock().unwrap().len()
+                        + core
+                            .eager
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .outstanding()
                 )),
                 // D6: render open/closed without exposing the fd; matches no interp counterpart (net
                 // is VM-only) but mirrors the core handles' structural `Display`.
