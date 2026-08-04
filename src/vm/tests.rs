@@ -12081,6 +12081,81 @@ ex.submit(closer)
     );
 }
 
+/// W7-13r(a) — an eager `wait:` block must be woken by its first arm, not by the poll timeout.
+///
+/// `op_wait_poll`'s eager branch was a bare `thread::sleep(DEMOTE_POLL_BACKOFF)`, so EVERY wake cost a
+/// full 5 ms tick however fast the value arrived. It now waits on ARM 0's condvar with the tick as the
+/// timeout — the trick `demote_wait_block` already used for the same N-arms-no-single-condvar problem,
+/// which is why the earlier "this needs a new multi-channel wait primitive" note was wrong.
+///
+/// 300 blocking `wait:` wakeups, release binary, same answer (`44850`) both ways:
+///
+/// | | before | after |
+/// |---|---|---|
+/// | wall clock | 1020 / 733 / 1102 ms | **5 / 5 / 5 ms** |
+///
+/// ~200×, because the old path paid a tick per wakeup and the new one pays a tick only when arm 0 is
+/// not the one that fires. The bound below is deliberately far above the fixed timing and far below
+/// the broken one, so it discriminates without flaking under a loaded suite. Mutation-verified
+/// in-process (stub the wait back to a blind poll): **0.01 s green vs 1.55 s red**.
+#[test]
+fn an_eager_wait_block_is_woken_by_its_arm_not_by_the_poll_timeout() {
+    // The `gate` handshake is what makes this test exercise the path at all: `cons` announces that it
+    // is about to block, and only then does `prod` send. Without it `prod` races ahead, every `wait:`
+    // finds its value already queued, and the block branch is never reached — measured: the vacuous
+    // version passed even with the wait stubbed back to a blind sleep.
+    let src = "
+import std.concurrency
+data: Channel[int] = Channel[int](1)
+other: Channel[int] = Channel[int](1)
+gate: Channel[bool] = Channel[bool](1)
+done: Channel[int] = Channel[int](1)
+fn prod():
+    for i in range(0, 300):
+        _ := gate.recv()
+        data.send(i)
+fn cons():
+    s := 0
+    for i in range(0, 300):
+        gate.send(true)
+        wait:
+            v := data.recv():
+                s = s + v
+            w := other.recv():
+                s = s + w
+    done.send(s)
+ex := Executor()
+ex.submit(prod)
+ex.submit(cons)
+ex.shutdown()
+print(done.recv())
+";
+    let entry = write_temp_chz("w713a_wait_wakeups", src);
+    let (tx, rx) = std::sync::mpsc::channel();
+    let e = entry.clone();
+    std::thread::spawn(move || {
+        let t0 = std::time::Instant::now();
+        let (o, _e2, r, _c) = run_file_p(&e);
+        let _ = tx.send((o, format!("{r:?}"), r.is_err(), t0.elapsed()));
+    });
+    let outcome = rx.recv_timeout(std::time::Duration::from_secs(60));
+    let _ = std::fs::remove_file(&entry);
+    let (out, rdbg, failed, elapsed) = outcome.expect(
+        "300 `wait:` wakeups did not finish in 60 s — either a hang, or <2 free pool threads (see \
+         the note on `eager_send_blocked_on_a_full_channel_faults_when_the_channel_is_closed`)",
+    );
+    assert!(!failed, "the program must succeed: out={out:?} r={rdbg}");
+    assert_eq!(
+        out, "44850\n",
+        "every arm value must still be received exactly once"
+    );
+    assert!(
+        elapsed < std::time::Duration::from_millis(400),
+        "300 eager `wait:` wakeups took {elapsed:?} (fixed: ~5 ms, blind-poll: ~700-1100 ms) — the \
+         eager `wait:` block is sleeping through its wakeups again"
+    );
+}
+
 /// W7-13r(c)'s ORDERING fence — the closed-check must come AFTER the enqueue retry, never before.
 ///
 /// This is the regression the first draft of that fix shipped, caught by adversarial review and not

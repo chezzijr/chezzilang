@@ -1322,7 +1322,20 @@ impl Vm {
             "trip" => {
                 self.arity_err("trip", args, 0, span)?;
                 let core = self.channel_core(h);
-                core.done_latch.store(true, Ordering::Relaxed);
+                // W7-13r(b) — the store happens UNDER `core.q`, the same lock a blocked waiter
+                // re-checks its readiness predicate under, and that is what makes the wake reliable.
+                // `close()` has always set `closed` under this lock; `trip()` used a bare atomic, so a
+                // waiter could evaluate "not tripped" while holding `q` and be notified before it had
+                // atomically released `q` and enqueued on `cv` — a lost wakeup costing a full
+                // `DEMOTE_POLL_BACKOFF`, the exact shape W7-13 fixed for values and closes. Holding
+                // `q` across the store makes the two orderings the only possibilities: the waiter sees
+                // the latch in its predicate, or it is already on the condvar when `notify_all` runs.
+                // The guard is dropped before the wake fan-out below, which takes the sched lock —
+                // `q` is never held across that.
+                {
+                    let _g = core.q.lock().unwrap_or_else(|e| e.into_inner());
+                    core.done_latch.store(true, Ordering::Relaxed);
+                }
                 if let Some(sched) = self.mn.clone().or_else(|| self.mn_enlist_sched.clone()) {
                     let key = self.channel_core_ptr(h);
                     sched.close_wake(key, &core);
@@ -2170,10 +2183,9 @@ impl Vm {
             return Ok(());
         }
         // EAGER `Executor` job — block instead of declaring a deadlock, like the empty-`recv` and
-        // full-`send` cases. There are N arm condvars and no single one to block on, so this is a
-        // bounded poll (the same trade [`Vm::demote_wait_block`] makes): sleep a tick, then REWIND so
-        // the dispatch loop re-runs this `WaitPoll` and re-polls every arm. Rewinding rather than
-        // looping in place also means the halts land on the ordinary back-edge checkpoint.
+        // full-`send` cases, then REWIND so the dispatch loop re-runs this `WaitPoll` and re-polls
+        // every arm. Rewinding rather than looping in place also means the halts land on the ordinary
+        // back-edge checkpoint.
         if self.eager_core.is_some() {
             // W7-12 — armed FIRST, before the halt check, so this job counts ITSELF as blocked; armed
             // after it, a LONE `wait:`-blocked job (the only shape the verdict now judges) would
@@ -2182,7 +2194,37 @@ impl Vm {
             // `outstanding == 1`, so there is no sibling whose sample could catch the gap.
             let _blocked = self.eager_block_guard();
             self.eager_halt_check(EMPTY_WAIT_DEADLOCK, span)?;
-            std::thread::sleep(DEMOTE_POLL_BACKOFF);
+            // W7-13r(a) — this used to be a bare `thread::sleep(DEMOTE_POLL_BACKOFF)`, so EVERY wake
+            // cost a full tick no matter how fast the value arrived. There are N arm condvars and no
+            // single one to block on, so it cannot be a plain targeted wait — but it does not have to
+            // be a blind sleep either: wait on the FIRST arm's condvar with the tick as the timeout,
+            // exactly as [`Vm::demote_wait_block`] already does. Arm 0 then wakes promptly and every
+            // other arm is still observed within a tick, so this is strictly better than the sleep and
+            // never worse. (An earlier note claimed fixing this needed a new multi-channel wait
+            // primitive; that was wrong — the precedent was already in the tree.)
+            let (h0, is_send0) = keys[0]; // non-empty: an all-closed arm set returned above
+            let first = self.channel_core(h0);
+            let cap0 = first.cap;
+            // Clamp to the soonest timer deadline so a timer arm still fires on time (saturating, so
+            // an already-passed deadline yields ~no wait) — the same clamp `demote_wait_block` uses.
+            let backoff = match soonest {
+                Some((_, d)) => {
+                    DEMOTE_POLL_BACKOFF.min(d.saturating_duration_since(std::time::Instant::now()))
+                }
+                None => DEMOTE_POLL_BACKOFF,
+            };
+            // Readiness for ARM 0 only, evaluated under the guard the wait consumes (W7-13's rule): a
+            // recv arm wants a value/close/latch, a send arm wants a free slot or a close. Every other
+            // arm is covered by the timeout, as before.
+            let q = first.q.lock().unwrap_or_else(|e| e.into_inner());
+            let _ = first.cv.wait_timeout_while(q, backoff, |g| {
+                let ready = if is_send0 {
+                    cap0.is_none_or(|c| g.len() < c) || g.closed
+                } else {
+                    !g.is_empty() || g.closed || first.done_latch.load(Ordering::Relaxed)
+                };
+                !ready
+            });
             self.frames.last_mut().unwrap().ip -= 1;
             return Ok(());
         }

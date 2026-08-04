@@ -32,7 +32,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 >    Deliberate divergence recorded: `--serial` keeps `FULL_SEND_DEADLOCK`, because its drain runs
 >    queued jobs one at a time and cannot interleave them. Precondition it does NOT fix: ≥2 pool
 >    threads (`--threads=1` still hangs — `pool.rs`'s known fixed-size-pool hazard). Residuals (a) the
->    blind eager `wait:` poll and (b) `trip()`'s latch written outside `core.q` stay open in `W7-13r`.
+>    blind eager `wait:` poll and (b) `trip()`'s latch written outside `core.q` are ALSO fixed — see 4.
 >    **`adversarial-review` caught a REGRESSION in the first draft of this fix**, and the green suite
 >    did not: checking `closed` *before* the enqueue retry faulted the ordinary drain-then-close shape
 >    (`a := ch.recv()` then `ch.close()`) that Go completes — the recv frees the slot for the blocked
@@ -46,7 +46,22 @@ Single source of truth for "what am I doing next." Update after every work sessi
 >    had already reported one false green (now an aggregate wall-clock bound, immune to that). And
 >    three claims written into the new comments were false on inspection — always re-derive a
 >    "this is already handled" claim from the code, not from the fix you just wrote.
-> 4. **Next milestone: a PROCESS-WIDE quiescence detector — `docs/future.md` §2d,
+> 4. ✅ **`W7-13r(a)` and `(b)` FIXED 2026-08-04 — the W7-13 family is now CLOSED.**
+>    **(a)** the eager `wait:` block was a bare `thread::sleep`, paying a full 5 ms tick per wake-up.
+>    Now waits on ARM 0's condvar with the tick as the timeout (clamped to the soonest timer
+>    deadline). 300 blocking `wait:` wakeups, release binary: **1020/733/1102 ms → 5/5/5 ms**, same
+>    answer. This is `demote_wait_block`'s existing four-line trick — the residual had been deferred as
+>    "needs a shared multi-channel wait primitive, a design change of its own", which was simply false.
+>    **(b)** `trip()` set `done_latch` outside `core.q`; now under it, matching `close()`'s discipline.
+>    **Deliberately shipped WITHOUT a test**, measured 5–6 ms both ways: the window is the nanoseconds
+>    between predicate-eval and condvar-enqueue, so a timing test would assert nothing and flake.
+>    **A vacuous-test lesson worth keeping:** (a)'s first test let the producer race ahead, so every
+>    `wait:` found its value already queued, the block branch was never reached, and it passed with the
+>    blind sleep stubbed back in. Only mutation testing exposed it; a `gate` handshake forcing the
+>    consumer to arrive first fixed it (0.01 s green vs 1.55 s red). **Mutation-verify every timing
+>    test — "it passes" is not evidence it executes the code you think it does.**
+>
+> 5. **Next milestone: a PROCESS-WIDE quiescence detector — `docs/future.md` §2d,
 >    step 0.** Decision 2026-08-04, owner: *"we should not let it hang; what could be done should be
 >    done."* Lift `MnSched::is_deadlocked` from per-nursery to process-wide and count JOINERS as blocked
 >    parties. That is Go's exact rule, it catches every shape W7-12 still hangs on (all of them are
@@ -56,14 +71,17 @@ Single source of truth for "what am I doing next." Update after every work sessi
 >    **Write the Go/CPython comparison programs and the looping tests BEFORE the detector**: the vetoes
 >    (timer, socket, netpoll, blocking-pool, value-in-flight) are the entire correctness surface, and
 >    mis-vetoing is exactly how W7-12's predicate produced three false alarms on healthy programs.
-> 5. **Do NOT** apply `.superpowers/sdd/task-3-mn-half.patch` (wrong lifetime, superseded), and do NOT
->    grow W7-12's local predicate one case at a time — that is what step 4 above replaces wholesale.
+> 6. **Do NOT** apply `.superpowers/sdd/task-3-mn-half.patch` (wrong lifetime, superseded), and do NOT
+>    grow W7-12's local predicate one case at a time — that is what step 5 above replaces wholesale.
 >    And do NOT read W7-13's fix as licensing progress-rate reasoning in the detector: the `W7-13r`
 >    `wait:` residual still stalls, and `parked-is-not-stuck` is a semantic objection, not a latency one.
 >
 > Still open and NOT part of this: `W7-5d` (hard halt mid-`shutdown()` engine asymmetry — note its M:N
 > half is written against `run_workers_on_pool`, which eager execution DELETED, so re-derive it before
-> closing it) and `W7-13r` (the eager `wait:` arm's blind poll).
+> closing it). The whole `W7-13` family is now closed. Two known limits it did NOT touch, both
+> pre-existing and both recorded in `docs/gaps.md`: a blocked eager job holds its pool thread, so
+> `--threads=1` still hangs two-job programs (`pool.rs`'s fixed-size-pool hazard), and nothing fences
+> the no-hot-spin property of the eager send loop (`cargo test` measures verdicts, not CPU).
 
 **Legend:** ⬜ not started · 🟦 in progress · ✅ done
 
