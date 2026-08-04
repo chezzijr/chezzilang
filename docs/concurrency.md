@@ -1209,8 +1209,16 @@ supervised tasks) — Go's float-free `go` is the model both ecosystems *rejecte
 > immediately** on the shared pool and `shutdown()` **waits** for the submitted work — the
 > `ThreadPoolExecutor` / `ExecutorService` model. `--serial` keeps the older queue-at-`submit`,
 > drain-at-`shutdown` behaviour (decision D3), which is why the two engines can disagree about a job's
-> effect *between* those two calls and about nothing else. **The test/usage shape that keeps you on
-> the agreed side: read or assert after `shutdown()`, never between it and the `submit`.**
+> effect *between* those two calls. **The test/usage shape that keeps you on the agreed side: read or
+> assert after `shutdown()`, never between it and the `submit`.**
+>
+> That window is no longer the *only* disagreement, so do not read it as a closed list. Because the
+> serial drain runs queued jobs one at a time and cannot interleave them, a program that needs two
+> jobs alive at once is inexpressible there and the two engines can differ in the terminating fault
+> itself — including *after* an explicit `shutdown()`. The measured case is `docs/gaps.md`
+> **W7-13r(c)**: a job blocked on a full channel that another job closes faults `send on a closed
+> channel` on M:N (matching Go) and `send on a full channel: deadlock` on `--serial`. Deliberate, and
+> resolved by §2b retiring `--serial`.
 >
 > The fault contract is unchanged by eager execution: **every submitted job runs**, and the **first
 > fault in submission order** (lowest index — not first-to-fail, which would be nondeterministic)

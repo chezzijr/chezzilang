@@ -57,7 +57,7 @@ chronological log.
 | **W6-10r** | `:1216` | `--max-heap` residual: a payload reachable ONLY through a **nested** core (a `Channel` inside a `Shared`, once the nested core's last `Obj` alias slot is swept) is counted nowhere | Left open by the W6-10 fix on purpose. `live_bytes` reaches a core's bytes through its `Obj::*` alias slot; a nested core has none. Closing it needs cross-core byte recursion with `Arc` de-dup — narrow trigger, not worth the machinery yet |
 | protocol embeds | `:1505` | A protocol-embedded method isn't callable through the interface value (`p: Person` can't call embedded `name()`) despite `spec.md:973` "flattened at bound sites" | Filed as a safe-direction observation in wave 3; never triaged — doc and behavior contradict each other either way |
 | **W7-5d** | `:4413` | A hard halt (over-memory/timeout/dead-stdout) firing mid-`shutdown()` does NOT run every queued job the way an ordinary fault does — `--serial` stops popping the queue the instant one fires (later-queued jobs never run at all); M:N has already dispatched every job to the pool before a hard halt can fire, but that is not a per-job guarantee under a thread-starved pool | Found while adversarially reviewing this milestone's own docs. Live and reproduced on the built binary (`Executor().submit(spew-until-dead-stdout)` then two marker jobs, piped through `head -1`: M:N runs both markers, `--serial` runs neither), but untested — `tests/chz/stdlib/executor_drain_test.chz`'s 6 tests only use `panic()` faults, never a hard-halt kind. `executor_hard_halt` was deliberately built as an unconditional kill switch (W7-5), so this is arguably correct-by-design on both engines individually, but the exact SHAPE of "what still doesn't run" differs by engine and neither engine's shape is pinned by a test |
-| **W7-13r** | `:4619` | Three residuals of the W7-13 fix (**the gap itself is FIXED 2026-08-04**): (a) the eager `wait:` arm is still a bare `thread::sleep(DEMOTE_POLL_BACKOFF)`, so it alone still pays a full tick per wake-up; (b) `trip()` writes `done_latch` OUTSIDE `core.q`, so that one predicate term narrows but cannot close its race; (c) an eager job blocked on a full `send` never observes a `close()` and loops until another halt — **pre-existing**, and an engine divergence (M:N faults `send on a closed channel`, `--serial` faults `FULL_SEND_DEADLOCK`, Go panics) | (a) is cheap, not expensive — `demote_wait_block` (`sched.rs:1114`) already does the first-arm-condvar trick without a new primitive; the earlier "needs its own design" note was wrong. (b) needs the latch moved into `ChanState`. (c) must NOT be fixed by adding `|| g.closed` to the send predicate — that spins hot; the loop body has to check and fault. Note the original W7-13 diagnosis (a *missing* `wake_senders`) was WRONG: that wake already fires on all six pop paths; the bug was a LOST wakeup — `eager_wait_tick` waited with no predicate, so a `notify_all` arriving while the lock was free hit a condvar nobody was on yet |
+| **W7-13r** | `:4619` | Residuals of the W7-13 fix (**the gap itself is FIXED 2026-08-04**, and so is **(c)**): (a) the eager `wait:` arm is still a bare `thread::sleep(DEMOTE_POLL_BACKOFF)`, so it alone still pays a full tick per wake-up; (b) `trip()` writes `done_latch` OUTSIDE `core.q`, so that one predicate term narrows but cannot close its race; ~~(c) a blocked eager `send` never observes `close()`~~ — **FIXED 2026-08-04**, was a hang, now faults `send on a closed channel` at 105 ms (Go, compiled: 104 ms); needs ≥2 pool threads, unchanged by the fix | (a) is cheap, not expensive — `demote_wait_block` (`sched.rs:1114`) already does the first-arm-condvar trick without a new primitive; the earlier "needs its own design" note was wrong. (b) needs the latch moved into `ChanState`. (c) left a DELIBERATE engine divergence: `--serial` still faults `FULL_SEND_DEADLOCK` because queue-at-submit (D3) means its `blocker` finishes before the closer exists — that engine cannot express the program. Note the original W7-13 diagnosis (a *missing* `wake_senders`) was WRONG: that wake already fires on all six pop paths; the bug was a LOST wakeup — `eager_wait_tick` waited with no predicate, so a `notify_all` arriving while the lock was free hit a condvar nobody was on yet |
 | **W7-12r** | `:4442` | Residuals of the W7-12 interim fix (**the gap itself is FIXED 2026-08-03**): the verdict only fires for an executor whose ONLY outstanding job is blocked, with no other executor still owing work — everything else DECLINES, i.e. hangs rather than faults. So (a) any multi-job deadlock inside one executor, (b) two executors deadlocking each other, and (c) a program with no explicit `shutdown()` all still hang. Go reports (a) and (b) (`all goroutines are asleep`), so these are measured gaps against the concurrency ancestor — **and they are live serial-vs-M:N divergences too**: two jobs both blocked on an empty `recv` faults in 0s on `--serial` and hangs forever on M:N, so the engine disagreement is closed only for the single-job shape | Deliberately under-fires. `blocked >= outstanding` was tried and is WRONG: a bounded cap-1 pipeline is permanently "all jobs parked" while being perfectly healthy (the two jobs feed each other), and it faulted 2–7 of 30 runs on a program Go and CPython complete — fenced now by `executor_bounded_pipeline_is_not_mistaken_for_a_deadlock`. Parked ≠ unfeedable, and no counter can tell those apart; do NOT try again with a cleverer counter. The sound successor is the process-wide AND-OR wait-for graph in `docs/future.md` **§2d** (which is what Go's own detector is), its own milestone, best sequenced after §2b retires `--serial` |
 | **W7-11** | `:3901` | A `RwShared` holding a container with an element that back-references the CONTAINER (`a.next = xs; RwShared(xs).at(0)`) aborts the host on `from_wire_memo`'s `.expect("a wire Backref always targets an already-reconstructed node id")` — a legal program, no concurrency, both engines | **Pre-existing on main**, not a W7-4 regression (verified on 5960052): a copy-out view drains ONE depth-1 piece, and a piece whose cycle closes through the ROOT container can never be self-contained — the definition it needs IS the container. `elem_split` fixes the sibling-CELL case, not this ancestor case. Closing it means either a catchable fault instead of the `.expect` (`from_wire_memo` returns a `Value`, so that is a signature change through every rebuild arm) or a same-guard whole-container fallback at all 12 view sites |
 | **W7-4a** | `:3901` | Airlock cell identity is preserved **per module** in the snapshot, so two globals in DIFFERENT modules over one shared cell still arrive as two cells | Residual disclosed by the W7-4 fix. Closing it needs `Vm`-lived rebuild state kept (and rooted) across the lazy per-module faults; the reported repro is same-module and is fixed |
@@ -4696,21 +4696,90 @@ as `lossy-decode-blinds-a-comparison-oracle` — when you add a detector, ask wh
 2. **`trip()` writes `done_latch` outside `core.q`**, so the `done_latch` term in the new recv
    predicate narrows its race but cannot close it (the value and `closed` terms ARE closed, because
    both writers hold `q`). Closing it means moving the latch into `ChanState`.
-3. **The eager full-`send` loop never observes `closed`** — `enqueue_bounded` does not consult it and
-   the loop never returns to `send`'s top-of-method closed guard, so an eager job blocked on a full
-   channel that is then closed loops until some other halt fires. **Pre-existing and unchanged by this
-   fix** (the old `wait_timeout` loop did exactly the same), but it is an engine divergence worth its
-   own entry: a parked M:N sender is woken by `close_wake`, re-runs `send` and faults
-   `send on a closed channel`, `--serial` faults `FULL_SEND_DEADLOCK`, and Go panics — three answers
-   where the eager path gives none. Note the fix is NOT "add `|| g.closed` to the send predicate":
-   that would make the predicate true while `enqueue_bounded` keeps failing, turning a 5 ms poll into
-   a **hot spin**. The loop body has to check `closed` and fault.
+3. ~~The eager full-`send` loop never observes `closed`.~~ **FIXED 2026-08-04 — see W7-13r(c) below.**
 
 Why it mattered beyond speed: it is what made "no progress in the last N ms" useless as evidence of
 deadlock (see W7-12's rejected experiment), which is why it was fixed BEFORE the process-wide
 quiescence detector (`future.md` §2d). Note that it does **not** make progress-rate reasoning sound —
 the `wait:` residual above still stalls, and `parked-is-not-stuck` is a semantic objection, not a
 latency one.
+
+### W7-13r(c) — an eager job blocked on a FULL channel never observed a `close()`, so it hung — **FIXED 2026-08-04**
+
+Filed as a residual while fixing W7-13, then fixed the same day. **Pre-existing, not a W7-13
+regression** — the old bare-`wait_timeout` loop had the identical hole.
+
+`enqueue_bounded` never consults `closed`, and the eager block loop never returns to the
+top-of-`send` closed guard, so a blocked eager sender had no way to observe a close *at all*. It was
+rescued only by accident: the W7-12 deadlock verdict needs `joining > 0`, so a program with an
+explicit `shutdown()` eventually got an answer — the **wrong** one. Remove the `shutdown()` and
+nothing catches it.
+
+```text
+ch := Channel[int](1)        # cap 1
+blocker:  ch.send(1)         # fills it
+          ch.send(2)         # BLOCKS
+closer:   sleep 100ms; ch.close()
+```
+
+| | before | after |
+|---|---|---|
+| M:N, no `shutdown()` | **HANGS** — killed at a 12 s timeout | faults at **105 ms** |
+| M:N, with `shutdown()` | 112 ms, but reports `send on a full channel: deadlock — …no runnable task can receive…` about a channel that is CLOSED | 105 ms, `send on a closed channel` |
+| **Go**, same program | `panic: send on closed channel` at **104 ms** | — |
+
+(All release-binary wall clock, 3+ runs each. The Go figure is a **compiled binary**; an earlier draft
+of this table quoted 182 ms, which was `go run`'s cold compile-and-link, not Go's runtime — the two
+languages are the same speed here. An earlier draft also quoted 3114 ms for the `shutdown()` row; that
+number came from a different program carrying an extra 3 s sleep, and the honest figure is 112 ms with
+the *wrong answer*. The defect that shape shows is the misreport, not latency; the hang needs the
+no-`shutdown()` row.)
+
+The fix adds `g.closed` to the wait predicate (so `close()`'s existing `cv.notify_all()` wakes the
+sender promptly) and checks `closed` **in the loop body**, faulting `CLOSED_SEND`.
+
+Two things are load-bearing and easy to get wrong:
+
+* **`closed` may not be acted on by the predicate alone.** A predicate that reports ready while
+  `enqueue_bounded` keeps refusing turns a 5 ms poll into a **hot spin**. The body must fault.
+* **The closed-check goes AFTER the enqueue retry, never before** — the reverse is a regression, and
+  the first draft of this fix shipped it. On the ordinary drain-then-close shape
+  (`a := ch.recv()` then `ch.close()`), the recv frees the slot *for* the blocked sender, and the
+  closer then wins the race back to `core.q`; a closed-check placed first faulted a program **Go
+  completes** (`sent both`, measured 5/5 each way). Go's receive hands the value to a waiting sender
+  atomically inside the recv, so by the time `close` runs the send has already happened; Chezzi's
+  eager sender is retry-based and must re-take the slot, so it has to retry FIRST. This is also the
+  drain-before-close rule the top-of-`send` guard already documents. Fenced by
+  `a_blocked_eager_send_still_completes_when_a_recv_frees_its_slot_before_the_close`.
+
+**Precondition, not fixed here: this needs ≥2 free pool threads.** A blocked eager job holds its pool
+thread with no replacement spin, so at `--threads=1` the closer is never dispatched and the program
+hangs — measured identically before and after this fix, and on `main`. That is `pool.rs`'s recorded
+"Known v1 hazard" (a fixed-size, non-growing pool), orthogonal to this gap and untouched by it.
+
+`"send on a closed channel"` is now the const `CLOSED_SEND`, shared by the top-of-`send` guard, the
+`wait:` send arm and this loop, so all three stay byte-identical (same pattern as
+`FULL_SEND_DEADLOCK`).
+
+**Deliberate engine divergence, stated.** `--serial` still faults `FULL_SEND_DEADLOCK` here. The
+reason is that its drain runs queued jobs **one at a time and cannot interleave them** (decision D3,
+queue-at-`submit`): `blocker` runs first and faults on the full channel before `closer` ever gets a
+turn. Note what is *not* true — an earlier draft said "the closer does not exist yet"; it does exist,
+it is queued, and it runs and closes the channel right after the fault (visible with prints, its
+output suppressed by fault ordering). The engine simply cannot express a program that needs two jobs
+alive at once. M:N now matches Go; `--serial` keeps its own answer until §2b removes it. Correctness
+outranks engine agreement.
+
+Regression tests (both M:N-only, both mutation-verified):
+`eager_send_blocked_on_a_full_channel_faults_when_the_channel_is_closed` — stubbing the check out
+makes it hang to the 30 s guard — and the ordering fence above. The first test synchronises on a
+`ready` channel before closing, which is load-bearing: with the closer merely sleeping, a schedule
+that runs it first makes `ch.send(1)` fault at the *pre-existing* top-of-`send` guard, and every
+assertion passes on the UNFIXED binary for an unrelated reason.
+
+**Untested residual of this fix:** nothing fences the no-hot-spin property. `cargo test` measures
+verdicts, not CPU, so a future change that made the predicate report ready while `enqueue_bounded`
+kept refusing would burn a core and still pass green.
 
 ### W7-5d — a hard halt mid-`shutdown()` doesn't run every queued job the way an ordinary fault does, and the two engines diverge on WHICH jobs still don't run — **OPEN, found during this milestone's own doc review, NOT fixed**
 

@@ -26,6 +26,16 @@ const FULL_SEND_DEADLOCK: &str = "send on a full channel: deadlock — the bound
     `parallel:` nursery, note the nursery body runs before its spawned tasks start, so a blocking \
     send in the body can't reach it — put the producer in a `spawn:` too.";
 
+/// The shared fault for a `send` to a CLOSED channel. ONE const for the same reason
+/// [`FULL_SEND_DEADLOCK`] is one: the top-of-`send` guard, the `wait:` send arm and the eager
+/// blocked-sender loop must all emit byte-identical text. Go panics `send on closed channel` here.
+const CLOSED_SEND: &str = "send on a closed channel";
+
+/// The shared fault for a `recv` on a CLOSED-and-drained channel — the twin of [`CLOSED_SEND`], and
+/// one const for the same byte-identical-text reason (it is raised from both the demote arm and the
+/// ordinary `chan_recv_step` arm of the same `match`).
+const CLOSED_RECV: &str = "receive on a closed channel";
+
 /// The shared fault for a `recv` on an EMPTY channel that cannot park. Raised both by the plain
 /// no-scheduler arm of [`Vm::chan_recv_step`] and — since W7-12 — by an eager `Executor` job that
 /// blocked and then found its own `shutdown()` waiting on it: ONE const so the two spellings of the
@@ -1182,7 +1192,7 @@ impl Vm {
                 // still buffered and drained before the close is observed (drain-before-close), exactly
                 // like Go's racy `select`/close. Strict mutual exclusion isn't required.
                 if self.channel_core(h).q.lock().unwrap().closed {
-                    return Err(self.err("send on a closed channel".to_string(), span));
+                    return Err(self.err(CLOSED_SEND.to_string(), span));
                 }
                 // Unbounded: enqueue immediately (byte-identical to the pre-bounded path). Bounded +
                 // full: park the fiber (`SendStep::Parked` — the receiver+value were re-rooted) or, in
@@ -1235,9 +1245,7 @@ impl Vm {
                             self.wake_senders(h); // freed a slot — wake a parked bounded sender
                             Ok(self.from_wire(w))
                         }
-                        RecvStep::ClosedEmpty => {
-                            Err(self.err("receive on a closed channel".to_string(), span))
-                        }
+                        RecvStep::ClosedEmpty => Err(self.err(CLOSED_RECV.to_string(), span)),
                         // demote never parks (it blocks in place); a Parked here is impossible.
                         RecvStep::Parked => unreachable!("demote_recv_block never parks"),
                     };
@@ -1251,9 +1259,7 @@ impl Vm {
                     // never observed (`do_method_call` gates the result-push on `suspend`).
                     RecvStep::Parked => Ok(Value::nil()),
                     // Closed-and-drained: a distinct fault (not the deadlock fault) — no producer left.
-                    RecvStep::ClosedEmpty => {
-                        Err(self.err("receive on a closed channel".to_string(), span))
-                    }
+                    RecvStep::ClosedEmpty => Err(self.err(CLOSED_RECV.to_string(), span)),
                 }
             }
             "try_recv" => {
@@ -1410,12 +1416,49 @@ impl Vm {
             }
             let _blocked = self.eager_block_guard();
             loop {
-                // Ready == a slot freed up. The retry below is still the one atomic `enqueue_bounded`,
-                // so a racing sender that takes the slot first just re-parks (W7-13).
-                self.eager_wait_tick(&core, FULL_SEND_DEADLOCK, span, |g| g.len() < cap)?;
+                // Ready == a slot freed up OR the channel closed. The retry below is still the one
+                // atomic `enqueue_bounded`, so a racing sender that takes the slot first just
+                // re-parks (W7-13).
+                self.eager_wait_tick(&core, FULL_SEND_DEADLOCK, span, |g| {
+                    g.len() < cap || g.closed
+                })?;
+                // W7-13r(c) — a `close()` while we are blocked means this send can NEVER complete, so
+                // it must fault rather than wait for something else to notice. `enqueue_bounded` does
+                // not consult `closed` and this loop never returns to the top-of-`send` guard, so
+                // without this a blocked sender could not observe a close AT ALL: it reported
+                // FULL_SEND_DEADLOCK — "no runnable task can receive" — about a channel that was
+                // closed, and with no explicit `shutdown()` (so no W7-12 verdict) it hung outright.
+                //
+                // **Ordered AFTER the retry, and that order is load-bearing** — the reverse is a
+                // regression, caught by adversarial review on the ordinary drain-then-close shape:
+                //
+                //     consumer:  a := ch.recv()   # frees the slot FOR the blocked sender
+                //                ch.close()       # …then wins the race back to `core.q`
+                //
+                // Go completes that program (`sent both`) because its receive hands the value to a
+                // waiting sender ATOMICALLY inside the recv — by the time `close` runs the send has
+                // already happened. Chezzi's eager sender is retry-based, so it is only woken and must
+                // re-take the slot; checking `closed` first let the close deterministically beat it
+                // and faulted a send Go completes (measured 5/5 both ways). Retrying first restores
+                // the handoff: a freed slot is taken, and `closed` is consulted only once the retry
+                // has failed — which is also exactly the drain-before-close rule the top-of-`send`
+                // guard documents at the head of this method.
+                //
+                // `closed` must also be acted on HERE rather than by the predicate alone: a predicate
+                // that reports ready while `enqueue_bounded` keeps refusing would spin hot instead of
+                // polling. It is in the predicate only to make the wake prompt.
+                //
+                // Fenced by `a_blocked_eager_send_still_completes_when_a_recv_frees_its_slot_before_
+                // the_close` (the drain-then-close shape) and
+                // `eager_send_blocked_on_a_full_channel_faults_when_the_channel_is_closed` (the hang).
+                // Swapping these two blocks fails the first and passes the second.
                 if self.enqueue_bounded(h, &core, cap, w.clone()) {
                     self.eager_block_settled();
                     return Ok(SendStep::Sent);
+                }
+                if core.q.lock().unwrap_or_else(|e| e.into_inner()).closed {
+                    self.eager_block_settled();
+                    return Err(self.err(CLOSED_SEND.to_string(), span));
                 }
             }
         }
@@ -1954,7 +1997,7 @@ impl Vm {
                 // is NOT ready (park until a receiver frees a slot). Value is serialized + enqueued
                 // atomically here (source order, once selected), never on a not-ready poll.
                 if core.q.lock().unwrap().closed {
-                    return Err(self.err("send on a closed channel".to_string(), span));
+                    return Err(self.err(CLOSED_SEND.to_string(), span));
                 }
                 let val = self.stack[slot + 1];
                 let w = self.to_wire_crossable(val, span)?;

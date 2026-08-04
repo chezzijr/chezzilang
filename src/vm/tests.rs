@@ -11985,6 +11985,165 @@ ex.shutdown()
     );
 }
 
+/// W7-13r(c) — an eager job blocked on a FULL channel must fault when that channel is CLOSED, not
+/// wait for something else to notice.
+///
+/// `enqueue_bounded` never consults `closed`, and the eager block loop never returns to the
+/// top-of-`send` closed guard, so a blocked sender had no way to observe a close at all. Measured on
+/// the release binary, same program:
+///
+/// | | pre-fix | post-fix | Go |
+/// |---|---|---|---|
+/// | with `shutdown()` | 112 ms, but reports `send on a full channel: deadlock` about a CLOSED channel | 105 ms, `send on a closed channel` | 104 ms, `panic: send on closed channel` |
+/// | no `shutdown()` (this test) | **HANGS** — killed at 12 s | 105 ms | — |
+///
+/// Without an explicit `shutdown()` the W7-12 verdict cannot fire (`joining == 0`), so nothing else
+/// caught it — that is why this test drops the `shutdown()`.
+///
+/// **The `ready` handshake is what makes the test prove anything**, and it was added after review:
+/// with `closer` merely sleeping, an unlucky schedule could run it BEFORE `blocker`, and then
+/// `ch.send(1)` faults at the pre-existing top-of-`send` guard — every assertion below passes for a
+/// reason that has nothing to do with this fix, on the PRE-fix binary. Waiting for `ready` makes the
+/// first `send` provably succeed, so the fault can only come from the blocked second one.
+///
+/// **Needs ≥2 free pool threads**, like every two-job eager program: a blocked eager job holds its
+/// pool thread (no replacement spin), so at `--threads=1` `closer` is never dispatched and this
+/// program hangs — before AND after this fix, and equally on `main`. See `pool.rs`'s "Known v1
+/// hazard". The 30 s guard below turns that into a clear failure rather than a hung suite.
+///
+/// **M:N-only.** On `--serial` both jobs are queued at `submit` and the drain runs them one at a
+/// time, so `blocker` faults `FULL_SEND_DEADLOCK` before `closer` gets to run its `close()` — the
+/// engine cannot interleave them, so it cannot express this program at all (it is NOT that the closer
+/// is absent: it does run, and does close the channel, after the fault). `docs/gaps.md` W7-13r
+/// records that divergence deliberately, under the standing rule that correctness outranks engine
+/// agreement and `--serial` is scheduled for removal.
+#[test]
+fn eager_send_blocked_on_a_full_channel_faults_when_the_channel_is_closed() {
+    let src = "
+import std.concurrency
+import std.time
+ch: Channel[int] = Channel[int](1)
+ready: Channel[bool] = Channel[bool](1)
+fn blocker():
+    ch.send(1)
+    print(\"filled\")
+    ready.send(true)
+    ch.send(2)
+    print(\"blocker finished\")
+fn closer():
+    _ := ready.recv()
+    _2 := time.timer(50).recv()
+    ch.close()
+ex := Executor()
+ex.submit(blocker)
+ex.submit(closer)
+";
+    let entry = write_temp_chz("w713c_send_sees_close", src);
+    let (tx, rx) = std::sync::mpsc::channel();
+    let e = entry.clone();
+    std::thread::spawn(move || {
+        let (o, _e2, r, _c) = run_file_p(&e);
+        let _ = tx.send((o, format!("{r:?}"), r.is_err()));
+    });
+    let outcome = rx.recv_timeout(std::time::Duration::from_secs(30));
+    let _ = std::fs::remove_file(&entry);
+    let (out, rdbg, failed) = match outcome {
+        Ok(v) => v,
+        // Two very different causes, so do not accuse the bug by default.
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => panic!(
+            "no result in 30 s: either the W7-13r(c) hang is back (a blocked eager `send` not \
+             observing `close()`), or this run had <2 free pool threads and `closer` was never \
+             dispatched"
+        ),
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+            panic!("the VM thread panicked — see the panic above this one")
+        }
+    };
+    // Proves the blocked path was actually exercised: without this, a `closer`-first schedule faults
+    // at the top-of-`send` guard instead and the test passes on the unfixed code.
+    assert!(
+        out.contains("filled"),
+        "the first send must have succeeded, or this test is not exercising the blocked path: \
+         out={out:?} r={rdbg}"
+    );
+    assert!(
+        failed,
+        "the send must fault, not succeed: out={out:?} r={rdbg}"
+    );
+    assert!(
+        rdbg.contains("send on a closed channel"),
+        "the fault must name the CLOSE, not a full-channel deadlock (that was the wrong answer this \
+         fixed): {rdbg}"
+    );
+    assert!(
+        !out.contains("blocker finished"),
+        "the send must not appear to succeed: {out:?}"
+    );
+}
+
+/// W7-13r(c)'s ORDERING fence — the closed-check must come AFTER the enqueue retry, never before.
+///
+/// This is the regression the first draft of that fix shipped, caught by adversarial review and not
+/// by any existing test. The shape is the most ordinary one there is: a consumer takes the last item
+/// and then closes.
+///
+/// ```text
+/// consumer:  a := ch.recv()   # frees the slot FOR the blocked sender
+///            ch.close()       # …then wins the race back to `core.q`
+/// ```
+///
+/// Go completes this program — its receive hands the value to a waiting sender ATOMICALLY inside the
+/// recv, so by the time `close` runs the send has already happened. Chezzi's eager sender is
+/// retry-based: it is only woken and must re-take the slot, so a closed-check placed BEFORE the retry
+/// let the close deterministically beat it. Measured 5/5 each way: Go and pre-fix Chezzi print
+/// `sent both`; closed-check-first faulted `send on a closed channel` on every run.
+///
+/// Checking `closed` only after the retry has failed is also exactly the drain-before-close rule the
+/// top-of-`send` guard already documents at the head of `channel_method`.
+#[test]
+fn a_blocked_eager_send_still_completes_when_a_recv_frees_its_slot_before_the_close() {
+    let src = "
+import std.concurrency
+import std.time
+ch: Channel[int] = Channel[int](1)
+fn blocker():
+    ch.send(1)
+    ch.send(2)
+    print(\"sent both\")
+fn consumer():
+    _ := time.timer(100).recv()
+    a := ch.recv()
+    ch.close()
+    print(\"got {a}\")
+ex := Executor()
+ex.submit(blocker)
+ex.submit(consumer)
+ex.shutdown()
+";
+    let entry = write_temp_chz("w713c_recv_then_close", src);
+    let (tx, rx) = std::sync::mpsc::channel();
+    let e = entry.clone();
+    std::thread::spawn(move || {
+        let (o, _e2, r, _c) = run_file_p(&e);
+        let _ = tx.send((o, format!("{r:?}"), r.is_err()));
+    });
+    let outcome = rx.recv_timeout(std::time::Duration::from_secs(30));
+    let _ = std::fs::remove_file(&entry);
+    let (out, rdbg, failed) = outcome.expect(
+        "no result in 30 s — either a hang, or this run had <2 free pool threads (see the sibling \
+         test's note)",
+    );
+    assert!(
+        !failed,
+        "a send whose slot was freed by a `recv` must COMPLETE, as Go does — faulting here is the \
+         closed-check-before-retry regression: out={out:?} r={rdbg}"
+    );
+    assert!(
+        out.contains("sent both"),
+        "the freed slot must be taken by the blocked sender: out={out:?}"
+    );
+}
+
 /// W7-5b — an `Executor` constructed INSIDE a task, never explicitly shut down, must still have its
 /// work run and waited for at program exit.
 ///

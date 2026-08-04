@@ -24,16 +24,29 @@ Single source of truth for "what am I doing next." Update after every work sessi
 >    predicate, so a `notify_all` arriving while the lock was free hit a condvar nobody was on yet.
 >    `Condvar::wait_timeout_while` + the callers' own settle predicates closes it. Measured on the
 >    release binary: the 50-handoff pipeline went from 7-of-15 runs paying an extra 5 ms quantum to
->    **all 15 at 3–4 ms**. Three residuals in `W7-13r`, one of them (an eager `send` blocked on a
->    channel that is then closed loops forever, where M:N, `--serial` and Go all report something)
->    pre-existing and worth its own fix.
+>    **all 15 at 3–4 ms**.
+> 3. ✅ **`W7-13r(c)` FIXED 2026-08-04** — an eager job blocked on a full channel never observed a
+>    `close()`. Pre-existing, not a W7-13 regression. It **HUNG** with no explicit `shutdown()`, and
+>    with one it answered in 112 ms but blamed a *full* channel for a *closed* one. Now faults
+>    `send on a closed channel` at **105 ms**; Go, compiled, panics at 104 ms on the same program.
+>    Deliberate divergence recorded: `--serial` keeps `FULL_SEND_DEADLOCK`, because its drain runs
+>    queued jobs one at a time and cannot interleave them. Precondition it does NOT fix: ≥2 pool
+>    threads (`--threads=1` still hangs — `pool.rs`'s known fixed-size-pool hazard). Residuals (a) the
+>    blind eager `wait:` poll and (b) `trip()`'s latch written outside `core.q` stay open in `W7-13r`.
+>    **`adversarial-review` caught a REGRESSION in the first draft of this fix**, and the green suite
+>    did not: checking `closed` *before* the enqueue retry faulted the ordinary drain-then-close shape
+>    (`a := ch.recv()` then `ch.close()`) that Go completes — the recv frees the slot for the blocked
+>    sender, then the closer wins the race back to the lock. Retry first, check `closed` second; now
+>    fenced both ways. Three of the measurements I first wrote into the docs were also wrong (a Go
+>    `go run` cold-compile time quoted as runtime, a latency from the wrong program, and a false
+>    account of what `--serial` does) — **re-run every number before it goes in a doc.**
 >    **Two process lessons from this one, both from `adversarial-review`, neither caught by the gate:**
 >    the first regression test used a process-global counter that neighbouring eager tests also moved —
 >    it passed alone and on a lucky full suite, then failed at 24 beside its own neighbours, i.e. it
 >    had already reported one false green (now an aggregate wall-clock bound, immune to that). And
 >    three claims written into the new comments were false on inspection — always re-derive a
 >    "this is already handled" claim from the code, not from the fix you just wrote.
-> 3. **Next milestone: a PROCESS-WIDE quiescence detector — `docs/future.md` §2d,
+> 4. **Next milestone: a PROCESS-WIDE quiescence detector — `docs/future.md` §2d,
 >    step 0.** Decision 2026-08-04, owner: *"we should not let it hang; what could be done should be
 >    done."* Lift `MnSched::is_deadlocked` from per-nursery to process-wide and count JOINERS as blocked
 >    parties. That is Go's exact rule, it catches every shape W7-12 still hangs on (all of them are
@@ -43,8 +56,8 @@ Single source of truth for "what am I doing next." Update after every work sessi
 >    **Write the Go/CPython comparison programs and the looping tests BEFORE the detector**: the vetoes
 >    (timer, socket, netpoll, blocking-pool, value-in-flight) are the entire correctness surface, and
 >    mis-vetoing is exactly how W7-12's predicate produced three false alarms on healthy programs.
-> 4. **Do NOT** apply `.superpowers/sdd/task-3-mn-half.patch` (wrong lifetime, superseded), and do NOT
->    grow W7-12's local predicate one case at a time — that is what step 3 above replaces wholesale.
+> 5. **Do NOT** apply `.superpowers/sdd/task-3-mn-half.patch` (wrong lifetime, superseded), and do NOT
+>    grow W7-12's local predicate one case at a time — that is what step 4 above replaces wholesale.
 >    And do NOT read W7-13's fix as licensing progress-rate reasoning in the detector: the `W7-13r`
 >    `wait:` residual still stalls, and `parked-is-not-stuck` is a semantic objection, not a latency one.
 >
