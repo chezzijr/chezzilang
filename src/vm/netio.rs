@@ -1410,7 +1410,9 @@ impl Vm {
             }
             let _blocked = self.eager_block_guard();
             loop {
-                self.eager_wait_tick(&core, FULL_SEND_DEADLOCK, span)?;
+                // Ready == a slot freed up. The retry below is still the one atomic `enqueue_bounded`,
+                // so a racing sender that takes the slot first just re-parks (W7-13).
+                self.eager_wait_tick(&core, FULL_SEND_DEADLOCK, span, |g| g.len() < cap)?;
                 if self.enqueue_bounded(h, &core, cap, w.clone()) {
                     self.eager_block_settled();
                     return Ok(SendStep::Sent);
@@ -1666,15 +1668,38 @@ impl Vm {
     /// where every other path observes the deadline — without this, `chezzi test --timeout` could not
     /// kill a job blocked forever on a channel, which is exactly the hang eager execution makes easier
     /// to write.
+    ///
+    /// **W7-13 — `ready` is re-checked under the SAME lock hold that the wait consumes, and that is
+    /// the whole point of the parameter.** The caller has already tried its operation and failed, but
+    /// it dropped `core.q` to do so and then ran [`Vm::eager_halt_check`] (which takes `exec_registry`
+    /// and per-core `eager` locks — a wide window). A `notify_all` from a consumer landing anywhere in
+    /// that gap reaches a condvar NOBODY IS ON YET and is simply lost, so the caller then slept the
+    /// full [`DEMOTE_POLL_BACKOFF`] with its value already waiting. Measured on the 50-handoff cap-1
+    /// pipeline: 7 of 15 runs paid a whole extra 5 ms tick, in exact 5 ms quanta.
+    ///
+    /// `Condvar::wait_timeout_while` closes it — it evaluates the predicate under the guard BEFORE
+    /// sleeping, so a wakeup that arrived while the lock was free is observed instead of missed (and
+    /// it re-checks on spurious wakeups for free). The wake it is waiting for was never missing:
+    /// [`Vm::wake_senders`] already fires on all six pop paths, and for an eager job it lands on
+    /// `core.cv`. `eager_halt_check` MUST stay before the lock — the no-lock-cycle argument on
+    /// [`Vm::eager_join_deadlocked`] depends on the registry never being taken under `ChannelCore::q`.
+    ///
+    /// This only makes the CHANNEL conditions instant. The halts `eager_halt_check` acts on — the
+    /// `--timeout` deadline, a cancel, the W7-12 verdict — are not in any predicate and are still
+    /// observed once per tick, so cancellation is now the SLOWEST thing in this loop rather than the
+    /// fastest. That bound is unchanged by this fix, not introduced by it.
     fn eager_wait_tick(
         &mut self,
         core: &Arc<ChannelCore>,
         deadlock_msg: &str,
         span: Span,
+        mut ready: impl FnMut(&mut crate::vm::core::ChanState) -> bool,
     ) -> Result<(), RuntimeError> {
         self.eager_halt_check(deadlock_msg, span)?;
         let q = core.q.lock().unwrap_or_else(|e| e.into_inner());
-        let _ = core.cv.wait_timeout(q, DEMOTE_POLL_BACKOFF);
+        let _ = core
+            .cv
+            .wait_timeout_while(q, DEMOTE_POLL_BACKOFF, |g| !ready(g));
         Ok(())
     }
 
@@ -1873,7 +1898,21 @@ impl Vm {
             if _blocked.is_none() {
                 _blocked = Some(BlockGuard::new(exec));
             }
-            self.eager_wait_tick(core, EMPTY_RECV_DEADLOCK, span)?;
+            // Ready == the same three settle conditions the loop head consumes, in the same order, so
+            // the wait cannot sleep through a state the next iteration would immediately take (W7-13).
+            //
+            // The three are NOT equally well served, and the difference is the writer's lock, not this
+            // predicate. A queued value and `closed` are both written under `core.q` (`ChanState::push`
+            // and `close`'s `q.lock().closed = true`), so re-checking them under the guard the wait
+            // consumes genuinely closes the window. `done_latch` is a bare relaxed atomic written
+            // OUTSIDE `q` by `trip()`, so a `trip()` landing between this evaluation and the wait's
+            // atomic release-and-enqueue is still lost and still costs a full tick — including it here
+            // narrows the race but cannot close it. Closing it means moving the latch under `q`
+            // (`gaps.md` W7-13r). It is included anyway because it strictly shrinks the window and the
+            // loop head acts on it.
+            self.eager_wait_tick(core, EMPTY_RECV_DEADLOCK, span, |g| {
+                !g.is_empty() || g.closed || core.done_latch.load(Ordering::Relaxed)
+            })?;
         }
     }
 

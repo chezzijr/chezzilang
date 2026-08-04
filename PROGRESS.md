@@ -16,8 +16,24 @@ Single source of truth for "what am I doing next." Update after every work sessi
 >    cap-1 pipeline 30/30 and the live-sibling-producer shape 20/20, plus `--serial`. (Looping matters:
 >    the predicate this replaced faulted only 2–7 of 30 runs.) `adversarial-review` had already run
 >    three times over the branch, each round finding a real wrong-answer bug the green gate had no
->    opinion on; all fixed.
-> 2. **Next milestone: a PROCESS-WIDE quiescence detector — `docs/future.md` §2d,
+>    opinion on; all fixed. The branch is deleted.
+> 2. ✅ **`W7-13` FIXED 2026-08-04** — and its filed diagnosis was wrong, which is worth carrying
+>    forward. It blamed a *missing* recv→sender wake and proposed a `wake_senders` on the eager pop
+>    path; that wake already fires on all six pop paths, so the filed fix was a no-op. The real bug
+>    was a LOST wakeup: `eager_wait_tick` handed a fresh `core.q` guard to `cv.wait_timeout` with no
+>    predicate, so a `notify_all` arriving while the lock was free hit a condvar nobody was on yet.
+>    `Condvar::wait_timeout_while` + the callers' own settle predicates closes it. Measured on the
+>    release binary: the 50-handoff pipeline went from 7-of-15 runs paying an extra 5 ms quantum to
+>    **all 15 at 3–4 ms**. Three residuals in `W7-13r`, one of them (an eager `send` blocked on a
+>    channel that is then closed loops forever, where M:N, `--serial` and Go all report something)
+>    pre-existing and worth its own fix.
+>    **Two process lessons from this one, both from `adversarial-review`, neither caught by the gate:**
+>    the first regression test used a process-global counter that neighbouring eager tests also moved —
+>    it passed alone and on a lucky full suite, then failed at 24 beside its own neighbours, i.e. it
+>    had already reported one false green (now an aggregate wall-clock bound, immune to that). And
+>    three claims written into the new comments were false on inspection — always re-derive a
+>    "this is already handled" claim from the code, not from the fix you just wrote.
+> 3. **Next milestone: a PROCESS-WIDE quiescence detector — `docs/future.md` §2d,
 >    step 0.** Decision 2026-08-04, owner: *"we should not let it hang; what could be done should be
 >    done."* Lift `MnSched::is_deadlocked` from per-nursery to process-wide and count JOINERS as blocked
 >    parties. That is Go's exact rule, it catches every shape W7-12 still hangs on (all of them are
@@ -27,13 +43,14 @@ Single source of truth for "what am I doing next." Update after every work sessi
 >    **Write the Go/CPython comparison programs and the looping tests BEFORE the detector**: the vetoes
 >    (timer, socket, netpoll, blocking-pool, value-in-flight) are the entire correctness surface, and
 >    mis-vetoing is exactly how W7-12's predicate produced three false alarms on healthy programs.
-> 3. **Do NOT** apply `.superpowers/sdd/task-3-mn-half.patch` (wrong lifetime, superseded), and do NOT
->    grow W7-12's local predicate one case at a time — that is what step 0 above replaces wholesale.
+> 4. **Do NOT** apply `.superpowers/sdd/task-3-mn-half.patch` (wrong lifetime, superseded), and do NOT
+>    grow W7-12's local predicate one case at a time — that is what step 3 above replaces wholesale.
+>    And do NOT read W7-13's fix as licensing progress-rate reasoning in the detector: the `W7-13r`
+>    `wait:` residual still stalls, and `parked-is-not-stuck` is a semantic objection, not a latency one.
 >
 > Still open and NOT part of this: `W7-5d` (hard halt mid-`shutdown()` engine asymmetry — note its M:N
 > half is written against `run_workers_on_pool`, which eager execution DELETED, so re-derive it before
-> closing it) and `W7-13` (the eager block's missed wakeup / 5 ms poll stall — small, and worth doing
-> BEFORE step 2, since it is why "no progress recently" is useless as deadlock evidence).
+> closing it) and `W7-13r` (the eager `wait:` arm's blind poll).
 
 **Legend:** ⬜ not started · 🟦 in progress · ✅ done
 

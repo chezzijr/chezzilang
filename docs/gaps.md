@@ -57,7 +57,7 @@ chronological log.
 | **W6-10r** | `:1216` | `--max-heap` residual: a payload reachable ONLY through a **nested** core (a `Channel` inside a `Shared`, once the nested core's last `Obj` alias slot is swept) is counted nowhere | Left open by the W6-10 fix on purpose. `live_bytes` reaches a core's bytes through its `Obj::*` alias slot; a nested core has none. Closing it needs cross-core byte recursion with `Arc` de-dup — narrow trigger, not worth the machinery yet |
 | protocol embeds | `:1505` | A protocol-embedded method isn't callable through the interface value (`p: Person` can't call embedded `name()`) despite `spec.md:973` "flattened at bound sites" | Filed as a safe-direction observation in wave 3; never triaged — doc and behavior contradict each other either way |
 | **W7-5d** | `:4413` | A hard halt (over-memory/timeout/dead-stdout) firing mid-`shutdown()` does NOT run every queued job the way an ordinary fault does — `--serial` stops popping the queue the instant one fires (later-queued jobs never run at all); M:N has already dispatched every job to the pool before a hard halt can fire, but that is not a per-job guarantee under a thread-starved pool | Found while adversarially reviewing this milestone's own docs. Live and reproduced on the built binary (`Executor().submit(spew-until-dead-stdout)` then two marker jobs, piped through `head -1`: M:N runs both markers, `--serial` runs neither), but untested — `tests/chz/stdlib/executor_drain_test.chz`'s 6 tests only use `panic()` faults, never a hard-halt kind. `executor_hard_halt` was deliberately built as an unconditional kill switch (W7-5), so this is arguably correct-by-design on both engines individually, but the exact SHAPE of "what still doesn't run" differs by engine and neither engine's shape is pinned by a test |
-| **W7-13** | `:4570` | An eager job parked on a FULL `send` is not woken by the consumer's `recv` (only the send→receiver direction wakes; the freed-slot→sender direction does not), so a healthy cap-1 handshake stalls a whole 5 ms poll tick | Latency/robustness, not correctness — but it is why "no progress recently" is useless as deadlock evidence (W7-12's rejected progress-counter experiment), so fix it BEFORE detector work. Mirror the existing send-side `cv.notify_all()`/`wake_on_send` with a wake-senders on the eager pop path |
+| **W7-13r** | `:4619` | Three residuals of the W7-13 fix (**the gap itself is FIXED 2026-08-04**): (a) the eager `wait:` arm is still a bare `thread::sleep(DEMOTE_POLL_BACKOFF)`, so it alone still pays a full tick per wake-up; (b) `trip()` writes `done_latch` OUTSIDE `core.q`, so that one predicate term narrows but cannot close its race; (c) an eager job blocked on a full `send` never observes a `close()` and loops until another halt — **pre-existing**, and an engine divergence (M:N faults `send on a closed channel`, `--serial` faults `FULL_SEND_DEADLOCK`, Go panics) | (a) is cheap, not expensive — `demote_wait_block` (`sched.rs:1114`) already does the first-arm-condvar trick without a new primitive; the earlier "needs its own design" note was wrong. (b) needs the latch moved into `ChanState`. (c) must NOT be fixed by adding `|| g.closed` to the send predicate — that spins hot; the loop body has to check and fault. Note the original W7-13 diagnosis (a *missing* `wake_senders`) was WRONG: that wake already fires on all six pop paths; the bug was a LOST wakeup — `eager_wait_tick` waited with no predicate, so a `notify_all` arriving while the lock was free hit a condvar nobody was on yet |
 | **W7-12r** | `:4442` | Residuals of the W7-12 interim fix (**the gap itself is FIXED 2026-08-03**): the verdict only fires for an executor whose ONLY outstanding job is blocked, with no other executor still owing work — everything else DECLINES, i.e. hangs rather than faults. So (a) any multi-job deadlock inside one executor, (b) two executors deadlocking each other, and (c) a program with no explicit `shutdown()` all still hang. Go reports (a) and (b) (`all goroutines are asleep`), so these are measured gaps against the concurrency ancestor — **and they are live serial-vs-M:N divergences too**: two jobs both blocked on an empty `recv` faults in 0s on `--serial` and hangs forever on M:N, so the engine disagreement is closed only for the single-job shape | Deliberately under-fires. `blocked >= outstanding` was tried and is WRONG: a bounded cap-1 pipeline is permanently "all jobs parked" while being perfectly healthy (the two jobs feed each other), and it faulted 2–7 of 30 runs on a program Go and CPython complete — fenced now by `executor_bounded_pipeline_is_not_mistaken_for_a_deadlock`. Parked ≠ unfeedable, and no counter can tell those apart; do NOT try again with a cleverer counter. The sound successor is the process-wide AND-OR wait-for graph in `docs/future.md` **§2d** (which is what Go's own detector is), its own milestone, best sequenced after §2b retires `--serial` |
 | **W7-11** | `:3901` | A `RwShared` holding a container with an element that back-references the CONTAINER (`a.next = xs; RwShared(xs).at(0)`) aborts the host on `from_wire_memo`'s `.expect("a wire Backref always targets an already-reconstructed node id")` — a legal program, no concurrency, both engines | **Pre-existing on main**, not a W7-4 regression (verified on 5960052): a copy-out view drains ONE depth-1 piece, and a piece whose cycle closes through the ROOT container can never be self-contained — the definition it needs IS the container. `elem_split` fixes the sibling-CELL case, not this ancestor case. Closing it means either a catchable fault instead of the `.expect` (`from_wire_memo` returns a `Value`, so that is a signature change through every rebuild arm) or a same-guard whole-container fallback at all 12 view sites |
 | **W7-4a** | `:3901` | Airlock cell identity is preserved **per module** in the snapshot, so two globals in DIFFERENT modules over one shared cell still arrive as two cells | Residual disclosed by the W7-4 fix. Closing it needs `Vm`-lived rebuild state kept (and rooted) across the lazy per-module faults; the reported repro is same-module and is fixed |
@@ -4566,9 +4566,11 @@ counter: tick an `ExecutorCore::progress` on every completed channel handoff and
 job is parked AND the counter is unchanged across the debounce window — "parked and nothing moved".
 Implemented and measured on 2026-08-03: **it still faults a healthy cap-1 pipeline 6/40 runs.** Instrumenting
 the verdict shows why — `outstanding=2 blocked=2` with the progress stamp genuinely unchanged, mid-run.
-The eager block is a 5 ms POLL (`DEMOTE_POLL_BACKOFF`) and a producer parked on a full `send` is not
-always woken by the consumer's `pop`, so a healthy mutual handoff really can make zero progress for a
-whole window. Widening the window is just a timing knob with the same failure mode further out. The
+The eager block is a 5 ms POLL (`DEMOTE_POLL_BACKOFF`) and a producer parked on a full `send` did not
+always OBSERVE the consumer's `pop` — W7-13, fixed 2026-08-04: the wake was always sent, but the
+waiter re-locked without re-checking, so it slept through it. Either way a healthy mutual handoff
+really could make zero progress for a whole window. (W7-13's fix does not rehabilitate the counter:
+the `wait:` arm still polls blind, and the objection below is semantic, not about latency.) Widening the window is just a timing knob with the same failure mode further out. The
 lesson generalises past this predicate: **on a polling runtime, "nothing happened recently" is not
 evidence that nothing CAN happen.** Only a real wait-for graph (§2d) answers this.
 
@@ -4616,24 +4618,99 @@ cap-1 `send`, can only be served by its own joiner now faults identically on bot
 boundary — a `shutdown()` running beside a live sibling producer, which must still WAIT — is pinned by
 `executor_job_keeps_waiting_when_shutdown_runs_beside_a_live_producer`.
 
-### W7-13 — an eager `Executor` job parked on a full `send` is not reliably woken by the consumer's `recv`, so a healthy handshake stalls for a whole 5 ms poll tick — **OPEN, found 2026-08-03 while debugging W7-12, NOT fixed**
+### W7-13 — an eager `Executor` job's blocking wait DROPPED wakeups, so a healthy handshake stalled a whole 5 ms poll tick — **FIXED 2026-08-04**
 
 Not a correctness bug — a latency/robustness one, and the reason W7-12's progress-counter experiment
 failed. An eager job's blocking `send`/`recv` waits on `ChannelCore::cv` with a `DEMOTE_POLL_BACKOFF`
-(5 ms) timeout, so a lost wakeup costs latency rather than the run. The cap-1 pipeline
-(`prod`/`cons` over `Channel[int](1)`, 50 items) usually finishes in **4 ms**, but instrumenting
-W7-12's verdict caught runs where BOTH jobs sat parked with the executor's progress counter unchanged
-across a full 5 ms window — i.e. the producer parked on a full `send` was not woken when the consumer
-popped, and only its own poll timeout got it moving again. `enqueue_bounded` does `cv.notify_all()` +
-`wake_on_send` after a successful push, so the send→receiver direction is covered; the
-**recv→sender direction is the gap** (a freed slot must wake parked senders exactly as a queued value
-wakes parked receivers — `ChannelCore`'s own doc comment already promises this).
+(5 ms) timeout, so a lost wakeup costs latency rather than the run.
 
-Why it matters beyond speed: it is what makes "no progress in the last N ms" useless as evidence of
-deadlock (see W7-12's rejected experiment), so it is worth fixing BEFORE any detector work that might
-be tempted to reason about progress rates. Fix is presumably a `wake_senders` on the eager `pop` path
-to mirror the existing send-side wake; verify with the same instrumented loop (40 runs of the cap-1
-pipeline, no window with zero progress) and by timing the pipeline.
+**The original diagnosis in this section was WRONG, and is corrected here.** It read
+"the recv→sender direction is the gap" and proposed adding a `wake_senders` to the eager `pop` path.
+That wake was never missing: `Vm::wake_senders` already fires on all **six** pop paths — the demote
+`recv` (`netio.rs:1254`), `recv` (`:1266`), `try_recv` (`:1286`), the `wait:` recv arm (`:1991`),
+`demote_wait_block` (`:2117`) and `for v in ch:` (`exec.rs:2163`) — and for an eager job it lands on
+`core.cv` (`mn`/`mn_enlist_sched` are both `None` there, so it takes the `notify_all` branch). The
+proposed fix would have been a no-op duplicate. Worth recording as a method note: the report named a
+real symptom, and the first mechanism that explains a symptom is not therefore the one that causes it.
+
+**The real cause was a lost wakeup — the notification was sent, but nobody was on the condvar yet.**
+`Vm::eager_wait_tick` handed a freshly-taken `core.q` guard straight to `cv.wait_timeout` with **no
+predicate**, so the window between the caller's failed attempt and the wait was unguarded:
+
+```text
+enqueue_bounded(...)      # locks q, sees full, DROPS q, returns false
+   <<< the consumer pops and calls core.cv.notify_all() HERE — nobody is on the cv: LOST >>>
+eager_wait_tick:
+   eager_halt_check(...)  # takes exec_registry + per-core `eager` — a WIDE window
+   q.lock()
+   cv.wait_timeout(q, 5ms)   # the notification is already gone -> sleeps the full tick
+```
+
+`eager_block_recv` had the identical shape (pop under the lock, `drop(q)`, halt check, then wait), so
+the receive side carried the same latent bug; both are fixed by the one change.
+
+**The fix.** `eager_wait_tick` takes a `ready` predicate and uses `Condvar::wait_timeout_while`, which
+evaluates it under the guard *before* sleeping — so a wakeup that arrived while the lock was free is
+observed instead of missed, and spurious wakeups are re-checked for free. Predicates are the callers'
+own settle conditions: `g.len() < cap` for the full `send`, and `!g.is_empty() || g.closed ||
+done_latch` for the empty `recv` (`done_latch` included because `trip()` also only does
+`cv.notify_all()`, so it lost the wakeup the same way). `eager_halt_check` stays BEFORE the lock — the
+no-lock-cycle argument on `eager_join_deadlocked` depends on `exec_registry` never being taken under
+`ChannelCore::q`.
+
+**Measured before → after** (first two rows: `chezzi run` on the release binary; third row: the
+in-process test, debug profile — the profiles are not comparable to each other):
+
+| program | before | after |
+|---|---|---|
+| release: cap-1 pipeline, 50 handoffs, 15 runs | `3,4` ms baseline but `8,9,14` ms in **7 of 15** — exact 5 ms quanta | **all 15 at 3–4 ms**, no outlier |
+| release: cap-1 pipeline, 2000 handoffs, 10 runs | 10–33 ms | 9–11 ms |
+| debug, in-process: 30 × 200-handoff pipelines | **2.19 s** | **0.14 s** |
+
+**Why the regression test times 30 pipelines in aggregate rather than bounding one run.** A per-run
+bound does not discriminate: only ~3 waits per 2000 handoffs actually lost their wakeup, so the
+2000-handoff program ran in 10–33 ms *both* before and after, and the 50-handoff one stalls in only
+about half of runs — a coin flip. Summing 30 × 200 handoffs gives the rare stall enough chances to
+dominate, which is the 15× separation in the third row above;
+`eager_handshake_is_driven_by_wakeups_not_by_the_poll_timeout` bounds that sum at 1 s (7× headroom
+over fixed, 2× under broken), mutation-verified by reverting to the bare `wait_timeout`.
+
+**A rejected first version of that test is worth recording, because it produced a false green.** It
+counted expired waits in a process-global `#[cfg(test)]` counter. libtest runs the file in ONE
+process, and the eager tests a dozen slots away in name order each park a job on a `timer(200)` —
+~40 expired ticks apiece, all landing on the same global. It passed alone and on a kindly-scheduled
+full suite, then failed at 24 under `--test-threads=8` beside two of its own neighbours. Wall clock is
+immune to that: a neighbour can steal CPU but cannot add to another test's elapsed time. Same family
+as `lossy-decode-blinds-a-comparison-oracle` — when you add a detector, ask what else can move it.
+
+**Three residuals, all filed as `W7-13r`, none of them regressions of this fix.**
+
+1. **The eager `wait:` arm is still a blind poll.** `op_wait_poll`'s eager branch is a bare
+   `thread::sleep(DEMOTE_POLL_BACKOFF)` with no condvar, so it still pays up to a full tick per
+   wake-up. The first draft of this section claimed that fixing it "needs a shared multi-channel wait
+   primitive, a design change of its own" — **that is wrong, and adversarial review caught it**:
+   `demote_wait_block` (`sched.rs:1114-1128`) already solves the same N-arm problem without any new
+   primitive, by sleeping on the FIRST arm's condvar with a timeout so arm 0 wakes promptly and the
+   rest are still observed within a tick. The eager arm can adopt that shape verbatim. It is deferred
+   because it is a partial win on a rarer path, not because it is expensive.
+2. **`trip()` writes `done_latch` outside `core.q`**, so the `done_latch` term in the new recv
+   predicate narrows its race but cannot close it (the value and `closed` terms ARE closed, because
+   both writers hold `q`). Closing it means moving the latch into `ChanState`.
+3. **The eager full-`send` loop never observes `closed`** — `enqueue_bounded` does not consult it and
+   the loop never returns to `send`'s top-of-method closed guard, so an eager job blocked on a full
+   channel that is then closed loops until some other halt fires. **Pre-existing and unchanged by this
+   fix** (the old `wait_timeout` loop did exactly the same), but it is an engine divergence worth its
+   own entry: a parked M:N sender is woken by `close_wake`, re-runs `send` and faults
+   `send on a closed channel`, `--serial` faults `FULL_SEND_DEADLOCK`, and Go panics — three answers
+   where the eager path gives none. Note the fix is NOT "add `|| g.closed` to the send predicate":
+   that would make the predicate true while `enqueue_bounded` keeps failing, turning a 5 ms poll into
+   a **hot spin**. The loop body has to check `closed` and fault.
+
+Why it mattered beyond speed: it is what made "no progress in the last N ms" useless as evidence of
+deadlock (see W7-12's rejected experiment), which is why it was fixed BEFORE the process-wide
+quiescence detector (`future.md` §2d). Note that it does **not** make progress-rate reasoning sound —
+the `wait:` residual above still stalls, and `parked-is-not-stuck` is a semantic objection, not a
+latency one.
 
 ### W7-5d — a hard halt mid-`shutdown()` doesn't run every queued job the way an ordinary fault does, and the two engines diverge on WHICH jobs still don't run — **OPEN, found during this milestone's own doc review, NOT fixed**
 

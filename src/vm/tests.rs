@@ -11898,6 +11898,93 @@ ex.shutdown()
     );
 }
 
+/// W7-13 — a healthy cap-1 handshake must be driven by WAKEUPS, not by the poll timeout.
+///
+/// `eager_wait_tick` used to hand a freshly-taken `core.q` guard straight to `cv.wait_timeout` with no
+/// predicate. Its caller had already dropped that lock to attempt its `send`/`recv`, and then ran
+/// `eager_halt_check` (which takes `exec_registry` + per-core `eager`) before re-taking it — so a
+/// consumer's `notify_all` landing in that window hit a condvar nobody was on yet and was lost, and
+/// the sender slept a whole `DEMOTE_POLL_BACKOFF` on a channel that already had room.
+///
+/// **Why this counts timeouts instead of asserting a wall-clock bound.** The obvious timing test does
+/// not discriminate. Measured on the release binary before the fix, the 2000-handoff pipeline ran in
+/// 10–33 ms — only ~3 waits per 2000 handoffs actually lost their wakeup — so every bound loose enough
+/// not to flake on a busy machine also passed while the bug was live. The 50-handoff run showed the
+/// stall plainly (7 of 15 runs paid an extra tick, in exact 5 ms quanta) but one run is a coin flip.
+/// So the test reads the mechanism directly: in a working handshake every wait ends by notification.
+///
+/// The signal is the AGGREGATE wall clock of 30 pipelines, and the margin is what makes that
+/// defensible. Mutation-verified by reverting `wait_timeout_while` to the old bare `wait_timeout`:
+/// **0.14 s fixed vs 2.19 s broken**, a 15× separation, because 200 handoffs × 30 runs gives the rare
+/// per-handoff stall enough chances to dominate. The bound is 1.0 s — 7× headroom over the fixed
+/// timing, still 2× below the broken one. A single run would be a coin flip (the 50-handoff program
+/// stalls in only ~half of runs) and a per-run bound would flake; the sum of 30 does neither.
+///
+/// **An earlier version of this test counted expired waits via a process-global `#[cfg(test)]`
+/// counter, and that was wrong — it is recorded here because the failure is not obvious.** libtest
+/// runs the whole file in ONE process, and the eager tests a dozen slots away in name order each park
+/// a job on a `timer(200)`, i.e. ~40 expired ticks apiece, which land on the same global. The counter
+/// version passed when run alone and when the full suite happened to schedule kindly, and FAILED at 24
+/// under `--test-threads=8` with two of its own neighbours — a flaky test that had already reported
+/// one false green. Wall clock is immune: a neighbour can steal CPU but cannot add to this loop's
+/// elapsed time the way it could add to a shared counter.
+#[test]
+fn eager_handshake_is_driven_by_wakeups_not_by_the_poll_timeout() {
+    let src = "
+import std.concurrency
+a: Channel[int] = Channel[int](1)
+fn prod():
+    for i in range(0, 200):
+        a.send(i)
+    a.close()
+fn cons():
+    s := 0
+    for v in a:
+        s = s + v
+    print(\"sum {s}\")
+ex := Executor()
+ex.submit(prod)
+ex.submit(cons)
+ex.shutdown()
+";
+    let entry = write_temp_chz("w713_handshake_wakeups", src);
+    let (tx, rx) = std::sync::mpsc::channel();
+    let e = entry.clone();
+    std::thread::spawn(move || {
+        let t0 = std::time::Instant::now();
+        let mut bad = Vec::new();
+        for _ in 0..30 {
+            let (o, _e2, r, _c) = run_file_p(&e);
+            if r.is_err() || o != "sum 19900\n" {
+                bad.push(format!("{r:?} / out={o:?}"));
+            }
+        }
+        let _ = tx.send((bad, t0.elapsed()));
+    });
+    // A worker panic drops `tx` and returns `Disconnected` immediately, which is NOT a hang — say so,
+    // rather than reporting every failure as one.
+    let outcome = rx.recv_timeout(std::time::Duration::from_secs(120));
+    let _ = std::fs::remove_file(&entry);
+    let (bad, elapsed) = match outcome {
+        Ok(v) => v,
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+            panic!("a bounded cap-1 pipeline hung for 120 s")
+        }
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+            panic!("the pipeline worker panicked — see the panic above this one")
+        }
+    };
+    assert!(
+        bad.is_empty(),
+        "the pipeline must still be correct: {bad:#?}"
+    );
+    assert!(
+        elapsed < std::time::Duration::from_secs(1),
+        "30 cap-1 pipelines took {elapsed:?} (fixed: ~0.14 s, W7-13's lost wakeup: ~2.19 s) — a \
+         healthy handshake is driven by notifications, not by the 5 ms poll timeout"
+    );
+}
+
 /// W7-5b — an `Executor` constructed INSIDE a task, never explicitly shut down, must still have its
 /// work run and waited for at program exit.
 ///
