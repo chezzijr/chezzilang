@@ -57,7 +57,7 @@ chronological log.
 | **W6-10r** | `:1216` | `--max-heap` residual: a payload reachable ONLY through a **nested** core (a `Channel` inside a `Shared`, once the nested core's last `Obj` alias slot is swept) is counted nowhere | Left open by the W6-10 fix on purpose. `live_bytes` reaches a core's bytes through its `Obj::*` alias slot; a nested core has none. Closing it needs cross-core byte recursion with `Arc` de-dup — narrow trigger, not worth the machinery yet |
 | protocol embeds | `:1505` | A protocol-embedded method isn't callable through the interface value (`p: Person` can't call embedded `name()`) despite `spec.md:973` "flattened at bound sites" | Filed as a safe-direction observation in wave 3; never triaged — doc and behavior contradict each other either way |
 | **W7-5d** | `:4413` | A hard halt (over-memory/timeout/dead-stdout) firing mid-`shutdown()` does NOT run every queued job the way an ordinary fault does — `--serial` stops popping the queue the instant one fires (later-queued jobs never run at all); M:N has already dispatched every job to the pool before a hard halt can fire, but that is not a per-job guarantee under a thread-starved pool | Found while adversarially reviewing this milestone's own docs. Live and reproduced on the built binary (`Executor().submit(spew-until-dead-stdout)` then two marker jobs, piped through `head -1`: M:N runs both markers, `--serial` runs neither), but untested — `tests/chz/stdlib/executor_drain_test.chz`'s 6 tests only use `panic()` faults, never a hard-halt kind. `executor_hard_halt` was deliberately built as an unconditional kill switch (W7-5), so this is arguably correct-by-design on both engines individually, but the exact SHAPE of "what still doesn't run" differs by engine and neither engine's shape is pinned by a test |
-| **W7-14** | `:4619` | An eager `wait:` with a timer arm inline-sleeps to the deadline and takes the timer, ignoring a sibling value that arrives sooner (`timer(300)` beats a value at 50 ms). Go's `select` takes the value — so a timeout arm beats the thing it is timing out | **Pre-existing** (identical 304/305 ms before and after W7-13r(a)); surfaced by that fix's dead timer clamp. Not reachable from the wait predicate: the cooperative inline-sleep above the eager block swallows every live timer arm before the block is entered. Fix = let the eager path block with the timer as an ordinary arm, clamped to its deadline |
+| **W7-14** | `:4619` | **`WAIT-1` unfixed on the `Executor` path.** A `wait:` timer arm inside an `Executor` job inline-sleeps to the deadline and takes the timer, ignoring a sibling value that arrives sooner: `timer(300)` beats a value at 50 ms. The SAME `wait:` in a `parallel:`/`spawn:` nursery correctly takes the value at 54 ms | `0b72ad60` (WAIT-1) fixed exactly this, but its branch is gated on `self.mn.is_some()` and an `Executor` job has `mn == None`, so it falls through to the cooperative inline-sleep. **Not an eager-execution regression** — pre-eager `main` (`b6cb9201`) measures the same 305 ms; the `Executor` path never had the fix. WAIT-1's recipe does not port unchanged: it submits the background deadline send into `self.mn`, which an eager job does not have |
 | ~~**W7-13r**~~ | `:4619` | **ALL THREE RESIDUALS FIXED 2026-08-04**, with W7-13 itself: (a) the eager `wait:` arm was a blind `thread::sleep` — now waits on arm 0's condvar, 300 wakeups **1020 ms → 5 ms**; (b) `trip()` set `done_latch` outside `core.q` — now under it; (c) a blocked eager `send` never observed `close()` — was a HANG, now faults `send on a closed channel` at 105 ms (Go, compiled: 104 ms) | Kept for the lessons, not the status. (a) was deferred as "needs its own design primitive" — **wrong**, `demote_wait_block` (`sched.rs:1114`) already had the four-line trick. (b) is deliberately UNFENCED: the window is nanoseconds and measured 5–6 ms both ways, so a timing test would assert nothing. (c) left a DELIBERATE engine divergence (`--serial` keeps `FULL_SEND_DEADLOCK`: its drain runs jobs one at a time and cannot interleave them) and needs ≥2 pool threads, unchanged by the fix. Note the original W7-13 diagnosis (a *missing* `wake_senders`) was WRONG: that wake already fires on all six pop paths; the bug was a LOST wakeup — `eager_wait_tick` waited with no predicate, so a `notify_all` arriving while the lock was free hit a condvar nobody was on yet |
 | **W7-12r** | `:4442` | Residuals of the W7-12 interim fix (**the gap itself is FIXED 2026-08-03**): the verdict only fires for an executor whose ONLY outstanding job is blocked, with no other executor still owing work — everything else DECLINES, i.e. hangs rather than faults. So (a) any multi-job deadlock inside one executor, (b) two executors deadlocking each other, and (c) a program with no explicit `shutdown()` all still hang. Go reports (a) and (b) (`all goroutines are asleep`), so these are measured gaps against the concurrency ancestor — **and they are live serial-vs-M:N divergences too**: two jobs both blocked on an empty `recv` faults in 0s on `--serial` and hangs forever on M:N, so the engine disagreement is closed only for the single-job shape | Deliberately under-fires. `blocked >= outstanding` was tried and is WRONG: a bounded cap-1 pipeline is permanently "all jobs parked" while being perfectly healthy (the two jobs feed each other), and it faulted 2–7 of 30 runs on a program Go and CPython complete — fenced now by `executor_bounded_pipeline_is_not_mistaken_for_a_deadlock`. Parked ≠ unfeedable, and no counter can tell those apart; do NOT try again with a cleverer counter. The sound successor is the process-wide AND-OR wait-for graph in `docs/future.md` **§2d** (which is what Go's own detector is), its own milestone, best sequenced after §2b retires `--serial` |
 | **W7-11** | `:3901` | A `RwShared` holding a container with an element that back-references the CONTAINER (`a.next = xs; RwShared(xs).at(0)`) aborts the host on `from_wire_memo`'s `.expect("a wire Backref always targets an already-reconstructed node id")` — a legal program, no concurrency, both engines | **Pre-existing on main**, not a W7-4 regression (verified on 5960052): a copy-out view drains ONE depth-1 piece, and a piece whose cycle closes through the ROOT container can never be self-contained — the definition it needs IS the container. `elem_split` fixes the sibling-CELL case, not this ancestor case. Closing it means either a catchable fault instead of the `.expect` (`from_wire_memo` returns a `Value`, so that is a signature change through every rebuild arm) or a same-guard whole-container fallback at all 12 view sites |
@@ -4768,12 +4768,29 @@ why the fence is a 300-iteration aggregate rather than a single run.
 CANNOT catch the spin itself: `cargo test` asserts verdicts, not CPU, and every variant of that bug
 printed the right answer. The executable guard is the derivation comment at the predicate.
 
-### W7-14 — an eager `wait:` with a timer arm inline-sleeps to the deadline and cannot take a sibling value that arrives sooner — **OPEN, found 2026-08-04 while reviewing W7-13r(a), NOT fixed**
+### W7-14 — **WAIT-1, unfixed on the `Executor` path**: a `wait:` timer arm inside an `Executor` job inline-sleeps to the deadline and cannot take a sibling value that arrives sooner — **OPEN, found 2026-08-04 while reviewing W7-13r(a), NOT fixed**
 
-Not introduced by W7-13r(a); surfaced by it (the dead timer clamp is what exposed the control flow).
-An eager job never takes the `mn.is_some()` branch of `op_wait_poll`, so a live timer arm is consumed
-by the **cooperative inline-sleep** above the eager block — which sleeps to the deadline and takes the
-timer arm, without ever looking at the other arms again.
+**This is the bug `WAIT-1` already fixed — on a path its gate does not reach.** `0b72ad60`
+("M:N timer lost-wakeup — timed-park instead of inline-sleep", 2026-06-13) replaced the inline-sleep
+with a background deadline `send_wake` + snapshot-park, and that branch is gated on
+`self.mn.is_some()`. An `Executor` job has `mn == None`, so it falls straight past WAIT-1's fix into
+the **cooperative inline-sleep** above the eager block — which sleeps to the deadline and takes the
+timer arm without looking at the other arms again.
+
+Same logic, two shapes, release binary:
+
+| shape | result |
+|---|---|
+| `parallel:` / `spawn:` (WAIT-1's snapshot-park path) | **`value 9` at 54 ms** — correct, matches Go |
+| the same `wait:` inside an `Executor` job | **`timer` at 305 ms** |
+
+**Not a regression of eager execution**, though it looks like one: pre-eager `main` (`b6cb9201`, when
+`submit` still queued and `shutdown` drained inline) measures the same 305 ms. The `Executor` path has
+simply never had WAIT-1's fix, before or after §2c. W7-13r(a) only *surfaced* it — the dead timer
+clamp is what exposed the control flow.
+
+**Why WAIT-1's recipe does not port over unchanged:** it submits the background deadline send *into
+`self.mn`*, and an eager job has no `MnSched` to submit to. That is the actual work here.
 
 ```text
 cons:  t := time.timer(300)
@@ -4783,14 +4800,13 @@ cons:  t := time.timer(300)
 prod:  sleep 50ms; work.send(9)
 ```
 
-Measured, release binary: prints `timer` at **304 ms**. Go's `select` takes the 50 ms value — this is
-the timeout arm beating the thing it is supposed to be a timeout *for*, i.e. a `wait:` with any timer
-arm degenerates into a plain sleep for an eager job. Identical before and after W7-13r(a) (305 ms vs
-304 ms), so it is pre-existing.
+Go's `select` takes the 50 ms value — this is the timeout arm beating the thing it is supposed to be a
+timeout *for*, i.e. a `wait:` with any timer arm degenerates into a plain sleep inside an `Executor`
+job. Identical before and after W7-13r(a) (305 ms vs 304 ms).
 
 The fix is not in the wait predicate: the eager path must stop letting the inline-sleep swallow the
 timer arm and instead block with the timer as one more arm, clamping the wait to its deadline — which
-is what the clamp W7-13r(a) removed was *written for* before it turned out to be unreachable.
+is what the clamp W7-13r(a) removed was *written for* before it turned out to be unreachable there.
 
 ### W7-13r(b) — `trip()` set `done_latch` outside `core.q`, so a waiter could still miss it — **FIXED 2026-08-04**
 
