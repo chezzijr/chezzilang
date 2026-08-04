@@ -58,7 +58,8 @@ chronological log.
 | **W6-10r** | `:1216` | `--max-heap` residual: a payload reachable ONLY through a **nested** core (a `Channel` inside a `Shared`, once the nested core's last `Obj` alias slot is swept) is counted nowhere | Left open by the W6-10 fix on purpose. `live_bytes` reaches a core's bytes through its `Obj::*` alias slot; a nested core has none. Closing it needs cross-core byte recursion with `Arc` de-dup — narrow trigger, not worth the machinery yet |
 | protocol embeds | `:1505` | A protocol-embedded method isn't callable through the interface value (`p: Person` can't call embedded `name()`) despite `spec.md:973` "flattened at bound sites" | Filed as a safe-direction observation in wave 3; never triaged — doc and behavior contradict each other either way |
 | **W7-5d** | `:4413` | A hard halt (over-memory/timeout/dead-stdout) firing mid-`shutdown()` does NOT run every queued job the way an ordinary fault does — `--serial` stops popping the queue the instant one fires (later-queued jobs never run at all); M:N has already dispatched every job to the pool before a hard halt can fire, but that is not a per-job guarantee under a thread-starved pool | Found while adversarially reviewing this milestone's own docs. Live and reproduced on the built binary (`Executor().submit(spew-until-dead-stdout)` then two marker jobs, piped through `head -1`: M:N runs both markers, `--serial` runs neither), but untested — `tests/chz/stdlib/executor_drain_test.chz`'s 6 tests only use `panic()` faults, never a hard-halt kind. `executor_hard_halt` was deliberately built as an unconditional kill switch (W7-5), so this is arguably correct-by-design on both engines individually, but the exact SHAPE of "what still doesn't run" differs by engine and neither engine's shape is pinned by a test |
-| **W7-14** | `:4619` | **`WAIT-1` unfixed on the `Executor` path.** A `wait:` timer arm inside an `Executor` job inline-sleeps to the deadline and takes the timer, ignoring a sibling value that arrives sooner: `timer(300)` beats a value at 50 ms. The SAME `wait:` in a `parallel:`/`spawn:` nursery correctly takes the value at 54 ms | `0b72ad60` (WAIT-1) fixed exactly this, but its branch is gated on `self.mn.is_some()` and an `Executor` job has `mn == None`, so it falls through to the cooperative inline-sleep. **Not an eager-execution regression** — pre-eager `main` (`b6cb9201`) measures the same 305 ms; the `Executor` path never had the fix. WAIT-1's recipe does not port unchanged: it submits the background deadline send into `self.mn`, which an eager job does not have |
+| **W7-16** | `:4939` | **A blocking NATIVE is not a cancellation checkpoint on the eager `Executor` path**, where it is inside a `parallel:` nursery. `ex.submit(job)` + `shutdown_now()` at 50 ms against `time.sleep_ms(3000)` (or a lone `timer(3000).recv()`) waits the full **3012 ms** AND runs the job's post-sleep code (`napper woke` prints). The same `sleep_ms` inside a nursery is interrupted on both engines — `parity_blocking_native_is_a_cancellation_checkpoint_on_both_engines` asserts `napper woke` never prints | Found 2026-08-04 while fixing W7-14's cancel half; the `wait:` half of the same hole IS fixed. Cause: the offload/park path (`call.rs:~285`, deadline-wake + checkpoint) needs an `MnSched`, and an eager job has `mn == None`, so the native runs inline (`thread::sleep`) and observes no halt. **Which contract wins is a real question, not a bug-by-inspection**: CPython's `ThreadPoolExecutor.shutdown(cancel_futures=True)` does NOT interrupt a RUNNING job either (a running `time.sleep(3)` completes), so Python agrees with today's behavior — but Chezzi's own nursery does not, and `--timeout` cannot reach these jobs either. Decide the contract before coding: measure CPython + Go, then either make the eager path a checkpoint or document the executor exemption |
+| ~~**W7-14**~~ | `:4974` | **FIXED 2026-08-04.** The cooperative inline-sleep is now gated off for every waiter that owns its OS thread — an eager `Executor` job, the top-level `main` thread, and `main` inside a native callback — each of which blocks with the timer as one more arm and clamps its in-place wait to the deadline. `timer(300)` beside a value at 50 ms: **`timer` @ 306–308 ms → `value 9` @ 56–57 ms** on all three, matching the nursery path (54 ms) and Go's `select` | Three lessons. (1) The blocker on file — "WAIT-1's recipe does not port: it submits the background deadline send into `self.mn`, which an eager job does not have" — was solving the wrong problem. WAIT-1 injects a wake because a PARKED FIBER has no thread; a party that owns its thread needs no wake at all, only a shorter timeout. (2) The dead clamp W7-13r(a) deleted was not dead code but a SYMPTOM: it was unreachable *because* of this bug, and reading it as "provably `None`" documented the bug as an invariant. (3) **The first fix reused `can_block_in_place()` and shipped green with a third path still broken** — that predicate folds in `is_counted_party`, i.e. `native_reentry == 0`, which is a rule about being JUDGED, not about being able to block. Adversarial review caught it; the tests did not, because they only covered the two paths the fix was written for |
 | ~~**W7-13r**~~ | `:4619` | **ALL THREE RESIDUALS FIXED 2026-08-04**, with W7-13 itself: (a) the eager `wait:` arm was a blind `thread::sleep` — now waits on arm 0's condvar, 300 wakeups **1020 ms → 5 ms**; (b) `trip()` set `done_latch` outside `core.q` — now under it; (c) a blocked eager `send` never observed `close()` — was a HANG, now faults `send on a closed channel` at 105 ms (Go, compiled: 104 ms) | Kept for the lessons, not the status. (a) was deferred as "needs its own design primitive" — **wrong**, `demote_wait_block` (`sched.rs:1114`) already had the four-line trick. (b) is deliberately UNFENCED: the window is nanoseconds and measured 5–6 ms both ways, so a timing test would assert nothing. (c) left a DELIBERATE engine divergence (`--serial` keeps `FULL_SEND_DEADLOCK`: its drain runs jobs one at a time and cannot interleave them) and needs ≥2 pool threads, unchanged by the fix. Note the original W7-13 diagnosis (a *missing* `wake_senders`) was WRONG: that wake already fires on all six pop paths; the bug was a LOST wakeup — `eager_wait_tick` waited with no predicate, so a `notify_all` arriving while the lock was free hit a condvar nobody was on yet |
 | ~~**W7-15**~~ | `:5142` | **FIXED 2026-08-04**, found while measuring `W7-12r` and previously unfiled. `main` blocking on a channel an eager `Executor` job was about to fill FAULTED `recv on an empty channel: deadlock` where Go and CPython both print the value — a WRONG ANSWER, not a hang, on a three-line program. Cause: `chan_recv_step`'s "I have no scheduler ⇒ nobody can ever send" `else` arm, the stale premise `future.md` §2d names, which stopped being true when eager execution put running jobs outside every scheduler. `main` now blocks like any other counted party | — |
 | ~~**W7-12r**~~ | `:4442` | **FIXED 2026-08-04** by the process-wide quiescence detector (`src/vm/quiesce.rs`, `future.md` §2d **step 0**), which DELETED W7-12's per-executor predicate whole. All three residuals close — (a) two blocked jobs in one executor, (b) two executors deadlocking each other, and (c) a blocked job with no explicit `shutdown()` all fault in <10 ms where they hung forever. The same change fixed an unfiled WRONG ANSWER found while measuring them (`W7-15`, below): `main` blocking on a channel an eager job was about to fill used to fault. Kept for the lessons | Three, all about *when* a verdict may be formed. (1) The verdict must be ONE observation — a first cut cloned the party list and released the lock before reading channels, and reported a producer and consumer parked on channels that were never both empty at any single instant. (2) A party must not stay registered across its own retry: `pop()` and un-registering are not atomic, so it reads as parked at the instant it made progress (both caught by the existing 300-handoff `wait:` fence, not by reasoning). (3) SATISFIABILITY ("is this wait already over?") is what replaced the debounce — a direct question, where "has nothing moved recently?" was a guess that faulted a healthy cap-1 pipeline 6/40 runs |
@@ -4935,7 +4936,42 @@ makes the parity test fail with `cannot index nil`.
    (`slice`) that the fix's own author had only read, never exercised. The green gate measures what the
    suite already knows to ask.
 
-### W7-14 — **WAIT-1, unfixed on the `Executor` path**: a `wait:` timer arm inside an `Executor` job inline-sleeps to the deadline and cannot take a sibling value that arrives sooner — **OPEN, found 2026-08-04 while reviewing W7-13r(a), NOT fixed**
+### W7-16 — **a blocking NATIVE is not a cancellation checkpoint on the eager `Executor` path** (it is inside a nursery) — **OPEN, found 2026-08-04 while fixing W7-14's cancel half; contract question, not a bug-by-inspection**
+
+```chezzi
+fn napper():
+    print("napper start")
+    time.sleep_ms(3000)      # or:  t := time.timer(3000); _ := t.recv()
+    print("napper woke")     # <-- runs, AFTER the cancel
+ex := Executor()
+ex.submit(napper)
+time.sleep_ms(50)
+ex.shutdown_now()
+print("main done")
+```
+
+Release binary, M:N: `napper start` / **`napper woke`** / `main done`, **@3012 ms** (timer form: 3013
+ms). The same `sleep_ms` inside a `parallel:` nursery is interrupted on BOTH engines — that is an
+asserted contract, `parity_blocking_native_is_a_cancellation_checkpoint_on_both_engines`
+(`parity_tests.rs:~10352`) asserts `napper woke` never prints.
+
+**Cause.** The offload path that makes it a checkpoint (`call.rs:~285`: `sleep_ms` rides the timer
+thread as `timer_ms`, parks, wakes at the deadline, and the park is cancellable) requires an
+`MnSched`. An eager job has `mn == None`, so the native runs INLINE — `std::thread::sleep`, which
+observes no halt. Same root shape as W7-14: an inline sleep is a hole in every halt the loop it skips
+would have checked. `--timeout` cannot reach these jobs either.
+
+**Why this is filed and not fixed: the contract is genuinely open.** CPython's
+`ThreadPoolExecutor.shutdown(cancel_futures=True)` does **not** interrupt a RUNNING job — a running
+`time.sleep(3)` completes — so Python agrees with today's Chezzi. Go has no cancel primitive at all
+(`<-time.After` is uninterruptible; cancellation is a `ctx.Done()` arm the *user* writes, which
+Chezzi's now-fixed `wait:` supports). But Chezzi's own nursery disagrees with its own executor, and
+that internal split is what makes it a gap. Decide first (measure both ancestors, pick the contract,
+write it in `concurrency.md`), then either route eager blocking natives through a cancellable park or
+document the executor exemption. Do NOT "fix" it by reflex — the W7-14 half was unambiguous (a
+`wait:` is a select and its siblings were being ignored); this one is a policy choice.
+
+### W7-14 — **WAIT-1, unfixed on every block-in-place path**: a `wait:` timer arm inside an `Executor` job (or on top-level `main`) inline-slept to the deadline and could not take a sibling value that arrived sooner — **FIXED 2026-08-04, found the same day while reviewing W7-13r(a)**
 
 **This is the bug `WAIT-1` already fixed — on a path its gate does not reach.** `0b72ad60`
 ("M:N timer lost-wakeup — timed-park instead of inline-sleep", 2026-06-13) replaced the inline-sleep
@@ -4971,9 +5007,84 @@ Go's `select` takes the 50 ms value — this is the timeout arm beating the thin
 timeout *for*, i.e. a `wait:` with any timer arm degenerates into a plain sleep inside an `Executor`
 job. Identical before and after W7-13r(a) (305 ms vs 304 ms).
 
-The fix is not in the wait predicate: the eager path must stop letting the inline-sleep swallow the
-timer arm and instead block with the timer as one more arm, clamping the wait to its deadline — which
-is what the clamp W7-13r(a) removed was *written for* before it turned out to be unreachable there.
+**THE FIX (2026-08-04).** Three edits in `op_wait_poll` (`src/vm/netio.rs`), no new machinery:
+
+1. `timed_block = soonest.is_some() && self.owns_os_thread()` — the new
+   `owns_os_thread()` is `is_counted_party()` **minus** its `native_reentry == 0` clause (that clause
+   is about whether the deadlock verdict may JUDGE a party, not whether it may block);
+2. the cooperative inline-sleep is gated OFF for `can_block_in_place() || timed_block`, so only a
+   cooperative FIBER still takes it (it has no thread to clamp, and its `wait_suspend` park has no
+   timer wake — removing the sleep there would hang a timer-only `wait:` outright; N10 is unchanged);
+3. the block-in-place branch admits `timed_block` too, and **clamps its condvar timeout to the soonest
+   deadline** — `DEMOTE_POLL_BACKOFF.min(deadline - now)`. The branch already re-polls (`ip -= 1`),
+   and the poll's own `now >= deadline` arm then takes the timer; before the deadline it is an
+   ordinary arm-0 wait, so a sibling's value wins.
+
+Measured on the release binary, the repro above:
+
+| waiter | before | after |
+|---|---|---|
+| inside an `Executor` job (M:N) | `timer` @ 306 ms | **`value 9` @ 56 ms** |
+| top-level `main` (M:N) | `timer` @ 306 ms | **`value 9` @ 56 ms** |
+| top-level `main` INSIDE a native callback (`[1].map(f)`) | `timer` @ 308 ms | **`value 9` @ 57 ms** |
+| any of them on `--serial` | `timer` @ 305 / 355 ms | unchanged (nothing else can run) |
+
+**Why `timed_block` is narrower than "block here whenever you own the thread".** An in-callback party
+is not registered with the verdict (`is_counted_party` is false), so a block there can never be judged
+a deadlock — for an UNTIMED wait that would turn today's honest `wait on channels that are all empty:
+deadlock` fault into a silent hang. A live timer arm removes the risk entirely: the wait provably ends
+at the deadline whatever anyone else does. `vm_wait_in_native_callback_no_sender_deadlocks` fences the
+untimed half.
+
+Fenced by `an_eager_wait_timer_arm_loses_to_a_sibling_value`,
+`a_top_level_wait_timer_arm_loses_to_an_eager_job` and
+`a_wait_timer_arm_in_a_native_callback_loses_to_a_sibling_value` (`src/vm/tests.rs`), each
+mutation-verified — the callback one goes red on the `timed_block` widening ALONE, the other two on
+the gate.
+
+**The tests use `timer(3000)`, not the 300 ms of the repro, and that is a lesson of its own.** The
+first cut asserted `elapsed < 250 ms` against a 306 ms bug — a 50 ms/306 ms window. Adversarial review
+ran them inside a full concurrent `cargo test --lib` and they FAILED at ~2.2 s elapsed while passing
+in isolation. The discriminator that actually matters is the OUTPUT (`value 9` vs `timer`), which is
+load-independent only if the deadline is far beyond any plausible stall; a 3 s deadline gives that and
+leaves a loose 1.5 s bound with 20× headroom on both sides. **A timing bound whose fixed and broken
+values are within 6× of each other is a flake, not a fence.**
+
+**A SECOND bug fell out with it, found while measuring the fix and previously unfiled: a timer arm
+made an eager `wait:` UNCANCELLABLE**, and the job then ran the timer arm's body after the cancel.
+`thread::sleep` observes nothing, and `op_wait_poll`'s cancellation checkpoint is at the TOP of the
+op — so it could not fire until the sleep returned, by which time the deadline had passed and the
+timer arm was taken. Measured on release binaries in separate target dirs (`shutdown_now()` at 50 ms
+against a job waiting on `timer(3000)`):
+
+| | before | after |
+|---|---|---|
+| output | **`timer` printed** | nothing printed |
+| exit | **3007 ms** | **57 ms** |
+
+The block-in-place path re-checks `block_halt_check` — cancel, `--timeout`, the deadlock verdict —
+once per `DEMOTE_POLL_BACKOFF`, so all three now land within a tick of a timer-armed `wait:` instead
+of within a timer deadline. Fenced by `a_timer_armed_eager_wait_is_cancellable_by_shutdown_now`.
+Generalizable lesson: **an inline sleep is a hole in every halt the loop it skips would have
+checked** — the latency was the visible symptom, the missed cancel was the real defect.
+
+**Scope was widened deliberately, and the wider half is the more important one.** The filed row was
+about `Executor` jobs, but `main` has `mn == None` too and took the identical branch — a top-level
+`wait:` beside an eager job gave the same wrong answer, unfiled. Gating on `eager_core.is_some()`
+would have closed the reported symptom and left the sibling live (CLAUDE.md's root-cause rule).
+
+**Why the "does not port" blocker below was wrong.** WAIT-1 submits a background deadline `send_wake`
+because a PARKED FIBER has no thread of its own to time out on. A block-in-place party *is* a thread:
+it does not need a wake injected, only a shorter timeout. No `timer::submit_at`, no `inflight`
+accounting, no `MnSched`. The second lesson is about the clamp W7-13r(a) deleted as dead code — it was
+not dead, it was **unreachable because of this bug**, and recording "`soonest` is provably `None`
+here" turned the bug into a documented invariant. A clamp/branch that is provably unreachable deserves
+the question "why can't this fire?" before the deletion.
+
+**Deliberately NOT changed: the serial cooperative fiber (N10).** It is the frozen parity oracle, its
+fix is folded into the post-freeze serial removal, and it is the one waiter that genuinely cannot
+clamp — it has no thread. `--serial` therefore still answers `timer` on the repro. Per CLAUDE.md that
+is not a defense of anything: M:N matches Go and is the correct engine here.
 
 ### W7-13r(b) — `trip()` set `done_latch` outside `core.q`, so a waiter could still miss it — **FIXED 2026-08-04**
 

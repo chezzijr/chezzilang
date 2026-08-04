@@ -12534,6 +12534,263 @@ ex.shutdown()
     );
 }
 
+/// W7-14 — a `wait:` timer arm must LOSE to a sibling value that arrives first for every waiter that
+/// owns its OS thread, exactly as `WAIT-1` already made it lose inside a `parallel:` nursery.
+///
+/// The timeout arm was beating the thing it is a timeout *for*: `op_wait_poll`'s cooperative
+/// inline-sleep slept to the timer deadline and took the timer without re-reading the siblings, and
+/// WAIT-1's timed-park fix (`0b72ad60`) never reached these paths because it is gated on
+/// `self.mn.is_some()` — none of them has an `MnSched`. So a `wait:` with any timer arm degenerated
+/// into a plain sleep. Release binary, the same program per waiter (with `timer(300)`, a value at
+/// 50 ms):
+///
+/// | waiter | before | after |
+/// |---|---|---|
+/// | `parallel:` / `spawn:` fiber (WAIT-1's path) | `value 9` @ 54 ms | unchanged |
+/// | eager `Executor` job | **`timer` @ 306 ms** | **`value 9` @ 56 ms** |
+/// | top-level `main` | **`timer` @ 306 ms** | **`value 9` @ 56 ms** |
+/// | top-level `main` INSIDE a native callback | **`timer` @ 308 ms** | **`value 9` @ 57 ms** |
+///
+/// Go's `select` takes the value. Not an eager-execution regression — pre-eager `main` (`b6cb9201`)
+/// measures the same 306 ms. The fix is NOT a ported `send_wake`: WAIT-1 injects a background
+/// deadline send because a parked fiber has no thread of its own, while these parties own their OS
+/// thread and can simply clamp the in-place wait to the deadline. Mutation-verified: with the gate
+/// reverted, each of these tests reads `timer`.
+///
+/// **Why `timer(3000)` here when the bug reproduces at 300 ms.** The discriminator is the OUTPUT, not
+/// the clock — `value 9` vs `timer` — and a wall-clock bound tight enough to separate 56 ms from
+/// 306 ms flakes under a loaded suite (measured: these tests failed a full concurrent `--lib` run at
+/// ~2.2 s elapsed while asserting < 250 ms, and passed in isolation). Pushing the deadline to 3 s
+/// makes the *answer* itself robust to a 3 s stall, and leaves a loose 1.5 s bound that still
+/// separates fixed (~56 ms) from broken (~3007 ms) with 20× headroom either side.
+///
+/// The `gate` handshake orders the two jobs so the producer's 50 ms starts only after the consumer
+/// has entered its `wait:` — without it a producer that races ahead leaves the value already queued
+/// and the POLL takes it, which passes even with the bug. (It is the 50 ms sleep that makes the block
+/// branch reachable; the gate is what stops the sleep from starting too early.)
+#[test]
+fn an_eager_wait_timer_arm_loses_to_a_sibling_value() {
+    let src = "
+import std.concurrency
+import std.time
+work: Channel[int] = Channel[int](1)
+gate: Channel[bool] = Channel[bool](1)
+fn prod():
+    _ := gate.recv()
+    time.sleep_ms(50)
+    work.send(9)
+fn cons():
+    t := time.timer(3000)
+    gate.send(true)
+    wait:
+        _ := t.recv():
+            print(\"timer\")
+        v := work.recv():
+            print(\"value {v}\")
+ex := Executor()
+ex.submit(prod)
+ex.submit(cons)
+ex.shutdown()
+";
+    let entry = write_temp_chz("w714_eager_timer_arm", src);
+    let (tx, rx) = std::sync::mpsc::channel();
+    let e = entry.clone();
+    std::thread::spawn(move || {
+        let t0 = std::time::Instant::now();
+        let (o, _e2, r, _c) = run_file_p(&e);
+        let _ = tx.send((o, format!("{r:?}"), r.is_err(), t0.elapsed()));
+    });
+    let outcome = rx.recv_timeout(std::time::Duration::from_secs(60));
+    let _ = std::fs::remove_file(&entry);
+    let (out, rdbg, failed, elapsed) = outcome.expect(
+        "the eager `wait:` hung — or there were <2 free pool threads (see the note on \
+         `eager_send_blocked_on_a_full_channel_faults_when_the_channel_is_closed`)",
+    );
+    assert!(!failed, "the program must succeed: out={out:?} r={rdbg}");
+    assert_eq!(
+        out, "value 9\n",
+        "the 50 ms value must beat the 3 s timer arm (W7-14: the inline-sleep took the timer)"
+    );
+    assert!(
+        elapsed < std::time::Duration::from_millis(1500),
+        "the wait took {elapsed:?} (fixed: ~56 ms, inline-sleep: ~3007 ms) — the timer arm is being \
+         slept to again even though the value arrived first"
+    );
+}
+
+/// W7-14 on the **top-level `main`** thread — see the sibling above for the full account.
+///
+/// `main` is a counted party with no scheduler under it (`mn == None`), so it took the identical
+/// inline-sleep and gave the identical wrong answer while an eager job was about to send. Fixing only
+/// `eager_core` parties would have left this live.
+///
+/// Also fences the verdict: `main` registers as a blocked party for this wait, so a timer arm MUST
+/// veto the process-wide deadlock verdict (`quiesce::PartyWait::Wait` answers satisfiable for any
+/// `core.timer.is_some()` arm). If that ever stops holding, this test faults instead of printing.
+#[test]
+fn a_top_level_wait_timer_arm_loses_to_an_eager_job() {
+    let src = "
+import std.concurrency
+import std.time
+work: Channel[int] = Channel[int](1)
+gate: Channel[bool] = Channel[bool](1)
+fn prod():
+    _ := gate.recv()
+    time.sleep_ms(50)
+    work.send(9)
+ex := Executor()
+ex.submit(prod)
+t := time.timer(3000)
+gate.send(true)
+wait:
+    _ := t.recv():
+        print(\"timer\")
+    v := work.recv():
+        print(\"value {v}\")
+ex.shutdown()
+";
+    let entry = write_temp_chz("w714_main_timer_arm", src);
+    let (tx, rx) = std::sync::mpsc::channel();
+    let e = entry.clone();
+    std::thread::spawn(move || {
+        let t0 = std::time::Instant::now();
+        let (o, _e2, r, _c) = run_file_p(&e);
+        let _ = tx.send((o, format!("{r:?}"), r.is_err(), t0.elapsed()));
+    });
+    let outcome = rx.recv_timeout(std::time::Duration::from_secs(60));
+    let _ = std::fs::remove_file(&entry);
+    let (out, rdbg, failed, elapsed) = outcome.expect("the top-level `wait:` hung");
+    assert!(
+        !failed,
+        "the program must succeed — a timer arm must veto the deadlock verdict: out={out:?} r={rdbg}"
+    );
+    assert_eq!(
+        out, "value 9\n",
+        "the 50 ms value must beat the 3 s timer arm on the `main` thread too (W7-14)"
+    );
+    assert!(
+        elapsed < std::time::Duration::from_millis(1500),
+        "the wait took {elapsed:?} (fixed: ~56 ms, inline-sleep: ~3007 ms)"
+    );
+}
+
+/// W7-14's THIRD waiter — the top-level `main` thread **inside a native callback** (here a list HOF;
+/// `Shared.update` and an FFI callback are the same shape). Found by adversarial review of the first
+/// two, which shipped green while this path still answered `timer` @ 308 ms.
+///
+/// It is the reason the gate is not simply [`Vm::can_block_in_place`]: that folds in
+/// `is_counted_party`, which requires `native_reentry == 0`, so a `main` thread with a host frame
+/// under it fell through to the inline-sleep. The exclusion is about the deadlock verdict being
+/// unable to JUDGE such a party — not about whether it may block — and a LIVE TIMER ARM removes the
+/// risk it guards, because the wait then provably ends at the deadline no matter what anyone else
+/// does. Hence `timed_block = soonest.is_some() && owns_os_thread()`, deliberately narrower than
+/// "always block here": with no timer arm an unjudgeable party that blocked forever would hang where
+/// the `wait on channels that are all empty: deadlock` fault is the honest answer
+/// (`vm_wait_in_native_callback_no_sender_deadlocks` fences that half).
+#[test]
+fn a_wait_timer_arm_in_a_native_callback_loses_to_a_sibling_value() {
+    let src = "
+import std.concurrency
+import std.time
+work: Channel[int] = Channel[int](1)
+gate: Channel[bool] = Channel[bool](1)
+t: Channel[bool] = time.timer(3000)
+fn prod():
+    _ := gate.recv()
+    time.sleep_ms(50)
+    work.send(9)
+fn pick(x: int) -> int:
+    gate.send(true)
+    wait:
+        _ := t.recv():
+            print(\"timer\")
+        v := work.recv():
+            print(\"value {v}\")
+    return x
+ex := Executor()
+ex.submit(prod)
+_ := [1].map(pick)
+ex.shutdown()
+";
+    let entry = write_temp_chz("w714_callback_timer_arm", src);
+    let (tx, rx) = std::sync::mpsc::channel();
+    let e = entry.clone();
+    std::thread::spawn(move || {
+        let t0 = std::time::Instant::now();
+        let (o, _e2, r, _c) = run_file_p(&e);
+        let _ = tx.send((o, format!("{r:?}"), r.is_err(), t0.elapsed()));
+    });
+    let outcome = rx.recv_timeout(std::time::Duration::from_secs(60));
+    let _ = std::fs::remove_file(&entry);
+    let (out, rdbg, failed, elapsed) = outcome.expect("the in-callback `wait:` hung");
+    assert!(!failed, "the program must succeed: out={out:?} r={rdbg}");
+    assert_eq!(
+        out, "value 9\n",
+        "a `main` thread inside a native callback owns its OS thread too — the 50 ms value must beat \
+         the 3 s timer arm there as well (W7-14, adversarial-review round)"
+    );
+    assert!(
+        elapsed < std::time::Duration::from_millis(1500),
+        "the wait took {elapsed:?} (fixed: ~57 ms, inline-sleep: ~3008 ms)"
+    );
+}
+
+/// W7-14's second half, found while measuring the fix — **a timer arm made an eager `wait:`
+/// UNCANCELLABLE**, and the job then ran the timer arm's body after the cancel was requested.
+///
+/// `std::thread::sleep(deadline - now)` observes nothing. `op_wait_poll`'s cancellation checkpoint is
+/// at the top of the op, so it can only fire if something returns to the dispatch loop — and the
+/// inline-sleep never did until the deadline had passed, at which point it TOOK the timer arm. So
+/// `shutdown_now()` (D4's cooperative stop) could not interrupt `wait:` over `timer(3000)`:
+///
+/// | | before | after |
+/// |---|---|---|
+/// | `shutdown_now()` at 50 ms, job waiting on `timer(3000)` | `timer` printed, exit @ **3007 ms** | nothing printed, exit @ **57 ms** |
+///
+/// Measured on release binaries built in separate target dirs. The block-in-place path re-checks
+/// `block_halt_check` (cancel included) once per tick, so the cancel now lands within one
+/// `DEMOTE_POLL_BACKOFF` instead of one timer deadline — and the arm body never runs.
+#[test]
+fn a_timer_armed_eager_wait_is_cancellable_by_shutdown_now() {
+    let src = "
+import std.concurrency
+import std.time
+work: Channel[int] = Channel[int](1)
+fn cons():
+    t := time.timer(3000)
+    wait:
+        _ := t.recv():
+            print(\"timer\")
+        v := work.recv():
+            print(\"value {v}\")
+ex := Executor()
+ex.submit(cons)
+time.sleep_ms(50)
+ex.shutdown_now()
+print(\"main done\")
+";
+    let entry = write_temp_chz("w714_cancel_timer_arm", src);
+    let (tx, rx) = std::sync::mpsc::channel();
+    let e = entry.clone();
+    std::thread::spawn(move || {
+        let t0 = std::time::Instant::now();
+        let (o, _e2, r, _c) = run_file_p(&e);
+        let _ = tx.send((o, format!("{r:?}"), t0.elapsed()));
+    });
+    let outcome = rx.recv_timeout(std::time::Duration::from_secs(30));
+    let _ = std::fs::remove_file(&entry);
+    let (out, rdbg, elapsed) = outcome.expect("the cancelled `wait:` hung");
+    assert!(
+        !out.contains("timer"),
+        "a cancelled job must not run its timer arm's body: out={out:?} r={rdbg}"
+    );
+    assert!(
+        elapsed < std::time::Duration::from_millis(1500),
+        "`shutdown_now()` took {elapsed:?} to interrupt a `wait:` on `timer(3000)` (fixed: ~57 ms, \
+         inline-sleep: ~3007 ms) — the timer arm is un-cancellable again"
+    );
+}
+
 /// W7-5b — an `Executor` constructed INSIDE a task, never explicitly shut down, must still have its
 /// work run and waited for at program exit.
 ///

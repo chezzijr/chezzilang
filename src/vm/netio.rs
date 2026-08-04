@@ -1786,10 +1786,22 @@ impl Vm {
     /// (`blocked < live` ⇒ veto), never a false fault. See [`crate::vm::quiesce`] for the full
     /// argument and the error-direction table.
     fn is_counted_party(&self) -> bool {
-        self.mn.is_none()
-            && self.mn_enlist_sched.is_none()
-            && self.scheduler_stack.is_empty()
-            && self.native_reentry == 0
+        self.owns_os_thread() && self.native_reentry == 0
+    }
+
+    /// Does this context own the OS thread it is running on — no scheduler of ANY kind under it?
+    ///
+    /// [`Vm::is_counted_party`] is exactly this plus `native_reentry == 0`, and the split matters:
+    /// the extra clause answers "may the process-wide verdict JUDGE this party?", not "may it block?".
+    /// A `main` thread inside a native callback owns its thread just as much — it simply cannot be
+    /// judged, because it is not reachable as a counted party while a host frame sits under it.
+    ///
+    /// Use this only where a block is provably FINITE on its own (W7-14's timed `wait:` — the deadline
+    /// ends it whatever anyone else does). For an unbounded block, [`Vm::can_block_in_place`] is the
+    /// right question: an unjudgeable party that blocks forever is a hang where a fault was the honest
+    /// answer.
+    fn owns_os_thread(&self) -> bool {
+        self.mn.is_none() && self.mn_enlist_sched.is_none() && self.scheduler_stack.is_empty()
     }
 
     /// May this context WAIT on a channel condvar in place, rather than parking a fiber or faulting?
@@ -1906,9 +1918,13 @@ impl Vm {
     /// `wait:` runtime (§6d) — execute [`Op::WaitPoll`]. The `n` arm channel handles are on the
     /// operand stack (`stack[base..base+n]`, source order). Poll source order: the first channel with
     /// a queued value (or a fired timer) wins → drop the handles, push the value, jump to that arm's
-    /// body. A closed+empty arm is skipped. Nothing ready → run `else` (jump), else inline-sleep to
-    /// the soonest live timer and take it, else fault (all-closed) or block (cooperative multi-channel
-    /// park; the M:N park is a follow-up — a blocking `wait` faults under `--parallel` for now).
+    /// body. A closed+empty arm is skipped. Nothing ready → run `else` (jump), else fault (all-closed)
+    /// or block: an M:N snapshot-park, an in-place condvar wait for a party that owns its OS thread
+    /// (an eager `Executor` job / top-level `main`, plus — for a TIMED wait only — either of those
+    /// inside a native callback), or the cooperative multi-channel park. A live timer arm is just
+    /// another arm on every one of those; only the cooperative fiber, which has no thread to clamp,
+    /// still inline-sleeps to the soonest deadline (`gaps.md` N10, and W7-14 for why the remaining
+    /// inline-sleep is exactly that narrow).
     pub(super) fn op_wait_poll(&mut self, meta: &WaitMeta, span: Span) -> Result<(), RuntimeError> {
         // CANCELLATION CHECKPOINT — engine-agnostic, mirroring `chan_recv_step`: cancel wins over a
         // ready arm / a fired timer, and it covers the COOPERATIVE multi-channel park below (which
@@ -2095,9 +2111,37 @@ impl Vm {
             self.take_wait_arm(base, v, meta.arm_targets[arm_index]);
             return Ok(());
         }
-        // Cooperative VM / interp (single-threaded) — a live timer arm inline-sleeps to the soonest
-        // deadline and takes it (the frozen parity oracle; reached only when `mn.is_none()`).
-        if let Some((i, deadline)) = soonest {
+        // **W7-14 — a live timer arm must not swallow the siblings, and this pair of gates is the
+        // whole fix.** A party that owns its OS thread (an eager `Executor` job, the top-level `main`
+        // thread — with or without a native callback frame under it) has `mn == None` too, so it used
+        // to land in the inline-sleep below and sleep to the deadline, which takes the timer arm
+        // without ever looking at the siblings again: the timeout arm beats the thing it is a timeout
+        // *for* (`timer(300)` won over a value that arrived at 50 ms; Go's `select` takes the value).
+        // That is WAIT-1's bug on the paths WAIT-1's `self.mn.is_some()` gate does not reach. Such a
+        // party blocks in place instead, with the timer as one more arm and the wait merely CLAMPED to
+        // its deadline. WAIT-1's own recipe — a background deadline `send_wake` submitted into
+        // `self.mn` — does not port here and does not need to: it exists to wake a fiber that has no
+        // thread, and this party IS a thread.
+        //
+        // `timed_block` is deliberately WIDER than [`Vm::can_block_in_place`], and only for a TIMED
+        // wait. `can_block_in_place` folds in [`Vm::is_counted_party`], which requires
+        // `native_reentry == 0`, so the top-level `main` thread inside any native callback (a list
+        // HOF, `Shared.update`, an FFI callback) is excluded from it — that exclusion is about a
+        // deadlock verdict being unable to JUDGE such a party, not about whether it may block, and it
+        // left W7-14 alive on that path (measured `timer` @ 308 ms with a value at 50 ms). A live
+        // timer arm removes the risk the exclusion guards: this wait provably ENDS at the deadline, so
+        // blocking on it cannot hang even though nothing will register or judge it. Without a timer
+        // arm the exclusion still stands and the fault below is the honest answer.
+        let timed_block = soonest.is_some() && self.owns_os_thread();
+        // Cooperative fiber (single-threaded, inside a nursery) — a live timer arm inline-sleeps to
+        // the soonest deadline and takes it (the frozen parity oracle, `gaps.md` N10). It cannot do
+        // what the parties above do: it has no thread of its own to clamp, and its `wait_suspend` park
+        // below has no timer wake, so removing the inline-sleep for it would hang a timer-only `wait:`
+        // outright. N10 stays exactly as documented.
+        if let Some((i, deadline)) = soonest
+            && !self.can_block_in_place()
+            && !timed_block
+        {
             let now = std::time::Instant::now();
             if now < deadline {
                 std::thread::sleep(deadline - now);
@@ -2117,7 +2161,9 @@ impl Vm {
         // blocks instead of declaring a deadlock, like the empty-`recv` and full-`send` cases, then
         // REWINDs so the dispatch loop re-runs this `WaitPoll` and re-polls every arm. Rewinding
         // rather than looping in place also means the halts land on the ordinary back-edge checkpoint.
-        if self.can_block_in_place() {
+        // `timed_block` (W7-14, above) admits one more waiter here — `main` inside a native callback —
+        // and ONLY when a live timer arm makes the block provably finite.
+        if self.can_block_in_place() || timed_block {
             // Registered FIRST, before the halt check, so this party counts ITSELF as blocked; after
             // it, a lone `wait:`-blocked party would forever see `blocked < live` and never fault.
             // The registration is an OR-set over every arm (§2d's OR-edge: ready on ANY arm is
@@ -2165,14 +2211,29 @@ impl Vm {
             // An all-closed arm set costs one tick before the `wait: all channels closed` fault, which
             // is exactly what the blind sleep cost.
             //
-            // No timer clamp here, deliberately: `soonest` is provably `None` at this point, because
-            // the cooperative inline-sleep above returns for every `soonest.is_some()` case and an
-            // eager job never takes the `self.mn.is_some()` branch. (A clamp WAS written here at
-            // first; it was dead code. The inline-sleep's own limit — an eager `wait:` sleeps to the
-            // timer deadline and cannot take a sibling value that arrives sooner, where Go's `select`
-            // would — is filed as `docs/gaps.md` W7-14, not something this predicate can reach.)
+            // **The timer clamp — W7-14.** A live timer arm no longer inline-sleeps on this path
+            // (see the gate above), so `soonest` reaches here and the tick is shortened to its
+            // deadline: the wait returns at the deadline at the latest, the `ip -= 1` below re-polls,
+            // and the poll's own `now >= deadline` arm takes the timer. Before the deadline the wait
+            // is an ordinary arm-0 wait, so a sibling's value that lands sooner wins — which is the
+            // whole point. `saturating_duration_since` because the deadline may already have passed
+            // (a zero timeout is a poll, and the re-poll then takes the timer immediately).
+            //
+            // Not the timer's OWN condvar, deliberately: this waits on arm 0 whatever arm 0 is, and a
+            // timer channel is filled by nobody — nothing would ever notify it. Precision, NOT
+            // liveness, is what the clamp buys: the unclamped tick already re-polls every
+            // `DEMOTE_POLL_BACKOFF`, so the deadline would be observed within 5 ms of itself anyway.
+            // The clamp makes it observed AT the deadline, the same way `demote_wait_block` clamps
+            // its own backoff. (Said plainly because an overclaim here is exactly the kind of comment
+            // this change is fixing elsewhere.)
+            //
+            // (An identical clamp was written here by W7-13r(a) and deleted as dead code: at that
+            // time the inline-sleep above swallowed every `soonest.is_some()` case, which was W7-14.)
+            let tick = soonest.map_or(DEMOTE_POLL_BACKOFF, |(_, d)| {
+                DEMOTE_POLL_BACKOFF.min(d.saturating_duration_since(std::time::Instant::now()))
+            });
             let q = first.q.lock().unwrap_or_else(|e| e.into_inner());
-            let _ = first.cv.wait_timeout_while(q, DEMOTE_POLL_BACKOFF, |g| {
+            let _ = first.cv.wait_timeout_while(q, tick, |g| {
                 let ready = if is_send0 {
                     cap0.is_none_or(|c| g.len() < c) || g.closed
                 } else {

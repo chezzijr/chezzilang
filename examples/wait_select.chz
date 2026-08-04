@@ -29,7 +29,10 @@ fn main():
         v := orders.recv(): print("order {v}")
         else: print("idle")
 
-    # 4. A `timer` arm fires once its deadline passes (inline-sleep, every engine).
+    # 4. A `timer` arm fires once its deadline passes. For a waiter that owns its OS thread (`main`,
+    #    an `Executor` job) or a `parallel:` fiber it is just another arm — a sibling value arriving
+    #    first wins the wait (`docs/gaps.md` W7-14). A `--serial` fiber inside a nursery still
+    #    inline-sleeps to the deadline (N10, the frozen parity oracle).
     wait:
         _ := timer(1).recv(): print("timeout")
 

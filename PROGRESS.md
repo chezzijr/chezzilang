@@ -2,6 +2,61 @@
 
 Single source of truth for "what am I doing next." Update after every work session.
 
+> **✅ W7-14 FIXED 2026-08-04 — a `wait:` timer arm no longer swallows a sibling value that arrives
+> first.** `WAIT-1`'s fix (`0b72ad60`) is gated on `self.mn.is_some()`, and a party that owns its OS
+> thread — an eager `Executor` job, and the **top-level `main` thread** — has `mn == None`, so it fell
+> into the cooperative inline-sleep: it slept to the timer deadline and took the timer without ever
+> re-reading the siblings. The timeout arm beat the thing it is a timeout *for*, i.e. any `wait:` with
+> a timer arm degenerated into a plain sleep. `timer(300)` beside a value at 50 ms: **`timer` @ 306 ms
+> → `value 9` @ 56 ms**, matching the `parallel:` path (54 ms), Go's `select` and CPython. Not an
+> eager-execution regression — pre-eager `main` (`b6cb9201`) measured the same 306 ms.
+>
+> **Fix (3 edits, `op_wait_poll` in `src/vm/netio.rs`, no new machinery):** add
+> `timed_block = soonest.is_some() && owns_os_thread()` (the new `owns_os_thread()` is
+> `is_counted_party()` minus its `native_reentry == 0` clause), gate the inline-sleep off for
+> `can_block_in_place() || timed_block`, and clamp the block-in-place condvar wait to the soonest
+> deadline (`DEMOTE_POLL_BACKOFF.min(deadline - now)`); the branch already re-polls, so the poll's own
+> `now >= deadline` arm takes the timer, while before the deadline a sibling's value wins.
+>
+> **Adversarial review earned its keep twice here — read this before the next `wait:` change.** (a)
+> The first cut gated on `can_block_in_place()` alone and shipped GREEN with a third path still
+> broken: that predicate folds in `is_counted_party`, i.e. `native_reentry == 0`, so `main` inside a
+> native callback (`[1].map(f)`, `Shared.update`, an FFI callback) still answered `timer` @ 308 ms.
+> That clause is a rule about being JUDGED by the deadlock verdict, not about being able to block —
+> hence the narrower `timed_block`, which admits an unjudgeable party only when a live timer arm makes
+> the block provably finite (an untimed one still faults, else a hang replaces an honest verdict).
+> (b) The first tests asserted `elapsed < 250 ms` against a 306 ms bug and FAILED inside a full
+> concurrent `--lib` run (~2.2 s elapsed) while passing in isolation. They now use `timer(3000)` so
+> the OUTPUT itself is the discriminator. **A timing bound whose fixed and broken values are within
+> 6× of each other is a flake, not a fence.**
+>
+> **A second, unfiled bug fell out with it: a timer arm made an eager `wait:` UNCANCELLABLE**, and
+> the job then ran the timer arm's body after the cancel. `thread::sleep` observes nothing and the
+> cancellation checkpoint is at the top of the op, so `shutdown_now()` at 50 ms against a job waiting
+> on `timer(3000)` printed `timer` and exited at **3007 ms**; it now prints nothing and exits at
+> **57 ms**. The block-in-place path re-checks cancel / `--timeout` / the deadlock verdict once per
+> tick. An inline sleep is a hole in every halt the loop it skips would have checked.
+>
+> Two lessons worth carrying. (1) The blocker on file — *"WAIT-1's recipe does not port: it submits the
+> background deadline send into `self.mn`"* — solved the wrong problem: WAIT-1 injects a wake because a
+> **parked fiber** has no thread; a block-in-place party *is* a thread and needs only a shorter timeout.
+> (2) The clamp W7-13r(a) deleted as "dead code — `soonest` is provably `None` here" was **unreachable
+> because of this bug**; the deletion documented the bug as an invariant. Ask *why* a branch can't fire
+> before deleting it. Scope was widened past the filed row on purpose: `main` had the identical bug and
+> no row of its own. `--serial`'s cooperative fiber keeps the inline-sleep (`gaps.md` N10, the frozen
+> oracle — the one waiter that genuinely has no thread to clamp). Fences:
+> `an_eager_wait_timer_arm_loses_to_a_sibling_value`, `a_top_level_wait_timer_arm_loses_to_an_eager_job`
+> (both mutation-verified red without the gate), plus
+> `a_timer_armed_eager_wait_is_cancellable_by_shutdown_now`.
+>
+> **Filed, NOT fixed: `W7-16`** — the same hole one layer down. A blocking **native** on the eager
+> path (`time.sleep_ms(3000)`, a lone `timer(3000).recv()`) is not a cancellation checkpoint: it runs
+> inline because the offload/park path needs an `MnSched`, so `shutdown_now()` waits 3012 ms and the
+> job's post-sleep code still runs — while the same `sleep_ms` inside a `parallel:` nursery IS
+> interrupted on both engines (an asserted parity contract). Left open deliberately: CPython's
+> `ThreadPoolExecutor` does not interrupt a running job either, so the contract is a policy choice to
+> settle before coding, not a bug by inspection. See `docs/gaps.md` **W7-16**.
+
 > **✅ W7-11 FIXED 2026-08-04 — the last ledger item that ABORTED THE HOST is gone.** An `RwShared`
 > copy-out view (`at`/`slice`/`for_each`/`fold`/`get_key`/`has`/`for_each_entry`/`fold_entries`/
 > `contains`) of an element whose cycle closes through the ROOT container killed the process on a
