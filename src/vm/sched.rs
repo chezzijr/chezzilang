@@ -2386,9 +2386,10 @@ impl Vm {
                 // both cross BY VALUE like `Builtin`, exactly as the SNAPSHOT path
                 // (`SnapValue::Native`/`Cffi`) already ships them across M:N workers. `has_handle`
                 // leaves both `false`, so the worker airlock accepts them.
-                Obj::Native { name, func } => WireValue::Native {
+                Obj::Native { name, func, kind } => WireValue::Native {
                     name: name.clone(),
                     func: *func,
+                    kind: *kind,
                 },
                 Obj::Cffi(c) => WireValue::Cffi(Arc::clone(c)),
                 // B3.1: the shared cores cross as the `Arc` itself (clone = refcount bump), so a
@@ -2920,8 +2921,8 @@ impl Vm {
             WireValue::Builtin(name) => Value::obj(self.heap.alloc(Obj::Builtin(name))),
             // Re-alloc a fresh `Obj::Native` from the name + fn pointer carried by value (pure code) —
             // same as the `SnapValue::Native` rebuild.
-            WireValue::Native { name, func } => {
-                Value::obj(self.heap.alloc(Obj::Native { name, func }))
+            WireValue::Native { name, func, kind } => {
+                Value::obj(self.heap.alloc(Obj::Native { name, func, kind }))
             }
             // Re-alloc a fresh `Obj::Cffi` sharing the SAME `Arc<Cffi>` (no re-dlopen) — same as the
             // `SnapValue::Cffi` rebuild.
@@ -4102,7 +4103,7 @@ impl Vm {
                     SnapValue::ModuleInline { name, globals }
                 }
             },
-            Obj::Native { name, func } => SnapValue::Native { name, func },
+            Obj::Native { name, func, kind } => SnapValue::Native { name, func, kind },
             // A first-class builtin fn is pure code — SENDABLE. Carry the name; the worker re-allocs
             // a fresh `Obj::Builtin` on replay (like `Native`, but with no fn pointer to share).
             Obj::Builtin(name) => SnapValue::Builtin(name),
@@ -4376,9 +4377,10 @@ impl Vm {
                 }
                 Value::obj(wm)
             }
-            SnapValue::Native { name, func } => Value::obj(self.heap.alloc(Obj::Native {
+            SnapValue::Native { name, func, kind } => Value::obj(self.heap.alloc(Obj::Native {
                 name: name.clone(),
                 func: *func,
+                kind: *kind,
             })),
             // Re-alloc a fresh `Obj::Builtin` from the carried name (pure code, no state to share).
             SnapValue::Builtin(name) => Value::obj(self.heap.alloc(Obj::Builtin(name.clone()))),

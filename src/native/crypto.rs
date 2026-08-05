@@ -12,10 +12,10 @@
 //! directly. `hmac_sha1`/`hmac_sha512` would need a block-size param (64 vs 128) + `&[u8]` adapters
 //! over the fixed-size digest arrays; add them here if a caller actually needs them.
 //!
-//! All are pure CPU transforms (no I/O) → not in [`super::is_blocking`]; they run inline on every
+//! All are pure CPU transforms (no I/O) → [`super::Kind::Inline`] on their registry entry; they run inline on every
 //! engine (3-engine parity by construction at the NativeFn seam).
 
-use super::{Host, HostError, NativeFn, NativeRet, expect_args};
+use super::{Host, HostError, Kind, NativeFn, NativeRet, expect_args};
 
 // ---- SHA-256 (FIPS 180-4) ----
 
@@ -583,18 +583,18 @@ fn token_hex(h: &mut dyn Host) -> Result<NativeRet, HostError> {
     Ok(NativeRet::Str(to_hex(&secure_random_bytes(n)?)))
 }
 
-/// Callable members. `(name, fn)`.
-pub const MEMBERS: &[(&str, NativeFn)] = &[
-    ("sha256", sha256),
-    ("sha256_bytes", sha256_bytes),
-    ("sha1", sha1),
-    ("sha1_bytes", sha1_bytes),
-    ("sha512", sha512),
-    ("sha512_bytes", sha512_bytes),
-    ("md5", md5),
-    ("hmac_sha256", hmac_sha256_fn),
-    ("secure_bytes", secure_bytes),
-    ("token_hex", token_hex),
+/// Callable members. `(name, fn, kind)`.
+pub const MEMBERS: &[(&str, NativeFn, Kind)] = &[
+    ("sha256", sha256, Kind::Inline),
+    ("sha256_bytes", sha256_bytes, Kind::Inline),
+    ("sha1", sha1, Kind::Inline),
+    ("sha1_bytes", sha1_bytes, Kind::Inline),
+    ("sha512", sha512, Kind::Inline),
+    ("sha512_bytes", sha512_bytes, Kind::Inline),
+    ("md5", md5, Kind::Inline),
+    ("hmac_sha256", hmac_sha256_fn, Kind::Inline),
+    ("secure_bytes", secure_bytes, Kind::Inline),
+    ("token_hex", token_hex, Kind::Inline),
 ];
 
 #[cfg(test)]

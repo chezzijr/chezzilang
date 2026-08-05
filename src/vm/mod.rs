@@ -772,7 +772,8 @@ pub struct Vm {
     /// that frees a slot wakes it ([`Vm::wake_senders`]). Mutually exclusive with `suspend`/
     /// `wait_suspend` (a fiber parks via exactly one). VM-global like `suspend` (one fiber runs at once).
     send_suspend: Option<GcRef>,
-    /// D5 — set when a blocking native call (`is_blocking`) is reached under the M:N engine: instead
+    /// D5 — set when a blocking native call ([`crate::native::Kind::blocks`]) is reached under the M:N
+    /// engine: instead
     /// of running inline (pinning the worker), `invoke_native` records the call here and returns a
     /// sentinel; the worker loop hands it to the dirty/blocking pool ([`Disp::Offload`]) and is freed.
     /// Like `suspend` it is a VM-global (one fiber runs at a time) and gates the result-push at the
@@ -1396,10 +1397,13 @@ enum SnapValue {
         name: Box<str>,
         globals: Vec<(String, SnapValue)>,
     },
-    /// A native (Rust) fn — re-allocated with the same fn pointer (`NativeFn` is `Clone`/`Send`).
+    /// A native (Rust) fn — re-allocated with the same fn pointer (`NativeFn` is `Clone`/`Send`) and
+    /// the same [`crate::native::Kind`] (a `Copy` field of its registry entry, so the rebuilt value
+    /// keeps running the way the entry says).
     Native {
         name: Box<str>,
         func: crate::native::NativeFn,
+        kind: crate::native::Kind,
     },
     /// A first-class universe builtin fn (`print`/`ord`/`chr`/`panic`) — SENDABLE (pure code). Carries
     /// only the name; replayed as a fresh `Obj::Builtin`.
@@ -3547,7 +3551,7 @@ pub use stream::{flush_stream, out_dead_reason, stream_error};
 
 /// D5 — the off-heap [`crate::native::Host`] for a blocking native run on the dirty pool (no `Vm`,
 /// no heap). It serves the pre-extracted primitive args ([`crate::native::NativeArg`]) and *panics*
-/// on any host-I/O method: the offload classifier ([`crate::native::is_blocking`]) only flags fns
+/// on any host-I/O method: the offload classifier ([`crate::native::Kind::Blocking`]) only covers fns
 /// that read primitive args + return a primitive `NativeRet`, so reaching stdout/stderr/stdin/os here
 /// means a fn was misclassified as off-heap-safe — a bug to surface loudly, not paper over.
 struct OffloadHost {

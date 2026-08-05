@@ -208,12 +208,13 @@ pub enum WireValue {
     /// pure code: a `fn` pointer (`Copy`, so heap-independent — the same code address is valid in any
     /// worker of this process) plus its name, no `GcRef` and no captured heap state. Like
     /// [`Builtin`](WireValue::Builtin), it genuinely crosses an OS-thread boundary; `from_wire` re-allocs
-    /// a fresh `Obj::Native` with the same name/pointer. Cross-safe (`has_handle` leaves it `false` via
-    /// the `_` arm) — the same value the SNAPSHOT path already ships across M:N workers
-    /// ([`SnapValue::Native`](super::sched)).
+    /// a fresh `Obj::Native` with the same name/pointer/[`kind`](crate::native::Kind). Cross-safe
+    /// (`has_handle` leaves it `false` via the `_` arm) — the same value the SNAPSHOT path already ships
+    /// across M:N workers ([`SnapValue::Native`](super::sched)).
     Native {
         name: Box<str>,
         func: crate::native::NativeFn,
+        kind: crate::native::Kind,
     },
     /// An FFI fn (`Obj::Cffi`, `extern "lib":`) carried across the airlock as its shared
     /// `Arc<Cffi>` — the `dlopen`'d library + resolved symbol behind an `Arc`, so a worker sharing this

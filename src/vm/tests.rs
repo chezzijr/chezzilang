@@ -1800,6 +1800,7 @@ fn vm_calls_native_fn_value() {
     let h = vm.heap.alloc(Obj::Native {
         name: "add".into(),
         func: add,
+        kind: crate::native::Kind::Inline,
     });
     vm.push(Value::obj(h));
     vm.push(Value::int(40));
@@ -1882,6 +1883,7 @@ fn vm_native_str_return_lowers_to_heap_with_no_children() {
     let nat = vm.heap.alloc(Obj::Native {
         name: "greet".into(),
         func: greet,
+        kind: crate::native::Kind::Inline,
     });
     // A native fn handle has no GC children (guards the mark-phase claim).
     assert!(vm.heap.children(nat).is_empty());

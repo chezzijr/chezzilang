@@ -200,7 +200,7 @@ pool keeps scheduling.
 
 **Landed (core):** `src/vm/blocking_pool.rs` (growable: spawn-on-stall, reap idle >10 s, cap 512) +
 the offload path in `src/vm/mod.rs`. `invoke_native` intercepts an off-heap-safe blocking native
-(`native::is_blocking`) under the M:N engine (gated `native_reentry == 0`), materializes args into
+(one whose registry entry carries `native::Kind::Blocking`/`TimedWait`) under the M:N engine (gated `native_reentry == 0`), materializes args into
 `Send` `NativeArg`s, suspends the fiber (`Vm::offload` + the `paused()` push-skip), and the worker
 hands it (`Disp::Offload`) to the pool. The pool runs it with no `Vm`/heap (`OffloadHost`), stashes the
 raw `NativeRet` on `Fiber.resume_native`, and `complete_offload`s the fiber back. `MnSched.inflight`

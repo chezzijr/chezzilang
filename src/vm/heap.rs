@@ -361,9 +361,15 @@ pub enum Obj {
     Module(Box<ModuleData>),
     /// A native (Rust) function — a member of a native std module (`std.math` etc., M6c). Holds no
     /// heap references, so it has no GC children.
+    ///
+    /// `kind` is the member's [`crate::native::Kind`], copied off its registry entry when the module
+    /// binds (`vm/exec.rs`). It travels with the value so `Vm::invoke_native` knows how to RUN this
+    /// native (inline / dirty-pool offload / timed wait / engine-intercepted) without comparing its
+    /// name to a string — `docs/future.md` §3c.
     Native {
         name: Box<str>,
         func: crate::native::NativeFn,
+        kind: crate::native::Kind,
     },
     /// A first-class UNIVERSE builtin FUNCTION value (`print`/`ord`/`chr`/`panic`), carried by name.
     /// Produced by `Op::LoadBuiltin` when the name is used in value position; calling it (via

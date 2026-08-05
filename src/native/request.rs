@@ -17,7 +17,7 @@
 //! timeout lowers to `Err` like any transport failure). Redirect configuration and streaming bodies
 //! are still deferred.
 
-use super::{Host, HostError, NativeFn, NativeRet, expect_args, expect_args_range};
+use super::{Host, HostError, Kind, NativeFn, NativeRet, expect_args, expect_args_range};
 use std::io::Read;
 use std::time::Duration;
 
@@ -256,16 +256,16 @@ fn head(h: &mut dyn Host) -> Result<NativeRet, HostError> {
     Ok(do_request("HEAD", &url, "", &[], None))
 }
 
-/// Callable members. `(name, fn)`.
-pub const MEMBERS: &[(&str, NativeFn)] = &[
-    ("get", get),
-    ("get_bytes", get_bytes),
-    ("post", post),
-    ("request", request),
-    ("put", put),
-    ("patch", patch),
-    ("delete", delete),
-    ("head", head),
+/// Callable members. `(name, fn, kind)`.
+pub const MEMBERS: &[(&str, NativeFn, Kind)] = &[
+    ("get", get, Kind::Blocking),
+    ("get_bytes", get_bytes, Kind::Blocking),
+    ("post", post, Kind::Blocking),
+    ("request", request, Kind::Blocking),
+    ("put", put, Kind::Blocking),
+    ("patch", patch, Kind::Blocking),
+    ("delete", delete, Kind::Blocking),
+    ("head", head, Kind::Blocking),
 ];
 
 #[cfg(test)]

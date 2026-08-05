@@ -852,7 +852,7 @@ impl Compiler {
                 && d.kind == crate::ast::NativeKind::Fn
                 && crate::native::native_members(nat)
                     .iter()
-                    .any(|(n, _)| *n == d.name)
+                    .any(|(n, _, _)| *n == d.name)
             {
                 add(d.name.clone(), &mut self.globals, &mut self.global_slots);
             }

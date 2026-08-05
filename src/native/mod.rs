@@ -490,6 +490,68 @@ pub trait Host {
 /// can live behind an `Rc`/`GcRef` cheaply and compare/clone trivially.
 pub type NativeFn = fn(&mut dyn Host) -> Result<NativeRet, HostError>;
 
+/// **How the engine must RUN a native** — the one behavioural property of a native fn, carried on its
+/// registry entry ([`native_members`]) rather than matched by name at the dispatch site.
+///
+/// This is `future.md` §3c: these properties used to live in string matches far from the entry — a
+/// 40-name `is_blocking` list plus three `"sleep_ms"` arms in `vm/call.rs` plus a
+/// `name == "connect" || name == "listen"` check — so **a new blocking native that forgot to join the
+/// list failed SILENTLY**: nothing errored, no test went red, it just pinned an M:N core worker for
+/// the syscall's duration (the D5 starvation the classification exists to prevent). As a field of
+/// every `MEMBERS` tuple, omitting it is a **compile error** instead.
+///
+/// It rides the entry → [`crate::vm::heap::Obj::Native`] (bound in `vm/exec.rs`) → `Vm::invoke_native`, so
+/// the dispatch site never compares a name: no lookup, and no bare-name ambiguity (`std.io::_append`
+/// and `std.fs::_append` are distinct entries with different kinds — under the old name-keyed scheme
+/// they collided and were kept apart only by check ORDER plus an exemption list in a test).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Kind {
+    /// Run inline on the calling worker: pure CPU (math/crypto/encoding/regex/ffi) or a call that
+    /// touches the host stdio/os state (`print`, `read_line`, `now`) and so *cannot* run off-heap.
+    Inline,
+    /// D5 — a blocking, **off-heap-safe** syscall the M:N engine offloads to the dirty/blocking pool
+    /// instead of running inline, so it can't pin a core worker (the G3 starvation). "Off-heap-safe"
+    /// is the contract that lets it run on a pool thread with no `Vm`: it reads only primitive args
+    /// (`arg_int`/`arg_str`/`NativeArg::{Map,List,Bytes}`) and returns a primitive [`NativeRet`] — it
+    /// never touches the heap, the stdout/stderr buffers, stdin, or os state during the blocking part
+    /// (so [`Host`]'s I/O methods are `unreachable!` on the off-heap host). The set: `std.io`'s four
+    /// file-seam members, all of `std.fs`, `std.request` (network) and `std.process` (subprocess).
+    /// Also a cancellation checkpoint on BOTH engines (see `vm/call.rs`).
+    Blocking,
+    /// A wait whose **deadline we own** (`std.time.sleep_ms`): it rides the timer thread (park +
+    /// deadline-wake) rather than a pool thread, and is a CONTINUOUS cancellation + `--timeout`
+    /// checkpoint for its whole duration (W7-16/17/18) — not merely at entry like a `read(2)` in the
+    /// kernel, which is not ours to cut short. Blocking in every other respect (offload gate, entry
+    /// cancel checkpoint).
+    TimedWait,
+    /// R2 — a `std.io` Writer/Reader opener or handle (`_create`/`_append`/`stdout`/`stderr`/
+    /// `buffered`/`_open`). It allocates a heap `Writer`/`Reader` over an `Arc`'d core, which a pure
+    /// off-heap native cannot, so the engine runs it itself (`Vm::io_native`) and the registered fn
+    /// (`io::intercepted`) never executes.
+    InterceptIo,
+    /// D6 — `std.net.connect`/`listen`. Same reason as [`Kind::InterceptIo`] (allocates a
+    /// `Socket`/`Listener` handle over an `Arc`'d core); run by `Vm::net_connect_or_listen`, and the
+    /// registered `net::intercepted` placeholder never executes.
+    InterceptNet,
+}
+
+impl Kind {
+    /// Does this native block its worker long enough to need the D5 treatment — the M:N offload gate
+    /// and the entry cancellation checkpoint? True for [`Kind::Blocking`] and [`Kind::TimedWait`]
+    /// (the two arms of the old `is_blocking` name list); false for everything the engine runs inline
+    /// or intercepts.
+    ///
+    /// EXHAUSTIVE on purpose (no `_` arm): a future `Kind` must be classified here deliberately, or it
+    /// does not compile. A catch-all would silently default a new variant to "does not block" — the
+    /// same silent-omission failure this enum exists to abolish, one level up.
+    pub fn blocks(self) -> bool {
+        match self {
+            Kind::Blocking | Kind::TimedWait => true,
+            Kind::Inline | Kind::InterceptIo | Kind::InterceptNet => false,
+        }
+    }
+}
+
 impl HostError {
     /// A missing positional argument (the engine's bounds check failed for index `i`).
     pub fn missing_arg(i: usize) -> Self {
@@ -503,60 +565,6 @@ impl HostError {
             message: format!("argument {i} must be {want}, got {got}"),
         }
     }
-}
-
-/// D5 — whether a native fn (by its bare member name) is a *blocking, off-heap-safe* call the M:N
-/// engine offloads to the dirty/blocking pool instead of running inline on a core worker (so a
-/// `sleep_ms`/`read_file` can't pin a worker → the live G3 starvation). "Off-heap-safe" is the
-/// contract that lets it run on a pool thread with no `Vm`: it reads only primitive args
-/// (`arg_int`/`arg_str`) and returns a primitive [`NativeRet`] — it never touches the heap, the
-/// stdout/stderr buffers, stdin, or os state during the blocking part (so [`Host`]'s I/O methods are
-/// `unreachable!` on the off-heap host). The scoped set: `std.io.read_file`/`write_file`, all of
-/// `std.fs`, and `std.time.sleep_ms`. Classified by bare name (the engine has the member name at the
-/// dispatch site); the set is distinctive across the native modules. D5 owe #1 added `std.request`
-/// (`get`/`post`, HTTP via `ureq`) and `std.process` (`cmd`, subprocess): both verified off-heap-safe
-/// (primitive `str` args, primitive `Struct`/`Ok`/`Err` returns, no heap/stdio touch during the call),
-/// so they offload like the rest instead of pinning a core worker on network / subprocess I/O.
-///
-/// ponytail: a native's PROPERTIES are classified here, by name, far from where the native is
-/// REGISTERED (`MEMBERS`) — so a new blocking native that forgets this list fails SILENTLY: nothing
-/// errors, no test goes red, it just pins an M:N worker for the syscall. The `_`-prefix strip below is
-/// a near-miss of exactly that. Same shape in `vm/call.rs`'s three `"sleep_ms"` arms (the "is this a
-/// timed wait?" property) — `sleep_ms` is named in 4 files. Upgrade path: move the property onto the
-/// registry entry (`struct Native { name, f, kind }`), so omitting it is a COMPILE error; ~192 entries
-/// across 12 tables, so it wants its own commit. Full write-up + the cheap interim variant:
-/// `docs/future.md` §3c.
-pub fn is_blocking(name: &str) -> bool {
-    // W7-8 — the path-taking natives were renamed to a `_`-prefixed INTERNAL byte seam (the public
-    // `PathLike` name is a bodied Chezzi wrapper). Strip the prefix so the classification travels with
-    // the rename: without this every `std.fs` syscall would silently stop offloading and pin a core
-    // M:N worker (the D5 starvation this set exists to prevent). No non-seam native starts with `_`.
-    let name = name.strip_prefix('_').unwrap_or(name);
-    matches!(
-        name,
-        // std.io (file I/O only — print/eprint/read_line touch host stdio, run inline; even under the
-        // streaming CLI a `print` cannot block: it hands the line to `vm::stream`'s writer thread)
-        // R1: `read_bytes`/`write_bytes` are the binary twins — `write_bytes` offloads its `bytes`
-        // arg via `NativeArg::Bytes` (off-heap-safe: owned byte vec, primitive return).
-        "read_file" | "write_file" | "read_bytes" | "write_bytes"
-        // std.fs (all members are filesystem syscalls — reads + mutations)
-        | "list_dir" | "exists" | "is_file" | "is_dir" | "size" | "glob" | "canonicalize"
-        | "mkdir" | "remove_file" | "remove_dir" | "rename" | "copy" | "append"
-        | "chmod" | "atomic_write"
-        // std.time
-        | "sleep_ms"
-        // std.request (network I/O) + std.process (subprocess) — D5 owe #1.
-        // `request`/`put`/`patch`/`delete`/`head` are the verb wrappers + the general header-carrying
-        // call; `request` offloads its `map[str, str]` headers via `NativeArg::Map` (off-heap-safe).
-        // `get_bytes` is the binary-download twin of `get` (str arg, `Ok(Bytes)`/`Err` primitive
-        // return — off-heap-safe); it MUST offload too or a slow/large download pins a core worker.
-        // `run`/`run_args` are the structured subprocess forms (alongside `cmd`); `run_args` offloads
-        // its `list[str]` argv via `NativeArg::List` (off-heap-safe). W6-4: `run_bytes`/`run_args_bytes`
-        // are the byte-exact stdout twins — same subprocess wait, so they MUST offload too or a slow
-        // child pins a core M:N worker (D5).
-        | "get" | "get_bytes" | "post" | "request" | "put" | "patch" | "delete" | "head" | "cmd" | "run" | "run_args"
-        | "run_bytes" | "run_args_bytes"
-    )
 }
 
 /// Helper for native functions: assert an exact argument count, else a uniform error.
@@ -664,10 +672,11 @@ pub fn is_file_backed_native(name: &str) -> bool {
     )
 }
 
-/// The callable members of a native module, as `(name, fn)`. Single source of truth shared by both
-/// engines (only the per-engine lowering and the checker's static signatures differ). Empty for an
+/// The callable members of a native module, as `(name, fn, kind)`. Single source of truth shared by
+/// both engines (only the per-engine lowering and the checker's static signatures differ) — and, since
+/// `future.md` §3c, the single source of truth for HOW each one is run too ([`Kind`]). Empty for an
 /// unknown name.
-pub fn native_members(module: &str) -> &'static [(&'static str, NativeFn)] {
+pub fn native_members(module: &str) -> &'static [(&'static str, NativeFn, Kind)] {
     match module {
         "std.math" => math::MEMBERS,
         "std.io" => io::MEMBERS,
@@ -703,6 +712,77 @@ pub fn native_consts(module: &str) -> &'static [(&'static str, f64)] {
 mod tests {
     use super::*;
     use std::collections::VecDeque;
+
+    /// Every native module with callable members — the domain the [`Kind`] assertions sweep.
+    ///
+    /// A hand-kept list is exactly the smell [`Kind`] exists to remove, so it is not hand-kept:
+    /// `native_modules_matches_the_member_tables` below reads THIS FILE and derives the same set from
+    /// [`native_members`]' match arms, both directions. Without that, adding a module and forgetting
+    /// the list would leave every sweep below green while never looking at the new module — the
+    /// silent-omission failure, relocated into the test harness.
+    const NATIVE_MODULES: &[&str] = &[
+        "std.math",
+        "std.io",
+        "std.os",
+        "std.process",
+        "std.rand",
+        "std.fs",
+        "std.time",
+        "std.regex",
+        "std.request",
+        "std.net",
+        "std.ffi",
+        "std.encoding",
+        "std.crypto",
+        "std.uuid",
+    ];
+
+    /// Each name in [`NATIVE_MODULES`] really names a native module with a member table — so a typo or
+    /// a module renamed out from under the list turns the kind sweeps into silent no-ops.
+    #[test]
+    fn native_modules_all_have_members() {
+        for module in NATIVE_MODULES {
+            let path: Vec<String> = module.split('.').map(str::to_string).collect();
+            assert_eq!(native_name(&path), Some(*module), "not a native module");
+            assert!(
+                !native_members(module).is_empty(),
+                "{module} has no callable members"
+            );
+        }
+    }
+
+    /// …and the OTHER direction: every `"std.x" => x::MEMBERS` arm of [`native_members`] is in
+    /// [`NATIVE_MODULES`]. Source-derived (`include_str!` of this file + the arm pattern) because a
+    /// second hand-maintained list of natives is precisely what [`Kind`] was introduced to abolish: a
+    /// new module missing from the const would leave `std_time_sleep_is_the_only_timed_wait` and the
+    /// intercept-exclusivity sweep GREEN while never examining it, and the engine would then route,
+    /// say, a stray `Kind::InterceptNet` member into `net_connect_or_listen`'s name dispatch.
+    #[test]
+    fn native_modules_matches_the_member_tables() {
+        let src = include_str!("mod.rs");
+        let body = {
+            let start = src
+                .find("pub fn native_members(")
+                .expect("native_members moved — update this fence");
+            let rest = &src[start..];
+            &rest[..rest.find("\n}\n").expect("unterminated native_members")]
+        };
+        let arms: std::collections::BTreeSet<&str> = body
+            .lines()
+            .filter_map(|l| {
+                let l = l.trim();
+                // `"std.math" => math::MEMBERS,` — the empty `std.concurrency => &[]` arm has no
+                // `::MEMBERS` and is skipped, matching the const.
+                let name = l.strip_prefix('"')?.split('"').next()?;
+                l.contains("::MEMBERS").then_some(name)
+            })
+            .collect();
+        let listed: std::collections::BTreeSet<&str> = NATIVE_MODULES.iter().copied().collect();
+        assert_eq!(
+            arms, listed,
+            "NATIVE_MODULES is out of step with native_members' match arms"
+        );
+    }
 
     /// A standalone `Host` for unit-testing native fns in isolation from either engine.
     #[derive(Default)]
@@ -821,27 +901,29 @@ mod tests {
         );
     }
 
-    /// `std.rand` is a native (virtual, no-file) module: it resolves to a canonical name, exposes its
-    /// four scalar members, and none of them are blocking (draws are inline CPU, not I/O).
+    /// `std.rand` is a native (virtual, no-file) module: it resolves to a canonical name and exposes
+    /// its four scalar members. (Their kinds are asserted by
+    /// `every_pure_and_host_state_module_member_is_inline` — draws are inline CPU, not I/O.)
     #[test]
-    fn native_rand_module_is_wired_and_non_blocking() {
+    fn native_rand_module_is_wired() {
         assert_eq!(
             native_name(&["std".into(), "rand".into()]),
             Some("std.rand")
         );
         assert_eq!(native_members("std.rand").len(), 4);
-        let names: Vec<&str> = native_members("std.rand").iter().map(|(n, _)| *n).collect();
+        let names: Vec<&str> = native_members("std.rand")
+            .iter()
+            .map(|(n, _, _)| *n)
+            .collect();
         assert_eq!(names, ["seed", "float", "int", "bool"]);
-        for name in ["seed", "float", "int", "bool"] {
-            assert!(!is_blocking(name), "{name} must not be blocking");
-        }
     }
 
     /// `std.encoding` / `std.crypto` / `std.uuid` are native (virtual) modules: each resolves to a
-    /// canonical name, exposes its members, and NONE are blocking (pure CPU str transforms / RNG
-    /// draws, never I/O — so they run inline on every engine, not offloaded to the dirty pool).
+    /// canonical name and exposes exactly these members. (Their kinds — all inline, since they are pure
+    /// CPU str transforms / RNG draws — are asserted by
+    /// `every_pure_and_host_state_module_member_is_inline`.)
     #[test]
-    fn native_encoding_crypto_uuid_wired_and_non_blocking() {
+    fn native_encoding_crypto_uuid_wired() {
         assert_eq!(
             native_name(&["std".into(), "encoding".into()]),
             Some("std.encoding")
@@ -857,7 +939,7 @@ mod tests {
 
         let enc: Vec<&str> = native_members("std.encoding")
             .iter()
-            .map(|(n, _)| *n)
+            .map(|(n, _, _)| *n)
             .collect();
         assert_eq!(
             enc,
@@ -879,7 +961,7 @@ mod tests {
         );
         let cry: Vec<&str> = native_members("std.crypto")
             .iter()
-            .map(|(n, _)| *n)
+            .map(|(n, _, _)| *n)
             .collect();
         assert_eq!(
             cry,
@@ -896,12 +978,11 @@ mod tests {
                 "token_hex"
             ]
         );
-        let uid: Vec<&str> = native_members("std.uuid").iter().map(|(n, _)| *n).collect();
+        let uid: Vec<&str> = native_members("std.uuid")
+            .iter()
+            .map(|(n, _, _)| *n)
+            .collect();
         assert_eq!(uid, ["v4", "uuid_seed"]);
-
-        for name in enc.iter().chain(cry.iter()).chain(uid.iter()) {
-            assert!(!is_blocking(name), "{name} must not be blocking");
-        }
     }
 
     #[test]
@@ -931,66 +1012,60 @@ mod tests {
         );
     }
 
-    /// D5 — the blocking-fn classifier flags exactly the off-heap-safe blocking natives (the work the
-    /// dirty pool offloads): `std.io.read_file`/`write_file`, all of `std.fs`, and `std.time.sleep_ms`.
-    #[test]
-    fn is_blocking_flags_the_offloadable_set() {
-        for name in [
-            "read_file",
-            "write_file",
-            // R1 — the binary whole-file twins (`write_bytes` offloads via `NativeArg::Bytes`).
-            "read_bytes",
-            "write_bytes",
-            "list_dir",
-            "exists",
-            "is_file",
-            "is_dir",
-            "size",
-            "glob",
-            "canonicalize",
-            // std.fs mutations — filesystem syscalls, off-heap-safe (str args + `chmod`'s int mode,
-            // primitive returns; `NativeArg::Int`/`Str` both cross the off-heap boundary).
-            "mkdir",
-            "remove_file",
-            "remove_dir",
-            "rename",
-            "copy",
-            "append",
-            "chmod",
-            "atomic_write",
-            "sleep_ms",
-        ] {
-            assert!(is_blocking(name), "{name} should be blocking");
-        }
+    /// Every member of a module, as `(name, kind)` — the shape the kind assertions below compare.
+    fn kinds(module: &str) -> Vec<(&'static str, Kind)> {
+        native_members(module)
+            .iter()
+            .map(|(n, _, k)| (*n, *k))
+            .collect()
     }
 
-    /// D5 owe #1 — `std.request` (HTTP via `ureq`) and `std.process` (subprocess) are blocking and
-    /// off-heap-safe: primitive `str` args, primitive returns (`Struct`/`Ok(Str)`/`Err`), no heap /
-    /// stdio touch during the blocking call. They satisfy the offload contract, so the M:N engine must
-    /// route them through the dirty pool instead of pinning a core worker.
+    /// [`Kind::blocks`] — the predicate the D5 offload gate and the entry cancellation checkpoint use —
+    /// is true for exactly the two waiting kinds. It replaced the old `is_blocking` name list, whose
+    /// membership was the thing a new native could silently forget.
     #[test]
-    fn is_blocking_flags_request_and_process() {
-        for name in ["get", "post", "cmd"] {
-            assert!(is_blocking(name), "{name} should be blocking");
+    fn only_the_waiting_kinds_block() {
+        assert!(Kind::Blocking.blocks());
+        assert!(Kind::TimedWait.blocks());
+        assert!(!Kind::Inline.blocks());
+        assert!(!Kind::InterceptIo.blocks());
+        assert!(!Kind::InterceptNet.blocks());
+    }
+
+    /// D5 — every member of `std.fs` (filesystem syscalls), `std.request` (HTTP via `ureq`) and
+    /// `std.process` (subprocess) is off-heap-safe blocking work: primitive args, primitive returns
+    /// (`Struct`/`Ok(Str)`/`Err`), no heap/stdio touch during the blocking call. All must carry
+    /// [`Kind::Blocking`] so the M:N engine routes them through the dirty pool instead of pinning a core
+    /// worker. Iterating MEMBERS (not a hand-copied name list) is the point: a future verb added without
+    /// a kind fails to COMPILE, and one added with the WRONG kind fails here.
+    #[test]
+    fn every_syscall_module_member_is_blocking() {
+        for module in ["std.fs", "std.request", "std.process"] {
+            for (name, kind) in kinds(module) {
+                // W7-19 — `_stat`/`_walk` were never in the pre-`Kind` `is_blocking` list, so they run
+                // inline today. Preserved as-is by the refactor that introduced `Kind`; reclassifying
+                // them is a behaviour change filed separately (`docs/gaps.md` W7-19).
+                if module == "std.fs" && matches!(name, "_stat" | "_walk") {
+                    assert_eq!(kind, Kind::Inline, "{module}.{name}: W7-19 status changed");
+                    continue;
+                }
+                assert_eq!(kind, Kind::Blocking, "{module}.{name} must be blocking");
+            }
         }
     }
 
     /// `std.process` exposes exactly `cmd`/`run`/`run_args` + the W6-4 bytes twins
-    /// `run_bytes`/`run_args_bytes`, and all five are blocking subprocess I/O (must offload to the
-    /// dirty pool under `--parallel`).
+    /// `run_bytes`/`run_args_bytes`.
     #[test]
     fn native_process_members_and_blocking() {
         let names: Vec<&str> = native_members("std.process")
             .iter()
-            .map(|(n, _)| *n)
+            .map(|(n, _, _)| *n)
             .collect();
         assert_eq!(
             names,
             vec!["cmd", "run", "run_args", "run_bytes", "run_args_bytes"]
         );
-        for name in ["cmd", "run", "run_args", "run_bytes", "run_args_bytes"] {
-            assert!(is_blocking(name), "{name} should be blocking");
-        }
     }
 
     /// `NativeArg::List` carries an ordered `list[str]` across the off-heap offload boundary so
@@ -1003,29 +1078,6 @@ mod tests {
         assert_ne!(a, NativeArg::List(vec![]));
     }
 
-    /// The new `std.request` verbs (`put`/`patch`/`delete`/`head`) and the general `request()` are
-    /// network I/O — they must offload to the dirty pool under `--parallel`, same as `get`/`post`.
-    #[test]
-    fn is_blocking_flags_new_request_verbs() {
-        for name in ["request", "put", "patch", "delete", "head"] {
-            assert!(is_blocking(name), "{name} should be blocking");
-        }
-    }
-
-    /// EVERY `std.request` member does a blocking `ureq` HTTP call, so ALL of them must be flagged by
-    /// [`is_blocking`] — else the offload gate + cancel checkpoint skip them and they pin a core worker
-    /// under the M:N engine. Iterating MEMBERS (not a hand-copied name list) makes a future verb that
-    /// forgets the classifier fail here instead of silently starving the scheduler.
-    #[test]
-    fn is_blocking_flags_every_request_member() {
-        for (name, _) in native_members("std.request") {
-            assert!(
-                is_blocking(name),
-                "std.request member {name} must be blocking"
-            );
-        }
-    }
-
     /// `NativeArg::Map` carries an insertion-ordered str/str map across the off-heap offload boundary
     /// so `request()`'s headers survive the handoff to the dirty pool.
     #[test]
@@ -1036,84 +1088,108 @@ mod tests {
         assert_ne!(a, NativeArg::Map(vec![]));
     }
 
-    /// [`is_blocking`] classifies by *bare member name* (the engine has only the member name at the
-    /// dispatch site), which is sound ONLY while member names are unique across the native modules —
-    /// otherwise a non-blocking member sharing a name with a blocking one (e.g. a future `regex.get`)
-    /// would be wrongly offloaded to the off-heap pool, where its host-I/O methods `unreachable!`.
-    /// This guard turns any future name collision into a RED test instead of a production panic.
+    /// Fast / pure / host-I/O natives must NOT be offloaded: pure CPU transforms (math, crypto,
+    /// encoding, regex, ffi, the RNG draws) are cheap, and the `std.os` members touch process state the
+    /// off-heap host cannot serve. Mislabeling one as blocking would bounce it through the pool for
+    /// nothing — or, for a host-state member, reach an `unreachable!` on the off-heap host.
     #[test]
-    fn native_member_names_are_unique_across_modules() {
-        use std::collections::HashMap;
-        let modules = [
+    fn every_pure_and_host_state_module_member_is_inline() {
+        for module in [
             "std.math",
-            "std.io",
-            "std.os",
-            "std.process",
-            "std.rand",
-            "std.fs",
-            "std.time",
-            "std.regex",
-            "std.request",
-            "std.ffi",
-            "std.encoding",
             "std.crypto",
+            "std.encoding",
             "std.uuid",
-        ];
-        let mut seen: HashMap<&str, &str> = HashMap::new();
-        for module in modules {
-            for (name, _) in native_members(module) {
-                // R2 — std.io's Writer openers (`create`/`append`/`stdout`/`stderr`/`buffered`) are
-                // FUNC-POINTER-intercepted in `Vm::invoke_native` BEFORE the `is_blocking` offload gate,
-                // so they never reach `is_blocking` — the bare-name soundness this guard protects is
-                // unaffected. `append` in particular collides with `fs.append` on purpose (the func-ptr
-                // intercept distinguishes them); exempt the five here so the collision isn't a false fail.
-                // (W7-8 renamed the path-taking openers to the `_`-prefixed byte seam; `_append` still
-                // collides with `fs._append` for exactly the same, still-benign reason.)
-                if module == "std.io"
-                    && matches!(
-                        *name,
-                        "_create" | "_append" | "stdout" | "stderr" | "buffered" | "_open"
-                    )
-                {
-                    continue;
-                }
-                // W7-8 — key on the STRIPPED name, because that is the domain `is_blocking` now
-                // classifies on (it does `strip_prefix('_')`). Checking raw names would let `_foo`
-                // in one module and `foo` in another both classify as `foo` while this guard saw two
-                // distinct names and stayed green — the exact soundness hole it exists to catch.
-                let key = name.strip_prefix('_').unwrap_or(name);
-                if let Some(prev) = seen.insert(key, module) {
-                    panic!(
-                        "native member name `{name}` (classified as `{key}`) collides with one in \
-                         `{prev}`, now also `{module}` — bare-name `is_blocking` classification is no \
-                         longer sound (see is_blocking docs)"
-                    );
-                }
+            "std.rand",
+            "std.regex",
+            "std.os",
+            "std.ffi",
+        ] {
+            for (name, kind) in kinds(module) {
+                assert_eq!(kind, Kind::Inline, "{module}.{name} must run inline");
             }
         }
     }
 
-    /// Fast / pure / host-I/O natives must NOT be offloaded: `print`/`eprint`/`read_line` touch the
-    /// host stdio buffers (off-heap host would `unreachable!`), and `now`/`monotonic`/`format`/math are
-    /// cheap. Mislabeling a CPU/pure fn as blocking would needlessly bounce it through the pool.
+    /// `std.time` — `sleep_ms` is the one native whose deadline the ENGINE owns, so it is a
+    /// [`Kind::TimedWait`]: it rides the timer thread and stays a cancellation + `--timeout` checkpoint
+    /// for its whole duration (W7-16/17/18). The clock reads beside it are plain inline calls.
     #[test]
-    fn is_blocking_excludes_fast_and_host_io_natives() {
-        for name in [
-            "print",
-            "eprint",
-            "read_line",
-            "now",
-            "monotonic",
-            "format",
-            "abs",
-            "sqrt",
-            // std.rand — draws are inline CPU (SplitMix64), never I/O.
-            "seed",
-            "float",
-            "int",
-            "bool",
-        ] {
-            assert!(!is_blocking(name), "{name} should not be blocking");
+    fn std_time_sleep_is_the_only_timed_wait() {
+        assert_eq!(
+            kinds("std.time"),
+            vec![
+                ("now", Kind::Inline),
+                ("monotonic", Kind::Inline),
+                ("sleep_ms", Kind::TimedWait),
+                ("format", Kind::Inline),
+            ]
+        );
+        // …and no OTHER module smuggles one in: the engine's timed-wait paths (offload timer, callback
+        // demote, block-in-place) all key on this kind alone.
+        for module in NATIVE_MODULES {
+            for (name, kind) in kinds(module) {
+                assert!(
+                    kind != Kind::TimedWait || (*module == "std.time" && name == "sleep_ms"),
+                    "{module}.{name} is a TimedWait — only std.time.sleep_ms may be"
+                );
+            }
+        }
+    }
+
+    /// `std.io` splits three ways: the four file seams are dirty-pool [`Kind::Blocking`]; the six
+    /// Writer/Reader openers are [`Kind::InterceptIo`] (the engine runs them — they allocate a heap
+    /// handle a pure off-heap native cannot); the rest touch host stdio and run inline. `std.net`'s two
+    /// members are [`Kind::InterceptNet`] for the same handle-allocating reason.
+    ///
+    /// This is also where the OLD name-keyed scheme was unsound: `std.io::_append` (an opener) and
+    /// `std.fs::_append` (a syscall) share a bare name, and were told apart only by the ORDER of the
+    /// checks in `invoke_native` plus a func-pointer identity test.
+    #[test]
+    fn io_and_net_members_carry_their_intercept_and_blocking_kinds() {
+        assert_eq!(
+            kinds("std.io"),
+            vec![
+                ("print", Kind::Inline),
+                ("eprint", Kind::Inline),
+                ("read_line", Kind::Inline),
+                ("read_all", Kind::Inline),
+                ("read_char", Kind::Inline),
+                ("flush", Kind::Inline),
+                ("isatty", Kind::Inline),
+                ("isatty_stdin", Kind::Inline),
+                ("isatty_stderr", Kind::Inline),
+                ("input", Kind::Inline),
+                ("_read_file", Kind::Blocking),
+                ("_write_file", Kind::Blocking),
+                // R1 — the binary whole-file twins (`write_bytes` offloads via `NativeArg::Bytes`).
+                ("_read_bytes", Kind::Blocking),
+                ("_write_bytes", Kind::Blocking),
+                ("_create", Kind::InterceptIo),
+                ("_append", Kind::InterceptIo),
+                ("stdout", Kind::InterceptIo),
+                ("stderr", Kind::InterceptIo),
+                ("buffered", Kind::InterceptIo),
+                ("_open", Kind::InterceptIo),
+            ]
+        );
+        assert_eq!(
+            kinds("std.net"),
+            vec![
+                ("connect", Kind::InterceptNet),
+                ("listen", Kind::InterceptNet),
+            ]
+        );
+        // The two intercept kinds are exclusive to those modules — `invoke_native` dispatches an
+        // InterceptIo to `io_native` and an InterceptNet to `net_connect_or_listen` by kind alone, so a
+        // stray one elsewhere would be routed to a handler that does not know its name.
+        for module in NATIVE_MODULES {
+            for (name, kind) in kinds(module) {
+                match kind {
+                    Kind::InterceptIo => assert_eq!(*module, "std.io", "{module}.{name}"),
+                    Kind::InterceptNet => assert_eq!(*module, "std.net", "{module}.{name}"),
+                    _ => {}
+                }
+            }
         }
     }
 }

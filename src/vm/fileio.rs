@@ -185,7 +185,8 @@ impl Vm {
         }
     }
 
-    /// R2 — dispatch the `std.io` openers/handles intercepted by func-pointer in `invoke_native`. Each
+    /// R2 — dispatch the `std.io` openers/handles `invoke_native` intercepts on their
+    /// [`crate::native::Kind::InterceptIo`] registry entry. Each
     /// allocates a heap `Writer` handle over an `Arc`'d core (a pure off-heap native cannot), mirroring
     /// `std.net`'s `connect`/`listen`.
     pub(super) fn io_native(

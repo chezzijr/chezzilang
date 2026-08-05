@@ -13,7 +13,7 @@
 //! A `ptr` is opaque, untyped, and never auto-freed: call the library's own destroy
 //! (e.g. `fclose`) explicitly. See `docs/spec.md` §Level-3 FFI.
 
-use super::{Host, HostError, NativeFn, NativeRet, expect_args};
+use super::{Host, HostError, Kind, NativeFn, NativeRet, expect_args};
 
 /// Resolve the base address of a deref builtin's `ptr` arg (`args[0]`), failing with a *recoverable*
 /// [`HostError`] (NOT a segfault) when it is the NULL pointer. This is the one cheaply-checkable
@@ -708,69 +708,69 @@ fn store_float32_at(h: &mut dyn Host) -> Result<NativeRet, HostError> {
 }
 
 /// The callable members of `std.ffi`.
-pub const MEMBERS: &[(&str, NativeFn)] = &[
-    ("null", null),
-    ("is_null", is_null),
+pub const MEMBERS: &[(&str, NativeFn, Kind)] = &[
+    ("null", null, Kind::Inline),
+    ("is_null", is_null, Kind::Inline),
     // --- loads (base form = offset 0; `_at` form takes a byte offset) ---
-    ("load_int", load_int),
-    ("load_int_at", load_int_at),
-    ("load_int8", load_int8),
-    ("load_int8_at", load_int8_at),
-    ("load_int16", load_int16),
-    ("load_int16_at", load_int16_at),
-    ("load_int32", load_int32),
-    ("load_int32_at", load_int32_at),
-    ("load_int64", load_int64),
-    ("load_int64_at", load_int64_at),
-    ("load_uint8", load_uint8),
-    ("load_uint8_at", load_uint8_at),
-    ("load_uint16", load_uint16),
-    ("load_uint16_at", load_uint16_at),
-    ("load_uint32", load_uint32),
-    ("load_uint32_at", load_uint32_at),
-    ("load_uint64", load_uint64),
-    ("load_uint64_at", load_uint64_at),
-    ("load_float", load_float),
-    ("load_float_at", load_float_at),
-    ("load_float32", load_float32),
-    ("load_float32_at", load_float32_at),
-    ("load_bool", load_bool),
-    ("load_bool_at", load_bool_at),
-    ("load_ptr", load_ptr),
-    ("load_ptr_at", load_ptr_at),
-    ("load_str", load_str),
-    ("load_str_at", load_str_at),
+    ("load_int", load_int, Kind::Inline),
+    ("load_int_at", load_int_at, Kind::Inline),
+    ("load_int8", load_int8, Kind::Inline),
+    ("load_int8_at", load_int8_at, Kind::Inline),
+    ("load_int16", load_int16, Kind::Inline),
+    ("load_int16_at", load_int16_at, Kind::Inline),
+    ("load_int32", load_int32, Kind::Inline),
+    ("load_int32_at", load_int32_at, Kind::Inline),
+    ("load_int64", load_int64, Kind::Inline),
+    ("load_int64_at", load_int64_at, Kind::Inline),
+    ("load_uint8", load_uint8, Kind::Inline),
+    ("load_uint8_at", load_uint8_at, Kind::Inline),
+    ("load_uint16", load_uint16, Kind::Inline),
+    ("load_uint16_at", load_uint16_at, Kind::Inline),
+    ("load_uint32", load_uint32, Kind::Inline),
+    ("load_uint32_at", load_uint32_at, Kind::Inline),
+    ("load_uint64", load_uint64, Kind::Inline),
+    ("load_uint64_at", load_uint64_at, Kind::Inline),
+    ("load_float", load_float, Kind::Inline),
+    ("load_float_at", load_float_at, Kind::Inline),
+    ("load_float32", load_float32, Kind::Inline),
+    ("load_float32_at", load_float32_at, Kind::Inline),
+    ("load_bool", load_bool, Kind::Inline),
+    ("load_bool_at", load_bool_at, Kind::Inline),
+    ("load_ptr", load_ptr, Kind::Inline),
+    ("load_ptr_at", load_ptr_at, Kind::Inline),
+    ("load_str", load_str, Kind::Inline),
+    ("load_str_at", load_str_at, Kind::Inline),
     // --- stores (base form = offset 0; `_at` form takes the byte offset BEFORE the value) ---
-    ("store_int", store_int),
-    ("store_int_at", store_int_at),
-    ("store_int8", store_int8),
-    ("store_int8_at", store_int8_at),
-    ("store_int16", store_int16),
-    ("store_int16_at", store_int16_at),
-    ("store_int32", store_int32),
-    ("store_int32_at", store_int32_at),
-    ("store_int64", store_int64),
-    ("store_int64_at", store_int64_at),
-    ("store_uint8", store_uint8),
-    ("store_uint8_at", store_uint8_at),
-    ("store_uint16", store_uint16),
-    ("store_uint16_at", store_uint16_at),
-    ("store_uint32", store_uint32),
-    ("store_uint32_at", store_uint32_at),
-    ("store_uint64", store_uint64),
-    ("store_uint64_at", store_uint64_at),
-    ("store_float", store_float),
-    ("store_float_at", store_float_at),
-    ("store_float32", store_float32),
-    ("store_float32_at", store_float32_at),
-    ("store_bool", store_bool),
-    ("store_bool_at", store_bool_at),
-    ("store_ptr", store_ptr),
-    ("store_ptr_at", store_ptr_at),
+    ("store_int", store_int, Kind::Inline),
+    ("store_int_at", store_int_at, Kind::Inline),
+    ("store_int8", store_int8, Kind::Inline),
+    ("store_int8_at", store_int8_at, Kind::Inline),
+    ("store_int16", store_int16, Kind::Inline),
+    ("store_int16_at", store_int16_at, Kind::Inline),
+    ("store_int32", store_int32, Kind::Inline),
+    ("store_int32_at", store_int32_at, Kind::Inline),
+    ("store_int64", store_int64, Kind::Inline),
+    ("store_int64_at", store_int64_at, Kind::Inline),
+    ("store_uint8", store_uint8, Kind::Inline),
+    ("store_uint8_at", store_uint8_at, Kind::Inline),
+    ("store_uint16", store_uint16, Kind::Inline),
+    ("store_uint16_at", store_uint16_at, Kind::Inline),
+    ("store_uint32", store_uint32, Kind::Inline),
+    ("store_uint32_at", store_uint32_at, Kind::Inline),
+    ("store_uint64", store_uint64, Kind::Inline),
+    ("store_uint64_at", store_uint64_at, Kind::Inline),
+    ("store_float", store_float, Kind::Inline),
+    ("store_float_at", store_float_at, Kind::Inline),
+    ("store_float32", store_float32, Kind::Inline),
+    ("store_float32_at", store_float32_at, Kind::Inline),
+    ("store_bool", store_bool, Kind::Inline),
+    ("store_bool_at", store_bool_at, Kind::Inline),
+    ("store_ptr", store_ptr, Kind::Inline),
+    ("store_ptr_at", store_ptr_at, Kind::Inline),
     // --- C-buffer alloc layer (libc malloc/calloc/free; MANUAL free — `defer ffi.free(p)`) ---
-    ("alloc", alloc),
-    ("alloc_zeroed", alloc_zeroed),
-    ("free", free),
+    ("alloc", alloc, Kind::Inline),
+    ("alloc_zeroed", alloc_zeroed, Kind::Inline),
+    ("free", free, Kind::Inline),
 ];
 
 /// The fixed-width C-ABI integer *type* names that `std.ffi` exports (Chezzi's first type imports).
@@ -1194,7 +1194,7 @@ mod tests {
 
     #[test]
     fn members_registers_every_builtin() {
-        let names: std::collections::HashSet<&str> = MEMBERS.iter().map(|(n, _)| *n).collect();
+        let names: std::collections::HashSet<&str> = MEMBERS.iter().map(|(n, _, _)| *n).collect();
         // null/is_null + 14 loads × 2 forms + 13 stores × 2 forms + alloc/alloc_zeroed/free
         // = 2 + 28 + 26 + 3 = 59.
         assert_eq!(MEMBERS.len(), 59, "expected exactly 59 std.ffi members");
@@ -1293,7 +1293,7 @@ mod tests {
 
     #[test]
     fn members_registers_alloc_layer() {
-        let names: std::collections::HashSet<&str> = MEMBERS.iter().map(|(n, _)| *n).collect();
+        let names: std::collections::HashSet<&str> = MEMBERS.iter().map(|(n, _, _)| *n).collect();
         assert_eq!(MEMBERS.len(), 59, "expected exactly 59 std.ffi members");
         for n in ["alloc", "alloc_zeroed", "free"] {
             assert!(names.contains(n), "MEMBERS missing {n}");

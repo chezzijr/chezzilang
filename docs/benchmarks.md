@@ -964,7 +964,7 @@ Full `--lib` **3221 green**, both-engine parity clean, conformance **7/7**, clip
 at exit. Rust's `Stdout` is a `LineWriter`, so that is **one `write` syscall per line** where it used to
 be a `push_str` — plus a channel send. (The writer thread is not decoration: an inline `write(2)` on a
 fiber blocks a core worker in the kernel, so one stalled reader would starve every other task — the D5
-`is_blocking` invariant. See `tests/interactive.rs::stalled_reader_does_not_starve_other_tasks`.)
+`Kind::Blocking` invariant. See `tests/interactive.rs::stalled_reader_does_not_starve_other_tasks`.)
 
 Tracked suite (same machine, `hyperfine`, `benches/run.chz`, before → after, Chezzi ms):
 `fib` 262.6 → 266.7 · `str` 176.4 → 177.7 · `primes` 658.6 → 649.1 · `loop` 979.8 → 992.1 ·

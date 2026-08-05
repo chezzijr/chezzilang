@@ -9,13 +9,13 @@
 //! entropy on first use. The 128 random bits come from two [`super::rand::next_u64`] draws (the
 //! shared SplitMix64 step is reused — the RNG algorithm is not duplicated).
 //!
-//! `v4`/`uuid_seed` are pure CPU transforms (no I/O) → not in [`super::is_blocking`]; they run inline
+//! `v4`/`uuid_seed` are pure CPU transforms (no I/O) → [`super::Kind::Inline`] on their registry entry; they run inline
 //! on every engine. LIMIT (same as `std.rand`): under `--parallel`, CONCURRENT draws from multiple
 //! tasks interleave nondeterministically on the shared global, so an EXACT seeded value is only
 //! deterministic for strictly-sequential draws — the goldens draw sequentially.
 
 use super::rand::next_u64;
-use super::{Host, HostError, NativeFn, NativeRet, expect_args};
+use super::{Host, HostError, Kind, NativeFn, NativeRet, expect_args};
 use std::sync::{Mutex, OnceLock};
 
 /// A process-wide lock serializing every test that draws from the shared global UUID RNG (the unit
@@ -89,10 +89,15 @@ fn uuid_seed(h: &mut dyn Host) -> Result<NativeRet, HostError> {
     Ok(NativeRet::Nil)
 }
 
-/// Callable members. `(name, fn)`. NOTE: the reseed is `uuid_seed` (not `seed`) to keep the bare
-/// member name unique across modules — `std.rand` already owns `seed` (the `is_blocking` classifier
-/// dispatches by bare name, guarded by `native_member_names_are_unique_across_modules`).
-pub const MEMBERS: &[(&str, NativeFn)] = &[("v4", v4), ("uuid_seed", uuid_seed)];
+/// Callable members. `(name, fn, kind)`. NOTE: the reseed is `uuid_seed` (not `seed`) because
+/// `std.rand` already owns `seed`. That was originally forced — the old `is_blocking` classifier
+/// dispatched by BARE NAME — and is now only a naming courtesy: [`Kind`] rides the entry, so two
+/// modules may share a member name safely. The distinct name stays because renaming it is a surface
+/// change, not because the engine needs it.
+pub const MEMBERS: &[(&str, NativeFn, Kind)] = &[
+    ("v4", v4, Kind::Inline),
+    ("uuid_seed", uuid_seed, Kind::Inline),
+];
 
 #[cfg(test)]
 mod tests {

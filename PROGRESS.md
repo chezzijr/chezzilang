@@ -7576,6 +7576,33 @@ no longer a non-goal — complete VM-only support shipped** (see below).
 One bullet per milestone/epic. Full landing detail (TDD notes, review-panel findings, test-count deltas,
 branch names) is in the git log.
 
+- **Refactor — a native's behavioural properties now ride its REGISTRY ENTRY, so forgetting one is a
+  compile error (2026-08-05, `docs/future.md` §3c option B + the interception fold).** A native's
+  properties used to live in string matches far from where it is registered: a 40-name `is_blocking`
+  list (with a `strip_prefix('_')` patch bolted on so the W7-8 rename would not silently un-classify
+  every `std.fs` syscall), three `"sleep_ms"` arms in `vm/call.rs`, a `name == "connect" || "listen"`
+  check, and a `fn_addr_eq` identity test — `sleep_ms` named in 4 files. **A new blocking native that
+  forgot the list failed SILENTLY**: no error, no red test, it just pinned an M:N core worker for the
+  syscall (the D5 starvation the classification exists to prevent).
+  Now `Kind { Inline, Blocking, TimedWait, InterceptIo, InterceptNet }` is a field of every `MEMBERS`
+  tuple (192 entries, 14 tables), copied onto `Obj::Native` at bind time and carried through
+  `WireValue`/`SnapValue`/`Callee::Native` into `invoke_native(func, name, kind, args, span)`. **No
+  native's behaviour is decided by a string comparison anywhere in the VM**, there is no name→kind
+  lookup (the kind rides the value — `invoke_native` has exactly one call site), and `is_blocking` +
+  the bare-name-uniqueness guard are **deleted**. Bare-name keying was in fact unsound: `std.io::_append`
+  (an intercepted opener) and `std.fs::_append` (a syscall) collide, and were kept apart only by check
+  ORDER plus a test exemption list.
+  Pure refactor — byte-identical behaviour, re-measured on the release binary: `--timeout=200` still
+  aborts a `sleep_ms(3000)` at top level, in a nursery, and in an eager `Executor` in ~200 ms each at
+  `CHEZZI_THREADS=1/2/4/8`; 4×`process.cmd("sleep 0.3")` still overlap on one core worker (305 ms
+  offloaded vs 1209 ms on `--serial`); `io.create`/`stdout`/`buffered` + `net.listen`/`connect` still
+  allocate their handles on both engines. Guarantee demonstrated by dropping one entry's kind →
+  `expected a tuple with 3 elements`. Suite 3820 green.
+  **Found by the conversion, not fixed there:** `fs.stat`/`fs.walk` were never in the old list, so they
+  pin a worker today — the predicted silent omission, already in the tree. Preserved as `Kind::Inline`
+  (behaviour-identical) with a `BUG PRESERVED` comment + a test pinning the state, filed as `gaps.md`
+  **W7-19**.
+
 - **Fix — an intrinsic protocol method on a built-in is now CALLABLE (2026-07-25, bug-hunt wave-6 W6-3,
   P0).** `fn total[T: Add](xs: List[T], zero: T) -> T` with `acc.add(x)` passed `chezzi check` and then
   faulted `type int has no method 'add'` on BOTH engines — the idiomatic Rust/Go generic shape, broken.

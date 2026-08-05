@@ -778,8 +778,9 @@ root marker (all fields default to unset, so `entrypoint` is required only for t
 >   **Unsafe, like ctypes:** a bad pointer segfaults; double-free / use-after-free / out-of-bounds
 >   store_/load_ are UB (no bounds/lifetime tracking); only the NULL base
 >   pointer is guarded (recoverable error, no fault) — a `ptr` cannot be forged from an int (provenance
->   is C-sourced). See `stdlib.md §std.ffi`. A slow C call runs inline (extern
->   names are NOT in `is_blocking`, so it pins its worker under `--parallel`).
+>   is C-sourced). See `stdlib.md §std.ffi`. A slow C call runs inline (an `extern`
+>   fn has no native-registry entry, so it carries no `Kind::Blocking` and pins its worker under
+>   `--parallel`).
 > - **FFI v1 limits (known + by design):**
 >   - **Integer width (FFI-2 — RESOLVED, opt-in):** bare Chezzi `int` (i64) still marshals as C
 >     **`long`** (64-bit on every supported **LP64** unix target — unchanged for back-compat; the prior

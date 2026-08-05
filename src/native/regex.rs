@@ -14,7 +14,7 @@
 //! `subject[m.start:m.end] == m.text` holds — Chezzi slicing is codepoint-indexed. `groups` holds
 //! capture groups 1..n as strings; a non-participating optional group becomes `""`.
 
-use super::{Host, HostError, NativeFn, NativeRet, expect_args};
+use super::{Host, HostError, Kind, NativeFn, NativeRet, expect_args};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -196,13 +196,13 @@ fn split(h: &mut dyn Host) -> Result<NativeRet, HostError> {
     }))
 }
 
-/// Callable members. `(name, fn)`.
-pub const MEMBERS: &[(&str, NativeFn)] = &[
-    ("is_match", is_match),
-    ("find", find),
-    ("find_all", find_all),
-    ("replace_all", replace_all),
-    ("split", split),
+/// Callable members. `(name, fn, kind)`.
+pub const MEMBERS: &[(&str, NativeFn, Kind)] = &[
+    ("is_match", is_match, Kind::Inline),
+    ("find", find, Kind::Inline),
+    ("find_all", find_all, Kind::Inline),
+    ("replace_all", replace_all, Kind::Inline),
+    ("split", split, Kind::Inline),
 ];
 
 #[cfg(test)]

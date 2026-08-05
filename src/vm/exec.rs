@@ -731,10 +731,11 @@ impl Vm {
         // compiled toplevel is empty and `run_proto` is a no-op. A hybrid native file may also `import`,
         // so the import loop below binds those deps (empty/no-op for a pure-native module).
         if let Some(name) = m.native {
-            for (mname, func) in crate::native::native_members(name) {
+            for (mname, func, kind) in crate::native::native_members(name) {
                 let nat = self.heap.alloc(Obj::Native {
                     name: (*mname).into(),
                     func: *func,
+                    kind: *kind,
                 });
                 self.module_define(mod_obj, mname, Value::obj(nat));
             }

@@ -6,7 +6,7 @@
 //! NOT here — they live in `std.cmp` as generic `[T: Comparable]` functions, M7-G3.)
 //! Pure Rust `std` — no third-party crates.
 
-use super::{Host, HostError, NativeFn, NativeRet, expect_args};
+use super::{Host, HostError, Kind, NativeFn, NativeRet, expect_args};
 
 // `abs` is numeric-polymorphic (gap #12): int args yield an int result, float args a float. The
 // checker (`infer_numeric_poly`) guarantees the arg is present and numeric, so `arg_is_int(0)`
@@ -336,39 +336,39 @@ fn parse_int_base(h: &mut dyn Host) -> Result<NativeRet, HostError> {
     })
 }
 
-/// Callable members. `(name, fn)`.
-pub const MEMBERS: &[(&str, NativeFn)] = &[
-    ("abs", abs),
-    ("floor", floor),
-    ("ceil", ceil),
-    ("round", round),
-    ("pow", pow),
-    ("sqrt", sqrt),
-    ("sin", sin),
-    ("cos", cos),
-    ("tan", tan),
-    ("asin", asin),
-    ("acos", acos),
-    ("atan", atan),
-    ("atan2", atan2),
-    ("exp", exp),
-    ("ln", ln),
-    ("log2", log2),
-    ("log10", log10),
-    ("log", log),
-    ("is_nan", is_nan),
-    ("is_inf", is_inf),
-    ("is_finite", is_finite),
-    ("gcd", gcd),
-    ("lcm", lcm),
-    ("sign", sign),
-    ("trunc", trunc),
-    ("hypot", hypot),
-    ("cbrt", cbrt),
-    ("factorial", factorial),
-    ("comb", comb),
-    ("perm", perm),
-    ("parse_int_base", parse_int_base),
+/// Callable members. `(name, fn, kind)`.
+pub const MEMBERS: &[(&str, NativeFn, Kind)] = &[
+    ("abs", abs, Kind::Inline),
+    ("floor", floor, Kind::Inline),
+    ("ceil", ceil, Kind::Inline),
+    ("round", round, Kind::Inline),
+    ("pow", pow, Kind::Inline),
+    ("sqrt", sqrt, Kind::Inline),
+    ("sin", sin, Kind::Inline),
+    ("cos", cos, Kind::Inline),
+    ("tan", tan, Kind::Inline),
+    ("asin", asin, Kind::Inline),
+    ("acos", acos, Kind::Inline),
+    ("atan", atan, Kind::Inline),
+    ("atan2", atan2, Kind::Inline),
+    ("exp", exp, Kind::Inline),
+    ("ln", ln, Kind::Inline),
+    ("log2", log2, Kind::Inline),
+    ("log10", log10, Kind::Inline),
+    ("log", log, Kind::Inline),
+    ("is_nan", is_nan, Kind::Inline),
+    ("is_inf", is_inf, Kind::Inline),
+    ("is_finite", is_finite, Kind::Inline),
+    ("gcd", gcd, Kind::Inline),
+    ("lcm", lcm, Kind::Inline),
+    ("sign", sign, Kind::Inline),
+    ("trunc", trunc, Kind::Inline),
+    ("hypot", hypot, Kind::Inline),
+    ("cbrt", cbrt, Kind::Inline),
+    ("factorial", factorial, Kind::Inline),
+    ("comb", comb, Kind::Inline),
+    ("perm", perm, Kind::Inline),
+    ("parse_int_base", parse_int_base, Kind::Inline),
 ];
 
 /// Constant members. `(name, value)`.

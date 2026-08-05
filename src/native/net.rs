@@ -4,9 +4,11 @@
 //! `connect`/`listen` allocates a `Socket`/`Listener` *handle* (a heap object over an `Arc`'d core)
 //! and the socket methods (`read`/`write`/`accept`) register interest with the netpoller and park the
 //! fiber on a would-block — all of which need the VM (`&mut Vm` + the scheduler). So the engine
-//! **intercepts** these by name in `Vm::invoke_native` / `Vm::do_method_call`; the `MEMBERS` entries
-//! below exist only so the module member *resolves* (the placeholder fns never run). This module holds
-//! just the pure, `Vm`-free socket helpers the VM calls.
+//! **intercepts** them: `connect`/`listen` carry [`Kind::InterceptNet`] on their `MEMBERS` entry and
+//! `Vm::invoke_native` runs them itself, and the socket METHODS are intercepted by name in
+//! `Vm::do_method_call` (a method is not a module member, so it has no registry entry). The `MEMBERS`
+//! entries below exist only so the module member *resolves* (the placeholder fns never run). This
+//! module holds just the pure, `Vm`-free socket helpers the VM calls.
 //!
 //! **Timeouts (D6c).** `read`/`write`/`accept` take an OPTIONAL trailing `timeout_ms: int`
 //! (`conn.read(n, timeout_ms)`, `sock.write(s, timeout_ms)`, `server.accept(timeout_ms)`): if no
@@ -18,7 +20,7 @@
 //! there, so it can't time out), though a `timeout_ms == 0` would-block still surfaces `Err("timeout")`
 //! since the poll-once check precedes the engine gate. Either way the cooperative result is an `Err`.
 
-use super::{Host, HostError, NativeFn, NativeRet};
+use super::{Host, HostError, Kind, NativeFn, NativeRet};
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 use std::net::{TcpListener, TcpStream, ToSocketAddrs};
 
@@ -83,9 +85,13 @@ fn intercepted(_h: &mut dyn Host) -> Result<NativeRet, HostError> {
     })
 }
 
-/// Callable members. `connect`/`listen` are intercepted in the VM (see module docs); the entries
-/// exist only so the member resolves to an `Obj::Native` the interception keys on by name.
-pub const MEMBERS: &[(&str, NativeFn)] = &[("connect", intercepted), ("listen", intercepted)];
+/// Callable members. `(name, fn, kind)`. Both are intercepted in the VM (see module docs); the entries
+/// exist so the member resolves to an `Obj::Native` carrying the [`Kind::InterceptNet`] the
+/// interception keys on.
+pub const MEMBERS: &[(&str, NativeFn, Kind)] = &[
+    ("connect", intercepted, Kind::InterceptNet),
+    ("listen", intercepted, Kind::InterceptNet),
+];
 
 #[cfg(test)]
 mod tests {
