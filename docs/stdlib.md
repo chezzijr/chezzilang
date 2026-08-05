@@ -534,6 +534,11 @@ task's line is visible before its nursery joins). Three rules follow:
   additionally prints `chezzi run: cannot write stdout: …`: a truncated redirect never reports success.
   A failure on **stderr** is swallowed — it is a diagnostic channel, and a dead `2>` reader is no reason
   to kill a healthy program.
+- **All of the above covers the VM's own sink only.** Bytes an FFI call writes to the descriptor
+  itself (`extern "libc.so.6": fn puts`) are outside every guarantee here — not line-atomic against
+  `print`, not unbuffered, not ordered with it, and invisible to the broken-pipe halt, so a `| head -1`
+  loop of C writes never faults. `ctypes` and `cgo` behave identically (measured); see
+  [`syntax.md` §12b](syntax.md).
 
 **Input contract (`read_line` / `read_all` / `read_char` / `input`).** stdin is **ONE source, shared
 by every task** — exactly Go's `os.Stdin` and Python's `sys.stdin`. Any task may read it (`spawn:`/
@@ -833,6 +838,13 @@ buffer can be handed to a C fn that itself reallocs/frees it.
 > beyond the allocation are undefined behavior** — the same inherently-unsafe contract as ctypes; there
 > is no bounds or lifetime tracking. Unix-only (a non-unix build registers the names but every call
 > errors).
+>
+> **The contract covers stream lifecycle too.** A C function that writes stdout writes the file
+> descriptor directly, so its bytes do not interleave with `print` and the broken-pipe halt cannot see
+> them — a `chezzi run x.chz | head -1` loop of C writes never faults, where the same loop of `print`s
+> exits in milliseconds. `ctypes` and `cgo` were measured doing exactly the same; the C function's own
+> return value is your only error channel. Full contract + runnable examples:
+> [`syntax.md` §12b](syntax.md).
 
 Sort a Chezzi list with libc `qsort` (the full composition — alloc + `store_*` + a callback comparator
 + `load_*`):

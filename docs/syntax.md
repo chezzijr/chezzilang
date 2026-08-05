@@ -2988,6 +2988,63 @@ in a hot loop grows both memory and mapping count. It degrades cleanly — when 
 grow, the call raises the ordinary recoverable error `cannot allocate a callback trampoline for
 argument N to 'f': the FFI closure pool is exhausted`, catchable with `recover:`.
 
+**C output does not go through the runtime's stdout — and the broken-pipe halt cannot see it.** A
+Chezzi `print` goes to the VM's sink, which is line-atomic across tasks, unbuffered, and raises a
+recoverable fault the moment the reader closes (`stdout closed (broken pipe)`). A C function writes the
+file descriptor itself, so **none of that applies to it**: its bytes sit in the C library's own buffer
+(block-buffered when stdout is a pipe, so they usually appear *last*, at exit), and a closed reader is
+invisible to the runtime — `chezzi run x.chz | head -1` on a loop of C writes runs forever instead of
+faulting. Rust sets SIGPIPE to `SIG_IGN` process-wide and the loaded C library inherits that
+disposition, so the signal a plain C program would die from never arrives either.
+
+```chezzi
+extern "libc.so.6":
+    fn puts(s: str) -> int
+
+print("chezzi-1")
+_ := puts("ffi-2")
+print("chezzi-3")
+_ := puts("ffi-4")
+# piped:  chezzi-1  chezzi-3  ffi-2  ffi-4   <- NOT source order; io.flush() does not change it
+```
+
+This is the same bargain as `ctypes` in Python and `cgo` in Go — both measured doing exactly this,
+ordering included — and the same "outside the runtime's guarantees" contract `std.ffi`'s pointers
+already carry. **Want the runtime's stdout? Return the string and `print` it.**
+
+**If you must write from C, the C function's own return value is your error channel — and you have to
+declare its exact width to see it.** The failure is real but the sign is not free: `puts` returns a C
+`int`, and a bare `int` marshals as C **`long`** (see the fixed-width section below), so its `-1`
+arrives as `4294967295` and every `< 0` guard silently never fires. Same call, same iteration, one
+character of difference in the declaration:
+
+| declared return | `puts`'s value once the reader is gone | `if r < 0` |
+|---|---|---|
+| `fn puts(s: str) -> int` | `4294967295` | **never fires** |
+| `fn puts(s: str) -> int32` | `-1` | fires, at the same write |
+
+```chezzi
+import std.io
+import int32 from std.ffi
+
+extern "libc.so.6":
+    fn puts(s: str) -> int32     # C `int` — NOT bare `int`, which is C `long`
+
+fn main():
+    i := 0
+    while i < 200000:
+        if puts("line") < 0:
+            io.eprint("stdout is gone, stopped at i={i}")   # the runtime will NOT fault for you
+            return
+        i = i + 1
+
+main()
+```
+
+Under `| head -1` that stops at `stopped at i=1638` — deterministic, because the C library reports the
+dead pipe when its 4 KiB buffer first reaches `write(2)`, not on the call that filled it. Declared
+`-> int` instead, the identical program runs to 200 000 and never notices.
+
 **Deferred FFI features (with design notes + the callback feasibility ladder in
 [`docs/ffi-and-packaging.md §1b`](ffi-and-packaging.md)):** the **rest of callbacks** (#4 — *stored* /
 *cross-thread* callbacks a C library keeps and calls later or from its own thread — these **abort**
