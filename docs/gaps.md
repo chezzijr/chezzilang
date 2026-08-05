@@ -60,8 +60,9 @@ chronological log.
 | **W6-10r** | `:1216` | `--max-heap` residual: a payload reachable ONLY through a **nested** core (a `Channel` inside a `Shared`, once the nested core's last `Obj` alias slot is swept) is counted nowhere | Left open by the W6-10 fix on purpose. `live_bytes` reaches a core's bytes through its `Obj::*` alias slot; a nested core has none. Closing it needs cross-core byte recursion with `Arc` de-dup — narrow trigger, not worth the machinery yet |
 | protocol embeds | `:1505` | A protocol-embedded method isn't callable through the interface value (`p: Person` can't call embedded `name()`) despite `spec.md:973` "flattened at bound sites" | Filed as a safe-direction observation in wave 3; never triaged — doc and behavior contradict each other either way |
 | ~~**W7-5d**~~ | `:5188` | **FIXED 2026-08-05.** A dead stdout was a whole-queue kill switch, so a broken pipe cancelled sibling `Executor` jobs. It is now an ORDINARY per-job fault. TWO process-global reads had to go: `executor_hard_halt` is `is_over_memory \|\| is_timed_out`, and `invoke_native`'s post-call `stream_halt` is gated on that call having actually emitted to stdout (`Vm::stdout_writes`) — unguarded it faulted a sibling that never printed, after its FIRST native. Repro: **both markers 21/21 runs**, **all three writes 15/15**, across `--serial` and `--threads=1/2/3/4/8`/default; pre-fix it wrote neither marker at `--threads=1`/`--serial`, both at `--threads=3+`, and either at `--threads=2`. Matches CPython `ThreadPoolExecutor` (`max_workers` 1/2/4), the ancestor that owns `Executor` | Three lessons. (1) A **process-GLOBAL read inside an error-property predicate** — `out_dead_reason().is_some()` does not describe the `err` it is passed. The shape was in the tree **twice**; fixing the first made the second visible. (2) The ledger's own proposed alternative ("an accepted-asymmetry test pinning what each engine actually does") **was never available**: the M:N shape varied by thread count AND across runs at one thread count. (3) A one-native-call marker is the exact shape that hides instance (2) — when the contract is "the REST of the job runs", the fence needs a "rest". Accepted cost: graceful `shutdown()` only — a submitted job that never prints and never returns now hangs `\| head -1` (`shutdown_now()` still kills it in 54 ms; a loop back-edge IS a cancellation point). CPython hangs identically; Go exits via SIGPIPE on fd 1, a signal policy Chezzi does not adopt. Nurseries unaffected (they abort siblings on any fault, by design) |
+| **W7-17** | — | **`chezzi test --timeout` cannot reach a `timer(ms).recv()` PARKED in a `parallel:` nursery when no sibling is runnable.** `--timeout=300` against `parallel: spawn (timer(3000).recv())` runs the full **3003 ms** and then executes the statement after the wait (an `assert false` fires — the exact fall-through the deadline exists to prevent). Two mechanisms both miss it: the M:N timer branch PARKS the fiber instead of blocking in place, so it never reaches `block_halt_check`, and with nothing else executing there is no loop back-edge to observe the deadline either. A *runnable* sibling fixes it (a spinning sibling's back-edge trips the cancel at 304 ms), as does the same wait in an eager `Executor` job or on top-level `main` (both block in place → 411 ms) | **Pre-existing — verified identical on a pre-fix binary, NOT introduced by W7-16**, and a different mechanism from the inline-sleep hole W7-16 closed. Found by adversarial review of the W7-16 branch, whose docs had over-claimed it. Cancel is unaffected: `cancel_drain` walks `c.parked`, so a sibling's fault DOES reach this fiber (measured 55 ms) — it is specifically the wall-clock deadline that has no path to a parked fiber. Fixing it means giving parked fibers a deadline-driven wake (a scheduler feature), not another checkpoint: chunk-re-arming the park's timer job only gets a wake, and the resumed fiber would re-park because its own deadline has not passed. Fenced-by-omission in `test_runner::timeout_aborts_a_sleeping_test_on_every_block_in_place_path`, whose doc-comment names this case |
 | **W7-5e** | `:5300` | `Vm::stdout_writes` — the W7-5d gate on `invoke_native`'s broken-pipe halt — assumes **every** streamed stdout write goes through `Vm::emit_out_bytes`. True today (audited: `print`/`do_print_sep`, the `print` builtin, `VmHost::print`, `fileio`'s stdout-backed `Writer`, `pending_cancel_report`), enforced by nothing. A new native that reaches `stream::write_out` any other way silently loses its halt: `chezzi run x.chz \| head -1` on a loop calling it spins forever, growing the unbounded stream queue | Cannot be enforced by moving the counter into `stream::write_out` — that would make it PROCESS-global, and a sibling thread's write during my native call would falsely fire my halt, re-introducing exactly the cross-job contamination W7-5d removed. A per-`Vm` counter is the correct shape; the invariant needs a test or a `debug_assert`, not a relocation. Cheap fence: a `#[test]` asserting `stream::write_out` has exactly one caller, or route every write through one `&mut Vm` method |
-| **W7-16** | `:4939` | **A blocking NATIVE is not a cancellation checkpoint on the eager `Executor` path**, where it is inside a `parallel:` nursery. `ex.submit(job)` + `shutdown_now()` at 50 ms against `time.sleep_ms(3000)` (or a lone `timer(3000).recv()`) waits the full **3012 ms** AND runs the job's post-sleep code (`napper woke` prints). The same `sleep_ms` inside a nursery is interrupted on both engines — `parity_blocking_native_is_a_cancellation_checkpoint_on_both_engines` asserts `napper woke` never prints | Found 2026-08-04 while fixing W7-14's cancel half; the `wait:` half of the same hole IS fixed. Cause: the offload/park path (`call.rs:~285`, deadline-wake + checkpoint) needs an `MnSched`, and an eager job has `mn == None`, so the native runs inline (`thread::sleep`) and observes no halt. **Which contract wins is a real question, not a bug-by-inspection**: CPython's `ThreadPoolExecutor.shutdown(cancel_futures=True)` does NOT interrupt a RUNNING job either (a running `time.sleep(3)` completes), so Python agrees with today's behavior — but Chezzi's own nursery does not, and `--timeout` cannot reach these jobs either. Decide the contract before coding: measure CPython + Go, then either make the eager path a checkpoint or document the executor exemption |
+| ~~**W7-16**~~ | `:4939` | **FIXED 2026-08-05.** A wait whose **deadline WE own** (`time.sleep_ms`, `timer(ms).recv()`) is now a **CONTINUOUS** cancellation + `--timeout` checkpoint (~5 ms), everywhere: nursery, eager `Executor`, top-level `main`, both engines. `shutdown_now()` at 50 ms against `sleep_ms(3000)`: **3005 ms → 55 ms**, and the post-sleep code no longer runs; timer form 3005 → 55 ms; nursery mid-flight 3005 → 55 ms. A syscall-blocking native (`fs.*`/`request*`/`process*`/`io.*`) stays deliberately ENTRY-only — a `read(2)` in the kernel is not ours to cut short | **The filed premise was WRONG in two ways, and measuring it is what found the real bug.** (1) *"The same `sleep_ms` inside a nursery is interrupted on both engines"* — **no**: the parity fence only passed because its `boom()` faulted BEFORE `napper` entered the sleep. Move the fault 50 ms later and the nursery ran the full **3005 ms M:N / 3054 ms serial** and printed `napper woke`. There was no nursery-vs-executor split to reconcile; both were broken mid-flight. (2) *"`--timeout` cannot reach these jobs"* is not executor-specific — `chezzi test --timeout=200` reached **no timer wait anywhere**: top-level, nursery AND executor sleeps all ran their full 3 s and reported **PASS** (only a busy `while` loop bucketed TIMED-OUT). A documented "Hard-abort" guard that silently never fires. (3) The contract question resolved AGAINST the CPython pairing the row proposed: `ThreadPoolExecutor.shutdown(cancel_futures=True)` (3001 ms, no interrupt) is the *thread*-blocking sleep; Chezzi's is a FIBER wait, whose ancestor is `asyncio.sleep` under a `TaskGroup` (cancelled @50 ms) / Go's `select { <-time.After; <-ctx.Done() }` (@100 ms) — both cancel. Decisive internal evidence: an eager job blocked on a plain `ch.recv()` **already** died at `shutdown_now()` in 56 ms, so exempting sleep was an internal inconsistency, not CPython fidelity |
 | ~~**W7-14**~~ | `:4974` | **FIXED 2026-08-04.** The cooperative inline-sleep is now gated off for every waiter that owns its OS thread — an eager `Executor` job, the top-level `main` thread, and `main` inside a native callback — each of which blocks with the timer as one more arm and clamps its in-place wait to the deadline. `timer(300)` beside a value at 50 ms: **`timer` @ 306–308 ms → `value 9` @ 56–57 ms** on all three, matching the nursery path (54 ms) and Go's `select` | Three lessons. (1) The blocker on file — "WAIT-1's recipe does not port: it submits the background deadline send into `self.mn`, which an eager job does not have" — was solving the wrong problem. WAIT-1 injects a wake because a PARKED FIBER has no thread; a party that owns its thread needs no wake at all, only a shorter timeout. (2) The dead clamp W7-13r(a) deleted was not dead code but a SYMPTOM: it was unreachable *because* of this bug, and reading it as "provably `None`" documented the bug as an invariant. (3) **The first fix reused `can_block_in_place()` and shipped green with a third path still broken** — that predicate folds in `is_counted_party`, i.e. `native_reentry == 0`, which is a rule about being JUDGED, not about being able to block. Adversarial review caught it; the tests did not, because they only covered the two paths the fix was written for |
 | ~~**W7-13r**~~ | `:4619` | **ALL THREE RESIDUALS FIXED 2026-08-04**, with W7-13 itself: (a) the eager `wait:` arm was a blind `thread::sleep` — now waits on arm 0's condvar, 300 wakeups **1020 ms → 5 ms**; (b) `trip()` set `done_latch` outside `core.q` — now under it; (c) a blocked eager `send` never observed `close()` — was a HANG, now faults `send on a closed channel` at 105 ms (Go, compiled: 104 ms) | Kept for the lessons, not the status. (a) was deferred as "needs its own design primitive" — **wrong**, `demote_wait_block` (`sched.rs:1114`) already had the four-line trick. (b) is deliberately UNFENCED: the window is nanoseconds and measured 5–6 ms both ways, so a timing test would assert nothing. (c) left a DELIBERATE engine divergence (`--serial` keeps `FULL_SEND_DEADLOCK`: its drain runs jobs one at a time and cannot interleave them) and needs ≥2 pool threads, unchanged by the fix. Note the original W7-13 diagnosis (a *missing* `wake_senders`) was WRONG: that wake already fires on all six pop paths; the bug was a LOST wakeup — `eager_wait_tick` waited with no predicate, so a `notify_all` arriving while the lock was free hit a condvar nobody was on yet |
 | ~~**W7-15**~~ | `:5142` | **FIXED 2026-08-04**, found while measuring `W7-12r` and previously unfiled. `main` blocking on a channel an eager `Executor` job was about to fill FAULTED `recv on an empty channel: deadlock` where Go and CPython both print the value — a WRONG ANSWER, not a hang, on a three-line program. Cause: `chan_recv_step`'s "I have no scheduler ⇒ nobody can ever send" `else` arm, the stale premise `future.md` §2d names, which stopped being true when eager execution put running jobs outside every scheduler. `main` now blocks like any other counted party | — |
@@ -4944,7 +4945,7 @@ makes the parity test fail with `cannot index nil`.
    (`slice`) that the fix's own author had only read, never exercised. The green gate measures what the
    suite already knows to ask.
 
-### W7-16 — **a blocking NATIVE is not a cancellation checkpoint on the eager `Executor` path** (it is inside a nursery) — **OPEN, found 2026-08-04 while fixing W7-14's cancel half; contract question, not a bug-by-inspection**
+### W7-16 — **a blocking NATIVE was not a cancellation checkpoint once the wait had STARTED** — **FIXED 2026-08-05** (filed 2026-08-04 as an eager-`Executor`-only contract question; measuring it showed the nursery was equally broken and `--timeout` reached no timer wait anywhere)
 
 ```chezzi
 fn napper():
@@ -4958,26 +4959,120 @@ ex.shutdown_now()
 print("main done")
 ```
 
-Release binary, M:N: `napper start` / **`napper woke`** / `main done`, **@3012 ms** (timer form: 3013
-ms). The same `sleep_ms` inside a `parallel:` nursery is interrupted on BOTH engines — that is an
-asserted contract, `parity_blocking_native_is_a_cancellation_checkpoint_on_both_engines`
-(`parity_tests.rs:~10352`) asserts `napper woke` never prints.
+Release binary, M:N, pre-fix: `napper start` / **`napper woke`** / `main done`, **@3005 ms** (timer
+form: 3005 ms). Post-fix: `napper start` / `main done` **@55 ms**, both forms.
 
-**Cause.** The offload path that makes it a checkpoint (`call.rs:~285`: `sleep_ms` rides the timer
-thread as `timer_ms`, parks, wakes at the deadline, and the park is cancellable) requires an
-`MnSched`. An eager job has `mn == None`, so the native runs INLINE — `std::thread::sleep`, which
-observes no halt. Same root shape as W7-14: an inline sleep is a hole in every halt the loop it skips
-would have checked. `--timeout` cannot reach these jobs either.
+**Cause.** The offload path (`call.rs:~285`: `sleep_ms` rides the timer thread, wakes at the deadline)
+requires an `MnSched`. An eager job has `mn == None`, so the native ran INLINE —
+`std::thread::sleep` (`native/time.rs:34`), which observes no halt. `timer(ms).recv()` had its own
+copy of the same hole (`netio.rs:~1655`), reached before the block-in-place path could see it. Same
+root shape as W7-14: an inline sleep is a hole in every halt the loop it skips would have checked.
 
-**Why this is filed and not fixed: the contract is genuinely open.** CPython's
-`ThreadPoolExecutor.shutdown(cancel_futures=True)` does **not** interrupt a RUNNING job — a running
-`time.sleep(3)` completes — so Python agrees with today's Chezzi. Go has no cancel primitive at all
-(`<-time.After` is uninterruptible; cancellation is a `ctx.Done()` arm the *user* writes, which
-Chezzi's now-fixed `wait:` supports). But Chezzi's own nursery disagrees with its own executor, and
-that internal split is what makes it a gap. Decide first (measure both ancestors, pick the contract,
-write it in `concurrency.md`), then either route eager blocking natives through a cancellable park or
-document the executor exemption. Do NOT "fix" it by reflex — the W7-14 half was unambiguous (a
-`wait:` is a select and its siblings were being ignored); this one is a policy choice.
+## The filed premise was WRONG in two ways — measuring it is what found the real bug
+
+**(1) There was no nursery-vs-executor split.** The row claimed "the same `sleep_ms` inside a nursery
+is interrupted on BOTH engines — that is an asserted contract". It is not what the fence asserted.
+`parity_blocking_native_is_a_cancellation_checkpoint_on_both_engines` passed only because its `boom()`
+divides by zero as its FIRST act, while `napper` still has a `print` ahead of the sleep: the cancel was
+always tripped BEFORE the blocking call, so the fence covered the **entry** checkpoint
+(`call.rs:276`) and nothing else. Move the fault 50 ms later — the same delay `shutdown_now()` has in
+the executor repro — and the nursery behaves identically to the executor:
+
+| construct | cancel @0 ms (entry) | cancel @50 ms (mid-flight) |
+|---|---|---|
+| nursery M:N, `sleep_ms(3000)` | 4 ms, cancelled | **3005 ms, `napper woke` prints** |
+| nursery serial, `sleep_ms(3000)` | cancelled | **3054 ms, prints** |
+| nursery M:N, `timer(3000).recv()` | cancelled | 55 ms, cancelled *(already parked — this one worked)* |
+| eager `Executor`, either form | — | 3005 ms, prints |
+
+The fence has been renamed `parity_blocking_native_is_an_entry_cancellation_checkpoint_on_both_engines`
+and tightened (3000 → 1500 ms); the mid-flight half is
+`tests::a_sleeping_nursery_task_is_cancelled_mid_flight_by_a_sibling_fault`, M:N-only because serial
+cannot preempt a sleeping fiber at all.
+
+**(2) The `--timeout` hole was not executor-specific.** `chezzi test --timeout=200` against three tests
+that each sleep 3 s: **all three PASS**, 3 s each — top-level, nursery and executor alike; only a busy
+`while` loop bucketed TIMED-OUT. A guard documented as a *hard abort* that silently never fires is
+worse than no guard. Fenced by `test_runner::timeout_aborts_a_sleeping_test_on_every_block_in_place_path` (4 fixtures ×
+both engines).
+
+## The contract question, and how it resolved
+
+It resolved **against** the pairing this row proposed. CPython's
+`ThreadPoolExecutor.shutdown(cancel_futures=True)` (measured 3001 ms, no interrupt) and Go's
+`time.Sleep` are the **thread-blocking** sleeps. Chezzi's `sleep_ms` is a **fiber** wait, and both
+ancestors DO cancel that one:
+
+| spelling | cancellable? | measured |
+|---|---|---|
+| CPython `time.sleep(3)` in a `ThreadPoolExecutor` job | no | 3001 ms, runs to completion |
+| CPython `await asyncio.sleep(3)` under a `TaskGroup` | **yes** | cancelled @50 ms |
+| Go `time.Sleep(3s)` in a goroutine | no | never woken |
+| Go `select { <-time.After(3s); <-ctx.Done() }` | **yes** | cancelled @100 ms |
+
+Chezzi has ONE spelling where they have two, so the question is which it is — and the decisive evidence
+is internal, not ancestral: an eager job blocked on a plain **`ch.recv()` already died at
+`shutdown_now()` in 56 ms**. Exempting sleep was an inconsistency with the executor's own behavior, not
+fidelity to CPython. `docs/concurrency.md:1342` and the parity fence's own doc-comment had also both
+been promising this behavior for months.
+
+## Fix
+
+One rule, three seams:
+
+1. `Vm::block_until_deadline` (`netio.rs`, beside `block_recv`) — wait in `DEMOTE_POLL_BACKOFF` (5 ms)
+   chunks, running `block_halt_check` (deadline → cancel → quiesce) between them. Not a condvar: a
+   plain sleep has no channel to wait on, and a waker would need notifying from every cancel-trip site
+   *and* still need a timeout for the wall clock. Replaces the inline sleep in `invoke_native`
+   (`call.rs`, covering the eager job / top-level `main` / serial fiber / `mn == None` callback) and in
+   `chan_recv_step`'s timer branch (`netio.rs`).
+2. The M:N offload re-arms its timer in 5 ms chunks (`arm_timer_sleep`, `mod.rs`) and ends the sleep on
+   a cancel or the `--timeout` deadline. **Not** a park that `cancel_drain` could reach: that needs a
+   claim-once token against the timer firing plus consistent `parked_n`/`runnable`/`inflight`, and a
+   parked fiber no channel can feed is the W7-12/W7-15 false-deadlock shape. Re-arming keeps ONE owner
+   (the timer heap) and leaves the counters byte-identical — `running -= 1`/`inflight += 1` still
+   happen once in `offload`, `complete_offload` still runs exactly once.
+3. `run_one_fiber`'s `resume_native` `Err` arm (`sched.rs`) now classifies a cancel-ended sleep as
+   `Cancelled`, not `Fault` — otherwise the cancelled sleeper trips its siblings and MASKS the real
+   error that cancelled it. Guarded by `executor_hard_halt` so a `--timeout`/over-memory abort is never
+   swallowed into silence.
+
+4. …and that `Err` arm must **UNWIND**, not merely finish: it returns without re-entering `run_until`,
+   so nothing else runs the task's `defer`s. Without the explicit `unwind_deferred(0, false)` (same
+   shape as `run_until`'s `cancel_bypass` funnel, hard-halt markers re-stamped), a cancel delivered
+   mid-sleep silently skipped every registered cleanup while the same cancel 50 ms earlier — the entry
+   checkpoint, which faults *inside* the VM — ran them. **Caught by adversarial review, not by the
+   fix's own tests**, which asserted only "did it stop promptly" — and a task that skips its cleanup
+   stops just as promptly. Now fenced by the `cleanup ran` assertion in
+   `a_sleeping_nursery_task_is_cancelled_mid_flight_by_a_sibling_fault`.
+
+**The sleeper is deliberately NOT registered as a blocked party.** Its wait always ends, so it is never
+unsatisfiable; registering it would be a false-deadlock generator. Unregistered means `blocked < live`,
+so the verdict declines — the safe direction, and exactly what `inflight` does on the M:N side.
+
+**Scope, stated precisely** (all measured; the first draft of this section over-claimed all three):
+`--serial` has the same checkpoint but nothing can trip it mid-sleep (one thread), so it is entry-only
+in practice and gains the `--timeout` half only. `--timeout` reaches a `sleep_ms` everywhere and a
+`timer(ms).recv()` on the two block-in-place paths, but **not** one parked in a nursery with no
+runnable sibling — pre-existing, filed as **W7-17**. `--max-heap` reaches a sleeper only through the
+CANCEL arm (a nursery/`Executor` sibling sharing its cancel scope, 365 ms); a sleeping top-level `main`
+has no cancel flag and its own heap is not the one growing, so it sleeps out first (3005 ms).
+
+`join_eager_jobs`'s untimed `eager_cv.wait` was NOT touched, though the original row blamed it too: the
+worker Vm carries the same absolute deadline, so a sleeping job now faults itself within 5 ms and
+`finish` notifies the joiner. A second mechanism there would guard a hazard that no longer exists.
+
+**Accepted cost, measured at both ends.** 200 timer re-arms/s per *sleeping* fiber (a `timers` mutex +
+a poller notify each) — and they land on the SINGLE `chezzi-netpoller` thread that also drives socket
+readiness, so at scale this contends with net IO, not just idle CPU. **200 concurrent sleepers**
+(~40k re-arms/s): 300 ms of sleep takes 301.7 ms —
+1.7 ms of overhead, nothing. **20 000 concurrent sleepers**, 2 s each: wall is
+unchanged (2.127 s vs 2.112 s pre-fix) but CPU goes **0.88 s → 2.90 s** (user 0.31 → 2.38) — a pure
+CPU cost on the single timer thread, and that is the regime to watch.
+`ponytail:`-marked at `arm_timer_sleep` with the upgrade path (a per-scope pending-sleep registry
+`cancel_drain` fires directly, so a sleep costs one timer entry again). Cancel latency is ≤5 ms, the bound every other blocking path here already pays. Sleep
+accuracy is unchanged (300 ms sleep measured 300.1 ms top-level / 300.5 ms nursery) because each
+re-arm targets the ABSOLUTE deadline, so tick jitter cannot accumulate.
 
 ### W7-14 — **WAIT-1, unfixed on every block-in-place path**: a `wait:` timer arm inside an `Executor` job (or on top-level `main`) inline-slept to the deadline and could not take a sibling value that arrived sooner — **FIXED 2026-08-04, found the same day while reviewing W7-13r(a)**
 

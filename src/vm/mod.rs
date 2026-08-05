@@ -2968,32 +2968,15 @@ impl MnSched {
             func,
             args,
             span,
-            timer_ms,
+            timer,
         } = req;
-        if let Some(ms) = timer_ms {
+        if let Some(t) = timer {
             // D5 owe #2 — a `sleep_ms`: park the fiber on the timer thread (no pool thread, no work),
             // waking it at the deadline. `sleep_ms` returns nothing, so the fiber resumes with
             // `Ok(Nil)` and the native is never run (there is nothing to compute). Same
             // inflight→runnable + `notify` accounting as the pool path (`complete_offload`), so the
             // deadlock predicate stays sound: the sleeping fiber is `inflight` and WILL come back.
-            // `checked_add` saturates a pathological `ms` (e.g. centuries) to a far-future deadline
-            // instead of panicking the worker on `Instant` overflow — a panic here escapes *before*
-            // `complete_offload` and would pin `inflight` forever (hang). Matches the old
-            // `thread::sleep` path's "effectively infinite sleep" rather than a crash.
-            let dur = std::time::Duration::from_millis(ms);
-            let deadline = std::time::Instant::now()
-                .checked_add(dur)
-                .unwrap_or_else(|| {
-                    std::time::Instant::now() + std::time::Duration::from_secs(86_400 * 365)
-                });
-            timer::submit_at(
-                deadline,
-                Box::new(move || {
-                    let mut fiber = fiber;
-                    fiber.resume_native = Some(Ok(crate::native::NativeRet::Nil));
-                    sched.complete_offload(fiber);
-                }),
-            );
+            arm_timer_sleep(sched, fiber, t, span);
             return;
         }
         blocking_pool::submit(Box::new(move || {
@@ -3089,6 +3072,76 @@ fn run_offload(
 ) -> Result<crate::native::NativeRet, crate::native::HostError> {
     let mut host = OffloadHost { args };
     func(&mut host)
+}
+
+/// W7-16 — wait out an offloaded `sleep_ms` in `DEMOTE_POLL_BACKOFF` chunks, re-arming itself on the
+/// timer thread, so a cancel or a `--timeout` reaches the sleeping fiber INSIDE the sleep instead of
+/// after it. Pre-fix this was one `submit_at(deadline, …)`: a nursery task sleeping 3 s ran the full
+/// 3 s through a sibling's fault at 50 ms and then printed its post-sleep line (measured 3005 ms; the
+/// existing parity fence only ever covered the *entry* checkpoint, where the fault precedes the call).
+///
+/// **Why re-arm rather than park where `cancel_drain` can reach it.** `cancel_drain` walks `c.parked`
+/// only, and filing this fiber there needs a claim-once token against the timer firing plus
+/// `parked_n`/`runnable`/`inflight` all kept consistent — and a parked fiber that no channel can ever
+/// feed is exactly the false-deadlock shape W7-12/W7-15 came from. It also requeues with
+/// `resume_native == None`, so the resumed fiber would push nothing where the suspended `Call` expects
+/// a value. Re-arming keeps the fiber under a SINGLE owner (the timer heap) at all times, so there is
+/// no claim race at all.
+///
+/// **Counters are untouched by design.** `running -= 1` / `inflight += 1` happened once in
+/// [`MnSched::offload`]; `complete_offload` runs exactly once, on whichever branch below resumes the
+/// fiber. A re-arm does neither, so `inflight > 0` keeps vetoing the deadlock predicate for the whole
+/// sleep — the property that makes this preferable to a park.
+///
+/// Each re-arm targets `min(deadline, now + backoff)` computed from the ABSOLUTE deadline, so tick
+/// jitter cannot accumulate and the final wake still lands on `deadline`.
+///
+/// ponytail: 200 re-arms/s per sleeping fiber, each a `timers` mutex + a poller notify. Thousands of
+/// concurrent sleepers would load the single timer/poll thread; upgrade path is a per-scope
+/// pending-sleep registry that `cancel_drain` fires directly. (`fire_due_timers` drops the timers lock
+/// before running a job, so re-arming from inside a job is safe.)
+fn arm_timer_sleep(sched: Arc<MnSched>, mut fiber: Fiber, t: TimerSleep, span: Span) {
+    let now = std::time::Instant::now();
+    let halt = if t.cancel.iter().any(|c| c.load(Ordering::Relaxed)) {
+        Some(RuntimeError {
+            message: "cancelled".to_string(),
+            span,
+            is_assert: false,
+            is_over_memory: false,
+            is_timed_out: false,
+        })
+    } else if t.run_deadline.is_some_and(|rd| now >= rd) {
+        Some(
+            RuntimeError {
+                message: format!("test exceeded --timeout ({}ms)", t.timeout_ms),
+                span,
+                is_assert: false,
+                is_over_memory: false,
+                is_timed_out: false,
+            }
+            .timed_out(),
+        )
+    } else {
+        None
+    };
+    if let Some(err) = halt {
+        fiber.resume_native = Some(Err(err));
+        sched.complete_offload(fiber);
+        return;
+    }
+    if now >= t.deadline {
+        fiber.resume_native = Some(Ok(crate::native::NativeRet::Nil));
+        sched.complete_offload(fiber);
+        return;
+    }
+    let mut next = t.deadline.min(now + DEMOTE_POLL_BACKOFF);
+    if let Some(rd) = t.run_deadline {
+        next = next.min(rd);
+    }
+    timer::submit_at(
+        next,
+        Box::new(move || arm_timer_sleep(sched, fiber, t, span)),
+    );
 }
 
 impl SchedCore {
@@ -3445,10 +3498,27 @@ struct OffloadReq {
     func: crate::native::NativeFn,
     args: Vec<crate::native::NativeArg>,
     span: Span,
-    /// D5 owe #2 — `Some(ms)` for a `sleep_ms`: park the fiber on the timer thread for `ms` rather
-    /// than run `func` on a dirty-pool thread (a sleep does no work, just waits a deadline). `None`
-    /// for every other blocking native (`io`/`fs`/`request`/`process`), which runs on the pool.
-    timer_ms: Option<u64>,
+    /// D5 owe #2 — `Some(..)` for a `sleep_ms`: park the fiber on the timer thread for its duration
+    /// rather than run `func` on a dirty-pool thread (a sleep does no work, just waits a deadline).
+    /// `None` for every other blocking native (`io`/`fs`/`request`/`process`), which runs on the pool.
+    timer: Option<TimerSleep>,
+}
+
+/// W7-16 — everything the timer thread needs to keep an offloaded `sleep_ms` a CANCELLATION and
+/// `--timeout` checkpoint for its whole duration. Snapshotted at the call site (in `invoke_native`),
+/// because the timer job runs with no `Vm` and no scheduler lock of its own.
+struct TimerSleep {
+    /// When the sleep is over.
+    deadline: std::time::Instant,
+    /// The fiber's scope cancel flag plus its ancestors' ([`Vm::demote_cancel_flags`] — which is
+    /// deliberately EMPTY inside a `defer`, so a sleeping cleanup stays uncancellable, as contracted).
+    /// Read the flags snapshotted HERE, not `c.scopes[id].cancel` inside `offload`: the latter is this
+    /// scope's own flag only, and would miss an enclosing nursery's cancel.
+    cancel: Vec<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    /// The run's absolute `--timeout` deadline, if any.
+    run_deadline: Option<std::time::Instant>,
+    /// …and its configured value, for the fault message.
+    timeout_ms: u64,
 }
 
 mod arith;

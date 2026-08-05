@@ -92,13 +92,32 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > (both mutation-verified red without the gate), plus
 > `a_timer_armed_eager_wait_is_cancellable_by_shutdown_now`.
 >
-> **Filed, NOT fixed: `W7-16`** — the same hole one layer down. A blocking **native** on the eager
-> path (`time.sleep_ms(3000)`, a lone `timer(3000).recv()`) is not a cancellation checkpoint: it runs
-> inline because the offload/park path needs an `MnSched`, so `shutdown_now()` waits 3012 ms and the
-> job's post-sleep code still runs — while the same `sleep_ms` inside a `parallel:` nursery IS
-> interrupted on both engines (an asserted parity contract). Left open deliberately: CPython's
-> `ThreadPoolExecutor` does not interrupt a running job either, so the contract is a policy choice to
-> settle before coding, not a bug by inspection. See `docs/gaps.md` **W7-16**.
+> **✅ W7-16 FIXED 2026-08-05 — a wait whose DEADLINE WE OWN is a CONTINUOUS cancellation checkpoint.**
+> `time.sleep_ms` and `timer(ms).recv()` now observe a cancel and the `--timeout` deadline for the whole
+> duration of the wait, in a nursery, in an eager `Executor` job and on top-level `main`:
+> `shutdown_now()` at 50 ms against `sleep_ms(3000)` went **3005 ms → 55 ms**, the post-sleep code no
+> longer runs, and the cancelled task still unwinds through its `defer`s. A syscall-blocking native
+> (`fs.*`/`request*`/`process*`/`io.*`) stays deliberately ENTRY-only — a `read(2)` already in the
+> kernel is not ours to cut short. `--serial` has the same checkpoint but nothing to trip it mid-sleep
+> (one thread), so it gains the `--timeout` half only. One shape is NOT reached and is filed as
+> **W7-17**: a `timer(ms).recv()` parked in a nursery with no runnable sibling is not deadline-reachable
+> (pre-existing, verified identical on a pre-fix binary).
+>
+> **Two filed premises were wrong, and measuring them is what found the real bug.** (1) "the same
+> `sleep_ms` inside a nursery IS interrupted" — no: the parity fence passed only because its `boom()`
+> faulted *before* `napper` entered the sleep. Delay the fault 50 ms and the nursery ran the full
+> **3005 ms M:N / 3054 ms serial** and printed `napper woke`. There was no nursery-vs-executor split.
+> (2) "`--timeout` cannot reach these jobs" was not executor-specific: `--timeout=200` against three 3 s
+> sleeps (top-level, nursery, executor) reported **PASS** on all three — a documented hard-abort guard
+> that silently never fired. And the contract resolved against CPython's `ThreadPoolExecutor` pairing:
+> that is the *thread*-blocking sleep, while Chezzi's is a fiber wait whose ancestors (`asyncio.sleep`
+> under a `TaskGroup`, Go's `select { <-time.After; <-ctx.Done() }`) both cancel — clinched by the fact
+> that an eager job blocked on a plain `ch.recv()` *already* died at `shutdown_now()` in 56 ms.
+> Fences: `tests/chz/stdlib/sleep_cancel_test.chz` (both engines, 2/3 red pre-fix),
+> `a_sleeping_nursery_task_is_cancelled_mid_flight_by_a_sibling_fault`,
+> `test_runner::timeout_aborts_a_sleeping_test_on_every_block_in_place_path` (4 fixtures × both engines), and the renamed
+> + tightened `parity_blocking_native_is_an_entry_cancellation_checkpoint_on_both_engines`. See
+> `docs/gaps.md` **W7-16**.
 
 > **✅ W7-11 FIXED 2026-08-04 — the last ledger item that ABORTED THE HOST is gone.** An `RwShared`
 > copy-out view (`at`/`slice`/`for_each`/`fold`/`get_key`/`has`/`for_each_entry`/`fold_entries`/
