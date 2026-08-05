@@ -161,6 +161,8 @@ impl Vm {
             module_faulted: Vec::new(),
             snapshot_memo: None,
             snapshot_rebuild: super::fxhash::FxHashMap::default(),
+            snapshot_cells: std::sync::Arc::new(super::fxhash::FxHashMap::default()),
+            snapshot_next_id: 0,
             snapshot_builds: 0,
             pinned_module_roots: Vec::new(),
             mn: None,
@@ -236,6 +238,13 @@ impl Vm {
         // `module_objs` just above: for an M:N fiber it indexes the heap swapped below, for a
         // cooperative one the shared heap. Either way it moves atomically with its view.
         std::mem::swap(&mut self.snapshot_rebuild, &mut ctx.snapshot_rebuild);
+        // W7-4c — the snapshot cell registry is heap-keyed too (its KEYS are `GcRef`s into the heap the
+        // snapshot was built from), so it travels with the same view for the same reason.
+        std::mem::swap(&mut self.snapshot_cells, &mut ctx.snapshot_cells);
+        // W7-4c — the counter travels WITH the registry it numbers; see `FiberCtx::snapshot_cells`.
+        // Split them and a fiber resuming on a fresher shell re-mints ids its own registry already
+        // uses, merging two unrelated bindings.
+        std::mem::swap(&mut self.snapshot_next_id, &mut ctx.snapshot_next_id);
         // D2a — an M:N fiber (`Some`) owns its heap; swap it with the host's. A cooperative fiber
         // (`None`) shares the single `Vm::heap` (decision A), so its heap is left untouched and the
         // cooperative engine stays byte-identical by construction. D2b — the same `Some` gate carries
@@ -1355,6 +1364,8 @@ impl Vm {
         // eager-faulted with `module_snapshot` cleared), and belt-and-braces even when not — see the
         // matching note in `collect`.
         work.extend(ctx.snapshot_rebuild.values().copied());
+        // W7-4c — and the registry's keys, for the reason in `collect`.
+        work.extend(ctx.snapshot_cells.keys().copied());
     }
 
     pub(super) fn collect(&mut self) {
@@ -1421,6 +1432,11 @@ impl Vm {
         // map now outlives a single fault, though, so the moment any entry enters it before something
         // else roots it, this is the only thing holding it. Cheap; do not "clean it up".
         work.extend(self.snapshot_rebuild.values().copied());
+        // W7-4c — the snapshot cell registry's KEYS. Unlike the map above this root is LOAD-BEARING:
+        // an unrooted key could be swept and its slot recycled to a different cell, which the seeding
+        // in `deep_clone_all`/`lower_task` would then identify with the dead cell's id and merge into
+        // the wrong binding. A rooted key is never swept, so never recycled.
+        work.extend(self.snapshot_cells.keys().copied());
         // Parked fibers in active cooperative schedulers (B1/B2): each level's joining-fiber context
         // plus every child fiber's context are roots while the children run. The CURRENTLY running
         // fiber's context is the live `self.{stack,frames,nurseries}` already rooted above; a parked
@@ -2248,6 +2264,8 @@ impl Vm {
                 // nursery-in-a-loop program builds exactly one). See `ModuleSnapshot::reusable`.
                 if self.snapshot_memo.as_ref().is_some_and(|s| !s.reusable) {
                     self.snapshot_memo = None;
+                    // W7-4c — the registry numbers that snapshot; drop it with the cache.
+                    self.snapshot_cells = std::sync::Arc::new(super::fxhash::FxHashMap::default());
                 }
                 self.nurseries.push(Vec::new());
                 self.mn_scopes.push(None); // lockstep — set Some(scope_id) only if early-enlisted

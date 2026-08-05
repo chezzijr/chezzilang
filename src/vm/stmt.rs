@@ -1873,6 +1873,8 @@ impl Vm {
         // (`register_task`), so a later assignment never time-travels into a task that predates it.
         // One store; no scan of anything.
         self.snapshot_memo = None;
+        // W7-4c — the cell registry describes that exact snapshot's numbering, so it dies with it.
+        self.snapshot_cells = std::sync::Arc::new(super::fxhash::FxHashMap::default());
         if let Obj::Module(m) = self.heap.get_mut(module) {
             m.slots[slot as usize] = value;
         }
@@ -1888,6 +1890,8 @@ impl Vm {
         // native-module population, worker fault replay). `fault_module` take/restores the memo around
         // its replay loop, since a replay REPRODUCES the snapshot rather than mutating the view.
         self.snapshot_memo = None;
+        // W7-4c — the cell registry describes that exact snapshot's numbering, so it dies with it.
+        self.snapshot_cells = std::sync::Arc::new(super::fxhash::FxHashMap::default());
         if let Obj::Module(m) = self.heap.get_mut(module) {
             match m.index.get(name) {
                 Some(&i) => m.slots[i as usize] = value,

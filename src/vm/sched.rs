@@ -63,6 +63,12 @@ struct WireMemo {
     /// its `from_wire_memo` rebuild map's, or a `Backref` minted under one memo hits the other's
     /// `.expect` — see [`Vm::to_wire_memo_at`].
     cells: super::fxhash::FxHashMap<GcRef, u32>,
+    /// W7-4c — a READ-ONLY base consulted on a `cells` miss: this view's snapshot cell registry
+    /// ([`Vm::snapshot_cells`]), shared by `Arc` rather than copied. Every `spawn` seeds a memo from
+    /// it, so copying would put an O(module-global cells) clone on the spawn path — the same O(M·K)
+    /// shape W7-4 already rejected for `to_snap`'s speculative rollback. Never written: new ids go to
+    /// `cells`, which shadows it, so `try_wire_speculative`'s rollback stays exact.
+    base_cells: Option<Arc<super::fxhash::FxHashMap<GcRef, u32>>>,
     /// Ids from `cells` already EMITTED (as a full `WireValue::Cell`) under the current `gen`. Equal to
     /// `cells`' id set unless `elem_split` is on.
     emitted: super::fxhash::FxHashMap<u32, u32>,
@@ -92,6 +98,17 @@ struct WireMemo {
     gens_on_stack: super::fxhash::FxHashSet<GcRef>,
 }
 
+impl WireMemo {
+    /// W7-4c — the id this cell already crosses under, from the overlay or the shared base.
+    fn cell_id(&self, h: GcRef) -> Option<u32> {
+        self.cells.get(&h).copied().or_else(|| {
+            self.base_cells
+                .as_ref()
+                .and_then(|base| base.get(&h).copied())
+        })
+    }
+}
+
 impl Vm {
     /// `spawn f(args)` / `spawn recv.m(args)` — pop `argc(+1)` operands, deep-copy the args (and, for
     /// the method form, the receiver) across the airlock, and register the task on the innermost
@@ -117,12 +134,19 @@ impl Vm {
         // receiver / `cross_spawn_callee`). Serialization order is observable when two of them are
         // non-crossable in DIFFERENT ways (a depth-cap arg vs a reference-cycle callee): the first
         // failure is the reported fault. `lower_task` keeps the same args-before-captures order.
+        //
+        // W7-4c — PIN THE SNAPSHOT FIRST. The clone below mints fresh cells, and they can only be tied
+        // to the module snapshot's ids if those ids already exist; pinning inside `register_task`
+        // (below) is too late for the first spawn of a view. No user code runs between here and there,
+        // so the pinned VALUES are identical — only which fault wins changes when BOTH the snapshot
+        // build and the crossing are non-viable, and the snapshot's fault is the more fundamental one.
+        let pin = self.pin_snapshot(span)?;
         let cross_head = method.is_some() || self.spawn_callee_crosses_deep(head);
         let mut batch = raw_args;
         if cross_head {
             batch.push(head);
         }
-        let mut crossed = self.deep_clone_all(batch, span)?;
+        let (mut crossed, cell_ids) = self.deep_clone_all(batch, span)?;
         let head = if cross_head {
             crossed.pop().expect("the head was pushed last")
         } else {
@@ -142,7 +166,7 @@ impl Vm {
                 span,
             },
         };
-        self.register_task(task, span)
+        self.register_task(task, span, pin, cell_ids)
     }
 
     /// Does a `spawn f()` **callee** have to cross the task boundary by DEEP value? A closure that
@@ -203,7 +227,10 @@ impl Vm {
         // Positional (lever #3): slot order matches the synthetic block proto's `capture_names`.
         // W7-4: ONE serialization for all captures — two captured closures over the same local
         // (`gi := c.inc; gg := c.get`) must reach the task sharing their single binding.
-        let captured = self.deep_clone_all(captured, span)?;
+        // W7-4c: and the snapshot is pinned BEFORE the clone, so a capture over a cell a module global
+        // also holds crosses under that global's id — see `do_spawn`.
+        let pin = self.pin_snapshot(span)?;
+        let (captured, cell_ids) = self.deep_clone_all(captured, span)?;
         let h = self.heap.alloc(Obj::Closure {
             proto,
             captured,
@@ -216,7 +243,26 @@ impl Vm {
                 span,
             },
             span,
+            pin,
+            cell_ids,
         )
+    }
+
+    /// W7-4c — the nursery guard + [`Vm::ensure_snapshot`], split out of [`Vm::register_task`] so a
+    /// `spawn` can pin its module view BEFORE `deep_clone_all` mints the task's cells. The guard stays
+    /// FIRST: `spawn` outside a `parallel:` must still report that, not a snapshot fault.
+    ///
+    /// The `Result` is CARRIED, not raised (W6-2): a snapshot that cannot be built — a module global
+    /// holding a frame-holding generator — faults where the task is PREPARED, so a nursery whose tasks
+    /// are all cancelled before preparation stays faultless.
+    fn pin_snapshot(
+        &mut self,
+        span: Span,
+    ) -> Result<Result<Arc<ModuleSnapshot>, RuntimeError>, RuntimeError> {
+        if self.nurseries.is_empty() {
+            return Err(self.err("spawn must be inside a parallel: block".to_string(), span));
+        }
+        Ok(self.ensure_snapshot(span))
     }
 
     /// Register a spawned task on the innermost nursery. Per-connection spawn: if that nursery is
@@ -234,12 +280,15 @@ impl Vm {
         &mut self,
         task: PendingCall,
         span: Span,
+        snap: Result<Arc<ModuleSnapshot>, RuntimeError>,
+        cell_ids: CellIds,
     ) -> Result<(), RuntimeError> {
         // The innermost open nursery (`nurseries`, `mn_scopes` and `eager_scheds` are lockstep).
+        // W7-4c — `snap` was pinned by `pin_snapshot`, which already ran this guard BEFORE the
+        // caller's `deep_clone_all`; re-checking here keeps the invariant local and costs one compare.
         let Some(i) = self.nurseries.len().checked_sub(1) else {
             return Err(self.err("spawn must be inside a parallel: block".to_string(), span));
         };
-        let snap = self.ensure_snapshot(span);
         // Eager innermost nursery → inject a live fiber. Clone the sched Arc, drop the borrow so
         // `prepare_worker` can take `&mut self`; `inject` assigns the real slot index under its lock
         // (the `0` placeholder is overwritten), so no caller-side index bookkeeping is needed.
@@ -248,11 +297,17 @@ impl Vm {
             // The eager nursery owns its OWN sched (a single scope 0 — see `activate_eager_nursery`);
             // `inject` overwrites the `0` placeholder `task_index` under its lock. This path PREPARES the
             // task right here, so a snapshot build failure surfaces right here too (prepare instant).
-            let fiber = self.prepare_worker(task, Some(snap?))?.into_fiber(0, 0);
+            let fiber = self
+                .prepare_worker(task, Some(snap?), &cell_ids)?
+                .into_fiber(0, 0);
             sched.inject(fiber, 0);
             return Ok(());
         }
-        self.nurseries[i].push(QueuedTask { call: task, snap });
+        self.nurseries[i].push(QueuedTask {
+            call: task,
+            snap,
+            cell_ids,
+        });
         Ok(())
     }
 
@@ -363,7 +418,7 @@ impl Vm {
         for (i, t) in tasks.into_iter().enumerate() {
             let span = t.span();
             let (pending, module_objs, module_faulted) =
-                self.prepare_serial_child(t.call, t.snap?)?;
+                self.prepare_serial_child(t.call, t.snap?, &t.cell_ids)?;
             children.push(Fiber {
                 span,
                 ctx: FiberCtx {
@@ -472,7 +527,10 @@ impl Vm {
         for (i, t) in tasks.into_iter().enumerate() {
             // W6-2 — each task replays the snapshot pinned at its own spawn (the serial engine replays
             // the same one). scope 0 — the outermost nursery.
-            fibers.push(self.prepare_worker(t.call, Some(t.snap?))?.into_fiber(i, 0));
+            fibers.push(
+                self.prepare_worker(t.call, Some(t.snap?), &t.cell_ids)?
+                    .into_fiber(i, 0),
+            );
         }
         let deadlock_err = self.err(DEADLOCK_MSG.to_string(), Span { line: 1, col: 1 });
         // Worker count must account for the early-enlisted OUTER scopes' tasks too (case-A: `main`'s `O`),
@@ -552,7 +610,7 @@ impl Vm {
         let cancel = Arc::new(AtomicBool::new(false));
         let mut workers = Vec::with_capacity(tasks.len());
         for t in tasks {
-            workers.push(self.prepare_worker(t.call, Some(t.snap?))?);
+            workers.push(self.prepare_worker(t.call, Some(t.snap?), &t.cell_ids)?);
         }
         let scope_id =
             sched.register_scope_seeded(Arc::clone(&cancel), self.scope_ancestors(), workers);
@@ -593,7 +651,7 @@ impl Vm {
             // so snapshotting here would diverge for a global mutated in between.
             let mut prepared = Vec::with_capacity(total);
             for t in clones {
-                prepared.push(self.prepare_worker(t.call, Some(t.snap?))?);
+                prepared.push(self.prepare_worker(t.call, Some(t.snap?), &t.cell_ids)?);
             }
             // COMMIT — nothing fallible remains. Discard the originals (the clones became the fibers),
             // register + seed the scope, and record it for its OWN `JoinNursery` to reduce.
@@ -2188,17 +2246,61 @@ impl Vm {
         &mut self,
         vs: Vec<Value>,
         span: Span,
-    ) -> Result<Vec<Value>, RuntimeError> {
-        let mut memo = WireMemo::default();
+    ) -> Result<(Vec<Value>, super::CellIds), RuntimeError> {
+        // W7-4c — SEED from this view's snapshot registry, so a cell that a module global also reaches
+        // serializes under the id the snapshot already gave it. `emitted` stays empty, so this walk
+        // writes the cell's FULL definition rather than a `Backref` into a serialization the far side
+        // has not replayed (and may replay later, or never — modules fault lazily); `from_wire_memo`
+        // dedupes a repeated definition by id.
+        let seed_ceiling = self.snapshot_next_id;
+        // W7-4c — the whole "a stale id MISSES, never collides" guarantee rests on this. It holds only
+        // while the counter travels with the registry it numbered (`FiberCtx` swaps both); split them
+        // and a fiber resuming on a fresher shell re-mints ids its own registry already uses.
+        debug_assert!(
+            self.snapshot_cells.values().all(|&id| id < seed_ceiling),
+            "snapshot registry holds an id at or above the mint counter — the counter and the \
+             registry have been separated (see FiberCtx::snapshot_cells)"
+        );
+        // No registry ⇒ no snapshot id to agree with, so skip the `Arc` bump and the base lookup
+        // entirely — that is every program whose module globals hold no closure over a captured local.
+        let base_cells =
+            (!self.snapshot_cells.is_empty()).then(|| Arc::clone(&self.snapshot_cells));
+        let mut memo = WireMemo {
+            base_cells,
+            next_id: seed_ceiling,
+            ..WireMemo::default()
+        };
         let mut ws = Vec::with_capacity(vs.len());
         for v in vs {
             ws.push(self.to_wire_memo_at(v, span, &mut memo)?);
         }
         let mut rebuild = super::fxhash::FxHashMap::<u32, GcRef>::default();
-        Ok(ws
+        let out: Vec<Value> = ws
             .into_iter()
             .map(|w| self.from_wire_memo(w, &mut rebuild))
-            .collect())
+            .collect();
+        // W7-4c — hand the CLONE cells' ids back so `lower_task` can serialize them under the same id
+        // (the clone is a different `GcRef` than the original the registry knows). Cells only: a
+        // container's id lives in the memo's `path`, which pops on DFS exit, so it can never be
+        // back-referenced from the separate `lower_task` walk. Never folded into `self.snapshot_cells`
+        // — that would grow it once per spawn and pin every clone for the view's life.
+        //
+        // FAST PATH: with no registry there is no snapshot id to agree with, so there is nothing to
+        // report and the scan is skipped outright — that is the overwhelmingly common shape (no module
+        // global holds a closure over a captured local), and it keeps `spawn` off this path entirely.
+        // Otherwise report only ids BELOW the seed ceiling: those are the registry's, the only ones the
+        // snapshot can also use. Ids this walk minted are above every snapshot id (the counter is
+        // monotonic), so they can never collide and carrying them would just cost.
+        let cell_ids: super::CellIds = if self.snapshot_cells.is_empty() {
+            Vec::new()
+        } else {
+            rebuild
+                .iter()
+                .filter(|&(&id, &h)| id < seed_ceiling && matches!(self.heap.get(h), Obj::Cell(_)))
+                .map(|(&id, &h)| (h, id))
+                .collect()
+        };
+        Ok((out, cell_ids))
     }
 
     /// [`to_wire_at`](Vm::to_wire_at) against a CALLER-OWNED [`WireMemo`], so several roots that cross
@@ -2713,8 +2815,8 @@ impl Vm {
                 // subtree — see [`WireMemo`]) decides definition-vs-`Backref`, and a repeated
                 // definition DEDUPES on rebuild, so identity is unchanged either way.
                 Obj::Cell(v) => {
-                    let id = match memo.cells.get(&h) {
-                        Some(&id) => id,
+                    let id = match memo.cell_id(h) {
+                        Some(id) => id,
                         None => {
                             let id = memo.next_id;
                             memo.next_id += 1;
@@ -3335,7 +3437,7 @@ impl Vm {
         &mut self,
         task: PendingCall,
     ) -> Result<WorkerResult, RuntimeError> {
-        self.prepare_worker(task, None)?.run()
+        self.prepare_worker(task, None, &[])?.run()
     }
 
     /// B3.3-threads — the parent-thread half of [`Vm::run_task_isolated`]: lower the task to a `Send`
@@ -3352,10 +3454,11 @@ impl Vm {
         &mut self,
         task: PendingCall,
         snap: Option<Arc<ModuleSnapshot>>,
+        cell_ids: &[(GcRef, u32)],
     ) -> Result<ReadyWorker, RuntimeError> {
         // 1. Lower the task to a `Send` description in THIS (parent) heap (read-only serialize),
         //    rejecting any value that can't cross a heap boundary as-is.
-        let lowered = self.lower_task(task)?;
+        let lowered = self.lower_task(task, cell_ids)?;
         // 2. Build the worker + install the shared read-only module snapshot (D1): pre-alloc empty
         //    module objs (indices line up with the parent), faulting each module's globals into the
         //    worker heap lazily on first access — instead of eagerly reconstructing the whole graph
@@ -3368,7 +3471,7 @@ impl Vm {
         };
         let mut worker = self.spawn_worker();
         worker.install_snapshot(snap);
-        let (call, span) = worker.rebuild_ready(lowered);
+        let (call, span) = worker.rebuild_ready(lowered, !cell_ids.is_empty());
         Ok(ReadyWorker { worker, call, span })
     }
 
@@ -3390,8 +3493,34 @@ impl Vm {
     /// moving it below the callee classification would (a) skip argument validation entirely for a
     /// non-callable callee and (b) let a capture fault pre-empt an argument fault. `rebuild_ready`
     /// matches by reconstructing a `Closure`'s args before its captures.
-    pub(super) fn lower_task(&mut self, task: PendingCall) -> Result<Lowered, RuntimeError> {
-        let mut memo = WireMemo::default();
+    pub(super) fn lower_task(
+        &mut self,
+        task: PendingCall,
+        cell_ids: &[(GcRef, u32)],
+    ) -> Result<Lowered, RuntimeError> {
+        // W7-4c — seed with the ids `deep_clone_all` gave this task's CLONE cells, so the binding a
+        // module global also holds crosses under the snapshot's id and `rebuild_ready` + `fault_module`
+        // (one shared map) tie both to ONE cell. `emitted` stays empty, so this walk writes the full
+        // definition and never a `Backref` into the snapshot's separate, lazily-replayed serialization.
+        //
+        // `next_id` must clear EVERY seeded id, not just the snapshot's high-water mark: the clone
+        // ids came from `deep_clone_all`, which itself minted from `snapshot_next_id` upward, so a
+        // clone cell's id is typically `>= snapshot_next_id`. Starting the walk at `snapshot_next_id`
+        // would re-mint an id already seeded here, and since `rebuild_ready` and `fault_module` share
+        // ONE rebuild map that merges a container with a cell — `CellLoad on a non-cell object`.
+        // Fenced by `spawn_named_args_keep_one_binding` (a spawn over a plain LOCAL, which is exactly
+        // the case whose clone ids sit above the snapshot's).
+        let next_id = cell_ids
+            .iter()
+            .map(|&(_, id)| id + 1)
+            .max()
+            .unwrap_or(0)
+            .max(self.snapshot_next_id);
+        let mut memo = WireMemo {
+            cells: cell_ids.iter().copied().collect(),
+            next_id,
+            ..WireMemo::default()
+        };
         let lowered = match task {
             PendingCall::Call { callee, args, span } => {
                 let wargs = self.wire_args(args, span, &mut memo)?;
@@ -3488,9 +3617,23 @@ impl Vm {
     /// captures; a `Method`'s receiver before its args), so a cell shared between an arg and a capture
     /// is rebuilt once and both references tie to it — and no `Backref` is ever reached before the
     /// `WireValue::Cell` that defines it.
-    pub(super) fn rebuild_ready(&mut self, lowered: Lowered) -> (ReadyCall, Span) {
-        let rb = &mut super::fxhash::FxHashMap::<u32, GcRef>::default();
-        match lowered {
+    pub(super) fn rebuild_ready(&mut self, lowered: Lowered, share: bool) -> (ReadyCall, Span) {
+        // W7-4c — when this task carries snapshot-numbered cells, rebuild into the SAME map
+        // `fault_module` drains, so a cell its captures rebuild is the one the module snapshot's later,
+        // lazy replay ties to (both sides emit full definitions under the shared id; `from_wire_memo`
+        // dedupes first-wins, so the order between them is free). Taken out of `self` for the borrow.
+        //
+        // When it carries NONE — no module global shares a binding with it, the common case — use a
+        // throwaway map exactly as before: joining would make every `spawn` pay a scan of its whole
+        // rebuilt object graph for a merge that can never happen. Measured: without this a 20k-spawn
+        // storm ran 18% slower.
+        let mut owned = if share {
+            std::mem::take(&mut self.snapshot_rebuild)
+        } else {
+            super::fxhash::FxHashMap::default()
+        };
+        let rb = &mut owned;
+        let out = match lowered {
             Lowered::Closure {
                 proto,
                 captured,
@@ -3552,7 +3695,15 @@ impl Vm {
                     .collect();
                 (ReadyCall::Method { recv, name, args }, span)
             }
+        };
+        // W7-4c — prune to cells, for the same reason `fault_module` does: only a cell can be
+        // back-referenced by a LATER, separate serialization (the module snapshot's), and keeping the
+        // task's whole rebuilt object graph in a `Vm`-lived GC root would make it immortal.
+        if share {
+            owned.retain(|_, &mut h| matches!(self.heap.get(h), Obj::Cell(_)));
+            self.snapshot_rebuild = owned;
         }
+        out
     }
 
     /// Task 1 — the SERIAL analogue of [`Vm::prepare_worker`]: deep-copy this module graph into a fresh
@@ -3573,9 +3724,10 @@ impl Vm {
         &mut self,
         task: PendingCall,
         snap: Arc<ModuleSnapshot>,
+        cell_ids: &[(GcRef, u32)],
     ) -> Result<(PendingCall, Vec<GcRef>, Vec<bool>), RuntimeError> {
         // Phase 1: lower against the SHELL's live module_objs (home indices resolve to the parent).
-        let lowered = self.lower_task(task)?;
+        let lowered = self.lower_task(task, cell_ids)?;
         // Phase 2: install a fresh child module view into the SHARED heap and eager-fault every global,
         // materializing the deep copy. The child's `FiberCtx` carries NO snapshot (W6-2: `module_snapshot`
         // swaps per fiber, and a cooperative child's is `None`) — else `ensure_module_faulted` would try
@@ -3592,19 +3744,37 @@ impl Vm {
         // fiber carries and `root_ctx` roots, so nothing is lost — and leaving it on the shell would
         // tie the shell's next view to this child's private copy.
         let saved_rebuild = std::mem::take(&mut self.snapshot_rebuild);
+        // W7-4c — the registry is keyed to the SHELL's heap objects; the child's window must not see
+        // or clobber it (`install_snapshot` clears it, `module_define` in the fault loop clears it).
+        let saved_cells = std::mem::take(&mut self.snapshot_cells);
+        let saved_next_id = self.snapshot_next_id;
         self.install_snapshot(snap);
+        // W7-4c — REBUILD THE TASK'S OWN CROSSING FIRST, then fault the modules. `from_wire_memo`'s
+        // `Cell` arm is FIRST-WINS, so with one shared rebuild map the writer that runs first decides
+        // the shared cell's VALUE — and the two crossings can hold DIFFERENT values for one binding: a
+        // write through a cell does not drop `snapshot_memo` (only a module-SLOT write does), so a
+        // cached snapshot can carry a stale cell while the task's clone carries the value at its own
+        // `spawn`. The task's clone is the correct one (CPython: a task sees the binding as of its
+        // spawn), and M:N already produced it — it rebuilds here and faults lazily afterwards. Serial
+        // faulted first and so kept the STALE snapshot value: `0` where CPython and M:N both measure
+        // `1`, an engine divergence AND a regression against serial's own pre-W7-4c answer. Ordering
+        // the two the same way on both engines is what makes the shared map safe.
+        //
+        // Safe to move: `rebuild_ready` resolves homes through `worker_home`, which needs the module
+        // OBJECTS (pre-alloced empty by `install_snapshot` just above), not their contents.
+        let (call, span) = self.rebuild_ready(lowered, !cell_ids.is_empty());
         for i in 0..self.module_objs.len() {
             self.fault_module(i);
         }
         self.module_snapshot = None;
-        // Phase 3: rebuild callee/receiver + args — home indices now resolve to the CHILD copy.
-        let (call, span) = self.rebuild_ready(lowered);
         // Capture the child view, restore the shell's real modules/snapshot.
         let child_objs = std::mem::replace(&mut self.module_objs, saved_objs);
         let child_faulted = std::mem::replace(&mut self.module_faulted, saved_faulted);
         self.module_snapshot = saved_snap;
         self.snapshot_memo = saved_memo;
         self.snapshot_rebuild = saved_rebuild;
+        self.snapshot_cells = saved_cells;
+        self.snapshot_next_id = saved_next_id;
         let pending = match call {
             ReadyCall::Invoke { callee, args } => PendingCall::Call { callee, args, span },
             ReadyCall::Method { recv, name, args } => PendingCall::Method {
@@ -3661,6 +3831,10 @@ impl Vm {
         // W7-4a — so does the rebuild map: it holds the CHILD view's cells, and leaking them onto the
         // shell would tie a later shell-view replay to cells from a dead child copy.
         let saved_rebuild = std::mem::take(&mut self.snapshot_rebuild);
+        // W7-4c — the registry is keyed to the SHELL's heap objects; the child's window must not see
+        // or clobber it (`install_snapshot` clears it, `module_define` in the fault loop clears it).
+        let saved_cells = std::mem::take(&mut self.snapshot_cells);
+        let saved_next_id = self.snapshot_next_id;
         self.install_snapshot(snap);
         for i in 0..self.module_objs.len() {
             self.fault_module(i);
@@ -3674,6 +3848,8 @@ impl Vm {
         self.module_snapshot = saved_snap;
         self.snapshot_memo = saved_memo;
         self.snapshot_rebuild = saved_rebuild;
+        self.snapshot_cells = saved_cells;
+        self.snapshot_next_id = saved_next_id;
         r
     }
 
@@ -3896,10 +4072,16 @@ impl Vm {
                 self.fault_module(i);
             }
         }
-        let snap = Arc::new(
-            self.snapshot_modules()
-                .map_err(|e| self.err(e.message, span))?,
-        );
+        // W7-4c — seed the build from the MONOTONIC counter, and keep the cell registry it produces
+        // so a later `deep_clone_all`/`lower_task` can serialize the same binding under the same id.
+        // On failure nothing is stored (the build path caches only on success), so a faulted snapshot
+        // never leaves a half-registry behind.
+        let (built, cells, next_id) = self
+            .snapshot_modules(self.snapshot_next_id)
+            .map_err(|e| self.err(e.message, span))?;
+        let snap = Arc::new(built);
+        self.snapshot_cells = cells;
+        self.snapshot_next_id = next_id;
         self.snapshot_builds += 1;
         // Cache unconditionally: consecutive `spawn`s into one nursery must not each rebuild the whole
         // view (that is O(all module globals) per spawn — measured 84× on a spawn storm with a big
@@ -3912,7 +4094,10 @@ impl Vm {
     /// [`ModuleSnapshot`]: one [`ModuleSnap`] per module in `module_objs` order (so a callable's home
     /// index lines up with a worker's pre-alloced modules), each global lowered by [`Vm::to_snap`].
     /// Replaces the eager per-task `build_worker_modules` reconstruction — built once, replayed lazily.
-    pub(super) fn snapshot_modules(&self) -> Result<ModuleSnapshot, RuntimeError> {
+    pub(super) fn snapshot_modules(
+        &self,
+        next_id: u32,
+    ) -> Result<super::SnapshotBuild, RuntimeError> {
         let mut modules = Vec::with_capacity(self.module_objs.len());
         // W6-2 — computed inside the walk that already visits every global (no extra traversal).
         let mut reusable = true;
@@ -3922,7 +4107,12 @@ impl Vm {
         // modules a fresh id each (`l.GI := k.C.inc` / `main.GG := k.C.get`), so the task rebuilt two
         // cells and its write to one was invisible to the other: `0`, where CPython and Go both
         // measure `2`. `cells`/`next_id` therefore persist across the loop.
-        let mut memo = WireMemo::default();
+        let mut memo = WireMemo {
+            // W7-4c — MONOTONIC across builds, so an id from a superseded snapshot can never collide
+            // with one from this build (a stale seed then simply misses; see `Vm::snapshot_next_id`).
+            next_id,
+            ..WireMemo::default()
+        };
         for &pm in &self.module_objs {
             // M19 Phase 2b — collect globals in *slot order* (not HashMap iteration order) so a
             // worker replays them into matching slots; the shared `Arc<Program>` slot map makes
@@ -3953,7 +4143,11 @@ impl Vm {
                 globals: snapped,
             });
         }
-        Ok(ModuleSnapshot { modules, reusable })
+        Ok((
+            ModuleSnapshot { modules, reusable },
+            Arc::new(memo.cells),
+            memo.next_id,
+        ))
     }
 
     /// W6-2 — may a snapshot containing this module-global value be CACHED and replayed by a later
@@ -4307,8 +4501,8 @@ impl Vm {
             // source-reachable: `p := [k]` captured by two closures over one binding read `1` where
             // CPython measures `3`.
             Obj::Cell(v) => {
-                let id = match memo.cells.get(&h) {
-                    Some(&id) => id,
+                let id = match memo.cell_id(h) {
+                    Some(id) => id,
                     None => {
                         let id = memo.next_id;
                         memo.next_id += 1;
@@ -4363,6 +4557,11 @@ impl Vm {
         // W7-4a — a fresh view rebuilds from scratch: ids are minted per snapshot, so carrying a
         // previous view's map in would tie this view's cells to another heap's `GcRef`s.
         self.snapshot_rebuild.clear();
+        // W7-4c — likewise the registry: its keys are `GcRef`s in the heap the snapshot was BUILT
+        // from, which is not this worker's heap. A worker therefore starts with no registry, so a
+        // NESTED nursery's tasks fall back to pre-W7-4c behavior (two bindings) until this worker
+        // builds a snapshot of its own — a missed optimisation, never a wrong merge.
+        self.snapshot_cells = Arc::new(super::fxhash::FxHashMap::default());
         // W6-2 — seed the cache from the snapshot being installed: this view IS a faithful replay of
         // `snap`, so a nested `spawn` that changed nothing reuses it for free instead of materializing
         // + re-walking every global. The two invalidation rules still apply to it: a slot write drops it,
@@ -4390,6 +4589,10 @@ impl Vm {
         // W6-2 — a replay REPRODUCES the snapshot, it does not mutate the view, so its `module_define`s
         // must not drop the cache this view was seeded with (`install_snapshot`).
         let memo = self.snapshot_memo.take();
+        // W7-4c — `module_define` clears the registry (it is a slot mutator); a replay REPRODUCES the
+        // snapshot rather than mutating the view, so the registry rides the same take/restore the
+        // cache does.
+        let saved_cells = std::mem::take(&mut self.snapshot_cells);
         // W7-4a: ONE rebuild map for the WHOLE view's replay, mirroring the one `WireMemo`
         // `snapshot_modules` now spans every module with (scope invariant — see `deep_clone_all`), so
         // two globals over one captured local rebuild ONE cell whether they live in the same module or
@@ -4433,6 +4636,7 @@ impl Vm {
         rb.retain(|_, &mut h| matches!(self.heap.get(h), Obj::Cell(_)));
         self.snapshot_rebuild = rb;
         self.snapshot_memo = memo;
+        self.snapshot_cells = saved_cells;
     }
 
     /// D1 — if this is a worker VM (a snapshot is installed), ensure the module that owns `home` has

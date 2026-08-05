@@ -1105,12 +1105,8 @@ was retired when module globals started deep-copying per task on both engines.)
   a `spawn:` block's captures, and **the whole module snapshot** (every module, not one: W7-4a).
 
   **Known ceilings** — all of the shape "two *independent* serializations reach the same cell", which is
-  exactly where identity stops:
-  - **One task, two serializations.** A `spawn:` block's captures and the module-global snapshot cross
-    into the same task at the same instant but are serialized separately: the block's captures are
-    deep-copied into fresh cells at the `spawn`, *before* the snapshot that would give them a shared id
-    is built. So a module global and a captured local over one factory-local cell still split inside one
-    task (`gaps.md` W7-4c).
+  exactly where identity stops. (A task's OWN two crossings — its captures and the module-global
+  snapshot — are no longer one of them: `gaps.md` W7-4c, fixed 2026-08-06.)
   - **`RwShared` copy-out views.** `at`/`for_each`/`fold`/`get_key`/`has`/`for_each_entry`/
     `fold_entries` rebuild ONE piece of the stored container per step, so each piece is an independent
     copy of the binding — two `at()` calls are two crossings and can never share. A whole-container

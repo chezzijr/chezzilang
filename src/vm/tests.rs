@@ -14415,6 +14415,67 @@ main()
     assert_eq!(par_out, "41\n");
 }
 
+/// W7-4c — the shared rebuild map must not let the two crossings disagree about a binding's VALUE.
+/// `from_wire_memo`'s `Cell` arm is FIRST-WINS, and the two writers can hold DIFFERENT values for one
+/// binding: a write THROUGH a cell does not drop `snapshot_memo` (only a module-SLOT write does), so
+/// the cached snapshot below still carries `0` while the second spawn's clone carries `1`.
+///
+/// Serial eager-faults every module BEFORE rebuilding the task, M:N rebuilds first and faults lazily
+/// — so whoever wrote first won, and that differed by engine: serial printed `0`, M:N `1`, where
+/// CPython measures `1` and serial's own pre-W7-4c answer was `1`. Found by adversarial review, with
+/// that repro. Fixed by rebuilding the task's crossing FIRST on both engines (the clone is the
+/// correct value — a task sees the binding as of its own spawn).
+#[test]
+fn airlock_shared_cell_takes_the_spawn_time_value_on_both_engines() {
+    let dir = std::env::temp_dir().join(format!("chezzi_vm_w74c_val_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let entry = dir.join("main.chz");
+    std::fs::write(
+        &entry,
+        "\
+struct Ctr:
+    inc: fn() -> nil
+    get: fn() -> int
+fn make() -> Ctr:
+    n := 0
+    fn inc():
+        n = n + 1
+    fn get() -> int:
+        return n
+    return Ctr(inc, get)
+C := make()
+I := C.inc
+fn go():
+    gg := C.get
+    r := Channel[int](1)
+    parallel:
+        spawn:
+            pass
+        I()
+        spawn:
+            r.send(gg())
+    print(r.recv())
+go()
+",
+    )
+    .unwrap();
+    let (vm_out, _e, vm_res, _) = run_file(&entry);
+    let (par_out, _pe, par_res, _) =
+        run_file_parallel(&entry, crate::native::HostConfig::default());
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(vm_res.is_ok(), "serial faulted: {vm_res:?}");
+    assert!(par_res.is_ok(), "M:N faulted: {par_res:?}");
+    assert_eq!(
+        vm_out, "1\n",
+        "serial kept the STALE cached-snapshot cell value"
+    );
+    assert_eq!(par_out, "1\n");
+    assert_eq!(
+        vm_out, par_out,
+        "serial and M:N disagreed on a shared binding's value"
+    );
+}
+
 /// W7-4a — a DISCARDED speculative wire attempt must not forge a `Backref`. Found by adversarial
 /// review, and it was a live host PANIC, not a theoretical one: `main.chz` below aborted the M:N task
 /// with `CellLoad on a non-handle value` while `--serial` printed `7`.
@@ -15923,6 +15984,7 @@ fn a_carried_snapshot_build_error_is_raised_at_task_preparation() {
             span,
         },
         snap: Err(carried.clone()),
+        cell_ids: Vec::new(),
     });
     let raised = vm
         .join_nursery()

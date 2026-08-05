@@ -544,10 +544,25 @@ impl PendingCall {
 /// generator). The error is CARRIED, not raised there: preparing a task is where that fault belongs,
 /// so a nursery whose tasks are all cancelled without ever being prepared (`break`/`return` out of
 /// `parallel:`) stays faultless, exactly as before W6-2, and the body's output still precedes it.
+/// W7-4c — a crossed cell's `GcRef` paired with the wire id its BINDING travels under. Produced by
+/// `deep_clone_all`, consumed by `lower_task`, so the two crossings a task makes agree on identity.
+type CellIds = Vec<(GcRef, u32)>;
+
+/// W7-4c — what one `snapshot_modules` build yields: the snapshot, the cell registry keyed by the
+/// heap it was built from, and the next free id (monotonic across builds).
+type SnapshotBuild = (ModuleSnapshot, Arc<fxhash::FxHashMap<GcRef, u32>>, u32);
+
 #[derive(Clone)]
 struct QueuedTask {
     call: PendingCall,
     snap: Result<Arc<ModuleSnapshot>, RuntimeError>,
+    /// W7-4c — the wire ids the spawn-time `deep_clone_all` gave this task's CLONE cells, so
+    /// `lower_task` serializes them under the id `snap` already uses for the same binding and the
+    /// worker rebuilds ONE cell for both. Every `GcRef` here is reachable from `call` (the clone lives
+    /// inside a crossed value), so `roots()` already keeps it alive and its slot can never be
+    /// recycled out from under the mapping. Empty when nothing crossed, or when no snapshot was
+    /// pinned yet.
+    cell_ids: CellIds,
 }
 
 impl QueuedTask {
@@ -952,6 +967,25 @@ pub struct Vm {
     /// immortal for the fiber's life, since this map is `Vm`-lived AND a GC root (a task that
     /// reassigns a big global would keep the original rooted — a `--max-heap` regression).
     snapshot_rebuild: fxhash::FxHashMap<u32, GcRef>,
+    /// W7-4c — the identity registry for THIS view's snapshot: every `Obj::Cell` the cached
+    /// `ModuleSnapshot` gave an id to, keyed by its `GcRef` in the heap the snapshot was BUILT from.
+    /// `deep_clone_all` and `lower_task` seed their memos from it, so a cell a task reaches through
+    /// its OWN captures serializes under the id the module snapshot already uses for the same binding
+    /// — the two crossings then rebuild ONE cell instead of two.
+    ///
+    /// Dropped wherever `snapshot_memo` is (it describes that exact snapshot). **Its keys are GC
+    /// roots**, and that is load-bearing, not hygiene: an unrooted key could be swept and its slot
+    /// recycled to a DIFFERENT cell, which would then be silently identified with the dead cell's id
+    /// and merged into the wrong binding. Bounded by the module globals' cell count — clone cells go
+    /// on the task (`QueuedTask::cell_ids`), never in here, so a spawn storm does not grow it.
+    snapshot_cells: Arc<fxhash::FxHashMap<GcRef, u32>>,
+    /// W7-4c — MONOTONIC id counter across every snapshot this VM builds; never reset, unlike the
+    /// per-build `WireMemo::next_id` it seeds. A task pins the snapshot live at its own `spawn`, but a
+    /// module-slot write can drop the cache and renumber before the task is prepared. With a monotonic
+    /// counter a stale id simply MISSES against the new snapshot (that task degrades to two bindings,
+    /// the pre-W7-4c behavior); restarting from zero would make it COLLIDE and merge two unrelated
+    /// bindings — a wrong answer instead of a missed optimisation.
+    snapshot_next_id: u32,
     /// W6-2 — how many snapshots this VM has BUILT (cache misses). A `usize` bump on a cold path, and the
     /// only direct probe that the cache short-circuits: a timing bench can hint, this counts. Read by
     /// `vm::tests::snapshot_cache_*`. NOT swapped per fiber — it is a per-VM statistic, not part of the
@@ -1143,6 +1177,16 @@ struct FiberCtx {
     /// it IS heap-keyed, so `root_ctx` roots it — for a cooperative fiber that is the shared heap;
     /// an M:N fiber's own heap is never traced while parked, and its map travels with the heap here.
     snapshot_rebuild: fxhash::FxHashMap<u32, GcRef>,
+    /// W7-4c — the fiber's snapshot cell registry (see [`Vm::snapshot_cells`]). Heap-keyed like
+    /// `snapshot_rebuild`, and rooted by `root_ctx` for the same reason.
+    ///
+    /// `snapshot_next_id` travels WITH it, and must: the "ids are monotonic, so a stale one MISSES"
+    /// guarantee is only true while the counter is at least as high as every id in the registry. Every
+    /// M:N shell starts at `0` (`spawn_worker` → `Vm::new`) and one shell drains fibers from several
+    /// scopes, so a registry numbered on shell A resuming on shell B would mint ids that COLLIDE with
+    /// its own entries — two unrelated bindings merged into one cell, silently.
+    snapshot_cells: Arc<fxhash::FxHashMap<GcRef, u32>>,
+    snapshot_next_id: u32,
     /// D2b — the fiber's `Executor` handles (GC roots into its own heap; same heap-keyed argument as
     /// `module_objs`). Empty for cooperative fibers.
     executors: Vec<GcRef>,
@@ -3430,6 +3474,9 @@ impl ReadyWorker {
             // the view above; carry it for the same heap-keyed reason as `str_intern`, so the modules
             // that fault in later all tie to one cell per binding.
             snapshot_rebuild: worker.snapshot_rebuild,
+            // W7-4c — the registry + its counter travel together (see `FiberCtx::snapshot_cells`).
+            snapshot_cells: worker.snapshot_cells,
+            snapshot_next_id: worker.snapshot_next_id,
             executors: worker.executors,
             // M19 Phase 3 — the intern cache indexes `worker.heap`, which becomes `ctx.heap`; carry it
             // so the heap-keyed invariant holds (its `GcRef`s stay valid against the heap they travel with).

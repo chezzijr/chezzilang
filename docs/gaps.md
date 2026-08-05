@@ -77,7 +77,7 @@ chronological log.
 | ~~**W7-11**~~ | `:4771` | **FIXED 2026-08-04** by the same-guard whole-container fallback (`Vm::from_wire_piece`), plus `at(i) -> Option[E]`. A dangling `Backref` no longer `.expect`s: it flags, and the view re-rebuilds the whole container and returns the piece by its wire id, so the cycle survives — CPython's measured answer. Kept for the two lessons: the W7-4 round-2 rejection of "rebuild the whole container" did **not** transfer (it fired on EVERY piece and re-read the box under a SECOND guard; this fires only on a dangling backref and borrows the caller's guard), and the `.expect` was reachable from a legal single-threaded program for months because no test ran a cyclic value THROUGH a copy-out view | — |
 | ~~**W7-4a**~~ | `:3901` | **FIXED 2026-08-05.** Cell identity was per MODULE in the snapshot, so two globals in DIFFERENT modules over one shared cell arrived as two cells and a task's write through one was invisible to the other: `0`, where CPython (`import pk, pl` + a thread) and Go (two packages + a goroutine) both **measure `2`**. Fixed by one `WireMemo` spanning the whole snapshot (`emitted` cleared per module so each stays self-contained under lazy fault order) + one `Vm`-lived rebuild map (`Vm::snapshot_rebuild`), rooted and swapped with the view | Kept for the lesson: the ceiling comment predicted this would need rooted state "across GC-visible points", and the rooting turned out to be **belt-and-braces** — the test still passes with the `collect` root line deleted, because every entry is also reachable from the global it was just `module_define`d into. Predicted cost ≠ measured cost |
 | ~~**W7-4b**~~ | `:3901` | **FIXED 2026-08-05.** A cell reaching the `SnapValue::Cell` slow arm carried no id, so its binding split: `p := [k]` (a captured local holding a module) read `1` where CPython **measures `3`**. Fixed by giving `SnapValue` the same `Cell { id, inner }` / `Backref(id)` encoding the wire arms have, minted from the SAME memo and drained by the same rebuild map | The filed premise was **stale**: `Native`/`Cffi` cross BY VALUE now, so they never force the slow arm — only `Obj::Module` does (`has_handle` = `WireValue::Handle` = `Obj::Module` alone). The code called that "source-unreachable, defensive only", but a module IS bindable to a local (`m := k`), so a cell over `[k]` reaches it. **Re-derive a residual's premise before pricing it**; the "snapshot FORMAT change, out of proportion" estimate was for a residual that had drifted |
-| **W7-4c** | `:3901` | ONE TASK reached through TWO serializations still gets two bindings: a `spawn:` block's captures and the module-global snapshot cross into the same task but are separate memos, rebuilt at different times (the snapshot faults in lazily). `0`, where CPython **measures `2`** | **RE-SCOPED 2026-08-05** after an attempt (see §W7-4c below). NOT the same family as W7-4a: the block's captures are DEEP-CLONED into fresh parent-heap cells at spawn time, *before* the snapshot that would give them ids exists, so the rebuild map alone cannot close it. Four mechanisms, one of which moves the W6-2 pin instant. Fenced by `module_global_plus_local_capture_still_split` and stated in `syntax.md` rule 2 |
+| ~~**W7-4c**~~ | `:3901` | **FIXED 2026-08-06.** ONE TASK reached through TWO serializations now gets ONE binding: a `spawn:` block's captures and the module-global snapshot rebuild the same cell. `0` → **`2`**, matching CPython. The snapshot is pinned BEFORE the spawn-time clone, the clone carries its ids forward on the task (`QueuedTask::cell_ids`), and `rebuild_ready` + `fault_module` drain ONE map | Cost: **+10.2% on a 120k-spawn storm** that gains nothing from it (filed below as an open perf item); snapshot stress flat (+0.2%). Adversarial review found TWO criticals first — see §W7-4c |
 | ~~**W7-4d**~~ | `:3901` | **CLOSED 2026-08-05 as NOT-A-BUG (resolved by design).** An `RwShared` COPY-OUT VIEW (`at`/`for_each`/`fold`/`get_key`/`has`/`for_each_entry`/`fold_entries`) rebuilds one piece per step, so two sibling closures pulled out separately do not share their binding | Inherent to a copy-out API — two `at()` calls ARE two crossings, and identity is per crossing by definition. A whole `get()`/`read()`, and `slice` (one call returning a container), are one crossing and DO share. Never a residual of the fix; "fixing" it would reopen the round-2 O(n²) + concurrent-`set` hazard. Documented in `concurrency.md` §airlock |
 
 **Known limits that are documented, not bugs** (listed so they aren't re-filed): `Iterable[T]` element
@@ -4120,11 +4120,12 @@ and [§W7-4c](#w7-4c--a-tasks-own-captures-and-its-module-snapshot-are-still-two
   same memo and drained by the same rebuild map, so a cell on the snapshot SLOW arm keeps its identity
   too. `1` → `3`, matching CPython. (The filed premise was stale — `Native`/`Cffi` cross by value now,
   so only `Obj::Module` still forces that arm.)
-- **W7-4c** — **STILL OPEN, re-scoped**: ONE TASK reached through TWO serializations still gets two
-  bindings. `c := make()` at module level with `gi := c.inc` a global and `gg := c.get` a local captured
-  by a `spawn:` block reads `0`, not `2`. NOT the same family as W7-4a — see the section below for the
-  two measured blockers. Fenced by `module_global_plus_local_capture_still_split` and stated in
-  `docs/syntax.md` rule 2 + `docs/concurrency.md` §airlock.
+- ~~**W7-4c**~~ — **FIXED 2026-08-06**: ONE TASK reached through TWO serializations now gets ONE
+  binding. `0` → `2`, matching CPython. Four mechanisms (snapshot cell registry + monotonic ids, a
+  seeded spawn-time clone, a per-task id carry, and the W6-2 pin moved ahead of the clone) — and the
+  fence `module_global_plus_local_capture_still_split` flipped to
+  `..._shares_its_binding`. **One thing stays open: a +10.2% cost on a spawn storm that gains nothing
+  from it** — see the section below.
 - ~~**W7-4d**~~ — **CLOSED as not-a-bug**: an `RwShared` COPY-OUT VIEW is per-piece independent:
   `at`/`for_each`/`fold`/`get_key`/`has`/`for_each_entry`/`fold_entries` rebuild one piece per step, so
   two sibling closures pulled out separately do not share their binding (two `at()` calls ARE two
@@ -4261,35 +4262,84 @@ is single-source and cannot reach the lazy per-module fault path). Full `cargo t
 module-global closures over distinct cells × 1000 nurseries) main 2.585 s → 2.573 s (flat, within run
 noise of ±0.06 s).
 
-### W7-4c — a task's own captures and its module snapshot are still two crossings (**RE-SCOPED 2026-08-05**)
+### W7-4c — a task's own captures and its module snapshot are ONE binding (**FIXED 2026-08-06**)
 
-Attempted right after W7-4a/b, on the theory in the a-fix ("same family — one more `Vm`-lived map").
-**It is not the same family**, and the attempt was stopped at a pre-declared stop condition rather than
-grown. What the trace actually shows:
+```chezzi
+C := make()            # the Ctr(inc, get) pair over a factory-local `n`
+GI := C.inc            # a module GLOBAL  -> crosses via the module snapshot
+fn main():
+    gg := C.get        # a captured LOCAL -> crosses via the spawn-time clone
+    parallel:
+        spawn:
+            GI(); GI(); r.send(gg())
+    print(r.recv())    # was 0 — CPython measures 2
+```
+
+The trace, and why the W7-4a fix did not transfer:
 
 ```
-parent cell N --deep_clone_all--> N' (parent heap) --lower_task--> wire id --rebuild_ready--> N''  (worker)
-parent cell N --to_snap--------------------------> snapshot id X ------------> fault_module --> N''' (worker)
+parent cell N --deep_clone_all--> N' (parent heap) --lower_task--> id --rebuild_ready--> N''  (worker)
+parent cell N --to_snap--------------------------> snapshot id X ----------> fault_module --> N''' (worker)
 ```
 
-`N''` and `N'''` must be one cell. Two measured blockers:
+**Four mechanisms**, all needed:
+1. `Vm::snapshot_cells` + a MONOTONIC `snapshot_next_id` — the registry of every cell the cached
+   snapshot numbered, keyed by `GcRef`. Its keys are GC roots, load-bearing: an unrooted key could be
+   swept and its slot recycled to a different cell, silently merging two bindings. Monotonic ids mean a
+   snapshot renumbered between `spawn` and preparation makes a stale id **miss** (degrade) rather than
+   **collide** (wrong answer).
+2. `deep_clone_all` seeds from the registry (shared by `Arc`, never copied — a per-spawn O(cells) clone
+   is the O(M·K) shape W7-4 already rejected) and reports the CLONE cells' ids on the task.
+3. `lower_task` seeds from those, so the clone serializes under the snapshot's id; `rebuild_ready`
+   joins the one `Vm`-lived rebuild map `fault_module` drains.
+4. The **W6-2 pin instant moves ahead of the clone** (`pin_snapshot`). It has to: `deep_clone_all` ran
+   BEFORE `register_task`'s `ensure_snapshot`, so the first spawn of a view cloned its cells before any
+   id existed. No user code runs between, so pinned VALUES are unchanged; only which fault wins when
+   both the snapshot build and the crossing are non-viable.
 
-1. **The clone happens before the snapshot exists.** `do_spawn`/`do_spawn_block` call `deep_clone_all`
-   (`sched.rs:111` / `:192`) and only THEN `register_task` (`:131` / `:198`), which is where
-   `ensure_snapshot` runs (`:228`). So on the first spawn of a view there are no snapshot ids to seed
-   the clone from — the side table the a-fix suggests is empty exactly when it is needed. Closing this
-   means hoisting the **W6-2 pin instant** ahead of the clone, which reorders an `ensure_snapshot`
-   fault against `deep_clone_all`'s crossability faults — observable, and the codebase already treats
-   that ordering as load-bearing (`do_spawn`'s "ARGS FIRST, receiver/callee LAST" note).
-2. **A re-snapshot mid-nursery renumbers.** `snapshot_memo` drops on any module-slot write, so a second
-   spawn in the same nursery can be numbered against a fresh snapshot while the first task still holds
-   ids from the old one. Survivable only with a VM-monotonic id counter (so a stale id MISSES and the
-   task degrades to today's behavior instead of colliding into a WRONG shared cell) — a third
-   mechanism, on top of the per-task clone-id carry that has to be threaded through
-   `QueuedTask`/`prepare_worker`/`prepare_serial_child`/`lower_task`.
+**ADVERSARIAL REVIEW CAUGHT TWO CRITICALS, and the first is the interesting one.**
 
-Four mechanisms, one of which moves a documented invariant. Re-filed rather than rushed; the fence
-`module_global_plus_local_capture_still_split` still asserts `0` and must flip to `2` when this lands.
+**(a) A shared identity forces a shared VALUE — and the two crossings held different ones.**
+`from_wire_memo`'s `Cell` arm is FIRST-WINS. A write THROUGH a cell does not drop `snapshot_memo`
+(only a module-SLOT write does), so a cached snapshot can carry a stale cell while the task's clone
+carries the value at its own `spawn`:
+
+```chezzi
+parallel:
+    spawn: pass          # builds+caches the snapshot, cell = 0
+    I()                  # a write THROUGH the cell — cache NOT dropped
+    spawn: r.send(gg())  # the clone carries 1
+#  serial 0  |  M:N 1  |  CPython 1  |  serial's own pre-W7-4c answer 1
+```
+Serial eager-faults every module before rebuilding the task; M:N rebuilds first and faults lazily — so
+the engines picked different winners. Fixed by rebuilding the task's crossing FIRST on both (the clone
+is the correct value: a task sees the binding as of its own spawn). Fenced by
+`airlock_shared_cell_takes_the_spawn_time_value_on_both_engines`. **Lesson: unifying identity across
+two serializations silently unifies their VALUES too, and "same binding" does not imply "same
+instant". Before merging two copies of anything, ask what happens when they disagree** — here one was
+a cached snapshot that no rule invalidates on a cell write.
+
+**(b) The monotonic-counter guarantee was split from the thing it guarded.** `snapshot_cells` went into
+the `FiberCtx` swap group; `snapshot_next_id` did not. Every M:N shell starts at `0` and one shell
+drains fibers from several scopes, so a registry numbered on shell A resuming on shell B would re-mint
+ids its own entries already use — two unrelated bindings merged, silently. The counter now travels
+with the registry, and a `debug_assert` in `deep_clone_all` re-checks the invariant.
+
+**Verified.** `0` → `2` on both engines; the full `airlock_` panel (32 Rust + 15 chz) green, including
+`separate_tasks_each_get_their_own_binding` (two tasks must still split) and
+`airlock_cross_arg_data_alias_stays_independent` (the data-DAG contract); `cargo test --lib` 3833;
+`chezzi test tests/chz/` 297/297 both engines; thread sweep `1/2/4/8` × 25, 0 wrong. The fence
+`module_global_plus_local_capture_still_split` FLIPPED to
+`module_global_plus_local_capture_shares_its_binding` (`0` → `2`) — an intended contract change.
+
+**OPEN — perf cost, not yet closed.** A 120k-`spawn` storm that holds **no** module-global cells (so it
+gains nothing) runs **+10.2%** (0.919 s → 1.013 s, interleaved A/B, medians of 7). Snapshot stress is
+flat (+0.2%), `loop` flat. Three optimisations are already in (share the registry by `Arc`; skip the
+report scan when the registry is empty; keep the throwaway rebuild map when a task has no shared ids —
+that one alone recovered ~5%). The residue is spread across the task pipeline (`QueuedTask` grew a
+`Vec`, `deep_clone_all` returns a tuple, extra per-spawn moves) and was not localised further: no
+`perf` on the box, and a hand bisect was invalid because the probe allocated a `String` per spawn.
+**Next step: profile the spawn path properly and recover it.**
 
 ## Session log — 2026-07-28 (bug-hunt wave 7 — the P2 tier: 3 findings; ALL THREE FIXED — W7-9 + W7-10 2026-07-30, W7-8 2026-07-31)
 

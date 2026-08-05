@@ -193,15 +193,13 @@ test fn separate_tasks_each_get_their_own_binding():
     assert r.recv() == 0
     assert c.get() == 0
 
-# FENCE — the THIRD boundary, and the one the persistent cell memo actually creates: ONE TASK reached
-# through TWO serializations still gets two bindings. A `spawn:` block's captures and the module-global
-# snapshot cross into the same task at the same instant but are separate serializations (per-task memo
-# vs per-module memo, rebuilt at different times — the snapshot faults in LAZILY on first module access,
-# so their rebuild maps cannot be unified without `Vm`-lived state across GC-visible points). So a
-# module global and a captured local over ONE factory-local cell still split: the task's `_w74i()`
-# writes the snapshot's cell, its `gg()` reads the capture's. Known ceiling, same family as the
-# cross-MODULE one — see docs/gaps.md W7-4c.
-test fn module_global_plus_local_capture_still_split():
+# W7-4c (FIXED 2026-08-06) — ONE TASK reached through TWO serializations now gets ONE binding. A
+# `spawn:` block's captures and the module-global snapshot are still two separate serializations,
+# rebuilt at different times (the snapshot faults in LAZILY on first module access), but they now agree
+# on the cell's ID: the snapshot is pinned BEFORE the spawn-time clone, the clone carries the
+# snapshot's id forward on the task, and `rebuild_ready` + `fault_module` drain ONE rebuild map. So the
+# task's `_w74i()` writes and its `gg()` reads the same cell. Was `0`; CPython measures `2`.
+test fn module_global_plus_local_capture_shares_its_binding():
     gg := _w74c.get
     r := Channel[int](1)
     parallel:
@@ -209,7 +207,7 @@ test fn module_global_plus_local_capture_still_split():
             _w74i()
             _w74i()
             r.send(gg())
-    assert r.recv() == 0
+    assert r.recv() == 2
 
 # W7-4 REGRESSION — `RwShared`'s zero-copy read views DRAIN one stored wire through many independent
 # `from_wire` rebuilds, so the persistent cell memo made a `Backref` reach across sibling elements for

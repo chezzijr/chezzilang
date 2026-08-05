@@ -31,13 +31,28 @@ Single source of truth for "what am I doing next." Update after every work sessi
 >   `airlock_handle_bearing_recursive_local_fn_round_trips`.
 > - **d** — CLOSED as resolved-by-design. An `RwShared` copy-out view is per-piece: two `at()` calls ARE
 >   two crossings. `get()`/`read()`/`slice` are one crossing and already share.
-> - **c** — STILL OPEN, and **not** the same family as a. Attempted and stopped at a pre-declared stop
->   condition: `deep_clone_all` runs at `sched.rs:111`/`:192`, *before* `register_task`'s
->   `ensure_snapshot` at `:228`, so the first spawn of a view clones its cells before any snapshot id
->   exists — the side table the a-fix suggests is empty exactly when needed. Closing it needs the W6-2
->   pin instant hoisted ahead of the clone (an observable fault-ordering change), a monotonic id counter
->   so a mid-nursery re-snapshot degrades instead of colliding, and a per-task clone-id carry through
->   `QueuedTask`/`prepare_worker`/`prepare_serial_child`/`lower_task`.
+> - **c** — **ALSO FIXED (2026-08-06)**, `0` → `2` matching CPython, after the first attempt was
+>   stopped at a pre-declared stop condition and re-scoped. Four mechanisms: a `Vm` snapshot cell
+>   registry with MONOTONIC ids (so a renumbered snapshot makes a stale id miss, not collide), a
+>   spawn-time clone seeded from it, a per-task clone-id carry
+>   (`QueuedTask::cell_ids` → `lower_task`), and the W6-2 pin instant moved ahead of the clone
+>   (`pin_snapshot`) — the first spawn of a view used to clone its cells before any id existed. The
+>   fence `module_global_plus_local_capture_still_split` FLIPPED to `..._shares_its_binding`.
+>   **⚠️ OPEN: it costs +10.2% on a 120k-spawn storm that holds no module-global cells and so gains
+>   nothing** (0.919 s → 1.013 s, interleaved A/B, medians of 7; snapshot stress and `loop` flat).
+>   Three optimisations already in; the residue is spread across the task pipeline and was not
+>   localised (no `perf` on the box). Next: profile the spawn path and recover it.
+>
+> **⚠️ ADVERSARIAL REVIEW CAUGHT TWO MORE CRITICALS in the (c) work, and the first is a general
+> lesson: unifying two copies' IDENTITY silently unifies their VALUES, and "same binding" does not
+> imply "same instant".** `from_wire_memo` is first-wins, and a write THROUGH a cell does not drop
+> `snapshot_memo` (only a module-SLOT write does) — so the cached snapshot held `0` while the task's
+> clone held `1`. Serial faults modules before rebuilding the task, M:N after, so the engines picked
+> different winners: **serial `0`, M:N `1`, CPython `1`, and serial's own pre-fix answer `1`.** Fixed by
+> rebuilding the task's crossing first on BOTH engines. Second: `snapshot_cells` was put in the
+> `FiberCtx` swap group but its monotonic counter was not — every M:N shell starts at `0` and drains
+> fibers from several scopes, so a migrated registry would re-mint ids it already used. **Before
+> merging two copies of anything, ask what happens when they disagree.**
 >
 > **⚠️ ADVERSARIAL REVIEW CAUGHT A LIVE REGRESSION THE FULL GREEN GATE MISSED** — both prosecutors
 > found it independently. The (a) fix made `WireMemo` span modules, which silently invalidated
