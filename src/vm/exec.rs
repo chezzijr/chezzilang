@@ -48,8 +48,11 @@ impl Vm {
     /// unwinds through defers, can be caught by `recover:`, loses to nothing at a cross-task join, and
     /// exits NON-ZERO with a trace on stderr (still live — `| head` closes only stdout). Python raises
     /// `BrokenPipeError` here for the same reason. Without a halt at all, `chezzi run x.chz | head -1`
-    /// would spin forever on a dead pipe: Rust ignores SIGPIPE, and restoring it would break
-    /// `std.net`'s EPIPE-as-an-error contract.
+    /// would spin forever on a dead pipe: Rust ignores SIGPIPE, and restoring it process-wide would
+    /// break `std.net`'s EPIPE-as-an-error contract. (Note the "process-wide": Go scopes SIGPIPE by
+    /// FD — fd 1/2 signal, every other fd returns `EPIPE` — and so has both. See the safe-direction
+    /// observation under `gaps.md` W7-5e. Not ruled out, just not what we do: an in-VM fault composes
+    /// with `defer`/`recover:`/task joins in ways a signal cannot, and `chezzi` is also library code.)
     ///
     /// ponytail: a defer that prints while a REAL fault is unwinding raises this fault too, so its
     /// message replaces the original's (the run still exits non-zero, with a trace — only the message

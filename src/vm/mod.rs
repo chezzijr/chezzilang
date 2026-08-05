@@ -835,6 +835,13 @@ pub struct Vm {
     /// emit to stdout" — see the `stream_halt` gate in `call.rs`'s `invoke_native`. A counter, not a
     /// flag, so a native that re-enters Chezzi (`[1].map(f)` where `f` prints) still reports the write
     /// to every frame that spans it. Never reset; wrapping is unreachable (2^64 writes).
+    ///
+    /// **UNENFORCED INVARIANT (`gaps.md` W7-5e): every streamed stdout write must go through
+    /// [`Vm::emit_out_bytes`].** It does today, but a new native reaching `stream::write_out` another
+    /// way emits without bumping this, so its broken-pipe halt never fires and `| head -1` spins. Do
+    /// NOT "fix" that by moving the counter into `stream::write_out`: that makes it process-global, so
+    /// a sibling thread's write during my native call fires MY halt — the same cross-job contamination
+    /// W7-5d removed, one layer down. Per-`Vm` is the correct shape; the fence is visibility.
     stdout_writes: u64,
     /// Active cooperative-scheduler levels (B1/B2), innermost last. Each [`Nursery`] holds the parked
     /// joining (parent) fiber's context plus its child fibers; non-empty means a `recv` may suspend.

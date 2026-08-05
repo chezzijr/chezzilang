@@ -83,6 +83,11 @@ fn spawn_writer<W: Write + Send + 'static>(mut w: W, is_stdout: bool) -> Sender<
 
 /// Queue `b` for the process's real stdout (the writer thread does the syscall). Once stdout is dead
 /// the bytes are dropped; the run is halted separately by [`super::Vm::stream_halt`] at the print site.
+///
+/// **Call this ONLY from [`super::Vm::emit_out_bytes`]** (`gaps.md` W7-5e). That method bumps
+/// `Vm::stdout_writes`, which is what gates the broken-pipe halt at native call sites; a write that
+/// bypasses it emits bytes the halt cannot see, and `chezzi run x.chz | head -1` on a loop calling
+/// that native spins forever instead of exiting.
 pub(super) fn write_out(b: &[u8]) {
     let tx = OUT.get_or_init(|| spawn_writer(std::io::stdout(), true));
     let _ = tx.send(Msg::Write(b.to_vec()));
