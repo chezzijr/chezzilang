@@ -61,6 +61,7 @@ chronological log.
 | **W6-10s** | `:1179` | `--max-heap` residual **sampling** escapes left after the byte-aware pacing fix | Pacing samples the cap on charged off-heap bytes, but only for stores routed through `to_wire_crossable` and only per heap. Still not sampled: the documented inline-scalar loop (`future.md §1b` — no `Obj`s, no wire bytes), the by-hand airlock paths (spawn args, closure captures, `Executor.submit`), and a heap that HOLDS a huge core without storing to it |
 | **W6-9r** | `:1303` | Parity-oracle residual left by the `W6-9b` fix: ~31 hand-rolled `run_file_p` + `run_file` cross-engine compares in `parity_tests.rs` still diff LOSSILY-DECODED strings, and `parity_entry_cfg_lines` compares stdout as an order-insensitive line multiset | The three SHARED comparators were fixed at the helper level (0 call sites touched); converting the hand-rolled ones means rewriting ~31 call sites. UTF-8-only today, so nothing is failing — but a new byte-emitting test added at one of those sites inherits the blindness. Use `vm::run_file_bytes` there |
 | **W6-10r** | `:1216` | `--max-heap` residual: a payload reachable ONLY through a **nested** core (a `Channel` inside a `Shared`, once the nested core's last `Obj` alias slot is swept) is counted nowhere | Left open by the W6-10 fix on purpose. `live_bytes` reaches a core's bytes through its `Obj::*` alias slot; a nested core has none. Closing it needs cross-core byte recursion with `Arc` de-dup — narrow trigger, not worth the machinery yet |
+| **W7-21** | `:5835` | A module global holding a FN VALUE can be referenced but not CALLED through the module: `l.BARE` resolves, `l.BARE()` → `module 'l' has no member 'BARE'` (binding it first and calling that works). CPython and Go both accept the direct call, measured | The call arm (`checker/expr.rs:2182`) reads only `ModuleSig::functions` (declared `fn`s); a top-level `let`/`:=` binding lives in `ModuleSig::values` whatever its type, so a `Ty::Fn` value there is never consulted and the diagnostic lies about the member existing. Fix is a `values` fallback on the `fsig == None` path. Found 2026-08-05 while building a W7-4a repro — not filed before because it needs an importer (single-module `check` says `ok`) |
 | protocol embeds | `:1505` | A protocol-embedded method isn't callable through the interface value (`p: Person` can't call embedded `name()`) despite `spec.md:973` "flattened at bound sites" | Filed as a safe-direction observation in wave 3; never triaged — doc and behavior contradict each other either way |
 | ~~**W7-5d**~~ | `:5188` | **FIXED 2026-08-05.** A dead stdout was a whole-queue kill switch, so a broken pipe cancelled sibling `Executor` jobs. It is now an ORDINARY per-job fault. TWO process-global reads had to go: `executor_hard_halt` is `is_over_memory \|\| is_timed_out`, and `invoke_native`'s post-call `stream_halt` is gated on that call having actually emitted to stdout (`Vm::stdout_writes`) — unguarded it faulted a sibling that never printed, after its FIRST native. Repro: **both markers 21/21 runs**, **all three writes 15/15**, across `--serial` and `--threads=1/2/3/4/8`/default; pre-fix it wrote neither marker at `--threads=1`/`--serial`, both at `--threads=3+`, and either at `--threads=2`. Matches CPython `ThreadPoolExecutor` (`max_workers` 1/2/4), the ancestor that owns `Executor` | Three lessons. (1) A **process-GLOBAL read inside an error-property predicate** — `out_dead_reason().is_some()` does not describe the `err` it is passed. The shape was in the tree **twice**; fixing the first made the second visible. (2) The ledger's own proposed alternative ("an accepted-asymmetry test pinning what each engine actually does") **was never available**: the M:N shape varied by thread count AND across runs at one thread count. (3) A one-native-call marker is the exact shape that hides instance (2) — when the contract is "the REST of the job runs", the fence needs a "rest". Accepted cost: graceful `shutdown()` only — a submitted job that never prints and never returns now hangs `\| head -1` (`shutdown_now()` still kills it in 54 ms; a loop back-edge IS a cancellation point). CPython hangs identically; Go exits via SIGPIPE on fd 1, a signal policy Chezzi does not adopt. Nurseries unaffected (they abort siblings on any fault, by design) |
 | ~~**W7-18**~~ | `:5155` | **FIXED 2026-08-05.** `--timeout` now reaches a fiber parked on the NETPOLLER — **10001 ms hang (no verdict, no output, killed by an external `timeout 10`) → 304 ms `TIMED-OUT t`**, stable 10/10 at `CHEZZI_THREADS=1/2/3/4/8`, and the aborted task still runs its `defer`s *including a socket write inside them*. Go is the ancestor and agrees: `go test -timeout 300ms` against a goroutine on `net.Listener.Accept()` panics `test timed out after 300ms` and never runs the following `t.Fatal`. A park now registers for `min(the op's own D6c timeout_ms, the run deadline)` and the resumed op **re-reads the clock** to tell the two apart | **The filed premise was WRONG, and it is the whole lesson.** The row said the fix "needs a second marker distinct from `poll_timed_out`, threaded through the 5 `PollPark` construction sites plus the re-inject." It needed none: `Vm::deadline` is ALREADY an absolute `Instant` on every worker and `Some` only under `--timeout`, so `now >= self.deadline` at resume answers exactly what the marker would have carried. `PollPark`, `poller::register`, `next_timeout` and `fire_due_socket_timeouts` are untouched. Second lesson: the obvious spelling of that insight re-introduced W7-16's skipped-`defer` bug on **three** separate paths (halt-before-take, `?` past `demote_socket_exit`, clear-only connect resume) and adversarial review found a **fourth** — a top-level `connect` handing the abort back as a *catchable* `Err`. All four shipped green |
@@ -5831,6 +5832,58 @@ saying it covers the VM's own sink only.
 regress, and the only assertable shape is a hang — a test that must time out to pass. Should this ever
 be revisited, the trigger is not "FFI can write fd 1" (it always can) but CPython or Go changing what
 *they* do.
+
+### W7-21 — a module global holding a FN VALUE cannot be CALLED through the module (`m.G` resolves, `m.G()` does not) — **OPEN, filed 2026-08-05 while building a W7-4a repro**
+
+```chezzi
+# k.chz
+fn one() -> int:
+    return 1
+# l.chz
+import k
+BARE := k.one            # a module global whose TYPE is a fn
+
+# main.chz
+import l
+x := l.BARE              # ok: no type errors
+y := l.BARE()            # type error (line 2, col 6): module 'l' has no member 'BARE'
+z := l.BARE
+w := z()                 # ok — binding it first works
+```
+
+**Both ancestors accept it, measured:** CPython `m.G()` where `G = _one` → `1`; Go `pkg.G()` where
+`var G = one` → `1`. Nothing about the two-step spelling is more correct, so this is drift, not design.
+
+**Root cause — the two member lookups read DIFFERENT maps.** `ModuleSig` (`src/checker/mod.rs:607`)
+carries `functions: HashMap<String, FnSig>` **and** `values: HashMap<String, Ty>`. A declared `fn` lands
+in `functions`; a top-level `let`/`:=` binding lands in `values`, whatever its type. The VALUE path
+reads `values`, so `l.BARE` resolves. The CALL path (`src/checker/expr.rs:2182`, the `Ty::Module(mname)`
+arm of the call inference) reads **only** `functions`:
+
+```rust
+let fsig = sig.and_then(|s| s.functions.get(method).cloned());
+…
+self.error(span, format!("module '{mname}' has no member '{method}'"));
+```
+
+so a `values` entry of type `Ty::Fn` is never consulted and falls straight to the diagnostic — which
+then *lies*: the member exists, it just isn't a declared `fn`.
+
+**Shape of the fix**: on the `fsig == None` path, before erroring, look the name up in `values` and, if
+its `Ty` is a `Ty::Fn`, check the args against it and return its result type — the same fallback the
+value path already performs. Note the diagnostic is wrong independently of the fix and should say
+something truthful when the name IS present but is not callable.
+
+**Scope, checked**: not destructuring-specific (that was the red herring the repro started from —
+`D1, D2 := k.fns()` fails for the same reason a plain `BARE :=` does), not nested-fn-specific, and the
+element type is irrelevant (`(int, int)` and `(List[int], List[int])` halves are fine because nobody
+calls them). The trigger is exactly *call syntax on a `values` member of fn type*.
+
+**Class**: `checker⊋compiler`'s sibling — a checker that REJECTS what the rest of the system supports
+(the value path proves the binding exists and the two-step call runs). Also single-module-clean:
+`chezzi check l.chz` alone says `ok`, because the failure needs an importer. Same shape as the
+`checker test helper key divergence` and `reserved method table: two harvest paths` notes — a member
+surface harvested into two places, with one consumer reading only one of them.
 
 ### Safe-direction observations (not filed as bugs)
 - **`Vm::stream_halt`'s stated reason for never restoring SIGPIPE is weaker than it reads.** The
