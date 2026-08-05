@@ -7677,11 +7677,12 @@ branch names) is in the git log.
   CPython drops the GIL around `os.stat`/`os.walk`). Now `Kind::Blocking`, after the off-heap-safety
   proof the gap asked for: both take their path through `Host::arg_bytes`, and both returns are
   primitive `NativeRet`s already crossed by members that offload today (`_list_dir` returns the same
-  `Ok(List([Bytes…]))`, `process.run`/`run_args` the same `Ok(Struct{…})`). Measured at `CHEZZI_THREADS=1` on a
-  121k-entry tree: a sibling fiber's worst scheduling gap **94–99 ms → 28 ms**, and 4 concurrent
-  `fs.walk`s **525–563 ms → 304–324 ms** (1.7× — they overlap on the dirty pool instead of
-  serializing). The 28 ms residual is *result lowering*, not the syscall: building the 121k-path list
-  as heap objects needs the `Vm`, so it stays on the core worker (it falls to 9 ms on an 18k-entry
+  `Ok(List([Bytes…]))`, `process.run`/`run_args` the same `Ok(Struct{…})`). Measured at
+  `CHEZZI_THREADS=1` on a 121k-entry tree, paired against a binary built from the same commit with only
+  these two entries reverted: a sibling fiber's worst scheduling gap **136–139 ms → 38–41 ms**, and 4
+  concurrent `fs.walk`s **814–825 ms → 449–469 ms** (1.8× — they overlap on the dirty pool instead of
+  serializing). The ~39 ms residual is *result lowering*, not the syscall: building the 121k-path list
+  as heap objects needs the `Vm`, so it stays on the core worker (it falls to 9–10 ms on an 18k-entry
   tree). `every_syscall_module_member_is_blocking` is now exception-free and is the fence that pins
   the classification; a new `tests/chz` case runs `fs.stat` inside a nursery to cover the offloaded
   `Struct` round-trip (a correctness fence — it passes under either `Kind`, which the review made the
