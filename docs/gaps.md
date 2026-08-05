@@ -61,8 +61,8 @@ chronological log.
 | **W6-10s** | `:1179` | `--max-heap` residual **sampling** escapes left after the byte-aware pacing fix | Pacing samples the cap on charged off-heap bytes, but only for stores routed through `to_wire_crossable` and only per heap. Still not sampled: the documented inline-scalar loop (`future.md §1b` — no `Obj`s, no wire bytes), the by-hand airlock paths (spawn args, closure captures, `Executor.submit`), and a heap that HOLDS a huge core without storing to it |
 | **W6-9r** | `:1303` | Parity-oracle residual left by the `W6-9b` fix: ~31 hand-rolled `run_file_p` + `run_file` cross-engine compares in `parity_tests.rs` still diff LOSSILY-DECODED strings, and `parity_entry_cfg_lines` compares stdout as an order-insensitive line multiset | The three SHARED comparators were fixed at the helper level (0 call sites touched); converting the hand-rolled ones means rewriting ~31 call sites. UTF-8-only today, so nothing is failing — but a new byte-emitting test added at one of those sites inherits the blindness. Use `vm::run_file_bytes` there |
 | **W6-10r** | `:1216` | `--max-heap` residual: a payload reachable ONLY through a **nested** core (a `Channel` inside a `Shared`, once the nested core's last `Obj` alias slot is swept) is counted nowhere | Left open by the W6-10 fix on purpose. `live_bytes` reaches a core's bytes through its `Obj::*` alias slot; a nested core has none. Closing it needs cross-core byte recursion with `Arc` de-dup — narrow trigger, not worth the machinery yet |
-| **W7-21** | `:5835` | A module global holding a FN VALUE can be referenced but not CALLED through the module: `l.BARE` resolves, `l.BARE()` → `module 'l' has no member 'BARE'` (binding it first and calling that works). CPython and Go both accept the direct call, measured | The call arm (`checker/expr.rs:2182`) reads only `ModuleSig::functions` (declared `fn`s); a top-level `let`/`:=` binding lives in `ModuleSig::values` whatever its type, so a `Ty::Fn` value there is never consulted and the diagnostic lies about the member existing. Fix is a `values` fallback on the `fsig == None` path. Found 2026-08-05 while building a W7-4a repro — not filed before because it needs an importer (single-module `check` says `ok`) |
 | protocol embeds | `:1505` | A protocol-embedded method isn't callable through the interface value (`p: Person` can't call embedded `name()`) despite `spec.md:973` "flattened at bound sites" | Filed as a safe-direction observation in wave 3; never triaged — doc and behavior contradict each other either way |
+| ~~**W7-21**~~ | `:5835` | **FIXED 2026-08-05.** A module global holding a FN VALUE is now CALLABLE through the module: `l.BARE()` went `type error … module 'l' has no member 'BARE'` (rc=1) → `ok`, and prints `1` on M:N, `--threads=1` and `--serial`. Both ancestors agree and were re-run: CPython `pk.G()` → `1`, Go `pkg.G()` → `1`. Checker-only — the `Ty::Module` call arm now falls back to `sig.values` and calls a `Func`/`BuiltinFn` there with STRICT `check_args`; the compiler's `Op::CallMethod` fall-through and `Obj::Module` dispatch already handled it. The lying diagnostic is fixed too: an existing-but-uncallable member says `member 'N' is not callable (it has type int)` | **The obvious runtime test was green BEFORE the fix, and that is the lesson.** For a `checker⊋compiler` sibling (checker rejects what the system executes) the instinct is "run it on both engines" — but `run_file`/`run_file_parallel` bypass the checker, so the both-engine test passes pre-fix. It proves the *lowering* exists; only a graph-level `check_graph` test proves the *rejection* is gone. Two claims, two tests, neither substitutes for the other (the VM test's doc-comment now says which one it is). Second: `from l import BARE` + `BARE()` always worked, which is precisely what kept the qualified arm the single broken site — a member surface harvested into two maps with one consumer reading one of them |
 | ~~**W7-5d**~~ | `:5188` | **FIXED 2026-08-05.** A dead stdout was a whole-queue kill switch, so a broken pipe cancelled sibling `Executor` jobs. It is now an ORDINARY per-job fault. TWO process-global reads had to go: `executor_hard_halt` is `is_over_memory \|\| is_timed_out`, and `invoke_native`'s post-call `stream_halt` is gated on that call having actually emitted to stdout (`Vm::stdout_writes`) — unguarded it faulted a sibling that never printed, after its FIRST native. Repro: **both markers 21/21 runs**, **all three writes 15/15**, across `--serial` and `--threads=1/2/3/4/8`/default; pre-fix it wrote neither marker at `--threads=1`/`--serial`, both at `--threads=3+`, and either at `--threads=2`. Matches CPython `ThreadPoolExecutor` (`max_workers` 1/2/4), the ancestor that owns `Executor` | Three lessons. (1) A **process-GLOBAL read inside an error-property predicate** — `out_dead_reason().is_some()` does not describe the `err` it is passed. The shape was in the tree **twice**; fixing the first made the second visible. (2) The ledger's own proposed alternative ("an accepted-asymmetry test pinning what each engine actually does") **was never available**: the M:N shape varied by thread count AND across runs at one thread count. (3) A one-native-call marker is the exact shape that hides instance (2) — when the contract is "the REST of the job runs", the fence needs a "rest". Accepted cost: graceful `shutdown()` only — a submitted job that never prints and never returns now hangs `\| head -1` (`shutdown_now()` still kills it in 54 ms; a loop back-edge IS a cancellation point). CPython hangs identically; Go exits via SIGPIPE on fd 1, a signal policy Chezzi does not adopt. Nurseries unaffected (they abort siblings on any fault, by design) |
 | ~~**W7-18**~~ | `:5155` | **FIXED 2026-08-05.** `--timeout` now reaches a fiber parked on the NETPOLLER — **10001 ms hang (no verdict, no output, killed by an external `timeout 10`) → 304 ms `TIMED-OUT t`**, stable 10/10 at `CHEZZI_THREADS=1/2/3/4/8`, and the aborted task still runs its `defer`s *including a socket write inside them*. Go is the ancestor and agrees: `go test -timeout 300ms` against a goroutine on `net.Listener.Accept()` panics `test timed out after 300ms` and never runs the following `t.Fatal`. A park now registers for `min(the op's own D6c timeout_ms, the run deadline)` and the resumed op **re-reads the clock** to tell the two apart | **The filed premise was WRONG, and it is the whole lesson.** The row said the fix "needs a second marker distinct from `poll_timed_out`, threaded through the 5 `PollPark` construction sites plus the re-inject." It needed none: `Vm::deadline` is ALREADY an absolute `Instant` on every worker and `Some` only under `--timeout`, so `now >= self.deadline` at resume answers exactly what the marker would have carried. `PollPark`, `poller::register`, `next_timeout` and `fire_due_socket_timeouts` are untouched. Second lesson: the obvious spelling of that insight re-introduced W7-16's skipped-`defer` bug on **three** separate paths (halt-before-take, `?` past `demote_socket_exit`, clear-only connect resume) and adversarial review found a **fourth** — a top-level `connect` handing the abort back as a *catchable* `Err`. All four shipped green |
 | ~~**W7-17**~~ | `:5081` | **FIXED 2026-08-05.** `--timeout` now reaches a timer wait PARKED in a `parallel:` nursery with no runnable sibling — **3004 ms `FAIL … SWALLOWED` → 304 ms `TIMED-OUT t`**, for BOTH park sites (the single `timer(ms).recv()` and a `wait:` timer arm), at `--threads=1/2/3/4/8`/default, and the aborted task still runs its `defer`s. A third site fell out of the same measurement: the **serial cooperative `wait:` timer arm** was still a bare `thread::sleep` — the one inline-sleep W7-16 missed — also 3004 ms → aborted. The park's timer job now fires at `min(its own deadline, the run deadline)` and delivers `true` ONLY if its own deadline really passed — an early wake just requeues the fiber (`close_wake`) — and `chan_recv_step`/`op_wait_poll` gained a `--timeout` checkpoint so the re-check turns that wake into the hard abort. Go is the ancestor and agrees: `go test -timeout 300ms` against `<-time.After(3s)` panics at 300 ms and never runs the following `t.Fatal` | **The filed lesson was WRONG, and it is the interesting part.** The row concluded "fixing it means giving parked fibers a deadline-driven wake (a scheduler feature), not another checkpoint: chunk-re-arming the park's timer job only gets a wake, and the resumed fiber would re-park because its own deadline has not passed." Both halves were true in isolation and the conclusion did not follow: **a wake and a checkpoint are the fix, together** — neither alone is anything. The re-park it predicted is exactly what the missing checkpoint prevents, and no re-arming was needed at all (one clamped wake, so W7-16's 200-re-arms/s cost is not paid here). The scheduler-level alternative it pointed at is also *worse*: `flag_deadlock` drops parked fibers without `unwind_deferred`, so it would have re-introduced W7-16's skipped-`defer` bug, while wake-and-re-check faults from inside the VM and unwinds normally (fenced: `a_timer_parked_task_aborted_by_the_deadline_still_runs_its_defers`). Second lesson: the **runnable sibling in every neighbouring fixture is what hid this for a whole milestone** — a spinner's own back-edge trips the deadline at 303 ms, so W7-16's tests passed over it; the new fixtures deliberately have no sibling |
@@ -5833,7 +5833,7 @@ regress, and the only assertable shape is a hang — a test that must time out t
 be revisited, the trigger is not "FFI can write fd 1" (it always can) but CPython or Go changing what
 *they* do.
 
-### W7-21 — a module global holding a FN VALUE cannot be CALLED through the module (`m.G` resolves, `m.G()` does not) — **OPEN, filed 2026-08-05 while building a W7-4a repro**
+### W7-21 — a module global holding a FN VALUE cannot be CALLED through the module (`m.G` resolves, `m.G()` does not) — **FIXED 2026-08-05** (filed the same day while building a W7-4a repro)
 
 ```chezzi
 # k.chz
@@ -5884,6 +5884,62 @@ calls them). The trigger is exactly *call syntax on a `values` member of fn type
 `chezzi check l.chz` alone says `ok`, because the failure needs an importer. Same shape as the
 `checker test helper key divergence` and `reserved method table: two harvest paths` notes — a member
 surface harvested into two places, with one consumer reading only one of them.
+
+**FIX (2026-08-05) — checker-only, `src/checker/expr.rs`.** The `Ty::Module` call arm now also clones
+the same name out of `sig.values` and, on the `fsig == None` path, calls through it when its `Ty` is a
+`Func`/`BuiltinFn` (STRICT `check_args` — no int→float widening through a function value, the same
+rule the fn-value `expr.rs:533` and fn-field `expr.rs:2362` paths already carry). Compiler and VM are
+UNTOUCHED: `l.BARE(…)` already lowered to the ordinary `Op::CallMethod` fall-through
+(`compiler/mod.rs:4388`), and `Obj::Module` dispatch (`vm/call.rs:1278`) already looks the member up in
+the module's slot table and `do_call`s whatever value is there — closure or native alike.
+
+Measured on the 3-file repro above, release binary, before → after:
+
+| | before | after |
+|---|---|---|
+| `chezzi check main.chz` | `type error (line 3, col 6): module 'l' has no member 'BARE'`, rc=1 | `ok: no type errors`, rc=0 |
+| `chezzi run main.chz` (M:N) / `--threads=1` / `--serial` | never reached | `1` on all three |
+| ancestors, re-run | CPython `pk.G()` → `1`; Go `pkg.G()` → `1` | Chezzi now agrees |
+
+The lying diagnostic is fixed independently: a member that exists but is not callable now reports
+`module 'l' member 'N' is not callable (it has type int)`, and a genuinely absent member keeps
+`module 'l' has no member 'NOPE'`.
+
+**Two things adversarial review added.** (1) A member whose own initializer already errored
+(`X := k.nope`) is `Unknown`-typed, and the first cut reported it as *"not callable (it has type ?)"*
+— a cascade asserting a type nobody knows. It now stays SILENT (the checker's `Ty::Unknown`
+suppression convention), so that program went **2 errors → 1**, matching what the two-step spelling
+`f := l.X; f()` already reported. Note this was NOT a regression — pre-fix the same program also
+emitted 2 (the second being `has no member 'X'`, measured on a rebuilt pre-fix binary) — the fix just
+had no reason to keep it. (2) The new arm records the editor HOVER for the member name, which the
+filing had written off as out-of-scope because `record_method_hover` takes an `FnSig` a `values`
+member lacks: the member's own `Ty::Func` **is** what that helper builds from an `FnSig`, so it is one
+`hover_record_at` call, fenced by `editor::tests::hover_module_fn_value_member_call` (verified to FAIL
+with the line removed). "The helper doesn't fit" was a statement about the helper, not the feature.
+
+Also from review, and worth keeping: the STRICT-vs-widening choice was **claimed by a comment and
+pinned by no test** — the two original cases (arity, `str` into `int`) fail under either helper. The
+deciding case is an int literal into a `float` param: `l.FL(2)` where `FL := k.half` errors
+`expected float, found int`, while the DECLARED spelling `k.half(2)` widens. Both are now asserted.
+
+Fences: `checker::tests::module_global_of_fn_type_is_callable_qualified` (+ arity/type-mismatch and
+both diagnostics), and `vm::tests::module_global_fn_value_call_runs_both_engines`. **The VM test is
+not the fence and its doc-comment says so** — `run_file` does not run the checker, so it passes
+pre-fix; what it locks is the other half of the claim, that the accepted form really executes, byte
+-identically on both engines.
+
+**Lesson: the runtime half of a `checker⊋compiler`-family finding needs a different kind of check
+than the checker half.** The natural instinct here was "run it on both engines and we're done" — but
+that test was green *before* the fix, because the VM helpers bypass the checker entirely. A both
+-engine run proves the lowering exists; only a graph-level `check_graph` test proves the rejection is
+gone. Two tests, two different claims, and neither substitutes for the other.
+
+**Not in scope** (checked, unchanged): keyword args through a module fn value (`l.BARE(x=1)`) — the
+desugar pass resolves `named` against the callee's params before the checker, so this arm never sees
+them; and hover, since `record_method_hover` takes an `FnSig` a `values` member does not have (no
+regression — there was no record before either). `from l import BARE` + `BARE()` already worked
+(`setup.rs:1337` declares the bind as a `Ty::Func` value and the ordinary value-call path handles it),
+which is what made the qualified arm the single broken site.
 
 ### Safe-direction observations (not filed as bugs)
 - **`Vm::stream_halt`'s stated reason for never restoring SIGPIPE is weaker than it reads.** The

@@ -2180,6 +2180,9 @@ impl Checker {
                     .and_then(|id| self.module_sigs.get(id));
                 let is_poly = sig.is_some_and(|s| s.numeric_poly.contains(method));
                 let fsig = sig.and_then(|s| s.functions.get(method).cloned());
+                // W7-21 — the same member name in the VALUES namespace (a top-level `let`/`:=`),
+                // cloned here so the `sig` borrow ends before the first `&mut self` call below.
+                let vty = sig.and_then(|s| s.values.get(method).cloned());
                 // Editor hover (CASE 2): record `module.fn`'s native signature at the method name —
                 // covers plain, numeric-poly (`abs` has an arity fsig), and generic module fns.
                 if let Some(f) = &fsig {
@@ -2212,6 +2215,51 @@ impl Checker {
                         true,
                     );
                     return fsig.ret;
+                }
+                // W7-21 — a module GLOBAL that HOLDS a function value is callable through the module
+                // (`m.G()`), like CPython's `m.G()` and Go's `pkg.G()`. `ModuleSig` splits the member
+                // surface in two: a declared `fn` lands in `functions`, a top-level `let`/`:=` binding
+                // in `values` whatever its type. Only the VALUE path read `values`, so a `Ty::Func`
+                // there resolved as a value (`m.G`) but not as a call — with a diagnostic that denied
+                // the member existed at all. Mirrors the fn-typed-FIELD fallback in the struct arm.
+                // Editor hover, same as the `fsig` path above: the member's own `Ty::Func` IS what
+                // `record_method_hover` would build from an `FnSig`, so record it directly (no doc —
+                // a `values` member carries none).
+                if self.hover_probe.is_some()
+                    && let Some(t @ (Ty::Func { .. } | Ty::BuiltinFn { .. })) = &vty
+                {
+                    let t = t.clone();
+                    self.hover_record_at(name_span, &t, HoverKind::Func, None);
+                }
+                match vty {
+                    // STRICT — a module global holds a function VALUE, and a `Ty::Func` does not say
+                    // which declaration it came from (a generic fn instantiated at float has an erased
+                    // `T` param and coerces nothing). Same rule as the fn-value and fn-field call
+                    // paths: no int→float widening through a function value.
+                    Some(Ty::Func { params, ret, .. } | Ty::BuiltinFn { params, ret }) => {
+                        self.check_args(method, &params, args, span);
+                        return *ret;
+                    }
+                    // The member's own initializer already errored (`X := k.nope`), so its type is
+                    // `Unknown`. Stay SILENT — the checker's Unknown-suppression convention (the
+                    // `Ty::Unknown` arm of `infer_call`): one root-cause error, no cascade asserting a
+                    // type nobody knows. Matches what the two-step spelling (`f := l.X; f()`) reports.
+                    Some(Ty::Unknown) => {
+                        self.infer_all(args);
+                        return Ty::Unknown;
+                    }
+                    // The member EXISTS, it just isn't callable — say that, rather than denying it.
+                    Some(t) => {
+                        self.infer_all(args);
+                        self.error(
+                            span,
+                            format!(
+                                "module '{mname}' member '{method}' is not callable (it has type {t})"
+                            ),
+                        );
+                        return Ty::Unknown;
+                    }
+                    None => {}
                 }
                 self.infer_all(args);
                 self.error(span, format!("module '{mname}' has no member '{method}'"));

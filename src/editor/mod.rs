@@ -2104,4 +2104,26 @@ mod tests {
         assert_eq!(d.col, 12);
         assert_eq!(d.end_col, 15); // 12 + 3 chars of "zzz"
     }
+
+    /// W7-21 — a CALL through a module global that holds a fn value (`l.BARE()`) hovers the member
+    /// name with its function type, exactly like a call on a declared module `fn`. The value form
+    /// (`x := l.BARE`) always hovered; the call form did not exist until the member became callable,
+    /// so it would have shipped as a silent hole. Needs real files on disk: `hover` resolves the
+    /// module graph from the entry PATH.
+    #[test]
+    fn hover_module_fn_value_member_call() {
+        let dir = std::env::temp_dir().join(format!("chezzi_hov_w721_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("k.chz"), "fn one() -> int:\n    return 1\n").unwrap();
+        std::fs::write(dir.join("l.chz"), "import k\nBARE := k.one\n").unwrap();
+        let src = "import l\nprint(l.BARE())\n";
+        let entry = dir.join("main.chz");
+        std::fs::write(&entry, src).unwrap();
+        // Line 1 (0-based), the `BARE` token starts at char col 8: `print(l.BARE())`.
+        let h = hover(&entry, src, 1, 8);
+        let _ = std::fs::remove_dir_all(&dir);
+        let h = h.expect("hover on a module fn-value member call");
+        assert_eq!(h.display, "fn() -> int");
+        assert_eq!(h.kind, crate::checker::HoverKind::Func);
+    }
 }

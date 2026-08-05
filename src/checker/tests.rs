@@ -19399,3 +19399,102 @@ fn executor_bodied_generic_method_infers_from_closure() {
          main()\n",
     );
 }
+
+// ===== W7-21 — a module GLOBAL holding a fn VALUE is callable through the module (`m.G()`). The
+// call arm read only `ModuleSig::functions` (declared `fn`s), so a `Ty::Func` sitting in `values` (a
+// top-level `let`/`:=`) resolved as a value but not as a call — and the diagnostic denied the member
+// existed at all. Both ancestors accept the direct call: CPython `m.G()` → 1, Go `pkg.G()` → 1. =====
+
+#[test]
+fn module_global_of_fn_type_is_callable_qualified() {
+    files_ok(&[
+        ("k.chz", "fn one() -> int:\n    return 1\n"),
+        ("l.chz", "import k\nBARE := k.one\n"),
+        (
+            "main.chz",
+            "import l\nx := l.BARE\ny := l.BARE()\nprint(x)\nprint(y)\n",
+        ),
+    ]);
+}
+
+/// The fallback is STRICT about arity/types, exactly like the fn-value and fn-field call paths — it
+/// widens nothing just because the callee arrived through a module member.
+#[test]
+fn module_global_fn_value_call_still_checks_args() {
+    files_reject(
+        &[
+            ("k.chz", "fn one() -> int:\n    return 1\n"),
+            ("l.chz", "import k\nBARE := k.one\n"),
+            ("main.chz", "import l\nprint(l.BARE(5))\n"),
+        ],
+        "expects 0 argument(s), got 1",
+    );
+    files_reject(
+        &[
+            ("k.chz", "fn twice(n: int) -> int:\n    return n * 2\n"),
+            ("l.chz", "import k\nTW := k.twice\n"),
+            ("main.chz", "import l\nprint(l.TW(\"x\"))\n"),
+        ],
+        "argument 1 of 'TW': expected int, found str",
+    );
+    // The case the STRICT choice actually decides: an int literal into a `float` param. A DECLARED
+    // module fn widens it (its prologue emits `Op::CoerceFloat`); a function VALUE does not, because
+    // a `Ty::Func` does not say which declaration it came from. Arity and str-vs-int above fail under
+    // either helper — this is the one that pins `check_args` over `check_args_w`.
+    files_reject(
+        &[
+            ("k.chz", "fn half(x: float) -> float:\n    return x / 2.0\n"),
+            ("l.chz", "import k\nFL := k.half\n"),
+            ("main.chz", "import l\nprint(l.FL(2))\n"),
+        ],
+        "argument 1 of 'FL': expected float, found int",
+    );
+    // …and the declared-fn spelling of the same call still widens, so the strictness is a property of
+    // the VALUE, not of module-qualified calls in general.
+    files_ok(&[
+        ("k.chz", "fn half(x: float) -> float:\n    return x / 2.0\n"),
+        ("main.chz", "import k\nprint(k.half(2))\n"),
+    ]);
+}
+
+/// A module member whose own initializer already errored is `Unknown`-typed; calling it must stay
+/// SILENT (one root-cause error, no cascade), matching the two-step spelling `f := l.X; f()` and the
+/// checker's `Ty::Unknown` suppression convention.
+#[test]
+fn module_unknown_typed_member_call_does_not_cascade() {
+    let errs = check_files(&[
+        ("k.chz", "fn one() -> int:\n    return 1\n"),
+        ("l.chz", "import k\nX := k.nope\n"),
+        ("main.chz", "import l\nprint(l.X())\n"),
+    ]);
+    assert_eq!(errs.len(), 1, "expected only the root cause, got: {errs:?}");
+    assert!(
+        errs[0].message.contains("module 'k' has no member 'nope'"),
+        "unexpected error: {errs:?}"
+    );
+}
+
+/// A member that EXISTS but is not callable gets a truthful diagnostic — the old one claimed the
+/// module had no such member, which was wrong independently of the fn-value fix.
+#[test]
+fn module_global_non_fn_call_says_not_callable() {
+    files_reject(
+        &[
+            ("l.chz", "N := 7\n"),
+            ("main.chz", "import l\nprint(l.N())\n"),
+        ],
+        "module 'l' member 'N' is not callable (it has type int)",
+    );
+}
+
+/// A genuinely absent member keeps the original message.
+#[test]
+fn module_missing_member_call_message_unchanged() {
+    files_reject(
+        &[
+            ("l.chz", "N := 7\n"),
+            ("main.chz", "import l\nprint(l.NOPE())\n"),
+        ],
+        "module 'l' has no member 'NOPE'",
+    );
+}

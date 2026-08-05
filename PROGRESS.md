@@ -2,6 +2,40 @@
 
 Single source of truth for "what am I doing next." Update after every work session.
 
+> **✅ W7-21 FIXED 2026-08-05 — a module global that HOLDS a function is now callable through the
+> module.** `BARE := k.one` in `l.chz`, then `l.BARE()` in an importer: `type error (line 3, col 6):
+> module 'l' has no member 'BARE'` (rc=1) → **`ok`, prints `1`** on M:N, `--threads=1` and `--serial`.
+> Both owning ancestors accept the direct call and were re-run: CPython `pk.G()` where `G = _one` → `1`,
+> Go `pkg.G()` where `var G = one` → `1`. Cause: `ModuleSig` splits its member surface into `functions`
+> (declared `fn`s) and `values` (a top-level `let`/`:=`, whatever the type), and the CALL arm read only
+> `functions` — so a `Ty::Func` sitting in `values` resolved as a value (`l.BARE`) but not as a call,
+> under a diagnostic that denied the member existed at all. **Checker-only** (`src/checker/expr.rs`): a
+> `values` fallback on the `fsig == None` path, calling a `Func`/`BuiltinFn` with STRICT `check_args`
+> (no int→float widening through a function value — the same rule the fn-value and fn-field paths
+> carry). The compiler and VM were already correct and are untouched. The lying diagnostic is fixed
+> independently: an existing-but-uncallable member now says `module 'l' member 'N' is not callable (it
+> has type int)`; a genuinely absent one keeps `has no member`.
+>
+> **Lesson: the obvious runtime test was GREEN BEFORE THE FIX.** This is `checker⊋compiler`'s sibling —
+> a checker that rejects what the system executes — and the instinct for that family is "run it on both
+> engines". But `run_file`/`run_file_parallel` bypass the checker, so the both-engine test passes
+> pre-fix; it proves the *lowering* exists, never that the *rejection* is gone. Only a graph-level
+> `check_graph` test is the fence (`checker::tests::module_global_of_fn_type_is_callable_qualified`);
+> the VM test keeps its own job and its doc-comment now says which one it is.
+>
+> **Adversarial review added three things.** (a) A member whose own initializer errored (`X := k.nope`)
+> is `Unknown`-typed and the first cut reported *"not callable (it has type ?)"* — a cascade asserting
+> a type nobody knows; it stays silent now (**2 errors → 1**, matching `f := l.X; f()`). Not a
+> regression — pre-fix emitted 2 as well — just no reason to keep it. (b) The arm records the editor
+> HOVER, which the filing had written off because `record_method_hover` takes an `FnSig` a `values`
+> member lacks — the member's own `Ty::Func` **is** what that helper builds, so it is one
+> `hover_record_at` call (`editor::tests::hover_module_fn_value_member_call`, verified to fail with the
+> line removed). "The helper doesn't fit" was a claim about the helper, not the feature. (c) The
+> STRICT-vs-widening rule was **asserted by a comment and pinned by no test** — arity and `str`-vs-`int`
+> fail under either helper. The deciding case is now asserted both ways: `l.FL(2)` (a fn VALUE) errors
+> `expected float, found int`, `k.half(2)` (a DECLARED fn) widens. Full write-up: `docs/gaps.md`
+> **W7-21**.
+
 > **✅ W7-17 FIXED 2026-08-05 — `--timeout` now reaches a fiber PARKED on a timer.** A `timer(ms)` wait
 > inside a `parallel:` nursery with no runnable sibling ran to its own deadline and then executed the
 > statement after the wait — the exact fall-through a hard abort exists to prevent. `--timeout=300`:

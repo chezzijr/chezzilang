@@ -2821,6 +2821,19 @@ COUNT = 99      # error: cannot assign to 'COUNT' imported from module 'lib.st' 
 COUNT := 99     # ok — a fresh binding this module owns; `COUNT = 100` after it is fine too
 ```
 
+**A module global that HOLDS a function is callable through the module** — `m.G()`, not just
+`g := m.G` then `g()` (CPython and Go both accept the direct call). A non-callable member says so:
+`module 'm' member 'N' is not callable (it has type int)`.
+
+```chezzi
+# l.chz
+import k
+BARE := k.one     # a global whose TYPE is a fn
+# main.chz
+import l
+print(l.BARE())   # ok — calls through the module member
+```
+
 **Types are module-scoped** (like functions — exported by default, no `pub`; visible elsewhere only
 via import, under the same bound last-segment name):
 

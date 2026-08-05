@@ -15687,3 +15687,36 @@ fn a_carried_snapshot_build_error_is_raised_at_task_preparation() {
     assert_eq!(raised.message, carried.message);
     assert_eq!(raised.span, span, "the error keeps its spawn-site span");
 }
+
+/// W7-21 — a module GLOBAL holding a fn VALUE, CALLED through the module (`l.BARE()`). The checker
+/// used to reject this (it read only `ModuleSig::functions`) while the runtime always supported it:
+/// `Op::CallMethod` on an `Obj::Module` looks the member up in the slot table and calls whatever
+/// value it finds. This test PASSES PRE-FIX (`run_file` does not run the checker) and is not the
+/// fence — the fence is `checker::tests::module_global_of_fn_type_is_callable_qualified`. What it
+/// locks is the other half of the claim: that the bytecode/VM path really executes the form the
+/// checker now accepts, identically on both engines. Both ancestors print 1: CPython `m.G()` where
+/// `G = _one`, Go `pkg.G()` where `var G = one`.
+#[test]
+fn module_global_fn_value_call_runs_both_engines() {
+    let dir = std::env::temp_dir().join(format!("chezzi_vm_w721_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("k.chz"), "fn one() -> int:\n    return 1\n").unwrap();
+    std::fs::write(dir.join("l.chz"), "import k\nBARE := k.one\n").unwrap();
+    let entry = dir.join("main.chz");
+    std::fs::write(
+        &entry,
+        "import l\nprint(l.BARE())\nz := l.BARE\nprint(z())\n",
+    )
+    .unwrap();
+    let (vm_out, _e, vm_res, _) = run_file(&entry);
+    let (par_out, _pe, par_res, _) =
+        run_file_parallel(&entry, crate::native::HostConfig::default());
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(vm_res.is_ok(), "serial faulted: {vm_res:?}");
+    assert!(par_res.is_ok(), "M:N faulted: {par_res:?}");
+    assert_eq!(vm_out, "1\n1\n");
+    assert_eq!(
+        vm_out, par_out,
+        "serial and M:N diverged on a module fn-value call"
+    );
+}
