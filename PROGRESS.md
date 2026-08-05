@@ -150,8 +150,50 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > **Scope, from adversarial review:** this closes the VM's own sink, not fd 1. FFI reaching libc
 > (`extern "libc.so.6": fn puts`) writes the descriptor directly, so `OUT_DEAD` never sets and that
 > `| head -1` loop still spins — **6002 ms, no fault**, against 3 ms for the same loop using `print`.
-> Pre-existing and untouched by this change; filed as **W7-20**. Full write-up: `docs/gaps.md`
-> **W7-5e**.
+> Pre-existing and untouched by this change; filed as **W7-20** and since **closed as not-a-bug**
+> (below). Full write-up: `docs/gaps.md` **W7-5e**.
+
+> **✅ W7-20 CLOSED 2026-08-05 — not a bug; FFI's stdout contract is now documented.** FFI writes the
+> file descriptor itself, so the broken-pipe halt cannot see it and a `| head -1` loop of C writes
+> spins. Running the owning ancestors settled it — **both do the identical thing**, on both
+> observables:
+>
+> | loop under `\| head -1` | native print | the same loop through C |
+> |---|---|---|
+> | Chezzi | 4 ms, `stdout closed (broken pipe)` | **spins**, 6002 ms, killed, rc=0 |
+> | CPython (`ctypes`) | 37 ms, `BrokenPipeError` | **spins**, 6001 ms, killed |
+> | Go (cgo) | 2 ms, SIGPIPE | **spins**, 6001 ms, killed |
+>
+> Output ordering is byte-identical to CPython's too (`chezzi-1 chezzi-3 ffi-2 ffi-4` — the C library
+> buffers its bytes until exit; `io.flush()` does not change it, 3/3 runs). So the fix is documentation:
+> `docs/syntax.md` §12b gains the contract plus two runnable examples, with cross-references from
+> `docs/stdlib.md`'s `std.ffi` unsafe-contract blockquote and its `print`/stdout guarantee list (which
+> now ends by saying it covers the VM's own sink only). No code change, no test — there is no behaviour
+> to regress and the only assertable shape is a hang.
+>
+> **The lesson is the filing's ranking, not the outcome.** It offered "flag the fd-1 writers at
+> `extern`" against "leave it and document", calling the second *"cheaper and narrower"* — the budget
+> option. Measuring inverted it: the flagger is not better-but-pricier, it is **wrong**, because it
+> would drift Chezzi away from both ancestors on a surface where it already matches them exactly (and
+> the symbol list is incomplete by construction — any C function can wrap `puts`). "Cheaper" was doing
+> the arguing; nobody had run `ctypes`.
+>
+> **A second lesson, from adversarial review catching this entry's own first draft.** It claimed a C
+> program cannot self-detect the dead pipe — *"`puts` + `fflush(NULL)` never reports it, glibc drops
+> the per-stream error"*. **False.** Two independent prosecutors ran the shipped snippet and found the
+> bug was in the extern declaration, not the C library:
+>
+> | `extern` declaration | `puts`'s value once the reader is gone | `if r < 0` |
+> |---|---|---|
+> | `fn puts(s: str) -> int` | `4294967295` | **never fires**, 200 000 iterations |
+> | `fn puts(s: str) -> int32` | `-1` | fires at **i=1638**, 3/3 runs |
+>
+> Bare `int` marshals as C **`long`**; `puts` returns a C `int`, so the sign is lost and the guard dies
+> silently — a trap `syntax.md` §12b already documents, walked straight into while writing that same
+> file. The corrected number strengthens the ancestor match: CPython `ctypes` also detects at i=1638.
+> Generalized: **"the library does not report X" is a claim about someone else's code made from one
+> local observation** — the honest sentence is "my call did not observe X". Full write-up:
+> `docs/gaps.md` **W7-20**.
 >
 > **✅ W7-14 FIXED 2026-08-04 — a `wait:` timer arm no longer swallows a sibling value that arrives
 > first.** `WAIT-1`'s fix (`0b72ad60`) is gated on `self.mn.is_some()`, and a party that owns its OS
@@ -7624,9 +7666,26 @@ branch names) is in the git log.
   allocate their handles on both engines. Guarantee demonstrated by dropping one entry's kind →
   `expected a tuple with 3 elements`. Suite 3820 green.
   **Found by the conversion, not fixed there:** `fs.stat`/`fs.walk` were never in the old list, so they
-  pin a worker today — the predicted silent omission, already in the tree. Preserved as `Kind::Inline`
+  pinned a worker — the predicted silent omission, already in the tree. Preserved as `Kind::Inline`
   (behaviour-identical) with a `BUG PRESERVED` comment + a test pinning the state, filed as `gaps.md`
-  **W7-19**.
+  **W7-19** and fixed the next day (below).
+
+- **Fix — `fs.stat`/`fs.walk` no longer PIN an M:N core worker (2026-08-05, `gaps.md` W7-19).** They
+  were the only two of `std.fs`'s seventeen members outside the blocking set, so their syscalls ran
+  inline on a core worker — `walk` for an entire tree walk — the D5 starvation the set exists to
+  prevent. Both ancestors hand the worker off here (Go's runtime releases the P on a blocking syscall;
+  CPython drops the GIL around `os.stat`/`os.walk`). Now `Kind::Blocking`, after the off-heap-safety
+  proof the gap asked for: both take their path through `Host::arg_bytes`, and both returns are
+  primitive `NativeRet`s already crossed by members that offload today (`_list_dir` returns the same
+  `Ok(List([Bytes…]))`, `process.run`/`run_args` the same `Ok(Struct{…})`). Measured at `CHEZZI_THREADS=1` on a
+  121k-entry tree: a sibling fiber's worst scheduling gap **94–99 ms → 28 ms**, and 4 concurrent
+  `fs.walk`s **525–563 ms → 304–324 ms** (1.7× — they overlap on the dirty pool instead of
+  serializing). The 28 ms residual is *result lowering*, not the syscall: building the 121k-path list
+  as heap objects needs the `Vm`, so it stays on the core worker (it falls to 9 ms on an 18k-entry
+  tree). `every_syscall_module_member_is_blocking` is now exception-free and is the fence that pins
+  the classification; a new `tests/chz` case runs `fs.stat` inside a nursery to cover the offloaded
+  `Struct` round-trip (a correctness fence — it passes under either `Kind`, which the review made the
+  comment say out loud; `fs.walk` from a fiber was already covered). Suite 3821 green.
 
 - **Fix — an intrinsic protocol method on a built-in is now CALLABLE (2026-07-25, bug-hunt wave-6 W6-3,
   P0).** `fn total[T: Add](xs: List[T], zero: T) -> T` with `acc.add(x)` passed `chezzi check` and then

@@ -494,7 +494,7 @@ fn wildcard_match(pat: &[u8], name: &[u8]) -> bool {
 }
 
 /// Callable members. `(name, fn, kind)` — every filesystem syscall is [`Kind::Blocking`] (offloaded to
-/// the dirty pool so it can't pin an M:N core worker), except the two noted below.
+/// the dirty pool so it can't pin an M:N core worker), with no exceptions.
 ///
 /// W7-8 — every path-taking member is `_`-prefixed and takes RAW `bytes`. It is the INTERNAL byte
 /// seam: the PUBLIC name (`fs.exists`) is a bodied pure-Chezzi wrapper in `std/fs.chz` that takes a
@@ -506,14 +506,14 @@ pub const MEMBERS: &[(&str, NativeFn, Kind)] = &[
     ("_is_file", is_file, Kind::Blocking),
     ("_is_dir", is_dir, Kind::Blocking),
     ("_size", size, Kind::Blocking),
-    // BUG PRESERVED, NOT INTENT — `stat` and `walk` were never in the old `is_blocking` name list, so
-    // today they run INLINE and pin a core M:N worker for their syscalls (`walk` recurses a whole
-    // tree). That omission is exactly the silent failure `Kind` exists to make impossible, and it was
-    // already in the tree when `Kind` landed. Reclassifying them is a BEHAVIOUR change (they must be
-    // proven off-heap-safe first), so it is filed separately rather than smuggled into a pure
-    // refactor — `docs/gaps.md` W7-19.
-    ("_stat", stat, Kind::Inline),
-    ("_walk", walk, Kind::Inline),
+    // W7-19 — these two were never in the pre-`Kind` `is_blocking` name list (they were added after
+    // it was written), so until 2026-08-05 they ran INLINE and pinned a core M:N worker for their
+    // syscalls — `walk` for a whole tree walk. Off-heap-safe like their siblings: `arg_path` reads
+    // `Host::arg_bytes`, and the returns are primitive `NativeRet`s already crossed by members that
+    // offload today (`_list_dir` returns the same `Ok(List([Bytes…]))`; `process::run`/`run_args` the
+    // same `Ok(Struct{…})`). Neither touches the heap, stdio or os state during the call.
+    ("_stat", stat, Kind::Blocking),
+    ("_walk", walk, Kind::Blocking),
     ("_canonicalize", canonicalize, Kind::Blocking),
     ("_glob", glob, Kind::Blocking),
     ("_chmod", chmod, Kind::Blocking),

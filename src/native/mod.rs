@@ -1037,18 +1037,12 @@ mod tests {
     /// (`Struct`/`Ok(Str)`/`Err`), no heap/stdio touch during the blocking call. All must carry
     /// [`Kind::Blocking`] so the M:N engine routes them through the dirty pool instead of pinning a core
     /// worker. Iterating MEMBERS (not a hand-copied name list) is the point: a future verb added without
-    /// a kind fails to COMPILE, and one added with the WRONG kind fails here.
+    /// a kind fails to COMPILE, and one added with the WRONG kind fails here. W7-19 — EXCEPTION-FREE
+    /// since 2026-08-05: `fs._stat`/`fs._walk` were carved out here while they still ran inline.
     #[test]
     fn every_syscall_module_member_is_blocking() {
         for module in ["std.fs", "std.request", "std.process"] {
             for (name, kind) in kinds(module) {
-                // W7-19 — `_stat`/`_walk` were never in the pre-`Kind` `is_blocking` list, so they run
-                // inline today. Preserved as-is by the refactor that introduced `Kind`; reclassifying
-                // them is a behaviour change filed separately (`docs/gaps.md` W7-19).
-                if module == "std.fs" && matches!(name, "_stat" | "_walk") {
-                    assert_eq!(kind, Kind::Inline, "{module}.{name}: W7-19 status changed");
-                    continue;
-                }
                 assert_eq!(kind, Kind::Blocking, "{module}.{name} must be blocking");
             }
         }

@@ -129,7 +129,42 @@ test fn stat_and_reads_take_a_non_utf8_path():
         Ok(s): assert s == "hi"
         Err(e): assert false, "read_file: " + e.message()
 
+# W7-19 — `fs.stat` is `Kind::Blocking`, so under M:N a call from a FIBER is offloaded to the dirty
+# pool (args extracted to primitives, run with no `Vm`, `NativeRet` lowered by the resuming worker),
+# while the same call at top level runs inline (`mn == None`). This pins the offloaded round trip of
+# the `Ok(Struct{…})` return: nothing else calls `fs.stat` from inside a nursery. Its sibling `fs.walk`
+# needs no case here — `path_crosses_a_spawn_airlock` below already walks from a `spawn`.
+#
+# NOT a fence on the CLASSIFICATION: this passes with either `Kind`, since an inline call returns the
+# same values (measured). What fails if `_stat`/`_walk` go back to `Kind::Inline` is the Rust test
+# `native::tests::every_syscall_module_member_is_blocking`.
+test fn stat_survives_the_offload_boundary():
+    d := fixture("offload")
+    defer cleanup(d)
+    f := cat(cat(d, b"/"), BAD)
+    inline_size := 0
+    inline_is_file := false
+    match fs.stat(f):
+        Ok(info):
+            inline_size = info.size
+            inline_is_file = info.is_file
+        Err(e): assert false, "stat (top level): " + e.message()
+
+    off_size := Shared(-1)
+    off_is_file := Shared(false)
+    parallel:
+        spawn:
+            match fs.stat(f):
+                Ok(info):
+                    off_size.set(info.size)
+                    off_is_file.set(info.is_file)
+                Err(e): assert false, "stat (offloaded): " + e.message()
+    assert off_size.get() == inline_size, "offloaded stat.size must match the inline one"
+    assert off_is_file.get() == inline_is_file, "offloaded stat.is_file must match the inline one"
+
 # A `Path` crosses the airlock (spawn) by value like any other struct over immutable `bytes`.
+# (It is also W7-19's `fs.walk` offload-boundary coverage: `walk` runs here from a FIBER, so under
+# M:N it takes the dirty-pool path, and the assert is byte-exact on what came back.)
 test fn path_crosses_a_spawn_airlock():
     d := fixture("spawn")
     defer cleanup(d)
