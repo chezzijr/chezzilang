@@ -1259,6 +1259,16 @@ impl Vm {
         );
         self.demote_socket_enter(span)?;
         let out = loop {
+            // W7-18 — the run's `--timeout` deadline, ABOVE the cancel check (it outranks a cancel,
+            // W7-17's ordering). An in-callback socket op is accounted `inflight`, so it VETOES the
+            // deadlock predicate: without this an untimed `accept` here hangs exactly like the
+            // netpoller-park shape. `break`, NOT `?` — this loop is bracketed by
+            // `demote_socket_enter`/`demote_socket_exit`, and returning past the exit would leak
+            // `running -= 1` / `inflight += 1` for the rest of the process (which is why every other
+            // exit below is a `break` too).
+            if let Err(e) = self.deadline_halt(span) {
+                break Err(e);
+            }
             // Observe teardown/cancel BEFORE doing more work each iteration. Cancel (a sibling faulted):
             // set `cancelled` so the outcome is SWALLOWED (a cancelled task is dropped, not reported).
             if self.cancel_requested() {
@@ -1538,6 +1548,27 @@ impl Vm {
             // it. `finish_pending_connect` never faults (it yields a `Result` *value*). Mutually
             // exclusive with `resume_native` (a fiber is offload-parked OR connect-parked, never both).
             if let Some(cip) = self.pending_connect.take() {
+                // W7-18 — a connect park carries no `timeout_ms` of its own, so only the run's
+                // `--timeout` clamp can have set this: RAISE the hard halt here rather than clearing
+                // the flag and trusting a later checkpoint. There is no later checkpoint on this path
+                // — `net.connect` is followed by a straight-line `match` with no back-edge and no
+                // blocking op, so the fiber would finish NORMALLY, the nursery would join, and the
+                // test body's `assert` would run: W7-17's original SWALLOWED symptom, re-created on
+                // the connect path by the fix meant to close it. Raising also avoids handing back the
+                // `Ok(Socket)` `finish_pending_connect` would produce for a handshake still in flight
+                // (it reports on `SO_ERROR` alone; `block_until_connected` additionally checks
+                // `peer_addr`). The unwind + re-stamp is the `resume_native` arm's, verbatim: without
+                // it the aborted task skips every `defer` (W7-16's bug, W7-17 lesson 2).
+                if std::mem::take(&mut self.poll_timed_out) {
+                    let rte = self
+                        .err(
+                            format!("test exceeded --timeout ({}ms)", self.timeout_ms),
+                            cip.span,
+                        )
+                        .timed_out();
+                    let rte = self.unwind_deferred(0, false).unwrap_or(rte).timed_out();
+                    return Disp::Finish(self.classify_mn_outcome(Err(rte)));
+                }
                 let v = self.finish_pending_connect(cip);
                 self.push(v);
             }

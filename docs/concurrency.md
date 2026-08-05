@@ -834,12 +834,14 @@ fn serve(tok: Token, io: Channel[str]):
 >   sleeps, so a *sibling's* cancel cannot arrive mid-sleep at all — serial is entry-only in practice,
 >   not by a different rule. What serial *does* gain is `--timeout`: the wall clock advances whether or
 >   not anything runs.
-> - **`chezzi test --timeout` reaches every timer wait** — `sleep_ms` and `timer(ms).recv()`, top-level,
->   in a nursery and in an `Executor`, blocked in place or PARKED. The park half is **W7-17**
->   (fixed 2026-08-05): a parked fiber observes nothing, so its timer job is armed for the *sooner* of
->   its own deadline and the run's, and the wake re-checks. Still out of reach, and it **hangs** rather
->   than falling through: a fiber parked on the **netpoller** (`Socket.accept`/`read` with no op
->   timeout) — `gaps.md` **W7-18**, open.
+> - **`chezzi test --timeout` reaches every blocking wait** — `sleep_ms` and `timer(ms).recv()`,
+>   top-level, in a nursery and in an `Executor`, blocked in place or PARKED. The timer-park half is
+>   **W7-17** (fixed 2026-08-05): a parked fiber observes nothing, so its timer job is armed for the
+>   *sooner* of its own deadline and the run's, and the wake re-checks. The **netpoller** half is
+>   **W7-18** (fixed 2026-08-05), same recipe: an `accept`/`read`/`write`/`connect` park registers with
+>   the sooner of the op's own `timeout_ms` and the run deadline, and the resumed op re-reads the clock
+>   to tell the two apart — the op's own deadline stays a catchable `Err("timeout")`, the run's is a
+>   hard abort. A socket op's `timeout_ms` is unaffected when the cap is off or unexpired.
 > - **`--max-heap` reaches a sleeper only through the cancel arm** — i.e. when the over-allocating task
 >   is a nursery/`Executor` sibling sharing its cancel scope (measured 365 ms). A sleeping top-level
 >   `main` has no cancel flag and its own heap is not the one growing, so it sleeps out (3005 ms) before

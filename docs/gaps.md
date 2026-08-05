@@ -60,7 +60,7 @@ chronological log.
 | **W6-10r** | `:1216` | `--max-heap` residual: a payload reachable ONLY through a **nested** core (a `Channel` inside a `Shared`, once the nested core's last `Obj` alias slot is swept) is counted nowhere | Left open by the W6-10 fix on purpose. `live_bytes` reaches a core's bytes through its `Obj::*` alias slot; a nested core has none. Closing it needs cross-core byte recursion with `Arc` de-dup — narrow trigger, not worth the machinery yet |
 | protocol embeds | `:1505` | A protocol-embedded method isn't callable through the interface value (`p: Person` can't call embedded `name()`) despite `spec.md:973` "flattened at bound sites" | Filed as a safe-direction observation in wave 3; never triaged — doc and behavior contradict each other either way |
 | ~~**W7-5d**~~ | `:5188` | **FIXED 2026-08-05.** A dead stdout was a whole-queue kill switch, so a broken pipe cancelled sibling `Executor` jobs. It is now an ORDINARY per-job fault. TWO process-global reads had to go: `executor_hard_halt` is `is_over_memory \|\| is_timed_out`, and `invoke_native`'s post-call `stream_halt` is gated on that call having actually emitted to stdout (`Vm::stdout_writes`) — unguarded it faulted a sibling that never printed, after its FIRST native. Repro: **both markers 21/21 runs**, **all three writes 15/15**, across `--serial` and `--threads=1/2/3/4/8`/default; pre-fix it wrote neither marker at `--threads=1`/`--serial`, both at `--threads=3+`, and either at `--threads=2`. Matches CPython `ThreadPoolExecutor` (`max_workers` 1/2/4), the ancestor that owns `Executor` | Three lessons. (1) A **process-GLOBAL read inside an error-property predicate** — `out_dead_reason().is_some()` does not describe the `err` it is passed. The shape was in the tree **twice**; fixing the first made the second visible. (2) The ledger's own proposed alternative ("an accepted-asymmetry test pinning what each engine actually does") **was never available**: the M:N shape varied by thread count AND across runs at one thread count. (3) A one-native-call marker is the exact shape that hides instance (2) — when the contract is "the REST of the job runs", the fence needs a "rest". Accepted cost: graceful `shutdown()` only — a submitted job that never prints and never returns now hangs `\| head -1` (`shutdown_now()` still kills it in 54 ms; a loop back-edge IS a cancellation point). CPython hangs identically; Go exits via SIGPIPE on fd 1, a signal policy Chezzi does not adopt. Nurseries unaffected (they abort siblings on any fault, by design) |
-| **W7-18** | `:5155` | **`chezzi test --timeout` cannot reach a fiber parked on the NETPOLLER — and that one HANGS.** `--timeout=300` against `parallel: spawn (l.accept())` on a listener nothing ever connects to produced **no verdict and no output**, killed by an external `timeout 10` at **10001 ms**. Same root as W7-17 (no path from the wall-clock deadline to a parked fiber), worse symptom: W7-17 fell through after its timer expired, this never ends at all | Found 2026-08-05 while measuring W7-17; **not** fixable by W7-17's clamp. A netpoller park's only deadline is the *socket op's own* `timeout_ms` (D6c), and `fire_due_socket_timeouts` re-injects with `poll_timed_out`, which makes the rewound op return a **catchable** `Err("timeout")` — a run-deadline abort must be a hard halt instead, so it needs a second marker, threaded through 5 `PollPark` construction sites. Deliberately UNFENCED in `test_runner::timeout_aborts_a_sleeping_test_everywhere`, whose doc-comment names it: an un-aborted park would HANG the suite rather than fail it |
+| ~~**W7-18**~~ | `:5155` | **FIXED 2026-08-05.** `--timeout` now reaches a fiber parked on the NETPOLLER — **10001 ms hang (no verdict, no output, killed by an external `timeout 10`) → 304 ms `TIMED-OUT t`**, stable 10/10 at `CHEZZI_THREADS=1/2/3/4/8`, and the aborted task still runs its `defer`s *including a socket write inside them*. Go is the ancestor and agrees: `go test -timeout 300ms` against a goroutine on `net.Listener.Accept()` panics `test timed out after 300ms` and never runs the following `t.Fatal`. A park now registers for `min(the op's own D6c timeout_ms, the run deadline)` and the resumed op **re-reads the clock** to tell the two apart | **The filed premise was WRONG, and it is the whole lesson.** The row said the fix "needs a second marker distinct from `poll_timed_out`, threaded through the 5 `PollPark` construction sites plus the re-inject." It needed none: `Vm::deadline` is ALREADY an absolute `Instant` on every worker and `Some` only under `--timeout`, so `now >= self.deadline` at resume answers exactly what the marker would have carried. `PollPark`, `poller::register`, `next_timeout` and `fire_due_socket_timeouts` are untouched. Second lesson: the obvious spelling of that insight re-introduced W7-16's skipped-`defer` bug on **three** separate paths (halt-before-take, `?` past `demote_socket_exit`, clear-only connect resume) and adversarial review found a **fourth** — a top-level `connect` handing the abort back as a *catchable* `Err`. All four shipped green |
 | ~~**W7-17**~~ | `:5081` | **FIXED 2026-08-05.** `--timeout` now reaches a timer wait PARKED in a `parallel:` nursery with no runnable sibling — **3004 ms `FAIL … SWALLOWED` → 304 ms `TIMED-OUT t`**, for BOTH park sites (the single `timer(ms).recv()` and a `wait:` timer arm), at `--threads=1/2/3/4/8`/default, and the aborted task still runs its `defer`s. A third site fell out of the same measurement: the **serial cooperative `wait:` timer arm** was still a bare `thread::sleep` — the one inline-sleep W7-16 missed — also 3004 ms → aborted. The park's timer job now fires at `min(its own deadline, the run deadline)` and delivers `true` ONLY if its own deadline really passed — an early wake just requeues the fiber (`close_wake`) — and `chan_recv_step`/`op_wait_poll` gained a `--timeout` checkpoint so the re-check turns that wake into the hard abort. Go is the ancestor and agrees: `go test -timeout 300ms` against `<-time.After(3s)` panics at 300 ms and never runs the following `t.Fatal` | **The filed lesson was WRONG, and it is the interesting part.** The row concluded "fixing it means giving parked fibers a deadline-driven wake (a scheduler feature), not another checkpoint: chunk-re-arming the park's timer job only gets a wake, and the resumed fiber would re-park because its own deadline has not passed." Both halves were true in isolation and the conclusion did not follow: **a wake and a checkpoint are the fix, together** — neither alone is anything. The re-park it predicted is exactly what the missing checkpoint prevents, and no re-arming was needed at all (one clamped wake, so W7-16's 200-re-arms/s cost is not paid here). The scheduler-level alternative it pointed at is also *worse*: `flag_deadlock` drops parked fibers without `unwind_deferred`, so it would have re-introduced W7-16's skipped-`defer` bug, while wake-and-re-check faults from inside the VM and unwinds normally (fenced: `a_timer_parked_task_aborted_by_the_deadline_still_runs_its_defers`). Second lesson: the **runnable sibling in every neighbouring fixture is what hid this for a whole milestone** — a spinner's own back-edge trips the deadline at 303 ms, so W7-16's tests passed over it; the new fixtures deliberately have no sibling |
 | **W7-5e** | `:5300` | `Vm::stdout_writes` — the W7-5d gate on `invoke_native`'s broken-pipe halt — assumes **every** streamed stdout write goes through `Vm::emit_out_bytes`. True today (audited: `print`/`do_print_sep`, the `print` builtin, `VmHost::print`, `fileio`'s stdout-backed `Writer`, `pending_cancel_report`), enforced by nothing. A new native that reaches `stream::write_out` any other way silently loses its halt: `chezzi run x.chz \| head -1` on a loop calling it spins forever, growing the unbounded stream queue | Cannot be enforced by moving the counter into `stream::write_out` — that would make it PROCESS-global, and a sibling thread's write during my native call would falsely fire my halt, re-introducing exactly the cross-job contamination W7-5d removed. A per-`Vm` counter is the correct shape; the invariant needs a test or a `debug_assert`, not a relocation. Cheap fence: a `#[test]` asserting `stream::write_out` has exactly one caller, or route every write through one `&mut Vm` method |
 | ~~**W7-16**~~ | `:4939` | **FIXED 2026-08-05.** A wait whose **deadline WE own** (`time.sleep_ms`, `timer(ms).recv()`) is now a **CONTINUOUS** cancellation + `--timeout` checkpoint (~5 ms), everywhere: nursery, eager `Executor`, top-level `main`, both engines. `shutdown_now()` at 50 ms against `sleep_ms(3000)`: **3005 ms → 55 ms**, and the post-sleep code no longer runs; timer form 3005 → 55 ms; nursery mid-flight 3005 → 55 ms. A syscall-blocking native (`fs.*`/`request*`/`process*`/`io.*`) stays deliberately ENTRY-only — a `read(2)` in the kernel is not ours to cut short | **The filed premise was WRONG in two ways, and measuring it is what found the real bug.** (1) *"The same `sleep_ms` inside a nursery is interrupted on both engines"* — **no**: the parity fence only passed because its `boom()` faulted BEFORE `napper` entered the sleep. Move the fault 50 ms later and the nursery ran the full **3005 ms M:N / 3054 ms serial** and printed `napper woke`. There was no nursery-vs-executor split to reconcile; both were broken mid-flight. (2) *"`--timeout` cannot reach these jobs"* is not executor-specific — `chezzi test --timeout=200` reached **no timer wait anywhere**: top-level, nursery AND executor sleeps all ran their full 3 s and reported **PASS** (only a busy `while` loop bucketed TIMED-OUT). A documented "Hard-abort" guard that silently never fires. (3) The contract question resolved AGAINST the CPython pairing the row proposed: `ThreadPoolExecutor.shutdown(cancel_futures=True)` (3001 ms, no interrupt) is the *thread*-blocking sleep; Chezzi's is a FIBER wait, whose ancestor is `asyncio.sleep` under a `TaskGroup` (cancelled @50 ms) / Go's `select { <-time.After; <-ctx.Done() }` (@100 ms) — both cancel. Decisive internal evidence: an eager job blocked on a plain `ch.recv()` **already** died at `shutdown_now()` in 56 ms, so exempting sleep was an internal inconsistency, not CPython fidelity |
@@ -5064,7 +5064,7 @@ in practice and gains the `--timeout` half only. `--timeout` reaches a `sleep_ms
 `timer(ms).recv()` on the two block-in-place paths, but **not** one parked in a nursery with no
 runnable sibling — pre-existing, filed as **W7-17** and **FIXED 2026-08-05** (which also closed the one
 inline-sleep this fix missed: the serial cooperative `wait:` timer arm). `--timeout` therefore now
-reaches every timer wait; a netpoller park is still out of reach and HANGS — **W7-18**.
+reaches every timer wait, and — since **W7-18** (fixed 2026-08-05) — every netpoller park too.
 `--max-heap` reaches a sleeper only through the
 CANCEL arm (a nursery/`Executor` sibling sharing its cancel scope, 365 ms); a sleeping top-level `main`
 has no cancel flag and its own heap is not the one growing, so it sleeps out first (3005 ms).
@@ -5189,17 +5189,16 @@ shape, M:N-only per **N10**). **The park gap is argued, not timing-tested**: it 
 submit-to-park window with no deterministic trigger (300 probe runs did not hit it), so the reasoning
 lives in `deadline_gap_wake`'s doc-comment instead of a test that would pass either way.
 
-### W7-18 — **`--timeout` cannot reach a NETPOLLER-parked fiber, and that one HANGS** — **OPEN, filed 2026-08-05 while measuring W7-17**
+### W7-18 — **`--timeout` could not reach a NETPOLLER-parked fiber, and that one HUNG** — **FIXED 2026-08-05** (filed 2026-08-05 while measuring W7-17)
 
 Same root as W7-17 (no path from the wall-clock deadline to a parked fiber), a strictly worse symptom —
-W7-17 fell through *after* its timer expired; this never ends at all:
+W7-17 fell through *after* its timer expired; this never ended at all:
 
 ```chezzi
 # c_test.chz — `chezzi test --timeout=300 c_test.chz`
 import std.net
 fn serve():
-    r := net.listen("127.0.0.1:34517")
-    match r:
+    match net.listen("127.0.0.1:0"):
         Ok(l): _ := l.accept()          # nothing ever connects
         Err(e): print("no listen")
 test fn t():
@@ -5208,18 +5207,91 @@ test fn t():
     assert false, "SWALLOWED"
 ```
 
-Measured: **no verdict, no output, killed by an external `timeout 10` at 10001 ms.**
+| shape (`--timeout=300`) | before | after |
+|---|---|---|
+| nursery `spawn` on an untimed `l.accept()` | **10001 ms**, no verdict, no output (external `timeout 10` kill) | **304 ms**, `TIMED-OUT t` |
+| nursery `spawn` on `net.connect("192.0.2.1:9")` (TEST-NET-1) | same hang | **304 ms**, `TIMED-OUT t` |
+| the aborted task's `defer` doing `conn.write("bye")` | never reached | `TIMED-OUT t` + `DEFER-WROTE 3` |
+| **top-level** `net.connect("192.0.2.1:9")` in the test body | 10 s spin, then `FAIL … SWALLOWED` | **304 ms**, `TIMED-OUT t` |
+| `accept(150)` under `--timeout=5000` (the other direction) | `Err("timeout")` at 154 ms | unchanged — still catchable |
+| Go `go test -timeout 300ms` + goroutine on `net.Listener.Accept()` | `panic: test timed out after 300ms`; the following `t.Fatal` never runs | — |
 
-**Why W7-17's clamp does not port.** A netpoller park's only deadline is the *socket op's own*
-`timeout_ms` (D6c), and `fire_due_socket_timeouts` re-injects the fiber with `poll_timed_out` set,
-which makes the rewound op return a **catchable** `Err("timeout")` — the ordinary socket-timeout
-contract. A run-deadline abort must be a **hard halt** (`recover:` must not catch it), so it needs a
-second marker distinct from `poll_timed_out`, threaded through the 5 `PollPark` construction sites in
-`netio.rs` plus the re-inject. The shape of the fix is otherwise W7-17's: register with
-`min(op deadline, run deadline)`, and let the re-injected fiber observe the halt.
+Stable 10/10 at `CHEZZI_THREADS=1/2/3/4/8`, 303–304 ms, `TIMED-OUT` and no `SWALLOWED`.
 
-Deliberately **unfenced** in `test_runner::timeout_aborts_a_sleeping_test_everywhere`, whose
-doc-comment names it: an un-aborted park would hang the suite rather than fail it.
+**Root cause.** `PollPark.deadline` carried only the *socket op's own* `timeout_ms` (D6c). `None` = park
+forever, and a `None` deadline is invisible to BOTH `next_timeout` (so the poll thread's own `wait` is
+unbounded) and `fire_due_socket_timeouts`'s `deadline.is_some_and(|d| d <= now)` filter. A socket park is
+also accounted `inflight` — correctly, the OS could still wake it — so the deadlock verdict rightly
+declined too. Nothing in the process was watching the wall clock on behalf of that fiber.
+
+**The fix — and the filed premise it refutes.** The row above concluded that a run-deadline abort "needs
+a second marker distinct from `poll_timed_out`, threaded through the 5 `PollPark` construction sites plus
+the re-inject", because the existing marker makes the rewound op return a *catchable* `Err("timeout")`
+while a hard halt must not be catchable. **No second marker was needed.** `Vm::deadline` is already an
+absolute `Instant`, already threaded onto every worker (`sched.rs`, `worker.set_deadline`), and `Some`
+only under `chezzi test --timeout` — so asking `now >= self.deadline` **at resume, before consuming
+`poll_timed_out`** answers precisely the question the marker would have carried. `PollPark`,
+`poller::register`, `next_timeout` and `fire_due_socket_timeouts` are untouched; so are the two literal
+`PollPark` constructions in tests, which the marker design would have forced to change.
+
+Four seams, all in the VM:
+
+- **`park_on_fd`** (the shared park for `read`/`read_bytes`/`write`/`accept`) clamps `target.deadline` to
+  `min(op deadline, run deadline)` and gains a `deadline_halt` **above** its cancellation checkpoint
+  (W7-17's ordering — the deadline outranks a cancel), **ungated** by `deferring`: a `defer` that would
+  park past the deadline is a hang, not cleanup.
+- **`poll_timeout_check`** is the new shared resume guard replacing the four duplicated
+  `if self.poll_timed_out { … }` entry heads. It **takes the flag first**, then halts.
+- **`park_on_connect`** sets `deadline: self.deadline` (a `connect` has no `timeout_ms`, so the marker on
+  a connect resume is unambiguous), and the `pending_connect` arm of `run_one_fiber` **raises** the halt
+  rather than clearing the flag.
+- **`demote_block_socket`** (the in-callback / block-in-place path) checks the deadline per iteration,
+  with `break Err(e)`, never `?`.
+
+**No `deadline_gap_wake` analogue is needed**, and the asymmetry with W7-17 is the interesting part.
+There, `timer::submit_at` armed a *job* before `MnSched::park` had filled the fiber's bucket, so an early
+fire found an empty bucket and was LOST. Here the deadline is not a job but a **field in the registry
+row**, and `poller::register` inserts the row and the fiber together under the registry lock; the wake is
+re-derived by re-reading the registry. An already-expired row simply makes `next_timeout` return `ZERO`.
+
+**Lessons.**
+
+1. **"This needs machinery X" deserves the same evidence bar as a bug report** — this is W7-17's lesson 1
+   recurring one row later, in the same file, about the same subsystem. Both rows named a mechanism the
+   fix turned out not to need. The tell is identical both times: the row reasoned from what the existing
+   machinery *carries* rather than from what the question actually *is*. "Which deadline expired?" is a
+   question about the clock, and the clock was already there.
+2. **The obvious spelling of the right idea re-introduced W7-16's skipped-`defer` bug on THREE paths.**
+   Halting with `?` before consuming `poll_timed_out` leaves the flag set for the unwind, so the first
+   socket op in any `defer` reports a fabricated `Err("timeout")` and the cleanup silently does nothing.
+   A `?` in `demote_block_socket` returns past `demote_socket_exit`, permanently leaking
+   `running`/`inflight`. Clearing the flag at the connect resume instead of raising lets the fiber finish
+   normally, so the nursery joins and `assert false` reports `FAIL … SWALLOWED` — W7-17's original
+   symptom, re-created by the fix meant to close it. All three are mutation-verified red by the new
+   fences; all three would have shipped green without them.
+3. **Adversarial review found a fourth, on a path the plan had classified as a mere overshoot.** A
+   top-level `net.connect` (the test body has no `mn`, so it takes `block_until_connected`'s bounded
+   spin) had the run deadline come back as a **catchable** `Err("connect failed: timed out")`:
+   `FAIL … SWALLOWED` at 304 ms, a `--timeout` a `match` arm swallows. Clamping the spin was necessary
+   and *not sufficient* — a function returning a `Value` cannot raise a halt, so the raise had to move to
+   the call site. Two independent prosecutors filed it; the full green suite, the four new fences and the
+   plan's own adversarial pre-review had all missed it.
+
+Fenced by `test_runner::timeout_aborts_a_netpoller_parked_test` (accept + connect park, both
+construction paths), `timeout_aborts_a_top_level_connect`,
+`a_netpoller_aborted_task_still_runs_its_defers` (asserts `DEFER-WROTE 3` — the byte count, so a
+cleanup that ran but wrote nothing still fails), and the counter-fence
+`a_socket_timeout_is_still_catchable_under_a_generous_timeout`. All four run through
+`run_tests_timed_watchdog`, a side thread + `recv_timeout(10s)`: a regression here HANGS rather than
+fails, and inline that would wedge `cargo test` itself — which is why these could not join
+`timeout_aborts_a_sleeping_test_everywhere`, whose doc-comment previously fenced W7-18 *by omission*.
+
+**Not fenced, deliberately:** `register`'s cancel-gap ordering (a sub-millisecond window with no
+deterministic trigger — same call as W7-17's park gap, argued in the doc-comment instead); the
+`demote_block_socket` accounting leak (a `?` there is caught by review and the comment, not by a test);
+and the degeneracy where an op deadline shorter than the run deadline by less than poller-inject-to-
+schedule latency converts a catchable `Err("timeout")` into a hard halt (correct by consequence — that
+fiber hard-halts at its next checkpoint regardless — and a test would pass either way).
 
 ### W7-14 — **WAIT-1, unfixed on every block-in-place path**: a `wait:` timer arm inside an `Executor` job (or on top-level `main`) inline-slept to the deadline and could not take a sibling value that arrived sooner — **FIXED 2026-08-04, found the same day while reviewing W7-13r(a)**
 
