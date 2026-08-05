@@ -933,6 +933,18 @@ pub struct Vm {
     /// Swapped per fiber with `module_snapshot`: it describes the swapped-in view, not the VM. See
     /// [`Vm::ensure_snapshot`].
     snapshot_memo: Option<Arc<ModuleSnapshot>>,
+    /// W7-4a — the ONE rebuild map for this view's whole snapshot replay: wire `id` → the `Obj::Cell`
+    /// already built for it. `snapshot_modules` serializes every module under ONE [`WireMemo`], so a
+    /// cell reached from globals in TWO DIFFERENT modules carries ONE id; the modules fault in lazily
+    /// and independently ([`Vm::fault_module`]), so the map has to outlive any single fault for both
+    /// to tie to one cell. Reset by `install_snapshot` (a fresh view rebuilds from scratch).
+    ///
+    /// Heap-keyed, like `module_objs`: its `GcRef`s index whatever heap is current while this view is
+    /// (an M:N fiber's own heap, or the shared heap inside a `prepare_serial_child` window), so it
+    /// swaps WITH `module_snapshot`/`module_faulted` and is a GC root in both `collect` and
+    /// `root_ctx`. Entries are cells reachable from an already-`module_define`d global, so rooting
+    /// them pins nothing the module did not already root.
+    snapshot_rebuild: fxhash::FxHashMap<u32, GcRef>,
     /// W6-2 — how many snapshots this VM has BUILT (cache misses). A `usize` bump on a cold path, and the
     /// only direct probe that the cache short-circuits: a timing bench can hint, this counts. Read by
     /// `vm::tests::snapshot_cache_*`. NOT swapped per fiber — it is a per-VM statistic, not part of the
@@ -1120,6 +1132,10 @@ struct FiberCtx {
     /// nothing for them. `None`/`None` for a cooperative child (eager-faulted at the spawn boundary).
     module_snapshot: Option<Arc<ModuleSnapshot>>,
     snapshot_memo: Option<Arc<ModuleSnapshot>>,
+    /// W7-4a — the fiber's snapshot rebuild map (see [`Vm::snapshot_rebuild`]). UNLIKE the two above
+    /// it IS heap-keyed, so `root_ctx` roots it — for a cooperative fiber that is the shared heap;
+    /// an M:N fiber's own heap is never traced while parked, and its map travels with the heap here.
+    snapshot_rebuild: fxhash::FxHashMap<u32, GcRef>,
     /// D2b — the fiber's `Executor` handles (GC roots into its own heap; same heap-keyed argument as
     /// `module_objs`). Empty for cooperative fibers.
     executors: Vec<GcRef>,
@@ -3386,6 +3402,10 @@ impl ReadyWorker {
             // per-nursery now, so the shell's cannot substitute for this fiber's).
             module_snapshot: worker.module_snapshot,
             snapshot_memo: worker.snapshot_memo,
+            // W7-4a — the rebuild map indexes `worker.heap` (which becomes `ctx.heap`) and belongs to
+            // the view above; carry it for the same heap-keyed reason as `str_intern`, so the modules
+            // that fault in later all tie to one cell per binding.
+            snapshot_rebuild: worker.snapshot_rebuild,
             executors: worker.executors,
             // M19 Phase 3 — the intern cache indexes `worker.heap`, which becomes `ctx.heap`; carry it
             // so the heap-keyed invariant holds (its `GcRef`s stay valid against the heap they travel with).
@@ -4474,7 +4494,7 @@ fn to_str_output((out, err, res, code): RunOutputRaw) -> RunOutput {
 /// CLI calls [`run_file_with_entry`] directly so a `module:function` entrypoint can name a function.
 #[cfg(test)]
 pub fn run_file_with(entry: &std::path::Path, cfg: crate::native::HostConfig) -> RunOutput {
-    to_str_output(run_file_engine(entry, cfg, false, None, None))
+    to_str_output(run_file_engine(entry, cfg, false, None, None, false))
 }
 
 /// Like [`run_file_with`], but runs on the **B3.3-threads `--parallel` engine** (real OS-thread
@@ -4482,7 +4502,7 @@ pub fn run_file_with(entry: &std::path::Path, cfg: crate::native::HostConfig) ->
 /// it to exercise the OS-thread engine.
 #[cfg(test)]
 pub fn run_file_parallel(entry: &std::path::Path, cfg: crate::native::HostConfig) -> RunOutput {
-    to_str_output(run_file_engine(entry, cfg, true, None, None))
+    to_str_output(run_file_engine(entry, cfg, true, None, None, false))
 }
 
 /// Resolve, compile, and run a program from its entry path on the dedicated VM thread, then — if
@@ -4514,7 +4534,29 @@ pub fn run_file_bytes(
     entry_fn: Option<&str>,
     root: Option<std::path::PathBuf>,
 ) -> RunOutputRaw {
-    run_file_engine(entry, cfg, parallel, entry_fn.map(str::to_string), root)
+    run_file_engine(
+        entry,
+        cfg,
+        parallel,
+        entry_fn.map(str::to_string),
+        root,
+        false,
+    )
+}
+
+/// W7-4a — a MULTI-FILE run under GC stress (collect at every safepoint). The single-source
+/// `run_capture_stress` cannot reach the lazy per-module fault path, which is exactly where a cell
+/// now sits parked in `Vm::snapshot_rebuild` across real safepoints between two modules' faults.
+#[cfg(test)]
+pub fn run_file_stress(entry: &std::path::Path, parallel: bool) -> RunOutput {
+    to_str_output(run_file_engine(
+        entry,
+        crate::native::HostConfig::default(),
+        parallel,
+        None,
+        None,
+        true,
+    ))
 }
 
 fn run_file_engine(
@@ -4523,11 +4565,12 @@ fn run_file_engine(
     parallel: bool,
     entry_fn: Option<String>,
     root: Option<std::path::PathBuf>,
+    stress: bool,
 ) -> RunOutputRaw {
     let entry = entry.to_path_buf();
     std::thread::Builder::new()
         .stack_size(VM_STACK_BYTES)
-        .spawn(move || run_file_inner(&entry, cfg, parallel, entry_fn.as_deref(), root))
+        .spawn(move || run_file_inner(&entry, cfg, parallel, entry_fn.as_deref(), root, stress))
         .expect("failed to spawn VM thread")
         .join()
         .expect("VM thread panicked")
@@ -4539,6 +4582,7 @@ fn run_file_inner(
     parallel: bool,
     entry_fn: Option<&str>,
     root: Option<std::path::PathBuf>,
+    stress: bool,
 ) -> RunOutputRaw {
     let build = match root {
         Some(r) => crate::resolver::build_graph_with_root(entry, r),
@@ -4581,6 +4625,7 @@ fn run_file_inner(
     let mut vm = Vm::new(Arc::new(program));
     vm.host = cfg;
     vm.parallel = parallel;
+    vm.gc_stress = stress;
     // On a clean finish, gracefully reap any Executor never explicitly shut down (C5 / A2). Skipped
     // on a fault (the program is already erroring) and on a hard `std.os.exit` (handled inside
     // `drain_live_executors` via `pending_exit`).

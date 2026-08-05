@@ -160,6 +160,7 @@ impl Vm {
             module_snapshot: None,
             module_faulted: Vec::new(),
             snapshot_memo: None,
+            snapshot_rebuild: super::fxhash::FxHashMap::default(),
             snapshot_builds: 0,
             pinned_module_roots: Vec::new(),
             mn: None,
@@ -230,6 +231,11 @@ impl Vm {
         std::mem::swap(&mut self.module_faulted, &mut ctx.module_faulted);
         std::mem::swap(&mut self.module_snapshot, &mut ctx.module_snapshot);
         std::mem::swap(&mut self.snapshot_memo, &mut ctx.snapshot_memo);
+        // W7-4a — the snapshot rebuild map describes the SAME view, so it travels with it. Unlike the
+        // two `Arc<ModuleSnapshot>`s above it IS heap-keyed (`GcRef` values), exactly like
+        // `module_objs` just above: for an M:N fiber it indexes the heap swapped below, for a
+        // cooperative one the shared heap. Either way it moves atomically with its view.
+        std::mem::swap(&mut self.snapshot_rebuild, &mut ctx.snapshot_rebuild);
         // D2a — an M:N fiber (`Some`) owns its heap; swap it with the host's. A cooperative fiber
         // (`None`) shares the single `Vm::heap` (decision A), so its heap is left untouched and the
         // cooperative engine stays byte-identical by construction. D2b — the same `Some` gate carries
@@ -1344,6 +1350,11 @@ impl Vm {
         // parked. Root them or a sibling's alloc-triggered GC would sweep the child's live module copy
         // (and, after the parent's swap-out, the REAL modules parked in `nursery.parent.module_objs`).
         work.extend(ctx.module_objs.iter().copied());
+        // W7-4a — same argument as `ctx.module_objs`: a cooperative fiber's rebuild map indexes the
+        // SHARED heap, so root it where the view is rooted. Empty in practice (a cooperative child is
+        // eager-faulted with `module_snapshot` cleared), and belt-and-braces even when not — see the
+        // matching note in `collect`.
+        work.extend(ctx.snapshot_rebuild.values().copied());
     }
 
     pub(super) fn collect(&mut self) {
@@ -1403,6 +1414,13 @@ impl Vm {
         // of the same op, so they must never be swept out from under a later push. Heap-keyed, so this
         // roots the cache for *this* heap (an M:N fiber's cache swapped in with its heap).
         work.extend(self.str_intern.values().copied());
+        // W7-4a — the snapshot rebuild map's cells, heap-keyed like `str_intern` (so this roots them
+        // for *this* heap). BELT AND BRACES today, and deliberately kept: every entry is currently
+        // also reachable from the module global it was just `module_define`d into, and MEASURED —
+        // `airlock_cross_module_shared_binding_is_one_cell` still passes with this line deleted. The
+        // map now outlives a single fault, though, so the moment any entry enters it before something
+        // else roots it, this is the only thing holding it. Cheap; do not "clean it up".
+        work.extend(self.snapshot_rebuild.values().copied());
         // Parked fibers in active cooperative schedulers (B1/B2): each level's joining-fiber context
         // plus every child fiber's context are roots while the children run. The CURRENTLY running
         // fiber's context is the live `self.{stack,frames,nurseries}` already rooted above; a parked

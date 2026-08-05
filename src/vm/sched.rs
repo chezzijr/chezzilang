@@ -3567,6 +3567,11 @@ impl Vm {
         // W6-2 — the cache describes the view, so it rides the same take/restore: the child's view must
         // not leave its snapshot cached on the parent (and vice versa).
         let saved_memo = self.snapshot_memo.take();
+        // W7-4a — and so does the rebuild map (see `with_serial_child_modules`). The child's map is
+        // DROPPED on the way out: every cell in it is reachable from `child_objs`, which the child
+        // fiber carries and `root_ctx` roots, so nothing is lost — and leaving it on the shell would
+        // tie the shell's next view to this child's private copy.
+        let saved_rebuild = std::mem::take(&mut self.snapshot_rebuild);
         self.install_snapshot(snap);
         for i in 0..self.module_objs.len() {
             self.fault_module(i);
@@ -3579,6 +3584,7 @@ impl Vm {
         let child_faulted = std::mem::replace(&mut self.module_faulted, saved_faulted);
         self.module_snapshot = saved_snap;
         self.snapshot_memo = saved_memo;
+        self.snapshot_rebuild = saved_rebuild;
         let pending = match call {
             ReadyCall::Invoke { callee, args } => PendingCall::Call { callee, args, span },
             ReadyCall::Method { recv, name, args } => PendingCall::Method {
@@ -3632,6 +3638,9 @@ impl Vm {
         let saved_snap = self.module_snapshot.take();
         // W6-2 — the snapshot cache describes the view, so it rides the same take/restore dance.
         let saved_memo = self.snapshot_memo.take();
+        // W7-4a — so does the rebuild map: it holds the CHILD view's cells, and leaking them onto the
+        // shell would tie a later shell-view replay to cells from a dead child copy.
+        let saved_rebuild = std::mem::take(&mut self.snapshot_rebuild);
         self.install_snapshot(snap);
         for i in 0..self.module_objs.len() {
             self.fault_module(i);
@@ -3644,6 +3653,7 @@ impl Vm {
         self.module_faulted = saved_faulted;
         self.module_snapshot = saved_snap;
         self.snapshot_memo = saved_memo;
+        self.snapshot_rebuild = saved_rebuild;
         r
     }
 
@@ -3886,6 +3896,13 @@ impl Vm {
         let mut modules = Vec::with_capacity(self.module_objs.len());
         // W6-2 — computed inside the walk that already visits every global (no extra traversal).
         let mut reusable = true;
+        // W7-4a — ONE [`WireMemo`] spans EVERY module, matched by the one `Vm`-lived rebuild map
+        // `fault_module` drains ([`Vm::snapshot_rebuild`]) — the scope invariant of `deep_clone_all`,
+        // now at snapshot scope. A memo per module gave a cell reached from globals in two DIFFERENT
+        // modules a fresh id each (`l.GI := k.C.inc` / `main.GG := k.C.get`), so the task rebuilt two
+        // cells and its write to one was invisible to the other: `0`, where CPython and Go both
+        // measure `2`. `cells`/`next_id` therefore persist across the loop.
+        let mut memo = WireMemo::default();
         for &pm in &self.module_objs {
             // M19 Phase 2b — collect globals in *slot order* (not HashMap iteration order) so a
             // worker replays them into matching slots; the shared `Arc<Program>` slot map makes
@@ -3897,13 +3914,16 @@ impl Vm {
             // Fallible: a module global that is a frame-holding generator faults here (graceful,
             // re-stamped with the nursery span by `ensure_snapshot`) instead of panicking in `to_snap`.
             let mut snapped = Vec::with_capacity(globals.len());
-            // W7-4: ONE [`WireMemo`] per MODULE, matching the one rebuild map `fault_module` uses for
-            // that module's replay loop (scope invariant — see `deep_clone_all`). Two globals holding
-            // sibling closures over one function-local cell (`gi := c.inc; gg := c.get`) then arrive in
-            // a task sharing their single binding, instead of one cell each. Slot order is the same on
-            // both sides, so whichever global defines the `WireValue::Cell` is replayed before the one
-            // that back-references it. Cross-MODULE cell identity stays split — see `fault_module`.
-            let mut memo = WireMemo::default();
+            // W7-4a — each module must be SELF-CONTAINED: modules fault in lazily, in whatever order
+            // the task touches them (and a module it never touches never faults at all), so a
+            // `Backref` pointing into a module that has not been replayed yet would resolve to
+            // nothing. Clearing `emitted` (not `cells`) makes this module re-emit the FULL
+            // `WireValue::Cell` definition under the SAME id, and `from_wire_memo`'s first-wins dedupe
+            // ties the second definition to the cell the first one built. The cost is wire size, and
+            // only for a cell reached from 2+ modules — the same trade `elem_split` already makes for
+            // `RwShared` stores. WITHIN a module the pop-on-DFS-exit `path` discipline is untouched,
+            // so the data-DAG contract is unchanged.
+            memo.emitted.clear();
             for (k, v) in globals {
                 reusable &= self.slot_snapshot_reusable(v);
                 snapped.push((k, self.to_snap(v, &mut memo)?));
@@ -4266,6 +4286,9 @@ impl Vm {
             self.module_objs.push(wm);
         }
         self.module_faulted = vec![false; snap.modules.len()];
+        // W7-4a — a fresh view rebuilds from scratch: ids are minted per snapshot, so carrying a
+        // previous view's map in would tie this view's cells to another heap's `GcRef`s.
+        self.snapshot_rebuild.clear();
         // W6-2 — seed the cache from the snapshot being installed: this view IS a faithful replay of
         // `snap`, so a nested `spawn` that changed nothing reuses it for free instead of materializing
         // + re-walking every global. The two invalidation rules still apply to it: a slot write drops it,
@@ -4293,22 +4316,25 @@ impl Vm {
         // W6-2 — a replay REPRODUCES the snapshot, it does not mutate the view, so its `module_define`s
         // must not drop the cache this view was seeded with (`install_snapshot`).
         let memo = self.snapshot_memo.take();
-        // W7-4: ONE rebuild map for this module's whole replay loop, mirroring the one `WireMemo`
-        // `snapshot_modules` used for the module (scope invariant — see `deep_clone_all`), so two
-        // globals over one captured local rebuild ONE cell. Slot order matches on both sides, so a
-        // `Backref` always resolves against an id already registered. GC-safe: `Heap::alloc` never
-        // collects (only `run_until` does) and every `GcRef` here is reachable from the rooted module
-        // it was just `module_define`d into.
-        //
-        // ponytail: KNOWN CEILING — the map is per MODULE, so cell identity is NOT preserved for two
-        // globals in DIFFERENT modules over one shared cell (they fault in lazily at different times,
-        // which would need Vm-lived rebuild state kept across GC-visible points). Upgrade path if it
-        // bites: hang the map off the `Vm` beside `module_snapshot` and root it.
-        let mut rb = super::fxhash::FxHashMap::<u32, GcRef>::default();
+        // W7-4a: ONE rebuild map for the WHOLE view's replay, mirroring the one `WireMemo`
+        // `snapshot_modules` now spans every module with (scope invariant — see `deep_clone_all`), so
+        // two globals over one captured local rebuild ONE cell whether they live in the same module or
+        // not. Each module re-emits a shared cell's full definition under the same id and
+        // `from_wire_memo` dedupes first-wins, so lazy fault ORDER does not matter and a module that
+        // never faults costs nothing. Taken out of `self` for the borrow and put back below; it lives
+        // on the `Vm` (rooted by `collect`/`root_ctx`) because a cell built by this fault can sit in it
+        // across a safepoint before a later module's fault ties to it.
+        let mut rb = std::mem::take(&mut self.snapshot_rebuild);
         for (name, sv) in &snap.modules[idx].globals {
             let val = self.replay_snap(sv, &mut rb);
             self.module_define(module, name, val);
         }
+        debug_assert!(
+            self.snapshot_rebuild.is_empty(),
+            "fault_module re-entered while its rebuild map was taken — the nested fault built cells \
+             against a map that is about to be dropped"
+        );
+        self.snapshot_rebuild = rb;
         self.snapshot_memo = memo;
     }
 

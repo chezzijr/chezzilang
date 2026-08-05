@@ -14234,6 +14234,79 @@ main()
     assert_eq!(run_capture_stress(src), run(src));
 }
 
+/// W7-4a — cell identity across MODULES. `k.C` holds two sibling closures over one factory-local
+/// `n`; `l.GI` and `main.GG` are globals in two DIFFERENT modules pointing at them. A memo per module
+/// minted a fresh id per module, so the task rebuilt two cells and its `l.GI()` writes were invisible
+/// to `GG()` — `0`, where CPython (`import pk, pl` + `threading.Thread`) and Go (two packages +
+/// a goroutine) both measure `2`. One snapshot-wide `WireMemo` + one `Vm`-lived rebuild map fixes it.
+#[test]
+fn airlock_cross_module_shared_binding_is_one_cell() {
+    let dir = std::env::temp_dir().join(format!("chezzi_vm_w74a_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("k.chz"),
+        "\
+struct Ctr:
+    inc: fn() -> nil
+    get: fn() -> int
+fn make() -> Ctr:
+    n := 0
+    fn inc():
+        n = n + 1
+    fn get() -> int:
+        return n
+    return Ctr(inc, get)
+C := make()
+",
+    )
+    .unwrap();
+    std::fs::write(dir.join("l.chz"), "import k\nGI := k.C.inc\n").unwrap();
+    let entry = dir.join("main.chz");
+    std::fs::write(
+        &entry,
+        "\
+import k
+import l
+GG := k.C.get
+fn main():
+    r := Channel[int]()
+    parallel:
+        spawn:
+            l.GI()
+            l.GI()
+            r.send(GG())
+    print(r.recv())
+main()
+",
+    )
+    .unwrap();
+    let (vm_out, _e, vm_res, _) = run_file(&entry);
+    let (par_out, _pe, par_res, _) =
+        run_file_parallel(&entry, crate::native::HostConfig::default());
+    // Modules fault in LAZILY, so a cell built by `k`'s fault sits in the `Vm`-lived rebuild map
+    // across real safepoints before `l`'s and `main`'s faults tie to it. (The map is also rooted by
+    // `collect`; that root is belt-and-braces today — this test still passes without it, because
+    // every entry is reachable from the global it was `module_define`d into. It is the LAZY-FAULT
+    // window this run locks down, not the root line.)
+    let (stress_out, _se, stress_res, _) = run_file_stress(&entry, true);
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(vm_res.is_ok(), "serial faulted: {vm_res:?}");
+    assert!(par_res.is_ok(), "M:N faulted: {par_res:?}");
+    assert!(stress_res.is_ok(), "gc-stress faulted: {stress_res:?}");
+    assert_eq!(
+        vm_out, "2\n",
+        "cross-module sibling closures split their cell"
+    );
+    assert_eq!(
+        par_out, "2\n",
+        "cross-module sibling closures split their cell (M:N)"
+    );
+    assert_eq!(
+        stress_out, "2\n",
+        "the snapshot rebuild map is not GC-rooted"
+    );
+}
+
 /// Control (regression lock, rc=0) — the SAME recursive `fn` HOISTED to module scope IS sendable: it
 /// crosses as `Obj::Func` (no captures; recursion resolves via its home-global slot), never entering
 /// the `Obj::Closure` serialization arm, so the new self-ref diagnostic never fires and the send works.
