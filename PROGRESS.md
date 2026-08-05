@@ -32,8 +32,10 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > (3) The first fence used markers making exactly ONE native call — the single shape where instance 2
 > is invisible. When the contract is "the REST of the job runs", the fence needs a "rest".
 >
-> **Accepted cost, and note the primitive:** `ex.submit`-only. A job with no print and no cancellation
-> point (`while true: j = j + 1`) now hangs `| head -1` where it exited in 4 ms. **CPython hangs
+> **Accepted cost, and note the primitive:** graceful `ex.shutdown()` only. A submitted job that never
+> prints and never returns (`while true: j = j + 1`) now hangs `| head -1` where it exited in 4 ms —
+> run-all keeping its promise, not a new uncancellable job class: **`shutdown_now()` still kills it in
+> 54 ms** on every engine (a loop back-edge is a cancellation point). **CPython hangs
 > identically** on `ThreadPoolExecutor` — the ancestor that owns `Executor` — so this follows it;
 > **Go exits, via SIGPIPE on fd 1**, a signal policy Chezzi does not adopt (`stream_halt` records why:
 > it would break `std.net`'s EPIPE contract). Nurseries are unaffected — `parallel:` aborts siblings

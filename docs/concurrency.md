@@ -1265,10 +1265,12 @@ supervised tasks) — Go's float-free `go` is the model both ecosystems *rejecte
 > cap** (W7-5d, fixed 2026-08-05): a broken pipe raises an ordinary fault in the job that printed, and
 > every sibling still runs to completion — matching CPython's `ThreadPoolExecutor`, the ancestor that
 > owns `Executor` semantics, which runs every submitted job at every `max_workers`. The cost is
-> deliberate and measured: a submitted job that reaches no print and no cancellation point (a bare
-> `while true: j = j + 1`) now runs forever instead of dying with the queue, so
-> `chezzi run x.chz | head -1` on that program hangs — CPython hangs on the same shape. (A nursery is
-> unaffected: `parallel:` aborts siblings on any fault, this one included.) `shutdown_now` drops work
+> deliberate and measured: under a GRACEFUL `shutdown()`, a submitted job that never prints and never
+> returns (a bare `while true: j = j + 1`) now runs forever instead of dying with the queue, so
+> `chezzi run x.chz | head -1` on that program hangs — CPython hangs on the same shape. Use
+> `shutdown_now()` if you need it dead: it still cancels that job at its loop back-edge (measured
+> 54 ms on every engine). (A nursery is unaffected: `parallel:` aborts siblings on any fault, this one
+> included.) `shutdown_now` drops work
 > that has not started
 > and asks running jobs to stop — **cooperatively, at their next cancellation point**, exactly like
 > Java's `shutdownNow`; a job with no such point still runs to completion, so on the default engine

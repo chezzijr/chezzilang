@@ -105,13 +105,17 @@ impl RuntimeError {
 /// `dead_stdout_does_not_{cancel_sibling_executor_jobs,tear_a_multi_native_sibling}_*` in
 /// `tests/interactive.rs`.
 ///
-/// **What this costs, measured, so nobody re-adds the term to buy it back.** A job that reaches NO
-/// print and no cancellation-observing point — `ex.submit(fn(): while true: j = j + 1)` — used to die
-/// with the queue and now runs forever, so `chezzi run x.chz | head -1` on that program hangs where
-/// it exited in 4 ms. CPython hangs on the identical `ThreadPoolExecutor` shape (measured), so this
-/// follows the owning ancestor. Go exits — but by taking SIGPIPE on fd 1 and killing the process, a
-/// signal policy Chezzi deliberately does not adopt ([`Vm::stream_halt`] records why: restoring
-/// SIGPIPE would break `std.net`'s EPIPE-as-an-error contract). A `parallel:`/`spawn` nursery is
+/// **What this costs, measured, so nobody re-adds the term to buy it back.** Under a GRACEFUL
+/// `shutdown()`, a job that never prints and never returns — `ex.submit(fn(): while true: j = j + 1)`
+/// — used to die with the queue and now runs forever, so `chezzi run x.chz | head -1` on that program
+/// hangs where it exited in 4 ms. That is run-all keeping its promise, NOT a new uncancellable job
+/// class: `shutdown_now()` still kills the same job in 54 ms on `--serial`/`--threads=1`/default (a
+/// loop back-edge is a cancellation point, and `shutdown_now` trips the per-core cancel flag).
+/// CPython hangs on the identical `ThreadPoolExecutor` shape (measured), so this follows the owning
+/// ancestor. Go exits — but by taking SIGPIPE on fd 1 and killing the process, a signal policy Chezzi
+/// does not adopt ([`Vm::stream_halt`] records why: restoring SIGPIPE would break `std.net`'s
+/// EPIPE-as-an-error contract — though note Go splits BY FD NUMBER, fd 1/2 signalling and every other
+/// fd returning `EPIPE`, so that conflict is not actually forced). A `parallel:`/`spawn` nursery is
 /// unaffected either way — structured concurrency aborts siblings on ANY fault, by design, so the
 /// same program under `spawn` still terminates promptly on both engines.
 ///
