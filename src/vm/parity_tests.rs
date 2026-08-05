@@ -10343,14 +10343,29 @@ fn parity_nested_nursery_inside_a_cancelled_task_is_cancellable() {
     assert_eq!(mn, "end\n", "M:N: the nested spinner was cancelled");
 }
 
-/// A blocking native (`sleep_ms` / `io.*` / `fs.*` / `request`) is a cancellation checkpoint on BOTH
-/// engines — the check sits OUTSIDE the M:N-only offload gate. It used to be M:N-only, so a cancelled
-/// SERIAL task slept the full duration (stalling the whole teardown — `sleep_ms(60000)` would freeze
-/// it for a minute) and then, having no other checkpoint, ran every straight-line statement AFTER the
-/// sleep to completion: `{napper start, napper woke, end}` on serial vs `{napper start, end}` on M:N,
-/// deterministically. The line SET is the parity contract.
+/// A blocking native (`sleep_ms` / `io.*` / `fs.*` / `request`) is an **ENTRY** cancellation
+/// checkpoint on BOTH engines — the check sits OUTSIDE the M:N-only offload gate. It used to be
+/// M:N-only, so a cancelled SERIAL task slept the full duration (stalling the whole teardown —
+/// `sleep_ms(60000)` would freeze it for a minute) and then, having no other checkpoint, ran every
+/// straight-line statement AFTER the sleep to completion: `{napper start, napper woke, end}` on serial
+/// vs `{napper start, end}` on M:N, deterministically. The line SET is the parity contract.
+///
+/// **Scope, tightened by W7-16.** This fence covers only the case where the cancel is ALREADY TRIPPED
+/// when the blocking call is reached — which is what its fixture produced by accident, `boom()`
+/// faulting before `napper` could enter the sleep. It said nothing about a cancel arriving DURING the
+/// sleep, and that case was broken on both engines (measured 3005 ms M:N / 3054 ms serial, `napper
+/// woke` printed) until W7-16. The mid-flight half is
+/// `tests::a_sleeping_nursery_task_is_cancelled_mid_flight_by_a_sibling_fault`, M:N-only because
+/// serial cannot preempt a sleeping fiber at all (nothing else runs), so its line SET legitimately
+/// differs there.
+///
+/// The fixture is left ungated ON PURPOSE: `boom()` divides by zero as its first act while `napper`
+/// still has a `print` ahead of the sleep, so the cancel is reliably tripped BEFORE the blocking call
+/// is reached — which is the ordering this fence is for. A `Channel` handshake would only move the
+/// race, not remove it (nothing can order "boom's fault" against "napper's sleep ENTRY" from inside
+/// the language), and would blur which checkpoint is under test.
 #[test]
-fn parity_blocking_native_is_a_cancellation_checkpoint_on_both_engines() {
+fn parity_blocking_native_is_an_entry_cancellation_checkpoint_on_both_engines() {
     let src = "import std.time\n\
                fn boom() -> int:\n    return 1 / 0\n\
                fn napper():\n    print(\"napper start\")\n    time.sleep_ms(3000)\n    print(\"napper woke\")\n\
@@ -10368,7 +10383,7 @@ fn parity_blocking_native_is_a_cancellation_checkpoint_on_both_engines() {
     }
     assert_same_lines(&serial, &mn);
     assert!(
-        t0.elapsed() < std::time::Duration::from_millis(3000),
+        t0.elapsed() < std::time::Duration::from_millis(1500),
         "neither engine's teardown waits out the cancelled task's 3s sleep: {:?}",
         t0.elapsed()
     );

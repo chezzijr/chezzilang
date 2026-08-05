@@ -274,7 +274,8 @@ instead (`concurrency.md` §8, decision D3) ·
 `shutdown() -> nil` (**wait** for the submitted work — every job runs; raises the lowest-index fault,
 see `concurrency.md` §8) ·
 `shutdown_now() -> nil` (drop work that has not started, ask running jobs to stop **cooperatively**,
-then wait — Java `shutdownNow`; a job with no cancellation point still finishes) ·
+then wait — Java `shutdownNow`; a job with no cancellation point still finishes, but one **sleeping or
+waiting a timer is ended** — see `concurrency.md` §cancellation points) ·
 `submit_result[T](f: fn() -> T) -> Channel[T]` — submit `f` and get back a cap-1 `Channel[T]` carrying
 its result (`.recv()` it **after** `shutdown()`). This is the result-returning primitive
 `std.concurrency.task.submit_task` / `Task[T]` wraps.
@@ -667,6 +668,11 @@ list) + `remove_file`/`remove_dir` in Chezzi if you need it.
 Also licenses the opcode-backed `timer(ms) -> Channel[bool]` builtin (one-shot timeout channel; see
 [§3](#3-runtime-types-concurrency--iteration) and `concurrency.md §6c`): `import std.time` (whole-module)
 or `import timer from std.time` (per-name; `timer` cannot be renamed on import).
+Both `sleep_ms` and a `timer(ms)` `recv` are **continuous cancellation checkpoints**: the deadline is
+the runtime's own, so a scope cancel or an `Executor.shutdown_now()` ends the wait within ~5 ms instead
+of after it, and the task still runs its `defer`s. `chezzi test --timeout` rides the same checkpoint,
+with one gap — a `timer(ms).recv()` parked in a `parallel:` nursery with no runnable sibling is not
+deadline-reachable (`concurrency.md` §cancellation points; `gaps.md` **W7-16**/**W7-17**).
 
 ### `std.process`
 `cmd(line: str) -> Result[str]` — run `sh -c <line>`, capture stdout; `Err(stderr)` on non-zero exit

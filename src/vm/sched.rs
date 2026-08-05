@@ -1500,7 +1500,36 @@ impl Vm {
                         let v = self.lower_native(nr);
                         self.push(v);
                     }
-                    Err(rte) => return Disp::Finish(self.classify_mn_outcome(Err(rte))),
+                    Err(rte) => {
+                        // W7-16 — …or the offloaded `sleep_ms` was ENDED by a cancel (the timer job
+                        // observes the scope flags mid-sleep now). `self.cancelled` was just reset
+                        // above, so without this the cancelled sleeper classifies as a **Fault**,
+                        // trips its siblings and MASKS the real error that cancelled it. The
+                        // `executor_hard_halt` guard keeps the other direction honest: a `--timeout`
+                        // / over-memory abort must never be swallowed into a silent `Cancelled`.
+                        if !executor_hard_halt(&rte) && self.cancel_requested() {
+                            self.cancelled = true;
+                        }
+                        // …and it must UNWIND, not merely finish. This arm returns WITHOUT re-entering
+                        // `run_until`, so nothing else would run the task's `defer`s — a cancel
+                        // delivered mid-sleep would silently skip every registered cleanup, while the
+                        // same cancel arriving 50 ms earlier (the entry checkpoint, which faults inside
+                        // the VM) runs them. `docs/concurrency.md`: "a cancelled task then unwinds
+                        // through its `defer`s… 'does my cleanup run?' no longer depends on scheduler
+                        // timing". Same shape as `run_until`'s `cancel_bypass` funnel — including
+                        // re-stamping the hard-halt markers a mid-unwind `defer` fault would strip, so
+                        // `--timeout`/`--max-heap` stay un-catchable. A native PANIC keeps its
+                        // documented no-defer behavior: it sets neither the cancel latch nor a marker.
+                        let rte = if self.cancelled || rte.is_over_memory || rte.is_timed_out {
+                            let (over_mem, timed) = (rte.is_over_memory, rte.is_timed_out);
+                            let r = self.unwind_deferred(0, false).unwrap_or(rte);
+                            let r = if over_mem { r.over_memory() } else { r };
+                            if timed { r.timed_out() } else { r }
+                        } else {
+                            rte
+                        };
+                        return Disp::Finish(self.classify_mn_outcome(Err(rte)));
+                    }
                 }
             }
             // D6b — a fiber resumed from a non-blocking `connect` park carries the connecting socket in

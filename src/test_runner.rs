@@ -1519,6 +1519,86 @@ struct Suite:
         }
     }
 
+    /// **Deliberately NOT covered, and not "everywhere":** a `timer(ms).recv()` PARKED in a
+    /// `parallel:` nursery with no runnable sibling. That path parks the fiber (`netio.rs`'s M:N timer
+    /// branch) instead of blocking in place, so it never reaches `block_halt_check`, and with nothing
+    /// executing there is no back-edge to observe the deadline either — measured 3003 ms under
+    /// `--timeout=300`, with the post-wait statement running. **Pre-existing** (identical on a pre-fix
+    /// binary), a different mechanism from the inline-sleep hole this test covers, and filed as
+    /// `gaps.md` **W7-17**. Named `..._in_place` rather than `..._everywhere` for exactly that reason.
+    #[test]
+    fn timeout_aborts_a_sleeping_test_on_every_block_in_place_path() {
+        // W7-16 — `--timeout` is documented as a HARD abort, and it reached NO timer wait anywhere.
+        // Measured pre-fix with `--timeout=200` against three tests that each sleep 3 s: all three
+        // reported **PASS** after running the full 3 s (only a busy `while` loop bucketed TIMED-OUT).
+        // A guard that silently does not guard is worse than no guard.
+        //
+        // The three fixtures are three DIFFERENT mechanisms, which is why one is not enough: the
+        // top-level sleep blocks the test's own thread inline, the nursery sleep rides the M:N timer
+        // offload (its own re-arm loop), and the executor sleep runs on an eager job with no scheduler
+        // under it. `shutdown()` is graceful ON PURPOSE — `shutdown_now()` would end the job by CANCEL
+        // and stop testing the deadline at all.
+        //
+        // Both engines: the deadline is the only mid-sleep halt a single-threaded engine can observe,
+        // so the serial arm is the regression fence for it. (`chezzi test --timeout` rejects `--serial`
+        // at the CLI; `run_tests_timed` is the layer below that gate.)
+        for (name, body) in [
+            (
+                "toplevelsleep_test.chz",
+                "import std.time\ntest fn t():\n    time.sleep_ms(3000)\n    assert false, \"SWALLOWED\"\n",
+            ),
+            (
+                "nurserysleep_test.chz",
+                "import std.time\nfn nap():\n    time.sleep_ms(3000)\ntest fn t():\n    parallel:\n        spawn nap()\n    assert false, \"SWALLOWED\"\n",
+            ),
+            (
+                "execsleep_test.chz",
+                "import std.time\nimport std.concurrency\nfn nap():\n    time.sleep_ms(3000)\ntest fn t():\n    ex := Executor()\n    ex.submit(nap)\n    ex.shutdown()\n    assert false, \"SWALLOWED\"\n",
+            ),
+            (
+                "exectimer_test.chz",
+                "import std.time\nimport std.concurrency\nfn nap():\n    tm := time.timer(3000)\n    _ := tm.recv()\ntest fn t():\n    ex := Executor()\n    ex.submit(nap)\n    ex.shutdown()\n    assert false, \"SWALLOWED\"\n",
+            ),
+        ] {
+            for parallel in [true, false] {
+                let d = TmpDir::new();
+                let f = d.write(name, body);
+                let t0 = std::time::Instant::now();
+                let report = run_tests_timed(&f, parallel, 0, 300);
+                let elapsed = t0.elapsed();
+                assert!(
+                    !report.passed,
+                    "{name} (parallel={parallel}):\n{}",
+                    report.text
+                );
+                assert!(
+                    report.text.contains("TIMED-OUT t"),
+                    "{name} (parallel={parallel}): --timeout must abort a SLEEPING test, not wait out \
+                     its deadline; report:\n{}",
+                    report.text
+                );
+                assert!(
+                    !report.text.contains("SWALLOWED"),
+                    "{name} (parallel={parallel}): control must never fall through the aborted sleep; \
+                     report:\n{}",
+                    report.text
+                );
+                assert!(
+                    !report.text.contains("deadlock"),
+                    "{name} (parallel={parallel}): a sleeper must never be judged a deadlock — its \
+                     wait always ends, so it is deliberately unregistered as a blocked party; \
+                     report:\n{}",
+                    report.text
+                );
+                assert!(
+                    elapsed < std::time::Duration::from_millis(1500),
+                    "{name} (parallel={parallel}): the 300ms cap took {elapsed:?} (pre-fix: the full \
+                     3s sleep, reported PASS)"
+                );
+            }
+        }
+    }
+
     #[test]
     fn over_memory_control_passes_under_generous_cap() {
         // A small alloc under a generous cap passes normally — the cap only trips on runaway growth.

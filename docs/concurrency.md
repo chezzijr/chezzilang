@@ -813,6 +813,36 @@ fn serve(tok: Token, io: Channel[str]):
 >   *before* anything can kill it. "Does my cleanup run?" no longer depends on scheduler timing.
 > - **A long-running CPU loop is still cancelled promptly** — the loop back-edge is the checkpoint.
 >
+> **Two kinds of blocking checkpoint — a wait whose DEADLINE WE OWN is CONTINUOUS; a syscall-blocking
+> native is ENTRY-only.**
+>
+> | wait | checkpoint | a cancel arriving *during* it |
+> |---|---|---|
+> | `time.sleep_ms(ms)`, `time.timer(ms).recv()`, a `wait:` timer arm | **continuous** (~5 ms) | ends the wait |
+> | `ch.recv()`, `ch.send()` on a full channel, `wait:`, a socket op | continuous | ends the wait |
+> | `fs.*`, `request*`, `process*`, `io.*` file I/O | **entry only** | observed after the syscall returns |
+>
+> The split is what we can actually do: a timer deadline is ours to cut short, a `read(2)` already in
+> the kernel is not. It holds in a `parallel:` nursery, in an eager `Executor` job and on the top-level
+> `main` thread, so `shutdown_now()` and a sibling's fault reach a sleeping task the same way, and the
+> task still unwinds through its `defer`s (`docs/gaps.md` **W7-16**; before it, both waited out the
+> full deadline *and* ran the code after the sleep).
+>
+> Three precisions, all measured:
+>
+> - **`--serial` has the checkpoint but nothing to observe.** Nothing else runs while its one thread
+>   sleeps, so a *sibling's* cancel cannot arrive mid-sleep at all — serial is entry-only in practice,
+>   not by a different rule. What serial *does* gain is `--timeout`: the wall clock advances whether or
+>   not anything runs.
+> - **`chezzi test --timeout` reaches a `sleep_ms` everywhere** (top-level, nursery, `Executor`) and a
+>   `timer(ms).recv()` on the two block-in-place paths — but **not** one parked in a `parallel:`
+>   nursery with no runnable sibling: nothing is executing to observe the deadline, and the park is
+>   woken only by its own timer. Pre-existing, unchanged by W7-16, filed as **W7-17**.
+> - **`--max-heap` reaches a sleeper only through the cancel arm** — i.e. when the over-allocating task
+>   is a nursery/`Executor` sibling sharing its cancel scope (measured 365 ms). A sleeping top-level
+>   `main` has no cancel flag and its own heap is not the one growing, so it sleeps out (3005 ms) before
+>   the OVER-MEMORY verdict lands. `--max-heap` is a per-heap cap, not a process-wide signal.
+>
 > A cancelled task then unwinds through its `defer`s — cancelled while running (back-edge), while parked
 > on a `recv`/`wait:`, while parked on a socket, or while parked when a *sibling*'s fault tore the
 > nursery down — **on the M:N engine and on `--serial` alike** (serial's scheduler cancels and re-drives
@@ -1276,6 +1306,17 @@ supervised tasks) — Go's float-free `go` is the model both ecosystems *rejecte
 > Java's `shutdownNow`; a job with no such point still runs to completion, so on the default engine
 > `shutdown_now` is not a guarantee that a submitted job did not run. `submit` after either is a fault.
 > Reap with `defer ex.shutdown()` as shown.
+>
+> **A job sleeping or waiting a timer IS ended by `shutdown_now()`** (measured: 55 ms against a
+> `time.sleep_ms(3000)`, and the code after the sleep never runs) — that deadline is ours, so it is a
+> *continuous* checkpoint, not an entry-only one (§cancellation points; `docs/gaps.md` **W7-16**). This
+> is a **deliberate divergence from CPython** and the one place Chezzi's executor does not follow it:
+> `ThreadPoolExecutor.shutdown(cancel_futures=True)` does not interrupt a running `time.sleep(3)`
+> (measured 3001 ms), and Go's `time.Sleep` is uninterruptible too. But Chezzi's own `sleep_ms` is a
+> *fiber* wait, and its ancestor is the async sleep both languages DO cancel — `asyncio.sleep` under a
+> `TaskGroup` (measured: cancelled at 50 ms), Go's `select { <-time.After; <-ctx.Done() }` (100 ms).
+> Chezzi has one spelling for both, so it follows its own nursery: an executor that disagrees with the
+> nursery beside it is the defect. A job blocked on a **channel** was already ended this way.
 > **A non-terminating sibling still blocks `shutdown()`, by design.** Run-all deliberately drops the
 > old fast-fail: if one submitted job faults but another never reaches a cancellation point (a tight
 > loop, a blocking sleep with no polling), `shutdown()` now waits for it on both engines instead of
@@ -1339,7 +1380,7 @@ fn main():
 |--------|-----------|
 | `submit(f)` | **start** a detached, side-effect-only job at once on the shared pool (results leave via a `Channel`, like `spawn`); returns immediately without waiting for it. `--serial` enqueues it for the drain instead (D3) |
 | `shutdown()` | **graceful** — stop accepting new work, then **wait** for the submitted work (every job runs on an ordinary fault, per W7-5's fault contract above; a hard halt is a separate kill switch — see the engine-asymmetry note above and `docs/gaps.md` **W7-5d**) |
-| `shutdown_now()` | **attempt to stop** — drop work that has not started and ask running jobs to stop at their next cancellation point, then wait for them (Java `shutdownNow`). **Cooperative, not pre-emptive:** a job with no cancellation point still finishes, so on the default engine this is not a guarantee the job did not run. Unaffected by the W7-5 run-all contract above |
+| `shutdown_now()` | **attempt to stop** — drop work that has not started and ask running jobs to stop at their next cancellation point, then wait for them (Java `shutdownNow`). **Cooperative, not pre-emptive:** a job with no cancellation point (a bare CPU loop with no back-edge, a syscall already in the kernel) still finishes, so on the default engine this is not a guarantee the job did not run. A job **sleeping or waiting a timer IS ended** — that wait's deadline is ours, so it is a continuous checkpoint (see §cancellation points). Unaffected by the W7-5 run-all contract above |
 
 - **`defer` is the lifetime knob.** A task "persists through scopes" because its *owner* — the
   `Executor` — does. Bind that owner's reaping to any scope with `defer ex.shutdown()` (a function, a

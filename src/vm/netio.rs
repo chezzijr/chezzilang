@@ -1652,7 +1652,13 @@ impl Vm {
                 // but lower throughput than `sleep_ms`'s demote. Acceptable for v1; demote-reuse is a
                 // future improvement. The cooperative/interp inline-sleep blocks siblings the same way
                 // their `sleep_ms` already does (single-thread).
-                std::thread::sleep(deadline - now);
+                //
+                // W7-16 — the wait is CHUNKED, not one `thread::sleep`: this deadline is ours, so it
+                // stays a cancellation + `--timeout` checkpoint for its whole duration. Pre-fix an
+                // eager `Executor` job here ran the full 3 s through a `shutdown_now()` at 50 ms (and
+                // through `--timeout`), while the same `timer(ms).recv()` in a nursery — which parks,
+                // above — was cancelled at 55 ms. Same primitive, two answers.
+                self.block_until_deadline(deadline, span)?;
                 return Ok(RecvStep::Got(WireValue::Bool(true)));
             }
         }
@@ -1859,6 +1865,47 @@ impl Vm {
             return Err(self.err(deadlock_msg.to_string(), span));
         }
         Ok(())
+    }
+
+    /// Sleep until `deadline`, observing the same halts every other blocking-in-place path does
+    /// ([`Vm::block_halt_check`]) once per [`DEMOTE_POLL_BACKOFF`] — the CONTINUOUS-checkpoint
+    /// contract for a wait whose deadline WE own (`time.sleep_ms`, a `timer(ms)` channel's `recv`).
+    ///
+    /// **Why chunked `thread::sleep` and not a condvar.** A plain sleep has no channel to wait on, so
+    /// a waker would have to be notified from every cancel-trip site AND still carry a timeout for the
+    /// wall-clock deadline (which nobody notifies at all). `DEMOTE_POLL_BACKOFF` is the same bound
+    /// every other blocking path here already pays ([`Vm::block_wait_tick`], `demote_recv_block`,
+    /// `demote_block_socket`): ≤5 ms of cancel latency, 200 wakes/s per SLEEPING thread.
+    ///
+    /// **The sleeper is deliberately NOT registered** as a blocked party ([`Vm::block_party_guard`]).
+    /// It is a live, unregistered party, so `blocked < live` and the process-wide verdict always
+    /// declines — the safe direction (it can only delay someone else's fault, never fabricate one),
+    /// and exactly what `inflight` does for the M:N side of the same sleep. A `PartyWait::Sleep` would
+    /// be a false-deadlock generator: a sleeper's wait is never unsatisfiable, it always ends.
+    /// `block_halt_check`'s `deadlock_msg` is therefore unreachable from here — the argument is
+    /// inherited, not intended.
+    ///
+    /// **`--max-heap` reaches this loop only through the CANCEL arm, and only when the over-allocating
+    /// task shares a cancel scope with the sleeper** — a nursery sibling or an `Executor` job, whose
+    /// over-memory hard halt (`executor_hard_halt`) trips a flag this loop reads (measured: 365 ms).
+    /// It does NOT reach a sleeping **top-level `main`**, which has no cancel flag and whose own heap
+    /// is not the one growing — `--max-heap` is a per-`Vm` live-heap cap, so there is nothing here for
+    /// a sleeper in a different heap to observe (measured: the sleep runs in full, 3005 ms, then the
+    /// OVER-MEMORY verdict lands). `--timeout` has no such gap: it is an absolute wall-clock deadline
+    /// this loop reads directly.
+    pub(super) fn block_until_deadline(
+        &mut self,
+        deadline: std::time::Instant,
+        span: Span,
+    ) -> Result<(), RuntimeError> {
+        loop {
+            let now = std::time::Instant::now();
+            if now >= deadline {
+                return Ok(());
+            }
+            self.block_halt_check(EMPTY_RECV_DEADLOCK, span)?;
+            std::thread::sleep(DEMOTE_POLL_BACKOFF.min(deadline - now));
+        }
     }
 
     /// Block on an empty `recv` until a value arrives, instead of declaring a deadlock (see

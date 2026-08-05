@@ -294,18 +294,35 @@ impl Vm {
                         Some(crate::native::NativeArg::Int(ms)) if *ms > 0 => Some(*ms as u64),
                         _ => None, // sleep_ms(<=0) / non-int: inline no-op
                     };
-                    ms.map(|ms| OffloadReq {
-                        func,
-                        args: nargs,
-                        span,
-                        timer_ms: Some(ms),
+                    // W7-16 — the halt inputs ride WITH the sleep, so the timer thread can end it on a
+                    // cancel or a `--timeout` instead of only at its deadline. `checked_add` saturates
+                    // a pathological `ms` (centuries) to a far-future deadline rather than panicking on
+                    // `Instant` overflow — a panic in `offload` escapes *before* `complete_offload` and
+                    // would pin `inflight` forever (hang). Matches the old inline-sleep path's
+                    // "effectively infinite sleep" rather than a crash.
+                    ms.map(|ms| {
+                        let now = std::time::Instant::now();
+                        let deadline = now
+                            .checked_add(std::time::Duration::from_millis(ms))
+                            .unwrap_or_else(|| now + std::time::Duration::from_secs(86_400 * 365));
+                        OffloadReq {
+                            func,
+                            args: nargs,
+                            span,
+                            timer: Some(crate::vm::TimerSleep {
+                                deadline,
+                                cancel: self.demote_cancel_flags(),
+                                run_deadline: self.deadline,
+                                timeout_ms: self.timeout_ms,
+                            }),
+                        }
                     })
                 }
                 _ => Some(OffloadReq {
                     func,
                     args: nargs,
                     span,
-                    timer_ms: None,
+                    timer: None,
                 }),
             };
             if let Some(req) = offload {
@@ -324,6 +341,31 @@ impl Vm {
             && ms > 0
         {
             return self.demote_block_sleep(ms as u64, span);
+        }
+        // W7-16 — every OTHER `sleep_ms(ms>0)`: an eager `Executor` job (`mn == None`), the top-level
+        // `main` thread on either engine, a serial nursery fiber, or a `mn == None` native callback.
+        // All of them used to reach `native::time::sleep_ms`'s bare `std::thread::sleep`, which is a
+        // hole in every halt the loop it replaces would have checked: `shutdown_now()` at 50 ms against
+        // a `sleep_ms(3000)` waited the full 3012 ms AND ran the job's post-sleep code, and
+        // `chezzi test --timeout=200` did not abort it either (measured: PASS, 3 s). The deadline is
+        // OURS, so it stays a checkpoint for its whole duration — see [`Vm::block_until_deadline`].
+        //
+        // Deliberately NOT gated on `native_reentry == 0`: a native callback loop is already a
+        // documented cancellation checkpoint, `demote_block_sleep` above already faults from inside
+        // one, and `block_halt_check` only ever returns `Err` — it never unwinds VM state.
+        //
+        // `checked_add` saturates a pathological `ms` (centuries) to a far-future deadline rather than
+        // panicking on `Instant` overflow, matching the offload path's own saturation above.
+        if name == "sleep_ms"
+            && let Some(ms) = args.first().and_then(|v| self.int_val(*v))
+            && ms > 0
+        {
+            let now = std::time::Instant::now();
+            let deadline = now
+                .checked_add(std::time::Duration::from_millis(ms as u64))
+                .unwrap_or_else(|| now + std::time::Duration::from_secs(86_400 * 365));
+            self.block_until_deadline(deadline, span)?;
+            return Ok(Value::nil());
         }
         let writes_before = self.stdout_writes;
         let mut host = VmHost { vm: self, args };

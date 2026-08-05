@@ -3518,7 +3518,7 @@ fn offload_native_panic_still_completes_and_faults() {
         func: panic_native,
         args: vec![],
         span: Span { line: 1, col: 1 },
-        timer_ms: None,
+        timer: None,
     };
     sched.offload(f0, req);
 
@@ -3737,7 +3737,7 @@ fn offload_runs_native_and_requeues_fiber_with_result() {
         func: double_native,
         args: vec![crate::native::NativeArg::Int(21)],
         span: Span { line: 1, col: 1 },
-        timer_ms: None,
+        timer: None,
     };
     sched.offload(f0, req);
 
@@ -3794,7 +3794,12 @@ fn timer_offload_parks_then_requeues_fiber_with_nil() {
         func: double_native,
         args: vec![],
         span: Span { line: 1, col: 1 },
-        timer_ms: Some(40),
+        timer: Some(crate::vm::TimerSleep {
+            deadline: std::time::Instant::now() + std::time::Duration::from_millis(40),
+            cancel: vec![],
+            run_deadline: None,
+            timeout_ms: 0,
+        }),
     };
     sched.offload(f0, req);
 
@@ -12788,6 +12793,81 @@ print(\"main done\")
         elapsed < std::time::Duration::from_millis(1500),
         "`shutdown_now()` took {elapsed:?} to interrupt a `wait:` on `timer(3000)` (fixed: ~57 ms, \
          inline-sleep: ~3007 ms) — the timer arm is un-cancellable again"
+    );
+}
+
+/// W7-16 — a nursery task **already inside** a `sleep_ms` must die when a sibling faults, not at its
+/// own deadline. This is the case the existing parity fence never covered: with the fault ORDERED
+/// AFTER the sleep begins, `parity_blocking_native_is_a_cancellation_checkpoint_on_both_engines`'s
+/// contract is delivered by the *entry* checkpoint at `invoke_native` — reorder the fault by 50 ms and
+/// pre-fix M:N ran the full 3005 ms and printed `napper woke`.
+///
+/// | | before | after |
+/// |---|---|---|
+/// | sibling faults at ~100 ms, task sleeping 3 s | `napper woke` printed, exit @ **3005 ms** | nothing printed, exit @ **~105 ms** |
+///
+/// **M:N-only, deliberately.** Serial cannot preempt: nothing else runs while the fiber sleeps, so the
+/// fault can only precede or follow the sleep and serial keeps taking the entry checkpoint. Asserting
+/// this shape on both engines would be asserting a physics claim, not a contract — `CLAUDE.md`'s
+/// "correctness outranks engine agreement". The `--timeout` half of the same contract IS engine-common
+/// and is fenced in `test_runner` (`timeout_aborts_a_sleeping_test_on_every_block_in_place_path`).
+///
+/// The `gate` handshake is what makes the ordering deterministic rather than raced: `boom` cannot
+/// fault until `napper` has announced it is about to sleep, and then waits another 100 ms. (Losing
+/// that race would only fall back to the entry checkpoint — the test cannot flake red.)
+#[test]
+fn a_sleeping_nursery_task_is_cancelled_mid_flight_by_a_sibling_fault() {
+    let src = "
+import std.time
+gate: Channel[int] = Channel[int](1)
+fn napper():
+    defer print(\"cleanup ran\")
+    print(\"napper start\")
+    gate.send(0)
+    time.sleep_ms(3000)
+    print(\"napper woke\")
+fn boom() -> int:
+    _ := gate.recv()
+    time.sleep_ms(100)
+    return 1 / 0
+fn main():
+    r := recover:
+        parallel:
+            spawn napper()
+            spawn boom()
+        0
+    print(\"end\")
+main()
+";
+    let entry = write_temp_chz("w716_nursery_mid_flight", src);
+    let (tx, rx) = std::sync::mpsc::channel();
+    let e = entry.clone();
+    std::thread::spawn(move || {
+        let t0 = std::time::Instant::now();
+        let (o, _e2, r, _c) = run_file_p(&e);
+        let _ = tx.send((o, format!("{r:?}"), t0.elapsed()));
+    });
+    let outcome = rx.recv_timeout(std::time::Duration::from_secs(30));
+    let _ = std::fs::remove_file(&entry);
+    let (out, rdbg, elapsed) = outcome.expect("the cancelled sleeper hung");
+    assert!(
+        !out.contains("napper woke"),
+        "a task cancelled DURING its sleep must not run past it: out={out:?} r={rdbg}"
+    );
+    // …and its `defer` still runs. The cancel is delivered by the timer job as a resumed `Err`, an
+    // arm that returns WITHOUT re-entering `run_until` — so it must unwind explicitly or every
+    // registered cleanup is silently skipped, while the same cancel arriving 50 ms earlier (the entry
+    // checkpoint, which faults inside the VM) runs them. Caught by adversarial review, not by the
+    // "did it stop promptly" assertions above: a task that skips its cleanup stops just as promptly.
+    assert!(
+        out.contains("cleanup ran"),
+        "a task cancelled DURING its sleep must still unwind through its `defer`s \
+         (docs/concurrency.md: cleanup does not depend on scheduler timing): out={out:?} r={rdbg}"
+    );
+    assert!(
+        elapsed < std::time::Duration::from_millis(1500),
+        "the cancel took {elapsed:?} to reach a sleeping sibling (fixed: ~105 ms, \
+         un-rearmed timer offload: ~3005 ms)"
     );
 }
 
