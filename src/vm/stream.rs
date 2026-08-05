@@ -2,7 +2,7 @@
 // The buffered sink (`Vm.out`/`Vm.stderr`) is untouched and stays the parity oracle.
 //
 // A fiber must never block in `write(2)`: an M:N core worker stuck in a full-pipe write runs no
-// other fiber (the D5 invariant — see `native::is_blocking`), and the serial engine's single thread
+// other fiber (the D5 invariant — see `native::Kind::Blocking`), and the serial engine's single thread
 // would stop dead. So a streamed write is a queue push (never blocks, never syscalls) and ONE
 // background thread per stream owns the real handle: one message = one `write_all` + `flush` = a
 // `print` is line-atomic across tasks, the output is UNBUFFERED (a `print(x, end="")` progress marker

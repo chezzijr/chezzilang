@@ -5,8 +5,9 @@
 //! output: the openers `create`/`append`, the stream handles `stdout`/`stderr`, and the `buffered`
 //! wrapper. R2b adds the read twin — a read-only `Reader` handle (`open` opener; `read_line`/
 //! `read_bytes`/`close` methods) for line/chunk streaming of a large file. Those six openers allocate a
-//! heap handle over an `Arc`'d core, so they are ENGINE-INTERCEPTED in `Vm::invoke_native` (by func-
-//! pointer identity — the `append` opener collides with `fs.append`'s bare name) and their
+//! heap handle over an `Arc`'d core, so they are ENGINE-INTERCEPTED in `Vm::invoke_native` (their
+//! registry entry carries [`super::Kind::InterceptIo`] — note the `_append` opener collides with
+//! `fs._append`'s bare NAME, which is exactly why the kind lives on the entry) and their
 //! `intercepted` placeholder below never runs. Errors come back as `Result` values (the engine lowers
 //! `NativeRet::Err` to `Err(msg)`), never panics.
 

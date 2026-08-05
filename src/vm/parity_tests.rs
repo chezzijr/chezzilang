@@ -4260,7 +4260,7 @@ fn parity_std_io_read_line_consumes_injected_stdin() {
 /// `io.read_all()` drains the WHOLE remaining stdin to EOF as one `str` (Python `sys.stdin.read()`).
 /// Over the injected `Lines` source it reconstructs each line + `\n` (the injected queue is newline-
 /// stripped), so two lines come back as "line0\nline1\n". Single entry task ⇒ deterministic exact
-/// assert. Also pins `read_all` is NOT in `is_blocking` (an offloaded call would hit `OffloadHost`'s
+/// assert. Also pins `read_all` is NOT `Kind::Blocking` (an offloaded call would hit `OffloadHost`'s
 /// stdio `unreachable!`).
 #[test]
 fn parity_std_io_read_all_drains_injected_stdin() {
@@ -4292,7 +4292,7 @@ fn parity_std_io_read_char_yields_scalars_then_eof() {
 
 /// `io.input(prompt)` = print the prompt (no newline) + flush + `read_line`. Under the BUFFERED sink
 /// (every test helper + embedder) `flush` is a no-op and the prompt simply lands in the captured
-/// `out` — both engines identical. Also pins that neither fn is in `is_blocking` (an offloaded call
+/// `out` — both engines identical. Also pins that neither fn is `Kind::Blocking` (an offloaded call
 /// would hit `OffloadHost`'s stdio `unreachable!`).
 #[test]
 fn parity_std_io_input_prompt_then_line_and_flush_is_a_noop() {

@@ -500,7 +500,7 @@ pub type NativeFn = fn(&mut dyn Host) -> Result<NativeRet, HostError>;
 /// the syscall's duration (the D5 starvation the classification exists to prevent). As a field of
 /// every `MEMBERS` tuple, omitting it is a **compile error** instead.
 ///
-/// It rides the entry → [`crate::vm::Obj::Native`] (bound in `vm/exec.rs`) → `Vm::invoke_native`, so
+/// It rides the entry → [`crate::vm::heap::Obj::Native`] (bound in `vm/exec.rs`) → `Vm::invoke_native`, so
 /// the dispatch site never compares a name: no lookup, and no bare-name ambiguity (`std.io::_append`
 /// and `std.fs::_append` are distinct entries with different kinds — under the old name-keyed scheme
 /// they collided and were kept apart only by check ORDER plus an exemption list in a test).
@@ -540,8 +540,15 @@ impl Kind {
     /// and the entry cancellation checkpoint? True for [`Kind::Blocking`] and [`Kind::TimedWait`]
     /// (the two arms of the old `is_blocking` name list); false for everything the engine runs inline
     /// or intercepts.
+    ///
+    /// EXHAUSTIVE on purpose (no `_` arm): a future `Kind` must be classified here deliberately, or it
+    /// does not compile. A catch-all would silently default a new variant to "does not block" — the
+    /// same silent-omission failure this enum exists to abolish, one level up.
     pub fn blocks(self) -> bool {
-        matches!(self, Kind::Blocking | Kind::TimedWait)
+        match self {
+            Kind::Blocking | Kind::TimedWait => true,
+            Kind::Inline | Kind::InterceptIo | Kind::InterceptNet => false,
+        }
     }
 }
 
@@ -706,10 +713,13 @@ mod tests {
     use super::*;
     use std::collections::VecDeque;
 
-    /// Every native module with callable members — the domain the [`Kind`] assertions sweep. Kept in
-    /// step with [`native_members`]' match arms by `native_modules_all_have_members` below (`std.io`
-    /// and `std.net` are covered by their own exhaustive test, and `std.concurrency` is omitted: it
-    /// licenses type names only and has no callable members).
+    /// Every native module with callable members — the domain the [`Kind`] assertions sweep.
+    ///
+    /// A hand-kept list is exactly the smell [`Kind`] exists to remove, so it is not hand-kept:
+    /// `native_modules_matches_the_member_tables` below reads THIS FILE and derives the same set from
+    /// [`native_members`]' match arms, both directions. Without that, adding a module and forgetting
+    /// the list would leave every sweep below green while never looking at the new module — the
+    /// silent-omission failure, relocated into the test harness.
     const NATIVE_MODULES: &[&str] = &[
         "std.math",
         "std.io",
@@ -739,6 +749,39 @@ mod tests {
                 "{module} has no callable members"
             );
         }
+    }
+
+    /// …and the OTHER direction: every `"std.x" => x::MEMBERS` arm of [`native_members`] is in
+    /// [`NATIVE_MODULES`]. Source-derived (`include_str!` of this file + the arm pattern) because a
+    /// second hand-maintained list of natives is precisely what [`Kind`] was introduced to abolish: a
+    /// new module missing from the const would leave `std_time_sleep_is_the_only_timed_wait` and the
+    /// intercept-exclusivity sweep GREEN while never examining it, and the engine would then route,
+    /// say, a stray `Kind::InterceptNet` member into `net_connect_or_listen`'s name dispatch.
+    #[test]
+    fn native_modules_matches_the_member_tables() {
+        let src = include_str!("mod.rs");
+        let body = {
+            let start = src
+                .find("pub fn native_members(")
+                .expect("native_members moved — update this fence");
+            let rest = &src[start..];
+            &rest[..rest.find("\n}\n").expect("unterminated native_members")]
+        };
+        let arms: std::collections::BTreeSet<&str> = body
+            .lines()
+            .filter_map(|l| {
+                let l = l.trim();
+                // `"std.math" => math::MEMBERS,` — the empty `std.concurrency => &[]` arm has no
+                // `::MEMBERS` and is skipped, matching the const.
+                let name = l.strip_prefix('"')?.split('"').next()?;
+                l.contains("::MEMBERS").then_some(name)
+            })
+            .collect();
+        let listed: std::collections::BTreeSet<&str> = NATIVE_MODULES.iter().copied().collect();
+        assert_eq!(
+            arms, listed,
+            "NATIVE_MODULES is out of step with native_members' match arms"
+        );
     }
 
     /// A standalone `Host` for unit-testing native fns in isolation from either engine.
@@ -1002,7 +1045,7 @@ mod tests {
                 // W7-19 — `_stat`/`_walk` were never in the pre-`Kind` `is_blocking` list, so they run
                 // inline today. Preserved as-is by the refactor that introduced `Kind`; reclassifying
                 // them is a behaviour change filed separately (`docs/gaps.md` W7-19).
-                if matches!(name, "_stat" | "_walk") {
+                if module == "std.fs" && matches!(name, "_stat" | "_walk") {
                     assert_eq!(kind, Kind::Inline, "{module}.{name}: W7-19 status changed");
                     continue;
                 }

@@ -258,10 +258,13 @@ impl Vm {
         // Both arms must stay AHEAD of the offload gate below. The kind is what distinguishes them:
         // `std.io::_append` (an opener) and `std.fs::_append` (a syscall) share a bare name, and used
         // to be told apart only by check ORDER plus a func-pointer identity test.
+        //
+        // EXHAUSTIVE on purpose (no `_` arm): a future `Kind` must be routed here deliberately, or it
+        // does not compile — a catch-all would silently run a new variant inline.
         match kind {
             Kind::InterceptNet => return self.net_connect_or_listen(name, args, span),
             Kind::InterceptIo => return self.io_native(name, args, span),
-            _ => {}
+            Kind::Inline | Kind::Blocking | Kind::TimedWait => {}
         }
         // D5 — under the M:N engine, a blocking native call (`read_file` / `sleep_ms` / `fs.*`) is
         // OFFLOADED to the dirty pool rather than run inline, so it can't pin a core worker (the G3
