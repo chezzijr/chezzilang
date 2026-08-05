@@ -1519,25 +1519,34 @@ struct Suite:
         }
     }
 
-    /// **Deliberately NOT covered, and not "everywhere":** a `timer(ms).recv()` PARKED in a
-    /// `parallel:` nursery with no runnable sibling. That path parks the fiber (`netio.rs`'s M:N timer
-    /// branch) instead of blocking in place, so it never reaches `block_halt_check`, and with nothing
-    /// executing there is no back-edge to observe the deadline either — measured 3003 ms under
-    /// `--timeout=300`, with the post-wait statement running. **Pre-existing** (identical on a pre-fix
-    /// binary), a different mechanism from the inline-sleep hole this test covers, and filed as
-    /// `gaps.md` **W7-17**. Named `..._in_place` rather than `..._everywhere` for exactly that reason.
+    /// **Still NOT covered** (`gaps.md` **W7-18**): a fiber parked on the **netpoller** — a nursery
+    /// `l.accept()` with no op timeout — under `--timeout`. Same root as W7-17 (no path from the
+    /// wall-clock deadline to a parked fiber) but a worse symptom: it HANGS, measured killed by an
+    /// external `timeout 10` at 10001 ms with no verdict at all. Not fixable by the same clamp — the
+    /// netpoller's `poll_timed_out` marker makes the op return a *catchable* `Err("timeout")`, where a
+    /// run-deadline abort must be a hard halt. No fixture here: an un-aborted park would hang the
+    /// suite, not fail it.
     #[test]
-    fn timeout_aborts_a_sleeping_test_on_every_block_in_place_path() {
+    fn timeout_aborts_a_sleeping_test_everywhere() {
         // W7-16 — `--timeout` is documented as a HARD abort, and it reached NO timer wait anywhere.
         // Measured pre-fix with `--timeout=200` against three tests that each sleep 3 s: all three
         // reported **PASS** after running the full 3 s (only a busy `while` loop bucketed TIMED-OUT).
         // A guard that silently does not guard is worse than no guard.
         //
-        // The three fixtures are three DIFFERENT mechanisms, which is why one is not enough: the
-        // top-level sleep blocks the test's own thread inline, the nursery sleep rides the M:N timer
-        // offload (its own re-arm loop), and the executor sleep runs on an eager job with no scheduler
-        // under it. `shutdown()` is graceful ON PURPOSE — `shutdown_now()` would end the job by CANCEL
-        // and stop testing the deadline at all.
+        // The fixtures are DIFFERENT mechanisms, which is why one is not enough: the top-level sleep
+        // blocks the test's own thread inline, the nursery sleep rides the M:N timer offload (its own
+        // re-arm loop), and the executor sleep runs on an eager job with no scheduler under it.
+        // `shutdown()` is graceful ON PURPOSE — `shutdown_now()` would end the job by CANCEL and stop
+        // testing the deadline at all.
+        //
+        // W7-17 — the last two fixtures are the PARK mechanism, the one W7-16 left open and this test
+        // was once named `..._on_every_block_in_place_path` to fence by omission: a `timer(ms)` wait
+        // inside a `parallel:` nursery does not block in place, it snapshot-parks (`chan_recv_step`'s
+        // M:N timer branch, and `op_wait_poll`'s timer arm), so it reaches neither `block_halt_check`
+        // nor a loop back-edge. Measured pre-fix: 3004 ms under `--timeout=300` for BOTH, with the
+        // post-wait `assert false` running. **No runnable sibling in either fixture** — a spinning
+        // sibling's own back-edge trips the deadline at 303 ms and hides the bug entirely, which is
+        // exactly how it survived W7-16's test pass.
         //
         // Both engines: the deadline is the only mid-sleep halt a single-threaded engine can observe,
         // so the serial arm is the regression fence for it. (`chezzi test --timeout` rejects `--serial`
@@ -1558,6 +1567,17 @@ struct Suite:
             (
                 "exectimer_test.chz",
                 "import std.time\nimport std.concurrency\nfn nap():\n    tm := time.timer(3000)\n    _ := tm.recv()\ntest fn t():\n    ex := Executor()\n    ex.submit(nap)\n    ex.shutdown()\n    assert false, \"SWALLOWED\"\n",
+            ),
+            // W7-17 — the single-`recv` park (`chan_recv_step`'s M:N timer branch).
+            (
+                "nurserytimer_test.chz",
+                "import std.time\nfn nap():\n    tm := time.timer(3000)\n    _ := tm.recv()\ntest fn t():\n    parallel:\n        spawn nap()\n    assert false, \"SWALLOWED\"\n",
+            ),
+            // W7-17 — the `wait:` timer-ARM park (`op_wait_poll`), a second `submit_at` site with its
+            // own arm-once CAS. The sibling arm's channel is never sent to, so only the timer is live.
+            (
+                "nurserywaittimer_test.chz",
+                "import std.time\nch: Channel[int] = Channel[int](1)\nfn nap():\n    wait:\n        v := ch.recv(): print(v)\n        _ := time.timer(3000).recv(): print(\"tick\")\ntest fn t():\n    parallel:\n        spawn nap()\n    assert false, \"SWALLOWED\"\n",
             ),
         ] {
             for parallel in [true, false] {
@@ -1594,6 +1614,135 @@ struct Suite:
                     elapsed < std::time::Duration::from_millis(1500),
                     "{name} (parallel={parallel}): the 300ms cap took {elapsed:?} (pre-fix: the full \
                      3s sleep, reported PASS)"
+                );
+            }
+        }
+    }
+
+    /// W7-17 — the aborted task must also CLEAN UP, not merely stop promptly. This is W7-16's own
+    /// lesson (its fix shipped green while silently skipping every `defer`, because "did it stop
+    /// promptly" is satisfied just as well by a task that skipped its cleanup); the wake-and-re-check
+    /// mechanism preserves it because the fiber faults from INSIDE the VM and unwinds normally, where a
+    /// scheduler-level `flag_deadlock` would have dropped it without `unwind_deferred`.
+    ///
+    /// `show_output` because a timed-out test's buffered stdout is hidden by default like any other
+    /// test's — the `defer` output is there, it just needs the flag (verified: the same fixture also
+    /// writes a marker file from its `defer` under the plain CLI).
+    #[test]
+    fn a_timer_parked_task_aborted_by_the_deadline_still_runs_its_defers() {
+        let d = TmpDir::new();
+        let f = d.write(
+            "deferpark_test.chz",
+            "import std.time\nfn nap():\n    defer print(\"cleanup ran\")\n    tm := time.timer(3000)\n    _ := tm.recv()\ntest fn t():\n    parallel:\n        spawn nap()\n    assert false, \"SWALLOWED\"\n",
+        );
+        for parallel in [true, false] {
+            let report = run_tests_opts(
+                &f,
+                parallel,
+                opts_with(|o| {
+                    o.timeout_ms = 300;
+                    o.show_output = true;
+                }),
+            );
+            assert!(
+                report.text.contains("TIMED-OUT t"),
+                "(parallel={parallel}) report:\n{}",
+                report.text
+            );
+            assert!(
+                report.text.contains("cleanup ran"),
+                "(parallel={parallel}): a task the deadline aborted mid-park must still unwind its \
+                 `defer`s — stopping promptly is not the same as cleaning up; report:\n{}",
+                report.text
+            );
+        }
+    }
+
+    /// W7-17 review fix — the `--timeout` checkpoint the fix added to `chan_recv_step`/`op_wait_poll`
+    /// must NOT preempt a channel op that completes without blocking. Its first cut sat at the top of
+    /// both fns, ungated, and silently truncated a cleanup body at a `recv` whose value was **already
+    /// queued** (the `DEFER-RECV` line below simply vanished) — the same "stopped promptly ≠ cleaned up"
+    /// failure W7-16 was caught on, re-introduced by its own fix. It is now suppressed by the same
+    /// `deferring > 0` term `cancel_requested` uses, and the checkpoint that matters sits at the PARK.
+    ///
+    /// Mutation-verified: hoisting `deadline_halt` back above the pop turns this red.
+    #[test]
+    fn the_deadline_does_not_truncate_a_defer_whose_recv_can_complete() {
+        let d = TmpDir::new();
+        let f = d.write(
+            "deferrecv_test.chz",
+            "import std.time\nch: Channel[int] = Channel[int](4)\ntest fn t():\n    defer:\n        print(\"DEFER-ENTERED\")\n        v := ch.recv()\n        print(\"DEFER-RECV {v}\")\n    ch.send(7)\n    time.sleep_ms(3000)\n",
+        );
+        for parallel in [true, false] {
+            let report = run_tests_opts(
+                &f,
+                parallel,
+                opts_with(|o| {
+                    o.timeout_ms = 300;
+                    o.show_output = true;
+                }),
+            );
+            assert!(
+                report.text.contains("TIMED-OUT t"),
+                "(parallel={parallel}) report:\n{}",
+                report.text
+            );
+            assert!(
+                report.text.contains("DEFER-RECV 7"),
+                "(parallel={parallel}): the `--timeout` abort must not preempt a cleanup `recv` whose \
+                 value is already queued — it does not block, so there is nothing for a hard halt to \
+                 rescue; report:\n{}",
+                report.text
+            );
+        }
+    }
+
+    /// W7-17 companion — the OTHER direction of the same clamp: with the cap unexpired,
+    /// `min(own deadline, run deadline)` must resolve to the timer's OWN deadline and the job must
+    /// still deliver `true` there. A clamp that armed for the run deadline unconditionally, or that
+    /// dropped the delivery, fails here.
+    ///
+    /// **Scope, honestly:** these fixtures never execute the early-wake arm — `fire_at` is always the
+    /// timer's own deadline, by construction. They fence the unclamped path, not the clamp's own gap
+    /// handling; that gap is a sub-millisecond submit-to-park window (`deadline_gap_wake`'s doc) with
+    /// no deterministic trigger, so it is argued and documented rather than timing-tested.
+    #[test]
+    fn a_live_timer_still_delivers_under_a_generous_timeout() {
+        for (name, body) in [
+            // The single-`recv` park: the timer's own deadline is what wakes it.
+            (
+                "livetimer_test.chz",
+                "import std.time\nfn nap():\n    tm := time.timer(120)\n    assert tm.recv()\ntest fn t():\n    parallel:\n        spawn nap()\n",
+            ),
+            // The `wait:` timer-arm park with NO competing value: the timer arm is taken.
+            (
+                "livewaittimer_test.chz",
+                "import std.time\nch: Channel[int] = Channel[int](1)\nfn nap():\n    wait:\n        v := ch.recv(): assert false, \"NOVALUE\"\n        _ := time.timer(120).recv(): pass\ntest fn t():\n    parallel:\n        spawn nap()\n",
+            ),
+            // W7-14's shape: a sibling value at 30ms must still beat the 3s timer arm.
+            // M:N ONLY — on the cooperative engine a `wait:` timer arm inline-sleeps instead of
+            // yielding to a runnable sibling, so the timer wins by design (`gaps.md` **N10**, a
+            // deliberate pre-freeze known-limit folded into the post-freeze serial removal). Running
+            // this fixture on `parallel=false` asserts N10 does not exist.
+            (
+                "valuebeatstimer_test.chz",
+                "import std.time\nch: Channel[int] = Channel[int](1)\nfn nap():\n    wait:\n        v := ch.recv(): assert v == 9\n        _ := time.timer(3000).recv(): assert false, \"TIMERWON\"\nfn feed():\n    time.sleep_ms(30)\n    ch.send(9)\ntest fn t():\n    parallel:\n        spawn nap()\n        spawn feed()\n",
+            ),
+        ] {
+            let engines: &[bool] = if name == "valuebeatstimer_test.chz" {
+                &[true]
+            } else {
+                &[true, false]
+            };
+            for &parallel in engines {
+                let d = TmpDir::new();
+                let f = d.write(name, body);
+                let report = run_tests_timed(&f, parallel, 0, 5000);
+                assert!(
+                    report.passed,
+                    "{name} (parallel={parallel}): a live timer must be unaffected by an unexpired \
+                     `--timeout`; report:\n{}",
+                    report.text
                 );
             }
         }

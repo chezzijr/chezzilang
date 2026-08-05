@@ -670,9 +670,9 @@ Also licenses the opcode-backed `timer(ms) -> Channel[bool]` builtin (one-shot t
 or `import timer from std.time` (per-name; `timer` cannot be renamed on import).
 Both `sleep_ms` and a `timer(ms)` `recv` are **continuous cancellation checkpoints**: the deadline is
 the runtime's own, so a scope cancel or an `Executor.shutdown_now()` ends the wait within ~5 ms instead
-of after it, and the task still runs its `defer`s. `chezzi test --timeout` rides the same checkpoint,
-with one gap — a `timer(ms).recv()` parked in a `parallel:` nursery with no runnable sibling is not
-deadline-reachable (`concurrency.md` §cancellation points; `gaps.md` **W7-16**/**W7-17**).
+of after it, and the task still runs its `defer`s. `chezzi test --timeout` rides the same checkpoint and
+reaches every timer wait, including one parked in a `parallel:` nursery with no runnable sibling
+(`concurrency.md` §cancellation points; `gaps.md` **W7-16**/**W7-17**).
 
 ### `std.process`
 `cmd(line: str) -> Result[str]` — run `sh -c <line>`, capture stdout; `Err(stderr)` on non-zero exit

@@ -834,10 +834,12 @@ fn serve(tok: Token, io: Channel[str]):
 >   sleeps, so a *sibling's* cancel cannot arrive mid-sleep at all — serial is entry-only in practice,
 >   not by a different rule. What serial *does* gain is `--timeout`: the wall clock advances whether or
 >   not anything runs.
-> - **`chezzi test --timeout` reaches a `sleep_ms` everywhere** (top-level, nursery, `Executor`) and a
->   `timer(ms).recv()` on the two block-in-place paths — but **not** one parked in a `parallel:`
->   nursery with no runnable sibling: nothing is executing to observe the deadline, and the park is
->   woken only by its own timer. Pre-existing, unchanged by W7-16, filed as **W7-17**.
+> - **`chezzi test --timeout` reaches every timer wait** — `sleep_ms` and `timer(ms).recv()`, top-level,
+>   in a nursery and in an `Executor`, blocked in place or PARKED. The park half is **W7-17**
+>   (fixed 2026-08-05): a parked fiber observes nothing, so its timer job is armed for the *sooner* of
+>   its own deadline and the run's, and the wake re-checks. Still out of reach, and it **hangs** rather
+>   than falling through: a fiber parked on the **netpoller** (`Socket.accept`/`read` with no op
+>   timeout) — `gaps.md` **W7-18**, open.
 > - **`--max-heap` reaches a sleeper only through the cancel arm** — i.e. when the over-allocating task
 >   is a nursery/`Executor` sibling sharing its cancel scope (measured 365 ms). A sleeping top-level
 >   `main` has no cancel flag and its own heap is not the one growing, so it sleeps out (3005 ms) before

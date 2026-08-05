@@ -51,6 +51,39 @@ const EMPTY_WAIT_DEADLOCK: &str = "wait on channels that are all empty: deadlock
     before its spawned tasks start, so a blocking `wait:` in the body can't reach it — put the \
     `wait:` in a `spawn:` too.";
 
+/// W7-17 — end a timer park EARLY, because the run's `--timeout` expired before the timer's own
+/// deadline. Used by both `timer(ms)` park sites ([`Vm::chan_recv_step`]'s timer branch and
+/// [`Vm::op_wait_poll`]'s timer arm), whose jobs are otherwise armed for their own deadline.
+///
+/// **This must leave STATE, not just a wake, and that is the whole reason it trips `cancel`.** The
+/// timer job is submitted BEFORE the fiber actually parks (`park_recv`/`wait_suspend` only mark it;
+/// [`MnSched::park`]/[`MnSched::park_wait`] do the parking, later, behind the core lock). A job that
+/// fires in that window finds an EMPTY bucket, so a bare wake is simply lost — and the fiber then
+/// parks with its one job already spent (`op_wait_poll`'s `timer_armed` CAS cannot re-arm it), i.e. a
+/// hang past the very deadline that exists to prevent hangs. The park-gap re-check reads exactly four
+/// things — a queued value, `closed`, `done_latch`, and the fiber's SCOPE CANCEL — and the first three
+/// all mean "the timer fired", which is a lie here. So the cancel flag is the one truthful state that
+/// closes the gap: set it, and a fiber still in flight requeues instead of parking, while one already
+/// parked is woken by the `close_wake` below (which delivers nothing — that is all `close_wake` does,
+/// it never sets `closed`; `recv_wake` already reuses it the same way).
+///
+/// Either way the fiber re-runs its op and faults at the op's own `--timeout` checkpoint, which is
+/// ordered ABOVE the cancel checkpoint — so the verdict is the honest `timed_out` hard halt, not
+/// `cancelled`. Ordering is safe in both directions: the store happens-before this thread takes the
+/// core lock in `close_wake`, so a `park_wait` that wins the lock either already sees the flag (and
+/// requeues) or parks and is then found by `close_wake`.
+fn deadline_gap_wake(
+    sched: &Arc<MnSched>,
+    key: usize,
+    core: &Arc<ChannelCore>,
+    scope_cancel: &Option<Arc<AtomicBool>>,
+) {
+    if let Some(c) = scope_cancel {
+        c.store(true, Ordering::Relaxed);
+    }
+    sched.close_wake(key, core);
+}
+
 /// B1 — the outcome of decoding one socket chunk (+ the socket's carried tail) as UTF-8.
 pub(super) enum Decoded {
     /// A complete, valid `str` (possibly empty — the EOF sentinel).
@@ -1587,6 +1620,17 @@ impl Vm {
         h: GcRef,
         span: Span,
     ) -> Result<RecvStep, RuntimeError> {
+        // W7-17 — `--timeout` ABOVE the cancellation checkpoint, because the deadline outranks a cancel
+        // and because ending a timer park early TRIPS this fiber's cancel to close the park gap
+        // ([`deadline_gap_wake`]): read in the other order, that fiber would report `cancelled` instead
+        // of the honest hard halt. Suppressed inside a `defer` by the SAME `deferring > 0` term
+        // `cancel_requested` uses — a cleanup body's `ch.recv()` on an already-queued value must still
+        // complete (measured: ungated, it silently truncated the defer at that `recv`, which is exactly
+        // the "stopped promptly ≠ cleaned up" failure W7-16 was caught on). A defer that would PARK is
+        // still aborted, at the park checkpoint below — that one is a hang, not cleanup.
+        if self.deferring == 0 {
+            self.deadline_halt(span)?;
+        }
         // CANCELLATION CHECKPOINT (engine-agnostic — the serial drain in `drain_cancelled_children`
         // depends on it, and it replaces the two `mn`-gated checks that used to sit inside the timer
         // and snapshot-park branches). At a `recv` checkpoint CANCEL WINS over a queued value, a
@@ -1625,6 +1669,14 @@ impl Vm {
                     return Ok(RecvStep::Got(WireValue::Bool(true)));
                 }
                 if self.mn.is_some() && self.native_reentry == 0 {
+                    // W7-17 — the `--timeout` checkpoint sits HERE, at the park, not at the top of this
+                    // fn: everything above settles without blocking (a queued value, a tripped latch, an
+                    // already-fired timer), and a hard abort has no business preempting a `recv` that
+                    // completes. Putting it at the top truncated a `defer`'s cleanup `ch.recv()` on an
+                    // ALREADY-QUEUED value — measured, and the exact "stopped promptly ≠ cleaned up"
+                    // failure W7-16 was caught on. What must not happen post-deadline is a PARK, which
+                    // reaches no loop back-edge and no `block_halt_check` at all.
+                    self.deadline_halt(span)?;
                     // --parallel, top level: schedule a one-shot background `send(true)` at the deadline
                     // (in THIS scheduler) and park. The pending timer is accounted `inflight` so it
                     // vetoes the deadlock predicate while the lone fiber waits; the job un-accounts it.
@@ -1634,10 +1686,20 @@ impl Vm {
                     let core_job = Arc::clone(&core);
                     let sched_job = Arc::clone(&sched);
                     sched.inflight.fetch_add(1, Ordering::Relaxed);
+                    // W7-17 — fire at the SOONER of our deadline and the run's `--timeout`, so the
+                    // wake that ends this park exists on both. Off (`self.deadline == None`) this is
+                    // byte-identical to the plain `submit_at(deadline, …)` it replaces: one job, one
+                    // `inflight` add/sub, no re-arming.
+                    let fire_at = self.deadline.map_or(deadline, |rd| deadline.min(rd));
+                    let gap_cancel = self.cancel.clone();
                     timer::submit_at(
-                        deadline,
+                        fire_at,
                         Box::new(move || {
-                            sched_job.send_wake(key, &core_job, WireValue::Bool(true));
+                            if std::time::Instant::now() >= deadline {
+                                sched_job.send_wake(key, &core_job, WireValue::Bool(true));
+                            } else {
+                                deadline_gap_wake(&sched_job, key, &core_job, &gap_cancel);
+                            }
                             sched_job.inflight.fetch_sub(1, Ordering::Relaxed);
                         }),
                     );
@@ -1830,15 +1892,17 @@ impl Vm {
         self.is_counted_party().then(|| self.quiesce.block(wait))
     }
 
-    /// The halts a party blocked in place must observe. Split out of [`Vm::block_wait_tick`] so the
-    /// multi-channel `wait:` path — which polls N arms instead of waiting on one condvar, and so
-    /// cannot share the tick — honours exactly the same three, rather than being the one blocking op a
-    /// `--timeout` cannot reach.
-    fn block_halt_check(&mut self, deadlock_msg: &str, span: Span) -> Result<(), RuntimeError> {
-        // Checked HERE because a blocked job never reaches `jump_checked`'s loop back-edge, which is
-        // where every other path observes the deadline. Without it `chezzi test --timeout` could not
-        // kill a job blocked forever on a channel — exactly the hang eager execution makes easier to
-        // write. No `deadline_tick` throttle: this runs once per `DEMOTE_POLL_BACKOFF`, not per op.
+    /// The `chezzi test --timeout` wall-clock halt, on its own so the ops that PARK a fiber can observe
+    /// it too ([`Vm::chan_recv_step`], [`Vm::op_wait_poll`]) — a parked fiber reaches neither
+    /// `jump_checked`'s loop back-edge nor [`Vm::block_halt_check`], so without a checkpoint at the op
+    /// itself the deadline has no path to it at all (W7-17).
+    ///
+    /// Deliberately NOT gated on `native_reentry` (unlike the cancellation checkpoint it sits beside at
+    /// those two call sites): a `--timeout` is a HARD abort that must always win, this only ever returns
+    /// `Err` — it never unwinds VM state — and `block_until_deadline` already returns this same error
+    /// from inside a native callback. Free when the cap is off: `Instant::now()` is read only when
+    /// `self.deadline` is `Some`.
+    pub(super) fn deadline_halt(&self, span: Span) -> Result<(), RuntimeError> {
         if let Some(dl) = self.deadline
             && std::time::Instant::now() >= dl
         {
@@ -1849,6 +1913,19 @@ impl Vm {
                 )
                 .timed_out());
         }
+        Ok(())
+    }
+
+    /// The halts a party blocked in place must observe. Split out of [`Vm::block_wait_tick`] so the
+    /// multi-channel `wait:` path — which polls N arms instead of waiting on one condvar, and so
+    /// cannot share the tick — honours exactly the same three, rather than being the one blocking op a
+    /// `--timeout` cannot reach.
+    fn block_halt_check(&mut self, deadlock_msg: &str, span: Span) -> Result<(), RuntimeError> {
+        // Checked HERE because a blocked job never reaches `jump_checked`'s loop back-edge, which is
+        // where every other path observes the deadline. Without it `chezzi test --timeout` could not
+        // kill a job blocked forever on a channel — exactly the hang eager execution makes easier to
+        // write. No `deadline_tick` throttle: this runs once per `DEMOTE_POLL_BACKOFF`, not per op.
+        self.deadline_halt(span)?;
         // `shutdown_now`'s cooperative stop (D4) and an enclosing scope's cancel both arrive here.
         if self.cancel_requested() {
             self.cancelled = true;
@@ -1973,6 +2050,13 @@ impl Vm {
     /// still inline-sleeps to the soonest deadline (`gaps.md` N10, and W7-14 for why the remaining
     /// inline-sleep is exactly that narrow).
     pub(super) fn op_wait_poll(&mut self, meta: &WaitMeta, span: Span) -> Result<(), RuntimeError> {
+        // W7-17 — `--timeout` above the cancellation checkpoint and suppressed inside a `defer`, for
+        // exactly the reasons `chan_recv_step` documents at the same seam: the deadline outranks a
+        // cancel (and ending a timer arm early trips this fiber's cancel to close the park gap), while
+        // a cleanup body's already-satisfiable `wait:` must still complete.
+        if self.deferring == 0 {
+            self.deadline_halt(span)?;
+        }
         // CANCELLATION CHECKPOINT — engine-agnostic, mirroring `chan_recv_step`: cancel wins over a
         // ready arm / a fired timer, and it covers the COOPERATIVE multi-channel park below (which
         // had no check at all, so serial's cancel drain could never unwind a `wait`-parked fiber).
@@ -2097,6 +2181,11 @@ impl Vm {
         // `send`/`close` to any arm claims the fiber once and sweeps the rest (lost-wakeup-safe via the
         // park-gap re-check). Mirrors the single-`recv` `park_recv`/`Disp::Park` path, generalized to N.
         if self.mn.is_some() && self.native_reentry == 0 {
+            // W7-17 — the ungated park checkpoint (see `chan_recv_step`'s): everything above settled
+            // without blocking, so a hard abort had no business preempting it, but a PARK past the
+            // deadline reaches no back-edge and no `block_halt_check` and would hang — including inside
+            // a `defer`, where the top-of-fn check is suppressed.
+            self.deadline_halt(span)?;
             // WAIT-1 fix — a live timer arm is NOT taken by an inline-sleep (which would pin the worker
             // and strand a sibling `send` that lands mid-window). Instead, for the soonest timer arm
             // submit ONE background `send_wake(true)` at its deadline (in THIS scheduler) and fall
@@ -2126,10 +2215,24 @@ impl Vm {
                     // Account the pending timer `inflight` (gated STRICTLY on `soonest.is_some()`) so it
                     // vetoes the deadlock predicate while a lone fiber waits; the job un-accounts it.
                     sched.inflight.fetch_add(1, Ordering::Relaxed);
+                    // W7-17 — same clamp as `chan_recv_step`'s timer park: fire at the SOONER of this
+                    // arm's deadline and the run's `--timeout`, and deliver `true` ONLY if the arm's own
+                    // deadline really passed. An early fire requeues the `WaitPark` token with nothing
+                    // consumable — exactly the "woken with no consumable value" case the arm-once CAS
+                    // above already tolerates — and the re-poll faults at the top-of-fn checkpoint. It
+                    // is `deadline_gap_wake`, not a bare wake, because this job can fire BEFORE the
+                    // fiber is parked and the CAS then forbids a second arm; see its doc. With
+                    // `--timeout` off this is the plain `submit_at(deadline, …)`.
+                    let fire_at = self.deadline.map_or(deadline, |rd| deadline.min(rd));
+                    let gap_cancel = self.cancel.clone();
                     timer::submit_at(
-                        deadline,
+                        fire_at,
                         Box::new(move || {
-                            sched_job.send_wake(key, &core_job, WireValue::Bool(true));
+                            if std::time::Instant::now() >= deadline {
+                                sched_job.send_wake(key, &core_job, WireValue::Bool(true));
+                            } else {
+                                deadline_gap_wake(&sched_job, key, &core_job, &gap_cancel);
+                            }
                             sched_job.inflight.fetch_sub(1, Ordering::Relaxed);
                         }),
                     );
@@ -2189,10 +2292,14 @@ impl Vm {
             && !self.can_block_in_place()
             && !timed_block
         {
-            let now = std::time::Instant::now();
-            if now < deadline {
-                std::thread::sleep(deadline - now);
-            }
+            // W7-17 — CHUNKED, not a bare `thread::sleep`: this is the one inline-sleep W7-16 missed
+            // (its four seams were `invoke_native`, `chan_recv_step`'s timer branch, the M:N timer
+            // offload and the resume arm — not this one), so a `--timeout` could not reach a serial
+            // `wait:` timer arm: measured 3004 ms under `--timeout=300`, with the post-wait statement
+            // running. The deadline is OURS, so it is a checkpoint for its whole duration. N10 is
+            // untouched — this still sleeps to the deadline and takes the timer arm; it just observes
+            // the halts on the way, exactly as `chan_recv_step`'s cooperative timer branch already does.
+            self.block_until_deadline(deadline, span)?;
             self.take_wait_arm(base, Value::bool(true), meta.arm_targets[i]);
             return Ok(());
         }
