@@ -2,6 +2,49 @@
 
 Single source of truth for "what am I doing next." Update after every work session.
 
+> **✅ W7-5d FIXED 2026-08-05 — a dead stdout no longer cancels sibling `Executor` jobs.** The bug was
+> a **process-GLOBAL read inside a predicate that answers "is this ERROR a hard halt"**
+> (`stream::out_dead_reason()` inside `Vm::executor_hard_halt`), so once stdout died every fault
+> anywhere reclassified as a whole-queue kill switch. Repro: `Executor()` + a job printing until stdout
+> dies + file-writing marker jobs, `| head -1`. Markers written, before → after:
+>
+> | engine | before | after |
+> |---|---|---|
+> | `--serial` | neither | both |
+> | M:N `--threads=1` | neither | both |
+> | M:N `--threads=2` | **either, run to run** | both |
+> | M:N `--threads=3+`/default | both | both |
+>
+> **The same shape was in the tree twice, and fixing the first instance is what made the second
+> visible.** `invoke_native`'s post-call `stream_halt` (`src/vm/call.rs`) reads the same global after
+> EVERY native, so a sibling doing three `fs.atomic_write`s — never printing — faulted after the
+> first, still varying by thread count and across runs. Its comment claimed "this only ever fires for
+> the print natives"; nothing made that true. Now gated on a `Vm::stdout_writes` counter delta, i.e.
+> "did THIS call emit to stdout" (which also stops a dead stdout faulting a FILE- or `stderr()`-backed
+> `Writer`). Post-fix: **both markers 21/21 runs, all three writes 15/15**, every engine and thread
+> count. `| head -1` contract intact (`rc=1`, `stdout closed (broken pipe)`); `--timeout`/`--max-heap`
+> stay kill switches — a bound a sibling can outlive is not a bound.
+>
+> **Three lessons.** (1) Grep for the shape: a predicate over a value that also reads ambient state.
+> (2) The ledger's proposed alternative — "an accepted-asymmetry test pinning what each engine does" —
+> **was never available**; only measuring the thread-starved end showed the shape varied across runs
+> at one thread count. An asymmetry you have not measured at both extremes may be a nondeterminism.
+> (3) The first fence used markers making exactly ONE native call — the single shape where instance 2
+> is invisible. When the contract is "the REST of the job runs", the fence needs a "rest".
+>
+> **Accepted cost, and note the primitive:** graceful `ex.shutdown()` only. A submitted job that never
+> prints and never returns (`while true: j = j + 1`) now hangs `| head -1` where it exited in 4 ms —
+> run-all keeping its promise, not a new uncancellable job class: **`shutdown_now()` still kills it in
+> 54 ms** on every engine (a loop back-edge is a cancellation point). **CPython hangs
+> identically** on `ThreadPoolExecutor` — the ancestor that owns `Executor` — so this follows it;
+> **Go exits, via SIGPIPE on fd 1**, a signal policy Chezzi does not adopt (`stream_halt` records why:
+> it would break `std.net`'s EPIPE contract). Nurseries are unaffected — `parallel:` aborts siblings
+> on any fault by design, so the same program under `spawn` still terminates promptly on both engines
+> (measured). Fenced by six tests in `tests/interactive.rs`
+> (`dead_stdout_does_not_{cancel_sibling_executor_jobs,tear_a_multi_native_sibling}_*`), all asserting
+> `rc != 0` + the pipe message so none can pass with `stream_halt` deleted. Full write-up:
+> `docs/gaps.md` **W7-5d**.
+>
 > **✅ W7-14 FIXED 2026-08-04 — a `wait:` timer arm no longer swallows a sibling value that arrives
 > first.** `WAIT-1`'s fix (`0b72ad60`) is gated on `self.mn.is_some()`, and a party that owns its OS
 > thread — an eager `Executor` job, and the **top-level `main` thread** — has `mn == None`, so it fell
@@ -462,8 +505,10 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > `main` and is very likely a misattribution to an unrelated sleep-cancellability limit. The landed fix
 > keeps run-all (an ordinary job fault no longer aborts its siblings — Python `ThreadPoolExecutor` / Java
 > `ExecutorService` / Go `errgroup` all agree) and splits the drain's cancel flag in two: gone for an
-> ordinary fault, kept for a HARD halt (`--max-heap`/`--timeout`/dead-stdout) via a new
-> `Vm::executor_hard_halt` predicate, so the dead-stdout/`os.exit` kill switches survive un-swallowable.
+> ordinary fault, kept for a HARD halt (`--max-heap`/`--timeout`) via a new
+> `Vm::executor_hard_halt` predicate, so the resource-cap/`os.exit` kill switches survive
+> un-swallowable. (That predicate ALSO carried a dead-stdout term until **W7-5d**, 2026-08-05, which
+> removed it: a broken pipe is an ordinary per-job fault, not a whole-queue kill.)
 > Early-stop is now opt-in in the caller via `std.cancel.Token` (`docs/concurrency.md` §6e/§8). Of the
 > original rejection's four charges, three are answered above and by W7-5c below; the fourth — a
 > faulting job leaves a non-terminating sibling unkillable — is **upheld and accepted by design**

@@ -1637,7 +1637,7 @@ impl Vm {
     /// the lowest-index one propagates. Precedence: an `os.exit` is an UNCONDITIONAL hard halt, so the
     /// lowest-index `Exit` wins over any `Fault` regardless of index — otherwise a lower-index
     /// recoverable fault could demote a child's `os.exit` to a catchable error. W7-5 review Fix 1: a
-    /// lowest-index [`executor_hard_halt`]-marked `Fault` (over-memory/timeout/dead-stdout) likewise
+    /// lowest-index [`executor_hard_halt`]-marked `Fault` (over-memory/timeout) likewise
     /// wins over any ordinary `Fault` regardless of index, for the same reason — an Executor drain's
     /// hard halt must never be demoted to a catchable error by an earlier sibling's plain fault. Full
     /// precedence: `Exit` > hard-halt `Fault` > ordinary `Fault` > `Deadlocked`, lowest index winning
@@ -1649,7 +1649,7 @@ impl Vm {
         let mut first_exit: Option<i32> = None;
         let mut first_fault: Option<RuntimeError> = None;
         // W7-5 review Fix 1: the lowest-index HARD-HALT fault (`executor_hard_halt` —
-        // over-memory/timeout/dead-stdout), tracked separately from `first_fault` above. It must win
+        // over-memory/timeout), tracked separately from `first_fault` above. It must win
         // final propagation over an earlier ordinary fault, or a later `--max-heap`/`--timeout` abort
         // gets demoted to a catchable error by an earlier sibling's plain fault (letting `recover:`
         // swallow a hard halt it must never be able to catch — `exec.rs`'s cancel-bypass check is

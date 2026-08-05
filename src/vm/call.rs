@@ -325,6 +325,7 @@ impl Vm {
         {
             return self.demote_block_sleep(ms as u64, span);
         }
+        let writes_before = self.stdout_writes;
         let mut host = VmHost { vm: self, args };
         let ret = func(&mut host).map_err(|e| RuntimeError {
             message: e.message,
@@ -333,10 +334,21 @@ impl Vm {
             is_over_memory: false,
             is_timed_out: false,
         })?;
-        // A streamed `io.print` whose stdout died set `pending_exit` ([`Vm::emit_out`]) — turn it into
-        // the same hard-halt sentinel `std.os.exit` returns, so the VM ends the run cleanly. (`os.exit`
-        // itself already returned `Err` above, so this only ever fires for the print natives.)
-        if let Some(halt) = self.stream_halt(span) {
+        // A streamed `io.print`/`io.flush` whose stdout died emitted into a dead sink
+        // ([`Vm::emit_out`], a no-op there) and still returned `Ok` — so the deterministic
+        // broken-pipe halt is raised HERE, at the call site, exactly as at `print` (line ~186) and
+        // the `Writer` arm (line ~1121).
+        //
+        // W7-5d — the gate is "did THIS native emit to stdout", NOT the bare
+        // `stream_halt`. `stream_halt` reads the process-GLOBAL `out_dead_reason()`, so unguarded it
+        // fired after EVERY native once stdout died anywhere: a job doing three `fs.atomic_write`s
+        // completed only the first, and how many completed varied with the thread count and across
+        // runs. The old comment here claimed "this only ever fires for the print natives" — it did
+        // not, and nothing made it so. The counter delta does. Re-entrancy is covered: a native that
+        // re-enters Chezzi and prints there bumps the same counter (see [`Vm::stdout_writes`]).
+        if self.stdout_writes != writes_before
+            && let Some(halt) = self.stream_halt(span)
+        {
             return Err(halt);
         }
         Ok(self.lower_native(ret))
@@ -1110,15 +1122,22 @@ impl Vm {
                     }
                     r
                 }
-                // R2 / N1: a `stdout()`/`stderr()`-backed `write` routes through `emit_out`/`emit_err`,
-                // a NO-OP once the streamed reader has died. `writer_method` then returns `Ok`, so —
-                // exactly like `print` (line ~186) and every native (invoke_native line ~331) — the
-                // deterministic broken-pipe halt must be raised HERE at the call site, or a
-                // `loop: w.write(...)` into a dead pipe spins forever, growing the unbounded stream
-                // queue without bound (6f8bb5c). `stream_halt` is inert off the streaming CLI path.
+                // R2 / N1: a `stdout()`-backed `write` routes through `emit_out`, a NO-OP once the
+                // streamed reader has died. `writer_method` then returns `Ok`, so — exactly like
+                // `print` (line ~186) and `invoke_native` (line ~339) — the deterministic broken-pipe
+                // halt must be raised HERE at the call site, or a `loop: w.write(...)` into a dead
+                // pipe spins forever, growing the unbounded stream queue without bound (6f8bb5c).
+                // `stream_halt` is inert off the streaming CLI path.
+                //
+                // W7-5d — gated on THIS call having emitted to stdout, for the reason spelled out at
+                // `invoke_native`: unguarded, a dead stdout also faulted a write to a FILE-backed or
+                // `stderr()`-backed `Writer`, which never touched the broken pipe.
                 "Writer" => {
+                    let writes_before = self.stdout_writes;
                     let r = self.writer_method(h, method, &args, span)?;
-                    if let Some(halt) = self.stream_halt(span) {
+                    if self.stdout_writes != writes_before
+                        && let Some(halt) = self.stream_halt(span)
+                    {
                         return Err(halt);
                     }
                     r
