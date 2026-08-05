@@ -686,6 +686,59 @@ fault-path. Fault-path is a future migration cluster.
 
 ---
 
+## 3c. Native-registry hygiene: a native's PROPERTIES belong on its registry entry (planned — NOT started, filed 2026-08-05)
+
+**The registry itself is fine and is not what this is about.** A native ships as a per-module
+`pub const MEMBERS: &[(&str, NativeFn)]` (`src/native/<mod>.rs`) plus a bodyless `native fn` decl in
+`std/<mod>.chz` for the signature. Two edits, both obvious, both local. Keep that.
+
+**The problem is that a native's BEHAVIOURAL PROPERTIES live in string matches far from the entry.**
+
+| property | where it lives today | what it decides |
+|---|---|---|
+| "is this blocking?" | `src/native/mod.rs:520` — one ~40-name `matches!` | offload to the dirty pool vs run inline on the worker |
+| "is this a timed wait?" | `src/vm/call.rs:291`, `:339`, `:359` — three `"sleep_ms"` string arms | ride the timer thread; be a continuous cancel + `--timeout` checkpoint (W7-16) |
+
+`sleep_ms` is named in 4 files. **A new blocking native that forgets `is_blocking` fails SILENTLY** —
+nothing errors, no test goes red, it just pins an M:N worker for the syscall's duration (the D5
+starvation the set exists to prevent). That near-miss is already documented inside the function it
+would break: `native/mod.rs:521` strips a `_` prefix specifically so the W7-8 rename did not silently
+un-classify every `std.fs` syscall.
+
+**The fix — the property moves onto the entry, so the table is the single source of truth:**
+
+```rust
+pub struct Native { pub name: &'static str, pub f: NativeFn, pub kind: Kind }
+pub enum Kind { Inline, Blocking, TimedWait }   // TimedWait replaces all three `"sleep_ms"` arms
+
+pub const MEMBERS: &[Native] = &[
+    Native { name: "sleep_ms", f: sleep_ms, kind: Kind::TimedWait },
+    ...
+];
+```
+
+`is_blocking(name)` becomes a lookup; `match name { "sleep_ms" => … }` becomes `match kind { TimedWait
+=> … }`. The payoff is not tidiness — it is that **omitting the property becomes a compile error** (a
+missing struct field) instead of a silent behaviour loss.
+
+**Two sizes, and they are genuinely different jobs:**
+
+| | diff | gets you | when |
+|---|---|---|---|
+| **A. Collapse the scatter** — add `native::kind(name) -> Kind` beside `is_blocking`; `call.rs` matches on `Kind::TimedWait` | ~4 files, ~40 lines | 4 files → 1. Still a name match, so still silently forgettable | safe any time |
+| **B. Property on the entry** (above) | **192 entries across 12 tables** (`ffi` 59, `math` 35, `io` 20, `fs` 17, `encoding` 13, `os` 12, `crypto` 10, `request` 8, `process`/`regex` 5, `rand`/`time` 4) + ~10 tuple-destructuring consumers (`native/mod.rs:824,851,873,890,976,1012,1055`; `ffi.rs` tests) | the compile-error guarantee | **before the JIT freeze** — a table-shape change wants that boundary, and it is a pure refactor best done outside a bug-hunt |
+
+**Deliberately NOT in scope.** `timer(ms)` is an **opcode** (`vm/op.rs:462`), not a native, so it never
+joins this table — its handling stays where it is either way. Do not grow this into a trait-object or
+plugin registry: it is two properties and one special-cased name, and a `kind` field is the whole fix.
+
+**Adjacent, same family, already filed:** `gaps.md` **W7-5e** — `Vm::stdout_writes` is a *third*
+per-native property ("did this call write to stdout?") resting on an unenforced invariant. If B is
+done, check whether it folds in as a fourth `Kind` / flag rather than staying a hand-maintained
+assumption.
+
+---
+
 ## 4. Optimizations (ranked effort → payoff)
 
 > **Live numbers:** `docs/benchmarks.md` tracks Chezzi vs CPython (reproducible via

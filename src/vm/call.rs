@@ -287,6 +287,12 @@ impl Vm {
             // so it is NOT offloaded — `offload` stays `None` and execution falls through to the
             // inline path below (which returns `Nil` instantly). Every other blocking native (the
             // `io`/`fs`/`request`/`process` set) keeps `timer_ms = None` → the dirty pool.
+            //
+            // ponytail: "is this a timed wait?" is a per-native PROPERTY matched here by bare name, and
+            // `sleep_ms` is named in three arms of this fn alone (here, the `native_reentry > 0` demote
+            // below, and the block-in-place arm) plus `native::is_blocking`. Upgrade path: carry the
+            // property on the registry entry (`Kind::TimedWait`) and match on that — `docs/future.md`
+            // §3c, which also has the cheap interim variant (one `native::kind(name)` classifier).
             let offload = match name {
                 "sleep_ms" => {
                     // Copy the duration out first (ends the `nargs` borrow before the move below).

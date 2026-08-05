@@ -517,6 +517,15 @@ impl HostError {
 /// (`get`/`post`, HTTP via `ureq`) and `std.process` (`cmd`, subprocess): both verified off-heap-safe
 /// (primitive `str` args, primitive `Struct`/`Ok`/`Err` returns, no heap/stdio touch during the call),
 /// so they offload like the rest instead of pinning a core worker on network / subprocess I/O.
+///
+/// ponytail: a native's PROPERTIES are classified here, by name, far from where the native is
+/// REGISTERED (`MEMBERS`) — so a new blocking native that forgets this list fails SILENTLY: nothing
+/// errors, no test goes red, it just pins an M:N worker for the syscall. The `_`-prefix strip below is
+/// a near-miss of exactly that. Same shape in `vm/call.rs`'s three `"sleep_ms"` arms (the "is this a
+/// timed wait?" property) — `sleep_ms` is named in 4 files. Upgrade path: move the property onto the
+/// registry entry (`struct Native { name, f, kind }`), so omitting it is a COMPILE error; ~192 entries
+/// across 12 tables, so it wants its own commit. Full write-up + the cheap interim variant:
+/// `docs/future.md` §3c.
 pub fn is_blocking(name: &str) -> bool {
     // W7-8 — the path-taking natives were renamed to a `_`-prefixed INTERNAL byte seam (the public
     // `PathLike` name is a bodied Chezzi wrapper). Strip the prefix so the classification travels with
