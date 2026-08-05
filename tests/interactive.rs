@@ -558,6 +558,129 @@ fn fault_under_broken_pipe_is_not_success_serial() {
     fault_under_broken_pipe_is_not_success(true);
 }
 
+/// W7-5d — a dead stdout kills the job that touched it, NOT its siblings, and NOT the rest of a
+/// sibling that never touched stdout at all. Two process-GLOBAL reads made it otherwise, both now
+/// gated:
+///
+/// 1. `executor_hard_halt` folded in `stream::out_dead_reason()`, so once stdout died ANY fault
+///    became a hard halt and tripped the executor's cancel flag, killing queued/eager siblings.
+/// 2. `invoke_native` (and the `Writer` arm) called `stream_halt` after EVERY native, which reads the
+///    same global — so a sibling doing three `fs.atomic_write`s faulted after the FIRST one, having
+///    never printed. Now gated on `Vm::stdout_writes` moving during that call.
+///
+/// Both were NONDETERMINISTIC before the gate: how much of each sibling survived depended on how far
+/// the pool had got when the pipe broke — for (1), neither marker at `--threads=1`/`--serial`, both
+/// at `--threads=3+`, either answer at `--threads=2` across runs; for (2), 1 of 3 writes usually and
+/// 3 of 3 sometimes at `--threads=2`. `--threads=1` is the load-bearing configuration: it is the one
+/// that fails again the moment either gate becomes reachable.
+///
+/// A broken pipe is an ORDINARY fault (`Vm::stream_halt` sets neither `is_over_memory` nor
+/// `is_timed_out`), so the W7-5 run-all contract applies to it unchanged. `writes` picks which half
+/// this run fences: 1 marker write per job exercises (1) alone, 3 exercise (2) as well.
+///
+/// **Ancestors, measured on the 3-job shape under `| head -1`:** CPython `ThreadPoolExecutor` runs
+/// every submitted job and completes all three writes at `max_workers` 1/2/4 — the ancestor that owns
+/// `Executor` semantics, and what this asserts. Go has no executor; its goroutines take SIGPIPE on
+/// fd 1 and the whole process dies, which is a signal policy Chezzi deliberately does not adopt
+/// (`Vm::stream_halt` explains why: restoring SIGPIPE would break `std.net`'s EPIPE contract).
+///
+/// The `spew` job is what breaks the pipe. The markers write FILES, never stdout, so they are
+/// observable after the pipe is gone — and the run must STILL fault non-zero naming the pipe, or this
+/// would pass with `stream_halt` deleted outright.
+fn dead_stdout_does_not_cancel_sibling_executor_jobs(
+    serial: bool,
+    threads: Option<usize>,
+    writes: usize,
+) {
+    let t = TmpDir::new();
+    let dir = t.0.display().to_string();
+    let markers: Vec<String> = (1..=writes).map(|i| format!("m{i}.txt")).collect();
+    let body: String = markers
+        .iter()
+        .enumerate()
+        .map(|(i, m)| format!("    r{i} := fs.atomic_write(\"{dir}/{m}\", \"{i}\")\n"))
+        .collect();
+    let entry = t.write(
+        "main.chz",
+        &format!(
+            "import std.concurrency\nimport std.fs\n\n\
+             fn spew():\n    i := 0\n    while i < 500000:\n        print(\"x{{i}}\")\n        i = i + 1\n\n\
+             fn markers():\n{body}\n\
+             ex := Executor()\nex.submit(spew)\nex.submit(markers)\nex.shutdown()\n"
+        ),
+    );
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_chezzi"));
+    cmd.arg("run");
+    if serial {
+        cmd.arg("--serial");
+    }
+    if let Some(n) = threads {
+        cmd.arg(format!("--threads={n}"));
+    }
+    let mut child = cmd
+        .arg(&entry)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn chezzi");
+    drop(child.stdout.take()); // the reader is gone, as under `| head -1`
+    let mut stderr = child.stderr.take().unwrap();
+    let status =
+        wait_timeout(&mut child, 20).expect("kept printing to a dead pipe (EPIPE ignored)");
+    let mut err = String::new();
+    use std::io::Read;
+    let _ = stderr.read_to_string(&mut err);
+    let cfg = format!("serial={serial}, threads={threads:?}, writes={writes}");
+    for m in &markers {
+        assert!(
+            t.0.join(m).exists(),
+            "a dead stdout stopped sibling Executor work at {m} ({cfg}) — a broken pipe is an \
+             ordinary fault in the job that printed, and must not reach a job that never did"
+        );
+    }
+    // The halt itself must still fire — otherwise deleting `stream_halt` outright would pass the
+    // assertions above, and the printing job would spin the unbounded stream queue instead.
+    assert!(
+        !status.success(),
+        "a dead stdout truncated the output — the run must not report success ({cfg}): {status:?}"
+    );
+    assert!(
+        err.contains("stdout closed (broken pipe)"),
+        "the printing job's fault must still name the pipe ({cfg}); stderr was:\n{err}"
+    );
+}
+
+#[test]
+fn dead_stdout_does_not_cancel_sibling_executor_jobs_mn() {
+    dead_stdout_does_not_cancel_sibling_executor_jobs(false, None, 1);
+}
+
+#[test]
+fn dead_stdout_does_not_cancel_sibling_executor_jobs_mn_one_thread() {
+    dead_stdout_does_not_cancel_sibling_executor_jobs(false, Some(1), 1);
+}
+
+#[test]
+fn dead_stdout_does_not_cancel_sibling_executor_jobs_serial() {
+    dead_stdout_does_not_cancel_sibling_executor_jobs(true, None, 1);
+}
+
+#[test]
+fn dead_stdout_does_not_tear_a_multi_native_sibling_mn() {
+    dead_stdout_does_not_cancel_sibling_executor_jobs(false, None, 3);
+}
+
+#[test]
+fn dead_stdout_does_not_tear_a_multi_native_sibling_mn_one_thread() {
+    dead_stdout_does_not_cancel_sibling_executor_jobs(false, Some(1), 3);
+}
+
+#[test]
+fn dead_stdout_does_not_tear_a_multi_native_sibling_serial() {
+    dead_stdout_does_not_cancel_sibling_executor_jobs(true, None, 3);
+}
+
 /// A stdout that CANNOT be written (`> /dev/full` → ENOSPC) must not be silently dropped: the run
 /// fails loudly (diagnostic + non-zero exit), never "exit 0 with no output". Same policy as
 /// `chezzi docs` (main.rs `write_stdout`): BrokenPipe = clean, any other errno = FAILURE.

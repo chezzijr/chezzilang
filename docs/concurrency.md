@@ -1257,12 +1257,19 @@ supervised tasks) — Go's float-free `go` is the model both ecosystems *rejecte
 > the caller: thread a `std.cancel.Token` through the closures and poll `tok.cancelled()` (§6e) — the
 > same split Go uses (`errgroup` + `context`), and the reason there is no abort flag on the Executor.
 > For structured first-fault-aborts-everything semantics, use a `parallel:` nursery, which is the
-> primitive that means that. **The run-all guarantee is for an ORDINARY job fault** — a hard halt (an
-> over-memory/timeout abort, or a fault raised while stdout is dead) is a separate, unconditional kill
-> switch that trumps it: `--serial` stops popping the queue the instant one fires, so later-queued jobs
-> never run; on the default engine every job was dispatched at its `submit`, so a hard halt stops the
-> ones that have not yet reached a cancellation point. This asymmetry is untested and tracked as
-> `docs/gaps.md` **W7-5d**, not fixed by this milestone. `shutdown_now` drops work that has not started
+> primitive that means that. **The run-all guarantee is for an ORDINARY job fault** — a RESOURCE CAP
+> (an over-memory/`--timeout` abort) is a separate, unconditional kill switch that trumps it, because a
+> bound a sibling can outlive is not a bound: `--serial` stops popping the queue the instant one fires,
+> so later-queued jobs never run; on the default engine every job was dispatched at its `submit`, so
+> the cap stops the ones that have not yet reached a cancellation point. **A dead stdout is NOT such a
+> cap** (W7-5d, fixed 2026-08-05): a broken pipe raises an ordinary fault in the job that printed, and
+> every sibling still runs to completion — matching CPython's `ThreadPoolExecutor`, the ancestor that
+> owns `Executor` semantics, which runs every submitted job at every `max_workers`. The cost is
+> deliberate and measured: a submitted job that reaches no print and no cancellation point (a bare
+> `while true: j = j + 1`) now runs forever instead of dying with the queue, so
+> `chezzi run x.chz | head -1` on that program hangs — CPython hangs on the same shape. (A nursery is
+> unaffected: `parallel:` aborts siblings on any fault, this one included.) `shutdown_now` drops work
+> that has not started
 > and asks running jobs to stop — **cooperatively, at their next cancellation point**, exactly like
 > Java's `shutdownNow`; a job with no such point still runs to completion, so on the default engine
 > `shutdown_now` is not a guarantee that a submitted job did not run. `submit` after either is a fault.

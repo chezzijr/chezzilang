@@ -3134,7 +3134,9 @@ impl Vm {
                     //
                     // W7-5 — run EVERY queued job, then raise the FIRST fault in submission order.
                     // The loop breaks early only for a hard halt (`os.exit` via `pending_exit`, or
-                    // `executor_hard_halt`), matching the M:N drain's cancel-flag rule exactly.
+                    // `executor_hard_halt` — a `--max-heap`/`--timeout` resource cap), matching the
+                    // M:N drain's cancel-flag rule exactly. W7-5d: a dead stdout is NOT one of those;
+                    // it faults each printing job at its own `print`, and the rest of the queue runs.
                     self.push(Value::obj(h));
                     let mut first_err: Option<RuntimeError> = None;
                     loop {

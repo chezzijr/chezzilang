@@ -522,7 +522,12 @@ task's line is visible before its nursery joins). Three rules follow:
   stdout reader (`chezzi run x.chz | head -1`) makes the next `print` raise the ordinary runtime fault
   `stdout closed (broken pipe)` — so an endless printer stops instead of spinning on a dead pipe, and
   the run exits **non-zero** with a trace on stderr (still live: `| head` closes only stdout). Python
-  raises `BrokenPipeError` here for the same reason. A dead stdout deliberately does **not** halt via
+  raises `BrokenPipeError` here for the same reason. The halt fires **only where stdout was actually
+  written**: the printing job faults, and an `Executor` sibling that never printed runs to completion
+  (a file write, a computation) — matching CPython's `ThreadPoolExecutor`, which runs every submitted
+  job. A `parallel:`/`spawn` nursery is different **by design**: structured concurrency aborts
+  siblings on any fault, broken pipe included (`docs/concurrency.md` §8). A dead stdout deliberately
+  does **not** halt via
   the `os.exit` channel: that channel outranks a fault, so borrowing it made a *crashing* program under
   `| head -1` report **exit 0 with no trace**. Any other stdout I/O error (`ENOSPC`, `EIO`, a closed fd)
   additionally prints `chezzi run: cannot write stdout: …`: a truncated redirect never reports success.

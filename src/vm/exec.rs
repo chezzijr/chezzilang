@@ -33,6 +33,10 @@ impl Vm {
     /// (the parity oracles diff `vm::run_file_bytes`' raw bytes; a lossy decode is not injective).
     pub(super) fn emit_out_bytes(&mut self, b: &[u8]) {
         if self.host.stream {
+            // Counted so `invoke_native` can ask "did THIS native emit to stdout" — see
+            // [`Vm::stdout_writes`]. Only the streamed branch: off the CLI path `stream_halt` is
+            // inert anyway, so a buffered write has nothing to gate.
+            self.stdout_writes += 1;
             stream::write_out(b);
         } else {
             self.out.extend_from_slice(b);
@@ -133,6 +137,7 @@ impl Vm {
             poll_deadline: None,
             poll_partial: None,
             native_reentry: 0,
+            stdout_writes: 0,
             reds: 0,             // D3 — set to CONTEXT_REDS per schedule-in (run_one_fiber)
             yield_now: false,    // D3
             gen_yielding: false, // experimental generators

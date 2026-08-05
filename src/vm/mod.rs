@@ -88,16 +88,39 @@ impl RuntimeError {
 
 /// W7-5 — the ONLY conditions under which an `Executor` drain still stops early. An ordinary job
 /// fault no longer aborts its siblings (the drain runs every queued job and raises the lowest-index
-/// fault), but a hard halt must stay un-swallowable: a `chezzi test --max-heap` / `--timeout` abort,
-/// or a fault raised while stdout is dead (`chezzi run x.chz | head -1` must not spin the whole
-/// queue). `os.exit` is NOT here — it arrives as `pending_exit`, handled by its own arm.
+/// fault), but a RESOURCE CAP must stay un-swallowable: a `chezzi test --max-heap` / `--timeout`
+/// abort. A bound that a sibling's work can outlive is not a bound. `os.exit` is NOT here — it
+/// arrives as `pending_exit`, handled by its own arm.
+///
+/// **W7-5d — a dead stdout is NOT here either, and must never be re-added.** It was, and it was the
+/// one term that read a process-GLOBAL condition (`stream::out_dead_reason()`) inside a predicate
+/// that answers "is this ERROR a hard halt": once stdout died, every fault anywhere became a hard
+/// halt. What the term bought was a whole-queue kill whose shape depended on how many jobs the pool
+/// had started first — measured on the `Executor` + spew + two file-writing markers shape, neither
+/// marker ran at `--threads=1` or `--serial`, both ran at `--threads=3+`, and `--threads=2` gave
+/// either answer across repeated runs. **CPython's `ThreadPoolExecutor` — the ancestor that owns
+/// `Executor` semantics — runs every submitted job at `max_workers` 1/2/4**, so a broken pipe kills
+/// the printer, not its siblings. (The `invoke_native` `stream_halt` gate is the same fix applied to
+/// the second global read; see there.) Pinned by
+/// `dead_stdout_does_not_{cancel_sibling_executor_jobs,tear_a_multi_native_sibling}_*` in
+/// `tests/interactive.rs`.
+///
+/// **What this costs, measured, so nobody re-adds the term to buy it back.** A job that reaches NO
+/// print and no cancellation-observing point — `ex.submit(fn(): while true: j = j + 1)` — used to die
+/// with the queue and now runs forever, so `chezzi run x.chz | head -1` on that program hangs where
+/// it exited in 4 ms. CPython hangs on the identical `ThreadPoolExecutor` shape (measured), so this
+/// follows the owning ancestor. Go exits — but by taking SIGPIPE on fd 1 and killing the process, a
+/// signal policy Chezzi deliberately does not adopt ([`Vm::stream_halt`] records why: restoring
+/// SIGPIPE would break `std.net`'s EPIPE-as-an-error contract). A `parallel:`/`spawn` nursery is
+/// unaffected either way — structured concurrency aborts siblings on ANY fault, by design, so the
+/// same program under `spawn` still terminates promptly on both engines.
 ///
 /// Not Executor-only despite the name: it is also `reduce_task_slots`'s hard-halt-over-ordinary error
 /// precedence predicate (W7-5 review Fix 1), and `reduce_task_slots` is shared by every M:N nursery
-/// join (`parallel:`, `spawn`) as well as the Executor drain — seven call sites total. Read every use
-/// of this predicate as "is this fault a hard halt", not "is this an Executor".
+/// join (`parallel:`, `spawn`) as well as the Executor drain. Read every use of this predicate as "is
+/// this fault a hard halt", not "is this an Executor".
 pub(super) fn executor_hard_halt(err: &RuntimeError) -> bool {
-    err.is_over_memory || err.is_timed_out || crate::vm::stream::out_dead_reason().is_some()
+    err.is_over_memory || err.is_timed_out
 }
 
 impl std::fmt::Display for RuntimeError {
@@ -803,6 +826,12 @@ pub struct Vm {
     /// parked into a [`Fiber`], so a `recv` reached while this is `> 0` cannot suspend — it faults
     /// `deadlock` instead (B1 v1 limitation). Maintained by [`Vm::guarded`].
     native_reentry: usize,
+    /// Monotonic count of streamed stdout writes made by this `Vm` ([`Vm::emit_out_bytes`], streaming
+    /// branch only). Read ONLY as a before/after delta around a native call, to answer "did THIS call
+    /// emit to stdout" — see the `stream_halt` gate in `call.rs`'s `invoke_native`. A counter, not a
+    /// flag, so a native that re-enters Chezzi (`[1].map(f)` where `f` prints) still reports the write
+    /// to every frame that spans it. Never reset; wrapping is unreachable (2^64 writes).
+    stdout_writes: u64,
     /// Active cooperative-scheduler levels (B1/B2), innermost last. Each [`Nursery`] holds the parked
     /// joining (parent) fiber's context plus its child fibers; non-empty means a `recv` may suspend.
     /// Every parked fiber here is a GC root (see [`Vm::collect`]).
@@ -3199,7 +3228,9 @@ impl ReadyWorker {
     /// B3.4 — the `--parallel` join's entry point: run the task and classify how it ended into a
     /// [`TaskOutcome`]. W7-5 — an ordinary fault does NOT trip the cancel flag: the drain runs every
     /// queued job and the join raises the lowest-index fault. Only a hard halt trips it — `os.exit`
-    /// (the `pending_exit` arm) or [`executor_hard_halt`] (over-memory / timeout / dead stdout).
+    /// (the `pending_exit` arm) or [`executor_hard_halt`] (over-memory / timeout). W7-5d: a fault
+    /// raised on a dead stdout is ORDINARY and does not trip it, so a broken pipe kills the printing
+    /// job and leaves its siblings alone — see [`executor_hard_halt`] for the measured ancestors.
     /// Precedence: a deliberate `os.exit` (worker `pending_exit`) → `Exit`; an observed sibling
     /// cancel (`worker.cancelled`) → `Cancelled` (swallowed); else the invoke result maps to
     /// `Fault`/`Done`. Output buffers are moved out only on the paths that flush them.

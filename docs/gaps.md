@@ -43,7 +43,9 @@ lowest-index-fault propagation) and `W7-5c` (every faulting task's output flushe
 milestone (`docs/future.md` §2c). Note the correction: eager execution did *not* dissolve W7-5b by
 deleting the queue (it kept one). It dissolved it by changing what the program-exit join walks — a
 heap-independent registry of `ExecutorCore` `Arc`s shared with every worker, instead of the per-`Vm`
-`Vec<GcRef>` that died with its task's heap. `W7-5d` remains open.
+`Vec<GcRef>` that died with its task's heap. **`W7-5d` is FIXED 2026-08-05** — a dead stdout is no
+longer a hard halt, so the run-all drain covers it like any other ordinary fault. The whole
+W7-5 family is now closed.
 **Keep this table in sync when a section is retired** — the
 reason it exists is that "which of these is still open?" previously required reading 1400 lines of
 chronological log.
@@ -57,7 +59,7 @@ chronological log.
 | **W6-9r** | `:1303` | Parity-oracle residual left by the `W6-9b` fix: ~31 hand-rolled `run_file_p` + `run_file` cross-engine compares in `parity_tests.rs` still diff LOSSILY-DECODED strings, and `parity_entry_cfg_lines` compares stdout as an order-insensitive line multiset | The three SHARED comparators were fixed at the helper level (0 call sites touched); converting the hand-rolled ones means rewriting ~31 call sites. UTF-8-only today, so nothing is failing — but a new byte-emitting test added at one of those sites inherits the blindness. Use `vm::run_file_bytes` there |
 | **W6-10r** | `:1216` | `--max-heap` residual: a payload reachable ONLY through a **nested** core (a `Channel` inside a `Shared`, once the nested core's last `Obj` alias slot is swept) is counted nowhere | Left open by the W6-10 fix on purpose. `live_bytes` reaches a core's bytes through its `Obj::*` alias slot; a nested core has none. Closing it needs cross-core byte recursion with `Arc` de-dup — narrow trigger, not worth the machinery yet |
 | protocol embeds | `:1505` | A protocol-embedded method isn't callable through the interface value (`p: Person` can't call embedded `name()`) despite `spec.md:973` "flattened at bound sites" | Filed as a safe-direction observation in wave 3; never triaged — doc and behavior contradict each other either way |
-| **W7-5d** | `:4413` | A hard halt (over-memory/timeout/dead-stdout) firing mid-`shutdown()` does NOT run every queued job the way an ordinary fault does — `--serial` stops popping the queue the instant one fires (later-queued jobs never run at all); M:N has already dispatched every job to the pool before a hard halt can fire, but that is not a per-job guarantee under a thread-starved pool | Found while adversarially reviewing this milestone's own docs. Live and reproduced on the built binary (`Executor().submit(spew-until-dead-stdout)` then two marker jobs, piped through `head -1`: M:N runs both markers, `--serial` runs neither), but untested — `tests/chz/stdlib/executor_drain_test.chz`'s 6 tests only use `panic()` faults, never a hard-halt kind. `executor_hard_halt` was deliberately built as an unconditional kill switch (W7-5), so this is arguably correct-by-design on both engines individually, but the exact SHAPE of "what still doesn't run" differs by engine and neither engine's shape is pinned by a test |
+| ~~**W7-5d**~~ | `:5188` | **FIXED 2026-08-05.** A dead stdout was a whole-queue kill switch, so a broken pipe cancelled sibling `Executor` jobs. It is now an ORDINARY per-job fault. TWO process-global reads had to go: `executor_hard_halt` is `is_over_memory \|\| is_timed_out`, and `invoke_native`'s post-call `stream_halt` is gated on that call having actually emitted to stdout (`Vm::stdout_writes`) — unguarded it faulted a sibling that never printed, after its FIRST native. Repro: **both markers 21/21 runs**, **all three writes 15/15**, across `--serial` and `--threads=1/2/3/4/8`/default; pre-fix it wrote neither marker at `--threads=1`/`--serial`, both at `--threads=3+`, and either at `--threads=2`. Matches CPython `ThreadPoolExecutor` (`max_workers` 1/2/4), the ancestor that owns `Executor` | Three lessons. (1) A **process-GLOBAL read inside an error-property predicate** — `out_dead_reason().is_some()` does not describe the `err` it is passed. The shape was in the tree **twice**; fixing the first made the second visible. (2) The ledger's own proposed alternative ("an accepted-asymmetry test pinning what each engine actually does") **was never available**: the M:N shape varied by thread count AND across runs at one thread count. (3) A one-native-call marker is the exact shape that hides instance (2) — when the contract is "the REST of the job runs", the fence needs a "rest". Accepted cost: `ex.submit`-only — a job with no print and no cancellation point now hangs `\| head -1`. CPython hangs identically; Go exits via SIGPIPE on fd 1, a signal policy Chezzi does not adopt. Nurseries unaffected (they abort siblings on any fault, by design) |
 | **W7-16** | `:4939` | **A blocking NATIVE is not a cancellation checkpoint on the eager `Executor` path**, where it is inside a `parallel:` nursery. `ex.submit(job)` + `shutdown_now()` at 50 ms against `time.sleep_ms(3000)` (or a lone `timer(3000).recv()`) waits the full **3012 ms** AND runs the job's post-sleep code (`napper woke` prints). The same `sleep_ms` inside a nursery is interrupted on both engines — `parity_blocking_native_is_a_cancellation_checkpoint_on_both_engines` asserts `napper woke` never prints | Found 2026-08-04 while fixing W7-14's cancel half; the `wait:` half of the same hole IS fixed. Cause: the offload/park path (`call.rs:~285`, deadline-wake + checkpoint) needs an `MnSched`, and an eager job has `mn == None`, so the native runs inline (`thread::sleep`) and observes no halt. **Which contract wins is a real question, not a bug-by-inspection**: CPython's `ThreadPoolExecutor.shutdown(cancel_futures=True)` does NOT interrupt a RUNNING job either (a running `time.sleep(3)` completes), so Python agrees with today's behavior — but Chezzi's own nursery does not, and `--timeout` cannot reach these jobs either. Decide the contract before coding: measure CPython + Go, then either make the eager path a checkpoint or document the executor exemption |
 | ~~**W7-14**~~ | `:4974` | **FIXED 2026-08-04.** The cooperative inline-sleep is now gated off for every waiter that owns its OS thread — an eager `Executor` job, the top-level `main` thread, and `main` inside a native callback — each of which blocks with the timer as one more arm and clamps its in-place wait to the deadline. `timer(300)` beside a value at 50 ms: **`timer` @ 306–308 ms → `value 9` @ 56–57 ms** on all three, matching the nursery path (54 ms) and Go's `select` | Three lessons. (1) The blocker on file — "WAIT-1's recipe does not port: it submits the background deadline send into `self.mn`, which an eager job does not have" — was solving the wrong problem. WAIT-1 injects a wake because a PARKED FIBER has no thread; a party that owns its thread needs no wake at all, only a shorter timeout. (2) The dead clamp W7-13r(a) deleted was not dead code but a SYMPTOM: it was unreachable *because* of this bug, and reading it as "provably `None`" documented the bug as an invariant. (3) **The first fix reused `can_block_in_place()` and shipped green with a third path still broken** — that predicate folds in `is_counted_party`, i.e. `native_reentry == 0`, which is a rule about being JUDGED, not about being able to block. Adversarial review caught it; the tests did not, because they only covered the two paths the fix was written for |
 | ~~**W7-13r**~~ | `:4619` | **ALL THREE RESIDUALS FIXED 2026-08-04**, with W7-13 itself: (a) the eager `wait:` arm was a blind `thread::sleep` — now waits on arm 0's condvar, 300 wakeups **1020 ms → 5 ms**; (b) `trip()` set `done_latch` outside `core.q` — now under it; (c) a blocked eager `send` never observed `close()` — was a HANG, now faults `send on a closed channel` at 105 ms (Go, compiled: 104 ms) | Kept for the lessons, not the status. (a) was deferred as "needs its own design primitive" — **wrong**, `demote_wait_block` (`sched.rs:1114`) already had the four-line trick. (b) is deliberately UNFENCED: the window is nanoseconds and measured 5–6 ms both ways, so a timing test would assert nothing. (c) left a DELIBERATE engine divergence (`--serial` keeps `FULL_SEND_DEADLOCK`: its drain runs jobs one at a time and cannot interleave them) and needs ≥2 pool threads, unchanged by the fix. Note the original W7-13 diagnosis (a *missing* `wake_senders`) was WRONG: that wake already fires on all six pop paths; the bug was a LOST wakeup — `eager_wait_tick` waited with no predicate, so a `notify_all` arriving while the lock was free hit a condvar nobody was on yet |
@@ -4348,7 +4350,11 @@ run-all decision.** The cancel flag is not one on/off switch — it has to split
 questions: "should an ordinary sibling fault stop other jobs" (no, per the decision above) vs "should a
 HARD halt still stop other jobs" (yes, unconditionally — a `--max-heap`/`--timeout` abort, or a fault
 raised while stdout is dead, must stay un-swallowable, or `chezzi run x.chz | head -1` spins the whole
-queue instead of exiting promptly). The fix keeps the cancel flag exactly for the second case
+queue instead of exiting promptly). **Superseded in part by W7-5d (2026-08-05, `:5188`):** the
+dead-stdout half of that "yes" was wrong. `| head -1` promptness never needed it — `stream_halt`
+faults each printing job at its own `print`, so the queue is bounded by job count — and the term was a
+process-global read that reclassified every fault in the process. Only the two resource caps are hard
+halts now. The fix keeps the cancel flag exactly for the second case
 (`executor_hard_halt`, gating `trip_cancel()` in `ReadyWorker::run_outcome`) and removes it for the
 first — the earlier attempts either kept the flag for both (matching the old abort-on-any-fault
 behavior, defeating run-all) or removed it for both (defeating the hard-halt kill switch). `os.exit`
@@ -4357,7 +4363,8 @@ behavior, defeating run-all) or removed it for both (defeating the hard-halt kil
 
 **All four of the original rejection's charges, accounted for — three answered, one upheld.** The
 `os.exit` "0.006s → 18.9s" measurement is a misattribution (see the safe-direction observation below);
-dead-stdout promptness is kept (the hard-halt cancel flag above); the `reduce_task_slots` line-set
+dead-stdout promptness is kept (the hard-halt cancel flag above — and still kept after W7-5d retired
+that flag for this case, now via `stream_halt`'s per-job fault); the `reduce_task_slots` line-set
 divergence is fixed by W7-5c below. The fourth — **"lets a faulting job leave a runaway sibling
 unkillable"** — is **upheld and accepted by design, not fixed**. Run-all means a sibling that never
 reaches a cancellation point (a tight loop with no I/O, a blocking sleep) now blocks `shutdown()` even
@@ -5185,40 +5192,110 @@ assertion passes on the UNFIXED binary for an unrelated reason.
 verdicts, not CPU, so a future change that made the predicate report ready while `enqueue_bounded`
 kept refusing would burn a core and still pass green.
 
-### W7-5d — a hard halt mid-`shutdown()` doesn't run every queued job the way an ordinary fault does, and the two engines diverge on WHICH jobs still don't run — **OPEN, found during this milestone's own doc review, NOT fixed**
+### W7-5d — a dead stdout cancelled sibling `Executor` jobs, in a shape that varied by thread count and across runs — **FIXED 2026-08-05**
 
 Found adversarially reviewing this milestone's docs, not while implementing W7-5/W7-5c. The run-all
 guarantee (every queued job runs; §8 above) is explicitly for an ORDINARY job fault. A **hard halt**
-(`Vm::executor_hard_halt` — over-memory, timeout, or a fault raised while stdout is dead) is, by
-design (W7-5's whole point), a separate, unconditional kill switch — but its effect on the REST of the
-queue is not symmetric between engines, and neither shape is pinned by a test:
+(`Vm::executor_hard_halt`) was a separate, unconditional kill switch — and it counted a fault raised
+while stdout is dead as one, so a broken pipe took the rest of the queue with it.
 
-- **`--serial`** (`src/vm/netio.rs`, the cooperative `"shutdown"` branch): the pop-loop `break`s the
-  instant a hard halt fires, before popping any still-queued task. Those tasks never run at all.
-- **M:N** (`src/vm/sched.rs`, `drain_executor_on_pool` → `run_workers_on_pool`): the WHOLE queue is
-  taken up front (`take_all()`) and every job is dispatched to a worker (inline or pool) unconditionally
-  — there is no hard-halt short-circuit on this path. In a live repro (`Executor().submit(spew)` — a
-  job that prints until stdout dies — followed by two file-writing marker jobs, `shutdown()`, piped
-  through `head -1`), both markers ran on M:N (both files written) while neither ran on `--serial`
-  (neither file written).
+**The repro.** `Executor()` + a `spew` job that prints until stdout dies + two marker jobs that write
+files, `shutdown()`, piped through `head -1`. Marker files written, HEAD before the fix:
 
-Whether M:N's "already dispatched" is a hard per-job guarantee under a thread-starved pool (fewer
-worker threads than queued jobs) is unverified — `ReadyWorker::run_outcome`'s pre-call
-`cancel_requested()` checkpoint (the same mechanism `--os.exit` timing races through, per the W7-5
-implementation report) could in principle let a farmed-but-not-yet-started job observe an
-already-tripped cancel flag and skip its body without ever truly running it, the same class of
-thread-count-sensitive race documented for the `os.exit` case. Not chased further here — this is a docs
-task, not a VM fix.
+| engine | m1 | m2 |
+|---|---|---|
+| `--serial` | N | N |
+| M:N `--threads=1` | N | N |
+| M:N `--threads=2` | Y | **N on 2 of 3 runs, Y on the third** |
+| M:N `--threads=3+` | Y | Y |
 
-**Why this isn't rolled into W7-5's "fixed."** `executor_hard_halt` doing exactly this — stopping the
-drain early — is correct BY DESIGN (that's the whole reason the cancel flag was kept for hard halts).
-The gap is that the docs claimed an unqualified "every queued job runs" without the hard-halt carve-out
-this implies, and that carve-out's precise shape differs by engine and has zero test coverage
-(`tests/chz/stdlib/executor_drain_test.chz`'s 6 tests use only `panic()` faults). Closing it needs
-either a same-shape fix (make `--serial` also farm-then-dispatch instead of pop-then-run, or make M:N
-also stop dispatching once a hard halt fires) or an accepted-asymmetry test pinning what each engine
-actually does — a decision for whoever next touches the Executor drain, likely inside the
-eager-execution milestone (`docs/future.md` §2c) rather than against the current queueing model.
+The ledger's original entry recorded only the two ends of that table (`--serial` neither, default M:N
+both) and left the thread-starved case "unverified". Measuring it is what turned a documented
+asymmetry into a **nondeterminism**, and that killed the alternative the entry proposed — "an
+accepted-asymmetry test pinning what each engine actually does" was never available, because there
+was no stable shape to pin. The same program with an ordinary `panic()` in place of the spew wrote
+both markers at every thread count on both engines, which isolated the cancel trip as the sole cause.
+
+**The ancestor that owns `Executor` semantics, measured on the same shape under `| head -1`:** CPython
+`ThreadPoolExecutor` runs every submitted job at `max_workers` 1, 2 and 4 — both markers, and all
+three writes of the multi-write variant below. A broken pipe kills the printer, not its siblings. (Go
+has no executor; see the cost note at the end for what Go's answer actually is and why it is not the
+model here.)
+
+**The fix — TWO process-global reads, not one.** The first was found by the repro, the second by
+adversarial review of the first fix.
+
+```rust
+// 1. src/vm/mod.rs — an ERROR-property predicate that read ambient state
+pub(super) fn executor_hard_halt(err: &RuntimeError) -> bool {
+    err.is_over_memory || err.is_timed_out   // was: || stream::out_dead_reason().is_some()
+}
+
+// 2. src/vm/call.rs — `invoke_native` (and the `Writer` arm) ran `stream_halt`, which reads the SAME
+//    global, after EVERY native call. Now gated on this call having actually emitted to stdout:
+let writes_before = self.stdout_writes;          // bumped by `Vm::emit_out_bytes` (streamed branch)
+let ret = func(&mut host)…?;
+if self.stdout_writes != writes_before && let Some(halt) = self.stream_halt(span) { … }
+```
+
+All four readers of (1) change behavior for free: `ReadyWorker::run_outcome`'s two `trip_cancel` arms
+no longer fire on a dead-stdout fault, serial `shutdown`'s pop-loop no longer `break`s, and
+`reduce_task_slots`' `first_hard_fault` precedence is unaffected — it was already a no-op for this
+case, since a global term made *every* `Fault` arm set `first_hard_fault` at the first fault, i.e.
+`first_hard_fault == first_fault`.
+
+(2) is what made the first fix incomplete in a way its own test could not see. With only (1) landed, a
+sibling job doing three `fs.atomic_write`s completed **only the first** — it never printed, but the
+post-native halt check read the global and faulted it — and how many completed still varied with the
+thread count and across runs at `--threads=2`. The one-marker test passed because a single-native job
+lands its write *inside* the native, before the check. The comment at that site asserted "this only
+ever fires for the print natives"; nothing made that true, and the counter delta now does. The same
+gate also stops a dead **stdout** from faulting a write to a FILE-backed or `stderr()`-backed
+`Writer`.
+
+Post-fix: both markers on **21/21 runs** across `--serial` and `--threads=1/2/3/4/8`/default, and all
+three writes on **15/15** across `--serial`/`--threads=1/2/4`/default. The `| head -1` contract is
+intact — `rc=1` with `stdout closed (broken pipe)` on stderr. `--timeout` still buckets `TIMED-OUT`
+against a spinning job.
+
+Pinned by six tests in `tests/interactive.rs` —
+`dead_stdout_does_not_cancel_sibling_executor_jobs_{mn,mn_one_thread,serial}` for (1) and
+`dead_stdout_does_not_tear_a_multi_native_sibling_{mn,mn_one_thread,serial}` for (2), all asserting
+`rc != 0` + the pipe message so they cannot pass with `stream_halt` deleted. A real closed pipe is
+needed, so this is the documented Rust fallback; `tests/chz/stdlib/executor_drain_test.chz` can only
+raise `panic()`. `--threads=1` is the load-bearing configuration — it is the one that fails again the
+moment either gate becomes reachable.
+
+**Three lessons.**
+
+1. **A process-GLOBAL read inside an error-property predicate.** `executor_hard_halt(err)` answers
+   "is this ERROR a hard halt", and `out_dead_reason().is_some()` says nothing about `err`. Once
+   stdout died, every fault anywhere in the process — in an unrelated nursery, in an unrelated
+   executor — silently reclassified. Grep for the shape: a predicate over a value that also reads
+   ambient state. **It was in the codebase TWICE**, and fixing the first instance is what made the
+   second observable.
+2. **An asymmetry you have not measured at both extremes may be a nondeterminism.** The entry was
+   written from two data points at the comfortable end of the range. One `--threads=1` run and three
+   repeats at `--threads=2` changed both the diagnosis and the set of available fixes.
+3. **A one-call fence proves one call.** The first test used markers that made exactly one native
+   call each — the single shape where instance (2) is invisible, because the write lands inside the
+   native before the check. When the contract is "the REST of this job still runs", the fence has to
+   contain a "rest".
+
+**Accepted cost, stated deliberately — and note the primitive.** It is `ex.submit`-only: a job that
+reaches no print and no cancellation point (`while true: j = j + 1`) used to die with the queue and
+now runs forever, so `chezzi run x.chz | head -1` on that program hangs where it exited in 4 ms.
+A `parallel:`/`spawn` nursery is NOT affected — the same program under `spawn` still terminates
+promptly on both engines (measured), because structured concurrency aborts siblings on ANY fault, by
+design. (Which nursery siblings had already FINISHED when the abort lands stays scheduler-dependent —
+this repro's markers complete on default M:N and not on `--serial`/`--threads=1`. That is inherent to
+first-fault-aborts-everything, the same as Go's `errgroup` + `context`, and is not W7-5d.)
+**CPython hangs on the identical `ThreadPoolExecutor` shape**
+(measured: `timeout 8` expires), so this follows the owning ancestor. **Go exits** — but by taking
+SIGPIPE on fd 1 and killing the whole process, a signal policy Chezzi deliberately does not adopt
+(`Vm::stream_halt` records why: restoring SIGPIPE would break `std.net`'s EPIPE-as-an-error contract).
+An earlier draft of this entry claimed "Go and CPython hang on it too" — half wrong, and caught by
+running it.
 
 ### Safe-direction observations (not filed as bugs)
 - **`PROGRESS.md`'s claim that the second (rejected) W7-5 fix attempt (`8c32fda6`) broke the `os.exit`
@@ -5231,11 +5308,14 @@ eager-execution milestone (`docs/future.md` §2c) rather than against the curren
   blocking OS sleep has no in-flight cancellation point once entered) rather than the kill switch the
   attempt was actually supposed to be judged on.
 - **Serial's hand-written mirror `Vm::drain_cancelled_children` (`src/vm/sched.rs:1925`) lacks the
-  hard-halt precedence Task 1 added to `reduce_task_slots`.** Unreachable today — `--max-heap` and
-  `--timeout` are M:N-only (`src/main.rs:685`, `:693`) and the dead-stdout marker is uniform across all
-  fault kinds — but it becomes a real serial-vs-M:N divergence the moment any serial-observable
-  hard-halt marker is added. Worth a grep-and-mirror pass if that ever happens; not worth pre-emptively
-  duplicating logic for a marker that doesn't exist yet.
+  hard-halt precedence Task 1 added to `reduce_task_slots`.** Unreachable today — after W7-5d the only
+  hard-halt markers left are `--max-heap` and `--timeout`, and both are M:N-only (`src/main.rs:685`,
+  `:693`) — but it becomes a real serial-vs-M:N divergence the moment any serial-observable hard-halt
+  marker is added. (W7-5d strengthens this: the observation used to lean partly on the dead-stdout
+  marker being "uniform across all fault kinds", which was true only because that term was a process
+  global; it is gone now, so the *only* thing keeping this unreachable is the M:N-only gate.) Worth a
+  grep-and-mirror pass if that ever happens; not worth pre-emptively duplicating logic for a marker
+  that doesn't exist yet.
 - **`std/cancel.chz` — `kids` only ever grows.** `derive()` registers a child into every ancestor's
   `kids` list and nothing ever unlinks it. Go's `context.WithCancel` returns a `CancelFunc` precisely so
   `defer cancel()` detaches the child from its parent; there is no detach here at all. A long-lived root
