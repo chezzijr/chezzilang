@@ -711,10 +711,13 @@ Three corrections to the estimate below, all found by reading the code before wr
   arms. This is still two properties on one enum, not a plugin registry: the "don't grow it" warning
   below stands.
 
-**Found, not fixed, by the conversion:** `fs._stat`/`fs._walk` were never in the `is_blocking` list, so
-they run inline and pin an M:N core worker (`walk` recurses a whole tree) — exactly the silent failure
-this section predicted, already in the tree. Preserved as `Kind::Inline` by the refactor (behaviour-
-identical) and filed as `gaps.md` **W7-19**; reclassifying needs the off-heap-safety proof first.
+**Found by the conversion, fixed the next day:** `fs._stat`/`fs._walk` were never in the `is_blocking`
+list, so they ran inline and pinned an M:N core worker (`walk` recurses a whole tree) — exactly the
+silent failure this section predicted, already in the tree. The refactor preserved them as
+`Kind::Inline` (behaviour-identical) and filed `gaps.md` **W7-19**; both are `Kind::Blocking` as of
+2026-08-05, after the off-heap-safety proof. **This is the section's own payoff, measured**: the
+property was made impossible to omit, and the first thing writing it down produced was a live
+starvation bug nothing else had detected.
 
 **W7-5e did NOT fold in** — `Vm::stdout_writes` is a per-CALL runtime observation ("did this call emit
 to stdout?"), not a static per-native property. It was **fixed separately 2026-08-05** by the same
