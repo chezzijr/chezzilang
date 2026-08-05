@@ -12810,7 +12810,7 @@ print(\"main done\")
 /// fault can only precede or follow the sleep and serial keeps taking the entry checkpoint. Asserting
 /// this shape on both engines would be asserting a physics claim, not a contract — `CLAUDE.md`'s
 /// "correctness outranks engine agreement". The `--timeout` half of the same contract IS engine-common
-/// and is fenced in `test_runner` (`timeout_aborts_a_sleeping_test_on_every_block_in_place_path`).
+/// and is fenced in `test_runner` (`timeout_aborts_a_sleeping_test_everywhere`).
 ///
 /// The `gate` handshake is what makes the ordering deterministic rather than raced: `boom` cannot
 /// fault until `napper` has announced it is about to sleep, and then waits another 100 ms. (Losing

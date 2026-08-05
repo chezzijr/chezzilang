@@ -2,6 +2,59 @@
 
 Single source of truth for "what am I doing next." Update after every work session.
 
+> **✅ W7-17 FIXED 2026-08-05 — `--timeout` now reaches a fiber PARKED on a timer.** A `timer(ms)` wait
+> inside a `parallel:` nursery with no runnable sibling ran to its own deadline and then executed the
+> statement after the wait — the exact fall-through a hard abort exists to prevent. `--timeout=300`:
+>
+> | shape (no runnable sibling) | before | after |
+> |---|---|---|
+> | nursery `timer(3000).recv()` | **3004 ms**, `FAIL … SWALLOWED` | **304 ms**, `TIMED-OUT t` |
+> | nursery `wait:` with a `timer(3000)` arm | **3004 ms**, `FAIL … SWALLOWED` | **304 ms**, `TIMED-OUT t` |
+> | serial cooperative `wait:` timer arm | **3004 ms**, `FAIL … SWALLOWED` | aborted |
+> | Go `go test -timeout 300ms` + `<-time.After(3s)` | panics at 300 ms, `t.Fatal` never runs | — |
+>
+> Stable at `--threads=1/2/3/4/8`/default. Both park sites' timer jobs now fire at `min(their own
+> deadline, the run deadline)` and deliver `true` only if their own deadline really passed; an early
+> fire goes through `deadline_gap_wake`, and `chan_recv_step`/`op_wait_poll` gained a `--timeout`
+> checkpoint (`Vm::deadline_halt`, split out of `block_halt_check`) so the re-check turns that wake
+> into the abort. With the cap off it is byte-identical to the one-shot job it replaces: one wake,
+> **no re-arming**, so W7-16's 200-re-arms/s cost is not paid here. A third site fell out of measuring
+> the fix: the serial cooperative `wait:` timer arm was still a bare `thread::sleep` — the one
+> inline-sleep W7-16 missed — now `block_until_deadline`; **N10 is unchanged** (it still takes the
+> timer arm without yielding, it just observes the halts on the way).
+>
+> **Two things adversarial review changed, both invisible to a green suite.** (1) The early wake must
+> leave STATE: `submit_at` runs *before* the fiber actually parks, so a bare wake landing in that
+> window hits an empty bucket, is lost, and the fiber parks with its one job spent (`timer_armed`
+> forbids a re-arm) — a hang past the deadline meant to prevent hangs. The park-gap re-check reads
+> only {queued value, `closed`, `done_latch`, scope cancel}, and the first three would mean "the timer
+> fired", so `deadline_gap_wake` trips the **cancel** and the deadline checkpoint is ordered above the
+> cancel checkpoint to keep the verdict `timed_out`. (2) The first cut put that checkpoint at the top
+> of both ops, ungated, which **silently truncated a `defer`'s cleanup `ch.recv()` on an already-queued
+> value** — W7-16's own bug, re-introduced by its fix, passing every test including the new
+> defers-still-run fence (whose `defer` only calls `print`). It is now suppressed by the same
+> `deferring > 0` term `cancel_requested` uses, with the ungated check moved to the PARK.
+>
+> **The filed lesson was wrong, and that is the interesting part.** The row concluded this needed "a
+> deadline-driven wake (a scheduler feature), not another checkpoint", because "chunk-re-arming only
+> gets a wake, and the resumed fiber would re-park". Every clause true; the conclusion false — **a wake
+> and a checkpoint are one fix**, and the predicted re-park is exactly what the missing checkpoint
+> prevents. The scheduler-level alternative it pointed at is also *worse*: `flag_deadlock` drops parked
+> fibers without `unwind_deferred`, re-introducing W7-16's skipped-`defer` bug, where wake-and-re-check
+> faults from inside the VM and unwinds normally (fenced). And **a runnable sibling in every
+> neighbouring fixture hid this for a whole milestone** — a spinner's own back-edge trips the deadline
+> at 303 ms, indistinguishable in the report from the park being reached.
+>
+> Fences: `test_runner::timeout_aborts_a_sleeping_test_everywhere` (renamed from
+> `..._on_every_block_in_place_path`, which was named that way *to* fence this by omission; 6 fixtures ×
+> both engines, 2 red pre-fix), `a_timer_parked_task_aborted_by_the_deadline_still_runs_its_defers`,
+> `the_deadline_does_not_truncate_a_defer_whose_recv_can_complete` (mutation-verified), and
+> `a_live_timer_still_delivers_under_a_generous_timeout` for the other direction of the clamp.
+> **Filed, not fixed: `gaps.md` W7-18** — a fiber parked on the **netpoller** (`l.accept()`, no op
+> timeout) is still unreachable by `--timeout` and **HANGS** (measured: killed at 10001 ms, no verdict).
+> Same root, but it needs a hard-halt marker distinct from `poll_timed_out`, whose re-inject produces a
+> *catchable* `Err("timeout")`. Full write-up: `docs/gaps.md` **W7-17**.
+
 > **✅ W7-5d FIXED 2026-08-05 — a dead stdout no longer cancels sibling `Executor` jobs.** The bug was
 > a **process-GLOBAL read inside a predicate that answers "is this ERROR a hard halt"**
 > (`stream::out_dead_reason()` inside `Vm::executor_hard_halt`), so once stdout died every fault
@@ -99,9 +152,9 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > longer runs, and the cancelled task still unwinds through its `defer`s. A syscall-blocking native
 > (`fs.*`/`request*`/`process*`/`io.*`) stays deliberately ENTRY-only — a `read(2)` already in the
 > kernel is not ours to cut short. `--serial` has the same checkpoint but nothing to trip it mid-sleep
-> (one thread), so it gains the `--timeout` half only. One shape is NOT reached and is filed as
-> **W7-17**: a `timer(ms).recv()` parked in a nursery with no runnable sibling is not deadline-reachable
-> (pre-existing, verified identical on a pre-fix binary).
+> (one thread), so it gains the `--timeout` half only. One shape was NOT reached and was filed as
+> **W7-17** (a `timer(ms).recv()` parked in a nursery with no runnable sibling) — **fixed 2026-08-05**,
+> see below.
 >
 > **Two filed premises were wrong, and measuring them is what found the real bug.** (1) "the same
 > `sleep_ms` inside a nursery IS interrupted" — no: the parity fence passed only because its `boom()`
@@ -115,7 +168,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > that an eager job blocked on a plain `ch.recv()` *already* died at `shutdown_now()` in 56 ms.
 > Fences: `tests/chz/stdlib/sleep_cancel_test.chz` (both engines, 2/3 red pre-fix),
 > `a_sleeping_nursery_task_is_cancelled_mid_flight_by_a_sibling_fault`,
-> `test_runner::timeout_aborts_a_sleeping_test_on_every_block_in_place_path` (4 fixtures × both engines), and the renamed
+> `test_runner::timeout_aborts_a_sleeping_test_everywhere` (6 fixtures × both engines; renamed when W7-17 closed the park half), and the renamed
 > + tightened `parity_blocking_native_is_an_entry_cancellation_checkpoint_on_both_engines`. See
 > `docs/gaps.md` **W7-16**.
 

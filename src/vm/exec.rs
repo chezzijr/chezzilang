@@ -655,7 +655,10 @@ impl Vm {
     /// `chezzi test --timeout=<MS>` — set the per-test wall-clock cap in ms (`0` = OFF, the default).
     /// A test running longer than `MS` is hard-aborted (bypassing `recover:`) and bucketed `TimedOut`.
     /// M:N-engine-only (a wall-clock trip is non-deterministic → no serial==M:N parity); the CLI guard
-    /// rejects `--timeout` with `--serial`. Observed at the loop back-edge (+ spawned fibers).
+    /// rejects `--timeout` with `--serial`. Observed at the loop back-edge (+ spawned fibers), and —
+    /// for the ops a back-edge cannot reach — in `block_halt_check` (blocked in place),
+    /// `block_until_deadline` (a wait whose deadline we own, W7-16) and at `chan_recv_step` /
+    /// `op_wait_poll`'s PARK, which is the only path to a parked fiber (W7-17).
     pub fn set_timeout(&mut self, ms: u64) {
         self.timeout_ms = ms;
     }
