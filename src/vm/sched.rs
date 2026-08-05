@@ -66,6 +66,20 @@ struct WireMemo {
     /// Ids from `cells` already EMITTED (as a full `WireValue::Cell`) under the current `gen`. Equal to
     /// `cells`' id set unless `elem_split` is on.
     emitted: super::fxhash::FxHashMap<u32, u32>,
+    /// W7-4a — undo journal for [`emitted`](WireMemo::emitted) while a SPECULATIVE attempt is in
+    /// flight: `(id, the entry it replaced)`. `try_wire_speculative`'s rollback used to be complete
+    /// with `emitted.retain(|id, _| *id < mint_from)`, because every id in the memo had been minted by
+    /// the current module's own walk — so "id below the watermark" meant "really emitted". Once the
+    /// memo spans MODULES (`snapshot_modules`) that stopped holding: a discarded attempt can mark an
+    /// id minted in an EARLIER module, `retain` keeps it as if it were real, and the module's kept
+    /// encoding then emits a `Backref` whose definition it never wrote — a dangling ref that rebuilds
+    /// a closure over `nil` and trips `CellLoad on a non-handle value`. Recorded only while
+    /// `speculating`, so the non-speculative paths pay nothing.
+    emit_undo: Vec<(u32, Option<u32>)>,
+    /// True for the duration of one [`Vm::try_wire_speculative`] attempt. Never nests — the only
+    /// callers are `to_snap_depth`'s two speculative sites, and the attempt runs `to_wire_depth`,
+    /// which never re-enters `to_snap_depth` (asserted by the empty-`path` `debug_assert` at entry).
+    speculating: bool,
     /// Bumped on entry to each depth-1 node when `elem_split` — see the type doc.
     elem_gen: u32,
     /// Re-emit a cell's full definition once per depth-1 subtree (cross-heap stores only).
@@ -2711,6 +2725,12 @@ impl Vm {
                     if memo.emitted.get(&id) == Some(&memo.elem_gen) {
                         WireValue::Backref(id)
                     } else {
+                        // W7-4a — journal the entry we are about to overwrite so a DISCARDED
+                        // speculative attempt restores it exactly (see `try_wire_speculative`).
+                        if memo.speculating {
+                            let prev = memo.emitted.get(&id).copied();
+                            memo.emit_undo.push((id, prev));
+                        }
                         memo.emitted.insert(id, memo.elem_gen);
                         let inner = self.to_wire_depth(*v, depth + 1, memo)?;
                         WireValue::Cell {
@@ -4019,12 +4039,24 @@ impl Vm {
     /// `keep` decides; on `false` (or `Err`) the caller's memo is restored to its entry state.
     ///
     /// Rollback, not a clone: `to_snap_depth` calls this at EVERY node, so cloning the caller's memo
-    /// (which for the module snapshot is module-scoped and grows with every cell already emitted) would
-    /// make snapshotting a module with K cell-bearing globals O(M·K) instead of O(M). The undo is
-    /// exact — every id this attempt minted is `>= next_id` on entry, and `path`/`gens_on_stack` are
-    /// empty on entry (only `to_wire_depth` touches them and it pops on every `Ok` arm; an `Err` can
-    /// leave residue, which is exactly what is cleared here). Cost is O(cells) on the DISCARD path
-    /// only — a handle-bearing or generator global — and O(1) on the kept path.
+    /// (which for the module snapshot spans every module and grows with every cell already emitted)
+    /// would make snapshotting a module with K cell-bearing globals O(M·K) instead of O(M).
+    ///
+    /// The undo is exact on all four pieces, but they need DIFFERENT undos, and W7-4a is why:
+    /// - `cells` / `next_id` — every id this attempt MINTED is `>= mint_from`, and an attempt never
+    ///   rewrites an existing entry, so the watermark `retain` is complete.
+    /// - `emitted` — the watermark is NOT enough. This attempt can mark an id minted by an EARLIER
+    ///   MODULE (ids persist across modules now, `emitted` does not), and such an id is *below* the
+    ///   watermark, so `retain` would keep a marking that the discarded encoding made up. The module's
+    ///   kept encoding would then emit `Backref(id)` with no definition anywhere in it → a rebuild
+    ///   miss → a closure over `nil` → `CellLoad on a non-handle value`. Replayed exactly from
+    ///   [`emit_undo`](WireMemo::emit_undo) instead. Fenced by
+    ///   `airlock_discarded_wire_attempt_does_not_forge_a_backref`.
+    /// - `path` / `gens_on_stack` — empty on entry (only `to_wire_depth` touches them and it pops on
+    ///   every `Ok` arm; an `Err` can leave residue, which is what the clears remove).
+    ///
+    /// Cost is O(cells touched) on the DISCARD path only — a handle-bearing or generator global — and
+    /// O(1) on the kept path.
     fn try_wire_speculative(
         &self,
         v: Value,
@@ -4033,12 +4065,26 @@ impl Vm {
         keep: impl Fn(&WireValue) -> bool,
     ) -> Option<WireValue> {
         debug_assert!(memo.path.is_empty() && memo.gens_on_stack.is_empty());
+        debug_assert!(!memo.speculating, "try_wire_speculative must not nest");
         let mint_from = memo.next_id;
-        match self.to_wire_depth(v, depth, memo) {
-            Ok(w) if keep(&w) => Some(w),
+        memo.emit_undo.clear();
+        memo.speculating = true;
+        let attempt = self.to_wire_depth(v, depth, memo);
+        memo.speculating = false;
+        match attempt {
+            Ok(w) if keep(&w) => {
+                memo.emit_undo.clear();
+                Some(w)
+            }
             _ => {
                 memo.cells.retain(|_, id| *id < mint_from);
-                memo.emitted.retain(|id, _| *id < mint_from);
+                // Newest-first, so an id marked twice in one attempt lands back on its ORIGINAL entry.
+                for (id, prev) in memo.emit_undo.drain(..).rev() {
+                    match prev {
+                        Some(g) => memo.emitted.insert(id, g),
+                        None => memo.emitted.remove(&id),
+                    };
+                }
                 memo.next_id = mint_from;
                 memo.path.clear();
                 memo.gens_on_stack.clear();
@@ -4273,6 +4319,10 @@ impl Vm {
                 if memo.emitted.get(&id) == Some(&memo.elem_gen) {
                     SnapValue::Backref(id)
                 } else {
+                    // No `emit_undo` journal here, unlike `to_wire_depth`'s twin: this arm is only
+                    // ever reached AFTER `try_wire_speculative` has already returned (it runs
+                    // `to_wire_depth`, never `to_snap_depth`), so `speculating` is false and this
+                    // marking is never part of an attempt that can be thrown away.
                     memo.emitted.insert(id, memo.elem_gen);
                     SnapValue::Cell {
                         id,
@@ -4345,19 +4395,42 @@ impl Vm {
         // two globals over one captured local rebuild ONE cell whether they live in the same module or
         // not. Each module re-emits a shared cell's full definition under the same id and
         // `from_wire_memo` dedupes first-wins, so lazy fault ORDER does not matter and a module that
-        // never faults costs nothing. Taken out of `self` for the borrow and put back below; it lives
+        // never faults costs nothing — PROVIDED the serialize side really did write a definition in
+        // every module that references the cell, which is what `try_wire_speculative`'s `emit_undo`
+        // journal guarantees (a discarded attempt must not leave a forged `emitted` marking).
+        // Taken out of `self` for the borrow and put back below; it lives
         // on the `Vm` (rooted by `collect`/`root_ctx`) because a cell built by this fault can sit in it
         // across a safepoint before a later module's fault ties to it.
         let mut rb = std::mem::take(&mut self.snapshot_rebuild);
+        // W7-4b — this replay is a WHOLE crossing (the module's globals under the one memo that
+        // serialized them), so every `Backref` must resolve. Own the flag like `from_wire`/
+        // `from_wire_piece` do: clear it going in, assert it going out, clear it again so a snapshot
+        // miss is never charged to the next unrelated `from_wire` caller's assert. Loud in debug; in
+        // release the miss still degrades to `nil` rather than aborting the host.
+        self.wire_backref_missing = false;
         for (name, sv) in &snap.modules[idx].globals {
             let val = self.replay_snap(sv, &mut rb);
             self.module_define(module, name, val);
         }
         debug_assert!(
+            !self.wire_backref_missing,
+            "fault_module: a module global's replay hit a dangling Backref — a discarded speculative \
+             attempt forged one, or the serialize memo's scope no longer matches this rebuild map"
+        );
+        self.wire_backref_missing = false;
+        debug_assert!(
             self.snapshot_rebuild.is_empty(),
             "fault_module re-entered while its rebuild map was taken — the nested fault built cells \
              against a map that is about to be dropped"
         );
+        // W7-4a — keep ONLY the cells past this module. `from_wire_memo` registers EVERY
+        // identity-preserved node it rebuilds (List/Map/Set/Struct/Tuple/Closure too), but only a cell
+        // can be back-referenced from a LATER module: containers live in the `path` map, which pops on
+        // DFS exit, so a container reached again in another module is serialized fresh under a NEW id
+        // and can never resolve against this one. Retaining them would make the whole module-global
+        // object graph immortal for the fiber's life (the map is `Vm`-lived AND a GC root, so a task
+        // that reassigns a big global would keep the original rooted — a `--max-heap` regression).
+        rb.retain(|_, &mut h| matches!(self.heap.get(h), Obj::Cell(_)));
         self.snapshot_rebuild = rb;
         self.snapshot_memo = memo;
     }

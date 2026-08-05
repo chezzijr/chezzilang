@@ -14415,6 +14415,68 @@ main()
     assert_eq!(par_out, "41\n");
 }
 
+/// W7-4a — a DISCARDED speculative wire attempt must not forge a `Backref`. Found by adversarial
+/// review, and it was a live host PANIC, not a theoretical one: `main.chz` below aborted the M:N task
+/// with `CellLoad on a non-handle value` while `--serial` printed `7`.
+///
+/// Mechanism: `H := (k, k.C.get)` embeds a module, so the tuple fails `to_snap`'s `!has_handle()`
+/// fast lane — but the attempt ALREADY marked `k.C.get`'s cell as emitted, and that cell's id was
+/// minted back when module `k` was walked. `try_wire_speculative`'s rollback pruned `emitted` by
+/// `id >= mint_from`, which cannot see an id from an earlier module, so the marking survived a walk
+/// whose output was thrown away. `GG := k.C.get` (the next global) then emitted `Backref(id)` into a
+/// module that never wrote the definition. Ordering matters: the handle-bearing global must come
+/// FIRST — move `H` below `GG` and it prints `7` either way.
+#[test]
+fn airlock_discarded_wire_attempt_does_not_forge_a_backref() {
+    let dir = std::env::temp_dir().join(format!("chezzi_vm_w74a_spec_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("k.chz"),
+        "\
+struct Ctr:
+    inc: fn() -> nil
+    get: fn() -> int
+fn make() -> Ctr:
+    n := 7
+    fn inc():
+        n = n + 1
+    fn get() -> int:
+        return n
+    return Ctr(inc, get)
+C := make()
+",
+    )
+    .unwrap();
+    let entry = dir.join("main.chz");
+    std::fs::write(
+        &entry,
+        "\
+import k
+H := (k, k.C.get)
+GG := k.C.get
+fn main():
+    r := Channel[int]()
+    parallel:
+        spawn:
+            r.send(GG())
+    print(r.recv())
+main()
+",
+    )
+    .unwrap();
+    let (vm_out, _e, vm_res, _) = run_file(&entry);
+    let (par_out, _pe, par_res, _) =
+        run_file_parallel(&entry, crate::native::HostConfig::default());
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(vm_res.is_ok(), "serial faulted: {vm_res:?}");
+    assert!(
+        par_res.is_ok(),
+        "M:N faulted — a discarded attempt forged a Backref: {par_res:?}"
+    );
+    assert_eq!(vm_out, "7\n");
+    assert_eq!(par_out, "7\n", "serial and M:N diverged");
+}
+
 /// Control (regression lock, rc=0) — the SAME recursive `fn` HOISTED to module scope IS sendable: it
 /// crosses as `Obj::Func` (no captures; recursion resolves via its home-global slot), never entering
 /// the `Obj::Closure` serialization arm, so the new self-ref diagnostic never fires and the send works.

@@ -942,8 +942,15 @@ pub struct Vm {
     /// Heap-keyed, like `module_objs`: its `GcRef`s index whatever heap is current while this view is
     /// (an M:N fiber's own heap, or the shared heap inside a `prepare_serial_child` window), so it
     /// swaps WITH `module_snapshot`/`module_faulted` and is a GC root in both `collect` and
-    /// `root_ctx`. Entries are cells reachable from an already-`module_define`d global, so rooting
-    /// them pins nothing the module did not already root.
+    /// `root_ctx`.
+    ///
+    /// **Cells ONLY.** `from_wire_memo` registers every identity-preserved node it rebuilds
+    /// (List/Map/Set/Struct/Tuple/Closure too), but only a cell can be back-referenced from a LATER
+    /// module — containers live in the memo's `path`, which pops on DFS exit, so one reached again in
+    /// another module is serialized fresh under a NEW id. `fault_module` therefore prunes to cells at
+    /// the end of each module: retaining the rest would make the whole module-global object graph
+    /// immortal for the fiber's life, since this map is `Vm`-lived AND a GC root (a task that
+    /// reassigns a big global would keep the original rooted — a `--max-heap` regression).
     snapshot_rebuild: fxhash::FxHashMap<u32, GcRef>,
     /// W6-2 — how many snapshots this VM has BUILT (cache misses). A `usize` bump on a cold path, and the
     /// only direct probe that the cache short-circuits: a timing bench can hint, this counts. Read by
@@ -1465,8 +1472,13 @@ enum SnapValue {
     },
     /// W7-4b — a second reach of an already-emitted `Cell` id (an off-stack sibling closure, or a
     /// letrec back-edge). The wire mirror of [`WireValue::Backref`], and it degrades the same way: an
-    /// id the rebuild map has never seen resolves to `nil` and flags `wire_backref_missing` rather
-    /// than aborting the host (W7-11).
+    /// id the rebuild map has never seen resolves to `nil` and flags `wire_backref_missing` (W7-11).
+    ///
+    /// That degradation is a LAST resort, not a supported outcome — a `nil` where a cell belongs
+    /// reaches `CellLoad on a non-handle value`. A miss means the serialize memo's scope stopped
+    /// matching the rebuild map's, so [`Vm::fault_module`] owns the flag around its replay and
+    /// `debug_assert`s on it (and clears it, so the miss is never charged to the next unrelated
+    /// `from_wire` caller).
     Backref(u32),
     /// `(cached hash, key, value)` triples — hashes are value-derived, so they carry over unchanged.
     Map(Vec<(u64, SnapValue, SnapValue)>),

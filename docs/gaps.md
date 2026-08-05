@@ -4198,6 +4198,47 @@ terminates the walk at the second reach, so the two paths agree. Fenced by
 reject is right** — this one was a `to_wire`-vs-`to_snap` divergence hiding behind a tidy error
 message, in the same family as `docs/gaps.md` W7-12's "correctness outranks engine agreement".
 
+**ADVERSARIAL REVIEW CAUGHT A LIVE REGRESSION THE WHOLE GREEN GATE MISSED.** Both prosecutors,
+independently, found the same critical bug in the (a) fix — and it was a host PANIC that diverged by
+engine, on a program the pre-fix binary ran fine:
+
+```chezzi
+# k.chz  = the Ctr(inc, get) pair over a local `n := 7`
+import k
+H  := (k, k.C.get)      # embeds a MODULE → fails to_snap's !has_handle() fast lane
+GG := k.C.get           # …and this global then emits a Backref with no definition
+# spawn: r.send(GG())
+#   base cbca2561 → 7            M:N after the (a) fix → PANIC: CellLoad on a non-handle value
+#                                --serial after the (a) fix → 7      (parity-DIVERGENT)
+```
+`try_wire_speculative` rolled `emitted` back with `retain(|id, _| *id < mint_from)`. That was a
+COMPLETE undo only while every id in the memo had been minted by the current module's own walk —
+"below the watermark" meant "really emitted". Making the memo span modules (the (a) fix) silently
+broke that premise: a discarded attempt can mark an id minted in an EARLIER module, which is *below*
+the watermark, so the rollback kept a marking the thrown-away encoding invented. Fixed with an
+`emit_undo` journal (`(id, the entry it replaced)`, recorded only while `speculating`) replayed
+newest-first on discard. Order-dependent: move `H` below `GG` and it prints `7` either way. Fenced by
+`airlock_discarded_wire_attempt_does_not_forge_a_backref`, verified to reproduce the exact panic with
+the journal removed.
+
+**The lesson is about WIDENING A SCOPE, and it is the same shape as
+`lossy-decode-blinds-a-comparison-oracle`:** when a change widens what a piece of state spans, every
+*existing* consumer of that state carries an unstated assumption about the old, narrower scope. The
+watermark rollback was correct code that became wrong without being touched. Grep the state's other
+readers in the same commit — `cells`, `next_id`, `path` and `gens_on_stack` were all audited and are
+fine; `emitted` was the one that was not, and 3830 green tests plus a two-engine chz suite plus a
+thread sweep all missed it because no test had a handle-bearing global positioned BEFORE a
+cross-module cell reference.
+
+Review also found (and fixed) two real secondary defects: `replay_snap`'s `Backref` miss set
+`wire_backref_missing` with **no consumer**, so a snapshot miss leaked into the next unrelated
+`from_wire` caller's `debug_assert` — `fault_module` now owns the flag around its replay; and
+`Vm::snapshot_rebuild` retained EVERY identity-preserved node (`List`/`Map`/`Set`/`Struct`/`Tuple`/
+`Closure`), not just cells, making the module-global object graph immortal for the fiber's life
+(a `--max-heap` regression for a task that reassigns a big global) — `fault_module` now prunes to
+cells, which is sound because only a cell can be back-referenced across modules (containers live in
+`path`, which pops on DFS exit).
+
 **Two lessons, both about PRICING a filed residual:**
 1. **The predicted cost was wrong in the expensive direction.** W7-4a's ceiling comment said closing it
    needs `Vm`-lived rebuild state "kept across GC-visible points" — implying delicate rooting. It does
@@ -4214,7 +4255,7 @@ message, in the same family as `docs/gaps.md` W7-12's "correctness outranks engi
 
 **Verified.** `airlock_cross_module_shared_binding_is_one_cell` + `airlock_handle_bearing_cell_keeps_one_binding`
 (each: serial, M:N, and a MULTI-FILE gc-stress run via the new `run_file_stress` — `run_capture_stress`
-is single-source and cannot reach the lazy per-module fault path). Full `cargo test --lib` 3831 green;
+is single-source and cannot reach the lazy per-module fault path). Full `cargo test --lib` 3832 green;
 `chezzi test tests/chz/` 297/297 on both engines; the 29-test `airlock_` panel green; thread sweep
 `1/2/4/8` × 25 runs on the cross-module repro, 0 wrong. **Perf** — the W7-4 snapshot stress (400
 module-global closures over distinct cells × 1000 nurseries) main 2.585 s → 2.573 s (flat, within run

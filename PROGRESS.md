@@ -39,6 +39,27 @@ Single source of truth for "what am I doing next." Update after every work sessi
 >   so a mid-nursery re-snapshot degrades instead of colliding, and a per-task clone-id carry through
 >   `QueuedTask`/`prepare_worker`/`prepare_serial_child`/`lower_task`.
 >
+> **⚠️ ADVERSARIAL REVIEW CAUGHT A LIVE REGRESSION THE FULL GREEN GATE MISSED** — both prosecutors
+> found it independently. The (a) fix made `WireMemo` span modules, which silently invalidated
+> `try_wire_speculative`'s rollback: it undid `emitted` by `retain(|id, _| *id < mint_from)`, complete
+> only while every id had been minted by the current module's own walk. A DISCARDED speculative
+> attempt could mark an id minted in an earlier module (below the watermark → kept), so the module's
+> kept encoding emitted a `Backref` it never defined. `import k` / `H := (k, k.C.get)` / `GG := k.C.get`
+> → M:N **host panic** `CellLoad on a non-handle value` where `--serial` printed `7` and the pre-fix
+> binary printed `7`. Fixed with an `emit_undo` journal replayed on discard; fenced by
+> `airlock_discarded_wire_attempt_does_not_forge_a_backref` (verified to reproduce the panic with the
+> journal removed). Two secondary defects fixed too: `replay_snap`'s `Backref` miss set
+> `wire_backref_missing` with **no consumer** (leaked into the next unrelated `from_wire`'s
+> `debug_assert`), and `snapshot_rebuild` retained every identity-preserved node rather than just
+> cells, making the module-global graph immortal for the fiber's life.
+>
+> **Lesson — WIDENING A SCOPE breaks untouched code.** Same shape as
+> `lossy-decode-blinds-a-comparison-oracle`: when a change widens what a piece of state spans, every
+> existing consumer carries an unstated assumption about the old, narrower scope. Audit the state's
+> other readers IN THE SAME COMMIT (`cells`/`next_id`/`path`/`gens_on_stack` were fine; `emitted` was
+> not). 3830 green tests, a two-engine chz suite and a 1/2/4/8 thread sweep all missed it — no test
+> had a handle-bearing global positioned BEFORE a cross-module cell reference.
+>
 > **Two lessons, both about PRICING a filed residual.** (1) W7-4a's ceiling comment predicted delicate
 > rooting "across GC-visible points"; the `Vm`-lived map was needed, but the rooting is
 > **belt-and-braces** — the new test still passes with the `collect` root line deleted (measured),
@@ -50,7 +71,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 >
 > **Verified.** `airlock_cross_module_shared_binding_is_one_cell` + `airlock_handle_bearing_cell_keeps_one_binding`,
 > each on serial, M:N, and a MULTI-FILE gc-stress run (new `run_file_stress` — `run_capture_stress` is
-> single-source and cannot reach the lazy per-module fault path). `cargo test --lib` 3831 green; `chezzi
+> single-source and cannot reach the lazy per-module fault path). `cargo test --lib` 3832 green; `chezzi
 > test tests/chz/` 297/297 on both engines; 29-test `airlock_` panel green; thread sweep `1/2/4/8` × 25
 > runs, 0 wrong. **Perf**: the W7-4 snapshot stress (400 module-global closures × 1000 nurseries) main
 > 2.585 s → 2.573 s, flat. Full write-up: `docs/gaps.md` **§W7-4a/b** and **§W7-4c**.
