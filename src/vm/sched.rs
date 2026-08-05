@@ -4097,11 +4097,15 @@ impl Vm {
             Obj::Closure { proto, captured, home } => {
                 // Lever #3: positional captures — carry names from the proto in slot order. A recursive
                 // local `fn` (self-cell cycle) reaches this slow arm ONLY if it ALSO embeds a residual
-                // `Module`/`Native`/`Cffi` handle (else `to_wire` succeeds with no handle and it rides
-                // the SnapValue::Wire fast path with the Backref cycle encoding). In that residual-handle
-                // case the recursion below walks the self-cell to the shared `MAX_STRUCTURAL_DEPTH` cap
-                // and rejects cleanly (bounded, host-stack-safe) — identity preservation is a wire-only
-                // concern; the SnapValue slow arm carries no Backref encoding.
+                // `Module` handle (else `to_wire` succeeds with no handle and it rides the
+                // SnapValue::Wire fast path with the Backref cycle encoding; `Native`/`Cffi`/`Builtin`
+                // cross BY VALUE and never force this arm).
+                //
+                // W7-4b — that case used to walk the self-cell to `MAX_STRUCTURAL_DEPTH` and "reject
+                // cleanly", i.e. FAULT a program CPython runs (`m := k` + a recursive `down`, `41`).
+                // The `Obj::Cell` arm below now carries an id and emits `SnapValue::Backref` on the
+                // second reach, so the cycle terminates here exactly as it does on the wire path.
+                // Fenced by `airlock_handle_bearing_recursive_local_fn_round_trips`.
                 let names = &self.program.protos[proto].capture_names;
                 let mut snapped = Vec::with_capacity(captured.len());
                 for (i, cv) in captured.iter().enumerate() {

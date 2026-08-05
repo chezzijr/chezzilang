@@ -2,6 +2,59 @@
 
 Single source of truth for "what am I doing next." Update after every work session.
 
+> **✅ W7-4a + W7-4b FIXED, W7-4d CLOSED as not-a-bug, W7-4c RE-SCOPED (2026-08-05) — the module
+> SNAPSHOT path now keeps one cell per binding.** Two of W7-4's four shipped residuals were real
+> wrong-answer bugs, measured against paired reference programs:
+>
+> | repro | before | after | CPython | Go |
+> |---|---|---|---|---|
+> | **a** — `l.GI := k.C.inc` and `main.GG := k.C.get`, two globals in DIFFERENT modules over one cell | `0` | **`2`** | `2` | `2` |
+> | **b** — `p := [k]` (a captured local holding a module) reached by two sibling closures | `1` | **`3`** | `3` | — |
+>
+> Both are the documented sibling-sharing rule (`syntax.md` rule 2) failing *inside* one task — not F1
+> isolation, which only says the PARENT must not see the write, and still holds.
+> - **a** — `snapshot_modules` used one `WireMemo` **per module** and `fault_module` one rebuild map per
+>   module, so a cell reached from two modules got two ids and rebuilt twice. Now one memo spans the
+>   whole snapshot with only `emitted` cleared per module, which keeps each module **self-contained**
+>   (it re-emits a shared cell's full definition under the SAME id; `from_wire_memo` dedupes first-wins)
+>   — that is what makes LAZY fault order irrelevant and an untouched module free. The rebuild map moved
+>   to `Vm::snapshot_rebuild`, swapped with the view, rooted in `collect`/`root_ctx`.
+> - **b** — `SnapValue::Cell` carried no id. Now `Cell { id, inner }` + `Backref(id)`, minted from the
+>   same memo as the wire arms, so a binding reached down BOTH the fast and slow paths keeps one
+>   identity. A dangling `Backref` degrades to `nil` + `wire_backref_missing` (W7-11), never `.expect`.
+> - **A second, unplanned fix fell out of b**, verified against the pre-fix binary: a recursive local
+>   `fn` whose captures embed a module (`m := k` + `fn down(n): … return down(n-1)`) used to abort the
+>   spawn with `maximum structural depth (10000) exceeded (cyclic data structure?)` (rc=1) and now
+>   prints `41`, matching CPython. The wire path had round-tripped that cycle via `Backref` all along;
+>   only the snapshot path faulted, behind a comment claiming the depth-cap walk "rejects cleanly".
+>   **A tidy error message is not evidence the reject is right.** Fenced by
+>   `airlock_handle_bearing_recursive_local_fn_round_trips`.
+> - **d** — CLOSED as resolved-by-design. An `RwShared` copy-out view is per-piece: two `at()` calls ARE
+>   two crossings. `get()`/`read()`/`slice` are one crossing and already share.
+> - **c** — STILL OPEN, and **not** the same family as a. Attempted and stopped at a pre-declared stop
+>   condition: `deep_clone_all` runs at `sched.rs:111`/`:192`, *before* `register_task`'s
+>   `ensure_snapshot` at `:228`, so the first spawn of a view clones its cells before any snapshot id
+>   exists — the side table the a-fix suggests is empty exactly when needed. Closing it needs the W6-2
+>   pin instant hoisted ahead of the clone (an observable fault-ordering change), a monotonic id counter
+>   so a mid-nursery re-snapshot degrades instead of colliding, and a per-task clone-id carry through
+>   `QueuedTask`/`prepare_worker`/`prepare_serial_child`/`lower_task`.
+>
+> **Two lessons, both about PRICING a filed residual.** (1) W7-4a's ceiling comment predicted delicate
+> rooting "across GC-visible points"; the `Vm`-lived map was needed, but the rooting is
+> **belt-and-braces** — the new test still passes with the `collect` root line deleted (measured),
+> because every entry is also reachable from the global it was `module_define`d into. (2) W7-4b's filed
+> premise had gone **stale**: it named `Module`/`Native`/`Cffi`, but `Native`/`Cffi` cross by value now,
+> so only `Obj::Module` forces that arm — and the code calls that "source-unreachable, defensive only",
+> which reads as unpriceable. It is reachable (`m := k` binds a module to a local). **Re-derive a
+> residual's premise against today's code before trusting its price tag.**
+>
+> **Verified.** `airlock_cross_module_shared_binding_is_one_cell` + `airlock_handle_bearing_cell_keeps_one_binding`,
+> each on serial, M:N, and a MULTI-FILE gc-stress run (new `run_file_stress` — `run_capture_stress` is
+> single-source and cannot reach the lazy per-module fault path). `cargo test --lib` 3831 green; `chezzi
+> test tests/chz/` 297/297 on both engines; 29-test `airlock_` panel green; thread sweep `1/2/4/8` × 25
+> runs, 0 wrong. **Perf**: the W7-4 snapshot stress (400 module-global closures × 1000 nurseries) main
+> 2.585 s → 2.573 s, flat. Full write-up: `docs/gaps.md` **§W7-4a/b** and **§W7-4c**.
+
 > **✅ W7-21 FIXED 2026-08-05 — a module global that HOLDS a function is now callable through the
 > module.** `BARE := k.one` in `l.chz`, then `l.BARE()` in an importer: `type error (line 3, col 6):
 > module 'l' has no member 'BARE'` (rc=1) → **`ok`, prints `1`** on M:N, `--threads=1` and `--serial`.

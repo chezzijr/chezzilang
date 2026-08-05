@@ -14364,6 +14364,57 @@ main()
     assert_eq!(stress_out, "3\n", "…and under GC stress");
 }
 
+/// W7-4b's second, unplanned fix — a RECURSIVE local `fn` whose captures embed a module used to abort
+/// the whole spawn with `maximum structural depth (10000) exceeded (cyclic data structure?)`. The
+/// self-cell cycle only reaches the `SnapValue` slow arm when the closure ALSO holds a handle, and
+/// that arm had no `Backref`, so the walk ran the cycle to the shared depth cap and "rejected
+/// cleanly" — a fault on a program CPython runs fine (`m = bk` + the same recursive `down`, printing
+/// `41`). Giving `SnapValue` the id/`Backref` encoding terminates the walk the way the wire path
+/// always did. Measured on the pre-fix binary (rc=1) and post-fix (`41`, both engines).
+#[test]
+fn airlock_handle_bearing_recursive_local_fn_round_trips() {
+    let dir = std::env::temp_dir().join(format!("chezzi_vm_w74b_cyc_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("k.chz"), "V := 41\n").unwrap();
+    let entry = dir.join("main.chz");
+    std::fs::write(
+        &entry,
+        "\
+import k
+fn make() -> fn(int) -> int:
+    m := k
+    fn down(n: int) -> int:
+        if n <= 0:
+            return m.V
+        return down(n - 1)
+    return down
+G := make()
+fn main():
+    r := Channel[int]()
+    parallel:
+        spawn:
+            r.send(G(3))
+    print(r.recv())
+main()
+",
+    )
+    .unwrap();
+    let (vm_out, _e, vm_res, _) = run_file(&entry);
+    let (par_out, _pe, par_res, _) =
+        run_file_parallel(&entry, crate::native::HostConfig::default());
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        vm_res.is_ok(),
+        "serial faulted (depth cap is back?): {vm_res:?}"
+    );
+    assert!(
+        par_res.is_ok(),
+        "M:N faulted (depth cap is back?): {par_res:?}"
+    );
+    assert_eq!(vm_out, "41\n");
+    assert_eq!(par_out, "41\n");
+}
+
 /// Control (regression lock, rc=0) — the SAME recursive `fn` HOISTED to module scope IS sendable: it
 /// crosses as `Obj::Func` (no captures; recursion resolves via its home-global slot), never entering
 /// the `Obj::Closure` serialization arm, so the new self-ref diagnostic never fires and the send works.

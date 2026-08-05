@@ -75,10 +75,10 @@ chronological log.
 | ~~**W7-15**~~ | `:5142` | **FIXED 2026-08-04**, found while measuring `W7-12r` and previously unfiled. `main` blocking on a channel an eager `Executor` job was about to fill FAULTED `recv on an empty channel: deadlock` where Go and CPython both print the value — a WRONG ANSWER, not a hang, on a three-line program. Cause: `chan_recv_step`'s "I have no scheduler ⇒ nobody can ever send" `else` arm, the stale premise `future.md` §2d names, which stopped being true when eager execution put running jobs outside every scheduler. `main` now blocks like any other counted party | — |
 | ~~**W7-12r**~~ | `:4442` | **FIXED 2026-08-04** by the process-wide quiescence detector (`src/vm/quiesce.rs`, `future.md` §2d **step 0**), which DELETED W7-12's per-executor predicate whole. All three residuals close — (a) two blocked jobs in one executor, (b) two executors deadlocking each other, and (c) a blocked job with no explicit `shutdown()` all fault in <10 ms where they hung forever. The same change fixed an unfiled WRONG ANSWER found while measuring them (`W7-15`, below): `main` blocking on a channel an eager job was about to fill used to fault. Kept for the lessons | Three, all about *when* a verdict may be formed. (1) The verdict must be ONE observation — a first cut cloned the party list and released the lock before reading channels, and reported a producer and consumer parked on channels that were never both empty at any single instant. (2) A party must not stay registered across its own retry: `pop()` and un-registering are not atomic, so it reads as parked at the instant it made progress (both caught by the existing 300-handoff `wait:` fence, not by reasoning). (3) SATISFIABILITY ("is this wait already over?") is what replaced the debounce — a direct question, where "has nothing moved recently?" was a guess that faulted a healthy cap-1 pipeline 6/40 runs |
 | ~~**W7-11**~~ | `:4771` | **FIXED 2026-08-04** by the same-guard whole-container fallback (`Vm::from_wire_piece`), plus `at(i) -> Option[E]`. A dangling `Backref` no longer `.expect`s: it flags, and the view re-rebuilds the whole container and returns the piece by its wire id, so the cycle survives — CPython's measured answer. Kept for the two lessons: the W7-4 round-2 rejection of "rebuild the whole container" did **not** transfer (it fired on EVERY piece and re-read the box under a SECOND guard; this fires only on a dangling backref and borrows the caller's guard), and the `.expect` was reachable from a legal single-threaded program for months because no test ran a cyclic value THROUGH a copy-out view | — |
-| **W7-4a** | `:3901` | Airlock cell identity is preserved **per module** in the snapshot, so two globals in DIFFERENT modules over one shared cell still arrive as two cells | Residual disclosed by the W7-4 fix. Closing it needs `Vm`-lived rebuild state kept (and rooted) across the lazy per-module faults; the reported repro is same-module and is fixed |
-| **W7-4b** | `:3901` | A cell whose inner value carries a residual `Module`/`Native`/`Cffi` handle falls to `SnapValue::Cell`, which has no `Backref` encoding, so its identity is not preserved across a module snapshot | Residual disclosed by the W7-4 fix, and the same limit the `SnapValue::Closure` slow arm already documents. Closing it is a snapshot FORMAT change (id/`Backref` arms on `SnapValue`), out of proportion to a residual this narrow |
-| **W7-4c** | `:3901` | ONE TASK reached through TWO serializations still gets two bindings: a `spawn:` block's captures and the module-global snapshot cross into the same task but are separate memos, rebuilt at different times (the snapshot faults in lazily) | Residual disclosed by the W7-4 fix; same family as W7-4a. Closing it needs `Vm`-lived rebuild state across GC-visible points. Fenced by `module_global_plus_local_capture_still_split` and stated in `syntax.md` rule 2 |
-| **W7-4d** | `:3901` | An `RwShared` COPY-OUT VIEW (`at`/`for_each`/`fold`/`get_key`/`has`/`for_each_entry`/`fold_entries`) rebuilds one piece per step, so two sibling closures pulled out separately do not share their binding | Inherent to a copy-out API — two `at()` calls are two crossings. A whole `get()`/`read()`, and `slice`, are one crossing and DO share. Not a residual of the fix, documented in `concurrency.md` §airlock |
+| ~~**W7-4a**~~ | `:3901` | **FIXED 2026-08-05.** Cell identity was per MODULE in the snapshot, so two globals in DIFFERENT modules over one shared cell arrived as two cells and a task's write through one was invisible to the other: `0`, where CPython (`import pk, pl` + a thread) and Go (two packages + a goroutine) both **measure `2`**. Fixed by one `WireMemo` spanning the whole snapshot (`emitted` cleared per module so each stays self-contained under lazy fault order) + one `Vm`-lived rebuild map (`Vm::snapshot_rebuild`), rooted and swapped with the view | Kept for the lesson: the ceiling comment predicted this would need rooted state "across GC-visible points", and the rooting turned out to be **belt-and-braces** — the test still passes with the `collect` root line deleted, because every entry is also reachable from the global it was just `module_define`d into. Predicted cost ≠ measured cost |
+| ~~**W7-4b**~~ | `:3901` | **FIXED 2026-08-05.** A cell reaching the `SnapValue::Cell` slow arm carried no id, so its binding split: `p := [k]` (a captured local holding a module) read `1` where CPython **measures `3`**. Fixed by giving `SnapValue` the same `Cell { id, inner }` / `Backref(id)` encoding the wire arms have, minted from the SAME memo and drained by the same rebuild map | The filed premise was **stale**: `Native`/`Cffi` cross BY VALUE now, so they never force the slow arm — only `Obj::Module` does (`has_handle` = `WireValue::Handle` = `Obj::Module` alone). The code called that "source-unreachable, defensive only", but a module IS bindable to a local (`m := k`), so a cell over `[k]` reaches it. **Re-derive a residual's premise before pricing it**; the "snapshot FORMAT change, out of proportion" estimate was for a residual that had drifted |
+| **W7-4c** | `:3901` | ONE TASK reached through TWO serializations still gets two bindings: a `spawn:` block's captures and the module-global snapshot cross into the same task but are separate memos, rebuilt at different times (the snapshot faults in lazily). `0`, where CPython **measures `2`** | **RE-SCOPED 2026-08-05** after an attempt (see §W7-4c below). NOT the same family as W7-4a: the block's captures are DEEP-CLONED into fresh parent-heap cells at spawn time, *before* the snapshot that would give them ids exists, so the rebuild map alone cannot close it. Four mechanisms, one of which moves the W6-2 pin instant. Fenced by `module_global_plus_local_capture_still_split` and stated in `syntax.md` rule 2 |
+| ~~**W7-4d**~~ | `:3901` | **CLOSED 2026-08-05 as NOT-A-BUG (resolved by design).** An `RwShared` COPY-OUT VIEW (`at`/`for_each`/`fold`/`get_key`/`has`/`for_each_entry`/`fold_entries`) rebuilds one piece per step, so two sibling closures pulled out separately do not share their binding | Inherent to a copy-out API — two `at()` calls ARE two crossings, and identity is per crossing by definition. A whole `get()`/`read()`, and `slice` (one call returning a container), are one crossing and DO share. Never a residual of the fix; "fixing" it would reopen the round-2 O(n²) + concurrent-`set` hazard. Documented in `concurrency.md` §airlock |
 
 **Known limits that are documented, not bugs** (listed so they aren't re-filed): `Iterable[T]` element
 recovery does not fire for a struct with only `iter` and no `next` **in BOUND position** — bound that
@@ -4109,28 +4109,146 @@ sibling-binding closures main 0.011 s → round-2 branch 3.7 s → 0.012 s; snap
 module-global closures over distinct cells × 1000 nurseries) main 1.084 s → memo-clone 1.243 s (+15%)
 → rollback 1.110 s (+2.4% vs main).
 
-**Residual ceilings, shipped as documented known limits** (`ponytail:` comments at the sites). All the
-same shape — TWO INDEPENDENT SERIALIZATIONS reach one cell; identity is per serialization:
-- **W7-4a** — cell identity is **per module** in the snapshot: two globals in DIFFERENT modules over one
-  shared cell still split. Closing it needs `Vm`-lived rebuild state kept across the lazy per-module
-  faults (and rooted); the repro is same-module.
-- **W7-4b** — a cell whose own inner value carries a residual `Module`/`Native`/`Cffi` handle falls to
-  the `SnapValue::Cell` slow arm, which has no id/`Backref` encoding, so identity there stays wire-only
-  (the same limit the `SnapValue::Closure` slow arm already documents). Closing it is a snapshot FORMAT
-  change, out of proportion to a residual this narrow.
-- **W7-4c** — ONE TASK reached through TWO serializations still gets two bindings: a `spawn:` block's
-  captures and the module-global snapshot cross into the same task at the same instant, but are
-  separate memos rebuilt at DIFFERENT times (the snapshot faults in lazily on the task's first module
-  access), so their rebuild maps cannot be unified without `Vm`-lived state across GC-visible points.
-  `c := make()` at module level with `gi := c.inc` a global and `gg := c.get` a local captured by the
-  block reads `0`, not `2`. Same family as W7-4a; fenced by
-  `module_global_plus_local_capture_still_split` and stated in `docs/syntax.md` rule 2 +
-  `docs/concurrency.md` §airlock.
-- **W7-4d** — an `RwShared` COPY-OUT VIEW is per-piece independent: `at`/`for_each`/`fold`/`get_key`/
-  `has`/`for_each_entry`/`fold_entries` rebuild one piece per step, so two sibling closures pulled out
-  separately do not share their binding (two `at()` calls are two crossings — they never could). A
-  whole-container `get()`/`read()`, and `slice` (one call returning a container), ARE one crossing and
-  do share. Inherent to a copy-out API, not a residual of the fix.
+**Residual ceilings** — all the same shape: TWO INDEPENDENT SERIALIZATIONS reach one cell; identity is
+per serialization. **Three of the four are now resolved (2026-08-05)** — see
+[§W7-4a/b — the snapshot path](#w7-4ab--the-module-snapshot-path-keeps-one-cell-per-binding-fixed-2026-08-05)
+and [§W7-4c](#w7-4c--a-tasks-own-captures-and-its-module-snapshot-are-still-two-crossings-re-scoped-2026-08-05):
+- ~~**W7-4a**~~ — **FIXED**: one `WireMemo` spans the whole snapshot and one `Vm`-lived rebuild map
+  (`Vm::snapshot_rebuild`) spans every lazy module fault, so two globals in DIFFERENT modules over one
+  shared cell arrive as one cell. `0` → `2`, matching CPython and Go.
+- ~~**W7-4b**~~ — **FIXED**: `SnapValue` gained `Cell { id, inner }` + `Backref(id)`, minted from the
+  same memo and drained by the same rebuild map, so a cell on the snapshot SLOW arm keeps its identity
+  too. `1` → `3`, matching CPython. (The filed premise was stale — `Native`/`Cffi` cross by value now,
+  so only `Obj::Module` still forces that arm.)
+- **W7-4c** — **STILL OPEN, re-scoped**: ONE TASK reached through TWO serializations still gets two
+  bindings. `c := make()` at module level with `gi := c.inc` a global and `gg := c.get` a local captured
+  by a `spawn:` block reads `0`, not `2`. NOT the same family as W7-4a — see the section below for the
+  two measured blockers. Fenced by `module_global_plus_local_capture_still_split` and stated in
+  `docs/syntax.md` rule 2 + `docs/concurrency.md` §airlock.
+- ~~**W7-4d**~~ — **CLOSED as not-a-bug**: an `RwShared` COPY-OUT VIEW is per-piece independent:
+  `at`/`for_each`/`fold`/`get_key`/`has`/`for_each_entry`/`fold_entries` rebuild one piece per step, so
+  two sibling closures pulled out separately do not share their binding (two `at()` calls ARE two
+  crossings — they never could). A whole-container `get()`/`read()`, and `slice` (one call returning a
+  container), ARE one crossing and do share. Inherent to a copy-out API, never a residual of the fix.
+
+### W7-4a/b — the module-snapshot path keeps one cell per binding (**FIXED 2026-08-05**)
+
+```chezzi
+# k.chz                       # l.chz            # main.chz
+struct Ctr:                   import k           import k
+    inc: fn() -> nil          GI := k.C.inc      import l
+    get: fn() -> int                             GG := k.C.get
+fn make() -> Ctr:                                fn main():
+    n := 0                                           r := Channel[int]()
+    fn inc():                                        parallel:
+        n = n + 1                                        spawn:
+    fn get() -> int:                                         l.GI()
+        return n                                             l.GI()
+    return Ctr(inc, get)                                     r.send(GG())
+C := make()                                          print(r.recv())   # was 0 — EXPECTED 2
+```
+
+| | Chezzi (before) | Chezzi (after) | CPython | Go |
+|---|---|---|---|---|
+| **a** — cross-module globals over one cell | `0` | **`2`** | `2` | `2` |
+| **b** — `p := [k]` (a cell holding a module) | `1` | **`3`** | `3` | — |
+
+The references are paired programs, not reasoning: CPython `pk.py`/`pl.py`/`pmain.py` with
+`threading.Thread`, and Go packages `k`/`l` + `main` with a goroutine. Both share the binding, so
+Chezzi's split was drift, not F1 isolation — F1 says the PARENT must not see the task's write, and it
+still does not.
+
+**Root cause (a)** — `snapshot_modules` built one `WireMemo` **per module**, and `fault_module` one
+rebuild map **per module**. A cell reached from globals in two modules therefore got a fresh id in each
+and rebuilt twice. **Fix**: hoist the memo out of the loop (`cells`/`next_id` persist) and clear only
+`emitted` per module, so every module stays **self-contained** — it re-emits a shared cell's FULL
+definition under the SAME id and `from_wire_memo`'s first-wins dedupe ties the second to the first.
+That is what makes LAZY fault order irrelevant, and a module the task never touches free. The cost is
+wire size, only for a cell reached from 2+ modules — the same trade `elem_split` already makes for
+`RwShared` stores. The rebuild map moved to `Vm::snapshot_rebuild`, swapped with the view and rooted.
+
+**Root cause (b)** — `SnapValue::Cell` carried no id. **Fix**: `Cell { id, inner }` + `Backref(id)`,
+minted from the same shared `WireMemo` as the wire arms, so a binding reached down BOTH the fast
+(`SnapValue::Wire(WireValue::Cell)`) and slow (`SnapValue::Cell`) paths keeps one identity; `replay_snap`
+dedupes first-wins into the same map `from_wire_memo` uses. A dangling `Backref` degrades to `nil` and
+flags `wire_backref_missing` (W7-11's soft miss), never an `.expect`.
+
+**A SECOND fix fell out of (b), unplanned and verified against the pre-fix binary.** A recursive local
+`fn` whose captures embed a module used to abort the whole spawn:
+
+```chezzi
+import k                      # k.chz: V := 41
+fn make() -> fn(int) -> int:
+    m := k                    # a captured local holding a MODULE → the closure fails the fast lane
+    fn down(n: int) -> int:   # …and `down` captures its own cell → a self-cell CYCLE on the slow arm
+        if n <= 0:
+            return m.V
+        return down(n - 1)
+    return down
+G := make()
+# spawn: r.send(G(3))
+#   before → runtime error: maximum structural depth (10000) exceeded (cyclic data structure?)  [rc=1]
+#   after  → 41          CPython (`m = bk` + the same recursive `down`) → 41
+```
+The `Obj::Closure` slow arm's comment said the depth-cap walk "rejects cleanly … identity preservation
+is a wire-only concern". Clean it was; correct it was not — the wire path had round-tripped that exact
+cycle for a year via `Backref`, and only the snapshot path faulted. Giving `SnapValue::Cell` an id
+terminates the walk at the second reach, so the two paths agree. Fenced by
+`airlock_handle_bearing_recursive_local_fn_round_trips`. **A "clean reject" note is not evidence the
+reject is right** — this one was a `to_wire`-vs-`to_snap` divergence hiding behind a tidy error
+message, in the same family as `docs/gaps.md` W7-12's "correctness outranks engine agreement".
+
+**Two lessons, both about PRICING a filed residual:**
+1. **The predicted cost was wrong in the expensive direction.** W7-4a's ceiling comment said closing it
+   needs `Vm`-lived rebuild state "kept across GC-visible points" — implying delicate rooting. It does
+   need the `Vm`-lived map, but the rooting turned out to be **belt-and-braces**:
+   `airlock_cross_module_shared_binding_is_one_cell` still passes with the `collect` root line deleted
+   (measured), because every entry is also reachable from the global it was just `module_define`d into.
+   The root line is kept anyway — cheap, and the map now outlives a single fault.
+2. **W7-4b's premise had gone stale under it.** It was filed as "a residual `Module`/`Native`/`Cffi`
+   handle", but `Native`/`Cffi` cross BY VALUE now — only `Obj::Module` still sets `has_handle`, and the
+   code calls that "source-unreachable, defensive only". That reads as unreachable, so the residual
+   looks unpriceable. It is reachable: a module IS bindable to a local (`m := k`), so a cell over `[k]`
+   lands on the slow arm from ordinary source. **Re-derive a residual's premise against today's code
+   before trusting its price tag.**
+
+**Verified.** `airlock_cross_module_shared_binding_is_one_cell` + `airlock_handle_bearing_cell_keeps_one_binding`
+(each: serial, M:N, and a MULTI-FILE gc-stress run via the new `run_file_stress` — `run_capture_stress`
+is single-source and cannot reach the lazy per-module fault path). Full `cargo test --lib` 3831 green;
+`chezzi test tests/chz/` 297/297 on both engines; the 29-test `airlock_` panel green; thread sweep
+`1/2/4/8` × 25 runs on the cross-module repro, 0 wrong. **Perf** — the W7-4 snapshot stress (400
+module-global closures over distinct cells × 1000 nurseries) main 2.585 s → 2.573 s (flat, within run
+noise of ±0.06 s).
+
+### W7-4c — a task's own captures and its module snapshot are still two crossings (**RE-SCOPED 2026-08-05**)
+
+Attempted right after W7-4a/b, on the theory in the a-fix ("same family — one more `Vm`-lived map").
+**It is not the same family**, and the attempt was stopped at a pre-declared stop condition rather than
+grown. What the trace actually shows:
+
+```
+parent cell N --deep_clone_all--> N' (parent heap) --lower_task--> wire id --rebuild_ready--> N''  (worker)
+parent cell N --to_snap--------------------------> snapshot id X ------------> fault_module --> N''' (worker)
+```
+
+`N''` and `N'''` must be one cell. Two measured blockers:
+
+1. **The clone happens before the snapshot exists.** `do_spawn`/`do_spawn_block` call `deep_clone_all`
+   (`sched.rs:111` / `:192`) and only THEN `register_task` (`:131` / `:198`), which is where
+   `ensure_snapshot` runs (`:228`). So on the first spawn of a view there are no snapshot ids to seed
+   the clone from — the side table the a-fix suggests is empty exactly when it is needed. Closing this
+   means hoisting the **W6-2 pin instant** ahead of the clone, which reorders an `ensure_snapshot`
+   fault against `deep_clone_all`'s crossability faults — observable, and the codebase already treats
+   that ordering as load-bearing (`do_spawn`'s "ARGS FIRST, receiver/callee LAST" note).
+2. **A re-snapshot mid-nursery renumbers.** `snapshot_memo` drops on any module-slot write, so a second
+   spawn in the same nursery can be numbered against a fresh snapshot while the first task still holds
+   ids from the old one. Survivable only with a VM-monotonic id counter (so a stale id MISSES and the
+   task degrades to today's behavior instead of colliding into a WRONG shared cell) — a third
+   mechanism, on top of the per-task clone-id carry that has to be threaded through
+   `QueuedTask`/`prepare_worker`/`prepare_serial_child`/`lower_task`.
+
+Four mechanisms, one of which moves a documented invariant. Re-filed rather than rushed; the fence
+`module_global_plus_local_capture_still_split` still asserts `0` and must flip to `2` when this lands.
 
 ## Session log — 2026-07-28 (bug-hunt wave 7 — the P2 tier: 3 findings; ALL THREE FIXED — W7-9 + W7-10 2026-07-30, W7-8 2026-07-31)
 

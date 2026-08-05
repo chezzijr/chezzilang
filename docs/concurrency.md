@@ -1102,17 +1102,15 @@ was retired when module globals started deep-copying per task on both engines.)
   task (Go behaves the same). Data aliasing keeps the deep-copy-independence contract unchanged: only
   `Obj::Cell` uses the persistent memo, every container and the closure VALUES themselves still pop on DFS
   exit. One serialization spans everything that crosses together — a `spawn`'s callee/receiver + all args,
-  a `spawn:` block's captures, and one module's globals in the snapshot.
+  a `spawn:` block's captures, and **the whole module snapshot** (every module, not one: W7-4a).
 
   **Known ceilings** — all of the shape "two *independent* serializations reach the same cell", which is
   exactly where identity stops:
   - **One task, two serializations.** A `spawn:` block's captures and the module-global snapshot cross
-    into the same task at the same instant but are serialized separately (per-task memo vs per-module
-    memo, and the snapshot is rebuilt LAZILY on the task's first module access, so the two rebuild maps
-    cannot be unified without `Vm`-lived state across GC-visible points). So a module global and a
-    captured local over one factory-local cell still split inside one task.
-  - **Cross-module.** Cell identity is per-module in the module snapshot: two globals in *different*
-    modules over one cell still split.
+    into the same task at the same instant but are serialized separately: the block's captures are
+    deep-copied into fresh cells at the `spawn`, *before* the snapshot that would give them a shared id
+    is built. So a module global and a captured local over one factory-local cell still split inside one
+    task (`gaps.md` W7-4c).
   - **`RwShared` copy-out views.** `at`/`for_each`/`fold`/`get_key`/`has`/`for_each_entry`/
     `fold_entries` rebuild ONE piece of the stored container per step, so each piece is an independent
     copy of the binding — two `at()` calls are two crossings and can never share. A whole-container
