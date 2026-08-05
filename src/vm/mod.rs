@@ -1453,9 +1453,21 @@ enum SnapValue {
         inner: Box<SnapValue>,
     },
     /// An `Obj::Cell` (a by-reference-captured local's box) embedding a handle — its inner snapped
-    /// recursively, replayed as a FRESH independent cell on the worker (design §4 F1). A pure-data
-    /// cell takes the `to_wire` fast path above (`SnapValue::Wire(WireValue::Cell { .. })`).
-    Cell(Box<SnapValue>),
+    /// recursively, replayed as ONE independent cell per BINDING on the worker (design §4 F1). A
+    /// pure-data cell takes the `to_wire` fast path above (`SnapValue::Wire(WireValue::Cell { .. })`).
+    ///
+    /// W7-4b — `id` is minted from the SAME [`WireMemo`] the wire arms use, so a binding reached down
+    /// both the fast (`Wire`) and slow (here) paths keeps one identity. A second reach emits
+    /// [`Backref`](SnapValue::Backref); `replay_snap` dedupes first-wins by id.
+    Cell {
+        id: u32,
+        inner: Box<SnapValue>,
+    },
+    /// W7-4b — a second reach of an already-emitted `Cell` id (an off-stack sibling closure, or a
+    /// letrec back-edge). The wire mirror of [`WireValue::Backref`], and it degrades the same way: an
+    /// id the rebuild map has never seen resolves to `nil` and flags `wire_backref_missing` rather
+    /// than aborting the host (W7-11).
+    Backref(u32),
     /// `(cached hash, key, value)` triples — hashes are value-derived, so they carry over unchanged.
     Map(Vec<(u64, SnapValue, SnapValue)>),
     /// `(cached hash, element)` pairs.

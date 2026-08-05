@@ -4247,15 +4247,35 @@ impl Vm {
                     .unwrap_or(WireValue::Nil),
             ),
             // A `Cell` embedding a handle snaps like a 1-field box (its inner recursively snapped) —
-            // replayed as a FRESH independent cell (design §4 F1). A pure-data cell took the `to_wire`
-            // fast path above (`WireValue::Cell`).
-            // ponytail: KNOWN CEILING — `SnapValue::Cell` carries no id/`Backref` encoding, so a cell
-            // whose own inner value still holds a residual `Module`/`Native`/`Cffi` handle is NOT
-            // identity-preserved across a module snapshot (W7-4 identity is wire-only, same limit the
-            // `Obj::Closure` slow arm already documents). Upgrade path if it ever bites: give
-            // `SnapValue` its own id/`Backref` arms — a snapshot FORMAT change, out of proportion to a
-            // residual this narrow.
-            Obj::Cell(v) => SnapValue::Cell(Box::new(self.to_snap_depth(v, depth + 1, memo)?)),
+            // replayed as ONE independent cell per BINDING (design §4 F1). A pure-data cell took the
+            // `to_wire` fast path above (`WireValue::Cell`).
+            //
+            // W7-4b — the id/`Backref` dance is the SAME as `to_wire_depth`'s `Obj::Cell` arm and
+            // shares its memo, so a cell reached twice (two sibling closures, or a letrec back-edge)
+            // rebuilds once whichever path each reference travelled. Only `Obj::Module` forces this
+            // slow arm today (`has_handle`; `Native`/`Cffi`/`Builtin` all cross by value), and it is
+            // source-reachable: `p := [k]` captured by two closures over one binding read `1` where
+            // CPython measures `3`.
+            Obj::Cell(v) => {
+                let id = match memo.cells.get(&h) {
+                    Some(&id) => id,
+                    None => {
+                        let id = memo.next_id;
+                        memo.next_id += 1;
+                        memo.cells.insert(h, id);
+                        id
+                    }
+                };
+                if memo.emitted.get(&id) == Some(&memo.elem_gen) {
+                    SnapValue::Backref(id)
+                } else {
+                    memo.emitted.insert(id, memo.elem_gen);
+                    SnapValue::Cell {
+                        id,
+                        inner: Box::new(self.to_snap_depth(v, depth + 1, memo)?),
+                    }
+                }
+            }
             // A cursor snapshots like a `List`: its items (recursively snapped) + `pos`. Only a
             // handle-bearing cursor reaches here; a pure-data cursor took the `to_wire` fast path.
             Obj::Iter { items, pos } => {
@@ -4459,11 +4479,30 @@ impl Vm {
                     inner,
                 }))
             }
-            // Rebuild a FRESH independent cell on the worker (deep copy, never shared) — design §4 F1.
-            SnapValue::Cell(inner) => {
+            // Rebuild ONE independent cell per binding on the worker (deep copy, never shared with the
+            // parent) — design §4 F1. W7-4b: mirrors `from_wire_memo`'s `Cell` arm exactly — first-wins
+            // dedupe by id (so a repeated definition from another module ties to the cell already
+            // built), and the placeholder is registered BEFORE recursing so a cycle through this cell
+            // resolves to it instead of recursing forever.
+            SnapValue::Cell { id, inner } => {
+                if let Some(&prev) = rb.get(id) {
+                    return Value::obj(prev);
+                }
+                let h = self.heap.alloc(Obj::Cell(Value::nil()));
+                rb.insert(*id, h);
                 let inner = self.replay_snap(inner, rb);
-                Value::obj(self.heap.alloc(Obj::Cell(inner)))
+                *self.heap.get_mut(h) = Obj::Cell(inner);
+                Value::obj(h)
             }
+            // W7-4b — the far side of a second reach. A miss is a memo-scope bug, not a program error:
+            // degrade to `nil` and flag it (W7-11) rather than aborting the host.
+            SnapValue::Backref(id) => match rb.get(id) {
+                Some(&h) => Value::obj(h),
+                None => {
+                    self.wire_backref_missing = true;
+                    Value::nil()
+                }
+            },
             SnapValue::Map(entries) => {
                 let mut out = MapData::default();
                 for (hash, k, val) in entries {

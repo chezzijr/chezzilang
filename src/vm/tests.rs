@@ -14307,6 +14307,63 @@ main()
     );
 }
 
+/// W7-4b — cell identity on the SNAPSHOT SLOW ARM. `p := [k]` holds a module, so the whole global
+/// fails `to_snap`'s `!has_handle()` fast lane (only `Obj::Module` still forces this — `Native`/
+/// `Cffi`/`Builtin` all cross by value now) and its cell lands in `SnapValue::Cell`, which carried no
+/// id: the two sibling closures rebuilt two cells and `GC()` read `1` where CPython (`p = [bk]` +
+/// `threading.Thread`) measures `3`. Fixed by giving `SnapValue` the same id/`Backref` encoding the
+/// wire arms have, drained by the same rebuild map.
+#[test]
+fn airlock_handle_bearing_cell_keeps_one_binding() {
+    let dir = std::env::temp_dir().join(format!("chezzi_vm_w74b_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("k.chz"), "V := 41\n").unwrap();
+    let entry = dir.join("main.chz");
+    std::fs::write(
+        &entry,
+        "\
+import k
+struct Sw:
+    add: fn() -> nil
+    count: fn() -> int
+fn make() -> Sw:
+    p := [k]
+    fn add():
+        p = p + [k]
+    fn count() -> int:
+        return p.len()
+    return Sw(add, count)
+C := make()
+GA := C.add
+GC := C.count
+fn main():
+    r := Channel[int]()
+    parallel:
+        spawn:
+            GA()
+            GA()
+            r.send(GC())
+    print(r.recv())
+main()
+",
+    )
+    .unwrap();
+    let (vm_out, _e, vm_res, _) = run_file(&entry);
+    let (par_out, _pe, par_res, _) =
+        run_file_parallel(&entry, crate::native::HostConfig::default());
+    let (stress_out, _se, stress_res, _) = run_file_stress(&entry, true);
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(vm_res.is_ok(), "serial faulted: {vm_res:?}");
+    assert!(par_res.is_ok(), "M:N faulted: {par_res:?}");
+    assert!(stress_res.is_ok(), "gc-stress faulted: {stress_res:?}");
+    assert_eq!(
+        vm_out, "3\n",
+        "a handle-bearing cell split its binding on the snapshot slow arm"
+    );
+    assert_eq!(par_out, "3\n", "…and on M:N");
+    assert_eq!(stress_out, "3\n", "…and under GC stress");
+}
+
 /// Control (regression lock, rc=0) — the SAME recursive `fn` HOISTED to module scope IS sendable: it
 /// crosses as `Obj::Func` (no captures; recursion resolves via its home-global slot), never entering
 /// the `Obj::Closure` serialization arm, so the new self-ref diagnostic never fires and the send works.
