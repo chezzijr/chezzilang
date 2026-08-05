@@ -352,7 +352,7 @@ impl Vm {
                 // handshake settles. net targets `--parallel`.
                 Ok((stream, true)) => {
                     if self.mn.is_some() && self.native_reentry == 0 {
-                        self.park_on_connect(stream);
+                        self.park_on_connect(stream, span);
                         Ok(Value::nil()) // parked sentinel; `poll_park` gates the result-push at `do_call`
                     } else if self.mn.is_some() {
                         // `native_reentry > 0` — a `connect` reached inside a native callback (operator
@@ -366,7 +366,18 @@ impl Vm {
                         // Top-level / cooperative: no fiber to park, so block (bounded) until the
                         // handshake settles. net targets `--parallel`; this keeps a top-level
                         // `net.connect` usable as the v1 fallback.
-                        Ok(self.block_until_connected(stream))
+                        let v = self.block_until_connected(stream);
+                        // W7-18 — the spin above is bounded by the run deadline, but it can only END
+                        // the spin: it returns a `Value`, so a `--timeout` expiry would come back as a
+                        // CATCHABLE `Err("connect failed: timed out")` and the test would carry on to
+                        // report PASS/FAIL instead of TIMED-OUT — a `--timeout` that `recover:` can
+                        // swallow, which is exactly what the hard-abort contract forbids. Raise it
+                        // here, where the call still has a `Result` to fault through. The test BODY is
+                        // this path (`mn` is set only on worker shells), and it is straight-line code:
+                        // `jump_checked`'s back-edge is the sole generic checkpoint and a body with no
+                        // loop never reaches one.
+                        self.deadline_halt(span)?;
+                        Ok(v)
                     }
                 }
                 Err(e) => Ok(self.sock_err(format!("{addr}: {e}"))),
@@ -422,7 +433,7 @@ impl Vm {
     /// park there is NO `ip` rewind — `net.connect`'s call site already popped its args and pushed
     /// nothing (`do_call` saw `paused()`), so on resume [`Vm::run_one_fiber`] finishes the connect and
     /// pushes the `Socket` exactly where the call would have, and execution continues past the call.
-    pub(super) fn park_on_connect(&mut self, stream: std::net::TcpStream) {
+    pub(super) fn park_on_connect(&mut self, stream: std::net::TcpStream, span: Span) {
         let key = core::next_poll_key();
         let in_flight = core::new_in_flight();
         in_flight.store(true, Ordering::Release); // mark parked (matches `park_on_fd`'s swap(true))
@@ -431,15 +442,19 @@ impl Vm {
             stream,
             key,
             in_flight: Arc::clone(&in_flight),
+            span,
         });
-        // A `connect` never carries a user timeout (the `connect` surface takes only an address); it
-        // parks forever (or until `drain_sched` re-injects it on a sibling fault).
+        // A `connect` never carries a user timeout (the `connect` surface takes only an address), so it
+        // parks until readiness, a `drain_sched` re-inject on a sibling fault — or, W7-18, the RUN's
+        // `--timeout` deadline, which is the only thing that can set `deadline` here. That makes
+        // `poll_timed_out` on a connect resume unambiguous: it is always the hard halt, never an op
+        // timeout, and the `pending_connect` arm in `run_one_fiber` raises it as one.
         self.poll_park = Some(PollPark {
             key,
             fd,
             interest: poller::Interest::Write,
             in_flight,
-            deadline: None,
+            deadline: self.deadline,
         });
     }
 
@@ -449,8 +464,16 @@ impl Vm {
     /// instead of spinning for the kernel's multi-minute connect timeout. net targets the M:N
     /// `--parallel` engine, so this path exists only to keep a top-level `net.connect` usable.
     pub(super) fn block_until_connected(&mut self, stream: std::net::TcpStream) -> Value {
-        let deadline =
+        // W7-18 — bounded by the SOONER of the 10 s connect cap and the run's `--timeout` deadline.
+        // Unclamped, a black-hole address spun the full 10 s under `--timeout=300` — a 33× cap
+        // violation. This only ENDS the spin (it returns a `Value`, not a `Result`); the caller
+        // raises the hard halt immediately after, because the `Err("connect failed: timed out")`
+        // produced here is CATCHABLE and would otherwise swallow the abort.
+        let mut deadline =
             std::time::Instant::now() + std::time::Duration::from_secs(CONNECT_BLOCK_TIMEOUT_SECS);
+        if let Some(run) = self.deadline {
+            deadline = deadline.min(run);
+        }
         loop {
             match crate::native::net::finish_connect(&stream) {
                 // SO_ERROR clear AND the peer is reachable ⇒ connected.
@@ -490,8 +513,7 @@ impl Vm {
         span: Span,
     ) -> Result<Value, RuntimeError> {
         self.arity_range_err("read_bytes", args, 1, 2, span)?;
-        if self.poll_timed_out {
-            self.poll_timed_out = false;
+        if self.poll_timeout_check(span)? {
             return Ok(self.sock_err("timeout"));
         }
         let timeout = self.parse_timeout_ms(args.get(1), span)?;
@@ -636,8 +658,7 @@ impl Vm {
         // fiber with `poll_timed_out` set; the rewound op re-runs and lands HERE — so check it at entry
         // (after the `run_until` loop-top cancel check, which a sibling fault wins) and return Err.
         self.arity_range_err("read", args, 1, 2, span)?;
-        if self.poll_timed_out {
-            self.poll_timed_out = false;
+        if self.poll_timeout_check(span)? {
             // N3(a) — if this read took a partial codepoint off the wire before the deadline fired
             // (`poll_partial` was latched at the NeedMore point and survived the park), classify it as
             // `incomplete utf-8` (those bytes are carried/retained), NOT `timeout` (which means nothing
@@ -858,8 +879,7 @@ impl Vm {
     ) -> Result<Value, RuntimeError> {
         // The optional trailing int bounds writability.
         self.arity_range_err(method, args, 1, 2, span)?;
-        if self.poll_timed_out {
-            self.poll_timed_out = false;
+        if self.poll_timeout_check(span)? {
             return Ok(self.sock_err("timeout"));
         }
         let timeout = self.parse_timeout_ms(args.get(1), span)?;
@@ -1009,8 +1029,7 @@ impl Vm {
         // `accept()` or `accept(timeout_ms)` — the optional trailing int bounds how long to wait for
         // an inbound connection (D6c). Mirrors `Socket::read`'s timeout handling.
         self.arity_range_err("accept", args, 0, 1, span)?;
-        if self.poll_timed_out {
-            self.poll_timed_out = false;
+        if self.poll_timeout_check(span)? {
             return Ok(self.sock_err("timeout"));
         }
         let timeout = self.parse_timeout_ms(args.first(), span)?;
@@ -1145,6 +1164,47 @@ impl Vm {
         self.sock_ok(v)
     }
 
+    /// W7-18 — the resume half of the socket-park deadline story, shared by every op that can be
+    /// re-injected by the netpoller (`read`, `read_bytes`, `write`, `accept`). Returns `true` when THIS
+    /// op's own D6c `timeout_ms` is what fired, i.e. when the caller should surface its catchable
+    /// `Err("timeout")` exactly as before.
+    ///
+    /// The two wake causes are told apart by the CLOCK, not by a second marker: `park_on_fd` clamped
+    /// the park to `min(op deadline, run deadline)`, both are absolute `Instant`s, and `self.deadline`
+    /// is `Some` only under `chezzi test --timeout` — so `now >= self.deadline` at resume is true iff
+    /// the RUN deadline is what expired. A run-deadline expiry must be a hard, `recover:`-proof halt;
+    /// an op-timeout expiry must stay an ordinary catchable value.
+    ///
+    /// Two orderings here are load-bearing and both were got wrong in the obvious version:
+    ///
+    /// 1. **Consume `poll_timed_out` FIRST, unconditionally.** Halting with `?` while the flag is still
+    ///    set leaves it for the unwind: the first socket op inside any `defer` then consumes it and
+    ///    reports a fabricated `Err("timeout")` for an op that was never given a `timeout_ms`, so the
+    ///    cleanup silently does nothing. That is the "stopped promptly ≠ cleaned up" failure W7-16 was
+    ///    caught on, and no existing fence sees it (their `defer`s only `print`).
+    /// 2. **Inside a `defer`, a run-deadline wake is NOT this op's timeout** — hence `Ok(false)`, which
+    ///    retries the syscall so a cleanup write that can complete immediately still does (W7-17's
+    ///    `deferring > 0` suppression, same term `cancel_requested` uses). If the retry would block,
+    ///    `park_on_fd`'s ungated check halts it there — which is what makes that check load-bearing.
+    ///
+    /// Accepted degeneracy: with an op deadline SHORTER than the run deadline by less than the
+    /// poller-inject-to-schedule latency, the op's honest timeout fires but the fiber is not scheduled
+    /// until the run deadline has also passed, converting a catchable `Err("timeout")` into a hard
+    /// halt. That window is scheduling latency — normally sub-millisecond, but it widens with worker
+    /// contention (`--threads=1` plus a CPU-bound sibling makes it reachable), so it is bounded by
+    /// load rather than by a constant. Accepted, not fenced, because it is correct by consequence: a
+    /// fiber that resumes past the run deadline hard-halts at its very next checkpoint regardless, so
+    /// the only thing lost is which of two aborts is reported, and a test that pinned it would pass
+    /// either way.
+    fn poll_timeout_check(&mut self, span: Span) -> Result<bool, RuntimeError> {
+        let fired = std::mem::take(&mut self.poll_timed_out);
+        match self.deadline_halt(span) {
+            Ok(()) => Ok(fired),
+            Err(e) if self.deferring == 0 => Err(e),
+            Err(_) => Ok(false),
+        }
+    }
+
     /// D6 — the M:N park half shared by every would-block socket op. Returns `Ok(true)` if the fiber
     /// was parked on the netpoller; `Ok(false)` off the M:N engine (or inside a native callback, whose
     /// Rust-stack state can't be parked) — the caller then surfaces a `Result::Err` (net requires the
@@ -1162,6 +1222,18 @@ impl Vm {
     /// this returns `Ok(false)` — the demote loop caps its kernel wait by the remaining budget and
     /// expires with the same timeout `Err`). Every socket op latches its deadline on the fiber the same
     /// way (`Vm::poll_deadline`, N2), so a re-park does not re-arm the budget.
+    ///
+    /// W7-18 — the park also observes the RUN's `--timeout` deadline, in two halves that are one fix:
+    /// the halt below (a fiber must not park PAST a deadline that has already passed) and the clamp
+    /// further down (a park already under way wakes at the sooner of the two deadlines). There is
+    /// deliberately no [`deadline_gap_wake`] analogue here, and that is worth stating because W7-17
+    /// needed one three functions away: there `timer::submit_at` armed a *job* before `MnSched::park`
+    /// had filled the fiber's bucket, so an early fire found an empty bucket and was LOST. Here the
+    /// deadline is not a job but a FIELD IN THE REGISTRY ROW, and [`poller::register`] inserts the row
+    /// and the fiber together under the registry lock — the wake is re-derived by re-reading the
+    /// registry (`next_timeout` / `fire_due_socket_timeouts`), so no fire can precede the park. An
+    /// already-expired row just makes `next_timeout` return `ZERO`, and `register`'s `notify()` covers
+    /// the insert-after-`next_timeout`-was-read window.
     pub(super) fn park_on_fd(
         &mut self,
         h: GcRef,
@@ -1169,6 +1241,12 @@ impl Vm {
         target: PollPark,
         span: Span,
     ) -> Result<bool, RuntimeError> {
+        // W7-18 — `--timeout` ABOVE the cancellation checkpoint, mirroring W7-17's ordering in
+        // `chan_recv_step`: the deadline outranks a cancel, so a fiber reaching here after the run
+        // deadline reports the honest hard halt rather than `cancelled`. UNGATED by `deferring`
+        // (unlike `poll_timeout_check`'s entry check): everything above a park settles without
+        // blocking, and a `defer` that would PARK past the deadline is a hang, not cleanup.
+        self.deadline_halt(span)?;
         // CANCELLATION CHECKPOINT — a socket op is a blocking op, so it is a cancel-delivery point
         // (the single choke point for `accept`/`read`/`write`/`connect`), on BOTH engines: the check
         // sits OUTSIDE the `mn.is_some()` gate, because serial runs the op as a BLOCKING syscall below
@@ -1196,6 +1274,23 @@ impl Vm {
                 self.push(a); // its args, in order, back on top
             }
             self.frames.last_mut().unwrap().ip -= 1;
+            // W7-18 — wake at the SOONER of the op's own D6c budget and the run's `--timeout`
+            // deadline, so a park with no `timeout_ms` at all (`deadline: None` — the shape that
+            // HUNG: a nursery `l.accept()` nobody connects to) is still reached by the wall clock.
+            // `poll_timeout_check` then tells the two causes apart at resume by re-reading the clock,
+            // which is why no second marker beside `poll_timed_out` is needed.
+            //
+            // Clamp `target.deadline` ONLY — never `self.poll_deadline` (the per-op budget latch, N2,
+            // which survives an ip-rewind re-park): `demote_block_socket` reads that latch as the op's
+            // own budget and expiring it yields a CATCHABLE `Err("timeout")`, so folding the run
+            // deadline into it would report a hard `--timeout` abort as an ordinary socket timeout.
+            let target = PollPark {
+                deadline: match (target.deadline, self.deadline) {
+                    (Some(op), Some(run)) => Some(op.min(run)),
+                    (op, run) => op.or(run),
+                },
+                ..target
+            };
             self.poll_park = Some(target);
             Ok(true)
         } else {

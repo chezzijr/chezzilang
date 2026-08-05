@@ -3437,9 +3437,17 @@ struct PollPark {
     /// D6 — the owning socket's `in_flight` flag, handed to the poller so it can clear it on inject
     /// (see [`core::SocketCore::in_flight`]).
     in_flight: Arc<AtomicBool>,
-    /// D6c — the optional read/accept/write timeout deadline. `Some` iff the op was given a
-    /// `timeout_ms`: if the fd has not fired by then, the poll thread re-injects the fiber with its
-    /// `poll_timed_out` marker set so the rewound op returns `Err("timeout")`. `None` = park forever.
+    /// D6c — when the poll thread gives up waiting for the fd: it re-injects the fiber with its
+    /// `poll_timed_out` marker set, and the rewound op returns `Err("timeout")`. `None` = park
+    /// forever (nothing here bounds the poll thread's own wait either — see `next_timeout`).
+    ///
+    /// W7-18 — this is the SOONER of TWO deadlines, not just the op's `timeout_ms`: `park_on_fd`
+    /// clamps it by the run's `--timeout` deadline, and `park_on_connect` sets it from that deadline
+    /// ALONE (a `connect` takes no `timeout_ms` of its own). So `Some` no longer implies the op was
+    /// given a timeout, and the marker no longer implies a catchable `Err`: the consumer decides which
+    /// deadline expired by re-reading the clock — [`Vm::poll_timeout_check`] for the four rewound ops,
+    /// and the `pending_connect` arm of [`Vm::run_one_fiber`] for a connect, which is not a rewound op
+    /// at all and raises the hard halt directly.
     deadline: Option<std::time::Instant>,
 }
 
@@ -3488,6 +3496,11 @@ struct ConnectInProgress {
     stream: std::net::TcpStream,
     key: usize,
     in_flight: Arc<AtomicBool>,
+    /// W7-18 — the `net.connect` call's span, carried so the resume can RAISE a `--timeout` hard halt
+    /// attributed to the connect (see the `pending_connect` arm in `run_one_fiber`). A connect park
+    /// has no other checkpoint to fall through to: the call is followed by a straight-line `match`
+    /// with no back-edge and no blocking op.
+    span: Span,
 }
 
 /// D5 — a blocking native call extracted at its dispatch site, ready to run off the core worker on

@@ -1519,13 +1519,10 @@ struct Suite:
         }
     }
 
-    /// **Still NOT covered** (`gaps.md` **W7-18**): a fiber parked on the **netpoller** — a nursery
-    /// `l.accept()` with no op timeout — under `--timeout`. Same root as W7-17 (no path from the
-    /// wall-clock deadline to a parked fiber) but a worse symptom: it HANGS, measured killed by an
-    /// external `timeout 10` at 10001 ms with no verdict at all. Not fixable by the same clamp — the
-    /// netpoller's `poll_timed_out` marker makes the op return a *catchable* `Err("timeout")`, where a
-    /// run-deadline abort must be a hard halt. No fixture here: an un-aborted park would hang the
-    /// suite, not fail it.
+    /// The **netpoller** park — a nursery `l.accept()` with no op timeout — is covered separately, by
+    /// the `timeout_aborts_a_netpoller_*` fences below (`gaps.md` **W7-18**, fixed). It cannot live
+    /// here: a regression there HANGS rather than fails, so those fixtures need a watchdog thread,
+    /// which this test deliberately does not have.
     #[test]
     fn timeout_aborts_a_sleeping_test_everywhere() {
         // W7-16 — `--timeout` is documented as a HARD abort, and it reached NO timer wait anywhere.
@@ -1746,6 +1743,261 @@ struct Suite:
                 );
             }
         }
+    }
+
+    /// W7-18 — run a `--timeout`ed suite under a WATCHDOG and return `(text, passed)`.
+    ///
+    /// Every other fence in this module calls `run_tests_*` inline, which is fine when a regression
+    /// FAILS. A netpoller-park regression does not fail, it HANGS (measured pre-fix: no verdict at
+    /// all, killed by an external `timeout 10` at 10001 ms) — inline, that wedges `cargo test`
+    /// itself. Same shape as `parity_tests::run_net_timeout_watchdog`, one layer up: that helper
+    /// drives `run_file_parallel`, which has no `--timeout` at all.
+    fn run_tests_timed_watchdog(
+        tag: &str,
+        path: &std::path::Path,
+        timeout_ms: u64,
+    ) -> (String, bool) {
+        let owned = path.to_path_buf();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            // `show_output` so a fixture's `defer` prints land in `text` (the W7-17 defer fences do
+            // the same); the abort itself is `timeout_ms`.
+            let opts = opts_with(|o| {
+                o.timeout_ms = timeout_ms;
+                o.show_output = true;
+            });
+            let r = run_tests_opts(&owned, true, opts);
+            let _ = tx.send((r.text, r.passed));
+        });
+        match rx.recv_timeout(std::time::Duration::from_secs(10)) {
+            Ok(v) => v,
+            Err(_) => panic!(
+                "{tag}: hung — W7-18 regressed. `--timeout` did not reach the netpoller-parked \
+                 fiber, so the run never ends (it does not merely report the wrong verdict)."
+            ),
+        }
+    }
+
+    /// W7-18 — **the gap itself**: `--timeout` must reach a fiber parked on the NETPOLLER.
+    ///
+    /// A `parallel:` nursery `spawn`s an `accept()` with no `timeout_ms` on a listener nothing ever
+    /// connects to. Pre-fix `PollPark.deadline` carried only the socket op's own D6c budget, so
+    /// `None` was invisible to both `next_timeout` and `fire_due_socket_timeouts` and the run's wall
+    /// clock had no path to the park at all: measured **10001 ms, no verdict, no output**. Go is the
+    /// ancestor and aborts — `go test -timeout 300ms` against a goroutine on `net.Listener.Accept()`
+    /// panics `test timed out after 300ms` and never runs the following `t.Fatal`.
+    ///
+    /// Two fixtures, two park CONSTRUCTION paths: `accept` goes through `park_on_fd` (shared with
+    /// `read`/`read_bytes`/`write`), while `connect` has its own `park_on_connect` and its own resume
+    /// (`pending_connect`, which never consulted `poll_timed_out`). The connect fixture is
+    /// deliberately straight-line — no back-edge, no later blocking op — because that is what makes
+    /// merely CLEARING the flag at the resume insufficient: the fiber would finish normally, the
+    /// nursery would join, and `assert false` would report `FAIL … SWALLOWED`, W7-17's original
+    /// symptom re-created by the fix meant to close it. `192.0.2.1` is TEST-NET-1 (RFC 5737): the SYN
+    /// gets no reply, so the non-blocking connect stays `EINPROGRESS` forever — the same address
+    /// `parity_tests::net_connect_parks_and_is_drained_on_fault` relies on.
+    ///
+    /// M:N only: net requires the `--parallel` engine (a socket op off it fails loud rather than
+    /// parking) and the CLI rejects `--timeout` with `--serial` anyway. Port `0` throughout — the
+    /// fixed port in the original gap repro is a flake waiting to happen.
+    #[test]
+    fn timeout_aborts_a_netpoller_parked_test() {
+        for (name, body) in [
+            (
+                "netaccept_test.chz",
+                "import std.net\n\
+                 fn serve(server: Listener):\n    \
+                     _ := server.accept()\n\
+                 test fn t():\n    \
+                     match net.listen(\"127.0.0.1:0\"):\n        \
+                         Ok(server):\n            \
+                             parallel:\n                \
+                                 spawn serve(server)\n        \
+                         Err(e): print(\"NOLISTEN\")\n    \
+                     assert false, \"SWALLOWED\"\n",
+            ),
+            (
+                "netconnect_test.chz",
+                "import std.net\n\
+                 fn dial():\n    \
+                     match net.connect(\"192.0.2.1:9\"):\n        \
+                         Ok(s): print(\"CONNECTED\")\n        \
+                         Err(e): print(\"REFUSED\")\n\
+                 test fn t():\n    \
+                     parallel:\n        \
+                         spawn dial()\n    \
+                     assert false, \"SWALLOWED\"\n",
+            ),
+        ] {
+            let d = TmpDir::new();
+            let f = d.write(name, body);
+            let started = std::time::Instant::now();
+            let (text, passed) = run_tests_timed_watchdog(name, &f, 300);
+            let elapsed = started.elapsed();
+            assert!(!passed, "{name} report:\n{text}");
+            assert!(
+                text.contains("TIMED-OUT t"),
+                "{name}: --timeout must reach a netpoller-parked fiber; report:\n{text}"
+            );
+            assert!(
+                !text.contains("SWALLOWED"),
+                "{name}: the park must ABORT the test, not fall through it; report:\n{text}"
+            );
+            assert!(
+                !text.contains("deadlock"),
+                "{name}: a socket park is `inflight` and must never fire the deadlock verdict — the \
+                 OS could still wake it; report:\n{text}"
+            );
+            assert!(
+                elapsed < std::time::Duration::from_millis(1500),
+                "{name}: aborted at the deadline, not after it ({elapsed:?}); report:\n{text}"
+            );
+        }
+    }
+
+    /// W7-18 — **stopped promptly is not the same as cleaned up.** The aborted netpoller-parked task
+    /// must still unwind through its `defer`s, AND a socket write inside that `defer` must actually
+    /// go out.
+    ///
+    /// The fixture: one fiber accepts a real loopback connection, registers a `defer` that writes on
+    /// it, then parks on an untimed `read(64)` the peer never feeds. On abort, `DEFER-WROTE 3`.
+    ///
+    /// This is the only fence for the two orderings inside `poll_timeout_check`, and both were wrong
+    /// in the obvious version of this fix. Halting with `?` *before* consuming `poll_timed_out`
+    /// leaves the flag set for the unwind, so this `defer`'s `write` — an op that was never given a
+    /// `timeout_ms` — consumes it and reports `DEFER-ERR:timeout` instead of writing. Every
+    /// neighbouring W7-17 fence is blind to that, because their `defer`s only call `print`; that is
+    /// precisely how W7-17's own first cut shipped fully green and still skipped a defer's `recv`.
+    #[test]
+    fn a_netpoller_aborted_task_still_runs_its_defers() {
+        let d = TmpDir::new();
+        let f = d.write(
+            "netdefer_test.chz",
+            "import std.net\n\
+             fn serve(server: Listener):\n    \
+                 match server.accept():\n        \
+                     Ok(conn):\n            \
+                         defer:\n                \
+                             match conn.write(\"bye\"):\n                    \
+                                 Ok(n): print(\"DEFER-WROTE {n}\")\n                    \
+                                 Err(e): print(\"DEFER-ERR:\" + e.message())\n            \
+                         _ := conn.read(64)\n        \
+                     Err(e): print(\"NOACCEPT\")\n\
+             fn client(addr: str):\n    \
+                 match net.connect(addr):\n        \
+                     Ok(sock): _ := sock.read(64)\n        \
+                     Err(e): print(\"NOCONNECT\")\n\
+             fn body():\n    \
+                 match net.listen(\"127.0.0.1:0\"):\n        \
+                     Ok(server):\n            \
+                         match server.addr():\n                \
+                             Ok(addr):\n                    \
+                                 parallel:\n                        \
+                                     spawn serve(server)\n                        \
+                                     spawn client(addr)\n                \
+                             Err(e): print(\"NOADDR\")\n        \
+                     Err(e): print(\"NOLISTEN\")\n\
+             test fn t():\n    \
+                 body()\n    \
+                 assert false, \"SWALLOWED\"\n",
+        );
+        let (text, passed) = run_tests_timed_watchdog("netdefer_test.chz", &f, 300);
+        assert!(!passed, "report:\n{text}");
+        assert!(
+            text.contains("TIMED-OUT t"),
+            "the read park must be aborted by the deadline; report:\n{text}"
+        );
+        assert!(
+            // The byte count, not just the marker: a short or 0-byte write is a `defer` that ran but
+            // did not clean up, which is the failure this fence exists to catch.
+            text.contains("DEFER-WROTE 3"),
+            "the aborted task's `defer` must run AND its socket write must succeed — a \
+             `DEFER-ERR:timeout` here means the abort leaked `poll_timed_out` into the cleanup \
+             (halt-before-take), which silently skips it; report:\n{text}"
+        );
+    }
+
+    /// W7-18 — the THIRD socket-block path: a `net.connect` on the test body itself, which parks on
+    /// nothing at all. `mn` is set only on worker shells, so a body-level connect takes the bounded
+    /// spin in `block_until_connected` rather than the netpoller.
+    ///
+    /// Bounding that spin by the run deadline is necessary but NOT sufficient, and the difference is
+    /// the whole fence: the spin returns a `Value`, so a `--timeout` expiry came back as a catchable
+    /// `Err("connect failed: timed out")` and the body carried on to report **`FAIL … SWALLOWED` at
+    /// 304 ms** — a `--timeout` a `match` arm swallowed. (Unclamped it was worse only in latency: the
+    /// same swallow after the full 10 s `CONNECT_BLOCK_TIMEOUT_SECS` spin.) The hard abort is raised
+    /// at the call site instead, where there is still a `Result` to fault through.
+    ///
+    /// The body is straight-line on purpose: `jump_checked`'s back-edge is the only generic
+    /// checkpoint, so with no loop there is no later place for the halt to land.
+    #[test]
+    fn timeout_aborts_a_top_level_connect() {
+        let d = TmpDir::new();
+        let f = d.write(
+            "netconnecttop_test.chz",
+            "import std.net\n\
+             test fn t():\n    \
+                 match net.connect(\"192.0.2.1:9\"):\n        \
+                     Ok(s): print(\"CONNECTED\")\n        \
+                     Err(e): print(\"ERR:\" + e.message())\n    \
+                 assert false, \"SWALLOWED\"\n",
+        );
+        let (text, passed) = run_tests_timed_watchdog("netconnecttop_test.chz", &f, 300);
+        assert!(!passed, "report:\n{text}");
+        assert!(
+            text.contains("TIMED-OUT t"),
+            "a `--timeout` must never come back as a value a `match` arm can consume; report:\n{text}"
+        );
+        assert!(
+            !text.contains("SWALLOWED"),
+            "the abort must end the test, not be caught as a connect error; report:\n{text}"
+        );
+    }
+
+    /// W7-18 counter-fence — the other direction of the clamp. A socket op's OWN D6c `timeout_ms`
+    /// must still expire at its own deadline and still surface as an ordinary CATCHABLE
+    /// `Err("timeout")` when the run's `--timeout` is generous. The clamp only ever *shortens* a park,
+    /// and the resume tells the two causes apart by re-reading the clock; a `poll_timeout_check` that
+    /// halted whenever `self.deadline` is `Some` would turn every socket timeout into a hard abort.
+    ///
+    /// The fixture asserts in Chezzi (per the testing policy) so PASS itself carries the meaning: a
+    /// wrong hard halt reports TIMED-OUT, a wrong message reports FAIL.
+    ///
+    /// **Scope, honestly:** `accept(150)` under a 5000 ms cap means the op deadline is always the
+    /// sooner one, so this never exercises the early-wake arm — same limit
+    /// `a_live_timer_still_delivers_under_a_generous_timeout` records for W7-17. Nor does it cover the
+    /// few-ms window where an honest op timeout is scheduled after the run deadline has also passed
+    /// and is converted to a hard halt: that has no deterministic trigger and is argued in
+    /// `poll_timeout_check`'s doc instead.
+    #[test]
+    fn a_socket_timeout_is_still_catchable_under_a_generous_timeout() {
+        let d = TmpDir::new();
+        let f = d.write(
+            "netcatch_test.chz",
+            "import std.net\n\
+             fn serve(server: Listener, out: Channel[str]):\n    \
+                 match server.accept(150):\n        \
+                     Ok(conn): out.send(\"UNEXPECTED CONNECTION\")\n        \
+                     Err(e): out.send(\"ERR:\" + e.message())\n\
+             test fn t():\n    \
+                 out := Channel[str](1)\n    \
+                 match net.listen(\"127.0.0.1:0\"):\n        \
+                     Ok(server):\n            \
+                         parallel:\n                \
+                             spawn serve(server, out)\n        \
+                     Err(e): out.send(\"NOLISTEN\")\n    \
+                 assert out.recv() == \"ERR:timeout\"\n",
+        );
+        let (text, passed) = run_tests_timed_watchdog("netcatch_test.chz", &f, 5000);
+        assert!(
+            passed,
+            "an unexpired `--timeout` must not disturb the op's own D6c timeout, which stays a \
+             catchable `Err(\"timeout\")`; report:\n{text}"
+        );
+        assert!(
+            !text.contains("TIMED-OUT"),
+            "the op's own deadline fired, not the run's; report:\n{text}"
+        );
     }
 
     #[test]

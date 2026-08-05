@@ -50,10 +50,40 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > both engines, 2 red pre-fix), `a_timer_parked_task_aborted_by_the_deadline_still_runs_its_defers`,
 > `the_deadline_does_not_truncate_a_defer_whose_recv_can_complete` (mutation-verified), and
 > `a_live_timer_still_delivers_under_a_generous_timeout` for the other direction of the clamp.
-> **Filed, not fixed: `gaps.md` W7-18** — a fiber parked on the **netpoller** (`l.accept()`, no op
-> timeout) is still unreachable by `--timeout` and **HANGS** (measured: killed at 10001 ms, no verdict).
-> Same root, but it needs a hard-halt marker distinct from `poll_timed_out`, whose re-inject produces a
-> *catchable* `Err("timeout")`. Full write-up: `docs/gaps.md` **W7-17**.
+> The one shape it left open — a fiber parked on the **netpoller** — is **W7-18, fixed the same day**
+> (below). Full write-up: `docs/gaps.md` **W7-17**.
+
+> **✅ W7-18 FIXED 2026-08-05 — `--timeout` now reaches a fiber parked on the NETPOLLER, the last shape
+> that HUNG.** A nursery `spawn` on an untimed `l.accept()` nobody connects to produced no verdict and
+> no output at all, killed by an external `timeout 10` at **10001 ms**. `--timeout=300`:
+>
+> | shape | before | after |
+> |---|---|---|
+> | nursery `l.accept()`, untimed | **10001 ms**, no verdict (external kill) | **304 ms**, `TIMED-OUT t` |
+> | nursery `net.connect("192.0.2.1:9")` | same hang | **304 ms**, `TIMED-OUT t` |
+> | the aborted task's `defer` doing `conn.write("bye")` | never reached | `TIMED-OUT t` + `DEFER-WROTE 3` |
+> | **top-level** `net.connect` in the test body | 10 s spin, then `FAIL … SWALLOWED` | **304 ms**, `TIMED-OUT t` |
+> | `accept(150)` under `--timeout=5000` | `Err("timeout")` at 154 ms | unchanged — still catchable |
+>
+> Stable 10/10 at `CHEZZI_THREADS=1/2/3/4/8`. Go agrees: `go test -timeout 300ms` against a goroutine on
+> `net.Listener.Accept()` panics at 300 ms and never runs the following `t.Fatal`.
+>
+> **The filed premise was wrong, and that is the lesson** — a repeat of W7-17's lesson 1, one row later.
+> The gap said this needed "a second marker distinct from `poll_timed_out`, threaded through the 5
+> `PollPark` construction sites plus the re-inject". It needed none: `Vm::deadline` is already an
+> absolute `Instant` on every worker and `Some` only under `--timeout`, so the resumed op just re-reads
+> the clock. `PollPark`, `poller::register`, `next_timeout` and `fire_due_socket_timeouts` are untouched;
+> the park registers for `min(op deadline, run deadline)` and `poll_timeout_check` decides which fired.
+>
+> **The obvious spelling of that idea re-introduced W7-16's skipped-`defer` bug on three paths**
+> (halt-before-take, `?` past `demote_socket_exit`, clear-only connect resume), and adversarial review
+> found a **fourth** the plan had mis-classified as a mere overshoot: a top-level `connect` handing the
+> abort back as a *catchable* `Err`. All four shipped fully green. Fences:
+> `test_runner::timeout_aborts_a_netpoller_parked_test`, `timeout_aborts_a_top_level_connect`,
+> `a_netpoller_aborted_task_still_runs_its_defers`,
+> `a_socket_timeout_is_still_catchable_under_a_generous_timeout` — all four behind
+> `run_tests_timed_watchdog`, because a regression here hangs `cargo test` rather than failing it. See
+> `docs/gaps.md` **W7-18**.
 
 > **✅ W7-5d FIXED 2026-08-05 — a dead stdout no longer cancels sibling `Executor` jobs.** The bug was
 > a **process-GLOBAL read inside a predicate that answers "is this ERROR a hard halt"**
