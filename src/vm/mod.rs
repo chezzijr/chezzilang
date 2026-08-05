@@ -831,18 +831,18 @@ pub struct Vm {
     /// parked into a [`Fiber`], so a `recv` reached while this is `> 0` cannot suspend — it faults
     /// `deadlock` instead (B1 v1 limitation). Maintained by [`Vm::guarded`].
     native_reentry: usize,
-    /// Monotonic count of streamed stdout writes made by this `Vm` ([`Vm::emit_out_bytes`], streaming
-    /// branch only). Read ONLY as a before/after delta around a native call, to answer "did THIS call
-    /// emit to stdout" — see the `stream_halt` gate in `call.rs`'s `invoke_native`. A counter, not a
-    /// flag, so a native that re-enters Chezzi (`[1].map(f)` where `f` prints) still reports the write
-    /// to every frame that spans it. Never reset; wrapping is unreachable (2^64 writes).
+    /// Monotonic count of streamed stdout writes made by this `Vm`. Read ONLY as a before/after delta
+    /// around a native call, to answer "did THIS call emit to stdout" — see the `stream_halt` gate in
+    /// `call.rs`'s `invoke_native`. A counter, not a flag, so a native that re-enters Chezzi
+    /// (`[1].map(f)` where `f` prints) still reports the write to every frame that spans it. Never
+    /// reset; wrapping is unreachable (2^64 writes).
     ///
-    /// **UNENFORCED INVARIANT (`gaps.md` W7-5e): every streamed stdout write must go through
-    /// [`Vm::emit_out_bytes`].** It does today, but a new native reaching `stream::write_out` another
-    /// way emits without bumping this, so its broken-pipe halt never fires and `| head -1` spins. Do
-    /// NOT "fix" that by moving the counter into `stream::write_out`: that makes it process-global, so
-    /// a sibling thread's write during my native call fires MY halt — the same cross-job contamination
-    /// W7-5d removed, one layer down. Per-`Vm` is the correct shape; the fence is visibility.
+    /// The gate is only as good as "every streamed stdout write is counted here", so the ONLY writer
+    /// is [`stream::write_out`], which is also the only door to the streamed handle — one statement
+    /// does both (`gaps.md` W7-5e). A native cannot emit uncounted bytes without a `&mut Vm` it would
+    /// have to bump. Do NOT collapse that into a static beside `stream::OUT`: a process-global counter
+    /// means a sibling thread's write during my native call fires MY halt — the same cross-job
+    /// contamination W7-5d removed, one layer down. Per-`Vm` is the correct shape.
     stdout_writes: u64,
     /// Active cooperative-scheduler levels (B1/B2), innermost last. Each [`Nursery`] holds the parked
     /// joining (parent) fiber's context plus its child fibers; non-empty means a `recv` may suspend.

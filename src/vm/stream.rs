@@ -84,11 +84,18 @@ fn spawn_writer<W: Write + Send + 'static>(mut w: W, is_stdout: bool) -> Sender<
 /// Queue `b` for the process's real stdout (the writer thread does the syscall). Once stdout is dead
 /// the bytes are dropped; the run is halted separately by [`super::Vm::stream_halt`] at the print site.
 ///
-/// **Call this ONLY from [`super::Vm::emit_out_bytes`]** (`gaps.md` W7-5e). That method bumps
-/// `Vm::stdout_writes`, which is what gates the broken-pipe halt at native call sites; a write that
-/// bypasses it emits bytes the halt cannot see, and `chezzi run x.chz | head -1` on a loop calling
-/// that native spins forever instead of exiting.
-pub(super) fn write_out(b: &[u8]) {
+/// Takes the writing `Vm` because the bump of `Vm::stdout_writes` and the queue push are ONE
+/// statement here (`gaps.md` W7-5e): that counter is what gates the broken-pipe halt at native call
+/// sites, so a write it cannot see leaves `chezzi run x.chz | head -1` spinning on a loop that calls
+/// the offending native. Routing every streamed write through this door makes the two impossible to
+/// separate — a bypass has no way to spell itself. The counter stays per-`Vm`, NOT a static beside
+/// [`OUT`]: see `Vm::stdout_writes` for why a process-global one would be wrong.
+pub(super) fn write_out(vm: &mut super::Vm, b: &[u8]) {
+    debug_assert!(
+        vm.host.stream,
+        "write_out on a buffered Vm — the parity oracle is Vm::out"
+    );
+    vm.stdout_writes += 1;
     let tx = OUT.get_or_init(|| spawn_writer(std::io::stdout(), true));
     let _ = tx.send(Msg::Write(b.to_vec()));
 }
