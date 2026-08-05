@@ -127,6 +127,31 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > (`dead_stdout_does_not_{cancel_sibling_executor_jobs,tear_a_multi_native_sibling}_*`), all asserting
 > `rc != 0` + the pipe message so none can pass with `stream_halt` deleted. Full write-up:
 > `docs/gaps.md` **W7-5d**.
+
+> **✅ W7-5e FIXED 2026-08-05 — the gate W7-5d added can no longer be bypassed.** That gate asks "did
+> THIS native emit to stdout" via a `Vm::stdout_writes` delta, which only `Vm::emit_out_bytes` bumped —
+> so a new native reaching `stream::write_out` another way would emit bytes the halt cannot see, and
+> `chezzi run x.chz | head -1` on a loop calling it would spin forever. `write_out` now takes the
+> writing `&mut Vm` and bumps the counter itself: counting and emitting are one statement, and the
+> bypass **does not compile** (`error[E0061]: argument #1 of type &mut vm::Vm is missing` — verified by
+> writing it; it compiles pre-fix). Still per-`Vm`, so none of W7-5d's cross-job contamination returns.
+> Zero behavior change: `| head -1` on a 100 000-line print loop exits at **4 ms, rc=1,
+> `stdout closed (broken pipe)`** at default M:N and `--threads=1/2/4`; all 53 `tests/interactive.rs`
+> fences green.
+>
+> **The lesson is in the filing, not the fix.** The row rejected the whole direction ("moving the
+> counter into `stream::write_out` … would make it PROCESS-global") when only the `static`-beside-`OUT`
+> *spelling* is global, and then ranked three fences that work around `write_out` instead — including
+> one, "make it private to `exec.rs`", that **Rust cannot express at this layout** (no friend
+> visibility, and `pub(in path)` names only an ANCESTOR module, never a sibling). When a filing rules
+> out a direction, check it ruled out the direction and not one spelling of it: everything ranked
+> below inherits the error.
+>
+> **Scope, from adversarial review:** this closes the VM's own sink, not fd 1. FFI reaching libc
+> (`extern "libc.so.6": fn puts`) writes the descriptor directly, so `OUT_DEAD` never sets and that
+> `| head -1` loop still spins — **6002 ms, no fault**, against 3 ms for the same loop using `print`.
+> Pre-existing and untouched by this change; filed as **W7-20**. Full write-up: `docs/gaps.md`
+> **W7-5e**.
 >
 > **✅ W7-14 FIXED 2026-08-04 — a `wait:` timer arm no longer swallows a sibling value that arrives
 > first.** `WAIT-1`'s fix (`0b72ad60`) is gated on `self.mn.is_some()`, and a party that owns its OS

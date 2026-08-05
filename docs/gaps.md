@@ -44,8 +44,11 @@ milestone (`docs/future.md` §2c). Note the correction: eager execution did *not
 deleting the queue (it kept one). It dissolved it by changing what the program-exit join walks — a
 heap-independent registry of `ExecutorCore` `Arc`s shared with every worker, instead of the per-`Vm`
 `Vec<GcRef>` that died with its task's heap. **`W7-5d` is FIXED 2026-08-05** — a dead stdout is no
-longer a hard halt, so the run-all drain covers it like any other ordinary fault. The whole
-W7-5 family is now closed.
+longer a hard halt, so the run-all drain covers it like any other ordinary fault, and **`W7-5e` is
+FIXED the same day** — the counter that gate reads is now bumped inside the one door to streamed
+stdout, so a *VM* write it cannot see does not compile. All five filed W7-5 rows are closed. Note the
+scope: this is the VM's own sink. Bytes that reach fd 1 WITHOUT going through it — FFI calling libc
+`puts`/`write` — are counted nowhere and are filed separately as **W7-20**.
 **Keep this table in sync when a section is retired** — the
 reason it exists is that "which of these is still open?" previously required reading 1400 lines of
 chronological log.
@@ -62,8 +65,9 @@ chronological log.
 | ~~**W7-5d**~~ | `:5188` | **FIXED 2026-08-05.** A dead stdout was a whole-queue kill switch, so a broken pipe cancelled sibling `Executor` jobs. It is now an ORDINARY per-job fault. TWO process-global reads had to go: `executor_hard_halt` is `is_over_memory \|\| is_timed_out`, and `invoke_native`'s post-call `stream_halt` is gated on that call having actually emitted to stdout (`Vm::stdout_writes`) — unguarded it faulted a sibling that never printed, after its FIRST native. Repro: **both markers 21/21 runs**, **all three writes 15/15**, across `--serial` and `--threads=1/2/3/4/8`/default; pre-fix it wrote neither marker at `--threads=1`/`--serial`, both at `--threads=3+`, and either at `--threads=2`. Matches CPython `ThreadPoolExecutor` (`max_workers` 1/2/4), the ancestor that owns `Executor` | Three lessons. (1) A **process-GLOBAL read inside an error-property predicate** — `out_dead_reason().is_some()` does not describe the `err` it is passed. The shape was in the tree **twice**; fixing the first made the second visible. (2) The ledger's own proposed alternative ("an accepted-asymmetry test pinning what each engine actually does") **was never available**: the M:N shape varied by thread count AND across runs at one thread count. (3) A one-native-call marker is the exact shape that hides instance (2) — when the contract is "the REST of the job runs", the fence needs a "rest". Accepted cost: graceful `shutdown()` only — a submitted job that never prints and never returns now hangs `\| head -1` (`shutdown_now()` still kills it in 54 ms; a loop back-edge IS a cancellation point). CPython hangs identically; Go exits via SIGPIPE on fd 1, a signal policy Chezzi does not adopt. Nurseries unaffected (they abort siblings on any fault, by design) |
 | ~~**W7-18**~~ | `:5155` | **FIXED 2026-08-05.** `--timeout` now reaches a fiber parked on the NETPOLLER — **10001 ms hang (no verdict, no output, killed by an external `timeout 10`) → 304 ms `TIMED-OUT t`**, stable 10/10 at `CHEZZI_THREADS=1/2/3/4/8`, and the aborted task still runs its `defer`s *including a socket write inside them*. Go is the ancestor and agrees: `go test -timeout 300ms` against a goroutine on `net.Listener.Accept()` panics `test timed out after 300ms` and never runs the following `t.Fatal`. A park now registers for `min(the op's own D6c timeout_ms, the run deadline)` and the resumed op **re-reads the clock** to tell the two apart | **The filed premise was WRONG, and it is the whole lesson.** The row said the fix "needs a second marker distinct from `poll_timed_out`, threaded through the 5 `PollPark` construction sites plus the re-inject." It needed none: `Vm::deadline` is ALREADY an absolute `Instant` on every worker and `Some` only under `--timeout`, so `now >= self.deadline` at resume answers exactly what the marker would have carried. `PollPark`, `poller::register`, `next_timeout` and `fire_due_socket_timeouts` are untouched. Second lesson: the obvious spelling of that insight re-introduced W7-16's skipped-`defer` bug on **three** separate paths (halt-before-take, `?` past `demote_socket_exit`, clear-only connect resume) and adversarial review found a **fourth** — a top-level `connect` handing the abort back as a *catchable* `Err`. All four shipped green |
 | ~~**W7-17**~~ | `:5081` | **FIXED 2026-08-05.** `--timeout` now reaches a timer wait PARKED in a `parallel:` nursery with no runnable sibling — **3004 ms `FAIL … SWALLOWED` → 304 ms `TIMED-OUT t`**, for BOTH park sites (the single `timer(ms).recv()` and a `wait:` timer arm), at `--threads=1/2/3/4/8`/default, and the aborted task still runs its `defer`s. A third site fell out of the same measurement: the **serial cooperative `wait:` timer arm** was still a bare `thread::sleep` — the one inline-sleep W7-16 missed — also 3004 ms → aborted. The park's timer job now fires at `min(its own deadline, the run deadline)` and delivers `true` ONLY if its own deadline really passed — an early wake just requeues the fiber (`close_wake`) — and `chan_recv_step`/`op_wait_poll` gained a `--timeout` checkpoint so the re-check turns that wake into the hard abort. Go is the ancestor and agrees: `go test -timeout 300ms` against `<-time.After(3s)` panics at 300 ms and never runs the following `t.Fatal` | **The filed lesson was WRONG, and it is the interesting part.** The row concluded "fixing it means giving parked fibers a deadline-driven wake (a scheduler feature), not another checkpoint: chunk-re-arming the park's timer job only gets a wake, and the resumed fiber would re-park because its own deadline has not passed." Both halves were true in isolation and the conclusion did not follow: **a wake and a checkpoint are the fix, together** — neither alone is anything. The re-park it predicted is exactly what the missing checkpoint prevents, and no re-arming was needed at all (one clamped wake, so W7-16's 200-re-arms/s cost is not paid here). The scheduler-level alternative it pointed at is also *worse*: `flag_deadlock` drops parked fibers without `unwind_deferred`, so it would have re-introduced W7-16's skipped-`defer` bug, while wake-and-re-check faults from inside the VM and unwinds normally (fenced: `a_timer_parked_task_aborted_by_the_deadline_still_runs_its_defers`). Second lesson: the **runnable sibling in every neighbouring fixture is what hid this for a whole milestone** — a spinner's own back-edge trips the deadline at 303 ms, so W7-16's tests passed over it; the new fixtures deliberately have no sibling |
-| **W7-19** | `:5645` | `fs.stat`/`fs.walk` are the only `std.fs` members outside the blocking set, so they run inline and PIN an M:N core worker for their syscalls (`walk` recurses a whole tree) | Found by the `native::Kind` refactor (`future.md` §3c) writing down every member's current classification — the silent-omission failure that section predicted, already in the tree. Deliberately NOT fixed there: `Kind::Blocking` is a behaviour change needing the off-heap-safety proof for a `Struct` / path-list return, so a pure refactor preserved it as `Kind::Inline` with a `BUG PRESERVED` comment and a test that pins the current state |
-| **W7-5e** | `:5300` | `Vm::stdout_writes` — the W7-5d gate on `invoke_native`'s broken-pipe halt — assumes **every** streamed stdout write goes through `Vm::emit_out_bytes`. True today (audited: `print`/`do_print_sep`, the `print` builtin, `VmHost::print`, `fileio`'s stdout-backed `Writer`, `pending_cancel_report`), enforced by nothing. A new native that reaches `stream::write_out` any other way silently loses its halt: `chezzi run x.chz \| head -1` on a loop calling it spins forever, growing the unbounded stream queue | Cannot be enforced by moving the counter into `stream::write_out` — that would make it PROCESS-global, and a sibling thread's write during my native call would falsely fire my halt, re-introducing exactly the cross-job contamination W7-5d removed. A per-`Vm` counter is the correct shape; the invariant needs a test or a `debug_assert`, not a relocation. Cheap fence: a `#[test]` asserting `stream::write_out` has exactly one caller, or route every write through one `&mut Vm` method |
+| **W7-20** | `:5703` | FFI bytes reach fd 1 without passing any VM sink, so the broken-pipe halt cannot see them: an `extern "libc.so.6": fn puts` loop under `\| head -1` runs **6002 ms to an external kill, rc=0, no fault**, where the same loop using `print` exits in **3 ms** with `stdout closed (broken pipe)`. Nothing sets `OUT_DEAD` — libc gets the `EPIPE`, not us — and Rust's process-wide `SIG_IGN` for SIGPIPE, which the C library inherits, means no signal either | Not a W7-5e regression (identical pre-fix); filed because W7-5e makes this the LAST uncounted stdout door. **Decide the contract before building anything:** an `extern` block names its symbols, so the FFI layer *could* flag the known fd-1 writers at declaration — but FFI is already the documented "outside the runtime's guarantees" surface, and accepting + documenting it may be the right answer |
+| **W7-19** | `:5679` | `fs.stat`/`fs.walk` are the only `std.fs` members outside the blocking set, so they run inline and PIN an M:N core worker for their syscalls (`walk` recurses a whole tree) | Found by the `native::Kind` refactor (`future.md` §3c) writing down every member's current classification — the silent-omission failure that section predicted, already in the tree. Deliberately NOT fixed there: `Kind::Blocking` is a behaviour change needing the off-heap-safety proof for a `Struct` / path-list return, so a pure refactor preserved it as `Kind::Inline` with a `BUG PRESERVED` comment and a test that pins the current state |
+| ~~**W7-5e**~~ | `:5624` | **FIXED 2026-08-05.** The W7-5d halt gate (`Vm::stdout_writes`) assumed every streamed stdout write goes through `Vm::emit_out_bytes` — true, enforced by nothing, and a new native reaching `stream::write_out` another way would silently lose its halt (`\| head -1` spins on a loop calling it). `write_out` now **takes the writing `&mut Vm` and bumps the counter itself**, so counting and emitting are one statement and a bypass does not compile (`error[E0061]`, verified by writing it). Still per-`Vm`. Zero behavior change: `\| head -1` on a 100 000-line print loop exits at **4 ms, rc=1, `stdout closed (broken pipe)`** at default M:N and `--threads=1/2/4`; all 53 `tests/interactive.rs` fences green | **This row's own reasoning is the lesson.** It ruled out the *direction* — "cannot be enforced by moving the counter into `stream::write_out` — that would make it PROCESS-global" — when only the `static`-beside-`OUT` **spelling** is global; a move that carries the `Vm` is not. The three fences it ranked instead all work around `write_out`, and the one it called the real fix (make it private to `exec.rs`) **is not expressible at this file layout** — Rust has no friend visibility and `pub(in path)` names only an ANCESTOR, never a sibling (only re-parenting the file under `exec/` would say it). Generalizes: when a filing rejects a direction, check it rejected the direction and not one spelling of it — everything ranked below inherits the error. Scope, from adversarial review: this closes the VM's own sink, not fd 1 — FFI still writes it uncounted, filed as **W7-20** |
 | ~~**W7-16**~~ | `:4939` | **FIXED 2026-08-05.** A wait whose **deadline WE own** (`time.sleep_ms`, `timer(ms).recv()`) is now a **CONTINUOUS** cancellation + `--timeout` checkpoint (~5 ms), everywhere: nursery, eager `Executor`, top-level `main`, both engines. `shutdown_now()` at 50 ms against `sleep_ms(3000)`: **3005 ms → 55 ms**, and the post-sleep code no longer runs; timer form 3005 → 55 ms; nursery mid-flight 3005 → 55 ms. A syscall-blocking native (`fs.*`/`request*`/`process*`/`io.*`) stays deliberately ENTRY-only — a `read(2)` in the kernel is not ours to cut short | **The filed premise was WRONG in two ways, and measuring it is what found the real bug.** (1) *"The same `sleep_ms` inside a nursery is interrupted on both engines"* — **no**: the parity fence only passed because its `boom()` faulted BEFORE `napper` entered the sleep. Move the fault 50 ms later and the nursery ran the full **3005 ms M:N / 3054 ms serial** and printed `napper woke`. There was no nursery-vs-executor split to reconcile; both were broken mid-flight. (2) *"`--timeout` cannot reach these jobs"* is not executor-specific — `chezzi test --timeout=200` reached **no timer wait anywhere**: top-level, nursery AND executor sleeps all ran their full 3 s and reported **PASS** (only a busy `while` loop bucketed TIMED-OUT). A documented "Hard-abort" guard that silently never fires. (3) The contract question resolved AGAINST the CPython pairing the row proposed: `ThreadPoolExecutor.shutdown(cancel_futures=True)` (3001 ms, no interrupt) is the *thread*-blocking sleep; Chezzi's is a FIBER wait, whose ancestor is `asyncio.sleep` under a `TaskGroup` (cancelled @50 ms) / Go's `select { <-time.After; <-ctx.Done() }` (@100 ms) — both cancel. Decisive internal evidence: an eager job blocked on a plain `ch.recv()` **already** died at `shutdown_now()` in 56 ms, so exempting sleep was an internal inconsistency, not CPython fidelity |
 | ~~**W7-14**~~ | `:4974` | **FIXED 2026-08-04.** The cooperative inline-sleep is now gated off for every waiter that owns its OS thread — an eager `Executor` job, the top-level `main` thread, and `main` inside a native callback — each of which blocks with the timer as one more arm and clamps its in-place wait to the deadline. `timer(300)` beside a value at 50 ms: **`timer` @ 306–308 ms → `value 9` @ 56–57 ms** on all three, matching the nursery path (54 ms) and Go's `select` | Three lessons. (1) The blocker on file — "WAIT-1's recipe does not port: it submits the background deadline send into `self.mn`, which an eager job does not have" — was solving the wrong problem. WAIT-1 injects a wake because a PARKED FIBER has no thread; a party that owns its thread needs no wake at all, only a shorter timeout. (2) The dead clamp W7-13r(a) deleted was not dead code but a SYMPTOM: it was unreachable *because* of this bug, and reading it as "provably `None`" documented the bug as an invariant. (3) **The first fix reused `can_block_in_place()` and shipped green with a third path still broken** — that predicate folds in `is_counted_party`, i.e. `native_reentry == 0`, which is a rule about being JUDGED, not about being able to block. Adversarial review caught it; the tests did not, because they only covered the two paths the fix was written for |
 | ~~**W7-13r**~~ | `:4619` | **ALL THREE RESIDUALS FIXED 2026-08-04**, with W7-13 itself: (a) the eager `wait:` arm was a blind `thread::sleep` — now waits on arm 0's condvar, 300 wakeups **1020 ms → 5 ms**; (b) `trip()` set `done_latch` outside `core.q` — now under it; (c) a blocked eager `send` never observed `close()` — was a HANG, now faults `send on a closed channel` at 105 ms (Go, compiled: 104 ms) | Kept for the lessons, not the status. (a) was deferred as "needs its own design primitive" — **wrong**, `demote_wait_block` (`sched.rs:1114`) already had the four-line trick. (b) is deliberately UNFENCED: the window is nanoseconds and measured 5–6 ms both ways, so a timing test would assert nothing. (c) left a DELIBERATE engine divergence (`--serial` keeps `FULL_SEND_DEADLOCK`: its drain runs jobs one at a time and cannot interleave them) and needs ≥2 pool threads, unchanged by the fix. Note the original W7-13 diagnosis (a *missing* `wake_senders`) was WRONG: that wake already fires on all six pop paths; the bug was a LOST wakeup — `eager_wait_tick` waited with no predicate, so a `notify_all` arriving while the lock was free hit a condvar nobody was on yet |
@@ -5617,7 +5621,32 @@ SIGPIPE on fd 1 and killing the whole process, a signal policy Chezzi deliberate
 An earlier draft of this entry claimed "Go and CPython hang on it too" — half wrong, and caught by
 running it.
 
-### W7-5e — the `stdout_writes` gate rests on an unenforced invariant — **OPEN, filed 2026-08-05 with the W7-5d fix**
+### W7-5e — the `stdout_writes` gate rests on an unenforced invariant — **FIXED 2026-08-05**
+
+**The fix:** `stream::write_out(vm: &mut Vm, b: &[u8])` — it takes the writing `Vm` and bumps
+`vm.stdout_writes` itself, so the count and the queue push are ONE statement. The counter is still
+per-`Vm`; only the *place it is incremented* moved, from `Vm::emit_out_bytes` into the one door every
+streamed stdout write already went through. A native that wants to emit uncounted bytes now has no way
+to spell itself: the call needs a `&mut Vm`, and having one is having the counter bumped. Verified by
+writing the bypass — `super::stream::write_out(b)` in `fileio.rs` — and confirming it stops compiling
+(`error[E0061]: argument #1 of type &mut vm::Vm is missing`); it compiles on the pre-fix tree. Zero
+behavior change: `| head -1` on a 100 000-line print loop still exits at **4 ms, rc=1,
+`stdout closed (broken pipe)`** at default M:N and `--threads=1/2/4`, and the 53 `tests/interactive.rs`
+fences (four broken-pipe ones + the W7-5d `Executor` sibling test) are unchanged and green.
+
+**The correction, and it is the point of keeping this entry.** The row below ruled out the whole
+*direction* — "**Why not just move the counter into `stream::write_out`?** … it would then be
+PROCESS-global" — and so ranked three fences that all work AROUND `write_out` instead. Only the
+`static`-beside-`OUT` spelling of that move is process-global. A move that **carries the `Vm`** is
+per-`Vm`, and is smaller than every fence that was ranked above it: the filed (b) ("make `write_out`
+private to `exec.rs`") is not expressible *at this file layout* — Rust has no friend visibility, and
+`pub(in path)` only names an ANCESTOR module, so it cannot say "visible to my sibling `exec`";
+`pub(super)` is already the tightest scope that lets `exec.rs` call into `stream.rs`. (Re-parenting
+the file to `src/vm/exec/stream.rs` would express it, at the cost of moving the stream sink under the
+dispatch loop — a worse home for it than taking the `&mut Vm`.) A rejected direction was carrying a
+rejected *spelling*'s flaw, and the ranked alternatives inherited that.
+
+The original filing follows.
 
 W7-5d's second gate asks "did THIS native call emit to stdout" by taking a before/after delta of
 `Vm::stdout_writes`, which only `Vm::emit_out_bytes` bumps (streamed branch). That is correct **only
@@ -5643,6 +5672,10 @@ halt. That is precisely the cross-job contamination W7-5d exists to remove — t
 structurally the only door; (c) a `debug_assert` in `write_out` that the calling `Vm`'s counter moved
 — needs a `&Vm`, which is why it is last. (b) is the real fix and is a visibility change, not logic.
 
+*(End of the original filing. None of the three shipped — (b) is not expressible, and (a)/(c) are
+proxies for what the signature now states outright. (c) came closest: it noticed `write_out` could
+take a `&Vm`, then asked that reference to CHECK the counter rather than to be the one that moves it.)*
+
 ### W7-19 — `fs.stat` and `fs.walk` are the only filesystem syscalls that PIN a core worker — **OPEN, filed 2026-08-05 by the `native::Kind` refactor (`future.md` §3c)**
 
 Converting the native registry to carry each member's `Kind` on its entry required writing down what
@@ -5666,6 +5699,46 @@ whether that return crosses `NativeArg`/`NativeRet` as a primitive before flippi
 4 concurrent `fs.walk`s of a deep tree at `CHEZZI_THREADS=1` should overlap, not serialize (the same
 shape as the D5 fence measured for the `Kind` refactor: 4×`process.cmd("sleep 0.3")` = 305 ms
 offloaded vs 1209 ms serialized).
+
+### W7-20 — FFI writes to fd 1 are invisible to the broken-pipe halt, so `| head -1` never ends — **OPEN, filed 2026-08-05 adversarially reviewing the W7-5e fix**
+
+Every stdout path the VM OWNS is now counted and halted (`W7-5d` + `W7-5e`). FFI does not go through
+any of them — it calls the C function, which writes the descriptor itself:
+
+```chezzi
+extern "libc.so.6":
+    fn puts(s: str) -> int
+
+fn main():
+    while true:
+        _ := puts("line")
+
+main()
+```
+
+| `chezzi run x.chz \| head -1` | result |
+|---|---|
+| the loop above (`puts`) | **6002 ms, killed by an external `timeout 6`, rc=0, no fault, no diagnostic** |
+| the same loop using `print` | **3 ms, rc=1, `stdout closed (broken pipe)`** |
+
+libc's `write(2)` returns `EPIPE` to *libc*, not to us: nothing sets `OUT_DEAD`, `out_dead_reason()`
+stays `None`, and `stream_halt` has nothing to report. The counter is not the missing piece — a write
+the VM never performed cannot be counted by any shape of counter. Nor does the OS catch it: Rust's
+runtime sets SIGPIPE to `SIG_IGN` process-wide at startup, and the loaded C library inherits that
+disposition, so FFI gets neither the signal a C program would die from nor the fault a Chezzi `print`
+raises.
+
+**Not a W7-5e regression** — it reproduces identically on the pre-fix tree, and no VM code path
+changed. Filed because W7-5e's fix is what makes it the LAST uncounted stdout door, and because the
+first draft of that fix's write-up claimed "a write the halt cannot see does not compile" without this
+qualifier.
+
+**Direction, unproven:** an `extern` block declares its symbols, so the checker/FFI layer could flag
+the known fd-1 writers (`puts`, `printf`, `putchar`, `fwrite` on `stdout`, `write` with fd 1) at
+declaration and either refuse them or route them through the VM sink. Cheaper and narrower: leave the
+behaviour and document it — FFI is already the "you are outside the runtime's guarantees" surface
+(`docs/stdlib.md` says as much for memory safety), and this is the same bargain for stream lifecycle.
+Decide which before spending anything; do not build the flagger on the assumption it is wanted.
 
 ### Safe-direction observations (not filed as bugs)
 - **`Vm::stream_halt`'s stated reason for never restoring SIGPIPE is weaker than it reads.** The

@@ -716,8 +716,11 @@ they run inline and pin an M:N core worker (`walk` recurses a whole tree) — ex
 this section predicted, already in the tree. Preserved as `Kind::Inline` by the refactor (behaviour-
 identical) and filed as `gaps.md` **W7-19**; reclassifying needs the off-heap-safety proof first.
 
-**W7-5e does NOT fold in.** `Vm::stdout_writes` is a per-CALL runtime observation ("did this call emit
-to stdout?"), not a static per-native property, so it stays its own gap.
+**W7-5e did NOT fold in** — `Vm::stdout_writes` is a per-CALL runtime observation ("did this call emit
+to stdout?"), not a static per-native property. It was **fixed separately 2026-08-05** by the same
+move this section makes one level down: the property rides the only door that can produce it
+(`stream::write_out` takes the writing `&mut Vm` and bumps the counter itself), so forgetting it is a
+compile error rather than a silent hole.
 
 <details>
 <summary>Original filing (2026-08-05) — kept for the reasoning</summary>
