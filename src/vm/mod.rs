@@ -1396,10 +1396,13 @@ enum SnapValue {
         name: Box<str>,
         globals: Vec<(String, SnapValue)>,
     },
-    /// A native (Rust) fn — re-allocated with the same fn pointer (`NativeFn` is `Clone`/`Send`).
+    /// A native (Rust) fn — re-allocated with the same fn pointer (`NativeFn` is `Clone`/`Send`) and
+    /// the same [`crate::native::Kind`] (a `Copy` field of its registry entry, so the rebuilt value
+    /// keeps running the way the entry says).
     Native {
         name: Box<str>,
         func: crate::native::NativeFn,
+        kind: crate::native::Kind,
     },
     /// A first-class universe builtin fn (`print`/`ord`/`chr`/`panic`) — SENDABLE (pure code). Carries
     /// only the name; replayed as a fresh `Obj::Builtin`.

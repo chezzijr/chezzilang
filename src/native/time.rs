@@ -5,7 +5,7 @@
 //! durations, immune to wall-clock adjustments. `sleep_ms(n)` parks the thread. `format(epoch)`
 //! renders epoch seconds as a UTC `"YYYY-MM-DD HH:MM:SS"` string, computed directly (no chrono).
 
-use super::{Host, HostError, NativeFn, NativeRet, expect_args};
+use super::{Host, HostError, Kind, NativeFn, NativeRet, expect_args};
 use std::sync::OnceLock;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
@@ -63,12 +63,12 @@ fn civil_from_days(z: i64) -> (i64, i64, i64) {
     (if m <= 2 { y + 1 } else { y }, m, d)
 }
 
-/// Callable members. `(name, fn)`.
-pub const MEMBERS: &[(&str, NativeFn)] = &[
-    ("now", now),
-    ("monotonic", monotonic),
-    ("sleep_ms", sleep_ms),
-    ("format", format),
+/// Callable members. `(name, fn, kind)`.
+pub const MEMBERS: &[(&str, NativeFn, Kind)] = &[
+    ("now", now, Kind::Inline),
+    ("monotonic", monotonic, Kind::Inline),
+    ("sleep_ms", sleep_ms, Kind::TimedWait),
+    ("format", format, Kind::Inline),
 ];
 
 #[cfg(test)]

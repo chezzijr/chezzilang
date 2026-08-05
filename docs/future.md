@@ -686,7 +686,41 @@ fault-path. Fault-path is a future migration cluster.
 
 ---
 
-## 3c. Native-registry hygiene: a native's PROPERTIES belong on its registry entry (planned — NOT started, filed 2026-08-05)
+## 3c. Native-registry hygiene: a native's PROPERTIES belong on its registry entry — **DONE 2026-08-05** (option B, plus the interception fold)
+
+**Landed.** `pub enum Kind { Inline, Blocking, TimedWait, InterceptIo, InterceptNet }` is a field of
+every `MEMBERS` tuple (`&[(&str, NativeFn, Kind)]`, 192 entries across 14 tables), copied onto
+`Obj::Native` when the module binds (`vm/exec.rs`) and carried through `WireValue`/`SnapValue` and
+`Callee::Native` into `Vm::invoke_native(func, name, kind, args, span)`. `is_blocking` is **deleted**,
+along with its `strip_prefix('_')` patch and the `native_member_names_are_unique_across_modules` guard
+whose whole premise was bare-name classification. **No native's behaviour is decided by a string
+comparison anywhere in the VM**, and a `MEMBERS` entry without a kind is a compile error
+(demonstrated: dropping `Kind::Inline` from `("now", now)` → `expected a tuple with 3 elements`).
+
+Three corrections to the estimate below, all found by reading the code before writing it:
+
+- **`Vm::invoke_native` has exactly ONE call site** and `Obj::Native` is built in 3 non-test places, so
+  the kind rides the value to the dispatch site — **no name→kind map, no lookup, no per-call cost.**
+  The "~10 tuple-destructuring consumers" were 2 real ones (`vm/exec.rs`, `compiler/mod.rs`) + tests.
+- **Name-keying would have been unsound anyway.** `std.io::_append` (an intercepted opener) and
+  `std.fs::_append` (a syscall) collide on the bare name; they were kept apart only by the ORDER of the
+  checks plus an exemption list in a test. Distinct entries, distinct kinds, no ordering hazard.
+- **The interception fold was worth doing in the same pass** (it was listed out of scope). `connect`/
+  `listen` were matched by BARE NAME in `invoke_native` — a future `std.foo.connect` would have been
+  hijacked by the net handler — and the `std.io` openers by `fn_addr_eq` identity. Both are now kind
+  arms. This is still two properties on one enum, not a plugin registry: the "don't grow it" warning
+  below stands.
+
+**Found, not fixed, by the conversion:** `fs._stat`/`fs._walk` were never in the `is_blocking` list, so
+they run inline and pin an M:N core worker (`walk` recurses a whole tree) — exactly the silent failure
+this section predicted, already in the tree. Preserved as `Kind::Inline` by the refactor (behaviour-
+identical) and filed as `gaps.md` **W7-19**; reclassifying needs the off-heap-safety proof first.
+
+**W7-5e does NOT fold in.** `Vm::stdout_writes` is a per-CALL runtime observation ("did this call emit
+to stdout?"), not a static per-native property, so it stays its own gap.
+
+<details>
+<summary>Original filing (2026-08-05) — kept for the reasoning</summary>
 
 **The registry itself is fine and is not what this is about.** A native ships as a per-module
 `pub const MEMBERS: &[(&str, NativeFn)]` (`src/native/<mod>.rs`) plus a bodyless `native fn` decl in
@@ -735,7 +769,9 @@ plugin registry: it is two properties and one special-cased name, and a `kind` f
 **Adjacent, same family, already filed:** `gaps.md` **W7-5e** — `Vm::stdout_writes` is a *third*
 per-native property ("did this call write to stdout?") resting on an unenforced invariant. If B is
 done, check whether it folds in as a fourth `Kind` / flag rather than staying a hand-maintained
-assumption.
+assumption. *(Checked when B landed: it does not — see the header above.)*
+
+</details>
 
 ---
 

@@ -18,10 +18,10 @@
 //!   `query_encode(map[str,str])` builds a `k=v&…` query string (both sides percent-encoded, keys
 //!   sorted by raw value for determinism, empty map → "").
 //!
-//! All members are pure CPU str transforms (no I/O), so none are in [`super::is_blocking`] — they run
+//! All members are pure CPU str transforms (no I/O), so all are [`super::Kind::Inline`] on their registry entry — they run
 //! inline on every engine, giving 3-engine parity by construction at the NativeFn seam.
 
-use super::{Host, HostError, NativeFn, NativeRet, expect_args};
+use super::{Host, HostError, Kind, NativeFn, NativeRet, expect_args};
 
 const STD_ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 const URL_ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
@@ -386,21 +386,21 @@ fn url_parse(h: &mut dyn Host) -> Result<NativeRet, HostError> {
     ]))
 }
 
-/// Callable members. `(name, fn)`.
-pub const MEMBERS: &[(&str, NativeFn)] = &[
-    ("base64_encode", base64_encode),
-    ("base64_encode_url", base64_encode_url),
-    ("base64_decode", base64_decode),
-    ("base64_decode_url", base64_decode_url),
-    ("base64_encode_bytes", base64_encode_bytes),
-    ("base64_decode_bytes", base64_decode_bytes),
-    ("hex_encode", hex_encode),
-    ("hex_decode", hex_decode),
-    ("url_encode", url_encode),
-    ("url_decode", url_decode),
-    ("query_encode", query_encode),
-    ("query_decode", query_decode),
-    ("url_parse", url_parse),
+/// Callable members. `(name, fn, kind)`.
+pub const MEMBERS: &[(&str, NativeFn, Kind)] = &[
+    ("base64_encode", base64_encode, Kind::Inline),
+    ("base64_encode_url", base64_encode_url, Kind::Inline),
+    ("base64_decode", base64_decode, Kind::Inline),
+    ("base64_decode_url", base64_decode_url, Kind::Inline),
+    ("base64_encode_bytes", base64_encode_bytes, Kind::Inline),
+    ("base64_decode_bytes", base64_decode_bytes, Kind::Inline),
+    ("hex_encode", hex_encode, Kind::Inline),
+    ("hex_decode", hex_decode, Kind::Inline),
+    ("url_encode", url_encode, Kind::Inline),
+    ("url_decode", url_decode, Kind::Inline),
+    ("query_encode", query_encode, Kind::Inline),
+    ("query_decode", query_decode, Kind::Inline),
+    ("url_parse", url_parse, Kind::Inline),
 ];
 
 #[cfg(test)]

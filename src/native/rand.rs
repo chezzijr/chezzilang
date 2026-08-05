@@ -17,7 +17,7 @@
 //! nondeterministically on the shared global — so engines may diverge ONLY for concurrent draws. The
 //! goldens draw strictly sequentially to stay deterministic on all three engines.
 
-use super::{Host, HostError, NativeFn, NativeRet, expect_args};
+use super::{Host, HostError, Kind, NativeFn, NativeRet, expect_args};
 use std::sync::{Mutex, OnceLock};
 
 /// A process-wide lock serializing every test that draws from the shared global RNG (the unit tests
@@ -131,12 +131,12 @@ fn bool(h: &mut dyn Host) -> Result<NativeRet, HostError> {
     Ok(NativeRet::Bool(draw() & 1 == 1))
 }
 
-/// Callable members. `(name, fn)`.
-pub const MEMBERS: &[(&str, NativeFn)] = &[
-    ("seed", seed),
-    ("float", float),
-    ("int", int),
-    ("bool", bool),
+/// Callable members. `(name, fn, kind)`.
+pub const MEMBERS: &[(&str, NativeFn, Kind)] = &[
+    ("seed", seed, Kind::Inline),
+    ("float", float, Kind::Inline),
+    ("int", int, Kind::Inline),
+    ("bool", bool, Kind::Inline),
 ];
 
 #[cfg(test)]

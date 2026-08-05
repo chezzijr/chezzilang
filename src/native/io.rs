@@ -10,7 +10,7 @@
 //! `intercepted` placeholder below never runs. Errors come back as `Result` values (the engine lowers
 //! `NativeRet::Err` to `Err(msg)`), never panics.
 
-use super::{Host, HostError, NativeFn, NativeRet, expect_args};
+use super::{Host, HostError, Kind, NativeFn, NativeRet, expect_args};
 use std::io::Read;
 
 /// Upper bound on `read_file` input, so a huge or unbounded file (`/dev/zero`, a multi-GB log)
@@ -173,8 +173,8 @@ fn write_file(h: &mut dyn Host) -> Result<NativeRet, HostError> {
 
 /// R2/R2b — placeholder for an engine-intercepted Writer/Reader opener/handle (`create`/`append`/
 /// `stdout`/`stderr`/`buffered`/`open`): `Vm::invoke_native` handles these directly (they allocate a
-/// heap `Writer`/`Reader` handle over an `Arc`'d core), keying on THIS fn's pointer identity, so the
-/// body must never run.
+/// heap `Writer`/`Reader` handle over an `Arc`'d core), keying on their [`Kind::InterceptIo`] registry
+/// entry, so the body must never run.
 pub fn intercepted(_h: &mut dyn Host) -> Result<NativeRet, HostError> {
     Err(HostError {
         message:
@@ -183,27 +183,29 @@ pub fn intercepted(_h: &mut dyn Host) -> Result<NativeRet, HostError> {
     })
 }
 
-/// Callable members. `(name, fn)`. The six Writer/Reader openers/handles resolve to the shared
-/// `intercepted` placeholder — the engine intercepts them by func-pointer identity (see `intercepted`).
-pub const MEMBERS: &[(&str, NativeFn)] = &[
-    ("print", print),
-    ("eprint", eprint),
-    ("read_line", read_line),
-    ("read_all", read_all),
-    ("read_char", read_char),
-    ("flush", flush),
-    ("isatty", isatty),
-    ("isatty_stdin", isatty_stdin),
-    ("isatty_stderr", isatty_stderr),
-    ("input", input),
-    ("_read_file", read_file),
-    ("_write_file", write_file),
-    ("_read_bytes", read_bytes),
-    ("_write_bytes", write_bytes),
-    ("_create", intercepted),
-    ("_append", intercepted),
-    ("stdout", intercepted),
-    ("stderr", intercepted),
-    ("buffered", intercepted),
-    ("_open", intercepted),
+/// Callable members. `(name, fn, kind)`. The four file seams are [`Kind::Blocking`] (dirty-pool
+/// offload); the six Writer/Reader openers/handles are [`Kind::InterceptIo`] — the engine runs them
+/// itself and their shared `intercepted` placeholder never executes; the rest touch host stdio and run
+/// inline.
+pub const MEMBERS: &[(&str, NativeFn, Kind)] = &[
+    ("print", print, Kind::Inline),
+    ("eprint", eprint, Kind::Inline),
+    ("read_line", read_line, Kind::Inline),
+    ("read_all", read_all, Kind::Inline),
+    ("read_char", read_char, Kind::Inline),
+    ("flush", flush, Kind::Inline),
+    ("isatty", isatty, Kind::Inline),
+    ("isatty_stdin", isatty_stdin, Kind::Inline),
+    ("isatty_stderr", isatty_stderr, Kind::Inline),
+    ("input", input, Kind::Inline),
+    ("_read_file", read_file, Kind::Blocking),
+    ("_write_file", write_file, Kind::Blocking),
+    ("_read_bytes", read_bytes, Kind::Blocking),
+    ("_write_bytes", write_bytes, Kind::Blocking),
+    ("_create", intercepted, Kind::InterceptIo),
+    ("_append", intercepted, Kind::InterceptIo),
+    ("stdout", intercepted, Kind::InterceptIo),
+    ("stderr", intercepted, Kind::InterceptIo),
+    ("buffered", intercepted, Kind::InterceptIo),
+    ("_open", intercepted, Kind::InterceptIo),
 ];

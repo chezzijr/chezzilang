@@ -102,12 +102,13 @@ impl Vm {
                     Native {
                         func: crate::native::NativeFn,
                         name: Box<str>,
+                        kind: crate::native::Kind,
                     },
                     Builtin(Box<str>),
                     Cffi(std::sync::Arc<crate::native::cffi::Cffi>),
                     NotCallable,
                 }
-                let kind = match self.heap.get(h) {
+                let callee_kind = match self.heap.get(h) {
                     Obj::Func { proto, home } => Callee::Func {
                         proto: *proto,
                         home: *home,
@@ -116,15 +117,16 @@ impl Vm {
                         proto: *proto,
                         home: *home,
                     },
-                    Obj::Native { func, name } => Callee::Native {
+                    Obj::Native { func, name, kind } => Callee::Native {
                         func: *func,
                         name: name.clone(),
+                        kind: *kind,
                     },
                     Obj::Builtin(name) => Callee::Builtin(name.clone()),
                     Obj::Cffi(c) => Callee::Cffi(std::sync::Arc::clone(c)),
                     _ => Callee::NotCallable,
                 };
-                match kind {
+                match callee_kind {
                     Callee::Func { proto, home } => {
                         // `&...name` (no clone): `check_arity` only formats the message on mismatch.
                         self.check_arity(
@@ -155,7 +157,9 @@ impl Vm {
                         }
                         self.run_proto(proto, home, Some(h), args, true, false, span)
                     }
-                    Callee::Native { func, name } => self.invoke_native(func, &name, args, span),
+                    Callee::Native { func, name, kind } => {
+                        self.invoke_native(func, &name, kind, args, span)
+                    }
                     // A first-class universe builtin fn value (`print`/`ord`/`chr`/`panic`) — route
                     // back into the SAME logic direct calls use. `print` replicates `do_print`'s
                     // value-form defaults (space-join + trailing '\n'; sep=/end= are direct-call-only
@@ -233,31 +237,31 @@ impl Vm {
     /// runs the binding, then lowers its engine-neutral [`NativeRet`] into a heap-allocated `Value`
     /// and pushes it. Lowering (the only allocation) happens here — at an instruction boundary,
     /// after the call returns — so the "collect only at instruction boundaries" GC invariant holds.
+    ///
+    /// `kind` is the native's [`crate::native::Kind`], carried from its registry entry on the
+    /// `Obj::Native` value — it decides EVERYTHING this fn branches on (intercept / offload / timed
+    /// wait / inline). Nothing here compares a native's name to a string literal: that scatter is what
+    /// `docs/future.md` §3c removed, because a new blocking native that forgot to join the old
+    /// `is_blocking` list failed silently.
     pub(super) fn invoke_native(
         &mut self,
         func: crate::native::NativeFn,
         name: &str,
+        kind: crate::native::Kind,
         args: Vec<Value>,
         span: Span,
     ) -> Result<Value, RuntimeError> {
-        // D6 — `std.net.connect` / `listen` are intercepted: they allocate a `Socket`/`Listener`
-        // handle (a heap object over an `Arc`'d core), which a pure off-heap native cannot do. Run
-        // inline in the VM (the `func` placeholder in `net.rs` never executes).
-        if name == "connect" || name == "listen" {
-            return self.net_connect_or_listen(name, args, span);
-        }
-        // R2 — `std.io`'s Writer openers/handles (`create`/`append`/`stdout`/`stderr`/`buffered`) all
-        // resolve to the shared `io::intercepted` placeholder; intercept by FUNC-POINTER identity, NOT
-        // name — the `append` opener collides with `fs.append`'s bare name, and only the func pointer
-        // distinguishes them (`fs::append` is a distinct fn, so it falls through to the `is_blocking`
-        // offload unchanged). They allocate a heap `Writer` handle over an `Arc`'d core, which a pure
-        // off-heap native cannot. Placed AFTER the net name-check (so connect/listen never reach here)
-        // and BEFORE the `is_blocking` offload gate below.
-        if std::ptr::fn_addr_eq(
-            func,
-            crate::native::io::intercepted as crate::native::NativeFn,
-        ) {
-            return self.io_native(name, args, span);
+        use crate::native::Kind;
+        // D6 / R2 — an INTERCEPTED native is run by the engine itself: `std.net.connect`/`listen` and
+        // `std.io`'s Writer/Reader openers all allocate a handle (a heap object over an `Arc`'d core),
+        // which a pure off-heap native cannot do, so their registered placeholder fns never execute.
+        // Both arms must stay AHEAD of the offload gate below. The kind is what distinguishes them:
+        // `std.io::_append` (an opener) and `std.fs::_append` (a syscall) share a bare name, and used
+        // to be told apart only by check ORDER plus a func-pointer identity test.
+        match kind {
+            Kind::InterceptNet => return self.net_connect_or_listen(name, args, span),
+            Kind::InterceptIo => return self.io_native(name, args, span),
+            _ => {}
         }
         // D5 — under the M:N engine, a blocking native call (`read_file` / `sleep_ms` / `fs.*`) is
         // OFFLOADED to the dirty pool rather than run inline, so it can't pin a core worker (the G3
@@ -273,28 +277,22 @@ impl Vm {
         // blocking call to completion, stalling the whole teardown for its full duration, and then
         // keep executing the straight-line statements after it — output M:N never produces. On M:N it
         // also stops a post-cancel `sleep_ms` from delaying the teardown by the full sleep.
-        if self.native_reentry == 0 && crate::native::is_blocking(name) && self.cancel_requested() {
+        if self.native_reentry == 0 && kind.blocks() && self.cancel_requested() {
             self.cancelled = true;
             return Err(self.err("cancelled".to_string(), span));
         }
         if self.mn.is_some()
             && self.native_reentry == 0
-            && crate::native::is_blocking(name)
+            && kind.blocks()
             && let Some(nargs) = self.extract_native_args(&args)
         {
-            // D5 owe #2 — `sleep_ms` rides the timer thread (park + deadline-wake), not a pool thread
-            // (`timer_ms = Some(ms)`). A non-positive (or non-int) `sleep_ms` has nothing to wait for,
-            // so it is NOT offloaded — `offload` stays `None` and execution falls through to the
-            // inline path below (which returns `Nil` instantly). Every other blocking native (the
-            // `io`/`fs`/`request`/`process` set) keeps `timer_ms = None` → the dirty pool.
-            //
-            // ponytail: "is this a timed wait?" is a per-native PROPERTY matched here by bare name, and
-            // `sleep_ms` is named in three arms of this fn alone (here, the `native_reentry > 0` demote
-            // below, and the block-in-place arm) plus `native::is_blocking`. Upgrade path: carry the
-            // property on the registry entry (`Kind::TimedWait`) and match on that — `docs/future.md`
-            // §3c, which also has the cheap interim variant (one `native::kind(name)` classifier).
-            let offload = match name {
-                "sleep_ms" => {
+            // D5 owe #2 — a TIMED WAIT (`sleep_ms`) rides the timer thread (park + deadline-wake), not
+            // a pool thread (`timer_ms = Some(ms)`). A non-positive (or non-int) duration has nothing
+            // to wait for, so it is NOT offloaded — `offload` stays `None` and execution falls through
+            // to the inline path below (which returns `Nil` instantly). Every other blocking native
+            // (the `io`/`fs`/`request`/`process` set) keeps `timer_ms = None` → the dirty pool.
+            let offload = match kind {
+                Kind::TimedWait => {
                     // Copy the duration out first (ends the `nargs` borrow before the move below).
                     let ms = match nargs.first() {
                         Some(crate::native::NativeArg::Int(ms)) if *ms > 0 => Some(*ms as u64),
@@ -336,19 +334,20 @@ impl Vm {
                 return Ok(Value::nil()); // sentinel; never pushed (the `paused()` gate at the call site)
             }
         }
-        // D5 owe #3 Path C (#3) — a `sleep_ms(ms>0)` reached INSIDE a native callback (the offload gate
-        // above is skipped here because it requires `native_reentry == 0`). Rather than run inline and
-        // pin the worker for `ms`, DEMOTE the worker: spawn a replacement + sleep in place + resume. A
-        // non-positive / non-int arg has nothing to wait for → falls through to the inline no-op.
+        // D5 owe #3 Path C (#3) — a timed wait (`ms > 0`) reached INSIDE a native callback (the offload
+        // gate above is skipped here because it requires `native_reentry == 0`). Rather than run inline
+        // and pin the worker for `ms`, DEMOTE the worker: spawn a replacement + sleep in place +
+        // resume. A non-positive / non-int arg has nothing to wait for → falls through to the inline
+        // no-op.
         if self.mn.is_some()
             && self.native_reentry > 0
-            && name == "sleep_ms"
+            && kind == Kind::TimedWait
             && let Some(ms) = args.first().and_then(|v| self.int_val(*v))
             && ms > 0
         {
             return self.demote_block_sleep(ms as u64, span);
         }
-        // W7-16 — every OTHER `sleep_ms(ms>0)`: an eager `Executor` job (`mn == None`), the top-level
+        // W7-16 — every OTHER timed wait with `ms > 0`: an eager `Executor` job (`mn == None`), the top-level
         // `main` thread on either engine, a serial nursery fiber, or a `mn == None` native callback.
         // All of them used to reach `native::time::sleep_ms`'s bare `std::thread::sleep`, which is a
         // hole in every halt the loop it replaces would have checked: `shutdown_now()` at 50 ms against
@@ -362,7 +361,7 @@ impl Vm {
         //
         // `checked_add` saturates a pathological `ms` (centuries) to a far-future deadline rather than
         // panicking on `Instant` overflow, matching the offload path's own saturation above.
-        if name == "sleep_ms"
+        if kind == Kind::TimedWait
             && let Some(ms) = args.first().and_then(|v| self.int_val(*v))
             && ms > 0
         {

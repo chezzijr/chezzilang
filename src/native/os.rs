@@ -8,7 +8,7 @@
 //! sentinel that unwinds past any `recover:` to the top level, where the driver reports it as the
 //! process exit status (clamped to `0..=255`). It is *not* catchable.
 
-use super::{Host, HostError, NativeFn, NativeRet, expect_args};
+use super::{Host, HostError, Kind, NativeFn, NativeRet, expect_args};
 
 fn args(h: &mut dyn Host) -> Result<NativeRet, HostError> {
     expect_args(h, "args", 0)?;
@@ -145,20 +145,20 @@ fn exit(h: &mut dyn Host) -> Result<NativeRet, HostError> {
     })
 }
 
-/// Callable members. `(name, fn)`.
-pub const MEMBERS: &[(&str, NativeFn)] = &[
-    ("args", args),
-    ("env", env),
+/// Callable members. `(name, fn, kind)`.
+pub const MEMBERS: &[(&str, NativeFn, Kind)] = &[
+    ("args", args, Kind::Inline),
+    ("env", env, Kind::Inline),
     // W7-8 — `_`-prefixed = the INTERNAL byte seam (raw `bytes` in/out); the public `getcwd`/`chdir`
     // are bodied `PathLike`/`path.Path` wrappers in `std/os.chz`.
-    ("_getcwd", getcwd),
-    ("exit", exit),
-    ("getpid", getpid),
-    ("platform", platform),
-    ("hostname", hostname),
-    ("home_dir", home_dir),
-    ("_temp_dir", temp_dir),
-    ("environ", environ),
-    ("setenv", setenv),
-    ("_chdir", chdir),
+    ("_getcwd", getcwd, Kind::Inline),
+    ("exit", exit, Kind::Inline),
+    ("getpid", getpid, Kind::Inline),
+    ("platform", platform, Kind::Inline),
+    ("hostname", hostname, Kind::Inline),
+    ("home_dir", home_dir, Kind::Inline),
+    ("_temp_dir", temp_dir, Kind::Inline),
+    ("environ", environ, Kind::Inline),
+    ("setenv", setenv, Kind::Inline),
+    ("_chdir", chdir, Kind::Inline),
 ];

@@ -44,7 +44,7 @@
 //! `cmd`, same injection caveat); `run_args` runs `prog` directly with `args` as the argv vector —
 //! NO shell — so metacharacters in `args` are passed literally and are injection-safe.
 
-use super::{Host, HostError, NativeFn, NativeRet, expect_args};
+use super::{Host, HostError, Kind, NativeFn, NativeRet, expect_args};
 
 /// Run `line` through `sh -c` and capture both streams (the shell form: `cmd`/`run`/`run_bytes`).
 fn spawn_shell(line: &str) -> std::io::Result<std::process::Output> {
@@ -171,13 +171,13 @@ fn run_args(h: &mut dyn Host) -> Result<NativeRet, HostError> {
     Ok(do_run_args(&prog, &args))
 }
 
-/// Callable members. `(name, fn)`.
-pub const MEMBERS: &[(&str, NativeFn)] = &[
-    ("cmd", cmd),
-    ("run", run),
-    ("run_args", run_args),
-    ("run_bytes", run_bytes),
-    ("run_args_bytes", run_args_bytes),
+/// Callable members. `(name, fn, kind)`.
+pub const MEMBERS: &[(&str, NativeFn, Kind)] = &[
+    ("cmd", cmd, Kind::Blocking),
+    ("run", run, Kind::Blocking),
+    ("run_args", run_args, Kind::Blocking),
+    ("run_bytes", run_bytes, Kind::Blocking),
+    ("run_args_bytes", run_args_bytes, Kind::Blocking),
 ];
 
 #[cfg(test)]
