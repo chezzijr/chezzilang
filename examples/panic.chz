@@ -19,14 +19,16 @@ fn main():
     a := recover:
         panic("boom")
     match a:
-        Ok(v): print("ok: {v}")
+        Ok(_): print("ok")
         Err(e): print("recovered: {e.message()}")
 
     # The defer fires as the panic unwinds, before the boundary regains control.
+    # `recover:` over a VOID call yields `Result[nil, Error]`, so the `Ok` arm binds `_`: nil has no
+    # value form, and binding it (`Ok(v)` + `{v}`) is a type error.
     b := recover:
         risky()
     match b:
-        Ok(v): print("ok: {v}")
+        Ok(_): print("ok")
         Err(e): print("recovered: {e.message()}")
 
     # `panic` is bottom-typed, so it type-checks in value position: the if-expression takes the

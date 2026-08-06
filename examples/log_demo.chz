@@ -17,7 +17,9 @@ lg.debug("now-visible")
 lg.set_prefix("[2020-01-01T00:00:00Z]")
 lg.error("stamped")
 
-# (4) The pure, deterministic core → STDOUT (the golden pins this on stdout, not stderr).
+# (4) The pure, deterministic core → STDOUT. `log_demo.expected` pins the STDERR stream only; these
+# two stdout lines are asserted separately by `golden_log_demo_via_run_file`, which also checks the
+# stderr logger's lines do NOT reach stdout (and vice versa).
 print(log.format_line(log.WARN(), "pure"))
 
 # (5) A stdout-target logger (to_stderr=false) → STDOUT.

@@ -14660,23 +14660,15 @@ fn all_shipped_examples_typecheck() {
     // examples/*.chz through the real checked path (build_graph + check_graph, mirroring
     // `chezzi check`) so example type-errors are caught from now on.
     let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("examples");
-    // `panic.chz` is an INTENTIONAL `chezzi check` failure on base (a deliberately run-only demo the
-    // golden VM tests exercise via `run`, which bypasses the checker): a top-level `panic(...)` demo
-    // whose result is used in value position. Allow-listed so this test catches NEW checker
-    // regressions on the OTHER examples without being blocked by that known hole.
-    // (`explicit_type_args.chz` USED to be allow-listed too — its struct-ctor turbofish was wrongly
-    // rejected by a `name_is_generic` keying bug; fixed, so it now type-checks and is verified here.)
-    let known_check_failures = ["panic.chz"];
+    // NO allow-list: every shipped example type-checks. (Two used to be exempt. `explicit_type_args.chz`
+    // was wrongly rejected by a `name_is_generic` keying bug. `panic.chz` bound `Ok(v)` + `{v}` over a
+    // `recover:` of a VOID call — that yields `Result[nil, Error]`, so the interpolation was a real
+    // nil-in-value-position error, NOT the "bottom-typed `panic` in value position" the old comment
+    // blamed: `x := if true: 1 else: panic(...)` checks clean on its own. Both fixed and verified here.)
     let mut entries: Vec<_> = std::fs::read_dir(&dir)
         .expect("examples dir")
         .filter_map(|e| e.ok().map(|e| e.path()))
         .filter(|p| p.extension().and_then(|s| s.to_str()) == Some("chz"))
-        .filter(|p| {
-            !p.file_name()
-                .and_then(|n| n.to_str())
-                .map(|n| known_check_failures.contains(&n))
-                .unwrap_or(false)
-        })
         .collect();
     entries.sort();
     assert!(!entries.is_empty(), "no examples found in {dir:?}");

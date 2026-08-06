@@ -7857,6 +7857,24 @@ no longer a non-goal — complete VM-only support shipped** (see below).
 One bullet per milestone/epic. Full landing detail (TDD notes, review-panel findings, test-count deltas,
 branch names) is in the git log.
 
+- **`examples/panic.chz` type-checks — the last allow-listed example is gone, and its recorded reason
+  was wrong (2026-08-06).** `chezzi check examples/panic.chz` failed with `line 29, col 22: expression
+  returns no value (nil) and cannot be used as a value`, while `checker::tests::all_shipped_examples_typecheck`
+  exempted it as "a top-level `panic(...)` demo whose result is used in value position". **That was not
+  the cause**: `x := if true: 1 else: panic("unreachable")` checks clean on its own. The real one is
+  `recover:` over a VOID call yielding `Result[nil, Error]`, so `Ok(v)` + `"ok: {v}"` interpolated nil.
+  Both arms now bind `Ok(_)`; `panic.expected` is byte-unchanged (the `Ok` arm is never taken — both
+  recoveries yield `Err`). The `known_check_failures` allow-list and its filter are **deleted**: every
+  `examples/*.chz` now type-checks, verified by the test and by a CLI sweep of all of them.
+  Two reports investigated in the same pass turned out to be **not bugs**, and their misleading comments
+  were corrected instead: (1) `channel.expected` / `implicit_nursery.expected` are not serial-only — the
+  measured M:N divergence (21/30, 30/30) is `chezzi run`'s **streamed** sink, where cross-task order is
+  documented-nondeterministic on both engines; the `.expected` files are consumed only by lib tests on
+  the **buffered** sink (`HostConfig::stream = false`), which is deterministic on serial and M:N alike,
+  which is why the goldens' exact M:N asserts do not flake. (2) `log_demo.expected` is not stale — it
+  pins the STDERR stream by design and `golden_log_demo_via_run_file` asserts the two stdout lines
+  separately, plus the cross-stream discrimination. Both examples now say so in their header comments.
+
 - **Refactor — a native's behavioural properties now ride its REGISTRY ENTRY, so forgetting one is a
   compile error (2026-08-05, `docs/future.md` §3c option B + the interception fold).** A native's
   properties used to live in string matches far from where it is registered: a 40-name `is_blocking`
