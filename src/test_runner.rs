@@ -1223,11 +1223,18 @@ struct Suite:
         }
     }
 
-    /// W7-26 — the same backlog held by an `Executor`'s RESULTS. `--max-heap` read only the core's
-    /// `inner` queue, which is the `--serial` half: the default M:N engine runs `submit` eagerly, so
-    /// `inner` stays empty and each finished job's result lands in `eager` instead. Measured on the
-    /// release binary: **PASS, rc=0, peak RSS 313 MB** against an 8 MB cap (→ OVER-MEMORY at 11 MB
-    /// after the fix). Both engines, because each one exercises a different half.
+    /// W7-26 — the same backlog held by an `Executor`'s finished jobs. `--max-heap` read only the
+    /// core's `inner` queue, which is the `--serial` half: the default M:N engine runs `submit`
+    /// eagerly, so `inner` stays empty and each finished job's outcome lands in `eager` instead,
+    /// reached by `live_bytes` nowhere. Both engines, because each one exercises a different half.
+    ///
+    /// W7-27 re-base: the backlog is the jobs' buffered OUTPUT, not their return values. Return
+    /// values are no longer retained at all (nothing can read them — see
+    /// `executor_results_are_not_retained`), so `out`/`stderr` are what the eager accounting still
+    /// has to count: they are held to the job's task-order slot for the W7-5c flush, unbounded.
+    /// Re-measured on the release binary for the program BELOW, not inherited from the pre-re-base
+    /// one: `chezzi test --max-heap=8000000` → **OVER-MEMORY, rc=1, peak RSS 30 MB**, and the
+    /// generous-cap control → **PASS, rc=0, peak 67 MB**.
     ///
     /// The negative direction is in the same test: a generous cap must still PASS, or the fix is
     /// just a way to fail everything.
@@ -1235,21 +1242,23 @@ struct Suite:
     fn over_memory_counts_an_executor_result_backlog() {
         const CAP: usize = 8_000_000;
         let d = TmpDir::new();
-        // ~1 MB blob built once and returned by 300 jobs. The blob is CAPTURED, so each submit also
-        // wires it — which is what paces the parent's sweeps (a job building its own payload leaves
-        // the parent with nothing to trigger a GC on; see the sampling residual on the gaps.md row).
+        // ~100 KB blob built once, CAPTURED by 300 jobs that each print it — 30 MB of buffered
+        // output held until `shutdown()`. The capture is load-bearing twice over: on `--serial` it
+        // is the queued task closure that trips the cap, and on M:N wiring it at each submit is what
+        // paces the parent's sweeps (a job building its own payload leaves the parent with nothing
+        // to trigger a GC on; see the W7-26r sampling residual on the gaps.md row).
         let ex = d.write(
             "ex_test.chz",
             "import std.concurrency\n\ntest fn execres():\n    parts: List[str] = []\n    \
-             for i in range(100000):\n        parts.push(\"0123456789\")\n    \
+             for i in range(10000):\n        parts.push(\"0123456789\")\n    \
              blob := \"\".join(parts)\n    ex := Executor()\n    for i in range(300):\n        \
-             ex.submit(fn() -> str: blob)\n    ex.shutdown()\n    assert true\n",
+             ex.submit(fn(): print(blob))\n    ex.shutdown()\n    assert true\n",
         );
         for parallel in [false, true] {
             let report = run_tests_capped(&ex, parallel, CAP);
             assert!(
                 report.text.contains("OVER-MEMORY execres"),
-                "an executor's result backlog must trip the cap (parallel={parallel}); \
+                "an executor's buffered-output backlog must trip the cap (parallel={parallel}); \
                  report:\n{}",
                 report.text
             );
@@ -1266,6 +1275,41 @@ struct Suite:
                 generous.text
             );
         }
+    }
+
+    /// W7-27 — an `Executor` job's RETURN VALUE is not retained. `submit` returns nil (Chezzi has no
+    /// futures) and `reduce_task_slots` reads only `out`/`stderr`, yet the eager path kept every
+    /// result until `shutdown()`. Measured uncapped (`chezzi run`, peak RSS, 300 × ~1 MB discarded):
+    /// a job BUILDING its own payload **339 MB → 45 MB** against CPython 3.14.6
+    /// `ThreadPoolExecutor`'s **42 MB** with futures discarded identically; the CAPTURED program
+    /// this test runs **666 MB → 410 MB**, whose remainder is not results at all but 300 queued
+    /// `ReadyWorker`s each holding their own wire copy of the capture (`W7-26r`'s pool-queue sibling,
+    /// still open — which is exactly why the assertion below is the cap, not RSS).
+    ///
+    /// The cap is the in-tree PROXY for the retention claim: with `W7-26`'s accounting live, a
+    /// retained result backlog is what `--max-heap` sees, so this program is `OVER-MEMORY` pre-fix
+    /// (it *was* `over_memory_counts_an_executor_result_backlog`) and must now PASS. The capture is
+    /// deliberate: it is what wires bytes at each submit and paces the parent's sweeps. M:N only —
+    /// `--max-heap` is an M:N cap, and on `--serial` the same program trips on its queued closures.
+    #[test]
+    fn executor_results_are_not_retained() {
+        const CAP: usize = 8_000_000;
+        let d = TmpDir::new();
+        // ~1 MB blob, captured (so each submit wires it and paces the parent's sweeps) and RETURNED
+        // by 300 jobs. Nothing reads those 300 MB, so nothing may hold them.
+        let ex = d.write(
+            "ret_test.chz",
+            "import std.concurrency\n\ntest fn execret():\n    parts: List[str] = []\n    \
+             for i in range(100000):\n        parts.push(\"0123456789\")\n    \
+             blob := \"\".join(parts)\n    ex := Executor()\n    for i in range(300):\n        \
+             ex.submit(fn() -> str: blob)\n    ex.shutdown()\n    assert true\n",
+        );
+        let report = run_tests_capped(&ex, true, CAP);
+        assert!(
+            report.text.contains("PASS execret"),
+            "300 discarded ~1 MB job results must not be retained; report:\n{}",
+            report.text
+        );
     }
 
     /// W6-10r — the same backlog, reachable only through a NESTED core. `live_bytes` reaches a

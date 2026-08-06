@@ -608,6 +608,11 @@ impl EagerState {
     /// The finished jobs' return values, for the nested-core walk in
     /// [`queue_bytes_deep`] — the [`ExecState::iter`] counterpart. Only `Done` carries a value; the
     /// other outcomes own buffered output only, already in `bytes`.
+    ///
+    /// W7-27: in the bin build every `Done` value is `WireValue::Nil` (nothing can read a job's
+    /// result, so it is dropped rather than retained), which makes this walk a `Nil` match per slot.
+    /// Kept anyway — it is what the accounting would need again the day a result IS stored, and the
+    /// `Nil` arm costs nothing; the unit tests store real values through `EagerState::finish`.
     pub fn values(&self) -> impl Iterator<Item = &WireValue> {
         self.slots.iter().filter_map(|s| match s {
             Some(super::TaskOutcome::Done(r)) => Some(&r.value),

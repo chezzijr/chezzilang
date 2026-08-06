@@ -860,7 +860,10 @@ impl Heap {
                 // `inner` is the `--serial` QUEUE, while on the default M:N engine `submit` runs
                 // EAGERLY, so `inner` stays empty forever and every finished job's result lands in
                 // `eager` instead (300 × ~1 MB of results measured **PASS at 313 MB against an
-                // 8 MB cap** while only `inner` was read). Exactly one half is ever non-zero for a
+                // 8 MB cap** while only `inner` was read). W7-27 — what a finished job leaves in
+                // `eager` is now its buffered `out`/`stderr` only: the return value is dropped, since
+                // nothing can read it. Those buffers are unbounded on their own (held to the W7-5c
+                // task-order flush), so this arm is needed either way. Exactly one half is ever non-zero for a
                 // given executor, but summing is what keeps this honest — the same argument the
                 // `Executor(pending=…)` display already makes. The locks are taken SEQUENTIALLY,
                 // and even nested they would keep the `inner → eager` order the submit arm

@@ -1315,9 +1315,11 @@ struct Handler {
 /// B3.2 — what a run isolated worker hands back across the airlock: the task's return value
 /// serialized in the worker heap, plus the worker's captured stdout/stderr (decision F —
 /// buffer-per-worker, returned to the parent rather than interleaved live).
-// `value` is read only by the worker unit tests: the `--parallel` join discards each task's return
-// value (data exits a spawn via `Shared`/`Channel`, not a return), so the field is dead in the bin
-// build — hence the allow. `out`/`stderr` are live (flushed at join).
+// `value` is read only by the worker unit tests (`ReadyWorker::run`, `#[cfg(test)]`): the join
+// discards each task's return value (data exits a spawn via `Shared`/`Channel`, not a return), so
+// the field is dead in the bin build — hence the allow. W7-27: every bin-build producer therefore
+// stores `WireValue::Nil` — a stored result is retained until the nursery join / `shutdown()`, and a
+// value nothing reads is pure retention. `out`/`stderr` are live (flushed at join).
 #[allow(dead_code)]
 #[derive(Debug)]
 struct WorkerResult {
@@ -3424,8 +3426,19 @@ impl ReadyWorker {
                         self.worker.ensure_crossable(&value, span).map(|()| value)
                     });
                     match crossed {
-                        Ok(value) => TaskOutcome::Done(WorkerResult {
-                            value,
+                        // W7-27 — the crossed value is DROPPED here, not stored. Nothing can read
+                        // it: `submit` returns nil (no futures) and `reduce_task_slots` reads only
+                        // `out`/`stderr`, so retaining it held every job's result for the executor's
+                        // whole lifetime — 300 × ~1 MB measured at 336 MB peak RSS against CPython
+                        // `ThreadPoolExecutor`'s 42 MB. The M:N nursery path stores `Nil` for the
+                        // same reason (`sched.rs`, `run_mn_nursery`'s outcome). The crossing above
+                        // still runs, and dropping its product does not make it dead: `to_wire_at`
+                        // is FALLIBLE — a return value that cannot cross (a generator closing a
+                        // reference cycle, a depth/size cap) must fault at the submit site with the
+                        // task's real span. (A plain non-sendable generator is not that case: it
+                        // wires to an inert `Nil` and faults only when reached — B3.3's Option B.)
+                        Ok(_) => TaskOutcome::Done(WorkerResult {
+                            value: WireValue::Nil,
                             out: std::mem::take(&mut self.worker.out),
                             stderr: std::mem::take(&mut self.worker.stderr),
                         }),

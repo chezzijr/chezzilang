@@ -59,8 +59,8 @@ chronological log.
 | `List[Any]` widening | `:1731` | `List[Any] = [1, 3.0]` silently widens the int to `1.0` | Deferred pre-freeze (wave 4) |
 | **N10** | `:3456` | A `wait:` timer arm makes `--serial` inline-sleep instead of yielding to a runnable sibling (serial ≠ M:N) | Deliberate pre-freeze known-limit; fix is folded into the post-freeze serial-engine removal |
 | ~~**W6-10s**~~ | `:1349` | `--max-heap` residual **sampling** escapes left after the byte-aware pacing fix | Pacing samples the cap on charged off-heap bytes, but only for stores routed through `to_wire_crossable` and only per heap. Still not sampled: the documented inline-scalar loop (`future.md §1b` — no `Obj`s, no wire bytes), the by-hand airlock paths (spawn args, closure captures, `Executor.submit`), and a heap that HOLDS a huge core without storing to it. **Premise partly re-derived 2026-08-06 and it did NOT hold**: the `Executor.submit` arm is the only one of the three that stores persistently off-heap, and it does so ONLY on `--serial` (M:N executes eagerly and queues nothing) — which `--max-heap` refuses at the CLI (`main.rs:685`), so that arm is unreachable. The spawn-arg / capture arms are transient: `prepare_worker` rebuilds them into a worker heap immediately. What IS reachable was measured instead and is a different mechanism: a worker heap **born big** — `spawn use(blob)` with a 200 000-int `blob` PASSED `--max-heap=8000000`, and adding ONE allocating statement to the spawned fn turned the same program OVER-MEMORY at the same RSS, because the payload arrives in ~7 objects so `since_gc` never reaches `next_gc` and `sweep()` — the sole assigner of `over_cap` — never runs. Charging bytes in `Heap::alloc` does NOT fix it: these containers are alloc'd EMPTY and patched via `get_mut` (the tie-the-knot rebuild), so there is nothing to charge at alloc time. **FIXED 2026-08-06** by `Heap::request_collect`: `Vm::spawn_worker` — the one door every worker heap is born through, and where the cap is already threaded — asks for the first collect whenever a cap is live, and the flag is consumed at the task's first instruction boundary in `run_until` (the first properly-rooted point; it is set before the payload is rebuilt, which is safe because `Heap::alloc` never collects). `spawn use(blob)` with `use = return xs.len()` at `--max-heap=1000000`: **PASS → OVER-MEMORY**, with the generous-cap, no-cap and 50-spawn controls all still PASS. **Two residuals stay open and are NOT claimed fixed** (both measured, neither introduced by the fix): (a) a task whose ENTIRE body is one native call (`spawn blob.len()`) executes no bytecode, so it reaches no instruction boundary and the flag is never consumed — and there is no safe sample point in that window, since the payload is rooted only as the pending call's operands (collect before the call and you free the task's own arguments; after it the receiver is already dead); (b) growth AFTER the sample that allocates no `Obj`s — `xs.push(i)` grew a worker heap 32× past the cap post-sweep and never re-triggered, which is `future.md §1b`. So the fix narrows "the verdict tracks who allocates" to bytecode-running tasks; it does not make `--max-heap` total |
-| **W7-27** | `:6960` | An `Executor` job's RETURN VALUE is retained until `shutdown()` even though nothing can ever read it — `Executor.submit` returns nil (no futures), `WorkerResult.value` is `#[allow(dead_code)]` ("the field is dead in the bin build", `vm/mod.rs:1318`), and `reduce_task_slots` reads only `out`/`stderr`. So M:N holds every result for the executor's whole lifetime | **Measured 2026-08-06 against the owning ancestor, found by adversarial review of the `W7-26` fix.** 300 × `ex.submit` of a job returning ~1 MB, results discarded — **Chezzi peak RSS 313 MB (captured blob) / 330 MB (job builds its own), CPython `ThreadPoolExecutor` 17 MB / 31 MB** (3.14.6, `resource.ru_maxrss`, futures discarded exactly as Chezzi discards them). A ~10–19× drift on the type Chezzi explicitly models on `ThreadPoolExecutor`, and it needs NO cap to bite: a plain `chezzi run` holds the same 313 MB. This is a RETENTION bug, not `W7-26`'s accounting one — `W7-26` makes the bytes visible to `--max-heap`, this frees them. The M:N nursery path already stores `value: WireValue::Nil` (`sched.rs:1746`), so the fix is that same drop on the eager path; the accounting stays needed either way (`out`/`stderr` are unbounded too). **Note for whoever takes it:** dropping the value makes the `W7-26` repro stop overshooting, so `test_runner::over_memory_counts_an_executor_result_backlog`'s M:N arm must be re-based onto buffered OUTPUT rather than return values |
-| **W7-26r** | `:6929` | `--max-heap` residual left by the `W7-26` fix: an `Executor` whose jobs BUILD their own payload (no capture) accumulates the whole backlog while the parent is blocked inside `shutdown()`'s join, where nothing samples the cap | The results ARE counted — adding one allocating statement to the parent turns the same program OVER-MEMORY, rc=1 — but `over_cap` is assigned only in `sweep()`, and a fiber parked in a native join reaches no instruction boundary and has no safely-rooted point to sweep at. 300 × ~1 MB **PASS at 330 MB** against an 8 MB cap. This is the `W6-10s` SAMPLING class (its open residual (a), "a task whose entire body is one native call"), not `W7-26`'s accounting one: closing it means moving to the `--timeout` model (a watchdog observation site) rather than sampling at `sweep`, which is a design change to the cap. Sibling, also uncounted: a submitted-but-not-started job in the process-global pool queue is owned by no heap, and a per-heap cap needs an owner |
+| ~~**W7-27**~~ | `:6971` | **FIXED 2026-08-06 (found by adversarial review of the `W7-26` fix; premise re-measured on the release binary before any edit).** An `Executor` job's RETURN VALUE was retained until `shutdown()` even though nothing can ever read it — `submit` returns nil (no futures), `WorkerResult.value` is `#[allow(dead_code)]`, and `reduce_task_slots` reads only `out`/`stderr`. 300 × `ex.submit` of a job **building** its own ~1 MB str, results discarded, uncapped `chezzi run`: **peak RSS 339 MB → 45 MB**, against CPython 3.14.6 `ThreadPoolExecutor`'s **42 MB** (futures discarded identically, `resource.ru_maxrss`) — an ~8× drift closed to parity, and it needed NO cap to bite. One line in `ReadyWorker::run_outcome`: the `Done` outcome stores `WireValue::Nil`, exactly like the M:N nursery path. `to_wire_at` + `ensure_crossable` still run, and dropping their product does not make them dead: `to_wire_at` is FALLIBLE, so a return value that cannot cross (a generator closing a reference cycle, a depth/size cap) still faults at the submit site with the task's real span — the fault contract is the crossing, not the storage. `W7-26`'s accounting stays: `out`/`stderr` are unbounded on their own | **RETENTION and ACCOUNTING are separate bugs on the same bytes, and fixing one re-bases the other's test.** `W7-26` made these bytes visible to `--max-heap`; this frees them — so its M:N repro stopped overshooting and `over_memory_counts_an_executor_result_backlog` was re-based onto buffered OUTPUT (300 jobs printing ~100 KB), which is what the eager accounting still has to count. The old return-value program became the inverse fence, `executor_results_are_not_retained`: same 8 MB cap, must now PASS. **Residual, unchanged and already filed on `W7-26r`:** the CAPTURED-blob variant is still **410 MB** (was 666 MB) — each `submit` wires its own ~1 MB copy of the capture into a `ReadyWorker` that queues in the process-global pool, owned by no heap. CPython holds 17 MB there because a captured `str` is shared by reference, which Chezzi's by-value airlock cannot do |
+| **W7-26r** | `:6929` | `--max-heap` residual left by the `W7-26` fix: an `Executor` whose jobs BUILD their own payload (no capture) accumulates the whole backlog while the parent is blocked inside `shutdown()`'s join, where nothing samples the cap | The results ARE counted — adding one allocating statement to the parent turns the same program OVER-MEMORY, rc=1 — but `over_cap` is assigned only in `sweep()`, and a fiber parked in a native join reaches no instruction boundary and has no safely-rooted point to sweep at. 300 × ~1 MB **PASS at 330 MB** against an 8 MB cap. This is the `W6-10s` SAMPLING class (its open residual (a), "a task whose entire body is one native call"), not `W7-26`'s accounting one: closing it means moving to the `--timeout` model (a watchdog observation site) rather than sampling at `sweep`, which is a design change to the cap. Sibling, also uncounted: a submitted-but-not-started job in the process-global pool queue is owned by no heap, and a per-heap cap needs an owner — **measured 2026-08-06 while fixing `W7-27`**: with the results freed, a 300 × `ex.submit(fn() -> str: blob)` capturing a ~1 MB blob still peaks at **410 MB** uncapped (`chezzi run`), which is 300 queued wire copies of the capture and nothing else |
 | ~~**W7-26**~~ | `:6871` | **FIXED 2026-08-06 (found by adversarial review of the `W6-10r` fix, premise re-derived on the release binary before any edit).** `--max-heap` read only the `Executor` core's `inner` QUEUE half, which is the `--serial` half: on the default M:N engine `submit` runs EAGERLY (matching `ThreadPoolExecutor`), so `inner` stays empty forever and every finished job's result lands in `eager.slots` as `TaskOutcome::Done(WorkerResult { value, out, stderr })` — reached by `live_bytes` nowhere. `Executor()` + a ~1 MB blob + `300 × ex.submit(fn() -> str: blob)` + `shutdown()` under `--max-heap=8000000`: **PASS, rc=0, peak RSS 313 MB → OVER-MEMORY, rc=1, 11 MB**; generous-cap (4 GB) and no-cap controls still PASS. `EagerState` gained the `(bytes, dirty)` summary `ChanState`/`ExecState` already carry, maintained in `finish`/`take_slots` over a PRIVATE slot vector (so no site can forget), and the `live_bytes` arm now sums BOTH halves. The charge is **unconditional**, unlike the `mem_cap != 0` gates elsewhere in this family: it fires once per finished job beside a thread handoff, and both ancestors keep accounting live with the *limit* separate (Go's `runtime.MemStats` vs `GOMEMLIMIT`). Rooting unchanged and now FENCED rather than reasoned about — a result crosses by value with no parent-heap `GcRef` (B3.2, enforced by `ensure_crossable`), asserted by a `debug_assert!(!w.has_handle())` in `outcome_summary` that says `Heap::children` needs an eager arm if it ever fires | **Counting is worthless if nothing samples, and the fix's first cut proved it twice.** With the accounting alone the repro tripped at **180 MB**, not 11 MB: `submit` wires the closure but nothing charged the RESULTS against the parent's GC pacing counter, so the parent swept only on its own `Obj` growth — closed by `EagerState::take_charge` (growth-since-last-read, charged at `submit` under a live cap). A SECOND shape survives even that and is filed below as an open residual, because it is the W6-10s sampling class rather than this one: a job that BUILDS its own payload (`ex.submit(mk)`, no capture) wires ~nothing at submit and all 300 submits complete before any job finishes, so `take_charge` sees 0 each time and the whole 330 MB accumulates while the parent is blocked inside `shutdown()`'s join — where there is no sample point at all. Adding ONE allocating statement to the parent turns that same program OVER-MEMORY (rc=1), which is what proves the accounting half is right and the gap is purely observational |
 | **W6-9r** | `:1473` | Parity-oracle residual left by the `W6-9b` fix: ~31 hand-rolled `run_file_p` + `run_file` cross-engine compares in `parity_tests.rs` still diff LOSSILY-DECODED strings, and `parity_entry_cfg_lines` compares stdout as an order-insensitive line multiset | The three SHARED comparators were fixed at the helper level (0 call sites touched); converting the hand-rolled ones means rewriting ~31 call sites. UTF-8-only today, so nothing is failing — but a new byte-emitting test added at one of those sites inherits the blindness. Use `vm::run_file_bytes` there |
 | ~~**W6-10r**~~ | `:1390` | `--max-heap` residual: a payload reachable ONLY through a **nested** core (a `Channel` inside a `Shared`, once the nested core's last `Obj` alias slot is swept) is counted nowhere | **Premise re-derived and CONFIRMED 2026-08-06** before any edit (the two preceding rows in this family had premises that had gone stale): `make() -> Shared[Channel[str]]` parking a channel whose only alias slot dies with the frame, then 300 × ~1 MB `s.get().send(blob)` → **PASS, rc=0, peak RSS 304 MB** against `--max-heap=8000000`, while the identical program holding the channel in a live local tripped OVER-MEMORY. **FIXED 2026-08-06**: `core::nested_core_bytes` — the byte mirror of `collect_core_gcrefs`, which already recursed into nested cores for ROOTING (only the byte walk stopped at the boundary) — plus `queue_bytes_deep` / `value_core_bytes_deep`, called from `Heap::live_bytes`. The recursion shares `live_bytes`'s per-heap `Arc`-identity set, so a nested core that also has an alias slot here is still charged exactly once, and it fills a `WS_UNKNOWN` summary in passing (every core constructor leaves it UNKNOWN, and a core reached only through a parent is never marked through a slot of its own — without the fill it reports 0 forever). Gated on `mem_cap != 0`, the same argument as the round-3 pacing counter: cap-off runs (every `chezzi run`, every bench, the whole parity gate) pay one `!= 0` load and ZERO extra walks. Repro: **PASS @ 304 MB → OVER-MEMORY, rc=1, 16.5 MB**; generous-cap and no-cap controls still PASS. Tests `vm::heap::live_bytes_counts_a_nested_core_with_no_alias_slot` (cap-off unchanged / cap-on charges / alias-slot de-dup) + `test_runner::over_memory_counts_a_nested_core_backlog` (both engines), both mutation-verified red with the walk disabled |
@@ -6957,39 +6957,76 @@ CPython's own.
 > heap. In the capturing repro above that is what the remaining 11 MB → 180 MB spread was made of.
 > A cap is per-heap by definition, so charging it needs an owner to charge it to.
 
-### W7-27 — an `Executor` job's return value is retained though nothing can read it (10–19× the ancestor) — **OPEN (measured 2026-08-06)**
-
-> Also found by adversarial review of the `W7-26` fix, and the sharper half of it: `W7-26` makes
-> these bytes *visible* to the cap, this row is about the fact that they exist at all.
->
-> | 300 jobs returning ~1 MB, results discarded | Chezzi peak RSS | CPython 3.14.6 `ThreadPoolExecutor` |
-> |---|---|---|
-> | blob captured (`ex.submit(fn() -> str: blob)`) | **313 MB** | **17 MB** |
-> | job builds its own (`ex.submit(mk)`) | **330 MB** | **31 MB** |
->
-> (CPython measured with `resource.getrusage(...).ru_maxrss`, futures discarded exactly as Chezzi
-> discards them — `for i in range(300): ex.submit(mk)`, no list of futures kept.)
->
-> **Nothing can read the retained value.** `Executor.submit` returns nil (Chezzi has no futures),
-> `WorkerResult.value` is `#[allow(dead_code)]` with the in-tree note *"the field is dead in the bin
-> build"* (`vm/mod.rs:1318`), and `Vm::reduce_task_slots` reads only `out`/`stderr`. The M:N NURSERY
-> path already stores `value: WireValue::Nil` (`sched.rs:1746`) for exactly this reason — the eager
-> executor path is the one place that still keeps it, for its whole lifetime.
->
-> **Why it is filed, not bundled into `W7-26`.** Different mechanism and different fix: `W7-26` is
-> accounting (and is needed regardless — `out`/`stderr` are unbounded on their own), this is
-> retention, and it bites with **no cap at all** — a plain `chezzi run` holds the same 313 MB where
-> the ancestor holds 17 MB. Also it is a **breaking-ish** change to this row's own tests: with the
-> value dropped, the `W7-26` repro stops overshooting, so
-> `test_runner::over_memory_counts_an_executor_result_backlog`'s M:N arm has to be re-based onto
-> buffered OUTPUT instead of return values. Whoever takes this does both in one commit.
->
-> ### Tests
+> ### Tests (`W7-26`)
 >
 > `vm::heap::live_bytes_counts_an_executors_eager_results` (results register cap-OFF and cap-ON, a
 > core nested in a result is charged under a cap, `take_slots` returns to baseline),
 > `vm::core::eager_charge_reports_growth_only` (delta semantics, and a post-drain result charging in
 > full rather than being swallowed by a stale watermark), and
 > `test_runner::over_memory_counts_an_executor_result_backlog` (the repro on BOTH engines — each
-> exercises a different half — plus the generous-cap negative direction). All mutation-verified:
-> deleting the charge in `finish` turns the first and third red.
+> exercises a different half — plus the generous-cap negative direction; **re-based onto buffered
+> OUTPUT by `W7-27`**, since return values are no longer retained for it to count). All
+> mutation-verified: deleting the charge in `finish` turns the first and third red.
+
+### W7-27 — an `Executor` job's return value was retained though nothing can read it (~8× the ancestor) — **FIXED 2026-08-06**
+
+> Also found by adversarial review of the `W7-26` fix, and the sharper half of it: `W7-26` makes
+> these bytes *visible* to the cap, this row is about the fact that they existed at all. Premise
+> re-measured on the release binary before any edit.
+>
+> ```chezzi
+> import std.concurrency
+> fn mk() -> str: …                 # builds its own ~1 MB blob
+> ex := Executor()
+> for i in range(300):
+>     ex.submit(mk)                 # `submit` returns nil — the result is unreachable
+> ex.shutdown()
+> ```
+>
+> Numbers below are **uncapped `chezzi run`** peak RSS. `W7-26`'s 313 MB for the same captured
+> program is not a contradiction: that was `chezzi test --max-heap=8000000`, a ~15× different
+> harness (the runner caps, sweeps and reports; measured post-fix at 28 MB vs 423 MB for the same
+> program) — always compare within one harness.
+>
+> | 300 jobs, ~1 MB each, results discarded | before | after | CPython 3.14.6 `ThreadPoolExecutor` |
+> |---|---|---|---|
+> | job builds its own (`ex.submit(mk)`) | **339 MB** | **45 MB** | **42 MB** |
+> | blob captured (`ex.submit(fn() -> str: blob)`) | **666 MB** | **410 MB** | **17 MB** |
+>
+> (Peak RSS, no cap involved. CPython measured with `resource.getrusage(...).ru_maxrss`, futures
+> discarded exactly as Chezzi discards them — `for i in range(300): ex.submit(mk)`, no list kept.)
+>
+> **Nothing can read the retained value.** `Executor.submit` returns nil (Chezzi has no futures),
+> `WorkerResult.value` is `#[allow(dead_code)]`, and `Vm::reduce_task_slots` reads only
+> `out`/`stderr`. The M:N NURSERY path already stored `value: WireValue::Nil` for exactly this
+> reason — the eager executor path was the one place that still kept it, for the executor's whole
+> lifetime.
+>
+> **Fix.** One line in `ReadyWorker::run_outcome` (`vm/mod.rs`): the `Done` outcome stores
+> `WireValue::Nil` and the crossed value is dropped. `to_wire_at` + `ensure_crossable` still run —
+> **the crossing is the FAULT contract, not the storage**: `to_wire_at` is the fallible half, so a
+> return value that cannot cross (a generator closing a reference cycle, a depth/size cap) still
+> faults at the submit site with the task's real span, independent of whether anyone keeps the wire
+> form. (A *plain* returned generator is not that case — B3.3's Option B wires it to an inert `Nil`
+> that faults only when reached, verified post-fix: `ex.submit(g)` with `fn g() -> Iterator[int]`
+> runs clean, rc=0.) `W7-26`'s accounting is untouched and still needed: `out`/`stderr` are
+> unbounded on their own, and the value arm of `outcome_summary` / `EagerState::values` now costs a
+> `Nil` match — kept, not deleted, so the walk does not have to be re-derived if a result is ever
+> stored again.
+>
+> **Residual (unchanged, already filed under `W7-26r`).** The CAPTURED variant is still 410 MB: each
+> `submit` wires its OWN ~1 MB copy of the capture into a `ReadyWorker` that then queues in the
+> process-global pool, owned by no heap and freed only when the job runs. CPython holds 17 MB there
+> because a captured `str` is shared by reference — which the by-value airlock (B3.2) cannot do, so
+> that half is an isolation-model cost, not this bug.
+>
+> ### Tests
+>
+> `test_runner::executor_results_are_not_retained` — the pre-fix `W7-26` program (300 jobs returning
+> a captured ~1 MB blob) must now **PASS** the same 8 MB cap. The cap is the in-tree PROXY for the
+> RSS claim: with `W7-26`'s accounting live, a retained backlog is exactly what `--max-heap` sees,
+> which is why the identical program was `OVER-MEMORY` before. M:N only — `--max-heap` is an M:N cap,
+> and `--serial` trips on its queued task closures instead. Plus the re-based
+> `test_runner::over_memory_counts_an_executor_result_backlog` above. Both mutation-verified:
+> restoring `value` turns the first red; deleting the charge in `EagerState::finish` turns the
+> second's M:N arm red.

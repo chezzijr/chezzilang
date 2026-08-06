@@ -26,6 +26,30 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > the diff against real CPython output found them. **`adversarial-review` is not optional after a
 > green gate — it is the only stage that has ever caught this class here.**
 
+> **✅ W7-27 FIXED 2026-08-06 — an `Executor` job's RETURN VALUE was retained until `shutdown()`
+> although nothing can read it.** `submit` returns nil (no futures), `reduce_task_slots` reads only
+> `out`/`stderr`, `WorkerResult.value` is `#[allow(dead_code)]` — and the M:N nursery path already
+> stored `Nil`; the eager executor path was the one holdout, keeping every result for the executor's
+> whole lifetime. 300 jobs each building a ~1 MB str, results discarded, uncapped `chezzi run`: **peak RSS 339 MB → 45 MB**,
+> against CPython 3.14.6 `ThreadPoolExecutor`'s **42 MB** with futures discarded identically — ~8×
+> drift closed to parity, and it needed no cap to bite. One line in `ReadyWorker::run_outcome`:
+> `Done` stores `WireValue::Nil`. `to_wire_at` + `ensure_crossable` still run — **the crossing is the
+> fault contract, not the storage**: `to_wire_at` is fallible, so a return value that cannot cross (a
+> generator closing a reference cycle, a depth/size cap) still faults at the submit site with the
+> task's real span. `W7-26`'s accounting stays: `out`/`stderr` are unbounded on their own.
+>
+> **Tests.** New `test_runner::executor_results_are_not_retained` — the pre-fix `W7-26` program must
+> now PASS the same 8 MB cap (the cap is the in-tree proxy for the RSS claim; M:N only, since
+> `--serial` trips on its queued closures). `over_memory_counts_an_executor_result_backlog` re-based
+> onto buffered OUTPUT (300 jobs printing ~100 KB), which is what the eager accounting still has to
+> count. Mutation-verified red both ways: restoring `value` kills the first, deleting the charge in
+> `EagerState::finish` kills the second's M:N arm.
+>
+> **Still open, unchanged, filed under `W7-26r`:** the CAPTURED-blob variant is 410 MB (was 666 MB) —
+> each `submit` wires its own copy of the capture into a `ReadyWorker` queued in the process-global
+> pool, owned by no heap. CPython's 17 MB there comes from sharing the `str` by reference, which the
+> by-value airlock cannot do. Full write-up: `docs/gaps.md` **§W7-27**.
+
 > **✅ W7-26 FIXED 2026-08-06 — `--max-heap` never counted an `Executor`'s EAGER half, which is the
 > only half the default M:N engine uses.** `ExecutorCore` has two payload halves; `Heap::live_bytes`
 > read only `inner`, the `--serial` QUEUE. On M:N `submit` runs EAGERLY (matching
@@ -72,8 +96,8 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > correction. Dismissed: the `has_handle` `debug_assert` is a tautology on the only path that reaches
 > it (`ensure_crossable` is the same predicate).
 >
-> **Filed, NOT fixed here — `W7-27`, and it is the sharper bug.** An eager job's RETURN VALUE is
-> retained until `shutdown()` although nothing can read it (`submit` returns nil, `WorkerResult.value`
+> **Filed, NOT fixed here — `W7-27`, and it is the sharper bug (FIXED in the next commit, above).**
+> An eager job's RETURN VALUE was retained until `shutdown()` although nothing can read it (`submit` returns nil, `WorkerResult.value`
 > is `#[allow(dead_code)]`, `reduce_task_slots` reads only `out`/`stderr`, and the M:N nursery already
 > stores `Nil`). Measured against the owning ancestor: the same 300-job programs peak at **313 MB /
 > 330 MB in Chezzi vs 17 MB / 31 MB in CPython 3.14.6 `ThreadPoolExecutor`** — a 10–19× drift that
