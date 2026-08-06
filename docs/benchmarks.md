@@ -1156,6 +1156,30 @@ The one residual escape this left — a nested core with no surviving alias slot
 2026-08-06 by a cross-core byte recursion gated on a live cap (gaps.md `W6-10r`); cap-off runs, and so
 every bench here, are unaffected.
 
+### Round 4 — the trigger counts BYTES, not events (W7-28, 2026-08-07) — the first cap-off cost this family has had to record
+
+Rounds 1–3 charged bytes only for off-heap wire stores. Every other byte still arrived under an EVENT
+counter, and each event class has a shape that raises none of it: `xs.push(i)` × 80 M appends into an
+existing `Vec` (**PASS at 617.8 MB against an 8 MB cap — 77×**), `big.extend(chunk)` × 150 does the same in
+~1200 instructions (**~240 MB**), and `s = s + s` ×22 / `"x".repeat(20000000)` stay under the 256-object
+floor at 41 MB / 20 MB. `should_collect`'s byte term is now fed by all three funnels a heap gains bytes
+through — `Heap::alloc`, `Heap::get_mut` (deferred before/after delta) and `Vm::to_wire_crossable`. All
+shapes are `OVER-MEMORY` rc=1 at 11–32 MB; generous-cap controls still PASS at full footprint.
+
+**An instruction TICK was tried first and is recorded here because it measured clean and was still wrong.**
+Sampling every `cap/8` instructions fixed the `push` repro, cost nothing cap-off, and passed the full
+suite on both engines — and still let `extend` put 240 MB past an 8 MB cap, because one instruction can
+append N values. No instruction interval bounds a bulk op.
+
+**Cap-off now costs ~1% on ONE bench, and it is real.** The gate is still `mem_cap != 0`, but it now sits
+in `alloc` and `get_mut` — both hot — rather than only in `should_collect`. 15-run A/B: `fib` −0.98% ·
+`str` −0.53% · `primes` +0.32% · `loop` +0.12% · `list` +0.37% · **`struct` +1.41%** · `poly_method`
++0.27% · `map` +0.73%. `struct` re-run at 40 runs × 2: **+0.85%, +1.11%** — ~1σ each but the same sign
+three times on the alloc-heaviest bench, so it is recorded as a real ~1% regression rather than filed as
+noise. `list` (the `get_mut`-heaviest bench) re-ran at −0.18% / −0.40% and `map` at +1.12% / −0.18%, i.e.
+genuinely unmoved. A branchless form would have to run `obj_bytes_shallow` unconditionally, which is
+strictly worse cap-off; the branch stays.
+
 ### Round 3 — byte-aware GC pacing under a cap (2026-07-27), the half that was wrongly marked done
 
 Counting the bytes did nothing on the natural runaway, because the cap was never **sampled**: `over_cap` is

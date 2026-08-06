@@ -575,8 +575,8 @@ render ERROR too (whole file, before any test runs), counted separately as `file
    whose last alias slot has been swept needs a cross-core recursion to be seen at all — that was
    `W6-10r`, **FIXED 2026-08-06**: `live_bytes` now walks into nested cores (`Arc`-de-duped against the
    same per-heap set, so a nested core with an alias slot of its own is still charged once), gated on
-   `mem_cap != 0` so a cap-off run pays one branch and zero extra walks. The **inline-scalar escape
-   below remains OPEN** and is a different hole.
+   `mem_cap != 0` so a cap-off run pays one branch and zero extra walks. The inline-scalar escape below
+   is a different hole, and is **CLOSED 2026-08-07 by `W7-28`** (see the end of this item).
    **GC pacing is byte-aware WHEN A CAP IS SET (round 3, 2026-07-27).** Counting the off-heap bytes was
    not enough on its own: `over_cap` is evaluated only inside `sweep()`, and `sweep()` used to run
    purely on `Obj`-count growth, so a program pushing megabytes across the airlock while allocating ~2
@@ -598,16 +598,24 @@ render ERROR too (whole file, before any test runs), counted separately as `file
    sampled. Both are fixed; `W7-26r` tracks what still is not sampled.) The reachable escape from
    this row was a worker heap **born big** — its task's payload arrives in ~7
    `Obj`s, so the object-count trigger never moves and nothing ever samples — now fixed by
-   `Heap::request_collect` from `Vm::spawn_worker`. TWO residuals remain and are tracked on that row:
-   a task whose entire body is ONE native call (no instruction boundary, and no safely-rooted point to
-   sample at), and post-sample growth that allocates no `Obj`s — which is the very next paragraph.
+   `Heap::request_collect` from `Vm::spawn_worker`. Of the two residuals tracked on that row, (b) is
+   **CLOSED by `W7-28`** (next paragraph); (a) — a task whose entire body is ONE native call — is
+   tracked on `gaps.md W6-10s`.
+   **THE TRIGGER COUNTS BYTES, NOT EVENTS (round 4, `W7-28`, 2026-08-07).** Every earlier trigger
+   counted an event — allocations, wire crossings — and each event class has a shape that adds
+   unbounded bytes without raising it. Measured against `--max-heap=8000000`, all PASS pre-fix:
+   `xs.push(i)` × 80 M grows the `Vec` behind an existing `Obj::List` and moves NOTHING (**617.8 MB,
+   77× the cap**); `big.extend(chunk)` × 150 does the same in ~1200 instructions (**~240 MB**);
+   `s = s + s` × 22 (41 MB) and `"x".repeat(20000000)` (20 MB in ONE allocation) both stay under the
+   256-object floor. `Map`/`Set` fail open like `List`. So `should_collect()`'s byte term is now fed by
+   **all three** funnels through which a heap can gain bytes — `Heap::alloc` (new objects),
+   `Heap::get_mut` (the sole `&mut Obj` door, charging a deferred before/after delta, so growth in
+   place cannot escape whatever new container method is added later) and `Vm::to_wire_crossable`
+   (off-heap, as before) — all reset in `sweep()`, all gated on `mem_cap != 0`. An INSTRUCTION TICK was
+   tried first and rejected: `extend` adds N values in one instruction, so no instruction interval can
+   bound it. A proxy that is only *nearly* proportional to bytes is not a byte counter.
    **v1 limits (deterministic, documented):** the
-   trip fires only at a **GC boundary**, and GC triggers on `Obj`-count growth (plus charged off-heap
-   wire bytes when a cap is set) — a loop growing a single
-   container of **inline scalars** (e.g. `xs.push(i)` for int `i`) allocates no `Obj`s **and charges no
-   wire bytes**, so neither trigger fires: it never sweeps and
-   so never trips (push a heap value to guard it) — **still open, and byte-aware pacing does not close
-   it**; the check is a high-water on `live_bytes` which
+   trip fires only at a **GC boundary**; the check is a high-water on `live_bytes` which
    **undermeasures** true RSS and can overshoot ~2× `N` before firing (`next_gc = 2*live`). **The cap is
    PER-HEAP, so its guarantee is: any single execution context (the test's own heap; a `spawn`'d worker's
    heap on M:N) whose live heap — including the off-heap wire payloads it can REACH, which a worker that

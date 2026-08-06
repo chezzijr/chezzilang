@@ -3375,7 +3375,7 @@ impl Vm {
                         // submitting slow jobs finishes none of them, so `take_charge` stays 0 and
                         // the parent (which allocates ~nothing per submit) would never sweep —
                         // measured PASS at 666 MB against an 8 MB cap with the accounting alone.
-                        self.heap.charge_wire_bytes(grown + pending);
+                        self.heap.charge_bytes(grown + pending);
                     }
                 } else {
                     // `--serial` keeps queue-at-submit / drain-at-`shutdown` (decision D3).

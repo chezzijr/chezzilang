@@ -1588,14 +1588,33 @@ struct Suite:
     ///
     /// M:N only — `--max-heap` is refused with `--serial` at the CLI (`main.rs`), and the serial
     /// engine shares ONE heap with the parent anyway, so there is no born-big worker heap to miss.
+    ///
+    /// **W7-28 re-base — the worker path can no longer be ATTRIBUTED, and that is a proof, not a
+    /// gap.** The `nospawn` control below did exactly the job it was written for: the parent-side
+    /// sampling fix landed (byte-paced `should_collect`, W7-28) and it failed LOUDLY. There is no
+    /// re-basing that restores the attribution, because the two properties are mutually exclusive
+    /// by construction:
+    ///
+    /// - to isolate the worker, the worker heap must be over the cap while the parent's is under it;
+    /// - the worker's copy is built by `from_wire` from the parent's OWN live value, and for a
+    ///   low-`Obj`-count payload it is never larger (`push` over-allocates, so the parent's
+    ///   `Vec::capacity()` is up to 2× the worker's exact-sized rebuild);
+    /// - the only wire path that AMPLIFIES is one that allocates more `Obj`s in the worker than the
+    ///   parent held — `WireValue::Str` carries no identity id, so N aliases of one interned string
+    ///   become N fresh `Obj::Str`. Measured: 20 K × 100-char const → parent ~160 KB (PASS), worker
+    ///   ~3.4 MB (OVER-MEMORY) at a 1 MB cap. But that amplification IS extra allocations, so
+    ///   `since_gc` alone trips it — verified by deleting `spawn_worker`'s `request_collect`: the
+    ///   shape still reported OVER-MEMORY. It proves nothing about the born-big path.
+    ///
+    /// Consequence, stated plainly rather than papered over: `spawn_worker`'s `request_collect` is
+    /// now **belt-and-braces behind the parent's trip** (a worker born over the cap implies the
+    /// parent that built the payload was over it too, and now samples), and NO in-tree test can
+    /// isolate it. `nospawn` is kept, with the same payload, asserting the new truth — that is what
+    /// keeps the assertions above honest about WHY they are green.
     #[test]
     fn over_memory_trips_on_a_worker_payload_with_no_task_allocation() {
-        // The worker heap holds ~1.6 MB (200k inline ints) against a 1 MB cap. NOTE, because it is
-        // easy to misread: the PARENT holds the same blob and is also over the cap — it simply never
-        // samples either (same object-count blindness, on the heap that built the list by `push`,
-        // which is `future.md §1b`). The `nospawn` control below pins that, so if a parent-side
-        // sampling fix ever lands, this test fails LOUDLY instead of going green for a new reason
-        // and silently un-guarding the worker path.
+        // The worker heap holds ~1.6 MB (200k inline ints) against a 1 MB cap — and so does the
+        // PARENT that built it by `push`, which since W7-28 samples its own heap and trips first.
         const CAP: usize = 1_000_000;
         // `{name}` is the test-fn name, so the report line is greppable per shape.
         let body = |name: &str| {
@@ -1625,14 +1644,22 @@ struct Suite:
                 body("noisy")
             ),
         );
-        // Control: the SAME payload and cap with no `spawn` at all. Today this passes — the parent
-        // is over the cap and never samples — which is what proves the two assertions above are
-        // reporting the worker path and not a parent-side trip.
+        // Control: the SAME payload and cap with no `spawn` at all. It used to PASS — the parent was
+        // over the cap and never sampled — which is what made the two assertions above attributable
+        // to the worker path. W7-28 put the sample on every heap, so it now trips, and the
+        // attribution is gone for good (see the proof in the doc comment). Kept, and flipped to the
+        // new truth: it is the regression guard for parent-side sampling of a `range`-driven `push`
+        // loop, and the standing record that `quiet`/`noisy` above are green for a parent reason.
         let d3 = TmpDir::new();
+        // `while`, NOT `for i in range(200000)`: `range()` materialises its own 1.6 MB `List[int]`
+        // before a single push, so the range version was over the 1 MB cap no matter what the loop
+        // body did (verified: replacing the body with `pass` still printed OVER-MEMORY). The
+        // assertion has to be about the `push` growth its message names.
         let nospawn = d3.write(
             "nospawn_test.chz",
-            "test fn nospawn():\n    blob: List[int] = []\n    \
-             for i in range(200000):\n        blob.push(i)\n    assert blob.len() == 200000\n",
+            "test fn nospawn():\n    blob: List[int] = []\n    i := 0\n    \
+             while i < 200000:\n        blob.push(i)\n        i = i + 1\n    \
+             assert blob.len() == 200000\n",
         );
         for (label, f) in [("quiet", &quiet), ("noisy", &noisy)] {
             let report = run_tests_capped(f, true, CAP);
@@ -1645,12 +1672,108 @@ struct Suite:
         }
         let report = run_tests_capped(&nospawn, true, CAP);
         assert!(
-            report.text.contains("PASS nospawn"),
-            "control drifted: the parent now samples its own over-cap heap, so the two assertions \
-             above no longer prove anything about the WORKER path — re-derive this test (and see \
-             gaps.md W6-10s / future.md 1b); report:\n{}",
+            report.text.contains("OVER-MEMORY nospawn"),
+            "a parent heap grown over the cap by `push` alone must sample and trip (W7-28); \
+             report:\n{}",
             report.text
         );
+        // …and the same shape under a generous cap must still PASS, so the line above is a
+        // measurement and not "a `push` loop trips".
+        let generous = run_tests_capped(&nospawn, true, 4_000_000_000);
+        assert!(
+            generous.text.contains("PASS nospawn"),
+            "the same payload under a generous cap must still PASS; report:\n{}",
+            generous.text
+        );
+    }
+
+    /// W7-28 — the cap must count BYTES, not events. `over_cap` is assigned only in `sweep()`, and
+    /// `sweep()` only runs when `should_collect()` fires, so any growth that moves no trigger rides
+    /// past the cap unbounded. Every proxy trigger has such a shape, and each row below is one:
+    ///
+    /// | shape | why the old triggers missed it | measured at `--max-heap=8000000` |
+    /// |---|---|---|
+    /// | `xs.push(i)` ×2 M / 20 M / 80 M | appends into an existing `Vec`: no `Obj`, no wire | PASS at 22.7 / 160 / **617.8 MB (77× the cap)** |
+    /// | `m[i] = i` ×2 M, `s.add(i)` ×2 M | same, `Map`/`Set` backing | PASS at 199.5 / 185.5 MB |
+    /// | `big.extend(chunk)` ×150 | **unbounded bytes in ONE instruction** — kills an instruction tick | PASS at ~240 MB in ~1200 instructions |
+    /// | `s = s + s` ×22 | 41 MB in 22 allocations — under the 256-object threshold | PASS at 127.7 MB |
+    /// | `"x".repeat(20000000)` | 20 MB in ONE allocation | PASS |
+    ///
+    /// The accounting was always right (`obj_bytes_shallow` charges `Vec::capacity()`); nobody ever
+    /// looked. The fix charges bytes at the three funnels every byte must pass through — `alloc`,
+    /// `get_mut`, `to_wire_crossable` — so the shape of the growth stops mattering.
+    ///
+    /// `while`, not `for i in range(...)`: `range()` materialises its own `List[int]`, which would
+    /// trip the cap by itself and confound what this proves.
+    #[test]
+    fn over_memory_trips_on_inline_scalar_growth() {
+        // Sized for a 1 MB cap rather than the 8 MB the repros used: the generous-cap controls have
+        // to run to completion on the DEBUG VM, so the suite pays for every iteration.
+        const CAP: usize = 1_000_000;
+        // 500 K inline ints = ~4 MB of `Vec<Value>` backing; the map's 100 K entries are ~2.4 MB —
+        // several times the cap either way, while the byte counter samples every 64 KB of growth.
+        let list = "test fn listgrow():\n    xs: List[int] = []\n    i := 0\n    \
+                    while i < 500000:\n        xs.push(i)\n        i = i + 1\n    \
+                    assert xs.len() == 500000\n";
+        let map = "test fn mapgrow():\n    m: Map[int, int] = {}\n    i := 0\n    \
+                   while i < 100000:\n        m[i] = i\n        i = i + 1\n    \
+                   assert m.len() == 100000\n";
+        // THE bulk shape: one `extend` moves 50 K values into an existing `Vec`, so 60 iterations is
+        // ~3 M ints (~24 MB) in a few hundred instructions. No event-counting trigger can bound it.
+        let ext = "test fn extgrow():\n    chunk: List[int] = []\n    i := 0\n    \
+                   while i < 50000:\n        chunk.push(i)\n        i = i + 1\n    \
+                   big: List[int] = []\n    j := 0\n    \
+                   while j < 60:\n        big.extend(chunk)\n        j = j + 1\n    \
+                   assert big.len() == 3000000\n";
+        // Few-allocation shapes: 21 doublings = ~10 MB of live `str` in 21 `Obj`s, and a single
+        // `repeat` call that is 4 MB in ONE. Both are far under the 256-object GC threshold.
+        let dbl = "test fn dblgrow():\n    s := \"0123456789\"\n    i := 0\n    \
+                   while i < 21:\n        s = s + s\n        i = i + 1\n    \
+                   assert s.len() > 0\n";
+        let rep = "test fn repgrow():\n    blob := \"x\".repeat(4000000)\n    \
+                   assert blob.len() == 4000000\n";
+        let d = TmpDir::new();
+        let d2 = TmpDir::new();
+        let d4 = TmpDir::new();
+        let d5 = TmpDir::new();
+        let d6 = TmpDir::new();
+        let listf = d.write("listgrow_test.chz", list);
+        let mapf = d2.write("mapgrow_test.chz", map);
+        let extf = d4.write("extgrow_test.chz", ext);
+        let dblf = d5.write("dblgrow_test.chz", dbl);
+        let repf = d6.write("repgrow_test.chz", rep);
+        for (label, f) in [
+            ("listgrow", &listf),
+            ("mapgrow", &mapf),
+            ("extgrow", &extf),
+            ("dblgrow", &dblf),
+            ("repgrow", &repf),
+        ] {
+            for parallel in [false, true] {
+                let report = run_tests_capped(f, parallel, CAP);
+                assert!(
+                    report.text.contains(&format!("OVER-MEMORY {label}")),
+                    "inline-scalar container growth must PACE a sweep so the cap is sampled \
+                     ({label}, parallel={parallel}); report:\n{}",
+                    report.text
+                );
+                assert!(
+                    !report.text.contains(&format!("FAIL {label}"))
+                        && !report.text.contains(&format!("ERROR {label}")),
+                    "must be OVER-MEMORY, not FAIL/ERROR ({label}, parallel={parallel}); \
+                     report:\n{}",
+                    report.text
+                );
+            }
+            // The negative direction: the same program under a generous cap must still PASS — the
+            // trip is a MEASUREMENT, not "a loop that pushes is over the cap".
+            let generous = run_tests_capped(f, true, 4_000_000_000);
+            assert!(
+                generous.text.contains(&format!("PASS {label}")),
+                "the same program under a generous cap must still PASS ({label}); report:\n{}",
+                generous.text
+            );
+        }
     }
 
     /// W6-10 review — the NEGATIVE direction, which matters just as much: a program comfortably

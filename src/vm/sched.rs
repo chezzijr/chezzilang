@@ -2364,8 +2364,7 @@ impl Vm {
         // accounting (`live_bytes()` stays the sole measure): a replacing store charges too and a
         // `recv` never decrements, because under-triggering means a guard that fails open.
         if self.heap.mem_cap() != 0 {
-            self.heap
-                .charge_wire_bytes(crate::vm::core::wire_summary(&w).0);
+            self.heap.charge_bytes(crate::vm::core::wire_summary(&w).0);
         }
         Ok(w)
     }

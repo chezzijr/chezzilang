@@ -26,6 +26,52 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > the diff against real CPython output found them. **`adversarial-review` is not optional after a
 > green gate — it is the only stage that has ever caught this class here.**
 
+> **✅ W7-28 FIXED 2026-08-07 — `--max-heap`'s trigger counted EVENTS, not bytes, so the most ordinary
+> runaway loop in the language rode 77× past the cap.** Closes `W6-10s` residual (b) — the
+> inline-scalar escape documented since `future.md §1b` shipped — plus two siblings that were never
+> filed. `over_cap` is assigned only in `sweep()`, which runs only when `should_collect()` fires, whose
+> terms were an `Obj` COUNT and charged off-heap WIRE bytes. Every event class has a shape that adds
+> unbounded bytes without raising it. All PASS pre-fix at `--max-heap=8000000`:
+>
+> | shape | why no trigger moves | measured |
+> |---|---|---|
+> | `xs.push(i)` × 80 M | appends into the `Vec` behind an existing `Obj::List` | **617.8 MB — 77× the cap** |
+> | `big.extend(chunk)` × 150 | same, and only ~1200 instructions total | **~240 MB** |
+> | `s = s + s` × 22 | 22 allocations, under the 256-object floor | 127.7 MB |
+> | `"x".repeat(20000000)` | ONE allocation | 20 MB |
+>
+> `Map`/`Set` fail open like `List`; `str` concat did NOT, which pins the mechanism exactly. The
+> ACCOUNTING was already right (`bytes_in` charges `Vec::capacity()`) — all of it was pure
+> non-observation, invisible to every behavioural assertion in the suite. Filed as "32×"; there is in
+> fact no ceiling.
+>
+> **Fix: charge BYTES at the three funnels a heap gains them through** — `Heap::alloc` (the only
+> constructor), `Heap::get_mut` (the SOLE `&mut Obj` door: it hands out the `&mut`, so it arms a
+> `pending_mut` record that the next door — or the next `should_collect` — settles as a before/after
+> delta) and the existing `Vm::to_wire_crossable`. One `obj_bytes_shallow` sizing table now shared with
+> `bytes_in`, core arms scoring 0 and taking NO lock (the `own_bytes` self-deadlock lesson from W7-26r).
+> Charging at the growth SITES instead — `push`/`insert`/`add`/`extend`/the map index-store/… — is an
+> open N-way set and would be W7-22's mistake again; `get_mut` cannot be forgotten by a new container
+> method. All shapes **PASS → OVER-MEMORY, rc=1, 11–32 MB**; generous-cap controls still PASS at full
+> footprint. Mutation-verified per funnel independently.
+>
+> **Adversarial review caught the FIRST fix, which was fully green and still wrong.** Round 1 added an
+> instruction TICK sampling every `cap/8` instructions, on the premise "an instruction can grow the heap
+> by at most O(1) bytes". Full suite both engines, clippy, and the `push` repro all green — and
+> `extend` still put 240 MB past an 8 MB cap, because one instruction appends N values. **A proxy that
+> is only *nearly* proportional to bytes is not a byte counter, and the gap is exactly where the bug
+> lives.** The same review found the re-based control confounded: it used `for i in range(200000)`, and
+> `range()` materialises its own 1.6 MB `List[int]` before a single `push`, so the assertion passed with
+> the loop body replaced by `pass`.
+>
+> **Cost, recorded not argued away: ~+1% on `struct`** (the alloc-heaviest bench, reproduced 3×, same
+> sign) — the `mem_cap != 0` branch now sits in `alloc` and `get_mut`, both hot. `docs/benchmarks.md`
+> Round 4. **Also closed: `W7-26r`'s per-process-containment residual, as BY DESIGN**, decided by
+> measuring the ancestors against a rule fixed in advance: CPython (`RLIMIT_AS`) aborts, Go
+> (`GOMEMLIMIT`) does not (5 GC cycles, 128 MiB live against a 32 MiB limit, exit 0). They disagree, so
+> there is no ancestor verdict to copy, and Chezzi's per-heap PASS already matches Go. Full write-up:
+> `docs/gaps.md` **§W7-28**.
+
 > **✅ W7-26r FIXED 2026-08-06, both halves — `--max-heap` was never observed while the parent sat in
 > a join.** `over_cap` is assigned only in `sweep()`, which runs only at the parent fiber's own
 > instruction boundary — and a parent inside `Executor.shutdown()` or a `parallel:` join reaches none.

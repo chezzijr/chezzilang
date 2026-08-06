@@ -573,7 +573,7 @@ impl EagerState {
     }
 
     /// W7-26, the SAMPLING half — the growth in `bytes` since this was last called, to be charged
-    /// against the SUBMITTING heap's GC pacing counter (`Heap::charge_wire_bytes`).
+    /// against the SUBMITTING heap's GC pacing counter (`Heap::charge_bytes`).
     ///
     /// Counting the results is worthless if the cap is never sampled (the W6-10 review lesson):
     /// `over_cap` is only evaluated in `sweep()`, `sweep()` only runs when `should_collect()` fires,

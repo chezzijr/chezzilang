@@ -444,6 +444,36 @@ struct Slot {
 /// since the last collection (avoids thrashing on tiny programs).
 const MIN_GC_THRESHOLD: usize = 256;
 
+/// One object's OWNED BACKING in bytes (`Vec`/`Box` capacities), excluding the fixed
+/// `size_of::<Obj>()` slot cost that every live slot pays alike. The single sizing table for the
+/// heap: `bytes_in` (the `live_bytes`/`own_bytes` walk), `alloc` and `get_mut`'s settle all read it,
+/// so a new `Obj` variant is sized once instead of drifting between three copies.
+///
+/// **Core arms deliberately score 0, and take NO lock.** A `Channel`/`Shared`/`RwShared`/`Atomic`/
+/// `Executor` payload lives in an `Arc` outside every heap and is already charged by
+/// `Vm::to_wire_crossable`; `bytes_in` adds its own once-per-`Arc` walk on top for the reachability
+/// question. Reaching `core.inner`/`core.q` from inside `get_mut` would re-take a lock the caller may
+/// already hold — `std::sync::Mutex` is not reentrant, and that exact self-deadlock (a job capturing
+/// its own executor: hang, rc=124, under a cap only) is why `Heap::own_bytes` exists. Do not add a
+/// core arm here.
+fn obj_bytes_shallow(obj: &Obj) -> usize {
+    match obj {
+        Obj::Str(s) => s.as_str().len(),
+        Obj::Bytes(b) => b.len(),
+        Obj::ByteArray(b) => b.capacity(),
+        Obj::Iter { items, .. } => items.capacity() * std::mem::size_of::<Value>(),
+        Obj::List(v) | Obj::Tuple(v) => v.capacity() * std::mem::size_of::<Value>(),
+        Obj::Struct { fields, .. } => fields.heap_bytes(),
+        Obj::Enum { payload, .. } => payload.capacity() * std::mem::size_of::<Value>(),
+        Obj::Closure { captured, .. } => captured.capacity() * std::mem::size_of::<Value>(),
+        Obj::Module(m) => m.slots.capacity() * std::mem::size_of::<Value>(),
+        // Map/Set: entries + the index cost; approximate by entries backing only.
+        Obj::Map(m) => m.entries.capacity() * std::mem::size_of::<(u64, Value, Value)>(),
+        Obj::Set(s) => s.entries.capacity() * std::mem::size_of::<(u64, Value)>(),
+        _ => 0,
+    }
+}
+
 /// The object heap: a slab of slots with a free-list for reuse + mark-sweep bookkeeping.
 ///
 /// The collector itself (root tracing) lives on the VM, which owns the roots; the heap provides
@@ -464,15 +494,54 @@ pub struct Heap {
     live: usize,
     /// Allocations since the last collection — drives the growth-threshold trigger.
     since_gc: usize,
-    /// Off-heap wire bytes charged since the last collection — the `since_gc` sibling for growth
-    /// that allocates (almost) no `Obj`s. A monotonic pacing **HINT**, never accounting: it only
-    /// decides WHEN to sample, `live_bytes()` remains the sole measure of what is live (so a
-    /// replacing store charges, and a `recv`/`pop` never decrements — under-triggering leaves the
-    /// `--max-heap` guard failing open, over-triggering just costs a sweep). Read by
+    /// BYTES charged since the last collection — the `since_gc` sibling for growth that allocates
+    /// (almost) no `Obj`s. A monotonic pacing **HINT**, never accounting: it only decides WHEN to
+    /// sample, `live_bytes()` remains the sole measure of what is live (so a replacing store charges,
+    /// and a `recv`/`pop` never decrements — under-triggering leaves the `--max-heap` guard failing
+    /// open, over-triggering just costs a sweep). Read by
     /// [`should_collect`](Heap::should_collect) ONLY when `mem_cap != 0`, so cap-off pacing is
-    /// bit-for-bit the object-count trigger it has always been. `Cell` because the sole charge
-    /// point (`Vm::to_wire_crossable`) holds `&self`.
-    since_gc_wire_bytes: Cell<usize>,
+    /// bit-for-bit the object-count trigger it has always been. `Cell` because two of the three
+    /// charge points hold `&self`.
+    ///
+    /// Every byte a heap gains arrives one of exactly three ways, and each has exactly one funnel:
+    /// a NEW object → [`alloc`](Heap::alloc); growth IN PLACE inside an existing one →
+    /// [`get_mut`](Heap::get_mut) (see `pending_mut`); an off-heap wire payload →
+    /// `Vm::to_wire_crossable`. All three charge here.
+    ///
+    /// It has to count BYTES and not events. Instructions, allocations and wire crossings are all
+    /// proxies, and each has a shape that adds unbounded bytes without moving it: an instruction tick
+    /// is defeated by `big.extend(chunk)` (measured ~240 MB past an 8 MB cap in ~1200 instructions),
+    /// the object count by `s = s + s` ×22 (41 MB in 22 allocations) and by
+    /// `"x".repeat(20000000)` (20 MB in ONE).
+    since_gc_bytes: Cell<usize>,
+    /// The in-place-growth half of `since_gc_bytes`: the object handed out by the last
+    /// [`get_mut`](Heap::get_mut) and its payload size AT THAT MOMENT. The next settle — the next
+    /// `get_mut`, or [`should_collect`](Heap::should_collect) — re-measures the same object and
+    /// charges the difference. `Cell` because `should_collect` holds `&self`.
+    ///
+    /// This is the door for byte growth that allocates NOTHING: `xs.push(i)` /
+    /// `m[k] = v` / `s.add(x)` / `ba.push(b)` / `big.extend(chunk)` all append into the `Vec` behind
+    /// an EXISTING `Obj`, so neither the object count nor the wire counter moves and `sweep()` never
+    /// runs — `over_cap` is assigned nowhere else, so the cap failed OPEN. Measured on the release
+    /// binary against `--max-heap=8000000`: an 80 M-element `List[int]` grown by `push` PASSED at
+    /// 617.8 MB (**77× the cap**), and one `big.extend(chunk)` loop PASSED at ~240 MB in ~1200
+    /// instructions.
+    ///
+    /// Why here and not at each growth site: `push`/`insert`/`add`/`extend`/the map index-store/… is
+    /// an open N-way set, and charging some arms of it is the mistake this repo has already been
+    /// bitten by twice (`docs/gaps.md` W7-22). `get_mut` is the SOLE `&mut Obj` door (verified: no
+    /// `.obj.as_mut()` or `slots[..]` access exists outside this file), so a charge here cannot be
+    /// forgotten by a new container method — the same forget-proof argument that put the wire charge
+    /// in `Vm::to_wire_crossable`.
+    ///
+    /// Why deferred rather than measured on both sides of the call: `get_mut` HANDS OUT the `&mut`,
+    /// so the "after" size does not exist until the caller is done with it. Settling at the next door
+    /// (or at the next `should_collect`, which is every instruction) is what makes it exact without a
+    /// wrapper at 65 call sites.
+    ///
+    /// Sound against a freed slot because `sweep()` — the only thing that frees, and so the only
+    /// thing that can make `alloc` re-hand this slot to a different object — clears it.
+    pending_mut: Cell<Option<(GcRef, usize)>>,
     /// Collect once `since_gc` reaches this; grows with the live set after each collection.
     next_gc: usize,
     /// Peak of `live_bytes()` sampled at each `sweep()` — the memory probe's high-water mark
@@ -502,7 +571,8 @@ impl Default for Heap {
             free: Vec::new(),
             live: 0,
             since_gc: 0,
-            since_gc_wire_bytes: Cell::new(0),
+            since_gc_bytes: Cell::new(0),
+            pending_mut: Cell::new(None),
             next_gc: MIN_GC_THRESHOLD,
             peak_live_bytes: 0,
             mem_cap: 0,
@@ -543,6 +613,13 @@ impl Heap {
     pub fn alloc(&mut self, obj: Obj) -> GcRef {
         self.live += 1;
         self.since_gc += 1;
+        // Byte funnel 1 of 3 (see `since_gc_bytes`): the only constructor. `since_gc` alone paces
+        // MANY-small-object growth; this paces FEW-huge-object growth, which it cannot see —
+        // `"x".repeat(20000000)` is one allocation carrying 20 MB, and `s = s + s` ×22 is 22 of them
+        // carrying 41 MB, both well under the 256-object threshold.
+        if self.mem_cap != 0 {
+            self.charge_bytes(obj_bytes_shallow(&obj));
+        }
         if let Some(idx) = self.free.pop() {
             self.slots[idx as usize].obj = Some(obj);
             self.clear_mark(idx as usize); // defensive: already 0 post-sweep (matches old mark=false)
@@ -566,10 +643,29 @@ impl Heap {
     }
 
     pub fn get_mut(&mut self, h: GcRef) -> &mut Obj {
+        // Byte funnel 2 of 3 (see `since_gc_bytes` / `pending_mut`): the sole `&mut Obj` door, and so
+        // the sole door for growth INSIDE an existing object. Settle whatever the previous `get_mut`
+        // handed out, then arm this one.
+        if self.mem_cap != 0 {
+            self.settle_pending_mut();
+            self.pending_mut
+                .set(Some((h, obj_bytes_shallow(self.get(h)))));
+        }
         self.slots[h.0 as usize]
             .obj
             .as_mut()
             .expect("dangling GcRef (object was collected while still reachable)")
+    }
+
+    /// Charge the growth of the object the last [`get_mut`](Heap::get_mut) handed out, and disarm.
+    /// A SHRINK charges 0 — monotonic, exactly like the wire counter (`live_bytes()` is what
+    /// measures; this only decides when to look).
+    #[inline]
+    fn settle_pending_mut(&self) {
+        if let Some((h, before)) = self.pending_mut.take() {
+            let now = obj_bytes_shallow(self.get(h));
+            self.charge_bytes(now.saturating_sub(before));
+        }
     }
 
     /// Live object count — for GC assertions / bounded-heap tests.
@@ -578,33 +674,44 @@ impl Heap {
         self.live
     }
 
-    /// Charge off-heap wire bytes against the collection trigger (see `since_gc_wire_bytes`).
-    /// Called from `Vm::to_wire_crossable`, the one helper every cross-heap value store routes
-    /// through, and only when a `--max-heap` cap is live.
+    /// Charge bytes against the collection trigger (see `since_gc_bytes`). Byte funnel 3 of 3 is
+    /// `Vm::to_wire_crossable`, the one helper every cross-heap value store routes through; the other
+    /// two callers are [`alloc`](Heap::alloc) and [`get_mut`](Heap::get_mut)'s settle. Only ever
+    /// reached when a `--max-heap` cap is live.
     #[inline]
-    pub fn charge_wire_bytes(&self, n: usize) {
-        self.since_gc_wire_bytes
-            .set(self.since_gc_wire_bytes.get().saturating_add(n));
+    pub fn charge_bytes(&self, n: usize) {
+        self.since_gc_bytes
+            .set(self.since_gc_bytes.get().saturating_add(n));
     }
 
-    /// How many charged off-heap bytes force a sweep under a live cap: a quarter of the cap bounds
-    /// the overshoot between samples, and the 64 KB floor stops a tiny cap from GC-ing per store.
-    fn wire_gc_threshold(&self) -> usize {
+    /// How many charged bytes force a sweep under a live cap: a quarter of the cap bounds the
+    /// overshoot between samples, and the 64 KB floor stops a tiny cap from GC-ing per store.
+    fn bytes_gc_threshold(&self) -> usize {
         (self.mem_cap / 4).max(64 * 1024)
     }
 
     /// Whether enough has been allocated since the last collection to warrant one.
     ///
-    /// W6-10 (sampling half): under a live `--max-heap` cap, off-heap wire growth ALSO paces a
-    /// sweep. Without it a program that pushes megabytes across the airlock while allocating ~2
-    /// `Obj`s per iteration never reaches the object-count threshold, so `sweep()` never runs,
-    /// `over_cap` is never evaluated and the cap fails OPEN (counting the bytes correctly in
-    /// `live_bytes` does nothing if nobody ever looks). Gated on `mem_cap != 0`: with no cap
-    /// `over_cap` is meaningless anyway, and pacing stays bit-for-bit unchanged.
+    /// W6-10 (sampling half): under a live `--max-heap` cap, BYTE growth ALSO paces a sweep. Without
+    /// it a program that grows megabytes while allocating ~2 `Obj`s per iteration never reaches the
+    /// object-count threshold, so `sweep()` never runs, `over_cap` is never evaluated and the cap
+    /// fails OPEN (counting the bytes correctly in `live_bytes` does nothing if nobody ever looks).
+    ///
+    /// W7-28 — the byte counter now covers ALL THREE ways a heap gains bytes, not just the off-heap
+    /// wire one: see `since_gc_bytes`. The settle here is what makes `get_mut`'s deferred charge
+    /// exact at an instruction boundary, which is the only place the cap is read.
+    ///
+    /// Gated on `mem_cap != 0`: with no cap `over_cap` is meaningless anyway, and pacing stays
+    /// bit-for-bit the object-count trigger it has always been.
     pub fn should_collect(&self) -> bool {
-        self.force_collect
-            || self.since_gc >= self.next_gc
-            || (self.mem_cap != 0 && self.since_gc_wire_bytes.get() >= self.wire_gc_threshold())
+        if self.force_collect || self.since_gc >= self.next_gc {
+            return true;
+        }
+        if self.mem_cap == 0 {
+            return false;
+        }
+        self.settle_pending_mut();
+        self.since_gc_bytes.get() >= self.bytes_gc_threshold()
     }
 
     /// W6-10s — force the next [`should_collect`](Heap::should_collect), so a heap that was HANDED a
@@ -781,7 +888,11 @@ impl Heap {
             }
         }
         self.since_gc = 0;
-        self.since_gc_wire_bytes.set(0);
+        self.since_gc_bytes.set(0);
+        // Drop the armed `get_mut` record: this is the ONLY thing that frees a slot, so it is also
+        // the only thing that could leave the record pointing at a slot `alloc` then re-hands to a
+        // different object. Clearing it here is what makes the settle sound.
+        self.pending_mut.set(None);
         self.force_collect = false;
         self.next_gc = (self.live * 2).max(MIN_GC_THRESHOLD);
         let lb = self.live_bytes();
@@ -851,18 +962,6 @@ impl Heap {
             let Some(obj) = &slot.obj else { continue };
             total += std::mem::size_of::<Obj>();
             total += match obj {
-                Obj::Str(s) => s.as_str().len(),
-                Obj::Bytes(b) => b.len(),
-                Obj::ByteArray(b) => b.capacity(),
-                Obj::Iter { items, .. } => items.capacity() * std::mem::size_of::<Value>(),
-                Obj::List(v) | Obj::Tuple(v) => v.capacity() * std::mem::size_of::<Value>(),
-                Obj::Struct { fields, .. } => fields.heap_bytes(),
-                Obj::Enum { payload, .. } => payload.capacity() * std::mem::size_of::<Value>(),
-                Obj::Closure { captured, .. } => captured.capacity() * std::mem::size_of::<Value>(),
-                Obj::Module(m) => m.slots.capacity() * std::mem::size_of::<Value>(),
-                // Map/Set: entries + the index cost; approximate by entries backing only.
-                Obj::Map(m) => m.entries.capacity() * std::mem::size_of::<(u64, Value, Value)>(),
-                Obj::Set(s) => s.entries.capacity() * std::mem::size_of::<(u64, Value)>(),
                 // W6-10 — an airlocked value lives as a `WireValue` in an `Arc` OUTSIDE every
                 // `Heap`, so it used to be counted nowhere and a 195 MB channel backlog sailed past
                 // a 200 KB `--max-heap` cap. Each core's cached byte count is charged ONCE per heap
@@ -965,7 +1064,11 @@ impl Heap {
                         core.summary.bytes()
                     }
                 }
-                _ => 0,
+                // Every non-core variant — the plain owned backing, sized in ONE place so a new
+                // `Obj` variant cannot be counted here and forgotten at the `alloc`/`get_mut`
+                // charges. A core arm whose guard above failed (already counted for this heap, or
+                // `include_cores == false`) lands here too and correctly scores 0.
+                other => obj_bytes_shallow(other),
             };
         }
         total
@@ -981,6 +1084,12 @@ impl Heap {
     pub fn set_mem_cap(&mut self, cap: usize) {
         self.mem_cap = cap;
         self.over_cap = false;
+        // Disarm `get_mut`'s pending record along with the cap. Cap-off never arms it, so a
+        // cap→0→cap toggle is the one way a record could outlive the `sweep()` that freed its slot
+        // and be settled against a slot `alloc` re-handed to a different object. Production sets the
+        // cap exactly once per `Vm`, so this is belt-and-braces — but it makes the settle's soundness
+        // a local property of this file instead of an argument about every caller.
+        self.pending_mut.set(None);
     }
 
     /// The configured `--max-heap` cap in bytes (`0` = OFF) — for the abort message.
@@ -1205,15 +1314,15 @@ mod iter_obj_tests {
     fn wire_bytes_pace_a_sweep_only_under_a_cap() {
         // (a) cap OFF: any amount of charged off-heap growth must NOT force a collection.
         let h = Heap::new();
-        h.charge_wire_bytes(64 * 1024 * 1024);
+        h.charge_bytes(64 * 1024 * 1024);
         assert!(!h.should_collect(), "cap-off pacing must ignore wire bytes");
 
         // (b) cap ON: sub-threshold does not collect, threshold does. cap/4 = 2 MB here.
         let mut h = Heap::new();
         h.set_mem_cap(8_000_000);
-        h.charge_wire_bytes(1024);
+        h.charge_bytes(1024);
         assert!(!h.should_collect(), "sub-threshold charge must not collect");
-        h.charge_wire_bytes(2_000_000);
+        h.charge_bytes(2_000_000);
         assert!(
             h.should_collect(),
             "cap/4 of charged wire bytes must collect"
@@ -1229,9 +1338,93 @@ mod iter_obj_tests {
         // (d) the 64 KB floor: a tiny cap must not force a GC on every small store.
         let mut h = Heap::new();
         h.set_mem_cap(1000);
-        h.charge_wire_bytes(32 * 1024);
+        h.charge_bytes(32 * 1024);
         assert!(!h.should_collect(), "64 KB floor must survive a tiny cap");
-        h.charge_wire_bytes(32 * 1024);
+        h.charge_bytes(32 * 1024);
+        assert!(h.should_collect());
+    }
+
+    /// W7-28 — the OTHER two byte funnels (`alloc` and `get_mut`), same contract as the wire-byte
+    /// sibling above. These are the growth the object count cannot see: FEW-huge allocations, and
+    /// in-place appends into an existing object that allocate nothing at all.
+    #[test]
+    fn alloc_and_in_place_growth_pace_a_sweep_only_under_a_cap() {
+        let big = |n: usize| Obj::List(Vec::with_capacity(n));
+
+        // (a) cap OFF must charge NOTHING — and this phase can actually FAIL: it does the growth
+        // cap-off, THEN turns the cap on. A charge that leaked past the `mem_cap` gate would have
+        // banked > cap/4 already and the very next `should_collect` would fire.
+        let mut h = Heap::new();
+        let r = h.alloc(big(1_000_000)); // 8 MB of backing, cap off
+        if let Obj::List(v) = h.get_mut(r) {
+            v.extend((0..1_000_000).map(Value::int)); // in-place bulk growth, cap off
+        }
+        assert!(!h.should_collect(), "cap-off pacing must ignore bytes");
+        h.set_mem_cap(8_000_000); // cap/4 = 2 MB
+        assert!(
+            !h.should_collect(),
+            "cap-off calls must have accumulated nothing"
+        );
+
+        // (b) cap ON, funnel 1 — `alloc` charges the new object's own backing. Sub-threshold does
+        // not collect; crossing cap/4 does. This is `\"x\".repeat(20000000)`: 20 MB in ONE
+        // allocation, which `since_gc`'s 256-object threshold can never see.
+        let mut h = Heap::new();
+        h.set_mem_cap(8_000_000);
+        h.alloc(big(100_000)); // 800 KB
+        assert!(!h.should_collect(), "sub-threshold alloc must not collect");
+        h.alloc(big(200_000)); // +1.6 MB = 2.4 MB
+        assert!(h.should_collect(), "cap/4 of allocated bytes must collect");
+
+        // (c) cap ON, funnel 2 — ONE `get_mut` that appends in bulk. This is `big.extend(chunk)`:
+        // unbounded bytes in a single instruction, which no instruction tick can bound.
+        let mut h = Heap::new();
+        h.set_mem_cap(8_000_000);
+        let r = h.alloc(Obj::List(Vec::new()));
+        assert!(!h.should_collect(), "an empty list must not collect");
+        if let Obj::List(v) = h.get_mut(r) {
+            v.extend((0..400_000).map(Value::int)); // 3.2 MB in one call
+        }
+        assert!(
+            h.should_collect(),
+            "a bulk in-place append must be charged at the next settle"
+        );
+
+        // (d) a SHRINK charges 0 — monotonic, like the wire counter. `mark` first: this heap has no
+        // VM roots, so an unmarked `r` would be freed and the settle would read a dead slot (which
+        // is exactly why `sweep()` clears `pending_mut`).
+        h.mark(r);
+        h.sweep();
+        assert!(!h.should_collect(), "sweep must reset the byte counter");
+        if let Obj::List(v) = h.get_mut(r) {
+            v.clear();
+            v.shrink_to_fit();
+        }
+        assert!(!h.should_collect(), "a shrink must charge 0, not underflow");
+
+        // (e) the settle is armed by `get_mut` and disarmed by whoever settles first, so a second
+        // `get_mut` charges the first one's growth rather than losing it.
+        let mut h = Heap::new();
+        h.set_mem_cap(8_000_000);
+        let a = h.alloc(Obj::List(Vec::new()));
+        let b = h.alloc(Obj::List(Vec::new()));
+        if let Obj::List(v) = h.get_mut(a) {
+            v.extend((0..150_000).map(Value::int)); // 1.2 MB, never settled by should_collect
+        }
+        if let Obj::List(v) = h.get_mut(b) {
+            v.extend((0..150_000).map(Value::int)); // +1.2 MB = 2.4 MB > cap/4
+        }
+        assert!(
+            h.should_collect(),
+            "a second get_mut must settle the first's growth, not drop it"
+        );
+
+        // (f) the 64 KB floor survives a tiny cap (shared with the wire threshold).
+        let mut h = Heap::new();
+        h.set_mem_cap(1000); // cap/4 = 250, floored to 65536
+        h.alloc(big(4_096)); // exactly 32 KB
+        assert!(!h.should_collect(), "64 KB floor must survive a tiny cap");
+        h.alloc(big(4_096)); // +32 KB = exactly the floor
         assert!(h.should_collect());
     }
 
