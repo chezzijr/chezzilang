@@ -186,6 +186,51 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > runs, 0 wrong. **Perf**: the W7-4 snapshot stress (400 module-global closures × 1000 nurseries) main
 > 2.585 s → 2.573 s, flat. Full write-up: `docs/gaps.md` **§W7-4a/b** and **§W7-4c**.
 
+> **✅ W6-10r FIXED 2026-08-06 — a backlog reachable only through a NESTED core was counted nowhere,
+> so 304 MB passed an 8 MB `--max-heap`.** `Heap::live_bytes` reached an off-heap payload's bytes only
+> through that core's own `Obj::*` alias slot. Build the channel inside a `fn` and park it in a
+> `Shared` — `make() -> Shared[Channel[str]]` — and the channel's only alias slot dies with the frame,
+> so 300 × ~1 MB of `s.get().send(blob)` is invisible to the cap. Measured on the release binary
+> **before** touching anything: **PASS, rc=0, peak RSS 304 MB**, while the identical program holding
+> the channel in a live local tripped OVER-MEMORY. (Premise re-derived first on purpose — the two
+> preceding rows in this family, `W7-22`'s parent and `W6-10s`, both had premises that had stopped
+> being true.)
+>
+> **The fix is the byte mirror of a recursion that already existed.** `collect_core_gcrefs` has always
+> recursed into nested cores for ROOTING — a nested core may be reachable only through its parent, so
+> its embedded handles would dangle otherwise — and only `wire_summary`'s byte half stopped at the
+> boundary. New `core::nested_core_bytes` walks the same arms, with `queue_bytes_deep` (shared by the
+> identically-shaped `ChanState`/`ExecState`) and `value_core_bytes_deep`
+> (`Shared`/`RwShared`/`Atomic`). Three properties carry it: the `Arc`-identity de-dup set is
+> **shared** with `live_bytes`'s per-slot scan, so a nested core that also has an alias slot here is
+> charged exactly once (double-charging is the false-positive direction W6-10's own review had to fix
+> once); a `WS_UNKNOWN` summary is filled in passing, because every core constructor leaves it UNKNOWN
+> and a core reached only through a parent is never marked through a slot of its own — without the
+> fill it reports 0 bytes forever, i.e. the same hole with extra steps; and the whole walk is gated on
+> `mem_cap != 0`, the same argument as the round-3 pacing counter, so every `chezzi run`, every bench
+> and the whole parity gate pay one `!= 0` load and ZERO extra walks. Under a cap the cost is one
+> O(payload) walk per **dirty** core per sweep; a CLEAN core stays O(1).
+>
+> **Verified.** Repro on the release binary: **PASS @ 304 MB → OVER-MEMORY, rc=1, 16.5 MB**; the same
+> program under a generous 4 GB cap and under no cap still PASS (no false positive). Tests
+> `vm::heap::live_bytes_counts_a_nested_core_with_no_alias_slot` (cap-off unchanged / cap-on charges /
+> alias-slot de-dup) and `test_runner::over_memory_counts_a_nested_core_backlog` (both engines), both
+> **mutation-verified** — forcing the gate to `false` turns both red. Known ceiling left in the code:
+> `dirty` conflates "holds a `Handle`" with "holds a nested core", so a queue of plain heap references
+> is walked and finds nothing; splitting the bit means a third field through `WireSummary` and
+> `ChanState::push`'s tuple at every call site, deferred until a profile asks.
+>
+> **It closes `W6-10r`, not `--max-heap` in general — and adversarial review of this fix proved it by
+> measuring the next hole.** An `Executor`'s EAGER half is the only half the default M:N engine uses
+> (`submit` runs eagerly, so the `inner` queue `live_bytes` reads stays empty forever), and 300
+> submitted ~1 MB results PASS at **312 MB** against an 8 MB cap. Filed as **`W7-26`** rather than
+> bundled: it is a second payload half with NO cached summary, not a nested core, so it needs new
+> incremental accounting through `reserve`/`finish`/`take_slots` — its own piece of work. Byte
+> accounting only; a worker result carries no parent-heap `GcRef` (B3.2), which is why `children` has
+> no `eager` arm either. Review also caught that the headline test reached only the single-value arm
+> — the queued-message and cycle arms are now covered by their own test, the "fixed on SOME arms of an
+> N-way set" guard. Full write-up: `docs/gaps.md` **§W6-10** (residual section) and **§W7-26**.
+
 > **✅ W7-22 FIXED 2026-08-06 — every container crossing the airlock was rebuilt at 22× the capacity
 > it needs, and kept it for the object's lifetime.** `from_wire_memo`'s eight container arms were
 > `items.into_iter().map(…).collect()`. Rust specializes that into an **in-place** collect when the
@@ -248,7 +293,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > ~7 objects, so `since_gc` never reaches `next_gc` and `sweep()`, the sole assigner of `over_cap`,
 > never runs. Charging bytes in `Heap::alloc` does not fix it: these containers are alloc'd EMPTY and
 > patched via `get_mut` (the tie-the-knot rebuild), so there is nothing to charge at alloc time. Row
-> updated in place; **re-scope before working it**. `W6-10r` is untouched and still open.
+> updated in place; **re-scope before working it**. `W6-10r` was fixed next (below).
 
 > **✅ Protocol embeds FIXED 2026-08-06 — a protocol's embed set is flattened at EVERY use site, not
 > just at a bound.** The `gaps.md` "protocol embeds" row, filed as a *safe-direction observation* in
@@ -1154,7 +1199,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > asserted the divergence was REWRITTEN (not deleted) as
 > `numeric_newtype_operator_auto_flows_and_ordinary_methods_still_work`. Docs: `docs/syntax.md`,
 > `docs/gaps.md` (W6-3d RESOLVED, index row removed — wave 6 carries no open DEFECTS; three disclosed
-> residuals remain as their own index rows: `W6-9r`, `W6-10s`, `W6-10r`).
+> residuals remain as their own index rows: `W6-9r`, `W6-10s`, `W6-10r` — the last two closed 2026-08-06).
 > **Corrected 2026-07-28 by adversarial review:** the first cut also rejected `neg`, which was WRONG
 > and has been removed from the list. Unary `-` has no newtype path (`Neg` is never granted), so `-m`
 > is already `cannot negate Meters` — there is no operator for a `neg` method to disagree with, and
@@ -1323,8 +1368,8 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > 2 000-element list, +0.8% on 10× bigger messages, flat on a 4-producer M:N fan-out — measured, since
 > `benches/run.chz` has no channel bench. `live_bytes` charges a core's bytes **once per core per
 > heap** (`Arc` identity); per-*slot* charging multiplied a shared payload by the live-handle count and
-> fired spurious OVER-MEMORY. One residual escape stays OPEN: a nested core with no surviving alias
-> slot is counted nowhere (gaps.md `W6-10r`). **Round 3 fixed the half that was wrongly marked done:
+> fired spurious OVER-MEMORY. One residual escape stayed open — a nested core with no surviving alias
+> slot is counted nowhere (gaps.md `W6-10r`, FIXED 2026-08-06, below). **Round 3 fixed the half that was wrongly marked done:
 > counting the bytes is useless if the cap is never SAMPLED.** `over_cap` is only assigned in
 > `sweep()`, and `sweep()` only ran on a heap-OBJECT count — so a program pushing ~1 MB per `send`
 > while allocating ~2 `Obj`s per iteration never swept and PASSED at 304 MB under an 8 MB cap (a
@@ -1346,7 +1391,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > `replacing_store_refreshes_the_gc_summary`, `vm::gc_tests::gc_stress_values_parked_in_cores`,
 > `test_runner::over_memory_counts_offheap_wire_payload`/`under_cap_still_passes_with_many_handles_to_one_core`/`over_memory_trips_without_object_churn`,
 > `vm::heap::wire_bytes_pace_a_sweep_only_under_a_cap`. Docs: `docs/gaps.md` (both retired FIXED;
-> the sampling residuals kept in the open-items index as `W6-10s`, alongside `W6-10r`), `docs/benchmarks.md`, `docs/concurrency.md` (the read-view's
+> the sampling residuals kept in the open-items index as `W6-10s`, alongside `W6-10r` — both since closed, 2026-08-06), `docs/benchmarks.md`, `docs/concurrency.md` (the read-view's
 > O(1)-memory claim kept; the false *time* implication corrected), `docs/future.md §1b` (the cap now
 > counts off-heap wire bytes — the inline-scalar escape in that same section is a DIFFERENT hole and
 > remains OPEN).

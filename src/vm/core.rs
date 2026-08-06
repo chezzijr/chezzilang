@@ -769,11 +769,13 @@ impl WireSummary {
 /// its embedded handles would dangle otherwise. So a cached `has_handle` verdict would be a use-after-free.
 /// Here a nested core is therefore **always dirty**, and the walk STOPS at that boundary.
 ///
-/// The byte half of that stop is an ACCEPTED HOLE, not a proof of correctness (gaps.md `W6-10r`,
-/// still open): a nested core's bytes are reached by `Heap::live_bytes` only through that core's own
-/// `Obj::*` alias slot, so a nested core whose last alias slot has been swept — it survives inside
-/// this payload's `Arc` — is counted NOWHERE. Closing it needs cross-core byte recursion with `Arc`
-/// de-dup; deliberately not built. Rooting is unaffected: `collect_core_gcrefs` does recurse.
+/// The byte half of that stop is completed by [`nested_core_bytes`] (gaps.md `W6-10r`, FIXED
+/// 2026-08-06), NOT by this function: a nested core's bytes belong to that core's own summary, and
+/// `Heap::live_bytes` used to reach them only through its `Obj::*` alias slot — so a nested core
+/// whose last alias slot had been swept was counted NOWHERE. `live_bytes` now runs the cross-core
+/// byte recursion (`Arc`-de-duped, under a live `--max-heap` only); the walk here still stops.
+/// That closed `W6-10r`, not the cap in general — an `Executor`'s eager half is still uncounted
+/// (gaps.md `W7-26`), as is the inline-scalar escape (`future.md §1b`).
 ///
 /// Keep the arms in lockstep with [`collect_core_gcrefs`] — a new `WireValue` variant must be added to both.
 pub fn wire_summary(w: &WireValue) -> (usize, bool) {
@@ -857,6 +859,185 @@ pub fn wire_summary(w: &WireValue) -> (usize, bool) {
         | WireValue::Nil => {}
     }
     acc
+}
+
+/// W6-10r — the BYTE mirror of [`collect_core_gcrefs`]: sum the cached byte counts of every core
+/// nested inside `w`, so `--max-heap` sees a payload that is reachable ONLY through another core.
+///
+/// [`wire_summary`] deliberately stops at a nested-core boundary (those bytes belong to that core's
+/// own summary), and [`Heap::live_bytes`](super::heap::Heap::live_bytes) reaches a core's summary
+/// only through its `Obj::*` alias slot. A nested core whose last alias slot has been swept — it
+/// survives inside this payload's `Arc` — therefore used to be counted **nowhere**: a `Channel`
+/// parked in a `Shared` backlogged 304 MB past an 8 MB cap and PASSED. Rooting was never affected
+/// ([`collect_core_gcrefs`] does recurse); only the byte walk stopped.
+///
+/// `seen` is the caller's per-heap `Arc`-identity set, SHARED with `live_bytes`'s own per-slot
+/// de-dup: a nested core that also has an alias slot in this heap is charged exactly once, whichever
+/// way it is met first. It also terminates `Arc` cycles (the reason [`visit_core`] exists).
+///
+/// Only entered under a live `mem_cap` (see `live_bytes`) — with no cap `over_cap` is meaningless and
+/// this walk is pure cost.
+///
+/// Keep the arms in lockstep with [`collect_core_gcrefs`] and [`wire_summary`] — a new `WireValue`
+/// variant must be added to all three.
+pub fn nested_core_bytes(w: &WireValue, seen: &mut super::fxhash::FxHashSet<usize>) -> usize {
+    let mut acc = 0usize;
+    match w {
+        WireValue::List { items: xs, .. } | WireValue::Tuple { items: xs, .. } => {
+            for x in xs {
+                acc += nested_core_bytes(x, seen);
+            }
+        }
+        WireValue::Map { entries, .. } => {
+            for (_, k, v) in entries {
+                acc += nested_core_bytes(k, seen) + nested_core_bytes(v, seen);
+            }
+        }
+        WireValue::Set { entries, .. } => {
+            for (_, e) in entries {
+                acc += nested_core_bytes(e, seen);
+            }
+        }
+        WireValue::Struct { fields, .. } => {
+            for (_, v) in fields {
+                acc += nested_core_bytes(v, seen);
+            }
+        }
+        WireValue::Enum { payload, .. } => {
+            for x in payload {
+                acc += nested_core_bytes(x, seen);
+            }
+        }
+        WireValue::NewType { inner, .. } | WireValue::Cell { inner, .. } => {
+            acc += nested_core_bytes(inner, seen)
+        }
+        WireValue::Iter { items, .. } => {
+            for x in items {
+                acc += nested_core_bytes(x, seen);
+            }
+        }
+        WireValue::Generator { closure, state, .. } => {
+            if let Some(c) = closure {
+                acc += nested_core_bytes(c, seen);
+            }
+            match state {
+                WireGenState::Pending(args) => {
+                    for x in args {
+                        acc += nested_core_bytes(x, seen);
+                    }
+                }
+                WireGenState::Suspended { stack, .. } => {
+                    for x in stack {
+                        acc += nested_core_bytes(x, seen);
+                    }
+                }
+                WireGenState::Done => {}
+            }
+        }
+        WireValue::Closure { captured, .. } => {
+            for (_, v) in captured {
+                acc += nested_core_bytes(v, seen);
+            }
+        }
+        // The nested cores themselves — charge each one's payload ONCE per heap, then keep
+        // recursing (a core nested two deep is just as invisible as one nested once).
+        WireValue::Channel(core) => {
+            if seen.insert(Arc::as_ptr(core) as usize) {
+                let g = core.q.lock().unwrap();
+                acc += queue_bytes_deep(g.summary(), g.iter(), seen);
+            }
+        }
+        WireValue::Executor(core) => {
+            if seen.insert(Arc::as_ptr(core) as usize) {
+                let g = core.inner.lock().unwrap();
+                acc += queue_bytes_deep(g.summary(), g.iter(), seen);
+            }
+        }
+        WireValue::Shared(core) => {
+            if seen.insert(Arc::as_ptr(core) as usize) {
+                acc += value_core_bytes_deep(&core.summary, &core.v.lock().unwrap(), seen);
+            }
+        }
+        WireValue::RwShared(core) => {
+            if seen.insert(Arc::as_ptr(core) as usize) {
+                acc += value_core_bytes_deep(&core.summary, &core.v.read().unwrap(), seen);
+            }
+        }
+        WireValue::Atomic(core) => {
+            if seen.insert(Arc::as_ptr(core) as usize) {
+                acc += value_core_bytes_deep(&core.summary, &core.v.lock().unwrap(), seen);
+            }
+        }
+        // Leaves — own no nested core. `Backref` also TERMINATES a cyclic wire graph (exactly like
+        // `collect_core_gcrefs` / `wire_summary`).
+        WireValue::Handle(_)
+        | WireValue::Backref(_)
+        | WireValue::AtomicInt(_)
+        | WireValue::Str(_)
+        | WireValue::Bytes(_)
+        | WireValue::ByteArray(_)
+        | WireValue::Int(_)
+        | WireValue::Float(_)
+        | WireValue::Bool(_)
+        | WireValue::Socket(_)
+        | WireValue::Listener(_)
+        | WireValue::Writer(_)
+        | WireValue::Reader(_)
+        | WireValue::Ptr(_)
+        | WireValue::Builtin(_)
+        | WireValue::Native { .. }
+        | WireValue::Cffi(_)
+        | WireValue::Func { .. }
+        | WireValue::Nil => {}
+    }
+    acc
+}
+
+/// W6-10r — a queue core's own bytes PLUS every core nested in its messages. Takes the summary and
+/// the messages rather than the state, so the identically-shaped [`ChanState`] and [`ExecState`]
+/// share one implementation.
+///
+/// The `(bytes, dirty)` summary is maintained incrementally by `push`/`pop`, so the walk is skipped
+/// outright for a clean queue.
+///
+/// `dirty` is conservative for this purpose: it is also set by a bare `Handle`, so a queue of plain
+/// heap references is walked and finds nothing.
+/// `ponytail: one bit conflates "has a handle" with "has a nested core"` — splitting them means a
+/// third field threaded through `WireSummary` and `ChanState::push`'s tuple at every call site; do it
+/// only if a profile says this walk matters.
+pub fn queue_bytes_deep<'a>(
+    summary: (usize, bool),
+    msgs: impl Iterator<Item = &'a WireValue>,
+    seen: &mut super::fxhash::FxHashSet<usize>,
+) -> usize {
+    let (bytes, dirty) = summary;
+    if !dirty {
+        return bytes;
+    }
+    bytes + msgs.map(|w| nested_core_bytes(w, seen)).sum::<usize>()
+}
+
+/// W6-10r — a single-value core's own bytes PLUS every core nested in its payload. Call with the
+/// payload lock held.
+///
+/// A `WS_UNKNOWN` summary is filled here (exactly as [`Heap::children`](super::heap::Heap::children)
+/// fills it during marking): every core CONSTRUCTOR leaves it `UNKNOWN`, and a core reachable only
+/// through a parent is never marked through an alias slot of its own — so without this fill it would
+/// report 0 bytes forever, which is the very hole being closed.
+pub fn value_core_bytes_deep(
+    summary: &WireSummary,
+    w: &WireValue,
+    seen: &mut super::fxhash::FxHashSet<usize>,
+) -> usize {
+    if summary.state() == WS_UNKNOWN {
+        summary.set(w);
+    }
+    let bytes = summary.bytes();
+    if summary.state() == WS_DIRTY {
+        bytes + nested_core_bytes(w, seen)
+    } else {
+        bytes
+    }
 }
 
 /// Run `f` over a not-yet-visited core (by `Arc`-pointer identity), recording it in `seen` first so a

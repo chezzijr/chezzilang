@@ -572,8 +572,11 @@ render ERROR too (whole file, before any test runs), counted separately as `file
    sharpen the per-heap guarantee below rather than restate it: a core reachable from N M:N worker heaps
    is counted in **each** of them (the number is "bytes **reachable from** this heap", not an ownership
    split — the N heaps' totals do not sum to RSS), and a payload reachable only through a **nested** core
-   whose last alias slot has been swept is counted **nowhere** (gaps.md `W6-10r`, still OPEN). This is a
-   **different hole from the inline-scalar escape below, which also remains OPEN.**
+   whose last alias slot has been swept needs a cross-core recursion to be seen at all — that was
+   `W6-10r`, **FIXED 2026-08-06**: `live_bytes` now walks into nested cores (`Arc`-de-duped against the
+   same per-heap set, so a nested core with an alias slot of its own is still charged once), gated on
+   `mem_cap != 0` so a cap-off run pays one branch and zero extra walks. The **inline-scalar escape
+   below remains OPEN** and is a different hole.
    **GC pacing is byte-aware WHEN A CAP IS SET (round 3, 2026-07-27).** Counting the off-heap bytes was
    not enough on its own: `over_cap` is evaluated only inside `sweep()`, and `sweep()` used to run
    purely on `Obj`-count growth, so a program pushing megabytes across the airlock while allocating ~2

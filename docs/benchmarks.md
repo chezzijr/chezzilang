@@ -1152,7 +1152,9 @@ Same change also closes gaps.md **W6-10**: the cached byte half of the summary f
 `chezzi test --max-heap` finally sees an off-heap channel backlog / `Shared`-parked data (195 MB used to
 pass a 200 KB cap). Those bytes are charged **once per core per heap** (by `Arc` identity) — charging once
 per `Obj` alias slot multiplied a shared payload by the fan-out and produced spurious OVER-MEMORY verdicts.
-One residual escape stays open (a nested core with no surviving alias slot) — gaps.md `W6-10r`.
+The one residual escape this left — a nested core with no surviving alias slot — was closed on
+2026-08-06 by a cross-core byte recursion gated on a live cap (gaps.md `W6-10r`); cap-off runs, and so
+every bench here, are unaffected.
 
 ### Round 3 — byte-aware GC pacing under a cap (2026-07-27), the half that was wrongly marked done
 

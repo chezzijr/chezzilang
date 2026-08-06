@@ -1223,6 +1223,40 @@ struct Suite:
         }
     }
 
+    /// W6-10r — the same backlog, reachable only through a NESTED core. `live_bytes` reaches a
+    /// core's bytes through its `Obj::*` alias slot; the channel here has none once `make()`'s frame
+    /// dies, so its 300 MB used to be counted nowhere and PASSED an 8 MB cap (measured on the release
+    /// binary: PASS, rc=0, peak RSS 304 MB — while the identical program holding the channel in a
+    /// live local tripped OVER-MEMORY).
+    #[test]
+    fn over_memory_counts_a_nested_core_backlog() {
+        const CAP: usize = 8_000_000;
+        let d = TmpDir::new();
+        let nested = d.write(
+            "nested_test.chz",
+            "import std.concurrency\n\nfn make() -> Shared[Channel[str]]:\n    \
+             ch := Channel[str](100000)\n    return Shared(ch)\n\n\
+             test fn nested():\n    s := make()\n    parts: List[str] = []\n    \
+             for i in range(100000):\n        parts.push(\"0123456789\")\n    \
+             blob := \"\".join(parts)\n    for i in range(300):\n        \
+             s.get().send(blob)\n    assert true\n",
+        );
+        for parallel in [false, true] {
+            let report = run_tests_capped(&nested, parallel, CAP);
+            assert!(
+                report.text.contains("OVER-MEMORY nested"),
+                "a backlog behind a nested core must trip the cap (parallel={parallel}); \
+                 report:\n{}",
+                report.text
+            );
+            assert!(
+                !report.text.contains("FAIL nested") && !report.text.contains("ERROR nested"),
+                "must be OVER-MEMORY, not FAIL/ERROR (parallel={parallel}); report:\n{}",
+                report.text
+            );
+        }
+    }
+
     /// W6-10 review, the SAMPLING half: counting the off-heap bytes is worthless if the cap is
     /// never sampled. `over_cap` is only evaluated inside `sweep()`, and `sweep()` only runs when
     /// `should_collect()` fires — which used to be a pure heap-OBJECT count. A program that pushes

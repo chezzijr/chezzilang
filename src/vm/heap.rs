@@ -810,7 +810,16 @@ impl Heap {
         // (Go-idiomatic mailbox-per-connection code holds thousands of distinct cores). It stays
         // allocation-free until the first core slot shows up (`HashSet::default` does not allocate).
         let mut cores: super::fxhash::FxHashSet<usize> = Default::default();
-        let mut once = |ptr: usize| cores.insert(ptr);
+        // W6-10r — whether to also charge the cores NESTED inside a core's payload (a `Channel`
+        // parked in a `Shared`, whose own alias slot has been swept: reachable from this heap, but
+        // owning no `Obj` slot of its own, so it used to be counted nowhere and backlogged 304 MB
+        // past an 8 MB cap). Gated on a live cap for the same reason the byte-aware GC pacing is
+        // (`should_collect`): with `mem_cap == 0` `over_cap` is meaningless, so a `chezzi run`, a
+        // bench and the whole parity gate pay one `!= 0` load and ZERO extra walks — the walk is
+        // O(payload) per DIRTY core per sweep, on top of the mark pass's. A CLEAN core stays O(1)
+        // either way. (`CHEZZI_HEAP_STATS`'s cap-off peak therefore still omits nested-core bytes,
+        // exactly as it did before this fix.)
+        let deep = self.mem_cap != 0;
         for slot in &self.slots {
             let Some(obj) = &slot.obj else { continue };
             total += std::mem::size_of::<Obj>();
@@ -836,20 +845,66 @@ impl Heap {
                 // a per-heap reachability cap (each worker really can reach it), but it is not an
                 // ownership split, so the N heaps' totals do not add up to process RSS.
                 //
-                // KNOWN GAP (gaps.md W6-10 residual, still OPEN): the byte walk stops at a NESTED
-                // core boundary — those bytes are owned by that core's own summary, and reached here
-                // only through ITS `Obj::*` alias slot. A nested core whose last alias slot has been
-                // swept (it survives inside the parent's `WireValue`) is counted NOWHERE. Closing it
-                // needs cross-core byte recursion with `Arc` de-dup; deliberately not built.
-                Obj::Channel(core) if once(Arc::as_ptr(core) as usize) => {
-                    core.q.lock().unwrap().summary().0
+                // W6-10r — under a cap the charge also RECURSES into the cores nested in this one's
+                // payload, sharing the same `cores` set so a nested core that *also* has an alias
+                // slot here is still charged exactly once, whichever way it is met first.
+                Obj::Channel(core) if cores.insert(Arc::as_ptr(core) as usize) => {
+                    let g = core.q.lock().unwrap();
+                    if deep {
+                        crate::vm::core::queue_bytes_deep(g.summary(), g.iter(), &mut cores)
+                    } else {
+                        g.summary().0
+                    }
                 }
-                Obj::Executor(core) if once(Arc::as_ptr(core) as usize) => {
-                    core.inner.lock().unwrap().summary().0
+                // KNOWN GAP (gaps.md `W7-26`, OPEN — measured, not assumed): this reads only the
+                // `inner` QUEUE half of the core, which is the `--serial` half. On the default M:N
+                // engine `submit` runs EAGERLY, so `inner` stays empty and every finished job's
+                // result (`eager.slots`, plus its buffered `out`/`stderr`) is counted NOWHERE —
+                // 300 × ~1 MB of submitted results measured **PASS at 312 MB against an 8 MB cap**.
+                // `EagerState` keeps no cached summary, so closing it is new incremental accounting,
+                // not a recursion. Rooting is unaffected: a worker result crosses by value with no
+                // parent-heap `GcRef` (B3.2), which is why `children` has no `eager` arm either.
+                Obj::Executor(core) if cores.insert(Arc::as_ptr(core) as usize) => {
+                    let g = core.inner.lock().unwrap();
+                    if deep {
+                        crate::vm::core::queue_bytes_deep(g.summary(), g.iter(), &mut cores)
+                    } else {
+                        g.summary().0
+                    }
                 }
-                Obj::Shared(core) if once(Arc::as_ptr(core) as usize) => core.summary.bytes(),
-                Obj::RwShared(core) if once(Arc::as_ptr(core) as usize) => core.summary.bytes(),
-                Obj::Atomic(core) if once(Arc::as_ptr(core) as usize) => core.summary.bytes(),
+                Obj::Shared(core) if cores.insert(Arc::as_ptr(core) as usize) => {
+                    if deep {
+                        crate::vm::core::value_core_bytes_deep(
+                            &core.summary,
+                            &core.v.lock().unwrap(),
+                            &mut cores,
+                        )
+                    } else {
+                        core.summary.bytes()
+                    }
+                }
+                Obj::RwShared(core) if cores.insert(Arc::as_ptr(core) as usize) => {
+                    if deep {
+                        crate::vm::core::value_core_bytes_deep(
+                            &core.summary,
+                            &core.v.read().unwrap(),
+                            &mut cores,
+                        )
+                    } else {
+                        core.summary.bytes()
+                    }
+                }
+                Obj::Atomic(core) if cores.insert(Arc::as_ptr(core) as usize) => {
+                    if deep {
+                        crate::vm::core::value_core_bytes_deep(
+                            &core.summary,
+                            &core.v.lock().unwrap(),
+                            &mut cores,
+                        )
+                    } else {
+                        core.summary.bytes()
+                    }
+                }
                 _ => 0,
             };
         }
@@ -1268,6 +1323,113 @@ mod iter_obj_tests {
             "a drained queue must return to zero"
         );
         let _ = cr;
+    }
+
+    /// W6-10r — a core reachable ONLY through another core's payload (its own alias slot swept) owns
+    /// no `Obj` slot, so `live_bytes` used to reach its bytes nowhere: measured on the release
+    /// binary, a `Channel` parked in a `Shared` backlogged to **304 MB peak RSS and PASSED** an 8 MB
+    /// `--max-heap`, while the identical program holding the channel in a live local tripped.
+    ///
+    /// Also pins the two properties the fix must not break: the walk is GATED on a live cap (cap-off
+    /// pacing/peak behaviour is bit-for-bit what it was), and a nested core that ALSO has an alias
+    /// slot here is still charged exactly once.
+    #[test]
+    fn live_bytes_counts_a_nested_core_with_no_alias_slot() {
+        let mut h = Heap::new();
+        // The inner core has a real backlog and NO alias slot of its own in this heap.
+        let inner = Arc::new(ChannelCore::default());
+        for _ in 0..100 {
+            let w = wlist(500);
+            inner
+                .q
+                .lock()
+                .unwrap()
+                .push(crate::vm::core::wire_summary(&w), w);
+        }
+        let inner_bytes = inner.q.lock().unwrap().summary().0;
+        assert!(inner_bytes > 100 * 500 * std::mem::size_of::<crate::vm::wire::WireValue>());
+
+        let outer = Arc::new(SharedCore::default());
+        outer.store(crate::vm::wire::WireValue::Channel(Arc::clone(&inner)));
+        let or = h.alloc(Obj::Shared(Arc::clone(&outer)));
+        h.children(or); // fill the lazy summary, exactly as a real GC pass would
+
+        // Cap OFF: unchanged behaviour — the nested backlog is not walked.
+        let shallow = h.live_bytes();
+        assert!(
+            shallow < inner_bytes,
+            "with no cap the nested walk must not run: {shallow} vs {inner_bytes}"
+        );
+
+        // Cap ON: the nested backlog is charged.
+        h.set_mem_cap(1);
+        let deep = h.live_bytes();
+        assert_eq!(
+            deep,
+            shallow + inner_bytes,
+            "a nested core's bytes must be charged under a cap"
+        );
+
+        // The inner core gains an alias slot of its own: still charged ONCE (per-`Arc` de-dup shared
+        // between the slot scan and the nested walk), not twice.
+        let ir = h.alloc(Obj::Channel(Arc::clone(&inner)));
+        assert_eq!(
+            h.live_bytes(),
+            deep + std::mem::size_of::<Obj>(),
+            "a nested core with its own alias slot is charged once, not twice"
+        );
+        let _ = ir;
+    }
+
+    /// W6-10r — the arms the headline test does NOT reach: a core nested inside a QUEUED MESSAGE
+    /// (so `queue_bytes_deep`'s recursive branch and a container arm, not just the single-value
+    /// path), and a core CYCLE. Filed by review of the fix: the headline test's nested core sits
+    /// directly in a `Shared`'s payload and its queue is pure data, so it short-circuits before
+    /// reaching either — the exact "fixed on SOME arms of an N-way set" shape.
+    #[test]
+    fn nested_core_bytes_walks_queued_messages_and_terminates_on_a_cycle() {
+        let mut h = Heap::new();
+        h.set_mem_cap(1);
+
+        // A core nested inside a queued LIST message: queue → message → container → core.
+        let deep = Arc::new(SharedCore::default());
+        deep.store(wlist(500));
+        let deep_bytes = deep.summary.bytes();
+        assert!(deep_bytes > 500 * std::mem::size_of::<crate::vm::wire::WireValue>());
+
+        let mid = Arc::new(ChannelCore::default());
+        let msg = crate::vm::wire::WireValue::List {
+            id: 0,
+            items: vec![crate::vm::wire::WireValue::Shared(Arc::clone(&deep))],
+        };
+        mid.q
+            .lock()
+            .unwrap()
+            .push(crate::vm::core::wire_summary(&msg), msg);
+        let base = h.live_bytes();
+        let cr = h.alloc(Obj::Channel(Arc::clone(&mid)));
+        let with_deep = h.live_bytes();
+        assert!(
+            with_deep >= base + deep_bytes,
+            "a core nested inside a QUEUED message must be charged: \
+             {base} -> {with_deep} (nested payload {deep_bytes})"
+        );
+        let _ = cr;
+
+        // A → B → A. The walk must terminate (and charge each core once).
+        let a = Arc::new(SharedCore::default());
+        let b = Arc::new(SharedCore::default());
+        b.store(crate::vm::wire::WireValue::Shared(Arc::clone(&a)));
+        a.store(crate::vm::wire::WireValue::Shared(Arc::clone(&b)));
+        let ar = h.alloc(Obj::Shared(Arc::clone(&a)));
+        let cyclic = h.live_bytes();
+        assert!(cyclic > with_deep, "the cycle's cores must still register");
+        assert_eq!(
+            cyclic,
+            h.live_bytes(),
+            "the walk must be stable, not growing"
+        );
+        let _ = ar;
     }
 
     /// W6-10 review — a core's payload is ONE `Arc` allocation, but `from_wire` mints a FRESH

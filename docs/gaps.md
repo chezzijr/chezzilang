@@ -19,7 +19,7 @@ OS bytes become Chezzi values): 3 findings, all FIXED, and it re-confirmed wave 
 surfaces the wave-5 residual named as never-audited (FFI: 4 defects; GC + new object layout: clean). As of
 2026-07-28 all 19 + the 3 carve-outs are fixed, plus one follow-up found by adversarial review of the
 W6-9 branch (**`W6-9b`**, the half-byte-exact parity oracle, fixed 2026-07-28); what remains are the
-the disclosed residuals `W6-9r` / `W6-10r` — see the index below (`W6-10s` was the third; it is CLOSED 2026-08-06). Read its session log
+the one disclosed residual `W6-9r` — see the index below (`W6-10s` and `W6-10r` were the other two; both CLOSED 2026-08-06). Read its session log
 before touching `io`/`process`/FFI/`RwShared`/module-snapshot code. Its meta-finding — **5 of 6 P0s are "a
 fix applied to SOME arms of an N-way set"** — is the highest-yield remaining lever. **Wave 7
 (2026-07-28)** is running against exactly that lever; `W7-3` (a `recover:` inside a cancelled task's
@@ -59,8 +59,9 @@ chronological log.
 | `List[Any]` widening | `:1731` | `List[Any] = [1, 3.0]` silently widens the int to `1.0` | Deferred pre-freeze (wave 4) |
 | **N10** | `:3456` | A `wait:` timer arm makes `--serial` inline-sleep instead of yielding to a runnable sibling (serial ≠ M:N) | Deliberate pre-freeze known-limit; fix is folded into the post-freeze serial-engine removal |
 | ~~**W6-10s**~~ | `:1349` | `--max-heap` residual **sampling** escapes left after the byte-aware pacing fix | Pacing samples the cap on charged off-heap bytes, but only for stores routed through `to_wire_crossable` and only per heap. Still not sampled: the documented inline-scalar loop (`future.md §1b` — no `Obj`s, no wire bytes), the by-hand airlock paths (spawn args, closure captures, `Executor.submit`), and a heap that HOLDS a huge core without storing to it. **Premise partly re-derived 2026-08-06 and it did NOT hold**: the `Executor.submit` arm is the only one of the three that stores persistently off-heap, and it does so ONLY on `--serial` (M:N executes eagerly and queues nothing) — which `--max-heap` refuses at the CLI (`main.rs:685`), so that arm is unreachable. The spawn-arg / capture arms are transient: `prepare_worker` rebuilds them into a worker heap immediately. What IS reachable was measured instead and is a different mechanism: a worker heap **born big** — `spawn use(blob)` with a 200 000-int `blob` PASSED `--max-heap=8000000`, and adding ONE allocating statement to the spawned fn turned the same program OVER-MEMORY at the same RSS, because the payload arrives in ~7 objects so `since_gc` never reaches `next_gc` and `sweep()` — the sole assigner of `over_cap` — never runs. Charging bytes in `Heap::alloc` does NOT fix it: these containers are alloc'd EMPTY and patched via `get_mut` (the tie-the-knot rebuild), so there is nothing to charge at alloc time. **FIXED 2026-08-06** by `Heap::request_collect`: `Vm::spawn_worker` — the one door every worker heap is born through, and where the cap is already threaded — asks for the first collect whenever a cap is live, and the flag is consumed at the task's first instruction boundary in `run_until` (the first properly-rooted point; it is set before the payload is rebuilt, which is safe because `Heap::alloc` never collects). `spawn use(blob)` with `use = return xs.len()` at `--max-heap=1000000`: **PASS → OVER-MEMORY**, with the generous-cap, no-cap and 50-spawn controls all still PASS. **Two residuals stay open and are NOT claimed fixed** (both measured, neither introduced by the fix): (a) a task whose ENTIRE body is one native call (`spawn blob.len()`) executes no bytecode, so it reaches no instruction boundary and the flag is never consumed — and there is no safe sample point in that window, since the payload is rooted only as the pending call's operands (collect before the call and you free the task's own arguments; after it the receiver is already dead); (b) growth AFTER the sample that allocates no `Obj`s — `xs.push(i)` grew a worker heap 32× past the cap post-sweep and never re-triggered, which is `future.md §1b`. So the fix narrows "the verdict tracks who allocates" to bytecode-running tasks; it does not make `--max-heap` total |
+| **W7-26** | `:6861` | `--max-heap` counts an `Executor`'s `inner` QUEUE half but never its **eager** half — on the default M:N engine that is the ONLY half in use, so every finished job's result is invisible to the cap | **Measured on the release binary 2026-08-06, found by adversarial review of the `W6-10r` fix.** `Executor()` + a ~1 MB blob + `300 × ex.submit(fn() -> str: blob)` + `shutdown()` under `--max-heap=8000000`: **PASS, rc=0, peak RSS 312 MB** — a 39× overshoot, the same magnitude and the same failure mode as the `W6-10r` repro it was found beside. `submit` runs EAGERLY on M:N (matching `ThreadPoolExecutor`), so `inner` stays empty and each result lands in `eager.slots` as a `TaskOutcome::Done(WorkerResult { value: WireValue, out, stderr })` — off-heap bytes plus two unbounded output buffers, reached by `live_bytes` nowhere. **Not a `W6-10r` regression and not closable by its recursion**: this is not a nested core, it is a second payload half with NO cached summary at all (`EagerState` has none), so closing it means new incremental accounting threaded through `reserve`/`finish`/`take_slots` — the same shape as `ChanState`'s, its own piece of work. **Rooting is unaffected** and this is a byte-accounting hole only: a worker result crosses by value with no parent-heap `GcRef` (B3.2), which is why `Heap::children` has no `eager` arm either. Disclosed in a comment on the `Obj::Executor` arm of `live_bytes` |
 | **W6-9r** | `:1473` | Parity-oracle residual left by the `W6-9b` fix: ~31 hand-rolled `run_file_p` + `run_file` cross-engine compares in `parity_tests.rs` still diff LOSSILY-DECODED strings, and `parity_entry_cfg_lines` compares stdout as an order-insensitive line multiset | The three SHARED comparators were fixed at the helper level (0 call sites touched); converting the hand-rolled ones means rewriting ~31 call sites. UTF-8-only today, so nothing is failing — but a new byte-emitting test added at one of those sites inherits the blindness. Use `vm::run_file_bytes` there |
-| **W6-10r** | `:1386` | `--max-heap` residual: a payload reachable ONLY through a **nested** core (a `Channel` inside a `Shared`, once the nested core's last `Obj` alias slot is swept) is counted nowhere | Left open by the W6-10 fix on purpose. `live_bytes` reaches a core's bytes through its `Obj::*` alias slot; a nested core has none. Closing it needs cross-core byte recursion with `Arc` de-dup — narrow trigger, not worth the machinery yet |
+| ~~**W6-10r**~~ | `:1390` | `--max-heap` residual: a payload reachable ONLY through a **nested** core (a `Channel` inside a `Shared`, once the nested core's last `Obj` alias slot is swept) is counted nowhere | **Premise re-derived and CONFIRMED 2026-08-06** before any edit (the two preceding rows in this family had premises that had gone stale): `make() -> Shared[Channel[str]]` parking a channel whose only alias slot dies with the frame, then 300 × ~1 MB `s.get().send(blob)` → **PASS, rc=0, peak RSS 304 MB** against `--max-heap=8000000`, while the identical program holding the channel in a live local tripped OVER-MEMORY. **FIXED 2026-08-06**: `core::nested_core_bytes` — the byte mirror of `collect_core_gcrefs`, which already recursed into nested cores for ROOTING (only the byte walk stopped at the boundary) — plus `queue_bytes_deep` / `value_core_bytes_deep`, called from `Heap::live_bytes`. The recursion shares `live_bytes`'s per-heap `Arc`-identity set, so a nested core that also has an alias slot here is still charged exactly once, and it fills a `WS_UNKNOWN` summary in passing (every core constructor leaves it UNKNOWN, and a core reached only through a parent is never marked through a slot of its own — without the fill it reports 0 forever). Gated on `mem_cap != 0`, the same argument as the round-3 pacing counter: cap-off runs (every `chezzi run`, every bench, the whole parity gate) pay one `!= 0` load and ZERO extra walks. Repro: **PASS @ 304 MB → OVER-MEMORY, rc=1, 16.5 MB**; generous-cap and no-cap controls still PASS. Tests `vm::heap::live_bytes_counts_a_nested_core_with_no_alias_slot` (cap-off unchanged / cap-on charges / alias-slot de-dup) + `test_runner::over_memory_counts_a_nested_core_backlog` (both engines), both mutation-verified red with the walk disabled |
 | ~~**W7-25**~~ | `:6725` | **FIXED 2026-08-06 (breaking output change).** A string nested in a container / struct field / enum payload rendered RAW, so different values printed identically: `["a", "b"]` and `["a, b"]` were both `[a, b]`, and `[""]` printed `[]` — `str(a) == str(b)` true while `a == b` false. Now Python `repr` (`slice::str_repr`, cross-checked against CPython 3.14), applied by `stringify_nested_into` at the six nesting sites; a `str(self)` hook's own result is deliberately NOT quoted. Sweep: 14 goldens, 15 Rust expectations, 8 chz assertions | **The detector encoded the bug.** The CPython differential oracle's shim defined `_chz_repr(v) = v if isinstance(v, str) else _chz_str(v)` — it mirrored the raw-nested-string behavior, so the one tool built to catch a Python divergence could never report this one. Eight difftest suites went red when the implementation was fixed. **A detector written to mirror the implementation is blind to bugs in what it mirrors** |
 | ~~**W7-24**~~ | `:6660` | **FIXED 2026-08-06.** Call-argument normalization never reached an interpolation fragment: `"{f(1)}"` with `fn f(a: int, b: int = 2)` was `'f' expects 2 argument(s), got 1`, `"{sub(y=1, x=10)}"` was `got 0`, and `"{sum_all(1, 2, 3)}"` was `expects 1 argument(s), got 3` + `expected List[int], found int` — every one of them correct outside the string. `ExprKind::Str` held RAW text, so `desugar::run` (named args + defaults + variadic sweeping, one pass) ran before the fragment was parsed, and three separate consumers re-parsed it after. Fixed by `ExprKind::Interp(Vec<Chunk>)`, produced by `desugar` itself — fragments become real children before normalization, inside the live scope stack | **An invariant a pass establishes only holds for what that pass can SEE.** The checker received exactly the `Call` shape desugar's own header promises it never will (`named` non-empty, defaults unfilled), which is why the errors were incoherent rather than merely wrong. Raw text stored in an AST node is a hole in every tree-walking guarantee, and the hole only surfaces at the consumer |
 | ~~**W7-23**~~ | `:6615` | **FIXED 2026-08-06.** The interpolation fragment scanner was neither quote- nor depth-aware: it cut at the FIRST `}`, so `"{d['a}}b']}"` was `unmatched '}' in string` and `"{ {1, 2}.len() }"` was `unexpected an indented block in expression` — valid code, hard compile errors. Now it carries `fmtspec::split_spec`'s own `in_str` + bracket-`depth` state. Also: a fragment is lexed as its own line, so leading padding (`"{ 1 + 2 }"`, legal in CPython) opened an INDENT token — `parse_expr_str` now trims | **One layer was careful about quotes and the layer feeding it was not** — `split_spec` is called on the very NEXT line of the same function and has been quote-aware since it shipped. A shared invariant implemented in one of two adjacent layers reads as implemented in both |
@@ -346,7 +347,7 @@ for a host-boundary batch.
 
 ## Session log — 2026-07-25 (bug-hunt wave 6: 19 findings — W6-19 found while FIXING W6-2 — W6-1..W6-19 all FIXED as of 2026-07-27, the last being W6-9; of the 3 carve-outs filed (W6-3b/c/d), **W6-3b and W6-3c are FIXED (2026-07-26)** and **W6-3d was RESOLVED 2026-07-27 by ruling (a)**; a follow-up to W6-9 — **W6-9b**, the capture-based
 parity comparators still diffing a lossy decode — was found by adversarial review and FIXED 2026-07-28. So
-wave 6 carries no open DEFECTS; what remains are the disclosed residuals W6-9r/W6-10r (W6-10s closed 2026-08-06), filed as
+wave 6 carries no open DEFECTS; what remains is the disclosed residual W6-9r (W6-10s and W6-10r both closed 2026-08-06), filed as
 their own rows. See the OPEN ITEMS table at the top, which is the authority — 2 never-hunted surfaces swept)
 
 Pre-freeze adversarial hunt, 5 disjoint parallel domains, weighted at the two surfaces the wave-5
@@ -1387,14 +1388,62 @@ last surviving member of the family.
 > cap (each worker really can reach it) but means the N heaps' totals are not an ownership split of
 > RSS. Test: `vm::heap::live_bytes_counts_a_shared_core_once_per_heap`.
 >
-> **RESIDUAL, STILL OPEN (`W6-10r` in the index table).** The byte walk stops at a **nested-core
-> boundary**: those bytes are owned by that core's own summary, and `live_bytes` reaches a core's
-> summary only through an `Obj::*` alias slot. A nested core whose last alias slot has been swept —
-> e.g. `s := Shared(ch)`, then the local `ch` binding dies, then backlog through `s.get().send(...)`
-> — survives inside the parent's `WireValue` with no slot of its own, so its backlog is counted
-> **nowhere** and sails past the cap exactly as before. Closing it needs cross-core byte recursion
-> with `Arc` de-dup; deliberately not built (narrow trigger, real machinery). The earlier claim that
-> "that core's own summary owns those bytes" makes the case safe was **wrong** and is retracted.
+> **RESIDUAL `W6-10r` — FIXED 2026-08-06 (was: the byte walk stops at a nested-core boundary).**
+> Those bytes are owned by that core's own summary, and `live_bytes` reached a core's summary only
+> through an `Obj::*` alias slot. A nested core whose last alias slot had been swept —
+> `s := Shared(ch)` built inside a `fn`, so the local `ch` binding dies with the frame, then backlog
+> through `s.get().send(...)` — survives inside the parent's `WireValue` with no slot of its own, so
+> its backlog was counted **nowhere** and sailed past the cap exactly as before. The earlier claim
+> that "that core's own summary owns those bytes" makes the case safe was **wrong** and is retracted.
+>
+> **Premise re-derived on the release binary BEFORE any edit** (the two preceding rows in this family
+> had premises that had stopped being true — `W6-10s`'s filed escape turned out to be unreachable):
+> the shape above at `--max-heap=8000000` measured **PASS, rc=0, peak RSS 304 MB**, while the
+> identical program holding the channel in a live local measured **OVER-MEMORY, rc=1**. Confirmed as
+> filed.
+>
+> **Fix — `core::nested_core_bytes`, the BYTE MIRROR of a recursion that already existed.**
+> `collect_core_gcrefs` has always recursed into nested cores (a nested core may be reachable only
+> through its parent, so its embedded handles would dangle otherwise); only `wire_summary`'s byte half
+> stopped at the boundary. The new walk keeps the arms in lockstep with both, and two small helpers
+> — `queue_bytes_deep` (shared by the identically-shaped `ChanState`/`ExecState`) and
+> `value_core_bytes_deep` (`Shared`/`RwShared`/`Atomic`) — charge a core's own summary plus everything
+> nested inside it. Three properties carry the fix:
+> - **de-dup is SHARED with `live_bytes`'s own per-slot scan** — one `FxHashSet` of `Arc` pointers
+>   spans both, so a nested core that *also* has an alias slot in this heap is charged exactly once
+>   whichever way it is met first (charging it twice is the false-positive direction W6-10's review
+>   already had to fix once), and it terminates `Arc` cycles.
+> - **a `WS_UNKNOWN` summary is filled in passing**, exactly as `Heap::children` fills it while
+>   marking. Every core CONSTRUCTOR (`Op::NewShared`, `new_atomic`, …) leaves the summary UNKNOWN and
+>   a core reached only through a parent is never marked through an alias slot of its own — without
+>   the fill it would report 0 bytes forever, i.e. the same hole with extra steps.
+> - **gated on `mem_cap != 0`**, the same argument as the round-3 pacing counter: with no cap
+>   `over_cap` is meaningless, so every `chezzi run`, every bench and the whole parity gate pay one
+>   `!= 0` load and ZERO extra walks. Under a cap the cost is one O(payload) walk per **dirty** core
+>   per sweep, on top of the mark pass's; a CLEAN core stays O(1). `CHEZZI_HEAP_STATS`'s cap-off peak
+>   therefore still omits nested-core bytes — exactly as it did before the fix, so nothing regresses.
+>
+> Known ceiling, marked in the code: `dirty` conflates "holds a `Handle`" with "holds a nested core",
+> so a queue of plain heap references is walked and finds nothing. Splitting them means a third field
+> threaded through `WireSummary` and `ChanState::push`'s tuple at every call site — not built until a
+> profile says it matters.
+>
+> Verified on the release binary: the repro **PASS @ 304 MB → OVER-MEMORY, rc=1, 16.5 MB**; the same
+> program under a generous 4 GB cap and under no cap still **PASS** (no false positive). Tests:
+> `vm::heap::live_bytes_counts_a_nested_core_with_no_alias_slot` (cap-off unchanged, cap-on charges
+> the nested backlog, and adding an alias slot for the nested core does not double-charge) and
+> `test_runner::over_memory_counts_a_nested_core_backlog` (the repro, both engines), plus
+> `nested_core_bytes_walks_queued_messages_and_terminates_on_a_cycle` for the arms the headline test
+> does NOT reach (a core nested inside a QUEUED message, and an A→B→A core cycle) — filed by review of
+> this fix, since the headline nested core sits directly in a `Shared`'s payload over a pure-data
+> queue and short-circuits before either. All **mutation-verified**: forcing the gate to `false` turns
+> them red.
+>
+> **This closes `W6-10r`, NOT `--max-heap` in general.** Review of this very fix measured a sibling
+> hole immediately: an `Executor`'s EAGER half — the only half the default M:N engine uses — is
+> counted nowhere, and 300 submitted ~1 MB results PASS at **312 MB** against an 8 MB cap. Filed as
+> **`W7-26`**, not bundled: it is a second payload half with no cached summary, not a nested core. The
+> sampling residuals from `W6-10s` also stay open.
 >
 > **Observable change (the point of the fix):** `--max-heap` now trips where it previously passed.
 > Nothing else moves — the dual-engine byte-identity gate runs cap-OFF, and `live_bytes` is otherwise
@@ -6818,3 +6867,42 @@ struct fields, enum payload, and the display-hook exclusion. Gated serial==M:N b
 renderer directly against CPython's `repr` output. The strongest fence is the difftest suite itself:
 with the shim arm now equal to `repr`, every fuzzed program compares Chezzi's nested rendering to
 CPython's own.
+
+### W7-26 — `--max-heap` never counts an `Executor`'s EAGER half, which is the only half M:N uses — **OPEN (measured 2026-08-06)**
+
+> Found by adversarial review of the `W6-10r` fix, and reproduced independently before filing.
+>
+> ```chezzi
+> import std.concurrency
+>
+> test fn execres():
+>     blob := "".join(parts)          # ~1 MB, built once
+>     ex := Executor()
+>     for i in range(300):
+>         ex.submit(fn() -> str: blob)
+>     ex.shutdown()
+>     assert true
+> ```
+> `chezzi test --max-heap=8000000 ex_test.chz` → **PASS, rc=0, peak RSS 312 MB** — a 39× overshoot,
+> the same magnitude and the same failure mode as the `W6-10r` repro it was found beside.
+>
+> **Mechanism.** `ExecutorCore` has TWO payload halves. `inner: Mutex<ExecState>` is the `--serial`
+> queue and the only one `Heap::live_bytes` reads. On the default M:N engine `submit` runs EAGERLY
+> (matching Python's `ThreadPoolExecutor`), so `inner` stays empty forever and every finished job's
+> result lands in `eager: Mutex<EagerState>` as
+> `TaskOutcome::Done(WorkerResult { value: WireValue, out, stderr })` — off-heap wire bytes plus two
+> unbounded buffered-output `Vec<u8>`s, reached by the byte walk nowhere. So the half the cap reads
+> is exactly the half the default engine does not use.
+>
+> **Why `W6-10r`'s recursion does not close it.** This is not a nested core reachable through a
+> parent's payload; it is a second payload half with **no cached summary at all** — `EagerState` has
+> neither a `bytes` nor a `dirty` field, unlike `ChanState`/`ExecState`. Closing it means new
+> incremental accounting threaded through `reserve` / `finish` / `take_slots` (the shape `ChanState`
+> already has, and for the same "no site can forget" reason), which is its own piece of work rather
+> than an arm of the recursion. Filed instead of bundled.
+>
+> **This is a byte-accounting hole only — rooting is NOT affected.** A worker result crosses by value
+> with no parent-heap `GcRef` (B3.2), which is precisely why `Heap::children` has no `eager` arm
+> either; nothing in `eager` can root a parent-heap object, so nothing there can dangle. Disclosed in
+> a comment on the `Obj::Executor` arm of `live_bytes` so the next reader of that arm sees which half
+> it reads.
