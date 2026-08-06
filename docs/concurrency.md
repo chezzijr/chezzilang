@@ -913,8 +913,9 @@ fn serve(tok: Token, io: Channel[str]):
 > One limit, in the N5 family and identical on both engines: a grandchild that is already **parked**
 > (`recv`/`wait:`) when the *outer* scope is cancelled is not re-driven — the cancel drain is scope-
 > scoped, and a parked fiber has no checkpoint to observe the inherited flag — so it is torn down by the
-> deadlock reap **without running its `defer`s** (`docs/gaps.md` **N5**). A grandchild that is *running*
-> (or parks *after* the cancel) unwinds normally.
+> deadlock reap **without running its `defer`s** (`docs/gaps.md` **N5**, which is the deliberate
+> deadlock exception below, not a filed bug). A grandchild that is *running* (or parks *after* the
+> cancel) unwinds normally.
 >
 > **Where a cancel is NOT delivered — pure CPU with no back-edge.** A checkpoint is a loop back-edge, a
 > blocking op, or a native→user-code re-entry (a `list.map`/`filter`/`fold`/`sort` callback: the native's
@@ -932,9 +933,15 @@ fn serve(tok: Token, io: Channel[str]):
 > the **exit code**, and **whether the `defer` ran**. Parity tests for concurrent output use the
 > order-insensitive comparison, never a byte-equal one.
 >
-> One known limit remains: a **genuine deadlock** (every fiber parked, nothing cancelled, nothing able
-> to arrive) tears the parked fibers down where they stand and does **not** run their `defer`s
-> (`docs/gaps.md` **N5**). Both engines agree there, so it is a limit, not a divergence.
+> **One deliberate exception: a genuine deadlock does not run `defer`s.** When every fiber is parked,
+> nothing is cancelled and nothing can arrive, the parked fibers are torn down where they stand and
+> their `defer`s do **not** run. This is the contract, not a debt — a deadlock is the runtime declaring
+> the program cannot proceed, which is not a cancellation, and the ancestors draw the line in the same
+> place: Go's `fatal error: all goroutines are asleep - deadlock!` skips its `defer`s (its `panic` path
+> runs them), and CPython does not even reach the question — a `queue.Queue().get()` or an unset
+> asyncio `Event` under a `TaskGroup` hangs until something external kills it, `finally` unrun.
+> Chezzi is the strictest of the three: it detects and reports in milliseconds. (`docs/gaps.md` **N5**,
+> closed as not-a-bug 2026-08-06 with the measured table.)
 
 **Parity-safe deadline.** A timeout's deadline is checked via `monotonic()` *at poll time* — no
 background canceller task — so a self-polling timeout loop stops on time identically on **every**

@@ -55,13 +55,13 @@ chronological log.
 
 | item | gaps.md | what | why it is still open |
 |---|---|---|---|
-| `min`/`max` → `Option` | `:1392` | `List.min`/`max`/`min_by`/`max_by` fault on empty while `first`/`last`/`pop` return `Option[T]` | Breaking surface change: 23 call sites + docs + examples. Own milestone |
-| `List[Any]` widening | `:1309` | `List[Any] = [1, 3.0]` silently widens the int to `1.0` | Deferred pre-freeze (wave 4) |
-| **N10** | `:3158` | A `wait:` timer arm makes `--serial` inline-sleep instead of yielding to a runnable sibling (serial ≠ M:N) | Deliberate pre-freeze known-limit; fix is folded into the post-freeze serial-engine removal |
-| **W6-10s** | `:1179` | `--max-heap` residual **sampling** escapes left after the byte-aware pacing fix | Pacing samples the cap on charged off-heap bytes, but only for stores routed through `to_wire_crossable` and only per heap. Still not sampled: the documented inline-scalar loop (`future.md §1b` — no `Obj`s, no wire bytes), the by-hand airlock paths (spawn args, closure captures, `Executor.submit`), and a heap that HOLDS a huge core without storing to it |
-| **W6-9r** | `:1303` | Parity-oracle residual left by the `W6-9b` fix: ~31 hand-rolled `run_file_p` + `run_file` cross-engine compares in `parity_tests.rs` still diff LOSSILY-DECODED strings, and `parity_entry_cfg_lines` compares stdout as an order-insensitive line multiset | The three SHARED comparators were fixed at the helper level (0 call sites touched); converting the hand-rolled ones means rewriting ~31 call sites. UTF-8-only today, so nothing is failing — but a new byte-emitting test added at one of those sites inherits the blindness. Use `vm::run_file_bytes` there |
-| **W6-10r** | `:1216` | `--max-heap` residual: a payload reachable ONLY through a **nested** core (a `Channel` inside a `Shared`, once the nested core's last `Obj` alias slot is swept) is counted nowhere | Left open by the W6-10 fix on purpose. `live_bytes` reaches a core's bytes through its `Obj::*` alias slot; a nested core has none. Closing it needs cross-core byte recursion with `Arc` de-dup — narrow trigger, not worth the machinery yet |
-| protocol embeds | `:1505` | A protocol-embedded method isn't callable through the interface value (`p: Person` can't call embedded `name()`) despite `spec.md:973` "flattened at bound sites" | Filed as a safe-direction observation in wave 3; never triaged — doc and behavior contradict each other either way |
+| `min`/`max` → `Option` | `:1690` | `List.min`/`max`/`min_by`/`max_by` fault on empty while `first`/`last`/`pop` return `Option[T]` | Breaking surface change: 23 call sites + docs + examples. Own milestone |
+| `List[Any]` widening | `:1731` | `List[Any] = [1, 3.0]` silently widens the int to `1.0` | Deferred pre-freeze (wave 4) |
+| **N10** | `:3456` | A `wait:` timer arm makes `--serial` inline-sleep instead of yielding to a runnable sibling (serial ≠ M:N) | Deliberate pre-freeze known-limit; fix is folded into the post-freeze serial-engine removal |
+| **W6-10s** | `:1349` | `--max-heap` residual **sampling** escapes left after the byte-aware pacing fix | Pacing samples the cap on charged off-heap bytes, but only for stores routed through `to_wire_crossable` and only per heap. Still not sampled: the documented inline-scalar loop (`future.md §1b` — no `Obj`s, no wire bytes), the by-hand airlock paths (spawn args, closure captures, `Executor.submit`), and a heap that HOLDS a huge core without storing to it |
+| **W6-9r** | `:1473` | Parity-oracle residual left by the `W6-9b` fix: ~31 hand-rolled `run_file_p` + `run_file` cross-engine compares in `parity_tests.rs` still diff LOSSILY-DECODED strings, and `parity_entry_cfg_lines` compares stdout as an order-insensitive line multiset | The three SHARED comparators were fixed at the helper level (0 call sites touched); converting the hand-rolled ones means rewriting ~31 call sites. UTF-8-only today, so nothing is failing — but a new byte-emitting test added at one of those sites inherits the blindness. Use `vm::run_file_bytes` there |
+| **W6-10r** | `:1386` | `--max-heap` residual: a payload reachable ONLY through a **nested** core (a `Channel` inside a `Shared`, once the nested core's last `Obj` alias slot is swept) is counted nowhere | Left open by the W6-10 fix on purpose. `live_bytes` reaches a core's bytes through its `Obj::*` alias slot; a nested core has none. Closing it needs cross-core byte recursion with `Arc` de-dup — narrow trigger, not worth the machinery yet |
+| protocol embeds | `:1803` | A protocol-embedded method isn't callable through the interface value (`p: Person` can't call embedded `name()`) despite `spec.md:973` "flattened at bound sites" | Filed as a safe-direction observation in wave 3; never triaged — doc and behavior contradict each other either way |
 | ~~**W7-21**~~ | `:5835` | **FIXED 2026-08-05.** A module global holding a FN VALUE is now CALLABLE through the module: `l.BARE()` went `type error … module 'l' has no member 'BARE'` (rc=1) → `ok`, and prints `1` on M:N, `--threads=1` and `--serial`. Both ancestors agree and were re-run: CPython `pk.G()` → `1`, Go `pkg.G()` → `1`. Checker-only — the `Ty::Module` call arm now falls back to `sig.values` and calls a `Func`/`BuiltinFn` there with STRICT `check_args`; the compiler's `Op::CallMethod` fall-through and `Obj::Module` dispatch already handled it. The lying diagnostic is fixed too: an existing-but-uncallable member says `member 'N' is not callable (it has type int)` | **The obvious runtime test was green BEFORE the fix, and that is the lesson.** For a `checker⊋compiler` sibling (checker rejects what the system executes) the instinct is "run it on both engines" — but `run_file`/`run_file_parallel` bypass the checker, so the both-engine test passes pre-fix. It proves the *lowering* exists; only a graph-level `check_graph` test proves the *rejection* is gone. Two claims, two tests, neither substitutes for the other (the VM test's doc-comment now says which one it is). Second: `from l import BARE` + `BARE()` always worked, which is precisely what kept the qualified arm the single broken site — a member surface harvested into two maps with one consumer reading one of them |
 | ~~**W7-5d**~~ | `:5188` | **FIXED 2026-08-05.** A dead stdout was a whole-queue kill switch, so a broken pipe cancelled sibling `Executor` jobs. It is now an ORDINARY per-job fault. TWO process-global reads had to go: `executor_hard_halt` is `is_over_memory \|\| is_timed_out`, and `invoke_native`'s post-call `stream_halt` is gated on that call having actually emitted to stdout (`Vm::stdout_writes`) — unguarded it faulted a sibling that never printed, after its FIRST native. Repro: **both markers 21/21 runs**, **all three writes 15/15**, across `--serial` and `--threads=1/2/3/4/8`/default; pre-fix it wrote neither marker at `--threads=1`/`--serial`, both at `--threads=3+`, and either at `--threads=2`. Matches CPython `ThreadPoolExecutor` (`max_workers` 1/2/4), the ancestor that owns `Executor` | Three lessons. (1) A **process-GLOBAL read inside an error-property predicate** — `out_dead_reason().is_some()` does not describe the `err` it is passed. The shape was in the tree **twice**; fixing the first made the second visible. (2) The ledger's own proposed alternative ("an accepted-asymmetry test pinning what each engine actually does") **was never available**: the M:N shape varied by thread count AND across runs at one thread count. (3) A one-native-call marker is the exact shape that hides instance (2) — when the contract is "the REST of the job runs", the fence needs a "rest". Accepted cost: graceful `shutdown()` only — a submitted job that never prints and never returns now hangs `\| head -1` (`shutdown_now()` still kills it in 54 ms; a loop back-edge IS a cancellation point). CPython hangs identically; Go exits via SIGPIPE on fd 1, a signal policy Chezzi does not adopt. Nurseries unaffected (they abort siblings on any fault, by design) |
 | ~~**W7-18**~~ | `:5155` | **FIXED 2026-08-05.** `--timeout` now reaches a fiber parked on the NETPOLLER — **10001 ms hang (no verdict, no output, killed by an external `timeout 10`) → 304 ms `TIMED-OUT t`**, stable 10/10 at `CHEZZI_THREADS=1/2/3/4/8`, and the aborted task still runs its `defer`s *including a socket write inside them*. Go is the ancestor and agrees: `go test -timeout 300ms` against a goroutine on `net.Listener.Accept()` panics `test timed out after 300ms` and never runs the following `t.Fatal`. A park now registers for `min(the op's own D6c timeout_ms, the run deadline)` and the resumed op **re-reads the clock** to tell the two apart | **The filed premise was WRONG, and it is the whole lesson.** The row said the fix "needs a second marker distinct from `poll_timed_out`, threaded through the 5 `PollPark` construction sites plus the re-inject." It needed none: `Vm::deadline` is ALREADY an absolute `Instant` on every worker and `Some` only under `--timeout`, so `now >= self.deadline` at resume answers exactly what the marker would have carried. `PollPark`, `poller::register`, `next_timeout` and `fire_due_socket_timeouts` are untouched. Second lesson: the obvious spelling of that insight re-introduced W7-16's skipped-`defer` bug on **three** separate paths (halt-before-take, `?` past `demote_socket_exit`, clear-only connect resume) and adversarial review found a **fourth** — a top-level `connect` handing the abort back as a *catchable* `Err`. All four shipped green |
@@ -2214,8 +2214,8 @@ CPU load-generators (`yes`, spin loops) that burned cores for hours; reap anythi
   deterministically non-zero (Python-matching) via a post-`flush_stream()` `out_dead_reason()` check in `cmd_run`.
 - [N2](#n2-socketwriteaccept-still-restart-their-timeout-budget-on-every-park--fixed-2026-07-15) **(FIXED)**,
   [N3](#n3-two-cosmetic-b1-leftovers) — small B1/socket residuals: N2 + N3(a) fixed 2026-07-15; N3(b) stays as-is by design.
-- [N5](#n5-a-genuine-deadlock-tears-tasks-down-without-running-their-defers--open) — a *genuine* deadlock
-  still skips defers (both engines agree, so parity holds — fixing one alone would diverge).
+- [N5](#n5-a-genuine-deadlock-tears-tasks-down-without-running-their-defers--closed-2026-08-06-not-a-bug-every-ancestor-does-the-same-or-worse) **(CLOSED, not a bug)** — a *genuine*
+  deadlock skips defers, which is what Go's deadlock `fatal error` does and better than CPython (hangs).
 - Backlog headliners: **R2** (Writer/file handles) **DONE 2026-07-15** + **R2b** (Reader/file handles)
   **DONE 2026-07-15**; **R3** (package manager) still
   open — see their sections. (**R4** runtime type tags and **L3** error-handling machinery were reviewed
@@ -3506,7 +3506,30 @@ serial `wait:` timer arm either (measured 3004 ms, post-wait statement ran). It 
 the deadline and still takes the timer arm without yielding to a runnable sibling — the divergence this
 entry describes is exactly as before; it just observes the halts on the way.
 
-### N5. A **genuine** deadlock tears tasks down without running their `defer`s — open
+### N5. A **genuine** deadlock tears tasks down without running their `defer`s — **CLOSED 2026-08-06, NOT A BUG: every ancestor does the same (or worse)**
+
+**The premise was a mis-paired comparison, and that is the whole entry.** The filing below reasoned
+"arguably the same silent-lie class as N4 — **Go still runs deferred fns on a panic**". True, and
+irrelevant: a Chezzi deadlock is not Go's `panic`, it is Go's **fatal error**, and those two paths
+differ *precisely* on whether deferred work runs. Measured, same three-line shape in each runtime — a
+receive on a channel nothing will ever fill, with cleanup registered:
+
+| runtime | what happens | cleanup runs? |
+|---|---|---|
+| **Chezzi** (`defer`, both engines) | faults `deadlock: every task in this parallel: block is blocked…` in ms | **no** |
+| **Go** (`defer`, `<-ch`) | `fatal error: all goroutines are asleep - deadlock!` | **no** |
+| **CPython** (`finally`, `queue.Queue().get()`) | **hangs forever** — killed by an external `timeout 6` | **no** |
+| **CPython** (`finally`, asyncio `TaskGroup` + unset `Event`) | **hangs forever** — killed at 6 s | **no** |
+| *control:* **Go** `defer` + `panic("boom")` | `panic: boom` | **yes** — `DEFER RAN` printed first |
+
+Chezzi is the **strictest** of the three: it detects and reports in milliseconds where CPython hangs
+until something kills it, and it declines to run cleanup on exactly the path Go declines to. There is
+no ancestor to converge on, so there is nothing to fix. Both engines agreeing was never the argument
+(that is a detector, not a standard) — the ancestors are.
+
+The original filing follows; its two engineering reasons are still accurate, they were just answering
+a question that turned out not to be open.
+
 Found while fixing N4, and **independent** of it. `flag_deadlock` (`src/vm/mod.rs`) drops each parked
 `Fiber` **without** `unwind_deferred`, so on a real deadlock (every fiber parked, nothing cancelled, no
 send possible) the tasks' `defer`s are skipped. Arguably the same silent-lie class as N4 — Go still runs
@@ -3519,7 +3542,8 @@ deferred fns on a panic. Deliberately **not** folded into the N4 fix, for two re
    serial change), which moves deadlock-path stdout ordering — a behavior change, so its own task.
 
 Documented as the one exception to the "cancellation always runs `defer`" guarantee in
-`docs/concurrency.md`.
+`docs/concurrency.md` — and that exception **stays**, now as a stated contract rather than a filed
+debt: a deadlock is the runtime declaring the program cannot proceed, which is not a cancellation.
 
 ### N6. `--serial` abandoned a PARKED task's `defer` on a sibling fault — **FIXED (2026-07-14, `auto-task/cancel-points`)**
 Found while verifying the N4 fix end-to-end on the CLI (**not** caused by it — reproduced on unfixed
@@ -3775,9 +3799,11 @@ that sends, sleeps, closes or computes is unaffected — the park is the only th
   nothing is owed an unwind that a cancel could still deliver). A demoted fiber unwinding after `terminate` runs on
   its own thread and never re-enters `take_runnable`. No failing test, so no change.
 
-### N5 status after the N6 fix — still open, deliberately UNTOUCHED
+### N5 status after the N6 fix — UNTOUCHED then, and CLOSED as not-a-bug 2026-08-06 (see the N5 section)
 A **genuine** deadlock (every fiber parked, nothing cancelled, nothing able to arrive) still tears the
-parked fibers down without running their `defer`s — on **both** engines. Serial reports it from
+parked fibers down without running their `defer`s — on **both** engines, and that is now the stated
+contract: Go's deadlock `fatal error` skips its `defer`s too, and CPython does not even get that far
+(it hangs). Serial reports it from
 `run_scheduler_level`'s `None` arm, which **never** routes through the cancel drain; M:N's `flag_deadlock`
 is unchanged. So the engines still agree and no new divergence was created. (A *nested* level's deadlock
 arriving at the outer level as an ordinary child error DOES now cancel-and-drain the outer level's parked

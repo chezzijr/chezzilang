@@ -276,6 +276,30 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > Pre-existing and untouched by this change; filed as **W7-20** and since **closed as not-a-bug**
 > (below). Full write-up: `docs/gaps.md` **W7-5e**.
 
+> **✅ N5 CLOSED 2026-08-06 — not a bug; a deadlock skipping `defer`s is the contract.** Filed since
+> 2026-07-14 as "arguably the same silent-lie class as N4 — **Go still runs deferred fns on a panic**".
+> True, and the wrong pairing: a Chezzi deadlock is not Go's `panic`, it is Go's **fatal error**, and
+> those two paths differ exactly on this. Same three-line shape (a receive nothing will ever fill, with
+> cleanup registered), measured in each runtime:
+>
+> | runtime | what happens | cleanup runs? |
+> |---|---|---|
+> | **Chezzi** (`defer`, both engines) | faults `deadlock: …` in ms | **no** |
+> | **Go** (`defer`, `<-ch`) | `fatal error: all goroutines are asleep - deadlock!` | **no** |
+> | **CPython** (`finally`, `queue.Queue().get()`) | **hangs forever**, killed at 6 s | **no** |
+> | **CPython** (`finally`, asyncio `TaskGroup` + unset `Event`) | **hangs forever**, killed at 6 s | **no** |
+> | *control:* **Go** `defer` + `panic("boom")` | `panic: boom` | **yes** |
+>
+> Chezzi is the strictest of the three — it detects and reports where CPython hangs until something
+> external kills it. No code change: `flag_deadlock`'s two engineering blockers (no `Vm` shell under the
+> core lock; a fix moves deadlock-path stdout ordering) were always accurate, they were just answering a
+> question that was never open. `docs/concurrency.md` now states the exception as a contract instead of
+> pointing at a filed debt. **The lesson: "both engines agree, so it is a known limit" carried this
+> entry from 2026-07-14 to 2026-08-06, and it proves nothing** — engine agreement is a detector, the
+> ancestors are the standard, and nobody had run them. Third entry this week closed by running the
+> reference program instead of re-reading the filing (W7-17, W7-20, N5). Full write-up:
+> `docs/gaps.md` **N5**.
+>
 > **✅ W7-20 CLOSED 2026-08-05 — not a bug; FFI's stdout contract is now documented.** FFI writes the
 > file descriptor itself, so the broken-pipe halt cannot see it and a `| head -1` loop of C writes
 > spins. Running the owning ancestors settled it — **both do the identical thing**, on both
@@ -7908,8 +7932,8 @@ branch names) is in the git log.
   `panic_fault_trips_the_scope_cancel` and `poll_park_rejects_cancelled_inner_scope`.
   See `docs/gaps.md` **N4**. Two related holes found while verifying it, both pre-existing, both left
   open with their own entries: **N5** (a GENUINE deadlock also tears parked fibers down without
-  `unwind_deferred`, so it skips `defer`s too — but both engines agree, so it is a known limit, not a
-  parity break) and **N6** (`--serial` does **not** run a PARKED task's `defer` on a sibling fault — it
+  `unwind_deferred`, so it skips `defer`s too — closed 2026-08-06 as **not a bug**: Go's deadlock
+  `fatal error` skips its `defer`s too, and CPython just hangs) and **N6** (`--serial` does **not** run a PARKED task's `defer` on a sibling fault — it
   abandons the parked children at `run_child(i)?` — a real **serial ≠ M:N divergence**, uncovered by the
   parity suite, where the *oracle* is the wrong engine; fixing it moves serial's fault-path output
   ordering, so it is its own task).
