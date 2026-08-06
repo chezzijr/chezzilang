@@ -91,6 +91,50 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > runs, 0 wrong. **Perf**: the W7-4 snapshot stress (400 module-global closures × 1000 nurseries) main
 > 2.585 s → 2.573 s, flat. Full write-up: `docs/gaps.md` **§W7-4a/b** and **§W7-4c**.
 
+> **✅ W7-22 FIXED 2026-08-06 — every container crossing the airlock was rebuilt at 22× the capacity
+> it needs, and kept it for the object's lifetime.** `from_wire_memo`'s eight container arms were
+> `items.into_iter().map(…).collect()`. Rust specializes that into an **in-place** collect when the
+> destination element is no larger than the source's: the source `Vec`'s allocation is reused and the
+> result inherits its capacity — `size_of::<WireValue>() / size_of::<Value>()` = **176 / 8 = 22**.
+> Measured on the release binary, a 200 000-int list crossing a `spawn`: parent `len 200 000 /
+> capacity 200 000` (1.6 MB) → worker `len 200 000 / **capacity 4 400 000**` (**35.2 MB**). Halving
+> the list halved the capacity — 22× both times, deterministically. 50 such spawns, same program on
+> both binaries: **peak RSS 3 450 096 kB → 202 776 kB**. Reach: `spawn` args, `Channel.recv`,
+> `Shared`/`RwShared` reads, closure captures, struct/enum/generator payloads. `Map`/`Set` were
+> already safe — they rebuild through explicit `push` loops, which is the shape the fix generalizes
+> into `Vm::rebuild_items` (pre-size, then push) for all **fourteen** rebuild sites. A capturing
+> `spawn` measures the same: **3 450 120 kB → 203 072 kB**.
+>
+> **Lesson: `len` is identical either way, so the whole behavioural suite is blind to it.** 3856
+> tests, both engines, byte-identical output — green before and after. `Vec::capacity` is the only
+> observable, and nothing asserted it, which is how a 22× memory bug on the core concurrency paths
+> survived seven waves of bug-hunt. The new test asserts capacity directly and is mutation-verified
+> (restore the `collect()` and it reads `rebuilt at 90112 capacity for 4096 elements`).
+> Second, and the sharper one: **the first cut fixed 8 of the 14** — `from_wire_memo`'s container arms
+> — and left the identical shape in `deep_clone_all` and `rebuild_ready`'s five `Lowered` arms, two of
+> which feed a DURABLE `Obj::Closure { captured }`. Capturing `spawn` still leaked 24×, under a fresh
+> doc comment claiming captures were fixed, with 3856 tests green. Adversarial review caught it — both
+> prosecutors filed it independently, from the diff alone. *Wave 6's meta-finding ("a fix applied to
+> SOME arms of an N-way set") reproduced by the fix for a bug found while auditing that class.* A
+> second test now fences the second family. Third: found while re-deriving a DIFFERENT row (`W6-10s`) —
+> by asking why a repro's RSS was 22× what arithmetic predicted instead of accepting that the cap had
+> "failed open". That row's own premise did not survive the check either (see below). Fourth:
+> `benches/run.chz` prices none of this — it is
+> single-threaded and never crosses the airlock, so the bench set has no coverage of airlock memory at
+> all. Full write-up: `docs/gaps.md` **§W7-22**.
+
+> **⚠️ W6-10s re-scoped 2026-08-06 — its filed premise did not hold.** The row named three "by-hand
+> airlock paths" as uncharged sampling escapes. Measured: `Executor.submit` is the only one that stores
+> persistently off-heap, and only on `--serial` — which `--max-heap` **refuses at the CLI**
+> (`main.rs:685`), so that arm is unreachable. Spawn args and closure captures are transient (rebuilt
+> into a worker heap immediately). What IS reachable is a different mechanism: a worker heap **born
+> big**. `spawn use(blob)` with a 200 000-int `blob` PASSES `--max-heap=8000000`; adding ONE allocating
+> statement to the spawned fn turns the same program OVER-MEMORY at the same RSS — the payload lands in
+> ~7 objects, so `since_gc` never reaches `next_gc` and `sweep()`, the sole assigner of `over_cap`,
+> never runs. Charging bytes in `Heap::alloc` does not fix it: these containers are alloc'd EMPTY and
+> patched via `get_mut` (the tie-the-knot rebuild), so there is nothing to charge at alloc time. Row
+> updated in place; **re-scope before working it**. `W6-10r` is untouched and still open.
+
 > **✅ Protocol embeds FIXED 2026-08-06 — a protocol's embed set is flattened at EVERY use site, not
 > just at a bound.** The `gaps.md` "protocol embeds" row, filed as a *safe-direction observation* in
 > bug-hunt wave 3 and never triaged because the doc and the behavior contradicted each other.

@@ -2275,10 +2275,7 @@ impl Vm {
             ws.push(self.to_wire_memo_at(v, span, &mut memo)?);
         }
         let mut rebuild = super::fxhash::FxHashMap::<u32, GcRef>::default();
-        let out: Vec<Value> = ws
-            .into_iter()
-            .map(|w| self.from_wire_memo(w, &mut rebuild))
-            .collect();
+        let out = self.rebuild_items(ws, &mut rebuild, |w| w);
         // W7-4c — hand the CLONE cells' ids back so `lower_task` can serialize them under the same id
         // (the clone is a different `GcRef` than the original the registry knows). Cells only: a
         // container's id lives in the memo's `path`, which pops on DFS exit, so it can never be
@@ -2988,6 +2985,47 @@ impl Vm {
         }
     }
 
+    /// Rebuild a wire item list into heap `Value`s **at exact capacity**. `pick` pulls the
+    /// [`WireValue`] out of each element, so a keyed list (`Vec<(Box<str>, WireValue)>` — struct
+    /// fields, closure captures) shares the one path with a plain `Vec<WireValue>`.
+    ///
+    /// NOT `items.into_iter().map(…).collect()`, which is the shape this replaced. Rust specializes
+    /// that into an **in-place** collect when the destination element is no larger than the source's
+    /// AND their alignments are equal (`align_of::<SRC>() != align_of::<DEST>()` is what makes std
+    /// bail): the source `Vec`'s allocation is reused and the result inherits its capacity, scaled by
+    /// the size ratio. Both conditions hold at every airlock rebuild — everything here maps into
+    /// `Value` (8 B, align 8) from an align-8 source — so the inflation was **22×** from a plain
+    /// `Vec<WireValue>` (176 B) and **24×** from a keyed `Vec<(Box<str>, WireValue)>` (192 B).
+    ///
+    /// Every container crossing the airlock (`spawn` args, `Channel.recv`, `Shared.get`, closure
+    /// captures) therefore kept the whole wire buffer alive for the rebuilt object's entire lifetime:
+    /// a 200 000-int `List` measured `capacity = 4 400 000` — a **35.2 MB** `Obj::List` holding
+    /// 1.6 MB of data — and 50 such spawns peaked at 3.45 GB (203 MB after). It is invisible to
+    /// `len()` and to every value-level test; only `Vec::capacity` shows it.
+    ///
+    /// **Use this at EVERY wire→`Value` list rebuild, not just the ones in `from_wire_memo`.** The
+    /// first cut of this fix converted that function's eight container arms and left the identical
+    /// shape in `deep_clone_all` and in `rebuild_ready`'s five `Lowered` arms — two of which
+    /// (`deep_clone_all`'s result and the `Lowered::Closure` captures) land in a durable
+    /// `Obj::Closure { captured }`, so `spawn` with a capturing closure still leaked 22–24×, under a
+    /// doc comment claiming captures were fixed. Adversarial review caught it; the suite did not.
+    ///
+    /// Pre-sizing and pushing keeps the exact-capacity guarantee at the cost of one extra live
+    /// buffer while the source drains, which the wire copy was already paying.
+    fn rebuild_items<T>(
+        &mut self,
+        items: Vec<T>,
+        rebuild: &mut super::fxhash::FxHashMap<u32, GcRef>,
+        pick: impl Fn(T) -> WireValue,
+    ) -> Vec<Value> {
+        let mut out = Vec::with_capacity(items.len());
+        for it in items {
+            let v = self.from_wire_memo(pick(it), rebuild);
+            out.push(v);
+        }
+        out
+    }
+
     /// Worker behind [`Vm::from_wire`] — reconstructs into this heap, threading `rebuild` (wire `id` →
     /// placeholder `GcRef`) so any value cycle (a recursive local `fn`, a self-referential struct/list/
     /// map, a mixed struct+closure cycle) round-trips. Every identity-preserved arm (`Cell`/`Closure`
@@ -3058,20 +3096,14 @@ impl Vm {
             WireValue::List { id, items } => {
                 let h = self.heap.alloc(Obj::List(Vec::new()));
                 rebuild.insert(id, h);
-                let cloned: Vec<Value> = items
-                    .into_iter()
-                    .map(|x| self.from_wire_memo(x, rebuild))
-                    .collect();
+                let cloned = self.rebuild_items(items, rebuild, |x| x);
                 *self.heap.get_mut(h) = Obj::List(cloned);
                 Value::obj(h)
             }
             WireValue::Tuple { id, items } => {
                 let h = self.heap.alloc(Obj::Tuple(Vec::new()));
                 rebuild.insert(id, h);
-                let cloned: Vec<Value> = items
-                    .into_iter()
-                    .map(|x| self.from_wire_memo(x, rebuild))
-                    .collect();
+                let cloned = self.rebuild_items(items, rebuild, |x| x);
                 *self.heap.get_mut(h) = Obj::Tuple(cloned);
                 Value::obj(h)
             }
@@ -3081,10 +3113,7 @@ impl Vm {
                     pos,
                 });
                 rebuild.insert(id, h);
-                let cloned: Vec<Value> = items
-                    .into_iter()
-                    .map(|x| self.from_wire_memo(x, rebuild))
-                    .collect();
+                let cloned = self.rebuild_items(items, rebuild, |x| x);
                 match self.heap.get_mut(h) {
                     Obj::Iter { items, .. } => *items = cloned,
                     _ => unreachable!("placeholder was alloc'd as Obj::Iter"),
@@ -3125,10 +3154,7 @@ impl Vm {
                     fields: Fields::from_vec(Vec::new()),
                 });
                 rebuild.insert(id, h);
-                let cloned: Vec<Value> = fields
-                    .into_iter()
-                    .map(|(_, val)| self.from_wire_memo(val, rebuild))
-                    .collect();
+                let cloned = self.rebuild_items(fields, rebuild, |(_, val)| val);
                 match self.heap.get_mut(h) {
                     Obj::Struct { fields, .. } => *fields = Fields::from_vec(cloned),
                     _ => unreachable!("placeholder was alloc'd as Obj::Struct"),
@@ -3145,10 +3171,7 @@ impl Vm {
                     payload: Vec::new(),
                 });
                 rebuild.insert(id, h);
-                let cloned: Vec<Value> = payload
-                    .into_iter()
-                    .map(|x| self.from_wire_memo(x, rebuild))
-                    .collect();
+                let cloned = self.rebuild_items(payload, rebuild, |x| x);
                 // M19 lever #2 — the dense `variant_id` crossed the airlock directly (shared
                 // `Arc<Program>`), so it is replayed as-is — no lossy name re-resolution.
                 match self.heap.get_mut(h) {
@@ -3242,10 +3265,7 @@ impl Vm {
                 rebuild.insert(id, h);
                 // Lever #3: rebuild positionally — push values in wire (slot) order, discard the
                 // carried names (they live in `proto.capture_names`). `to_wire` emits in slot order.
-                let cap: Vec<Value> = captured
-                    .into_iter()
-                    .map(|(_k, w)| self.from_wire_memo(w, rebuild))
-                    .collect();
+                let cap = self.rebuild_items(captured, rebuild, |(_k, w)| w);
                 match self.heap.get_mut(h) {
                     Obj::Closure { captured, .. } => *captured = cap,
                     _ => unreachable!("placeholder was alloc'd as Obj::Closure"),
@@ -3278,10 +3298,7 @@ impl Vm {
                 });
                 match state {
                     WireGenState::Pending(wargs) => {
-                        let args: Vec<Value> = wargs
-                            .into_iter()
-                            .map(|w| self.from_wire_memo(w, rebuild))
-                            .collect();
+                        let args = self.rebuild_items(wargs, rebuild, |w| w);
                         self.alloc_generator(proto, home, closure, args)
                     }
                     WireGenState::Done => {
@@ -3301,10 +3318,7 @@ impl Vm {
                         cur_base,
                         handlers,
                     } => {
-                        let stack: Vec<Value> = stack
-                            .into_iter()
-                            .map(|w| self.from_wire_memo(w, rebuild))
-                            .collect();
+                        let stack = self.rebuild_items(stack, rebuild, |w| w);
                         let rebuilt = CallFrame {
                             proto: frame.proto,
                             ip: frame.ip,
@@ -3644,15 +3658,9 @@ impl Vm {
                 let home = self.worker_home(home);
                 // ARGS FIRST — `lower_task` serializes them first (see its doc), so the defining
                 // `WireValue::Cell` of a cell shared with a capture lives here.
-                let args: Vec<Value> = args
-                    .into_iter()
-                    .map(|w| self.from_wire_memo(w, rb))
-                    .collect();
+                let args = self.rebuild_items(args, rb, |w| w);
                 // Lever #3: rebuild positionally (slot order), discarding the carried names.
-                let cap: Vec<Value> = captured
-                    .into_iter()
-                    .map(|(_k, w)| self.from_wire_memo(w, rb))
-                    .collect();
+                let cap = self.rebuild_items(captured, rb, |(_k, w)| w);
                 let callee = Value::obj(self.heap.alloc(Obj::Closure {
                     proto,
                     captured: cap,
@@ -3668,18 +3676,12 @@ impl Vm {
             } => {
                 let home = self.worker_home(home);
                 let callee = Value::obj(self.heap.alloc(Obj::Func { proto, home }));
-                let args = args
-                    .into_iter()
-                    .map(|w| self.from_wire_memo(w, rb))
-                    .collect();
+                let args = self.rebuild_items(args, rb, |w| w);
                 (ReadyCall::Invoke { callee, args }, span)
             }
             Lowered::Builtin { name, args, span } => {
                 let callee = Value::obj(self.heap.alloc(Obj::Builtin(name)));
-                let args = args
-                    .into_iter()
-                    .map(|w| self.from_wire_memo(w, rb))
-                    .collect();
+                let args = self.rebuild_items(args, rb, |w| w);
                 (ReadyCall::Invoke { callee, args }, span)
             }
             Lowered::Method {
@@ -3689,10 +3691,7 @@ impl Vm {
                 span,
             } => {
                 let recv = self.from_wire_memo(recv, rb);
-                let args = args
-                    .into_iter()
-                    .map(|w| self.from_wire_memo(w, rb))
-                    .collect();
+                let args = self.rebuild_items(args, rb, |w| w);
                 (ReadyCall::Method { recv, name, args }, span)
             }
         };

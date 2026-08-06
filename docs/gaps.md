@@ -58,9 +58,10 @@ chronological log.
 | `min`/`max` → `Option` | `:1690` | `List.min`/`max`/`min_by`/`max_by` fault on empty while `first`/`last`/`pop` return `Option[T]` | Breaking surface change: 23 call sites + docs + examples. Own milestone |
 | `List[Any]` widening | `:1731` | `List[Any] = [1, 3.0]` silently widens the int to `1.0` | Deferred pre-freeze (wave 4) |
 | **N10** | `:3456` | A `wait:` timer arm makes `--serial` inline-sleep instead of yielding to a runnable sibling (serial ≠ M:N) | Deliberate pre-freeze known-limit; fix is folded into the post-freeze serial-engine removal |
-| **W6-10s** | `:1349` | `--max-heap` residual **sampling** escapes left after the byte-aware pacing fix | Pacing samples the cap on charged off-heap bytes, but only for stores routed through `to_wire_crossable` and only per heap. Still not sampled: the documented inline-scalar loop (`future.md §1b` — no `Obj`s, no wire bytes), the by-hand airlock paths (spawn args, closure captures, `Executor.submit`), and a heap that HOLDS a huge core without storing to it |
+| **W6-10s** | `:1349` | `--max-heap` residual **sampling** escapes left after the byte-aware pacing fix | Pacing samples the cap on charged off-heap bytes, but only for stores routed through `to_wire_crossable` and only per heap. Still not sampled: the documented inline-scalar loop (`future.md §1b` — no `Obj`s, no wire bytes), the by-hand airlock paths (spawn args, closure captures, `Executor.submit`), and a heap that HOLDS a huge core without storing to it. **Premise partly re-derived 2026-08-06 and it did NOT hold**: the `Executor.submit` arm is the only one of the three that stores persistently off-heap, and it does so ONLY on `--serial` (M:N executes eagerly and queues nothing) — which `--max-heap` refuses at the CLI (`main.rs:685`), so that arm is unreachable. The spawn-arg / capture arms are transient: `prepare_worker` rebuilds them into a worker heap immediately. What IS reachable was measured instead and is a different mechanism: a worker heap **born big** — `spawn use(blob)` with a 200 000-int `blob` PASSED `--max-heap=8000000`, and adding ONE allocating statement to the spawned fn turned the same program OVER-MEMORY at the same RSS, because the payload arrives in ~7 objects so `since_gc` never reaches `next_gc` and `sweep()` — the sole assigner of `over_cap` — never runs. Charging bytes in `Heap::alloc` does NOT fix it: these containers are alloc'd EMPTY and patched via `get_mut` (the tie-the-knot rebuild), so there is nothing to charge at alloc time. Re-scope before working this row |
 | **W6-9r** | `:1473` | Parity-oracle residual left by the `W6-9b` fix: ~31 hand-rolled `run_file_p` + `run_file` cross-engine compares in `parity_tests.rs` still diff LOSSILY-DECODED strings, and `parity_entry_cfg_lines` compares stdout as an order-insensitive line multiset | The three SHARED comparators were fixed at the helper level (0 call sites touched); converting the hand-rolled ones means rewriting ~31 call sites. UTF-8-only today, so nothing is failing — but a new byte-emitting test added at one of those sites inherits the blindness. Use `vm::run_file_bytes` there |
 | **W6-10r** | `:1386` | `--max-heap` residual: a payload reachable ONLY through a **nested** core (a `Channel` inside a `Shared`, once the nested core's last `Obj` alias slot is swept) is counted nowhere | Left open by the W6-10 fix on purpose. `live_bytes` reaches a core's bytes through its `Obj::*` alias slot; a nested core has none. Closing it needs cross-core byte recursion with `Arc` de-dup — narrow trigger, not worth the machinery yet |
+| ~~**W7-22**~~ | `:6076` | **FIXED 2026-08-06.** Every container crossing the airlock was rebuilt with **22× the capacity it needs**, and kept it for the object's whole lifetime. Fourteen wire→`Value` rebuild sites were `items.into_iter().map(…).collect()`, which Rust specializes into an **in-place** collect: the destination element is smaller than the source, so the source `Vec`'s allocation is REUSED and the rebuilt `Vec<Value>` inherits its capacity — `size_of::<WireValue>() / size_of::<Value>()` = 176 / 8. Measured on the release binary: a 200 000-int list crossing a `spawn` arrived as `len = 200 000, capacity = 4 400 000` (a **35.2 MB** `Obj::List` holding 1.6 MB), halving the list halved the capacity to 2 200 000 — exactly 22× both times. 50 such spawns: **peak RSS 3.45 GB → 203 MB**. Hits `spawn` args, `Channel.recv`, `Shared.get`/`RwShared` reads, closure captures, struct/enum/generator payloads. A capturing `spawn` measured the same: **3.45 GB → 203 MB**. Fix: one `Vm::rebuild_items` helper (pre-size, then push) at all fourteen sites | **`len` is identical either way, so the entire behavioural suite is blind to it** — 3856 tests, both engines, byte-identical output, all green before and after. Only `Vec::capacity` can see it, which is why a memory bug of this size survived every wave of the bug-hunt: every existing assertion is about *values*, and this changes none. Second: it was found while chasing a DIFFERENT filed row (`W6-10s`), by asking why a repro's RSS was 22× what arithmetic predicted rather than accepting that the cap "failed open" — the filed row's own premise (a serial-only `Executor.submit` escape) turned out to be unreachable, because `--max-heap` refuses `--serial` at the CLI. Third: **the first cut fixed eight of the fourteen** — `from_wire_memo`'s container arms — and left the identical shape in `deep_clone_all` and `rebuild_ready`'s five `Lowered` arms, two of which feed a DURABLE `Obj::Closure { captured }`. So `spawn` with a capturing closure still leaked 22–24×, under a new doc comment asserting captures were fixed, with the full suite green. Adversarial review caught it; both prosecutors filed it independently. *This is wave 6's meta-finding — "a fix applied to SOME arms of an N-way set" — reproduced by the fix for a bug found while auditing that very class.* Fourth: the fix is invisible to `benches/run.chz`, which is single-threaded and never crosses the airlock — a whole class of regression the bench set cannot price |
 | ~~protocol embeds~~ | `:6365` | **FIXED 2026-08-06.** A protocol's embed set is now flattened at EVERY use site, not just at a bound. `p: Person` → `p.name()` (embedded) went `type error … type Person has no method 'name'` → `ada 36`; the same through a bound, `<` through an embedded `Comparable`, `in` through an embedded `Contains`, and passing a `Person` value to a `Named` parameter all went type-error → correct value. Both ancestors were re-run and agree: Go (embedded interface + interface-to-interface assignment + a generic constraint) prints `ada 36` / `ada` / `eve 7`; pyright is clean on the `Protocol`-inheritance twin. Checker-only — the runtime dispatches every one of these by NAME already. **Bounded by object safety**: a method taking `Self` (so every operator protocol, whose method is `(self, Self) -> Self`) stays BOUND-only, because a protocol value erases which witness it holds | **The CONTROLS are what made this two bugs instead of one.** Running each case with an OWN (non-embedded) method split the report cleanly: five cases passed the control and so were the embed bug; `a + b` on two protocol values and a `Self`-typed method on an existential FAILED their controls too — and "fixing" those two opened a SOUNDNESS HOLE that shipped FULLY GREEN (3848 tests, clippy, both engines) before adversarial review caught it: `plus(V(1), W("q"))` through `fn plus(a: Vecish, b: Vecish)` checked ok and faulted `no field 'x' on W`. A protocol value erases its witness, so `Self` in a parameter slot is bound-only — Rust's object-safety rule, and why Go bans `Self` in interfaces outright. The licence taken for it was a pyright PASS; but Python's `Protocol` is GRADUAL and enforces no witness identity, so it was never evidence a statically-enforced language may accept it. Two more, same review: the embed walk had a depth cap and no VISITED SET (branching ≥2 ⇒ 2^64, so a diamond/cyclic graph hung `check` on a method miss), and the CONFORMANCE half of the embed-arg re-spelling was left on the old resolver, so `b: PBag[str] = B` (a `contains(self, int)`) was accepted. Second lesson, found by the negative test: the flatten's own `resolve_ty_ro` reads `self.type_params`, which at a USE site is the *calling function's* params — so `protocol Bag[T]: Contains[T]` resolved its `T` to `Unknown` and `"x" in b` type-checked on a `Bag[int]`. A widening's negative control is not paperwork; it is the only thing that catches a widening that went permissive |
 | ~~**W7-21**~~ | `:5835` | **FIXED 2026-08-05.** A module global holding a FN VALUE is now CALLABLE through the module: `l.BARE()` went `type error … module 'l' has no member 'BARE'` (rc=1) → `ok`, and prints `1` on M:N, `--threads=1` and `--serial`. Both ancestors agree and were re-run: CPython `pk.G()` → `1`, Go `pkg.G()` → `1`. Checker-only — the `Ty::Module` call arm now falls back to `sig.values` and calls a `Func`/`BuiltinFn` there with STRICT `check_args`; the compiler's `Op::CallMethod` fall-through and `Obj::Module` dispatch already handled it. The lying diagnostic is fixed too: an existing-but-uncallable member says `member 'N' is not callable (it has type int)` | **The obvious runtime test was green BEFORE the fix, and that is the lesson.** For a `checker⊋compiler` sibling (checker rejects what the system executes) the instinct is "run it on both engines" — but `run_file`/`run_file_parallel` bypass the checker, so the both-engine test passes pre-fix. It proves the *lowering* exists; only a graph-level `check_graph` test proves the *rejection* is gone. Two claims, two tests, neither substitutes for the other (the VM test's doc-comment now says which one it is). Second: `from l import BARE` + `BARE()` always worked, which is precisely what kept the qualified arm the single broken site — a member surface harvested into two maps with one consumer reading one of them |
 | ~~**W7-5d**~~ | `:5188` | **FIXED 2026-08-05.** A dead stdout was a whole-queue kill switch, so a broken pipe cancelled sibling `Executor` jobs. It is now an ORDINARY per-job fault. TWO process-global reads had to go: `executor_hard_halt` is `is_over_memory \|\| is_timed_out`, and `invoke_native`'s post-call `stream_halt` is gated on that call having actually emitted to stdout (`Vm::stdout_writes`) — unguarded it faulted a sibling that never printed, after its FIRST native. Repro: **both markers 21/21 runs**, **all three writes 15/15**, across `--serial` and `--threads=1/2/3/4/8`/default; pre-fix it wrote neither marker at `--threads=1`/`--serial`, both at `--threads=3+`, and either at `--threads=2`. Matches CPython `ThreadPoolExecutor` (`max_workers` 1/2/4), the ancestor that owns `Executor` | Three lessons. (1) A **process-GLOBAL read inside an error-property predicate** — `out_dead_reason().is_some()` does not describe the `err` it is passed. The shape was in the tree **twice**; fixing the first made the second visible. (2) The ledger's own proposed alternative ("an accepted-asymmetry test pinning what each engine actually does") **was never available**: the M:N shape varied by thread count AND across runs at one thread count. (3) A one-native-call marker is the exact shape that hides instance (2) — when the contract is "the REST of the job runs", the fence needs a "rest". Accepted cost: graceful `shutdown()` only — a submitted job that never prints and never returns now hangs `\| head -1` (`shutdown_now()` still kills it in 54 ms; a loop back-edge IS a cancellation point). CPython hangs identically; Go exits via SIGPIPE on fd 1, a signal policy Chezzi does not adopt. Nurseries unaffected (they abort siblings on any fault, by design) |
@@ -6071,6 +6072,79 @@ saying it covers the VM's own sink only.
 regress, and the only assertable shape is a hang — a test that must time out to pass. Should this ever
 be revisited, the trigger is not "FFI can write fd 1" (it always can) but CPython or Go changing what
 *they* do.
+
+### W7-22 — every container crossing the airlock is rebuilt at 22× capacity (Rust's in-place `collect` retains the wire buffer) — **FIXED 2026-08-06** (found while re-deriving `W6-10s`)
+
+```chezzi
+# 50 spawns of one 200 000-int list — peak RSS 3.45 GB before, 203 MB after
+test fn spawn_args():
+    blob: List[int] = []
+    for i in range(200000):
+        blob.push(i)
+    parallel:
+        for i in range(50):
+            spawn use(blob)
+
+fn use(xs: List[int]) -> int:
+    return xs.len()
+```
+
+**Root cause.** `Vm::from_wire_memo`'s container arms all had the shape
+
+```rust
+let cloned: Vec<Value> = items.into_iter().map(|x| self.from_wire_memo(x, rebuild)).collect();
+```
+
+`Vec<T>::into_iter().map(f).collect::<Vec<U>>()` is specialized by the standard library into an
+**in-place** collect when `size_of::<U>() <= size_of::<T>()` and the alignments allow: the source
+`Vec`'s allocation is written through and handed back as the destination `Vec`, whose capacity is
+therefore `src_capacity * size_of::<T>() / size_of::<U>()`. Here `T = WireValue` (176 B) and
+`U = Value` (8 B), so **every rebuilt container came out at 22× the capacity it needed** and held the
+whole wire buffer alive for as long as the object lived.
+
+Measured on the release binary, instrumenting `sweep()` to dump live objects over 100 KB:
+
+| heap | `len` | `capacity` | `Obj::List` bytes |
+|---|---|---|---|
+| parent (the original `blob`) | 200 000 | 200 000 | 1 600 000 |
+| worker (the rebuilt `spawn` arg) | 200 000 | **4 400 000** | **35 200 000** |
+
+Halving the list to 100 000 gave `capacity = 2 200 000` — 22× again, deterministically. Peak RSS for
+the program above, same program on both binaries: **3 450 096 kB → 202 776 kB**.
+
+Reach: **fourteen sites**, not the eight the first cut found. `from_wire_memo`'s eight container arms
+— `List`, `Tuple`, `Iter`, `Struct`, `Enum`, `Closure` captures, and both generator arms (`Pending`
+args, `Suspended` stack) — plus `deep_clone_all` (one) and `rebuild_ready`'s five `Lowered` arms.
+Two of those six extras are DURABLE, not transient: `deep_clone_all`'s result and
+`Lowered::Closure`'s captures both land in an `Obj::Closure { captured }` that lives as long as the
+closure, so the `parallel:`/`spawn` capture path leaked 22–24× even after the first cut — measured
+`len 4096 → capacity 98304` for the keyed `Vec<(Box<str>, WireValue)>` (192 B / 8 B = 24×).
+`Map`/`Set` were
+already safe: they rebuild through explicit `push` loops (they carry the hash alongside), which is
+exactly the shape the fix generalizes. The `to_wire` direction is safe by construction — the element
+GROWS (8 → 176), so the in-place specialization cannot apply — and `replay_snap`'s list arm uses
+`.iter()`, not `.into_iter()`.
+
+**Fix.** One helper, `Vm::rebuild_items`, used by all fourteen sites. It pre-sizes with
+`Vec::with_capacity(items.len())` and pushes, so the capacity is exact; a `pick` closure pulls the
+`WireValue` out of each element so a keyed list (`Vec<(Box<str>, WireValue)>` — struct fields, closure
+captures) shares the one path. Cost: one extra live buffer while the source drains, which the wire
+copy was already paying; `shrink_to_fit()` after the fact was rejected because it reallocs and memcpys
+the whole container on every `recv`/`spawn` to undo something that should not have happened.
+
+**Tests.** `vm::gc_tests::a_crossed_container_rebuilds_at_exact_capacity` asserts `capacity == len`
+for a `List`, a `Tuple` and an `Iter` round-tripped through `to_wire`/`from_wire`;
+`vm::gc_tests::deep_clone_all_rebuilds_at_exact_capacity` fences the second, separately-missed family.
+Both mutation-verified: restoring the `collect()` shape turns them red with `rebuilt at 90112 capacity
+for 4096 elements` and `deep_clone_all returned 90112 capacity for 4096 values` — 22× exactly — while
+the rest of the suite stays green, which is the point. **No value-level test can fence this**: `len`,
+element order, contents and printed output are all identical either way, so `Vec::capacity` is the
+only observable. That is why 3856 green tests never caught it.
+
+**Not moved:** `benches/run.chz` is single-threaded and never crosses the airlock, so it prices none
+of this — the bench set has no coverage of airlock memory behaviour at all. Re-measured after the fix
+anyway (fib 2.84×, loop 1.03×, str 1.93×, primes 2.09×, list 2.25×, struct 2.49×, poly_method 3.89×,
+map 1.75×, empty 4.61× faster): unchanged, as expected for a path they do not touch.
 
 ### W7-21 — a module global holding a FN VALUE cannot be CALLED through the module (`m.G` resolves, `m.G()` does not) — **FIXED 2026-08-05** (filed the same day while building a W7-4a repro)
 
