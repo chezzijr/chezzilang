@@ -4112,7 +4112,7 @@ module-global closures over distinct cells × 1000 nurseries) main 1.084 s → m
 **Residual ceilings** — all the same shape: TWO INDEPENDENT SERIALIZATIONS reach one cell; identity is
 per serialization. **Three of the four are now resolved (2026-08-05)** — see
 [§W7-4a/b — the snapshot path](#w7-4ab--the-module-snapshot-path-keeps-one-cell-per-binding-fixed-2026-08-05)
-and [§W7-4c](#w7-4c--a-tasks-own-captures-and-its-module-snapshot-are-still-two-crossings-re-scoped-2026-08-05):
+and [§W7-4c](#w7-4c--a-tasks-own-captures-and-its-module-snapshot-are-one-binding-fixed-2026-08-06):
 - ~~**W7-4a**~~ — **FIXED**: one `WireMemo` spans the whole snapshot and one `Vm`-lived rebuild map
   (`Vm::snapshot_rebuild`) spans every lazy module fault, so two globals in DIFFERENT modules over one
   shared cell arrive as one cell. `0` → `2`, matching CPython and Go.

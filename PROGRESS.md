@@ -2,8 +2,8 @@
 
 Single source of truth for "what am I doing next." Update after every work session.
 
-> **✅ W7-4a + W7-4b FIXED, W7-4d CLOSED as not-a-bug, W7-4c RE-SCOPED (2026-08-05) — the module
-> SNAPSHOT path now keeps one cell per binding.** Two of W7-4's four shipped residuals were real
+> **✅ ALL FOUR W7-4 RESIDUALS CLOSED (2026-08-05/06) — W7-4a + W7-4b + W7-4c FIXED, W7-4d closed as
+> not-a-bug — the module SNAPSHOT path now keeps one cell per binding.** Two of W7-4's four shipped residuals were real
 > wrong-answer bugs, measured against paired reference programs:
 >
 > | repro | before | after | CPython | Go |
