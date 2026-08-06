@@ -856,21 +856,39 @@ impl Heap {
                         g.summary().0
                     }
                 }
-                // KNOWN GAP (gaps.md `W7-26`, OPEN — measured, not assumed): this reads only the
-                // `inner` QUEUE half of the core, which is the `--serial` half. On the default M:N
-                // engine `submit` runs EAGERLY, so `inner` stays empty and every finished job's
-                // result (`eager.slots`, plus its buffered `out`/`stderr`) is counted NOWHERE —
-                // 300 × ~1 MB of submitted results measured **PASS at 312 MB against an 8 MB cap**.
-                // `EagerState` keeps no cached summary, so closing it is new incremental accounting,
-                // not a recursion. Rooting is unaffected: a worker result crosses by value with no
-                // parent-heap `GcRef` (B3.2), which is why `children` has no `eager` arm either.
+                // W7-26 — BOTH payload halves, because the engine decides which one is in use:
+                // `inner` is the `--serial` QUEUE, while on the default M:N engine `submit` runs
+                // EAGERLY, so `inner` stays empty forever and every finished job's result lands in
+                // `eager` instead (300 × ~1 MB of results measured **PASS at 313 MB against an
+                // 8 MB cap** while only `inner` was read). Exactly one half is ever non-zero for a
+                // given executor, but summing is what keeps this honest — the same argument the
+                // `Executor(pending=…)` display already makes. The locks are taken SEQUENTIALLY,
+                // and even nested they would keep the `inner → eager` order the submit arm
+                // establishes (`Vm::executor_method` holds `inner` across `dispatch_eager_job`,
+                // which takes `eager` alone). `core::nested_core_bytes`'s `Executor` arm reads both
+                // halves too and MUST stay in lockstep: the `cores` set is shared between the two
+                // walks, so a half missing from either arm is dropped whenever that walk gets there
+                // first.
+                //
+                // Rooting is deliberately NOT mirrored: a job's return value crossed by value with
+                // no parent-heap `GcRef` (B3.2, enforced by `ensure_crossable` and fenced by a
+                // `debug_assert` in `outcome_summary`), which is why `children` has no `eager` arm.
                 Obj::Executor(core) if cores.insert(Arc::as_ptr(core) as usize) => {
-                    let g = core.inner.lock().unwrap();
-                    if deep {
-                        crate::vm::core::queue_bytes_deep(g.summary(), g.iter(), &mut cores)
-                    } else {
-                        g.summary().0
-                    }
+                    let queued = {
+                        let g = core.inner.lock().unwrap();
+                        if deep {
+                            crate::vm::core::queue_bytes_deep(g.summary(), g.iter(), &mut cores)
+                        } else {
+                            g.summary().0
+                        }
+                    };
+                    let g = core.eager.lock().unwrap_or_else(|e| e.into_inner());
+                    queued
+                        + if deep {
+                            crate::vm::core::queue_bytes_deep(g.summary(), g.values(), &mut cores)
+                        } else {
+                            g.summary().0
+                        }
                 }
                 Obj::Shared(core) if cores.insert(Arc::as_ptr(core) as usize) => {
                     if deep {
@@ -1184,6 +1202,22 @@ mod iter_obj_tests {
         }
     }
 
+    /// W7-26 — record a finished eager job returning `value`, summarising it exactly as
+    /// `dispatch_eager_job` does (the summary is computed OFF the lock, so the test must too).
+    fn finish_done(
+        g: &mut crate::vm::core::EagerState,
+        idx: usize,
+        value: crate::vm::wire::WireValue,
+    ) {
+        let outcome = crate::vm::TaskOutcome::Done(crate::vm::WorkerResult {
+            value,
+            out: Vec::new(),
+            stderr: Vec::new(),
+        });
+        let sum = crate::vm::core::outcome_summary(&outcome);
+        g.finish(idx, sum, outcome);
+    }
+
     /// W6-7 — a core's pure-data wire payload is walked ONCE (lazily, on the first mark) and then
     /// short-circuited: `children()` must go O(payload) → O(1) per GC pass. A bigger payload swapped
     /// in BEHIND the memo (not via a store path) moves neither the walk nor the cached byte count —
@@ -1379,6 +1413,121 @@ mod iter_obj_tests {
             "a nested core with its own alias slot is charged once, not twice"
         );
         let _ = ir;
+    }
+
+    /// W7-26 — the `Obj::Executor` arm used to read only `inner`, the `--serial` QUEUE half. The
+    /// default M:N engine runs `submit` EAGERLY, so `inner` stays empty forever and every finished
+    /// job's result sits in `eager` instead: measured on the release binary, 300 × ~1 MB of results
+    /// **PASSED an 8 MB `--max-heap` at 313 MB peak RSS**.
+    ///
+    /// Also pins the two decisions the fix rests on: the charge is UNCONDITIONAL (unlike the nested
+    /// walk above, the eager half's own bytes are correct cap-off too — accounting and enforcement
+    /// stay separate, as in Go's `MemStats` vs `GOMEMLIMIT`), and `take_slots` returns the state to
+    /// baseline so a second `shutdown` cannot leave phantom bytes charged.
+    #[test]
+    fn live_bytes_counts_an_executors_eager_results() {
+        let mut h = Heap::new();
+        let core = Arc::new(crate::vm::core::ExecutorCore::default());
+        let r = h.alloc(Obj::Executor(Arc::clone(&core)));
+        let base = h.live_bytes();
+
+        let payload = 500 * std::mem::size_of::<crate::vm::wire::WireValue>();
+        {
+            let mut g = core.eager.lock().unwrap();
+            for i in 0..10 {
+                assert_eq!(g.reserve(), i);
+                finish_done(&mut g, i, wlist(500));
+            }
+        }
+
+        // Cap OFF: the results are counted anyway — this half needs no gate.
+        let with_results = h.live_bytes();
+        assert!(
+            with_results >= base + 10 * payload,
+            "a finished job's result must register with no cap: {base} -> {with_results}"
+        );
+        // Cap ON: same number (the `deep` gate only adds the NESTED-core recursion, and these
+        // results hold pure data).
+        h.set_mem_cap(1);
+        assert_eq!(
+            h.live_bytes(),
+            with_results,
+            "the eager charge must not depend on the cap"
+        );
+
+        // A core nested in a result IS charged under a cap, through the shared `cores` de-dup.
+        let nested = Arc::new(SharedCore::default());
+        nested.store(wlist(500));
+        {
+            let mut g = core.eager.lock().unwrap();
+            let i = g.reserve();
+            let w = crate::vm::wire::WireValue::Shared(Arc::clone(&nested));
+            finish_done(&mut g, i, w);
+        }
+        assert!(
+            h.live_bytes() >= with_results + nested.summary.bytes(),
+            "a core nested inside an eager result must be charged under a cap"
+        );
+
+        // The join drains the slots — the charge goes with them.
+        core.eager.lock().unwrap().take_slots();
+        assert_eq!(
+            h.live_bytes(),
+            base,
+            "take_slots must return the eager half to zero"
+        );
+        let _ = r;
+    }
+
+    /// W7-26, filed by adversarial review of the fix and MEASURED before the second arm landed: an
+    /// executor holding 880 400 bytes of eager results, reachable only through an `Obj::Shared`
+    /// payload, was counted as **240**. `Heap::live_bytes` gained the eager half but
+    /// `core::nested_core_bytes` — the walk that reaches a core with no alias slot of its own — kept
+    /// reading `inner` alone. And because the two walks SHARE the `cores`/`seen` set, the miss is
+    /// not confined to slot-less cores: whichever walk meets a core first is the only one that
+    /// charges it, so a live `Obj::Executor` slot ALSO loses its eager half whenever the enclosing
+    /// container is visited first. Both orders are asserted here.
+    ///
+    /// This is the wave-6 meta-finding again (a fix applied to SOME arms of an N-way set), which is
+    /// why the arms now carry lockstep comments pointing at each other.
+    #[test]
+    fn nested_executor_charges_its_eager_half_in_either_visit_order() {
+        let ex = Arc::new(crate::vm::core::ExecutorCore::default());
+        {
+            let mut g = ex.eager.lock().unwrap();
+            for i in 0..10 {
+                assert_eq!(g.reserve(), i);
+                finish_done(&mut g, i, wlist(500));
+            }
+        }
+        let eager_bytes = ex.eager.lock().unwrap().summary().0;
+        assert!(eager_bytes > 10 * 500 * std::mem::size_of::<crate::vm::wire::WireValue>());
+
+        // (a) reachable ONLY through a `Shared`'s payload — no `Obj::Executor` slot at all.
+        let mut h = Heap::new();
+        h.set_mem_cap(1);
+        let outer = Arc::new(SharedCore::default());
+        outer.store(crate::vm::wire::WireValue::Executor(Arc::clone(&ex)));
+        let base = h.live_bytes();
+        let sr = h.alloc(Obj::Shared(Arc::clone(&outer)));
+        assert!(
+            h.live_bytes() >= base + eager_bytes,
+            "a nested executor's eager results must be charged (was 240 of 880 400)"
+        );
+        let _ = sr;
+
+        // (b) the executor DOES have its own slot, but the enclosing `Shared` is met first — the
+        // shared `cores` set means the nested walk is the one that has to charge both halves.
+        let mut h = Heap::new();
+        h.set_mem_cap(1);
+        let base = h.live_bytes();
+        let sr = h.alloc(Obj::Shared(Arc::clone(&outer)));
+        let er = h.alloc(Obj::Executor(Arc::clone(&ex)));
+        assert!(
+            h.live_bytes() >= base + eager_bytes,
+            "visit order must not decide whether the eager half is counted"
+        );
+        let (_, _) = (sr, er);
     }
 
     /// W6-10r — the arms the headline test does NOT reach: a core nested inside a QUEUED MESSAGE

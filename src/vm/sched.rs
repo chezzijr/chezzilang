@@ -4866,10 +4866,14 @@ pub(super) fn dispatch_eager_job(core: &Arc<ExecutorCore>, rw: ReadyWorker) {
                 out: Vec::new(),
                 stderr: Vec::new(),
             });
+        // W7-26 — summarised for the `--max-heap` byte walk BEFORE the lock is taken: the walk is
+        // O(result) and this lock is contended by every `submit` (`reserve`, below, runs while the
+        // submitter holds `inner`) and by every `live_bytes`. Same hoist as `SharedCore::store`.
+        let sum = crate::vm::core::outcome_summary(&outcome);
         core.eager
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .finish(idx, outcome);
+            .finish(idx, sum, outcome);
         core.eager_cv.notify_all();
     }));
 }

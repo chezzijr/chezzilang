@@ -518,7 +518,18 @@ pub struct EagerState {
     /// Submitted-but-not-yet-finished jobs. `shutdown` waits for this to reach 0.
     outstanding: usize,
     /// One slot per `submit`, in submission order; `None` until that job finishes.
+    /// PRIVATE on purpose — see [`ChanState::queue`]: the cached `(bytes, dirty)` summary below is
+    /// only trustworthy while `finish`/`take_slots` are the sole ways to change this vector.
     slots: Vec<Option<super::TaskOutcome>>,
+    /// W7-26 — cached `(bytes, dirty)` of the collected outcomes, the shape `ChanState`/`ExecState`
+    /// already carry. Without it a finished job's result was reachable by `Heap::live_bytes`
+    /// NOWHERE: `--max-heap` reads the executor core, and the only half it could read was `inner`,
+    /// the `--serial` queue — which the eager (default M:N) engine leaves empty forever.
+    bytes: usize,
+    dirty: bool,
+    /// How much of `bytes` has already been reported to a submitting heap's GC pacing counter — see
+    /// [`take_charge`](EagerState::take_charge).
+    charged: usize,
 }
 
 impl EagerState {
@@ -530,9 +541,13 @@ impl EagerState {
         self.slots.len() - 1
     }
 
-    /// Record a finished job's outcome. The caller must `notify_all` the core's `eager_cv` after
-    /// dropping the guard so a waiting `shutdown` re-checks.
-    pub(super) fn finish(&mut self, idx: usize, outcome: super::TaskOutcome) {
+    /// Record a finished job's outcome with its PRE-COMPUTED [`outcome_summary`] — see
+    /// [`ChanState::push`], and hoisted for the same reason `SharedCore::store` hoists its walk: the
+    /// summary is a recursive O(result) walk, and this lock is contended by every `submit`
+    /// (`dispatch_eager_job`'s `reserve`, taken while the submitter holds `inner`) and by every
+    /// `live_bytes`. Lock hold time must not scale with user payload size. The caller must
+    /// `notify_all` the core's `eager_cv` after dropping the guard so a waiting `shutdown` re-checks.
+    pub(super) fn finish(&mut self, idx: usize, sum: (usize, bool), outcome: super::TaskOutcome) {
         // `take_slots` empties the vector, which would invalidate a live job's index. It only ever runs
         // at `outstanding == 0` (the join waits for that first) and `submit` reserves under the `shut`
         // check, so no job can be holding a stale index here. Asserted rather than defended: the
@@ -542,6 +557,8 @@ impl EagerState {
             idx < self.slots.len(),
             "eager slot {idx} was taken while a job was still outstanding"
         );
+        self.bytes += sum.0;
+        self.dirty |= sum.1;
         self.slots[idx] = Some(outcome);
         self.outstanding -= 1;
     }
@@ -549,12 +566,97 @@ impl EagerState {
     /// Take the collected outcomes, leaving the slot vector empty. A second `shutdown` therefore
     /// reduces an empty vector — a clean no-op, matching the serial engine's drained queue.
     pub(super) fn take_slots(&mut self) -> Vec<Option<super::TaskOutcome>> {
+        self.bytes = 0;
+        self.dirty = false;
+        self.charged = 0;
         std::mem::take(&mut self.slots)
+    }
+
+    /// W7-26, the SAMPLING half — the growth in `bytes` since this was last called, to be charged
+    /// against the SUBMITTING heap's GC pacing counter (`Heap::charge_wire_bytes`).
+    ///
+    /// Counting the results is worthless if the cap is never sampled (the W6-10 review lesson):
+    /// `over_cap` is only evaluated in `sweep()`, `sweep()` only runs when `should_collect()` fires,
+    /// and a `for … : ex.submit(f)` loop over a job that BUILDS its own payload allocates almost
+    /// nothing in the parent and wires almost nothing at submit — so the parent never swept and
+    /// 300 × ~1 MB of results measured PASS at 330 MB against an 8 MB cap even with the accounting
+    /// above in place. A DELTA rather than the absolute total: the pacing counter is monotonic and
+    /// reset at each sweep, so charging the total again per submit would sweep on every submit.
+    ///
+    /// Known ceiling, and safe by the same "fails open only by under-triggering" argument the
+    /// pacing counter itself carries: `charged` is ONE watermark on a core that any number of heaps
+    /// can submit to (an `Executor` handle crosses by `Arc`), so with two tasks sharing an executor
+    /// the growth is charged to whichever submits next, not split. Detection is mis-attributed or
+    /// delayed, never lost — every heap that can reach the core still counts its FULL bytes in its
+    /// own `live_bytes`; this only decides who gets swept sooner.
+    pub(super) fn take_charge(&mut self) -> usize {
+        let d = self.bytes.saturating_sub(self.charged);
+        self.charged = self.bytes;
+        d
     }
 
     pub fn outstanding(&self) -> usize {
         self.outstanding
     }
+
+    /// Cached GC summary of the collected outcomes: `(approximate owned bytes, holds a nested core)`
+    /// — the [`ExecState::summary`] counterpart for the eager half (W7-26).
+    pub fn summary(&self) -> (usize, bool) {
+        (self.bytes, self.dirty)
+    }
+
+    /// The finished jobs' return values, for the nested-core walk in
+    /// [`queue_bytes_deep`] — the [`ExecState::iter`] counterpart. Only `Done` carries a value; the
+    /// other outcomes own buffered output only, already in `bytes`.
+    pub fn values(&self) -> impl Iterator<Item = &WireValue> {
+        self.slots.iter().filter_map(|s| match s {
+            Some(super::TaskOutcome::Done(r)) => Some(&r.value),
+            _ => None,
+        })
+    }
+}
+
+/// W7-26 — one finished job's `(owned bytes, holds a nested core)`, the [`wire_summary`] of a
+/// [`TaskOutcome`](super::TaskOutcome). Every variant owns two buffered-output `Vec<u8>`s (W7-5c
+/// flushes them at the slot's task-order position, so they are retained until `shutdown`); only
+/// `Done` also owns a return value.
+///
+/// Charged UNCONDITIONALLY, unlike the `mem_cap != 0` gates on `Vm::to_wire_crossable`'s pacing
+/// charge and `live_bytes`'s nested-core recursion. Those fire per-store / per-sweep; this fires
+/// once per finished job, beside a thread handoff and a condvar notify, right after that job's own
+/// `O(payload)` `to_wire` — so gating it would buy nothing and would make `live_bytes` mean two
+/// different things depending on a flag (both ancestors keep accounting live and the *limit*
+/// separate: Go's `runtime.MemStats` vs `GOMEMLIMIT`). `ExecState::push` charges unconditionally
+/// for the same reason.
+///
+/// Called OFF the `eager` lock (see [`EagerState::finish`]) — the walk is O(result).
+pub(super) fn outcome_summary(o: &super::TaskOutcome) -> (usize, bool) {
+    use super::TaskOutcome as T;
+    let (out, stderr, value) = match o {
+        T::Done(r) => (&r.out, &r.stderr, Some(&r.value)),
+        T::Cancelled { out, stderr }
+        | T::Exit { out, stderr, .. }
+        | T::Fault { out, stderr, .. }
+        | T::Deadlocked { out, stderr, .. } => (out, stderr, None),
+    };
+    let mut acc = (
+        std::mem::size_of::<super::TaskOutcome>() + out.capacity() + stderr.capacity(),
+        false,
+    );
+    if let Some(w) = value {
+        // The "no `Heap::children` eager arm" claim is an INVARIANT, not luck: a job's return value
+        // crossed via `to_wire_crossable`, whose `ensure_crossable` rejects a `Handle`. Fenced here
+        // rather than merely reasoned about in a comment — if this ever fires, the eager half can
+        // root a parent-heap object and `children` needs the arm `live_bytes` just gained.
+        debug_assert!(
+            !w.has_handle(),
+            "an eager job result carries a parent-heap Handle — Heap::children needs an eager arm"
+        );
+        let (b, d) = wire_summary(w);
+        acc.0 += b;
+        acc.1 |= d;
+    }
+    acc
 }
 
 /// `Executor` core (B3.1 / C5 escape hatch): the explicitly-owned work queue. On `--serial`, `submit`
@@ -774,8 +876,9 @@ impl WireSummary {
 /// `Heap::live_bytes` used to reach them only through its `Obj::*` alias slot — so a nested core
 /// whose last alias slot had been swept was counted NOWHERE. `live_bytes` now runs the cross-core
 /// byte recursion (`Arc`-de-duped, under a live `--max-heap` only); the walk here still stops.
-/// That closed `W6-10r`, not the cap in general — an `Executor`'s eager half is still uncounted
-/// (gaps.md `W7-26`), as is the inline-scalar escape (`future.md §1b`).
+/// That closed `W6-10r`, not the cap in general — an `Executor`'s eager half followed in `W7-26`
+/// (FIXED 2026-08-06, both here and in `nested_core_bytes`), and the inline-scalar escape
+/// (`future.md §1b`) plus the join-window sampling residual (`W7-26r`) are still open.
 ///
 /// Keep the arms in lockstep with [`collect_core_gcrefs`] — a new `WireValue` variant must be added to both.
 pub fn wire_summary(w: &WireValue) -> (usize, bool) {
@@ -947,10 +1050,20 @@ pub fn nested_core_bytes(w: &WireValue, seen: &mut super::fxhash::FxHashSet<usiz
                 acc += queue_bytes_deep(g.summary(), g.iter(), seen);
             }
         }
+        // W7-26 — BOTH halves, exactly like `Heap::live_bytes`'s `Obj::Executor` arm. Keeping them
+        // in lockstep is not cosmetic: `seen`/`cores` is SHARED between the two walks, so whichever
+        // one meets a core first is the only one that charges it. An arm that reads a single half
+        // would therefore silently drop the other half whenever the enclosing core happens to be
+        // visited first — measured during review of this fix: an executor holding 880 400 bytes of
+        // eager results, reached through an `Obj::Shared` payload, was counted as 240.
         WireValue::Executor(core) => {
             if seen.insert(Arc::as_ptr(core) as usize) {
-                let g = core.inner.lock().unwrap();
-                acc += queue_bytes_deep(g.summary(), g.iter(), seen);
+                let queued = {
+                    let g = core.inner.lock().unwrap();
+                    queue_bytes_deep(g.summary(), g.iter(), seen)
+                };
+                let g = core.eager.lock().unwrap_or_else(|e| e.into_inner());
+                acc += queued + queue_bytes_deep(g.summary(), g.values(), seen);
             }
         }
         WireValue::Shared(core) => {
@@ -1128,6 +1241,47 @@ mod summary_tests {
 
     fn list(items: Vec<WireValue>) -> WireValue {
         WireValue::List { id: 0, items }
+    }
+
+    /// W7-26, the sampling half — `take_charge` reports GROWTH, never the running total. Charging
+    /// the total per submit would re-trigger a sweep on every submit once any results exist (the
+    /// pacing counter is monotonic and reset at each sweep), and charging nothing leaves the cap
+    /// unsampled: 300 × ~1 MB of results tripped at **313 MB → 180 MB → 11 MB peak RSS** as the
+    /// accounting and then this charge landed.
+    #[test]
+    fn eager_charge_reports_growth_only() {
+        fn done(g: &mut EagerState) {
+            let o = crate::vm::TaskOutcome::Done(crate::vm::WorkerResult {
+                value: list((0..1000).map(WireValue::Int).collect()),
+                out: Vec::new(),
+                stderr: Vec::new(),
+            });
+            let i = g.reserve();
+            let sum = outcome_summary(&o);
+            g.finish(i, sum, o);
+        }
+        let mut g = EagerState::default();
+        assert_eq!(g.take_charge(), 0, "an empty executor charges nothing");
+
+        done(&mut g);
+        let first = g.take_charge();
+        assert!(
+            first >= 1000 * std::mem::size_of::<WireValue>(),
+            "the finished result's bytes must be charged once: {first}"
+        );
+        assert_eq!(g.take_charge(), 0, "a re-read charges nothing new");
+        assert_eq!(g.summary().0, first, "the total itself is unchanged");
+
+        // The join drains the slots: the next result starts from zero again, not from a stale
+        // `charged` watermark that would swallow it.
+        g.take_slots();
+        assert_eq!(g.summary(), (0, false));
+        done(&mut g);
+        assert_eq!(
+            g.take_charge(),
+            first,
+            "a post-drain result must charge in full"
+        );
     }
 
     /// W6-7/W6-10 — one walk yields both GC facts: approximate owned bytes, and whether the payload

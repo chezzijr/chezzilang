@@ -1223,6 +1223,51 @@ struct Suite:
         }
     }
 
+    /// W7-26 — the same backlog held by an `Executor`'s RESULTS. `--max-heap` read only the core's
+    /// `inner` queue, which is the `--serial` half: the default M:N engine runs `submit` eagerly, so
+    /// `inner` stays empty and each finished job's result lands in `eager` instead. Measured on the
+    /// release binary: **PASS, rc=0, peak RSS 313 MB** against an 8 MB cap (→ OVER-MEMORY at 11 MB
+    /// after the fix). Both engines, because each one exercises a different half.
+    ///
+    /// The negative direction is in the same test: a generous cap must still PASS, or the fix is
+    /// just a way to fail everything.
+    #[test]
+    fn over_memory_counts_an_executor_result_backlog() {
+        const CAP: usize = 8_000_000;
+        let d = TmpDir::new();
+        // ~1 MB blob built once and returned by 300 jobs. The blob is CAPTURED, so each submit also
+        // wires it — which is what paces the parent's sweeps (a job building its own payload leaves
+        // the parent with nothing to trigger a GC on; see the sampling residual on the gaps.md row).
+        let ex = d.write(
+            "ex_test.chz",
+            "import std.concurrency\n\ntest fn execres():\n    parts: List[str] = []\n    \
+             for i in range(100000):\n        parts.push(\"0123456789\")\n    \
+             blob := \"\".join(parts)\n    ex := Executor()\n    for i in range(300):\n        \
+             ex.submit(fn() -> str: blob)\n    ex.shutdown()\n    assert true\n",
+        );
+        for parallel in [false, true] {
+            let report = run_tests_capped(&ex, parallel, CAP);
+            assert!(
+                report.text.contains("OVER-MEMORY execres"),
+                "an executor's result backlog must trip the cap (parallel={parallel}); \
+                 report:\n{}",
+                report.text
+            );
+            assert!(
+                !report.text.contains("FAIL execres") && !report.text.contains("ERROR execres"),
+                "must be OVER-MEMORY, not FAIL/ERROR (parallel={parallel}); report:\n{}",
+                report.text
+            );
+            let generous = run_tests_capped(&ex, parallel, 4_000_000_000);
+            assert!(
+                generous.text.contains("PASS execres"),
+                "the same program under a generous cap must still PASS (parallel={parallel}); \
+                 report:\n{}",
+                generous.text
+            );
+        }
+    }
+
     /// W6-10r — the same backlog, reachable only through a NESTED core. `live_bytes` reaches a
     /// core's bytes through its `Obj::*` alias slot; the channel here has none once `make()`'s frame
     /// dies, so its 300 MB used to be counted nowhere and PASSED an 8 MB cap (measured on the release

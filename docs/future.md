@@ -591,8 +591,12 @@ render ERROR too (whole file, before any test runs), counted separately as `file
    run pays extra sweeps plus a second `wire_summary` walk per store (+11% measured, `docs/benchmarks.md`).
    Residual SAMPLING escapes were listed in gaps.md `W6-10s`, which is **CLOSED 2026-08-06** — its
    filed premise (uncharged by-hand airlock paths) did not survive re-derivation: the only one storing
-   persistently off-heap is `Executor.submit`, and only on `--serial`, which `--max-heap` refuses at
-   the CLI. The reachable escape was a worker heap **born big** — its task's payload arrives in ~7
+   persistently off-heap through the QUEUE is `Executor.submit`, and only on `--serial`, which
+   `--max-heap` refuses at the CLI. (That sentence read "the only one storing persistently off-heap"
+   until `W7-26` measured its blind spot the same day: on M:N `submit` runs EAGERLY, so the same call
+   stores persistently in the core's *other* half — `eager` — which nothing counted and nothing
+   sampled. Both are fixed; `W7-26r` tracks what still is not sampled.) The reachable escape from
+   this row was a worker heap **born big** — its task's payload arrives in ~7
    `Obj`s, so the object-count trigger never moves and nothing ever samples — now fixed by
    `Heap::request_collect` from `Vm::spawn_worker`. TWO residuals remain and are tracked on that row:
    a task whose entire body is ONE native call (no instruction boundary, and no safely-rooted point to

@@ -26,6 +26,69 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > the diff against real CPython output found them. **`adversarial-review` is not optional after a
 > green gate — it is the only stage that has ever caught this class here.**
 
+> **✅ W7-26 FIXED 2026-08-06 — `--max-heap` never counted an `Executor`'s EAGER half, which is the
+> only half the default M:N engine uses.** `ExecutorCore` has two payload halves; `Heap::live_bytes`
+> read only `inner`, the `--serial` QUEUE. On M:N `submit` runs EAGERLY (matching
+> `ThreadPoolExecutor`), so `inner` stays empty forever and every finished job's result sits in
+> `eager.slots` as `TaskOutcome::Done(WorkerResult { value, out, stderr })` — reached by the byte walk
+> nowhere. `Executor()` + a ~1 MB blob + `300 × ex.submit(fn() -> str: blob)` + `shutdown()` under
+> `--max-heap=8000000`, measured on the release binary **before** any edit (premise re-derived, per the
+> W7-22/W6-10s rule): **PASS, rc=0, peak RSS 313 MB → OVER-MEMORY, rc=1, 11 MB.** Generous-cap (4 GB)
+> and no-cap controls still PASS.
+>
+> **The fix has two halves, and the second one is the lesson.** (1) *Accounting*: `EagerState` gains
+> the `(bytes, dirty)` summary `ChanState`/`ExecState` already carry, maintained in `finish` /
+> `take_slots` over a now-PRIVATE slot vector (so no site can forget), and `live_bytes` sums both
+> halves. Charged **unconditionally**, unlike the `mem_cap != 0` gates elsewhere in this family: it
+> fires once per finished job beside a thread handoff, and both ancestors keep accounting live with the
+> *limit* a separate knob (Go `runtime.MemStats` vs `GOMEMLIMIT`). (2) *Sampling*: with (1) alone the
+> repro tripped at **180 MB, not 11 MB** — `over_cap` is assigned only in `sweep()`, and a `submit`
+> loop grows the parent's heap barely at all, so hundreds of MB piled up between samples.
+> `EagerState::take_charge` (growth since last read) is charged to the submitting heap's pacing
+> counter at each `submit` under a live cap. **A byte that is counted but never looked at is the same
+> as a byte that was never counted** — the W6-10 review lesson, one wave later.
+>
+> **Rooting unchanged, and now fenced instead of reasoned about**: a result crosses by value with no
+> parent-heap `GcRef` (B3.2, enforced by `ensure_crossable`), so `children` still has no `eager` arm —
+> `outcome_summary` carries a `debug_assert!(!w.has_handle())` that names that consequence.
+>
+> **What is NOT closed, measured and filed as `W7-26r`:** a job that BUILDS its own payload
+> (`ex.submit(mk)`, no capture) wires ~nothing at submit and all 300 submits finish before any job
+> does, so the whole 330 MB accumulates while the parent is blocked inside `shutdown()`'s join — where
+> no instruction boundary is reached and nothing can sample. The results ARE counted (one allocating
+> statement in the parent turns that program OVER-MEMORY, rc=1); it is the `W6-10s` SAMPLING class, and
+> closing it means a watchdog observation site like `--timeout`'s. Also uncounted: a
+> submitted-but-not-started job in the process-global pool queue, owned by no heap.
+>
+> **Adversarial review filed six charges; five were upheld and are in this commit.** The one that
+> mattered was measured by the defender: `core::nested_core_bytes`'s `Executor` arm still read `inner`
+> alone, so an executor holding **880 400 bytes** of eager results, reached through an `Obj::Shared`,
+> counted **240** — and because both walks share the `cores` de-dup set, a live `Obj::Executor` slot
+> ALSO lost its eager half whenever the enclosing container was visited first. *The wave-6
+> meta-finding (a fix applied to SOME arms of an N-way set), reproduced by a fix for a bug found while
+> auditing that very class — for the second time in three commits.* Also applied: the `O(result)`
+> summary walk is hoisted OFF the `eager` lock (`finish` takes a precomputed summary, like
+> `ExecState::push`), plus a ceiling note on the shared `charged` watermark and a lock-order comment
+> correction. Dismissed: the `has_handle` `debug_assert` is a tautology on the only path that reaches
+> it (`ensure_crossable` is the same predicate).
+>
+> **Filed, NOT fixed here — `W7-27`, and it is the sharper bug.** An eager job's RETURN VALUE is
+> retained until `shutdown()` although nothing can read it (`submit` returns nil, `WorkerResult.value`
+> is `#[allow(dead_code)]`, `reduce_task_slots` reads only `out`/`stderr`, and the M:N nursery already
+> stores `Nil`). Measured against the owning ancestor: the same 300-job programs peak at **313 MB /
+> 330 MB in Chezzi vs 17 MB / 31 MB in CPython 3.14.6 `ThreadPoolExecutor`** — a 10–19× drift that
+> needs no cap to bite. `W7-26` makes those bytes visible; `W7-27` frees them. Separate because
+> dropping the value re-bases this row's own runner test onto buffered output.
+>
+> **Verified.** `cargo test` full: **3872 + integration green**, `cargo clippy --all-targets -D
+> warnings` + `cargo fmt --check` clean. Tests `vm::heap::live_bytes_counts_an_executors_eager_results`,
+> `vm::core::eager_charge_reports_growth_only`,
+> `test_runner::over_memory_counts_an_executor_result_backlog` (both engines + generous-cap negative),
+> and `vm::heap::nested_executor_charges_its_eager_half_in_either_visit_order` (the review finding, both
+> visit orders). Mutation-verified red: deleting the charge in `finish` kills the first and third,
+> reverting the nested arm to `inner`-only kills the fourth. Full write-up: `docs/gaps.md`
+> **§W7-26**.
+
 > **✅ W7-25 FIXED 2026-08-06 (BREAKING output change) — a string nested inside a container, struct
 > field or enum payload now renders as its Python `repr`.** Values that differ used to print
 > identically, and printed output is what most of the corpus compares:
@@ -225,7 +288,8 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > (`submit` runs eagerly, so the `inner` queue `live_bytes` reads stays empty forever), and 300
 > submitted ~1 MB results PASS at **312 MB** against an 8 MB cap. Filed as **`W7-26`** rather than
 > bundled: it is a second payload half with NO cached summary, not a nested core, so it needs new
-> incremental accounting through `reserve`/`finish`/`take_slots` — its own piece of work. Byte
+> incremental accounting through `reserve`/`finish`/`take_slots` — its own piece of work (**done the
+> same day; `W7-26` is FIXED, its sampling residual `W7-26r` is open**). Byte
 > accounting only; a worker result carries no parent-heap `GcRef` (B3.2), which is why `children` has
 > no `eager` arm either. Review also caught that the headline test reached only the single-value arm
 > — the queued-message and cycle arms are now covered by their own test, the "fixed on SOME arms of an

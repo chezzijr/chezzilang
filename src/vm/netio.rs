@@ -3341,6 +3341,21 @@ impl Vm {
                     }
                     crate::vm::sched::dispatch_eager_job(&core, rw);
                     drop(g);
+                    // W7-26 (the SAMPLING half) — charge the results this executor has ACCUMULATED
+                    // against this heap's GC pacing counter, so a live `--max-heap` actually gets
+                    // sampled. `wire_callable` above charges only what the submit itself sends; a
+                    // job that builds its own payload wires ~nothing, so the parent's loop would
+                    // never sweep and the cap would fail OPEN with the results counted but never
+                    // looked at. Gated on a live cap, exactly like `to_wire_crossable`'s charge:
+                    // cap-off pays one `!= 0` load and does not take the `eager` lock at all.
+                    if self.heap.mem_cap() != 0 {
+                        let grown = core
+                            .eager
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .take_charge();
+                        self.heap.charge_wire_bytes(grown);
+                    }
                 } else {
                     // `--serial` keeps queue-at-submit / drain-at-`shutdown` (decision D3).
                     let mut g = core.inner.lock().unwrap();
