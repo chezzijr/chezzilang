@@ -2466,6 +2466,28 @@ fn type_mentions_any(t: &Type, names: &[String]) -> bool {
     }
 }
 
+/// The first bare name in `t` that is neither one of `names` nor accepted by `known` — i.e. a type
+/// argument that will silently resolve to `Ty::Unknown`, which is permissive against every operand.
+fn first_unresolvable_name(
+    t: &Type,
+    names: &[String],
+    known: &dyn Fn(&str) -> bool,
+) -> Option<String> {
+    match t {
+        Type::Named { name, .. } => (!names.contains(name) && !known(name)).then(|| name.clone()),
+        Type::Qualified { args, .. } | Type::Generic(_, args, _) => args
+            .iter()
+            .find_map(|a| first_unresolvable_name(a, names, known)),
+        Type::Func { params, ret, .. } => params
+            .iter()
+            .chain(std::iter::once(&**ret))
+            .find_map(|a| first_unresolvable_name(a, names, known)),
+        Type::Tuple(ts) => ts
+            .iter()
+            .find_map(|a| first_unresolvable_name(a, names, known)),
+    }
+}
+
 /// Does `ty` mention `Self` anywhere, at any nesting depth (`Self`, `List[Self]`, `Option[Self]`)?
 /// Implemented as a `subst` round-trip rather than a hand-rolled walk so it covers exactly the arms
 /// `subst` covers — a hand-rolled twin would drift the first time a `Ty` variant is added. `Unknown`

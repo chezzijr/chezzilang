@@ -6465,13 +6465,50 @@ all — so a pyright PASS is not evidence a statically-enforced language may acc
 ancestors that can actually *express* the question both say no. "An ancestor accepts it" is only
 evidence when that ancestor enforces the property in question.
 
-Also introduced and caught by the same review, both fixed here: (a) the embed walk had a DEPTH cap
-and no visited set — with branching ≥ 2 that is 2^64 visits, so a diamond or cyclic embed graph hung
-`check` (and the LSP) past 15 s on a method MISS, and the cycle diagnostic never printed; (b) the
+Also introduced and caught by the same review, both fixed: (a) the embed walk had a DEPTH cap and no
+visited set — with branching ≥ 2 that is 2^64 visits, so a diamond or cyclic embed graph hung `check`
+(and the LSP) past 15 s on a method MISS, and the cycle diagnostic never printed; (b) the
 conformance-witness half of `satisfies_args_d` still resolved embed args with a bare
 `resolve_ty_ro`, so `b: PBag[str] = B` (whose `contains` takes `int`) was ACCEPTED — the read side
 was re-spelled, the write side was not, and the read side's comment claimed the write side had
 already witnessed it.
+
+### Round 2 — the object-safety guard was itself mis-placed, and three more fell out
+
+The fix for the above shipped green too, and a SECOND review round (2 prosecutors, fresh diff) found
+the guard had been put at the `satisfies` root — which cannot tell a generic BOUND from a plain
+annotation, so it netted every use of the value:
+
+```chezzi
+fn takes(p: Vecish) -> int: return 1
+fn f(a: Vecish) -> int: return takes(a)
+# type error: argument 1 of 'takes': expected Vecish, found Vecish     <- absurd, and pre-fix legal
+```
+
+A single pass/return/assign slot pairs NOTHING, so the guard's own premise never applied there. It
+also hit every user protocol embedding `Add`/`Comparable`/`Arithmetic`. Moved to the actual pairing
+sites: `enforce_bounds` (a generic type param, whose two slots could hold two witnesses), the
+existential method-call arm, and the operator arms (which simply have no `Ty::Protocol` arm). Three
+more, same round:
+
+- The relocated guard read **own methods only**, so `protocol Vecish: Add` — where the `Self` method
+  arrives through the EMBED, the commonest spelling — walked straight through it.
+  `protocol_self_param_method` reads the flattened set.
+- An embed arg naming an **undeclared** type (`protocol Bag: Contains[T]`, no `T` declared) resolved
+  to `Ty::Unknown`, and an `Unknown` requirement accepts every operand: `"oops" in b` on a `Bag`
+  whose `contains` takes `int` was `check: ok` → `cannot apply Add to str and int`. Now a hard error
+  at the declaration — the same Unknown-as-permissive hazard as the nested case, reached by a typo.
+- `protocol_op_sig` never bound `Self`, so `o[0]` on a `fn index(self, k: int) -> Self` protocol
+  leaked the raw `Ty::Param("Self")` while `o.index(0)` yielded the protocol. An operator and its
+  method spelling must not disagree.
+
+And the termination class turned out to have a FOURTH member the first round missed:
+`flatten_embed_methods` uses a `path` stack, which detects a cycle but does nothing about SHARING, so
+it re-walked every shared subtree once per route. A 42-protocol `Pi: P(i+1), P(i+2)` DAG hung `check`
+on the **declaration alone**, before any use — and hung identically pre-change, so it was never a
+regression, merely never triggered. Fixed with the same visited set. **Lesson: "I fixed the
+exponential walk" was a claim about the walkers I had touched, not about the class.** Grepping for
+the *shape* (a recursive embed walk) rather than the symptom would have found all four at once.
 
 ### The lesson: a widening's negative control is the whole test
 

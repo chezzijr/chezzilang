@@ -15798,14 +15798,47 @@ fn self_typed_method_rejected_on_a_protocol_existential() {
     );
 }
 
-/// A protocol whose methods are `Self`-parameterized cannot be witnessed by an existential AT ALL —
-/// the guard is at the `satisfies` root, so passing one into a `[T: Add]` generic (where two `T`s
-/// would then pair up) is rejected as well, not just the direct operator.
+/// A protocol value cannot WITNESS a generic type param whose bound needs a `Self`-parameterized
+/// method — two slots of one param would then hold two different witnesses, which is the same hole
+/// the operator arms have, reached by a different route. Rejected whether the `Self` method is the
+/// protocol's OWN or arrives through an EMBED, and whichever protocol the bound names.
 #[test]
-fn a_self_parameterized_protocol_is_not_witnessed_by_an_existential() {
+fn a_self_parameterized_protocol_value_cannot_witness_a_type_param() {
+    let v = "protocol Vecish:\n    Add\n    fn tag(self) -> str\nstruct V:\n    x: int\n    fn add(self, o: V) -> V:\n        return V(self.x + o.x)\n    fn tag(self) -> str:\n        return \"v\"\n";
+    // `Self` via an EMBED — the spelling an own-methods-only guard misses.
     rejects(
-        "protocol Vecish:\n    Add\n    fn tag(self) -> str\nstruct V:\n    x: int\n    fn add(self, o: V) -> V:\n        return V(self.x + o.x)\n    fn tag(self) -> str:\n        return \"v\"\nfn sum2[T: Add](a: T, b: T) -> T:\n    return a + b\nfn f(a: Vecish, b: Vecish) -> Vecish:\n    return sum2(a, b)\n",
-        "does not satisfy",
+        &format!(
+            "{v}fn sum2[T: Add](a: T, b: T) -> T:\n    return a + b\nfn f(a: Vecish, b: Vecish) -> Vecish:\n    return sum2(a, b)\n"
+        ),
+        "cannot use the protocol value Vecish as type parameter 'T'",
+    );
+    // …and when the bound names the embedding protocol itself.
+    rejects(
+        &format!(
+            "{v}fn sum2[T: Vecish](a: T, b: T) -> T:\n    return a + b\nfn f(a: Vecish, b: Vecish) -> Vecish:\n    return sum2(a, b)\n"
+        ),
+        "cannot use the protocol value Vecish as type parameter 'T'",
+    );
+    // `Self` declared directly on the protocol is the same rejection.
+    rejects(
+        "protocol Vecish:\n    fn add(self, o: Self) -> Self\nfn sum2[T: Vecish](a: T, b: T) -> T:\n    return a.add(b)\nfn f(a: Vecish, b: Vecish) -> Vecish:\n    return sum2(a, b)\n",
+        "cannot use the protocol value Vecish as type parameter 'T'",
+    );
+}
+
+/// REGRESSION — the object-safety guard must NOT reach plain assignability. Passing a `Vecish` value
+/// to a `Vecish` parameter pairs nothing and is sound; an earlier placement of the guard (inside
+/// `satisfies_args_d`, which cannot tell a bound from an annotation) rejected it with the absurd
+/// `expected Vecish, found Vecish`, and did so for EVERY protocol carrying a `Self` method.
+#[test]
+fn a_self_parameterized_protocol_value_still_passes_to_its_own_annotation() {
+    ok(
+        "protocol Vecish:\n    fn add(self, o: Self) -> Self\n    fn tag(self) -> str\nstruct V:\n    x: int\n    fn add(self, o: V) -> V:\n        return V(self.x + o.x)\n    fn tag(self) -> str:\n        return \"v\"\nfn takes(p: Vecish) -> str:\n    return p.tag()\nfn forward(p: Vecish) -> str:\n    return takes(p)\nfn main():\n    a: Vecish = V(1)\n    print(takes(a))\n    print(forward(a))\nmain()\n",
+    );
+    // …and it still satisfies a protocol it EMBEDS (the interface-to-interface case), which also
+    // routes through `satisfies_args_d` and so would have been collateral of the same misplacement.
+    ok(
+        "protocol Named:\n    fn name(self) -> str\nprotocol Person:\n    Named\n    fn add(self, o: Self) -> Self\nstruct Dev:\n    n: str\n    fn name(self) -> str:\n        return self.n\n    fn add(self, o: Dev) -> Dev:\n        return self\nfn only_named(n: Named) -> str:\n    return n.name()\nfn take(p: Person) -> str:\n    return only_named(p)\nfn main():\n    print(take(Dev(\"ada\")))\nmain()\n",
     );
 }
 
@@ -15828,15 +15861,64 @@ fn self_in_return_position_stays_callable_on_an_existential() {
     );
 }
 
-/// A cyclic — or merely diamond-shaped — embed graph must not blow up the checker on a method MISS.
-/// Termination is a visited set, not the depth cap: with branching ≥ 2 a depth bound of 64 is 2^64
-/// visits, and this exact file hung `check` past 15 s before the set was added.
+/// A cyclic — or merely diamond-shaped — embed graph must not blow up the checker. Termination is a
+/// VISITED SET, not a depth cap: with branching ≥ 2 a depth bound of 64 is 2^64 visits. THREE
+/// separate walkers had this shape (`protocol_method_sig_d`, `protocol_provides_d`,
+/// `satisfies_args_d`) and a fourth — `flatten_embed_methods` — used a path stack, which detects a
+/// cycle but does nothing about SHARING, so it re-walked every shared subtree once per route.
 #[test]
-fn a_branching_embed_graph_terminates_on_a_method_miss() {
+fn a_branching_embed_graph_terminates() {
+    // On a method MISS through a cyclic graph.
     rejects(
         "protocol A:\n    B\n    C\nprotocol B:\n    A\n    C\nprotocol C:\n    A\n    B\nfn f(x: A) -> int:\n    return x.nope()\n",
         "cyclic",
     );
+    // On a legal, ACYCLIC, shared DAG — `Pi: P(i+1), P(i+2)`. Declaration alone hung `check` (and
+    // so the LSP) past 25 s at n=42; the cheap `path` stack does not bound this, only `seen` does.
+    let n = 42;
+    let mut src = String::new();
+    for i in 0..n {
+        src.push_str(&format!("protocol P{i}:\n"));
+        let (a, b) = (i + 1, i + 2);
+        if a < n {
+            src.push_str(&format!("    P{a}\n"));
+        }
+        if b < n {
+            src.push_str(&format!("    P{b}\n"));
+        }
+        if a >= n && b >= n {
+            src.push_str(&format!("    fn m{i}(self) -> int\n"));
+        }
+    }
+    src.push_str("fn g[T: P0](t: T) -> int:\n    return 1\n");
+    ok(&src);
+}
+
+/// An embed's type argument naming a type that does not exist resolves to `Ty::Unknown`, and an
+/// `Unknown` requirement accepts EVERY operand — `"oops" in b` type-checked on a `Bag` whose
+/// `contains` takes an `int`, then faulted at runtime. Same Unknown-as-permissive hazard as the
+/// nested case, reached by a typo instead of a nesting, so it is the same hard error.
+#[test]
+fn an_unknown_type_in_an_embed_arg_is_rejected() {
+    rejects(
+        "protocol Bag:\n    Contains[T]\nstruct B:\n    n: int\n    fn contains(self, x: int) -> bool:\n        return x + self.n > 0\nfn has(b: Bag) -> bool:\n    return \"oops\" in b\n",
+        "unknown type 'T' in the type argument",
+    );
+    ok("protocol Bag:\n    Contains[int]\n");
+}
+
+/// An operator and its method spelling must agree. `Self` in an operator method's RETURN widens to
+/// the existential through BOTH — `o[0]` used to leak the raw `Ty::Param("Self")` while
+/// `o.index(0)` yielded the protocol.
+#[test]
+fn self_returning_operator_method_widens_through_the_operator_spelling() {
+    let src = "protocol Boxy:\n    fn index(self, k: int) -> Self\n    fn tag(self) -> str\nstruct S:\n    x: int\n    fn index(self, k: int) -> S:\n        return self\n    fn tag(self) -> str:\n        return \"s\"\n";
+    ok(&format!(
+        "{src}fn read(o: Boxy) -> str:\n    return o[0].tag()\n"
+    ));
+    ok(&format!(
+        "{src}fn read(o: Boxy) -> str:\n    return o.index(0).tag()\n"
+    ));
 }
 
 /// An owner type param NESTED inside an embed's type argument is declined at declare time. The

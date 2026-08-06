@@ -1370,17 +1370,25 @@ and unary `-` an embedded `Neg`. A protocol value also **satisfies the protocols
 assignment. Type arguments stay **invariant** throughout: a `Container[str]` value never satisfies
 `Container[int]`, embedded or not.
 
-**Object safety — `Self` in a parameter position.** A method whose signature takes `Self` is callable
-through a **bound**, never through an interface **value**. A protocol value erases which type it
-holds, so two values of one protocol need not be the same witness — `a + b` over `a: Vecish, b:
-Vecish` could hand a `W` to `V`'s `add`. Every operator protocol's method is `(self, Self) -> Self`,
-so `+ - * / %` and `<` are all bound-only; so is calling `a.add(b)` by hand. Bind the operands
-together with a generic parameter and it works: `fn plus[T: Vecish](a: T, b: T) -> T: return a + b`.
-`Self` in the **return** is fine — it widens to the protocol — which is why `fn neg(self) -> Self`
-(and so unary `-`) stays usable on a value. Rust's object-safety rule is the same; Go bans `Self`
-from interfaces outright. An embed's type argument may name the owner's type parameter directly
-(`protocol Bag[T]: Contains[T]`) but not nested inside another type (`Contains[List[T]]` is
-rejected).
+**Object safety — `Self` in a parameter position.** A protocol value erases which type it holds, so
+two values of one protocol need not be the same witness — `a + b` over `a: Vecish, b: Vecish` could
+hand a `W` to `V`'s `add`. A method whose signature **takes** `Self` is therefore not usable where
+two witnesses could meet: calling it on a value (`a.add(b)`) is rejected, the operator forms are
+rejected (every operator protocol's method is `(self, Self) -> Self`, so `+ - * / %` and `<` are all
+affected), and a protocol value may not be the **witness for a generic type parameter** whose bound
+needs such a method (`sum2[T: Vecish](a: T, b: T)` has two `T` slots). Bind the operands together
+with a generic parameter over a CONCRETE type and it all works:
+`fn plus[T: Vecish](a: T, b: T) -> T: return a + b` called with two `V`s.
+
+Everything else about the value is unaffected — it still passes to a parameter of its own protocol,
+still satisfies the protocols it embeds, and `Self` in the **return** is fine (it widens to the
+protocol), which is why `fn neg(self) -> Self` and unary `-` stay usable. Rust's object-safety rule
+is the same; Go bans `Self` from interfaces outright.
+
+An embed's type argument must name a real type, and may name the owner's type parameter only as the
+whole argument (`protocol Bag[T]: Contains[T]`) — nested inside another type (`Contains[List[T]]`),
+or naming a type that does not exist, is rejected at the declaration rather than silently becoming a
+requirement that accepts anything.
 
 ```chezzi
 protocol Arithmetic:        # builtin/reserved — shape file-backed in std/prelude.chz

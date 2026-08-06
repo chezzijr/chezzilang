@@ -3486,7 +3486,7 @@ impl Checker {
             return None;
         };
         let sig = self.protocol_method_sig(p, method)?;
-        let map = self
+        let mut map: HashMap<String, Ty> = self
             .protocols
             .get(p)?
             .type_params
@@ -3494,6 +3494,11 @@ impl Checker {
             .cloned()
             .zip(pargs.iter().cloned())
             .collect();
+        // `Self` binds to the receiver, exactly as the method-call arm does — otherwise `o[0]` on a
+        // `fn index(self, k: int) -> Self` protocol leaks the raw `Ty::Param("Self")` out while the
+        // hand-written `o.index(0)` yields the existential. An operator and its method spelling must
+        // not disagree.
+        map.insert("Self".to_string(), ty.clone());
         Some((sig, map))
     }
 

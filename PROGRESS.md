@@ -139,6 +139,23 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > (each acceptance paired with its negative — these are the only ones that can prove a *rejection* is
 > gone, since `run_file` bypasses the checker) + 8 running `test fn`s in
 > `tests/chz/spec/protocol_embed_test.chz`, serial==M:N gated. `cargo test` **3852** green, clippy clean.
+> **A SECOND review round found the object-safety guard itself mis-placed.** Put at the `satisfies`
+> root it could not tell a generic BOUND from a plain annotation, so it rejected
+> `fn f(a: Vecish) -> int: return takes(a)` with `expected Vecish, found Vecish` — a single slot
+> pairs nothing, so the guard's own premise never applied there. Moved to the real pairing sites
+> (`enforce_bounds`, the existential method-call arm, the operator arms). Three more from that round:
+> the relocated guard read OWN methods only, so `protocol Vecish: Add` — `Self` arriving via the
+> embed, the commonest spelling — walked through it; an embed arg naming an UNDECLARED type resolved
+> to `Unknown` and so accepted every operand (`"oops" in b` → `check: ok` → `cannot apply Add to str
+> and int`), now a hard error at the declaration; and `protocol_op_sig` never bound `Self`, so `o[0]`
+> leaked `Ty::Param("Self")` while `o.index(0)` widened correctly.
+>
+> **The termination class had a FOURTH member the first round missed.** `flatten_embed_methods` uses
+> a `path` stack — which detects a cycle but does nothing about SHARING, so it re-walked every shared
+> subtree once per route. A 42-protocol `Pi: P(i+1), P(i+2)` DAG hung `check` on the DECLARATION
+> alone, and hung identically before this work, so it was never a regression — merely never
+> triggered. *"I fixed the exponential walk" was a claim about the three walkers I had touched, not
+> about the class; grepping for the SHAPE would have found all four at once.*
 > Full write-up: `docs/gaps.md` **§2026-08-06**.
 
 > **✅ W7-21 FIXED 2026-08-05 — a module global that HOLDS a function is now callable through the

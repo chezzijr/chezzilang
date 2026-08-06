@@ -335,6 +335,26 @@ impl Checker {
         let own: Vec<String> = type_params.iter().map(|tp| tp.name.clone()).collect();
         for emb in embeds {
             for a in &emb.args {
+                // An embed arg naming a type that does not exist (`Contains[T]` where the protocol
+                // declares no `T`) resolves to `Ty::Unknown`, and an `Unknown` element type accepts
+                // EVERY operand — `"oops" in b` type-checked on a `Bag` whose `contains` takes an
+                // `int`, then faulted. Unknown-as-permissive is the same hazard as the nested case
+                // below, reached by a typo instead of a nesting; both must be a hard error, not a
+                // silently wide requirement. Every struct/enum/alias/protocol is hoisted before this
+                // runs, so an unresolvable name here really is unresolvable.
+                if let Some(bad) = first_unresolvable_name(a, &own, &|n| {
+                    !self.resolve_ty_ro(&Type::named(n)).is_unknown()
+                }) {
+                    self.error(
+                        span,
+                        format!(
+                            "unknown type '{bad}' in the type argument of embedded protocol '{}' \
+                             in '{name}'",
+                            emb.name
+                        ),
+                    );
+                    continue;
+                }
                 if !matches!(a, Type::Named { name: n, .. } if own.contains(n))
                     && type_mentions_any(a, &own)
                 {
@@ -391,6 +411,22 @@ impl Checker {
         embeds: &[Bound],
         path: &mut Vec<String>,
     ) -> (HashMap<String, FnSig>, bool, Option<String>) {
+        self.flatten_embed_methods_seen(embeds, path, &mut HashSet::new())
+    }
+
+    /// `seen` is what bounds the walk. `path` detects a CYCLE (a name revisited on the current
+    /// branch) but does nothing about SHARING: a DAG where each protocol embeds two others re-walks
+    /// every shared subtree once per route, which is exponential — a 42-protocol chain of
+    /// `Pi: P(i+1), P(i+2)` hung `check` (and the LSP) past 25 s on the DECLARATION alone, before any
+    /// use. Skipping an already-walked protocol is result-preserving: its methods are already merged
+    /// into `required`, and re-merging identical signatures is what the diamond rule already dedups.
+    /// The `path` check stays FIRST so a cycle is still reported rather than silently skipped.
+    fn flatten_embed_methods_seen(
+        &self,
+        embeds: &[Bound],
+        path: &mut Vec<String>,
+        seen: &mut HashSet<String>,
+    ) -> (HashMap<String, FnSig>, bool, Option<String>) {
         let mut required: HashMap<String, FnSig> = HashMap::new();
         let mut conflict: Option<String> = None;
         let mut merge = |mn: &str, ms: &FnSig, conflict: &mut Option<String>| {
@@ -413,11 +449,15 @@ impl Checker {
             let Some(pinfo) = self.protocols.get(&emb.name).cloned() else {
                 continue; // unknown embed already errored in validate_protocol_embeds
             };
+            if !seen.insert(emb.name.clone()) {
+                continue; // already merged on this walk — a shared subtree, not new work
+            }
             for (mn, ms) in &pinfo.methods {
                 merge(mn, ms, &mut conflict);
             }
             path.push(emb.name.clone());
-            let (sub, cyclic, sub_conf) = self.flatten_embed_methods(&pinfo.embeds, path);
+            let (sub, cyclic, sub_conf) =
+                self.flatten_embed_methods_seen(&pinfo.embeds, path, seen);
             path.pop();
             if cyclic {
                 return (required, true, conflict);
@@ -480,6 +520,34 @@ impl Checker {
             return Some(subst_sig(&sig, &map));
         }
         None
+    }
+
+    /// M22 + object safety — the name of a method this protocol requires, own OR through any embed,
+    /// whose signature takes `Self`. `Some(name)` ⇒ no existential can be a witness for it.
+    ///
+    /// The flattened set is the point: `protocol Vecish: Add` has NO own method taking `Self` — the
+    /// `add(self, o: Self) -> Self` arrives through the embed — so an own-methods-only check let the
+    /// commonest spelling of the hazard straight through. Embed-arg substitution is irrelevant here
+    /// (`Self` is not a protocol type param, so no substitution can introduce or remove it), which
+    /// is why `flatten_embed_methods` is enough and the re-spelling walk is not needed.
+    pub(super) fn protocol_self_param_method(&self, p: &str) -> Option<String> {
+        let pinfo = self.protocols.get(p)?;
+        if let Some((n, _)) = pinfo
+            .methods
+            .iter()
+            .find(|(_, s)| self_in_param_position(s))
+        {
+            return Some(n.clone());
+        }
+        let mut path = vec![p.to_string()];
+        let (required, _cyclic, _conflict) = self.flatten_embed_methods(&pinfo.embeds, &mut path);
+        let mut hits: Vec<&String> = required
+            .iter()
+            .filter(|(_, s)| self_in_param_position(s))
+            .map(|(n, _)| n)
+            .collect();
+        hits.sort(); // `required` is a HashMap — pick deterministically so the diagnostic is stable
+        hits.first().map(|n| (*n).clone())
     }
 
     /// Resolve an embed's type args in the OWNING protocol's vocabulary: a bare name that is one of
@@ -1209,7 +1277,8 @@ impl Checker {
         protocol: &str,
         args: &[Ty],
     ) -> Result<(), String> {
-        self.satisfies_args_d(ty, protocol, args, 0).map(|_| ())
+        self.satisfies_args_d(ty, protocol, args, &mut HashSet::new())
+            .map(|_| ())
     }
 
     /// A `where T: <scalar>` bound names a concrete scalar type rather than a protocol, making it an
@@ -1246,7 +1315,7 @@ impl Checker {
         })
     }
 
-    /// Depth-bounded core of [`satisfies_args`]. `depth` guards the embed-flattening recursion (M22):
+    /// Visited-set core of [`satisfies_args`]. `seen` guards the embed-flattening recursion (M22):
     /// cycles are rejected at declare time, but a malformed cyclic program still runs the rest of the
     /// checker, so a hard cap (mirroring `resolve_ty_ro_d`) breaks the recursion with a plain failure
     /// instead of overflowing the stack.
@@ -1255,7 +1324,7 @@ impl Checker {
         ty: &Ty,
         protocol: &str,
         args: &[Ty],
-        depth: usize,
+        seen: &mut HashSet<String>,
     ) -> Result<Grant, String> {
         let Some(pinfo) = self.protocols.get(protocol) else {
             // A `where T: <scalar>` EQUALITY bound: the name is a concrete scalar type, not a
@@ -1296,7 +1365,11 @@ impl Checker {
         // is NOT flattened here — it forwards through its declared bounds in the `Ty::Param` arm below
         // (which knows, via `bound_provides`, that an `Arithmetic`-bound param provides Add/Sub/…).
         if !pinfo.embeds.is_empty() && !matches!(ty, Ty::Param(_)) {
-            if depth <= 64 {
+            // A VISITED SET, not a depth cap: `ty` is fixed across the whole walk, so revisiting
+            // one (protocol, args) pair can only re-derive the same answer, while a depth bound of
+            // 64 over a branching graph is 2^64 visits — a 42-protocol DAG hung `check` (and the
+            // LSP) past 25 s. Same class the sibling walkers close; this one is the third.
+            {
                 // The owner's params are re-spelled here too (`embed_arg_tys`, not a bare
                 // `resolve_ty_ro`) and then bound to the args actually being required. Without both,
                 // `protocol Bag[T]: Contains[T]` witnessed conformance against an `Unknown` element
@@ -1315,7 +1388,19 @@ impl Checker {
                         .iter()
                         .map(|t| subst(t, &omap))
                         .collect();
-                    let _: Grant = self.satisfies_args_d(ty, &emb.name, &eargs, depth + 1)?;
+                    let key = format!(
+                        "{}[{}]",
+                        emb.name,
+                        eargs
+                            .iter()
+                            .map(|a| a.to_string())
+                            .collect::<Vec<_>>()
+                            .join(",")
+                    );
+                    if !seen.insert(key) {
+                        continue; // already answered on this walk — an embed diamond, not new work
+                    }
+                    let _: Grant = self.satisfies_args_d(ty, &emb.name, &eargs, seen)?;
                 }
             }
             if pinfo.methods.is_empty() {
@@ -1464,23 +1549,13 @@ impl Checker {
         // when a Protocol VALUE is the subject: a bare `Container` value does NOT satisfy
         // `Container[int]` (0 args vs 1) and vice-versa, and `Container[str]` ≠ `Container[int]`.
         if let Ty::Protocol(p, pargs) = ty {
-            // OBJECT SAFETY — a requirement with `Self` in a parameter slot can never be witnessed
-            // by an existential, however it is reached (embed walk, structural, or a generic bound
-            // that later pairs two values of it). One guard at the root, so every downstream
-            // consumer — operator dispatch, `<`, a `[T: Add]` call — is sound without its own copy.
-            if pinfo.methods.iter().any(|(_, s)| self_in_param_position(s)) {
-                return Err(format!(
-                    "type {ty} does not satisfy {protocol} (its method '{}' takes `Self`, which a \
-                     protocol value cannot witness — it erases which type it holds; bind the \
-                     receiver with a generic parameter instead)",
-                    pinfo
-                        .methods
-                        .iter()
-                        .find(|(_, s)| self_in_param_position(s))
-                        .map(|(n, _)| n.as_str())
-                        .unwrap_or("?")
-                ));
-            }
+            // OBJECT SAFETY is deliberately NOT enforced here: this arm answers plain assignability
+            // too, and `fn takes(p: Vecish)` fed a `Vecish` value is sound — nothing pairs two
+            // witnesses. Placed here it rejected `expected Vecish, found Vecish`. The pairing sites
+            // each carry their own guard instead: `enforce_bounds` (a generic type param, whose two
+            // slots could hold two different witnesses), the existential method-call arm in
+            // `expr.rs`, and `op_overload_result`/`ordering_allowed` (which simply have no
+            // `Ty::Protocol` arm at all). See `self_in_param_position`.
             if self.protocol_provides(p, pargs, protocol, args) {
                 return Ok(Grant::no_intrinsic_method());
             }
@@ -2241,6 +2316,30 @@ impl Checker {
     ) {
         for tp in tps {
             if let Some(concrete) = sub.get(&tp.name) {
+                // OBJECT SAFETY — a protocol EXISTENTIAL may not witness a type param whose bound
+                // requires a `Self`-parameterized method. Two slots of the SAME param could then
+                // hold two different witnesses: `sum2[T: Vecish](a: T, b: T)` fed two `Vecish`
+                // values type-checks `a.add(b)` against `T`, then hands a `W` to `V::add`.
+                //
+                // The guard lives HERE, on the bound path, NOT in `satisfies_args_d` — down there it
+                // cannot tell a bound from a plain annotation, and plain `fn takes(p: Vecish)` fed a
+                // `Vecish` value is sound (nothing pairs two witnesses). Placed there it rejected
+                // `expected Vecish, found Vecish`.
+                if let Ty::Protocol(p, _) = concrete
+                    && let Some(m) = self.protocol_self_param_method(p)
+                {
+                    self.error(
+                        span,
+                        format!(
+                            "cannot use the protocol value {concrete} as type parameter '{}' — it \
+                             requires '{m}', which takes `Self`, and a protocol value erases which \
+                             type it holds, so two of them need not be the same type. Pass the \
+                             concrete type instead",
+                            tp.name
+                        ),
+                    );
+                    continue;
+                }
                 for bound in &tp.bounds {
                     // Resolve the bound's args, then substitute any params recovered into `sub` (e.g.
                     // `Index[int, V]` with `V` recovered to `int`) so the structural/intrinsic check
