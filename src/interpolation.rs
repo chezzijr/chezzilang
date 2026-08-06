@@ -53,12 +53,33 @@ pub(crate) fn parse_interpolation(raw: &str, span: Span) -> Result<Vec<Chunk>, I
                 if !lit.is_empty() {
                     chunks.push(Chunk::Lit(std::mem::take(&mut lit)));
                 }
+                // Scan to the fragment's CLOSING `}` with the same state machine
+                // `fmtspec::split_spec` uses one line below: a `}` inside a `"`/`'` string literal
+                // or nested inside `([{` is part of the expression, NOT the terminator. Without
+                // this, `{d['a}b']}` cut at the quoted brace and `{ {1,2}.len() }` at the set
+                // literal's — both hard compile errors on valid code.
                 let mut inner = String::new();
                 let mut closed = false;
+                let mut depth: i32 = 0;
+                let mut in_str: Option<char> = None;
                 for ic in chars.by_ref() {
-                    if ic == '}' {
-                        closed = true;
-                        break;
+                    if let Some(q) = in_str {
+                        if ic == q {
+                            in_str = None;
+                        }
+                        inner.push(ic);
+                        continue;
+                    }
+                    match ic {
+                        '"' | '\'' => in_str = Some(ic),
+                        '(' | '[' | '{' => depth += 1,
+                        ')' | ']' => depth -= 1,
+                        '}' if depth == 0 => {
+                            closed = true;
+                            break;
+                        }
+                        '}' => depth -= 1,
+                        _ => {}
                     }
                     inner.push(ic);
                 }
@@ -107,6 +128,10 @@ pub(crate) fn parse_interpolation(raw: &str, span: Span) -> Result<Vec<Chunk>, I
 }
 
 fn parse_expr_str(src: &str, span: Span, base_line: usize) -> Result<Expr, InterpError> {
+    // TRIM first: the fragment is lexed as its own line, so leading whitespace (`"{ 1 + 2 }"`,
+    // legal in Python) would otherwise open an INDENT token — "unexpected an indented block in
+    // expression". Padding around a fragment is insignificant.
+    let src = src.trim();
     let tokens = lexer::tokenize_at(src, base_line).map_err(|e| InterpError {
         message: e.to_string(),
         span,

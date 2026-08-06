@@ -2,6 +2,20 @@
 
 Single source of truth for "what am I doing next." Update after every work session.
 
+> **✅ W7-23 FIXED 2026-08-06 — the interpolation fragment scanner is now quote- and depth-aware.**
+> `parse_interpolation` scanned to the FIRST `}` with no state, so a brace that belonged to the
+> expression closed the fragment instead: `"{d['a}}b']}"` → `unmatched '}' in string` and
+> `"{ {1, 2}.len() }"` → `unexpected an indented block in expression`, both on valid code. It was
+> internally inconsistent too — `fmtspec::split_spec`, called on the very next line, has been
+> quote-aware since it shipped; the layer FEEDING it was not. The scanner now carries `split_spec`'s
+> own `in_str` + bracket-`depth` state. Second defect found while testing it: a fragment is lexed as
+> its own line, so leading padding (`"{ 1 + 2 }"`, legal in CPython) opened an INDENT token —
+> `parse_expr_str` now trims. Two limits remain and are documented (`docs/syntax.md` §10), both
+> shared with CPython < 3.12: a fragment cannot nest the SAME quote style (the lexer ends the string
+> first), and a nested literal interpolates too, so a literal brace inside it is still doubled.
+> Fenced by `tests/chz/spec/interpolation_test.chz` (6 `test fn`s, serial==M:N) +
+> `parse_interpolation_scanner_is_quote_and_depth_aware`. Full write-up: `docs/gaps.md` **§W7-23**.
+
 > **✅ ALL FOUR W7-4 RESIDUALS CLOSED (2026-08-05/06) — W7-4a + W7-4b + W7-4c FIXED, W7-4d closed as
 > not-a-bug — the module SNAPSHOT path now keeps one cell per binding.** Two of W7-4's four shipped residuals were real
 > wrong-answer bugs, measured against paired reference programs:

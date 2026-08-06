@@ -1,0 +1,39 @@
+# tests/chz/spec/interpolation_test.chz — `"{…}"` interpolation behavior spec.
+#
+# Two classes of bug live here:
+#  1. The fragment SCANNER must be quote- and depth-aware — a `}` inside a nested string literal or
+#     inside `([{` belongs to the expression, not to the fragment (CPython f-string parity).
+#  2. A fragment is a first-class expression: named/default/variadic call arguments are normalized
+#     for it exactly as they are outside a string (they are desugared with the rest of the module).
+#
+# The still-a-compile-error cases (a bare unmatched `}`, a genuinely wrong-arity fragment call) stay
+# in Rust — `assert` cannot observe a checker diagnostic.
+
+# ---- scanner: quotes and nesting ----
+
+test fn brace_inside_quoted_index():
+    # The key is `a}b`. EVERY Chezzi string interpolates (there is no `f` prefix), so the nested
+    # literal spells a literal brace `}}` too. The point here is the fragment SCANNER: it stays
+    # inside `'…'` instead of cutting the fragment at the first quoted `}`.
+    d := {"a}}b": 7}
+    assert "val = {d['a}}b']}" == "val = 7"
+
+test fn brace_inside_quoted_index_with_spec():
+    d := {"a}}b": 7}
+    assert "{d['a}}b']:>3}" == "  7"
+
+test fn nested_string_literal_in_fragment():
+    n := 5
+    # Chezzi interpolates every string, so the nested literal interpolates too (no `f` prefix here).
+    assert "outer {'inner {n}'}" == "outer inner 5"
+
+test fn set_literal_in_fragment():
+    assert "{ {1, 2}.len() }" == "2"
+
+test fn map_literal_in_fragment():
+    assert "{ {'a': 1}['a'] }" == "1"
+
+test fn colon_in_quoted_key_is_not_a_spec():
+    m := {"a:b": 4}
+    assert "{m['a:b']}" == "4"
+    assert "{m['a:b']:>3}" == "  4"

@@ -6101,6 +6101,35 @@ mod interp_tests {
         let chunks = parse_interpolation("{m[\"a:b\"]}", sp()).unwrap();
         assert!(matches!(&chunks[..], [Chunk::Expr(_, None)]));
     }
+
+    #[test]
+    fn parse_interpolation_scanner_is_quote_and_depth_aware() {
+        // A `}` inside a nested string literal does NOT close the fragment.
+        let chunks = parse_interpolation("v={d['a}}b']}", sp()).unwrap();
+        assert!(matches!(
+            &chunks[..],
+            [Chunk::Lit(l), Chunk::Expr(_, None)] if l == "v="
+        ));
+        // Nor does one nested inside `{`/`[`/`(` — the set literal's brace is at depth 1.
+        let chunks = parse_interpolation("{ {1, 2}.len() }", sp()).unwrap();
+        assert!(matches!(&chunks[..], [Chunk::Expr(_, None)]));
+        // Padding around a fragment is insignificant (CPython allows `f"{ x }"`).
+        let chunks = parse_interpolation("{ x }", sp()).unwrap();
+        assert!(matches!(&chunks[..], [Chunk::Expr(_, None)]));
+        // A depth-0 `}` still terminates, and an unclosed fragment is still an error.
+        assert!(
+            parse_interpolation("{x", sp())
+                .unwrap_err()
+                .message
+                .contains("unterminated '{'")
+        );
+        assert!(
+            parse_interpolation("a}b", sp())
+                .unwrap_err()
+                .message
+                .contains("unmatched '}'")
+        );
+    }
 }
 
 #[cfg(test)]

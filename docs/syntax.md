@@ -2466,6 +2466,21 @@ print('single quotes work too: {name}, with \'apostrophe\' and \u{2728}')
 print("literal {{x}} vs value {x}")
 ```
 
+**What goes inside `{…}`.** Any expression. The fragment scanner is **quote- and depth-aware**, so a
+`}` inside a nested string literal or inside `(`/`[`/`{` belongs to the expression rather than
+closing the fragment; whitespace padding around the fragment is insignificant.
+
+```chezzi
+print("{ {1, 2}.len() }")     # 2          ← set literal's brace is nested, and padding is fine
+print("{ {'a': 1}['a'] }")    # 1
+print("{d['a}}b']}")          # value at key `a}b` — the quoted brace does not close the fragment
+```
+
+Two limits, both shared with CPython < 3.12. The **lexer** ends the string at the first unescaped
+delimiter, so a fragment cannot nest the *same* quote style (`"{d["k"]}"` is a lex error — use
+`"{d['k']}"`). And a nested literal is itself a normal Chezzi string, so it interpolates too and a
+literal brace inside it is still doubled (`'a}}b'` above is the key `a}b`).
+
 **Format specifiers.** An interpolation may carry a Python-style format spec after a `:` —
 `{expr:spec}`. The mini-language is a coherent subset:
 
