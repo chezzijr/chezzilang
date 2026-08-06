@@ -3394,17 +3394,23 @@ impl Vm {
         // boundary of the task, by which point the payload is fully installed. Gated on a live cap,
         // so an uncapped run forces no GC at all.
         //
-        // TWO THINGS THIS DOES NOT FIX, both measured, neither introduced here (gaps.md `W6-10s`):
-        //  - a task whose ENTIRE body is one native call (`spawn blob.len()`) executes no bytecode,
-        //    so it never reaches an instruction boundary and the flag is never consumed. There is no
-        //    safe sample point inside that window: the payload is rooted only as the pending call's
-        //    operands, so collecting before the call would free the task's own arguments, and by the
-        //    time the call returns the receiver is already dead. Still PASSES a cap it exceeds.
-        //  - growth AFTER this sample that allocates no `Obj`s — `xs.push(i)` into an existing list
-        //    grows a `Vec` in place, so a task can take its heap 32× over the cap post-sweep and
-        //    never trigger again (`future.md §1b`, the documented inline-scalar escape).
-        // So this narrows "the verdict tracks who allocates" to the tasks that run bytecode; it does
-        // not make `--max-heap` total. Do not restate the guarantee above as unconditional.
+        // WHAT THIS DOES NOT FIX, measured, not introduced here (gaps.md `W6-10s` residual (a)):
+        // a task whose ENTIRE body is one native call (`spawn blob.len()`) executes no bytecode, so
+        // it never reaches an instruction boundary and the flag is never consumed. There is no safe
+        // sample point inside that window: the payload is rooted only as the pending call's operands,
+        // so collecting before the call would free the task's own arguments, and by the time the call
+        // returns the receiver is already dead.
+        //
+        // `W7-28` RE-SCOPED that residual rather than closing it, and the distinction matters here.
+        // Byte growth is now charged at `Heap::alloc` / `Heap::get_mut` / `to_wire_crossable`, so the
+        // PARENT — which built the payload and therefore paid those charges — samples its own heap and
+        // trips first. Every shape that used to demonstrate residual (a) is now OVER-MEMORY for that
+        // reason, which is why no test here can attribute a trip to the worker path. What is left is
+        // only the case where the worker's heap is over the cap while its parent's is under.
+        //
+        // The sibling escape that WAS closed by `W7-28`: growth after this sample that allocates no
+        // `Obj`s (`xs.push(i)` into an existing list grew a `Vec` in place and rode 77× past the cap).
+        // `get_mut` charges it now. Do not restate the guarantee above as unconditional.
         if self.heap.mem_cap() != 0 {
             worker.heap.request_collect();
         }

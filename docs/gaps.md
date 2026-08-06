@@ -1356,8 +1356,11 @@ last surviving member of the family.
 >
 > **Residual SAMPLING escapes (distinct from `W6-10r`, which is an ACCOUNTING hole):**
 > - the documented inline-scalar case (`docs/future.md §1b`) — a loop growing one container of inline
->   scalars allocates no `Obj`s AND charges no wire bytes, so neither trigger fires. Still open; this
->   fix does not touch it.
+>   scalars allocates no `Obj`s AND charges no wire bytes, so neither trigger fires. This fix does not
+>   touch it. **CLOSED 2026-08-07 by `W7-28`**, which measured it at 77× the cap (not the 32× filed)
+>   and found the same blindness in one-instruction `extend` and in few-allocation/huge-byte growth:
+>   the trigger now charges BYTES at `alloc` / `get_mut` / `to_wire_crossable` instead of counting
+>   events.
 > - the by-hand airlock paths that pair `to_wire_at` + `ensure_crossable` instead of routing through
 >   `to_wire_crossable` (spawn args, closure captures, `Executor.submit`) grow off-heap storage
 >   without charging it.
