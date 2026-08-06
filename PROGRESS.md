@@ -26,6 +26,42 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > the diff against real CPython output found them. **`adversarial-review` is not optional after a
 > green gate — it is the only stage that has ever caught this class here.**
 
+> **✅ W7-29 FIXED 2026-08-07 — a task whose whole body is ONE native call was never sampled: the cap
+> tracked who ran BYTECODE, not who held bytes.** Closes `W6-10s` residual (a), open since 2026-08-06
+> and filed as having "no safe sample point" — the sentence that kept it shelved, and it was wrong.
+> Two programs, byte-identical payloads (~171 MB peak RSS), same 8 MB cap, differing ONLY in the task
+> body:
+>
+> | task body | verdict |
+> |---|---|
+> | `spawn xs.len()` (native) | **PASS at 170.9 MB — 21× the cap** |
+> | `spawn use(xs)` (bytecode, otherwise identical) | OVER-MEMORY |
+>
+> `spawn xs.len()` pushes no frame, so `run_until`'s `while self.frames.len() > base_level` never runs
+> an iteration — `should_collect()` is never called, `sweep()` never runs, `over_cap` is never
+> assigned. Fixed by `Vm::sample_mem_cap` from `Vm::start_task` under a live cap: the `Method` arm
+> already has receiver+args on the operand stack (which `Vm::collect` traces first), so a direct
+> `collect()` is sound with `frames` empty — empty frames end the LOOP, they do not make a collect
+> unsound. The `Call` arm parks callee+args across the sample, since a `Callee::Builtin`/`Native`
+> callee pushes no frame either.
+>
+> **Masked for three rounds by an unrelated artifact:** `do_spawn` deep-clones the payload into the
+> SPAWNING heap first, and on the lazy nursery path that copy stays rooted in `self.nurseries` until
+> the join — so the PARENT tripped and every repro looked guarded. A doubling test proved it
+> (`nospawn` flips at ~2.7 MB, `spawn` at ~6.5 MB — 2×).
+>
+> **Adversarial review caught three things, two of them mine.** (1) I directed `Heap::request_collect`
+> deleted as subsumed; both prosecutors INDEPENDENTLY caught that `ReadyWorker::invoke` — the eager-
+> `Executor` job door — never routes through `start_task`. Restored, with each door now documenting
+> what it owns; **"no witness built" is not "unreachable"**. (2) The new test could not fail on its own
+> regression: green on a single core with the fix reverted, because the eager arm needs
+> `worker_count() >= 2`. Note `CHEZZI_THREADS=1` does NOT show this (that var is read by `cmd_run`, not
+> the test helper) — only `taskset -c 0` does. It now **controls the environment instead of asserting
+> it** (`set_worker_count(4)` behind an RAII guard restoring on any panic), verified red-on-the-real-
+> assertion under `taskset -c 0`. (3) Stale doc claims re-pinned. **Cost ceiling, stated up front:** a
+> mark-sweep per task start — cheap on M:N, O(live heap × tasks) on serial, reachable only through the
+> test helper. Full write-up: `docs/gaps.md` **§W7-29**.
+
 > **✅ W7-28 FIXED 2026-08-07 — `--max-heap`'s trigger counted EVENTS, not bytes, so the most ordinary
 > runaway loop in the language rode 77× past the cap.** Closes `W6-10s` residual (b) — the
 > inline-scalar escape documented since `future.md §1b` shipped — plus two siblings that were never

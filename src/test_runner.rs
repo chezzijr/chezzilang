@@ -1583,8 +1583,11 @@ struct Suite:
     /// `next_gc`, never `sweep()` — and `over_cap` is assigned nowhere else. The pair below is the
     /// whole proof: **identical memory, and pre-fix the verdict flipped on who ALLOCATED**. `quiet`
     /// (`return xs.len()`) PASSED; `noisy`, the same program plus one allocating loop, correctly
-    /// reported OVER-MEMORY at the same RSS. Now both trip: `spawn_worker` requests the first
-    /// collect whenever a cap is live, so the payload is sampled once the task starts.
+    /// reported OVER-MEMORY at the same RSS. Both trip today, but NOT for the reason this test was
+    /// written to prove — since W7-28 it is the PARENT that samples and trips first for both, which
+    /// is what the `nospawn` control below (no `spawn` at all, same payload, OVER-MEMORY) measures.
+    /// See the attribution proof further down; do not credit these verdicts to the worker-side
+    /// mechanisms (`Vm::sample_mem_cap` at the fiber door, `Heap::request_collect` at the job door).
     ///
     /// M:N only — `--max-heap` is refused with `--serial` at the CLI (`main.rs`), and the serial
     /// engine shares ONE heap with the parent anyway, so there is no born-big worker heap to miss.
@@ -1603,14 +1606,19 @@ struct Suite:
     ///   parent held — `WireValue::Str` carries no identity id, so N aliases of one interned string
     ///   become N fresh `Obj::Str`. Measured: 20 K × 100-char const → parent ~160 KB (PASS), worker
     ///   ~3.4 MB (OVER-MEMORY) at a 1 MB cap. But that amplification IS extra allocations, so
-    ///   `since_gc` alone trips it — verified by deleting `spawn_worker`'s `request_collect`: the
-    ///   shape still reported OVER-MEMORY. It proves nothing about the born-big path.
+    ///   `since_gc` alone trips it — verified by deleting `spawn_worker`'s `request_collect` flag:
+    ///   the shape still reported OVER-MEMORY. It proves nothing about the born-big path.
     ///
-    /// Consequence, stated plainly rather than papered over: `spawn_worker`'s `request_collect` is
-    /// now **belt-and-braces behind the parent's trip** (a worker born over the cap implies the
-    /// parent that built the payload was over it too, and now samples), and NO in-tree test can
-    /// isolate it. `nospawn` is kept, with the same payload, asserting the new truth — that is what
-    /// keeps the assertions above honest about WHY they are green.
+    /// Consequence, stated plainly rather than papered over: the worker-side mechanisms are
+    /// **belt-and-braces behind the parent's trip** for the shapes HERE (a worker born over the cap
+    /// implies the parent that built the payload was over it too, and now samples), and NO test in
+    /// this pair can isolate them. `nospawn` is kept, with the same payload, asserting the new truth
+    /// — that is what keeps the assertions above honest about WHY they are green. The one shape
+    /// where the worker's heap really is over the cap while the parent's is under it — a
+    /// non-re-interning `from_wire` amplification behind a NESTED nursery, so the parent's own copy
+    /// is garbage in the same opcode — is `over_memory_trips_on_an_all_native_task_body`, and that
+    /// one isolates the FIBER door only. The eager-`Executor` job door has no in-tree witness at all;
+    /// its guard is documented at `Vm::spawn_worker` rather than tested.
     #[test]
     fn over_memory_trips_on_a_worker_payload_with_no_task_allocation() {
         // The worker heap holds ~1.6 MB (200k inline ints) against a 1 MB cap — and so does the
@@ -1683,6 +1691,151 @@ struct Suite:
         assert!(
             generous.text.contains("PASS nospawn"),
             "the same payload under a generous cap must still PASS; report:\n{}",
+            generous.text
+        );
+    }
+
+    /// W6-10s residual (a) — a task whose ENTIRE body is one native call was never sampled at all.
+    ///
+    /// `over_cap` is assigned only in `Heap::sweep()`; `sweep()` runs only when `should_collect()`
+    /// fires; and `should_collect()`'s only non-test caller is the top of `run_until`'s dispatch
+    /// loop, guarded by `self.frames.len() > base_level`. `spawn xs.len()` pushes NO frame
+    /// (`Op::SpawnMethod` → `PendingCall::Method` → `start_task` → `do_method_call` → `invoke_native`),
+    /// so it never enters that loop and its heap is never looked at.
+    ///
+    /// The pair below is the whole proof: byte-identical programs, same payload, same peak RSS —
+    /// pre-fix the verdict flipped on **who runs bytecode**, not on who holds bytes. Measured on the
+    /// release binary at `--max-heap=8000000` with 300 K elements: `spawn xs.len()` PASSED at 170.9 MB
+    /// (21× the cap), `spawn use(xs)` reported OVER-MEMORY at the same RSS. `Vm::start_task` now
+    /// samples the cap for every task shape before dispatch, with the receiver/args rooted on the
+    /// operand stack (see `Vm::sample_mem_cap`).
+    ///
+    /// Two details the repro depends on, neither incidental:
+    /// - the worker's copy is BIGGER than the producer's — `from_wire` mints a fresh `Obj::Str` per
+    ///   element and does not re-intern, so N aliases of ONE interned literal become N objects. That
+    ///   is what keeps the producer under the cap while the task's heap is far over it.
+    /// - the NESTED `parallel:` is load-bearing. On the lazy `register_task` path the parent's own
+    ///   `deep_clone_all` copy stays rooted in `self.nurseries` until the join, so the PARENT trips
+    ///   and masks the bug. The eager arm (`self.parallel && self.mn.is_some() && worker_count() >= 2`)
+    ///   consumes the task into `prepare_worker` immediately, so that copy is garbage within the same
+    ///   opcode and the parent never trips.
+    ///
+    /// M:N only, like `over_memory_trips_on_a_worker_payload_with_no_task_allocation`: `--max-heap` is
+    /// refused with `--serial` at the CLI, and the serial engine shares ONE heap with the parent — the
+    /// parent's next instruction boundary samples the copy, so there is no unsampled task heap to miss.
+    ///
+    /// Sized DOWN to 8 K elements against a 1 MB cap (the repros used 300 K / 8 MB): the generous-cap
+    /// controls must run to completion on the DEBUG VM, and a slow test here perturbs this suite's
+    /// wall-clock tests.
+    ///
+    /// **Two guards, because `OVER-MEMORY nat` alone does not prove the fix works.** A producer trip
+    /// renders the IDENTICAL verdict line, so anything that makes the parent trip first would leave
+    /// this test green forever while testing nothing:
+    ///
+    /// - `prod` — the same payload with no `spawn`/`parallel:` at all — must PASS. That pins that the
+    ///   producer's own live set is under the cap, so a payload-size drift cannot silently take over
+    ///   the trip.
+    /// - a FORCED worker count of 4. The discrimination rests entirely on the eager arm arming
+    ///   (`self.parallel && self.mn.is_some() && worker_count() >= 2`), and on a genuinely
+    ///   single-core runner it cannot: the lazy `register_task` path keeps the parent's own
+    ///   `deep_clone_all` copy — which is the SAME non-re-interned amplification, `deep_clone_all`
+    ///   being a `to_wire`/`from_wire` round-trip into the parent's heap — rooted in `self.nurseries`
+    ///   until the join, so the parent trips and the verdict is right for the wrong reason. MEASURED:
+    ///   the pre-fix release binary under `taskset -c 0` prints `OVER-MEMORY nat` at this exact size,
+    ///   so without the override this test would be GREEN with the fix reverted on one core. Note
+    ///   `CHEZZI_THREADS=1` does NOT reproduce that — the env var is read by `main::cmd_run`, not by
+    ///   `run_tests_capped`; the affinity mask is what moves `available_parallelism()`.
+    ///
+    /// The override makes the test deterministic on a 1-core box and on a 96-core box alike. It is
+    /// safe to set it AFTER `pool()`'s `OnceLock` has already sized the pool (which an earlier test
+    /// in the process will normally have done): the eager gate and `mn_join`'s `nworkers` both read
+    /// `worker_count()` live, and helper shells are `pool::submit` JOBS — a smaller pool just runs
+    /// them later, while "the inline owner alone still guarantees completion, helpers only
+    /// accelerate" (`Vm::mn_join`). Verified by running this test under `taskset -c 0`: green, no
+    /// hang, 0.1 s.
+    #[test]
+    fn over_memory_trips_on_an_all_native_task_body() {
+        // Force the eager arm on rather than demanding the hardware provide it. The lock is the
+        // house pattern for process-global test state (`native::rand::TEST_RNG_LOCK`); the guard
+        // bundles it with the restore so an assertion failure below cannot leave the rest of the
+        // suite running at a forced worker count.
+        struct Workers(#[allow(dead_code)] std::sync::MutexGuard<'static, ()>);
+        impl Drop for Workers {
+            fn drop(&mut self) {
+                crate::vm::set_worker_count(0); // 0 = auto
+            }
+        }
+        let _workers = Workers(
+            crate::vm::TEST_WORKER_LOCK
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()),
+        );
+        crate::vm::set_worker_count(4);
+
+        const CAP: usize = 1_000_000;
+        // 8 K × 100 chars — the producer holds 8 K aliases of ONE interned literal (~130 KB, under
+        // the cap); the task's heap rebuilds them as 8 K separate `Obj::Str` (~1.6 MB, over it).
+        let src = |name: &str, body: &str| {
+            format!(
+                "fn use(ys: List[str]) -> int:\n    return ys.len()\n\n\
+                 fn build() -> List[str]:\n    xs: List[str] = []\n    i := 0\n    \
+                 while i < 8000:\n        xs.push(\"{}\")\n        i = i + 1\n    return xs\n\n\
+                 fn inner():\n    xs := build()\n    parallel:\n        spawn {body}\n\n\
+                 test fn {name}():\n    parallel:\n        spawn inner()\n",
+                "a".repeat(100)
+            )
+        };
+        let d = TmpDir::new();
+        let d2 = TmpDir::new();
+        // The shape that used to PASS: the task body is one native method call, so no frame is ever
+        // pushed and no boundary is ever reached.
+        let nat = d.write("nat_test.chz", &src("nat", "xs.len()"));
+        // Control: byte-identical but for the body — `use` is a user fn, so it pushes a frame and
+        // `run_until` samples. It tripped pre-fix, which is what pins that ONLY the body differs.
+        let bc = d2.write("bc_test.chz", &src("bc", "use(xs)"));
+        // Producer-only control: the same payload, no `spawn`/`parallel:` anywhere. It must PASS —
+        // that is what makes the two OVER-MEMORY verdicts below attributable to a TASK heap. If this
+        // ever flips, the assertions after it have stopped proving anything (a producer trip prints
+        // the same line), so read a failure here as "this test is no longer testing the fix", not as
+        // "the producer is over the cap".
+        let d3 = TmpDir::new();
+        let prod = d3.write(
+            "prod_test.chz",
+            &format!(
+                "fn build() -> List[str]:\n    xs: List[str] = []\n    i := 0\n    \
+                 while i < 8000:\n        xs.push(\"{}\")\n        i = i + 1\n    return xs\n\n\
+                 test fn prod():\n    xs := build()\n    assert xs.len() == 8000\n",
+                "a".repeat(100)
+            ),
+        );
+        let prod_report = run_tests_capped(&prod, true, CAP);
+        assert!(
+            prod_report.text.contains("PASS prod"),
+            "the payload ALONE must stay under the cap, or the OVER-MEMORY verdicts below are the \
+             producer's and this test proves nothing about the task-start sample; report:\n{}",
+            prod_report.text
+        );
+        for (label, f) in [("nat", &nat), ("bc", &bc)] {
+            let report = run_tests_capped(f, true, CAP);
+            assert!(
+                report.text.contains(&format!("OVER-MEMORY {label}")),
+                "a task heap over the cap must be sampled at task start whatever the body runs \
+                 ({label}); report:\n{}",
+                report.text
+            );
+            assert!(
+                !report.text.contains(&format!("FAIL {label}"))
+                    && !report.text.contains(&format!("ERROR {label}")),
+                "must be OVER-MEMORY, not FAIL/ERROR ({label}); report:\n{}",
+                report.text
+            );
+        }
+        // The negative direction: the same program under a generous cap must still PASS, so the trip
+        // above is a MEASUREMENT and not "an all-native spawn is over the cap".
+        let generous = run_tests_capped(&nat, true, 4_000_000_000);
+        assert!(
+            generous.text.contains("PASS nat"),
+            "the same program under a generous cap must still PASS; report:\n{}",
             generous.text
         );
     }

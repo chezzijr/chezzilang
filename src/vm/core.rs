@@ -960,8 +960,9 @@ impl WireSummary {
 /// That closed `W6-10r`, not the cap in general — an `Executor`'s eager half followed in `W7-26`
 /// (FIXED 2026-08-06, both here and in `nested_core_bytes`). The inline-scalar escape
 /// (`future.md §1b`) and the join-window sampling residual (`W7-26r`) are FIXED too — `W7-28`
-/// 2026-08-07 and `W7-26r` 2026-08-06. What remains open is `W6-10s` residual (a): a task whose whole
-/// body is one native call reaches no instruction boundary, so its worker heap is never sampled.
+/// 2026-08-07 and `W7-26r` 2026-08-06 — as is `W6-10s` residual (a) (a task whose whole body is one
+/// native call reaches no instruction boundary), fixed by `W7-29` 2026-08-07: `Vm::start_task`
+/// samples the cap before dispatch, with the pending call's operands rooted on the operand stack.
 ///
 /// Keep the arms in lockstep with [`collect_core_gcrefs`] — a new `WireValue` variant must be added to both.
 pub fn wire_summary(w: &WireValue) -> (usize, bool) {

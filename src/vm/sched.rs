@@ -2183,6 +2183,55 @@ impl Vm {
         }
     }
 
+    /// `chezzi test --max-heap` — collect and read the cap, at a point that is NOT an instruction
+    /// boundary. Callers must have every live value of the pending call already on `self.stack`.
+    ///
+    /// W6-10s residual (a), closed: `over_cap` is assigned only in `Heap::sweep()`, `sweep()` runs
+    /// only when `should_collect()` fires, and the only non-test caller of `should_collect()` is the
+    /// top of [`run_until`](Vm::run_until)'s dispatch loop — whose guard is `self.frames.len() >
+    /// base_level`. **A task whose entire body is one native call pushes no frame, so it never enters
+    /// that loop and its heap is never sampled at all.** Measured on the release binary: `spawn
+    /// xs.len()` over a 300 K-element `List[str]` PASSED a 8 MB cap at 170.9 MB (21×), while the
+    /// byte-identical `spawn use(xs)` (`use` = `return xs.len()`, one bytecode frame) correctly
+    /// reported OVER-MEMORY at the same RSS — the verdict tracked who ran bytecode, not who held
+    /// bytes. The worker's copy is the BIGGER one, too: `from_wire` mints a fresh `Obj::Str` per
+    /// element and does not re-intern, so N aliases of one interned literal become N objects.
+    ///
+    /// SCOPE — this owns the FIBER door only: [`start_task`](Vm::start_task), which every `spawn` /
+    /// `parallel:` task is dispatched through. It does NOT cover eager `Executor` jobs, which reach
+    /// the VM by `ReadyWorker::invoke` instead; those keep their own forced sample
+    /// (`Heap::request_collect`, set in [`spawn_worker`](Vm::spawn_worker)). Neither mechanism
+    /// subsumes the other and the two-door split is written out at that call site — read it before
+    /// deleting either.
+    ///
+    /// COST CEILING: this is a FULL mark-sweep of the heap the fiber runs on, once per task start.
+    /// On the M:N engine that heap is the worker's own and freshly born, so it is small. On the
+    /// SERIAL engine every fiber shares one heap, making a capped serial run O(live heap × tasks).
+    /// Acceptable because `--max-heap` is refused with `--serial` at the CLI (`main.rs`) — only the
+    /// in-process `run_tests_capped` test helper can reach that combination — but if the cap is ever
+    /// opened up to serial runs, this is the line that needs a cheaper trigger.
+    ///
+    /// **Collecting with `self.frames` EMPTY is sound.** Empty frames stop `run_until`'s *loop*; they
+    /// do not make a direct [`collect`](Vm::collect) unsafe. `collect` roots the operand stack first
+    /// (`for v in &self.stack`), plus the swapped-in child's module objects, intern cache and
+    /// snapshot registry — the same root set the task's first instruction boundary would see, minus
+    /// frame slots that do not exist yet. That is why the contract above is "operands on the stack".
+    ///
+    /// No `unwind_deferred`: there are no frames and no `defer` registered yet. The `is_over_memory`
+    /// marker alone is what buckets the verdict `OverMemory` and makes it uncatchable by `recover:`.
+    fn sample_mem_cap(&mut self, span: Span) -> Result<(), RuntimeError> {
+        self.collect();
+        if self.heap.over_cap() {
+            return Err(self
+                .err(
+                    format!("test exceeded --max-heap ({} bytes)", self.heap.mem_cap()),
+                    span,
+                )
+                .over_memory());
+        }
+        Ok(())
+    }
+
     /// Launch a fiber's initial task in the (already swapped-in) child context. Mirrors the old
     /// `run_pending`, but a blocking `recv` may park the fiber mid-flight: the `do_method_call` /
     /// `invoke_value` paths leave `self.suspend` set and the frames live, so the discard-pop is
@@ -2190,6 +2239,22 @@ impl Vm {
     pub(super) fn start_task(&mut self, task: PendingCall) -> Result<(), RuntimeError> {
         match task {
             PendingCall::Call { callee, args, span } => {
+                // Sample the `--max-heap` cap before dispatch (see `sample_mem_cap`). The callee and
+                // args are plain Rust locals here, so they are NOT rooted — park them on the operand
+                // stack (which `collect` traces) across the sample and take them back after. Under a
+                // live cap only, so the uncapped path is byte-for-byte what it was.
+                let (callee, args) = if self.heap.mem_cap() != 0 {
+                    let argc = args.len();
+                    self.push(callee);
+                    for a in args {
+                        self.push(a);
+                    }
+                    self.sample_mem_cap(span)?;
+                    let args = self.stack.split_off(self.stack.len() - argc);
+                    (self.pop(), args)
+                } else {
+                    (callee, args)
+                };
                 self.invoke_value(callee, args, span)?;
                 Ok(())
             }
@@ -2203,6 +2268,10 @@ impl Vm {
                 self.push(recv);
                 for a in args {
                     self.push(a);
+                }
+                // Receiver + args are already on the operand stack, i.e. rooted — sample here.
+                if self.heap.mem_cap() != 0 {
+                    self.sample_mem_cap(span)?;
                 }
                 self.do_method_call(&name, argc, NO_IC, span)?;
                 if !self.paused() {
@@ -3376,41 +3445,48 @@ impl Vm {
         // documented (`docs/future.md §3b`); a cross-engine aggregate would need non-deterministic global
         // RSS. `0` when the cap is off, so the common path is untouched.
         worker.set_max_heap(self.heap.mem_cap());
-        // W6-10s — …and make sure something actually LOOKS. A worker heap is BORN with its task's
-        // payload already rebuilt into it, and `should_collect` counts OBJECTS: a `List[int]` of any
-        // size rebuilds to ONE `Obj`, so a heap holding megabytes after ~7 allocations never reaches
-        // `next_gc`, never sweeps, and `over_cap` — assigned only in `sweep()` — is never evaluated.
-        // The guarantee the comment above states ("a real runaway trips on whichever heap runs it")
-        // was therefore false even for the most ordinary shape there is: `spawn use(blob)` where `use` is
-        // `return xs.len()` PASSED a cap its own payload exceeded, while the SAME program with one
-        // allocating statement added to `use` correctly reported OVER-MEMORY at the same RSS — the
-        // verdict tracked who allocated, not what was used.
+        // …and something actually LOOKS at it, but NOT from here. A worker heap is BORN with its
+        // task's payload already rebuilt into it, and `should_collect` counts OBJECTS: a `List[int]`
+        // of any size rebuilds to ONE `Obj`, so a heap holding megabytes after ~7 allocations never
+        // reaches `next_gc`, never sweeps, and `over_cap` — assigned only in `sweep()` — is never
+        // evaluated. The guarantee the comment above states ("a real runaway trips on whichever heap
+        // runs it") was therefore false even for the most ordinary shape there is.
         //
-        // Here, not at the run site, because this is the one door every worker heap is born through:
-        // both `ReadyWorker` constructors call it, and the flag survives into `FiberCtx` when M:N
-        // deconstructs the worker into a fiber (`into_fiber`) — which is the real M:N run path, NOT
-        // `ReadyWorker::invoke`. The request is set BEFORE the payload is rebuilt and that is fine:
-        // `Heap::alloc` never collects, so nothing can consume the flag before the first instruction
-        // boundary of the task, by which point the payload is fully installed. Gated on a live cap,
-        // so an uncapped run forces no GC at all.
+        // TWO DOORS run a worker built here, and each has its OWN sampling mechanism. Neither
+        // subsumes the other; state which one you mean before claiming coverage.
         //
-        // WHAT THIS DOES NOT FIX, measured, not introduced here (gaps.md `W6-10s` residual (a)):
-        // a task whose ENTIRE body is one native call (`spawn blob.len()`) executes no bytecode, so
-        // it never reaches an instruction boundary and the flag is never consumed. There is no safe
-        // sample point inside that window: the payload is rooted only as the pending call's operands,
-        // so collecting before the call would free the task's own arguments, and by the time the call
-        // returns the receiver is already dead.
+        //   1. THE FIBER DOOR — `spawn` / `parallel:`. `into_fiber` turns this worker's `ReadyCall`
+        //      into a `PendingCall` and [`Vm::start_task`] dispatches it. Sampled THERE, by
+        //      [`Vm::sample_mem_cap`], before dispatch. That placement is what covers a task body
+        //      running NO bytecode (`spawn blob.len()` → `do_method_call` → `invoke_native`, no
+        //      frame, no boundary) — a shape the flag below structurally cannot reach, because
+        //      nothing ever consumes it. That was W6-10s residual (a).
         //
-        // `W7-28` RE-SCOPED that residual rather than closing it, and the distinction matters here.
-        // Byte growth is now charged at `Heap::alloc` / `Heap::get_mut` / `to_wire_crossable`, so the
-        // PARENT — which built the payload and therefore paid those charges — samples its own heap and
-        // trips first. Every shape that used to demonstrate residual (a) is now OVER-MEMORY for that
-        // reason, which is why no test here can attribute a trip to the worker path. What is left is
-        // only the case where the worker's heap is over the cap while its parent's is under.
+        //   2. THE JOB DOOR — eager `Executor` jobs. `prepare_worker_from_wire` →
+        //      `dispatch_eager_job` → `ReadyWorker::run_outcome` → `ReadyWorker::invoke`, which does
+        //      NOT route through `start_task` and so is NOT covered by the sample above. An
+        //      `Executor` job body is always a closure, i.e. always bytecode, so it always reaches an
+        //      instruction boundary and the `request_collect` flag below is always consumed — which
+        //      is exactly the condition under which the flag works. It is the only forced sample this
+        //      door has.
         //
-        // The sibling escape that WAS closed by `W7-28`: growth after this sample that allocates no
-        // `Obj`s (`xs.push(i)` into an existing list grew a `Vec` in place and rode 77× past the cap).
-        // `get_mut` charges it now. Do not restate the guarantee above as unconditional.
+        // What the flag uniquely covers on door 2: a job heap BORN over the cap in few objects and
+        // few *shallow* bytes — an `Arc`-core capture (`Shared`/`Channel`/`Executor`), where
+        // `obj_bytes_shallow` charges 0 by design and `since_gc` stays under `MIN_GC_THRESHOLD`
+        // (256), but `live_bytes`'s deep walk would report over-cap if a sweep ever ran. No in-tree
+        // witness exists for that class — the producer holds the same core and `live_bytes` charges a
+        // core once per heap by reachability, so the producer trips first — but "no witness built" is
+        // not "unreachable", and three lines is not a price worth arguing over.
+        //
+        // Here, not at a run site, because this is the one door every worker heap is born through
+        // (both `ReadyWorker` constructors call it) and the flag survives `into_fiber`. Setting it
+        // BEFORE the payload is rebuilt is fine: `Heap::alloc` never collects, so nothing can consume
+        // it before the first instruction boundary, by which point the payload is fully installed.
+        // Gated on a live cap, so an uncapped run forces no GC at all.
+        //
+        // WHAT NEITHER COVERS: growth AFTER the sample. `xs.push(i)` into an existing list allocates
+        // no `Obj` and rode 77× past the cap until W7-28 charged it in `get_mut`. Bytes are paced,
+        // not bounded — do not restate any of the above as an unconditional guarantee.
         if self.heap.mem_cap() != 0 {
             worker.heap.request_collect();
         }

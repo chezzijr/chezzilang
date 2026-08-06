@@ -285,6 +285,13 @@ where
 /// ([`pool`]) is a `OnceLock` created lazily on first use, so a later store would not resize it.
 static WORKER_OVERRIDE: AtomicUsize = AtomicUsize::new(0);
 
+/// A process-wide lock serializing every test that WRITES [`WORKER_OVERRIDE`]. The override is
+/// process-global and the harness runs tests on multiple threads, so an unguarded store would change
+/// the worker count under every concurrent parallel test. Same shape and same reason as
+/// `native::rand::TEST_RNG_LOCK`: hold it across the whole set-run-restore sequence.
+#[cfg(test)]
+pub(crate) static TEST_WORKER_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// Override the M:N engine's worker count. `0` restores auto (= `available_parallelism()`). Must be
 /// called before the first parallel run; see [`WORKER_OVERRIDE`].
 pub fn set_worker_count(n: usize) {

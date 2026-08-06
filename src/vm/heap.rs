@@ -721,6 +721,10 @@ impl Heap {
     /// trigger never moves and the guard fails OPEN. Set by `Vm::spawn_worker` under a live cap only
     /// (so cap-off pacing is untouched), and consumed at the task's first instruction boundary in
     /// `run_until` — the first point where every live value is properly rooted.
+    ///
+    /// This is the guard for the [`ReadyWorker::invoke`] door (eager `Executor` jobs); the `spawn` /
+    /// `parallel:` fiber door is sampled before dispatch by `Vm::sample_mem_cap` instead. Neither
+    /// subsumes the other — see the two-door note in `Vm::spawn_worker`.
     pub fn request_collect(&mut self) {
         self.force_collect = true;
     }

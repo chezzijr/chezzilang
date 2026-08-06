@@ -598,9 +598,12 @@ render ERROR too (whole file, before any test runs), counted separately as `file
    sampled. Both are fixed; `W7-26r` tracks what still is not sampled.) The reachable escape from
    this row was a worker heap **born big** — its task's payload arrives in ~7
    `Obj`s, so the object-count trigger never moves and nothing ever samples — now fixed by
-   `Heap::request_collect` from `Vm::spawn_worker`. Of the two residuals tracked on that row, (b) is
-   **CLOSED by `W7-28`** (next paragraph); (a) — a task whose entire body is ONE native call — is
-   tracked on `gaps.md W6-10s`.
+   `Heap::request_collect` from `Vm::spawn_worker`. **Both residuals on that row are now CLOSED**: (b)
+   by `W7-28` (next paragraph), and (a) — a task whose entire body is ONE native call, which pushes no
+   frame and so never reaches `run_until`'s loop — by `W7-29` 2026-08-07. `Vm::start_task` samples the
+   cap before dispatch with the pending call's operands rooted on the operand stack; the filed claim
+   that that window had "no safe sample point" was wrong. `request_collect` stays for the OTHER task
+   door, `ReadyWorker::invoke` (eager `Executor` jobs), which does not route through `start_task`.
    **THE TRIGGER COUNTS BYTES, NOT EVENTS (round 4, `W7-28`, 2026-08-07).** Every earlier trigger
    counted an event — allocations, wire crossings — and each event class has a shape that adds
    unbounded bytes without raising it. Measured against `--max-heap=8000000`, all PASS pre-fix:
