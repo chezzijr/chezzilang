@@ -1091,7 +1091,9 @@ pub fn expr_recover_blocks<'a>(e: &'a Expr, out: &mut Vec<&'a Block>) {
         | ExprKind::Ident(_)
         // A type-application head carries only `Type`s (no sub-expressions, no recover blocks).
         | ExprKind::TypeApply { .. } => {}
-        // An interpolation fragment is an ordinary expression — it can hold a `recover:` too.
+        // An interpolation fragment is an ordinary expression, so walk it like any other child.
+        // (No fragment can currently hold a `recover:` — `split_spec` claims its `:` — so this arm
+        // is a structural completeness guard, not a live path.)
         ExprKind::Interp(chunks) => chunks.iter().for_each(|c| {
             if let Chunk::Expr(e, _) = c {
                 expr_recover_blocks(e, out);

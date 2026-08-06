@@ -1978,6 +1978,11 @@ impl Vm {
             ValueView::Nil => Ok("nil".to_string()),
             // A boxed float/big-int is heap-tagged → the `Obj::FloatBox`/`Obj::BigInt` arms below.
             ValueView::Obj(h) => match self.heap.get(h) {
+                // NESTED (`depth > 0`) means this string sits inside a container / field / payload,
+                // so it renders as its `repr` — same rule as `stringify_nested_into`, applied here
+                // by depth alone because this renderer is `&self` and has no display-hook path that
+                // preserves depth. A top-level `display` of a `str` stays its bare characters.
+                Obj::Str(s) if depth > 0 => Ok(crate::slice::str_repr(s)),
                 Obj::Str(s) => Ok(s.to_string()),
                 // Boxed scalars render identically to the inline `Int`/`Float`.
                 Obj::BigInt(n) => Ok(n.to_string()),
@@ -2171,7 +2176,9 @@ impl Vm {
             WireValue::Float(x) => format_float(*x),
             WireValue::Bool(b) => b.to_string(),
             WireValue::Nil => "nil".to_string(),
-            WireValue::Str(s) => s.to_string(),
+            // Every `display_wire` caller renders a NESTED position — inside `Shared(…)`/`Atomic(…)`,
+            // a container, or a struct field — so a wire string is always quoted (`Shared(['a'])`).
+            WireValue::Str(s) => crate::slice::str_repr(s),
             WireValue::Bytes(b) => crate::slice::bytes_repr(b),
             WireValue::ByteArray(b) => crate::slice::bytearray_repr(b),
             WireValue::Handle(h) => self.display(Value::obj(*h)),

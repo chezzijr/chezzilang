@@ -1751,9 +1751,16 @@ print(["it's", "a\nb"])       # ["it's", 'a\nb'] — CPython quote choice + esca
 print(Point(1, 2))            # (1, 2)           — a `str` hook's output is NOT quoted
 ```
 
-The quote is `'`, switching to `"` only when the string contains a `'` and no `"`; `\\`, `\n`, `\t`,
-`\r` and ASCII control characters escape (`\xHH`); non-ASCII stays literal. A `str(self)` display
-hook's result is the object's own rendering, never a nested string, so it is never quoted.
+The quote is `'`, switching to `"` only when the string contains a `'` and no `"`. Escapes: `\\`,
+`\n`, `\t`, `\r`, the quote, and every **non-printable** character (`\xHH` / `\uXXXX` /
+`\UXXXXXXXX`, CPython's widths) — so a no-break space is distinguishable from a space and a
+zero-width space from `""`. Printable non-ASCII stays literal (`['é', '😀']`). The same rule applies
+inside a wrapper box: `print(Shared(["a"]))` is `Shared(['a'])`. A `str(self)` display hook's result
+is the object's own rendering, never a nested string, so it is never quoted.
+
+(One deliberate deviation from CPython: a combining mark such as `U+0301` escapes here and prints
+literally in Python — Chezzi reads printability from Rust's Unicode tables, which also treat
+grapheme-extend characters as non-printable. Escaping is the unambiguous direction.)
 
 The prebuilt **`Hashable`** protocol (`hash(self) -> int`) governs `map` keys and `set` elements:
 `int`/`str`/`bool` satisfy it intrinsically, and a struct satisfies it by defining `hash(self) ->
@@ -2505,6 +2512,9 @@ print("{ {1, 2}.len() }")     # 2          ← set literal's brace is nested, an
 print("{ {'a': 1}['a'] }")    # 1
 print("{d['a}}b']}")          # value at key `a}b` — the quoted brace does not close the fragment
 ```
+
+Past the top-level `:` the rest of the fragment is the **format spec** — literal text, not an
+expression — so any character may be the fill (`"{x:'>5}"` → `''''7`, `"{x:(>5}"` → `((((7`).
 
 Two limits, both shared with CPython < 3.12. The **lexer** ends the string at the first unescaped
 delimiter, so a fragment cannot nest the *same* quote style (`"{d["k"]}"` is a lex error — use

@@ -6639,6 +6639,16 @@ whitespace opens an INDENT token.
 terminator; `parse_expr_str` trims its source. `unterminated '{'` and the bare `unmatched '}'` are
 unchanged.
 
+**Adversarial review caught a REGRESSION in the first cut.** Tracking quotes/brackets across the
+WHOLE fragment broke every format spec whose fill character is `'`, `(` or `)`: `"{x:'>5}"` printed
+`''''7` before (CPython prints the same) and became `unterminated '{' in interpolated string` after —
+the fill `'` opened a string that never closed, `(` swallowed the closing brace, `)` drove the depth
+negative. The spec is **literal text**, so the scanner now stops expression-tracking at the top-level
+`:` and counts only brace nesting past it (CPython's own rule). The ternary check that keeps
+`split_spec` from splitting `if c: a else: b` is now `fmtspec::is_ternary_head`, shared by both
+layers — the same fix as the bug itself, one level up: two layers reading the same text must not each
+carry their own copy of where the expression ends.
+
 **Two limits stay, and are now documented** (`docs/syntax.md` §10) — both shared with CPython < 3.12:
 a fragment cannot nest the *same* quote style (`"{d["k"]}"` — the LEXER ends the string literal
 first, before interpolation is ever reached), and a nested literal is a normal Chezzi string, so it
@@ -6769,11 +6779,35 @@ mirror the implementation is blind to bugs in what it mirrors** — when a shim 
 "by-design difference", the design claim needs its own evidence, because the shim will never supply
 it.
 
+**Adversarial review caught the fix being HALF-APPLIED, twice.**
+1. **A second and third renderer were untouched.** `display_guarded` (the `&self` structural form)
+   and `display_wire` (the wire form, which is how a `Shared`/`RwShared`/`Atomic` payload renders)
+   kept printing nested strings bare, so `print(Shared([" ", "a, b", ""]))` gave
+   `Shared([ , a, b, ])` — three elements looking like four — while `print(s.get())` on the SAME box
+   gave `[' ', 'a, b', '']`. The invariant this row exists to establish (`str(a) != str(b)` whenever
+   `a != b`) was false on every wrapper-box path. Both now quote: `display_guarded` by `depth > 0`
+   (it is `&self`, so it has no display-hook path that preserves depth), `display_wire`
+   unconditionally (every one of its callers renders a nested position). Error/debug text changes
+   with them, and that is the consistent answer — CPython's exceptions show `repr` too.
+2. **Non-printable non-ASCII was still raw**, which is the SAME ambiguity one alphabet over:
+   `["\u{a0}", " "]` printed as two identical-looking elements, and `["\u{200b}", ""]` hid a
+   zero-width space exactly the way `[""]` used to print as `[]`. `str_repr` now escapes by
+   printability (Rust's Unicode tables via `char::escape_debug`) at CPython's widths —
+   `\xHH`/`\uXXXX`/`\UXXXXXXXX`, lowercase hex, verified value-by-value against CPython 3.14.
+   **One deliberate residual:** Rust also treats grapheme-extend characters as non-printable, so a
+   combining mark escapes here and prints literally in CPython. Escaping is the unambiguous
+   direction, and a Unicode-category dependency for one category is not worth it.
+
+*Both are the same meta-finding as W7-22's: a fix applied to SOME arms of an N-way set. The N here
+was "the renderers" (three) and "the ambiguous characters" (two alphabets), and in both cases the
+full green suite plus a fresh doc comment claimed the job was done.*
+
 **Sweep.** 14 `examples/*.expected` regenerated (mechanically, by diffing each example's real
 output; the remaining example diffs are concurrency line-order, which those tests compare sorted),
 15 Rust expectations across `vm/tests.rs`, `vm/parity_tests.rs`, `vm/gc_tests.rs`, and 8 assertions
-in `tests/chz`. Unchanged by design: `display`/`display_wire` (error/debug text), `Op::ToStrFmt`'s
-top-level `FmtArg::Str` path, `json` encoding, and `assert` messages.
+in `tests/chz`. Unchanged by design: `Op::ToStrFmt`'s top-level `FmtArg::Str` path, `json`
+encoding, and `assert` messages. (`display`/`display_wire` were on this list until adversarial review
+showed they are reachable from `print` — see above.)
 
 ### Tests
 

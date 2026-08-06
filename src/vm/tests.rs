@@ -6464,7 +6464,9 @@ fn display_shared_renders_contents() {
         v: Mutex::new(boxed),
         ..Default::default()
     })));
-    assert_eq!(vm.display(Value::obj(sh)), "Shared(hi)");
+    // The payload sits INSIDE `Shared(…)`, i.e. nested — so it renders as its `repr` (W7-25),
+    // matching `print(s.get())` on the same box.
+    assert_eq!(vm.display(Value::obj(sh)), "Shared('hi')");
 }
 
 // ----- B3.2: isolated worker-VM construction (no threads) -----

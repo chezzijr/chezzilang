@@ -71,15 +71,25 @@ pub enum FmtArg<'a> {
 /// Split an interpolation's inner text on the FIRST top-level `:` into `(expr, Some(spec))`, or
 /// `(expr, None)` if there is no spec. A `:` inside `()[]{}` or inside a `"`/`'` string literal is
 /// NOT a separator (so `{m["a:b"]:>5}` splits only at the final colon, and `{m["a:b"]}` not at all).
+/// True when `inner` opens with Chezzi's ternary `if cond: a else: b`, whose top-level colons are
+/// STRUCTURAL rather than format-spec separators. Shared with the interpolation scanner
+/// (`crate::interpolation`), which must make the same call to know whether a top-level `:` starts
+/// the literal spec text — one rule, one place, or the two layers disagree about where the
+/// expression ends.
+pub(crate) fn is_ternary_head(inner: &str) -> bool {
+    inner
+        .trim_start()
+        .strip_prefix("if")
+        .is_some_and(|rest| rest.starts_with(|c: char| c.is_whitespace() || c == '('))
+}
+
 pub fn split_spec(inner: &str) -> (&str, Option<&str>) {
     // Chezzi's ternary `if cond: a else: b` is an expression whose top-level colons are structural,
     // NOT format-spec separators. A bare top-level ternary therefore carries no spec — splitting on
     // its first colon would corrupt the expression. To attach a spec to a ternary, parenthesize it
     // (`{(if b: 1 else: 2):>5}`), which pushes the inner colons to depth > 0 so only the trailing
     // top-level colon splits.
-    let head = inner.trim_start();
-    let after_if = head.strip_prefix("if");
-    if after_if.is_some_and(|rest| rest.starts_with(|c: char| c.is_whitespace() || c == '(')) {
+    if is_ternary_head(inner) {
         return (inner, None);
     }
     let mut depth: i32 = 0;

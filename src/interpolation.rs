@@ -58,7 +58,26 @@ pub(crate) fn parse_interpolation(raw: &str, span: Span) -> Result<Vec<Chunk>, I
                 let mut closed = false;
                 let mut depth: i32 = 0;
                 let mut in_str: Option<char> = None;
+                // Past the top-level `:` the rest of the fragment is the FORMAT SPEC — literal text,
+                // not an expression. Quote/bracket tracking must stop there or a spec whose fill
+                // char is `'`, `(` or `)` (`"{x:'>5}"`, `"{x:(>5}"` — both legal, both CPython) is
+                // read as an unterminated string / unbalanced bracket and the fragment never closes.
+                // Only brace nesting still counts in spec text (CPython's nested `{width}` field).
+                let mut in_spec = false;
                 for ic in chars.by_ref() {
+                    if in_spec {
+                        match ic {
+                            '{' => depth += 1,
+                            '}' if depth == 0 => {
+                                closed = true;
+                                break;
+                            }
+                            '}' => depth -= 1,
+                            _ => {}
+                        }
+                        inner.push(ic);
+                        continue;
+                    }
                     if let Some(q) = in_str {
                         if ic == q {
                             in_str = None;
@@ -75,6 +94,11 @@ pub(crate) fn parse_interpolation(raw: &str, span: Span) -> Result<Vec<Chunk>, I
                             break;
                         }
                         '}' => depth -= 1,
+                        // The spec separator — the same top-level `:` `split_spec` splits on, and
+                        // skipped for the same reason on a ternary, whose colons are structural.
+                        ':' if depth == 0 && !crate::fmtspec::is_ternary_head(&inner) => {
+                            in_spec = true;
+                        }
                         _ => {}
                     }
                     inner.push(ic);

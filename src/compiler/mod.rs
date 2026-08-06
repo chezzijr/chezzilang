@@ -5122,13 +5122,9 @@ fn find_boundary_free_block(stmts: &[Stmt], out: &mut HashSet<String>) {
     }
 }
 
-/// Best-effort: the interpolation sub-expressions of a string literal (`"a{x}b"` → the `x` expr).
-/// Used by the capture pre-pass so a name referenced ONLY inside a `{…}` interpolation is still seen
-/// as a free variable (and therefore boxed) — the interpolation exprs are embedded in the `Str`
-/// literal and parsed at compile time, so the AST walk would otherwise miss them. A malformed
-/// interpolation yields no exprs here; the real `compile_str` surfaces that error.
 /// The fragment expressions of an already-parsed interpolation (`ExprKind::Interp`) — the desugared
-/// counterpart of [`interp_exprs`], with no re-parse.
+/// counterpart of [`interp_exprs`], with no re-parse. This is the path a compiled program actually
+/// takes; `interp_exprs` below remains for a literal `desugar` left un-parsed.
 fn chunk_exprs(chunks: &[Chunk]) -> impl Iterator<Item = &Expr> {
     chunks.iter().filter_map(|c| match c {
         Chunk::Expr(e, _) => Some(e),
@@ -5136,6 +5132,11 @@ fn chunk_exprs(chunks: &[Chunk]) -> impl Iterator<Item = &Expr> {
     })
 }
 
+/// Best-effort: the interpolation sub-expressions of a string literal (`"a{x}b"` → the `x` expr).
+/// Used by the capture pre-pass so a name referenced ONLY inside a `{…}` interpolation is still seen
+/// as a free variable (and therefore boxed) — in an un-desugared `Str` the interpolation exprs are
+/// embedded in the raw text, so the AST walk would otherwise miss them. A malformed interpolation
+/// yields no exprs here; the real `compile_str` surfaces that error.
 fn interp_exprs(raw: &str) -> Vec<Expr> {
     match parse_interpolation(raw, Span { line: 1, col: 1 }) {
         Ok(chunks) => chunks

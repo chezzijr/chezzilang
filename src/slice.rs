@@ -163,8 +163,16 @@ pub fn bytearray_repr(bytes: &[u8]) -> String {
 /// values with identical output (`docs/gaps.md` §W7-25).
 ///
 /// Quote choice follows CPython: `'` normally, switching to `"` only when the string contains a `'`
-/// and no `"`. Escapes `\\`, `\n`, `\t`, `\r`, the chosen quote, and ASCII control characters
-/// (`\xHH`). Non-ASCII stays literal — `repr('é')` is `'é'` in Python 3 too.
+/// and no `"`. Escapes `\\`, `\n`, `\t`, `\r`, the chosen quote, ASCII control characters (`\xHH`),
+/// and every NON-PRINTABLE character (`\xHH` / `\uXXXX` / `\UXXXXXXXX`, CPython's widths and
+/// lowercase hex) — otherwise `["\u{a0}"]` and `[" "]` would print identically, which is the whole
+/// defect this function exists to remove. Printable non-ASCII stays literal (`repr('é')` is `'é'`).
+///
+/// Printability comes from `char::escape_debug` (Rust's own Unicode tables) rather than a
+/// `unicodedata` dependency. **One documented divergence:** Rust also treats grapheme-extend
+/// characters as non-printable, so a combining mark (`U+0301`) escapes here while CPython prints it
+/// literally. Escaping is the unambiguous direction, and a Unicode-category crate for one category
+/// is not worth the dependency (`docs/gaps.md` §W7-25).
 pub fn str_repr(s: &str) -> String {
     use std::fmt::Write;
     let quote = if s.contains('\'') && !s.contains('"') {
@@ -184,9 +192,20 @@ pub fn str_repr(s: &str) -> String {
                 out.push('\\');
                 out.push(c);
             }
-            // ASCII control characters (the three common ones are already handled above).
-            c if (c as u32) < 0x20 || c as u32 == 0x7F => {
-                let _ = write!(out, "\\x{:02x}", c as u32);
+            // Non-printable: ASCII controls, and (via Rust's Unicode tables) anything else that
+            // would render invisibly or ambiguously. CPython's escape widths.
+            c if (c as u32) < 0x20
+                || c as u32 == 0x7F
+                || (!c.is_ascii() && c.escape_debug().count() > 1) =>
+            {
+                let n = c as u32;
+                if n <= 0xFF {
+                    let _ = write!(out, "\\x{n:02x}");
+                } else if n <= 0xFFFF {
+                    let _ = write!(out, "\\u{n:04x}");
+                } else {
+                    let _ = write!(out, "\\U{n:08x}");
+                }
             }
             c => out.push(c),
         }
@@ -212,8 +231,15 @@ mod tests {
         assert_eq!(str_repr("a\tb\rc"), "'a\\tb\\rc'");
         assert_eq!(str_repr("back\\slash"), "'back\\\\slash'");
         assert_eq!(str_repr("\u{0}\u{1f}\u{7f}"), "'\\x00\\x1f\\x7f'");
-        // Non-ASCII stays literal, like CPython 3.
+        // Printable non-ASCII stays literal, like CPython 3.
         assert_eq!(str_repr("é😀"), "'é😀'");
+        // Non-printable non-ASCII escapes at CPython's widths — otherwise `["\u{a0}"]` and `[" "]`
+        // print identically. Values cross-checked against CPython 3.14 `repr`.
+        assert_eq!(str_repr("\u{a0}"), "'\\xa0'");
+        assert_eq!(str_repr("\u{85}"), "'\\x85'");
+        assert_eq!(str_repr("\u{200b}"), "'\\u200b'");
+        assert_eq!(str_repr("\u{2028}"), "'\\u2028'");
+        assert_eq!(str_repr("\u{1d173}"), "'\\U0001d173'");
     }
 
     #[test]

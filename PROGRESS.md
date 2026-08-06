@@ -2,6 +2,30 @@
 
 Single source of truth for "what am I doing next." Update after every work session.
 
+> **⚠️ ADVERSARIAL REVIEW CAUGHT SIX ISSUES IN W7-23/24/25 THAT THE FULL GREEN GATE MISSED** — one a
+> live REGRESSION, two half-applied fixes, all measured against CPython, all fixed in the follow-up commit:
+> 1. **Regression (W7-23).** The new quote/depth-aware scanner tracked the WHOLE fragment, so every
+>    format spec with a `'`, `(` or `)` FILL character stopped compiling — `"{x:'>5}"` went `''''7`
+>    → `unterminated '{' in interpolated string`. The spec is literal text: expression tracking now
+>    stops at the top-level `:`, and the ternary rule both layers need is one shared
+>    `fmtspec::is_ternary_head`.
+> 2. **W7-25 was applied to one of three renderers.** `display_guarded` and `display_wire` still
+>    printed nested strings bare, so `print(Shared([" ", "a, b", ""]))` → `Shared([ , a, b, ])`
+>    (three elements looking like four) while `print(s.get())` on the same box → `[' ', 'a, b', '']`.
+>    The invariant the row exists for was false on every wrapper-box path.
+> 3. **W7-25 skipped a whole alphabet.** Non-printable non-ASCII stayed raw, so `["\u{a0}", " "]`
+>    printed as two identical-looking elements and a zero-width space hid exactly the way `[""]` used
+>    to print as `[]`. Now escaped by printability at CPython's widths (one documented residual:
+>    combining marks).
+> 4. A desugar error inside a fragment reported column 1 instead of the literal's column.
+> 5/6. Two doc comments that described code they were not attached to.
+>
+> **Lesson (again): a fix applied to SOME arms of an N-way set.** Same shape as W7-22 — the N was
+> "the renderers" (three) and "the ambiguous characters" (two alphabets). 3865 tests, both engines,
+> the chz suite and the CPython differential oracle were all green with #1–#3 live; only prosecuting
+> the diff against real CPython output found them. **`adversarial-review` is not optional after a
+> green gate — it is the only stage that has ever caught this class here.**
+
 > **✅ W7-25 FIXED 2026-08-06 (BREAKING output change) — a string nested inside a container, struct
 > field or enum payload now renders as its Python `repr`.** Values that differ used to print
 > identically, and printed output is what most of the corpus compares:

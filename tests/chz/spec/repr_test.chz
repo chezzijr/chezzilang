@@ -6,6 +6,8 @@
 # identical output, which is worse here than in most languages because printed output is what the
 # golden corpus compares (`docs/gaps.md` §W7-25).
 
+import std.concurrency
+
 # ---- the motivating ambiguity ----
 
 test fn different_lists_no_longer_print_the_same():
@@ -72,3 +74,25 @@ struct Tag:
 test fn display_hook_output_is_never_quoted():
     assert str(Tag(v=7)) == "<7>"
     assert str([Tag(v=7)]) == "[<7>]", "the hook renders the object; it is not a nested string"
+
+# ---- the OTHER renderer: a wrapper box must agree with the value it holds ----
+
+test fn shared_box_renders_like_its_contents():
+    # `print(Shared(x))` goes through a different renderer (`display_wire`) than `print(x)`; both
+    # must quote, or one value has two spellings and the ambiguity survives in half the program.
+    s := Shared([" ", "a, b", ""])
+    assert "{s}" == "Shared([' ', 'a, b', ''])"
+    assert "{s.get()}" == "[' ', 'a, b', '']"
+    t := Shared("hi")
+    assert "{t}" == "Shared('hi')"
+
+# ---- non-printable characters ----
+
+test fn non_printable_characters_escape():
+    # Otherwise a no-break space is indistinguishable from a space, and a zero-width space from "" —
+    # the same defect, one alphabet over. Widths + lowercase hex are CPython's.
+    assert str(["\u{00a0}", " "]) == "['\\xa0', ' ']"
+    assert str(["\u{200b}", ""]) == "['\\u200b', '']"
+    assert str(["\u{1d173}"]) == "['\\U0001d173']"
+    # Printable non-ASCII stays literal.
+    assert str(["é", "😀"]) == "['é', '😀']"
