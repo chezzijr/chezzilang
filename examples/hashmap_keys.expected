@@ -10,7 +10,7 @@ labels (insertion order):
 at (1,0): east
 has (0,1): true
 has (9,9): false
-removed (0,0): Some(home)
+removed (0,0): Some('home')
 len after remove: 2
 pts.len: 2
 a | b: 3

@@ -23,7 +23,7 @@ fn main():
     more := [str(4), str(5), str(6)]
     print(x)
 main()";
-    assert_eq!(run_capture_stress(src), "[1, 2]\n");
+    assert_eq!(run_capture_stress(src), "['1', '2']\n");
 }
 
 /// A value reachable only through a module's globals (the namespace cache root) survives.
@@ -36,7 +36,7 @@ fn main():
     b := [str(2), str(3)]
     print(K)
 main()";
-    assert_eq!(run_capture_stress(src), "[7, 8]\n");
+    assert_eq!(run_capture_stress(src), "['7', '8']\n");
 }
 
 /// A value reachable only through a closure's captured environment survives — after the
@@ -137,7 +137,7 @@ fn main():
 main()";
     assert_eq!(
         run_capture_stress(src),
-        "01234567\ntrue\nSome(5)\nSome(2)\nSome(0)\n7\n"
+        "01234567\ntrue\nSome('5')\nSome('2')\nSome('0')\n7\n"
     );
 }
 

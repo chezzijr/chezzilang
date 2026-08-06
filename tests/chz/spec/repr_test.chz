@@ -1,0 +1,74 @@
+# tests/chz/spec/repr_test.chz — a string NESTED inside something else renders as its `repr`.
+#
+# CPython's `str` vs `repr` split: `print("a")` is the bare characters, but a string inside a
+# list/tuple/map/set, a struct field, or an enum payload is quoted and escaped. Before this,
+# `["a", "b"]` and `["a, b"]` both printed `[a, b]` and `[""]` printed `[]` — different values with
+# identical output, which is worse here than in most languages because printed output is what the
+# golden corpus compares (`docs/gaps.md` §W7-25).
+
+# ---- the motivating ambiguity ----
+
+test fn different_lists_no_longer_print_the_same():
+    a := ["a", "b"]
+    b := ["a, b"]
+    assert a != b
+    assert str(a) != str(b), "str() must distinguish values that != distinguishes"
+    assert str(a) == "['a', 'b']"
+    assert str(b) == "['a, b']"
+
+test fn empty_string_element_is_visible():
+    assert str([""]) == "['']"
+    assert str(["", ""]) == "['', '']"
+    assert [""].len() == 1
+
+# ---- containers ----
+
+test fn containers_quote_their_string_elements():
+    assert str(["a"]) == "['a']"
+    assert str(("x", 1)) == "('x', 1)"
+    assert str({"k": "v"}) == "{{'k': 'v'}}"
+    assert str({"a": [1, 2]}) == "{{'a': [1, 2]}}"
+    assert str([["a"], ["b"]]) == "[['a'], ['b']]"
+
+test fn a_bare_string_is_not_quoted():
+    assert str("a") == "a"
+    assert "{'a'}" == "a"
+    assert str("") == ""
+
+# ---- quote choice + escapes (CPython rules) ----
+
+test fn quote_choice_and_escapes():
+    # A `'` in the string flips the quote to `"`; with both quotes present, `'` wins and escapes.
+    assert str(["it's"]) == "[\"it's\"]"
+    assert str(["a\nb"]) == "['a\\nb']"
+    assert str(["a\tb"]) == "['a\\tb']"
+    assert str(["back\\slash"]) == "['back\\\\slash']"
+
+# ---- structs, newtypes, enum payloads ----
+
+struct S:
+    name: str
+    n: int
+
+test fn struct_fields_are_quoted():
+    assert str(S(name="hi", n=1)) == "S(name='hi', n=1)"
+    assert str([S(name="hi", n=1)]) == "[S(name='hi', n=1)]"
+
+test fn enum_payload_is_quoted():
+    assert str(Some("h")) == "Some('h')"
+    r := recover: [1][5]
+    match r:
+        Ok(_): assert false, "expected a fault"
+        Err(e): assert str(r).starts_with("Err('"), "Err payload is quoted: {r}"
+
+# ---- a display hook's own output is NOT a nested value ----
+
+struct Tag:
+    v: int
+
+    fn str(self) -> str:
+        return "<{self.v}>"
+
+test fn display_hook_output_is_never_quoted():
+    assert str(Tag(v=7)) == "<7>"
+    assert str([Tag(v=7)]) == "[<7>]", "the hook renders the object; it is not a nested string"

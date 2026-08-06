@@ -2454,6 +2454,31 @@ impl Vm {
         matches!(v.as_obj(), Some(h) if matches!(self.heap.get(h), Obj::Str(_)))
     }
 
+    /// Render a value that is NESTED inside something else — a list/tuple/map/set element, a struct
+    /// field, an enum payload. Identical to [`Self::stringify_into`] except that a `str` renders as
+    /// its Python `repr` (quoted + escaped) instead of its bare characters, so `["a", "b"]` and
+    /// `["a, b"]` no longer print the same text and `[""]` no longer prints `[]` (`docs/gaps.md`
+    /// §W7-25). CPython's `str` vs `repr` split, same rule.
+    ///
+    /// NOT used for a `str(self)` display hook's RESULT: that string is the object's own rendering,
+    /// not a nested value, so it must never be quoted (those sites re-enter `stringify_into` at the
+    /// same depth deliberately).
+    pub(super) fn stringify_nested_into(
+        &mut self,
+        out: &mut String,
+        v: Value,
+        span: Span,
+        depth: usize,
+    ) -> Result<(), RuntimeError> {
+        if let Some(h) = v.as_obj()
+            && let Obj::Str(s) = self.heap.get(h)
+        {
+            out.push_str(&crate::slice::str_repr(s));
+            return Ok(());
+        }
+        self.stringify_into(out, v, span, depth)
+    }
+
     pub(super) fn stringify_obj_into(
         &mut self,
         out: &mut String,
@@ -2488,9 +2513,9 @@ impl Vm {
                     if i > 0 {
                         out.push_str(", ");
                     }
-                    self.stringify_into(out, *k, span, depth + 1)?;
+                    self.stringify_nested_into(out, *k, span, depth + 1)?;
                     out.push_str(": ");
-                    self.stringify_into(out, *mv, span, depth + 1)?;
+                    self.stringify_nested_into(out, *mv, span, depth + 1)?;
                 }
                 out.push('}');
             }
@@ -2503,7 +2528,7 @@ impl Vm {
                         if i > 0 {
                             out.push_str(", ");
                         }
-                        self.stringify_into(out, *e, span, depth + 1)?;
+                        self.stringify_nested_into(out, *e, span, depth + 1)?;
                     }
                     out.push('}');
                 }
@@ -2561,7 +2586,7 @@ impl Vm {
                             let _ = write!(out, "{i}=");
                         }
                     }
-                    self.stringify_into(out, *fv, span, depth + 1)?;
+                    self.stringify_nested_into(out, *fv, span, depth + 1)?;
                 }
                 out.push(')');
             }
@@ -2629,7 +2654,7 @@ impl Vm {
                 }
                 let display = crate::compiler::bare_display(type_key.as_ref());
                 let _ = write!(out, "{display}(");
-                self.stringify_into(out, inner, span, depth + 1)?;
+                self.stringify_nested_into(out, inner, span, depth + 1)?;
                 out.push(')');
             }
             Obj::Func { proto, .. } => {
@@ -2684,7 +2709,7 @@ impl Vm {
             if i > 0 {
                 out.push_str(", ");
             }
-            self.stringify_into(out, *e, span, depth)?;
+            self.stringify_nested_into(out, *e, span, depth)?;
         }
         Ok(())
     }

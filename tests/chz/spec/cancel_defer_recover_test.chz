@@ -22,7 +22,7 @@ test fn recover_inside_defer_of_cancelled_task_catches():
                 defer:
                     log.update(fn(s: str) -> str: s + "A")
                     r := recover: panic("cleanup step 1 failed")
-                    assert "{r}" == "Err(cleanup step 1 failed)"
+                    assert "{r}" == "Err('cleanup step 1 failed')"
                     log.update(fn(s: str) -> str: s + "B")
                 _ := ch.recv()
             spawn:
@@ -30,7 +30,7 @@ test fn recover_inside_defer_of_cancelled_task_catches():
                 panic("sibling-fault")
         0
     assert log.get() == "AB", "log={log.get()} outer={outer}"
-    assert "{outer}" == "Err(sibling-fault)", "outer={outer}"
+    assert "{outer}" == "Err('sibling-fault')", "outer={outer}"
 
 # (b) FENCE: a `recover:` OUTSIDE the defer body still cannot defeat the cancel — the statement
 # after it never runs.

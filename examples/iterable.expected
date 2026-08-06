@@ -10,7 +10,7 @@ None
 Some(7)
 Some(1)
 Some(2)
-Some(h)
+Some('h')
 Some(65)
 Some(9)
 None

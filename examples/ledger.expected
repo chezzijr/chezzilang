@@ -11,4 +11,4 @@ total: 380
 carol: 200
 alice: 150
 bob: 30
-below 100: [bob]
+below 100: ['bob']

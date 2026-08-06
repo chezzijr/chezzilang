@@ -76,7 +76,7 @@ cases.
 2. **Differential vs CPython.** ✅ **Built** — `src/difftest/` (see "Differential oracle" below). The
    external oracle that defeats the shared-bug blind spot: it would flag `sum()` overflow and `nan <`
    immediately. The documented intentional divergences are handled *structurally* by a Python
-   **shim** (mirrors Chezzi's spec — `true`/`false`/`nil` spelling, raw nested strings, truncating
+   **shim** (mirrors Chezzi's spec — `true`/`false`/`nil` spelling, truncating
    `/`,`%`) rather than by a big allow-list, so the allow-list stays near-empty and any hit is a
    genuinely new category to triage.
 3. **Miri + ASan on the `unsafe` surface** (GC, FFI/libffi, raw pointers, any `transmute`).
@@ -317,7 +317,7 @@ widened families below). One abstract IR (`ast.rs`) is rendered by two backends 
   native `in` on both sides, always `bool`.
 - **Tuples** (`tuples`): literals `(a, b)`, positional fields (`(t).N` Chezzi / `(t)[N]` Python), and
   destructuring (`a, b := t` / `a, b = t`). The **single** new shim arm is the tuple stringify in
-  `_chz_str` (`(1, two, true)` spelling, raw nested strings); single-element `(1,)` and empty `()`
+  `_chz_str` (`(1, 'two', true)` spelling); single-element `(1,)` and empty `()`
   diverge from Chezzi's spelling, so the generator only emits arity ≥ 2.
 
 The i64-no-overflow guarantee is preserved across these: the only new path where an int value crosses a
@@ -325,8 +325,15 @@ seam is a tuple-field read, which inherits the element's tracked `tuple_bounds` 
 inside an in-loop accumulator RHS; method (`str`/`bool`/`List[str]`), `in` (`bool`), and slice
 (collection/`str`) results carry no int value, so they add no seam.
 
+**One shim arm became the identity (2026-08-06).** A string nested in a container used to render
+raw, so `_chz_repr` returned the string unchanged; it is now CPython `repr` (`docs/gaps.md` §W7-25),
+so that arm is literally `repr` and the oracle proves the nested-string rendering equal rather than
+absorbing a difference. Note the direction of the hazard: while the divergence existed, the shim
+ENCODED it, so the oracle could never have reported it — a detector written to mirror the
+implementation cannot see a bug in what it mirrors.
+
 **Why it isn't a tautology.** The Python backend prepends a fixed *shim* that implements Chezzi's
-**specification** (`_chz_str` for `true`/`false`/`nil` + raw nested strings + Chezzi float format;
+**specification** (`_chz_str` for `true`/`false`/`nil` + Chezzi float format;
 `_chz_div`/`_chz_mod` for truncate-toward-zero / sign-of-dividend). Chezzi source uses the real
 **implementation**. The shim absorbs only the by-design surface/semantic differences — never the
 actual arithmetic or control-flow *result* — so a stdout divergence means the implementation

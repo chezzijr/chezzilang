@@ -1,5 +1,5 @@
 [9, 6, 5, 4, 3, 2, 1, 1]
-[a, e, bb, dd, cccc]
+['a', 'e', 'bb', 'dd', 'cccc']
 pear: 7
 kiwi: 7
 apple: 3

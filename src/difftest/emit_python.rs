@@ -32,7 +32,7 @@ def _chz_str(v):
     if isinstance(v, dict): return "{" + ", ".join(_chz_repr(k) + ": " + _chz_repr(x) for k, x in v.items()) + "}"
     return str(v)
 def _chz_repr(v):
-    return v if isinstance(v, str) else _chz_str(v)
+    return repr(v) if isinstance(v, str) else _chz_str(v)
 def _chz_print(*a):
     print(*[_chz_str(x) for x in a])
 "#;

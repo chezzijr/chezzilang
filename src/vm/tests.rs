@@ -446,7 +446,7 @@ fn implicit_nursery_nested_functions() {
 #[test]
 fn implicit_nursery_try_preserves_error_value() {
     let src = "fn w():\n    print(\"task ran\")\nfn g() -> int!:\n    return Err(\"boom-value\")\nfn f() -> int!:\n    spawn w()\n    x := g()?\n    return Ok(x)\nfn main():\n    r := recover:\n        f()?\n        99\n    print(\"after: {r}\")\nmain()\n";
-    assert_mc_parity(src, "task ran\nafter: Err(boom-value)\n");
+    assert_mc_parity(src, "task ran\nafter: Err('boom-value')\n");
 }
 
 /// M-C regression (review-panel BUG): a bare `spawn` inside a `defer:` block is legal — the
@@ -1613,7 +1613,7 @@ fn fstring_and_str_render_all_value_shapes() {
     assert_eq!(run("print(\"{[[1], [2, 3]]}\")\n"), "[[1], [2, 3]]\n");
     assert_eq!(
         run("m := {\"a\": 1, \"b\": 2}\nprint(\"{m}\")\n"),
-        "{a: 1, b: 2}\n"
+        "{'a': 1, 'b': 2}\n"
     );
     assert_eq!(run("print(str({1, 2}))\n"), "{1, 2}\n");
     assert_eq!(run("s: Set[int] = Set()\nprint(str(s))\n"), "Set()\n");
@@ -4659,7 +4659,10 @@ main()
     assert!(vr.is_ok(), "vm run faulted: {vr:?}");
     assert!(ir.is_ok(), "interp run faulted: {ir:?}");
     assert_eq!(vo, io, "vm/interp stdout divergence");
-    assert_eq!(vo, "[1, 4, 9, 16, 25]\n[2, 4]\n15\n120\n[n1, n2]\n-15\n");
+    assert_eq!(
+        vo,
+        "[1, 4, 9, 16, 25]\n[2, 4]\n15\n120\n['n1', 'n2']\n-15\n"
+    );
 }
 
 /// D5 owe #3 (Path C) — a blocking `recv` reached inside a **native** callback (`xs.map`, whose
@@ -7047,7 +7050,7 @@ fn float_display_keeps_one_decimal_for_integral() {
 fn list_display() {
     assert_eq!(run("print([1, 2, 3])"), "[1, 2, 3]\n");
     assert_eq!(run("print([])"), "[]\n");
-    assert_eq!(run(r#"print(["a", "b"])"#), "[a, b]\n");
+    assert_eq!(run(r#"print(["a", "b"])"#), "['a', 'b']\n");
 }
 
 #[test]
@@ -15212,7 +15215,7 @@ fn str_hook_nonstr_fallback_is_gc_safe_after_mutating_hook() {
 fn generic_fn_value_map_conv_runs_both_engines() {
     // `.map(conv)` — conv's own T pinned = int from the element type; yields the string list.
     let src = "fn conv[T](x: T) -> str:\n    return str(x)\nprint([1, 2, 3].map(conv))\n";
-    assert_mc_parity(src, "[1, 2, 3]\n");
+    assert_mc_parity(src, "['1', '2', '3']\n");
 }
 
 #[test]
@@ -15247,7 +15250,7 @@ fn generic_fn_value_filter_keep_runs_both_engines() {
 fn generic_fn_value_user_hof_and_turbofish_run_both_engines() {
     // Regression: the pre-existing user-HOF pin and the turbofish workaround still run unchanged.
     let src = "fn conv[T](x: T) -> str:\n    return str(x)\nfn mymap(xs: List[int], f: fn(int) -> str) -> List[str]:\n    return xs.map(f)\nprint(mymap([1, 2, 3], conv))\nprint([1, 2, 3].map(conv[int]))\n";
-    assert_mc_parity(src, "[1, 2, 3]\n[1, 2, 3]\n");
+    assert_mc_parity(src, "['1', '2', '3']\n['1', '2', '3']\n");
 }
 
 // ── Parameterized protocols in value position (Q1) — two-engine goldens ──────────────────────

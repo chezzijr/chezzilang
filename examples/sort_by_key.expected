@@ -2,9 +2,9 @@ fig: 1
 apple: 3
 pear: 7
 kiwi: 7
-[a, e, bb, dd, cccc]
+['a', 'e', 'bb', 'dd', 'cccc']
 [9, 6, 5, 4, 3, 2, 1, 1]
-[alice, bob, charlie]
+['alice', 'bob', 'charlie']
 cheap
 mid
 rich

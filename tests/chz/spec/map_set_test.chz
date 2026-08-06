@@ -9,7 +9,7 @@
 # ---- literal, display, insertion order, dup-key-last-wins ----
 
 test fn literal_and_display():
-    assert str({"a": 1, "b": 2}) == "{{a: 1, b: 2}}", "insertion-ordered display ({{ }} = literal braces)"
+    assert str({"a": 1, "b": 2}) == "{{'a': 1, 'b': 2}}", "insertion-ordered display ({{ }} = literal braces)"
     assert str({}) == "{{}}"
     assert {"a": 1, "a": 9} == {"a": 9}, "duplicate key -> last wins"
 

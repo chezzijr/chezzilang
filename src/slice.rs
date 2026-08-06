@@ -156,9 +156,65 @@ pub fn bytearray_repr(bytes: &[u8]) -> String {
     format!("bytearray({})", bytes_repr(bytes))
 }
 
+/// Python `str` `repr`: the quoted, escaped form used whenever a string is rendered **nested inside**
+/// something else — a list/tuple/map/set element, a struct field, an enum payload. Top-level
+/// `str(s)` / `print(s)` stay the bare characters, exactly like CPython's `str` vs `repr` split.
+/// Without it, `["a", "b"]` and `["a, b"]` both printed `[a, b]` and `[""]` printed `[]` — different
+/// values with identical output (`docs/gaps.md` §W7-25).
+///
+/// Quote choice follows CPython: `'` normally, switching to `"` only when the string contains a `'`
+/// and no `"`. Escapes `\\`, `\n`, `\t`, `\r`, the chosen quote, and ASCII control characters
+/// (`\xHH`). Non-ASCII stays literal — `repr('é')` is `'é'` in Python 3 too.
+pub fn str_repr(s: &str) -> String {
+    use std::fmt::Write;
+    let quote = if s.contains('\'') && !s.contains('"') {
+        '"'
+    } else {
+        '\''
+    };
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push(quote);
+    for c in s.chars() {
+        match c {
+            '\n' => out.push_str("\\n"),
+            '\t' => out.push_str("\\t"),
+            '\r' => out.push_str("\\r"),
+            '\\' => out.push_str("\\\\"),
+            c if c == quote => {
+                out.push('\\');
+                out.push(c);
+            }
+            // ASCII control characters (the three common ones are already handled above).
+            c if (c as u32) < 0x20 || c as u32 == 0x7F => {
+                let _ = write!(out, "\\x{:02x}", c as u32);
+            }
+            c => out.push(c),
+        }
+    }
+    out.push(quote);
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Cross-checked against CPython 3.14: `repr` of each of these strings is byte-identical.
+    #[test]
+    fn str_repr_python_style() {
+        assert_eq!(str_repr(""), "''");
+        assert_eq!(str_repr("a"), "'a'");
+        assert_eq!(str_repr("a, b"), "'a, b'");
+        // A `'` flips the quote to `"`; a string with both keeps `'` and escapes the inner one.
+        assert_eq!(str_repr("it's"), "\"it's\"");
+        assert_eq!(str_repr("it's \"q\""), "'it\\'s \"q\"'");
+        assert_eq!(str_repr("a\nb"), "'a\\nb'");
+        assert_eq!(str_repr("a\tb\rc"), "'a\\tb\\rc'");
+        assert_eq!(str_repr("back\\slash"), "'back\\\\slash'");
+        assert_eq!(str_repr("\u{0}\u{1f}\u{7f}"), "'\\x00\\x1f\\x7f'");
+        // Non-ASCII stays literal, like CPython 3.
+        assert_eq!(str_repr("é😀"), "'é😀'");
+    }
 
     #[test]
     fn bytes_repr_python_style() {

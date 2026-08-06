@@ -61,6 +61,7 @@ chronological log.
 | ~~**W6-10s**~~ | `:1349` | `--max-heap` residual **sampling** escapes left after the byte-aware pacing fix | Pacing samples the cap on charged off-heap bytes, but only for stores routed through `to_wire_crossable` and only per heap. Still not sampled: the documented inline-scalar loop (`future.md §1b` — no `Obj`s, no wire bytes), the by-hand airlock paths (spawn args, closure captures, `Executor.submit`), and a heap that HOLDS a huge core without storing to it. **Premise partly re-derived 2026-08-06 and it did NOT hold**: the `Executor.submit` arm is the only one of the three that stores persistently off-heap, and it does so ONLY on `--serial` (M:N executes eagerly and queues nothing) — which `--max-heap` refuses at the CLI (`main.rs:685`), so that arm is unreachable. The spawn-arg / capture arms are transient: `prepare_worker` rebuilds them into a worker heap immediately. What IS reachable was measured instead and is a different mechanism: a worker heap **born big** — `spawn use(blob)` with a 200 000-int `blob` PASSED `--max-heap=8000000`, and adding ONE allocating statement to the spawned fn turned the same program OVER-MEMORY at the same RSS, because the payload arrives in ~7 objects so `since_gc` never reaches `next_gc` and `sweep()` — the sole assigner of `over_cap` — never runs. Charging bytes in `Heap::alloc` does NOT fix it: these containers are alloc'd EMPTY and patched via `get_mut` (the tie-the-knot rebuild), so there is nothing to charge at alloc time. **FIXED 2026-08-06** by `Heap::request_collect`: `Vm::spawn_worker` — the one door every worker heap is born through, and where the cap is already threaded — asks for the first collect whenever a cap is live, and the flag is consumed at the task's first instruction boundary in `run_until` (the first properly-rooted point; it is set before the payload is rebuilt, which is safe because `Heap::alloc` never collects). `spawn use(blob)` with `use = return xs.len()` at `--max-heap=1000000`: **PASS → OVER-MEMORY**, with the generous-cap, no-cap and 50-spawn controls all still PASS. **Two residuals stay open and are NOT claimed fixed** (both measured, neither introduced by the fix): (a) a task whose ENTIRE body is one native call (`spawn blob.len()`) executes no bytecode, so it reaches no instruction boundary and the flag is never consumed — and there is no safe sample point in that window, since the payload is rooted only as the pending call's operands (collect before the call and you free the task's own arguments; after it the receiver is already dead); (b) growth AFTER the sample that allocates no `Obj`s — `xs.push(i)` grew a worker heap 32× past the cap post-sweep and never re-triggered, which is `future.md §1b`. So the fix narrows "the verdict tracks who allocates" to bytecode-running tasks; it does not make `--max-heap` total |
 | **W6-9r** | `:1473` | Parity-oracle residual left by the `W6-9b` fix: ~31 hand-rolled `run_file_p` + `run_file` cross-engine compares in `parity_tests.rs` still diff LOSSILY-DECODED strings, and `parity_entry_cfg_lines` compares stdout as an order-insensitive line multiset | The three SHARED comparators were fixed at the helper level (0 call sites touched); converting the hand-rolled ones means rewriting ~31 call sites. UTF-8-only today, so nothing is failing — but a new byte-emitting test added at one of those sites inherits the blindness. Use `vm::run_file_bytes` there |
 | **W6-10r** | `:1386` | `--max-heap` residual: a payload reachable ONLY through a **nested** core (a `Channel` inside a `Shared`, once the nested core's last `Obj` alias slot is swept) is counted nowhere | Left open by the W6-10 fix on purpose. `live_bytes` reaches a core's bytes through its `Obj::*` alias slot; a nested core has none. Closing it needs cross-core byte recursion with `Arc` de-dup — narrow trigger, not worth the machinery yet |
+| ~~**W7-25**~~ | `:6725` | **FIXED 2026-08-06 (breaking output change).** A string nested in a container / struct field / enum payload rendered RAW, so different values printed identically: `["a", "b"]` and `["a, b"]` were both `[a, b]`, and `[""]` printed `[]` — `str(a) == str(b)` true while `a == b` false. Now Python `repr` (`slice::str_repr`, cross-checked against CPython 3.14), applied by `stringify_nested_into` at the six nesting sites; a `str(self)` hook's own result is deliberately NOT quoted. Sweep: 14 goldens, 15 Rust expectations, 8 chz assertions | **The detector encoded the bug.** The CPython differential oracle's shim defined `_chz_repr(v) = v if isinstance(v, str) else _chz_str(v)` — it mirrored the raw-nested-string behavior, so the one tool built to catch a Python divergence could never report this one. Eight difftest suites went red when the implementation was fixed. **A detector written to mirror the implementation is blind to bugs in what it mirrors** |
 | ~~**W7-24**~~ | `:6660` | **FIXED 2026-08-06.** Call-argument normalization never reached an interpolation fragment: `"{f(1)}"` with `fn f(a: int, b: int = 2)` was `'f' expects 2 argument(s), got 1`, `"{sub(y=1, x=10)}"` was `got 0`, and `"{sum_all(1, 2, 3)}"` was `expects 1 argument(s), got 3` + `expected List[int], found int` — every one of them correct outside the string. `ExprKind::Str` held RAW text, so `desugar::run` (named args + defaults + variadic sweeping, one pass) ran before the fragment was parsed, and three separate consumers re-parsed it after. Fixed by `ExprKind::Interp(Vec<Chunk>)`, produced by `desugar` itself — fragments become real children before normalization, inside the live scope stack | **An invariant a pass establishes only holds for what that pass can SEE.** The checker received exactly the `Call` shape desugar's own header promises it never will (`named` non-empty, defaults unfilled), which is why the errors were incoherent rather than merely wrong. Raw text stored in an AST node is a hole in every tree-walking guarantee, and the hole only surfaces at the consumer |
 | ~~**W7-23**~~ | `:6615` | **FIXED 2026-08-06.** The interpolation fragment scanner was neither quote- nor depth-aware: it cut at the FIRST `}`, so `"{d['a}}b']}"` was `unmatched '}' in string` and `"{ {1, 2}.len() }"` was `unexpected an indented block in expression` — valid code, hard compile errors. Now it carries `fmtspec::split_spec`'s own `in_str` + bracket-`depth` state. Also: a fragment is lexed as its own line, so leading padding (`"{ 1 + 2 }"`, legal in CPython) opened an INDENT token — `parse_expr_str` now trims | **One layer was careful about quotes and the layer feeding it was not** — `split_spec` is called on the very NEXT line of the same function and has been quote-aware since it shipped. A shared invariant implemented in one of two adjacent layers reads as implemented in both |
 | ~~**W7-22**~~ | `:6076` | **FIXED 2026-08-06.** Every container crossing the airlock was rebuilt with **22× the capacity it needs**, and kept it for the object's whole lifetime. Fourteen wire→`Value` rebuild sites were `items.into_iter().map(…).collect()`, which Rust specializes into an **in-place** collect: the destination element is smaller than the source, so the source `Vec`'s allocation is REUSED and the rebuilt `Vec<Value>` inherits its capacity — `size_of::<WireValue>() / size_of::<Value>()` = 176 / 8. Measured on the release binary: a 200 000-int list crossing a `spawn` arrived as `len = 200 000, capacity = 4 400 000` (a **35.2 MB** `Obj::List` holding 1.6 MB), halving the list halved the capacity to 2 200 000 — exactly 22× both times. 50 such spawns: **peak RSS 3.45 GB → 203 MB**. Hits `spawn` args, `Channel.recv`, `Shared.get`/`RwShared` reads, closure captures, struct/enum/generator payloads. A capturing `spawn` measured the same: **3.45 GB → 203 MB**. Fix: one `Vm::rebuild_items` helper (pre-size, then push) at all fourteen sites | **`len` is identical either way, so the entire behavioural suite is blind to it** — 3856 tests, both engines, byte-identical output, all green before and after. Only `Vec::capacity` can see it, which is why a memory bug of this size survived every wave of the bug-hunt: every existing assertion is about *values*, and this changes none. Second: it was found while chasing a DIFFERENT filed row (`W6-10s`), by asking why a repro's RSS was 22× what arithmetic predicted rather than accepting that the cap "failed open" — the filed row's own premise (a serial-only `Executor.submit` escape) turned out to be unreachable, because `--max-heap` refuses `--serial` at the CLI. Third: **the first cut fixed eight of the fourteen** — `from_wire_memo`'s container arms — and left the identical shape in `deep_clone_all` and `rebuild_ready`'s five `Lowered` arms, two of which feed a DURABLE `Obj::Closure { captured }`. So `spawn` with a capturing closure still leaked 22–24×, under a new doc comment asserting captures were fixed, with the full suite green. Adversarial review caught it; both prosecutors filed it independently. *This is wave 6's meta-finding — "a fix applied to SOME arms of an N-way set" — reproduced by the fix for a bug found while auditing that very class.* Fourth: the fix is invisible to `benches/run.chz`, which is single-threaded and never crosses the airlock — a whole class of regression the bench set cannot price |
@@ -6719,3 +6720,67 @@ directions), `interpolation_fragment_unknown_named_arg_rejected_by_desugar` (the
 error, from the same pass, as outside a string), `interpolation_fragment_respects_local_shadowing`,
 and `interpolation_fragment_checked_without_desugar` (the `Str` fallback still checks and still
 rejects a malformed literal).
+
+---
+
+### W7-25 — a string nested in a container/struct/enum rendered raw, so different values printed identically — **FIXED 2026-08-06** (BREAKING output change)
+
+Measured on the release binary at `5076ab6a`, against CPython 3.14:
+
+| value | before | after | CPython |
+|---|---|---|---|
+| `["a", "b"]` | `[a, b]` | **`['a', 'b']`** | `['a', 'b']` |
+| `["a, b"]` | `[a, b]` — **same text, different value** | **`['a, b']`** | `['a, b']` |
+| `[""]` | `[]` — reads as an EMPTY list | **`['']`** | `['']` |
+| `{"k": "v"}` | `{k: v}` | **`{'k': 'v'}`** | `{'k': 'v'}` |
+| `S(name="hi", n=1)` | `S(name=hi, n=1)` | **`S(name='hi', n=1)`** | `S(name='hi', n=1)` |
+| `recover: [1][5]` | `Err(index 5 out of bounds (len 1))` | **`Err('index 5 out of bounds (len 1)')`** | — |
+
+`str(a) == str(b)` was therefore **true while `a == b` was false**. Two consequences beyond the
+cosmetic one: a one-element list of a comma-bearing string is indistinguishable from a two-element
+list (it reads as a `split` bug that does not exist), and `[""]` prints exactly like `[]`.
+
+**Fix.** `crate::slice::str_repr` — beside the existing `bytes_repr`/`bytearray_repr`, same escape
+family, cross-checked value-by-value against CPython 3.14 (`'` normally, `"` when the string holds a
+`'` and no `"`; `\\`, `\n`, `\t`, `\r`, the chosen quote, and ASCII control chars as `\xHH`;
+non-ASCII literal, as in Python 3). Applied by a new `Vm::stringify_nested_into` at the six NESTING
+sites and nowhere else: `stringify_seq_into` elements (list / tuple / **enum payload**), map key,
+map value, set element, struct field, newtype inner.
+
+**The one site deliberately excluded** is a `str(self)` display hook's RESULT (the three arms that
+re-enter `stringify_into` at the SAME depth, for struct / enum / newtype). That string is the
+object's own rendering, not a value nested inside it — quoting it would turn `[Tag(7)]` into
+`['<7>']`. Fenced by `display_hook_output_is_never_quoted`. This is also why the rule could not be
+implemented as "quote whenever `depth > 0`": the hook path preserves depth on purpose.
+
+**Why it survived — the detector encoded the bug.** The CPython differential oracle
+(`src/difftest/`) exists precisely to catch a Chezzi-vs-Python divergence, and its shim defined:
+
+```python
+def _chz_repr(v):
+    return v if isinstance(v, str) else _chz_str(v)   # ← the divergence, written INTO the oracle
+```
+
+So the one tool built to find this could never report it. Eight difftest suites went red the moment
+the implementation was fixed, and the arm is now literally `repr(v)` — the oracle proves nested
+rendering EQUAL rather than absorbing a difference. Same family as
+`lossy-decode-blinds-a-comparison-oracle`, one step earlier in the pipeline: **a detector written to
+mirror the implementation is blind to bugs in what it mirrors** — when a shim absorbs a
+"by-design difference", the design claim needs its own evidence, because the shim will never supply
+it.
+
+**Sweep.** 14 `examples/*.expected` regenerated (mechanically, by diffing each example's real
+output; the remaining example diffs are concurrency line-order, which those tests compare sorted),
+15 Rust expectations across `vm/tests.rs`, `vm/parity_tests.rs`, `vm/gc_tests.rs`, and 8 assertions
+in `tests/chz`. Unchanged by design: `display`/`display_wire` (error/debug text), `Op::ToStrFmt`'s
+top-level `FmtArg::Str` path, `json` encoding, and `assert` messages.
+
+### Tests
+
+`tests/chz/spec/repr_test.chz` — 8 `test fn`s: the motivating ambiguity (`str(a) != str(b)` whenever
+`a != b`), the empty-string element, containers, the bare-string non-case, quote choice + escapes,
+struct fields, enum payload, and the display-hook exclusion. Gated serial==M:N by
+`test_runner::chz_suite_passes_both_engines`. `slice::tests::str_repr_python_style` covers the
+renderer directly against CPython's `repr` output. The strongest fence is the difftest suite itself:
+with the shim arm now equal to `repr`, every fuzzed program compares Chezzi's nested rendering to
+CPython's own.

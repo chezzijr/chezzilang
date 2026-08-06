@@ -1736,6 +1736,25 @@ print("here: {Point(3, 4)}")  # here: (3, 4)
 print([Point(5, 6)])          # [(5, 6)]      — dispatches when nested too
 ```
 
+**A nested `str` is quoted (`str` vs `repr`).** A string printed on its own is its bare characters,
+but a string rendered **inside** something else — a list/tuple/map/set element, a struct field, an
+enum payload — is quoted and escaped, exactly as in Python. Without it, values that differ print the
+same, and printed output is what most tests compare.
+
+```chezzi
+print("a, b")                 # a, b
+print(["a", "b"])             # ['a', 'b']       — two elements
+print(["a, b"])               # ['a, b']         — one element (was identical before)
+print([""])                   # ['']             — one empty element (printed as [] before)
+print({"k": "v"})             # {'k': 'v'}
+print(["it's", "a\nb"])       # ["it's", 'a\nb'] — CPython quote choice + escapes
+print(Point(1, 2))            # (1, 2)           — a `str` hook's output is NOT quoted
+```
+
+The quote is `'`, switching to `"` only when the string contains a `'` and no `"`; `\\`, `\n`, `\t`,
+`\r` and ASCII control characters escape (`\xHH`); non-ASCII stays literal. A `str(self)` display
+hook's result is the object's own rendering, never a nested string, so it is never quoted.
+
 The prebuilt **`Hashable`** protocol (`hash(self) -> int`) governs `map` keys and `set` elements:
 `int`/`str`/`bool` satisfy it intrinsically, and a struct satisfies it by defining `hash(self) ->
 int`. `map`/`set` are real insertion-ordered hash tables, so **any `Hashable` type can be a key or

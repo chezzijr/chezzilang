@@ -2,6 +2,35 @@
 
 Single source of truth for "what am I doing next." Update after every work session.
 
+> **✅ W7-25 FIXED 2026-08-06 (BREAKING output change) — a string nested inside a container, struct
+> field or enum payload now renders as its Python `repr`.** Values that differ used to print
+> identically, and printed output is what most of the corpus compares:
+>
+> | value | before | after | CPython |
+> |---|---|---|---|
+> | `["a", "b"]` | `[a, b]` | **`['a', 'b']`** | `['a', 'b']` |
+> | `["a, b"]` | `[a, b]` — same text, different value | **`['a, b']`** | `['a, b']` |
+> | `[""]` | `[]` — reads as an EMPTY list | **`['']`** | `['']` |
+> | `S(name="hi", n=1)` | `S(name=hi, n=1)` | **`S(name='hi', n=1)`** | `S(name='hi', n=1)` |
+> | `recover: [1][5]` | `Err(index 5 out of bounds (len 1))` | **`Err('index 5 out of bounds (len 1)')`** | — |
+>
+> So `str(a) == str(b)` was true while `a == b` was false. `crate::slice::str_repr` (beside
+> `bytes_repr`, cross-checked against CPython 3.14 for quote choice + escapes) is applied by a new
+> `stringify_nested_into` at the six NESTING sites only — seq elements (list/tuple/enum payload), map
+> key + value, set element, struct field, newtype inner. A `str(self)` display hook's RESULT is
+> deliberately not one of them: that string is the object's own rendering, not a nested value
+> (`display_hook_output_is_never_quoted`).
+> **The detector encoded the bug.** The CPython differential oracle's shim defined
+> `_chz_repr(v) = v if isinstance(v, str) else _chz_str(v)` — it mirrored the raw-nested-string
+> behavior, so it could never have reported it; the arm is now literally `repr` and 8 difftest
+> suites went red until it was fixed. Same family as `lossy-decode-blinds-a-comparison-oracle`: **a
+> detector written to mirror the implementation is blind to bugs in what it mirrors.**
+> Sweep: 14 `examples/*.expected` regenerated (the remaining diffs are concurrency line-order, which
+> those tests compare sorted), 15 Rust expectations, 8 `tests/chz` assertions. Fenced by
+> `tests/chz/spec/repr_test.chz` (8 `test fn`s, serial==M:N) + `slice::tests::str_repr_python_style`.
+> Docs: `syntax.md` §"A nested `str` is quoted", `stdlib.md` `str()` row, `bug-discovery.md`.
+> Full write-up: `docs/gaps.md` **§W7-25**.
+
 > **✅ W7-24 FIXED 2026-08-06 — an interpolation fragment is now a first-class call site: named
 > args, defaults, struct-ctor defaults, method defaults and variadics all work inside `"{…}"`.**
 > Every one of these was a type error inside a string and correct outside it:

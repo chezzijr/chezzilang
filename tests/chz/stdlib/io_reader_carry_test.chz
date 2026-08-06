@@ -43,7 +43,7 @@ test fn read_line_fault_is_recoverable_and_non_destructive():
     match io.open(p):
         Err(e): assert false, e.message()
         Ok(r):
-            assert str(r.read_line()) == "Some(line1)", "first line"
+            assert str(r.read_line()) == "Some('line1')", "first line"
             x := recover: r.read_line()
             match x:
                 Ok(_): assert false, "expected a fault on the undecodable line"
@@ -84,8 +84,8 @@ test fn read_bytes_drain_lets_read_line_resume():
                 Ok(_): assert false, "expected a fault"
                 Err(e): pass
             assert eqb(r.read_bytes(2), b"A\xff"), "partial carry drain"
-            assert str(r.read_line()) == "Some(B)", "the rest of the carry decodes as a line"
-            assert str(r.read_line()) == "Some(line2)", "and the fd continues"
+            assert str(r.read_line()) == "Some('B')", "the rest of the carry decodes as a line"
+            assert str(r.read_line()) == "Some('line2')", "and the fd continues"
 
 test fn lines_inherits_the_carry():
     # The N-way arm that is NOT native: `lines()` is a pure-Chezzi generator over read_line, so it
@@ -122,8 +122,8 @@ test fn eof_does_not_resurrect_a_carry():
     match io.open(p):
         Err(e): assert false, e.message()
         Ok(r):
-            assert str(r.read_line()) == "Some(a)", "a"
-            assert str(r.read_line()) == "Some(b)", "b"
+            assert str(r.read_line()) == "Some('a')", "a"
+            assert str(r.read_line()) == "Some('b')", "b"
             assert str(r.read_line()) == "None", "EOF"
             assert eqb(r.read_bytes(100), b""), "EOF stays EOF"
             assert str(r.read_line()) == "None", "and read_line stays None"

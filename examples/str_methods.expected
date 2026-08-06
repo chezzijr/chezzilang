@@ -29,7 +29,7 @@ happy
 happy
 file
 file.txt
-[a, b, c]
+['a', 'b', 'c']
 x
 Some(42)
 Some(9)
@@ -37,6 +37,6 @@ None
 Some(4.5)
 None
 Ok(42)
-Err(cannot parse 'x' as an integer)
+Err("cannot parse 'x' as an integer")
 Ok(3.14)
-Err(cannot parse 'x' as a float)
+Err("cannot parse 'x' as a float")

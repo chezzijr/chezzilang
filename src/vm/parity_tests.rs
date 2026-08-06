@@ -458,7 +458,7 @@ fn derived_cancel_token_done_implies_cancelled_runtime() {
     let out = parity_entry(
         "import std.cancel\nc := cancel.timeout(10).derive()\n_ := c.done().recv()\nprint(\"{c.cancelled()} {c.reason()}\")\n",
     );
-    assert_eq!(out, "true Some(timeout)\n");
+    assert_eq!(out, "true Some('timeout')\n");
 }
 
 /// Stdlib: `import min_heap from std.collections; min_heap().push(3)` runs on both engines.
@@ -1340,7 +1340,10 @@ fn main():
 
 main()
 "#;
-    assert_parity_out(src, "Ok(42)\nOk(7)\nErr(cannot parse 'x' as an integer)\n");
+    assert_parity_out(
+        src,
+        "Ok(42)\nOk(7)\nErr(\"cannot parse 'x' as an integer\")\n",
+    );
 }
 
 #[test]
@@ -1353,7 +1356,7 @@ fn main():
 
 main()
 "#;
-    assert_parity_out(src, "Ok(3.14)\nErr(cannot parse 'x' as a float)\n");
+    assert_parity_out(src, "Ok(3.14)\nErr(\"cannot parse 'x' as a float\")\n");
 }
 
 #[test]
@@ -1873,7 +1876,7 @@ fn sort_by_stable_by_key_parity() {
     // Equal keys (string length) must keep input order — stability is part of the contract.
     assert_parity_out(
         "ws := [\"bb\", \"a\", \"dd\", \"e\"]\nws.sort_by(fn(a: str, b: str) -> int: a.len() - b.len())\nprint(ws)\n",
-        "[a, e, bb, dd]\n",
+        "['a', 'e', 'bb', 'dd']\n",
     );
 }
 
@@ -6750,7 +6753,7 @@ fn parity_map_gc_stress_heap_keys_and_values() {
     // is untraced). The keys()/values() lists also hold heap children.
     let src = "fn main():\n    i := 0\n    while i < 200:\n        m := {\"k{i}\": \"v{i}\"}\n        m[\"extra\"] = \"x{i}\"\n        if i == 199:\n            print(m[\"k{i}\"])\n            print(m.values())\n        i += 1\nmain()\n";
     assert_parity(src);
-    let expected = "v199\n[v199, x199]\n";
+    let expected = "v199\n['v199', 'x199']\n";
     assert_eq!(vm_outcome(src).unwrap(), expected);
     assert_eq!(
         run_capture_stress(src),
@@ -9806,7 +9809,7 @@ fn widen_any_collection_const_mix_agrees() {
 fn widen_annotated_all_int_collection_runs() {
     widen_three_engines(
         "xs: List[float] = [1, 2]\nm: Map[str, float] = {\"a\": 1}\nprint(xs)\nprint(m)\nprint(xs[0] / 2)\n",
-        "[1.0, 2.0]\n{a: 1.0}\n0.5\n",
+        "[1.0, 2.0]\n{'a': 1.0}\n0.5\n",
     );
 }
 

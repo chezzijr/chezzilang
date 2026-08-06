@@ -7,5 +7,5 @@ deque drained front->back: [-1, 0, 1, 2]
 stack (pop_back): [30, 20, 10]
 count red: 3, missing: 0
 total: 7
-most_common(2): [(red, 3), (blue, 2)]
-most_common(all): [(red, 3), (blue, 2), (green, 2)]
+most_common(2): [('red', 3), ('blue', 2)]
+most_common(all): [('red', 3), ('blue', 2), ('green', 2)]
