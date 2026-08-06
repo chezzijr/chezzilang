@@ -3326,6 +3326,22 @@ impl Vm {
                     // happen BEFORE a slot is reserved, or the reservation would leave `outstanding`
                     // permanently short and hang `shutdown` forever.
                     let rw = self.prepare_eager_job(&core, w, span)?;
+                    // W7-26r sibling — measure the worker heap this submit just built, so its bytes
+                    // are OWNED by this submitter while the job waits in the pool queue (see
+                    // `ExecutorCore::pending`). Under a live cap only: the walk is O(this worker's
+                    // slots), and with no cap there is nothing to compare it against.
+                    //
+                    // `own_bytes`, NOT `live_bytes`, and OUTSIDE the `inner` lock below — both were
+                    // adversarial-review findings, each a real failure: the full walk charges
+                    // `Arc`-SHARED core payloads the submitter already counts (60 jobs capturing one
+                    // 1 MB `Shared` reported 60 MB against a true 3.8 MB → false OVER-MEMORY), and it
+                    // re-takes `core.inner`, which a job capturing its own executor turned into a
+                    // self-deadlock (hang, rc=124) — precisely the hazard the comment above names.
+                    let pending = if self.heap.mem_cap() != 0 {
+                        rw.worker.heap.own_bytes()
+                    } else {
+                        0
+                    };
                     // Now the atomic part: re-check `shut` and reserve the submission slot under ONE
                     // lock, so a job racing an `ex.shutdown()` is either rejected or is counted by
                     // that shutdown's join — never dispatched into a shut executor nobody waits for.
@@ -3339,7 +3355,7 @@ impl Vm {
                             span,
                         ));
                     }
-                    crate::vm::sched::dispatch_eager_job(&core, rw);
+                    crate::vm::sched::dispatch_eager_job(&core, rw, self.heap.mem_cap(), pending);
                     drop(g);
                     // W7-26 (the SAMPLING half) — charge the results this executor has ACCUMULATED
                     // against this heap's GC pacing counter, so a live `--max-heap` actually gets
@@ -3354,7 +3370,12 @@ impl Vm {
                             .lock()
                             .unwrap_or_else(|e| e.into_inner())
                             .take_charge();
-                        self.heap.charge_wire_bytes(grown);
+                        // W7-26r sibling — and the queued job just handed off, for exactly the same
+                        // reason: counting it in `live_bytes` is worthless if nothing looks. A loop
+                        // submitting slow jobs finishes none of them, so `take_charge` stays 0 and
+                        // the parent (which allocates ~nothing per submit) would never sweep —
+                        // measured PASS at 666 MB against an 8 MB cap with the accounting alone.
+                        self.heap.charge_wire_bytes(grown + pending);
                     }
                 } else {
                     // `--serial` keeps queue-at-submit / drain-at-`shutdown` (decision D3).

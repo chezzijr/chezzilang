@@ -26,6 +26,59 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > the diff against real CPython output found them. **`adversarial-review` is not optional after a
 > green gate — it is the only stage that has ever caught this class here.**
 
+> **✅ W7-26r FIXED 2026-08-06, both halves — `--max-heap` was never observed while the parent sat in
+> a join.** `over_cap` is assigned only in `sweep()`, which runs only at the parent fiber's own
+> instruction boundary — and a parent inside `Executor.shutdown()` or a `parallel:` join reaches none.
+> Against an 8 MB cap: an executor whose 300 jobs each buffer ~1 MB of output **PASSED at 622 MB**,
+> and the same shape under `parallel:`/`spawn` **PASSED at 733 MB** — that nursery half was never
+> counted at all, its outcome slots living in `SchedCore::slots`, outside every `Heap`.
+>
+> **Both owning ancestors put the observation on the ALLOCATOR, never on the blocked consumer, and
+> that is measured, not reasoned:** CPython 3.14.6's `ThreadPoolExecutor` under a 300 MB `RLIMIT_AS`
+> raised `MemoryError` **in the worker at job 57/500** while `main` sat in `ex.shutdown()`; Go 1.26
+> under `GOMEMLIMIT=32MiB` ran **7 GC cycles while `main` was blocked** in `wg.Wait()`. So does Chezzi
+> now: `core::halt_over_backlog`, called by the two producers (`dispatch_eager_job`'s pool closure and
+> `MnSched::finish`), lets the thread that finished a task convert its own outcome into a hard-halt
+> over-memory `Fault` when the join's retained backlog alone exceeds the whole cap, and trip its
+> core/scope cancel. Downstream is all reuse: `reduce_task_slots`' hard-halt precedence, the
+> `is_over_memory` marker that `recover:` cannot catch, the `OVER-MEMORY` bucket. **Both PASS →
+> OVER-MEMORY**, executor peak 622 → 65 MB; generous-cap and 300-tiny-spawn controls still PASS.
+>
+> **Its filed sibling went with it:** `prepare_eager_job` rebuilds each submitted closure into its own
+> worker `Vm` at submit, so a queue deeper than the pool is N whole worker heaps in `vm/pool.rs`'s
+> global FIFO — each under a per-heap cap, together **666 MB past an 8 MB cap**. The submitter now
+> owns them (`ExecutorCore::pending`, added at dispatch, removed the instant a pool thread takes the
+> job). **And for the third time in this family the accounting alone changed nothing** — a loop
+> submitting slow jobs finishes none of them, so nothing paced a sweep and it still PASSED at 666 MB;
+> the same bytes now also pace the submitter. **PASS → OVER-MEMORY, 395 MB.**
+>
+> **Adversarial review caught two criticals in the sibling half, both from ONE line, both found
+> independently by both prosecutors, both reproduced before fixing.** `pending` was first measured
+> with `Heap::live_bytes()` while `core.inner` was held: (1) that walk RE-TAKES `core.inner`, so a job
+> capturing its own executor **hung, rc=124** under a cap — the self-deadlock the comment 20 lines
+> above the hunk exists to warn about; (2) `live_bytes` is a REACHABILITY walk, so it charged
+> `Arc`-shared cores the submitter already counts, once per queued job — 60 jobs sharing one ~1 MB
+> box reported ~60 MB and tripped a 20 MB cap against a true 3.8 MB peak. Both fixed by
+> `Heap::own_bytes` (shared-core arms skipped, no core lock taken) plus moving the measurement off the
+> lock; both pinned by controls in the test, the aliasing one mutation-verified. **A green gate said
+> nothing about either** — and my own first check of the hang reported PASS because the shell pipeline
+> gave me `head`'s exit status instead of `chezzi`'s.
+>
+> **Two more lessons worth keeping.** (1) The filed premise had DECAYED — the row's repro was
+> return-value-based and `W7-27` had just freed those, so the shape had to be rebuilt on buffered
+> output before any edit. (2) The obvious control (same capture, fast job body, "the pool keeps up so
+> it must PASS") **failed under full-suite load, and the trip was right**: a busy machine really does
+> let ~48 jobs queue and ~48 MB really is live. A cap verdict is load-dependent by nature — both
+> ancestors are too — so a control must size the payload, never rely on scheduling. (3) A test that
+> holds POOL threads perturbs every other test in the process: the first version's 300 ms sleeping
+> jobs occupied all 12 shared pool threads and pushed `tests/chz`'s `shutdown_now_interrupts_a_
+> sleeping_job` from 50 ms to 1.10 s past its 1 s bound — a red dual-engine gate caused purely by a
+> new test's footprint (fixed by shortening the sleeps to 60 ms). Still open: `W6-10s` residual (a),
+> per-heap containment ≠ per-process containment, and the pre-existing
+> `eager_handshake_is_driven_by_wakeups_not_by_the_poll_timeout` flake (~5.2 s against its 1 s bound
+> under full-suite load, reproduced on a clean stashed tree — now filed in `docs/gaps.md`). Full
+> write-up: `docs/gaps.md` **§W7-26r**.
+>
 > **✅ W7-27 FIXED 2026-08-06 — an `Executor` job's RETURN VALUE was retained until `shutdown()`
 > although nothing can read it.** `submit` returns nil (no futures), `reduce_task_slots` reads only
 > `out`/`stderr`, `WorkerResult.value` is `#[allow(dead_code)]` — and the M:N nursery path already

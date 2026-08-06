@@ -2888,7 +2888,8 @@ fn dl_err() -> RuntimeError {
 fn mk_sched(total: usize) -> MnSched {
     // 4 worker slots by default — enough for the multi-`wid` steal tests; single-worker tests
     // just use `wid` 0.
-    MnSched::new(total, 4, Arc::new(AtomicBool::new(false)), dl_err())
+    // `mem_cap` 0 = the `--max-heap` cap off, which is what every fixture here wants.
+    MnSched::new(total, 4, Arc::new(AtomicBool::new(false)), dl_err(), 0)
 }
 fn mk_fiber(task_index: usize) -> Fiber {
     Fiber {
@@ -6017,7 +6018,7 @@ fn mnsched_park_requeues_when_message_already_waiting() {
 #[test]
 fn mnsched_park_requeues_when_cancel_tripped() {
     let cancel = Arc::new(AtomicBool::new(false));
-    let sched = MnSched::new(1, 4, Arc::clone(&cancel), dl_err());
+    let sched = MnSched::new(1, 4, Arc::clone(&cancel), dl_err(), 0);
     let core = empty_core();
     sched.seed(vec![mk_fiber(0)]);
     let f = take_run(&sched);
@@ -6063,7 +6064,7 @@ fn mnsched_deadlock_when_all_parked_runq_empty() {
 fn mnsched_cancelled_scope_with_parked_fibers_is_not_deadlock() {
     // Scope 0's `JoinScope::cancel` IS this Arc (see `mnsched_park_requeues_when_cancel_tripped`).
     let cancel = Arc::new(AtomicBool::new(false));
-    let sched = MnSched::new(2, 4, Arc::clone(&cancel), dl_err());
+    let sched = MnSched::new(2, 4, Arc::clone(&cancel), dl_err(), 0);
     let c1 = empty_core();
     let c2 = empty_core();
     sched.seed(vec![mk_fiber(0), mk_fiber(1)]);
@@ -6096,7 +6097,7 @@ fn mnsched_cancelled_scope_with_parked_fibers_is_not_deadlock() {
 #[test]
 fn mnsched_cancelled_scope_whose_only_fiber_is_demoted_is_deadlock() {
     let cancel = Arc::new(AtomicBool::new(false));
-    let sched = MnSched::new(2, 4, Arc::clone(&cancel), dl_err());
+    let sched = MnSched::new(2, 4, Arc::clone(&cancel), dl_err(), 0);
     let core = empty_core();
     let ptr = core_key(&core);
     sched.seed(vec![mk_fiber(0), mk_fiber(1)]);
@@ -6148,7 +6149,7 @@ fn mnsched_cancelled_scope_whose_only_fiber_is_demoted_is_deadlock() {
 #[test]
 fn mnsched_demoted_fiber_with_a_tripped_cancel_is_not_deadlock() {
     let cancel = Arc::new(AtomicBool::new(false));
-    let sched = MnSched::new(2, 4, Arc::clone(&cancel), dl_err());
+    let sched = MnSched::new(2, 4, Arc::clone(&cancel), dl_err(), 0);
     let core = empty_core();
     let ptr = core_key(&core);
     sched.seed(vec![mk_fiber(0), mk_fiber(1)]);
@@ -6204,7 +6205,7 @@ fn mnsched_demoted_fiber_with_a_tripped_cancel_is_not_deadlock() {
 #[test]
 fn mnsched_cancelled_scope_with_a_parked_and_a_demoted_fiber_is_not_deadlock() {
     let cancel = Arc::new(AtomicBool::new(false));
-    let sched = MnSched::new(3, 4, Arc::clone(&cancel), dl_err());
+    let sched = MnSched::new(3, 4, Arc::clone(&cancel), dl_err(), 0);
     let park_core = empty_core();
     let demote_core = empty_core();
     let ptr = core_key(&demote_core);

@@ -521,6 +521,7 @@ mod tests {
             1,
             Arc::new(AtomicBool::new(false)),
             dl_err(),
+            0,
         ))
     }
 

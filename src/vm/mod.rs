@@ -1768,6 +1768,11 @@ struct MnSched {
     /// fiber *will* come back runnable. Like `runnable`, only ever mutated under the core lock, so the
     /// predicate's read is sound.
     inflight: AtomicUsize,
+    /// W7-26r — the run's `--max-heap` cap (`0` = off), copied from the creating VM's heap. Uniform
+    /// per run (`spawn_worker` gives every worker heap the parent's cap), so one field is the whole
+    /// story. Read by `finish` to decide a scope's retained-backlog verdict — the observation site
+    /// the blocked joining fiber cannot provide.
+    mem_cap: usize,
     /// D5 owe #3 (Path C) — count of fibers currently **demoted**: blocked in place on a channel
     /// condvar after a `recv` reached inside a native callback (a 5th fiber state, distinct from
     /// `inflight`). Mutated only under the core lock by [`Vm::demote_recv_block`] (running→demoted on
@@ -1805,6 +1810,13 @@ struct JoinScope {
     total: usize,
     /// Tasks in this scope that have produced a `TaskOutcome`.
     done: usize,
+    /// W7-26r — the bytes this scope's finished tasks have RETAINED in `SchedCore::slots` (buffered
+    /// stdout/stderr, held to the join for the task-order flush). Accumulated by `finish` and
+    /// compared against `MnSched::mem_cap` there, because these slots live outside every `Heap` and
+    /// so are reachable by `Heap::live_bytes` NOWHERE — a `parallel:` of 300 tasks each printing
+    /// ~1 MB measured PASS at 733 MB against an 8 MB cap. Per-scope, not per-sched: a nested nursery
+    /// reduces (and frees) its own slots at its own join.
+    bytes: usize,
     /// `true` while an EAGER nursery's body is still running (between `EnterNursery` and `JoinNursery`)
     /// and may still `inject` more tasks. While set, a transient `done == total` for this scope must NOT
     /// terminate the global sched and `is_deadlocked` is vetoed (the body is live work the sched can't
@@ -2070,6 +2082,7 @@ impl MnSched {
         nworkers: usize,
         cancel: Arc<AtomicBool>,
         deadlock_err: RuntimeError,
+        mem_cap: usize,
     ) -> Self {
         MnSched {
             core: Mutex::new(SchedCore {
@@ -2082,6 +2095,7 @@ impl MnSched {
                     base_index: 0,
                     total,
                     done: 0,
+                    bytes: 0,
                     body_open: false,
                     awaiting_builder: false,
                     cancel: Arc::clone(&cancel),
@@ -2103,6 +2117,7 @@ impl MnSched {
             steal_ctr: AtomicUsize::new(0),
             inflight: AtomicUsize::new(0),
             blocked_native: AtomicUsize::new(0),
+            mem_cap,
             // gaps.md B5 — no parent by default; `activate_eager_nursery` sets it on an eager sched.
             parent_wake: None,
         }
@@ -2128,6 +2143,7 @@ impl MnSched {
             base_index,
             total,
             done: 0,
+            bytes: 0,
             body_open: false,
             awaiting_builder: false,
             cancel,
@@ -2168,6 +2184,7 @@ impl MnSched {
             base_index,
             total,
             done: 0,
+            bytes: 0,
             body_open: false,
             awaiting_builder: false,
             cancel,
@@ -2806,9 +2823,39 @@ impl MnSched {
     /// because farmed helpers (sentinel scope_id) drain until global terminate, and the scope-scoped
     /// owner stop returns each owner the instant its OWN scope completes. The per-scope `done` drives
     /// that owner stop; the global all-done drives helper/sentinel termination.
-    fn finish(&self, task_index: usize, scope_id: usize, outcome: TaskOutcome) {
+    /// Returns whether the stored outcome ABORTS its scope (a `Fault`/`Exit`), so the caller runs the
+    /// `cancel_drain` its parked siblings need. It is computed here, not by the caller, because the
+    /// W7-26r backlog verdict below can turn a `Done` into a hard-halt `Fault` — a caller-side
+    /// `matches!` on the outcome it handed in would miss that and leave the scope's parked fibers
+    /// with nobody to wake them.
+    fn finish(&self, task_index: usize, scope_id: usize, outcome: TaskOutcome) -> bool {
         let mut c = self.lock();
         c.running -= 1;
+        // W7-26r — this thread is the only party that can observe the cap for a nursery whose parent
+        // is blocked in the join (see `core::halt_over_backlog`). These slots live outside every
+        // `Heap`, so `live_bytes` never counted them either: this is the accounting AND the
+        // observation. Cheap: the summary is O(1) (buffered output capacities; a task's return value
+        // is `Nil`, W7-27) and the whole block is skipped when no cap is set.
+        let outcome = if self.mem_cap != 0 {
+            let s = &mut c.scopes[scope_id];
+            s.bytes += super::vm::core::outcome_summary(&outcome).0;
+            let (outcome, over) =
+                super::vm::core::halt_over_backlog(outcome, s.bytes, self.mem_cap);
+            if over {
+                // Under the core lock, exactly as `trip_scope_cancel` requires — the release
+                // publishes the flag to every worker that later evaluates `is_deadlocked`. Only THIS
+                // scope: an inner nursery's backlog must not cancel an outer sibling (structured
+                // concurrency); the fault propagates outward through the join instead.
+                s.cancel.store(true, Ordering::Relaxed);
+            }
+            outcome
+        } else {
+            outcome
+        };
+        let aborts = matches!(
+            outcome,
+            TaskOutcome::Fault { .. } | TaskOutcome::Exit { .. }
+        );
         c.slots[task_index] = Some(outcome);
         c.scopes[scope_id].done += 1;
         // Per-connection spawn — do NOT latch `terminate` while ANY eager body is still injecting: a
@@ -2819,6 +2866,7 @@ impl MnSched {
             c.terminate = true;
         }
         self.cv.notify_all();
+        aborts
     }
 
     /// N4 — trip scope `scope_id`'s cancel **under the core lock**. Two reasons the lock is not
@@ -2926,6 +2974,12 @@ impl MnSched {
             let s = &c.scopes[scope_id];
             (s.base_index, s.total)
         };
+        // W7-26r — the retained bytes leave with the slots, so the backlog total returns to zero with
+        // them (`EagerState::take_slots` does the same for the executor half). Today every caller
+        // takes only after `wait_for_scope`, so no fiber of this scope can still be running; this
+        // keeps the counter honest if that ever stops being true, instead of leaving a stale
+        // watermark that would fault the NEXT program to reach this scope id.
+        c.scopes[scope_id].bytes = 0;
         (base..base + total).map(|i| c.slots[i].take()).collect()
     }
 

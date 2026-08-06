@@ -59,8 +59,8 @@ chronological log.
 | `List[Any]` widening | `:1731` | `List[Any] = [1, 3.0]` silently widens the int to `1.0` | Deferred pre-freeze (wave 4) |
 | **N10** | `:3456` | A `wait:` timer arm makes `--serial` inline-sleep instead of yielding to a runnable sibling (serial ≠ M:N) | Deliberate pre-freeze known-limit; fix is folded into the post-freeze serial-engine removal |
 | ~~**W6-10s**~~ | `:1349` | `--max-heap` residual **sampling** escapes left after the byte-aware pacing fix | Pacing samples the cap on charged off-heap bytes, but only for stores routed through `to_wire_crossable` and only per heap. Still not sampled: the documented inline-scalar loop (`future.md §1b` — no `Obj`s, no wire bytes), the by-hand airlock paths (spawn args, closure captures, `Executor.submit`), and a heap that HOLDS a huge core without storing to it. **Premise partly re-derived 2026-08-06 and it did NOT hold**: the `Executor.submit` arm is the only one of the three that stores persistently off-heap, and it does so ONLY on `--serial` (M:N executes eagerly and queues nothing) — which `--max-heap` refuses at the CLI (`main.rs:685`), so that arm is unreachable. The spawn-arg / capture arms are transient: `prepare_worker` rebuilds them into a worker heap immediately. What IS reachable was measured instead and is a different mechanism: a worker heap **born big** — `spawn use(blob)` with a 200 000-int `blob` PASSED `--max-heap=8000000`, and adding ONE allocating statement to the spawned fn turned the same program OVER-MEMORY at the same RSS, because the payload arrives in ~7 objects so `since_gc` never reaches `next_gc` and `sweep()` — the sole assigner of `over_cap` — never runs. Charging bytes in `Heap::alloc` does NOT fix it: these containers are alloc'd EMPTY and patched via `get_mut` (the tie-the-knot rebuild), so there is nothing to charge at alloc time. **FIXED 2026-08-06** by `Heap::request_collect`: `Vm::spawn_worker` — the one door every worker heap is born through, and where the cap is already threaded — asks for the first collect whenever a cap is live, and the flag is consumed at the task's first instruction boundary in `run_until` (the first properly-rooted point; it is set before the payload is rebuilt, which is safe because `Heap::alloc` never collects). `spawn use(blob)` with `use = return xs.len()` at `--max-heap=1000000`: **PASS → OVER-MEMORY**, with the generous-cap, no-cap and 50-spawn controls all still PASS. **Two residuals stay open and are NOT claimed fixed** (both measured, neither introduced by the fix): (a) a task whose ENTIRE body is one native call (`spawn blob.len()`) executes no bytecode, so it reaches no instruction boundary and the flag is never consumed — and there is no safe sample point in that window, since the payload is rooted only as the pending call's operands (collect before the call and you free the task's own arguments; after it the receiver is already dead); (b) growth AFTER the sample that allocates no `Obj`s — `xs.push(i)` grew a worker heap 32× past the cap post-sweep and never re-triggered, which is `future.md §1b`. So the fix narrows "the verdict tracks who allocates" to bytecode-running tasks; it does not make `--max-heap` total |
-| ~~**W7-27**~~ | `:6971` | **FIXED 2026-08-06 (found by adversarial review of the `W7-26` fix; premise re-measured on the release binary before any edit).** An `Executor` job's RETURN VALUE was retained until `shutdown()` even though nothing can ever read it — `submit` returns nil (no futures), `WorkerResult.value` is `#[allow(dead_code)]`, and `reduce_task_slots` reads only `out`/`stderr`. 300 × `ex.submit` of a job **building** its own ~1 MB str, results discarded, uncapped `chezzi run`: **peak RSS 339 MB → 45 MB**, against CPython 3.14.6 `ThreadPoolExecutor`'s **42 MB** (futures discarded identically, `resource.ru_maxrss`) — an ~8× drift closed to parity, and it needed NO cap to bite. One line in `ReadyWorker::run_outcome`: the `Done` outcome stores `WireValue::Nil`, exactly like the M:N nursery path. `to_wire_at` + `ensure_crossable` still run, and dropping their product does not make them dead: `to_wire_at` is FALLIBLE, so a return value that cannot cross (a generator closing a reference cycle, a depth/size cap) still faults at the submit site with the task's real span — the fault contract is the crossing, not the storage. `W7-26`'s accounting stays: `out`/`stderr` are unbounded on their own | **RETENTION and ACCOUNTING are separate bugs on the same bytes, and fixing one re-bases the other's test.** `W7-26` made these bytes visible to `--max-heap`; this frees them — so its M:N repro stopped overshooting and `over_memory_counts_an_executor_result_backlog` was re-based onto buffered OUTPUT (300 jobs printing ~100 KB), which is what the eager accounting still has to count. The old return-value program became the inverse fence, `executor_results_are_not_retained`: same 8 MB cap, must now PASS. **Residual, unchanged and already filed on `W7-26r`:** the CAPTURED-blob variant is still **410 MB** (was 666 MB) — each `submit` wires its own ~1 MB copy of the capture into a `ReadyWorker` that queues in the process-global pool, owned by no heap. CPython holds 17 MB there because a captured `str` is shared by reference, which Chezzi's by-value airlock cannot do |
-| **W7-26r** | `:6929` | `--max-heap` residual left by the `W7-26` fix: an `Executor` whose jobs BUILD their own payload (no capture) accumulates the whole backlog while the parent is blocked inside `shutdown()`'s join, where nothing samples the cap | The results ARE counted — adding one allocating statement to the parent turns the same program OVER-MEMORY, rc=1 — but `over_cap` is assigned only in `sweep()`, and a fiber parked in a native join reaches no instruction boundary and has no safely-rooted point to sweep at. 300 × ~1 MB **PASS at 330 MB** against an 8 MB cap. This is the `W6-10s` SAMPLING class (its open residual (a), "a task whose entire body is one native call"), not `W7-26`'s accounting one: closing it means moving to the `--timeout` model (a watchdog observation site) rather than sampling at `sweep`, which is a design change to the cap. Sibling, also uncounted: a submitted-but-not-started job in the process-global pool queue is owned by no heap, and a per-heap cap needs an owner — **measured 2026-08-06 while fixing `W7-27`**: with the results freed, a 300 × `ex.submit(fn() -> str: blob)` capturing a ~1 MB blob still peaks at **410 MB** uncapped (`chezzi run`), which is 300 queued wire copies of the capture and nothing else |
+| ~~**W7-27**~~ | `:6971` | **FIXED 2026-08-06 (found by adversarial review of the `W7-26` fix; premise re-measured on the release binary before any edit).** An `Executor` job's RETURN VALUE was retained until `shutdown()` even though nothing can ever read it — `submit` returns nil (no futures), `WorkerResult.value` is `#[allow(dead_code)]`, and `reduce_task_slots` reads only `out`/`stderr`. 300 × `ex.submit` of a job **building** its own ~1 MB str, results discarded, uncapped `chezzi run`: **peak RSS 339 MB → 45 MB**, against CPython 3.14.6 `ThreadPoolExecutor`'s **42 MB** (futures discarded identically, `resource.ru_maxrss`) — an ~8× drift closed to parity, and it needed NO cap to bite. One line in `ReadyWorker::run_outcome`: the `Done` outcome stores `WireValue::Nil`, exactly like the M:N nursery path. `to_wire_at` + `ensure_crossable` still run, and dropping their product does not make them dead: `to_wire_at` is FALLIBLE, so a return value that cannot cross (a generator closing a reference cycle, a depth/size cap) still faults at the submit site with the task's real span — the fault contract is the crossing, not the storage. `W7-26`'s accounting stays: `out`/`stderr` are unbounded on their own | **RETENTION and ACCOUNTING are separate bugs on the same bytes, and fixing one re-bases the other's test.** `W7-26` made these bytes visible to `--max-heap`; this frees them — so its M:N repro stopped overshooting and `over_memory_counts_an_executor_result_backlog` was re-based onto buffered OUTPUT (300 jobs printing ~100 KB), which is what the eager accounting still has to count. The old return-value program became the inverse fence, `executor_results_are_not_retained`: same 8 MB cap, must now PASS. **Residual, filed on `W7-26r` and fixed there the same day:** the CAPTURED-blob variant is still **410 MB** of RSS (was 666 MB) — each `submit` builds its own ~1 MB copy of the capture into a `ReadyWorker` that queues in the process-global pool. CPython holds 17 MB there because a captured `str` is shared by reference, which Chezzi's by-value airlock cannot do, so that RSS is an isolation-model cost; `W7-26r` closed the accounting half, charging those copies to the submitter so the cap can see them |
+| ~~**W7-26r**~~ | `:6929` | **FIXED 2026-08-06, both halves (the join residual AND the pool-queue sibling), premises re-derived on the release binary first.** `--max-heap` was never observed while the parent fiber sat in a join — `over_cap` is assigned only in `sweep()`, which runs only at the parent's own instruction boundary, and a parent inside `Executor.shutdown()` or a `parallel:` join reaches none. Against an 8 MB cap: an executor whose 300 jobs each buffer ~1 MB of output **PASSED at 622 MB**, and the same shape under `parallel:`/`spawn` **PASSED at 733 MB** — the nursery half counted NOWHERE at all, its outcome slots living in `SchedCore::slots`, outside every `Heap`. **Both owning ancestors put the observation on the ALLOCATOR, never on the blocked consumer** (measured, not reasoned): CPython 3.14.6's `ThreadPoolExecutor` under a 300 MB `RLIMIT_AS` raised `MemoryError` **in the worker at job 57/500** while `main` sat in `ex.shutdown()`; Go 1.26 under `GOMEMLIMIT=32MiB` + `GOGC=off` ran **7 GC cycles while `main` was blocked** in `wg.Wait()`. So the fix is `core::halt_over_backlog`, called by the two producers (`dispatch_eager_job`'s pool closure and `MnSched::finish`): the thread that finished a task adds its outcome to the join's retained-byte total and, if that backlog ALONE exceeds the whole cap, replaces its own `Done`/`Cancelled` with a hard-halt over-memory `Fault` and trips its scope/core cancel. Everything downstream is reused — `reduce_task_slots`' `Exit > hard-halt > ordinary` precedence propagates it and `recover:` cannot catch it. It cannot false-positive: the trip needs the retained backlog by itself to exceed the cap, and those bytes are held until the join reduces. **PASS → OVER-MEMORY on both, generous-cap and 300-tiny-spawn controls still PASS.** The SIBLING (queued-but-not-started jobs) is the same story one layer out: `prepare_eager_job` rebuilds each submitted closure into its own worker `Vm` at submit, so a queue deeper than the pool is N whole worker heaps — each under a per-heap cap, summing to **666 MB past an 8 MB cap** — now owned by the submitter (`ExecutorCore::pending`, added at dispatch, removed the instant a pool thread takes the job, so it never double-counts the running heap's own charge) | **Counting them is worthless if nothing looks — for the THIRD time in this family.** With the sibling's accounting alone the 666 MB program still PASSED: a loop submitting slow jobs finishes none of them, so `take_charge` stays 0 and the parent (which allocates almost nothing per submit) never sweeps. Fixed by pacing on the same bytes at the same site. Second lesson, from the review that made this test honest: the obvious control — same 1 MB capture, fast job body, assert the pool keeps up — **FAILED under full-suite load**, because a busy machine really does let ~48 jobs queue and ~48 MB really is live, so the trip was CORRECT and the assertion was wrong. A cap verdict is load-dependent by nature (both ancestors are too), so the control had to shrink the PAYLOAD rather than rely on timing. Still open, unchanged: the general `W6-10s` residual (a) — a heap that grows for reasons OTHER than a join backlog while its fiber is inside one native call; and per-heap containment is not per-process containment, so a nursery of N tasks each individually under the cap still peaks high (reduction-count preemption interleaves all N payload builds) even though the verdict is now right. Third: the filed premise had DECAYED and the shape had to be rebuilt before the fix — the row's own repro was return-value-based, and `W7-27` (landed hours earlier) frees those, so every repro here is output-based instead |
 | ~~**W7-26**~~ | `:6871` | **FIXED 2026-08-06 (found by adversarial review of the `W6-10r` fix, premise re-derived on the release binary before any edit).** `--max-heap` read only the `Executor` core's `inner` QUEUE half, which is the `--serial` half: on the default M:N engine `submit` runs EAGERLY (matching `ThreadPoolExecutor`), so `inner` stays empty forever and every finished job's result lands in `eager.slots` as `TaskOutcome::Done(WorkerResult { value, out, stderr })` — reached by `live_bytes` nowhere. `Executor()` + a ~1 MB blob + `300 × ex.submit(fn() -> str: blob)` + `shutdown()` under `--max-heap=8000000`: **PASS, rc=0, peak RSS 313 MB → OVER-MEMORY, rc=1, 11 MB**; generous-cap (4 GB) and no-cap controls still PASS. `EagerState` gained the `(bytes, dirty)` summary `ChanState`/`ExecState` already carry, maintained in `finish`/`take_slots` over a PRIVATE slot vector (so no site can forget), and the `live_bytes` arm now sums BOTH halves. The charge is **unconditional**, unlike the `mem_cap != 0` gates elsewhere in this family: it fires once per finished job beside a thread handoff, and both ancestors keep accounting live with the *limit* separate (Go's `runtime.MemStats` vs `GOMEMLIMIT`). Rooting unchanged and now FENCED rather than reasoned about — a result crosses by value with no parent-heap `GcRef` (B3.2, enforced by `ensure_crossable`), asserted by a `debug_assert!(!w.has_handle())` in `outcome_summary` that says `Heap::children` needs an eager arm if it ever fires | **Counting is worthless if nothing samples, and the fix's first cut proved it twice.** With the accounting alone the repro tripped at **180 MB**, not 11 MB: `submit` wires the closure but nothing charged the RESULTS against the parent's GC pacing counter, so the parent swept only on its own `Obj` growth — closed by `EagerState::take_charge` (growth-since-last-read, charged at `submit` under a live cap). A SECOND shape survives even that and is filed below as an open residual, because it is the W6-10s sampling class rather than this one: a job that BUILDS its own payload (`ex.submit(mk)`, no capture) wires ~nothing at submit and all 300 submits complete before any job finishes, so `take_charge` sees 0 each time and the whole 330 MB accumulates while the parent is blocked inside `shutdown()`'s join — where there is no sample point at all. Adding ONE allocating statement to the parent turns that same program OVER-MEMORY (rc=1), which is what proves the accounting half is right and the gap is purely observational |
 | **W6-9r** | `:1473` | Parity-oracle residual left by the `W6-9b` fix: ~31 hand-rolled `run_file_p` + `run_file` cross-engine compares in `parity_tests.rs` still diff LOSSILY-DECODED strings, and `parity_entry_cfg_lines` compares stdout as an order-insensitive line multiset | The three SHARED comparators were fixed at the helper level (0 call sites touched); converting the hand-rolled ones means rewriting ~31 call sites. UTF-8-only today, so nothing is failing — but a new byte-emitting test added at one of those sites inherits the blindness. Use `vm::run_file_bytes` there |
 | ~~**W6-10r**~~ | `:1390` | `--max-heap` residual: a payload reachable ONLY through a **nested** core (a `Channel` inside a `Shared`, once the nested core's last `Obj` alias slot is swept) is counted nowhere | **Premise re-derived and CONFIRMED 2026-08-06** before any edit (the two preceding rows in this family had premises that had gone stale): `make() -> Shared[Channel[str]]` parking a channel whose only alias slot dies with the frame, then 300 × ~1 MB `s.get().send(blob)` → **PASS, rc=0, peak RSS 304 MB** against `--max-heap=8000000`, while the identical program holding the channel in a live local tripped OVER-MEMORY. **FIXED 2026-08-06**: `core::nested_core_bytes` — the byte mirror of `collect_core_gcrefs`, which already recursed into nested cores for ROOTING (only the byte walk stopped at the boundary) — plus `queue_bytes_deep` / `value_core_bytes_deep`, called from `Heap::live_bytes`. The recursion shares `live_bytes`'s per-heap `Arc`-identity set, so a nested core that also has an alias slot here is still charged exactly once, and it fills a `WS_UNKNOWN` summary in passing (every core constructor leaves it UNKNOWN, and a core reached only through a parent is never marked through a slot of its own — without the fill it reports 0 forever). Gated on `mem_cap != 0`, the same argument as the round-3 pacing counter: cap-off runs (every `chezzi run`, every bench, the whole parity gate) pay one `!= 0` load and ZERO extra walks. Repro: **PASS @ 304 MB → OVER-MEMORY, rc=1, 16.5 MB**; generous-cap and no-cap controls still PASS. Tests `vm::heap::live_bytes_counts_a_nested_core_with_no_alias_slot` (cap-off unchanged / cap-on charges / alias-slot de-dup) + `test_runner::over_memory_counts_a_nested_core_backlog` (both engines), both mutation-verified red with the walk disabled |
@@ -1445,8 +1445,8 @@ last surviving member of the family.
 > hole immediately: an `Executor`'s EAGER half — the only half the default M:N engine uses — is
 > counted nowhere, and 300 submitted ~1 MB results PASS at **312 MB** against an 8 MB cap. Filed as
 > **`W7-26`**, not bundled: it is a second payload half with no cached summary, not a nested core.
-> (**`W7-26` is FIXED 2026-08-06**; its own sampling residual `W7-26r` stays open.) The
-> sampling residuals from `W6-10s` also stay open.
+> (**`W7-26` is FIXED 2026-08-06**, and so is its own sampling residual **`W7-26r`** — including the
+> pool-queue sibling filed with it.) The sampling residuals from `W6-10s` still stay open.
 >
 > **Observable change (the point of the fix):** `--max-heap` now trips where it previously passed.
 > Nothing else moves — the dual-engine byte-identity gate runs cap-OFF, and `live_bytes` is otherwise
@@ -5000,6 +5000,16 @@ dominate, which is the 15× separation in the third row above;
 `eager_handshake_is_driven_by_wakeups_not_by_the_poll_timeout` bounds that sum at 1 s (7× headroom
 over fixed, 2× under broken), mutation-verified by reverting to the bare `wait_timeout`.
 
+> **That bound does NOT survive a loaded full-suite run, and it is the last known one that doesn't
+> (observed 2026-08-06/07, pre-existing — reproduced on a clean stashed tree at 5.34 s and again at
+> 5.24 s with the `W7-26r` work applied).** `cargo test --lib` on a 12-core box at
+> `RUST_TEST_THREADS=4` runs this beside the concurrency suites, and the 30-pipeline sum lands at
+> **~5.2 s against a 1 s bound** — above even the 2.19 s "broken" figure, so under load the test
+> cannot discriminate fixed from broken in EITHER direction. It passes alone in 0.2 s. Raising the
+> bound is not the fix (past 2.19 s it stops detecting the bug it exists for); it wants a
+> load-independent signal — a serial-only `#[ignore]`d timing test, or counting wakeups per PIPELINE
+> instead of process-globally (the rejected version's failure mode, but scoped). Filed, not fixed.
+
 **A rejected first version of that test is worth recording, because it produced a false green.** It
 counted expired waits in a process-global `#[cfg(test)]` counter. libtest runs the file in ONE
 process, and the eager tests a dozen slots away in name order each park a job on a `timer(200)` —
@@ -6929,33 +6939,113 @@ CPython's own.
 > `outcome_summary` carries `debug_assert!(!w.has_handle())` naming the consequence: if it ever
 > fires, `children` needs the arm `live_bytes` just gained.
 >
-> ### Residual — **OPEN**: growth entirely inside `shutdown()`'s join is never sampled (`W7-26r`)
+### W7-26r — nothing observed `--max-heap` while the parent was blocked in a join — **FIXED 2026-08-06**
+
+> Filed as `W7-26`'s residual. Both halves are closed here — the join backlog and the pool-queue
+> sibling — and **the filed premise had to be rebuilt first**: the original repro was return-value
+> based, and `W7-27` (landed hours earlier) stopped retaining those. Every repro below is buffered
+> OUTPUT instead, which is retained by contract (W7-5c flushes it at the task's slot).
 >
 > ```chezzi
-> fn mk() -> str: …            # builds its own ~1 MB blob, captures NOTHING
-> test fn genres():
+> fn noisy():                     # builds its own ~1 MB and PRINTS it; captures NOTHING
+>     …
+> test fn exjoin():
 >     ex := Executor()
->     for i in range(300):
->         ex.submit(mk)        # wires ~nothing; all 300 submits finish before any job does
->     ex.shutdown()            # the 330 MB accumulates HERE
+>     for i in range(300): ex.submit(noisy)
+>     ex.shutdown()               # the backlog accumulates HERE, where nothing samples
+>
+> test fn nursjoin():
+>     parallel:
+>         for i in range(300): spawn noisy()
 > ```
-> `--max-heap=8000000` → **PASS, rc=0, peak RSS 330 MB.** The results are counted correctly (adding
-> ONE allocating statement to the parent between the loop and `shutdown()` turns the same program
-> **OVER-MEMORY, rc=1** — which is what proves the accounting half is right); nothing ever looks.
-> `take_charge` sees 0 at every submit because no job has finished yet, and the entire growth then
-> happens while the parent is blocked inside a native join, where the VM reaches no instruction
-> boundary and there is no safely-rooted point to sweep at.
+> `--max-heap=8000000` on the release binary: **executor PASS at 622 MB, nursery PASS at 733 MB.**
+> `over_cap` is assigned only in `sweep()`, `sweep()` runs only at the parent's own instruction
+> boundary, and a parent inside a join reaches none. The nursery half was worse than a sampling
+> gap — its outcome slots live in `SchedCore::slots`, outside every `Heap`, so `live_bytes` could
+> not have counted them even if something had looked.
 >
-> This is the **`W6-10s` sampling class**, not this row's accounting one — the same shape as that
-> row's open residual (a) "a task whose entire body is ONE native call". Closing it needs an
-> observation site that does not depend on the capped fiber running bytecode, i.e. the `--timeout`
-> model (a watchdog) rather than the `--max-heap` model (sample at `sweep`), which is a design change
-> to the cap's observation site and its own piece of work. Not bundled.
+> **The ancestors decide the design, measured 2026-08-06 rather than reasoned about:**
 >
-> **Also still uncounted, and distinct from both:** a job submitted but **not yet started** sits as a
-> `ReadyWorker` in the process-global unbounded pool queue (`vm/pool.rs`), owned by no core and no
-> heap. In the capturing repro above that is what the remaining 11 MB → 180 MB spread was made of.
-> A cap is per-heap by definition, so charging it needs an owner to charge it to.
+> | | who observes the limit | while the joining thread is blocked |
+> |---|---|---|
+> | CPython 3.14.6, `ThreadPoolExecutor` + `RLIMIT_AS` 300 MB, 500 × 1 MB retained | the kernel, at each allocation, **in the allocating worker thread** | `MemoryError` in the worker at job **57/500** while `main` sat in `ex.shutdown()`; peak 230 MB |
+> | Go 1.26, `GOMEMLIMIT=32MiB`, `GOGC=off`, 500 goroutines × 1 MB retained, `wg.Wait()` | the runtime GC pacer, driven by **allocating goroutines** | **7 GC cycles ran while `main` was blocked**; soft limit → thrash, no abort |
+>
+> Neither ancestor asks the blocked consumer. Neither does Chezzi now: `core::halt_over_backlog` is
+> called by the two PRODUCERS — `dispatch_eager_job`'s pool closure and `MnSched::finish` — and when
+> the join's retained backlog alone exceeds the whole cap, the finishing thread replaces its own
+> `Done`/`Cancelled` outcome with a hard-halt over-memory `Fault` and trips its core/scope cancel so
+> siblings stop feeding it. Everything downstream is inherited: `reduce_task_slots`'
+> `Exit > hard-halt > ordinary` precedence propagates it, the `is_over_memory` marker keeps `recover:`
+> from catching it, and the runner buckets it `OVER-MEMORY`. Only `Done`/`Cancelled` are replaced —
+> demoting an `Exit` would lose an `os.exit`, and an existing `Fault` already halts.
+> `MnSched::finish` now RETURNS whether the stored outcome aborts, because a caller-side `matches!`
+> on the outcome it handed in would miss the conversion and leave the scope's parked siblings unwoken.
+>
+> **It cannot false-positive**: the trip needs the retained backlog BY ITSELF to exceed the entire
+> cap, and those bytes are held until the join reduces the slots. Nothing estimates, nothing samples a
+> heap mid-native-call, and nothing sweeps where values are unrooted — which is what ruled out the
+> tempting alternative of polling `live_bytes()` from inside the join: it counts not-yet-swept
+> garbage, so it can fault a healthy program (the `parked-is-not-stuck` wrong-verdict class).
+>
+> Result: **both PASS → OVER-MEMORY**, executor peak 622 → 65 MB. Controls still PASS: the same
+> programs at a 4 GB cap, and 300 tiny spawns under the 8 MB cap.
+>
+> ### The sibling — a job dispatched but not started is owned by no heap — **FIXED with it**
+>
+> `prepare_eager_job` rebuilds each submitted closure into its OWN worker `Vm` at submit time, so a
+> queue deeper than the pool is N fully-built worker heaps parked in `vm/pool.rs`'s global FIFO: each
+> one comfortably under a per-heap `--max-heap`, their sum charged to nobody. Measured: 300 slow jobs
+> each capturing ~1 MB → **PASS, rc=0, peak RSS 666 MB** against an 8 MB cap.
+>
+> A per-heap cap needs an owner, and the submitter is it — the work is its own and reachable only
+> through its executor handle. `ExecutorCore::pending` carries the bytes (`Heap::live_bytes` of the
+> freshly built worker, measured under a live cap only), added at dispatch and removed the instant a
+> pool thread picks the job up, so the queued charge and the running heap's own never overlap.
+> `live_bytes`'s `Obj::Executor` arm adds it.
+>
+> **And — the third time in this family — the accounting alone changed nothing: still PASS at 666 MB.**
+> A loop submitting slow jobs finishes none of them, so `take_charge` stays 0 and the parent, which
+> allocates almost nothing per submit, never sweeps. The same bytes therefore also pace the
+> submitter's sweeps, one line at the same site. **PASS at 666 MB → OVER-MEMORY, rc=1, 395 MB.**
+>
+> ### Adversarial review filed two criticals against the sibling charge, and BOTH were real
+>
+> Both prosecutors found the same pair independently, each with a measured repro, and both were
+> reproduced on the release binary before fixing. Both came from ONE line — `pending` was first
+> measured with `Heap::live_bytes()`, taken while `core.inner` was held:
+>
+> 1. **Self-deadlock, and the comment 20 lines above named the hazard.** `live_bytes`'s
+>    `Obj::Executor` arm re-takes `core.inner`, which the submit path holds across the dispatch;
+>    `std::sync::Mutex` is not reentrant. A job capturing its own executor — the exact
+>    `ex.submit(fn(): ex.…)` shape that comment exists for — **hung, rc=124**, under a cap and only
+>    under a cap. (My own first check called it PASS: the shell pipeline made `$?` report `head`'s
+>    exit status, not `chezzi`'s. Verify a hang with the exit code of the program, not of a pipe.)
+> 2. **False OVER-MEMORY from aliasing.** `live_bytes` is a REACHABILITY walk, so it charged every
+>    `Arc`-shared core the captured closure could reach — bytes the submitter's own `live_bytes`
+>    already counts — once per queued job. 60 jobs capturing ONE ~1 MB `Shared` reported ~60 MB and
+>    tripped a 20 MB cap while the true peak was 3.8 MB. The row's own "cannot false-positive" claim
+>    was false as written, because the argument was about the backlog and the sibling charge is a
+>    different quantity.
+>
+> Fix for both: `Heap::own_bytes` — the same walk with the shared-core arms skipped, so it counts only
+> what the submit actually deep-copied, and takes no core lock at all. The measurement also moved off
+> the `inner` lock (belt to that braces). Both are pinned by controls inside
+> `over_memory_counts_jobs_queued_but_not_started`, and the aliasing one is mutation-verified:
+> restoring `live_bytes` there turns it red.
+>
+> ### What is still open
+>
+> - The general `W6-10s` residual (a): a heap that grows for reasons OTHER than a join backlog while
+>   its fiber is inside one native call. Unchanged — that still wants a watchdog observation site.
+> - **Per-heap containment is not per-process containment.** The nursery verdict is now right, but its
+>   peak RSS is not contained: reduction-count preemption interleaves all N tasks, so N partial
+>   payloads are live before any task finishes, and each individual heap stays under the cap.
+> - A cap verdict is **load-dependent**, and legitimately so: on a busy machine the pool falls behind,
+>   more jobs really do queue, and the memory really is live. Both ancestors behave the same way. Do
+>   not write a test that asserts a PASS which depends on the pool keeping up — size the payload so
+>   the whole queue fits under the cap instead (this exact assertion failed in the full suite, and the
+>   trip it reported was correct).
 
 > ### Tests (`W7-26`)
 >
@@ -6967,6 +7057,20 @@ CPython's own.
 > exercises a different half — plus the generous-cap negative direction; **re-based onto buffered
 > OUTPUT by `W7-27`**, since return values are no longer retained for it to count). All
 > mutation-verified: deleting the charge in `finish` turns the first and third red.
+
+> ### Tests (`W7-26r` + its sibling)
+>
+> `test_runner::over_memory_trips_while_the_parent_is_blocked_in_a_join` (both producers — the
+> executor join and the `parallel:` nursery join — plus the generous-cap negative direction) and
+> `test_runner::over_memory_counts_jobs_queued_but_not_started` (a 60-job queue the pool cannot keep
+> up with, its generous-cap control, and a same-shape control whose whole queue fits under the cap).
+> Each is mutation-verified against BOTH halves of its own fix independently: disabling the executor
+> producer reds the `exjoin` arm and disabling `MnSched::finish`'s reds the `nursjoin` one; dropping
+> either the `pending` accounting or its pacing charge reds the sibling test.
+>
+> The sibling test uses a `sleep_ms` body rather than a busy loop to hold its pool threads: an eager
+> job runs on a plain `Vm`, so the wait blocks that thread just as effectively at no CPU cost — the
+> busy-loop version loaded the machine enough to flake the suite's wall-clock timing tests.
 
 ### W7-27 — an `Executor` job's return value was retained though nothing can read it (~8× the ancestor) — **FIXED 2026-08-06**
 
@@ -7014,11 +7118,13 @@ CPython's own.
 > `Nil` match — kept, not deleted, so the walk does not have to be re-derived if a result is ever
 > stored again.
 >
-> **Residual (unchanged, already filed under `W7-26r`).** The CAPTURED variant is still 410 MB: each
-> `submit` wires its OWN ~1 MB copy of the capture into a `ReadyWorker` that then queues in the
-> process-global pool, owned by no heap and freed only when the job runs. CPython holds 17 MB there
-> because a captured `str` is shared by reference — which the by-value airlock (B3.2) cannot do, so
-> that half is an isolation-model cost, not this bug.
+> **Residual (filed under `W7-26r`, and FIXED there the same day).** The CAPTURED variant is still
+> 410 MB of RSS: each `submit` builds its OWN ~1 MB copy of the capture into a `ReadyWorker` that then
+> queues in the process-global pool, owned by no heap and freed only when the job runs. CPython holds
+> 17 MB there because a captured `str` is shared by reference — which the by-value airlock (B3.2)
+> cannot do, so the RSS half is an isolation-model cost, not this bug. What `W7-26r` closed is the
+> ACCOUNTING half: those queued copies are now charged to the submitter (`ExecutorCore::pending`), so
+> `--max-heap` sees them instead of passing a 666 MB program at an 8 MB cap.
 >
 > ### Tests
 >

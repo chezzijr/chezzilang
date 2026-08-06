@@ -664,6 +664,64 @@ pub(super) fn outcome_summary(o: &super::TaskOutcome) -> (usize, bool) {
     acc
 }
 
+/// W7-26r — the `--max-heap` verdict a finished task's own thread reaches when the RETAINED backlog
+/// of its join (an `Executor`'s eager slots, a nursery scope's task slots) has by itself grown past
+/// the whole cap. Returns the outcome to store plus whether the cap tripped (the caller then trips
+/// its scope/core cancel so siblings stop feeding the backlog).
+///
+/// **Why the producer decides, and not the joining parent.** `over_cap` is assigned only in
+/// `Heap::sweep()`, which runs only at the parent fiber's own instruction boundary — and a parent
+/// blocked inside `Executor.shutdown()`'s join or a `parallel:` join reaches none. Measured on the
+/// release binary against an 8 MB cap: 300 jobs each printing ~1 MB PASSED at **622 MB** (executor)
+/// and **733 MB** (nursery). Both owning ancestors put the observation on the ALLOCATOR, never on
+/// the blocked consumer (measured 2026-08-06): CPython's `ThreadPoolExecutor` under a 300 MB
+/// `RLIMIT_AS` raised `MemoryError` **in the worker at job 57/500** while `main` sat in
+/// `ex.shutdown()`; Go 1.26 under `GOMEMLIMIT=32MiB` ran **7 GC cycles while `main` was blocked** in
+/// `wg.Wait()`. So does this: the thread that produced the bytes is the one that looks.
+///
+/// **It cannot false-positive.** The trip needs the retained backlog ALONE to exceed the entire cap,
+/// and those bytes provably exist — they are held in the slot vector until the join reduces it.
+/// Nothing here estimates, samples a heap mid-native-call, or sweeps where values are unrooted
+/// (which is what rules out the alternative of polling `live_bytes()` from inside the join: it
+/// counts not-yet-swept garbage and would fault healthy programs).
+///
+/// Only `Done`/`Cancelled` are replaced: an `Exit` or an existing `Fault` already halts the join
+/// with equal-or-higher precedence in [`Vm::reduce_task_slots`](super::Vm::reduce_task_slots), and
+/// demoting one would lose an `os.exit` or a real fault. The replacement KEEPS the task's buffered
+/// output (it flushes at its task-order slot like any fault's, W7-5c) and is the same size, so the
+/// caller's already-computed [`outcome_summary`] stays accurate.
+pub(super) fn halt_over_backlog(
+    outcome: super::TaskOutcome,
+    backlog: usize,
+    cap: usize,
+) -> (super::TaskOutcome, bool) {
+    use super::TaskOutcome as T;
+    if cap == 0 || backlog <= cap {
+        return (outcome, false);
+    }
+    let err = super::RuntimeError {
+        message: format!("test exceeded --max-heap ({cap} bytes)"),
+        span: super::Span::default(),
+        is_assert: false,
+        // The marker is the whole point: it makes this a hard halt `recover:` cannot catch and buckets
+        // the run `OVER-MEMORY`, exactly like the parent-side abort in `Vm::run_until`.
+        is_over_memory: true,
+        is_timed_out: false,
+    };
+    match outcome {
+        T::Done(r) => (
+            T::Fault {
+                err,
+                out: r.out,
+                stderr: r.stderr,
+            },
+            true,
+        ),
+        T::Cancelled { out, stderr } => (T::Fault { err, out, stderr }, true),
+        other => (other, false),
+    }
+}
+
 /// `Executor` core (B3.1 / C5 escape hatch): the explicitly-owned work queue. On `--serial`, `submit`
 /// enqueues a wire-form task closure (rejected once `shut`); `shutdown` drains FIFO; `shutdown_now`
 /// discards. On the M:N engine `submit` runs EAGERLY (the job goes straight to the pool, matching
@@ -679,6 +737,24 @@ pub struct ExecutorCore {
     pub eager: Mutex<EagerState>,
     /// Signalled whenever a job finishes; `shutdown` waits on it for `outstanding == 0`.
     pub eager_cv: Condvar,
+    /// W7-26r sibling — the live heap bytes of jobs DISPATCHED BUT NOT YET STARTED, i.e. the ones
+    /// sitting in the process-global pool queue. `prepare_eager_job` rebuilds each submitted closure
+    /// into its own worker `Vm` at submit time, so a deep queue is N fully-built worker heaps: each
+    /// one comfortably under a per-heap `--max-heap`, summing to hundreds of MB that were charged to
+    /// NOBODY (measured on the release binary: 300 slow jobs capturing ~1 MB each **PASS at 666 MB**
+    /// against an 8 MB cap). The cap is per-heap by definition, so this needs an OWNER — and the
+    /// submitter is it: the work is its own, it can still be reached only through this executor
+    /// handle, and the submit loop is running bytecode, so the parent samples it normally.
+    ///
+    /// Added at dispatch and removed the instant the pool thread picks the job up (from then on the
+    /// bytes are the worker heap's own, charged against the worker's copy of the cap), so the charge
+    /// never overlaps in TIME. It cannot overlap by ALIASING either, and that took a review to get
+    /// right: the measurement is `Heap::own_bytes`, which excludes `Arc`-shared core payloads — a
+    /// captured `Shared`/`Channel` crosses as one shared allocation the submitter already counts, and
+    /// charging it per queued job reported 60 MB against a true 3.8 MB. What is charged here is only
+    /// the deep-copied plain data the submit actually added. Maintained under a live cap only — the
+    /// walk is O(the new worker's slots) and would be pure cost otherwise.
+    pub pending: AtomicUsize,
     /// The cooperative cancel flag shared by every job this executor has dispatched. Per-CORE, not
     /// per-drain (the pre-eager model had no running jobs to cancel): `shutdown_now` trips it so
     /// already-started jobs die at their next back-edge (decision D4 — "attempts to stop",

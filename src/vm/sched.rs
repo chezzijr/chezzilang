@@ -544,6 +544,7 @@ impl Vm {
             nworkers,
             Arc::clone(&cancel),
             deadlock_err,
+            self.heap.mem_cap(),
         ));
         sched.lock().scopes[0].ancestors = self.scope_ancestors();
         sched.seed(fibers);
@@ -771,7 +772,7 @@ impl Vm {
         );
         let deadlock_err = self.err(DEADLOCK_MSG.to_string(), Span { line: 1, col: 1 });
         // wid 0 = inline join worker; wid 1 = the dedicated raw drainer below.
-        let mut inner = MnSched::new(0, 2, Arc::clone(&cancel), deadlock_err);
+        let mut inner = MnSched::new(0, 2, Arc::clone(&cancel), deadlock_err, self.heap.mem_cap());
         // gaps.md B5 — this eager sched is PRIVATE (no link to the parent). A `send`/`close` inside its
         // body only scans its OWN parked set, so a receiver parked in the PARENT nursery on a shared
         // channel is never woken → the parent spuriously faults `deadlock`. Point `parent_wake` at the
@@ -1502,11 +1503,10 @@ impl Vm {
                 // this worker). The poller re-enqueues it via `complete_offload` on OS readiness.
                 Disp::PollPark(pp) => sched.poll_park_offload(fiber, pp),
                 Disp::Finish(outcome) => {
-                    let aborts = matches!(
-                        outcome,
-                        TaskOutcome::Fault { .. } | TaskOutcome::Exit { .. }
-                    );
-                    sched.finish(task_index, scope_id, outcome);
+                    // `finish` reports whether the STORED outcome aborts: it may itself turn a `Done`
+                    // into a hard-halt over-memory `Fault` (W7-26r), which needs the same sibling
+                    // drain a task's own fault does.
+                    let aborts = sched.finish(task_index, scope_id, outcome);
                     // A fault/exit tripped the FIBER's SCOPE cancel (in `classify_mn_outcome`, via the
                     // re-pointed `self.cancel`); requeue THAT scope's parked siblings so they observe it
                     // and unwind (running ones see it at a back-edge). `cancel_drain(scope_id)` reaches
@@ -4845,8 +4845,17 @@ impl Vm {
 /// order regardless of completion order — that is what lets `shutdown` reduce them with the shared
 /// [`Vm::reduce_task_slots`] and inherit the whole W7-5/W7-5c contract (decision F output order,
 /// lowest-index fault, hard-halt precedence, per-slot flush) instead of re-deriving it.
-pub(super) fn dispatch_eager_job(core: &Arc<ExecutorCore>, rw: ReadyWorker) {
+pub(super) fn dispatch_eager_job(
+    core: &Arc<ExecutorCore>,
+    rw: ReadyWorker,
+    mem_cap: usize,
+    pending: usize,
+) {
     let span = rw.span;
+    // W7-26r sibling — this job's rebuilt worker heap belongs to the SUBMITTER until a pool thread
+    // picks it up (see `ExecutorCore::pending`). `0` when the cap is off, so this is a no-op then.
+    core.pending
+        .fetch_add(pending, std::sync::atomic::Ordering::Relaxed);
     let idx = core
         .eager
         .lock()
@@ -4854,6 +4863,12 @@ pub(super) fn dispatch_eager_job(core: &Arc<ExecutorCore>, rw: ReadyWorker) {
         .reserve();
     let core = Arc::clone(core);
     pool::submit(Box::new(move || {
+        // W7-26r sibling — the job leaves the queue HERE: from this point its bytes are the worker
+        // heap's own (charged against the worker's copy of the cap by its own sweeps), so the
+        // submitter must stop counting them or the two double-count. Before `catch_unwind`, so a
+        // panicking job cannot leave the charge stranded on the core forever.
+        core.pending
+            .fetch_sub(pending, std::sync::atomic::Ordering::Relaxed);
         // A Rust panic in the worker VM becomes a `Fault` slot rather than unwinding into the pool
         // thread and leaving `outstanding` short — which would hang `shutdown`'s condvar wait forever.
         // Everything after the `catch_unwind` is panic-free (an in-range `Vec` index; the lock is
@@ -4870,10 +4885,24 @@ pub(super) fn dispatch_eager_job(core: &Arc<ExecutorCore>, rw: ReadyWorker) {
         // O(result) and this lock is contended by every `submit` (`reserve`, below, runs while the
         // submitter holds `inner`) and by every `live_bytes`. Same hoist as `SharedCore::store`.
         let sum = crate::vm::core::outcome_summary(&outcome);
-        core.eager
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .finish(idx, sum, outcome);
+        // W7-26r — the finishing job is the only party that can observe the cap while the submitter
+        // sits in `shutdown()`'s join (see `core::halt_over_backlog`). `bytes` is this executor's
+        // whole retained backlog INCLUDING this outcome, so the trip means the results alone are
+        // over the cap; the replacement outcome is the same size, leaving `sum` accurate.
+        let over = {
+            let mut g = core.eager.lock().unwrap_or_else(|e| e.into_inner());
+            let backlog = g.summary().0 + sum.0;
+            let (outcome, over) = crate::vm::core::halt_over_backlog(outcome, backlog, mem_cap);
+            g.finish(idx, sum, outcome);
+            over
+        };
+        if over {
+            // Stop the siblings still feeding the backlog — the `shutdown_now` idiom (D4: cooperative,
+            // a job with no cancellation point still runs to completion). Without it the remaining
+            // jobs keep allocating while the join drains, which is what the abort exists to prevent.
+            core.cancel
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+        }
         core.eager_cv.notify_all();
     }));
 }

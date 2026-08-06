@@ -798,6 +798,33 @@ impl Heap {
     /// gate — not precise allocator accounting (Map/Set count entries backing only, not the index),
     /// but stable enough to compare before/after on a fixed workload.
     pub fn live_bytes(&self) -> usize {
+        self.bytes_in(true)
+    }
+
+    /// W7-26r sibling — this heap's OWN allocation: [`live_bytes`](Heap::live_bytes) minus every
+    /// `Arc`-shared core payload. Used to charge a queued job's freshly built worker heap to its
+    /// submitter, where the full walk would be wrong twice over.
+    ///
+    /// **Aliasing.** A `Channel`/`Shared`/`RwShared`/`Atomic`/`Executor` crosses the airlock as a
+    /// SHARED `Arc`, not a copy — so a captured `Shared` holding 1 MB is one allocation that the
+    /// submitter's own `live_bytes` already counts. Charging it again per queued job made 60 jobs
+    /// report 60 MB against a true 3.8 MB (a false OVER-MEMORY at a 20 MB cap; found by adversarial
+    /// review). What a submit really ADDS is the deep-copied plain data, which is exactly what this
+    /// counts.
+    ///
+    /// **Locks.** Taking none is also what makes this callable from the submit path at all: the core
+    /// arms of the full walk take `core.inner` / `core.q`, and `Vm::executor_method` reaches this
+    /// while holding `core.inner` — `std::sync::Mutex` is not reentrant, so a job capturing its own
+    /// executor self-deadlocked (measured: hang, rc=124, under a cap only). The call site is off the
+    /// lock now as well; this is the belt to that braces.
+    pub fn own_bytes(&self) -> usize {
+        self.bytes_in(false)
+    }
+
+    /// The shared body of [`live_bytes`](Heap::live_bytes) / [`own_bytes`](Heap::own_bytes):
+    /// `include_cores` decides whether an `Arc`-shared core's payload is charged to this heap (the
+    /// reachability question) or skipped entirely (the "what does this heap itself own" question).
+    fn bytes_in(&self, include_cores: bool) -> usize {
         let mut total = 0usize;
         // W6-10 — an off-heap wire payload belongs to ONE `Arc` core, but `from_wire` mints a FRESH
         // `Obj::Channel`/`Shared`/… slot for every crossing, so a heap can hold K alias slots for one
@@ -848,7 +875,7 @@ impl Heap {
                 // W6-10r — under a cap the charge also RECURSES into the cores nested in this one's
                 // payload, sharing the same `cores` set so a nested core that *also* has an alias
                 // slot here is still charged exactly once, whichever way it is met first.
-                Obj::Channel(core) if cores.insert(Arc::as_ptr(core) as usize) => {
+                Obj::Channel(core) if include_cores && cores.insert(Arc::as_ptr(core) as usize) => {
                     let g = core.q.lock().unwrap();
                     if deep {
                         crate::vm::core::queue_bytes_deep(g.summary(), g.iter(), &mut cores)
@@ -876,7 +903,9 @@ impl Heap {
                 // Rooting is deliberately NOT mirrored: a job's return value crossed by value with
                 // no parent-heap `GcRef` (B3.2, enforced by `ensure_crossable` and fenced by a
                 // `debug_assert` in `outcome_summary`), which is why `children` has no `eager` arm.
-                Obj::Executor(core) if cores.insert(Arc::as_ptr(core) as usize) => {
+                Obj::Executor(core)
+                    if include_cores && cores.insert(Arc::as_ptr(core) as usize) =>
+                {
                     let queued = {
                         let g = core.inner.lock().unwrap();
                         if deep {
@@ -886,14 +915,22 @@ impl Heap {
                         }
                     };
                     let g = core.eager.lock().unwrap_or_else(|e| e.into_inner());
+                    // W7-26r sibling — plus the jobs this executor has DISPATCHED BUT NOT STARTED.
+                    // Each is a fully built worker heap parked in the process-global pool queue,
+                    // owned by no heap and so counted nowhere: 300 of them summing to 666 MB sailed
+                    // past an 8 MB cap while every individual heap stayed well under it. The
+                    // submitter owns them until the pool picks them up (`ExecutorCore::pending`),
+                    // and `Relaxed` is enough — this is a size estimate sampled at a sweep, not a
+                    // synchronization edge.
                     queued
+                        + core.pending.load(std::sync::atomic::Ordering::Relaxed)
                         + if deep {
                             crate::vm::core::queue_bytes_deep(g.summary(), g.values(), &mut cores)
                         } else {
                             g.summary().0
                         }
                 }
-                Obj::Shared(core) if cores.insert(Arc::as_ptr(core) as usize) => {
+                Obj::Shared(core) if include_cores && cores.insert(Arc::as_ptr(core) as usize) => {
                     if deep {
                         crate::vm::core::value_core_bytes_deep(
                             &core.summary,
@@ -904,7 +941,9 @@ impl Heap {
                         core.summary.bytes()
                     }
                 }
-                Obj::RwShared(core) if cores.insert(Arc::as_ptr(core) as usize) => {
+                Obj::RwShared(core)
+                    if include_cores && cores.insert(Arc::as_ptr(core) as usize) =>
+                {
                     if deep {
                         crate::vm::core::value_core_bytes_deep(
                             &core.summary,
@@ -915,7 +954,7 @@ impl Heap {
                         core.summary.bytes()
                     }
                 }
-                Obj::Atomic(core) if cores.insert(Arc::as_ptr(core) as usize) => {
+                Obj::Atomic(core) if include_cores && cores.insert(Arc::as_ptr(core) as usize) => {
                     if deep {
                         crate::vm::core::value_core_bytes_deep(
                             &core.summary,

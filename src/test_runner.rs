@@ -1312,6 +1312,189 @@ struct Suite:
         );
     }
 
+    /// W7-26r — the cap must be observed while the parent fiber is BLOCKED IN A JOIN, where it
+    /// reaches no instruction boundary and so never sweeps. Both programs below build their payload
+    /// inside the task (nothing is captured, so the parent wires ~nothing at spawn/submit and has
+    /// nothing to trigger a GC on) and hold it as buffered OUTPUT, which is retained to the join for
+    /// the task-order flush (W7-5c). Measured on the release binary against an 8 MB cap, ~1 MB × 300:
+    /// **PASS at 622 MB** (executor) and **PASS at 733 MB** (nursery) — the nursery half was counted
+    /// NOWHERE at all, its slots living outside every `Heap`.
+    ///
+    /// The fix puts the observation on the producer, which is where both owning ancestors put it
+    /// (measured 2026-08-06): CPython's `ThreadPoolExecutor` under a 300 MB `RLIMIT_AS` raised
+    /// `MemoryError` in the WORKER at job 57/500 while `main` sat in `ex.shutdown()`; Go 1.26 under
+    /// `GOMEMLIMIT=32MiB` ran 7 GC cycles while `main` was blocked in `wg.Wait()`.
+    ///
+    /// M:N only (`--max-heap` is refused with `--serial`). Payload here is ~100 KB × 300 = ~30 MB of
+    /// backlog against the same 8 MB cap — enough to trip several times over without making the test
+    /// suite carry the 700 MB repro.
+    #[test]
+    fn over_memory_trips_while_the_parent_is_blocked_in_a_join() {
+        const CAP: usize = 8_000_000;
+        // `noisy()` captures NOTHING: it builds ~100 KB and prints it, so the retained bytes appear
+        // only after the parent has already blocked in its join.
+        let noisy = "fn noisy():\n    parts: List[str] = []\n    \
+                     for k in range(10000):\n        parts.push(\"0123456789\")\n    \
+                     print(\"\".join(parts))\n\n";
+        let d = TmpDir::new();
+        let ex = d.write(
+            "join_test.chz",
+            &format!(
+                "import std.concurrency\n\n{noisy}test fn exjoin():\n    ex := Executor()\n    \
+                 for i in range(300):\n        ex.submit(noisy)\n    ex.shutdown()\n    assert true\n"
+            ),
+        );
+        let d2 = TmpDir::new();
+        let nursery = d2.write(
+            "nurs_test.chz",
+            &format!(
+                "{noisy}test fn nursjoin():\n    parallel:\n        for i in range(300):\n            \
+                 spawn noisy()\n    assert true\n"
+            ),
+        );
+        for (label, f) in [("exjoin", &ex), ("nursjoin", &nursery)] {
+            let report = run_tests_capped(f, true, CAP);
+            assert!(
+                report.text.contains(&format!("OVER-MEMORY {label}")),
+                "a backlog grown entirely while the parent is blocked in its join must trip the cap \
+                 ({label}); report head:\n{}",
+                &report.text[..report.text.len().min(2000)]
+            );
+            assert!(
+                !report.text.contains(&format!("FAIL {label}"))
+                    && !report.text.contains(&format!("ERROR {label}")),
+                "must be OVER-MEMORY, not FAIL/ERROR ({label}); report head:\n{}",
+                &report.text[..report.text.len().min(2000)]
+            );
+            // The negative direction: the trip needs the RETAINED BACKLOG ALONE to exceed the whole
+            // cap, so the identical program under a generous one must still run to completion.
+            let generous = run_tests_capped(f, true, 4_000_000_000);
+            assert!(
+                generous.text.contains(&format!("PASS {label}")),
+                "the same program under a generous cap must still PASS ({label}); report head:\n{}",
+                &generous.text[..generous.text.len().min(2000)]
+            );
+        }
+    }
+
+    /// W7-26r's sibling — a job DISPATCHED BUT NOT STARTED is owned by no heap. `prepare_eager_job`
+    /// rebuilds each submitted closure into its own worker `Vm` at submit time, so a queue deeper
+    /// than the pool is N fully-built worker heaps sitting in `vm::pool`'s global FIFO: every one of
+    /// them comfortably under a per-heap `--max-heap`, and their sum charged to nobody. Measured on
+    /// the release binary, 300 slow jobs each capturing ~1 MB: **PASS, rc=0, peak RSS 666 MB**
+    /// against an 8 MB cap. The submitter owns them until the pool picks them up
+    /// (`ExecutorCore::pending`), and — the W6-10 lesson yet again — the same bytes ALSO pace the
+    /// submitter's sweeps, without which they were counted and never looked at (measured: still PASS
+    /// at 666 MB with the accounting alone, because a loop submitting slow jobs finishes none of
+    /// them and allocates almost nothing itself).
+    ///
+    /// The job body must OUTLAST the submit loop, or there is no queue to miss.
+    ///
+    /// **The control below is sized, not timed, and that distinction is the lesson.** The obvious
+    /// control — the same 1 MB capture with a fast body, asserting the pool keeps up — FAILED in the
+    /// full suite: under load the pool falls behind, ~48 jobs really do queue, and ~48 MB really is
+    /// live, so the trip was CORRECT and the assertion was wrong. A cap verdict that depends on how
+    /// busy the machine is, is honest (both ancestors are load-dependent the same way: a backed-up
+    /// `ThreadPoolExecutor` queue really does hold more memory) but it cannot be asserted on. So the
+    /// control shrinks the CAPTURE instead: even if every one of the 60 jobs queues at once, the
+    /// total is far under the cap, and no scheduling outcome can trip it.
+    #[test]
+    fn over_memory_counts_jobs_queued_but_not_started() {
+        const CAP: usize = 8_000_000;
+        // Only the jobs the pool has NOT started count, so the trip needs the queue to outgrow the
+        // worker threads — hence a body that outlasts the submit loop.
+        let prog = |blob_len: usize, body: &str| {
+            format!(
+                "import std.concurrency\nimport std.time\n\ntest fn queued():\n    \
+                 parts: List[str] = []\n    \
+                 for i in range({blob_len}):\n        parts.push(\"0123456789\")\n    \
+                 blob := \"\".join(parts)\n    fn job() -> int:\n{body}\n    \
+                 ex := Executor()\n    for i in range(60):\n        ex.submit(job)\n    \
+                 ex.shutdown()\n    assert true\n"
+            )
+        };
+        let d = TmpDir::new();
+        // A `sleep_ms` body rather than a busy loop: it holds its pool thread just as effectively
+        // (an eager job runs on a plain `Vm`, so the wait blocks that thread) while costing no CPU —
+        // this test otherwise loaded the machine enough to flake the suite's wall-clock tests.
+        let slow = d.write(
+            "slow_test.chz",
+            // ~1 MB per job × the ~48 that cannot start at once — many times the cap.
+            &prog(
+                100_000,
+                "        time.sleep_ms(60)\n        return blob.len()",
+            ),
+        );
+        let report = run_tests_capped(&slow, true, CAP);
+        assert!(
+            report.text.contains("OVER-MEMORY queued"),
+            "jobs queued but not started must be charged to the submitter; report head:\n{}",
+            &report.text[..report.text.len().min(2000)]
+        );
+        let generous = run_tests_capped(&slow, true, 4_000_000_000);
+        assert!(
+            generous.text.contains("PASS queued"),
+            "the same program under a generous cap must still PASS; report head:\n{}",
+            &generous.text[..generous.text.len().min(2000)]
+        );
+        // Control: the same 60 queued jobs holding the same pool threads, but a ~10 KB capture — the
+        // whole queue is well under the cap however the scheduler orders it, so this run may never
+        // trip. It is what proves the charge above is a MEASUREMENT and not "an executor with a
+        // queue is over the cap".
+        let d2 = TmpDir::new();
+        let small = d2.write(
+            "small_test.chz",
+            &prog(
+                1_000,
+                "        time.sleep_ms(60)\n        return blob.len()",
+            ),
+        );
+        let report = run_tests_capped(&small, true, CAP);
+        assert!(
+            report.text.contains("PASS queued"),
+            "a queue whose whole contents fit under the cap must not trip; report head:\n{}",
+            &report.text[..report.text.len().min(2000)]
+        );
+        // Adversarial-review regression #1 — the charge must not count `Arc`-SHARED core payloads.
+        // A captured `Shared` is ONE allocation the submitter already counts; charging it per queued
+        // job made 60 jobs holding one ~1 MB box report ~60 MB and trip a 20 MB cap while the true
+        // peak was 3.8 MB. `Heap::own_bytes` (not `live_bytes`) is what keeps this PASS.
+        let d3 = TmpDir::new();
+        let shared = d3.write(
+            "shared_test.chz",
+            "import std.concurrency\nimport std.time\n\ntest fn queued():\n    \
+             parts: List[str] = []\n    for i in range(100000):\n        \
+             parts.push(\"0123456789\")\n    box := Shared(\"\".join(parts))\n    \
+             fn job() -> int:\n        time.sleep_ms(60)\n        return box.get().len()\n    \
+             ex := Executor()\n    for i in range(60):\n        ex.submit(job)\n    \
+             ex.shutdown()\n    assert true\n",
+        );
+        let report = run_tests_capped(&shared, true, 20_000_000);
+        assert!(
+            report.text.contains("PASS queued"),
+            "60 queued jobs sharing ONE ~1 MB box hold ~1 MB, not ~60 MB; report head:\n{}",
+            &report.text[..report.text.len().min(2000)]
+        );
+        // Adversarial-review regression #2 — measuring the new worker must take NO executor lock and
+        // must run OFF `core.inner`, which `submit` holds while dispatching. A job capturing its own
+        // executor puts an `Obj::Executor` over that same core into the worker heap, and the full
+        // `live_bytes` walk re-takes `core.inner`: `std::sync::Mutex` is not reentrant, so this
+        // program HUNG (rc=124) under a cap and only under a cap.
+        let d4 = TmpDir::new();
+        let selfcap = d4.write(
+            "selfcap_test.chz",
+            "import std.concurrency\n\ntest fn queued():\n    ex := Executor()\n    \
+             fn job() -> int:\n        mine := ex\n        return 1\n    \
+             ex.submit(job)\n    ex.shutdown()\n    assert true\n",
+        );
+        let report = run_tests_capped(&selfcap, true, CAP);
+        assert!(
+            report.text.contains("PASS queued"),
+            "a job capturing its own executor must not deadlock the submit; report head:\n{}",
+            &report.text[..report.text.len().min(2000)]
+        );
+    }
+
     /// W6-10r — the same backlog, reachable only through a NESTED core. `live_bytes` reaches a
     /// core's bytes through its `Obj::*` alias slot; the channel here has none once `make()`'s frame
     /// dies, so its 300 MB used to be counted nowhere and PASSED an 8 MB cap (measured on the release
