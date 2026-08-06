@@ -2466,9 +2466,20 @@ print('single quotes work too: {name}, with \'apostrophe\' and \u{2728}')
 print("literal {{x}} vs value {x}")
 ```
 
-**What goes inside `{…}`.** Any expression. The fragment scanner is **quote- and depth-aware**, so a
-`}` inside a nested string literal or inside `(`/`[`/`{` belongs to the expression rather than
-closing the fragment; whitespace padding around the fragment is insignificant.
+**What goes inside `{…}`.** Any expression, with no second-class rules — a call in a fragment takes
+**named arguments, defaults, and variadics** exactly like the same call written outside the string
+(fragments are parsed with the rest of the module, before call arguments are normalized). The
+fragment scanner is **quote- and depth-aware**, so a `}` inside a nested string literal or inside
+`(`/`[`/`{` belongs to the expression rather than closing the fragment; whitespace padding around the
+fragment is insignificant.
+
+```chezzi
+fn greet(name: str, greeting: str = "hi") -> str:
+    return "{greeting}, {name}"
+
+print("{greet('ada')}")              # hi, ada          ← default applies inside a string
+print("{greet(greeting='yo', name='ada')}")   # yo, ada ← named args, any order
+```
 
 ```chezzi
 print("{ {1, 2}.len() }")     # 2          ← set literal's brace is nested, and padding is fine

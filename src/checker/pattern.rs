@@ -1182,41 +1182,49 @@ impl Checker {
     /// column). Always returns `Ty::Str`.
     pub(super) fn check_interpolation(&mut self, raw: &str, span: Span) -> Ty {
         match crate::interpolation::parse_interpolation(raw, span) {
-            Ok(chunks) => {
-                // A value+keyword call inside a `{…}` fragment is keyed by (string span, fragment
-                // ordinal) so two fragments whose first named-arg value shares a fragment-relative
-                // column don't alias one table slot (each fragment is re-lexed from a fresh source).
-                // Save/restore for nested interpolations. The compiler/interp keep the identical pair.
-                let saved_ctx = self.kw_frag_ctx;
-                let saved_ord = self.kw_frag_ord;
-                let mut ord = 0usize;
-                for chunk in chunks {
-                    if let crate::interpolation::Chunk::Expr(mut e, spec) = chunk {
-                        self.kw_frag_ctx = span;
-                        self.kw_frag_ord = ord;
-                        // Anchor the fragment root at the string literal so a nil-fragment error
-                        // points at the literal, not the `(1,1)` fragment-relative fallback.
-                        e.span = span;
-                        let ty = self.infer_value(&e);
-                        // Static format-spec/value-type check: when the value is a CONCRETE scalar
-                        // and the spec is provably wrong for it, reject at COMPILE time (same wording
-                        // the runtime backstop would emit — single-sourced in `fmtspec`). Only fires
-                        // for Int/Float/Str/Bool; Unknown, a generic `Param(T)`, protocols, structs,
-                        // lists, bytes, ... all fall through and keep the runtime backstop.
-                        if let Some(fs) = &spec
-                            && let Some(kind) = scalar_kind_of(&ty)
-                            && let Err(msg) = crate::fmtspec::spec_valid_for_scalar(fs, kind)
-                        {
-                            self.error(span, msg);
-                        }
-                        ord += 1;
-                    }
-                }
-                self.kw_frag_ctx = saved_ctx;
-                self.kw_frag_ord = saved_ord;
+            Ok(chunks) => self.check_interp_chunks(&chunks, span),
+            Err(e) => {
+                self.error(span, e.message);
+                Ty::Str
             }
-            Err(e) => self.error(span, e.message),
         }
+    }
+
+    /// Check an already-parsed interpolation's chunks — the desugared [`ExprKind::Interp`] path, and
+    /// the body of [`Self::check_interpolation`]'s fallback. Always returns `Ty::Str`.
+    pub(super) fn check_interp_chunks(&mut self, chunks: &[crate::ast::Chunk], span: Span) -> Ty {
+        // A value+keyword call inside a `{…}` fragment is keyed by (string span, fragment
+        // ordinal) so two fragments whose first named-arg value shares a fragment-relative
+        // column don't alias one table slot (each fragment is re-lexed from a fresh source).
+        // Save/restore for nested interpolations. The compiler keeps the identical pair.
+        let saved_ctx = self.kw_frag_ctx;
+        let saved_ord = self.kw_frag_ord;
+        let mut ord = 0usize;
+        for chunk in chunks {
+            if let crate::ast::Chunk::Expr(e, spec) = chunk {
+                self.kw_frag_ctx = span;
+                self.kw_frag_ord = ord;
+                // Anchor the fragment root at the string literal so a nil-fragment error
+                // points at the literal, not the `(1,1)` fragment-relative fallback.
+                let mut e = e.clone();
+                e.span = span;
+                let ty = self.infer_value(&e);
+                // Static format-spec/value-type check: when the value is a CONCRETE scalar
+                // and the spec is provably wrong for it, reject at COMPILE time (same wording
+                // the runtime backstop would emit — single-sourced in `fmtspec`). Only fires
+                // for Int/Float/Str/Bool; Unknown, a generic `Param(T)`, protocols, structs,
+                // lists, bytes, ... all fall through and keep the runtime backstop.
+                if let Some(fs) = spec
+                    && let Some(kind) = scalar_kind_of(&ty)
+                    && let Err(msg) = crate::fmtspec::spec_valid_for_scalar(fs, kind)
+                {
+                    self.error(span, msg);
+                }
+                ord += 1;
+            }
+        }
+        self.kw_frag_ctx = saved_ctx;
+        self.kw_frag_ord = saved_ord;
         Ty::Str
     }
 
@@ -1259,6 +1267,9 @@ impl Checker {
             ExprKind::Int(_) => Ty::Int,
             ExprKind::Float(_) => Ty::Float,
             ExprKind::Str(raw) => self.check_interpolation(raw, expr.span),
+            // The desugared form: fragments are real children, already normalized (named/default/
+            // variadic args). `Str` above is only the brace-free or malformed remainder.
+            ExprKind::Interp(chunks) => self.check_interp_chunks(chunks, expr.span),
             ExprKind::RawStr(_) => Ty::Str, // verbatim `str`, no interpolation to check
             ExprKind::Bytes(_) => Ty::Bytes,
             ExprKind::Bool(_) => Ty::Bool,
@@ -1516,6 +1527,9 @@ impl Checker {
             ExprKind::Int(_)
             | ExprKind::Float(_)
             | ExprKind::Str(_)
+            // An interpolated literal hovers as one `str` literal, like its un-desugared `Str` form
+            // (its fragments record their own hovers when inferred).
+            | ExprKind::Interp(_)
             | ExprKind::RawStr(_)
             | ExprKind::Bytes(_)
             | ExprKind::Bool(_) => self.hover_record_at(expr.span, ty, HoverKind::Literal, None),
@@ -3279,9 +3293,17 @@ impl Checker {
             ExprKind::Str(raw) => {
                 if let Ok(chunks) = crate::interpolation::parse_interpolation(raw, e.span) {
                     for chunk in &chunks {
-                        if let crate::interpolation::Chunk::Expr(frag, _) = chunk {
+                        if let crate::ast::Chunk::Expr(frag, _) = chunk {
                             self.scan_expr_for_pin(name, frag, match_pin, member_pin);
                         }
+                    }
+                }
+            }
+            // The desugared form — the fragments are already parsed children here.
+            ExprKind::Interp(chunks) => {
+                for chunk in chunks {
+                    if let crate::ast::Chunk::Expr(frag, _) = chunk {
+                        self.scan_expr_for_pin(name, frag, match_pin, member_pin);
                     }
                 }
             }

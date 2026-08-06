@@ -16,20 +16,16 @@ use crate::ast::{Expr, Span};
 use crate::lexer;
 use crate::parser;
 
+/// Re-export: a parsed chunk lives in the AST (`ExprKind::Interp` carries them), so `desugar` can
+/// store what this parser produced instead of every consumer re-parsing the raw text.
+pub(crate) use crate::ast::Chunk;
+
 /// A neutral interpolation-parse error: a message and the (whole-string) span. Callers map this to
 /// their own error type.
 #[derive(Debug)]
 pub(crate) struct InterpError {
     pub message: String,
     pub span: Span,
-}
-
-#[derive(Debug)]
-pub(crate) enum Chunk {
-    Lit(String),
-    /// An interpolated `{expr}` or `{expr:spec}`; the format spec (parsed at compile time) is
-    /// `None` for a bare `{expr}`.
-    Expr(Expr, Option<crate::fmtspec::FormatSpec>),
 }
 
 /// Split an interpolated string literal into literal/expr chunks, mirroring `interp::interpolate`

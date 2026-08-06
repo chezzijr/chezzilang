@@ -17,8 +17,8 @@
 //! (mirroring the checker, which treats a call as a named function only when the name is not a local).
 
 use crate::ast::{
-    Block, DeferTarget, Expr, ExprKind, Import, MatchExprArm, Module, OptCall, Param, Pattern,
-    Span, SpawnTarget, Stmt, StmtKind, Type, WaitArmKind, WaitTarget,
+    Block, Chunk, DeferTarget, Expr, ExprKind, Import, MatchExprArm, Module, OptCall, Param,
+    Pattern, Span, SpawnTarget, Stmt, StmtKind, Type, WaitArmKind, WaitTarget,
 };
 use crate::resolver::{ModuleGraph, ModuleId, ResolveError};
 use std::collections::{HashMap, HashSet};
@@ -471,6 +471,14 @@ fn walk_idents(e: &Expr, f: &mut impl FnMut(&str)) {
         // A type-application head names a TYPE (not a value reference); its args are `Type`s.
         | ExprKind::TypeApply { .. }
         | ExprKind::Bool(_) => {}
+        // A fragment identifier IS a reference (`"{a}"` reads `a`), so descend. Only reachable
+        // after `desugar` has rewritten the literal — `validate_defaults` runs before that and sees
+        // the raw `Str` above, where a fragment reference is caught later by the checker instead.
+        ExprKind::Interp(chunks) => chunks.iter().for_each(|c| {
+            if let Chunk::Expr(e, _) = c {
+                walk_idents(e, f)
+            }
+        }),
         ExprKind::List(xs) | ExprKind::Tuple(xs) | ExprKind::Set(xs) => {
             xs.iter().for_each(|x| walk_idents(x, f))
         }
@@ -1163,6 +1171,25 @@ impl Walker<'_> {
                 return self.walk_expr(expr);
             }
             ExprKind::Ident(_) => {}
+            // A string literal carrying `{…}` is PARSED HERE, once, into `ExprKind::Interp` — before
+            // the normalization below runs. That is the whole point: a fragment call gets named
+            // args / defaults / variadic sweeping exactly like any other call, in THIS scope (so a
+            // local shadowing a fn name still wins), instead of being re-parsed after the pass by
+            // each consumer. A malformed interpolation stays an `ExprKind::Str`, so the checker and
+            // compiler still report it with their existing message and span.
+            ExprKind::Str(raw) if raw.contains('{') || raw.contains('}') => {
+                if let Ok(chunks) = crate::interpolation::parse_interpolation(raw, expr.span) {
+                    expr.kind = ExprKind::Interp(chunks);
+                    return self.walk_expr(expr);
+                }
+            }
+            ExprKind::Interp(chunks) => {
+                for c in chunks.iter_mut() {
+                    if let crate::ast::Chunk::Expr(e, _) = c {
+                        self.walk_expr(e)?;
+                    }
+                }
+            }
             // Leaves.
             ExprKind::Int(_)
             | ExprKind::Float(_)

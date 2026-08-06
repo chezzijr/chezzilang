@@ -3363,6 +3363,8 @@ impl Compiler {
             ExprKind::Float(x) => fc.emit(Op::ConstFloat(*x), expr.span),
             ExprKind::Bool(b) => fc.emit(if *b { Op::True } else { Op::False }, expr.span),
             ExprKind::Str(raw) => self.compile_str(fc, raw, expr.span)?,
+            // The desugared form: fragments are already-parsed, already-normalized children.
+            ExprKind::Interp(chunks) => self.compile_interp(fc, chunks, expr.span)?,
             // Raw string: emit the literal directly — does NOT go through `compile_str` /
             // `parse_interpolation`, so braces stay literal and backslashes are verbatim.
             ExprKind::RawStr(s) => fc.emit(Op::ConstStr(s.clone()), expr.span),
@@ -4698,7 +4700,18 @@ impl Compiler {
             message: e.message,
             span: e.span,
         })?;
-        if let [Chunk::Lit(s)] = chunks.as_slice() {
+        self.compile_interp(fc, &chunks, span)
+    }
+
+    /// Emit an already-parsed interpolation — the desugared [`ExprKind::Interp`] path, and the body
+    /// of [`Self::compile_str`]'s fallback for a literal `desugar` left un-parsed.
+    fn compile_interp(
+        &mut self,
+        fc: &mut FnComp,
+        chunks: &[Chunk],
+        span: Span,
+    ) -> Result<(), CompileError> {
+        if let [Chunk::Lit(s)] = chunks {
             fc.emit(Op::ConstStr(s.clone()), span);
             return Ok(());
         }
@@ -4715,14 +4728,14 @@ impl Compiler {
         let mut ord = 0usize;
         for chunk in chunks {
             match chunk {
-                Chunk::Lit(s) => fc.emit(Op::ConstStr(s), span),
+                Chunk::Lit(s) => fc.emit(Op::ConstStr(s.clone()), span),
                 Chunk::Expr(e, spec) => {
                     self.kw_frag_ctx = span;
                     self.kw_frag_ord = ord;
-                    self.compile_expr(fc, &e)?;
+                    self.compile_expr(fc, e)?;
                     match spec {
                         None => fc.emit(Op::ToStr, span),
-                        Some(fs) => fc.emit(Op::ToStrFmt(Box::new(fs)), span),
+                        Some(fs) => fc.emit(Op::ToStrFmt(Box::new(fs.clone())), span),
                     }
                     ord += 1;
                 }
@@ -5114,6 +5127,15 @@ fn find_boundary_free_block(stmts: &[Stmt], out: &mut HashSet<String>) {
 /// as a free variable (and therefore boxed) — the interpolation exprs are embedded in the `Str`
 /// literal and parsed at compile time, so the AST walk would otherwise miss them. A malformed
 /// interpolation yields no exprs here; the real `compile_str` surfaces that error.
+/// The fragment expressions of an already-parsed interpolation (`ExprKind::Interp`) — the desugared
+/// counterpart of [`interp_exprs`], with no re-parse.
+fn chunk_exprs(chunks: &[Chunk]) -> impl Iterator<Item = &Expr> {
+    chunks.iter().filter_map(|c| match c {
+        Chunk::Expr(e, _) => Some(e),
+        Chunk::Lit(_) => None,
+    })
+}
+
 fn interp_exprs(raw: &str) -> Vec<Expr> {
     match parse_interpolation(raw, Span { line: 1, col: 1 }) {
         Ok(chunks) => chunks
@@ -5139,6 +5161,11 @@ fn find_boundary_free_expr(e: &Expr, out: &mut HashSet<String>) {
         ExprKind::Str(raw) => {
             for ie in interp_exprs(raw) {
                 find_boundary_free_expr(&ie, out);
+            }
+        }
+        ExprKind::Interp(chunks) => {
+            for ie in chunk_exprs(chunks) {
+                find_boundary_free_expr(ie, out);
             }
         }
         ExprKind::Int(_)
@@ -5375,6 +5402,11 @@ pub(crate) fn free_names_expr(e: &Expr, bound: &HashSet<String>, out: &mut HashS
                 free_names_expr(&ie, bound, out);
             }
         }
+        ExprKind::Interp(chunks) => {
+            for ie in chunk_exprs(chunks) {
+                free_names_expr(ie, bound, out);
+            }
+        }
         ExprKind::Int(_)
         | ExprKind::Float(_)
         | ExprKind::Bytes(_)
@@ -5501,6 +5533,11 @@ fn collect_frame_binds_expr(e: &Expr, out: &mut HashSet<String>) {
         ExprKind::Str(raw) => {
             for ie in interp_exprs(raw) {
                 collect_frame_binds_expr(&ie, out);
+            }
+        }
+        ExprKind::Interp(chunks) => {
+            for ie in chunk_exprs(chunks) {
+                collect_frame_binds_expr(ie, out);
             }
         }
         ExprKind::Int(_)

@@ -834,11 +834,30 @@ pub struct Expr {
     pub span: Span,
 }
 
+/// One piece of an interpolated string literal ([`ExprKind::Interp`]): either literal text or a
+/// `{expr}` / `{expr:spec}` fragment (the format spec is parsed at compile time; `None` for a bare
+/// `{expr}`). Built by [`crate::interpolation::parse_interpolation`].
+#[derive(Debug, Clone, PartialEq)]
+pub enum Chunk {
+    Lit(String),
+    Expr(Expr, Option<crate::fmtspec::FormatSpec>),
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum ExprKind {
     Int(i64),
     Float(f64),
-    Str(String), // raw contents; interpolation parsing deferred
+    /// A string literal's raw (post-escape) contents. The PARSER always produces this; the
+    /// [`desugar`](crate::desugar) pass rewrites any literal carrying a `{…}` interpolation into
+    /// [`ExprKind::Interp`], so what survives here is a brace-free literal — or one whose
+    /// interpolation failed to parse, left intact so the checker/compiler report it.
+    Str(String),
+    /// An interpolated string literal, split into literal/expression [`Chunk`]s. **Produced by
+    /// `desugar`, never by the parser**: the fragments must become real AST children BEFORE call
+    /// arguments are normalized, or named/default/variadic arguments never reach a fragment call
+    /// (`docs/gaps.md` §W7-24) — and every later walker sees the fragments as ordinary children
+    /// instead of having to re-parse the raw text.
+    Interp(Vec<Chunk>),
     /// `b"..."` — a byte-string literal: the resolved raw bytes. No interpolation (unlike `Str`).
     Bytes(Vec<u8>),
     /// `r"..."` / `r"""..."""` — a raw-string literal: verbatim contents. NO interpolation (braces
@@ -1072,6 +1091,12 @@ pub fn expr_recover_blocks<'a>(e: &'a Expr, out: &mut Vec<&'a Block>) {
         | ExprKind::Ident(_)
         // A type-application head carries only `Type`s (no sub-expressions, no recover blocks).
         | ExprKind::TypeApply { .. } => {}
+        // An interpolation fragment is an ordinary expression — it can hold a `recover:` too.
+        ExprKind::Interp(chunks) => chunks.iter().for_each(|c| {
+            if let Chunk::Expr(e, _) = c {
+                expr_recover_blocks(e, out);
+            }
+        }),
         ExprKind::List(es) | ExprKind::Tuple(es) | ExprKind::Set(es) => es.iter().for_each(go),
         ExprKind::Map(pairs) => pairs.iter().for_each(|(k, v)| {
             expr_recover_blocks(k, out);

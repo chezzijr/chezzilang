@@ -37,3 +37,61 @@ test fn colon_in_quoted_key_is_not_a_spec():
     m := {"a:b": 4}
     assert "{m['a:b']}" == "4"
     assert "{m['a:b']:>3}" == "  4"
+
+# ---- a fragment is a first-class expression: call arguments are normalized ----
+#
+# `desugar` rewrites an interpolated literal into parsed fragments BEFORE it normalizes calls, so
+# named args, defaults, and variadic sweeping reach a fragment call exactly as they reach any other
+# (W7-24). Before that, every one of these was a type error inside a string and worked outside it.
+
+fn with_default(a: int, b: int = 2) -> int:
+    return a + b
+
+fn sub(x: int, y: int) -> int:
+    return x - y
+
+fn sum_all(...xs: int) -> int:
+    t := 0
+    for x in xs:
+        t = t + x
+    return t
+
+struct Point:
+    x: int
+    y: int = 5
+
+struct Counter:
+    v: int
+
+    fn bump(self, n: int, m: int = 3) -> int:
+        return self.v + n + m
+
+test fn fragment_free_fn_default():
+    assert "{with_default(1)}" == "3"
+    assert "{with_default(1, 10)}" == "11"
+
+test fn fragment_named_args():
+    assert "{sub(y=1, x=10)}" == "9"
+    assert "{sub(x=10, y=1)}" == "9"
+    assert "{with_default(b=10, a=1)}" == "11"
+
+test fn fragment_struct_ctor_default():
+    assert "{Point(x=1).y}" == "5"
+
+test fn fragment_method_default():
+    c := Counter(v=1)
+    assert "{c.bump(2)}" == "6"
+
+test fn fragment_variadic():
+    assert "{sum_all(1, 2, 3)}" == "6"
+    assert "{sum_all()}" == "0"
+
+test fn fragment_nested_call_defaults():
+    assert "{with_default(with_default(1))}" == "5"
+
+test fn fragment_local_shadows_fn_name():
+    # A local binding shadows the module fn, so the call is a plain closure call — normalization
+    # must NOT splice `with_default`'s default into it. Same rule inside a string as outside.
+    with_default := fn(a: int) -> int: a * 100
+    assert with_default(1) == 100
+    assert "{with_default(1)}" == "100"

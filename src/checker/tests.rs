@@ -19800,3 +19800,64 @@ fn module_missing_member_call_message_unchanged() {
         "module 'l' has no member 'NOPE'",
     );
 }
+
+// ===== W7-24 — an interpolation fragment is a normalized call site like any other =====
+
+/// Named args / defaults / variadic sweeping reach a call inside `"{…}"`. Before `desugar` parsed
+/// fragments (they were re-parsed AFTER the normalization pass), every one of these was a type
+/// error inside a string while the identical call outside one type-checked.
+#[test]
+fn interpolation_fragment_call_args_are_normalized() {
+    ok_desugared("fn f(a: int, b: int = 2) -> int:\n    return a + b\nprint(\"{f(1)}\")\n");
+    ok_desugared("fn s(x: int, y: int) -> int:\n    return x - y\nprint(\"{s(y=1, x=10)}\")\n");
+    ok_desugared("fn v(...xs: int) -> int:\n    return xs.len()\nprint(\"{v(1, 2, 3)}\")\n");
+    ok_desugared("struct P:\n    x: int\n    y: int = 5\nprint(\"{P(x=1).y}\")\n");
+}
+
+/// …and the rule did not go permissive: a genuinely wrong-arity fragment call is still rejected,
+/// now with the ACCURATE count (the pre-fix diagnostic for a named-arg call said "got 0", because
+/// the named args had never been converted to positional ones).
+#[test]
+fn interpolation_fragment_wrong_arity_still_rejected_with_real_count() {
+    rejects_desugared(
+        "fn f(a: int, b: int) -> int:\n    return a + b\nprint(\"{f(1)}\")\n",
+        "expects 2 argument(s), got 1",
+    );
+    rejects_desugared(
+        "fn f(a: int, b: int) -> int:\n    return a + b\nprint(\"{f(1, 2, 3)}\")\n",
+        "expects 2 argument(s), got 3",
+    );
+}
+
+/// An unknown named argument inside a fragment is now caught by `desugar` itself — the same error,
+/// from the same pass, as the identical call outside a string (it used to reach the checker as a
+/// raw `Call` with `named` still populated, which the checker counted as "got 0" positional args).
+#[test]
+fn interpolation_fragment_unknown_named_arg_rejected_by_desugar() {
+    let src = "fn f(a: int, b: int = 2) -> int:\n    return a + b\nprint(\"{f(nope=1)}\")\n";
+    let tokens = lexer::tokenize(src).expect("lex should succeed");
+    let mut module = parser::parse(tokens).expect("parse should succeed");
+    let err = crate::desugar::run_standalone(&mut module).expect_err("expected a desugar error");
+    assert!(
+        err.message.contains("unknown named argument 'nope'"),
+        "got: {err:?}"
+    );
+}
+
+/// A local binding shadows the module fn, so a fragment call through it is a plain value call and
+/// must NOT have the fn's default spliced in — the scope-awareness `desugar` already applies
+/// outside strings, applied inside one.
+#[test]
+fn interpolation_fragment_respects_local_shadowing() {
+    ok_desugared(
+        "fn f(a: int, b: int = 2) -> int:\n    return a + b\nf := fn(a: int) -> int: a * 100\nprint(\"{f(1)}\")\n",
+    );
+}
+
+/// The un-desugared `Str` fallback still type-checks its fragments (this is the path a caller that
+/// skips `desugar::run` takes, and the one a malformed interpolation stays on).
+#[test]
+fn interpolation_fragment_checked_without_desugar() {
+    rejects("print(\"{nope}\")\n", "unknown name 'nope'");
+    rejects("print(\"a}b\")\n", "unmatched '}'");
+}

@@ -2,6 +2,34 @@
 
 Single source of truth for "what am I doing next." Update after every work session.
 
+> **✅ W7-24 FIXED 2026-08-06 — an interpolation fragment is now a first-class call site: named
+> args, defaults, struct-ctor defaults, method defaults and variadics all work inside `"{…}"`.**
+> Every one of these was a type error inside a string and correct outside it:
+>
+> | program | before | after |
+> |---|---|---|
+> | `fn f(a: int, b: int = 2)`; `"{f(1)}"` | `'f' expects 2 argument(s), got 1` | **`3`** |
+> | `fn sub(x, y)`; `"{sub(y=1, x=10)}"` | `'sub' expects 2 argument(s), got 0` | **`9`** |
+> | `fn sum_all(...xs: int)`; `"{sum_all(1, 2, 3)}"` | `expects 1 argument(s), got 3` + `expected List[int], found int` | **`6`** |
+>
+> **Cause.** `ExprKind::Str` held raw text ("interpolation parsing deferred"), so `desugar::run` —
+> which does named args, defaults AND variadic sweeping in one `normalize_call` pass — ran while the
+> fragment was still a string. Each consumer then re-parsed it afterwards (checker, compiler codegen,
+> and the compiler's three capture walkers — **three re-parses per literal**), re-applying only
+> `lower_carriers`. The checker therefore saw exactly the `Call` shape desugar's own header promises
+> it will never see (`named` non-empty, no defaults filled) — hence the incoherent counts.
+> **Fix.** A new `ExprKind::Interp(Vec<Chunk>)`, produced by `desugar` itself: the literal is parsed
+> ONCE into real AST children before normalization, inside the walker's live scope stack, so a local
+> that shadows a fn name still wins (fenced). `Str` now means "brace-free, or a malformed
+> interpolation left intact for the checker/compiler to report". All five consumers read chunks
+> instead of re-parsing; the re-parse helpers stay as the fallback for the un-desugared path.
+> **Lesson: an invariant a pass establishes only holds for what that pass can SEE.** Text stored
+> inside a node is invisible to every pass that runs over the tree, and the phase-ordering that
+> follows ("parsed later, by whoever needs it") silently exempts it from every guarantee upstream.
+> Fenced by 8 `test fn`s in `tests/chz/spec/interpolation_test.chz` (one per surface + the shadowing
+> guard, serial==M:N) and 5 checker tests, including the paired negatives — a wrong-arity fragment
+> call is still rejected, now with the accurate count. Full write-up: `docs/gaps.md` **§W7-24**.
+
 > **✅ W7-23 FIXED 2026-08-06 — the interpolation fragment scanner is now quote- and depth-aware.**
 > `parse_interpolation` scanned to the FIRST `}` with no state, so a brace that belonged to the
 > expression closed the fragment instead: `"{d['a}}b']}"` → `unmatched '}' in string` and
