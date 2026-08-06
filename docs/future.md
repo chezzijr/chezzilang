@@ -586,8 +586,14 @@ render ERROR too (whole file, before any test runs), counted separately as `file
    pipeline stall the trigger forever, i.e. fail open again. **Gated on `mem_cap != 0`**, so cap-off
    pacing (every `chezzi run`, every bench, the whole parity gate) is bit-for-bit unchanged; a capped
    run pays extra sweeps plus a second `wire_summary` walk per store (+11% measured, `docs/benchmarks.md`).
-   Residual SAMPLING escapes are listed in gaps.md `W6-10s` — notably the by-hand airlock paths (spawn
-   args, closure captures, `Executor.submit`) which grow off-heap storage without charging it.
+   Residual SAMPLING escapes were listed in gaps.md `W6-10s`, which is **CLOSED 2026-08-06** — its
+   filed premise (uncharged by-hand airlock paths) did not survive re-derivation: the only one storing
+   persistently off-heap is `Executor.submit`, and only on `--serial`, which `--max-heap` refuses at
+   the CLI. The reachable escape was a worker heap **born big** — its task's payload arrives in ~7
+   `Obj`s, so the object-count trigger never moves and nothing ever samples — now fixed by
+   `Heap::request_collect` from `Vm::spawn_worker`. TWO residuals remain and are tracked on that row:
+   a task whose entire body is ONE native call (no instruction boundary, and no safely-rooted point to
+   sample at), and post-sample growth that allocates no `Obj`s — which is the very next paragraph.
    **v1 limits (deterministic, documented):** the
    trip fires only at a **GC boundary**, and GC triggers on `Obj`-count growth (plus charged off-heap
    wire bytes when a cap is set) — a loop growing a single

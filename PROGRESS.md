@@ -123,7 +123,27 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > single-threaded and never crosses the airlock, so the bench set has no coverage of airlock memory at
 > all. Full write-up: `docs/gaps.md` **§W7-22**.
 
-> **⚠️ W6-10s re-scoped 2026-08-06 — its filed premise did not hold.** The row named three "by-hand
+> **✅ W6-10s FIXED 2026-08-06 (after re-scoping — its filed premise did not hold).** The fix:
+> `Heap::request_collect`, set in `Vm::spawn_worker` — the one door every worker heap is born through,
+> and where `set_max_heap` already runs — and consumed at the task's first instruction boundary in
+> `run_until`, the first properly-rooted point. Setting it before the payload is rebuilt is safe
+> because `Heap::alloc` never collects, so nothing can consume it early. `spawn use(blob)` where `use`
+> is `return xs.len()`, at `--max-heap=1000000` against a ~1.6 MB worker heap: **PASS → OVER-MEMORY**;
+> generous-cap, no-cap and 50-spawn controls all still PASS. Mutation-verified (drop the two-line hunk
+> and only the `quiet` case reds).
+>
+> **Two residuals are explicitly NOT claimed fixed**, both measured, both found by adversarial review
+> rather than by me: (a) a task whose entire body is ONE native call (`spawn blob.len()`) runs no
+> bytecode, so it reaches no instruction boundary — and there is no safe sample point in that window,
+> because the payload is rooted only as the pending call's operands; collecting before the call frees
+> the task's own arguments, and after it the receiver is already dead. (b) growth AFTER the sample that
+> allocates no `Obj`s: `xs.push(i)` took a worker heap 32× past the cap post-sweep and never
+> re-triggered — `future.md §1b`. *Review also caught my comment restating the cap's guarantee as
+> unconditional when the fix only narrows it, and a test comment asserting "the parent is not over the
+> cap" when it is; the test now carries a `nospawn` control that fails loudly if a parent-side fix ever
+> makes it green for a new reason.*
+>
+> The re-scoping that preceded it: The row named three "by-hand
 > airlock paths" as uncharged sampling escapes. Measured: `Executor.submit` is the only one that stores
 > persistently off-heap, and only on `--serial` — which `--max-heap` **refuses at the CLI**
 > (`main.rs:685`), so that arm is unreachable. Spawn args and closure captures are transient (rebuilt

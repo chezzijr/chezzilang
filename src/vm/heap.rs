@@ -486,6 +486,12 @@ pub struct Heap {
     /// its GC boundary to hard-abort the running test, re-observed each sweep like a cancel checkpoint
     /// (so a runaway `defer` during the abort unwind re-trips it); cleared per test by `clear_over_cap`.
     over_cap: bool,
+    /// W6-10s — force the next [`should_collect`](Heap::should_collect), regardless of object count.
+    /// Set only under a live cap, by [`request_collect`](Heap::request_collect), for a heap that is
+    /// handed a large payload in very few `Obj`s (a worker's rebuilt task args/captures) — the
+    /// object-count trigger cannot see those bytes, so without this nobody ever samples the cap.
+    /// Cleared by `sweep()`.
+    force_collect: bool,
 }
 
 impl Default for Heap {
@@ -501,6 +507,7 @@ impl Default for Heap {
             peak_live_bytes: 0,
             mem_cap: 0,
             over_cap: false,
+            force_collect: false,
         }
     }
 }
@@ -595,8 +602,20 @@ impl Heap {
     /// `live_bytes` does nothing if nobody ever looks). Gated on `mem_cap != 0`: with no cap
     /// `over_cap` is meaningless anyway, and pacing stays bit-for-bit unchanged.
     pub fn should_collect(&self) -> bool {
-        self.since_gc >= self.next_gc
+        self.force_collect
+            || self.since_gc >= self.next_gc
             || (self.mem_cap != 0 && self.since_gc_wire_bytes.get() >= self.wire_gc_threshold())
+    }
+
+    /// W6-10s — force the next [`should_collect`](Heap::should_collect), so a heap that was HANDED a
+    /// large payload samples the `--max-heap` cap even though it allocated almost no `Obj`s doing so.
+    /// `over_cap` is assigned only in `sweep()`, and `sweep()` only runs when `should_collect()`
+    /// fires; a worker heap holding a rebuilt `List` of any size counts ONE object, so the growth
+    /// trigger never moves and the guard fails OPEN. Set by `Vm::spawn_worker` under a live cap only
+    /// (so cap-off pacing is untouched), and consumed at the task's first instruction boundary in
+    /// `run_until` — the first point where every live value is properly rooted.
+    pub fn request_collect(&mut self) {
+        self.force_collect = true;
     }
 
     /// Mark one object reachable. Returns `true` if it was *newly* marked (caller should then
@@ -763,6 +782,7 @@ impl Heap {
         }
         self.since_gc = 0;
         self.since_gc_wire_bytes.set(0);
+        self.force_collect = false;
         self.next_gc = (self.live * 2).max(MIN_GC_THRESHOLD);
         let lb = self.live_bytes();
         if lb > self.peak_live_bytes {

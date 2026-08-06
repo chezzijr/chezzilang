@@ -1270,6 +1270,83 @@ struct Suite:
         }
     }
 
+    /// W6-10s — a task's payload arrives as BYTES, not as `Obj`s, so nobody looks at the cap.
+    ///
+    /// `should_collect()` counts objects, and a `List[int]` of any size rebuilds into a worker heap
+    /// as ONE `Obj::List`. A heap can therefore be BORN over the cap in ~7 allocations, never reach
+    /// `next_gc`, never `sweep()` — and `over_cap` is assigned nowhere else. The pair below is the
+    /// whole proof: **identical memory, and pre-fix the verdict flipped on who ALLOCATED**. `quiet`
+    /// (`return xs.len()`) PASSED; `noisy`, the same program plus one allocating loop, correctly
+    /// reported OVER-MEMORY at the same RSS. Now both trip: `spawn_worker` requests the first
+    /// collect whenever a cap is live, so the payload is sampled once the task starts.
+    ///
+    /// M:N only — `--max-heap` is refused with `--serial` at the CLI (`main.rs`), and the serial
+    /// engine shares ONE heap with the parent anyway, so there is no born-big worker heap to miss.
+    #[test]
+    fn over_memory_trips_on_a_worker_payload_with_no_task_allocation() {
+        // The worker heap holds ~1.6 MB (200k inline ints) against a 1 MB cap. NOTE, because it is
+        // easy to misread: the PARENT holds the same blob and is also over the cap — it simply never
+        // samples either (same object-count blindness, on the heap that built the list by `push`,
+        // which is `future.md §1b`). The `nospawn` control below pins that, so if a parent-side
+        // sampling fix ever lands, this test fails LOUDLY instead of going green for a new reason
+        // and silently un-guarding the worker path.
+        const CAP: usize = 1_000_000;
+        // `{name}` is the test-fn name, so the report line is greppable per shape.
+        let body = |name: &str| {
+            format!(
+                "test fn {name}():\n    blob: List[int] = []\n    \
+                 for i in range(200000):\n        blob.push(i)\n    \
+                 parallel:\n        spawn use(blob)\n\n"
+            )
+        };
+        let d = TmpDir::new();
+        let d2 = TmpDir::new();
+        // The spawned fn allocates NOTHING — this is the shape that used to pass.
+        let quiet = d.write(
+            "quiet_test.chz",
+            &format!(
+                "{}fn use(xs: List[int]) -> int:\n    return xs.len()\n",
+                body("quiet")
+            ),
+        );
+        // Control: same payload, same cap, but the task churns — this tripped even pre-fix, so a
+        // regression that breaks the FIX (not the guard) shows up as `quiet` alone going green.
+        let noisy = d2.write(
+            "noisy_test.chz",
+            &format!(
+                "{}fn use(xs: List[int]) -> int:\n    junk: List[int] = []\n    \
+                 for i in range(3000):\n        junk = [i]\n    return xs.len()\n",
+                body("noisy")
+            ),
+        );
+        // Control: the SAME payload and cap with no `spawn` at all. Today this passes — the parent
+        // is over the cap and never samples — which is what proves the two assertions above are
+        // reporting the worker path and not a parent-side trip.
+        let d3 = TmpDir::new();
+        let nospawn = d3.write(
+            "nospawn_test.chz",
+            "test fn nospawn():\n    blob: List[int] = []\n    \
+             for i in range(200000):\n        blob.push(i)\n    assert blob.len() == 200000\n",
+        );
+        for (label, f) in [("quiet", &quiet), ("noisy", &noisy)] {
+            let report = run_tests_capped(f, true, CAP);
+            assert!(
+                report.text.contains(&format!("OVER-MEMORY {label}")),
+                "a worker heap born over the cap must be SAMPLED even though the task allocates \
+                 nothing ({label}); report:\n{}",
+                report.text
+            );
+        }
+        let report = run_tests_capped(&nospawn, true, CAP);
+        assert!(
+            report.text.contains("PASS nospawn"),
+            "control drifted: the parent now samples its own over-cap heap, so the two assertions \
+             above no longer prove anything about the WORKER path — re-derive this test (and see \
+             gaps.md W6-10s / future.md 1b); report:\n{}",
+            report.text
+        );
+    }
+
     /// W6-10 review — the NEGATIVE direction, which matters just as much: a program comfortably
     /// UNDER the cap must still PASS while holding a shared core. A core's payload is ONE `Arc`
     /// allocation, but `from_wire` mints a FRESH `Obj::Shared` alias slot for every crossing, so 50

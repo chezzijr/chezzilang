@@ -3377,6 +3377,39 @@ impl Vm {
         // documented (`docs/future.md §3b`); a cross-engine aggregate would need non-deterministic global
         // RSS. `0` when the cap is off, so the common path is untouched.
         worker.set_max_heap(self.heap.mem_cap());
+        // W6-10s — …and make sure something actually LOOKS. A worker heap is BORN with its task's
+        // payload already rebuilt into it, and `should_collect` counts OBJECTS: a `List[int]` of any
+        // size rebuilds to ONE `Obj`, so a heap holding megabytes after ~7 allocations never reaches
+        // `next_gc`, never sweeps, and `over_cap` — assigned only in `sweep()` — is never evaluated.
+        // The guarantee the comment above states ("a real runaway trips on whichever heap runs it")
+        // was therefore false even for the most ordinary shape there is: `spawn use(blob)` where `use` is
+        // `return xs.len()` PASSED a cap its own payload exceeded, while the SAME program with one
+        // allocating statement added to `use` correctly reported OVER-MEMORY at the same RSS — the
+        // verdict tracked who allocated, not what was used.
+        //
+        // Here, not at the run site, because this is the one door every worker heap is born through:
+        // both `ReadyWorker` constructors call it, and the flag survives into `FiberCtx` when M:N
+        // deconstructs the worker into a fiber (`into_fiber`) — which is the real M:N run path, NOT
+        // `ReadyWorker::invoke`. The request is set BEFORE the payload is rebuilt and that is fine:
+        // `Heap::alloc` never collects, so nothing can consume the flag before the first instruction
+        // boundary of the task, by which point the payload is fully installed. Gated on a live cap,
+        // so an uncapped run forces no GC at all.
+        //
+        // TWO THINGS THIS DOES NOT FIX, both measured, neither introduced here (gaps.md `W6-10s`):
+        //  - a task whose ENTIRE body is one native call (`spawn blob.len()`) executes no bytecode,
+        //    so it never reaches an instruction boundary and the flag is never consumed. There is no
+        //    safe sample point inside that window: the payload is rooted only as the pending call's
+        //    operands, so collecting before the call would free the task's own arguments, and by the
+        //    time the call returns the receiver is already dead. Still PASSES a cap it exceeds.
+        //  - growth AFTER this sample that allocates no `Obj`s — `xs.push(i)` into an existing list
+        //    grows a `Vec` in place, so a task can take its heap 32× over the cap post-sweep and
+        //    never trigger again (`future.md §1b`, the documented inline-scalar escape).
+        // So this narrows "the verdict tracks who allocates" to the tasks that run bytecode; it does
+        // not make `--max-heap` total. Do not restate the guarantee above as unconditional.
+        if self.heap.mem_cap() != 0 {
+            worker.heap.request_collect();
+        }
+
         // `chezzi test --timeout` — thread the SAME absolute deadline onto the worker so a `spawn`/
         // `parallel:` task's loop trips the wall-clock cap on the M:N engine too (a fresh `Vm::new`
         // starts with `deadline = None`). `None` when the cap is off, so the common path is untouched.
