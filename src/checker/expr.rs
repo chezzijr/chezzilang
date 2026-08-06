@@ -2265,25 +2265,48 @@ impl Checker {
                 self.error(span, format!("module '{mname}' has no member '{method}'"));
                 Ty::Unknown
             }
-            // A protocol existential (e.g. `Error`, or a parameterized `Container[int]`): only the
-            // protocol's own methods are callable.
+            // A protocol existential (e.g. `Error`, or a parameterized `Container[int]`): the
+            // protocol's own methods AND everything its embeds require are callable (M22 — the
+            // embed set is flattened at every use site, not just at a bound).
             Ty::Protocol(pname, pargs) => {
-                let found = self.protocols.get(pname).and_then(|pinfo| {
-                    pinfo
-                        .methods
-                        .iter()
-                        .find(|(m, _)| m == method)
-                        .map(|(_, msig)| (msig.clone(), pinfo.type_params.clone()))
+                let found = self.protocol_method_sig(pname, method).map(|msig| {
+                    let ptps = self
+                        .protocols
+                        .get(pname)
+                        .map(|p| p.type_params.clone())
+                        .unwrap_or_default();
+                    (msig, ptps)
                 });
                 if let Some((msig, ptps)) = found {
+                    // OBJECT SAFETY — `Self` in a parameter slot is un-dispatchable through a
+                    // protocol value: it erases which witness it holds, so `a.add(b)` over two
+                    // `Vecish` values could hand a `W` to `V::add`. Rejected with the remedy, not
+                    // silently mis-typed. `Self` in the RETURN stays fine (it widens to `obj_ty`).
+                    if self_in_param_position(&msig) {
+                        self.infer_all(args);
+                        self.error(
+                            span,
+                            format!(
+                                "method '{method}' is not callable through the protocol value \
+                                 {pname} — its signature takes `Self`, and a protocol value erases \
+                                 which type it holds. Bind the receiver with a generic parameter \
+                                 instead: `[T: {pname}]`"
+                            ),
+                        );
+                        return Ty::Unknown;
+                    }
                     // DECISION-2 element RECOVERY: substitute the protocol's own type params → the
                     // carried concrete args into the method's params AND return, so `c.get(0)` on a
                     // `Container[int]` witnesses `i: int` and yields `int` (not the bare param `T`).
                     // Empty `pargs` (a bare existential like `Error`) yields an empty map — a no-op
                     // that reproduces the prior bare behaviour. This is SOUND because the store/pass
                     // boundary already witnessed conformance with these same args.
-                    let pmap: HashMap<String, Ty> =
+                    let mut pmap: HashMap<String, Ty> =
                         ptps.iter().cloned().zip(pargs.iter().cloned()).collect();
+                    // `Self` in the RETURN means the receiver — here the existential itself, so
+                    // `fn neg(self) -> Self` on a `Negish` value yields `Negish` rather than leaking
+                    // the bare param out (the `Ty::Param` arm below binds it the same way).
+                    pmap.insert("Self".to_string(), obj_ty.clone());
                     // First param is the implicit receiver; explicit args correspond to params[1..].
                     let expected: Vec<Ty> = msig
                         .params
@@ -3079,12 +3102,8 @@ impl Checker {
                 // `T: Add + Mul` exposes the union of both protocols' methods).
                 let bounds = self.type_params.get(pname).cloned().unwrap_or_default();
                 let found = bounds.iter().find_map(|proto| {
-                    self.protocols.get(&proto.name).and_then(|p| {
-                        p.methods
-                            .iter()
-                            .find(|(n, _)| n == method)
-                            .map(|(_, s)| (proto.clone(), s.clone()))
-                    })
+                    self.protocol_method_sig(&proto.name, method)
+                        .map(|s| (proto.clone(), s))
                 });
                 if let Some((proto, msig)) = found {
                     // Map `Self` to the receiver, plus the parameterized protocol's own params to the

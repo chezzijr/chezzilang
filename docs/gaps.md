@@ -61,7 +61,7 @@ chronological log.
 | **W6-10s** | `:1349` | `--max-heap` residual **sampling** escapes left after the byte-aware pacing fix | Pacing samples the cap on charged off-heap bytes, but only for stores routed through `to_wire_crossable` and only per heap. Still not sampled: the documented inline-scalar loop (`future.md §1b` — no `Obj`s, no wire bytes), the by-hand airlock paths (spawn args, closure captures, `Executor.submit`), and a heap that HOLDS a huge core without storing to it |
 | **W6-9r** | `:1473` | Parity-oracle residual left by the `W6-9b` fix: ~31 hand-rolled `run_file_p` + `run_file` cross-engine compares in `parity_tests.rs` still diff LOSSILY-DECODED strings, and `parity_entry_cfg_lines` compares stdout as an order-insensitive line multiset | The three SHARED comparators were fixed at the helper level (0 call sites touched); converting the hand-rolled ones means rewriting ~31 call sites. UTF-8-only today, so nothing is failing — but a new byte-emitting test added at one of those sites inherits the blindness. Use `vm::run_file_bytes` there |
 | **W6-10r** | `:1386` | `--max-heap` residual: a payload reachable ONLY through a **nested** core (a `Channel` inside a `Shared`, once the nested core's last `Obj` alias slot is swept) is counted nowhere | Left open by the W6-10 fix on purpose. `live_bytes` reaches a core's bytes through its `Obj::*` alias slot; a nested core has none. Closing it needs cross-core byte recursion with `Arc` de-dup — narrow trigger, not worth the machinery yet |
-| protocol embeds | `:1803` | A protocol-embedded method isn't callable through the interface value (`p: Person` can't call embedded `name()`) despite `spec.md:973` "flattened at bound sites" | Filed as a safe-direction observation in wave 3; never triaged — doc and behavior contradict each other either way |
+| ~~protocol embeds~~ | `:6365` | **FIXED 2026-08-06.** A protocol's embed set is now flattened at EVERY use site, not just at a bound. `p: Person` → `p.name()` (embedded) went `type error … type Person has no method 'name'` → `ada 36`; the same through a bound, `<` through an embedded `Comparable`, `in` through an embedded `Contains`, and passing a `Person` value to a `Named` parameter all went type-error → correct value. Both ancestors were re-run and agree: Go (embedded interface + interface-to-interface assignment + a generic constraint) prints `ada 36` / `ada` / `eve 7`; pyright is clean on the `Protocol`-inheritance twin. Checker-only — the runtime dispatches every one of these by NAME already. **Bounded by object safety**: a method taking `Self` (so every operator protocol, whose method is `(self, Self) -> Self`) stays BOUND-only, because a protocol value erases which witness it holds | **The CONTROLS are what made this two bugs instead of one.** Running each case with an OWN (non-embedded) method split the report cleanly: five cases passed the control and so were the embed bug; `a + b` on two protocol values and a `Self`-typed method on an existential FAILED their controls too — and "fixing" those two opened a SOUNDNESS HOLE that shipped FULLY GREEN (3848 tests, clippy, both engines) before adversarial review caught it: `plus(V(1), W("q"))` through `fn plus(a: Vecish, b: Vecish)` checked ok and faulted `no field 'x' on W`. A protocol value erases its witness, so `Self` in a parameter slot is bound-only — Rust's object-safety rule, and why Go bans `Self` in interfaces outright. The licence taken for it was a pyright PASS; but Python's `Protocol` is GRADUAL and enforces no witness identity, so it was never evidence a statically-enforced language may accept it. Two more, same review: the embed walk had a depth cap and no VISITED SET (branching ≥2 ⇒ 2^64, so a diamond/cyclic graph hung `check` on a method miss), and the CONFORMANCE half of the embed-arg re-spelling was left on the old resolver, so `b: PBag[str] = B` (a `contains(self, int)`) was accepted. Second lesson, found by the negative test: the flatten's own `resolve_ty_ro` reads `self.type_params`, which at a USE site is the *calling function's* params — so `protocol Bag[T]: Contains[T]` resolved its `T` to `Unknown` and `"x" in b` type-checked on a `Bag[int]`. A widening's negative control is not paperwork; it is the only thing that catches a widening that went permissive |
 | ~~**W7-21**~~ | `:5835` | **FIXED 2026-08-05.** A module global holding a FN VALUE is now CALLABLE through the module: `l.BARE()` went `type error … module 'l' has no member 'BARE'` (rc=1) → `ok`, and prints `1` on M:N, `--threads=1` and `--serial`. Both ancestors agree and were re-run: CPython `pk.G()` → `1`, Go `pkg.G()` → `1`. Checker-only — the `Ty::Module` call arm now falls back to `sig.values` and calls a `Func`/`BuiltinFn` there with STRICT `check_args`; the compiler's `Op::CallMethod` fall-through and `Obj::Module` dispatch already handled it. The lying diagnostic is fixed too: an existing-but-uncallable member says `member 'N' is not callable (it has type int)` | **The obvious runtime test was green BEFORE the fix, and that is the lesson.** For a `checker⊋compiler` sibling (checker rejects what the system executes) the instinct is "run it on both engines" — but `run_file`/`run_file_parallel` bypass the checker, so the both-engine test passes pre-fix. It proves the *lowering* exists; only a graph-level `check_graph` test proves the *rejection* is gone. Two claims, two tests, neither substitutes for the other (the VM test's doc-comment now says which one it is). Second: `from l import BARE` + `BARE()` always worked, which is precisely what kept the qualified arm the single broken site — a member surface harvested into two maps with one consumer reading one of them |
 | ~~**W7-5d**~~ | `:5188` | **FIXED 2026-08-05.** A dead stdout was a whole-queue kill switch, so a broken pipe cancelled sibling `Executor` jobs. It is now an ORDINARY per-job fault. TWO process-global reads had to go: `executor_hard_halt` is `is_over_memory \|\| is_timed_out`, and `invoke_native`'s post-call `stream_halt` is gated on that call having actually emitted to stdout (`Vm::stdout_writes`) — unguarded it faulted a sibling that never printed, after its FIRST native. Repro: **both markers 21/21 runs**, **all three writes 15/15**, across `--serial` and `--threads=1/2/3/4/8`/default; pre-fix it wrote neither marker at `--threads=1`/`--serial`, both at `--threads=3+`, and either at `--threads=2`. Matches CPython `ThreadPoolExecutor` (`max_workers` 1/2/4), the ancestor that owns `Executor` | Three lessons. (1) A **process-GLOBAL read inside an error-property predicate** — `out_dead_reason().is_some()` does not describe the `err` it is passed. The shape was in the tree **twice**; fixing the first made the second visible. (2) The ledger's own proposed alternative ("an accepted-asymmetry test pinning what each engine actually does") **was never available**: the M:N shape varied by thread count AND across runs at one thread count. (3) A one-native-call marker is the exact shape that hides instance (2) — when the contract is "the REST of the job runs", the fence needs a "rest". Accepted cost: graceful `shutdown()` only — a submitted job that never prints and never returns now hangs `\| head -1` (`shutdown_now()` still kills it in 54 ms; a loop back-edge IS a cancellation point). CPython hangs identically; Go exits via SIGPIPE on fd 1, a signal policy Chezzi does not adopt. Nurseries unaffected (they abort siblings on any fault, by design) |
 | ~~**W7-18**~~ | `:5155` | **FIXED 2026-08-05.** `--timeout` now reaches a fiber parked on the NETPOLLER — **10001 ms hang (no verdict, no output, killed by an external `timeout 10`) → 304 ms `TIMED-OUT t`**, stable 10/10 at `CHEZZI_THREADS=1/2/3/4/8`, and the aborted task still runs its `defer`s *including a socket write inside them*. Go is the ancestor and agrees: `go test -timeout 300ms` against a goroutine on `net.Listener.Accept()` panics `test timed out after 300ms` and never runs the following `t.Fatal`. A park now registers for `min(the op's own D6c timeout_ms, the run deadline)` and the resumed op **re-reads the clock** to tell the two apart | **The filed premise was WRONG, and it is the whole lesson.** The row said the fix "needs a second marker distinct from `poll_timed_out`, threaded through the 5 `PollPark` construction sites plus the re-inject." It needed none: `Vm::deadline` is ALREADY an absolute `Instant` on every worker and `Some` only under `--timeout`, so `now >= self.deadline` at resume answers exactly what the marker would have carried. `PollPark`, `poller::register`, `next_timeout` and `fire_due_socket_timeouts` are untouched. Second lesson: the obvious spelling of that insight re-introduced W7-16's skipped-`defer` bug on **three** separate paths (halt-before-take, `?` past `demote_socket_exit`, clear-only connect resume) and adversarial review found a **fourth** — a top-level `connect` handing the abort back as a *catchable* `Err`. All four shipped green |
@@ -1804,6 +1804,10 @@ Safe-direction observations (NOT bugs — noted for a future look): protocol-emb
 through the interface value (`p: Person` can't call embedded `name()`) despite spec.md:973 "flattened at bound
 sites"; `List[Any]=[1,3.0]` accepted but `Map[str,Any]={"a":1,"b":3.0}` rejected (asymmetry vs spec's joint wording).
 **[UPDATE — wave 4, above]** the `List[Any]=[1,3.0]` half is NOT safe: it silently corrupts the int to `1.0`.
+**[UPDATE — 2026-08-06]** neither was the embed half: it was a plain bug (Go and pyright both accept
+the program), and running the OWN-method control on each case found a SECOND defect this filing never
+named — operators and `Self` on a protocol existential. Both **FIXED**; see the 2026-08-06 session log
+at the end of this file. "Safe-direction" was an untested guess, not an observation.
 
 ## Session log — 2026-07-23 (bug-hunt wave 2 + completeness sweep: 3 fixes + 1 doc fix MERGED, 0 open findings, 2 dormant fragilities remain)
 
@@ -6359,3 +6363,137 @@ mutation-verified: stubbing `quiesced()` to `false` fails the first three, and r
 `executor_job_blocking_recv_waits_for_a_later_send` and
 `executor_job_blocked_during_shutdown_faults_both_engines` all stay green unchanged, as does
 `tests/chz/stdlib/executor_drain_test.chz` (frozen by decision D5).
+
+---
+
+## Session log — 2026-08-06 (protocol embeds: flattened at every use site — the `:64` row, FIXED, plus one defect it never named)
+
+The `protocol embeds` row had sat untriaged since bug-hunt wave 3, filed as a *safe-direction
+observation*: `spec.md` said an embed set is "flattened at bound sites", the checker disagreed, and
+nobody had decided which was wrong. Measuring against the owning ancestors settles it — the docs were
+right.
+
+### Measured, on the release binary, before the fix
+
+| case | Chezzi | Go | Python / pyright |
+|---|---|---|---|
+| `p: Person` → `p.name()` (embedded) | ✗ `type Person has no method 'name'` | ✓ `ada 36` | ✓ 0 errors |
+| `[T: Person]` → `p.name()` | ✗ `type parameter T has no method 'name'` | ✓ `eve 7` | ✓ |
+| `Person` value → `Named` param | ✗ `expected Named, found Person` | ✓ `ada` | ✓ |
+| `<` via embedded `Comparable` (bound) | ✗ `cannot compare T and T` | n/a | ✓ |
+| `in` via embedded `Contains` (bound) | ✗ `cannot use \`in\` on T` | n/a | ✓ |
+| `a + b` on `a, b: Vecish` (protocol declares `add` **itself**) | ✗ `cannot apply + to Vecish and Vecish` | n/a — Go bans `Self` in interfaces | ✓ (pyright — **and pyright is wrong**, see below) |
+| `p.add(q)` where the sig is `fn add(self, o: Self) -> Self` | ✗ `expected Self, found Vecish` | n/a | ✓ (same) |
+| **controls** — the same five with **own**, non-embedded methods | ✓ all pass | | |
+
+Go reference (`type Person interface { Named; Age() int }`, a `Dev` witness, `show(p Person)`,
+`onlyNamed(n Named)`, `viaBound[T Person]`): `ada 36` / `ada` / `eve 7`, rc=0. Python reference
+(`class Person(Named, Protocol)`): runs, and `pyright` reports 0 errors / 0 warnings.
+
+### The controls are what turned one report into two bugs
+
+Running every case a second time with an **own** method in place of the embedded one is what split
+the report. Rows 1–5 pass their control, so they are one defect: `ProtocolInfo.methods`
+(`checker/mod.rs:586`) holds own methods only, and five consumer sites read it directly while
+`flatten_embed_methods` (`proto.rs:359`) — which already existed and was already used by declare-time
+validation and `protocol_has_static_method` — was never consulted from any of them.
+
+Rows 6–7 **fail their control too**, so they looked like a second, independent defect. They are not
+a defect at all — **they are the correct answer, reached by accident**, and the first cut of this fix
+"fixed" them into a soundness hole. See the next section: rows 1–5 are the bug, rows 6–7 were never
+one. The genuine second defect is narrower: `contains_item_ty` and
+`index_kv`/`index_set_kv`/`slice_result` had no `Ty::Protocol` arm, so `in` / `[]` / `[a:b]` did not
+reach an existential even where the method has no `Self` parameter, and `Self` in a RETURN position
+leaked out of the existential method-call arm as the bare `Ty::Param("Self")` instead of widening to
+the receiver.
+
+### The fix
+
+Checker-only, in all six places. `a.name()` lowers to name-keyed `Op::CallMethod` and `a + b` to a
+type-blind `Op::Add` that dispatches on the runtime object, so every one of these already worked at
+runtime — a protocol existential is erased, and the receiver is the concrete witness.
+
+- **`Checker::protocol_method_sig`** (`proto.rs`) — own methods first, then transitively through the
+  embeds, substituting each embed's args into the pulled-in signature. Deliberately NOT built on
+  `flatten_embed_methods`, which does not substitute `Bound.args` (its four callers only inspect
+  `is_static`, so it never mattered there). Wired into the existential and bound method-call arms,
+  `protocol_has_method`, and `contains_item_ty`.
+- **`Checker::protocol_provides`** — the `Ty`-level twin of `bound_provides`, so a protocol VALUE
+  satisfies anything it transitively embeds. Plus a structural fallback (does `p` itself supply
+  `protocol`'s methods?), which is what lets a `Vecish` declaring `add` witness the builtin `Add`.
+  Arg matching stays strict throughout: `Container[str]` still does not satisfy `Container[int]`.
+- **Object safety** (`self_in_param_position`, `checker/mod.rs`) — a requirement with `Self` in a
+  non-receiver PARAMETER slot is un-witnessable by an existential. One guard at the `satisfies` root
+  (so operator dispatch, `<`, and passing the value into a `[T: Add]` generic are all covered without
+  their own copy) plus one in the existential method-call arm for the hand-written `a.add(b)` form.
+  `op_overload_result` and `ordering_allowed` therefore get NO `Ty::Protocol` arm.
+- **Operators that are object-safe** — `Ty::Protocol` arms in
+  `index_kv`/`index_set_kv`/`slice_result`/`contains_item_ty` through one shared `protocol_op_sig`
+  seam (`index(self, key: K) -> V` and friends have no `Self` parameter). Unary `-` needed no edit —
+  it routes through `satisfies`, and `neg(self) -> Self` is object-safe. `Ty::Protocol` also had to
+  be excluded from the `Iterator` and `Index`/`IndexSet`/`Slice` early-arms of `satisfies_args_d`,
+  which errored on it before the protocol arm was ever reached.
+- **`Self` in a RETURN ↦ the receiver** in the existential method-call arm, matching the `Ty::Param`
+  arm — the half of the `Self` question that IS sound (it widens to the protocol).
+
+### The bigger lesson: rows 6–7 were the checker being RIGHT, and the first fix broke it
+
+The first cut of this change shipped **fully green** — `cargo test` 3848, clippy clean, both engines,
+14 checker tests, 8 running `test fn`s — and had opened a check-OK-then-fault hole. Adversarial
+review found it; two independent prosecutors filed the same charge from the same three-line program:
+
+```chezzi
+protocol Vecish:
+    fn add(self, o: Self) -> Self
+struct V: …fn add(self, o: V) -> V…      struct W: …fn add(self, o: W) -> W…
+fn plus(a: Vecish, b: Vecish) -> Vecish:
+    return a + b
+print(plus(V(1), W("q")))
+# check: ok  →  runtime error (line 6): no field 'x' on W(s=q)      ← BOTH engines
+```
+
+**A protocol value erases which witness it holds**, so two values of one protocol need not be the
+same concrete type. Binding `Self` to the existential asserts they are. This is exactly Rust's
+object-safety rule (a `Self`-typed parameter makes a trait non-`dyn`-able) and exactly why Go bans
+`Self` from interfaces at all. Every operator protocol's method is `(self, Self) -> Self`, so
+`+ - * / % <` are all bound-only on a value; the sound spelling — `fn plus[T: Vecish](a: T, b: T)` —
+binds both operands to ONE witness and already worked, and correctly rejects `plus(V(1), W("q"))`.
+
+**The ancestor check was run on the wrong ancestor.** pyright accepts the Python twin, and that was
+taken as the licence. But Python's `Protocol` is gradual — it does not enforce witness identity at
+all — so a pyright PASS is not evidence a statically-enforced language may accept it. The two
+ancestors that can actually *express* the question both say no. "An ancestor accepts it" is only
+evidence when that ancestor enforces the property in question.
+
+Also introduced and caught by the same review, both fixed here: (a) the embed walk had a DEPTH cap
+and no visited set — with branching ≥ 2 that is 2^64 visits, so a diamond or cyclic embed graph hung
+`check` (and the LSP) past 15 s on a method MISS, and the cycle diagnostic never printed; (b) the
+conformance-witness half of `satisfies_args_d` still resolved embed args with a bare
+`resolve_ty_ro`, so `b: PBag[str] = B` (whose `contains` takes `int`) was ACCEPTED — the read side
+was re-spelled, the write side was not, and the read side's comment claimed the write side had
+already witnessed it.
+
+### The lesson: a widening's negative control is the whole test
+
+The first version of the fix shipped green against every acceptance and was still wrong.
+`"x" in b` type-checked on a `b: Bag[int]` where `protocol Bag[T]: Contains[T]`. Cause:
+`resolve_ty_ro` resolves a bare name through `self.type_params` — which at a USE site is the *calling
+function's* params, not the protocol's, so the embed arg `T` resolved to `Ty::Unknown` (permissive
+everywhere) or, when the caller happened to have a same-named param, to the CALLER's `T`. Fixed by
+`embed_arg_tys`, which resolves an embed's args against the owning protocol's own type params first.
+
+Nothing in the acceptance set could have caught it — every acceptance wants a `Some`, and `Unknown`
+is a `Some`. Only the paired rejection (`"x" in b` must fail while `3 in b` passes) distinguishes
+"resolved correctly" from "resolved to Unknown". Same shape as the
+`rule-fires-is-not-rule-is-right` rule, one direction over: a new **accept** must be proven against
+its own premise too, not just observed to accept.
+
+### Tests
+
+Two claims, two tests, per the W7-21 lesson. `src/checker/tests.rs` — 14 `ok()`/`rejects()` tests in
+the M22 block, each acceptance paired with the negative that proves the rule did not go permissive
+(unembedded method still rejected, unrelated protocol param still rejected, arg invariance intact,
+mismatched protocol operands still rejected, and the parameterized-embed item type). These are the
+only tests that can prove a *rejection* is gone — `run_file`/`run_file_parallel` bypass the checker.
+`tests/chz/spec/protocol_embed_test.chz` — 8 `test fn`s running the same programs end to end,
+gated serial==M:N by `test_runner::chz_suite_passes_both_engines`.

@@ -3463,8 +3463,38 @@ impl Checker {
                 let map = struct_param_map(info, targs);
                 Some((subst(&sig.params[1], &map), subst(&sig.ret, &map)))
             }
+            // A protocol existential that IS or embeds `Index[K, V]` (M22).
+            Ty::Protocol(..) => {
+                let (sig, map) = self.protocol_op_sig(ty, "index")?;
+                if sig.params.len() != 2 {
+                    return None;
+                }
+                Some((subst(&sig.params[1], &map), subst(&sig.ret, &map)))
+            }
             _ => None,
         }
+    }
+
+    /// M22 — `(sig, param-map)` for `method` on a protocol EXISTENTIAL: the signature resolved
+    /// through the protocol's own methods or its embeds, paired with the map binding the protocol's
+    /// type params to the value's carried args. The single seam every operator recovery below uses
+    /// to read `K`/`V`/`R`/item off a protocol-typed receiver, mirroring `struct_param_map` for a
+    /// struct one. The runtime receiver is always the concrete witness, dispatched by name, so
+    /// every caller of this is a checker-only widening.
+    fn protocol_op_sig(&self, ty: &Ty, method: &str) -> Option<(FnSig, HashMap<String, Ty>)> {
+        let Ty::Protocol(p, pargs) = ty else {
+            return None;
+        };
+        let sig = self.protocol_method_sig(p, method)?;
+        let map = self
+            .protocols
+            .get(p)?
+            .type_params
+            .iter()
+            .cloned()
+            .zip(pargs.iter().cloned())
+            .collect();
+        Some((sig, map))
     }
 
     /// The `item` type of `x in obj` when `obj` is a user type satisfying the `Contains` protocol —
@@ -3483,7 +3513,8 @@ impl Checker {
                 let Some(pinfo) = self.protocols.get(&b.name) else {
                     continue;
                 };
-                let Some((_, sig)) = pinfo.methods.iter().find(|(n, _)| n == "contains") else {
+                // Own `contains` OR one an embed requires (`protocol Bag: Contains[int]`).
+                let Some(sig) = self.protocol_method_sig(&b.name, "contains") else {
                     continue;
                 };
                 if sig.params.len() != 2 || sig.ret != Ty::Bool {
@@ -3498,6 +3529,15 @@ impl Checker {
                 return Some(subst(&sig.params[1], &map));
             }
             return None;
+        }
+        // A protocol EXISTENTIAL (`b: Bag[int]`) — same recovery, with the value's own carried args
+        // standing in for the bound's.
+        if let Ty::Protocol(..) = ty {
+            let (sig, map) = self.protocol_op_sig(ty, "contains")?;
+            if sig.params.len() != 2 || sig.ret != Ty::Bool {
+                return None;
+            }
+            return Some(subst(&sig.params[1], &map));
         }
         let (sig, map) = match ty {
             Ty::Struct(name, targs) => {
@@ -3528,6 +3568,16 @@ impl Checker {
     /// writer). The COMPOUND form is the one that reads — `check_assign`'s struct arm types its LHS
     /// from `index_kv` (the read side) and then requires the result to fit this write slot.
     pub(super) fn index_set_kv(&self, ty: &Ty) -> Option<(Ty, Ty)> {
+        // A protocol existential that IS or embeds `IndexSet[K, V]` (M22). Same read-too rule as a
+        // struct: compound index-assign needs `index` as well as `set_index`.
+        if let Ty::Protocol(..) = ty {
+            let (sig, map) = self.protocol_op_sig(ty, "set_index")?;
+            let read = self.protocol_op_sig(ty, "index")?.0;
+            if sig.params.len() != 3 || read.params.len() != 2 {
+                return None;
+            }
+            return Some((subst(&sig.params[1], &map), subst(&sig.params[2], &map)));
+        }
         let Ty::Struct(name, targs) = ty else {
             return None;
         };
@@ -3564,6 +3614,15 @@ impl Checker {
                     return None;
                 }
                 let map = struct_param_map(info, targs);
+                Some(subst(&sig.ret, &map))
+            }
+            // A protocol existential that IS or embeds `Slice[R]` (M22) — same signature rule.
+            Ty::Protocol(..) => {
+                let (sig, map) = self.protocol_op_sig(ty, "slice")?;
+                let opt_int = Ty::option(Ty::Int);
+                if sig.params.len() != 4 || sig.params[1..=3].iter().any(|p| *p != opt_int) {
+                    return None;
+                }
                 Some(subst(&sig.ret, &map))
             }
             _ => None,

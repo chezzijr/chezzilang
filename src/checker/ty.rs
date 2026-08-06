@@ -168,7 +168,9 @@ pub enum Ty {
     /// PARAMETERIZED protocol `Container[int]`. The `Vec<Ty>` carries the protocol's concrete type
     /// arguments (empty for a bare/non-generic existential like `Error`). A concrete type is
     /// assignable to it iff it satisfies the protocol WITH those args (witnessed statically at every
-    /// store/pass boundary); only the protocol's own methods are callable on it — with the carried
+    /// store/pass boundary); the protocol's own methods AND everything its embeds require are
+    /// callable on it (M22 — the embed set flattens at every use site), EXCEPT one taking `Self`,
+    /// which is bound-only by object safety (`self_in_param_position`) — with the carried
     /// args substituted into the method's params/return so `c.get(0)` on a `Container[int]` yields
     /// `int`, not the bare param `T`. Type-erased at runtime (methods dispatch by name; the args are
     /// a checker-only witness, never constructed in the vm/compiler). STRICT INVARIANCE: bare

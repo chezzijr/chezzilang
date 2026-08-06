@@ -2439,6 +2439,56 @@ fn subst(ty: &Ty, map: &HashMap<String, Ty>) -> Ty {
     }
 }
 
+/// [`subst`] lifted to a whole signature — params + return only. Every other field (labels,
+/// arity, `is_static`, doc) is vocabulary-independent and rides along unchanged.
+fn subst_sig(sig: &FnSig, map: &HashMap<String, Ty>) -> FnSig {
+    FnSig {
+        params: sig.params.iter().map(|t| subst(t, map)).collect(),
+        ret: subst(&sig.ret, map),
+        ..sig.clone()
+    }
+}
+
+/// Does the type ANNOTATION `t` mention any of `names` anywhere, at any nesting depth? Used to spot
+/// an owner type param buried inside an embed's type argument (`Contains[List[T]]`), which the
+/// read-only resolver cannot re-spell — see `validate_protocol_embeds`.
+fn type_mentions_any(t: &Type, names: &[String]) -> bool {
+    match t {
+        Type::Named { name, .. } => names.contains(name),
+        Type::Qualified { args, .. } => args.iter().any(|a| type_mentions_any(a, names)),
+        Type::Generic(head, args, _) => {
+            names.contains(head) || args.iter().any(|a| type_mentions_any(a, names))
+        }
+        Type::Func { params, ret, .. } => {
+            params.iter().any(|a| type_mentions_any(a, names)) || type_mentions_any(ret, names)
+        }
+        Type::Tuple(ts) => ts.iter().any(|a| type_mentions_any(a, names)),
+    }
+}
+
+/// Does `ty` mention `Self` anywhere, at any nesting depth (`Self`, `List[Self]`, `Option[Self]`)?
+/// Implemented as a `subst` round-trip rather than a hand-rolled walk so it covers exactly the arms
+/// `subst` covers — a hand-rolled twin would drift the first time a `Ty` variant is added. `Unknown`
+/// is a safe probe: substituting it into a type that already contains one leaves the type equal.
+fn mentions_self(ty: &Ty) -> bool {
+    let probe = HashMap::from([("Self".to_string(), Ty::Unknown)]);
+    subst(ty, &probe) != *ty
+}
+
+/// **Object safety** — is this signature un-dispatchable through a protocol EXISTENTIAL?
+///
+/// True when `Self` appears in a non-receiver PARAMETER position. A protocol value erases which
+/// concrete type it holds, so two values of one protocol need not be the same witness: with
+/// `fn add(self, o: Self) -> Self`, `a + b` over two `Vecish` values would hand a `W` to `V::add`
+/// and fault on the first field access. Rust states the same rule as object safety (a `Self`-typed
+/// parameter makes a trait non-`dyn`-able); Go bans `Self` from interfaces outright.
+///
+/// `Self` in the RETURN is fine — it widens to the existential, which is a legal supertype of
+/// whatever the witness returns. That is what keeps unary `-` (`neg(self) -> Self`) usable.
+fn self_in_param_position(sig: &FnSig) -> bool {
+    sig.params.iter().skip(1).any(mentions_self)
+}
+
 /// Does a struct method `actual` match a protocol method `proto` (with `Self` bound to `self_ty`)?
 fn method_matches(proto: &FnSig, actual: &FnSig, self_ty: &Ty) -> bool {
     if proto.params.len() != actual.params.len() {

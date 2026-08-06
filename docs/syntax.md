@@ -1362,6 +1362,26 @@ method is an error; two embeds requiring the same method with the *same* signatu
 legal diamond — so `Arithmetic + Add` is fine), with *differing* signatures it is an error; a cyclic
 embed is an error.
 
+The embed set flattens at **every** use site, not only at a bound. Through a value annotated with the
+protocol (an *interface value*) and through a bounded type parameter alike: an embedded method is
+callable, `in` resolves an embedded `Contains`, `[]`/`[a:b]` an embedded `Index`/`IndexSet`/`Slice`,
+and unary `-` an embedded `Neg`. A protocol value also **satisfies the protocols it embeds**, so a
+`Person` (embedding `Named`) is accepted where a `Named` is wanted — Go's interface-to-interface
+assignment. Type arguments stay **invariant** throughout: a `Container[str]` value never satisfies
+`Container[int]`, embedded or not.
+
+**Object safety — `Self` in a parameter position.** A method whose signature takes `Self` is callable
+through a **bound**, never through an interface **value**. A protocol value erases which type it
+holds, so two values of one protocol need not be the same witness — `a + b` over `a: Vecish, b:
+Vecish` could hand a `W` to `V`'s `add`. Every operator protocol's method is `(self, Self) -> Self`,
+so `+ - * / %` and `<` are all bound-only; so is calling `a.add(b)` by hand. Bind the operands
+together with a generic parameter and it works: `fn plus[T: Vecish](a: T, b: T) -> T: return a + b`.
+`Self` in the **return** is fine — it widens to the protocol — which is why `fn neg(self) -> Self`
+(and so unary `-`) stays usable on a value. Rust's object-safety rule is the same; Go bans `Self`
+from interfaces outright. An embed's type argument may name the owner's type parameter directly
+(`protocol Bag[T]: Contains[T]`) but not nested inside another type (`Contains[List[T]]` is
+rejected).
+
 ```chezzi
 protocol Arithmetic:        # builtin/reserved — shape file-backed in std/prelude.chz
     Add + Sub + Mul + Div
@@ -1372,6 +1392,19 @@ protocol VectorSpace:       # embeds two protocols and adds its own requirement
 
 fn combine[T: Arithmetic](a: T, b: T) -> T:   # +, -, *, / all available on T
     return (a + b) * (a - b) / b
+
+protocol Named:
+    fn name(self) -> str
+
+protocol Person:            # embeds Named, adds its own requirement
+    Named
+    fn age(self) -> int
+
+fn only_named(n: Named) -> str:
+    return n.name()
+
+fn show(p: Person) -> str:       # an INTERFACE VALUE, not a bound
+    return p.name() + " " + only_named(p)   # embedded method; Person satisfies Named
 ```
 
 Indexing and slicing are overloaded through the prebuilt **`Index[K, V]`** (read `obj[k]` via
@@ -1446,7 +1479,8 @@ fn first[X: Container[int]](c: X) -> int:   # T pinned to int; c.get(0) is int
 The number of args must match the protocol's arity (a bare protocol takes none). A parameterized
 protocol is also a first-class **value/annotation type** — `c: Container[int]` is a valid parameter,
 return, field, or reassignment slot (an *existential*: any type that satisfies `Container[int]` is
-accepted, and only the protocol's own methods are callable on it). The concrete args are witnessed
+accepted, and the protocol's own methods plus everything its embeds require are callable on it —
+except a method taking `Self`, which is bound-only; see object safety above). The concrete args are witnessed
 **statically at every store/pass boundary** (assigning a value into the slot checks conformance
 there) and then **erased at runtime** (methods dispatch by name, like every protocol existential). A
 method that returns the protocol's param **recovers** the carried arg — `c.get(0)` on a

@@ -2268,12 +2268,13 @@ impl Checker {
         for s in stmts {
             if let StmtKind::Protocol {
                 name,
+                type_params,
                 methods,
                 embeds,
                 ..
             } = &s.kind
             {
-                self.validate_protocol_embeds(name, methods, embeds, s.span);
+                self.validate_protocol_embeds(name, type_params, methods, embeds, s.span);
             }
         }
         // extern fn (name, span) pairs, collected during the hoist loop and checked against the

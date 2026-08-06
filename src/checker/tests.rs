@@ -15649,6 +15649,234 @@ fn embed_cycle_errors() {
     rejects("protocol A:\n    B\nprotocol B:\n    A\n", "cyclic");
 }
 
+// ===== M22 — the embed set is flattened at EVERY use site, not just at a bound (gaps.md's
+// "protocol embeds" row). `spec.md` always promised this; five lookup sites read the protocol's OWN
+// method list only, so an embedded method was invisible through an interface value, through a bound,
+// and to `<` / `in`. Go is the ancestor for interfaces and agrees on all of it (an embedded method is
+// callable through the interface value, and a `Person` value is assignable to a `Named` parameter);
+// pyright accepts the Python `Protocol`-inheritance twin. Every acceptance below is paired with the
+// negative that proves the rule did not just go permissive. Runtime dispatch is by NAME and always
+// worked — the end-to-end twin of these lives in `tests/chz/spec/protocol_embed_test.chz`. =====
+
+/// The filed row: an embedded method is callable through the protocol EXISTENTIAL.
+#[test]
+fn embedded_method_callable_through_interface_value() {
+    ok(
+        "protocol Named:\n    fn name(self) -> str\nprotocol Person:\n    Named\n    fn age(self) -> int\nstruct Dev:\n    n: str\n    a: int\n    fn name(self) -> str:\n        return self.n\n    fn age(self) -> int:\n        return self.a\nfn show(p: Person) -> str:\n    return p.name()\nfn main():\n    print(show(Dev(\"ada\", 36)))\nmain()\n",
+    );
+}
+
+/// …and through a BOUND — the same own-only lookup, one arm over.
+#[test]
+fn embedded_method_callable_through_bound() {
+    ok(
+        "protocol Named:\n    fn name(self) -> str\nprotocol Person:\n    Named\n    fn age(self) -> int\nstruct Dev:\n    n: str\n    a: int\n    fn name(self) -> str:\n        return self.n\n    fn age(self) -> int:\n        return self.a\nfn show[T: Person](p: T) -> str:\n    return p.name()\nfn main():\n    print(show(Dev(\"ada\", 36)))\nmain()\n",
+    );
+}
+
+/// A method NO embed supplies is still rejected — the lookup widened, it did not go permissive.
+#[test]
+fn unembedded_method_still_rejected_on_interface_value() {
+    rejects(
+        "protocol Named:\n    fn name(self) -> str\nprotocol Person:\n    Named\nfn f(p: Person) -> str:\n    return p.nope()\n",
+        "has no method 'nope'",
+    );
+}
+
+/// A protocol VALUE is assignable to a parameter of a protocol it embeds — Go's interface-to-
+/// interface assignment (`func onlyNamed(n Named)` accepts a `Person`, measured).
+#[test]
+fn protocol_value_satisfies_its_embedded_protocol() {
+    ok(
+        "protocol Named:\n    fn name(self) -> str\nprotocol Person:\n    Named\n    fn age(self) -> int\nstruct Dev:\n    n: str\n    a: int\n    fn name(self) -> str:\n        return self.n\n    fn age(self) -> int:\n        return self.a\nfn only_named(n: Named) -> str:\n    return n.name()\nfn take(p: Person) -> str:\n    return only_named(p)\nfn main():\n    print(take(Dev(\"ada\", 36)))\nmain()\n",
+    );
+}
+
+/// …but an UNRELATED protocol parameter still rejects the same value.
+#[test]
+fn protocol_value_does_not_satisfy_an_unrelated_protocol() {
+    rejects(
+        "protocol Named:\n    fn name(self) -> str\nprotocol Other:\n    fn zzz(self) -> int\nprotocol Person:\n    Named\nfn g(o: Other) -> int:\n    return o.zzz()\nfn f(p: Person) -> int:\n    return g(p)\n",
+        "expected Other, found Person",
+    );
+}
+
+/// Arg invariance survives the widening: `Box2[str]` is not a `Box2[int]`.
+#[test]
+fn protocol_value_arg_invariance_survives_embed_widening() {
+    rejects(
+        "protocol Box2[T]:\n    fn get(self, i: int) -> T\nfn want(c: Box2[int]) -> int:\n    return c.get(0)\nfn f(c: Box2[str]) -> int:\n    return want(c)\n",
+        "expected Box2[int], found Box2[str]",
+    );
+}
+
+/// `<` resolves through an embedded `Comparable` on a bound, exactly as a declared `compare` does.
+#[test]
+fn ordering_through_embedded_comparable_bound() {
+    ok(
+        "protocol Ord2:\n    Comparable\n    fn tag(self) -> str\nstruct N:\n    v: int\n    fn compare(self, o: N) -> int:\n        return self.v - o.v\n    fn tag(self) -> str:\n        return \"n\"\nfn lt[T: Ord2](a: T, b: T) -> bool:\n    return a < b\nfn main():\n    print(lt(N(1), N(2)))\nmain()\n",
+    );
+}
+
+/// `in` resolves through an embedded `Contains` on a bound.
+#[test]
+fn membership_through_embedded_contains_bound() {
+    ok(
+        "protocol Bag:\n    Contains[int]\n    fn tag(self) -> str\nstruct B:\n    xs: List[int]\n    fn contains(self, x: int) -> bool:\n        return x in self.xs\n    fn tag(self) -> str:\n        return \"b\"\nfn has[T: Bag](b: T, x: int) -> bool:\n    return x in b\nfn main():\n    print(has(B([1, 2]), 2))\nmain()\n",
+    );
+}
+
+/// A PARAMETERIZED embed is re-spelled in the OUTER protocol's vocabulary, so `Bag[int]` gives `in`
+/// an item type of `int`. Without that substitution the embedded arg resolves to `Unknown` and every
+/// item type passes — this is the test that fails if the flatten skips `Bound.args`.
+#[test]
+fn parameterized_embed_substitutes_its_arg_into_the_item_type() {
+    ok("protocol Bag[T]:\n    Contains[T]\nfn has(b: Bag[int]) -> bool:\n    return 3 in b\n");
+    rejects(
+        "protocol Bag[T]:\n    Contains[T]\nfn has(b: Bag[int]) -> bool:\n    return \"x\" in b\n",
+        "cannot test membership of str in Bag[int]",
+    );
+    // …and the same through a bound, where the ambient scope is the caller's params, not the
+    // protocol's — the seam that made the arg resolve to the wrong `T` entirely.
+    rejects(
+        "protocol Bag[T]:\n    Contains[T]\nfn has[C: Bag[int]](b: C) -> bool:\n    return \"x\" in b\n",
+        "cannot test membership of str in C",
+    );
+}
+
+// ===== OBJECT SAFETY — `Self` in a PARAMETER slot is not dispatchable through an existential.
+//
+// A protocol value erases which witness it holds, so two values of one protocol need not be the same
+// concrete type. `fn add(self, o: Self) -> Self` through a `Vecish` would hand a `W` to `V::add` —
+// `check: ok`, then `runtime error: no field 'x' on W(s=q)` on both engines. Rust states the same
+// rule (a `Self`-typed parameter makes a trait non-`dyn`-able) and Go bans `Self` from interfaces
+// outright, so neither ancestor admits the program. Every operator protocol's method is
+// `(self, Self) -> Self`, which is why `+ - * / % <` are all un-dispatchable on an existential; the
+// SOUND spelling binds the operands together with a generic parameter, and is fenced below. `Self`
+// in the RETURN is fine (it widens to the existential) — that is what keeps unary `-` working. =====
+
+/// `+` on two existentials is rejected: the pair is not provably the same witness.
+#[test]
+fn operator_rejected_on_a_protocol_existential_pair() {
+    rejects(
+        "protocol Vecish:\n    fn add(self, o: Self) -> Self\nstruct V:\n    x: int\n    fn add(self, o: V) -> V:\n        return V(self.x + o.x)\nfn plus(a: Vecish, b: Vecish) -> Vecish:\n    return a + b\n",
+        "cannot apply + to Vecish and Vecish",
+    );
+    // The builtin operator protocol used directly as the annotation is the same case…
+    rejects(
+        "struct V:\n    x: int\n    fn add(self, o: V) -> V:\n        return V(self.x + o.x)\nfn plus(a: Add, b: Add) -> Add:\n    return a + b\n",
+        "cannot apply + to Add and Add",
+    );
+    // …and so is reaching it through an EMBED.
+    rejects(
+        "protocol Vecish:\n    Add\n    fn tag(self) -> str\nstruct V:\n    x: int\n    fn add(self, o: V) -> V:\n        return V(self.x + o.x)\n    fn tag(self) -> str:\n        return \"v\"\nfn plus(a: Vecish, b: Vecish) -> Vecish:\n    return a + b\n",
+        "cannot apply + to Vecish and Vecish",
+    );
+    // `<` through an embedded `Comparable` is the same shape (`compare(self, o: Self)`).
+    rejects(
+        "protocol Ord2:\n    Comparable\n    fn tag(self) -> str\nfn lt(a: Ord2, b: Ord2) -> bool:\n    return a < b\n",
+        "cannot compare Ord2 and Ord2",
+    );
+}
+
+/// The SOUND spelling of the same program — a generic parameter binds both operands to ONE witness.
+/// This is the remedy the diagnostic names, so it has to actually work.
+#[test]
+fn the_generic_bound_spelling_of_an_operator_over_a_protocol_is_accepted() {
+    ok(
+        "protocol Vecish:\n    Add\n    fn tag(self) -> str\nstruct V:\n    x: int\n    fn add(self, o: V) -> V:\n        return V(self.x + o.x)\n    fn tag(self) -> str:\n        return \"v\"\nfn plus[T: Vecish](a: T, b: T) -> T:\n    return a + b\nfn main():\n    print(plus(V(1), V(2)).tag())\nmain()\n",
+    );
+}
+
+/// The explicit-call form is rejected too, with the remedy in the message — an operator that lowers
+/// to a method must not have a legal hand-written spelling the operator lacks.
+#[test]
+fn self_typed_method_rejected_on_a_protocol_existential() {
+    rejects(
+        "protocol Vecish:\n    fn add(self, o: Self) -> Self\nstruct V:\n    x: int\n    fn add(self, o: V) -> V:\n        return V(self.x + o.x)\nfn plus(a: Vecish, b: Vecish) -> Vecish:\n    return a.add(b)\n",
+        "not callable through the protocol value Vecish",
+    );
+}
+
+/// A protocol whose methods are `Self`-parameterized cannot be witnessed by an existential AT ALL —
+/// the guard is at the `satisfies` root, so passing one into a `[T: Add]` generic (where two `T`s
+/// would then pair up) is rejected as well, not just the direct operator.
+#[test]
+fn a_self_parameterized_protocol_is_not_witnessed_by_an_existential() {
+    rejects(
+        "protocol Vecish:\n    Add\n    fn tag(self) -> str\nstruct V:\n    x: int\n    fn add(self, o: V) -> V:\n        return V(self.x + o.x)\n    fn tag(self) -> str:\n        return \"v\"\nfn sum2[T: Add](a: T, b: T) -> T:\n    return a + b\nfn f(a: Vecish, b: Vecish) -> Vecish:\n    return sum2(a, b)\n",
+        "does not satisfy",
+    );
+}
+
+/// TWO DIFFERENT protocols are not an operand pair either.
+#[test]
+fn operator_rejects_mismatched_protocol_operands() {
+    rejects(
+        "protocol Vecish:\n    fn add(self, o: Self) -> Self\nprotocol Other:\n    fn add(self, o: Self) -> Self\nfn plus(a: Vecish, b: Other) -> Vecish:\n    return a + b\n",
+        "cannot apply + to Vecish and Other",
+    );
+}
+
+/// A method with `Self` only in the RETURN stays callable — it widens to the existential, which is a
+/// legal supertype of whatever the witness returns. The line between this and the rejections above
+/// is the whole object-safety rule, so pin it.
+#[test]
+fn self_in_return_position_stays_callable_on_an_existential() {
+    ok(
+        "protocol Negish:\n    fn neg(self) -> Self\n    fn tag(self) -> str\nstruct V:\n    x: int\n    fn neg(self) -> V:\n        return V(-self.x)\n    fn tag(self) -> str:\n        return \"v\"\nfn flip(a: Negish) -> Negish:\n    return a.neg()\nfn main():\n    print(flip(V(1)).tag())\nmain()\n",
+    );
+}
+
+/// A cyclic — or merely diamond-shaped — embed graph must not blow up the checker on a method MISS.
+/// Termination is a visited set, not the depth cap: with branching ≥ 2 a depth bound of 64 is 2^64
+/// visits, and this exact file hung `check` past 15 s before the set was added.
+#[test]
+fn a_branching_embed_graph_terminates_on_a_method_miss() {
+    rejects(
+        "protocol A:\n    B\n    C\nprotocol B:\n    A\n    C\nprotocol C:\n    A\n    B\nfn f(x: A) -> int:\n    return x.nope()\n",
+        "cyclic",
+    );
+}
+
+/// An owner type param NESTED inside an embed's type argument is declined at declare time. The
+/// re-spelling resolver reads the ambient scope, where the owner's params are gone, so a nested `T`
+/// resolved to `Unknown` — and an `Unknown` element type accepts EVERY argument (`["x"] in b` on a
+/// `Bag[int]` type-checked, then faulted). Rejecting is the sound decline; the direct form is fine.
+#[test]
+fn a_type_param_nested_in_an_embed_arg_is_rejected() {
+    rejects(
+        "protocol Bag[T]:\n    Contains[List[T]]\n",
+        "nested inside a type argument",
+    );
+    ok("protocol Bag[T]:\n    Contains[T]\n");
+}
+
+/// Unary `-` on an existential whose protocol declares `neg` — routed through `satisfies`, so it
+/// needs no operator-arm change of its own, only this fence.
+#[test]
+fn unary_neg_on_a_protocol_existential() {
+    ok(
+        "protocol Negish:\n    fn neg(self) -> Self\nstruct V:\n    x: int\n    fn neg(self) -> V:\n        return V(-self.x)\nfn flip(a: Negish) -> Negish:\n    return -a\nfn main():\n    print(flip(V(1)))\nmain()\n",
+    );
+}
+
+/// Indexing and slicing recover `K`/`V`/`R` off a protocol existential's own args.
+#[test]
+fn index_and_slice_on_a_protocol_existential() {
+    ok(
+        "struct S:\n    xs: List[int]\n    fn index(self, k: int) -> int:\n        return self.xs[k]\nfn read(o: Index[int, int]) -> int:\n    return o[0]\nfn main():\n    print(read(S([7])))\nmain()\n",
+    );
+    ok(
+        "struct S:\n    xs: List[int]\n    fn slice(self, a: int? = None, b: int? = None, c: int? = None) -> List[int]:\n        return self.xs\nfn cut(o: Slice[List[int]]) -> List[int]:\n    return o[0:1]\nfn main():\n    print(cut(S([7])))\nmain()\n",
+    );
+    // The key type still has to match.
+    rejects(
+        "struct S:\n    xs: List[int]\n    fn index(self, k: int) -> int:\n        return self.xs[k]\nfn read(o: Index[int, int]) -> int:\n    return o[\"a\"]\n",
+        "index must be int, found str",
+    );
+}
+
 // ===== M22 soundness: a newtype operator METHOD is never dispatched at runtime (the same-newtype
 // arm always auto-flows to the underlying's native op), so the checker must NOT type-check an
 // operator overload defined on a newtype — doing so would accept a program that crashes at runtime

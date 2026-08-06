@@ -2,6 +2,7 @@
 // Protocol hoisting/embedding, satisfies, receiver refinement, hashability.
 
 use super::*;
+use std::collections::HashSet;
 
 /// **The intrinsic-grant ↔ runtime-arm pairing table (W6-3's structural ratchet).**
 ///
@@ -306,6 +307,7 @@ impl Checker {
     pub(super) fn validate_protocol_embeds(
         &mut self,
         name: &str,
+        type_params: &[TypeParam],
         methods: &[MethodSig],
         embeds: &[Bound],
         span: Span,
@@ -320,6 +322,34 @@ impl Checker {
                     span,
                     format!("unknown protocol '{}' embedded in '{name}'", emb.name),
                 );
+            }
+        }
+        // An embed arg may mention one of the owner's type params only as the WHOLE arg
+        // (`Contains[T]`), never nested inside a constructor (`Contains[List[T]]`). Re-spelling the
+        // pulled-in signature happens through `embed_arg_tys`, which resolves an arg with `&self` —
+        // and `resolve_ty_ro` reads the AMBIENT scope, where the owner's params are long gone. A
+        // nested `T` therefore resolves to `Unknown`, and an `Unknown` element type accepts every
+        // argument: `protocol Bag[T]: Contains[List[T]]` let `["x"] in b` pass on a `Bag[int]` and
+        // then fault at runtime. DECLINE rather than answer wrongly — a rejected declaration is
+        // recoverable, a silently permissive one teaches distrust of the whole check.
+        let own: Vec<String> = type_params.iter().map(|tp| tp.name.clone()).collect();
+        for emb in embeds {
+            for a in &emb.args {
+                if !matches!(a, Type::Named { name: n, .. } if own.contains(n))
+                    && type_mentions_any(a, &own)
+                {
+                    self.error(
+                        span,
+                        format!(
+                            "embedded protocol '{}' in '{name}' uses a type parameter nested inside \
+                             a type argument, which is not supported — pass the parameter directly \
+                             ({}[{}]) or spell the requirement as an own `fn`",
+                            emb.name,
+                            emb.name,
+                            own.join(", ")
+                        ),
+                    );
+                }
             }
         }
         // Flatten the transitive embed method set, detecting cycles + cross-embed signature conflicts.
@@ -400,6 +430,76 @@ impl Checker {
             }
         }
         (required, false, conflict)
+    }
+
+    /// M22 — resolve `method` on protocol `pname`: OWN methods first, then transitively through the
+    /// embeds, substituting each embed's args into the pulled-in signature so it speaks the OUTER
+    /// protocol's type-param vocabulary (`protocol Bag[T]: Contains[T]` ⇒ `contains(self, T) -> bool`,
+    /// so a `Bag[int]` receiver witnesses `int`). This is what makes an embedded method callable
+    /// through an interface value and through a bound — `spec.md`'s "flattened at every use site".
+    ///
+    /// Deliberately NOT built on [`Self::flatten_embed_methods`]: that one builds the whole map and
+    /// does not substitute `Bound.args` (its callers only inspect `is_static`), which would type an
+    /// embedded method in the EMBEDDED protocol's vocabulary. Depth-capped like `bound_provides` —
+    /// a cyclic embed is rejected at declare time but still reaches here after erroring.
+    pub(super) fn protocol_method_sig(&self, pname: &str, method: &str) -> Option<FnSig> {
+        self.protocol_method_sig_d(pname, method, &mut HashSet::new())
+    }
+
+    /// `seen` is what makes this terminate, not a depth cap: with branching ≥ 2 a depth bound of 64
+    /// is 2^64 visits, so a diamond DAG (or a cyclic decl, which is an error but still reaches here)
+    /// hangs `check` and the LSP on a MISS — every embed gets explored before `None` is returned.
+    /// Visiting each protocol once is also semantically free: the first hit wins either way.
+    fn protocol_method_sig_d(
+        &self,
+        pname: &str,
+        method: &str,
+        seen: &mut HashSet<String>,
+    ) -> Option<FnSig> {
+        if !seen.insert(pname.to_string()) {
+            return None;
+        }
+        let pinfo = self.protocols.get(pname)?;
+        if let Some((_, sig)) = pinfo.methods.iter().find(|(n, _)| n == method) {
+            return Some(sig.clone());
+        }
+        for emb in &pinfo.embeds {
+            let Some(sig) = self.protocol_method_sig_d(&emb.name, method, seen) else {
+                continue;
+            };
+            // The recovered sig is spelled in `emb.name`'s params; re-spell it in ours.
+            let etps = self
+                .protocols
+                .get(&emb.name)
+                .map(|p| p.type_params.clone())
+                .unwrap_or_default();
+            let map: HashMap<String, Ty> = etps
+                .into_iter()
+                .zip(self.embed_arg_tys(pinfo, emb))
+                .collect();
+            return Some(subst_sig(&sig, &map));
+        }
+        None
+    }
+
+    /// Resolve an embed's type args in the OWNING protocol's vocabulary: a bare name that is one of
+    /// `owner`'s own type params becomes `Ty::Param(name)`.
+    ///
+    /// [`Self::resolve_ty_ro`] reads `self.type_params`, which at a USE site is the *calling*
+    /// function's params — the owning protocol's are long out of scope. So without this,
+    /// `protocol Bag[T]: Contains[T]` resolved its `T` to `Ty::Unknown`, which made every embedded
+    /// method's arg silently permissive (`"x" in b` type-checked on a `Bag[int]`), and resolved it
+    /// to the CALLER's `T` whenever one happened to share the name.
+    fn embed_arg_tys(&self, owner: &ProtocolInfo, emb: &Bound) -> Vec<Ty> {
+        emb.args
+            .iter()
+            .map(|a| match a {
+                Type::Named { name, .. } if owner.type_params.contains(name) => {
+                    Ty::Param(name.clone())
+                }
+                _ => self.resolve_ty_ro(a),
+            })
+            .collect()
     }
 
     /// Does concrete `ty` structurally satisfy `protocol`? Read-only. Primitives intrinsically
@@ -688,6 +788,68 @@ impl Checker {
                 .any(|e| self.bound_provides(&e.name, &e.args, protocol, required, depth + 1));
         }
         false
+    }
+
+    /// M22 — does protocol `p`, with its own type params bound to `pargs`, BE or transitively EMBED
+    /// `protocol` with args matching `required`? The `Ty`-level twin of [`Self::bound_provides`],
+    /// which answers the same question for a declared BOUND (whose args are still AST `Type`s).
+    /// Each embed's args are resolved and then re-spelled through `p`'s own bindings, so
+    /// `protocol P[T]: Container[T]` at `P[int]` provides `Container[int]` and not `Container[T]`.
+    pub(super) fn protocol_provides(
+        &self,
+        p: &str,
+        pargs: &[Ty],
+        protocol: &str,
+        required: &[Ty],
+    ) -> bool {
+        self.protocol_provides_d(p, pargs, protocol, required, &mut HashSet::new())
+    }
+
+    /// `seen` is keyed on the protocol AND its args, because the same protocol reached along two
+    /// paths with different args is a different question (`P[int]` vs `P[str]`). Same reason as
+    /// `protocol_method_sig_d`: a depth cap does not terminate a branching walk.
+    fn protocol_provides_d(
+        &self,
+        p: &str,
+        pargs: &[Ty],
+        protocol: &str,
+        required: &[Ty],
+        seen: &mut HashSet<String>,
+    ) -> bool {
+        let key = format!(
+            "{p}[{}]",
+            pargs
+                .iter()
+                .map(|a| a.to_string())
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+        if !seen.insert(key) {
+            return false;
+        }
+        if p == protocol
+            && pargs.len() == required.len()
+            && pargs.iter().zip(required).all(|(x, y)| compatible(x, y))
+        {
+            return true;
+        }
+        let Some(pinfo) = self.protocols.get(p) else {
+            return false;
+        };
+        let map: HashMap<String, Ty> = pinfo
+            .type_params
+            .iter()
+            .cloned()
+            .zip(pargs.iter().cloned())
+            .collect();
+        pinfo.embeds.iter().any(|e| {
+            let eargs: Vec<Ty> = self
+                .embed_arg_tys(pinfo, e)
+                .iter()
+                .map(|t| subst(t, &map))
+                .collect();
+            self.protocol_provides_d(&e.name, &eargs, protocol, required, seen)
+        })
     }
 
     /// Read-only type resolution (no error emission), for contexts that only hold `&self`. Returns
@@ -1135,8 +1297,24 @@ impl Checker {
         // (which knows, via `bound_provides`, that an `Arithmetic`-bound param provides Add/Sub/…).
         if !pinfo.embeds.is_empty() && !matches!(ty, Ty::Param(_)) {
             if depth <= 64 {
+                // The owner's params are re-spelled here too (`embed_arg_tys`, not a bare
+                // `resolve_ty_ro`) and then bound to the args actually being required. Without both,
+                // `protocol Bag[T]: Contains[T]` witnessed conformance against an `Unknown` element
+                // and `PBag[str] = B` (a `contains(self, int)`) passed — the CONFORMANCE half of the
+                // same bug the read side had, and the thing that makes the read side's substitution
+                // sound to trust.
+                let omap: HashMap<String, Ty> = pinfo
+                    .type_params
+                    .iter()
+                    .cloned()
+                    .zip(args.iter().cloned())
+                    .collect();
                 for emb in &pinfo.embeds {
-                    let eargs: Vec<Ty> = emb.args.iter().map(|a| self.resolve_ty_ro(a)).collect();
+                    let eargs: Vec<Ty> = self
+                        .embed_arg_tys(pinfo, emb)
+                        .iter()
+                        .map(|t| subst(t, &omap))
+                        .collect();
                     let _: Grant = self.satisfies_args_d(ty, &emb.name, &eargs, depth + 1)?;
                 }
             }
@@ -1205,7 +1383,7 @@ impl Checker {
         // recovers `T` the same way (see `recover_iter_elems`). A `Ty::Param` falls through to the
         // declared-bounds check below (so a `[S: Iterator[T]]` value forwards into another
         // iterator-generic call), since neither predicate can see through a bare param.
-        if protocol == "Iterator" && !matches!(ty, Ty::Param(_)) {
+        if protocol == "Iterator" && !matches!(ty, Ty::Param(_) | Ty::Protocol(..)) {
             let is_cursor = matches!(ty, Ty::Struct(n, a) if n == "Iterator" && a.len() == 1);
             return if is_cursor || self.struct_iter_elem(ty).is_some() {
                 self.grant_intrinsic(protocol, ty)
@@ -1251,7 +1429,7 @@ impl Checker {
         // conforms structurally, falling through to the matcher below; a `Ty::Param` forwards to its
         // declared bounds). `str` is immutable, so it satisfies `Index`/`Slice` but NOT `IndexSet`.
         if matches!(protocol, "Index" | "IndexSet" | "Slice")
-            && !matches!(ty, Ty::Param(_) | Ty::Struct(..))
+            && !matches!(ty, Ty::Param(_) | Ty::Struct(..) | Ty::Protocol(..))
         {
             let provided: Vec<Ty> = match protocol {
                 "Slice" => match self.slice_result(ty) {
@@ -1278,14 +1456,47 @@ impl Checker {
             }
             return self.grant_intrinsic(protocol, ty);
         }
-        // A protocol existential value satisfies a protocol iff it IS that protocol AND its carried
-        // args match the required ones (arity + arg-wise `compatible`). This enforces strict
-        // invariance when a Protocol VALUE is the subject: a bare `Container` value does NOT satisfy
+        // A protocol existential value satisfies a protocol iff it IS that protocol, or EMBEDS it
+        // (M22, transitively — a `Person` value is accepted where `Named` is wanted, matching Go's
+        // interface-to-interface assignment), or STRUCTURALLY has its methods (so a `Vecish` that
+        // declares `add(self, o: Self) -> Self` witnesses the builtin `Add`, which is what makes
+        // `a + b` work on two `Vecish` values). Arg matching stays STRICT throughout — invariance
+        // when a Protocol VALUE is the subject: a bare `Container` value does NOT satisfy
         // `Container[int]` (0 args vs 1) and vice-versa, and `Container[str]` ≠ `Container[int]`.
         if let Ty::Protocol(p, pargs) = ty {
-            let args_match =
-                pargs.len() == args.len() && pargs.iter().zip(args).all(|(x, y)| compatible(x, y));
-            return if p == protocol && args_match {
+            // OBJECT SAFETY — a requirement with `Self` in a parameter slot can never be witnessed
+            // by an existential, however it is reached (embed walk, structural, or a generic bound
+            // that later pairs two values of it). One guard at the root, so every downstream
+            // consumer — operator dispatch, `<`, a `[T: Add]` call — is sound without its own copy.
+            if pinfo.methods.iter().any(|(_, s)| self_in_param_position(s)) {
+                return Err(format!(
+                    "type {ty} does not satisfy {protocol} (its method '{}' takes `Self`, which a \
+                     protocol value cannot witness — it erases which type it holds; bind the \
+                     receiver with a generic parameter instead)",
+                    pinfo
+                        .methods
+                        .iter()
+                        .find(|(_, s)| self_in_param_position(s))
+                        .map(|(n, _)| n.as_str())
+                        .unwrap_or("?")
+                ));
+            }
+            if self.protocol_provides(p, pargs, protocol, args) {
+                return Ok(Grant::no_intrinsic_method());
+            }
+            // Structural: does `p` (own + flattened embeds) supply every method `protocol` requires?
+            // Only meaningful when `protocol` has own methods — a pure bundle already returned above
+            // once its embeds passed.
+            let provided: HashMap<String, FnSig> = pinfo
+                .methods
+                .iter()
+                .filter_map(|(n, _)| self.protocol_method_sig(p, n).map(|s| (n.clone(), s)))
+                .collect();
+            return if !pinfo.methods.is_empty()
+                && self
+                    .satisfies_methods(ty, protocol, args, pinfo, &provided)
+                    .is_ok()
+            {
                 Ok(Grant::no_intrinsic_method())
             } else {
                 Err(format!("type {ty} does not satisfy {protocol}"))
@@ -1436,6 +1647,24 @@ impl Checker {
                         .collect()
                 })
                 .unwrap_or_default(),
+            // A protocol existential witnessing another protocol (M22): bind its OWN params to its
+            // carried args, and `Self` to the existential itself — its sigs spell `Self` exactly as
+            // the requirement's do, and only the requirement side is `Self`-bound by `method_matches`.
+            Ty::Protocol(name, targs) => {
+                let mut m: HashMap<String, Ty> = self
+                    .protocols
+                    .get(name)
+                    .map(|p| {
+                        p.type_params
+                            .iter()
+                            .cloned()
+                            .zip(targs.iter().cloned())
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                m.insert("Self".to_string(), ty.clone());
+                m
+            }
             _ => HashMap::new(),
         };
         for (mname, msig) in &pinfo.methods {
@@ -1541,6 +1770,11 @@ impl Checker {
             | (Ty::Enum(..), Ty::Enum(..))
             | (Ty::NewType(..), Ty::NewType(..)) => compatible(l, r),
             (Ty::Param(a), Ty::Param(b)) => a == b,
+            // NOT `(Ty::Protocol, Ty::Protocol)`: every operator protocol's method is
+            // `(self, Self) -> Self`, and two values of one protocol need not hold the same witness
+            // (`Vecish + Vecish` over a `V` and a `W`), so the pair is un-dispatchable by object
+            // safety — see `self_in_param_position`. Bind the operands together with a generic
+            // parameter (`[T: Vecish](a: T, b: T)`) and this works, soundly.
             _ => false,
         };
         if same && self.satisfies(l, protocol).is_ok() {
@@ -1601,14 +1835,17 @@ impl Checker {
                     && self.newtype_underlying(a).is_some_and(|u| u.is_numeric()))
                     || self.satisfies(l, "Comparable").is_ok()
             }
+            // No `(Ty::Protocol, Ty::Protocol)` arm — `Comparable.compare(self, o: Self)` is
+            // `Self`-parameterized, so two values of one protocol are un-orderable for the same
+            // object-safety reason `+` is (see `op_overload_result`).
             _ => false,
         }
     }
 
+    /// Own methods OR anything an embed requires (M22) — so `protocol Ord2: Comparable` makes
+    /// `a < b` legal on an `Ord2`-bounded param, exactly as declaring `compare` directly does.
     pub(super) fn protocol_has_method(&self, protocol: &str, method: &str) -> bool {
-        self.protocols
-            .get(protocol)
-            .is_some_and(|p| p.methods.iter().any(|(n, _)| n == method))
+        self.protocol_method_sig(protocol, method).is_some()
     }
 
     /// Whether `name` is a *generic* user fn / struct / enum-variant constructor (i.e. one that can

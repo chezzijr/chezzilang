@@ -91,6 +91,56 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > runs, 0 wrong. **Perf**: the W7-4 snapshot stress (400 module-global closures × 1000 nurseries) main
 > 2.585 s → 2.573 s, flat. Full write-up: `docs/gaps.md` **§W7-4a/b** and **§W7-4c**.
 
+> **✅ Protocol embeds FIXED 2026-08-06 — a protocol's embed set is flattened at EVERY use site, not
+> just at a bound.** The `gaps.md` "protocol embeds" row, filed as a *safe-direction observation* in
+> bug-hunt wave 3 and never triaged because the doc and the behavior contradicted each other.
+> Measuring settles it — the doc was right. `p: Person` → `p.name()` (embedded): `type error … type
+> Person has no method 'name'` → **`ada 36`**. Same for the bound form, `<` through an embedded
+> `Comparable`, `in` through an embedded `Contains`, and passing a `Person` value to a `Named`
+> parameter. Both ancestors re-run and agree: **Go** (embedded interface, interface-to-interface
+> assignment, a generic constraint) prints `ada 36` / `ada` / `eve 7`; **pyright** is clean on the
+> Python `Protocol`-inheritance twin. **Checker-only** — `a.name()` lowers to name-keyed
+> `Op::CallMethod` and `a + b` to a type-blind `Op::Add` dispatching on the runtime object, so every
+> case already worked at runtime. One shared `Checker::protocol_method_sig` (own methods → transitive
+> embeds, re-spelling each embed's args into the outer protocol's vocabulary) feeds the two method-call
+> arms, `protocol_has_method` and `contains_item_ty`; `Checker::protocol_provides` is the `Ty`-level
+> twin of `bound_provides` for assignability.
+>
+> **Bounded by OBJECT SAFETY, and that bound is the session's real finding.** A method taking `Self`
+> stays **bound-only** — a protocol value erases which witness it holds, so two `Vecish` values need
+> not be the same struct. Every operator protocol's method is `(self, Self) -> Self`, so `+ - * / %`
+> and `<` on two protocol values are rejected with the remedy named (`[T: Vecish](a: T, b: T)`, which
+> works and always did). `Self` in the RETURN widens to the protocol and stays callable — that is what
+> keeps unary `-` usable on a value. Same rule as Rust's object safety; Go bans `Self` in interfaces
+> outright.
+>
+> **The first cut shipped FULLY GREEN with a soundness hole in it** — 3848 tests, clippy clean, both
+> engines, 14 checker tests, 8 running `test fn`s. Adversarial review caught it; two independent
+> prosecutors filed the same three-line charge: `plus(V(1), W("q"))` through
+> `fn plus(a: Vecish, b: Vecish)` gave `check: ok` -> `runtime error: no field 'x' on W(s=q)`. The
+> licence taken for binding `Self` to the existential was a **pyright PASS on the Python twin** — but
+> Python's `Protocol` is gradual and enforces no witness identity, so a pyright pass was never
+> evidence that a statically-enforced language may accept it. *An ancestor accepting something is only
+> evidence when that ancestor enforces the property in question.* Two more from the same review, both
+> fixed: the embed walk had a depth cap and **no visited set** (branching >= 2 ⇒ 2^64 visits, so a
+> diamond or cyclic embed graph hung `check` and the LSP past 15 s on a method MISS, and the cycle
+> diagnostic never printed), and the **conformance half** of the embed-arg re-spelling was left on the
+> old resolver, so `b: PBag[str] = B` — whose `contains` takes `int` — was accepted.
+>
+> **Lesson: a widening's negative control is the whole test.** The first cut shipped green against
+> every acceptance and was still wrong — `"x" in b` type-checked on a `b: Bag[int]` where `protocol
+> Bag[T]: Contains[T]`, because `resolve_ty_ro` resolves a bare name through `self.type_params`, which
+> at a USE site is the *calling function's* params. The embed arg `T` became `Ty::Unknown` (permissive
+> everywhere), or the CALLER's `T` when one shared the name. No acceptance could catch it: every
+> acceptance wants a `Some`, and `Unknown` is a `Some`. Only the paired rejection distinguishes
+> "resolved correctly" from "resolved to Unknown". The nested form (`Contains[List[T]]`) is DECLINED
+> at declare time rather than answered wrongly — the read-only resolver cannot re-spell it, and an
+> `Unknown` element accepts every argument. Tests: 23 `ok()`/`rejects()` in `src/checker/tests.rs`
+> (each acceptance paired with its negative — these are the only ones that can prove a *rejection* is
+> gone, since `run_file` bypasses the checker) + 8 running `test fn`s in
+> `tests/chz/spec/protocol_embed_test.chz`, serial==M:N gated. `cargo test` **3852** green, clippy clean.
+> Full write-up: `docs/gaps.md` **§2026-08-06**.
+
 > **✅ W7-21 FIXED 2026-08-05 — a module global that HOLDS a function is now callable through the
 > module.** `BARE := k.one` in `l.chz`, then `l.BARE()` in an importer: `type error (line 3, col 6):
 > module 'l' has no member 'BARE'` (rc=1) → **`ok`, prints `1`** on M:N, `--threads=1` and `--serial`.

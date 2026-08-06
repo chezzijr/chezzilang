@@ -1,0 +1,130 @@
+# tests/chz/spec/protocol_embed_test.chz — a protocol's embed set is flattened at EVERY use site.
+#
+# `spec.md` always promised this; the checker read each protocol's OWN method list at five lookup
+# sites, so an embedded method was invisible through an interface value, through a bound, and to
+# `<` / `in`. Go is the ancestor for interfaces and agrees on all of it (an embedded method is
+# callable through the interface value; a `Person` value is assignable to a `Named` parameter).
+#
+# These are the RUNNING half of the fix. Runtime dispatch is by NAME and always worked, so a green
+# run here proves the lowering, never that the checker's rejection is gone — that claim is fenced
+# separately by the `ok()`/`rejects()` tests in `src/checker/tests.rs` (the M22 embed block).
+# Serial==M:N is guarded by `test_runner::chz_suite_passes_both_engines`.
+
+protocol Named:
+    fn name(self) -> str
+
+protocol Person:
+    Named
+    fn age(self) -> int
+
+struct Dev:
+    n: str
+    a: int
+    fn name(self) -> str:
+        return self.n
+    fn age(self) -> int:
+        return self.a
+
+test fn embedded_method_through_an_interface_value():
+    p: Person = Dev("ada", 36)
+    assert p.name() == "ada"      # embedded
+    assert p.age() == 36          # own
+
+test fn embedded_method_through_a_bound():
+    assert named_of(Dev("ada", 36)) == "ada"
+
+fn named_of[T: Person](p: T) -> str:
+    return p.name()
+
+test fn a_protocol_value_is_accepted_where_an_embedded_protocol_is_wanted():
+    p: Person = Dev("ada", 36)
+    assert only_named(p) == "ada"
+
+fn only_named(n: Named) -> str:
+    return n.name()
+
+# ---- `<` through an embedded Comparable ----
+
+protocol Ord2:
+    Comparable
+    fn tag(self) -> str
+
+struct N:
+    v: int
+    fn compare(self, o: N) -> int:
+        return self.v - o.v
+    fn tag(self) -> str:
+        return "n"
+
+fn lt[T: Ord2](a: T, b: T) -> bool:
+    return a < b
+
+test fn ordering_through_an_embedded_comparable():
+    assert lt(N(1), N(2))
+    assert not lt(N(2), N(1))
+
+# ---- `in` through an embedded Contains, including the parameterized form ----
+
+protocol Bag:
+    Contains[int]
+    fn tag(self) -> str
+
+struct B:
+    xs: List[int]
+    fn contains(self, x: int) -> bool:
+        return x in self.xs
+    fn tag(self) -> str:
+        return "b"
+
+fn has[T: Bag](b: T, x: int) -> bool:
+    return x in b
+
+protocol PBag[T]:
+    Contains[T]
+
+test fn membership_through_an_embedded_contains():
+    assert has(B([1, 2]), 2)
+    assert not has(B([1, 2]), 9)
+
+test fn membership_through_a_parameterized_embed():
+    b: PBag[int] = B([1, 2])
+    assert 2 in b
+    assert not (9 in b)
+
+# ---- operators through an embedded operator protocol ----
+#
+# OBJECT SAFETY: `Add.add` is `(self, Self) -> Self`, and a protocol VALUE erases which witness it
+# holds, so two `Vecish` values are not provably the same struct — `fn plus(a: Vecish, b: Vecish)`
+# is a compile error, not a test case (fenced in `src/checker/tests.rs`). The sound spelling binds
+# both operands to ONE witness with a generic parameter, which is what runs here. `Self` in the
+# RETURN is fine and stays callable through the value.
+
+protocol Vecish:
+    Add
+    fn tag(self) -> str
+
+struct V:
+    x: int
+    fn add(self, o: V) -> V:
+        return V(self.x + o.x)
+    fn neg(self) -> V:
+        return V(-self.x)
+    fn tag(self) -> str:
+        return "v"
+
+fn plus[T: Vecish](a: T, b: T) -> T:
+    return a + b
+
+protocol Negish:
+    fn neg(self) -> Self
+    fn tag(self) -> str
+
+fn flip(a: Negish) -> Negish:
+    return a.neg()
+
+test fn operator_dispatches_through_an_embedded_operator_protocol():
+    assert plus(V(1), V(2)).tag() == "v"
+
+test fn a_self_returning_method_is_callable_through_an_existential():
+    a: Negish = V(3)
+    assert flip(a).neg().tag() == "v"
