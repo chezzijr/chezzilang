@@ -59,6 +59,23 @@ pub enum DivKind {
     /// Chezzi succeeded while Python failed (usually our generator emitting something
     /// Python rejects — a harness bug, not a Chezzi bug, but worth surfacing).
     PythonFault,
+    /// Both engines failed, but their stdout DIFFERS within the shared prefix — not just one
+    /// side getting further before an unrelated fault of its own (`BothError`'s routine shape).
+    /// Compared prefix-compatibly (`chz.stdout[..n] == py.stdout[..n]`, `n = min(len, len)`),
+    /// never by plain inequality: CPython failing at parse time writes nothing to stdout while
+    /// Chezzi fails at runtime after printing, and plain `!=` would flag that routine
+    /// generator-quirk shape (`b"" != b"1\n"`) as a divergence (F4, `docs/gaps.md` §W7-36).
+    BothErrorStdout,
+    /// The Chezzi child did not exit within the timeout, but Python finished the SAME program
+    /// cleanly (exit 0). `generate.rs` bounds every loop by construction (`LOOP_CAP`, a bounded
+    /// `for`, a mandatory `while` increment), so a generated program that does not terminate is a
+    /// Chezzi bug, not the "slow input" excuse that makes a timeout uninteresting in the
+    /// panic-fuzz oracle (F3, `docs/gaps.md` §W7-36). `chz` here is a SYNTHESIZED `Capture`
+    /// (`run_one` returns nothing on timeout) — empty stdout, a stderr note, `code: None`. That
+    /// is deliberately NOT the same `code: None` `classify` treats as a signal kill: this capture
+    /// is built directly in `run_sources` and never passed through `classify`, so that invariant
+    /// (`Capture::code`'s doc, pinned by W7-33) is untouched.
+    ChezziHang,
 }
 
 #[derive(Clone, Debug)]
@@ -155,8 +172,36 @@ pub fn run_sources(cfg: &Config, chz_src: &str, py_src: &str, prog: Option<&Prog
     ) {
         Ok(c) => c,
         Err(RunErr::TimedOut) => {
+            // F3: don't give up yet. `generate.rs` bounds every loop by construction
+            // (`LOOP_CAP`, a bounded `for`, a mandatory `while` increment), so a generated
+            // program that does not terminate in the timeout is a Chezzi bug — PROVIDED Python
+            // finishes the SAME program (otherwise it's outside the shared subset and "chezzi
+            // timed out" tells us nothing; a slow/hanging CPython on our input is a harness
+            // matter, not a Chezzi claim).
+            let py_after_chz_timeout =
+                run_one(Command::new(&cfg.python).arg(&py_path), cfg.timeout);
+            let outcome = match py_after_chz_timeout {
+                Ok(py) if py.code == Some(0) => {
+                    // False-positive guard: a single wall-clock timeout on a loaded machine is
+                    // not proof of a hang (this project has been bitten by exactly that pattern
+                    // — commit 0fc437a2 — and this gate runs in CI beside a full `cargo test`).
+                    // Re-run ONCE at 3x the configured timeout; only report if it times out
+                    // again. This only runs on the already-timed-out path, so it costs nothing
+                    // on the normal (non-hanging) run.
+                    let retry_timeout = cfg.timeout * 3;
+                    let retry = run_one(
+                        Command::new(&cfg.chezzi_bin).arg("run").arg(&chz_path),
+                        retry_timeout,
+                    );
+                    hang_retry_outcome(retry, py, prog, retry_timeout)
+                }
+                // Python failed too, or itself timed out: outside the shared subset, not a
+                // Chezzi claim.
+                Ok(_) | Err(RunErr::TimedOut) => Outcome::Timeout { which: "chezzi" },
+                Err(RunErr::CouldNotRun(msg)) => Outcome::HarnessError(msg),
+            };
             cleanup(&chz_path, &py_path);
-            return Outcome::Timeout { which: "chezzi" };
+            return outcome;
         }
         Err(RunErr::CouldNotRun(msg)) => {
             cleanup(&chz_path, &py_path);
@@ -177,6 +222,45 @@ pub fn run_sources(cfg: &Config, chz_src: &str, py_src: &str, prog: Option<&Prog
     cleanup(&chz_path, &py_path);
 
     classify(chz, py, prog)
+}
+
+/// F3's 3x-timeout re-run decision, split out of `run_sources` so it's unit-testable without a
+/// real subprocess race. Called only after chezzi's FIRST run already timed out and Python
+/// finished the same program cleanly (`code: Some(0)`) — `py` is that clean capture.
+fn hang_retry_outcome(
+    retry: Result<Capture, RunErr>,
+    py: Capture,
+    prog: Option<&Program>,
+    retry_timeout: Duration,
+) -> Outcome {
+    match retry {
+        // Timed out again: a confirmed hang.
+        Err(RunErr::TimedOut) => Outcome::Divergence {
+            kind: DivKind::ChezziHang,
+            // Synthesized: `run_one` returns nothing on timeout, so there is no real `Capture`
+            // to report. `code: None` here is NOT the signal-kill sentinel `classify` checks
+            // for — this outcome is built directly, never passed through `classify` (see
+            // `DivKind::ChezziHang`'s doc).
+            chz: Capture {
+                stdout: Vec::new(),
+                stderr: format!(
+                    "chezzi did not exit within {retry_timeout:?} (3x the configured timeout) — hang"
+                )
+                .into_bytes(),
+                code: None,
+            },
+            py,
+        },
+        // A loaded-machine false alarm: chezzi finished on the retry after all. Not a confirmed
+        // hang, but it DID produce a real capture — classify it against `py` instead of
+        // discarding it, or a genuine divergence that merely took 1-3x longer than the timeout
+        // goes unreported (the same "real signal thrown away" class this whole task closes).
+        Ok(c) => classify(c, py, prog),
+        // The harness itself broke on the retry (e.g. the child could not even spawn) — fatal,
+        // per this function's contract on every other arm; must NOT collapse into the
+        // non-finding `Timeout` (that would reproduce W7-34's exact bug one call site over).
+        Err(RunErr::CouldNotRun(msg)) => Outcome::HarnessError(msg),
+    }
 }
 
 fn classify(chz: Capture, py: Capture, prog: Option<&Program>) -> Outcome {
@@ -240,8 +324,21 @@ fn classify(chz: Capture, py: Capture, prog: Option<&Program>) -> Outcome {
                 py,
             };
         }
-        // both failed, no host panic, no signal kill — generator produced something outside
-        // the shared subset
+        // Both failed, no host panic, no signal kill. Usually the generator produced something
+        // outside the shared subset — but "usually" isn't "always": compare the shared PREFIX of
+        // stdout (never plain `!=`) so a real divergence printed before two unrelated faults
+        // isn't thrown away unexamined (F4). Prefix, not full equality: one side simply getting
+        // further before its own fault (Chezzi prints a line Python's earlier parse-time failure
+        // never reached) is the routine shape and must stay `BothError` — plain `!=` would flag
+        // it.
+        let n = chz.stdout.len().min(py.stdout.len());
+        if chz.stdout[..n] != py.stdout[..n] {
+            return Outcome::Divergence {
+                kind: DivKind::BothErrorStdout,
+                chz,
+                py,
+            };
+        }
         return Outcome::BothError;
     }
 
@@ -566,6 +663,179 @@ mod tests {
         assert!(
             matches!(classify(chz, py, None), Outcome::BothError),
             "two ordinary faults with no panic marker and no signal kill must stay BothError"
+        );
+    }
+
+    // --- F4: the both-failed arm must diff stdout, not throw it away -------------------------
+
+    /// F4 test #1. Both engines failed but printed genuinely DIFFERENT bytes on stdout before
+    /// failing — a real divergence, not the routine "one side got further" shape `BothError`
+    /// exists for.
+    #[test]
+    fn a_both_failed_run_with_divergent_stdout_is_a_finding() {
+        let chz = cap_exit(b"1\n".to_vec(), b"runtime error: boom".to_vec(), Some(1));
+        let py = cap_exit(b"2\n".to_vec(), b"ZeroDivisionError".to_vec(), Some(1));
+        assert!(
+            matches!(
+                classify(chz, py, None),
+                Outcome::Divergence {
+                    kind: DivKind::BothErrorStdout,
+                    ..
+                }
+            ),
+            "two different bytes on stdout before both sides failed must be a finding"
+        );
+    }
+
+    /// F4 test #2. The guard against a naive `!=` check: one side simply printed MORE before it
+    /// hit its own unrelated fault (a common shape — Chezzi runs one line further than Python
+    /// before faulting). Plain inequality WOULD flag this (`b"1\n2\n" != b"1\n"`); the assert
+    /// below pins that premise so nobody swaps prefix-compare for `!=` without this test failing.
+    /// Prefix-compatibility must not.
+    #[test]
+    fn a_both_failed_run_whose_stdout_is_a_prefix_stays_a_non_finding() {
+        let chz = cap_exit(b"1\n2\n".to_vec(), b"runtime error: boom".to_vec(), Some(1));
+        let py = cap_exit(b"1\n".to_vec(), b"ZeroDivisionError".to_vec(), Some(1));
+        assert_ne!(
+            chz.stdout, py.stdout,
+            "premise: a naive != check would flag this pair"
+        );
+        assert!(
+            matches!(classify(chz, py, None), Outcome::BothError),
+            "one side simply getting further before its own fault must stay a non-finding"
+        );
+    }
+
+    /// F4 test #3. The CPython-parse-error shape: Python fails before writing anything to
+    /// stdout, Chezzi fails at runtime after printing — a routine generator quirk, not a
+    /// divergence (an empty prefix is trivially compatible with anything).
+    #[test]
+    fn a_both_failed_run_with_empty_python_stdout_stays_a_non_finding() {
+        let chz = cap_exit(b"1\n".to_vec(), b"runtime error: boom".to_vec(), Some(1));
+        let py = cap_exit(Vec::new(), b"SyntaxError: invalid syntax".to_vec(), Some(1));
+        assert!(
+            matches!(classify(chz, py, None), Outcome::BothError),
+            "CPython failing before writing anything must stay a non-finding"
+        );
+    }
+
+    // --- F3: a Chezzi hang is a finding when Python survives the same program ----------------
+
+    /// Locate the built `chezzi` binary for a real-subprocess test. `env!("CARGO_BIN_EXE_chezzi")`
+    /// does NOT work here: this module is textually pulled into TWO different crates by
+    /// `#[path]` (`tests/difftest.rs`, and `src/bin/difffuzz.rs` built as a test harness by a
+    /// plain `cargo test`), and the second one fails to COMPILE with that macro — confirmed:
+    /// `cargo test --bin difffuzz` errors `environment variable "CARGO_BIN_EXE_chezzi" not
+    /// defined at compile time` (Cargo only defines `CARGO_BIN_EXE_<name>` for integration-test
+    /// compilation, not for a bin target built in test mode). Mirrors `difffuzz::locate_chezzi`'s
+    /// current_exe-relative search, one directory further up: a TEST binary (this one, or
+    /// `tests/difftest.rs`'s) lives in `target/{debug,release}/deps/`, not directly in
+    /// `target/{debug,release}/` like a plain `cargo build` binary.
+    fn locate_chezzi_for_test() -> PathBuf {
+        let exe = std::env::current_exe().expect("current_exe");
+        if let Some(dir) = exe.parent().and_then(|d| d.parent()) {
+            let cand = dir.join("chezzi");
+            if cand.exists() {
+                return cand;
+            }
+        }
+        PathBuf::from("chezzi") // fall back to PATH
+    }
+
+    /// Short-timeout config for the hang tests: real subprocesses, so keep it small — the 3x
+    /// re-run false-positive guard means a confirmed hang costs ~4x this value.
+    fn hang_cfg() -> Config {
+        let mut c = Config::new(locate_chezzi_for_test());
+        c.timeout = Duration::from_millis(500);
+        c
+    }
+
+    /// F3. `generate.rs` bounds every loop by construction, so a generated program that never
+    /// terminates within the timeout is a Chezzi bug — PROVIDED Python finishes the SAME program
+    /// (this is the brief's own repro verbatim). Real subprocesses; prints the measured wall time
+    /// per the report requirement.
+    #[test]
+    fn a_chezzi_hang_python_survives_is_a_finding() {
+        let cfg = hang_cfg();
+        let start = Instant::now();
+        let outcome = run_sources(&cfg, "while true:\n    x := 0\n", "print(0)\n", None);
+        eprintln!(
+            "a_chezzi_hang_python_survives_is_a_finding wall time: {:?}",
+            start.elapsed()
+        );
+        assert!(
+            matches!(
+                outcome,
+                Outcome::Divergence {
+                    kind: DivKind::ChezziHang,
+                    ..
+                }
+            ),
+            "a chezzi hang Python survives must be a finding, got {outcome:?}"
+        );
+        assert!(outcome.is_finding());
+    }
+
+    /// F3 guard. Python hanging too means the program is outside the shared subset — a slow or
+    /// hanging CPython on our generated input is a harness/generator matter, not a Chezzi claim.
+    /// Must stay a non-finding (and must not pay the 3x chezzi re-run: python never survives).
+    #[test]
+    fn a_chezzi_hang_python_also_hangs_stays_a_non_finding() {
+        let cfg = hang_cfg();
+        let outcome = run_sources(
+            &cfg,
+            "while true:\n    x := 0\n",
+            "while True:\n    x = 0\n",
+            None,
+        );
+        assert!(
+            !outcome.is_finding(),
+            "both sides hanging must not be a finding, got {outcome:?}"
+        );
+    }
+
+    // --- F3 review follow-up: the 3x-timeout retry's own two outcomes must not be swallowed ---
+
+    /// Adversarial-review finding: a naive retry match (`Err(TimedOut) => Divergence, _ =>
+    /// Timeout`) silently absorbs `RunErr::CouldNotRun` — the retry's OWN harness failure (e.g.
+    /// the child couldn't even spawn) — into the ordinary non-finding `Timeout`, reproducing
+    /// `W7-34`'s exact bug one call site over (a harness error must be FATAL, never scored as
+    /// "no finding" — every other `RunErr::CouldNotRun` arm in this file maps to
+    /// `Outcome::HarnessError`).
+    #[test]
+    fn a_hang_retry_harness_error_is_not_silently_a_timeout() {
+        let py = cap_exit(b"0\n".to_vec(), Vec::new(), Some(0));
+        let outcome = hang_retry_outcome(
+            Err(RunErr::CouldNotRun("could not run \"chezzi\": ...".into())),
+            py,
+            None,
+            Duration::from_millis(900),
+        );
+        assert!(
+            matches!(outcome, Outcome::HarnessError(_)),
+            "the retry's own harness failure must be fatal, not a Timeout non-finding, got {outcome:?}"
+        );
+    }
+
+    /// Adversarial-review finding: when the 3x-timeout retry actually SUCCEEDS (a loaded-machine
+    /// false alarm, not a genuine hang), the resulting `Capture` must be classified against
+    /// Python's, not discarded — otherwise a real divergence that merely took 1-3x longer than
+    /// the timeout goes unreported, silently downgraded to `Timeout { which: "chezzi" }`.
+    #[test]
+    fn a_hang_retry_that_succeeds_is_classified_not_discarded() {
+        let py = cap_exit(b"1\n".to_vec(), Vec::new(), Some(0));
+        let chz_retry = cap_exit(b"2\n".to_vec(), Vec::new(), Some(0));
+        let outcome = hang_retry_outcome(Ok(chz_retry), py, None, Duration::from_millis(900));
+        assert!(
+            matches!(
+                outcome,
+                Outcome::Divergence {
+                    kind: DivKind::Stdout,
+                    ..
+                }
+            ),
+            "a slow-but-successful retry with divergent stdout must be classified as a real \
+             finding, not discarded as a non-finding Timeout, got {outcome:?}"
         );
     }
 

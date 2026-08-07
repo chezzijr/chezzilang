@@ -7823,3 +7823,113 @@ this with `run_one: Result<Capture, RunErr>` + `Outcome::HarnessError(String)` +
 `panicfuzz::run_one` / `Outcome` / `run_input`'s staging arm, and to `panicfuzz`'s own caller(s) (the
 CLI fuzzer binary and any `#[test]` sweep) — but `src/panicfuzz/` is a hand-maintained sibling of
 `src/difftest/`, not a shared module, so the fix needs its own pass rather than a shared helper.
+
+### W7-36 — a Chezzi hang was thrown away without ever running Python, and a both-failed run's stdout divergence was invisible — **FIXED 2026-08-07**
+
+**Found by:** the same "real bug reported as a non-finding" audit as `W7-30`–`W7-34`, this time on
+the two remaining arms of `classify` / `run_sources` (`src/difftest/run.rs`) that discarded real
+signal. Same family, two more findings.
+
+**F3 — a Chezzi hang was thrown away, and Python was never even run.** `run_sources` returned
+`Outcome::Timeout { which: "chezzi" }` (`is_finding() == false`) the instant the chezzi child
+timed out, without running Python at all — so `run_sources(&cfg, "while true:\n    x := 0\n",
+"print(0)\n", None)` reported nothing even though Python finishes the identical program in
+milliseconds. **The load-bearing premise, stated explicitly because it is what makes a timeout
+reportable HERE and not in the panic-fuzz oracle:** `generate.rs` bounds every loop by
+construction — `LOOP_CAP`, a bounded `for`, a `while` with a mandatory increment on a reserved
+counter — so a *generated* program that does not terminate in the timeout is a Chezzi bug, by the
+same argument `generate.rs`'s own header uses to justify treating a Chezzi fault as real. The
+panic-fuzz oracle fuzzes raw token streams, not correct-by-construction programs, so a hang there
+can legitimately be a slow/malformed input rather than a bug — this verdict does not transfer. **If
+`generate.rs` ever gains an unbounded loop, this verdict must be revisited.**
+
+Fixed: on a chezzi timeout, `run_sources` now runs Python anyway. If Python exits **0**, before
+reporting anything Chezzi is re-run **ONCE at 3x the configured timeout** — a false-positive guard,
+required rather than optional: a single wall-clock timeout on a loaded machine is not proof of a
+hang, this gate runs in CI beside a full `cargo test`, and the project has already had to rewrite a
+wall-clock assertion for exactly this reason (commit `0fc437a2`). Only if the re-run also times out
+is the outcome `Outcome::Divergence { kind: DivKind::ChezziHang, chz, py }`. If Python does anything
+else (non-zero exit, itself times out, or the harness can't even run it) the outcome stays the
+existing non-finding `Outcome::Timeout { which: "chezzi" }` (or routes to `HarnessError` if the
+harness itself broke) — the program is then outside the shared subset, and a slow/hanging CPython
+on our generated input is a harness/generator matter, not a Chezzi claim. `chz` in the reported
+`Divergence` is a SYNTHESIZED `Capture` — `run_one` returns nothing on a timeout, so there is no
+real capture to report — with empty stdout, a stderr note naming the timeout, and `code: None`.
+That reuses the `code: None` bit pattern for a NEW meaning ("no capture, timed out"), which is safe
+only because this `Capture` is built directly inside `run_sources` and is never passed through
+`classify`: `classify`'s "a live `Capture` reaching me with `code: None` means a signal kill"
+invariant (pinned by `W7-33`) is therefore untouched, not re-overloaded — spelled out in
+`DivKind::ChezziHang`'s own doc comment so a future reader doesn't wire this capture into
+`classify` and revive the exact hole `W7-33` closed.
+
+**Review follow-up, same day: the retry itself had two more instances of this exact bug class.**
+Adversarial review of this fix caught both — the retry's `match` was originally `Err(TimedOut) =>
+Divergence, _ => Timeout`, and that wildcard silently absorbed two DIFFERENT outcomes into the
+non-finding `Timeout`: (a) `Err(RunErr::CouldNotRun)` — the retry's OWN spawn failing — which
+reproduces `W7-34`'s exact bug one call site over (a harness error must be fatal, not a scored
+non-finding); (b) `Ok(c)` — the retry actually SUCCEEDING (a loaded-machine false alarm) — whose
+resulting `Capture` was thrown away entirely instead of being compared against `py`, so a genuine
+divergence that merely took 1-3x longer than the timeout went unreported. Fixed by extracting the
+retry decision into `hang_retry_outcome` (a pure function taking `Result<Capture, RunErr>` +
+`py` + `prog`, unit-testable without a subprocess race): `Err(TimedOut)` is the confirmed hang,
+`Ok(c)` now routes through `classify(c, py, prog)`, and `Err(CouldNotRun)` routes to
+`Outcome::HarnessError` like every other harness-broke arm in this file.
+
+**F4 — `BothError` threw away stdout unexamined.** `classify`'s both-failed arm returned
+`Outcome::BothError` (a non-finding) unconditionally, even when the two sides had printed
+completely DIFFERENT stdout before failing (e.g. chezzi `b"1\n"` then a runtime fault, Python
+`b"2\n"` then an unrelated exception) — ten lines of genuinely divergent output, discarded. Fixed:
+the arm now compares the shared PREFIX of the two stdouts (`chz.stdout[..n] == py.stdout[..n]`, `n
+= min(len, len)`) — a byte difference within the shared prefix is
+`Outcome::Divergence { kind: DivKind::BothErrorStdout, .. }`; a length-only difference (one side
+simply got further before its own unrelated fault) stays `BothError`. **Prefix-compatibility,
+not equality, is the load-bearing choice**: CPython failing at PARSE time writes nothing to stdout
+at all, while Chezzi routinely fails at RUNTIME after printing several lines first — under plain
+`!=` that routine, harmless shape (`b"" != b"1\n"`) would false-positive on every such pair, which
+is exactly the CPython-parse-error case this oracle sees constantly. Pinned by a test that asserts
+the premise directly (`assert_ne!(chz.stdout, py.stdout)` before asserting the outcome still stays
+`BothError`), so a regression to plain `!=` fails this test, not just silently ships.
+
+Both new `DivKind`s render in `describe` (`src/difftest/mod.rs`). `ChezziHang` gets an explicit
+line making clear chezzi produced no capture and Python exited 0 — without it, the empty
+chezzi-stdout block sitting next to Python's non-empty one would read as an ordinary (and
+misleading) stdout mismatch rather than a hang. `BothErrorStdout` was folded into the existing
+`W7-30` byte-only-divergence hex fallback (previously keyed on `DivKind::Stdout` alone): two
+byte-different stdouts that happen to DECODE alike can occur on this arm exactly as they can on the
+exit-0 arm, and without the raw-hex line it would render as the same unreadable
+verdict-contradicts-the-text-above defect `W7-30` fixed.
+
+**Tests** (`src/difftest/run.rs`'s `#[cfg(test)] mod tests`): 3 for F4 —
+`a_both_failed_run_with_divergent_stdout_is_a_finding` (`BothErrorStdout`, today `BothError`),
+`a_both_failed_run_whose_stdout_is_a_prefix_stays_a_non_finding` (pins the naive-`!=`-would-flag-this
+premise, then asserts the outcome stays `BothError`), `a_both_failed_run_with_empty_python_stdout_stays_a_non_finding`
+(the CPython-parse-error shape). 2 for F3, using real subprocesses via `run_sources` — one is the
+brief's own repro verbatim (`"while true:\n    x := 0\n"` / `"print(0)\n"`) under a 500ms `Config`
+timeout: **measured wall time ≈2.02s** (≈4x the timeout, confirming the 3x re-run guard actually
+ran before reporting); the guard test (both sides loop forever) stays a non-finding and finishes in
+≈1s, without paying the 3x re-run since Python never survives to trigger it. A `#[cfg(test)]`-only
+`locate_chezzi_for_test` finds the built `chezzi` binary via `current_exe()` rather than
+`env!("CARGO_BIN_EXE_chezzi")`: this module is pulled by `#[path]` into TWO crates
+(`tests/difftest.rs`, and `src/bin/difffuzz.rs` built as a test harness by a plain `cargo test`),
+and the macro fails to COMPILE in the second one — confirmed empirically (`cargo test --bin
+difffuzz` errors `environment variable "CARGO_BIN_EXE_chezzi" not defined at compile time`; Cargo
+only defines that variable for integration-test compilation, not a bin built in test mode). Plus 2
+more from the review follow-up, exercising `hang_retry_outcome` directly with synthetic captures
+(no subprocess): `a_hang_retry_harness_error_is_not_silently_a_timeout` and
+`a_hang_retry_that_succeeds_is_classified_not_discarded`.
+
+All RED before the fix (assertion failures, not compile errors — the two new `DivKind` variants
+were added first as inert data so the tests exercise real classification logic): GREEN after.
+`cargo test --test difftest` — 46 passed, 1 ignored; the same tests also pass compiled into
+`src/bin/difffuzz.rs`'s test harness confirming `locate_chezzi_for_test` works in both compilation
+contexts. `cargo clippy --all-targets -- -D warnings` clean. Full `cargo test` (whole pre-commit
+suite): 3878 lib + parity + conformance, difftest, difffuzz, panicfuzz, all green.
+
+**The heavy sweep (seeds 0..3000, `cargo test --test difftest -- --ignored`) was run TWICE**, per
+the false-positive-guard requirement — both runs **PASS**, **94.69s** and **94.50s**: no
+`ChezziHang` or `BothErrorStdout` finding on either run, so the guard is not flaking under this
+sweep. Reachability from today's generator is deliberately low (it avoids faults by construction,
+so a Chezzi fault on a generated program usually implies Python succeeded cleanly rather than also
+failing, and loops terminate quickly) — but `run_sources` is public and used by hand-written
+probes too, and **Task 6 of this hardening series widens the generator to float arithmetic and
+non-int calls**, which is expected to land in exactly these two arms.

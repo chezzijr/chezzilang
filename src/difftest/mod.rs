@@ -35,6 +35,14 @@ pub fn describe(seed: u64, outcome: &Outcome, chz_src: &str, py_src: &str) -> St
     match outcome {
         Outcome::Divergence { kind, chz, py } => {
             s.push_str(&format!("kind: {kind:?}\n"));
+            // `ChezziHang`'s `chz` is a SYNTHESIZED capture (empty stdout, a stderr note,
+            // `code: None`) — say so explicitly, or an empty chezzi-stdout block next to a
+            // Python stdout reads as an ordinary (and wrong) stdout-mismatch report.
+            if *kind == run::DivKind::ChezziHang {
+                s.push_str(
+                    "--- chezzi produced NO CAPTURE: it did not exit within the timeout (hang) ---\n--- python exited 0 ---\n",
+                );
+            }
             // Decoded for the human reading the report. When the two sides are byte-different but
             // decode alike (non-UTF-8 output), the text below looks identical — so spell the raw
             // bytes out too, or the report would contradict the verdict.
@@ -43,7 +51,14 @@ pub fn describe(seed: u64, outcome: &Outcome, chz_src: &str, py_src: &str) -> St
                 chz.stdout_text(),
                 py.stdout_text()
             ));
-            if *kind == run::DivKind::Stdout && chz.stdout_text() == py.stdout_text() {
+            // W7-30's byte-only-divergence hex fallback applies to BOTH stdout-comparing kinds:
+            // `Stdout` (both exit 0) and `BothErrorStdout` (both failed, prefix differs) can each
+            // have two byte-different stdouts that happen to DECODE alike — without the raw hex
+            // line that would render as an unreadable contradiction (a `Divergence` verdict over
+            // two identical-looking blocks), the exact defect W7-30 fixed.
+            if (*kind == run::DivKind::Stdout || *kind == run::DivKind::BothErrorStdout)
+                && chz.stdout_text() == py.stdout_text()
+            {
                 s.push_str(&format!(
                     "--- stdout differs in RAW BYTES ONLY (the decode above is lossy) ---\nchezzi: {}\npython: {}\n",
                     hex(&chz.stdout),

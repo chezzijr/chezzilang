@@ -327,6 +327,27 @@ not finish (bad args, or a `HarnessError` — e.g. `chezzi` not on `PATH`). See 
 for the measured before/after (`chezzi` missing → `done: N seeds, 0 finding(s)`, exit 0, before
 the fix).
 
+**A Chezzi timeout is not thrown away — Python gets a chance to prove it's a real hang.**
+`generate.rs` bounds every loop by construction (`LOOP_CAP`, a bounded `for`, a mandatory `while`
+increment on a reserved counter), so a generated program that does not terminate in the timeout is
+a Chezzi bug — PROVIDED Python finishes the same program cleanly; a program outside the shared
+subset times out for reasons that say nothing about Chezzi. On a chezzi timeout, `run_sources` now
+runs Python anyway: if Python exits 0, Chezzi is re-run ONCE at 3x the configured timeout (a
+false-positive guard against a loaded machine — required, not optional, since this gate runs in CI
+beside a full `cargo test`) and only a second timeout is reported, as
+`Outcome::Divergence { kind: DivKind::ChezziHang, .. }` — `chz` there is a synthesized `Capture`
+(`code: None`, but never passed through `classify`, so `W7-33`'s signal-kill invariant is
+untouched). If Python fails, itself times out, or can't be run, the outcome stays the non-finding
+`Outcome::Timeout { which: "chezzi" }` (`gaps.md` **W7-36**).
+
+**The both-failed arm compares stdout, prefix-compatibly.** `classify`'s `BothError` arm used to
+discard stdout unexamined even when the two sides had printed genuinely different bytes before
+failing. It now diffs the shared PREFIX (`chz.stdout[..n] == py.stdout[..n]`) — a byte difference
+within that prefix is `Outcome::Divergence { kind: DivKind::BothErrorStdout, .. }`; one side simply
+printing more before its own unrelated fault stays `BothError`. Prefix, not plain `!=`: CPython
+failing at parse time writes nothing to stdout while Chezzi routinely fails at runtime after
+printing, and equality would false-positive on that routine, harmless shape (`gaps.md` **W7-36**).
+
 **Widened construct coverage** (granular `Features` flags, all on in `full()`):
 - **String methods** (`string_methods`): the eight ASCII-identical methods `upper`/`lower`/`replace`/
   `split`/`join`/`starts_with`/`ends_with`/`contains`. The emitters map names per language
