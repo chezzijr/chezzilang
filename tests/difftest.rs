@@ -510,8 +510,16 @@ fn fuzz_range(feat: Features, start: u64, end: u64) {
 /// does not exist) and pin the abort behavior below, without spawning the real 20s-timeout `chezzi`.
 fn fuzz_range_cfg(cfg: &Config, feat: Features, start: u64, end: u64) {
     let mut findings = Vec::new();
+    // Same outcome histogram the `difffuzz` binary prints, for the same reason (W7-34's
+    // residual): a sweep where every seed timed out compared NOTHING, and a bare green tick is
+    // byte-identical to a sweep that really did compare 3000 programs. `--nocapture` shows it;
+    // a failing run prints it unconditionally. Deliberately NOT an assertion threshold — a
+    // heuristic that cannot be certain must stay legible rather than emit a confident wrong
+    // verdict about the machine it happens to be running on.
+    let mut hist: std::collections::BTreeMap<&'static str, usize> = Default::default();
     for seed in start..end {
         let (outcome, chz, py) = difftest::run_seed(cfg, seed, feat);
+        *hist.entry(difftest::kind_label(&outcome)).or_default() += 1;
         // A harness error means the oracle never ran this seed at all — not a divergence, and
         // not something to accumulate: 3000 identical ENOENT messages would help nobody, so
         // fail on the first one instead of burying it in a findings list it isn't a member of.
@@ -531,9 +539,16 @@ fn fuzz_range_cfg(cfg: &Config, feat: Features, start: u64, end: u64) {
             findings.push(difftest::describe(seed, &outcome, &chz, &py));
         }
     }
+    let hist: Vec<String> = hist.iter().map(|(k, n)| format!("{k} {n}")).collect();
+    eprintln!(
+        "fuzz sweep {start}..{end}: {} finding(s) [{}]",
+        findings.len(),
+        hist.join(", ")
+    );
     assert!(
         findings.is_empty(),
-        "differential divergences found:\n{}",
+        "differential divergences found (sweep {start}..{end} [{}]):\n{}",
+        hist.join(", "),
         findings.join("\n")
     );
 }

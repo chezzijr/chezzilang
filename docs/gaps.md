@@ -7842,6 +7842,23 @@ is right, since a legitimate sweep can time out at a small `--timeout-ms` on a l
 the run is made **readable** and the human reads the histogram. `kind_label` was already the report's
 name table in both `mod.rs` files; it is now `pub` and reused rather than duplicated.
 
+**Second half, closed the same day** — the fix's own author flagged that it landed only in the two
+`src/bin/` sweeps, so the `cargo test` GATES (`fuzz_range_cfg`, and `panicfuzz`'s sweep) still reported
+pass/fail alone. That is the same false negative in the place it matters most: CI is where an
+all-timeout sweep would actually go unnoticed, because a green tick there is byte-identical whether the
+gate compared 3000 programs or zero. `fuzz_range_cfg` now tallies the same histogram, prints it via
+`eprintln!` (visible under `--nocapture`) and folds it into the failure message unconditionally:
+
+```
+$ cargo test --test difftest -- fuzz_straight_line --nocapture
+fuzz sweep 0..120: 0 finding(s) [Match 120]
+```
+
+Same rule as above: printed, never asserted on. **The lesson worth keeping is the shape, not the
+fix** — "the detector could not run" and "the detector ran and examined nothing" are two different
+false negatives, and closing the first one reads like closing both. This series closed the first in
+`W7-34`, and it still took a whole-branch review to notice the second was sitting right behind it.
+
 ### W7-35 — `panicfuzz` has the identical F1 bug `difftest` just fixed as `W7-34` — **FIXED 2026-08-07**
 
 **Found by:** the adversarial review of the `W7-34` fix, per this project's own established pattern of
