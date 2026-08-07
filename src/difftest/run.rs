@@ -276,9 +276,11 @@ fn classify(chz: Capture, py: Capture, prog: Option<&Program>) -> Outcome {
     // `chz.code` is `None` ONLY when the child was killed by a SIGNAL (SIGSEGV / SIGABRT / a
     // Rust stack overflow, which prints "has overflowed its stack" and dies WITHOUT a
     // `panicked at` marker — the check above misses it). A timeout can never reach here:
-    // `run_one` returns `None` on timeout and `run_sources` returns `Outcome::Timeout` before a
-    // `Capture` is ever constructed, so a live `Capture` with `code: None` cannot mean "timed
-    // out" — see the `Capture::code` doc. Same rule as the twin oracle: `panicfuzz::classify`
+    // `run_one` returns `Err(RunErr::TimedOut)` on timeout and no `Capture` is ever built from
+    // it, so a live `Capture` arriving in `classify` cannot mean "timed out" — see the
+    // `Capture::code` doc. (F3's hang verdict does synthesize a `code: None` capture, but it
+    // builds `Outcome::Divergence{ChezziHang}` directly and never routes it through here — see
+    // `hang_retry_outcome`.) Same rule as the twin oracle: `panicfuzz::classify`
     // (`src/panicfuzz/run.rs:98-100`) reports this exact condition as `Outcome::Crash`.
     if chz.code.is_none() {
         return Outcome::HostPanic { chz };
