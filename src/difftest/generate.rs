@@ -39,7 +39,11 @@ pub struct Features {
 }
 
 impl Features {
-    /// Everything we trust today (floats stay off by default — see the float-format risk).
+    /// Everything we trust today. Floats stay off by default: the two known float-format
+    /// divergences are now closed (the sci-notation crossover was never real — `W7-31`; the
+    /// shortest-repr tie WAS — `W7-32`, fixed 2026-08-07), but turning them on is its own task
+    /// — `gen_float` also has to stop restricting itself to short exact-ish decimals before this
+    /// oracle could have found `W7-32` on its own.
     pub fn full() -> Self {
         Features {
             div_mod: true,

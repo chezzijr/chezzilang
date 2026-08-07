@@ -70,6 +70,7 @@ chronological log.
 | ~~**W7-26r**~~ | `:6929` | **FIXED 2026-08-06, both halves (the join residual AND the pool-queue sibling), premises re-derived on the release binary first.** `--max-heap` was never observed while the parent fiber sat in a join — `over_cap` is assigned only in `sweep()`, which runs only at the parent's own instruction boundary, and a parent inside `Executor.shutdown()` or a `parallel:` join reaches none. Against an 8 MB cap: an executor whose 300 jobs each buffer ~1 MB of output **PASSED at 622 MB**, and the same shape under `parallel:`/`spawn` **PASSED at 733 MB** — the nursery half counted NOWHERE at all, its outcome slots living in `SchedCore::slots`, outside every `Heap`. **Both owning ancestors put the observation on the ALLOCATOR, never on the blocked consumer** (measured, not reasoned): CPython 3.14.6's `ThreadPoolExecutor` under a 300 MB `RLIMIT_AS` raised `MemoryError` **in the worker at job 57/500** while `main` sat in `ex.shutdown()`; Go 1.26 under `GOMEMLIMIT=32MiB` + `GOGC=off` ran **7 GC cycles while `main` was blocked** in `wg.Wait()`. So the fix is `core::halt_over_backlog`, called by the two producers (`dispatch_eager_job`'s pool closure and `MnSched::finish`): the thread that finished a task adds its outcome to the join's retained-byte total and, if that backlog ALONE exceeds the whole cap, replaces its own `Done`/`Cancelled` with a hard-halt over-memory `Fault` and trips its scope/core cancel. Everything downstream is reused — `reduce_task_slots`' `Exit > hard-halt > ordinary` precedence propagates it and `recover:` cannot catch it. It cannot false-positive: the trip needs the retained backlog by itself to exceed the cap, and those bytes are held until the join reduces. **PASS → OVER-MEMORY on both, generous-cap and 300-tiny-spawn controls still PASS.** The SIBLING (queued-but-not-started jobs) is the same story one layer out: `prepare_eager_job` rebuilds each submitted closure into its own worker `Vm` at submit, so a queue deeper than the pool is N whole worker heaps — each under a per-heap cap, summing to **666 MB past an 8 MB cap** — now owned by the submitter (`ExecutorCore::pending`, added at dispatch, removed the instant a pool thread takes the job, so it never double-counts the running heap's own charge) | **Counting them is worthless if nothing looks — for the THIRD time in this family.** With the sibling's accounting alone the 666 MB program still PASSED: a loop submitting slow jobs finishes none of them, so `take_charge` stays 0 and the parent (which allocates almost nothing per submit) never sweeps. Fixed by pacing on the same bytes at the same site. Second lesson, from the review that made this test honest: the obvious control — same 1 MB capture, fast job body, assert the pool keeps up — **FAILED under full-suite load**, because a busy machine really does let ~48 jobs queue and ~48 MB really is live, so the trip was CORRECT and the assertion was wrong. A cap verdict is load-dependent by nature (both ancestors are too), so the control had to shrink the PAYLOAD rather than rely on timing. Filed then as still open, BOTH now closed: the general `W6-10s` residual (a) — a heap that grows for reasons OTHER than a join backlog while its fiber is inside one native call — fixed by **`W7-29`** 2026-08-07 (`Vm::start_task` samples before dispatch); and per-heap containment is not per-process containment, closed 2026-08-07 as BY DESIGN after measuring both ancestors (CPython's `RLIMIT_AS` aborts, Go's `GOMEMLIMIT` does not — they disagree, and Chezzi's PASS matches Go), so a nursery of N tasks each individually under the cap still peaks high (reduction-count preemption interleaves all N payload builds) even though the verdict is now right. Third: the filed premise had DECAYED and the shape had to be rebuilt before the fix — the row's own repro was return-value-based, and `W7-27` (landed hours earlier) frees those, so every repro here is output-based instead |
 | ~~**W7-26**~~ | `:6871` | **FIXED 2026-08-06 (found by adversarial review of the `W6-10r` fix, premise re-derived on the release binary before any edit).** `--max-heap` read only the `Executor` core's `inner` QUEUE half, which is the `--serial` half: on the default M:N engine `submit` runs EAGERLY (matching `ThreadPoolExecutor`), so `inner` stays empty forever and every finished job's result lands in `eager.slots` as `TaskOutcome::Done(WorkerResult { value, out, stderr })` — reached by `live_bytes` nowhere. `Executor()` + a ~1 MB blob + `300 × ex.submit(fn() -> str: blob)` + `shutdown()` under `--max-heap=8000000`: **PASS, rc=0, peak RSS 313 MB → OVER-MEMORY, rc=1, 11 MB**; generous-cap (4 GB) and no-cap controls still PASS. `EagerState` gained the `(bytes, dirty)` summary `ChanState`/`ExecState` already carry, maintained in `finish`/`take_slots` over a PRIVATE slot vector (so no site can forget), and the `live_bytes` arm now sums BOTH halves. The charge is **unconditional**, unlike the `mem_cap != 0` gates elsewhere in this family: it fires once per finished job beside a thread handoff, and both ancestors keep accounting live with the *limit* separate (Go's `runtime.MemStats` vs `GOMEMLIMIT`). Rooting unchanged and now FENCED rather than reasoned about — a result crosses by value with no parent-heap `GcRef` (B3.2, enforced by `ensure_crossable`), asserted by a `debug_assert!(!w.has_handle())` in `outcome_summary` that says `Heap::children` needs an eager arm if it ever fires | **Counting is worthless if nothing samples, and the fix's first cut proved it twice.** With the accounting alone the repro tripped at **180 MB**, not 11 MB: `submit` wires the closure but nothing charged the RESULTS against the parent's GC pacing counter, so the parent swept only on its own `Obj` growth — closed by `EagerState::take_charge` (growth-since-last-read, charged at `submit` under a live cap). A SECOND shape survives even that and is filed below as an open residual, because it is the W6-10s sampling class rather than this one: a job that BUILDS its own payload (`ex.submit(mk)`, no capture) wires ~nothing at submit and all 300 submits complete before any job finishes, so `take_charge` sees 0 each time and the whole 330 MB accumulates while the parent is blocked inside `shutdown()`'s join — where there is no sample point at all. Adding ONE allocating statement to the parent turns that same program OVER-MEMORY (rc=1), which is what proves the accounting half is right and the gap is purely observational |
 | **W6-9r** | `:1473` | Parity-oracle residual left by the `W6-9b` fix: hand-rolled `run_file_p` + `run_file` cross-engine compares still diff LOSSILY-DECODED strings, and `parity_entry_cfg_lines` compares stdout as an order-insensitive line multiset | **Item 1 CLOSED as WON'T FIX 2026-08-07; items 2–4 open on their existing terms.** Scope was under-recorded: not "~31 in `parity_tests.rs`" but **~60 sites** across `parity_tests.rs` + `src/vm/tests.rs` + `src/native/cffi.rs` (e.g. `tests.rs:8180`/`:8183`, `cffi.rs:2280`). Not worth converting, because **these compares die with `--serial`**: `future.md §2b`'s migration mechanics turn each pair into a single-engine (M:N) GOLDEN test, and a golden compares against a UTF-8 literal — where "a decode cannot hide anything when the other side is a UTF-8 literal" (item 3's own finding). UTF-8-only today, so nothing is failing; a byte-emitting test added at one of those sites must use `vm::run_file_bytes`. What the re-derivation DID find is the same hole in the oracle that OUTLIVES `--serial` — the CPython differential — filed and fixed as `W7-30` |
+| ~~**W7-32**~~ | `:7553` | **FIXED 2026-08-07 (found by re-deriving `W7-31`'s premise — the dead allow-list entry pointed at the right neighbourhood for the wrong reason).** A **real language bug**, not a detector one: `repr_float` took its shortest-repr digits from Rust's formatter, which breaks an EXACT half-way tie **away from zero** where CPython breaks it **to even** — `print(771.5462036132812)` gave `771.5462036132813` (exact value `771.54620361328125`). Moved `str`/`print`/interpolation/`json.stringify`. Not the lexer: both sides parse the literal to the same `f64` | 20 000-value fuzz vs CPython 3.14.6 found 6, all one shape. Fixed by *reusing Rust's own exact half-even `{:.N}` formatter* at the shortest digit count instead of hand-rolling digit surgery — plus a **round-trip guard**, which is load-bearing: at a binade boundary (`2^-24`) the even candidate names a different float, so CPython keeps the odd digit too. A version without that guard passed the whole suite AND the 5 400-value differential; only a 60 000-value tie-rich `m/2^k` fuzz caught it. 213 791 floats now byte-identical to CPython |
 | ~~**W7-31**~~ | `:7468` | **FIXED 2026-08-07.** The CPython differential's float-formatting allow-list looks only at the two stdouts, never at `code`, but `classify` reaches it from THREE arms — so Chezzi printing `1e-05` and then FAULTING (exit 1) while CPython prints `0.00001` and exits 0 is downgraded to `AllowListed`: a Chezzi crash reported as a non-finding | **Pre-existing** (same three call sites since `95fbbd5a`), surfaced by adversarial review of the `W7-30` branch while checking an unrelated claim. A real Rust host panic is still safe (`is_host_panic` returns first). Filed as a per-MATCHER gate, shipped as a **deletion** instead — the premise was re-derived on the release binary and found dead. Not folded into `W7-30`: different bug, changed what the oracle REPORTS, needed its own failing-first test + corpus re-run |
 | ~~**W7-30**~~ | `:7408` | **FIXED 2026-08-07 (found by re-deriving `W6-9r` item 1 rather than trusting its filed price).** The CPython differential — the oracle `future.md §2b` keeps after `--serial` is deleted — read raw `Vec<u8>` off the child's pipe and threw it away one line later (`run.rs:253`), then compared the decoded `String`s (`:129`). `from_utf8_lossy` is not injective, so a run where Chezzi wrote `ff fe` and CPython wrote `fe ff` was `Outcome::Match`. Both sides can emit non-UTF-8 (`write_bytes` since W6-9; `sys.stdout.buffer.write` always) — measured, CPython / Go / `chezzi run` all put `ff fe` on fd 1, so the runtime was right and only the detector was blind. Fixed by making `Capture.stdout`/`.stderr` `Vec<u8>`: `classify`'s existing compare needed no edit and is now byte-exact, and the blind version is **unrepresentable**, not merely fixed. `stdout_text()`/`stderr_text()` (`Cow<str>`) serve the three text consumers — `is_host_panic`, the float-formatting allow-list matcher (which only runs after the byte compare already found a difference), and the report | **A residual's filed price decays, and re-deriving it can move the fix somewhere better.** `W6-9r` item 1 read as ~31 sites of unavoidable churn; measuring found ~60 — and found that all of them are scheduled for deletion, which turns a 50-line newtype into wasted work. The same 20 minutes located the identical hole in the oracle that is *not* scheduled for deletion. Second: `describe` had to grow a hex line for the byte-only case, or the report would show a `Divergence` verdict over two identical-looking stdout blocks — **a detector that is right and unreadable teaches the same distrust as one that is wrong** |
 | ~~**W6-10r**~~ | `:1390` | `--max-heap` residual: a payload reachable ONLY through a **nested** core (a `Channel` inside a `Shared`, once the nested core's last `Obj` alias slot is swept) is counted nowhere | **Premise re-derived and CONFIRMED 2026-08-06** before any edit (the two preceding rows in this family had premises that had gone stale): `make() -> Shared[Channel[str]]` parking a channel whose only alias slot dies with the frame, then 300 × ~1 MB `s.get().send(blob)` → **PASS, rc=0, peak RSS 304 MB** against `--max-heap=8000000`, while the identical program holding the channel in a live local tripped OVER-MEMORY. **FIXED 2026-08-06**: `core::nested_core_bytes` — the byte mirror of `collect_core_gcrefs`, which already recursed into nested cores for ROOTING (only the byte walk stopped at the boundary) — plus `queue_bytes_deep` / `value_core_bytes_deep`, called from `Heap::live_bytes`. The recursion shares `live_bytes`'s per-heap `Arc`-identity set, so a nested core that also has an alias slot here is still charged exactly once, and it fills a `WS_UNKNOWN` summary in passing (every core constructor leaves it UNKNOWN, and a core reached only through a parent is never marked through a slot of its own — without the fill it reports 0 forever). Gated on `mem_cap != 0`, the same argument as the round-3 pacing counter: cap-off runs (every `chezzi run`, every bench, the whole parity gate) pay one `!= 0` load and ZERO extra walks. Repro: **PASS @ 304 MB → OVER-MEMORY, rc=1, 16.5 MB**; generous-cap and no-cap controls still PASS. Tests `vm::heap::live_bytes_counts_a_nested_core_with_no_alias_slot` (cap-off unchanged / cap-on charges / alias-slot de-dup) + `test_runner::over_memory_counts_a_nested_core_backlog` (both engines), both mutation-verified red with the walk disabled |
@@ -7548,3 +7549,100 @@ arm. Both direct on `classify`, no process spawn. `cargo test --test difftest` (
 subprocess suite including `fuzz_full`/`fuzz_straight_line` over seeds 0..120) and the heavy ignored
 sweep (`fuzz_full_heavy`, seeds 0..3000, 99 s) both stayed green after the deletion — no corpus seed
 was relying on the downgrade.
+
+### W7-32 — a float's shortest `repr` broke an exact tie AWAY FROM ZERO; CPython breaks it TO EVEN — **FIXED 2026-08-07**
+**How it was found: by re-deriving `W7-31`'s premise.** `W7-31` deleted an allow-list entry that
+excused "Rust `{}` and CPython `repr` switch to scientific notation at different magnitudes" — measured
+false, the crossover is byte-identical. But the dead entry was pointing at roughly the right
+*neighbourhood* for entirely the wrong *reason*: float formatting really did diverge, one layer down,
+in the shortest-repr **digits**. An independent fuzz of 20 000 random `f64` bit patterns against
+CPython 3.14.6 (adversarial review of the `W7-31` branch) found **6 mismatches, all one shape**.
+
+```
+$ cat f.chz                          $ cat f.py
+print(771.5462036132812)             print(771.5462036132812)
+print(1007730844620651.2)            print(1007730844620651.2)
+print(-887777373534812.25)           print(-887777373534812.25)
+
+$ chezzi run f.chz                   $ python3 f.py
+771.5462036132813                    771.5462036132812
+1007730844620651.3                   1007730844620651.2
+-887777373534812.3                   -887777373534812.2
+```
+
+**It is not the lexer** — both sides parse the literal to the same `f64`:
+`printf 'x := 771.5462036132812\nprint(x == 771.5462036132813)\n' | chezzi run /dev/stdin` → `true`,
+and in CPython `float('771.5462036132812').hex() == float('771.5462036132813').hex()` (both
+`0x1.81c5ea0000000p+9`). It is the *printer*.
+
+**Root cause.** The exact values are `771.54620361328125`, `1007730844620651.25`,
+`-887777373534812.25` — the decimal expansion terminates in an exact `5` one digit past the cut, so
+the two candidate shortest reprs are **exactly equidistant**. Rust's *shortest* float formatter breaks
+that tie **away from zero**; CPython's `repr` (David Gay's `_Py_dg_dtoa`) breaks it **to even**.
+Confirmed directly against rustc, independent of Chezzi:
+
+```rust
+println!("{} | {:e}", 771.5462036132812f64, 771.5462036132812f64);
+// => 771.5462036132813 | 7.715462036132813e2      (both Rust forms; CPython says …812)
+```
+
+**Scope — narrow, and that is what makes the fix cheap.** Only the two *shortest* branches of
+`repr_float` were wrong. Rust's **fixed-precision** formatter (`{:.N}`) is exact and already rounds
+half-to-even, so every `{:.Nf}`/`{:.Ne}`/`{:.N%}` format-spec path was already CPython-correct —
+measured, both sides identical:
+
+```
+"{:.2f}"(0.125)=0.12  "{:.2f}"(0.135)=0.14  "{:.1f}"(2.5)=2.5
+"{:.1f}"(0.25)=0.2    "{:.3e}"(106250.0)=1.062e+05  "{:.0f}"(0.5)=0  "{:.0f}"(1.5)=2
+```
+
+Blast radius of the bug (and of the fix): `repr_float` is the single source of truth for the bare
+stringify path — `str(f)`, `print(f)`, `{f}` interpolation with no type char, `json.stringify`, and
+the `None`-type-char spec arm (`fmtspec.rs:379`).
+
+**Fix** (`src/fmtspec.rs`, `repr_float`). *Reuse Rust's own exact half-even formatter rather than
+hand-rolling digit surgery over a 1074-digit expansion.* CPython's `repr` is "the nearest decimal with
+the shortest round-tripping digit count, ties to even"; Rust's shortest gives that same digit count,
+and `{:.N}`/`{:.Ne}` at that count is exactly "nearest, ties to even". So:
+
+1. Count the significant digits `D` of Rust's `{:e}` mantissa. If its **last digit is even**, return
+   unchanged — Rust and CPython can only disagree when away-from-zero landed on an odd digit. This is
+   the fast path and it never re-formats.
+2. Otherwise re-render at the same `D`: `{x:.*e}` with `D-1` (scientific branch) or `{x:.*}` with
+   `D-1-exp` fractional digits (fixed branch).
+3. Keep the re-render **only if it still round-trips** (`parse::<f64>()` compared by `to_bits`).
+
+Step 3 is not belt-and-braces — it is load-bearing, and the fuzz proved it: at a **binade boundary**
+the even candidate can fall outside the value's rounding interval. `2^-24` is exactly
+`5.9604644775390625e-08`, an exact tie, but `5.960464477539062e-08` parses to a *different* float, so
+the even candidate is not a legal repr and CPython keeps the odd `…063` too. A first cut of this fix
+without step 3 was green on the whole test suite and on the brief's 5 400-value differential, and was
+caught only by a 60 000-value tie-rich dyadic (`m/2^k`) fuzz — 31 regressions, all this one shape.
+The `x.fract() == 0.0` branch is untouched (an integer-valued double is exact — no tie is possible)
+and no `{:.N}` path is touched.
+
+**Tests.**
+- `src/fmtspec.rs::python_float_repr_and_e_spec` — the existing CPython-differential table grew seven
+  rows: the three measured ties above (incl. a **negative**, since the rule is derived on the
+  magnitude's digits), `2.9802322387695312e-08` (`2^-25`, a tie in the **scientific** branch, found by
+  an exhaustive search of the two families that can produce one there), the binade-boundary
+  non-adjustable tie `5.960464477539063e-08` (`2^-24`), and two near-ties that must NOT move —
+  `5e-324` (odd last digit, and the decremented neighbour `4e-324` *does* round-trip but is farther)
+  and `0.1`. Every expected string is a real `python3 -c "print(repr(...))"` run.
+- `tests/chz/spec/conversions_test.chz::float_repr_breaks_an_exact_tie_to_even` — the same assertions
+  in Chezzi (`str(...) == "..."`), so this observable-output change is pinned at the language level and
+  gated serial==M:N by `test_runner::chz_suite_passes_both_engines`.
+- End-to-end CPython differential, post-fix, **all identical**: the brief's two runs (400 and 5 000
+  mixed-magnitude values), 100 000 uniform random `f64` **bit patterns**, 60 000 dyadic `m/2^k`
+  (tie-rich), 20 000 `n/8` product chains + values straddling the `1e15`/`1e16` crossover, 20 000
+  sci-branch tiny/huge, and all 8 391 powers of two with their immediate neighbours — 213 791 floats,
+  zero diffs.
+
+**Two record corrections this forces.** (a) `vm/parity_tests.rs::python_float_repr_str_parity` is a
+serial==M:N golden against a **hardcoded literal**, not a CPython differential — it could never have
+caught this, and `W7-31`'s original filing citing it as a CPython-parity pin is part of why W7-32
+stayed invisible for so long. Its doc comment now says what it actually pins (assertions unchanged;
+its values are unaffected by this fix). (b) There was no automated CPython float-repr differential at
+all; the difftest generator's `gen_float` deliberately emits only short exact-ish decimals and
+`Features::full()` has `floats: false`, so the oracle that *should* own this cannot currently reach it
+— the table test + the chz test are the standing guard.

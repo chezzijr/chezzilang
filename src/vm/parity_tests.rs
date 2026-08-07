@@ -1542,8 +1542,16 @@ fn json_stringify_non_finite_faults_parity() {
     );
 }
 
-/// Python-parity float `str()`/`print()`: scientific notation when the decimal exponent is `< -4`
-/// or `>= 16`, otherwise fixed. Byte-identical on both engines (serial == M:N).
+/// Float `str()`/`print()` crossover golden — scientific notation when the decimal exponent is
+/// `< -4` or `>= 16`, otherwise fixed — asserted **serial == M:N against a hardcoded literal**.
+///
+/// Read the name carefully: this is NOT a CPython differential. It pins these eight values against a
+/// string typed into this file, so it can only catch an engine divergence or a regression away from
+/// the values below — never a divergence from real CPython. `W7-31`'s filing cited it as a
+/// CPython-parity pin, and that is part of why `W7-32` (shortest-repr ties broken away from zero
+/// instead of to even) stayed invisible. The actual CPython differentials for float formatting are
+/// `fmtspec::tests::python_float_repr_and_e_spec` (a table whose every expected string is a real
+/// `python3 repr()` run) and `tests/chz/spec/conversions_test.chz`.
 #[test]
 fn python_float_repr_str_parity() {
     let out = parity_entry(

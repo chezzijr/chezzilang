@@ -2579,7 +2579,9 @@ exponent is `< -4` or `>= 16`**, and fixed-point otherwise. So `1e16` prints `1e
 `-2.5e-08`; whole floats inside the fixed range keep their trailing `.0` (`1.0`, `1000.0`). The
 mantissa is **shortest-round-trip-correct** (the fewest digits that parse back to the same `f64`) and
 the exponent always carries an explicit sign, zero-padded to ≥2 digits — byte-identical to Python's
-`repr`. `json.stringify` routes through the same formatter, so a large float serializes as
+`repr`. When the two shortest candidates are *exactly* equidistant from the value, the tie breaks
+**to even** like CPython, not away from zero: `print(771.5462036132812)` is `771.5462036132812`, not
+`…813` (the exact value is `771.54620361328125`) — `docs/gaps.md` §W7-32. `json.stringify` routes through the same formatter, so a large float serializes as
 `1.5e+300` (valid JSON, round-trips through `json.parse`), not a 300-digit expansion.
 
 Core-type string methods (built in — no import needed):

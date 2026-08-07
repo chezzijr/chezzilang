@@ -440,21 +440,45 @@ pub(crate) fn normalize_exp(rust_e: &str, marker: char) -> String {
 /// an always-present `.0` on integer-valued floats. Non-finite floats keep Rust's `inf`/`-inf`/`NaN`
 /// (the NaN sign is dropped, as before). `x` is signed here; callers that pre-split the sign pass the
 /// magnitude.
+///
+/// **Tie rule (W7-32).** When the two shortest candidate reprs are *exactly* equidistant from `x`
+/// (the exact binary value's decimal expansion ends in a `5` one digit past the cut, e.g.
+/// `771.54620361328125`), CPython's `repr` (David Gay's `_Py_dg_dtoa`) breaks the tie **to even**
+/// while Rust's shortest formatter breaks it **away from zero**. They can therefore only disagree
+/// when Rust's last significant digit is **odd**; in that case re-render `x` at the same
+/// significant-digit count with Rust's *fixed-precision* formatter, which is exact and already
+/// rounds half-to-even. (That is also why the `{:.N}` spec paths never needed this fix.)
+/// The re-render is kept only if it still round-trips (`round_trips`): at a binade boundary the
+/// even candidate can fall outside `x`'s rounding interval — `2f64.powi(-24)` is exactly
+/// `5.9604644775390625e-08`, yet `5.960464477539062e-08` parses to a *different* float, so CPython
+/// keeps the odd `…063` there too.
 pub(crate) fn repr_float(x: f64) -> String {
     if !x.is_finite() {
         return format!("{x}");
     }
     let e = format!("{x:e}");
-    let exp: i32 = e
-        .split_once('e')
-        .and_then(|(_, s)| s.parse().ok())
-        .unwrap_or(0);
+    let (mant, exp_s) = e.split_once('e').unwrap_or((e.as_str(), "0"));
+    let exp: i32 = exp_s.parse().unwrap_or(0);
+    // Number of significant digits Rust's *shortest* repr used, and whether its last one is odd
+    // (the only case where CPython's tie-to-even can differ — see the doc comment above).
+    let ndigits = mant.bytes().filter(u8::is_ascii_digit).count();
+    let odd_last = mant.bytes().next_back().is_some_and(|b| b % 2 == 1);
+    // A candidate only replaces Rust's shortest form if it still names the very same float.
+    let round_trips = |c: &str| c.parse::<f64>().is_ok_and(|v| v.to_bits() == x.to_bits());
     if !(-4..16).contains(&exp) {
-        normalize_exp(&e, 'e')
+        let even = odd_last
+            .then(|| format!("{x:.*e}", ndigits - 1))
+            .filter(|c| round_trips(c));
+        normalize_exp(&even.unwrap_or(e), 'e')
     } else if x.fract() == 0.0 {
         format!("{x}.0")
     } else {
-        format!("{x}")
+        // `ndigits` significant digits with the point after digit `exp + 1` → this many after it.
+        // Always >= 1 here: `x` has a fractional part, so the shortest repr shows one.
+        odd_last
+            .then(|| format!("{x:.*}", (ndigits as i32 - 1 - exp) as usize))
+            .filter(|c| round_trips(c))
+            .unwrap_or_else(|| format!("{x}"))
     }
 }
 
@@ -572,6 +596,27 @@ mod tests {
             (-2.5e-8, "-2.5e-08"),
             (0.0, "0.0"),
             (123.5, "123.5"),
+            // --- W7-32: exact-tie shortest reprs. Every expected value below is a real
+            // `python3 -c "print(repr(...))"` run (CPython 3.14.6), not hand-derived.
+            // Rust's shortest formatter breaks these away from zero (…813 / …651.3 / …812.3 /
+            // …313e-08); CPython breaks them to even.
+            (771.5462036132812, "771.5462036132812"), // exact 771.54620361328125
+            (1007730844620651.2, "1007730844620651.2"), // exact 1007730844620651.25
+            // negative: the rule is derived on the MAGNITUDE's digits. Spelled as an exact sum
+            // because clippy::excessive_precision rejects the literal `-887777373534812.25` and
+            // "helpfully" suggests `-887777373534812.3` — which is the away-from-zero rendering
+            // this row exists to reject. Both terms and the sum are exactly representable.
+            (-(887777373534812.0 + 0.25), "-887777373534812.2"),
+            (2.9802322387695312e-08, "2.9802322387695312e-08"), // 2^-25, scientific branch
+            // Near-ties that must NOT be adjusted: the last significant digit is odd, and the
+            // decremented neighbour either round-trips but is FARTHER (5e-324, whose exact value
+            // is 4.94…e-324 — decrementing here would be a new bug) or does not round-trip (0.1).
+            (5e-324, "5e-324"),
+            (0.1, "0.1"),
+            // A tie whose EVEN candidate does not round-trip (binade boundary): `2^-24` is exactly
+            // `5.9604644775390625e-08`, but `5.960464477539062e-08` parses to a different float,
+            // so CPython keeps the odd `…063` — the round-trip guard must not "fix" this one.
+            (5.960464477539063e-8, "5.960464477539063e-08"),
         ];
         for (x, want) in repr_cases {
             assert_eq!(repr_float(*x), *want, "repr_float({x})");

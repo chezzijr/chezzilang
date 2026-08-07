@@ -17,6 +17,23 @@ test fn str_ctor():
     assert str(4.5) == "4.5"
     assert str(true) == "true"
 
+test fn float_repr_breaks_an_exact_tie_to_even():
+    # When the two shortest candidate reprs are EXACTLY equidistant from the value, CPython
+    # (David Gay's dtoa) breaks the tie to EVEN. Rust's shortest formatter breaks it away from
+    # zero, which used to leak straight into `str`/`print`/interpolation/`json.stringify`.
+    # docs/gaps.md W7-32; every expected string below is a real CPython 3.14.6 `repr()`.
+    assert str(771.5462036132812) == "771.5462036132812"     # exact 771.54620361328125
+    assert str(1007730844620651.2) == "1007730844620651.2"   # exact 1007730844620651.25
+    assert str(-887777373534812.25) == "-887777373534812.2"  # negative
+    assert str(2.9802322387695312e-08) == "2.9802322387695312e-08"  # 2^-25, sci branch
+    # NOT a tie: `5e-324`'s odd last digit is already CPython's answer even though `4e-324`
+    # round-trips to the same float — it is farther from the value, so it must not be picked.
+    assert str(5e-324) == "5e-324"
+    assert str(0.1) == "0.1"
+    # A tie whose EVEN candidate does not round-trip: 2^-24 is exactly 5.9604644775390625e-08,
+    # but "5.960464477539062e-08" names a different float, so CPython keeps the odd digit.
+    assert str(5.960464477539063e-8) == "5.960464477539063e-08"
+
 test fn bytes_ctor():
     b := bytes([104, 105])
     assert b.len() == 2

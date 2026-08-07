@@ -2,6 +2,16 @@
 
 Single source of truth for "what am I doing next." Update after every work session.
 
+> **✅ W7-32 FIXED 2026-08-07 — a float's shortest `repr` broke an EXACT tie away from zero; CPython
+> breaks it to EVEN.** A real language bug (observable output moved): `print(771.5462036132812)` gave
+> `771.5462036132813` — the exact value is `771.54620361328125`, so the two shortest candidates are
+> equidistant and Rust's formatter rounds away from zero where CPython's `_Py_dg_dtoa` rounds to even.
+> Hit `str`/`print`/`{f}`/`json.stringify`; the `{:.N}` spec paths were already correct (Rust's
+> fixed-precision formatter is exact + half-even) — which is also the fix: re-render an odd-last-digit
+> shortest repr at the same significant-digit count, keeping it only if it round-trips (load-bearing —
+> at a binade boundary like `2^-24` the even candidate names a different float). Found by re-deriving
+> W7-31's premise. 213 791 floats now byte-identical to CPython 3.14.6. `docs/gaps.md` **§W7-32**.
+
 > **✅ W7-31 FIXED 2026-08-07 — the CPython differential's float allow-list could downgrade a CHEZZI
 > CRASH to a non-finding; deleted rather than gated.** `float_scientific_crossover`'s premise (Rust `{}`
 > vs CPython `repr` disagreeing on the sci-notation crossover) re-derived as dead — `fmtspec::repr_float`
