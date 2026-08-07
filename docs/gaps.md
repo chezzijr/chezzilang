@@ -5012,8 +5012,32 @@ over fixed, 2× under broken), mutation-verified by reverting to the bare `wait_
 > **~5.2 s against a 1 s bound** — above even the 2.19 s "broken" figure, so under load the test
 > cannot discriminate fixed from broken in EITHER direction. It passes alone in 0.2 s. Raising the
 > bound is not the fix (past 2.19 s it stops detecting the bug it exists for); it wants a
-> load-independent signal — a serial-only `#[ignore]`d timing test, or counting wakeups per PIPELINE
-> instead of process-globally (the rejected version's failure mode, but scoped). Filed, not fixed.
+> load-independent signal. **FIXED 2026-08-07 — and the answer was neither of the two options guessed
+> here** (a serial-only `#[ignore]`d timing test, or a per-pipeline wakeup count). The test now asserts
+> on the DEFECT ITSELF rather than on any duration: `BLOCK_WAITS_SLEPT_WHILE_READY` counts waits that
+> burned a whole `DEMOTE_POLL_BACKOFF` tick and then woke to an ALREADY-READY channel — the lost
+> wakeup, in one number. `wait_timeout_while` re-evaluates the predicate under the guard after each
+> inner wait, so `timed_out()` implies "still not ready" and the counter is **structurally zero** in a
+> fixed build, on an idle machine and a hammered one alike.
+>
+> **It is process-global like the rejected version below, and immune to that failure for a reason
+> worth stating: it counts only an event a healthy build CANNOT produce.** A neighbour's honest 5 ms
+> `timer(200)` park is a wait that expired while genuinely not ready, and never touches it; a
+> neighbour could pollute this only by hitting the same defect, at which point failing is correct.
+> (Total waits, `BLOCK_WAITS`, IS neighbour-polluted, so it is used only as a `>=` coverage floor —
+> proof the pipeline still reaches `block_wait_tick`, so a refactor that stopped blocking there cannot
+> leave the test passing vacuously.) Mutation-verified by reverting the call to the bare
+> `wait_timeout`: **0 of 323 waits fixed → 309 of 1014 broken** (independently re-run by the
+> controller: **270 of 849**). The bug is dense enough that 6 runs replace the old 30, and the test
+> costs **0.05 s** instead of 0.21 s idle / 5.07 s loaded. Full `cargo test`: **4014 passed, 0 failed**,
+> the first fully clean run in this series.
+>
+> **One disclosed false-positive path, found by review rather than reasoned away:** on a POISONED
+> `core.q`, `wait_timeout_while` propagates the inner wait's `Err` without running its post-wait
+> re-check, so the `into_inner` can report `timed_out()` on a ready channel. It needs another lib test
+> to panic while holding a `ChannelCore::q` — a run that is already failing, since the bare `unwrap()`s
+> elsewhere in `netio.rs` panic on that same poison — so the cost is a misleading second failure, never
+> a false green. Recorded on the static's own doc comment.
 
 **A rejected first version of that test is worth recording, because it produced a false green.** It
 counted expired waits in a process-global `#[cfg(test)]` counter. libtest runs the file in ONE

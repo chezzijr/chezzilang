@@ -51,6 +51,41 @@ const EMPTY_WAIT_DEADLOCK: &str = "wait on channels that are all empty: deadlock
     before its spawned tasks start, so a blocking `wait:` in the body can't reach it — put the \
     `wait:` in a `spawn:` too.";
 
+/// Test-only instrumentation: how many waits [`Vm::block_wait_tick`] has performed, process-wide.
+/// A COVERAGE floor for [`BLOCK_WAITS_SLEPT_WHILE_READY`] — "this program really did block on a
+/// channel" — never a measurement: libtest runs the whole lib suite in ONE process, so a concurrent
+/// test's blocking also lands here. Only ever read as a delta, and only ever compared with `>=`.
+#[cfg(test)]
+pub(crate) static BLOCK_WAITS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Test-only instrumentation: **W7-13's defect signature** — a [`Vm::block_wait_tick`] wait that
+/// slept its whole [`DEMOTE_POLL_BACKOFF`] tick and yet found the channel READY when it woke, i.e. a
+/// wakeup that was lost because it landed while nobody was on the condvar.
+///
+/// `wait_timeout_while` makes this UNREACHABLE by construction: it re-evaluates the predicate under
+/// the guard before returning, so `timed_out()` can only be `true` while the predicate still says
+/// NOT ready. The bare `wait_timeout` this replaced had no such guarantee, which is exactly the bug.
+/// So a healthy build increments this ZERO times no matter how loaded the machine is — which is what
+/// lets `eager_handshake_is_driven_by_wakeups_not_by_the_poll_timeout` assert on it directly, with no
+/// wall-clock threshold to flake, and process-globally, with no neighbour able to pollute it (a
+/// neighbour would have to hit the same defect, and then failing is right).
+///
+/// **Zero false positives depends on every readiness term being written under `core.q`**, because the
+/// re-check runs while [`Vm::block_wait_tick`] still holds the guard the wait returned: a term some
+/// other thread could flip in that window would be counted as a stall that never happened. All of
+/// them are — a queued value and `closed` under `ChanState`, and `done_latch` since W7-13r(b) stores
+/// it under `core.q` too. Move one back outside that lock and this counter turns flaky.
+///
+/// ONE EXCEPTION to "unreachable", found by review rather than reasoned away: on a POISONED `core.q`,
+/// `wait_timeout_while` propagates the inner wait's `Err` WITHOUT running its post-wait re-check, so
+/// the `into_inner` below can hand back `timed_out() == true` on an already-ready channel. Reaching it
+/// needs another lib test to panic while holding some `ChannelCore::q` — a run that is already failing
+/// (the bare `unwrap()`s elsewhere in this file panic on that same poison), so the cost is a
+/// misleading second failure, not a false green.
+#[cfg(test)]
+pub(crate) static BLOCK_WAITS_SLEPT_WHILE_READY: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
 /// W7-17 — end a timer park EARLY, because the run's `--timeout` expired before the timer's own
 /// deadline. Used by both `timer(ms)` park sites ([`Vm::chan_recv_step`]'s timer branch and
 /// [`Vm::op_wait_poll`]'s timer arm), whose jobs are otherwise armed for their own deadline.
@@ -1911,7 +1946,12 @@ impl Vm {
     ///
     /// `Condvar::wait_timeout_while` closes it — it evaluates the predicate under the guard BEFORE
     /// sleeping, so a wakeup that arrived while the lock was free is observed instead of missed (and
-    /// it re-checks on spurious wakeups for free). The wake it is waiting for was never missing:
+    /// it re-checks on spurious wakeups for free). It also re-checks the predicate AFTER each inner
+    /// wait, so `timed_out()` implies "still not ready" — which is what
+    /// [`BLOCK_WAITS_SLEPT_WHILE_READY`] (test builds only) turns into a load-independent regression
+    /// detector: revert this call to a bare `wait_timeout` and that counter goes nonzero.
+    ///
+    /// The wake it is waiting for was never missing:
     /// [`Vm::wake_senders`] already fires on all six pop paths, and for an eager job it lands on
     /// `core.cv`. `block_halt_check` MUST stay before the lock — the no-lock-cycle argument on
     /// the process-wide verdict depends on the registry never being taken under `ChannelCore::q`.
@@ -1929,9 +1969,19 @@ impl Vm {
     ) -> Result<(), RuntimeError> {
         self.block_halt_check(deadlock_msg, span)?;
         let q = core.q.lock().unwrap_or_else(|e| e.into_inner());
-        let _ = core
+        #[cfg_attr(not(test), allow(unused_mut))]
+        let (mut guard, waited) = core
             .cv
-            .wait_timeout_while(q, DEMOTE_POLL_BACKOFF, |g| !ready(g));
+            .wait_timeout_while(q, DEMOTE_POLL_BACKOFF, |g| !ready(g))
+            .unwrap_or_else(|e| e.into_inner());
+        #[cfg(test)]
+        {
+            BLOCK_WAITS.fetch_add(1, Ordering::Relaxed);
+            if waited.timed_out() && ready(&mut guard) {
+                BLOCK_WAITS_SLEPT_WHILE_READY.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        drop((guard, waited));
         Ok(())
     }
 

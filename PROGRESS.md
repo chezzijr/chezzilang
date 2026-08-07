@@ -2,6 +2,29 @@
 
 Single source of truth for "what am I doing next." Update after every work session.
 
+> **✅ THE SUITE IS FULLY GREEN AGAIN (2026-08-07) — 4014 passed, 0 failed.** The last standing
+> failure, `eager_handshake_is_driven_by_wakeups_not_by_the_poll_timeout`, was a wall-clock bound that
+> could not survive its own suite: it timed 30 cap-1 pipelines and required `< 1 s`, but full-suite CPU
+> contention cost **5.07 s** while the bug it guards costs only **2.19 s** — **load cost more than the
+> defect, so no threshold separated them in either direction** and it failed on every full run. Raising
+> the bound would have stopped it detecting the bug.
+>
+> Fixed by asserting on the DEFECT rather than on a duration. `BLOCK_WAITS_SLEPT_WHILE_READY`
+> (`#[cfg(test)]`) counts waits that burned a whole poll tick and then woke to an ALREADY-READY channel
+> — W7-13's lost wakeup, in one number. `wait_timeout_while` re-checks the predicate under the guard,
+> so `timed_out()` implies "still not ready" and the count is **structurally zero** in a fixed build at
+> any load. Mutation-verified both by the implementer and independently by the controller: **0 waits
+> fixed → 270 of 849 with the call reverted to a bare `wait_timeout`**. 6 runs replace the old 30;
+> 0.05 s instead of 0.21 s idle / 5.07 s loaded.
+>
+> **A process-global counter was tried for this test once before and produced a FALSE GREEN** (a dozen
+> neighbouring tests park on `timer(200)` and polluted it). This one is process-global too and immune,
+> for the reason that generalises: **it counts only an event a healthy build cannot produce**, so a
+> neighbour could pollute it only by hitting the same defect — at which point failing is correct. Total
+> waits IS polluted, so it serves only as a `>=` coverage floor against the test passing vacuously.
+> Review disclosed one false-positive path (a poisoned `core.q` skips the post-wait re-check), which
+> needs a run that is already failing — a misleading second failure, never a false green.
+
 > **⚠️ ADVERSARIAL REVIEW CAUGHT SIX ISSUES IN W7-23/24/25 THAT THE FULL GREEN GATE MISSED** — one a
 > live REGRESSION, two half-applied fixes, all measured against CPython, all fixed in the follow-up commit:
 > 1. **Regression (W7-23).** The new quote/depth-aware scanner tracked the WHOLE fragment, so every
@@ -157,7 +180,8 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > sleeping_job` from 50 ms to 1.10 s past its 1 s bound — a red dual-engine gate caused purely by a
 > new test's footprint (fixed by shortening the sleeps to 60 ms). Still open: `W6-10s` residual (a),
 > per-heap containment ≠ per-process containment, and the pre-existing
-> `eager_handshake_is_driven_by_wakeups_not_by_the_poll_timeout` flake (~5.2 s against its 1 s bound
+> `eager_handshake_is_driven_by_wakeups_not_by_the_poll_timeout` flake — **FIXED 2026-08-07**, see the
+> W7-13 note in `docs/gaps.md` — (~5.2 s against its 1 s bound
 > under full-suite load, reproduced on a clean stashed tree — now filed in `docs/gaps.md`). Full
 > write-up: `docs/gaps.md` **§W7-26r**.
 >

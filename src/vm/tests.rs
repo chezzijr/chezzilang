@@ -12165,34 +12165,42 @@ ex.shutdown()
 
 /// W7-13 — a healthy cap-1 handshake must be driven by WAKEUPS, not by the poll timeout.
 ///
-/// `eager_wait_tick` used to hand a freshly-taken `core.q` guard straight to `cv.wait_timeout` with no
+/// `block_wait_tick` used to hand a freshly-taken `core.q` guard straight to `cv.wait_timeout` with no
 /// predicate. Its caller had already dropped that lock to attempt its `send`/`recv`, and then ran
-/// `eager_halt_check` (which takes `exec_registry` + per-core `eager`) before re-taking it — so a
+/// `block_halt_check` (which takes `exec_registry` + per-core `eager`) before re-taking it — so a
 /// consumer's `notify_all` landing in that window hit a condvar nobody was on yet and was lost, and
 /// the sender slept a whole `DEMOTE_POLL_BACKOFF` on a channel that already had room.
 ///
-/// **Why this counts timeouts instead of asserting a wall-clock bound.** The obvious timing test does
-/// not discriminate. Measured on the release binary before the fix, the 2000-handoff pipeline ran in
-/// 10–33 ms — only ~3 waits per 2000 handoffs actually lost their wakeup — so every bound loose enough
-/// not to flake on a busy machine also passed while the bug was live. The 50-handoff run showed the
-/// stall plainly (7 of 15 runs paid an extra tick, in exact 5 ms quanta) but one run is a coin flip.
-/// So the test reads the mechanism directly: in a working handshake every wait ends by notification.
+/// **This asserts on the DEFECT ITSELF, not on how long the pipeline took, and that is what makes it
+/// load-independent.** [`crate::vm::netio::BLOCK_WAITS_SLEPT_WHILE_READY`] counts waits that burned a
+/// whole `DEMOTE_POLL_BACKOFF` tick and then woke to find the channel READY — the lost wakeup, in one
+/// number. `wait_timeout_while` re-evaluates the predicate under the guard after each inner wait, so
+/// `timed_out()` implies "still not ready" and that counter is structurally ZERO in a fixed build, on
+/// an idle machine and on a hammered one alike. Mutation-verified by reverting the call to the old
+/// bare `wait_timeout` (which has no such guarantee): **0 of 323 waits fixed, 309 of 1014 broken**,
+/// over these same 6 runs. The bug is that dense, so 6 runs replace the 30 the old timing bound
+/// needed, and the test costs 0.05 s instead of 0.21 s idle / 5.07 s loaded.
 ///
-/// The signal is the AGGREGATE wall clock of 30 pipelines, and the margin is what makes that
-/// defensible. Mutation-verified by reverting `wait_timeout_while` to the old bare `wait_timeout`:
-/// **0.14 s fixed vs 2.19 s broken**, a 15× separation, because 200 handoffs × 30 runs gives the rare
-/// per-handoff stall enough chances to dominate. The bound is 1.0 s — 7× headroom over the fixed
-/// timing, still 2× below the broken one. A single run would be a coin flip (the 50-handoff program
-/// stalls in only ~half of runs) and a per-run bound would flake; the sum of 30 does neither.
+/// **Two earlier designs failed, and both are recorded here because neither failure is obvious.**
 ///
-/// **An earlier version of this test counted expired waits via a process-global `#[cfg(test)]`
-/// counter, and that was wrong — it is recorded here because the failure is not obvious.** libtest
-/// runs the whole file in ONE process, and the eager tests a dozen slots away in name order each park
-/// a job on a `timer(200)`, i.e. ~40 expired ticks apiece, which land on the same global. The counter
-/// version passed when run alone and when the full suite happened to schedule kindly, and FAILED at 24
-/// under `--test-threads=8` with two of its own neighbours — a flaky test that had already reported
-/// one false green. Wall clock is immune: a neighbour can steal CPU but cannot add to this loop's
-/// elapsed time the way it could add to a shared counter.
+/// 1. **A wall-clock bound on 30 pipelines.** Mutation separation was real (0.14 s fixed vs 2.19 s
+///    broken on the release binary) but useless in the suite: the same 30 runs took **5.07 s** under
+///    an ordinary full `cargo test` at `RUST_TEST_THREADS=4` — CPU contention costs MORE than the bug
+///    does, so every bound loose enough not to fail on a busy machine also passed while the bug was
+///    live. It failed on every full-suite run, permanently.
+/// 2. **A process-global count of EXPIRED waits.** libtest runs the whole file in ONE process, and
+///    the eager tests a dozen slots away in name order each park a job on a `timer(200)` — ~40
+///    expired ticks apiece, onto the same global. That version passed alone, passed when the suite
+///    scheduled kindly, and FAILED at 24 under `--test-threads=8`; it had already reported one false
+///    green.
+///
+/// The counter used here is process-global too, and is immune to (2) for a reason worth stating: it
+/// counts only an event a healthy build CANNOT produce. A neighbour's honest 5 ms timer park is a
+/// wait that expired while genuinely not ready and never touches it; a neighbour could pollute this
+/// only by hitting the same defect, and then failing is the correct outcome. `BLOCK_WAITS` — total
+/// waits — is polluted by neighbours and so is used only as a `>=` COVERAGE floor: it asserts this
+/// program still reaches `block_wait_tick` at all, so a future refactor that stopped blocking there
+/// cannot leave the test passing vacuously.
 #[test]
 fn eager_handshake_is_driven_by_wakeups_not_by_the_poll_timeout() {
     let src = "
@@ -12215,22 +12223,24 @@ ex.shutdown()
     let entry = write_temp_chz("w713_handshake_wakeups", src);
     let (tx, rx) = std::sync::mpsc::channel();
     let e = entry.clone();
+    use std::sync::atomic::Ordering::Relaxed;
+    let waits0 = crate::vm::netio::BLOCK_WAITS.load(Relaxed);
+    let stalls0 = crate::vm::netio::BLOCK_WAITS_SLEPT_WHILE_READY.load(Relaxed);
     std::thread::spawn(move || {
-        let t0 = std::time::Instant::now();
         let mut bad = Vec::new();
-        for _ in 0..30 {
+        for _ in 0..6 {
             let (o, _e2, r, _c) = run_file_p(&e);
             if r.is_err() || o != "sum 19900\n" {
                 bad.push(format!("{r:?} / out={o:?}"));
             }
         }
-        let _ = tx.send((bad, t0.elapsed()));
+        let _ = tx.send(bad);
     });
     // A worker panic drops `tx` and returns `Disconnected` immediately, which is NOT a hang — say so,
     // rather than reporting every failure as one.
     let outcome = rx.recv_timeout(std::time::Duration::from_secs(120));
     let _ = std::fs::remove_file(&entry);
-    let (bad, elapsed) = match outcome {
+    let bad = match outcome {
         Ok(v) => v,
         Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
             panic!("a bounded cap-1 pipeline hung for 120 s")
@@ -12239,14 +12249,27 @@ ex.shutdown()
             panic!("the pipeline worker panicked — see the panic above this one")
         }
     };
+    let waits = crate::vm::netio::BLOCK_WAITS.load(Relaxed) - waits0;
+    let stalls = crate::vm::netio::BLOCK_WAITS_SLEPT_WHILE_READY.load(Relaxed) - stalls0;
     assert!(
         bad.is_empty(),
         "the pipeline must still be correct: {bad:#?}"
     );
+    assert_eq!(
+        stalls, 0,
+        "{stalls} of {waits} blocking waits slept a full 5 ms poll tick and then woke to a channel \
+         that was ALREADY ready — a healthy handshake is driven by notifications, and W7-13's lost \
+         wakeup is the only thing that produces this (measured: 0 fixed, 309 of 1014 waits with \
+         `block_wait_tick` reverted to a bare `wait_timeout`, same 6 runs)"
+    );
+    // Coverage floor, not a measurement — a concurrent test's own blocking also lands in
+    // `BLOCK_WAITS`, so this can only ever be too GENEROUS. 6 runs × 200 handoffs at cap 1 cannot
+    // hand off without blocking; if this trips, the program stopped exercising `block_wait_tick` and
+    // the assertion above went vacuous.
     assert!(
-        elapsed < std::time::Duration::from_secs(1),
-        "30 cap-1 pipelines took {elapsed:?} (fixed: ~0.14 s, W7-13's lost wakeup: ~2.19 s) — a \
-         healthy handshake is driven by notifications, not by the 5 ms poll timeout"
+        waits >= 100,
+        "only {waits} blocking waits — this cap-1 pipeline no longer reaches `block_wait_tick`, so \
+         the stall assertion above is vacuous"
     );
 }
 
