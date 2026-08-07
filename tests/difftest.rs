@@ -110,6 +110,42 @@ fn p0_shim_div_mod_negatives() {
     }
 }
 
+/// Float `/` is total IEEE-754 in Chezzi (`docs/spec.md:472`): a zero divisor is `inf`/`-inf`/`NaN`,
+/// never a fault — a DELIBERATE divergence from CPython, which raises `ZeroDivisionError` on the
+/// same expression (Chezzi follows Rust/Go here, confirmed by the project owner 2026-08-07). The
+/// shim's `_chz_fdiv` absorbs this, exactly like `_chz_div`/`_chz_mod` absorb truncating int
+/// division. All four sign combinations of a zero divisor are covered because signed zero is the
+/// part a naive `if b == 0: inf if a > 0 else -inf` gets wrong (two of the four cases flip): pins
+/// `_chz_fdiv`'s `copysign` pair against ever being "simplified" back to that.
+#[test]
+fn p0_shim_float_div_signed_zero() {
+    let cfg = config();
+    let cases: [(f64, f64); 5] = [
+        (1.0, 0.0),
+        (1.0, -0.0),
+        (-1.0, 0.0),
+        (-1.0, -0.0),
+        (0.0, 0.0),
+    ];
+    for (a, b) in cases {
+        let prog = Program {
+            funcs: vec![],
+            main: vec![Stmt::Print(vec![Expr::Bin {
+                op: BinOp::Div,
+                ty: Ty::Float,
+                l: Box::new(Expr::FloatLit(a)),
+                r: Box::new(Expr::FloatLit(b)),
+            }])],
+        };
+        let (outcome, chz, py) = run::run_program(&cfg, &prog);
+        assert!(
+            matches!(outcome, Outcome::Match | Outcome::AllowListed(_)),
+            "float div {a}/{b}: {}",
+            difftest::describe(0, &outcome, &chz, &py)
+        );
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Non-tautology guard — prove the oracle actually detects a real divergence.
 // If the shim were removed, raw Python `%` (sign of divisor) differs from Chezzi.
@@ -895,6 +931,30 @@ fn gen_emits_float_comparison() {
             |_| false
         ),
         "generator never emitted a float comparison"
+    );
+}
+
+/// `gen_float` used to choose only from `[Add, Sub, Mul]` — `Div` never appeared, so
+/// `emit_python.rs`'s float-`Div` shim routing (`_chz_fdiv`) was dead code by construction, exactly
+/// the `W7-37` failure mode (coverage both engines "agree" on because neither runs it). Mutation-
+/// proven: reverting `gen_float`'s op list back to `[Add, Sub, Mul]` turns this red.
+#[test]
+fn gen_emits_float_div() {
+    assert!(
+        emits(
+            feat_floats(),
+            400,
+            |e| matches!(
+                e,
+                Expr::Bin {
+                    op: BinOp::Div,
+                    ty: Ty::Float,
+                    ..
+                }
+            ),
+            |_| false
+        ),
+        "generator never emitted a float division"
     );
 }
 

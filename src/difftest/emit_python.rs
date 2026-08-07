@@ -2,10 +2,12 @@
 //!
 //! The emitted Python calls a fixed *shim* prelude that implements Chezzi's **specified**
 //! behaviour for the handful of by-design surface/semantic differences: value stringifying
-//! (`true`/`false`/`nil`, raw nested strings, Chezzi float formatting) and integer
-//! `/`,`%` (truncate-toward-zero, sign-of-dividend). The shim mirrors the *spec*, while the
-//! Chezzi source uses the real *implementation* — so any divergence in stdout is a genuine
-//! deviation of the implementation from its own contract, never a by-design difference.
+//! (`true`/`false`/`nil`, raw nested strings, Chezzi float formatting), integer
+//! `/`,`%` (truncate-toward-zero, sign-of-dividend), and float `/` (total IEEE-754 — a zero
+//! divisor is `inf`/`-inf`/`NaN`, never CPython's `ZeroDivisionError`). The shim mirrors the
+//! *spec*, while the Chezzi source uses the real *implementation* — so any divergence in stdout
+//! is a genuine deviation of the implementation from its own contract, never a by-design
+//! difference.
 
 use super::ast::*;
 use super::emit_chezzi::float_lit;
@@ -17,6 +19,11 @@ def _chz_div(a, b):
     return q if (a < 0) == (b < 0) else -q
 def _chz_mod(a, b):
     return a - _chz_div(a, b) * b
+def _chz_fdiv(a, b):
+    if b == 0.0:
+        if a != a or a == 0.0: return float('nan')
+        return _math.copysign(float('inf'), a) * _math.copysign(1.0, b)
+    return a / b
 def _chz_str(v):
     if v is True: return "true"
     if v is False: return "false"
@@ -331,8 +338,12 @@ impl Emitter {
         self.out.push(')');
     }
 
-    /// Integer `/` and `%` route through the shim (Chezzi semantics); everything else is the
-    /// matching native Python operator.
+    /// Integer `/` and `%` route through the shim (Chezzi semantics: truncate-toward-zero,
+    /// sign-of-dividend). Float `/` also routes through the shim: Chezzi's float division is
+    /// total IEEE-754 (`docs/spec.md:472`) — a zero divisor is `inf`/`-inf`/`NaN`, never a fault —
+    /// which is a deliberate divergence from CPython's `ZeroDivisionError`, so `_chz_fdiv` models
+    /// Chezzi's semantics rather than Python's native `/`. Everything else is the matching native
+    /// Python operator.
     fn bin(&mut self, op: BinOp, ty: &Ty, l: &Expr, r: &Expr) {
         if *ty == Ty::Int && matches!(op, BinOp::Div | BinOp::Mod) {
             self.out.push_str(if op == BinOp::Div {
@@ -340,6 +351,14 @@ impl Emitter {
             } else {
                 "_chz_mod("
             });
+            self.expr(l);
+            self.out.push_str(", ");
+            self.expr(r);
+            self.out.push(')');
+            return;
+        }
+        if *ty == Ty::Float && op == BinOp::Div {
+            self.out.push_str("_chz_fdiv(");
             self.expr(l);
             self.out.push_str(", ");
             self.expr(r);

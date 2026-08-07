@@ -922,13 +922,19 @@ impl Gen {
     /// Premise measured 2026-08-07 before landing: 4005 cases byte-identical against CPython
     /// across all six operators, plus `0.0 == -0.0` / `-0.0 < 0.0` / subnormals / `0.1+0.2==0.3`.
     ///
-    /// Two float surfaces are deliberately still unreachable, in the order they should land —
-    /// both filed in `docs/gaps.md` W7-37:
+    /// `Div` landed too: `BinOp::Div` is in the op list below, **with no non-zero-divisor
+    /// discipline** — that inverts `gen_int`'s rule (int `/` FAULTS on zero, so `gen_int` must
+    /// guarantee a non-zero divisor) because float `/` is total IEEE-754
+    /// (`docs/spec.md:472`): a zero divisor is `inf`/`-inf`/`NaN`, never a fault, so it is a
+    /// legitimate value whose result this widening exists to exercise, not a case to dodge. The
+    /// `_chz_fdiv` shim in `emit_python.rs` absorbs CPython's `ZeroDivisionError` divergence
+    /// (deliberate — Chezzi follows Rust/Go here, not Python; confirmed by the project owner
+    /// 2026-08-07). Premise verified first: all nine hand sign/zero cases matched CPython through
+    /// `_chz_fdiv` before this landed.
     ///
-    /// 1. **`Div`.** A zero divisor diverges (CPython raises `ZeroDivisionError`) and inexact
-    ///    quotients widen the formatting surface all at once; wants a non-zero-divisor
-    ///    discipline like `gen_int`'s.
-    /// 2. **Int↔float mixing** (`1 + 2.0`), which needs a coercion model the IR does not have.
+    /// One float surface is deliberately still unreachable, filed in `docs/gaps.md` W7-37:
+    /// **int↔float mixing** (`1 + 2.0`), which needs a coercion model the IR does not have. Float
+    /// `%` (`BinOp::Mod`) is also not emitted here — a separate step, not yet started.
     fn gen_float(&mut self, depth: usize) -> Expr {
         let at_leaf = depth >= MAX_EXPR_DEPTH;
         // Inside an in-loop `+=`/`-=` RHS a mutable float var would compound geometrically across
@@ -960,7 +966,13 @@ impl Gen {
         {
             return e;
         }
-        let op = *self.rng.choice(&[BinOp::Add, BinOp::Sub, BinOp::Mul]);
+        // `Div`'s divisor is UNRESTRICTED — no non-zero guard, unlike `gen_int`'s Div/Mod arm.
+        // Float `/` is total IEEE-754 (`docs/spec.md:472`): `x/0.0` is `inf`/`-inf`/`NaN`, never
+        // a fault, so a zero divisor is a legitimate value this widening should reach, not one to
+        // avoid — do not add a guard here by analogy with the int arm above.
+        let op = *self
+            .rng
+            .choice(&[BinOp::Add, BinOp::Sub, BinOp::Mul, BinOp::Div]);
         let l = self.gen_float(depth + 1);
         let r = self.gen_float(depth + 1);
         Expr::Bin {
