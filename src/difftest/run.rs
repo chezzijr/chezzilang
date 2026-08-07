@@ -761,10 +761,7 @@ mod tests {
         let cfg = hang_cfg();
         let start = Instant::now();
         let outcome = run_sources(&cfg, "while true:\n    x := 0\n", "print(0)\n", None);
-        eprintln!(
-            "a_chezzi_hang_python_survives_is_a_finding wall time: {:?}",
-            start.elapsed()
-        );
+        let elapsed = start.elapsed();
         assert!(
             matches!(
                 outcome,
@@ -776,6 +773,18 @@ mod tests {
             "a chezzi hang Python survives must be a finding, got {outcome:?}"
         );
         assert!(outcome.is_finding());
+        // The 3x re-run guard must actually RUN before a hang is reported — deleting it leaves
+        // every other assertion here green (measured: 2.02 s → 519 ms), which is precisely the
+        // regression the guard exists to prevent. A wall-clock LOWER bound is the safe
+        // direction to assert: load can only make this slower, never faster, so unlike the
+        // upper bound that had to be deleted in `0fc437a2` this cannot flake under a busy
+        // suite. Budget: 1x for the first timeout + 3x for the re-run = 4x; require 3x so a
+        // little scheduling slop is fine but skipping the re-run entirely (~1x) is not.
+        assert!(
+            elapsed >= cfg.timeout * 3,
+            "the 3x re-run guard did not run: {elapsed:?} < {:?}",
+            cfg.timeout * 3
+        );
     }
 
     /// F3 guard. Python hanging too means the program is outside the shared subset — a slow or
