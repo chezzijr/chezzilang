@@ -47,6 +47,7 @@ pub fn describe(seed: u64, outcome: &Outcome, input: &[u8]) -> String {
                 cap.stderr
             ));
         }
+        Outcome::HarnessError(msg) => s.push_str(&format!("harness error: {msg}\n")),
         _ => {}
     }
     s.push_str(&format!(
@@ -63,6 +64,7 @@ fn kind_label(o: &Outcome) -> &'static str {
         Outcome::HostPanic { .. } => "HostPanic",
         Outcome::Crash { .. } => "Crash",
         Outcome::Timeout => "Timeout",
+        Outcome::HarnessError(_) => "HarnessError",
     }
 }
 

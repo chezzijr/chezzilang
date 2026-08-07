@@ -12,6 +12,14 @@
 //! The `chezzi` binary is located as a sibling of this executable (so build both first, e.g.
 //! `cargo build --release`).
 //!
+//! Exit codes: `0` = clean (no findings), `1` = findings were found (real panics/crashes), `2` =
+//! the harness itself is broken (bad args, or a seed's `Outcome::HarnessError` — e.g. the
+//! `chezzi` binary could not be spawned) and NO seed after the failure was executed. `2` is
+//! deliberately distinct from `1` so a caller can tell "the oracle broke" from "the oracle
+//! worked and found bugs" — printing "N seeds, 0 finding(s)" with exit 0 over a harness that
+//! never ran a single program would be a false negative dressed up as a clean pass
+//! (`docs/gaps.md` W7-35, mirroring `difffuzz`'s W7-34 contract).
+//!
 //! NOTE: a *release* sibling `chezzi` is built with overflow-checks OFF, so arithmetic-overflow
 //! wraps silently and is invisible here. For a full overflow sweep, build with
 //! `RUSTFLAGS="-C overflow-checks=on"`. Signal / segfault / explicit-panic crashes are still caught
@@ -20,6 +28,7 @@
 #[path = "../panicfuzz/mod.rs"]
 mod panicfuzz;
 
+use panicfuzz::Outcome;
 use panicfuzz::run::Config;
 use std::time::Duration;
 
@@ -101,6 +110,13 @@ fn main() {
     let total = end - start;
     for seed in start..end {
         let (outcome, input) = panicfuzz::run_seed(&cfg, seed, &corpus);
+        // A harness error means the oracle could not even run this seed (e.g. `chezzi` is not
+        // on PATH) — fatal, not "0 findings". Abort loud instead of grinding through the rest of
+        // the range reporting nothing wrong.
+        if let Outcome::HarnessError(msg) = &outcome {
+            eprintln!("harness error at seed {seed}: {msg}");
+            std::process::exit(2);
+        }
         if outcome.is_finding() {
             findings += 1;
             println!("{}", panicfuzz::describe(seed, &outcome, &input));

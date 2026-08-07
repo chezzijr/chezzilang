@@ -173,15 +173,28 @@ fn generators_are_bounded_and_deterministic() {
 // (Debug chezzi => overflow-checks ON => arithmetic-overflow panics ARE caught.)
 // ---------------------------------------------------------------------------
 
-#[test]
-fn fuzz_no_panics_seeds_0_2000() {
-    let cfg = config();
-    let corpus = load_corpus();
-    assert!(!corpus.is_empty(), "examples corpus failed to load");
-
+/// `Config`-parametrized so a test can point it at a broken harness (e.g. a `chezzi_bin` that
+/// does not exist) and pin the abort behavior below, without spawning the real 20s-timeout
+/// `chezzi`. Mirrors `tests/difftest.rs`'s `fuzz_range`/`fuzz_range_cfg` split.
+fn fuzz_range_cfg(cfg: &Config, corpus: &[Vec<u8>], start: u64, end: u64) {
     let mut findings = Vec::new();
-    for seed in 0..2000u64 {
-        let (outcome, input) = panicfuzz::run_seed(&cfg, seed, &corpus);
+    for seed in start..end {
+        let (outcome, input) = panicfuzz::run_seed(cfg, seed, corpus);
+        // A harness error means the oracle never ran this seed at all — not a finding, and not
+        // something to accumulate: thousands of identical ENOENT messages would help nobody, so
+        // fail on the first one instead of burying it in a findings list it isn't a member of.
+        if let Outcome::HarnessError(msg) = &outcome {
+            // Don't let the abort silently swallow real findings already confirmed earlier in
+            // this same range — the harness broke, but those findings are still real.
+            if findings.is_empty() {
+                panic!("harness error at seed {seed}: {msg}");
+            }
+            panic!(
+                "harness error at seed {seed}: {msg}\n\n{} earlier finding(s) already confirmed before the harness broke:\n{}",
+                findings.len(),
+                findings.join("\n")
+            );
+        }
         if outcome.is_finding() {
             findings.push(panicfuzz::describe(seed, &outcome, &input));
         }
@@ -191,4 +204,24 @@ fn fuzz_no_panics_seeds_0_2000() {
         "front-end panic/crash finding(s) — these are REAL bugs:\n{}",
         findings.join("\n")
     );
+}
+
+#[test]
+fn fuzz_no_panics_seeds_0_2000() {
+    let cfg = config();
+    let corpus = load_corpus();
+    assert!(!corpus.is_empty(), "examples corpus failed to load");
+    fuzz_range_cfg(&cfg, &corpus, 0, 2000);
+}
+
+/// This is `fuzz_range_cfg`'s own consumer of `Outcome::HarnessError` — the CI gate's abort
+/// path — pinned directly: a `chezzi_bin` that does not exist must panic with a message naming
+/// the problem, not silently score the range as "0 findings". Mirrors
+/// `tests/difftest.rs::fuzz_range_aborts_on_harness_error` (`docs/gaps.md` W7-34/W7-35).
+#[test]
+#[should_panic(expected = "harness error at seed")]
+fn fuzz_range_aborts_on_harness_error() {
+    let cfg = Config::new("/nonexistent/chezzi-does-not-exist");
+    let corpus = load_corpus();
+    fuzz_range_cfg(&cfg, &corpus, 0, 5);
 }

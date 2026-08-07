@@ -229,7 +229,12 @@ architecture:
 **Classification** (`run.rs`): `Clean` = exit 0, or non-zero with a clean diagnostic and no panic
 marker (non-finding); `HostPanic` = stderr contains `panicked at` (a BUG); `Crash` = exit code is
 `None`, killed by a signal (a BUG); `Timeout` = killed at the wall-clock budget (**not** a finding —
-a slow input, not a crash). Only `HostPanic`/`Crash` are findings (`is_finding()`).
+a slow input, not a crash); `HarnessError(String)` = the oracle itself could not run this input at
+all — the child failed to spawn or the candidate could not be staged to a temp file (**not** a
+finding — it isn't a Chezzi bug — but FATAL: both callers (`tests/panicfuzz.rs`'s `fuzz_range_cfg`,
+`src/bin/panicfuzz.rs`) abort on it instead of scoring it, exit code **2** for the bin, distinct from
+**1** for real findings, mirroring `difftest`'s `W7-34` contract — `docs/gaps.md` **W7-35**). Only
+`HostPanic`/`Crash` are findings (`is_finding()`).
 
 **Three combined generators** (`generate.rs`), all bounded to ≤ 2 KB and deterministic in `(seed,
 corpus)`: (1) random UTF-8-ish byte strings; (2) a token-alphabet sampler over Chezzi keyword /
