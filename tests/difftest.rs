@@ -539,9 +539,25 @@ fn fuzz_range_cfg(cfg: &Config, feat: Features, start: u64, end: u64) {
             findings.push(difftest::describe(seed, &outcome, &chz, &py));
         }
     }
+    // Outcomes that represent a REAL comparison of the two engines. `Timeout` and `HarnessError`
+    // are precisely the two that mean "nothing was compared".
+    let compared: usize = hist
+        .iter()
+        .filter(|(k, _)| {
+            [
+                "Match",
+                "AllowListed",
+                "Divergence",
+                "HostPanic",
+                "BothError",
+            ]
+            .contains(k)
+        })
+        .map(|(_, n)| n)
+        .sum();
     let hist: Vec<String> = hist.iter().map(|(k, n)| format!("{k} {n}")).collect();
     eprintln!(
-        "fuzz sweep {start}..{end}: {} finding(s) [{}]",
+        "fuzz sweep {start}..{end}: {} finding(s), {compared} compared [{}]",
         findings.len(),
         hist.join(", ")
     );
@@ -550,6 +566,20 @@ fn fuzz_range_cfg(cfg: &Config, feat: Features, start: u64, end: u64) {
         "differential divergences found (sweep {start}..{end} [{}]):\n{}",
         hist.join(", "),
         findings.join("\n")
+    );
+    // The histogram above is `eprintln!`, and libtest CAPTURES stderr on a PASSING test — so a
+    // sweep where every seed timed out (nothing compared at all) is a green tick indistinguishable
+    // from one that really compared 120 programs. Acknowledging the capture in a comment is not a
+    // guard; this is. A hard "zero comparisons" floor is CERTAIN — deliberately not a "too many
+    // timeouts" threshold, which is a heuristic, and an uncertain heuristic must decline rather
+    // than guess (`docs/gaps.md` W7-12, W7-38). It also closes the empty-range hole the sibling
+    // arg parsers had: `fuzz_range(feat, 5, 5)` now fails instead of passing over nothing.
+    assert!(
+        compared > 0,
+        "vacuous sweep {start}..{end}: compared 0 of {} seeds — nothing was ever run against \
+         CPython, so a green result here proves NOTHING [{}]",
+        end - start,
+        hist.join(", ")
     );
 }
 
@@ -564,6 +594,17 @@ fn fuzz_range_cfg(cfg: &Config, feat: Features, start: u64, end: u64) {
 fn fuzz_range_aborts_on_harness_error() {
     let cfg = Config::new("/nonexistent/chezzi-does-not-exist");
     fuzz_range_cfg(&cfg, Features::straight_line(), 0, 5);
+}
+
+/// The gate must refuse to pass over ZERO comparisons (W7-38). Forced with a 1 ms timeout, which
+/// no real `chezzi run` + `python3` pair can beat, so every seed comes back `Timeout` — the shape
+/// that used to be a silent green because libtest captures the histogram on a passing test.
+#[test]
+#[should_panic(expected = "compared 0 of")]
+fn fuzz_range_refuses_to_pass_over_zero_comparisons() {
+    let mut cfg = config();
+    cfg.timeout = Duration::from_millis(1);
+    fuzz_range_cfg(&cfg, Features::straight_line(), 0, 2);
 }
 
 #[test]

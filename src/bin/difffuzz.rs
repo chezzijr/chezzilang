@@ -15,6 +15,12 @@
 //! deliberately distinct from `1` so a caller can tell "the oracle broke" from "the oracle
 //! worked and found bugs" — printing "N seeds, 0 finding(s)" with exit 0 over a harness that
 //! never ran a single program would be a false negative dressed up as a clean pass.
+//! **Findings win over the abort**: if the harness breaks mid-range AFTER a real divergence was
+//! already confirmed, the exit code is `1`, not `2` — a real finding must never be masked by a
+//! later environment failure (the abort is still printed, and the `done:` line says how many
+//! seeds actually ran). An EMPTY range (`--seeds 5..5`) is a usage error (`2`), not a clean pass:
+//! zero comparisons is exactly the "0 findings" false negative this whole contract exists to
+//! prevent (`docs/gaps.md` W7-38).
 
 #[path = "../difftest/mod.rs"]
 mod difftest;
@@ -78,8 +84,12 @@ fn main() {
         i += 1;
     }
 
-    if end < start {
-        eprintln!("empty/inverted seed range: {start}..{end}");
+    // `<=`, not `<`: an EMPTY range runs zero seeds, compares nothing, and prints
+    // `done: 0 seeds 5..5, 0 finding(s) []` with exit 0 — a clean pass over zero evidence, the
+    // exact false negative W7-34 and its residual exist to close, one layer up in the arg parser
+    // (W7-38).
+    if end <= start {
+        eprintln!("empty or inverted seed range: {start}..{end} (need end > start)");
         std::process::exit(2);
     }
 
@@ -100,15 +110,22 @@ fn main() {
     let mut hist: std::collections::BTreeMap<&'static str, usize> =
         std::collections::BTreeMap::new();
     let total = end - start;
+    let mut ran = 0u64;
+    let mut aborted = false;
     for seed in start..end {
         let (outcome, chz, py) = difftest::run_seed(&cfg, seed, feat);
+        ran += 1;
         *hist.entry(difftest::kind_label(&outcome)).or_default() += 1;
         // A harness error means the oracle could not even run this seed (e.g. `chezzi` is not
         // on PATH) — fatal, not "0 findings". Abort loud instead of grinding through the rest
-        // of the range reporting nothing wrong.
+        // of the range reporting nothing wrong. BREAK, never `exit()` from inside the loop: an
+        // in-loop exit skips the `done:` line and the histogram — losing the count of seeds that
+        // did run on the one run where that count matters most — and hard-codes exit 2 over any
+        // real finding already confirmed earlier in the range (W7-38).
         if let Outcome::HarnessError(msg) = &outcome {
             eprintln!("harness error at seed {seed}: {msg}");
-            std::process::exit(2);
+            aborted = true;
+            break;
         }
         if outcome.is_finding() {
             findings += 1;
@@ -126,11 +143,24 @@ fn main() {
 
     let hist: Vec<String> = hist.iter().map(|(k, n)| format!("{k} {n}")).collect();
     eprintln!(
-        "done: {total} seeds {start}..{end}, {findings} finding(s) [{}]",
+        "done: {ran} of {total} seeds {start}..{end}, {findings} finding(s) [{}]",
         hist.join(", ")
     );
+    if aborted {
+        eprintln!(
+            "ABORTED: the harness broke (see above) — {} seed(s) never ran",
+            total - ran
+        );
+    }
+    // A real finding outranks the abort: exit 1 so it is never masked, and say both happened.
     if findings > 0 {
+        if aborted {
+            eprintln!("exit 1 (real findings) even though the harness also broke — both above");
+        }
         std::process::exit(1);
+    }
+    if aborted {
+        std::process::exit(2);
     }
 }
 

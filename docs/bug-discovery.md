@@ -329,9 +329,15 @@ failure, to `Outcome::HarnessError(String)` — `is_finding()` is `false` (it is
 but both callers treat it as **fatal**: `tests/difftest.rs::fuzz_range` `panic!`s on the first
 one, and `difffuzz` prints it to stderr and exits **2**. Exit-code contract: `0` = clean (no
 findings), `1` = findings (real divergences), `2` = the harness itself is broken and the run did
-not finish (bad args, or a `HarnessError` — e.g. `chezzi` not on `PATH`). See `gaps.md` **W7-34**
-for the measured before/after (`chezzi` missing → `done: N seeds, 0 finding(s)`, exit 0, before
-the fix).
+not finish (bad args — including an **empty** `--seeds A..A`, which would otherwise be a clean pass
+over zero comparisons — or a `HarnessError`, e.g. `chezzi` not on `PATH`). **Findings win over the
+abort**: if the harness breaks *after* a real divergence was already confirmed, the exit code is
+`1`, not `2`, so a real finding is never masked by a later environment failure. The abort now
+`break`s out of the seed loop instead of exiting inside it, so the `done:` line and the histogram
+print on that path too and say how many seeds actually ran (`done: 1 of 50 seeds 0..50, 0
+finding(s) [HarnessError 1]`). See `gaps.md` **W7-34** for the measured before/after (`chezzi`
+missing → `done: N seeds, 0 finding(s)`, exit 0, before the fix) and **W7-38** for the empty-range,
+abort-path and exit-code half.
 
 **Every sweep prints an outcome histogram, because "0 findings" alone cannot be read.** Both
 `difffuzz` and `panicfuzz` tally `kind_label(&outcome)` per seed and print it in the `done:` line:
@@ -343,6 +349,26 @@ byte-identical lines. There is deliberately **no** abort threshold or "too many 
 heuristic: a verdict that cannot be certain must decline rather than emit a confident wrong one
 (`gaps.md` **W7-12**), and a wrong "your oracle is broken" abort would teach distrust of every
 future one. The fix is legibility — read the histogram (`gaps.md` **W7-34**).
+
+**…and the CI gates refuse to PASS over zero comparisons.** Legibility is enough for a human
+running the binary, and not enough for `cargo test`: libtest CAPTURES stderr on a passing test, so
+the histogram above is invisible exactly when the sweep was vacuous. Both gates
+(`tests/difftest.rs::fuzz_range_cfg`, `tests/panicfuzz.rs::fuzz_range_cfg`) therefore assert a hard
+floor — the number of seeds that represent a REAL comparison (`Match`/`AllowListed`/`Divergence`/
+`HostPanic`/`BothError`; `Clean`/`HostPanic`/`Crash` for panicfuzz) must be non-zero, `Timeout` and
+`HarnessError` being the two outcomes that mean nothing was compared. A zero floor is certain; a
+"too many timeouts" threshold would be a heuristic, and is deliberately absent (`gaps.md`
+**W7-38**).
+
+**A SIGKILL is not a Chezzi bug.** `ExitStatus::code()` is `None` for *every* signal, so both
+oracles capture the signal NUMBER too. Only signals a crash in the child itself raises — SIGILL,
+SIGTRAP, SIGABRT, SIGBUS, SIGFPE, SIGSEGV, SIGSYS — are a finding (`HostPanic`/`Crash`). Every
+other signal, SIGKILL (the cgroup OOM-killer under a `MemoryMax` scope, `kill -9`) and SIGTERM (a
+CI reaper) included, is an outside kill that implicates nothing about the program: it becomes the
+fatal-but-not-a-finding `HarnessError` saying the seed proved nothing. An unrecognized signal
+declines the same way rather than asserting a crash (`gaps.md` **W7-12**, **W7-38**). Reports NAME
+the signal — `--- chezzi killed by SIGSEGV (signal 11) ---` — because "killed by a signal" is
+unactionable when SIGSEGV, SIGABRT and SIGFPE want three different first moves.
 
 **A Chezzi timeout is not thrown away — Python gets a chance to prove it's a real hang.**
 `generate.rs` bounds every loop by construction (`LOOP_CAP`, a bounded `for`, a mandatory `while`

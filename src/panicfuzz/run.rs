@@ -21,6 +21,12 @@ pub struct Capture {
     pub stdout: String,
     pub stderr: String,
     pub code: Option<i32>, // None => killed by signal (SIGSEGV/SIGABRT/stack-overflow)
+    /// WHICH signal (`None` when the child exited normally). `code` alone cannot tell a SIGSEGV —
+    /// a real front-end bug — from a SIGKILL, which under this project's mandated
+    /// `systemd-run … MemoryMax=6G` scope is the cgroup OOM-killer and implicates nothing
+    /// (CLAUDE.md: "exit 137 = OOM, not a test failure"). See `docs/gaps.md` W7-38; mirrors
+    /// `difftest::run::Capture::signal`.
+    pub signal: Option<i32>,
 }
 
 /// Classified result of feeding one candidate input to `chezzi check`.
@@ -111,6 +117,16 @@ pub fn classify(cap: Capture) -> Outcome {
     if is_host_panic(&cap.stderr) {
         return Outcome::HostPanic { cap };
     }
+    // Only the signals a crash in the child itself raises are a finding. A SIGKILL (cgroup
+    // OOM-killer / `kill -9`) or SIGTERM comes from OUTSIDE and implicates nothing about the
+    // front-end, so it is the fatal-but-not-a-finding `HarnessError`: this input proved nothing.
+    // An unrecognized signal DECLINES the same way rather than emitting a confident "chezzi
+    // crashed" (`docs/gaps.md` W7-12, W7-38).
+    if let Some(sig) = cap.signal
+        && !is_crash_signal(sig)
+    {
+        return Outcome::HarnessError(outside_kill_msg("chezzi", sig));
+    }
     if cap.code.is_none() {
         return Outcome::Crash { cap };
     }
@@ -123,6 +139,48 @@ pub fn classify(cap: Capture) -> Outcome {
 /// real Rust arithmetic-overflow / index panic always carries `panicked at`, so nothing is lost.
 fn is_host_panic(stderr: &str) -> bool {
     stderr.contains("panicked at")
+}
+
+/// Signals a **bug in the child itself** raises; everything else (SIGKILL from the OOM-killer,
+/// SIGTERM from a CI reaper) is an outside kill. Linux numbering (`man 7 signal`); this crate is
+/// already Unix-only. Mirrors `difftest::run::is_crash_signal`.
+fn is_crash_signal(sig: i32) -> bool {
+    matches!(sig, 4 | 5 | 6 | 7 | 8 | 11 | 31)
+}
+
+/// Name the signal in reports — "killed by a signal" is unactionable when SIGSEGV, SIGABRT and
+/// SIGKILL want three different responses.
+pub fn signal_name(sig: i32) -> &'static str {
+    match sig {
+        1 => "SIGHUP",
+        2 => "SIGINT",
+        4 => "SIGILL",
+        5 => "SIGTRAP",
+        6 => "SIGABRT",
+        7 => "SIGBUS",
+        8 => "SIGFPE",
+        9 => "SIGKILL",
+        11 => "SIGSEGV",
+        13 => "SIGPIPE",
+        15 => "SIGTERM",
+        31 => "SIGSYS",
+        _ => "unknown signal",
+    }
+}
+
+fn outside_kill_msg(who: &str, sig: i32) -> String {
+    format!(
+        "{who} was killed by {} (signal {sig}) — a kill from OUTSIDE the process (cgroup \
+         OOM-killer / `MemoryMax`, a CI reaper, a manual kill), not a crash in the program; this \
+         input proved nothing about the front-end",
+        signal_name(sig)
+    )
+}
+
+/// The signal that killed the child, if any (`ExitStatus::code()` is `None` for ALL of them).
+fn signal_of(status: &std::process::ExitStatus) -> Option<i32> {
+    use std::os::unix::process::ExitStatusExt;
+    status.signal()
 }
 
 fn write_file(path: &std::path::Path, contents: &[u8]) -> std::io::Result<()> {
@@ -222,6 +280,7 @@ fn run_one(cmd: &mut Command, timeout: Duration) -> Result<Capture, RunErr> {
         stdout: String::from_utf8_lossy(&stdout).into_owned(),
         stderr: String::from_utf8_lossy(&stderr).into_owned(),
         code: status.code(),
+        signal: signal_of(&status),
     })
 }
 
@@ -247,6 +306,55 @@ mod tests {
                  (before the W7-35 fix this wrongly came back as Timeout)"
             ),
         }
+    }
+
+    /// A child killed by `sig`, as the OS actually reports it.
+    fn cap_signal(sig: i32) -> Capture {
+        Capture {
+            stdout: String::new(),
+            stderr: String::new(),
+            code: None,
+            signal: Some(sig),
+        }
+    }
+
+    /// W7-38, twin of `difftest`'s: a SIGKILL is the cgroup OOM-killer under the `MemoryMax`
+    /// scope this repo mandates — an outside kill that says nothing about the front-end. Reporting
+    /// it as `Crash` is a non-bug reported as a real bug, on the very machine this fuzzer runs on.
+    #[test]
+    fn a_sigkill_is_not_a_chezzi_bug() {
+        let outcome = classify(cap_signal(9));
+        assert!(
+            !outcome.is_finding(),
+            "an OOM/outside SIGKILL must not be a crash finding, got {outcome:?}"
+        );
+        match outcome {
+            Outcome::HarnessError(msg) => assert!(
+                msg.contains("SIGKILL") && msg.contains("proved nothing"),
+                "the message must name the signal and say the input proved nothing: {msg}"
+            ),
+            other => panic!("expected the fatal-but-not-a-finding HarnessError, got {other:?}"),
+        }
+    }
+
+    /// The other half: a SIGSEGV is a real front-end crash and stays a finding.
+    #[test]
+    fn a_sigsegv_is_still_a_crash_finding() {
+        let outcome = classify(cap_signal(11));
+        assert!(
+            matches!(outcome, Outcome::Crash { .. }) && outcome.is_finding(),
+            "a SIGSEGV must stay a Crash finding, got {outcome:?}"
+        );
+    }
+
+    /// A report that says only "killed by signal" is unactionable.
+    #[test]
+    fn a_crash_report_names_the_signal() {
+        let report = super::super::describe(0, &classify(cap_signal(11)), b"x := 1\n");
+        assert!(
+            report.contains("SIGSEGV") && report.contains("signal 11"),
+            "the report must name the signal:\n{report}"
+        );
     }
 
     /// So nobody later "fixes" the abort in `fuzz_range`/the `panicfuzz` bin by making this a

@@ -42,8 +42,14 @@ pub fn describe(seed: u64, outcome: &Outcome, input: &[u8]) -> String {
             ));
         }
         Outcome::Crash { cap } => {
+            // NAME the signal — SIGSEGV, SIGABRT and SIGFPE want three different first moves, and
+            // "killed by signal" tells the reader none of that (W7-38).
+            let which = match cap.signal {
+                Some(sig) => format!("{} (signal {sig})", run::signal_name(sig)),
+                None => "an unknown signal (code: None)".to_string(),
+            };
             s.push_str(&format!(
-                "--- chezzi killed by signal (code: None) ---\nstderr:\n{}\n",
+                "--- chezzi killed by {which} ---\nstderr:\n{}\n",
                 cap.stderr
             ));
         }

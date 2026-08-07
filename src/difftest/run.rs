@@ -42,6 +42,13 @@ pub struct Capture {
     // Keep this description true: a WRONG comment on this exact field is the recorded proximate
     // cause of the signal-kill case going unclassified for the oracle's whole life (W7-33).
     pub code: Option<i32>,
+    /// WHICH signal killed the child (`None` when it exited normally, or for a synthesized
+    /// capture). `code` alone cannot tell a SIGSEGV — a real Chezzi bug — from a SIGKILL, which
+    /// on this project's own mandated `systemd-run … MemoryMax=6G` scope is the cgroup OOM-killer
+    /// and says NOTHING about the program (CLAUDE.md: "exit 137 = OOM, not a test failure").
+    /// Without it `classify` reported every OOM kill as a `HostPanic` finding — the series' own
+    /// "a non-bug reported as a bug" mirror image (W7-38).
+    pub signal: Option<i32>,
 }
 
 impl Capture {
@@ -257,6 +264,9 @@ fn hang_retry_outcome(
                 )
                 .into_bytes(),
                 code: None,
+                // No signal: nothing killed it, we gave up waiting. This capture never reaches
+                // `classify` anyway (see above), so it can never be read as an outside kill.
+                signal: None,
             },
             py,
         },
@@ -291,6 +301,19 @@ fn classify(chz: Capture, py: Capture, prog: Option<&Program>) -> Outcome {
     // builds `Outcome::Divergence{ChezziHang}` directly and never routes it through here — see
     // `hang_retry_outcome`.) Same rule as the twin oracle: `panicfuzz::classify`
     // (`src/panicfuzz/run.rs`) reports this exact condition as `Outcome::Crash`.
+    // ...but `code: None` alone does not say WHICH signal, and only some signals implicate the
+    // program. A SIGKILL is delivered from OUTSIDE the process — the cgroup OOM-killer under the
+    // `MemoryMax` scope this repo mandates, a CI reaper, a manual `kill -9` — so nothing about
+    // Chezzi is implicated and the seed proved nothing: that is a `HarnessError` (fatal to every
+    // caller, never scored as a clean pass), not a `HostPanic` finding. The allow-list runs the
+    // safe way round — only the signals a crash actually raises are promoted to a finding, and an
+    // unrecognized signal DECLINES into the fatal-but-not-a-finding arm rather than emitting a
+    // confident "Chezzi crashed" (the standing rule, `docs/gaps.md` W7-12).
+    if let Some(sig) = chz.signal
+        && !is_crash_signal(sig)
+    {
+        return Outcome::HarnessError(outside_kill_msg("chezzi", sig));
+    }
     if chz.code.is_none() {
         return Outcome::HostPanic { chz };
     }
@@ -374,6 +397,50 @@ fn classify(chz: Capture, py: Capture, prog: Option<&Program>) -> Outcome {
 /// Rust arithmetic-overflow / index panic always carries `panicked at`, so nothing is lost.
 fn is_host_panic(stderr: &str) -> bool {
     stderr.contains("panicked at")
+}
+
+/// Signals a **bug in the child itself** raises. Everything else — SIGKILL (cgroup OOM-killer,
+/// `kill -9`), SIGTERM/SIGINT/SIGHUP (a CI reaper, a human) — is an outside kill that implicates
+/// nothing about Chezzi. Numbers are Linux's (`man 7 signal`); this crate is already Unix-only
+/// (`src/native/fs.rs` imports `std::os::unix::*` unconditionally) and is developed on Linux.
+fn is_crash_signal(sig: i32) -> bool {
+    matches!(sig, 4 | 5 | 6 | 7 | 8 | 11 | 31)
+}
+
+/// Name the signal in reports. "killed by a SIGNAL" is unactionable — SIGSEGV, SIGABRT and
+/// SIGKILL want three different responses — and an unactionable report is the exact defect W7-30
+/// already had to fix once in `describe`.
+pub fn signal_name(sig: i32) -> &'static str {
+    match sig {
+        1 => "SIGHUP",
+        2 => "SIGINT",
+        4 => "SIGILL",
+        5 => "SIGTRAP",
+        6 => "SIGABRT",
+        7 => "SIGBUS",
+        8 => "SIGFPE",
+        9 => "SIGKILL",
+        11 => "SIGSEGV",
+        13 => "SIGPIPE",
+        15 => "SIGTERM",
+        31 => "SIGSYS",
+        _ => "unknown signal",
+    }
+}
+
+fn outside_kill_msg(who: &str, sig: i32) -> String {
+    format!(
+        "{who} was killed by {} (signal {sig}) — a kill from OUTSIDE the process (cgroup \
+         OOM-killer / `MemoryMax`, a CI reaper, a manual kill), not a crash in the program; this \
+         seed proved nothing about either engine",
+        signal_name(sig)
+    )
+}
+
+/// The signal that killed the child, if any (`ExitStatus::code()` is `None` for ALL of them).
+fn signal_of(status: &std::process::ExitStatus) -> Option<i32> {
+    use std::os::unix::process::ExitStatusExt;
+    status.signal()
 }
 
 fn write_file(path: &std::path::Path, contents: &str) -> std::io::Result<()> {
@@ -473,6 +540,7 @@ fn run_one(cmd: &mut Command, timeout: Duration) -> Result<Capture, RunErr> {
         stdout,
         stderr,
         code: status.code(),
+        signal: signal_of(&status),
     })
 }
 
@@ -487,6 +555,18 @@ mod tests {
             stdout,
             stderr: Vec::new(),
             code: Some(0),
+            signal: None,
+        }
+    }
+
+    /// A child killed by `sig` — `code: None` plus the signal number, which is what the OS
+    /// actually reports and what tells a SIGSEGV (our bug) from a SIGKILL (someone else's).
+    fn cap_signal(stderr: Vec<u8>, sig: i32) -> Capture {
+        Capture {
+            stdout: Vec::new(),
+            stderr,
+            code: None,
+            signal: Some(sig),
         }
     }
 
@@ -497,6 +577,7 @@ mod tests {
             stdout,
             stderr,
             code,
+            signal: None,
         }
     }
 
@@ -587,11 +668,7 @@ mod tests {
     /// divergence — the highest-value finding this oracle can produce, invisible.
     #[test]
     fn a_signal_killed_chezzi_is_a_host_panic() {
-        let chz = cap_exit(
-            Vec::new(),
-            b"\nthread 'main' has overflowed its stack\n".to_vec(),
-            None,
-        );
+        let chz = cap_signal(b"\nthread 'main' has overflowed its stack\n".to_vec(), 11);
         let py = cap_exit(b"ok\n".to_vec(), Vec::new(), Some(0));
         assert!(
             matches!(classify(chz, py, None), Outcome::HostPanic { .. }),
@@ -603,11 +680,7 @@ mod tests {
     /// `BothError` — `is_finding() == false` — which buries a host crash as a non-finding.
     #[test]
     fn a_signal_killed_chezzi_is_a_finding_even_when_python_also_failed() {
-        let chz = cap_exit(
-            Vec::new(),
-            b"\nthread 'main' has overflowed its stack\n".to_vec(),
-            None,
-        );
+        let chz = cap_signal(b"\nthread 'main' has overflowed its stack\n".to_vec(), 11);
         let py = cap_exit(Vec::new(), Vec::new(), Some(1));
         let outcome = classify(chz, py, None);
         assert!(
@@ -634,6 +707,59 @@ mod tests {
         assert!(
             matches!(classify(chz, py, None), Outcome::HostPanic { .. }),
             "identical stdout must not hide a worker-thread panic on stderr"
+        );
+    }
+
+    /// W7-38. A SIGKILL is delivered from OUTSIDE the process — on this machine, the cgroup
+    /// OOM-killer under the `MemoryMax=6G` scope CLAUDE.md mandates for every cargo run ("exit
+    /// 137 = OOM, not a test failure"). Nothing about the program is implicated, so reporting it
+    /// as `HostPanic` — a finding, exit 1, "chezzi crashed" — is a NON-bug reported as a real
+    /// bug, and it fires on the very machine this oracle runs on.
+    #[test]
+    fn a_sigkill_is_not_a_chezzi_bug() {
+        let chz = cap_signal(Vec::new(), 9);
+        let py = cap_exit(b"ok\n".to_vec(), Vec::new(), Some(0));
+        let outcome = classify(chz, py, None);
+        assert!(
+            !outcome.is_finding(),
+            "an OOM/outside SIGKILL must not be reported as a Chezzi bug, got {outcome:?}"
+        );
+        match outcome {
+            Outcome::HarnessError(msg) => assert!(
+                msg.contains("SIGKILL") && msg.contains("proved nothing"),
+                "the message must name the signal and say the seed proved nothing: {msg}"
+            ),
+            other => panic!("expected the fatal-but-not-a-finding HarnessError, got {other:?}"),
+        }
+    }
+
+    /// The other half of the same rule, so nobody "fixes" the SIGKILL case by demoting every
+    /// signal: a SIGSEGV is a real crash in OUR runtime and stays the highest-value finding this
+    /// oracle can produce.
+    #[test]
+    fn a_sigsegv_is_still_a_host_panic() {
+        let chz = cap_signal(Vec::new(), 11);
+        let py = cap_exit(b"ok\n".to_vec(), Vec::new(), Some(0));
+        let outcome = classify(chz, py, None);
+        assert!(
+            matches!(outcome, Outcome::HostPanic { .. }) && outcome.is_finding(),
+            "a SIGSEGV must stay a HostPanic finding, got {outcome:?}"
+        );
+    }
+
+    /// A report that says only "killed by a SIGNAL" is unactionable — the same defect W7-30 had
+    /// to fix once already in `describe`.
+    #[test]
+    fn a_signal_kill_report_names_the_signal() {
+        let outcome = classify(
+            cap_signal(Vec::new(), 11),
+            cap_exit(b"ok\n".to_vec(), Vec::new(), Some(0)),
+            None,
+        );
+        let report = super::super::describe(0, &outcome, "<chz>", "<py>");
+        assert!(
+            report.contains("SIGSEGV") && report.contains("signal 11"),
+            "the report must name the signal, not just say 'a SIGNAL':\n{report}"
         );
     }
 
@@ -742,15 +868,26 @@ mod tests {
     /// current_exe-relative search, one directory further up: a TEST binary (this one, or
     /// `tests/difftest.rs`'s) lives in `target/{debug,release}/deps/`, not directly in
     /// `target/{debug,release}/` like a plain `cargo build` binary.
+    /// NO PATH fallback (W7-38). A bare `PathBuf::from("chezzi")` resolves to whatever `chezzi`
+    /// is installed in `~/.cargo/bin` — on this machine a binary predating this work by days —
+    /// so a green hang test could be proving something about a STALE binary, and nothing in these
+    /// tests pins which one ran. This repo has a documented history of exactly that trap
+    /// (CLAUDE.md's worktree/`CARGO_TARGET_DIR` warning: "the binary you verify SILENTLY LACKS
+    /// your change — a green two-engine run proving nothing"). Refuse instead.
     fn locate_chezzi_for_test() -> PathBuf {
         let exe = std::env::current_exe().expect("current_exe");
-        if let Some(dir) = exe.parent().and_then(|d| d.parent()) {
-            let cand = dir.join("chezzi");
-            if cand.exists() {
-                return cand;
-            }
+        let cand = exe
+            .parent()
+            .and_then(|d| d.parent())
+            .map(|d| d.join("chezzi"));
+        match cand {
+            Some(p) if p.exists() => p,
+            other => panic!(
+                "no sibling `chezzi` binary at {other:?} — build it first \
+                 (`cargo build --bin chezzi`, or run the full `cargo test`). Refusing to fall \
+                 back to PATH: that can silently test a stale installed binary."
+            ),
         }
-        PathBuf::from("chezzi") // fall back to PATH
     }
 
     /// Short-timeout config for the hang tests: real subprocesses, so keep it small — the 3x

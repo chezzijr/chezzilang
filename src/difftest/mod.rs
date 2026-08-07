@@ -77,8 +77,17 @@ pub fn describe(seed: u64, outcome: &Outcome, chz_src: &str, py_src: &str) -> St
             // `panicked at` marker at all (a bare SIGSEGV writes nothing). Say so explicitly, or
             // an empty-stderr signal death renders as an empty block that contradicts the
             // HostPanic verdict above it — the same defect W7-30 had to fix in this function.
-            if chz.code.is_none() {
-                s.push_str("--- chezzi killed by a SIGNAL (code: None) ---\n");
+            // NAME the signal: "killed by a SIGNAL" alone does not tell a SIGSEGV (memory bug)
+            // from a SIGABRT (assert/double-panic) from a SIGFPE, and those want three different
+            // first moves. An unactionable report teaches the same distrust as a wrong one (W7-30,
+            // W7-38).
+            if let Some(sig) = chz.signal {
+                s.push_str(&format!(
+                    "--- chezzi killed by {} (signal {sig}) ---\n",
+                    run::signal_name(sig)
+                ));
+            } else if chz.code.is_none() {
+                s.push_str("--- chezzi killed by a SIGNAL (code: None, number unavailable) ---\n");
             }
             if !chz.stderr_text().trim().is_empty() {
                 s.push_str(&format!(

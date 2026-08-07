@@ -56,15 +56,19 @@ fn classify_flags_panic_signal_and_clean() {
         stdout: String::new(),
         stderr: "thread 'main' panicked at src/parser/mod.rs:1234:5".into(),
         code: Some(101),
+        signal: None,
     });
     assert!(matches!(panic, Outcome::HostPanic { .. }), "{panic:?}");
     assert!(panic.is_finding());
 
-    // Killed by a signal (code == None, no panic marker) => Crash (a finding).
+    // Killed by a CRASH signal (code == None, no panic marker) => Crash (a finding). SIGSEGV,
+    // not a bare `code: None`: an outside kill (SIGKILL from the OOM-killer) is deliberately NOT
+    // a finding — see `a_sigkill_is_not_a_chezzi_bug` in `src/panicfuzz/run.rs` (W7-38).
     let crash = run::classify(Capture {
         stdout: String::new(),
         stderr: String::new(),
         code: None,
+        signal: Some(11),
     });
     assert!(matches!(crash, Outcome::Crash { .. }), "{crash:?}");
     assert!(crash.is_finding());
@@ -74,6 +78,7 @@ fn classify_flags_panic_signal_and_clean() {
         stdout: String::new(),
         stderr: "error: parse error: expected expression".into(),
         code: Some(1),
+        signal: None,
     });
     assert!(matches!(clean, Outcome::Clean { .. }), "{clean:?}");
     assert!(!clean.is_finding());
@@ -83,6 +88,7 @@ fn classify_flags_panic_signal_and_clean() {
         stdout: "ok: no type errors".into(),
         stderr: String::new(),
         code: Some(0),
+        signal: None,
     });
     assert!(matches!(ok, Outcome::Clean { .. }), "{ok:?}");
 
@@ -97,6 +103,7 @@ fn classify_flags_panic_signal_and_clean() {
         stdout: String::new(),
         stderr: "thread 'main' panicked at src/x.rs:1:1\nstack overflow".into(),
         code: None,
+        signal: Some(6),
     });
     assert!(
         matches!(panic_and_signal, Outcome::HostPanic { .. }),
@@ -178,8 +185,17 @@ fn generators_are_bounded_and_deterministic() {
 /// `chezzi`. Mirrors `tests/difftest.rs`'s `fuzz_range`/`fuzz_range_cfg` split.
 fn fuzz_range_cfg(cfg: &Config, corpus: &[Vec<u8>], start: u64, end: u64) {
     let mut findings = Vec::new();
+    // Inputs the front-end was actually RUN on. `Timeout` and `HarnessError` are the two outcomes
+    // that mean nothing was checked at all — see the floor assertion below.
+    let mut checked = 0usize;
     for seed in start..end {
         let (outcome, input) = panicfuzz::run_seed(cfg, seed, corpus);
+        if matches!(
+            outcome,
+            Outcome::Clean { .. } | Outcome::HostPanic { .. } | Outcome::Crash { .. }
+        ) {
+            checked += 1;
+        }
         // A harness error means the oracle never ran this seed at all — not a finding, and not
         // something to accumulate: thousands of identical ENOENT messages would help nobody, so
         // fail on the first one instead of burying it in a findings list it isn't a member of.
@@ -204,6 +220,17 @@ fn fuzz_range_cfg(cfg: &Config, corpus: &[Vec<u8>], start: u64, end: u64) {
         "front-end panic/crash finding(s) — these are REAL bugs:\n{}",
         findings.join("\n")
     );
+    // A sweep where every input timed out checked NOTHING, and a green tick is indistinguishable
+    // from one that really fed 2000 inputs to the front-end. A hard "zero checks" floor is
+    // certain; deliberately not a "too many timeouts" threshold, which is a heuristic that would
+    // have to guess (`docs/gaps.md` W7-12, W7-38). Also closes the empty-range hole:
+    // `fuzz_range_cfg(.., 5, 5)` now fails instead of passing over nothing.
+    assert!(
+        checked > 0,
+        "vacuous sweep {start}..{end}: checked 0 of {} inputs — the front-end was never run, so \
+         a green result here proves NOTHING",
+        end - start
+    );
 }
 
 #[test]
@@ -218,6 +245,17 @@ fn fuzz_no_panics_seeds_0_2000() {
 /// path — pinned directly: a `chezzi_bin` that does not exist must panic with a message naming
 /// the problem, not silently score the range as "0 findings". Mirrors
 /// `tests/difftest.rs::fuzz_range_aborts_on_harness_error` (`docs/gaps.md` W7-34/W7-35).
+/// The gate must refuse to pass over ZERO checked inputs (W7-38) — mirrors
+/// `tests/difftest.rs::fuzz_range_refuses_to_pass_over_zero_comparisons`. A 1 ms timeout no real
+/// `chezzi check` can beat forces every seed to `Timeout`.
+#[test]
+#[should_panic(expected = "checked 0 of")]
+fn fuzz_range_refuses_to_pass_over_zero_checks() {
+    let mut cfg = config();
+    cfg.timeout = Duration::from_millis(1);
+    fuzz_range_cfg(&cfg, &load_corpus(), 0, 2);
+}
+
 #[test]
 #[should_panic(expected = "harness error at seed")]
 fn fuzz_range_aborts_on_harness_error() {

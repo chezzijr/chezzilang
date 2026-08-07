@@ -62,6 +62,7 @@ later edit shifts them and nobody re-numbers the whole table (`W7-27`'s was alre
 
 | item | gaps.md | what | why it is still open |
 |---|---|---|---|
+| ~~**W7-38**~~ | `:8155` | **FIXED 2026-08-07 — the adversarial review (prosecute → defend → judge) of the `W7-30`–`W7-37` series found the series' OWN theme, "a real bug must never be reportable as a non-finding", still open in three places the series itself had just written or touched: the arg parser, the abort path, and the CI gate.** (1) `parse_range`'s guard rejected only INVERTED ranges, so `difffuzz --seeds 5..5` printed `done: 0 seeds 5..5, 0 finding(s) []` and exited **0** — a clean pass over zero comparisons, verbatim `W7-34`'s false negative one layer up (its message already claimed to reject "empty/inverted"). (2) `process::exit(2)` fired INSIDE the seed loop, so the abort printed no `done:` line and no histogram — losing the count of seeds that did run on the run where it matters most — and masked a real finding's exit **1** behind exit **2**. (3) `fuzz_range_cfg` printed its histogram with `eprintln!`, which libtest CAPTURES on a passing test, so a 120-seed sweep where all 120 timed out was green and indistinguishable from 120 real comparisons — the hole the histogram was added to close, unclosed exactly where it matters. Plus the mirror-image defect: `classify`'s `chz.code.is_none() => HostPanic` could not tell a SIGSEGV from a **SIGKILL**, so the cgroup OOM-killer under the `MemoryMax=6G` scope this repo's own CLAUDE.md mandates reported an OOM as a real Chezzi crash | Fixed as one commit: `end <= start` in BOTH bins; the abort now `break`s and always prints `done: {ran} of {total} …` + the histogram, with findings winning the exit code; both CI gates assert a hard **zero-comparisons floor** (deliberately not a "too many timeouts" threshold — an uncertain heuristic must decline, `W7-12`); `Capture` gained `signal: Option<i32>` in both oracles, only crash signals (SIGILL/SIGTRAP/SIGABRT/SIGBUS/SIGFPE/SIGSEGV/SIGSYS) stay `HostPanic`/`Crash` and every other signal declines into the fatal-but-not-a-finding `HarnessError`, with both reports NAMING the signal. Also: the hang tests' `locate_chezzi_for_test` no longer falls back to PATH (a 10-day-stale `~/.cargo/bin/chezzi` could have been what went green), and `gen_float`'s exactness proof was replaced by the real reason the float sweep is sound (IEEE-754 determinism). A seventh charge — a hang-verdict flake — was DISMISSED with evidence |
 | ~~**W7-35**~~ | `:7845` | **FIXED 2026-08-07 — `panicfuzz` had the identical `W7-34` bug: `run_one`'s `.spawn().ok()?` and the staging `write_file` failure both collapsed "the child never even started" into the same non-finding `Outcome::Timeout`.** Ported `W7-34`'s exact shape: `run_one` now returns `Result<Capture, RunErr>`, a new `Outcome::HarnessError(String)` is fatal to both callers (`tests/panicfuzz.rs`'s new `fuzz_range_cfg` panics, `src/bin/panicfuzz.rs` exits **2** — distinct from **1** for real findings). See its session-log section for the other-holes audit (timeout-vs-crash was already right; the "nothing counts seeds actually executed" gap it shared with `difftest` was closed by the `W7-34` residual the same day — both binaries now print an outcome histogram). Whole-branch review then REVERSED this fix's one deliberate deviation: `classify` kept `Option<Capture>`, which leaves the very bug this row fixes expressible by a second caller (`classify(run_one(..).ok())`) — it now takes `Capture` like `difftest`'s, making it unrepresentable rather than merely fixed |
 | `min`/`max` → `Option` | `:1690` | `List.min`/`max`/`min_by`/`max_by` fault on empty while `first`/`last`/`pop` return `Option[T]` | Breaking surface change: 23 call sites + docs + examples. Own milestone |
 | `List[Any]` widening | `:1731` | `List[Any] = [1, 3.0]` silently widens the int to `1.0` | Deferred pre-freeze (wave 4) |
@@ -8116,17 +8117,21 @@ for an index.
 - `Features::full()` now has `floats: true`. It was flipped only after the sweep below came back
   green.
 
-**Why turning float arithmetic on is safe, and where the brief's premise was wrong.** `n/8` leaves
-are exact binary fractions, so `+ - *` over them are exactly representable — at `MAX_EXPR_DEPTH`
-the worst case is 8 leaves, `80^8 / 8^8`, numerator under `2^53` — and both engines compute
-IEEE-754 doubles, so the *values* cannot disagree. What can differ is **formatting**, which is the
-point. But the brief's claim that "a mul chain drives magnitudes toward the scientific-notation
+**Why turning float arithmetic on is safe, and where the brief's premise was wrong.** Both engines
+evaluate the same expression tree in the same order on binary64 with correctly-rounded `+ - *`, so
+they compute the **bit-identical** double and the *values* cannot disagree. What can differ is
+**formatting**, which is the point. (This paragraph originally justified that by EXACTNESS — `n/8`
+leaves are exact binary fractions, worst case `80^8 / 8^8` with numerator under `2^53`. That
+argument holds only for an UNSCALED leaf and is **false** across the `2^e` scaling introduced two
+sentences later: `10 * 2^60 + 0.125 * 2^-70` absorbs the addend entirely. The soundness is IEEE-754
+determinism, not exactness — corrected 2026-08-07, `W7-38`.) But the brief's claim that "a mul chain drives magnitudes toward the scientific-notation
 crossover" is **false as stated**: with `n/8` leaves a depth-3 product tops out near `1e8`, and
 Python's crossover is `|x| >= 1e16` or `< 1e-4`. Shipping it that way would have been a second
 round of coverage-that-reads-as-covered. So `float_leaf()` scales `n/8` by `2^e`, `e` drawn from
 `[-70, -20] ∪ {0} ∪ [20, 60]`: a power of two moves only the exponent field, so it introduces **no
-new rounding** and the exactness argument survives intact, while the range now straddles both
-crossovers. That bound — `e` bounded so an 8-leaf product tops out at `~1e152`, short of `inf`/the
+new rounding in the leaf itself**, while the range now straddles both crossovers. (Arithmetic
+ACROSS two differently-scaled leaves does round — see the correction above; that is harmless
+because it is deterministic and identical on both sides.) That bound — `e` bounded so an 8-leaf product tops out at `~1e152`, short of `inf`/the
 subnormal range — holds only for LITERAL leaves: a leaf can also be a float var or a `try_call`
 result, and those compose magnitudes multiplicatively across statements and functions, so `inf`
 (and `NaN` from it) is structurally reachable, as is `-0.0`. Measured, not assumed: 0 `inf`/`NaN`
@@ -8149,3 +8154,135 @@ out) plus three structural probes in the shape of the existing `gen_emits_*` fam
 regression fence that matters: without them a refactor could revert to literal-only floats and
 int-only calls and **every other test in the file would still pass**, which is exactly the failure
 mode this row is about. All three are red against the pre-fix generator.
+
+### W7-38 — the seven-task "never report a real bug as a non-finding" series left the same class in its own arg parser, abort path and CI gate — **FIXED 2026-08-07**
+
+**How it was found:** an **adversarial review** of the whole `W7-30`…`W7-37` branch, run as
+**prosecute → defend → judge** (isolated prosecutors treat the change as guilty; a defender
+refutes weak charges with evidence; the judge spot-checks what survives). Six charges survived and
+are fixed here. A **seventh was DISMISSED with evidence** (below).
+
+**The finding that matters more than any individual bug:** this series spent **seven tasks**
+eliminating "a real bug reported as a non-finding" — `W7-30` (lossy decode → `Match`), `W7-31`
+(a crash allow-listed), `W7-33` (a signal kill unclassified), `W7-34` + residual (a harness that
+never started scored as 0 findings), `W7-35` (the same in the twin oracle), `W7-36` (a hang and a
+both-failed stdout diff thrown away). The review then found **the same class in the arg parser, the
+abort path, and the CI gate the series itself had just added**. Eliminating a bug class from the
+code you are looking at does not eliminate it from the code you are writing while you look.
+
+**1 — an empty seed range is a clean pass over zero comparisons** (HIGH). `parse_range`'s guard
+was `if end < start`, rejecting only INVERTED ranges, while its own message claimed to reject
+"empty/inverted". Measured at `b788ed31`:
+
+```
+$ ./target/release/difffuzz --seeds 5..5
+done: 0 seeds 5..5, 0 finding(s) []          EXIT=0
+```
+
+Zero seeds, zero comparisons, exit 0 — `W7-34`'s false negative exactly, one layer up. Now
+`end <= start` in **both** bins, message matching the check:
+`empty or inverted seed range: 5..5 (need end > start)`, exit **2** (a usage error).
+
+**2 — an OOM SIGKILL was reported as a real Chezzi bug** (HIGH; the mirror image of the series'
+theme, and it fires on this machine). `classify` had `if chz.code.is_none() { return HostPanic }`,
+but `ExitStatus::code()` is `None` for **every** signal, and the signal number was never captured
+anywhere (`grep -rn "ExitStatusExt|\.signal()" src/difftest src/panicfuzz` returned nothing). So
+SIGSEGV (a real bug) and SIGKILL (the cgroup OOM-killer under the `MemoryMax=6G` scope this repo's
+own CLAUDE.md **mandates** for every cargo invocation) were indistinguishable, and the OOM path
+exits 1 claiming Chezzi crashed. CLAUDE.md already states the convention this now aligns with:
+*"exit 137 = OOM, not a test failure."*
+
+Fixed by adding `signal: Option<i32>` to `Capture` in **both** oracles (`ExitStatusExt::signal()`;
+unconditional `std::os::unix` import, matching `src/native/fs.rs`, which the crate already relies
+on). The routing runs the **safe way round**: only signals a crash in the child itself raises —
+SIGILL/SIGTRAP/SIGABRT/SIGBUS/SIGFPE/SIGSEGV/SIGSYS — stay `HostPanic` (difftest) / `Crash`
+(panicfuzz); **every other signal, SIGKILL and SIGTERM included, declines** into
+`HarnessError`. That is the right home and the right default: `HarnessError` is
+`is_finding() == false` (nothing about the program is implicated — the process was killed from
+outside) **but FATAL to every caller**, so the run aborts loudly saying *"this seed proved
+nothing"* instead of either reporting a fake bug or silently scoring a clean pass. An unrecognized
+signal declining rather than being asserted as a crash is this project's standing rule (`W7-12`,
+the `parked-is-not-stuck` family): a verdict that cannot be certain must decline. Both `describe`s
+now NAME the signal (`--- chezzi killed by SIGSEGV (signal 11) ---`) — "killed by a SIGNAL" is
+unactionable when SIGSEGV, SIGABRT and SIGFPE want three different first moves, and an
+unactionable report is the defect `W7-30` already had to fix once in that same function.
+
+**3 — the abort path lost the histogram, and its exit code hid real findings** (MEDIUM).
+`process::exit(2)` fired INSIDE the seed loop in both bins. Measured before:
+
+```
+$ env -i PATH=/usr/bin:/bin <isolated difffuzz, no adjacent chezzi> --seeds 0..50
+harness error at seed 0: could not run "chezzi": No such file or directory (os error 2)
+EXIT=2                      # no done: line, no histogram — the legibility the previous commit added
+```
+
+after:
+
+```
+harness error at seed 0: could not run "chezzi": No such file or directory (os error 2)
+done: 1 of 50 seeds 0..50, 0 finding(s) [HarnessError 1]
+ABORTED: the harness broke (see above) — 49 seed(s) never ran
+EXIT=2
+```
+
+The loop now `break`s; the `done:` line and histogram always print, and the line says `{ran} of
+{total}` so the seeds-actually-executed count is never lost. **Exit-code contract, now documented
+in both bins' usage headers:** `0` clean, `1` findings, `2` the harness broke — and **findings
+win**: a range where seed 3 diverged and seed 10 hit ENOENT exits `1`, not `2`, with a line saying
+both happened. `tests/difftest.rs::fuzz_range_cfg` already got this right (it folds earlier
+findings into the abort panic message); the binaries now match it.
+
+**4 — the CI gate's histogram is swallowed on a green run** (MEDIUM). `fuzz_range_cfg` printed the
+histogram with `eprintln!` before the `assert!`, and **libtest captures stderr on a PASSING test**
+unless `--nocapture` — so a 120-seed sweep where all 120 timed out was green and byte-identical to
+one that really compared 120 programs. The in-code comment acknowledged the capture; an
+acknowledgment is not a guard. Both gates now assert a **hard zero-comparison floor**: outcomes
+that represent a real comparison (`Match`/`AllowListed`/`Divergence`/`HostPanic`/`BothError`;
+`Clean`/`HostPanic`/`Crash` for panicfuzz) must be `> 0`, since `Timeout` and `HarnessError` are
+exactly the two that mean *nothing was compared*. Deliberately **not** a "too many timeouts"
+threshold — that is a heuristic, and an uncertain heuristic must decline rather than guess
+(`W7-12`). Demonstrated red by forcing a 1 ms timeout through `fuzz_range_cfg`:
+`vacuous sweep 0..2: compared 0 of 2 seeds — nothing was ever run against CPython, so a green
+result here proves NOTHING [Timeout 2]`. This also closes the empty-range hole in the gates'
+own sweep entry point (`fuzz_range(feat, 5, 5)` now fails instead of passing over nothing) — the
+same defect as charge 1, in the third place it lived.
+
+**5 — a test helper's PATH fallback can green-light a stale binary** (MEDIUM).
+`locate_chezzi_for_test` fell back to bare `PathBuf::from("chezzi")` when the sibling binary was
+absent, and a real `chezzi` dated **Jul 28** — predating all of this work — sits in
+`~/.cargo/bin`. A full `cargo test` builds `target/debug/chezzi`, so the fallback is dormant
+there, but nothing forces that build under `cargo test --bin difffuzz`, and no assertion pinned
+which binary ran: the hang tests could have gone green against a 10-day-stale binary. It now
+**panics** telling the reader to build first. This repo has a documented history of exactly this
+trap (CLAUDE.md's `CARGO_TARGET_DIR`/worktree warning: *"the binary you verify SILENTLY LACKS your
+change — a green two-engine run proving nothing"*). The `difffuzz`/`panicfuzz` **binaries'**
+`locate_chezzi` fallback is deliberately left alone: since `W7-34` a bad path is a loud, fatal
+`HarnessError` naming the missing binary, so there the fallback cannot produce a silent pass.
+
+**6 — a doc comment's exactness proof ignored the scaling it sits next to** (LOW, doc-only).
+`gen_float` claimed its `+ - *` results "stay exactly representable (`80^8/8^8 < 2^53`)". That is
+written as if `float_leaf`'s own `2^e` scaling did not exist: with `e ∈ [-70,-20] ∪ [20,60]`,
+`10 * 2^60 + 0.125 * 2^-70` absorbs the addend entirely. `float_leaf`'s "the exactness argument in
+`gen_float` is untouched" is true per-leaf and false across differently-scaled leaves. No behavior
+defect — both engines compute the same IEEE-754 double, so they agree **by determinism, not by
+exactness** — but a future edit leaning on the wrong justification is unguarded. Both comments now
+state the real reason the sweep is sound: two binary64 engines evaluating the same tree in the same
+order with correctly-rounded operations produce bit-identical results, so only *formatting* can
+differ. The same claim is corrected in the `W7-37` write-up above.
+
+**The seventh charge, DISMISSED with evidence.** A prosecutor argued that
+`a_chezzi_hang_python_survives_is_a_finding`'s wall-clock LOWER bound (`elapsed >= timeout * 3`,
+added by `W7-36`) is flaky on a slow debug binary. Measured: the assertion needs a **5.6×**
+slowdown to fail, while the code it replaced — an upper bound — failed at **1.9×**. The change
+strictly *reduces* that failure mode, and a lower bound is the safe direction for a wall-clock
+assert (load can only make a run slower). No action.
+
+**Tests.** Six new, all failing-then-green against the pre-fix code: `a_sigkill_is_not_a_chezzi_bug`
++ `a_sigsegv_is_still_a_host_panic` + `a_signal_kill_report_names_the_signal` in
+`src/difftest/run.rs`, and the three mirrors in `src/panicfuzz/run.rs`
+(`a_sigkill_is_not_a_chezzi_bug`, `a_sigsegv_is_still_a_crash_finding`,
+`a_crash_report_names_the_signal`); plus `fuzz_range_refuses_to_pass_over_zero_comparisons`
+(`tests/difftest.rs`) and `fuzz_range_refuses_to_pass_over_zero_checks` (`tests/panicfuzz.rs`),
+which force an all-`Timeout` sweep with a 1 ms timeout and assert the gate REFUSES to pass. The
+SIGSEGV-stays-a-finding halves are the over-fire fence: without them, demoting every signal would
+leave the SIGKILL tests green.

@@ -889,13 +889,20 @@ impl Gen {
         }
     }
 
-    /// Float expressions, same shape as `gen_int`. Leaves are `n/8` — exact binary fractions —
-    /// so `+ - *` over them stay exactly representable at every magnitude reachable here (at
-    /// `MAX_EXPR_DEPTH` the worst case is 8 leaves: `80^8 / 8^8`, numerator < 2^53). Both engines
-    /// then compute the identical IEEE-754 double and the only thing that can differ is
-    /// *formatting* — which is exactly the seam this is here to exercise, and exactly the seam
-    /// that hid `W7-32` (shortest-repr ties rounding away from zero) from this oracle while
-    /// `gen_float` could only emit a literal both emitters rendered from the same `float_lit`.
+    /// Float expressions, same shape as `gen_int`. **Why the sweep is sound: IEEE-754
+    /// determinism, NOT exactness.** Both engines evaluate the same expression tree in the same
+    /// order on binary64, and IEEE-754 `+ - *` are each correctly rounded, so the two sides
+    /// compute the bit-identical double whether or not any intermediate is exact. The only thing
+    /// that can differ is *formatting* — which is exactly the seam this is here to exercise, and
+    /// exactly the seam that hid `W7-32` (shortest-repr ties rounding away from zero) from this
+    /// oracle while `gen_float` could only emit a literal both emitters rendered from the same
+    /// `float_lit`.
+    ///
+    /// This comment used to claim instead that the results "stay exactly representable
+    /// (`80^8 / 8^8 < 2^53`)". That argument holds only for an UNSCALED `n/8` leaf and is false
+    /// across the `2^e` scaling `float_leaf` applies: `10 * 2^60 + 0.125 * 2^-70` absorbs the
+    /// addend entirely. Rounding here is harmless — it is deterministic and identical on both
+    /// sides — but nothing may lean on exactness (W7-38).
     ///
     /// Float `Div` is deliberately left out: a zero divisor diverges (CPython raises
     /// `ZeroDivisionError`) and inexact quotients widen the formatting surface all at once.
@@ -947,9 +954,12 @@ impl Gen {
     /// `n/8` alone tops out around `1e8` at `MAX_EXPR_DEPTH` — nowhere near either
     /// scientific-notation crossover (`|x| >= 1e16` / `< 1e-4`), which is precisely where
     /// shortest-repr formatting is most delicate and where `W7-32` lived. Scaling by `2^e`
-    /// reaches both sides while introducing NO new rounding: a power of two only moves the
-    /// exponent field, so the mantissa (and therefore the exactness argument in `gen_float`)
-    /// is untouched. `e` stays inside `[-70, 60]`, so for an 8-leaf product of LITERAL leaves
+    /// reaches both sides while introducing no rounding IN THE LEAF ITSELF: a power of two only
+    /// moves the exponent field, so this leaf's mantissa is untouched. That is per-leaf only —
+    /// an `Add` ACROSS two differently-scaled leaves does round (`10 * 2^60 + 0.125 * 2^-70`
+    /// absorbs the addend), which is why `gen_float`'s soundness argument is IEEE-754 determinism
+    /// across two binary64 engines and not exactness (W7-38).
+    /// `e` stays inside `[-70, 60]`, so for an 8-leaf product of LITERAL leaves
     /// alone the worst case is `~1e152` — short of `inf` and the subnormal range. That bound is
     /// leaf-local, not general: a leaf can also be a float var (itself possibly holding a prior
     /// multi-leaf product) or a `try_call` result (a float callee's return is itself an up-to-
