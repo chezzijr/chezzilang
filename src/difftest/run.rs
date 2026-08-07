@@ -82,6 +82,13 @@ pub enum Outcome {
     /// Both engines errored (no host panic). Usually the generator emitted something outside
     /// the shared subset — not a Chezzi bug. Non-finding.
     BothError,
+    /// The oracle itself could not run this seed at all — a child failed to spawn (e.g. the
+    /// `chezzi` binary is missing: `ENOENT`), or a temp file could not be staged. `is_finding()`
+    /// stays false — this is not a Chezzi bug — but a caller must still treat it as FATAL, not
+    /// silently skip it: a differential oracle that never started a child has proven nothing
+    /// about either engine, and reporting that as "0 findings" is a false negative dressed up as
+    /// a clean pass (see `docs/bug-discovery.md` / `docs/gaps.md` for the concrete trigger).
+    HarnessError(String),
 }
 
 impl Outcome {
@@ -125,25 +132,41 @@ pub fn run_sources(cfg: &Config, chz_src: &str, py_src: &str, prog: Option<&Prog
     let pid = std::process::id();
     let chz_path = dir.join(format!("p_{pid}_{n}.chz"));
     let py_path = dir.join(format!("p_{pid}_{n}.py"));
-    if write_file(&chz_path, chz_src).is_err() || write_file(&py_path, py_src).is_err() {
-        return Outcome::BothError; // cannot stage temp files — non-finding
+    if let Err(e) = write_file(&chz_path, chz_src) {
+        // Same class as `run_one`'s `CouldNotRun`: the harness is broken, not a divergence.
+        return Outcome::HarnessError(format!("could not write {}: {e}", chz_path.display()));
+    }
+    if let Err(e) = write_file(&py_path, py_src) {
+        // The chz write above already succeeded — clean it up like every other error arm below,
+        // or it leaks into the temp dir on every occurrence (e.g. a transient ENOSPC on the
+        // second write during a long fuzz run).
+        cleanup(&chz_path, &py_path);
+        return Outcome::HarnessError(format!("could not write {}: {e}", py_path.display()));
     }
 
     let chz = match run_one(
         Command::new(&cfg.chezzi_bin).arg("run").arg(&chz_path),
         cfg.timeout,
     ) {
-        Some(c) => c,
-        None => {
+        Ok(c) => c,
+        Err(RunErr::TimedOut) => {
             cleanup(&chz_path, &py_path);
             return Outcome::Timeout { which: "chezzi" };
         }
+        Err(RunErr::CouldNotRun(msg)) => {
+            cleanup(&chz_path, &py_path);
+            return Outcome::HarnessError(msg);
+        }
     };
     let py = match run_one(Command::new(&cfg.python).arg(&py_path), cfg.timeout) {
-        Some(c) => c,
-        None => {
+        Ok(c) => c,
+        Err(RunErr::TimedOut) => {
             cleanup(&chz_path, &py_path);
             return Outcome::Timeout { which: "python" };
+        }
+        Err(RunErr::CouldNotRun(msg)) => {
+            cleanup(&chz_path, &py_path);
+            return Outcome::HarnessError(msg);
         }
     };
     cleanup(&chz_path, &py_path);
@@ -250,23 +273,43 @@ fn cleanup(a: &std::path::Path, b: &std::path::Path) {
     let _ = std::fs::remove_file(b);
 }
 
-/// Run a configured command with a wall-clock timeout. Returns `None` on timeout (after
-/// killing the child).
+/// Why `run_one` failed. `TimedOut` is an ordinary, expected outcome (a generated program can
+/// loop forever) — `run_sources` maps it to `Outcome::Timeout`. `CouldNotRun` means the harness
+/// itself is broken (the child never even started, or we lost track of it) — `run_sources` maps
+/// it to `Outcome::HarnessError`, which callers must treat as fatal, not score as "no finding".
+#[derive(Debug)]
+enum RunErr {
+    TimedOut,
+    /// Carries the underlying `io::Error` text plus the program name, so the message names the
+    /// actual problem, e.g. `could not run "chezzi": No such file or directory (os error 2)`.
+    CouldNotRun(String),
+}
+
+/// Run a configured command with a wall-clock timeout. `Err(RunErr::TimedOut)` on timeout
+/// (after killing the child); `Err(RunErr::CouldNotRun(_))` if the child could never be
+/// observed at all (spawn failed, a stdio pipe wasn't there to take, or `try_wait` errored).
 ///
 /// stdout/stderr are drained on dedicated threads so a child that fills an OS pipe buffer
 /// before exiting cannot deadlock the poll loop.
-fn run_one(cmd: &mut Command, timeout: Duration) -> Option<Capture> {
+fn run_one(cmd: &mut Command, timeout: Duration) -> Result<Capture, RunErr> {
     use std::io::Read;
 
+    let program = cmd.get_program().to_string_lossy().into_owned();
     let mut child = cmd
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .ok()?;
+        .map_err(|e| RunErr::CouldNotRun(format!("could not run {program:?}: {e}")))?;
 
-    let mut out_pipe = child.stdout.take()?;
-    let mut err_pipe = child.stderr.take()?;
+    let mut out_pipe = child
+        .stdout
+        .take()
+        .ok_or_else(|| RunErr::CouldNotRun(format!("{program:?}: stdout pipe was not present")))?;
+    let mut err_pipe = child
+        .stderr
+        .take()
+        .ok_or_else(|| RunErr::CouldNotRun(format!("{program:?}: stderr pipe was not present")))?;
     let out_h = std::thread::spawn(move || {
         let mut buf = Vec::new();
         let _ = out_pipe.read_to_end(&mut buf);
@@ -289,25 +332,31 @@ fn run_one(cmd: &mut Command, timeout: Duration) -> Option<Capture> {
                     // Reader threads unblock once the pipes close on kill.
                     let _ = out_h.join();
                     let _ = err_h.join();
-                    return None;
+                    return Err(RunErr::TimedOut);
                 }
                 std::thread::sleep(Duration::from_millis(2));
             }
-            Err(_) => {
+            Err(e) => {
                 // try_wait failed — reap the child and join the readers so we never leak a
                 // zombie process, its pipe fds, or the two reader threads.
                 let _ = child.kill();
                 let _ = child.wait();
                 let _ = out_h.join();
                 let _ = err_h.join();
-                return None;
+                return Err(RunErr::CouldNotRun(format!(
+                    "try_wait failed for {program:?}: {e}"
+                )));
             }
         }
     };
 
-    let stdout = out_h.join().ok()?;
-    let stderr = err_h.join().ok()?;
-    Some(Capture {
+    let stdout = out_h
+        .join()
+        .map_err(|_| RunErr::CouldNotRun(format!("{program:?}: stdout reader thread panicked")))?;
+    let stderr = err_h
+        .join()
+        .map_err(|_| RunErr::CouldNotRun(format!("{program:?}: stderr reader thread panicked")))?;
+    Ok(Capture {
         stdout,
         stderr,
         code: status.code(),
@@ -512,6 +561,53 @@ mod tests {
         assert!(
             matches!(classify(chz, py, None), Outcome::BothError),
             "two ordinary faults with no panic marker and no signal kill must stay BothError"
+        );
+    }
+
+    // --- F1: a harness that cannot even START a child must abort, not score 0 findings -------
+
+    /// F1's concrete trigger: `difffuzz`'s `locate_chezzi()` falls back to the bare name
+    /// `"chezzi"` when no sibling binary exists, so a missing build spawns `ENOENT` on every
+    /// seed. Today that reaches `run_one`'s `.spawn().ok()?` and comes back as
+    /// `Outcome::Timeout { which: "chezzi" }` — a non-finding — which is how a fuzz run over
+    /// ZERO executed programs prints "0 finding(s), exit 0". This spawns for real (a bad path
+    /// fails immediately, no timeout wait), so it belongs with the other subprocess tests.
+    #[test]
+    fn a_missing_chezzi_binary_is_a_harness_error_not_a_timeout() {
+        let cfg = Config::new("/nonexistent/chezzi-does-not-exist");
+        let outcome = run_sources(&cfg, "print(1)\n", "print(1)\n", None);
+        match outcome {
+            Outcome::HarnessError(msg) => assert!(
+                msg.contains("chezzi-does-not-exist") && msg.contains("No such file or directory"),
+                "the message must name the actual problem, not just \"failed\": {msg}"
+            ),
+            other => panic!(
+                "expected HarnessError naming the missing binary, got {other:?} \
+                 (today this wrongly comes back as Timeout {{ which: \"chezzi\" }})"
+            ),
+        }
+    }
+
+    /// So nobody later "fixes" the abort in `fuzz_range`/`difffuzz` by making this a finding —
+    /// it is the harness that is broken, not Chezzi.
+    #[test]
+    fn a_harness_error_is_not_a_finding() {
+        assert!(!Outcome::HarnessError("boom".into()).is_finding());
+    }
+
+    /// A REAL timeout must stay `Timeout`, not collapse into `HarnessError` — otherwise the two
+    /// tests above would still pass with the distinction deleted. Exercised at the `run_one`
+    /// level with `sleep 5` under a 50ms timeout (per the brief: faster and non-flaky vs.
+    /// spawning the real `chezzi` binary on an infinite-loop source, and this is what `run_one`
+    /// itself is responsible for).
+    #[test]
+    fn a_real_timeout_is_still_a_timeout_not_a_harness_error() {
+        let mut cmd = Command::new("sleep");
+        cmd.arg("5");
+        let result = run_one(&mut cmd, Duration::from_millis(50));
+        assert!(
+            matches!(result, Err(RunErr::TimedOut)),
+            "expected TimedOut, got {result:?}"
         );
     }
 }

@@ -8,11 +8,18 @@
 //!
 //! The `chezzi` binary is located as a sibling of this executable (so build both first, e.g.
 //! `cargo build --release`).
+//!
+//! Exit codes: `0` = clean (no findings), `1` = findings were found (real divergences), `2` =
+//! the harness itself is broken (bad args, or a seed's `Outcome::HarnessError` — e.g. the
+//! `chezzi` binary could not be spawned) and NO seed after the failure was executed. `2` is
+//! deliberately distinct from `1` so a caller can tell "the oracle broke" from "the oracle
+//! worked and found bugs" — printing "N seeds, 0 finding(s)" with exit 0 over a harness that
+//! never ran a single program would be a false negative dressed up as a clean pass.
 
 #[path = "../difftest/mod.rs"]
 mod difftest;
 
-use difftest::{Features, run::Config};
+use difftest::{Features, Outcome, run::Config};
 use std::time::Duration;
 
 fn main() {
@@ -84,6 +91,13 @@ fn main() {
     let total = end - start;
     for seed in start..end {
         let (outcome, chz, py) = difftest::run_seed(&cfg, seed, feat);
+        // A harness error means the oracle could not even run this seed (e.g. `chezzi` is not
+        // on PATH) — fatal, not "0 findings". Abort loud instead of grinding through the rest
+        // of the range reporting nothing wrong.
+        if let Outcome::HarnessError(msg) = &outcome {
+            eprintln!("harness error at seed {seed}: {msg}");
+            std::process::exit(2);
+        }
         if outcome.is_finding() {
             findings += 1;
             println!("{}", difftest::describe(seed, &outcome, &chz, &py));

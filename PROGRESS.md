@@ -2,6 +2,8 @@
 
 Single source of truth for "what am I doing next." Update after every work session.
 
+> **✅ W7-34 FIXED 2026-08-07 — a child the CPython differential oracle could not even START (e.g. `chezzi` missing from `PATH`) used to print "N seeds, 0 finding(s), exit 0"; `run_one` now returns `Result<Capture, RunErr>`, a new `Outcome::HarnessError(String)` is fatal to both callers (`fuzz_range` panics, `difffuzz` exits 2 — distinct from 1 for real findings), and the staged-temp-file failure moved off `BothError` onto it too.** `docs/gaps.md` **§W7-34**.
+
 > **✅ W7-33 FIXED 2026-08-07 — the CPython differential's `classify` now treats a signal-killed chezzi (`code: None`, e.g. a Rust stack overflow) and a worker-thread panic on an exit-0 both-match arm as `HostPanic`, not a buried non-finding/`Match`.** Two holes, same shape as `W7-31`: the highest-value finding this oracle can produce was invisible on the arms that never checked for it — the twin `panicfuzz::classify` already had the `code.is_none()` rule. `docs/gaps.md` **§W7-33**.
 
 > **✅ W7-32 FIXED 2026-08-07 — a float's shortest `repr` broke an EXACT tie away from zero; CPython

@@ -74,6 +74,7 @@ pub fn describe(seed: u64, outcome: &Outcome, chz_src: &str, py_src: &str) -> St
         }
         Outcome::Timeout { which } => s.push_str(&format!("timed out: {which}\n")),
         Outcome::AllowListed(reason) => s.push_str(&format!("allow-listed: {reason}\n")),
+        Outcome::HarnessError(msg) => s.push_str(&format!("harness error: {msg}\n")),
         _ => {}
     }
     s.push_str(&format!("--- chezzi source ---\n{chz_src}\n"));
@@ -98,5 +99,6 @@ fn kind_label(o: &Outcome) -> &'static str {
         Outcome::HostPanic { .. } => "HostPanic",
         Outcome::Timeout { .. } => "Timeout",
         Outcome::BothError => "BothError",
+        Outcome::HarnessError(_) => "HarnessError",
     }
 }

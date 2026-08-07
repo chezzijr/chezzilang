@@ -507,6 +507,21 @@ fn fuzz_range(feat: Features, start: u64, end: u64) {
     let mut findings = Vec::new();
     for seed in start..end {
         let (outcome, chz, py) = difftest::run_seed(&cfg, seed, feat);
+        // A harness error means the oracle never ran this seed at all — not a divergence, and
+        // not something to accumulate: 3000 identical ENOENT messages would help nobody, so
+        // fail on the first one instead of burying it in a findings list it isn't a member of.
+        if let Outcome::HarnessError(msg) = &outcome {
+            // Don't let the abort silently swallow real divergences already confirmed earlier
+            // in this same range — the harness broke, but those findings are still real.
+            if findings.is_empty() {
+                panic!("harness error at seed {seed}: {msg}");
+            }
+            panic!(
+                "harness error at seed {seed}: {msg}\n\n{} earlier finding(s) already confirmed before the harness broke:\n{}",
+                findings.len(),
+                findings.join("\n")
+            );
+        }
         if outcome.is_finding() {
             findings.push(difftest::describe(seed, &outcome, &chz, &py));
         }

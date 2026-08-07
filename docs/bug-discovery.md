@@ -315,6 +315,18 @@ both **unconditionally on every arm**, including the both-exit-0 stdout-compare 
 neither can be buried under a `BothError` non-finding. Same rule the twin panic-fuzz oracle uses
 (`panicfuzz::classify`, above) — see `gaps.md` **W7-33**.
 
+**A harness that never ran is a fatal error, not "0 findings."** `run_one` distinguishes a real
+timeout (`RunErr::TimedOut`) from a child the harness could not even observe — spawn failed, a
+stdio pipe wasn't there, `try_wait` errored (`RunErr::CouldNotRun(String)`, carrying the program
+name and the real `io::Error` text). `run_sources` routes `CouldNotRun`, and a temp-file staging
+failure, to `Outcome::HarnessError(String)` — `is_finding()` is `false` (it isn't a Chezzi bug)
+but both callers treat it as **fatal**: `tests/difftest.rs::fuzz_range` `panic!`s on the first
+one, and `difffuzz` prints it to stderr and exits **2**. Exit-code contract: `0` = clean (no
+findings), `1` = findings (real divergences), `2` = the harness itself is broken and the run did
+not finish (bad args, or a `HarnessError` — e.g. `chezzi` not on `PATH`). See `gaps.md` **W7-34**
+for the measured before/after (`chezzi` missing → `done: N seeds, 0 finding(s)`, exit 0, before
+the fix).
+
 **Widened construct coverage** (granular `Features` flags, all on in `full()`):
 - **String methods** (`string_methods`): the eight ASCII-identical methods `upper`/`lower`/`replace`/
   `split`/`join`/`starts_with`/`ends_with`/`contains`. The emitters map names per language
