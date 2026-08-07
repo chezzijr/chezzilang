@@ -28,9 +28,10 @@ pub struct Capture {
     pub stdout: Vec<u8>,
     pub stderr: Vec<u8>,
     // `None` means the child was killed by a SIGNAL (SIGSEGV / SIGABRT / a Rust stack overflow).
-    // Never "or timeout": a timeout returns `None` from `run_one` *before* any `Capture` is
-    // constructed (`run_sources` returns `Outcome::Timeout` right there) — so a live `Capture`
-    // reaching `classify` can only have `code: None` from a signal kill.
+    // Never "or timeout": `run_one` returns `Result<Capture, RunErr>`, and a timeout is
+    // `Err(RunErr::TimedOut)` — returned *before* any `Capture` is constructed (`run_sources`
+    // maps it straight to `Outcome::Timeout` right there) — so a live `Capture` reaching
+    // `classify` can only have `code: None` from a signal kill.
     pub code: Option<i32>,
 }
 
@@ -133,7 +134,11 @@ pub fn run_sources(cfg: &Config, chz_src: &str, py_src: &str, prog: Option<&Prog
     let chz_path = dir.join(format!("p_{pid}_{n}.chz"));
     let py_path = dir.join(format!("p_{pid}_{n}.py"));
     if let Err(e) = write_file(&chz_path, chz_src) {
-        // Same class as `run_one`'s `CouldNotRun`: the harness is broken, not a divergence.
+        // `File::create` can succeed and the later `write_all` still fail (transient ENOSPC),
+        // leaving a stub `.chz` on disk — `cleanup` removes it (a no-op on the not-yet-created
+        // `py_path`). Same class as `run_one`'s `CouldNotRun`: the harness is broken, not a
+        // divergence, and every exit from this function must leave the staging dir clean.
+        cleanup(&chz_path, &py_path);
         return Outcome::HarnessError(format!("could not write {}: {e}", chz_path.display()));
     }
     if let Err(e) = write_file(&py_path, py_src) {

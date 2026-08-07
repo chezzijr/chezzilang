@@ -60,6 +60,7 @@ chronological log.
 
 | item | gaps.md | what | why it is still open |
 |---|---|---|---|
+| **W7-35** | `:7797` | `panicfuzz`'s subprocess harness has the identical bug `difftest` just fixed as `W7-34`: `run_one`'s `.spawn().ok()?` (`src/panicfuzz/run.rs:134`) and the staging `write_file` failure both collapse "the child never even started" into the same `None`/non-finding as an ordinary timeout, so `classify` reports `Outcome::Timeout` — a crash-detector sweep against a `chezzi_bin` that cannot spawn reports a clean pass instead of aborting | Filed, not fixed — out of scope for the `W7-34` fix pass per its own brief. `src/panicfuzz/` is a hand-maintained sibling of `src/difftest/` (deliberate copy, not a shared module — see its own header), so the `Result<Capture, RunErr>` + `Outcome::HarnessError` + caller-aborts fix needs its own pass, mirroring `W7-34`'s shape rather than reusing its code |
 | `min`/`max` → `Option` | `:1690` | `List.min`/`max`/`min_by`/`max_by` fault on empty while `first`/`last`/`pop` return `Option[T]` | Breaking surface change: 23 call sites + docs + examples. Own milestone |
 | `List[Any]` widening | `:1731` | `List[Any] = [1, 3.0]` silently widens the int to `1.0` | Deferred pre-freeze (wave 4) |
 | **N10** | `:3456` | A `wait:` timer arm makes `--serial` inline-sleep instead of yielding to a runnable sibling (serial ≠ M:N) | Deliberate pre-freeze known-limit; fix is folded into the post-freeze serial-engine removal |
@@ -7740,7 +7741,8 @@ done: 50 seeds, 0 finding(s) [(0, 50)]     exit code 0
 ```
 
 **A green fuzz run over zero executed programs.** `difffuzz`'s `locate_chezzi()` falls back to the
-bare name `"chezzi"` when no sibling binary exists next to the fuzzer (`src/bin/difffuzz.rs:119`),
+bare name `"chezzi"` when no sibling binary exists next to the fuzzer (`src/bin/difffuzz.rs:141`,
+inside `locate_chezzi` at `:133-142`),
 so every seed's `Command::new("chezzi").spawn()` failed with `ENOENT`. `run_one` (`src/difftest/
 run.rs`) collapsed FOUR distinct failure modes into a single `Option<Capture>::None`: the child
 could not spawn (`.spawn().ok()?`), a stdio pipe wasn't there to `take()`, `try_wait()` itself
@@ -7792,3 +7794,32 @@ $ env PATH=/usr/bin:/bin ./target/release/difffuzz --seeds 0..50
 harness error at seed 0: could not run "chezzi": No such file or directory (os error 2)
 exit=2
 ```
+
+### W7-35 — `panicfuzz` has the identical F1 bug `difftest` just fixed as `W7-34` — OPEN, filed not fixed
+
+**Found by:** the adversarial review of the `W7-34` fix, per this project's own established pattern of
+auditing the twin oracle whenever one of the pair gets a fix (`W7-33` is the precedent: `panicfuzz`
+was the one with the RIGHT rule there, and `difftest` had to catch up).
+
+`src/panicfuzz/run.rs` is a deliberate copy of `src/difftest/run.rs`'s subprocess machinery (its own
+header says so: "This is a deliberate copy, not an import"), and it still has the bug `W7-34` fixed on
+the `difftest` side. `run_one`'s `.spawn().ok()?` (`src/panicfuzz/run.rs:134`) returns `None` on a
+child that could not even start (missing `chezzi_bin`, bad path, `ENOENT`) — the exact same case as an
+ordinary wall-clock timeout, both of which are `None`. `run_input` (`:65-82`) passes that straight to
+`classify` (`:90`), which maps `None` to `Outcome::Timeout` unconditionally — and `Outcome::is_finding`
+is `false` for `Timeout`. So a `panicfuzz` run against a `chezzi` binary that cannot be spawned reports
+every input as a clean, boring timeout instead of aborting — the crash-detector's own "did the
+front-end crash" question was never asked for a single input, and nothing distinguishes that from a
+sweep that genuinely found nothing.
+
+**Mechanism, concretely:** same shape as `W7-34`'s repro — point `Config::chezzi_bin` at a path that
+does not exist (or run with an unwritable `TMPDIR`, which hits the `write_file` staging arm at
+`run_input`'s `:71-73`, itself mapped to `Outcome::Timeout` too) and every input in the sweep comes
+back `Timeout`, indistinguishable from "the front-end is rock solid."
+
+**Not implemented here** — out of scope for the `W7-34` fix pass per its own brief. `difftest` fixed
+this with `run_one: Result<Capture, RunErr>` + `Outcome::HarnessError(String)` + the two callers
+(`fuzz_range`, `difffuzz::main`) aborting instead of scoring it. The same shape applies to
+`panicfuzz::run_one` / `Outcome` / `run_input`'s staging arm, and to `panicfuzz`'s own caller(s) (the
+CLI fuzzer binary and any `#[test]` sweep) — but `src/panicfuzz/` is a hand-maintained sibling of
+`src/difftest/`, not a shared module, so the fix needs its own pass rather than a shared helper.

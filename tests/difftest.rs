@@ -503,10 +503,15 @@ fn p0_string_methods() {
 // ---------------------------------------------------------------------------
 
 fn fuzz_range(feat: Features, start: u64, end: u64) {
-    let cfg = config();
+    fuzz_range_cfg(&config(), feat, start, end);
+}
+
+/// `Config`-parametrized so a test can point it at a broken harness (e.g. a `chezzi_bin` that
+/// does not exist) and pin the abort behavior below, without spawning the real 20s-timeout `chezzi`.
+fn fuzz_range_cfg(cfg: &Config, feat: Features, start: u64, end: u64) {
     let mut findings = Vec::new();
     for seed in start..end {
-        let (outcome, chz, py) = difftest::run_seed(&cfg, seed, feat);
+        let (outcome, chz, py) = difftest::run_seed(cfg, seed, feat);
         // A harness error means the oracle never ran this seed at all — not a divergence, and
         // not something to accumulate: 3000 identical ENOENT messages would help nobody, so
         // fail on the first one instead of burying it in a findings list it isn't a member of.
@@ -531,6 +536,19 @@ fn fuzz_range(feat: Features, start: u64, end: u64) {
         "differential divergences found:\n{}",
         findings.join("\n")
     );
+}
+
+/// This is `fuzz_range`'s own consumer of `Outcome::HarnessError` — the CI gate's abort path —
+/// pinned directly: a `chezzi_bin` that does not exist must panic with a message naming the
+/// problem, not silently score the range as "0 findings". `#[should_panic]` is appropriate
+/// because panicking IS `fuzz_range_cfg`'s contract for this input; `expected` is specific
+/// enough ("harness error at seed") that a panic from some other cause (e.g. an actual
+/// divergence, which panics via `assert!` with a different message) would not satisfy it.
+#[test]
+#[should_panic(expected = "harness error at seed")]
+fn fuzz_range_aborts_on_harness_error() {
+    let cfg = Config::new("/nonexistent/chezzi-does-not-exist");
+    fuzz_range_cfg(&cfg, Features::straight_line(), 0, 5);
 }
 
 #[test]
