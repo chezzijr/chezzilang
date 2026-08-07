@@ -167,15 +167,17 @@ fn classify(chz: Capture, py: Capture, prog: Option<&Program>) -> Outcome {
     // `run_one` returns `None` on timeout and `run_sources` returns `Outcome::Timeout` before a
     // `Capture` is ever constructed, so a live `Capture` with `code: None` cannot mean "timed
     // out" — see the `Capture::code` doc. Same rule as the twin oracle: `panicfuzz::classify`
-    // (`src/panicfuzz/run.rs:96-101`) reports this exact condition as `Outcome::Crash`.
+    // (`src/panicfuzz/run.rs:98-100`) reports this exact condition as `Outcome::Crash`.
     if chz.code.is_none() {
         return Outcome::HostPanic { chz };
     }
     // Deliberately NOT mirrored on the Python side: a "Python host panic" isn't a thing CPython
     // has, and `py.code.is_none()` (CPython killed by a signal) is real but is not a Chezzi bug
-    // to promote to a finding — it already makes `py_ok` false below and falls through to the
-    // ordinary PythonFault/BothError arms, which is the right non-finding shape for "the
-    // reference interpreter crashed on our generated input" rather than a HostPanic.
+    // to promote to a HostPanic — it already makes `py_ok` false below and falls through to the
+    // ordinary `PythonFault` / `BothError` arms. Note `PythonFault` IS a finding (`is_finding()`
+    // is true for every `Divergence`) — deliberately so, per its own doc: a CPython crash on our
+    // rendering usually means the EMITTER is wrong and is worth surfacing. What this skips is
+    // only the HostPanic promotion, which is reserved for a bug in *our* runtime.
 
     let chz_ok = chz.code == Some(0);
     let py_ok = py.code == Some(0);
