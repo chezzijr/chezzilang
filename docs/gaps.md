@@ -7995,7 +7995,12 @@ for an index.
   into a fault, and the one hazard it shares — an in-loop accumulator compounding geometrically —
   is closed the same way `gen_int` closes it: inside an in-loop `+=`/`-=` RHS, `gen_float` reads no
   float var at all (loop counters, the only loop-stable vars, are never floats). Its remaining
-  leaves — literals, calls, index reads — are all loop-stable.
+  leaves — literals, calls, index reads — are all loop-stable, with one caveat: a `List[Float]`
+  declared *inside* the loop body snapshots the accumulator each iteration, so an index read off
+  it can still double the accumulator per iteration — bounded and harmless given the `depth < 2`
+  loop-nesting cap (`loop_mult <= 400`), unlike the int path, which is immune for a different
+  reason (`try_index` reports `MAX_BOUND`, tripping `gen_assign`'s widen check into a Print
+  fallback — the backstop floats don't have).
 - `Features::full()` now has `floats: true`. It was flipped only after the sweep below came back
   green.
 
@@ -8009,9 +8014,14 @@ Python's crossover is `|x| >= 1e16` or `< 1e-4`. Shipping it that way would have
 round of coverage-that-reads-as-covered. So `float_leaf()` scales `n/8` by `2^e`, `e` drawn from
 `[-70, -20] ∪ {0} ∪ [20, 60]`: a power of two moves only the exponent field, so it introduces **no
 new rounding** and the exactness argument survives intact, while the range now straddles both
-crossovers (`e` is bounded so an 8-leaf product cannot reach `inf` — worst case `~1e152` — or the
-subnormal range). Verified directly: `print(0.125 * 8.470329472543003e-23)` and
-`print(9.625 * 1152921504606846976.0)` are byte-identical between `chezzi run` and `python3`
+crossovers. That bound — `e` bounded so an 8-leaf product tops out at `~1e152`, short of `inf`/the
+subnormal range — holds only for LITERAL leaves: a leaf can also be a float var or a `try_call`
+result, and those compose magnitudes multiplicatively across statements and functions, so `inf`
+(and `NaN` from it) is structurally reachable, as is `-0.0`. Measured, not assumed: 0 `inf`/`NaN`
+across 5000 `Features::full()` programs (with 25 `-0.0` occurrences in the same sweep), and when
+`inf`/`-inf`/`NaN`/`-0.0` do occur they render byte-identically between Chezzi and CPython, both
+top-level and nested in a list/map/tuple. Verified directly: `print(0.125 * 8.470329472543003e-23)`
+and `print(9.625 * 1152921504606846976.0)` are byte-identical between `chezzi run` and `python3`
 (`1.0587911840678753e-23`, `1.1096869481840902e+19`).
 
 **Deferred, in order.** (1) Float `Div`: a zero divisor diverges (CPython raises

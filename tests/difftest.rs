@@ -614,7 +614,12 @@ fn feat_floats() -> Features {
 
 #[test]
 fn fuzz_floats() {
-    fuzz_range(feat_floats(), 0, 200);
+    // `feat_floats()` is `Features::full()` with `floats` forced true, and `full().floats` is
+    // already `true` (§W7-37) — so today `feat_floats() == full()`, and seeds 0..120 here would
+    // regenerate byte-identical programs to `fuzz_full`'s 0..120. Disjoint range so the ~15s this
+    // sweep costs buys new coverage instead of repeating `fuzz_full`'s work; the fence itself is
+    // still real (it survives someone flipping `full().floats` back to `false`).
+    fuzz_range(feat_floats(), 5000, 5200);
 }
 
 // ---------------------------------------------------------------------------

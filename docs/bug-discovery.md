@@ -373,8 +373,12 @@ printing, and equality would false-positive on that routine, harmless shape (`ga
   "both engines compute the identical double" argument holds), and the scale is what actually
   reaches Python's scientific-notation crossover (`|x| >= 1e16` / `< 1e-4`) — `n/8` alone tops out
   near `1e8`. That crossover is where shortest-`repr` formatting is most delicate and where `W7-32`
-  lived. Float `Div` and int↔float mixed arithmetic are the deferred next steps (§W7-37).
-
+  lived. The per-leaf `[-70, 60]` scale bounds a single LITERAL leaf, not the generator overall —
+  a float var or a `try_call` result can carry a prior multi-leaf product, so magnitudes compose
+  across statements and functions and `inf`/`NaN`/`-0.0` are structurally reachable; measured 0
+  `inf`/`NaN` (25 `-0.0`) across 5000 `Features::full()` programs, and both engines render all
+  four byte-identically when they do occur. Float `Div` and int↔float mixed arithmetic are the
+  deferred next steps (§W7-37).
 
 **Every scalar type is reachable through a call and an index.** `try_call`/`try_index` used to be
 asked only for `Ty::Int`, so ~2/3 of generated functions were emitted and never invoked and non-int

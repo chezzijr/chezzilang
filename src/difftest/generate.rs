@@ -387,8 +387,15 @@ impl Gen {
         let (value, vbound) = self.gen_expr(&ty, 1);
         self.in_loop_rhs = prev;
         // Only Int carries a tracked bound. A float target needs none: `gen_float`'s leaves are
-        // exact binary fractions and an in-loop RHS reads no float var (see `gen_float`), so an
-        // accumulator grows at most `loop_mult * 1e8` — exact, and far from the f64 range.
+        // exact binary fractions and, post-`float_leaf` scaling, the in-loop RHS (a 4-leaf
+        // product at this call depth) tops out near `(10 * 2^60)^4 ≈ 1.8e76`, so the accumulator
+        // grows at most `loop_mult * 1.8e76 ≈ 1e80` — still nowhere near the f64 range. One hole:
+        // a `List[Float]` declared INSIDE the loop body snapshots the accumulator's current value
+        // each iteration, so e.g. `acc += xs[0]` is effectively `acc *= 2` per iteration — bounded
+        // and harmless here (loop nesting capped at `depth < 2` in `gen_stmt`, `loop_mult <= 400`).
+        // The int path is immune for a different reason, not the same one: `try_index` reports
+        // `MAX_BOUND` for an int element, so `gen_assign`'s widen check below overflows the cap
+        // and falls back to a Print — exactly the backstop floats do not have.
         if ty != Ty::Int {
             return Some(Stmt::Assign {
                 name: self.scope[idx].name.clone(),
@@ -942,8 +949,15 @@ impl Gen {
     /// shortest-repr formatting is most delicate and where `W7-32` lived. Scaling by `2^e`
     /// reaches both sides while introducing NO new rounding: a power of two only moves the
     /// exponent field, so the mantissa (and therefore the exactness argument in `gen_float`)
-    /// is untouched. `e` stays inside `[-70, 60]` so an 8-leaf product cannot reach `inf`
-    /// (worst case `~1e152`) or the subnormal range.
+    /// is untouched. `e` stays inside `[-70, 60]`, so for an 8-leaf product of LITERAL leaves
+    /// alone the worst case is `~1e152` — short of `inf` and the subnormal range. That bound is
+    /// leaf-local, not general: a leaf can also be a float var (itself possibly holding a prior
+    /// multi-leaf product) or a `try_call` result (a float callee's return is itself an up-to-
+    /// 8-leaf `gen_expr`, and generated functions can call each other), so magnitudes compose
+    /// multiplicatively across statements and functions — `inf`, and therefore `NaN`, is
+    /// structurally reachable. Measured, not assumed: 0 `inf` and 0 `NaN` across 5000
+    /// `Features::full()` programs; when they (or `-0.0`) do occur, both engines render them
+    /// byte-identically, top-level and nested in a list/map/tuple.
     fn float_leaf(&mut self) -> f64 {
         let n = self.rng.range_i64(-80, 80) as f64 / 8.0;
         let e = match self.rng.below(4) {
