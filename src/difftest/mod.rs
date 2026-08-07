@@ -106,7 +106,10 @@ fn hex(bytes: &[u8]) -> String {
         .join(" ")
 }
 
-fn kind_label(o: &Outcome) -> &'static str {
+/// One stable word per `Outcome` variant. Also the histogram key the fuzz binaries tally by, so a
+/// sweep's `done:` line says WHAT the seeds did, not just how many findings came out (W7-34's
+/// residual: "0 findings" over 0 executed comparisons looks identical to a clean sweep).
+pub fn kind_label(o: &Outcome) -> &'static str {
     match o {
         Outcome::Match => "Match",
         Outcome::AllowListed(_) => "AllowListed",

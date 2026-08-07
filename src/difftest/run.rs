@@ -1,8 +1,10 @@
 //! Shell out to both engines, capture their output, and classify the result.
 //!
 //! The runner writes the two source renderings to temp files, runs `chezzi run <f>` and
-//! `python3 <f>` under a wall-clock timeout, then compares stdout. Known-by-design
-//! divergences are downgraded to `AllowListed` (see `allowlist`).
+//! `python3 <f>` under a wall-clock timeout, then compares stdout BYTES and classifies the pair.
+//! `allowlist::check` is consulted as an extension point for known-by-design divergences, but
+//! `MATCHERS` is empty today, so nothing is downgraded to `AllowListed` at HEAD — the one entry
+//! that ever existed described a divergence that could not happen and was deleted (`W7-31`).
 
 use super::allowlist;
 use super::ast::Program;
@@ -28,10 +30,17 @@ pub struct Capture {
     pub stdout: Vec<u8>,
     pub stderr: Vec<u8>,
     // `None` means the child was killed by a SIGNAL (SIGSEGV / SIGABRT / a Rust stack overflow).
-    // Never "or timeout": `run_one` returns `Result<Capture, RunErr>`, and a timeout is
-    // `Err(RunErr::TimedOut)` — returned *before* any `Capture` is constructed (`run_sources`
-    // maps it straight to `Outcome::Timeout` right there) — so a live `Capture` reaching
-    // `classify` can only have `code: None` from a signal kill.
+    // Never "or timeout": `run_one` returns `Result<Capture, RunErr>` and a timeout is
+    // `Err(RunErr::TimedOut)`, so NO `Capture` is ever built from a timed-out child. A chezzi
+    // timeout is no longer a straight `Outcome::Timeout` (F3/W7-36 made it run Python, and on a
+    // clean Python re-run chezzi at 3x — so it can end as `ChezziHang`, `HarnessError`, or a full
+    // `classify` of the retry's capture), but every one of those paths preserves the invariant:
+    // the only `Capture`s that reach `classify` come from a child that actually EXITED, and the
+    // one synthesized `code: None` capture (`hang_retry_outcome`'s `ChezziHang`) is built into an
+    // `Outcome` directly and never routed through `classify`. So a live `Capture` reaching
+    // `classify` can still only have `code: None` from a signal kill.
+    // Keep this description true: a WRONG comment on this exact field is the recorded proximate
+    // cause of the signal-kill case going unclassified for the oracle's whole life (W7-33).
     pub code: Option<i32>,
 }
 
@@ -281,7 +290,7 @@ fn classify(chz: Capture, py: Capture, prog: Option<&Program>) -> Outcome {
     // `Capture::code` doc. (F3's hang verdict does synthesize a `code: None` capture, but it
     // builds `Outcome::Divergence{ChezziHang}` directly and never routes it through here — see
     // `hang_retry_outcome`.) Same rule as the twin oracle: `panicfuzz::classify`
-    // (`src/panicfuzz/run.rs:98-100`) reports this exact condition as `Outcome::Crash`.
+    // (`src/panicfuzz/run.rs`) reports this exact condition as `Outcome::Crash`.
     if chz.code.is_none() {
         return Outcome::HostPanic { chz };
     }
@@ -802,6 +811,29 @@ mod tests {
         assert!(
             !outcome.is_finding(),
             "both sides hanging must not be a finding, got {outcome:?}"
+        );
+    }
+
+    /// F3 guard, the OTHER half of "Python survived the same program". The two tests above cover
+    /// Python exiting 0 and Python hanging too; neither one dies if `run_sources`'s
+    /// `py.code == Some(0)` guard is deleted (with the guard gone that arm becomes `Ok(py) =>`,
+    /// and both still reach the same verdict). This one does: Python FAILS FAST (non-zero exit, no
+    /// hang) means the program is simply outside the shared subset, so "chezzi timed out" tells us
+    /// nothing about Chezzi and must stay a non-finding. Without the guard it becomes a confident
+    /// `Divergence{ChezziHang}`.
+    #[test]
+    fn a_chezzi_hang_python_fails_fast_stays_a_non_finding() {
+        let cfg = hang_cfg();
+        let outcome = run_sources(
+            &cfg,
+            "while true:\n    x := 0\n",
+            "import sys\nsys.exit(3)\n",
+            None,
+        );
+        assert!(
+            !outcome.is_finding(),
+            "python failing fast means the program is outside the shared subset, so a chezzi \
+             timeout proves nothing — must not be a finding, got {outcome:?}"
         );
     }
 

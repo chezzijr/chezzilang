@@ -89,7 +89,7 @@ pub fn run_input(cfg: &Config, input: &[u8]) -> Outcome {
     cleanup(&path);
 
     match result {
-        Ok(cap) => classify(Some(cap)),
+        Ok(cap) => classify(cap),
         Err(RunErr::TimedOut) => Outcome::Timeout,
         Err(RunErr::CouldNotRun(msg)) => Outcome::HarnessError(msg),
     }
@@ -97,15 +97,17 @@ pub fn run_input(cfg: &Config, input: &[u8]) -> Outcome {
 
 /// Classify a captured run. Exposed so a non-tautology unit test can drive synthetic captures.
 ///
-/// - `None`             => `Timeout` (the child was killed at the wall-clock budget). Non-finding.
 /// - `panicked at`      => `HostPanic` (a Rust host panic). BUG.
 /// - `code == None`     => `Crash` (killed by a signal: SIGSEGV/SIGABRT/stack-overflow). BUG.
 /// - otherwise          => `Clean` (exit 0 or a clean non-zero diagnostic). Non-finding.
-pub fn classify(cap: Option<Capture>) -> Outcome {
-    let cap = match cap {
-        Some(c) => c,
-        None => return Outcome::Timeout,
-    };
+///
+/// Takes a `Capture`, never an `Option<Capture>`: "the child did not produce a capture" is routed
+/// by `run_input` from the typed `RunErr` (`TimedOut` => `Timeout`, `CouldNotRun` => the FATAL
+/// `HarnessError`), and a `None` sentinel here could only collapse those two back together — which
+/// is precisely the `W7-35` bug. Matching `difftest::classify(chz: Capture, ..)`, this makes it
+/// unrepresentable rather than merely fixed; the two sibling oracles diverging on exactly this
+/// shape is the mechanism behind both `W7-33` and `W7-35`.
+pub fn classify(cap: Capture) -> Outcome {
     if is_host_panic(&cap.stderr) {
         return Outcome::HostPanic { cap };
     }

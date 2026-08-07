@@ -309,8 +309,9 @@ widened families below). One abstract IR (`ast.rs`) is rendered by two backends 
 The diff is on **raw bytes**, not on decoded text (`Capture.stdout` is `Vec<u8>`): `from_utf8_lossy`
 is not injective, so a decoded compare would call `ff fe` vs `fe ff` a `Match`, and both sides can
 emit non-UTF-8 (`io.stdout().write_bytes`, CPython `sys.stdout.buffer.write`). `Capture::stdout_text()`
-decodes for the report and the allow-list's formatting heuristic only — never for a verdict
-(`gaps.md` W7-30).
+decodes for the report and for `is_host_panic`'s `panicked at` scan only — never for a verdict
+(`gaps.md` W7-30). (`allowlist::MATCHERS` is empty at HEAD — its one formatting heuristic was
+deleted by `gaps.md` **W7-31**; `check()` remains as the extension point.)
 
 **A host crash is always `HostPanic`, checked before any other verdict logic.** `classify` looks
 for a Rust `panicked at` marker on Chezzi's stderr and, separately, `chz.code.is_none()` (killed
@@ -331,6 +332,17 @@ findings), `1` = findings (real divergences), `2` = the harness itself is broken
 not finish (bad args, or a `HarnessError` — e.g. `chezzi` not on `PATH`). See `gaps.md` **W7-34**
 for the measured before/after (`chezzi` missing → `done: N seeds, 0 finding(s)`, exit 0, before
 the fix).
+
+**Every sweep prints an outcome histogram, because "0 findings" alone cannot be read.** Both
+`difffuzz` and `panicfuzz` tally `kind_label(&outcome)` per seed and print it in the `done:` line:
+`done: 200 seeds 0..200, 0 finding(s) [Match 200]` on a healthy sweep versus
+`done: 20 seeds 0..20, 0 finding(s) [Timeout 20]` when every child was killed at the deadline and
+**nothing was ever compared**. `HarnessError` closes "the child never started"; it does not close
+"the children started and nothing was compared", and before the histogram those two runs printed
+byte-identical lines. There is deliberately **no** abort threshold or "too many timeouts"
+heuristic: a verdict that cannot be certain must decline rather than emit a confident wrong one
+(`gaps.md` **W7-12**), and a wrong "your oracle is broken" abort would teach distrust of every
+future one. The fix is legibility — read the histogram (`gaps.md` **W7-34**).
 
 **A Chezzi timeout is not thrown away — Python gets a chance to prove it's a real hang.**
 `generate.rs` bounds every loop by construction (`LOOP_CAP`, a bounded `for`, a mandatory `while`

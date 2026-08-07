@@ -88,9 +88,21 @@ fn main() {
     cfg.timeout = Duration::from_millis(timeout_ms);
 
     let mut findings = 0usize;
+    // Outcome histogram, keyed by `difftest::kind_label`. Without it `done: 20 seeds, 0 finding(s)`
+    // is byte-identical whether every seed was actually compared or every seed timed out and
+    // NOTHING was ever compared — `HarnessError` closes "the child never started", not "the
+    // children started and nothing was compared" (`docs/gaps.md` W7-34). `BTreeMap` so the order
+    // is stable run to run. Deliberately NO abort threshold / "too many timeouts" heuristic: a
+    // verdict that cannot be certain must DECLINE rather than emit a confident wrong one (this
+    // project's standing rule — `docs/gaps.md` W7-12, the `parked-is-not-stuck` family), and a
+    // wrong "your oracle is broken" abort would teach distrust of every future one. Make the run
+    // LEGIBLE and let the human read the histogram.
+    let mut hist: std::collections::BTreeMap<&'static str, usize> =
+        std::collections::BTreeMap::new();
     let total = end - start;
     for seed in start..end {
         let (outcome, chz, py) = difftest::run_seed(&cfg, seed, feat);
+        *hist.entry(difftest::kind_label(&outcome)).or_default() += 1;
         // A harness error means the oracle could not even run this seed (e.g. `chezzi` is not
         // on PATH) — fatal, not "0 findings". Abort loud instead of grinding through the rest
         // of the range reporting nothing wrong.
@@ -112,9 +124,10 @@ fn main() {
         }
     }
 
+    let hist: Vec<String> = hist.iter().map(|(k, n)| format!("{k} {n}")).collect();
     eprintln!(
-        "done: {total} seeds, {findings} finding(s) [{:?}]",
-        (start, end)
+        "done: {total} seeds {start}..{end}, {findings} finding(s) [{}]",
+        hist.join(", ")
     );
     if findings > 0 {
         std::process::exit(1);

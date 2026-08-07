@@ -58,7 +58,10 @@ pub fn describe(seed: u64, outcome: &Outcome, input: &[u8]) -> String {
     s
 }
 
-fn kind_label(o: &Outcome) -> &'static str {
+/// One stable word per `Outcome` variant. Also the histogram key the fuzz binary tallies by, so a
+/// sweep's `done:` line says WHAT the seeds did, not just how many findings came out (W7-34's
+/// residual: "0 findings" over 0 executed checks looks identical to a clean sweep).
+pub fn kind_label(o: &Outcome) -> &'static str {
     match o {
         Outcome::Clean { .. } => "Clean",
         Outcome::HostPanic { .. } => "HostPanic",

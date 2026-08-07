@@ -52,52 +52,52 @@ fn load_corpus() -> Vec<Vec<u8>> {
 #[test]
 fn classify_flags_panic_signal_and_clean() {
     // A Rust host panic on stderr => HostPanic (a finding).
-    let panic = run::classify(Some(Capture {
+    let panic = run::classify(Capture {
         stdout: String::new(),
         stderr: "thread 'main' panicked at src/parser/mod.rs:1234:5".into(),
         code: Some(101),
-    }));
+    });
     assert!(matches!(panic, Outcome::HostPanic { .. }), "{panic:?}");
     assert!(panic.is_finding());
 
     // Killed by a signal (code == None, no panic marker) => Crash (a finding).
-    let crash = run::classify(Some(Capture {
+    let crash = run::classify(Capture {
         stdout: String::new(),
         stderr: String::new(),
         code: None,
-    }));
+    });
     assert!(matches!(crash, Outcome::Crash { .. }), "{crash:?}");
     assert!(crash.is_finding());
 
     // A clean non-zero diagnostic => Clean (NOT a finding).
-    let clean = run::classify(Some(Capture {
+    let clean = run::classify(Capture {
         stdout: String::new(),
         stderr: "error: parse error: expected expression".into(),
         code: Some(1),
-    }));
+    });
     assert!(matches!(clean, Outcome::Clean { .. }), "{clean:?}");
     assert!(!clean.is_finding());
 
     // Exit 0 => Clean.
-    let ok = run::classify(Some(Capture {
+    let ok = run::classify(Capture {
         stdout: "ok: no type errors".into(),
         stderr: String::new(),
         code: Some(0),
-    }));
+    });
     assert!(matches!(ok, Outcome::Clean { .. }), "{ok:?}");
 
-    // Wall-clock timeout (None capture) => Timeout (NOT a finding).
-    let timeout = run::classify(None);
-    assert!(matches!(timeout, Outcome::Timeout), "{timeout:?}");
-    assert!(!timeout.is_finding());
+    // A wall-clock timeout is NOT expressible here at all: `classify` takes a `Capture`, and a
+    // timed-out child never produces one. `run_input` routes `RunErr::TimedOut` to
+    // `Outcome::Timeout` and `RunErr::CouldNotRun` to the fatal `HarnessError` — see
+    // `a_real_timeout_is_still_a_timeout_not_a_harness_error` in `src/panicfuzz/run.rs`.
 
     // A signal kill that ALSO printed a panic marker is classified as the (more specific)
     // HostPanic, not Crash.
-    let panic_and_signal = run::classify(Some(Capture {
+    let panic_and_signal = run::classify(Capture {
         stdout: String::new(),
         stderr: "thread 'main' panicked at src/x.rs:1:1\nstack overflow".into(),
         code: None,
-    }));
+    });
     assert!(
         matches!(panic_and_signal, Outcome::HostPanic { .. }),
         "{panic_and_signal:?}"
