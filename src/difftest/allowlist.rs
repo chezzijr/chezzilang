@@ -7,12 +7,19 @@
 //! narrow, cite why, and must not mask a **value** divergence, only a **formatting** one.
 //!
 //! `MATCHERS` is empty (W7-31, 2026-08-07): the one prior entry, `float_scientific_crossover`,
-//! excused "Rust `{}` vs CPython `repr` pick different scientific-notation crossovers" — but
-//! Chezzi's float stringify (`vm::format_float` → `fmtspec::repr_float`) IS CPython `repr`
-//! parity by construction, pinned by `vm/parity_tests.rs::python_float_repr_str_parity`, so that
-//! divergence cannot occur. The entry was a pure masking device; deleted rather than gated. See
-//! `docs/gaps.md` §W7-31 for the measured crossover-boundary table and the second defect (no
-//! numeric-equality check) it also closes.
+//! excused "Rust `{}` vs CPython `repr` pick different scientific-notation crossovers" — and that
+//! specific divergence does not occur. `vm::format_float` → `fmtspec::repr_float` implements
+//! CPython's crossover RULE directly (scientific when the decimal exponent is `< -4` or `>= 16`),
+//! and the two agree byte-for-byte at every boundary (measured table in `docs/gaps.md` §W7-31).
+//! The entry was a pure masking device; deleted rather than gated.
+//!
+//! Scope that claim carefully — it is about the CROSSOVER, not about float formatting in general.
+//! Chezzi's shortest-repr DIGITS came from Rust's formatter, which breaks an exact half-way tie
+//! away from zero where CPython breaks it to even; that is a real divergence, tracked separately
+//! as `docs/gaps.md` §W7-32. It is not allow-list material — it is a bug, and this oracle SHOULD
+//! report it. Note also that `vm/parity_tests.rs::python_float_repr_str_parity` is a serial==M:N
+//! golden against a hardcoded literal, not a CPython differential: it cannot vouch for parity with
+//! CPython, and citing it as if it could is how W7-32 stayed invisible.
 
 use super::ast::Program;
 use super::run::Capture;

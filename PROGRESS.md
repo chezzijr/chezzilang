@@ -4,10 +4,12 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 > **✅ W7-31 FIXED 2026-08-07 — the CPython differential's float allow-list could downgrade a CHEZZI
 > CRASH to a non-finding; deleted rather than gated.** `float_scientific_crossover`'s premise (Rust `{}`
-> vs CPython `repr` disagreeing on the sci-notation crossover) re-derived as dead — Chezzi's float
-> stringify is CPython `repr` parity by construction — so `MATCHERS` is now empty and `allowlist::check`
-> floors on `chz.code == Some(0) && py.code == Some(0)` before the (now-empty) loop. Full write-up:
-> `docs/gaps.md` **§W7-31**.
+> vs CPython `repr` disagreeing on the sci-notation crossover) re-derived as dead — `fmtspec::repr_float`
+> implements CPython's crossover rule directly and the two are byte-identical at every boundary — so
+> `MATCHERS` is now empty and `allowlist::check` returns `None` up front whenever either side exited
+> non-zero, before the (now-empty) loop. That claim is about the **crossover only**: a 20 000-value
+> fuzz against CPython found a *different*, real float divergence (shortest-repr ties round away from
+> zero, not to even), filed as **W7-32**. Full write-up: `docs/gaps.md` **§W7-31**.
 
 > **✅ THE SUITE IS FULLY GREEN AGAIN (2026-08-07) — 4014 passed, 0 failed.** The last standing
 > failure, `eager_handshake_is_driven_by_wakeups_not_by_the_poll_timeout`, was a wall-clock bound that

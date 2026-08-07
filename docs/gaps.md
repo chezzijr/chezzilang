@@ -7505,10 +7505,23 @@ cpython    1e+16   1000000000000000.0   0.0001   1e-05     1234567890123456.0   
 ```
 
 Byte-identical throughout — not by luck: `vm::format_float` (`src/vm/mod.rs:4135-4140`) delegates to
-`fmtspec::repr_float` (`src/fmtspec.rs:443`), whose doc states it matches CPython's `repr()`/`str()`
-crossover rule exactly (scientific when the decimal exponent is `< -4` or `>= 16`), and
-`vm/parity_tests.rs:1547 python_float_repr_str_parity` pins it. The entry described a divergence that
-cannot occur. It was also unfireable on any *generated* program by two independent mechanisms:
+`fmtspec::repr_float` (`src/fmtspec.rs:443`), which implements CPython's `repr()`/`str()` crossover
+rule directly (scientific when the decimal exponent is `< -4` or `>= 16`). The entry described a
+divergence that does not occur.
+
+**Scope that finding precisely — it is about the CROSSOVER, not float formatting in general.** The
+adversarial review of this very change fuzzed 20 000 random `f64` bit patterns against CPython 3.14.6
+and found **6 mismatches**, all one shape: `repr_float`'s shortest-repr *digits* come from Rust's
+formatter, which breaks an exact half-way tie **away from zero** where CPython breaks it **to even**
+(`-887777373534812.25` → chezzi `-887777373534812.3`, CPython `-887777373534812.2`, and
+`float(...2) == float(...3)`). That is a real divergence, filed as **`W7-32`** and fixed there. It is
+not allow-list material — it is a bug, and this oracle should report it, which after the deletion it
+now can. Two corrections this forces on the record: the original filing of this section cited
+`vm/parity_tests.rs:1547 python_float_repr_str_parity` as "pinning" CPython parity, and it does not —
+it is a serial==M:N golden against a **hardcoded literal**, so it could never have caught `W7-32`; and
+a 7-value hand-picked boundary table is evidence about the boundaries it names and nothing more.
+
+The deleted entry was also unfireable on any *generated* program by two independent mechanisms:
 `generate.rs`'s `gen_float` restricts itself to short exact-ish decimals specifically to dodge the
 crossover and always emits a literal; `float_lit` is shared byte-for-byte between the Chezzi and Python
 emitters; and `Features::full()` has `floats: false` regardless.
