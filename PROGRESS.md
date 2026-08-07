@@ -2,6 +2,8 @@
 
 Single source of truth for "what am I doing next." Update after every work session.
 
+> **✅ W7-33 FIXED 2026-08-07 — the CPython differential's `classify` now treats a signal-killed chezzi (`code: None`, e.g. a Rust stack overflow) and a worker-thread panic on an exit-0 both-match arm as `HostPanic`, not a buried non-finding/`Match`.** Two holes, same shape as `W7-31`: the highest-value finding this oracle can produce was invisible on the arms that never checked for it — the twin `panicfuzz::classify` already had the `code.is_none()` rule. `docs/gaps.md` **§W7-33**.
+
 > **✅ W7-32 FIXED 2026-08-07 — a float's shortest `repr` broke an EXACT tie away from zero; CPython
 > breaks it to EVEN.** A real language bug (observable output moved): `print(771.5462036132812)` gave
 > `771.5462036132813` — the exact value is `771.54620361328125`, so the two shortest candidates are

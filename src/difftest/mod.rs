@@ -58,10 +58,19 @@ pub fn describe(seed: u64, outcome: &Outcome, chz_src: &str, py_src: &str) -> St
             }
         }
         Outcome::HostPanic { chz } => {
-            s.push_str(&format!(
-                "--- chezzi stderr (RUST PANIC) ---\n{}\n",
-                chz.stderr_text()
-            ));
+            // `chz.code: None` means a SIGNAL kill (see `Capture::code`), which may carry no
+            // `panicked at` marker at all (a bare SIGSEGV writes nothing). Say so explicitly, or
+            // an empty-stderr signal death renders as an empty block that contradicts the
+            // HostPanic verdict above it — the same defect W7-30 had to fix in this function.
+            if chz.code.is_none() {
+                s.push_str("--- chezzi killed by a SIGNAL (code: None) ---\n");
+            }
+            if !chz.stderr_text().trim().is_empty() {
+                s.push_str(&format!(
+                    "--- chezzi stderr (RUST PANIC) ---\n{}\n",
+                    chz.stderr_text()
+                ));
+            }
         }
         Outcome::Timeout { which } => s.push_str(&format!("timed out: {which}\n")),
         Outcome::AllowListed(reason) => s.push_str(&format!("allow-listed: {reason}\n")),

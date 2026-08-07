@@ -307,6 +307,14 @@ emit non-UTF-8 (`io.stdout().write_bytes`, CPython `sys.stdout.buffer.write`). `
 decodes for the report and the allow-list's formatting heuristic only — never for a verdict
 (`gaps.md` W7-30).
 
+**A host crash is always `HostPanic`, checked before any other verdict logic.** `classify` looks
+for a Rust `panicked at` marker on Chezzi's stderr and, separately, `chz.code.is_none()` (killed
+by a signal — SIGSEGV/SIGABRT/a Rust stack overflow, which has no `panicked at` marker at all) —
+both **unconditionally on every arm**, including the both-exit-0 stdout-compare arm (a panicking
+*worker thread* doesn't change the process's own exit code). Neither can be allow-listed and
+neither can be buried under a `BothError` non-finding. Same rule the twin panic-fuzz oracle uses
+(`panicfuzz::classify`, above) — see `gaps.md` **W7-33**.
+
 **Widened construct coverage** (granular `Features` flags, all on in `full()`):
 - **String methods** (`string_methods`): the eight ASCII-identical methods `upper`/`lower`/`replace`/
   `split`/`join`/`starts_with`/`ends_with`/`contains`. The emitters map names per language

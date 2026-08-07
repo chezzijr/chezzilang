@@ -27,7 +27,11 @@ static NONCE: AtomicU64 = AtomicU64::new(0);
 pub struct Capture {
     pub stdout: Vec<u8>,
     pub stderr: Vec<u8>,
-    pub code: Option<i32>, // None => killed by signal / timeout
+    // `None` means the child was killed by a SIGNAL (SIGSEGV / SIGABRT / a Rust stack overflow).
+    // Never "or timeout": a timeout returns `None` from `run_one` *before* any `Capture` is
+    // constructed (`run_sources` returns `Outcome::Timeout` right there) — so a live `Capture`
+    // reaching `classify` can only have `code: None` from a signal kill.
+    pub code: Option<i32>,
 }
 
 impl Capture {
@@ -47,7 +51,9 @@ impl Capture {
 pub enum DivKind {
     /// Both ran to exit 0 but printed different stdout.
     Stdout,
-    /// Chezzi failed (non-zero exit) while Python succeeded.
+    /// Chezzi failed with an ordinary non-zero exit while Python succeeded — never a signal
+    /// kill or a Rust host panic, both of which `classify` intercepts as `HostPanic` before
+    /// this arm is reached.
     ChezziFault,
     /// Chezzi succeeded while Python failed (usually our generator emitting something
     /// Python rejects — a harness bug, not a Chezzi bug, but worth surfacing).
@@ -63,7 +69,10 @@ pub enum Outcome {
         chz: Capture,
         py: Capture,
     },
-    /// Chezzi exited non-zero with a *Rust host panic* on stderr — always a bug.
+    /// Chezzi crashed at the Rust level: either a `panicked at` marker on stderr (ANY exit
+    /// code, including 0 — a background worker thread's panic doesn't change the process's own
+    /// exit code) or the process was killed by a signal (`code: None`, no panic text
+    /// required). Always a bug.
     HostPanic {
         chz: Capture,
     },
@@ -143,6 +152,31 @@ pub fn run_sources(cfg: &Config, chz_src: &str, py_src: &str, prog: Option<&Prog
 }
 
 fn classify(chz: Capture, py: Capture, prog: Option<&Program>) -> Outcome {
+    // A Rust host panic is the single highest-value finding this oracle can produce, so it is
+    // checked FIRST — before any arm-specific logic and before any `allowlist::check` call —
+    // so it can never be allow-listed or buried under a both-failed non-finding. This must run
+    // unconditionally (not gated on `!chz_ok`): a panicking *worker thread* (`vm/stream.rs`,
+    // `native/request.rs`, `native/rand.rs`, `native/cffi.rs`) doesn't touch the process's own
+    // exit code, so a clean `chz.code == Some(0)` proves nothing about stderr.
+    if is_host_panic(&chz.stderr_text()) {
+        return Outcome::HostPanic { chz };
+    }
+    // `chz.code` is `None` ONLY when the child was killed by a SIGNAL (SIGSEGV / SIGABRT / a
+    // Rust stack overflow, which prints "has overflowed its stack" and dies WITHOUT a
+    // `panicked at` marker — the check above misses it). A timeout can never reach here:
+    // `run_one` returns `None` on timeout and `run_sources` returns `Outcome::Timeout` before a
+    // `Capture` is ever constructed, so a live `Capture` with `code: None` cannot mean "timed
+    // out" — see the `Capture::code` doc. Same rule as the twin oracle: `panicfuzz::classify`
+    // (`src/panicfuzz/run.rs:96-101`) reports this exact condition as `Outcome::Crash`.
+    if chz.code.is_none() {
+        return Outcome::HostPanic { chz };
+    }
+    // Deliberately NOT mirrored on the Python side: a "Python host panic" isn't a thing CPython
+    // has, and `py.code.is_none()` (CPython killed by a signal) is real but is not a Chezzi bug
+    // to promote to a finding — it already makes `py_ok` false below and falls through to the
+    // ordinary PythonFault/BothError arms, which is the right non-finding shape for "the
+    // reference interpreter crashed on our generated input" rather than a HostPanic.
+
     let chz_ok = chz.code == Some(0);
     let py_ok = py.code == Some(0);
 
@@ -163,10 +197,8 @@ fn classify(chz: Capture, py: Capture, prog: Option<&Program>) -> Outcome {
     }
 
     if !chz_ok {
-        // A Rust host panic is the single highest-value finding — never an allow-list case.
-        if is_host_panic(&chz.stderr_text()) {
-            return Outcome::HostPanic { chz };
-        }
+        // A host panic (stderr marker OR signal kill) already returned above — never an
+        // allow-list case, and never reaches this arm.
         if py_ok {
             // Chezzi faulted on a program Python ran cleanly — a real divergence.
             if let Some(reason) = allowlist::check(prog, &chz, &py) {
@@ -178,7 +210,8 @@ fn classify(chz: Capture, py: Capture, prog: Option<&Program>) -> Outcome {
                 py,
             };
         }
-        // both failed, no host panic — generator produced something outside the shared subset
+        // both failed, no host panic, no signal kill — generator produced something outside
+        // the shared subset
         return Outcome::BothError;
     }
 
@@ -379,6 +412,104 @@ mod tests {
                 }
             ),
             "a Python fault must never be masked by the float-formatting allow-list"
+        );
+    }
+
+    // --- F2/F5: a crash must be a crash on every `classify` arm ------------------------------
+
+    /// F2. `chz.code == None` means the child was killed by a SIGNAL (a Rust stack overflow
+    /// prints exactly this and dies without a `panicked at` marker). Today `classify` never
+    /// looks at `code.is_none()` anywhere, so this fell through to an ordinary `ChezziFault`
+    /// divergence — the highest-value finding this oracle can produce, invisible.
+    #[test]
+    fn a_signal_killed_chezzi_is_a_host_panic() {
+        let chz = cap_exit(
+            Vec::new(),
+            b"\nthread 'main' has overflowed its stack\n".to_vec(),
+            None,
+        );
+        let py = cap_exit(b"ok\n".to_vec(), Vec::new(), Some(0));
+        assert!(
+            matches!(classify(chz, py, None), Outcome::HostPanic { .. }),
+            "a signal-killed chezzi must be a HostPanic even though stderr has no 'panicked at'"
+        );
+    }
+
+    /// F2, `BothError` shape: today a signal-killed chezzi next to a Python failure is
+    /// `BothError` — `is_finding() == false` — which buries a host crash as a non-finding.
+    #[test]
+    fn a_signal_killed_chezzi_is_a_finding_even_when_python_also_failed() {
+        let chz = cap_exit(
+            Vec::new(),
+            b"\nthread 'main' has overflowed its stack\n".to_vec(),
+            None,
+        );
+        let py = cap_exit(Vec::new(), Vec::new(), Some(1));
+        let outcome = classify(chz, py, None);
+        assert!(
+            matches!(outcome, Outcome::HostPanic { .. }),
+            "a signal-killed chezzi must be a HostPanic even when Python also failed, got {outcome:?}"
+        );
+        assert!(
+            outcome.is_finding(),
+            "the property that actually matters: this must be a finding"
+        );
+    }
+
+    /// F5. `classify`'s both-exit-0 arm never consults `is_host_panic` — a worker thread can
+    /// panic without touching the process's own exit code, so today this is a `Match`.
+    #[test]
+    fn a_worker_thread_panic_with_exit_zero_is_a_finding() {
+        let chz = cap_exit(
+            b"1\n".to_vec(),
+            b"thread '<chezzi-worker>' panicked at src/vm/stream.rs:120:\nsomething broke\n"
+                .to_vec(),
+            Some(0),
+        );
+        let py = cap_exit(b"1\n".to_vec(), Vec::new(), Some(0));
+        assert!(
+            matches!(classify(chz, py, None), Outcome::HostPanic { .. }),
+            "identical stdout must not hide a worker-thread panic on stderr"
+        );
+    }
+
+    /// Guard against over-firing: an ordinary Chezzi runtime fault (no `panicked at`, real exit
+    /// code, not a signal kill) must stay an ordinary `ChezziFault` divergence, not get
+    /// promoted to `HostPanic`. This is exactly the case `is_host_panic`'s own doc comment
+    /// warns about — broader substrings like "index out of bounds" also appear in clean faults.
+    #[test]
+    fn a_clean_chezzi_fault_is_still_an_ordinary_divergence() {
+        let chz = cap_exit(
+            Vec::new(),
+            b"runtime error: index 5 out of range".to_vec(),
+            Some(1),
+        );
+        let py = cap_exit(b"ok\n".to_vec(), Vec::new(), Some(0));
+        assert!(
+            matches!(
+                classify(chz, py, None),
+                Outcome::Divergence {
+                    kind: DivKind::ChezziFault,
+                    ..
+                }
+            ),
+            "an ordinary clean fault must not be promoted to HostPanic"
+        );
+    }
+
+    /// Guard the both-failed non-finding: two ordinary faults with no panic markers and no
+    /// signal kill on either side must stay `BothError`, not get promoted by the new checks.
+    #[test]
+    fn a_both_ordinary_faults_stays_botherror() {
+        let chz = cap_exit(
+            Vec::new(),
+            b"runtime error: division by zero".to_vec(),
+            Some(1),
+        );
+        let py = cap_exit(Vec::new(), b"ZeroDivisionError: ...".to_vec(), Some(1));
+        assert!(
+            matches!(classify(chz, py, None), Outcome::BothError),
+            "two ordinary faults with no panic marker and no signal kill must stay BothError"
         );
     }
 }
