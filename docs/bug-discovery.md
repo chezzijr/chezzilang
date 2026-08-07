@@ -420,13 +420,18 @@ printing, and equality would false-positive on that routine, harmless shape (`ga
   a float var or a `try_call` result can carry a prior multi-leaf product, so magnitudes compose
   across statements and functions and `inf`/`NaN`/`-0.0` are structurally reachable; measured 0
   `inf`/`NaN` (25 `-0.0`) across 5000 `Features::full()` programs, and both engines render all
-  four byte-identically when they do occur. **Comparison** (`< <= > >= == !=`, never mixed with
-  int) landed 2026-08-07: `gen_bool`'s comparison arm now sometimes draws both operands from
-  `gen_float` — premise verified first, 4005 cases byte-identical against CPython. **`Div`** landed
-  the same day: `gen_float` emits it with no non-zero-divisor guard (float `/` is total IEEE-754,
+  four byte-identically when they do occur. **Comparison** (`< <= > >= == !=`) landed 2026-08-07:
+  `gen_bool`'s comparison arm now sometimes draws both operands from `gen_float` — premise
+  verified first, 4005 cases byte-identical against CPython. **`Div`** landed the same day:
+  `gen_float` emits it with no non-zero-divisor guard (float `/` is total IEEE-754,
   `docs/spec.md:472` — a zero divisor is `inf`/`-inf`/`NaN`, never a fault), and the Python shim's
-  `_chz_fdiv` absorbs Chezzi's deliberate divergence from CPython's `ZeroDivisionError`. Int↔float
-  mixed arithmetic and float `%` are the deferred next steps (§W7-37).
+  `_chz_fdiv` absorbs Chezzi's deliberate divergence from CPython's `ZeroDivisionError`.
+  **Int↔float mixing** (`1 + 2.0`) landed 2026-08-07 too — the filed reason it was deferred
+  ("needs a coercion model in the IR") was wrong: `Bin`'s `ty` is already the result type, so a
+  mixed node renders correctly through both emitters with no IR change. `gen_float`'s composite
+  arm and `gen_bool`'s float-comparison arm each mix in an int operand (0.3 chance), side
+  randomized so both `int op float` and `float op int` are generated; `MAX_BOUND` staying under
+  `2^53` keeps every mixed comparison exact. Float `%` is the sole remaining item (§W7-37).
 
 **Every scalar type is reachable through a call and an index.** `try_call`/`try_index` used to be
 asked only for `Ty::Int`, so ~2/3 of generated functions were emitted and never invoked and non-int

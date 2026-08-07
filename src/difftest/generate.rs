@@ -21,6 +21,11 @@ use super::rng::Rng;
 const LEAF_INT_MAX: i64 = 100;
 const PARAM_BOUND: i128 = 1000;
 const MAX_BOUND: i128 = 1_000_000_000_000; // 10^12, far under i64::MAX (~9.2e18)
+// ^ Also load-bearing for `gen_float`'s int↔float mixing: 10^12 is well under `2^53 ≈ 9.007e15`,
+//   the largest integer magnitude an `f64` represents exactly, so every int this generator can
+//   produce converts to `f64` exactly and Chezzi/CPython agree bit-for-bit on a mixed node.
+//   Raising this past `2^53` makes mixed arithmetic a genuine precision divergence — re-check
+//   `gen_int_float_pair`'s premise before raising it.
 const LOOP_CAP: i64 = 20;
 const MAX_EXPR_DEPTH: usize = 3;
 
@@ -774,10 +779,9 @@ impl Gen {
                 let i = *self.rng.choice(&bool_vars);
                 return Expr::Var(self.scope[i].name.clone());
             }
-            // comparison of two ints or two floats — never mixed (int↔float mixing needs a
-            // coercion model the IR doesn't have; deferred, see `gen_float`'s doc comment).
-            // Ints stay the common case: 0.3 chance of the float variant keeps them carrying
-            // most of the bound-discipline / overflow-adjacent coverage.
+            // comparison of two ints, two floats, or (see below) one of each. Ints stay the
+            // common case: 0.3 chance of the float variant keeps them carrying most of the
+            // bound-discipline / overflow-adjacent coverage.
             if self.rng.chance(0.6) {
                 let op = *self.rng.choice(&[
                     BinOp::Lt,
@@ -788,8 +792,14 @@ impl Gen {
                     BinOp::Ne,
                 ]);
                 if self.feat.floats && self.rng.chance(0.3) {
-                    let l = self.gen_float(depth + 1);
-                    let r = self.gen_float(depth + 1);
+                    // Mixed int↔float comparison, same mechanism and same 0.3 chance as the
+                    // mixed-arithmetic arm in `gen_float` — `a < b` / `a == 3.0` both measured
+                    // against CPython before landing (docs/gaps.md W7-37).
+                    let (l, r) = if self.rng.chance(0.3) {
+                        self.gen_int_float_pair(depth + 1)
+                    } else {
+                        (self.gen_float(depth + 1), self.gen_float(depth + 1))
+                    };
                     return Expr::Bin {
                         op,
                         ty: Ty::Bool,
@@ -932,9 +942,20 @@ impl Gen {
     /// 2026-08-07). Premise verified first: all nine hand sign/zero cases matched CPython through
     /// `_chz_fdiv` before this landed.
     ///
-    /// One float surface is deliberately still unreachable, filed in `docs/gaps.md` W7-37:
-    /// **int↔float mixing** (`1 + 2.0`), which needs a coercion model the IR does not have. Float
-    /// `%` (`BinOp::Mod`) is also not emitted here — a separate step, not yet started.
+    /// **Int↔float mixing landed too** (`1 + 2.0`) — the deferral's filed reason ("needs a
+    /// coercion model in the IR") was WRONG: `Expr::Bin`'s `ty` is already the RESULT type, not
+    /// an operand type, `emit_chezzi.rs` ignores `ty` entirely and renders `l op r` textually,
+    /// and `emit_python.rs`'s `bin()` reads `ty` only to pick int/float `Div`/`Mod` routing — so
+    /// a `Bin { ty: Float, l: <int expr>, r: <float expr> }` already renders correctly on both
+    /// sides. The composite arm below mixes in an int operand (0.3 chance, matching the
+    /// comparison arm's mixing chance) via `gen_int_float_pair`, side order randomized so both
+    /// `int op float` and `float op int` get generated; `gen_bool`'s float-comparison arm mixes
+    /// the same way. Precision is exact: `gen_int` bounds every int by `MAX_BOUND` (see its doc
+    /// comment — well under `2^53`), so every int this generator can produce converts to `f64`
+    /// exactly and both languages agree bit-for-bit; raising `MAX_BOUND` past `2^53` would turn
+    /// this into a real precision divergence. `docs/gaps.md` W7-37 is now fully closed — this was
+    /// its last deferred item. Float `%` (`BinOp::Mod`) is the sole remaining note: `gen_float`
+    /// does not emit it — a separate step, not yet started.
     fn gen_float(&mut self, depth: usize) -> Expr {
         let at_leaf = depth >= MAX_EXPR_DEPTH;
         // Inside an in-loop `+=`/`-=` RHS a mutable float var would compound geometrically across
@@ -973,6 +994,18 @@ impl Gen {
         let op = *self
             .rng
             .choice(&[BinOp::Add, BinOp::Sub, BinOp::Mul, BinOp::Div]);
+        // Int↔float mixing (0.3, matching the float-comparison arm's chance): the coercion is
+        // real in both emitters with no IR change (see the doc comment above), so this is just
+        // choosing where an int-typed subexpression can appear inside a `Float`-typed `Bin`.
+        if self.rng.chance(0.3) {
+            let (l, r) = self.gen_int_float_pair(depth + 1);
+            return Expr::Bin {
+                op,
+                ty: Ty::Float,
+                l: Box::new(l),
+                r: Box::new(r),
+            };
+        }
         let l = self.gen_float(depth + 1);
         let r = self.gen_float(depth + 1);
         Expr::Bin {
@@ -981,6 +1014,23 @@ impl Gen {
             l: Box::new(l),
             r: Box::new(r),
         }
+    }
+
+    /// One int-valued expr and one float-valued expr, side order randomized so both
+    /// `int op float` and `float op int` get generated (a one-sided implementation would leave
+    /// half the surface untested). Shared by `gen_float`'s mixed-arithmetic arm and `gen_bool`'s
+    /// mixed-comparison arm — same mechanism, same `depth` passed straight through to both
+    /// `gen_int`/`gen_float` (already incremented by the caller, matching every other arm here).
+    /// `gen_int`'s returned bound is discarded: it bounds int-only arithmetic against i64
+    /// overflow and has no bearing on a `Float`-typed result. Neither guard is weakened by this
+    /// composition: `gen_int` and `gen_float` each read `self.in_loop_rhs` themselves (not a
+    /// parameter), so calling one from within the other still applies its own existing
+    /// discipline — `gen_int` still restricts leaves to reserved loop-stable vars, `gen_float`
+    /// still refuses float vars — regardless of which function is the caller.
+    fn gen_int_float_pair(&mut self, depth: usize) -> (Expr, Expr) {
+        let (i, _) = self.gen_int(depth);
+        let f = self.gen_float(depth);
+        if self.rng.chance(0.5) { (i, f) } else { (f, i) }
     }
 
     /// A float leaf: `n/8`, sometimes scaled by a power of two.

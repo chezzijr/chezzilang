@@ -146,6 +146,37 @@ fn p0_shim_float_div_signed_zero() {
     }
 }
 
+/// A mixed `Div` (`ty: Float`, dividend a `FloatLit`, divisor an INT `0`) exercises the exact
+/// same `_chz_fdiv` chain as `p0_shim_float_div_signed_zero`, but through the mixed-arithmetic
+/// path this task adds: `emit_python.rs`'s `bin()` routes on `ty` alone, so a `Float`-typed `Div`
+/// node reaches `_chz_fdiv` regardless of whether the divisor operand is textually an int or a
+/// float literal, and `_chz_fdiv`'s guard is `b == 0.0` — Python's `0 == 0.0` is `True`, so an
+/// integer `0` divisor takes the same `inf`/`-inf` branch a float `0.0` divisor would. Pins that
+/// chain for the mixed case specifically: if a future change ever narrows the guard to something
+/// that stops matching an integer `0` (e.g. `b is 0.0`, or an `isinstance` check), this goes red
+/// where the all-float `p0_shim_float_div_signed_zero` would not.
+#[test]
+fn p0_shim_mixed_float_div_zero_divisor() {
+    let cfg = config();
+    for dividend in [1.0, -1.0] {
+        let prog = Program {
+            funcs: vec![],
+            main: vec![Stmt::Print(vec![Expr::Bin {
+                op: BinOp::Div,
+                ty: Ty::Float,
+                l: Box::new(Expr::FloatLit(dividend)),
+                r: Box::new(Expr::IntLit(0)),
+            }])],
+        };
+        let (outcome, chz, py) = run::run_program(&cfg, &prog);
+        assert!(
+            matches!(outcome, Outcome::Match | Outcome::AllowListed(_)),
+            "mixed float div {dividend}/0: {}",
+            difftest::describe(0, &outcome, &chz, &py)
+        );
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Non-tautology guard — prove the oracle actually detects a real divergence.
 // If the shim were removed, raw Python `%` (sign of divisor) differs from Chezzi.
@@ -955,6 +986,43 @@ fn gen_emits_float_div() {
             |_| false
         ),
         "generator never emitted a float division"
+    );
+}
+
+/// Honest int-operand detector, mirror of `is_float_operand` above (same blind spot: `Expr::Var`
+/// carries no type in this IR, so an int var is indistinguishable from a float var at the bare
+/// node — not reproduced as a second float-detection scheme, just the same shapes typed for Int).
+fn is_int_operand(e: &Expr) -> bool {
+    matches!(
+        e,
+        Expr::IntLit(_)
+            | Expr::Bin { ty: Ty::Int, .. }
+            | Expr::Call { ret: Ty::Int, .. }
+            | Expr::Index { ret: Ty::Int, .. }
+    )
+}
+
+/// `gen_float`'s composite arm used to draw both operands from `gen_float` only — int↔float
+/// mixed arithmetic (`1 + 2.0`) was never generated, the last item `docs/gaps.md` W7-37 deferred.
+/// `is_int_operand`/`is_float_operand` are each an UNDER-count (the `Var` blind spot), so this
+/// probe can go red spuriously but never pass vacuously: it only fires on a `Bin { ty: Float }`
+/// where it can positively identify one int-shaped operand AND one float-shaped operand, which
+/// is a strict subset of all mixed nodes actually generated.
+#[test]
+fn gen_emits_mixed_int_float_arith() {
+    assert!(
+        emits(
+            feat_floats(),
+            400,
+            |e| matches!(
+                e,
+                Expr::Bin { ty: Ty::Float, l, r, .. }
+                    if (is_int_operand(l) && is_float_operand(r))
+                        || (is_float_operand(l) && is_int_operand(r))
+            ),
+            |_| false
+        ),
+        "generator never emitted a mixed int/float binary operation"
     );
 }
 
