@@ -3,61 +3,41 @@
 //!
 //! This list is intentionally tiny: the Python shim already absorbs every *documented*
 //! intentional difference (bool/nil spelling, raw nested strings, truncating int `/`/`%`).
-//! An entry here is for a corner we have consciously decided not to chase (e.g. a float
-//! shortest-decimal / scientific-notation crossover where Rust's `{}` and CPython's `repr`
-//! pick different but equivalent spellings). Keep each entry narrow and cite why.
+//! An entry here is for a corner we have consciously decided not to chase — but it must be
+//! narrow, cite why, and must not mask a **value** divergence, only a **formatting** one.
+//!
+//! `MATCHERS` is empty (W7-31, 2026-08-07): the one prior entry, `float_scientific_crossover`,
+//! excused "Rust `{}` vs CPython `repr` pick different scientific-notation crossovers" — but
+//! Chezzi's float stringify (`vm::format_float` → `fmtspec::repr_float`) IS CPython `repr`
+//! parity by construction, pinned by `vm/parity_tests.rs::python_float_repr_str_parity`, so that
+//! divergence cannot occur. The entry was a pure masking device; deleted rather than gated. See
+//! `docs/gaps.md` §W7-31 for the measured crossover-boundary table and the second defect (no
+//! numeric-equality check) it also closes.
 
 use super::ast::Program;
 use super::run::Capture;
 
 type Matcher = fn(Option<&Program>, &Capture, &Capture) -> Option<&'static str>;
 
-const MATCHERS: &[Matcher] = &[float_scientific_crossover];
+// Extension point, deliberately empty — see the module doc above. A future entry goes here.
+const MATCHERS: &[Matcher] = &[];
 
 pub fn check(prog: Option<&Program>, chz: &Capture, py: &Capture) -> Option<&'static str> {
+    // W7-31: an allow-list entry excuses a *formatting* difference between two SUCCESSFUL runs.
+    // A non-zero exit on either side is never that — it's a crash or a fault, and downgrading it
+    // to a non-finding is the exact bug this floor closes. This was filed as a per-MATCHER gate
+    // (`float_scientific_crossover` requiring `code == Some(0)` on both sides) rather than a
+    // call-site floor, reasoning that `MATCHERS` is an extension point and a future entry might
+    // legitimately apply to a fault arm. With zero entries there is no matcher left to gate, so
+    // the floor lives here instead. A future entry that genuinely needs a fault arm moves this
+    // gate down into that matcher (and the others) — it is never simply deleted.
+    if chz.code != Some(0) || py.code != Some(0) {
+        return None;
+    }
     for m in MATCHERS {
         if let Some(reason) = m(prog, chz, py) {
             return Some(reason);
         }
     }
     None
-}
-
-/// Rust's `{}` and CPython `repr` agree on the shortest round-tripping decimal but switch to
-/// scientific notation at different magnitudes (e.g. `1e-05`, `1e+16`). When the only
-/// difference between the two outputs is an `e`-notation token on one side, treat it as the
-/// known float-formatting crossover rather than a semantic bug.
-fn float_scientific_crossover(
-    _prog: Option<&Program>,
-    chz: &Capture,
-    py: &Capture,
-) -> Option<&'static str> {
-    // Text, deliberately: this is a *formatting* heuristic over numeric output. Decoding here
-    // cannot reintroduce the blindness `Capture`'s byte fields close — not because of where this
-    // runs (`classify` reaches `check` from three arms, and only the stdout one has already
-    // byte-compared), but because of the early return below: two byte-different stdouts that
-    // decode ALIKE take `a == b` and yield `None`, so a byte-only divergence can never be
-    // downgraded to `AllowListed` from any arm.
-    let a = chz.stdout_text();
-    let b = py.stdout_text();
-    if a == b {
-        return None;
-    }
-    // Only fires when exactly one side uses exponent notation and the lengths are close —
-    // a conservative guard so it never masks a real arithmetic divergence.
-    let a_sci = a.contains('e') || a.contains('E');
-    let b_sci = b.contains('e') || b.contains('E');
-    if a_sci != b_sci && both_numericish(&a) && both_numericish(&b) {
-        return Some(
-            "float shortest-decimal vs scientific-notation crossover (Rust {} vs CPython repr)",
-        );
-    }
-    None
-}
-
-fn both_numericish(s: &str) -> bool {
-    let t = s.trim();
-    !t.is_empty()
-        && t.chars()
-            .all(|c| c.is_ascii_digit() || matches!(c, '.' | '-' | '+' | 'e' | 'E'))
 }

@@ -2,6 +2,13 @@
 
 Single source of truth for "what am I doing next." Update after every work session.
 
+> **✅ W7-31 FIXED 2026-08-07 — the CPython differential's float allow-list could downgrade a CHEZZI
+> CRASH to a non-finding; deleted rather than gated.** `float_scientific_crossover`'s premise (Rust `{}`
+> vs CPython `repr` disagreeing on the sci-notation crossover) re-derived as dead — Chezzi's float
+> stringify is CPython `repr` parity by construction — so `MATCHERS` is now empty and `allowlist::check`
+> floors on `chz.code == Some(0) && py.code == Some(0)` before the (now-empty) loop. Full write-up:
+> `docs/gaps.md` **§W7-31**.
+
 > **✅ THE SUITE IS FULLY GREEN AGAIN (2026-08-07) — 4014 passed, 0 failed.** The last standing
 > failure, `eager_handshake_is_driven_by_wakeups_not_by_the_poll_timeout`, was a wall-clock bound that
 > could not survive its own suite: it timed 30 cap-1 pipelines and required `< 1 s`, but full-suite CPU

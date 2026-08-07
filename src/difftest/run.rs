@@ -293,6 +293,16 @@ mod tests {
         }
     }
 
+    /// Build a capture with an explicit exit code and stderr — for tests that exercise the
+    /// fault arms `cap` (hardcoded `code: Some(0)`) cannot reach.
+    fn cap_exit(stdout: Vec<u8>, stderr: Vec<u8>, code: Option<i32>) -> Capture {
+        Capture {
+            stdout,
+            stderr,
+            code,
+        }
+    }
+
     /// The CPython differential oracle must diff **bytes**. `String::from_utf8_lossy` is not
     /// injective — `ff fe` and `fe ff` both decode to two U+FFFD — so a decoded compare reports
     /// `Match` for a run where Chezzi and CPython put DIFFERENT bytes on fd 1. Both sides can
@@ -332,6 +342,43 @@ mod tests {
                 && report.contains("chezzi: ff fe")
                 && report.contains("python: fe ff"),
             "byte-only divergence report must spell out both byte strings, per side:\n{report}"
+        );
+    }
+
+    /// W7-31: the float allow-list looked only at stdout, never at exit code, so a Chezzi
+    /// FAULT (`1e-05` then exit 1) next to a clean CPython run (`0.00001`, exit 0) was
+    /// downgraded to `AllowListed` — a crash reported as a non-finding.
+    #[test]
+    fn a_chezzi_fault_next_to_a_float_reformat_is_not_allow_listed() {
+        let chz = cap_exit(b"1e-05\n".to_vec(), b"runtime error: ...".to_vec(), Some(1));
+        let py = cap_exit(b"0.00001\n".to_vec(), Vec::new(), Some(0));
+        assert!(
+            matches!(
+                classify(chz, py, None),
+                Outcome::Divergence {
+                    kind: DivKind::ChezziFault,
+                    ..
+                }
+            ),
+            "a Chezzi fault must never be masked by the float-formatting allow-list"
+        );
+    }
+
+    /// W7-31, `PythonFault` arm: the same shape must not be allow-listed when it's Python that
+    /// faulted, since the excuse is about float *formatting*, and neither side ran to see one.
+    #[test]
+    fn a_python_fault_next_to_a_float_reformat_is_not_allow_listed() {
+        let chz = cap_exit(b"1e-05\n".to_vec(), Vec::new(), Some(0));
+        let py = cap_exit(b"0.00001\n".to_vec(), Vec::new(), Some(1));
+        assert!(
+            matches!(
+                classify(chz, py, None),
+                Outcome::Divergence {
+                    kind: DivKind::PythonFault,
+                    ..
+                }
+            ),
+            "a Python fault must never be masked by the float-formatting allow-list"
         );
     }
 }
