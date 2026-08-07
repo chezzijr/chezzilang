@@ -857,6 +857,13 @@ fn gen_emits_float_binop() {
 /// blind spot is acceptable here: it only means some float-comparison hits go unseen by this
 /// probe, not that the probe can pass vacuously — a `FloatLit`-only predicate would also miss
 /// the interesting shapes, which is exactly the failure mode this is guarding against.
+///
+/// The blind spot is an UNDER-count, measured, not assumed: dumping the emitted source for seeds
+/// 0..400 shows float-`Var` comparisons really are generated (`(6.125 > v2)` at seed 2,
+/// `(v6 != -0.00000000000000000008131516293641283)` at seed 3) alongside the shapes this
+/// predicate does see (`(-2146246697418752.0 > (3.375 - -7.75))` at seed 1). So the probe
+/// fires on strictly fewer programs than actually contain a float comparison — the safe
+/// direction: it can go red spuriously, never green vacuously.
 fn is_float_operand(e: &Expr) -> bool {
     matches!(
         e,
