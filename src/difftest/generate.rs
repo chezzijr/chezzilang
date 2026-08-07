@@ -904,9 +904,17 @@ impl Gen {
     /// addend entirely. Rounding here is harmless — it is deterministic and identical on both
     /// sides — but nothing may lean on exactness (W7-38).
     ///
-    /// Float `Div` is deliberately left out: a zero divisor diverges (CPython raises
-    /// `ZeroDivisionError`) and inexact quotients widen the formatting surface all at once.
-    /// Filed as the next step in `docs/gaps.md` W7-37.
+    /// Three float surfaces are deliberately still unreachable, in the order they should land —
+    /// all filed in `docs/gaps.md` W7-37:
+    ///
+    /// 1. **Comparison.** `gen_bool`'s comparison arm calls `gen_int` for BOTH operands, so
+    ///    `< <= > >= == !=` on floats is never generated. Cheapest of the three (one arm beside
+    ///    the existing int one, no new value model) and the most valuable: everything here
+    ///    exercises how a float *renders*, and nothing yet compares two floats for their VALUE.
+    /// 2. **`Div`.** A zero divisor diverges (CPython raises `ZeroDivisionError`) and inexact
+    ///    quotients widen the formatting surface all at once; wants a non-zero-divisor
+    ///    discipline like `gen_int`'s.
+    /// 3. **Int↔float mixing** (`1 + 2.0`), which needs a coercion model the IR does not have.
     fn gen_float(&mut self, depth: usize) -> Expr {
         let at_leaf = depth >= MAX_EXPR_DEPTH;
         // Inside an in-loop `+=`/`-=` RHS a mutable float var would compound geometrically across

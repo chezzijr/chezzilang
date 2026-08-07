@@ -8141,11 +8141,17 @@ top-level and nested in a list/map/tuple. Verified directly: `print(0.125 * 8.47
 and `print(9.625 * 1152921504606846976.0)` are byte-identical between `chezzi run` and `python3`
 (`1.0587911840678753e-23`, `1.1096869481840902e+19`).
 
-**Deferred, in order.** (1) Float `Div`: a zero divisor diverges (CPython raises
-`ZeroDivisionError`) and inexact quotients widen the formatting surface a lot at once — it wants
-its own pass with a non-zero-divisor discipline like `gen_int`'s. (2) Int↔float mixed arithmetic
-(`1 + 2.0`), which needs a coercion model in the IR the generator does not have today. Both are
-commented at `gen_float`'s definition so the next reader finds them there, not only here.
+**Deferred, in order.** (1) Float **comparison** — `gen_bool`'s comparison arm calls `gen_int` for
+BOTH operands, so `<` / `<=` / `>` / `>=` / `==` / `!=` on floats is still never generated (measured
+2026-08-07: `gen_bool` mentions `Ty::Float` nowhere). Same species as the hole this section closes,
+and the cheapest of the three — it is one extra arm beside the existing int one, with no new value
+model. It matters because float comparison is where a formatting-independent divergence would live:
+`W7-32` was a *rendering* bug, and nothing here yet compares two floats for their VALUE. (2) Float
+`Div`: a zero divisor diverges (CPython raises `ZeroDivisionError`) and inexact quotients widen the
+formatting surface a lot at once — it wants its own pass with a non-zero-divisor discipline like
+`gen_int`'s. (3) Int↔float mixed arithmetic (`1 + 2.0`), which needs a coercion model in the IR the
+generator does not have today. All three are commented at `gen_float`'s definition so the next reader
+finds them there, not only here.
 
 **Tests.** `tests/difftest.rs` gained `fuzz_floats` (core features + `floats: true`, seeds 0..200,
 kept as its own gate so a future `Features::full()` edit cannot silently take float coverage back
