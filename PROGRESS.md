@@ -49,6 +49,22 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > the diff against real CPython output found them. **`adversarial-review` is not optional after a
 > green gate — it is the only stage that has ever caught this class here.**
 
+> **✅ W7-30 FIXED 2026-08-07 — the CPython differential oracle diffed a LOSSY DECODE, so a byte-only
+> divergence reported `Match`.** `run.rs` read raw `Vec<u8>` off the child's pipe and discarded it one
+> line later; `from_utf8_lossy` is not injective, so a run where Chezzi wrote `ff fe` and CPython wrote
+> `fe ff` was classified as agreement. Both sides can emit non-UTF-8 (`write_bytes` since W6-9;
+> `sys.stdout.buffer.write` always) — CPython, Go and `chezzi run` all put `ff fe` on fd 1, measured, so
+> the runtime was right and only the detector was blind. `Capture.stdout`/`.stderr` are now `Vec<u8>`,
+> which makes the blind compare **unrepresentable** rather than merely fixed; `stdout_text()` (`Cow<str>`)
+> serves the report, `is_host_panic`, and the float-formatting allow-list matcher, which only ever runs
+> after the byte compare has already found a difference.
+>
+> Found by **re-deriving `W6-9r` item 1 instead of trusting its filed price** — and item 1 is now
+> **closed as WON'T FIX**: its ~60 hand-rolled cross-engine compares (under-recorded as "~31") all die
+> with `--serial` per `future.md` §2b, which converts each into a single-engine golden test against a
+> UTF-8 literal, where a decode hides nothing. The same re-derivation found the identical hole in the
+> oracle that *outlives* `--serial`. Full write-up: `docs/gaps.md` **§W7-30**.
+
 > **✅ W7-29 FIXED 2026-08-07 — a task whose whole body is ONE native call was never sampled: the cap
 > tracked who ran BYTECODE, not who held bytes.** Closes `W6-10s` residual (a), open since 2026-08-06
 > and filed as having "no safe sample point" — the sentence that kept it shelved, and it was wrong.

@@ -32,8 +32,14 @@ fn float_scientific_crossover(
     chz: &Capture,
     py: &Capture,
 ) -> Option<&'static str> {
-    let a = &chz.stdout;
-    let b = &py.stdout;
+    // Text, deliberately: this is a *formatting* heuristic over numeric output. Decoding here
+    // cannot reintroduce the blindness `Capture`'s byte fields close — not because of where this
+    // runs (`classify` reaches `check` from three arms, and only the stdout one has already
+    // byte-compared), but because of the early return below: two byte-different stdouts that
+    // decode ALIKE take `a == b` and yield `None`, so a byte-only divergence can never be
+    // downgraded to `AllowListed` from any arm.
+    let a = chz.stdout_text();
+    let b = py.stdout_text();
     if a == b {
         return None;
     }
@@ -41,7 +47,7 @@ fn float_scientific_crossover(
     // a conservative guard so it never masks a real arithmetic divergence.
     let a_sci = a.contains('e') || a.contains('E');
     let b_sci = b.contains('e') || b.contains('E');
-    if a_sci != b_sci && both_numericish(a) && both_numericish(b) {
+    if a_sci != b_sci && both_numericish(&a) && both_numericish(&b) {
         return Some(
             "float shortest-decimal vs scientific-notation crossover (Rust {} vs CPython repr)",
         );

@@ -81,6 +81,14 @@ and composes cleanly with `recover:`. **Recommend `defer`.**
 | Scheduler races / lost-wakeups | **Seeded / deterministic-interleaving mode for M:N** (the `loom`/`shuttle` pattern): explore many schedules from a seed, replay on failure. This — not an external language — is the real replacement for serial's race-finding job; a reference language's scheduler is *also* nondeterministic, so diffing two nondeterministic schedulers catches nothing. Stronger than serial==M:N (one schedule pair). |
 | Airlock / structured-concurrency semantics (no external equivalent) | Hand-written **known-answer** tests |
 
+**Every oracle in that table compares RAW BYTES.** `String::from_utf8_lossy` is not injective (`ff`
+and `fe` both become one U+FFFD), so a decoded compare reports agreement for a run whose two sides put
+different bytes on fd 1 — and both Chezzi (`io.stdout().write_bytes`, byte-exact since W6-9) and the
+reference languages (CPython `sys.stdout.buffer.write`, Go `os.Stdout.Write`, both measured `ff fe`)
+can emit non-UTF-8. This has already been the live shape of three separate holes (W6-9, W6-9b, and the
+CPython differential itself — `gaps.md` W7-30), so the Go paired-programs differential must be born
+with it: capture `Vec<u8>`, keep the decode for *display and text heuristics only*, never for a verdict.
+
 **Net:** CPython (sequential) + Go (channel/select semantics) + seeded-M:N (races) + known-answer (airlock)
 together cover **more** than serial==M:N did, and none of them constrain the M:N engine's design. The
 freeze is the natural cut point: post-JIT, serial byte-identity is impossible anyway.

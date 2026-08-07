@@ -301,6 +301,12 @@ arithmetic, bool/str ops, `if`/`for`/`while`, non-recursive functions, list/map/
 widened families below). One abstract IR (`ast.rs`) is rendered by two backends — `emit_chezzi`
 (native ops/`print`) and `emit_python` — and the two are run and their stdout diffed (`run.rs`).
 
+The diff is on **raw bytes**, not on decoded text (`Capture.stdout` is `Vec<u8>`): `from_utf8_lossy`
+is not injective, so a decoded compare would call `ff fe` vs `fe ff` a `Match`, and both sides can
+emit non-UTF-8 (`io.stdout().write_bytes`, CPython `sys.stdout.buffer.write`). `Capture::stdout_text()`
+decodes for the report and the allow-list's formatting heuristic only — never for a verdict
+(`gaps.md` W7-30).
+
 **Widened construct coverage** (granular `Features` flags, all on in `full()`):
 - **String methods** (`string_methods`): the eight ASCII-identical methods `upper`/`lower`/`replace`/
   `split`/`join`/`starts_with`/`ends_with`/`contains`. The emitters map names per language

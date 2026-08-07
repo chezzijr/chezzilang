@@ -35,21 +35,32 @@ pub fn describe(seed: u64, outcome: &Outcome, chz_src: &str, py_src: &str) -> St
     match outcome {
         Outcome::Divergence { kind, chz, py } => {
             s.push_str(&format!("kind: {kind:?}\n"));
+            // Decoded for the human reading the report. When the two sides are byte-different but
+            // decode alike (non-UTF-8 output), the text below looks identical — so spell the raw
+            // bytes out too, or the report would contradict the verdict.
             s.push_str(&format!(
                 "--- chezzi stdout ---\n{}\n--- python stdout ---\n{}\n",
-                chz.stdout, py.stdout
+                chz.stdout_text(),
+                py.stdout_text()
             ));
-            if !chz.stderr.trim().is_empty() {
-                s.push_str(&format!("--- chezzi stderr ---\n{}\n", chz.stderr));
+            if *kind == run::DivKind::Stdout && chz.stdout_text() == py.stdout_text() {
+                s.push_str(&format!(
+                    "--- stdout differs in RAW BYTES ONLY (the decode above is lossy) ---\nchezzi: {}\npython: {}\n",
+                    hex(&chz.stdout),
+                    hex(&py.stdout)
+                ));
             }
-            if !py.stderr.trim().is_empty() {
-                s.push_str(&format!("--- python stderr ---\n{}\n", py.stderr));
+            if !chz.stderr_text().trim().is_empty() {
+                s.push_str(&format!("--- chezzi stderr ---\n{}\n", chz.stderr_text()));
+            }
+            if !py.stderr_text().trim().is_empty() {
+                s.push_str(&format!("--- python stderr ---\n{}\n", py.stderr_text()));
             }
         }
         Outcome::HostPanic { chz } => {
             s.push_str(&format!(
                 "--- chezzi stderr (RUST PANIC) ---\n{}\n",
-                chz.stderr
+                chz.stderr_text()
             ));
         }
         Outcome::Timeout { which } => s.push_str(&format!("timed out: {which}\n")),
@@ -59,6 +70,15 @@ pub fn describe(seed: u64, outcome: &Outcome, chz_src: &str, py_src: &str) -> St
     s.push_str(&format!("--- chezzi source ---\n{chz_src}\n"));
     s.push_str(&format!("--- python source ---\n{py_src}\n"));
     s
+}
+
+/// Space-separated lowercase hex — the only rendering that survives a byte-only divergence.
+fn hex(bytes: &[u8]) -> String {
+    bytes
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn kind_label(o: &Outcome) -> &'static str {

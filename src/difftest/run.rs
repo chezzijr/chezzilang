@@ -15,11 +15,32 @@ use std::time::{Duration, Instant};
 
 static NONCE: AtomicU64 = AtomicU64::new(0);
 
+/// What a process actually wrote, as RAW BYTES.
+///
+/// Not `String`: `String::from_utf8_lossy` is not injective (`ff` and `fe` both become one
+/// U+FFFD), so a decoded compare would report `Match` for a run whose two engines put DIFFERENT
+/// bytes on fd 1 — and both sides can emit non-UTF-8 (`io.stdout().write_bytes` since W6-9,
+/// CPython's `sys.stdout.buffer.write` always). Keeping only the bytes makes the blind compare
+/// unrepresentable; [`Capture::stdout_text`] / [`Capture::stderr_text`] decode for *display and
+/// text heuristics only*, never for a verdict. Same class as the parity-oracle hole W6-9b closed.
 #[derive(Clone, Debug)]
 pub struct Capture {
-    pub stdout: String,
-    pub stderr: String,
+    pub stdout: Vec<u8>,
+    pub stderr: Vec<u8>,
     pub code: Option<i32>, // None => killed by signal / timeout
+}
+
+impl Capture {
+    /// stdout decoded for a human (report text, allow-list heuristics). Lossy — never compare
+    /// two of these to decide a verdict; compare the `stdout` bytes.
+    pub fn stdout_text(&self) -> std::borrow::Cow<'_, str> {
+        String::from_utf8_lossy(&self.stdout)
+    }
+
+    /// stderr decoded for a human. Same caveat as [`Capture::stdout_text`].
+    pub fn stderr_text(&self) -> std::borrow::Cow<'_, str> {
+        String::from_utf8_lossy(&self.stderr)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -126,6 +147,8 @@ fn classify(chz: Capture, py: Capture, prog: Option<&Program>) -> Outcome {
     let py_ok = py.code == Some(0);
 
     if chz_ok && py_ok {
+        // BYTES (see `Capture`) — a decoded compare folds `ff fe` and `fe ff` into the same
+        // two-U+FFFD string and would call a genuine divergence a `Match`.
         if chz.stdout == py.stdout {
             return Outcome::Match;
         }
@@ -141,7 +164,7 @@ fn classify(chz: Capture, py: Capture, prog: Option<&Program>) -> Outcome {
 
     if !chz_ok {
         // A Rust host panic is the single highest-value finding — never an allow-list case.
-        if is_host_panic(&chz.stderr) {
+        if is_host_panic(&chz.stderr_text()) {
             return Outcome::HostPanic { chz };
         }
         if py_ok {
@@ -250,8 +273,65 @@ fn run_one(cmd: &mut Command, timeout: Duration) -> Option<Capture> {
     let stdout = out_h.join().ok()?;
     let stderr = err_h.join().ok()?;
     Some(Capture {
-        stdout: String::from_utf8_lossy(&stdout).into_owned(),
-        stderr: String::from_utf8_lossy(&stderr).into_owned(),
+        stdout,
+        stderr,
         code: status.code(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Build a clean-exit capture from the RAW BYTES a process wrote to stdout. Only the
+    /// construction adapts to `Capture`'s field type; the assertions below never change.
+    fn cap(stdout: Vec<u8>) -> Capture {
+        Capture {
+            stdout,
+            stderr: Vec::new(),
+            code: Some(0),
+        }
+    }
+
+    /// The CPython differential oracle must diff **bytes**. `String::from_utf8_lossy` is not
+    /// injective — `ff fe` and `fe ff` both decode to two U+FFFD — so a decoded compare reports
+    /// `Match` for a run where Chezzi and CPython put DIFFERENT bytes on fd 1. Both sides can
+    /// emit non-UTF-8 today (`io.stdout().write_bytes` since W6-9; CPython's
+    /// `sys.stdout.buffer.write` always could), and this oracle is the one `docs/future.md §2b`
+    /// keeps after `--serial` is deleted. Same class as the parity-oracle hole W6-9b closed.
+    #[test]
+    fn a_byte_only_divergence_is_not_a_match() {
+        let chz = cap(vec![0xff, 0xfe]);
+        let py = cap(vec![0xfe, 0xff]);
+        assert_eq!(
+            chz.stdout_text(),
+            py.stdout_text(),
+            "premise: the lossy decode really does fold these two into one string"
+        );
+        assert!(
+            matches!(
+                classify(chz, py, None),
+                Outcome::Divergence {
+                    kind: DivKind::Stdout,
+                    ..
+                }
+            ),
+            "a byte-only stdout divergence must be a Divergence, not a Match"
+        );
+    }
+
+    /// The report must not contradict the verdict: both decoded stdouts render identically here,
+    /// so without the raw-byte line a reader sees "Divergence" over two identical blocks.
+    #[test]
+    fn a_byte_only_divergence_reports_the_raw_bytes() {
+        let outcome = classify(cap(vec![0xff, 0xfe]), cap(vec![0xfe, 0xff]), None);
+        let report = super::super::describe(0, &outcome, "<chz>", "<py>");
+        // Bind each byte string to its SIDE — `contains` alone passes with the two swapped.
+        assert!(
+            report.contains("RAW BYTES ONLY")
+                && report.contains("chezzi: ff fe")
+                && report.contains("python: fe ff"),
+            "byte-only divergence report must spell out both byte strings, per side:\n{report}"
+        );
+    }
 }
