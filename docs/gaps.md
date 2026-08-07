@@ -7506,7 +7506,7 @@ cpython    1e+16   1000000000000000.0   0.0001   1e-05     1234567890123456.0   
 ```
 
 Byte-identical throughout — not by luck: `vm::format_float` (`src/vm/mod.rs:4135-4140`) delegates to
-`fmtspec::repr_float` (`src/fmtspec.rs:443`), which implements CPython's `repr()`/`str()` crossover
+`fmtspec::repr_float` (`src/fmtspec.rs:455`), which implements CPython's `repr()`/`str()` crossover
 rule directly (scientific when the decimal exponent is `< -4` or `>= 16`). The entry described a
 divergence that does not occur.
 
