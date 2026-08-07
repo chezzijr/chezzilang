@@ -39,11 +39,11 @@ pub struct Features {
 }
 
 impl Features {
-    /// Everything we trust today. Floats stay off by default: the two known float-format
-    /// divergences are now closed (the sci-notation crossover was never real — `W7-31`; the
-    /// shortest-repr tie WAS — `W7-32`, fixed 2026-08-07), but turning them on is its own task
-    /// — `gen_float` also has to stop restricting itself to short exact-ish decimals before this
-    /// oracle could have found `W7-32` on its own.
+    /// Everything we trust today, floats included. They were off until `W7-37`: the two known
+    /// float-format divergences are closed (the sci-notation crossover was never real —
+    /// `W7-31`; the shortest-repr tie WAS — `W7-32`), and `gen_float` now emits real arithmetic
+    /// over both sides of the sci-notation crossover instead of a single shared literal, so the
+    /// flag finally buys coverage rather than the appearance of it.
     pub fn full() -> Self {
         Features {
             div_mod: true,
@@ -51,7 +51,7 @@ impl Features {
             while_loops: true,
             collections: true,
             functions: true,
-            floats: false,
+            floats: true,
             string_methods: true,
             slicing: true,
             membership: true,
@@ -359,11 +359,12 @@ impl Gen {
     }
 
     fn gen_assign(&mut self) -> Option<Stmt> {
-        let ints = self.int_assign_targets();
-        if ints.is_empty() {
+        let targets = self.assign_targets();
+        if targets.is_empty() {
             return None;
         }
-        let idx = *self.rng.choice(&ints);
+        let idx = *self.rng.choice(&targets);
+        let ty = self.scope[idx].ty.clone();
         let in_loop = self.loop_mult > 1;
         // In a loop, only additive mutation, and widen the target's bound pessimistically.
         let op = if in_loop {
@@ -383,8 +384,18 @@ impl Gen {
         // bignums absorb it. Restricting to loop-stable leaves keeps the widen bound exact.
         let prev = self.in_loop_rhs;
         self.in_loop_rhs = in_loop;
-        let (value, vbound) = self.gen_expr(&Ty::Int, 1);
+        let (value, vbound) = self.gen_expr(&ty, 1);
         self.in_loop_rhs = prev;
+        // Only Int carries a tracked bound. A float target needs none: `gen_float`'s leaves are
+        // exact binary fractions and an in-loop RHS reads no float var (see `gen_float`), so an
+        // accumulator grows at most `loop_mult * 1e8` — exact, and far from the f64 range.
+        if ty != Ty::Int {
+            return Some(Stmt::Assign {
+                name: self.scope[idx].name.clone(),
+                op,
+                value,
+            });
+        }
         match op {
             AssignOp::Set => {
                 self.scope[idx].bound = vbound.min(MAX_BOUND);
@@ -407,11 +418,12 @@ impl Gen {
         })
     }
 
-    fn int_assign_targets(&self) -> Vec<usize> {
+    /// Scalars we can mutate: Int (bound-tracked) and Float (no bound needed — see `gen_assign`).
+    fn assign_targets(&self) -> Vec<usize> {
         self.scope
             .iter()
             .enumerate()
-            .filter(|(_, v)| v.ty == Ty::Int && !v.reserved)
+            .filter(|(_, v)| matches!(v.ty, Ty::Int | Ty::Float) && !v.reserved)
             .map(|(i, _)| i)
             .collect()
     }
@@ -777,6 +789,18 @@ impl Gen {
             return Expr::BoolLit(self.rng.chance(0.5));
         }
         // composite bool
+        if self.feat.functions
+            && self.rng.chance(0.2)
+            && let Some((e, _)) = self.try_call(&Ty::Bool)
+        {
+            return e;
+        }
+        if self.feat.collections
+            && self.rng.chance(0.15)
+            && let Some((e, _)) = self.try_index(&Ty::Bool)
+        {
+            return e;
+        }
         if self.feat.membership
             && self.rng.chance(0.3)
             && let Some(e) = self.try_membership()
@@ -822,7 +846,19 @@ impl Gen {
             }
             return Expr::StrLit(self.rand_str());
         }
-        // string method (upper/lower/replace/join) or slice of a str
+        // call / index / string method (upper/lower/replace/join) / slice of a str
+        if self.feat.functions
+            && self.rng.chance(0.2)
+            && let Some((e, _)) = self.try_call(&Ty::Str)
+        {
+            return e;
+        }
+        if self.feat.collections
+            && self.rng.chance(0.15)
+            && let Some((e, _)) = self.try_index(&Ty::Str)
+        {
+            return e;
+        }
         if self.feat.string_methods
             && self.rng.chance(0.35)
             && let Some(e) = self.try_str_method()
@@ -846,10 +882,76 @@ impl Gen {
         }
     }
 
-    fn gen_float(&mut self, _depth: usize) -> Expr {
-        // restricted to short exact-ish decimals (n/8) to dodge the formatting crossover
-        let n = self.rng.range_i64(-80, 80);
-        Expr::FloatLit(n as f64 / 8.0)
+    /// Float expressions, same shape as `gen_int`. Leaves are `n/8` — exact binary fractions —
+    /// so `+ - *` over them stay exactly representable at every magnitude reachable here (at
+    /// `MAX_EXPR_DEPTH` the worst case is 8 leaves: `80^8 / 8^8`, numerator < 2^53). Both engines
+    /// then compute the identical IEEE-754 double and the only thing that can differ is
+    /// *formatting* — which is exactly the seam this is here to exercise, and exactly the seam
+    /// that hid `W7-32` (shortest-repr ties rounding away from zero) from this oracle while
+    /// `gen_float` could only emit a literal both emitters rendered from the same `float_lit`.
+    ///
+    /// Float `Div` is deliberately left out: a zero divisor diverges (CPython raises
+    /// `ZeroDivisionError`) and inexact quotients widen the formatting surface all at once.
+    /// Filed as the next step in `docs/gaps.md` W7-37.
+    fn gen_float(&mut self, depth: usize) -> Expr {
+        let at_leaf = depth >= MAX_EXPR_DEPTH;
+        // Inside an in-loop `+=`/`-=` RHS a mutable float var would compound geometrically across
+        // iterations exactly like the int accumulator does (`gen_assign`); loop counters are the
+        // only loop-stable vars, and they are never floats — so read no float var at all there.
+        let float_vars = if self.in_loop_rhs {
+            Vec::new()
+        } else {
+            self.vars_of(&Ty::Float)
+        };
+        if at_leaf || self.rng.chance(0.45) {
+            if !float_vars.is_empty() && self.rng.chance(0.5) {
+                let i = *self.rng.choice(&float_vars);
+                return Expr::Var(self.scope[i].name.clone());
+            }
+            return Expr::FloatLit(self.float_leaf());
+        }
+        // call / index leaves — both loop-stable (a callee is non-recursive and reads no mutable
+        // outer var; a list/map var is never mutated after its literal init).
+        if self.feat.functions
+            && self.rng.chance(0.2)
+            && let Some((e, _)) = self.try_call(&Ty::Float)
+        {
+            return e;
+        }
+        if self.feat.collections
+            && self.rng.chance(0.15)
+            && let Some((e, _)) = self.try_index(&Ty::Float)
+        {
+            return e;
+        }
+        let op = *self.rng.choice(&[BinOp::Add, BinOp::Sub, BinOp::Mul]);
+        let l = self.gen_float(depth + 1);
+        let r = self.gen_float(depth + 1);
+        Expr::Bin {
+            op,
+            ty: Ty::Float,
+            l: Box::new(l),
+            r: Box::new(r),
+        }
+    }
+
+    /// A float leaf: `n/8`, sometimes scaled by a power of two.
+    ///
+    /// `n/8` alone tops out around `1e8` at `MAX_EXPR_DEPTH` — nowhere near either
+    /// scientific-notation crossover (`|x| >= 1e16` / `< 1e-4`), which is precisely where
+    /// shortest-repr formatting is most delicate and where `W7-32` lived. Scaling by `2^e`
+    /// reaches both sides while introducing NO new rounding: a power of two only moves the
+    /// exponent field, so the mantissa (and therefore the exactness argument in `gen_float`)
+    /// is untouched. `e` stays inside `[-70, 60]` so an 8-leaf product cannot reach `inf`
+    /// (worst case `~1e152`) or the subnormal range.
+    fn float_leaf(&mut self) -> f64 {
+        let n = self.rng.range_i64(-80, 80) as f64 / 8.0;
+        let e = match self.rng.below(4) {
+            0 => self.rng.range_i64(-70, -20) as i32,
+            1 => self.rng.range_i64(20, 60) as i32,
+            _ => 0,
+        };
+        n * 2f64.powi(e)
     }
 
     // ---- expression sub-builders ---------------------------------------------

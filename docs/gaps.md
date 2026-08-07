@@ -71,6 +71,7 @@ chronological log.
 | ~~**W7-26r**~~ | `:6929` | **FIXED 2026-08-06, both halves (the join residual AND the pool-queue sibling), premises re-derived on the release binary first.** `--max-heap` was never observed while the parent fiber sat in a join — `over_cap` is assigned only in `sweep()`, which runs only at the parent's own instruction boundary, and a parent inside `Executor.shutdown()` or a `parallel:` join reaches none. Against an 8 MB cap: an executor whose 300 jobs each buffer ~1 MB of output **PASSED at 622 MB**, and the same shape under `parallel:`/`spawn` **PASSED at 733 MB** — the nursery half counted NOWHERE at all, its outcome slots living in `SchedCore::slots`, outside every `Heap`. **Both owning ancestors put the observation on the ALLOCATOR, never on the blocked consumer** (measured, not reasoned): CPython 3.14.6's `ThreadPoolExecutor` under a 300 MB `RLIMIT_AS` raised `MemoryError` **in the worker at job 57/500** while `main` sat in `ex.shutdown()`; Go 1.26 under `GOMEMLIMIT=32MiB` + `GOGC=off` ran **7 GC cycles while `main` was blocked** in `wg.Wait()`. So the fix is `core::halt_over_backlog`, called by the two producers (`dispatch_eager_job`'s pool closure and `MnSched::finish`): the thread that finished a task adds its outcome to the join's retained-byte total and, if that backlog ALONE exceeds the whole cap, replaces its own `Done`/`Cancelled` with a hard-halt over-memory `Fault` and trips its scope/core cancel. Everything downstream is reused — `reduce_task_slots`' `Exit > hard-halt > ordinary` precedence propagates it and `recover:` cannot catch it. It cannot false-positive: the trip needs the retained backlog by itself to exceed the cap, and those bytes are held until the join reduces. **PASS → OVER-MEMORY on both, generous-cap and 300-tiny-spawn controls still PASS.** The SIBLING (queued-but-not-started jobs) is the same story one layer out: `prepare_eager_job` rebuilds each submitted closure into its own worker `Vm` at submit, so a queue deeper than the pool is N whole worker heaps — each under a per-heap cap, summing to **666 MB past an 8 MB cap** — now owned by the submitter (`ExecutorCore::pending`, added at dispatch, removed the instant a pool thread takes the job, so it never double-counts the running heap's own charge) | **Counting them is worthless if nothing looks — for the THIRD time in this family.** With the sibling's accounting alone the 666 MB program still PASSED: a loop submitting slow jobs finishes none of them, so `take_charge` stays 0 and the parent (which allocates almost nothing per submit) never sweeps. Fixed by pacing on the same bytes at the same site. Second lesson, from the review that made this test honest: the obvious control — same 1 MB capture, fast job body, assert the pool keeps up — **FAILED under full-suite load**, because a busy machine really does let ~48 jobs queue and ~48 MB really is live, so the trip was CORRECT and the assertion was wrong. A cap verdict is load-dependent by nature (both ancestors are too), so the control had to shrink the PAYLOAD rather than rely on timing. Filed then as still open, BOTH now closed: the general `W6-10s` residual (a) — a heap that grows for reasons OTHER than a join backlog while its fiber is inside one native call — fixed by **`W7-29`** 2026-08-07 (`Vm::start_task` samples before dispatch); and per-heap containment is not per-process containment, closed 2026-08-07 as BY DESIGN after measuring both ancestors (CPython's `RLIMIT_AS` aborts, Go's `GOMEMLIMIT` does not — they disagree, and Chezzi's PASS matches Go), so a nursery of N tasks each individually under the cap still peaks high (reduction-count preemption interleaves all N payload builds) even though the verdict is now right. Third: the filed premise had DECAYED and the shape had to be rebuilt before the fix — the row's own repro was return-value-based, and `W7-27` (landed hours earlier) frees those, so every repro here is output-based instead |
 | ~~**W7-26**~~ | `:6871` | **FIXED 2026-08-06 (found by adversarial review of the `W6-10r` fix, premise re-derived on the release binary before any edit).** `--max-heap` read only the `Executor` core's `inner` QUEUE half, which is the `--serial` half: on the default M:N engine `submit` runs EAGERLY (matching `ThreadPoolExecutor`), so `inner` stays empty forever and every finished job's result lands in `eager.slots` as `TaskOutcome::Done(WorkerResult { value, out, stderr })` — reached by `live_bytes` nowhere. `Executor()` + a ~1 MB blob + `300 × ex.submit(fn() -> str: blob)` + `shutdown()` under `--max-heap=8000000`: **PASS, rc=0, peak RSS 313 MB → OVER-MEMORY, rc=1, 11 MB**; generous-cap (4 GB) and no-cap controls still PASS. `EagerState` gained the `(bytes, dirty)` summary `ChanState`/`ExecState` already carry, maintained in `finish`/`take_slots` over a PRIVATE slot vector (so no site can forget), and the `live_bytes` arm now sums BOTH halves. The charge is **unconditional**, unlike the `mem_cap != 0` gates elsewhere in this family: it fires once per finished job beside a thread handoff, and both ancestors keep accounting live with the *limit* separate (Go's `runtime.MemStats` vs `GOMEMLIMIT`). Rooting unchanged and now FENCED rather than reasoned about — a result crosses by value with no parent-heap `GcRef` (B3.2, enforced by `ensure_crossable`), asserted by a `debug_assert!(!w.has_handle())` in `outcome_summary` that says `Heap::children` needs an eager arm if it ever fires | **Counting is worthless if nothing samples, and the fix's first cut proved it twice.** With the accounting alone the repro tripped at **180 MB**, not 11 MB: `submit` wires the closure but nothing charged the RESULTS against the parent's GC pacing counter, so the parent swept only on its own `Obj` growth — closed by `EagerState::take_charge` (growth-since-last-read, charged at `submit` under a live cap). A SECOND shape survives even that and is filed below as an open residual, because it is the W6-10s sampling class rather than this one: a job that BUILDS its own payload (`ex.submit(mk)`, no capture) wires ~nothing at submit and all 300 submits complete before any job finishes, so `take_charge` sees 0 each time and the whole 330 MB accumulates while the parent is blocked inside `shutdown()`'s join — where there is no sample point at all. Adding ONE allocating statement to the parent turns that same program OVER-MEMORY (rc=1), which is what proves the accounting half is right and the gap is purely observational |
 | **W6-9r** | `:1473` | Parity-oracle residual left by the `W6-9b` fix: hand-rolled `run_file_p` + `run_file` cross-engine compares still diff LOSSILY-DECODED strings, and `parity_entry_cfg_lines` compares stdout as an order-insensitive line multiset | **Item 1 CLOSED as WON'T FIX 2026-08-07; items 2–4 open on their existing terms.** Scope was under-recorded: not "~31 in `parity_tests.rs`" but **~60 sites** across `parity_tests.rs` + `src/vm/tests.rs` + `src/native/cffi.rs` (e.g. `tests.rs:8180`/`:8183`, `cffi.rs:2280`). Not worth converting, because **these compares die with `--serial`**: `future.md §2b`'s migration mechanics turn each pair into a single-engine (M:N) GOLDEN test, and a golden compares against a UTF-8 literal — where "a decode cannot hide anything when the other side is a UTF-8 literal" (item 3's own finding). UTF-8-only today, so nothing is failing; a byte-emitting test added at one of those sites must use `vm::run_file_bytes`. What the re-derivation DID find is the same hole in the oracle that OUTLIVES `--serial` — the CPython differential — filed and fixed as `W7-30` |
+| ~~**W7-37**~~ | `:7938` | **FIXED 2026-08-07 (found by an audit of what the CPython differential GENERATES, the last unexamined half of the oracle after `W7-30`–`W7-36` audited what it REPORTS).** `gen_float` ignored its `depth` and always returned an `n/8` literal that both emitters rendered from the same shared `float_lit`, so `Expr::Bin { ty: Ty::Float }` was **never generated** and `emit_python`'s float fall-through was dead code; `Features::full()` had `floats: false` on top of that. Separately `try_call`/`try_index` were only ever asked for `Ty::Int`, so ~2/3 of generated functions were emitted and **never called** and non-int element reads never happened. Both engines "agreed" on all of it because neither executed it | **Coverage that both engines agree on because neither runs it is not coverage — and the proof is `W7-32`.** That was a real float-repr bug (shortest-repr ties rounding away from zero) in exactly the formatting seam this oracle owns, and the oracle could not have found it: a hand-written differential did. `gen_float` is now recursive over `Add`/`Sub`/`Mul` with float vars, `try_call`, and `try_index` leaves; `gen_bool`/`gen_str` gained the same call+index attempts; float vars became assignable; `Features::full().floats` is now `true`. Leaves are `n/8` **scaled by a power of two** — exact (a power of two moves only the exponent field), and the scale is what actually reaches the sci-notation crossover the brief assumed a mul chain would reach on its own (it does not: `n/8` tops out near `1e8`, the crossover is `1e16`). Deferred, in order: float `Div` (a zero divisor raises `ZeroDivisionError` in CPython; inexact quotients widen the formatting surface at once) and int↔float mixed arithmetic |
 | ~~**W7-34**~~ | `:7730` | **FIXED 2026-08-07 (found by the same audit as `W7-33`).** `difffuzz --seeds 0..50` with `chezzi` not on `PATH` printed `done: 50 seeds, 0 finding(s) [(0, 50)]` and exited 0 — `run_one` collapsed "could not even spawn the child" into the same `Option::None` as an ordinary timeout, and `run_sources`/`write_file` mapped it to `Outcome::Timeout`/`BothError`, both non-findings | `run_one` now returns `Result<Capture, RunErr>` (`TimedOut` / `CouldNotRun(String)` carrying the real `io::Error` text); a new `Outcome::HarnessError(String)` (`is_finding() == false`, but FATAL to the two callers — `fuzz_range` panics on the first one instead of accumulating it, `difffuzz` exits **2**, distinct from **1** for real findings). `Capture::code`'s "`None` = signal kill only" invariant (`W7-33`) is unchanged. Re-measured post-fix: `env PATH=/usr/bin:/bin ./target/release/difffuzz --seeds 0..50` now prints `harness error at seed 0: could not run "chezzi": No such file or directory (os error 2)` and exits 2 |
 | ~~**W7-33**~~ | `:7649` | **FIXED 2026-08-07 (found by an audit of the whole CPython-differential oracle for the "real bug reported as a non-finding" class, prompted by `W7-31`).** The CPython differential's `classify` never examined `chz.code.is_none()` (signal kill: SIGSEGV/SIGABRT/a Rust stack overflow) ANYWHERE, and its first arm (both exit 0, compare stdout) never consulted `is_host_panic` at all — so a signal-killed chezzi was an ordinary `ChezziFault`/`BothError` non-finding, and a **worker thread** panicking on stderr while `main` exits 0 with matching stdout was `Match`. The twin oracle one directory over, `panicfuzz::classify`, already had the `code.is_none()` rule (`src/panicfuzz/run.rs:98-100`) — this was a divergence between two sibling oracles, not a novel design question | The proximate cause: `Capture.code`'s own doc comment read `// None => killed by signal / timeout`, and the "/ timeout" half is false (a timeout returns `None` from `run_one` before any `Capture` is built), which is plausibly why nobody classified the signal-kill case. Fixed by moving BOTH checks (`is_host_panic`, then `code.is_none()`) to the top of `classify`, before any arm-specific logic and before any `allowlist::check` call, so they run unconditionally on all three arms |
 | ~~**W7-32**~~ | `:7553` | **FIXED 2026-08-07 (found by re-deriving `W7-31`'s premise — the dead allow-list entry pointed at the right neighbourhood for the wrong reason).** A **real language bug**, not a detector one: `repr_float` took its shortest-repr digits from Rust's formatter, which breaks an EXACT half-way tie **away from zero** where CPython breaks it **to even** — `print(771.5462036132812)` gave `771.5462036132813` (exact value `771.54620361328125`). Moved `str`/`print`/interpolation/`json.stringify`. Not the lexer: both sides parse the literal to the same `f64` | 20 000-value fuzz vs CPython 3.14.6 found 6, all one shape. Fixed by *reusing Rust's own exact half-even `{:.N}` formatter* at the shortest digit count instead of hand-rolling digit surgery — plus a **round-trip guard**, which is load-bearing: at a binade boundary (`2^-24`) the even candidate names a different float, so CPython keeps the odd digit too. A version without that guard passed the whole suite AND the 5 400-value differential; only a 60 000-value tie-rich `m/2^k` fuzz caught it. 213 791 floats now byte-identical to CPython |
@@ -7528,7 +7529,9 @@ a 7-value hand-picked boundary table is evidence about the boundaries it names a
 The deleted entry was also unfireable on any *generated* program by two independent mechanisms:
 `generate.rs`'s `gen_float` restricts itself to short exact-ish decimals specifically to dodge the
 crossover and always emits a literal; `float_lit` is shared byte-for-byte between the Chezzi and Python
-emitters; and `Features::full()` has `floats: false` regardless.
+emitters; and `Features::full()` has `floats: false` regardless. (All three of those
+restrictions were lifted by **`W7-37`** 2026-08-07 — the generator now emits float arithmetic and
+`full()` has `floats: true` — which does not revive the matcher: the premise was still dead.)
 
 A second, independent defect confirmed deletion over gating: the matcher never checked the two numbers
 were numerically **equal** — `1e-05` vs `0.00002`, a genuine arithmetic divergence, was also silently
@@ -7648,7 +7651,9 @@ stayed invisible for so long. Its doc comment now says what it actually pins (as
 its values are unaffected by this fix). (b) There was no automated CPython float-repr differential at
 all; the difftest generator's `gen_float` deliberately emits only short exact-ish decimals and
 `Features::full()` has `floats: false`, so the oracle that *should* own this cannot currently reach it
-— the table test + the chz test are the standing guard.
+— the table test + the chz test are the standing guard. **Closed by `W7-37` (2026-08-07):** that is
+precisely the gap it fixes, and this row is the motivating example cited there — the oracle now emits
+float arithmetic over both sides of the sci-notation crossover, with `floats: true` in `full()`.
 
 ### W7-33 — the CPython differential's `classify` never checked for a signal kill, and never checked for a host panic on the both-exit-0 arm — **FIXED 2026-08-07**
 
@@ -7933,3 +7938,92 @@ so a Chezzi fault on a generated program usually implies Python succeeded cleanl
 failing, and loops terminate quickly) — but `run_sources` is public and used by hand-written
 probes too, and **Task 6 of this hardening series widens the generator to float arithmetic and
 non-int calls**, which is expected to land in exactly these two arms.
+
+### W7-37 — the differential generator emitted float arithmetic never, and called two thirds of the functions it generated never — **FIXED 2026-08-07**
+
+**Found by:** an audit of what the CPython differential oracle *generates*. `W7-30`–`W7-36` audited
+what it **reports** (a lossy decode, an allow-list downgrade, a signal kill, a spawn failure, a
+hang, a both-failed stdout). This row is the other half: a verdict engine that is now correct on
+every arm is still worth nothing over programs that cannot diverge by construction.
+
+**The lesson, stated plainly: coverage that both engines agree on because neither executes it is
+not coverage.** The proof is `W7-32`, landed four commits earlier in this same series. That was a
+**real** Chezzi↔CPython divergence — a float's shortest `repr` broke an exact tie away from zero
+where CPython breaks it to even, hitting ~0.5% of doubles — squarely inside the output-formatting
+seam this oracle exists to own. It was found by a hand-written differential. This oracle could not
+have found it, and `difffuzz --floats --seeds 0..1000000` would have reported a clean sweep, because
+of the two gaps below.
+
+**F6 — float arithmetic was never differentially tested.** `gen_float` took a `_depth` it ignored
+and always returned a literal:
+
+```rust
+fn gen_float(&mut self, _depth: usize) -> Expr {
+    // restricted to short exact-ish decimals (n/8) to dodge the formatting crossover
+    let n = self.rng.range_i64(-80, 80);
+    Expr::FloatLit(n as f64 / 8.0)
+}
+```
+
+Four compounding consequences, each verified: `Expr::Bin { ty: Ty::Float, .. }` was never
+constructed, so `emit_python.rs`'s float fall-through to native `/` was dead code and Chezzi float
+`+ - * /`, float comparison and int↔float mixing were never exercised; `gen_assign` targeted only
+`Ty::Int`, so a float was never mutated either; `float_lit` is **shared** by both emitters
+(`emit_python.rs` imports it from `emit_chezzi`), so every float literal's text was byte-identical
+*by construction* — the one thing a literal-only generator can emit is the one thing that cannot
+differ; and `Features::full()` set `floats: false` anyway, so the CI gate never turned any of it on.
+
+**F7 — most generated functions were emitted and never called.** `try_call` was only ever invoked
+with `&Ty::Int` (from `gen_int`), while `gen_func` picked its return type from `rand_scalar_ty()`
+(Int/Bool/Str, +Float) — so roughly **two thirds** of generated functions were emitted as dead
+source. Any seed producing `fn f0(p0: str) -> str:` had no call site anywhere in the program. Same
+for `try_index`: element reads on `List[str]`, `List[bool]`, `Map[_, str]` were never generated
+because `gen_str`/`gen_bool` reached for `try_str_method`/`try_slice`/`try_membership` but never
+for an index.
+
+**Fix.** `src/difftest/generate.rs`:
+
+- `gen_float` is recursive on `depth`, matching `gen_int`'s shape and guard discipline: leaves are
+  float literals, in-scope float vars, `try_call(&Ty::Float)` and `try_index(&Ty::Float)`;
+  composites are `Add`/`Sub`/`Mul` honouring `MAX_EXPR_DEPTH`.
+- `gen_bool` and `gen_str` each gained a `try_call(want)` (gated on `feat.functions`, `p = 0.2`,
+  matching `gen_int`'s call site) and a `try_index(want)` (gated on `feat.collections`, `p = 0.15`).
+  `try_call`'s int-argument discipline is untouched — an int arg must stay a small literal because
+  the callee's body and `ret_bound` were generated assuming `|int param| <= PARAM_BOUND`.
+- `int_assign_targets` → `assign_targets`: floats are now mutable too. This needed **no** float
+  bound system. The int path's `bound` exists to prove no i64 overflow; a float cannot overflow
+  into a fault, and the one hazard it shares — an in-loop accumulator compounding geometrically —
+  is closed the same way `gen_int` closes it: inside an in-loop `+=`/`-=` RHS, `gen_float` reads no
+  float var at all (loop counters, the only loop-stable vars, are never floats). Its remaining
+  leaves — literals, calls, index reads — are all loop-stable.
+- `Features::full()` now has `floats: true`. It was flipped only after the sweep below came back
+  green.
+
+**Why turning float arithmetic on is safe, and where the brief's premise was wrong.** `n/8` leaves
+are exact binary fractions, so `+ - *` over them are exactly representable — at `MAX_EXPR_DEPTH`
+the worst case is 8 leaves, `80^8 / 8^8`, numerator under `2^53` — and both engines compute
+IEEE-754 doubles, so the *values* cannot disagree. What can differ is **formatting**, which is the
+point. But the brief's claim that "a mul chain drives magnitudes toward the scientific-notation
+crossover" is **false as stated**: with `n/8` leaves a depth-3 product tops out near `1e8`, and
+Python's crossover is `|x| >= 1e16` or `< 1e-4`. Shipping it that way would have been a second
+round of coverage-that-reads-as-covered. So `float_leaf()` scales `n/8` by `2^e`, `e` drawn from
+`[-70, -20] ∪ {0} ∪ [20, 60]`: a power of two moves only the exponent field, so it introduces **no
+new rounding** and the exactness argument survives intact, while the range now straddles both
+crossovers (`e` is bounded so an 8-leaf product cannot reach `inf` — worst case `~1e152` — or the
+subnormal range). Verified directly: `print(0.125 * 8.470329472543003e-23)` and
+`print(9.625 * 1152921504606846976.0)` are byte-identical between `chezzi run` and `python3`
+(`1.0587911840678753e-23`, `1.1096869481840902e+19`).
+
+**Deferred, in order.** (1) Float `Div`: a zero divisor diverges (CPython raises
+`ZeroDivisionError`) and inexact quotients widen the formatting surface a lot at once — it wants
+its own pass with a non-zero-divisor discipline like `gen_int`'s. (2) Int↔float mixed arithmetic
+(`1 + 2.0`), which needs a coercion model in the IR the generator does not have today. Both are
+commented at `gen_float`'s definition so the next reader finds them there, not only here.
+
+**Tests.** `tests/difftest.rs` gained `fuzz_floats` (core features + `floats: true`, seeds 0..200,
+kept as its own gate so a future `Features::full()` edit cannot silently take float coverage back
+out) plus three structural probes in the shape of the existing `gen_emits_*` family —
+`gen_emits_float_binop`, `gen_emits_non_int_call`, `gen_emits_non_int_index`. Those three are the
+regression fence that matters: without them a refactor could revert to literal-only floats and
+int-only calls and **every other test in the file would still pass**, which is exactly the failure
+mode this row is about. All three are red against the pre-fix generator.

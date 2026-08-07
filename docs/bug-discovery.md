@@ -366,6 +366,22 @@ printing, and equality would false-positive on that routine, harmless shape (`ga
   destructuring (`a, b := t` / `a, b = t`). The **single** new shim arm is the tuple stringify in
   `_chz_str` (`(1, 'two', true)` spelling); single-element `(1,)` and empty `()`
   diverge from Chezzi's spelling, so the generator only emits arity ≥ 2.
+- **Floats** (`floats`, on in `full()` since `docs/gaps.md` §W7-37): float **arithmetic**, not just
+  float literals. `gen_float` is recursive like `gen_int` — `Add`/`Sub`/`Mul` over in-scope float
+  vars, `try_call`/`try_index` leaves, and literals — and floats are assignable (`=`/`+=`/`-=`).
+  Leaves are `n/8` scaled by `2^e`: exact (a power of two moves only the exponent field, so the
+  "both engines compute the identical double" argument holds), and the scale is what actually
+  reaches Python's scientific-notation crossover (`|x| >= 1e16` / `< 1e-4`) — `n/8` alone tops out
+  near `1e8`. That crossover is where shortest-`repr` formatting is most delicate and where `W7-32`
+  lived. Float `Div` and int↔float mixed arithmetic are the deferred next steps (§W7-37).
+
+
+**Every scalar type is reachable through a call and an index.** `try_call`/`try_index` used to be
+asked only for `Ty::Int`, so ~2/3 of generated functions were emitted and never invoked and non-int
+element reads never happened — code both engines "agreed" on because neither ran it. `gen_bool`,
+`gen_str` and `gen_float` now each attempt both (§W7-37). `try_call`'s int-argument discipline is
+unchanged: an int arg stays a small literal, because the callee's body and `ret_bound` were
+generated assuming `|int param| <= PARAM_BOUND`.
 
 The i64-no-overflow guarantee is preserved across these: the only new path where an int value crosses a
 seam is a tuple-field read, which inherits the element's tracked `tuple_bounds` and is never emitted
@@ -402,7 +418,7 @@ cargo test --test difftest -- --ignored    # heavier sweep (fuzz_full_heavy, see
 cargo build --release --bin chezzi --bin difffuzz
 ./target/release/difffuzz --seeds 0..100000          # unattended fuzz (full features)
 ./target/release/difffuzz --seed 12345               # reproduce one seed (prints both sources)
-./target/release/difffuzz --seeds 0..5000 --floats   # enable the float backend
+./target/release/difffuzz --seeds 0..5000 --floats   # floats (on by default since W7-37; explicit here)
 ```
 
 A finding prints the seed plus both rendered sources and both captures — paste-ready for a bug

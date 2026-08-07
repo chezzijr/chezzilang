@@ -604,6 +604,19 @@ fn fuzz_tuples() {
     fuzz_range(feat_only(false, false, false, true), 0, 200);
 }
 
+/// Core features plus floats. Kept as its own gate even once `Features::full()` turns floats on,
+/// so a future `full()` edit cannot silently take float coverage back out.
+fn feat_floats() -> Features {
+    let mut f = Features::full();
+    f.floats = true;
+    f
+}
+
+#[test]
+fn fuzz_floats() {
+    fuzz_range(feat_floats(), 0, 200);
+}
+
 // ---------------------------------------------------------------------------
 // Coverage: prove the generator actually emits each widened construct over a
 // fixed seed range. Walks the abstract IR directly (unambiguous, no token
@@ -754,6 +767,53 @@ fn gen_emits_membership() {
             |_| false
         ),
         "generator never emitted an `in` membership test"
+    );
+}
+
+/// Floats must reach the generator as *arithmetic*, not just as a literal both emitters render
+/// from the same `float_lit` — a literal-only float is byte-identical by construction, so a
+/// green float sweep over it proves nothing. This is the probe that would have gone red for the
+/// pre-`W7-32` oracle's blind spot.
+#[test]
+fn gen_emits_float_binop() {
+    assert!(
+        emits(
+            feat_floats(),
+            400,
+            |e| matches!(e, Expr::Bin { ty: Ty::Float, .. }),
+            |_| false
+        ),
+        "generator never emitted a float binary operation"
+    );
+}
+
+/// `try_call` used to be asked only for `Ty::Int`, so ~2/3 of generated functions were emitted
+/// and never invoked — code both engines "agreed" on because neither ran it.
+#[test]
+fn gen_emits_non_int_call() {
+    assert!(
+        emits(
+            feat_floats(),
+            400,
+            |e| matches!(e, Expr::Call { ret, .. } if *ret != Ty::Int),
+            |_| false
+        ),
+        "generator never emitted a call to a non-int-returning function"
+    );
+}
+
+/// Same for `try_index`: element reads on `List[str]` / `List[bool]` / `Map[_, float]` were
+/// never generated.
+#[test]
+fn gen_emits_non_int_index() {
+    assert!(
+        emits(
+            feat_floats(),
+            400,
+            |e| matches!(e, Expr::Index { ret, .. } if *ret != Ty::Int),
+            |_| false
+        ),
+        "generator never emitted a non-int index read"
     );
 }
 
