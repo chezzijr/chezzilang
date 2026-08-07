@@ -420,8 +420,10 @@ printing, and equality would false-positive on that routine, harmless shape (`ga
   a float var or a `try_call` result can carry a prior multi-leaf product, so magnitudes compose
   across statements and functions and `inf`/`NaN`/`-0.0` are structurally reachable; measured 0
   `inf`/`NaN` (25 `-0.0`) across 5000 `Features::full()` programs, and both engines render all
-  four byte-identically when they do occur. Float `Div` and int↔float mixed arithmetic are the
-  deferred next steps (§W7-37).
+  four byte-identically when they do occur. **Comparison** (`< <= > >= == !=`, never mixed with
+  int) landed 2026-08-07: `gen_bool`'s comparison arm now sometimes draws both operands from
+  `gen_float` — premise verified first, 4005 cases byte-identical against CPython. Float `Div` and
+  int↔float mixed arithmetic are the deferred next steps (§W7-37).
 
 **Every scalar type is reachable through a call and an index.** `try_call`/`try_index` used to be
 asked only for `Ty::Int`, so ~2/3 of generated functions were emitted and never invoked and non-int

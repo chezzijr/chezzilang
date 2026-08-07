@@ -848,6 +848,49 @@ fn gen_emits_float_binop() {
     );
 }
 
+/// Honest float-operand detector for the comparison probe below. `Expr::Bin`'s `ty` is the
+/// RESULT type (`Ty::Bool` for every comparison), so matching on it cannot tell an int
+/// comparison from a float one — this walks an operand's own shape instead. It recognizes a
+/// float through `FloatLit`, a float arithmetic `Bin` (`ty: Ty::Float`), a float-returning
+/// `Call`, or a float-returning `Index` — but NOT a float `Var`, since `Expr::Var` carries no
+/// type in this IR at all (int and float vars are indistinguishable from the bare node). That
+/// blind spot is acceptable here: it only means some float-comparison hits go unseen by this
+/// probe, not that the probe can pass vacuously — a `FloatLit`-only predicate would also miss
+/// the interesting shapes, which is exactly the failure mode this is guarding against.
+fn is_float_operand(e: &Expr) -> bool {
+    matches!(
+        e,
+        Expr::FloatLit(_)
+            | Expr::Bin { ty: Ty::Float, .. }
+            | Expr::Call { ret: Ty::Float, .. }
+            | Expr::Index { ret: Ty::Float, .. }
+    )
+}
+
+/// Comparison in `gen_bool` used to call `gen_int` for BOTH operands unconditionally, so
+/// `< <= > >= == !=` never ran on floats — everything else float-related exercises how a float
+/// *renders*, never a VALUE comparison. See `is_float_operand` for why this can't just match on
+/// `Expr::Bin { ty: Ty::Bool, .. }` — that's true of every comparison, int or float alike.
+#[test]
+fn gen_emits_float_comparison() {
+    assert!(
+        emits(
+            feat_floats(),
+            400,
+            |e| matches!(
+                e,
+                Expr::Bin {
+                    op: BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge | BinOp::Eq | BinOp::Ne,
+                    l,
+                    ..
+                } if is_float_operand(l)
+            ),
+            |_| false
+        ),
+        "generator never emitted a float comparison"
+    );
+}
+
 /// `try_call` used to be asked only for `Ty::Int`, so ~2/3 of generated functions were emitted
 /// and never invoked — code both engines "agreed" on because neither ran it.
 #[test]

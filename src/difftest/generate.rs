@@ -774,10 +774,11 @@ impl Gen {
                 let i = *self.rng.choice(&bool_vars);
                 return Expr::Var(self.scope[i].name.clone());
             }
-            // comparison of two ints — the common, interesting case
+            // comparison of two ints or two floats — never mixed (int↔float mixing needs a
+            // coercion model the IR doesn't have; deferred, see `gen_float`'s doc comment).
+            // Ints stay the common case: 0.3 chance of the float variant keeps them carrying
+            // most of the bound-discipline / overflow-adjacent coverage.
             if self.rng.chance(0.6) {
-                let (l, _) = self.gen_int(depth + 1);
-                let (r, _) = self.gen_int(depth + 1);
                 let op = *self.rng.choice(&[
                     BinOp::Lt,
                     BinOp::Le,
@@ -786,6 +787,18 @@ impl Gen {
                     BinOp::Eq,
                     BinOp::Ne,
                 ]);
+                if self.feat.floats && self.rng.chance(0.3) {
+                    let l = self.gen_float(depth + 1);
+                    let r = self.gen_float(depth + 1);
+                    return Expr::Bin {
+                        op,
+                        ty: Ty::Bool,
+                        l: Box::new(l),
+                        r: Box::new(r),
+                    };
+                }
+                let (l, _) = self.gen_int(depth + 1);
+                let (r, _) = self.gen_int(depth + 1);
                 return Expr::Bin {
                     op,
                     ty: Ty::Bool,
@@ -904,17 +917,18 @@ impl Gen {
     /// addend entirely. Rounding here is harmless — it is deterministic and identical on both
     /// sides — but nothing may lean on exactness (W7-38).
     ///
-    /// Three float surfaces are deliberately still unreachable, in the order they should land —
-    /// all filed in `docs/gaps.md` W7-37:
+    /// Comparison landed: `gen_bool`'s comparison arm now sometimes draws both operands from
+    /// `gen_float` instead of `gen_int` (never mixed) when `feat.floats` is on — see that arm.
+    /// Premise measured 2026-08-07 before landing: 4005 cases byte-identical against CPython
+    /// across all six operators, plus `0.0 == -0.0` / `-0.0 < 0.0` / subnormals / `0.1+0.2==0.3`.
     ///
-    /// 1. **Comparison.** `gen_bool`'s comparison arm calls `gen_int` for BOTH operands, so
-    ///    `< <= > >= == !=` on floats is never generated. Cheapest of the three (one arm beside
-    ///    the existing int one, no new value model) and the most valuable: everything here
-    ///    exercises how a float *renders*, and nothing yet compares two floats for their VALUE.
-    /// 2. **`Div`.** A zero divisor diverges (CPython raises `ZeroDivisionError`) and inexact
+    /// Two float surfaces are deliberately still unreachable, in the order they should land —
+    /// both filed in `docs/gaps.md` W7-37:
+    ///
+    /// 1. **`Div`.** A zero divisor diverges (CPython raises `ZeroDivisionError`) and inexact
     ///    quotients widen the formatting surface all at once; wants a non-zero-divisor
     ///    discipline like `gen_int`'s.
-    /// 3. **Int↔float mixing** (`1 + 2.0`), which needs a coercion model the IR does not have.
+    /// 2. **Int↔float mixing** (`1 + 2.0`), which needs a coercion model the IR does not have.
     fn gen_float(&mut self, depth: usize) -> Expr {
         let at_leaf = depth >= MAX_EXPR_DEPTH;
         // Inside an in-loop `+=`/`-=` RHS a mutable float var would compound geometrically across
