@@ -177,6 +177,70 @@ fn p0_shim_mixed_float_div_zero_divisor() {
     }
 }
 
+/// Float `%` is `fmod` in Chezzi — sign follows the DIVIDEND (`docs/spec.md`) — and total (never
+/// faults), same two properties `p0_shim_float_div_signed_zero` pins for `/`. Two things a careless
+/// edit would break, both pinned here:
+///
+/// - **sign of dividend**: `-7.0 % 3.0` and `7.0 % -3.0` are the two cases where Python's native
+///   floored `%` gives a DIFFERENT NUMBER (`2.0`/`-2.0`), not just a different spelling — these are
+///   what prove `_chz_fmod` models Chezzi rather than falling through to native `%`.
+/// - **totality**: `5.0 % 0.0` is `NaN` in Chezzi where `math.fmod` raises `ValueError`, and so is
+///   an `inf` DIVIDEND (`inf % 3.0`) — a second, distinct raise `math.fmod` has that a naive
+///   `if b == 0.0` guard would miss. The `inf` is built from `1.0 / 0.0` in the IR rather than an
+///   `inf` float literal: `emit_chezzi::float_lit` renders a non-finite `f64` via `format!("{f}")`
+///   (`"inf"`), which is not a Chezzi float literal, so a literal-based case would not even parse.
+///   If the `inf % 3.0` case here still passes with `_chz_fmod`'s `_math.isinf(a)` guard removed,
+///   it is not pinning totality — `5.0 % 0.0` alone can't tell, since `b == 0.0` already catches it.
+#[test]
+fn p0_shim_float_mod() {
+    let cfg = config();
+    let inf_via_div = Expr::Bin {
+        op: BinOp::Div,
+        ty: Ty::Float,
+        l: Box::new(Expr::FloatLit(1.0)),
+        r: Box::new(Expr::FloatLit(0.0)),
+    };
+    let cases: Vec<(Expr, Expr, &str)> = vec![
+        (
+            Expr::FloatLit(-7.0),
+            Expr::FloatLit(3.0),
+            "-7.0 % 3.0 (sign of dividend)",
+        ),
+        (
+            Expr::FloatLit(7.0),
+            Expr::FloatLit(-3.0),
+            "7.0 % -3.0 (sign of dividend)",
+        ),
+        (
+            Expr::FloatLit(5.0),
+            Expr::FloatLit(0.0),
+            "5.0 % 0.0 (totality: zero divisor)",
+        ),
+        (
+            inf_via_div,
+            Expr::FloatLit(3.0),
+            "inf % 3.0 (totality: inf dividend, built from 1.0/0.0)",
+        ),
+    ];
+    for (l, r, label) in cases {
+        let prog = Program {
+            funcs: vec![],
+            main: vec![Stmt::Print(vec![Expr::Bin {
+                op: BinOp::Mod,
+                ty: Ty::Float,
+                l: Box::new(l),
+                r: Box::new(r),
+            }])],
+        };
+        let (outcome, chz, py) = run::run_program(&cfg, &prog);
+        assert!(
+            matches!(outcome, Outcome::Match | Outcome::AllowListed(_)),
+            "float mod {label}: {}",
+            difftest::describe(0, &outcome, &chz, &py)
+        );
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Non-tautology guard — prove the oracle actually detects a real divergence.
 // If the shim were removed, raw Python `%` (sign of divisor) differs from Chezzi.
@@ -986,6 +1050,29 @@ fn gen_emits_float_div() {
             |_| false
         ),
         "generator never emitted a float division"
+    );
+}
+
+/// `gen_float`'s op list did not include `Mod` — float `%` (`_chz_fmod`) was the last unreached
+/// float operator in the differential generator (`docs/gaps.md` W7-37). Mutation-proven: reverting
+/// `gen_float`'s op list back to `[Add, Sub, Mul, Div]` turns this red.
+#[test]
+fn gen_emits_float_mod() {
+    assert!(
+        emits(
+            feat_floats(),
+            400,
+            |e| matches!(
+                e,
+                Expr::Bin {
+                    op: BinOp::Mod,
+                    ty: Ty::Float,
+                    ..
+                }
+            ),
+            |_| false
+        ),
+        "generator never emitted a float modulo"
     );
 }
 

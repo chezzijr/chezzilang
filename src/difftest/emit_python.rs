@@ -3,8 +3,10 @@
 //! The emitted Python calls a fixed *shim* prelude that implements Chezzi's **specified**
 //! behaviour for the handful of by-design surface/semantic differences: value stringifying
 //! (`true`/`false`/`nil`, raw nested strings, Chezzi float formatting), integer
-//! `/`,`%` (truncate-toward-zero, sign-of-dividend), and float `/` (total IEEE-754 — a zero
-//! divisor is `inf`/`-inf`/`NaN`, never CPython's `ZeroDivisionError`). The shim mirrors the
+//! `/`,`%` (truncate-toward-zero, sign-of-dividend), float `/` (total IEEE-754 — a zero
+//! divisor is `inf`/`-inf`/`NaN`, never CPython's `ZeroDivisionError`), and float `%` (`fmod`:
+//! sign-of-dividend like Rust's `%`/Go's `math.Mod`, not CPython's floored `%`, and total — a
+//! zero divisor or an `inf` dividend is `NaN`, never CPython's `ValueError`). The shim mirrors the
 //! *spec*, while the Chezzi source uses the real *implementation* — so any divergence in stdout
 //! is a genuine deviation of the implementation from its own contract, never a by-design
 //! difference.
@@ -24,6 +26,9 @@ def _chz_fdiv(a, b):
         if a != a or a == 0.0: return float('nan')
         return _math.copysign(float('inf'), a) * _math.copysign(1.0, b)
     return a / b
+def _chz_fmod(a, b):
+    if b == 0.0 or _math.isinf(a): return float('nan')
+    return _math.fmod(a, b)
 def _chz_str(v):
     if v is True: return "true"
     if v is False: return "false"
@@ -339,11 +344,13 @@ impl Emitter {
     }
 
     /// Integer `/` and `%` route through the shim (Chezzi semantics: truncate-toward-zero,
-    /// sign-of-dividend). Float `/` also routes through the shim: Chezzi's float division is
-    /// total IEEE-754 (`docs/spec.md:472`) — a zero divisor is `inf`/`-inf`/`NaN`, never a fault —
-    /// which is a deliberate divergence from CPython's `ZeroDivisionError`, so `_chz_fdiv` models
-    /// Chezzi's semantics rather than Python's native `/`. Everything else is the matching native
-    /// Python operator.
+    /// sign-of-dividend). Float `/` and `%` also route through the shim: Chezzi's float division
+    /// is total IEEE-754 (`docs/spec.md:472`) — a zero divisor is `inf`/`-inf`/`NaN`, never a
+    /// fault — and float `%` is `fmod` (sign-of-dividend, total: a zero divisor or an `inf`
+    /// dividend is `NaN`), both deliberate divergences from CPython (`/` raises
+    /// `ZeroDivisionError`; `%` is floored — sign-of-divisor — and raises `ValueError` on the same
+    /// two inputs), so `_chz_fdiv`/`_chz_fmod` model Chezzi's semantics rather than Python's
+    /// native operators. Everything else is the matching native Python operator.
     fn bin(&mut self, op: BinOp, ty: &Ty, l: &Expr, r: &Expr) {
         if *ty == Ty::Int && matches!(op, BinOp::Div | BinOp::Mod) {
             self.out.push_str(if op == BinOp::Div {
@@ -357,8 +364,12 @@ impl Emitter {
             self.out.push(')');
             return;
         }
-        if *ty == Ty::Float && op == BinOp::Div {
-            self.out.push_str("_chz_fdiv(");
+        if *ty == Ty::Float && matches!(op, BinOp::Div | BinOp::Mod) {
+            self.out.push_str(if op == BinOp::Div {
+                "_chz_fdiv("
+            } else {
+                "_chz_fmod("
+            });
             self.expr(l);
             self.out.push_str(", ");
             self.expr(r);

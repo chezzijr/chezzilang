@@ -431,7 +431,13 @@ printing, and equality would false-positive on that routine, harmless shape (`ga
   mixed node renders correctly through both emitters with no IR change. `gen_float`'s composite
   arm and `gen_bool`'s float-comparison arm each mix in an int operand (0.3 chance), side
   randomized so both `int op float` and `float op int` are generated; `MAX_BOUND` staying under
-  `2^53` keeps every mixed comparison exact. Float `%` is the sole remaining item (§W7-37).
+  `2^53` keeps every mixed comparison exact. **`Mod`** landed 2026-08-08, the last unreached float
+  operator: `gen_float` emits it beside `Div`, same no-non-zero-divisor discipline, and rides the
+  same `op` variable the mixing arm already uses so mixed int↔float `%` comes for free. Chezzi's
+  float `%` is `fmod` — sign of the DIVIDEND, matching Rust/Go, diverging deliberately from
+  CPython's floored, raising `%` — and the Python shim's `_chz_fmod` absorbs both the sign rule and
+  the totality (a zero divisor or an `inf` dividend is `NaN`, where `math.fmod` raises on both).
+  §W7-37 is now fully closed.
 
 **Every scalar type is reachable through a call and an index.** `try_call`/`try_index` used to be
 asked only for `Ty::Int`, so ~2/3 of generated functions were emitted and never invoked and non-int

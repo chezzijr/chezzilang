@@ -954,8 +954,17 @@ impl Gen {
     /// comment — well under `2^53`), so every int this generator can produce converts to `f64`
     /// exactly and both languages agree bit-for-bit; raising `MAX_BOUND` past `2^53` would turn
     /// this into a real precision divergence. `docs/gaps.md` W7-37 is now fully closed — this was
-    /// its last deferred item. Float `%` (`BinOp::Mod`) is the sole remaining note: `gen_float`
-    /// does not emit it — a separate step, not yet started.
+    /// its last deferred item.
+    ///
+    /// **`Mod` landed too** — the last unreached float operator: `BinOp::Mod` is in the op list
+    /// below beside `Div`, **with the same no-non-zero-divisor discipline** (a zero divisor is a
+    /// legitimate value, not one to dodge — float `%` is `fmod`, total like `/`). It rides the
+    /// SAME `op` variable the mixed-int-float arm below already uses, so `gen_int_float_pair`
+    /// reaches `Mod` for free — no separate wiring needed. The `_chz_fmod` shim in
+    /// `emit_python.rs` absorbs two deliberate divergences from CPython: the sign rule (Chezzi
+    /// follows the DIVIDEND, like Rust's `%`/Go's `math.Mod`; CPython's native `%` follows the
+    /// divisor — floored) and totality (`5.0 % 0.0` and an `inf` dividend are `NaN` in Chezzi;
+    /// `math.fmod` raises `ValueError` on both).
     fn gen_float(&mut self, depth: usize) -> Expr {
         let at_leaf = depth >= MAX_EXPR_DEPTH;
         // Inside an in-loop `+=`/`-=` RHS a mutable float var would compound geometrically across
@@ -987,13 +996,14 @@ impl Gen {
         {
             return e;
         }
-        // `Div`'s divisor is UNRESTRICTED — no non-zero guard, unlike `gen_int`'s Div/Mod arm.
-        // Float `/` is total IEEE-754 (`docs/spec.md:472`): `x/0.0` is `inf`/`-inf`/`NaN`, never
-        // a fault, so a zero divisor is a legitimate value this widening should reach, not one to
-        // avoid — do not add a guard here by analogy with the int arm above.
+        // `Div`/`Mod`'s divisor is UNRESTRICTED — no non-zero guard, unlike `gen_int`'s Div/Mod
+        // arm. Both are total IEEE-754 (`docs/spec.md:472`): `x/0.0` is `inf`/`-inf`/`NaN` and
+        // `x%0.0` is `NaN`, never a fault, so a zero divisor is a legitimate value this widening
+        // should reach, not one to avoid — do not add a guard here by analogy with the int arm
+        // above.
         let op = *self
             .rng
-            .choice(&[BinOp::Add, BinOp::Sub, BinOp::Mul, BinOp::Div]);
+            .choice(&[BinOp::Add, BinOp::Sub, BinOp::Mul, BinOp::Div, BinOp::Mod]);
         // Int↔float mixing (0.3, matching the float-comparison arm's chance): the coercion is
         // real in both emitters with no IR change (see the doc comment above), so this is just
         // choosing where an int-typed subexpression can appear inside a `Float`-typed `Bin`.
