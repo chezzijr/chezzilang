@@ -1476,7 +1476,7 @@ times; the cap simply never sees the 195 MB. So the documented guarantee ("any s
 whose live heap exceeds `N` is aborted — a real runaway trips") is false for the most natural *concurrent*
 runaway: an unbounded/large-cap channel backlog, or data parked in a `Shared`/`RwShared`. Same accounting
 seam as W6-7. (The documented inline-scalar escape was separately re-confirmed and is NOT re-filed —
-it is a DIFFERENT hole and remains OPEN.)
+it is a DIFFERENT hole; it stayed open until **`W7-28` closed it 2026-08-07**, at a measured 77× the cap.)
 </details>
 
 ### W6-9b. The serial==M:N parity oracle was only HALF byte-exact — the CAPTURE-based comparators still diffed a lossy decode — **FIXED (2026-07-28)**
