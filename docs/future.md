@@ -423,7 +423,11 @@ direction that matters. Its acceptance tests are M:N-only and say so.
     `struct` (a struct is a shared reference); for cross-task mutation use `Shared[T]`. The `ref`
     keyword, the `Ref[T]` reserved global, and `std.ref` no longer exist.
 
-13. **Static / associated protocol requirements (typeclass-style `T.default()`) — ⏸️ SHELVED
+13. **Static / associated protocol requirements (typeclass-style `T.default()`) — ⏸️ SHELVED**
+    **→ governed by §3a1 (Generics strategy): the ruling is WITNESS PASSING, and the next step is a
+    SPIKE against the M23 checker→compiler→VM precedent, not another implementation run. The shelf note
+    below was written 2026-06-25, before that machinery existed — re-derive its premise before trusting
+    it.** Original entry: — ⏸️ SHELVED
     (attempted twice 2026-06-24, both rejected; not worth the cost at the current model).**
     The goal: a protocol may declare a *static* (no-`self`) requirement, and a generic bounded by it can
     **construct** through the type param — the one thing instance-only protocols can't express:
@@ -459,7 +463,11 @@ direction that matters. Its acceptance tests are M:N-only and say so.
     The two rejected attempts live unmerged as branches `auto-task/protocol-static-req` /
     `…-v2` (main is clean); discardable. Revisit only with a design-first pass + appetite for the sugar.
 
-14. **`cast[T](val: Any) -> Option[T]` — a checked downcast off the `Any` top type — ⏸️ DEFERRED
+14. **`cast[T](val: Any) -> Option[T]` — ⛔ NO CONSUMER (2026-08-09).** The owner ruled against
+    leaning on `Any` ("we vouch for statically typed; `Any` is Go's `interface{}`"), and `cast` only pays
+    off through `Any` — so this is closed unless that reverses. Its erasure analysis stays valuable and
+    is summarised in §3a1 "What stays impossible". Original entry: **a checked downcast off the `Any`
+    top type — ⏸️ DEFERRED
     (DESIGN ONLY, no code).** The `Any` top type + variadics shipped (see `docs/syntax.md`); `Any`
     lets a value of any type into a universal slot, but there is currently **no way back out** — you can
     hold and display an `Any` but not recover its concrete type. The companion is a **checked downcast**:
@@ -501,7 +509,8 @@ direction that matters. Its acceptance tests are M:N-only and say so.
       not just `convert`), and the only concrete static call is `Type.convert(x)` written directly (which
       already works with no protocol). `T.<static>()` on a type param now gives a **clear error** (Option A)
       instead of `unknown name 'T'`. Making it real needs the deferred **witness-passing** escape hatch
-      (thread the concrete `convert` in as a hidden arg — the only erasure-compatible way); build it only
+      (thread the concrete `convert` in as a hidden arg — the only erasure-compatible way — **this is
+      exactly §3a1's witness passing; the two are one mechanism, not two**); build it only
       when real code needs generic-over-Convert construction. A fallible conversion is `convert(x: S) ->
       Result[Self, E]` — **no separate `TryFrom`** needed. **Skip `Into`** (needs expected-type threading;
       Chezzi infers bottom-up). **Multi-source (Phase 2) also DEFERRED** — needs argument-type overloading
@@ -515,6 +524,113 @@ direction that matters. Its acceptance tests are M:N-only and say so.
 
 **Ecosystem (Tier 4, separate track):** REPL (huge for scripting iteration), formatter, `assert` +
 built-in test runner, LSP.
+
+---
+
+## 3a1. Generics strategy — the live options, and the ruling (2026-08-09)
+
+Items 13 (`T.default()`), 14 (`cast[T]`) and 15 (`Convert[S]` slice 3) above are all blocked by the
+same wall, and §14's "erasure contract" is what the wall is made of. This section records the
+**strategy decision that governs all three**, so they stop being re-litigated one at a time.
+
+### The question
+
+Chezzi's generics are **erased**: `T` exists in the checker and is gone by the time the compiler
+emits. Nothing at runtime knows a `Box[int]` from a `Box[str]`. Three ways forward:
+
+| | monomorphize | witness passing | stay fully erased |
+|---|---|---|---|
+| `T.default()` / `T.convert()` through a bound | ✅ | ✅ | ❌ |
+| `cast[List[int]]` / `match` on a `T` | ✅ | ❌ | ❌ |
+| unboxed `List[int]` (`Vec<i64>` not `Vec<Value>`) | partial | ❌ | ❌ |
+| one erased body per generic fn | ❌ | ✅ | ✅ |
+| separate compilation / `import` | breaks | fine | fine |
+| size of the change | whole-language | one milestone | none |
+
+### Ruling: **witness passing.** Monomorphization is NOT the direction.
+
+Reasons, in the order that decided it:
+
+1. **Its biggest win is a feature we declined.** Monomorphization's headline gain is reified type
+   args — `cast[List[int]]`, `match` on a `T`. But `cast` is dead: it only pays off through the `Any`
+   top type, and **the owner ruled against leaning on `Any` (2026-08-09) — "we vouch for statically
+   typed; `Any` is Go's `interface{}`"**. With `Any` out, §14 has no consumer.
+2. **It does not deliver the perf win people assume.** `Value` is a uniform 8-byte pointer-tagged word
+   (`src/vm/value.rs`), so a monomorphized `List[int]` is still `Vec<Value>`. Unboxing needs *typed
+   containers* as a separate change. Monomorphization alone moves nothing on the CPython gap — do not
+   justify it on perf without building the container work too.
+3. **It contradicts the declared anchor.** `PROGRESS.md` pins the reference model as **Java (erased)**
+   precisely because Java is the only mainstream *erased* model, and copying Rust/Swift ergonomics
+   without their machinery is how generics go inconsistent. Monomorphizing is not an increment on that
+   model; it replaces it.
+4. **It breaks the module story.** Chezzi resolves modules at runtime (`resolver`), so there is no
+   whole-program point at which every instantiation is known.
+
+**The one condition that would reopen this: the Cranelift JIT.** A JIT wants monomorphized,
+type-specialized code, so if that end-game is committed to, monomorphization is on its path. `CLAUDE.md`
+scopes Cranelift as a late-stage endeavor, so this stays closed until then — but revisit it *with* the
+JIT, not before, and revisit it as one decision rather than as three feature requests.
+
+### What witness passing must satisfy before it ships
+
+The mechanism is small — resolve the conforming type's static method at the call site, thread it in as
+a hidden trailing argument, keep the single erased body. **The mechanism is not what failed twice.**
+Both rejected runs (branches `auto-task/protocol-static-req`, `…-v2`, item 13 above) died the same way:
+the checker's "accept" boundary drifted out of lockstep with the compiler's "can-lower" boundary, so
+each run half-covered the surface and a prosecutor found the next axis.
+
+A witness cannot be resolved once at the outermost call, because the caller is often generic itself:
+
+```chezzi
+fn make[T: Default]() -> T: return T.default()
+fn g[T: Default]() -> T:    return make[T]()     # T is STILL abstract here
+```
+
+`g` must *forward* its witness. So the deliverable is **one checker gate that decides "this call can be
+witnessed", proven against every axis at once** — not codegen. The six axes that broke the earlier runs,
+which any future attempt must cover before writing a line of lowering:
+
+1. cross-module call
+2. `spawn:` / `parallel:` body
+3. first-class value / `defer` (`g := make; g()`)
+4. inferred `T` through a container (`xs: List[T]`)
+5. non-leading bound param
+6. generic-calls-generic witness forwarding (the shape above)
+
+**M23 is evidence the contract is now expressible.** The `Eq` protocol needed exactly this shape and
+landed it: `validate_eq_shape` (checker decides) → `binds_eq_hook` (compiler records) →
+`Program::eq_struct` / `eq_enum` (VM dispatches from a validated table, never a name lookup). Checker-only
+was tried and rejected there for the identical reason — `fn same[T](a, b): return a == b` erases `T`, so
+a use-site gate never sees the concrete type. That is the first in-tree precedent for a
+checker→compiler→VM contract over an erased boundary.
+
+**Recommended next step is a SPIKE, not an implementation:** build one repro per axis against the M23
+machinery and report whether the contract closes. That converts item 13's shelf note — written
+2026-06-25, before any of this existed — into a current yes/no. A filed residual's premise decays; do not
+trust it without re-deriving.
+
+### What stays impossible under witness passing, permanently
+
+State these when the questions recur; they are not oversights:
+
+- **`cast[List[int]]` / any parameterized downcast.** `Obj::List` carries no element type. Java refuses
+  the same thing at compile time (`o instanceof List<String>` → *"Object cannot be safely cast to
+  List<String>"*); Python refuses it at runtime (`isinstance(x, list[int])` → *"argument 2 cannot be a
+  parameterized generic"*). Both measured 2026-08-09.
+- **`match` on a bare `T`** — `cannot match on non-enum type T`.
+- **A generic slot that coerces like a declared one.** `fn f(x: float)` accepts `f(2)` → `2.0`; a method
+  param declared `T` on a `Box[float]` rejects `b.set(2)`. Same type, same value, different answer,
+  because the backend sees `T` and not `float`. Documented at `docs/spec.md:513`; the erasure tax
+  showing through to users, and the one item on this list that is arguably a bug rather than a wall.
+- **Specialized numeric containers.** Needs typed containers, independent of this decision.
+
+### Not the same problem — do not fold it in
+
+**Compiler type-blindness** (`docs/future.md §4`, struct-field slotting) looks like erasure and is not.
+The compiler discards *all* static types, not just generic args — it knows a field's *name* but not the
+receiver's struct type. The fix is to thread the checker's types into the compiler, and its payoff is
+larger than perf: it is the `checker-superset-of-compiler` soundness class, where the checker accepts
+what the compiler cannot lower. Keep the two tracked separately.
 
 ---
 
