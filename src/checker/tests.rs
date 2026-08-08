@@ -1144,6 +1144,22 @@ fn disjoint_types_equality_rejected() {
         "fn main():\n    o := Some(1)\n    print(o == 1)\nmain()\n",
         "cannot compare",
     );
+    // The two shapes the shipped examples used to spell directly (`examples/empty_struct.chz`,
+    // `examples/enum_layout.chz`) — both now route through `Any`, and BOTH must stay errors when
+    // spelled disjointly, or B2 has stopped rejecting what it exists to reject.
+    entry_rejects(
+        "struct S:\n    pass\nstruct T:\n    pass\nfn main():\n    print(S() == T())\nmain()\n",
+        "cannot compare S and T for equality",
+    );
+    entry_rejects(
+        "enum Shadow:\n    A\n    B\nfn main():\n    o: Option[int] = Some(1)\n    print(o == Shadow.A)\nmain()\n",
+        "cannot compare Option[int] and Shadow for equality",
+    );
+    // A protocol existential is NOT a free pass: a concrete that does NOT conform stays disjoint.
+    entry_rejects(
+        "protocol Shape:\n    fn area(self) -> int\nstruct Sq:\n    s: int\n    fn area(self) -> int:\n        return self.s\nfn main():\n    sh: Shape = Sq(2)\n    print(sh == \"a\")\nmain()\n",
+        "cannot compare Shape and str for equality",
+    );
 }
 
 /// The B2 rejection's PREMISE is "provably disjoint" — every pair that can legitimately be equal must
@@ -1166,6 +1182,26 @@ fn comparable_types_equality_still_ok() {
     );
     // An erased generic body compares two values of its own type param.
     entry_ok("fn same[T](a: T, b: T) -> bool:\n    return a == b\nprint(same(1, 2))\n");
+    // ----- the shapes `compatible` alone CANNOT see (it is registry-blind), i.e. everything that
+    // is NOT provably disjoint because one side is a SUPERTYPE of the other or is erased. Each of
+    // these ran and printed `true` before B2 landed; all five regressed on the first cut.
+    // (1) a protocol existential vs a conforming concrete, in the existential's own direction.
+    entry_ok(
+        "protocol Shape:\n    fn area(self) -> int\nstruct Sq:\n    s: int\n    fn area(self) -> int:\n        return self.s * self.s\nfn main():\n    sh: Shape = Sq(2)\n    print(sh == Sq(2))\n    print(Sq(2) == sh)\nmain()\n",
+    );
+    // (2) the `Error` existential vs a conforming user error struct (not just the `str` special case).
+    entry_ok(
+        "struct MyErr:\n    m: str\n    fn message(self) -> str:\n        return self.m\nfn boom() -> int!:\n    return Err(MyErr(\"x\"))\nfn main():\n    match boom():\n        Ok(v): print(v)\n        Err(e): print(e == MyErr(\"x\"))\nmain()\n",
+    );
+    // (3) `Any` is the TOP type — the documented escape hatch, and it must work with only ONE side
+    // widened (the docs spell it `u: Any = a`).
+    entry_ok("fn main():\n    u: Any = 1\n    print(u == 1)\n    print(1 == u)\nmain()\n");
+    // (4) an unbounded `Ty::Param` vs a concrete: generics are erased, so nothing is provable.
+    entry_ok("fn f[T](a: T) -> bool:\n    return a == 1\nfn main():\n    print(f(1))\nmain()\n");
+    // (5) a NESTED existential — the recursion `compatible` cannot do.
+    entry_ok(
+        "struct MyErr:\n    m: str\n    fn message(self) -> str:\n        return self.m\nfn main():\n    o: Option[Error] = Some(MyErr(\"x\"))\n    p: Option[MyErr] = Some(MyErr(\"x\"))\n    print(o == p)\nmain()\n",
+    );
 }
 
 /// **Decision 5** — a type with a user `eq` is rejected as an `Atomic[T]` payload: `Atomic.cas`

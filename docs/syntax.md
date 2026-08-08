@@ -1343,9 +1343,13 @@ Box[str]`, or two different structs can only ever answer `false`, which is alway
 This is a **deliberate divergence from Python** (which answers `False` at runtime): Chezzi is
 statically typed, so it follows mypy's `--strict-equality`, Go, and Rust here. Everything the runtime
 can genuinely compare stays legal — a mixed `int`/`float` pair (`1 == 1.0`), `bytes` vs `bytearray`
-(content-equal, Python parity), and any pair of the same type. When you *want* the dynamic answer,
-compare through the `Any` existential (`u: Any = a`), where disjointness is not provable and the
-runtime's type-tag guard decides.
+(content-equal, Python parity), any pair of the same type, and — since only a *provably* disjoint pair
+is an error — a **protocol existential against a type that conforms to it** (`sh: Shape` vs a `Sq`,
+an `Error` vs your error struct, in either operand order, and nested: `Option[Error]` vs
+`Option[MyErr]`) plus any comparison involving an erased type parameter (`a == 1` inside `fn f[T](a:
+T)`). When you *want* the dynamic answer on a genuinely disjoint pair, compare through the `Any`
+existential — widening **one** side is enough (`u: Any = a; u == b`), since `Any` is the top type and
+disjointness is then not provable, and the runtime's type-tag guard decides.
 Ordering is overloaded through `Comparable`; arithmetic is overloaded through the per-operator
 protocols **`Add`/`Sub`/`Mul`/`Div`/`Mod`** (binary, methods `add`/`sub`/`mul`/`div`/`mod(self,
 other: Self) -> Self`, powering `+`/`-`/`*`/`/`/`%`) and **`Neg`** (unary, method `neg(self) -> Self`,
@@ -2840,7 +2844,8 @@ fn fetch_all(urls: List[str]):
   the Rust seed — but protocol CONFORMANCE (`int`/`float` satisfying `Add`/`Comparable`/`Neg` intrinsically
   with no method; `Iterator` via `iter_elem`; structural satisfaction for user structs) and OPERATOR
   BINDING (`+`→`add`, `<`→`compare`, `for`→`Iterator`, `[]`→`Index`, `[:]`→`Slice`) stay Rust-wired.
-  (All 20 are file-backed, `Any` and `Iterable` included — `Any` is `protocol Any:` + `pass` (empty), and
+  (All 21 are file-backed — the 20 above plus `Any` (the top type, reserved the same way): `Any` is
+  `protocol Any:` + `pass` (empty), and
   `Iterable`'s `iter(self) -> Iterator[Elem]` return type resolves to the same `Iterator[T]` value type the
   Rust seed uses, so their shapes mirror cleanly like the rest.) `Convert[S]` (`fn convert(x: S) -> Self`,
   a STATIC method — the extensible type-conversion protocol, Rust `From`) is DECLARED + reserved +

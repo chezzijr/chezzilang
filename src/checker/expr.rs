@@ -1730,8 +1730,10 @@ impl Checker {
                 // the value's type.
                 let inferred = self.one_arg("Atomic", args, span);
                 let elem = self.concurrency_turbofish_elem("Atomic", targs, inferred, span);
-                self.reject_eq_atomic_payload(&elem, span);
                 if self.concurrency_licensed("Atomic") {
+                    // INSIDE the licensing branch: an unavailable type must not first get advice
+                    // about its payload (the `unknown type 'Atomic'` error is the only useful one).
+                    self.reject_eq_atomic_payload(&elem, span);
                     Some(Ty::atomic(elem))
                 } else {
                     self.error(

@@ -2357,12 +2357,18 @@ impl Checker {
                 }
             }
             // **B2** (`docs/gaps.md`) — `==`/`!=` yields `bool`, but the operands must be able to be
-            // equal. Anything the runtime compares structurally is fine (`compatible`, checked BOTH
-            // ways so a `str` still matches an `Error` existential), as is a mixed int/float pair
-            // (`1 == 1.0`, the same widening `<` allows) and any pair that overloads a user `eq`
-            // (`equality_allowed`). A provably-disjoint pair (`1 == "a"`, `Box[int] == Box[str]`) is
-            // always a bug in user code: Python answers `False` at runtime, but Chezzi is statically
-            // typed, so — like mypy `--strict-equality`, Go, and Rust — it is rejected at check time.
+            // equal. Only a **provably disjoint** pair (`1 == "a"`, `Box[int] == Box[str]`) is
+            // rejected: that is always a bug in user code — Python answers `False` at runtime, but
+            // Chezzi is statically typed, so — like mypy `--strict-equality`, Go, and Rust — it is a
+            // check-time error. Everything one side can legitimately BE is accepted, which is
+            // `assignable` (both directions), NOT the context-free `compatible`: `compatible` cannot
+            // see the protocol/struct registry (see its own `Protocol` arm's note), so it would
+            // reject `Shape == Sq`, `Any == int`, and `Option[Error] == Option[MyErr]` — a protocol
+            // existential is a SUPERTYPE of its conforming concretes, and `Any` is the top type.
+            // A `Ty::Param` is never provably disjoint either: generics are erased, so the body is
+            // checked once with `T` abstract and any concrete pairing is possible at a call site.
+            // Plus a mixed int/float pair (`1 == 1.0`, the same widening `<` allows) and any pair
+            // that overloads a user `eq` (`equality_allowed`).
             // `either_unknown` keeps a prior error from cascading (and keeps both operands INFERRED,
             // which the range-in-value-position backstop depends on).
             Eq | NotEq => {
@@ -2373,8 +2379,9 @@ impl Checker {
                         (&l, &r),
                         (Ty::Bytes, Ty::ByteArray) | (Ty::ByteArray, Ty::Bytes)
                     )
-                    || compatible(&l, &r)
-                    || compatible(&r, &l)
+                    || matches!((&l, &r), (Ty::Param(_), _) | (_, Ty::Param(_)))
+                    || self.assignable(&l, &r)
+                    || self.assignable(&r, &l)
                     || self.equality_allowed(&l, &r);
                 if !ok && !either_unknown {
                     self.error(lhs.span, format!("cannot compare {l} and {r} for equality"));

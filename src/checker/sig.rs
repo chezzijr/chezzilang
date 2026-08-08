@@ -1354,8 +1354,9 @@ impl Checker {
                     // type isn't gated on sendability — the handle is what crosses.
                     ("Atomic", [inner]) => {
                         let elem = self.resolve_type(inner, span);
-                        self.reject_eq_atomic_payload(&elem, span);
                         if self.concurrency_licensed("Atomic") {
+                            // INSIDE the licensing branch — see the ctor site in `expr.rs`.
+                            self.reject_eq_atomic_payload(&elem, span);
                             Ty::atomic(elem)
                         } else {
                             self.error(

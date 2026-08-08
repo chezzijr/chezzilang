@@ -2134,12 +2134,17 @@ impl Checker {
             _ => false,
         };
         if has_user_eq {
-            self.error(
-                span,
-                format!(
-                    "Atomic[{elem}] payload defines its own 'eq' — Atomic.cas compares stored values structurally, never through a user 'eq', so the two would disagree; use Shared[{elem}] (no cas) instead"
-                ),
+            let msg = format!(
+                "Atomic[{elem}] payload defines its own 'eq' — Atomic.cas compares stored values structurally, never through a user 'eq', so the two would disagree; use Shared[{elem}] (no cas) instead"
             );
+            // ONCE per offending payload type. `a: Atomic[P] = Atomic(P(1))` reaches here THREE
+            // times (the annotation is resolved twice, plus the ctor); the complaint is about the
+            // type `P`, not about each spelling of it, so a later identical message adds nothing.
+            // (`ends_with`, not `==`: `Checker::error` may prefix an `in module '<label>': `.)
+            if self.errors.iter().any(|e| e.message.ends_with(&msg)) {
+                return;
+            }
+            self.error(span, msg);
         }
     }
 

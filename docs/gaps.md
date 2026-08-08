@@ -2564,11 +2564,20 @@ docs as a deliberate, explained divergence from Python's runtime.
 
 **Landed (M23, the `Eq`-protocol slice).** The `Eq | NotEq` arm now rejects `cannot compare {l} and
 {r} for equality` unless the pair is something the runtime can genuinely compare. The accepted set is
-derived from `values_equal_guarded`'s own truth table rather than guessed: same type (`compatible`,
-tried both ways so a `str` still matches an `Error` existential), a mixed `int`/`float` pair, a
-`bytes`/`bytearray` pair (content-equal, Python parity), or a user-`eq` overload
-(`equality_allowed`) — everything else can only ever answer `false`. An `Unknown` operand silences it,
-so one earlier error never cascades. Documented as a deliberate Python divergence in
+derived from `values_equal_guarded`'s own truth table rather than guessed: `Checker::assignable`
+either way round, a mixed `int`/`float` pair, a `bytes`/`bytearray` pair (content-equal, Python
+parity), a `Ty::Param` on either side, or a user-`eq` overload (`equality_allowed`) — everything else
+can only ever answer `false`. An `Unknown` operand silences it, so one earlier error never cascades.
+
+The predicate is **`assignable`, deliberately not the free `compatible`** — that was the first cut's
+bug. `compatible` is registry-blind (its own `Protocol` arm says so: "struct conformance needs the
+registry — handled by `Checker::assignable`, not here"), so it cannot see that a protocol existential
+is a SUPERTYPE of its conforming concretes. Using it rejected five classes of legal,
+correctly-answering programs: `Shape == Sq`, `Error == MyErr`, `Any == int`, `T == int` inside an
+erased generic, and the nested `Option[Error] == Option[MyErr]`. Only the hardcoded
+`(Protocol("Error"), Str)` special case kept `e == "nope"` alive — `Error == str` legal while
+`Error == MyErr` was rejected is the tell. A `Ty::Param` is never provably disjoint either (generics
+are erased), so it is accepted outright. Documented as a deliberate Python divergence in
 `docs/syntax.md`; the dynamic answer is still reachable through the `Any` existential, which is how
 `examples/empty_struct.chz` and `examples/enum_layout.chz` still demonstrate the runtime type-tag
 guard.
