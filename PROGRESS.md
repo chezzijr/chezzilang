@@ -2,6 +2,21 @@
 
 Single source of truth for "what am I doing next." Update after every work session.
 
+> # ✅ `PathLike` is drift-guarded — all 21 reserved protocols, not 20 (2026-08-08)
+>
+> `assert_native_protocol_shape_matches` (the debug-only guard that `debug_assert_eq!`s each reserved
+> protocol's `std/prelude.chz` decl against its `prebuilt_protocols` Rust seed) carried 20 of the 21
+> names. `PathLike` was mirrored in the prelude but absent from the list, so its shape was the one that
+> could drift with nothing noticing — pre-existing since W7-8, surfaced by M23. `docs/gaps.md` §L4b is
+> retired.
+>
+> **The harvest running was the deliverable, not the list entry.** `PathLike`'s decl round-trips
+> through `harvest_protocol_shape` and **matched the seed unchanged** (zero type params, zero embeds,
+> one `as_path(self) -> bytes`), so neither side needed correcting. That the guard now really executes
+> for `PathLike` was proven by drifting the mirror's return type to `str` in a **debug** build (the
+> body is `cfg!(debug_assertions)`-gated, a no-op in release): it panicked with `protocol 'PathLike'
+> method 'as_path' sig drifted from prebuilt_protocols`; reverted. No runtime behavior change.
+>
 > # ✅ M23 follow-up — the `Comparable: Eq` migration hint now fires on the BOUND path too (2026-08-08)
 >
 > M23's migration diagnostic ("`Comparable` embeds `Eq`, so a type defining `compare` must define

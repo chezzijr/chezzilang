@@ -798,9 +798,9 @@ impl Checker {
     /// [`prebuilt_protocols`], which stays the RUNTIME source of truth. The file-backed decls are an
     /// ADDITIVE mirror — never inserted into `self.protocols` (the `hoist_protocol` stdlib gate no-ops
     /// them) — so nothing at runtime consults them; this guard is the only thing that reads them, keeping
-    /// the two source expressions from silently drifting. 20 of the 21 reserved protocols are
-    /// guarded here — **`PathLike` is mirrored in `std/prelude.chz` but NOT in the list below**, so
-    /// it is the one shape that can still drift (pre-existing gap; closing it is its own change);
+    /// the two source expressions from silently drifting. ALL 21 reserved protocols are guarded here
+    /// (`PathLike` was the one omission — `gaps.md` §L4b, closed 2026-08-08; its harvested shape
+    /// matched the seed unchanged, so nothing but the list entry moved);
     /// `Iterable`'s `iter(self) -> Iterator[Elem]` return type resolves (via `resolve_type`'s dedicated
     /// `Iterator[T]` value arm) to the same `Ty::Struct("Iterator",[Elem])` the seed uses, so its shape
     /// byte-matches too. Called only on the always-linked prelude module; the body is
@@ -834,6 +834,7 @@ impl Checker {
             "Slice",
             "Convert",
             "Contains",
+            "PathLike",
         ] {
             let got = self.harvest_protocol_shape(ast, name).unwrap_or_else(|| {
                 panic!("reserved protocol '{name}' missing from std/prelude.chz")
