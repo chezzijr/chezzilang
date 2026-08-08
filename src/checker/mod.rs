@@ -445,33 +445,44 @@ pub(crate) fn is_firstclass_builtin_fn(name: &str) -> bool {
     prelude_fn(name).is_some_and(|p| p.first_class)
 }
 
-/// Prebuilt protocols a user program may use as bounds but must not redeclare (mirrors
-/// [`prebuilt_protocols`]).
+/// THE declaration of the reserved (prebuilt) protocol set — one list, three consumers:
+/// [`is_reserved_protocol`] (the redeclaration gate), [`prebuilt_protocols`] (the live runtime seed,
+/// whose key set this must EQUAL — asserted by the drift guard), and
+/// `Checker::assert_native_protocol_shape_matches` (which iterates this to prove each name's
+/// `std/prelude.chz` mirror byte-matches its seed). Previously three hand-maintained copies that
+/// nothing forced to agree: `PathLike` sat in the first two and was missing from the third for months,
+/// so its shape was the one that could silently drift (`docs/gaps.md` §L4b). Adding a protocol now
+/// means adding it HERE and seeding it; omit either and the debug guard fails.
+pub(crate) const RESERVED_PROTOCOLS: &[&str] = &[
+    "Any",
+    "Comparable",
+    "Eq",
+    "Stringable",
+    "Hashable",
+    "Error",
+    "Add",
+    "Sub",
+    "Mul",
+    "Div",
+    "Mod",
+    "Neg",
+    "Arithmetic",
+    "Iterator",
+    "Iterable",
+    "Index",
+    "IndexSet",
+    "Slice",
+    "Convert",
+    "Contains",
+    "PathLike",
+];
+
+/// Prebuilt protocols a user program may use as bounds but must not redeclare (the
+/// [`RESERVED_PROTOCOLS`] membership test). Every caller is a per-DECLARATION hoist/setup check
+/// (`hoist_protocol`, the `struct`/`enum`/`newtype`/`type` reserved-name arms), so the linear scan is
+/// off any hot path — it sits beside an identical `native::ffi::TYPE_NAMES.contains(..)` scan.
 fn is_reserved_protocol(name: &str) -> bool {
-    matches!(
-        name,
-        "Any"
-            | "Comparable"
-            | "Eq"
-            | "Stringable"
-            | "Hashable"
-            | "Error"
-            | "Add"
-            | "Sub"
-            | "Mul"
-            | "Div"
-            | "Mod"
-            | "Neg"
-            | "Arithmetic"
-            | "Iterator"
-            | "Iterable"
-            | "Index"
-            | "IndexSet"
-            | "Slice"
-            | "Convert"
-            | "Contains"
-            | "PathLike"
-    )
+    RESERVED_PROTOCOLS.contains(&name)
 }
 
 /// True if `name` is one of the four recognized suite lifecycle hooks.

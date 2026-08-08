@@ -11985,29 +11985,14 @@ fn extern_owned_str_param_via_alias_rejected() {
 
 #[test]
 fn protocol_named_types_rejected_at_decl() {
-    // The 16 prebuilt PROTOCOL names may be used as bounds (`[T: Comparable]`) but must NOT be
+    // The prebuilt PROTOCOL names may be used as bounds (`[T: Comparable]`) but must NOT be
     // redeclared as a struct/enum/newtype/type alias — left ungated such a decl silently shadowed
     // the protocol and produced a self-contradictory diagnostic ("type Comparable does not satisfy
     // Comparable"). Mirrors the reserved-TYPE-name reservation (Result/Channel/...). The DECL of the
     // name is reserved; the protocol BOUND of the same name stays legal (see the boundary test).
-    for name in [
-        "Comparable",
-        "Stringable",
-        "Hashable",
-        "Error",
-        "Add",
-        "Sub",
-        "Mul",
-        "Div",
-        "Mod",
-        "Neg",
-        "Arithmetic",
-        "Iterable",
-        "Index",
-        "IndexSet",
-        "Slice",
-        "Convert",
-    ] {
+    // Driven from `RESERVED_PROTOCOLS` rather than a hand-copied subset, so a 22nd protocol is covered
+    // here the day it is declared.
+    for &name in crate::checker::RESERVED_PROTOCOLS {
         for src in [
             format!("struct {name}:\n    x: int\nfn main():\n    print(1)\nmain()\n"),
             format!("enum {name}:\n    A\nfn main():\n    print(1)\nmain()\n"),
@@ -17030,13 +17015,14 @@ fn native_enum_option_result_shape_matches_inline() {
     );
 }
 
-/// Phase 5c-protocols BEHAVIOR-PRESERVING DRIFT GUARD: all 18 reserved protocols are now ALSO declared
-/// in `std/prelude.chz` as plain `protocol` decls, but `prebuilt_protocols` stays the live runtime source
+/// Phase 5c-protocols BEHAVIOR-PRESERVING DRIFT GUARD: every reserved protocol is ALSO declared
+/// in `std/prelude.chz` as a plain `protocol` decl, but `prebuilt_protocols` stays the live runtime source
 /// (conformance / operator lowering / `check_bounds` untouched). This asserts each file-backed protocol's
 /// harvested SHAPE (`type_params`, `embeds`, ordered method `FnSig`s) BYTE-EQUALS the Rust seed, so the two
-/// source expressions can never silently drift. `Iterable` completes the set: its `iter(self) ->
+/// source expressions can never silently drift. `Iterable` is the interesting one: its `iter(self) ->
 /// Iterator[Elem]` return type resolves via `resolve_type`'s dedicated `Iterator[T]` value arm to the same
-/// `Ty::Struct("Iterator",[Elem])` the seed uses, so its shape byte-matches like the other 16.
+/// `Ty::Struct("Iterator",[Elem])` the seed uses, so its shape byte-matches like the rest. Iterates
+/// `RESERVED_PROTOCOLS` (not a hand-copied subset — this list had gone stale at 17 of 21 names).
 #[test]
 fn native_protocol_shapes_match_prebuilt_seed() {
     let path = crate::resolver::std_root().join("prelude.chz");
@@ -17046,25 +17032,7 @@ fn native_protocol_shapes_match_prebuilt_seed() {
     let mut c = Checker::new();
     c.current_module_is_stdlib = true;
     let seed = prebuilt_protocols();
-    for name in [
-        "Comparable",
-        "Stringable",
-        "Error",
-        "Hashable",
-        "Add",
-        "Sub",
-        "Mul",
-        "Div",
-        "Mod",
-        "Neg",
-        "Arithmetic",
-        "Iterator",
-        "Iterable",
-        "Index",
-        "IndexSet",
-        "Slice",
-        "Convert",
-    ] {
+    for &name in crate::checker::RESERVED_PROTOCOLS {
         let got = c.harvest_protocol_shape(&module, name).unwrap_or_else(|| {
             panic!("reserved protocol '{name}' must be declared in std/prelude.chz")
         });

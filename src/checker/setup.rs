@@ -798,9 +798,12 @@ impl Checker {
     /// [`prebuilt_protocols`], which stays the RUNTIME source of truth. The file-backed decls are an
     /// ADDITIVE mirror — never inserted into `self.protocols` (the `hoist_protocol` stdlib gate no-ops
     /// them) — so nothing at runtime consults them; this guard is the only thing that reads them, keeping
-    /// the two source expressions from silently drifting. ALL 21 reserved protocols are guarded here
-    /// (`PathLike` was the one omission — `gaps.md` §L4b, closed 2026-08-08; its harvested shape
-    /// matched the seed unchanged, so nothing but the list entry moved);
+    /// the two source expressions from silently drifting. The guarded set is not a list of its own any
+    /// more: it IS [`RESERVED_PROTOCOLS`], the single declaration `is_reserved_protocol` also answers
+    /// from — and the first assertion below pins that const's contents EQUAL to `prebuilt_protocols`'s
+    /// key set, so "reserved but not seeded" and "seeded but not reserved" fail here too. That closes
+    /// the mechanism behind `gaps.md` §L4b (a hand-copied guard list that omitted `PathLike` for
+    /// months, leaving its shape the one that could silently drift).
     /// `Iterable`'s `iter(self) -> Iterator[Elem]` return type resolves (via `resolve_type`'s dedicated
     /// `Iterator[T]` value arm) to the same `Ty::Struct("Iterator",[Elem])` the seed uses, so its shape
     /// byte-matches too. Called only on the always-linked prelude module; the body is
@@ -811,31 +814,18 @@ impl Checker {
             return;
         }
         let seed = prebuilt_protocols();
-        for name in [
-            // `Any` — the empty (zero-method, zero-embed) accept-all top type. Now expressible in
-            // Chezzi as `protocol Any:\n    pass`, so it is mirrored + drift-guarded like the rest.
-            "Any",
-            "Comparable",
-            "Eq",
-            "Stringable",
-            "Error",
-            "Hashable",
-            "Add",
-            "Sub",
-            "Mul",
-            "Div",
-            "Mod",
-            "Neg",
-            "Arithmetic",
-            "Iterator",
-            "Iterable",
-            "Index",
-            "IndexSet",
-            "Slice",
-            "Convert",
-            "Contains",
-            "PathLike",
-        ] {
+        // The set half of the guard: the reserved-name const and the seed's keys must be the SAME set.
+        // A protocol seeded but never reserved (redeclarable — it would shadow the builtin) or reserved
+        // but never seeded (usable as a bound that resolves to nothing) both fail right here.
+        let mut reserved: Vec<&str> = crate::checker::RESERVED_PROTOCOLS.to_vec();
+        reserved.sort_unstable();
+        let mut seeded: Vec<&str> = seed.keys().map(String::as_str).collect();
+        seeded.sort_unstable();
+        debug_assert_eq!(
+            reserved, seeded,
+            "RESERVED_PROTOCOLS and prebuilt_protocols disagree on the reserved protocol set"
+        );
+        for &name in crate::checker::RESERVED_PROTOCOLS {
             let got = self.harvest_protocol_shape(ast, name).unwrap_or_else(|| {
                 panic!("reserved protocol '{name}' missing from std/prelude.chz")
             });

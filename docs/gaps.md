@@ -3140,6 +3140,25 @@ the mirror's return type to `str` in a debug build — it panicked with `protoco
 'as_path' sig drifted from prebuilt_protocols` — then reverting. (Debug build required: the body is
 `cfg!(debug_assertions)`-gated and is a no-op in release.)
 
+**FOLLOW-UP — the MECHANISM is gone, not just the instance (2026-08-08).** The list edit closed the
+`PathLike` case and left intact the thing that produced it: the reserved set was written out **three**
+independent times (`is_reserved_protocol`'s `matches!`, `prebuilt_protocols`'s keys, the guard's own
+literal list) plus **two** stale hand-copied subsets in `checker/tests.rs` (16 and 17 of 21 names), and
+nothing forced any of them to agree — a 22nd protocol re-opens the identical hole silently. Now there
+is one declaration, `checker::RESERVED_PROTOCOLS`: `is_reserved_protocol` is a `.contains` over it (all
+its callers are per-DECLARATION hoist/setup checks, so the linear scan over 21 entries is off any hot
+path — it sits beside an identical `native::ffi::TYPE_NAMES.contains(..)`), the guard iterates it, and
+both test lists are driven from it. The guard **additionally** `debug_assert_eq!`s the const's contents
+against `prebuilt_protocols`'s key set — the half a const alone does not solve, catching *reserved but
+not seeded* (a bound resolving to nothing) and *seeded but not reserved* (a builtin a user can shadow).
+That set assertion passed unchanged on the first run, so no pre-existing mismatch was hiding behind the
+three lists; widening the two test subsets to all 21 also passed, so the five names they had never
+covered (`Any`, `Eq`, `Iterator`, `Contains`, `PathLike`) were already correctly rejected at their decl
+sites. Proven to fire, in a debug build, in both directions: deleting `"Contains"` from the const and
+adding an unseeded `"Bogus"` each panicked `RESERVED_PROTOCOLS and prebuilt_protocols disagree on the
+reserved protocol set` with the two sorted sets diffed, then reverted. Adding a protocol is now a
+two-place edit (the const + a seed) that fails loudly if you do only one.
+
 ### L5. Operator-protocol holes
 The reserved set (`Add Sub Mul Div Mod Neg Arithmetic Comparable Stringable Hashable Index IndexSet
 Slice Contains Iterator Iterable Convert Any Error`) covers arithmetic, ordering, indexing, slicing,
