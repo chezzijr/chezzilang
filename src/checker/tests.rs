@@ -2113,6 +2113,147 @@ print(Ver(1) < Ver(2))
     );
 }
 
+/// M23 follow-up — the SAME migration diagnostic on the BOUND path (`[T: Comparable]`), which Task 2
+/// wired only to the operator. One source of the sentence (`eq_migration_hint`), two call sites.
+#[test]
+fn comparable_bound_on_compare_without_eq_names_the_missing_eq() {
+    let src = "\
+struct Ver:
+    maj: int
+    fn compare(self, o: Ver) -> int:
+        return self.maj - o.maj
+fn mx[T: Comparable](a: T, b: T) -> T:
+    if a < b:
+        return b
+    return a
+print(mx(Ver(1), Ver(2)))
+";
+    rejects(
+        src,
+        "type Ver does not satisfy Eq (missing method 'eq'): `Comparable` embeds `Eq`, so a type defining `compare` must define `eq` too",
+    );
+    // Transitively, through a user protocol that EMBEDS `Comparable` — the bound is `Ord2`, but the
+    // requirement (and so the ratchet) is still Comparable's.
+    rejects(
+        "\
+protocol Ord2:
+    Comparable
+    fn tag(self) -> str
+struct Ver:
+    maj: int
+    fn compare(self, o: Ver) -> int:
+        return self.maj - o.maj
+    fn tag(self) -> str:
+        return \"v\"
+fn u[T: Ord2](a: T) -> int:
+    return 0
+print(u(Ver(1)))
+",
+        "does not satisfy Eq (missing method 'eq'): `Comparable` embeds `Eq`",
+    );
+}
+
+/// The bound-path hint must NOT over-fire. Three controls, each one bare-wording:
+/// no `compare` at all, a bare `T: Eq` bound (no `compare` requirement → not the ratchet), and a user
+/// protocol that has its own `compare` but no `Eq` (also not the ratchet).
+#[test]
+fn comparable_bound_hint_does_not_over_fire() {
+    let bare = |src: &str, msg: &str| {
+        let errs = check_src(src);
+        assert!(
+            errs.iter().any(|e| e.message == msg),
+            "expected the bare wording {msg:?}, got: {errs:?}"
+        );
+    };
+    // (1) No comparator at all — never misled by the pre-M23 wording, so it keeps it.
+    bare(
+        "\
+struct Ver:
+    maj: int
+fn mx[T: Comparable](a: T, b: T) -> T:
+    return a
+print(mx(Ver(1), Ver(2)))
+",
+        "type Ver does not satisfy Eq (missing method 'eq')",
+    );
+    // (2) A bare `T: Eq` bound requires no `compare`, so `Comparable` is not what the user tripped on.
+    bare(
+        "\
+struct Ver:
+    maj: int
+    fn compare(self, o: Ver) -> int:
+        return self.maj - o.maj
+fn u[T: Eq](a: T, b: T) -> bool:
+    return a == b
+print(u(Ver(1), Ver(2)))
+",
+        "type Ver does not satisfy Eq (missing method 'eq')",
+    );
+    // (3) A user protocol requiring only `compare` — no `Eq` anywhere, so no `Eq` sentence.
+    bare(
+        "\
+protocol MyCmp:
+    fn compare(self, o: Self) -> int
+struct Ver:
+    maj: int
+    fn compare(self, o: Ver) -> str:
+        return \"x\"
+fn u[T: MyCmp](a: T) -> int:
+    return 0
+print(u(Ver(1)))
+",
+        "type Ver does not satisfy MyCmp (method 'compare' has the wrong signature)",
+    );
+}
+
+/// A GENERIC NEWTYPE is a dead end, not a missing method: `Comparable` embeds `Eq`, and declaring
+/// `eq` on any newtype is itself an error, so the struct/enum sentence ("define `eq` too") would send
+/// this user to a second diagnostic. Say it is unsatisfiable and name the way out instead.
+#[test]
+fn comparable_bound_on_newtype_says_it_is_unsatisfiable() {
+    let src = "\
+newtype Box[T] = T:
+    fn compare(self, o: Box[T]) -> int:
+        return 0
+fn mx[T: Comparable](a: T, b: T) -> T:
+    if a < b:
+        return b
+    return a
+print(mx(Box(1), Box(2)))
+";
+    rejects(
+        src,
+        "type Box[int] does not satisfy Eq: `Comparable` embeds `Eq`, and a newtype can never define `eq` (its `==` always unwraps to the underlying's native equality, so the method and the operator would disagree), so a `compare` method can never make a newtype satisfy `Comparable` — use a struct if you need your own ordering",
+    );
+    // The sentence is scoped to a `compare`-declaring newtype for a reason: a NUMERIC newtype DOES
+    // satisfy `Comparable`, intrinsically. It can never reach the hint (declaring `compare` on one is
+    // rejected at the decl site, and the intrinsic grant means its bound never fails) — but a wider
+    // claim in the text would have been false.
+    ok(
+        "newtype Meters = float\nfn mx[T: Comparable](a: T, b: T) -> T:\n    if a < b:\n        return b\n    return a\nprint(mx(Meters(1.0), Meters(2.0)))\n",
+    );
+    // The advice must be REACHABLE: adding `eq` — what the struct/enum sentence would tell them — is
+    // itself an error on a newtype, which is exactly why that sentence is wrong here.
+    rejects(
+        "newtype Box[T] = T:\n    fn eq(self, o: Box[T]) -> bool:\n        return true\n",
+        "operator method 'eq' on a newtype is never dispatched as an operator",
+    );
+    // A newtype with NO `compare` keeps the bare wording (same non-over-fire rule as the struct case).
+    let errs = check_src(
+        "\
+newtype Box[T] = T
+fn mx[T: Comparable](a: T, b: T) -> T:
+    return a
+print(mx(Box(1), Box(2)))
+",
+    );
+    assert!(
+        errs.iter()
+            .any(|e| e.message == "type Box[int] does not satisfy Eq"),
+        "a comparator-less newtype must keep the bare wording, got: {errs:?}"
+    );
+}
+
 #[test]
 fn sort_on_non_comparable_struct_list_rejected() {
     let src = "\
