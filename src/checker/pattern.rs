@@ -2360,29 +2360,41 @@ impl Checker {
             // equal. Only a **provably disjoint** pair (`1 == "a"`, `Box[int] == Box[str]`) is
             // rejected: that is always a bug in user code — Python answers `False` at runtime, but
             // Chezzi is statically typed, so — like mypy `--strict-equality`, Go, and Rust — it is a
-            // check-time error. Everything one side can legitimately BE is accepted, which is
-            // `assignable` (both directions), NOT the context-free `compatible`: `compatible` cannot
-            // see the protocol/struct registry (see its own `Protocol` arm's note), so it would
-            // reject `Shape == Sq`, `Any == int`, and `Option[Error] == Option[MyErr]` — a protocol
-            // existential is a SUPERTYPE of its conforming concretes, and `Any` is the top type.
-            // A `Ty::Param` is never provably disjoint either: generics are erased, so the body is
-            // checked once with `T` abstract and any concrete pairing is possible at a call site.
-            // Plus a mixed int/float pair (`1 == 1.0`, the same widening `<` allows) and any pair
-            // that overloads a user `eq` (`equality_allowed`).
+            // check-time error.
+            //
+            // The question is CO-INHABITABILITY ("can these two ever be the same value?"), which is
+            // [`Checker::may_be_equal`] and NOT `assignable`/`compatible`: those answer the STORAGE
+            // question and carry container invariance + a sendability witness that equality, which
+            // never writes and never crosses a thread boundary, has no use for. See that fn's doc
+            // for the three-way difference and the `Shape == Error` / `List[Error] == List[MyErr]`
+            // cases it exists to admit.
+            //
+            // The runtime's cross-type pairs (`1 == 1.0`, `b"ab" == bytearray(...)`) are arms of
+            // `may_be_equal` itself, so they compose through the recursion (`[1.0] == [1]`) instead
+            // of being a top-level special case. `equality_allowed` adds the user-`eq` overload.
             // `either_unknown` keeps a prior error from cascading (and keeps both operands INFERRED,
             // which the range-in-value-position backstop depends on).
             Eq | NotEq => {
-                let ok = (l.is_numeric() && r.is_numeric())
-                    // `bytes`/`bytearray` compare by CONTENT across the two spellings (Python
-                    // parity — `b"ab" == bytearray([97, 98])` is true), so the pair is not disjoint.
-                    || matches!(
-                        (&l, &r),
-                        (Ty::Bytes, Ty::ByteArray) | (Ty::ByteArray, Ty::Bytes)
-                    )
-                    || matches!((&l, &r), (Ty::Param(_), _) | (_, Ty::Param(_)))
-                    || self.assignable(&l, &r)
-                    || self.assignable(&r, &l)
-                    || self.equality_allowed(&l, &r);
+                // A `where T: <scalar>` bound is an EQUALITY constraint (`scalar_bound_ty`), not
+                // structural satisfaction: such a `T` is EXACTLY that scalar, at any nesting depth.
+                // Substitute the pins away so the pair is judged concretely — without this the
+                // blanket "an erased param is never provably disjoint" rule would wave through
+                // `fn f[T](a: T, b: int) -> bool where T: str: return a == b`.
+                let pins: HashMap<String, Ty> = self
+                    .type_params
+                    .iter()
+                    .filter_map(|(n, bs)| {
+                        bs.iter()
+                            .find_map(|b| Self::scalar_bound_ty(&b.name))
+                            .map(|t| (n.clone(), t))
+                    })
+                    .collect();
+                let (l, r) = if pins.is_empty() {
+                    (l, r)
+                } else {
+                    (subst(&l, &pins), subst(&r, &pins))
+                };
+                let ok = self.may_be_equal(&l, &r) || self.equality_allowed(&l, &r);
                 if !ok && !either_unknown {
                     self.error(lhs.span, format!("cannot compare {l} and {r} for equality"));
                 }

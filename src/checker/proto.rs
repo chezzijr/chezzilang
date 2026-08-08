@@ -785,6 +785,91 @@ impl Checker {
         }
     }
 
+    /// **CO-INHABITABILITY** — can a value of type `l` and a value of type `r` ever be the *same
+    /// value* at runtime? The predicate gap B2 (`==`/`!=`) asks, and the ONLY thing it asks: a pair
+    /// that answers `false` here is **provably disjoint**, so comparing it is a bug in user code
+    /// (mypy `--strict-equality` / Go / Rust all reject it); everything else is accepted and answered
+    /// structurally at runtime, exactly as before.
+    ///
+    /// It is deliberately NOT [`Checker::assignable`]. Assignability answers a *storage* question —
+    /// "can a `B` be written into an `A` slot" — and carries two conjuncts equality has no use for:
+    ///
+    /// * **Invariance.** `assignable` compares `List`/`Set`/`Map`/generic `Struct`/`Enum` type
+    ///   ARGUMENTS with the context-free `compatible`, because a `G[Sub]` aliased as `G[Super]` can be
+    ///   *written through*. `==` never writes, so a `List[Error]` and a `List[MyErr]` can genuinely
+    ///   hold the same list; here the arguments recurse CO-VARIANTLY.
+    /// * **Sendability.** `assignable`'s `Protocol` arm ends in `&& self.sendable(a)` (the spawn-airlock
+    ///   witness). Whether two values may be equal has nothing to do with whether either crosses a
+    ///   thread boundary.
+    ///
+    /// And it adds the arm `assignable` cannot have: **two existentials co-inhabit**. `assignable`
+    /// only passes `Protocol` vs `Protocol` when one embeds the other (a `Shape` slot really can't
+    /// hold an arbitrary `Error`), but ONE concrete type can conform to two unrelated protocols — a
+    /// `Sq` that has both `area` and `message` is simultaneously a `Shape` and an `Error` — so the
+    /// pair is inhabited and `Shape == Error` must compile.
+    ///
+    /// An existential against a CONCRETE is still decided by conformance, so this is not a free pass:
+    /// `Shape == str` stays an error because no `Shape` witness is ever a `str`.
+    pub(super) fn may_be_equal(&self, l: &Ty, r: &Ty) -> bool {
+        use Ty::*;
+        match (l, r) {
+            // A prior error, or an un-refined empty collection — never cascade off it.
+            (Unknown, _) | (_, Unknown) => true,
+            // ERASED: a generic body is checked once with `T` abstract, so any concrete pairing is
+            // possible at some call site. (A `where T: <scalar>` param is NOT erased — it is an
+            // equality bound pinning `T` to that scalar, and `infer_binary`'s `Eq` arm substitutes
+            // those pins away BEFORE calling this, so `T: str` vs `int` still rejects.)
+            (Param(_), _) | (_, Param(_)) => true,
+            (Protocol(..), Protocol(..)) => true,
+            (Protocol(p, pargs), a) | (a, Protocol(p, pargs)) => {
+                self.satisfies_args(a, p, pargs).is_ok()
+            }
+            // The runtime's own CROSS-TYPE equality arms (`values_equal`), which is what makes these
+            // pairs inhabited rather than merely assignable. They live HERE, not as a top-level
+            // special case, so they compose through the recursion the same way the runtime does:
+            // `[1.0, 2.0] == [1, 2]` and `{"k": 1.0} == {"k": 1}` answer `true` on both engines
+            // (CPython agrees), so rejecting them would have been a lie about "provably disjoint".
+            (Int, Float) | (Float, Int) | (Bytes, ByteArray) | (ByteArray, Bytes) => true,
+            (List(a), List(b)) | (Set(a), Set(b)) | (Option(a), Option(b)) => {
+                self.may_be_equal(a, b)
+            }
+            (Map(ak, av), Map(bk, bv)) => self.may_be_equal(ak, bk) && self.may_be_equal(av, bv),
+            (Result(at, ae), Result(bt, be)) => {
+                self.may_be_equal(at, bt) && self.may_be_equal(ae, be)
+            }
+            (Tuple(a), Tuple(b)) => {
+                a.len() == b.len() && a.iter().zip(b).all(|(x, y)| self.may_be_equal(x, y))
+            }
+            (Struct(n, a), Struct(m, b))
+            | (Enum(n, a), Enum(m, b))
+            | (NewType(n, a), NewType(m, b)) => {
+                n == m
+                    && a.len() == b.len()
+                    && a.iter().zip(b).all(|(x, y)| self.may_be_equal(x, y))
+            }
+            (
+                Func {
+                    params: p1,
+                    ret: r1,
+                    ..
+                },
+                Func {
+                    params: p2,
+                    ret: r2,
+                    ..
+                },
+            ) => {
+                p1.len() == p2.len()
+                    && p1.iter().zip(p2).all(|(a, b)| self.may_be_equal(a, b))
+                    && self.may_be_equal(r1, r2)
+            }
+            // Everything else (scalars, the concurrency/IO handles, `Module`) is nominal: two values
+            // co-inhabit iff the types are structurally the same, which is exactly the runtime's own
+            // type-tag guard ("distinct types are never equal"). Unchanged from `assignable`'s `_`.
+            _ => compatible(l, r),
+        }
+    }
+
     /// Like [`Checker::assignable`], but accepts **one-way int→float widening** (`(Float, Int)` only)
     /// at a SCALAR value-DEFINITION sink (typed `let`, function/struct/method arg, return,
     /// param/field default).
@@ -2137,11 +2222,17 @@ impl Checker {
             let msg = format!(
                 "Atomic[{elem}] payload defines its own 'eq' — Atomic.cas compares stored values structurally, never through a user 'eq', so the two would disagree; use Shared[{elem}] (no cas) instead"
             );
-            // ONCE per offending payload type. `a: Atomic[P] = Atomic(P(1))` reaches here THREE
-            // times (the annotation is resolved twice, plus the ctor); the complaint is about the
-            // type `P`, not about each spelling of it, so a later identical message adds nothing.
+            // ONCE per (payload type, SITE). `a: Atomic[P]` resolves its annotation TWICE, which
+            // would report the identical message at the identical span; the span keys that pair
+            // down to one. It deliberately does NOT key on the type alone: a second, genuinely
+            // different `Atomic[P]` site (another statement, another module) is its own bug and
+            // must be reported, or the user fixes one and only then learns about the next.
             // (`ends_with`, not `==`: `Checker::error` may prefix an `in module '<label>': `.)
-            if self.errors.iter().any(|e| e.message.ends_with(&msg)) {
+            if self
+                .errors
+                .iter()
+                .any(|e| e.span == span && e.message.ends_with(&msg))
+            {
                 return;
             }
             self.error(span, msg);

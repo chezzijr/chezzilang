@@ -1074,6 +1074,12 @@ fn eq_wrong_return_type_rejected() {
         "struct P:\n    x: int\n    fn eq(self, o: P) -> int:\n        return 0\nfn same[T: Eq](a: T, b: T) -> bool:\n    return a.eq(b)\nprint(same(P(1), P(2)))\n",
         "wrong signature",
     );
+    // The ARITY half of the same signature rule — `eq` takes exactly one `Self` besides the
+    // receiver. This rejected before the row existed; nothing held it.
+    entry_rejects(
+        "struct P:\n    x: int\n    fn eq(self) -> bool:\n        return true\nfn same[T: Eq](a: T, b: T) -> bool:\n    return a.eq(b)\nprint(same(P(1), P(2)))\n",
+        "wrong signature",
+    );
 }
 
 /// Mirror of `generic_struct_heterogeneous_compare_rejected`: `Box[int] == Box[str]` must not
@@ -1160,6 +1166,27 @@ fn disjoint_types_equality_rejected() {
         "protocol Shape:\n    fn area(self) -> int\nstruct Sq:\n    s: int\n    fn area(self) -> int:\n        return self.s\nfn main():\n    sh: Shape = Sq(2)\n    print(sh == \"a\")\nmain()\n",
         "cannot compare Shape and str for equality",
     );
+    // …and it is not a free pass NESTED either: `may_be_equal` recurses a container's type args
+    // CO-variantly, which is not the same as waving them through. A non-conforming element keeps
+    // the pair provably disjoint one and two levels down.
+    entry_rejects(
+        "protocol Shape:\n    fn area(self) -> int\nfn cmp(a: List[Shape], b: List[str]) -> bool:\n    return a == b\nfn main():\n    pass\nmain()\n",
+        "cannot compare List[Shape] and List[str] for equality",
+    );
+    entry_rejects(
+        "fn cmp(a: Option[int], b: Option[str]) -> bool:\n    return a == b\nfn main():\n    pass\nmain()\n",
+        "cannot compare Option[int] and Option[str] for equality",
+    );
+    entry_rejects(
+        "fn cmp(a: Map[str, int], b: Map[str, bool]) -> bool:\n    return a == b\nfn main():\n    pass\nmain()\n",
+        "cannot compare Map[str, int] and Map[str, bool] for equality",
+    );
+    // A `where T: <scalar>` bound is an EQUALITY constraint, so `T` is exactly `str` — the param is
+    // NOT erased and the pair is provable after all (the diagnostic names the pinned scalar).
+    entry_rejects(
+        "fn f[T](a: T, b: int) -> bool where T: str:\n    return a == b\nfn main():\n    print(f(\"a\", 1))\nmain()\n",
+        "cannot compare str and int for equality",
+    );
 }
 
 /// The B2 rejection's PREMISE is "provably disjoint" — every pair that can legitimately be equal must
@@ -1201,6 +1228,31 @@ fn comparable_types_equality_still_ok() {
     // (5) a NESTED existential — the recursion `compatible` cannot do.
     entry_ok(
         "struct MyErr:\n    m: str\n    fn message(self) -> str:\n        return self.m\nfn main():\n    o: Option[Error] = Some(MyErr(\"x\"))\n    p: Option[MyErr] = Some(MyErr(\"x\"))\n    print(o == p)\nmain()\n",
+    );
+    // ----- and the shapes `assignable` cannot see either (it answers the STORAGE question):
+    // (6) TWO existentials over ONE concrete. `Sq` has both `area` and `message`, so it is
+    // simultaneously a `Shape` and an `Error` — the pair is inhabited even though neither protocol
+    // embeds the other, which is all `assignable`'s `(Protocol, Protocol)` path can see.
+    entry_ok(
+        "protocol Shape:\n    fn area(self) -> int\nstruct Sq:\n    s: int\n    fn area(self) -> int:\n        return self.s\n    fn message(self) -> str:\n        return \"sq\"\nfn main():\n    sh: Shape = Sq(2)\n    e: Error = Sq(2)\n    print(sh == e)\n    print(e == sh)\nmain()\n",
+    );
+    // (7) an existential nested inside a MUTABLE container / generic struct. Their type args are
+    // compared INVARIANTLY for assignability (a `G[Sub]` aliased as `G[Super]` can be written
+    // through) — a soundness rule for STORAGE. `==` never writes, so the same list/box/tuple really
+    // can inhabit both types and the comparison must compile.
+    entry_ok(
+        "struct MyErr:\n    m: str\n    fn message(self) -> str:\n        return self.m\nstruct Box[T]:\n    v: T\nfn boxes(a: Box[Error], b: Box[MyErr]) -> bool:\n    return a == b\nfn maps(a: Map[str, Error], b: Map[str, MyErr]) -> bool:\n    return a == b\nfn main():\n    o: List[Error] = [MyErr(\"x\")]\n    p: List[MyErr] = [MyErr(\"x\")]\n    print(o == p)\n    t: (Error, int) = (MyErr(\"x\"), 1)\n    u: (MyErr, int) = (MyErr(\"x\"), 1)\n    print(t == u)\nmain()\n",
+    );
+    // (8) an erased param nested one level down (`List[T]`), not only bare at the top level.
+    entry_ok(
+        "fn f[T](a: List[T]) -> bool:\n    return a == [1]\nfn main():\n    print(f([1]))\nmain()\n",
+    );
+    // (9) the runtime's own CROSS-TYPE equality arms compose through the recursion, because they
+    // are arms of `may_be_equal` rather than a top-level special case: `[1.0] == [1]` and
+    // `{"k": 1.0} == {"k": 1}` both print `true` on both engines (CPython agrees), so rejecting
+    // them would contradict "only a PROVABLY disjoint pair".
+    entry_ok(
+        "fn main():\n    a: List[float] = [1.0]\n    b: List[int] = [1]\n    print(a == b)\n    m: Map[str, float] = {\"k\": 1.0}\n    n: Map[str, int] = {\"k\": 1}\n    print(m == n)\n    t: (float, int) = (1.0, 2)\n    s: (int, int) = (1, 2)\n    print(t == s)\nmain()\n",
     );
 }
 

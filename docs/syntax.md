@@ -1341,15 +1341,32 @@ the declaration site (the method could never agree with the operator).
 `==` / `!=` between **provably-disjoint types is a compile error** — `1 == "a"`, `Box[int] ==
 Box[str]`, or two different structs can only ever answer `false`, which is always a bug in the source.
 This is a **deliberate divergence from Python** (which answers `False` at runtime): Chezzi is
-statically typed, so it follows mypy's `--strict-equality`, Go, and Rust here. Everything the runtime
-can genuinely compare stays legal — a mixed `int`/`float` pair (`1 == 1.0`), `bytes` vs `bytearray`
-(content-equal, Python parity), any pair of the same type, and — since only a *provably* disjoint pair
-is an error — a **protocol existential against a type that conforms to it** (`sh: Shape` vs a `Sq`,
-an `Error` vs your error struct, in either operand order, and nested: `Option[Error]` vs
-`Option[MyErr]`) plus any comparison involving an erased type parameter (`a == 1` inside `fn f[T](a:
-T)`). When you *want* the dynamic answer on a genuinely disjoint pair, compare through the `Any`
-existential — widening **one** side is enough (`u: Any = a; u == b`), since `Any` is the top type and
-disjointness is then not provable, and the runtime's type-tag guard decides.
+statically typed, so it follows mypy's `--strict-equality`, Go, and Rust here. The question asked is
+**"can these two ever be the same value?"** — *not* "is one assignable to the other", which is a
+stricter, different question (it forbids write-through aliasing, and `==` never writes). So
+everything the runtime can genuinely compare stays legal:
+
+* the runtime's cross-type pairs — a mixed `int`/`float` (`1 == 1.0`) and `bytes` vs `bytearray`
+  (content-equal, Python parity) — **at any depth**, so `[1.0] == [1]` and `{"k": 1.0} == {"k": 1}`
+  compile and answer `true`, exactly as in Python;
+* a **protocol existential against a type that conforms to it** (`sh: Shape` vs a `Sq`, an `Error` vs
+  your error struct, in either operand order);
+* **two different existentials** (`Shape` vs `Error`) — one concrete type can conform to both, so the
+  pair is inhabited;
+* an existential **nested inside a container or generic struct** — `List[Error]` vs `List[MyErr]`,
+  `Map[str, Error]` vs `Map[str, MyErr]`, `Box[Error]` vs `Box[MyErr]`, `Option[Error]` vs
+  `Option[MyErr]`, `(Error, int)` vs `(MyErr, int)`. (Note these same pairs are *not* mutually
+  **assignable** — a mutable container's type argument is invariant — but they can still hold equal
+  values, which is all `==` asks.)
+* any comparison involving an **erased type parameter**, bare or nested (`a == 1` and `xs == [1]`
+  inside `fn f[T](a: T, xs: List[T])`). A `where T: <scalar>` bound is the exception: it *pins* `T` to
+  that scalar, so `fn f[T](a: T, b: int) where T: str` still rejects `a == b`.
+
+A conforming existential is not a blanket pass: a **non**-conforming concrete stays an error at every
+depth (`sh: Shape` vs a `str`, `List[Shape]` vs `List[str]`). When you *want* the dynamic answer on a
+genuinely disjoint pair, compare through the `Any` existential — widening **one** side is enough
+(`u: Any = a; u == b`), since `Any` is the top type and disjointness is then not provable, and the
+runtime's type-tag guard decides.
 Ordering is overloaded through `Comparable`; arithmetic is overloaded through the per-operator
 protocols **`Add`/`Sub`/`Mul`/`Div`/`Mod`** (binary, methods `add`/`sub`/`mul`/`div`/`mod(self,
 other: Self) -> Self`, powering `+`/`-`/`*`/`/`/`%`) and **`Neg`** (unary, method `neg(self) -> Self`,

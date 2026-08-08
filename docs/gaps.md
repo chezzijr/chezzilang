@@ -2563,24 +2563,49 @@ it a compile error. Recommendation: reject at check time (a typed language shoul
 docs as a deliberate, explained divergence from Python's runtime.
 
 **Landed (M23, the `Eq`-protocol slice).** The `Eq | NotEq` arm now rejects `cannot compare {l} and
-{r} for equality` unless the pair is something the runtime can genuinely compare. The accepted set is
-derived from `values_equal_guarded`'s own truth table rather than guessed: `Checker::assignable`
-either way round, a mixed `int`/`float` pair, a `bytes`/`bytearray` pair (content-equal, Python
-parity), a `Ty::Param` on either side, or a user-`eq` overload (`equality_allowed`) — everything else
-can only ever answer `false`. An `Unknown` operand silences it, so one earlier error never cascades.
+{r} for equality` unless the pair is something the runtime can genuinely compare. An `Unknown`
+operand silences it, so one earlier error never cascades.
 
-The predicate is **`assignable`, deliberately not the free `compatible`** — that was the first cut's
-bug. `compatible` is registry-blind (its own `Protocol` arm says so: "struct conformance needs the
-registry — handled by `Checker::assignable`, not here"), so it cannot see that a protocol existential
-is a SUPERTYPE of its conforming concretes. Using it rejected five classes of legal,
-correctly-answering programs: `Shape == Sq`, `Error == MyErr`, `Any == int`, `T == int` inside an
-erased generic, and the nested `Option[Error] == Option[MyErr]`. Only the hardcoded
-`(Protocol("Error"), Str)` special case kept `e == "nope"` alive — `Error == str` legal while
-`Error == MyErr` was rejected is the tell. A `Ty::Param` is never provably disjoint either (generics
-are erased), so it is accepted outright. Documented as a deliberate Python divergence in
-`docs/syntax.md`; the dynamic answer is still reachable through the `Any` existential, which is how
-`examples/empty_struct.chz` and `examples/enum_layout.chz` still demonstrate the runtime type-tag
-guard.
+**The predicate is `Checker::may_be_equal` — CO-INHABITABILITY, "can these two ever be the same
+value?"** It took three cuts to get there, and the first two failed the *same* way: a predicate built
+to answer a **storage** question was asked an **equality** question.
+
+* *Cut 1* used the free `compatible`. It is registry-blind (its own `Protocol` arm says so: "struct
+  conformance needs the registry — handled by `Checker::assignable`, not here"), so it could not see
+  that a protocol existential is a SUPERTYPE of its conforming concretes. It rejected `Shape == Sq`,
+  `Error == MyErr`, `Any == int`, `T == int` inside an erased generic, and the nested
+  `Option[Error] == Option[MyErr]`. Only the hardcoded `(Protocol("Error"), Str)` special case kept
+  `e == "nope"` alive — `Error == str` legal while `Error == MyErr` was rejected is the tell.
+* *Cut 2* used `Checker::assignable` both ways round. Better, but assignability answers "can a `B` be
+  stored in an `A` slot", and it carries two conjuncts equality has no use for: **invariance** (a
+  `List`/`Map`/`Set`/generic-`Struct` type argument is compared with `compatible`, because a `G[Sub]`
+  aliased as `G[Super]` can be *written through* — `==` never writes) and **sendability** (its
+  `Protocol` arm ends in `&& self.sendable(a)`, the spawn-airlock witness, which has no bearing on
+  whether two values are equal). It also has no way to pass `Protocol` vs `Protocol` unless one
+  embeds the other, although one concrete type can conform to two unrelated protocols. Measured
+  fallout: `List[Error] == List[MyErr]` and `Shape == Error` were compile errors; both run and print
+  `true` when one side is widened through `Any`.
+
+`may_be_equal` (`src/checker/proto.rs`, next to `assignable`) drops both conjuncts, adds
+`(Protocol, Protocol) => true`, keeps `Protocol`-vs-concrete decided by conformance (so
+`Shape == str` and `List[Shape] == List[str]` stay errors), recurses container/tuple/generic type
+arguments **co-variantly**, and carries the runtime's own cross-type arms (`int`/`float`,
+`bytes`/`bytearray`) *inside* the recursion rather than as a top-level special case — which is what
+makes `[1.0] == [1]` and `{"k": 1.0} == {"k": 1}` compile (both engines print `true`; CPython agrees).
+`Ty::Param` is accepted outright (generics are erased) **except** where a `where T: <scalar>` bound
+pins it: those pins are substituted away first, so `fn f[T](a: T, b: int) where T: str` still rejects
+`a == b`. `equality_allowed` (the user-`eq` overload) is OR'd in alongside.
+
+Rejection therefore requires: both operands fully concrete (no protocol, no free param, no `Unknown`
+anywhere), structurally different, with no cross-type runtime arm — i.e. exactly the runtime's own
+type-tag guard, "distinct types are never equal". Known ceiling, in the declining direction: two
+protocols with *contradictory* requirements (same method name, different signature) are inhabited by
+no type at all, but `(Protocol, Protocol) => true` accepts the pair anyway; proving that needs
+method-set intersection reasoning, and "decline rather than misanswer" is the house rule.
+
+Documented as a deliberate Python divergence in `docs/syntax.md`; the dynamic answer is still
+reachable through the `Any` existential, which is how `examples/empty_struct.chz` and
+`examples/enum_layout.chz` still demonstrate the runtime type-tag guard.
 
 ## Root causes — one change each, many gaps unblocked
 
