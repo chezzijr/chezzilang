@@ -2268,25 +2268,20 @@ impl Checker {
     /// between `cas` and the `p.eq(q)` METHOD spelling, not the operator — which is why the message
     /// says "the payload's own equality" rather than naming `==`: one wording, true on all three arms.
     ///
-    /// Keyed on the payload's OWN `eq` only: a container payload whose ELEMENT defines `eq`
-    /// (`Atomic[List[P]]`) is the same hazard one level down, and belongs with the rest of the
-    /// container-equality ripple rather than here.
+    /// Keyed on every type the payload REACHES, not just its own: structural equality recurses into
+    /// elements, entries, tuple slots, struct fields and enum payloads, so `Atomic[List[P]]`,
+    /// `Atomic[Option[P]]`, `Atomic[(int, P)]` and `Atomic[Wrapper]{p: P}` all reach `P`'s `eq` on
+    /// the same compare that a bare `Atomic[P]` does. Keying on the payload's own `eq` let every one
+    /// of those through the gate (`docs/gaps.md` — M23 review, CRITICAL 2).
     pub(super) fn reject_eq_atomic_payload(&mut self, elem: &Ty, span: Span) {
-        let has_user_eq = match elem {
-            Ty::Struct(k, _) => self
-                .struct_shape(k)
-                .is_some_and(|i| i.methods.contains_key("eq")),
-            Ty::Enum(k, _) => self
-                .enum_methods_of(k)
-                .is_some_and(|m| m.contains_key("eq")),
-            Ty::NewType(k, _) => self
-                .newtype_methods_of(k)
-                .is_some_and(|m| m.contains_key("eq")),
-            _ => false,
-        };
-        if has_user_eq {
+        if let Some(inner) = self.reaches_user_eq(elem, &mut Vec::new()) {
+            let owner = if inner == elem.to_string() {
+                "payload defines its own 'eq'".to_string()
+            } else {
+                format!("payload reaches '{inner}', which defines its own 'eq'")
+            };
             let msg = format!(
-                "Atomic[{elem}] payload defines its own 'eq' — Atomic.cas compares stored values structurally, never through that 'eq', so cas and the payload's own equality would disagree; use Shared[{elem}] (no cas) instead"
+                "Atomic[{elem}] {owner} — Atomic.cas compares stored values structurally, never through that 'eq', so cas and the payload's own equality would disagree; use Shared[{elem}] (no cas) instead"
             );
             // ONCE per (payload type, SITE). `a: Atomic[P]` resolves its annotation TWICE, which
             // would report the identical message at the identical span; the span keys that pair
@@ -2302,6 +2297,95 @@ impl Checker {
                 return;
             }
             self.error(span, msg);
+        }
+    }
+
+    /// The name of the first type reachable from `ty` by a STRUCTURAL equality walk that declares its
+    /// own `eq`, or `None`. `stack` is the cycle guard (`sendable_rec`'s shape — a recursive
+    /// `Node { next: Option[Node] }` terminates).
+    ///
+    /// Reachability here means exactly what `Vm::values_equal_guarded` recurses through: list/set
+    /// elements, map keys AND values, `Option`/`Result` payloads, tuple slots, struct fields, enum
+    /// variant payloads, and a newtype's underlying. NOT through a `Channel`/`Shared`/`Atomic`
+    /// handle (comparing two handles compares the handles, never their contents) and not into a
+    /// `Func`. `Protocol`/`Param`/`Unknown` are permissive holes by construction — the concrete
+    /// witness is unknown here — which is why the RUNTIME `cas` also refuses to dispatch the hook
+    /// (`vm/netio.rs`), rather than trusting this walk to be exhaustive.
+    fn reaches_user_eq(&self, ty: &Ty, stack: &mut Vec<String>) -> Option<String> {
+        let any = |s: &Self, ts: &[Ty], stack: &mut Vec<String>| -> Option<String> {
+            ts.iter().find_map(|t| s.reaches_user_eq(t, stack))
+        };
+        match ty {
+            Ty::List(t) | Ty::Set(t) | Ty::Option(t) => self.reaches_user_eq(t, stack),
+            Ty::Map(k, v) => self
+                .reaches_user_eq(k, stack)
+                .or_else(|| self.reaches_user_eq(v, stack)),
+            Ty::Result(t, e) => self
+                .reaches_user_eq(t, stack)
+                .or_else(|| self.reaches_user_eq(e, stack)),
+            Ty::Tuple(elems) => any(self, elems, stack),
+            Ty::Struct(name, args) => {
+                if let hit @ Some(_) = any(self, args, stack) {
+                    return hit;
+                }
+                if self
+                    .struct_shape(name)
+                    .is_some_and(|i| i.methods.contains_key("eq"))
+                {
+                    return Some(ty.to_string());
+                }
+                if stack.contains(name) {
+                    return None;
+                }
+                let fields = self.structs.get(name)?.fields.clone();
+                stack.push(name.clone());
+                let hit = fields
+                    .iter()
+                    .find_map(|(_, f)| self.reaches_user_eq(f, stack));
+                stack.pop();
+                hit
+            }
+            Ty::Enum(name, args) => {
+                if let hit @ Some(_) = any(self, args, stack) {
+                    return hit;
+                }
+                if self
+                    .enum_methods_of(name)
+                    .is_some_and(|m| m.contains_key("eq"))
+                {
+                    return Some(ty.to_string());
+                }
+                if stack.contains(name) {
+                    return None;
+                }
+                let payloads: Vec<Ty> = self
+                    .variants
+                    .values()
+                    .filter(|v| &v.enum_name == name)
+                    .flat_map(|v| v.payload.clone())
+                    .collect();
+                stack.push(name.clone());
+                let hit = payloads.iter().find_map(|p| self.reaches_user_eq(p, stack));
+                stack.pop();
+                hit
+            }
+            Ty::NewType(name, _) => {
+                if self
+                    .newtype_methods_of(name)
+                    .is_some_and(|m| m.contains_key("eq"))
+                {
+                    return Some(ty.to_string());
+                }
+                if stack.contains(name) {
+                    return None;
+                }
+                let under = self.newtype_unwrap_target(ty)?;
+                stack.push(name.clone());
+                let hit = self.reaches_user_eq(&under, stack);
+                stack.pop();
+                hit
+            }
+            _ => None,
         }
     }
 

@@ -1436,6 +1436,37 @@ fn atomic_payload_with_eq_rejected() {
     );
 }
 
+/// The gate must see through EVERY type structural equality recurses into, not just the payload's
+/// own methods. `cas` compares `Atomic[List[P]]` element-by-element, so it reaches `P`'s `eq` on
+/// exactly the compare a bare `Atomic[P]` does — and the `_ => false` arm this replaces let the
+/// container, `Option`, tuple, struct-field, enum-payload and newtype-underlying spellings all walk
+/// straight past a gate that was the SOLE stated safety argument for holding the value mutex across
+/// the compare (`vm/netio.rs`). M23 adversarial review, CRITICAL 2.
+#[test]
+fn atomic_payload_reaching_a_nested_eq_rejected() {
+    let decl = "import std.concurrency\nstruct P:\n    x: int\n    fn eq(self, o: P) -> bool:\n        return true\nstruct W:\n    p: P\nenum E:\n    Has(P)\n    Nope\nnewtype NP = List[P]\n";
+    for (payload, rendered) in [
+        ("[P(1)]", "Atomic[List[P]]"),
+        ("[[P(1)]]", "Atomic[List[List[P]]]"),
+        ("(1, P(1))", "Atomic[(int, P)]"),
+        ("{1: P(1)}", "Atomic[Map[int, P]]"),
+        ("{P(1)}", "Atomic[Set[P]]"),
+        ("W(P(1))", "Atomic[W]"),
+        ("E.Has(P(1))", "Atomic[E]"),
+        ("NP([])", "Atomic[NP]"),
+    ] {
+        entry_rejects(
+            &format!("{decl}fn main():\n    a := Atomic({payload})\n    print(a.load())\nmain()\n"),
+            rendered,
+        );
+    }
+    // BOUNDARY: the same shapes over an `eq`-free element stay legal — the walk must reject on
+    // REACHING an `eq`, not on being a container. A self-referential struct must also terminate.
+    entry_ok(
+        "import std.concurrency\nstruct Q:\n    x: int\nstruct Node:\n    v: int\n    next: List[Node]\nfn main():\n    a := Atomic([1, 2])\n    b := Atomic({\"k\": [Q(1)]})\n    c := Atomic((1, \"x\"))\n    d := Atomic(Node(1, []))\n    print(a.load().len() + b.load().len() + d.load().v)\n    print(c.load())\nmain()\n",
+    );
+}
+
 // ----- transparent type aliases (M10-G3) -----
 
 #[test]
