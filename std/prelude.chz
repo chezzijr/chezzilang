@@ -246,6 +246,7 @@ protocol Any:
     pass
 
 protocol Comparable:
+    Eq
     fn compare(self, other: Self) -> int
 
 protocol Eq:

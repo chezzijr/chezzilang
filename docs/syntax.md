@@ -1338,6 +1338,20 @@ bound only — `==` does **not** yet dispatch to a user `eq` — so a `[T: Eq]` 
 always unwraps to the underlying's native equality, so a numeric newtype declaring `eq` is rejected at
 the declaration site (the method could never agree with the operator).
 
+**`Comparable` embeds `Eq`** (mirroring Rust's `Ord: Eq`): a type ordered must also be equatable, so a
+struct/enum satisfying `Comparable` needs BOTH `compare` and `eq` defined (the implementor's job is to
+keep them agreeing — the checker cannot verify `eq(a, b) == (compare(a, b) == 0)`). int/float/str keep
+satisfying `Comparable` intrinsically with no `eq` to write (the scalar grant short-circuits before the
+embed is flattened). A type with `compare` but no `eq` no longer satisfies `Comparable`:
+
+```chezzi
+struct Ver:
+    maj: int
+    fn compare(self, o: Ver) -> int:
+        return self.maj - o.maj
+    # missing `eq` — Ver does NOT satisfy Comparable until one is added
+```
+
 `==` / `!=` between **provably-disjoint types is a compile error** — `1 == "a"`, `Box[int] ==
 Box[str]`, or two different structs can only ever answer `false`, which is always a bug in the source.
 This is a **deliberate divergence from Python** (which answers `False` at runtime): Chezzi is

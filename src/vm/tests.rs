@@ -651,12 +651,12 @@ fn min_max_by_empty_faults() {
 fn min_max_shrinking_comparator_no_panic() {
     // `compare` shrinks the module-global list it is invoked on (the receiver) each comparison; the
     // snapshot scan still visits all three original elements → min by x = 1, on both engines.
-    let min_src = "struct Point:\n    x: int\n    fn compare(self, other: Point) -> int:\n        pts.remove_at(0)\n        return self.x - other.x\n\
+    let min_src = "struct Point:\n    x: int\n    fn compare(self, other: Point) -> int:\n        pts.remove_at(0)\n        return self.x - other.x\n    fn eq(self, other: Point) -> bool:\n        return self.x == other.x\n\
                pts: List[Point] = [Point(3), Point(1), Point(2)]\n\
                print(pts.min().x)\n";
     assert_mc_parity(min_src, "1\n");
     // Same for `max` (same `list_reduce_extreme` scan, is_max flipped) → max by x = 3.
-    let max_src = "struct Q:\n    x: int\n    fn compare(self, other: Q) -> int:\n        qs.remove_at(0)\n        return self.x - other.x\n\
+    let max_src = "struct Q:\n    x: int\n    fn compare(self, other: Q) -> int:\n        qs.remove_at(0)\n        return self.x - other.x\n    fn eq(self, other: Q) -> bool:\n        return self.x == other.x\n\
                qs: List[Q] = [Q(3), Q(1), Q(2)]\n\
                print(qs.max().x)\n";
     assert_mc_parity(max_src, "3\n");
@@ -14682,6 +14682,8 @@ struct P:
     t: str
     fn compare(self, o: P) -> int:
         return self.n - o.n
+    fn eq(self, o: P) -> bool:
+        return self.n == o.n
     fn show(self) -> str:
         return self.t + str(self.n)
 xs := [P(3, \"c\"), P(1, \"a\"), P(2, \"b\"), P(1, \"z\")]
@@ -14699,6 +14701,8 @@ struct P:
     n: int
     fn compare(self, other: P) -> int:
         return self.n - other.n
+    fn eq(self, other: P) -> bool:
+        return self.n == other.n
 print(P(1) < P(2))
 print(P(2) < P(1))
 print(P(5) >= P(5))
@@ -14842,6 +14846,8 @@ struct P:
     v: int
     fn compare(self, other: P) -> int:
         return self.v - other.v
+    fn eq(self, other: P) -> bool:
+        return self.v == other.v
 
 fn leave(n: int):
     print(\"leave {n}\")

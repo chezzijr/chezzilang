@@ -13,6 +13,9 @@ struct Point:
     fn compare(self, other: Point) -> int:
         return (self.x + self.y) - (other.x + other.y)
 
+    fn eq(self, other: Point) -> bool:
+        return self.compare(other) == 0
+
     fn label(self) -> str:
         return "(" + str(self.x) + ", " + str(self.y) + ")"
 

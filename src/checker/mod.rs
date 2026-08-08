@@ -1997,10 +1997,20 @@ fn prebuilt_protocols() -> HashMap<String, ProtocolInfo> {
         },
     );
     m.insert(
+        // `Comparable` embeds `Eq` (M23) — mirrors Rust's `Ord: Eq`: a type ordered must also be
+        // equatable, and `eq` must agree with `compare` (the implementor's contract, unchecked). Built
+        // with the SAME `embeds` field `Arithmetic` uses — no special-casing. int/float/str still need
+        // no explicit `eq` method: `satisfies_args_d`'s embed-flattening loop DOES run for them now
+        // (embeds is no longer empty), but it recurses into `Eq`'s OWN intrinsic-grant early-out (every
+        // scalar satisfies `Eq`), so the embed passes trivially before `Comparable`'s own intrinsic
+        // grant is reached — no `Comparable`-specific short-circuit needed.
         "Comparable".to_string(),
         ProtocolInfo {
             type_params: Vec::new(),
-            embeds: Vec::new(),
+            embeds: vec![Bound {
+                name: "Eq".to_string(),
+                args: Vec::new(),
+            }],
             // receiver `self` (Unknown), `other: Self` (Param "Self"), returning int.
             methods: vec![(
                 "compare".to_string(),
@@ -2011,9 +2021,8 @@ fn prebuilt_protocols() -> HashMap<String, ProtocolInfo> {
     m.insert(
         // `Eq` — user-defined equality: `eq(self, other: Self) -> bool`. Every scalar satisfies it
         // intrinsically (all FOUR — `==` is defined on `bool` too, unlike `Comparable`'s ordering);
-        // a struct/enum satisfies it structurally through its own `eq`. Deliberately NOT embedded by
-        // `Comparable` yet — that flip (and the `==` dispatch that gives an `eq` method its operator
-        // meaning) is a later slice of M23.
+        // a struct/enum satisfies it structurally through its own `eq`. Embedded by `Comparable` (M23):
+        // a type ordered must also be equatable.
         "Eq".to_string(),
         ProtocolInfo {
             type_params: Vec::new(),

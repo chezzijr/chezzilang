@@ -84,6 +84,8 @@ struct M:
     fn compare(self, o: M) -> int:
         junk := [str(self.c), str(o.c)]
         return self.c - o.c
+    fn eq(self, o: M) -> bool:
+        return self.c == o.c
 fn make() -> List[M]:
     xs := []
     i := 0
@@ -175,6 +177,8 @@ struct M:
     fn compare(self, o: M) -> int:
         junk := [str(self.c)]
         return self.c - o.c
+    fn eq(self, o: M) -> bool:
+        return self.c == o.c
 fn make() -> List[M]:
     xs := []
     i := 0

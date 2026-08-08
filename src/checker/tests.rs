@@ -371,12 +371,25 @@ struct Point:
     y: int
     fn compare(self, other: Point) -> int:
         return (self.x + self.y) - (other.x + other.y)
+    fn eq(self, other: Point) -> bool:
+        return (self.x + self.y) == (other.x + other.y)
 ";
 
 #[test]
 fn generic_max_over_int_ok() {
     ok(
         "fn max[T: Comparable](a: T, b: T) -> T:\n    if a < b:\n        return b\n    return a\nm := max(3, 7)\n",
+    );
+}
+
+/// M23/B3 — `Comparable` embeds `Eq`, but scalars must stay unaffected: int/float/str get
+/// `Comparable` from the intrinsic-grant early-out in `satisfies_args_d` (`protocol == "Comparable"
+/// && matches!(ty, Ty::Int | Ty::Float | Ty::Str)`), so a `[T: Comparable]` generic must still accept
+/// all three WITHOUT requiring a user-defined `eq` (there is none to define on a scalar).
+#[test]
+fn generic_max_over_float_and_str_ok_after_eq_embed() {
+    ok(
+        "fn max[T: Comparable](a: T, b: T) -> T:\n    if a < b:\n        return b\n    return a\nf := max(1.5, 2.5)\ns := max(\"a\", \"b\")\n",
     );
 }
 
@@ -407,7 +420,7 @@ fn ordering_on_unbounded_type_param_rejected() {
 
 #[test]
 fn calling_comparable_generic_on_non_comparable_struct_rejected() {
-    // Plain (no `compare` method) ⇒ does not satisfy Comparable.
+    // Plain (no `compare`/`eq` method) ⇒ does not satisfy Comparable (via its `Eq` embed).
     let src = "\
 struct Plain:
     n: int
@@ -415,7 +428,9 @@ fn max[T: Comparable](a: T, b: T) -> T:
     return a
 p := max(Plain(1), Plain(2))
 ";
-    rejects(src, "does not satisfy Comparable");
+    // M23: Comparable now embeds Eq, and Plain has neither — the embed loop fails on
+    // Eq (checked first) before ever reaching Comparable's own `compare` requirement.
+    rejects(src, "does not satisfy Eq");
 }
 
 #[test]
@@ -881,6 +896,8 @@ struct Box[T]:
         return Box(self.v)
     fn compare(self, o: Box[T]) -> int:
         return 0
+    fn eq(self, o: Box[T]) -> bool:
+        return true
 a := (-Box(5)).v
 b := Box(5) < Box(10)
 fn smallest[T: Comparable](x: T, y: T) -> T:
@@ -1014,7 +1031,10 @@ fn pick[T: Comparable](x: T, y: T) -> T:
     return y
 v := pick(Wrap(1), Wrap(2))
 ";
-    entry_rejects(src, "does not satisfy Comparable");
+    // M23/B5: Comparable now embeds Eq, and a generic newtype's operator-soundness gate rejects Eq
+    // the same way it already rejected Comparable (no runtime dispatch path for either) — the embed
+    // loop hits the Eq gate first, so the reported protocol is now Eq, not Comparable.
+    entry_rejects(src, "does not satisfy Eq");
 }
 
 #[test]
@@ -1483,7 +1503,8 @@ struct Box[T]:
 b := Box(0)
 r := b.biggest(Plain(1), Plain(2))
 ";
-    rejects(src, "does not satisfy Comparable");
+    // M23: Comparable embeds Eq; Plain has neither, so Eq (checked first) fails.
+    rejects(src, "does not satisfy Eq");
 }
 
 #[test]
@@ -1697,7 +1718,8 @@ struct Box[T: Comparable]:
     a: T
 b := Box(Plain(1))
 ";
-    rejects(src, "does not satisfy Comparable");
+    // M23: Comparable embeds Eq; Plain has neither, so Eq (checked first) fails.
+    rejects(src, "does not satisfy Eq");
 }
 
 #[test]
@@ -1709,7 +1731,8 @@ struct Box[T: Comparable]:
     a: T
 b: Box[Plain] = Box(Plain(1))
 ";
-    rejects(src, "does not satisfy Comparable");
+    // M23: Comparable embeds Eq; Plain has neither, so Eq (checked first) fails.
+    rejects(src, "does not satisfy Eq");
 }
 
 #[test]
@@ -1856,7 +1879,8 @@ enum Box[T: Comparable]:
     Has(T)
 b := Box.Has(Plain(1))
 ";
-    rejects(src, "does not satisfy Comparable");
+    // M23: Comparable embeds Eq; Plain has neither, so Eq (checked first) fails.
+    rejects(src, "does not satisfy Eq");
 }
 
 #[test]
@@ -1902,10 +1926,31 @@ struct P:
     n: int
     fn compare(self, o: P) -> int:
         return self.n - o.n
+    fn eq(self, o: P) -> bool:
+        return self.n == o.n
 xs := [P(2), P(1)]
 xs.sort()
 ";
     ok(src);
+}
+
+/// M23 (B1/B2t) — `Comparable` embeds `Eq`, mirroring Rust's `Ord: Eq`: a type ordered must also be
+/// equatable, since `compare`/`==` must be free to agree. A struct with `compare` but no `eq` no
+/// longer satisfies `Comparable` — same diagnostic as the no-`compare`-at-all case above.
+#[test]
+fn compare_without_eq_rejected() {
+    let src = "\
+struct P:
+    n: int
+    fn compare(self, o: P) -> int:
+        return self.n - o.n
+xs := [P(2), P(1)]
+xs.sort()
+";
+    // The embed check runs before Comparable's own `compare` requirement, so the missing `eq` is
+    // what actually surfaces — still "P does not satisfy Comparable" in effect (Eq is Comparable's
+    // own embed), just reported via the specific unmet piece.
+    rejects(src, "does not satisfy Eq");
 }
 
 #[test]
@@ -1918,7 +1963,8 @@ xs.sort()
 ";
     // `sort` is now file-backed as `where T: Comparable`; a non-Comparable element fails via the
     // standard bound-satisfaction diagnostic (retired the bespoke `sort() requires …` text).
-    rejects(src, "does not satisfy Comparable");
+    // M23: Comparable embeds Eq; P has neither, so Eq (checked first) fails.
+    rejects(src, "does not satisfy Eq");
 }
 
 #[test]
@@ -1944,7 +1990,8 @@ fn needs_cmp[T](x: T) where T: Comparable:
 q := Q(1)
 needs_cmp(q)
 ";
-    rejects(src, "does not satisfy Comparable");
+    // M23: Comparable embeds Eq; Q has neither, so Eq (checked first) fails.
+    rejects(src, "does not satisfy Eq");
 }
 
 #[test]
@@ -2029,7 +2076,8 @@ struct Box[T]:
 b := Box(Q(1))
 x := b.top()
 ",
-        "does not satisfy Comparable",
+        // M23: Comparable embeds Eq; Q has neither, so Eq (checked first) fails.
+        "does not satisfy Eq",
     );
 }
 
@@ -2051,6 +2099,8 @@ struct Box[T]:
         if self.val < other.val:
             return -1
         return 0
+    fn eq(self, other: Box[T]) -> bool where T: Eq:
+        return self.val == other.val
 a := Box({val})
 b := Box({val})
 {op}
@@ -2077,6 +2127,8 @@ struct Box[T]:
     val: T
     fn compare(self, other: Box[T]) -> int where T: Comparable:
         return 0
+    fn eq(self, other: Box[T]) -> bool:
+        return true
 fn need_cmp[U: Comparable](x: U) -> U:
     return x
 y := need_cmp(Box({val}))
@@ -2112,7 +2164,8 @@ enum Opt[T]:
 o := Opt.Some(Q(1))
 x := o.peek()
 ",
-        "does not satisfy Comparable",
+        // M23: Comparable embeds Eq; Q has neither, so Eq (checked first) fails.
+        "does not satisfy Eq",
     );
 }
 
@@ -2137,7 +2190,8 @@ newtype Stack[T] = List[T]:
 s := Stack([Q(1)])
 x := s.top()
 ",
-        "does not satisfy Comparable",
+        // M23: Comparable embeds Eq; Q has neither, so Eq (checked first) fails.
+        "does not satisfy Eq",
     );
 }
 
@@ -2165,7 +2219,8 @@ struct Box[T]:
 b := Box(5)
 x := b.cmp(Q(1))
 ",
-        "does not satisfy Comparable",
+        // M23: Comparable embeds Eq; Q has neither, so Eq (checked first) fails.
+        "does not satisfy Eq",
     );
 }
 
@@ -2236,7 +2291,8 @@ struct Box[T]:
         return Box(x)
 b := Box.of(Q(1))
 ",
-        "does not satisfy Comparable",
+        // M23: Comparable embeds Eq; Q has neither, so Eq (checked first) fails.
+        "does not satisfy Eq",
     );
 }
 
@@ -2262,7 +2318,8 @@ enum Opt[T]:
         return Opt.Some(x)
 o := Opt.build(Q(1))
 ",
-        "does not satisfy Comparable",
+        // M23: Comparable embeds Eq; Q has neither, so Eq (checked first) fails.
+        "does not satisfy Eq",
     );
 }
 
@@ -2350,11 +2407,13 @@ struct Box[T: Comparable]:
         return Box(x)
 b := Box.of(Q(1))
 ";
+    // M23: Comparable embeds Eq; Q has neither, so Eq (checked first) fails — same dedup question,
+    // now against the Eq diagnostic.
     let n = check_src(src)
         .iter()
-        .filter(|e| e.message.contains("does not satisfy Comparable"))
+        .filter(|e| e.message.contains("does not satisfy Eq"))
         .count();
-    assert_eq!(n, 1, "expected exactly one Comparable diagnostic, got {n}");
+    assert_eq!(n, 1, "expected exactly one Eq diagnostic, got {n}");
 }
 
 // ----- file-backed `sort` via `where T: Comparable` (port off the bespoke arm) -----
@@ -2369,15 +2428,16 @@ fn sort_where_clause_returns_nil() {
 #[test]
 fn sort_where_clause_non_comparable_reports_satisfies_diagnostic() {
     // A non-Comparable element list now fails via the `where T: Comparable` bound-enforcement path,
-    // so the message is the standard `does not satisfy Comparable` diagnostic (not the retired
-    // bespoke `sort() requires …` text).
+    // so the message is the standard `does not satisfy <protocol>` diagnostic (not the retired
+    // bespoke `sort() requires …` text) — `Eq`, since Comparable's embed is checked first (M23).
     let src = "\
 struct Q:
     n: int
 xs := [Q(2), Q(1)]
 xs.sort()
 ";
-    rejects(src, "does not satisfy Comparable");
+    // M23: Comparable embeds Eq; Q has neither, so Eq (checked first) fails.
+    rejects(src, "does not satisfy Eq");
 }
 
 #[test]
@@ -3283,7 +3343,7 @@ fn inferred_struct_compare_rejected_for_comparable() {
     // An inferred `compare(self,o)` body yielding bool must be REJECTED where Comparable (needs
     // `-> int`) is required (the `<` operator), exactly like an explicit `-> bool`.
     entry_rejects(
-        "struct P:\n    x: int\n    fn compare(self, o: P):\n        return self.x < o.x\nfn main():\n    a := P(1)\n    b := P(2)\n    c := a < b\n    print(c)\nmain()\n",
+        "struct P:\n    x: int\n    fn compare(self, o: P):\n        return self.x < o.x\n    fn eq(self, o: P) -> bool:\n        return self.x == o.x\nfn main():\n    a := P(1)\n    b := P(2)\n    c := a < b\n    print(c)\nmain()\n",
         "compare",
     );
 }
@@ -3293,7 +3353,7 @@ fn inferred_compare_generic_bound_rejected() {
     // A generic bound `[T: Comparable]` over a struct whose `compare` infers bool must reject at
     // check, not fault later.
     entry_rejects(
-        "struct P:\n    x: int\n    fn compare(self, o: P):\n        return self.x < o.x\nfn cmp[T: Comparable](a: T, b: T) -> int:\n    return a.compare(b)\nfn main():\n    print(cmp(P(1), P(2)))\nmain()\n",
+        "struct P:\n    x: int\n    fn compare(self, o: P):\n        return self.x < o.x\n    fn eq(self, o: P) -> bool:\n        return self.x == o.x\nfn cmp[T: Comparable](a: T, b: T) -> int:\n    return a.compare(b)\nfn main():\n    print(cmp(P(1), P(2)))\nmain()\n",
         "Comparable",
     );
 }
@@ -5498,7 +5558,7 @@ fn cmp_min_int_returns_int() {
 #[test]
 fn cmp_max_over_comparable_struct_ok() {
     entry_ok(
-        "import std.cmp\nstruct P:\n    n: int\n    fn compare(self, o: P) -> int:\n        return self.n - o.n\nfn main():\n    p := cmp.max(P(1), P(2))\n    print(p.n)\n",
+        "import std.cmp\nstruct P:\n    n: int\n    fn compare(self, o: P) -> int:\n        return self.n - o.n\n    fn eq(self, o: P) -> bool:\n        return self.n == o.n\nfn main():\n    p := cmp.max(P(1), P(2))\n    print(p.n)\n",
     );
 }
 
@@ -5506,7 +5566,8 @@ fn cmp_max_over_comparable_struct_ok() {
 fn cmp_max_over_non_comparable_struct_rejected() {
     entry_rejects(
         "import std.cmp\nstruct P:\n    n: int\nfn main():\n    p := cmp.max(P(1), P(2))\n    print(p.n)\n",
-        "does not satisfy Comparable",
+        // M23: Comparable embeds Eq; P has neither, so Eq (checked first) fails.
+        "does not satisfy Eq",
     );
 }
 
@@ -9416,7 +9477,7 @@ fn sort_by_key_int_key_ok() {
 fn sort_by_key_struct_key_ok() {
     // A key function returning a Comparable struct is accepted (compared via `compare`).
     ok(
-        "struct M:\n    n: int\n    fn compare(self, o: M) -> int:\n        return self.n - o.n\nxs := [M(2), M(1)]\nxs.sort_by_key(fn(m: M) -> M: m)\n",
+        "struct M:\n    n: int\n    fn compare(self, o: M) -> int:\n        return self.n - o.n\n    fn eq(self, o: M) -> bool:\n        return self.n == o.n\nxs := [M(2), M(1)]\nxs.sort_by_key(fn(m: M) -> M: m)\n",
     );
 }
 
@@ -9427,7 +9488,8 @@ fn sort_by_key_non_comparable_key_rejected() {
     // by the loop-back, then enforced — the uniform protocol-conformance diagnostic (was bespoke).
     rejects(
         "struct B:\n    n: int\nxs := [B(2), B(1)]\nxs.sort_by_key(fn(b: B) -> B: b)\n",
-        "does not satisfy Comparable",
+        // M23: Comparable embeds Eq; B has neither, so Eq (checked first) fails.
+        "does not satisfy Eq",
     );
 }
 
@@ -11909,7 +11971,7 @@ fn protocol_bound_and_typeparam_named_protocol_still_ok() {
     // like a protocol. (a) a user type that satisfies a prebuilt protocol used via its bound; and
     // (b) a type param spelled `Comparable` shadowing the protocol locally — both stay legal.
     entry_ok(
-        "struct P:\n    v: int\n    fn compare(self, o: P) -> int:\n        return self.v - o.v\nfn pick[T: Comparable](a: T) -> T:\n    return a\nfn main():\n    print(pick(P(v=5)).compare(P(v=3)))\nmain()\n",
+        "struct P:\n    v: int\n    fn compare(self, o: P) -> int:\n        return self.v - o.v\n    fn eq(self, o: P) -> bool:\n        return self.v == o.v\nfn pick[T: Comparable](a: T) -> T:\n    return a\nfn main():\n    print(pick(P(v=5)).compare(P(v=3)))\nmain()\n",
     );
     entry_ok(
         "fn id[Comparable](x: Comparable) -> Comparable:\n    return x\nfn main():\n    print(id(1))\nmain()\n",
@@ -15993,7 +16055,7 @@ fn protocol_value_arg_invariance_survives_embed_widening() {
 #[test]
 fn ordering_through_embedded_comparable_bound() {
     ok(
-        "protocol Ord2:\n    Comparable\n    fn tag(self) -> str\nstruct N:\n    v: int\n    fn compare(self, o: N) -> int:\n        return self.v - o.v\n    fn tag(self) -> str:\n        return \"n\"\nfn lt[T: Ord2](a: T, b: T) -> bool:\n    return a < b\nfn main():\n    print(lt(N(1), N(2)))\nmain()\n",
+        "protocol Ord2:\n    Comparable\n    fn tag(self) -> str\nstruct N:\n    v: int\n    fn compare(self, o: N) -> int:\n        return self.v - o.v\n    fn eq(self, o: N) -> bool:\n        return self.v == o.v\n    fn tag(self) -> str:\n        return \"n\"\nfn lt[T: Ord2](a: T, b: T) -> bool:\n    return a < b\nfn main():\n    print(lt(N(1), N(2)))\nmain()\n",
     );
 }
 
@@ -18366,7 +18428,8 @@ fn generic_fn_value_into_map_bound_violation_rejected() {
     // enforce_bounds under the pin (the helper mirrors Scope A's bound enforcement).
     rejects(
         "struct Tag:\n    n: int\n\nfn cmp[T: Comparable](x: T) -> T:\n    return x\n\nfn main():\n    xs := [Tag(1), Tag(2)].map(cmp)\n    print(xs)\n",
-        "Comparable",
+        // M23: Comparable embeds Eq; Tag has neither, so Eq (checked first) fails.
+        "Eq",
     );
 }
 

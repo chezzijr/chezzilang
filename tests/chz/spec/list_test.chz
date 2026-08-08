@@ -63,6 +63,8 @@ struct P:
     tag: str
     fn compare(self, o: P) -> int:
         return self.k - o.k
+    fn eq(self, o: P) -> bool:
+        return self.k == o.k
 
 test fn min_max_comparable_struct():
     # first-seen tie-break for equal minima (P(1,"b") before P(1,"c"))

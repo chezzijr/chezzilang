@@ -10,6 +10,8 @@ struct Point:
     n: int
     fn compare(self, o: Point) -> int:
         return self.n - o.n
+    fn eq(self, o: Point) -> bool:
+        return self.n == o.n
 
 fn show_ints(xs: List[int]):
     for x in xs:

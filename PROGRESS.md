@@ -2,6 +2,29 @@
 
 Single source of truth for "what am I doing next." Update after every work session.
 
+> **✅ M23 slice 2 landed 2026-08-08 — `Comparable` now embeds `Eq`, mirroring Rust's `Ord: Eq`.** Two
+> parallel sites flip together in the same commit (`src/checker/mod.rs`'s `prebuilt_protocols` seed +
+> `std/prelude.chz`'s `protocol Comparable:` decl — the same `embeds` field M22's `Arithmetic` bundle
+> uses, no special-casing; the debug-only `assert_native_protocol_shape_matches` drift-guard panics if
+> only one moves). A struct/enum satisfying `Comparable` now needs BOTH `compare` and `eq` — the
+> checker cannot verify they agree, so every existing `compare` impl the flip broke got a matching
+> `eq` (~30 sites: `std/path.chz`, 7 `examples/*.chz`, 2 `tests/chz/spec/*.chz`, plus `compare` impls
+> embedded in Rust test source strings across `src/checker/tests.rs` / `src/vm/{tests,gc_tests,
+> parity_tests}.rs`) — keyed on the same subset of fields `compare` keys on, or a matching constant
+> where `compare` returns one (so no spurious `T: Eq` bound). New checker test
+> `compare_without_eq_rejected` (TDD: RED pre-flip via a temp stash of the two flip-only files, GREEN
+> post-flip). **Scalars are unaffected (verified, not assumed — B3):** int/float/str keep satisfying
+> `Comparable` with no `eq` to write — `generic_max_over_float_and_str_ok_after_eq_embed` pins it.
+> **Numeric newtypes take no `eq` (B5):** a generic newtype's operator-soundness gate (no runtime
+> method-dispatch path for a same-newtype op) already rejected `Comparable` via a `compare` method;
+> it now rejects `Eq` the same way, so `generic_newtype_compare_satisfies_comparable_rejected` still
+> rejects — the embed loop just hits the `Eq` gate first, so the reported protocol name in ~19
+> pre-existing "not Comparable" diagnostics changed from `Comparable` to `Eq` (same underlying
+> rejection, more specific wording — matches the M22 `Arithmetic`/`Add` precedent, not a new
+> convention). All 7 touched `examples/*.expected` goldens stay byte-identical — `==` was never
+> routed through `compare`/`eq` in this slice, so no example's printed output could move. **NOT in
+> this slice:** `==`'s dispatch to a user `eq` — still a later slice.
+
 > **✅ M23 slice 1 landed 2026-08-08 — the `Eq` protocol exists in the checker, and `docs/gaps.md` §B2 is closed.** `Eq` (`eq(self, other: Self) -> bool`) is now a reserved prebuilt protocol wired at all four parallel sites (`is_reserved_protocol`, `prebuilt_protocols`, `std/prelude.chz`, the drift-guard list): the four scalars satisfy it intrinsically (`bool` included — `==` is defined on every scalar, unlike ordering), a struct/enum satisfies it structurally, and a newtype does **not** (its `==` unwraps to the underlying's native equality, so a numeric newtype declaring `eq` is now rejected at the decl site alongside `add`/`compare` — W6-3d). Five `INTRINSIC_PROTO_METHODS` rows + the `("eq", 1)` arm in `Vm::intrinsic_proto_method` (routing `values_equal_guarded`, the operator's own worker — so `x.eq(y)` can never disagree with `x == y`, and a cyclic operand raises the same depth fault). **§B2:** `==`/`!=` between provably-disjoint types is now a compile error — a deliberate, documented divergence from Python's runtime `False`, with the `Any` existential as the dynamic escape hatch (widening **one** side is enough). "Provably disjoint" is decided by **`Checker::may_be_equal`** — CO-INHABITABILITY ("can these two ever be the same value?"), *not* assignability, which answers the stricter STORAGE question and carries container invariance + a sendability witness that equality has no use for. So a protocol existential vs a conforming concrete (`Shape == Sq`, `Error == MyErr`, `Any == int`), **two** different existentials (`Shape == Error` — one type can conform to both), an existential nested in an invariant container or concurrency handle (`List[Error] == List[MyErr]`, `Map`/`Box`/tuple/`Option`/`Shared` alike), and any erased `Ty::Param` bare or nested **at any depth** — including inside the native generic handles (`Channel[T] == Channel[int]`, whose `==` is the runtime's identity shortcut) and inside a parameterized protocol's own arguments (`Container[T] == Bag[int]`, where the args are erased to `Unknown` so the METHOD SET still decides) — all stay legal; a **non**-conforming concrete (`Shape == str`, `List[Shape] == List[str]`, `Container[T] == int`), a handle over disjoint elements (`Channel[int] == Channel[str]`) and a `where T: <scalar>`-pinned param still reject. The runtime's cross-type arms (mixed `int`/`float`, `bytes`/`bytearray`) live INSIDE that recursion, so `[1.0] == [1]` compiles and prints `true` like CPython. Also: an `Atomic[T]` payload may not define `eq` (`cas` compares structurally and could never route through it). **NOT in this slice:** the `Comparable: Eq` embed and `==`'s dispatch to a user `eq` — both later slices. `docs/gaps.md` **§B2**, **§L5**.
 
 > **✅ Float `%` landed 2026-08-08 — the last unreached float operator in the CPython differential generator, closing `docs/gaps.md` §W7-37 entirely.** Chezzi's float `%` is `fmod` (sign of the DIVIDEND, total — matches Rust/Go, diverges deliberately from CPython's floored, raising `%`); `gen_float`'s op list gained `BinOp::Mod` beside `Div` (no non-zero-divisor guard) and mixed int↔float `%` came for free via the shared `op` variable; the Python shim's new `_chz_fmod` absorbs both the sign rule and totality (zero divisor / `inf` dividend → `NaN`). 5000-seed `difffuzz --floats` sweep + `fuzz_full_heavy` (0..3000): 0 findings. `docs/gaps.md` **§W7-37**.

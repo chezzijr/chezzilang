@@ -10,6 +10,9 @@ struct Money:
     fn compare(self, other: Money) -> int:
         return self.cents - other.cents
 
+    fn eq(self, other: Money) -> bool:
+        return self.cents == other.cents
+
     fn show(self) -> str:
         return "$" + str(self.cents)
 

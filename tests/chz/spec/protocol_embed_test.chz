@@ -53,6 +53,8 @@ struct N:
     v: int
     fn compare(self, o: N) -> int:
         return self.v - o.v
+    fn eq(self, o: N) -> bool:
+        return self.v == o.v
     fn tag(self) -> str:
         return "n"
 
