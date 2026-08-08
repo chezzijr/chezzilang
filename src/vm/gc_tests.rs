@@ -201,6 +201,92 @@ main()";
     assert_eq!(run_capture_stress(src), "3\n4\n5\n2\n2\n");
 }
 
+/// M23 Task 4 — the CONTAINER twin of [`set_struct_hash_survives_gc_stress`]: every probe now
+/// dispatches a user `eq`, so a probe re-enters the VM (and can collect) where before it was pure
+/// `&self`. The receiver, the needle, the wire of a half-built local `SetData`/`MapData`/`Vec` and a
+/// freshly-snapshotted key are all off the operand stack at that moment. `hash` is deliberately
+/// allocation-FREE here so the only re-entry under test is `eq`'s. Inline-temporary receivers
+/// (`make_set().has(..)`) are the sharpest case: nothing but the rooting keeps them alive.
+#[test]
+fn set_struct_eq_survives_gc_stress() {
+    let src = "\
+struct K:
+    n: int
+    fn hash(self) -> int:
+        return self.n % 3
+    fn eq(self, o: K) -> bool:
+        junk := [str(self.n), str(o.n)]
+        return junk[0] == junk[1]
+fn make_set() -> Set[K]:
+    return Set([K(1), K(2), K(2), K(3)])
+fn make_list() -> List[K]:
+    return [K(1), K(2), K(2), K(3)]
+fn make_map() -> Map[K, str]:
+    m: Map[K, str] = {}
+    i := 0
+    while i < 6:
+        m[K(i)] = str(i)
+        i = i + 1
+    return m
+fn main():
+    a := make_set()
+    print(a.len())
+    a.add(K(3))
+    a.add(K(4))
+    print(a.len())
+    b := Set([K(3), K(4), K(5)])
+    print(a.union(b).len(), a.intersection(b).len(), a.difference(b).len())
+    print((a | b).len(), (a ^ b).len())
+    print(make_set().has(K(2)))              # inline-temporary receiver
+    print(K(3) in make_set())
+    print(make_list().index_of(K(3)), make_list().unique().len())
+    print(K(2) in make_list())
+    m := make_map()
+    print(m.has(K(4)), m.get(K(5)), make_map().get(K(2)), m[K(1)])
+    print(m.merge(make_map()).len(), m.remove(K(0)), m.len())
+    m.update(make_map())
+    print(m.len())
+    print({K(7): str(7), K(7): str(8)}.len(), {K(9), K(9)}.len())   # map/set literals
+    print(Map([(K(1), str(1)), (K(1), str(2))]).len())              # Map() ctor
+    print(Set(make_list()).len())                                   # Set() ctor
+main()";
+    // a = {1,2,3,4}; b = {3,4,5}; |a∪b|=5, |a∩b|=2, |a\\b|=2, |a^b|=3
+    assert_eq!(
+        run_capture_stress(src),
+        "3\n4\n5 2 2\n5 3\ntrue\ntrue\n3 3\ntrue\ntrue Some('5') Some('2') 1\n6 Some('0') 5\n6\n1 1\n1\n3\n"
+    );
+}
+
+/// M23 Task 4 — the `RwShared` read-view probes (`contains`/`has`/`get_key`) reconstruct the stored
+/// element/key FROM THE WIRE before comparing it, so that reconstruction is a fresh object reachable
+/// only from a Rust local while a now-re-entrant `eq` runs. `Atomic.cas` is deliberately absent: it
+/// compares under `core.v.lock()` and stays on the structural path (see `netio.rs`).
+#[test]
+fn rwshared_struct_eq_survives_gc_stress() {
+    let src = "\
+import std.concurrency
+struct K:
+    n: int
+    fn hash(self) -> int:
+        return self.n % 3
+    fn eq(self, o: K) -> bool:
+        junk := [str(self.n), str(o.n)]
+        return junk[0] == junk[1]
+fn main():
+    # LIST values, not str: a freshly-rebuilt list can never alias an interned program constant,
+    # so an unrooted `v` really is collectable while `eq` runs.
+    m: Map[K, List[str]] = {K(1): [str(1)], K(2): [str(2), str(3)]}
+    box := RwShared(m)
+    print(box.has(K(1)), box.has(K(9)), box.get_key(K(2)), box.get_key(K(9)))
+    s := RwShared(Set([K(1), K(2)]))
+    print(s.contains(K(2)), s.contains(K(7)))
+main()";
+    assert_eq!(
+        run_capture_stress(src),
+        "true false Some(['2', '3']) None\ntrue false\n"
+    );
+}
+
 /// Same hazard via `sort_by` with an allocating comparator on an inline-temporary list.
 #[test]
 fn struct_sort_by_inline_temporary_survives_gc_stress() {

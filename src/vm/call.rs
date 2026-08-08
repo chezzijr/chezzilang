@@ -2383,10 +2383,9 @@ impl Vm {
         val: Value,
         span: Span,
     ) -> Result<(), RuntimeError> {
-        let Obj::Map(m) = self.heap.get(h) else {
-            unreachable!()
-        };
-        let pos = self.map_slot(&m.entries, m.candidates(hk), key, span)?;
+        // `key`/`val` are in-flight Rust locals here (the source map's entries were cloned out), so
+        // root `val` across the probe — `map_probe` roots the target map and the key itself.
+        let pos = self.with_roots(&[val], |vm| vm.map_probe(h, hk, key, span))?;
         match pos {
             Some(i) => {
                 let Obj::Map(m) = self.heap.get_mut(h) else {
@@ -2530,9 +2529,14 @@ impl Vm {
             // (`values_equal_guarded` is the operator's OWN worker — not the fault-swallowing
             // `values_equal` test wrapper — so a cyclic operand raises the same recoverable
             // depth fault `==` raises instead of silently answering "not equal".)
-            ("eq", 1) => Ok(Some(Value::bool(
-                self.values_equal_guarded(recv, args[0], 0, span)?,
-            ))),
+            ("eq", 1) => {
+                let other = args[0];
+                Ok(Some(Value::bool(
+                    self.with_roots(&[recv, other], |vm| {
+                        vm.values_equal_guarded(recv, other, 0, span)
+                    })?,
+                )))
+            }
             // W7-8 `PathLike` → the RAW OS bytes of a path spelled as a `str`/`bytes`/`bytearray`.
             // `str` hands back its UTF-8 encoding (exactly what `str.encode()` yields), `bytes` IS the
             // answer (returned unchanged — no copy), and a `bytearray` is COPIED into a fresh immutable
@@ -3016,17 +3020,26 @@ impl Vm {
                         *items = elems;
                         Ok(Value::nil())
                     }
+                    // `elems` is a Rust-local clone and `target` came off the stack at dispatch, so
+                    // both the receiver and the target are rooted across the (re-entrant) `eq`.
                     "contains" => {
                         self.arity_err("contains", args, 1, span)?;
                         let target = args[0];
                         let elems = items.clone();
-                        Ok(Value::bool(self.seq_slot(&elems, target, span)?.is_some()))
+                        let found = self
+                            .with_roots(&[Value::obj(h), target], |vm| {
+                                vm.seq_slot(&elems, target, span)
+                            })?
+                            .is_some();
+                        Ok(Value::bool(found))
                     }
                     "index_of" => {
                         self.arity_err("index_of", args, 1, span)?;
                         let target = args[0];
                         let elems = items.clone();
-                        let idx = self.seq_slot(&elems, target, span)?;
+                        let idx = self.with_roots(&[Value::obj(h), target], |vm| {
+                            vm.seq_slot(&elems, target, span)
+                        })?;
                         Ok(Value::int(idx.map(|i| i as i64).unwrap_or(-1)))
                     }
                     "concat" => {
@@ -3141,37 +3154,41 @@ impl Vm {
                         self.arity_err(method, args, 0, span)?;
                         self.list_reduce_extreme(h, method == "max", span)
                     }
-                    // unique/dedup: NEW list, never mutate the receiver. Equality via `values_equal`
-                    // (pure `&self`, no re-entry/GC — same primitive `contains` uses, works on floats),
-                    // so no rooting is needed here.
+                    // unique/dedup: NEW list, never mutate the receiver. Equality is the same
+                    // `elem_equal` `contains` uses (works on floats) — which since M23 can dispatch a
+                    // user `eq` and so re-enter the VM. `out` holds only elements of the receiver, so
+                    // rooting the receiver keeps every one of them alive across a collection.
                     "unique" | "dedup" => {
                         self.arity_err(method, args, 0, span)?;
                         let Obj::List(items) = self.heap.get(h) else {
                             unreachable!()
                         };
                         let items = items.clone();
-                        let mut out: Vec<Value> = Vec::new();
-                        if method == "dedup" {
-                            // Collapse only CONSECUTIVE runs (Rust `Vec::dedup`): keep an element iff it
-                            // differs from the previously-kept one.
-                            for v in items {
-                                let keep = match out.last() {
-                                    Some(&p) => !self.elem_equal(p, v, 0, span)?,
-                                    None => true,
-                                };
-                                if keep {
-                                    out.push(v);
+                        let out = self.with_roots(&[Value::obj(h)], |vm| {
+                            let mut out: Vec<Value> = Vec::new();
+                            if method == "dedup" {
+                                // Collapse only CONSECUTIVE runs (Rust `Vec::dedup`): keep an element
+                                // iff it differs from the previously-kept one.
+                                for v in items {
+                                    let keep = match out.last() {
+                                        Some(&p) => !vm.elem_equal(p, v, 0, span)?,
+                                        None => true,
+                                    };
+                                    if keep {
+                                        out.push(v);
+                                    }
+                                }
+                            } else {
+                                // Remove ALL duplicates, first-occurrence order (Python `dict.fromkeys`).
+                                // ponytail: O(n^2) linear scan, swap to a hash_key-backed set if a hot path needs O(n).
+                                for v in items {
+                                    if vm.seq_slot(&out, v, span)?.is_none() {
+                                        out.push(v);
+                                    }
                                 }
                             }
-                        } else {
-                            // Remove ALL duplicates, first-occurrence order (Python `dict.fromkeys`).
-                            // ponytail: O(n^2) linear scan, swap to a hash_key-backed set if a hot path needs O(n).
-                            for v in items {
-                                if self.seq_slot(&out, v, span)?.is_none() {
-                                    out.push(v);
-                                }
-                            }
-                        }
+                            Ok(out)
+                        })?;
                         Ok(Value::obj(self.heap.alloc(Obj::List(out))))
                     }
                     // chunk/windows build a `List[List[T]]`. Each inner-list alloc may GC, so the outer
@@ -3231,24 +3248,19 @@ impl Vm {
                     self.arity_err("has", args, 1, span)?;
                     let key = args[0];
                     let hk = self.hash_key_rooted(key, &[Value::obj(h), key], span)?;
-                    let Obj::Map(m) = self.heap.get(h) else {
-                        unreachable!()
-                    };
-                    let found = self
-                        .map_slot(&m.entries, m.candidates(hk), key, span)?
-                        .is_some();
+                    let found = self.map_probe(h, hk, key, span)?.is_some();
                     Ok(Value::bool(found))
                 }
                 "get" => {
                     self.arity_err("get", args, 1, span)?;
                     let key = args[0];
                     let hk = self.hash_key_rooted(key, &[Value::obj(h), key], span)?;
-                    let Obj::Map(m) = self.heap.get(h) else {
-                        unreachable!()
-                    };
-                    let found = self
-                        .map_slot(&m.entries, m.candidates(hk), key, span)?
-                        .map(|p| m.entries[p].2);
+                    let found = self.map_probe(h, hk, key, span)?.map(|p| {
+                        let Obj::Map(m) = self.heap.get(h) else {
+                            unreachable!()
+                        };
+                        m.entries[p].2
+                    });
                     match found {
                         Some(v) => Ok(self.alloc_enum("Option", "Some", vec![v])),
                         None => Ok(self.alloc_enum("Option", "None", vec![])),
@@ -3268,10 +3280,7 @@ impl Vm {
                     self.arity_err("remove", args, 1, span)?;
                     let key = args[0];
                     let hk = self.hash_key_rooted(key, &[Value::obj(h), key], span)?;
-                    let Obj::Map(m) = self.heap.get(h) else {
-                        unreachable!()
-                    };
-                    let pos = self.map_slot(&m.entries, m.candidates(hk), key, span)?;
+                    let pos = self.map_probe(h, hk, key, span)?;
                     match pos {
                         Some(i) => {
                             let Obj::Map(m) = self.heap.get_mut(h) else {
@@ -3310,27 +3319,45 @@ impl Vm {
                             Obj::Map(m) => m.entries.clone(),
                             _ => unreachable!(),
                         };
-                        let mut out = MapData::default();
-                        for (hk, key, val) in mine {
-                            let key = self.snapshot_key(key);
-                            out.push(hk, key, val);
-                        }
-                        for (hk, key, val) in incoming {
-                            let pos = self.map_slot(&out.entries, out.candidates(hk), key, span)?;
-                            match pos {
-                                Some(i) => out.entries[i].2 = val,
-                                None => {
-                                    let key = self.snapshot_key(key);
-                                    out.push(hk, key, val);
+                        // Root BOTH source maps: `out` is a Rust local and its snapshot keys are
+                        // reachable only from it, so the receiver + argument (whose entries every
+                        // value in `out` came from) must stay alive across a re-entrant user `eq`.
+                        let out = self.with_roots(&[Value::obj(h), args[0]], |vm| {
+                            let mut out = MapData::default();
+                            for (hk, key, val) in mine {
+                                // A snapshot key is a FRESH object reachable only from the local
+                                // `out`, so root it on the operand stack too (`with_roots` truncates
+                                // back past these on the way out).
+                                let key = vm.snapshot_key(key);
+                                vm.push(key);
+                                out.push(hk, key, val);
+                            }
+                            for (hk, key, val) in incoming {
+                                let pos =
+                                    vm.map_slot(&out.entries, out.candidates(hk), key, span)?;
+                                match pos {
+                                    Some(i) => out.entries[i].2 = val,
+                                    None => {
+                                        let key = vm.snapshot_key(key);
+                                        vm.push(key);
+                                        out.push(hk, key, val);
+                                    }
                                 }
                             }
-                        }
-                        // `out` is fully built and moved into the new Obj before any GC can run.
+                            Ok(out)
+                        })?;
                         Ok(Value::obj(self.heap.alloc(Obj::Map(out))))
                     } else {
-                        for (hk, key, val) in incoming {
-                            self.map_upsert_in_heap(h, hk, key, val, span)?;
-                        }
+                        // Root both maps for the WHOLE loop: the not-yet-upserted tail of `incoming`
+                        // is a Rust local reachable only through the argument map, which is unrooted
+                        // when it is an inline temporary (`m.update(make_map())`) — and each upsert
+                        // now probes with a possibly re-entrant user `eq`.
+                        self.with_roots(&[Value::obj(h), args[0]], |vm| {
+                            for (hk, key, val) in incoming {
+                                vm.map_upsert_in_heap(h, hk, key, val, span)?;
+                            }
+                            Ok(())
+                        })?;
                         Ok(Value::nil())
                     }
                 }
@@ -3345,24 +3372,13 @@ impl Vm {
                     self.arity_err("has", args, 1, span)?;
                     let x = args[0];
                     let hx = self.hash_key_rooted(x, &[Value::obj(h), x], span)?;
-                    let Obj::Set(s) = self.heap.get(h) else {
-                        unreachable!()
-                    };
-                    Ok(Value::bool(
-                        self.set_slot(&s.entries, s.candidates(hx), x, span)?
-                            .is_some(),
-                    ))
+                    Ok(Value::bool(self.set_probe(h, hx, x, span)?.is_some()))
                 }
                 "add" => {
                     self.arity_err("add", args, 1, span)?;
                     let x = args[0];
                     let hx = self.hash_key_rooted(x, &[Value::obj(h), x], span)?;
-                    let Obj::Set(s) = self.heap.get(h) else {
-                        unreachable!()
-                    };
-                    let present = self
-                        .set_slot(&s.entries, s.candidates(hx), x, span)?
-                        .is_some();
+                    let present = self.set_probe(h, hx, x, span)?.is_some();
                     if !present {
                         // Snapshot a struct/enum/newtype element on insert (Go value-key model) so a
                         // later mutation of the caller's live value can't corrupt the set. Pure alloc
@@ -3379,10 +3395,7 @@ impl Vm {
                     self.arity_err("remove", args, 1, span)?;
                     let x = args[0];
                     let hx = self.hash_key_rooted(x, &[Value::obj(h), x], span)?;
-                    let Obj::Set(s) = self.heap.get(h) else {
-                        unreachable!()
-                    };
-                    let pos = self.set_slot(&s.entries, s.candidates(hx), x, span)?;
+                    let pos = self.set_probe(h, hx, x, span)?;
                     match pos {
                         Some(i) => {
                             let Obj::Set(s) = self.heap.get_mut(h) else {
@@ -3397,15 +3410,16 @@ impl Vm {
                 "union" | "intersection" | "difference" => {
                     self.arity_err(method, args, 1, span)?;
                     // Both operands already carry per-element cached hashes, so set algebra needs no
-                    // re-hashing (no user code re-enters) — purely build a fresh hash set, deduping
-                    // and membership-testing via the cached hashes confirmed by `values_equal`.
+                    // re-hashing — purely build a fresh hash set, deduping and membership-testing via
+                    // the cached hashes confirmed by `elem_equal` (which since M23 may dispatch a user
+                    // `eq` and re-enter the VM; `mine`/`other`/`out` are Rust locals holding elements
+                    // reachable only through the two source sets, so both are rooted).
                     let mine = match self.heap.get(h) {
                         Obj::Set(s) => s.entries.clone(),
                         _ => unreachable!(),
                     };
                     let other = self.set_arg(args[0], method, span)?;
-                    let mut out = SetData::default();
-                    let add = |vm: &Vm,
+                    let add = |vm: &mut Vm,
                                set: &mut SetData,
                                he: u64,
                                e: Value|
@@ -3418,25 +3432,29 @@ impl Vm {
                         }
                         Ok(())
                     };
-                    match method {
-                        "union" => {
-                            for (he, e) in mine.iter().chain(other.entries.iter()) {
-                                add(self, &mut out, *he, *e)?;
+                    let out = self.with_roots(&[Value::obj(h), args[0]], |vm| {
+                        let mut out = SetData::default();
+                        match method {
+                            "union" => {
+                                for (he, e) in mine.iter().chain(other.entries.iter()) {
+                                    add(vm, &mut out, *he, *e)?;
+                                }
                             }
-                        }
-                        // intersection keeps mine's elements present in other; difference drops them.
-                        m => {
-                            let keep_when_present = m == "intersection";
-                            for (he, e) in &mine {
-                                let in_other = self
-                                    .set_slot(&other.entries, other.candidates(*he), *e, span)?
-                                    .is_some();
-                                if in_other == keep_when_present {
-                                    add(self, &mut out, *he, *e)?;
+                            // intersection keeps mine's elements present in other; difference drops them.
+                            m => {
+                                let keep_when_present = m == "intersection";
+                                for (he, e) in &mine {
+                                    let in_other = vm
+                                        .set_slot(&other.entries, other.candidates(*he), *e, span)?
+                                        .is_some();
+                                    if in_other == keep_when_present {
+                                        add(vm, &mut out, *he, *e)?;
+                                    }
                                 }
                             }
                         }
-                    }
+                        Ok(out)
+                    })?;
                     Ok(Value::obj(self.heap.alloc(Obj::Set(out))))
                 }
                 _ => Err(self.err(format!("type set has no method '{method}'"), span)),

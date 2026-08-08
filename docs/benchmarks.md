@@ -78,6 +78,36 @@ Levers, ranked for this gap:
 
 Re-run `many_struct`/`many_map` after each lever to track the close.
 
+## The container `Eq` ripple (M23 slice 4) — 2026-08-08 — correctness fix, cost measured
+
+Not a lever — the correctness fix that makes `y in xs` / `m[y]` agree with `x == y`. Its price is
+structural: `values_equal_guarded`/`elem_equal`/`*_slot` had to become `&mut self` (they can now call
+user code), so a heap Map/Set probe can no longer hold its `entries` slice borrowed across the compare.
+`Vm::map_probe`/`set_probe` re-index the candidate list per probe step instead — allocation-free, one
+extra index lookup on the terminating step (a distinct key almost always has exactly one candidate).
+Rooting the probe's in-flight values is skipped entirely when the program declares no `eq` hook at all
+(`Vm::eq_may_reenter`, both hook tables empty ⇒ no compare can re-enter ⇒ no collection).
+
+A/B against `035de7ee`, hyperfine `-N --warmup 2/3`, release binaries, one at a time. `map` is the only
+bench that moves, and it is the one that pays for the ripple:
+
+| bench     | runs | before        | after         | delta   |
+|-----------|-----:|--------------:|--------------:|--------:|
+| map       |   30 | 249.0 ± 15.9 ms | 259.3 ± 11.0 ms | **+4.1%** |
+| many_map  |   10 | 455.0 ± 10.7 ms | 463.5 ± 18.1 ms |  +1.9%  |
+| loop      |   12 | 1.476 ± 0.018 s | 1.467 ± 0.014 s |  −0.6%  |
+| struct    |   12 | 680.2 ±  4.8 ms | 670.1 ± 12.0 ms |  −1.5%  |
+| enum      |   12 | 3.247 ± 0.085 s | 3.160 ± 0.027 s |  −2.7%  |
+| list      |   12 | 588.2 ±  5.3 ms | 582.1 ±  2.5 ms |  −1.0%  |
+| str       |   12 | 256.6 ±  2.2 ms | 255.0 ±  2.6 ms |  −0.6%  |
+| primes    |   12 | 960.4 ± 15.6 ms | 958.0 ± 10.4 ms |  −0.2%  |
+
+`map` (200k int inserts + 1M lookups) is ~4% slower — at the edge of its own σ (6%) but reproducible
+across three A/B runs. Everything else is flat-to-faster, i.e. noise. Accepted: the alternative is a
+`==` that disagrees with `in` and `m[k]`. If map probing later needs the 4% back, the lever is a
+`!eq_may_reenter()` fast path that keeps the old borrow-holding slice loop (it needs a second copy of
+the probe body, which is why it was not taken here).
+
 ## `Eq`-hook lookup table (M23 slice 3 follow-up) — 2026-08-08 — correctness fix that also pays
 
 Not a lever either — the `==` operator must be able to tell the `Eq` HOOK (`fn eq(self, o: Self) ->

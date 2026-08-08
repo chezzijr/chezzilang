@@ -3130,7 +3130,14 @@ membership, iteration, hashing, display. **`Eq`** (`eq(self, other: Self) -> boo
 M23 as a reserved protocol + generic bound, **B2** (the permissive `==`) is FIXED, and `==`/`!=` now
 dispatch to a user `eq` — gated on the hook's exact signature at the declaration, so a method that
 merely shares the name (`Opt[T].eq(self, x: T)`) stays an ordinary method and `==` stays structural.
-Container probes (`Map`/`Set` keys, `in`, `list.contains`) are the remaining half. Still missing: bitwise/shift protocols, and a call operator. Small
+Container probes (`Map`/`Set` keys, `in`, `list.contains`/`index_of`/`dedup`/`unique`, set algebra,
+and the recursive element/field/entry arms) route through the SAME dispatch — the hook lives in
+`Vm::values_equal_guarded`, so every consumer inherits it, and containers keep CPython's
+`x is y or x == y` identity short-circuit. The `hash`/`eq` contract stays the implementor's (an `eq`
+coarser than its type's `hash` is structurally unreachable, exactly as in Rust/Python).
+`Atomic.cas` is the one deliberate exception: it compares under the value lock, so it stays
+structural — and a type with a user `eq` is already an illegal `Atomic[T]` payload.
+Still missing: bitwise/shift protocols, and a call operator. Small
 each. **`Contains`** (`x in my_struct` via `contains(self, item) -> bool`, Python's `__contains__`) —
 **FIXED**: a user struct/enum with a `contains(self, item) -> bool` method makes `x in that_value`
 dispatch to it, yielding `bool`; container `in` (list/set/map/str) is unchanged.

@@ -618,11 +618,11 @@ impl Vm {
                 }
                 Obj::Map(_) => {
                     let hk = self.scalar_hash(key);
-                    let Obj::Map(m) = self.heap.get(h) else {
-                        unreachable!()
-                    };
-                    return match self.map_slot(&m.entries, m.candidates(hk), key, span)? {
+                    return match self.map_probe(h, hk, key, span)? {
                         Some(p) => {
+                            let Obj::Map(m) = self.heap.get(h) else {
+                                unreachable!()
+                            };
                             let v = m.entries[p].2;
                             self.push(v);
                             Ok(())
@@ -696,11 +696,11 @@ impl Vm {
             }
             Obj::Map(_) => {
                 let hk = self.hash_key_rooted(key, &[obj, key], span)?;
-                let Obj::Map(m) = self.heap.get(h) else {
-                    unreachable!()
-                };
-                match self.map_slot(&m.entries, m.candidates(hk), key, span)? {
+                match self.map_probe(h, hk, key, span)? {
                     Some(p) => {
+                        let Obj::Map(m) = self.heap.get(h) else {
+                            unreachable!()
+                        };
                         let v = m.entries[p].2;
                         self.push(v);
                         Ok(())
@@ -800,10 +800,9 @@ impl Vm {
         // `Struct` with an Int key still falls through to its `set_index` protocol dispatch below.
         if self.is_integral(key) && matches!(self.heap.get(h), Obj::Map(_)) {
             let hk = self.scalar_hash(key);
-            let Obj::Map(m) = self.heap.get(h) else {
-                unreachable!()
-            };
-            let pos = self.map_slot(&m.entries, m.candidates(hk), key, span)?;
+            // `val` is an in-flight Rust local: `map_probe` roots the map + key itself, but a user
+            // `eq` on a stored key could otherwise collect the value being written.
+            let pos = self.with_roots(&[val], |vm| vm.map_probe(h, hk, key, span))?;
             let Obj::Map(m) = self.heap.get_mut(h) else {
                 unreachable!()
             };
@@ -817,10 +816,7 @@ impl Vm {
         // hash()), locate the entry, then mutate — updating the side index on insert.
         if matches!(self.heap.get(h), Obj::Map(_)) {
             let hk = self.hash_key_rooted(key, &[obj, key, val], span)?;
-            let Obj::Map(m) = self.heap.get(h) else {
-                unreachable!()
-            };
-            let pos = self.map_slot(&m.entries, m.candidates(hk), key, span)?;
+            let pos = self.with_roots(&[val], |vm| vm.map_probe(h, hk, key, span))?;
             // On INSERT only, snapshot a struct/enum/newtype key so a later mutation of the
             // caller's live value can't corrupt the map (Go value-key model). An UPDATE reuses the
             // stored key and pays no clone. `snapshot_key` is pure alloc (no GC), so no rooting.

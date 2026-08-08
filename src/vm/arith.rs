@@ -180,31 +180,18 @@ impl Vm {
     ///
     /// `Eq` protocol (M23): two operands of the SAME struct/enum type whose type defines
     /// `eq(self, o: Self) -> bool` dispatch to that method; everything else keeps the structural
-    /// worker. Same shape as [`Self::op_contains`] / [`Self::struct_compare`] — a `&self` peek
-    /// decides, so the immutable `self.heap` borrow is over before `run_proto` needs `&mut self`.
+    /// worker. The dispatch itself lives in [`Self::values_equal_guarded`] — the ONE place every
+    /// consumer (this operator, `in`, map/set probing, the recursive container arms) routes through.
     ///
-    /// Scope is the OPERATOR only: container probes (map/set lookup, `in`, `list.contains`) call
-    /// `values_equal_guarded` directly and stay structural until the container ripple lands.
+    /// The popped operands are rooted across the call: a user `eq` allocates, and `l`/`r` are off the
+    /// operand stack from here on.
     #[inline(never)]
     pub(super) fn eq_operator(&mut self, negate: bool, span: Span) -> Result<(), RuntimeError> {
         let r = self.pop();
         let l = self.pop();
-        let eq = match self.user_eq_method(l, r) {
-            Some((proto, home)) => {
-                let res = self
-                    .guarded(|vm| vm.run_proto(proto, home, None, vec![l, r], true, false, span))?;
-                match res.as_bool() {
-                    Some(b) => b,
-                    None => {
-                        return Err(self.err(
-                            format!("eq() must return bool, got {}", self.type_name(res)),
-                            span,
-                        ));
-                    }
-                }
-            }
-            None => self.values_equal_guarded(l, r, 0, span)?,
-        };
+        let held = [l, r];
+        let roots: &[Value] = if self.eq_may_reenter() { &held } else { &[] };
+        let eq = self.with_roots(roots, |vm| vm.values_equal_guarded(l, r, 0, span))?;
         self.push(Value::bool(eq ^ negate));
         Ok(())
     }
@@ -626,7 +613,7 @@ impl Vm {
 
     /// Set algebra for the operator forms `| & - ^` (gap #3). Mirrors the
     /// `union`/`intersection`/`difference` set methods (vm:7918) using the cached per-element
-    /// hashes (no re-hashing, no user re-entry). `^` (symmetric-difference) has no method form:
+    /// hashes (no re-hashing; membership may still dispatch a user `eq`). `^` (symmetric-difference) has no method form:
     /// it is the union of (mine ∉ other) THEN (other ∉ mine), in that canonical insertion order so
     /// the result's print order is deterministic and parity-equal with the serial-VM oracle.
     pub(super) fn set_op(
@@ -644,10 +631,9 @@ impl Vm {
             Obj::Set(s) => s.entries.clone(),
             _ => unreachable!(),
         };
-        let mut out = SetData::default();
         // Dedup-insert: propagate a cyclic-key depth fault (`?`) instead of swallowing it — the
         // membership `==` here is the same one `s.add`/`|` are DEFINED by, so it must fault alike.
-        let add = |vm: &Vm, set: &mut SetData, he: u64, e: Value| -> Result<(), RuntimeError> {
+        let add = |vm: &mut Vm, set: &mut SetData, he: u64, e: Value| -> Result<(), RuntimeError> {
             if vm
                 .set_slot(&set.entries, set.candidates(he), e, span)?
                 .is_none()
@@ -657,7 +643,7 @@ impl Vm {
             Ok(())
         };
         let in_set =
-            |vm: &Vm, set: &[(u64, Value)], he: u64, e: Value| -> Result<bool, RuntimeError> {
+            |vm: &mut Vm, set: &[(u64, Value)], he: u64, e: Value| -> Result<bool, RuntimeError> {
                 for &(h2, e2) in set {
                     if h2 == he && vm.elem_equal(e2, e, 0, span)? {
                         return Ok(true);
@@ -665,39 +651,45 @@ impl Vm {
                 }
                 Ok(false)
             };
-        match op {
-            SetOp::Union => {
-                for (he, e) in mine.iter().chain(other.iter()) {
-                    add(self, &mut out, *he, *e)?;
+        // Root BOTH source sets: `mine`/`other`/`out` are Rust locals, and every element in them is
+        // reachable only through `ha`/`hb` — a user `eq` re-enters the VM and can collect.
+        let out = self.with_roots(&[Value::obj(ha), Value::obj(hb)], |vm| {
+            let mut out = SetData::default();
+            match op {
+                SetOp::Union => {
+                    for (he, e) in mine.iter().chain(other.iter()) {
+                        add(vm, &mut out, *he, *e)?;
+                    }
                 }
-            }
-            SetOp::Intersection => {
-                for (he, e) in &mine {
-                    if in_set(self, &other, *he, *e)? {
-                        add(self, &mut out, *he, *e)?;
+                SetOp::Intersection => {
+                    for (he, e) in &mine {
+                        if in_set(vm, &other, *he, *e)? {
+                            add(vm, &mut out, *he, *e)?;
+                        }
+                    }
+                }
+                SetOp::Difference => {
+                    for (he, e) in &mine {
+                        if !in_set(vm, &other, *he, *e)? {
+                            add(vm, &mut out, *he, *e)?;
+                        }
+                    }
+                }
+                SetOp::SymmetricDifference => {
+                    for (he, e) in &mine {
+                        if !in_set(vm, &other, *he, *e)? {
+                            add(vm, &mut out, *he, *e)?;
+                        }
+                    }
+                    for (he, e) in &other {
+                        if !in_set(vm, &mine, *he, *e)? {
+                            add(vm, &mut out, *he, *e)?;
+                        }
                     }
                 }
             }
-            SetOp::Difference => {
-                for (he, e) in &mine {
-                    if !in_set(self, &other, *he, *e)? {
-                        add(self, &mut out, *he, *e)?;
-                    }
-                }
-            }
-            SetOp::SymmetricDifference => {
-                for (he, e) in &mine {
-                    if !in_set(self, &other, *he, *e)? {
-                        add(self, &mut out, *he, *e)?;
-                    }
-                }
-                for (he, e) in &other {
-                    if !in_set(self, &mine, *he, *e)? {
-                        add(self, &mut out, *he, *e)?;
-                    }
-                }
-            }
-        }
+            Ok(out)
+        })?;
         Ok(Value::obj(self.heap.alloc(Obj::Set(out))))
     }
 
@@ -1001,24 +993,21 @@ impl Vm {
         let found = match container.view() {
             ValueView::Obj(h) => match self.heap.get(h) {
                 Obj::List(items) => {
+                    // Root the list and the needle: `elems` is a clone held only in a Rust local, and
+                    // a user `eq` on an element re-enters the VM (and can collect).
                     let elems = items.clone();
-                    self.seq_slot(&elems, needle, span)?.is_some()
+                    self.with_roots(&[Value::obj(h), needle], |vm| {
+                        vm.seq_slot(&elems, needle, span)
+                    })?
+                    .is_some()
                 }
                 Obj::Set(_) => {
                     let hx = self.hash_key_rooted(needle, &[Value::obj(h), needle], span)?;
-                    let Obj::Set(s) = self.heap.get(h) else {
-                        unreachable!()
-                    };
-                    self.set_slot(&s.entries, s.candidates(hx), needle, span)?
-                        .is_some()
+                    self.set_probe(h, hx, needle, span)?.is_some()
                 }
                 Obj::Map(_) => {
                     let hk = self.hash_key_rooted(needle, &[Value::obj(h), needle], span)?;
-                    let Obj::Map(m) = self.heap.get(h) else {
-                        unreachable!()
-                    };
-                    self.map_slot(&m.entries, m.candidates(hk), needle, span)?
-                        .is_some()
+                    self.map_probe(h, hk, needle, span)?.is_some()
                 }
                 Obj::Str(_) => {
                     let Some(nh) = needle.as_obj() else {
@@ -1339,14 +1328,7 @@ impl Vm {
         roots: &[Value],
         span: Span,
     ) -> Result<u64, RuntimeError> {
-        for &r in roots {
-            self.push(r);
-        }
-        let res = self.hash_value(key, span);
-        for _ in roots {
-            self.pop();
-        }
-        res
+        self.with_roots(roots, |vm| vm.hash_value(key, span))
     }
 
     /// Snapshot (deep-copy) a struct/enum/newtype key/element on the STORE path (Go value-key
@@ -1732,7 +1714,7 @@ impl Vm {
     /// membership / key-equality, which must SURFACE the fault the same way `==`/`!=` do (see the
     /// `*_slot` helpers below). Kept `#[cfg(test)]` so no production caller swallows the fault.
     #[cfg(test)]
-    pub(super) fn values_equal(&self, l: Value, r: Value) -> bool {
+    pub(super) fn values_equal(&mut self, l: Value, r: Value) -> bool {
         self.values_equal_guarded(l, r, 0, Span { line: 1, col: 1 })
             .unwrap_or(false)
     }
@@ -1746,9 +1728,14 @@ impl Vm {
     /// NOT for the `==` OPERATOR — bare `nan == nan` must stay false (Python parity). Use this only
     /// where an element/field/entry is being matched (`in`, `index_of`, `has`, and the recursive arms
     /// of [`Self::values_equal_guarded`]); the operator's own entry point calls the worker directly.
+    ///
+    /// `&mut self` since M23: the worker can dispatch a user `eq(self, o: Self) -> bool`, which
+    /// re-enters the VM. The identity short-circuit below still runs FIRST, so an element compared
+    /// against itself never reaches user code (CPython's `PyObject_RichCompareBool`, which the
+    /// `==` OPERATOR deliberately does not share — see [`Self::values_equal_guarded`]).
     #[inline]
     pub(super) fn elem_equal(
-        &self,
+        &mut self,
         l: Value,
         r: Value,
         depth: usize,
@@ -1763,9 +1750,13 @@ impl Vm {
     /// First index in `hay` structurally-equal to `needle`, or `None`. Depth-fault propagating
     /// (`?`), so a cyclic operand raises the same recoverable "maximum structural depth" fault as
     /// `==` instead of silently comparing unequal. Allocation-free flat scan.
+    ///
+    /// `hay` must NOT be borrowed out of `self.heap` (M23: `elem_equal` takes `&mut self`) — every
+    /// caller already passes a cloned/local element vec. For a heap Map/Set use
+    /// [`Self::map_probe`] / [`Self::set_probe`], which re-read the container per candidate.
     #[inline]
     pub(super) fn seq_slot(
-        &self,
+        &mut self,
         hay: &[Value],
         needle: Value,
         span: Span,
@@ -1778,12 +1769,15 @@ impl Vm {
         Ok(None)
     }
 
-    /// First candidate position in a Set's `entries` whose element structurally equals `key`, or
-    /// `None`. `cands` are `candidates(hash(key))` positions; `entries[p].1` is the element.
-    /// Depth-fault propagating (see [`Self::seq_slot`]).
+    /// First candidate position in a LOCAL (not-yet-heap) Set's `entries` whose element structurally
+    /// equals `key`, or `None`. `cands` are `candidates(hash(key))` positions; `entries[p].1` is the
+    /// element. Depth-fault propagating (see [`Self::seq_slot`]).
+    ///
+    /// Only for a `SetData` the caller owns (a half-built literal / set-algebra result). A Set that
+    /// already lives on the heap must go through [`Self::set_probe`].
     #[inline]
     pub(super) fn set_slot(
-        &self,
+        &mut self,
         entries: &[(u64, Value)],
         cands: &[usize],
         key: Value,
@@ -1797,12 +1791,14 @@ impl Vm {
         Ok(None)
     }
 
-    /// First candidate position in a Map's `entries` whose key structurally equals `key`, or `None`.
-    /// `cands` are `candidates(hash(key))` positions; `entries[p].1` is the stored key.
-    /// Depth-fault propagating (see [`Self::seq_slot`]).
+    /// First candidate position in a LOCAL (not-yet-heap) Map's `entries` whose key structurally
+    /// equals `key`, or `None`. `cands` are `candidates(hash(key))` positions; `entries[p].1` is the
+    /// stored key. Depth-fault propagating (see [`Self::seq_slot`]).
+    ///
+    /// Only for a `MapData` the caller owns; a heap Map must go through [`Self::map_probe`].
     #[inline]
     pub(super) fn map_slot(
-        &self,
+        &mut self,
         entries: &[(u64, Value, Value)],
         cands: &[usize],
         key: Value,
@@ -1816,10 +1812,130 @@ impl Vm {
         Ok(None)
     }
 
-    /// Depth-guarded structural equality. Returns `Err` (recoverable) once recursion exceeds
+    /// Probe the HEAP map at `mh` for `key` (pre-hashed to `hk`), returning the matching entry
+    /// position. The heap-resident twin of [`Self::map_slot`]: `elem_equal` needs `&mut self` (a user
+    /// `eq` re-enters the VM), so the entry slice can no longer be held borrowed across the compare —
+    /// the candidate positions are read out ONCE and each stored key is re-read from the heap per
+    /// probe step.
+    ///
+    /// Roots `mh` and `key` on the operand stack for the duration (both are typically off-stack Rust
+    /// locals at a method-dispatch site, and a user `eq` can allocate → collect). A caller holding
+    /// FURTHER in-flight values (an insert's `val`) wraps the call in [`Self::with_roots`].
+    /// Nothing is copied out of the heap: the candidate list is re-indexed per probe step (a distinct
+    /// key almost always has exactly one candidate, so that is one extra index lookup on the
+    /// terminating step and NO allocation). Re-reading also means a user `eq` that mutated the map
+    /// mid-probe yields a miss rather than an out-of-range panic.
+    #[inline]
+    pub(super) fn map_probe(
+        &mut self,
+        mh: GcRef,
+        hk: u64,
+        key: Value,
+        span: Span,
+    ) -> Result<Option<usize>, RuntimeError> {
+        let held = [Value::obj(mh), key];
+        let roots: &[Value] = if self.eq_may_reenter() { &held } else { &[] };
+        self.with_roots(roots, |vm| {
+            let mut i = 0;
+            loop {
+                let (p, stored) = match vm.heap.get(mh) {
+                    Obj::Map(m) => match m.candidates(hk).get(i) {
+                        Some(&p) => match m.entries.get(p) {
+                            Some(&(_, k, _)) => (p, k),
+                            None => return Ok(None),
+                        },
+                        None => return Ok(None),
+                    },
+                    _ => unreachable!("map_probe on non-map"),
+                };
+                if vm.elem_equal(stored, key, 0, span)? {
+                    return Ok(Some(p));
+                }
+                i += 1;
+            }
+        })
+    }
+
+    /// The Set twin of [`Self::map_probe`] — probe the HEAP set at `sh` for `elem` (pre-hashed to
+    /// `he`), rooting `sh`/`elem` across the (re-entrant) equality.
+    #[inline]
+    pub(super) fn set_probe(
+        &mut self,
+        sh: GcRef,
+        he: u64,
+        elem: Value,
+        span: Span,
+    ) -> Result<Option<usize>, RuntimeError> {
+        let held = [Value::obj(sh), elem];
+        let roots: &[Value] = if self.eq_may_reenter() { &held } else { &[] };
+        self.with_roots(roots, |vm| {
+            let mut i = 0;
+            loop {
+                let (p, stored) = match vm.heap.get(sh) {
+                    Obj::Set(s) => match s.candidates(he).get(i) {
+                        Some(&p) => match s.entries.get(p) {
+                            Some(&(_, e)) => (p, e),
+                            None => return Ok(None),
+                        },
+                        None => return Ok(None),
+                    },
+                    _ => unreachable!("set_probe on non-set"),
+                };
+                if vm.elem_equal(stored, elem, 0, span)? {
+                    return Ok(Some(p));
+                }
+                i += 1;
+            }
+        })
+    }
+
+    /// Can ANY equality in this program dispatch a user `eq` — i.e. can a compare re-enter the VM and
+    /// therefore collect? Both hook tables are left EMPTY unless the program declares at least one
+    /// `fn eq(self, o: Self) -> bool` (`Compiler::build_eq_hooks`), so this is a whole-program answer,
+    /// and `false` for the overwhelming majority of programs. Used to skip the probe rooting on the
+    /// hot map/set/`==` paths, where it would otherwise be pure overhead.
+    #[inline]
+    fn eq_may_reenter(&self) -> bool {
+        !self.program.eq_struct.is_empty() || !self.program.eq_enum.is_empty()
+    }
+
+    /// Run `f` with `roots` pinned on the operand stack, unrooting on BOTH the `Ok` and `Err` path.
+    /// The generalisation of [`Self::hash_key_rooted`]: a user `hash`/`eq` hook re-enters the VM and
+    /// can trigger a collection, so every in-flight value the caller holds only in a Rust local (a
+    /// popped receiver/argument, a cloned element vec's source, a wire-reconstructed value) must be
+    /// reachable from a GC root for the duration. The operand stack is truncated back to its entry
+    /// height afterwards, so `f` may also push roots of its own (a freshly-built snapshot key) and
+    /// need not unwind them itself.
+    pub(super) fn with_roots<T>(
+        &mut self,
+        roots: &[Value],
+        f: impl FnOnce(&mut Self) -> Result<T, RuntimeError>,
+    ) -> Result<T, RuntimeError> {
+        let base = self.stack.len();
+        for &r in roots {
+            self.push(r);
+        }
+        let out = f(self);
+        self.stack.truncate(base);
+        out
+    }
+
+    /// Depth-guarded structural equality — and, since M23, the single place a user
+    /// `eq(self, o: Self) -> bool` is dispatched from, so EVERY consumer (the `==`/`!=` operator,
+    /// `in`, `index_of`, `unique`/`dedup`, map/set key probing, the recursive `List`/`Tuple`/`Map`/
+    /// `Set`/`Struct`/`Enum` arms) inherits it. Returns `Err` (recoverable) once recursion exceeds
     /// [`MAX_STRUCTURAL_DEPTH`] — guarding against cyclic data structures overflowing the host stack.
+    ///
+    /// The hook is dispatched BEFORE the `ha == hb` identity short-circuit: CPython's `do_richcompare`
+    /// has no identity fast path either, so `x == x` really does call the user's `eq`. Containers get
+    /// the identity shortcut from [`Self::elem_equal`] instead (CPython's
+    /// `PyObject_RichCompareBool`), which never reaches this function for an identical pair.
+    ///
+    /// `MAX_STRUCTURAL_DEPTH` is threaded through the structural recursion as before. A user `eq` that
+    /// itself compares starts a FRESH depth-0 walk in a new VM frame — bounded there by the call-depth
+    /// guard, not by this counter.
     pub(super) fn values_equal_guarded(
-        &self,
+        &mut self,
         l: Value,
         r: Value,
         depth: usize,
@@ -1843,6 +1959,22 @@ impl Vm {
             (ValueView::Bool(a), ValueView::Bool(b)) => Ok(a == b),
             (ValueView::Nil, ValueView::Nil) => Ok(true),
             (ValueView::Obj(ha), ValueView::Obj(hb)) => {
+                // `Eq` protocol (M23). The `user_eq_method` peek is `&self`, so the immutable
+                // `self.heap` borrow is over before `run_proto` needs `&mut self` (the borrow shape
+                // `op_contains`/`struct_compare` use). Both operands are already GC-reachable from
+                // whatever rooted the top of this walk (`with_roots` at the entry points).
+                if let Some((proto, home)) = self.user_eq_method(l, r) {
+                    let res = self.guarded(|vm| {
+                        vm.run_proto(proto, home, None, vec![l, r], true, false, span)
+                    })?;
+                    return match res.as_bool() {
+                        Some(b) => Ok(b),
+                        None => Err(self.err(
+                            format!("eq() must return bool, got {}", self.type_name(res)),
+                            span,
+                        )),
+                    };
+                }
                 if ha == hb {
                     return Ok(true);
                 }

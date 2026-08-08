@@ -1890,8 +1890,9 @@ impl Vm {
             Op::NewMap(n) => {
                 // Build an insertion-ordered hash map with last-key-wins upsert. Phase 1 hashes
                 // every key while ALL operands are still rooted on the stack (a struct key's hash()
-                // re-enters the VM and can GC); phase 2 then builds the map with no further re-entry
-                // (so no GC), reading keys/values from the still-rooted stack.
+                // re-enters the VM and can GC); phase 2 dedups against the half-built LOCAL map,
+                // which since M23 may dispatch a user `eq` (another re-entry) — both phases read
+                // keys/values from the still-rooted stack, so the operands survive either collection.
                 let count = *n;
                 let at = self.stack.len() - 2 * count;
                 let mut hashes = Vec::with_capacity(count);
@@ -1920,7 +1921,8 @@ impl Vm {
             }
             Op::NewSet(n) => {
                 // Insertion-ordered hash set, dedup keeping first occurrence. Same two-phase rooting
-                // as NewMap (phase 1 hashes all elements rooted; phase 2 builds GC-free).
+                // as NewMap (elements stay rooted on the stack across BOTH the re-entrant `hash`
+                // and the dedup's possibly-re-entrant `eq`).
                 let count = *n;
                 let at = self.stack.len() - count;
                 let mut hashes = Vec::with_capacity(count);

@@ -1382,11 +1382,38 @@ Like `Comparable`, `Eq` is not satisfiable by a newtype's own `eq` method: a new
 unwraps to the underlying's native equality, so a numeric newtype declaring `eq` is rejected at the
 declaration site (the method could never agree with the operator).
 
-> **Current limit — the operator only.** Container probes still compare **structurally**: `Map`/`Set`
-> key lookup, `x in xs`, and `list.contains`/`index_of`/`dedup`/`unique` do not call a user `eq` yet.
-> So `Ver(1, "alpha") == Ver(1, "beta")` is `true` while `{Ver(1, "alpha"): 1}[Ver(1, "beta")]` still
-> raises key-not-found. Keep `eq` consistent with `hash` and with the fields, or avoid using such a
-> type as a key, until the container ripple lands.
+A user `eq` reaches **every** equality site, not just the operator — `Map`/`Set` key lookup (`m[k]`,
+`has`, `get`, `remove`, `in`, `add`), `x in xs`, `list.contains`/`index_of`/`dedup`/`unique`, set
+algebra, and the recursive element/field/entry compares inside `==` on a container:
+
+```chezzi
+struct K:
+    a: int
+    b: str
+    fn hash(self) -> int: return self.a
+    fn eq(self, o: K) -> bool: return self.a == o.a
+
+x := K(1, "x")
+y := K(1, "y")
+print(x == y)          # true
+print(y in [x])        # true
+m: Map[K, int] = {}
+m[x] = 10
+print(m[y])            # 10
+print([x] == [y])      # true — the recursion reaches the element's `eq`
+```
+
+Two rules carried over from Python:
+
+* A **container** short-circuits on identity first (`x is y or x == y`, CPython's
+  `PyObject_RichCompareBool`), so `[x] == [x]` is `true` even for an `eq` that answers `false` for
+  everything. The bare `==` **operator** has no such shortcut and always calls `eq`, so `x == x` for
+  that same type is `false`.
+* **`hash` and `eq` must agree — this is the implementor's contract, and it has a hard structural
+  limit.** A `Map`/`Set` probe can only ever scan the buckets of `hash(key)`, so an `eq` *coarser*
+  than its type's `hash` is **unreachable**, not merely wrong: two values that `eq` calls equal but
+  that hash differently will never meet. Rust and Python leave this to the implementor too; Chezzi
+  does not try to enforce it.
 
 **`Comparable` embeds `Eq`** (mirroring Rust's `Ord: Eq`): a type ordered must also be equatable, so a
 struct/enum satisfying `Comparable` needs BOTH `compare` and `eq` defined (the implementor's job is to

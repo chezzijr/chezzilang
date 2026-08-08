@@ -2,6 +2,60 @@
 
 Single source of truth for "what am I doing next." Update after every work session.
 
+> **✅ M23 slice 4 landed 2026-08-08 — a user `eq` now reaches EVERY equality site, not just the
+> operator.** Slice 3 knowingly shipped an inconsistency: `x == y` could be `true` while `y in xs` was
+> `false` and `m[y]` faulted `key not found` — three answers to one question, and none of them is
+> Python's (its `__eq__` is what `in`, `index_of`, `dict[k]` and `set` all probe with; the twin prints
+> `True / True / 10`). **Fixed at the root, not per caller:** the hook dispatch moved OUT of
+> `eq_operator` and INTO `Vm::values_equal_guarded`'s `Obj`/`Obj` arm, so every consumer inherits it —
+> the operator, `in`, `list.contains`/`index_of`/`dedup`/`unique`, `Map`/`Set` key probing
+> (`m[k]`/`has`/`get`/`remove`/`add`/literals/`Map()`/`Set()`/`merge`/`update`), set algebra
+> (`| & - ^` and the method forms), the `RwShared` read-view probes, and the recursive
+> `List`/`Tuple`/`Map`/`Set`/`Struct`/`Enum`/`NewType` arms. `Program::eq_struct`/`eq_enum` +
+> `user_eq_method` (slice 3) are reused unchanged, so the peek is still a table index, not a name lookup.
+>
+> **The ripple.** `values_equal_guarded`/`elem_equal`/`seq_slot`/`set_slot`/`map_slot` were all `&self`
+> and cannot call user code; all five became `&mut self`, which the compiler then propagated to ~40 call
+> sites across `vm/{arith,call,stmt,exec,netio}.rs` — **the type system IS the completeness proof**: a
+> site that still holds an `entries` slice borrowed out of `self.heap` across the compare no longer
+> builds, so every remaining caller demonstrably passes a Rust-local collection. Heap Map/Set probes
+> route through two new helpers, `Vm::map_probe`/`set_probe`, which re-index the candidate list per
+> probe step (allocation-free; a stale position after an `eq` that mutated the container reads as a miss,
+> never an out-of-range panic) — `map_slot`/`set_slot` survive only for a **local**, not-yet-heap
+> `MapData`/`SetData`.
+>
+> **Rooting.** A user `eq` re-enters the VM and can collect, so every in-flight Rust local across a
+> compare is now pinned on the operand stack by the new `Vm::with_roots` (the generalisation of
+> `hash_key_rooted`: push, run, truncate on BOTH the `Ok` and `Err` path, and `f` may push roots of its
+> own). Newly rooted: `eq_operator`'s popped operands, the probes' receiver+key, `set_index`/
+> `map_upsert_in_heap`'s in-flight `val`, `list.contains`/`index_of`'s cloned element vec,
+> `unique`/`dedup`'s half-built output, set algebra's two source sets, `map.merge`'s two source maps
+> **plus each freshly-snapshotted key** (a copy, so the source map does not root it), `map.update`'s
+> argument map across the WHOLE upsert loop (an inline temporary `m.update(make_map())` left the
+> not-yet-upserted tail unrooted — caught by the new gc-stress test, not by review), and the three
+> `RwShared` read-view probes' wire-reconstructed key/element/value. Two new `#[cfg(test)]` gc-stress
+> tests (`vm::gc_tests::set_struct_eq_survives_gc_stress`, `rwshared_struct_eq_survives_gc_stress`) —
+> both verified to FAIL with the rooting removed.
+>
+> **Preserved deliberately.** (1) `elem_equal`'s raw-word identity short-circuit still runs BEFORE any
+> hook — CPython's `PyObject_RichCompareBool` (`x is y or x == y`), so `[x] == [x]` is `true` even for an
+> `eq` that answers `false` for everything, while the bare operator (`do_richcompare`, no identity fast
+> path) makes `x == x` `false`; measured against CPython, both agree. (2) `MAX_STRUCTURAL_DEPTH` still
+> bounds the structural recursion; a user `eq` that compares starts a fresh depth-0 walk in a new VM
+> frame, bounded there by the call-depth guard. (3) `values_equal` stays `#[cfg(test)]`-only (it swallows
+> the depth fault `==` propagates). (4) **`Atomic.cas` stays structural** — it compares under
+> `core.v.lock()` so the CAS is atomic, and a re-entrant `eq` touching the same `Atomic` would deadlock a
+> non-reentrant mutex; safe because slice 1 already made a user-`eq` type an illegal `Atomic[T]` payload,
+> with a `ponytail:` comment naming the upgrade path. (5) The `hash`/`eq` contract stays the
+> implementor's: a probe can only scan `candidates(hash(key))`, so an `eq` coarser than its type's `hash`
+> is structurally *unreachable* — documented in `docs/syntax.md`, not enforced (Rust and Python don't
+> either).
+>
+> Tests: `tests/chz/spec/eq_protocol_containers_test.chz` (13 `test fn` — 11 of them FAIL on `035de7ee`,
+> 2 are controls) + the 2 Rust gc-stress cases. Full suite 3897 lib + integration green, clippy clean,
+> `chezzi test tests/chz/` 352/352 identical on both engines. Perf: `map` −4.1%, the eight other benches
+> flat-to-faster (`docs/benchmarks.md`).
+
 > **✅ M23 slice 3 follow-up 2026-08-08 — the `==` dispatch is now GATED on `eq`'s signature; a
 > malformed `eq` is a check error, never a silently wrong `==`.** Review found the operator dispatched
 > to *any* method named `eq`: `struct A: fn eq(self) -> bool: return true` type-checked and answered
