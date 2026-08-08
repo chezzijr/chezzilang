@@ -614,8 +614,9 @@ root marker (all fields default to unset, so `entrypoint` is required only for t
   *compiled* `Regex` handle value (compile once, reuse) — still blocked on Level-3 **Userdata** below.
 - **Shipped:** **enum methods** — `fn name(self, …)` blocks after an enum's variants, mirroring struct
   methods end-to-end (name-resolved dispatch, generic-enum type params in scope, structural-protocol
-  satisfaction so an enum can define `str`/`hash`/`add`/`compare` for `Stringable`/`Hashable`/`Add`/
-  `Comparable` and pass into protocol-bound generics, and `+`/`-`/`*`/`<` operator overloading).
+  satisfaction so an enum can define `str`/`hash`/`add`/`compare`+`eq` for `Stringable`/`Hashable`/
+  `Add`/`Comparable` (M23: `Comparable` embeds `Eq`, so it needs both methods) and pass into
+  protocol-bound generics, and `+`/`-`/`*`/`<` operator overloading).
 - **Shipped (M21):** nominal **`newtype`** — `newtype Name = <type>` (optionally with a method block)
   is a DISTINCT type wrapping the underlying (Go defined-type model), not a transparent alias: only an
   explicit construct (`Name(x)`) or cast-unwrap (`int(n)`/`float(n)`/`str(n)`) crosses the boundary,

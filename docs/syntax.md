@@ -1278,7 +1278,8 @@ method: `fn of(x: T) -> Box[T] where T: Comparable` rejects `Box.of(q)` when `q`
 `Comparable`).
 
 **Conditional conformance.** When the conditional method *is* a protocol's required method — e.g. a
-`compare(self, other: Self) -> int where T: Comparable` makes `Box[T]` *structurally* satisfy
+`compare(self, other: Self) -> int where T: Comparable` (paired with the `eq` `Comparable`'s `Eq`
+embed also requires) makes `Box[T]` *structurally* satisfy
 `Comparable` — the receiver bound makes that conformance **conditional**: `Box[int]` satisfies
 `Comparable` (so `Box(1) < Box(2)` and passing a `Box[int]` to a `[U: Comparable]` generic are both
 fine), but `Box[Tag]` (with `Tag` not `Comparable`) does **not** — the `<`, and the bound-check, are
@@ -1299,15 +1300,18 @@ field, or a top-level annotation is `unknown type 'Self'`.
 
 ```chezzi
 protocol Comparable:                 # PREBUILT/reserved — its shape is file-backed in std/prelude.chz
+    Eq                               # embedded: ordered ⇒ equatable (Rust's `Ord: Eq`)
     fn compare(self, other: Self) -> int
 
 struct Point:
     x: int
     y: int
-    fn compare(self, other: Point) -> int:   # ⇒ Point satisfies Comparable, structurally
+    fn compare(self, other: Point) -> int:   # ⇒ Point satisfies Comparable, structurally — but
         return (self.x + self.y) - (other.x + other.y)
+    fn eq(self, other: Point) -> bool:       #   BOTH methods are required (Comparable embeds Eq),
+        return (self.x + self.y) == (other.x + other.y)   # and yours must agree with each other
 
-print(max(Point(1, 2), Point(3, 0)).x)   # works: Point is Comparable
+print(max(Point(1, 2), Point(3, 0)).x)   # works: Point is Comparable (compare + eq)
 ```
 
 The prebuilt **`Comparable`** protocol (`compare(self, other: Self) -> int`) is special: it is the
@@ -2667,7 +2671,7 @@ List methods (built in): `xs.push(x)` `xs.pop()` `xs.len()` `xs.reverse()` `xs.c
 `xs.extend(ys)` (append in place, → nil); higher-order `xs.map(f)` `xs.filter(p)` `xs.fold(init, f)`;
 `xs.sort_by(fn(a, b) -> int)` — a custom comparator (negative = `a` before `b`), stable, in place;
 and `xs.sort_by_key(fn(x) -> K)` — sort by a derived key (`K` Comparable: int/float/str or a struct
-with `compare`), stable, in place.
+with `compare` **and** `eq`), stable, in place.
 
 > **Empty-collection element typing (refine-on-first-use).** An un-annotated empty `[]` / `{}` /
 > `Set()` has no element/key type yet; the **first** mutating op on the binding — `.push`/`.add`/
@@ -3582,7 +3586,8 @@ Modules are `import std.X` then `X.func(...)`. Importable:
 A few cross-cutting notes (full detail in `stdlib.md`):
 
 - `min`/`max`/`clamp` live in **`std.cmp`** as generic `[T: Comparable]` functions (int/float/str and
-  any struct with a `compare` method); `list.sort()` is likewise Comparable.
+  any struct with `compare` **and** `eq` methods — `Comparable` embeds `Eq`); `list.sort()` is
+  likewise Comparable.
 - **`std.json`** parses/stringifies a dynamic `Json` enum, and `json.decode[T](s) -> Result[T]`
   deserializes straight into a known shape. A JSON *literal in source* needs a raw string
   (`r"""{"k": 1}"""`) or doubled braces — a bare `{…}` in a normal string is interpolation.

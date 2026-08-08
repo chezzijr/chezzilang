@@ -2064,6 +2064,41 @@ impl Checker {
         }
     }
 
+    /// The methods a struct/enum DECLARES (`None` for anything else) — for diagnostics that need to
+    /// ask "did the user write this method at all?", which conformance alone can't answer.
+    fn declared_methods(&self, ty: &Ty) -> Option<&HashMap<String, FnSig>> {
+        match ty {
+            Ty::Struct(name, _) => self.struct_shape(name).map(|i| &i.methods),
+            Ty::Enum(name, _) => self.enum_methods_of(name),
+            _ => None,
+        }
+    }
+
+    /// M23 — `Comparable` embeds `Eq` (Rust's `Ord: Eq`), so a struct/enum that DOES define `compare`
+    /// but no `eq` stopped satisfying `Comparable`. For that user the bare "cannot compare X and Y"
+    /// actively misleads (they wrote the comparator), so name the missing half — cf. rustc appending
+    /// `note: an implementation of PartialOrd might be missing` rather than stopping at the rejection.
+    /// The reason is not re-derived: it is the `satisfies` `Err`, the same text the generic-bound path
+    /// already prints. Empty string for every other rejection, so a type with no comparator at all
+    /// keeps the pre-M23 wording.
+    pub(super) fn missing_eq_note(&self, l: &Ty, r: &Ty) -> String {
+        if !compatible(l, r)
+            || !self
+                .declared_methods(l)
+                .is_some_and(|m| m.contains_key("compare"))
+        {
+            return String::new();
+        }
+        match self.satisfies(l, "Comparable") {
+            // MISSING `eq` only — a declared-but-failing `eq` (wrong signature, unmet `where`) was
+            // rejected for its own reason, and telling that user to add `eq` would misdirect.
+            Err(why) if why.contains("missing method 'eq'") => format!(
+                " — {why}: `Comparable` embeds `Eq`, so a type defining `compare` must define `eq` too"
+            ),
+            _ => String::new(),
+        }
+    }
+
     /// Own methods OR anything an embed requires (M22) — so `protocol Ord2: Comparable` makes
     /// `a < b` legal on an `Ord2`-bounded param, exactly as declaring `compare` directly does.
     pub(super) fn protocol_has_method(&self, protocol: &str, method: &str) -> bool {

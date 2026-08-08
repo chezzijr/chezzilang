@@ -394,6 +394,17 @@ fn generic_max_over_float_and_str_ok_after_eq_embed() {
 }
 
 #[test]
+fn generic_newtype_arg_over_comparable_bound_ok_after_eq_embed() {
+    // B5's POSITIVE direction. A bare `a < b` on two `Meters` short-circuits in
+    // `cmp_overload_allowed`'s NewType arm before `satisfies` is ever consulted, so only a
+    // `[T: Comparable]` BOUND walks the embed recursion that the flip added — and a numeric newtype
+    // takes no `eq` (W6-3d), so its `Eq` half must come from the same intrinsic numeric grant.
+    ok(
+        "newtype Meters = float\nfn max[T: Comparable](a: T, b: T) -> T:\n    if a < b:\n        return b\n    return a\nm := max(Meters(1.5), Meters(2.5))\n",
+    );
+}
+
+#[test]
 fn generic_max_over_comparable_struct_ok() {
     let src = format!(
         "{POINT}fn max[T: Comparable](a: T, b: T) -> T:\n    if a < b:\n        return b\n    return a\np := max(Point(1, 2), Point(3, 0))\n"
@@ -1954,6 +1965,31 @@ xs.sort()
 }
 
 #[test]
+fn ordering_on_compare_without_eq_names_the_missing_eq() {
+    // MIGRATION DIAGNOSTIC: `<` is the most-travelled path into the `Comparable: Eq` ratchet, and the
+    // bare "cannot compare Ver and Ver" reads as "this type has no comparator" — exactly wrong for
+    // someone who just wrote `compare`. Rust doesn't stop at the bare rejection either (`note: an
+    // implementation of PartialOrd might be missing`), so the missing half is named.
+    let src = "\
+struct Ver:
+    maj: int
+    fn compare(self, o: Ver) -> int:
+        return self.maj - o.maj
+print(Ver(1) < Ver(2))
+";
+    rejects(
+        src,
+        "cannot compare Ver and Ver — type Ver does not satisfy Eq (missing method 'eq'): `Comparable` embeds `Eq`, so a type defining `compare` must define `eq` too",
+    );
+    // A type with NO comparator at all was never misled by the old wording — it keeps it, bare.
+    let errs = check_src("struct P:\n    n: int\nprint(P(1) < P(2))\n");
+    assert!(
+        errs.iter().any(|e| e.message == "cannot compare P and P"),
+        "a comparator-less type must keep the bare wording, got: {errs:?}"
+    );
+}
+
+#[test]
 fn sort_on_non_comparable_struct_list_rejected() {
     let src = "\
 struct P:
@@ -2095,6 +2131,9 @@ struct Q:
     n: int
 struct Box[T]:
     val: T
+    # BOUND-ENFORCEMENT STUB, not a model comparator: it answers 0 for `greater` as well as
+    # `equal`, so no `eq` can literally agree with it. The test only exercises `<`; `eq` reads the
+    # intent (compare by `val`). Don't copy this shape into real code.
     fn compare(self, other: Box[T]) -> int where T: Comparable:
         if self.val < other.val:
             return -1
