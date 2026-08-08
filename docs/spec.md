@@ -925,8 +925,10 @@ native `stringify` that `str(x)` uses). Structs/enums/newtypes opt in with their
 *intrinsically* (no user method), the protocol's method is callable on it inside an erased generic body
 or through a protocol-typed value — and it is defined as **exactly** the operator/primitive form:
 `a.add(b)` ≡ `a + b` (same overflow / divide-by-zero faults, same int↔float coercion), `a.neg()` ≡ `-a`,
-`a.compare(b)` is what `<` orders by, `a.eq(b)` ≡ `a == b` (M23 — one dispatch, both directions: a
-struct/enum defining `eq` OWNS its `==`), `c.index(k)` ≡ `c[k]`, `c.set_index(k, v)` ≡ `c[k] = v` (returns
+`a.compare(b)` is what `<` orders by, `a.eq(b)` ≡ `a == b` for a struct/enum (M23 — one dispatch,
+both directions: a struct/enum defining `fn eq(self, o: Self) -> bool` OWNS its `==`; a *newtype*'s
+`==` still unwraps to the underlying, and an `eq` with a GENERIC operand is an ordinary method the
+operator leaves alone), `c.index(k)` ≡ `c[k]`, `c.set_index(k, v)` ≡ `c[k] = v` (returns
 `nil`), `c.slice(s, e, st)` ≡ `c[s:e:st]` (its three components are `int?`, i.e. `Option[int]`), and
 `x.hash()` is exactly the hash `x` gets as a map/set key. `hash()`'s numeric value itself is
 **unspecified** (a build-dependent 64-bit hash, possibly negative) — only its consistency is

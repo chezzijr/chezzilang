@@ -2262,11 +2262,11 @@ impl Checker {
     /// (`Atomic(P(1))`) and the annotation (`a: Atomic[P]`). `Shared[T]` has no `cas`, so it is the
     /// escape hatch and stays unrestricted.
     ///
-    /// M23 Task 3 made the message literally true for the struct/enum arms: `P == P` now DOES route
+    /// M23 Task 3 made the claim literally true for the struct/enum arms: `P == P` now DOES route
     /// through the user `eq` while `cas` stays structural. A non-numeric newtype's `==` is still
-    /// structural (it does not satisfy `Eq` — see `satisfies`), so for that arm the disagreement is
-    /// between `cas` and the `p.eq(q)` METHOD spelling rather than the operator; the wording ("never
-    /// through a user 'eq', so the two would disagree") holds for both readings.
+    /// structural (it does not satisfy `Eq` — see `satisfies`), so for THAT arm the disagreement is
+    /// between `cas` and the `p.eq(q)` METHOD spelling, not the operator — which is why the message
+    /// says "the payload's own equality" rather than naming `==`: one wording, true on all three arms.
     ///
     /// Keyed on the payload's OWN `eq` only: a container payload whose ELEMENT defines `eq`
     /// (`Atomic[List[P]]`) is the same hazard one level down, and belongs with the rest of the
@@ -2286,7 +2286,7 @@ impl Checker {
         };
         if has_user_eq {
             let msg = format!(
-                "Atomic[{elem}] payload defines its own 'eq' — Atomic.cas compares stored values structurally, never through a user 'eq', so the two would disagree; use Shared[{elem}] (no cas) instead"
+                "Atomic[{elem}] payload defines its own 'eq' — Atomic.cas compares stored values structurally, never through that 'eq', so cas and the payload's own equality would disagree; use Shared[{elem}] (no cas) instead"
             );
             // ONCE per (payload type, SITE). `a: Atomic[P]` resolves its annotation TWICE, which
             // would report the identical message at the identical span; the span keys that pair

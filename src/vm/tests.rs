@@ -1752,6 +1752,8 @@ pub(crate) fn empty_program() -> Program {
         variants: Default::default(),
         variants_by_id: Vec::new(),
         struct_names: Vec::new(),
+        eq_struct: Vec::new(),
+        eq_enum: Vec::new(),
         modules: vec![],
         field_ic_sites: 0,
         method_ic_sites: 0,

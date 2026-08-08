@@ -1345,11 +1345,38 @@ print(Ver(1, "alpha") == Ver(1, "beta"))         # true  — `pre` differs, `eq`
 print(Ver(1, "alpha") != Ver(1, "beta"))         # false — `!=` is the same dispatch, negated
 ```
 
-`a.eq(b)` and `a == b` are **one** dispatch in both directions, so a `[T: Eq]` body may spell either.
-Dispatch is by the operands' **runtime type**: both sides must be the same struct/enum type or the
-comparison stays structural `false` without calling user code, and for an enum it is the *enum* that
-decides — one `eq` also answers `Shape.Circle == Shape.Square` (Rust `PartialEq` / Python `__eq__`
-compare across variants). An `eq` returning a non-`bool` faults (`eq() must return bool, got int`).
+For a struct/enum, `a.eq(b)` and `a == b` are **one** dispatch in both directions, so a `[T: Eq]` body
+may spell either. (For a *newtype* they are not: its `==` unwraps to the underlying's native equality —
+see the paragraph below.) Dispatch is by the operands' **runtime type**: both sides must be the same
+struct/enum type or the comparison stays structural `false` without calling user code, and for an enum
+it is the *enum* that decides — one `eq` also answers `Shape.Circle == Shape.Square` (Rust `PartialEq` /
+Python `__eq__` compare across variants).
+
+`eq` is **not** a reserved name, so the operator dispatches only to the hook's exact signature,
+`fn eq(self, o: Self) -> bool`. A wrong arity, a concrete non-`Self` operand, or a non-`bool` return
+is rejected at the **declaration**, not left to answer wrongly at the operator:
+
+```chezzi
+struct A:
+    v: int
+    fn eq(self) -> bool:      # type error: 'eq' … must take exactly one operand
+        return true
+```
+
+The one alternative shape that stays legal is a **generic** operand — an ordinary method that merely
+shares the name (Rust allows an inherent `eq` beside `PartialEq`; Python namespaces the hook as
+`__eq__`). `==` leaves it alone and stays structural:
+
+```chezzi
+enum Opt[T]:
+    Some(T)
+    None
+    fn eq(self, x: T) -> bool:               # an ordinary method, NOT the Eq hook
+        return true
+
+print(Opt[int].Some(1).eq(7))                # true  — the method still works
+print(Opt[int].Some(1) == Opt[int].Some(2))  # false — `==` stays structural
+```
 
 Like `Comparable`, `Eq` is not satisfiable by a newtype's own `eq` method: a newtype's `==` always
 unwraps to the underlying's native equality, so a numeric newtype declaring `eq` is rejected at the

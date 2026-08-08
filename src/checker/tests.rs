@@ -1113,6 +1113,78 @@ fn eq_wrong_return_type_rejected() {
     );
 }
 
+/// M23 — `eq` on a struct/enum is the `Eq` HOOK that `==`/`!=` dispatch to, so a MALFORMED one is a
+/// DECLARATION-site error rather than a silently wrong operator. Pre-fix every case below
+/// type-checked and then ran: `struct A: fn eq(self) -> bool: return true` answered
+/// `A(1) == A(2)` ⇒ `true` with the second operand silently dropped, the 3-param form ran with
+/// `extra = nil`, and the `o: int` form reached a runtime `cannot apply Gt to struct and int`. `eq`
+/// was the only protocol hook with no signature gate — `contains`/`hash` are check errors and a
+/// malformed `str` is simply never dispatched.
+#[test]
+fn malformed_eq_rejected_at_decl() {
+    // no operand at all — the headline silently-wrong case
+    entry_rejects(
+        "struct A:\n    v: int\n    fn eq(self) -> bool:\n        return true\nprint(A(1) == A(2))\n",
+        "must take exactly one operand",
+    );
+    // an EXTRA operand the dispatch would have filled with nil
+    entry_rejects(
+        "struct A:\n    v: int\n    fn eq(self, o: A, extra: int) -> bool:\n        return true\nprint(A(1) == A(2))\n",
+        "must take exactly one operand",
+    );
+    // a CONCRETE non-Self operand — the body was handed a struct where it declared an int
+    entry_rejects(
+        "struct A:\n    v: int\n    fn eq(self, o: int) -> bool:\n        return o > 0\nprint(A(1) == A(2))\n",
+        "its operand must be A, found int",
+    );
+    // a non-bool return, now caught at the DECLARATION (it was only reachable via a `[T: Eq]` bound)
+    entry_rejects(
+        "struct A:\n    v: int\n    fn eq(self, o: A) -> int:\n        return 1\nprint(A(1) == A(2))\n",
+        "it must return bool, found int",
+    );
+    // the enum arm of the same rule
+    entry_rejects(
+        "enum E:\n    A\n    B\n\n    fn eq(self) -> bool:\n        return true\n",
+        "must take exactly one operand",
+    );
+    entry_rejects(
+        "enum E:\n    A\n    B\n\n    fn eq(self, o: int) -> bool:\n        return true\n",
+        "its operand must be E, found int",
+    );
+}
+
+/// The BOUNDARY `malformed_eq_rejected_at_decl` must not cross. `eq` is NOT a reserved name — Rust
+/// keeps it in `PartialEq` and still allows an inherent `eq`, Python namespaces the hook as `__eq__`,
+/// Go has no overloading at all — so a method that merely shares the name stays legal. The separator
+/// is the OPERAND: a type PARAMETER means "ordinary method" (the operator leaves it alone and stays
+/// structural, asserted in `tests/chz/spec/eq_protocol_test.chz`), `Self` means "the hook".
+#[test]
+fn generic_operand_eq_stays_an_ordinary_method() {
+    // the in-tree shape this rule exists to preserve (see `widen_generic_method_param_at_float_rejected`)
+    entry_ok(
+        "enum Opt[T]:\n    Some(T)\n    None\n\n    fn eq(self, x: T) -> bool:\n        return true\n\no := Opt[int].Some(1)\nprint(o.eq(1))\n",
+    );
+    // a METHOD's own type param is equally not `Self`
+    entry_ok(
+        "struct H[T]:\n    v: T\n    fn eq[U](self, o: U) -> bool:\n        return true\nprint(H(1).eq(\"s\"))\n",
+    );
+    // …and every spelling of the hook itself stays legal: the bare name, `Self`, and a generic Self
+    entry_ok(
+        "struct P:\n    x: int\n    fn eq(self, o: P) -> bool:\n        return self.x == o.x\nprint(P(1) == P(2))\n",
+    );
+    entry_ok(
+        "struct P:\n    x: int\n    fn eq(self, o: Self) -> bool:\n        return self.x == o.x\nprint(P(1) == P(2))\n",
+    );
+    entry_ok(
+        "struct Box[T]:\n    v: T\n    fn eq(self, o: Box[T]) -> bool:\n        return true\nprint(Box(1) == Box(2))\n",
+    );
+    // a type ALIAS of the enclosing type is still the hook — the rule is the operand's TYPE, not its
+    // spelling (the backend's syntactic twin dispatches it too: `alias` is not a type-param name)
+    entry_ok(
+        "struct Ver:\n    maj: int\n    fn eq(self, o: V2) -> bool:\n        return self.maj == o.maj\ntype V2 = Ver\nprint(Ver(1) == Ver(2))\n",
+    );
+}
+
 /// Mirror of `generic_struct_heterogeneous_compare_rejected`: `Box[int] == Box[str]` must not
 /// launder through `eq` — heterogeneous type args are provably-disjoint operands (B2).
 #[test]

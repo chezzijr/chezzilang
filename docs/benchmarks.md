@@ -78,6 +78,37 @@ Levers, ranked for this gap:
 
 Re-run `many_struct`/`many_map` after each lever to track the close.
 
+## `Eq`-hook lookup table (M23 slice 3 follow-up) — 2026-08-08 — correctness fix that also pays
+
+Not a lever either — the `==` operator must be able to tell the `Eq` HOOK (`fn eq(self, o: Self) ->
+bool`) from an ordinary method that merely shares the name, which a `methods.get("eq")` name lookup
+cannot do. The compiler now records the hook in `Program::eq_struct`/`eq_enum`, dense
+`Vec<Option<(proto, module)>>` indexed by the `tid`/`variant_id` the operands already carry, so the
+string hash leaves the **miss** path of every struct/enum `==` — including every `Option`/`Result`
+compare — as a side effect of the fix.
+
+Micro-bench (the only place the change can show: 2M struct `==` + 2M `Some(1) == Some(1)`, neither type
+declaring `eq`), hyperfine `--warmup 3 -N --runs 12`, release binaries, `before` = `0dec27bd`:
+
+| micro                                    | before        | after         | delta            |
+|------------------------------------------|--------------:|--------------:|-----------------:|
+| 4M `==` on the MISS path (struct + enum)  | 474.0 ± 21.3 ms | 426.6 ± 17.4 ms | **1.11× faster** |
+
+The nine standard benches are the no-regression check — none of them compares a struct or enum with
+`==`, so flat is the expected result (hyperfine `--runs 8`, all within σ):
+
+| bench       | before | after  | ratio |
+|-------------|-------:|-------:|------:|
+| fib         |  247.7 |  249.0 | 1.005 |
+| str         |  162.0 |  166.7 | 1.029 |
+| primes      |  625.3 |  619.6 | 0.991 |
+| loop        |  954.7 |  949.8 | 0.995 |
+| list        |  397.6 |  378.0 | 0.951 |
+| struct      |  436.7 |  441.2 | 1.010 |
+| poly_method | 1350.0 | 1297.9 | 0.961 |
+| map         |  145.3 |  142.3 | 0.979 |
+| empty       |    2.2 |    2.1 | 0.967 |
+
 ## Fresh per-task module-global snapshot (gaps.md W6-2) — 2026-07-25 — correctness fix, cost measured
 
 Not a lever — a P0 correctness fix (a task now snapshots the module globals fresh, pinned at its own

@@ -2,6 +2,29 @@
 
 Single source of truth for "what am I doing next." Update after every work session.
 
+> **✅ M23 slice 3 follow-up 2026-08-08 — the `==` dispatch is now GATED on `eq`'s signature; a
+> malformed `eq` is a check error, never a silently wrong `==`.** Review found the operator dispatched
+> to *any* method named `eq`: `struct A: fn eq(self) -> bool: return true` type-checked and answered
+> `A(1) == A(2)` ⇒ `true` with the second operand silently DROPPED (a 3-param `eq` ran with `extra =
+> nil`; `fn eq(self, o: int)` reached a runtime `cannot apply Gt to struct and int`). `eq` was the only
+> operator-wired hook with no signature gate — `contains`/`hash` are check errors, and a malformed `str`
+> is simply never dispatched. **Enforced in BOTH halves, because neither alone is sound.** Checker
+> (`validate_eq_shape`, `src/checker/sig.rs`, at the struct/enum method decl): a struct/enum `eq` must
+> be either the hook `fn eq(self, o: Self) -> bool` or an ordinary method with a GENERIC operand
+> (`Opt[T].eq(self, x: T)` — `eq` is not a reserved name; Rust allows an inherent `eq` beside
+> `PartialEq`, Python namespaces the hook as `__eq__`). Wrong arity, a concrete non-`Self` operand, or a
+> non-`bool` return is rejected at the DECLARATION. A use-site gate could not be the whole answer:
+> `fn same[T](a: T, b: T) -> bool: return a == b` erases `T`, so the checker never sees the struct.
+> Backend (`binds_eq_hook`, `src/compiler/mod.rs`): records the hook in the new `Program::eq_struct` /
+> `eq_enum` — dense `Vec<Option<(proto, module)>>` indexed by `tid` / `variant_id` — and `Vm::
+> user_eq_method` reads THOSE instead of `methods.get("eq")`, so the type-blind VM can tell the hook from
+> an ordinary same-named method. Its test ("the operand names a type parameter in scope") is the
+> syntactic twin of the checker's split, so the two agree by construction on any program that
+> type-checks. Side effect: the string hash is off the MISS path of every struct/enum `==` (including
+> every `Option`/`Result` compare) — measured on a 4M-compare miss micro-bench, see
+> `docs/benchmarks.md`. The operator's `eq() must return bool` fault is now a backstop no checked
+> program can reach (its Chezzi test moved to `checker::tests::malformed_eq_rejected_at_decl`).
+
 > **✅ M23 slice 3 landed 2026-08-08 — `==` / `!=` now DISPATCH to a user `eq`; the milestone's bug is
 > flipped.** The acceptance program (a `Ver` whose identity is its major version, defining both
 > `compare` and `eq`) went from `false false false` to `false false true` on BOTH engines — matching the

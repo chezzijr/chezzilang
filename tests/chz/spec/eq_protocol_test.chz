@@ -110,18 +110,41 @@ test fn two_different_types_behind_one_protocol_stay_structural():
     z: Sized_ = Sq(9)
     assert (x == z) == true, "the SAME type behind the protocol does dispatch"
 
-# ---- a non-bool return faults, it never silently coerces ----
+# ---- a GENERIC operand is an ordinary method, NOT the hook: `==` stays structural ----
+#
+# `eq` is not a reserved name — Rust keeps `eq` in `PartialEq` and still allows an inherent `eq`,
+# Python namespaces the hook as `__eq__`. So a method that merely SHARES the name, one whose operand
+# is a type PARAMETER rather than `Self`, must stay callable and must NOT be dispatched by `==`:
+# doing so handed the body an operand of a type it never declared, and answered with whatever came
+# back. Only `fn eq(self, o: Self) -> bool` is the hook.
 
-struct BadEq:
-    n: int
-    fn eq(self, o: BadEq) -> int:
-        return 1
+enum Opt2[T]:
+    Some(T)
+    None
+    fn eq(self, x: T) -> bool:
+        return true
 
-test fn non_bool_eq_return_faults():
-    r := recover: BadEq(1) == BadEq(2)
-    assert msg_of(r, "BadEq ==") == "eq() must return bool, got int"
-    rn := recover: BadEq(1) != BadEq(2)
-    assert msg_of(rn, "BadEq !=") == "eq() must return bool, got int"
+struct Holder[T]:
+    v: T
+    fn eq[U](self, o: U) -> bool:
+        return true
+
+test fn a_generic_operand_eq_is_an_ordinary_method():
+    a := Opt2[int].Some(1)
+    b := Opt2[int].Some(2)
+    assert a.eq(7) == true, "the method spelling still works"
+    assert (a == b) == false, "`==` stays STRUCTURAL — this `eq` is not the Eq hook"
+    assert (a == Opt2[int].Some(1)) == true
+    assert (a != b) == true
+    # the method's OWN type param is not `Self` either
+    h := Holder(1)
+    assert h.eq("anything") == true
+    assert (h == Holder(2)) == false
+    assert (h == Holder(1)) == true
+
+# (A non-`bool` return is now rejected at the DECLARATION — `checker::tests::malformed_eq_rejected_
+# at_decl` — so the operator's `"eq() must return bool"` fault is a backstop no checked program can
+# reach, and there is nothing left here to assert from Chezzi.)
 
 # ---- a faulting `eq` propagates to the operator's caller ----
 

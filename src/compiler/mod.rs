@@ -104,6 +104,7 @@ pub fn compile_graph(graph: &ModuleGraph) -> Result<Program, CompileError> {
     c.program.field_ic_sites = c.field_ic_next;
     c.program.method_ic_sites = c.method_ic_next;
     c.program.rebuild_struct_names();
+    c.build_eq_hooks();
     Ok(c.program)
 }
 
@@ -157,6 +158,7 @@ pub fn compile_module_standalone(module: &Module) -> Result<Program, CompileErro
     c.program.field_ic_sites = c.field_ic_next;
     c.program.method_ic_sites = c.method_ic_next;
     c.program.rebuild_struct_names();
+    c.build_eq_hooks();
     Ok(c.program)
 }
 
@@ -168,6 +170,11 @@ struct Compiler {
     /// `compile_ctor_args`, whose field types are written in the STRUCT's scope, not the caller's:
     /// a field `v: F` must not be treated as a float alias when `F` is the struct's own type param.
     struct_generics: HashMap<String, std::collections::HashSet<String>>,
+    /// M23 — struct/enum runtime key → its `Eq` protocol hook (`(proto, home module index)`), for the
+    /// types whose `eq` method [`binds_eq_hook`] accepts. Materialized into the `tid`- and
+    /// `variant_id`-indexed `Program::eq_struct` / `eq_enum` by [`Compiler::build_eq_hooks`] once every
+    /// module is compiled (the dense ids are only final then).
+    eq_hooks: HashMap<String, (ProtoId, usize)>,
     /// The GENERIC type-param names currently in scope (enclosing type's `[T]` + the fn's own `[U]`).
     /// A type param SHADOWS a module-level `type F = float` alias, exactly as it does in the checker's
     /// scoped `resolve_type` — so every `FloatAliases` lookup below must exclude these names, or the
@@ -545,7 +552,53 @@ fn register_variant(program: &mut Program, enum_name: &str, variant: &str, arity
         .insert((enum_name.to_string(), variant.to_string()), def);
 }
 
+/// Does this struct/enum method declaration bind the `Eq` protocol hook — the `fn eq(self, o: Self)
+/// -> bool` that `==`/`!=` dispatch to (`Vm::user_eq_method`)?
+///
+/// The backend is type-blind, so this is the SYNTACTIC twin of the checker's `validate_eq_shape`
+/// (`src/checker/sig.rs`), which has already forced every struct/enum `eq` into exactly one of two
+/// shapes: the hook, or an ordinary method whose operand is a type PARAMETER (`Opt[T].eq(self,
+/// x: T)` — legal, and the operator must leave it alone). So the only thing left to ask here is which
+/// of the two it is, and "the operand names a type parameter in scope" answers it without resolving a
+/// single type. The two therefore agree by construction on every program that type-checks.
+///
+/// Deliberately does NOT re-test the return type: `type B = bool` is an alias the backend cannot see,
+/// and a non-`bool` return already faults cleanly at the operator ("eq() must return bool, got …").
+fn binds_eq_hook(m: &FnDecl, owner_params: &[crate::ast::TypeParam]) -> bool {
+    if m.name != "eq" || m.params.len() != 2 {
+        return false;
+    }
+    let Some(Type::Named { name, .. }) = &m.params[1].ty else {
+        return true; // `o: Box[T]` / `o: Self` / unannotated — never a bare type-param name
+    };
+    !owner_params
+        .iter()
+        .chain(m.type_params.iter())
+        .any(|tp| &tp.name == name)
+}
+
 impl Compiler {
+    /// Materialize the `Eq`-hook tables the VM's `==` reads (`Program::eq_struct` / `eq_enum`) from
+    /// the key-based `eq_hooks` gathered while compiling. Runs last: `tid`s and `variant_id`s are the
+    /// index space, and both are only final once every module has been hoisted and compiled.
+    fn build_eq_hooks(&mut self) {
+        if self.eq_hooks.is_empty() {
+            return; // the overwhelmingly common case — leave both tables empty (every lookup misses)
+        }
+        let mut by_tid = vec![None; self.program.struct_names.len()];
+        for (key, def) in &self.program.structs {
+            if let Some(hook) = self.eq_hooks.get(key) {
+                by_tid[def.tid as usize] = Some(*hook);
+            }
+        }
+        let mut by_vid = vec![None; self.program.variants_by_id.len()];
+        for (vid, vd) in self.program.variants_by_id.iter().enumerate() {
+            by_vid[vid] = self.eq_hooks.get(&vd.enum_name).copied();
+        }
+        self.program.eq_struct = by_tid;
+        self.program.eq_enum = by_vid;
+    }
+
     fn new() -> Self {
         let mut program = Program {
             protos: Vec::new(),
@@ -559,6 +612,8 @@ impl Compiler {
             variants: HashMap::new(),
             variants_by_id: Vec::new(),
             struct_names: Vec::new(),
+            eq_struct: Vec::new(),
+            eq_enum: Vec::new(),
             modules: Vec::new(),
             field_ic_sites: 0,
             method_ic_sites: 0,
@@ -623,6 +678,7 @@ impl Compiler {
             program,
             struct_fields: HashMap::new(),
             struct_generics: HashMap::new(),
+            eq_hooks: HashMap::new(),
             float_shadow: std::collections::HashSet::new(),
             globals: HashMap::new(),
             fn_names: std::collections::HashSet::new(),
@@ -1047,6 +1103,9 @@ impl Compiler {
                     let def = self.program.structs.get_mut(&key).expect("hoisted");
                     def.module_idx = module_idx;
                     def.methods.insert(m.name.clone(), pid);
+                    if binds_eq_hook(m, type_params) {
+                        self.eq_hooks.insert(key.clone(), (pid, module_idx));
+                    }
                     if m.is_test {
                         test_methods.push(m.name.clone());
                         suite_tests.push((m.name.clone(), pid));
@@ -1096,6 +1155,9 @@ impl Compiler {
                 for m in methods {
                     let pid = self.compile_fn(m, false)?;
                     compiled.insert(m.name.clone(), pid);
+                    if binds_eq_hook(m, type_params) {
+                        self.eq_hooks.insert(key.clone(), (pid, module_idx));
+                    }
                 }
                 self.float_shadow = prev_shadow;
                 self.program

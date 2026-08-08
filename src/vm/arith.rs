@@ -210,27 +210,38 @@ impl Vm {
     }
 
     /// Does `l == r` dispatch to a user `eq(self, o: Self) -> bool`? `Some((proto, home))` only when
-    /// both operands are the SAME struct/enum type AND that type declares `eq`; a mismatched pair is
-    /// `None` WITHOUT calling user code. Deliberately non-allocating, unlike
-    /// [`Self::resolve_overload_method`] whose miss builds a diagnostic `String`: every struct/enum
-    /// `==` asks this, and the usual answer is "no".
+    /// both operands are the SAME struct/enum type AND that type declares the `Eq` HOOK; a mismatched
+    /// pair is `None` WITHOUT calling user code.
+    ///
+    /// The hook is looked up in [`Program::eq_struct`] / [`Program::eq_enum`] — dense tables indexed by
+    /// the ids the operands already carry — NOT by a `"eq"` name lookup in the method map. Two reasons,
+    /// both load-bearing:
+    ///
+    /// * **Correctness.** A method merely NAMED `eq` is not the hook: `Opt[T].eq(self, x: T)` is an
+    ///   ordinary method (the operand is a type parameter, not `Self`), and dispatching `==` to it
+    ///   answered a silently wrong `true`. The compiler decides hook-vs-ordinary from the declaration
+    ///   (`binds_eq_hook`), after the checker has rejected every other shape, so the operator can only
+    ///   ever reach a real `(self, Self) -> bool`.
+    /// * **Cost.** This runs on the MISS path of every struct/enum `==` — including every `Option` /
+    ///   `Result` compare — where the answer is almost always "no". A table index beats hashing `"eq"`.
     fn user_eq_method(&self, l: Value, r: Value) -> Option<(usize, GcRef)> {
         let (hl, hr) = (l.as_obj()?, r.as_obj()?);
         match (self.heap.get(hl), self.heap.get(hr)) {
             (Obj::Struct { tid: a, .. }, Obj::Struct { tid: b, .. }) if a == b => {
-                let def = self.program.structs.get(self.struct_name_of_tid(*a))?;
-                Some((*def.methods.get("eq")?, self.module_objs[def.module_idx]))
+                let (proto, home) = (*self.program.eq_struct.get(*a as usize)?)?;
+                Some((proto, self.module_objs[home]))
             }
             // Keyed on the ENUM, not the variant: one type's `eq` also decides `Shape.Circle ==
             // Shape.Square` (Rust `PartialEq` / Python `__eq__` compare ACROSS variants), so a
             // `variant_id` equality guard would be too narrow and silently keep the structural
-            // `false` for every cross-variant pair.
-            (Obj::Enum { variant_id: a, .. }, Obj::Enum { variant_id: b, .. })
-                if self.enum_names(*a).0 == self.enum_names(*b).0 =>
-            {
-                let key = self.enum_names(*a).0;
-                let proto = *self.program.enum_methods.get(key)?.get("eq")?;
-                Some((proto, self.module_objs[self.enum_home_module(key)]))
+            // `false` for every cross-variant pair. Equal entries ⇒ same enum (a hook proto belongs to
+            // exactly one enum), so this compare IS the same-type guard the struct arm gets from `tid`.
+            (Obj::Enum { variant_id: a, .. }, Obj::Enum { variant_id: b, .. }) => {
+                let hook = (*self.program.eq_enum.get(*a as usize)?)?;
+                if Some(hook) != *self.program.eq_enum.get(*b as usize)? {
+                    return None;
+                }
+                Some((hook.0, self.module_objs[hook.1]))
             }
             _ => None,
         }

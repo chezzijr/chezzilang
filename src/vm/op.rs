@@ -610,6 +610,18 @@ pub struct Program {
     pub struct_names: Vec<Box<str>>,
     /// Modules in dependency order (deps first, entry last) — the run order.
     pub modules: Vec<ModuleProto>,
+    /// M23 — the `Eq` protocol hook (`fn eq(self, o: Self) -> bool`) a struct type declares, indexed
+    /// by `tid`, carrying `(hook proto, home module index)` so a `==` HIT needs no further lookup and
+    /// a MISS is one bounds-checked index instead of a string hash. `None` ⇒ that type has no hook —
+    /// either no `eq` at all, or an `eq` with a GENERIC operand (`Opt[T].eq(self, x: T)`), which is an
+    /// ordinary method the operator must leave alone. Built by the compiler (`binds_eq_hook`); empty
+    /// when no type in the program declares one.
+    pub eq_struct: Vec<Option<(ProtoId, usize)>>,
+    /// The enum twin of [`Self::eq_struct`], indexed by `variant_id` — every variant of one enum
+    /// shares its enum's entry. Two operands with EQUAL entries are necessarily the same enum (a hook
+    /// proto belongs to exactly one enum), so the compare that finds the hook doubles as the same-type
+    /// guard `tid` gives the struct arm.
+    pub eq_enum: Vec<Option<(ProtoId, usize)>>,
     /// M19 Phase 4 — number of struct-field inline-cache sites (dense ids `0..field_ic_sites`
     /// baked into `GetField`/`SetField` ops). The VM pre-sizes its per-`Vm` `field_ic` vector to
     /// this length. Carries no heap state, so it is never snapshotted or swapped.

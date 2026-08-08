@@ -2597,7 +2597,10 @@ pins it: those pins are substituted away first, so `fn f[T](a: T, b: int) where 
 `a == b`. It is the WHOLE legality test: a companion `equality_allowed` ("does this pair dispatch to a
 user `eq`?") was OR'd in alongside for one milestone and deleted in M23 slice 3 — the `Eq` overload is
 decided at RUNTIME off the operands' heap tags (`Vm::user_eq_method`), and every pair it accepted was a
-same-type pair `may_be_equal` already accepted, so the disjunct was provably dead.
+same-type pair `may_be_equal` already accepted, so the disjunct was provably dead. (What the checker
+*does* own is the hook's SHAPE, at the declaration: `validate_eq_shape` forces a struct/enum `eq` to be
+either `fn eq(self, o: Self) -> bool` or an ordinary method with a generic operand, so the type-blind
+runtime can tell the two apart from a compiler-built table instead of a name lookup.)
 
 *Cut 4* (review round 4) fixed the erasure escape being **top-level only**. The bare-`Param` arm fires
 only when a *whole operand* is a `T`; every other constructor re-establishes the escape by recursing —
@@ -3124,8 +3127,10 @@ Given that, the three "holes" are narrow and NOT worth building:
 The reserved set (`Add Sub Mul Div Mod Neg Arithmetic Comparable Stringable Hashable Index IndexSet
 Slice Contains Iterator Iterable Convert Any Error`) covers arithmetic, ordering, indexing, slicing,
 membership, iteration, hashing, display. **`Eq`** (`eq(self, other: Self) -> bool`) joined the set in
-M23 as a reserved protocol + generic bound, and **B2** (the permissive `==`) is FIXED; `==`/`!=`
-dispatching to a user `eq` is the remaining half. Still missing: bitwise/shift protocols, and a call operator. Small
+M23 as a reserved protocol + generic bound, **B2** (the permissive `==`) is FIXED, and `==`/`!=` now
+dispatch to a user `eq` — gated on the hook's exact signature at the declaration, so a method that
+merely shares the name (`Opt[T].eq(self, x: T)`) stays an ordinary method and `==` stays structural.
+Container probes (`Map`/`Set` keys, `in`, `list.contains`) are the remaining half. Still missing: bitwise/shift protocols, and a call operator. Small
 each. **`Contains`** (`x in my_struct` via `contains(self, item) -> bool`, Python's `__contains__`) —
 **FIXED**: a user struct/enum with a `contains(self, item) -> bool` method makes `x in that_value`
 dispatch to it, yielding `bool`; container `in` (list/set/map/str) is unchanged.
