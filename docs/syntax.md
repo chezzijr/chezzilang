@@ -1353,17 +1353,21 @@ everything the runtime can genuinely compare stays legal:
   your error struct, in either operand order);
 * **two different existentials** (`Shape` vs `Error`) — one concrete type can conform to both, so the
   pair is inhabited;
-* an existential **nested inside a container or generic struct** — `List[Error]` vs `List[MyErr]`,
-  `Map[str, Error]` vs `Map[str, MyErr]`, `Box[Error]` vs `Box[MyErr]`, `Option[Error]` vs
-  `Option[MyErr]`, `(Error, int)` vs `(MyErr, int)`. (Note these same pairs are *not* mutually
-  **assignable** — a mutable container's type argument is invariant — but they can still hold equal
-  values, which is all `==` asks.)
-* any comparison involving an **erased type parameter**, bare or nested (`a == 1` and `xs == [1]`
-  inside `fn f[T](a: T, xs: List[T])`). A `where T: <scalar>` bound is the exception: it *pins* `T` to
-  that scalar, so `fn f[T](a: T, b: int) where T: str` still rejects `a == b`.
+* an existential **nested inside a container, generic struct, or concurrency handle** — `List[Error]`
+  vs `List[MyErr]`, `Map[str, Error]` vs `Map[str, MyErr]`, `Box[Error]` vs `Box[MyErr]`,
+  `Option[Error]` vs `Option[MyErr]`, `(Error, int)` vs `(MyErr, int)`, `Shared[Error]` vs
+  `Shared[MyErr]`. (Note these same pairs are *not* mutually **assignable** — a mutable container's
+  type argument is invariant — but they can still hold equal values, which is all `==` asks.)
+* any comparison involving an **erased type parameter**, bare or nested at any depth (`a == 1` and
+  `xs == [1]` inside `fn f[T](a: T, xs: List[T])`; `a == b` inside
+  `fn cmp[T](a: Channel[T], b: Channel[int])`; a free `T` in a parameterized protocol's own arguments,
+  `Container[T]` vs a conforming `Bag[int]`). A `where T: <scalar>` bound is the exception: it *pins*
+  `T` to that scalar, so `fn f[T](a: T, b: int) where T: str` still rejects `a == b`.
 
 A conforming existential is not a blanket pass: a **non**-conforming concrete stays an error at every
-depth (`sh: Shape` vs a `str`, `List[Shape]` vs `List[str]`). When you *want* the dynamic answer on a
+depth (`sh: Shape` vs a `str`, `List[Shape]` vs `List[str]`, `Container[T]` vs an `int`), and neither
+is an erased parameter — a *handle* whose element types are disjoint is still disjoint
+(`Channel[int]` vs `Channel[str]`). When you *want* the dynamic answer on a
 genuinely disjoint pair, compare through the `Any` existential — widening **one** side is enough
 (`u: Any = a; u == b`), since `Any` is the top type and disjointness is then not provable, and the
 runtime's type-tag guard decides.

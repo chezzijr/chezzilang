@@ -2596,6 +2596,22 @@ makes `[1.0] == [1]` and `{"k": 1.0} == {"k": 1}` compile (both engines print `t
 pins it: those pins are substituted away first, so `fn f[T](a: T, b: int) where T: str` still rejects
 `a == b`. `equality_allowed` (the user-`eq` overload) is OR'd in alongside.
 
+*Cut 4* (review round 4) fixed the erasure escape being **top-level only**. The bare-`Param` arm fires
+only when a *whole operand* is a `T`; every other constructor re-establishes the escape by recursing —
+but the four native generic handles (`Channel`/`Shared`/`RwShared`/`Atomic`) had **no arm at all** and
+fell through to `_ => compatible`, which is neither `Param`-tolerant nor conformance-aware. Their `==`
+is a live identity comparison (the `ha == hb` shortcut at the top of `values_equal_guarded`), so
+`fn cmp[T](a: Channel[T], b: Channel[int])` and `Shared[Error] == Shared[MyErr]` were working code that
+stopped compiling. They now join the co-variant recursion arm. The other half was `Protocol`'s own
+`pargs`: a free `T` in `Container[T]` (or in the concrete's args) was fed to `satisfies_args`, which
+compared it against a concrete arg and wrong-rejected `Container[T] == Bag[int]`; params are now erased
+to `Ty::Unknown` (reusing that path's existing don't-cascade leniency) so the **method set** still
+decides — `Container[T] == int` and `== str` still reject. Full `Ty`-constructor audit behind this cut:
+every variant carrying a type argument now has a `may_be_equal` arm except `BuiltinFn` (monomorphic by
+construction, `src/checker/ty.rs`: it can never hold a `Ty::Param`; `compatible` already accepts
+`Func` ↔ `BuiltinFn`, measured: `f == ord` prints `true`) and `Module` (a name, no type args), both of
+which genuinely belong on the `compatible` path.
+
 Rejection therefore requires: both operands fully concrete (no protocol, no free param, no `Unknown`
 anywhere), structurally different, with no cross-type runtime arm — i.e. exactly the runtime's own
 type-tag guard, "distinct types are never equal". Known ceiling, in the declining direction: two

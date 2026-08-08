@@ -2649,11 +2649,17 @@ fn unify(decl: &Ty, actual: &Ty, map: &mut HashMap<String, Ty>) {
 
 /// Collect (into `out`, dedup, in first-seen order) the names from `wanted` that appear as a
 /// `Ty::Param` anywhere inside `ty`. Used by the un-inferable-closure-param deadlock diagnostic to
-/// find which still-unbound type parameters a closure-typed slot mentions.
-fn ty_collect_params(ty: &Ty, wanted: &std::collections::HashSet<String>, out: &mut Vec<String>) {
+/// find which still-unbound type parameters a closure-typed slot mentions. `wanted: None` = collect
+/// EVERY param name, whatever its scope — what [`Checker::may_be_equal`]'s erasure escape needs (it
+/// has no candidate list; it must find any free param at all).
+fn ty_collect_params(
+    ty: &Ty,
+    wanted: Option<&std::collections::HashSet<String>>,
+    out: &mut Vec<String>,
+) {
     match ty {
         Ty::Param(n) => {
-            if wanted.contains(n) && !out.contains(n) {
+            if wanted.is_none_or(|w| w.contains(n)) && !out.contains(n) {
                 out.push(n.clone());
             }
         }

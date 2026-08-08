@@ -820,9 +820,30 @@ impl Checker {
             // equality bound pinning `T` to that scalar, and `infer_binary`'s `Eq` arm substitutes
             // those pins away BEFORE calling this, so `T: str` vs `int` still rejects.)
             (Param(_), _) | (_, Param(_)) => true,
+            // CEILING, deliberate: two protocols with contradictory method signatures (`fn f() -> int`
+            // vs `fn f() -> str`) are inhabited by NOTHING, yet this accepts the pair. Tightening it
+            // means intersecting two method tables; the rationale for not doing so lives in
+            // `docs/gaps.md` §B2 — read it there before narrowing this arm.
             (Protocol(..), Protocol(..)) => true,
             (Protocol(p, pargs), a) | (a, Protocol(p, pargs)) => {
-                self.satisfies_args(a, p, pargs).is_ok()
+                // ERASURE, one constructor in: a free `T` in the protocol's args (`Container[T]`) or
+                // in the concrete's (`Bag[T]`) is un-decidable here, exactly as a bare `T` is at the
+                // arm above — conformance would compare it against a concrete arg and wrong-reject.
+                // Erase params to `Ty::Unknown` and reuse `satisfies_args`' existing don't-cascade
+                // leniency, so the METHOD SET is still checked (`Container[T] == int` still rejects)
+                // while the arguments stop deciding anything.
+                let mut names: Vec<String> = Vec::new();
+                ty_collect_params(a, None, &mut names);
+                for t in pargs {
+                    ty_collect_params(t, None, &mut names);
+                }
+                if names.is_empty() {
+                    return self.satisfies_args(a, p, pargs).is_ok();
+                }
+                let map: HashMap<String, Ty> =
+                    names.into_iter().map(|n| (n, Ty::Unknown)).collect();
+                let pargs: Vec<Ty> = pargs.iter().map(|t| subst(t, &map)).collect();
+                self.satisfies_args(&subst(a, &map), p, &pargs).is_ok()
             }
             // The runtime's own CROSS-TYPE equality arms (`values_equal`), which is what makes these
             // pairs inhabited rather than merely assignable. They live HERE, not as a top-level
@@ -830,9 +851,18 @@ impl Checker {
             // `[1.0, 2.0] == [1, 2]` and `{"k": 1.0} == {"k": 1}` answer `true` on both engines
             // (CPython agrees), so rejecting them would have been a lie about "provably disjoint".
             (Int, Float) | (Float, Int) | (Bytes, ByteArray) | (ByteArray, Bytes) => true,
-            (List(a), List(b)) | (Set(a), Set(b)) | (Option(a), Option(b)) => {
-                self.may_be_equal(a, b)
-            }
+            // The native generic HANDLES belong here too, not on the `_ => compatible` fall-through:
+            // their `==` is the identity shortcut (`ha == hb`) at the top of `values_equal_guarded`,
+            // so `Channel[T] == Channel[int]` is a live, true-capable comparison. `compatible` is
+            // neither `Param`-tolerant nor conformance-aware, so leaving them there wrong-rejected
+            // working code (`fn cmp[T](a: Channel[T], b: Channel[int])`).
+            (List(a), List(b))
+            | (Set(a), Set(b))
+            | (Option(a), Option(b))
+            | (Channel(a), Channel(b))
+            | (Shared(a), Shared(b))
+            | (RwShared(a), RwShared(b))
+            | (Atomic(a), Atomic(b)) => self.may_be_equal(a, b),
             (Map(ak, av), Map(bk, bv)) => self.may_be_equal(ak, bk) && self.may_be_equal(av, bv),
             (Result(at, ae), Result(bt, be)) => {
                 self.may_be_equal(at, bt) && self.may_be_equal(ae, be)
@@ -2907,7 +2937,7 @@ impl Checker {
             tps.iter().map(|tp| tp.name.clone()).collect();
         let mut in_param_pos: Vec<String> = Vec::new();
         for p in all_params {
-            ty_collect_params(p, &wanted, &mut in_param_pos);
+            ty_collect_params(p, Some(&wanted), &mut in_param_pos);
         }
         for tp in tps {
             if in_param_pos.contains(&tp.name) {

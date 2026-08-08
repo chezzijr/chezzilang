@@ -1187,6 +1187,22 @@ fn disjoint_types_equality_rejected() {
         "fn f[T](a: T, b: int) -> bool where T: str:\n    return a == b\nfn main():\n    print(f(\"a\", 1))\nmain()\n",
         "cannot compare str and int for equality",
     );
+    // The native generic HANDLES joined the co-variant recursion (see the `_ok` twin) — recursing is
+    // not waving through: two handles whose element types are disjoint are still disjoint handles.
+    entry_rejects(
+        "import std.concurrency\nfn cmp(a: Channel[int], b: Channel[str]) -> bool:\n    return a == b\nfn main():\n    pass\nmain()\n",
+        "cannot compare Channel[int] and Channel[str] for equality",
+    );
+    entry_rejects(
+        "import std.concurrency\nfn cmp(a: Shared[int], b: Shared[str]) -> bool:\n    return a == b\nfn main():\n    pass\nmain()\n",
+        "cannot compare Shared[int] and Shared[str] for equality",
+    );
+    // A PARAMETERIZED protocol erases only its ARGS — the method SET is still decided, so a concrete
+    // that cannot conform however the args are chosen stays provably disjoint.
+    entry_rejects(
+        "protocol Container[T]:\n    fn get(self, i: int) -> T\nfn cmp[T](a: Container[T], b: int) -> bool:\n    return a == b\nfn main():\n    pass\nmain()\n",
+        "cannot compare Container[T] and int for equality",
+    );
 }
 
 /// The B2 rejection's PREMISE is "provably disjoint" — every pair that can legitimately be equal must
@@ -1253,6 +1269,23 @@ fn comparable_types_equality_still_ok() {
     // them would contradict "only a PROVABLY disjoint pair".
     entry_ok(
         "fn main():\n    a: List[float] = [1.0]\n    b: List[int] = [1]\n    print(a == b)\n    m: Map[str, float] = {\"k\": 1.0}\n    n: Map[str, int] = {\"k\": 1}\n    print(m == n)\n    t: (float, int) = (1.0, 2)\n    s: (int, int) = (1, 2)\n    print(t == s)\nmain()\n",
+    );
+    // (10) the native generic HANDLES (`Channel`/`Shared`/`RwShared`/`Atomic`). Their `==` is the
+    // identity shortcut at the top of `values_equal_guarded` (`cmp(ch, ch)` is `true`, two distinct
+    // channels `false`) — live, working code. They had no `may_be_equal` arm and fell through to
+    // `compatible`, which is neither `Param`-tolerant nor conformance-aware, so BOTH the erased-param
+    // escape (8) and the existential-nesting case (7) stopped one constructor short.
+    entry_ok(
+        "import std.concurrency\nfn chans[T](a: Channel[T], b: Channel[int]) -> bool:\n    return a == b\nfn atoms[T](a: Atomic[T], b: Atomic[int]) -> bool:\n    return a == b\nfn rws[T](a: RwShared[T], b: RwShared[int]) -> bool:\n    return a == b\nfn main():\n    pass\nmain()\n",
+    );
+    entry_ok(
+        "import std.concurrency\nstruct MyErr:\n    m: str\n    fn message(self) -> str:\n        return self.m\nfn shr(a: Shared[Error], b: Shared[MyErr]) -> bool:\n    return a == b\nfn nested(a: List[Shared[Error]], b: List[Shared[MyErr]]) -> bool:\n    return a == b\nfn main():\n    pass\nmain()\n",
+    );
+    // (11) a PARAMETERIZED protocol existential vs a conforming concrete, with a free `T` in the
+    // protocol's args — the erasure escape did not reach into `Protocol`'s own `pargs` either, so the
+    // args (not the method set) were deciding a question they cannot answer inside an erased body.
+    entry_ok(
+        "protocol Container[T]:\n    fn get(self, i: int) -> T\nstruct Bag[T]:\n    item: T\n    fn get(self, i: int) -> T:\n        return self.item\nfn cmp[T](a: Container[T], b: Bag[int]) -> bool:\n    return a == b\nfn flip[T](a: Bag[T], b: Container[int]) -> bool:\n    return a == b\nfn main():\n    pass\nmain()\n",
     );
 }
 

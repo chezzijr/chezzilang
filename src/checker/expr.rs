@@ -3446,7 +3446,7 @@ impl Checker {
                     if cp.ty.is_none()
                         && let Some(dp) = dparams.get(i)
                     {
-                        ty_collect_params(dp, &unbound, &mut mentioned);
+                        ty_collect_params(dp, Some(&unbound), &mut mentioned);
                     }
                 }
                 // This closure arg has an unannotated param slot mentioning an unbound param — it is
