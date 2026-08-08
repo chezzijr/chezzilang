@@ -1025,6 +1025,172 @@ fn redeclaring_add_rejected() {
     );
 }
 
+// ----- M23 — the `Eq` protocol (checker foundation; the `==` dispatch itself lands later) -----
+
+/// `Eq` is a reserved prebuilt protocol exactly like `Comparable` — a user redeclaration is rejected
+/// on the NAME alone (mirrors `redeclaring_comparable_rejected`).
+#[test]
+fn redeclaring_eq_rejected() {
+    rejects(
+        "protocol Eq:\n    fn eq(self, other: Self) -> bool\n",
+        "reserved",
+    );
+}
+
+/// The intrinsic scalar grant: ALL FOUR scalars satisfy `Eq` with no user method — `==` is defined
+/// on every scalar (unlike `Comparable`, which excludes `bool`). A container does NOT: it has no
+/// `eq` method and no grant, so a `[T: Eq]` bound correctly rejects it.
+#[test]
+fn scalars_satisfy_eq_intrinsically() {
+    for lit in ["1", "1.5", "\"a\"", "true"] {
+        ok(&format!(
+            "fn same[T: Eq](a: T, b: T) -> bool:\n    return a.eq(b)\nprint(same({lit}, {lit}))\n"
+        ));
+    }
+    rejects(
+        "fn same[T: Eq](a: T, b: T) -> bool:\n    return a.eq(b)\nprint(same([1], [2]))\n",
+        "does not satisfy Eq",
+    );
+}
+
+/// Struct/enum conformance is STRUCTURAL (the `Comparable` model): a `eq(self, Self) -> bool` method
+/// satisfies the bound, a type without one does not.
+#[test]
+fn struct_with_eq_satisfies_eq() {
+    entry_ok(
+        "struct P:\n    x: int\n    fn eq(self, o: P) -> bool:\n        return self.x == o.x\nfn same[T: Eq](a: T, b: T) -> bool:\n    return a.eq(b)\nprint(same(P(1), P(2)))\n",
+    );
+    entry_rejects(
+        "struct Q:\n    x: int\nfn same[T: Eq](a: T, b: T) -> bool:\n    return a.eq(b)\nprint(same(Q(1), Q(2)))\n",
+        "does not satisfy Eq",
+    );
+}
+
+/// `eq` must be `(self, Self) -> bool`. A wrong RETURN type is a wrong signature, not a conformance —
+/// admitting it would let an erased `[T: Eq]` body use a non-bool as a condition.
+#[test]
+fn eq_wrong_return_type_rejected() {
+    entry_rejects(
+        "struct P:\n    x: int\n    fn eq(self, o: P) -> int:\n        return 0\nfn same[T: Eq](a: T, b: T) -> bool:\n    return a.eq(b)\nprint(same(P(1), P(2)))\n",
+        "wrong signature",
+    );
+}
+
+/// Mirror of `generic_struct_heterogeneous_compare_rejected`: `Box[int] == Box[str]` must not
+/// launder through `eq` — heterogeneous type args are provably-disjoint operands (B2).
+#[test]
+fn generic_struct_heterogeneous_eq_rejected() {
+    let src = "\
+struct Box[T]:
+    v: T
+    fn eq(self, o: Box[T]) -> bool:
+        return true
+b := Box(5) == Box(\"hello\")
+";
+    entry_rejects(src, "cannot compare Box[int] and Box[str] for equality");
+}
+
+/// Mirror of `generic_newtype_compare_satisfies_comparable_rejected`: a newtype's `eq` METHOD is
+/// never dispatched by `==` (it auto-flows to the underlying's native equality), so a generic newtype
+/// must NOT satisfy `Eq` through it — that would be check-ok / run-divergent.
+#[test]
+fn generic_newtype_eq_satisfies_eq_rejected() {
+    let src = "\
+newtype Wrap[T] = T:
+    fn eq(self, o: Wrap[T]) -> bool:
+        return true
+fn same[T: Eq](a: T, b: T) -> bool:
+    return a.eq(b)
+v := same(Wrap(1), Wrap(2))
+";
+    entry_rejects(src, "does not satisfy Eq");
+}
+
+/// W6-3d extended to `eq`: a NUMERIC newtype gets the intrinsic `Eq` grant (its `==` is the
+/// underlying's native equality), and intrinsic method dispatch is MISS-ONLY — so a user `eq` method
+/// would answer `.eq()` while `==` answered natively: two spellings of one protocol operation
+/// disagreeing silently. Rejected at the declaration site, exactly like `compare`.
+#[test]
+fn numeric_newtype_eq_method_rejected_at_decl() {
+    entry_rejects(
+        "newtype Meters = float:\n    fn eq(self, o: Meters) -> bool:\n        return true\nm := Meters(1.0)\nprint(m == m)\n",
+        "never dispatched as an operator",
+    );
+    // BOUNDARY: a NON-numeric newtype has no intrinsic grant, so its `eq` is an ordinary method with
+    // no protocol promise to break — it stays legal, exactly as its `compare` does today.
+    entry_ok(
+        "newtype Name = str:\n    fn eq(self, o: Name) -> bool:\n        return true\nn := Name(\"a\")\nprint(n.eq(n))\n",
+    );
+}
+
+/// **B2** (`docs/gaps.md`) — `==`/`!=` between provably-disjoint types is rejected at check time.
+/// Python answers `False` at runtime; a statically-typed language rejects it (mypy
+/// `--strict-equality`, Go/Rust compile errors), so this is a deliberate, documented divergence.
+#[test]
+fn disjoint_types_equality_rejected() {
+    entry_rejects(
+        "fn main():\n    print(1 == \"a\")\nmain()\n",
+        "cannot compare int and str for equality",
+    );
+    entry_rejects(
+        "fn main():\n    print([1] != Set([1]))\nmain()\n",
+        "cannot compare",
+    );
+    entry_rejects(
+        "struct A:\n    x: int\nstruct B:\n    x: int\nfn main():\n    print(A(1) == B(1))\nmain()\n",
+        "cannot compare",
+    );
+    entry_rejects(
+        "fn main():\n    o := Some(1)\n    print(o == 1)\nmain()\n",
+        "cannot compare",
+    );
+}
+
+/// The B2 rejection's PREMISE is "provably disjoint" — every pair that can legitimately be equal must
+/// still be accepted. These are the neighbours the rule must not eat (numeric widening, `Unknown`
+/// silencing, container/`Option`/protocol-existential pairs, same struct/enum/newtype).
+#[test]
+fn comparable_types_equality_still_ok() {
+    entry_ok(
+        "fn main():\n    print(1 == 1.0)\n    print(2.5 != 2)\n    print(\"a\" == \"b\")\n    print(true == false)\n    print([1] == [2])\n    print({\"a\": 1} == {})\n    print(Set([1]) == Set([2]))\n    print((1, \"a\") == (2, \"b\"))\nmain()\n",
+    );
+    entry_ok(
+        "fn main():\n    o: Option[int] = Some(1)\n    print(o == None)\n    print(o == Some(2))\n    r: Result[int] = Ok(1)\n    print(r == Ok(2))\nmain()\n",
+    );
+    entry_ok(
+        "struct P:\n    x: int\nenum C:\n    Red\n    Blue\nnewtype M = float\nfn main():\n    print(P(1) == P(2))\n    print(C.Red != C.Blue)\n    print(M(1.0) == M(2.0))\nmain()\n",
+    );
+    // A `str` IS an `Error` existential (the intrinsic Go-style conformance), in either operand order.
+    entry_ok(
+        "fn boom() -> int!:\n    return Err(\"nope\")\nfn main():\n    match boom():\n        Ok(v): print(v)\n        Err(e): print(e == \"nope\")\nmain()\n",
+    );
+    // An erased generic body compares two values of its own type param.
+    entry_ok("fn same[T](a: T, b: T) -> bool:\n    return a == b\nprint(same(1, 2))\n");
+}
+
+/// **Decision 5** — a type with a user `eq` is rejected as an `Atomic[T]` payload: `Atomic.cas`
+/// compares the stored value with the runtime's STRUCTURAL equality, which is not the user's `eq`, so
+/// admitting it would silently answer a different question than `==` does.
+#[test]
+fn atomic_payload_with_eq_rejected() {
+    let decl = "import std.concurrency\nstruct P:\n    x: int\n    fn eq(self, o: P) -> bool:\n        return true\n";
+    entry_rejects(
+        &format!("{decl}fn main():\n    a := Atomic(P(1))\n    print(a.load().x)\nmain()\n"),
+        "Atomic[P] payload",
+    );
+    entry_rejects(
+        &format!(
+            "{decl}fn hold(a: Atomic[P]):\n    print(a.load().x)\nfn main():\n    pass\nmain()\n"
+        ),
+        "Atomic[P] payload",
+    );
+    // BOUNDARY: the payloads that DON'T define `eq` stay legal — scalars (whose `Eq` is intrinsic and
+    // IS structural equality) and a struct without an `eq` method.
+    entry_ok(
+        "import std.concurrency\nstruct Q:\n    x: int\nfn main():\n    a := Atomic(1)\n    b := Atomic(\"s\")\n    c := Atomic(Q(1))\n    print(a.load() + c.load().x)\n    print(b.load())\nmain()\n",
+    );
+}
+
 // ----- transparent type aliases (M10-G3) -----
 
 #[test]
@@ -19264,7 +19430,8 @@ fn range_in_value_position_is_a_type_error() {
         "fn main():\n    y := (0..3) + [7]\n    print(y)\nmain()\n",
         m,
     );
-    // (g) equality — the permissive `Eq | NotEq => Ty::Bool` arm must still INFER both operands,
+    // (g) equality — the `Eq | NotEq` arm must still INFER both operands (its own B2 check is
+    // silenced by the resulting `Unknown`, which is exactly why the range error must fire first),
     // or the error never fires and the compiler backstop stays reachable from check-clean code.
     entry_rejects(
         "fn main():\n    b := (0..3) == [0, 1, 2]\n    print(b)\nmain()\n",

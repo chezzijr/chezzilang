@@ -1256,11 +1256,16 @@ impl Vm {
                 // methods the checker grants these built-ins. NAME-GATED because a dispatcher error
                 // is not necessarily a name miss (`Set.add` on a cyclic key, `list.pop` on empty…)
                 // and rewriting an existing fault message would be a regression; none of the three
-                // dispatchers owns these four names, so the gate is exact. Zero cost unless the
+                // dispatchers owns any of the gated names, so the gate is exact. Zero cost unless the
                 // dispatch already failed.
                 Err(e) => {
-                    // W7-8 adds `as_path` (the `PathLike` grant on str/bytes/bytearray) to the gate.
-                    if !matches!(method, "index" | "set_index" | "slice" | "hash" | "as_path") {
+                    // W7-8 adds `as_path` (the `PathLike` grant on str/bytes/bytearray) to the gate;
+                    // M23 adds `eq` (the `Eq` grant on `str` — the one scalar that is heap-backed and
+                    // so lands in this container dispatcher rather than the inline-scalar path).
+                    if !matches!(
+                        method,
+                        "index" | "set_index" | "slice" | "hash" | "as_path" | "eq"
+                    ) {
                         return Err(e);
                     }
                     match self.intrinsic_proto_method(recv, method, &args, span)? {
@@ -2518,6 +2523,16 @@ impl Vm {
                 // caller's `has no method` error standing, exactly as before.
                 None => Ok(None),
             },
+            // `Eq` (M23) → the SAME structural equality `==` uses, so `x.eq(y)` can never disagree
+            // with `x == y`. Serves the four scalar grants and the numeric-newtype grant (whose `==`
+            // unwraps to the underlying, which is what the worker below does). Miss-only like the rest, so
+            // a user type's own `eq` method is dispatched before this ever runs.
+            // (`values_equal_guarded` is the operator's OWN worker — not the fault-swallowing
+            // `values_equal` test wrapper — so a cyclic operand raises the same recoverable
+            // depth fault `==` raises instead of silently answering "not equal".)
+            ("eq", 1) => Ok(Some(Value::bool(
+                self.values_equal_guarded(recv, args[0], 0, span)?,
+            ))),
             // W7-8 `PathLike` → the RAW OS bytes of a path spelled as a `str`/`bytes`/`bytearray`.
             // `str` hands back its UTF-8 encoding (exactly what `str.encode()` yields), `bytes` IS the
             // answer (returned unchanged — no copy), and a `bytearray` is COPIED into a fresh immutable

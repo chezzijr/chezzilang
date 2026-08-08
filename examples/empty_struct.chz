@@ -14,8 +14,13 @@ fn main():
     print(a == b)
     # Display: an empty struct prints with no fields.
     print(a)
-    # Distinct empty-struct types are not equal (type tag differs despite equal hash).
-    print(a == T())
+    # Distinct empty-struct types are not equal (type tag differs despite equal hash). `a == T()`
+    # spelled directly is a COMPILE error — `S` and `T` are provably disjoint, so the comparison
+    # could only ever answer false (docs/gaps.md B2). Through the `Any` existential, where the
+    # checker cannot prove disjointness, the runtime type-tag guard still answers it.
+    u: Any = a
+    v: Any = T()
+    print(u == v)
     # Usable as a Set element — two `S()` dedup to one.
     seen: Set[S] = {a, b}
     print(seen.len())

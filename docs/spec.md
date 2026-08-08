@@ -930,7 +930,7 @@ or through a protocol-typed value — and it is defined as **exactly** the opera
 **unspecified** (a build-dependent 64-bit hash, possibly negative) — only its consistency is
 guaranteed: equal values hash equally, and it agrees with container membership.
 
-The intrinsic grants and their methods are: `Comparable`→`compare`, `Stringable`→`str`,
+The intrinsic grants and their methods are: `Comparable`→`compare`, `Eq`→`eq`, `Stringable`→`str`,
 `Hashable`→`hash`, `Error`→`message`, `Iterable`→`iter`, `Index`→`index`, `IndexSet`→`index`+`set_index`,
 `Slice`→`slice`, `Add`/`Sub`/`Mul`/`Div`/`Mod`→`add`/`sub`/`mul`/`div`/`mod`, `Neg`→`neg`. A type that
 DEFINES the method always gets its own (intrinsic dispatch is a resolution fallback, never a shadow).

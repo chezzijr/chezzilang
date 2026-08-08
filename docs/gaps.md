@@ -2553,7 +2553,7 @@ documented decode contract, unchanged (`read_bytes` is purely additive).
 **What remains is not a defect:** the caller must pick the right method — a `str` seam cannot hand back
 bytes that are not UTF-8, and it now says so and points at `read_bytes`.
 
-### B2. `==` between disjoint types type-checks (a proposed tightening, not a clear bug)
+### B2. `==` between disjoint types type-checks — **FIXED (M23)**
 `1 == "a"` compiles and evaluates to `false` (`src/checker/pattern.rs`, the `Eq | NotEq` arm returns
 `Ty::Bool` without checking operand compatibility). Note the tension before "fixing" it: this is
 **exactly Python's runtime behavior** (`1 == "a"` → `False`), so by the no-drift rule it is not a
@@ -2561,6 +2561,17 @@ divergence. But Chezzi is **statically typed**, and a comparison between provabl
 always a bug in user code — which is why mypy ships `--strict-equality` to reject it and Go/Rust make
 it a compile error. Recommendation: reject at check time (a typed language should), and say so in the
 docs as a deliberate, explained divergence from Python's runtime.
+
+**Landed (M23, the `Eq`-protocol slice).** The `Eq | NotEq` arm now rejects `cannot compare {l} and
+{r} for equality` unless the pair is something the runtime can genuinely compare. The accepted set is
+derived from `values_equal_guarded`'s own truth table rather than guessed: same type (`compatible`,
+tried both ways so a `str` still matches an `Error` existential), a mixed `int`/`float` pair, a
+`bytes`/`bytearray` pair (content-equal, Python parity), or a user-`eq` overload
+(`equality_allowed`) — everything else can only ever answer `false`. An `Unknown` operand silences it,
+so one earlier error never cascades. Documented as a deliberate Python divergence in
+`docs/syntax.md`; the dynamic answer is still reachable through the `Any` existential, which is how
+`examples/empty_struct.chz` and `examples/enum_layout.chz` still demonstrate the runtime type-tag
+guard.
 
 ## Root causes — one change each, many gaps unblocked
 
@@ -3059,8 +3070,9 @@ Given that, the three "holes" are narrow and NOT worth building:
 ### L5. Operator-protocol holes
 The reserved set (`Add Sub Mul Div Mod Neg Arithmetic Comparable Stringable Hashable Index IndexSet
 Slice Contains Iterator Iterable Convert Any Error`) covers arithmetic, ordering, indexing, slicing,
-membership, iteration, hashing, display. Missing: **`Eq`** (`==`/`!=` cannot be overloaded — and see
-**B2**, the checker is *permissive* about them), bitwise/shift protocols, and a call operator. Small
+membership, iteration, hashing, display. **`Eq`** (`eq(self, other: Self) -> bool`) joined the set in
+M23 as a reserved protocol + generic bound, and **B2** (the permissive `==`) is FIXED; `==`/`!=`
+dispatching to a user `eq` is the remaining half. Still missing: bitwise/shift protocols, and a call operator. Small
 each. **`Contains`** (`x in my_struct` via `contains(self, item) -> bool`, Python's `__contains__`) —
 **FIXED**: a user struct/enum with a `contains(self, item) -> bool` method makes `x in that_value`
 dispatch to it, yielding `bool`; container `in` (list/set/map/str) is unchanged.
@@ -3185,8 +3197,8 @@ widening to an existential is frequently *implicit* (a struct used where `Error`
 **Risk / why POST-FREEZE.** This is checker surface with **real false-positive risk** (every widening site
 must be found; a missed one is a soundness hole, an over-eager one rejects legal in-task code). Do NOT
 attempt before the JIT freeze. The concrete-error-type workaround covers the practical need until then.
-Related: [B2](#b2--between-disjoint-types-type-checks-a-proposed-tightening-not-a-clear-bug) (another
-typed-language tightening), and the note that **dropping `ref`/`Ref` was the WRONG lever *for F2*** — it
+Related: [B2](#b2--between-disjoint-types-type-checks--fixed-m23) (another
+typed-language tightening, landed), and the note that **dropping `ref`/`Ref` was the WRONG lever *for F2*** — it
 would not close the generator-field laundering that F2 is about, so this milestone stands on its own.
 (NOTE 2026-07-19: `ref`/`Ref`/`std.ref` were later removed *separately*, on minimalism/coherence
 grounds — they only added scalar aliasing over Chezzi's Python object model — **not** as an F2/sendability

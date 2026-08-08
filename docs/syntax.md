@@ -1329,6 +1329,23 @@ search, dedup, sorted-set membership), make `compare` consistent with all the fi
 or key both on the same fields. (Routing `==` through `compare` was considered and rejected: it cannot
 be made sound for generic `==` on an unbounded type parameter without either runtime type metadata or
 requiring an equality bound — see the known-limitations note.)
+
+The prebuilt **`Eq`** protocol (`eq(self, other: Self) -> bool`) names that equality as a **bound**:
+`int`/`float`/`bool`/`str` satisfy it intrinsically (all four — `==` is defined on every scalar, unlike
+ordering), and a struct/enum satisfies it structurally by defining `eq`. As of this milestone it is a
+bound only — `==` does **not** yet dispatch to a user `eq` — so a `[T: Eq]` body must spell the call
+`a.eq(b)`. Like `Comparable`, it is not satisfiable by a newtype's own `eq` method: a newtype's `==`
+always unwraps to the underlying's native equality, so a numeric newtype declaring `eq` is rejected at
+the declaration site (the method could never agree with the operator).
+
+`==` / `!=` between **provably-disjoint types is a compile error** — `1 == "a"`, `Box[int] ==
+Box[str]`, or two different structs can only ever answer `false`, which is always a bug in the source.
+This is a **deliberate divergence from Python** (which answers `False` at runtime): Chezzi is
+statically typed, so it follows mypy's `--strict-equality`, Go, and Rust here. Everything the runtime
+can genuinely compare stays legal — a mixed `int`/`float` pair (`1 == 1.0`), `bytes` vs `bytearray`
+(content-equal, Python parity), and any pair of the same type. When you *want* the dynamic answer,
+compare through the `Any` existential (`u: Any = a`), where disjointness is not provable and the
+runtime's type-tag guard decides.
 Ordering is overloaded through `Comparable`; arithmetic is overloaded through the per-operator
 protocols **`Add`/`Sub`/`Mul`/`Div`/`Mod`** (binary, methods `add`/`sub`/`mul`/`div`/`mod(self,
 other: Self) -> Self`, powering `+`/`-`/`*`/`/`/`%`) and **`Neg`** (unary, method `neg(self) -> Self`,
@@ -2814,8 +2831,8 @@ fn fetch_all(urls: List[str]):
   `import Socket from std.net`) — they are NOT global builtins, but stay **reserved names** (no user
   `struct Socket`/`struct Listener`). The builtin SCALAR (`int`/`float`/`str`/…), CONTAINER
   (`List`/`Set`/`Map`/`Channel`/`range`), and FFI (`ptr`/`owned_str`) type names are likewise reserved
-  at declaration (a `struct int` / `struct List` is rejected `type 'X' is reserved (builtin)`). The 19
-  prebuilt PROTOCOL names (`Comparable`/`Stringable`/`Hashable`/`Error`/`Add`/`Sub`/`Mul`/`Div`/`Mod`/
+  at declaration (a `struct int` / `struct List` is rejected `type 'X' is reserved (builtin)`). The 20
+  prebuilt PROTOCOL names (`Comparable`/`Eq`/`Stringable`/`Hashable`/`Error`/`Add`/`Sub`/`Mul`/`Div`/`Mod`/
   `Neg`/`Arithmetic`/`Iterator`/`Iterable`/`Index`/`IndexSet`/`Slice`/`Convert`/`Contains`/`PathLike`) are reserved the same way — usable
   as a bound (`[T: Comparable]`) but not as a `struct`/`enum`/`newtype`/`type` decl name (a user
   `protocol Comparable:` is likewise rejected `reserved (builtin)`). Their SHAPE (method sigs + embeds)

@@ -452,6 +452,7 @@ fn is_reserved_protocol(name: &str) -> bool {
         name,
         "Any"
             | "Comparable"
+            | "Eq"
             | "Stringable"
             | "Hashable"
             | "Error"
@@ -2004,6 +2005,23 @@ fn prebuilt_protocols() -> HashMap<String, ProtocolInfo> {
             methods: vec![(
                 "compare".to_string(),
                 FnSig::plain(vec![Ty::Unknown, Ty::Param("Self".into())], Ty::Int),
+            )],
+        },
+    );
+    m.insert(
+        // `Eq` — user-defined equality: `eq(self, other: Self) -> bool`. Every scalar satisfies it
+        // intrinsically (all FOUR — `==` is defined on `bool` too, unlike `Comparable`'s ordering);
+        // a struct/enum satisfies it structurally through its own `eq`. Deliberately NOT embedded by
+        // `Comparable` yet — that flip (and the `==` dispatch that gives an `eq` method its operator
+        // meaning) is a later slice of M23.
+        "Eq".to_string(),
+        ProtocolInfo {
+            type_params: Vec::new(),
+            embeds: Vec::new(),
+            // receiver `self` (Unknown), `other: Self` (Param "Self"), returning bool.
+            methods: vec![(
+                "eq".to_string(),
+                FnSig::plain(vec![Ty::Unknown, Ty::Param("Self".into())], Ty::Bool),
             )],
         },
     );

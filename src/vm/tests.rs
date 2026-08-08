@@ -15770,6 +15770,7 @@ fn intrinsic_grants_all_have_vm_arms() {
     // (method, call template) — `{r}` is the receiver, `{k}`/`{v}` the index key/value.
     let calls: &[(&str, &str)] = &[
         ("compare", "{r}.compare(b)"),
+        ("eq", "{r}.eq(b)"),
         ("str", "{r}.str()"),
         ("hash", "{r}.hash()"),
         ("message", "{r}.message()"),

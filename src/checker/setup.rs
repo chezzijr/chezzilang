@@ -798,7 +798,7 @@ impl Checker {
     /// [`prebuilt_protocols`], which stays the RUNTIME source of truth. The file-backed decls are an
     /// ADDITIVE mirror — never inserted into `self.protocols` (the `hoist_protocol` stdlib gate no-ops
     /// them) — so nothing at runtime consults them; this guard is the only thing that reads them, keeping
-    /// the two source expressions from silently drifting. All 18 reserved protocols are mirrored;
+    /// the two source expressions from silently drifting. All 20 of them are drift-guarded here;
     /// `Iterable`'s `iter(self) -> Iterator[Elem]` return type resolves (via `resolve_type`'s dedicated
     /// `Iterator[T]` value arm) to the same `Ty::Struct("Iterator",[Elem])` the seed uses, so its shape
     /// byte-matches too. Called only on the always-linked prelude module; the body is
@@ -814,6 +814,7 @@ impl Checker {
             // Chezzi as `protocol Any:\n    pass`, so it is mirrored + drift-guarded like the rest.
             "Any",
             "Comparable",
+            "Eq",
             "Stringable",
             "Error",
             "Hashable",
@@ -2579,8 +2580,10 @@ impl Checker {
                         }
                     }
                     // An OPERATOR-NAMED method on a NUMERIC newtype is rejected at the decl site
-                    // (gaps.md W6-3d). Same reason as the static-method reject above — the dispatch
-                    // path does not exist: same-newtype `+`/`-`/`<`/… always auto-flow to the
+                    // (gaps.md W6-3d; `eq` joined the list with M23's `Eq` protocol, whose numeric
+                    // grant is the same unconditional promise `Comparable`'s is). Same reason as the
+                    // static-method reject above — the dispatch
+                    // path does not exist: same-newtype `+`/`-`/`<`/`==` always auto-flow to the
                     // UNDERLYING's native op (vm `newtype_arith` / `compare_op`'s `same_newtype_keys`
                     // fast path), and a newtype's own `add`/`compare` is never dispatched as an
                     // operator (`docs/syntax.md`). But the intrinsic numeric grant is unconditional on
@@ -2608,7 +2611,7 @@ impl Checker {
                         for m in methods {
                             if matches!(
                                 m.name.as_str(),
-                                "add" | "sub" | "mul" | "div" | "mod" | "compare"
+                                "add" | "sub" | "mul" | "div" | "mod" | "compare" | "eq"
                             ) {
                                 self.error(
                                     m.name_span,

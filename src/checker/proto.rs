@@ -45,6 +45,13 @@ pub const INTRINSIC_PROTO_METHODS: &[(&str, &str, &str)] = &[
     ("Comparable", "compare", "float"),
     ("Comparable", "compare", "str"),
     ("Comparable", "compare", "newtype"),
+    // Eq — all FOUR scalars (`==` is defined on `bool` too, unlike `Comparable`) + a newtype (whose
+    // `==` unwraps to the underlying's native equality, exactly as its `<` unwraps to the ordering).
+    ("Eq", "eq", "int"),
+    ("Eq", "eq", "float"),
+    ("Eq", "eq", "str"),
+    ("Eq", "eq", "bool"),
+    ("Eq", "eq", "newtype"),
     // Stringable — all four scalars.
     ("Stringable", "str", "int"),
     ("Stringable", "str", "float"),
@@ -1412,6 +1419,13 @@ impl Checker {
         if protocol == "Comparable" && matches!(ty, Ty::Int | Ty::Float | Ty::Str) {
             return self.grant_intrinsic(protocol, ty);
         }
+        // `Eq` (sole method `eq(self, other: Self) -> bool`) is satisfied intrinsically by every
+        // scalar — all FOUR, because `==` is defined on `bool` as well (the membership is WIDER than
+        // `Comparable`'s, which has no ordering for `bool`). Structs/enums/newtypes fall through to
+        // the structural check below (a type without an `eq(self, Self) -> bool` stays rejected).
+        if protocol == "Eq" && matches!(ty, Ty::Int | Ty::Float | Ty::Bool | Ty::Str) {
+            return self.grant_intrinsic(protocol, ty);
+        }
         // `Stringable` (sole method `str(self) -> str`) is satisfied intrinsically by every scalar —
         // all four stringify (int/float/bool/str), so a `[T: Stringable]` generic accepts them (the
         // erased body's `v.str()` is dispatched by the scalar `str` branch in `Vm::do_method_call`).
@@ -1641,7 +1655,7 @@ impl Checker {
                 if numeric
                     && matches!(
                         protocol,
-                        "Add" | "Sub" | "Mul" | "Div" | "Mod" | "Comparable"
+                        "Add" | "Sub" | "Mul" | "Div" | "Mod" | "Comparable" | "Eq"
                     )
                 {
                     return self.grant_intrinsic(protocol, ty);
@@ -1659,10 +1673,12 @@ impl Checker {
                 // ordering (`compare_op`'s `same_newtype_keys` fast path), never the user `compare`, so
                 // a generic newtype (the only non-numeric case that reaches here after the numeric
                 // short-circuit) must NOT claim `Comparable` via a method — that would be check-ok /
-                // run-divergent. (Hashable/Stringable/Iterable/etc. still resolve structurally below.)
+                // run-divergent. `Eq` is in both lists for exactly the same reason: same-newtype `==`
+                // always unwraps to the UNDERLYING's native equality, never a user `eq` method.
+                // (Hashable/Stringable/Iterable/etc. still resolve structurally below.)
                 if matches!(
                     protocol,
-                    "Add" | "Sub" | "Mul" | "Div" | "Mod" | "Neg" | "Comparable"
+                    "Add" | "Sub" | "Mul" | "Div" | "Mod" | "Neg" | "Comparable" | "Eq"
                 ) {
                     return Err(format!("type {ty} does not satisfy {protocol}"));
                 }
@@ -1888,19 +1904,34 @@ impl Checker {
     /// Are `l < r` etc. allowed? True for same-named comparable type params, or same-named structs
     /// that satisfy `Comparable` (operator overloading dispatches to their `compare` at runtime).
     pub(super) fn ordering_allowed(&self, l: &Ty, r: &Ty) -> bool {
+        self.cmp_overload_allowed(l, r, "Comparable", "compare")
+    }
+
+    /// Does `l == r` / `l != r` DISPATCH to a user `eq`? The `Eq` twin of [`Self::ordering_allowed`] —
+    /// same shape, protocol/method parameterized (the `op_overload_result` precedent).
+    ///
+    /// This is the OVERLOAD question, not the legality one: `==` is legal on every pair the runtime
+    /// compares structurally, so `infer_binary`'s `Eq` arm accepts a strict SUPERSET of this (a `true`
+    /// here is currently always also `compatible`). It is separate because the two answers part company
+    /// the moment `==` lowers to a user `eq` — this predicate is what that lowering asks.
+    pub(super) fn equality_allowed(&self, l: &Ty, r: &Ty) -> bool {
+        self.cmp_overload_allowed(l, r, "Eq", "eq")
+    }
+
+    /// Shared body of [`Self::ordering_allowed`] / [`Self::equality_allowed`]: do `l` and `r` name the
+    /// SAME type param / struct / enum / newtype, such that the comparison operator dispatches to
+    /// `protocol`'s `method` (or, for a numeric newtype, to the underlying's native op)?
+    fn cmp_overload_allowed(&self, l: &Ty, r: &Ty, protocol: &str, method: &str) -> bool {
         match (l, r) {
             (Ty::Param(a), Ty::Param(b)) if a == b => self.type_params.get(a).is_some_and(|bs| {
                 bs.iter()
-                    .any(|proto| self.protocol_has_method(&proto.name, "compare"))
+                    .any(|proto| self.protocol_has_method(&proto.name, method))
             }),
             // Same generic struct/enum REQUIRES matching type ARGS (`compatible` = name + targs), not
             // just the same name — `Box[int] < Box[str]` must not overload `compare` (same
             // heterogeneous laundering as `+`; see `op_overload_result`).
-            (Ty::Struct(..), Ty::Struct(..)) if compatible(l, r) => {
-                self.satisfies(l, "Comparable").is_ok()
-            }
-            (Ty::Enum(..), Ty::Enum(..)) if compatible(l, r) => {
-                self.satisfies(l, "Comparable").is_ok()
+            (Ty::Struct(..), Ty::Struct(..)) | (Ty::Enum(..), Ty::Enum(..)) if compatible(l, r) => {
+                self.satisfies(l, protocol).is_ok()
             }
             // Same SCALAR newtype with a numeric underlying: `Meters < Meters` uses the underlying's
             // native ordering (returns bool). A user `compare` method also enables it via satisfies()
@@ -1908,11 +1939,12 @@ impl Checker {
             (Ty::NewType(a, _), Ty::NewType(b, _)) if a == b => {
                 (!self.newtype_is_generic(a)
                     && self.newtype_underlying(a).is_some_and(|u| u.is_numeric()))
-                    || self.satisfies(l, "Comparable").is_ok()
+                    || self.satisfies(l, protocol).is_ok()
             }
-            // No `(Ty::Protocol, Ty::Protocol)` arm — `Comparable.compare(self, o: Self)` is
-            // `Self`-parameterized, so two values of one protocol are un-orderable for the same
-            // object-safety reason `+` is (see `op_overload_result`).
+            // No `(Ty::Protocol, Ty::Protocol)` arm — `Comparable.compare(self, o: Self)` (and
+            // `Eq.eq(self, o: Self)`) is `Self`-parameterized, so two values of one protocol are
+            // un-orderable/un-dispatchable for the same object-safety reason `+` is (see
+            // `op_overload_result`).
             _ => false,
         }
     }
@@ -2074,6 +2106,40 @@ impl Checker {
                 .to_string()
         } else {
             String::new()
+        }
+    }
+
+    /// **M23 decision 5** — an `Atomic[T]` payload may not define its own `eq`. `Atomic.cas(expected,
+    /// new)` compares the stored value with the runtime's STRUCTURAL equality, and it can never route
+    /// through a user `eq` (the compare happens under the box's lock, off any user frame), so an
+    /// `Atomic[P]` over a type with custom equality would silently answer a DIFFERENT question than
+    /// `P == P` does on the same two values. Rejected at both spellings of the type — the ctor
+    /// (`Atomic(P(1))`) and the annotation (`a: Atomic[P]`). `Shared[T]` has no `cas`, so it is the
+    /// escape hatch and stays unrestricted.
+    ///
+    /// Keyed on the payload's OWN `eq` only: a container payload whose ELEMENT defines `eq`
+    /// (`Atomic[List[P]]`) is the same hazard one level down, and belongs with the rest of the
+    /// container-equality ripple rather than here.
+    pub(super) fn reject_eq_atomic_payload(&mut self, elem: &Ty, span: Span) {
+        let has_user_eq = match elem {
+            Ty::Struct(k, _) => self
+                .struct_shape(k)
+                .is_some_and(|i| i.methods.contains_key("eq")),
+            Ty::Enum(k, _) => self
+                .enum_methods_of(k)
+                .is_some_and(|m| m.contains_key("eq")),
+            Ty::NewType(k, _) => self
+                .newtype_methods_of(k)
+                .is_some_and(|m| m.contains_key("eq")),
+            _ => false,
+        };
+        if has_user_eq {
+            self.error(
+                span,
+                format!(
+                    "Atomic[{elem}] payload defines its own 'eq' — Atomic.cas compares stored values structurally, never through a user 'eq', so the two would disagree; use Shared[{elem}] (no cas) instead"
+                ),
+            );
         }
     }
 

@@ -1730,6 +1730,7 @@ impl Checker {
                 // the value's type.
                 let inferred = self.one_arg("Atomic", args, span);
                 let elem = self.concurrency_turbofish_elem("Atomic", targs, inferred, span);
+                self.reject_eq_atomic_payload(&elem, span);
                 if self.concurrency_licensed("Atomic") {
                     Some(Ty::atomic(elem))
                 } else {

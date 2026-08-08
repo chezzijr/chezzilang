@@ -2356,7 +2356,31 @@ impl Checker {
                     Ty::Unknown
                 }
             }
-            Eq | NotEq => Ty::Bool, // equality is permissive (matches the serial-VM parity oracle)
+            // **B2** (`docs/gaps.md`) — `==`/`!=` yields `bool`, but the operands must be able to be
+            // equal. Anything the runtime compares structurally is fine (`compatible`, checked BOTH
+            // ways so a `str` still matches an `Error` existential), as is a mixed int/float pair
+            // (`1 == 1.0`, the same widening `<` allows) and any pair that overloads a user `eq`
+            // (`equality_allowed`). A provably-disjoint pair (`1 == "a"`, `Box[int] == Box[str]`) is
+            // always a bug in user code: Python answers `False` at runtime, but Chezzi is statically
+            // typed, so — like mypy `--strict-equality`, Go, and Rust — it is rejected at check time.
+            // `either_unknown` keeps a prior error from cascading (and keeps both operands INFERRED,
+            // which the range-in-value-position backstop depends on).
+            Eq | NotEq => {
+                let ok = (l.is_numeric() && r.is_numeric())
+                    // `bytes`/`bytearray` compare by CONTENT across the two spellings (Python
+                    // parity — `b"ab" == bytearray([97, 98])` is true), so the pair is not disjoint.
+                    || matches!(
+                        (&l, &r),
+                        (Ty::Bytes, Ty::ByteArray) | (Ty::ByteArray, Ty::Bytes)
+                    )
+                    || compatible(&l, &r)
+                    || compatible(&r, &l)
+                    || self.equality_allowed(&l, &r);
+                if !ok && !either_unknown {
+                    self.error(lhs.span, format!("cannot compare {l} and {r} for equality"));
+                }
+                Ty::Bool
+            }
             // `x in xs` — membership, type-directed on the RHS container. List/Set test element
             // membership, Map tests KEY membership (Python-style), Str tests substring. Always
             // yields `bool`. A user struct/enum with a `contains(self, item) -> bool` method (the
