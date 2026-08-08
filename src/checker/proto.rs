@@ -45,6 +45,13 @@ pub const INTRINSIC_PROTO_METHODS: &[(&str, &str, &str)] = &[
     ("Comparable", "compare", "float"),
     ("Comparable", "compare", "str"),
     ("Comparable", "compare", "newtype"),
+    // Eq — all FOUR scalars (`==` is defined on `bool` too, unlike `Comparable`) + a newtype (whose
+    // `==` unwraps to the underlying's native equality, exactly as its `<` unwraps to the ordering).
+    ("Eq", "eq", "int"),
+    ("Eq", "eq", "float"),
+    ("Eq", "eq", "str"),
+    ("Eq", "eq", "bool"),
+    ("Eq", "eq", "newtype"),
     // Stringable — all four scalars.
     ("Stringable", "str", "int"),
     ("Stringable", "str", "float"),
@@ -778,6 +785,121 @@ impl Checker {
         }
     }
 
+    /// **CO-INHABITABILITY** — can a value of type `l` and a value of type `r` ever be the *same
+    /// value* at runtime? The predicate gap B2 (`==`/`!=`) asks, and the ONLY thing it asks: a pair
+    /// that answers `false` here is **provably disjoint**, so comparing it is a bug in user code
+    /// (mypy `--strict-equality` / Go / Rust all reject it); everything else is accepted and answered
+    /// structurally at runtime, exactly as before.
+    ///
+    /// It is deliberately NOT [`Checker::assignable`]. Assignability answers a *storage* question —
+    /// "can a `B` be written into an `A` slot" — and carries two conjuncts equality has no use for:
+    ///
+    /// * **Invariance.** `assignable` compares `List`/`Set`/`Map`/generic `Struct`/`Enum` type
+    ///   ARGUMENTS with the context-free `compatible`, because a `G[Sub]` aliased as `G[Super]` can be
+    ///   *written through*. `==` never writes, so a `List[Error]` and a `List[MyErr]` can genuinely
+    ///   hold the same list; here the arguments recurse CO-VARIANTLY.
+    /// * **Sendability.** `assignable`'s `Protocol` arm ends in `&& self.sendable(a)` (the spawn-airlock
+    ///   witness). Whether two values may be equal has nothing to do with whether either crosses a
+    ///   thread boundary.
+    ///
+    /// And it adds the arm `assignable` cannot have: **two existentials co-inhabit**. `assignable`
+    /// only passes `Protocol` vs `Protocol` when one embeds the other (a `Shape` slot really can't
+    /// hold an arbitrary `Error`), but ONE concrete type can conform to two unrelated protocols — a
+    /// `Sq` that has both `area` and `message` is simultaneously a `Shape` and an `Error` — so the
+    /// pair is inhabited and `Shape == Error` must compile.
+    ///
+    /// An existential against a CONCRETE is still decided by conformance, so this is not a free pass:
+    /// `Shape == str` stays an error because no `Shape` witness is ever a `str`.
+    pub(super) fn may_be_equal(&self, l: &Ty, r: &Ty) -> bool {
+        use Ty::*;
+        match (l, r) {
+            // A prior error, or an un-refined empty collection — never cascade off it.
+            (Unknown, _) | (_, Unknown) => true,
+            // ERASED: a generic body is checked once with `T` abstract, so any concrete pairing is
+            // possible at some call site. (A `where T: <scalar>` param is NOT erased — it is an
+            // equality bound pinning `T` to that scalar, and `infer_binary`'s `Eq` arm substitutes
+            // those pins away BEFORE calling this, so `T: str` vs `int` still rejects.)
+            (Param(_), _) | (_, Param(_)) => true,
+            // CEILING, deliberate: two protocols with contradictory method signatures (`fn f() -> int`
+            // vs `fn f() -> str`) are inhabited by NOTHING, yet this accepts the pair. Tightening it
+            // means intersecting two method tables; the rationale for not doing so lives in
+            // `docs/gaps.md` §B2 — read it there before narrowing this arm.
+            (Protocol(..), Protocol(..)) => true,
+            (Protocol(p, pargs), a) | (a, Protocol(p, pargs)) => {
+                // ERASURE, one constructor in: a free `T` in the protocol's args (`Container[T]`) or
+                // in the concrete's (`Bag[T]`) is un-decidable here, exactly as a bare `T` is at the
+                // arm above — conformance would compare it against a concrete arg and wrong-reject.
+                // Erase params to `Ty::Unknown` and reuse `satisfies_args`' existing don't-cascade
+                // leniency, so the METHOD SET is still checked (`Container[T] == int` still rejects)
+                // while the arguments stop deciding anything.
+                let mut names: Vec<String> = Vec::new();
+                ty_collect_params(a, None, &mut names);
+                for t in pargs {
+                    ty_collect_params(t, None, &mut names);
+                }
+                if names.is_empty() {
+                    return self.satisfies_args(a, p, pargs).is_ok();
+                }
+                let map: HashMap<String, Ty> =
+                    names.into_iter().map(|n| (n, Ty::Unknown)).collect();
+                let pargs: Vec<Ty> = pargs.iter().map(|t| subst(t, &map)).collect();
+                self.satisfies_args(&subst(a, &map), p, &pargs).is_ok()
+            }
+            // The runtime's own CROSS-TYPE equality arms (`values_equal`), which is what makes these
+            // pairs inhabited rather than merely assignable. They live HERE, not as a top-level
+            // special case, so they compose through the recursion the same way the runtime does:
+            // `[1.0, 2.0] == [1, 2]` and `{"k": 1.0} == {"k": 1}` answer `true` on both engines
+            // (CPython agrees), so rejecting them would have been a lie about "provably disjoint".
+            (Int, Float) | (Float, Int) | (Bytes, ByteArray) | (ByteArray, Bytes) => true,
+            // The native generic HANDLES belong here too, not on the `_ => compatible` fall-through:
+            // their `==` is the identity shortcut (`ha == hb`) at the top of `values_equal_guarded`,
+            // so `Channel[T] == Channel[int]` is a live, true-capable comparison. `compatible` is
+            // neither `Param`-tolerant nor conformance-aware, so leaving them there wrong-rejected
+            // working code (`fn cmp[T](a: Channel[T], b: Channel[int])`).
+            (List(a), List(b))
+            | (Set(a), Set(b))
+            | (Option(a), Option(b))
+            | (Channel(a), Channel(b))
+            | (Shared(a), Shared(b))
+            | (RwShared(a), RwShared(b))
+            | (Atomic(a), Atomic(b)) => self.may_be_equal(a, b),
+            (Map(ak, av), Map(bk, bv)) => self.may_be_equal(ak, bk) && self.may_be_equal(av, bv),
+            (Result(at, ae), Result(bt, be)) => {
+                self.may_be_equal(at, bt) && self.may_be_equal(ae, be)
+            }
+            (Tuple(a), Tuple(b)) => {
+                a.len() == b.len() && a.iter().zip(b).all(|(x, y)| self.may_be_equal(x, y))
+            }
+            (Struct(n, a), Struct(m, b))
+            | (Enum(n, a), Enum(m, b))
+            | (NewType(n, a), NewType(m, b)) => {
+                n == m
+                    && a.len() == b.len()
+                    && a.iter().zip(b).all(|(x, y)| self.may_be_equal(x, y))
+            }
+            (
+                Func {
+                    params: p1,
+                    ret: r1,
+                    ..
+                },
+                Func {
+                    params: p2,
+                    ret: r2,
+                    ..
+                },
+            ) => {
+                p1.len() == p2.len()
+                    && p1.iter().zip(p2).all(|(a, b)| self.may_be_equal(a, b))
+                    && self.may_be_equal(r1, r2)
+            }
+            // Everything else (scalars, the concurrency/IO handles, `Module`) is nominal: two values
+            // co-inhabit iff the types are structurally the same, which is exactly the runtime's own
+            // type-tag guard ("distinct types are never equal"). Unchanged from `assignable`'s `_`.
+            _ => compatible(l, r),
+        }
+    }
+
     /// Like [`Checker::assignable`], but accepts **one-way int→float widening** (`(Float, Int)` only)
     /// at a SCALAR value-DEFINITION sink (typed `let`, function/struct/method arg, return,
     /// param/field default).
@@ -1412,6 +1534,13 @@ impl Checker {
         if protocol == "Comparable" && matches!(ty, Ty::Int | Ty::Float | Ty::Str) {
             return self.grant_intrinsic(protocol, ty);
         }
+        // `Eq` (sole method `eq(self, other: Self) -> bool`) is satisfied intrinsically by every
+        // scalar — all FOUR, because `==` is defined on `bool` as well (the membership is WIDER than
+        // `Comparable`'s, which has no ordering for `bool`). Structs/enums/newtypes fall through to
+        // the structural check below (a type without an `eq(self, Self) -> bool` stays rejected).
+        if protocol == "Eq" && matches!(ty, Ty::Int | Ty::Float | Ty::Bool | Ty::Str) {
+            return self.grant_intrinsic(protocol, ty);
+        }
         // `Stringable` (sole method `str(self) -> str`) is satisfied intrinsically by every scalar —
         // all four stringify (int/float/bool/str), so a `[T: Stringable]` generic accepts them (the
         // erased body's `v.str()` is dispatched by the scalar `str` branch in `Vm::do_method_call`).
@@ -1641,7 +1770,7 @@ impl Checker {
                 if numeric
                     && matches!(
                         protocol,
-                        "Add" | "Sub" | "Mul" | "Div" | "Mod" | "Comparable"
+                        "Add" | "Sub" | "Mul" | "Div" | "Mod" | "Comparable" | "Eq"
                     )
                 {
                     return self.grant_intrinsic(protocol, ty);
@@ -1659,10 +1788,12 @@ impl Checker {
                 // ordering (`compare_op`'s `same_newtype_keys` fast path), never the user `compare`, so
                 // a generic newtype (the only non-numeric case that reaches here after the numeric
                 // short-circuit) must NOT claim `Comparable` via a method — that would be check-ok /
-                // run-divergent. (Hashable/Stringable/Iterable/etc. still resolve structurally below.)
+                // run-divergent. `Eq` is in both lists for exactly the same reason: same-newtype `==`
+                // always unwraps to the UNDERLYING's native equality, never a user `eq` method.
+                // (Hashable/Stringable/Iterable/etc. still resolve structurally below.)
                 if matches!(
                     protocol,
-                    "Add" | "Sub" | "Mul" | "Div" | "Mod" | "Neg" | "Comparable"
+                    "Add" | "Sub" | "Mul" | "Div" | "Mod" | "Neg" | "Comparable" | "Eq"
                 ) {
                     return Err(format!("type {ty} does not satisfy {protocol}"));
                 }
@@ -1888,19 +2019,29 @@ impl Checker {
     /// Are `l < r` etc. allowed? True for same-named comparable type params, or same-named structs
     /// that satisfy `Comparable` (operator overloading dispatches to their `compare` at runtime).
     pub(super) fn ordering_allowed(&self, l: &Ty, r: &Ty) -> bool {
+        self.cmp_overload_allowed(l, r, "Comparable", "compare")
+    }
+
+    /// Shared body of [`Self::ordering_allowed`]: do `l` and `r` name the
+    /// SAME type param / struct / enum / newtype, such that the comparison operator dispatches to
+    /// `protocol`'s `method` (or, for a numeric newtype, to the underlying's native op)?
+    ///
+    /// Still protocol/method parameterized (the `op_overload_result` precedent) even with one caller:
+    /// `==`'s twin predicate was deleted in M23 Task 3 because the `Eq` overload is decided at RUNTIME
+    /// off the operand's heap tag (`Vm::user_eq_method`) and never asked here — `infer_binary`'s `Eq`
+    /// arm only needs the legality question (`may_be_equal`), which already accepts every pair this
+    /// would have.
+    fn cmp_overload_allowed(&self, l: &Ty, r: &Ty, protocol: &str, method: &str) -> bool {
         match (l, r) {
             (Ty::Param(a), Ty::Param(b)) if a == b => self.type_params.get(a).is_some_and(|bs| {
                 bs.iter()
-                    .any(|proto| self.protocol_has_method(&proto.name, "compare"))
+                    .any(|proto| self.protocol_has_method(&proto.name, method))
             }),
             // Same generic struct/enum REQUIRES matching type ARGS (`compatible` = name + targs), not
             // just the same name — `Box[int] < Box[str]` must not overload `compare` (same
             // heterogeneous laundering as `+`; see `op_overload_result`).
-            (Ty::Struct(..), Ty::Struct(..)) if compatible(l, r) => {
-                self.satisfies(l, "Comparable").is_ok()
-            }
-            (Ty::Enum(..), Ty::Enum(..)) if compatible(l, r) => {
-                self.satisfies(l, "Comparable").is_ok()
+            (Ty::Struct(..), Ty::Struct(..)) | (Ty::Enum(..), Ty::Enum(..)) if compatible(l, r) => {
+                self.satisfies(l, protocol).is_ok()
             }
             // Same SCALAR newtype with a numeric underlying: `Meters < Meters` uses the underlying's
             // native ordering (returns bool). A user `compare` method also enables it via satisfies()
@@ -1908,12 +2049,48 @@ impl Checker {
             (Ty::NewType(a, _), Ty::NewType(b, _)) if a == b => {
                 (!self.newtype_is_generic(a)
                     && self.newtype_underlying(a).is_some_and(|u| u.is_numeric()))
-                    || self.satisfies(l, "Comparable").is_ok()
+                    || self.satisfies(l, protocol).is_ok()
             }
-            // No `(Ty::Protocol, Ty::Protocol)` arm — `Comparable.compare(self, o: Self)` is
-            // `Self`-parameterized, so two values of one protocol are un-orderable for the same
-            // object-safety reason `+` is (see `op_overload_result`).
+            // No `(Ty::Protocol, Ty::Protocol)` arm — `Comparable.compare(self, o: Self)` (and
+            // `Eq.eq(self, o: Self)`) is `Self`-parameterized, so two values of one protocol are
+            // un-orderable/un-dispatchable for the same object-safety reason `+` is (see
+            // `op_overload_result`).
             _ => false,
+        }
+    }
+
+    /// The methods a struct/enum DECLARES (`None` for anything else) — for diagnostics that need to
+    /// ask "did the user write this method at all?", which conformance alone can't answer.
+    fn declared_methods(&self, ty: &Ty) -> Option<&HashMap<String, FnSig>> {
+        match ty {
+            Ty::Struct(name, _) => self.struct_shape(name).map(|i| &i.methods),
+            Ty::Enum(name, _) => self.enum_methods_of(name),
+            _ => None,
+        }
+    }
+
+    /// M23 — `Comparable` embeds `Eq` (Rust's `Ord: Eq`), so a struct/enum that DOES define `compare`
+    /// but no `eq` stopped satisfying `Comparable`. For that user the bare "cannot compare X and Y"
+    /// actively misleads (they wrote the comparator), so name the missing half — cf. rustc appending
+    /// `note: an implementation of PartialOrd might be missing` rather than stopping at the rejection.
+    /// The reason is not re-derived: it is the `satisfies` `Err`, the same text the generic-bound path
+    /// already prints. Empty string for every other rejection, so a type with no comparator at all
+    /// keeps the pre-M23 wording.
+    pub(super) fn missing_eq_note(&self, l: &Ty, r: &Ty) -> String {
+        if !compatible(l, r)
+            || !self
+                .declared_methods(l)
+                .is_some_and(|m| m.contains_key("compare"))
+        {
+            return String::new();
+        }
+        match self.satisfies(l, "Comparable") {
+            // MISSING `eq` only — a declared-but-failing `eq` (wrong signature, unmet `where`) was
+            // rejected for its own reason, and telling that user to add `eq` would misdirect.
+            Err(why) if why.contains("missing method 'eq'") => format!(
+                " — {why}: `Comparable` embeds `Eq`, so a type defining `compare` must define `eq` too"
+            ),
+            _ => String::new(),
         }
     }
 
@@ -2074,6 +2251,141 @@ impl Checker {
                 .to_string()
         } else {
             String::new()
+        }
+    }
+
+    /// **M23 decision 5** — an `Atomic[T]` payload may not define its own `eq`. `Atomic.cas(expected,
+    /// new)` compares the stored value with the runtime's STRUCTURAL equality, and it can never route
+    /// through a user `eq` (the compare happens under the box's lock, off any user frame), so an
+    /// `Atomic[P]` over a type with custom equality would silently answer a DIFFERENT question than
+    /// `P == P` does on the same two values. Rejected at both spellings of the type — the ctor
+    /// (`Atomic(P(1))`) and the annotation (`a: Atomic[P]`). `Shared[T]` has no `cas`, so it is the
+    /// escape hatch and stays unrestricted.
+    ///
+    /// M23 Task 3 made the claim literally true for the struct/enum arms: `P == P` now DOES route
+    /// through the user `eq` while `cas` stays structural. A non-numeric newtype's `==` is still
+    /// structural (it does not satisfy `Eq` — see `satisfies`), so for THAT arm the disagreement is
+    /// between `cas` and the `p.eq(q)` METHOD spelling, not the operator — which is why the message
+    /// says "the payload's own equality" rather than naming `==`: one wording, true on all three arms.
+    ///
+    /// Keyed on every type the payload REACHES, not just its own: structural equality recurses into
+    /// elements, entries, tuple slots, struct fields and enum payloads, so `Atomic[List[P]]`,
+    /// `Atomic[Option[P]]`, `Atomic[(int, P)]` and `Atomic[Wrapper]{p: P}` all reach `P`'s `eq` on
+    /// the same compare that a bare `Atomic[P]` does. Keying on the payload's own `eq` let every one
+    /// of those through the gate (`docs/gaps.md` — M23 review, CRITICAL 2).
+    pub(super) fn reject_eq_atomic_payload(&mut self, elem: &Ty, span: Span) {
+        if let Some(inner) = self.reaches_user_eq(elem, &mut Vec::new()) {
+            let owner = if inner == elem.to_string() {
+                "payload defines its own 'eq'".to_string()
+            } else {
+                format!("payload reaches '{inner}', which defines its own 'eq'")
+            };
+            let msg = format!(
+                "Atomic[{elem}] {owner} — Atomic.cas compares stored values structurally, never through that 'eq', so cas and the payload's own equality would disagree; use Shared[{elem}] (no cas) instead"
+            );
+            // ONCE per (payload type, SITE). `a: Atomic[P]` resolves its annotation TWICE, which
+            // would report the identical message at the identical span; the span keys that pair
+            // down to one. It deliberately does NOT key on the type alone: a second, genuinely
+            // different `Atomic[P]` site (another statement, another module) is its own bug and
+            // must be reported, or the user fixes one and only then learns about the next.
+            // (`ends_with`, not `==`: `Checker::error` may prefix an `in module '<label>': `.)
+            if self
+                .errors
+                .iter()
+                .any(|e| e.span == span && e.message.ends_with(&msg))
+            {
+                return;
+            }
+            self.error(span, msg);
+        }
+    }
+
+    /// The name of the first type reachable from `ty` by a STRUCTURAL equality walk that declares its
+    /// own `eq`, or `None`. `stack` is the cycle guard (`sendable_rec`'s shape — a recursive
+    /// `Node { next: Option[Node] }` terminates).
+    ///
+    /// Reachability here means exactly what `Vm::values_equal_guarded` recurses through: list/set
+    /// elements, map keys AND values, `Option`/`Result` payloads, tuple slots, struct fields, enum
+    /// variant payloads, and a newtype's underlying. NOT through a `Channel`/`Shared`/`Atomic`
+    /// handle (comparing two handles compares the handles, never their contents) and not into a
+    /// `Func`. `Protocol`/`Param`/`Unknown` are permissive holes by construction — the concrete
+    /// witness is unknown here — which is why the RUNTIME `cas` also refuses to dispatch the hook
+    /// (`vm/netio.rs`), rather than trusting this walk to be exhaustive.
+    fn reaches_user_eq(&self, ty: &Ty, stack: &mut Vec<String>) -> Option<String> {
+        let any = |s: &Self, ts: &[Ty], stack: &mut Vec<String>| -> Option<String> {
+            ts.iter().find_map(|t| s.reaches_user_eq(t, stack))
+        };
+        match ty {
+            Ty::List(t) | Ty::Set(t) | Ty::Option(t) => self.reaches_user_eq(t, stack),
+            Ty::Map(k, v) => self
+                .reaches_user_eq(k, stack)
+                .or_else(|| self.reaches_user_eq(v, stack)),
+            Ty::Result(t, e) => self
+                .reaches_user_eq(t, stack)
+                .or_else(|| self.reaches_user_eq(e, stack)),
+            Ty::Tuple(elems) => any(self, elems, stack),
+            Ty::Struct(name, args) => {
+                if let hit @ Some(_) = any(self, args, stack) {
+                    return hit;
+                }
+                if self
+                    .struct_shape(name)
+                    .is_some_and(|i| i.methods.contains_key("eq"))
+                {
+                    return Some(ty.to_string());
+                }
+                if stack.contains(name) {
+                    return None;
+                }
+                let fields = self.structs.get(name)?.fields.clone();
+                stack.push(name.clone());
+                let hit = fields
+                    .iter()
+                    .find_map(|(_, f)| self.reaches_user_eq(f, stack));
+                stack.pop();
+                hit
+            }
+            Ty::Enum(name, args) => {
+                if let hit @ Some(_) = any(self, args, stack) {
+                    return hit;
+                }
+                if self
+                    .enum_methods_of(name)
+                    .is_some_and(|m| m.contains_key("eq"))
+                {
+                    return Some(ty.to_string());
+                }
+                if stack.contains(name) {
+                    return None;
+                }
+                let payloads: Vec<Ty> = self
+                    .variants
+                    .values()
+                    .filter(|v| &v.enum_name == name)
+                    .flat_map(|v| v.payload.clone())
+                    .collect();
+                stack.push(name.clone());
+                let hit = payloads.iter().find_map(|p| self.reaches_user_eq(p, stack));
+                stack.pop();
+                hit
+            }
+            Ty::NewType(name, _) => {
+                if self
+                    .newtype_methods_of(name)
+                    .is_some_and(|m| m.contains_key("eq"))
+                {
+                    return Some(ty.to_string());
+                }
+                if stack.contains(name) {
+                    return None;
+                }
+                let under = self.newtype_unwrap_target(ty)?;
+                stack.push(name.clone());
+                let hit = self.reaches_user_eq(&under, stack);
+                stack.pop();
+                hit
+            }
+            _ => None,
         }
     }
 
@@ -2745,7 +3057,7 @@ impl Checker {
             tps.iter().map(|tp| tp.name.clone()).collect();
         let mut in_param_pos: Vec<String> = Vec::new();
         for p in all_params {
-            ty_collect_params(p, &wanted, &mut in_param_pos);
+            ty_collect_params(p, Some(&wanted), &mut in_param_pos);
         }
         for tp in tps {
             if in_param_pos.contains(&tp.name) {

@@ -12,6 +12,8 @@ struct Box[T]:
         return Box(self.v)
     fn compare(self, o: Box[T]) -> int:
         return 0
+    fn eq(self, o: Box[T]) -> bool:
+        return true
 
 enum Num[T]:
     Val(T)

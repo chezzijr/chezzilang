@@ -1,7 +1,8 @@
 # std.cmp — comparison helpers as generic functions over the `Comparable` protocol (M7-G3).
 #
 # Written entirely in Chezzi: `<` dispatches through `Comparable.compare`, so these work for every
-# Comparable type — int, float, str, AND any user struct that implements `compare(self, other) -> int`.
+# Comparable type — int, float, str, AND any user struct that implements BOTH `compare(self, other)
+# -> int` and `eq(self, other) -> bool` (M23: `Comparable` embeds `Eq`).
 # This replaces the old numeric-only `std.math.min`/`max` (the gap-#12 ad-hoc int/float overload)
 # with one real, extensible implementation.
 

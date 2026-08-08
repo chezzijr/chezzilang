@@ -853,6 +853,15 @@ pub struct Vm {
     /// parked into a [`Fiber`], so a `recv` reached while this is `> 0` cannot suspend — it faults
     /// `deadlock` instead (B1 v1 limitation). Maintained by [`Vm::guarded`].
     native_reentry: usize,
+    /// While `true`, [`Vm::values_equal_guarded`] does NOT dispatch a user `eq` — it compares
+    /// structurally, all the way down. Set for exactly one window: `Atomic.cas`'s compare, which runs
+    /// while holding the box's value mutex, where re-entering user code could block on that same
+    /// `Atomic` and deadlock a non-reentrant lock with no deadlock report. The checker rejects an
+    /// `Atomic[T]` payload that reaches a user `eq`, but that walk cannot see through a `Protocol`
+    /// existential or an unresolved type param, so the safety property is enforced HERE and merely
+    /// diagnosed there. No user code can run inside the window (that is the point), so it cannot
+    /// leak across a yield — the flag is per-`Vm` and always cleared on the same statement that set it.
+    eq_hook_off: bool,
     /// Monotonic count of streamed stdout writes made by this `Vm`. Read ONLY as a before/after delta
     /// around a native call, to answer "did THIS call emit to stdout" — see the `stream_halt` gate in
     /// `call.rs`'s `invoke_native`. A counter, not a flag, so a native that re-enters Chezzi

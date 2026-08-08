@@ -2,6 +2,248 @@
 
 Single source of truth for "what am I doing next." Update after every work session.
 
+> # ✅ M23 review fixes — a re-entrant `eq` can no longer panic, orphan, or run under a lock (2026-08-08)
+>
+> An adversarial review of M23 found eight ways the new "equality can run arbitrary user code" reality
+> was not fully accounted for. All eight are fixed; the two criticals reproduced on BOTH engines
+> before the fix and pass on both after.
+>
+> * **CRITICAL — user Chezzi code could panic the VM.** `map_probe`/`set_probe` returned a position
+>   that every caller then indexed with, and an `eq` mutating the container on the compare that
+>   returns **true** invalidated it. Two entries → `index out of bounds` at `call.rs:3262` (an
+>   uncatchable process abort from pure Chezzi source); four entries → `Some(22)` where `Some(11)` is
+>   correct (a silent wrong answer). The probes now **re-validate the matched position after every
+>   compare and restart when it moved** (CPython `lookdict`'s `DKIX_KEY_CHANGED`), gated to zero cost
+>   when no program `eq` exists. Covered by `tests/chz/spec/eq_protocol_containers_test.chz`
+>   (get/index/insert/remove/`has`/`in`, Map and Set).
+> * **CRITICAL — `Atomic.cas` could call a user `eq` under the value mutex.** The gate keyed on the
+>   payload's OWN `eq`, so `Atomic[List[P]]`, `Option`, tuples, maps, struct fields, enum payloads and
+>   newtype underlyings all walked past it; the prosecutor's two-task repro hung forever with no
+>   deadlock report. The gate now walks every type structural equality recurses into
+>   (`Checker::reaches_user_eq`), and — because no checker walk can see through a protocol existential
+>   — the VM **switches the `eq` hook off** for the compare window (`Vm::eq_hook_off`), so the
+>   invariant the four docs state is enforced rather than assumed.
+> * **HIGH — cloned element handles outlived their only root.** The container-equality arms snapshot
+>   the child handles into a Rust local and rooted only the SOURCE containers; an `eq` that empties
+>   those sources orphaned the snapshot, making the answer depend on GC pressure (`true` at 0
+>   allocations, `false` at 2000, abort at 40000). New `Vm::with_elem_roots` pins the snapshot itself
+>   at every arm (list/tuple/map/set/struct/enum) plus `seq_slot`/`map_slot`/`set_slot` — one guard in
+>   each shared scan rather than at each caller — and the set-algebra worker. Two GC-stress
+>   regressions that abort with `dangling GcRef` without the fix.
+> * **MEDIUM — `tid` is not a per-instantiation guard.** Generic type arguments are erased at runtime,
+>   so `a: Any = Box(1)` vs `b: Any = Box("x")` dispatches `Box`'s `eq` across instantiations. Verified
+>   against the owning ancestor: CPython's identical program raises `TypeError` out of `__eq__`, and
+>   Chezzi's is a normal `recover:`-catchable fault. Documented as the erasure ceiling
+>   (`docs/syntax.md` §7b) with a test that pins the recoverable-fault guarantee.
+> * **MEDIUM — the newtype-`Eq` docs contradicted the code.** Ruled for the CODE: a **numeric** newtype
+>   satisfies `Eq` intrinsically via the underlying's native equality, because `Comparable` embeds `Eq`
+>   (M23) and a numeric newtype satisfies `Comparable` intrinsically — denying it would make
+>   `fn sorted[T: Comparable]` unsatisfiable for `newtype Meters = float`, a regression of M21. No
+>   newtype ever satisfies `Eq` through a METHOD. `docs/spec.md` ×2 and `PROGRESS.md` ×2 corrected to
+>   match `docs/syntax.md` and the code.
+> * **LOW —** "the eight other benches" is seven others (`docs/benchmarks.md`'s table is 8 rows
+>   *including* `map`).
+>
+> **Cost: free.** Every bench flat-to-faster (`map` −0.4%, `struct` +0.1%, `primes` −1.6%; full table
+> in [`benchmarks.md`](docs/benchmarks.md)) — both hot additions are gated on `Vm::eq_may_reenter`.
+> The first cut did regress **`struct` by +3.3%**, a bench with no `==` in it: the new container-arm
+> closures had bloated `values_equal_guarded` enough to hurt the neighbouring codegen in `arith.rs`.
+> `#[inline(never)]` on `with_elem_roots` restored it.
+>
+> **Gate:** `cargo test` 17 targets / **4109** passed / 0 failed; `chezzi test tests/chz/` **358/358**
+> identical on both engines; `cargo clippy --all-targets -- -D warnings` clean.
+>
+> # ✅ M23 COMPLETE — the `Eq` protocol: `==` is user-overloadable (2026-08-08)
+>
+> **The bug.** A type could own its `<` (define `compare`) but never its `==`. Measured on the
+> pre-milestone binary, `Ver(1,"alpha")` vs `Ver(1,"beta")` with a `compare` on `maj` printed
+> `false false false` — `compare` said equal, `==` said unequal, and there was no way to fix it. Every
+> ancestor lets you define equality (Python `__eq__`, Rust `impl PartialEq`, Go by giving you neither
+> half); Chezzi was the only one handing you exactly one. The same program now prints
+> `false false true` on **both** engines, matching the Python twin.
+>
+> **What shipped.** **`Eq`** (`fn eq(self, o: Self) -> bool`) is a reserved prebuilt protocol, wired at
+> all four parallel sites (`is_reserved_protocol`, `prebuilt_protocols`, `std/prelude.chz`, the
+> drift-guard list).
+> * **Who satisfies it:** all four scalars intrinsically — **`bool` included**, unlike `Comparable`,
+>   since `==` is defined on every scalar; a `struct`/`enum` structurally, by defining `eq`; a
+>   **newtype** never through a METHOD (its `==` unwraps to the underlying's native equality — W6-3d),
+>   but a **numeric** newtype intrinsically, via that same native equality: `Comparable` embeds `Eq`
+>   and a numeric newtype satisfies `Comparable` intrinsically, so denying it `Eq` would make
+>   `fn sorted[T: Comparable]` unsatisfiable for `newtype Meters = float`. A `str`/`bool`/generic
+>   newtype satisfies neither (ceiling: its `==` works natively, so `Eq` could be granted there too —
+>   an additive follow-up, not a bug).
+> * **`Comparable` embeds `Eq`** (Rust's `Ord: Eq`), so a struct/enum defining `compare` must also
+>   define `eq`. Keeping the two agreeing is the implementor's job — the checker cannot verify
+>   `eq(a,b) == (compare(a,b) == 0)`. Scalars keep `Comparable` with no `eq` to write.
+> * **Where the hook fires:** at the operator **and at every container equality site** — `in`,
+>   `list.contains`/`index_of`/`dedup`/`unique`, `Map`/`Set` key probes, set algebra, the `RwShared`
+>   read-view probes, and the recursive element/field/entry compares. The dispatch lives in
+>   `Vm::values_equal_guarded`, so every consumer inherits it: `x == y`, `y in xs` and `m[y]` can no
+>   longer give three different answers. `!=` is the same dispatch negated — there is no second hook.
+> * **Dispatch is by the operands' runtime type** (`tid` equality; enum-keyed, not variant-keyed, so
+>   one `eq` also answers `Shape.Circle == Shape.Square`), and is gated on the hook's **exact**
+>   signature at the *declaration*: a method that merely shares the name stays legal as an ordinary
+>   method **only** when its operand is generic (`Opt[T].eq(self, x: T)`); anything else is a
+>   check-time error, never a silently wrong `==`.
+> * **`match` never dispatches `eq`** — literal patterns are `int`/`str`/`bool` only, and a
+>   struct/enum arm compares `variant_id` and binds fields.
+> * **`docs/gaps.md` §B2 landed with it:** `==`/`!=` between provably-disjoint types is now a compile
+>   error, decided by **`Checker::may_be_equal`** (CO-INHABITABILITY, not assignability), with the
+>   `Any` existential as the escape hatch — a deliberate divergence from Python's runtime `False`,
+>   matching Go, Rust and mypy `--strict-equality`. §L5's "Missing: `Eq`" is retired.
+>
+> **Ceilings — user-visible, documented, not fixed.** (1) The `hash`/`eq` contract is structurally
+> **unenforceable**: a probe can only scan `candidates(hash(key))`, so an `eq` *coarser* than its
+> type's `hash` is unreachable, not merely wrong — key both on the same fields (Rust and Python leave
+> this to the implementor too). (2) A **non-reflexive** `eq` makes `x in {x}` **false** — a stored key
+> is a snapshot, so the identity short-circuit never fires against it (pre-existing value-key model,
+> newly reachable). (3) An `eq` that **mutates the container being probed** gets an unspecified answer
+> (a stale position reads as a miss), never a panic. (4) **`Atomic.cas` compares structurally**, never
+> via a user `eq` — which is why a type defining `eq` is a rejected `Atomic[T]` payload.
+> (5) A **newtype may not declare `eq` at all** — on any underlying, numeric or not, and at any operand
+> signature: its `==` unwraps to the underlying's native equality and reaches no user method, so the
+> name is a compile error at the declaration (W6-3d's numeric-only gate widened; `docs/gaps.md` §L5,
+> closed 2026-08-08). Use a `struct` if you need your own equality.
+>
+> **Cost.** `map` **+4.1%**, the seven other benches flat-to-faster (`docs/benchmarks.md`); the price
+> of `values_equal_guarded`/`*_slot` becoming `&mut self` so a probe can call user code.
+>
+> **Docs:** `docs/syntax.md §7b` (the `Eq` surface + the ceilings), `docs/spec.md` (M23 row, the
+> intrinsic-grant table, the newtype note), `docs/stdlib.md`, `docs/concurrency.md` (`cas`),
+> `docs/gaps.md` §B2/§L5, `docs/benchmarks.md`. The four slice logs below are the build record.
+
+> **✅ M23 slice 4 landed 2026-08-08 — a user `eq` now reaches EVERY equality site, not just the
+> operator.** Slice 3 knowingly shipped an inconsistency: `x == y` could be `true` while `y in xs` was
+> `false` and `m[y]` faulted `key not found` — three answers to one question, and none of them is
+> Python's (its `__eq__` is what `in`, `index_of`, `dict[k]` and `set` all probe with; the twin prints
+> `True / True / 10`). **Fixed at the root, not per caller:** the hook dispatch moved OUT of
+> `eq_operator` and INTO `Vm::values_equal_guarded`'s `Obj`/`Obj` arm, so every consumer inherits it —
+> the operator, `in`, `list.contains`/`index_of`/`dedup`/`unique`, `Map`/`Set` key probing
+> (`m[k]`/`has`/`get`/`remove`/`add`/literals/`Map()`/`Set()`/`merge`/`update`), set algebra
+> (`| & - ^` and the method forms), the `RwShared` read-view probes, and the recursive
+> `List`/`Tuple`/`Map`/`Set`/`Struct`/`Enum`/`NewType` arms. `Program::eq_struct`/`eq_enum` +
+> `user_eq_method` (slice 3) are reused unchanged, so the peek is still a table index, not a name lookup.
+>
+> **The ripple.** `values_equal_guarded`/`elem_equal`/`seq_slot`/`set_slot`/`map_slot` were all `&self`
+> and cannot call user code; all five became `&mut self`, which the compiler then propagated to ~40 call
+> sites across `vm/{arith,call,stmt,exec,netio}.rs` — **the type system IS the completeness proof**: a
+> site that still holds an `entries` slice borrowed out of `self.heap` across the compare no longer
+> builds, so every remaining caller demonstrably passes a Rust-local collection. Heap Map/Set probes
+> route through two new helpers, `Vm::map_probe`/`set_probe`, which re-index the candidate list per
+> probe step (allocation-free) AND re-validate the matched position after every compare, restarting the
+> probe when it moved (CPython `lookdict`'s `DKIX_KEY_CHANGED`) — so an `eq` that mutates the container
+> mid-probe answers from the container it left behind, never a shifted neighbour and never an
+> out-of-range panic — `map_slot`/`set_slot` survive only for a **local**, not-yet-heap
+> `MapData`/`SetData`.
+>
+> **Rooting.** A user `eq` re-enters the VM and can collect, so every in-flight Rust local across a
+> compare is now pinned on the operand stack by the new `Vm::with_roots` (the generalisation of
+> `hash_key_rooted`: push, run, truncate on BOTH the `Ok` and `Err` path, and `f` may push roots of its
+> own). Newly rooted: `eq_operator`'s popped operands, the probes' receiver+key, `set_index`/
+> `map_upsert_in_heap`'s in-flight `val`, `list.contains`/`index_of`'s cloned element vec,
+> `unique`/`dedup`'s half-built output, set algebra's two source sets, `map.merge`'s two source maps
+> **plus each freshly-snapshotted key** (a copy, so the source map does not root it), `map.update`'s
+> argument map across the WHOLE upsert loop (an inline temporary `m.update(make_map())` left the
+> not-yet-upserted tail unrooted — caught by the new gc-stress test, not by review), and the three
+> `RwShared` read-view probes' wire-reconstructed key/element/value. Two new `#[cfg(test)]` gc-stress
+> tests (`vm::gc_tests::set_struct_eq_survives_gc_stress`, `rwshared_struct_eq_survives_gc_stress`) —
+> both verified to FAIL with the rooting removed.
+>
+> **Preserved deliberately.** (1) `elem_equal`'s raw-word identity short-circuit still runs BEFORE any
+> hook — CPython's `PyObject_RichCompareBool` (`x is y or x == y`), so `[x] == [x]` is `true` even for an
+> `eq` that answers `false` for everything, while the bare operator (`do_richcompare`, no identity fast
+> path) makes `x == x` `false`; measured against CPython, both agree. (2) `MAX_STRUCTURAL_DEPTH` still
+> bounds the structural recursion; a user `eq` that compares starts a fresh depth-0 walk in a new VM
+> frame, bounded there by the call-depth guard. (3) `values_equal` stays `#[cfg(test)]`-only (it swallows
+> the depth fault `==` propagates). (4) **`Atomic.cas` stays structural** — it compares under
+> `core.v.lock()` so the CAS is atomic, and a re-entrant `eq` touching the same `Atomic` would deadlock a
+> non-reentrant mutex; safe because slice 1 already made a user-`eq` type an illegal `Atomic[T]` payload,
+> with a `ponytail:` comment naming the upgrade path. (5) The `hash`/`eq` contract stays the
+> implementor's: a probe can only scan `candidates(hash(key))`, so an `eq` coarser than its type's `hash`
+> is structurally *unreachable* — documented in `docs/syntax.md`, not enforced (Rust and Python don't
+> either).
+>
+> Tests: `tests/chz/spec/eq_protocol_containers_test.chz` (13 `test fn` — 11 of them FAIL on `035de7ee`,
+> 2 are controls) + the 2 Rust gc-stress cases. Full suite 3897 lib + integration green, clippy clean,
+> `chezzi test tests/chz/` 352/352 identical on both engines. Perf: `map` **+4.1% SLOWER**, the seven other benches
+> flat-to-faster (`docs/benchmarks.md`).
+
+> **✅ M23 slice 3 follow-up 2026-08-08 — the `==` dispatch is now GATED on `eq`'s signature; a
+> malformed `eq` is a check error, never a silently wrong `==`.** Review found the operator dispatched
+> to *any* method named `eq`: `struct A: fn eq(self) -> bool: return true` type-checked and answered
+> `A(1) == A(2)` ⇒ `true` with the second operand silently DROPPED (a 3-param `eq` ran with `extra =
+> nil`; `fn eq(self, o: int)` reached a runtime `cannot apply Gt to struct and int`). `eq` was the only
+> operator-wired hook with no signature gate — `contains`/`hash` are check errors, and a malformed `str`
+> is simply never dispatched. **Enforced in BOTH halves, because neither alone is sound.** Checker
+> (`validate_eq_shape`, `src/checker/sig.rs`, at the struct/enum method decl): a struct/enum `eq` must
+> be either the hook `fn eq(self, o: Self) -> bool` or an ordinary method with a GENERIC operand
+> (`Opt[T].eq(self, x: T)` — `eq` is not a reserved name; Rust allows an inherent `eq` beside
+> `PartialEq`, Python namespaces the hook as `__eq__`). Wrong arity, a concrete non-`Self` operand, or a
+> non-`bool` return is rejected at the DECLARATION. A use-site gate could not be the whole answer:
+> `fn same[T](a: T, b: T) -> bool: return a == b` erases `T`, so the checker never sees the struct.
+> Backend (`binds_eq_hook`, `src/compiler/mod.rs`): records the hook in the new `Program::eq_struct` /
+> `eq_enum` — dense `Vec<Option<(proto, module)>>` indexed by `tid` / `variant_id` — and `Vm::
+> user_eq_method` reads THOSE instead of `methods.get("eq")`, so the type-blind VM can tell the hook from
+> an ordinary same-named method. Its test ("the operand names a type parameter in scope") is the
+> syntactic twin of the checker's split, so the two agree by construction on any program that
+> type-checks. Side effect: the string hash is off the MISS path of every struct/enum `==` (including
+> every `Option`/`Result` compare) — measured on a 4M-compare miss micro-bench, see
+> `docs/benchmarks.md`. The operator's `eq() must return bool` fault is now a backstop no checked
+> program can reach (its Chezzi test moved to `checker::tests::malformed_eq_rejected_at_decl`).
+
+> **✅ M23 slice 3 landed 2026-08-08 — `==` / `!=` now DISPATCH to a user `eq`; the milestone's bug is
+> flipped.** The acceptance program (a `Ver` whose identity is its major version, defining both
+> `compare` and `eq`) went from `false false false` to `false false true` on BOTH engines — matching the
+> Python twin (`__lt__`/`__gt__`/`__eq__`, measured `False False True`), which is what makes the old
+> answer a bug rather than a choice. One new operator entry `Vm::eq_operator` (`src/vm/arith.rs`) is now
+> the single generic path shared by `q_eq`'s deopt fall-through and the kept `Op::Eq`/`Op::NotEq` `step`
+> arms; it asks the non-allocating `Vm::user_eq_method` (a `&self` heap-tag peek that ENDS the immutable
+> borrow before `run_proto` needs `&mut self` — the `op_contains`/`struct_compare` shape) and otherwise
+> falls back to `values_equal_guarded` unchanged. Re-entry goes through `Vm::guarded` (cancellation
+> checkpoint + panic-safe `native_reentry`); a non-`bool` return faults `eq() must return bool, got …`
+> rather than coercing; a faulting `eq` propagates to the operator's caller. Dispatch requires the SAME
+> struct/enum type (`tid` equality) — a mismatched pair stays structural `false` WITHOUT calling user
+> code — and is keyed on the ENUM, not the variant, so one `eq` also answers `Tag.Num(1) ==
+> Tag.Word("x")` (Rust `PartialEq` / Python `__eq__` compare across variants). `q_eq`'s `Q_INT` fast path
+> was NOT restructured: a struct fails `as_int_inline`, which deopts the site to `Q_GENERIC` and falls
+> through — pinned by an int-warmed-site-then-structs test. Checker side: `equality_allowed` was
+> DELETED (with its `pattern.rs` call site) rather than consumed — the overload is decided at runtime off
+> the heap tag and is never asked at check time, and every pair it accepted `may_be_equal` already
+> accepted, so it was a provably dead disjunct. Tests: new `tests/chz/spec/eq_protocol_test.chz` (8 `test
+> fn`: acceptance, method≡operator, enum cross-variant, no-`eq` control, protocol-typed mismatch,
+> non-`bool` fault, faulting `eq` propagation, `Q_INT` deopt) + the operator≡method equivalence assert in
+> `intrinsic_proto_methods_test.chz`. 339/339 Chezzi tests pass identically on serial and M:N.
+> **NOT in this slice — a known, deliberate intermediate state:** container probes (`Map`/`Set` key
+> lookup, `in`, `list.contains`/`index_of`/`dedup`/`unique`) still compare structurally, so
+> `Ver(1,"a") == Ver(1,"b")` can be `true` while `m[Ver(1,"b")]` raises key-not-found. That ripple
+> (`values_equal_guarded` `&self` → `&mut self`) is slice 4.
+
+> **✅ M23 slice 2 landed 2026-08-08 — `Comparable` now embeds `Eq`, mirroring Rust's `Ord: Eq`.** Two
+> parallel sites flip together in the same commit (`src/checker/mod.rs`'s `prebuilt_protocols` seed +
+> `std/prelude.chz`'s `protocol Comparable:` decl — the same `embeds` field M22's `Arithmetic` bundle
+> uses, no special-casing; the debug-only `assert_native_protocol_shape_matches` drift-guard panics if
+> only one moves). A struct/enum satisfying `Comparable` now needs BOTH `compare` and `eq` — the
+> checker cannot verify they agree, so every existing `compare` impl the flip broke got a matching
+> `eq` (~30 sites: `std/path.chz`, 7 `examples/*.chz`, 2 `tests/chz/spec/*.chz`, plus `compare` impls
+> embedded in Rust test source strings across `src/checker/tests.rs` / `src/vm/{tests,gc_tests,
+> parity_tests}.rs`) — keyed on the same subset of fields `compare` keys on, or a matching constant
+> where `compare` returns one (so no spurious `T: Eq` bound). New checker test
+> `compare_without_eq_rejected` (TDD: RED pre-flip via a temp stash of the two flip-only files, GREEN
+> post-flip). **Scalars are unaffected (verified, not assumed — B3):** int/float/str keep satisfying
+> `Comparable` with no `eq` to write — `generic_max_over_float_and_str_ok_after_eq_embed` pins it.
+> **Numeric newtypes take no `eq` (B5):** a generic newtype's operator-soundness gate (no runtime
+> method-dispatch path for a same-newtype op) already rejected `Comparable` via a `compare` method;
+> it now rejects `Eq` the same way, so `generic_newtype_compare_satisfies_comparable_rejected` still
+> rejects — the embed loop just hits the `Eq` gate first, so the reported protocol name in ~19
+> pre-existing "not Comparable" diagnostics changed from `Comparable` to `Eq` (same underlying
+> rejection, more specific wording — matches the M22 `Arithmetic`/`Add` precedent, not a new
+> convention). All 7 touched `examples/*.expected` goldens stay byte-identical — `==` was never
+> routed through `compare`/`eq` in this slice, so no example's printed output could move. **NOT in
+> this slice:** `==`'s dispatch to a user `eq` — still a later slice.
+
+> **✅ M23 slice 1 landed 2026-08-08 — the `Eq` protocol exists in the checker, and `docs/gaps.md` §B2 is closed.** `Eq` (`eq(self, other: Self) -> bool`) is now a reserved prebuilt protocol wired at all four parallel sites (`is_reserved_protocol`, `prebuilt_protocols`, `std/prelude.chz`, the drift-guard list): the four scalars satisfy it intrinsically (`bool` included — `==` is defined on every scalar, unlike ordering), a struct/enum satisfies it structurally, and a newtype never through a **method** (its `==` unwraps to the underlying's native equality, so a numeric newtype declaring `eq` is now rejected at the decl site alongside `add`/`compare` — W6-3d; a *numeric* newtype does satisfy `Eq` intrinsically via that native equality, as `Comparable` embeds `Eq`). Five `INTRINSIC_PROTO_METHODS` rows + the `("eq", 1)` arm in `Vm::intrinsic_proto_method` (routing `values_equal_guarded`, the operator's own worker — so `x.eq(y)` can never disagree with `x == y`, and a cyclic operand raises the same depth fault). **§B2:** `==`/`!=` between provably-disjoint types is now a compile error — a deliberate, documented divergence from Python's runtime `False`, with the `Any` existential as the dynamic escape hatch (widening **one** side is enough). "Provably disjoint" is decided by **`Checker::may_be_equal`** — CO-INHABITABILITY ("can these two ever be the same value?"), *not* assignability, which answers the stricter STORAGE question and carries container invariance + a sendability witness that equality has no use for. So a protocol existential vs a conforming concrete (`Shape == Sq`, `Error == MyErr`, `Any == int`), **two** different existentials (`Shape == Error` — one type can conform to both), an existential nested in an invariant container or concurrency handle (`List[Error] == List[MyErr]`, `Map`/`Box`/tuple/`Option`/`Shared` alike), and any erased `Ty::Param` bare or nested **at any depth** — including inside the native generic handles (`Channel[T] == Channel[int]`, whose `==` is the runtime's identity shortcut) and inside a parameterized protocol's own arguments (`Container[T] == Bag[int]`, where the args are erased to `Unknown` so the METHOD SET still decides) — all stay legal; a **non**-conforming concrete (`Shape == str`, `List[Shape] == List[str]`, `Container[T] == int`), a handle over disjoint elements (`Channel[int] == Channel[str]`) and a `where T: <scalar>`-pinned param still reject. The runtime's cross-type arms (mixed `int`/`float`, `bytes`/`bytearray`) live INSIDE that recursion, so `[1.0] == [1]` compiles and prints `true` like CPython. Also: an `Atomic[T]` payload may not define `eq` (`cas` compares structurally and could never route through it). **NOT in this slice:** the `Comparable: Eq` embed and `==`'s dispatch to a user `eq` — both later slices. `docs/gaps.md` **§B2**, **§L5**.
+
 > **✅ Float `%` landed 2026-08-08 — the last unreached float operator in the CPython differential generator, closing `docs/gaps.md` §W7-37 entirely.** Chezzi's float `%` is `fmod` (sign of the DIVIDEND, total — matches Rust/Go, diverges deliberately from CPython's floored, raising `%`); `gen_float`'s op list gained `BinOp::Mod` beside `Div` (no non-zero-divisor guard) and mixed int↔float `%` came for free via the shared `op` variable; the Python shim's new `_chz_fmod` absorbs both the sign rule and totality (zero divisor / `inf` dividend → `NaN`). 5000-seed `difffuzz --floats` sweep + `fuzz_full_heavy` (0..3000): 0 findings. `docs/gaps.md` **§W7-37**.
 
 > **✅ W7-37's LAST deferred item landed 2026-08-07 — the CPython differential generator mixes int↔float arithmetic and comparison.** The filed premise ("needs a coercion model in the IR") was WRONG: `Expr::Bin`'s `ty` is the result type, both emitters already render a mixed node correctly with zero IR change. `gen_float`'s composite arm and `gen_bool`'s float-comparison arm each mix in an int operand via a new shared `gen_int_float_pair` helper (0.3 chance, side randomized so both `int op float` and `float op int` generate), exact under `MAX_BOUND < 2^53`; the mixed zero-divisor chain needed nothing new (`_chz_fdiv`'s `b == 0.0` already matches an int `0`). §W7-37 is now fully closed — only float `%` remains, not filed as deferred. 5000-seed `difffuzz --floats` sweep + `fuzz_full_heavy` (0..3000): 0 findings. `docs/gaps.md` **§W7-37**.

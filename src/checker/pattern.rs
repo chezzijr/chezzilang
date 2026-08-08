@@ -2316,7 +2316,8 @@ impl Checker {
                     || (l == Ty::Str && r == Ty::Str)
                     || self.ordering_allowed(&l, &r);
                 if !ok && !either_unknown {
-                    self.error(lhs.span, format!("cannot compare {l} and {r}"));
+                    let note = self.missing_eq_note(&l, &r);
+                    self.error(lhs.span, format!("cannot compare {l} and {r}{note}"));
                 }
                 Ty::Bool
             }
@@ -2356,7 +2357,51 @@ impl Checker {
                     Ty::Unknown
                 }
             }
-            Eq | NotEq => Ty::Bool, // equality is permissive (matches the serial-VM parity oracle)
+            // **B2** (`docs/gaps.md`) — `==`/`!=` yields `bool`, but the operands must be able to be
+            // equal. Only a **provably disjoint** pair (`1 == "a"`, `Box[int] == Box[str]`) is
+            // rejected: that is always a bug in user code — Python answers `False` at runtime, but
+            // Chezzi is statically typed, so — like mypy `--strict-equality`, Go, and Rust — it is a
+            // check-time error.
+            //
+            // The question is CO-INHABITABILITY ("can these two ever be the same value?"), which is
+            // [`Checker::may_be_equal`] and NOT `assignable`/`compatible`: those answer the STORAGE
+            // question and carry container invariance + a sendability witness that equality, which
+            // never writes and never crosses a thread boundary, has no use for. See that fn's doc
+            // for the three-way difference and the `Shape == Error` / `List[Error] == List[MyErr]`
+            // cases it exists to admit.
+            //
+            // The runtime's cross-type pairs (`1 == 1.0`, `b"ab" == bytearray(...)`) are arms of
+            // `may_be_equal` itself, so they compose through the recursion (`[1.0] == [1]`) instead
+            // of being a top-level special case. A user `eq` overload adds NOTHING to ask here: it
+            // only ever applies to a same-type pair, which `may_be_equal` already accepts.
+            // `either_unknown` keeps a prior error from cascading (and keeps both operands INFERRED,
+            // which the range-in-value-position backstop depends on).
+            Eq | NotEq => {
+                // A `where T: <scalar>` bound is an EQUALITY constraint (`scalar_bound_ty`), not
+                // structural satisfaction: such a `T` is EXACTLY that scalar, at any nesting depth.
+                // Substitute the pins away so the pair is judged concretely — without this the
+                // blanket "an erased param is never provably disjoint" rule would wave through
+                // `fn f[T](a: T, b: int) -> bool where T: str: return a == b`.
+                let pins: HashMap<String, Ty> = self
+                    .type_params
+                    .iter()
+                    .filter_map(|(n, bs)| {
+                        bs.iter()
+                            .find_map(|b| Self::scalar_bound_ty(&b.name))
+                            .map(|t| (n.clone(), t))
+                    })
+                    .collect();
+                let (l, r) = if pins.is_empty() {
+                    (l, r)
+                } else {
+                    (subst(&l, &pins), subst(&r, &pins))
+                };
+                let ok = self.may_be_equal(&l, &r);
+                if !ok && !either_unknown {
+                    self.error(lhs.span, format!("cannot compare {l} and {r} for equality"));
+                }
+                Ty::Bool
+            }
             // `x in xs` — membership, type-directed on the RHS container. List/Set test element
             // membership, Map tests KEY membership (Python-style), Str tests substring. Always
             // yields `bool`. A user struct/enum with a `contains(self, item) -> bool` method (the

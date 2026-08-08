@@ -452,6 +452,7 @@ fn is_reserved_protocol(name: &str) -> bool {
         name,
         "Any"
             | "Comparable"
+            | "Eq"
             | "Stringable"
             | "Hashable"
             | "Error"
@@ -1996,14 +1997,40 @@ fn prebuilt_protocols() -> HashMap<String, ProtocolInfo> {
         },
     );
     m.insert(
+        // `Comparable` embeds `Eq` (M23) — mirrors Rust's `Ord: Eq`: a type ordered must also be
+        // equatable, and `eq` must agree with `compare` (the implementor's contract, unchecked). Built
+        // with the SAME `embeds` field `Arithmetic` uses — no special-casing. int/float/str still need
+        // no explicit `eq` method: `satisfies_args_d`'s embed-flattening loop DOES run for them now
+        // (embeds is no longer empty), but it recurses into `Eq`'s OWN intrinsic-grant early-out (every
+        // scalar satisfies `Eq`), so the embed passes trivially before `Comparable`'s own intrinsic
+        // grant is reached — no `Comparable`-specific short-circuit needed.
         "Comparable".to_string(),
         ProtocolInfo {
             type_params: Vec::new(),
-            embeds: Vec::new(),
+            embeds: vec![Bound {
+                name: "Eq".to_string(),
+                args: Vec::new(),
+            }],
             // receiver `self` (Unknown), `other: Self` (Param "Self"), returning int.
             methods: vec![(
                 "compare".to_string(),
                 FnSig::plain(vec![Ty::Unknown, Ty::Param("Self".into())], Ty::Int),
+            )],
+        },
+    );
+    m.insert(
+        // `Eq` — user-defined equality: `eq(self, other: Self) -> bool`. Every scalar satisfies it
+        // intrinsically (all FOUR — `==` is defined on `bool` too, unlike `Comparable`'s ordering);
+        // a struct/enum satisfies it structurally through its own `eq`. Embedded by `Comparable` (M23):
+        // a type ordered must also be equatable.
+        "Eq".to_string(),
+        ProtocolInfo {
+            type_params: Vec::new(),
+            embeds: Vec::new(),
+            // receiver `self` (Unknown), `other: Self` (Param "Self"), returning bool.
+            methods: vec![(
+                "eq".to_string(),
+                FnSig::plain(vec![Ty::Unknown, Ty::Param("Self".into())], Ty::Bool),
             )],
         },
     );
@@ -2631,11 +2658,17 @@ fn unify(decl: &Ty, actual: &Ty, map: &mut HashMap<String, Ty>) {
 
 /// Collect (into `out`, dedup, in first-seen order) the names from `wanted` that appear as a
 /// `Ty::Param` anywhere inside `ty`. Used by the un-inferable-closure-param deadlock diagnostic to
-/// find which still-unbound type parameters a closure-typed slot mentions.
-fn ty_collect_params(ty: &Ty, wanted: &std::collections::HashSet<String>, out: &mut Vec<String>) {
+/// find which still-unbound type parameters a closure-typed slot mentions. `wanted: None` = collect
+/// EVERY param name, whatever its scope — what [`Checker::may_be_equal`]'s erasure escape needs (it
+/// has no candidate list; it must find any free param at all).
+fn ty_collect_params(
+    ty: &Ty,
+    wanted: Option<&std::collections::HashSet<String>>,
+    out: &mut Vec<String>,
+) {
     match ty {
         Ty::Param(n) => {
-            if wanted.contains(n) && !out.contains(n) {
+            if wanted.is_none_or(|w| w.contains(n)) && !out.contains(n) {
                 out.push(n.clone());
             }
         }

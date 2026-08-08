@@ -144,7 +144,12 @@ fn main():
     sh := Shadow.Some(5)
     print(sh)
     nat := [5].pop()              # native int? == Some(5)
-    print("native Some == user Shadow.Some:", nat == sh)
+    # `nat == sh` spelled directly is a COMPILE error (`Option[int]` and `Shadow` are provably
+    # disjoint — docs/gaps.md B2), which is the identity enforced one phase earlier. Through the
+    # `Any` existential the runtime still answers it: distinct enum types are never equal.
+    lhs: Any = nat
+    rhs: Any = sh
+    print("native Some == user Shadow.Some:", lhs == rhs)
     print("first_native:", first_native([10, 20]))
     print("first_native empty:", first_native([]))
 

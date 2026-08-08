@@ -407,7 +407,14 @@ fn bump(a: Atomic[int]):
 | `sub`      | `sub(self, x: T) -> T` | numeric `T` only; returns the **new** value |
 
 `add`/`sub` use the language's checked integer arithmetic (an overflow faults, exactly like `+`/`-`) and
-plain float arithmetic. `cas` compares with the same structural equality as `==`. Each method is a single
+plain float arithmetic. **`cas` compares *structurally* — it never calls a user `eq`** (M23): the compare
+happens under the value's lock, and re-entering user code there could deadlock. Rather than let
+`a == b` and `atom.cas(a, …)` disagree, a payload type that **reaches** a user `eq` is **rejected at
+check time** — its own (`Atomic[K] payload defines its own 'eq' …`) or one on any element, entry, tuple
+slot, struct field, enum payload or newtype underlying the structural compare would recurse into
+(`Atomic[List[K]] payload reaches 'K', which defines its own 'eq' …`); use `Shared[K]`, which has no
+`cas`. Because no checker walk can see through a protocol existential payload, the VM ALSO switches the
+`eq` hook off for the compare — the no-user-code-under-the-lock property is enforced, not assumed. Each method is a single
 lock-op-unlock, so the read-modify-write is atomic across threads with no separate update lock. `Atomic`
 vs `Shared`: reach for `Atomic` when a lock-free-style counter/flag/CAS-loop is clearer than
 `update(closure)`; reach for `Shared` when the update is an arbitrary transformation.

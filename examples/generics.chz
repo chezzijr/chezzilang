@@ -2,8 +2,9 @@
 #
 # `protocol`s are Go-style structural interfaces: a type satisfies one by having the right
 # methods, with no explicit `implements`. The prebuilt `Comparable` protocol requires
-# `compare(self, other: Self) -> int`; int/float/str satisfy it intrinsically, and any struct
-# that defines `compare` satisfies it too. A `T: Comparable` bound lets a generic use `<`/`>`
+# `compare(self, other: Self) -> int` AND — since `Comparable` embeds `Eq` (M23) — `eq(self,
+# other: Self) -> bool`; int/float/str satisfy it intrinsically, and any struct defining BOTH
+# methods satisfies it too. A `T: Comparable` bound lets a generic use `<`/`>`
 # (which dispatch to `compare`) and call `.compare()` on its values.
 
 struct Point:
@@ -12,6 +13,9 @@ struct Point:
 
     fn compare(self, other: Point) -> int:
         return (self.x + self.y) - (other.x + other.y)
+
+    fn eq(self, other: Point) -> bool:
+        return self.compare(other) == 0
 
     fn label(self) -> str:
         return "(" + str(self.x) + ", " + str(self.y) + ")"

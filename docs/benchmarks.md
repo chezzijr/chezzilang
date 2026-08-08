@@ -78,6 +78,97 @@ Levers, ranked for this gap:
 
 Re-run `many_struct`/`many_map` after each lever to track the close.
 
+## The M23 review fixes — 2026-08-08 — correctness fixes, **free**
+
+The eight adversarial-review fixes (probe position re-validation, snapshot rooting, the `Atomic.cas`
+hook switch, the nested-payload checker walk). A/B against `f50deb56`, hyperfine `-N --warmup 2/3`,
+release binaries built into **separate** `CARGO_TARGET_DIR`s and confirmed distinct
+(`strings … | grep "payload reaches"` = 1 vs 0).
+
+| bench     | runs | before   | after    | delta   |
+|-----------|-----:|---------:|---------:|--------:|
+| map       |   30 | 255.9 ms | 254.8 ms |  −0.4%  |
+| struct    |   20 | 666.9 ms | 667.8 ms |  +0.1%  |
+| loop      |   12 | 1467.9 ms| 1451.7 ms|  −1.1%  |
+| list      |   12 | 587.5 ms | 586.7 ms |  −0.1%  |
+| enum      |   12 | 3152.0 ms| 3163.7 ms|  +0.4%  |
+| many_map  |   12 | 466.5 ms | 464.9 ms |  −0.3%  |
+| primes    |   12 | 956.9 ms | 942.0 ms |  −1.6%  |
+| str       |   12 | 255.8 ms | 255.6 ms |  −0.1%  |
+| fib       |   12 | 390.6 ms | 388.5 ms |  −0.5%  |
+
+Free because the two hot additions are gated on `Vm::eq_may_reenter` — the probes' position
+re-validation and the snapshot rooting both collapse to nothing when the program declares no `eq`
+hook, which is every bench.
+
+**One measured surprise, worth the note.** The first cut regressed **`struct` by +3.3%** (669.5 →
+690.9 ms, 2.5σ, reproducible) — a bench with **no `==` in it at all**. Nothing semantic reached it:
+the six new container-arm closures had inlined into `values_equal_guarded` and bloated it enough to
+degrade the neighbouring codegen in `arith.rs` (where the hot arithmetic/superinstruction paths live).
+`#[inline(never)]` on `Vm::with_elem_roots` put it back to flat with no other change. Another entry
+for "don't trust a lever's a-priori blast radius" — this one wasn't a lever at all.
+
+## The container `Eq` ripple (M23 slice 4) — 2026-08-08 — correctness fix, cost measured
+
+Not a lever — the correctness fix that makes `y in xs` / `m[y]` agree with `x == y`. Its price is
+structural: `values_equal_guarded`/`elem_equal`/`*_slot` had to become `&mut self` (they can now call
+user code), so a heap Map/Set probe can no longer hold its `entries` slice borrowed across the compare.
+`Vm::map_probe`/`set_probe` re-index the candidate list per probe step instead — allocation-free, one
+extra index lookup on the terminating step (a distinct key almost always has exactly one candidate).
+Rooting the probe's in-flight values is skipped entirely when the program declares no `eq` hook at all
+(`Vm::eq_may_reenter`, both hook tables empty ⇒ no compare can re-enter ⇒ no collection).
+
+A/B against `035de7ee`, hyperfine `-N --warmup 2/3`, release binaries, one at a time. `map` is the only
+bench that moves, and it is the one that pays for the ripple:
+
+| bench     | runs | before        | after         | delta   |
+|-----------|-----:|--------------:|--------------:|--------:|
+| map       |   30 | 249.0 ± 15.9 ms | 259.3 ± 11.0 ms | **+4.1%** |
+| many_map  |   10 | 455.0 ± 10.7 ms | 463.5 ± 18.1 ms |  +1.9%  |
+| loop      |   12 | 1.476 ± 0.018 s | 1.467 ± 0.014 s |  −0.6%  |
+| struct    |   12 | 680.2 ±  4.8 ms | 670.1 ± 12.0 ms |  −1.5%  |
+| enum      |   12 | 3.247 ± 0.085 s | 3.160 ± 0.027 s |  −2.7%  |
+| list      |   12 | 588.2 ±  5.3 ms | 582.1 ±  2.5 ms |  −1.0%  |
+| str       |   12 | 256.6 ±  2.2 ms | 255.0 ±  2.6 ms |  −0.6%  |
+| primes    |   12 | 960.4 ± 15.6 ms | 958.0 ± 10.4 ms |  −0.2%  |
+
+`map` (200k int inserts + 1M lookups) is ~4% slower — at the edge of its own σ (6%) but reproducible
+across three A/B runs. Everything else is flat-to-faster, i.e. noise. Accepted: the alternative is a
+`==` that disagrees with `in` and `m[k]`. If map probing later needs the 4% back, the lever is a
+`!eq_may_reenter()` fast path that keeps the old borrow-holding slice loop (it needs a second copy of
+the probe body, which is why it was not taken here).
+
+## `Eq`-hook lookup table (M23 slice 3 follow-up) — 2026-08-08 — correctness fix that also pays
+
+Not a lever either — the `==` operator must be able to tell the `Eq` HOOK (`fn eq(self, o: Self) ->
+bool`) from an ordinary method that merely shares the name, which a `methods.get("eq")` name lookup
+cannot do. The compiler now records the hook in `Program::eq_struct`/`eq_enum`, dense
+`Vec<Option<(proto, module)>>` indexed by the `tid`/`variant_id` the operands already carry, so the
+string hash leaves the **miss** path of every struct/enum `==` — including every `Option`/`Result`
+compare — as a side effect of the fix.
+
+Micro-bench (the only place the change can show: 2M struct `==` + 2M `Some(1) == Some(1)`, neither type
+declaring `eq`), hyperfine `--warmup 3 -N --runs 12`, release binaries, `before` = `0dec27bd`:
+
+| micro                                    | before        | after         | delta            |
+|------------------------------------------|--------------:|--------------:|-----------------:|
+| 4M `==` on the MISS path (struct + enum)  | 474.0 ± 21.3 ms | 426.6 ± 17.4 ms | **1.11× faster** |
+
+The nine standard benches are the no-regression check — none of them compares a struct or enum with
+`==`, so flat is the expected result (hyperfine `--runs 8`, all within σ):
+
+| bench       | before | after  | ratio |
+|-------------|-------:|-------:|------:|
+| fib         |  247.7 |  249.0 | 1.005 |
+| str         |  162.0 |  166.7 | 1.029 |
+| primes      |  625.3 |  619.6 | 0.991 |
+| loop        |  954.7 |  949.8 | 0.995 |
+| list        |  397.6 |  378.0 | 0.951 |
+| struct      |  436.7 |  441.2 | 1.010 |
+| poly_method | 1350.0 | 1297.9 | 0.961 |
+| map         |  145.3 |  142.3 | 0.979 |
+| empty       |    2.2 |    2.1 | 0.967 |
+
 ## Fresh per-task module-global snapshot (gaps.md W6-2) — 2026-07-25 — correctness fix, cost measured
 
 Not a lever — a P0 correctness fix (a task now snapshots the module globals fresh, pinned at its own

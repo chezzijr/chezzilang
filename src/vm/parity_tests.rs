@@ -1839,7 +1839,7 @@ fn cmp_max_float_parity() {
 #[test]
 fn cmp_max_struct_parity() {
     // The generic max over a Comparable struct must be byte-identical on both engines.
-    let src = "import std.cmp\nstruct P:\n    n: int\n    fn compare(self, o: P) -> int:\n        return self.n - o.n\nfn main():\n    print(cmp.max(P(2), P(9)).n)\n    print(cmp.min(P(2), P(9)).n)\nmain()\n";
+    let src = "import std.cmp\nstruct P:\n    n: int\n    fn compare(self, o: P) -> int:\n        return self.n - o.n\n    fn eq(self, o: P) -> bool:\n        return self.n == o.n\nfn main():\n    print(cmp.max(P(2), P(9)).n)\n    print(cmp.min(P(2), P(9)).n)\nmain()\n";
     assert_eq!(parity_entry(src), "9\n2\n");
 }
 

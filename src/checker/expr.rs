@@ -1731,6 +1731,9 @@ impl Checker {
                 let inferred = self.one_arg("Atomic", args, span);
                 let elem = self.concurrency_turbofish_elem("Atomic", targs, inferred, span);
                 if self.concurrency_licensed("Atomic") {
+                    // INSIDE the licensing branch: an unavailable type must not first get advice
+                    // about its payload (the `unknown type 'Atomic'` error is the only useful one).
+                    self.reject_eq_atomic_payload(&elem, span);
                     Some(Ty::atomic(elem))
                 } else {
                     self.error(
@@ -3443,7 +3446,7 @@ impl Checker {
                     if cp.ty.is_none()
                         && let Some(dp) = dparams.get(i)
                     {
-                        ty_collect_params(dp, &unbound, &mut mentioned);
+                        ty_collect_params(dp, Some(&unbound), &mut mentioned);
                     }
                 }
                 // This closure arg has an unannotated param slot mentioning an unbound param — it is

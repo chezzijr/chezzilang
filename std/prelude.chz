@@ -234,7 +234,7 @@ native enum Result[T, E]:
 # VALIDATE-AND-NO-OP in a stdlib module (never inserted into the protocol table), so these decls register
 # no user symbol — they are shape documentation the drift guard pins to the Rust seed.
 #
-# All 17 reserved protocols are mirrored here, including `Iterable` — its `iter(self) -> Iterator[Elem]`
+# All 21 reserved protocols are mirrored here, including `Iterable` — its `iter(self) -> Iterator[Elem]`
 # return type resolves via `resolve_type`'s dedicated `Iterator[T]` value arm to the same
 # `Ty::Struct("Iterator",[Elem])` the seed uses, so the shape ports cleanly like every other one.
 
@@ -246,7 +246,11 @@ protocol Any:
     pass
 
 protocol Comparable:
+    Eq
     fn compare(self, other: Self) -> int
+
+protocol Eq:
+    fn eq(self, other: Self) -> bool
 
 protocol Stringable:
     fn str(self) -> str

@@ -1,12 +1,15 @@
 # examples/sort_by_key.chz — sort_by_key(f): sort in place by a derived key, sugar over sort_by.
 # The key extractor `fn(T) -> K` is called once per element; keys are compared by their natural
-# order (`K` must be Comparable — int/float/str or a struct with `compare`). Stable, like sort_by.
+# order (`K` must be Comparable — int/float/str or a struct with `compare` + `eq`). Stable, like sort_by.
 
 struct Money:
     cents: int
 
     fn compare(self, other: Money) -> int:
         return self.cents - other.cents
+
+    fn eq(self, other: Money) -> bool:
+        return self.cents == other.cents
 
 # Sort (word, count) pairs by count ascending — int key. Stable: the two 7s keep input order.
 pairs := [("apple", 3), ("pear", 7), ("fig", 1), ("kiwi", 7)]

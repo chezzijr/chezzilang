@@ -1,0 +1,272 @@
+# tests/chz/spec/eq_protocol_test.chz — M23: `==` / `!=` dispatch to a user `eq`.
+#
+# A struct/enum defining `fn eq(self, o: Self) -> bool` OWNS its `==`, exactly as `compare` owns
+# its `<`. Before M23 the operator was hardwired structural, so a `Ver` whose identity is its major
+# version answered `Ver(1,"alpha") == Ver(1,"beta")` false while `<` and `>` (its `compare`) both
+# said false too — three answers that cannot all be right. Python's twin (`__lt__`/`__gt__`/`__eq__`
+# on `maj`) prints `False False True`.
+#
+# SCOPE: the OPERATOR. The container ripple (Map/Set probes, `in`, `list.contains`/`index_of`/
+# `dedup`/`unique`, and the recursive container arms) lives in `eq_protocol_containers_test.chz`.
+# Serial==M:N is guarded by `test_runner::chz_suite_passes_both_engines`.
+
+fn msg_of[T](r: Result[T, Error], where_: str) -> str:
+    match r:
+        Ok(_): assert false, where_ + " must fault"
+        Err(e): return e.message()
+    return ""
+
+# ---- the acceptance program: `<`, `>`, `==` must agree on ONE identity ----
+
+struct Ver:
+    maj: int
+    pre: str
+    fn compare(self, o: Ver) -> int:
+        return self.maj - o.maj
+    fn eq(self, o: Ver) -> bool:
+        return self.maj == o.maj
+
+test fn user_eq_owns_the_equality_operator():
+    a := Ver(1, "alpha")
+    b := Ver(1, "beta")
+    assert (a < b) == false
+    assert (a > b) == false
+    assert (a == b) == true, "the fields differ, but `eq` says they are equal"
+    assert (a != b) == false, "`!=` is the same dispatch, negated"
+    # a genuinely different major version is still unequal, both spellings
+    c := Ver(2, "alpha")
+    assert (a == c) == false
+    assert (a != c) == true
+    assert (a < c) == true
+    # self-comparison goes through `eq` too
+    assert (a == a) == true
+
+test fn eq_method_and_operator_agree():
+    a := Ver(1, "alpha")
+    b := Ver(1, "beta")
+    assert a.eq(b) == (a == b), "the method spelling and the operator are ONE dispatch"
+    assert a.eq(Ver(2, "x")) == (a == Ver(2, "x"))
+
+# ---- enums: one `eq` decides ACROSS variants (Rust `PartialEq` / Python `__eq__`) ----
+
+enum Tag:
+    Num(int)
+    Word(str)
+    fn eq(self, o: Tag) -> bool:
+        # every `Tag` is equal to every other — deliberately unstructural, so a structural
+        # answer is distinguishable from the dispatched one
+        return true
+
+enum Plain:
+    A
+    B(int)
+
+test fn enum_eq_dispatches_across_variants():
+    assert (Tag.Num(1) == Tag.Num(2)) == true, "same variant, different payload"
+    assert (Tag.Num(1) == Tag.Word("x")) == true, "DIFFERENT variants still ask the user `eq`"
+    assert (Tag.Word("a") != Tag.Num(9)) == false
+    # control: an enum with no `eq` keeps structural equality
+    assert (Plain.A == Plain.A) == true
+    assert (Plain.A == Plain.B(1)) == false
+    assert (Plain.B(1) == Plain.B(1)) == true
+    assert (Plain.B(1) == Plain.B(2)) == false
+
+# ---- controls: a type with no `eq` is untouched ----
+
+struct Pt:
+    x: int
+    y: int
+
+test fn struct_without_eq_stays_structural():
+    assert (Pt(1, 2) == Pt(1, 2)) == true
+    assert (Pt(1, 2) == Pt(1, 3)) == false
+    assert (Pt(1, 2) != Pt(1, 3)) == true
+    # nested inside containers, unchanged
+    assert [Pt(1, 2)] == [Pt(1, 2)]
+    assert (1, Pt(0, 0)) == (1, Pt(0, 0))
+
+# ---- a mismatched pair never calls user code ----
+
+protocol Sized_:
+    fn size(self) -> int
+
+struct Sq:
+    s: int
+    fn size(self) -> int:
+        return self.s
+    fn eq(self, o: Sq) -> bool:
+        return true
+
+struct Ci:
+    r: int
+    fn size(self) -> int:
+        return self.r
+
+test fn two_different_types_behind_one_protocol_stay_structural():
+    x: Sized_ = Sq(1)
+    y: Sized_ = Ci(1)
+    assert (x == y) == false, "different types: structural false, `Sq.eq` is never called"
+    assert (x != y) == true
+    z: Sized_ = Sq(9)
+    assert (x == z) == true, "the SAME type behind the protocol does dispatch"
+
+# ---- a GENERIC operand is an ordinary method, NOT the hook: `==` stays structural ----
+#
+# `eq` is not a reserved name — Rust keeps `eq` in `PartialEq` and still allows an inherent `eq`,
+# Python namespaces the hook as `__eq__`. So a method that merely SHARES the name, one whose operand
+# is a type PARAMETER rather than `Self`, must stay callable and must NOT be dispatched by `==`:
+# doing so handed the body an operand of a type it never declared, and answered with whatever came
+# back. Only `fn eq(self, o: Self) -> bool` is the hook.
+
+enum Opt2[T]:
+    Some(T)
+    None
+    fn eq(self, x: T) -> bool:
+        return true
+
+struct Holder[T]:
+    v: T
+    fn eq[U](self, o: U) -> bool:
+        return true
+
+test fn a_generic_operand_eq_is_an_ordinary_method():
+    a := Opt2[int].Some(1)
+    b := Opt2[int].Some(2)
+    assert a.eq(7) == true, "the method spelling still works"
+    assert (a == b) == false, "`==` stays STRUCTURAL — this `eq` is not the Eq hook"
+    assert (a == Opt2[int].Some(1)) == true
+    assert (a != b) == true
+    # the method's OWN type param is not `Self` either
+    h := Holder(1)
+    assert h.eq("anything") == true
+    assert (h == Holder(2)) == false
+    assert (h == Holder(1)) == true
+
+# (A non-`bool` return is now rejected at the DECLARATION — `checker::tests::malformed_eq_rejected_
+# at_decl` — so the operator's `"eq() must return bool"` fault is a backstop no checked program can
+# reach, and there is nothing left here to assert from Chezzi.)
+
+# ---- a faulting `eq` propagates to the operator's caller ----
+
+struct Boom:
+    n: int
+    fn eq(self, o: Boom) -> bool:
+        return 1 / 0 == 0
+
+test fn a_faulting_eq_propagates():
+    r := recover: Boom(1) == Boom(1)
+    assert msg_of(r, "Boom ==") == "division by zero"
+
+# ---- the int-specialized `==` site DEOPTS when it later sees structs ----
+#
+# `q_eq` quickens a `==` site to an int-only fast path after it sees two ints. One generic function
+# is ONE bytecode site, so warming it on ints and then handing it structs is the deopt: the fast
+# path must fall through to the `Eq`-protocol dispatch, not answer with a stale specialization.
+
+fn same[T](a: T, b: T) -> bool:
+    return a == b
+
+fn differs[T](a: T, b: T) -> bool:
+    return a != b
+
+test fn an_int_warmed_eq_site_still_dispatches_user_eq():
+    # warm the site hard on ints
+    n := 0
+    for i in range(0, 50):
+        if same(i, i):
+            n = n + 1
+    assert n == 50
+    assert same(3, 4) == false
+    # …now the SAME site sees structs with a user `eq`
+    assert same(Ver(1, "alpha"), Ver(1, "beta")) == true, "the deopted site dispatches `eq`"
+    assert same(Ver(1, "a"), Ver(2, "a")) == false
+    assert differs(Ver(1, "alpha"), Ver(1, "beta")) == false
+    # and the int answers are unchanged afterwards
+    assert same(7, 7) == true
+    assert same(7, 8) == false
+
+# ---- `Atomic.cas` compares STRUCTURALLY, whatever the checker could see ----
+#
+# M23 adversarial review, CRITICAL 2. `cas` holds the box's value mutex across the compare, so
+# re-entering user code there can block on that same `Atomic` and hang with no deadlock report. The
+# only stated safety argument was the checker gate — which keyed on the payload's OWN `eq` and so
+# missed `Atomic[List[P]]`, `Atomic[Option[P]]`, tuples, maps, struct fields and enum payloads
+# (those are now rejected: `checker::tests::atomic_payload_reaching_a_nested_eq_rejected`). A
+# `Protocol` existential payload is a hole NO checker walk can close — the witness is unknown — so
+# the property is enforced in the VM: the `eq` hook is switched OFF for the window.
+
+import std.concurrency
+
+protocol Named:
+    fn name(self) -> str
+
+eq_calls: List[int] = []
+
+struct Witness:
+    n: int
+    fn name(self) -> str:
+        return "w"
+    fn eq(self, o: Witness) -> bool:
+        eq_calls.push(1)
+        return true
+
+test fn atomic_cas_never_calls_a_user_eq():
+    a: Named = Witness(1)
+    b: Named = Witness(2)
+    box: Atomic[Named] = Atomic(a)
+    # `Witness.eq` answers `true` for ANY pair; the structural compare must disagree with it, which
+    # is exactly how we can tell the hook did not run.
+    assert box.cas(b, a) == false, "cas compares fields, not the payload's `eq`"
+    assert box.cas(a, b) == true
+    assert eq_calls.len() == 0, "no user `eq` may run under the value lock"
+    # …and the OPERATOR on the very same values still dispatches the hook (the switch is scoped to
+    # the cas window, not a global disable).
+    assert (a == b) == true
+    assert eq_calls.len() == 1
+
+# ---- a numeric newtype DOES satisfy `Eq` (the M23 review's newtype ruling) ----
+#
+# `Comparable` embeds `Eq` (M23) and a numeric newtype satisfies `Comparable` intrinsically, so
+# denying it `Eq` would make `fn sorted[T: Comparable]` unsatisfiable for `newtype Meters = float` —
+# a regression of M21. The intrinsic grant is the underlying's NATIVE equality; no newtype ever
+# satisfies `Eq` through a method (declaring `eq` on one is a decl-site error).
+
+newtype Score = int
+
+fn eq_bound[T: Eq](a: T, b: T) -> bool:
+    return a == b
+
+fn cmp_bound[T: Comparable](a: T, b: T) -> bool:
+    return a < b
+
+test fn a_numeric_newtype_satisfies_eq_intrinsically():
+    assert eq_bound(Score(1), Score(1)) == true
+    assert eq_bound(Score(1), Score(2)) == false
+    assert cmp_bound(Score(1), Score(2)) == true, "Comparable embeds Eq — both must be satisfiable"
+
+# ---- generic instantiations are ERASED, so `Any` can hand `eq` a foreign operand ----
+#
+# M23 adversarial review, MEDIUM 1. `tid` identifies a TYPE, not an instantiation, because Chezzi
+# erases type arguments at runtime — there is no per-instantiation tag to dispatch on. Widening to
+# `Any` is the deliberate escape hatch from the co-inhabitability rule (§B2), and through it a
+# `Box[int]` can meet a `Box[str]`. The requirement is that this stays a RECOVERABLE fault, never a
+# panic and never a confident wrong answer. CPython does exactly the same thing:
+#   class Box:
+#       def __init__(self, v): self.v = v
+#       def __eq__(self, o): return self.v < o.v or self.v == o.v
+#   Box(1) == Box("x")   →  TypeError: '<' not supported between instances of 'int' and 'str'
+
+struct EBox[T: Comparable]:
+    v: T
+    fn eq(self, o: EBox[T]) -> bool:
+        return self.v < o.v or self.v == o.v
+
+test fn a_cross_instantiation_eq_faults_recoverably():
+    a: Any = EBox(1)
+    b: Any = EBox("x")
+    r := recover: a == b
+    assert msg_of(r, "cross-instantiation ==") == "cannot apply Lt to int and str"
+    # the SAME instantiation is unaffected — the erasure ceiling costs nothing that type-checks
+    c: Any = EBox(2)
+    d: Any = EBox(2)
+    assert (c == d) == true

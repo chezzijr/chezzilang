@@ -2553,7 +2553,7 @@ documented decode contract, unchanged (`read_bytes` is purely additive).
 **What remains is not a defect:** the caller must pick the right method — a `str` seam cannot hand back
 bytes that are not UTF-8, and it now says so and points at `read_bytes`.
 
-### B2. `==` between disjoint types type-checks (a proposed tightening, not a clear bug)
+### B2. `==` between disjoint types type-checks — **FIXED (M23)**
 `1 == "a"` compiles and evaluates to `false` (`src/checker/pattern.rs`, the `Eq | NotEq` arm returns
 `Ty::Bool` without checking operand compatibility). Note the tension before "fixing" it: this is
 **exactly Python's runtime behavior** (`1 == "a"` → `False`), so by the no-drift rule it is not a
@@ -2561,6 +2561,73 @@ divergence. But Chezzi is **statically typed**, and a comparison between provabl
 always a bug in user code — which is why mypy ships `--strict-equality` to reject it and Go/Rust make
 it a compile error. Recommendation: reject at check time (a typed language should), and say so in the
 docs as a deliberate, explained divergence from Python's runtime.
+
+**Landed (M23, the `Eq`-protocol slice).** The `Eq | NotEq` arm now rejects `cannot compare {l} and
+{r} for equality` unless the pair is something the runtime can genuinely compare. An `Unknown`
+operand silences it, so one earlier error never cascades.
+
+**The predicate is `Checker::may_be_equal` — CO-INHABITABILITY, "can these two ever be the same
+value?"** It took three cuts to get there, and the first two failed the *same* way: a predicate built
+to answer a **storage** question was asked an **equality** question.
+
+* *Cut 1* used the free `compatible`. It is registry-blind (its own `Protocol` arm says so: "struct
+  conformance needs the registry — handled by `Checker::assignable`, not here"), so it could not see
+  that a protocol existential is a SUPERTYPE of its conforming concretes. It rejected `Shape == Sq`,
+  `Error == MyErr`, `Any == int`, `T == int` inside an erased generic, and the nested
+  `Option[Error] == Option[MyErr]`. Only the hardcoded `(Protocol("Error"), Str)` special case kept
+  `e == "nope"` alive — `Error == str` legal while `Error == MyErr` was rejected is the tell.
+* *Cut 2* used `Checker::assignable` both ways round. Better, but assignability answers "can a `B` be
+  stored in an `A` slot", and it carries two conjuncts equality has no use for: **invariance** (a
+  `List`/`Map`/`Set`/generic-`Struct` type argument is compared with `compatible`, because a `G[Sub]`
+  aliased as `G[Super]` can be *written through* — `==` never writes) and **sendability** (its
+  `Protocol` arm ends in `&& self.sendable(a)`, the spawn-airlock witness, which has no bearing on
+  whether two values are equal). It also has no way to pass `Protocol` vs `Protocol` unless one
+  embeds the other, although one concrete type can conform to two unrelated protocols. Measured
+  fallout: `List[Error] == List[MyErr]` and `Shape == Error` were compile errors; both run and print
+  `true` when one side is widened through `Any`.
+
+`may_be_equal` (`src/checker/proto.rs`, next to `assignable`) drops both conjuncts, adds
+`(Protocol, Protocol) => true`, keeps `Protocol`-vs-concrete decided by conformance (so
+`Shape == str` and `List[Shape] == List[str]` stay errors), recurses container/tuple/generic type
+arguments **co-variantly**, and carries the runtime's own cross-type arms (`int`/`float`,
+`bytes`/`bytearray`) *inside* the recursion rather than as a top-level special case — which is what
+makes `[1.0] == [1]` and `{"k": 1.0} == {"k": 1}` compile (both engines print `true`; CPython agrees).
+`Ty::Param` is accepted outright (generics are erased) **except** where a `where T: <scalar>` bound
+pins it: those pins are substituted away first, so `fn f[T](a: T, b: int) where T: str` still rejects
+`a == b`. It is the WHOLE legality test: a companion `equality_allowed` ("does this pair dispatch to a
+user `eq`?") was OR'd in alongside for one milestone and deleted in M23 slice 3 — the `Eq` overload is
+decided at RUNTIME off the operands' heap tags (`Vm::user_eq_method`), and every pair it accepted was a
+same-type pair `may_be_equal` already accepted, so the disjunct was provably dead. (What the checker
+*does* own is the hook's SHAPE, at the declaration: `validate_eq_shape` forces a struct/enum `eq` to be
+either `fn eq(self, o: Self) -> bool` or an ordinary method with a generic operand, so the type-blind
+runtime can tell the two apart from a compiler-built table instead of a name lookup.)
+
+*Cut 4* (review round 4) fixed the erasure escape being **top-level only**. The bare-`Param` arm fires
+only when a *whole operand* is a `T`; every other constructor re-establishes the escape by recursing —
+but the four native generic handles (`Channel`/`Shared`/`RwShared`/`Atomic`) had **no arm at all** and
+fell through to `_ => compatible`, which is neither `Param`-tolerant nor conformance-aware. Their `==`
+is a live identity comparison (the `ha == hb` shortcut at the top of `values_equal_guarded`), so
+`fn cmp[T](a: Channel[T], b: Channel[int])` and `Shared[Error] == Shared[MyErr]` were working code that
+stopped compiling. They now join the co-variant recursion arm. The other half was `Protocol`'s own
+`pargs`: a free `T` in `Container[T]` (or in the concrete's args) was fed to `satisfies_args`, which
+compared it against a concrete arg and wrong-rejected `Container[T] == Bag[int]`; params are now erased
+to `Ty::Unknown` (reusing that path's existing don't-cascade leniency) so the **method set** still
+decides — `Container[T] == int` and `== str` still reject. Full `Ty`-constructor audit behind this cut:
+every variant carrying a type argument now has a `may_be_equal` arm except `BuiltinFn` (monomorphic by
+construction, `src/checker/ty.rs`: it can never hold a `Ty::Param`; `compatible` already accepts
+`Func` ↔ `BuiltinFn`, measured: `f == ord` prints `true`) and `Module` (a name, no type args), both of
+which genuinely belong on the `compatible` path.
+
+Rejection therefore requires: both operands fully concrete (no protocol, no free param, no `Unknown`
+anywhere), structurally different, with no cross-type runtime arm — i.e. exactly the runtime's own
+type-tag guard, "distinct types are never equal". Known ceiling, in the declining direction: two
+protocols with *contradictory* requirements (same method name, different signature) are inhabited by
+no type at all, but `(Protocol, Protocol) => true` accepts the pair anyway; proving that needs
+method-set intersection reasoning, and "decline rather than misanswer" is the house rule.
+
+Documented as a deliberate Python divergence in `docs/syntax.md`; the dynamic answer is still
+reachable through the `Any` existential, which is how `examples/empty_struct.chz` and
+`examples/enum_layout.chz` still demonstrate the runtime type-tag guard.
 
 ## Root causes — one change each, many gaps unblocked
 
@@ -3059,8 +3126,45 @@ Given that, the three "holes" are narrow and NOT worth building:
 ### L5. Operator-protocol holes
 The reserved set (`Add Sub Mul Div Mod Neg Arithmetic Comparable Stringable Hashable Index IndexSet
 Slice Contains Iterator Iterable Convert Any Error`) covers arithmetic, ordering, indexing, slicing,
-membership, iteration, hashing, display. Missing: **`Eq`** (`==`/`!=` cannot be overloaded — and see
-**B2**, the checker is *permissive* about them), bitwise/shift protocols, and a call operator. Small
+membership, iteration, hashing, display. **`Eq`** (`eq(self, other: Self) -> bool`) joined the set in
+M23 as a reserved protocol + generic bound, **B2** (the permissive `==`) is FIXED, and `==`/`!=` now
+dispatch to a user `eq` — gated on the hook's exact signature at the declaration, so a method that
+merely shares the name (`Opt[T].eq(self, x: T)`) stays an ordinary method and `==` stays structural.
+Container probes (`Map`/`Set` keys, `in`, `list.contains`/`index_of`/`dedup`/`unique`, set algebra,
+and the recursive element/field/entry arms) route through the SAME dispatch — the hook lives in
+`Vm::values_equal_guarded`, so every consumer inherits it, and containers keep CPython's
+`x is y or x == y` identity short-circuit. The `hash`/`eq` contract stays the implementor's (an `eq`
+coarser than its type's `hash` is structurally unreachable, exactly as in Rust/Python).
+`Atomic.cas` is the one deliberate exception: it compares under the value lock, so it stays
+structural — and a type with a user `eq` is already an illegal `Atomic[T]` payload.
+**Residual (found writing the M23 docs) — FIXED 2026-08-08: a `newtype` may no longer declare `eq`, on
+ANY underlying.** The W6-3d decl-site rule used to fire only for a *numeric* newtype, on the premise
+that a non-numeric one "has no operator to disagree with" — true for `+`/`<`, false for `==`, which
+exists for every newtype underlying. Measured on `5b699c9b`, both engines:
+```chezzi
+newtype Name = str:
+    fn eq(self, o: Name) -> bool: return true
+a := Name("a")
+b := Name("b")
+print(a == b, a.eq(b))     # false true   <- the two spellings disagree
+```
+`Name` never satisfied `Eq` (so a `[T: Eq]` bound already rejected it) and the answer was stable across
+engines, so it was a wart, not a soundness hole — but it was the *milestone's own* defect one type-kind
+over, so it ships fixed rather than filed. `eq` moved out of W6-3d's numeric-only list into an
+unconditional per-newtype reject (`checker/setup.rs`, the newtype arm), with its own message naming
+`==` (one diagnostic per declaration: a numeric newtype matches both premises and still reports once).
+Task 3's struct/enum carve-out — a *generic* operand (`fn eq(self, x: T)`) marks an ordinary method and
+leaves `==` structural — deliberately does **not** transfer: it exists to tell the hook apart from a
+same-named ordinary method on a type whose `==` *does* dispatch, and a newtype's dispatches to no user
+method at all, so both operand shapes are rejected. Ruling (b) — make `==` dispatch to it, as Rust's
+`impl PartialEq` on a tuple struct and Python's `__eq__` on a wrapper do — is the same one W6-3d
+implemented and rejected for `compare`: the numeric intrinsic grant is unconditional, so a
+heterogeneous `List[Eq]` would take the user's equality for a same-newtype pair and the native one for
+a newtype/underlying pair, giving non-transitive equality with no fault. Pinned by
+`checker::tests::newtype_eq_method_rejected_at_decl` (numeric / non-numeric / both generic operand
+shapes / the ordinary-method + `compare` boundary) and, for the behavior that remains, by
+`tests/chz/spec/intrinsic_proto_methods_test.chz::newtype_equality_is_the_underlyings` on both engines.
+Still missing: bitwise/shift protocols, and a call operator. Small
 each. **`Contains`** (`x in my_struct` via `contains(self, item) -> bool`, Python's `__contains__`) —
 **FIXED**: a user struct/enum with a `contains(self, item) -> bool` method makes `x in that_value`
 dispatch to it, yielding `bool`; container `in` (list/set/map/str) is unchanged.
@@ -3185,8 +3289,8 @@ widening to an existential is frequently *implicit* (a struct used where `Error`
 **Risk / why POST-FREEZE.** This is checker surface with **real false-positive risk** (every widening site
 must be found; a missed one is a soundness hole, an over-eager one rejects legal in-task code). Do NOT
 attempt before the JIT freeze. The concrete-error-type workaround covers the practical need until then.
-Related: [B2](#b2--between-disjoint-types-type-checks-a-proposed-tightening-not-a-clear-bug) (another
-typed-language tightening), and the note that **dropping `ref`/`Ref` was the WRONG lever *for F2*** — it
+Related: [B2](#b2--between-disjoint-types-type-checks--fixed-m23) (another
+typed-language tightening, landed), and the note that **dropping `ref`/`Ref` was the WRONG lever *for F2*** — it
 would not close the generator-field laundering that F2 is about, so this milestone stands on its own.
 (NOTE 2026-07-19: `ref`/`Ref`/`std.ref` were later removed *separately*, on minimalism/coherence
 grounds — they only added scalar aliasing over Chezzi's Python object model — **not** as an F2/sendability

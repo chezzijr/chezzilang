@@ -139,6 +139,7 @@ impl Vm {
             poll_deadline: None,
             poll_partial: None,
             native_reentry: 0,
+            eq_hook_off: false,
             stdout_writes: 0,
             reds: 0,             // D3 — set to CONTEXT_REDS per schedule-in (run_one_fiber)
             yield_now: false,    // D3
@@ -1747,18 +1748,11 @@ impl Vm {
                 }
             }
             Op::Lt | Op::LtEq | Op::Gt | Op::GtEq => self.compare_op(op, span)?,
-            Op::Eq => {
-                let r = self.pop();
-                let l = self.pop();
-                let eq = self.values_equal_guarded(l, r, 0, span)?;
-                self.push(Value::bool(eq));
-            }
-            Op::NotEq => {
-                let r = self.pop();
-                let l = self.pop();
-                let eq = self.values_equal_guarded(l, r, 0, span)?;
-                self.push(Value::bool(!eq));
-            }
+            // `return`, like `Op::Contains` below: `eq_operator` may re-enter user code (a struct/enum
+            // `eq`), so keeping its String/Vec temporaries out of `step`'s frame matters on the deep
+            // `step → run_proto → run_until → step` path.
+            Op::Eq => return self.eq_operator(false, span),
+            Op::NotEq => return self.eq_operator(true, span),
             Op::BitAnd | Op::BitOr | Op::BitXor | Op::Shl | Op::Shr => self.bitwise(op, span)?,
             // `return` (not `?`): keeps `step`'s frame from materializing an extra `RuntimeError`
             // temporary, which would bloat the deep re-entrant recursion path (`str(self)`-style
@@ -1897,8 +1891,9 @@ impl Vm {
             Op::NewMap(n) => {
                 // Build an insertion-ordered hash map with last-key-wins upsert. Phase 1 hashes
                 // every key while ALL operands are still rooted on the stack (a struct key's hash()
-                // re-enters the VM and can GC); phase 2 then builds the map with no further re-entry
-                // (so no GC), reading keys/values from the still-rooted stack.
+                // re-enters the VM and can GC); phase 2 dedups against the half-built LOCAL map,
+                // which since M23 may dispatch a user `eq` (another re-entry) — both phases read
+                // keys/values from the still-rooted stack, so the operands survive either collection.
                 let count = *n;
                 let at = self.stack.len() - 2 * count;
                 let mut hashes = Vec::with_capacity(count);
@@ -1927,7 +1922,8 @@ impl Vm {
             }
             Op::NewSet(n) => {
                 // Insertion-ordered hash set, dedup keeping first occurrence. Same two-phase rooting
-                // as NewMap (phase 1 hashes all elements rooted; phase 2 builds GC-free).
+                // as NewMap (elements stay rooted on the stack across BOTH the re-entrant `hash`
+                // and the dedup's possibly-re-entrant `eq`).
                 let count = *n;
                 let at = self.stack.len() - count;
                 let mut hashes = Vec::with_capacity(count);

@@ -1,0 +1,284 @@
+# tests/chz/spec/eq_protocol_containers_test.chz — M23: a user `eq` reaches EVERY equality site.
+#
+# M23's first half gave a struct/enum its own `==`. That alone shipped an inconsistency: `x == y`
+# could be true while `y in xs` was false and `m[y]` faulted "key not found" — three answers to one
+# question. Python has no such split; `__eq__` is what `in`, `index_of`, `dict[k]` and `set` all
+# probe with. So the whole container family now routes through the same dispatch.
+#
+# The CPython twin of the acceptance case (`__hash__` on `a`, `__eq__` on `a`) prints
+# `True / True / 10`.
+#
+# The hash/eq CONTRACT is the user's, and it has a hard structural limit: a map/set probe can only
+# ever scan the buckets of `hash(key)`, so an `eq` COARSER than its type's `hash` is unreachable,
+# not merely wrong — exactly as in Rust and Python. Every type here keeps `hash` and `eq` agreeing.
+
+fn msg_of[T](r: Result[T, Error], where_: str) -> str:
+    match r:
+        Ok(_): assert false, where_ + " must fault"
+        Err(e): return e.message()
+    return ""
+
+# ---- the acceptance program: `==`, `in` and `m[k]` must give ONE answer ----
+
+struct K:
+    a: int
+    b: str
+    fn hash(self) -> int:
+        return self.a
+    fn eq(self, o: K) -> bool:
+        return self.a == o.a
+
+test fn operator_membership_and_map_lookup_agree():
+    x := K(1, "x")
+    y := K(1, "y")
+    assert (x == y) == true
+    assert (y in [x]) == true, "membership asks the same `eq` the operator does"
+    m: Map[K, int] = {}
+    m[x] = 10
+    assert m[y] == 10, "a key EQUAL to the stored one resolves it"
+
+# ---- a case-insensitive key: `hash` and `eq` agree, so every probe agrees ----
+
+struct CI:
+    s: str
+    fn hash(self) -> int:
+        h := 0
+        for c in self.s.lower():
+            h = h * 31 + ord(c)
+        return h
+    fn eq(self, o: CI) -> bool:
+        return self.s.lower() == o.s.lower()
+
+test fn ci_map_probes_dispatch_eq():
+    m: Map[CI, int] = {}
+    m[CI("ab")] = 1
+    assert m[CI("aB")] == 1, "index"
+    assert m.has(CI("AB")) == true, "has"
+    assert str(m.get(CI("Ab"))) == "Some(1)", "get"
+    assert (CI("aB") in m) == true, "`in` on a map probes KEYS"
+    # a differently-spelled EQUAL key updates the existing entry rather than adding one
+    m[CI("AB")] = 2
+    assert m.len() == 1
+    assert m[CI("ab")] == 2
+    assert str(m.remove(CI("aB"))) == "Some(2)"
+    assert m.len() == 0
+
+test fn ci_set_probes_dispatch_eq():
+    s: Set[CI] = {CI("ab")}
+    assert s.has(CI("AB")) == true
+    assert (CI("Ab") in s) == true
+    s.add(CI("aB"))
+    assert s.len() == 1, "an EQUAL element is not a new one"
+    assert s.remove(CI("AB")) == true
+    assert s.len() == 0
+
+test fn ci_list_probes_dispatch_eq():
+    xs := [CI("ab"), CI("cd")]
+    assert (CI("AB") in xs) == true
+    assert xs.contains(CI("Cd")) == true
+    assert xs.index_of(CI("aB")) == 0
+    assert xs.index_of(CI("CD")) == 1
+    assert xs.index_of(CI("zz")) == -1
+
+test fn ci_unique_and_dedup_collapse_equal_elements():
+    xs := [CI("ab"), CI("AB"), CI("cd"), CI("Ab")]
+    assert xs.unique().len() == 2, "unique removes ALL duplicates"
+    assert xs.dedup().len() == 3, "dedup collapses only CONSECUTIVE runs"
+    assert xs.unique()[0].s == "ab", "first occurrence wins"
+
+test fn ci_set_algebra_dispatches_eq():
+    a: Set[CI] = {CI("ab"), CI("cd")}
+    b: Set[CI] = {CI("AB")}
+    assert (a | b).len() == 2
+    assert (a & b).len() == 1
+    assert (a - b).len() == 1
+    assert (a ^ b).len() == 1
+    assert a.union(b).len() == 2
+    assert a.intersection(b).len() == 1
+    assert a.difference(b).len() == 1
+
+test fn ci_map_literal_and_ctor_dedup_on_eq():
+    m := {CI("ab"): 1, CI("AB"): 2}
+    assert m.len() == 1, "a map literal upserts last-wins on an EQUAL key"
+    assert m[CI("Ab")] == 2
+    s := {CI("ab"), CI("AB")}
+    assert s.len() == 1, "a set literal dedups on an EQUAL element"
+    assert Set([CI("ab"), CI("AB")]).len() == 1, "…and so does the Set() ctor"
+    assert Map([(CI("ab"), 1), (CI("AB"), 2)]).len() == 1
+
+test fn ci_map_merge_and_update_dedup_on_eq():
+    a: Map[CI, int] = {CI("ab"): 1}
+    b: Map[CI, int] = {CI("AB"): 2}
+    merged := a.merge(b)
+    assert merged.len() == 1
+    assert merged[CI("ab")] == 2
+    a.update(b)
+    assert a.len() == 1
+    assert a[CI("Ab")] == 2
+
+# ---- the recursion: a user `eq` nested inside a container ----
+
+test fn a_user_eq_recurses_through_containers():
+    assert [K(1, "x")] == [K(1, "y")], "list elements"
+    assert (K(1, "x"), 9) == (K(1, "y"), 9), "tuple elements"
+    assert {"k": K(1, "x")} == {"k": K(1, "y")}, "map VALUES"
+    assert {K(1, "x"): 1} == {K(1, "y"): 1}, "map keys"
+    assert Set([K(1, "x")]) == Set([K(1, "y")]), "set elements"
+    assert [[K(1, "x")]] == [[K(1, "y")]], "nested two deep"
+    # and a genuine difference is still unequal at every depth
+    assert ([K(1, "x")] == [K(2, "x")]) == false
+    assert ({"k": K(1, "x")} == {"k": K(2, "x")}) == false
+
+struct Wrap:
+    inner: K
+
+test fn a_user_eq_recurses_through_struct_fields():
+    assert Wrap(K(1, "x")) == Wrap(K(1, "y")), "the FIELD's `eq` decides, Wrap has none of its own"
+    assert (Wrap(K(1, "x")) == Wrap(K(2, "x"))) == false
+
+# ---- CPython's `x is y or x == y`: containers keep the identity short-circuit ----
+#
+# `PyObject_RichCompareBool` (what `in` / `list.__eq__` use) answers true for an IDENTICAL pair
+# without calling `__eq__`, while the bare `==` operator (`do_richcompare`) always calls it. A
+# deliberately non-reflexive `eq` is the only way to see the difference. CPython prints
+# `False / True / True`.
+
+struct Never:
+    a: int
+    fn hash(self) -> int:
+        return 1
+    fn eq(self, o: Never) -> bool:
+        return false
+
+test fn containers_keep_the_identity_short_circuit():
+    x := Never(1)
+    assert (x == x) == false, "the OPERATOR always calls `eq` (CPython `do_richcompare`)"
+    assert ([x] == [x]) == true, "…but a container short-circuits on identity FIRST"
+    assert (x in [x]) == true
+
+# ---- a faulting `eq` propagates out of every probe, it is never swallowed ----
+
+struct Boom2:
+    n: int
+    fn hash(self) -> int:
+        return self.n
+    fn eq(self, o: Boom2) -> bool:
+        return 1 / 0 == 0
+
+test fn a_faulting_eq_propagates_from_container_probes():
+    r1 := recover: Boom2(1) in [Boom2(2)]
+    assert msg_of(r1, "`in` on a list") == "division by zero"
+    r2 := recover: [Boom2(1)] == [Boom2(2)]
+    assert msg_of(r2, "list ==") == "division by zero"
+    m: Map[Boom2, int] = {}
+    m[Boom2(1)] = 1
+    r3 := recover: m[Boom2(1)]
+    assert msg_of(r3, "map index") == "division by zero"
+
+# ---- an `eq` that ALLOCATES: the probe must survive the collection it can trigger ----
+#
+# A user `eq` re-enters the VM, so it can allocate and trip a GC in the middle of a probe. Every
+# in-flight value (the receiver, the needle, a half-built result) has to stay rooted across it. The
+# Rust twin under gc-stress is `vm::gc_tests::set_struct_eq_survives_gc_stress`.
+
+struct Alloc:
+    a: int
+    fn hash(self) -> int:
+        return self.a
+    fn eq(self, o: Alloc) -> bool:
+        junk := [self.a, o.a, 1, 2, 3]
+        pad := "x".repeat(64)
+        return junk[0] == junk[1] and pad.len() == 64
+
+test fn an_allocating_eq_survives_the_probe():
+    xs: List[Alloc] = []
+    for i in range(0, 200):
+        xs.push(Alloc(i % 7))
+    assert xs.unique().len() == 7
+    m: Map[Alloc, int] = {}
+    for i in range(0, 200):
+        m[Alloc(i % 7)] = i
+    assert m.len() == 7
+    assert m[Alloc(3)] == 199 - ((199 - 3) % 7)
+    s := Set[Alloc]([])
+    for i in range(0, 200):
+        s.add(Alloc(i % 7))
+    assert s.len() == 7
+    assert (Alloc(5) in s) == true
+
+# ---- an `eq` that MUTATES the container it is being probed against ----
+#
+# M23 adversarial review, CRITICAL 1. The probe re-read its candidate list each step, which saves
+# every compare that returns FALSE — but not the one that returns TRUE, which is the one whose
+# position the caller then indexes with. An `eq` that removed an earlier entry on that last compare
+# handed back a position that had already shifted: `m.get(k)` answered a NEIGHBOUR's value with two
+# entries left standing (a silent wrong answer), and with fewer than the position it named it was
+# `index out of bounds` — a Rust panic, i.e. an uncatchable process abort raised from pure Chezzi
+# source. Both spellings reproduced on BOTH engines.
+#
+# The probe now re-validates the position after every compare and restarts when it moved (CPython
+# `lookdict`'s `DKIX_KEY_CHANGED`), so the answer is the one the POST-mutation container gives.
+# Colliding hashes (`hash` is constant) force multi-candidate probes, which is where this lives.
+
+mut_map: Map[Mut, int] = {}
+mut_set: Set[Mut] = Set([])
+mut_armed: List[int] = []
+
+struct Mut:
+    n: int
+    fn hash(self) -> int:
+        return 0
+    fn eq(self, o: Mut) -> bool:
+        r := self.n == o.n
+        # fire on the TRUE compare only — the position the caller is about to use
+        if r and mut_armed.len() > 0:
+            mut_armed.remove_at(0)
+            mut_map.remove(Mut(0))
+            mut_set.remove(Mut(0))
+        return r
+
+fn mut_reset(n: int):
+    mut_map = {}
+    mut_set = Set([])
+    while mut_armed.len() > 0:
+        mut_armed.remove_at(0)
+    for i in range(0, n):
+        mut_map[Mut(i)] = i * 11
+        mut_set.add(Mut(i))
+    mut_armed.push(1)
+
+test fn a_probe_whose_eq_removes_an_earlier_entry_answers_the_new_container():
+    # two entries: pre-fix this was `index out of bounds` (VM panic) on both engines
+    mut_reset(2)
+    assert mut_map.get(Mut(1)) == Some(11), "the surviving entry's own value, not a stale slot"
+    # four entries: pre-fix this silently answered `Some(22)` — the NEXT entry's value
+    mut_reset(4)
+    assert mut_map.get(Mut(1)) == Some(11)
+    # the same position hazard through every other Map caller
+    mut_reset(4)
+    assert mut_map[Mut(1)] == 11
+    mut_reset(4)
+    assert mut_map.has(Mut(1)) == true
+    mut_reset(4)
+    assert (Mut(1) in mut_map) == true
+    mut_reset(4)
+    mut_map[Mut(1)] = 99
+    assert mut_map[Mut(1)] == 99, "the insert overwrote the key it matched, not a shifted neighbour"
+    mut_reset(4)
+    assert mut_map.remove(Mut(1)) == Some(11)
+    assert mut_map.has(Mut(1)) == false
+
+test fn a_set_probe_whose_eq_removes_an_earlier_entry_answers_the_new_container():
+    mut_reset(2)
+    assert mut_set.has(Mut(1)) == true
+    mut_reset(4)
+    assert (Mut(1) in mut_set) == true
+    mut_reset(4)
+    assert mut_set.remove(Mut(1)) == true
+    assert mut_set.has(Mut(1)) == false
+    # and the removed entry really is gone, i.e. the position named a real element
+    mut_reset(4)
+    n0 := mut_set.len()
+    dropped := mut_set.remove(Mut(3))
+    assert dropped == true
+    assert mut_set.len() < n0

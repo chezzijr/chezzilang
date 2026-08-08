@@ -1355,6 +1355,8 @@ impl Checker {
                     ("Atomic", [inner]) => {
                         let elem = self.resolve_type(inner, span);
                         if self.concurrency_licensed("Atomic") {
+                            // INSIDE the licensing branch — see the ctor site in `expr.rs`.
+                            self.reject_eq_atomic_payload(&elem, span);
                             Ty::atomic(elem)
                         } else {
                             self.error(
@@ -1966,6 +1968,7 @@ impl Checker {
                         .cloned()
                     {
                         self.record_method_decl_hover(m.name_span, &sig);
+                        self.validate_eq_shape(m, &sig, &self_ty);
                         self.check_fn_body(m, Some(self_ty.clone()), sig);
                     }
                 }
@@ -2028,6 +2031,7 @@ impl Checker {
                         .cloned()
                     {
                         self.record_method_decl_hover(m.name_span, &sig);
+                        self.validate_eq_shape(m, &sig, &self_ty);
                         self.check_fn_body(m, Some(self_ty.clone()), sig);
                     }
                 }
@@ -2458,6 +2462,65 @@ impl Checker {
             self.error(
                 span,
                 format!("lifecycle hook '{}' must not return a value", decl.name),
+            );
+        }
+    }
+
+    /// M23 — a struct/enum method named `eq` is the `Eq` protocol HOOK that `==`/`!=` dispatch to, so
+    /// its signature is enforced at the DECLARATION rather than left to answer wrongly (or fault) at
+    /// the operator. Exactly two shapes survive:
+    ///
+    /// * `fn eq(self, o: Self) -> bool` — the hook. `==` dispatches to it.
+    /// * `fn eq(self, x: T) -> bool` with a GENERIC operand — an ordinary method (`Opt[T].eq(self,
+    ///   x: T)`); `==` leaves it alone and stays structural. `eq` is not a reserved name (Rust puts it
+    ///   in `PartialEq` and still allows an inherent `eq`; Python namespaces the hook as `__eq__`), so
+    ///   this must stay legal.
+    ///
+    /// Everything else — a missing/extra operand, a concrete non-`Self` operand, a non-`bool` return —
+    /// is a typo of the first, and a check error beats a silently un-dispatched `==`. Nothing here is
+    /// ambiguous enough to warrant guessing: the operand's type alone separates "wrote the hook" from
+    /// "wrote a method that happens to be called eq". The backend's `binds_eq_hook` is the syntactic
+    /// twin of the *same* split, so checker and compiler agree by construction.
+    ///
+    /// Newtypes are deliberately NOT covered: their `==` never dispatches to a user `eq` at all (it
+    /// auto-flows to the underlying's native equality), and the numeric case already has its own
+    /// decl-site rejection.
+    pub(super) fn validate_eq_shape(&mut self, decl: &FnDecl, sig: &FnSig, self_ty: &Ty) {
+        if decl.name != "eq" {
+            return;
+        }
+        let span = Self::fn_span(decl);
+        let hint = "the `Eq` protocol hook `==` dispatches to";
+        if sig.params.len() != 2 {
+            self.error(
+                span,
+                format!(
+                    "'eq' on {self_ty} is {hint}: it must take exactly one operand — `fn eq(self, o: Self) -> bool`"
+                ),
+            );
+            return;
+        }
+        let operand = &sig.params[1];
+        // A GENERIC operand is the ordinary-method escape hatch — not the hook, and not an error.
+        if matches!(operand, Ty::Param(_)) || operand.is_unknown() {
+            return;
+        }
+        if operand != self_ty {
+            self.error(
+                span,
+                format!(
+                    "'eq' on {self_ty} is {hint}: its operand must be {self_ty}, found {operand} — rename the method if it is not equality"
+                ),
+            );
+            return;
+        }
+        if sig.ret != Ty::Bool {
+            self.error(
+                span,
+                format!(
+                    "'eq' on {self_ty} is {hint}: it must return bool, found {}",
+                    sig.ret
+                ),
             );
         }
     }

@@ -55,6 +55,8 @@ enum Money:
         if a < b: return -1
         if a > b: return 1
         return 0
+    fn eq(self, o: Money) -> bool:
+        return self.amount() == o.amount()
 
 fn twice[T: Add](x: T) -> T:
     return x + x

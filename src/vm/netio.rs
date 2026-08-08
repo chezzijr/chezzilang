@@ -2955,7 +2955,9 @@ impl Vm {
                         let mut rb = super::fxhash::FxHashMap::<u32, GcRef>::default();
                         self.from_wire_piece(&g, ew, &mut rb)
                     };
-                    if self.values_equal_guarded(e, needle, 0, span)? {
+                    // ROOT the wire-reconstructed element: it is a fresh allocation held only in a
+                    // Rust local, and since M23 the eq may dispatch a user `eq` (VM re-entry → GC).
+                    if self.with_roots(&[e], |vm| vm.values_equal_guarded(e, needle, 0, span))? {
                         found = true;
                         break;
                     }
@@ -2999,7 +3001,9 @@ impl Vm {
                         let mut rb = super::fxhash::FxHashMap::<u32, GcRef>::default();
                         self.from_wire_piece(&g, kw, &mut rb)
                     };
-                    if self.values_equal_guarded(k, key, 0, span)? {
+                    // ROOT the wire-reconstructed key (fresh, Rust-local) across the possibly
+                    // re-entrant eq — see the `contains` arm.
+                    if self.with_roots(&[k], |vm| vm.values_equal_guarded(k, key, 0, span))? {
                         found = true;
                         break;
                     }
@@ -3036,8 +3040,9 @@ impl Vm {
                     // The value is rebuilt eagerly rather than after the eq, which is what keeps this
                     // to one guard; the cost is one extra rebuild per hash COLLISION that then fails
                     // eq (rare by construction) and the wires were already cloned eagerly for the same
-                    // reason. No rooting is needed across the eq: `values_equal_guarded` takes `&self`
-                    // (`arith.rs:1752`), so it cannot allocate or collect.
+                    // reason. BOTH reconstructions must be ROOTED across the eq: since M23
+                    // `values_equal_guarded` takes `&mut self` and may dispatch a user `eq` (VM
+                    // re-entry → GC), and `k`/`v` are fresh objects held only in Rust locals.
                     let (k, v) = {
                         let g = core.v.read().unwrap();
                         let entries = match &*g {
@@ -3056,7 +3061,7 @@ impl Vm {
                         let mut rb = super::fxhash::FxHashMap::<u32, GcRef>::default();
                         (k, self.from_wire_piece(&g, vw, &mut rb))
                     };
-                    if self.values_equal_guarded(k, key, 0, span)? {
+                    if self.with_roots(&[k, v], |vm| vm.values_equal_guarded(k, key, 0, span))? {
                         result = Some(v);
                         break;
                     }
@@ -3209,7 +3214,22 @@ impl Vm {
                 // Propagate a cyclic-operand depth fault (`?`) instead of swallowing it — consistent
                 // with `==` and every container membership site. The `?` runs BEFORE the store, so a
                 // fault leaves the box unchanged (the lock guard `g` drops on the early return).
-                let swapped = self.values_equal_guarded(cur, args[0], 0, span)?;
+                //
+                // This is the ONE equality site that stays STRUCTURAL: the compare runs under
+                // `core.v.lock()` so the compare-and-swap is atomic, and a user `eq` re-entering the
+                // VM here could touch the same `Atomic` and deadlock a non-reentrant mutex. The
+                // checker rejects a payload type that REACHES a user `eq` (`reject_eq_atomic_payload`),
+                // but that walk cannot see through a `Protocol` existential or an unresolved type
+                // param — so the property is ENFORCED here, by turning the hook off for the window,
+                // instead of being asserted from the checker's exhaustiveness. Cleared on the next
+                // statement (no `?` in between), so an `Err` compare cannot leave it stuck on.
+                // ponytail: eq-under-lock ceiling — if `Atomic[T]` ever admits a user-`eq` payload,
+                // read under the lock → drop it → eq → re-acquire → verify the value is unchanged via
+                // `wire_summary` → swap.
+                self.eq_hook_off = true;
+                let cmp = self.values_equal_guarded(cur, args[0], 0, span);
+                self.eq_hook_off = false;
+                let swapped = cmp?;
                 if swapped {
                     // Reject a non-crossable store BEFORE the assignment — a failed store leaves the
                     // box unchanged (recoverable, no partial write). `ensure_crossable` borrows `&self`

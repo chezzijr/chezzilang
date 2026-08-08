@@ -84,6 +84,8 @@ struct M:
     fn compare(self, o: M) -> int:
         junk := [str(self.c), str(o.c)]
         return self.c - o.c
+    fn eq(self, o: M) -> bool:
+        return self.c == o.c
 fn make() -> List[M]:
     xs := []
     i := 0
@@ -102,6 +104,39 @@ fn main():
     print(\"ok\")
 main()";
     assert_eq!(run_capture_stress(src), "00123456\nok\n");
+}
+
+/// M23 — `==` dispatching to a user `eq` that ALLOCATES (triggering GC mid-compare). `eq_operator`
+/// POPS both operands before `run_proto`, so an inline-temporary operand (`M(1) == M(2)`) is reachable
+/// only through the argument vec while the callee runs — the same rooting question
+/// `struct_sort_survives_gc_stress` asks of `compare`. Not expressible in `tests/chz/` (no way to force
+/// a collection from `assert`), which is why it lives here.
+#[test]
+fn struct_eq_dispatch_survives_gc_stress() {
+    let src = "\
+struct M:
+    c: int
+    fn eq(self, o: M) -> bool:
+        junk := [str(self.c), str(o.c)]
+        return junk[0] == junk[1]
+fn make(n: int) -> M:
+    return M(n)
+fn main():
+    a := make(3)
+    out := \"\"
+    i := 0
+    while i < 8:
+        # both an inline-temporary operand and a rooted local, plus the negated spelling
+        if a == make(i % 4):
+            out = out + \"y\"
+        elif make(i) != make(i):
+            out = out + \"!\"
+        else:
+            out = out + \"n\"
+        i = i + 1
+    print(out)
+main()";
+    assert_eq!(run_capture_stress(src), "nnnynnny\n");
 }
 
 /// A struct key's `hash()` allocates (triggering GC mid-operation). The map/set obj and the
@@ -166,6 +201,233 @@ main()";
     assert_eq!(run_capture_stress(src), "3\n4\n5\n2\n2\n");
 }
 
+/// M23 Task 4 — the CONTAINER twin of [`set_struct_hash_survives_gc_stress`]: every probe now
+/// dispatches a user `eq`, so a probe re-enters the VM (and can collect) where before it was pure
+/// `&self`. The receiver, the needle, the wire of a half-built local `SetData`/`MapData`/`Vec` and a
+/// freshly-snapshotted key are all off the operand stack at that moment. `hash` is deliberately
+/// allocation-FREE here so the only re-entry under test is `eq`'s. Inline-temporary receivers
+/// (`make_set().has(..)`) are the sharpest case: nothing but the rooting keeps them alive.
+#[test]
+fn set_struct_eq_survives_gc_stress() {
+    let src = "\
+struct K:
+    n: int
+    fn hash(self) -> int:
+        return self.n % 3
+    fn eq(self, o: K) -> bool:
+        junk := [str(self.n), str(o.n)]
+        return junk[0] == junk[1]
+fn make_set() -> Set[K]:
+    return Set([K(1), K(2), K(2), K(3)])
+fn make_list() -> List[K]:
+    return [K(1), K(2), K(2), K(3)]
+fn make_map() -> Map[K, str]:
+    m: Map[K, str] = {}
+    i := 0
+    while i < 6:
+        m[K(i)] = str(i)
+        i = i + 1
+    return m
+fn main():
+    a := make_set()
+    print(a.len())
+    a.add(K(3))
+    a.add(K(4))
+    print(a.len())
+    b := Set([K(3), K(4), K(5)])
+    print(a.union(b).len(), a.intersection(b).len(), a.difference(b).len())
+    print((a | b).len(), (a ^ b).len())
+    print(make_set().has(K(2)))              # inline-temporary receiver
+    print(K(3) in make_set())
+    print(make_list().index_of(K(3)), make_list().unique().len())
+    print(K(2) in make_list())
+    m := make_map()
+    print(m.has(K(4)), m.get(K(5)), make_map().get(K(2)), m[K(1)])
+    print(m.merge(make_map()).len(), m.remove(K(0)), m.len())
+    m.update(make_map())
+    print(m.len())
+    print({K(7): str(7), K(7): str(8)}.len(), {K(9), K(9)}.len())   # map/set literals
+    print(Map([(K(1), str(1)), (K(1), str(2))]).len())              # Map() ctor
+    print(Set(make_list()).len())                                   # Set() ctor
+main()";
+    // a = {1,2,3,4}; b = {3,4,5}; |a∪b|=5, |a∩b|=2, |a\\b|=2, |a^b|=3
+    assert_eq!(
+        run_capture_stress(src),
+        "3\n4\n5 2 2\n5 3\ntrue\ntrue\n3 3\ntrue\ntrue Some('5') Some('2') 1\n6 Some('0') 5\n6\n1 1\n1\n3\n"
+    );
+}
+
+/// M23 Task 4 — the `RwShared` read-view probes (`contains`/`has`/`get_key`) reconstruct the stored
+/// element/key FROM THE WIRE before comparing it, so that reconstruction is a fresh object reachable
+/// only from a Rust local while a now-re-entrant `eq` runs. `Atomic.cas` is deliberately absent: it
+/// compares under `core.v.lock()` and stays on the structural path (see `netio.rs`).
+#[test]
+fn rwshared_struct_eq_survives_gc_stress() {
+    let src = "\
+import std.concurrency
+struct K:
+    n: int
+    fn hash(self) -> int:
+        return self.n % 3
+    fn eq(self, o: K) -> bool:
+        junk := [str(self.n), str(o.n)]
+        return junk[0] == junk[1]
+fn main():
+    # LIST values, not str: a freshly-rebuilt list can never alias an interned program constant,
+    # so an unrooted `v` really is collectable while `eq` runs.
+    m: Map[K, List[str]] = {K(1): [str(1)], K(2): [str(2), str(3)]}
+    box := RwShared(m)
+    print(box.has(K(1)), box.has(K(9)), box.get_key(K(2)), box.get_key(K(9)))
+    s := RwShared(Set([K(1), K(2)]))
+    print(s.contains(K(2)), s.contains(K(7)))
+main()";
+    assert_eq!(
+        run_capture_stress(src),
+        "true false Some(['2', '3']) None\ntrue false\n"
+    );
+}
+
+/// M23 adversarial review, HIGH — a container-equality arm SNAPSHOTS the child handles into a Rust
+/// local and then walks it. The M23 rooting design rooted the two source CONTAINERS, which does not
+/// keep those children alive: an `eq` that empties the sources orphans every element still to be
+/// compared, and the next `heap.get` on one is `dangling GcRef` (an uncatchable abort) — or, before
+/// the collection catches up, a compare against a recycled object. The defence measured the same
+/// `xs == ys` answering `true` at 0 allocations, `false` at 2000 and aborting at 40000: equality
+/// whose ANSWER depends on GC timing. Under `run_capture_stress` (collect at every allocation) the
+/// pre-fix binary aborts on the first arm below; the fix roots the snapshot itself
+/// (`Vm::with_elem_roots`), inductively down the recursion.
+///
+/// Every arm the review named is exercised: list, tuple, set, map (keys AND values), struct fields,
+/// enum payloads, plus `seq_slot`'s callers (`in` / `contains` / `index_of` / `unique`) and the
+/// set-algebra worker.
+#[test]
+fn container_eq_snapshot_survives_an_eq_that_empties_the_sources() {
+    let src = "\
+xs: List[K] = []
+ys: List[K] = []
+armed: List[int] = []
+
+struct K:
+    n: int
+    fn hash(self) -> int:
+        return 0
+    fn eq(self, o: K) -> bool:
+        # ONE mutation per armed walk: EMPTY the two source lists in place, so the only remaining
+        # reference to the elements the caller already snapshotted is that Rust-local snapshot —
+        # then allocate, so the stress collector actually runs while the walk still holds them.
+        if armed.len() > 0:
+            armed.remove_at(0)
+            while xs.len() > 0:
+                xs.remove_at(0)
+            while ys.len() > 0:
+                ys.remove_at(0)
+            junk := [str(self.n), str(o.n)]
+        return self.n == o.n
+
+fn reset():
+    while armed.len() > 0:
+        armed.remove_at(0)
+    while xs.len() > 0:
+        xs.remove_at(0)
+    while ys.len() > 0:
+        ys.remove_at(0)
+    xs.push(K(1))
+    xs.push(K(2))
+    ys.push(K(1))
+    ys.push(K(2))
+
+fn arm():
+    armed.push(1)
+
+fn main():
+    # The List arm: the compare of element 0 empties both sources; element 1 is compared from the
+    # snapshot alone. Pre-fix this is `dangling GcRef` (abort) under stress.
+    reset()
+    arm()
+    print(xs == ys)
+    # A nested list — the recursion must root at EVERY level, not just the top.
+    reset()
+    arm()
+    print([xs] == [ys])
+    # `seq_slot`'s callers: `in`, `contains`, `index_of` (the needle is a FRESH K, so the identity
+    # short-circuit cannot hide the dispatch).
+    reset()
+    arm()
+    print(K(2) in xs)
+    reset()
+    arm()
+    print(xs.contains(K(2)))
+    reset()
+    arm()
+    print(xs.index_of(K(2)))
+    # `unique` walks its own accumulator as well as the receiver snapshot.
+    reset()
+    arm()
+    print(xs.unique().len())
+    # Set algebra: `mine`/`other`/`out` are three Rust locals over the same orphaned elements.
+    reset()
+    sa := Set(xs)
+    sb := Set(ys)
+    reset()
+    arm()
+    print(sa.union(sb).len())
+main()";
+    assert_eq!(run_capture_stress(src), "true\ntrue\ntrue\ntrue\n1\n2\n2\n");
+}
+
+/// The Map and Set container arms of the same defect: a heap Map/Set is the one container a user
+/// `eq` can empty IN PLACE while its entries are being walked out of a Rust-local snapshot.
+#[test]
+fn map_and_set_eq_snapshot_survives_an_eq_that_empties_the_sources() {
+    let src = "\
+sa: Set[K] = Set([])
+sb: Set[K] = Set([])
+ma: Map[K, List[str]] = {}
+mb: Map[K, List[str]] = {}
+armed: List[int] = []
+
+struct K:
+    n: int
+    fn hash(self) -> int:
+        return self.n
+    fn eq(self, o: K) -> bool:
+        if armed.len() > 0:
+            armed.remove_at(0)
+            sa.remove(K(1))
+            sa.remove(K(2))
+            sb.remove(K(1))
+            sb.remove(K(2))
+            ma.remove(K(1))
+            ma.remove(K(2))
+            mb.remove(K(1))
+            mb.remove(K(2))
+            junk := [str(self.n), str(o.n)]
+        return self.n == o.n
+
+fn reset():
+    while armed.len() > 0:
+        armed.remove_at(0)
+    sa.add(K(1))
+    sa.add(K(2))
+    sb.add(K(1))
+    sb.add(K(2))
+    # LIST values, not str: a rebuilt list can never alias an interned program constant.
+    ma[K(1)] = [str(1)]
+    ma[K(2)] = [str(2)]
+    mb[K(1)] = [str(1)]
+    mb[K(2)] = [str(2)]
+
+fn main():
+    reset()
+    armed.push(1)
+    print(sa == sb)
+    reset()
+    armed.push(1)
+    print(ma == mb)
+main()";
+    assert_eq!(run_capture_stress(src), "true\ntrue\n");
+}
+
 /// Same hazard via `sort_by` with an allocating comparator on an inline-temporary list.
 #[test]
 fn struct_sort_by_inline_temporary_survives_gc_stress() {
@@ -175,6 +437,8 @@ struct M:
     fn compare(self, o: M) -> int:
         junk := [str(self.c)]
         return self.c - o.c
+    fn eq(self, o: M) -> bool:
+        return self.c == o.c
 fn make() -> List[M]:
     xs := []
     i := 0
