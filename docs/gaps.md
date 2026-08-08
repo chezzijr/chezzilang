@@ -3123,21 +3123,41 @@ Given that, the three "holes" are narrow and NOT worth building:
   chosen spelling — Python-consistent, no new keyword, and std already uses it by convention.)
 - Struct-**field** immutability (a `const` field) is a separate, unshipped axis (fields are all mutable).
 
-### L4b. `assert_native_protocol_shape_matches` does not guard `PathLike` — surfaced M23, unfixed
+### L4b. ~~`assert_native_protocol_shape_matches` does not guard `PathLike`~~ — **FIXED 2026-08-08**
 
-The debug-only drift guard (`src/checker/setup.rs:802`) `debug_assert_eq!`s each reserved protocol's
-`std/prelude.chz` decl against its `prebuilt_protocols` Rust seed. Its name list carries **20 of the
-21** reserved protocols: `PathLike` is mirrored in `std/prelude.chz` but absent from the list, so it
-is the one protocol shape that can drift between the `.chz` mirror and the Rust seed without any
-test noticing.
+The debug-only drift guard (`src/checker/setup.rs`) `debug_assert_eq!`s each reserved protocol's
+`std/prelude.chz` decl against its `prebuilt_protocols` Rust seed. Its name list carried **20 of the
+21** reserved protocols: `PathLike` was mirrored in `std/prelude.chz` but absent from the list, so it
+was the one protocol shape that could drift between the `.chz` mirror and the Rust seed without any
+test noticing. Pre-existing (it predated M23 — `PathLike` landed with W7-8 and was never added); M23
+only made it visible, when the "All 20 of them are drift-guarded here" comment stopped matching.
 
-Pre-existing (it predates M23 — `PathLike` landed with W7-8 and was never added to the list). M23
-only made it visible: the comment there used to read "All 20 of them are drift-guarded here", which
-matched the list length and so counted the gap away. It now names the omission instead.
+**FIXED** — `"PathLike"` is in the list; all 21 are guarded. The harvest was the deliverable, not the
+list edit: `PathLike`'s `std/prelude.chz` decl round-trips through `harvest_protocol_shape` and
+**matched the seed unchanged** (zero type params, zero embeds, one `as_path(self) -> bytes`), so
+neither side needed a correction. The guard was proven to actually EXECUTE for `PathLike` by drifting
+the mirror's return type to `str` in a debug build — it panicked with `protocol 'PathLike' method
+'as_path' sig drifted from prebuilt_protocols` — then reverting. (Debug build required: the body is
+`cfg!(debug_assertions)`-gated and is a no-op in release.)
 
-**Fix is one line** — add `"PathLike"` to the list — but do it with the harvest actually running:
-`PathLike`'s decl shape must round-trip through `harvest_protocol_shape` first, and if it does not,
-that mismatch is the real finding, not the missing list entry.
+**FOLLOW-UP — the MECHANISM is gone, not just the instance (2026-08-08).** The list edit closed the
+`PathLike` case and left intact the thing that produced it: the reserved set was written out **three**
+independent times (`is_reserved_protocol`'s `matches!`, `prebuilt_protocols`'s keys, the guard's own
+literal list) plus **two** stale hand-copied subsets in `checker/tests.rs` (16 and 17 of 21 names), and
+nothing forced any of them to agree — a 22nd protocol re-opens the identical hole silently. Now there
+is one declaration, `checker::RESERVED_PROTOCOLS`: `is_reserved_protocol` is a `.contains` over it (all
+its callers are per-DECLARATION hoist/setup checks, so the linear scan over 21 entries is off any hot
+path — it sits beside an identical `native::ffi::TYPE_NAMES.contains(..)`), the guard iterates it, and
+both test lists are driven from it. The guard **additionally** `debug_assert_eq!`s the const's contents
+against `prebuilt_protocols`'s key set — the half a const alone does not solve, catching *reserved but
+not seeded* (a bound resolving to nothing) and *seeded but not reserved* (a builtin a user can shadow).
+That set assertion passed unchanged on the first run, so no pre-existing mismatch was hiding behind the
+three lists; widening the two test subsets to all 21 also passed, so the five names they had never
+covered (`Any`, `Eq`, `Iterator`, `Contains`, `PathLike`) were already correctly rejected at their decl
+sites. Proven to fire, in a debug build, in both directions: deleting `"Contains"` from the const and
+adding an unseeded `"Bogus"` each panicked `RESERVED_PROTOCOLS and prebuilt_protocols disagree on the
+reserved protocol set` with the two sorted sets diffed, then reverted. Adding a protocol is now a
+two-place edit (the const + a seed) that fails loudly if you do only one.
 
 ### L5. Operator-protocol holes
 The reserved set (`Add Sub Mul Div Mod Neg Arithmetic Comparable Stringable Hashable Index IndexSet

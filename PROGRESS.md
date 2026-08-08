@@ -2,6 +2,44 @@
 
 Single source of truth for "what am I doing next." Update after every work session.
 
+> # ✅ `PathLike` is drift-guarded — all 21 reserved protocols, not 20 (2026-08-08)
+>
+> `assert_native_protocol_shape_matches` (the debug-only guard that `debug_assert_eq!`s each reserved
+> protocol's `std/prelude.chz` decl against its `prebuilt_protocols` Rust seed) carried 20 of the 21
+> names. `PathLike` was mirrored in the prelude but absent from the list, so its shape was the one that
+> could drift with nothing noticing — pre-existing since W7-8, surfaced by M23. `docs/gaps.md` §L4b is
+> retired.
+>
+> **The harvest running was the deliverable, not the list entry.** `PathLike`'s decl round-trips
+> through `harvest_protocol_shape` and **matched the seed unchanged** (zero type params, zero embeds,
+> one `as_path(self) -> bytes`), so neither side needed correcting. That the guard now really executes
+> for `PathLike` was proven by drifting the mirror's return type to `str` in a **debug** build (the
+> body is `cfg!(debug_assertions)`-gated, a no-op in release): it panicked with `protocol 'PathLike'
+> method 'as_path' sig drifted from prebuilt_protocols`; reverted. No runtime behavior change.
+>
+> # ✅ M23 follow-up — the `Comparable: Eq` migration hint now fires on the BOUND path too (2026-08-08)
+>
+> M23's migration diagnostic ("`Comparable` embeds `Eq`, so a type defining `compare` must define
+> `eq` too") was wired only to the `<` operator; a `[T: Comparable]` bound still printed the bare
+> `type Ver does not satisfy Eq (missing method 'eq')`. The sentence now has ONE source
+> (`Checker::eq_migration_hint`) and two call sites — the operator reject and `enforce_bounds`. Message
+> text only: no program's accept/reject verdict moves.
+>
+> * **The newtype case gets DIFFERENT text, because it is a dead end, not a missing method.** A
+>   newtype's own `compare` can never satisfy `Comparable` — the embed requires `Eq`, and declaring
+>   `eq` on any newtype is itself an error (its `==` always unwraps to the underlying's native
+>   equality). So `type Box[int] does not satisfy Eq` now continues "…and a newtype can never define
+>   `eq` … so a `compare` method can never make a newtype satisfy `Comparable` — use a struct if you
+>   need your own ordering". Telling that user to add `eq` would have sent them straight into a second
+>   diagnostic. The claim is scoped to a `compare`-declaring newtype deliberately: a **numeric**
+>   newtype *does* satisfy `Comparable`, intrinsically via the underlying's native ordering (it cannot
+>   reach the hint — `compare` on it is rejected at the decl site — but the wider claim would be false).
+> * **The hint does not over-fire**, pinned by three controls: a type with no `compare` at all, a bare
+>   `T: Eq` bound, and a user protocol that requires only `compare`. The bound must require BOTH
+>   `compare` and `eq` (i.e. it is `Comparable` or embeds it, transitively) before the sentence is
+>   appended; the struct/enum half additionally fires only when `eq` is genuinely ABSENT, so a
+>   declared-but-wrong-signature `eq` keeps its own reason.
+>
 > # ✅ M23 review fixes — a re-entrant `eq` can no longer panic, orphan, or run under a lock (2026-08-08)
 >
 > An adversarial review of M23 found eight ways the new "equality can run arbitrary user code" reality

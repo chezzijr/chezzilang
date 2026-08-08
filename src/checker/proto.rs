@@ -2059,12 +2059,47 @@ impl Checker {
         }
     }
 
-    /// The methods a struct/enum DECLARES (`None` for anything else) — for diagnostics that need to
-    /// ask "did the user write this method at all?", which conformance alone can't answer.
+    /// The methods a struct/enum/newtype DECLARES (`None` for anything else) — for diagnostics that
+    /// need to ask "did the user write this method at all?", which conformance alone can't answer.
     fn declared_methods(&self, ty: &Ty) -> Option<&HashMap<String, FnSig>> {
         match ty {
             Ty::Struct(name, _) => self.struct_shape(name).map(|i| &i.methods),
             Ty::Enum(name, _) => self.enum_methods_of(name),
+            Ty::NewType(key, _) => self.newtype_methods_of(key),
+            _ => None,
+        }
+    }
+
+    /// M23 — the ONE source of the `Comparable`-embeds-`Eq` migration sentence, shared by the two
+    /// rejections that need it: the `<` operator ([`Self::missing_eq_note`]) and a generic bound
+    /// ([`Self::enforce_bounds`]). `None` = no hint, so a type that never wrote `compare` keeps its
+    /// pre-M23 bare wording (the hint must not over-fire), and so does one whose `eq` exists but was
+    /// rejected for its own reason (wrong signature, unmet `where`) — telling that user to add `eq`
+    /// would misdirect.
+    fn eq_migration_hint(&self, ty: &Ty) -> Option<String> {
+        let methods = self.declared_methods(ty)?;
+        if !methods.contains_key("compare") {
+            return None;
+        }
+        match ty {
+            // A newtype is a DEAD END, not a missing method: declaring `eq` on ANY newtype is itself
+            // an error (`setup.rs` — its `==` always unwraps to the underlying's native equality), so
+            // the struct/enum sentence would be actively wrong here — no method can fix this; only a
+            // different type kind can. The claim is scoped to a `compare`-DECLARING newtype on
+            // purpose: a NUMERIC newtype does satisfy `Comparable`, intrinsically via the underlying's
+            // native ordering — but it can't reach this arm, because declaring `compare` on one is
+            // itself rejected at the decl site and the intrinsic grant means its bound never fails.
+            Ty::NewType(..) => Some(
+                "`Comparable` embeds `Eq`, and a newtype can never define `eq` (its `==` always \
+                 unwraps to the underlying's native equality, so the method and the operator would \
+                 disagree), so a `compare` method can never make a newtype satisfy `Comparable` — \
+                 use a struct if you need your own ordering"
+                    .to_string(),
+            ),
+            _ if !methods.contains_key("eq") => Some(
+                "`Comparable` embeds `Eq`, so a type defining `compare` must define `eq` too"
+                    .to_string(),
+            ),
             _ => None,
         }
     }
@@ -2077,19 +2112,18 @@ impl Checker {
     /// already prints. Empty string for every other rejection, so a type with no comparator at all
     /// keeps the pre-M23 wording.
     pub(super) fn missing_eq_note(&self, l: &Ty, r: &Ty) -> String {
-        if !compatible(l, r)
-            || !self
-                .declared_methods(l)
-                .is_some_and(|m| m.contains_key("compare"))
-        {
+        if !compatible(l, r) {
             return String::new();
         }
         match self.satisfies(l, "Comparable") {
             // MISSING `eq` only — a declared-but-failing `eq` (wrong signature, unmet `where`) was
-            // rejected for its own reason, and telling that user to add `eq` would misdirect.
-            Err(why) if why.contains("missing method 'eq'") => format!(
-                " — {why}: `Comparable` embeds `Eq`, so a type defining `compare` must define `eq` too"
-            ),
+            // rejected for its own reason, and telling that user to add `eq` would misdirect. A
+            // newtype never produces this text (its arm rejects `Eq` outright), so the operator
+            // wording here is unchanged by the newtype branch of `eq_migration_hint`.
+            Err(why) if why.contains("missing method 'eq'") => self
+                .eq_migration_hint(l)
+                .map(|hint| format!(" — {why}: {hint}"))
+                .unwrap_or_default(),
             _ => String::new(),
         }
     }
@@ -2662,7 +2696,22 @@ impl Checker {
                         .map(|a| subst(&self.resolve_bound_arg(a, tps, span), sub))
                         .collect();
                     if let Err(msg) = self.satisfies_args(concrete, &bound.name, &bargs) {
-                        self.error(span, msg);
+                        // M23 migration hint (the operator path's twin): a bound that requires BOTH
+                        // `compare` AND `eq` is a `Comparable`-shaped one, so a type that wrote only
+                        // `compare` gets told why it stopped conforming. Requiring both names is what
+                        // keeps this off a bare `T: Eq` bound (no `compare`) and off a user protocol
+                        // that merely has its own `compare` (no `eq`) — neither is the ratchet.
+                        let note = (self.protocol_has_method(&bound.name, "compare")
+                            && self.protocol_has_method(&bound.name, "eq"))
+                        .then(|| self.eq_migration_hint(concrete))
+                        .flatten();
+                        self.error(
+                            span,
+                            match note {
+                                Some(hint) => format!("{msg}: {hint}"),
+                                None => msg,
+                            },
+                        );
                     }
                 }
             }
