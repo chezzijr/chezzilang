@@ -45,8 +45,10 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > newly reachable). (3) An `eq` that **mutates the container being probed** gets an unspecified answer
 > (a stale position reads as a miss), never a panic. (4) **`Atomic.cas` compares structurally**, never
 > via a user `eq` — which is why a type defining `eq` is a rejected `Atomic[T]` payload.
-> (5) Open residual: a **non-numeric newtype may still declare `eq`** and its `.eq()` disagrees with
-> `==` (`docs/gaps.md` §L5) — a wart, not a soundness hole.
+> (5) A **newtype may not declare `eq` at all** — on any underlying, numeric or not, and at any operand
+> signature: its `==` unwraps to the underlying's native equality and reaches no user method, so the
+> name is a compile error at the declaration (W6-3d's numeric-only gate widened; `docs/gaps.md` §L5,
+> closed 2026-08-08). Use a `struct` if you need your own equality.
 >
 > **Cost.** `map` **+4.1%**, the eight other benches flat-to-faster (`docs/benchmarks.md`); the price
 > of `values_equal_guarded`/`*_slot` becoming `&mut self` so a probe can call user code.

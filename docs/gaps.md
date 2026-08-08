@@ -3137,10 +3137,10 @@ and the recursive element/field/entry arms) route through the SAME dispatch — 
 coarser than its type's `hash` is structurally unreachable, exactly as in Rust/Python).
 `Atomic.cas` is the one deliberate exception: it compares under the value lock, so it stays
 structural — and a type with a user `eq` is already an illegal `Atomic[T]` payload.
-**Open residual (small, low, found writing the M23 docs): a NON-numeric `newtype` may still declare
-`eq`.** The W6-3d decl-site rule only fires for a *numeric* newtype, on the premise that a non-numeric
-one "has no operator to disagree with" — true for `+`/`<`, false for `==`, which exists for every
-newtype underlying. Measured on `5b699c9b`, both engines:
+**Residual (found writing the M23 docs) — FIXED 2026-08-08: a `newtype` may no longer declare `eq`, on
+ANY underlying.** The W6-3d decl-site rule used to fire only for a *numeric* newtype, on the premise
+that a non-numeric one "has no operator to disagree with" — true for `+`/`<`, false for `==`, which
+exists for every newtype underlying. Measured on `5b699c9b`, both engines:
 ```chezzi
 newtype Name = str:
     fn eq(self, o: Name) -> bool: return true
@@ -3148,9 +3148,22 @@ a := Name("a")
 b := Name("b")
 print(a == b, a.eq(b))     # false true   <- the two spellings disagree
 ```
-`Name` does not satisfy `Eq` (so a `[T: Eq]` bound still rejects it) and the answer is stable across
-engines, so this is a wart, not a soundness hole. Fix = widen the W6-3d gate to reject `eq` on **any**
-newtype (one predicate); documented as-is in `docs/syntax.md`'s newtype section meanwhile.
+`Name` never satisfied `Eq` (so a `[T: Eq]` bound already rejected it) and the answer was stable across
+engines, so it was a wart, not a soundness hole — but it was the *milestone's own* defect one type-kind
+over, so it ships fixed rather than filed. `eq` moved out of W6-3d's numeric-only list into an
+unconditional per-newtype reject (`checker/setup.rs`, the newtype arm), with its own message naming
+`==` (one diagnostic per declaration: a numeric newtype matches both premises and still reports once).
+Task 3's struct/enum carve-out — a *generic* operand (`fn eq(self, x: T)`) marks an ordinary method and
+leaves `==` structural — deliberately does **not** transfer: it exists to tell the hook apart from a
+same-named ordinary method on a type whose `==` *does* dispatch, and a newtype's dispatches to no user
+method at all, so both operand shapes are rejected. Ruling (b) — make `==` dispatch to it, as Rust's
+`impl PartialEq` on a tuple struct and Python's `__eq__` on a wrapper do — is the same one W6-3d
+implemented and rejected for `compare`: the numeric intrinsic grant is unconditional, so a
+heterogeneous `List[Eq]` would take the user's equality for a same-newtype pair and the native one for
+a newtype/underlying pair, giving non-transitive equality with no fault. Pinned by
+`checker::tests::newtype_eq_method_rejected_at_decl` (numeric / non-numeric / both generic operand
+shapes / the ordinary-method + `compare` boundary) and, for the behavior that remains, by
+`tests/chz/spec/intrinsic_proto_methods_test.chz::newtype_equality_is_the_underlyings` on both engines.
 Still missing: bitwise/shift protocols, and a call operator. Small
 each. **`Contains`** (`x in my_struct` via `contains(self, item) -> bool`, Python's `__contains__`) —
 **FIXED**: a user struct/enum with a `contains(self, item) -> bool` method makes `x in that_value`

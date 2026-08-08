@@ -1215,20 +1215,41 @@ v := same(Wrap(1), Wrap(2))
     entry_rejects(src, "does not satisfy Eq");
 }
 
-/// W6-3d extended to `eq`: a NUMERIC newtype gets the intrinsic `Eq` grant (its `==` is the
-/// underlying's native equality), and intrinsic method dispatch is MISS-ONLY — so a user `eq` method
-/// would answer `.eq()` while `==` answered natively: two spellings of one protocol operation
-/// disagreeing silently. Rejected at the declaration site, exactly like `compare`.
+/// W6-3d extended to `eq` — on EVERY newtype, not just a numeric one (`docs/gaps.md` L5, closed
+/// 2026-08-08). A newtype's `==` always unwraps to the underlying's native equality and never reaches
+/// a user method, while `.eq()` does reach it: two spellings of one protocol operation disagreeing
+/// silently. W6-3d's "a non-numeric newtype has no operator to disagree with" is true for `+`/`<` and
+/// FALSE for `==`, which every underlying defines. Rejected at the declaration site.
 #[test]
-fn numeric_newtype_eq_method_rejected_at_decl() {
+fn newtype_eq_method_rejected_at_decl() {
+    // numeric — was already rejected by W6-3d's list; still is, and with ONE diagnostic.
+    let numeric = "newtype Meters = float:\n    fn eq(self, o: Meters) -> bool:\n        return true\nm := Meters(1.0)\nprint(m == m)\n";
+    entry_rejects(numeric, "never dispatched as an operator");
+    assert_eq!(
+        check_entry(numeric).len(),
+        1,
+        "a numeric newtype's `eq` matches both premises — it must still report exactly once"
+    );
+    // NON-numeric — the L5 hole. `Name("a") == Name("b")` was `false` while `.eq()` said `true`.
     entry_rejects(
-        "newtype Meters = float:\n    fn eq(self, o: Meters) -> bool:\n        return true\nm := Meters(1.0)\nprint(m == m)\n",
+        "newtype Name = str:\n    fn eq(self, o: Name) -> bool:\n        return true\nn := Name(\"a\")\nprint(n == n)\n",
+        "always unwraps to str's native equality",
+    );
+    // GENERIC — Task 3's generic-operand carve-out does NOT transfer: it disambiguates the hook from
+    // an ordinary method on a type whose `==` dispatches, and a newtype's never does. Both operand
+    // shapes are rejected, so no `eq` on a newtype can be read as equality-that-`==`-ignores.
+    entry_rejects(
+        "newtype Wrap[T] = T:\n    fn eq(self, o: Wrap[T]) -> bool:\n        return true\nw := Wrap(1)\nprint(w == w)\n",
         "never dispatched as an operator",
     );
-    // BOUNDARY: a NON-numeric newtype has no intrinsic grant, so its `eq` is an ordinary method with
-    // no protocol promise to break — it stays legal, exactly as its `compare` does today.
+    entry_rejects(
+        "newtype Wrap[T] = T:\n    fn eq(self, x: T) -> bool:\n        return true\nw := Wrap(1)\nprint(w == w)\n",
+        "never dispatched as an operator",
+    );
+    // BOUNDARY: only the name `eq` moves. Ordinary methods on a non-numeric newtype stay legal, and
+    // so do its `add`/`compare` (no `+`/`<` exists on a `str` newtype to disagree with them).
     entry_ok(
-        "newtype Name = str:\n    fn eq(self, o: Name) -> bool:\n        return true\nn := Name(\"a\")\nprint(n.eq(n))\n",
+        "newtype Name = str:\n    fn same(self, o: Name) -> bool:\n        return true\n    fn compare(self, o: Name) -> int:\n        return 0\nn := Name(\"a\")\nprint(n.same(n))\n",
     );
 }
 

@@ -2601,28 +2601,57 @@ impl Checker {
                     // fault. (c) — drop the grant when such a method exists — leaves `+` diverging
                     // still. Only (a) makes the two-orders state unrepresentable. Cost: a numeric
                     // newtype can no longer define these names at all, even to call deliberately.
-                    // Non-numeric/generic newtypes are NOT affected: they have no operator to disagree
-                    // with (`satisfies` already rejects the operator protocols for them).
+                    // Non-numeric/generic newtypes are NOT affected FOR THE ARITHMETIC AND ORDERING
+                    // names: they have no operator to disagree with (`satisfies` already rejects the
+                    // operator protocols for them).
+                    //
+                    // `eq` is the ONE name where that premise is false, so it is rejected on EVERY
+                    // newtype (gaps.md L5, closed 2026-08-08). "No operator to disagree with" holds for
+                    // `+`/`<` on a `newtype Name = str` — but `==` is defined on EVERY underlying, so
+                    // `Name("a") == Name("b")` unwraps to `str`'s native equality while
+                    // `Name("a").eq(Name("b"))` runs the user's method: the identical two-spellings-
+                    // disagree shape, one type-kind over. The M23 rule is that no type may declare an
+                    // `eq` that `==` silently ignores, and a newtype's `==` ignores ALL of them.
+                    // Task 3's struct/enum carve-out (a generic operand = an ordinary method, not the
+                    // hook) does NOT transfer: it exists to tell the hook apart from a same-named
+                    // ordinary method on a type whose `==` DOES dispatch. A newtype has no hook to tell
+                    // anything apart from, so the name is simply unusable here — rename it, or use a
+                    // struct. Ruling (b) (make `==` dispatch to it, as Rust's `impl PartialEq` on a
+                    // tuple struct and Python's `__eq__` on a wrapper do) is the same one W6-3d
+                    // implemented and rejected for `compare`: a numeric newtype's intrinsic grant is
+                    // unconditional, so a heterogeneous `List[Eq]` would take the user's equality for a
+                    // same-newtype pair and the native one for a newtype/underlying pair — equality
+                    // that is not transitive, with no fault.
                     // `neg` is deliberately NOT in this list. Unary `-` has no newtype path at all
                     // (`Neg` is absent from the intrinsic grant — `proto.rs`, and `satisfies`'s
                     // newtype arm returns `Err` for it), so `-m` on a numeric newtype is ALREADY a
                     // type error ("cannot negate Meters"). There is therefore no operator for a
                     // `neg` method to disagree with — it is the only spelling of negation available,
                     // and rejecting it would delete working code under a false premise.
-                    if type_params.is_empty() && under_ty.is_numeric() {
-                        for m in methods {
-                            if matches!(
+                    let numeric = type_params.is_empty() && under_ty.is_numeric();
+                    for m in methods {
+                        // `eq` first, and unconditionally — a numeric newtype hits BOTH premises, and
+                        // one diagnostic per declaration is the point (the `else if` is the dedupe).
+                        if m.name == "eq" {
+                            self.error(
+                                m.name_span,
+                                format!(
+                                    "operator method 'eq' on a newtype is never dispatched as an operator — a newtype's '==' always unwraps to {under_ty}'s native equality, so '.eq()' and '==' would disagree; use a struct if you need your own equality"
+                                ),
+                            );
+                        } else if numeric
+                            && matches!(
                                 m.name.as_str(),
-                                "add" | "sub" | "mul" | "div" | "mod" | "compare" | "eq"
-                            ) {
-                                self.error(
-                                    m.name_span,
-                                    format!(
-                                        "operator method '{}' on a numeric newtype is never dispatched as an operator — a numeric newtype inherits {under_ty}'s operators, so '.{}()' and the operator would disagree; use a struct if you need your own arithmetic",
-                                        m.name, m.name
-                                    ),
-                                );
-                            }
+                                "add" | "sub" | "mul" | "div" | "mod" | "compare"
+                            )
+                        {
+                            self.error(
+                                m.name_span,
+                                format!(
+                                    "operator method '{}' on a numeric newtype is never dispatched as an operator — a numeric newtype inherits {under_ty}'s operators, so '.{}()' and the operator would disagree; use a struct if you need your own arithmetic",
+                                    m.name, m.name
+                                ),
+                            );
                         }
                     }
                     // `Self` in a method sig resolves to this concrete newtype (parameterized by its

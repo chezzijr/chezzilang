@@ -1348,8 +1348,9 @@ print(Ver(1, "alpha") != Ver(1, "beta"))         # false — `!=` is the same di
 ```
 
 For a struct/enum, `a.eq(b)` and `a == b` are **one** dispatch in both directions, so a `[T: Eq]` body
-may spell either. (For a *newtype* they are not: its `==` unwraps to the underlying's native equality —
-see the paragraph below.) Dispatch is by the operands' **runtime type**: both sides must be the same
+may spell either. (A *newtype* cannot get into that position at all: its `==` unwraps to the
+underlying's native equality, so declaring an `eq` on one is a compile error — see the newtype section
+below.) Dispatch is by the operands' **runtime type**: both sides must be the same
 struct/enum type or the comparison stays structural `false` without calling user code, and for an enum
 it is the *enum* that decides — one `eq` also answers `Shape.Circle == Shape.Square` (Rust `PartialEq` /
 Python `__eq__` compare across variants).
@@ -1776,16 +1777,18 @@ the **non-operator** prebuilt protocols by defining the relevant method — `str
 display override) and `hash(self)` (so it can be a `map`/`set` key — opt-in, *not* inherited from the
 underlying) — so it passes into those protocol-bound generics (`fn show[T: Stringable](x: T)`). The
 **operator** protocols (`Add`/`Sub`/`Mul`/`Div`/`Mod`/`Neg`/`Comparable`/`Eq`) are **not** satisfiable by a
-newtype method: a newtype's own `add`/`div`/`compare`/`eq`/… is never dispatched as an operator (the
+newtype method: a newtype's own `add`/`div`/`compare`/… is never dispatched as an operator (the
 same-type arm always auto-flows to the underlying's native op/ordering/equality), so only a **numeric**
 underlying supplies them — a numeric newtype satisfies `Add`/`Sub`/`Mul`/`Div`/`Mod`/`Comparable`
-intrinsically (native same-type ops above), while a `newtype Name = str` with an `add` (or `compare`,
-or `eq`) method does **not** pass `fn twice[T: Add](x: T)` (or `fn sorted[T: Comparable](xs: T)`, or
-`fn same[T: Eq](a: T, b: T)`) — its `<` / `==`
+intrinsically (native same-type ops above), while a `newtype Name = str` with an `add` (or `compare`)
+method does **not** pass `fn twice[T: Add](x: T)` (or `fn sorted[T: Comparable](xs: T)`) — its `<`
 would silently use the underlying's native ordering, never the method, so the checker rejects it.
+(`eq` never even reaches that question: declaring one on **any** newtype is a compile error — see
+below — so no newtype satisfies `Eq` through a method, and only a numeric one satisfies it at all.)
 
 Because of that, a **numeric** newtype may not *define* a method named after an operator it actually
-inherits (`add`/`sub`/`mul`/`div`/`mod`/`compare`/`eq`) — it is a **compile error at the declaration**:
+inherits (`add`/`sub`/`mul`/`div`/`mod`/`compare`) — and **no** newtype, numeric or not, may define
+`eq` — it is a **compile error at the declaration**:
 
 ```chezzi
 newtype Score = int:
@@ -1798,14 +1801,31 @@ newtype Score = int:
 Without the rule the two spellings disagreed for that receiver: `.add()` dispatched the user's method
 (the miss-only intrinsic never shadows one) while `+` auto-flowed to `int`'s native op, so
 `twice(Score(1), Score(2))` gave `99` and `Score(1) + Score(2)` gave `3`. A numeric newtype inherits
-its underlying's operators; **use a `struct` if you need your own arithmetic.** The rule is narrow —
-non-numeric and generic newtypes are unaffected for the *arithmetic and ordering* names, since they
-have no such operator to disagree with. **`eq` is the one exception, and it is a known rough edge:**
-`==` exists for **every** newtype underlying, so a `newtype Name = str` with an `eq` method is accepted
-at the declaration yet `Name("a") == Name("b")` still unwraps to `str`'s native equality (`false`)
-while `Name("a").eq(Name("b"))` runs your method — the same two-spellings-disagree shape the numeric
-rule rejects. `Name` does not satisfy `Eq` either, so it cannot reach a `[T: Eq]` bound. Don't define
-`eq` on a newtype; use a `struct`. Tracked in `docs/gaps.md` §L5.
+its underlying's operators; **use a `struct` if you need your own arithmetic.** For the *arithmetic and
+ordering* names the rule is narrow — non-numeric and generic newtypes are unaffected, since they have
+no such operator to disagree with.
+
+**`eq` is the one name where that "no operator to disagree with" premise is false, so it is rejected on
+EVERY newtype** — numeric, non-numeric, or generic. `==` is defined on **every** underlying, so a
+`newtype Name = str` with an `eq` method would have `Name("a") == Name("b")` unwrap to `str`'s native
+equality (`false`) while `Name("a").eq(Name("b"))` ran the method — the identical two-spellings-disagree
+shape, one type-kind over:
+
+```chezzi
+newtype Name = str:
+    fn eq(self, o: Name) -> bool:   # error: operator method 'eq' on a newtype is never dispatched
+        return true                 # as an operator — a newtype's '==' always unwraps to str's …
+```
+
+Unlike a struct/enum — where a *generic* operand (`fn eq(self, x: T)`) marks the method as an ordinary
+one and leaves `==` structural — **no** signature rescues `eq` on a newtype: there is no hook to tell it
+apart from, because a newtype's `==` dispatches to no user method at all. Rename the method, or use a
+`struct` (whose `eq` **does** own its `==`). This is deliberate divergence from Rust — where a tuple
+struct may `impl PartialEq` and `==` uses it — and from Python's `__eq__` on a wrapper class: making a
+newtype's `==` dispatch was implemented and rejected for `compare` (a numeric newtype's intrinsic grant
+is unconditional, so a heterogeneous `List[Eq]`/`List[Comparable]` would take the user's answer for a
+same-newtype pair and the native one for a newtype/underlying pair — equality/ordering that is not
+transitive, with no fault).
 `neg` is the one operator-named method a numeric newtype MAY still define, because unary `-` has no
 newtype path at all (`-m` on a `newtype Meters = float` is already the error `cannot negate Meters`).
 With no operator to disagree with, a `neg` method is simply the only spelling of negation available.
