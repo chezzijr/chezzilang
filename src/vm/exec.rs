@@ -1747,18 +1747,11 @@ impl Vm {
                 }
             }
             Op::Lt | Op::LtEq | Op::Gt | Op::GtEq => self.compare_op(op, span)?,
-            Op::Eq => {
-                let r = self.pop();
-                let l = self.pop();
-                let eq = self.values_equal_guarded(l, r, 0, span)?;
-                self.push(Value::bool(eq));
-            }
-            Op::NotEq => {
-                let r = self.pop();
-                let l = self.pop();
-                let eq = self.values_equal_guarded(l, r, 0, span)?;
-                self.push(Value::bool(!eq));
-            }
+            // `return`, like `Op::Contains` below: `eq_operator` may re-enter user code (a struct/enum
+            // `eq`), so keeping its String/Vec temporaries out of `step`'s frame matters on the deep
+            // `step → run_proto → run_until → step` path.
+            Op::Eq => return self.eq_operator(false, span),
+            Op::NotEq => return self.eq_operator(true, span),
             Op::BitAnd | Op::BitOr | Op::BitXor | Op::Shl | Op::Shr => self.bitwise(op, span)?,
             // `return` (not `?`): keeps `step`'s frame from materializing an extra `RuntimeError`
             // temporary, which would bloat the deep re-entrant recursion path (`str(self)`-style

@@ -106,6 +106,39 @@ main()";
     assert_eq!(run_capture_stress(src), "00123456\nok\n");
 }
 
+/// M23 — `==` dispatching to a user `eq` that ALLOCATES (triggering GC mid-compare). `eq_operator`
+/// POPS both operands before `run_proto`, so an inline-temporary operand (`M(1) == M(2)`) is reachable
+/// only through the argument vec while the callee runs — the same rooting question
+/// `struct_sort_survives_gc_stress` asks of `compare`. Not expressible in `tests/chz/` (no way to force
+/// a collection from `assert`), which is why it lives here.
+#[test]
+fn struct_eq_dispatch_survives_gc_stress() {
+    let src = "\
+struct M:
+    c: int
+    fn eq(self, o: M) -> bool:
+        junk := [str(self.c), str(o.c)]
+        return junk[0] == junk[1]
+fn make(n: int) -> M:
+    return M(n)
+fn main():
+    a := make(3)
+    out := \"\"
+    i := 0
+    while i < 8:
+        # both an inline-temporary operand and a rooted local, plus the negated spelling
+        if a == make(i % 4):
+            out = out + \"y\"
+        elif make(i) != make(i):
+            out = out + \"!\"
+        else:
+            out = out + \"n\"
+        i = i + 1
+    print(out)
+main()";
+    assert_eq!(run_capture_stress(src), "nnnynnny\n");
+}
+
 /// A struct key's `hash()` allocates (triggering GC mid-operation). The map/set obj and the
 /// in-flight key/value — popped off the operand stack before dispatch — must stay rooted across
 /// every hash, including with an INLINE-TEMPORARY receiver (`make_map().get(k)`). Regression for

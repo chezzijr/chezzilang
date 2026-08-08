@@ -2372,7 +2372,8 @@ impl Checker {
             //
             // The runtime's cross-type pairs (`1 == 1.0`, `b"ab" == bytearray(...)`) are arms of
             // `may_be_equal` itself, so they compose through the recursion (`[1.0] == [1]`) instead
-            // of being a top-level special case. `equality_allowed` adds the user-`eq` overload.
+            // of being a top-level special case. A user `eq` overload adds NOTHING to ask here: it
+            // only ever applies to a same-type pair, which `may_be_equal` already accepts.
             // `either_unknown` keeps a prior error from cascading (and keeps both operands INFERRED,
             // which the range-in-value-position backstop depends on).
             Eq | NotEq => {
@@ -2395,7 +2396,7 @@ impl Checker {
                 } else {
                     (subst(&l, &pins), subst(&r, &pins))
                 };
-                let ok = self.may_be_equal(&l, &r) || self.equality_allowed(&l, &r);
+                let ok = self.may_be_equal(&l, &r);
                 if !ok && !either_unknown {
                     self.error(lhs.span, format!("cannot compare {l} and {r} for equality"));
                 }

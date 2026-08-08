@@ -2022,20 +2022,15 @@ impl Checker {
         self.cmp_overload_allowed(l, r, "Comparable", "compare")
     }
 
-    /// Does `l == r` / `l != r` DISPATCH to a user `eq`? The `Eq` twin of [`Self::ordering_allowed`] —
-    /// same shape, protocol/method parameterized (the `op_overload_result` precedent).
-    ///
-    /// This is the OVERLOAD question, not the legality one: `==` is legal on every pair the runtime
-    /// compares structurally, so `infer_binary`'s `Eq` arm accepts a strict SUPERSET of this (a `true`
-    /// here is currently always also `compatible`). It is separate because the two answers part company
-    /// the moment `==` lowers to a user `eq` — this predicate is what that lowering asks.
-    pub(super) fn equality_allowed(&self, l: &Ty, r: &Ty) -> bool {
-        self.cmp_overload_allowed(l, r, "Eq", "eq")
-    }
-
-    /// Shared body of [`Self::ordering_allowed`] / [`Self::equality_allowed`]: do `l` and `r` name the
+    /// Shared body of [`Self::ordering_allowed`]: do `l` and `r` name the
     /// SAME type param / struct / enum / newtype, such that the comparison operator dispatches to
     /// `protocol`'s `method` (or, for a numeric newtype, to the underlying's native op)?
+    ///
+    /// Still protocol/method parameterized (the `op_overload_result` precedent) even with one caller:
+    /// `==`'s twin predicate was deleted in M23 Task 3 because the `Eq` overload is decided at RUNTIME
+    /// off the operand's heap tag (`Vm::user_eq_method`) and never asked here — `infer_binary`'s `Eq`
+    /// arm only needs the legality question (`may_be_equal`), which already accepts every pair this
+    /// would have.
     fn cmp_overload_allowed(&self, l: &Ty, r: &Ty, protocol: &str, method: &str) -> bool {
         match (l, r) {
             (Ty::Param(a), Ty::Param(b)) if a == b => self.type_params.get(a).is_some_and(|bs| {
@@ -2266,6 +2261,12 @@ impl Checker {
     /// `P == P` does on the same two values. Rejected at both spellings of the type — the ctor
     /// (`Atomic(P(1))`) and the annotation (`a: Atomic[P]`). `Shared[T]` has no `cas`, so it is the
     /// escape hatch and stays unrestricted.
+    ///
+    /// M23 Task 3 made the message literally true for the struct/enum arms: `P == P` now DOES route
+    /// through the user `eq` while `cas` stays structural. A non-numeric newtype's `==` is still
+    /// structural (it does not satisfy `Eq` — see `satisfies`), so for that arm the disagreement is
+    /// between `cas` and the `p.eq(q)` METHOD spelling rather than the operator; the wording ("never
+    /// through a user 'eq', so the two would disagree") holds for both readings.
     ///
     /// Keyed on the payload's OWN `eq` only: a container payload whose ELEMENT defines `eq`
     /// (`Atomic[List[P]]`) is the same hazard one level down, and belongs with the rest of the

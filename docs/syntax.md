@@ -1323,24 +1323,43 @@ less/equal/greater). `int`, `float`, and `str` satisfy `Comparable` intrinsicall
 print(Point(1, 1) < Point(5, 5))     # true  — `<` calls Point.compare
 ```
 
-Equality (`==` / `!=`) is **not** affected — it stays structural (field-by-field) for every type,
-**even when the type defines `compare`.** This is a deliberate design choice (structural equality is
-always well-defined and hash-consistent for `Map`/`Set` keys), but note the **caveat**: a `compare`
-that ignores some fields can disagree with `==`. If `Point.compare` keys only on `x`, then
-`Point(1, 7)` and `Point(1, 9)` satisfy `a <= b` **and** `b <= a` yet `a != b` — the total-order
-identity `a <= b ∧ b <= a ⟹ a == b` does **not** hold. When you mix `<=`/`>=` with `==` (binary
-search, dedup, sorted-set membership), make `compare` consistent with all the fields `==` compares,
-or key both on the same fields. (Routing `==` through `compare` was considered and rejected: it cannot
-be made sound for generic `==` on an unbounded type parameter without either runtime type metadata or
-requiring an equality bound — see the known-limitations note.)
+Equality (`==` / `!=`) is **not** routed through `compare` — it has its own protocol, **`Eq`**. (Routing
+`==` through `compare` was considered and rejected: a `compare` that ignores some fields would silently
+redefine equality, and `<`'s ordering answer is the wrong shape for it.)
 
-The prebuilt **`Eq`** protocol (`eq(self, other: Self) -> bool`) names that equality as a **bound**:
-`int`/`float`/`bool`/`str` satisfy it intrinsically (all four — `==` is defined on every scalar, unlike
-ordering), and a struct/enum satisfies it structurally by defining `eq`. As of this milestone it is a
-bound only — `==` does **not** yet dispatch to a user `eq` — so a `[T: Eq]` body must spell the call
-`a.eq(b)`. Like `Comparable`, it is not satisfiable by a newtype's own `eq` method: a newtype's `==`
-always unwraps to the underlying's native equality, so a numeric newtype declaring `eq` is rejected at
-the declaration site (the method could never agree with the operator).
+The prebuilt **`Eq`** protocol (`eq(self, other: Self) -> bool`) is the second protocol wired to an
+operator: a struct/enum that defines `eq` **owns its `==` / `!=`**, exactly as `compare` owns its `<`.
+`int`/`float`/`bool`/`str` satisfy `Eq` intrinsically (all four — `==` is defined on every scalar, unlike
+ordering). A type that defines **no** `eq` keeps the structural (field-by-field) equality it always had.
+
+```chezzi
+struct Ver:
+    maj: int
+    pre: str
+    fn compare(self, o: Ver) -> int:
+        return self.maj - o.maj
+    fn eq(self, o: Ver) -> bool:                 # `==` asks THIS, not the fields
+        return self.maj == o.maj
+
+print(Ver(1, "alpha") == Ver(1, "beta"))         # true  — `pre` differs, `eq` says equal
+print(Ver(1, "alpha") != Ver(1, "beta"))         # false — `!=` is the same dispatch, negated
+```
+
+`a.eq(b)` and `a == b` are **one** dispatch in both directions, so a `[T: Eq]` body may spell either.
+Dispatch is by the operands' **runtime type**: both sides must be the same struct/enum type or the
+comparison stays structural `false` without calling user code, and for an enum it is the *enum* that
+decides — one `eq` also answers `Shape.Circle == Shape.Square` (Rust `PartialEq` / Python `__eq__`
+compare across variants). An `eq` returning a non-`bool` faults (`eq() must return bool, got int`).
+
+Like `Comparable`, `Eq` is not satisfiable by a newtype's own `eq` method: a newtype's `==` always
+unwraps to the underlying's native equality, so a numeric newtype declaring `eq` is rejected at the
+declaration site (the method could never agree with the operator).
+
+> **Current limit — the operator only.** Container probes still compare **structurally**: `Map`/`Set`
+> key lookup, `x in xs`, and `list.contains`/`index_of`/`dedup`/`unique` do not call a user `eq` yet.
+> So `Ver(1, "alpha") == Ver(1, "beta")` is `true` while `{Ver(1, "alpha"): 1}[Ver(1, "beta")]` still
+> raises key-not-found. Keep `eq` consistent with `hash` and with the fields, or avoid using such a
+> type as a key, until the container ripple lands.
 
 **`Comparable` embeds `Eq`** (mirroring Rust's `Ord: Eq`): a type ordered must also be equatable, so a
 struct/enum satisfying `Comparable` needs BOTH `compare` and `eq` defined (the implementor's job is to

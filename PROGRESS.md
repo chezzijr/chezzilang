@@ -2,6 +2,33 @@
 
 Single source of truth for "what am I doing next." Update after every work session.
 
+> **✅ M23 slice 3 landed 2026-08-08 — `==` / `!=` now DISPATCH to a user `eq`; the milestone's bug is
+> flipped.** The acceptance program (a `Ver` whose identity is its major version, defining both
+> `compare` and `eq`) went from `false false false` to `false false true` on BOTH engines — matching the
+> Python twin (`__lt__`/`__gt__`/`__eq__`, measured `False False True`), which is what makes the old
+> answer a bug rather than a choice. One new operator entry `Vm::eq_operator` (`src/vm/arith.rs`) is now
+> the single generic path shared by `q_eq`'s deopt fall-through and the kept `Op::Eq`/`Op::NotEq` `step`
+> arms; it asks the non-allocating `Vm::user_eq_method` (a `&self` heap-tag peek that ENDS the immutable
+> borrow before `run_proto` needs `&mut self` — the `op_contains`/`struct_compare` shape) and otherwise
+> falls back to `values_equal_guarded` unchanged. Re-entry goes through `Vm::guarded` (cancellation
+> checkpoint + panic-safe `native_reentry`); a non-`bool` return faults `eq() must return bool, got …`
+> rather than coercing; a faulting `eq` propagates to the operator's caller. Dispatch requires the SAME
+> struct/enum type (`tid` equality) — a mismatched pair stays structural `false` WITHOUT calling user
+> code — and is keyed on the ENUM, not the variant, so one `eq` also answers `Tag.Num(1) ==
+> Tag.Word("x")` (Rust `PartialEq` / Python `__eq__` compare across variants). `q_eq`'s `Q_INT` fast path
+> was NOT restructured: a struct fails `as_int_inline`, which deopts the site to `Q_GENERIC` and falls
+> through — pinned by an int-warmed-site-then-structs test. Checker side: `equality_allowed` was
+> DELETED (with its `pattern.rs` call site) rather than consumed — the overload is decided at runtime off
+> the heap tag and is never asked at check time, and every pair it accepted `may_be_equal` already
+> accepted, so it was a provably dead disjunct. Tests: new `tests/chz/spec/eq_protocol_test.chz` (8 `test
+> fn`: acceptance, method≡operator, enum cross-variant, no-`eq` control, protocol-typed mismatch,
+> non-`bool` fault, faulting `eq` propagation, `Q_INT` deopt) + the operator≡method equivalence assert in
+> `intrinsic_proto_methods_test.chz`. 339/339 Chezzi tests pass identically on serial and M:N.
+> **NOT in this slice — a known, deliberate intermediate state:** container probes (`Map`/`Set` key
+> lookup, `in`, `list.contains`/`index_of`/`dedup`/`unique`) still compare structurally, so
+> `Ver(1,"a") == Ver(1,"b")` can be `true` while `m[Ver(1,"b")]` raises key-not-found. That ripple
+> (`values_equal_guarded` `&self` → `&mut self`) is slice 4.
+
 > **✅ M23 slice 2 landed 2026-08-08 — `Comparable` now embeds `Eq`, mirroring Rust's `Ord: Eq`.** Two
 > parallel sites flip together in the same commit (`src/checker/mod.rs`'s `prebuilt_protocols` seed +
 > `std/prelude.chz`'s `protocol Comparable:` decl — the same `embeds` field M22's `Arithmetic` bundle

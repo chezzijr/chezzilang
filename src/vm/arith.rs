@@ -144,7 +144,9 @@ impl Vm {
     /// int fast path uses EXACT `x == y` (i64), matching `values_equal_guarded`'s exact `(Int,Int)`
     /// arm — both engines run this same code, so two-engine parity holds. (It formerly replicated the
     /// lossy `as_f64(x) == as_f64(y)`, which wrongly equated distinct ints above 2^53.) `negate` flips
-    /// the result for `NotEq`. Mirrors the kept `Op::Eq`/`Op::NotEq` `step` arms.
+    /// the result for `NotEq`. The generic path is [`Self::eq_operator`], shared with the kept
+    /// `Op::Eq`/`Op::NotEq` `step` arms. A struct/enum operand fails `as_int_inline`, so a site warmed
+    /// to `Q_INT` DEOPTS to `Q_GENERIC` and falls through — the fast path needs no `Eq`-protocol arm.
     #[inline(never)]
     pub(super) fn q_eq(
         &mut self,
@@ -171,11 +173,67 @@ impl Vm {
             self.quicken[site] = if both_int { Q_INT } else { Q_GENERIC };
             // fall through to the generic path this first time
         }
+        self.eq_operator(negate, span)
+    }
+
+    /// The `==` / `!=` OPERATOR entry (`negate` flips it to `!=`). Pops `[l, r]`, pushes a `Bool`.
+    ///
+    /// `Eq` protocol (M23): two operands of the SAME struct/enum type whose type defines
+    /// `eq(self, o: Self) -> bool` dispatch to that method; everything else keeps the structural
+    /// worker. Same shape as [`Self::op_contains`] / [`Self::struct_compare`] — a `&self` peek
+    /// decides, so the immutable `self.heap` borrow is over before `run_proto` needs `&mut self`.
+    ///
+    /// Scope is the OPERATOR only: container probes (map/set lookup, `in`, `list.contains`) call
+    /// `values_equal_guarded` directly and stay structural until the container ripple lands.
+    #[inline(never)]
+    pub(super) fn eq_operator(&mut self, negate: bool, span: Span) -> Result<(), RuntimeError> {
         let r = self.pop();
         let l = self.pop();
-        let eq = self.values_equal_guarded(l, r, 0, span)?;
+        let eq = match self.user_eq_method(l, r) {
+            Some((proto, home)) => {
+                let res = self
+                    .guarded(|vm| vm.run_proto(proto, home, None, vec![l, r], true, false, span))?;
+                match res.as_bool() {
+                    Some(b) => b,
+                    None => {
+                        return Err(self.err(
+                            format!("eq() must return bool, got {}", self.type_name(res)),
+                            span,
+                        ));
+                    }
+                }
+            }
+            None => self.values_equal_guarded(l, r, 0, span)?,
+        };
         self.push(Value::bool(eq ^ negate));
         Ok(())
+    }
+
+    /// Does `l == r` dispatch to a user `eq(self, o: Self) -> bool`? `Some((proto, home))` only when
+    /// both operands are the SAME struct/enum type AND that type declares `eq`; a mismatched pair is
+    /// `None` WITHOUT calling user code. Deliberately non-allocating, unlike
+    /// [`Self::resolve_overload_method`] whose miss builds a diagnostic `String`: every struct/enum
+    /// `==` asks this, and the usual answer is "no".
+    fn user_eq_method(&self, l: Value, r: Value) -> Option<(usize, GcRef)> {
+        let (hl, hr) = (l.as_obj()?, r.as_obj()?);
+        match (self.heap.get(hl), self.heap.get(hr)) {
+            (Obj::Struct { tid: a, .. }, Obj::Struct { tid: b, .. }) if a == b => {
+                let def = self.program.structs.get(self.struct_name_of_tid(*a))?;
+                Some((*def.methods.get("eq")?, self.module_objs[def.module_idx]))
+            }
+            // Keyed on the ENUM, not the variant: one type's `eq` also decides `Shape.Circle ==
+            // Shape.Square` (Rust `PartialEq` / Python `__eq__` compare ACROSS variants), so a
+            // `variant_id` equality guard would be too narrow and silently keep the structural
+            // `false` for every cross-variant pair.
+            (Obj::Enum { variant_id: a, .. }, Obj::Enum { variant_id: b, .. })
+                if self.enum_names(*a).0 == self.enum_names(*b).0 =>
+            {
+                let key = self.enum_names(*a).0;
+                let proto = *self.program.enum_methods.get(key)?.get("eq")?;
+                Some((proto, self.module_objs[self.enum_home_module(key)]))
+            }
+            _ => None,
+        }
     }
 
     /// `BinLocalLocal{a,b,kind}` — push `local[a] <op> local[b]`. `#[inline(never)]` keeps the body

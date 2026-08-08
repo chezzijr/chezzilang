@@ -38,6 +38,9 @@ fn hash_m[T: Hashable](a: T) -> int:
 fn cmp_m[T: Comparable](a: T, b: T) -> int:
     return a.compare(b)
 
+fn eq_m[T: Eq](a: T, b: T) -> bool:
+    return a.eq(b)
+
 fn str_m[T: Stringable](a: T) -> str:
     return a.str()
 
@@ -246,6 +249,39 @@ test fn numeric_newtype_operator_methods():
     assert int(add_m(p, q)) == int(p + q)
     assert int(div_m(p, q)) == int(p / q)
     assert int(mod_m(p, q)) == int(p % q)
+
+# ---- `Eq`: the method form and the `==` operator are ONE dispatch (M23) ----
+#
+# `.eq()` was already the structural equality `==` used; M23 made `==` route through a user `eq` too,
+# so the two spellings must still answer identically for EVERY receiver — the intrinsic scalar grants,
+# a numeric newtype (whose `==` auto-flows to the underlying), and a struct with its own `eq`.
+
+struct Tol:
+    n: int
+    fn eq(self, o: Tol) -> bool:
+        # deliberately unstructural: equal within ±1, so a structural answer is distinguishable
+        d := self.n - o.n
+        return d == 0 or d == 1 or d == -1
+
+test fn eq_method_matches_the_equality_operator():
+    assert eq_m(3, 3) == (3 == 3)
+    assert eq_m(3, 4) == (3 == 4)
+    assert eq_m(1.5, 1.5) == (1.5 == 1.5)
+    assert eq_m("a", "a") == ("a" == "a")
+    assert eq_m("a", "b") == ("a" == "b")
+    assert eq_m(true, true) == (true == true)
+    assert eq_m(true, false) == (true == false)
+    wide := 4611686018427387900
+    assert eq_m(wide, wide) == (wide == wide)
+    assert eq_m(wide, wide + 1) == (wide == wide + 1)
+    # a numeric newtype: `==` auto-flows to the underlying, and so does the method
+    assert eq_m(Meters(1.5), Meters(1.5)) == (Meters(1.5) == Meters(1.5))
+    assert eq_m(Count(1), Count(2)) == (Count(1) == Count(2))
+    # a USER `eq` wins over the intrinsic in both spellings, and they still agree
+    assert eq_m(Tol(5), Tol(6)) == (Tol(5) == Tol(6))
+    assert (Tol(5) == Tol(6)) == true, "the user `eq` really is what answers"
+    assert eq_m(Tol(5), Tol(9)) == (Tol(5) == Tol(9))
+    assert (Tol(5) == Tol(9)) == false
 
 test fn newtype_compare_matches_operator():
     a := Meters(1.5)

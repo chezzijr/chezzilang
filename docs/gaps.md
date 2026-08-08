@@ -2594,7 +2594,10 @@ arguments **co-variantly**, and carries the runtime's own cross-type arms (`int`
 makes `[1.0] == [1]` and `{"k": 1.0} == {"k": 1}` compile (both engines print `true`; CPython agrees).
 `Ty::Param` is accepted outright (generics are erased) **except** where a `where T: <scalar>` bound
 pins it: those pins are substituted away first, so `fn f[T](a: T, b: int) where T: str` still rejects
-`a == b`. `equality_allowed` (the user-`eq` overload) is OR'd in alongside.
+`a == b`. It is the WHOLE legality test: a companion `equality_allowed` ("does this pair dispatch to a
+user `eq`?") was OR'd in alongside for one milestone and deleted in M23 slice 3 — the `Eq` overload is
+decided at RUNTIME off the operands' heap tags (`Vm::user_eq_method`), and every pair it accepted was a
+same-type pair `may_be_equal` already accepted, so the disjunct was provably dead.
 
 *Cut 4* (review round 4) fixed the erasure escape being **top-level only**. The bare-`Param` arm fires
 only when a *whole operand* is a `T`; every other constructor re-establishes the escape by recursing —
