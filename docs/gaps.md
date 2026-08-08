@@ -3123,6 +3123,22 @@ Given that, the three "holes" are narrow and NOT worth building:
   chosen spelling — Python-consistent, no new keyword, and std already uses it by convention.)
 - Struct-**field** immutability (a `const` field) is a separate, unshipped axis (fields are all mutable).
 
+### L4b. `assert_native_protocol_shape_matches` does not guard `PathLike` — surfaced M23, unfixed
+
+The debug-only drift guard (`src/checker/setup.rs:802`) `debug_assert_eq!`s each reserved protocol's
+`std/prelude.chz` decl against its `prebuilt_protocols` Rust seed. Its name list carries **20 of the
+21** reserved protocols: `PathLike` is mirrored in `std/prelude.chz` but absent from the list, so it
+is the one protocol shape that can drift between the `.chz` mirror and the Rust seed without any
+test noticing.
+
+Pre-existing (it predates M23 — `PathLike` landed with W7-8 and was never added to the list). M23
+only made it visible: the comment there used to read "All 20 of them are drift-guarded here", which
+matched the list length and so counted the gap away. It now names the omission instead.
+
+**Fix is one line** — add `"PathLike"` to the list — but do it with the harvest actually running:
+`PathLike`'s decl shape must round-trip through `harvest_protocol_shape` first, and if it does not,
+that mismatch is the real finding, not the missing list entry.
+
 ### L5. Operator-protocol holes
 The reserved set (`Add Sub Mul Div Mod Neg Arithmetic Comparable Stringable Hashable Index IndexSet
 Slice Contains Iterator Iterable Convert Any Error`) covers arithmetic, ordering, indexing, slicing,
