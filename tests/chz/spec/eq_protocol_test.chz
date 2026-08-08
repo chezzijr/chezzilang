@@ -184,3 +184,89 @@ test fn an_int_warmed_eq_site_still_dispatches_user_eq():
     # and the int answers are unchanged afterwards
     assert same(7, 7) == true
     assert same(7, 8) == false
+
+# ---- `Atomic.cas` compares STRUCTURALLY, whatever the checker could see ----
+#
+# M23 adversarial review, CRITICAL 2. `cas` holds the box's value mutex across the compare, so
+# re-entering user code there can block on that same `Atomic` and hang with no deadlock report. The
+# only stated safety argument was the checker gate — which keyed on the payload's OWN `eq` and so
+# missed `Atomic[List[P]]`, `Atomic[Option[P]]`, tuples, maps, struct fields and enum payloads
+# (those are now rejected: `checker::tests::atomic_payload_reaching_a_nested_eq_rejected`). A
+# `Protocol` existential payload is a hole NO checker walk can close — the witness is unknown — so
+# the property is enforced in the VM: the `eq` hook is switched OFF for the window.
+
+import std.concurrency
+
+protocol Named:
+    fn name(self) -> str
+
+eq_calls: List[int] = []
+
+struct Witness:
+    n: int
+    fn name(self) -> str:
+        return "w"
+    fn eq(self, o: Witness) -> bool:
+        eq_calls.push(1)
+        return true
+
+test fn atomic_cas_never_calls_a_user_eq():
+    a: Named = Witness(1)
+    b: Named = Witness(2)
+    box: Atomic[Named] = Atomic(a)
+    # `Witness.eq` answers `true` for ANY pair; the structural compare must disagree with it, which
+    # is exactly how we can tell the hook did not run.
+    assert box.cas(b, a) == false, "cas compares fields, not the payload's `eq`"
+    assert box.cas(a, b) == true
+    assert eq_calls.len() == 0, "no user `eq` may run under the value lock"
+    # …and the OPERATOR on the very same values still dispatches the hook (the switch is scoped to
+    # the cas window, not a global disable).
+    assert (a == b) == true
+    assert eq_calls.len() == 1
+
+# ---- a numeric newtype DOES satisfy `Eq` (the M23 review's newtype ruling) ----
+#
+# `Comparable` embeds `Eq` (M23) and a numeric newtype satisfies `Comparable` intrinsically, so
+# denying it `Eq` would make `fn sorted[T: Comparable]` unsatisfiable for `newtype Meters = float` —
+# a regression of M21. The intrinsic grant is the underlying's NATIVE equality; no newtype ever
+# satisfies `Eq` through a method (declaring `eq` on one is a decl-site error).
+
+newtype Score = int
+
+fn eq_bound[T: Eq](a: T, b: T) -> bool:
+    return a == b
+
+fn cmp_bound[T: Comparable](a: T, b: T) -> bool:
+    return a < b
+
+test fn a_numeric_newtype_satisfies_eq_intrinsically():
+    assert eq_bound(Score(1), Score(1)) == true
+    assert eq_bound(Score(1), Score(2)) == false
+    assert cmp_bound(Score(1), Score(2)) == true, "Comparable embeds Eq — both must be satisfiable"
+
+# ---- generic instantiations are ERASED, so `Any` can hand `eq` a foreign operand ----
+#
+# M23 adversarial review, MEDIUM 1. `tid` identifies a TYPE, not an instantiation, because Chezzi
+# erases type arguments at runtime — there is no per-instantiation tag to dispatch on. Widening to
+# `Any` is the deliberate escape hatch from the co-inhabitability rule (§B2), and through it a
+# `Box[int]` can meet a `Box[str]`. The requirement is that this stays a RECOVERABLE fault, never a
+# panic and never a confident wrong answer. CPython does exactly the same thing:
+#   class Box:
+#       def __init__(self, v): self.v = v
+#       def __eq__(self, o): return self.v < o.v or self.v == o.v
+#   Box(1) == Box("x")   →  TypeError: '<' not supported between instances of 'int' and 'str'
+
+struct EBox[T: Comparable]:
+    v: T
+    fn eq(self, o: EBox[T]) -> bool:
+        return self.v < o.v or self.v == o.v
+
+test fn a_cross_instantiation_eq_faults_recoverably():
+    a: Any = EBox(1)
+    b: Any = EBox("x")
+    r := recover: a == b
+    assert msg_of(r, "cross-instantiation ==") == "cannot apply Lt to int and str"
+    # the SAME instantiation is unaffected — the erasure ceiling costs nothing that type-checks
+    c: Any = EBox(2)
+    d: Any = EBox(2)
+    assert (c == d) == true

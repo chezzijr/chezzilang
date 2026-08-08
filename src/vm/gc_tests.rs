@@ -287,6 +287,147 @@ main()";
     );
 }
 
+/// M23 adversarial review, HIGH — a container-equality arm SNAPSHOTS the child handles into a Rust
+/// local and then walks it. The M23 rooting design rooted the two source CONTAINERS, which does not
+/// keep those children alive: an `eq` that empties the sources orphans every element still to be
+/// compared, and the next `heap.get` on one is `dangling GcRef` (an uncatchable abort) — or, before
+/// the collection catches up, a compare against a recycled object. The defence measured the same
+/// `xs == ys` answering `true` at 0 allocations, `false` at 2000 and aborting at 40000: equality
+/// whose ANSWER depends on GC timing. Under `run_capture_stress` (collect at every allocation) the
+/// pre-fix binary aborts on the first arm below; the fix roots the snapshot itself
+/// (`Vm::with_elem_roots`), inductively down the recursion.
+///
+/// Every arm the review named is exercised: list, tuple, set, map (keys AND values), struct fields,
+/// enum payloads, plus `seq_slot`'s callers (`in` / `contains` / `index_of` / `unique`) and the
+/// set-algebra worker.
+#[test]
+fn container_eq_snapshot_survives_an_eq_that_empties_the_sources() {
+    let src = "\
+xs: List[K] = []
+ys: List[K] = []
+armed: List[int] = []
+
+struct K:
+    n: int
+    fn hash(self) -> int:
+        return 0
+    fn eq(self, o: K) -> bool:
+        # ONE mutation per armed walk: EMPTY the two source lists in place, so the only remaining
+        # reference to the elements the caller already snapshotted is that Rust-local snapshot —
+        # then allocate, so the stress collector actually runs while the walk still holds them.
+        if armed.len() > 0:
+            armed.remove_at(0)
+            while xs.len() > 0:
+                xs.remove_at(0)
+            while ys.len() > 0:
+                ys.remove_at(0)
+            junk := [str(self.n), str(o.n)]
+        return self.n == o.n
+
+fn reset():
+    while armed.len() > 0:
+        armed.remove_at(0)
+    while xs.len() > 0:
+        xs.remove_at(0)
+    while ys.len() > 0:
+        ys.remove_at(0)
+    xs.push(K(1))
+    xs.push(K(2))
+    ys.push(K(1))
+    ys.push(K(2))
+
+fn arm():
+    armed.push(1)
+
+fn main():
+    # The List arm: the compare of element 0 empties both sources; element 1 is compared from the
+    # snapshot alone. Pre-fix this is `dangling GcRef` (abort) under stress.
+    reset()
+    arm()
+    print(xs == ys)
+    # A nested list — the recursion must root at EVERY level, not just the top.
+    reset()
+    arm()
+    print([xs] == [ys])
+    # `seq_slot`'s callers: `in`, `contains`, `index_of` (the needle is a FRESH K, so the identity
+    # short-circuit cannot hide the dispatch).
+    reset()
+    arm()
+    print(K(2) in xs)
+    reset()
+    arm()
+    print(xs.contains(K(2)))
+    reset()
+    arm()
+    print(xs.index_of(K(2)))
+    # `unique` walks its own accumulator as well as the receiver snapshot.
+    reset()
+    arm()
+    print(xs.unique().len())
+    # Set algebra: `mine`/`other`/`out` are three Rust locals over the same orphaned elements.
+    reset()
+    sa := Set(xs)
+    sb := Set(ys)
+    reset()
+    arm()
+    print(sa.union(sb).len())
+main()";
+    assert_eq!(run_capture_stress(src), "true\ntrue\ntrue\ntrue\n1\n2\n2\n");
+}
+
+/// The Map and Set container arms of the same defect: a heap Map/Set is the one container a user
+/// `eq` can empty IN PLACE while its entries are being walked out of a Rust-local snapshot.
+#[test]
+fn map_and_set_eq_snapshot_survives_an_eq_that_empties_the_sources() {
+    let src = "\
+sa: Set[K] = Set([])
+sb: Set[K] = Set([])
+ma: Map[K, List[str]] = {}
+mb: Map[K, List[str]] = {}
+armed: List[int] = []
+
+struct K:
+    n: int
+    fn hash(self) -> int:
+        return self.n
+    fn eq(self, o: K) -> bool:
+        if armed.len() > 0:
+            armed.remove_at(0)
+            sa.remove(K(1))
+            sa.remove(K(2))
+            sb.remove(K(1))
+            sb.remove(K(2))
+            ma.remove(K(1))
+            ma.remove(K(2))
+            mb.remove(K(1))
+            mb.remove(K(2))
+            junk := [str(self.n), str(o.n)]
+        return self.n == o.n
+
+fn reset():
+    while armed.len() > 0:
+        armed.remove_at(0)
+    sa.add(K(1))
+    sa.add(K(2))
+    sb.add(K(1))
+    sb.add(K(2))
+    # LIST values, not str: a rebuilt list can never alias an interned program constant.
+    ma[K(1)] = [str(1)]
+    ma[K(2)] = [str(2)]
+    mb[K(1)] = [str(1)]
+    mb[K(2)] = [str(2)]
+
+fn main():
+    reset()
+    armed.push(1)
+    print(sa == sb)
+    reset()
+    armed.push(1)
+    print(ma == mb)
+main()";
+    assert_eq!(run_capture_stress(src), "true\ntrue\n");
+}
+
 /// Same hazard via `sort_by` with an allocating comparator on an inline-temporary list.
 #[test]
 fn struct_sort_by_inline_temporary_survives_gc_stress() {

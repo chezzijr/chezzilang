@@ -205,3 +205,80 @@ test fn an_allocating_eq_survives_the_probe():
         s.add(Alloc(i % 7))
     assert s.len() == 7
     assert (Alloc(5) in s) == true
+
+# ---- an `eq` that MUTATES the container it is being probed against ----
+#
+# M23 adversarial review, CRITICAL 1. The probe re-read its candidate list each step, which saves
+# every compare that returns FALSE — but not the one that returns TRUE, which is the one whose
+# position the caller then indexes with. An `eq` that removed an earlier entry on that last compare
+# handed back a position that had already shifted: `m.get(k)` answered a NEIGHBOUR's value with two
+# entries left standing (a silent wrong answer), and with fewer than the position it named it was
+# `index out of bounds` — a Rust panic, i.e. an uncatchable process abort raised from pure Chezzi
+# source. Both spellings reproduced on BOTH engines.
+#
+# The probe now re-validates the position after every compare and restarts when it moved (CPython
+# `lookdict`'s `DKIX_KEY_CHANGED`), so the answer is the one the POST-mutation container gives.
+# Colliding hashes (`hash` is constant) force multi-candidate probes, which is where this lives.
+
+mut_map: Map[Mut, int] = {}
+mut_set: Set[Mut] = Set([])
+mut_armed: List[int] = []
+
+struct Mut:
+    n: int
+    fn hash(self) -> int:
+        return 0
+    fn eq(self, o: Mut) -> bool:
+        r := self.n == o.n
+        # fire on the TRUE compare only — the position the caller is about to use
+        if r and mut_armed.len() > 0:
+            mut_armed.remove_at(0)
+            mut_map.remove(Mut(0))
+            mut_set.remove(Mut(0))
+        return r
+
+fn mut_reset(n: int):
+    mut_map = {}
+    mut_set = Set([])
+    while mut_armed.len() > 0:
+        mut_armed.remove_at(0)
+    for i in range(0, n):
+        mut_map[Mut(i)] = i * 11
+        mut_set.add(Mut(i))
+    mut_armed.push(1)
+
+test fn a_probe_whose_eq_removes_an_earlier_entry_answers_the_new_container():
+    # two entries: pre-fix this was `index out of bounds` (VM panic) on both engines
+    mut_reset(2)
+    assert mut_map.get(Mut(1)) == Some(11), "the surviving entry's own value, not a stale slot"
+    # four entries: pre-fix this silently answered `Some(22)` — the NEXT entry's value
+    mut_reset(4)
+    assert mut_map.get(Mut(1)) == Some(11)
+    # the same position hazard through every other Map caller
+    mut_reset(4)
+    assert mut_map[Mut(1)] == 11
+    mut_reset(4)
+    assert mut_map.has(Mut(1)) == true
+    mut_reset(4)
+    assert (Mut(1) in mut_map) == true
+    mut_reset(4)
+    mut_map[Mut(1)] = 99
+    assert mut_map[Mut(1)] == 99, "the insert overwrote the key it matched, not a shifted neighbour"
+    mut_reset(4)
+    assert mut_map.remove(Mut(1)) == Some(11)
+    assert mut_map.has(Mut(1)) == false
+
+test fn a_set_probe_whose_eq_removes_an_earlier_entry_answers_the_new_container():
+    mut_reset(2)
+    assert mut_set.has(Mut(1)) == true
+    mut_reset(4)
+    assert (Mut(1) in mut_set) == true
+    mut_reset(4)
+    assert mut_set.remove(Mut(1)) == true
+    assert mut_set.has(Mut(1)) == false
+    # and the removed entry really is gone, i.e. the position named a real element
+    mut_reset(4)
+    n0 := mut_set.len()
+    dropped := mut_set.remove(Mut(3))
+    assert dropped == true
+    assert mut_set.len() < n0

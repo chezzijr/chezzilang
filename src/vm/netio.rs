@@ -3217,13 +3217,19 @@ impl Vm {
                 //
                 // This is the ONE equality site that stays STRUCTURAL: the compare runs under
                 // `core.v.lock()` so the compare-and-swap is atomic, and a user `eq` re-entering the
-                // VM here could touch the same `Atomic` and deadlock a non-reentrant mutex. It is safe
-                // because a type with a user `eq` is not a legal `Atomic[T]` payload (checker gate,
-                // M23 Task 1), so the hook inside `values_equal_guarded` is unreachable from here.
+                // VM here could touch the same `Atomic` and deadlock a non-reentrant mutex. The
+                // checker rejects a payload type that REACHES a user `eq` (`reject_eq_atomic_payload`),
+                // but that walk cannot see through a `Protocol` existential or an unresolved type
+                // param — so the property is ENFORCED here, by turning the hook off for the window,
+                // instead of being asserted from the checker's exhaustiveness. Cleared on the next
+                // statement (no `?` in between), so an `Err` compare cannot leave it stuck on.
                 // ponytail: eq-under-lock ceiling — if `Atomic[T]` ever admits a user-`eq` payload,
                 // read under the lock → drop it → eq → re-acquire → verify the value is unchanged via
                 // `wire_summary` → swap.
-                let swapped = self.values_equal_guarded(cur, args[0], 0, span)?;
+                self.eq_hook_off = true;
+                let cmp = self.values_equal_guarded(cur, args[0], 0, span);
+                self.eq_hook_off = false;
+                let swapped = cmp?;
                 if swapped {
                     // Reject a non-crossable store BEFORE the assignment — a failed store leaves the
                     // box unchanged (recoverable, no partial write). `ensure_crossable` borrows `&self`

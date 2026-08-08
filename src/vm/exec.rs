@@ -139,6 +139,7 @@ impl Vm {
             poll_deadline: None,
             poll_partial: None,
             native_reentry: 0,
+            eq_hook_off: false,
             stdout_writes: 0,
             reds: 0,             // D3 — set to CONTEXT_REDS per schedule-in (run_one_fiber)
             yield_now: false,    // D3

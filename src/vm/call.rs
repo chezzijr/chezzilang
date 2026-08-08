@@ -3156,20 +3156,21 @@ impl Vm {
                     }
                     // unique/dedup: NEW list, never mutate the receiver. Equality is the same
                     // `elem_equal` `contains` uses (works on floats) — which since M23 can dispatch a
-                    // user `eq` and so re-enter the VM. `out` holds only elements of the receiver, so
-                    // rooting the receiver keeps every one of them alive across a collection.
+                    // user `eq` and so re-enter the VM. Root the snapshotted ELEMENTS, not just the
+                    // receiver: an `eq` that clears the receiver mid-walk orphans every element
+                    // `items`/`out` still hold (`out` ⊆ `items`, so `items` covers both).
                     "unique" | "dedup" => {
                         self.arity_err(method, args, 0, span)?;
                         let Obj::List(items) = self.heap.get(h) else {
                             unreachable!()
                         };
                         let items = items.clone();
-                        let out = self.with_roots(&[Value::obj(h)], |vm| {
+                        let out = self.with_elem_roots(&[Value::obj(h)], &items, |vm| {
                             let mut out: Vec<Value> = Vec::new();
                             if method == "dedup" {
                                 // Collapse only CONSECUTIVE runs (Rust `Vec::dedup`): keep an element
                                 // iff it differs from the previously-kept one.
-                                for v in items {
+                                for &v in &items {
                                     let keep = match out.last() {
                                         Some(&p) => !vm.elem_equal(p, v, 0, span)?,
                                         None => true,
@@ -3181,7 +3182,7 @@ impl Vm {
                             } else {
                                 // Remove ALL duplicates, first-occurrence order (Python `dict.fromkeys`).
                                 // ponytail: O(n^2) linear scan, swap to a hash_key-backed set if a hot path needs O(n).
-                                for v in items {
+                                for &v in &items {
                                     if vm.seq_slot(&out, v, span)?.is_none() {
                                         out.push(v);
                                     }
