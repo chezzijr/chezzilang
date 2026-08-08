@@ -256,6 +256,8 @@ share — see [`concurrency.md`](concurrency.md) §airlock.
 ### `Atomic[T]` — cross-task atomic (numeric `T` for add/sub)
 `load() -> T` · `store(x: T) -> nil` · `exchange(x: T) -> T` · `cas(expected: T, new: T) -> bool` ·
 `add(x: T) -> T` · `sub(x: T) -> T` (return the **new** value).
+`cas` compares **structurally**, never through a user `eq` — so a payload type that defines `eq` is a
+check-time error (use `Shared[T]`, which has no `cas`). See [`concurrency.md`](concurrency.md).
 
 ### `AtomicInt` — monomorphic **lock-free** int atomic
 `load() -> int` · `store(x: int) -> nil` · `exchange(x: int) -> int` · `cas(expected: int, new: int) -> bool` ·

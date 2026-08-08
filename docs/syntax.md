@@ -1314,10 +1314,12 @@ struct Point:
 print(max(Point(1, 2), Point(3, 0)).x)   # works: Point is Comparable (compare + eq)
 ```
 
-The prebuilt **`Comparable`** protocol (`compare(self, other: Self) -> int`) is special: it is the
-one protocol wired to operators. For any `Comparable` value — including a bare `T: Comparable` —
-the ordering operators `< <= > >=` dispatch to `compare` (a negative/zero/positive result means
-less/equal/greater). `int`, `float`, and `str` satisfy `Comparable` intrinsically.
+The prebuilt **`Comparable`** protocol (`compare(self, other: Self) -> int`) is the protocol wired to
+the **ordering** operators. For any `Comparable` value — including a bare `T: Comparable` —
+`< <= > >=` dispatch to `compare` (a negative/zero/positive result means less/equal/greater).
+`int`, `float`, and `str` satisfy `Comparable` intrinsically. (It is not the only operator-wired
+protocol: `Eq` owns `==`/`!=` below, and `Add`/`Sub`/`Mul`/`Div`/`Mod`/`Neg` own the arithmetic
+operators further down.)
 
 ```chezzi
 print(Point(1, 1) < Point(5, 5))     # true  — `<` calls Point.compare
@@ -1327,8 +1329,8 @@ Equality (`==` / `!=`) is **not** routed through `compare` — it has its own pr
 `==` through `compare` was considered and rejected: a `compare` that ignores some fields would silently
 redefine equality, and `<`'s ordering answer is the wrong shape for it.)
 
-The prebuilt **`Eq`** protocol (`eq(self, other: Self) -> bool`) is the second protocol wired to an
-operator: a struct/enum that defines `eq` **owns its `==` / `!=`**, exactly as `compare` owns its `<`.
+The prebuilt **`Eq`** protocol (`eq(self, other: Self) -> bool`) is the protocol wired to `==`/`!=`:
+a struct/enum that defines `eq` **owns its `==` / `!=`**, exactly as `compare` owns its `<`.
 `int`/`float`/`bool`/`str` satisfy `Eq` intrinsically (all four — `==` is defined on every scalar, unlike
 ordering). A type that defines **no** `eq` keeps the structural (field-by-field) equality it always had.
 
@@ -1403,7 +1405,9 @@ print(m[y])            # 10
 print([x] == [y])      # true — the recursion reaches the element's `eq`
 ```
 
-Two rules carried over from Python:
+**Writing a correct `eq` is your job, and these are the limits — read them before you write one.**
+The first two are rules carried over from Python; the rest are ceilings Chezzi does not (and largely
+cannot) enforce.
 
 * A **container** short-circuits on identity first (`x is y or x == y`, CPython's
   `PyObject_RichCompareBool`), so `[x] == [x]` is `true` even for an `eq` that answers `false` for
@@ -1413,7 +1417,36 @@ Two rules carried over from Python:
   limit.** A `Map`/`Set` probe can only ever scan the buckets of `hash(key)`, so an `eq` *coarser*
   than its type's `hash` is **unreachable**, not merely wrong: two values that `eq` calls equal but
   that hash differently will never meet. Rust and Python leave this to the implementor too; Chezzi
-  does not try to enforce it.
+  does not try to enforce it. **What to do:** key `hash` and `eq` on the **same fields** — `eq` may
+  read fewer fields than the struct has, but never fewer than `hash` does.
+* **Keep `eq` reflexive (`x.eq(x)` is `true`) or a value stops finding itself in a container.** A
+  `Map`/`Set` key is a **snapshot** (the value model, `§Keys are value types` below), so the probe
+  compares your value against a *copy*, not against the same object — the identity short-circuit
+  above cannot save you. An `eq` that answers `false` for everything makes `x in {x}` and `x in m`
+  both `false`:
+
+  ```chezzi
+  struct Never:
+      a: int
+      fn hash(self) -> int: return self.a
+      fn eq(self, o: Never) -> bool: return false     # never reflexive — a bug, not a feature
+
+  x := Never(1)
+  s: Set[Never] = {x}
+  print(x in s)       # false — the stored key is a COPY, so identity never fires
+  print([x] == [x])   # true  — same object, identity short-circuit fires
+  ```
+* **An `eq` that mutates the very container it is being probed against gets an unspecified answer —
+  never a crash.** The probe re-reads its candidate list each step, so a position invalidated
+  mid-probe reads as a **miss**, not an out-of-range panic. CPython is equally arbitrary here. Don't
+  do it; if you do, memory safety still holds and the fault-free answer is simply not defined.
+* **`Atomic[T].cas` compares structurally and never calls a user `eq`** — it holds the value's lock
+  across the compare, and re-entering user code there would deadlock. Rather than let `a == b` and
+  `atom.cas(a, …)` disagree, the checker **rejects a payload type that defines `eq`** outright: use
+  `Shared[T]` (which has no `cas`) for such a type. See [`concurrency.md`](concurrency.md).
+* **`match` never dispatches `eq`.** A literal pattern is `int`/`str`/`bool` only, and a struct/enum
+  arm matches by variant and *binds* fields rather than comparing them — so a user `eq` cannot change
+  which arm is taken.
 
 **`Comparable` embeds `Eq`** (mirroring Rust's `Ord: Eq`): a type ordered must also be equatable, so a
 struct/enum satisfying `Comparable` needs BOTH `compare` and `eq` defined (the implementor's job is to
@@ -1742,16 +1775,17 @@ A newtype may carry its own **methods** (a trailing-colon block, like a struct/e
 the **non-operator** prebuilt protocols by defining the relevant method — `str(self)` (Stringable
 display override) and `hash(self)` (so it can be a `map`/`set` key — opt-in, *not* inherited from the
 underlying) — so it passes into those protocol-bound generics (`fn show[T: Stringable](x: T)`). The
-**operator** protocols (`Add`/`Sub`/`Mul`/`Div`/`Mod`/`Neg`/`Comparable`) are **not** satisfiable by a
-newtype method: a newtype's own `add`/`div`/`compare`/… is never dispatched as an operator (the
-same-type arm always auto-flows to the underlying's native op/ordering), so only a **numeric**
+**operator** protocols (`Add`/`Sub`/`Mul`/`Div`/`Mod`/`Neg`/`Comparable`/`Eq`) are **not** satisfiable by a
+newtype method: a newtype's own `add`/`div`/`compare`/`eq`/… is never dispatched as an operator (the
+same-type arm always auto-flows to the underlying's native op/ordering/equality), so only a **numeric**
 underlying supplies them — a numeric newtype satisfies `Add`/`Sub`/`Mul`/`Div`/`Mod`/`Comparable`
-intrinsically (native same-type ops above), while a `newtype Name = str` with an `add` (or `compare`)
-method does **not** pass `fn twice[T: Add](x: T)` (or `fn sorted[T: Comparable](xs: T)`) — its `<`
+intrinsically (native same-type ops above), while a `newtype Name = str` with an `add` (or `compare`,
+or `eq`) method does **not** pass `fn twice[T: Add](x: T)` (or `fn sorted[T: Comparable](xs: T)`, or
+`fn same[T: Eq](a: T, b: T)`) — its `<` / `==`
 would silently use the underlying's native ordering, never the method, so the checker rejects it.
 
 Because of that, a **numeric** newtype may not *define* a method named after an operator it actually
-inherits (`add`/`sub`/`mul`/`div`/`mod`/`compare`) — it is a **compile error at the declaration**:
+inherits (`add`/`sub`/`mul`/`div`/`mod`/`compare`/`eq`) — it is a **compile error at the declaration**:
 
 ```chezzi
 newtype Score = int:
@@ -1765,7 +1799,13 @@ Without the rule the two spellings disagreed for that receiver: `.add()` dispatc
 (the miss-only intrinsic never shadows one) while `+` auto-flowed to `int`'s native op, so
 `twice(Score(1), Score(2))` gave `99` and `Score(1) + Score(2)` gave `3`. A numeric newtype inherits
 its underlying's operators; **use a `struct` if you need your own arithmetic.** The rule is narrow —
-non-numeric and generic newtypes are unaffected, since they have no operator to disagree with.
+non-numeric and generic newtypes are unaffected for the *arithmetic and ordering* names, since they
+have no such operator to disagree with. **`eq` is the one exception, and it is a known rough edge:**
+`==` exists for **every** newtype underlying, so a `newtype Name = str` with an `eq` method is accepted
+at the declaration yet `Name("a") == Name("b")` still unwraps to `str`'s native equality (`false`)
+while `Name("a").eq(Name("b"))` runs your method — the same two-spellings-disagree shape the numeric
+rule rejects. `Name` does not satisfy `Eq` either, so it cannot reach a `[T: Eq]` bound. Don't define
+`eq` on a newtype; use a `struct`. Tracked in `docs/gaps.md` §L5.
 `neg` is the one operator-named method a numeric newtype MAY still define, because unary `-` has no
 newtype path at all (`-m` on a `newtype Meters = float` is already the error `cannot negate Meters`).
 With no operator to disagree with, a `neg` method is simply the only spelling of negation available.
@@ -1898,9 +1938,11 @@ grapheme-extend characters as non-printable. Escaping is the unambiguous directi
 The prebuilt **`Hashable`** protocol (`hash(self) -> int`) governs `map` keys and `set` elements:
 `int`/`str`/`bool` satisfy it intrinsically, and a struct satisfies it by defining `hash(self) ->
 int`. `map`/`set` are real insertion-ordered hash tables, so **any `Hashable` type can be a key or
-element** — a struct key is hashed via its `hash()` and the probe confirmed by structural `==`.
-`float` is rejected (NaN footgun). Contract: two structurally-equal structs must return the same
-`hash()` (the implementor owns this, like Rust's `Hash`/`Eq`). `bytes` and a zero-field struct (no state
+element** — a struct key is hashed via its `hash()` and the probe confirmed by `==`, which is the
+struct's own `eq` when it defines one (§`Eq`, above) and structural equality otherwise.
+`float` is rejected (NaN footgun). Contract: two keys that `==` calls equal must return the same
+`hash()` (the implementor owns this, like Rust's `Hash`/`Eq` — and see the `Eq` section for why an
+`eq` coarser than its `hash` is structurally unreachable). `bytes` and a zero-field struct (no state
 to hash) also satisfy it intrinsically. In an erased `[T: Hashable]` body `x.hash()` returns exactly the
 hash the container uses, so the method and membership can never disagree; the numeric value itself is
 **unspecified** (a build-dependent 64-bit hash, possibly negative) — rely on consistency, not on a
@@ -2947,8 +2989,8 @@ fn fetch_all(urls: List[str]):
   `import Socket from std.net`) — they are NOT global builtins, but stay **reserved names** (no user
   `struct Socket`/`struct Listener`). The builtin SCALAR (`int`/`float`/`str`/…), CONTAINER
   (`List`/`Set`/`Map`/`Channel`/`range`), and FFI (`ptr`/`owned_str`) type names are likewise reserved
-  at declaration (a `struct int` / `struct List` is rejected `type 'X' is reserved (builtin)`). The 20
-  prebuilt PROTOCOL names (`Comparable`/`Eq`/`Stringable`/`Hashable`/`Error`/`Add`/`Sub`/`Mul`/`Div`/`Mod`/
+  at declaration (a `struct int` / `struct List` is rejected `type 'X' is reserved (builtin)`). The 21
+  prebuilt PROTOCOL names (`Any`/`Comparable`/`Eq`/`Stringable`/`Hashable`/`Error`/`Add`/`Sub`/`Mul`/`Div`/`Mod`/
   `Neg`/`Arithmetic`/`Iterator`/`Iterable`/`Index`/`IndexSet`/`Slice`/`Convert`/`Contains`/`PathLike`) are reserved the same way — usable
   as a bound (`[T: Comparable]`) but not as a `struct`/`enum`/`newtype`/`type` decl name (a user
   `protocol Comparable:` is likewise rejected `reserved (builtin)`). Their SHAPE (method sigs + embeds)

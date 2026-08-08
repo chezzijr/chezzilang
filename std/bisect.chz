@@ -2,7 +2,8 @@
 #
 # Written entirely in Chezzi. Every fn assumes `xs` is already sorted ascending and compares with
 # `<`, which dispatches through the `Comparable` protocol — so these work for int, float, str, and
-# any user struct that implements `compare(self, other) -> int`.
+# any user struct that implements BOTH `compare(self, other) -> int` and `eq(self, other) -> bool`
+# (M23: `Comparable` embeds `Eq`).
 #
 # `bisect_left` returns the leftmost insertion index (before any equal elements); `bisect_right`
 # (a.k.a. `bisect`) the rightmost (after any equal elements). `insort_*` insert `x` in-place keeping

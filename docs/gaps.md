@@ -3137,6 +3137,20 @@ and the recursive element/field/entry arms) route through the SAME dispatch — 
 coarser than its type's `hash` is structurally unreachable, exactly as in Rust/Python).
 `Atomic.cas` is the one deliberate exception: it compares under the value lock, so it stays
 structural — and a type with a user `eq` is already an illegal `Atomic[T]` payload.
+**Open residual (small, low, found writing the M23 docs): a NON-numeric `newtype` may still declare
+`eq`.** The W6-3d decl-site rule only fires for a *numeric* newtype, on the premise that a non-numeric
+one "has no operator to disagree with" — true for `+`/`<`, false for `==`, which exists for every
+newtype underlying. Measured on `5b699c9b`, both engines:
+```chezzi
+newtype Name = str:
+    fn eq(self, o: Name) -> bool: return true
+a := Name("a")
+b := Name("b")
+print(a == b, a.eq(b))     # false true   <- the two spellings disagree
+```
+`Name` does not satisfy `Eq` (so a `[T: Eq]` bound still rejects it) and the answer is stable across
+engines, so this is a wart, not a soundness hole. Fix = widen the W6-3d gate to reject `eq` on **any**
+newtype (one predicate); documented as-is in `docs/syntax.md`'s newtype section meanwhile.
 Still missing: bitwise/shift protocols, and a call operator. Small
 each. **`Contains`** (`x in my_struct` via `contains(self, item) -> bool`, Python's `__contains__`) —
 **FIXED**: a user struct/enum with a `contains(self, item) -> bool` method makes `x in that_value`

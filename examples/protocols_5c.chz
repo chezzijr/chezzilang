@@ -29,7 +29,8 @@ struct Vec2:
 fn combine[T: Arithmetic](a: T, b: T) -> T:
     return (a + b) * (a - b) / b
 
-# Bounded by builtin `Comparable` — works on ints AND any struct with `compare`.
+# Bounded by builtin `Comparable` — works on ints AND any struct with `compare` + `eq`
+# (`Comparable` embeds `Eq`, M23).
 fn maxOf[T: Comparable](a: T, b: T) -> T:
     if a > b:
         return a

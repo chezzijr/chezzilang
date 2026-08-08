@@ -1,6 +1,6 @@
 # std.cmp + Comparable sort (M7-G3): the stdlib's polymorphism now runs on generics, not the old
 # ad-hoc numeric overload. `cmp.min`/`cmp.max`/`cmp.clamp` and `list.sort()` all work over any
-# Comparable type — int, float, str, AND user structs that implement `compare`.
+# Comparable type — int, float, str, AND user structs that implement `compare` + `eq`.
 
 import std.cmp
 

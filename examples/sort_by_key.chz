@@ -1,6 +1,6 @@
 # examples/sort_by_key.chz — sort_by_key(f): sort in place by a derived key, sugar over sort_by.
 # The key extractor `fn(T) -> K` is called once per element; keys are compared by their natural
-# order (`K` must be Comparable — int/float/str or a struct with `compare`). Stable, like sort_by.
+# order (`K` must be Comparable — int/float/str or a struct with `compare` + `eq`). Stable, like sort_by.
 
 struct Money:
     cents: int

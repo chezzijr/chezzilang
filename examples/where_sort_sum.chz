@@ -1,7 +1,7 @@
 # Golden: file-backed List `sort` (now `native fn sort(self) -> nil where T: Comparable` in
 # std/prelude.chz — the retired bespoke Comparable arm) and `sum` (`native fn sum(self) -> T where
 # T: Add`, an annotation over the surviving numeric check-gate). Exercises sort on int / float /
-# struct-with-`compare` lists and sum on int / float lists. `where` lowers to NOTHING at runtime, so
+# struct-with-`compare`+`eq` lists and sum on int / float lists. `where` lowers to NOTHING at runtime, so
 # the output is byte-identical on interp, the cooperative VM (--serial), and the M:N engine
 # (default / --parallel) — the three-engine parity gate for the where-clause feature.
 # Run with: chezzi run examples/where_sort_sum.chz   (also --serial / --parallel — byte-identical)
