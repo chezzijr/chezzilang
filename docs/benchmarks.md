@@ -78,6 +78,36 @@ Levers, ranked for this gap:
 
 Re-run `many_struct`/`many_map` after each lever to track the close.
 
+## The M23 review fixes — 2026-08-08 — correctness fixes, **free**
+
+The eight adversarial-review fixes (probe position re-validation, snapshot rooting, the `Atomic.cas`
+hook switch, the nested-payload checker walk). A/B against `f50deb56`, hyperfine `-N --warmup 2/3`,
+release binaries built into **separate** `CARGO_TARGET_DIR`s and confirmed distinct
+(`strings … | grep "payload reaches"` = 1 vs 0).
+
+| bench     | runs | before   | after    | delta   |
+|-----------|-----:|---------:|---------:|--------:|
+| map       |   30 | 255.9 ms | 254.8 ms |  −0.4%  |
+| struct    |   20 | 666.9 ms | 667.8 ms |  +0.1%  |
+| loop      |   12 | 1467.9 ms| 1451.7 ms|  −1.1%  |
+| list      |   12 | 587.5 ms | 586.7 ms |  −0.1%  |
+| enum      |   12 | 3152.0 ms| 3163.7 ms|  +0.4%  |
+| many_map  |   12 | 466.5 ms | 464.9 ms |  −0.3%  |
+| primes    |   12 | 956.9 ms | 942.0 ms |  −1.6%  |
+| str       |   12 | 255.8 ms | 255.6 ms |  −0.1%  |
+| fib       |   12 | 390.6 ms | 388.5 ms |  −0.5%  |
+
+Free because the two hot additions are gated on `Vm::eq_may_reenter` — the probes' position
+re-validation and the snapshot rooting both collapse to nothing when the program declares no `eq`
+hook, which is every bench.
+
+**One measured surprise, worth the note.** The first cut regressed **`struct` by +3.3%** (669.5 →
+690.9 ms, 2.5σ, reproducible) — a bench with **no `==` in it at all**. Nothing semantic reached it:
+the six new container-arm closures had inlined into `values_equal_guarded` and bloated it enough to
+degrade the neighbouring codegen in `arith.rs` (where the hot arithmetic/superinstruction paths live).
+`#[inline(never)]` on `Vm::with_elem_roots` put it back to flat with no other change. Another entry
+for "don't trust a lever's a-priori blast radius" — this one wasn't a lever at all.
+
 ## The container `Eq` ripple (M23 slice 4) — 2026-08-08 — correctness fix, cost measured
 
 Not a lever — the correctness fix that makes `y in xs` / `m[y]` agree with `x == y`. Its price is

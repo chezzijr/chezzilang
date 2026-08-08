@@ -1437,14 +1437,25 @@ cannot) enforce.
   print(x in s)       # false — the stored key is a COPY, so identity never fires
   print([x] == [x])   # true  — same object, identity short-circuit fires
   ```
-* **An `eq` that mutates the very container it is being probed against gets an unspecified answer —
-  never a crash.** The probe re-reads its candidate list each step, so a position invalidated
-  mid-probe reads as a **miss**, not an out-of-range panic. CPython is equally arbitrary here. Don't
-  do it; if you do, memory safety still holds and the fault-free answer is simply not defined.
+* **An `eq` that mutates the very container it is being probed against answers from the container it
+  LEFT behind — never a crash.** The probe re-reads its candidate list each step *and* re-validates
+  the matched position after each compare; if the entry moved, the whole probe restarts (CPython
+  `lookdict`'s `DKIX_KEY_CHANGED`). So `m.get(k)` inside such an `eq` returns `k`'s value in the
+  post-mutation map, not a shifted neighbour's and not an out-of-range panic. An `eq` that mutates
+  on *every* call makes the probe spin, exactly like an `eq` containing `while true`. Don't do it.
 * **`Atomic[T].cas` compares structurally and never calls a user `eq`** — it holds the value's lock
-  across the compare, and re-entering user code there would deadlock. Rather than let `a == b` and
-  `atom.cas(a, …)` disagree, the checker **rejects a payload type that defines `eq`** outright: use
-  `Shared[T]` (which has no `cas`) for such a type. See [`concurrency.md`](concurrency.md).
+  across the compare, and re-entering user code there would deadlock. Two layers keep that true:
+  the checker **rejects a payload type that REACHES a user `eq`** — its own, or one on any element,
+  entry, tuple slot, struct field, enum payload or newtype underlying the structural compare would
+  recurse into (use `Shared[T]`, which has no `cas`, for such a type) — and the VM **switches the
+  `eq` hook off** for the duration of the compare, so the guarantee does not depend on that walk
+  being able to see through a protocol existential. See [`concurrency.md`](concurrency.md).
+* **A generic type's instantiation is ERASED at runtime, so `Any` can hand `eq` a foreign operand.**
+  `a: Any = Box(1)`, `b: Any = Box("x")`, `a == b` type-checks (the `Any` escape hatch from the
+  disjoint-type rule) and dispatches `Box`'s `eq`, whose body then faults on `int` vs `str`. It is a
+  normal recoverable fault, catchable with `recover:` — and it is what CPython does with the same
+  program (`TypeError` out of `__eq__`). There is no per-instantiation tag to dispatch on; keep the
+  static type if you want the compile-time answer.
 * **`match` never dispatches `eq`.** A literal pattern is `int`/`str`/`bool` only, and a struct/enum
   arm matches by variant and *binds* fields rather than comparing them — so a user `eq` cannot change
   which arm is taken.

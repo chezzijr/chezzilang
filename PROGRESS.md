@@ -2,6 +2,57 @@
 
 Single source of truth for "what am I doing next." Update after every work session.
 
+> # ✅ M23 review fixes — a re-entrant `eq` can no longer panic, orphan, or run under a lock (2026-08-08)
+>
+> An adversarial review of M23 found eight ways the new "equality can run arbitrary user code" reality
+> was not fully accounted for. All eight are fixed; the two criticals reproduced on BOTH engines
+> before the fix and pass on both after.
+>
+> * **CRITICAL — user Chezzi code could panic the VM.** `map_probe`/`set_probe` returned a position
+>   that every caller then indexed with, and an `eq` mutating the container on the compare that
+>   returns **true** invalidated it. Two entries → `index out of bounds` at `call.rs:3262` (an
+>   uncatchable process abort from pure Chezzi source); four entries → `Some(22)` where `Some(11)` is
+>   correct (a silent wrong answer). The probes now **re-validate the matched position after every
+>   compare and restart when it moved** (CPython `lookdict`'s `DKIX_KEY_CHANGED`), gated to zero cost
+>   when no program `eq` exists. Covered by `tests/chz/spec/eq_protocol_containers_test.chz`
+>   (get/index/insert/remove/`has`/`in`, Map and Set).
+> * **CRITICAL — `Atomic.cas` could call a user `eq` under the value mutex.** The gate keyed on the
+>   payload's OWN `eq`, so `Atomic[List[P]]`, `Option`, tuples, maps, struct fields, enum payloads and
+>   newtype underlyings all walked past it; the prosecutor's two-task repro hung forever with no
+>   deadlock report. The gate now walks every type structural equality recurses into
+>   (`Checker::reaches_user_eq`), and — because no checker walk can see through a protocol existential
+>   — the VM **switches the `eq` hook off** for the compare window (`Vm::eq_hook_off`), so the
+>   invariant the four docs state is enforced rather than assumed.
+> * **HIGH — cloned element handles outlived their only root.** The container-equality arms snapshot
+>   the child handles into a Rust local and rooted only the SOURCE containers; an `eq` that empties
+>   those sources orphaned the snapshot, making the answer depend on GC pressure (`true` at 0
+>   allocations, `false` at 2000, abort at 40000). New `Vm::with_elem_roots` pins the snapshot itself
+>   at every arm (list/tuple/map/set/struct/enum) plus `seq_slot`/`map_slot`/`set_slot` — one guard in
+>   each shared scan rather than at each caller — and the set-algebra worker. Two GC-stress
+>   regressions that abort with `dangling GcRef` without the fix.
+> * **MEDIUM — `tid` is not a per-instantiation guard.** Generic type arguments are erased at runtime,
+>   so `a: Any = Box(1)` vs `b: Any = Box("x")` dispatches `Box`'s `eq` across instantiations. Verified
+>   against the owning ancestor: CPython's identical program raises `TypeError` out of `__eq__`, and
+>   Chezzi's is a normal `recover:`-catchable fault. Documented as the erasure ceiling
+>   (`docs/syntax.md` §7b) with a test that pins the recoverable-fault guarantee.
+> * **MEDIUM — the newtype-`Eq` docs contradicted the code.** Ruled for the CODE: a **numeric** newtype
+>   satisfies `Eq` intrinsically via the underlying's native equality, because `Comparable` embeds `Eq`
+>   (M23) and a numeric newtype satisfies `Comparable` intrinsically — denying it would make
+>   `fn sorted[T: Comparable]` unsatisfiable for `newtype Meters = float`, a regression of M21. No
+>   newtype ever satisfies `Eq` through a METHOD. `docs/spec.md` ×2 and `PROGRESS.md` ×2 corrected to
+>   match `docs/syntax.md` and the code.
+> * **LOW —** "the eight other benches" is seven others (`docs/benchmarks.md`'s table is 8 rows
+>   *including* `map`).
+>
+> **Cost: free.** Every bench flat-to-faster (`map` −0.4%, `struct` +0.1%, `primes` −1.6%; full table
+> in [`benchmarks.md`](docs/benchmarks.md)) — both hot additions are gated on `Vm::eq_may_reenter`.
+> The first cut did regress **`struct` by +3.3%**, a bench with no `==` in it: the new container-arm
+> closures had bloated `values_equal_guarded` enough to hurt the neighbouring codegen in `arith.rs`.
+> `#[inline(never)]` on `with_elem_roots` restored it.
+>
+> **Gate:** `cargo test` 17 targets / **4109** passed / 0 failed; `chezzi test tests/chz/` **358/358**
+> identical on both engines; `cargo clippy --all-targets -- -D warnings` clean.
+>
 > # ✅ M23 COMPLETE — the `Eq` protocol: `==` is user-overloadable (2026-08-08)
 >
 > **The bug.** A type could own its `<` (define `compare`) but never its `==`. Measured on the
@@ -16,7 +67,12 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > drift-guard list).
 > * **Who satisfies it:** all four scalars intrinsically — **`bool` included**, unlike `Comparable`,
 >   since `==` is defined on every scalar; a `struct`/`enum` structurally, by defining `eq`; a
->   **newtype** not at all (its `==` unwraps to the underlying's native equality — W6-3d).
+>   **newtype** never through a METHOD (its `==` unwraps to the underlying's native equality — W6-3d),
+>   but a **numeric** newtype intrinsically, via that same native equality: `Comparable` embeds `Eq`
+>   and a numeric newtype satisfies `Comparable` intrinsically, so denying it `Eq` would make
+>   `fn sorted[T: Comparable]` unsatisfiable for `newtype Meters = float`. A `str`/`bool`/generic
+>   newtype satisfies neither (ceiling: its `==` works natively, so `Eq` could be granted there too —
+>   an additive follow-up, not a bug).
 > * **`Comparable` embeds `Eq`** (Rust's `Ord: Eq`), so a struct/enum defining `compare` must also
 >   define `eq`. Keeping the two agreeing is the implementor's job — the checker cannot verify
 >   `eq(a,b) == (compare(a,b) == 0)`. Scalars keep `Comparable` with no `eq` to write.
@@ -50,7 +106,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > name is a compile error at the declaration (W6-3d's numeric-only gate widened; `docs/gaps.md` §L5,
 > closed 2026-08-08). Use a `struct` if you need your own equality.
 >
-> **Cost.** `map` **+4.1%**, the eight other benches flat-to-faster (`docs/benchmarks.md`); the price
+> **Cost.** `map` **+4.1%**, the seven other benches flat-to-faster (`docs/benchmarks.md`); the price
 > of `values_equal_guarded`/`*_slot` becoming `&mut self` so a probe can call user code.
 >
 > **Docs:** `docs/syntax.md §7b` (the `Eq` surface + the ceilings), `docs/spec.md` (M23 row, the
@@ -75,8 +131,10 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > site that still holds an `entries` slice borrowed out of `self.heap` across the compare no longer
 > builds, so every remaining caller demonstrably passes a Rust-local collection. Heap Map/Set probes
 > route through two new helpers, `Vm::map_probe`/`set_probe`, which re-index the candidate list per
-> probe step (allocation-free; a stale position after an `eq` that mutated the container reads as a miss,
-> never an out-of-range panic) — `map_slot`/`set_slot` survive only for a **local**, not-yet-heap
+> probe step (allocation-free) AND re-validate the matched position after every compare, restarting the
+> probe when it moved (CPython `lookdict`'s `DKIX_KEY_CHANGED`) — so an `eq` that mutates the container
+> mid-probe answers from the container it left behind, never a shifted neighbour and never an
+> out-of-range panic — `map_slot`/`set_slot` survive only for a **local**, not-yet-heap
 > `MapData`/`SetData`.
 >
 > **Rooting.** A user `eq` re-enters the VM and can collect, so every in-flight Rust local across a
@@ -108,7 +166,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 >
 > Tests: `tests/chz/spec/eq_protocol_containers_test.chz` (13 `test fn` — 11 of them FAIL on `035de7ee`,
 > 2 are controls) + the 2 Rust gc-stress cases. Full suite 3897 lib + integration green, clippy clean,
-> `chezzi test tests/chz/` 352/352 identical on both engines. Perf: `map` **+4.1% SLOWER**, the eight other benches
+> `chezzi test tests/chz/` 352/352 identical on both engines. Perf: `map` **+4.1% SLOWER**, the seven other benches
 > flat-to-faster (`docs/benchmarks.md`).
 
 > **✅ M23 slice 3 follow-up 2026-08-08 — the `==` dispatch is now GATED on `eq`'s signature; a
@@ -184,7 +242,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > routed through `compare`/`eq` in this slice, so no example's printed output could move. **NOT in
 > this slice:** `==`'s dispatch to a user `eq` — still a later slice.
 
-> **✅ M23 slice 1 landed 2026-08-08 — the `Eq` protocol exists in the checker, and `docs/gaps.md` §B2 is closed.** `Eq` (`eq(self, other: Self) -> bool`) is now a reserved prebuilt protocol wired at all four parallel sites (`is_reserved_protocol`, `prebuilt_protocols`, `std/prelude.chz`, the drift-guard list): the four scalars satisfy it intrinsically (`bool` included — `==` is defined on every scalar, unlike ordering), a struct/enum satisfies it structurally, and a newtype does **not** (its `==` unwraps to the underlying's native equality, so a numeric newtype declaring `eq` is now rejected at the decl site alongside `add`/`compare` — W6-3d). Five `INTRINSIC_PROTO_METHODS` rows + the `("eq", 1)` arm in `Vm::intrinsic_proto_method` (routing `values_equal_guarded`, the operator's own worker — so `x.eq(y)` can never disagree with `x == y`, and a cyclic operand raises the same depth fault). **§B2:** `==`/`!=` between provably-disjoint types is now a compile error — a deliberate, documented divergence from Python's runtime `False`, with the `Any` existential as the dynamic escape hatch (widening **one** side is enough). "Provably disjoint" is decided by **`Checker::may_be_equal`** — CO-INHABITABILITY ("can these two ever be the same value?"), *not* assignability, which answers the stricter STORAGE question and carries container invariance + a sendability witness that equality has no use for. So a protocol existential vs a conforming concrete (`Shape == Sq`, `Error == MyErr`, `Any == int`), **two** different existentials (`Shape == Error` — one type can conform to both), an existential nested in an invariant container or concurrency handle (`List[Error] == List[MyErr]`, `Map`/`Box`/tuple/`Option`/`Shared` alike), and any erased `Ty::Param` bare or nested **at any depth** — including inside the native generic handles (`Channel[T] == Channel[int]`, whose `==` is the runtime's identity shortcut) and inside a parameterized protocol's own arguments (`Container[T] == Bag[int]`, where the args are erased to `Unknown` so the METHOD SET still decides) — all stay legal; a **non**-conforming concrete (`Shape == str`, `List[Shape] == List[str]`, `Container[T] == int`), a handle over disjoint elements (`Channel[int] == Channel[str]`) and a `where T: <scalar>`-pinned param still reject. The runtime's cross-type arms (mixed `int`/`float`, `bytes`/`bytearray`) live INSIDE that recursion, so `[1.0] == [1]` compiles and prints `true` like CPython. Also: an `Atomic[T]` payload may not define `eq` (`cas` compares structurally and could never route through it). **NOT in this slice:** the `Comparable: Eq` embed and `==`'s dispatch to a user `eq` — both later slices. `docs/gaps.md` **§B2**, **§L5**.
+> **✅ M23 slice 1 landed 2026-08-08 — the `Eq` protocol exists in the checker, and `docs/gaps.md` §B2 is closed.** `Eq` (`eq(self, other: Self) -> bool`) is now a reserved prebuilt protocol wired at all four parallel sites (`is_reserved_protocol`, `prebuilt_protocols`, `std/prelude.chz`, the drift-guard list): the four scalars satisfy it intrinsically (`bool` included — `==` is defined on every scalar, unlike ordering), a struct/enum satisfies it structurally, and a newtype never through a **method** (its `==` unwraps to the underlying's native equality, so a numeric newtype declaring `eq` is now rejected at the decl site alongside `add`/`compare` — W6-3d; a *numeric* newtype does satisfy `Eq` intrinsically via that native equality, as `Comparable` embeds `Eq`). Five `INTRINSIC_PROTO_METHODS` rows + the `("eq", 1)` arm in `Vm::intrinsic_proto_method` (routing `values_equal_guarded`, the operator's own worker — so `x.eq(y)` can never disagree with `x == y`, and a cyclic operand raises the same depth fault). **§B2:** `==`/`!=` between provably-disjoint types is now a compile error — a deliberate, documented divergence from Python's runtime `False`, with the `Any` existential as the dynamic escape hatch (widening **one** side is enough). "Provably disjoint" is decided by **`Checker::may_be_equal`** — CO-INHABITABILITY ("can these two ever be the same value?"), *not* assignability, which answers the stricter STORAGE question and carries container invariance + a sendability witness that equality has no use for. So a protocol existential vs a conforming concrete (`Shape == Sq`, `Error == MyErr`, `Any == int`), **two** different existentials (`Shape == Error` — one type can conform to both), an existential nested in an invariant container or concurrency handle (`List[Error] == List[MyErr]`, `Map`/`Box`/tuple/`Option`/`Shared` alike), and any erased `Ty::Param` bare or nested **at any depth** — including inside the native generic handles (`Channel[T] == Channel[int]`, whose `==` is the runtime's identity shortcut) and inside a parameterized protocol's own arguments (`Container[T] == Bag[int]`, where the args are erased to `Unknown` so the METHOD SET still decides) — all stay legal; a **non**-conforming concrete (`Shape == str`, `List[Shape] == List[str]`, `Container[T] == int`), a handle over disjoint elements (`Channel[int] == Channel[str]`) and a `where T: <scalar>`-pinned param still reject. The runtime's cross-type arms (mixed `int`/`float`, `bytes`/`bytearray`) live INSIDE that recursion, so `[1.0] == [1]` compiles and prints `true` like CPython. Also: an `Atomic[T]` payload may not define `eq` (`cas` compares structurally and could never route through it). **NOT in this slice:** the `Comparable: Eq` embed and `==`'s dispatch to a user `eq` — both later slices. `docs/gaps.md` **§B2**, **§L5**.
 
 > **✅ Float `%` landed 2026-08-08 — the last unreached float operator in the CPython differential generator, closing `docs/gaps.md` §W7-37 entirely.** Chezzi's float `%` is `fmod` (sign of the DIVIDEND, total — matches Rust/Go, diverges deliberately from CPython's floored, raising `%`); `gen_float`'s op list gained `BinOp::Mod` beside `Div` (no non-zero-divisor guard) and mixed int↔float `%` came for free via the shared `op` variable; the Python shim's new `_chz_fmod` absorbs both the sign rule and totality (zero divisor / `inf` dividend → `NaN`). 5000-seed `difffuzz --floats` sweep + `fuzz_full_heavy` (0..3000): 0 findings. `docs/gaps.md` **§W7-37**.
 
