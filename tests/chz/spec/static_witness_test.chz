@@ -269,3 +269,18 @@ fn pong[T: Default](x: T, n: int) -> T:
 test fn mutually_recursive_generics_forward_a_witness():
     assert ping(Counter(3), 5).n == 0
     assert ping(Tag("q"), 4).s == "none"
+
+# ---- a witness call that is the ROOT of an interpolation fragment ----
+#
+# `"{reset(c)}"` (no trailing `.field`) keyed the witness under the STRING LITERAL's span in the
+# checker — which re-anchors a fragment root there so errors point at the literal — while the
+# compiler still looked it up under the fragment-relative span. `chezzi check` passed and the run
+# died with `internal: no static-type witness recorded`. Both halves of the key must agree.
+
+fn fwd_interp[T: Default](x: T) -> str:
+    return "{reset(x)}"
+
+test fn an_interpolation_fragment_root_is_a_real_call_site():
+    c := Counter(9)
+    assert "{reset(c)}" == "Counter(n=0)"
+    assert fwd_interp(Tag("hi")) == "Tag(s='none')"

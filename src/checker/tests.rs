@@ -20925,3 +20925,22 @@ fn witness_forwarding_fn_loses_value_and_spawn_positions_rejected() {
         "across a module boundary is not supported yet",
     );
 }
+
+/// A witness call that is the ROOT of a `{…}` interpolation fragment (`"{reset(c)}"`, no trailing
+/// `.field`). The checker anchors a fragment root at the STRING LITERAL's span so a fragment error
+/// points at the literal — which also moved the witness key, and the compiler looked the call up
+/// under the fragment-relative span it still had. Result: `chezzi check` said ok and the run died
+/// with `internal: no static-type witness recorded`. Present since slice A (no forwarding needed to
+/// reproduce); this pins BOTH halves — the key must agree, and the runtime value must be right (the
+/// RUNNING half is `an_interpolation_fragment_root_is_a_real_call_site` in the `.chz` suite).
+#[test]
+fn witness_call_at_an_interpolation_fragment_root_ok() {
+    // the CONCRETE witness (the pre-existing hole)…
+    entry_ok(&format!(
+        "{FWD_HEAD}fn main():\n    c := Counter(9)\n    print(\"{{reset(c)}}\")\nmain()\n"
+    ));
+    // …and the FORWARDED one, which reaches the same key
+    entry_ok(&format!(
+        "{FWD_HEAD}fn fwd[T: Default](x: T) -> str:\n    return \"{{reset(x)}}\"\nfn main():\n    print(fwd(Tag(\"hi\")))\nmain()\n"
+    ));
+}
