@@ -297,24 +297,15 @@ impl Checker {
                 return Ty::Unknown;
             }
             // `T.member(args)` where `T` is an in-scope generic TYPE PARAMETER (not a concrete type
-            // name). You cannot call a static method / construct THROUGH an erased type parameter: the
-            // body is checked once with `T` abstract and `T` is erased at runtime, so there is no
-            // concrete type to dispatch to (see the Convert/From "restricted construction" note —
-            // `T.convert` on an abstract `T` is deferred pending witness-passing). Give a clear,
-            // actionable message instead of the value path's cryptic "unknown name 'T'". Mirrors the
-            // newtype arm above (a precise diagnostic for an otherwise-cryptic member access).
+            // name). M24 — this is the STATIC-WITNESS call: legal exactly when one of `T`'s bounds
+            // declares `member` as a STATIC requirement AND the enclosing fn's hidden `$w:T` witness
+            // local is reachable here. Everything else keeps the pre-M24 clear diagnostic (generics
+            // are erased, so without a witness there is no concrete type to dispatch to).
             if let ExprKind::Ident(tname) = &obj.kind
                 && !self.is_local_binding(tname)
                 && self.type_params.contains_key(tname)
             {
-                self.infer_all(args);
-                self.error(
-                    span,
-                    format!(
-                        "cannot call a static method through the generic type parameter '{tname}' (`{tname}.{name}`): generics are erased, so there is no concrete type to construct at runtime — call the concrete type's static method directly (e.g. `SomeType.{name}(...)`) or pass a converter function (a `fn(...) -> {tname}` parameter)"
-                    ),
-                );
-                return Ty::Unknown;
+                return self.infer_witness_static_call(tname, name, args, span);
             }
             // `Type[T…].member(args)` — declaration-site turbofish for a generic TYPE: a VARIANT
             // constructor (`Box[int].Has(5)`, `E[int, str].Pair(…)`) or a generic STATIC method
@@ -718,7 +709,7 @@ impl Checker {
         if self.harvest_keywords {
             let perm: Vec<usize> = fill.iter().map(|f| f.expect("filled")).collect();
             let key = keyword_key(
-                self.keyword_module_idx,
+                self.graph_module_idx,
                 self.kw_frag_ctx,
                 self.kw_frag_ord,
                 named,
@@ -1903,7 +1894,9 @@ impl Checker {
                     // A generic function: infer its type parameters from the arguments, enforce
                     // bounds, and substitute into the return type.
                     if !sig.type_params.is_empty() {
-                        return Some(self.infer_generic_call(name, &sig, args, targs, span, hint));
+                        return Some(
+                            self.infer_generic_call(name, &sig, args, targs, span, hint, true),
+                        );
                     }
                     // Float params are coerced at the callee's prologue (compile_fn / extern).
                     // Honor an optional trailing tail (`min_params < params.len()`, e.g. a native
@@ -2204,7 +2197,10 @@ impl Checker {
                         // turbofish (`m.f[int]()`) and the expected-type hint — a type param that
                         // appears ONLY in the return type (`fn empty_list[T]() -> List[T]`) is otherwise
                         // unsolvable and leaked `List[T]` into a user-facing type.
-                        return self.infer_generic_call(method, &fsig, args, type_args, span, hint);
+                        // M24: `local_call = false` — a module-qualified callee's witness would have to be
+                        // keyed to the DECLARING module (Task 3), so a witness-needing one is rejected.
+                        return self
+                            .infer_generic_call(method, &fsig, args, type_args, span, hint, false);
                     }
                     // Float params are coerced at the callee's prologue. Honor an optional trailing
                     // tail (`min_params < params.len()`, e.g. `request.get(url, timeout_ms?)`); for

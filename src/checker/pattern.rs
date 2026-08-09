@@ -1870,6 +1870,25 @@ impl Checker {
             let params = sig.params.clone();
             let ret = sig.ret.clone();
             let labels = sig.labels.clone();
+            // M24 — PERMANENT WALL, not a v1 limit: a generic fn whose bound carries a STATIC
+            // protocol requirement needs a hidden witness argument, and a `Ty::Func` erases which
+            // declaration it came from — so no witness can ever be recovered at the eventual
+            // indirect call. Reject at the READ (`g := reset`), where the name is still known, both
+            // for the Scope-A pin below and for the rigid fallback after it.
+            let wparams = self.witness_type_params(&type_params);
+            if !wparams.is_empty() {
+                self.error(
+                    span,
+                    format!(
+                        "'{name}' cannot be used as a function value: its bound on {} requires a static \
+                         protocol method, which needs the concrete type — a function value erases it. \
+                         Call '{name}' directly, or pass a factory closure instead (e.g. \
+                         `fn make[T](mk: fn() -> T) -> T`)",
+                        wparams.join(", ")
+                    ),
+                );
+                return Ty::Unknown;
+            }
             // Scope A — a GENERIC fn referenced in value position (a bare `Name`, NOT the callee of a
             // direct call) whose type params can be PINNED from a concrete expected `fn(..) -> ..`
             // hint (a `let` annotation, a HOF param, or a return position — all delivered via the
@@ -3538,6 +3557,11 @@ impl Checker {
         // not seed the enclosing generator's `collected_yields` during inference. (Defensive — mirrors
         // `yield_ty.take()`; closures are single-expression so a closure `yield` is unparseable today.)
         let saved_ig = std::mem::replace(&mut self.in_generator, false);
+        // M24: a closure compiles to its own child proto and captures only its body's FREE VARIABLES.
+        // The enclosing generic fn's `$w:T` witness local is never spelled in the source, so it is
+        // never free, never captured, and not reachable here — clear the witness scope so a
+        // `T.static()` inside a closure body is rejected instead of mis-lowered.
+        let saved_witness_scope = std::mem::take(&mut self.witness_scope);
         // Mark BEFORE param binding so the free-closure finalize (below) is suppressed if EITHER an
         // un-inferable PARAM (`cannot infer type of parameter`) or the body emits a real error — a
         // residual `Unknown` return is then a cascade, not a genuine un-inferable return.
@@ -3612,6 +3636,7 @@ impl Checker {
         let body_ty = self.infer(body);
         let closure_had_err = self.errors.len() > closure_mark;
         self.pop_scope();
+        self.witness_scope = saved_witness_scope;
         self.loop_depth = saved_loop_depth;
         self.recover_depth = saved_recover;
         self.in_defer_block = saved_in_defer;

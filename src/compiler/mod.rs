@@ -62,6 +62,12 @@ pub(crate) fn is_builtin(name: &str) -> bool {
     )
 }
 
+/// M24 — the UNSPELLABLE local name holding the runtime type witness for type param `t`. `$` is not
+/// an identifier character, so no source binding can shadow or read it.
+fn witness_local(t: &str) -> String {
+    format!("$w:{t}")
+}
+
 /// Compile a whole resolved module graph in dependency order.
 pub fn compile_graph(graph: &ModuleGraph) -> Result<Program, CompileError> {
     let mut c = Compiler::new();
@@ -72,7 +78,13 @@ pub fn compile_graph(graph: &ModuleGraph) -> Result<Program, CompileError> {
     // Swift-style keyword args through a function VALUE: the checker resolves each value+keyword call
     // to a positional slot permutation (module-scoped, keyed like extern sigs); the value path lowers
     // it to a plain positional `Op::Call`, so the runtime ABI stays positional.
-    c.keyword_calls = crate::checker::resolve_keyword_calls(graph);
+    // M24 rides the same pass: the witness table says which generic fns take hidden trailing
+    // witness params and what fills each witness at each call site. The compiler CONSUMES it — it
+    // never re-derives which protocols carry a static requirement (that resolves through
+    // imports/aliases/embeds, which is checker work).
+    let (kw, wt) = crate::checker::resolve_call_tables(graph);
+    c.keyword_calls = kw;
+    c.witnesses = wt;
     // Pass 0: collision pre-pass — assign runtime keys for module-scoped user types. A type name
     // declared in exactly one module keeps its BARE name (the common case → unchanged Display/print
     // output); a name declared in ≥2 modules that are BOTH in the program is disambiguated (the
@@ -142,7 +154,9 @@ pub fn compile_module_standalone(module: &Module) -> Result<Program, CompileErro
     // SINGLE-RESOLVER: extern C types come from the checker's standalone pass — the SAME resolver the
     // multi-file CLI uses (no second backend resolver exists). The backend reads this table verbatim.
     c.extern_sigs = crate::checker::resolve_extern_signatures_standalone(&module.stmts);
-    c.keyword_calls = crate::checker::resolve_keyword_calls_standalone(&module.stmts);
+    let (kw, wt) = crate::checker::resolve_call_tables_standalone(&module.stmts);
+    c.keyword_calls = kw;
+    c.witnesses = wt;
     let toplevel = c.compile_module(0, module, &[], true, None)?;
     let global_slots = std::mem::take(&mut c.global_slots);
     // A synthetic module id so the run driver has something to key the namespace cache on.
@@ -241,6 +255,19 @@ struct Compiler {
     /// in `compile_graph`/`compile_module_standalone` from the checker's `resolve_keyword_calls`;
     /// consumed by the value path of `compile_call` to emit a positional `Op::Call`.
     keyword_calls: crate::checker::KeywordTable,
+    /// M24 — the checker-produced static-witness contract (see [`crate::checker::WitnessTable`]),
+    /// consumed verbatim: `fns` drives the hidden trailing `$w:T` params a generic fn's proto gets,
+    /// `calls` drives the extra argument each call site pushes.
+    witnesses: crate::checker::WitnessTable,
+    /// M24 — the witness TYPE-PARAM names of the fn body currently being emitted, in declaration
+    /// order. Non-empty ONLY inside that body's own proto: `compile_closure` and the `spawn:` /
+    /// `defer:` block child protos clear it (their frames have no `$w:T` local), and a nested `fn`
+    /// clears it by taking an empty `pending_witnesses`. `T.static()` lowers to `Op::CallStaticDyn`
+    /// exactly when `T` is in here — the compiler's half of the checker's `witness_scope`.
+    witness_locals: Vec<String>,
+    /// M24 — the witness params for the NEXT `compile_fn_body`, set only at the module-level `fn`
+    /// emit site (so a nested `fn` sharing a top-level fn's name can never inherit its arity).
+    pending_witnesses: Vec<String>,
     /// String-interpolation fragment discriminators for the [`crate::checker::KeywordKey`]: the
     /// whole-string span + the fragment's 0-based ordinal, maintained (save/restore) around each
     /// fragment in `compile_str`. Mirrors the checker's `kw_frag_ctx`/`kw_frag_ord` so the keyword-call
@@ -693,6 +720,9 @@ impl Compiler {
             bare_types: HashMap::new(),
             extern_sigs: crate::checker::ExternTable::new(),
             keyword_calls: crate::checker::KeywordTable::new(),
+            witnesses: crate::checker::WitnessTable::default(),
+            witness_locals: Vec::new(),
+            pending_witnesses: Vec::new(),
             kw_frag_ctx: crate::lexer::Span::default(),
             kw_frag_ord: 0,
             float_elem_hint: None,
@@ -1245,6 +1275,14 @@ impl Compiler {
         fc.boxed_names = captured_names_of_body(&module.stmts, &[]);
         for stmt in &module.stmts {
             if let StmtKind::Fn(decl) = &stmt.kind {
+                // M24: a module-level generic fn whose bound carries a static protocol requirement
+                // gets hidden trailing witness params — the checker's `fns` table is the ONLY source.
+                self.pending_witnesses = self
+                    .witnesses
+                    .fns
+                    .get(&(module_idx, decl.name.clone()))
+                    .cloned()
+                    .unwrap_or_default();
                 let pid = self.compile_fn(decl, false)?;
                 fc.emit(Op::MakeFunc(pid), stmt.span);
                 fc.emit(
@@ -1387,7 +1425,14 @@ impl Compiler {
         let prev_shadow = self.float_shadow.clone();
         self.float_shadow
             .extend(decl.type_params.iter().map(|tp| tp.name.clone()));
+        // M24 — this body's hidden witness params. `pending_witnesses` is set ONLY at the
+        // module-level `fn` emit site, so a nested `fn`/method takes the empty default here, which
+        // also CLEARS any enclosing body's witness locals (they live in a frame this proto cannot
+        // reach). Restored afterwards so the enclosing body keeps lowering its own `T.static()`.
+        let witnesses = std::mem::take(&mut self.pending_witnesses);
+        let prev_w = std::mem::replace(&mut self.witness_locals, witnesses);
         let r = self.compile_fn_body(decl, captured_names);
+        self.witness_locals = prev_w;
         self.float_shadow = prev_shadow;
         r
     }
@@ -1397,7 +1442,13 @@ impl Compiler {
         decl: &FnDecl,
         captured_names: Vec<String>,
     ) -> Result<ProtoId, CompileError> {
-        let mut fc = FnComp::new(decl.name.clone(), decl.params.len(), false);
+        // M24: the hidden trailing witness params sit AFTER the declared params, so every existing
+        // slot index (float/box prologues, capture entries) is untouched and only the arity grows.
+        let mut fc = FnComp::new(
+            decl.name.clone(),
+            decl.params.len() + self.witness_locals.len(),
+            false,
+        );
         fc.captured_names = captured_names;
         // Uniform by-reference capture (Task A): compute this frame's boxed-name set (unwired).
         fc.boxed_names = captured_names_of_body(&decl.body, &decl.params);
@@ -1410,6 +1461,9 @@ impl Compiler {
         });
         for p in &decl.params {
             fc.add_local(p.name.clone());
+        }
+        for w in &self.witness_locals {
+            fc.add_local(witness_local(w));
         }
         // A `float` param coerces any int argument at the callee prologue — so EVERY caller (incl. an
         // int VARIABLE, not just a literal) widens.
@@ -2005,6 +2059,7 @@ impl Compiler {
                         span,
                     });
                 };
+                self.reject_witness_indirect_call(fc, callee, "spawn", call.span)?;
                 if let ExprKind::Field { obj, name, .. } = &callee.kind {
                     self.compile_expr(fc, obj)?;
                     self.compile_args(fc, args)?;
@@ -2059,7 +2114,11 @@ impl Compiler {
                     child.emit(Op::EnterNursery, span);
                     child.nursery_scopes += 1;
                 }
-                self.compile_block_scoped(&mut child, body)?;
+                // M24: the block's own proto has no `$w:T` local (see `compile_closure`).
+                let prev_w = std::mem::take(&mut self.witness_locals);
+                let r = self.compile_block_scoped(&mut child, body);
+                self.witness_locals = prev_w;
+                r?;
                 if implicit {
                     child.nursery_scopes -= 1;
                 }
@@ -4085,7 +4144,11 @@ impl Compiler {
                     child.emit(Op::EnterNursery, span);
                     child.nursery_scopes += 1;
                 }
-                self.compile_block_scoped(&mut child, body)?;
+                // M24: the block's own proto has no `$w:T` local (see `compile_closure`).
+                let prev_w = std::mem::take(&mut self.witness_locals);
+                let r = self.compile_block_scoped(&mut child, body);
+                self.witness_locals = prev_w;
+                r?;
                 if implicit {
                     child.nursery_scopes -= 1;
                 }
@@ -4109,6 +4172,7 @@ impl Compiler {
                 span,
             });
         };
+        self.reject_witness_indirect_call(fc, callee, "defer", call.span)?;
         if let ExprKind::Field { obj, name, .. } = &callee.kind {
             self.compile_expr(fc, obj)?;
             self.compile_args(fc, args)?;
@@ -4227,6 +4291,34 @@ impl Compiler {
         Ok(())
     }
 
+    /// M24 — `spawn f(...)` / `defer f(...)` lower at their OWN emit sites (`Op::SpawnCall` /
+    /// `Op::DeferCall`), which do not push witness arguments. The checker already rejects a
+    /// witness-needing callee there; this is the backstop that makes a miss a loud compile error
+    /// instead of a silently short `argc`.
+    fn reject_witness_indirect_call(
+        &self,
+        fc: &FnComp,
+        callee: &Expr,
+        kw: &str,
+        span: Span,
+    ) -> Result<(), CompileError> {
+        if let ExprKind::Ident(fname) = &callee.kind
+            && fc.is_unbound(fname)
+            && self
+                .witnesses
+                .fns
+                .contains_key(&(self.current_module_idx, fname.clone()))
+        {
+            return Err(CompileError {
+                message: format!(
+                    "'{fname}' takes a static-protocol bound, so it cannot be the target of `{kw}` yet"
+                ),
+                span,
+            });
+        }
+        Ok(())
+    }
+
     fn compile_call(
         &mut self,
         fc: &mut FnComp,
@@ -4237,6 +4329,36 @@ impl Compiler {
     ) -> Result<(), CompileError> {
         // Method / module-member call: `obj.name(args)`.
         if let ExprKind::Field { obj, name, .. } = &callee.kind {
+            // M24 — `T.method(args)` through a generic bound's STATIC requirement. NO table lookup is
+            // needed here: `T` is a type PARAM (never in `bare_types`/`static_methods`), and this
+            // compiler itself declared the `$w:T` local for exactly the fns the checker's `fns` table
+            // named — so "a `Field` call on a bare `T` for which a `$w:T` local exists" IS the
+            // witness call. The checker guarantees the local is reachable wherever it accepts the
+            // call (`Checker::witness_scope`), so a missing slot is an internal invariant break.
+            if let ExprKind::Ident(t) = &obj.kind
+                && fc.is_unbound(t)
+                && self.witness_locals.iter().any(|w| w == t)
+            {
+                let Some(slot) = fc.resolve_local(&witness_local(t)) else {
+                    return Err(CompileError {
+                        message: format!(
+                            "internal: no type witness in scope for '{t}.{name}' (the witness does \
+                             not cross a closure / spawn / defer boundary)"
+                        ),
+                        span,
+                    });
+                };
+                self.compile_args(fc, args)?;
+                fc.emit_get_local_raw(slot, span);
+                fc.emit(
+                    Op::CallStaticDyn {
+                        method: name.clone(),
+                        argc: args.len(),
+                    },
+                    span,
+                );
+                return Ok(());
+            }
             // `module.Struct(args)` → qualified struct constructor. `module` is a bound module name
             // whose target declares struct `name`; emit `NewStruct` keyed by that module's runtime key.
             if let ExprKind::Ident(mname) = &obj.kind
@@ -4677,6 +4799,48 @@ impl Compiler {
                 return Ok(());
             }
         }
+        // M24 — a same-module call to a generic fn that takes hidden trailing witness params: push
+        // the declared args, then one `ConstStr` type-identity key per witness, and call with the
+        // widened `argc`. The compiler CONSUMES the checker's table; a missing entry for a call the
+        // checker's `fns` table says needs witnesses is a hard error, never a short `argc`.
+        if let ExprKind::Ident(fname) = &callee.kind
+            && fc.is_unbound(fname)
+            && self
+                .witnesses
+                .fns
+                .contains_key(&(self.current_module_idx, fname.clone()))
+        {
+            let key = crate::checker::witness_key(
+                self.current_module_idx,
+                self.kw_frag_ctx,
+                self.kw_frag_ord,
+                span,
+            );
+            let Some(srcs) = self.witnesses.calls.get(&key).cloned() else {
+                return Err(CompileError {
+                    message: format!(
+                        "internal: no static-type witness recorded for the call to '{fname}'"
+                    ),
+                    span,
+                });
+            };
+            if !named.is_empty() {
+                return Err(CompileError {
+                    message: format!(
+                        "keyword arguments are not supported yet on '{fname}' (it takes a \
+                         static-protocol bound); pass its arguments positionally"
+                    ),
+                    span,
+                });
+            }
+            self.compile_expr(fc, callee)?;
+            self.compile_args(fc, args)?;
+            for crate::checker::WitnessSrc::Concrete(k) in &srcs {
+                fc.emit(Op::ConstStr(k.clone()), span);
+            }
+            fc.emit(Op::Call(args.len() + srcs.len()), span);
+            return Ok(());
+        }
         // General callable value.
         // Swift-style keyword arguments through a function VALUE (`g(name="Bob")`): the checker
         // recorded a slot PERMUTATION over the combined `[positional args ++ named exprs]` list. Emit
@@ -4735,6 +4899,9 @@ impl Compiler {
         let captured_names: Vec<String> = entries.iter().map(|e| e.name.clone()).collect();
 
         let mut child = FnComp::new("<closure>".to_string(), params.len(), false);
+        // M24: a closure is its own proto and captures only FREE VARIABLES; the enclosing frame's
+        // `$w:T` local is never spelled in the source, so it is never captured and unreachable here.
+        let prev_w = std::mem::take(&mut self.witness_locals);
         // Uniform by-reference capture (Task A): this closure's own boxed-name set (unwired).
         child.boxed_names = captured_names_of_closure(body, params);
         child.captured_names = captured_names;
@@ -4746,7 +4913,9 @@ impl Compiler {
         self.emit_float_param_prologue(&mut child, params);
         // Uniform by-reference capture: box any param captured by a nested closure (after coercion).
         self.emit_box_param_prologue(&mut child, params);
-        self.compile_expr(&mut child, body)?;
+        let r = self.compile_expr(&mut child, body);
+        self.witness_locals = prev_w;
+        r?;
         child.emit(Op::Return, span);
         let pid = self.finish(child);
 

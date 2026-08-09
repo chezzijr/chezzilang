@@ -231,6 +231,16 @@ pub enum Op {
         method: String,
         argc: usize,
     },
+    /// M24 — `T.method(args)` through a generic bound's STATIC requirement: [`Op::CallStatic`] whose
+    /// `type_key` arrives as a VALUE instead of being baked in. Stack: `[arg0, …, witness]` — the
+    /// `argc` args, then the type's runtime identity key as a `str` on top (loaded from the callee's
+    /// hidden `$w:T` local). Pops the key, leaving the args exactly as `CallStatic` expects, and runs
+    /// the same [`crate::vm::Vm::do_static_call`]. The site is polymorphic by construction, so no
+    /// inline cache.
+    CallStaticDyn {
+        method: String,
+        argc: usize,
+    },
     CallBuiltin(String, usize),
     CallPrint(usize),
     /// `print(..., sep=, end=)` — stack `[arg0, …, argN-1, sep, end]`: the positional args, then the

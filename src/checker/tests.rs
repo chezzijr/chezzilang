@@ -12148,21 +12148,22 @@ fn convert_bound_only_not_value_type() {
 
 #[test]
 fn static_call_through_type_param_is_clear_error() {
-    // Slice 3 CLOSE-OUT (Option A) — `T.convert(x)` (or any `T.<static>()`) on an in-scope generic type
-    // parameter is NOT supported: generics are erased + the body is checked once abstractly, so there is
-    // no concrete type to construct through at runtime (the "restricted construction" bet delivers nothing
-    // under single-pass erased generics; deferred pending witness-passing). It must give a CLEAR
-    // actionable error, not the cryptic "unknown name 'T'".
-    let needle = "cannot call a static method through the generic type parameter";
-    // `T.convert` — the Convert/From driver.
-    entry_rejects(
+    // M24 INVERSION. This test used to encode the pre-M24 contract: `T.<static>()` on an in-scope
+    // generic type parameter was ALWAYS a clear error, because generics are erased and there was no
+    // concrete type to dispatch to. M24 (static-witness passing) makes exactly one shape legal — a
+    // bound whose protocol DECLARES that static method, called directly in the body of a
+    // module-level generic fn — so the first case below flipped from `_rejects` to `_ok`. The error
+    // survives, narrowed: it now fires when NO bound declares the static method, which is still an
+    // erased call with nothing to dispatch to. The `Box[int].empty()` keep-working case is
+    // unchanged (a concrete turbofish type was never the erased case).
+    // NOW OK — `T.convert(x)` under `[T: Convert[int]]`, the Convert/From driver.
+    entry_ok(
         "struct Port:\n    n: int\n    fn convert(x: int) -> Port:\n        return Port(n=x)\nfn build[T: Convert[int]](x: int) -> T:\n    return T.convert(x)\nfn main():\n    print(build[Port](5).n)\nmain()\n",
-        needle,
     );
-    // The SAME gap for any generic static method (not Convert-specific): `T.empty()`.
+    // STILL AN ERROR — `mk[T]` has NO bound at all, so nothing declares a static `empty`.
     entry_rejects(
         "struct Box[T]:\n    items: List[T]\n    fn empty() -> Box[T]:\n        return Box(items=[])\nfn mk[T]() -> Box[T]:\n    return T.empty()\nfn main():\n    print(1)\nmain()\n",
-        needle,
+        "no bound on 'T' declares a static method 'empty'",
     );
     // KEEP-WORKING: a CONCRETE turbofish static call `Box[int].empty()` is fine (a real type, not a param).
     entry_ok(
@@ -20483,4 +20484,247 @@ fn interpolation_fragment_respects_local_shadowing() {
 fn interpolation_fragment_checked_without_desugar() {
     rejects("print(\"{nope}\")\n", "unknown name 'nope'");
     rejects("print(\"a}b\")\n", "unmatched '}'");
+}
+
+// ===== M24 slice A — static-witness passing: a protocol's STATIC (no-`self`) requirement is
+// callable through a generic bound (`T.default()` inside `fn reset[T: Default](old: T) -> T`).
+// The concrete type's runtime identity key rides as a hidden trailing argument on the generic fn.
+//
+// SCOPE of slice A: a SAME-MODULE call to a MODULE-LEVEL free generic fn whose `T` is CONCRETE at
+// the call site. Every other shape is a deliberate, clear checker error — pinned below so a later
+// slice that lifts one has to come here and say so. The RUNNING half (that the checker's identity
+// key equals the VM's runtime key) is `tests/chz/spec/static_witness_test.chz`.
+
+/// The accepted surface. Each of these also RUNS in `tests/chz/spec/static_witness_test.chz`; here
+/// they only pin that the checker admits them.
+#[test]
+fn witness_static_call_accepted_shapes_ok() {
+    let dflt = "protocol Default:\n    fn default() -> Self\nstruct Counter:\n    n: int\n    fn default() -> Counter:\n        return Counter(0)\nfn reset[T: Default](old: T) -> T:\n    return T.default()\n";
+    // the driver shape
+    entry_ok(&format!(
+        "{dflt}fn main():\n    print(reset(Counter(9)).n)\nmain()\n"
+    ));
+    // an ENUM can host the static requirement too (not just a struct)
+    entry_ok(
+        "protocol Default:\n    fn default() -> Self\nenum Col:\n    Red\n    Blue\n    fn default() -> Col:\n        return Col.Blue\nfn reset[T: Default](old: T) -> T:\n    return T.default()\nfn main():\n    print(reset(Col.Red))\nmain()\n",
+    );
+    // a static requirement WITH ARGUMENTS
+    entry_ok(
+        "protocol Conv:\n    fn conv(x: int) -> Self\nstruct Wrap:\n    v: int\n    fn conv(x: int) -> Wrap:\n        return Wrap(x * 2)\nfn mk[T: Conv](seed: T, n: int) -> T:\n    return T.conv(n)\nfn main():\n    print(mk(Wrap(0), 21).v)\nmain()\n",
+    );
+    // the RESERVED `Convert[S]` protocol — the slice-3 close-out this milestone re-opened
+    entry_ok(
+        "struct Port:\n    v: int\n    fn convert(x: int) -> Port:\n        return Port(x + 1)\nfn make[T: Convert[int]](seed: T, n: int) -> T:\n    return T.convert(n)\nfn main():\n    print(make(Port(0), 41).v)\nmain()\n",
+    );
+    // no value argument at all: `T` pinned by a turbofish…
+    entry_ok(&format!(
+        "{dflt}fn empty[T: Default]() -> T:\n    return T.default()\nfn main():\n    print(empty[Counter]().n)\nmain()\n"
+    ));
+    // …or by an annotated result (the alternative the "not determined here" error suggests)
+    entry_ok(&format!(
+        "{dflt}fn empty[T: Default]() -> T:\n    return T.default()\nfn main():\n    x: Counter = empty()\n    print(x.n)\nmain()\n"
+    ));
+    // TWO witness params on one fn — the hidden args are positional, so their order must survive
+    entry_ok(&format!(
+        "{dflt}struct Other:\n    m: int\n    fn default() -> Other:\n        return Other(7)\nfn two[T: Default, U: Default](a: T, b: U) -> T:\n    y := U.default()\n    return T.default()\nfn main():\n    print(two(Counter(1), Other(2)).n)\nmain()\n"
+    ));
+    // The CALL SITE (not the witness call) inside a closure / `spawn:` / `defer:`: `T` is concrete
+    // there, so the witness is just a constant pushed at that site — nothing has to be captured.
+    entry_ok(&format!(
+        "{dflt}fn main():\n    c := Counter(9)\n    f := fn(): reset(c).n\n    print(f())\nmain()\n"
+    ));
+    entry_ok(&format!(
+        "{dflt}fn main():\n    c := Counter(9)\n    ch := Channel[int](4)\n    parallel:\n        spawn:\n            ch.send(reset(c).n)\n    print(ch.recv())\nmain()\n"
+    ));
+    entry_ok(&format!(
+        "{dflt}fn main():\n    c := Counter(9)\n    defer:\n        print(reset(c).n)\n    print(1)\nmain()\n"
+    ));
+    // nested call, and a call inside a string-interpolation fragment — both exercise the per-call
+    // witness key, which is the seam most likely to collide.
+    entry_ok(&format!(
+        "{dflt}fn main():\n    c := Counter(9)\n    print(reset(reset(c)).n)\n    print(\"{{reset(c).n}}\")\nmain()\n"
+    ));
+}
+
+/// The witness is threaded only for a SAME-MODULE call (the key is `(module, fn name)`), so a
+/// cross-module call is refused — in BOTH import spellings, since both reach the same callee.
+#[test]
+fn witness_static_call_cross_module_rejected() {
+    let lib = (
+        "lib.chz",
+        "protocol Default:\n    fn default() -> Self\nstruct Counter:\n    n: int\n    fn default() -> Counter:\n        return Counter(0)\nfn reset[T: Default](old: T) -> T:\n    return T.default()\n",
+    );
+    let needle = "across a module boundary is not supported yet";
+    files_reject(
+        &[
+            lib,
+            (
+                "main.chz",
+                "import lib\nfn main():\n    print(lib.reset(lib.Counter(9)).n)\nmain()\n",
+            ),
+        ],
+        needle,
+    );
+    files_reject(
+        &[
+            lib,
+            (
+                "main.chz",
+                "import reset, Counter from lib\nfn main():\n    print(reset(Counter(9)).n)\nmain()\n",
+            ),
+        ],
+        needle,
+    );
+}
+
+/// Generic-calls-generic: the caller's own `T` is still abstract, so it has no concrete key to
+/// forward. Forwarding a witness is a later slice; today it must say so.
+#[test]
+fn witness_static_call_forwarding_rejected() {
+    entry_rejects(
+        "protocol Default:\n    fn default() -> Self\nstruct Counter:\n    n: int\n    fn default() -> Counter:\n        return Counter(0)\nfn reset[T: Default](old: T) -> T:\n    return T.default()\nfn g[U: Default](x: U) -> U:\n    return reset(x)\nfn main():\n    print(g(Counter(1)).n)\nmain()\n",
+        "still abstract here",
+    );
+}
+
+/// The `$w:T` local lives in the module-level generic fn's OWN frame. A closure, a `spawn:`/`defer:`
+/// block, a nested `fn` and a method each compile to their own proto that does not carry it, so a
+/// `T.static()` written inside one is rejected rather than mis-lowered to a wrong (or missing) key.
+#[test]
+fn witness_static_call_outside_module_fn_body_rejected() {
+    let needle = "can only be called directly in the body of the module-level generic function";
+    let head = "protocol Default:\n    fn default() -> Self\nstruct Counter:\n    n: int\n    fn default() -> Counter:\n        return Counter(0)\n";
+    // a closure body
+    entry_rejects(
+        &format!(
+            "{head}fn bad[T: Default](x: T) -> int:\n    f := fn(): T.default()\n    return 1\nfn main():\n    print(bad(Counter(1)))\nmain()\n"
+        ),
+        needle,
+    );
+    // a `spawn:` block (behind the airlock — the witness is not a free variable, so never captured)
+    entry_rejects(
+        &format!(
+            "{head}fn bad[T: Default](x: T) -> int:\n    parallel:\n        spawn:\n            y := T.default()\n    return 1\nfn main():\n    print(bad(Counter(1)))\nmain()\n"
+        ),
+        needle,
+    );
+    // a `defer:` block (its own child proto)
+    entry_rejects(
+        &format!(
+            "{head}fn bad[T: Default](x: T) -> int:\n    defer:\n        y := T.default()\n    return 1\nfn main():\n    print(bad(Counter(1)))\nmain()\n"
+        ),
+        needle,
+    );
+    // a nested `fn` (lowered as a closure)
+    entry_rejects(
+        &format!(
+            "{head}fn bad[T: Default](x: T) -> int:\n    fn inner() -> T:\n        return T.default()\n    return 1\nfn main():\n    print(bad(Counter(1)))\nmain()\n"
+        ),
+        needle,
+    );
+    // a METHOD's own type param — methods get no witness params in slice A
+    entry_rejects(
+        &format!(
+            "{head}struct Holder:\n    k: int\n    fn go[T: Default](self, x: T) -> T:\n        return T.default()\nfn main():\n    print(Holder(1).go(Counter(2)).n)\nmain()\n"
+        ),
+        needle,
+    );
+}
+
+/// `spawn f(..)` / `defer f(..)` lower at dedicated emit sites that never push the hidden argument,
+/// so a witness-taking callee cannot be their target (the runtime `argc` would be one short).
+#[test]
+fn witness_fn_cannot_be_spawn_or_defer_target_rejected() {
+    let head = "protocol Default:\n    fn default() -> Self\nstruct Counter:\n    n: int\n    fn default() -> Counter:\n        return Counter(0)\nfn reset[T: Default](old: T) -> T:\n    return T.default()\n";
+    entry_rejects(
+        &format!(
+            "{head}fn main():\n    c := Counter(9)\n    parallel:\n        spawn reset(c)\nmain()\n"
+        ),
+        "cannot be the target of `spawn`",
+    );
+    entry_rejects(
+        &format!(
+            "{head}fn main():\n    c := Counter(9)\n    defer reset(c)\n    print(1)\nmain()\n"
+        ),
+        "cannot be the target of `defer`",
+    );
+}
+
+/// PERMANENT: a function VALUE erases the concrete type, and the witness is exactly that type — so a
+/// witness-taking fn can never be one. Both spellings (a binding and a HOF argument) are refused.
+#[test]
+fn witness_fn_as_function_value_rejected() {
+    let head = "protocol Default:\n    fn default() -> Self\nstruct Counter:\n    n: int\n    fn default() -> Counter:\n        return Counter(0)\nfn reset[T: Default](old: T) -> T:\n    return T.default()\n";
+    let needle = "cannot be used as a function value";
+    entry_rejects(
+        &format!("{head}fn main():\n    f := reset\n    print(1)\nmain()\n"),
+        needle,
+    );
+    entry_rejects(
+        &format!(
+            "{head}fn apply(f: fn(Counter) -> Counter, c: Counter) -> Counter:\n    return f(c)\nfn main():\n    print(apply(reset, Counter(3)).n)\nmain()\n"
+        ),
+        needle,
+    );
+}
+
+/// PERMANENT: if the call site does not pin `T` there is no key to pass. (`empty[Counter]()` and the
+/// annotated-result form are the two fixes, both pinned `_ok` above.)
+#[test]
+fn witness_type_param_unpinned_at_call_site_rejected() {
+    entry_rejects(
+        "protocol Default:\n    fn default() -> Self\nstruct Counter:\n    n: int\n    fn default() -> Counter:\n        return Counter(0)\nfn empty[T: Default]() -> T:\n    return T.default()\nfn main():\n    x := empty()\n    print(1)\nmain()\n",
+        "is not determined here",
+    );
+}
+
+/// The narrowed pre-M24 error: a bound exists, but no bound's protocol declares that static method,
+/// so it is still an erased call with nothing to dispatch to. (`[T]` with no bound at all is the
+/// same verdict — pinned in `static_call_through_type_param_is_clear_error`.)
+#[test]
+fn witness_bound_without_that_static_method_rejected() {
+    entry_rejects(
+        "fn bad[T: Comparable](x: T) -> int:\n    y := T.empty()\n    return 1\nfn main():\n    print(bad(1))\nmain()\n",
+        "no bound on 'T' declares a static method 'empty'",
+    );
+}
+
+/// A newtype cannot host methods, so it can neither satisfy a static-requirement protocol nor be a
+/// witness. It emits BOTH errors — the conformance failure and the host failure; pin the pair,
+/// because a later slice that drops one of them is a change in what the user is told.
+#[test]
+fn witness_newtype_host_rejected() {
+    let errs = check_entry(
+        "protocol Default:\n    fn default() -> Self\nnewtype Meters = float\nfn reset[T: Default](old: T) -> T:\n    return T.default()\nfn main():\n    print(reset(Meters(1.0)))\nmain()\n",
+    );
+    assert!(
+        errs.iter()
+            .any(|e| e.message.contains("does not satisfy Default")),
+        "the newtype must fail conformance, got: {errs:?}"
+    );
+    assert!(
+        errs.iter()
+            .any(|e| e.message.contains("cannot host a static method")),
+        "the newtype must also be named as an impossible witness host, got: {errs:?}"
+    );
+}
+
+/// REGRESSION GUARD — the feature appends a HIDDEN parameter, so everything that does NOT need one
+/// must keep its exact arity and its exact freedoms.
+#[test]
+fn non_witness_generics_unaffected_by_hidden_param_ok() {
+    // A NON-static bound (`Comparable` requires `fn compare(self, ..)`) takes no witness: still
+    // callable, still passable as a function VALUE, arity unchanged.
+    entry_ok(
+        "fn biggest[T: Comparable](a: T, b: T) -> T:\n    if a < b:\n        return b\n    return a\nfn apply2(f: fn(int, int) -> int, a: int, b: int) -> int:\n    return f(a, b)\nfn main():\n    print(biggest(3, 7))\n    g := biggest\n    print(apply2(biggest, 4, 1))\nmain()\n",
+    );
+    // An UNBOUNDED generic fn is untouched.
+    entry_ok(
+        "fn ident[T](x: T) -> T:\n    return x\nfn main():\n    print(ident(\"hi\"))\nmain()\n",
+    );
+    // A NESTED `fn` sharing a module-level witness fn's name must NOT inherit its arity: only
+    // module-level free fns are recorded, so this `reset` stays a plain 1-arg fn.
+    entry_ok(
+        "protocol Default:\n    fn default() -> Self\nstruct Counter:\n    n: int\n    fn default() -> Counter:\n        return Counter(0)\nfn reset[T: Default](old: T) -> T:\n    return T.default()\nfn shadow() -> int:\n    fn reset(k: int) -> int:\n        return k * 10\n    return reset(4)\nfn main():\n    print(shadow())\n    print(reset(Counter(9)).n)\nmain()\n",
+    );
 }

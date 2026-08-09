@@ -31,6 +31,42 @@ pub type KeywordKey = (usize, Span, usize, Span);
 /// hot path never touches it). Produced by `resolve_keyword_calls{,_standalone}`.
 pub type KeywordTable = HashMap<KeywordKey, Vec<usize>>;
 
+/// M24 — the [`WitnessTable::calls`] key. Same four components as [`KeywordKey`] and built by the
+/// same rules (see [`crate::checker::witness_key`]), except the last component is the CALLEE span
+/// (`reset` in `reset(c)`) rather than a first-named-arg span: a witness call is always a direct
+/// by-name call, so the callee identifier token is a distinct source node per call and therefore
+/// unique within one lexed source — which the shared primary-expression call span is NOT (a chained
+/// postfix `f(a)(b)` gives every link the same span).
+pub type WitnessKey = (usize, Span, usize, Span);
+
+/// M24 — where ONE witness argument at a call site comes from. Task 1 only ever produces
+/// [`WitnessSrc::Concrete`]; forwarding a caller's own witness (generic-calls-generic) is Task 2.
+#[derive(Debug, Clone, PartialEq)]
+pub enum WitnessSrc {
+    /// The concrete type's runtime IDENTITY KEY (`<module-key>::Name`) — the exact key
+    /// `Vm::do_static_call` resolves against `Program::structs` / `Program::enum_methods`.
+    Concrete(String),
+}
+
+/// M24 static-witness passing — BOTH halves of the contract, produced by the checker and CONSUMED
+/// (never re-derived) by the compiler. The compiler cannot re-derive either half: "does this bound's
+/// protocol carry a static requirement" resolves through imports/aliases/embeds, which is type work
+/// the backend does not do.
+///
+/// * `fns` — a generic fn that needs hidden trailing witness parameters, keyed `(graph module index,
+///   fn name)`; the value is the witness TYPE-PARAM names in declaration order. One hidden trailing
+///   param `$w:<name>` per entry, appended after the declared params, ALWAYS (whether or not the
+///   body uses it) so a fn's arity is a property of its declaration alone. Only MODULE-LEVEL free
+///   fns are recorded (a nested `fn` never is, so a name collision between the two cannot
+///   mis-arity the nested one).
+/// * `calls` — what fills each witness slot at one call site, keyed by [`WitnessKey`], parallel to
+///   the callee's `fns` entry.
+#[derive(Debug, Clone, Default)]
+pub struct WitnessTable {
+    pub fns: HashMap<(usize, String), Vec<String>>,
+    pub calls: HashMap<WitnessKey, Vec<WitnessSrc>>,
+}
+
 /// Surface-only parameter labels on a function type (Swift SE-0111 keyword arguments through a
 /// function VALUE). They ride PARALLEL to a `Ty::Func`'s `params`, but participate in NO type
 /// identity: two function types differing only in labels are the SAME type (mutually assignable,

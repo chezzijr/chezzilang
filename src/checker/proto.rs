@@ -2718,8 +2718,163 @@ impl Checker {
         }
     }
 
+    /// M24 — `T.method(args)` where `T` is an in-scope generic type PARAMETER: the static-witness
+    /// call. The instance twin is `infer_method_call`'s `Ty::Param` arm; this one differs in that
+    /// there is no receiver (every `msig.params` slot is a real argument) and `Self` maps to
+    /// `Ty::Param(T)` rather than to a receiver type.
+    ///
+    /// Accepted only when BOTH hold, because both are what the compiler can actually lower:
+    /// * one of `T`'s bounds declares `method` as a **static** requirement, and
+    /// * `T`'s hidden `$w:T` witness local is reachable here ([`Checker::witness_scope`]).
+    ///
+    /// Anything else keeps the pre-M24 "generics are erased" diagnostic.
+    pub(super) fn infer_witness_static_call(
+        &mut self,
+        tname: &str,
+        method: &str,
+        args: &[Expr],
+        span: Span,
+    ) -> Ty {
+        let bounds = self.type_params.get(tname).cloned().unwrap_or_default();
+        let found = bounds.iter().find_map(|b| {
+            self.protocol_method_sig(&b.name, method)
+                .filter(|s| s.is_static)
+                .map(|s| (b.clone(), s))
+        });
+        let Some((bound, msig)) = found else {
+            self.infer_all(args);
+            self.error(
+                span,
+                format!(
+                    "cannot call a static method through the generic type parameter '{tname}' (`{tname}.{method}`): no bound on '{tname}' declares a static method '{method}', so generics are erased here and there is no concrete type to dispatch to — bound '{tname}' by a protocol that requires `fn {method}(...) -> Self`, call the concrete type's static method directly (e.g. `SomeType.{method}(...)`), or pass a factory function (a `fn(...) -> {tname}` parameter)"
+                ),
+            );
+            return Ty::Unknown;
+        };
+        if !self.witness_scope.iter().any(|w| w == tname) {
+            self.infer_all(args);
+            self.error(
+                span,
+                format!(
+                    "`{tname}.{method}(...)` can only be called directly in the body of the module-level generic function that declares '{tname}' — not inside a closure, a `spawn:`/`defer:` block, a nested `fn`, or a method, because the hidden type witness for '{tname}' does not cross those boundaries. Call it in the enclosing function body and pass the value in"
+                ),
+            );
+            return Ty::Unknown;
+        }
+        // `Self` is the type param itself (the body is still checked abstractly), plus the
+        // parameterized protocol's own params mapped to the bound's concrete args (`Convert[int]`
+        // ⇒ `S ↦ int`), so a requirement `fn convert(x: S) -> Self` types as `(int) -> T`.
+        let mut map = HashMap::from([("Self".to_string(), Ty::Param(tname.to_string()))]);
+        let ptps = self
+            .protocols
+            .get(&bound.name)
+            .map(|p| p.type_params.clone())
+            .unwrap_or_default();
+        for (pn, parg) in ptps.iter().zip(&bound.args) {
+            let resolved = self.resolve_type(parg, span);
+            map.insert(pn.clone(), resolved);
+        }
+        // A STATIC requirement has NO receiver slot, so every declared param is a real argument.
+        let expected: Vec<Ty> = msig.params.iter().map(|t| subst(t, &map)).collect();
+        self.check_args(method, &expected, args, span);
+        subst(&msig.ret, &map)
+    }
+
+    /// M24 — record (or reject) the witness arguments a call to `name` needs. Runs AFTER every
+    /// type-param recovery pass in [`Self::infer_generic_call`], because a param recovered only by
+    /// the loop-back would otherwise look un-determined here.
+    ///
+    /// `local_call` is false for a module-qualified call (`m.f(...)`) — deferred to M24 Task 3.
+    fn record_witness_call(
+        &mut self,
+        name: &str,
+        wparams: &[String],
+        sub: &HashMap<String, Ty>,
+        local_call: bool,
+        span: Span,
+    ) {
+        if !local_call || !self.local_fn_names.contains(name) {
+            self.error(
+                span,
+                format!(
+                    "calling '{name}' across a module boundary is not supported yet: its bound on {} \
+                     requires a static protocol method, whose hidden type witness is only threaded for \
+                     a same-module call. Wrap the call in a same-module function",
+                    wparams.join(", ")
+                ),
+            );
+            return;
+        }
+        let mut srcs = Vec::with_capacity(wparams.len());
+        for w in wparams {
+            // Presence in `sub` is NOT enough: `enforce_bounds` silently SKIPS a param missing from
+            // the map, and a param bound to a partly-`Unknown` type has no runtime identity either.
+            let concrete = sub.get(w).filter(|t| ty_fully_concrete(t));
+            match concrete {
+                // The `Ty::Struct`/`Ty::Enum` name IS the runtime identity key (`<module-key>::Name`,
+                // bare for a std/native type) — the checker and the compiler derive it from the same
+                // `resolver::module_keys`, so this is exactly what `do_static_call` resolves.
+                Some(Ty::Struct(key, _) | Ty::Enum(key, _)) => {
+                    srcs.push(WitnessSrc::Concrete(key.clone()));
+                }
+                Some(other) => {
+                    let other = other.clone();
+                    self.error(
+                        span,
+                        format!(
+                            "type parameter '{w}' of '{name}' is bound to {other}, which cannot host a \
+                             static method — only a struct or an enum can"
+                        ),
+                    );
+                    return;
+                }
+                // Bound to the CALLER's own still-abstract type param: forwarding one generic fn's
+                // witness into another is M24 Task 2, and lowering it now would push the type-param
+                // NAME as if it were an identity key.
+                None if matches!(sub.get(w), Some(Ty::Param(_))) => {
+                    let got = sub[w].clone();
+                    self.error(
+                        span,
+                        format!(
+                            "type parameter '{w}' of '{name}' is bound to {got}, which is still \
+                             abstract here: forwarding a static-protocol witness from one generic \
+                             function into another is not supported yet. Call '{name}' with a \
+                             concrete type"
+                        ),
+                    );
+                    return;
+                }
+                None => {
+                    self.error(
+                        span,
+                        format!(
+                            "type parameter '{w}' of '{name}' is not determined here, so its static \
+                             protocol method has no concrete type to dispatch to — pin it with a \
+                             type argument (`{name}[SomeType](...)`) or an annotated result"
+                        ),
+                    );
+                    return;
+                }
+            }
+        }
+        if self.harvest_keywords {
+            self.witnesses.calls.insert(
+                crate::checker::witness_key(
+                    self.graph_module_idx,
+                    self.kw_frag_ctx,
+                    self.kw_frag_ord,
+                    span,
+                ),
+                srcs,
+            );
+        }
+    }
+
     /// Type-check a call to a generic function: infer each type parameter from the arguments,
-    /// enforce the declared bounds, and substitute into the return type.
+    /// enforce the declared bounds, and substitute into the return type. `local_call` is true for a
+    /// bare same-module/`from`-imported callee and false for a module-qualified one (`m.f(...)`) —
+    /// it gates M24's static-witness threading, which is same-module-only in Task 1.
+    #[allow(clippy::too_many_arguments)] // the sig pieces + call site + hint + the M24 call-kind flag
     pub(super) fn infer_generic_call(
         &mut self,
         name: &str,
@@ -2728,6 +2883,7 @@ impl Checker {
         targs: &[Ty],
         span: Span,
         hint: Option<&Ty>,
+        local_call: bool,
     ) -> Ty {
         if args.len() != sig.params.len() {
             self.check_arity(name, sig.params.len(), args, span);
@@ -2819,6 +2975,13 @@ impl Checker {
             span,
             false,
         );
+        // M24 — half two of the static-witness contract, recorded LAST: `recover_return_only_params`
+        // above can still bind a param that `enforce_bounds` never saw, so anything earlier would
+        // read a param as un-determined that the call actually pins.
+        let wparams = self.witness_type_params(&sig.type_params);
+        if !wparams.is_empty() {
+            self.record_witness_call(name, &wparams, &subst_map, local_call, span);
+        }
         subst(&sig.ret, &subst_map)
     }
 

@@ -20,7 +20,7 @@ use std::fmt;
 
 pub use ty::Ty;
 use ty::compatible;
-pub use ty::{FnLabels, KeywordKey, KeywordTable};
+pub use ty::{FnLabels, KeywordKey, KeywordTable, WitnessKey, WitnessSrc, WitnessTable};
 
 /// The fully-resolved C signature of one `extern` fn, computed by the checker in the defining
 /// module's import/alias scope (the single source of truth for every alias spelling). Each param /
@@ -821,20 +821,26 @@ pub fn resolve_extern_signatures_standalone(stmts: &[Stmt]) -> ExternTable {
 /// labelled `Ty::Func` must be known), but harvests the keyword table and ignores type errors (the
 /// error gate is `check_graph`, run separately). Both backends consume the returned table to lower a
 /// value+keyword call to a plain positional `Op::Call`, so the runtime ABI stays positional.
-pub fn resolve_keyword_calls(graph: &ModuleGraph) -> KeywordTable {
+///
+/// M24 rides the SAME pass and the SAME `harvest_keywords` licence (one extra deps-first check, not
+/// two): the [`WitnessTable`] the static-witness lowering consumes comes back alongside.
+pub fn resolve_call_tables(graph: &ModuleGraph) -> (KeywordTable, WitnessTable) {
     let mut c = Checker::new();
     c.harvest_keywords = true;
     c.run_graph_pass(graph, false);
-    std::mem::take(&mut c.keyword_calls)
+    (
+        std::mem::take(&mut c.keyword_calls),
+        std::mem::take(&mut c.witnesses),
+    )
 }
 
 /// Resolve value-keyword calls for a SINGLE-FILE (standalone, source-string) program, through the
-/// EXACT SAME [`resolve_keyword_calls`] pass as the multi-file CLI (one resolver, both engines
+/// EXACT SAME [`resolve_call_tables`] pass as the multi-file CLI (one resolver, both engines
 /// consume, module index `0`). Wraps `stmts` in a synthetic one-module graph, mirroring
 /// [`resolve_extern_signatures_standalone`]. Test-only (the standalone compile/run paths are
 /// `#[cfg(test)]`; production always goes through `build_graph`).
 #[cfg(test)]
-pub fn resolve_keyword_calls_standalone(stmts: &[Stmt]) -> KeywordTable {
+pub fn resolve_call_tables_standalone(stmts: &[Stmt]) -> (KeywordTable, WitnessTable) {
     let id = crate::resolver::ModuleId(std::path::PathBuf::from("<main>"));
     let graph = ModuleGraph {
         entry: id.clone(),
@@ -848,7 +854,7 @@ pub fn resolve_keyword_calls_standalone(stmts: &[Stmt]) -> KeywordTable {
             native: None,
         }],
     };
-    resolve_keyword_calls(&graph)
+    resolve_call_tables(&graph)
 }
 
 /// The [`KeywordTable`] key span for a value call that carries keyword arguments. The AST call-node
@@ -882,6 +888,21 @@ pub fn keyword_key(
         frag_ord,
         keyword_key_span(named, call_span),
     )
+}
+
+/// M24 — build the [`WitnessKey`] for a call site that needs static-witness arguments: `(module,
+/// fragment-context span, fragment ordinal, CALLEE span)`. The checker's record site and the
+/// compiler's lookup site call this one helper so they can never disagree on the key. `callee_span`
+/// is the callee identifier token (`reset` in `reset(c)`), NOT the call node's span — see
+/// [`WitnessKey`] for why. `frag_ctx`/`frag_ord` are the same interpolation discriminators
+/// [`keyword_key`] uses.
+pub fn witness_key(
+    module_idx: usize,
+    frag_ctx: Span,
+    frag_ord: usize,
+    callee_span: Span,
+) -> crate::checker::WitnessKey {
+    (module_idx, frag_ctx, frag_ord, callee_span)
 }
 
 impl Checker {
@@ -1159,7 +1180,7 @@ impl Checker {
             c.extern_module_idx = if harvest_externs { Some(idx) } else { None };
             // Maintained on every graph pass (cheap) so a recorded value+keyword call is keyed under
             // the SAME module index the backends derive — mirrors the extern-sig keying.
-            c.keyword_module_idx = idx;
+            c.graph_module_idx = idx;
             c.current_module_is_stdlib = lm.is_std();
             let sig = c.check_module(&lm.ast.stmts, Some(&lm.id), &lm.imports);
             // Phase 5a-containers — capture the always-linked prelude's `List`/`Map`/`Set`/`Channel`
@@ -1651,15 +1672,27 @@ struct Checker {
     /// call span)` — module-scoped exactly like [`Self::extern_sigs`]. Recorded during `infer_call`
     /// (only when [`Self::harvest_keywords`] is set — the error-gate `check_graph` leaves it empty) and
     /// consumed by both backends to lower a value+keyword call to a positional `Op::Call`. Produced by
-    /// [`resolve_keyword_calls`].
+    /// [`resolve_call_tables`].
     keyword_calls: KeywordTable,
-    /// True only while [`resolve_keyword_calls`] drives the pass, licensing `infer_call` to record
-    /// into [`Self::keyword_calls`]. Off during the normal error-gate check (which discards the table).
+    /// True only while [`resolve_call_tables`] drives the pass, licensing `infer_call` to record
+    /// into [`Self::keyword_calls`] / [`Self::witnesses`]. Off during the normal error-gate check
+    /// (which discards both tables).
     harvest_keywords: bool,
+    /// M24 — both halves of the static-witness contract (which fns need hidden witness params, and
+    /// what fills each witness at each call site). Recorded only while [`Self::harvest_keywords`] is
+    /// set; consumed verbatim by the compiler. See [`WitnessTable`].
+    witnesses: WitnessTable,
+    /// M24 — the witness TYPE-PARAM names whose `$w:T` local is DIRECTLY reachable at the statement
+    /// currently being checked: the enclosing MODULE-LEVEL free generic fn's witness params, and
+    /// empty everywhere else. Cleared (save/restore) at every boundary that compiles to its own
+    /// proto and would therefore not see that local — a closure body, a `spawn:` / `defer:` block,
+    /// a nested `fn`, and any method body. `T.static_method()` is accepted ONLY when `T` is in here,
+    /// which is exactly what the compiler can lower.
+    witness_scope: Vec<String>,
     /// The CURRENT module's graph index, maintained across every graph pass (set per module in
-    /// `run_graph_pass`), so a recorded keyword-call permutation is keyed under the SAME index the
-    /// backends derive. `0` for a lone `check` (single synthetic module).
-    keyword_module_idx: usize,
+    /// `run_graph_pass`), so a recorded keyword-call permutation / witness entry is keyed under the
+    /// SAME index the backends derive. `0` for a lone `check` (single synthetic module).
+    graph_module_idx: usize,
     /// The string-interpolation fragment CONTEXT for keyword-call keying: the whole-string span of the
     /// interpolation currently being inferred (or `Span::default()` outside interpolation) paired with
     /// [`Self::kw_frag_ord`], the fragment's 0-based index in that string. Because each `{…}` fragment

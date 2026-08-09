@@ -359,6 +359,15 @@ impl Checker {
         // during inference; a non-generator resets both so a stray `yield` is diagnosed.
         let saved_ig = std::mem::replace(&mut self.in_generator, decl.is_generator);
         let saved_yields = std::mem::take(&mut self.collected_yields);
+        // M24 — same rule as `check_fn_body` (module-level free fn only). Without it an UNANNOTATED
+        // `fn reset[T: Default](old: T): return T.default()` would infer its return as `Unknown`
+        // here (the pass-1 error is truncated), and that residual Unknown is a type-check bypass.
+        let wparams = if self_ty.is_none() && !saved_in_fn {
+            self.witness_type_params(&decl.type_params)
+        } else {
+            Vec::new()
+        };
+        let saved_witness_scope = std::mem::replace(&mut self.witness_scope, wparams);
         self.push_scope();
         for (i, param) in decl.params.iter().enumerate() {
             let ty = if param.name == "self" {
@@ -403,6 +412,7 @@ impl Checker {
         self.current_ret = saved_ret;
         self.in_fn_body = saved_in_fn;
         self.current_self_ty = saved_self;
+        self.witness_scope = saved_witness_scope;
         self.exit_type_params(saved_tps);
         // Did the body inference itself emit an error (undefined name, bad call, …)? If so the real
         // diagnostic surfaces in pass 2, so a residual `Unknown`/conflict here is a CASCADE, not a
@@ -850,6 +860,55 @@ impl Checker {
         let mut path = vec![n.to_string()];
         let (required, _cyclic, _conflict) = self.flatten_embed_methods(&p.embeds, &mut path);
         required.values().any(|s| s.is_static)
+    }
+
+    /// M24 — the type-param names of `tps` that need a hidden trailing witness argument: those with
+    /// at least one bound whose protocol carries a STATIC requirement (directly or through an embed).
+    /// Declaration order is preserved — it IS the witness-parameter order, so the checker's record
+    /// site, the compiler's `$w:T` locals, and the call site's pushed arguments all agree.
+    ///
+    /// This is the ONE place the "does this fn need witnesses?" question is answered; the compiler
+    /// never asks it (it cannot — protocol identity resolves through imports/aliases/embeds).
+    pub(super) fn witness_type_params(&self, tps: &[TypeParam]) -> Vec<String> {
+        tps.iter()
+            .filter(|tp| {
+                tp.bounds
+                    .iter()
+                    .any(|b| self.protocol_has_static_method(&b.name))
+            })
+            .map(|tp| tp.name.clone())
+            .collect()
+    }
+
+    /// M24 — reject `spawn f(...)` / `defer f(...)` when `f` is a generic fn that needs hidden
+    /// witness arguments. Both statements lower at DEDICATED emit sites (`Op::SpawnCall` /
+    /// `Op::DeferCall`), not through `compile_call`, so the witness would never be pushed and the
+    /// runtime `argc` would be one short. Rejected here rather than widened (M24 Task 4).
+    pub(super) fn reject_witness_spawn_defer_target(&mut self, e: &Expr, kw: &str) {
+        let ExprKind::Call { callee, .. } = &e.kind else {
+            return;
+        };
+        let ExprKind::Ident(fname) = &callee.kind else {
+            return;
+        };
+        if self.lookup(fname).is_some() {
+            return; // a local shadow — a plain value call, not this fn
+        }
+        let Some(tps) = self.functions.get(fname).map(|s| s.type_params.clone()) else {
+            return;
+        };
+        let w = self.witness_type_params(&tps);
+        if w.is_empty() {
+            return;
+        }
+        self.error(
+            e.span,
+            format!(
+                "'{fname}' takes a static-protocol bound ({}), so it cannot be the target of `{kw}` yet — \
+                 call it eagerly and `{kw}` the result, or wrap the call in a closure",
+                w.join(", ")
+            ),
+        );
     }
 
     /// Find the first STATIC-CTOR protocol embedded ANYWHERE in a (possibly nested) already-resolved
@@ -2208,6 +2267,7 @@ impl Checker {
                     },
                     _ => self.error(e.span, "defer requires a function or method call"),
                 }
+                self.reject_witness_spawn_defer_target(e, "defer");
                 // Type-check the call (and its args); the result is discarded, like an expr stmt.
                 self.infer(e);
             }
@@ -2238,7 +2298,11 @@ impl Checker {
                 // an enclosing `recover:` boundary (a `recover:` nested INSIDE the block re-arms it).
                 let saved_recover = std::mem::replace(&mut self.recover_depth, 0);
                 let saved_in_defer = std::mem::replace(&mut self.in_defer_block, true);
+                // M24: a `defer:` block compiles to its own child proto, which does NOT capture the
+                // enclosing frame's `$w:T` local — so no witness is reachable inside it.
+                let saved_ws = std::mem::take(&mut self.witness_scope);
                 self.check_block(body);
+                self.witness_scope = saved_ws;
                 self.in_defer_block = saved_in_defer;
                 self.recover_depth = saved_recover;
                 self.loop_depth = saved_loop_depth;
@@ -2292,6 +2356,7 @@ impl Checker {
                                 _ => {}
                             }
                         }
+                        self.reject_witness_spawn_defer_target(e, "spawn");
                         // Full type-check of the call (callee, arity, args) — the single source of
                         // type diagnostics for the sub-expressions.
                         self.infer(e);
@@ -2381,11 +2446,16 @@ impl Checker {
                         // this task targets the task (nil-returning → reject), exactly as a bare
                         // `spawn: v := g()?` does. Reset the flag across this task boundary.
                         let saved_in_defer = std::mem::replace(&mut self.in_defer_block, false);
+                        // M24: a `spawn:` block is its own child proto behind the airlock — the
+                        // enclosing frame's `$w:T` local is not a free variable of the block, so it
+                        // is not captured and no witness is reachable inside it.
+                        let saved_ws = std::mem::take(&mut self.witness_scope);
                         self.push_scope();
                         for stmt in body {
                             self.check_stmt(stmt);
                         }
                         self.pop_scope();
+                        self.witness_scope = saved_ws;
                         self.in_defer_block = saved_in_defer;
                         self.loop_depth = saved_loop_depth;
                         self.capture_floors.pop();
@@ -3277,6 +3347,27 @@ impl Checker {
         let saved_recover = std::mem::replace(&mut self.recover_depth, 0);
         // …and it is NOT a defer block: a `?` inside a fn declared in a defer block targets that fn.
         let saved_in_defer = std::mem::replace(&mut self.in_defer_block, false);
+        // M24 — the witness params whose `$w:T` local this body can reach. Only a MODULE-LEVEL FREE
+        // generic fn gets them (Task 1 scope): `self_ty.is_some()` is a method, and `saved_in_fn`
+        // (the pre-replace `in_fn_body`) being true means this is a NESTED fn, which the compiler
+        // lowers as a closure with no witness params. Both therefore reset the scope to empty, so a
+        // `T.static()` inside them is rejected rather than mis-lowered.
+        let is_module_level_free_fn = self_ty.is_none() && !saved_in_fn;
+        let wparams = if is_module_level_free_fn {
+            self.witness_type_params(&sig.type_params)
+        } else {
+            Vec::new()
+        };
+        // Half one of the contract: which fns need hidden trailing witness params. Recorded from the
+        // DECLARATION alone (not from whether the body uses `T.static()`), so a fn's arity is fixed
+        // by its signature. Nested fns are never recorded, so a nested fn sharing a top-level fn's
+        // name cannot inherit its arity.
+        if self.harvest_keywords && is_module_level_free_fn && !wparams.is_empty() {
+            self.witnesses
+                .fns
+                .insert((self.graph_module_idx, decl.name.clone()), wparams.clone());
+        }
+        let saved_witness_scope = std::mem::replace(&mut self.witness_scope, wparams);
         self.push_scope();
         // Editor hover: record the function's OWN signature at its decl-site name token (no-op
         // off-probe; parity-neutral — `name_span` is runtime-inert). Covers free fns AND methods,
@@ -3397,6 +3488,7 @@ impl Checker {
         self.loop_depth = saved_loop_depth;
         self.recover_depth = saved_recover;
         self.in_defer_block = saved_in_defer;
+        self.witness_scope = saved_witness_scope;
         self.exit_type_params(saved_tps);
     }
 

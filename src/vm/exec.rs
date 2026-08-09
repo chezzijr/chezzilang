@@ -1841,6 +1841,20 @@ impl Vm {
                 method,
                 argc,
             } => self.do_static_call(type_key, method, *argc, span)?,
+            // M24 static witness: the type key rides on top of the args as a `str`. Pop it, then
+            // dispatch exactly like `CallStatic`. The compiler only emits this reading a `$w:T`
+            // local it itself initialized from a `ConstStr`, so a non-`str` here is an internal
+            // invariant break — surfaced as a clear runtime error, never a panic.
+            Op::CallStaticDyn { method, argc } => {
+                let w = self.pop();
+                let Some(key) = self.val_str(w) else {
+                    return Err(self.err(
+                        format!("internal: static witness for '{method}' is not a type key"),
+                        span,
+                    ));
+                };
+                self.do_static_call(&key, method, *argc, span)?
+            }
             Op::CallBuiltin(name, argc) => self.do_builtin(name, *argc, span)?,
             Op::LoadBuiltin(name) => {
                 let h = self.heap.alloc(Obj::Builtin(name.as_str().into()));

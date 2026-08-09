@@ -1,0 +1,153 @@
+# tests/chz/spec/static_witness_test.chz — M24 slice A: a protocol's STATIC (no-`self`) requirement
+# is callable through a generic bound.
+#
+# `fn reset[T: Default](old: T) -> T: return T.default()` used to be a hard checker error ("generics
+# are erased, there is no concrete type to construct"). M24 threads the concrete type's runtime
+# identity key as a hidden trailing argument on the generic fn, so `T.default()` dispatches to the
+# real type. Rust is the ancestor here — `T::default()` under `fn reset<T: Default>(_: T) -> T` is
+# the same program, and answers the same.
+#
+# This file is the RUNNING half. It is the only thing that proves the CHECKER's identity key equals
+# the COMPILER's/VM's runtime key — a checker-only test passes even if the wrong type is
+# constructed. The compile-time rejections (cross-module, forwarding, fn-as-value, unpinned `T`, a
+# witness call inside a closure/`spawn:`/`defer:`/nested-fn/method) are `src/checker/tests.rs`
+# (`// ===== M24` section), not here: they never reach a runtime.
+# Serial==M:N is guarded by `test_runner::chz_suite_passes_both_engines`.
+
+protocol Default:
+    fn default() -> Self
+
+struct Counter:
+    n: int
+    fn default() -> Counter:
+        return Counter(0)
+
+struct Tag:
+    s: str
+    fn default() -> Tag:
+        return Tag("none")
+
+enum Col:
+    Red
+    Blue
+    fn default() -> Col:
+        return Col.Blue
+
+protocol Conv:
+    fn conv(x: int) -> Self
+
+struct Wrap:
+    v: int
+    fn conv(x: int) -> Wrap:
+        return Wrap(x * 2)
+
+struct Port:
+    v: int
+    fn convert(x: int) -> Port:
+        return Port(x + 1)
+
+fn reset[T: Default](old: T) -> T:
+    return T.default()
+
+fn empty[T: Default]() -> T:
+    return T.default()
+
+fn mk[T: Conv](seed: T, n: int) -> T:
+    return T.conv(n)
+
+fn make[T: Convert[int]](seed: T, n: int) -> T:
+    return T.convert(n)
+
+fn second_of[T: Default, U: Default](a: T, b: U) -> U:
+    x := T.default()
+    return U.default()
+
+# ---- the driver shape ----
+
+test fn a_static_requirement_dispatches_to_the_concrete_type():
+    assert reset(Counter(9)).n == 0, "T.default() must build Counter, not the argument"
+
+test fn two_different_concrete_types_flow_through_one_generic():
+    # the identity key is per CALL SITE, so the same `reset` must answer differently here
+    assert reset(Counter(9)).n == 0
+    assert reset(Tag("hi")).s == "none"
+
+test fn an_enum_can_host_the_static_requirement():
+    assert reset(Col.Red) == Col.Blue
+
+# ---- arguments, and the reserved `Convert[S]` bound ----
+
+test fn a_static_requirement_takes_arguments():
+    assert mk(Wrap(0), 21).v == 42
+
+test fn the_reserved_convert_bound_dispatches_too():
+    assert make(Port(0), 41).v == 42
+
+# ---- pinning `T` without a value argument ----
+
+test fn a_turbofish_pins_a_nullary_generic():
+    assert empty[Counter]().n == 0
+    assert empty[Tag]().s == "none"
+
+test fn an_annotated_result_pins_a_nullary_generic():
+    c: Counter = empty()
+    assert c.n == 0
+
+# ---- witness ORDER: two params, and the second one is the answer ----
+
+test fn two_witness_params_keep_their_declaration_order():
+    assert second_of(Counter(1), Tag("x")).s == "none", "U's witness must not be T's"
+    assert second_of(Tag("x"), Counter(1)).n == 0
+
+# ---- call sites the witness constant has to survive ----
+
+test fn a_nested_call_site_gets_its_own_witness():
+    assert reset(reset(Counter(9))).n == 0
+
+test fn an_interpolation_fragment_is_a_real_call_site():
+    assert "{reset(Counter(9)).n}" == "0"
+
+test fn a_witness_call_site_inside_a_closure():
+    f := fn(): reset(Counter(9)).n
+    assert f() == 0
+
+test fn a_witness_call_site_inside_a_spawn_block():
+    ch := Channel[int](4)
+    parallel:
+        spawn:
+            ch.send(reset(Counter(9)).n)
+        spawn:
+            ch.send(reset(Counter(5)).n)
+    assert ch.recv() + ch.recv() == 0
+
+test fn a_witness_call_site_inside_a_defer_block():
+    seen := [1]
+    fn body():
+        defer:
+            seen.push(reset(Counter(9)).n)
+        seen.push(2)
+    body()
+    assert seen == [1, 2, 0]
+
+# ---- the hidden parameter must not leak into anything that does not take one ----
+
+fn biggest[T: Comparable](a: T, b: T) -> T:
+    if a < b:
+        return b
+    return a
+
+fn ident[T](x: T) -> T:
+    return x
+
+fn apply2(f: fn(int, int) -> int, a: int, b: int) -> int:
+    return f(a, b)
+
+test fn a_non_static_bound_is_untouched_and_still_a_function_value():
+    assert biggest(3, 7) == 7
+    assert apply2(biggest, 4, 1) == 4
+    assert ident("hi") == "hi"
+
+test fn a_nested_fn_does_not_inherit_a_module_fns_witness_arity():
+    fn reset(k: int) -> int:
+        return k * 10
+    assert reset(4) == 40, "the nested `reset` is a plain 1-arg fn"
