@@ -887,11 +887,23 @@ impl Checker {
     /// The body scan is deliberately COARSE (any mention of the bare name `T` in expression position,
     /// not just `T.m(...)`; any mention of a witness-taking fn's name, not just a call forwarding
     /// `T` into it): over-inclusion can only cost a fn positions it would lose anyway, while
-    /// under-inclusion would mean a body whose `T.static()` or forward cannot lower. The forwarding
-    /// half's coarseness has one live cost — a generic with a static-carrying bound whose body calls
+    /// under-inclusion would mean a body whose `T.static()` or forward cannot lower.
+    ///
+    /// The FORWARDING half is fenced by two conditions, because over-charging there does more than
+    /// cost a position — a charged param that no call site can determine makes the fn UNCALLABLE
+    /// ("type parameter 'T' … is not determined here"), which would break programs that compile
+    /// today:
+    /// * the witness-taking name must not be SHADOWED by one of this fn's own params
+    ///   (`fn label[T: Spawnable](x: T, reset: int)` calls the param, never the module's `reset`),
+    ///   which is why the free-name walk subtracts the parameter names; and
+    /// * the param must actually OCCUR in this fn's own signature ([`Self::ty_param_in_sig`]). A
+    ///   param that appears in neither a parameter type nor the return type can never be bound to
+    ///   anything at a call site, so it can never be the thing forwarded.
+    ///
+    /// What survives is one real over-charge: a generic with a static-carrying bound whose body calls
     /// a witness-taking fn with only CONCRETE types is charged a hidden param it never uses, so it
-    /// loses value/`spawn`/cross-module position; the fix is to move that concrete call into a
-    /// non-generic helper.
+    /// loses value/`spawn`/cross-module position. It stays CALLABLE (the param is still inferred from
+    /// its arguments); the fix is to move the concrete call into a non-generic helper.
     ///
     /// Because forwarding is transitive (`a` forwards into `b` which constructs), this answer depends
     /// on OTHER fns' answers, and a fn is hoisted before its callees. [`Checker::hoist`] therefore
@@ -931,19 +943,19 @@ impl Checker {
         // Reuse the whole-body free-name walker (the same one the nested-fn capture record uses): it
         // is exhaustive over statements and expressions and descends into closures, nested fns,
         // `recover:` blocks and string interpolation, so a `T.default()` anywhere in the body is seen.
-        // Nothing is subtracted as "bound" — a type param and a value binding never share a name, and
-        // a stray shadow would only over-include.
+        // The fn's OWN PARAM NAMES are subtracted: a param shadows a module-level fn of the same
+        // name, so `reset` in the body of `fn f(reset: int)` is that param and forwards nothing.
+        // (Subtracting them cannot hide a `T` mention — a type param and a value param never share a
+        // name, and if they did the param would shadow the type anyway.)
+        let params: std::collections::HashSet<String> =
+            decl.params.iter().map(|p| p.name.clone()).collect();
         let mut mentioned = std::collections::HashSet::new();
-        crate::compiler::free_names_block(
-            &decl.body,
-            &std::collections::HashSet::new(),
-            &mut mentioned,
-        );
-        // Slice 2 — the body names a fn that takes witnesses, so this body can FORWARD into it. That
-        // makes every static-bounded param of this fn a candidate carrier, since which one flows into
-        // which callee slot is type work that only `record_witness_call` can do (it runs long after
-        // this). A charge that turns out unused is inert arity; a MISSING one would be a call the
-        // checker accepts and the compiler cannot lower.
+        crate::compiler::free_names_block(&decl.body, &params, &mut mentioned);
+        // Slice 2 — the body names a fn that takes witnesses, so this body can FORWARD into it. Which
+        // of this fn's params flows into which callee slot is type work only `record_witness_call`
+        // can do (it runs long after this), so every static-bounded param THAT THIS SIGNATURE CAN
+        // BIND is charged. A charge that turns out unused is inert arity; a MISSING one would be a
+        // call the checker accepts and the compiler cannot lower.
         let forwards = mentioned.iter().any(|n| {
             self.functions
                 .get(n)
@@ -951,8 +963,33 @@ impl Checker {
         });
         cands
             .into_iter()
-            .filter(|t| forwards || mentioned.contains(t))
+            .filter(|t| mentioned.contains(t) || (forwards && Self::ty_param_in_sig(decl, t)))
             .collect()
+    }
+
+    /// M24 — does type param `t` occur in `decl`'s own signature (any parameter's annotation or the
+    /// return annotation)? A param that occurs in NEITHER can never be bound by a call site, so it
+    /// can never be the type a witness is forwarded for — charging it would only make the fn
+    /// uncallable. Syntactic on purpose: this runs at the signature hoist, before resolution.
+    fn ty_param_in_sig(decl: &FnDecl, t: &str) -> bool {
+        fn mentions(ty: &crate::ast::Type, t: &str) -> bool {
+            match ty {
+                crate::ast::Type::Named { name, .. } => name == t,
+                crate::ast::Type::Qualified { args, .. } => args.iter().any(|a| mentions(a, t)),
+                crate::ast::Type::Generic(head, args, _) => {
+                    head == t || args.iter().any(|a| mentions(a, t))
+                }
+                crate::ast::Type::Func { params, ret, .. } => {
+                    params.iter().any(|p| mentions(p, t)) || mentions(ret, t)
+                }
+                crate::ast::Type::Tuple(items) => items.iter().any(|i| mentions(i, t)),
+            }
+        }
+        decl.params
+            .iter()
+            .filter_map(|p| p.ty.as_ref())
+            .chain(decl.ret.as_ref())
+            .any(|ty| mentions(ty, t))
     }
 
     /// M24 — reject `spawn f(...)` / `defer f(...)` when `f` is a generic fn that needs hidden

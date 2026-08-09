@@ -20926,6 +20926,28 @@ fn witness_forwarding_fn_loses_value_and_spawn_positions_rejected() {
     );
 }
 
+/// A generic with a static-carrying bound whose type param this signature can never BIND must not
+/// be charged a witness by the forwarding rule — a charged param nothing determines makes the fn
+/// UNCALLABLE, so an over-charge here breaks a program that compiles. Nor may a PARAMETER named like
+/// a witness-taking fn count as forwarding: the param shadows the module fn, so the body never
+/// reaches it.
+#[test]
+fn witness_forwarding_does_not_overcharge_ok() {
+    // `T`/`U` occur in NO parameter type and NO return type, so nothing at a call site can bind
+    // them — charging one would make every call fail "is not determined here".
+    entry_ok(&format!(
+        "{FWD_HEAD}fn note[T: Default]() -> str:\n    c := reset(Counter(1))\n    return \"hi{{c.n}}\"\nfn main():\n    print(note())\nmain()\n"
+    ));
+    entry_ok(&format!(
+        "{FWD_HEAD}fn helper[T: Default, U: Default](x: T) -> int:\n    c := reset(Counter(1))\n    return c.n\nfn main():\n    print(helper(Counter(5)))\nmain()\n"
+    ));
+    // a PARAM named `reset` shadows the module-level `reset`, so this body forwards nothing and
+    // keeps its value position.
+    entry_ok(&format!(
+        "{FWD_HEAD}fn label[T: Default](x: T, reset: int) -> int:\n    return reset + 1\nfn main():\n    g := label\n    print(label(Counter(1), 2))\nmain()\n"
+    ));
+}
+
 /// A witness call that is the ROOT of a `{…}` interpolation fragment (`"{reset(c)}"`, no trailing
 /// `.field`). The checker anchors a fragment root at the STRING LITERAL's span so a fragment error
 /// points at the literal — which also moved the witness key, and the compiler looked the call up

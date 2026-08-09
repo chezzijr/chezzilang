@@ -1204,11 +1204,16 @@ impl Checker {
             if let crate::ast::Chunk::Expr(e, spec) = chunk {
                 self.kw_frag_ctx = span;
                 self.kw_frag_ord = ord;
-                // Anchor the fragment root at the string literal so a nil-fragment error
-                // points at the literal, not the `(1,1)` fragment-relative fallback.
-                let mut e = e.clone();
-                e.span = span;
-                let ty = self.infer_value(&e);
+                // The fragment root keeps its OWN span. It used to be re-anchored at the string
+                // literal for diagnostics — but a per-call table keyed by the call NODE's span
+                // (M24's `WitnessTable::calls`) then keyed the root under the LITERAL's span, which
+                // (a) the compiler could not find, since it compiles the un-rewritten node, and
+                // (b) COLLIDED with any nested call whose fragment-relative column happened to equal
+                // the literal's column — one call site silently taking another's witness under a
+                // green `chezzi check`. A span that is a table key cannot double as a diagnostic
+                // anchor. The line is already real (`interpolation.rs` anchors the fragment lexer to
+                // the literal's opening line), so only the column is fragment-relative.
+                let ty = self.infer_value(e);
                 // Static format-spec/value-type check: when the value is a CONCRETE scalar
                 // and the spec is provably wrong for it, reject at COMPILE time (same wording
                 // the runtime backstop would emit — single-sourced in `fmtspec`). Only fires

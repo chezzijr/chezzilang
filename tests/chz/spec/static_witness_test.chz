@@ -284,3 +284,22 @@ test fn an_interpolation_fragment_root_is_a_real_call_site():
     c := Counter(9)
     assert "{reset(c)}" == "Counter(n=0)"
     assert fwd_interp(Tag("hi")) == "Tag(s='none')"
+
+# ---- two witness calls in ONE interpolation fragment ----
+#
+# `WitnessTable::calls` is keyed by the call node's span. The checker used to re-anchor a fragment's
+# ROOT expression at the string literal's span for diagnostics, which (a) hid the root's own entry
+# from the compiler and (b) COLLIDED with any nested call whose fragment-relative column equalled the
+# literal's column — the nested call then silently took the root's witness under a green
+# `chezzi check`. The trigger is column arithmetic, so the assert below pins the exact layout that
+# used to collide (`    s := "` puts the literal at column 10; `reset` sits at fragment column 10).
+
+fn outer_w[T: Default](x: T, ignored: Counter) -> str:
+    y := T.default()
+    return "{ignored.n}"
+
+test fn two_witness_calls_in_one_interpolation_fragment_keep_their_own_witnesses():
+    c := Counter(5)
+    t := Tag("hi")
+    s := "{outer_w(t, reset(c))}"
+    assert s == "0", "the nested `reset(c)` must construct a Counter, not the outer call's Tag"

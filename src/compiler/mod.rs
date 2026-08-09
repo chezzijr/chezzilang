@@ -4975,16 +4975,10 @@ impl Compiler {
                 Chunk::Expr(e, spec) => {
                     self.kw_frag_ctx = span;
                     self.kw_frag_ord = ord;
-                    // Re-anchor the fragment ROOT at the string literal, exactly as the checker does
-                    // (`check_interp_chunks`). Not cosmetic: a per-call table keyed by the call
-                    // NODE's span (M24's witness table) is recorded under the ANCHORED span, so a
-                    // fragment whose root IS the call (`"{reset(c)}"`, no trailing `.field`) missed
-                    // its entry here and faulted at runtime after `chezzi check` said ok. A
-                    // fragment's own span is re-lexed from a fresh source anyway, so the literal is
-                    // also the better runtime anchor.
-                    let mut e = e.clone();
-                    e.span = span;
-                    self.compile_expr(fc, &e)?;
+                    // The fragment root is compiled with its OWN span — matching the checker, which
+                    // no longer re-anchors it (see `check_interp_chunks`). Both halves therefore key
+                    // every per-call table (`WitnessTable::calls`, `KeywordTable`) on the same span.
+                    self.compile_expr(fc, e)?;
                     match spec {
                         None => fc.emit(Op::ToStr, span),
                         Some(fs) => fc.emit(Op::ToStrFmt(Box::new(fs.clone())), span),

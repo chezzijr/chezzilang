@@ -2846,10 +2846,12 @@ impl Checker {
                             format!(
                                 "type parameter '{w}' of '{name}' is bound to {p}, which is still \
                                  abstract here, and the hidden type witness for '{p}' is not \
-                                 reachable at this call site — it does not cross a closure, a \
-                                 `spawn:`/`defer:` block, a nested `fn`, or a method body. Call \
-                                 '{name}' from the body of the module-level generic function that \
-                                 declares '{p}', or with a concrete type"
+                                 reachable at this call site — only the body of the module-level \
+                                 generic function that declares '{p}' carries it, and it does not \
+                                 cross a closure, a `spawn:`/`defer:` block, a nested `fn`, or a \
+                                 method (a method's type param never has one at all). Call \
+                                 '{name}' with a concrete type, or take a factory parameter \
+                                 (`fn(...) -> {p}`) and call that instead"
                             ),
                         );
                         return;
