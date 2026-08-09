@@ -161,7 +161,7 @@ fn cmd_check(args: &[String]) -> ExitCode {
 
     // `chezzi check` is file-only (no bare/manifest mode), so the root is the nearest marker walking
     // up from the file — pass `None`.
-    match type_check(&path, None) {
+    match type_check(&path, None, None) {
         CheckOutcome::Ok => {
             println!("{}", if json { "[]" } else { "ok: no type errors" });
             ExitCode::SUCCESS
@@ -312,7 +312,7 @@ fn cmd_run(args: &[String]) -> ExitCode {
 
     // Pre-run type check: type errors block execution (no partial output). Pins the SAME root the VM
     // will run (below), so the checker and the VM never disagree on which same-named module to load.
-    match type_check(&path, root_override.as_deref()) {
+    match type_check(&path, root_override.as_deref(), entry_fn.as_deref()) {
         CheckOutcome::Ok => {}
         CheckOutcome::Errors(errs) => {
             report_check_errors(&errs, json);
@@ -964,15 +964,20 @@ enum CheckOutcome {
 /// `root` pins the module-graph root (the "one root per run" invariant): the bare-`chezzi run`
 /// manifest path passes `Some(root)` so the checker resolves imports against the SAME root the VM
 /// will run against; `None` (explicit `chezzi run FILE`) derives it by walking up from the file.
-fn type_check(path: &str, root: Option<&std::path::Path>) -> CheckOutcome {
+fn type_check(path: &str, root: Option<&std::path::Path>, entry_fn: Option<&str>) -> CheckOutcome {
     // Resolve + desugar + type-check on the dedicated front-end stack: the recursive AST walkers can
     // overflow the caller's (main-thread) stack on a deep-but-valid AST — see `chezzi::on_frontend_stack`.
     let path = path.to_string();
     let root = root.map(|r| r.to_path_buf());
-    chezzi::on_frontend_stack(move || type_check_inner(&path, root.as_deref()))
+    let entry_fn = entry_fn.map(str::to_string);
+    chezzi::on_frontend_stack(move || type_check_inner(&path, root.as_deref(), entry_fn.as_deref()))
 }
 
-fn type_check_inner(path: &str, root: Option<&std::path::Path>) -> CheckOutcome {
+fn type_check_inner(
+    path: &str,
+    root: Option<&std::path::Path>,
+    entry_fn: Option<&str>,
+) -> CheckOutcome {
     let entry = std::path::Path::new(path);
     let build = match root {
         Some(r) => resolver::build_graph_with_root(entry, r.to_path_buf()),
@@ -989,7 +994,7 @@ fn type_check_inner(path: &str, root: Option<&std::path::Path>) -> CheckOutcome 
             };
         }
     };
-    match checker::check_graph(&graph) {
+    match checker::check_graph_with_entry(&graph, entry_fn) {
         Ok(()) => CheckOutcome::Ok,
         Err(errs) => CheckOutcome::Errors(errs),
     }

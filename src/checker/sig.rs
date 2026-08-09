@@ -886,16 +886,22 @@ impl Checker {
     /// `T` into it): over-inclusion can only cost a fn positions it would lose anyway, while
     /// under-inclusion would mean a body whose `T.static()` or forward cannot lower.
     ///
-    /// The FORWARDING half is fenced by two conditions, because over-charging there does more than
+    /// The FORWARDING half is fenced by three conditions, because over-charging there does more than
     /// cost a position — a charged param that no call site can determine makes the fn UNCALLABLE
     /// ("type parameter 'T' … is not determined here"), which would break programs that compile
     /// today:
     /// * the witness-taking name must not be SHADOWED by one of this fn's own params
     ///   (`fn label[T: Spawnable](x: T, reset: int)` calls the param, never the module's `reset`),
-    ///   which is why the free-name walk subtracts the parameter names; and
+    ///   which is why the free-name walk subtracts the parameter names;
     /// * the param must actually OCCUR in this fn's own signature ([`Self::ty_param_in_sig`]). A
     ///   param that appears in neither a parameter type nor the return type can never be bound to
-    ///   anything at a call site, so it can never be the thing forwarded.
+    ///   anything at a call site, so it can never be the thing forwarded; and
+    /// * a MODULE-QUALIFIED forwarding target needs BOTH halves of its spelling to appear — the
+    ///   module bind as a free name AND the callee as a `Field` member name
+    ///   ([`crate::compiler::FreeNames::members`]). Merely naming a module that exports SOME
+    ///   witness-taking fn is not a forward, and charging for it poisoned every static-bounded
+    ///   generic in any file that imported such a module (`Convert[S]` is reserved, so that reached
+    ///   code which never asked for M24).
     ///
     /// What survives is one real over-charge: a generic with a static-carrying bound whose body calls
     /// a witness-taking fn with only CONCRETE types is charged a hidden param it never uses, so it
@@ -946,20 +952,23 @@ impl Checker {
         // name, and if they did the param would shadow the type anyway.)
         let params: std::collections::HashSet<String> =
             decl.params.iter().map(|p| p.name.clone()).collect();
-        let mut mentioned = std::collections::HashSet::new();
-        crate::compiler::free_names_block(&decl.body, &params, &mut mentioned);
+        let mut walk = crate::compiler::FreeNames::default();
+        crate::compiler::free_names_block(&decl.body, &params, &mut walk);
+        let mentioned = walk.names;
         // Slice 2 — the body names a fn that takes witnesses, so this body can FORWARD into it. Which
         // of this fn's params flows into which callee slot is type work only `record_witness_call`
         // can do (it runs long after this), so every static-bounded param THAT THIS SIGNATURE CAN
         // BIND is charged. A charge that turns out unused is inert arity; a MISSING one would be a
         // call the checker accepts and the compiler cannot lower.
         // A name is a forwarding target either as a FN this module can call bare (declared here or
-        // `from`-imported — one table), or as a bound MODULE that exports one, since the only way to
-        // reach `lib.reset(x)` is to name `lib`. The module half is coarser still (any mention of
-        // `lib` counts, not just a call to its witness-taking member) because the qualified callee is
-        // a `Field` and the free-name walk yields only the module bind; it is the same trade as the
-        // bare half — over-inclusion costs positions, under-inclusion would be a forward that cannot
-        // lower.
+        // `from`-imported — one table), or as a member of a bound MODULE (`lib.reset(x)`), which
+        // needs BOTH halves of the spelling: the module bind is a free NAME, the callee is the
+        // `Field`'s MEMBER name. Requiring both is what keeps merely NAMING a module from charging
+        // every static-bounded generic in the file — a module exports many fns and only some take
+        // witnesses, so `lib.name(1)` inside `fn label[T: Spawnable]` must cost nothing. Each half
+        // stays name-only (a mention, not a proven call), the same trade as the bare half:
+        // over-inclusion costs positions, under-inclusion is a forward the checker then REFUSES
+        // (`witness_scope` has no `$w:T` to load), never one that lowers wrong.
         let forwards = mentioned.iter().any(|n| {
             self.functions
                 .get(n)
@@ -968,7 +977,11 @@ impl Checker {
                     .imported_modules
                     .get(n)
                     .and_then(|id| self.module_sigs.get(id))
-                    .is_some_and(|s| s.functions.values().any(|f| !f.witness_params.is_empty()))
+                    .is_some_and(|s| {
+                        s.functions.iter().any(|(fname, f)| {
+                            !f.witness_params.is_empty() && walk.members.contains(fname)
+                        })
+                    })
         });
         cands
             .into_iter()
@@ -1013,12 +1026,14 @@ impl Checker {
     /// `parse_postfix` gives that outer link the same span as its HEAD, so arming it would refuse the
     /// head's own witness call, which evaluates eagerly in this frame and lowered fine before Task 5.
     /// Same shape rule as `reject_witness_spawn_defer_target`, which only classifies those two
-    /// callee spellings.
+    /// callee spellings — and `reported` is that function's answer, so the two arms (which overlap
+    /// on a bare free-fn target) emit the message ONCE.
     pub(super) fn enter_witness_indirect_target(
         &mut self,
         e: &Expr,
         kw: &'static str,
-    ) -> Option<(Span, &'static str)> {
+        reported: bool,
+    ) -> Option<(Span, &'static str, bool)> {
         let key = match &e.kind {
             ExprKind::Call { callee, .. }
                 if matches!(callee.kind, ExprKind::Ident(_) | ExprKind::Field { .. }) =>
@@ -1027,16 +1042,18 @@ impl Checker {
             }
             _ => return self.witness_indirect_target,
         };
-        self.witness_indirect_target.replace((key, kw))
+        self.witness_indirect_target.replace((key, kw, reported))
     }
 
     /// M24 — reject `spawn f(...)` / `defer f(...)` when `f` is a generic fn that needs hidden
     /// witness arguments. Both statements lower at DEDICATED emit sites (`Op::SpawnCall` /
     /// `Op::DeferCall`), not through `compile_call`, so the witness would never be pushed and the
     /// runtime `argc` would be one short. Rejected here rather than widened (M24 Task 4).
-    pub(super) fn reject_witness_spawn_defer_target(&mut self, e: &Expr, kw: &str) {
+    /// Returns whether it REPORTED, so the overlapping `record_witness_call` arm stays silent
+    /// instead of emitting the identical string at the identical span.
+    pub(super) fn reject_witness_spawn_defer_target(&mut self, e: &Expr, kw: &str) -> bool {
         let ExprKind::Call { callee, .. } = &e.kind else {
-            return;
+            return false;
         };
         // Both callee spellings that can name a module-level generic fn: bare (local or
         // `from`-imported — one `FnSig` table), and module-QUALIFIED (`lib.reset(...)`, whose sig
@@ -1051,13 +1068,13 @@ impl Checker {
             ),
             ExprKind::Field { obj, name, .. } => {
                 let ExprKind::Ident(mname) = &obj.kind else {
-                    return;
+                    return false;
                 };
                 // A whole-module bind lands in the VALUE namespace as `Ty::Module`, so a plain
                 // `lookup(..).is_some()` would skip every qualified call. Anything else bound to the
                 // name is a genuine local shadow, i.e. an ordinary method call.
                 if !matches!(self.lookup(mname), None | Some(Ty::Module(_))) {
-                    return;
+                    return false;
                 }
                 let w = self
                     .imported_modules
@@ -1067,13 +1084,13 @@ impl Checker {
                     .map(|f| f.witness_params.clone());
                 (name, w)
             }
-            _ => return, // a local shadow, or a callee that is not a named fn
+            _ => return false, // a local shadow, or a callee that is not a named fn
         };
         let Some(w) = w else {
-            return;
+            return false;
         };
         if w.is_empty() {
-            return;
+            return false;
         }
         self.error(
             e.span,
@@ -1083,6 +1100,7 @@ impl Checker {
                 w.join(", ")
             ),
         );
+        true
     }
 
     /// Find the first STATIC-CTOR protocol embedded ANYWHERE in a (possibly nested) already-resolved
@@ -1998,8 +2016,7 @@ impl Checker {
                 if let ExprKind::Closure { params, body, .. } = &value.kind {
                     let bound: std::collections::HashSet<String> =
                         params.iter().map(|p| p.name.clone()).collect();
-                    let mut free = std::collections::HashSet::new();
-                    crate::compiler::free_names_expr(body, &bound, &mut free);
+                    let free = crate::compiler::free_names_of_expr(body, &bound);
                     self.record_closure_captures(name, &free);
                 }
             }
@@ -2110,8 +2127,7 @@ impl Checker {
                     let mut bound: std::collections::HashSet<String> =
                         decl.params.iter().map(|p| p.name.clone()).collect();
                     bound.insert(decl.name.clone());
-                    let mut free = std::collections::HashSet::new();
-                    crate::compiler::free_names_block(&decl.body, &bound, &mut free);
+                    let free = crate::compiler::free_names_of_block(&decl.body, &bound);
                     self.record_closure_captures(&decl.name, &free);
                     self.check_fn_body(decl, None, sig);
                     return;
@@ -2445,9 +2461,9 @@ impl Checker {
                     },
                     _ => self.error(e.span, "defer requires a function or method call"),
                 }
-                self.reject_witness_spawn_defer_target(e, "defer");
+                let reported = self.reject_witness_spawn_defer_target(e, "defer");
                 // Type-check the call (and its args); the result is discarded, like an expr stmt.
-                let saved_wt = self.enter_witness_indirect_target(e, "defer");
+                let saved_wt = self.enter_witness_indirect_target(e, "defer", reported);
                 self.infer(e);
                 self.witness_indirect_target = saved_wt;
             }
@@ -2534,10 +2550,10 @@ impl Checker {
                                 _ => {}
                             }
                         }
-                        self.reject_witness_spawn_defer_target(e, "spawn");
+                        let reported = self.reject_witness_spawn_defer_target(e, "spawn");
                         // Full type-check of the call (callee, arity, args) — the single source of
                         // type diagnostics for the sub-expressions.
-                        let saved_wt = self.enter_witness_indirect_target(e, "spawn");
+                        let saved_wt = self.enter_witness_indirect_target(e, "spawn", reported);
                         self.infer(e);
                         self.witness_indirect_target = saved_wt;
                         // Every value crossing the airlock must be sendable: the arguments, and

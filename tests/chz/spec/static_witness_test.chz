@@ -627,3 +627,71 @@ test fn a_generators_closure_reaches_the_witness():
     for t in gen_defaults(Tag("hi"), 2):
         names.push(t.s)
     assert names == ["none", "none"]
+
+# ---- the KEY is the CALLEE TOKEN, not the call node ----
+#
+# `WitnessKey`'s span component used to be the CALL NODE's span, on the premise that a witness call
+# is always the head link of its postfix chain. `|>` breaks that premise: it desugars at PARSE time
+# into a plain `Call` that inherits the WHOLE infix expression's span, so every link of
+# `a |> f() |> g()` carried the same `(line, col)` and the second link silently took the first's
+# witness — a wrong VALUE under a green `chezzi check`, invisible to two-engine parity because both
+# engines read the same aliased table. The callee token is distinct per link, so it is the key.
+
+# Each link STAMPS its own witness into the value, so a link that took its neighbour's witness
+# changes the answer — an assert that only looked at the LAST link would pass on the aliased table.
+
+fn tag_of[T: Default](x: T) -> Tag:
+    return Tag("{T.default()}")
+
+fn name_of[U: Default](u: U) -> str:
+    return "{U.default()}+{u}"
+
+test fn a_pipe_chain_gives_each_link_its_own_witness():
+    # link 1 sees Counter (so its Tag carries "Counter(n=0)"), link 2 sees Tag
+    assert (Counter(1) |> tag_of() |> name_of()) == "Tag(s='none')+Tag(s='Counter(n=0)')"
+    # …and the same chain written as nested calls must answer identically
+    assert name_of(tag_of(Counter(1))) == "Tag(s='none')+Tag(s='Counter(n=0)')"
+
+test fn a_pipe_chain_with_two_different_protocols():
+    # the harder half: link 2's bound is a protocol link 1's witness does not satisfy, so an aliased
+    # key is not a wrong value but a hard fault ("type 'Wrap' has no static method 'default'").
+    assert (Counter(1) |> to_wrap() |> conv_of()) == "Wrap(v=4)+Wrap(v=12)"
+
+fn to_wrap[T: Default](x: T) -> Wrap:
+    return Wrap("{T.default()}".len())
+
+fn conv_of[U: Conv](u: U) -> str:
+    return "{U.conv(2)}+{u}"
+
+test fn a_pipe_chain_repeating_one_callee_keeps_both_links():
+    # the same callee twice — two entries under one callee NAME, distinct callee TOKENS
+    assert (Counter(1) |> reset() |> reset()).n == 0
+    assert (Tag("hi") |> reset() |> reset()).s == "none"
+
+test fn a_pipe_chain_inside_an_interpolation_fragment():
+    assert "{Counter(1) |> tag_of() |> name_of()}" == "Tag(s='none')+Tag(s='Counter(n=0)')"
+
+# ---- a type param that SHADOWS a real type name: both halves must mean the SAME one ----
+#
+# The checker resolves `Shadowed.<static>()` to the concrete STRUCT (its struct arm runs before the
+# type-param arm); the compiler used to resolve it to the witness, so a green check ran into
+# `type 'Counter' has no static method 'tag'`. Whether the checker's precedence is the right one
+# (Go and Rust let a type parameter shadow an outer type of the same name) is a separate question —
+# this pins that the two halves agree, which is what makes the program's answer defined.
+
+struct Shadowed:
+    q: int
+    fn tag() -> int:
+        return 7
+    fn default() -> Shadowed:
+        return Shadowed(9)
+
+fn shadowing[Shadowed: Default](x: Shadowed) -> int:
+    return Shadowed.tag()
+
+fn shadowing_builds[Shadowed: Default](x: Shadowed) -> int:
+    return Shadowed.default().q
+
+test fn a_type_param_shadowing_a_type_name_resolves_the_same_in_both_halves():
+    assert shadowing(Counter(1)) == 7
+    assert shadowing_builds(Counter(1)) == 9

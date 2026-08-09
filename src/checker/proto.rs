@@ -2839,23 +2839,28 @@ impl Checker {
         sub: &HashMap<String, Ty>,
         key_span: Span,
         span: Span,
+        recv: WitnessCallee,
     ) {
         // A `spawn`/`defer` TARGET lowers at its own emit site (`Op::SpawnCall`/`SpawnMethod`/
         // `DeferCall`/`DeferMethod`), none of which push a hidden argument — so the call is refused
         // rather than lowered one `argc` short. Matched on the call site's own KEY span, which is
         // unique per call node, so only the target itself is refused: an ARGUMENT that is a witness
         // call (`spawn f(reset(c))`) evaluates eagerly in this frame and stays legal.
-        if let Some((target, kw)) = self.witness_indirect_target
+        if let Some((target, kw, reported)) = self.witness_indirect_target
             && target == key_span
         {
-            self.error(
-                span,
-                format!(
-                    "'{name}' takes a static-protocol bound ({}), so it cannot be the target of \
-                     `{kw}` yet — call it eagerly and `{kw}` the result, or wrap the call in a closure",
-                    wparams.join(", ")
-                ),
-            );
+            // …unless `reject_witness_spawn_defer_target` already said exactly this, at exactly this
+            // span (the two arms overlap on a bare free-fn target). One error, one message.
+            if !reported {
+                self.error(
+                    span,
+                    format!(
+                        "'{name}' takes a static-protocol bound ({}), so it cannot be the target of \
+                         `{kw}` yet — call it eagerly and `{kw}` the result, or wrap the call in a closure",
+                        wparams.join(", ")
+                    ),
+                );
+            }
             return;
         }
         let mut srcs = Vec::with_capacity(wparams.len());
@@ -2911,12 +2916,23 @@ impl Checker {
                     srcs.push(WitnessSrc::Forward(p));
                 }
                 None => {
+                    // The suggested spelling has to be one that PARSES. A member's type arguments
+                    // go on the METHOD (`h.make[Counter]()`); `make[Counter](...)` is read as a free
+                    // call and answers "'make' takes no type arguments", and an annotated result
+                    // does not reach a method's own `[T]` either — so neither is offered there.
+                    let pin = match recv {
+                        WitnessCallee::Free => format!(
+                            "pin it with a type argument (`{name}[SomeType](...)`) or an annotated result"
+                        ),
+                        WitnessCallee::Member => format!(
+                            "pin it with a type argument ON THE METHOD (`<receiver>.{name}[SomeType](...)`)"
+                        ),
+                    };
                     self.error(
                         span,
                         format!(
                             "type parameter '{w}' of '{name}' is not determined here, so its static \
-                             protocol method has no concrete type to dispatch to — pin it with a \
-                             type argument (`{name}[SomeType](...)`) or an annotated result"
+                             protocol method has no concrete type to dispatch to — {pin}"
                         ),
                     );
                     return;
@@ -3048,7 +3064,14 @@ impl Checker {
         // read a param as un-determined that the call actually pins.
         if !sig.witness_params.is_empty() {
             let wparams = sig.witness_params.clone();
-            self.record_witness_call(name, &wparams, &subst_map, key_span, span);
+            self.record_witness_call(
+                name,
+                &wparams,
+                &subst_map,
+                key_span,
+                span,
+                WitnessCallee::Free,
+            );
         }
         subst(&sig.ret, &subst_map)
     }
@@ -3169,7 +3192,14 @@ impl Checker {
         // substituted into `params`/`ret` by the caller, so `mmap` holds only the METHOD's params —
         // which is exactly the set that can be witnessed.
         if !wparams.is_empty() {
-            self.record_witness_call(method, wparams, &mmap, key_span, span);
+            self.record_witness_call(
+                method,
+                wparams,
+                &mmap,
+                key_span,
+                span,
+                WitnessCallee::Member,
+            );
         }
         subst(ret, &mmap)
     }

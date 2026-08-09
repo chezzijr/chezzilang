@@ -174,3 +174,47 @@ fn single_root_bare_and_file_agree() {
         "bare run and explicit file run must agree on a single-root project"
     );
 }
+
+// M24 — a manifest `module:function` entrypoint is invoked BY NAME with no arguments, so it cannot
+// take a hidden static-protocol type witness: there is no call site to pin `T`. Before this it
+// type-checked green and then died at startup with the HIDDEN arity leaked into the message
+// ("function 'main' expects 1 argument(s), got 0"), naming a parameter the source does not declare.
+// Driven through the real binary because the entrypoint's name is CLI state — the library check
+// helpers never see it.
+#[test]
+fn witness_taking_manifest_entrypoint_is_refused_with_its_reason() {
+    let t = TmpDir::new();
+    t.write("chezzi.toml", "[project]\nentrypoint = \"src.main:main\"\n");
+    t.write(
+        "src/main.chz",
+        "protocol Default:\n    fn default() -> Self\nstruct Counter:\n    n: int\n    fn default() -> Counter:\n        return Counter(5)\nfn main[T: Default]():\n    print(T.default())\n",
+    );
+
+    let (stdout, stderr, ok) = run(&t.0, &["run"]);
+    assert!(!ok, "must be refused; stdout:\n{stdout}");
+    assert!(
+        stderr.contains("the manifest entrypoint 'main' is invoked with no arguments"),
+        "the error must name the real cause, not the hidden arity; stderr:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("expects 1 argument(s), got 0"),
+        "the hidden witness arity must never leak into a user-facing message; stderr:\n{stderr}"
+    );
+
+    // The same shape WITHOUT a static-carrying bound still runs: only the witness is refused.
+    t.write("src/main.chz", "fn main[T]():\n    print(\"ran\")\n");
+    let (stdout, stderr, ok) = run(&t.0, &["run"]);
+    assert!(
+        ok,
+        "a plain generic entrypoint still runs; stderr:\n{stderr}"
+    );
+    assert!(stdout.contains("ran"), "stdout:\n{stdout}");
+
+    // …and an explicit FILE run of the same module is untouched (it never invokes `main`).
+    let (stdout, stderr, ok) = run(&t.0, &["run", "src/main.chz"]);
+    assert!(ok, "explicit file run; stderr:\n{stderr}");
+    assert!(
+        !stdout.contains("ran"),
+        "a file run executes the top level only; stdout:\n{stdout}"
+    );
+}

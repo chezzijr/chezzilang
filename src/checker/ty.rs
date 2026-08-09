@@ -32,15 +32,26 @@ pub type KeywordKey = (usize, Span, usize, Span);
 pub type KeywordTable = HashMap<KeywordKey, Vec<usize>>;
 
 /// M24 — the [`WitnessTable::calls`] key. Same four components as [`KeywordKey`] and built by the
-/// same rules (see [`crate::checker::witness_key`]), except the last component is the CALL NODE's
-/// span rather than a first-named-arg span.
+/// same rules (see [`crate::checker::witness_key`]), except the last component is the CALLEE TOKEN's
+/// span ([`crate::checker::witness_key_span`]) rather than a first-named-arg span.
 ///
-/// That span is shared by every link of a chained postfix expression (`parse_postfix` gives each link
-/// the primary expression's span), so it is unique per call only because of what a witness call IS: a
-/// direct by-name call whose callee is a bare `Ident`, i.e. the HEAD link of its chain. At most one
-/// link of any chain can be a witness call, so two witness calls can never share the span — and the
-/// checker's record site and the compiler's lookup both key on the same node.
+/// It is deliberately NOT the call node's span: that span is shared by every link of a chained
+/// postfix expression AND of a pipe chain (`a |> f() |> g()` desugars to nested `Call`s that all
+/// inherit the infix expression's span), so two distinct witness calls would alias onto one slot.
+/// The callee token — the bare `Ident`, or the member-name token — is a distinct source node per
+/// link, and the checker's record site and the compiler's lookup both derive it the same way.
 pub type WitnessKey = (usize, Span, usize, Span);
+
+/// M24 — how a witness call is SPELLED, which is all the "type parameter … is not determined here"
+/// diagnostic needs: it decides which pin the message may suggest. A free fn / static member takes
+/// its type argument on the name (`empty[Counter]()`, `Holder.build[Counter]()`) and can also be
+/// pinned by an annotated result; an INSTANCE method takes it on the method
+/// (`h.make[Counter]()`) and by nothing else.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WitnessCallee {
+    Free,
+    Member,
+}
 
 /// M24 — where ONE witness argument at a call site comes from.
 #[derive(Debug, Clone, PartialEq)]

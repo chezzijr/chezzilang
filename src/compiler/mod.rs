@@ -4547,29 +4547,6 @@ impl Compiler {
             name_span,
         } = &callee.kind
         {
-            // M24 — `T.method(args)` through a generic bound's STATIC requirement. NO table lookup is
-            // needed here: `T` is a type PARAM (never in `bare_types`/`static_methods`), and this
-            // compiler itself created the `$w:T` binding — a trailing param of the fns the checker's
-            // `fns` table named, or (Task 4) a capture of one in a nested body — so "a `Field` call on
-            // a bare `T` for which a `$w:T` binding is reachable" IS the witness call. That reach
-            // (`FnComp::witness_ref`) is the compiler's half of `Checker::witness_scope`.
-            if let ExprKind::Ident(t) = &obj.kind
-                && fc.is_unbound(t)
-                && let Some(w) = fc.witness_ref(t)
-            {
-                self.compile_args(fc, args)?;
-                // The SAME `witness_ref` that admitted this call emits it — there is no second
-                // lookup that could come back empty and leave `CallStaticDyn` reading an operand.
-                fc.emit_witness(w, span);
-                fc.emit(
-                    Op::CallStaticDyn {
-                        method: name.clone(),
-                        argc: args.len(),
-                    },
-                    span,
-                );
-                return Ok(());
-            }
             // `module.Struct(args)` → qualified struct constructor. `module` is a bound module name
             // whose target declares struct `name`; emit `NewStruct` keyed by that module's runtime key.
             if let ExprKind::Ident(mname) = &obj.kind
@@ -4684,6 +4661,38 @@ impl Compiler {
                 && self.static_methods.contains(&static_key(&key, name))
             {
                 self.emit_call_static(fc, key, name, args, *name_span, span)?;
+                return Ok(());
+            }
+            // M24 — `T.method(args)` through a generic bound's STATIC requirement. NO table lookup is
+            // needed here: `T` is a type PARAM, and this compiler itself created the `$w:T` binding —
+            // a trailing param of the fns the checker's `fns` table named, or (Task 4) a capture of
+            // one in a nested body — so "a `Field` call on a bare `T` for which a `$w:T` binding is
+            // reachable" IS the witness call. That reach (`FnComp::witness_ref`) is the compiler's
+            // half of `Checker::witness_scope`.
+            //
+            // PLACED LAST among the bare-`Ident` receiver arms, because that is where the CHECKER
+            // puts it (`infer_call`: the enum/struct static arms run first, the type-param arm after).
+            // A type param may SHADOW a real type name (`fn f[Item: Default](x: Item)` next to a
+            // `struct Item`), and both halves must then mean the same `Item` — resolving it here
+            // first while the checker resolved the struct is a green `chezzi check` followed by a
+            // runtime "type 'A' has no static method". Whether the checker's precedence is the RIGHT
+            // one (Go and Rust let a type parameter shadow an outer type of the same name) is a
+            // separate question; agreement is not.
+            if let ExprKind::Ident(t) = &obj.kind
+                && fc.is_unbound(t)
+                && let Some(w) = fc.witness_ref(t)
+            {
+                self.compile_args(fc, args)?;
+                // The SAME `witness_ref` that admitted this call emits it — there is no second
+                // lookup that could come back empty and leave `CallStaticDyn` reading an operand.
+                fc.emit_witness(w, span);
+                fc.emit(
+                    Op::CallStaticDyn {
+                        method: name.clone(),
+                        argc: args.len(),
+                    },
+                    span,
+                );
                 return Ok(());
             }
             // `Type[T…].Variant(args)` → declaration-site turbofish VARIANT constructor
@@ -5104,9 +5113,8 @@ impl Compiler {
         // dragged unused non-sendable siblings (a closure value / live generator) across the spawn
         // airlock → check-OK/run-fault (Finding D). `free_names_expr` is a trusted over-approximation
         // (it also drives cell-boxing), so this is behavior-identical and strictly smaller.
-        let mut free: HashSet<String> = HashSet::new();
         let params_set: HashSet<String> = params.iter().map(|p| p.name.clone()).collect();
-        free_names_expr(body, &params_set, &mut free);
+        let free = free_names_of_expr(body, &params_set);
         let snap = fc.snapshot_entries();
         // M24 Task 4: a closure captures only FREE VARIABLES, and the enclosing frame's `$w:T` is
         // never spelled in the source — so it is appended explicitly, and travels BY VALUE (the
@@ -5181,9 +5189,13 @@ impl Compiler {
                 Chunk::Expr(e, spec) => {
                     self.kw_frag_ctx = span;
                     self.kw_frag_ord = ord;
-                    // The fragment root is compiled with its OWN span — matching the checker, which
-                    // no longer re-anchors it (see `check_interp_chunks`). Both halves therefore key
-                    // every per-call table (`WitnessTable::calls`, `KeywordTable`) on the same span.
+                    // The fragment root is compiled with its OWN span, so a RUNTIME fault inside a
+                    // fragment keeps the span it had before M24. (The checker re-anchors its
+                    // fragment-root DIAGNOSTIC at the string literal — a diagnostic anchor, not a
+                    // key: every per-call table keys on a sub-node the rewrite cannot touch, the
+                    // CALLEE TOKEN for `WitnessTable::calls` and the first named-arg value for
+                    // `KeywordTable`. `49bd9f80` conflated the two; keeping them separate is what
+                    // lets both halves be right.)
                     self.compile_expr(fc, e)?;
                     match spec {
                         None => fc.emit(Op::ToStr, span),
@@ -5553,7 +5565,7 @@ fn find_boundary_free_block(stmts: &[Stmt], out: &mut HashSet<String>) {
             // to an empty scope) and stop. `defer f(x)` / `spawn f(x)` evaluate the call in THIS
             // frame, so scan the call expression for closure boundaries instead.
             StmtKind::Defer(DeferTarget::Block(b)) | StmtKind::Spawn(SpawnTarget::Block(b)) => {
-                free_names_block(b, &HashSet::new(), out)
+                out.extend(free_names_of_block(b, &HashSet::new()))
             }
             StmtKind::Defer(DeferTarget::Call(e)) | StmtKind::Spawn(SpawnTarget::Call(e)) => {
                 find_boundary_free_expr(e, out)
@@ -5566,7 +5578,7 @@ fn find_boundary_free_block(stmts: &[Stmt], out: &mut HashSet<String>) {
             // inner boundaries capture ITS frame, already folded into its free set.)
             StmtKind::Fn(decl) => {
                 let params: HashSet<String> = decl.params.iter().map(|p| p.name.clone()).collect();
-                free_names_block(&decl.body, &params, out);
+                out.extend(free_names_of_block(&decl.body, &params));
             }
             // Remaining statements contain no capture boundary.
             _ => {}
@@ -5608,7 +5620,7 @@ fn find_boundary_free_expr(e: &Expr, out: &mut HashSet<String>) {
     match &e.kind {
         ExprKind::Closure { params, body, .. } => {
             let bound: HashSet<String> = params.iter().map(|p| p.name.clone()).collect();
-            free_names_expr(body, &bound, out);
+            out.extend(free_names_of_expr(body, &bound));
         }
         // A string literal may carry `{…}` interpolation exprs (a closure could nest in one).
         ExprKind::Str(raw) => {
@@ -5727,9 +5739,8 @@ fn filter_entries_free_block(
     stmts: &[Stmt],
     params: &[crate::ast::Param],
 ) -> Vec<CapEntry> {
-    let mut free: HashSet<String> = HashSet::new();
     let bound: HashSet<String> = params.iter().map(|p| p.name.clone()).collect();
-    free_names_block(stmts, &bound, &mut free);
+    let free = free_names_of_block(stmts, &bound);
     entries
         .iter()
         .filter(|e| free.contains(&e.name))
@@ -5737,9 +5748,35 @@ fn filter_entries_free_block(
         .collect()
 }
 
+/// What a free-variable walk collects. `names` is the free-variable answer every capture consumer
+/// wants. `members` is the MEMBER name of every `obj.member` seen on the way — the walk otherwise
+/// drops it (the `Field` arm recurses into `obj` only, so `lib.mk(x)` yields just `lib`). M24's
+/// forwarding charge needs it to tell a real qualified forward (`lib.mk(x)`) from merely naming a
+/// module that happens to export a witness-taking fn; nothing else reads it, and no member name is
+/// ever a free VARIABLE, so the two sets never mix.
+#[derive(Default)]
+pub(crate) struct FreeNames {
+    pub names: HashSet<String>,
+    pub members: HashSet<String>,
+}
+
+/// [`free_names_block`] for callers that want only the free-variable set.
+pub(crate) fn free_names_of_block(stmts: &[Stmt], bound: &HashSet<String>) -> HashSet<String> {
+    let mut f = FreeNames::default();
+    free_names_block(stmts, bound, &mut f);
+    f.names
+}
+
+/// [`free_names_expr`] for callers that want only the free-variable set.
+pub(crate) fn free_names_of_expr(e: &Expr, bound: &HashSet<String>) -> HashSet<String> {
+    let mut f = FreeNames::default();
+    free_names_expr(e, bound, &mut f);
+    f.names
+}
+
 /// Free names of a capture-boundary BLOCK body (`defer:`/`spawn:`): names referenced but not bound
 /// within, relative to `bound`. Threads bindings left-to-right (a later stmt sees earlier lets).
-pub(crate) fn free_names_block(stmts: &[Stmt], bound: &HashSet<String>, out: &mut HashSet<String>) {
+pub(crate) fn free_names_block(stmts: &[Stmt], bound: &HashSet<String>, out: &mut FreeNames) {
     let mut b = bound.clone();
     for s in stmts {
         match &s.kind {
@@ -5841,11 +5878,11 @@ pub(crate) fn free_names_block(stmts: &[Stmt], bound: &HashSet<String>, out: &mu
 
 /// Free names of an expression relative to `bound`: referenced idents not in `bound`. Descends
 /// THROUGH nested closures/comprehensions/matches, subtracting each inner scope's binds.
-pub(crate) fn free_names_expr(e: &Expr, bound: &HashSet<String>, out: &mut HashSet<String>) {
+pub(crate) fn free_names_expr(e: &Expr, bound: &HashSet<String>, out: &mut FreeNames) {
     match &e.kind {
         ExprKind::Ident(n) => {
             if !bound.contains(n) {
-                out.insert(n.clone());
+                out.names.insert(n.clone());
             }
         }
         // A string literal's `{…}` interpolation exprs reference names too (parsed at compile time,
@@ -5908,8 +5945,12 @@ pub(crate) fn free_names_expr(e: &Expr, bound: &HashSet<String>, out: &mut HashS
                 .iter()
                 .for_each(|(_, v)| free_names_expr(v, bound, out));
         }
-        ExprKind::Field { obj, .. } => free_names_expr(obj, bound, out),
-        ExprKind::OptChain { obj, call, .. } => {
+        ExprKind::Field { obj, name, .. } => {
+            out.members.insert(name.clone());
+            free_names_expr(obj, bound, out);
+        }
+        ExprKind::OptChain { obj, call, name } => {
+            out.members.insert(name.clone());
             free_names_expr(obj, bound, out);
             if let Some(c) = call {
                 c.args.iter().for_each(|a| free_names_expr(a, bound, out));

@@ -57,6 +57,7 @@ impl Checker {
             witnesses: crate::checker::WitnessTable::default(),
             witness_scope: Vec::new(),
             witness_indirect_target: None,
+            entry_fn: None,
             graph_module_idx: 0,
             kw_frag_ctx: Span::default(),
             kw_frag_ord: 0,
@@ -2051,8 +2052,7 @@ impl Checker {
             ExprKind::Closure { params, body, .. } => {
                 let bound: std::collections::HashSet<String> =
                     params.iter().map(|p| p.name.clone()).collect();
-                let mut free = std::collections::HashSet::new();
-                crate::compiler::free_names_expr(body, &bound, &mut free);
+                let free = crate::compiler::free_names_of_expr(body, &bound);
                 self.local_captures_of(&free)
             }
             _ => Vec::new(),

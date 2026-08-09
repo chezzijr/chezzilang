@@ -21275,3 +21275,168 @@ fn witness_call_at_an_interpolation_fragment_root_ok() {
         "{FWD_HEAD}fn fwd[T: Default](x: T) -> str:\n    return \"{{reset(x)}}\"\nfn main():\n    print(fwd(Tag(\"hi\")))\nmain()\n"
     ));
 }
+
+// ===== M24 final review — the seven findings the three reviewers filed against the finished branch.
+// Each test below is the compile-time half; the ones whose bug is a WRONG VALUE (the pipe key, the
+// shadowed type param) run in `tests/chz/spec/static_witness_test.chz`, which is the only half that
+// can catch them.
+
+/// A — the witness key is the CALLEE TOKEN. `|>` desugars at PARSE time into a plain `Call` that
+/// inherits the whole infix expression's span, so keying on the call NODE aliased every link of
+/// `a |> f() |> g()` onto one table slot. When the two links' bounds differ that green
+/// `chezzi check` becomes a hard runtime fault; when they agree it is a silently wrong value.
+#[test]
+fn witness_pipe_chain_links_do_not_alias_ok() {
+    // two DIFFERENT static-carrying protocols in one chain: pre-fix the second link's entry
+    // overwrote the first's, so link 1 dispatched `default` on `Wrap` — which has none — and the
+    // green check became a hard runtime fault.
+    entry_ok(&format!(
+        "{FWD_HEAD}protocol Conv:\n    fn conv(x: int) -> Self\nstruct Wrap:\n    v: int\n    fn conv(x: int) -> Wrap:\n        return Wrap(x)\nfn to_wrap[T: Default](x: T) -> Wrap:\n    return Wrap(1)\nfn from_wrap[U: Conv](x: U) -> U:\n    return U.conv(1)\nfn main():\n    print((Counter(1) |> to_wrap() |> from_wrap()).v)\nmain()\n"
+    ));
+    // the same callee twice — one NAME, two distinct callee TOKENS
+    entry_ok(&format!(
+        "{FWD_HEAD}fn main():\n    print((Counter(1) |> reset() |> reset()).n)\nmain()\n"
+    ));
+    // …and a pipe chain that is an interpolation fragment's root
+    entry_ok(&format!(
+        "{FWD_HEAD}fn main():\n    print(\"{{Counter(1) |> reset() |> reset()}}\")\nmain()\n"
+    ));
+}
+
+/// B — a type param whose name SHADOWS a real type. The checker resolves the static call to the
+/// concrete struct (its struct arm runs before the type-param arm); the compiler used to resolve it
+/// to the witness, so the two halves disagreed about which `Item` was meant and a green check ran
+/// into `type 'Counter' has no static method 'tag'`. This pins that the checker still accepts the
+/// shape it accepted (the agreement itself is only observable by RUNNING it — see the `.chz` suite).
+#[test]
+fn witness_type_param_shadowing_a_type_name_ok() {
+    entry_ok(&format!(
+        "{FWD_HEAD}struct Item:\n    q: int\n    fn tag() -> int:\n        return 7\n    fn default() -> Item:\n        return Item(9)\nfn f[Item: Default](x: Item) -> int:\n    return Item.tag()\nfn main():\n    print(f(Counter(1)))\nmain()\n"
+    ));
+}
+
+/// A module that exports BOTH a witness-taking generic (`mk`) and an ordinary fn (`name`) — the
+/// shape the module half of the forwarding charge has to tell apart.
+const WITNESS_LIB: (&str, &str) = (
+    "lib.chz",
+    "protocol Default:\n    fn default() -> Self\nstruct Counter:\n    n: int\n    fn default() -> Counter:\n        return Counter(0)\nfn mk[T: Default](x: T) -> T:\n    return T.default()\nfn name(n: int) -> str:\n    return \"n\"\n",
+);
+
+/// D — merely NAMING an imported module must not charge a witness. The module half of the forwarding
+/// scan was coarse to the WHOLE module, so importing any module that exports any witness-taking fn
+/// cost every static-bounded generic in the file its value / `spawn` / `defer` positions.
+#[test]
+fn witness_forwarding_naming_a_module_does_not_charge_ok() {
+    // `label` names `lib` but calls a NON-witness member of it → uncharged, so it keeps every
+    // position a plain generic has (function value, `defer` target).
+    files_ok(&[
+        WITNESS_LIB,
+        (
+            "main.chz",
+            "import lib\nprotocol Mk:\n    fn mk_it() -> Self\nstruct Q:\n    v: int\n    fn mk_it() -> Q:\n        return Q(1)\nfn label[T: Mk](x: T) -> str:\n    return lib.name(1)\nfn apply(f: fn(Q) -> str, q: Q) -> str:\n    return f(q)\nfn main():\n    print(apply(label, Q(2)))\n    defer label(Q(3))\nmain()\n",
+        ),
+    ]);
+}
+
+/// …and the other direction, which is the unsafe one: a genuine forward into an imported callee must
+/// STILL be charged, in every spelling (bare `from`-import, module-qualified, aliased module).
+#[test]
+fn witness_forwarding_into_an_imported_callee_ok() {
+    files_ok(&[
+        WITNESS_LIB,
+        (
+            "main.chz",
+            "import lib\nimport lib as alias\nimport mk from lib\nfn qfwd[T: Default](x: T) -> T:\n    return lib.mk(x)\nfn afwd[T: Default](x: T) -> T:\n    return alias.mk(x)\nfn bfwd[T: Default](x: T) -> T:\n    return mk(x)\nfn main():\n    print(qfwd(lib.Counter(1)).n)\n    print(afwd(lib.Counter(1)).n)\n    print(bfwd(lib.Counter(1)).n)\nmain()\n",
+        ),
+    ]);
+    // a charged fn loses its value position — the proof the qualified forward really was charged
+    files_reject(
+        &[
+            WITNESS_LIB,
+            (
+                "main.chz",
+                "import lib\nfn qfwd[T: Default](x: T) -> T:\n    return lib.mk(x)\nfn main():\n    g := qfwd\n    print(1)\nmain()\n",
+            ),
+        ],
+        "cannot be used as a function value",
+    );
+}
+
+/// E — an interpolation-fragment diagnostic anchors at the STRING LITERAL, not at the fragment's own
+/// `(1,1)`-relative column. `49bd9f80` removed that anchor to fix a keying bug and took the
+/// diagnostic with it; the key is now a sub-node (the callee token), so the root span is free to be
+/// an anchor again. Pins the COLUMN, which is the whole content of the regression.
+#[test]
+fn interpolation_fragment_error_anchors_at_the_literal() {
+    let errs = check_src("print(\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa {nope} bbbb\")\n");
+    let e = errs
+        .iter()
+        .find(|e| e.message.contains("unknown name 'nope'"))
+        .unwrap_or_else(|| panic!("expected an unknown-name error, got: {errs:?}"));
+    assert_eq!(
+        (e.span.line, e.span.col),
+        (1, 7),
+        "a fragment error must point at the string literal, not the fragment-relative column"
+    );
+}
+
+/// …and the anchor must not bring the key aliasing back with it: two witness calls in ONE fragment
+/// still resolve to their own witnesses (the key is the callee token, which the re-anchor of the
+/// fragment ROOT cannot touch).
+#[test]
+fn two_witness_calls_in_one_fragment_keep_their_own_witness_ok() {
+    entry_ok(&format!(
+        "{FWD_HEAD}fn main():\n    print(\"{{reset(reset(Counter(1))).n}} {{reset(Tag(\\\"x\\\")).s}}\")\nmain()\n"
+    ));
+}
+
+/// F — the "not determined here" diagnostic must name a spelling that WORKS. For an instance method
+/// both suggestions were dead ends: `make[SomeType](...)` is read as a free call ("'make' takes no
+/// type arguments") and an annotated result never reaches a method's own `[T]`. The form that works
+/// is the member turbofish.
+#[test]
+fn witness_undetermined_member_names_the_member_turbofish() {
+    let head = format!(
+        "{FWD_HEAD}struct Holder:\n    k: int\n    fn make[T: Default](self) -> T:\n        return T.default()\n"
+    );
+    entry_rejects(
+        &format!("{head}fn main():\n    print(Holder(1).make())\nmain()\n"),
+        "ON THE METHOD (`<receiver>.make[SomeType](...)`)",
+    );
+    // …and that spelling is accepted.
+    entry_ok(&format!(
+        "{head}fn main():\n    print(Holder(1).make[Counter]().n)\nmain()\n"
+    ));
+    // a FREE fn keeps the (working) name-turbofish + annotated-result advice.
+    entry_rejects(
+        &format!(
+            "{FWD_HEAD}fn empty[T: Default]() -> T:\n    return T.default()\nfn main():\n    print(empty())\nmain()\n"
+        ),
+        "pin it with a type argument (`empty[SomeType](...)`) or an annotated result",
+    );
+}
+
+/// G — the `spawn`/`defer` rejection is emitted ONCE. Two arms overlap on a bare free-fn target
+/// (`reject_witness_spawn_defer_target`, then `record_witness_call`'s indirect arm) and both emitted
+/// the identical string at the identical span.
+#[test]
+fn witness_defer_target_rejection_is_not_duplicated() {
+    for kw in ["defer", "spawn"] {
+        let src = if kw == "defer" {
+            format!("{FWD_HEAD}fn main():\n    defer reset(Counter(1))\n    print(1)\nmain()\n")
+        } else {
+            format!(
+                "{FWD_HEAD}fn main():\n    parallel:\n        spawn reset(Counter(1))\nmain()\n"
+            )
+        };
+        let errs = check_entry(&src);
+        let hits = errs
+            .iter()
+            .filter(|e| e.message.contains("cannot be the target of"))
+            .count();
+        assert_eq!(
+            hits, 1,
+            "expected exactly one `{kw}` rejection, got: {errs:?}"
+        );
+    }
+}

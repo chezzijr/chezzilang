@@ -20,7 +20,9 @@ use std::fmt;
 
 pub use ty::Ty;
 use ty::compatible;
-pub use ty::{FnLabels, KeywordKey, KeywordTable, WitnessKey, WitnessSrc, WitnessTable};
+pub use ty::{
+    FnLabels, KeywordKey, KeywordTable, WitnessCallee, WitnessKey, WitnessSrc, WitnessTable,
+};
 
 /// The fully-resolved C signature of one `extern` fn, computed by the checker in the defining
 /// module's import/alias scope (the single source of truth for every alias spelling). Each param /
@@ -725,7 +727,20 @@ pub fn check(module: &crate::ast::Module) -> Result<(), Vec<CheckError>> {
 /// MODULE-SCOPED: a type declared in one module is private to it and visible elsewhere only via
 /// import. The same type name may appear in several modules.
 pub fn check_graph(graph: &ModuleGraph) -> Result<(), Vec<CheckError>> {
+    check_graph_with_entry(graph, None)
+}
+
+/// [`check_graph`] for the manifest-entrypoint run (`chezzi run` with no file): `entry_fn` is the
+/// `[project] entrypoint = "mod:fn"` function name, which the runtime invokes BY NAME with no
+/// arguments. That is CLI state the checker cannot discover, and the only thing it changes is one
+/// extra rejection (M24: such a function may not take a hidden type witness — see the entry-fn arm
+/// in `run_graph_pass`). `None` ⇒ byte-identical to `check_graph`.
+pub fn check_graph_with_entry(
+    graph: &ModuleGraph,
+    entry_fn: Option<&str>,
+) -> Result<(), Vec<CheckError>> {
     let mut c = Checker::new();
+    c.entry_fn = entry_fn.map(str::to_string);
     c.run_graph_pass(graph, false);
     if c.errors.is_empty() {
         Ok(())
@@ -903,35 +918,37 @@ pub fn keyword_key(
 }
 
 /// M24 — build the [`WitnessKey`] for a call site that needs static-witness arguments: `(module,
-/// fragment-context span, fragment ordinal, CALL-NODE span)`. The checker's record site and the
-/// compiler's lookup site call this one helper so they can never disagree on the key. `call_span` is
-/// the call expression's own span — which a chained postfix shares across its links, and is unique
-/// here only because a witness call is always the HEAD link (a bare `Ident` callee); see
+/// fragment-context span, fragment ordinal, CALLEE-TOKEN span)`. The checker's record site and the
+/// compiler's lookup site call this one helper so they can never disagree on the key. `key_span` is
+/// always a [`witness_key_span`] result — the callee's own token, never the call node's span; see
 /// [`WitnessKey`]. `frag_ctx`/`frag_ord` are the same interpolation discriminators [`keyword_key`]
 /// uses.
 pub fn witness_key(
     module_idx: usize,
     frag_ctx: Span,
     frag_ord: usize,
-    call_span: Span,
+    key_span: Span,
 ) -> crate::checker::WitnessKey {
-    (module_idx, frag_ctx, frag_ord, call_span)
+    (module_idx, frag_ctx, frag_ord, key_span)
 }
 
 /// M24 Task 5 — the span component of a call site's [`WitnessKey`], from the CALLEE and the call
 /// node's span. ONE derivation, shared by the checker's record sites and the compiler's lookups.
 ///
-/// A bare-`Ident` callee (`reset(c)`, the free-fn form) keys on the call node's own span, which is
-/// unique because such a call is always the HEAD link of its postfix chain. A member callee — an
-/// instance method (`h.make(c)`), a static method (`Holder.build(c)`), a module member
-/// (`lib.reset(c)`) — is NOT: `parse_postfix` gives every link of `h.make(a).make(b)` the primary
-/// expression's span, so two witness calls in one chain would collide on it and the second would
-/// silently take the first's witness. The member-name TOKEN's span (`name_span`) is a distinct
-/// source node per link, so it discriminates them. It is a KEY ONLY — diagnostics still anchor on
-/// the call span (the trap `49bd9f80` closed).
+/// The key is the CALLEE's own token, never the call node's span. A call node's span is shared by
+/// every link of a postfix chain (`parse_postfix` gives each link the primary expression's span) AND
+/// by every link of a pipe chain (`a |> f() |> g()` desugars at parse time to nested `Call`s that all
+/// inherit the whole infix expression's span) — so keying on it aliases two distinct witness calls
+/// onto one slot: the later insert wins and the earlier call silently constructs the WRONG type
+/// under a green `chezzi check`. The callee token is a distinct source node per link in both shapes:
+/// a bare `Ident` (`reset(c)`) keys on the identifier's span, a member callee — instance method
+/// (`h.make(c)`), static method (`Holder.build(c)`), module member (`lib.reset(c)`) — on the
+/// member-name TOKEN (`name_span`). It is a KEY ONLY: diagnostics still anchor on the call span (the
+/// trap `49bd9f80` closed).
 pub fn witness_key_span(callee: &Expr, call_span: Span) -> Span {
     match &callee.kind {
         ExprKind::Field { name_span, .. } => *name_span,
+        ExprKind::Ident(_) => callee.span,
         _ => call_span,
     }
 }
@@ -1252,6 +1269,30 @@ impl Checker {
                 // `harvest_protocol_shape` production-live (no dead_code) AND is assert-only (no effect on
                 // resolution/output), so behavior + 3-engine parity are unchanged.
                 c.assert_native_protocol_shape_matches(&lm.ast);
+            }
+            // M24 — the manifest's `[project] entrypoint = "mod:fn"` names a function the runtime
+            // invokes BY NAME at a fixed arity of ZERO, exactly like a `test fn`. A hidden witness
+            // parameter has no call site to come from there, so a bare `chezzi run` would fault at
+            // startup after a green check with the hidden arity leaked into the message
+            // ("expects 1 argument(s), got 0"). Rejected here, where the name is known.
+            if lm.id == graph.entry
+                && let Some(f) = c.entry_fn.clone()
+                && let w = c.stored_witness_params(None, &f)
+                && !w.is_empty()
+            {
+                let span = lm
+                    .ast
+                    .stmts
+                    .iter()
+                    .find(|s| matches!(&s.kind, StmtKind::Fn(d) if d.name == f))
+                    .map_or(Span { line: 1, col: 1 }, |s| s.span);
+                c.error(
+                    span,
+                    format!(
+                        "the manifest entrypoint '{f}' is invoked with no arguments, so it cannot construct through its static-protocol bound ({}) — the hidden type witness has no call site to come from. Give the entrypoint a non-generic signature and move the construction into a helper it calls with a concrete type",
+                        w.join(", ")
+                    ),
+                );
             }
             c.module_sigs.insert(lm.id.clone(), sig);
         }
@@ -1728,11 +1769,19 @@ struct Checker {
     /// witness would have to live in the instance, which is a different mechanism.
     witness_scope: Vec<String>,
     /// M24 Task 5 — set while type-checking a `spawn <call>` / `defer <call>` TARGET: the target
-    /// call's [`witness_key_span`] and the keyword. `record_witness_call` refuses a call whose key
-    /// span matches, because both statements lower at emit sites that push no hidden argument. The
-    /// key span (not the call span) is the discriminator so that an ARGUMENT which is itself a
-    /// witness call — evaluated eagerly in this frame — stays legal.
-    witness_indirect_target: Option<(Span, &'static str)>,
+    /// call's [`witness_key_span`], the keyword, and whether
+    /// [`Checker::reject_witness_spawn_defer_target`] ALREADY reported this target.
+    /// `record_witness_call` refuses a call whose key span matches, because both statements lower at
+    /// emit sites that push no hidden argument — but stays SILENT when the flag says the identical
+    /// message was already emitted at the identical span (the two arms overlap on a bare free-fn
+    /// target; one error, one message). The key span (not the call span) is the discriminator so
+    /// that an ARGUMENT which is itself a witness call — evaluated eagerly in this frame — stays
+    /// legal.
+    witness_indirect_target: Option<(Span, &'static str, bool)>,
+    /// M24 — the manifest `[project] entrypoint`'s FUNCTION name, when this check is for a bare
+    /// `chezzi run` (`check_graph_with_entry`). `None` for `chezzi check <file>` and every library
+    /// caller: a file run never invokes a function by name.
+    entry_fn: Option<String>,
     /// The CURRENT module's graph index, maintained across every graph pass (set per module in
     /// `run_graph_pass`), so a recorded keyword-call permutation / witness entry is keyed under the
     /// SAME index the backends derive. `0` for a lone `check` (single synthetic module).

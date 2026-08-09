@@ -957,7 +957,7 @@ impl Checker {
         // Only the METHOD's params can be witnessed, so the ENCLOSING type's `tps` are never here.
         if !sig.witness_params.is_empty() {
             let wparams = sig.witness_params.clone();
-            self.record_witness_call(method, &wparams, &sub, name_span, span);
+            self.record_witness_call(method, &wparams, &sub, name_span, span, WitnessCallee::Free);
         }
         // A method-OWN `[U]` param still un-inferred (no method turbofish, unbindable from args, e.g.
         // `make[U]() -> List[U]`) degrades to the refinable `Ty::Unknown` — a method-local `[U]` with
@@ -1902,8 +1902,11 @@ impl Checker {
                     // A generic function: infer its type parameters from the arguments, enforce
                     // bounds, and substitute into the return type.
                     if !sig.type_params.is_empty() {
+                        // M24 — the witness key span is the CALLEE TOKEN (`name_span`), never the
+                        // call node: a pipe chain's links all carry the infix expression's span, so
+                        // keying on it aliased two witness calls onto one entry.
                         return Some(
-                            self.infer_generic_call(name, &sig, args, targs, span, span, hint),
+                            self.infer_generic_call(name, &sig, args, targs, name_span, span, hint),
                         );
                     }
                     // Float params are coerced at the callee's prologue (compile_fn / extern).
