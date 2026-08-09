@@ -151,3 +151,45 @@ test fn a_nested_fn_does_not_inherit_a_module_fns_witness_arity():
     fn reset(k: int) -> int:
         return k * 10
     assert reset(4) == 40, "the nested `reset` is a plain 1-arg fn"
+
+test fn a_keyword_argument_reaches_a_witness_call():
+    # named args are normalized to positional by desugar BEFORE the witness lowering sees the call,
+    # so the hidden trailing witness still lands last.
+    assert reset(old=Counter(9)).n == 0
+
+# ---- a witness is charged only to a body that uses one ----
+#
+# `Spawnable` carries a static requirement, but `tagged` never constructs — so it takes NO hidden
+# param and keeps every position a plain generic fn has (value, HOF argument, `spawn`/`defer`).
+
+protocol Spawnable:
+    fn make() -> Self
+    fn tag(self) -> str
+
+struct Node:
+    v: int
+    fn make() -> Node:
+        return Node(0)
+    fn tag(self) -> str:
+        return "node{self.v}"
+
+fn tagged[T: Spawnable](x: T) -> str:
+    return x.tag()
+
+fn apply_tag(f: fn(Node) -> str, x: Node) -> str:
+    return f(x)
+
+test fn a_generic_that_never_constructs_stays_a_function_value():
+    assert tagged(Node(2)) == "node2"
+    g := tagged
+    assert apply_tag(tagged, Node(3)) == "node3"
+
+test fn a_generic_that_never_constructs_can_be_a_spawn_or_defer_target():
+    seen := [1]
+    fn body():
+        defer tagged(Node(1))
+        seen.push(2)
+    body()
+    parallel:
+        spawn tagged(Node(2))
+    assert seen == [1, 2]

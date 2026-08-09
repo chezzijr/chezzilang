@@ -32,11 +32,14 @@ pub type KeywordKey = (usize, Span, usize, Span);
 pub type KeywordTable = HashMap<KeywordKey, Vec<usize>>;
 
 /// M24 — the [`WitnessTable::calls`] key. Same four components as [`KeywordKey`] and built by the
-/// same rules (see [`crate::checker::witness_key`]), except the last component is the CALLEE span
-/// (`reset` in `reset(c)`) rather than a first-named-arg span: a witness call is always a direct
-/// by-name call, so the callee identifier token is a distinct source node per call and therefore
-/// unique within one lexed source — which the shared primary-expression call span is NOT (a chained
-/// postfix `f(a)(b)` gives every link the same span).
+/// same rules (see [`crate::checker::witness_key`]), except the last component is the CALL NODE's
+/// span rather than a first-named-arg span.
+///
+/// That span is shared by every link of a chained postfix expression (`parse_postfix` gives each link
+/// the primary expression's span), so it is unique per call only because of what a witness call IS: a
+/// direct by-name call whose callee is a bare `Ident`, i.e. the HEAD link of its chain. At most one
+/// link of any chain can be a witness call, so two witness calls can never share the span — and the
+/// checker's record site and the compiler's lookup both key on the same node.
 pub type WitnessKey = (usize, Span, usize, Span);
 
 /// M24 — where ONE witness argument at a call site comes from. Task 1 only ever produces

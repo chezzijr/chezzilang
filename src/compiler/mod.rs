@@ -4824,15 +4824,8 @@ impl Compiler {
                     span,
                 });
             };
-            if !named.is_empty() {
-                return Err(CompileError {
-                    message: format!(
-                        "keyword arguments are not supported yet on '{fname}' (it takes a \
-                         static-protocol bound); pass its arguments positionally"
-                    ),
-                    span,
-                });
-            }
+            // `named` needs no handling here: desugar has already normalized every keyword argument
+            // of a by-name call into its positional slot, so `args` is the full argument list.
             self.compile_expr(fc, callee)?;
             self.compile_args(fc, args)?;
             for crate::checker::WitnessSrc::Concrete(k) in &srcs {

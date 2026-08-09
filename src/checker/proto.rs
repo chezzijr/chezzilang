@@ -1888,6 +1888,7 @@ impl Checker {
                 // Instance-method requirements keep `is_static == false`, so this is inert for them.
                 is_static: msig.is_static,
                 doc: None,
+                witness_params: Vec::new(),
                 variadic: None,
             };
             let msig = &want;
@@ -2978,8 +2979,8 @@ impl Checker {
         // M24 — half two of the static-witness contract, recorded LAST: `recover_return_only_params`
         // above can still bind a param that `enforce_bounds` never saw, so anything earlier would
         // read a param as un-determined that the call actually pins.
-        let wparams = self.witness_type_params(&sig.type_params);
-        if !wparams.is_empty() {
+        if !sig.witness_params.is_empty() {
+            let wparams = sig.witness_params.clone();
             self.record_witness_call(name, &wparams, &subst_map, local_call, span);
         }
         subst(&sig.ret, &subst_map)

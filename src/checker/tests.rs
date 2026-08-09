@@ -20666,6 +20666,66 @@ fn witness_fn_as_function_value_rejected() {
         ),
         needle,
     );
+    // …and the TURBOFISH value spelling (`reset[Counter]`), which reaches a different value path
+    // (`infer_index`'s Scope-B pin). Pinning `T` in the TYPE does not recover the witness — the pin
+    // is checker-only and the runtime value is the same erased function — so it is refused too.
+    // Both spellings: a binding and a HOF argument.
+    entry_rejects(
+        &format!("{head}fn main():\n    g := reset[Counter]\n    print(1)\nmain()\n"),
+        needle,
+    );
+    entry_rejects(
+        &format!(
+            "{head}fn apply(f: fn(Counter) -> Counter, c: Counter) -> Counter:\n    return f(c)\nfn main():\n    print(apply(reset[Counter], Counter(3)).n)\nmain()\n"
+        ),
+        needle,
+    );
+    // …and the CROSS-MODULE read (`lib.empty`), which reaches the module-member path. A
+    // return-only-generic makes this reachable: nothing downstream rejects the erased `Ty::Func`.
+    files_reject(
+        &[
+            (
+                "lib.chz",
+                "protocol Default:\n    fn default() -> Self\nstruct Counter:\n    n: int\n    fn default() -> Counter:\n        return Counter(0)\nfn empty[T: Default]() -> T:\n    return T.default()\n",
+            ),
+            (
+                "main.chz",
+                "import lib\nfn main():\n    g := lib.empty\n    print(1)\nmain()\n",
+            ),
+        ],
+        needle,
+    );
+}
+
+/// A witness parameter is ARITY, so it is charged only to a fn that actually calls `T.static()`. A
+/// generic whose bound merely CONTAINS a static requirement but whose body never constructs keeps
+/// every position a plain generic fn has — all of them legal before M24.
+#[test]
+fn witness_only_charged_when_the_body_uses_it_ok() {
+    // `Spawnable` has a static requirement, but `label` only calls an INSTANCE method: value
+    // position (binding + HOF argument), `spawn`/`defer` target, and a same-module call all stay.
+    let head = "protocol Spawnable:\n    fn make() -> Self\n    fn tag(self) -> str\nstruct N:\n    v: int\n    fn make() -> N:\n        return N(0)\n    fn tag(self) -> str:\n        return \"n\"\nfn label[T: Spawnable](x: T) -> str:\n    return x.tag()\n";
+    entry_ok(&format!(
+        "{head}fn apply(f: fn(N) -> str, x: N) -> str:\n    return f(x)\nfn main():\n    g := label\n    print(apply(label, N(2)))\n    print(label[N](N(3)))\nmain()\n"
+    ));
+    entry_ok(&format!(
+        "{head}fn main():\n    defer label(N(1))\n    parallel:\n        spawn label(N(2))\nmain()\n"
+    ));
+    // …and it is callable ACROSS a module boundary, which needs no witness threading.
+    files_ok(&[
+        (
+            "lib.chz",
+            "protocol Spawnable:\n    fn make() -> Self\n    fn tag(self) -> str\nstruct N:\n    v: int\n    fn make() -> N:\n        return N(0)\n    fn tag(self) -> str:\n        return \"n\"\nfn label[T: Spawnable](x: T) -> str:\n    return x.tag()\n",
+        ),
+        (
+            "main.chz",
+            "import lib\nfn main():\n    print(lib.label(lib.N(2)))\nmain()\n",
+        ),
+    ]);
+    // The same for the RESERVED `Convert[S]` bound with a body that never converts.
+    entry_ok(
+        "struct Port:\n    v: int\n    fn convert(x: int) -> Port:\n        return Port(x + 1)\nfn wrap[T: Convert[int]](seed: T, n: int) -> T:\n    return seed\nfn main():\n    g := wrap\n    print(wrap(Port(1), 2).v)\nmain()\n",
+    );
 }
 
 /// PERMANENT: if the call site does not pin `T` there is no key to pass. (`empty[Counter]()` and the

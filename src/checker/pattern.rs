@@ -1847,6 +1847,35 @@ impl Checker {
         out
     }
 
+    /// M24 — PERMANENT WALL, not a v1 limit: a generic fn that takes hidden witness arguments
+    /// (`wparams`, from [`FnSig::witness_params`]) may not become a function VALUE. A `Ty::Func`
+    /// erases which declaration it came from, so no witness can ever be recovered at the eventual
+    /// indirect call — the value would be called one argument short. Rejected at the READ, where the
+    /// name is still known. Every path that can hand back a `Ty::Func` for a named fn routes through
+    /// here: the bare read (`g := reset`), the turbofish read (`reset[Counter]`, incl. as a HOF
+    /// argument), and a cross-module member read (`lib.reset`). Returns `true` if it rejected.
+    pub(super) fn reject_witness_fn_value(
+        &mut self,
+        name: &str,
+        wparams: &[String],
+        span: Span,
+    ) -> bool {
+        if wparams.is_empty() {
+            return false;
+        }
+        self.error(
+            span,
+            format!(
+                "'{name}' cannot be used as a function value: its bound on {} requires a static \
+                 protocol method, which needs the concrete type — a function value erases it. \
+                 Call '{name}' directly, or pass a factory closure instead (e.g. \
+                 `fn make[T](mk: fn() -> T) -> T`)",
+                wparams.join(", ")
+            ),
+        );
+        true
+    }
+
     pub(super) fn infer_ident(&mut self, name: &str, span: Span) -> Ty {
         if let Some(ty) = self.lookup(name) {
             // A function-local binding captured by an enclosing `spawn:` task crosses the airlock as
@@ -1870,23 +1899,10 @@ impl Checker {
             let params = sig.params.clone();
             let ret = sig.ret.clone();
             let labels = sig.labels.clone();
-            // M24 — PERMANENT WALL, not a v1 limit: a generic fn whose bound carries a STATIC
-            // protocol requirement needs a hidden witness argument, and a `Ty::Func` erases which
-            // declaration it came from — so no witness can ever be recovered at the eventual
-            // indirect call. Reject at the READ (`g := reset`), where the name is still known, both
-            // for the Scope-A pin below and for the rigid fallback after it.
-            let wparams = self.witness_type_params(&type_params);
-            if !wparams.is_empty() {
-                self.error(
-                    span,
-                    format!(
-                        "'{name}' cannot be used as a function value: its bound on {} requires a static \
-                         protocol method, which needs the concrete type — a function value erases it. \
-                         Call '{name}' directly, or pass a factory closure instead (e.g. \
-                         `fn make[T](mk: fn() -> T) -> T`)",
-                        wparams.join(", ")
-                    ),
-                );
+            // M24 — the fn-as-value wall, at the BARE read (`g := reset`): both for the Scope-A pin
+            // below and for the rigid fallback after it.
+            let wparams = sig.witness_params.clone();
+            if self.reject_witness_fn_value(name, &wparams, span) {
                 return Ty::Unknown;
             }
             // Scope A — a GENERIC fn referenced in value position (a bare `Name`, NOT the callee of a
@@ -2787,6 +2803,19 @@ impl Checker {
                 Ty::Unknown
             }
             Ty::Module(mname) => {
+                // M24 — the fn-as-value wall on the cross-module read (`g := lib.empty`): the member
+                // path below hands back a plain `Ty::Func`, which erases the witness exactly like a
+                // same-module read does.
+                let wparams = self
+                    .imported_modules
+                    .get(mname)
+                    .and_then(|id| self.module_sigs.get(id))
+                    .and_then(|sig| sig.functions.get(name))
+                    .map(|f| f.witness_params.clone())
+                    .unwrap_or_default();
+                if self.reject_witness_fn_value(name, &wparams, obj.span) {
+                    return Ty::Unknown;
+                }
                 let member = self
                     .imported_modules
                     .get(mname)
@@ -2838,15 +2867,22 @@ impl Checker {
                     .get(name)
                     .is_some_and(|s| !s.type_params.is_empty());
             if is_local_generic && let Some(ty_expr) = self.index_as_type(index) {
-                let (type_params, params, ret, labels) = {
+                let (type_params, params, ret, labels, wparams) = {
                     let s = &self.functions[name];
                     (
                         s.type_params.clone(),
                         s.params.clone(),
                         s.ret.clone(),
                         s.labels.clone(),
+                        s.witness_params.clone(),
                     )
                 };
+                // M24 — the fn-as-value wall again: pinning the type params does NOT recover the
+                // witness (the pin is checker-only, the runtime value is the same erased function),
+                // so `reset[Counter]` is as unlowerable as a bare `reset`.
+                if self.reject_witness_fn_value(name, &wparams, obj.span) {
+                    return Ty::Unknown;
+                }
                 let targ = self.resolve_type(&ty_expr, index.span);
                 // `seed_targs` arity-checks the single type arg against the param count and emits the
                 // clean "'name' expects N type argument(s), found 1" error on a mismatch.

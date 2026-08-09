@@ -522,6 +522,16 @@ struct FnSig {
     /// native/synthetic sigs). Purely informational — surfaced on LSP hover, never affects checking
     /// (excluded from `fn_sig_eq`). Covers free fns AND methods/static methods (all reuse `FnSig`).
     doc: Option<String>,
+    /// M24 — the type params this fn takes a hidden trailing `$w:T` witness argument for, in
+    /// declaration order (empty for everything else, which is nearly every signature). Computed ONCE
+    /// by [`Checker::witness_params_of`] at the signature hoist — where the declaration BODY is still
+    /// available — and read from here by every consumer (the body's `witness_scope`, the
+    /// [`WitnessTable::fns`] entry the compiler lowers, the fn-as-value wall, the `spawn`/`defer`
+    /// target rejection, and the per-call-site record). Crosses the module boundary inside
+    /// [`ModuleSig`]. Excluded from `fn_sig_eq` (a lowering detail, not type identity). On a METHOD's
+    /// sig it is inert — slice A threads witnesses for module-level FREE fns only, and every consumer
+    /// reaches this field through a free-fn table.
+    witness_params: Vec<String>,
     /// `Some(i)` iff parameter `i` is variadic (`fn f(...xs: T)`) — its slot type is the collapsed
     /// `List[T]`, and everything after index `i` is keyword-only. Surface-only: the desugar pass
     /// collapses surplus positionals into a `List` literal before checking, so this drives arity /
@@ -543,6 +553,7 @@ impl FnSig {
             min_params,
             is_static: false,
             doc: None,
+            witness_params: Vec::new(),
             variadic: None,
         }
     }
@@ -560,6 +571,7 @@ impl FnSig {
             min_params,
             is_static: false,
             doc: None,
+            witness_params: Vec::new(),
             variadic: None,
         }
     }
@@ -891,18 +903,19 @@ pub fn keyword_key(
 }
 
 /// M24 — build the [`WitnessKey`] for a call site that needs static-witness arguments: `(module,
-/// fragment-context span, fragment ordinal, CALLEE span)`. The checker's record site and the
-/// compiler's lookup site call this one helper so they can never disagree on the key. `callee_span`
-/// is the callee identifier token (`reset` in `reset(c)`), NOT the call node's span — see
-/// [`WitnessKey`] for why. `frag_ctx`/`frag_ord` are the same interpolation discriminators
-/// [`keyword_key`] uses.
+/// fragment-context span, fragment ordinal, CALL-NODE span)`. The checker's record site and the
+/// compiler's lookup site call this one helper so they can never disagree on the key. `call_span` is
+/// the call expression's own span — which a chained postfix shares across its links, and is unique
+/// here only because a witness call is always the HEAD link (a bare `Ident` callee); see
+/// [`WitnessKey`]. `frag_ctx`/`frag_ord` are the same interpolation discriminators [`keyword_key`]
+/// uses.
 pub fn witness_key(
     module_idx: usize,
     frag_ctx: Span,
     frag_ord: usize,
-    callee_span: Span,
+    call_span: Span,
 ) -> crate::checker::WitnessKey {
-    (module_idx, frag_ctx, frag_ord, callee_span)
+    (module_idx, frag_ctx, frag_ord, call_span)
 }
 
 impl Checker {

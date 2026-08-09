@@ -161,6 +161,9 @@ impl Checker {
             where_bounds: receiver_bounds,
             is_static,
             doc: decl.doc.clone(),
+            // M24 — computed HERE (the one site with the declaration's body in hand) so every
+            // consumer reads this one answer instead of re-deriving it.
+            witness_params: self.witness_params_of(decl),
             variadic: decl.params.iter().position(|p| p.is_variadic),
         }
     }
@@ -363,7 +366,7 @@ impl Checker {
         // `fn reset[T: Default](old: T): return T.default()` would infer its return as `Unknown`
         // here (the pass-1 error is truncated), and that residual Unknown is a type-check bypass.
         let wparams = if self_ty.is_none() && !saved_in_fn {
-            self.witness_type_params(&decl.type_params)
+            self.witness_params_of(decl)
         } else {
             Vec::new()
         };
@@ -862,21 +865,66 @@ impl Checker {
         required.values().any(|s| s.is_static)
     }
 
-    /// M24 — the type-param names of `tps` that need a hidden trailing witness argument: those with
-    /// at least one bound whose protocol carries a STATIC requirement (directly or through an embed).
+    /// M24 — the type-param names of `decl` that need a hidden trailing witness argument. TWO
+    /// conditions, both necessary:
+    /// * the param has at least one bound (declared or `where`) whose protocol carries a STATIC
+    ///   requirement, directly or through an embed — only such a bound has anything to witness; AND
+    /// * the BODY mentions the param's name, i.e. it can actually contain a `T.static()` call.
+    ///
+    /// The second condition is what keeps a generic that never constructs whole: `fn label[T:
+    /// Spawnable](x: T) -> str: return x.tag()` needs no witness, so it keeps its value position, its
+    /// cross-module call sites and its `spawn`/`defer` target position — all legal before M24. A
+    /// witness parameter is arity, so it must be paid for only where it is used.
+    ///
+    /// The body scan is deliberately COARSE (any mention of the bare name `T` in expression position,
+    /// not just `T.m(...)`): over-inclusion can only cost a fn positions it would lose anyway — a body
+    /// mentioning `T` other than as `T.m(...)` does not compile — while under-inclusion would mean a
+    /// body whose `T.static()` cannot lower. Task 2 (forwarding a witness into a generic callee,
+    /// `f[T](x)`) will need exactly those extra mentions PLUS a within-module fixpoint over the call
+    /// graph, which is deliberately not built here.
+    ///
     /// Declaration order is preserved — it IS the witness-parameter order, so the checker's record
     /// site, the compiler's `$w:T` locals, and the call site's pushed arguments all agree.
     ///
-    /// This is the ONE place the "does this fn need witnesses?" question is answered; the compiler
-    /// never asks it (it cannot — protocol identity resolves through imports/aliases/embeds).
-    pub(super) fn witness_type_params(&self, tps: &[TypeParam]) -> Vec<String> {
-        tps.iter()
+    /// This is the ONE place the "does this fn need witnesses?" question is answered: the result is
+    /// stored on [`FnSig::witness_params`] and every consumer reads it from there. The compiler never
+    /// asks it (it cannot — protocol identity resolves through imports/aliases/embeds).
+    pub(super) fn witness_params_of(&self, decl: &FnDecl) -> Vec<String> {
+        let cands: Vec<String> = decl
+            .type_params
+            .iter()
             .filter(|tp| {
+                // A free fn's `where T: P` is merged into `type_params` by `fn_sig`, but this runs
+                // BEFORE/independently of that merge, so consider both spellings.
+                let wheres = decl
+                    .where_bounds
+                    .iter()
+                    .filter(|w| w.name == tp.name)
+                    .flat_map(|w| w.bounds.iter());
                 tp.bounds
                     .iter()
+                    .chain(wheres)
                     .any(|b| self.protocol_has_static_method(&b.name))
             })
             .map(|tp| tp.name.clone())
+            .collect();
+        if cands.is_empty() {
+            return cands; // the overwhelmingly common case — no body walk at all
+        }
+        // Reuse the whole-body free-name walker (the same one the nested-fn capture record uses): it
+        // is exhaustive over statements and expressions and descends into closures, nested fns,
+        // `recover:` blocks and string interpolation, so a `T.default()` anywhere in the body is seen.
+        // Nothing is subtracted as "bound" — a type param and a value binding never share a name, and
+        // a stray shadow would only over-include.
+        let mut mentioned = std::collections::HashSet::new();
+        crate::compiler::free_names_block(
+            &decl.body,
+            &std::collections::HashSet::new(),
+            &mut mentioned,
+        );
+        cands
+            .into_iter()
+            .filter(|t| mentioned.contains(t))
             .collect()
     }
 
@@ -894,10 +942,9 @@ impl Checker {
         if self.lookup(fname).is_some() {
             return; // a local shadow — a plain value call, not this fn
         }
-        let Some(tps) = self.functions.get(fname).map(|s| s.type_params.clone()) else {
+        let Some(w) = self.functions.get(fname).map(|s| s.witness_params.clone()) else {
             return;
         };
-        let w = self.witness_type_params(&tps);
         if w.is_empty() {
             return;
         }
@@ -3354,14 +3401,14 @@ impl Checker {
         // `T.static()` inside them is rejected rather than mis-lowered.
         let is_module_level_free_fn = self_ty.is_none() && !saved_in_fn;
         let wparams = if is_module_level_free_fn {
-            self.witness_type_params(&sig.type_params)
+            sig.witness_params.clone()
         } else {
             Vec::new()
         };
-        // Half one of the contract: which fns need hidden trailing witness params. Recorded from the
-        // DECLARATION alone (not from whether the body uses `T.static()`), so a fn's arity is fixed
-        // by its signature. Nested fns are never recorded, so a nested fn sharing a top-level fn's
-        // name cannot inherit its arity.
+        // Half one of the contract: which fns need hidden trailing witness params — read off the
+        // signature, which computed it once at the hoist ([`Checker::witness_params_of`]), so this
+        // arity agrees with every other consumer by construction. Nested fns are never recorded, so a
+        // nested fn sharing a top-level fn's name cannot inherit its arity.
         if self.harvest_keywords && is_module_level_free_fn && !wparams.is_empty() {
             self.witnesses
                 .fns
