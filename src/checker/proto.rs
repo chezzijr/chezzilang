@@ -2719,6 +2719,25 @@ impl Checker {
         }
     }
 
+    /// M24 Task 5 — is `t` a type parameter of the type whose body we are checking (`struct Bx[T]`),
+    /// rather than one the MEMBER declares? Such a param can never be witnessed by this mechanism
+    /// (see the diagnostic in [`Self::infer_witness_static_call`]). Returns the host type's display
+    /// name. `None` outside a method body, or when the enclosing type does not declare `t`.
+    pub(super) fn enclosing_type_declaring(&self, t: &str) -> Option<String> {
+        let key = match self.current_self_ty.as_ref()? {
+            Ty::Struct(k, _) | Ty::Enum(k, _) | Ty::NewType(k, _) => k,
+            _ => return None,
+        };
+        let tps = self
+            .struct_shape(key)
+            .map(|s| &s.type_params)
+            .or_else(|| self.enum_type_params_of(key))
+            .or_else(|| self.newtype_type_params_of(key))?;
+        tps.iter()
+            .any(|tp| tp.name == t)
+            .then(|| crate::compiler::bare_display(key))
+    }
+
     /// M24 — `T.method(args)` where `T` is an in-scope generic type PARAMETER: the static-witness
     /// call. The instance twin is `infer_method_call`'s `Ty::Param` arm; this one differs in that
     /// there is no receiver (every `msig.params` slot is a real argument) and `Self` maps to
@@ -2754,10 +2773,23 @@ impl Checker {
         };
         if !self.witness_scope.iter().any(|w| w == tname) {
             self.infer_all(args);
+            // A type param declared by the ENCLOSING TYPE (`struct Bx[T: Default]`) is a different
+            // mechanism, not a missing case: its witness would have to be stored in every `Bx` VALUE
+            // (one per instance), where this one lives in the calling frame. Say so, and name the
+            // member-level form — which Task 5 does support — as the way out.
+            if let Some(host) = self.enclosing_type_declaring(tname) {
+                self.error(
+                    span,
+                    format!(
+                        "`{tname}.{method}(...)`: '{tname}' is a type parameter of the enclosing type '{host}', which carries no hidden type witness — the concrete type is erased once a '{host}' value exists, so only a value could hold it. Declare the type parameter on the MEMBER instead (`fn {method}_of[{tname}: <bound>](self, ...)`, whose witness rides on the call), or pass a factory function (a `fn(...) -> {tname}` parameter/field)"
+                    ),
+                );
+                return Ty::Unknown;
+            }
             self.error(
                 span,
                 format!(
-                    "`{tname}.{method}(...)` can only be called directly in the body of the module-level generic function that declares '{tname}' — not inside a closure, a `spawn:`/`defer:` block, a nested `fn`, or a method, because the hidden type witness for '{tname}' does not cross those boundaries. Call it in the enclosing function body and pass the value in"
+                    "`{tname}.{method}(...)` can only be called directly in the body of the function that declares '{tname}' — not inside a closure, a `spawn:`/`defer:` block, or a nested `fn`, because the hidden type witness for '{tname}' does not cross those boundaries. Call it in the enclosing function body and pass the value in"
                 ),
             );
             return Ty::Unknown;
@@ -2791,13 +2823,36 @@ impl Checker {
     /// boundary inside its `ModuleSig`. So a `from`-imported callee (`reset(c)`) and a qualified one
     /// (`lib.reset(c)`) record exactly like a local one. What is NOT recorded here — a `defer`/`spawn`
     /// target — is walled by [`Self::reject_witness_spawn_defer_target`], in every spelling.
-    fn record_witness_call(
+    ///
+    /// `key_span` is the [`crate::checker::witness_key_span`] of this call site (the member-name
+    /// token for a `Field` callee, the call node otherwise) and is a TABLE KEY only; every
+    /// diagnostic anchors on `span`, the call node — the two must never be conflated (`49bd9f80`).
+    pub(super) fn record_witness_call(
         &mut self,
         name: &str,
         wparams: &[String],
         sub: &HashMap<String, Ty>,
+        key_span: Span,
         span: Span,
     ) {
+        // A `spawn`/`defer` TARGET lowers at its own emit site (`Op::SpawnCall`/`SpawnMethod`/
+        // `DeferCall`/`DeferMethod`), none of which push a hidden argument — so the call is refused
+        // rather than lowered one `argc` short. Matched on the call site's own KEY span, which is
+        // unique per call node, so only the target itself is refused: an ARGUMENT that is a witness
+        // call (`spawn f(reset(c))`) evaluates eagerly in this frame and stays legal.
+        if let Some((target, kw)) = self.witness_indirect_target
+            && target == key_span
+        {
+            self.error(
+                span,
+                format!(
+                    "'{name}' takes a static-protocol bound ({}), so it cannot be the target of \
+                     `{kw}` yet — call it eagerly and `{kw}` the result, or wrap the call in a closure",
+                    wparams.join(", ")
+                ),
+            );
+            return;
+        }
         let mut srcs = Vec::with_capacity(wparams.len());
         for w in wparams {
             // Presence in `sub` is NOT enough: `enforce_bounds` silently SKIPS a param missing from
@@ -2838,11 +2893,11 @@ impl Checker {
                             format!(
                                 "type parameter '{w}' of '{name}' is bound to {p}, which is still \
                                  abstract here, and the hidden type witness for '{p}' is not \
-                                 reachable at this call site — only the body of the module-level \
-                                 generic function that declares '{p}' carries it, and it does not \
-                                 cross a closure, a `spawn:`/`defer:` block, a nested `fn`, or a \
-                                 method (a method's type param never has one at all). Call \
-                                 '{name}' with a concrete type, or take a factory parameter \
+                                 reachable at this call site — only the body that DECLARES '{p}' \
+                                 carries one, and only when that body itself constructs through \
+                                 '{p}' or forwards into a module-level generic function; it never \
+                                 crosses a closure, a `spawn:`/`defer:` block or a nested `fn`. \
+                                 Call '{name}' with a concrete type, or take a factory parameter \
                                  (`fn(...) -> {p}`) and call that instead"
                             ),
                         );
@@ -2869,7 +2924,7 @@ impl Checker {
                     self.graph_module_idx,
                     self.kw_frag_ctx,
                     self.kw_frag_ord,
-                    span,
+                    key_span,
                 ),
                 srcs,
             );
@@ -2880,12 +2935,16 @@ impl Checker {
     /// enforce the declared bounds, and substitute into the return type. Shared by the bare callee
     /// (local or `from`-imported) and the module-qualified one (`m.f(...)`) — M24's witness record is
     /// keyed by the CALLING module either way, so the spelling makes no difference here (Task 3).
+    /// `key_span` is this call site's [`crate::checker::witness_key_span`]: the call node's own span
+    /// for the bare spelling, the member-name token for the module-qualified one (`lib.reset(c)`).
+    #[allow(clippy::too_many_arguments)] // the callee's sig pieces + call args + both spans + hint
     pub(super) fn infer_generic_call(
         &mut self,
         name: &str,
         sig: &FnSig,
         args: &[Expr],
         targs: &[Ty],
+        key_span: Span,
         span: Span,
         hint: Option<&Ty>,
     ) -> Ty {
@@ -2984,7 +3043,7 @@ impl Checker {
         // read a param as un-determined that the call actually pins.
         if !sig.witness_params.is_empty() {
             let wparams = sig.witness_params.clone();
-            self.record_witness_call(name, &wparams, &subst_map, span);
+            self.record_witness_call(name, &wparams, &subst_map, key_span, span);
         }
         subst(&sig.ret, &subst_map)
     }
@@ -2994,6 +3053,11 @@ impl Checker {
     /// method's own `[U]` params remain free; `params[0]` is the receiver (bound from `obj`, not an
     /// explicit arg). `targs` are the EXPLICIT member-level turbofish (`obj.method[A, B](...)`): they
     /// seed the `[U]` params first; the rest are inferred positionally. Mirrors `infer_generic_call`.
+    ///
+    /// M24 Task 5 — `wparams` are the method's [`FnSig::witness_params`] (empty for every native
+    /// method and for a user method that never constructs through a bound), and `key_span` is this
+    /// call site's [`crate::checker::witness_key_span`] — the method-name token, so two links of one
+    /// postfix chain cannot collide on the shared call span.
     #[allow(clippy::too_many_arguments)] // the method's resolved signature pieces + receiver + targs + call
     pub(super) fn infer_generic_method(
         &mut self,
@@ -3001,9 +3065,11 @@ impl Checker {
         params: &[Ty],
         ret: &Ty,
         mtps: &[TypeParam],
+        wparams: &[String],
         recv_ty: &Ty,
         targs: &[Ty],
         args: &[Expr],
+        key_span: Span,
         span: Span,
     ) -> Ty {
         // The first parameter is the receiver (bound from `obj`). A method with NO params has no
@@ -3092,6 +3158,14 @@ impl Checker {
         self.recover_return_only_params(
             method, expected, &arg_tys, args, params, mtps, &mut mmap, span, true,
         );
+        // M24 Task 5 — half two of the static-witness contract for a MEMBER-declared type param,
+        // recorded LAST for the same reason the free-fn path does it last (`recover_return_only_params`
+        // can still bind a param nothing else saw). The receiver's own type args are already
+        // substituted into `params`/`ret` by the caller, so `mmap` holds only the METHOD's params —
+        // which is exactly the set that can be witnessed.
+        if !wparams.is_empty() {
+            self.record_witness_call(method, wparams, &mmap, key_span, span);
+        }
         subst(ret, &mmap)
     }
 

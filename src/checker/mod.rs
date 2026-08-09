@@ -918,6 +918,24 @@ pub fn witness_key(
     (module_idx, frag_ctx, frag_ord, call_span)
 }
 
+/// M24 Task 5 — the span component of a call site's [`WitnessKey`], from the CALLEE and the call
+/// node's span. ONE derivation, shared by the checker's record sites and the compiler's lookups.
+///
+/// A bare-`Ident` callee (`reset(c)`, the free-fn form) keys on the call node's own span, which is
+/// unique because such a call is always the HEAD link of its postfix chain. A member callee — an
+/// instance method (`h.make(c)`), a static method (`Holder.build(c)`), a module member
+/// (`lib.reset(c)`) — is NOT: `parse_postfix` gives every link of `h.make(a).make(b)` the primary
+/// expression's span, so two witness calls in one chain would collide on it and the second would
+/// silently take the first's witness. The member-name TOKEN's span (`name_span`) is a distinct
+/// source node per link, so it discriminates them. It is a KEY ONLY — diagnostics still anchor on
+/// the call span (the trap `49bd9f80` closed).
+pub fn witness_key_span(callee: &Expr, call_span: Span) -> Span {
+    match &callee.kind {
+        ExprKind::Field { name_span, .. } => *name_span,
+        _ => call_span,
+    }
+}
+
 impl Checker {
     /// The shared deps-first module-checking pass behind both [`check_graph`] and
     /// [`resolve_extern_signatures`]. When `harvest_externs` is set, gathers every struct's AST field
@@ -1696,12 +1714,21 @@ struct Checker {
     /// set; consumed verbatim by the compiler. See [`WitnessTable`].
     witnesses: WitnessTable,
     /// M24 — the witness TYPE-PARAM names whose `$w:T` local is DIRECTLY reachable at the statement
-    /// currently being checked: the enclosing MODULE-LEVEL free generic fn's witness params, and
-    /// empty everywhere else. Cleared (save/restore) at every boundary that compiles to its own
-    /// proto and would therefore not see that local — a closure body, a `spawn:` / `defer:` block,
-    /// a nested `fn`, and any method body. `T.static_method()` is accepted ONLY when `T` is in here,
-    /// which is exactly what the compiler can lower.
+    /// currently being checked: the witness params of the enclosing MODULE-LEVEL free fn or of the
+    /// enclosing MEMBER (Task 5 — a method/static method declares its own `[T]`, and the hidden
+    /// argument rides on its frame the same way), and empty everywhere else. Cleared (save/restore)
+    /// at every boundary that compiles to its own proto and would therefore not see that local — a
+    /// closure body, a `spawn:` / `defer:` block, a nested `fn`. `T.static_method()` is accepted ONLY
+    /// when `T` is in here, which is exactly what the compiler can lower. A type param of the
+    /// enclosing TYPE (`struct Bx[T]`) is never in here: its witness would have to live in the
+    /// instance, which is a different mechanism.
     witness_scope: Vec<String>,
+    /// M24 Task 5 — set while type-checking a `spawn <call>` / `defer <call>` TARGET: the target
+    /// call's [`witness_key_span`] and the keyword. `record_witness_call` refuses a call whose key
+    /// span matches, because both statements lower at emit sites that push no hidden argument. The
+    /// key span (not the call span) is the discriminator so that an ARGUMENT which is itself a
+    /// witness call — evaluated eagerly in this frame — stays legal.
+    witness_indirect_target: Option<(Span, &'static str)>,
     /// The CURRENT module's graph index, maintained across every graph pass (set per module in
     /// `run_graph_pass`), so a recorded keyword-call permutation / witness entry is keyed under the
     /// SAME index the backends derive. `0` for a lone `check` (single synthetic module).
@@ -2606,6 +2633,14 @@ fn method_matches(proto: &FnSig, actual: &FnSig, self_ty: &Ty) -> bool {
     // it (and vice-versa). Every non-static protocol requirement keeps `is_static == false`, so this is a
     // no-op for every existing instance-method protocol.
     if proto.is_static != actual.is_static {
+        return false;
+    }
+    // M24 Task 5 — a method that takes hidden witness arguments can never WITNESS a protocol
+    // requirement. A protocol method has no type parameters of its own (the parser refuses them), so
+    // every dispatch through the requirement — an existential value call, `T.static()` through a
+    // bound (`Op::CallStaticDyn`) — pushes the declared arity only, and the hidden argument would be
+    // missing. Refusing satisfaction here keeps that a type error instead of a runtime arity fault.
+    if !actual.witness_params.is_empty() {
         return false;
     }
     let map = HashMap::from([("Self".to_string(), self_ty.clone())]);

@@ -1144,6 +1144,7 @@ impl Compiler {
                 let mut suite_tests: Vec<(String, ProtoId)> = Vec::new();
                 let mut hooks: HashMap<String, ProtoId> = HashMap::new();
                 for m in methods {
+                    self.pending_witnesses = self.member_witnesses(module_idx, &key, &m.name);
                     let pid = self.compile_fn(m, false)?;
                     let def = self.program.structs.get_mut(&key).expect("hoisted");
                     def.module_idx = module_idx;
@@ -1198,6 +1199,7 @@ impl Compiler {
                 );
                 let mut compiled: HashMap<String, ProtoId> = HashMap::new();
                 for m in methods {
+                    self.pending_witnesses = self.member_witnesses(module_idx, &key, &m.name);
                     let pid = self.compile_fn(m, false)?;
                     compiled.insert(m.name.clone(), pid);
                     if binds_eq_hook(m, type_params) {
@@ -1266,6 +1268,7 @@ impl Compiler {
                 );
                 let mut compiled: HashMap<String, ProtoId> = HashMap::new();
                 for m in methods {
+                    self.pending_witnesses = self.member_witnesses(module_idx, &key, &m.name);
                     let pid = self.compile_fn(m, false)?;
                     compiled.insert(m.name.clone(), pid);
                 }
@@ -4283,23 +4286,53 @@ impl Compiler {
         Ok(())
     }
 
+    /// M24 Task 5 — the hidden witness params a MEMBER's proto carries, from the checker's `fns`
+    /// table. Keyed `<type key>.<method>` under the DECLARING module, which cannot collide with a
+    /// free fn's entry (no fn name contains a `.`).
+    fn member_witnesses(&self, module_idx: usize, type_key: &str, method: &str) -> Vec<String> {
+        self.witnesses
+            .fns
+            .get(&(module_idx, format!("{type_key}.{method}")))
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// M24 Task 5 — the witness arguments recorded for a MEMBER call site (`h.make(c)`,
+    /// `Holder.build(c)`, `lib.Type.build(c)`). Keyed on the member-name TOKEN
+    /// ([`crate::checker::witness_key_span`]), which is unique per link of a postfix chain — the call
+    /// span is not.
+    fn member_witness_srcs(&self, name_span: Span) -> Option<&Vec<crate::checker::WitnessSrc>> {
+        self.witnesses.calls.get(&crate::checker::witness_key(
+            self.current_module_idx,
+            self.kw_frag_ctx,
+            self.kw_frag_ord,
+            name_span,
+        ))
+    }
+
     /// Push `args` and emit `Op::CallStatic` for a `Type.method(args)` static call. The six call
     /// sites differ only in how they derive `type_key` (bare / qualified / turbofish); this collapses
-    /// the identical push-then-emit tail.
+    /// the identical push-then-emit tail — including the hidden witness arguments of a generic static
+    /// method (M24 Task 5), which ride LAST so no declared slot index moves.
     fn emit_call_static(
         &mut self,
         fc: &mut FnComp,
         type_key: String,
         name: &str,
         args: &[Expr],
+        name_span: Span,
         span: Span,
     ) -> Result<(), CompileError> {
         self.compile_args(fc, args)?;
+        let w = match self.member_witness_srcs(name_span).cloned() {
+            Some(srcs) => self.emit_witness_args(fc, &srcs, name, span)?,
+            None => 0,
+        };
         fc.emit(
             Op::CallStatic {
                 type_key,
                 method: name.to_string(),
-                argc: args.len(),
+                argc: args.len() + w,
             },
             span,
         );
@@ -4323,9 +4356,16 @@ impl Compiler {
             ExprKind::Field { name, .. } => name,
             _ => return Ok(()),
         };
-        // `callee_takes_witnesses` does the rest of the shape work (unbound name, module bind,
-        // declaring module), so a local shadow or a plain method call answers `false` here.
-        if self.callee_takes_witnesses(fc, callee, fname) {
+        // M24 Task 5 — a MEMBER target (`spawn h.make(c)`, `defer Holder.build(c)`) lowers as
+        // `Op::SpawnMethod`/`DeferMethod`, which push no hidden argument either. The compiler cannot
+        // type the receiver, so the signal is the checker's own record at this call site: an entry
+        // here means a witness is required and this emit site would drop it. The checker refuses the
+        // shape first (with a diagnostic that names the target); this is the loud backstop.
+        if self
+            .member_witness_srcs(crate::checker::witness_key_span(callee, span))
+            .is_some()
+            || self.callee_takes_witnesses(fc, callee, fname)
+        {
             return Err(CompileError {
                 message: format!(
                     "'{fname}' takes a static-protocol bound, so it cannot be the target of `{kw}` yet"
@@ -4392,7 +4432,7 @@ impl Compiler {
             self.current_module_idx,
             self.kw_frag_ctx,
             self.kw_frag_ord,
-            span,
+            crate::checker::witness_key_span(callee, span),
         );
         let recorded = self.witnesses.calls.get(&key);
         match (self.callee_takes_witnesses(fc, callee, fname), recorded) {
@@ -4456,7 +4496,12 @@ impl Compiler {
         span: Span,
     ) -> Result<(), CompileError> {
         // Method / module-member call: `obj.name(args)`.
-        if let ExprKind::Field { obj, name, .. } = &callee.kind {
+        if let ExprKind::Field {
+            obj,
+            name,
+            name_span,
+        } = &callee.kind
+        {
             // M24 — `T.method(args)` through a generic bound's STATIC requirement. NO table lookup is
             // needed here: `T` is a type PARAM (never in `bare_types`/`static_methods`), and this
             // compiler itself declared the `$w:T` local for exactly the fns the checker's `fns` table
@@ -4565,7 +4610,7 @@ impl Compiler {
                 && let key = self.type_key(tidx, tname)
                 && self.static_methods.contains(&static_key(&key, name))
             {
-                self.emit_call_static(fc, key, name, args, span)?;
+                self.emit_call_static(fc, key, name, args, *name_span, span)?;
                 return Ok(());
             }
             // `Enum.Variant(args)` → variant constructor, mirroring the bare-ident variant path
@@ -4600,7 +4645,7 @@ impl Compiler {
                 && let Some(key) = self.bare_types.get(tname).cloned()
                 && self.static_methods.contains(&static_key(&key, name))
             {
-                self.emit_call_static(fc, key, name, args, span)?;
+                self.emit_call_static(fc, key, name, args, *name_span, span)?;
                 return Ok(());
             }
             // `Type[T…].Variant(args)` → declaration-site turbofish VARIANT constructor
@@ -4638,7 +4683,7 @@ impl Compiler {
                 && let Some(key) = self.bare_types.get(tname).cloned()
                 && self.static_methods.contains(&static_key(&key, name))
             {
-                self.emit_call_static(fc, key, name, args, span)?;
+                self.emit_call_static(fc, key, name, args, *name_span, span)?;
                 return Ok(());
             }
             // `module.Type[T…].Variant(args)` / `.staticmethod(args)` → QUALIFIED declaration-site
@@ -4666,7 +4711,7 @@ impl Compiler {
                     return Ok(());
                 }
                 if self.static_methods.contains(&static_key(&key, name)) {
-                    self.emit_call_static(fc, key, name, args, span)?;
+                    self.emit_call_static(fc, key, name, args, *name_span, span)?;
                     return Ok(());
                 }
             }
@@ -4720,13 +4765,22 @@ impl Compiler {
                 );
                 return Ok(());
             }
+            // M24 Task 5 — an INSTANCE method that declares its own witnessed `[T]`
+            // (`h.make(c)`): the hidden witness arguments ride LAST, after the declared args, so
+            // `CallMethod`'s widened `argc` matches the proto the method was compiled with. The
+            // checker's record is keyed on the method-name token, which is unique per link of a
+            // postfix chain (`h.make(a).make(b)` shares one call span, not one name token).
             self.compile_expr(fc, obj)?;
             self.compile_args(fc, args)?;
+            let w = match self.member_witness_srcs(*name_span).cloned() {
+                Some(srcs) => self.emit_witness_args(fc, &srcs, name, span)?,
+                None => 0,
+            };
             let ic = self.next_method_ic();
             fc.emit(
                 Op::CallMethod {
                     name: name.clone(),
-                    argc: args.len(),
+                    argc: args.len() + w,
                     ic,
                 },
                 span,
@@ -4745,7 +4799,9 @@ impl Compiler {
             obj: callee_obj, ..
         } = &callee.kind
             && let ExprKind::Field {
-                obj: head, name, ..
+                obj: head,
+                name,
+                name_span,
             } = &callee_obj.kind
         {
             // Combined QUALIFIED turbofish `mod.Type[int].member[U](args)` — the checker accepts it
@@ -4771,7 +4827,7 @@ impl Compiler {
                     return Ok(());
                 }
                 if self.static_methods.contains(&static_key(&key, name)) {
-                    self.emit_call_static(fc, key, name, args, span)?;
+                    self.emit_call_static(fc, key, name, args, *name_span, span)?;
                     return Ok(());
                 }
             }
@@ -4804,7 +4860,7 @@ impl Compiler {
                 if let Some(key) = self.bare_types.get(tname).cloned()
                     && self.static_methods.contains(&static_key(&key, name))
                 {
-                    self.emit_call_static(fc, key, name, args, span)?;
+                    self.emit_call_static(fc, key, name, args, *name_span, span)?;
                     return Ok(());
                 }
             }

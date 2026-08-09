@@ -235,7 +235,7 @@ impl Checker {
                     let Some(sig) = self.functions.get(&decl.name).cloned() else {
                         continue;
                     };
-                    let ret = self.infer_fn_ret(decl, None, &sig.params, finalize);
+                    let ret = self.infer_fn_ret(decl, None, &sig, finalize);
                     if let Some(sig) = self.functions.get_mut(&decl.name)
                         && sig.ret != ret
                     {
@@ -267,8 +267,7 @@ impl Checker {
                         else {
                             continue;
                         };
-                        let ret =
-                            self.infer_fn_ret(m, Some(self_ty.clone()), &sig.params, finalize);
+                        let ret = self.infer_fn_ret(m, Some(self_ty.clone()), &sig, finalize);
                         if let Some(ms) = self
                             .structs
                             .get_mut(&key)
@@ -304,8 +303,7 @@ impl Checker {
                         else {
                             continue;
                         };
-                        let ret =
-                            self.infer_fn_ret(m, Some(self_ty.clone()), &sig.params, finalize);
+                        let ret = self.infer_fn_ret(m, Some(self_ty.clone()), &sig, finalize);
                         if let Some(ms) = self
                             .enum_methods
                             .get_mut(&key)
@@ -344,7 +342,7 @@ impl Checker {
         &mut self,
         decl: &FnDecl,
         self_ty: Option<Ty>,
-        params: &[Ty],
+        sig: &FnSig,
         finalize: bool,
     ) -> Ty {
         let mark = self.errors.len();
@@ -362,19 +360,17 @@ impl Checker {
         // during inference; a non-generator resets both so a stray `yield` is diagnosed.
         let saved_ig = std::mem::replace(&mut self.in_generator, decl.is_generator);
         let saved_yields = std::mem::take(&mut self.collected_yields);
-        // M24 — same rule as `check_fn_body` (module-level free fn only). Without it an UNANNOTATED
-        // `fn reset[T: Default](old: T): return T.default()` would infer its return as `Unknown`
-        // here (the pass-1 error is truncated), and that residual Unknown is a type-check bypass.
-        // Read the ONE stored answer (the hoist's fixpoint), not a fresh derivation: forwarding makes
-        // the set transitive, so a recomputation from a partly-updated state could disagree with the
-        // arity `check_fn_body` and the compiler use.
-        let wparams = if self_ty.is_none() && !saved_in_fn {
-            self.functions
-                .get(&decl.name)
-                .map(|s| s.witness_params.clone())
-                .unwrap_or_default()
-        } else {
+        // M24 — same rule as `check_fn_body` (a module-level free fn or a member, never a nested fn).
+        // Without it an UNANNOTATED `fn reset[T: Default](old: T): return T.default()` would infer
+        // its return as `Unknown` here (the pass-1 error is truncated), and that residual Unknown is
+        // a type-check bypass. Read the ONE stored answer (the hoist's fixpoint) off the caller's
+        // signature, not a fresh derivation: forwarding makes the set transitive, so a recomputation
+        // from a partly-updated state could disagree with the arity `check_fn_body` and the compiler
+        // use.
+        let wparams = if saved_in_fn {
             Vec::new()
+        } else {
+            sig.witness_params.clone()
         };
         let saved_witness_scope = std::mem::replace(&mut self.witness_scope, wparams);
         self.push_scope();
@@ -382,7 +378,7 @@ impl Checker {
             let ty = if param.name == "self" {
                 self_ty.clone().unwrap_or(Ty::Unknown)
             } else {
-                params.get(i).cloned().unwrap_or(Ty::Unknown)
+                sig.params.get(i).cloned().unwrap_or(Ty::Unknown)
             };
             self.declare(&param.name, ty);
         }
@@ -1002,6 +998,23 @@ impl Checker {
             .filter_map(|p| p.ty.as_ref())
             .chain(decl.ret.as_ref())
             .any(|ty| mentions(ty, t))
+    }
+
+    /// M24 Task 5 — arm [`Checker::witness_indirect_target`] for the `spawn`/`defer` target `e`,
+    /// returning the previous value to restore. Covers the shapes
+    /// [`Self::reject_witness_spawn_defer_target`] cannot name (an instance method `h.make(c)`, a
+    /// static method `Holder.build(c)`) — there the callee's requirement is only known once the
+    /// receiver is typed, which is inside `infer`. A non-call target arms nothing.
+    pub(super) fn enter_witness_indirect_target(
+        &mut self,
+        e: &Expr,
+        kw: &'static str,
+    ) -> Option<(Span, &'static str)> {
+        let key = match &e.kind {
+            ExprKind::Call { callee, .. } => crate::checker::witness_key_span(callee, e.span),
+            _ => return self.witness_indirect_target,
+        };
+        self.witness_indirect_target.replace((key, kw))
     }
 
     /// M24 — reject `spawn f(...)` / `defer f(...)` when `f` is a generic fn that needs hidden
@@ -2063,7 +2076,8 @@ impl Checker {
                                 labels: crate::checker::FnLabels(sig.labels.clone()),
                             },
                         );
-                        sig.ret = self.infer_fn_ret(decl, None, &sig.params, true);
+                        let inferred = self.infer_fn_ret(decl, None, &sig, true);
+                        sig.ret = inferred;
                     }
                     // Nearest-scope binding: the name resolves to THIS nested fn (not a global
                     // namesake) at every call site, and recursion type-checks. Declared BEFORE
@@ -2417,7 +2431,9 @@ impl Checker {
                 }
                 self.reject_witness_spawn_defer_target(e, "defer");
                 // Type-check the call (and its args); the result is discarded, like an expr stmt.
+                let saved_wt = self.enter_witness_indirect_target(e, "defer");
                 self.infer(e);
+                self.witness_indirect_target = saved_wt;
             }
             StmtKind::Defer(DeferTarget::Block(body)) => {
                 // `defer:` block — an ordinary nested scope checked in place. Unlike a `spawn:` block
@@ -2507,7 +2523,9 @@ impl Checker {
                         self.reject_witness_spawn_defer_target(e, "spawn");
                         // Full type-check of the call (callee, arity, args) — the single source of
                         // type diagnostics for the sub-expressions.
+                        let saved_wt = self.enter_witness_indirect_target(e, "spawn");
                         self.infer(e);
+                        self.witness_indirect_target = saved_wt;
                         // Every value crossing the airlock must be sendable: the arguments, and
                         // (for a method spawn) the receiver the task talks through. Re-inferring
                         // here would duplicate the type errors `infer(e)` already reported, so we
@@ -2652,6 +2670,7 @@ impl Checker {
     /// instance). The body is still checked normally by the caller.
     pub(super) fn validate_test_fn_shape(&mut self, decl: &FnDecl, is_method: bool) {
         let span = Self::fn_span(decl);
+        self.reject_witness_runner_target(decl, "a `test fn`", span);
         if is_method {
             let ok = decl.params.len() == 1 && decl.params[0].name == "self";
             if !ok {
@@ -2665,10 +2684,30 @@ impl Checker {
         }
     }
 
+    /// M24 Task 5 — `chezzi test` invokes a `test fn` (and each lifecycle hook) BY NAME at a fixed
+    /// arity — nothing, or the suite instance. So it can carry no hidden witness argument: the
+    /// runner has no call site at which to pin `T`, and the slot would be read off the stack as a
+    /// type key. Rejected at the declaration, where the fix is obvious.
+    fn reject_witness_runner_target(&mut self, decl: &FnDecl, what: &str, span: Span) {
+        let w = self.witness_params_of(decl);
+        if w.is_empty() {
+            return;
+        }
+        self.error(
+            span,
+            format!(
+                "{what} is invoked by the test runner with no arguments of its own, so '{}' cannot construct through its static-protocol bound ({}) — the hidden type witness has no call site to come from. Move the construction into a helper the test calls with a concrete type",
+                decl.name,
+                w.join(", ")
+            ),
+        );
+    }
+
     /// A suite lifecycle hook (`before_all`/`after_all`/`before_each`/`after_each`) must be
     /// `fn name(self)` returning nothing — the runner invokes it with only the instance.
     pub(super) fn validate_lifecycle_hook(&mut self, decl: &FnDecl) {
         let span = Self::fn_span(decl);
+        self.reject_witness_runner_target(decl, "a suite lifecycle hook", span);
         let ok = decl.params.len() == 1 && decl.params[0].name == "self";
         if !ok {
             self.error(
@@ -2709,6 +2748,18 @@ impl Checker {
         }
         let span = Self::fn_span(decl);
         let hint = "the `Eq` protocol hook `==` dispatches to";
+        // M24 Task 5 — `==` dispatches to this proto by NAME with exactly one operand pushed, so a
+        // hidden witness argument could never be supplied: the operand would be read as the witness.
+        if !sig.witness_params.is_empty() {
+            self.error(
+                span,
+                format!(
+                    "'eq' on {self_ty} is {hint}: it cannot construct through a static-protocol bound ({}) — `==` calls it with the operand only, and the hidden type witness has nowhere to ride. Move the construction into an ordinary method and call it from here",
+                    sig.witness_params.join(", ")
+                ),
+            );
+            return;
+        }
         if sig.params.len() != 2 {
             self.error(
                 span,
@@ -3495,25 +3546,37 @@ impl Checker {
         let saved_recover = std::mem::replace(&mut self.recover_depth, 0);
         // …and it is NOT a defer block: a `?` inside a fn declared in a defer block targets that fn.
         let saved_in_defer = std::mem::replace(&mut self.in_defer_block, false);
-        // M24 — the witness params whose `$w:T` local this body can reach. Only a MODULE-LEVEL FREE
-        // generic fn gets them (Task 1 scope): `self_ty.is_some()` is a method, and `saved_in_fn`
-        // (the pre-replace `in_fn_body`) being true means this is a NESTED fn, which the compiler
-        // lowers as a closure with no witness params. Both therefore reset the scope to empty, so a
-        // `T.static()` inside them is rejected rather than mis-lowered.
-        let is_module_level_free_fn = self_ty.is_none() && !saved_in_fn;
-        let wparams = if is_module_level_free_fn {
-            sig.witness_params.clone()
-        } else {
-            Vec::new()
+        // M24 — the witness params whose `$w:T` local this body can reach, and the name the
+        // contract's fn-half keys them under. A MODULE-LEVEL FREE fn keys on its own name; a MEMBER
+        // (Task 5 — a method or static method declaring its own `[T]`) keys on `<type key>.<method>`,
+        // which cannot collide with a fn name (no fn name contains a `.`). `saved_in_fn` (the
+        // pre-replace `in_fn_body`) being true means this is a NESTED fn, which the compiler lowers
+        // as a closure with no witness params — it gets none, so a `T.static()` inside one is
+        // rejected rather than mis-lowered. So is a body whose receiver is neither struct, enum nor
+        // newtype (nothing there declares a proto the witness could ride on).
+        let witness_fn_name = match &self_ty {
+            _ if saved_in_fn => None,
+            None => Some(decl.name.clone()),
+            Some(Ty::Struct(k, _) | Ty::Enum(k, _) | Ty::NewType(k, _)) => {
+                Some(format!("{k}.{}", decl.name))
+            }
+            Some(_) => None,
+        };
+        let wparams = match &witness_fn_name {
+            Some(_) => sig.witness_params.clone(),
+            None => Vec::new(),
         };
         // Half one of the contract: which fns need hidden trailing witness params — read off the
         // signature, which computed it once at the hoist ([`Checker::witness_params_of`]), so this
         // arity agrees with every other consumer by construction. Nested fns are never recorded, so a
         // nested fn sharing a top-level fn's name cannot inherit its arity.
-        if self.harvest_keywords && is_module_level_free_fn && !wparams.is_empty() {
+        if self.harvest_keywords
+            && !wparams.is_empty()
+            && let Some(fname) = witness_fn_name
+        {
             self.witnesses
                 .fns
-                .insert((self.graph_module_idx, decl.name.clone()), wparams.clone());
+                .insert((self.graph_module_idx, fname), wparams.clone());
         }
         let saved_witness_scope = std::mem::replace(&mut self.witness_scope, wparams);
         self.push_scope();
@@ -3654,7 +3717,7 @@ impl Checker {
             return None;
         };
         let info = self.structs.get(name)?;
-        let sig = info.methods.get("next")?;
+        let sig = structural_impl(info.methods.get("next")?)?;
         if sig.params.len() != 1 {
             return None; // (self) only — no extra args
         }
@@ -3687,7 +3750,7 @@ impl Checker {
         if info.methods.contains_key("next") {
             return None; // the runtime would drive `next`; only `struct_iter_elem` may admit it
         }
-        let sig = info.methods.get("iter")?;
+        let sig = structural_impl(info.methods.get("iter")?)?;
         if sig.params.len() != 1 {
             return None; // (self) only
         }
@@ -3759,7 +3822,7 @@ impl Checker {
             Ty::Map(k, v) => Some(((**k).clone(), (**v).clone())),
             Ty::Struct(name, targs) => {
                 let info = self.structs.get(name)?;
-                let sig = info.methods.get("index")?;
+                let sig = structural_impl(info.methods.get("index")?)?;
                 if sig.params.len() != 2 {
                     return None; // (self, key)
                 }
@@ -3850,10 +3913,13 @@ impl Checker {
         let (sig, map) = match ty {
             Ty::Struct(name, targs) => {
                 let info = self.structs.get(name)?;
-                (info.methods.get("contains")?, struct_param_map(info, targs))
+                (
+                    structural_impl(info.methods.get("contains")?)?,
+                    struct_param_map(info, targs),
+                )
             }
             Ty::Enum(name, targs) => (
-                self.enum_methods_of(name)?.get("contains")?,
+                structural_impl(self.enum_methods_of(name)?.get("contains")?)?,
                 self.enum_param_map(name, targs),
             ),
             _ => return None,
@@ -3890,12 +3956,12 @@ impl Checker {
             return None;
         };
         let info = self.structs.get(name)?;
-        let sig = info.methods.get("set_index")?;
+        let sig = structural_impl(info.methods.get("set_index")?)?;
         if sig.params.len() != 3 {
             return None; // (self, key, val)
         }
         // Must also be readable — `index(self, key) -> val` — or compound index-assign would crash.
-        let read = info.methods.get("index")?;
+        let read = structural_impl(info.methods.get("index")?)?;
         if read.params.len() != 2 {
             return None; // (self, key)
         }
@@ -3912,7 +3978,7 @@ impl Checker {
             Ty::List(_) | Ty::Str | Ty::Bytes | Ty::ByteArray => Some(ty.clone()),
             Ty::Struct(name, targs) => {
                 let info = self.structs.get(name)?;
-                let sig = info.methods.get("slice")?;
+                let sig = structural_impl(info.methods.get("slice")?)?;
                 // The `Slice` protocol fixes the bounds: `slice(self, int? , int?, int?) -> R`.
                 // Both engines always pass three `Option[int]` components (start/end/step, each
                 // `None` when omitted), so a non-conforming signature (wrong arity or non-`int?`
@@ -4301,4 +4367,16 @@ impl Checker {
         let map = struct_param_map(info, targs);
         Some(info.fields.iter().map(|(_, t)| subst(t, &map)).collect())
     }
+}
+
+/// M24 Task 5 — the gate every STRUCTURAL protocol lookup passes its candidate through: a method the
+/// RUNTIME dispatches BY NAME at a fixed argument count (`next`/`iter`/`index`/`set_index`/
+/// `contains`/`slice`, and `eq` via `validate_eq_shape`) may not take hidden witness arguments. Those
+/// emit sites push exactly the declared operands, so a witness-taking method would read one of them
+/// as its type key — a check-OK-then-runtime-fault. Such a method simply does not implement the
+/// protocol, which is what `None` says here (the shape errors stay the arity/type ones each site
+/// already reports). The protocol-DECLARED family (`Add`/`Eq`/`Comparable`/…) is walled by the same
+/// rule inside `method_matches`.
+fn structural_impl(sig: &FnSig) -> Option<&FnSig> {
+    sig.witness_params.is_empty().then_some(sig)
 }

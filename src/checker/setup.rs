@@ -56,6 +56,7 @@ impl Checker {
             harvest_keywords: false,
             witnesses: crate::checker::WitnessTable::default(),
             witness_scope: Vec::new(),
+            witness_indirect_target: None,
             graph_module_idx: 0,
             kw_frag_ctx: Span::default(),
             kw_frag_ord: 0,
@@ -2896,6 +2897,38 @@ impl Checker {
             }
             if !changed {
                 break;
+            }
+        }
+        // M24 Task 5 — a MEMBER's own `[T]` can be witnessed too, and its forwarding charge reads the
+        // free fns' answers, which the fixpoint above just finalized. ONE re-pass is enough (no second
+        // fixpoint): a method is never a forwarding TARGET — it cannot be called by bare name — so no
+        // member's answer depends on another member's.
+        for s in stmts {
+            let (methods, key) = match &s.kind {
+                StmtKind::Struct { name, methods, .. }
+                | StmtKind::Enum { name, methods, .. }
+                | StmtKind::NewType { name, methods, .. } => (methods, self.bare_key(name)),
+                _ => continue,
+            };
+            for m in methods {
+                let w = self.witness_params_of(m);
+                let slot = match &s.kind {
+                    StmtKind::Struct { .. } => self
+                        .structs
+                        .get_mut(&key)
+                        .and_then(|s| s.methods.get_mut(&m.name)),
+                    StmtKind::Enum { .. } => self
+                        .enum_methods
+                        .get_mut(&key)
+                        .and_then(|ms| ms.get_mut(&m.name)),
+                    _ => self
+                        .newtype_defs
+                        .get_mut(&key)
+                        .and_then(|(_, ms)| ms.get_mut(&m.name)),
+                };
+                if let Some(sig) = slot {
+                    sig.witness_params = w;
+                }
             }
         }
         // Order-independent extern/registry collision sweep: a struct or enum variant registers a

@@ -20649,12 +20649,13 @@ fn witness_static_call_forwarding_ok() {
     );
 }
 
-/// The `$w:T` local lives in the module-level generic fn's OWN frame. A closure, a `spawn:`/`defer:`
-/// block, a nested `fn` and a method each compile to their own proto that does not carry it, so a
-/// `T.static()` written inside one is rejected rather than mis-lowered to a wrong (or missing) key.
+/// The `$w:T` local lives in the frame of the fn (or member) that DECLARES `T`. A closure, a
+/// `spawn:`/`defer:` block and a nested `fn` each compile to their own proto that does not carry it,
+/// so a `T.static()` written inside one is rejected rather than mis-lowered to a wrong (or missing)
+/// key. (A METHOD is no longer in this list — Task 5 gives a member-declared `[T]` its own witness.)
 #[test]
 fn witness_static_call_outside_module_fn_body_rejected() {
-    let needle = "can only be called directly in the body of the module-level generic function";
+    let needle = "can only be called directly in the body of the function that declares";
     let head = "protocol Default:\n    fn default() -> Self\nstruct Counter:\n    n: int\n    fn default() -> Counter:\n        return Counter(0)\n";
     // a closure body
     entry_rejects(
@@ -20684,10 +20685,11 @@ fn witness_static_call_outside_module_fn_body_rejected() {
         ),
         needle,
     );
-    // a METHOD's own type param — methods get no witness params in slice A
+    // a closure INSIDE a method body: the method's own `[T]` IS witnessed (Task 5), but the
+    // closure's proto still does not carry the local, so the boundary rule is unchanged.
     entry_rejects(
         &format!(
-            "{head}struct Holder:\n    k: int\n    fn go[T: Default](self, x: T) -> T:\n        return T.default()\nfn main():\n    print(Holder(1).go(Counter(2)).n)\nmain()\n"
+            "{head}struct Holder:\n    k: int\n    fn go[T: Default](self, x: T) -> int:\n        f := fn(): T.default()\n        return 1\nfn main():\n    print(Holder(1).go(Counter(2)))\nmain()\n"
         ),
         needle,
     );
@@ -20851,6 +20853,209 @@ fn non_witness_generics_unaffected_by_hidden_param_ok() {
     );
 }
 
+// ===== M24 Task 5 — a witness for a type param declared BY A MEMBER: `fn make[T: Default](self,
+// old: T) -> T` on a struct/enum, and the static form `fn build[T: Default](old: T) -> T` reached as
+// `Holder.build(x)`. The hidden argument rides on the MEMBER's frame exactly as on a free fn's.
+//
+// SCOPE: a type param the MEMBER declares. A type param of the ENCLOSING TYPE (`struct Bx[T]`) is
+// OUT and stays a clear error — its witness would have to live in every instance, a different
+// mechanism. The RUNNING half is `tests/chz/spec/static_witness_test.chz` (each accepted shape with
+// TWO concrete types, so a wrong witness cannot pass by coincidence).
+
+/// The accepted member-level surface.
+#[test]
+fn witness_member_declared_param_ok() {
+    let head = "protocol Default:\n    fn default() -> Self\nstruct Counter:\n    n: int\n    fn default() -> Counter:\n        return Counter(0)\nstruct Tag:\n    s: str\n    fn default() -> Tag:\n        return Tag(\"none\")\n";
+    // an INSTANCE method declaring its own witnessed `[T]`…
+    entry_ok(&format!(
+        "{head}struct Holder:\n    k: int\n    fn make[T: Default](self, old: T) -> T:\n        return T.default()\nfn main():\n    print(Holder(1).make(Counter(9)).n)\n    print(Holder(1).make(Tag(\"x\")).s)\nmain()\n"
+    ));
+    // …a STATIC method (no `self`), reached as `Type.method(...)` and with a method turbofish
+    entry_ok(&format!(
+        "{head}struct Holder:\n    k: int\n    fn build[T: Default](old: T) -> T:\n        return T.default()\nfn main():\n    print(Holder.build(Counter(9)).n)\n    print(Holder.build[Tag](Tag(\"x\")).s)\nmain()\n"
+    ));
+    // …an ENUM host, both forms
+    entry_ok(&format!(
+        "{head}enum Host:\n    One\n    fn make[T: Default](self, old: T) -> T:\n        return T.default()\n    fn build[T: Default](old: T) -> T:\n        return T.default()\nfn main():\n    print(Host.One.make(Counter(9)).n)\n    print(Host.build(Tag(\"x\")).s)\nmain()\n"
+    ));
+    // …a GENERIC host: the MEMBER's `[T]` is witnessed, the enclosing `[K]` is not (and needs no
+    // witness — nothing constructs through it), incl. the type-level turbofish static spelling.
+    entry_ok(&format!(
+        "{head}struct Gen[K]:\n    k: K\n    fn make[T: Default](self, old: T) -> T:\n        return T.default()\n    fn build[T: Default](old: T) -> T:\n        return T.default()\nfn main():\n    print(Gen(7).make(Counter(9)).n)\n    print(Gen[int].build(Tag(\"x\")).s)\nmain()\n"
+    ));
+    // …a witness param that is NOT the leading one: the hidden args are positional and trail the
+    // declared ones, so `[A]` (unwitnessed) must not consume `[T]`'s slot.
+    entry_ok(&format!(
+        "{head}struct Holder:\n    k: int\n    fn tail[A, T: Default](self, a: A, t: T) -> T:\n        return T.default()\nfn main():\n    print(Holder(1).tail(\"a\", Counter(9)).n)\nmain()\n"
+    ));
+    // …a member FORWARDING its own witness into a free generic fn (the charge is a fixpoint over the
+    // module's free fns, so it holds with `reset` declared AFTER the struct)
+    entry_ok(&format!(
+        "{head}struct Holder:\n    k: int\n    fn fwd[T: Default](self, x: T) -> T:\n        return reset(x)\nfn reset[T: Default](old: T) -> T:\n    return T.default()\nfn main():\n    print(Holder(1).fwd(Counter(9)).n)\nmain()\n"
+    ));
+    // …and ACROSS a module boundary, in every spelling: an imported host with a local witness type,
+    // and a local call on an imported type.
+    let lib = (
+        "lib.chz",
+        "protocol Default:\n    fn default() -> Self\nstruct Counter:\n    n: int\n    fn default() -> Counter:\n        return Counter(7)\nstruct Holder:\n    v: int\n    fn make[T: Default](self, old: T) -> T:\n        return T.default()\n    fn build[T: Default](old: T) -> T:\n        return T.default()\n",
+    );
+    files_ok(&[
+        lib,
+        (
+            "main.chz",
+            "import lib\nimport Holder, Counter from lib\nstruct Local:\n    k: str\n    fn default() -> Local:\n        return Local(\"loc\")\nfn main():\n    print(lib.Holder(1).make(lib.Counter(9)).n)\n    print(lib.Holder(1).make(Local(\"x\")).k)\n    print(lib.Holder.build(Local(\"x\")).k)\n    print(Holder(2).make(Counter(1)).n)\n    print(Holder.build(Local(\"y\")).k)\nmain()\n",
+        ),
+    ]);
+}
+
+/// OUT OF SCOPE, and it must stay a clear error: a type param declared by the ENCLOSING TYPE. Its
+/// witness would have to be stored in every instance of that type — a different mechanism, not a
+/// missing case — so the message says that and names the member-level form as the way out.
+#[test]
+fn witness_enclosing_type_param_rejected() {
+    let head = "protocol Default:\n    fn default() -> Self\nstruct Counter:\n    n: int\n    fn default() -> Counter:\n        return Counter(0)\n";
+    let needle = "is a type parameter of the enclosing type";
+    entry_rejects(
+        &format!(
+            "{head}struct Bx[T: Default]:\n    v: int\n    fn get(self) -> T:\n        return T.default()\nfn main():\n    print(1)\nmain()\n"
+        ),
+        needle,
+    );
+    entry_rejects(
+        &format!(
+            "{head}enum Eb[T: Default]:\n    One\n    fn get(self) -> T:\n        return T.default()\nfn main():\n    print(1)\nmain()\n"
+        ),
+        needle,
+    );
+    // the message must point at the member-level form, which is the supported one
+    entry_rejects(
+        &format!(
+            "{head}struct Bx[T: Default]:\n    v: int\n    fn get(self) -> T:\n        return T.default()\nfn main():\n    print(1)\nmain()\n"
+        ),
+        "Declare the type parameter on the MEMBER instead",
+    );
+}
+
+/// The VALUE walls, for the member forms. A method is not first-class in this language and a bare
+/// type name is not a value, so both reads are already refused — pinned here because a witness-taking
+/// member would be exactly the read that cannot be lowered.
+#[test]
+fn witness_member_as_value_rejected() {
+    let head = "protocol Default:\n    fn default() -> Self\nstruct Counter:\n    n: int\n    fn default() -> Counter:\n        return Counter(0)\nstruct Holder:\n    k: int\n    fn make[T: Default](self, old: T) -> T:\n        return T.default()\n    fn build[T: Default](old: T) -> T:\n        return T.default()\n";
+    entry_rejects(
+        &format!("{head}fn main():\n    g := Holder(1).make\n    print(1)\nmain()\n"),
+        "methods are not values",
+    );
+    entry_rejects(
+        &format!("{head}fn main():\n    g := Holder.build\n    print(1)\nmain()\n"),
+        "unknown name 'Holder'",
+    );
+}
+
+/// `spawn`/`defer` lower a member call at `Op::SpawnMethod`/`DeferMethod`, which push no hidden
+/// argument — so a witness-taking member cannot be their target either, in any spelling. An
+/// ARGUMENT that is itself a witness call stays legal: it is evaluated eagerly in this frame.
+#[test]
+fn witness_member_cannot_be_spawn_or_defer_target_rejected() {
+    let head = "protocol Default:\n    fn default() -> Self\nstruct Counter:\n    n: int\n    fn default() -> Counter:\n        return Counter(0)\nstruct Holder:\n    k: int\n    fn make[T: Default](self, old: T) -> T:\n        return T.default()\n    fn build[T: Default](old: T) -> T:\n        return T.default()\nfn sink(c: Counter) -> int:\n    return c.n\n";
+    entry_rejects(
+        &format!(
+            "{head}fn main():\n    h := Holder(1)\n    c := Counter(9)\n    parallel:\n        spawn h.make(c)\nmain()\n"
+        ),
+        "cannot be the target of `spawn`",
+    );
+    entry_rejects(
+        &format!(
+            "{head}fn main():\n    h := Holder(1)\n    c := Counter(9)\n    defer h.make(c)\n    print(1)\nmain()\n"
+        ),
+        "cannot be the target of `defer`",
+    );
+    entry_rejects(
+        &format!(
+            "{head}fn main():\n    c := Counter(9)\n    parallel:\n        spawn Holder.build(c)\nmain()\n"
+        ),
+        "cannot be the target of `spawn`",
+    );
+    entry_rejects(
+        &format!(
+            "{head}fn main():\n    c := Counter(9)\n    defer Holder.build(c)\n    print(1)\nmain()\n"
+        ),
+        "cannot be the target of `defer`",
+    );
+    // the ARGUMENT position is untouched — the witness call runs before the task/deferral exists
+    entry_ok(&format!(
+        "{head}fn main():\n    h := Holder(1)\n    c := Counter(9)\n    defer print(h.make(c).n)\n    parallel:\n        spawn sink(h.make(c))\nmain()\n"
+    ));
+}
+
+/// THE HUNTED CLASS — a member that takes a hidden witness may not be reached by any dispatch that
+/// pushes a FIXED argument count by name: a protocol requirement (protocol methods cannot declare
+/// type params, so no requirement can ever carry the witness), the structural `next`/`iter`/`index`/
+/// `set_index`/`contains`/`slice` protocols, the `eq` hook `==` dispatches to, and the test runner's
+/// `test fn` / lifecycle hooks. Each of these used to be check-OK-then-runtime-fault ("expects 2
+/// argument(s), got 1", or a witness slot read off an operand).
+#[test]
+fn witness_member_not_reachable_by_fixed_arity_dispatch_rejected() {
+    let head = "protocol Default:\n    fn default() -> Self\nstruct Counter:\n    n: int\n    fn default() -> Counter:\n        return Counter(0)\n";
+    // a protocol requirement: the witness-taking method does not satisfy it
+    entry_rejects(
+        &format!(
+            "{head}protocol Maker:\n    fn shape(self, x: int) -> int\nstruct M:\n    v: int\n    fn shape[T: Default](self, x: int) -> int:\n        c := T.default()\n        return x\nfn use(m: Maker) -> int:\n    return m.shape(1)\nfn main():\n    print(use(M(1)))\nmain()\n"
+        ),
+        "expected Maker, found M",
+    );
+    // the structural iterator protocol — `for` drives `next(self)` with no room for a witness
+    entry_rejects(
+        &format!(
+            "{head}struct It:\n    n: int\n    fn next[T: Default](self) -> Option[int]:\n        c := T.default()\n        return None\nfn main():\n    for x in It(1):\n        print(x)\nmain()\n"
+        ),
+        "cannot iterate over It",
+    );
+    // …and the index / contains / slice ones
+    entry_rejects(
+        &format!(
+            "{head}struct S:\n    n: int\n    fn index[T: Default](self, k: int) -> int:\n        c := T.default()\n        return k\nfn main():\n    print(S(1)[0])\nmain()\n"
+        ),
+        "cannot index into S",
+    );
+    entry_rejects(
+        &format!(
+            "{head}struct S:\n    n: int\n    fn contains[T: Default](self, x: int) -> bool:\n        c := T.default()\n        return true\nfn main():\n    print(0 in S(1))\nmain()\n"
+        ),
+        "cannot use `in` on S",
+    );
+    entry_rejects(
+        &format!(
+            "{head}struct S:\n    n: int\n    fn slice[T: Default](self, a: int?, b: int?, c: int?) -> int:\n        x := T.default()\n        return 1\nfn main():\n    print(S(1)[0:1])\nmain()\n"
+        ),
+        "cannot slice S",
+    );
+    // the `eq` hook: `==` pushes the operand only, so the operand would be read as the type key
+    entry_rejects(
+        &format!(
+            "{head}struct S:\n    n: int\n    fn eq[T: Default](self, o: S) -> bool:\n        c := T.default()\n        return true\nfn main():\n    print(S(1) == S(2))\nmain()\n"
+        ),
+        "it cannot construct through a static-protocol bound",
+    );
+    // the test runner (a free `test fn`, a suite `test fn`, and a lifecycle hook)
+    entry_rejects(
+        &format!("{head}test fn t[T: Default]():\n    c := T.default()\n    assert true\n"),
+        "invoked by the test runner",
+    );
+    entry_rejects(
+        &format!(
+            "{head}struct Suite:\n    v: int = 0\n    test fn t[T: Default](self):\n        c := T.default()\n        assert true\n"
+        ),
+        "invoked by the test runner",
+    );
+    entry_rejects(
+        &format!(
+            "{head}struct Suite:\n    v: int = 0\n    fn before_each[T: Default](self):\n        c := T.default()\n    test fn t(self):\n        assert true\n"
+        ),
+        "invoked by the test runner",
+    );
+}
+
 // ===== M24 slice 2 — witness FORWARDING: a generic fn passes its OWN still-abstract type param's
 // witness into another generic fn (`fn twice[U: Default](x: U) -> U: return reset(reset(x))`).
 // The hidden argument stops being a constant and becomes a load of the caller's own `$w:U` local.
@@ -20930,13 +21135,11 @@ fn witness_forwarding_out_of_scope_rejected() {
         ),
         needle,
     );
-    // a METHOD's own type param — a method frame has no `$w:T` local at all
-    entry_rejects(
-        &format!(
-            "{FWD_HEAD}struct Holder:\n    k: int\n    fn go[T: Default](self, x: T) -> T:\n        return reset(x)\nfn main():\n    print(Holder(1).go(Counter(2)).n)\nmain()\n"
-        ),
-        needle,
-    );
+    // …but a METHOD's OWN type param forwards fine (Task 5): the hidden argument rides on the
+    // method's frame exactly as on a free fn's — pinned in `witness_member_declared_param_ok`.
+    entry_ok(&format!(
+        "{FWD_HEAD}struct Holder:\n    k: int\n    fn go[T: Default](self, x: T) -> T:\n        return reset(x)\nfn main():\n    print(Holder(1).go(Counter(2)).n)\nmain()\n"
+    ));
 }
 
 /// A type param with NO static-carrying bound has nothing to forward — that must stay the ordinary

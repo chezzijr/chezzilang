@@ -5255,6 +5255,43 @@ fn witness_cross_module_runs_both_engines() {
     assert_eq!(vo, io, "serial vs M:N divergence");
 }
 
+/// M24 Task 5 — the same, for a witness declared BY A MEMBER: an instance method and a static method
+/// on an IMPORTED type, witnessed by both an imported and a LOCALLY-declared type. The member's proto
+/// is compiled in the DECLARING module (which is where its hidden param is added) while the witness
+/// constant is pushed by the CALLING one, so the two modules' identity keys must agree — a mismatch
+/// only shows up at run time.
+#[test]
+fn witness_member_cross_module_runs_both_engines() {
+    let dir = std::env::temp_dir().join(format!("chezzi_vm_xmod_member_w_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("lib.chz"),
+        "protocol Default:\n    fn default() -> Self\n\nstruct Counter:\n    n: int\n    fn default() -> Counter:\n        return Counter(7)\n\nstruct Holder:\n    v: int\n    fn make[T: Default](self, old: T) -> T:\n        return T.default()\n    fn build[T: Default](old: T) -> T:\n        return T.default()\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.chz");
+    std::fs::write(
+        &entry,
+        "import lib\nimport Holder, Counter from lib\n\nstruct Local:\n    k: str\n    fn default() -> Local:\n        return Local(\"loc\")\n\nfn main():\n    print(lib.Holder(1).make(lib.Counter(9)).n)\n    print(lib.Holder(1).make(Local(\"x\")).k)\n    print(lib.Holder.build(lib.Counter(9)).n)\n    print(lib.Holder.build(Local(\"x\")).k)\n    print(Holder(2).make(Counter(1)).n)\n    print(Holder.build(Local(\"y\")).k)\nmain()\n",
+    )
+    .unwrap();
+    let graph = crate::resolver::build_graph(&entry).expect("resolve");
+    if let Err(errs) = crate::checker::check_graph(&graph) {
+        let _ = std::fs::remove_dir_all(&dir);
+        panic!("program must type-check, got: {errs:?}");
+    }
+    let (vo, _ve, vr, _vc) = run_file(&entry);
+    let (io, _ie, ir, _ic) = run_file_p(&entry);
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(vr.is_ok(), "serial VM faulted: {vr:?}");
+    assert!(ir.is_ok(), "M:N engine faulted: {ir:?}");
+    assert_eq!(
+        vo, "7\nloc\n7\nloc\n7\nloc\n",
+        "serial VM output (a wrong identity key faults, a wrong witness builds the other type)"
+    );
+    assert_eq!(vo, io, "serial vs M:N divergence");
+}
+
 /// Entry-last backstop — when the ENTRY file IS the always-injected prelude stub
 /// (`chezzi run std/prelude.chz`), the resolver dedups the entry's own visit and the entry-last
 /// reorder must restore `modules.last() == entry` so the positional-entry consumers designate the

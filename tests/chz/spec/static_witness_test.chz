@@ -303,3 +303,121 @@ test fn two_witness_calls_in_one_interpolation_fragment_keep_their_own_witnesses
     t := Tag("hi")
     s := "{outer_w(t, reset(c))}"
     assert s == "0", "the nested `reset(c)` must construct a Counter, not the outer call's Tag"
+
+# ---- M24 Task 5: a witness for a type param declared BY A MEMBER ----
+#
+# `fn make[T: Default](self, old: T) -> T` declares `[T]` on the METHOD, so the hidden witness rides
+# on the METHOD's own frame exactly as it does on a free fn's — instance methods, static methods
+# (`Holder.build(x)`), enum hosts, and a generic host whose OWN param stays un-witnessed. Rust is the
+# ancestor: `impl Holder { fn make<T: Default>(&self, _: T) -> T { T::default() } }` answers the same.
+# Every case runs with TWO different concrete types, so a wrong witness cannot pass by coincidence.
+
+struct Holder:
+    v: int
+    fn make[T: Default](self, old: T) -> T:
+        return T.default()
+    fn build[T: Default](old: T) -> T:
+        return T.default()
+    fn fwd[T: Default](self, x: T) -> T:
+        return reset(x)
+    fn tail[A, T: Default](self, a: A, t: T) -> T:
+        return T.default()
+    fn conv[T: Conv](self, n: int) -> T:
+        return T.conv(n)
+
+enum Host:
+    One
+    Two
+    fn make[T: Default](self, old: T) -> T:
+        return T.default()
+    fn build[T: Default](old: T) -> T:
+        return T.default()
+
+struct Gen[K]:
+    k: K
+    fn make[T: Default](self, old: T) -> T:
+        return T.default()
+    fn build[T: Default](old: T) -> T:
+        return T.default()
+
+test fn a_generic_method_constructs_through_its_own_bound():
+    h := Holder(1)
+    assert h.make(Counter(9)).n == 0
+    assert h.make(Tag("hi")).s == "none"
+
+test fn a_generic_static_method_constructs_through_its_own_bound():
+    assert Holder.build(Counter(9)).n == 0
+    assert Holder.build(Tag("hi")).s == "none"
+
+test fn a_method_turbofish_pins_the_witness():
+    h := Holder(1)
+    assert h.make[Counter](Counter(9)).n == 0
+    assert Holder.build[Tag](Tag("hi")).s == "none"
+
+test fn an_enum_hosts_a_witness_taking_member():
+    e := Host.One
+    assert e.make(Counter(9)).n == 0
+    assert e.make(Tag("hi")).s == "none"
+    assert Host.build(Counter(9)).n == 0
+    assert Host.build(Tag("hi")).s == "none"
+
+test fn a_generic_host_leaves_its_own_param_unwitnessed():
+    g := Gen(7)
+    assert g.make(Counter(9)).n == 0
+    assert g.make(Tag("hi")).s == "none"
+    assert g.k == 7
+    assert Gen[int].build(Counter(9)).n == 0
+    assert Gen[str].build(Tag("hi")).s == "none"
+
+test fn a_witness_param_after_a_plain_one_keeps_its_slot():
+    h := Holder(1)
+    assert h.tail("a", Counter(9)).n == 0
+    assert h.tail(5, Tag("hi")).s == "none"
+
+test fn a_member_witness_takes_arguments():
+    h := Holder(1)
+    assert h.conv[Wrap](21).v == 42
+
+test fn a_method_forwards_its_own_witness_into_a_free_generic():
+    h := Holder(1)
+    assert h.fwd(Counter(9)).n == 0
+    assert h.fwd(Tag("hi")).s == "none"
+
+test fn two_witness_method_calls_chain_without_sharing_a_key():
+    h := Holder(1)
+    assert h.make(Counter(9)).n == 0
+    assert h.make(h.make(Tag("hi"))).s == "none"
+
+# a member witness call inside an interpolation fragment — the fragment key seam broke twice in this
+# milestone (once per half), and a member call keys on its own method-name token
+struct Frag:
+    v: int
+    fn make[T: Default](self, old: T) -> T:
+        return T.default()
+    fn show[T: Default](self, x: T) -> str:
+        return "{reset(x)}|{self.make(x)}"
+
+test fn a_member_witness_call_inside_an_interpolation_fragment():
+    f := Frag(1)
+    assert "{f.make(Counter(9)).n}" == "0"
+    assert f.show(Counter(9)) == "Counter(n=0)|Counter(n=0)"
+    assert f.show(Tag("hi")) == "Tag(s='none')|Tag(s='none')"
+
+# a member forwarding into ITSELF and into another instance's method: the witness stops being a
+# constant and becomes a load of the member frame's own `$w:T`
+struct Rec:
+    v: int
+    fn down[T: Default](self, x: T, n: int) -> T:
+        if n <= 0:
+            return T.default()
+        return self.down(x, n - 1)
+    fn hop[T: Default](self, x: T) -> T:
+        y := T.default()
+        return Rec(2).down(x, 1)
+
+test fn a_member_forwards_its_own_witness_into_a_member():
+    r := Rec(1)
+    assert r.down(Counter(9), 3).n == 0
+    assert r.down(Tag("hi"), 2).s == "none"
+    assert r.hop(Counter(9)).n == 0
+    assert r.hop(Tag("hi")).s == "none"

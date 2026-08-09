@@ -951,6 +951,14 @@ impl Checker {
         // when `where_bounds` is empty. (The non-generic fast path above cannot carry receiver
         // bounds: `where_bounds` non-empty ⟹ the enclosing type has params ⟹ `tps` non-empty.)
         self.enforce_bounds(&sig.where_bounds, &sub, span);
+        // M24 Task 5 — half two of the contract for a STATIC method that declares its own witnessed
+        // `[T]` (`Holder.build(c)`). Recorded BEFORE the degrade below so an un-inferable `T` reports
+        // "is not determined here" (its own diagnostic) rather than looking bound to `Unknown`.
+        // Only the METHOD's params can be witnessed, so the ENCLOSING type's `tps` are never here.
+        if !sig.witness_params.is_empty() {
+            let wparams = sig.witness_params.clone();
+            self.record_witness_call(method, &wparams, &sub, name_span, span);
+        }
         // A method-OWN `[U]` param still un-inferred (no method turbofish, unbindable from args, e.g.
         // `make[U]() -> List[U]`) degrades to the refinable `Ty::Unknown` — a method-local `[U]` with
         // nothing to bind it is genuinely unconstrained, and downstream use refines it cleanly.
@@ -1894,7 +1902,9 @@ impl Checker {
                     // A generic function: infer its type parameters from the arguments, enforce
                     // bounds, and substitute into the return type.
                     if !sig.type_params.is_empty() {
-                        return Some(self.infer_generic_call(name, &sig, args, targs, span, hint));
+                        return Some(
+                            self.infer_generic_call(name, &sig, args, targs, span, span, hint),
+                        );
                     }
                     // Float params are coerced at the callee's prologue (compile_fn / extern).
                     // Honor an optional trailing tail (`min_params < params.len()`, e.g. a native
@@ -2055,9 +2065,11 @@ impl Checker {
                 &params,
                 &sig.ret,
                 &sig.type_params,
+                &[], // a native method never takes a witness (no user body to construct in)
                 obj_ty,
                 type_args,
                 args,
+                name_span,
                 span,
             ));
         }
@@ -2198,7 +2210,9 @@ impl Checker {
                         // M24 Task 3: a witness-needing callee records here exactly like a bare one —
                         // the entry is keyed by the CALLING module, and the compiler resolves the
                         // callee's hidden arity through this same module bind.
-                        return self.infer_generic_call(method, &fsig, args, type_args, span, hint);
+                        return self.infer_generic_call(
+                            method, &fsig, args, type_args, name_span, span, hint,
+                        );
                     }
                     // Float params are coerced at the callee's prologue. Honor an optional trailing
                     // tail (`min_params < params.len()`, e.g. `request.get(url, timeout_ms?)`); for
@@ -2350,6 +2364,8 @@ impl Checker {
                             sig.params.clone(),
                             subst(&sig.ret, &map),
                             sig.type_params.clone(),
+                            // M24 Task 5 — the METHOD's own witnessed params (never the struct's)
+                            sig.witness_params.clone(),
                             sig.is_static,
                             sig.doc.clone(),
                             sig.where_bounds.clone(),
@@ -2357,8 +2373,17 @@ impl Checker {
                         )
                     })
                 });
-                if let Some((params, declared, ret, mtps, is_static, mdoc, where_bounds, rmap)) =
-                    resolved
+                if let Some((
+                    params,
+                    declared,
+                    ret,
+                    mtps,
+                    mwitness,
+                    is_static,
+                    mdoc,
+                    where_bounds,
+                    rmap,
+                )) = resolved
                 {
                     // A STATIC method (no `self`) is NOT callable on a value — it is reached only as
                     // `Type.method(...)`. Reject the instance call with a pointer at the right form.
@@ -2383,7 +2408,8 @@ impl Checker {
                     // mirrors the free generic-fn path (`infer_generic_call`).
                     if !mtps.is_empty() {
                         return self.infer_generic_method(
-                            method, &params, &ret, &mtps, &obj_ty, type_args, args, span,
+                            method, &params, &ret, &mtps, &mwitness, &obj_ty, type_args, args,
+                            name_span, span,
                         );
                     }
                     // The first param is the receiver (bound implicitly from `obj`), so the call's
@@ -2472,13 +2498,24 @@ impl Checker {
                             sig.params.clone(),
                             subst(&sig.ret, &map),
                             sig.type_params.clone(),
+                            // M24 Task 5 — the METHOD's own witnessed params (never the host type's)
+                            sig.witness_params.clone(),
                             sig.is_static,
                             sig.where_bounds.clone(),
                             map,
                         )
                     })
                 });
-                if let Some((params, declared, ret, mtps, is_static, where_bounds, rmap)) = resolved
+                if let Some((
+                    params,
+                    declared,
+                    ret,
+                    mtps,
+                    mwitness,
+                    is_static,
+                    where_bounds,
+                    rmap,
+                )) = resolved
                 {
                     // Static methods on a newtype are DEFERRED (v1 covers struct + enum only). A
                     // no-self newtype method is still classified static, so reject the instance call
@@ -2501,7 +2538,8 @@ impl Checker {
                     self.enforce_bounds(&where_bounds, &rmap, span);
                     if !mtps.is_empty() {
                         return self.infer_generic_method(
-                            method, &params, &ret, &mtps, &obj_ty, type_args, args, span,
+                            method, &params, &ret, &mtps, &mwitness, &obj_ty, type_args, args,
+                            name_span, span,
                         );
                     }
                     match params.split_first() {
@@ -2542,13 +2580,24 @@ impl Checker {
                             sig.params.clone(),
                             subst(&sig.ret, &map),
                             sig.type_params.clone(),
+                            // M24 Task 5 — the METHOD's own witnessed params (never the host type's)
+                            sig.witness_params.clone(),
                             sig.is_static,
                             sig.where_bounds.clone(),
                             map,
                         )
                     })
                 });
-                if let Some((params, declared, ret, mtps, is_static, where_bounds, rmap)) = resolved
+                if let Some((
+                    params,
+                    declared,
+                    ret,
+                    mtps,
+                    mwitness,
+                    is_static,
+                    where_bounds,
+                    rmap,
+                )) = resolved
                 {
                     // A STATIC enum method is reached only as `Enum.method(...)`; reject the call on a
                     // value with a pointer at the right form (mirrors the struct arm).
@@ -2569,7 +2618,8 @@ impl Checker {
                     self.enforce_bounds(&where_bounds, &rmap, span);
                     if !mtps.is_empty() {
                         return self.infer_generic_method(
-                            method, &params, &ret, &mtps, &obj_ty, type_args, args, span,
+                            method, &params, &ret, &mtps, &mwitness, &obj_ty, type_args, args,
+                            name_span, span,
                         );
                     }
                     match params.split_first() {
@@ -2648,9 +2698,11 @@ impl Checker {
                             &params,
                             &sig.ret,
                             &sig.type_params,
+                            &[], // native `List` methods take no witness
                             &Ty::list(elem.clone()),
                             type_args,
                             args,
+                            name_span,
                             span,
                         );
                     }
@@ -2844,7 +2896,16 @@ impl Checker {
                         bounds: vec![],
                     }];
                     this.infer_generic_method(
-                        name, &params, &r, &tps, &obj_ty, type_args, args, span,
+                        name,
+                        &params,
+                        &r,
+                        &tps,
+                        &[],
+                        &obj_ty,
+                        type_args,
+                        args,
+                        name_span,
+                        span,
                     )
                 };
                 let func = |params: Vec<Ty>| Ty::Func {
