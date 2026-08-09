@@ -541,8 +541,10 @@
 #   `Type[T, …].member(args)?` — MULTI type arg: the disambiguating comma lets the parser commit a
 #                                 `<typeApply>` head (real parsed types); the trailing `.member` /
 #                                 `(args)` attach via the postfix loop. VARIANT-first, else static.
-# The method-level form `Type.method[T](...)` is reserved (rejected by the checker) — turbofish is
-# type-level only.
+# The method-level form `Type.method[T](...)` is a MEMBER-level turbofish and is accepted: it pins the
+# member's OWN type args (`Box.make[str]("hi")`), per the declaration-site rule — a type argument is
+# written where its parameter is declared. It composes with the type-level form
+# (`Box[int].make[str](x)`). See `docs/syntax.md` §7a.
 <postfix> ::= <primary>
             | <postfix> "LPAREN" "RPAREN"
             | <postfix> "LPAREN" <argList> "RPAREN"
