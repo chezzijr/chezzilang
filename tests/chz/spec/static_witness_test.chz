@@ -421,3 +421,18 @@ test fn a_member_forwards_its_own_witness_into_a_member():
     assert r.down(Tag("hi"), 2).s == "none"
     assert r.hop(Counter(9)).n == 0
     assert r.hop(Tag("hi")).s == "none"
+
+# TWO witness params on one member, on a GENERIC host: the hidden args are positional, so the second
+# slot must reach the second type param — checked with the two hosts swapped
+struct Pair[K]:
+    a: K
+    b: K
+    fn both[T: Default, U: Default](self, x: T, y: U) -> str:
+        p := T.default()
+        q := U.default()
+        return "{p}/{q}"
+
+test fn two_member_witness_params_keep_their_declaration_order():
+    p := Pair(1, 2)
+    assert p.both(Counter(1), Tag("x")) == "Counter(n=0)/Tag(s='none')"
+    assert p.both(Tag("x"), Counter(1)) == "Tag(s='none')/Counter(n=0)"
