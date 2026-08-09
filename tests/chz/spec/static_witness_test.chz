@@ -464,3 +464,166 @@ test fn a_spawned_value_call_keeps_its_head_links_witness():
     parallel:
         spawn chain_sink(Counter(9), sink)(5)
     assert sink == ["Counter(n=0)"]
+
+# ===== Task 4 — the witness REACHES a nested body =====
+#
+# A closure, a nested `fn`, a `spawn:` block and a `defer:` block each compile to their own proto and
+# capture only the FREE VARIABLES of their source text; `$w:T` is unspellable, so it is never free.
+# `with_witness_captures` appends it to those capture entries unconditionally, so the nested body
+# reads the witness out of its own capture env. It travels BY VALUE (a `str`) — which is what the
+# escaping-closure cases below prove: they construct AFTER the defining frame is gone. Rust is the
+# ancestor: a closure inside `fn f<T: Default>()` may call `T::default()`.
+#
+# Every case runs with TWO concrete types, so a witness that leaked from the wrong frame (or was read
+# off a real operand) cannot pass by coincidence.
+
+# ---- 1: a closure, including one that ESCAPES its defining fn ----
+
+fn build[T: Default](x: T) -> fn() -> T:
+    return fn(): T.default()
+
+test fn a_closure_reaches_the_witness():
+    f := fn(): reset(Counter(9))
+    assert f().n == 0
+
+test fn an_escaping_closure_carries_its_witness_by_value():
+    mk_counter := build(Counter(9))
+    mk_tag := build(Tag("hi"))
+    # both defining frames are gone; each closure still knows its own type
+    assert mk_counter().n == 0
+    assert mk_tag().s == "none"
+
+# ---- 2: a nested `fn` ----
+
+fn via_nested[T: Default](x: T) -> T:
+    fn inner() -> T:
+        return T.default()
+    return inner()
+
+test fn a_nested_fn_reaches_the_witness():
+    assert via_nested(Counter(9)).n == 0
+    assert via_nested(Tag("hi")).s == "none"
+
+# ---- 3: a `defer:` block, and a `defer` of a closure that constructs ----
+
+fn defer_block[T: Default](x: T, sink: List[str]):
+    defer:
+        sink.push("{T.default()}")
+    sink.push("body")
+
+fn defer_closure[T: Default](x: T, sink: List[str]):
+    mk := fn() -> T: T.default()
+    defer sink.push("{mk()}")
+    sink.push("body")
+
+test fn a_defer_block_reaches_the_witness():
+    sink: List[str] = []
+    defer_block(Counter(9), sink)
+    defer_block(Tag("hi"), sink)
+    assert sink == ["body", "Counter(n=0)", "body", "Tag(s='none')"]
+
+test fn a_deferred_closure_reaches_the_witness():
+    sink: List[str] = []
+    defer_closure(Counter(9), sink)
+    defer_closure(Tag("hi"), sink)
+    assert sink == ["body", "Counter(n=0)", "body", "Tag(s='none')"]
+
+# ---- 4: a `spawn:` block — the witness `str` deep-copies across the airlock ----
+
+fn spawn_block[T: Default](x: T, ch: Channel[str]):
+    parallel:
+        spawn:
+            ch.send("{T.default()}")
+
+test fn a_spawn_block_reaches_the_witness():
+    ch := Channel[str](4)
+    spawn_block(Counter(9), ch)
+    assert ch.recv() == "Counter(n=0)"
+    spawn_block(Tag("hi"), ch)
+    assert ch.recv() == "Tag(s='none')"
+
+# a nested `fn` whose body spawns: the block reads the witness the nested fn itself only CAPTURED
+# (`CapSrc::Captured`), one hop further from the declaring frame
+fn spawn_from_nested[T: Default](x: T, ch: Channel[str]):
+    fn go():
+        parallel:
+            spawn:
+                ch.send("{T.default()}")
+    go()
+
+test fn a_spawn_block_two_frames_down_reaches_the_witness():
+    ch := Channel[str](4)
+    spawn_from_nested(Counter(9), ch)
+    assert ch.recv() == "Counter(n=0)"
+    spawn_from_nested(Tag("hi"), ch)
+    assert ch.recv() == "Tag(s='none')"
+
+# ---- 5: a closure that FORWARDS `T` into another generic instead of constructing ----
+
+fn fwd_from_closure[T: Default](x: T) -> fn() -> T:
+    return fn(): reset(x)
+
+test fn a_closure_forwards_the_witness_into_another_generic():
+    assert fwd_from_closure(Counter(9))().n == 0
+    assert fwd_from_closure(Tag("hi"))().s == "none"
+
+# ---- 6: TWO witnesses reachable inside ONE nested body (positional capture order) ----
+
+fn both_in_one_closure[T: Default, U: Default](a: T, b: U) -> str:
+    f := fn() -> str: "{T.default()}/{U.default()}"
+    return f()
+
+test fn two_witnesses_reach_one_nested_body_in_order():
+    assert both_in_one_closure(Counter(1), Tag("x")) == "Counter(n=0)/Tag(s='none')"
+    assert both_in_one_closure(Tag("x"), Counter(1)) == "Tag(s='none')/Counter(n=0)"
+
+# ---- 7: a closure INSIDE a closure (the inner one reads a capture, not a local) ----
+
+fn twice_nested[T: Default](x: T) -> fn() -> fn() -> T:
+    return fn(): fn(): T.default()
+
+test fn a_closure_inside_a_closure_reaches_the_witness():
+    assert twice_nested(Counter(9))()().n == 0
+    assert twice_nested(Tag("hi"))()().s == "none"
+
+# ---- 8: a MEMBER-level `[T]` reaching a closure in that method's body ----
+
+struct Nest:
+    k: int
+    fn go[T: Default](self, x: T) -> str:
+        f := fn() -> str: "{T.default()}"
+        return f()
+    fn deep[T: Default](self, x: T, ch: Channel[str]):
+        parallel:
+            spawn:
+                ch.send("{T.default()}")
+
+test fn a_member_witness_reaches_a_closure_in_its_own_body():
+    n := Nest(1)
+    assert n.go(Counter(9)) == "Counter(n=0)"
+    assert n.go(Tag("hi")) == "Tag(s='none')"
+
+test fn a_member_witness_reaches_a_spawn_block_in_its_own_body():
+    n := Nest(1)
+    ch := Channel[str](4)
+    n.deep(Counter(9), ch)
+    assert ch.recv() == "Counter(n=0)"
+    n.deep(Tag("hi"), ch)
+    assert ch.recv() == "Tag(s='none')"
+
+# ---- a generator: the `$w:T` local lives in a suspended frame, and its closure still reads it ----
+
+fn gen_defaults[T: Default](x: T, n: int) -> Iterator[T]:
+    f := fn() -> T: T.default()
+    for i in range(n):
+        yield f()
+
+test fn a_generators_closure_reaches_the_witness():
+    out: List[int] = []
+    for c in gen_defaults(Counter(9), 2):
+        out.push(c.n)
+    assert out == [0, 0]
+    names: List[str] = []
+    for t in gen_defaults(Tag("hi"), 2):
+        names.push(t.s)
+    assert names == ["none", "none"]

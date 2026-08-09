@@ -2745,7 +2745,8 @@ impl Checker {
     ///
     /// Accepted only when BOTH hold, because both are what the compiler can actually lower:
     /// * one of `T`'s bounds declares `method` as a **static** requirement, and
-    /// * `T`'s hidden `$w:T` witness local is reachable here ([`Checker::witness_scope`]).
+    /// * `T`'s hidden `$w:T` witness binding is reachable here ([`Checker::witness_scope`]) — the
+    ///   declaring body, or (Task 4) any nested body inside it, which captures it.
     ///
     /// Anything else keeps the pre-M24 "generics are erased" diagnostic.
     pub(super) fn infer_witness_static_call(
@@ -2786,10 +2787,14 @@ impl Checker {
                 );
                 return Ty::Unknown;
             }
+            // Reached when the `enclosing_type_declaring` arm above cannot see the host — notably a
+            // nested `fn` inside a method of `struct Bx[T]`, where `current_self_ty` is reset. So
+            // this message must ALSO be true for a type-declared param: it states the rule, and
+            // never claims the current body carries a witness.
             self.error(
                 span,
                 format!(
-                    "`{tname}.{method}(...)` can only be called directly in the body of the function that declares '{tname}' — not inside a closure, a `spawn:`/`defer:` block, or a nested `fn`, because the hidden type witness for '{tname}' does not cross those boundaries. Call it in the enclosing function body and pass the value in"
+                    "`{tname}.{method}(...)`: no hidden type witness for '{tname}' is reachable here. One exists only where '{tname}' is declared by a FUNCTION or a MEMBER (`fn f[{tname}: <bound>](...)`) — in that body and in any closure, `spawn:`/`defer:` block or nested `fn` inside it. A type parameter of an enclosing TYPE (`struct Bx[{tname}]`) never has one: the concrete type is erased once a value exists. Declare '{tname}' on the function or member, or pass a factory function (a `fn(...) -> {tname}` parameter)"
                 ),
             );
             return Ty::Unknown;
@@ -2877,11 +2882,10 @@ impl Checker {
                     return;
                 }
                 // Bound to the CALLER's own still-abstract type param — FORWARDING (slice 2). The
-                // caller's `$w:p` local becomes the argument, but ONLY when it is directly reachable
-                // here: `witness_scope` is empty inside a closure, a `spawn:`/`defer:` block, a
-                // nested `fn` and a method body, each of which compiles to its own proto that never
-                // carries the local. Forwarding from one of those would push a name the callee reads
-                // as an identity key (or nothing at all), so it stays an error.
+                // caller's `$w:p` binding becomes the argument, but ONLY when it is reachable here:
+                // `witness_scope` is empty in a body that neither declares `p` nor is nested inside
+                // one that does. Forwarding from such a body would push a name the callee reads as
+                // an identity key (or nothing at all), so it stays an error.
                 None if matches!(sub.get(w), Some(Ty::Param(_))) => {
                     let Some(Ty::Param(p)) = sub.get(w) else {
                         unreachable!("guarded by the arm's own pattern")
@@ -2892,13 +2896,14 @@ impl Checker {
                             span,
                             format!(
                                 "type parameter '{w}' of '{name}' is bound to {p}, which is still \
-                                 abstract here, and the hidden type witness for '{p}' is not \
-                                 reachable at this call site — only the body that DECLARES '{p}' \
-                                 carries one, and only when that body itself constructs through \
-                                 '{p}' or forwards into a module-level generic function; it never \
-                                 crosses a closure, a `spawn:`/`defer:` block or a nested `fn`. \
-                                 Call '{name}' with a concrete type, or take a factory parameter \
-                                 (`fn(...) -> {p}`) and call that instead"
+                                 abstract here, and no hidden type witness for '{p}' is reachable \
+                                 at this call site. One exists only where '{p}' is declared by a \
+                                 FUNCTION or a MEMBER — in that body and in any closure, \
+                                 `spawn:`/`defer:` block or nested `fn` inside it. A type \
+                                 parameter of an enclosing TYPE (`struct Bx[{p}]`) never has one: \
+                                 the concrete type is erased once a value exists. Declare '{p}' on \
+                                 the member instead (`fn m[{p}: <bound>](self, ...)`), or take a \
+                                 factory parameter (`fn(...) -> {p}`) and call that"
                             ),
                         );
                         return;

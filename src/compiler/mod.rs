@@ -65,7 +65,43 @@ pub(crate) fn is_builtin(name: &str) -> bool {
 /// M24 — the UNSPELLABLE local name holding the runtime type witness for type param `t`. `$` is not
 /// an identifier character, so no source binding can shadow or read it.
 fn witness_local(t: &str) -> String {
-    format!("$w:{t}")
+    format!("{WITNESS_PREFIX}{t}")
+}
+
+/// The prefix of every [`witness_local`] name — the marker a capture-entry filter matches on.
+const WITNESS_PREFIX: &str = "$w:";
+
+/// M24 Task 4 — append the enclosing frame's hidden `$w:T` bindings to a nested body's capture
+/// entries (closure, nested `fn`, `spawn:`/`defer:` block). They can never survive the
+/// free-variable filter — `$` is unspellable, so no source name makes one free — so a child proto
+/// reaches its witness only because this puts it back. `snapshot` is the SAME `snapshot_entries()`
+/// the free filter ran over, so a `$w:T` the enclosing frame itself only CAPTURED (a closure in a
+/// closure) rides along with its `CapSrc::Captured` stamp already correct.
+///
+/// Unconditional, and that is the point: the compiler captures a witness into EVERY nested body, so
+/// "is a witness for `T` reachable here?" has one answer — [`FnComp::witness_ref`] — and the
+/// checker's [`crate::checker::Checker::witness_scope`] agrees with it by construction rather than
+/// by a second, similar-looking rule. The cost is one extra captured `str` per nested body of a
+/// witness-taking fn; a `str` is sendable, so even the `spawn:` airlock is indifferent.
+fn with_witness_captures(snapshot: &[CapEntry], mut entries: Vec<CapEntry>) -> Vec<CapEntry> {
+    entries.extend(
+        snapshot
+            .iter()
+            .filter(|e| e.name.starts_with(WITNESS_PREFIX))
+            .cloned(),
+    );
+    entries
+}
+
+/// M24 Task 4 — where a frame keeps the hidden witness for a type param: its own trailing `$w:T`
+/// parameter, or a capture of the enclosing frame's.
+#[derive(Clone, Copy)]
+enum WitnessRef {
+    /// A plain, never-boxed local slot (`$w:T` cannot be in `boxed_names` — it is unspellable).
+    Local(usize),
+    /// A positional capture slot, holding the witness `str` RAW (not a cell) — see
+    /// [`with_witness_captures`], which snapshots the local's value, not a cell handle.
+    Captured(u32),
 }
 
 /// Compile a whole resolved module graph in dependency order.
@@ -259,11 +295,10 @@ struct Compiler {
     /// consumed verbatim: `fns` drives the hidden trailing `$w:T` params a generic fn's proto gets,
     /// `calls` drives the extra argument each call site pushes.
     witnesses: crate::checker::WitnessTable,
-    /// M24 — the witness TYPE-PARAM names of the fn body currently being emitted, in declaration
-    /// order. Non-empty ONLY inside that body's own proto: `compile_closure` and the `spawn:` /
-    /// `defer:` block child protos clear it (their frames have no `$w:T` local), and a nested `fn`
-    /// clears it by taking an empty `pending_witnesses`. `T.static()` lowers to `Op::CallStaticDyn`
-    /// exactly when `T` is in here — the compiler's half of the checker's `witness_scope`.
+    /// M24 — the witness TYPE-PARAM names the NEXT [`Self::compile_fn_body`] declares as trailing
+    /// `$w:T` params, in declaration order. DECLARATION only: a nested body's REACH is read off the
+    /// frame it is emitting into ([`FnComp::witness_ref`]), never from here, so this cannot drift
+    /// from what was actually captured.
     witness_locals: Vec<String>,
     /// M24 — the witness params for the NEXT `compile_fn_body`, set only at the module-level `fn`
     /// emit site (so a nested `fn` sharing a top-level fn's name can never inherit its arity).
@@ -1443,10 +1478,10 @@ impl Compiler {
         let prev_shadow = self.float_shadow.clone();
         self.float_shadow
             .extend(decl.type_params.iter().map(|tp| tp.name.clone()));
-        // M24 — this body's hidden witness params. `pending_witnesses` is set ONLY at the
-        // module-level `fn` emit site, so a nested `fn`/method takes the empty default here, which
-        // also CLEARS any enclosing body's witness locals (they live in a frame this proto cannot
-        // reach). Restored afterwards so the enclosing body keeps lowering its own `T.static()`.
+        // M24 — this body's OWN hidden witness params. `pending_witnesses` is set ONLY at the
+        // module-level `fn`/member emit site, so a nested `fn` takes the empty default: it declares
+        // none, and reaches the enclosing frame's through the `$w:T` capture entries
+        // `with_witness_captures` appended at its `MakeClosure` (Task 4).
         let witnesses = std::mem::take(&mut self.pending_witnesses);
         let prev_w = std::mem::replace(&mut self.witness_locals, witnesses);
         let r = self.compile_fn_body(decl, captured_names);
@@ -1742,7 +1777,11 @@ impl Compiler {
                     // Free-variable capture (Finding D): keep only the names the body references
                     // (relative to its own params). The recursive self-name is free in a recursive
                     // body → stays captured → the self-call resolves through the cell above.
-                    let entries = filter_entries_free_block(&fc.snapshot_entries(), &decl.body, &decl.params);
+                    let snap = fc.snapshot_entries();
+                    let entries = with_witness_captures(
+                        &snap,
+                        filter_entries_free_block(&snap, &decl.body, &decl.params),
+                    );
                     let captured_names: Vec<String> =
                         entries.iter().map(|e| e.name.clone()).collect();
                     let pid = self.compile_fn_captured(decl, captured_names)?;
@@ -1757,7 +1796,11 @@ impl Compiler {
                     // the closure, and bind it plainly. (Still a closure so it can capture outer
                     // locals — it just needs no self-cell because nothing captures it.)
                     // Free-variable capture (Finding D): keep only referenced names.
-                    let entries = filter_entries_free_block(&fc.snapshot_entries(), &decl.body, &decl.params);
+                    let snap = fc.snapshot_entries();
+                    let entries = with_witness_captures(
+                        &snap,
+                        filter_entries_free_block(&snap, &decl.body, &decl.params),
+                    );
                     let captured_names: Vec<String> =
                         entries.iter().map(|e| e.name.clone()).collect();
                     let pid = self.compile_fn_captured(decl, captured_names)?;
@@ -2118,7 +2161,9 @@ impl Compiler {
                 // are deep-copied across the airlock at `SpawnBlock`. The block becomes a synthetic
                 // zero-arg proto whose free names resolve via `GetCaptured`. Free-variable capture
                 // (Finding D) avoids dragging unused non-sendable siblings across the airlock.
-                let entries = filter_entries_free_block(&fc.snapshot_entries(), body, &[]);
+                let snap = fc.snapshot_entries();
+                let entries =
+                    with_witness_captures(&snap, filter_entries_free_block(&snap, body, &[]));
                 let captured_names: Vec<String> = entries.iter().map(|e| e.name.clone()).collect();
                 let mut child = FnComp::new("<spawned task>".to_string(), 0, false);
                 // Uniform by-reference capture (Task A): the block's own boxed-name set (unwired).
@@ -2132,11 +2177,10 @@ impl Compiler {
                     child.emit(Op::EnterNursery, span);
                     child.nursery_scopes += 1;
                 }
-                // M24: the block's own proto has no `$w:T` local (see `compile_closure`).
-                let prev_w = std::mem::take(&mut self.witness_locals);
-                let r = self.compile_block_scoped(&mut child, body);
-                self.witness_locals = prev_w;
-                r?;
+                // M24 Task 4: the block reaches the enclosing frame's witnesses through
+                // `with_witness_captures` above — a `str` per witness, deep-copied across the
+                // airlock like any captured string.
+                self.compile_block_scoped(&mut child, body)?;
                 if implicit {
                     child.nursery_scopes -= 1;
                 }
@@ -4146,7 +4190,9 @@ impl Compiler {
                 // reference at the defer point (exactly `compile_spawn`'s Block arm, minus the
                 // airlock), then defer-invoke it with 0 args. Reuses `MakeClosure` + `DeferCall` — no
                 // new op. Free-variable capture (Finding D): only names the block references.
-                let entries = filter_entries_free_block(&fc.snapshot_entries(), body, &[]);
+                let snap = fc.snapshot_entries();
+                let entries =
+                    with_witness_captures(&snap, filter_entries_free_block(&snap, body, &[]));
                 let captured_names: Vec<String> = entries.iter().map(|e| e.name.clone()).collect();
                 let mut child = FnComp::new("<deferred block>".to_string(), 0, false);
                 // Uniform by-reference capture (Task A): the block's own boxed-name set (unwired).
@@ -4162,11 +4208,9 @@ impl Compiler {
                     child.emit(Op::EnterNursery, span);
                     child.nursery_scopes += 1;
                 }
-                // M24: the block's own proto has no `$w:T` local (see `compile_closure`).
-                let prev_w = std::mem::take(&mut self.witness_locals);
-                let r = self.compile_block_scoped(&mut child, body);
-                self.witness_locals = prev_w;
-                r?;
+                // M24 Task 4: the block reaches the enclosing frame's witnesses through
+                // `with_witness_captures` above.
+                self.compile_block_scoped(&mut child, body)?;
                 if implicit {
                     child.nursery_scopes -= 1;
                 }
@@ -4467,11 +4511,12 @@ impl Compiler {
         for src in srcs {
             match src {
                 crate::checker::WitnessSrc::Concrete(k) => fc.emit(Op::ConstStr(k.clone()), span),
-                // FORWARDING: the caller's own `$w:p` local IS the argument. The checker records
-                // this only where that local is directly reachable (`Checker::witness_scope`), so
-                // a missing slot is an internal invariant break, never a short `argc`.
+                // FORWARDING: the caller's own witness for `p` IS the argument — its `$w:p` local,
+                // or (Task 4, inside a nested body) the capture of it. The checker records this only
+                // where that witness is reachable (`Checker::witness_scope`), so a missing one is an
+                // internal invariant break, never a short `argc`.
                 crate::checker::WitnessSrc::Forward(p) => {
-                    let Some(slot) = fc.resolve_local(&witness_local(p)) else {
+                    let Some(w) = fc.witness_ref(p) else {
                         return Err(CompileError {
                             message: format!(
                                 "internal: no type witness in scope to forward as '{p}' into \
@@ -4480,7 +4525,7 @@ impl Compiler {
                             span,
                         });
                     };
-                    fc.emit_get_local_raw(slot, span);
+                    fc.emit_witness(w, span);
                 }
             }
         }
@@ -4504,25 +4549,18 @@ impl Compiler {
         {
             // M24 — `T.method(args)` through a generic bound's STATIC requirement. NO table lookup is
             // needed here: `T` is a type PARAM (never in `bare_types`/`static_methods`), and this
-            // compiler itself declared the `$w:T` local for exactly the fns the checker's `fns` table
-            // named — so "a `Field` call on a bare `T` for which a `$w:T` local exists" IS the
-            // witness call. The checker guarantees the local is reachable wherever it accepts the
-            // call (`Checker::witness_scope`), so a missing slot is an internal invariant break.
+            // compiler itself created the `$w:T` binding — a trailing param of the fns the checker's
+            // `fns` table named, or (Task 4) a capture of one in a nested body — so "a `Field` call on
+            // a bare `T` for which a `$w:T` binding is reachable" IS the witness call. That reach
+            // (`FnComp::witness_ref`) is the compiler's half of `Checker::witness_scope`.
             if let ExprKind::Ident(t) = &obj.kind
                 && fc.is_unbound(t)
-                && self.witness_locals.iter().any(|w| w == t)
+                && let Some(w) = fc.witness_ref(t)
             {
-                let Some(slot) = fc.resolve_local(&witness_local(t)) else {
-                    return Err(CompileError {
-                        message: format!(
-                            "internal: no type witness in scope for '{t}.{name}' (the witness does \
-                             not cross a closure / spawn / defer boundary)"
-                        ),
-                        span,
-                    });
-                };
                 self.compile_args(fc, args)?;
-                fc.emit_get_local_raw(slot, span);
+                // The SAME `witness_ref` that admitted this call emits it — there is no second
+                // lookup that could come back empty and leave `CallStaticDyn` reading an operand.
+                fc.emit_witness(w, span);
                 fc.emit(
                     Op::CallStaticDyn {
                         method: name.clone(),
@@ -5069,17 +5107,21 @@ impl Compiler {
         let mut free: HashSet<String> = HashSet::new();
         let params_set: HashSet<String> = params.iter().map(|p| p.name.clone()).collect();
         free_names_expr(body, &params_set, &mut free);
-        let entries: Vec<CapEntry> = fc
-            .snapshot_entries()
-            .into_iter()
-            .filter(|e| free.contains(&e.name))
-            .collect();
+        let snap = fc.snapshot_entries();
+        // M24 Task 4: a closure captures only FREE VARIABLES, and the enclosing frame's `$w:T` is
+        // never spelled in the source — so it is appended explicitly, and travels BY VALUE (the
+        // point of case 1: a closure that outlives its defining frame still constructs the right
+        // type).
+        let entries: Vec<CapEntry> = with_witness_captures(
+            &snap,
+            snap.iter()
+                .filter(|e| free.contains(&e.name))
+                .cloned()
+                .collect(),
+        );
         let captured_names: Vec<String> = entries.iter().map(|e| e.name.clone()).collect();
 
         let mut child = FnComp::new("<closure>".to_string(), params.len(), false);
-        // M24: a closure is its own proto and captures only FREE VARIABLES; the enclosing frame's
-        // `$w:T` local is never spelled in the source, so it is never captured and unreachable here.
-        let prev_w = std::mem::take(&mut self.witness_locals);
         // Uniform by-reference capture (Task A): this closure's own boxed-name set (unwired).
         child.boxed_names = captured_names_of_closure(body, params);
         child.captured_names = captured_names;
@@ -5091,9 +5133,7 @@ impl Compiler {
         self.emit_float_param_prologue(&mut child, params);
         // Uniform by-reference capture: box any param captured by a nested closure (after coercion).
         self.emit_box_param_prologue(&mut child, params);
-        let r = self.compile_expr(&mut child, body);
-        self.witness_locals = prev_w;
-        r?;
+        self.compile_expr(&mut child, body)?;
         child.emit(Op::Return, span);
         let pid = self.finish(child);
 
@@ -6460,6 +6500,35 @@ impl FnComp {
 
     fn captures(&self, name: &str) -> bool {
         self.captured_names.iter().any(|n| n == name)
+    }
+
+    /// M24 — THE derivation of "is the hidden type witness for `t` reachable in this frame?": it is
+    /// either this body's own trailing `$w:t` parameter, or — Task 4 — a capture appended by
+    /// [`with_witness_captures`] at the nested-body construction site. Nothing else can produce a
+    /// `$w:` binding, so this answer IS the compiler's real capture behavior, which is what the
+    /// checker's `witness_scope` predicate has to mirror.
+    fn witness_ref(&self, t: &str) -> Option<WitnessRef> {
+        let name = witness_local(t);
+        if let Some(slot) = self.resolve_local(&name) {
+            return Some(WitnessRef::Local(slot));
+        }
+        self.captured_names
+            .iter()
+            .position(|n| *n == name)
+            .map(|s| WitnessRef::Captured(s as u32))
+    }
+
+    /// Push a witness [`Self::witness_ref`] already resolved. Infallible on purpose: taking the
+    /// resolved reference (never a name to re-look-up) makes "the guard said yes but nothing was
+    /// pushed" — a wrong `argc` / an operand read as a witness — unrepresentable.
+    fn emit_witness(&mut self, w: WitnessRef, span: Span) {
+        match w {
+            WitnessRef::Local(slot) => self.emit_get_local_raw(slot, span),
+            // The captured witness is the raw `str` (never boxed, because `$w:T` is unspellable and
+            // so can never be in `boxed_names`), so NO trailing `CellLoad` — the one capture read
+            // that legitimately skips it.
+            WitnessRef::Captured(slot) => self.emit(Op::GetCaptured(slot), span),
+        }
     }
 
     /// A free/global name in this frame: neither a local nor a captured binding. The guard used to

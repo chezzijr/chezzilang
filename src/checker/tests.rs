@@ -20649,49 +20649,73 @@ fn witness_static_call_forwarding_ok() {
     );
 }
 
-/// The `$w:T` local lives in the frame of the fn (or member) that DECLARES `T`. A closure, a
-/// `spawn:`/`defer:` block and a nested `fn` each compile to their own proto that does not carry it,
-/// so a `T.static()` written inside one is rejected rather than mis-lowered to a wrong (or missing)
-/// key. (A METHOD is no longer in this list — Task 5 gives a member-declared `[T]` its own witness.)
+/// M24 Task 4 — the `$w:T` binding REACHES a nested body: `with_witness_captures` appends it to the
+/// capture entries of every closure, nested `fn`, `spawn:` block and `defer:` block, so `T.static()`
+/// inside one lowers to the same `CallStaticDyn`. The witness is a `str`, so it crosses BY VALUE —
+/// an escaping closure and the `spawn:` airlock both stay correct. The RUNNING half (that the value
+/// captured is the right type, on both engines) is `tests/chz/spec/static_witness_test.chz`.
 #[test]
-fn witness_static_call_outside_module_fn_body_rejected() {
-    let needle = "can only be called directly in the body of the function that declares";
+fn witness_static_call_inside_a_nested_body_ok() {
     let head = "protocol Default:\n    fn default() -> Self\nstruct Counter:\n    n: int\n    fn default() -> Counter:\n        return Counter(0)\n";
-    // a closure body
-    entry_rejects(
-        &format!(
-            "{head}fn bad[T: Default](x: T) -> int:\n    f := fn(): T.default()\n    return 1\nfn main():\n    print(bad(Counter(1)))\nmain()\n"
-        ),
-        needle,
-    );
-    // a `spawn:` block (behind the airlock — the witness is not a free variable, so never captured)
-    entry_rejects(
-        &format!(
-            "{head}fn bad[T: Default](x: T) -> int:\n    parallel:\n        spawn:\n            y := T.default()\n    return 1\nfn main():\n    print(bad(Counter(1)))\nmain()\n"
-        ),
-        needle,
-    );
+    // a closure body — including one that ESCAPES its defining frame
+    entry_ok(&format!(
+        "{head}fn build[T: Default](x: T) -> fn() -> T:\n    return fn(): T.default()\nfn main():\n    print(build(Counter(1))().n)\nmain()\n"
+    ));
+    // a `spawn:` block (behind the airlock — a `str` deep-copies across it)
+    entry_ok(&format!(
+        "{head}fn go[T: Default](x: T) -> int:\n    parallel:\n        spawn:\n            y := T.default()\n    return 1\nfn main():\n    print(go(Counter(1)))\nmain()\n"
+    ));
     // a `defer:` block (its own child proto)
-    entry_rejects(
-        &format!(
-            "{head}fn bad[T: Default](x: T) -> int:\n    defer:\n        y := T.default()\n    return 1\nfn main():\n    print(bad(Counter(1)))\nmain()\n"
-        ),
-        needle,
-    );
+    entry_ok(&format!(
+        "{head}fn go[T: Default](x: T) -> int:\n    defer:\n        y := T.default()\n    return 1\nfn main():\n    print(go(Counter(1)))\nmain()\n"
+    ));
     // a nested `fn` (lowered as a closure)
+    entry_ok(&format!(
+        "{head}fn go[T: Default](x: T) -> T:\n    fn inner() -> T:\n        return T.default()\n    return inner()\nfn main():\n    print(go(Counter(1)).n)\nmain()\n"
+    ));
+    // a closure inside a closure — the inner one reads the middle frame's CAPTURE (`CapSrc::Captured`)
+    entry_ok(&format!(
+        "{head}fn go[T: Default](x: T) -> fn() -> fn() -> T:\n    return fn(): fn(): T.default()\nfn main():\n    print(go(Counter(1))()().n)\nmain()\n"
+    ));
+    // a closure inside a METHOD body, over the member-level `[T]` (Task 5's witness, Task 4's reach)
+    entry_ok(&format!(
+        "{head}struct Holder:\n    k: int\n    fn go[T: Default](self, x: T) -> T:\n        f := fn() -> T: T.default()\n        return f()\nfn main():\n    print(Holder(1).go(Counter(2)).n)\nmain()\n"
+    ));
+    // TWO witnesses, both reached from one nested body — the hidden params are positional, so the
+    // capture entries must keep them apart.
+    entry_ok(&format!(
+        "{head}struct Tag:\n    s: str\n    fn default() -> Tag:\n        return Tag(\"none\")\nfn both[T: Default, U: Default](a: T, b: U) -> str:\n    f := fn() -> str: \"{{T.default()}}{{U.default()}}\"\n    return f()\nfn main():\n    print(both(Counter(1), Tag(\"x\")))\nmain()\n"
+    ));
+}
+
+/// …and what a nested body still cannot reach: a type parameter of the enclosing TYPE
+/// (`struct Bx[T]`) has no witness ANYWHERE — Task 4 widens which bodies see a witness, never which
+/// declarations have one — so the member-level hint stays the answer, inside a closure too.
+#[test]
+fn witness_static_call_for_an_enclosing_type_param_still_rejected() {
+    let head = "protocol Default:\n    fn default() -> Self\nstruct Counter:\n    n: int\n    fn default() -> Counter:\n        return Counter(0)\n";
+    let needle = "is a type parameter of the enclosing type";
     entry_rejects(
         &format!(
-            "{head}fn bad[T: Default](x: T) -> int:\n    fn inner() -> T:\n        return T.default()\n    return 1\nfn main():\n    print(bad(Counter(1)))\nmain()\n"
+            "{head}struct Bx[T: Default]:\n    v: T\n    fn get(self) -> T:\n        return T.default()\nfn main():\n    print(1)\nmain()\n"
         ),
         needle,
     );
-    // a closure INSIDE a method body: the method's own `[T]` IS witnessed (Task 5), but the
-    // closure's proto still does not carry the local, so the boundary rule is unchanged.
     entry_rejects(
         &format!(
-            "{head}struct Holder:\n    k: int\n    fn go[T: Default](self, x: T) -> int:\n        f := fn(): T.default()\n        return 1\nfn main():\n    print(Holder(1).go(Counter(2)))\nmain()\n"
+            "{head}struct Bx[T: Default]:\n    v: T\n    fn get(self) -> T:\n        f := fn() -> T: T.default()\n        return f()\nfn main():\n    print(1)\nmain()\n"
         ),
         needle,
+    );
+    // A NESTED `fn` in that method resets `current_self_ty`, so `enclosing_type_declaring` cannot
+    // name the host and the GENERAL diagnostic answers instead. It has to be true here too — it may
+    // not tell the user that a nested `fn` carries a witness while refusing one inside a nested
+    // `fn`. (This is the only shape that reaches it, so it is also its only coverage.)
+    entry_rejects(
+        &format!(
+            "{head}struct Bx[T: Default]:\n    v: T\n    fn get(self) -> T:\n        fn inner() -> T:\n            return T.default()\n        return inner()\nfn main():\n    print(1)\nmain()\n"
+        ),
+        "A type parameter of an enclosing TYPE",
     );
 }
 
@@ -21114,46 +21138,55 @@ fn witness_forwarding_accepted_shapes_ok() {
     ));
 }
 
-/// The permit predicate is `witness_scope`: the caller's `$w:U` local must be DIRECTLY reachable at
-/// the call. A closure, a `spawn:`/`defer:` block, a nested `fn` and a method body each compile to
-/// their own proto that never carries it — so a forward written inside one is a clear error, not a
-/// mis-lowered (missing) argument.
+/// The permit predicate is `witness_scope`: the caller's witness for `U` must be reachable at the
+/// call. Task 4 — that now includes every NESTED body of the declaring fn (a closure, a
+/// `spawn:`/`defer:` block, a nested `fn`), because the compiler appends the `$w:U` capture entry
+/// there; so a forward written inside one lowers, loading the capture instead of the local.
 #[test]
-fn witness_forwarding_out_of_scope_rejected() {
-    let needle = "is not reachable at this call site";
-    // a closure body
-    entry_rejects(
-        &format!(
-            "{FWD_HEAD}fn bad[T: Default](x: T) -> int:\n    f := fn(): reset(x)\n    return 1\nfn main():\n    print(bad(Counter(1)))\nmain()\n"
-        ),
-        needle,
-    );
+fn witness_forwarding_from_a_nested_body_ok() {
+    // a closure body — the escaping spelling, so the forward runs after the defining frame is gone
+    entry_ok(&format!(
+        "{FWD_HEAD}fn go[T: Default](x: T) -> fn() -> T:\n    return fn(): reset(x)\nfn main():\n    print(go(Counter(1))().n)\nmain()\n"
+    ));
     // a `spawn:` block
-    entry_rejects(
-        &format!(
-            "{FWD_HEAD}fn bad[T: Default](x: T) -> int:\n    parallel:\n        spawn:\n            y := reset(x)\n    return 1\nfn main():\n    print(bad(Counter(1)))\nmain()\n"
-        ),
-        needle,
-    );
+    entry_ok(&format!(
+        "{FWD_HEAD}fn go[T: Default](x: T) -> int:\n    parallel:\n        spawn:\n            y := reset(x)\n    return 1\nfn main():\n    print(go(Counter(1)))\nmain()\n"
+    ));
     // a `defer:` block
-    entry_rejects(
-        &format!(
-            "{FWD_HEAD}fn bad[T: Default](x: T) -> int:\n    defer:\n        y := reset(x)\n    return 1\nfn main():\n    print(bad(Counter(1)))\nmain()\n"
-        ),
-        needle,
-    );
+    entry_ok(&format!(
+        "{FWD_HEAD}fn go[T: Default](x: T) -> int:\n    defer:\n        y := reset(x)\n    return 1\nfn main():\n    print(go(Counter(1)))\nmain()\n"
+    ));
     // a nested `fn`
-    entry_rejects(
-        &format!(
-            "{FWD_HEAD}fn bad[T: Default](x: T) -> int:\n    fn inner(y: T) -> T:\n        return reset(y)\n    return 1\nfn main():\n    print(bad(Counter(1)))\nmain()\n"
-        ),
-        needle,
-    );
-    // …but a METHOD's OWN type param forwards fine (Task 5): the hidden argument rides on the
-    // method's frame exactly as on a free fn's — pinned in `witness_member_declared_param_ok`.
+    entry_ok(&format!(
+        "{FWD_HEAD}fn go[T: Default](x: T) -> T:\n    fn inner(y: T) -> T:\n        return reset(y)\n    return inner(x)\nfn main():\n    print(go(Counter(1)).n)\nmain()\n"
+    ));
+    // a METHOD's OWN type param forwards fine (Task 5): the hidden argument rides on the method's
+    // frame exactly as on a free fn's — pinned in `witness_member_declared_param_ok`.
     entry_ok(&format!(
         "{FWD_HEAD}struct Holder:\n    k: int\n    fn go[T: Default](self, x: T) -> T:\n        return reset(x)\nfn main():\n    print(Holder(1).go(Counter(2)).n)\nmain()\n"
     ));
+}
+
+/// …and a forward whose param has no witness ANYWHERE still fails clearly. A type parameter of the
+/// enclosing TYPE is the case that survives Task 4: no frame in the program holds a witness for it,
+/// so neither the method body nor a closure inside it can forward it.
+#[test]
+fn witness_forwarding_of_an_enclosing_type_param_rejected() {
+    // The needle is the clause that has to stay TRUE for this shape: the enclosing TYPE's param has
+    // no witness anywhere, so the message must not imply the current body carries one.
+    let needle = "A type parameter of an enclosing TYPE";
+    entry_rejects(
+        &format!(
+            "{FWD_HEAD}struct Bx[T: Default]:\n    v: T\n    fn go(self) -> T:\n        return reset(self.v)\nfn main():\n    print(1)\nmain()\n"
+        ),
+        needle,
+    );
+    entry_rejects(
+        &format!(
+            "{FWD_HEAD}struct Bx[T: Default]:\n    v: T\n    fn go(self) -> T:\n        f := fn() -> T: reset(self.v)\n        return f()\nfn main():\n    print(1)\nmain()\n"
+        ),
+        needle,
+    );
 }
 
 /// A type param with NO static-carrying bound has nothing to forward — that must stay the ordinary

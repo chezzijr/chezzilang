@@ -367,12 +367,13 @@ impl Checker {
         // signature, not a fresh derivation: forwarding makes the set transitive, so a recomputation
         // from a partly-updated state could disagree with the arity `check_fn_body` and the compiler
         // use.
-        let wparams = if saved_in_fn {
-            Vec::new()
+        // Task 4 — a nested fn declares none and INHERITS the enclosing scope (its `MakeClosure`
+        // carries the `$w:T` capture entries), so leave `witness_scope` alone in that arm.
+        let saved_witness_scope = if saved_in_fn {
+            self.witness_scope.clone()
         } else {
-            sig.witness_params.clone()
+            std::mem::replace(&mut self.witness_scope, sig.witness_params.clone())
         };
-        let saved_witness_scope = std::mem::replace(&mut self.witness_scope, wparams);
         self.push_scope();
         for (i, param) in decl.params.iter().enumerate() {
             let ty = if param.name == "self" {
@@ -2477,11 +2478,9 @@ impl Checker {
                 // an enclosing `recover:` boundary (a `recover:` nested INSIDE the block re-arms it).
                 let saved_recover = std::mem::replace(&mut self.recover_depth, 0);
                 let saved_in_defer = std::mem::replace(&mut self.in_defer_block, true);
-                // M24: a `defer:` block compiles to its own child proto, which does NOT capture the
-                // enclosing frame's `$w:T` local — so no witness is reachable inside it.
-                let saved_ws = std::mem::take(&mut self.witness_scope);
+                // M24 Task 4: the witness scope carries in — `compile_defer`'s block arm appends the
+                // enclosing frame's `$w:T` bindings to the child proto's capture entries.
                 self.check_block(body);
-                self.witness_scope = saved_ws;
                 self.in_defer_block = saved_in_defer;
                 self.recover_depth = saved_recover;
                 self.loop_depth = saved_loop_depth;
@@ -2627,16 +2626,15 @@ impl Checker {
                         // this task targets the task (nil-returning → reject), exactly as a bare
                         // `spawn: v := g()?` does. Reset the flag across this task boundary.
                         let saved_in_defer = std::mem::replace(&mut self.in_defer_block, false);
-                        // M24: a `spawn:` block is its own child proto behind the airlock — the
-                        // enclosing frame's `$w:T` local is not a free variable of the block, so it
-                        // is not captured and no witness is reachable inside it.
-                        let saved_ws = std::mem::take(&mut self.witness_scope);
+                        // M24 Task 4: the witness scope carries in. `compile_spawn`'s block arm
+                        // appends the enclosing frame's `$w:T` bindings to the capture entries, and
+                        // a witness is a plain `str` — it deep-copies across the airlock like any
+                        // other captured string, so nothing here needs a sendability exemption.
                         self.push_scope();
                         for stmt in body {
                             self.check_stmt(stmt);
                         }
                         self.pop_scope();
-                        self.witness_scope = saved_ws;
                         self.in_defer_block = saved_in_defer;
                         self.loop_depth = saved_loop_depth;
                         self.capture_floors.pop();
@@ -3585,14 +3583,15 @@ impl Checker {
         let saved_recover = std::mem::replace(&mut self.recover_depth, 0);
         // …and it is NOT a defer block: a `?` inside a fn declared in a defer block targets that fn.
         let saved_in_defer = std::mem::replace(&mut self.in_defer_block, false);
-        // M24 — the witness params whose `$w:T` local this body can reach, and the name the
+        // M24 — the witness params whose `$w:T` binding this body can reach, and the name the
         // contract's fn-half keys them under. A MODULE-LEVEL FREE fn keys on its own name; a MEMBER
         // (Task 5 — a method or static method declaring its own `[T]`) keys on `<type key>.<method>`,
         // which cannot collide with a fn name (no fn name contains a `.`). `saved_in_fn` (the
         // pre-replace `in_fn_body`) being true means this is a NESTED fn, which the compiler lowers
-        // as a closure with no witness params — it gets none, so a `T.static()` inside one is
-        // rejected rather than mis-lowered. So is a body whose receiver is neither struct, enum nor
-        // newtype (nothing there declares a proto the witness could ride on).
+        // as a closure that DECLARES no witness param — it INHERITS the enclosing scope through the
+        // capture entries instead (Task 4), so its scope is left untouched below. A body whose
+        // receiver is neither struct, enum nor newtype declares none and inherits none (nothing
+        // there declares a proto the witness could ride on).
         let witness_fn_name = match &self_ty {
             _ if saved_in_fn => None,
             None => Some(decl.name.clone()),
@@ -3617,7 +3616,14 @@ impl Checker {
                 .fns
                 .insert((self.graph_module_idx, fname), wparams.clone());
         }
-        let saved_witness_scope = std::mem::replace(&mut self.witness_scope, wparams);
+        // A NESTED fn inherits (Task 4 — its `MakeClosure` carries the `$w:T` entries); every other
+        // body gets exactly the witness params it declares. Restoring the clone is a no-op for the
+        // inherit arm, which is what "inherits" means.
+        let saved_witness_scope = if saved_in_fn {
+            self.witness_scope.clone()
+        } else {
+            std::mem::replace(&mut self.witness_scope, wparams)
+        };
         self.push_scope();
         // Editor hover: record the function's OWN signature at its decl-site name token (no-op
         // off-probe; parity-neutral — `name_span` is runtime-inert). Covers free fns AND methods,

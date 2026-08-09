@@ -3598,11 +3598,10 @@ impl Checker {
         // not seed the enclosing generator's `collected_yields` during inference. (Defensive — mirrors
         // `yield_ty.take()`; closures are single-expression so a closure `yield` is unparseable today.)
         let saved_ig = std::mem::replace(&mut self.in_generator, false);
-        // M24: a closure compiles to its own child proto and captures only its body's FREE VARIABLES.
-        // The enclosing generic fn's `$w:T` witness local is never spelled in the source, so it is
-        // never free, never captured, and not reachable here — clear the witness scope so a
-        // `T.static()` inside a closure body is rejected instead of mis-lowered.
-        let saved_witness_scope = std::mem::take(&mut self.witness_scope);
+        // M24 Task 4: the witness scope CARRIES INTO a closure body. `$w:T` is never a free variable
+        // (it is unspellable), so `compile_closure` appends it to the capture entries explicitly and
+        // unconditionally — the witness crosses BY VALUE, so a closure that outlives its defining
+        // frame still constructs the right type.
         // Mark BEFORE param binding so the free-closure finalize (below) is suppressed if EITHER an
         // un-inferable PARAM (`cannot infer type of parameter`) or the body emits a real error — a
         // residual `Unknown` return is then a cascade, not a genuine un-inferable return.
@@ -3677,7 +3676,6 @@ impl Checker {
         let body_ty = self.infer(body);
         let closure_had_err = self.errors.len() > closure_mark;
         self.pop_scope();
-        self.witness_scope = saved_witness_scope;
         self.loop_depth = saved_loop_depth;
         self.recover_depth = saved_recover;
         self.in_defer_block = saved_in_defer;

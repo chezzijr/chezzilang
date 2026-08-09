@@ -1713,15 +1713,19 @@ struct Checker {
     /// what fills each witness at each call site). Recorded only while [`Self::harvest_keywords`] is
     /// set; consumed verbatim by the compiler. See [`WitnessTable`].
     witnesses: WitnessTable,
-    /// M24 — the witness TYPE-PARAM names whose `$w:T` local is DIRECTLY reachable at the statement
+    /// M24 — the witness TYPE-PARAM names whose `$w:T` binding is reachable at the statement
     /// currently being checked: the witness params of the enclosing MODULE-LEVEL free fn or of the
     /// enclosing MEMBER (Task 5 — a method/static method declares its own `[T]`, and the hidden
-    /// argument rides on its frame the same way), and empty everywhere else. Cleared (save/restore)
-    /// at every boundary that compiles to its own proto and would therefore not see that local — a
-    /// closure body, a `spawn:` / `defer:` block, a nested `fn`. `T.static_method()` is accepted ONLY
-    /// when `T` is in here, which is exactly what the compiler can lower. A type param of the
-    /// enclosing TYPE (`struct Bx[T]`) is never in here: its witness would have to live in the
-    /// instance, which is a different mechanism.
+    /// argument rides on its frame the same way), and empty everywhere else.
+    ///
+    /// Task 4 — it CARRIES INTO every nested body (a closure, a `spawn:`/`defer:` block, a nested
+    /// `fn`), because the compiler appends the enclosing frame's `$w:T` bindings to that body's
+    /// capture entries unconditionally (`compiler::with_witness_captures`). The witness is a plain
+    /// `str`, so it crosses BY VALUE — a closure outliving its defining frame, and the `spawn:`
+    /// airlock, both stay correct. `T.static_method()` is accepted ONLY when `T` is in here, which
+    /// is exactly what the compiler can lower (`compiler::FnComp::witness_ref` is the other half).
+    /// A type param of the enclosing TYPE (`struct Bx[T]`) is never in here: its
+    /// witness would have to live in the instance, which is a different mechanism.
     witness_scope: Vec<String>,
     /// M24 Task 5 — set while type-checking a `spawn <call>` / `defer <call>` TARGET: the target
     /// call's [`witness_key_span`] and the keyword. `record_witness_call` refuses a call whose key
