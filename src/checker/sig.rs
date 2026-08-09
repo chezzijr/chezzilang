@@ -908,9 +908,9 @@ impl Checker {
     /// Because forwarding is transitive (`a` forwards into `b` which constructs), this answer depends
     /// on OTHER fns' answers, and a fn is hoisted before its callees. [`Checker::hoist`] therefore
     /// re-runs this to a FIXPOINT over the module's free fns once every signature exists. The
-    /// iteration is monotone — a charge is only ever added — so it converges; a witness set that
-    /// crosses a MODULE boundary is not resolved here, because such a call is rejected outright
-    /// (M24 Task 3).
+    /// iteration is monotone — a charge is only ever added — so it converges. A forwarding target in
+    /// ANOTHER module needs no fixpoint: modules are checked deps-first, so an imported callee's
+    /// `witness_params` is already final when this module hoists (Task 3).
     ///
     /// Declaration order is preserved — it IS the witness-parameter order, so the checker's record
     /// site, the compiler's `$w:T` locals, and the call site's pushed arguments all agree.
@@ -956,10 +956,22 @@ impl Checker {
         // can do (it runs long after this), so every static-bounded param THAT THIS SIGNATURE CAN
         // BIND is charged. A charge that turns out unused is inert arity; a MISSING one would be a
         // call the checker accepts and the compiler cannot lower.
+        // A name is a forwarding target either as a FN this module can call bare (declared here or
+        // `from`-imported — one table), or as a bound MODULE that exports one, since the only way to
+        // reach `lib.reset(x)` is to name `lib`. The module half is coarser still (any mention of
+        // `lib` counts, not just a call to its witness-taking member) because the qualified callee is
+        // a `Field` and the free-name walk yields only the module bind; it is the same trade as the
+        // bare half — over-inclusion costs positions, under-inclusion would be a forward that cannot
+        // lower.
         let forwards = mentioned.iter().any(|n| {
             self.functions
                 .get(n)
                 .is_some_and(|s| !s.witness_params.is_empty())
+                || self
+                    .imported_modules
+                    .get(n)
+                    .and_then(|id| self.module_sigs.get(id))
+                    .is_some_and(|s| s.functions.values().any(|f| !f.witness_params.is_empty()))
         });
         cands
             .into_iter()
@@ -1000,13 +1012,38 @@ impl Checker {
         let ExprKind::Call { callee, .. } = &e.kind else {
             return;
         };
-        let ExprKind::Ident(fname) = &callee.kind else {
-            return;
+        // Both callee spellings that can name a module-level generic fn: bare (local or
+        // `from`-imported — one `FnSig` table), and module-QUALIFIED (`lib.reset(...)`, whose sig
+        // lives in the bound module's `ModuleSig`). Task 3 made the qualified one callable, so it is
+        // a `defer` target the emit site would silently push short — wall it here too. (`spawn
+        // lib.f(...)` is additionally refused as a non-sendable module receiver; this fires first and
+        // says why.)
+        let (fname, w) = match &callee.kind {
+            ExprKind::Ident(fname) if self.lookup(fname).is_none() => (
+                fname,
+                self.functions.get(fname).map(|s| s.witness_params.clone()),
+            ),
+            ExprKind::Field { obj, name, .. } => {
+                let ExprKind::Ident(mname) = &obj.kind else {
+                    return;
+                };
+                // A whole-module bind lands in the VALUE namespace as `Ty::Module`, so a plain
+                // `lookup(..).is_some()` would skip every qualified call. Anything else bound to the
+                // name is a genuine local shadow, i.e. an ordinary method call.
+                if !matches!(self.lookup(mname), None | Some(Ty::Module(_))) {
+                    return;
+                }
+                let w = self
+                    .imported_modules
+                    .get(mname)
+                    .and_then(|id| self.module_sigs.get(id))
+                    .and_then(|s| s.functions.get(name))
+                    .map(|f| f.witness_params.clone());
+                (name, w)
+            }
+            _ => return, // a local shadow, or a callee that is not a named fn
         };
-        if self.lookup(fname).is_some() {
-            return; // a local shadow — a plain value call, not this fn
-        }
-        let Some(w) = self.functions.get(fname).map(|s| s.witness_params.clone()) else {
+        let Some(w) = w else {
             return;
         };
         if w.is_empty() {

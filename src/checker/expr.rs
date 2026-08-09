@@ -1894,9 +1894,7 @@ impl Checker {
                     // A generic function: infer its type parameters from the arguments, enforce
                     // bounds, and substitute into the return type.
                     if !sig.type_params.is_empty() {
-                        return Some(
-                            self.infer_generic_call(name, &sig, args, targs, span, hint, true),
-                        );
+                        return Some(self.infer_generic_call(name, &sig, args, targs, span, hint));
                     }
                     // Float params are coerced at the callee's prologue (compile_fn / extern).
                     // Honor an optional trailing tail (`min_params < params.len()`, e.g. a native
@@ -2197,10 +2195,10 @@ impl Checker {
                         // turbofish (`m.f[int]()`) and the expected-type hint — a type param that
                         // appears ONLY in the return type (`fn empty_list[T]() -> List[T]`) is otherwise
                         // unsolvable and leaked `List[T]` into a user-facing type.
-                        // M24: `local_call = false` — a module-qualified callee's witness would have to be
-                        // keyed to the DECLARING module (Task 3), so a witness-needing one is rejected.
-                        return self
-                            .infer_generic_call(method, &fsig, args, type_args, span, hint, false);
+                        // M24 Task 3: a witness-needing callee records here exactly like a bare one —
+                        // the entry is keyed by the CALLING module, and the compiler resolves the
+                        // callee's hidden arity through this same module bind.
+                        return self.infer_generic_call(method, &fsig, args, type_args, span, hint);
                     }
                     // Float params are coerced at the callee's prologue. Honor an optional trailing
                     // tail (`min_params < params.len()`, e.g. `request.get(url, timeout_ms?)`); for

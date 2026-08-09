@@ -5209,6 +5209,52 @@ fn struct_match_qualified_whole_module_runs_both_engines() {
     assert_eq!(vo, io, "serial vs M:N divergence");
 }
 
+/// M24 Task 3 — a static-witness call ACROSS a module boundary must RUN, on both engines. Type-check
+/// alone proves nothing here: the hidden argument is the concrete type's runtime IDENTITY KEY, which
+/// is the OWNING module's (`<module-key>::Name`) — a wrong key surfaces only at run time, as
+/// `type 'X' has no static method 'default'`. Every direction is exercised: the qualified callee
+/// (`lib.reset`), the `from`-imported one (bare + aliased), a LOCAL type witnessing the IMPORTED
+/// generic, an IMPORTED type witnessing a LOCAL generic, and a local generic FORWARDING its own
+/// still-abstract witness into the imported one.
+#[test]
+fn witness_cross_module_runs_both_engines() {
+    let dir = std::env::temp_dir().join(format!("chezzi_vm_xmod_witness_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("lib.chz"),
+        "protocol Default:\n    fn default() -> Self\n\nstruct Counter:\n    n: int\n    fn default() -> Counter:\n        return Counter(7)\n\nfn reset[T: Default](old: T) -> T:\n    return T.default()\n",
+    )
+    .unwrap();
+    // A THIRD module in the middle: its `twice` forwards its own still-abstract witness into `lib`'s
+    // `reset` — so a type declared in the ENTRY module reaches its `default()` across TWO boundaries.
+    std::fs::write(
+        dir.join("mid.chz"),
+        "import lib\nimport reset from lib\n\nfn twice[U: Default](x: U) -> U:\n    return reset(lib.reset(x))\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.chz");
+    std::fs::write(
+        &entry,
+        "import lib\nimport mid\nimport reset from lib\nimport reset as again from lib\n\nstruct Local:\n    k: str\n    fn default() -> Local:\n        return Local(\"loc\")\n\nfn mine[T: Default](x: T) -> T:\n    return T.default()\n\nfn fwd[U: Default](x: U) -> U:\n    return lib.reset(x)\n\nfn main():\n    print(lib.reset(lib.Counter(1)).n)\n    print(reset(lib.Counter(1)).n)\n    print(again(lib.Counter(1)).n)\n    print(lib.reset[lib.Counter](lib.Counter(1)).n)\n    print(reset(Local(\"x\")).k)\n    print(mine(lib.Counter(1)).n)\n    print(fwd(lib.Counter(1)).n)\n    print(fwd(Local(\"y\")).k)\n    print(mid.twice(Local(\"z\")).k)\n    print(mid.twice(lib.Counter(1)).n)\nmain()\n",
+    )
+    .unwrap();
+    let graph = crate::resolver::build_graph(&entry).expect("resolve");
+    if let Err(errs) = crate::checker::check_graph(&graph) {
+        let _ = std::fs::remove_dir_all(&dir);
+        panic!("program must type-check, got: {errs:?}");
+    }
+    let (vo, _ve, vr, _vc) = run_file(&entry);
+    let (io, _ie, ir, _ic) = run_file_p(&entry);
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(vr.is_ok(), "serial VM faulted: {vr:?}");
+    assert!(ir.is_ok(), "M:N engine faulted: {ir:?}");
+    assert_eq!(
+        vo, "7\n7\n7\n7\nloc\n7\n7\nloc\nloc\n7\n",
+        "serial VM output (a wrong identity key faults, a wrong witness prints another type)"
+    );
+    assert_eq!(vo, io, "serial vs M:N divergence");
+}
+
 /// Entry-last backstop — when the ENTRY file IS the always-injected prelude stub
 /// (`chezzi run std/prelude.chz`), the resolver dedups the entry's own visit and the entry-last
 /// reorder must restore `modules.last() == entry` so the positional-entry consumers designate the

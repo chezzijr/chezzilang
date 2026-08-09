@@ -268,6 +268,14 @@ struct Compiler {
     /// M24 — the witness params for the NEXT `compile_fn_body`, set only at the module-level `fn`
     /// emit site (so a nested `fn` sharing a top-level fn's name can never inherit its arity).
     pending_witnesses: Vec<String>,
+    /// M24 Task 3 — the CURRENT module's `from`-imported FUNCTION names: bound name (the `as` alias
+    /// when there is one) → `(declaring module index, declared name)`. Rebuilt per `compile_module`.
+    /// [`crate::checker::WitnessTable::fns`] is keyed by the DECLARING module, so a bare call to an
+    /// imported fn must be resolved through this before it can be read — with this module's own index
+    /// the entry is simply missing, which is how a cross-module witness call used to lower one
+    /// argument short. A name this module declares as a top-level `fn` is never in here (the checker
+    /// rejects that collision outright), so a local fn always wins by construction.
+    imported_fns: HashMap<String, (usize, String)>,
     /// String-interpolation fragment discriminators for the [`crate::checker::KeywordKey`]: the
     /// whole-string span + the fragment's 0-based ordinal, maintained (save/restore) around each
     /// fragment in `compile_str`. Mirrors the checker's `kw_frag_ctx`/`kw_frag_ord` so the keyword-call
@@ -723,6 +731,7 @@ impl Compiler {
             witnesses: crate::checker::WitnessTable::default(),
             witness_locals: Vec::new(),
             pending_witnesses: Vec::new(),
+            imported_fns: HashMap::new(),
             kw_frag_ctx: crate::lexer::Span::default(),
             kw_frag_ord: 0,
             float_elem_hint: None,
@@ -1060,6 +1069,7 @@ impl Compiler {
         // qualified `geo.Point(...)` resolves to the right module's runtime key.
         self.current_module_idx = module_idx;
         self.imported_modules.clear();
+        self.imported_fns.clear();
         // Bare-resolvable type names in THIS module → runtime key: locally declared first.
         self.bare_types.clear();
         if let Some(own) = self.module_types.get(module_idx) {
@@ -1092,6 +1102,7 @@ impl Compiler {
                 Import::From { names, .. } => {
                     if let Some(tidx) = self.program.module_index(&imp.target) {
                         for (member, alias) in names {
+                            let bind = alias.clone().unwrap_or_else(|| member.clone());
                             // A `from`-imported user type becomes bare-resolvable under its bind name,
                             // keyed by the DECLARING module's runtime key.
                             if self
@@ -1100,8 +1111,12 @@ impl Compiler {
                                 .is_some_and(|t| t.contains(member))
                             {
                                 let key = self.type_key(tidx, member);
-                                let bind = alias.clone().unwrap_or_else(|| member.clone());
                                 self.bare_types.insert(bind, key);
+                            } else {
+                                // …anything else is a value/function member: remember where it was
+                                // DECLARED, so a call site can read the callee's witness arity out of
+                                // the checker's declaring-module-keyed table (M24 Task 3).
+                                self.imported_fns.insert(bind, (tidx, member.clone()));
                             }
                         }
                     }
@@ -4294,7 +4309,8 @@ impl Compiler {
     /// M24 — `spawn f(...)` / `defer f(...)` lower at their OWN emit sites (`Op::SpawnCall` /
     /// `Op::DeferCall`), which do not push witness arguments. The checker already rejects a
     /// witness-needing callee there; this is the backstop that makes a miss a loud compile error
-    /// instead of a silently short `argc`.
+    /// instead of a silently short `argc`. Both callee spellings, since Task 3 made the
+    /// module-qualified one (`defer lib.reset(c)`) reachable.
     fn reject_witness_indirect_call(
         &self,
         fc: &FnComp,
@@ -4302,13 +4318,14 @@ impl Compiler {
         kw: &str,
         span: Span,
     ) -> Result<(), CompileError> {
-        if let ExprKind::Ident(fname) = &callee.kind
-            && fc.is_unbound(fname)
-            && self
-                .witnesses
-                .fns
-                .contains_key(&(self.current_module_idx, fname.clone()))
-        {
+        let fname = match &callee.kind {
+            ExprKind::Ident(fname) => fname,
+            ExprKind::Field { name, .. } => name,
+            _ => return Ok(()),
+        };
+        // `callee_takes_witnesses` does the rest of the shape work (unbound name, module bind,
+        // declaring module), so a local shadow or a plain method call answers `false` here.
+        if self.callee_takes_witnesses(fc, callee, fname) {
             return Err(CompileError {
                 message: format!(
                     "'{fname}' takes a static-protocol bound, so it cannot be the target of `{kw}` yet"
@@ -4317,6 +4334,117 @@ impl Compiler {
             });
         }
         Ok(())
+    }
+
+    /// M24 Task 3 — does the fn a call site NAMES take hidden trailing witness params?
+    /// [`crate::checker::WitnessTable::fns`] is keyed by the module that DECLARES the fn, so the
+    /// call site's own index is only right for a local callee; a `from`-imported one resolves through
+    /// [`Self::imported_fns`] and a qualified one (`lib.reset(...)`) through the module bind. Callees
+    /// this cannot classify (a value, a method, a local shadow) answer `false` — and the stray-entry
+    /// guard in [`Self::witness_srcs`] is what keeps such a miss loud instead of one `argc` short.
+    fn callee_takes_witnesses(&self, fc: &FnComp, callee: &Expr, fname: &str) -> bool {
+        self.witness_fn_key(fc, callee, fname)
+            .is_some_and(|k| self.witnesses.fns.contains_key(&k))
+    }
+
+    /// The `(module index, fn name)` [`crate::checker::WitnessTable::fns`] would key this callee
+    /// under — the module that DECLARES it and the name it is DECLARED as (an `import reset as again`
+    /// binding is keyed `reset`, not `again`) — or `None` when the callee is not a by-name call on a
+    /// module-level fn.
+    fn witness_fn_key(&self, fc: &FnComp, callee: &Expr, fname: &str) -> Option<(usize, String)> {
+        match &callee.kind {
+            ExprKind::Ident(_) if fc.is_unbound(fname) => Some(
+                self.imported_fns
+                    .get(fname)
+                    .cloned()
+                    .unwrap_or((self.current_module_idx, fname.to_string())),
+            ),
+            ExprKind::Field { obj, .. } => match &obj.kind {
+                ExprKind::Ident(m) if fc.is_unbound(m) => self
+                    .imported_modules
+                    .get(m)
+                    .map(|&idx| (idx, fname.to_string())),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// M24 — the witness arguments this call site must push, `None` when the callee takes none.
+    /// BOTH directions are hard errors, never a silent short `argc`: a callee that needs witnesses
+    /// with no recorded entry, and a recorded entry at a call the compiler would not thread (the
+    /// checker recorded a witness the backend is about to drop).
+    fn witness_srcs(
+        &self,
+        fc: &FnComp,
+        callee: &Expr,
+        fname: &str,
+        span: Span,
+    ) -> Result<Option<Vec<crate::checker::WitnessSrc>>, CompileError> {
+        // Only a BY-NAME call on a module-level fn can be a witness call, and only such a callee is
+        // held to the stray-entry half of the guard below. A chained postfix link shares its
+        // primary expression's span (`lib.reset(c).tag(1)` keys where `lib.reset(c)` recorded), so a
+        // blanket check would read the head link's entry and reject a legal program.
+        if self.witness_fn_key(fc, callee, fname).is_none() {
+            return Ok(None);
+        }
+        let key = crate::checker::witness_key(
+            self.current_module_idx,
+            self.kw_frag_ctx,
+            self.kw_frag_ord,
+            span,
+        );
+        let recorded = self.witnesses.calls.get(&key);
+        match (self.callee_takes_witnesses(fc, callee, fname), recorded) {
+            (true, Some(srcs)) => Ok(Some(srcs.clone())),
+            (true, None) => Err(CompileError {
+                message: format!(
+                    "internal: no static-type witness recorded for the call to '{fname}'"
+                ),
+                span,
+            }),
+            (false, Some(_)) => Err(CompileError {
+                message: format!(
+                    "internal: a static-type witness is recorded for the call to '{fname}', which \
+                     this call site does not thread"
+                ),
+                span,
+            }),
+            (false, None) => Ok(None),
+        }
+    }
+
+    /// M24 — push one argument per witness slot, on top of the already-pushed declared args: a
+    /// `ConstStr` type-identity key for a CONCRETE witness, or a load of the caller's own `$w:p` local
+    /// for a FORWARDED one. Returns how many were pushed, which widens the call's `argc`.
+    fn emit_witness_args(
+        &mut self,
+        fc: &mut FnComp,
+        srcs: &[crate::checker::WitnessSrc],
+        fname: &str,
+        span: Span,
+    ) -> Result<usize, CompileError> {
+        for src in srcs {
+            match src {
+                crate::checker::WitnessSrc::Concrete(k) => fc.emit(Op::ConstStr(k.clone()), span),
+                // FORWARDING: the caller's own `$w:p` local IS the argument. The checker records
+                // this only where that local is directly reachable (`Checker::witness_scope`), so
+                // a missing slot is an internal invariant break, never a short `argc`.
+                crate::checker::WitnessSrc::Forward(p) => {
+                    let Some(slot) = fc.resolve_local(&witness_local(p)) else {
+                        return Err(CompileError {
+                            message: format!(
+                                "internal: no type witness in scope to forward as '{p}' into \
+                                 the call to '{fname}'"
+                            ),
+                            span,
+                        });
+                    };
+                    fc.emit_get_local_raw(slot, span);
+                }
+            }
+        }
+        Ok(srcs.len())
     }
 
     fn compile_call(
@@ -4572,6 +4700,26 @@ impl Compiler {
                     return Ok(());
                 }
             }
+            // M24 Task 3 — `module.fn(args)` where the member is a generic fn that takes hidden
+            // trailing witness params. Same shape as the bare spelling, one opcode later: the member
+            // is looked up on the module object and the witness arguments ride on top of the declared
+            // ones, so `CallMethod`'s widened `argc` reaches the SAME proto (which the declaring
+            // module compiled with those hidden params) as `reset(...)` would.
+            if let Some(srcs) = self.witness_srcs(fc, callee, name, span)? {
+                self.compile_expr(fc, obj)?;
+                self.compile_args(fc, args)?;
+                let w = self.emit_witness_args(fc, &srcs, name, span)?;
+                let ic = self.next_method_ic();
+                fc.emit(
+                    Op::CallMethod {
+                        name: name.clone(),
+                        argc: args.len() + w,
+                        ic,
+                    },
+                    span,
+                );
+                return Ok(());
+            }
             self.compile_expr(fc, obj)?;
             self.compile_args(fc, args)?;
             let ic = self.next_method_ic();
@@ -4799,58 +4947,20 @@ impl Compiler {
                 return Ok(());
             }
         }
-        // M24 — a same-module call to a generic fn that takes hidden trailing witness params: push
-        // the declared args, then one `ConstStr` type-identity key per witness, and call with the
-        // widened `argc`. The compiler CONSUMES the checker's table; a missing entry for a call the
-        // checker's `fns` table says needs witnesses is a hard error, never a short `argc`.
+        // M24 — a call to a generic fn that takes hidden trailing witness params, by its bare name
+        // (declared here, or `from`-imported): push the declared args, then one argument per witness
+        // slot, and call with the widened `argc`. The compiler CONSUMES the checker's table; a
+        // mismatch either way is a hard error, never a short `argc` (see `witness_srcs`).
         if let ExprKind::Ident(fname) = &callee.kind
             && fc.is_unbound(fname)
-            && self
-                .witnesses
-                .fns
-                .contains_key(&(self.current_module_idx, fname.clone()))
+            && let Some(srcs) = self.witness_srcs(fc, callee, fname, span)?
         {
-            let key = crate::checker::witness_key(
-                self.current_module_idx,
-                self.kw_frag_ctx,
-                self.kw_frag_ord,
-                span,
-            );
-            let Some(srcs) = self.witnesses.calls.get(&key).cloned() else {
-                return Err(CompileError {
-                    message: format!(
-                        "internal: no static-type witness recorded for the call to '{fname}'"
-                    ),
-                    span,
-                });
-            };
             // `named` needs no handling here: desugar has already normalized every keyword argument
             // of a by-name call into its positional slot, so `args` is the full argument list.
             self.compile_expr(fc, callee)?;
             self.compile_args(fc, args)?;
-            for src in &srcs {
-                match src {
-                    crate::checker::WitnessSrc::Concrete(k) => {
-                        fc.emit(Op::ConstStr(k.clone()), span)
-                    }
-                    // FORWARDING: the caller's own `$w:p` local IS the argument. The checker records
-                    // this only where that local is directly reachable (`Checker::witness_scope`), so
-                    // a missing slot is an internal invariant break, never a short `argc`.
-                    crate::checker::WitnessSrc::Forward(p) => {
-                        let Some(slot) = fc.resolve_local(&witness_local(p)) else {
-                            return Err(CompileError {
-                                message: format!(
-                                    "internal: no type witness in scope to forward as '{p}' into \
-                                     the call to '{fname}'"
-                                ),
-                                span,
-                            });
-                        };
-                        fc.emit_get_local_raw(slot, span);
-                    }
-                }
-            }
-            fc.emit(Op::Call(args.len() + srcs.len()), span);
+            let w = self.emit_witness_args(fc, &srcs, fname, span)?;
+            fc.emit(Op::Call(args.len() + w), span);
             return Ok(());
         }
         // General callable value.

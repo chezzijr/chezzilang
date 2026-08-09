@@ -20546,21 +20546,72 @@ fn witness_static_call_accepted_shapes_ok() {
     ));
 }
 
-/// The witness is threaded only for a SAME-MODULE call (the key is `(module, fn name)`), so a
-/// cross-module call is refused — in BOTH import spellings, since both reach the same callee.
+/// Task 3 — the witness crosses a MODULE boundary. `WitnessTable::fns` is keyed by the DECLARING
+/// module and `calls` by the CALLING one, so a call site must resolve its callee's requirement
+/// through the import binding that named it (a module bind for `lib.reset(...)`, a `from` bind for
+/// the bare spelling). Both spellings reach the same callee, and both must lower.
+/// (Its RUNNING half — that the threaded key is the OWNING module's identity key — is
+/// `witness_cross_module_runs_both_engines` in `src/vm/tests.rs`.)
 #[test]
-fn witness_static_call_cross_module_rejected() {
+fn witness_static_call_cross_module_ok() {
     let lib = (
         "lib.chz",
-        "protocol Default:\n    fn default() -> Self\nstruct Counter:\n    n: int\n    fn default() -> Counter:\n        return Counter(0)\nfn reset[T: Default](old: T) -> T:\n    return T.default()\n",
+        "protocol Default:\n    fn default() -> Self\nstruct Counter:\n    n: int\n    fn default() -> Counter:\n        return Counter(7)\nfn reset[T: Default](old: T) -> T:\n    return T.default()\n",
     );
-    let needle = "across a module boundary is not supported yet";
+    // the module-QUALIFIED spelling, bare and turbofished
+    files_ok(&[
+        lib,
+        (
+            "main.chz",
+            "import lib\nfn main():\n    print(lib.reset(lib.Counter(9)).n)\n    print(lib.reset[lib.Counter](lib.Counter(9)).n)\nmain()\n",
+        ),
+    ]);
+    // the `from`-imported spelling, bare / turbofished / under an alias
+    files_ok(&[
+        lib,
+        (
+            "main.chz",
+            "import reset, Counter from lib\nimport reset as again from lib\nfn main():\n    print(reset(Counter(9)).n)\n    print(reset[Counter](Counter(9)).n)\n    print(again(Counter(9)).n)\nmain()\n",
+        ),
+    ]);
+    // …and a forwarding LOCAL generic feeding an IMPORTED one: the caller's own `$w:U` local fills
+    // the imported callee's slot, so forwarding crosses the boundary too (both spellings). The bound
+    // names the IMPORTED protocol, which a whole-module import makes usable bare.
+    files_ok(&[
+        lib,
+        (
+            "main.chz",
+            "import lib\nimport reset from lib\nfn twice[U: Default](x: U) -> U:\n    return reset(lib.reset(x))\nfn main():\n    print(twice(lib.Counter(9)).n)\nmain()\n",
+        ),
+    ]);
+    // the REVERSE direction — a LOCAL type witnessing an IMPORTED generic's bound (its identity key
+    // is the CALLING module's), and an IMPORTED type witnessing a LOCAL generic's bound.
+    files_ok(&[
+        lib,
+        (
+            "main.chz",
+            "import lib\nimport reset from lib\nstruct Local:\n    k: str\n    fn default() -> Local:\n        return Local(\"loc\")\nfn mine[T: Default](x: T) -> T:\n    return T.default()\nfn main():\n    print(reset(Local(\"x\")).k)\n    print(mine(lib.Counter(1)).n)\nmain()\n",
+        ),
+    ]);
+}
+
+/// `defer f(...)` lowers at its own emit site (`Op::DeferCall`), which pushes no witness — so a
+/// witness-taking callee is refused there in the CROSS-MODULE spellings too. (`spawn lib.f(...)` is
+/// already walled by the non-sendable module receiver; the bare `from`-imported spellings reach the
+/// same `FnSig` as a local one.)
+#[test]
+fn witness_fn_cannot_be_cross_module_defer_target_rejected() {
+    let lib = (
+        "lib.chz",
+        "protocol Default:\n    fn default() -> Self\nstruct Counter:\n    n: int\n    fn default() -> Counter:\n        return Counter(7)\nfn reset[T: Default](old: T) -> T:\n    return T.default()\n",
+    );
+    let needle = "cannot be the target of `defer`";
     files_reject(
         &[
             lib,
             (
                 "main.chz",
-                "import lib\nfn main():\n    print(lib.reset(lib.Counter(9)).n)\nmain()\n",
+                "import lib\nfn main():\n    defer lib.reset(lib.Counter(9))\n    print(1)\nmain()\n",
             ),
         ],
         needle,
@@ -20570,10 +20621,20 @@ fn witness_static_call_cross_module_rejected() {
             lib,
             (
                 "main.chz",
-                "import reset, Counter from lib\nfn main():\n    print(reset(Counter(9)).n)\nmain()\n",
+                "import reset, Counter from lib\nfn main():\n    defer reset(Counter(9))\n    print(1)\nmain()\n",
             ),
         ],
         needle,
+    );
+    files_reject(
+        &[
+            lib,
+            (
+                "main.chz",
+                "import lib\nfn main():\n    parallel:\n        spawn lib.reset(lib.Counter(9))\nmain()\n",
+            ),
+        ],
+        "spawn",
     );
 }
 
@@ -20910,20 +20971,18 @@ fn witness_forwarding_fn_loses_value_and_spawn_positions_rejected() {
         ),
         "cannot be the target of `spawn`",
     );
-    // …and it is no longer callable across a module boundary either (Task 3).
-    files_reject(
-        &[
-            (
-                "lib.chz",
-                &format!("{FWD_HEAD}fn fwd[T: Default](x: T) -> T:\n    return reset(x)\n"),
-            ),
-            (
-                "main.chz",
-                "import lib\nfn main():\n    print(lib.fwd(lib.Counter(9)).n)\nmain()\n",
-            ),
-        ],
-        "across a module boundary is not supported yet",
-    );
+    // …but a CALL across a module boundary keeps working (Task 3): the caller pushes the witness at
+    // the call site, which is exactly the position a function VALUE cannot offer.
+    files_ok(&[
+        (
+            "lib.chz",
+            &format!("{FWD_HEAD}fn fwd[T: Default](x: T) -> T:\n    return reset(x)\n"),
+        ),
+        (
+            "main.chz",
+            "import lib\nfn main():\n    print(lib.fwd(lib.Counter(9)).n)\nmain()\n",
+        ),
+    ]);
 }
 
 /// A generic with a static-carrying bound whose type param this signature can never BIND must not

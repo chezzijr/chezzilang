@@ -2785,27 +2785,19 @@ impl Checker {
     /// type-param recovery pass in [`Self::infer_generic_call`], because a param recovered only by
     /// the loop-back would otherwise look un-determined here.
     ///
-    /// `local_call` is false for a module-qualified call (`m.f(...)`) — deferred to M24 Task 3.
+    /// Task 3 — the callee's module does NOT matter here. The entry is keyed by the CALLING module
+    /// ([`crate::checker::witness_key`]), which is the module the compiler is emitting when it looks
+    /// it up; the callee's own requirement rides on its [`FnSig::witness_params`], which crosses the
+    /// boundary inside its `ModuleSig`. So a `from`-imported callee (`reset(c)`) and a qualified one
+    /// (`lib.reset(c)`) record exactly like a local one. What is NOT recorded here — a `defer`/`spawn`
+    /// target — is walled by [`Self::reject_witness_spawn_defer_target`], in every spelling.
     fn record_witness_call(
         &mut self,
         name: &str,
         wparams: &[String],
         sub: &HashMap<String, Ty>,
-        local_call: bool,
         span: Span,
     ) {
-        if !local_call || !self.local_fn_names.contains(name) {
-            self.error(
-                span,
-                format!(
-                    "calling '{name}' across a module boundary is not supported yet: its bound on {} \
-                     requires a static protocol method, whose hidden type witness is only threaded for \
-                     a same-module call. Wrap the call in a same-module function",
-                    wparams.join(", ")
-                ),
-            );
-            return;
-        }
         let mut srcs = Vec::with_capacity(wparams.len());
         for w in wparams {
             // Presence in `sub` is NOT enough: `enforce_bounds` silently SKIPS a param missing from
@@ -2885,10 +2877,9 @@ impl Checker {
     }
 
     /// Type-check a call to a generic function: infer each type parameter from the arguments,
-    /// enforce the declared bounds, and substitute into the return type. `local_call` is true for a
-    /// bare same-module/`from`-imported callee and false for a module-qualified one (`m.f(...)`) —
-    /// it gates M24's static-witness threading, which is same-module-only in Task 1.
-    #[allow(clippy::too_many_arguments)] // the sig pieces + call site + hint + the M24 call-kind flag
+    /// enforce the declared bounds, and substitute into the return type. Shared by the bare callee
+    /// (local or `from`-imported) and the module-qualified one (`m.f(...)`) — M24's witness record is
+    /// keyed by the CALLING module either way, so the spelling makes no difference here (Task 3).
     pub(super) fn infer_generic_call(
         &mut self,
         name: &str,
@@ -2897,7 +2888,6 @@ impl Checker {
         targs: &[Ty],
         span: Span,
         hint: Option<&Ty>,
-        local_call: bool,
     ) -> Ty {
         if args.len() != sig.params.len() {
             self.check_arity(name, sig.params.len(), args, span);
@@ -2994,7 +2984,7 @@ impl Checker {
         // read a param as un-determined that the call actually pins.
         if !sig.witness_params.is_empty() {
             let wparams = sig.witness_params.clone();
-            self.record_witness_call(name, &wparams, &subst_map, local_call, span);
+            self.record_witness_call(name, &wparams, &subst_map, span);
         }
         subst(&sig.ret, &subst_map)
     }
