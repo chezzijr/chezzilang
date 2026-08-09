@@ -1004,14 +1004,26 @@ impl Checker {
     /// returning the previous value to restore. Covers the shapes
     /// [`Self::reject_witness_spawn_defer_target`] cannot name (an instance method `h.make(c)`, a
     /// static method `Holder.build(c)`) — there the callee's requirement is only known once the
-    /// receiver is typed, which is inside `infer`. A non-call target arms nothing.
+    /// receiver is typed, which is inside `infer`.
+    ///
+    /// Armed ONLY for a callee that NAMES its target — a bare `Ident` or a member `Field`. A VALUE
+    /// callee (`defer resetter(c)(5)`, whose callee is itself a `Call`) must arm nothing: `Op::Call`
+    /// is not a by-name emit site, the value it defers is already computed, and — the actual bug —
+    /// `parse_postfix` gives that outer link the same span as its HEAD, so arming it would refuse the
+    /// head's own witness call, which evaluates eagerly in this frame and lowered fine before Task 5.
+    /// Same shape rule as `reject_witness_spawn_defer_target`, which only classifies those two
+    /// callee spellings.
     pub(super) fn enter_witness_indirect_target(
         &mut self,
         e: &Expr,
         kw: &'static str,
     ) -> Option<(Span, &'static str)> {
         let key = match &e.kind {
-            ExprKind::Call { callee, .. } => crate::checker::witness_key_span(callee, e.span),
+            ExprKind::Call { callee, .. }
+                if matches!(callee.kind, ExprKind::Ident(_) | ExprKind::Field { .. }) =>
+            {
+                crate::checker::witness_key_span(callee, e.span)
+            }
             _ => return self.witness_indirect_target,
         };
         self.witness_indirect_target.replace((key, kw))
@@ -2018,7 +2030,7 @@ impl Checker {
             }
             StmtKind::Fn(decl) => {
                 if decl.is_test {
-                    self.validate_test_fn_shape(decl, false);
+                    self.validate_test_fn_shape(decl, None);
                 }
                 // A NESTED `fn` (declared inside any block / fn body — `scopes.len() > 1`; the module
                 // top level is exactly ONE scope, so a top-level fn sees `len == 1`) is a FIRST-CLASS
@@ -2165,11 +2177,13 @@ impl Checker {
                 // (before_all/after_all/before_each/after_each), when present, must be `fn name(self)`
                 // returning nothing — validated here so the runner can trust the shape.
                 let is_suite = methods.iter().any(|m| m.is_test);
+                // The type's runtime key — the table the members' stored `witness_params` live under.
+                let host_key = self.bare_key(name);
                 for m in methods {
                     if m.is_test {
-                        self.validate_test_fn_shape(m, true);
+                        self.validate_test_fn_shape(m, Some(&host_key));
                     } else if is_suite && is_lifecycle_hook(&m.name) {
-                        self.validate_lifecycle_hook(m);
+                        self.validate_lifecycle_hook(m, &host_key);
                     }
                     // Panic-safe: a redeclared struct name means `structs[key]` is a *different*
                     // struct whose method table may not contain `m.name`. Keyed by the runtime key
@@ -2234,11 +2248,12 @@ impl Checker {
                     }
                 }
                 let is_suite = methods.iter().any(|m| m.is_test);
+                let host_key = self.bare_key(name);
                 for m in methods {
                     if m.is_test {
-                        self.validate_test_fn_shape(m, true);
+                        self.validate_test_fn_shape(m, Some(&host_key));
                     } else if is_suite && is_lifecycle_hook(&m.name) {
-                        self.validate_lifecycle_hook(m);
+                        self.validate_lifecycle_hook(m, &host_key);
                     }
                     // Skip a duplicate-named method's body check (see the struct arm) — its clear
                     // hoist-time dup error stands alone instead of a misleading return-type mismatch.
@@ -2280,7 +2295,7 @@ impl Checker {
                     if m.is_test {
                         // Parser rejects `test fn` in a newtype body, so this is unreachable; guard
                         // anyway to keep the suite invariants explicit.
-                        self.validate_test_fn_shape(m, true);
+                        self.validate_test_fn_shape(m, Some(&key));
                     }
                     // Skip a duplicate-named method's body check (see the struct arm) — its clear
                     // hoist-time dup error stands alone instead of a misleading return-type mismatch.
@@ -2668,10 +2683,10 @@ impl Checker {
     /// A `test fn` takes no parameters (free) or only `self` (method) and returns nothing. Hard
     /// errors here keep the runner's contract simple (it invokes tests with no args / only the
     /// instance). The body is still checked normally by the caller.
-    pub(super) fn validate_test_fn_shape(&mut self, decl: &FnDecl, is_method: bool) {
+    pub(super) fn validate_test_fn_shape(&mut self, decl: &FnDecl, host: Option<&str>) {
         let span = Self::fn_span(decl);
-        self.reject_witness_runner_target(decl, "a `test fn`", span);
-        if is_method {
+        self.reject_witness_runner_target(decl, host, "a `test fn`", span);
+        if host.is_some() {
             let ok = decl.params.len() == 1 && decl.params[0].name == "self";
             if !ok {
                 self.error(span, "test method must take only self".to_string());
@@ -2684,12 +2699,36 @@ impl Checker {
         }
     }
 
+    /// M24 — the ONE stored answer to "does this fn/member take hidden witness params", read BY NAME:
+    /// [`FnSig::witness_params`], derived once by [`Self::witness_params_of`] at the hoist (whose
+    /// fixpoint makes the forwarding half transitive). `host` is the type's runtime key for a member,
+    /// `None` for a module-level free fn. Never re-derives — a fresh derivation from a different point
+    /// in the pipeline is exactly the second answer this milestone forbids.
+    pub(super) fn stored_witness_params(&self, host: Option<&str>, name: &str) -> Vec<String> {
+        let sig = match host {
+            None => self.functions.get(name),
+            Some(k) => self
+                .structs
+                .get(k)
+                .and_then(|s| s.methods.get(name))
+                .or_else(|| self.enum_methods.get(k).and_then(|ms| ms.get(name)))
+                .or_else(|| self.newtype_defs.get(k).and_then(|(_, ms)| ms.get(name))),
+        };
+        sig.map(|s| s.witness_params.clone()).unwrap_or_default()
+    }
+
     /// M24 Task 5 — `chezzi test` invokes a `test fn` (and each lifecycle hook) BY NAME at a fixed
     /// arity — nothing, or the suite instance. So it can carry no hidden witness argument: the
     /// runner has no call site at which to pin `T`, and the slot would be read off the stack as a
     /// type key. Rejected at the declaration, where the fix is obvious.
-    fn reject_witness_runner_target(&mut self, decl: &FnDecl, what: &str, span: Span) {
-        let w = self.witness_params_of(decl);
+    fn reject_witness_runner_target(
+        &mut self,
+        decl: &FnDecl,
+        host: Option<&str>,
+        what: &str,
+        span: Span,
+    ) {
+        let w = self.stored_witness_params(host, &decl.name);
         if w.is_empty() {
             return;
         }
@@ -2705,9 +2744,9 @@ impl Checker {
 
     /// A suite lifecycle hook (`before_all`/`after_all`/`before_each`/`after_each`) must be
     /// `fn name(self)` returning nothing — the runner invokes it with only the instance.
-    pub(super) fn validate_lifecycle_hook(&mut self, decl: &FnDecl) {
+    pub(super) fn validate_lifecycle_hook(&mut self, decl: &FnDecl, host: &str) {
         let span = Self::fn_span(decl);
-        self.reject_witness_runner_target(decl, "a suite lifecycle hook", span);
+        self.reject_witness_runner_target(decl, Some(host), "a suite lifecycle hook", span);
         let ok = decl.params.len() == 1 && decl.params[0].name == "self";
         if !ok {
             self.error(

@@ -436,3 +436,31 @@ test fn two_member_witness_params_keep_their_declaration_order():
     p := Pair(1, 2)
     assert p.both(Counter(1), Tag("x")) == "Counter(n=0)/Tag(s='none')"
     assert p.both(Tag("x"), Counter(1)) == "Tag(s='none')/Counter(n=0)"
+
+# a `defer`/`spawn` target that is a chained VALUE call (`f(a)(b)`): `parse_postfix` gives the outer
+# link the same span as its head, so the head's own witness call must NOT be mistaken for the target.
+# The head runs eagerly at the `defer`/`spawn` statement — before the body — and its witness is an
+# ordinary constant pushed in this frame.
+fn chain_sink[T: Default](old: T, sink: List[str]) -> fn(int) -> int:
+    sink.push("{T.default()}")
+    return fn(k: int) -> int: k
+
+test fn a_deferred_value_call_keeps_its_head_links_witness():
+    sink: List[str] = []
+    fn body():
+        defer chain_sink(Counter(9), sink)(5)
+        sink.push("body")
+    body()
+    assert sink == ["Counter(n=0)", "body"]
+    sink2: List[str] = []
+    fn body2():
+        defer chain_sink(Tag("hi"), sink2)(5)
+        sink2.push("body")
+    body2()
+    assert sink2 == ["Tag(s='none')", "body"]
+
+test fn a_spawned_value_call_keeps_its_head_links_witness():
+    sink: List[str] = []
+    parallel:
+        spawn chain_sink(Counter(9), sink)(5)
+    assert sink == ["Counter(n=0)"]

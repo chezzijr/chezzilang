@@ -20986,6 +20986,20 @@ fn witness_member_cannot_be_spawn_or_defer_target_rejected() {
     entry_ok(&format!(
         "{head}fn main():\n    h := Holder(1)\n    c := Counter(9)\n    defer print(h.make(c).n)\n    parallel:\n        spawn sink(h.make(c))\nmain()\n"
     ));
+    // …and so is the HEAD LINK of a chained VALUE call target (`defer f(a)(b)`): `parse_postfix`
+    // gives the outer link the head's span, so keying the refusal on the call span alone rejected a
+    // program that lowered fine before Task 5 (the head evaluates eagerly in THIS frame; the target
+    // is the already-computed function value, which needs no witness). Both statements, and the
+    // member spelling of the head.
+    entry_ok(&format!(
+        "{head}fn mk[T: Default](old: T) -> fn(int) -> int:\n    y := T.default()\n    return fn(k: int) -> int: k\nfn main():\n    defer mk(Counter(1))(5)\n    print(1)\nmain()\n"
+    ));
+    entry_ok(&format!(
+        "{head}fn mk[T: Default](old: T) -> fn(int) -> int:\n    y := T.default()\n    return fn(k: int) -> int: k\nfn main():\n    parallel:\n        spawn mk(Counter(1))(5)\nmain()\n"
+    ));
+    entry_ok(&format!(
+        "{head}struct W:\n    k: int\n    fn mk[T: Default](self, old: T) -> fn(int) -> int:\n        y := T.default()\n        return fn(k: int) -> int: k\nfn main():\n    defer W(1).mk(Counter(1))(5)\n    print(1)\nmain()\n"
+    ));
 }
 
 /// THE HUNTED CLASS — a member that takes a hidden witness may not be reached by any dispatch that
