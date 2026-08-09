@@ -42,13 +42,17 @@ pub type KeywordTable = HashMap<KeywordKey, Vec<usize>>;
 /// checker's record site and the compiler's lookup both key on the same node.
 pub type WitnessKey = (usize, Span, usize, Span);
 
-/// M24 — where ONE witness argument at a call site comes from. Task 1 only ever produces
-/// [`WitnessSrc::Concrete`]; forwarding a caller's own witness (generic-calls-generic) is Task 2.
+/// M24 — where ONE witness argument at a call site comes from.
 #[derive(Debug, Clone, PartialEq)]
 pub enum WitnessSrc {
     /// The concrete type's runtime IDENTITY KEY (`<module-key>::Name`) — the exact key
     /// `Vm::do_static_call` resolves against `Program::structs` / `Program::enum_methods`.
     Concrete(String),
+    /// FORWARDING (slice 2): the callee's slot is filled by the CALLER's own still-abstract type
+    /// param of this name, so the argument is a load of the caller's `$w:<name>` local rather than a
+    /// constant. Recorded only when that local is directly reachable at the call site
+    /// (`Checker::witness_scope`) — which is exactly what the compiler can lower.
+    Forward(String),
 }
 
 /// M24 static-witness passing — BOTH halves of the contract, produced by the checker and CONSUMED

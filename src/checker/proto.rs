@@ -2829,21 +2829,32 @@ impl Checker {
                     );
                     return;
                 }
-                // Bound to the CALLER's own still-abstract type param: forwarding one generic fn's
-                // witness into another is M24 Task 2, and lowering it now would push the type-param
-                // NAME as if it were an identity key.
+                // Bound to the CALLER's own still-abstract type param — FORWARDING (slice 2). The
+                // caller's `$w:p` local becomes the argument, but ONLY when it is directly reachable
+                // here: `witness_scope` is empty inside a closure, a `spawn:`/`defer:` block, a
+                // nested `fn` and a method body, each of which compiles to its own proto that never
+                // carries the local. Forwarding from one of those would push a name the callee reads
+                // as an identity key (or nothing at all), so it stays an error.
                 None if matches!(sub.get(w), Some(Ty::Param(_))) => {
-                    let got = sub[w].clone();
-                    self.error(
-                        span,
-                        format!(
-                            "type parameter '{w}' of '{name}' is bound to {got}, which is still \
-                             abstract here: forwarding a static-protocol witness from one generic \
-                             function into another is not supported yet. Call '{name}' with a \
-                             concrete type"
-                        ),
-                    );
-                    return;
+                    let Some(Ty::Param(p)) = sub.get(w) else {
+                        unreachable!("guarded by the arm's own pattern")
+                    };
+                    let p = p.clone();
+                    if !self.witness_scope.contains(&p) {
+                        self.error(
+                            span,
+                            format!(
+                                "type parameter '{w}' of '{name}' is bound to {p}, which is still \
+                                 abstract here, and the hidden type witness for '{p}' is not \
+                                 reachable at this call site — it does not cross a closure, a \
+                                 `spawn:`/`defer:` block, a nested `fn`, or a method body. Call \
+                                 '{name}' from the body of the module-level generic function that \
+                                 declares '{p}', or with a concrete type"
+                            ),
+                        );
+                        return;
+                    }
+                    srcs.push(WitnessSrc::Forward(p));
                 }
                 None => {
                     self.error(

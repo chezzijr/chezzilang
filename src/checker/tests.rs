@@ -20577,13 +20577,14 @@ fn witness_static_call_cross_module_rejected() {
     );
 }
 
-/// Generic-calls-generic: the caller's own `T` is still abstract, so it has no concrete key to
-/// forward. Forwarding a witness is a later slice; today it must say so.
+/// Generic-calls-generic with the caller's `U` still abstract: slice 2 FORWARDS the caller's own
+/// `$w:U` local instead of a constant, so this is now accepted. (Its runtime half — that the value
+/// forwarded is the OUTERMOST concrete type — is `tests/chz/spec/static_witness_test.chz`; the
+/// shapes that still cannot forward are `witness_forwarding_*_rejected` below.)
 #[test]
-fn witness_static_call_forwarding_rejected() {
-    entry_rejects(
+fn witness_static_call_forwarding_ok() {
+    entry_ok(
         "protocol Default:\n    fn default() -> Self\nstruct Counter:\n    n: int\n    fn default() -> Counter:\n        return Counter(0)\nfn reset[T: Default](old: T) -> T:\n    return T.default()\nfn g[U: Default](x: U) -> U:\n    return reset(x)\nfn main():\n    print(g(Counter(1)).n)\nmain()\n",
-        "still abstract here",
     );
 }
 
@@ -20786,5 +20787,141 @@ fn non_witness_generics_unaffected_by_hidden_param_ok() {
     // module-level free fns are recorded, so this `reset` stays a plain 1-arg fn.
     entry_ok(
         "protocol Default:\n    fn default() -> Self\nstruct Counter:\n    n: int\n    fn default() -> Counter:\n        return Counter(0)\nfn reset[T: Default](old: T) -> T:\n    return T.default()\nfn shadow() -> int:\n    fn reset(k: int) -> int:\n        return k * 10\n    return reset(4)\nfn main():\n    print(shadow())\n    print(reset(Counter(9)).n)\nmain()\n",
+    );
+}
+
+// ===== M24 slice 2 — witness FORWARDING: a generic fn passes its OWN still-abstract type param's
+// witness into another generic fn (`fn twice[U: Default](x: U) -> U: return reset(reset(x))`).
+// The hidden argument stops being a constant and becomes a load of the caller's own `$w:U` local.
+//
+// SCOPE of slice 2: SAME-MODULE, and only where the caller's `$w:U` local is DIRECTLY reachable
+// (`Checker::witness_scope`) — that predicate is exactly what keeps checker-accepts ⊆
+// compiler-lowers. The RUNNING half (that the forwarded key is the OUTERMOST concrete type) is
+// `tests/chz/spec/static_witness_test.chz`.
+
+/// The head every forwarding test shares: a static-requirement protocol, two hosts, and the leaf
+/// generic that actually constructs.
+const FWD_HEAD: &str = "protocol Default:\n    fn default() -> Self\nstruct Counter:\n    n: int\n    fn default() -> Counter:\n        return Counter(0)\nstruct Tag:\n    s: str\n    fn default() -> Tag:\n        return Tag(\"none\")\nfn reset[T: Default](old: T) -> T:\n    return T.default()\n";
+
+/// The accepted forwarding surface. Each of these also RUNS in the `.chz` suite.
+#[test]
+fn witness_forwarding_accepted_shapes_ok() {
+    // the driver shape — a forward NESTED inside another forward
+    entry_ok(&format!(
+        "{FWD_HEAD}fn twice[U: Default](x: U) -> U:\n    return reset(reset(x))\nfn main():\n    print(twice(Counter(9)).n)\nmain()\n"
+    ));
+    // TRANSITIVE, three levels, with the leaf declared LAST — the charge must be a fixpoint over
+    // the module, not a source-order sweep.
+    entry_ok(&format!(
+        "{FWD_HEAD}fn lvl1[T: Default](x: T) -> T:\n    return lvl2(x)\nfn lvl2[T: Default](x: T) -> T:\n    return lvl3(x)\nfn lvl3[T: Default](x: T) -> T:\n    return T.default()\nfn main():\n    print(lvl1(Counter(1)).n)\nmain()\n"
+    ));
+    // TWO type params, forwarding the SECOND one — the hidden args are positional, so slot order
+    // (declaration order) has to survive.
+    entry_ok(&format!(
+        "{FWD_HEAD}fn second[T: Default, U: Default](a: T, b: U) -> U:\n    return reset(b)\nfn main():\n    print(second(Counter(1), Tag(\"x\")).s)\nmain()\n"
+    ));
+    // a forwarding call whose callee ALSO takes real value args: the hidden witness stays LAST
+    entry_ok(&format!(
+        "{FWD_HEAD}fn mk[T: Default](seed: T, n: int) -> T:\n    return T.default()\nfn mk_fwd[T: Default](seed: T, n: int) -> T:\n    return mk(seed, n + 1)\nfn main():\n    print(mk_fwd(Counter(1), 2).n)\nmain()\n"
+    ));
+    // RECURSION — a fn forwarding its own witness to ITSELF
+    entry_ok(&format!(
+        "{FWD_HEAD}fn rec[T: Default](x: T, n: int) -> T:\n    if n <= 0:\n        return T.default()\n    return rec(x, n - 1)\nfn main():\n    print(rec(Counter(1), 3).n)\nmain()\n"
+    ));
+    // MUTUAL recursion between two forwarding fns (the fixpoint's other direction)
+    entry_ok(&format!(
+        "{FWD_HEAD}fn ping[T: Default](x: T, n: int) -> T:\n    if n <= 0:\n        return reset(x)\n    return pong(x, n - 1)\nfn pong[T: Default](x: T, n: int) -> T:\n    return ping(x, n - 1)\nfn main():\n    print(ping(Counter(1), 3).n)\nmain()\n"
+    ));
+}
+
+/// The permit predicate is `witness_scope`: the caller's `$w:U` local must be DIRECTLY reachable at
+/// the call. A closure, a `spawn:`/`defer:` block, a nested `fn` and a method body each compile to
+/// their own proto that never carries it — so a forward written inside one is a clear error, not a
+/// mis-lowered (missing) argument.
+#[test]
+fn witness_forwarding_out_of_scope_rejected() {
+    let needle = "is not reachable at this call site";
+    // a closure body
+    entry_rejects(
+        &format!(
+            "{FWD_HEAD}fn bad[T: Default](x: T) -> int:\n    f := fn(): reset(x)\n    return 1\nfn main():\n    print(bad(Counter(1)))\nmain()\n"
+        ),
+        needle,
+    );
+    // a `spawn:` block
+    entry_rejects(
+        &format!(
+            "{FWD_HEAD}fn bad[T: Default](x: T) -> int:\n    parallel:\n        spawn:\n            y := reset(x)\n    return 1\nfn main():\n    print(bad(Counter(1)))\nmain()\n"
+        ),
+        needle,
+    );
+    // a `defer:` block
+    entry_rejects(
+        &format!(
+            "{FWD_HEAD}fn bad[T: Default](x: T) -> int:\n    defer:\n        y := reset(x)\n    return 1\nfn main():\n    print(bad(Counter(1)))\nmain()\n"
+        ),
+        needle,
+    );
+    // a nested `fn`
+    entry_rejects(
+        &format!(
+            "{FWD_HEAD}fn bad[T: Default](x: T) -> int:\n    fn inner(y: T) -> T:\n        return reset(y)\n    return 1\nfn main():\n    print(bad(Counter(1)))\nmain()\n"
+        ),
+        needle,
+    );
+    // a METHOD's own type param — a method frame has no `$w:T` local at all
+    entry_rejects(
+        &format!(
+            "{FWD_HEAD}struct Holder:\n    k: int\n    fn go[T: Default](self, x: T) -> T:\n        return reset(x)\nfn main():\n    print(Holder(1).go(Counter(2)).n)\nmain()\n"
+        ),
+        needle,
+    );
+}
+
+/// A type param with NO static-carrying bound has nothing to forward — that must stay the ordinary
+/// BOUND failure, not a witness diagnostic.
+#[test]
+fn witness_forwarding_unbounded_param_rejected() {
+    entry_rejects(
+        &format!(
+            "{FWD_HEAD}fn g[U](x: U) -> U:\n    return reset(x)\nfn main():\n    print(g(Counter(1)).n)\nmain()\n"
+        ),
+        "does not satisfy",
+    );
+}
+
+/// A fn that becomes witness-needing ONLY through forwarding is charged a hidden parameter exactly
+/// like one that constructs directly — so it loses the same positions. The shared fn-value wall and
+/// the `spawn`/`defer`-target wall must both see the transitive charge.
+#[test]
+fn witness_forwarding_fn_loses_value_and_spawn_positions_rejected() {
+    let head = format!("{FWD_HEAD}fn fwd[T: Default](x: T) -> T:\n    return reset(x)\n");
+    entry_rejects(
+        &format!("{head}fn main():\n    g := fwd\n    print(1)\nmain()\n"),
+        "cannot be used as a function value",
+    );
+    entry_rejects(
+        &format!("{head}fn main():\n    g := fwd[Counter]\n    print(1)\nmain()\n"),
+        "cannot be used as a function value",
+    );
+    entry_rejects(
+        &format!(
+            "{head}fn main():\n    c := Counter(9)\n    parallel:\n        spawn fwd(c)\nmain()\n"
+        ),
+        "cannot be the target of `spawn`",
+    );
+    // …and it is no longer callable across a module boundary either (Task 3).
+    files_reject(
+        &[
+            (
+                "lib.chz",
+                &format!("{FWD_HEAD}fn fwd[T: Default](x: T) -> T:\n    return reset(x)\n"),
+            ),
+            (
+                "main.chz",
+                "import lib\nfn main():\n    print(lib.fwd(lib.Counter(9)).n)\nmain()\n",
+            ),
+        ],
+        "across a module boundary is not supported yet",
     );
 }

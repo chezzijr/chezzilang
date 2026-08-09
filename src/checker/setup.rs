@@ -2870,6 +2870,34 @@ impl Checker {
                 _ => {}
             }
         }
+        // M24 slice 2 — witness FORWARDING makes "does this fn need hidden witness params" depend on
+        // its CALLEES' answers, and a fn is hoisted before them. Re-run the ONE derivation
+        // (`witness_params_of`) over this module's free fns to a fixpoint, so the answer is
+        // order-independent (`a` → `b` → `c` charges `a` even with `c` declared last, and mutual
+        // recursion converges). Monotone — a charge is only ever added — so a pass that changes
+        // nothing is the fixpoint, and the pass count is bounded by the number of fns.
+        let fn_decls: Vec<&crate::ast::FnDecl> = stmts
+            .iter()
+            .filter_map(|s| match &s.kind {
+                StmtKind::Fn(d) => Some(d),
+                _ => None,
+            })
+            .collect();
+        for _ in 0..fn_decls.len() {
+            let mut changed = false;
+            for d in &fn_decls {
+                let w = self.witness_params_of(d);
+                if let Some(sig) = self.functions.get_mut(&d.name)
+                    && sig.witness_params != w
+                {
+                    sig.witness_params = w;
+                    changed = true;
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
         // Order-independent extern/registry collision sweep: a struct or enum variant registers a
         // same-named constructor the backends resolve before a plain call, so an extern sharing that
         // name is unreachable. Done after the loop so a `struct S`/`enum {Leaf}` declared *after* an

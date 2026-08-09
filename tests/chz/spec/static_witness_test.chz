@@ -193,3 +193,79 @@ test fn a_generic_that_never_constructs_can_be_a_spawn_or_defer_target():
     parallel:
         spawn tagged(Node(2))
     assert seen == [1, 2]
+
+# ---- M24 slice 2: witness FORWARDING ----
+#
+# A generic fn passes its OWN still-abstract type param's witness into another generic fn: the
+# hidden argument stops being a constant and becomes a load of the caller's `$w:T` local. What has
+# to hold at runtime is that the key threaded all the way down is the OUTERMOST concrete type —
+# which is why every assert below checks the CONSTRUCTED value, not just that it compiled. Rust is
+# the ancestor: `fn twice<U: Default>(x: U) -> U { reset(reset(x)) }` answers the same.
+
+fn twice[U: Default](x: U) -> U:
+    return reset(reset(x))
+
+test fn a_generic_forwards_its_own_witness_into_another_generic():
+    assert twice(Counter(9)).n == 0
+    # the SAME `twice` with a different outer type — the forwarded key follows the caller's argument
+    assert twice(Tag("hi")).s == "none"
+
+# three levels, the leaf declared LAST: the charge is a fixpoint over the module, not a source-order
+# sweep, so `lvl1` must be charged even though `lvl3` is not yet known when `lvl1` is hoisted.
+fn lvl1[T: Default](x: T) -> T:
+    return lvl2(x)
+
+fn lvl2[T: Default](x: T) -> T:
+    return lvl3(x)
+
+fn lvl3[T: Default](x: T) -> T:
+    return T.default()
+
+test fn a_witness_forwards_transitively_through_three_generics():
+    assert lvl1(Counter(5)).n == 0
+    assert lvl1(Tag("z")).s == "none"
+
+# TWO witness params on one forwarding fn: the hidden args are positional, so the SECOND slot must
+# reach the second type param.
+fn first_of_two[T: Default, U: Default](a: T, b: U) -> T:
+    return reset(a)
+
+fn second_of_two[T: Default, U: Default](a: T, b: U) -> U:
+    return reset(b)
+
+test fn a_forward_picks_the_right_witness_slot_of_two():
+    assert first_of_two(Counter(1), Tag("x")).n == 0
+    assert second_of_two(Counter(1), Tag("x")).s == "none"
+    # …and with the two hosts swapped, so a slot mix-up cannot pass by coincidence
+    assert first_of_two(Tag("x"), Counter(1)).s == "none"
+    assert second_of_two(Tag("x"), Counter(1)).n == 0
+
+# a forwarding call whose callee ALSO takes real value args — the hidden witness must stay LAST
+fn mk_fwd[T: Conv](seed: T, n: int) -> T:
+    return mk(seed, n + 1)
+
+test fn a_forwarded_witness_stays_after_the_real_arguments():
+    assert mk_fwd(Wrap(0), 20).v == 42
+
+# a fn forwarding its own witness to ITSELF
+fn rec[T: Default](x: T, n: int) -> T:
+    if n <= 0:
+        return T.default()
+    return rec(x, n - 1)
+
+test fn a_recursive_generic_forwards_its_own_witness():
+    assert rec(Counter(5), 3).n == 0
+    assert rec(Tag("a"), 4).s == "none"
+
+# mutual recursion between two forwarding fns
+fn ping[T: Default](x: T, n: int) -> T:
+    if n <= 0:
+        return reset(x)
+    return pong(x, n - 1)
+
+fn pong[T: Default](x: T, n: int) -> T:
+    return ping(x, n - 1)
+
+test fn mutually_recursive_generics_forward_a_witness():
+    assert ping(Counter(3), 5).n == 0
+    assert ping(Tag("q"), 4).s == "none"

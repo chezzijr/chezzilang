@@ -4828,8 +4828,27 @@ impl Compiler {
             // of a by-name call into its positional slot, so `args` is the full argument list.
             self.compile_expr(fc, callee)?;
             self.compile_args(fc, args)?;
-            for crate::checker::WitnessSrc::Concrete(k) in &srcs {
-                fc.emit(Op::ConstStr(k.clone()), span);
+            for src in &srcs {
+                match src {
+                    crate::checker::WitnessSrc::Concrete(k) => {
+                        fc.emit(Op::ConstStr(k.clone()), span)
+                    }
+                    // FORWARDING: the caller's own `$w:p` local IS the argument. The checker records
+                    // this only where that local is directly reachable (`Checker::witness_scope`), so
+                    // a missing slot is an internal invariant break, never a short `argc`.
+                    crate::checker::WitnessSrc::Forward(p) => {
+                        let Some(slot) = fc.resolve_local(&witness_local(p)) else {
+                            return Err(CompileError {
+                                message: format!(
+                                    "internal: no type witness in scope to forward as '{p}' into \
+                                     the call to '{fname}'"
+                                ),
+                                span,
+                            });
+                        };
+                        fc.emit_get_local_raw(slot, span);
+                    }
+                }
             }
             fc.emit(Op::Call(args.len() + srcs.len()), span);
             return Ok(());

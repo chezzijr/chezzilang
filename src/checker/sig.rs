@@ -365,8 +365,14 @@ impl Checker {
         // M24 — same rule as `check_fn_body` (module-level free fn only). Without it an UNANNOTATED
         // `fn reset[T: Default](old: T): return T.default()` would infer its return as `Unknown`
         // here (the pass-1 error is truncated), and that residual Unknown is a type-check bypass.
+        // Read the ONE stored answer (the hoist's fixpoint), not a fresh derivation: forwarding makes
+        // the set transitive, so a recomputation from a partly-updated state could disagree with the
+        // arity `check_fn_body` and the compiler use.
         let wparams = if self_ty.is_none() && !saved_in_fn {
-            self.witness_params_of(decl)
+            self.functions
+                .get(&decl.name)
+                .map(|s| s.witness_params.clone())
+                .unwrap_or_default()
         } else {
             Vec::new()
         };
@@ -869,7 +875,9 @@ impl Checker {
     /// conditions, both necessary:
     /// * the param has at least one bound (declared or `where`) whose protocol carries a STATIC
     ///   requirement, directly or through an embed — only such a bound has anything to witness; AND
-    /// * the BODY mentions the param's name, i.e. it can actually contain a `T.static()` call.
+    /// * the BODY either mentions the param's name (a `T.static()` call), or names a fn that itself
+    ///   takes a witness — slice 2's FORWARDING, where this fn's own `$w:T` becomes the callee's
+    ///   argument, so it must be charged one to have anything to pass.
     ///
     /// The second condition is what keeps a generic that never constructs whole: `fn label[T:
     /// Spawnable](x: T) -> str: return x.tag()` needs no witness, so it keeps its value position, its
@@ -877,11 +885,20 @@ impl Checker {
     /// witness parameter is arity, so it must be paid for only where it is used.
     ///
     /// The body scan is deliberately COARSE (any mention of the bare name `T` in expression position,
-    /// not just `T.m(...)`): over-inclusion can only cost a fn positions it would lose anyway — a body
-    /// mentioning `T` other than as `T.m(...)` does not compile — while under-inclusion would mean a
-    /// body whose `T.static()` cannot lower. Task 2 (forwarding a witness into a generic callee,
-    /// `f[T](x)`) will need exactly those extra mentions PLUS a within-module fixpoint over the call
-    /// graph, which is deliberately not built here.
+    /// not just `T.m(...)`; any mention of a witness-taking fn's name, not just a call forwarding
+    /// `T` into it): over-inclusion can only cost a fn positions it would lose anyway, while
+    /// under-inclusion would mean a body whose `T.static()` or forward cannot lower. The forwarding
+    /// half's coarseness has one live cost — a generic with a static-carrying bound whose body calls
+    /// a witness-taking fn with only CONCRETE types is charged a hidden param it never uses, so it
+    /// loses value/`spawn`/cross-module position; the fix is to move that concrete call into a
+    /// non-generic helper.
+    ///
+    /// Because forwarding is transitive (`a` forwards into `b` which constructs), this answer depends
+    /// on OTHER fns' answers, and a fn is hoisted before its callees. [`Checker::hoist`] therefore
+    /// re-runs this to a FIXPOINT over the module's free fns once every signature exists. The
+    /// iteration is monotone — a charge is only ever added — so it converges; a witness set that
+    /// crosses a MODULE boundary is not resolved here, because such a call is rejected outright
+    /// (M24 Task 3).
     ///
     /// Declaration order is preserved — it IS the witness-parameter order, so the checker's record
     /// site, the compiler's `$w:T` locals, and the call site's pushed arguments all agree.
@@ -922,9 +939,19 @@ impl Checker {
             &std::collections::HashSet::new(),
             &mut mentioned,
         );
+        // Slice 2 — the body names a fn that takes witnesses, so this body can FORWARD into it. That
+        // makes every static-bounded param of this fn a candidate carrier, since which one flows into
+        // which callee slot is type work that only `record_witness_call` can do (it runs long after
+        // this). A charge that turns out unused is inert arity; a MISSING one would be a call the
+        // checker accepts and the compiler cannot lower.
+        let forwards = mentioned.iter().any(|n| {
+            self.functions
+                .get(n)
+                .is_some_and(|s| !s.witness_params.is_empty())
+        });
         cands
             .into_iter()
-            .filter(|t| mentioned.contains(t))
+            .filter(|t| forwards || mentioned.contains(t))
             .collect()
     }
 
