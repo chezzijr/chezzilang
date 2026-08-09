@@ -1183,9 +1183,79 @@ b := Box[int].make[str]("hi")         # combined turbofish: T=int + U=str ⇒ Bo
 A method param name may **not shadow** an enclosing type param (`fn make[T]` inside `Box[T]` is an
 error). A method-level turbofish on a member that declares **no** type params (or a builtin like
 `xs.len[int]()` / `xs.iter[int]()`) is an arity error. **Instance** methods take the same member-level
-turbofish, multi-arg: `pair.first[int, str](1, "x")`. Static methods do **not** participate in
-**protocol** satisfaction — protocols stay instance-only. Static methods on `newtype` are not
+turbofish, multi-arg: `pair.first[int, str](1, "x")`. Static methods on `newtype` are not
 supported yet (struct + enum only).
+
+#### Static protocol requirements — calling `T.method(...)` through a bound  (M24)
+
+A protocol may require a **static** method — one whose first parameter is not `self`. A type
+witnesses it by declaring that method statically (an instance `default(self)` does **not** witness
+it), and a generic bounded by such a protocol may **call it through the type parameter**. This is the
+one thing an instance-only protocol cannot express: *construct* a `T` you were never handed:
+
+```chezzi
+protocol Default:
+    fn default() -> Self          # STATIC requirement: no `self` receiver
+
+struct Counter:
+    n: int
+    fn default() -> Counter:
+        return Counter(7)
+
+fn reset[T: Default](old: T) -> T:
+    return T.default()            # dispatches to the CONCRETE type
+
+print(reset(Counter(1)).n)        # 7
+```
+
+**How it works — witness passing, not monomorphization.** Generics stay erased: there is still one
+body per generic fn and no type argument reaches the VM. A type parameter whose bound carries a
+static requirement, *and* whose body needs it, is given a **hidden trailing parameter** holding the
+concrete type's runtime identity key; `T.method(...)` compiles to a call that pops that key and runs
+the same dispatch as an ordinary `Type.method(...)`. The parameter is charged **only** to a body that
+uses one, so a generic that merely *has* a static-carrying bound (`fn tagged[T: Spawnable](x: T) ->
+str: return x.tag()`) is untouched and keeps every position it had before.
+
+**What works.** A struct or an enum host; same-module and cross-module calls in every import
+spelling (`m.reset(x)`, `import reset from m`, `import reset as again from m`); a `T` inferred from
+an argument, pinned by turbofish (`empty[Counter]()`), or fixed by an annotated result
+(`c: Counter = empty()`); **forwarding** a still-abstract `T` from one generic into another,
+transitively, recursively and mutually; a type parameter declared by a **member** — instance or
+static, on a plain or generic host (`h.make(x)`, `Holder.build(x)`, and the member turbofish
+`h.make[Counter](x)`); the call inside a **closure** (including one that escapes its defining frame),
+a **nested `fn`**, a **`defer:`** block and a **`spawn:`/`parallel:`** block (the witness is a value,
+so it crosses the airlock); and the reserved **`Convert[S]`** protocol, whose witness is a static
+`convert(x: S) -> Self`:
+
+```chezzi
+fn make[T: Convert[int]](seed: T, n: int) -> T:
+    return T.convert(n)
+```
+
+**What does not, each with a diagnostic naming the workaround.**
+
+| shape | why | do this instead |
+|---|---|---|
+| `T` declared by the enclosing **TYPE** (`struct Bx[T: Default]` … `T.default()` in a method) | the concrete type is erased once a `Bx` *value* exists — only a value could hold the witness | declare the parameter on the **member** (`fn fresh[T: Default](self, …)`), whose witness rides on the call |
+| reading a witness-taking fn as a **function value** — `g := reset`, `reset[Counter]` as a value, passing it to a HOF, a cross-module read | a `fn` value erases which declaration it came from, so no witness can be recovered. **A permanent wall, not a v1 limit** | call it directly, or take a factory closure: `fn make[T](mk: fn() -> T) -> T` |
+| `spawn f(...)` / `defer f(...)` with a witness-taking callee as the **statement target** | same wall — the target is reached as a value | call it eagerly and `spawn`/`defer` the result, or wrap the call in a closure (`defer: … f(x) …` as a *block* works) |
+| a `T` **not determined** at the call site | there is no concrete type to build a key from | pin it (`nodet[Counter]()`) or annotate the result |
+| a bound witnessed by a **newtype** or a **scalar** | neither can host a static method | use a struct or an enum |
+| a **manifest entrypoint** that takes a witness (`entrypoint = "src.main:main"` where `fn main[T: Default]()`) | it is invoked with no arguments, so nothing supplies the key | give the entrypoint a non-generic signature and construct in a helper it calls |
+
+The turbofish *call* form is fine — `reset[Counter](Counter(1))` works; it is only reading
+`reset[Counter]` as a **value** that hits the wall.
+
+Two known rough edges, filed as `docs/gaps.md` **M24-1/-3**: (1) the hidden parameter is charged by a
+coarse body scan, so a generic that calls a witness-taking fn with only *concrete* types — or names a
+struct method sharing a name with an imported witness-taking fn — can be charged one it never uses,
+which costs it value / `spawn` / `defer` position (an over-*rejection*, never a wrong answer; move the
+concrete call into a non-generic helper); (2) a type parameter whose **name equals a real type**
+resolves to the type, not the parameter, in static-call position — avoid shadowing.
+
+Static methods still do **not** participate in *instance*-method protocol satisfaction: a protocol
+requirement is matched static-to-static and instance-to-instance, never across. Worked demo:
+`examples/static_witness.chz`.
 
 **Uniform parse rule (any receiver).** `recv.name[X](args)` parses as a method turbofish on **any**
 receiver — not just a bare ident, but a call result, a field, or an index:
@@ -3033,9 +3103,11 @@ fn fetch_all(urls: List[str]):
   `protocol Any:` + `pass` (empty), and
   `Iterable`'s `iter(self) -> Iterator[Elem]` return type resolves to the same `Iterator[T]` value type the
   Rust seed uses, so their shapes mirror cleanly like the rest.) `Convert[S]` (`fn convert(x: S) -> Self`,
-  a STATIC method — the extensible type-conversion protocol, Rust `From`) is DECLARED + reserved +
-  bound-parseable (`[T: Convert[str]]`) as of slice 1 only — structural WITNESSING (a concrete type
-  satisfying it) and `T.convert(..)` construction through a bound are not wired yet (slices 2/3).
+  a STATIC method — the extensible type-conversion protocol, Rust `From`) is **complete**: reserved,
+  bound-only (`[T: Convert[str]]`; a value annotation is rejected — a value can't invoke a static
+  ctor), structurally witnessed static-slot-aware, and callable through the bound
+  (`fn make[T: Convert[int]](seed: T, n: int) -> T: return T.convert(n)`) via M24's witness passing —
+  see §7a "Static protocol requirements".
   `PathLike` (`fn as_path(self) -> bytes`, W7-8) is the **path INPUT** position of the whole std
   filesystem surface: `str`/`bytes`/`bytearray` satisfy it intrinsically and `path.Path` structurally,
   so `fs.exists("x")`, `fs.exists(b"x")` and `fs.exists(p)` all work with no annotation. It is what

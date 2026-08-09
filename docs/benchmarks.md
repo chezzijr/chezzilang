@@ -1374,3 +1374,24 @@ today's `bytes` surface:
   would close most of the remaining gap; it is new builtin surface and was deliberately out of W7-8's scope.
 
 No M19 bench moves — `std.path` is a lexical helper module that no bench imports.
+
+## M24 — static protocol requirements through a bound (witness passing) — measured, NO delta (2026-08-10)
+
+A language milestone, recorded here only because "we measured it" is the claim, not "it got faster".
+`hyperfine`, **20 runs**, the M24 branch against a pre-milestone binary built from `b6c17369` in a
+**separate `CARGO_TARGET_DIR`** (same machine; the shared-target trap in `CLAUDE.md` is exactly how a
+comparison like this silently measures one binary twice):
+
+| bench | branch vs baseline | noise floor (baseline vs a copy of itself) |
+|---|---|---|
+| fib | 1.00 ± 0.03 | — |
+| loop | 1.02 ± 0.07 | — |
+| poly_method | 1.00 ± 0.04 | — |
+| primes | 1.03 ± 0.06 | 1.00 ± 0.06 |
+
+Every row is inside the noise floor, so **no headline number changes**. That is the expected shape,
+not luck: the new `Op::CallStaticDyn` only appears where a generic body calls `T.static()`, the hidden
+witness parameter is charged **only** to a body that uses one (`Checker::witness_params_of`), and no
+tracked bench has a static-carrying protocol bound at all. The cost that *would* show up on a
+witness-heavy workload is one extra argument push per witnessed call plus one `str` per witness per
+nested body (`docs/gaps.md` **M24-2**) — the suite has no such bench to isolate it.

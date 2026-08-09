@@ -525,7 +525,14 @@
 #                                 leading IDENT is a known struct/enum and `method` is a static method
 #                                 (its first param is not `self` — the "no self ⇒ static" rule). For
 #                                 an enum a same-named VARIANT wins (so variant/static names are
-#                                 disjoint, enforced at decl time).
+#                                 disjoint, enforced at decl time). The leading IDENT may also be an
+#                                 in-scope TYPE PARAMETER whose bound carries a static requirement
+#                                 (`T.default()` inside `fn reset[T: Default](…)`, M24) — SAME
+#                                 production, no new syntax: the checker reinterprets the head and the
+#                                 compiler emits `CallStaticDyn`, which reads the concrete type from
+#                                 the fn's hidden trailing witness parameter. A type parameter that
+#                                 shadows a real type name resolves to the TYPE here (see
+#                                 `docs/gaps.md` M24-3).
 #   `Type[targ].member(args)?` — SINGLE type arg: parses as `<postfix> "LBRACKET" <subscript>
 #                                 "RBRACKET" "DOT" "IDENT" ("LPAREN" <argList>? "RPAREN")?` — the
 #                                 parser cannot tell `Type[int].member` from `arr[i].field`, so it

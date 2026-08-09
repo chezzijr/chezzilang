@@ -1,0 +1,116 @@
+# M24 — a protocol's STATIC (no-`self`) requirement, called THROUGH a generic bound.
+#
+# A protocol may require a static method (`fn default() -> Self` — no `self` receiver). Before M24 a
+# bound on such a protocol was a dead marker: you could declare it, a type could satisfy it, but the
+# body could never CALL it, because generics are erased and `T` is gone by the time the VM runs.
+#
+# M24 threads the concrete type's runtime identity key in as a HIDDEN TRAILING ARGUMENT (witness
+# passing) — so `T.default()` inside `fn reset[T: Default](old: T) -> T` dispatches to the real type.
+# Generics stay erased: one body, nothing monomorphized, no type argument reaches the VM.
+# Rust is the ancestor — `fn reset<T: Default>(_: T) -> T { T::default() }` is the same program.
+#
+# Two-engine parity (default M:N and `--serial`) — byte-identical, no time-dependent behavior.
+
+protocol Default:
+    fn default() -> Self
+
+struct Counter:
+    n: int
+    fn default() -> Counter:          # STATIC: first param is not `self`
+        return Counter(0)
+
+struct Tag:
+    s: str
+    fn default() -> Tag:
+        return Tag("none")
+
+enum Color:
+    Red
+    Blue
+    fn default() -> Color:            # an enum hosts the static requirement too
+        return Color.Blue
+
+# The headline: `T.default()` on an abstract type parameter.
+fn reset[T: Default](old: T) -> T:
+    return T.default()
+
+# No value argument to infer `T` from — pin it with a turbofish or an annotated result.
+fn empty[T: Default]() -> T:
+    return T.default()
+
+# The witness FORWARDS: `twice`'s own hidden parameter becomes `reset`'s argument, so a still-abstract
+# `T` can be passed on. Transitive and recursive.
+fn twice[T: Default](x: T) -> T:
+    return reset(reset(x))
+
+# A MEMBER may declare its own witnessed `[T]` — instance or static.
+struct Holder:
+    k: int
+    fn make[T: Default](self, old: T) -> T:
+        return T.default()
+    fn build[T: Default](old: T) -> T:
+        return T.default()
+
+# The witness reaches every nested body: a closure (even one that ESCAPES the defining frame), a
+# nested `fn`, a `defer:` block and a `spawn:` block (it crosses the airlock by value).
+fn factory[T: Default](x: T) -> fn() -> T:
+    return fn(): T.default()
+
+fn logged[T: Default](x: T, sink: List[str], ch: Channel[str]):
+    fn note():
+        sink.push("nested {T.default()}")
+    defer:
+        sink.push("defer {T.default()}")
+    parallel:
+        spawn:
+            # a spawned body crosses the airlock by VALUE, so it reports back over a channel
+            ch.send("spawn {T.default()}")
+    note()
+
+# The reserved `Convert[S]` protocol is witnessed by a static `convert(x: S) -> Self`, so it works
+# through a bound exactly the same way.
+struct Port:
+    v: int
+    fn convert(x: int) -> Port:
+        return Port(x + 1)
+
+fn make[T: Convert[int]](seed: T, n: int) -> T:
+    return T.convert(n)
+
+fn main():
+    # one generic body, two different concrete types
+    print(reset(Counter(9)).n)             # 0
+    print(reset(Tag("hi")).s)              # none
+    print(reset(Color.Red) == Color.Blue)  # true
+
+    # `T` pinned without a value argument
+    print(empty[Counter]().n)              # 0
+    c: Counter = empty()
+    print(c.n)                             # 0
+
+    # forwarding
+    print(twice(Counter(9)).n)             # 0
+    print(twice(Tag("hi")).s)              # none
+
+    # a member's own `[T]`
+    h := Holder(1)
+    print(h.make(Counter(9)).n)            # 0
+    print(Holder.build(Tag("hi")).s)       # none
+
+    # an escaping closure carries its witness by value — the defining frame is long gone
+    mk_counter := factory(Counter(9))
+    mk_tag := factory(Tag("hi"))
+    print(mk_counter().n)                  # 0
+    print(mk_tag().s)                      # none
+
+    # nested fn, `defer:` and `spawn:` all reach it
+    sink: List[str] = []
+    ch := Channel[str](1)
+    logged(Counter(9), sink, ch)
+    print(ch.recv())
+    print(sink)
+
+    # the reserved Convert[S] bound
+    print(make(Port(0), 41).v)             # 42
+
+main()

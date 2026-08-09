@@ -1,0 +1,14 @@
+0
+none
+true
+0
+0
+0
+none
+0
+none
+0
+none
+spawn Counter(n=0)
+['nested Counter(n=0)', 'defer Counter(n=0)']
+42

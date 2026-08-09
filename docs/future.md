@@ -423,45 +423,40 @@ direction that matters. Its acceptance tests are M:N-only and say so.
     `struct` (a struct is a shared reference); for cross-task mutation use `Shared[T]`. The `ref`
     keyword, the `Ref[T]` reserved global, and `std.ref` no longer exist.
 
-13. **Static / associated protocol requirements (typeclass-style `T.default()`) — ⏸️ SHELVED**
-    **→ governed by §3a1 (Generics strategy): the ruling is WITNESS PASSING, and the next step is a
-    SPIKE against the M23 checker→compiler→VM precedent, not another implementation run. The shelf note
-    below was written 2026-06-25, before that machinery existed — re-derive its premise before trusting
-    it.** Original entry: — ⏸️ SHELVED
-    (attempted twice 2026-06-24, both rejected; not worth the cost at the current model).**
-    The goal: a protocol may declare a *static* (no-`self`) requirement, and a generic bounded by it can
-    **construct** through the type param — the one thing instance-only protocols can't express:
+13. **Static / associated protocol requirements (typeclass-style `T.default()`) — ✅ SHIPPED as M24
+    (2026-08-10), by witness passing.** A protocol may declare a *static* (no-`self`) requirement, and a
+    generic bounded by it **constructs** through the type param — the one thing instance-only protocols
+    can't express:
     ```chezzi
     protocol Default:
         fn default() -> Self
-    fn make[T: Default]() -> T:
-        return T.default()      # T erased at runtime — needs dictionary passing
+    struct Counter:
+        n: int
+        fn default() -> Counter: return Counter(7)
+    fn reset[T: Default](old: T) -> T:
+        return T.default()
+    print(reset(Counter(1)).n)      # 7
     ```
-    **Direction (if ever revived): dictionary passing, NOT monomorphization** — Chezzi is a type-erased
-    bytecode VM, so `T` has nothing to dispatch on; thread the conforming type's static-method
-    dictionary in as a hidden trailing call arg (kept the one erased body + two-engine parity).
-    **Why shelved:** two full auto-task runs both **rejected** with 5 criticals *each*, all the same
-    class — the **checker's "accept" boundary keeps drifting out of lockstep with the compiler's
-    "can-lower" boundary**, so every run half-covers the lowering surface and a prosecutor finds the next
-    axis (cross-module call, `spawn:`/`parallel:` body, first-class value / `defer` (`g := make; g()`),
-    inferred-T through a container `xs: List[T]`, non-leading bound param). Each shape either crashes the
-    compiler or diverges the two VM engines. Making it sound needs a *complete* lowering contract enforced in one
-    checker gate — a real design pass, not another blind run.
-    **Current behavior on main (the sharp edge): a no-`self` protocol requirement is DECLARABLE but
-    UNUSABLE.** Main does **not** reject the no-`self` rule — `protocol Default: fn default() -> Self`
-    hoists fine, a struct's *static* `default()` satisfies the bound `[T: Default]` (an *instance*
-    `default(self)` does not — `method 'default' has the wrong signature`), so you can declare and bound
-    on it. But you can never **call** it: `T.default()` inside the body fails with `unknown name 'T'`
-    (no dict-passing to dispatch the erased `T`). So such a bound is just a **dead marker** today — not
-    unsound, only inert until the feature is revived. (Verified 2026-06-25 on main @ 503b6b8.)
-    **Why it's low priority anyway:** the workaround already exists and is idiomatic — **pass a factory
-    closure** (first-class-fn style instead of typeclass style), works today with zero new machinery:
+    **Mechanism — §3a1's ruling, built.** A type param whose bounds carry a static requirement AND whose
+    body needs it gets a **hidden trailing parameter** holding the concrete type's runtime identity key;
+    `T.method(...)` lowers to `Op::CallStaticDyn`, which pops that key and runs the same
+    `Vm::do_static_call` as an ordinary `Type.method(...)`. Generics stay **erased** — one body per
+    generic fn, nothing monomorphized, no type argument reaches the VM. The witness is charged only to a
+    body that uses one, so a generic that merely *has* such a bound keeps every position it had before.
+    All six axes §3a1 named as the ones that broke the two earlier runs are covered: cross-module (every
+    import spelling), `spawn:`/`parallel:` bodies, `defer:`, closures (including escaping ones) and
+    nested `fn`s, inferred/turbofish/annotation-pinned `T`, non-leading bound params, and transitive +
+    recursive + mutual **forwarding**. Axis 3 (first-class value / `defer f(...)`) is the one that did
+    NOT close — it is a permanent wall, recorded in "What stays impossible" below.
+    **The factory closure is still the right answer when the wall bites** — it needs no static
+    requirement at all and works in value position:
     ```chezzi
     fn make[T](mk: fn() -> T) -> T: return mk()
-    make(fn(): Counter(0))      # same power; dict-passing only buys the `make[Counter]()` sugar over this
+    make(fn(): Counter(0))
     ```
-    The two rejected attempts live unmerged as branches `auto-task/protocol-static-req` /
-    `…-v2` (main is clean); discardable. Revisit only with a design-first pass + appetite for the sugar.
+    Full surface + the decline list: `docs/syntax.md §7a`. Running proof:
+    `tests/chz/spec/static_witness_test.chz`, `examples/static_witness.chz`. The two rejected 2026-06-24
+    attempts (`auto-task/protocol-static-req`, `…-v2`) are superseded and discardable.
 
 14. **`cast[T](val: Any) -> Option[T]` — ⛔ NO CONSUMER (2026-08-09).** The owner ruled against
     leaning on `Any` ("we vouch for statically typed; `Any` is Go's `interface{}`"), and `cast` only pays
@@ -492,7 +487,7 @@ direction that matters. Its acceptance tests are M:N-only and say so.
     types on lists/maps, type args on structs) — its own milestone (also a prerequisite for reflection).
     Record this so a future `cast` implementation starts from the erasure contract, not a surprise.
 
-15. **Type conversion protocol (`Convert[S]`) + scalar fills — 🚧 PARTIALLY LANDED (slices 1+2).** Today
+15. **Type conversion protocol (`Convert[S]`) + scalar fills — ✅ LANDED (slices 1+2+3).** Today
     conversion is a fixed set of builtins (`int`/`float`/`str`/`ord`/`chr`, safe `to_int`/`to_float`)
     plus one-way `int`→`float` widening of an untyped CONSTANT, and one-way newtype wrap/unwrap. The extensible mechanism is
     the reserved `Convert[S]` protocol (there is still no `as`, no `Into`/`TryFrom`). Full current-state
@@ -503,15 +498,16 @@ direction that matters. Its acceptance tests are M:N-only and say so.
       1+2 LANDED** (2026-07-07): the protocol is reserved + binds as `[T: Convert[S]]`, sound static-slot
       witnessing (an instance `convert(self,…)` does NOT witness it), and **bound-only** enforcement
       (rejected as a value-annotation type — a value can't invoke a static ctor). **Slice 3 (`T.convert`
-      through a bound) ⛔ DEFERRED** (2026-07-07): a spike proved the "restricted construction" model
-      delivers nothing under Chezzi's **erased, single-pass, non-monomorphizing** generics — `T` is never
-      concrete while its body is checked (the same gap hits *every* generic static call, e.g. `T.empty()`,
-      not just `convert`), and the only concrete static call is `Type.convert(x)` written directly (which
-      already works with no protocol). `T.<static>()` on a type param now gives a **clear error** (Option A)
-      instead of `unknown name 'T'`. Making it real needs the deferred **witness-passing** escape hatch
-      (thread the concrete `convert` in as a hidden arg — the only erasure-compatible way — **this is
-      exactly §3a1's witness passing; the two are one mechanism, not two**); build it only
-      when real code needs generic-over-Convert construction. A fallible conversion is `convert(x: S) ->
+      through a bound) ✅ LANDED as M24** (2026-08-10). The 2026-07-07 spike had ruled it deferred on the
+      premise that a "restricted construction" checker rewrite delivers nothing under erased,
+      single-pass, non-monomorphizing generics — which was true of *that* model and is why the answer
+      was **witness passing** instead: the concrete type's runtime identity key rides in as a hidden
+      trailing argument, so `T.convert(n)` dispatches without `T` ever becoming concrete in the checker.
+      It was never `Convert`-specific (the same gap hit *every* generic static call, e.g. `T.empty()`),
+      and it did not ship as a `Convert` feature: item 13 is the mechanism and `Convert[S]` is one
+      reserved consumer of it (`fn make[T: Convert[int]](seed: T, n: int) -> T: return T.convert(n)`).
+      Direct `Type.convert(x)` still needs no protocol and is still the right spelling when the type is
+      known. A fallible conversion is `convert(x: S) ->
       Result[Self, E]` — **no separate `TryFrom`** needed. **Skip `Into`** (needs expected-type threading;
       Chezzi infers bottom-up). **Multi-source (Phase 2) also DEFERRED** — needs argument-type overloading
       (banned invariant) for thin payoff; distinct-named static ctors cover it today.
@@ -527,11 +523,17 @@ built-in test runner, LSP.
 
 ---
 
-## 3a1. Generics strategy — the live options, and the ruling (2026-08-09)
+## 3a1. Generics strategy — the live options, and the ruling (2026-08-09; **BUILT as M24, 2026-08-10**)
 
-Items 13 (`T.default()`), 14 (`cast[T]`) and 15 (`Convert[S]` slice 3) above are all blocked by the
+Items 13 (`T.default()`), 14 (`cast[T]`) and 15 (`Convert[S]` slice 3) above were all blocked by the
 same wall, and §14's "erasure contract" is what the wall is made of. This section records the
 **strategy decision that governs all three**, so they stop being re-litigated one at a time.
+
+> **Status: the ruling shipped.** Witness passing is built (**M24**, 2026-08-10) and items 13 and 15
+> are closed by it; item 14 (`cast[T]`) stays closed for its own reason (no consumer). The "what stays
+> impossible" list below is still true and now has one more entry — the **fn-value wall** — which is
+> the only one of the six axes the spike named that did not close. Everything below is kept as the
+> reasoning of record; the "recommended next step is a SPIKE" note at the end is superseded.
 
 ### The question
 
@@ -604,15 +606,44 @@ was tried and rejected there for the identical reason — `fn same[T](a, b): ret
 a use-site gate never sees the concrete type. That is the first in-tree precedent for a
 checker→compiler→VM contract over an erased boundary.
 
-**Recommended next step is a SPIKE, not an implementation:** build one repro per axis against the M23
-machinery and report whether the contract closes. That converts item 13's shelf note — written
-2026-06-25, before any of this existed — into a current yes/no. A filed residual's premise decays; do not
-trust it without re-deriving.
+**The spike ran, and the contract closed — M24 (2026-08-10).** Five of the six axes are supported;
+axis 3 (first-class value / `defer f(...)`) is a permanent wall and is listed below. The shape is
+exactly M23's: the checker decides ([`Checker::witness_params_of`] answers "does this fn take hidden
+witness params" ONCE and stores it on `FnSig::witness_params`; every consumer reads it from there),
+the compiler records (`$w:T` locals, appended to nested bodies' capture entries), and the VM
+dispatches from the recorded key (`Op::CallStaticDyn` → `Vm::do_static_call`). The lesson from item
+13's shelf note held: **a filed residual's premise decays** — the note was written 2026-06-25, before
+any of this machinery existed, and re-deriving it is what turned a "not worth the cost" into a
+milestone.
+
+**One trap this milestone paid for twice, worth stating generally: a span used as a cross-half table
+key must not double as a diagnostic anchor.** The witness table is keyed by source position so the
+checker's answer and the compiler's lookup agree. Two separate bugs on this branch were the same
+mistake — `|>` desugars at PARSE time and gives every link of `a |> f() |> g()` the span of the whole
+infix expression, so two witness calls aliased onto one key and the second silently took the first's
+type: a **wrong value both engines agreed on**, so parity was blind to it and only a running test with
+two different concrete types caught it. The key is now the **callee token** (distinct per link); the
+diagnostic anchor is a separate field. Any future checker→compiler table keyed on position inherits
+this hazard.
 
 ### What stays impossible under witness passing, permanently
 
 State these when the questions recur; they are not oversights:
 
+- **A witness-taking generic read as a FUNCTION VALUE.** `g := reset`, a turbofish read as a value, a
+  HOF argument, a cross-module read, and the `spawn f(...)` / `defer f(...)` **statement targets**
+  (which reach the callee as a value) all reject with *"'reset' cannot be used as a function value:
+  its bound on T requires a static protocol method, which needs the concrete type — a function value
+  erases it."* A `fn` value carries a code pointer and captures; it does not carry which *declaration*
+  it came from, so there is no site at which the hidden argument could be supplied. This is axis 3 of
+  the six above — the one that did not close, and the reason to say so plainly is that it looks like a
+  v1 gap and is not. Workarounds: call it directly, or take a factory closure
+  (`fn make[T](mk: fn() -> T) -> T`); for `spawn`/`defer`, call eagerly and defer the result, or use
+  the **block** form (`defer:` / `spawn:`), which the witness does reach.
+- **A type parameter of the enclosing TYPE** (`struct Bx[T: Default]` … `T.default()` in a method).
+  The concrete type is erased the moment a `Bx` *value* exists, so only a value could carry the
+  witness — and putting it there would make every generic struct pay for it. Declare the parameter on
+  the **member** instead; its witness rides on the call.
 - **`cast[List[int]]` / any parameterized downcast.** `Obj::List` carries no element type. Java refuses
   the same thing at compile time (`o instanceof List<String>` → *"Object cannot be safely cast to
   List<String>"*); Python refuses it at runtime (`isinstance(x, list[int])` → *"argument 2 cannot be a

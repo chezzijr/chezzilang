@@ -2,6 +2,107 @@
 
 Single source of truth for "what am I doing next." Update after every work session.
 
+> # ✅ M24 COMPLETE — a protocol's STATIC requirement is callable through a generic bound (2026-08-10)
+>
+> **The gap.** A protocol could declare a static (no-`self`) requirement and a type could satisfy it,
+> but the bound was a **dead marker**: `T.default()` inside `fn reset[T: Default](old: T) -> T` was a
+> hard checker error, because generics are erased and `T` is gone before the VM runs. That is the one
+> thing an instance-only protocol cannot express — *construct* a `T` you were never handed. Rust is
+> the ancestor: `fn reset<T: Default>(_: T) -> T { T::default() }` is the same program. The same
+> program now runs on both engines:
+>
+> ```chezzi
+> protocol Default:
+>     fn default() -> Self
+> struct Counter:
+>     n: int
+>     fn default() -> Counter: return Counter(7)
+> fn reset[T: Default](old: T) -> T:
+>     return T.default()
+> print(reset(Counter(1)).n)      # 7
+> ```
+>
+> **What shipped — witness passing, the `docs/future.md §3a1` ruling, built.** A type parameter whose
+> bounds carry a static requirement **and whose body needs it** gets a **hidden trailing parameter**
+> holding the concrete type's runtime identity key. `T.method(...)` lowers to a new
+> `Op::CallStaticDyn`, which pops that key and runs the same `Vm::do_static_call` as an ordinary
+> `Type.method(...)`. **Generics stay erased** — one body per generic fn, nothing monomorphized, no
+> type argument reaches the VM. Same three-layer contract as M23: the checker decides
+> (`Checker::witness_params_of` answers "does this fn take witnesses" ONCE, stored on
+> `FnSig::witness_params`; every consumer reads it from there — the compiler cannot ask, since
+> protocol identity resolves through imports/aliases/embeds), the compiler records (`$w:T` locals,
+> appended to nested bodies' capture entries), the VM dispatches from the recorded key.
+> * **The witness is charged only to a body that uses one.** A generic that merely *has* a
+>   static-carrying bound (`fn tagged[T: Spawnable](x: T) -> str: return x.tag()`) takes no hidden
+>   parameter and keeps every position it had before — value, HOF argument, `spawn`/`defer` target.
+>   Arity must be paid for only where it is used.
+> * **All six axes `§3a1` named — the ones that broke the two 2026-06-24 attempts — are covered**
+>   except axis 3: cross-module in every import spelling (`m.reset(x)`, `import reset from m`,
+>   `import reset as again from m`); `spawn:`/`parallel:` and `defer:` **blocks**; `T` inferred from an
+>   argument, pinned by turbofish (`empty[Counter]()`) or fixed by an annotated result
+>   (`c: Counter = empty()`); non-leading bound params; and **forwarding** a still-abstract `T` from
+>   one generic into another — transitively, recursively and mutually (the charge is a **fixpoint**
+>   over the module's free fns, so a leaf declared last still charges its callers).
+> * **A MEMBER may declare its own witnessed `[T]`** — instance or static, on a plain or generic host,
+>   with the member turbofish (`h.make[Counter](x)`) and with the host's own params left unwitnessed.
+> * **The witness REACHES every nested body** — a closure (including one that **escapes** its defining
+>   frame), a nested `fn`, a `defer:` block, a `spawn:`/`parallel:` block, and a generator's closure
+>   over a suspended frame. `$w:T` is unspellable so it is never a free variable; it is appended to
+>   those capture entries unconditionally and travels **by value** (a `str`), which is what lets it
+>   cross the airlock and outlive its frame.
+>
+> **What stays impossible — each a clear diagnostic naming the workaround, not a v1 gap.**
+> * **A witness-taking generic read as a FUNCTION VALUE** (`g := reset`, a turbofish read as a value,
+>   a HOF argument, a cross-module read, and the `spawn f(...)` / `defer f(...)` **statement targets**,
+>   which reach the callee as a value). A `fn` value erases which *declaration* it came from, so no
+>   witness can ever be recovered. **This is axis 3 — a permanent wall.** Call it directly, take a
+>   factory closure (`fn make[T](mk: fn() -> T) -> T`), or use the `defer:`/`spawn:` **block** form.
+> * **A type parameter of the enclosing TYPE** (`struct Bx[T: Default]` … `T.default()` in a method):
+>   the concrete type is erased once a `Bx` value exists, so only a value could hold the witness.
+>   Declare the parameter on the member.
+> * An **undetermined `T`**; a bound witnessed by a **newtype or a scalar** (neither can host a static
+>   method); a **manifest entrypoint** that takes a witness (it is invoked with no arguments).
+>
+> **Closes `Convert[S]`'s last slice.** `fn make[T: Convert[int]](seed: T, n: int) -> T: return
+> T.convert(n)` runs. Slice 3 was deferred 2026-07-07 on the premise that a *concrete-pinned checker
+> rewrite* delivers nothing under erased generics — true of that model, and exactly why the answer was
+> witness passing instead. `docs/future.md` items 13 and 15 are now closed; item 14 (`cast[T]`) stays
+> closed for its own reason (no consumer).
+>
+> **The trap this milestone paid for twice — a span used as a cross-half table key must not double as
+> a diagnostic anchor.** The witness table is keyed by source position so the checker's answer and the
+> compiler's lookup agree. `|>` desugars at PARSE time and gives every link of `a |> f() |> g()` the
+> span of the whole infix expression, so two witness calls aliased onto one key and the second link
+> silently took the first's type — a **wrong value both engines agreed on**, invisible to two-engine
+> parity, caught only by a running test that used two different concrete types. (The first instance
+> was an interpolation fragment root re-anchored at the string literal's span.) The key is now the
+> **callee token**; the diagnostic anchor is a separate field.
+>
+> **Cost: measured, nothing moved.** `hyperfine` 20 runs, branch vs a pre-milestone binary built from
+> `b6c17369` in a separate `CARGO_TARGET_DIR`: `fib` 1.00 ±0.03, `loop` 1.02 ±0.07, `poly_method`
+> 1.00 ±0.04, `primes` 1.03 ±0.06 against a 1.00 ±0.06 noise floor (baseline vs a copy of itself). No
+> new number in `docs/benchmarks.md` — the opcode is on a cold path and the charge is off unless a
+> body uses it.
+>
+> **Residuals, filed honestly** as `docs/gaps.md` **M24-1..M24-4**: witness **over-charge** (a body
+> that calls a witness-taking fn with only concrete types, or names a struct method matching an
+> imported witness-taking fn, is charged one it never uses — an over-*rejection* only, never a
+> mis-lowering; every syntactic narrowing tried under-charges some shape, which is the unsafe
+> direction); **unused captures** (one `str` per witness per nested body); **type-param shadowing**
+> (a param named like a real type resolves to the STRUCT in ctor/static position but the PARAM in
+> annotation position — pre-existing and reproducible with plain generics, but M24 had to ALIGN its
+> lowering to it so both halves agree; Go and Rust both let the param shadow); and the
+> **entrypoint gate living in `src/main.rs`** (a library caller of `run_file_with_entry` still sees
+> the raw arity fault; the CLI is covered).
+>
+> **Docs:** `docs/syntax.md §7a` ("Static protocol requirements — calling `T.method(...)` through a
+> bound", incl. the decline table), `docs/spec.md` (the M24 row + the `Convert[S]` note),
+> `docs/future.md` (items 13/15 closed, §3a1's ruling marked built + the fn-value wall added to "what
+> stays impossible"), `docs/gaps.md` (M24-1..4), `docs/grammar.bnf` (comment only — `T.default()`
+> already parsed as the `Type.method(args)` postfix form; the comment now says the head may also be a
+> type PARAMETER). Running proof: `tests/chz/spec/static_witness_test.chz` (dual-engine gated) and the
+> golden `examples/static_witness.chz`.
+>
 > # ✅ `PathLike` is drift-guarded — all 21 reserved protocols, not 20 (2026-08-08)
 >
 > `assert_native_protocol_shape_matches` (the debug-only guard that `debug_assert_eq!`s each reserved
@@ -3987,13 +4088,16 @@ in-progress alongside it (see "Next perf batch" below). The Type-Conversion trac
 
 ### Paused track — Type Conversion (2026-07-07)
 
-**🎯 TYPE CONVERSION — `Convert`/`From` PROTOCOL + SCALAR FILLS.** **STATUS (2026-07-07): Phase 0 ✅ +
-Phase 1 slices 1–2 ✅ SHIPPED; slice 3 (`T.convert`) ⛔ deferred (Option A clear-error landed); Phase 2
-(multi-source) ⛔ deferred — both revisit-later, see below.** What works now: scalar fills (`bool(x)`,
-`parse_int`/`parse_float`); a reserved bound-only `Convert[S]` protocol with SOUND structural witnessing;
-direct `Type.convert(x)` conversion (struct↔struct/enum/newtype). What's deferred: generic construction
-`T.convert` through a bound (needs witness-passing) and multi-source (needs overloading). This is a
-coherent stopping point — the Convert track is PAUSED here pending real demand for the deferred pieces.
+**🎯 TYPE CONVERSION — `Convert`/`From` PROTOCOL + SCALAR FILLS.** **STATUS (updated 2026-08-10):
+Phase 0 ✅ + Phase 1 slices 1–2 ✅ SHIPPED (2026-07-07); slice 3 (`T.convert` through a bound) ✅
+SHIPPED as M24 (2026-08-10) — the witness-passing escape hatch this track deferred it to got built;
+Phase 2 (multi-source) ⛔ still deferred, needs overloading.** What works now: scalar fills (`bool(x)`,
+`parse_int`/`parse_float`); a reserved bound-only `Convert[S]` protocol with SOUND structural
+witnessing; direct `Type.convert(x)` conversion (struct↔struct/enum/newtype); **and generic
+construction through the bound** (`fn make[T: Convert[int]](seed: T, n: int) -> T: return
+T.convert(n)`). Only multi-source remains deferred. **Everything below is the 2026-07-07 record, kept
+for its reasoning — read the slice-3 entries as history, not current state; the M24 entry at the top
+of this file is what shipped.**
 
 Closes the documented gap in `docs/spec.md` "Type conversions & casting" / `docs/future.md §15`: today
 conversion is a fixed builtin set (`int`/`float`/`str`/`ord`/`chr`, safe `to_int`/`to_float`) + one-way
@@ -4056,7 +4160,10 @@ consistent (this lang's generics are the buggy-if-improvised part — anchor or 
   is rare). A `TryConvert[S]: try_convert(x) -> Result[Self,E]` protocol is a **clean additive follow-up**
   (exactly how Rust shipped `TryFrom` after `From`) — built ONLY if generic-over-fallible proves needed.
   Design C (Result-only protocol) is REJECTED: forces `Ok(...)` boilerplate on conversions that never fail.
-- **`T.convert(x)` construction-through-typevar — ⛔ SLICE 3 DEFERRED (2026-07-07); spike proved the
+- **`T.convert(x)` construction-through-typevar — ✅ SHIPPED as M24 (2026-08-10). The 2026-07-07 note
+  below stands as the reason the *restricted-rewrite* model was rejected; the answer was the
+  witness-passing hatch it names at the end, and that is what got built.** Original entry: **⛔ SLICE 3
+  DEFERRED (2026-07-07); spike proved the
   "restricted" model delivers NOTHING here.** The Q4-C plan assumed `T.convert` would appear at
   *concrete-pinned* sites the checker could rewrite. A spike disproved it: (a) `T.convert` inside a
   generic body sees `T` **abstract** (`unknown name 'T'`); (b) the SAME gap hits every generic static
@@ -4090,10 +4197,11 @@ consistent (this lang's generics are the buggy-if-improvised part — anchor or 
   It does NOT unblock the generic payoff (that's slice 3 / witness-passing). **Decision (2026-07-07): not
   worth the overloading cost now** — revisit together with witness-passing when real code demands
   multi-source; until then use distinct-named static ctors. General method overloading stays banned.
-- **Witness-passing (Haskell/Swift dictionaries) — DEFERRED escape hatch.** The only erasure-compatible
-  way to make `T.convert` work on an *abstract* `T` (thread the concrete `convert` in as a hidden arg).
-  Its own scoped milestone, built ONLY if the restricted-construction DX proves too weak. Do NOT bolt on
-  per-call-shape special cases instead — that's the path to inconsistent generics.
+- **Witness-passing (Haskell/Swift dictionaries) — ✅ BUILT as M24 (2026-08-10), as its own scoped
+  milestone exactly as prescribed here.** The only erasure-compatible way to make `T.convert` work on
+  an *abstract* `T`: thread the concrete type's runtime identity key in as a hidden trailing arg. The
+  "do NOT bolt on per-call-shape special cases" warning is why it landed as ONE checker answer
+  (`Checker::witness_params_of`) every consumer reads, rather than a rule per call shape.
 - **NOTHING to reserve for `convert` — it's a plain method name.** Only the **protocol `Convert`** is
   reserved (prebuilt + file-backed in `prelude.chz`, like `Comparable`/`Add`/`Stringable`; user
   redeclaration rejected "reserved (builtin)"). NOTE: a user can ALREADY write `fn convert(c: Celsius)
@@ -4108,7 +4216,8 @@ consistent (this lang's generics are the buggy-if-improvised part — anchor or 
   `struct`/`enum`/`newtype`/`type Convert` rejected `reserved (builtin)`), and binds as a generic bound
   `[T: Convert[int]]` with arity-checking (`[T: Convert]`/`[T: Convert[int,str]]` → clear arity error).
   Checker-only, runtime-erased (no `Ty::Protocol` reaches the VM). NOT wired: witnessing (a concrete type
-  satisfying it — slice 2) or `T.convert(..)` through a bound (slice 3, still errors `unknown name 'T'`).
+  satisfying it — slice 2) or `T.convert(..)` through a bound (slice 3; both have since landed —
+  slice 2 on 2026-07-07, slice 3 as M24 on 2026-08-10).
   · 2 **sound static-slot witnessing + bound-only enforcement**
   (HIGH — checker soundness) — **✅ LANDED (2026-07-07, slice 2)**: (A) structural conformance is now
   `is_static`-aware — a concrete type witnesses `Convert[int]` (satisfies `[T: Convert[int]]` at a call
@@ -4133,8 +4242,10 @@ consistent (this lang's generics are the buggy-if-improvised part — anchor or 
   runtime-erased; positive witness runs byte-identical serial == M:N.
   · 3 **`T.convert`
   static-through-bound, concrete-pinned checker rewrite** (HIGH — generics, hand-do + runtime-verify) —
-  **PENDING** (`T.convert` through a bound still errors `unknown name 'T'`). Memory: auto-task
-  over-reaches on checker soundness → auto-task slice 1 only, hand-do 2/3.
+  — **SHIPPED as M24 (2026-08-10)**, but NOT by the concrete-pinned rewrite this line planned: by
+  witness passing (a hidden trailing parameter carrying the concrete type's runtime identity key), so
+  no site needs `T` to be concrete in the checker. Memory: auto-task over-reaches on checker soundness
+  → slice 1 was auto-task, 2 and 3 were hand-done.
 - **Out of scope:** `Into`/`x.into()` (needs top-down expected-type threading; Chezzi is bottom-up),
   `cast[T](Any)` (needs runtime type tags — separate reflection milestone, `docs/future.md §14`),
   `TryConvert` (deferred additive), general method overloading (this is type-keyed witness selection).
@@ -7772,8 +7883,8 @@ member-level turbofish on a builtin/non-generic member (fixes the `.iter[int]()`
 already errored). The `fn_sig` shadow guard already fires for static methods. **Compiler + interp** get
 matching combined-Index-callee arms (peel the erased index → same `Op::NewEnum`/`Op::CallStatic` /
 `build_variant`/`call` as the bare forms; runtime is type-erased). **OUT OF SCOPE (unchanged):** static
-methods on `newtype`; associated protocol requirements (`T.zero()`) — **SHELVED** after two rejected
-attempts, see `docs/future.md` §3.13; protocols stay instance-only.
+methods on `newtype`; associated protocol requirements (`T.zero()`) — at the time SHELVED, **since
+SHIPPED as M24** (2026-08-10, witness passing — see the M24 entry at the top of this file).
 **Both engines + `--parallel`** byte-identical via golden `examples/turbofish_member_args.chz` +
 `.expected` (asserts type-checks clean too) incl. the regression-guard shape; new checker unit tests
 (static own-`[U]` inferred, no-leak degrade, combined ok + mismatch, shadow-static rejected,
@@ -7812,9 +7923,10 @@ generator edge via `alloc_generator`). **Generic statics** via the **type-level 
 otherwise invalid, so unambiguous). (Multi type-arg + variant-side resolution were generalized by the
 later "Turbofish at the declaration site — type-side" milestone above; a static method declaring its
 own `[U]` + the member-level turbofish landed in the "member-side (PART 2)" milestone above.) v1 limits
-(documented): static methods do **not** participate in
-**protocol** conformance (instance-only); static methods on `newtype` are a follow-up (the newtype
-receiver-error site stays). **Both engines + `--parallel`** byte-identical via golden
+(documented at the time): static methods do **not** participate in
+**protocol** conformance (instance-only) — **lifted**: a protocol may require a STATIC method and a
+type witnesses it static-slot-aware (2026-07-07), callable through a bound as of **M24**; static
+methods on `newtype` are still a follow-up (the newtype receiver-error site stays). **Both engines + `--parallel`** byte-identical via golden
 `examples/static_methods.chz` + `.expected` (mirrors `newtype.chz`); checker unit tests for each rule
 + the negative cases; clippy clean. Docs: `syntax.md §7a`, `spec.md` (M21 newtype-static note
 de-staled + a new "Static methods" milestone note), `grammar.bnf` (`Type.method` / `Type[t].method`

@@ -8678,6 +8678,29 @@ fn golden_static_methods_chz_matches_expected_and_interp() {
     );
 }
 
+/// M24 static-witness golden: `examples/static_witness.chz` — a protocol's STATIC (no-`self`)
+/// requirement called THROUGH a generic bound (`T.default()` inside `fn reset[T: Default]`), on a
+/// struct, an enum and the reserved `Convert[int]`; `T` pinned by turbofish and by an annotated
+/// result; witness FORWARDING (`twice`); a MEMBER's own `[T]` (instance + static); and the witness
+/// reaching an escaping closure, a nested `fn`, a `defer:` block and a `spawn:` block. The witness
+/// is a hidden trailing argument, so nothing is monomorphized and the runtime stays erased —
+/// byte-identical on the serial VM, the M:N engine, and the checked-in `.expected`.
+#[test]
+fn golden_static_witness_chz_matches_expected_and_parallel() {
+    let src = include_str!("../../examples/static_witness.chz");
+    let expected = include_str!("../../examples/static_witness.expected");
+    let vm_out = run_capture(src).expect("vm run");
+    let par_out = run_capture_parallel(src).expect("parallel run");
+    assert_eq!(
+        vm_out, expected,
+        "vm output drifted from static_witness.expected"
+    );
+    assert_eq!(
+        vm_out, par_out,
+        "parallel engine diverged on static_witness"
+    );
+}
+
 /// M21 generic-newtype golden: `examples/newtype_generic.chz` exercises type-parameterized
 /// newtypes — `Stack[T] = List[T]` / `Tally[T: Hashable] = Map[T, int]` with methods that
 /// reference `T`, ctor inference + turbofish construction (`Stack[str]([])`), method dispatch with

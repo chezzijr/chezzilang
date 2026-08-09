@@ -2,8 +2,9 @@
 
 A fast, statically-typed, Python-feel scripting language. Hand-built in Rust.
 
-> **Status:** core language **implemented through M21 (still evolving; M19 perf in progress)** (scalars + collections, generics +
-> structural protocols, exhaustive `match`, closures/HOF, modules, `Iterator[T]`, slicing/indexing,
+> **Status:** core language **implemented through M24 (still evolving; M19 perf in progress)** (scalars + collections, generics +
+> structural protocols incl. user-overloadable `==` and **static protocol requirements callable
+> through a bound**, exhaustive `match`, closures/HOF, modules, `Iterator[T]`, slicing/indexing,
 > `defer` + `recover:`); **concurrency shipped through Tier-D** (`spawn` / `parallel:` nursery,
 > `Channel`/`Shared`/`Executor`, real OS-thread M:N scheduler + netpoller + `std.net`). **M19** (a
 > behavior-preserving perf track) is in progress — ~1630 tests passing. This doc is the source of truth
@@ -665,10 +666,10 @@ root marker (all fields default to unset, so `entrypoint` is required only for t
 > at the first mismatching use with the same "un-inferred type parameter … bind it at the construction
 > site" guidance as a bare container ctor (`[]`) or a generic free-function return — it is **not**
 > silently degraded to `Unknown` (which used to swallow any later argument and defeat homogeneity). A
-> method-**own** `[U]` with nothing to bind it stays refinably `Unknown` (genuinely unconstrained). v1 limits: static methods do
-> **not** participate in protocol conformance (protocols stay instance-only); static methods on
-> `newtype` and **associated protocol requirements** (`T.zero()`) remain follow-ups — the latter
-> **attempted twice and SHELVED** (see `docs/future.md` §3.13; factory-closure is the working alternative).
+> method-**own** `[U]` with nothing to bind it stays refinably `Unknown` (genuinely unconstrained). v1 limits: static methods on
+> `newtype` remain a follow-up. **Associated protocol requirements** (`T.zero()`) were a v1 limit and
+> **LANDED in M24** — a protocol may require a static method, a type witnesses it statically, and a
+> generic bounded by it may call `T.zero()` through the bound (witness passing; `docs/syntax.md §7a`).
 
 > **Turbofish at the declaration site — type-side (PART 1, landed).** Explicit type args for a generic
 > are pinned **at the site the generic is DECLARED**: declared on the type (`enum/struct/newtype [T]`)
@@ -702,8 +703,8 @@ root marker (all fields default to unset, so `entrypoint` is required only for t
 > type). A method turbofish on a generic **variant** ctor (`Box[int].Has[str](5)`) is an error.
 > Runtime is type-erased (dispatch to the existing `CallStatic` / method paths), so both engines
 > (serial `--serial` VM and the default M:N VM) are byte-identical (`examples/turbofish_member_args.chz`). Still out of scope: static
-> methods on `newtype` and associated protocol requirements (`T.zero()`) — the latter **SHELVED**
-> after two rejected attempts (see `docs/future.md` §3.13).
+> methods on `newtype`. (Associated protocol requirements (`T.zero()`) were out of scope here too;
+> they **landed in M24** — see `docs/syntax.md §7a`.)
 
 > **Expected-type inference — an annotation pins a generic ctor / generic fn-call (landed).** Beyond
 > the turbofish above, a type **annotation** that surrounds a generic constructor or generic function
@@ -965,13 +966,14 @@ pair still compares Equal by the method (`sort()` orders `-0.0 < +0.0`).
 **What does NOT exist (current boundaries):**
 
 - No `as` operator (`as` in the grammar is only import aliasing).
-- No `Into`/`TryFrom`, and no value-level conversion protocol — a `Convert[S]` **bound** exists (see
-  below), but there is not yet an ergonomic value-position conversion mechanism (`T.convert` through a
-  bound is a separate pending slice).
+- No `Into`/`TryFrom`, and no value-level conversion protocol — `Convert[S]` is a **bound-only**
+  protocol (see below); a value-position conversion mechanism (`c: Convert[int]` as an annotation) is
+  deliberately rejected, since a value cannot invoke a static ctor. `T.convert(x)` **through** the
+  bound landed in M24.
 - `cast[T](val: Any) -> Option[T]` (a checked downcast off the `Any` top type) is **deferred** — it
   needs runtime type tags, since generics are erased (`docs/future.md`).
 
-**`Convert[S]` — bound-only conversion protocol (partial).** A structural, target-keyed conversion
+**`Convert[S]` — bound-only conversion protocol.** A structural, target-keyed conversion
 protocol `Convert[S]` exists as a reserved builtin. A type **witnesses** `Convert[S]` by declaring a
 **static** method `fn convert(x: S) -> Self` (associated / no `self` receiver) — witnessed structurally
 like `Comparable`/`Add`, but `is_static`-aware (an instance `convert(self, …)` does NOT witness it). It
@@ -979,15 +981,17 @@ is usable **only as a generic bound** `[T: Convert[S]]`; because a static ctor c
 value, `Convert[S]` is **rejected as a value-annotation type** (param/field/return/binding, including
 nested `List[Convert[int]]`/`Option[…]`/tuple, a same- or cross-module type alias, and a protocol that
 *embeds* a static-ctor protocol) — bound-only by the same static-slot rule that applies to any
-static-ctor protocol. NOT available: calling `T.convert(x)` **through** the bound — generics are erased
-and a generic body is checked once with `T` abstract, so there is no concrete type to construct at
-runtime (this affects *every* generic static call, e.g. `T.empty()`, not just `convert`). `T.<static>()`
-on a type parameter is a clear error ("cannot call a static method through the generic type parameter
-'T' … call the concrete type's static method directly or pass a `fn(...) -> T`"), and generic
-construction over the bound is **deferred** pending witness-passing (`docs/future.md §15`). Use direct
-`Type.convert(x)` (which needs no protocol) or a passed converter function. The cheap scalar fills
-(`bool(x)` truthiness cast + `Result`-returning `parse_int`/`parse_float`) have **landed**. Recorded in
-`docs/future.md §3`.
+static-ctor protocol. **Calling `T.convert(x)` through the bound LANDED in M24** — the last deferred
+slice — by **witness passing**: a type parameter whose bound carries a static requirement, and whose
+body needs it, gets a hidden trailing parameter holding the concrete type's runtime identity key, so
+`T.convert(n)` dispatches to the real type while generics stay erased (one body, nothing
+monomorphized, no type argument reaches the VM). This is general, not `Convert`-specific — it is the
+same mechanism behind `T.default()` on any user protocol with a static requirement. Surface, the
+supported shapes, and the four walls that remain (a type parameter of the enclosing TYPE, a
+witness-taking fn read as a function VALUE, a `spawn`/`defer` statement target, an undetermined `T`):
+`docs/syntax.md §7a`. Direct `Type.convert(x)` (which needs no protocol) still works and is still the
+right spelling when the type is known. The cheap scalar fills (`bool(x)` truthiness cast +
+`Result`-returning `parse_int`/`parse_float`) have **landed**. Recorded in `docs/future.md §3`.
 
 ## Architecture — pipeline
 
@@ -1053,6 +1057,7 @@ tests/          # Rust unit + golden tests
 | ✅ **M21** | Nominal `newtype` | `newtype Name = <type>` — a DISTINCT type wrapping the underlying (Go defined-type model), not a transparent alias: construct (`Name(x)`) / cast-unwrap (`int(n)`) cross the boundary; accidental mixing with the raw underlying or a different newtype is a compile error. Numeric (`int`/`float`) same-type operators auto-flow (native op, unwrap→op→rewrap); a `str`/`bool` newtype does not auto-inherit `+`/`<` (define a method); methods + `Stringable`/`Hashable` via the newtype's own methods (runtime hash/str dispatch, both engines) — the **operator** protocols (`Add`/…/`Neg`/`Comparable`/`Eq`) are never satisfied by a newtype method, only by a numeric underlying's auto-flow (W6-3d). **Generic newtypes** (`newtype Stack[T] = List[T]`, Go defined-type model + generics): methods-only (no native operator auto-flow even for `Box[T] = T`); ctor infers type args (from the binding/return/parameter annotation — `e: Stack[str] = Stack([])` — or a turbofish `Stack[int]([])` when an empty literal can't bind `T`); cast-unwrap propagates the instantiation (`List(s)` for `s: Stack[int]` ⇒ `List[int]`). v1 limits: aggregate underlyings get identity+construct+unwrap+own-methods only; no `derive`; no static / associated methods **on a newtype** (`Type.method()`) yet — a follow-up (static methods HAVE landed for struct + enum; see the "Static methods" note); declaring one is **rejected with a clear "not supported yet" error** (decl site + call site), not a cryptic "unknown name". Surface in [`docs/syntax.md §7b`](syntax.md) |
 | ✅ **M22** | Operator protocols + protocol embedding | New per-operator protocols **`Div`/`Mod`/`Neg`** (methods `div`/`mod`/`neg`, powering `/`/`%`/unary `-`; `int`/`float` intrinsic, structs/enums via the method, numeric scalar newtypes via the underlying's native auto-flow (`Div`/`Mod` only — `Neg` is out of scope for newtypes, and a newtype operator *method* is never dispatched) wired exactly like `Add`/`Sub`/`Mul`. **Protocol embedding** — a protocol body may list embed lines (`Add + Sub`, order-free, interleaved with `fn` sigs); a type satisfies it iff it satisfies every embed (transitively) AND every own method, flattened at every use site — a bound AND an interface value alike (a protocol value also satisfies the protocols it embeds, Go's interface-to-interface assignment). **Object safety** bounds the value form: since a protocol value erases which witness it holds, a method TAKING `Self` is unusable wherever two witnesses could meet — `a.add(b)` on a value, the operator forms (`+ - * / % <`, all `(self, Self) -> Self`), and a protocol value witnessing a generic type param whose bound needs one. Assignability and embed-satisfaction are unaffected, and `Self` in the RETURN widens to the protocol and stays callable. Collision rules: own-fn-vs-embed = error, same-sig embed diamond dedups, differing-sig embed = error, cyclic embed = error. Builtin **`Arithmetic`** bundle = `Add + Sub + Mul + Div`. Checker/parser/grammar + both-engine operator dispatch; parity-tested. Surface in [`docs/syntax.md`](syntax.md) |
 | ✅ **M23** | The `Eq` protocol — user-overloadable `==` | Prebuilt reserved **`Eq`** (`eq(self, other: Self) -> bool`): a struct/enum defining `eq` **owns its `==`/`!=`**, closing the hole where a type could define `compare` (so `<` was yours) but never `==`. All four scalars satisfy it intrinsically (**`bool` included**, unlike `Comparable`); a **newtype** never satisfies it through a METHOD — its `==` unwraps to the underlying's native equality, so declaring `eq` on a newtype (any underlying, any operand signature) is a decl-site error (W6-3d widened, `docs/gaps.md` §L5) — while a **numeric** newtype satisfies it intrinsically via that same native equality (`Comparable` embeds `Eq`, so it must). **`Comparable` embeds `Eq`** (Rust's `Ord: Eq`), so a struct/enum with `compare` must also define `eq`. Dispatch is by the operands' **runtime type** and reaches **every** equality site, not just the operator: `in`, `list.contains`/`index_of`/`dedup`/`unique`, `Map`/`Set` key probes, set algebra, and the recursive element/field/entry compares — so `x == y`, `y in xs` and `m[y]` can no longer give three answers. `!=` is the same dispatch negated (no separate hook); `match` never dispatches `eq`; `Atomic[T].cas` stays structural — a payload that REACHES a user `eq` (its own or one nested in an element/entry/field/payload) is a check-time error, and the VM switches the hook off for the compare so the property does not rest on that walk. The hook is gated on its **exact** signature at the declaration, so a method merely sharing the name (a *generic* operand, `Opt[T].eq(self, x: T)`) stays an ordinary method. Also closes **`docs/gaps.md` §B2**: `==`/`!=` between provably-disjoint types is now a compile error, decided by co-inhabitability (`Checker::may_be_equal`), with the `Any` existential as the escape hatch — a deliberate divergence from Python's runtime `False`, matching Go, Rust and mypy `--strict-equality`. Cost: `map` +4.1%, everything else flat ([`benchmarks.md`](benchmarks.md)). Surface in [`docs/syntax.md §7b`](syntax.md) |
+| ✅ **M24** | Static protocol requirements through a bound — **witness passing** | A protocol may require a **static** (no-`self`) method, and a generic bounded by it may **call it through the type parameter**: `fn reset[T: Default](old: T) -> T: return T.default()`. Generics stay **erased** — a type param whose bound carries a static requirement AND whose body needs it gets a **hidden trailing parameter** holding the concrete type's runtime identity key; `T.method(...)` lowers to a new `Op::CallStaticDyn` that pops that key and runs the same dispatch as `Type.method(...)`. Nothing is monomorphized and no type argument reaches the VM. Charged **only** to a body that uses one, so a generic that merely has a static-carrying bound keeps every position it had. Covers struct + enum hosts, same- and cross-module calls in every import spelling, `T` inferred / turbofish-pinned / annotation-pinned, transitive + recursive + mutual **forwarding** of a still-abstract `T`, a type param declared by a **MEMBER** (instance or static, plain or generic host), and the call inside a closure (incl. an escaping one), a nested `fn`, a `defer:` block and a `spawn:`/`parallel:` block (the witness crosses the airlock by value). Closes `Convert[S]`'s last slice — `fn make[T: Convert[int]](…): return T.convert(n)`. Permanent walls (each a clear diagnostic naming the workaround): a type param of the enclosing **TYPE**, a witness-taking fn read as a **function value** (a `fn` value erases its declaration), a `spawn`/`defer` **statement target**, an undetermined `T`, a newtype/scalar witness, and a witness-taking manifest entrypoint. Bench-neutral (measured). Surface in [`docs/syntax.md §7a`](syntax.md); the strategy ruling in [`docs/future.md §3a1`](future.md) |
 | **Stretch** | Cranelift AOT/JIT backend | Near-Go native speed (optional; a late-stage endeavor once the language has matured) |
 
 > Native FFI (Level-2 compiled-in bindings) **shipped in M6c**; **Level-3 dynamic C-ABI FFI v1

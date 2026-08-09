@@ -153,10 +153,11 @@ UPDATE_EDITOR_ASSETS=1 cargo test --test editor_tmlanguage    # regenerate the V
 
 ## Where things stand
 
-Core language is **implemented through M23 (and still evolving; M19 perf in progress)** (scalars, `List`/`Map`/`Set`/`tuple`,
+Core language is **implemented through M24 (and still evolving; M19 perf in progress)** (scalars, `List`/`Map`/`Set`/`tuple`,
 generic structs + enums, `Result`/`Option` + `?`, generics + structural protocols,
 exhaustive `match` + guards, closures/HOF, modules, GC, interpolation, pipe, `defer`,
-`recover:`, `Iterator[T]`, slicing/indexing protocols, user-overloadable `==` via `Eq`). **Concurrency** has landed through
+`recover:`, `Iterator[T]`, slicing/indexing protocols, user-overloadable `==` via `Eq`,
+static protocol requirements callable through a generic bound via witness passing). **Concurrency** has landed through
 **Tier-D** (`spawn` / `parallel:` nursery, `Channel[T]`, `Shared[T]`, `Executor`, real
 OS-thread engine via `--parallel`, netpoller + `std.net`). ~3681 tests green.
 
