@@ -2,6 +2,16 @@
 
 Single source of truth for "what am I doing next." Update after every work session.
 
+> **✅ W7-44a landed 2026-08-10 — `docs/stdlib.md` now names the CSPRNG surface's Linux-only wiring,
+> and warns `uuid.v4()` is not cryptographically secure.** The `std.crypto` CSPRNG paragraph gets a
+> platform caveat: Linux `getrandom(2)` is the only wired entropy source, and `secure_bytes`/`token_hex`
+> fail closed on macOS/Windows with the exact message `secure_bytes: no secure entropy source on this
+> platform`. The `std.uuid` section gets a **Security:** line (the generator is a 64-bit SplitMix64,
+> which is invertible — two observed UUIDs predict every later one — so use `crypto.token_hex(n)` for
+> tokens/session ids/secrets) and the now-false blanket "auto-seeded from OS entropy" claim is corrected
+> to name the Linux-only path. Docs-only; the code half (a portable entropy source off Linux) stays
+> filed open in `docs/gaps.md` **W7-44**.
+
 > # ✅ External review, batch 1 — 2 fixed, 8 filed (2026-08-10)
 >
 > Nine independent external testers wrote programs against Chezzi. **Six findings re-verified on HEAD

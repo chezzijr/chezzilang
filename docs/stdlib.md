@@ -943,6 +943,10 @@ entropy they raise a **recoverable fault** (catchable by `recover:`), never weak
 `n` must be `0..=1048576` (a 1 MiB cap); a negative or oversized `n` faults. Output is
 **non-deterministic** — two draws differ, so it has no fixed golden. (`token_urlsafe` (base64url) is a
 deferred follow-up.)
+**Platform:** the only wired entropy source is Linux `getrandom(2)`. On macOS and Windows both fns
+**fail closed** — a recoverable fault with the exact message `secure_bytes: no secure entropy source on
+this platform` — rather than falling back to a weaker source; portable entropy is a filed follow-up
+(`docs/gaps.md`, row W7-44 half (b)).
 **Security:** MD5 **and SHA-1** are **cryptographically broken** — use them only for checksums / git
 object ids / legacy interop, never for passwords, signatures, or integrity against an adversary.
 Password hashing (bcrypt/argon2) is not yet provided.
@@ -952,11 +956,15 @@ Password hashing (bcrypt/argon2) is not yet provided.
 RFC 4122 version-4 (random) UUIDs. `v4() -> str` returns a fresh random UUID as the canonical 36-char
 `8-4-4-4-12` lowercase-hex string (version nibble `4`, variant in `8/9/a/b`). `uuid_seed(n: int) -> nil`
 reseeds the generator deterministically (for reproducible/golden runs). The generator has its **own**
-process-global stream (separate from `std.rand`, auto-seeded from OS entropy), so a `v4()` draw never
-perturbs a program's `rand` sequence. *Pure CPU draws (no I/O); inline on every engine.*
+process-global stream (separate from `std.rand`, auto-seeded from Linux `getrandom` where available, a
+timestamp-derived seed elsewhere), so a `v4()` draw never perturbs a program's `rand` sequence.
+*Pure CPU draws (no I/O); inline on every engine.*
 **Limit (not a bug, same as `std.rand`):** the stream is a single process-global, so under `--parallel`
 *concurrent* `v4()` draws interleave nondeterministically; an EXACT seeded value is reproducible only for
 *sequential* draws.
+**Security:** `v4()` is **not cryptographically secure**, regardless of platform — the generator is a
+64-bit SplitMix64, which is invertible, so two observed UUIDs recover its state and predict every later
+one. Use `crypto.token_hex(n)` for tokens, session ids, or any other secret.
 
 ---
 
