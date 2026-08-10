@@ -530,9 +530,9 @@
 #                                 (`T.default()` inside `fn reset[T: Default](…)`, M24) — SAME
 #                                 production, no new syntax: the checker reinterprets the head and the
 #                                 compiler emits `CallStaticDyn`, which reads the concrete type from
-#                                 the fn's hidden trailing witness parameter. A type parameter that
-#                                 shadows a real type name resolves to the TYPE here (see
-#                                 `docs/gaps.md` M24-3).
+#                                 the fn's hidden trailing witness parameter. A type parameter
+#                                 SHADOWS a real type name of the same name here, as it already did
+#                                 in annotation position (Rust/Go's rule; `docs/gaps.md` M24-3).
 #   `Type[targ].member(args)?` — SINGLE type arg: parses as `<postfix> "LBRACKET" <subscript>
 #                                 "RBRACKET" "DOT" "IDENT" ("LPAREN" <argList>? "RPAREN")?` — the
 #                                 parser cannot tell `Type[int].member` from `arr[i].field`, so it

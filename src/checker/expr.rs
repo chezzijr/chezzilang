@@ -182,6 +182,25 @@ impl Checker {
                     expected,
                 );
             }
+            // `T.member(args)` where `T` is an in-scope generic TYPE PARAMETER. M24 — this is the
+            // STATIC-WITNESS call: legal exactly when one of `T`'s bounds declares `member` as a
+            // STATIC requirement AND the enclosing fn's hidden `$w:T` witness local is reachable
+            // here. Everything else keeps the pre-M24 clear diagnostic (generics are erased, so
+            // without a witness there is no concrete type to dispatch to).
+            //
+            // FIRST among the bare-`Ident` receiver arms, because a type parameter SHADOWS an outer
+            // type of the same name — `fn f[Item: Tagged](x: Item) -> int: return Item.tag()` next
+            // to a `struct Item` means the PARAM. That is Rust's answer (`fn f<Item: D>(_x: Item)
+            // -> i32 { Item::tag() }` with `f(Counter)` prints `1`, measured 2026-08-10) and Go's,
+            // and it is what the ANNOTATION position (`x: Item`) has always meant here, so the two
+            // positions finally agree. The compiler's witness arm sits first among ITS bare-receiver
+            // arms for the same reason: both halves must resolve the same `Item`.
+            if let ExprKind::Ident(tname) = &obj.kind
+                && !self.is_local_binding(tname)
+                && self.type_params.contains_key(tname)
+            {
+                return self.infer_witness_static_call(tname, name, args, span);
+            }
             // `Enum.Variant(args)` — qualified payload-variant constructor. Same gate as the nullary
             // value form in `infer_field`: an unbound enum name dotted with one of its variants. The
             // bare-written enum name is gated by `enum_names` (bare visibility) and resolved to its
@@ -295,17 +314,6 @@ impl Checker {
                     ),
                 );
                 return Ty::Unknown;
-            }
-            // `T.member(args)` where `T` is an in-scope generic TYPE PARAMETER (not a concrete type
-            // name). M24 — this is the STATIC-WITNESS call: legal exactly when one of `T`'s bounds
-            // declares `member` as a STATIC requirement AND the enclosing fn's hidden `$w:T` witness
-            // local is reachable here. Everything else keeps the pre-M24 clear diagnostic (generics
-            // are erased, so without a witness there is no concrete type to dispatch to).
-            if let ExprKind::Ident(tname) = &obj.kind
-                && !self.is_local_binding(tname)
-                && self.type_params.contains_key(tname)
-            {
-                return self.infer_witness_static_call(tname, name, args, span);
             }
             // `Type[T…].member(args)` — declaration-site turbofish for a generic TYPE: a VARIANT
             // constructor (`Box[int].Has(5)`, `E[int, str].Pair(…)`) or a generic STATIC method
@@ -957,7 +965,10 @@ impl Checker {
         // Only the METHOD's params can be witnessed, so the ENCLOSING type's `tps` are never here.
         if !sig.witness_params.is_empty() {
             let wparams = sig.witness_params.clone();
-            self.record_witness_call(method, &wparams, &sub, name_span, span, WitnessCallee::Free);
+            // The pin goes AFTER the member name (`Holder.build[Counter]()`); the bare
+            // `build[Counter](...)` the free spelling suggests is read as a free call.
+            let recv = WitnessCallee::Dotted(tname.to_string());
+            self.record_witness_call(method, &wparams, &sub, name_span, span, recv);
         }
         // A method-OWN `[U]` param still un-inferred (no method turbofish, unbindable from args, e.g.
         // `make[U]() -> List[U]`) degrades to the refinable `Ty::Unknown` — a method-local `[U]` with
@@ -1905,9 +1916,16 @@ impl Checker {
                         // M24 — the witness key span is the CALLEE TOKEN (`name_span`), never the
                         // call node: a pipe chain's links all carry the infix expression's span, so
                         // keying on it aliased two witness calls onto one entry.
-                        return Some(
-                            self.infer_generic_call(name, &sig, args, targs, name_span, span, hint),
-                        );
+                        return Some(self.infer_generic_call(
+                            name,
+                            &sig,
+                            args,
+                            targs,
+                            name_span,
+                            span,
+                            hint,
+                            WitnessCallee::Free,
+                        ));
                     }
                     // Float params are coerced at the callee's prologue (compile_fn / extern).
                     // Honor an optional trailing tail (`min_params < params.len()`, e.g. a native
@@ -2213,8 +2231,12 @@ impl Checker {
                         // M24 Task 3: a witness-needing callee records here exactly like a bare one —
                         // the entry is keyed by the CALLING module, and the compiler resolves the
                         // callee's hidden arity through this same module bind.
+                        // The pin the "not determined here" diagnostic may suggest is spelled with
+                        // the MODULE prefix (`lib.empty[Counter]()`); the bare form parses as a
+                        // free call and dead-ends on "'empty' takes no type arguments".
+                        let recv = WitnessCallee::Dotted(mname.clone());
                         return self.infer_generic_call(
-                            method, &fsig, args, type_args, name_span, span, hint,
+                            method, &fsig, args, type_args, name_span, span, hint, recv,
                         );
                     }
                     // Float params are coerced at the callee's prologue. Honor an optional trailing

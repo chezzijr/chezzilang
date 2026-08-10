@@ -616,30 +616,33 @@ dispatches from the recorded key (`Op::CallStaticDyn` → `Vm::do_static_call`).
 any of this machinery existed, and re-deriving it is what turned a "not worth the cost" into a
 milestone.
 
-**One trap this milestone paid for twice, worth stating generally: a span used as a cross-half table
-key must not double as a diagnostic anchor.** The witness table is keyed by source position so the
-checker's answer and the compiler's lookup agree. Two separate bugs on this branch were the same
-mistake — `|>` desugars at PARSE time and gives every link of `a |> f() |> g()` the span of the whole
-infix expression, so two witness calls aliased onto one key and the second silently took the first's
-type: a **wrong value both engines agreed on**, so parity was blind to it and only a running test with
-two different concrete types caught it. The key is now the **callee token** (distinct per link); the
-diagnostic anchor is a separate field. Any future checker→compiler table keyed on position inherits
-this hazard.
+**One trap this milestone paid for three times, worth stating generally: a span used as a cross-half
+table key must not double as a diagnostic anchor.** The witness table is keyed by source position so
+the checker's answer and the compiler's lookup agree. Three separate bugs on this branch were the
+same mistake — `|>` desugars at PARSE time and gives every link of `a |> f() |> g()` the span of the
+whole infix expression, so two witness calls aliased onto one key and the second silently took the
+first's type: a **wrong value both engines agreed on**, so parity was blind to it and only a running
+test with two different concrete types caught it. The third instance survived a fix that *claimed* to
+have separated them: the fragment anchor was still written onto a cloned AST node's `span`, so a
+fragment root that was itself a string carried the outer literal's span into the NESTED
+interpolation's keys and both per-call tables missed. The key is now the **callee token** (distinct
+per link) and the anchor lives BESIDE the AST (`Checker::frag_anchor`, applied on the way out in
+`Checker::error`) — no span is mutated anywhere, which is what makes the next instance
+unrepresentable rather than merely fixed. Any future checker→compiler table keyed on position
+inherits this hazard.
 
 ### What stays impossible under witness passing, permanently
 
 State these when the questions recur; they are not oversights:
 
 - **A witness-taking generic read as a FUNCTION VALUE.** `g := reset`, a turbofish read as a value, a
-  HOF argument, a cross-module read, and the `spawn f(...)` / `defer f(...)` **statement targets**
-  (which reach the callee as a value) all reject with *"'reset' cannot be used as a function value:
+  HOF argument and a cross-module read all reject with *"'reset' cannot be used as a function value:
   its bound on T requires a static protocol method, which needs the concrete type — a function value
   erases it."* A `fn` value carries a code pointer and captures; it does not carry which *declaration*
   it came from, so there is no site at which the hidden argument could be supplied. This is axis 3 of
   the six above — the one that did not close, and the reason to say so plainly is that it looks like a
-  v1 gap and is not. Workarounds: call it directly, or take a factory closure
-  (`fn make[T](mk: fn() -> T) -> T`); for `spawn`/`defer`, call eagerly and defer the result, or use
-  the **block** form (`defer:` / `spawn:`), which the witness does reach.
+  v1 gap and is not. Workaround: call it directly, or take a factory closure
+  (`fn make[T](mk: fn() -> T) -> T`).
 - **A type parameter of the enclosing TYPE** (`struct Bx[T: Default]` … `T.default()` in a method).
   The concrete type is erased the moment a `Bx` *value* exists, so only a value could carry the
   witness — and putting it there would make every generic struct pay for it. Declare the parameter on
@@ -654,6 +657,15 @@ State these when the questions recur; they are not oversights:
   because the backend sees `T` and not `float`. Documented at `docs/spec.md:513`; the erasure tax
   showing through to users, and the one item on this list that is arguably a bug rather than a wall.
 - **Specialized numeric containers.** Needs typed containers, independent of this decision.
+
+**Not on that list — the `spawn f(...)` / `defer f(...)` STATEMENT TARGET is a DEFERRAL, not a wall.**
+It rejects with its own message: *"'reset' takes a static-protocol bound (T), so it cannot be the
+target of `defer` yet — call it eagerly and `defer` the result, or wrap the call in a closure"*. The
+"yet" is honest: a statement target is not read as a function value at all, it lowers at its own emit
+site (`Op::SpawnCall` / `SpawnMethod` / `DeferCall` / `DeferMethod`), and none of those push the
+hidden argument — so this is arity plumbing nobody has needed, not erasure. Workarounds as the message
+says, or use the **block** form (`defer:` / `spawn:`), which the witness already reaches. Filed as
+`docs/gaps.md` **M24-5**.
 
 ### Not the same problem — do not fold it in
 

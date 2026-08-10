@@ -13,8 +13,10 @@
 //! The `entrypoint` value is a dotted module path, optionally suffixed with `:function`. With a
 //! `:function` suffix (e.g. `"src.main:main"`) a bare `chezzi run` runs the module's top-level and
 //! then calls that function — so the source needs no trailing call. Without the suffix
-//! (`"src.main"`) it just runs the module top-level (scripting model). This parser keeps the value
-//! verbatim; the `:`-split happens in the CLI (`main::split_entrypoint`).
+//! (`"src.main"`) it just runs the module top-level (scripting model). [`parse`] keeps the value
+//! verbatim; [`split_entrypoint`] / [`entrypoint_file`] interpret it, and [`entry_fn_for`] answers
+//! the one question every static consumer asks — "is THIS file the project's entry module, and what
+//! function does it owe?".
 //!
 //! Recognized syntax: `[section]` headers, `key = "value"` string pairs, `#` comments, blank lines,
 //! and leading/trailing whitespace. Only `[project]` keys (`name`/`version`/`entrypoint`) are
@@ -141,6 +143,83 @@ fn parse_string_value(s: &str) -> Option<String> {
         }
     }
     Some(out)
+}
+
+/// Split a manifest `entrypoint` value into its dotted module path and an optional `:function`
+/// suffix. Splits on the FIRST `:` so the function name is taken verbatim; `"src.main"` →
+/// `("src.main", None)`, `"src.main:main"` → `("src.main", Some("main"))`. A `:` with no function
+/// after it (`"src.main:"`) is rejected — otherwise it reaches the VM as an empty name and produces a
+/// baffling "function `` not found" error. Pure (no I/O) so it is unit-testable.
+pub fn split_entrypoint(entrypoint: &str) -> Result<(&str, Option<&str>), String> {
+    match entrypoint.split_once(':') {
+        Some((_, "")) => Err(format!(
+            "has an invalid [project] entrypoint {entrypoint:?}; the ':' must be followed by a function name like \"src.main:main\""
+        )),
+        Some((module, func)) => Ok((module, Some(func))),
+        None => Ok((entrypoint, None)),
+    }
+}
+
+/// Map a manifest `[project] entrypoint` (a dotted module path) to its `.chz` file, root-relatively.
+/// Validates the path FIRST: an empty / whitespace / leading- or trailing-dot / doubled-dot value
+/// would otherwise feed empty path segments to [`crate::resolver::module_file`], whose `push("")` +
+/// `set_extension` rewrites the project-root dir's own extension and escapes the root (e.g.
+/// `<root>.chz`), producing a baffling "cannot read" error. Pure (no cwd/env) so it is unit-testable.
+pub fn entrypoint_file(
+    entrypoint: &str,
+    root: &std::path::Path,
+) -> Result<std::path::PathBuf, String> {
+    // Trim surrounding whitespace on EACH segment before building the path, so a padded value like
+    // `" app "` resolves to `app.chz` rather than the baffling `<root>/ app .chz` ("cannot read").
+    // An embedded path separator would resolve by accident via `PathBuf::push` instead of the
+    // documented dotted form, so reject it up front.
+    if entrypoint.contains('/') || entrypoint.contains('\\') {
+        return Err(format!(
+            "has an invalid [project] entrypoint {entrypoint:?}; the module path must use '.' separators, not '/'"
+        ));
+    }
+    let segs: Vec<String> = entrypoint
+        .split('.')
+        .map(|s| s.trim().to_string())
+        .collect();
+    if segs.iter().any(String::is_empty) {
+        return Err(format!(
+            "has an invalid [project] entrypoint {entrypoint:?}; expected a dotted module path like \"src.main\""
+        ));
+    }
+    Ok(crate::resolver::module_file(
+        &segs,
+        root,
+        &crate::resolver::std_root(),
+    ))
+}
+
+/// M24 — the manifest entry FUNCTION `file` is declared to provide, or `None`.
+///
+/// `Some("main")` exactly when the project `file` belongs to has `entrypoint = "<path>:main"` AND
+/// `<path>` resolves to `file` itself. That is a property of the PROJECT, not of one CLI invocation:
+/// the manifest declares the function's required shape (invoked by name, with no arguments), so a
+/// generic that would take a hidden type witness is broken in that file however you reach it — the
+/// same way Go rejects a `func main` with parameters at build time. So this is the ONE derivation
+/// every consumer that statically checks a file uses (`chezzi check`, `chezzi run`, the editor /
+/// LSP); bare `chezzi run` passes the name it already resolved and gets the same answer.
+///
+/// Silent (`None`) on every failure — no manifest, unreadable, malformed, no `entrypoint`, no
+/// `:function` suffix, a different module. Reporting those is the run path's job; a file with no
+/// project around it must still check.
+pub fn entry_fn_for(file: &std::path::Path) -> Option<String> {
+    // Canonicalize FIRST: the caller's path is often relative to the cwd, and `find_root_from_dir`
+    // walks `Path::parent`, which on a relative path stops at `""` — it would then read the cwd's
+    // manifest for a file two directories up. Both sides of the identity compare are canonical too,
+    // so a symlinked or `./`-prefixed spelling of the entry module still matches.
+    let file = std::fs::canonicalize(file).ok()?;
+    let root = crate::resolver::find_root_from_dir(file.parent()?)?;
+    let src = std::fs::read_to_string(root.join("chezzi.toml")).ok()?;
+    let entrypoint = parse(&src).ok()?.entrypoint?;
+    let (module_path, entry_fn) = split_entrypoint(&entrypoint).ok()?;
+    let entry_fn = entry_fn?;
+    let declared = std::fs::canonicalize(entrypoint_file(module_path, &root).ok()?).ok()?;
+    (declared == file).then(|| entry_fn.to_string())
 }
 
 #[cfg(test)]

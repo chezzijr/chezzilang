@@ -218,3 +218,38 @@ fn witness_taking_manifest_entrypoint_is_refused_with_its_reason() {
         "a file run executes the top level only; stdout:\n{stdout}"
     );
 }
+
+// M24 — the SAME entrypoint gate must be reachable from every consumer that statically checks the
+// file, not just from bare `chezzi run`. The entrypoint is a property of the PROJECT (the manifest
+// declares `main`'s required shape, exactly as Go requires `func main()` to be nullary), so
+// `chezzi check` — and through the same derivation the editor/LSP — must report it too. It used to
+// be CLI state threaded only through the bare-run path, so `chezzi check src/main.chz` said "ok: no
+// type errors" about a project that cannot start.
+#[test]
+fn a_witness_taking_manifest_entrypoint_is_refused_by_check_too() {
+    let t = TmpDir::new();
+    t.write("chezzi.toml", "[project]\nentrypoint = \"src.main:main\"\n");
+    t.write(
+        "src/main.chz",
+        "protocol Default:\n    fn default() -> Self\nstruct Counter:\n    n: int\n    fn default() -> Counter:\n        return Counter(5)\nfn main[T: Default]():\n    print(T.default())\n",
+    );
+
+    let (stdout, stderr, ok) = run(&t.0, &["check", "src/main.chz"]);
+    assert!(!ok, "check must refuse it too; stdout:\n{stdout}");
+    let out = format!("{stdout}{stderr}");
+    assert!(
+        out.contains("the manifest entrypoint 'main' is invoked with no arguments"),
+        "check must give the same reason as run; output:\n{out}"
+    );
+
+    // A file that is NOT the manifest entrypoint keeps every generic position it had.
+    t.write(
+        "src/other.chz",
+        "protocol Default:\n    fn default() -> Self\nstruct Counter:\n    n: int\n    fn default() -> Counter:\n        return Counter(5)\nfn main[T: Default]():\n    print(T.default())\n",
+    );
+    let (stdout, stderr, ok) = run(&t.0, &["check", "src/other.chz"]);
+    assert!(
+        ok,
+        "only the declared entrypoint module is gated; stdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+}

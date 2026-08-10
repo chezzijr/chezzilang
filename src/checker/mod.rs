@@ -1795,6 +1795,19 @@ struct Checker {
     /// interp maintain the identical pair at their own interpolation boundaries.
     kw_frag_ctx: Span,
     kw_frag_ord: usize,
+    /// The interpolation fragment's DIAGNOSTIC ANCHOR: `(the fragment root's own span, the string
+    /// literal's span)` while that fragment is being inferred, `None` otherwise (save/restore for
+    /// nesting, alongside the pair above). [`Self::error`] rewrites the first to the second, so a
+    /// fragment error points at the literal instead of at its `(1,1)`-relative re-lexed column.
+    ///
+    /// It lives BESIDE the AST, and that is the whole point: the anchor used to be written onto a
+    /// cloned fragment root's `span`, and a span in this checker is also a cross-half TABLE KEY
+    /// ([`WitnessKey`], [`KeywordKey`]) — so a fragment root that was ITSELF a string carried the
+    /// outer literal's span into the inner interpolation's keys while the compiler kept the inner
+    /// literal's real one, and both per-call tables missed under a green `chezzi check`. Three bugs
+    /// on this milestone were that one mistake. Keying reads the AST; anchoring reads this; a future
+    /// anchor that mutates a node instead is the same bug again.
+    frag_anchor: Option<(Span, Span)>,
     /// True only while resolving an `extern "lib":` fn's param/return signature. `owned_str` is a
     /// RETURN-ONLY C marshalling form that collapses to `str`; it is legal ONLY inside an extern
     /// signature. This flag licenses `resolve_type`'s `owned_str` arm there and rejects a bare

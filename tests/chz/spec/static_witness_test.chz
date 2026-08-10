@@ -17,15 +17,27 @@
 protocol Default:
     fn default() -> Self
 
+# a second static requirement, so the shadowing tests at the bottom of this file can bound a type
+# param whose name equals a real struct's and still name a method BOTH types answer differently
+protocol Tagged:
+    fn tag() -> int
+
 struct Counter:
     n: int
     fn default() -> Counter:
         return Counter(0)
+    fn tag() -> int:
+        return 1
 
 struct Tag:
     s: str
     fn default() -> Tag:
         return Tag("none")
+    fn tag() -> int:
+        return 3
+
+fn greet(a: int, b: int) -> str:
+    return "{a}-{b}"
 
 enum Col:
     Red
@@ -671,13 +683,15 @@ test fn a_pipe_chain_repeating_one_callee_keeps_both_links():
 test fn a_pipe_chain_inside_an_interpolation_fragment():
     assert "{Counter(1) |> tag_of() |> name_of()}" == "Tag(s='none')+Tag(s='Counter(n=0)')"
 
-# ---- a type param that SHADOWS a real type name: both halves must mean the SAME one ----
+# ---- a type param that SHADOWS a real type name: the PARAM wins, in both halves ----
 #
-# The checker resolves `Shadowed.<static>()` to the concrete STRUCT (its struct arm runs before the
-# type-param arm); the compiler used to resolve it to the witness, so a green check ran into
-# `type 'Counter' has no static method 'tag'`. Whether the checker's precedence is the right one
-# (Go and Rust let a type parameter shadow an outer type of the same name) is a separate question —
-# this pins that the two halves agree, which is what makes the program's answer defined.
+# `fn f[Item: Tagged](x: Item) -> int: return Item.tag()` next to a `struct Item` is Rust's
+#   trait D { fn tag() -> i32; }
+#   fn f<Item: D>(_x: Item) -> i32 { Item::tag() }
+# which prints `1` for `f(Counter)` — the type parameter shadows the outer type (measured with
+# rustc, 2026-08-10). Chezzi answered `7` (the struct) because the checker's struct arm ran before
+# its type-param arm and the compiler's witness arm was moved last to match. Both halves agreeing on
+# the answer the owning ancestor rejects is not a defense: the type param now wins in BOTH.
 
 struct Shadowed:
     q: int
@@ -686,12 +700,43 @@ struct Shadowed:
     fn default() -> Shadowed:
         return Shadowed(9)
 
-fn shadowing[Shadowed: Default](x: Shadowed) -> int:
+fn shadowing[Shadowed: Tagged](x: Shadowed) -> int:
     return Shadowed.tag()
 
-fn shadowing_builds[Shadowed: Default](x: Shadowed) -> int:
-    return Shadowed.default().q
+fn shadowing_builds[Shadowed: Default](x: Shadowed) -> Shadowed:
+    return Shadowed.default()
 
-test fn a_type_param_shadowing_a_type_name_resolves_the_same_in_both_halves():
-    assert shadowing(Counter(1)) == 7
-    assert shadowing_builds(Counter(1)) == 9
+test fn a_type_param_shadows_a_type_name_of_the_same_name():
+    # `Counter.tag()` is 1, `Shadowed.tag()` is 7 — the argument's type decides, like Rust
+    assert shadowing(Counter(1)) == 1
+    assert shadowing(Tag("hi")) == 3
+    # …and the ANNOTATION position binds the same `Shadowed` (the param), so passing a Counter fits
+    assert shadowing_builds(Counter(1)).n == 0
+    # the shadowed STRUCT is still reachable by its own name, from an unshadowed scope
+    assert Shadowed.tag() == 7
+    # …and a NESTED body resolves the same shadowing param — the checker's `type_params` and the
+    # compiler's captured `$w:Shadowed` must agree there too, not just in the declaring frame
+    assert shadowing_nested(Counter(1)) == 1
+
+fn shadowing_nested[Shadowed: Tagged](x: Shadowed) -> int:
+    f := fn() -> int: Shadowed.tag()
+    return f()
+
+# ---- a witness call inside a NESTED interpolation ----
+#
+# The fragment ROOT is re-anchored at the string literal for DIAGNOSTICS. When that anchor was
+# written onto a cloned node's `span`, a fragment root that is ITSELF a string carried the outer
+# literal's span into the inner interpolation's fragment key, while the compiler kept the inner
+# literal's real span — `chezzi check` passed and the run died with `internal: no static-type
+# witness recorded`. A span used as a cross-half table key must not double as a diagnostic anchor:
+# the anchor is now carried beside the AST, never written into it.
+
+test fn a_witness_call_inside_a_nested_interpolation_keeps_its_key():
+    c := Counter(1)
+    assert "{ \"{reset(c).n}\" }" == "0"
+    # the same shape one level deeper still — the anchor is saved/restored per nesting level
+    assert "{ \"{ \\\"{reset(c).n}\\\" }\" }" == "0"
+
+test fn a_keyword_call_inside_a_nested_interpolation_keeps_its_key():
+    # the KeywordTable twin of the case above — it keys off the same fragment context
+    assert "{ \"{greet(1, b=2)}\" }" == "1-2"

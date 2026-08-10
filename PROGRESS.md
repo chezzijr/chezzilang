@@ -69,14 +69,17 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > witness passing instead. `docs/future.md` items 13 and 15 are now closed; item 14 (`cast[T]`) stays
 > closed for its own reason (no consumer).
 >
-> **The trap this milestone paid for twice — a span used as a cross-half table key must not double as
-> a diagnostic anchor.** The witness table is keyed by source position so the checker's answer and the
-> compiler's lookup agree. `|>` desugars at PARSE time and gives every link of `a |> f() |> g()` the
-> span of the whole infix expression, so two witness calls aliased onto one key and the second link
-> silently took the first's type — a **wrong value both engines agreed on**, invisible to two-engine
-> parity, caught only by a running test that used two different concrete types. (The first instance
-> was an interpolation fragment root re-anchored at the string literal's span.) The key is now the
-> **callee token**; the diagnostic anchor is a separate field.
+> **The trap this milestone paid for three times — a span used as a cross-half table key must not
+> double as a diagnostic anchor.** The witness table is keyed by source position so the checker's
+> answer and the compiler's lookup agree. `|>` desugars at PARSE time and gives every link of
+> `a |> f() |> g()` the span of the whole infix expression, so two witness calls aliased onto one key
+> and the second link silently took the first's type — a **wrong value both engines agreed on**,
+> invisible to two-engine parity, caught only by a running test that used two different concrete
+> types. (The first instance was an interpolation fragment root re-anchored at the string literal's
+> span; the third was that same anchor still being written onto a cloned node, which fed the OUTER
+> literal's span to a nested interpolation's keys.) The key is now the **callee token** and the anchor
+> lives beside the AST (`Checker::frag_anchor`, applied in `Checker::error`) — no span is mutated, so
+> the next instance is unrepresentable rather than merely fixed.
 >
 > **Cost: measured, nothing moved.** `hyperfine` 20 runs, branch vs a pre-milestone binary built from
 > `b6c17369` in a separate `CARGO_TARGET_DIR`: `fib` 1.00 ±0.03, `loop` 1.02 ±0.07, `poly_method`
@@ -84,16 +87,18 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > new number in `docs/benchmarks.md` — the opcode is on a cold path and the charge is off unless a
 > body uses it.
 >
-> **Residuals, filed honestly** as `docs/gaps.md` **M24-1..M24-4**: witness **over-charge** (a body
+> **Residuals, filed honestly** as `docs/gaps.md` **M24-1..M24-5**: witness **over-charge** (a body
 > that calls a witness-taking fn with only concrete types, or names a struct method matching an
 > imported witness-taking fn, is charged one it never uses — an over-*rejection* only, never a
 > mis-lowering; every syntactic narrowing tried under-charges some shape, which is the unsafe
-> direction); **unused captures** (one `str` per witness per nested body); **type-param shadowing**
-> (a param named like a real type resolves to the STRUCT in ctor/static position but the PARAM in
-> annotation position — pre-existing and reproducible with plain generics, but M24 had to ALIGN its
-> lowering to it so both halves agree; Go and Rust both let the param shadow); and the
-> **entrypoint gate living in `src/main.rs`** (a library caller of `run_file_with_entry` still sees
-> the raw arity fault; the CLI is covered).
+> direction) and **unused captures** (one `str` per witness per nested body). **M24-3 and M24-4 are
+> now FIXED** (2026-08-10): a type parameter **shadows** a same-named type in static-call position in
+> both halves — Rust prints `1` for `fn f<Item: D>(_x: Item) -> i32 { Item::tag() }` with
+> `f(Counter)` and so does Chezzi, where it used to print `7`; aligning both halves on the struct was
+> agreement bought at correctness's expense. And the **entrypoint gate** now runs wherever a file is
+> checked (`chezzi check`, `chezzi run`, the editor), off one derivation `manifest::entry_fn_for`.
+> The bare-CTOR position (`T(99)`) still resolves to the struct — filed under M24-3; the
+> `spawn`/`defer` STATEMENT target is a deferral, not a wall — filed as M24-5.
 >
 > **Docs:** `docs/syntax.md §7a` ("Static protocol requirements — calling `T.method(...)` through a
 > bound", incl. the decline table), `docs/spec.md` (the M24 row + the `Convert[S]` note),

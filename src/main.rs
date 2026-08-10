@@ -517,57 +517,15 @@ fn resolve_entrypoint() -> Result<(String, Option<String>, std::path::PathBuf), 
             manifest_path.display()
         )
     })?;
-    let (module_path, entry_fn) = split_entrypoint(&entrypoint)
+    let (module_path, entry_fn) = manifest::split_entrypoint(&entrypoint)
         .map_err(|e| format!("chezzi run: {} {e}", manifest_path.display()))?;
-    let file = entrypoint_file(module_path, &root)
+    let file = manifest::entrypoint_file(module_path, &root)
         .map_err(|e| format!("chezzi run: {} {e}", manifest_path.display()))?;
     Ok((
         file.to_string_lossy().into_owned(),
         entry_fn.map(str::to_string),
         root,
     ))
-}
-
-/// Split a manifest `entrypoint` value into its dotted module path and an optional `:function`
-/// suffix. Splits on the FIRST `:` so the function name is taken verbatim; `"src.main"` →
-/// `("src.main", None)`, `"src.main:main"` → `("src.main", Some("main"))`. A `:` with no function
-/// after it (`"src.main:"`) is rejected — otherwise it reaches the VM as an empty name and produces a
-/// baffling "function `` not found" error. Pure (no I/O) so it is unit-testable.
-fn split_entrypoint(entrypoint: &str) -> Result<(&str, Option<&str>), String> {
-    match entrypoint.split_once(':') {
-        Some((_, "")) => Err(format!(
-            "has an invalid [project] entrypoint {entrypoint:?}; the ':' must be followed by a function name like \"src.main:main\""
-        )),
-        Some((module, func)) => Ok((module, Some(func))),
-        None => Ok((entrypoint, None)),
-    }
-}
-
-/// Map a manifest `[project] entrypoint` (a dotted module path) to its `.chz` file, root-relatively.
-/// Validates the path FIRST: an empty / whitespace / leading- or trailing-dot / doubled-dot value
-/// would otherwise feed empty path segments to [`resolver::module_file`], whose `push("")` +
-/// `set_extension` rewrites the project-root dir's own extension and escapes the root (e.g.
-/// `<root>.chz`), producing a baffling "cannot read" error. Pure (no cwd/env) so it is unit-testable.
-fn entrypoint_file(entrypoint: &str, root: &std::path::Path) -> Result<std::path::PathBuf, String> {
-    // Trim surrounding whitespace on EACH segment before building the path, so a padded value like
-    // `" app "` resolves to `app.chz` rather than the baffling `<root>/ app .chz` ("cannot read").
-    // An embedded path separator would resolve by accident via `PathBuf::push` instead of the
-    // documented dotted form, so reject it up front.
-    if entrypoint.contains('/') || entrypoint.contains('\\') {
-        return Err(format!(
-            "has an invalid [project] entrypoint {entrypoint:?}; the module path must use '.' separators, not '/'"
-        ));
-    }
-    let segs: Vec<String> = entrypoint
-        .split('.')
-        .map(|s| s.trim().to_string())
-        .collect();
-    if segs.iter().any(String::is_empty) {
-        return Err(format!(
-            "has an invalid [project] entrypoint {entrypoint:?}; expected a dotted module path like \"src.main\""
-        ));
-    }
-    Ok(resolver::module_file(&segs, root, &resolver::std_root()))
 }
 
 /// `chezzi test [path]` — discover + run every `test fn` in `*_test.chz` files under `path` (default
@@ -979,6 +937,12 @@ fn type_check_inner(
     entry_fn: Option<&str>,
 ) -> CheckOutcome {
     let entry = std::path::Path::new(path);
+    // M24 — the manifest-entrypoint gate reaches EVERY consumer that checks this file, not just bare
+    // `chezzi run` (which passes the name it already resolved). `chezzi check src/main.chz` used to
+    // say "ok: no type errors" about a project that cannot start; the editor, which calls
+    // `check_graph` through the same one derivation, showed nothing.
+    let derived = manifest::entry_fn_for(entry);
+    let entry_fn = entry_fn.or(derived.as_deref());
     let build = match root {
         Some(r) => resolver::build_graph_with_root(entry, r.to_path_buf()),
         None => resolver::build_graph(entry),
@@ -1251,7 +1215,8 @@ mod init_tests {
         );
 
         // Splits into the module path and the function name.
-        let (module_path, entry_fn) = split_entrypoint(m.entrypoint.as_deref().unwrap()).unwrap();
+        let (module_path, entry_fn) =
+            manifest::split_entrypoint(m.entrypoint.as_deref().unwrap()).unwrap();
         assert_eq!(module_path, "src.main");
         assert_eq!(entry_fn, Some("main"));
 
@@ -1259,7 +1224,7 @@ mod init_tests {
         let root = resolver::find_root_from_dir(&d.0).expect("chezzi.toml marks the root");
 
         // The module path resolves root-relatively to src/main.chz.
-        let entry = entrypoint_file(module_path, &root).expect("module path resolves");
+        let entry = manifest::entrypoint_file(module_path, &root).expect("module path resolves");
         assert!(
             entry.ends_with("src/main.chz"),
             "entry: {}",
@@ -1342,15 +1307,21 @@ mod init_tests {
 
     #[test]
     fn split_entrypoint_forms() {
-        assert_eq!(split_entrypoint("src.main").unwrap(), ("src.main", None));
         assert_eq!(
-            split_entrypoint("src.main:main").unwrap(),
+            manifest::split_entrypoint("src.main").unwrap(),
+            ("src.main", None)
+        );
+        assert_eq!(
+            manifest::split_entrypoint("src.main:main").unwrap(),
             ("src.main", Some("main"))
         );
         // Split on the FIRST colon (module path can't contain one; the rest is the fn name verbatim).
-        assert_eq!(split_entrypoint("a.b:c:d").unwrap(), ("a.b", Some("c:d")));
+        assert_eq!(
+            manifest::split_entrypoint("a.b:c:d").unwrap(),
+            ("a.b", Some("c:d"))
+        );
         // A trailing `:` with no function name is rejected (would otherwise be an empty fn name).
-        let err = split_entrypoint("src.main:").unwrap_err();
+        let err = manifest::split_entrypoint("src.main:").unwrap_err();
         assert!(
             err.contains("must be followed by a function name"),
             "got: {err}"
@@ -1371,31 +1342,31 @@ mod init_tests {
         let root = std::path::Path::new("/proj");
         // Valid dotted path → root-relative .chz under the project root.
         assert_eq!(
-            entrypoint_file("src.main", root).unwrap(),
+            manifest::entrypoint_file("src.main", root).unwrap(),
             root.join("src/main.chz")
         );
         // Surrounding whitespace on segments is trimmed before the path is built, so a padded
         // entrypoint resolves to the same file as its trimmed form (was: `<root>/ app .chz`).
         assert_eq!(
-            entrypoint_file(" app ", root).unwrap(),
+            manifest::entrypoint_file(" app ", root).unwrap(),
             root.join("app.chz")
         );
         assert_eq!(
-            entrypoint_file(" src . main ", root).unwrap(),
+            manifest::entrypoint_file(" src . main ", root).unwrap(),
             root.join("src/main.chz")
         );
         // Bad forms must be REJECTED, not mangle the root path (push("") + set_extension footgun).
         // `"a. .b"` has a whitespace-only middle segment that trims to empty → still rejected.
         for bad in ["", "   ", ".", ".main", "src.main.", "src..main", "a. .b"] {
             assert!(
-                entrypoint_file(bad, root).is_err(),
+                manifest::entrypoint_file(bad, root).is_err(),
                 "entrypoint {bad:?} should be rejected"
             );
         }
         // An embedded path separator ('/' or '\\') would resolve by accident via PathBuf::push
         // instead of the documented dotted form — reject it with a clear message.
         for bad in ["src/main", "src\\main", "a/b.c"] {
-            let e = entrypoint_file(bad, root).unwrap_err();
+            let e = manifest::entrypoint_file(bad, root).unwrap_err();
             assert!(
                 e.contains("'.' separators"),
                 "entrypoint {bad:?} err should mention '.' separators, got: {e}"

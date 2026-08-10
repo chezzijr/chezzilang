@@ -1238,7 +1238,7 @@ fn make[T: Convert[int]](seed: T, n: int) -> T:
 |---|---|---|
 | `T` declared by the enclosing **TYPE** (`struct Bx[T: Default]` … `T.default()` in a method) | the concrete type is erased once a `Bx` *value* exists — only a value could hold the witness | declare the parameter on the **member** (`fn fresh[T: Default](self, …)`), whose witness rides on the call |
 | reading a witness-taking fn as a **function value** — `g := reset`, `reset[Counter]` as a value, passing it to a HOF, a cross-module read | a `fn` value erases which declaration it came from, so no witness can be recovered. **A permanent wall, not a v1 limit** | call it directly, or take a factory closure: `fn make[T](mk: fn() -> T) -> T` |
-| `spawn f(...)` / `defer f(...)` with a witness-taking callee as the **statement target** | same wall — the target is reached as a value | call it eagerly and `spawn`/`defer` the result, or wrap the call in a closure (`defer: … f(x) …` as a *block* works) |
+| `spawn f(...)` / `defer f(...)` with a witness-taking callee as the **statement target** | a **deferral, not the wall above**: the target is never read as a value, but its emit sites (`SpawnCall`/`DeferCall`/…) push no hidden argument, so it would lower one argument short. `docs/gaps.md` **M24-5** | call it eagerly and `spawn`/`defer` the result, or wrap the call in a closure (`defer: … f(x) …` as a *block* works) |
 | a `T` **not determined** at the call site | there is no concrete type to build a key from | pin it (`nodet[Counter]()`) or annotate the result |
 | a bound witnessed by a **newtype** or a **scalar** | neither can host a static method | use a struct or an enum |
 | a **manifest entrypoint** that takes a witness (`entrypoint = "src.main:main"` where `fn main[T: Default]()`) | it is invoked with no arguments, so nothing supplies the key | give the entrypoint a non-generic signature and construct in a helper it calls |
@@ -1246,12 +1246,17 @@ fn make[T: Convert[int]](seed: T, n: int) -> T:
 The turbofish *call* form is fine — `reset[Counter](Counter(1))` works; it is only reading
 `reset[Counter]` as a **value** that hits the wall.
 
-Two known rough edges, filed as `docs/gaps.md` **M24-1/-3**: (1) the hidden parameter is charged by a
-coarse body scan, so a generic that calls a witness-taking fn with only *concrete* types — or names a
-struct method sharing a name with an imported witness-taking fn — can be charged one it never uses,
-which costs it value / `spawn` / `defer` position (an over-*rejection*, never a wrong answer; move the
-concrete call into a non-generic helper); (2) a type parameter whose **name equals a real type**
-resolves to the type, not the parameter, in static-call position — avoid shadowing.
+One known rough edge, filed as `docs/gaps.md` **M24-1**: the hidden parameter is charged by a coarse
+body scan, so a generic that calls a witness-taking fn with only *concrete* types — or names a struct
+method sharing a name with an imported witness-taking fn — can be charged one it never uses, which
+costs it value / `spawn` / `defer` position (an over-*rejection*, never a wrong answer; move the
+concrete call into a non-generic helper).
+
+A type parameter whose **name equals a real type** SHADOWS it in static-call position, as it already
+did in annotation position — `fn f[Item: Tagged](x: Item) -> int: return Item.tag()` beside a
+`struct Item` dispatches on the *argument's* type, which is Rust's and Go's answer. (The bare
+constructor call `T(99)` is the one position that still resolves to the type — `docs/gaps.md`
+**M24-3**.)
 
 Static methods still do **not** participate in *instance*-method protocol satisfaction: a protocol
 requirement is matched static-to-static and instance-to-instance, never across. Worked demo:

@@ -2920,9 +2920,12 @@ impl Checker {
                     // go on the METHOD (`h.make[Counter]()`); `make[Counter](...)` is read as a free
                     // call and answers "'make' takes no type arguments", and an annotated result
                     // does not reach a method's own `[T]` either — so neither is offered there.
-                    let pin = match recv {
+                    let pin = match &recv {
                         WitnessCallee::Free => format!(
                             "pin it with a type argument (`{name}[SomeType](...)`) or an annotated result"
+                        ),
+                        WitnessCallee::Dotted(prefix) => format!(
+                            "pin it with a type argument (`{prefix}.{name}[SomeType](...)`) or an annotated result"
                         ),
                         WitnessCallee::Member => format!(
                             "pin it with a type argument ON THE METHOD (`<receiver>.{name}[SomeType](...)`)"
@@ -2958,6 +2961,8 @@ impl Checker {
     /// keyed by the CALLING module either way, so the spelling makes no difference here (Task 3).
     /// `key_span` is this call site's [`crate::checker::witness_key_span`]: the call node's own span
     /// for the bare spelling, the member-name token for the module-qualified one (`lib.reset(c)`).
+    /// `recv` is how the callee is SPELLED — the two spellings differ only in the pin the
+    /// "not determined here" diagnostic may suggest ([`WitnessCallee`]).
     #[allow(clippy::too_many_arguments)] // the callee's sig pieces + call args + both spans + hint
     pub(super) fn infer_generic_call(
         &mut self,
@@ -2968,6 +2973,7 @@ impl Checker {
         key_span: Span,
         span: Span,
         hint: Option<&Ty>,
+        recv: WitnessCallee,
     ) -> Ty {
         if args.len() != sig.params.len() {
             self.check_arity(name, sig.params.len(), args, span);
@@ -3064,14 +3070,7 @@ impl Checker {
         // read a param as un-determined that the call actually pins.
         if !sig.witness_params.is_empty() {
             let wparams = sig.witness_params.clone();
-            self.record_witness_call(
-                name,
-                &wparams,
-                &subst_map,
-                key_span,
-                span,
-                WitnessCallee::Free,
-            );
+            self.record_witness_call(name, &wparams, &subst_map, key_span, span, recv);
         }
         subst(&sig.ret, &subst_map)
     }

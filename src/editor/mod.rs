@@ -47,7 +47,12 @@ fn diagnostics_inner(path: &Path, source: &str) -> Vec<Diag> {
     match resolver::build_graph_with_entry_source(path, Some(source.to_string())) {
         // A resolve error wraps the fatal lex/parse error (or a missing/cyclic import).
         Err(e) => vec![span_diag(source, e.span.line, e.span.col, e.message)],
-        Ok(graph) => match checker::check_graph(&graph) {
+        // M24 — the manifest-entrypoint gate is a property of the PROJECT, so the editor reports it
+        // like `chezzi check` does: one derivation (`manifest::entry_fn_for`), every consumer.
+        Ok(graph) => match checker::check_graph_with_entry(
+            &graph,
+            crate::manifest::entry_fn_for(path).as_deref(),
+        ) {
             Ok(()) => Vec::new(),
             Err(errs) => errs
                 .into_iter()

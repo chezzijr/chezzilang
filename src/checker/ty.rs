@@ -43,13 +43,23 @@ pub type KeywordTable = HashMap<KeywordKey, Vec<usize>>;
 pub type WitnessKey = (usize, Span, usize, Span);
 
 /// M24 — how a witness call is SPELLED, which is all the "type parameter … is not determined here"
-/// diagnostic needs: it decides which pin the message may suggest. A free fn / static member takes
-/// its type argument on the name (`empty[Counter]()`, `Holder.build[Counter]()`) and can also be
-/// pinned by an annotated result; an INSTANCE method takes it on the method
-/// (`h.make[Counter]()`) and by nothing else.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// diagnostic needs: it decides which pin the message may suggest, and every suggested spelling has
+/// to be one that PARSES. Three forms, because the turbofish does not go in the same place in all
+/// three:
+/// * [`Self::Free`] — a bare name (`empty()`): `empty[Counter]()`, or an annotated result.
+/// * [`Self::Dotted`] — a dotted callee whose PREFIX is spellable at the call site: a static member
+///   (`Holder.build()` → `Holder.build[Counter]()`) or a module-qualified fn (`lib.empty()` →
+///   `lib.empty[Counter]()`). An annotated result pins these too. The payload is the prefix text.
+/// * [`Self::Member`] — an INSTANCE method (`h.make()`), whose receiver is a value expression we
+///   cannot re-spell, and which an annotated result never reaches: only `<receiver>.make[Counter]()`.
+///
+/// Getting this wrong is not cosmetic — the bare `build[SomeType](...)` a static member used to be
+/// offered parses as a FREE call and answers "'build' takes no type arguments", so the message sent
+/// the reader to a dead end.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WitnessCallee {
     Free,
+    Dotted(String),
     Member,
 }
 

@@ -61,6 +61,7 @@ impl Checker {
             graph_module_idx: 0,
             kw_frag_ctx: Span::default(),
             kw_frag_ord: 0,
+            frag_anchor: None,
             in_extern_sig: false,
             struct_field_asts: HashMap::new(),
             struct_ctypes: HashMap::new(),
@@ -892,6 +893,14 @@ impl Checker {
     }
 
     pub(super) fn error(&mut self, span: Span, message: impl Into<String>) {
+        // Interpolation fragment anchoring (diagnostics only): a fragment is re-lexed from a fresh
+        // source, so its ROOT expression's column is `(1,1)`-relative and meaningless to a reader.
+        // Report it at the string literal instead. The rewrite lives HERE, on the way out, so no
+        // AST span is ever mutated — spans are cross-half table keys (see `Checker::frag_anchor`).
+        let span = match self.frag_anchor {
+            Some((from, to)) if span == from => to,
+            _ => span,
+        };
         let message = match &self.current_module_label {
             Some(label) => format!("in module '{label}': {}", message.into()),
             None => message.into(),

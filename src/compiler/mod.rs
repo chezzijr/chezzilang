@@ -4628,6 +4628,36 @@ impl Compiler {
                 self.emit_call_static(fc, key, name, args, *name_span, span)?;
                 return Ok(());
             }
+            // M24 — `T.method(args)` through a generic bound's STATIC requirement. NO table lookup is
+            // needed here: `T` is a type PARAM, and this compiler itself created the `$w:T` binding —
+            // a trailing param of the fns the checker's `fns` table named, or (Task 4) a capture of
+            // one in a nested body — so "a `Field` call on a bare `T` for which a `$w:T` binding is
+            // reachable" IS the witness call. That reach (`FnComp::witness_ref`) is the compiler's
+            // half of `Checker::witness_scope`.
+            //
+            // PLACED FIRST among the bare-`Ident` receiver arms, because that is where the CHECKER
+            // puts it (`infer_call`: the type-param arm runs before the enum/struct static arms). A
+            // type param SHADOWS a real type name (`fn f[Item: Tagged](x: Item)` next to a `struct
+            // Item` means the PARAM — Rust's and Go's answer, measured 2026-08-10), and both halves
+            // must mean the same `Item`: resolving the struct here while the checker resolved the
+            // param is a green `chezzi check` followed by a wrong runtime answer.
+            if let ExprKind::Ident(t) = &obj.kind
+                && fc.is_unbound(t)
+                && let Some(w) = fc.witness_ref(t)
+            {
+                self.compile_args(fc, args)?;
+                // The SAME `witness_ref` that admitted this call emits it — there is no second
+                // lookup that could come back empty and leave `CallStaticDyn` reading an operand.
+                fc.emit_witness(w, span);
+                fc.emit(
+                    Op::CallStaticDyn {
+                        method: name.clone(),
+                        argc: args.len(),
+                    },
+                    span,
+                );
+                return Ok(());
+            }
             // `Enum.Variant(args)` → variant constructor, mirroring the bare-ident variant path
             // below. Gated like the value form: an unbound enum name dotted with one of its variants.
             // The enum name resolves to its bare-visible runtime key (`enum_bare_key`).
@@ -4661,38 +4691,6 @@ impl Compiler {
                 && self.static_methods.contains(&static_key(&key, name))
             {
                 self.emit_call_static(fc, key, name, args, *name_span, span)?;
-                return Ok(());
-            }
-            // M24 — `T.method(args)` through a generic bound's STATIC requirement. NO table lookup is
-            // needed here: `T` is a type PARAM, and this compiler itself created the `$w:T` binding —
-            // a trailing param of the fns the checker's `fns` table named, or (Task 4) a capture of
-            // one in a nested body — so "a `Field` call on a bare `T` for which a `$w:T` binding is
-            // reachable" IS the witness call. That reach (`FnComp::witness_ref`) is the compiler's
-            // half of `Checker::witness_scope`.
-            //
-            // PLACED LAST among the bare-`Ident` receiver arms, because that is where the CHECKER
-            // puts it (`infer_call`: the enum/struct static arms run first, the type-param arm after).
-            // A type param may SHADOW a real type name (`fn f[Item: Default](x: Item)` next to a
-            // `struct Item`), and both halves must then mean the same `Item` — resolving it here
-            // first while the checker resolved the struct is a green `chezzi check` followed by a
-            // runtime "type 'A' has no static method". Whether the checker's precedence is the RIGHT
-            // one (Go and Rust let a type parameter shadow an outer type of the same name) is a
-            // separate question; agreement is not.
-            if let ExprKind::Ident(t) = &obj.kind
-                && fc.is_unbound(t)
-                && let Some(w) = fc.witness_ref(t)
-            {
-                self.compile_args(fc, args)?;
-                // The SAME `witness_ref` that admitted this call emits it — there is no second
-                // lookup that could come back empty and leave `CallStaticDyn` reading an operand.
-                fc.emit_witness(w, span);
-                fc.emit(
-                    Op::CallStaticDyn {
-                        method: name.clone(),
-                        argc: args.len(),
-                    },
-                    span,
-                );
                 return Ok(());
             }
             // `Type[T…].Variant(args)` → declaration-site turbofish VARIANT constructor

@@ -1199,6 +1199,7 @@ impl Checker {
         // Save/restore for nested interpolations. The compiler keeps the identical pair.
         let saved_ctx = self.kw_frag_ctx;
         let saved_ord = self.kw_frag_ord;
+        let saved_anchor = self.frag_anchor;
         let mut ord = 0usize;
         for chunk in chunks {
             if let crate::ast::Chunk::Expr(e, spec) = chunk {
@@ -1206,15 +1207,17 @@ impl Checker {
                 self.kw_frag_ord = ord;
                 // Anchor the fragment ROOT at the string literal so a fragment error points at the
                 // literal, not at the `(1,1)` fragment-relative column (each fragment is re-lexed
-                // from a fresh source, so only its LINE is real). Diagnostics only: no per-call
-                // table keys off this node's span — `KeywordTable` keys on the first named-arg
-                // value and `WitnessTable` on the CALLEE TOKEN, both sub-nodes this rewrite leaves
-                // untouched. Conflating the two is what `49bd9f80` had to undo; keeping them
-                // separate is what lets both be right. The COMPILER does not re-anchor (a runtime
-                // fault keeps the fragment's own span, as before M24) — this is diagnostics only.
-                let mut e = e.clone();
-                e.span = span;
-                let ty = self.infer_value(&e);
+                // from a fresh source, so only its LINE is real). The anchor is carried BESIDE the
+                // AST (`frag_anchor`, applied in `Checker::error`) and the node is left alone,
+                // because a span here is also a cross-half TABLE KEY: writing the anchor onto a
+                // cloned root's span fed the outer literal's span to a NESTED interpolation's
+                // fragment keys while the compiler kept the inner literal's, so both per-call
+                // tables missed under a green `chezzi check`. `49bd9f80` undid the same conflation
+                // once already; keeping key and anchor in different places is what lets both be
+                // right. The COMPILER does not re-anchor (a runtime fault keeps the fragment's own
+                // span, as before M24) — this is diagnostics only.
+                self.frag_anchor = Some((e.span, span));
+                let ty = self.infer_value(e);
                 // Static format-spec/value-type check: when the value is a CONCRETE scalar
                 // and the spec is provably wrong for it, reject at COMPILE time (same wording
                 // the runtime backstop would emit — single-sourced in `fmtspec`). Only fires
@@ -1231,6 +1234,7 @@ impl Checker {
         }
         self.kw_frag_ctx = saved_ctx;
         self.kw_frag_ord = saved_ord;
+        self.frag_anchor = saved_anchor;
         Ty::Str
     }
 

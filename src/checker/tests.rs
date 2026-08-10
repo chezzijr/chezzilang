@@ -21303,17 +21303,11 @@ fn witness_pipe_chain_links_do_not_alias_ok() {
     ));
 }
 
-/// B — a type param whose name SHADOWS a real type. The checker resolves the static call to the
-/// concrete struct (its struct arm runs before the type-param arm); the compiler used to resolve it
-/// to the witness, so the two halves disagreed about which `Item` was meant and a green check ran
-/// into `type 'Counter' has no static method 'tag'`. This pins that the checker still accepts the
-/// shape it accepted (the agreement itself is only observable by RUNNING it — see the `.chz` suite).
-#[test]
-fn witness_type_param_shadowing_a_type_name_ok() {
-    entry_ok(&format!(
-        "{FWD_HEAD}struct Item:\n    q: int\n    fn tag() -> int:\n        return 7\n    fn default() -> Item:\n        return Item(9)\nfn f[Item: Default](x: Item) -> int:\n    return Item.tag()\nfn main():\n    print(f(Counter(1)))\nmain()\n"
-    ));
-}
+// B — a type param whose name SHADOWS a real type used to be pinned here as "the checker keeps
+// resolving it to the concrete STRUCT", which was the wrong half to settle on: Rust and Go let the
+// parameter shadow. Superseded by
+// `witness_type_param_shadows_a_same_named_type_in_static_call_position` (below), which pins the
+// ancestor's answer plus its neighbours; the running half is in the `.chz` suite.
 
 /// A module that exports BOTH a witness-taking generic (`mk`) and an ordinary fn (`name`) — the
 /// shape the module half of the forwarding charge has to tell apart.
@@ -21414,6 +21408,78 @@ fn witness_undetermined_member_names_the_member_turbofish() {
         ),
         "pin it with a type argument (`empty[SomeType](...)`) or an annotated result",
     );
+}
+
+/// F2 — the same diagnostic at the OTHER two callee spellings. A static MEMBER
+/// (`Holder.build()`) and a module-QUALIFIED fn (`lib.empty()`) both took their type argument after
+/// the member name, and both were told to write the bare `build[SomeType](...)` — which parses as a
+/// free call and answers "'build' takes no type arguments". Each suggested spelling is also compiled
+/// here, so the advice cannot rot.
+#[test]
+fn witness_undetermined_names_a_working_spelling_at_every_callee_form() {
+    // static MEMBER
+    let head = format!(
+        "{FWD_HEAD}struct Holder:\n    k: int\n    fn build[T: Default]() -> T:\n        return T.default()\n"
+    );
+    entry_rejects(
+        &format!("{head}fn main():\n    print(Holder.build())\nmain()\n"),
+        "pin it with a type argument (`Holder.build[SomeType](...)`)",
+    );
+    entry_ok(&format!(
+        "{head}fn main():\n    print(Holder.build[Counter]().n)\nmain()\n"
+    ));
+    // module-QUALIFIED free fn
+    let lib = (
+        "lib.chz",
+        "protocol Default:\n    fn default() -> Self\nstruct Counter:\n    n: int\n    fn default() -> Counter:\n        return Counter(0)\nfn empty[T: Default]() -> T:\n    return T.default()\n",
+    );
+    files_reject(
+        &[
+            lib,
+            (
+                "main.chz",
+                "import lib\nfn main():\n    print(lib.empty())\nmain()\n",
+            ),
+        ],
+        "pin it with a type argument (`lib.empty[SomeType](...)`)",
+    );
+    files_ok(&[
+        lib,
+        (
+            "main.chz",
+            "import lib\nfn main():\n    print(lib.empty[lib.Counter]().n)\nmain()\n",
+        ),
+    ]);
+}
+
+/// M24-3 — a type parameter SHADOWS an outer type of the same name in static-call position, like
+/// Rust (`fn f<Item: D>(_x: Item) -> i32 { Item::tag() }` with `f(Counter)` prints `1`, measured
+/// 2026-08-10). The checker used to resolve the STRUCT there. The neighbours matter as much as the
+/// case: a shadowing param whose bound does NOT declare the method must say so rather than silently
+/// falling back to the struct (rustc: "no associated function named `tag` found for type parameter
+/// `Item`"), and a NON-shadowing program must be untouched.
+#[test]
+fn witness_type_param_shadows_a_same_named_type_in_static_call_position() {
+    const SHADOW_HEAD: &str = "protocol Tagged:\n    fn tag() -> int\nstruct Item:\n    q: int\n    fn tag() -> int:\n        return 7\nstruct Counter:\n    n: int\n    fn tag() -> int:\n        return 1\n";
+    // the param wins — and it type-checks as the param, so a `Counter` argument fits
+    entry_ok(&format!(
+        "{SHADOW_HEAD}fn f[Item: Tagged](x: Item) -> int:\n    return Item.tag()\nfn main():\n    print(f(Counter(1)))\nmain()\n"
+    ));
+    // the bound does NOT declare it → the param's own diagnostic, never the struct's method
+    entry_rejects(
+        &format!(
+            "{SHADOW_HEAD}protocol Other:\n    fn other() -> int\nfn f[Item: Other](x: Item) -> int:\n    return Item.tag()\nfn main():\n    print(f(Counter(1)))\nmain()\n"
+        ),
+        "no bound on 'Item' declares a static method 'tag'",
+    );
+    // the ANNOTATION position already bound the param; both positions now agree
+    entry_ok(&format!(
+        "{FWD_HEAD}fn g[Counter: Default](x: Counter) -> Counter:\n    return Counter.default()\nfn main():\n    print(g(Tag(\"hi\")).s)\nmain()\n"
+    ));
+    // NON-shadowing: a bare struct name that is not a type param still reaches its static method
+    entry_ok(&format!(
+        "{SHADOW_HEAD}fn f[T: Tagged](x: T) -> int:\n    return T.tag() + Item.tag()\nfn main():\n    print(f(Counter(1)))\nmain()\n"
+    ));
 }
 
 /// G — the `spawn`/`defer` rejection is emitted ONCE. Two arms overlap on a bare free-fn target
