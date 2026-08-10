@@ -210,13 +210,53 @@ fn witness_taking_manifest_entrypoint_is_refused_with_its_reason() {
     );
     assert!(stdout.contains("ran"), "stdout:\n{stdout}");
 
-    // …and an explicit FILE run of the same module is untouched (it never invokes `main`).
+    // …and an explicit FILE run of the same module is untouched — on the WITNESS variant, which is
+    // what the previous version of this test failed to exercise: it kept the non-witness `fn
+    // main[T]()` above, so it asserted less than its name said and a regression walked straight
+    // through it. `chezzi run <file>` is script mode (top level only, never invokes `main`), so the
+    // entrypoint gate — which is about a call that does not happen here — must not fire.
+    t.write(
+        "src/main.chz",
+        "protocol Default:\n    fn default() -> Self\nstruct Counter:\n    n: int\n    fn default() -> Counter:\n        return Counter(5)\nfn main[T: Default]():\n    print(T.default())\nprint(\"top\")\n",
+    );
     let (stdout, stderr, ok) = run(&t.0, &["run", "src/main.chz"]);
     assert!(ok, "explicit file run; stderr:\n{stderr}");
     assert!(
-        !stdout.contains("ran"),
-        "a file run executes the top level only; stdout:\n{stdout}"
+        stdout.contains("top"),
+        "a file run executes the top level; stdout:\n{stdout}\nstderr:\n{stderr}"
     );
+    // …while the bare manifest run of that same file is still refused.
+    let (_stdout, stderr, ok) = run(&t.0, &["run"]);
+    assert!(!ok, "the manifest run is still gated; stderr:\n{stderr}");
+}
+
+/// The gate is about the manifest INVOKING the entrypoint, so it must cover every shape that call
+/// cannot supply — not only the hidden witness parameter. `fn main(a: int)` type-checked green and
+/// then died at startup with *"function 'main' expects 1 argument(s), got 0"*.
+#[test]
+fn a_manifest_entrypoint_taking_arguments_is_refused_at_check_time() {
+    let t = TmpDir::new();
+    t.write("chezzi.toml", "[project]\nentrypoint = \"src.main:main\"\n");
+    t.write("src/main.chz", "fn main(a: int):\n    print(a)\n");
+
+    let (stdout, stderr, ok) = run(&t.0, &["check", "src/main.chz"]);
+    assert!(!ok, "check must refuse it; stdout:\n{stdout}");
+    let out = format!("{stdout}{stderr}");
+    assert!(
+        out.contains("the manifest entrypoint 'main' is invoked with no arguments"),
+        "check must name the real cause; output:\n{out}"
+    );
+    let (_stdout, stderr, ok) = run(&t.0, &["run"]);
+    assert!(!ok, "and the run agrees; stderr:\n{stderr}");
+    assert!(
+        !stderr.contains("expects 1 argument(s), got 0"),
+        "the startup arity error must be pre-empted; stderr:\n{stderr}"
+    );
+    // A nullary entrypoint is untouched.
+    t.write("src/main.chz", "fn main():\n    print(\"ran\")\n");
+    let (stdout, stderr, ok) = run(&t.0, &["run"]);
+    assert!(ok, "stderr:\n{stderr}");
+    assert!(stdout.contains("ran"), "stdout:\n{stdout}");
 }
 
 // M24 — the SAME entrypoint gate must be reachable from every consumer that statically checks the

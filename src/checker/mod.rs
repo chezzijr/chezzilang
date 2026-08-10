@@ -1277,22 +1277,39 @@ impl Checker {
             // ("expects 1 argument(s), got 0"). Rejected here, where the name is known.
             if lm.id == graph.entry
                 && let Some(f) = c.entry_fn.clone()
-                && let w = c.stored_witness_params(None, &f)
-                && !w.is_empty()
             {
-                let span = lm
-                    .ast
-                    .stmts
-                    .iter()
-                    .find(|s| matches!(&s.kind, StmtKind::Fn(d) if d.name == f))
-                    .map_or(Span { line: 1, col: 1 }, |s| s.span);
-                c.error(
-                    span,
-                    format!(
-                        "the manifest entrypoint '{f}' is invoked with no arguments, so it cannot construct through its static-protocol bound ({}) — the hidden type witness has no call site to come from. Give the entrypoint a non-generic signature and move the construction into a helper it calls with a concrete type",
+                let decl = lm.ast.stmts.iter().find_map(|s| match &s.kind {
+                    StmtKind::Fn(d) if d.name == f => Some((d, s.span)),
+                    _ => None,
+                });
+                let span = decl.map_or(Span { line: 1, col: 1 }, |(_, sp)| sp);
+                // Two ways the zero-argument call cannot be satisfied, one message. The DECLARED
+                // params are the plain one — `fn main(a: int)` used to check green and then die at
+                // startup with "function 'main' expects 1 argument(s), got 0", which reads as a
+                // caller's mistake when the caller is the runtime. The hidden witness params are the
+                // M24 one: no call site exists to pin `T`.
+                let declared = decl.map_or(0, |(d, _)| d.params.len());
+                let w = c.stored_witness_params(None, &f);
+                let cause = if declared > 0 {
+                    Some(format!(
+                        "it declares {declared} parameter(s), which nothing can supply. Give the entrypoint a nullary signature and read its inputs inside it (e.g. `std.os.args`)"
+                    ))
+                } else if !w.is_empty() {
+                    Some(format!(
+                        "it cannot construct through its static-protocol bound ({}) — the hidden type witness has no call site to come from. Give the entrypoint a non-generic signature and move the construction into a helper it calls with a concrete type",
                         w.join(", ")
-                    ),
-                );
+                    ))
+                } else {
+                    None
+                };
+                if let Some(cause) = cause {
+                    c.error(
+                        span,
+                        format!(
+                            "the manifest entrypoint '{f}' is invoked with no arguments, so {cause}"
+                        ),
+                    );
+                }
             }
             c.module_sigs.insert(lm.id.clone(), sig);
         }

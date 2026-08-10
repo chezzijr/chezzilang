@@ -160,10 +160,10 @@ fn cmd_check(args: &[String]) -> ExitCode {
     }
 
     // `chezzi check` is file-only (no bare/manifest mode), so the root is the nearest marker walking
-    // up from the file — pass `None`. The entry FUNCTION is `None` here too, but that is not the
-    // same as "no entrypoint gate": `type_check` derives it from the project manifest when this file
-    // IS the declared entry module (`manifest::entry_fn_for`), so check and run agree.
-    match type_check(&path, None, None) {
+    // up from the file — pass `None`. The entry FUNCTION is derived from the project manifest when
+    // this file IS the declared entry module (`manifest::entry_fn_for`), so a static check of an
+    // entry module a project cannot start reports it.
+    match type_check(&path, None, EntryGate::FromManifest) {
         CheckOutcome::Ok => {
             println!("{}", if json { "[]" } else { "ok: no type errors" });
             ExitCode::SUCCESS
@@ -314,7 +314,14 @@ fn cmd_run(args: &[String]) -> ExitCode {
 
     // Pre-run type check: type errors block execution (no partial output). Pins the SAME root the VM
     // will run (below), so the checker and the VM never disagree on which same-named module to load.
-    match type_check(&path, root_override.as_deref(), entry_fn.as_deref()) {
+    // Bare `chezzi run` gates on the entrypoint it resolved; an explicit `chezzi run <file>` is
+    // SCRIPT mode — it runs the top level and invokes nothing, so the gate is not its business even
+    // when the file happens to be the manifest's entry module (`chezzi check` still reports it).
+    let gate = match &entry_fn {
+        Some(f) => EntryGate::Named(f),
+        None => EntryGate::Script,
+    };
+    match type_check(&path, root_override.as_deref(), gate) {
         CheckOutcome::Ok => {}
         CheckOutcome::Errors(errs) => {
             report_check_errors(&errs, json);
@@ -924,27 +931,65 @@ enum CheckOutcome {
 /// `root` pins the module-graph root (the "one root per run" invariant): the bare-`chezzi run`
 /// manifest path passes `Some(root)` so the checker resolves imports against the SAME root the VM
 /// will run against; `None` (explicit `chezzi run FILE`) derives it by walking up from the file.
-fn type_check(path: &str, root: Option<&std::path::Path>, entry_fn: Option<&str>) -> CheckOutcome {
+fn type_check(path: &str, root: Option<&std::path::Path>, entry_fn: EntryGate<'_>) -> CheckOutcome {
     // Resolve + desugar + type-check on the dedicated front-end stack: the recursive AST walkers can
     // overflow the caller's (main-thread) stack on a deep-but-valid AST — see `chezzi::on_frontend_stack`.
     let path = path.to_string();
     let root = root.map(|r| r.to_path_buf());
-    let entry_fn = entry_fn.map(str::to_string);
-    chezzi::on_frontend_stack(move || type_check_inner(&path, root.as_deref(), entry_fn.as_deref()))
+    let owned = match entry_fn {
+        EntryGate::Named(f) => Some(f.to_string()),
+        _ => None,
+    };
+    let script = matches!(entry_fn, EntryGate::Script);
+    chezzi::on_frontend_stack(move || {
+        let gate = match (&owned, script) {
+            (Some(f), _) => EntryGate::Named(f),
+            (None, true) => EntryGate::Script,
+            (None, false) => EntryGate::FromManifest,
+        };
+        type_check_inner(&path, root.as_deref(), gate)
+    })
+}
+
+/// Which entry FUNCTION a static check must hold this file's declarations to — the three CLI shapes,
+/// spelled out so a caller cannot land in the wrong one by passing `None` and meaning two things.
+///
+/// The gate exists because the manifest's `entrypoint = "mod:fn"` declares a call the runtime makes
+/// BY NAME at arity zero. It is a property of the PROJECT (Go rejects a `func main` with parameters
+/// at build time), so a static check of the entry module reports it — but only where that call
+/// actually happens.
+#[derive(Clone, Copy)]
+enum EntryGate<'a> {
+    /// Bare `chezzi run` — the manifest entrypoint function it already resolved.
+    Named(&'a str),
+    /// `chezzi check <file>` and the editor/LSP: derive it from the project manifest, so a static
+    /// check of the declared entry module reports a `main` the project cannot start.
+    FromManifest,
+    /// `chezzi run <file>` — SCRIPT mode: the file's top level runs and no function is invoked, so
+    /// the gate must not fire. It fired here for one commit, and a project whose `main` took a
+    /// witness could no longer run its own entry file as a script at all.
+    Script,
 }
 
 fn type_check_inner(
     path: &str,
     root: Option<&std::path::Path>,
-    entry_fn: Option<&str>,
+    entry_fn: EntryGate<'_>,
 ) -> CheckOutcome {
     let entry = std::path::Path::new(path);
     // M24 — the manifest-entrypoint gate reaches EVERY consumer that checks this file, not just bare
     // `chezzi run` (which passes the name it already resolved). `chezzi check src/main.chz` used to
     // say "ok: no type errors" about a project that cannot start; the editor, which calls
-    // `check_graph` through the same one derivation, showed nothing.
-    let derived = manifest::entry_fn_for(entry);
-    let entry_fn = entry_fn.or(derived.as_deref());
+    // `check_graph` through the same one derivation, showed nothing. What the caller must NOT be
+    // able to do is land in that arm by accident — see [`EntryGate::Script`].
+    let derived = match entry_fn {
+        EntryGate::FromManifest => manifest::entry_fn_for(entry),
+        _ => None,
+    };
+    let entry_fn = match entry_fn {
+        EntryGate::Named(f) => Some(f),
+        _ => derived.as_deref(),
+    };
     let build = match root {
         Some(r) => resolver::build_graph_with_root(entry, r.to_path_buf()),
         None => resolver::build_graph(entry),

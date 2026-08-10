@@ -65,7 +65,9 @@ Single source of truth for "what am I doing next." Update after every work sessi
 >   `T.Variant`. The parameter wins the name (one rule, `Checker::shadowing_type_param`, asked by
 >   every type-name position, as in Rust); it is erased, so only the static call can be lowered.
 > * An **undetermined `T`**; a bound witnessed by a **newtype or a scalar** (neither can host a static
->   method); a **manifest entrypoint** that takes a witness (it is invoked with no arguments).
+>   method); a **manifest entrypoint** that takes a witness — or any declared parameter — since it is
+>   invoked with no arguments (reported by `chezzi check` and bare `chezzi run`; an explicit
+>   `chezzi run <file>` is script mode, runs the top level and invokes nothing, so it is not gated).
 >
 > **Closes `Convert[S]`'s last slice.** `fn make[T: Convert[int]](seed: T, n: int) -> T: return
 > T.convert(n)` runs. Slice 3 was deferred 2026-07-07 on the premise that a *concrete-pinned checker

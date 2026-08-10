@@ -198,11 +198,14 @@ pub fn entrypoint_file(
 ///
 /// `Some("main")` exactly when the project `file` belongs to has `entrypoint = "<path>:main"` AND
 /// `<path>` resolves to `file` itself. That is a property of the PROJECT, not of one CLI invocation:
-/// the manifest declares the function's required shape (invoked by name, with no arguments), so a
-/// generic that would take a hidden type witness is broken in that file however you reach it — the
+/// the manifest declares the function's required shape (invoked by name, with no arguments), the
 /// same way Go rejects a `func main` with parameters at build time. So this is the ONE derivation
-/// every consumer that statically checks a file uses (`chezzi check`, `chezzi run`, the editor /
-/// LSP); bare `chezzi run` passes the name it already resolved and gets the same answer.
+/// every consumer that STATICALLY CHECKS a file uses (`chezzi check`, the editor / LSP); bare
+/// `chezzi run` passes the name it already resolved and gets the same answer.
+///
+/// NOT used by `chezzi run <file>`, which is script mode — it runs the file's top level and invokes
+/// nothing, so a `main` the manifest could not call is none of that run's business. Deriving it
+/// there stopped a project from running its own entry file as a script (`main::EntryGate::Script`).
 ///
 /// Silent (`None`) on every failure — no manifest, unreadable, malformed, no `entrypoint`, no
 /// `:function` suffix, a different module. Reporting those is the run path's job; a file with no

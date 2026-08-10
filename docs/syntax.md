@@ -1241,7 +1241,7 @@ fn make[T: Convert[int]](seed: T, n: int) -> T:
 | `spawn f(...)` / `defer f(...)` with a witness-taking callee as the **statement target** | a **deferral, not the wall above**: the target is never read as a value, but its emit sites (`SpawnCall`/`DeferCall`/…) push no hidden argument, so it would lower one argument short. `docs/gaps.md` **M24-5** | call it eagerly and `spawn`/`defer` the result, or wrap the call in a closure (`defer: … f(x) …` as a *block* works) |
 | a `T` **not determined** at the call site | there is no concrete type to build a key from | pin it (`nodet[Counter]()`) or annotate the result |
 | a bound witnessed by a **newtype** or a **scalar** | neither can host a static method | use a struct or an enum |
-| a **manifest entrypoint** that takes a witness (`entrypoint = "src.main:main"` where `fn main[T: Default]()`) | it is invoked with no arguments, so nothing supplies the key | give the entrypoint a non-generic signature and construct in a helper it calls |
+| a **manifest entrypoint** that takes a witness or any declared parameter (`entrypoint = "src.main:main"` where `fn main[T: Default]()` or `fn main(a: int)`) | it is invoked with no arguments, so nothing supplies the key (or the argument) | give the entrypoint a nullary, non-generic signature and construct / read inputs in a helper it calls. Reported by `chezzi check` and by bare `chezzi run`; an explicit `chezzi run <file>` is script mode and runs the top level regardless |
 
 The turbofish *call* form is fine — `reset[Counter](Counter(1))` works; it is only reading
 `reset[Counter]` as a **value** that hits the wall.
