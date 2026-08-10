@@ -160,7 +160,9 @@ fn cmd_check(args: &[String]) -> ExitCode {
     }
 
     // `chezzi check` is file-only (no bare/manifest mode), so the root is the nearest marker walking
-    // up from the file — pass `None`.
+    // up from the file — pass `None`. The entry FUNCTION is `None` here too, but that is not the
+    // same as "no entrypoint gate": `type_check` derives it from the project manifest when this file
+    // IS the declared entry module (`manifest::entry_fn_for`), so check and run agree.
     match type_check(&path, None, None) {
         CheckOutcome::Ok => {
             println!("{}", if json { "[]" } else { "ok: no type errors" });
