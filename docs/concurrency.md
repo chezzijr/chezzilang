@@ -168,9 +168,24 @@ They are **not** the same channel, and the difference is Go's, not an accident:
 Measured Go 1.26.5, the ancestor that owns this seam:
 
 ```go
-go func() { _ = errors.New("boom") }()   // → "main finished normally", rc=0   (error dropped)
-go func() { panic("boom") }()            // → "panic: boom", exit status 2     (process dies)
+// program 1 — the error channel: the returned value is dropped, main completes.
+func main() {
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() { defer wg.Done(); _ = errors.New("boom") }()
+	wg.Wait()
+	fmt.Println("main finished normally")   // prints; rc=0
+}
+
+// program 2 — the fault channel: the panicking goroutine kills the process.
+func main() {
+	go func() { panic("boom") }()
+	time.Sleep(200 * time.Millisecond)
+	fmt.Println("main continued")           // NEVER prints — "panic: boom" + stack, rc=2
+}
 ```
+
+(rc=2 is the `go build` binary; `go run` wraps it and exits 1 while printing `exit status 2`.)
 
 This is precisely why `errgroup` exists in Go and why `spawn f()` in Chezzi is a **statement**, not an
 expression. **To observe what a task produced, collect it explicitly** — send it on a `Channel[T]`, or
@@ -195,7 +210,9 @@ count what actually happened.
 `WaitGroup` is the thing Go regrets: manual (`Add`/`Done`/`Wait` — forget one and you leak or
 deadlock) and **unstructured** (a goroutine's lifetime isn't tied to any scope, so it can outlive the
 function that spawned it). The nursery *is* the join — no counter to mismanage — and a task **cannot
-outlive its `parallel:` block**, so leaks are structurally impossible and errors have an obvious home.
+outlive its `parallel:` block**, so leaks are structurally impossible and a *fault* has an obvious home
+(the join surfaces it). A **returned `Err` still does not** — the nursery discards it, exactly like Go;
+see "A spawned task's two error channels" above and collect it yourself.
 This is **structured concurrency**, the modern consensus that postdates Go: Python `trio` /
 `asyncio.TaskGroup`, Kotlin `coroutineScope`, Swift `TaskGroup`, Java `StructuredTaskScope`.
 

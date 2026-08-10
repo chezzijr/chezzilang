@@ -9183,7 +9183,7 @@ programs were run, not reasoned about:
 | ancestor | program | stdout / stderr | rc |
 |---|---|---|---|
 | Go 1.26.5 | `go func(){ _ = work() }()` (`work` returns `errors.New("boom")`), `wg.Wait()` | `main finished normally` | **0** |
-| Go 1.26.5 | `go func(){ panic("goroutine blew up") }()`, main sleeps 200 ms | `panic: goroutine blew up` + stack, `exit status 2` (`go run` itself exits 1) | **2** |
+| Go 1.26.5 | `go func(){ panic("goroutine blew up") }()`, main sleeps 200 ms | `panic: goroutine blew up` + stack; main's `Println` never runs | **2** — measured on the `go build` binary; `go run` wraps it and exits **1** while printing `exit status 2` |
 | Python 3.14.6 | `asyncio.TaskGroup` with one task raising `RuntimeError("boom")` | `ExceptionGroup: unhandled errors in a TaskGroup (1 sub-exception)` | **1** |
 
 **Chezzi matches Go on BOTH channels: value → dropped (rc=0), fault → process dies (rc=1).** So the
@@ -9191,7 +9191,8 @@ asymmetry above is not a disagreement Chezzi invented — it is the Go contract,
 `errgroup` exists. Python's `TaskGroup` propagates because its error channel *is* the exception
 channel; Chezzi's `Result` is a **value**, and a statement-form `spawn f(x)` has nowhere to put a
 returned value, exactly like `go f(x)`. **No engine change.** (Making a spawned `Err` propagate would
-also resurrect the per-task outcome value `W7-27` deleted for a measured 336 MB peak-RSS reason.)
+also resurrect the per-task outcome value `W7-27` deleted for a measured peak-RSS reason — 339 MB → 45
+MB, per that row at `:6971`.)
 
 **What WAS the defect — and what was fixed.** `examples/echo_server.chz` and
 `examples/echo_server_spawn.chz` printed a **hard-coded literal** count, so they claimed a success they

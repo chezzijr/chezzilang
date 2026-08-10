@@ -4174,6 +4174,7 @@ fn net_echo_sequential_client_needs_concurrent_handlers() {
         return;
     }
     let src = r#"import std.net
+import std.concurrency
 
 fn handle(conn: Socket) -> int!:
     msg := conn.read(64)?
@@ -4189,27 +4190,28 @@ fn acceptor(server: Listener, n: int) -> int!:
     server.close()
     return Ok(0)
 
-fn client(addr: str, n: int) -> int!:
-    for i in 0..n:
+fn client(addr: str, n: int, served: AtomicInt) -> int!:
+    for _ in 0..n:
         sock := net.connect(addr)?
         sock.write("ping")?
         reply := sock.read(64)?
         sock.close()
-        if reply != "echo:ping":
-            return Err("bad reply: " + reply)
+        if reply == "echo:ping":
+            served.add(1)
     return Ok(0)
 
 fn run(n: int) -> int!:
     server := net.listen("127.0.0.1:0")?
     addr := server.addr()?
+    served := AtomicInt(0)
     parallel:
         spawn acceptor(server, n)
-        spawn client(addr, n)
-    return Ok(0)
+        spawn client(addr, n, served)
+    return Ok(served.load())
 
 fn main():
     match run(8):
-        Ok(_): print("all served")
+        Ok(served): print("all served: {served}")
         Err(e): print("error: " + e.message())
 
 main()
@@ -4220,8 +4222,8 @@ main()
         "sequential client must complete once handlers run concurrently: {res:?}"
     );
     assert!(
-        out.contains("all served"),
-        "all 8 sequential round-trips serviced: {out:?}"
+        out.contains("all served: 8"),
+        "all 8 sequential round-trips serviced with a correct echo: {out:?}"
     );
     assert!(
         !out.contains("error"),
@@ -4347,6 +4349,7 @@ fn net_concurrent_eager_servers_do_not_exhaust_pool() {
         return;
     }
     let src = r#"import std.net
+import std.concurrency
 
 fn handle(conn: Socket) -> int!:
     msg := conn.read(64)?
@@ -4362,33 +4365,34 @@ fn server_loop(server: Listener, n: int) -> int!:
     server.close()
     return Ok(0)
 
-fn pinger(addr: str) -> int!:
+fn pinger(addr: str, served: AtomicInt) -> int!:
     sock := net.connect(addr)?
     sock.write("ping")?
     reply := sock.read(64)?
     sock.close()
     if reply == "echo:ping":
-        return Ok(1)
-    return Err("bad reply: " + reply)
+        served.add(1)
+    return Ok(0)
 
-fn one_server(n: int) -> int!:
+fn one_server(n: int, served: AtomicInt) -> int!:
     server := net.listen("127.0.0.1:0")?
     addr := server.addr()?
     parallel:
         spawn server_loop(server, n)
         for _ in 0..n:
-            spawn pinger(addr)
+            spawn pinger(addr, served)
     return Ok(0)
 
 fn run(servers: int, conns: int) -> int!:
+    served := AtomicInt(0)
     parallel:
         for _ in 0..servers:
-            spawn one_server(conns)
-    return Ok(0)
+            spawn one_server(conns, served)
+    return Ok(served.load())
 
 fn main():
     match run(4, 12):
-        Ok(_): print("all servers done")
+        Ok(served): print("all servers done: {served}")
         Err(e): print("error: " + e.message())
 
 main()
@@ -4399,8 +4403,8 @@ main()
         "concurrent eager servers must not fault: {res:?}"
     );
     assert!(
-        out.contains("all servers done"),
-        "every concurrent eager nursery completed: {out:?}"
+        out.contains("all servers done: 48"),
+        "every concurrent eager nursery completed all 12 round-trips: {out:?}"
     );
     assert!(!out.contains("error"), "no pinger saw a bad echo: {out:?}");
 }
