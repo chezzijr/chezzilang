@@ -21589,6 +21589,20 @@ fn witness_type_param_shadows_in_every_type_name_position() {
     entry_ok(&format!(
         "{H}fn f[T: Tagged](x: T) -> int:\n    y := Item[int](3)\n    z := Col.Red\n    return T.tag() + Item[int].tag() + y.q\nfn main():\n    print(f(Counter(1)))\nmain()\n"
     ));
+    // Chezzi has ONE namespace, so the parameter shadows a same-named FUNCTION for the whole body
+    // too — which is Go's answer, not Rust's (Rust splits type and value namespaces, so its
+    // `foo()` stays the function). Measured 2026-08-10: `func fv[foo any](x foo) int { return
+    // foo() }` → *"missing argument in conversion to foo"*. It used to call the function, so one
+    // name meant two things here as well.
+    entry_rejects(
+        "fn foo() -> int:\n    return 5\nfn f[foo](x: foo) -> int:\n    return foo()\nfn main():\n    print(f(1))\nmain()\n",
+        SHADOW,
+    );
+    // A real LOCAL binding still wins over the parameter — that is the ordinary value/type split,
+    // not this rule.
+    entry_ok(
+        "struct Bxx:\n    n: int\nfn f[Bxx](x: Bxx) -> int:\n    Bxx := 3\n    return Bxx\nfn main():\n    print(f(1))\nmain()\n",
+    );
 }
 
 /// …and every diagnostic in the family must say the name resolved to the TYPE PARAMETER and why

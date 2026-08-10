@@ -2741,9 +2741,13 @@ impl Checker {
     /// M24-3 — **THE shadowing rule, stated once: an in-scope generic type parameter shadows a type
     /// of the same name in EVERY type-name position.** `fn f[Item: Tagged](x: Item)` next to a
     /// `struct Item` means the PARAMETER — in the annotation `x: Item`, in `Item.tag()`, in
-    /// `Item[int].tag()`, in `Item(99)` and in `Item.Red`. Rust is the reference and resolves the
-    /// parameter in all of them (measured 2026-08-10: E0109 on `Item::<i32>::tag()`, E0308 on
-    /// `let _y: Item = Item(99)`, E0599 on `Col::Red`).
+    /// `Item[int].tag()`, in `Item(99)`, in `Item.Red` — and, since Chezzi has ONE namespace, in a
+    /// same-named FUNCTION call `foo()`. **Go** is the reference for the scoping (one namespace too)
+    /// and rejects every one of these, measured 2026-08-10: `func fv[foo any](x foo) int { return
+    /// foo() }` → *"missing argument in conversion to foo"*, `Item{}` under `[Item any]` → *"invalid
+    /// composite literal type Item"*. rustc agrees on the type-namespace shapes (E0109 on
+    /// `Item::<i32>::tag()`, E0574 on `P { a: 3 }`, E0599 on `Col::Red`) and differs only where its
+    /// separate VALUE namespace keeps `Item(99)` as the tuple-struct constructor.
     ///
     /// Round 3 applied it in ONE spelling, and the same name then meant two different things inside
     /// one expression (`Item.tag() * 100 + Item[int].tag()` answered `107`). Every type-name position
@@ -2761,11 +2765,19 @@ impl Checker {
     /// static-witness call: say that the name resolved to the TYPE PARAMETER and why that is a dead
     /// end here. Never prescribe a bound — a bound licenses a *static method*, not a constructor, a
     /// type argument or a variant.
+    ///
+    /// The shadowed declaration is not necessarily a type: Chezzi has ONE namespace, so a type
+    /// parameter also shadows a same-named FUNCTION for the whole body. Go — the one-namespace
+    /// ancestor — rejects exactly the same two shapes (measured 2026-08-10: `func fv[foo any](x foo)
+    /// int { return foo() }` → *"missing argument in conversion to foo"*, `func fc[Item any](x Item)
+    /// int { y := Item{}; … }` → *"invalid composite literal type Item"*). Rust splits the type and
+    /// value namespaces and so keeps `Item(99)` as the tuple-struct constructor, which is why the
+    /// wording below claims nothing about which kind of declaration was shadowed.
     pub(super) fn type_param_shadow_error(&mut self, tname: &str, detail: &str, span: Span) -> Ty {
         self.error(
             span,
             format!(
-                "'{tname}' resolves to the generic type parameter '{tname}' here, not to a type of the same name (an in-scope type parameter shadows it in every type-name position, as in Rust) — {detail}. Rename the type parameter if you meant the type"
+                "'{tname}' resolves to the generic type parameter '{tname}' here, not to the same-named declaration outside it (a type parameter shadows that name for the whole body, in every position) — {detail}. Rename the type parameter if you meant the outer '{tname}'"
             ),
         );
         Ty::Unknown

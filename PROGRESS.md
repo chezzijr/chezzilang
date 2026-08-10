@@ -116,7 +116,10 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > (`Checker::shadowing_type_param`) asked by EVERY type-name position — `T[int].m()`, `T(99)` and
 > `T.Variant` still reached the shadowed type, so one expression meant two different `Item`s
 > (`Item.tag() * 100 + Item[int].tag()` → `107`); each dead-end diagnostic now names the *parameter*
-> instead of prescribing a bound that cannot help, checked against `rustc` shape by shape. (C) the
+> instead of prescribing a bound that cannot help, checked shape by shape against `rustc` and — for
+> the one-namespace scoping Chezzi actually has — against **Go**, which rejects the constructor and a
+> same-named function call as well (`rustc` keeps `Item(99)` only because its value namespace is
+> separate). (C) the
 > entrypoint gate no longer fires on `chezzi run <file>`, which is script mode and invokes nothing
 > (the three CLI shapes are `main::EntryGate`), and it now also catches a plain `fn main(a: int)`.
 > (D) the pin advice carries the prefix the callee was reached by (`lib.Holder.build[…]`).

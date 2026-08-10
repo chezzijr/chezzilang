@@ -531,11 +531,12 @@
 #                                 production, no new syntax: the checker reinterprets the head and the
 #                                 compiler emits `CallStaticDyn`, which reads the concrete type from
 #                                 the fn's hidden trailing witness parameter. A type parameter
-#                                 SHADOWS a real type name of the same name in EVERY type-name
+#                                 SHADOWS a same-named declaration for its whole body in EVERY
 #                                 position — this production, `Type[targ].member` below, the bare
-#                                 `Type(args)` constructor, `Type.Variant` and the annotation
-#                                 position (Rust/Go's rule). Only the static call can then be
-#                                 lowered; the others reject, because a type parameter is erased.
+#                                 `Type(args)` constructor, `Type.Variant`, a same-named function
+#                                 call, and the annotation position (Go's rule; Chezzi has one
+#                                 namespace). Only the static call can then be lowered; the others
+#                                 reject, because a type parameter is erased.
 #   `Type[targ].member(args)?` — SINGLE type arg: parses as `<postfix> "LBRACKET" <subscript>
 #                                 "RBRACKET" "DOT" "IDENT" ("LPAREN" <argList>? "RPAREN")?` — the
 #                                 parser cannot tell `Type[int].member` from `arr[i].field`, so it
