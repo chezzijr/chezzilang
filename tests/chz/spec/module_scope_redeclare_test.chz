@@ -44,10 +44,14 @@ test fn fn_local_redeclare_is_a_fresh_slot():
     assert peek() == 1, "fn-local closure saw {peek()}"
     assert y == "9", "shadowed local is {y}"
 
+gb := 1
+gbseen := fn() -> int: gb
+if true:
+    gb := "s"
+
 test fn block_scope_redeclare_does_not_touch_the_global():
-    # A top-level-style block body is a fresh scope, so its binding is a local shadow either way.
-    b := 1
-    if true:
-        b := "s"
-        assert b == "s", "block binding is {b}"
-    assert b == 1, "outer binding is {b}"
+    # A top-level `if:` body is scope > 1, so `gb := "s"` inside it routes to `add_local` and is a
+    # fresh LOCAL shadow — it may change type and it leaves the module slot alone. That is why the
+    # rule's discriminator is `scopes.len() == 1` and not `in_fn_body`.
+    assert gb == 1, "global is {gb}"
+    assert gbseen() == 1, "closure saw {gbseen()}"

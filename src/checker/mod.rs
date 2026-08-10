@@ -2521,7 +2521,7 @@ fn contains_unknown_in_slot(t: &Ty) -> bool {
 /// compounds (List/Set/Option/Channel/Shared/Atomic ×1, Map/Result ×2, Tuple ×n, Struct/Enum by
 /// NAME + arity) it recurses pairwise. On a shape-NAME or arity mismatch (e.g. pushing a different
 /// generic enum) it leaves `a` unchanged — no refine — so the normal `check_args` mismatch fires.
-fn merge_unknown(a: &Ty, shape: &Ty) -> Ty {
+pub(crate) fn merge_unknown(a: &Ty, shape: &Ty) -> Ty {
     use Ty::*;
     if shape.is_unknown() {
         return a.clone();

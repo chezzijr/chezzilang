@@ -30,6 +30,20 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > all 13 changes are module-slot retypes) plus a `chezzi check` sweep of all 422 shipped `.chz` — **0**
 > hits. `docs/syntax.md` documents the scope asymmetry, the import carve-out and the re-annotate escape;
 > destructuring and the forward-read-of-a-hoisted-import remain filed as `W7-42r`.
+>
+> **Follow-up 2026-08-10 (adversarial review) — the `Unknown` carve-out was a two-sided veto and did
+> NOT close the defect.** An `Unknown` on *either* side silenced the rule, so `x := 1` /
+> `f := fn() -> int: x` / `x := None` stayed **check-clean and printed `None` out of a `-> int` fn**
+> (rc=0) — along with `[] -> 42`, `None -> 42` and `1 -> []`. The relation wanted is one-sided ("is
+> `declared` a **refinement** of `prev`?"), which is exactly the existing `merge_unknown`: the
+> conjunct is now `merge_unknown(prev, declared) != declared`, plus a bare `declared == Unknown` guard
+> (`merge_unknown` early-returns on an unknown shape). All four holes reject; `[] -> [1]`, `{} -> {"a":1}`,
+> `None -> Some(1)` and same-type rebinds stay legal; the 80-cell import sweep is **byte-identical** to
+> its pre-repair run and the 422-file corpus check is still **0** hits. A **fourth** residual is filed
+> as `W7-42r` (d): a same-module top-level `fn` can still be retyped (`fn helper()` / `helper := 3` →
+> `'int' is not callable`), because `prev` is read from `scopes[0]` and top-level fns live in
+> `Checker::functions`; fixing it opens a hoist-populated, source-position-blind reject family that
+> needs its own sweep, so it is disclosed rather than forced.
 
 > **✅ W7-46 landed 2026-08-10 — the two echo-server examples count the connections they actually
 > served.** The semantics were **measured correct and Go-consistent** and the engine was not touched:
@@ -47,10 +61,21 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > platform caveat: Linux `getrandom(2)` is the only wired entropy source, and `secure_bytes`/`token_hex`
 > fail closed on macOS/Windows with the exact message `secure_bytes: no secure entropy source on this
 > platform`. The `std.uuid` section gets a **Security:** line (the generator is a 64-bit SplitMix64,
-> which is invertible — two observed UUIDs predict every later one — so use `crypto.token_hex(n)` for
-> tokens/session ids/secrets) and the now-false blanket "auto-seeded from OS entropy" claim is corrected
-> to name the Linux-only path. Docs-only; the code half (a portable entropy source off Linux) stays
-> filed open in `docs/gaps.md` **W7-44**.
+> which is invertible — so use `crypto.token_hex(n)` for tokens/session ids/secrets) and the now-false
+> blanket "auto-seeded from OS entropy" claim is corrected to name the Linux-only path. Docs-only; the
+> code half (a portable entropy source off Linux) stays filed open in `docs/gaps.md` **W7-44**.
+>
+> **Follow-up 2026-08-10 (adversarial review) — the caveat understated the risk, and `std.rand` never
+> got it.** **ONE** observed UUID suffices, not two, and it recovers the **seed**: SplitMix64's output
+> function is a bijection and `v4` overwrites only 6 of 128 bits, so inverting the first half over the
+> 16 version candidates and filtering on the second half's surviving 62 bits leaves **exactly one**
+> state — verified against this repo's own frozen seed-42 vector (`src/native/uuid.rs`), recovering
+> `42` and predicting UUID #2 byte-exactly. `std.rand` carried the same uncorrected blanket
+> "auto-seeds from OS entropy" claim two sections above (the `getrandom` call is `cfg(target_os =
+> "linux")`-gated with a nanos ^ addr ^ counter fallback) and, drawing through the same
+> `rand::next_u64`, the same not-for-crypto property — it now has both, and `iter.shuffle`/`choice`/
+> `sample` point at it. The `crypto` platform line no longer enumerates "macOS and Windows" as if it
+> were exhaustive (the gate is `not(target_os = "linux")`).
 
 > # ✅ External review, batch 1 — 2 fixed, 8 filed (2026-08-10)
 >

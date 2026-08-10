@@ -6433,6 +6433,45 @@ fn module_scope_redeclare_unknown_slot_ok() {
 }
 
 #[test]
+fn module_scope_redeclare_unknown_carve_out_is_one_sided() {
+    // The carve-out asks "is `declared` a REFINEMENT of `prev`?" — NOT "does either side hold an
+    // `Unknown`?". The symmetric form silenced the rule in BOTH directions, so all four of these
+    // were check-clean and wrong at runtime (measured on the pre-fix release binary):
+    //   `x := 1` / `f := fn() -> int: x` / `x := None`   → `y: int = f()` accepted, printed `None`
+    //   `x := []` / `f := fn() -> List[int]: x` / `x := 42`      → printed `42`
+    //   `x := None` / `f := fn() -> Option[int]: x` / `x := 42`  → printed `42`
+    //   `x := 1` / `f := fn() -> int: x` / `x := []` / `x.push(3)` → `Add to List and int` at runtime
+    rejects(
+        "x := 1\nf := fn() -> int: x\nx := None\n",
+        "int -> Option[?]",
+    );
+    rejects(
+        "x := []\nf := fn() -> List[int]: x\nx := 42\n",
+        "List[?] -> int",
+    );
+    rejects(
+        "x := None\nf := fn() -> Option[int]: x\nx := 42\n",
+        "Option[?] -> int",
+    );
+    rejects(
+        "x := 1\nf := fn() -> int: x\nx := []\nx.push(3)\n",
+        "int -> List[?]",
+    );
+    // The refinement direction — the whole point of the carve-out — stays legal at every shape.
+    ok("x := []\nx := [1]\nprint(x)\n");
+    ok("y := {}\ny := {\"a\": 1}\nprint(y)\n");
+    ok("z := None\nz := Some(1)\nprint(z)\n");
+    ok("s := Set()\ns.add(1)\nprint(s)\n");
+    ok("w := 1\nw := 2\nprint(w)\n");
+    // A deeper slot refines too (the merge recurses), and a same-shape non-refinement still rejects.
+    ok("m := {}\nm := {\"a\": [1]}\nprint(m)\n");
+    rejects(
+        "m := {\"a\": 1}\nm := {\"a\": \"s\"}\n",
+        "Map[str, int] -> Map[str, str]",
+    );
+}
+
+#[test]
 fn module_scope_redeclare_const_keeps_const_message() {
     // The const carve-out wins: a live const reports the const message and ONLY that one.
     rejects(

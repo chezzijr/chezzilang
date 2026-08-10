@@ -733,9 +733,19 @@ result (binary stdout *plus* stderr *plus* the code in one value).
 Pseudo-random scalars (SplitMix64 PRNG). `seed(n: int) -> nil` (reseed deterministically) ·
 `float() -> float` (uniform in `[0, 1)`) · `int(lo: int, hi: int) -> int` (uniform in the half-open
 `[lo, hi)`; **faults** `rand.int(lo, hi): hi must be > lo` if `hi <= lo`) · `bool() -> bool`.
-The stream auto-seeds from OS entropy on first use; call `seed(n)` to make it reproducible. Draws are
+The stream auto-seeds on first use; call `seed(n)` to make it reproducible. Draws are
 inline CPU (not I/O). Generic collection helpers (`shuffle`/`choice`/`sample`) live in `std.iter` —
 the native seam carries only scalars, so it cannot return a generic `List[T]`.
+**Platform (same gate as `crypto`):** the auto-seed reads OS entropy only on **Linux**
+(`getrandom(2)`); on every other target (macOS, Windows, the BSDs, Android, iOS — the gate is
+`not(target_os = "linux")`) it falls back to a mix of wall-clock nanos, a static's address and a
+process counter, which is guessable.
+**Security:** `std.rand` is **not cryptographically secure** on any platform — the generator is a
+64-bit SplitMix64 whose output function is a bijection, so a single observed raw draw recovers the state
+*and* the seed and predicts the whole stream in both directions (see `std.uuid`, which draws from the
+same step). This carries to `iter.shuffle` / `iter.choice` / `iter.sample`, which call `rand.int`. For a
+secret — a token, a session id, a shuffle an adversary must not predict — use `crypto.token_hex(n)` /
+`crypto.secure_bytes(n)` instead.
 **Limit (not a bug):** the PRNG state is a single process-global, so under `--parallel` *concurrent*
 draws from multiple tasks interleave nondeterministically (engines may diverge). *Sequential* draws
 are deterministic and byte-identical across all engines once seeded — draw in one task, or guard with a
@@ -943,7 +953,8 @@ entropy they raise a **recoverable fault** (catchable by `recover:`), never weak
 `n` must be `0..=1048576` (a 1 MiB cap); a negative or oversized `n` faults. Output is
 **non-deterministic** — two draws differ, so it has no fixed golden. (`token_urlsafe` (base64url) is a
 deferred follow-up.)
-**Platform:** the only wired entropy source is Linux `getrandom(2)`. On macOS and Windows both fns
+**Platform:** the only wired entropy source is Linux `getrandom(2)`. On every other target (macOS,
+Windows, the BSDs, Android, iOS — the gate is `not(target_os = "linux")`) both fns
 **fail closed** — a recoverable fault with the exact message `secure_bytes: no secure entropy source on
 this platform` — rather than falling back to a weaker source; portable entropy is a filed follow-up
 (`docs/gaps.md`, row W7-44 half (b)).
@@ -963,8 +974,12 @@ timestamp-derived seed elsewhere), so a `v4()` draw never perturbs a program's `
 *concurrent* `v4()` draws interleave nondeterministically; an EXACT seeded value is reproducible only for
 *sequential* draws.
 **Security:** `v4()` is **not cryptographically secure**, regardless of platform — the generator is a
-64-bit SplitMix64, which is invertible, so two observed UUIDs recover its state and predict every later
-one. Use `crypto.token_hex(n)` for tokens, session ids, or any other secret.
+64-bit SplitMix64, whose output function is a bijection, and `v4` overwrites only **6** of the 128 drawn
+bits (4 version + 2 variant). **ONE observed UUID is enough:** inverting its first half over the 16
+version candidates and filtering on the second half's surviving 62 bits leaves exactly one state, which
+also **recovers the seed** — so every later UUID *and* every earlier one is predictable byte-exactly
+(measured against this repo's own frozen seed-42 vector). One leaked id compromises the whole stream.
+Use `crypto.token_hex(n)` for tokens, session ids, or any other secret.
 
 ---
 
@@ -1409,7 +1424,9 @@ v1) · `islice(it, stop) -> Iterator[T]` (the first `stop` elements of any itera
 `.iter()` cursor, or another generator — via the `[S: Iterable[T], T]` bound.
 
 Random helpers (call `std.rand`; seed via `rand.seed(n)` for reproducibility — these are pure-Chezzi
-because the native seam can't return a generic `List[T]`):
+because the native seam can't return a generic `List[T]`). They inherit `std.rand`'s security
+properties: the PRNG is **predictable from its output**, so never use these to shuffle or pick
+something an adversary must not guess — see the `std.rand` **Security** note above:
 `shuffle(xs) -> List[T]` (new randomly-permuted list, Fisher–Yates, non-mutating) ·
 `choice(xs) -> Option[T]` (`None` on empty) ·
 `sample(xs, k) -> List[T]` (`k` elements without replacement; `k` clamped to `[0, len]`).

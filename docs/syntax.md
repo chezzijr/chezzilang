@@ -278,8 +278,11 @@ fn f():
 - **A fn-local (or block-local) re-declare is a genuinely fresh binding**, so it may change type and a
   closure made earlier keeps the *old* one — the same as Rust's `let` shadowing. This includes a
   binding inside a top-level `if:`/`for:`/`while:` body: those are inner scopes, not the module scope.
-- The rule fires only when **both** types are fully known. An unrefined empty literal (`x := []`, then
-  `x := [1]`) is a refinement, not a retype, and stays legal.
+- **A refinement is not a retype.** The carve-out is one-sided: the new type is allowed only when it
+  *fills in* what the old one left open, so `x := []` then `x := [1]`, `y := {}` then `y := {"a": 1}`,
+  and `z := None` then `z := Some(1)` all stay legal. Going the other way is a retype and is rejected —
+  `x := []` then `x := 42`, and `x := 1` then `x := None`, both fire (the second would hand a `None` out
+  of a closure declared `-> int`).
 - **Narrowing counts as a change too** — `v: Any = 1` then `v := "s"`, or `s: Shape = Circle(1)` then
   `s := Circle(2)`, are rejected even though nothing *reads* a lie. The slot's declared type is what is
   frozen, and an earlier writer typed against `Any`/`Shape` can still store a non-`str`/non-`Circle`.
@@ -295,6 +298,11 @@ fn f():
 - **The from-import hand-back (`import COUNT from lib` then `COUNT := COUNT + 1`) keeps working, at the
   same type only.** Handing the name back at a *different* type is a retype of the same slot; there is
   no annotation escape (`COUNT: int = 0` declares the same `int`), so **rename**.
+- **What the rule does NOT reach yet** (open, filed as `W7-42r` in `docs/gaps.md` — the retype is
+  check-clean and shows up at runtime): a **destructuring** re-declaration (`a, b := ("s", 2)` retyping
+  an `a` that was an `int`), a forward read of a *hoisted* import, and re-declaring a **function** name
+  (`fn helper()` then `helper := 3`) — the rule covers **value** bindings, and top-level `fn`s live in
+  their own namespace. Treat those as the same mistake even though the checker stays quiet.
 
 ### Closure capture — uniformly by reference
 

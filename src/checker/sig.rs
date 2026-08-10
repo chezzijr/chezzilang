@@ -1987,9 +1987,6 @@ impl Checker {
                     };
                     self.hover_record_binding(span, &declared, name, HoverKind::Local, doc);
                 }
-                // Fully known = not the bare `Unknown` don't-know sentinel (which
-                // `contains_unknown_in_slot` deliberately reports as clean) and no `Unknown` in a slot.
-                let known = |t: &Ty| !matches!(t, Ty::Unknown) && !contains_unknown_in_slot(t);
                 // A live const in THIS scope cannot be re-declared away (`X := 2` / `X: T = 2` after
                 // `X: const T = 1`). For a module global that is the SAME storage slot, so a silent
                 // re-bind would defeat the guarantee, not shadow it (`declare` would otherwise drop the
@@ -2015,9 +2012,17 @@ impl Checker {
                 // local re-declare is a genuine Rust-style shadow and may change type. `scopes.len() == 1`
                 // is the discriminator that maps 1:1 onto the compiler's `is_global_scope()`; a top-level
                 // `if:`/`for:` block body is scope > 1 and routes to `add_local`, so it stays legal.
-                // `Unknown` (bare sentinel or in a type slot) never fires — it is the checker's don't-know
-                // value, and `x := []` then `x := [1]` is a legitimate script-writer refinement. Skipped
-                // during return inference, whose truncate-and-rerun can re-walk a body within one scope.
+                // The `Unknown` carve-out is ONE-SIDED, not a two-sided veto: the question is only "is
+                // `declared` a REFINEMENT of `prev`?", which is exactly `merge_unknown` (fill `prev`'s
+                // `Unknown` slots from `declared`'s shape; unchanged on a shape/name/arity mismatch). So
+                // `x := []` then `x := [1]` refines and stays legal, while `x := []` then `x := 42` —
+                // and `x := 1` then `x := None` — are retypes and fire. A symmetric "either side has an
+                // `Unknown` ⇒ skip" test silenced the rule for BOTH, letting a closure declared
+                // `-> int` hand out a `None`, check-clean (the original W7-42 defect). The bare
+                // `declared == Unknown` guard is load-bearing: `merge_unknown` early-returns `a` when
+                // the SHAPE is unknown, so `int -> Unknown` would otherwise fire off the don't-know
+                // sentinel. Skipped during return inference, whose truncate-and-rerun can re-walk a
+                // body within one scope.
                 // When `prev` is an IMPORT's binding, it fires only if the `import` is SOURCE-EARLIER
                 // than this let. Imports are HOISTED, so the checker binds them before every top-level
                 // statement no matter where they sit in the file; keying on "the name was ever imported"
@@ -2044,8 +2049,8 @@ impl Checker {
                             .get(name)
                             .is_some_and(|i| (i.line, i.col) < (span.line, span.col)))
                     && prev != declared
-                    && known(&prev)
-                    && known(&declared)
+                    && !matches!(declared, Ty::Unknown)
+                    && crate::checker::merge_unknown(&prev, &declared) != declared
                 {
                     self.error(
                         span,
