@@ -531,8 +531,11 @@
 #                                 production, no new syntax: the checker reinterprets the head and the
 #                                 compiler emits `CallStaticDyn`, which reads the concrete type from
 #                                 the fn's hidden trailing witness parameter. A type parameter
-#                                 SHADOWS a real type name of the same name here, as it already did
-#                                 in annotation position (Rust/Go's rule; `docs/gaps.md` M24-3).
+#                                 SHADOWS a real type name of the same name in EVERY type-name
+#                                 position — this production, `Type[targ].member` below, the bare
+#                                 `Type(args)` constructor, `Type.Variant` and the annotation
+#                                 position (Rust/Go's rule). Only the static call can then be
+#                                 lowered; the others reject, because a type parameter is erased.
 #   `Type[targ].member(args)?` — SINGLE type arg: parses as `<postfix> "LBRACKET" <subscript>
 #                                 "RBRACKET" "DOT" "IDENT" ("LPAREN" <argList>? "RPAREN")?` — the
 #                                 parser cannot tell `Type[int].member` from `arr[i].field`, so it

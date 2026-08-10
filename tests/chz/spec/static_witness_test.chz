@@ -753,6 +753,30 @@ fn shadowing_nested[Shadowed: Tagged](x: Shadowed) -> int:
     f := fn() -> int: Shadowed.tag()
     return f()
 
+# …and the shadow is a RULE that holds in EVERY type-name position, not one spelling. The type-level
+# turbofish, the bare constructor and a nullary enum variant used to keep reaching the shadowed type,
+# so `Item.tag() * 100 + Item[int].tag()` answered `107` — one name, two meanings, in one expression.
+# All three are now the parameter, hence rejected (`src/checker/tests.rs`, which is where a
+# compile-time rejection belongs). What RUNS here is the other half of the same rule: outside a
+# shadowing scope every one of those spellings still reaches the type, unchanged.
+
+struct Gsh[K]:
+    q: K
+    fn tag() -> int:
+        return 7
+
+fn gshadowing[Gsh: Tagged](x: Gsh) -> int:
+    return Gsh.tag()
+
+test fn the_shadow_rule_leaves_every_unshadowed_position_alone():
+    # inside the shadowing scope the bound param answers, never the generic struct's 7
+    assert gshadowing(Counter(1)) == 1
+    assert gshadowing(Tag("hi")) == 3
+    # outside it, the same three positions still name the struct/enum
+    assert Gsh[int](3).q == 3
+    assert Gsh[int].tag() == 7
+    assert Col.Red != Col.Blue
+
 # ---- a witness call inside a NESTED interpolation ----
 #
 # The fragment ROOT is re-anchored at the string literal for DIAGNOSTICS. When that anchor was

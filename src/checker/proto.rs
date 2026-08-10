@@ -2738,6 +2738,39 @@ impl Checker {
             .then(|| crate::compiler::bare_display(key))
     }
 
+    /// M24-3 — **THE shadowing rule, stated once: an in-scope generic type parameter shadows a type
+    /// of the same name in EVERY type-name position.** `fn f[Item: Tagged](x: Item)` next to a
+    /// `struct Item` means the PARAMETER — in the annotation `x: Item`, in `Item.tag()`, in
+    /// `Item[int].tag()`, in `Item(99)` and in `Item.Red`. Rust is the reference and resolves the
+    /// parameter in all of them (measured 2026-08-10: E0109 on `Item::<i32>::tag()`, E0308 on
+    /// `let _y: Item = Item(99)`, E0599 on `Col::Red`).
+    ///
+    /// Round 3 applied it in ONE spelling, and the same name then meant two different things inside
+    /// one expression (`Item.tag() * 100 + Item[int].tag()` answered `107`). Every type-name position
+    /// asks THIS predicate; what you may then DO with the parameter is a separate question, answered
+    /// by [`Self::infer_witness_static_call`] (a bound's static requirement plus a reachable witness)
+    /// and by [`Self::type_param_shadow_error`] everywhere else.
+    ///
+    /// A real local binding still wins over both — that is the ordinary value/type split, not this
+    /// rule.
+    pub(super) fn shadowing_type_param(&self, name: &str) -> bool {
+        !self.is_local_binding(name) && self.type_params.contains_key(name)
+    }
+
+    /// The dead end that [`Self::shadowing_type_param`] leads to in every position except the
+    /// static-witness call: say that the name resolved to the TYPE PARAMETER and why that is a dead
+    /// end here. Never prescribe a bound — a bound licenses a *static method*, not a constructor, a
+    /// type argument or a variant.
+    pub(super) fn type_param_shadow_error(&mut self, tname: &str, detail: &str, span: Span) -> Ty {
+        self.error(
+            span,
+            format!(
+                "'{tname}' resolves to the generic type parameter '{tname}' here, not to a type of the same name (an in-scope type parameter shadows it in every type-name position, as in Rust) — {detail}. Rename the type parameter if you meant the type"
+            ),
+        );
+        Ty::Unknown
+    }
+
     /// M24 — `T.method(args)` where `T` is an in-scope generic type PARAMETER: the static-witness
     /// call. The instance twin is `infer_method_call`'s `Ty::Param` arm; this one differs in that
     /// there is no receiver (every `msig.params` slot is a real argument) and `Self` maps to
@@ -2756,6 +2789,24 @@ impl Checker {
         args: &[Expr],
         span: Span,
     ) -> Ty {
+        let in_scope = self.witness_scope.iter().any(|w| w == tname);
+        // A type param declared by the ENCLOSING TYPE (`struct Bx[T]`) can never carry a witness,
+        // WHATEVER its bounds: the witness lives in the calling frame, and a `Bx` value has no
+        // frame — so this verdict is checked BEFORE the bound lookup. It used to sit after it, so an
+        // UNBOUNDED enclosing param was told to "bound it by a protocol", which is advice that
+        // produces a second rejection. A method may not reuse its host's type-param name
+        // (`method_type_param_shadowing_struct_param_rejected`), so a hit here is always the host's.
+        // The `in_scope` guard keeps a legitimately witnessed member param out of this arm.
+        if !in_scope && let Some(host) = self.enclosing_type_declaring(tname) {
+            self.infer_all(args);
+            self.error(
+                span,
+                format!(
+                    "`{tname}.{method}(...)`: '{tname}' is a type parameter of the enclosing type '{host}', which carries no hidden type witness — the concrete type is erased once a '{host}' value exists, so only a value could hold it, and no bound on '{host}' can change that. Declare the type parameter on the MEMBER instead (`fn {method}_of[{tname}: <bound>](self, ...)`, whose witness rides on the call), or pass a factory function (a `fn(...) -> {tname}` parameter/field)"
+                ),
+            );
+            return Ty::Unknown;
+        }
         let bounds = self.type_params.get(tname).cloned().unwrap_or_default();
         let found = bounds.iter().find_map(|b| {
             self.protocol_method_sig(&b.name, method)
@@ -2764,29 +2815,35 @@ impl Checker {
         });
         let Some((bound, msig)) = found else {
             self.infer_all(args);
+            // Name a protocol that ALREADY declares this static method rather than inventing a
+            // signature for it — the invented `fn {method}(...) -> Self` was simply wrong for a
+            // requirement returning anything else. rustc does the same ("the following trait defines
+            // an item `tag`, perhaps you need to restrict type parameter `Item` with it").
+            let mut hosts: Vec<&String> = self
+                .protocols
+                .keys()
+                .filter(|p| {
+                    self.protocol_method_sig(p, method)
+                        .is_some_and(|s| s.is_static)
+                })
+                .collect();
+            hosts.sort();
+            let advice = match hosts.first() {
+                Some(p) => format!("bound '{tname}' by '{p}', which declares a static '{method}'"),
+                None => format!(
+                    "no protocol in scope declares a static '{method}' — declare one and bound '{tname}' by it"
+                ),
+            };
             self.error(
                 span,
                 format!(
-                    "cannot call a static method through the generic type parameter '{tname}' (`{tname}.{method}`): no bound on '{tname}' declares a static method '{method}', so generics are erased here and there is no concrete type to dispatch to — bound '{tname}' by a protocol that requires `fn {method}(...) -> Self`, call the concrete type's static method directly (e.g. `SomeType.{method}(...)`), or pass a factory function (a `fn(...) -> {tname}` parameter)"
+                    "cannot call a static method through the generic type parameter '{tname}' (`{tname}.{method}`): no bound on '{tname}' declares a static method '{method}', so generics are erased here and there is no concrete type to dispatch to — {advice}, call the concrete type's static method directly (e.g. `SomeType.{method}(...)`), or pass a factory function (a `fn(...) -> {tname}` parameter)"
                 ),
             );
             return Ty::Unknown;
         };
-        if !self.witness_scope.iter().any(|w| w == tname) {
+        if !in_scope {
             self.infer_all(args);
-            // A type param declared by the ENCLOSING TYPE (`struct Bx[T: Default]`) is a different
-            // mechanism, not a missing case: its witness would have to be stored in every `Bx` VALUE
-            // (one per instance), where this one lives in the calling frame. Say so, and name the
-            // member-level form — which Task 5 does support — as the way out.
-            if let Some(host) = self.enclosing_type_declaring(tname) {
-                self.error(
-                    span,
-                    format!(
-                        "`{tname}.{method}(...)`: '{tname}' is a type parameter of the enclosing type '{host}', which carries no hidden type witness — the concrete type is erased once a '{host}' value exists, so only a value could hold it. Declare the type parameter on the MEMBER instead (`fn {method}_of[{tname}: <bound>](self, ...)`, whose witness rides on the call), or pass a factory function (a `fn(...) -> {tname}` parameter/field)"
-                    ),
-                );
-                return Ty::Unknown;
-            }
             // Reached when the `enclosing_type_declaring` arm above cannot see the host — notably a
             // nested `fn` inside a method of `struct Bx[T]`, where `current_self_ty` is reset. So
             // this message must ALSO be true for a type-declared param: it states the rule, and

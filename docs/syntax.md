@@ -1252,11 +1252,13 @@ method sharing a name with an imported witness-taking fn — can be charged one 
 costs it value / `spawn` / `defer` position (an over-*rejection*, never a wrong answer; move the
 concrete call into a non-generic helper).
 
-A type parameter whose **name equals a real type** SHADOWS it in static-call position, as it already
-did in annotation position — `fn f[Item: Tagged](x: Item) -> int: return Item.tag()` beside a
-`struct Item` dispatches on the *argument's* type, which is Rust's and Go's answer. (The bare
-constructor call `T(99)` is the one position that still resolves to the type — `docs/gaps.md`
-**M24-3**.)
+A type parameter whose **name equals a real type** SHADOWS it in **every type-name position** —
+the annotation `x: Item`, the static call `Item.tag()`, the type-level turbofish `Item[int].tag()`,
+the constructor `Item(99)` and a nullary variant `Item.Red`. `fn f[Item: Tagged](x: Item) -> int:
+return Item.tag()` beside a `struct Item` dispatches on the *argument's* type, which is Rust's and
+Go's answer; the other positions resolve to the parameter too and therefore reject (a type parameter
+is erased — it has no constructor, takes no type arguments and has no variants). Rename the type
+parameter if you meant the type.
 
 Static methods still do **not** participate in *instance*-method protocol satisfaction: a protocol
 requirement is matched static-to-static and instance-to-instance, never across. Worked demo:

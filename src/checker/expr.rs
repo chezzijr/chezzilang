@@ -188,18 +188,26 @@ impl Checker {
             // here. Everything else keeps the pre-M24 clear diagnostic (generics are erased, so
             // without a witness there is no concrete type to dispatch to).
             //
-            // FIRST among the bare-`Ident` receiver arms, because a type parameter SHADOWS an outer
-            // type of the same name — `fn f[Item: Tagged](x: Item) -> int: return Item.tag()` next
-            // to a `struct Item` means the PARAM. That is Rust's answer (`fn f<Item: D>(_x: Item)
-            // -> i32 { Item::tag() }` with `f(Counter)` prints `1`, measured 2026-08-10) and Go's,
-            // and it is what the ANNOTATION position (`x: Item`) has always meant here, so the two
-            // positions finally agree. The compiler's witness arm sits first among ITS bare-receiver
-            // arms for the same reason: both halves must resolve the same `Item`.
+            // FIRST among the receiver arms, because of [`Checker::shadowing_type_param`] — a type
+            // parameter shadows a same-named type in EVERY type-name position, so the struct arms
+            // below must never see the name. The compiler's witness arm sits first among ITS
+            // bare-receiver arms for the same reason: both halves must resolve the same `Item`.
             if let ExprKind::Ident(tname) = &obj.kind
-                && !self.is_local_binding(tname)
-                && self.type_params.contains_key(tname)
+                && self.shadowing_type_param(tname)
             {
                 return self.infer_witness_static_call(tname, name, args, span);
+            }
+            // …and the same head under a TYPE-LEVEL turbofish (`Item[int].tag()`, in either carrier)
+            // is the same `Item`: the parameter, which takes no type arguments (rustc E0109).
+            if let Some(tname) = type_apply_param_head(obj)
+                && self.shadowing_type_param(&tname)
+            {
+                self.infer_all(args);
+                return self.type_param_shadow_error(
+                    &tname,
+                    &format!("a type parameter takes no type arguments (`{tname}[…]`)"),
+                    span,
+                );
             }
             // `Enum.Variant(args)` — qualified payload-variant constructor. Same gate as the nullary
             // value form in `infer_field`: an unbound enum name dotted with one of its variants. The
@@ -738,6 +746,10 @@ impl Checker {
     ///     already parsed real `Type`s. Keyed by `bare_key`.
     /// Returns `None` when `obj` is not such a head (a real index-then-member, a local binding, an
     /// unknown name, or a non-type index), so the caller falls back to the ordinary method path.
+    /// The bare NAME under a type-level turbofish head, in either carrier the parser produces
+    /// (`Type[int]` = `Index` over an `Ident`, `Type[int, str]` = `TypeApply`). Syntax only — the
+    /// caller decides what the name means; [`Checker::shadowing_type_param`] is what asks whether it
+    /// is a shadowing type parameter, so that question keeps its one answer.
     pub(super) fn type_apply_head(&self, obj: &Expr) -> Option<(String, String, Vec<Type>)> {
         match &obj.kind {
             ExprKind::TypeApply { name, args } => {
@@ -1304,6 +1316,20 @@ impl Checker {
                 .get(&(en.to_string(), name.to_string()))
                 .cloned()?;
             return Some(self.infer_variant_call(&v, name, args, targs, name_span, span, hint));
+        }
+        // CONSTRUCTOR position, and the same shadowing rule: `Item(99)` inside `fn f[Item: Tagged]`
+        // is the PARAMETER, so the struct/enum/newtype ctor arms below must never see the name.
+        // A type parameter is erased at runtime and has no constructor; rustc rejects the shape too
+        // (E0308 `expected type parameter Item, found struct Item` on `let _y: Item = Item(99)`).
+        if self.shadowing_type_param(name) {
+            self.infer_all(args);
+            return Some(self.type_param_shadow_error(
+                name,
+                &format!(
+                    "a type parameter is erased at runtime, so it has no constructor; take a factory function (a `fn(...) -> {name}` parameter), or bound '{name}' by a protocol with a static requirement and call `{name}.<method>(...)`"
+                ),
+                span,
+            ));
         }
         // Explicit call-site type arguments are only meaningful on a *generic* user fn / struct /
         // enum-variant constructor. Reject them on anything else (builtins, non-generic decls)
@@ -3923,5 +3949,20 @@ impl Checker {
                 let _ = self.resolve_type(a, span);
             }
         }
+    }
+}
+
+/// The bare head NAME of a type-level turbofish, in either carrier the parser produces:
+/// `Type[int]` arrives as `Index` over an `Ident`, `Type[int, str]` as `TypeApply`. Syntax only —
+/// whether that name is a shadowing type parameter is [`Checker::shadowing_type_param`]'s single
+/// answer, and a real local binding is excluded there (so `arr[i].len()` is untouched).
+fn type_apply_param_head(obj: &Expr) -> Option<String> {
+    match &obj.kind {
+        ExprKind::TypeApply { name, .. } => Some(name.clone()),
+        ExprKind::Index { obj: tobj, .. } => match &tobj.kind {
+            ExprKind::Ident(n) => Some(n.clone()),
+            _ => None,
+        },
+        _ => None,
     }
 }

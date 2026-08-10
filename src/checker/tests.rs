@@ -21516,6 +21516,93 @@ fn witness_type_param_shadows_a_same_named_type_in_static_call_position() {
     ));
 }
 
+/// The shadow is a RULE, not one spelling. Round 3 applied it only to bare `T.member(args)`, so the
+/// SAME name meant two different things in one expression (`Item.tag() * 100 + Item[int].tag()` →
+/// `107`: the param answered `1`, the struct answered `7`). Every type-name position resolves an
+/// in-scope type parameter to the PARAMETER. Rust is the reference and rejects each of these on the
+/// parameter (measured 2026-08-10 with rustc): `Item::<i32>::tag()` → E0109 *"type arguments are not
+/// allowed on type parameter `Item`"*, `let _y: Item = Item(99)` → E0308 *"expected type parameter
+/// `Item`, found struct `Item`"*, `Col::Red` → E0599 *"no associated function or constant named
+/// `Red` found for type parameter `Col`"*.
+#[test]
+fn witness_type_param_shadows_in_every_type_name_position() {
+    const H: &str = "protocol Tagged:\n    fn tag() -> int\nstruct Item[K]:\n    q: K\n    fn tag() -> int:\n        return 7\nenum Col:\n    Red\n    Blue\n    fn tag() -> int:\n        return 9\nstruct Counter:\n    n: int\n    fn tag() -> int:\n        return 1\n";
+    const SHADOW: &str = "resolves to the generic type parameter";
+    // the type-level turbofish
+    entry_rejects(
+        &format!(
+            "{H}fn f[Item: Tagged](x: Item) -> int:\n    return Item[int].tag()\nfn main():\n    print(f(Counter(1)))\nmain()\n"
+        ),
+        SHADOW,
+    );
+    // the bare constructor
+    entry_rejects(
+        &format!(
+            "{H}fn f[Item: Tagged](x: Item) -> int:\n    y := Item(99)\n    return 1\nfn main():\n    print(f(Counter(1)))\nmain()\n"
+        ),
+        SHADOW,
+    );
+    // a nullary variant of a shadowed enum
+    entry_rejects(
+        &format!(
+            "{H}fn f[Col: Tagged](x: Col) -> int:\n    y := Col.Red\n    return 1\nfn main():\n    print(f(Counter(1)))\nmain()\n"
+        ),
+        SHADOW,
+    );
+    // …and NONE of those spellings is disturbed when no type parameter shadows the name
+    entry_ok(&format!(
+        "{H}fn f[T: Tagged](x: T) -> int:\n    y := Item[int](3)\n    z := Col.Red\n    return T.tag() + Item[int].tag() + y.q\nfn main():\n    print(f(Counter(1)))\nmain()\n"
+    ));
+}
+
+/// …and every diagnostic in the family must say the name resolved to the TYPE PARAMETER and why
+/// that is a dead end, never prescribe a bound that does not help. Both messages below were wrong:
+/// an UNBOUNDED param was told to bound itself by "a protocol that requires `fn tag(...) -> Self`"
+/// for a method returning `int` (rustc names the trait that already declares the item instead), and
+/// a param of the ENCLOSING TYPE got that same advice even though no bound there can ever carry a
+/// witness — following it produced a second rejection.
+#[test]
+fn witness_static_call_dead_ends_name_the_type_parameter() {
+    const H: &str = "protocol Tagged:\n    fn tag() -> int\nstruct Item:\n    q: int\n    fn tag() -> int:\n        return 7\n";
+    // UNBOUNDED param: name the protocol that already declares the static method (rustc's
+    // "the following trait defines an item `tag`, perhaps you need to restrict type parameter
+    // `Item` with it"), never an invented `-> Self` signature.
+    let errs = check_entry(&format!(
+        "{H}fn f[Item](x: Item) -> int:\n    return Item.tag()\nfn main():\n    print(f(1))\nmain()\n"
+    ));
+    let msg = errs
+        .iter()
+        .find(|e| e.message.contains("no bound on 'Item'"))
+        .map(|e| e.message.clone())
+        .unwrap_or_else(|| panic!("expected the no-bound error, got: {errs:?}"));
+    assert!(
+        msg.contains("'Tagged'"),
+        "must name the protocol that declares a static 'tag', got: {msg}"
+    );
+    assert!(
+        !msg.contains("-> Self"),
+        "must not invent a signature for a `-> int` requirement, got: {msg}"
+    );
+    // ENCLOSING-TYPE param: say where it is declared and that only a MEMBER-level one can be
+    // witnessed — never "bound it", which cannot help.
+    let errs = check_entry(&format!(
+        "{H}struct Bx[Item]:\n    k: Item\n    fn peek(self) -> int:\n        return Item.tag()\nfn main():\n    print(Bx(1).peek())\nmain()\n"
+    ));
+    let msg = errs
+        .iter()
+        .find(|e| e.message.contains("enclosing type 'Bx'"))
+        .map(|e| e.message.clone())
+        .unwrap_or_else(|| panic!("expected the enclosing-type error, got: {errs:?}"));
+    assert!(
+        !msg.contains("bound 'Item' by"),
+        "must not prescribe a bound that cannot help, got: {msg}"
+    );
+    // …and the workaround it names really compiles.
+    entry_ok(&format!(
+        "{H}struct Bx[K]:\n    k: K\n    fn peek_of[Item: Tagged](self, x: Item) -> int:\n        return Item.tag()\nfn main():\n    print(Bx(1).peek_of(Item(2)))\nmain()\n"
+    ));
+}
+
 /// G — the `spawn`/`defer` rejection is emitted ONCE. Two arms overlap on a bare free-fn target
 /// (`reject_witness_spawn_defer_target`, then `record_witness_call`'s indirect arm) and both emitted
 /// the identical string at the identical span.

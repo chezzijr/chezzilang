@@ -2697,6 +2697,23 @@ impl Checker {
                 }
             }
         }
+        // MEMBER-as-a-value position, and the same shadowing rule: `Col.Red` inside
+        // `fn f[Col: Tagged]` is the PARAMETER, so the enum/struct arms below must never see the
+        // name. Nothing is reachable through an erased type parameter except a STATIC method its
+        // bound declares, which is a CALL and is handled in `infer_call` before it ever gets here
+        // (rustc agrees: E0599 "no associated function or constant named `Red` found for type
+        // parameter `Col`").
+        if let ExprKind::Ident(tname) = &obj.kind
+            && self.shadowing_type_param(tname)
+        {
+            return self.type_param_shadow_error(
+                tname,
+                &format!(
+                    "a type parameter has no member '{name}'; the only thing reachable through one is a STATIC method declared by one of its bounds, and only as a call (`{tname}.<method>(...)`)"
+                ),
+                obj.span,
+            );
+        }
         // `Enum.Variant` used as a value: a bare *unbound* name that is an enum, dotted with one of
         // its nullary variants — sugar for the bare `Variant`. A real binding (struct/tuple/local
         // named like the enum) wins, so only when `lookup` finds nothing. The bare enum name is gated

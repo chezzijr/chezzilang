@@ -59,7 +59,11 @@ Single source of truth for "what am I doing next." Update after every work sessi
 >   factory closure (`fn make[T](mk: fn() -> T) -> T`), or use the `defer:`/`spawn:` **block** form.
 > * **A type parameter of the enclosing TYPE** (`struct Bx[T: Default]` … `T.default()` in a method):
 >   the concrete type is erased once a `Bx` value exists, so only a value could hold the witness.
->   Declare the parameter on the member.
+>   Declare the parameter on the member. (No bound on the host can change that, and the diagnostic
+>   says so rather than suggesting one.)
+> * Every **non-static-call** position a shadowing type parameter reaches — `T[int].m()`, `T(99)`,
+>   `T.Variant`. The parameter wins the name (one rule, `Checker::shadowing_type_param`, asked by
+>   every type-name position, as in Rust); it is erased, so only the static call can be lowered.
 > * An **undetermined `T`**; a bound witnessed by a **newtype or a scalar** (neither can host a static
 >   method); a **manifest entrypoint** that takes a witness (it is invoked with no arguments).
 >
