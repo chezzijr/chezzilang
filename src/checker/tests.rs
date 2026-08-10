@@ -21356,22 +21356,56 @@ fn witness_forwarding_into_an_imported_callee_ok() {
     );
 }
 
-/// E — an interpolation-fragment diagnostic anchors at the STRING LITERAL, not at the fragment's own
-/// `(1,1)`-relative column. `49bd9f80` removed that anchor to fix a keying bug and took the
-/// diagnostic with it; the key is now a sub-node (the callee token), so the root span is free to be
-/// an anchor again. Pins the COLUMN, which is the whole content of the regression.
+/// E — an interpolation-fragment diagnostic points at the FRAGMENT EXPRESSION's real column. A
+/// fragment is re-lexed from its own source, and while only its LINE was re-anchored every column
+/// restarted at 1; three successive anchors papered over that (one mutating a cloned root's span,
+/// one carried beside the AST) and each one broke a table key or a nested fragment. The lexer now
+/// takes a base COLUMN, so there is nothing left to anchor. CPython is the ancestor and points at
+/// the expression too (3.14.6 carets `nope` in `print(f"hello {nope}")`, not the literal).
 #[test]
-fn interpolation_fragment_error_anchors_at_the_literal() {
-    let errs = check_src("print(\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa {nope} bbbb\")\n");
+fn interpolation_fragment_error_points_at_the_fragment() {
+    // col:            1234567890123
+    let errs = check_src("print(\"ab {nope}\")\n");
     let e = errs
         .iter()
         .find(|e| e.message.contains("unknown name 'nope'"))
         .unwrap_or_else(|| panic!("expected an unknown-name error, got: {errs:?}"));
     assert_eq!(
         (e.span.line, e.span.col),
-        (1, 7),
-        "a fragment error must point at the string literal, not the fragment-relative column"
+        (1, 12),
+        "a fragment error must point at `nope` itself"
     );
+}
+
+/// …and a fragment NESTED in another fragment's literal is a real position too — the case that
+/// reported column 1 at every depth. Single-quoted inner literal so no escape shifts the offset:
+/// `raw` is the post-escape payload, so a `\"` before the fragment moves the reported column one
+/// left (bounded, documented in `interpolation::parse_interpolation`, and never enough to alias two
+/// fragments).
+#[test]
+fn nested_interpolation_fragment_error_points_at_the_fragment() {
+    // col:            1234567890123456789012345
+    let errs = check_src("print(\"hello {'inner {nope} x'} world\")\n");
+    let e = errs
+        .iter()
+        .find(|e| e.message.contains("unknown name 'nope'"))
+        .unwrap_or_else(|| panic!("expected an unknown-name error, got: {errs:?}"));
+    assert_eq!((e.span.line, e.span.col), (1, 23), "the inner `nope`");
+}
+
+/// An escape before the fragment shifts its reported column left by one (`raw` is the post-escape
+/// payload) — bounded and documented. What must NOT shift is the KEY: the two fragments below still
+/// get two different columns, which is the whole reason the base column exists.
+#[test]
+fn escapes_before_a_fragment_keep_two_fragments_apart() {
+    let errs = check_src("print(\"\\t{nope} \\\"x\\\" {nope}\")\n");
+    let cols: Vec<usize> = errs
+        .iter()
+        .filter(|e| e.message.contains("unknown name 'nope'"))
+        .map(|e| e.span.col)
+        .collect();
+    assert_eq!(cols.len(), 2, "two fragments, got: {errs:?}");
+    assert_ne!(cols[0], cols[1], "two fragments must not share a column");
 }
 
 /// …and the anchor must not bring the key aliasing back with it: two witness calls in ONE fragment

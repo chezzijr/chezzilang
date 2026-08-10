@@ -625,11 +625,16 @@ first's type: a **wrong value both engines agreed on**, so parity was blind to i
 test with two different concrete types caught it. The third instance survived a fix that *claimed* to
 have separated them: the fragment anchor was still written onto a cloned AST node's `span`, so a
 fragment root that was itself a string carried the outer literal's span into the NESTED
-interpolation's keys and both per-call tables missed. The key is now the **callee token** (distinct
-per link) and the anchor lives BESIDE the AST (`Checker::frag_anchor`, applied on the way out in
-`Checker::error`) — no span is mutated anywhere, which is what makes the next instance
-unrepresentable rather than merely fixed. Any future checker→compiler table keyed on position
-inherits this hazard.
+interpolation's keys and both per-call tables missed. A FOURTH followed the third — a re-lexed
+fragment carried an absolute line but no absolute COLUMN, so two sibling nested fragments restarted
+at column 1, shared one key, and both took the last one's witness (that fix turned a loud fault into
+a silent wrong value). The key is now the **callee token** (distinct per link) and the anchor is
+**deleted**: `Lexer::base_col` gives every fragment token a real absolute column, so the map from
+(literal span, offset in the literal) to a span is strictly increasing and two call sites cannot
+alias — and with a real column there is nothing left to anchor, so the checker points at the
+expression, exactly where CPython carets inside an f-string (measured 3.14.6). The general lesson
+holds: any future checker→compiler table keyed on position inherits this hazard, and the durable fix
+is to make the position REAL rather than to correct it at a consumer.
 
 ### What stays impossible under witness passing, permanently
 

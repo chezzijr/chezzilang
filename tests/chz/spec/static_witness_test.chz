@@ -297,6 +297,37 @@ test fn an_interpolation_fragment_root_is_a_real_call_site():
     assert "{reset(c)}" == "Counter(n=0)"
     assert fwd_interp(Tag("hi")) == "Tag(s='none')"
 
+# ---- SIBLING nested interpolations must not alias their witness keys ----
+#
+# A `{…}` fragment is re-lexed from its own source, so its spans are stamped with the literal's
+# absolute line AND column. When only the line was stamped, every fragment restarted at column 1 —
+# so the two inner literals below shared a span, their two `reset` calls shared a `WitnessTable`
+# key, and the second entry overwrote the first. `chezzi check` stayed green and the program
+# printed `Tag(s='none')Tag(s='none')`: a SILENT WRONG VALUE, not a fault. Both orders are asserted
+# so a last-one-wins alias cannot pass by coincidence.
+
+fn sib_in_generic[T: Default](x: T, c: Counter) -> str:
+    return "{ \"{reset(c)}\" }{ \"{T.default()}\" }"
+
+test fn two_sibling_nested_fragments_keep_their_own_witness():
+    c := Counter(5)
+    t := Tag("z")
+    assert "{ \"{reset(c)}\" }{ \"{reset(t)}\" }" == "Counter(n=0)Tag(s='none')"
+    assert "{ \"{reset(t)}\" }{ \"{reset(c)}\" }" == "Tag(s='none')Counter(n=0)"
+
+test fn a_double_nested_fragment_keeps_its_own_witness():
+    c := Counter(5)
+    t := Tag("z")
+    assert "{ \"{ \\\"{reset(c)}\\\" }\" }{ \"{reset(t)}\" }" == "Counter(n=0)Tag(s='none')"
+
+test fn sibling_nested_fragments_inside_a_generic_fn():
+    assert sib_in_generic(Tag("z"), Counter(5)) == "Counter(n=0)Tag(s='none')"
+
+test fn a_keyword_argument_survives_a_nested_fragment():
+    # `KeywordTable` is keyed by (string span, fragment ordinal) and rides the same re-lexed spans
+    assert "{ \"{greet(1, b=2)}\" }" == "1-2"
+    assert "{ \"{greet(1, b=2)}\" }{ \"{greet(3, b=4)}\" }" == "1-23-4"
+
 # ---- two witness calls in ONE interpolation fragment ----
 #
 # `WitnessTable::calls` is keyed by the call node's span. The checker used to re-anchor a fragment's

@@ -1184,17 +1184,12 @@ impl Walker<'_> {
                 }
             }
             ExprKind::Interp(chunks) => {
-                // Re-anchor a fragment's error to the STRING LITERAL's span. A fragment is re-lexed
-                // from its own source, so its spans are fragment-relative — an un-anchored error
-                // reports column 1 instead of the literal's real column. Mirrors the checker's
-                // identical `e.span = span` stamp in `check_interp_chunks`.
-                let span = expr.span;
+                // No re-anchoring to the string literal: a fragment is re-lexed with the literal's
+                // absolute line AND column, so its own span is a real source position (and the one
+                // the checker and compiler report too). See `interpolation::parse_interpolation`.
                 for c in chunks.iter_mut() {
                     if let crate::ast::Chunk::Expr(e, _) = c {
-                        self.walk_expr(e).map_err(|mut err| {
-                            err.span = span;
-                            err
-                        })?;
+                        self.walk_expr(e)?;
                     }
                 }
             }

@@ -34,14 +34,16 @@ pub(crate) struct InterpError {
 pub(crate) fn parse_interpolation(raw: &str, span: Span) -> Result<Vec<Chunk>, InterpError> {
     let mut chunks = Vec::new();
     let mut lit = String::new();
-    let mut chars = raw.chars().peekable();
-    while let Some(c) = chars.next() {
+    // `i` is the char index in `raw` — it is what re-anchors a fragment's re-lexed spans to a real
+    // COLUMN (see the `base_col` computation below), so it must be tracked, not recomputed.
+    let mut chars = raw.chars().enumerate().peekable();
+    while let Some((i, c)) = chars.next() {
         match c {
-            '{' if chars.peek() == Some(&'{') => {
+            '{' if chars.peek().map(|(_, c)| *c) == Some('{') => {
                 chars.next();
                 lit.push('{');
             }
-            '}' if chars.peek() == Some(&'}') => {
+            '}' if chars.peek().map(|(_, c)| *c) == Some('}') => {
                 chars.next();
                 lit.push('}');
             }
@@ -64,7 +66,7 @@ pub(crate) fn parse_interpolation(raw: &str, span: Span) -> Result<Vec<Chunk>, I
                 // read as an unterminated string / unbalanced bracket and the fragment never closes.
                 // Only brace nesting still counts in spec text (CPython's nested `{width}` field).
                 let mut in_spec = false;
-                for ic in chars.by_ref() {
+                for (_, ic) in chars.by_ref() {
                     if in_spec {
                         match ic {
                             '{' => depth += 1,
@@ -129,7 +131,25 @@ pub(crate) fn parse_interpolation(raw: &str, span: Span) -> Result<Vec<Chunk>, I
                 // `base_line` offsets the fragment lexer's 1-based `self.line`; newlines INSIDE the
                 // fragment itself still compose on top (those are real source lines, not escapes).
                 let base_line = span.line.saturating_sub(1);
-                let expr = parse_expr_str(expr_src, span, base_line)?;
+                // …and the same for the COLUMN, which is not cosmetic: a span is a cross-half table
+                // key (`WitnessTable`, `KeywordTable`), so while every fragment restarted at column
+                // 1, two fragments of two SIBLING nested literals produced the SAME key and the
+                // second call silently took the first's witness — a wrong value under a green
+                // `chezzi check`. Char `k` of `raw` sits at column `span.col + 1 + k` (the opening
+                // delimiter plus the offset); this fragment's expression starts at `k = i + 1 +
+                // lead` (past its `{` and the whitespace `parse_expr_str` trims); `span_at` adds a
+                // 1-based intra-fragment offset on top, so what we hand it is one less than that.
+                // Two known, bounded approximations, both inherited from
+                // `raw` being the post-escape payload with the delimiter already stripped: a
+                // TRIPLE-quoted literal is short by 2, and each escape consumed before the fragment
+                // shortens it by 1. Neither can make two fragments collide — the offset is strictly
+                // increasing within a literal and nested literals compose inside their parent's
+                // extent — so the key stays unique and the column stays within a couple of columns
+                // of the truth. Recovering it exactly would mean carrying a per-char source map on
+                // every string token.
+                let lead = expr_src.chars().take_while(|c| c.is_whitespace()).count();
+                let base_col = span.col + i + 1 + lead;
+                let expr = parse_expr_str(expr_src, span, base_line, base_col)?;
                 chunks.push(Chunk::Expr(expr, spec));
             }
             '}' => {
@@ -147,12 +167,18 @@ pub(crate) fn parse_interpolation(raw: &str, span: Span) -> Result<Vec<Chunk>, I
     Ok(chunks)
 }
 
-fn parse_expr_str(src: &str, span: Span, base_line: usize) -> Result<Expr, InterpError> {
+fn parse_expr_str(
+    src: &str,
+    span: Span,
+    base_line: usize,
+    base_col: usize,
+) -> Result<Expr, InterpError> {
     // TRIM first: the fragment is lexed as its own line, so leading whitespace (`"{ 1 + 2 }"`,
     // legal in Python) would otherwise open an INDENT token — "unexpected an indented block in
-    // expression". Padding around a fragment is insignificant.
+    // expression". Padding around a fragment is insignificant. `base_col` already accounts for the
+    // leading run this drops.
     let src = src.trim();
-    let tokens = lexer::tokenize_at(src, base_line).map_err(|e| InterpError {
+    let tokens = lexer::tokenize_at(src, base_line, base_col).map_err(|e| InterpError {
         message: e.to_string(),
         span,
     })?;

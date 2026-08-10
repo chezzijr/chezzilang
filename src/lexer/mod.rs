@@ -377,6 +377,16 @@ pub struct Lexer {
     /// escape-processed substring: the offset re-anchors fragment token spans to their true source
     /// line so a runtime fault inside `"{expr}"` reports `expr`'s real line (Bug E).
     base_line: usize,
+    /// Absolute-column offset applied to spans on the fragment's FIRST line only (default 0). Same
+    /// job as `base_line` in the other axis, and the reason it exists is not cosmetic: a span is a
+    /// cross-half TABLE KEY (`WitnessTable`, `KeywordTable`), so two fragments that both restarted
+    /// at column 1 produced ONE key and the second call silently took the first's witness — a wrong
+    /// value under a green `chezzi check`. With the base column the map from (literal span, offset
+    /// in the literal) to a span is strictly increasing, so distinct call sites cannot alias.
+    ///
+    /// It applies to line 1 only because a fragment containing a real newline (a triple-quoted
+    /// literal) starts its own lines at the true column 0 from there on.
+    base_col: usize,
     line_start: usize, // char index where the current line begins (for column tracking)
     indents: Vec<usize>, // the indentation stack. Starts as vec![0].
     at_line_start: bool, // true when the next char begins a fresh logical line
@@ -394,18 +404,20 @@ pub struct Lexer {
 
 impl Lexer {
     pub fn new(source: &str) -> Self {
-        Lexer::new_at(source, 0)
+        Lexer::new_at(source, 0, 0)
     }
 
-    /// Like [`Lexer::new`] but stamps every emitted span with an absolute-line `base_line` offset.
-    /// Used to re-lex string-interpolation fragments so their token spans point at the true source
-    /// line (see [`Lexer::base_line`]). `base_line == 0` is identical to [`Lexer::new`].
-    pub fn new_at(source: &str, base_line: usize) -> Self {
+    /// Like [`Lexer::new`] but stamps every emitted span with an absolute `base_line` / `base_col`
+    /// offset. Used to re-lex string-interpolation fragments so their token spans point at the true
+    /// source position (see [`Lexer::base_line`], [`Lexer::base_col`]). `(0, 0)` is identical to
+    /// [`Lexer::new`].
+    pub fn new_at(source: &str, base_line: usize, base_col: usize) -> Self {
         Lexer {
             chars: source.chars().collect(),
             pos: 0,
             line: 1,
             base_line,
+            base_col,
             line_start: 0,
             indents: vec![0],
             at_line_start: true,
@@ -418,9 +430,12 @@ impl Lexer {
 
     /// The span pointing at character index `pos` on the current line.
     fn span_at(&self, pos: usize) -> Span {
+        // `base_col` lands on the first line only: past a newline this fragment's lines start at
+        // the real column 0, so adding the offset again would push them off the end of the line.
+        let base_col = if self.line == 1 { self.base_col } else { 0 };
         Span {
             line: self.line + self.base_line,
-            col: pos - self.line_start + 1,
+            col: pos - self.line_start + 1 + base_col,
         }
     }
 
@@ -1457,11 +1472,12 @@ pub fn tokenize(source: &str) -> Result<Vec<Tok>, LexError> {
     Lexer::new(source).tokenize()
 }
 
-/// Like [`tokenize`] but stamps every token span with an absolute-line `base_line` offset — used to
-/// re-lex string-interpolation fragments so their spans point at the true source line (Bug E).
-/// `base_line == 0` is identical to [`tokenize`].
-pub fn tokenize_at(source: &str, base_line: usize) -> Result<Vec<Tok>, LexError> {
-    Lexer::new_at(source, base_line).tokenize()
+/// Like [`tokenize`] but stamps every token span with an absolute `base_line` / `base_col` offset —
+/// used to re-lex string-interpolation fragments so their spans point at the true source position
+/// (Bug E, and the witness/keyword key aliasing that fragment-relative columns caused).
+/// `(0, 0)` is identical to [`tokenize`].
+pub fn tokenize_at(source: &str, base_line: usize, base_col: usize) -> Result<Vec<Tok>, LexError> {
+    Lexer::new_at(source, base_line, base_col).tokenize()
 }
 
 /// Convenience free function: `lexer::tokenize_with_comments(src)` — tokens plus the doc-comment
@@ -2755,5 +2771,24 @@ mod tests {
         // a file ending in a bare `|>` still lexes (and stays a parse error)
         let toks = tokenize("r := 5\n    |>\n").unwrap();
         assert_eq!(toks.last().map(|t| &t.kind), Some(&Token::Eof));
+    }
+
+    /// A re-lexed interpolation fragment carries an absolute base LINE and base COLUMN. The column
+    /// applies to the fragment's FIRST line only: past a newline the fragment's own lines start at
+    /// the true column 0, so adding the offset again would push them off the end of the line.
+    #[test]
+    fn base_col_applies_to_the_first_line_only() {
+        let toks = tokenize_at("a\nbb", 4, 10).unwrap();
+        let spans: Vec<(usize, usize)> = toks
+            .iter()
+            .filter(|t| matches!(t.kind, Token::Ident(_)))
+            .map(|t| (t.span.line, t.span.col))
+            .collect();
+        assert_eq!(spans, vec![(5, 11), (6, 1)]);
+        // and (0, 0) is byte-identical to plain `tokenize`
+        assert_eq!(
+            tokenize_at("a\nbb", 0, 0).unwrap(),
+            tokenize("a\nbb").unwrap()
+        );
     }
 }

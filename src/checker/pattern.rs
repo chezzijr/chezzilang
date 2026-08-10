@@ -1170,16 +1170,14 @@ impl Checker {
     /// then stop (the compiler treats the same malformed string as fatal). Format-spec *validation*
     /// stays the compiler's job — we discard the parsed spec and only infer the expression.
     ///
-    /// Span: a fragment expr is parsed from the `{…}` substring via `tokenize_at`, which re-anchors
-    /// each fragment token span to the string literal's OPENING source line — see Bug E. We anchor to
-    /// the opening line rather than the fragment's exact inner line because `raw` is the post-escape
-    /// payload: a `\n` escape and a genuine source newline are indistinguishable, so counting them
-    /// would risk a confidently-wrong line. Columns stay fragment-relative (also unrecoverable from
-    /// the escape-processed substring). We still stamp the whole-string-literal `span` onto each
-    /// fragment's ROOT node before inferring, matching the compiler's emit site, so the nil-in-value-
-    /// position ban (the only diagnostic anchored at the root) reports the string literal's exact
-    /// column too. Errors raised DEEPER inside a fragment carry the string's opening line (best-effort
-    /// column). Always returns `Ty::Str`.
+    /// Span: a fragment expr is parsed from the `{…}` substring via `tokenize_at`, which stamps each
+    /// fragment token span with the string literal's OPENING source line and the fragment's absolute
+    /// COLUMN — see `interpolation::parse_interpolation`. We anchor to the opening line rather than
+    /// the fragment's exact inner line because `raw` is the post-escape payload: a `\n` escape and a
+    /// genuine source newline are indistinguishable, so counting them would risk a confidently-wrong
+    /// line. Nothing is re-anchored on the way out any more: the span is a real position, so a
+    /// fragment error points at the EXPRESSION (where CPython carets inside an f-string) and two
+    /// fragments can no longer share a witness/keyword table key. Always returns `Ty::Str`.
     pub(super) fn check_interpolation(&mut self, raw: &str, span: Span) -> Ty {
         match crate::interpolation::parse_interpolation(raw, span) {
             Ok(chunks) => self.check_interp_chunks(&chunks, span),
@@ -1199,24 +1197,19 @@ impl Checker {
         // Save/restore for nested interpolations. The compiler keeps the identical pair.
         let saved_ctx = self.kw_frag_ctx;
         let saved_ord = self.kw_frag_ord;
-        let saved_anchor = self.frag_anchor;
         let mut ord = 0usize;
         for chunk in chunks {
             if let crate::ast::Chunk::Expr(e, spec) = chunk {
                 self.kw_frag_ctx = span;
                 self.kw_frag_ord = ord;
-                // Anchor the fragment ROOT at the string literal so a fragment error points at the
-                // literal, not at the `(1,1)` fragment-relative column (each fragment is re-lexed
-                // from a fresh source, so only its LINE is real). The anchor is carried BESIDE the
-                // AST (`frag_anchor`, applied in `Checker::error`) and the node is left alone,
-                // because a span here is also a cross-half TABLE KEY: writing the anchor onto a
-                // cloned root's span fed the outer literal's span to a NESTED interpolation's
-                // fragment keys while the compiler kept the inner literal's, so both per-call
-                // tables missed under a green `chezzi check`. `49bd9f80` undid the same conflation
-                // once already; keeping key and anchor in different places is what lets both be
-                // right. The COMPILER does not re-anchor (a runtime fault keeps the fragment's own
-                // span, as before M24) — this is diagnostics only.
-                self.frag_anchor = Some((e.span, span));
+                // No re-anchoring: a fragment is re-lexed with the literal's absolute line AND
+                // column, so its own span is a real source position and a fragment error points at
+                // the EXPRESSION, exactly where CPython points inside an f-string (measured on
+                // 3.14.6: `print(f"hello {f'inner {nope} x'} world")` carets `nope` itself, not the
+                // literal). Three anchors lived here across this milestone — one on a cloned root,
+                // one beside the AST — and each was a workaround for the column being fake; with a
+                // real column there is nothing left to anchor, and the checker finally agrees with
+                // the compiler, which never re-anchored.
                 let ty = self.infer_value(e);
                 // Static format-spec/value-type check: when the value is a CONCRETE scalar
                 // and the spec is provably wrong for it, reject at COMPILE time (same wording
@@ -1234,7 +1227,6 @@ impl Checker {
         }
         self.kw_frag_ctx = saved_ctx;
         self.kw_frag_ord = saved_ord;
-        self.frag_anchor = saved_anchor;
         Ty::Str
     }
 
