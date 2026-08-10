@@ -213,7 +213,9 @@ impl Checker {
                 self.infer_all(args);
                 return self.type_param_shadow_error(
                     &tname,
-                    &format!("a type parameter takes no type arguments (`{tname}[…]`)"),
+                    &format!(
+                        "a type parameter takes no type arguments and cannot be indexed (`{tname}[…]`)"
+                    ),
                     span,
                 );
             }
@@ -3966,7 +3968,9 @@ impl Checker {
 /// The bare head NAME of a type-level turbofish, in either carrier the parser produces:
 /// `Type[int]` arrives as `Index` over an `Ident`, `Type[int, str]` as `TypeApply`. Syntax only —
 /// whether that name is a shadowing type parameter is [`Checker::shadowing_type_param`]'s single
-/// answer, and a real local binding is excluded there (so `arr[i].len()` is untouched).
+/// answer. That excludes a LOCAL binding (so `arr[i].len()` is untouched) but deliberately NOT a
+/// module GLOBAL: a type parameter is the inner scope, so it shadows a global of the same name for
+/// the whole body, and `g[0]` under `fn h[g](…)` is the parameter — Go answers the same.
 fn type_apply_param_head(obj: &Expr) -> Option<String> {
     match &obj.kind {
         ExprKind::TypeApply { name, .. } => Some(name.clone()),

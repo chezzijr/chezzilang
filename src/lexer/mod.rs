@@ -384,8 +384,20 @@ pub struct Lexer {
     /// value under a green `chezzi check`. With the base column the map from (literal span, offset
     /// in the literal) to a span is strictly increasing, so distinct call sites cannot alias.
     ///
-    /// It applies to line 1 only because a fragment containing a real newline (a triple-quoted
-    /// literal) starts its own lines at the true column 0 from there on.
+    /// It applies to EVERY line of the fragment, not just the first, and that is load-bearing rather
+    /// than sloppy. A fragment may span a newline (`"{['a',\n'{f()}']}"` — brackets suppress layout,
+    /// so this lexes and runs), and `base_line` is the LITERAL's opening line for every fragment of
+    /// that literal. Reset the column at the newline and two sibling fragments' second lines both
+    /// land on `(base_line + 2, 1)` — one key again, and the same silent wrong value. Keeping the
+    /// offset makes the position strictly increasing in the fragment's offset within the literal,
+    /// which is the property the keys need.
+    ///
+    /// The cost is a column that keeps counting from the literal's start once a newline is behind it
+    /// — so past a newline it can exceed the physical line's length. That is the same known
+    /// approximation `base_line` already makes in the other axis (it never advances for a newline in
+    /// `raw`, real or escaped, because the two are indistinguishable in the post-escape payload), and
+    /// it is the deliberate direction: an out-of-range column reads as degraded, where a shifted LINE
+    /// would point at real, unrelated code. Filed as `docs/gaps.md` M24-6.
     base_col: usize,
     line_start: usize, // char index where the current line begins (for column tracking)
     indents: Vec<usize>, // the indentation stack. Starts as vec![0].
@@ -430,12 +442,9 @@ impl Lexer {
 
     /// The span pointing at character index `pos` on the current line.
     fn span_at(&self, pos: usize) -> Span {
-        // `base_col` lands on the first line only: past a newline this fragment's lines start at
-        // the real column 0, so adding the offset again would push them off the end of the line.
-        let base_col = if self.line == 1 { self.base_col } else { 0 };
         Span {
             line: self.line + self.base_line,
-            col: pos - self.line_start + 1 + base_col,
+            col: pos - self.line_start + 1 + self.base_col,
         }
     }
 
@@ -2773,18 +2782,24 @@ mod tests {
         assert_eq!(toks.last().map(|t| &t.kind), Some(&Token::Eof));
     }
 
-    /// A re-lexed interpolation fragment carries an absolute base LINE and base COLUMN. The column
-    /// applies to the fragment's FIRST line only: past a newline the fragment's own lines start at
-    /// the true column 0, so adding the offset again would push them off the end of the line.
+    /// A re-lexed interpolation fragment carries an absolute base LINE and base COLUMN, and the
+    /// column HOLDS past a newline inside the fragment. Dropping it there is what let two sibling
+    /// fragments' second lines both land on `(base_line + 2, 1)` — one witness-table key for two
+    /// call sites, and the second silently took the first's type. The offset must stay so the
+    /// position is strictly increasing in the fragment's offset within the literal.
     #[test]
-    fn base_col_applies_to_the_first_line_only() {
+    fn base_col_holds_past_a_newline_inside_the_fragment() {
         let toks = tokenize_at("a\nbb", 4, 10).unwrap();
         let spans: Vec<(usize, usize)> = toks
             .iter()
             .filter(|t| matches!(t.kind, Token::Ident(_)))
             .map(|t| (t.span.line, t.span.col))
             .collect();
-        assert_eq!(spans, vec![(5, 11), (6, 1)]);
+        assert_eq!(spans, vec![(5, 11), (6, 11)]);
+        // …so two fragments of ONE literal cannot collide on their second lines either
+        let a = tokenize_at("a\nbb", 4, 10).unwrap();
+        let b = tokenize_at("a\nbb", 4, 40).unwrap();
+        assert_ne!(a[2].span, b[2].span, "line-2 tokens must stay distinct");
         // and (0, 0) is byte-identical to plain `tokenize`
         assert_eq!(
             tokenize_at("a\nbb", 0, 0).unwrap(),

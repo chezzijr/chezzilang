@@ -323,6 +323,14 @@ test fn a_double_nested_fragment_keeps_its_own_witness():
 test fn sibling_nested_fragments_inside_a_generic_fn():
     assert sib_in_generic(Tag("z"), Counter(5)) == "Counter(n=0)Tag(s='none')"
 
+test fn a_nested_fragment_past_a_newline_keeps_its_own_witness():
+    # A fragment may span a newline — brackets suppress layout, so this lexes and runs. The
+    # literal's absolute line is shared by every fragment of that literal, so if the base COLUMN were
+    # dropped past the newline both inner literals would land on `(line + 1, col 1)`, share a
+    # `WitnessTable` key again, and both print the last one's type. Same silent-wrong-value class as
+    # the sibling case above, one line further in.
+    assert "{['x',\n'{reset(Counter(5)).n}']}{['x',\n'{reset(Tag(\"z\")).s}']}" == "['x', '0']['x', 'none']"
+
 test fn a_keyword_argument_survives_a_nested_fragment():
     # `KeywordTable` is keyed by (string span, fragment ordinal) and rides the same re-lexed spans
     assert "{ \"{greet(1, b=2)}\" }" == "1-2"

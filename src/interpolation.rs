@@ -139,14 +139,20 @@ pub(crate) fn parse_interpolation(raw: &str, span: Span) -> Result<Vec<Chunk>, I
                 // delimiter plus the offset); this fragment's expression starts at `k = i + 1 +
                 // lead` (past its `{` and the whitespace `parse_expr_str` trims); `span_at` adds a
                 // 1-based intra-fragment offset on top, so what we hand it is one less than that.
-                // Two known, bounded approximations, both inherited from
-                // `raw` being the post-escape payload with the delimiter already stripped: a
-                // TRIPLE-quoted literal is short by 2, and each escape consumed before the fragment
-                // shortens it by 1. Neither can make two fragments collide — the offset is strictly
-                // increasing within a literal and nested literals compose inside their parent's
-                // extent — so the key stays unique and the column stays within a couple of columns
-                // of the truth. Recovering it exactly would mean carrying a per-char source map on
-                // every string token.
+                // What this is NOT is the physical column in every case, and the deviations are
+                // all inherited from `raw` being the post-escape payload with the delimiter already
+                // stripped: a TRIPLE-quoted literal is short by 2, each escape consumed before the
+                // fragment shortens it by 1, and — the big one — a NEWLINE before the fragment (real
+                // or escaped) does not reset it, because `base_line` does not advance for one either
+                // (the two kinds are indistinguishable here, and advancing would point the LINE at
+                // real, unrelated code). So past a newline this is an offset from the literal's
+                // start and can exceed the physical line: filed as `docs/gaps.md` **M24-6**, with an
+                // out-of-range column chosen deliberately over an accusing line.
+                //
+                // What it IS, unconditionally, is strictly increasing in the fragment's offset
+                // within the literal — nested literals compose inside their parent's extent — so two
+                // call sites can never share a key. That is the load-bearing property; recovering
+                // the exact column would mean carrying a per-char source map on every string token.
                 let lead = expr_src.chars().take_while(|c| c.is_whitespace()).count();
                 let base_col = span.col + i + 1 + lead;
                 let expr = parse_expr_str(expr_src, span, base_line, base_col)?;

@@ -124,6 +124,19 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > (the three CLI shapes are `main::EntryGate`), and it now also catches a plain `fn main(a: int)`.
 > (D) the pin advice carries the prefix the callee was reached by (`lib.Holder.build[…]`).
 >
+> **Adversarial review then caught two of those four fixes still incomplete** — the only stage that
+> has ever caught this class here, and it caught it again after a full green gate. (A) the base column
+> was applied to the fragment's FIRST line only, so a fragment spanning a newline
+> (`"{['a',\n'{f()}']}"`, which lexes and runs) put two sibling fragments' second lines back on one
+> key and printed the last one's type — the *same silent wrong value*, one line further in. The offset
+> now HOLDS past a newline, which is what makes the position strictly increasing and the aliasing
+> unrepresentable; the price is a column that can exceed its physical line inside a multi-line
+> literal, filed as `docs/gaps.md` **M24-6** with the reason that direction was chosen (an
+> out-of-range column reads as degraded; a shifted LINE accuses innocent code). (B) the shadow rule
+> still missed the BARE-VALUE position — `g := foo` read the shadowed function while `foo()` two
+> lines up resolved to the parameter, and a module global did the same — so `Checker::infer_ident`
+> asks the one predicate too.
+>
 > **Docs:** `docs/syntax.md §7a` ("Static protocol requirements — calling `T.method(...)` through a
 > bound", incl. the decline table), `docs/spec.md` (the M24 row + the `Convert[S]` note),
 > `docs/future.md` (items 13/15 closed, §3a1's ruling marked built + the fn-value wall added to "what

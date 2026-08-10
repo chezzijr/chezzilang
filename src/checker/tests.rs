@@ -21598,8 +21598,19 @@ fn witness_type_param_shadows_in_every_type_name_position() {
         "fn foo() -> int:\n    return 5\nfn f[foo](x: foo) -> int:\n    return foo()\nfn main():\n    print(f(1))\nmain()\n",
         SHADOW,
     );
+    // …including the BARE-VALUE position, which is where the shadow leaked back out: `g := foo`
+    // read the shadowed FUNCTION while `foo()` two lines up resolved to the parameter, and a module
+    // GLOBAL did the same (`lookup` reaches scope 0). Go: *"foo (type) is not an expression"*.
+    entry_rejects(
+        "fn foo() -> int:\n    return 5\nfn f[foo](x: foo) -> int:\n    g := foo\n    return g()\nfn main():\n    print(f(1))\nmain()\n",
+        SHADOW,
+    );
+    entry_rejects(
+        "LIM := 10\nfn f[LIM](x: LIM) -> int:\n    return LIM + 1\nfn main():\n    print(f(1))\nmain()\n",
+        SHADOW,
+    );
     // A real LOCAL binding still wins over the parameter — that is the ordinary value/type split,
-    // not this rule.
+    // not this rule. (A module GLOBAL does NOT: the parameter is the inner scope.)
     entry_ok(
         "struct Bxx:\n    n: int\nfn f[Bxx](x: Bxx) -> int:\n    Bxx := 3\n    return Bxx\nfn main():\n    print(f(1))\nmain()\n",
     );

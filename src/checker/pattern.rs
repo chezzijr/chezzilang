@@ -1879,6 +1879,19 @@ impl Checker {
     }
 
     pub(super) fn infer_ident(&mut self, name: &str, span: Span) -> Ty {
+        // BARE-VALUE position, and the same shadowing rule (`Checker::shadowing_type_param`): a type
+        // parameter shadows a same-named FUNCTION or module GLOBAL for the whole body, so `g := foo`
+        // and `LIM + 1` must not quietly read the outer one while `foo()` / `LIM.m()` resolve to the
+        // parameter. FIRST, because `lookup` reaches module globals (scope 0) — an inner LOCAL still
+        // wins, which is what `shadowing_type_param` excludes. Go, the one-namespace ancestor, is the
+        // reference: reading a type parameter as a value is *"foo (type) is not an expression"*.
+        if self.shadowing_type_param(name) {
+            return self.type_param_shadow_error(
+                name,
+                "a type parameter is a type, not a value — it is erased at runtime, so there is nothing to read",
+                span,
+            );
+        }
         if let Some(ty) = self.lookup(name) {
             // A function-local binding captured by an enclosing `spawn:` task crosses the airlock as
             // a copy; a *non-sendable* one (e.g. a captured closure that's then called) can't, so
