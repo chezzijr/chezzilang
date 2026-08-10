@@ -9458,6 +9458,19 @@ first is smaller and matches the ancestor; the second is what `--timeout`/cancel
 
 ### Safe-direction observations and smaller items (2026-08-10)
 
+- **INTERMITTENT: `accept_inside_an_executor_job_errs_instead_of_starving_the_pool` fails under suite
+  load.** `src/vm/parity_tests.rs` — observed **twice, by two independent agents on different days'
+  work**, in each case on a `cargo test --lib` run that immediately followed another full run; it then
+  passed 3/3 in isolation and on the next clean full run. Both observers dismissed it as unrelated to
+  their own change (a checker predicate in one case, an examples/docs change in the other) and both
+  were right to — **but two independent sightings is not a fluke, and this test is one of the pins
+  `W7-40` added for its narrowing**, so a flaky pin is a weakened guard on a freshly-landed fix.
+  Not yet investigated: whether it is the real-socket/port-reuse setup, the bounded process-wide pool
+  being already saturated by a preceding run's threads (`vm::worker_count()`, `src/vm/mod.rs:304`,
+  never grows and the pool is never joined — `src/vm/pool.rs:12`), or a genuine timing hole in the
+  eager-`Executor` demote path. **Reproduce it under load before touching it** (run the full `--lib`
+  suite twice back-to-back, or the test in a loop with a warm pool), because in isolation it passes.
+
 - **`net.connect` blocks in place on EVERY engine**, and `W7-40` deliberately did not narrow it. Its
   `mn == None` arm (`src/vm/netio.rs:400-416` → `block_until_connected`, `:501`) predates all of this.
   It is **bounded** — a 10 s cap, clamped by `--timeout` — so it is not a permanent hang like the two
