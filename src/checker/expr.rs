@@ -141,9 +141,14 @@ impl Checker {
                 // enforced at decl), so delegate to `infer_static_call` keyed by the declaring module's
                 // runtime key. Emits "type 'Enum' has no static method 'm'" for a genuine miss.
                 let key = self.type_key(&mid, ename);
+                // The SPELLING this callee was reached by, prefix included — every diagnostic
+                // `infer_static_call` writes quotes it back, and the witness pin advice
+                // (`WitnessCallee::Dotted`) has to name a form that actually compiles: bare
+                // `Enum.method[T](...)` here answers "unknown type 'Enum'".
+                let spelled = format!("{mname}.{ename}");
                 return self.infer_static_call(
                     &key,
-                    ename,
+                    &spelled,
                     name,
                     args,
                     &[],
@@ -170,9 +175,12 @@ impl Checker {
                 && sig.struct_defs.contains_key(tname)
             {
                 let key = self.type_key(&mid, tname);
+                // …and the same for a qualified STRUCT static (`lib.Holder.build()`): the advice
+                // must carry `lib.`, which is the prefix the user reached it by (an alias included).
+                let spelled = format!("{mname}.{tname}");
                 return self.infer_static_call(
                     &key,
-                    tname,
+                    &spelled,
                     name,
                     args,
                     &[],
@@ -854,6 +862,9 @@ impl Checker {
     pub(super) fn infer_static_call(
         &mut self,
         key: &str,
+        // How the TYPE was spelled at this call site — bare (`Holder`) or module-qualified
+        // (`lib.Holder`, or an alias). Diagnostics only, and that includes the witness pin advice,
+        // which must name a spelling that compiles.
         tname: &str,
         method: &str,
         args: &[Expr],

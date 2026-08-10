@@ -102,13 +102,24 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > imported witness-taking fn, is charged one it never uses — an over-*rejection* only, never a
 > mis-lowering; every syntactic narrowing tried under-charges some shape, which is the unsafe
 > direction) and **unused captures** (one `str` per witness per nested body). **M24-3 and M24-4 are
-> now FIXED** (2026-08-10): a type parameter **shadows** a same-named type in static-call position in
-> both halves — Rust prints `1` for `fn f<Item: D>(_x: Item) -> i32 { Item::tag() }` with
-> `f(Counter)` and so does Chezzi, where it used to print `7`; aligning both halves on the struct was
-> agreement bought at correctness's expense. And the **entrypoint gate** now runs wherever a file is
-> checked (`chezzi check`, `chezzi run`, the editor), off one derivation `manifest::entry_fn_for`.
-> The bare-CTOR position (`T(99)`) still resolves to the struct — filed under M24-3; the
-> `spawn`/`defer` STATEMENT target is a deferral, not a wall — filed as M24-5.
+> now FIXED** (2026-08-10): a type parameter **shadows** a same-named type — Rust prints `1` for
+> `fn f<Item: D>(_x: Item) -> i32 { Item::tag() }` with `f(Counter)` and so does Chezzi, where it
+> used to print `7`; aligning both halves on the struct was agreement bought at correctness's
+> expense. And the **entrypoint gate** now runs wherever a file is *checked* (`chezzi check`, bare
+> `chezzi run`, the editor), off one derivation `manifest::entry_fn_for`.
+> The `spawn`/`defer` STATEMENT target is a deferral, not a wall — filed as M24-5.
+>
+> **Round 4 (2026-08-10) — three hunters, eight findings, four root causes, all fixed at the root.**
+> (A) the fragment column above — the third patch of that family had turned a loud fault into a
+> **silent wrong value**, so the fourth gave the fragment a real column and DELETED the anchor
+> instead of adjusting it again. (B) the shadow became a RULE with one derivation
+> (`Checker::shadowing_type_param`) asked by EVERY type-name position — `T[int].m()`, `T(99)` and
+> `T.Variant` still reached the shadowed type, so one expression meant two different `Item`s
+> (`Item.tag() * 100 + Item[int].tag()` → `107`); each dead-end diagnostic now names the *parameter*
+> instead of prescribing a bound that cannot help, checked against `rustc` shape by shape. (C) the
+> entrypoint gate no longer fires on `chezzi run <file>`, which is script mode and invokes nothing
+> (the three CLI shapes are `main::EntryGate`), and it now also catches a plain `fn main(a: int)`.
+> (D) the pin advice carries the prefix the callee was reached by (`lib.Holder.build[…]`).
 >
 > **Docs:** `docs/syntax.md §7a` ("Static protocol requirements — calling `T.method(...)` through a
 > bound", incl. the decline table), `docs/spec.md` (the M24 row + the `Convert[S]` note),

@@ -21484,6 +21484,42 @@ fn witness_undetermined_names_a_working_spelling_at_every_callee_form() {
             "import lib\nfn main():\n    print(lib.empty[lib.Counter]().n)\nmain()\n",
         ),
     ]);
+    // module-QUALIFIED static MEMBER — the spelling that still named an unspellable prefix. The
+    // advice must carry the prefix the callee was REACHED by (`lib.Holder.build[…]`); the bare
+    // `Holder.build[…]` it used to suggest answers "unknown type 'Holder'". Third report of this
+    // shape, hence the compile-each-suggestion rule below.
+    let hlib = (
+        "lib.chz",
+        "protocol Default:\n    fn default() -> Self\nstruct Counter:\n    n: int\n    fn default() -> Counter:\n        return Counter(0)\nstruct Holder:\n    k: int\n    fn build[T: Default]() -> T:\n        return T.default()\n",
+    );
+    files_reject(
+        &[
+            hlib,
+            (
+                "main.chz",
+                "import lib\nfn main():\n    print(lib.Holder.build())\nmain()\n",
+            ),
+        ],
+        "pin it with a type argument (`lib.Holder.build[SomeType](...)`)",
+    );
+    files_ok(&[
+        hlib,
+        (
+            "main.chz",
+            "import lib\nfn main():\n    print(lib.Holder.build[lib.Counter]().n)\nmain()\n",
+        ),
+    ]);
+    // …and through an ALIAS, which is the prefix the user actually wrote.
+    files_reject(
+        &[
+            hlib,
+            (
+                "main.chz",
+                "import lib as L\nfn main():\n    print(L.Holder.build())\nmain()\n",
+            ),
+        ],
+        "pin it with a type argument (`L.Holder.build[SomeType](...)`)",
+    );
 }
 
 /// M24-3 — a type parameter SHADOWS an outer type of the same name in static-call position, like
