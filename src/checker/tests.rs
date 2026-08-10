@@ -6370,6 +6370,247 @@ fn const_read_and_alias_ok() {
     ok("K: const int = 7\ny := K + 1\ny = 100\nprint(K)\nprint(y)\n");
 }
 
+// ===== module-scope re-declaration: may REBIND the global, may not RETYPE it (W7-42) =====
+
+#[test]
+fn module_scope_redeclare_changing_type_rejected() {
+    // The check-clean unsoundness: `collect_globals` is idempotent by NAME, so both `x`s are the ONE
+    // global slot — the closure keeps reading it and hands a `str` out of a `fn() -> int`. Measured
+    // pre-fix: `chezzi check` said "ok: no type errors" and the program printed `9`.
+    rejects(
+        "x := 1\nf := fn() -> int: x\nx := \"9\"\nprint(f())\n",
+        "cannot re-declare module-level binding 'x' with a different type (int -> str)",
+    );
+}
+
+#[test]
+fn module_scope_redeclare_same_type_ok() {
+    // Python-style late binding is preserved: a re-bind of the SAME type stays legal, and a closure
+    // over the slot legitimately observes the new value.
+    ok("x := 1\nx := 2\nf := fn() -> int: x\nprint(f())\n");
+}
+
+#[test]
+fn module_scope_typed_redeclare_changing_type_rejected() {
+    // The typed-`let` path routes through the same binding site, so it is covered too.
+    rejects("x: int = 1\nx: str = \"9\"\n", "int -> str");
+}
+
+#[test]
+fn module_scope_redeclare_int_to_float_rejected() {
+    // int -> float is a type change like any other — measured pre-fix, `x := 1; f := fn() -> int: x;
+    // x := 1.0` gave `y: int = f()` the value `1.0` and `print(y + 1)` printed `2.0`.
+    rejects("x := 1\nx := 1.0\n", "int -> float");
+}
+
+#[test]
+fn fn_local_redeclare_changing_type_ok() {
+    // `add_local` pushes a FRESH slot for a fn-local re-declare, so it is a genuine Rust-style shadow
+    // and may change type (Rust, measured: the pre-shadow closure keeps the old binding). Untouched.
+    ok("fn f():\n    y := 1\n    y := \"9\"\n    print(y)\n");
+}
+
+#[test]
+fn top_level_block_redeclare_changing_type_ok() {
+    // A top-level `if:`/`for:` body is scope > 1 and routes to `add_local`, NOT to a global slot —
+    // which is why `scopes.len() == 1` is the discriminator and `in_fn_body` would over-reject here.
+    ok("x := 1\nc := true\nif c:\n    x := \"s\"\n    print(x)\n");
+    ok("x := \"s\"\nfor x in 0..3:\n    print(x)\n");
+}
+
+#[test]
+fn fn_local_shadow_of_module_global_ok() {
+    ok("x := 1\nfn f():\n    x := \"s\"\n    print(x)\n");
+}
+
+#[test]
+fn module_scope_redeclare_unknown_slot_ok() {
+    // `Unknown` — the bare sentinel or one sitting in a type slot — never fires: it is the checker's
+    // don't-know value, and refining an empty literal is a script-writer idiom, not a retype.
+    ok("x := []\nx := [1]\nprint(x)\n");
+    // …but two CONCRETE element types are the same one-slot lie as any other retype.
+    rejects("xs := [1]\nxs := [\"a\"]\n", "List[int] -> List[str]");
+}
+
+#[test]
+fn module_scope_redeclare_const_keeps_const_message() {
+    // The const carve-out wins: a live const reports the const message and ONLY that one.
+    rejects(
+        "X: const int = 1\nX := \"s\"\n",
+        "cannot re-declare const binding",
+    );
+    let errs = check_src("X: const int = 1\nX := \"s\"\n");
+    assert!(
+        !errs.iter().any(|e| e.message.contains("module-level")),
+        "a live const must not ALSO report the retype error, got: {errs:?}"
+    );
+}
+
+#[test]
+fn module_scope_redeclare_inferred_return_no_double_fire() {
+    // Return inference truncates errors and re-walks a body inside one open scope, so the rule is
+    // gated on `!inferring_ret` — it must neither false-fire nor double-fire around an inferred fn.
+    ok("x := 1\nfn g():\n    return x\nx := 2\nprint(g())\n");
+    let errs = check_src("x := 1\nfn g():\n    return x\nx := \"s\"\nprint(g())\n");
+    assert_eq!(
+        errs.iter()
+            .filter(|e| e.message.contains("module-level binding"))
+            .count(),
+        1,
+        "expected exactly one retype error, got: {errs:?}"
+    );
+}
+
+#[test]
+fn module_scope_redeclare_over_hoisted_import_ok() {
+    // Imports are HOISTED: the checker binds `x` from the import before every top-level statement,
+    // whatever line the import sits on. When the `import` is source-LATER than the `let`, firing
+    // would reject a SOUND program — nothing ahead of the `let` can read the import's binding, and
+    // at runtime the hoisted import lands first so `x` is `1` from line 1 onward (measured: prints
+    // `1`, identical on the pre-fix binary). So the rule compares the import's OWN span.
+    files_ok(&[
+        ("lib/st.chz", "COUNT := \"s\"\n"),
+        (
+            "main.chz",
+            "x := 1\nf := fn() -> int: x\nimport COUNT as x from lib.st\nprint(f())\n",
+        ),
+    ]);
+    // A whole-module bind is the same shape: `import lib.st` after `st := 1` keeps its pre-fix verdict.
+    files_ok(&[
+        ("lib/st.chz", "COUNT := \"s\"\n"),
+        ("main.chz", "st := 1\nimport lib.st\nprint(1)\n"),
+    ]);
+}
+
+#[test]
+fn module_scope_redeclare_under_source_earlier_import_rejected() {
+    // The mirror image, and the shape the first cut of this rule LET THROUGH: when the `import` is
+    // source-EARLIER, the closure between it and the `let` really does read the one slot, so this is
+    // the W7-42 defect verbatim. Measured on the pre-fix binary: `chezzi check` said "ok", the
+    // program printed `s` out of a `fn() -> int`, and `print(y + 1)` died with
+    // "cannot apply Add to str and int".
+    files_reject(
+        &[
+            ("lib/st.chz", "COUNT := 0\n"),
+            (
+                "main.chz",
+                "import COUNT from lib.st\nf := fn() -> int: COUNT\nCOUNT := \"s\"\nprint(f())\n",
+            ),
+        ],
+        "cannot re-declare module-level binding 'COUNT' with a different type (int -> str)",
+    );
+    // Same for a whole-module bind: `import lib.st` then `st := 1` retypes the slot a source-earlier
+    // closure resolves `st.g()` against (measured pre-fix: check-clean, then "type int has no method").
+    files_reject(
+        &[
+            ("lib/st.chz", "fn g() -> str:\n    return \"m\"\n"),
+            ("main.chz", "import lib.st\nst := 1\nprint(st)\n"),
+        ],
+        "module st -> int",
+    );
+}
+
+#[test]
+fn module_scope_redeclare_not_suppressed_by_an_unrelated_later_import() {
+    // The import span is consulted ONLY while the previous binding is still the IMPORT's. Keying on it
+    // unconditionally turned a source-LATER import into a per-NAME suppressor: the `let` had already
+    // handed the name back (`declare` clears `imported_values`), so `prev` was the first LET's type and
+    // the import's position was irrelevant — yet it silenced the rule and re-opened W7-42 verbatim.
+    // Measured on the intermediate binary: check-clean, `f()` printed `s` out of a `fn() -> int`, and
+    // `print(y + 1)` died with "cannot apply Add to str and int".
+    files_reject(
+        &[
+            ("lib/st.chz", "COUNT := \"s\"\n"),
+            (
+                "main.chz",
+                "x := 1\nf := fn() -> int: x\nx := \"s\"\nimport COUNT as x from lib.st\nprint(f())\n",
+            ),
+        ],
+        "cannot re-declare module-level binding 'x' with a different type (int -> str)",
+    );
+    // Same for the whole-module form (`prev` is no longer `Ty::Module` by the second let).
+    files_reject(
+        &[
+            ("lib/st.chz", "VAL := 1\n"),
+            (
+                "main.chz",
+                "st := 1\nf := fn() -> int: st\nst := \"s\"\nimport lib.st\nprint(f())\n",
+            ),
+        ],
+        "cannot re-declare module-level binding 'st' with a different type (int -> str)",
+    );
+    // Control: the same program whose later import binds a DIFFERENT name always fired — which is what
+    // identifies the name collision, not the source order, as the thing that was being suppressed.
+    files_reject(
+        &[
+            ("lib/st.chz", "COUNT := \"s\"\n"),
+            (
+                "main.chz",
+                "x := 1\nf := fn() -> int: x\nx := \"s\"\nimport COUNT as other from lib.st\nprint(f())\n",
+            ),
+        ],
+        "cannot re-declare module-level binding 'x' with a different type (int -> str)",
+    );
+}
+
+#[test]
+fn from_import_hand_back_at_a_different_type_rejected_deliberately() {
+    // The blessed hand-back idiom (`import COUNT from lib` / `COUNT := COUNT + 1`) keeps working, but
+    // ONLY at the same type — handing the name back at a DIFFERENT type is rejected, deliberately, and
+    // there is no annotation escape (`COUNT: int = 0` has the same `declared`); the escape is a rename.
+    // It has to be: the import's binding IS the module slot's first declaration, so everything typed
+    // against the imported `str` — including a `fn` that writes it — is still typed that way. Both
+    // pre-existing hand-back fixtures are `int -> int`, so the suite would otherwise never sample this.
+    files_reject(
+        &[
+            ("lib/st.chz", "COUNT := \"s\"\n"),
+            (
+                "main.chz",
+                "import COUNT from lib.st\nCOUNT := 0\nCOUNT = COUNT + 1\nprint(COUNT)\n",
+            ),
+        ],
+        "cannot re-declare module-level binding 'COUNT' with a different type (str -> int)",
+    );
+    // The same-type hand-back — the idiom the rule must not break — stays legal.
+    files_ok(&[
+        ("lib/st.chz", "COUNT := 0\n"),
+        (
+            "main.chz",
+            "import COUNT from lib.st\nCOUNT := COUNT + 1\nCOUNT = COUNT + 1\nprint(COUNT)\n",
+        ),
+    ]);
+}
+
+#[test]
+fn module_scope_redeclare_to_a_subtype_rejected_deliberately() {
+    // DELIBERATE, not an oversight: these three narrow the slot's type rather than widening it, and a
+    // `fn() -> Any` handing back a `str` is no lie. They are still rejected because the check is on the
+    // slot, not on the readers — the type is frozen at the FIRST declaration, so an earlier WRITER
+    // typed against the old type can put a non-conforming value in. Measured pre-fix, check-clean and
+    // dead at runtime: `v: Any = 1` / `fn setv(): v = 42` / `v := "s"` / `y: str = v` / `y.upper()`
+    // → "type int has no method 'upper'". Loosening the test to `assignable` would re-admit exactly
+    // that, so `prev != declared` stands and this family is collateral we accept and document
+    // (`docs/syntax.md`); the escape is to re-annotate (`v: Any = "s"`), which stays legal.
+    rejects(
+        "v: Any = 1\nf := fn() -> Any: v\nv := \"s\"\n",
+        "Any -> str",
+    );
+    rejects(
+        "protocol Shape:\n    fn area(self) -> int\n\nstruct Circle:\n    r: int\n    fn area(self) -> int:\n        return self.r\n\ns: Shape = Circle(1)\ns := Circle(2)\n",
+        "Shape -> Circle",
+    );
+    rejects(
+        "xs: List[Any] = [1]\nxs := [\"a\"]\n",
+        "List[Any] -> List[str]",
+    );
+    // The escape the diagnostic names, on the same programs: re-annotating declares the slot afresh
+    // at the type it already has, so it is accepted.
+    ok("v: Any = 1\nf := fn() -> Any: v\nv: Any = \"s\"\nprint(f())\n");
+    ok(
+        "protocol Shape:\n    fn area(self) -> int\n\nstruct Circle:\n    r: int\n    fn area(self) -> int:\n        return self.r\n\ns: Shape = Circle(1)\ns: Shape = Circle(2)\nprint(s.area())\n",
+    );
+}
+
 #[test]
 fn const_from_imported_rebind_names_const() {
     // A from-imported const, rebound, gets a const-specific message (not the snapshot-mutator one

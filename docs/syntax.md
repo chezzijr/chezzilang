@@ -255,6 +255,47 @@ ANSWER += 1                   # ✗ every compound form is caught too
   that *any* imported global is already read-only — a from-imported value is a snapshot copy — so the
   const marking sharpens the message, it doesn't add the restriction.)
 
+#### Re-declaring an ordinary binding — rebind anywhere, retype only in a fn
+
+Re-declaring a name with `:=` (or a second typed let) is legal, but what it *means* differs by scope,
+and the asymmetry is deliberate:
+
+```chezzi
+x := 1
+x := 2          # ✓ same type — Python-style late binding, the SAME storage slot
+x := "9"        # ✗ type error: module-level binding 'x' re-declared with a different type
+
+fn f():
+    y := 1
+    y := "9"    # ✓ a fn-local re-declare is a FRESH binding (Rust-style shadowing)
+```
+
+- **A module global is one storage slot, and its type is frozen at the first declaration.** Both `x`s
+  above are the same slot, so code on *either* side of the re-declaration is typed against the old
+  type: a closure written before it (`f := fn() -> int: x`) would hand a `str` out of a fn declared
+  `-> int`, and a `fn` that *writes* the slot (`fn setx(): x = 42`) would put an `int` into what is now
+  a `str`. Rebinding the value is fine; **changing the type is a type error**.
+- **A fn-local (or block-local) re-declare is a genuinely fresh binding**, so it may change type and a
+  closure made earlier keeps the *old* one — the same as Rust's `let` shadowing. This includes a
+  binding inside a top-level `if:`/`for:`/`while:` body: those are inner scopes, not the module scope.
+- The rule fires only when **both** types are fully known. An unrefined empty literal (`x := []`, then
+  `x := [1]`) is a refinement, not a retype, and stays legal.
+- **Narrowing counts as a change too** — `v: Any = 1` then `v := "s"`, or `s: Shape = Circle(1)` then
+  `s := Circle(2)`, are rejected even though nothing *reads* a lie. The slot's declared type is what is
+  frozen, and an earlier writer typed against `Any`/`Shape` can still store a non-`str`/non-`Circle`.
+- **Escapes:** **re-annotate** at the declared type (`s: Shape = Circle(2)` and `v: Any = "s"` are both
+  accepted — the annotation restates the frozen type instead of changing it), **rename**, or move the
+  pair into a `fn`.
+- **Imports are hoisted, so the rule compares source position** — but only while the previous binding
+  is still the import's. `import COUNT from lib` followed by `COUNT := "s"` is rejected like any other
+  retype; a `let` that a *later* `import` happens to collide with (`x := 1` … `import COUNT as x from
+  lib`) is **not**, because the import binds first at runtime, so nothing before the `let` can read it.
+  Once a `let` has taken the name over, a further re-declaration is judged against *that* let's type, so
+  a later `import` of the same name does not license it.
+- **The from-import hand-back (`import COUNT from lib` then `COUNT := COUNT + 1`) keeps working, at the
+  same type only.** Handing the name back at a *different* type is a retype of the same slot; there is
+  no annotation escape (`COUNT: int = 0` declares the same `int`), so **rename**.
+
 ### Closure capture — uniformly by reference
 
 Capture is **by reference, always**. A closure (and a `spawn:` / `parallel:` / `defer:` block)

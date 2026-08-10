@@ -2,6 +2,35 @@
 
 Single source of truth for "what am I doing next." Update after every work session.
 
+> **✅ W7-42 landed 2026-08-10 — a module-scope re-declaration may rebind a global, but not retype
+> it.** `x := 1` / `f := fn() -> int: x` / `x := "9"` used to be **check-clean** and hand a `str` out of
+> a fn declared `-> int` (`y: int = f()` accepted, `y + 1` then faulting): the checker retyped one
+> binding while `collect_globals` is idempotent by NAME, so both `x`s are the ONE global slot the
+> closure keeps reading. The ancestors split and were re-measured — Go 1.26.5 **rejects** (`no new
+> variables on left side of :=`), rustc 1.97.0 **shadows** with a fresh binding (`1 9`), CPython 3.14.6
+> late-binds (`9`) but has no enforced annotation to lie about — so the decision was to reject only a
+> re-declaration that **changes the type**. Python-style late binding survives for same-type rebinds
+> (`x := 1; x := 2` still prints `2` through a pre-existing closure), a fn-local re-declare stays a
+> Rust-style fresh binding that may change type, and `x := []` / `x := [1]` stays legal (`Unknown`
+> never fires the rule). One checker-only `else if` beside the `const` carve-out (`src/checker/sig.rs`),
+> keyed on `scopes.len() == 1`. Imports are hoisted, so when the previous binding is **the import's own**
+> it is compared by **source position** (`import_binds` already records each bound name's `import`
+> span). **Two wrong cuts were measured first:** keying on "the name was ever imported" rejects the
+> sound `x := 1` … `import … as x` *and* lets the headline defect through one `import` away
+> (`import COUNT from lib` / closure / `COUNT := "s"`); keying on the span *unconditionally* makes an
+> unused source-LATER import a per-NAME suppressor that re-opens the defect verbatim (`x := 1` /
+> closure / `x := "s"` / `import … as x` — check-clean, printing `s` out of a `fn() -> int`). Both are
+> now rejected. The from-import hand-back keeps working, but only at the **same** type — handing the
+> name back at a different type (`import COUNT from lib` (str) / `COUNT := 0`) rejects with no
+> annotation escape, deliberately and now pinned. A **narrowing** (`Any -> str`,
+> `Shape -> Circle`) is rejected too, deliberately — the frozen type is the SLOT's, so an earlier
+> *writer* typed against `Any` is check-clean then dead at runtime (measured); re-annotating
+> (`v: Any = "s"`) is the escape and stays legal. Evidence is a **36-program before/after table from the
+> pre- and post-change release binaries** (23 rows keep their verdict *and* their byte-identical output;
+> all 13 changes are module-slot retypes) plus a `chezzi check` sweep of all 422 shipped `.chz` — **0**
+> hits. `docs/syntax.md` documents the scope asymmetry, the import carve-out and the re-annotate escape;
+> destructuring and the forward-read-of-a-hoisted-import remain filed as `W7-42r`.
+
 > **✅ W7-46 landed 2026-08-10 — the two echo-server examples count the connections they actually
 > served.** The semantics were **measured correct and Go-consistent** and the engine was not touched:
 > Go 1.26.5 drops a goroutine's returned `error` (rc=0 — why `errgroup` exists) and dies on a goroutine

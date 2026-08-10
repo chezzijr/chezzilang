@@ -1987,6 +1987,9 @@ impl Checker {
                     };
                     self.hover_record_binding(span, &declared, name, HoverKind::Local, doc);
                 }
+                // Fully known = not the bare `Unknown` don't-know sentinel (which
+                // `contains_unknown_in_slot` deliberately reports as clean) and no `Unknown` in a slot.
+                let known = |t: &Ty| !matches!(t, Ty::Unknown) && !contains_unknown_in_slot(t);
                 // A live const in THIS scope cannot be re-declared away (`X := 2` / `X: T = 2` after
                 // `X: const T = 1`). For a module global that is the SAME storage slot, so a silent
                 // re-bind would defeat the guarantee, not shadow it (`declare` would otherwise drop the
@@ -2002,6 +2005,51 @@ impl Checker {
                     self.error(
                         span,
                         format!("cannot re-declare const binding '{name}' (a const cannot be rebound — not even with ':=' or a new typed let)"),
+                    );
+                }
+                // A MODULE-scope re-declaration may rebind the global but not RETYPE it. At scope 0 the
+                // compiler's `collect_globals` is idempotent by NAME, so `x := "9"` after `x := 1` reuses
+                // the ONE global slot: a closure built before this line still reads it and hands the new
+                // type out of its declared one (`fn() -> int` yielding a `str`, check-clean). The
+                // fn-local path is deliberately untouched — `add_local` pushes a FRESH slot there, so a
+                // local re-declare is a genuine Rust-style shadow and may change type. `scopes.len() == 1`
+                // is the discriminator that maps 1:1 onto the compiler's `is_global_scope()`; a top-level
+                // `if:`/`for:` block body is scope > 1 and routes to `add_local`, so it stays legal.
+                // `Unknown` (bare sentinel or in a type slot) never fires — it is the checker's don't-know
+                // value, and `x := []` then `x := [1]` is a legitimate script-writer refinement. Skipped
+                // during return inference, whose truncate-and-rerun can re-walk a body within one scope.
+                // When `prev` is an IMPORT's binding, it fires only if the `import` is SOURCE-EARLIER
+                // than this let. Imports are HOISTED, so the checker binds them before every top-level
+                // statement no matter where they sit in the file; keying on "the name was ever imported"
+                // would reject the sound `x := 1` … `import … as x from lib` (nothing before the let can
+                // read the import's binding), while the span comparison rejects the unsound
+                // `import COUNT from lib` … `COUNT := "s"` (the closure between them reads the one slot).
+                // `import_binds` already records that span, per bound name, per module.
+                // The span is consulted ONLY while `prev` really is the import's binding: a module-scope
+                // `declare` hands the name back to this module and clears `imported_values`
+                // (`setup.rs:1764-1766`), so after one `let` the previous binding is that LET's and where
+                // some later `import` happens to sit stopped being the question — keying on the span
+                // unconditionally made an unused source-later import a per-NAME suppressor that re-opened
+                // the original defect (`x := 1` / closure / `x := "s"` / `import … as x`).
+                // Two axes make the comparison total: imports are syntactically top-level only, so there
+                // is no nested-scope case, and the language has no statement separator, so two top-level
+                // statements can never share a position — `<` has no reachable tie, and a tie-break for
+                // it would be dead code.
+                else if !self.inferring_ret
+                    && self.scopes.len() == 1
+                    && let Some(prev) = self.scopes[0].get(name).cloned()
+                    && (!(self.imported_values.contains_key(name) || matches!(prev, Ty::Module(_)))
+                        || self
+                            .import_binds
+                            .get(name)
+                            .is_some_and(|i| (i.line, i.col) < (span.line, span.col)))
+                    && prev != declared
+                    && known(&prev)
+                    && known(&declared)
+                {
+                    self.error(
+                        span,
+                        format!("cannot re-declare module-level binding '{name}' with a different type ({prev} -> {declared}) — a module global is ONE storage slot whose type is frozen at its first declaration, so any code that reads or writes '{name}' is typed against {prev} while the slot now holds {declared} (rename it, or keep its type; a fn-local ':=' is a fresh binding and may change type)"),
                     );
                 }
                 self.declare(name, declared);

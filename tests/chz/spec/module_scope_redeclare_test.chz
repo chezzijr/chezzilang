@@ -1,0 +1,53 @@
+# A module-scope `:=` re-declaration may REBIND the global, but not RETYPE it (gaps.md W7-42).
+#
+# The rejecting half is a compile-time diagnostic and lives in `src/checker/tests.rs`; what runs here
+# is the LEGAL neighbour the rule must not break. A module global is ONE storage slot (the compiler's
+# `collect_globals` is idempotent by name), so a same-type re-declaration keeps Python's late binding:
+# a closure built BEFORE the second `x := …` reads the new value through that shared slot. A fn-local
+# re-declare is a different backend path (`add_local` pushes a fresh slot), so it is a Rust-style
+# shadow and may change type — the closure there keeps the OLD binding.
+# Gated serial==M:N by chz_suite_passes_both_engines.
+
+gx := 1
+gseen := fn() -> int: gx
+gx := 2
+
+test fn module_scope_redeclare_shares_one_slot():
+    # Late binding through the shared global slot — the closure predates the re-declaration.
+    assert gseen() == 2, "closure saw {gseen()}"
+    assert gx == 2, "global is {gx}"
+
+gl: List[int] = [1]
+glen := fn() -> int: gl.len()
+gl: List[int] = [1, 2, 3]
+
+test fn typed_module_redeclare_of_the_same_type_shares_one_slot():
+    assert glen() == 3, "closure saw len {glen()}"
+
+gany: Any = 1
+ganyseen := fn() -> Any: gany
+gany: Any = "s"
+
+test fn re_annotating_at_the_frozen_type_is_the_escape():
+    # A NARROWING re-declaration (`gany := "s"`) is rejected — the slot's declared type is frozen at
+    # its first declaration, so an earlier writer typed against `Any` could still store an int. The
+    # escape the diagnostic names is to RE-ANNOTATE at that frozen type, which restates it instead of
+    # changing it: still one slot, still late binding.
+    assert ganyseen() == "s", "closure saw {ganyseen()}"
+
+test fn fn_local_redeclare_is_a_fresh_slot():
+    # The fn-local path is a genuine shadow: `peek` keeps reading the FIRST `y`, and the second may
+    # even change type (Rust, measured: `let x = 1; let f = move || x; let x = "9";` prints `1 9`).
+    y := 1
+    peek := fn() -> int: y
+    y := "9"
+    assert peek() == 1, "fn-local closure saw {peek()}"
+    assert y == "9", "shadowed local is {y}"
+
+test fn block_scope_redeclare_does_not_touch_the_global():
+    # A top-level-style block body is a fresh scope, so its binding is a local shadow either way.
+    b := 1
+    if true:
+        b := "s"
+        assert b == "s", "block binding is {b}"
+    assert b == 1, "outer binding is {b}"
