@@ -2,6 +2,17 @@
 
 Single source of truth for "what am I doing next." Update after every work session.
 
+> **✅ W7-46 landed 2026-08-10 — the two echo-server examples count the connections they actually
+> served.** The semantics were **measured correct and Go-consistent** and the engine was not touched:
+> Go 1.26.5 drops a goroutine's returned `error` (rc=0 — why `errgroup` exists) and dies on a goroutine
+> panic (`exit status 2`), which is exactly Chezzi's `spawn` on both channels. The defect was that
+> `examples/echo_server.chz` / `echo_server_spawn.chz` printed a **hard-coded** `echo server handled 50
+> connections` at rc=0 having handled **zero** on `--serial`. Both now bump a shared `AtomicInt` (Go's
+> `atomic.Int64`) only from a client whose full round-trip returned `echo:ping`, read after the nursery
+> joins — default engine prints the real `50`, `--serial` prints a truthful `0`, all rc=0. The three
+> `parity_tests.rs` tests that asserted the vacuous lines now assert the real counts (`0` / `all served:
+> 100`). `docs/concurrency.md` states the two-channel contract once, with the measured Go output.
+
 > **✅ W7-44a landed 2026-08-10 — `docs/stdlib.md` now names the CSPRNG surface's Linux-only wiring,
 > and warns `uuid.v4()` is not cryptographically secure.** The `std.crypto` CSPRNG paragraph gets a
 > platform caveat: Linux `getrandom(2)` is the only wired entropy source, and `secure_bytes`/`token_hex`
@@ -64,11 +75,9 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > off Linux, and `uuid.v4()`'s 64-bit SplitMix64 state is **invertible from two outputs on every
 > platform** — docs half should not wait), `W7-45` (`W7-41`'s hole is still open on
 > `contains`/`index_of`/`dedup`/Set+Map insert, whose runtime is `values_equal`; the Set/Map halves fail
-> only on a hash collision, so the silent-wrong-answer variant is the worse half), and **`W7-46`** — a
-> spawned fn's returned `Err` is silently discarded while a raw fault aborts the nursery, so the repo's
-> own `examples/echo_server.chz` prints `echo server handled 50 connections` at rc=0 on `--serial`
-> **having handled zero**; the two error channels disagree, and Go (drops it) and Python's
-> `asyncio.TaskGroup` (propagates) must both be measured before that is resolved. Also **`W7-47`** —
+> only on a hash collision, so the silent-wrong-answer variant is the worse half). ~~`W7-46`~~ is
+> **fixed** (see the banner above): the ancestors were measured, the `spawn` semantics are Go-consistent,
+> and the real defect — two examples printing a hard-coded count they never verified — is closed. Also **`W7-47`** —
 > `os.exit` from an eager `Executor` job does **not** terminate the process while `main` is blocked in a
 > socket op (marker prints, then rc=124; Go's `os.Exit` is immediate from any goroutine, rc=3): an
 > `os.exit` defect in nature, only *observable* now that `W7-40` lets `main` block on a socket at all.

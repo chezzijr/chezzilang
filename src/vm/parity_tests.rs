@@ -3298,13 +3298,15 @@ main()
 ///
 /// With the block-in-place path open to `--serial` this ran forever (`timeout 15 chezzi run --serial
 /// examples/echo_server.chz` → `rc=124`): the acceptor blocked the only thread inside `accept`, so no
-/// client fiber could ever be scheduled to connect. It must TERMINATE — the watchdog is the assertion
-/// that matters here; the printed line is `run()`'s, whose per-fiber `Err`s a `spawn` discards.
+/// client fiber could ever be scheduled to connect. It must TERMINATE — the watchdog is still the
+/// primary assertion. The printed count is now a real observation: the example bumps a shared
+/// `AtomicInt` only from a client that completed the whole round-trip, so `--serial` — where every
+/// would-block op is W7-40's engine `Err` — reports the truthful `0`, not an unearned `50` (W7-46).
 #[test]
 fn echo_server_example_terminates_on_the_serial_engine() {
     let src = include_str!("../../examples/echo_server.chz");
     let out = run_net_watchdog_engine("echo_server_serial", src, false);
-    assert_eq!(out, "echo server handled 50 connections\n");
+    assert_eq!(out, "echo server handled 0 connections\n");
 }
 
 /// The `read_bytes` arm of the same fix — the fourth op, covered directly rather than by symmetry.
@@ -4034,6 +4036,7 @@ fn net_connect_top_level_dead_port_errors_not_hangs() {
 #[test]
 fn net_echo_server_services_more_conns_than_workers() {
     let src = r#"import std.net
+import std.concurrency
 
 fn acceptor(server: Listener, n: int) -> int!:
     for _ in 0..n:
@@ -4044,27 +4047,28 @@ fn acceptor(server: Listener, n: int) -> int!:
     server.close()
     return Ok(0)
 
-fn client(addr: str) -> int!:
+fn client(addr: str, served: AtomicInt) -> int!:
     sock := net.connect(addr)?
     sock.write("ping")?
     reply := sock.read(64)?
     sock.close()
     if reply == "echo:ping":
-        return Ok(1)
-    return Err("bad reply: " + reply)
+        served.add(1)
+    return Ok(0)
 
 fn run(n: int) -> int!:
     server := net.listen("127.0.0.1:0")?
     addr := server.addr()?
+    served := AtomicInt(0)
     parallel:
         spawn acceptor(server, n)
         for _ in 0..n:
-            spawn client(addr)
-    return Ok(0)
+            spawn client(addr, served)
+    return Ok(served.load())
 
 fn main():
     match run(100):
-        Ok(_): print("all served")
+        Ok(served): print("all served: {served}")
         Err(e): print("error: " + e.message())
 
 main()
@@ -4072,8 +4076,8 @@ main()
     let (out, _e, res, _c) = run_parallel_watchdog(src);
     assert!(res.is_ok(), "100-conn echo server must not fault: {res:?}");
     assert!(
-        out.contains("all served"),
-        "every connection was serviced + the nursery joined: {out:?}"
+        out.contains("all served: 100"),
+        "every connection COMPLETED its round-trip + the nursery joined: {out:?}"
     );
     assert!(!out.contains("error"), "no client saw a bad echo: {out:?}");
 }
@@ -4096,6 +4100,7 @@ fn net_echo_server_spawns_handler_per_connection() {
         return;
     }
     let src = r#"import std.net
+import std.concurrency
 
 fn handle(conn: Socket) -> int!:
     msg := conn.read(64)?
@@ -4111,27 +4116,28 @@ fn acceptor(server: Listener, n: int) -> int!:
     server.close()
     return Ok(0)
 
-fn client(addr: str) -> int!:
+fn client(addr: str, served: AtomicInt) -> int!:
     sock := net.connect(addr)?
     sock.write("ping")?
     reply := sock.read(64)?
     sock.close()
     if reply == "echo:ping":
-        return Ok(1)
-    return Err("bad reply: " + reply)
+        served.add(1)
+    return Ok(0)
 
 fn run(n: int) -> int!:
     server := net.listen("127.0.0.1:0")?
     addr := server.addr()?
+    served := AtomicInt(0)
     parallel:
         spawn acceptor(server, n)
         for _ in 0..n:
-            spawn client(addr)
-    return Ok(0)
+            spawn client(addr, served)
+    return Ok(served.load())
 
 fn main():
     match run(100):
-        Ok(_): print("all served")
+        Ok(served): print("all served: {served}")
         Err(e): print("error: " + e.message())
 
 main()
@@ -4142,8 +4148,8 @@ main()
         "per-connection-spawn echo server must not fault: {res:?}"
     );
     assert!(
-        out.contains("all served"),
-        "every connection was handled by its own fiber: {out:?}"
+        out.contains("all served: 100"),
+        "every connection COMPLETED its round-trip in its own fiber: {out:?}"
     );
     assert!(!out.contains("error"), "no client saw a bad echo: {out:?}");
 }

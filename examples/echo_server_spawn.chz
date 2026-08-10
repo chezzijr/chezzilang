@@ -10,8 +10,13 @@
 # Per-connection spawn parks on the netpoller, which needs the default (M:N) engine:
 #
 #   chezzi run examples/echo_server_spawn.chz
+#
+# The printed number is MEASURED, not asserted: a `spawn`ed fiber's return value is discarded (this is
+# Go's `go f()`), so the count lives in a shared `AtomicInt` — Go's `atomic.Int64` — that only a client
+# which completed the whole round-trip bumps. On `--serial` that prints a truthful `0 connections`.
 
 import std.net
+import std.concurrency
 
 fn handle(conn: Socket) -> int!:
     msg := conn.read(64)?
@@ -27,27 +32,28 @@ fn acceptor(server: Listener, n: int) -> int!:
     server.close()
     return Ok(0)
 
-fn client(addr: str) -> int!:
+fn client(addr: str, served: AtomicInt) -> int!:
     sock := net.connect(addr)?
     sock.write("ping")?
     reply := sock.read(64)?
     sock.close()
     if reply == "echo:ping":
-        return Ok(1)
-    return Err("bad reply: " + reply)
+        served.add(1)             # counted only by a client that got its own echo back
+    return Ok(0)
 
 fn run(n: int) -> int!:
     server := net.listen("127.0.0.1:0")?
     addr := server.addr()?
+    served := AtomicInt(0)
     parallel:
         spawn acceptor(server, n)
         for _ in 0..n:
-            spawn client(addr)
-    return Ok(0)
+            spawn client(addr, served)
+    return Ok(served.load())      # the nursery has joined, so every client has finished counting
 
 fn main():
     match run(50):
-        Ok(_): print("echo server handled 50 connections, one fiber each")
+        Ok(served): print("echo server handled {served} connections, one fiber each")
         Err(e): print("error: " + e.message())
 
 main()

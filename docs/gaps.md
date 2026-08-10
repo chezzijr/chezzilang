@@ -63,7 +63,7 @@ later edit shifts them and nobody re-numbers the whole table (`W7-27`'s was alre
 | item | gaps.md | what | why it is still open |
 |---|---|---|---|
 | **W7-47** | `:9188` | **`os.exit` does not terminate the process while `main` is blocked in a socket op.** An eager `Executor` job calling `os.exit(3)` prints its marker and the process then **hangs at rc=124** under `timeout 12`, with `main` still sitting in `accept()`. Go's `os.Exit` is immediate from any goroutine (same shape measured: `listening`, the goroutine's line, **rc=3**), so this is an ancestor divergence on a seam Go owns. Cause: `os.exit` in a job only sets the worker's `pending_exit` (`src/vm/mod.rs:4137`), which `run_outcome` (`:3461-3472`) turns into a `TaskOutcome::Exit` value somebody must **observe** — surfaced only at `shutdown()`/`join_eager_jobs` or the program-exit drain, neither of which a permanently-blocked `main` ever reaches | **Pre-existing in NATURE, newly OBSERVABLE.** The deferred-through-the-join plumbing is unchanged by `W7-40`; what `W7-40` changed is that top-level `main` can now block on a socket AT ALL (before it got the immediate `Err`), which turns "deferred until the join" into "never". Compounds with the untimed `join_eager_jobs` wait below. Not investigated: whether a `parallel:`/`spawn` fiber's `os.exit` defers the same way, and whether the fix belongs at the `os.exit` native (halt the process directly, Go-style — smaller, matches the ancestor) or at the blocking waits (observe a process-wide exit flag — what `--timeout`/cancel would want anyway) |
-| **W7-46** | `:9140` | **A spawned fn's returned `Err` is silently discarded, while a raw fault aborts the nursery — the two error channels disagree.** `examples/echo_server.chz` spawns `acceptor(server, n) -> int!`; on `--serial` every socket op returns `W7-40`'s deliberate engine `Err`, `?` turns each into an `Err` return VALUE, the nursery drops it, `run()` returns `Ok(0)`, and the program prints `echo server handled 50 connections` at **rc=0 having handled zero** — the repo's own example is **vacuously green**, and so is any test asserting that line. A raw **fault** in a `spawn:` DOES propagate: `spawn: boom()` where `boom` indexes `[1]` at `99` prints `main done` then `runtime error … index 99 out of bounds (len 1)` and **rc=1**, identically on both engines | **Measure the ancestors before deciding — the row deliberately does not.** Go's bare `go func()` also drops a returned `error` (which is why `errgroup` exists), but Python's `asyncio.TaskGroup` propagates an exception. **Chezzi's `Result` is a value, not an exception**, so "dropped" may be Go-consistent and the real defect may be only the DISAGREEMENT between the two channels — in which case the fix is to make the fault path match, not the `Err` path. Independent of that decision, `examples/echo_server.chz` and `echo_server_spawn.chz` need fixing **either way**: they claim a success they did not achieve, which is `W7-38`'s "a real bug reported as a non-finding" class relocated into the examples |
+| ~~**W7-46**~~ | `:9140` | **FIXED 2026-08-10 — the SEMANTICS were measured correct and Go-consistent; the defect was two examples asserting an unearned success.** A spawned fn's returned `Err` is discarded while a raw fault aborts the nursery. Measured Go 1.26.5: `go func(){ _ = errors.New("boom") }()` → `main finished normally`, **rc=0** (error dropped — this is why `errgroup` exists); `go func(){ panic("boom") }()` → `panic: boom`, `exit status 2`. **Chezzi matches Go on BOTH channels**, so the "disagreement" is the Go contract, not a bug — and `Result` is a value, so there is nowhere for a statement-form `spawn`'s return to go. The real defect: `examples/echo_server.chz` / `echo_server_spawn.chz` printed a **hard-coded** `echo server handled 50 connections` at rc=0 having handled zero on `--serial`, and 3 tests asserted that vacuous line | **Fix:** both examples now count what actually happened — a shared `AtomicInt` (Go's `atomic.Int64`) bumped only by a client whose full round-trip returned `echo:ping`, read after the nursery joins. `--serial` now truthfully prints `echo server handled 0 connections`; the default engine prints the real `50`. `parity_tests.rs` `echo_server_example_terminates_on_the_serial_engine` asserts the honest `0`; `net_echo_server_services_more_conns_than_workers` + `net_echo_server_spawns_handler_per_connection` assert `all served: 100` instead of a vacuous `contains("all served")`. `docs/concurrency.md` states the two-channel contract once, with the measured Go output |
 | **W7-45** | `:9113` | **The `where`-bound hole `W7-41` closed for `==` is still open on every builtin whose runtime is `values_equal`.** With `W7-41`'s `struct Box[T]` carrying `fn eq(...) where T: Comparable` over a non-`Comparable` `Tag`, all of these are check-clean then `runtime error: struct 'Tag' has no 'compare' method`: `[a].contains(b)`, `[a].index_of(b)`, `[a, b].dedup()`, and Set/Map key insert — **the last two only on a hash collision**, so with distinct hashes no `eq` runs and the program silently succeeds with a wrong answer. Cause: these have a runtime of `values_equal` but a checker signature validated only by `assignable`, so `may_be_equal` (and therefore `W7-41`'s guard) is never consulted. Two corrections to the surface as first reported: `List.count` takes a **predicate** (`std/prelude.chz:87`) so it never routes through `values_equal`, and `List.remove` **does not exist** (it is `remove_at`) — both non-issues | Found while fixing `W7-41`, filed rather than folded in: each builtin needs its own checker-side call into `may_be_equal`, which is a wider surface than the one nominal arm `W7-41` touched, and it wants its own negative controls (`W7-41`'s two lessons apply verbatim). **The silent-wrong-answer variant is the worse half** — an `eq` body doing only `self.val == other.val` falls back to structural equality and returns wrong-but-not-faulting, and `[a].contains(a)` hits the identity shortcut in `values_equal_guarded` and never dispatches at all, so a repro that skips those two shapes reports a false green |
 | **W7-44** | `:9083` | **The documented `secrets` equivalent is dead off Linux, and `uuid.v4()` is not a CSPRNG on ANY platform.** (1) `secure_random_bytes` (`src/native/crypto.rs:514`) has a `#[cfg(not(target_os = "linux"))]` arm (`:547-553`) returning `Err("secure_bytes: no secure entropy source on this platform")`, so `crypto.secure_bytes`/`token_hex` are dead on macOS and Windows with no doc caveat — the fail-closed choice is right, the missing wiring and missing caveat are not. (2) **Stronger than the external report, and true on Linux too:** `uuid.v4()` (`src/native/uuid.rs:74`) draws two `next_u64` from a **64-bit SplitMix64** state, which is **invertible** — two observed UUIDs recover the state and predict every subsequent one, regardless of how the seed was obtained (off Linux the seed is additionally just `nanos ^ addr`, `uuid.rs:41-47`). `docs/stdlib.md:952` claims "auto-seeded from OS entropy" with no platform caveat and no "not for security" warning, while `:943-945` already warns correctly about MD5/SHA-1 | Split, and only half is expensive. **(a) docs — LANDED 2026-08-10** (`docs(stdlib): the CSPRNG surface names its Linux-only wiring, and uuid.v4 says it is not secure`): an explicit "`uuid.v4()` is NOT cryptographically secure — use `crypto.token_hex` for secrets" warning plus the Linux-only caveat. **(b) its own task, still open:** a portable entropy source (`getentropy(3)` on BSD/macOS, `BCryptGenRandom` on Windows) and/or reseeding `uuid` from it per draw. Ancestor to measure when (a) lands: Python's `secrets` and `uuid.uuid4()` both draw from `os.urandom` on every platform, Go's `crypto/rand` likewise, and neither ships a 64-bit-state UUID |
 | **W7-43** | `:9035` | **`?.` / `??` on a `Result` emits three errors naming variants the user never wrote** — the most-hit papercut in the external review (four separate testers, one of them four times in 30 programs). `f()?.len()` where `f() -> Result[str, str]` reports `'Some' is not a variant of Result` + `'None' is not a variant of Result` + `non-exhaustive match on Result: missing Err, Ok`, all on the `OptChain` span; `f()? .len()` — **one space** — works. Cause: the lexer merges `?.` type-blindly (`src/lexer/mod.rs:819-829`) and `Desugar::lower_carrier` (`src/desugar/mod.rs:1230-1308`) lowers it to a `Match` with hard-coded `Some`/`None` arms **before any typing**, so the checker only ever sees a `Match` on a `Result` with Option arms. The spaced/unspaced split is deliberate and documented (`syntax.md:2474-2486`) — the semantics may be right, **the diagnostics are not** | The decision needs types and the lowering site has none, so any fix is structural: stop lowering `OptChain`/`NullCoalesce` in desugar and retire the two `unreachable!()`s asserting the node is dead (`src/checker/pattern.rs:1351-1353`, `src/compiler/mod.rs:3802-3804`). `ExprKind::Try` is the precedent — it survives to the checker (`infer_try`, `pattern.rs:3095`) and to the VM (`Op::Try`, `exec.rs:1888` → `do_try`, `stmt.rs:120`) with no desugaring at all. **Minimal:** keep Option-only, emit ONE error naming `?.`. **Full** (`?.` on a Result = `?` then `.`): additionally needs `infer_try`'s enclosing-fn-return-kind gate (`pattern.rs:3149-3158`) and its `recover:`/`defer:` cases (`:3100-3131`, `:3138-3147`), because `x?.f` on a Result is a real early return where the Option form is a pure expression — **that interaction is the cost centre, not the parsing**. `syntax.md:2474-2486` + `grammar.bnf:580-585` move with it |
@@ -9138,7 +9138,10 @@ structural equality on `Tag` and returns a **wrong-but-not-faulting** answer. An
 the identity shortcut in `values_equal_guarded` and never dispatches at all. **The silent-wrong-answer
 variant is arguably the worse half of this row.**
 
-### W7-46 — a spawned fn's returned `Err` is silently discarded, while a raw fault aborts the nursery — **OPEN**
+### W7-46 — a spawned fn's returned `Err` is silently discarded, while a raw fault aborts the nursery — **FIXED (2026-08-10)**
+
+> **Verdict: the semantics are CORRECT and Go-consistent — the defect was the examples.** The ancestors
+> were measured (below) before touching anything; the engine was **not** changed.
 
 Found while verifying `W7-40`'s narrowing, and it independently reproduces an item from the same
 external review ("spawned `Err` silently swallowed by the nursery — breaks the repo's own
@@ -9174,17 +9177,46 @@ main()
 nursery propagates a fault and drops an `Err` value: **its two error channels disagree with each
 other.**
 
-**The question, deliberately not answered here — measure the ancestors first.** Go's bare `go func()`
-also drops a returned `error` (which is why `errgroup` exists), but Python's `asyncio.TaskGroup`
-propagates an exception. **Chezzi's `Result` is a value, not an exception**, so "dropped" may well be
-Go-consistent and the real defect may be only the *disagreement* between the two channels — in which
-case the fix is to make the fault path match, not the `Err` path. Run both reference programs before
-deciding; do not resolve this from the shapes alone.
+**The ancestors, MEASURED (2026-08-10).** `spawn`/`parallel:` is Go's seam, so Go is the owner. Both
+programs were run, not reasoned about:
 
-**Independent of that decision:** `examples/echo_server.chz` and `examples/echo_server_spawn.chz` need
-fixing **either way**, because they currently claim a success they did not achieve. A golden example
-that prints a hard-coded count it never verified is the same defect class as `W7-38`'s "a real bug
-reported as a non-finding", in the examples rather than the oracle.
+| ancestor | program | stdout / stderr | rc |
+|---|---|---|---|
+| Go 1.26.5 | `go func(){ _ = work() }()` (`work` returns `errors.New("boom")`), `wg.Wait()` | `main finished normally` | **0** |
+| Go 1.26.5 | `go func(){ panic("goroutine blew up") }()`, main sleeps 200 ms | `panic: goroutine blew up` + stack, `exit status 2` (`go run` itself exits 1) | **2** |
+| Python 3.14.6 | `asyncio.TaskGroup` with one task raising `RuntimeError("boom")` | `ExceptionGroup: unhandled errors in a TaskGroup (1 sub-exception)` | **1** |
+
+**Chezzi matches Go on BOTH channels: value → dropped (rc=0), fault → process dies (rc=1).** So the
+asymmetry above is not a disagreement Chezzi invented — it is the Go contract, and it is the reason
+`errgroup` exists. Python's `TaskGroup` propagates because its error channel *is* the exception
+channel; Chezzi's `Result` is a **value**, and a statement-form `spawn f(x)` has nowhere to put a
+returned value, exactly like `go f(x)`. **No engine change.** (Making a spawned `Err` propagate would
+also resurrect the per-task outcome value `W7-27` deleted for a measured 336 MB peak-RSS reason.)
+
+**What WAS the defect — and what was fixed.** `examples/echo_server.chz` and
+`examples/echo_server_spawn.chz` printed a **hard-coded literal** count, so they claimed a success they
+did not achieve — the same class as `W7-38`'s "a real bug reported as a non-finding", relocated into
+the examples. Both now **count what actually happened**, in the shape `docs/concurrency.md` now
+recommends: a shared `AtomicInt` (Go's `atomic.Int64`) that a client bumps only when its own full
+round-trip came back `echo:ping`, read after the nursery has joined:
+
+```chezzi
+served := AtomicInt(0)
+parallel:
+    spawn acceptor(server, n)
+    for _ in 0..n:
+        spawn client(addr, served)
+return Ok(served.load())
+```
+
+Measured after the fix, all rc=0: `chezzi run examples/echo_server.chz` → `echo server handled 50
+connections`; `--serial` → `echo server handled 0 connections` (truthful — every socket op there is
+`W7-40`'s engine `Err`). Same for `echo_server_spawn.chz`. Three tests in `src/vm/parity_tests.rs`
+asserted the vacuous lines and were given teeth: `echo_server_example_terminates_on_the_serial_engine`
+now `assert_eq!`s the honest `0` (the watchdog stays the primary assertion), and
+`net_echo_server_services_more_conns_than_workers` / `net_echo_server_spawns_handler_per_connection`
+assert `all served: 100` instead of `contains("all served")`. Neither example gains a `.expected`
+golden — the ephemeral port keeps them nondeterministic by design.
 
 ### W7-47 — `os.exit` does not terminate the process while `main` is blocked in a socket op — **OPEN**
 

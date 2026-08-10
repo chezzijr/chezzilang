@@ -154,7 +154,41 @@ main()
 ```
 
 Reaching the dedent guarantees every spawned child has finished — no `WaitGroup`, no `Done()` to
-forget, no leak. Child errors propagate to the block (composes with `recover:` + `defer`).
+forget, no leak.
+
+### A spawned task's two error channels
+
+They are **not** the same channel, and the difference is Go's, not an accident:
+
+| what the spawned callee does | what the nursery does |
+|---|---|
+| **returns a value** — including an `Err(e)` from a `-> T!` callee | **discarded.** `spawn f(x)` is a statement; there is no place for a return value to go, exactly like Go's `go f(x)`. |
+| **faults** (a runtime error, an uncaught `panic(...)`) | **aborts the nursery** and the program, rc=1 — as a panicking goroutine takes down a Go process. |
+
+Measured Go 1.26.5, the ancestor that owns this seam:
+
+```go
+go func() { _ = errors.New("boom") }()   // → "main finished normally", rc=0   (error dropped)
+go func() { panic("boom") }()            // → "panic: boom", exit status 2     (process dies)
+```
+
+This is precisely why `errgroup` exists in Go and why `spawn f()` in Chezzi is a **statement**, not an
+expression. **To observe what a task produced, collect it explicitly** — send it on a `Channel[T]`, or
+reduce it into a `Shared[T]`/`AtomicInt`, then read after the join:
+
+```chezzi
+served := AtomicInt(0)
+parallel:
+    for _ in 0..n:
+        spawn client(addr, served)     # a client bumps `served` only when it really succeeded
+print(served.load())                   # the nursery has joined — the count is final and real
+```
+
+`examples/echo_server.chz` is the worked version. A `Result` returned by a spawned callee and never
+collected is silently gone, so **never conclude "it worked" from a nursery that merely finished** —
+count what actually happened.
+
+`recover:` + `defer` compose with the fault channel only.
 
 ### Why a nursery, not a `WaitGroup`
 
