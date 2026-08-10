@@ -5,10 +5,14 @@
 # All N+1 fibers multiplex over a core-sized worker pool: a would-block accept/read parks the fiber
 # on the epoll/kqueue netpoller instead of pinning a thread, so #connections >> #workers.
 #
-# net sockets are non-blocking and park on the M:N scheduler, so this MUST run on the --parallel
-# engine (the cooperative oracle has no fibers to park):
+# net sockets are non-blocking and park on the M:N scheduler, so this needs the default engine (the
+# cooperative `--serial` oracle runs every fiber on ONE thread, so it has no fiber to park and no peer
+# to make the fd ready — a would-block op there returns "requires the --parallel engine"):
 #
-#   chezzi run --parallel examples/echo_server.chz
+#   chezzi run examples/echo_server.chz
+#
+# (A socket op on the top-level `main` fiber does NOT need a nursery: on the default engine it blocks
+#  in place until it is ready, exactly as `ln.Accept()` does on Go's main goroutine.)
 
 import std.net
 

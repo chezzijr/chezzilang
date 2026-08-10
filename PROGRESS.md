@@ -2,6 +2,83 @@
 
 Single source of truth for "what am I doing next." Update after every work session.
 
+> # ✅ External review, batch 1 — 2 fixed, 8 filed (2026-08-10)
+>
+> Nine independent external testers wrote programs against Chezzi. **Six findings re-verified on HEAD
+> `2a27697e`; all six reproduce.** Two are fixed here, the rest filed open, plus three found while
+> doing the work — ledger rows + full write-ups in `docs/gaps.md` **W7-39..W7-46**.
+>
+> **Two of the three fixes first written were wrong, with the full 4164-test suite green for both.**
+> `W7-41`'s was reverted whole; `W7-40`'s was narrowed. Adversarial review caught both by running the
+> *pre-change* binary on neighbours no test covered. **A change that widens what is rejected — or
+> narrows when an error is returned — is not tested by the suite that passed before it.**
+>
+> * **`W7-39` — a nested `Executor`'s jobs never saw the outer `shutdown_now()`.** 8.005 s → 0.056 s;
+>   `--serial` was already correct, so this brings M:N *into* engine agreement. `prepare_eager_job` was
+>   the one seam that installed a cancel token without its `scope_ancestors()` half. **The ancestors are
+>   split** — CPython's `shutdown(cancel_futures=True, wait=False)` returns the *call* at 51 ms but the
+>   *process* still takes 8.037 s and prints both job lines; Go's `context.WithCancel` propagates. What
+>   decided it is Chezzi-vs-Chezzi: the outer job's own identical sleep *was* cancelled, so one wait had
+>   two cancellation rules by nesting depth (`W7-16`'s ruling one level down). **Follow-up:** the
+>   inherited chain is keyed on the executor's *creator* and is **sticky** (never reset — Go's derived
+>   context), so a `submit` after the creating job's cancellation used to vanish silently; it now faults
+>   with `submit on an Executor whose creating job was cancelled`. A repro needs a cancellation *point*
+>   inside the job — without one it completes and hides the whole thing.
+> * **`W7-40` — NARROWED after the first attempt hung two engines.** `std.net` blocked only on an M:N
+>   worker fiber, so `accept()` on `main` returned `Err('… require the --parallel engine')` *while
+>   running the parallel engine*: `Vm::mn` means "this Vm is an M:N worker shell", not "the engine is
+>   on" (that is `Vm::parallel`). The first attempt let *every* non-worker context block in place and
+>   was measured at **rc=124 twice** — `--serial` has one thread, so blocking it starves the peer that
+>   would make the fd ready (and `--timeout` is rejected alongside `--serial`, so there is no escape);
+>   and an eager `Executor` job does not own its thread, it runs on the bounded process-wide pool, so at
+>   `CHEZZI_THREADS=1` two jobs deadlock. **What shipped is one predicate,
+>   `Vm::may_block_socket_in_place`: the pre-existing in-callback demote, plus top-level `main` on the
+>   default engine, and nothing else.** So `accept`/`read`/`read_bytes`/`write` from `main` now block and
+>   succeed (Go blocks `Accept()` on the main goroutine and so does this), while `--serial` and eager
+>   `Executor` jobs keep the immediate `Err` — **the `std.net` serial≠M:N divergence is narrowed, not
+>   closed**, and R1 is the measured reason it must stay. Now pinned by tests asserting the `Err` verdict
+>   in both of those contexts.
+> * **`W7-41` — REVERTED, filed OPEN.** The bug is real (a `where` receiver bound is enforced for `<`,
+>   `+`, hashing and generic bounds but not `==`: check-clean then `struct 'Tag' has no 'compare'
+>   method`, the `checker-superset-of-compiler` class parity is blind to; rustc rejects the mirror with
+>   `E0369`). The fix was not. `Eq` is granted intrinsically to only the four scalars, so
+>   `where T: Eq` is unsatisfiable for every type whose `==` is structural, and the guard rejected
+>   `Box([1,2]) == Box([1,2])`, `Box((1,2))`, `Box(SomeStruct)` — all legal, all previously `true`.
+>   **The prerequisite is making `Eq` satisfaction agree with what `==` accepts**, which is its own
+>   milestone. Full post-mortem + three traps for the next attempt in the ledger row.
+>
+> **Filed open:** `W7-42` (a top-level `:=` re-declaration retypes a live binding, so a `-> int` fn
+> returns a `str` — needs a decision, the three ancestors disagree), `W7-43` (`?.` on a `Result` emits
+> three errors naming `Some`/`None`; the most-hit papercut of the review — four testers — and the fix is
+> structural, `?.` must survive desugar like `ExprKind::Try` does), `W7-44` (`crypto.secure_bytes` dead
+> off Linux, and `uuid.v4()`'s 64-bit SplitMix64 state is **invertible from two outputs on every
+> platform** — docs half should not wait), `W7-45` (`W7-41`'s hole is still open on
+> `contains`/`index_of`/`dedup`/Set+Map insert, whose runtime is `values_equal`; the Set/Map halves fail
+> only on a hash collision, so the silent-wrong-answer variant is the worse half), and **`W7-46`** — a
+> spawned fn's returned `Err` is silently discarded while a raw fault aborts the nursery, so the repo's
+> own `examples/echo_server.chz` prints `echo server handled 50 connections` at rc=0 on `--serial`
+> **having handled zero**; the two error channels disagree, and Go (drops it) and Python's
+> `asyncio.TaskGroup` (propagates) must both be measured before that is resolved. Also **`W7-47`** —
+> `os.exit` from an eager `Executor` job does **not** terminate the process while `main` is blocked in a
+> socket op (marker prints, then rc=124; Go's `os.Exit` is immediate from any goroutine, rc=3): an
+> `os.exit` defect in nature, only *observable* now that `W7-40` lets `main` block on a socket at all.
+> Three smaller items:
+> `net.connect` still blocks in place on every engine (bounded at 10 s, so `W7-40`'s R2 family an order
+> of magnitude less severe — deliberately out of scope), `join_eager_jobs` is an untimed condvar wait
+> (ignores cancel and `--timeout`), and a bare top-level `spawn:` does not start until end-of-main where
+> Go's `go func()` starts immediately (check `docs/concurrency.md` before filing that as a defect).
+>
+> **The batch's theme is this file's oldest one, arriving from outside:** all three findings are *a rule
+> that held on some arms of an N-way set* — one nursery seam of three, four socket ops of five, one
+> operator of five. Wave 6's meta-finding is still the highest-yield lever, and outsiders hit three more
+> instances of it without knowing it had a name.
+>
+> **Docs:** `docs/gaps.md` (eight `W7-` rows + three smaller-item rows and their write-ups; §Net
+> rewritten to the narrowed rule, with the wave-5 residual's "only known serial≠M:N divergence"
+> correction left STANDING — an earlier draft of both claimed the divergence was gone, written against
+> the reverted attempt), `docs/concurrency.md` (`shutdown_now()` row + a measured Python/Go block +
+> "what detached means, precisely" under A2), `docs/stdlib.md`, `docs/syntax.md`.
+
 > # ✅ M24 COMPLETE — a protocol's STATIC requirement is callable through a generic bound (2026-08-10)
 >
 > **The gap.** A protocol could declare a static (no-`self`) requirement and a type could satisfy it,

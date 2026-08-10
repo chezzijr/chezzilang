@@ -2765,14 +2765,21 @@ main()
 /// can legitimately take longer than `run_parallel_watchdog`'s 5 s, and a regressed timeout would
 /// HANG rather than fault). Returns the captured stdout, or panics loudly on a hang.
 fn run_net_timeout_watchdog(tag: &str, src: &str) -> String {
+    run_net_watchdog_engine(tag, src, true)
+}
+
+/// The same watchdog, engine-selectable: `parallel = false` runs the serial (cooperative) VM. Used by
+/// the "a would-block socket op blocks in place" tests, which must hold on BOTH engines — a
+/// regression there is a HANG, so the watchdog is mandatory rather than a nicety.
+fn run_net_watchdog_engine(tag: &str, src: &str, parallel: bool) -> String {
     let t = TmpDir::new();
     let entry = t.write("main.chz", src);
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
-        let _ = tx.send(run_file_parallel(
-            &entry,
-            crate::native::HostConfig::default(),
-        ));
+        let _ = tx.send(match parallel {
+            true => run_file_parallel(&entry, crate::native::HostConfig::default()),
+            false => run_file(&entry),
+        });
     });
     match rx.recv_timeout(std::time::Duration::from_secs(30)) {
         Ok((out, _err, res, _code)) => {
@@ -3142,6 +3149,251 @@ main()
         "the in-callback demote loop must honour timeout_ms AND classify a taken-partial timeout as \
          incomplete-utf-8, not 'timeout' (nothing arrived): {out:?}"
     );
+}
+
+/// A Rust peer that retry-dials `addr` (10 ms apart, ~10 s cap — so it cannot lose the race against
+/// the chezzi `listen`), waits 50 ms so the chezzi side is provably BLOCKED in `accept`, sends
+/// `"hi"`, and reads the echo back. Shared by the block-in-place tests below.
+fn net_peer(addr: std::net::SocketAddr) -> std::thread::JoinHandle<String> {
+    std::thread::spawn(move || {
+        use std::io::{Read, Write};
+        let mut s = None;
+        for _ in 0..500 {
+            match std::net::TcpStream::connect(addr) {
+                Ok(c) => {
+                    s = Some(c);
+                    break;
+                }
+                Err(_) => std::thread::sleep(std::time::Duration::from_millis(10)),
+            }
+        }
+        // Never panic here — the chezzi-side stdout is the diagnostic that matters, and a peer panic
+        // would poison the `join` and hide it. Report the failure as the echo string instead.
+        let Some(mut s) = s else {
+            return "<peer never reached the chezzi listener>".into();
+        };
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        if s.write_all(b"hi").and_then(|()| s.flush()).is_err() {
+            return "<peer write failed>".into();
+        }
+        let mut buf = [0u8; 64];
+        match s.read(&mut buf) {
+            Ok(n) => String::from_utf8_lossy(&buf[..n]).into_owned(),
+            Err(e) => format!("<peer read failed: {e}>"),
+        }
+    })
+}
+
+/// Bind a Rust listener only to LEARN a free port, then drop it so chezzi can take the address.
+fn free_addr() -> std::net::SocketAddr {
+    std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+}
+
+/// W7 — a would-block socket op reached where the fiber CANNOT park (top-level `main`: `Vm::mn` is
+/// `None`, because `mn` is set only on an M:N worker shell) must BLOCK IN PLACE, not return
+/// `Err("accept would block: std.net sockets require the --parallel engine")` — which it did even
+/// while running the default M:N engine, making the hello-world TCP server unwritable.
+///
+/// **Go is the ancestor and blocks.** `ln, _ := net.Listen("tcp","127.0.0.1:0")` on the MAIN
+/// goroutine, a `go func()` dialing after 50 ms, `ln.Accept()` on main:
+/// ```text
+/// [   0.1ms] listening on 127.0.0.1:38541 (main goroutine)
+/// [   0.1ms] calling ln.Accept() on the main goroutine...
+/// [  50.5ms] dialed
+/// [  50.5ms] Accept() returned: 127.0.0.1:58036
+/// [  50.5ms] Read() -> "hi" err=<nil>
+/// ```
+/// Accept blocks for the full 50 ms and succeeds. CPython's `socket.accept()` on the main thread is
+/// the same.
+///
+/// **DEFAULT ENGINE ONLY** — see `socket_op_on_serial_main_errs_instead_of_wedging_the_only_thread`
+/// below for why `--serial` deliberately keeps the `Err` instead of matching Go here.
+fn accept_from_main_blocks(parallel: bool) {
+    let addr = free_addr();
+    let peer = net_peer(addr);
+    let src = format!(
+        "\
+import std.net
+
+fn serve() -> int!:
+    l := net.listen(\"{addr}\")?
+    print(\"listening\")
+    conn := l.accept()?
+    msg := conn.read(64)?
+    print(\"GOT:\" + msg)
+    conn.write(\"echo:\" + msg)?
+    conn.close()
+    l.close()
+    return Ok(0)
+
+fn main():
+    match serve():
+        Ok(_): print(\"done\")
+        Err(e): print(\"ERR:\" + e.message())
+
+main()
+"
+    );
+    let out = run_net_watchdog_engine("accept_from_main", &src, parallel);
+    assert_eq!(
+        out, "listening\nGOT:hi\ndone\n",
+        "engine parallel={parallel}"
+    );
+    assert_eq!(peer.join().unwrap(), "echo:hi");
+}
+
+#[test]
+fn accept_from_main_blocks_instead_of_erroring_mn() {
+    accept_from_main_blocks(true);
+}
+
+/// The `--serial` twin of the test above, and it asserts the OPPOSITE — the cooperative engine keeps
+/// `Err("accept would block: std.net sockets require the --parallel engine")`.
+///
+/// This test used to call `accept_from_main_blocks(false)` and pass, because its peer is an external
+/// Rust thread that always dials: `main` blocking in place is harmless when the thing that makes the
+/// fd ready is not a chezzi fiber. That is precisely the case the block-in-place widening was measured
+/// on, and it hid the general one — on `--serial` ONE thread runs every fiber, so a `main` (or fiber)
+/// blocking in place starves the peer FIBER that would connect, and nothing can ever end the wait:
+/// `--timeout` is rejected alongside `--serial` (`main.rs`), and no other fiber can run to deliver a
+/// cancel. `examples/echo_server.chz --serial` hung forever (measured, `rc=124`), which is why the
+/// widening is narrowed to the default engine and pinned here rather than deleted.
+///
+/// Correctness outranks ancestor-matching only where the ancestor's shape does not exist: Go has no
+/// single-threaded-runtime mode to copy, and a hang with no escape is never the honest answer.
+#[test]
+fn socket_op_on_serial_main_errs_instead_of_wedging_the_only_thread() {
+    let addr = free_addr();
+    let peer = net_peer(addr);
+    let src = format!(
+        "\
+import std.net
+
+fn main():
+    match net.listen(\"{addr}\"):
+        Ok(l):
+            print(\"listening\")
+            match l.accept():
+                Ok(_): print(\"accepted\")
+                Err(e): print(\"ERR:\" + e.message())
+            l.close()
+        Err(e): print(\"ERR:\" + e.message())
+
+main()
+"
+    );
+    let out = run_net_watchdog_engine("serial_main_accept", &src, false);
+    assert_eq!(
+        out,
+        "listening\nERR:accept would block: std.net sockets require the --parallel engine\n"
+    );
+    let _ = peer.join();
+}
+
+/// The whole-program shape of the same regression: `examples/echo_server.chz` on `--serial` — a
+/// `parallel:` acceptor fiber plus 50 client fibers, all on the cooperative engine's ONE thread.
+///
+/// With the block-in-place path open to `--serial` this ran forever (`timeout 15 chezzi run --serial
+/// examples/echo_server.chz` → `rc=124`): the acceptor blocked the only thread inside `accept`, so no
+/// client fiber could ever be scheduled to connect. It must TERMINATE — the watchdog is the assertion
+/// that matters here; the printed line is `run()`'s, whose per-fiber `Err`s a `spawn` discards.
+#[test]
+fn echo_server_example_terminates_on_the_serial_engine() {
+    let src = include_str!("../../examples/echo_server.chz");
+    let out = run_net_watchdog_engine("echo_server_serial", src, false);
+    assert_eq!(out, "echo server handled 50 connections\n");
+}
+
+/// The `read_bytes` arm of the same fix — the fourth op, covered directly rather than by symmetry.
+#[test]
+fn read_bytes_from_main_blocks_instead_of_erroring() {
+    let addr = free_addr();
+    let peer = net_peer(addr);
+    let src = format!(
+        "\
+import std.net
+
+fn serve() -> int!:
+    l := net.listen(\"{addr}\")?
+    print(\"listening\")
+    conn := l.accept()?
+    b := conn.read_bytes(64)?
+    print(\"GOT:\" + str(b.len()))
+    conn.write(\"echo:hi\")?
+    conn.close()
+    l.close()
+    return Ok(0)
+
+fn main():
+    match serve():
+        Ok(_): print(\"done\")
+        Err(e): print(\"ERR:\" + e.message())
+
+main()
+"
+    );
+    let out = run_net_timeout_watchdog("read_bytes_from_main", &src);
+    assert_eq!(out, "listening\nGOT:2\ndone\n");
+    assert_eq!(peer.join().unwrap(), "echo:hi");
+}
+
+/// The other `mn == None` context — an EAGER `Executor` job — deliberately does NOT block in place,
+/// and this pins that: it keeps `Err("accept would block: …")`.
+///
+/// A job does not own its thread. It runs on the bounded, process-wide `vm::pool` (`worker_count()`,
+/// never grown on demand) and has no `MnSched` under it to spin a replacement worker, so a job that
+/// blocks in `accept` starves every other job and every `parallel:` nursery sharing that pool.
+/// Measured with the block-in-place path open to jobs, at `CHEZZI_THREADS=1`: an `accept` job plus a
+/// later `connect` job hung outright (`rc=124`); at ≥2 workers the same program passed — a
+/// pool-width-dependent hang, which is the worst possible failure mode to ship.
+///
+/// The check is written as the `Err` rather than as the starvation repro on purpose: the pool width is
+/// process-global (`CHEZZI_THREADS` read once), so a width-1 test would be both flaky under the
+/// parallel test harness and a 30 s hang when it regressed. `Err`-promptly is the contract the
+/// starvation shape follows from, and it fails fast. Socket work belongs in `spawn`/`parallel:`, which
+/// parks on the netpoller instead of blocking.
+#[test]
+fn accept_inside_an_executor_job_errs_instead_of_starving_the_pool() {
+    let addr = free_addr();
+    let peer = net_peer(addr);
+    let src = format!(
+        "\
+import std.net
+
+fn server(l: Listener):
+    match l.accept():
+        Ok(conn):
+            match conn.read(64):
+                Ok(msg):
+                    print(\"GOT:\" + msg)
+                    conn.write(\"echo:\" + msg)
+                    conn.close()
+                Err(e): print(\"ERR:\" + e.message())
+        Err(e): print(\"ERR:\" + e.message())
+
+fn main():
+    match net.listen(\"{addr}\"):
+        Ok(l):
+            print(\"listening\")
+            ex := Executor()
+            ex.submit(fn(): server(l))
+            ex.shutdown()
+            l.close()
+            print(\"done\")
+        Err(e): print(\"ERR:\" + e.message())
+
+main()
+"
+    );
+    let out = run_net_timeout_watchdog("accept_in_executor_job", &src);
+    assert_eq!(
+        out,
+        "listening\nERR:accept would block: std.net sockets require the --parallel engine\ndone\n"
+    );
+    let _ = peer.join();
 }
 
 /// B1 — an incomplete codepoint left over when the peer CLOSES (`b"ok\xC3"` ⇒ `error_len() == None`,

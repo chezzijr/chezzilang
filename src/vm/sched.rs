@@ -1287,14 +1287,70 @@ impl Vm {
         Ok(Value::nil())
     }
 
-    /// D5 owe #3 Path C (#3 socket half) — a socket `read`/`write`/`accept` that `WouldBlock`s INSIDE a
-    /// native callback (`native_reentry > 0`) on the M:N engine. [`Vm::park_on_fd`] only parks on the
-    /// netpoller when `native_reentry == 0` (the callback's `for`-loop state lives on the un-snapshottable
-    /// Rust host stack), so without this the op surfaces a misleading `--parallel`-engine error even
-    /// though we *are* on `--parallel`. Instead DEMOTE like [`Vm::demote_block_sleep`]: spin a replacement
-    /// worker once + backoff-poll the **non-blocking** op in place until it's ready, then resume.
+    /// **Block a would-block socket op IN PLACE when the fiber cannot park.** [`Vm::park_on_fd`] parks on
+    /// the netpoller only when this Vm is an M:N worker shell AND `native_reentry == 0`. Callers do NOT
+    /// route every other context here — the precondition is exactly [`Vm::may_block_socket_in_place`],
+    /// i.e. the two contexts whose thread runs nothing else:
     ///
-    /// Accounted as `inflight` (NOT `blocked_native`): a socket op is woken by external OS readiness, so
+    /// - **In a native callback on an M:N worker** (`native_reentry > 0` — the callback's `for`-loop state
+    ///   lives on the un-snapshottable Rust host stack). This is the original D5 owe #3 Path C case:
+    ///   DEMOTE like [`Vm::demote_block_sleep`] — spin a replacement worker once so the pool keeps its
+    ///   width, then backoff-poll in place.
+    /// - **Top-level `main` on the DEFAULT engine** (`parallel`, `mn == None`, no `eager_core`, no
+    ///   scheduler, `native_reentry == 0`). There is no pool to demote FROM, so the scheduler bookkeeping
+    ///   is skipped entirely — hence the `Option` sched — and only the wait loop runs. Until 2026-08-10
+    ///   the four callers returned `Err("… requires the --parallel engine")` here too, on the DEFAULT
+    ///   engine, because `mn.is_some()` means "worker shell", not "parallel is on" (`Vm::parallel`) —
+    ///   which made the hello-world TCP server unwritable. `connect` had had this fallback all along
+    ///   ([`Vm::block_until_connected`]); the other four were simply left behind (the repo's recurring
+    ///   fixed-some-arms-of-an-N-way-set finding, W7-22).
+    ///
+    /// **Not, deliberately: `--serial` and an eager `Executor` job.** Neither owns its thread — serial
+    /// runs every fiber on one thread, and a job runs on the bounded process-wide [`crate::vm::pool`] —
+    /// so blocking in place there starves the peer that would make the fd ready. Both were measured as
+    /// permanent hangs when a first attempt at this widening let them in; they keep the loud `Err`.
+    ///
+    /// **Consequence, deliberate: an fd that never becomes ready is now a HANG, not an immediate `Err`.**
+    /// That is Go-identical (`ln.Accept()` on the main goroutine with nobody dialing blocks forever) and
+    /// it is the ancestor's contract, not an oversight. Three escapes are checked at the top of every
+    /// loop iteration — the op's own `timeout_ms` (`deadline`, below), the run's `--timeout` via
+    /// [`Vm::deadline_halt`], and cancellation — but **which of them EXIST depends on the context**, and
+    /// for top-level `main` under `chezzi run` two of the three do not:
+    ///
+    /// - `--timeout` is a **`chezzi test` flag only**; `chezzi run --timeout=500 f.chz` is rejected by
+    ///   the CLI with `chezzi run: unknown flag '--timeout=500'` (`src/main.rs:243`), so `self.deadline`
+    ///   is `None` and [`Vm::deadline_halt`] is a no-op on this path.
+    /// - `main` has no scope — no `cancel`, no `cancel_outer` — so `cancel_requested()` reads an EMPTY
+    ///   flag set and nothing can ever trip it.
+    ///
+    /// So an `accept`/`read`/`write` reached on `main` with **no explicit `timeout_ms`** has no escape at
+    /// all short of SIGINT. Pass a `timeout_ms` if you need one. (The in-callback M:N demote — the other
+    /// context routed here — does have all three: it runs under `chezzi test` where `--timeout` is legal,
+    /// and its fiber has a scope cancel.)
+    ///
+    /// **Second-order, also deliberate: a socket-blocked `main` is NOT a quiescence party.** It cannot
+    /// register as one — there is no scheduler here to register with — which matches the precedent on
+    /// both sides: `time.sleep_ms` deliberately stays out of the predicate as "a false-deadlock
+    /// generator" (`netio.rs`), and the M:N socket demote is accounted `inflight` specifically to VETO
+    /// the predicate (Go-identical). It therefore never FABRICATES a verdict — the safe direction
+    /// (`parked-is-not-stuck`: a wrong verdict is worse than a late one).
+    ///
+    /// It does, however, **SUPPRESS** the process-wide verdict for as long as the op is outstanding —
+    /// which for an fd that never becomes ready is FOREVER, not merely "delayed" (an earlier version of
+    /// this note claimed the latter; measured, it is wrong). Repro: `main` blocks in `accept()` while an
+    /// eager `Executor` job blocks on a `Channel` nothing can ever send. The default engine prints
+    /// `listening` and hangs (rc=124 under `timeout 12`); `--serial` on the IDENTICAL source prints
+    /// `Err('accept would block: …')` and then the full `recv on an empty channel: deadlock` diagnostic,
+    /// exit 1.
+    ///
+    /// **That engine difference is not a parity bug — do not "fix" it in code.** Go behaves exactly like
+    /// the default engine: an open socket is a runnable party, so `all goroutines are asleep` does not
+    /// fire (measured — `main` in `ln.Accept()` plus a goroutine on an empty `chan int`: prints
+    /// `listening`, hangs, rc=124). `--serial` differs only because it REFUSES the socket op outright
+    /// (the documented narrowed contract above), which is what leaves its channel party alone in the
+    /// predicate. The engine that matches the ancestor is the default one.
+    ///
+    /// On an M:N worker it is accounted `inflight` (NOT `blocked_native`): a socket op is woken by external OS readiness, so
     /// it must VETO the deadlock predicate — exactly the netpoller-park accounting (a lone in-callback
     /// `accept` with no client correctly never self-terminates, Go-identical), hence **no** `is_deadlocked`
     /// self-fire here. The flip side: this op exits the wait ONLY via fd readiness, `cancel`, or another
@@ -1325,12 +1381,13 @@ impl Vm {
         span: Span,
         mut attempt: impl FnMut(&mut Vm) -> SockPoll,
     ) -> Result<Value, RuntimeError> {
-        let sched = Arc::clone(
-            self.mn
-                .as_ref()
-                .expect("demote_block_socket on the cooperative engine"),
-        );
-        self.demote_socket_enter(span)?;
+        // `None` when there is no worker pool at all (top-level `main`, an eager `Executor` job, a
+        // `--serial` run): the calling thread is its own, so there is nothing to demote FROM and the
+        // scheduler bookkeeping below is skipped. The wait loop itself is engine-agnostic.
+        let sched = self.mn.as_ref().map(Arc::clone);
+        if sched.is_some() {
+            self.demote_socket_enter(span)?;
+        }
         let out = loop {
             // W7-18 — the run's `--timeout` deadline, ABOVE the cancel check (it outranks a cancel,
             // W7-17's ordering). An in-callback socket op is accounted `inflight`, so it VETOES the
@@ -1351,8 +1408,10 @@ impl Vm {
             // Nursery torn down (deadlock elsewhere / `os.exit`): fault in place. An `inflight` socket op
             // never *self*-fires the predicate (it vetoes it), so a genuine quiesce is surfaced by another
             // worker setting `terminate`, observed here within the backoff.
-            if sched.lock().terminate {
-                break Err(sched.deadlock_err.clone());
+            if let Some(s) = &sched
+                && s.lock().terminate
+            {
+                break Err(s.deadlock_err.clone());
             }
             match attempt(self) {
                 SockPoll::Ready(r) => break r,
@@ -1384,7 +1443,9 @@ impl Vm {
                 }
             }
         };
-        self.demote_socket_exit();
+        if sched.is_some() {
+            self.demote_socket_exit();
+        }
         out
     }
 
@@ -4031,6 +4092,29 @@ impl Vm {
         let mut rw = self.prepare_worker_from_wire(task, span)?;
         rw.worker.eager_core = Some(Arc::clone(core));
         rw.worker.cancel = Some(Arc::clone(&core.cancel));
+        // …and the ENCLOSING EXECUTOR's flag with it, when this executor was CREATED inside an eager
+        // job (`ExecutorCore::creator_cancel`, captured at `Op::NewExecutor`). Without it this was the
+        // ONE seam in the tree installing a cancel token without the `scope_ancestors()` half every
+        // nursery seam pairs it with (`spawn_shell`, `run_one_fiber`), so an inner executor's job had
+        // the chain `[inner.cancel]` and never observed an outer `shutdown_now` — the outer job's own
+        // `sleep_ms(8000)` died at 50 ms while the IDENTICAL sleep one executor deeper ran to
+        // completion and the program paid the full 8 s at the exit drain. That inconsistency is
+        // Chezzi-vs-Chezzi; the ancestors are split (CPython's nested `ThreadPoolExecutor` does NOT
+        // propagate — 8.04 s and the job's line printed, for both `shutdown(wait=False)` and
+        // `wait=True`; Go's derived `context.WithCancel(parent)` DOES — child cancelled at 50 ms), so
+        // this follows W7-16's ruling one level down: an executor that disagrees with the nursery
+        // beside it is the defect.
+        //
+        // Read from the CORE, not from `self`: an `Executor` crosses the airlock by `Arc`, so keying
+        // this on the submitter let a job of an unrelated executor donate ITS cancel chain to a job of
+        // `main`'s executor — an outer `shutdown_now()` then killed an already-started job that was
+        // none of its business, and `main`'s own graceful `shutdown()` returned with the work dropped.
+        //
+        // Empty for an executor created by `main` or by a `parallel:`/`spawn` fiber, so decision A2's
+        // "an `Executor` is DETACHED" survives intact: detached from NURSERIES, not from an enclosing
+        // executor job. `scope_ancestors()` already severs inside a `defer`, so an executor created by
+        // a cancelled job's cleanup still runs uncancelled work.
+        rw.worker.cancel_outer = core.creator_cancel.clone();
         Ok(rw)
     }
 

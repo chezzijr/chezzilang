@@ -1365,7 +1365,20 @@ embed also requires) makes `Box[T]` *structurally* satisfy
 fine), but `Box[Tag]` (with `Tag` not `Comparable`) does **not** — the `<`, and the bound-check, are
 rejected at compile time. The bound is honoured *everywhere* conformance is queried — operator
 dispatch (`<`, `+`, …), generic bounds, and protocol-typed parameters — not just at an explicit
-`.compare()` call, so there is no path by which a `Box[Tag]` slips through as `Comparable`.
+`.compare()` call.
+
+**KNOWN GAP — `==` does not honour the bound yet** (`docs/gaps.md` **W7-41**, open). A conditional
+`fn eq(self, other: Self) -> bool where T: Comparable` is the hook `==`/`!=` dispatch to, but the
+equality path does not consult conformance, so `Box[Tag] == Box[Tag]` **check-cleans and then faults
+at runtime** (`struct 'Tag' has no 'compare' method`) where `Box[Tag] < Box[Tag]` is correctly
+rejected at compile time. Rust rejects both (`impl<T: Ord> PartialEq for Boxy<T>` leaves
+`Boxy<Tag> == Boxy<Tag>` un-callable, `error[E0369]`). Leaks the same way through `!=`, containers
+and payloads (`[a] == [b]`, `Some(a) == Some(b)`), `in`, and the `values_equal` builtins
+(`contains`/`index_of`/`dedup`, set/map key insert — **W7-45**). The fix is not a guard on the
+equality path alone: the `Eq` protocol is granted intrinsically only to the four scalars, so
+`where T: Eq` is unsatisfiable for every type whose `==` is structural, and a naive check rejects
+`Box[List[int]]`/`Box[(int, int)]`/`Box[SomeStruct]` — all legal today. Making `Eq` satisfaction
+agree with what `==` actually accepts is the prerequisite, and is its own milestone.
 
 **Protocols** are Go-style structural interfaces: a block of body-less method signatures. A type
 satisfies a protocol by *having* the methods — there is no `implements` declaration. `Self` inside

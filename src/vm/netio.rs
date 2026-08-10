@@ -612,53 +612,46 @@ impl Vm {
                 if self.park_on_fd(h, args, target, span)? {
                     return Ok(Value::nil()); // parked (sentinel)
                 }
-                if self.mn.is_some() && self.native_reentry > 0 {
-                    let core = Arc::clone(&core);
-                    return self.demote_block_socket(
-                        fd,
-                        poller::Interest::Read,
-                        deadline,
-                        span,
-                        move |vm| {
-                            let mut b = vec![0u8; n];
-                            let r = {
-                                let mut carry =
-                                    core.carry.lock().unwrap_or_else(|e| e.into_inner());
-                                let mut guard =
-                                    core.stream.lock().unwrap_or_else(|e| e.into_inner());
-                                let Some(stream) = guard.as_mut() else {
-                                    return SockPoll::Ready(Ok(
-                                        vm.sock_err("read_bytes on a closed socket")
-                                    ));
-                                };
-                                if !carry.is_empty() {
-                                    let take = n.min(carry.len());
-                                    Ok(carry.drain(..take).collect::<Vec<u8>>())
-                                } else {
-                                    match std::io::Read::read(stream, &mut b) {
-                                        Ok(got) => Ok(b[..got].to_vec()),
-                                        Err(e) => Err(e),
-                                    }
-                                }
-                            };
-                            match r {
-                                Ok(bytes) => {
-                                    let bv = Value::obj(
-                                        vm.heap.alloc(Obj::Bytes(bytes.into_boxed_slice())),
-                                    );
-                                    SockPoll::Ready(Ok(vm.sock_ok(bv)))
-                                }
-                                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                                    SockPoll::WouldBlock
-                                }
-                                Err(e) => SockPoll::Ready(Ok(vm.sock_err(format!("{e}")))),
-                            }
-                        },
-                    );
+                // No fiber to park: block the thread in place only where that starves nobody
+                // ([`Vm::may_block_socket_in_place`]) — else the pre-existing loud error.
+                if !self.may_block_socket_in_place() {
+                    return Ok(self.sock_err(
+                        "read_bytes would block: std.net sockets require the --parallel engine",
+                    ));
                 }
-                Ok(self.sock_err(
-                    "read_bytes would block: std.net sockets require the --parallel engine",
-                ))
+                let core = Arc::clone(&core);
+                self.demote_block_socket(fd, poller::Interest::Read, deadline, span, move |vm| {
+                    let mut b = vec![0u8; n];
+                    let r = {
+                        let mut carry = core.carry.lock().unwrap_or_else(|e| e.into_inner());
+                        let mut guard = core.stream.lock().unwrap_or_else(|e| e.into_inner());
+                        let Some(stream) = guard.as_mut() else {
+                            return SockPoll::Ready(Ok(
+                                vm.sock_err("read_bytes on a closed socket")
+                            ));
+                        };
+                        if !carry.is_empty() {
+                            let take = n.min(carry.len());
+                            Ok(carry.drain(..take).collect::<Vec<u8>>())
+                        } else {
+                            match std::io::Read::read(stream, &mut b) {
+                                Ok(got) => Ok(b[..got].to_vec()),
+                                Err(e) => Err(e),
+                            }
+                        }
+                    };
+                    match r {
+                        Ok(bytes) => {
+                            let bv =
+                                Value::obj(vm.heap.alloc(Obj::Bytes(bytes.into_boxed_slice())));
+                            SockPoll::Ready(Ok(vm.sock_ok(bv)))
+                        }
+                        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                            SockPoll::WouldBlock
+                        }
+                        Err(e) => SockPoll::Ready(Ok(vm.sock_err(format!("{e}")))),
+                    }
+                })
             }
             Err((e, _)) => Ok(self.sock_err(format!("{e}"))),
         }
@@ -817,80 +810,79 @@ impl Vm {
                     }
                     // No netpoller-park: inside a native callback on M:N (`native_reentry > 0`, the
                     // Rust-stack `map`/sort loop can't snapshot-park) → DEMOTE + backoff-poll the
-                    // non-blocking read in place (#3 socket half). Off the M:N engine (top-level /
-                    // cooperative) there is no fiber to demote → fail loud (a silent hang would also
-                    // defeat the cooperative deadlock detector). net targets the `--parallel` engine.
-                    if self.mn.is_some() && self.native_reentry > 0 {
-                        let core = Arc::clone(&core);
-                        return self.demote_block_socket(
-                            fd,
-                            poller::Interest::Read,
-                            deadline,
-                            span,
-                            move |vm| {
-                                let mut b = vec![0u8; n];
-                                let r = {
-                                    let mut carry =
-                                        core.carry.lock().unwrap_or_else(|e| e.into_inner());
-                                    let mut guard =
-                                        core.stream.lock().unwrap_or_else(|e| e.into_inner());
-                                    let Some(stream) = guard.as_mut() else {
-                                        return SockPoll::Ready(Ok(
-                                            vm.sock_err("read on a closed socket")
-                                        ));
-                                    };
-                                    // Settle a carry that already decides BEFORE touching the fd —
-                                    // same guard, same order as the fast path (an invalid carry is
-                                    // sticky, so waiting on the fd for it would poll to the deadline
-                                    // for nothing).
-                                    let decided = match carry.is_empty() {
-                                        true => None,
-                                        false => match Vm::decode_carry(&mut carry, &[], false) {
-                                            Decoded::NeedMore => None,
-                                            d => Some(d),
-                                        },
-                                    };
-                                    match decided {
-                                        Some(d) => Ok(d),
-                                        None => match std::io::Read::read(stream, &mut b) {
-                                            Ok(got) => Ok(Vm::decode_carry(
-                                                &mut carry,
-                                                &b[..got],
-                                                got == 0,
-                                            )),
-                                            Err(e) => Err(e),
-                                        },
-                                    }
+                    // non-blocking read in place (#3 socket half); top-level `main` on the default
+                    // engine blocks in place too (Go-identical). Anywhere else the calling thread is
+                    // shared, so blocking it starves the peer that would make the fd ready → fail loud
+                    // ([`Vm::may_block_socket_in_place`]).
+                    if !self.may_block_socket_in_place() {
+                        return Ok(self.sock_err(
+                            "read would block: std.net sockets require the --parallel engine",
+                        ));
+                    }
+                    let core = Arc::clone(&core);
+                    return self.demote_block_socket(
+                        fd,
+                        poller::Interest::Read,
+                        deadline,
+                        span,
+                        move |vm| {
+                            let mut b = vec![0u8; n];
+                            let r = {
+                                let mut carry =
+                                    core.carry.lock().unwrap_or_else(|e| e.into_inner());
+                                let mut guard =
+                                    core.stream.lock().unwrap_or_else(|e| e.into_inner());
+                                let Some(stream) = guard.as_mut() else {
+                                    return SockPoll::Ready(Ok(
+                                        vm.sock_err("read on a closed socket")
+                                    ));
                                 };
-                                match r {
-                                    // Same decode guard as the fast path; a NeedMore (no complete
-                                    // codepoint yet) just re-polls, like a would-block.
-                                    Ok(d) => match vm.decoded_value(d) {
-                                        Some(v) => SockPoll::Ready(Ok(v)),
-                                        None => {
-                                            // N3(a) — took a partial off the fd: latch it so the demote
-                                            // loop's timeout branch (sched.rs) reports `incomplete
-                                            // utf-8` rather than `timeout`.
-                                            vm.poll_partial = Some(
-                                                core.carry
-                                                    .lock()
-                                                    .unwrap_or_else(|e| e.into_inner())
-                                                    .len(),
-                                            );
-                                            SockPoll::WouldBlock
-                                        }
+                                // Settle a carry that already decides BEFORE touching the fd —
+                                // same guard, same order as the fast path (an invalid carry is
+                                // sticky, so waiting on the fd for it would poll to the deadline
+                                // for nothing).
+                                let decided = match carry.is_empty() {
+                                    true => None,
+                                    false => match Vm::decode_carry(&mut carry, &[], false) {
+                                        Decoded::NeedMore => None,
+                                        d => Some(d),
                                     },
-                                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                                };
+                                match decided {
+                                    Some(d) => Ok(d),
+                                    None => match std::io::Read::read(stream, &mut b) {
+                                        Ok(got) => {
+                                            Ok(Vm::decode_carry(&mut carry, &b[..got], got == 0))
+                                        }
+                                        Err(e) => Err(e),
+                                    },
+                                }
+                            };
+                            match r {
+                                // Same decode guard as the fast path; a NeedMore (no complete
+                                // codepoint yet) just re-polls, like a would-block.
+                                Ok(d) => match vm.decoded_value(d) {
+                                    Some(v) => SockPoll::Ready(Ok(v)),
+                                    None => {
+                                        // N3(a) — took a partial off the fd: latch it so the demote
+                                        // loop's timeout branch (sched.rs) reports `incomplete
+                                        // utf-8` rather than `timeout`.
+                                        vm.poll_partial = Some(
+                                            core.carry
+                                                .lock()
+                                                .unwrap_or_else(|e| e.into_inner())
+                                                .len(),
+                                        );
                                         SockPoll::WouldBlock
                                     }
-                                    Err(e) => SockPoll::Ready(Ok(vm.sock_err(format!("{e}")))),
+                                },
+                                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                                    SockPoll::WouldBlock
                                 }
-                            },
-                        );
-                    }
-                    return Ok(self.sock_err(
-                        "read would block: std.net sockets require the --parallel engine",
-                    ));
+                                Err(e) => SockPoll::Ready(Ok(vm.sock_err(format!("{e}")))),
+                            }
+                        },
+                    );
                 }
                 Err((e, _)) => return Ok(self.sock_err(format!("{e}"))),
             }
@@ -962,37 +954,30 @@ impl Vm {
                 if self.park_on_fd(h, args, target, span)? {
                     return Ok(Value::nil());
                 }
-                // In-callback on M:N → demote + backoff-poll the non-blocking write (#3 socket half).
-                if self.mn.is_some() && self.native_reentry > 0 {
-                    let core = Arc::clone(&core);
-                    return self.demote_block_socket(
-                        fd,
-                        poller::Interest::Write,
-                        deadline,
-                        span,
-                        move |vm| {
-                            let r = {
-                                let mut guard =
-                                    core.stream.lock().unwrap_or_else(|e| e.into_inner());
-                                let Some(stream) = guard.as_mut() else {
-                                    return SockPoll::Ready(Ok(
-                                        vm.sock_err("write on a closed socket")
-                                    ));
-                                };
-                                std::io::Write::write(stream, &data)
-                            };
-                            match r {
-                                Ok(got) => SockPoll::Ready(Ok(vm.sock_ok(Value::int(got as i64)))),
-                                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                                    SockPoll::WouldBlock
-                                }
-                                Err(e) => SockPoll::Ready(Ok(vm.sock_err(format!("{e}")))),
-                            }
-                        },
-                    );
+                // In-callback on M:N (or top-level `main` on the default engine) → demote +
+                // backoff-poll the non-blocking write in place (#3 socket half).
+                if !self.may_block_socket_in_place() {
+                    return Ok(self.sock_err(
+                        "write would block: std.net sockets require the --parallel engine",
+                    ));
                 }
-                Ok(self
-                    .sock_err("write would block: std.net sockets require the --parallel engine"))
+                let core = Arc::clone(&core);
+                self.demote_block_socket(fd, poller::Interest::Write, deadline, span, move |vm| {
+                    let r = {
+                        let mut guard = core.stream.lock().unwrap_or_else(|e| e.into_inner());
+                        let Some(stream) = guard.as_mut() else {
+                            return SockPoll::Ready(Ok(vm.sock_err("write on a closed socket")));
+                        };
+                        std::io::Write::write(stream, &data)
+                    };
+                    match r {
+                        Ok(got) => SockPoll::Ready(Ok(vm.sock_ok(Value::int(got as i64)))),
+                        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                            SockPoll::WouldBlock
+                        }
+                        Err(e) => SockPoll::Ready(Ok(vm.sock_err(format!("{e}")))),
+                    }
+                })
             }
             Err((e, _)) => Ok(self.sock_err(format!("{e}"))),
         }
@@ -1099,38 +1084,30 @@ impl Vm {
                 if self.park_on_fd(h, args, target, span)? {
                     return Ok(Value::nil());
                 }
-                // In-callback on M:N → demote + backoff-poll the non-blocking accept (#3 socket half).
-                if self.mn.is_some() && self.native_reentry > 0 {
-                    let core = Arc::clone(&core);
-                    return self.demote_block_socket(
-                        fd,
-                        poller::Interest::Read,
-                        deadline,
-                        span,
-                        move |vm| {
-                            let r = {
-                                let guard = core.listener.lock().unwrap_or_else(|e| e.into_inner());
-                                let Some(listener) = guard.as_ref() else {
-                                    return SockPoll::Ready(Ok(
-                                        vm.sock_err("accept on a closed listener")
-                                    ));
-                                };
-                                listener.accept()
-                            };
-                            match r {
-                                Ok((stream, _peer)) => {
-                                    SockPoll::Ready(Ok(vm.accept_socket_value(stream)))
-                                }
-                                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                                    SockPoll::WouldBlock
-                                }
-                                Err(e) => SockPoll::Ready(Ok(vm.sock_err(format!("{e}")))),
-                            }
-                        },
-                    );
+                // In-callback on M:N (or top-level `main` on the default engine) → demote +
+                // backoff-poll the non-blocking accept in place (#3 socket half).
+                if !self.may_block_socket_in_place() {
+                    return Ok(self.sock_err(
+                        "accept would block: std.net sockets require the --parallel engine",
+                    ));
                 }
-                Ok(self
-                    .sock_err("accept would block: std.net sockets require the --parallel engine"))
+                let core = Arc::clone(&core);
+                self.demote_block_socket(fd, poller::Interest::Read, deadline, span, move |vm| {
+                    let r = {
+                        let guard = core.listener.lock().unwrap_or_else(|e| e.into_inner());
+                        let Some(listener) = guard.as_ref() else {
+                            return SockPoll::Ready(Ok(vm.sock_err("accept on a closed listener")));
+                        };
+                        listener.accept()
+                    };
+                    match r {
+                        Ok((stream, _peer)) => SockPoll::Ready(Ok(vm.accept_socket_value(stream))),
+                        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                            SockPoll::WouldBlock
+                        }
+                        Err(e) => SockPoll::Ready(Ok(vm.sock_err(format!("{e}")))),
+                    }
+                })
             }
             Err((e, _)) => Ok(self.sock_err(format!("{e}"))),
         }
@@ -1241,9 +1218,19 @@ impl Vm {
     }
 
     /// D6 — the M:N park half shared by every would-block socket op. Returns `Ok(true)` if the fiber
-    /// was parked on the netpoller; `Ok(false)` off the M:N engine (or inside a native callback, whose
-    /// Rust-stack state can't be parked) — the caller then surfaces a `Result::Err` (net requires the
-    /// `--parallel` engine; blocking the only thread would wedge the cooperative deadlock detector).
+    /// was parked on the netpoller; `Ok(false)` when this Vm is not an M:N worker shell (top-level
+    /// `main`, an eager `Executor` job, `--serial`) or is inside a native callback whose Rust-stack
+    /// state can't be parked. The caller then asks [`Vm::may_block_socket_in_place`]: on the two
+    /// contexts that own their whole thread (an M:N in-callback demote, and top-level `main` on the
+    /// default engine — Go-identical, and what makes the hello-world TCP server writable) it falls
+    /// through to [`Vm::demote_block_socket`] and BLOCKS there, bounded only by the op's `timeout_ms`,
+    /// the run's `--timeout`, or a cancel — and on top-level `main` under `chezzi run` **only the first
+    /// of those three exists**: `--timeout` is a `chezzi test` flag (`chezzi run` rejects it as an
+    /// unknown flag) and `main` has no scope cancel to trip, so an untimed op there blocks until SIGINT
+    /// (see [`Vm::demote_block_socket`]'s doc); everywhere else — `--serial`, an eager `Executor` job, a
+    /// callback on a non-M:N thread — it keeps the loud `Err("<op> would block: std.net sockets
+    /// require the --parallel engine")`, because blocking a SHARED thread starves the very peer that
+    /// would make the fd ready (both shapes measured as hangs; see that helper's doc).
     /// `Err` only for a **concurrent op on a shared socket**: oneshot epoll allows ONE registration per
     /// fd, so a second fiber reaching a would-block op while the first is parked (`in_flight` already
     /// set) faults cleanly rather than corrupting the poller registry (review: Critical). On the park
@@ -2026,6 +2013,40 @@ impl Vm {
     /// judge it (a hang, the safe direction), rather than the fault it would otherwise take.
     fn can_block_in_place(&self) -> bool {
         self.eager_core.is_some() || self.is_counted_party()
+    }
+
+    /// May a would-block socket op BLOCK ITS THREAD in place ([`Vm::demote_block_socket`]) instead of
+    /// surfacing `Err("<op> would block: std.net sockets require the --parallel engine")`?
+    ///
+    /// Only where the calling thread runs nothing else, so blocking it starves nobody:
+    /// - an M:N worker INSIDE a native callback (`mn.is_some() && native_reentry > 0`) — the original
+    ///   D5 owe #3 Path C demote: the callback's `for`-loop state lives on the un-snapshottable Rust
+    ///   host stack so the fiber can't park, but [`Vm::demote_socket_enter`] spins a replacement worker
+    ///   so the pool keeps its width;
+    /// - top-level `main` on the DEFAULT engine — `parallel` on, not a worker shell, not an eager
+    ///   `Executor` job, no scheduler under it ([`Vm::is_counted_party`] = [`Vm::owns_os_thread`] +
+    ///   `native_reentry == 0`). Go-identical: `ln.Accept()` on the main goroutine blocks until a
+    ///   client arrives, and until this landed the hello-world TCP server was unwritable (the old gate
+    ///   was `mn.is_some()`, which means "worker shell", not "parallel is on").
+    ///
+    /// Everything else keeps the immediate `Err`, and each exclusion is a MEASURED hang, not caution:
+    /// - **`--serial`**: one thread runs every fiber, so blocking it in place starves the very peer
+    ///   fiber that would make the fd ready — `examples/echo_server.chz --serial` hung forever, and
+    ///   nothing can end it (`--timeout` is rejected alongside `--serial` in `main.rs`, and no other
+    ///   fiber can run to deliver a cancel);
+    /// - **an eager `Executor` job**: it does NOT own its thread. It runs on the bounded, process-wide
+    ///   [`crate::vm::pool`] (`worker_count()`, never grows) and there is no `MnSched` here to spin a
+    ///   replacement, so a blocked job starves every other job and every `parallel:` nursery sharing
+    ///   that pool — measured at `CHEZZI_THREADS=1` (an `accept` job plus a later `connect` job = hang);
+    /// - **`main` inside a native callback** (`native_reentry > 0` with `mn == None`): unjudgeable by
+    ///   the deadlock verdict ([`Vm::is_counted_party`]'s doc), so an unbounded block there is a hang
+    ///   where a fault is the honest answer.
+    ///
+    /// A `spawn`/`parallel:` fiber never reaches this question — it parks on the netpoller
+    /// ([`Vm::park_on_fd`]) — so the narrowing costs the M:N server shapes nothing.
+    pub(super) fn may_block_socket_in_place(&self) -> bool {
+        (self.mn.is_some() && self.native_reentry > 0)
+            || (self.parallel && self.eager_core.is_none() && self.is_counted_party())
     }
 
     /// Register this thread as a blocked party for as long as the returned guard lives, so the
@@ -3364,6 +3385,33 @@ impl Vm {
                 if core.inner.lock().unwrap().shut {
                     return Err(self.err(
                         "submit on a shut-down Executor (it no longer accepts work)".to_string(),
+                        span,
+                    ));
+                }
+                // W7-39 follow-up — the inherited chain (`creator_cancel`, captured at
+                // `Op::NewExecutor`) is STICKY: nothing ever resets it, matching Go's derived context
+                // (a cancelled parent stays cancelled). So once the creating job's executor has been
+                // `shutdown_now`-ed, every job this core dispatches starts already-cancelled and dies
+                // at its first checkpoint. Silently: the handle crosses the airlock by `Arc`, so the
+                // submitter may be `main` holding the only reference, and its own GRACEFUL
+                // `shutdown()` — which promises to wait for its work — returned having run nothing.
+                // Keep the stickiness, drop the silence: this is a `submit` the executor cannot
+                // honour, exactly like a `submit` after `shutdown()`, so it faults the same way.
+                //
+                // Read-only after construction (no lock), and EMPTY for an executor created by `main`
+                // or by a `parallel:`/`spawn` fiber — those are untouched. The core's OWN `cancel` is
+                // deliberately NOT checked here: `shutdown_now` sets `shut` first, so the check above
+                // already owns that case and adding it would double-report. (`--serial` never sets
+                // `eager_core`, so `creator_cancel` is always empty there — no parity delta.)
+                if core
+                    .creator_cancel
+                    .iter()
+                    .any(|c| c.load(std::sync::atomic::Ordering::Relaxed))
+                {
+                    return Err(self.err(
+                        "submit on an Executor whose creating job was cancelled (it no longer \
+                         accepts work)"
+                            .to_string(),
                         span,
                     ));
                 }

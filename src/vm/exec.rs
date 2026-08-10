@@ -2374,7 +2374,17 @@ impl Vm {
                 self.push(v);
             }
             Op::NewExecutor => {
-                let core = Arc::new(ExecutorCore::default());
+                let core = Arc::new(ExecutorCore {
+                    // W7-39 — an executor created INSIDE a running eager job inherits that job's
+                    // cancel chain, so an outer `shutdown_now()` reaches the jobs this executor will
+                    // dispatch. Captured HERE, at creation, not at `submit`: the handle crosses the
+                    // airlock by `Arc`, so the submitter can belong to an unrelated executor.
+                    creator_cancel: match self.eager_core.is_some() {
+                        true => self.scope_ancestors(),
+                        false => Vec::new(),
+                    },
+                    ..Default::default()
+                });
                 // Heap-independent registration for the program-exit join (W7-5b) — this is the one
                 // that survives its creating task/heap. Creation order across the whole run.
                 self.exec_registry

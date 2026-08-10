@@ -286,7 +286,13 @@ its result (`.recv()` it **after** `shutdown()`). This is the result-returning p
 `std.concurrency.task.submit_task` / `Task[T]` wraps.
 
 An `Executor` is **detached**: it outlives the scope that made it, and the program waits for its
-outstanding work at exit. **Read results after `shutdown()`, never between it and the `submit`** —
+outstanding work at exit. Detached is about **lifetime**, not cancellation — an executor created inside
+a *running job* of another executor is still joined at exit, but it inherits that job's cancel, so an
+outer `shutdown_now()` stops the nested executor's jobs at their checkpoints too (`concurrency.md`
+§cancellation points). That inheritance is **sticky** (a cancelled parent stays cancelled, as in Go),
+so a later `submit` to such an executor **faults** — `submit on an Executor whose creating job was
+cancelled` — rather than accepting work it would immediately cancel. **Read results after
+`shutdown()`, never between it and the `submit`** —
 that window is the one place the two engines deliberately disagree.
 
 A blocking `recv`/`send`/`wait:` inside a job, or in `main` while jobs are running, **blocks and waits**

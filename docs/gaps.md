@@ -62,6 +62,18 @@ later edit shifts them and nobody re-numbers the whole table (`W7-27`'s was alre
 
 | item | gaps.md | what | why it is still open |
 |---|---|---|---|
+| **W7-47** | `:9188` | **`os.exit` does not terminate the process while `main` is blocked in a socket op.** An eager `Executor` job calling `os.exit(3)` prints its marker and the process then **hangs at rc=124** under `timeout 12`, with `main` still sitting in `accept()`. Go's `os.Exit` is immediate from any goroutine (same shape measured: `listening`, the goroutine's line, **rc=3**), so this is an ancestor divergence on a seam Go owns. Cause: `os.exit` in a job only sets the worker's `pending_exit` (`src/vm/mod.rs:4137`), which `run_outcome` (`:3461-3472`) turns into a `TaskOutcome::Exit` value somebody must **observe** — surfaced only at `shutdown()`/`join_eager_jobs` or the program-exit drain, neither of which a permanently-blocked `main` ever reaches | **Pre-existing in NATURE, newly OBSERVABLE.** The deferred-through-the-join plumbing is unchanged by `W7-40`; what `W7-40` changed is that top-level `main` can now block on a socket AT ALL (before it got the immediate `Err`), which turns "deferred until the join" into "never". Compounds with the untimed `join_eager_jobs` wait below. Not investigated: whether a `parallel:`/`spawn` fiber's `os.exit` defers the same way, and whether the fix belongs at the `os.exit` native (halt the process directly, Go-style — smaller, matches the ancestor) or at the blocking waits (observe a process-wide exit flag — what `--timeout`/cancel would want anyway) |
+| **W7-46** | `:9140` | **A spawned fn's returned `Err` is silently discarded, while a raw fault aborts the nursery — the two error channels disagree.** `examples/echo_server.chz` spawns `acceptor(server, n) -> int!`; on `--serial` every socket op returns `W7-40`'s deliberate engine `Err`, `?` turns each into an `Err` return VALUE, the nursery drops it, `run()` returns `Ok(0)`, and the program prints `echo server handled 50 connections` at **rc=0 having handled zero** — the repo's own example is **vacuously green**, and so is any test asserting that line. A raw **fault** in a `spawn:` DOES propagate: `spawn: boom()` where `boom` indexes `[1]` at `99` prints `main done` then `runtime error … index 99 out of bounds (len 1)` and **rc=1**, identically on both engines | **Measure the ancestors before deciding — the row deliberately does not.** Go's bare `go func()` also drops a returned `error` (which is why `errgroup` exists), but Python's `asyncio.TaskGroup` propagates an exception. **Chezzi's `Result` is a value, not an exception**, so "dropped" may be Go-consistent and the real defect may be only the DISAGREEMENT between the two channels — in which case the fix is to make the fault path match, not the `Err` path. Independent of that decision, `examples/echo_server.chz` and `echo_server_spawn.chz` need fixing **either way**: they claim a success they did not achieve, which is `W7-38`'s "a real bug reported as a non-finding" class relocated into the examples |
+| **W7-45** | `:9113` | **The `where`-bound hole `W7-41` closed for `==` is still open on every builtin whose runtime is `values_equal`.** With `W7-41`'s `struct Box[T]` carrying `fn eq(...) where T: Comparable` over a non-`Comparable` `Tag`, all of these are check-clean then `runtime error: struct 'Tag' has no 'compare' method`: `[a].contains(b)`, `[a].index_of(b)`, `[a, b].dedup()`, and Set/Map key insert — **the last two only on a hash collision**, so with distinct hashes no `eq` runs and the program silently succeeds with a wrong answer. Cause: these have a runtime of `values_equal` but a checker signature validated only by `assignable`, so `may_be_equal` (and therefore `W7-41`'s guard) is never consulted. Two corrections to the surface as first reported: `List.count` takes a **predicate** (`std/prelude.chz:87`) so it never routes through `values_equal`, and `List.remove` **does not exist** (it is `remove_at`) — both non-issues | Found while fixing `W7-41`, filed rather than folded in: each builtin needs its own checker-side call into `may_be_equal`, which is a wider surface than the one nominal arm `W7-41` touched, and it wants its own negative controls (`W7-41`'s two lessons apply verbatim). **The silent-wrong-answer variant is the worse half** — an `eq` body doing only `self.val == other.val` falls back to structural equality and returns wrong-but-not-faulting, and `[a].contains(a)` hits the identity shortcut in `values_equal_guarded` and never dispatches at all, so a repro that skips those two shapes reports a false green |
+| **W7-44** | `:9083` | **The documented `secrets` equivalent is dead off Linux, and `uuid.v4()` is not a CSPRNG on ANY platform.** (1) `secure_random_bytes` (`src/native/crypto.rs:514`) has a `#[cfg(not(target_os = "linux"))]` arm (`:547-553`) returning `Err("secure_bytes: no secure entropy source on this platform")`, so `crypto.secure_bytes`/`token_hex` are dead on macOS and Windows with no doc caveat — the fail-closed choice is right, the missing wiring and missing caveat are not. (2) **Stronger than the external report, and true on Linux too:** `uuid.v4()` (`src/native/uuid.rs:74`) draws two `next_u64` from a **64-bit SplitMix64** state, which is **invertible** — two observed UUIDs recover the state and predict every subsequent one, regardless of how the seed was obtained (off Linux the seed is additionally just `nanos ^ addr`, `uuid.rs:41-47`). `docs/stdlib.md:952` claims "auto-seeded from OS entropy" with no platform caveat and no "not for security" warning, while `:943-945` already warns correctly about MD5/SHA-1 | Split, and only half is expensive. **(a) docs — cheap, should not wait:** an explicit "`uuid.v4()` is NOT cryptographically secure — use `crypto.token_hex` for secrets" warning plus the Linux-only caveat. **(b) its own task:** a portable entropy source (`getentropy(3)` on BSD/macOS, `BCryptGenRandom` on Windows) and/or reseeding `uuid` from it per draw. Ancestor to measure when (a) lands: Python's `secrets` and `uuid.uuid4()` both draw from `os.urandom` on every platform, Go's `crypto/rand` likewise, and neither ships a 64-bit-state UUID |
+| **W7-43** | `:9035` | **`?.` / `??` on a `Result` emits three errors naming variants the user never wrote** — the most-hit papercut in the external review (four separate testers, one of them four times in 30 programs). `f()?.len()` where `f() -> Result[str, str]` reports `'Some' is not a variant of Result` + `'None' is not a variant of Result` + `non-exhaustive match on Result: missing Err, Ok`, all on the `OptChain` span; `f()? .len()` — **one space** — works. Cause: the lexer merges `?.` type-blindly (`src/lexer/mod.rs:819-829`) and `Desugar::lower_carrier` (`src/desugar/mod.rs:1230-1308`) lowers it to a `Match` with hard-coded `Some`/`None` arms **before any typing**, so the checker only ever sees a `Match` on a `Result` with Option arms. The spaced/unspaced split is deliberate and documented (`syntax.md:2474-2486`) — the semantics may be right, **the diagnostics are not** | The decision needs types and the lowering site has none, so any fix is structural: stop lowering `OptChain`/`NullCoalesce` in desugar and retire the two `unreachable!()`s asserting the node is dead (`src/checker/pattern.rs:1351-1353`, `src/compiler/mod.rs:3802-3804`). `ExprKind::Try` is the precedent — it survives to the checker (`infer_try`, `pattern.rs:3095`) and to the VM (`Op::Try`, `exec.rs:1888` → `do_try`, `stmt.rs:120`) with no desugaring at all. **Minimal:** keep Option-only, emit ONE error naming `?.`. **Full** (`?.` on a Result = `?` then `.`): additionally needs `infer_try`'s enclosing-fn-return-kind gate (`pattern.rs:3149-3158`) and its `recover:`/`defer:` cases (`:3100-3131`, `:3138-3147`), because `x?.f` on a Result is a real early return where the Option form is a pure expression — **that interaction is the cost centre, not the parsing**. `syntax.md:2474-2486` + `grammar.bnf:580-585` move with it |
+| **W7-42** | `:8993` | **A top-level `:=` re-declaration retypes a LIVE binding, so the checker validates a different program than the one that runs.** `x := 1` / `f := fn() -> int: x` / `x := "9"` → `f()` returns a **`str`** out of a fn declared `-> int`, `y: int = f()` is accepted, and `y + 1` faults `cannot apply Add to str and int` — all check-clean. Inside a `fn` body the same program correctly prints `1`: **module top level only, i.e. exactly where scripts live.** Cause, both halves: `Checker::declare` (`src/checker/setup.rs:1747`) is an unconditional `insert` that RETYPES one binding, while the compiler models it two ways — `collect_globals`'s `add` (`src/compiler/mod.rs:940-945`) is idempotent BY NAME so the second `x` reuses the first's slot and a late-bound `GetGlobalSlot` reads the new value, but `FnComp::add_local` (`mod.rs:6512`) always pushes a FRESH slot. The checker agrees only with the local backend; `setup.rs:1912-1917` already names this class in a neighbouring comment | **The ancestors disagree with each other, so this needs a decision, not a lookup.** Python prints `9` too (late binding) — so the *value* matches the scripting ancestor and the defect is specifically that the `-> int` annotation is a lie; Go rejects same-scope `:=` re-declaration outright; Rust shadows with a fresh binding, which is what the fn-local path already does. **Planning decision, to be re-validated against all three before implementing:** reject a module-scope `:=` re-declaration that CHANGES THE TYPE — preserves Python's late binding for same-type rebinds, rejects only the unsound case. Cost: legal in a fn, rejected at top level, an asymmetry that must be written into `docs/syntax.md` (silent today on ordinary re-declaration; only the `const` carve-out at `:248-251` is documented). The alternative — a fresh global slot per re-declaration, matching the fn-local path and Rust — is cleaner but touches the global-slotting perf seam and the late-bound-by-name read path |
+| **W7-41** | `:8863` | **OPEN — a fix was written, adversarially reviewed, and REVERTED the same day; read the lesson column BEFORE attempting it again.** A `where` receiver bound is enforced for `<`, `+`, hashing and generic bounds but NOT for `==`. `struct Box[T]` with `fn eq(self, other: Self) -> bool where T: Comparable` over a non-`Comparable` `Tag`: `chezzi check` → `ok: no type errors`, `chezzi run` → `runtime error: struct 'Tag' has no 'compare' method` — the `checker-superset-of-compiler` class, which two-engine parity is structurally blind to. Leaked identically through `!=`, `[a] == [b]`, `Some(a) == Some(b)` and `in`. Cause: `<`/`+` route through `satisfies` → `satisfies_methods`, whose `where_bounds` walk fires; `==` routes through `may_be_equal` (`src/checker/proto.rs:813`), whose nominal arm compared name + arity + arg co-inhabitance only. The `equality_allowed` disjunct deleted in M23 slice 3 as "provably dead" was dead **only until conditional conformance landed** — `Box[Tag] == Box[Tag]` IS a same-type pair whose `eq` does not cover it. rustc 1.97.0 rejects the mirror at compile time (`E0369`, "an implementation of `Ord` might be missing for `Tag`") while the satisfying instantiation still compiles | **THE ATTEMPTED FIX AND WHY IT WAS REVERTED — this is the whole value of the row.** The guard tried was: in `may_be_equal`'s nominal arm, if the type declares an `eq`, require `satisfies(ty, "Eq")`. It shipped **fully green** — `cargo test --lib` 3952 passed, `chezzi test tests/chz/` 424 passed on both engines, clippy clean, the repro correctly rejected — and it **broke working programs en masse**, caught only by adversarial review running the pre-change binary on neighbours the tests never covered. `Eq` is granted intrinsically to **only the four scalars** (`proto.rs:1541`), so `where T: Eq` is unsatisfiable for every type whose `==` is structural: with `fn eq(self, o: Box[T]) -> bool where T: Eq`, `Box([1,2])`, `Box((1,2))`, `Box(b"ab")`, `Box(Some(1))` and `Box(P(1))` for any plain struct `P` all printed `true` before and became `cannot compare … for equality`. **So the prerequisite is not a guard on the equality path at all — it is making `Eq` satisfaction agree with what `==` actually accepts**, which touches every `satisfies(_, "Eq")` caller and is its own milestone. Three further traps found in the same review, all still live for the next attempt: (a) the guard must not fire on the in-tree ordinary-method escape hatch (`enum Opt[T]: fn eq(self, x: T)`, `struct H[T]: fn eq[U](self, o: U)`) — those are not `(self, Self) -> bool`, so `satisfies` fails on legal code; it needs the `Ty::Param`/`Unknown` test mirroring `validate_eq_shape`; (b) a **one-sided** guard is an asymmetry hole, because `n == m` plus co-inhabitable args ≠ identical args (the `int`/`float` and `bytes`/`bytearray` cross arms recurse in), so it must gate both operands; (c) the obvious fixture does **not** exhibit the bug — an `eq` body of `self.val == o.val` falls back to structural equality and exits 0; the fault needs a body that calls the bounded operation (`self.compare(o)` → `<`, or `.hash()`), which is what makes a test written from the fixture alone a false green. **Meta-lesson, and it is the repo's own `rule-fires-is-not-rule-is-right`: a new checker REJECT must be proven against its own premise — run the PRE-change binary on the `ok()` neighbours the premise implies, not just on the case you are fixing.** A green suite proves nothing about a widening; the suite contained no `where T: Eq` over a non-scalar |
+| ~~**W7-40**~~ | `:8742` | **FIXED 2026-08-10 (NARROWED — a first attempt was measured to cause two hangs and was reverted). `std.net`'s blocking ops worked only on an M:N worker fiber, so the hello-world TCP server could not be written.** `l.accept()` from top-level `main` on the **default engine** returned `Err('accept would block: std.net sockets require the --parallel engine')` *while running the parallel engine*; same inside an eager `Executor` job. Cause: `Vm::mn` is assigned in **exactly one place** (`Vm::spawn_shell`, `src/vm/sched.rs:877`; `Vm::new` sets `mn: None`, `exec.rs:169`), so `mn.is_some()` means "this Vm is an M:N worker SHELL", **not** "the parallel engine is on" (that is `Vm::parallel`, default `true`) — and neither `main` nor an eager job has it. Go, measured: `ln.Accept()` on the **main goroutine** blocks and succeeds at 50.5 ms. **What shipped is one predicate**, `Vm::may_block_socket_in_place` (`src/vm/netio.rs:2044`) = `(mn.is_some() && native_reentry > 0)` (the pre-existing in-callback demote) `\|\|` `(parallel && eager_core.is_none() && is_counted_party())` — and `is_counted_party()` (`:1985`) is `owns_os_thread() && native_reentry == 0` with `owns_os_thread()` (`:2000`) = `mn.is_none() && mn_enlist_sched.is_none() && scheduler_stack.is_empty()`, so **the second disjunct is top-level `main` on the default engine and nothing else**. The four ops (`netio.rs:617`, `:817`, `:959`, `:1089`) restore the verbatim pre-existing `Err` for every other context. **Scope: `accept`/`read`/`read_bytes`/`write` from top-level `main` on the default engine now BLOCK and succeed; `--serial` and eager `Executor` jobs keep the immediate `Err`** | **The first attempt blocked everywhere and was measured as two rc=124 hangs.** **R1:** `--serial` has ONE thread, so blocking it starves the fiber that would make the fd ready — `timeout 15 chezzi run --serial examples/echo_server.chz` went rc=0 → **rc=124**, `socket_timeout.chz` printed `accept: timeout` then **rc=124**, with **no escape** (`--timeout` is rejected alongside `--serial`, `src/main.rs:660`). **R2:** an eager `Executor` job does NOT own its thread — it runs on the bounded process-wide pool (`pool::submit`, `src/vm/pool.rs:77`; sized by `vm::worker_count()`, `src/vm/mod.rs:304`, never grows) and the `mn.is_none()` path skipped `demote_socket_enter`, so no replacement worker spun: at `CHEZZI_THREADS=1` job A `accept`ing + job B `connect`ing → **rc=124** (≥2 threads passed), and it starves `parallel:` nurseries on the same pool. So **the `std.net` serial≠M:N divergence is NARROWED, NOT CLOSED** — R1 is the measured reason it must stay. Verified post-narrowing: `--serial` `echo_server`/`socket_timeout`/`echo_server_spawn` all rc=0, default engine unchanged, `CHEZZI_THREADS=1` executor shape rc=0 in 6 ms with a prompt `Err`, accept-on-`main` with an external `python3` peer prints `accepted`/`Ok('hi')` on the default engine and the `Err` on `--serial`; `cargo test --lib` 3952 passed, clippy clean; and the narrowed behavior is now **pinned by tests asserting the `Err` verdict on `--serial` and inside an `Executor` job**. **Lesson — a change that NARROWS when an error is returned is not tested by the suite that passed before it:** the full suite was green with BOTH regressions present, because nothing tested sockets on `--serial` and nothing tested a socket op inside an `Executor` job under a constrained pool — the suite has no example of the context such a change newly affects. Caught by adversarial review running the PRE-change binary; not by 4164 tests, not by two-engine parity, not by clippy. `W7-41`'s twin, same day and same branch |
+| ~~**W7-39**~~ | `:8622` | **FIXED 2026-08-10 — a nested `Executor`'s jobs never observed the outer `shutdown_now()`.** An outer job creating an inner `Executor` and submitting an 8 s sleeper: pre-fix `done` then **`nap finished`** at **8.005 s**, post-fix `done` only at **0.056 s** (flat control 0.055 s both ways; `--serial` was already correct at 0.054 s, so this brings M:N *into* engine agreement). Cause: `prepare_eager_job` (`src/vm/sched.rs:4050`) installed `worker.cancel` and left `cancel_outer` empty — **the one seam in the tree that installed a cancel token without the `scope_ancestors()` half** that `spawn_shell` (`:875`) and `run_one_fiber` (`:1575-1585`) both pair it with — so an inner executor's jobs had chain `[inner.cancel]` and `drain_live_executors` joined the un-shut core at exit | Fixed at `sched.rs:4075-4082`, gated on `eager_core` so decision A2's "an `Executor` is **detached**" survives: detached from NURSERIES, not from an enclosing executor job (a `submit` from `main` or a `parallel:`/`spawn` fiber installs nothing), and `scope_ancestors()` already severs inside a `defer` so `defer ex.shutdown()` still submits uncancelled cleanup. **The ancestors are SPLIT and did not decide it** — CPython 3.14.6 nested `ThreadPoolExecutor` with `shutdown(cancel_futures=True, wait=False)` returns the CALL at 0.051 s but the PROCESS takes **8.037 s and prints both job lines** (an external report's "63 ms" measured the call, not the process); Go's `context.WithCancel` parent→child **propagates** at 50 ms. What decided it is Chezzi-vs-Chezzi: pre-fix the outer job's own identical `sleep_ms(8000)` WAS cancelled at 50 ms, so one spelling of one wait had two cancellation rules by nesting depth — `W7-16`'s ruling one level down. **Lesson: a one-line install is only safe once you have checked every path that WRITES the same field** — `run_one_fiber` overwrites both fields on every swap-in and misses this only because an eager job never enters the fiber scheduler **Follow-up, same branch:** the inherited chain is keyed on the executor's **creator** (`ExecutorCore::creator_cancel`, captured at `Op::NewExecutor`), never on the submitter, and it is **sticky** — never reset, matching Go's derived context. That made a `submit` after the creating job's cancellation vanish SILENTLY (`main` holding the only handle got `main done` rc=0 with the job never run, and its own graceful `shutdown()` waited for nothing); it now FAULTS through the existing post-shutdown reject — `submit on an Executor whose creating job was cancelled`. **Checkpoint trap:** a job with no cancellation point completes and hides the whole thing, so a repro without a `sleep_ms` is a false green. |
+| `net.connect` blocks everywhere | `:9245` | `net.connect`'s `mn == None` arm (`src/vm/netio.rs:400-416` → `block_until_connected`, `:501`) is pre-existing and was deliberately **not** narrowed by `W7-40`, so it blocks the calling thread on every engine. Bounded (10 s cap, clamped by `--timeout`), so not a permanent hang — but at `CHEZZI_THREADS=1` a `connect` inside an `Executor` job can pin a pool worker for up to 10 s | **The same family as `W7-40`'s R2, an order of magnitude less severe**, left out of scope so the narrowing stayed a narrowing. If it is ever fixed the shape is the one `W7-40` shipped — route it through `Vm::may_block_socket_in_place` (`netio.rs:2044`) instead of the bare `mn == None` test, which gives it the `--serial` and eager-`Executor` `Err` for free |
+| `join_eager_jobs` untimed | `:9245` | `src/vm/sched.rs:4106-4117` is `while g.outstanding() > 0 { g = core.eager_cv.wait(g) }` — **no cancel-flag check, no `deadline` check** — so a job blocked in an inner `shutdown()` is uncancellable and ignores `--timeout` | Found while fixing `W7-39`, deliberately not fixed there (different seam; a bounded wait wants its own failing-then-green test on both engines). Partially mitigated: `block_party_guard` registers the joiner with `quiesce`, so a genuine process-wide deadlock is still detected — what is uncovered is **cancellation** and the **wall-clock cap** |
+| bare `spawn:` start time | `:9245` | A bare top-level `spawn:` does not start until end-of-main: `print("A")` / `spawn: print("SPAWNED")` / `sleep_ms(300)` / `print("B")` measures `A`, `B`, `SPAWNED` on both engines — the block is deferred to the implicit end-of-main join rather than running during the 300 ms sleep. Go's `go func()` starts immediately | **Not yet investigated: whether this is documented deliberate behavior** — grep `docs/concurrency.md` for the nursery-less `spawn` contract before filing it as a defect; if it IS documented it is a documented-behavior note, not a bug. Surfaced because a `spawn`-based TCP repro self-deadlocked (`l.accept()` on `main` waiting on a dialer queued behind the end-of-main join) |
 | ~~**W7-38**~~ | `:8155` | **FIXED 2026-08-07 — the adversarial review (prosecute → defend → judge) of the `W7-30`–`W7-37` series found the series' OWN theme, "a real bug must never be reportable as a non-finding", still open in three places the series itself had just written or touched: the arg parser, the abort path, and the CI gate.** (1) `parse_range`'s guard rejected only INVERTED ranges, so `difffuzz --seeds 5..5` printed `done: 0 seeds 5..5, 0 finding(s) []` and exited **0** — a clean pass over zero comparisons, verbatim `W7-34`'s false negative one layer up (its message already claimed to reject "empty/inverted"). (2) `process::exit(2)` fired INSIDE the seed loop, so the abort printed no `done:` line and no histogram — losing the count of seeds that did run on the run where it matters most — and masked a real finding's exit **1** behind exit **2**. (3) `fuzz_range_cfg` printed its histogram with `eprintln!`, which libtest CAPTURES on a passing test, so a 120-seed sweep where all 120 timed out was green and indistinguishable from 120 real comparisons — the hole the histogram was added to close, unclosed exactly where it matters. Plus the mirror-image defect: `classify`'s `chz.code.is_none() => HostPanic` could not tell a SIGSEGV from a **SIGKILL**, so the cgroup OOM-killer under the `MemoryMax=6G` scope this repo's own CLAUDE.md mandates reported an OOM as a real Chezzi crash | Fixed as one commit: `end <= start` in BOTH bins; the abort now `break`s and always prints `done: {ran} of {total} …` + the histogram, with findings winning the exit code; both CI gates assert a hard **zero-comparisons floor** (deliberately not a "too many timeouts" threshold — an uncertain heuristic must decline, `W7-12`); `Capture` gained `signal: Option<i32>` in both oracles, only crash signals (SIGILL/SIGTRAP/SIGABRT/SIGBUS/SIGFPE/SIGSEGV/SIGSYS) stay `HostPanic`/`Crash` and every other signal declines into the fatal-but-not-a-finding `HarnessError`, with both reports NAMING the signal. Also: the hang tests' `locate_chezzi_for_test` no longer falls back to PATH (a 10-day-stale `~/.cargo/bin/chezzi` could have been what went green), and `gen_float`'s exactness proof was replaced by the real reason the float sweep is sound (IEEE-754 determinism). A seventh charge — a hang-verdict flake — was DISMISSED with evidence |
 | ~~**W7-35**~~ | `:7845` | **FIXED 2026-08-07 — `panicfuzz` had the identical `W7-34` bug: `run_one`'s `.spawn().ok()?` and the staging `write_file` failure both collapsed "the child never even started" into the same non-finding `Outcome::Timeout`.** Ported `W7-34`'s exact shape: `run_one` now returns `Result<Capture, RunErr>`, a new `Outcome::HarnessError(String)` is fatal to both callers (`tests/panicfuzz.rs`'s new `fuzz_range_cfg` panics, `src/bin/panicfuzz.rs` exits **2** — distinct from **1** for real findings). See its session-log section for the other-holes audit (timeout-vs-crash was already right; the "nothing counts seeds actually executed" gap it shared with `difftest` was closed by the `W7-34` residual the same day — both binaries now print an outcome histogram). Whole-branch review then REVERSED this fix's one deliberate deviation: `classify` kept `Option<Capture>`, which leaves the very bug this row fixes expressible by a second caller (`classify(run_one(..).ok())`) — it now takes `Capture` like `difftest`'s, making it unrepresentable rather than merely fixed |
 | **M24-1** | `Type-system / construction` | **Witness OVER-charge.** A generic with a static-carrying bound whose body never needs a witness can still be charged one, which costs it value / `spawn`-target / `defer`-target position. Two live shapes: (a) the body calls a witness-taking fn with only CONCRETE types (`fn concrete[T: Default](x: T) -> int: return reset(Counter(1)).get()` → `g := concrete` is rejected); (b) the module-qualified forwarding charge requires the module name as a free name AND the callee as a `Field` member, so a same-named **struct method** (`h.reset()` beside an imported witness-taking `lib.reset`) satisfies the member half. Only ever an **over-rejection** — a charged-but-unused witness is inert arity, never a mis-lowering | Deliberate. Every syntactic narrowing tried under-charges some shape, and under-charging is the unsafe direction (a call the checker accepts and the compiler cannot lower). Workaround: move the concrete call into a non-generic helper. A real fix needs the charge to run AFTER type resolution, not at the signature hoist |
@@ -2600,10 +2612,21 @@ arguments **co-variantly**, and carries the runtime's own cross-type arms (`int`
 makes `[1.0] == [1]` and `{"k": 1.0} == {"k": 1}` compile (both engines print `true`; CPython agrees).
 `Ty::Param` is accepted outright (generics are erased) **except** where a `where T: <scalar>` bound
 pins it: those pins are substituted away first, so `fn f[T](a: T, b: int) where T: str` still rejects
-`a == b`. It is the WHOLE legality test: a companion `equality_allowed` ("does this pair dispatch to a
-user `eq`?") was OR'd in alongside for one milestone and deleted in M23 slice 3 — the `Eq` overload is
-decided at RUNTIME off the operands' heap tags (`Vm::user_eq_method`), and every pair it accepted was a
-same-type pair `may_be_equal` already accepted, so the disjunct was provably dead. (What the checker
+`a == b`. It is *nearly* the whole legality test: a companion `equality_allowed` ("does this pair
+dispatch to a user `eq`?") was OR'd in alongside for one milestone and deleted in M23 slice 3, on the
+argument that the `Eq` overload is decided at RUNTIME off the operands' heap tags
+(`Vm::user_eq_method`) and every pair it accepted was a same-type pair `may_be_equal` already
+accepted, so **"the disjunct was provably dead"**. **Corrected 2026-08-10 (W7): it was not dead.**
+That argument assumed a declared `eq` applies to *every* instantiation of its type — which
+**conditional conformance** (a `where` clause on the method, landed after M23) falsifies:
+`fn eq(self, o: Box[T]) -> bool where T: Eq` makes `Box[Q] == Box[Q]` a *same-type* pair the overload
+does **not** cover, so `may_be_equal` waved it through and the type-blind runtime then dispatched into
+a method whose body cannot run (`struct 'Q' has no 'eq' method` — the `checker-superset-of-compiler`
+class; rustc rejects the mirror `impl<T: Ord> PartialEq for Boxy<T>` at compile time with `E0369`).
+The gate is back, as `Checker::eq_overload_applies`, called from `may_be_equal`'s **nominal arm** — the
+one choke point `==`, `!=`, every container/payload nesting, and `in`'s element/key checks all funnel
+through. It early-outs (returns "applies") for a type that declares no `eq` and for the generic-operand
+ordinary-method shape, so structural equality — the common case — is untouched. (What the checker
 *does* own is the hook's SHAPE, at the declaration: `validate_eq_shape` forces a struct/enum `eq` to be
 either `fn eq(self, o: Self) -> bool` or an ordinary method with a generic operand, so the type-blind
 runtime can tell the two apart from a compiler-built table instead of a name lookup.)
@@ -2977,7 +3000,7 @@ failing-then-green test + two-engine (serial + M:N) runtime verify.
   wrong — `std.encoding` is a FILE-BACKED NATIVE module; all members are bodyless `native fn` decls in
   `std/encoding.chz` implemented in `src/native/encoding.rs`. A pure-Chezzi fn there is dead code.)
 
-### 8. Net — *and `std.net` is `--parallel`-only, which is a standing serial≠M:N divergence*
+### 8. Net
 - TCP (`std.net`) + HTTP-client (`std.request`) only. No UDP, no HTTP **server**, no DNS-resolve
   exposed, no raw TLS socket (`request` does HTTPS internally via ureq). Also missing: unix-domain
   sockets, `shutdown()` half-close, socket options (`set_nodelay`, `SO_REUSEADDR`, keepalive),
@@ -2987,11 +3010,32 @@ failing-then-green test + two-engine (serial + M:N) runtime verify.
   serve JSON and could not accept an image. **FIXED by R1** (`Socket.read_bytes`/`write_bytes`, 2026-07-14):
   binary sockets work byte-exactly. HTTP *fetch* of a binary body — a separate, `std.request`-side gap —
   is now **also DONE** via `request.get_bytes` (2026-07-15, byte-exact `into_reader().read_to_end`).
-- **`std.net` requires the M:N engine**: off it, a would-block op returns `Err("read would block:
-  std.net sockets require the --parallel engine")` (`src/vm/netio.rs`). So the same TCP program behaves
-  differently on `--serial` vs the default engine. This is an *accepted design fallback*, not a bug —
-  but it must be written down, because §"Audited residuals" previously claimed the task-stdin bug was
-  "the only known serial≠M:N divergence", and that was **wrong as written**.
+- **`std.net` now works from top-level `main` on the default engine (`W7-40`, 2026-08-10) — and
+  `--serial` is still a deliberate divergence.** The rule is one predicate,
+  `Vm::may_block_socket_in_place` (`src/vm/netio.rs:2044`): a would-block socket op **parks the fiber on
+  the netpoller** when it is on an M:N worker; **blocks the calling thread in place** in exactly two
+  contexts — the pre-existing in-callback demote (`mn.is_some() && native_reentry > 0`) and **top-level
+  `main` on the default engine** (`parallel && eager_core.is_none() && is_counted_party()`); and returns
+  the pre-existing `Err("<op> would block: std.net sockets require the --parallel engine")` everywhere
+  else. Previously the *only* non-error path was the netpoller park, so all four of
+  `read`/`read_bytes`/`write`/`accept` errored whenever `Vm::mn` was `None` — which is *not* "the parallel
+  engine is off" (that is `Vm::parallel`) but "this Vm is not an M:N worker shell" — and the error fired
+  on the DEFAULT engine, so the hello-world TCP server was unwritable. Go blocks `Accept()` on the main
+  goroutine and now so does this.
+- **`--serial` and eager `Executor` jobs keep the `Err`, on purpose, and it is measured.** Blocking in
+  place needs a thread that is *not* also owed to the peer that would make the fd ready. `--serial` has
+  exactly one thread, so blocking it starves the fiber that would connect — a permanent hang with **no
+  escape**, since `--timeout` is rejected alongside `--serial` (`src/main.rs:660`). An eager `Executor`
+  job runs on the bounded process-wide pool (`src/vm/pool.rs:77`, `vm::worker_count`, `src/vm/mod.rs:304`,
+  which never grows), so at `CHEZZI_THREADS=1` a blocking job starves the sibling job that would unblock
+  it. Both were **measured as rc=124 hangs** on a first attempt that blocked everywhere; see `W7-40`.
+  So `std.net` remains a **standing, deliberate serial≠M:N divergence** — the one this file has named
+  since the 2026-07-14 audit — narrowed, not removed.
+- `connect` is the exception and predates all of this: its `mn == None` arm blocks in place on **every**
+  engine (`netio.rs:400-416` → `block_until_connected`, `:501`). Bounded (10 s cap, clamped by
+  `--timeout`), so not a permanent hang — but at `CHEZZI_THREADS=1` a `connect` inside an `Executor` job
+  can pin a pool worker for up to 10 s. Same family as `W7-40`'s R2, an order of magnitude less severe,
+  deliberately left out of scope; see the smaller-items subsection of the 2026-08-10 session log.
 
 ### 9. Date/time — `parse_iso8601` LANDED; `strptime`/`from_string` remain
 **`datetime.parse_iso8601(s: str) -> Result[DateTime]` shipped** (pure-Chezzi, the exact inverse of
@@ -4064,10 +4108,14 @@ on the entry Vm** (`src/vm/netio.rs`, no `swap_ctx`) — so on serial the task r
 entry's stdin while M:N's workers reported EOF: an **accidental serial≠M:N divergence**, the invariant
 the whole parity oracle rests on.
 
-> **Correction (2026-07-14 audit):** this entry used to call it "the only known serial≠M:N divergence".
-> That was wrong. `std.net` is a **standing, deliberate** one — a socket op on the serial engine returns
-> `Err("… requires the --parallel engine")`, so the same TCP program behaves differently on the two
-> engines (see §Net). An accepted design fallback, but a divergence, and the map must say so.
+> **Correction (2026-07-14 audit), still standing as of 2026-08-10:** this entry used to call it "the
+> only known serial≠M:N divergence", and the 2026-07-14 correction answered that `std.net` was a
+> **standing, deliberate** second one. **That is still true.** `W7-40` (2026-08-10) narrowed the
+> divergence — a would-block socket op now blocks in place from top-level `main` on the default engine
+> instead of erroring — but `--serial` deliberately keeps the `Err`, because its single thread is the
+> one that would run the peer, so blocking it is a hang with no escape (measured: rc=124). See §Net and
+> `W7-40`. An earlier draft of this correction claimed the divergence was gone; it was written against a
+> first attempt that was reverted for exactly that reason.
 
 The semantics is now **shared stdin** (Go's `os.Stdin` / Python's `sys.stdin`): ONE source, any task may
 read it, a line goes to **exactly one** task (never duplicated, never dropped), WHICH task gets it is
@@ -8543,3 +8591,692 @@ assert (load can only make a run slower). No action.
 which force an all-`Timeout` sweep with a 1 ms timeout and assert the gate REFUSES to pass. The
 SIGSEGV-stays-a-finding halves are the over-fire fence: without them, demoting every signal would
 leave the SIGKILL tests green.
+
+---
+
+## Session log — 2026-08-10 (external review, batch 1: 6 re-verified findings — 3 FIXED, 3 filed OPEN — plus 2 found while fixing)
+
+Nine independent external testers wrote programs against Chezzi and reported what broke. **Six of the
+findings were re-verified on HEAD `2a27697e`; all six reproduce.** Two are fixed on this branch
+(`W7-39`, `W7-40` — the latter deliberately NARROWER than first attempted); four are filed open
+(`W7-41`, `W7-42`, `W7-43`, `W7-44`). Two more were found while doing the work — `W7-45`, and the
+smaller items in the last subsection.
+
+**Two of the three fixes first written were WRONG, and the full suite was green for both.** `W7-41`'s
+was reverted whole (it rejected every `Box[List]`/`Box[tuple]`/`Box[struct]` `==`); `W7-40`'s over-reached
+and hung `--serial` net programs and starved the shared `Executor` pool, and was narrowed to top-level
+`main` on the default engine. **Both were caught by adversarial review running the PRE-change binary on
+neighbours no test covered — neither by 4164 green tests, nor by two-engine parity, nor by clippy.** The
+common shape: a change that WIDENS what is rejected, or NARROWS when an error is returned, is not
+tested by the suite that passed before it, because the suite contains no example of the thing it newly
+affects. Each row below carries its own version of that lesson.
+
+**The batch's own theme is this file's oldest one, arriving from outside.** All three fixed findings
+are *a rule that held on some arms of a set and not the others*: one nursery seam that installed a
+cancel token without the `scope_ancestors()` half every other seam pairs it with; four of `std.net`'s
+five blocking ops left behind by a fallback `connect` already had; one of the five things a `where`
+receiver bound gates (`<`, `+`, hashing, generic bounds, `==`) that never asked. Wave 6's meta-finding
+— **"a fix applied to SOME arms of an N-way set"** — is still the highest-yield lever, and outside
+testers hit three more instances of it without knowing it had a name.
+
+### W7-39 — a nested `Executor`'s jobs never observed the outer `shutdown_now()` — **FIXED 2026-08-10**
+
+**Repro.** An outer `Executor` submits `outer()`; `outer` creates `inner := Executor()`, does
+`inner.submit(nap)` where `nap` is `time.sleep_ms(8000); print("nap finished")`, then itself sleeps
+8000 ms. `main` sleeps 50 ms, calls `ex.shutdown_now()`, prints `done`.
+
+**Measured, release binary, default (M:N) engine:**
+
+| | output | wall |
+|---|---|---|
+| pre-fix | `done` then **`nap finished`** | **8.005 s** |
+| post-fix | `done` only | **0.056 s** |
+| flat control (no inner executor), both | `done` only | 0.055 s |
+| `--serial`, both | `done` only | 0.054 s |
+
+`--serial` was **already correct** — it queues and drops on `shutdown_now` — so this fix brings M:N
+*into* engine agreement rather than out of it.
+
+**The ancestors are SPLIT, so they did not decide it.**
+
+| ancestor | program | measured |
+|---|---|---|
+| CPython 3.14.6 | nested `ThreadPoolExecutor`, outer `shutdown(cancel_futures=True)` at 50 ms, `wait=False` | the **call** returns at 0.051 s, but the **process** takes **8.037 s** and prints both job lines |
+| CPython 3.14.6 | same, `wait=True` | 8.001 s |
+| Go 1.26.5 | `context.WithCancel(parent)` parent→child, parent cancelled at 50 ms | `outer cancelled at 50ms`, `inner cancelled at 50ms`, main returns at 251 ms |
+
+**CPython does not cancel** — it only declines to block the caller; the non-daemon pool threads are
+joined at interpreter exit. (An external report's "63 ms" measured the *call*, not the process. Measure
+the process.) **Go propagates.**
+
+**What decided it is Chezzi-vs-Chezzi.** Pre-fix, the outer job's OWN `sleep_ms(8000)` *was* cancelled
+at 50 ms — `outer finished` never printed — while the *identical* sleep one executor deeper ran the
+full 8 s. One spelling of one wait had two cancellation rules depending on nesting depth. That is
+`W7-16`'s ruling ("an executor that disagrees with the nursery beside it is the defect") applied one
+level down, and `W7-16` already resolved against CPython on exactly this axis. Go concurs.
+
+**Cause.** `Vm::prepare_eager_job` (`src/vm/sched.rs:4050`) installed `worker.cancel = Some(core.cancel)`
+and left `worker.cancel_outer` empty — **the one seam in the tree that installed a cancel token without
+the `scope_ancestors()` half**, which `spawn_shell` (`sched.rs:875`, `:881`) and `run_one_fiber`
+(`sched.rs:1575-1585`) both pair it with. So an inner executor's jobs carried the chain `[inner.cancel]`
+and could never observe the outer trip; `drain_live_executors` (`src/vm/netio.rs:3579`) then joined the
+un-shut inner core at program exit, which is where the 8 s came from.
+
+**Fix.** The chain is captured at the executor's **construction** (`Op::NewExecutor`,
+`src/vm/exec.rs:2382`) into `ExecutorCore::creator_cancel` (`src/vm/core.rs:775`) and installed from
+the CORE at dispatch (`src/vm/sched.rs:4091`) —
+
+```rust
+// Op::NewExecutor
+creator_cancel: match self.eager_core.is_some() {
+    true => self.scope_ancestors(),
+    false => Vec::new(),
+},
+// prepare_eager_job
+rw.worker.cancel_outer = core.creator_cancel.clone();
+```
+
+**Keyed on the CREATOR, never on the submitter** — the first cut read `self.scope_ancestors()` at
+`submit`, and because an `Executor` crosses the airlock by `Arc` any job can `submit` to any executor
+it can name, so an unrelated executor's `shutdown_now()` killed a job belonging to `main`'s executor
+and `main`'s own graceful `shutdown()` returned with the work silently dropped. Pinned by
+`a_job_submitted_to_mains_executor_survives_another_executors_shutdown_now_mn`.
+
+Gated on `eager_core` so decision **A2**'s "an `Executor` is **detached**" survives intact: detached
+from NURSERIES, not from an enclosing executor job. An executor created by `main` or by a
+`parallel:`/`spawn` fiber gets an EMPTY chain and behaves exactly as before.
+`Vm::scope_ancestors` (`src/vm/exec.rs:1584`) already severs inside a `defer`, so `defer ex.shutdown()`
+in a cancelled job still submits *uncancelled* cleanup. Docs moved in the same change:
+`docs/concurrency.md`'s `shutdown_now()` table row, a measured Python/Go block, a "what detached means,
+precisely" block under A2, and `docs/stdlib.md`.
+
+**Follow-up, same branch: the inherited chain is STICKY, and that made a later `submit` VANISH.**
+`creator_cancel` is set once and never reset — deliberate, and Go-consistent (a derived
+`context.WithCancel(parent)` stays cancelled once the parent is). The consequence is that after the
+creating job's executor is `shutdown_now`-ed, *every* job the inner core later dispatches starts
+already-cancelled and dies at its first checkpoint. It did so **silently**: the handle is a value, so
+`main` may hold the only reference, and `main`'s own graceful `shutdown()` — which promises to wait for
+its work — returned having run nothing:
+
+```chezzi
+fn work():
+    time.sleep_ms(10)          # a cancellation checkpoint — REQUIRED to observe this
+    print("inner job ran")
+fn jobber(ch: Channel[Executor]):
+    inner := Executor()
+    ch.send(inner)
+    time.sleep_ms(2000)
+ch := Channel[Executor](1)
+outer := Executor()
+outer.submit(fn(): jobber(ch))
+inner := ch.recv()
+time.sleep_ms(50)
+outer.shutdown_now()
+inner.submit(work)
+inner.shutdown()
+print("main done")
+```
+
+→ pre-fix `main done`, **rc=0**, `inner job ran` never printed; with `outer.shutdown()` (graceful) the
+same program printed `inner job ran` / `main done`. **Keep the stickiness, drop the silence:** a
+`submit` whose inherited chain is already tripped now FAULTS, reusing the existing post-shutdown reject
+(`src/vm/netio.rs:3382-3387`, the advisory pre-wiring check in `executor_method`) —
+`submit on an Executor whose creating job was cancelled (it no longer accepts work)`. The core's OWN
+`cancel` is deliberately not checked there: `shutdown_now` sets `shut` first, so the neighbouring
+message already owns that case and adding it would double-report. `--serial` never sets `eager_core`,
+so `creator_cancel` is always empty there — no parity delta. Pinned by
+`submit_to_an_executor_whose_creating_job_was_cancelled_faults_mn` plus two negative controls (graceful
+outer shutdown; an executor created by `main` after an unrelated `shutdown_now`).
+
+**The checkpoint trap — a test written without one is a FALSE GREEN.** With `work` a bare `print` and
+no `sleep_ms`, the job finishes before reaching any cancellation point (D4 is cooperative, not
+pre-emptive) and the bug does not show at all. This trap already burned this branch once.
+
+**Lesson — a one-line install is only safe once you have checked every path that WRITES the same
+field.** `run_one_fiber` (`sched.rs:1575-1585`) unconditionally overwrites **both** `cancel` and
+`cancel_outer` on every fiber swap-in. It does not clobber this install only because an eager job runs
+through `ReadyWorker::run_outcome` → `invoke` directly on the pool thread and never enters the fiber
+scheduler. Had eager jobs been fibers, the fix would have been silently overwritten and the test would
+have stayed red with no indication why.
+
+### W7-40 — `std.net`'s blocking ops worked only on an M:N worker fiber, so the hello-world TCP server could not be written — **FIXED 2026-08-10 (narrowed, after a first attempt was measured to cause two hangs)**
+
+**Repro.** `net.listen("127.0.0.1:PORT")` then `l.accept()` from top-level `main`, **default engine**:
+
+```
+listening
+Err('accept would block: std.net sockets require the --parallel engine')
+```
+
+…while running the parallel engine. Same inside an eager `Executor` job. Sockets worked only inside a
+`spawn`, which was documented nowhere — and the `spawn` workaround self-deadlocks in the obvious shape
+(see the last subsection).
+
+**Ancestor — Go, measured.** `net.Listen` + `ln.Accept()` **on the main goroutine**, dialer in a
+`go func()` after 50 ms:
+
+```
+[   0.1ms] listening on 127.0.0.1:38541 (main goroutine)
+[   0.1ms] calling ln.Accept() on the main goroutine...
+[  50.5ms] dialed
+[  50.5ms] Accept() returned: 127.0.0.1:58036
+[  50.5ms] Read() -> "hi" err=<nil>
+```
+
+Accept blocks and succeeds. Chezzi errored.
+
+**Cause — a field whose name reads as a global mode but is not one.** `Vm::mn` is assigned in **exactly
+one place**, `Vm::spawn_shell` (`src/vm/sched.rs:877`; `Vm::new` sets `mn: None`, `src/vm/exec.rs:169`).
+So `mn.is_some()` means *"this Vm is an M:N worker SHELL"* — **not** *"the parallel engine is on"*, which
+is the separate `Vm::parallel` (default `true`). `main` runs `vm.run()` on the host thread and eager
+`Executor` jobs come from `Vm::new`; neither has `mn`. `park_on_fd` parks only under
+`mn.is_some() && native_reentry == 0`, so both fell straight through to the error return.
+
+**`connect` already handled this** — it has had an explicit `mn == None` arm calling
+`block_until_connected` (`src/vm/netio.rs:400-416`, `:501`) — and only `read`/`read_bytes`/`write`/
+`accept` were left behind. The `W7-22` meta-shape again: a fix applied to some arms of an N-way set.
+(`connect`'s arm is *broader* than what shipped for the other four — it blocks on every engine — which
+is its own smaller item, recorded in the smaller-items subsection below.)
+
+**The first attempt over-reached, and was measured to cause two regressions.** It deleted the four
+gates outright and let every non-worker context block in place, on the argument that a caller with no
+`mn` "owns its thread". **That argument is false for two of the contexts it newly covered**, and its own
+doc comment asserted it.
+
+**R1 (critical — a clean `Err` became a permanent hang).** `--serial` has exactly ONE thread, and
+blocking it starves the very fiber that would make the fd ready. Measured on the over-reaching binary:
+
+| program | pre-change | over-reaching version |
+|---|---|---|
+| `timeout 15 chezzi run --serial examples/echo_server.chz` | rc=0 | **rc=124** |
+| `timeout 15 chezzi run --serial examples/socket_timeout.chz` | rc=0 | prints `accept: timeout`, then **rc=124** |
+
+**No escape exists**: `--timeout` is rejected alongside `--serial` (`src/main.rs:660`), and no other
+fiber can run to deliver a cancel.
+
+**R2 (high — same shape, on the shared pool).** An eager `Executor` job does **not** own its thread: it
+runs on the bounded, process-wide pool (`pool::submit`, `src/vm/pool.rs:77`; sized by
+`vm::worker_count()`, `src/vm/mod.rs:304`, which never grows), and the `mn.is_none()` path skipped
+`demote_socket_enter`, so no replacement worker was spun. Measured at `CHEZZI_THREADS=1`: job A
+`accept`s, job B (submitted after) `connect`s → **rc=124**; at ≥2 threads it passed. It also starves
+`parallel:` nurseries sharing that pool.
+
+**What actually shipped — one predicate, `Vm::may_block_socket_in_place` (`src/vm/netio.rs:2044`):**
+
+```rust
+(self.mn.is_some() && self.native_reentry > 0)                   // the original in-callback demote
+    || (self.parallel && self.eager_core.is_none() && self.is_counted_party())
+```
+
+`is_counted_party()` (`netio.rs:1985`) is `owns_os_thread() && native_reentry == 0`, and
+`owns_os_thread()` (`:2000`) is `mn.is_none() && mn_enlist_sched.is_none() && scheduler_stack.is_empty()`
+— so the second disjunct is **top-level `main` on the default engine, and nothing else**. The four ops
+(`netio.rs:617`, `:817`, `:959`, `:1089`) restore the **verbatim** pre-existing
+`Err("<op> would block: std.net sockets require the --parallel engine")` for every other context.
+`Vm::demote_block_socket` keeps its `Option<Arc<MnSched>>` (`src/vm/sched.rs:1352-1358`, `:1379-1383`,
+`:1414-1416`) — that is exactly what lets `main` use the loop, whose wait is engine-neutral anyway
+(`wait_fd_ready` is `libc::poll(2)` on the raw fd, not the netpoller). `connect` is untouched.
+
+**So the shipped scope is: `accept`/`read`/`read_bytes`/`write` from top-level `main` on the default
+engine now BLOCK and succeed (Go-identical). `--serial` and eager `Executor` jobs keep the immediate
+`Err`.** The `std.net` serial≠M:N divergence this file has named since 2026-07-14 is **narrowed, not
+closed** — R1 is the measured reason it must stay: on a single-threaded engine there is no peer to make
+the fd ready. (§Net and §"Audited residuals" wave-5 item 0 both say so; an earlier draft of this row and
+of both of those claimed the divergence was gone, written against the reverted attempt.)
+
+Two consequences that DO hold, within that scope: a never-ready fd on `main` is now a **HANG** rather
+than an `Err` (Go-identical; the escapes are the op's own `timeout_ms` and cancel), and a socket-blocked
+`main` is deliberately **not** registered as a quiescence party — the `time.sleep_ms` precedent, since a
+registered wait on *external* readiness is a false-deadlock generator, so it can only ever delay someone
+else's deadlock verdict, never fabricate one (`parked-is-not-stuck`).
+
+**Verified post-narrowing, release binary.** `--serial`: `echo_server` rc=0, `socket_timeout` rc=0 (now
+printing the two engine `Err` lines), `echo_server_spawn` rc=0. Default engine: all three unchanged.
+`CHEZZI_THREADS=1` executor shape: rc=0 in **6 ms** with a prompt `Err`. Accept-on-`main` with an
+external `python3` peer: `accepted` / `Ok('hi')` on the default engine, the `Err` on `--serial`.
+`cargo test --lib` **3952 passed**, clippy clean. The in-callback demote fences (`d5_owe3_path_c_*`,
+`net_read_timeout_bounds_the_in_callback_demote_path`) and the three `W7-18`
+`timeout_aborts_a_netpoller_*` fences stay green. **The narrowed behavior is now pinned by tests that
+assert the `Err` verdict on `--serial` and inside an `Executor` job**, so the next person who widens
+this has to face them.
+
+**Lesson — a change that NARROWS when an error is returned is not tested by the suite that passed
+before it.** The full suite was **green with both regressions present**, because nothing tested sockets
+on `--serial` and nothing tested a socket op inside an `Executor` job under a constrained pool: the
+suite has no example of the context the change newly affects, which is definitionally true of every
+error-narrowing change. Both regressions were caught by **adversarial review running the PRE-change
+binary** — not by 4164 tests, not by two-engine parity, not by clippy. This is `W7-41`'s twin: same
+day, same branch, same failure mode (a green gate over an unexercised context), and in both cases the
+only detector that worked was measuring the old binary against the new one on a program neither the
+suite nor the report contained.
+
+**Second lesson, from the brief — a "this branch is dead" argument that is off by one quantifier
+deletes the right code and teaches the wrong invariant.** The work was briefed as *"the four gates are a
+tautology — reaching them implies `mn.is_none() || native_reentry > 0`, so their `else` is dead"*.
+**False as stated.** `mn.is_some() && native_reentry > 0` is not implied by
+`mn.is_none() || native_reentry > 0`; the `else` is reached on exactly `mn.is_none()`, which is not dead
+at all — it is both the bug's surface AND, for `--serial` and `Executor` jobs, the surface that had to
+be preserved. Acting on the brief as written is what produced R1 and R2. Third, smaller:
+`socket_read`'s call sits inside a `loop`, so it must stay a `return` where the other three are tail
+expressions — converting all four uniformly is an `E0308` build error, which is the good outcome.
+
+### W7-41 — a `where` receiver bound is enforced for `<`, `+`, hashing and generic bounds but NOT for `==` — **OPEN (fix attempted 2026-08-10, reverted the same day)**
+
+> **READ THIS FIRST.** A fix for this row was written, passed the entire suite (`cargo test --lib` 3952,
+> `chezzi test tests/chz/` 424 on both engines, clippy clean) with the repro correctly rejected — and
+> **broke working programs en masse.** Adversarial review caught it by running the *pre-change* binary
+> on neighbours no test covered. The guard was "type declares `eq` ⇒ require `satisfies(ty, "Eq")`";
+> `Eq` is granted intrinsically to only the four scalars (`src/checker/proto.rs:1541`), so `where T: Eq`
+> is **unsatisfiable for every type whose `==` is structural**, and with
+> `fn eq(self, o: Box[T]) -> bool where T: Eq` these all printed `true` before and became
+> `cannot compare … for equality`: `Box([1,2])`, `Box((1,2))`, `Box(b"ab")`, `Box(Some(1))`,
+> `Box(P(1))` for any plain struct `P`.
+>
+> **The prerequisite is therefore NOT a guard on the equality path.** It is making `Eq` satisfaction
+> agree with what `==` actually accepts — which touches every `satisfies(_, "Eq")` caller and is its own
+> milestone. Three further traps, all still live for the next attempt:
+> 1. The guard must not fire on the in-tree **ordinary-method escape hatch** (`enum Opt[T]: fn eq(self, x: T)`,
+>    `struct H[T]: fn eq[U](self, o: U)`) — those are not `(self, Self) -> bool`, so `satisfies` fails on
+>    legal code. It needs the `Ty::Param`/`Unknown` operand test mirroring `validate_eq_shape`.
+> 2. A **one-sided** guard is an asymmetry hole: `n == m` plus co-inhabitable args ≠ identical args (the
+>    `int`/`float` and `bytes`/`bytearray` cross arms recurse in), so it must gate both operands.
+> 3. **The obvious fixture does not exhibit the bug.** An `eq` body of `self.val == o.val` falls back to
+>    structural equality and exits 0. The fault needs a body that calls the *bounded* operation
+>    (`self.compare(o)` → `<`, or `.hash()`). A test written from the fixture alone is a false green —
+>    one was.
+>
+> **Meta-lesson (the repo's own `rule-fires-is-not-rule-is-right`): a new checker REJECT must be proven
+> against its own premise — run the PRE-change binary on the `ok()` neighbours the premise implies, not
+> only on the case being fixed.** A green suite proves nothing about a widening; this suite contained no
+> `where T: Eq` over a non-scalar, so it could not.
+
+**Repro** — check-clean, then a runtime fault: the `checker-superset-of-compiler` soundness class, which
+two-engine parity is structurally blind to.
+
+```chezzi
+struct Tag:
+    n: int
+
+struct Box[T]:
+    val: T
+    fn compare(self, other: Self) -> int where T: Comparable:
+        if self.val < other.val:
+            return -1
+        return 0
+    fn eq(self, other: Self) -> bool where T: Comparable:
+        return self.compare(other) == 0
+
+a := Box(Tag(1)); b := Box(Tag(2))
+print(a == b)
+```
+
+```
+chezzi check → ok: no type errors
+chezzi run   → runtime error (line 8, col 12): struct 'Tag' has no 'compare' method
+                 at compare (called at line 13) / at eq (called at line 18)
+```
+
+It leaked identically through `!=`, `[a] == [b]`, `Some(a) == Some(b)`, and (separately) `in`.
+
+**Ancestor — Rust owns conditional conformance. `rustc 1.97.0`, verbatim on the mirror
+`impl<T: Ord> PartialEq for Boxy<T>`:**
+
+```
+error[E0369]: binary operation `==` cannot be applied to type `Boxy<Tag>`
+note: an implementation of `Ord` might be missing for `Tag`
+help: consider annotating `Tag` with `#[derive(Eq, Ord, PartialEq, PartialOrd)]`
+```
+
+Positive control (`Boxy(1) == Boxy(2)`) compiles and prints `false`. **Compile-time rejection, and a
+satisfying instantiation still works** — which is the shape the fix has to reproduce.
+
+**Cause — a deliberate deletion that went stale under a later feature.** `<` and `+` route through
+`ordering_allowed`/`op_overload_result` → `satisfies` → `satisfies_methods`, whose `where_bounds` walk
+fires. `==` routes through `may_be_equal` (`src/checker/proto.rs:813`), whose nominal arm compared
+**name + arity + arg co-inhabitance only** and never called `satisfies`. `proto.rs` and `pattern.rs`
+both carried the argument that *"a user `eq` overload adds NOTHING to ask here: it only ever applies to
+a same-type pair, which `may_be_equal` already accepts"*, and this file called the deleted
+`equality_allowed` disjunct **"provably dead"**. **Conditional conformance — a `where` clause on the
+method, landed after M23 — invalidates exactly that premise:** `Box[Tag] == Box[Tag]` IS a same-type
+pair whose `eq` does not cover it. (The prose at §"what the checker owns for `==`" is corrected in the
+same commit.)
+
+**The attempted fix, and the measurement that killed it.** Checker-only (the runtime dispatches off the
+operands' heap tags and is type-blind by design): a `Checker::eq_overload_applies` called on both
+operands from `may_be_equal`'s nominal arm, plus `|| !self.may_be_equal(…)` on the `In` arm's list/set
+element and map key checks. One guard, closing `==`, `!=` and every container/payload nesting, because
+`List`/`Set`/`Option`/`Map`/`Result`/`Tuple` all recurse into that single arm. It **rejected the repro
+correctly** and passed everything: `check` reported 3 errors (direct, `!=`, `List` nesting),
+`chezzi test tests/chz/` **424 passed on both engines**, `cargo test --lib` **3952 passed**, clippy clean.
+
+**And it broke working programs.** The guard's core was *"the type declares an `eq` ⇒ require
+`satisfies(ty, "Eq")`"*. `Eq` is granted intrinsically to **only the four scalars**
+(`src/checker/proto.rs:1541`), so `where T: Eq` is unsatisfiable for every type whose `==` is
+structural. With `fn eq(self, o: Box[T]) -> bool where T: Eq`, measured against the pre-change binary:
+
+| program | pre-change | with the guard |
+|---|---|---|
+| `Box([1,2]) == Box([1,2])` | `true` | `cannot compare Box[List[int]] and Box[List[int]] for equality` |
+| `Box((1,2)) == Box((1,2))` | `true` | rejected |
+| `Box(P(1)) == Box(P(1))`, plain struct `P` | `true` | rejected |
+| `Box(b"ab") == Box(b"ab")`, `Box(Some(1)) == …` | `true` | rejected |
+
+**Reverted.** The prerequisite is not a guard on the equality path — it is making `Eq` satisfaction
+agree with what `==` actually accepts, which touches every `satisfies(_, "Eq")` caller and is its own
+milestone.
+
+**Three traps for the next attempt, all measured.**
+
+1. **The obvious guard over-fires** beyond the `Eq`-grant problem: it also rejects the ordinary-method
+   escape hatch that already exists in-tree (`enum Opt[T]: fn eq(self, x: T)`,
+   `struct H[T]: fn eq[U](self, o: U)`). Those signatures are not `(self, Self) -> bool`, so `satisfies`
+   fails and `Opt[int] == Opt[int]` is rejected. Needs the `Ty::Param`/`Unknown` operand test mirroring
+   `validate_eq_shape`.
+2. **A one-sided guard is an asymmetry hole.** `n == m` plus co-inhabitable args is NOT identical args —
+   the `int`/`float` and `bytes`/`bytearray` cross arms recurse in — so a left-operand-only guard gives
+   `Box(1) == Box(1.0)` and `Box(1.0) == Box(1)` different verdicts off one hook. Gate both operands.
+3. **The obvious fixture does not exhibit the bug.** An `eq` body of `self.val == o.val` falls back to
+   structural equality on the payload and exits 0; the runtime fault needs a body that calls the
+   *bounded* operation (`self.compare(o)` → `<`, or `.hash()`). A test written from the fixture alone is
+   a false green — the reverted change shipped exactly that test, with a docstring quoting a fault its
+   own fixture never produced.
+
+**The meta-lesson, and it is this repo's `rule-fires-is-not-rule-is-right`: a new checker REJECT must be
+proven against its OWN PREMISE — run the pre-change binary on the `ok()` neighbours the premise implies,
+not only on the case being fixed.** A green suite proves nothing about a widening: this suite contained
+no `where T: Eq` over a non-scalar, so it was structurally incapable of catching the regression, exactly
+as two-engine parity is structurally incapable of catching the underlying soundness bug. The precedent
+is the **protocol-embeds** row above — a widening whose negative control was skipped shipped fully green
+with a soundness hole. This one skipped the *pre-change* half of the control and shipped the mirror
+image: a rejection with no soundness hole and no legal program left standing.
+
+### W7-42 — a top-level `:=` re-declaration retypes a LIVE binding, so the checker validates a different program than the one that runs — **OPEN**
+
+**Repro** — check-clean, then a `-> int` function returns a `str`:
+
+```chezzi
+x := 1
+f := fn() -> int: x
+x := "9"
+print(f())      # 9   ← a str, out of a fn declared `-> int`
+y: int = f()    # accepted
+print(y + 1)    # runtime error: cannot apply Add to str and int
+```
+
+Inside a `fn` body the same program correctly prints `1`. **Module top level only — i.e. exactly where
+scripts live.**
+
+**Cause, both halves.** The checker models re-declaration as *retype one binding*: `Checker::declare`
+(`src/checker/setup.rs:1747`) is an unconditional `insert` with no "already present?" branch. The
+compiler models it **two different ways**: `collect_globals`'s `add` closure
+(`src/compiler/mod.rs:940-945`) is idempotent BY NAME, so the second `x` reuses the first `x`'s slot and
+a closure's late-bound `GetGlobalSlot` reads the new value; while `FnComp::add_local`
+(`src/compiler/mod.rs:6512`) always pushes a FRESH slot, so a fn-local re-declare is a new cell. **The
+checker agrees only with the local backend.** `setup.rs:1912-1917` already names this exact class in
+`is_local_binding`'s doc comment — *"the checker would validate a different program than the one that
+runs"* — for a neighbouring case.
+
+**The ancestors disagree with each other, so this needs a DECISION, not a lookup.**
+
+| ancestor | verdict |
+|---|---|
+| Python | prints `9` — late binding. Chezzi's *value* matches its scripting ancestor; the defect is specifically that `f` is declared `-> int` and the annotation is a lie |
+| Go | rejects same-scope `:=` re-declaration outright (*"no new variables on left side of :="*) |
+| Rust | shadows with a fresh binding — which is what Chezzi's fn-local path already does |
+
+**Planning decision, to be re-validated against all three before implementing:** reject a module-scope
+`:=` re-declaration that **changes the type**. That preserves Python's late binding for same-type
+rebinds and rejects only the unsound case. Cost: legal in a fn, rejected at top level — an asymmetry
+that must be written into `docs/syntax.md`, which today is silent on ordinary re-declaration (only the
+`const` carve-out at `syntax.md:248-251` is documented). The alternative — a fresh global slot per
+re-declaration, matching the fn-local path and Rust — is semantically cleaner but touches the
+global-slotting perf seam and the late-bound-by-name read path.
+
+### W7-43 — `?.` / `??` on a `Result` emits three errors naming variants the user never wrote — **OPEN**
+
+**The single most-hit papercut in the external review** — four separate testers hit it, one of them four
+times in 30 programs.
+
+```chezzi
+fn f() -> Result[str, str]:
+    return Ok("hi")
+fn main() -> Result[int, str]:
+    n := f()?.len()
+```
+
+```
+type error (line 5, col 10): 'Some' is not a variant of Result
+type error (line 5, col 10): 'None' is not a variant of Result
+type error (line 5, col 10): non-exhaustive match on Result: missing Err, Ok
+```
+
+`f()? .len()` — **one space** — works. Three errors for one mistake, and **none of them names `?.`**.
+
+**Cause.** The lexer merges `?.` when adjacent, type-blindly (`src/lexer/mod.rs:819-829`).
+`Desugar::lower_carrier` (`src/desugar/mod.rs:1230-1308`) then lowers it to a `Match` with hard-coded
+`Some`/`None` arms, **before any typing** (desugar runs from `resolver::build_graph`). The checker only
+ever sees a `Match` on a `Result` with `Some`/`None` arms and reports accordingly — all three
+diagnostics on the `OptChain` span.
+
+The spaced/unspaced split is deliberate and documented (`docs/syntax.md:2474-2486`), so the *semantics*
+are not necessarily wrong. **The diagnostics are.**
+
+**Seam for the fix, and why it is structural.** The decision needs types, and the current lowering site
+has none. **`ExprKind::Try` is the precedent**: it survives to the checker and is resolved by operand
+type there (`Checker::infer_try`, `src/checker/pattern.rs:3095`) and by runtime value in the VM
+(`Op::Try`, `src/vm/exec.rs:1888` → `Vm::do_try`, `src/vm/stmt.rs:120`), with no desugaring at all. So:
+stop lowering `OptChain`/`NullCoalesce` in desugar and retire the two `unreachable!()`s that currently
+assert the node is dead (`src/checker/pattern.rs:1351-1353`, `src/compiler/mod.rs:3802-3804`).
+
+- **Minimal version** — keep Option-only semantics, emit **ONE** error naming `?.` (e.g. *"`?.` applies
+  to an Option; on a Result write `x? .field`"*). Still pays the structural cost of keeping the node
+  alive to the checker, minus the compiler work.
+- **Full version** — `?.` on a `Result` means `?` then `.`. Additionally needs `infer_try`'s
+  enclosing-fn-return-kind gate (`pattern.rs:3149-3158` and the `match` under it) and its `recover:` /
+  `defer:` cases (`pattern.rs:3100-3131`, `:3138-3147`), because `x?.f` on a `Result` is a **real early
+  return** where the Option form is a pure expression. **That interaction is the cost centre, not the
+  parsing.**
+
+Either way `docs/syntax.md:2474-2486` and `docs/grammar.bnf:580-585` state the Option-only rule and move
+with it.
+
+### W7-44 — the documented secrets surface is dead off Linux, and `uuid.v4()` is not a CSPRNG on ANY platform — **OPEN**
+
+**Two defects, one module family.**
+
+1. **`crypto.secure_bytes` / `crypto.token_hex` are dead on macOS and Windows.**
+   `secure_random_bytes` (`src/native/crypto.rs:514`) has a
+   `#[cfg(not(target_os = "linux"))]` arm (`:547-553`) returning
+   `Err("secure_bytes: no secure entropy source on this platform")`. That is the whole documented
+   `secrets` equivalent, with **no caveat anywhere in the docs**. The fail-closed choice is right; the
+   missing platform wiring and the missing doc caveat are not.
+2. **`uuid.v4()` is predictable from two observed outputs — and this is true on Linux too** (stronger
+   than the external report, which only flagged the non-Linux seed). `v4` (`src/native/uuid.rs:74`) is
+   `with_state(|s| (next_u64(s), next_u64(s)))` over a **64-bit SplitMix64** state. SplitMix64 is
+   **invertible**, so two observed UUIDs recover the generator state and predict every subsequent one —
+   *regardless of how the seed was obtained*. Off Linux the seed is additionally just `nanos ^ addr`
+   (`uuid.rs:41-47`). `docs/stdlib.md:952` says the stream is *"auto-seeded from OS entropy"* with no
+   platform caveat and **no "not for security" warning**, while `:943-945` already warns correctly about
+   MD5/SHA-1 — the file has the right shape to copy.
+
+**Split the work.**
+
+- **(a) Docs, cheap, should not wait:** an explicit *"`uuid.v4()` is NOT cryptographically secure — use
+  `crypto.token_hex` for secrets"* warning, plus the Linux-only caveat on
+  `crypto.secure_bytes`/`token_hex`.
+- **(b) Its own task:** wire a portable entropy source (`getentropy(3)` on BSD/macOS,
+  `BCryptGenRandom` on Windows), and/or reseed `uuid` from it per draw.
+
+**Ancestor to measure once (a) lands:** Python's `secrets` and `uuid.uuid4()` both draw from
+`os.urandom` on **every** platform; Go's `crypto/rand` likewise. Neither ships a 64-bit-state UUID.
+
+### W7-45 — the `where`-bound hole `W7-41` closed for `==` is still open on every builtin whose runtime is `values_equal` — **OPEN**
+
+**Confirmed by RUNNING, all check-clean then runtime-fault**, with `W7-41`'s `struct Box[T]` carrying
+`fn eq(...) where T: Comparable` over a non-`Comparable` `Tag`:
+
+| expression | result |
+|---|---|
+| `[a].contains(b)` | `runtime error: struct 'Tag' has no 'compare' method` |
+| `[a].index_of(b)` | same |
+| `[a, b].dedup()` | same |
+| Set insert / `.add(...)` | same — **but only on a hash collision** (with distinct hashes no `eq` runs and it silently succeeds) |
+| Map key insert | same, same collision caveat |
+
+**Cause.** These have a runtime of `values_equal` but a checker signature validated only by
+`assignable`, so `may_be_equal` — and therefore `W7-41`'s new guard — is never consulted.
+
+**Two corrections to the surface as first listed.** `List.count` takes a **predicate**
+(`fn(T) -> bool`, `std/prelude.chz:87`), so it never routes through `values_equal`; and `List.remove`
+**does not exist** (`type List[…] has no method 'remove'` — the method is `remove_at`,
+`std/prelude.chz:80`). Both are non-issues.
+
+**Caveat for whoever builds the repro** — this one is easy to get a false green on. The fault needs an
+`eq` **body that actually uses the bound**: an `eq` doing only `self.val == other.val` falls back to
+structural equality on `Tag` and returns a **wrong-but-not-faulting** answer. And `[a].contains(a)` hits
+the identity shortcut in `values_equal_guarded` and never dispatches at all. **The silent-wrong-answer
+variant is arguably the worse half of this row.**
+
+### W7-46 — a spawned fn's returned `Err` is silently discarded, while a raw fault aborts the nursery — **OPEN**
+
+Found while verifying `W7-40`'s narrowing, and it independently reproduces an item from the same
+external review ("spawned `Err` silently swallowed by the nursery — breaks the repo's own
+`echo_server_spawn.chz`"). **Confirmed by running.**
+
+**Repro — the repo's own example lies about what it did.** `examples/echo_server.chz` spawns
+`acceptor(server, n) -> int!`. On `--serial` every socket op returns the engine `Err` (`W7-40`'s
+deliberate divergence), `?` turns each into an `Err` **return value**, the nursery **discards it**,
+`run()` returns `Ok(0)`, and the program prints:
+
+```
+echo server handled 50 connections
+```
+
+rc=0 — having handled **zero**. The example is **vacuously green**, and so is any test asserting that
+line.
+
+**The asymmetry is the finding: a raw FAULT in a spawn DOES propagate.** Measured, both engines
+identically:
+
+```chezzi
+fn boom():
+    xs := [1]
+    print(xs[99])
+fn main():
+    spawn:
+        boom()
+    print("main done")
+main()
+```
+
+→ `main done`, then `runtime error (line 3, col 11): index 99 out of bounds (len 1)`, **rc=1**. So the
+nursery propagates a fault and drops an `Err` value: **its two error channels disagree with each
+other.**
+
+**The question, deliberately not answered here — measure the ancestors first.** Go's bare `go func()`
+also drops a returned `error` (which is why `errgroup` exists), but Python's `asyncio.TaskGroup`
+propagates an exception. **Chezzi's `Result` is a value, not an exception**, so "dropped" may well be
+Go-consistent and the real defect may be only the *disagreement* between the two channels — in which
+case the fix is to make the fault path match, not the `Err` path. Run both reference programs before
+deciding; do not resolve this from the shapes alone.
+
+**Independent of that decision:** `examples/echo_server.chz` and `examples/echo_server_spawn.chz` need
+fixing **either way**, because they currently claim a success they did not achieve. A golden example
+that prints a hard-coded count it never verified is the same defect class as `W7-38`'s "a real bug
+reported as a non-finding", in the examples rather than the oracle.
+
+### W7-47 — `os.exit` does not terminate the process while `main` is blocked in a socket op — **OPEN**
+
+**Repro.** An eager `Executor` job calls `std.os.exit(3)` while `main` sits in `accept()`:
+
+```chezzi
+import std.net
+import std.concurrency
+import std.os
+import std.time
+
+fn bail():
+    time.sleep_ms(50)
+    print("job calling os.exit")
+    os.exit(3)
+
+fn main():
+    ex := Executor()
+    ex.submit(bail)
+    match net.listen("127.0.0.1:8807"):
+        Ok(l):
+            print("listening")
+            print(l.accept())
+        Err(e): print("listen err", e.message())
+
+main()
+```
+
+**Measured, release binary, default (M:N) engine, under `timeout 12`:**
+
+| | output | rc |
+|---|---|---|
+| Chezzi | `listening`, `job calling os.exit` | **124 (hang)** |
+| Go 1.26.5, same shape (`go func(){ …; os.Exit(3) }()` + `ln.Accept()` on main) | `listening`, `goroutine calling os.Exit` | **3, immediately** |
+
+The job's marker prints, so `os.exit` ran — and then nothing happens. **Go's `os.Exit` is immediate
+from any goroutine**, so this is an ancestor divergence on a seam Go owns.
+
+**Cause (pointer, not a fix).** `std.os.exit` inside an eager job does not touch the process: it sets
+the worker's `pending_exit` (`src/vm/mod.rs:4137`), which `ReadyWorker::run_outcome`
+(`src/vm/mod.rs:3461-3472`) turns into a `TaskOutcome::Exit { code, … }`. That outcome is a value
+somebody must **observe** — it is surfaced only when the executor is joined (`shutdown()` /
+`join_eager_jobs`, or the program-exit drain). A `main` blocked forever in `accept()` never reaches
+either, so the halt sits in a slot nobody reads. `os.exit` from a job is therefore a *deferred* halt
+handed up through a join, where Go's is a process-immediate `exit(2)`.
+
+**Pre-existing in NATURE, newly OBSERVABLE.** This is an `os.exit` defect, not something `W7-40`
+introduced: the deferred-through-the-join plumbing is unchanged. But before `W7-40` an `accept()` on
+top-level `main` returned the immediate `Err("… requires the --parallel engine")`, so `main` could not
+block indefinitely and the deferral always resolved. `W7-40` made `main` able to block on a socket at
+all, which is what turns "deferred" into "never". Related, same root: `join_eager_jobs` is an untimed
+condvar wait (see the smaller-items subsection below), so the two uncancellable waits compound.
+
+**Not investigated:** whether `os.exit` from a `parallel:`/`spawn` fiber has the same deferral (the
+nursery join is a different seam), and whether the fix belongs at the `os.exit` native (halt the
+process directly, Go-style) or at the blocking waits (make them observe a process-wide exit flag). The
+first is smaller and matches the ancestor; the second is what `--timeout`/cancel would want anyway.
+
+### Safe-direction observations and smaller items (2026-08-10)
+
+- **`net.connect` blocks in place on EVERY engine**, and `W7-40` deliberately did not narrow it. Its
+  `mn == None` arm (`src/vm/netio.rs:400-416` → `block_until_connected`, `:501`) predates all of this.
+  It is **bounded** — a 10 s cap, clamped by `--timeout` — so it is not a permanent hang like the two
+  regressions `W7-40`'s first attempt caused. But at `CHEZZI_THREADS=1` a `connect` inside an
+  `Executor` job can pin a pool worker for up to 10 s: **the same family as `W7-40`'s R2, an order of
+  magnitude less severe**, left out of scope so the narrowing stayed a narrowing. If it is ever fixed,
+  the shape is the same one `W7-40` shipped — route it through `Vm::may_block_socket_in_place`
+  (`netio.rs:2044`) instead of the bare `mn == None` test, which gives it the `--serial` and
+  eager-`Executor` `Err` for free.
+- **`join_eager_jobs` is an untimed condvar wait.** `src/vm/sched.rs:4106-4117` is
+  `while g.outstanding() > 0 { g = core.eager_cv.wait(g) }` — **no cancel-flag check and no `deadline`
+  check**. A job blocked in an inner `shutdown()` is therefore uncancellable and ignores `--timeout`. A
+  partial mitigation already exists: `block_party_guard` registers the joiner with `quiesce`
+  (`sched.rs:4107`), so a genuine process-wide deadlock is still detected. What is uncovered is
+  **cancellation** and the **wall-clock cap**. Found while fixing `W7-39`; deliberately not fixed there
+  (a different seam, and a bounded wait wants its own failing-then-green test on both engines).
+- **A bare top-level `spawn:` does not start until end-of-main.** Measured on the release binary, both
+  engines:
+
+  ```chezzi
+  print("A")
+  spawn:
+      print("SPAWNED")
+  time.sleep_ms(300)
+  print("B")
+  ```
+
+  → `A`, `B`, `SPAWNED`. The spawned block does not run during a 300 ms sleep; it is deferred to the
+  implicit end-of-main join. **Go's `go func()` starts immediately**, so this is a candidate ancestor
+  divergence on the seam Go owns. **Not yet investigated: whether it is documented deliberate behavior**
+  — grep `docs/concurrency.md` for the nursery-less `spawn` contract before filing it as a defect; if it
+  IS documented, it is a documented-behavior note, not a bug. It surfaced because a `spawn`-based TCP
+  repro self-deadlocked: `l.accept()` on `main` waits on a dialer queued behind the end-of-main join.
+- **Stale doc comment (trivial).** `src/vm/exec.rs:1530`'s comment lists `op_sock_park` as one of the
+  cancellation checkpoints. `grep -rn "sock_park\|SockPark" src/` returns **exactly one hit — the comment
+  itself**. No such function, opcode or variant exists.

@@ -7,9 +7,9 @@
 # injects a live fiber into the running scheduler (not queued for the join), so the handler runs
 # now, not after the loop. The inner nursery joins (waits for every handler) when the loop ends.
 #
-# Per-connection spawn parks on the netpoller and is M:N-only, so run on --parallel:
+# Per-connection spawn parks on the netpoller, which needs the default (M:N) engine:
 #
-#   chezzi run --parallel examples/echo_server_spawn.chz
+#   chezzi run examples/echo_server_spawn.chz
 
 import std.net
 

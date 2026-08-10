@@ -8,9 +8,11 @@
 #   sock.write(s, timeout_ms)    -> int!     # Err("timeout") if not writable within timeout_ms
 #   server.accept(timeout_ms)    -> Socket!  # Err("timeout") if no connection within timeout_ms
 #
-# This MUST run on the --parallel engine (the cooperative oracle has no fibers to park):
+# The timeout bounds the wait whether the op parks a fiber (a `spawn`/`parallel:` fiber) or blocks its
+# thread (top-level `main`), but both need the default engine — `--serial` has no fiber to park and no
+# second thread, so a would-block op there reports "requires the --parallel engine" instead:
 #
-#   chezzi run --parallel examples/socket_timeout.chz
+#   chezzi run examples/socket_timeout.chz
 
 import std.net
 import std.time

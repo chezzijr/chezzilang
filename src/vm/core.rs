@@ -760,6 +760,19 @@ pub struct ExecutorCore {
     /// already-started jobs die at their next back-edge (decision D4 — "attempts to stop",
     /// cooperative, not preemptive), and a hard halt inside a job trips it via `run_outcome`.
     pub cancel: Arc<AtomicBool>,
+    /// The cancel-flag chain of the job that CREATED this executor (`Vm::scope_ancestors()` captured at
+    /// `Op::NewExecutor`), empty for an executor created by `main` or by a `parallel:`/`spawn` fiber.
+    /// Every job dispatched from this core inherits it as its `cancel_outer`, so an outer
+    /// `shutdown_now()` reaches a nested executor's jobs (W7-39, `docs/concurrency.md` §Executor).
+    ///
+    /// **Keyed on the CREATOR, never on the submitter.** An `Executor` value crosses the airlock by
+    /// `Arc`, so `submit` can be reached from a job of an entirely unrelated executor; keying on the
+    /// submitter made *that* executor's `shutdown_now()` kill a job belonging to `main`'s executor, and
+    /// `main`'s own graceful `shutdown()` then returned with the work silently dropped.
+    ///
+    /// Set once at construction and read-only afterwards — the core crosses threads by `Arc`, so a
+    /// plain `Vec` (no lock) is only sound because nothing ever writes it again.
+    pub creator_cancel: Vec<Arc<AtomicBool>>,
 }
 
 /// Every `ExecutorCore` created during one run, in creation order — the list the program-exit join

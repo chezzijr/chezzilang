@@ -13098,6 +13098,250 @@ print("main done")
     }
 }
 
+/// `shutdown_now()` must reach a job running inside a NESTED executor, not just the job it submitted
+/// directly.
+///
+/// `prepare_eager_job` was the one seam in the tree that installed a cancel token WITHOUT the
+/// `scope_ancestors()` half every nursery seam pairs it with (`spawn_shell`, `run_one_fiber`), so an
+/// inner executor's job had the flag chain `[inner.cancel]` and never observed the outer trip. The
+/// program then paid the full inner sleep at the exit drain.
+///
+/// The inconsistency this pins is Chezzi-vs-Chezzi, not a borrowed ancestor rule: `outer`'s own
+/// `sleep_ms(8000)` is already cancelled at 50 ms (its chain holds the outer flag), while the
+/// IDENTICAL sleep one executor deeper ran to completion. Measured ancestors are split — CPython
+/// `ThreadPoolExecutor` does not propagate (nested pool: 8.04 s wall, `nap finished` printed, for both
+/// `shutdown(wait=False)` and `wait=True`), Go's derived `context.WithCancel(parent)` does (child
+/// cancelled at 50 ms) — so the deciding argument is W7-16's, applied one level down: an executor that
+/// disagrees with the nursery beside it is the defect.
+///
+/// M:N only — eager `submit` requires `self.parallel`; `--serial` queues jobs and runs them at the
+/// drain, where there is no running inner job to cancel. Wall-clock asserted under a `recv_timeout`
+/// watchdog so a regression FAILS loud instead of hanging the suite for 8 s a run.
+#[test]
+fn nested_executor_job_is_cancelled_by_an_outer_shutdown_now_mn() {
+    let src = r#"
+import std.time
+fn nap():
+    time.sleep_ms(8000)
+    print("nap finished")
+fn outer():
+    inner := Executor()
+    inner.submit(nap)
+    time.sleep_ms(8000)
+    print("outer finished")
+ex := Executor()
+ex.submit(outer)
+time.sleep_ms(50)
+ex.shutdown_now()
+print("done")
+"#;
+    let entry = write_temp_chz("nested_shutdown_now", src);
+    let run_entry = entry.clone();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let t0 = std::time::Instant::now();
+        let out = run_file_p(&run_entry);
+        let _ = tx.send((out, t0.elapsed()));
+    });
+    let result = rx.recv_timeout(std::time::Duration::from_secs(30));
+    let _ = std::fs::remove_file(&entry);
+    let ((out, _err, res, _code), elapsed) =
+        result.expect("hung: an outer shutdown_now never reached the nested executor's job");
+    assert!(res.is_ok(), "the program faulted: {res:?}");
+    assert!(
+        !out.contains("nap finished"),
+        "the nested job outlived the outer shutdown_now: {out:?}"
+    );
+    assert!(
+        elapsed < std::time::Duration::from_secs(1),
+        "the outer shutdown_now did not cancel the nested job (took {elapsed:?})"
+    );
+    assert!(out.contains("done"), "main must still finish: {out:?}");
+}
+
+/// The NEGATIVE twin of the test above: a `shutdown_now()` must reach only the executors its own job
+/// CREATED, never one that merely had work submitted to it from inside that job.
+///
+/// An `Executor` crosses the airlock by `Arc`, so any job can `submit` to any executor it can name. A
+/// first cut keyed cancel inheritance on the SUBMITTER (`if self.eager_core.is_some() {
+/// rw.worker.cancel_outer = self.scope_ancestors() }`), which handed `other`'s cancel chain to a job
+/// belonging to `main`'s executor: `other.shutdown_now()` then killed an already-started job that was
+/// none of its business, AND `shared.shutdown()` — a GRACEFUL join that promises to wait for its work
+/// — returned silently with that work dropped ("job started" printed, "shared job ran" never; before
+/// the nested-cancel change both printed). Keying it on the executor's CREATOR
+/// (`ExecutorCore::creator_cancel`, captured at `Op::NewExecutor`) is what makes both this and the
+/// nested case right at once: `shared` was created by `main`, so it inherits nothing from anyone.
+///
+/// M:N only, for the same reason as its twin — `--serial` queues jobs and runs them at the drain.
+#[test]
+fn a_job_submitted_to_mains_executor_survives_another_executors_shutdown_now_mn() {
+    let src = r#"
+import std.time
+fn work():
+    time.sleep_ms(300)
+    print("shared job ran")
+fn jobber():
+    print("job started")
+    shared.submit(work)
+    time.sleep_ms(8000)
+shared := Executor()
+other := Executor()
+other.submit(jobber)
+time.sleep_ms(50)
+other.shutdown_now()
+shared.shutdown()
+print("done")
+"#;
+    let entry = write_temp_chz("cross_executor_shutdown_now", src);
+    let run_entry = entry.clone();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let t0 = std::time::Instant::now();
+        let out = run_file_p(&run_entry);
+        let _ = tx.send((out, t0.elapsed()));
+    });
+    let result = rx.recv_timeout(std::time::Duration::from_secs(30));
+    let _ = std::fs::remove_file(&entry);
+    let ((out, _err, res, _code), elapsed) = result.expect("hung");
+    assert!(res.is_ok(), "the program faulted: {res:?}");
+    assert!(
+        out.contains("job started"),
+        "the outer job must run: {out:?}"
+    );
+    assert!(
+        out.contains("shared job ran"),
+        "an unrelated executor's shutdown_now killed main's executor's job: {out:?}"
+    );
+    assert!(out.contains("done"), "main must still finish: {out:?}");
+    // The outer job's own 8 s sleep IS cancelled (it belongs to `other`), so the whole program is
+    // bounded by the 300 ms job — a regression that waits it out would blow this.
+    assert!(
+        elapsed < std::time::Duration::from_secs(3),
+        "took {elapsed:?}"
+    );
+}
+
+/// The THIRD case in the W7-39 family, and the one the two tests above left silent: an executor
+/// CREATED inside an eager job, whose handle outlives the job's cancellation.
+///
+/// `creator_cancel` is captured once at `Op::NewExecutor` and never reset — sticky by design, the way
+/// Go's derived `context.WithCancel(parent)` stays cancelled once the parent is. So after the creating
+/// job's executor is `shutdown_now`-ed, EVERY later job this core dispatches starts already-cancelled.
+/// That is correct; what was indefensible is that it was SILENT: `main` holds the only handle here,
+/// its `submit` vanished, and its own GRACEFUL `shutdown()` — which promises to wait for its work —
+/// returned having run nothing (measured pre-fix: `main done`, rc=0, `inner job ran` never printed).
+/// A `submit` the executor cannot honour now faults, exactly like a `submit` after `shutdown()`.
+///
+/// **The checkpoint trap**: `work` MUST contain a cancellation point (the `sleep_ms`). With a bare
+/// `print` the job finishes before reaching one and runs to completion (D4 is cooperative, not
+/// preemptive) — a test written without it is a false green that proves nothing.
+///
+/// M:N only: `--serial` never sets `eager_core`, so `creator_cancel` is always empty there.
+#[test]
+fn submit_to_an_executor_whose_creating_job_was_cancelled_faults_mn() {
+    let src = r#"
+import std.concurrency
+import std.time
+fn work():
+    time.sleep_ms(10)
+    print("inner job ran")
+fn jobber(ch: Channel[Executor]):
+    inner := Executor()
+    ch.send(inner)
+    time.sleep_ms(2000)
+ch := Channel[Executor](1)
+outer := Executor()
+outer.submit(fn(): jobber(ch))
+inner := ch.recv()
+time.sleep_ms(50)
+outer.shutdown_now()
+inner.submit(work)
+inner.shutdown()
+print("main done")
+"#;
+    let entry = write_temp_chz("submit_after_creator_cancel", src);
+    let (out, _err, res, _code) = run_file_p(&entry);
+    let _ = std::fs::remove_file(&entry);
+    let e = res.expect_err(&format!(
+        "the poisoned submit was accepted silently: {out:?}"
+    ));
+    assert!(
+        e.message
+            .contains("submit on an Executor whose creating job was cancelled"),
+        "wrong fault: {e:?}"
+    );
+    assert!(
+        !out.contains("main done"),
+        "the fault must propagate out of main: {out:?}"
+    );
+}
+
+/// Negative control 1 — the SAME program with a graceful `outer.shutdown()`. Nothing is cancelled, so
+/// the inherited chain stays untripped and the submitted job runs normally.
+#[test]
+fn submit_to_a_nested_executor_after_a_graceful_outer_shutdown_runs_mn() {
+    let src = r#"
+import std.concurrency
+import std.time
+fn work():
+    time.sleep_ms(10)
+    print("inner job ran")
+fn jobber(ch: Channel[Executor]):
+    inner := Executor()
+    ch.send(inner)
+    time.sleep_ms(200)
+ch := Channel[Executor](1)
+outer := Executor()
+outer.submit(fn(): jobber(ch))
+inner := ch.recv()
+time.sleep_ms(50)
+outer.shutdown()
+inner.submit(work)
+inner.shutdown()
+print("main done")
+"#;
+    let entry = write_temp_chz("submit_after_creator_graceful", src);
+    let (out, _err, res, _code) = run_file_p(&entry);
+    let _ = std::fs::remove_file(&entry);
+    assert!(res.is_ok(), "the program faulted: {res:?}");
+    assert!(
+        out.contains("inner job ran"),
+        "the job was dropped: {out:?}"
+    );
+    assert!(out.contains("main done"), "main must finish: {out:?}");
+}
+
+/// Negative control 2 — an executor created by `main` has NO `creator_cancel` at all, so an unrelated
+/// executor's `shutdown_now()` cannot reach it. This is the case the new guard must leave untouched.
+#[test]
+fn submit_to_mains_own_executor_after_an_unrelated_shutdown_now_runs_mn() {
+    let src = r#"
+import std.time
+fn work():
+    time.sleep_ms(10)
+    print("mine ran")
+fn nap():
+    time.sleep_ms(8000)
+mine := Executor()
+other := Executor()
+other.submit(nap)
+time.sleep_ms(50)
+other.shutdown_now()
+mine.submit(work)
+mine.shutdown()
+print("done")
+"#;
+    let entry = write_temp_chz("submit_mains_own_after_unrelated_now", src);
+    let (out, _err, res, _code) = run_file_p(&entry);
+    let _ = std::fs::remove_file(&entry);
+    assert!(res.is_ok(), "the program faulted: {res:?}");
+    assert!(
+        out.contains("mine ran"),
+        "main's own job was dropped: {out:?}"
+    );
+    assert!(out.contains("done"), "main must finish: {out:?}");
+}
+
 // ----- C5 (A2): program-exit auto-drain (VM parity) -----
 
 #[test]
