@@ -2,6 +2,42 @@
 
 Single source of truth for "what am I doing next." Update after every work session.
 
+> **✅ W7-47 landed 2026-08-12 — `os.exit` from an eager `Executor` job halts the process while `main`
+> is blocked, instead of sitting in a slot nobody reads.** `docs/gaps.md`'s `W7-47` is CLOSED. Measured
+> on the release binary under `timeout 12`: a socket-blocked `main` went **rc=124 (hang) → rc=3**, and
+> the `Channel` variant **rc=1 (`recv on an empty channel: deadlock`) → rc=3** — so the socket was only
+> the *reachable* example, not the trigger. Go is rc=3 on both. `--serial` is bit-for-bit unchanged (it
+> never blocks on a socket and never sets `eager_core`, so it never reaches the new path).
+>
+> `os.exit` writes `pending_exit` on whichever `Vm` ran the native — for an eager job, a value only the
+> join observes, and a `main` parked in `accept()` never reaches the join. The fix publishes the masked
+> code to the run's ALREADY-EXISTING shared cell (`Vm::quiesce: Arc<QuiesceState>`, per-run and
+> deliberately not a `static`, since `cargo test` runs many VMs in one process), and the blocking loops
+> adopt it via a new `run_exit_err` rung. **No `std::process::exit`** (`stream.rs:17-20` refuses it) and
+> **no wakeup plumbing** — every counted-party wait is already a bounded ≤5 ms poll, so the flag IS the
+> wakeup, and fixing the leaves released the untimed `join_eager_jobs` condvar with no change to it.
+> The rung sits **below `cancel_requested`** (so a party already holding a cancel flag still unwinds as
+> `Cancelled` — only top-level `main`, which has no cancel flag at all, reaches it) and **above the
+> deadlock verdict** (an `Exit` outranks a synthesized `Deadlocked`).
+>
+> **Adversarial review caught two defects before landing, both reproduced on the binary first.** (1)
+> The cell was never cleared and `chezzi test` reuses one `Vm` per file, so a `test fn` calling
+> `os.exit` made every later blocking `test fn` `ERROR … exit` — cleared in `invoke_test`. (2)
+> `reduce_task_slots` read `first_exit` from task SLOTS only, so an eager job (which owns no slot) was
+> invisible and a nursery reported `deadlock` while an exit was already published — a confident wrong
+> verdict, worse than the hang it replaced; fixed uniformly, with no existing exit test's expected value
+> moved. Both pinned by new tests in `tests/exit_status.rs`, each under a watchdog that kills and panics
+> so a hang fails rather than passing.
+>
+> **Two rows filed, not built.** **`W7-56`** — a genuinely pre-existing FALSE deadlock, confirmed on the
+> unmodified pre-fix binary with no `os.exit` anywhere: a live eager `Executor` job does not veto the
+> nursery deadlock predicate, so `parallel: spawn waiter()` waiting on a job that *will* `send` dies at
+> ~11 ms with `deadlock: … the nursery cannot progress` where Go completes. `parked-is-not-stuck`
+> again; it needs its own task because widening this predicate has `W7-12`'s history. **`W7-57`** — the
+> `W7-47` residual ceilings: a CPU-spinning party, a snapshot-parked fiber, and an in-flight `sleep_ms`
+> outlive a run-wide exit (measured 312 ms vs Go's 50 ms). All three want a wake, not a check; the exit
+> *code* is right in every case, only its latency is wrong.
+
 > **✅ W7-48 landed 2026-08-12 — a `?`/`?.` inside a `spawn:` block is a compile error, so the silent
 > swallow is gone.** `docs/gaps.md`'s `W7-48` is CLOSED. `SpawnTarget::Block` carried the enclosing
 > frame's `current_ret`/`in_fn_body`/`recover_depth` across the task boundary, so `spawn: v := g()?`

@@ -2082,6 +2082,23 @@ impl Vm {
         Ok(())
     }
 
+    /// W7-47 — a run-wide `os.exit` issued by SOMEBODY ELSE (typically an eager `Executor` job), for
+    /// the blocking loops whose party would otherwise never learn of it. Produces verbatim the shape
+    /// `reduce_task_slots` already produces for a joined child's exit (`sched.rs`): `pending_exit` set
+    /// plus the `"exit"` sentinel `Err`, which unwinds past every `recover:` to the driver.
+    ///
+    /// Deliberately does NOT set `self.cancelled` — that would SWALLOW the outcome (`run_outcome`),
+    /// which is the opposite of what an exit needs.
+    ///
+    /// Returns the error rather than a `Result` because most call sites are demote loops that must run
+    /// their un-accounting (`running += 1`, `blocked_native`, `unregister_demoted`, …) BETWEEN learning
+    /// of the exit and returning it, exactly as their cancel arms do.
+    pub(super) fn run_exit_err(&mut self, span: Span) -> Option<RuntimeError> {
+        let code = self.quiesce.pending()?;
+        self.pending_exit = Some(code);
+        Some(self.err("exit".to_string(), span))
+    }
+
     /// The halts a party blocked in place must observe. Split out of [`Vm::block_wait_tick`] so the
     /// multi-channel `wait:` path — which polls N arms instead of waiting on one condvar, and so
     /// cannot share the tick — honours exactly the same three, rather than being the one blocking op a
@@ -2096,6 +2113,15 @@ impl Vm {
         if self.cancel_requested() {
             self.cancelled = true;
             return Err(self.err("cancelled".to_string(), span));
+        }
+        // W7-47 — a run-wide `os.exit` from another party. BELOW cancel, so a party that already holds
+        // a cancel flag keeps unwinding as `Cancelled` exactly as before (only a party with no cancel
+        // flag at all — precisely top-level `main` — reaches this rung). ABOVE the deadlock verdict,
+        // because an `Exit` outranks a synthesized `Deadlocked` — the same precedence
+        // `reduce_task_slots` encodes, and what makes a `recv`-blocked `main` report the exit code
+        // instead of a "deadlock" that is really somebody else's exit.
+        if let Some(e) = self.run_exit_err(span) {
+            return Err(e);
         }
         // The process-wide deadlock verdict (`future.md` §2d step 0), checked LAST so the two real
         // halts still outrank it. Every counted party is registered as blocked and none of their wait

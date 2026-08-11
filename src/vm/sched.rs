@@ -1015,6 +1015,16 @@ impl Vm {
                     drop(c);
                     return Err(self.err("cancelled".to_string(), span));
                 }
+                // W7-47 — a run-wide `os.exit` from another party, below cancel like every other site.
+                // Un-account first (same bookkeeping as the cancel arm above), or the counters leak.
+                if let Some(e) = self.run_exit_err(span) {
+                    c.running += 1;
+                    sched.blocked_native.fetch_sub(1, Ordering::Relaxed);
+                    c.unregister_demoted(ptr);
+                    c.unwatch_demoted_cancel(tok);
+                    drop(c);
+                    return Err(e);
+                }
                 if closed {
                     c.running += 1;
                     sched.blocked_native.fetch_sub(1, Ordering::Relaxed);
@@ -1155,6 +1165,12 @@ impl Vm {
                     drop(c);
                     return Err(self.err("cancelled".to_string(), span));
                 }
+                // W7-47 — a run-wide `os.exit` from another party, below cancel like every other site.
+                if let Some(e) = self.run_exit_err(span) {
+                    un_account(&mut c);
+                    drop(c);
+                    return Err(e);
+                }
                 // WAIT-1 (demote path) — a live timer arm fires only AFTER the source-order channel scan
                 // failed (so a real `send` to any arm beats the timer on a tie). Once `now >= deadline`,
                 // take the timer arm with `true`. A still-pending timer vetoes the deadlock fault below
@@ -1284,6 +1300,12 @@ impl Vm {
             self.cancelled = true;
             return Err(self.err("cancelled".to_string(), span));
         }
+        // W7-47 — a run-wide `os.exit` observed during/after the sleep, below cancel like every other
+        // site. Same residual as the cancel check above: the `thread::sleep` is uninterruptible, so the
+        // exit aborts the REST of the callback loop rather than the sleep already in progress.
+        if let Some(e) = self.run_exit_err(span) {
+            return Err(e);
+        }
         Ok(Value::nil())
     }
 
@@ -1404,6 +1426,12 @@ impl Vm {
             if self.cancel_requested() {
                 self.cancelled = true;
                 break Err(self.err("cancelled".to_string(), span));
+            }
+            // W7-47 — a run-wide `os.exit` from another party (an eager `Executor` job). This is the one
+            // blocking wait not routed through `block_halt_check`, so it needs the rung explicitly, in
+            // the same relative order (below cancel). `break`, NOT `?`, for the bracketing reason above.
+            if let Some(e) = self.run_exit_err(span) {
+                break Err(e);
             }
             // Nursery torn down (deadlock elsewhere / `os.exit`): fault in place. An `inflight` socket op
             // never *self*-fires the predicate (it vetoes it), so a genuine quiesce is surfaced by another
@@ -1925,6 +1953,12 @@ impl Vm {
         // index winning within each kind. This changes ONLY which error propagates; it does not
         // touch the `Exit`-over-`Fault` rule above or the nursery's abort semantics (every fault
         // still trips the shared cancel flag the same way it always did).
+        // W7-47 — `first_exit` only ever comes from a SLOT, so an `os.exit` issued by an eager
+        // `Executor` job (which owns no slot) is invisible here, and a nursery whose tasks are all
+        // blocked reported a `deadlock` — a confident WRONG verdict about the user's program, the
+        // `parked-is-not-stuck` class. The run-scoped cell carries that exit, folded in as an ordinary
+        // `first_exit` so there is ONE precedence table (Go's rule: the first `os.Exit` wins).
+        let first_exit = first_exit.or_else(|| self.quiesce.pending());
         match (first_exit, first_hard_fault.or(first_fault), deadlock_err) {
             // A child `os.exit` hard-halts the parent: set `pending_exit` and return the exit
             // sentinel. The op→`step`→`run_until` chain sees `pending_exit` and unwinds past every

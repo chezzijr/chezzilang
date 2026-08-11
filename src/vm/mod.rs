@@ -4141,7 +4141,13 @@ impl crate::native::Host for VmHost<'_> {
         // The LOW 8 BITS of the code, exactly like POSIX `exit(3)` / bash / Python / Go: `-1` → 255,
         // `300` → 44, `-256` → 0. NOT a clamp — clamping a negative code UP to 0 reported a failure
         // exit as SUCCESS to the shell/CI, and `os.exit(-1)` is the canonical failure idiom.
-        self.vm.pending_exit = Some((code & 0xff) as i32);
+        let code = (code & 0xff) as i32;
+        self.vm.pending_exit = Some(code);
+        // W7-47 — also publish run-wide, AFTER the mask so it is applied exactly once. `pending_exit`
+        // is per-`Vm`: for an eager `Executor` job it is a value only the join observes, and a `main`
+        // parked in `accept()`/`recv()` never reaches the join. The run-scoped cell is what lets every
+        // blocking loop see the exit (`Vm::run_exit_err`) — Go's `os.Exit` is immediate.
+        self.vm.quiesce.request_exit(code);
     }
 }
 

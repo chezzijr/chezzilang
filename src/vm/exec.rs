@@ -538,6 +538,10 @@ impl Vm {
             "invoke_test called on a non-test proto"
         );
         self.reset_over_memory();
+        // The run-wide `os.exit` latch is per-RUN, and one `Vm` serves the whole test FILE — so a
+        // `test fn` that calls `os.exit` would otherwise halt every later test that blocks (they read
+        // the latch in `Vm::run_exit_err`). Each `test fn` is its own run for this purpose.
+        self.quiesce.clear_exit();
         self.arm_deadline();
         let home = self.entry_home();
         self.run_proto(proto, home, None, Vec::new(), true, false, Span::RUNTIME)?;

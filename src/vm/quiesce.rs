@@ -151,9 +151,39 @@ impl PartyWait {
 #[derive(Default)]
 pub(super) struct QuiesceState {
     parties: Mutex<Vec<Arc<PartyWait>>>,
+    /// The run-wide `os.exit` request (W7-47). `os.exit` writes `pending_exit` on whichever `Vm` ran
+    /// the native, which for an eager `Executor` job is that job's isolated worker — a value nobody
+    /// observes until the join. A party blocked in a socket/channel wait never reaches the join, so
+    /// the request is published HERE too, where every blocking loop can see it (`Vm::run_exit_err`).
+    ///
+    /// **`Mutex<Option<i32>>`, not an `AtomicI32`**: this struct derives `Default`, and an atomic
+    /// would default to `0` — i.e. "exit code 0 is pending" on every fresh run.
+    ///
+    /// **The cell is per-RUN, and `chezzi test` treats each `test fn` as its own run** — one `Vm` is
+    /// built per test FILE and reused across every test in it (`invoke_all`), so without a reset a
+    /// `test fn` that calls `os.exit` would latch the cell and halt every LATER test that blocks.
+    /// [`Vm::invoke_test`] clears it, beside the other per-test resets.
+    exit: Mutex<Option<i32>>,
 }
 
 impl QuiesceState {
+    /// Publish an `os.exit`. First writer wins, exactly like Go: whichever `os.Exit` runs first sets
+    /// the status, and a later one cannot rewrite it.
+    pub(super) fn request_exit(&self, code: i32) {
+        let mut g = self.exit.lock().unwrap_or_else(|e| e.into_inner());
+        g.get_or_insert(code);
+    }
+
+    /// The pending run-wide exit code, if any.
+    pub(super) fn pending(&self) -> Option<i32> {
+        *self.exit.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Drop a latched exit — the per-test reset (`Vm::invoke_test`); see the field's doc.
+    pub(super) fn clear_exit(&self) {
+        *self.exit.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    }
+
     /// Register a blocked party for as long as the returned guard lives.
     pub(super) fn block(self: &Arc<Self>, wait: PartyWait) -> PartyGuard {
         let wait = Arc::new(wait);
