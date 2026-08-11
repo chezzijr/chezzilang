@@ -1,5 +1,9 @@
-# examples/optchain.chz — optional chaining `?.` and null-coalescing `??` on Option.
-# Both desugar to a `match`: None short-circuits, Some(v) applies the access and re-wraps.
+# examples/optchain.chz — optional chaining `?.` on both carriers, null-coalescing `??` on Option.
+# The carriers survive desugar; the CHECKER picks the lowering from the operand's type.
+#   `?.` on an Option -> a `match`: None short-circuits, Some(v) applies the access and re-wraps.
+#   `?.` on a Result  -> `?` then `.`: propagate the Err, then access the unwrapped value. Identical
+#                        to the spaced spelling `x? .f`, and subject to the same return-kind rule.
+# `??` is Option-ONLY — a Result carries an error that must be handled, so `r ?? d` is an error.
 
 struct Profile:
     name: str
@@ -40,3 +44,34 @@ print(u?.profile?.age ?? 0)       # 30
 # Inside string interpolation — fragments are re-parsed per engine but still lower identically.
 fallback := "nobody"
 print("name={u?.profile?.name ?? fallback}, age={none_user?.profile?.age ?? -1}")  # name=bob, age=-1
+
+# --- optional chaining on a Result: `?` then `.` ---
+fn fetch(ok: bool) -> Result[str, str]:
+    if ok:
+        return Ok("payload")
+    return Err("offline")
+
+# In a Result-returning fn, `fetch(ok)?.len()` propagates the Err, then `.len()`s the unwrapped str.
+fn size(ok: bool) -> Result[int, str]:
+    return Ok(fetch(ok)?.len())
+
+# The SPACED spelling is the same program — same value, same bytecode, same diagnostics.
+fn size_spaced(ok: bool) -> Result[int, str]:
+    return Ok(fetch(ok)? .len())
+
+print(size(true))          # Ok(7)
+print(size(false))         # Err('offline')   — the `?` propagated, `.len()` never ran
+print(size_spaced(true))   # Ok(7)
+print(size_spaced(false))  # Err('offline')
+
+# `?.` also carries method ARGS through a Result.
+fn shout(ok: bool) -> Result[bool, str]:
+    return Ok(fetch(ok)?.starts_with("pay"))
+
+print(shout(true))         # Ok(true)
+
+# `??` is Option-only, so there is no `fetch(true)?.len() ?? 0` — that is an error on the `??`
+# (`fetch(true)?.len()` is already an int). Use `match` when you want a fallback, not propagation.
+match fetch(false):
+    Ok(s):  print(s.len())
+    Err(e): print("fell back: {e}")   # fell back: offline

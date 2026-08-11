@@ -161,8 +161,6 @@ pub fn run(graph: &mut ModuleGraph) -> Result<(), ResolveError> {
                 ctx,
                 scopes: Vec::new(),
                 local_struct: Vec::new(),
-                next_tmp: 0,
-                skip_normalize: false,
                 first_pass: pass == 0,
             };
             // Borrow the module's AST mutably; everything `walker` reads lives in `regs`/the maps above.
@@ -204,48 +202,11 @@ pub fn run_standalone(module: &mut Module) -> Result<(), ResolveError> {
             ctx,
             scopes: Vec::new(),
             local_struct: Vec::new(),
-            next_tmp: 0,
-            skip_normalize: false,
             first_pass: pass == 0,
         };
         walker.walk_block(&mut module.stmts)?;
     }
     Ok(())
-}
-
-/// Lower `?.`/`??` carrier nodes to `match` in a single standalone expression. String-interpolation
-/// fragments (`"{ … }"`) are re-parsed AFTER the module-wide [`run`] pass — by each engine, at
-/// compile/eval time — so their carriers would otherwise reach the checker-less interpolation path
-/// (a hard VM `unreachable!` panic, a graceful interp error → a parity break). Calling this on every
-/// fragment in BOTH engines keeps them in lockstep. Ctx-free: call normalization is skipped (it was
-/// never applied to fragments), only the carriers are rewritten.
-pub fn lower_carriers(expr: &mut Expr) {
-    let regs: HashMap<ModuleId, ModReg> = HashMap::new();
-    let own_id = ModuleId(std::path::PathBuf::from("<fragment>"));
-    let bare_from: HashMap<String, ModuleId> = HashMap::new();
-    let aliases: HashMap<String, ModuleId> = HashMap::new();
-    let methods: HashMap<String, Vec<Vec<PSpec>>> = HashMap::new();
-    let methods_by_struct: HashMap<(String, String), Vec<PSpec>> = HashMap::new();
-    let fn_fields: HashSet<String> = HashSet::new();
-    let ctx = Ctx {
-        regs: &regs,
-        own_id: &own_id,
-        bare_from: &bare_from,
-        aliases: &aliases,
-        methods: &methods,
-        methods_by_struct: &methods_by_struct,
-        fn_fields: &fn_fields,
-    };
-    let mut walker = Walker {
-        ctx,
-        scopes: Vec::new(),
-        local_struct: Vec::new(),
-        next_tmp: 0,
-        skip_normalize: true,
-        first_pass: false,
-    };
-    // Infallible: `skip_normalize` suppresses the only error path (`normalize_call`).
-    let _ = walker.walk_expr(expr);
 }
 
 /// Snapshot each module's free functions and struct constructors into a registry keyed by module id.
@@ -692,13 +653,6 @@ struct Walker<'a> {
     /// `recv.m(args)` resolve `m`'s param defaults/variadic against the receiver's *actual* struct (so
     /// a sibling struct's same-named method does not derail the decision).
     local_struct: Vec<HashMap<String, String>>,
-    /// Counter for fresh temp names minted when lowering `?.`/`??` to `match` (`__opt0`, `__opt1`, …).
-    /// `__`-prefixed names can't be written by user code, so they never collide with a real binding.
-    next_tmp: usize,
-    /// When set, skip `normalize_call` (named/default-arg resolution) — used for string-interpolation
-    /// fragments, which are re-parsed after the module-wide pass and need only carrier lowering
-    /// (their call-normalization was already skipped before this pass existed; kept identical).
-    skip_normalize: bool,
     /// Variadic-collapse runs on the FIRST pass only. The module pass walks the tree twice (to lower
     /// spliced defaults); the collapse is NOT idempotent (re-running it on pass 2 would wrap the
     /// synthesized `List` in another `List`), so it must fire exactly once.
@@ -1163,12 +1117,26 @@ impl Walker<'_> {
                     self.walk_expr(v)?;
                 }
             }
-            // Optional chaining `?.` / null-coalescing `??`: lower the carrier to a `match` in place,
-            // then re-walk the resulting `Match` so its scrutinee and arm bodies (the synthesized
-            // field/method access) are normalized like any other expression.
-            ExprKind::OptChain { .. } | ExprKind::NullCoalesce { .. } => {
-                self.lower_carrier(expr);
-                return self.walk_expr(expr);
+            // W7-43 — optional chaining `?.` / null-coalescing `??` SURVIVE this pass: the choice
+            // between the Option lowering and the Result (`?` then `.`) one needs the operand's
+            // TYPE, which only the checker has. Walk the children like any other node, then
+            // normalize the `?.` call part explicitly (see `normalize_opt_call` — the carrier no
+            // longer becomes a `Call` here, so `walk_expr`'s tail can't do it).
+            ExprKind::NullCoalesce { lhs, rhs } => {
+                self.walk_expr(lhs)?;
+                self.walk_expr(rhs)?;
+            }
+            ExprKind::OptChain { obj, call, .. } => {
+                self.walk_expr(obj)?;
+                if let Some(c) = call {
+                    for a in c.args.iter_mut() {
+                        self.walk_expr(a)?;
+                    }
+                    for (_, v) in c.named.iter_mut() {
+                        self.walk_expr(v)?;
+                    }
+                }
+                self.normalize_opt_call(expr)?;
             }
             ExprKind::Ident(_) => {}
             // A string literal carrying `{…}` is PARSED HERE, once, into `ExprKind::Interp` — before
@@ -1204,108 +1172,63 @@ impl Walker<'_> {
             | ExprKind::Bool(_) => {}
         }
 
-        // Now normalize this node if it is a resolvable call (skipped for interpolation fragments,
-        // which carry no module context and only need carrier lowering).
-        if !self.skip_normalize
-            && let ExprKind::Call { .. } = &expr.kind
-        {
+        // Now normalize this node if it is a resolvable call.
+        if let ExprKind::Call { .. } = &expr.kind {
             self.normalize_call(expr)?;
         }
         Ok(())
     }
 
-    /// Mint a fresh, collision-proof temp name (`__opt0`, `__opt1`, …) for an opt-chain payload bind.
-    fn fresh_opt_name(&mut self) -> String {
-        let n = self.next_tmp;
-        self.next_tmp += 1;
-        format!("__opt{n}")
-    }
-
-    /// Lower an `OptChain` / `NullCoalesce` carrier (in place) to an expression-position `match`:
-    ///   `a ?? b`     → `match a: Some(__c): __c; None: b`
-    ///   `x?.field`   → `match x: Some(__c): Some(__c.field); None: None`
-    ///   `x?.m(args)` → `match x: Some(__c): Some(__c.m(args)); None: None`
-    /// The scrutinee is evaluated once by `match`; the payload binds to a fresh `__c`. The arm bodies
-    /// and field/method access use only nodes the checker + both engines already handle.
-    fn lower_carrier(&mut self, expr: &mut Expr) {
+    /// W7-43 — normalize the CALL PART of an optional-chained method call (`obj?.m(args)`): named →
+    /// positional binding, omitted defaults, variadic collapse.
+    ///
+    /// Before W7-43 the carrier was lowered here and its arm body — a real `Call { callee: Field }` —
+    /// fell through [`Self::walk_expr`]'s tail into [`Self::normalize_call`]. The carrier now survives
+    /// the pass, so nothing would otherwise normalize it and `u?.greet(greeting="hi")` would reach the
+    /// checker with `named` un-rewritten. Runs `normalize_call` on the exact `Call { callee: Field }`
+    /// shape both `lower_carrier_*` build, then moves the (possibly rewritten) args back.
+    ///
+    /// The synthetic receiver is the REAL `obj`, not a placeholder: `receiver_struct_ty` yields `None`
+    /// for an `Option`/`Result`-typed receiver in every reachable case (an `Option` annotation is
+    /// never `Type::Named`, and `Some(...)`/`Ok(...)` is not a registered struct ctor), so this
+    /// reproduces the old `__optN` receiver's behaviour exactly — while not being WRONG if
+    /// `local_struct` ever learns to track more receivers.
+    ///
+    /// Idempotent on pass 2 for the same reason `normalize_call` is: the variadic collapse inside it
+    /// is `first_pass`-gated, and an already-bound call has empty `named` and full arity.
+    fn normalize_opt_call(&self, expr: &mut Expr) -> Result<(), ResolveError> {
         let span = expr.span;
-        let kind = std::mem::replace(&mut expr.kind, ExprKind::Bool(false));
-        expr.kind = match kind {
-            ExprKind::NullCoalesce { lhs, rhs } => {
-                let c = self.fresh_opt_name();
-                ExprKind::Match {
-                    scrutinee: lhs,
-                    arms: vec![
-                        MatchExprArm {
-                            pattern: variant_pat(
-                                "Some",
-                                vec![Pattern::Ident(c.clone(), Span::default())],
-                            ),
-                            guard: None,
-                            body: ident_expr(&c, span),
-                        },
-                        MatchExprArm {
-                            pattern: variant_pat("None", vec![]),
-                            guard: None,
-                            body: *rhs,
-                        },
-                    ],
-                }
-            }
-            ExprKind::OptChain { obj, name, call } => {
-                let c = self.fresh_opt_name();
-                let field = Expr {
-                    kind: ExprKind::Field {
-                        obj: Box::new(ident_expr(&c, span)),
-                        name,
-                        name_span: span,
-                    },
-                    span,
-                };
-                // `__c.field` or `__c.method(args)`, then wrapped in `Some(...)`.
-                let access = match call {
-                    None => field,
-                    Some(OptCall {
-                        args,
-                        named,
-                        type_args,
-                    }) => Expr {
-                        kind: ExprKind::Call {
-                            callee: Box::new(field),
-                            args,
-                            named,
-                            type_args,
-                        },
-                        span,
-                    },
-                };
-                let some_body = Expr {
-                    kind: ExprKind::Call {
-                        callee: Box::new(ident_expr("Some", span)),
-                        args: vec![access],
-                        named: vec![],
-                        type_args: vec![],
-                    },
-                    span,
-                };
-                ExprKind::Match {
-                    scrutinee: obj,
-                    arms: vec![
-                        MatchExprArm {
-                            pattern: variant_pat("Some", vec![Pattern::Ident(c, Span::default())]),
-                            guard: None,
-                            body: some_body,
-                        },
-                        MatchExprArm {
-                            pattern: variant_pat("None", vec![]),
-                            guard: None,
-                            body: ident_expr("None", span),
-                        },
-                    ],
-                }
-            }
-            other => other, // unreachable: caller guards on the two carrier kinds
+        let ExprKind::OptChain {
+            obj,
+            name,
+            name_span,
+            call: Some(c),
+        } = &mut expr.kind
+        else {
+            return Ok(());
         };
+        let mut tmp = Expr {
+            kind: ExprKind::Call {
+                callee: Box::new(Expr {
+                    kind: ExprKind::Field {
+                        obj: obj.clone(),
+                        name: name.clone(),
+                        name_span: *name_span,
+                    },
+                    span,
+                }),
+                args: std::mem::take(&mut c.args),
+                named: std::mem::take(&mut c.named),
+                type_args: c.type_args.clone(),
+            },
+            span,
+        };
+        let res = self.normalize_call(&mut tmp);
+        if let ExprKind::Call { args, named, .. } = tmp.kind {
+            c.args = args;
+            c.named = named;
+        }
+        res
     }
 
     /// Resolve `expr` (a `Call`) to a callable and rewrite named/omitted args into positional. Leaves
@@ -1638,6 +1561,149 @@ fn variant_pat(name: &str, bindings: Vec<Pattern>) -> Pattern {
         enum_name: None,
         module_name: None,
     }
+}
+
+/// Lower an `OptChain` / `NullCoalesce` carrier (in place) to an expression-position `match` —
+/// the **Option** lowering:
+///   `a ?? b`     → `match a: Some(__optN): __optN; None: b`
+///   `x?.field`   → `match x: Some(__optN): Some(__optN.field); None: None`
+///   `x?.m(args)` → `match x: Some(__optN): Some(__optN.m(args)); None: None`
+/// The scrutinee is evaluated once by `match`; the payload binds to `__opt{tmp}` (the caller owns the
+/// counter, so temps stay unique within one expression). The arm bodies and field/method access use
+/// only nodes the checker + both engines already handle.
+///
+/// Ctx-free and free-standing on purpose: every consumer that needs this lowering must call THIS
+/// function, so the synthesized spans (and therefore the `KeywordKey`/`WitnessKey`s derived from
+/// them) cannot drift between consumers.
+pub fn lower_carrier_option(expr: &mut Expr, tmp: usize) {
+    let span = expr.span;
+    let c = format!("__opt{tmp}");
+    let kind = std::mem::replace(&mut expr.kind, ExprKind::Bool(false));
+    expr.kind = match kind {
+        ExprKind::NullCoalesce { lhs, rhs } => ExprKind::Match {
+            scrutinee: lhs,
+            arms: vec![
+                MatchExprArm {
+                    pattern: variant_pat("Some", vec![Pattern::Ident(c.clone(), Span::default())]),
+                    guard: None,
+                    body: ident_expr(&c, span),
+                },
+                MatchExprArm {
+                    pattern: variant_pat("None", vec![]),
+                    guard: None,
+                    body: *rhs,
+                },
+            ],
+        },
+        ExprKind::OptChain {
+            obj,
+            name,
+            name_span,
+            call,
+        } => {
+            // The synthesized callee `Field` takes the carrier's REAL `name_span`, not `span`:
+            // `span` is the primary's span, shared by every link of a chain, so two synthesized
+            // method callees in one chain would collide on a single `WitnessKey`.
+            let field = Expr {
+                kind: ExprKind::Field {
+                    obj: Box::new(ident_expr(&c, span)),
+                    name,
+                    name_span,
+                },
+                span,
+            };
+            // `__optN.field` or `__optN.method(args)`, then wrapped in `Some(...)`.
+            let access = match call {
+                None => field,
+                Some(OptCall {
+                    args,
+                    named,
+                    type_args,
+                }) => Expr {
+                    kind: ExprKind::Call {
+                        callee: Box::new(field),
+                        args,
+                        named,
+                        type_args,
+                    },
+                    span,
+                },
+            };
+            let some_body = Expr {
+                kind: ExprKind::Call {
+                    callee: Box::new(ident_expr("Some", span)),
+                    args: vec![access],
+                    named: vec![],
+                    type_args: vec![],
+                },
+                span,
+            };
+            ExprKind::Match {
+                scrutinee: obj,
+                arms: vec![
+                    MatchExprArm {
+                        pattern: variant_pat("Some", vec![Pattern::Ident(c, Span::default())]),
+                        guard: None,
+                        body: some_body,
+                    },
+                    MatchExprArm {
+                        pattern: variant_pat("None", vec![]),
+                        guard: None,
+                        body: ident_expr("None", span),
+                    },
+                ],
+            }
+        }
+        other => other, // unreachable: caller guards on the two carrier kinds
+    };
+}
+
+/// Lower an `OptChain` carrier (in place) to the **Result** lowering — `?` then `.`:
+///   `x?.field`   → `x?.field`      i.e. `Field { obj: Try(x), … }`
+///   `x?.m(args)` → `x?.m(args)`    i.e. `Call { callee: Field { obj: Try(x), … }, … }`
+/// The output is EXACTLY what the parser builds for the spaced spelling `x? .field` /
+/// `x? .m(args)`: `parse_postfix` reuses the primary's span for every postfix link, so `Try`,
+/// `Field` and `Call` all carry `expr.span`, and the `Field`'s `name_span` is the name token's own
+/// span — which is what the carrier already holds. That equality is the whole point: the two
+/// spellings must produce byte-identical ASTs, diagnostics and bytecode.
+///
+/// `NullCoalesce` never reaches here — `??` stays Option-only.
+pub fn lower_carrier_try(expr: &mut Expr) {
+    let span = expr.span;
+    let kind = std::mem::replace(&mut expr.kind, ExprKind::Bool(false));
+    let ExprKind::OptChain {
+        obj,
+        name,
+        name_span,
+        call,
+    } = kind
+    else {
+        unreachable!("lower_carrier_try applies to `?.` only; `??` is Option-only");
+    };
+    let field = Expr {
+        kind: ExprKind::Field {
+            obj: Box::new(Expr {
+                kind: ExprKind::Try(obj),
+                span,
+            }),
+            name,
+            name_span,
+        },
+        span,
+    };
+    expr.kind = match call {
+        None => field.kind,
+        Some(OptCall {
+            args,
+            named,
+            type_args,
+        }) => ExprKind::Call {
+            callee: Box::new(field),
+            args,
+            named,
+            type_args,
+        },
+    };
 }
 
 /// A bare identifier expression at `span`.
@@ -2139,44 +2205,142 @@ mod tests {
     }
 
     #[test]
-    fn null_coalesce_desugars_to_match() {
-        let stmts = desugar_ok("a := Some(1)\nx := a ?? 0\n");
+    fn null_coalesce_survives_desugar() {
+        // W7-43 inverted this: the carrier is NOT lowered here any more (the choice needs the
+        // operand's type). What desugar still owes it is a NORMALIZED child on each side.
+        let stmts = desugar_ok(
+            "fn g(x: int, y: int = 7) -> int?:\n    return Some(x)\nx := g(1) ?? g(2, y=9)\n",
+        );
         match last_let_value(&stmts).kind {
-            ExprKind::Match { arms, .. } => {
-                assert_eq!(arms.len(), 2);
-                // Some(__optN): __optN ; None: 0
-                assert!(
-                    matches!(&arms[0].pattern, Pattern::Variant { name, .. } if name == "Some")
-                );
-                assert!(
-                    matches!(&arms[1].pattern, Pattern::Variant { name, bindings, .. } if name == "None" && bindings.is_empty())
-                );
+            ExprKind::NullCoalesce { lhs, rhs } => {
+                let args_of = |e: &Expr| -> usize {
+                    let ExprKind::Call { args, named, .. } = &e.kind else {
+                        panic!("expected a Call, got {:?}", e.kind)
+                    };
+                    assert!(named.is_empty(), "named must be bound to positional slots");
+                    args.len()
+                };
+                assert_eq!(args_of(&lhs), 2, "omitted default filled on the lhs");
+                assert_eq!(args_of(&rhs), 2, "named arg bound to a slot on the rhs");
             }
-            other => panic!("expected a Match, got {other:?}"),
+            other => panic!("expected a NullCoalesce, got {other:?}"),
         }
     }
 
     #[test]
-    fn opt_chain_field_desugars_to_match() {
+    fn opt_chain_survives_desugar_with_a_normalized_call() {
+        // The carrier survives; `normalize_opt_call` still binds its named args and fills defaults
+        // (before W7-43 the lowered arm body got this from `walk_expr`'s ordinary `Call` tail).
+        let stmts = desugar_ok(
+            "struct P:\n    x: int\n    fn tag(self, a: int, b: int = 4) -> int:\n        return a\na := Some(P(1))\nv := a?.tag(1, b=9)\n",
+        );
+        match last_let_value(&stmts).kind {
+            ExprKind::OptChain { name, call, .. } => {
+                assert_eq!(name, "tag");
+                let c = call.expect("a method call");
+                assert!(
+                    c.named.is_empty(),
+                    "named must be bound to positional slots"
+                );
+                assert_eq!(c.args.len(), 2);
+                assert!(matches!(c.args[1].kind, ExprKind::Int(9)));
+            }
+            other => panic!("expected an OptChain, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn opt_chain_field_survives_desugar() {
         let stmts = desugar_ok("struct P:\n    x: int\na := Some(P(1))\nv := a?.x\n");
         match last_let_value(&stmts).kind {
-            ExprKind::Match { arms, .. } => {
-                // Some arm wraps the field access in `Some(...)`; None arm yields the `None` ident.
-                assert!(matches!(&arms[0].body.kind, ExprKind::Call { callee, .. }
-                    if matches!(&callee.kind, ExprKind::Ident(n) if n == "Some")));
-                assert!(matches!(&arms[1].body.kind, ExprKind::Ident(n) if n == "None"));
+            ExprKind::OptChain { name, call, .. } => {
+                assert_eq!(name, "x");
+                assert!(call.is_none(), "a field access carries no call part");
             }
-            other => panic!("expected a Match, got {other:?}"),
+            other => panic!("expected an OptChain, got {other:?}"),
         }
+    }
+
+    /// Parse `src` WITHOUT desugaring and return the last `name := <expr>` value — carriers survive.
+    fn raw_last_let_value(src: &str) -> Expr {
+        let ast = crate::parser::parse(lexer::tokenize(src).unwrap()).expect("parse");
+        last_let_value(&ast.stmts)
+    }
+
+    #[test]
+    fn lower_carrier_try_matches_the_spaced_spelling_exactly() {
+        // THE load-bearing equivalence: `a?.f` lowered by `lower_carrier_try` must be the very AST
+        // the parser builds for `a? .f` — spans included. The two sources are column-aligned (`a`
+        // at col 6, `f` at col 10 in both) precisely so span equality is a real assertion.
+        for (carrier_src, spaced_src) in [
+            ("x := a ?.f\n", "x := a? .f\n"),
+            ("x := a ?.f(1, k=2)\n", "x := a? .f(1, k=2)\n"),
+        ] {
+            let mut lowered = raw_last_let_value(carrier_src);
+            assert!(
+                matches!(lowered.kind, ExprKind::OptChain { .. }),
+                "the carrier must survive parsing"
+            );
+            lower_carrier_try(&mut lowered);
+            let spaced = raw_last_let_value(spaced_src);
+            assert_eq!(lowered, spaced, "{carrier_src:?} vs {spaced_src:?}");
+        }
+    }
+
+    #[test]
+    fn lower_carrier_option_uses_the_carriers_own_name_span() {
+        // Each link of `a?.m(c)?.n(c)` must give its synthesized callee `Field` a DISTINCT
+        // `name_span` — they share `span` (the primary's), so `span` would collide two witness keys.
+        let name_spans = |src: &str| -> (Span, Span) {
+            let mut outer = raw_last_let_value(src);
+            let ExprKind::OptChain { ref mut obj, .. } = outer.kind else {
+                panic!("outer carrier")
+            };
+            lower_carrier_option(obj, 0);
+            lower_carrier_option(&mut outer, 1);
+            // `match <inner>: Some(__opt1): Some(__opt1.n(c)) …`
+            let callee_name_span = |e: &Expr| -> Span {
+                let ExprKind::Match { arms, .. } = &e.kind else {
+                    panic!("match")
+                };
+                let ExprKind::Call { args, .. } = &arms[0].body.kind else {
+                    panic!("Some(...) wrapper")
+                };
+                let ExprKind::Call { callee, .. } = &args[0].kind else {
+                    panic!("method call")
+                };
+                let ExprKind::Field { name_span, .. } = &callee.kind else {
+                    panic!("callee field")
+                };
+                *name_span
+            };
+            let ExprKind::Match { scrutinee, .. } = &outer.kind else {
+                panic!("match")
+            };
+            (callee_name_span(scrutinee), callee_name_span(&outer))
+        };
+        let (inner, outer) = name_spans("x := a?.m(c)?.n(c)\n");
+        assert_ne!(inner, outer, "two witness calls must not share one key");
+        assert_eq!(inner, Span { line: 1, col: 9 });
+        assert_eq!(outer, Span { line: 1, col: 15 });
     }
 
     #[test]
     fn two_coalesce_in_one_expr_get_unique_temps() {
-        // `(a ?? 0) + (b ?? 0)` — each desugared match must bind a DISTINCT temp name.
+        // `(a ?? 0) + (b ?? 0)` — both carriers now survive desugar, and the temp names are minted
+        // by whoever lowers them. Assert the property at that point instead: two lowerings with
+        // distinct counter values bind DISTINCT temps.
         let stmts = desugar_ok("a := Some(1)\nb := Some(2)\nx := (a ?? 0) + (b ?? 0)\n");
-        let ExprKind::Binary { lhs, rhs, .. } = last_let_value(&stmts).kind else {
+        let ExprKind::Binary {
+            mut lhs, mut rhs, ..
+        } = last_let_value(&stmts).kind
+        else {
             panic!("expected a Binary");
         };
+        assert!(matches!(lhs.kind, ExprKind::NullCoalesce { .. }));
+        assert!(matches!(rhs.kind, ExprKind::NullCoalesce { .. }));
+        lower_carrier_option(&mut lhs, 0);
+        lower_carrier_option(&mut rhs, 1);
         let name_of = |e: &Expr| -> String {
             let ExprKind::Match { arms, .. } = &e.kind else {
                 panic!("expected Match")
@@ -2269,10 +2433,12 @@ mod tests {
     }
 
     #[test]
-    fn carrier_in_default_is_lowered() {
-        // A `??` carrier inside a default must be lowered to a `match` (else the checker/VM panics).
+    fn carrier_in_default_survives_with_a_normalized_child() {
+        // W7-43 inverted this: a `??` carrier spliced from a default SURVIVES desugar. What must
+        // still hold is that the two-pass splice normalized its children — here `h()`'s own omitted
+        // default is filled inside the spliced carrier's lhs.
         let s = desugar_ok(
-            "fn h() -> int?:\n    return Some(5)\nfn f(x: int = h() ?? 0):\n    print(x)\nr := f()\n",
+            "fn h(k: int = 3) -> int?:\n    return Some(k)\nfn f(x: int = h() ?? 0):\n    print(x)\nr := f()\n",
         );
         let last = s.last().unwrap();
         let StmtKind::Let { value, .. } = &last.kind else {
@@ -2281,11 +2447,16 @@ mod tests {
         let ExprKind::Call { args, .. } = &value.kind else {
             panic!("call f")
         };
-        // The spliced default must be a lowered `match` (NullCoalesce carrier is gone).
-        assert!(
-            matches!(args[0].kind, ExprKind::Match { .. }),
-            "carrier lowered to match, got {:?}",
-            args[0].kind
+        let ExprKind::NullCoalesce { lhs, .. } = &args[0].kind else {
+            panic!("carrier survives, got {:?}", args[0].kind)
+        };
+        let ExprKind::Call { args: hargs, .. } = &lhs.kind else {
+            panic!("call h")
+        };
+        assert_eq!(
+            hargs.len(),
+            1,
+            "h()'s own default was filled inside the carrier"
         );
     }
 

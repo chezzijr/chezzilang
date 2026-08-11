@@ -1344,13 +1344,14 @@ impl Checker {
             ExprKind::Field { obj, name, .. } => self.infer_field(obj, name),
             ExprKind::Index { obj, index } => self.infer_index(obj, index),
             ExprKind::Try(inner) => self.infer_try(inner, expr.span),
-            // Optional-chaining `?.` / null-coalescing `??` are carrier nodes lowered to `match` by
-            // the desugar pass (`resolver::build_graph` → `desugar::run`), which always runs before
-            // the checker. Reaching here means the pipeline skipped desugar — an internal invariant
-            // break, not a user error.
-            ExprKind::OptChain { .. } | ExprKind::NullCoalesce { .. } => {
-                unreachable!("`?.`/`??` must be lowered by the desugar pass before checking")
+            // W7-43 — optional-chaining `?.` / null-coalescing `??` are CARRIER nodes: the checker
+            // types the operand, picks the lowering, then clone-lowers and infers the clone. The
+            // choice needs the operand's TYPE, which is why desugar no longer lowers them; the
+            // picked mode is recorded in the `CarrierTable` so the type-blind compiler agrees.
+            ExprKind::OptChain { obj, name_span, .. } => {
+                self.infer_opt_chain(expr, obj, *name_span, expr.span)
             }
+            ExprKind::NullCoalesce { lhs, .. } => self.infer_null_coalesce(expr, lhs, expr.span),
             ExprKind::DecodeCall { obj, ty, arg } => self.infer_decode(obj, ty, arg, expr.span),
             ExprKind::Closure { params, ret, body } => {
                 // No expected type at the generic `infer` seam — free-closure inference (sources
@@ -3078,6 +3079,163 @@ impl Checker {
             Some(r) => r,
             None => {
                 self.error(span, format!("cannot slice {obj_ty}"));
+                Ty::Unknown
+            }
+        }
+    }
+
+    /// W7-43 — bind a fresh scratch local to `t` (a carrier operand's ALREADY-inferred type) and hand
+    /// back the `Ident` that replaces the operand inside the lowered clone. The caller MUST
+    /// [`Self::pop_scope`] once the clone is inferred.
+    ///
+    /// Why: `lower_carrier_*` lowers a CLONE that still contains the operand, so inferring the clone
+    /// inferred the operand a second time. `?.` chains left-nest (`a?.b?.c`'s operand is the previous
+    /// carrier), making that `T(n) = 2·T(n-1)` — 22 links took 10s of `chezzi check`, and the checker
+    /// runs twice per `run` and once per LSP keystroke. Substituting a pre-typed stand-in makes each
+    /// operand infer exactly once, so a chain is linear. It also removes the `errors.truncate(mark)`
+    /// rollback the double inference needed: the operand's diagnostics are now emitted exactly once,
+    /// by the caller's own `infer_value`, on every arm.
+    ///
+    /// Three properties this shape depends on:
+    /// * **Its own scope.** A fresh scope can't shadow a user name, is removed on every path, and sits
+    ///   at or below every `capture_floors` entry — so `is_local_capture` never mistakes the scratch
+    ///   for a binding captured by an enclosing `spawn:`/`Executor.submit` and over-fires the
+    ///   non-sendable read gate on it.
+    /// * **`Span::default()`**, like the `__optN` payload binder `lower_carrier_option` synthesizes.
+    ///   No lowered node derives its span from the operand's (both `lower_carrier_*` stamp everything
+    ///   from the carrier's own `span`/`name_span`), and a default span can never equal the 1-based
+    ///   `hover_probe` position, so the LSP probe keeps landing on the real operand.
+    /// * **Side tables are untouched.** `KeywordTable`/`WitnessTable`/`CarrierTable` are all keyed by
+    ///   source spans and are `HashMap`s, so the operand's entries — recorded by the caller's
+    ///   `infer_value` from the ORIGINAL spans — are simply no longer overwritten with themselves.
+    fn scratch_operand(&mut self, t: Ty) -> Expr {
+        let n = self.next_opt_tmp;
+        self.next_opt_tmp += 1;
+        let name = format!("__optrecv{n}");
+        self.push_scope();
+        self.declare(&name, t);
+        Expr {
+            kind: ExprKind::Ident(name),
+            span: Span::default(),
+        }
+    }
+
+    /// W7-43 — infer a `?.` carrier: type the OPERAND, pick the lowering from it, record the choice
+    /// for the compiler, then **clone-and-lower to a real AST shape and infer THAT**.
+    ///
+    /// Clone-and-lower rather than direct inference because direct inference would re-implement
+    /// `infer_call`'s generics + witness recording + keyword resolution against a receiver with no
+    /// `Expr` to hang off. It also buys the `Result` mode all three of [`Self::infer_try`]'s gates
+    /// (`recover_depth`, `in_defer_block`, the `current_ret`/`in_fn_body` return-kind gate) with
+    /// ZERO new gate code, because the clone literally CONTAINS an `ExprKind::Try` at the right
+    /// nesting. Both `lower_carrier_*` stamp every synthesized node from the carrier's own
+    /// `span`/`name_span`, so the compiler — calling the same function on the same input — derives
+    /// identical spans, and therefore identical `KeywordKey`/`WitnessKey`s.
+    ///
+    /// ponytail: the reused gates' messages say `'?'`, not `'?.'`. Left verbatim — each message is
+    /// TRUE of `?.`, and threading the spelling through would need a saved/restored `self.carrier_op`
+    /// field around the nested `infer` below. Upgrade if a report says the wording misleads.
+    ///
+    /// The clone's OPERAND is swapped for a pre-typed scratch binding first — see
+    /// [`Self::scratch_operand`]. Without that swap the operand is inferred twice (once here, once
+    /// inside the clone that still contains it) and a chain — which left-nests, so `a?.b?.c`'s
+    /// operand IS the previous carrier — costs `T(n) = 2·T(n-1)`.
+    pub(super) fn infer_opt_chain(
+        &mut self,
+        carrier: &Expr,
+        obj: &Expr,
+        name_span: Span,
+        span: Span,
+    ) -> Ty {
+        let t = self.infer_value(obj);
+        let key = crate::checker::carrier_key(
+            self.graph_module_idx,
+            self.kw_frag_ctx,
+            self.kw_frag_ord,
+            name_span,
+        );
+        match &t {
+            Ty::Result(..) => {
+                self.carriers.insert(key, CarrierMode::Try);
+                let mut c = carrier.clone();
+                let scratch = self.scratch_operand(t.clone());
+                if let ExprKind::OptChain { obj, .. } = &mut c.kind {
+                    **obj = scratch;
+                }
+                crate::desugar::lower_carrier_try(&mut c);
+                let r = self.infer(&c);
+                self.pop_scope();
+                r
+            }
+            Ty::Option(..) => {
+                self.carriers.insert(key, CarrierMode::Option);
+                let mut c = carrier.clone();
+                let scratch = self.scratch_operand(t.clone());
+                if let ExprKind::OptChain { obj, .. } = &mut c.kind {
+                    **obj = scratch;
+                }
+                let tmp = self.next_opt_tmp;
+                self.next_opt_tmp += 1;
+                crate::desugar::lower_carrier_option(&mut c, tmp);
+                let r = self.infer(&c);
+                self.pop_scope();
+                r
+            }
+            // The operand already errored (its diagnostic stands, un-truncated) — adding a second
+            // one here would be the cascade `Ty::Unknown` exists to suppress.
+            Ty::Unknown => {
+                self.carriers.insert(key, CarrierMode::Unknown);
+                Ty::Unknown
+            }
+            other => {
+                self.carriers.insert(key, CarrierMode::Unknown);
+                self.error(
+                    span,
+                    format!("'?.' applies to an Option or a Result, found {other}"),
+                );
+                Ty::Unknown
+            }
+        }
+    }
+
+    /// W7-43 — infer a `??` carrier. Option-ONLY: `??` has no spaced alternative spelling (so there
+    /// is no whitespace trap to remove, only a new operator meaning to invent), no ancestor supports
+    /// it on a `Result`, and coalescing a `Result` would silently discard its error payload. Because
+    /// everything that reaches the compiler is therefore an `Option` (or already-rejected), `??`
+    /// needs no [`crate::checker::CarrierTable`] entry and no compiler decision.
+    pub(super) fn infer_null_coalesce(&mut self, carrier: &Expr, lhs: &Expr, span: Span) -> Ty {
+        // Same operand-scratch shape as `infer_opt_chain`, same reason.
+        let t = self.infer_value(lhs);
+        match &t {
+            Ty::Option(..) => {
+                let mut c = carrier.clone();
+                let scratch = self.scratch_operand(t.clone());
+                if let ExprKind::NullCoalesce { lhs, .. } = &mut c.kind {
+                    **lhs = scratch;
+                }
+                let tmp = self.next_opt_tmp;
+                self.next_opt_tmp += 1;
+                crate::desugar::lower_carrier_option(&mut c, tmp);
+                let r = self.infer(&c);
+                self.pop_scope();
+                r
+            }
+            Ty::Unknown => Ty::Unknown,
+            // No `unwrap_or` suggestion: `Result`/`Option` carry ZERO methods (`std/prelude.chz`).
+            // No inline `match` spelling either — expression-`match` is indentation-based here, and
+            // every suggested spelling must be one that actually parses.
+            Ty::Result(..) => {
+                self.error(
+                    span,
+                    format!(
+                        "'??' applies to an Option, found {t} — a Result carries an error that \
+                         must be handled: use a match with Ok/Err arms"
+                    ),
+                );
+                Ty::Unknown
+            }
+            other => {
+                self.error(span, format!("'??' applies to an Option, found {other}"));
                 Ty::Unknown
             }
         }

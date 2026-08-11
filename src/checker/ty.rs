@@ -95,6 +95,43 @@ pub struct WitnessTable {
     pub calls: HashMap<WitnessKey, Vec<WitnessSrc>>,
 }
 
+/// W7-43 — the [`CarrierTable`] key. The same four components as [`KeywordKey`]/[`WitnessKey`],
+/// built by the same rules (see [`crate::checker::carrier_key`]), except the last component is the
+/// `?.` carrier's NAME-TOKEN span (`ExprKind::OptChain`'s `name_span`).
+///
+/// It is deliberately NOT the carrier node's span. `parse_postfix` takes `let span = e.span;` ONCE
+/// before the postfix match, so every link of `a?.b?.c` carries the PRIMARY expression's span — and
+/// a MIXED chain (`a: Result`, `a.b: Option`) has two links whose modes DIFFER. Keying on the node
+/// span would alias them: the later insert wins and the compiler emits the wrong lowering for the
+/// other link under a green `chezzi check` — a silent wrong value, not a diagnostic. The name token
+/// is a distinct source node per link, and the checker's record site and the compiler's lookup site
+/// derive it the same way (one helper, one derivation).
+///
+/// **Not yet injective ACROSS MODULES, and neither are [`KeywordKey`]/[`WitnessKey`]** — the shared
+/// hole, measured and filed as `docs/gaps.md` W7-49. `desugar` splices a callee's default-parameter
+/// expression into the CALLER's AST as a clone that keeps the DEFINING module's spans, while the key
+/// is built with the CALLING module's index — so a `?.` inside a default in `lib.chz` and a `?.` at
+/// the same `line:col` in `main.chz` share one key. The fix is a file identity on [`Span`] itself,
+/// which leaves this tuple and every record/lookup site unchanged.
+pub type CarrierKey = (usize, Span, usize, Span);
+
+/// W7-43 — which lowering a `?.` carrier takes. The checker decides it from the OPERAND's type; the
+/// compiler CONSUMES it and never re-derives it (the backend is type-blind).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CarrierMode {
+    /// Operand is an `Option[T]` — the `match x: Some(__optN): Some(…); None: None` lowering.
+    Option,
+    /// Operand is a `Result[T, E]` — `?` then `.`, byte-identical to the spaced `x? .f` spelling.
+    Try,
+    /// The operand did not type, or is not a carrier at all. The checker already reported it; the
+    /// entry exists only so the compiler's "absent = the two halves disagree" fault stays loud.
+    Unknown,
+}
+
+/// W7-43 — the checker's per-`?.`-carrier lowering decision, keyed by [`CarrierKey`]. `??` is
+/// Option-only, so an `ExprKind::NullCoalesce` never gets an entry: there is no decision to record.
+pub type CarrierTable = HashMap<CarrierKey, CarrierMode>;
+
 /// Surface-only parameter labels on a function type (Swift SE-0111 keyword arguments through a
 /// function VALUE). They ride PARALLEL to a `Ty::Func`'s `params`, but participate in NO type
 /// identity: two function types differing only in labels are the SAME type (mutually assignable,

@@ -21,7 +21,8 @@ use std::fmt;
 pub use ty::Ty;
 use ty::compatible;
 pub use ty::{
-    FnLabels, KeywordKey, KeywordTable, WitnessCallee, WitnessKey, WitnessSrc, WitnessTable,
+    CarrierKey, CarrierMode, CarrierTable, FnLabels, KeywordKey, KeywordTable, WitnessCallee,
+    WitnessKey, WitnessSrc, WitnessTable,
 };
 
 /// The fully-resolved C signature of one `extern` fn, computed by the checker in the defining
@@ -851,13 +852,19 @@ pub fn resolve_extern_signatures_standalone(stmts: &[Stmt]) -> ExternTable {
 ///
 /// M24 rides the SAME pass and the SAME `harvest_keywords` licence (one extra deps-first check, not
 /// two): the [`WitnessTable`] the static-witness lowering consumes comes back alongside.
-pub fn resolve_call_tables(graph: &ModuleGraph) -> (KeywordTable, WitnessTable) {
+///
+/// W7-43 rides it too, as the third element: the [`CarrierTable`] telling the compiler which
+/// lowering each `?.` carrier takes. Unlike the other two it is recorded UNCONDITIONALLY (not gated
+/// on `harvest_keywords`) — a gate would be a second way for this pass and [`check_graph`] to
+/// disagree about the same program.
+pub fn resolve_call_tables(graph: &ModuleGraph) -> (KeywordTable, WitnessTable, CarrierTable) {
     let mut c = Checker::new();
     c.harvest_keywords = true;
     c.run_graph_pass(graph, false);
     (
         std::mem::take(&mut c.keyword_calls),
         std::mem::take(&mut c.witnesses),
+        std::mem::take(&mut c.carriers),
     )
 }
 
@@ -867,7 +874,9 @@ pub fn resolve_call_tables(graph: &ModuleGraph) -> (KeywordTable, WitnessTable) 
 /// [`resolve_extern_signatures_standalone`]. Test-only (the standalone compile/run paths are
 /// `#[cfg(test)]`; production always goes through `build_graph`).
 #[cfg(test)]
-pub fn resolve_call_tables_standalone(stmts: &[Stmt]) -> (KeywordTable, WitnessTable) {
+pub fn resolve_call_tables_standalone(
+    stmts: &[Stmt],
+) -> (KeywordTable, WitnessTable, CarrierTable) {
     let id = crate::resolver::ModuleId(std::path::PathBuf::from("<main>"));
     let graph = ModuleGraph {
         entry: id.clone(),
@@ -930,6 +939,21 @@ pub fn witness_key(
     key_span: Span,
 ) -> crate::checker::WitnessKey {
     (module_idx, frag_ctx, frag_ord, key_span)
+}
+
+/// W7-43 — build the [`CarrierKey`] for a `?.` carrier: `(module, fragment-context span, fragment
+/// ordinal, the OptChain's NAME-TOKEN span)`. The checker's record site and the compiler's lookup
+/// site call this one helper so they can never disagree on the key. `name_span` is always the
+/// carrier's own `name_span`, never its node span — see [`CarrierKey`] for why (a mixed
+/// `Result`/`Option` chain shares one node span across links with DIFFERENT modes).
+/// `frag_ctx`/`frag_ord` are the same interpolation discriminators [`keyword_key`] uses.
+pub fn carrier_key(
+    module_idx: usize,
+    frag_ctx: Span,
+    frag_ord: usize,
+    name_span: Span,
+) -> crate::checker::CarrierKey {
+    (module_idx, frag_ctx, frag_ord, name_span)
 }
 
 /// M24 Task 5 — the span component of a call site's [`WitnessKey`], from the CALLEE and the call
@@ -1771,6 +1795,16 @@ struct Checker {
     /// what fills each witness at each call site). Recorded only while [`Self::harvest_keywords`] is
     /// set; consumed verbatim by the compiler. See [`WitnessTable`].
     witnesses: WitnessTable,
+    /// W7-43 — which lowering each `?.` carrier takes, keyed by [`carrier_key`] and consumed
+    /// verbatim by the compiler (which cannot re-derive it: the decision is the operand's TYPE).
+    /// Recorded UNCONDITIONALLY — not gated on [`Self::harvest_keywords`], because a gate is a
+    /// second way for the harvest pass and `check_graph` to disagree. Produced by
+    /// [`resolve_call_tables`].
+    carriers: CarrierTable,
+    /// W7-43 — a monotonic counter for the `__opt{n}` binding the Option lowering synthesizes, so a
+    /// carrier nested inside another carrier's operand can never shadow it. Mirrors the desugar
+    /// walker's `next_tmp`; never reset (uniqueness within one checked graph is free).
+    next_opt_tmp: usize,
     /// M24 — the witness TYPE-PARAM names whose `$w:T` binding is reachable at the statement
     /// currently being checked: the witness params of the enclosing MODULE-LEVEL free fn or of the
     /// enclosing MEMBER (Task 5 — a method/static method declares its own `[T]`, and the hidden

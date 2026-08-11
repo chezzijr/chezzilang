@@ -62,11 +62,13 @@ later edit shifts them and nobody re-numbers the whole table (`W7-27`'s was alre
 
 | item | gaps.md | what | why it is still open |
 |---|---|---|---|
+| **W7-48** | `:9525` | **A `?` inside `spawn:` is checked against the ENCLOSING fn's return kind, so its `Err` is accepted and then silently dropped.** `SpawnTarget::Block` (`src/checker/sig.rs:2674-2710`) resets `in_defer_block` and `loop_depth` across the task boundary but **not** `current_ret`/`in_fn_body`, so its own comment (`:2693-2696`) — *"a `?` in this task targets the task (nil-returning → reject)"* — is false whenever the enclosing fn returns a carrier. Measured `chezzi check`: nil-returning fn → rejected; **`-> Result[int, str]` → `ok: no type errors`**; `-> Option[int]` → rejected but with `'?' propagates a Result error, but the enclosing function returns Option` (the diagnostic names the *enclosing* fn, which is the bug in one sentence); module top level → accepted. **The accepted case is a silent swallow**: the `spawn` body is its own frame at runtime, so the `Err` early-returns out of the *task*, where the nursery discards it by design (`W7-46`). Measured both engines: `parallel: spawn: v := g()?` inside a `-> Result` fn prints `after nursery` / `Ok(0)`, rc=0 — `boom` appears nowhere. Found while landing `W7-43`; **pre-existing**, and `?.` inherits it identically (a Result-mode `?.` lowers to a real `ExprKind::Try`) | The mechanical fix is a save-zero-restore of `current_ret`/`in_fn_body` in the `SpawnTarget::Block` arm beside the two resets already there (`infer_closure` is the pattern, and the comment already documents the intent). **But it is a REJECT-widening**, the class project memory flags as structurally untested by the suite that passes today: it would newly reject every `?`/`?.` inside a `spawn:` in a carrier-returning fn — run the PRE-change binary over every such site in `examples/` and `tests/chz/` before landing. The prior decision is whether Chezzi wants the Go answer (reject: a spawned task has nowhere to propagate to, which is why `errgroup` exists) or a channel-based escape hatch first; `W7-46` settled that a spawned `Err` VALUE is dropped by design, which argues for reject |
+| **W7-49** | `:9600` | **The three checker→compiler side tables are NOT keyed injectively across modules: a default-parameter expression spliced from one module into another keeps the DEFINING module's spans but is keyed with the CALLING module's index, so two unrelated call sites at the same `line:col` share one entry and the later insert wins — a silent wrong value under a green `chezzi check`, identical on both engines (parity is blind).** `KeywordKey`, `WitnessKey` and `CarrierKey` (`src/checker/ty.rs:24,43,109`) all share the tuple `(graph_module_idx, frag_ctx, frag_ord, key_span)`, and `Span` is `{line, col}` with **no file identity** (`src/lexer/mod.rs:148-152`). **Measured on `KeywordTable`, which has shipped for milestones — this is PRE-EXISTING, not introduced by `W7-43`:** `lib.chz:6 fn f(x: int = g(a=7, b=9)) -> int:` (first named-arg VALUE at col 19) + `main.chz:6     vvvvvv := g(b=1, a=2)` (first named-arg VALUE at col 19), both modules defining `fn h(a, b) = a*100+b` and `g := h` → `chezzi check` **clean**, `chezzi run` prints `709` then **`102`**, where `probe()` should be **`201`**: lib's identity permutation was applied to main's reversed call. The `CarrierTable` form is the same shape (a `?.` in a default colliding with a `?.` at the same `line:col` → the Option lowering emitted for a `Result` carrier → `runtime error: no match arm for variant 'Ok'`; shifting one column fixes it, which isolates the fault to the key). `WitnessTable` is affected by code trace, not yet measured — three predicted modes, worst first: wrong `argc` from `emit_witness_args` (`src/compiler/mod.rs:4564-4593`), wrong concrete type, or a false `internal:` compile error | **Fix (chosen, its own commit): give `Span` a `file: u32`** — assigned once at the single production lex seam `resolver::Builder::parse` (`src/resolver/mod.rs:656-674`), `0` = synthesized/standalone. **The three key tuples and all nine record/lookup sites stay unchanged**, because the spliced clone already carries the defining module's spans and therefore now carries its file id: both halves keep deriving the key from the same AST with no new state to agree about. Nesting composes with **no stack** (each splice level's clone carries its own definer's id). ~104 `Span {…}` literals become hard compile errors; `Span::default()` (47 sites) and `.line`/`.col` reads (116) are untouched; no `HashMap` is keyed on `Span` directly. **Rejected:** a `Spliced` marker `ExprKind` (~12 walker arms, three of them capture/free-variable walkers where a missed arm is silent, *plus* it still needs the cross-half discriminator it was meant to avoid); a recomputable arg-position discriminator (~25 checker + 5 compiler arg-walk sites, unenforced, and the compiler's permuted loops walk a different order — needs a stack that a `(ctx, ord)` pair cannot express); re-spanning the spliced clone (**rejected twice already** — `5642b55d`/`67e848a6`: a span here IS a table key, and a flat re-span aliases two carriers inside ONE default). **Also in scope:** `KeywordTable` alone has **no missing-entry guard** — the lookup at `src/compiler/mod.rs:5134-5158` falls through to `Op::Call(args.len())` and silently **drops every named argument**, where the carrier (`:3852`) and witness (`:4548`) lookups hard-error; plus a value-comparing conflict backstop at the three record sites. **Residual after the fix:** the same default spliced twice into the SAME module can still resolve differently per site (a default is cloned into the CALLER's scope, so a caller-side local can shadow the definer's global) — the backstop makes that loud; the real fix is to compile a default once in its defining module, which is also where Chezzi diverges from CPython (Python evaluates defaults at `def` time in the DEFINING scope) |
 | **W7-47** | `:9328` | **`os.exit` does not terminate the process while `main` is blocked in a socket op.** An eager `Executor` job calling `os.exit(3)` prints its marker and the process then **hangs at rc=124** under `timeout 12`, with `main` still sitting in `accept()`. Go's `os.Exit` is immediate from any goroutine (same shape measured: `listening`, the goroutine's line, **rc=3**), so this is an ancestor divergence on a seam Go owns. Cause: `os.exit` in a job only sets the worker's `pending_exit` (`src/vm/mod.rs:4137`), which `run_outcome` (`:3461-3472`) turns into a `TaskOutcome::Exit` value somebody must **observe** — surfaced only at `shutdown()`/`join_eager_jobs` or the program-exit drain, neither of which a permanently-blocked `main` ever reaches | **Pre-existing in NATURE, newly OBSERVABLE.** The deferred-through-the-join plumbing is unchanged by `W7-40`; what `W7-40` changed is that top-level `main` can now block on a socket AT ALL (before it got the immediate `Err`), which turns "deferred until the join" into "never". Compounds with the untimed `join_eager_jobs` wait below. Not investigated: whether a `parallel:`/`spawn` fiber's `os.exit` defers the same way, and whether the fix belongs at the `os.exit` native (halt the process directly, Go-style — smaller, matches the ancestor) or at the blocking waits (observe a process-wide exit flag — what `--timeout`/cancel would want anyway) |
 | ~~**W7-46**~~ | `:9247` | **FIXED 2026-08-10 — the SEMANTICS were measured correct and Go-consistent; the defect was two examples asserting an unearned success.** A spawned fn's returned `Err` is discarded while a raw fault aborts the nursery. Measured Go 1.26.5: `go func(){ _ = errors.New("boom") }()` → `main finished normally`, **rc=0** (error dropped — this is why `errgroup` exists); `go func(){ panic("boom") }()` → `panic: boom`, `exit status 2`. **Chezzi matches Go on BOTH channels**, so the "disagreement" is the Go contract, not a bug — and `Result` is a value, so there is nowhere for a statement-form `spawn`'s return to go. The real defect: `examples/echo_server.chz` / `echo_server_spawn.chz` printed a **hard-coded** `echo server handled 50 connections` at rc=0 having handled zero on `--serial`, and 3 tests asserted that vacuous line | **Fix:** both examples now count what actually happened — a shared `AtomicInt` (Go's `atomic.Int64`) bumped only by a client whose full round-trip returned `echo:ping`, read after the nursery joins. `--serial` now truthfully prints `echo server handled 0 connections`; the default engine prints the real `50`. `parity_tests.rs` `echo_server_example_terminates_on_the_serial_engine` asserts the honest `0`; `net_echo_server_services_more_conns_than_workers` + `net_echo_server_spawns_handler_per_connection` assert `all served: 100` instead of a vacuous `contains("all served")`. `docs/concurrency.md` states the two-channel contract once, with the measured Go output |
 | **W7-45** | `:9220` | **The `where`-bound hole `W7-41` closed for `==` is still open on every builtin whose runtime is `values_equal`.** With `W7-41`'s `struct Box[T]` carrying `fn eq(...) where T: Comparable` over a non-`Comparable` `Tag`, all of these are check-clean then `runtime error: struct 'Tag' has no 'compare' method`: `[a].contains(b)`, `[a].index_of(b)`, `[a, b].dedup()`, and Set/Map key insert — **the last two only on a hash collision**, so with distinct hashes no `eq` runs and the program silently succeeds with a wrong answer. Cause: these have a runtime of `values_equal` but a checker signature validated only by `assignable`, so `may_be_equal` (and therefore `W7-41`'s guard) is never consulted. Two corrections to the surface as first reported: `List.count` takes a **predicate** (`std/prelude.chz:87`) so it never routes through `values_equal`, and `List.remove` **does not exist** (it is `remove_at`) — both non-issues | Found while fixing `W7-41`, filed rather than folded in: each builtin needs its own checker-side call into `may_be_equal`, which is a wider surface than the one nominal arm `W7-41` touched, and it wants its own negative controls (`W7-41`'s two lessons apply verbatim). **The silent-wrong-answer variant is the worse half** — an `eq` body doing only `self.val == other.val` falls back to structural equality and returns wrong-but-not-faulting, and `[a].contains(a)` hits the identity shortcut in `values_equal_guarded` and never dispatches at all, so a repro that skips those two shapes reports a false green |
 | **W7-44** | `:9189` | **The documented `secrets` equivalent is dead off Linux, and `uuid.v4()` is not a CSPRNG on ANY platform.** (1) `secure_random_bytes` (`src/native/crypto.rs:514`) has a `#[cfg(not(target_os = "linux"))]` arm (`:547-553`) returning `Err("secure_bytes: no secure entropy source on this platform")`, so `crypto.secure_bytes`/`token_hex` are dead on macOS and Windows with no doc caveat — the fail-closed choice is right, the missing wiring and missing caveat are not. (2) **Stronger than the external report, and true on Linux too:** `uuid.v4()` (`src/native/uuid.rs:74`) draws two `next_u64` from a **64-bit SplitMix64** state, whose output function is a **bijection** — and `v4` destroys only 6 of 128 bits, so **ONE** observed UUID recovers the state AND the seed and predicts every other one, forwards and backwards, regardless of how the seed was obtained (measured against the repo's own frozen seed-42 vector; off Linux the seed is additionally just `nanos ^ addr`, `uuid.rs:41-47`). The same property carries to **`std.rand`** (same `next_u64`, same Linux-only auto-seed) and thence to `iter.shuffle`/`choice`/`sample`. `docs/stdlib.md:952` claimed "auto-seeded from OS entropy" with no platform caveat and no "not for security" warning, while `:943-945` already warns correctly about MD5/SHA-1 | Split, and only half is expensive. **(a) docs — LANDED 2026-08-10** (`docs(stdlib): the CSPRNG surface names its Linux-only wiring, and uuid.v4 says it is not secure`): an explicit "`uuid.v4()` is NOT cryptographically secure — use `crypto.token_hex` for secrets" warning plus the Linux-only caveat. **(b) its own task, still open:** a portable entropy source (`getentropy(3)` on BSD/macOS, `BCryptGenRandom` on Windows) and/or reseeding `uuid` from it per draw. Ancestor to measure when (a) lands: Python's `secrets` and `uuid.uuid4()` both draw from `os.urandom` on every platform, Go's `crypto/rand` likewise, and neither ships a 64-bit-state UUID |
-| **W7-43** | `:9141` | **`?.` / `??` on a `Result` emits three errors naming variants the user never wrote** — the most-hit papercut in the external review (four separate testers, one of them four times in 30 programs). `f()?.len()` where `f() -> Result[str, str]` reports `'Some' is not a variant of Result` + `'None' is not a variant of Result` + `non-exhaustive match on Result: missing Err, Ok`, all on the `OptChain` span; `f()? .len()` — **one space** — works. Cause: the lexer merges `?.` type-blindly (`src/lexer/mod.rs:819-829`) and `Desugar::lower_carrier` (`src/desugar/mod.rs:1230-1308`) lowers it to a `Match` with hard-coded `Some`/`None` arms **before any typing**, so the checker only ever sees a `Match` on a `Result` with Option arms. The spaced/unspaced split is deliberate and documented (`syntax.md:2474-2486`) — the semantics may be right, **the diagnostics are not** | The decision needs types and the lowering site has none, so any fix is structural: stop lowering `OptChain`/`NullCoalesce` in desugar and retire the two `unreachable!()`s asserting the node is dead (`src/checker/pattern.rs:1351-1353`, `src/compiler/mod.rs:3802-3804`). `ExprKind::Try` is the precedent — it survives to the checker (`infer_try`, `pattern.rs:3095`) and to the VM (`Op::Try`, `exec.rs:1888` → `do_try`, `stmt.rs:120`) with no desugaring at all. **Minimal:** keep Option-only, emit ONE error naming `?.`. **Full** (`?.` on a Result = `?` then `.`): additionally needs `infer_try`'s enclosing-fn-return-kind gate (`pattern.rs:3149-3158`) and its `recover:`/`defer:` cases (`:3100-3131`, `:3138-3147`), because `x?.f` on a Result is a real early return where the Option form is a pure expression — **that interaction is the cost centre, not the parsing**. `syntax.md:2474-2486` + `grammar.bnf:580-585` move with it |
+| ~~**W7-43**~~ | `:9201` | **FIXED 2026-08-11 — the FULL version: `?.` on a `Result` now MEANS `?` then `.`, so the whitespace cliff is gone, not just the diagnostics.** `f()?.len()` where `f() -> Result[str, str]` used to report `'Some' is not a variant of Result` + `'None' is not a variant of Result` + `non-exhaustive match on Result: missing Err, Ok`, none of them naming `?.` — the most-hit papercut of the external review (four testers, one of them four times in 30 programs). It now reports `ok: no type errors`, and `f()?.len()` / `f()? .len()` are byte-identical programs (measured both engines: `Ok(2)` / `Err('boom')`, rc=0). Rust owns enums/errors/control flow and `f()?.len()` compiles in Rust | **Fix:** the carriers stop being lowered by desugar and survive to the checker, mirroring `ExprKind::Try`. The checker types the operand, picks Option-vs-Try, then **clone-lowers to a real AST shape and infers THAT** — so the Result-mode clone literally *contains* an `ExprKind::Try` and all three of `infer_try`'s gates (`recover_depth`, `in_defer_block`, the `current_ret`/`in_fn_body` return-kind gate) apply with **zero new gate code**: the row's own predicted cost centre was discharged by construction. The choice is recorded in a `CarrierTable` keyed `(module_idx, frag_ctx, frag_ord, **name_span**)` — a NEW `OptChain` field, load-bearing because `parse_postfix` takes `let span = e.span;` once before the postfix match, so every link of `a?.b?.c` shares the primary's span and a **mixed** chain (`a: Result`, `a.b: Option`) would have aliased two different modes onto one entry under a green `chezzi check`. The compiler looks the mode up and clone-lowers with the SAME shared functions (`desugar::lower_carrier_option`/`lower_carrier_try`), so spans, keys and bytecode cannot drift; a MISSING entry is a hard `CompileError`, never a default. **The VM is unchanged** (the Result path emits the `Op::Try` the spaced form already emitted); a runtime-dispatched `CarrierEnter`/`CarrierExit` opcode pair was **rejected** — two opcodes and two new serial-vs-M:N surfaces for zero benefit, since the checker must decide statically anyway. `??` stays **Option-only** (no spaced alternative to rescue, no ancestor offers it, and it would silently discard an error payload) with ONE accurate error naming `??` and pointing at `match`. Migration papercut: `f()?.len() ?? 0` on a Result is now an error on the `??`. Evidence: 3991 lib tests green; `tests/chz/spec/opt_carrier_test.chz` (21 `test fn`) green on BOTH engines, every case an **equivalence** assertion between the two spellings (a widening is untestable by the suite that rejected it); plus a bytecode-**identity** test asserting `f()?.len()` and `f()? .len()` emit identical opcode sequences. Grammar productions unchanged. **Residuals filed as `W7-48`** (a `?` inside `spawn:`) **and `W7-49`** — `CarrierKey` inherits the cross-module key-aliasing hole that `KeywordKey`/`WitnessKey` have carried since they shipped; `name_span` makes the key injective *within* a module, which is all it ever claimed, and `W7-49`'s `Span`-file fix closes the rest without touching this tuple |
 | ~~**W7-42**~~ | `:8994` | **FIXED 2026-08-10 — a module-scope `:=` re-declaration may REBIND the global but not RETYPE it.** `x := 1` / `f := fn() -> int: x` / `x := "9"` was check-clean and printed a **`str`** out of a fn declared `-> int` (`y: int = f()` accepted, `y + 1` then faulting). Cause: `Checker::declare` (`src/checker/setup.rs:1747`) retypes ONE binding, while `collect_globals` (`src/compiler/mod.rs:940-945`) is idempotent BY NAME so both `x`s are one global slot a pre-existing closure keeps reading — the checker agreed only with the fn-local backend (`add_local`, `mod.rs:6512`, which pushes a FRESH slot). **The ancestors were re-measured and they split** (`go` 1.26.5 / `python3` 3.14.6 / `rustc` 1.97.0 — table at the detail row), so this was a decision: Go rejects, Rust shadows, Python late-binds but has no annotation to lie about | **Fix:** one checker-only carve-out beside the `const` one (`src/checker/sig.rs:2007`), fired when `scopes.len() == 1` (the 1:1 map onto the compiler `is_global_scope()`; `in_fn_body` would over-reject a top-level `if:` body) and the previous and newly declared types differ and `declared` is **not a refinement of** `prev` — `merge_unknown(prev, declared) != declared`, the same structural refine-on-first-use merge, so `x := []` then `x := [1]` stays legal. **The first cut of that carve-out was a two-sided veto** (`!contains_unknown_in_slot` on *both* sides) and it did **not close the defect it was written for**: an `Unknown` on EITHER side silenced the rule, so `x := 1` / `f := fn() -> int: x` / `x := None` was check-clean and printed **`None`** out of a `-> int` fn (`y: int = f()` accepted, rc=0), as were `x := []` → `x := 42`, `x := None` → `x := 42`, and `x := 1` → `x := []`. The relation wanted is ONE-SIDED (is `declared` a refinement of `prev`?), plus a bare `declared == Unknown` guard because `merge_unknown` early-returns `a` on an unknown shape. All four holes now reject; the 80-cell import sweep is **byte-identical** to its pre-repair run (18 catches / 26 rejects-with-no-reader / the 4 disclosed `W7-42r` (b) holes) and the 422-file corpus check is still **0** hits. Gated `!inferring_ret`, and it still calls `declare` so the from-import hand-back survives. When `prev` is **the import's own binding** it is compared by **source position** (`import_binds`, which already records each bound name's `import` span). Imports are HOISTED, and **two wrong cuts were measured first**: keying on "the name was ever imported" rejects the sound `x := 1` … `import … as x` *and* lets the defect through one `import` away (`import COUNT from lib` / closure / `COUNT := "s"`); keying on the span *unconditionally* makes an unused source-LATER import a per-NAME suppressor that re-opens the defect verbatim (`x := 1` / closure / `x := "s"` / `import … as x` — check-clean, printed `s` out of a `fn() -> int`; the same program with a different imported name always fired). `imported_values` / `Ty::Module` are exactly the "is `prev` still the import's?" test, since `declare` clears the former at module scope. No tie case exists (imports are top-level only; no statement separator). **Evidence: a 36-program before/after table from the pre-change and post-change release binaries** — 23 rows keep their exact verdict AND their byte-identical runtime output, and every one of the 13 that change is a module-slot retype — plus a `chezzi check` sweep of all 422 shipped `.chz` (**0** hits). `x := 1` / `x := 1.0` is rejected too (measured pre-fix: `y: int = f()` held `1.0` and `y + 1` printed `2.0`); a **narrowing** (`Any -> str`, `Shape -> Circle`) is rejected too and **deliberately** so — the frozen type is the SLOT's, and an earlier *writer* typed against `Any` is check-clean then dead at runtime (measured) — escape by re-annotating. The from-import hand-back survives only at the SAME type (`import COUNT from lib` (str) / `COUNT := 0` rejects, with no annotation escape — a rename); pinned as deliberate. **Residual filed as `W7-42r`** (destructuring; the forward read of a hoisted import; a from-imported fn) |
 | **W7-42r** | `:9132` | **Four module-global retype shapes the `W7-42` rule does not reach — same check-clean class, filed not fixed.** (a) **Destructuring** (`src/checker/sig.rs:2863-2894`): `x := 1` / `f := fn() -> int: x` / `x, y := ("s", 2)` → `f()` prints `s` and `z: int = f()` is accepted, check-clean. (b) A **forward read of a hoisted import** (`src/checker/setup.rs:1126`, `:1341`), retyped by a source-EARLIER `let`: `f := fn() -> str: x` / `x := 1` / `import COUNT as x from lib` → `f()` is `1` out of a `-> str`, check-clean. (c) A from-imported **fn**, retyped: `import g from lib` / `f := fn() -> str: g()` / `g := 1` → check-clean on BOTH binaries, `'int' is not callable` at runtime — outside the rule because a from-imported fn never lands in `scopes[0]`. All measured on the post-`W7-42` binary; all predate that fix and are unchanged by it. **NOTE — the source-*earlier*-`import` half of (b) is now CLOSED** (`import COUNT from lib` / a closure / `COUNT := "s"` is rejected): `W7-42` compares the import's own span, so what is left is only the forward-read direction. (d) the SAME-MODULE version of (c) — `fn helper() -> int` / `f := fn() -> int: helper()` / `helper := 3` → check-clean, `'int' is not callable` at runtime; the commoner shape, same `scopes[0]`-vs-`Checker::functions` cause. Top-level `for` and `match` binds are **not** affected: both push a scope first (measured) | (a) is the same shape of fix as `W7-42` — the discriminator (`scopes.len() == 1`, previous type known and different) is already written; the destructuring site needs its own call to it plus a per-site message. (c)/(d) need the rule to see the fn namespace as well as `scopes[0]` — **assessed, deliberately deferred**: `functions` is hoist-populated and therefore source-position-blind (the axis that produced two wrong cuts of the import half), and two legal neighbours already live in that family (`helper := <same-sig closure>`, and a `helper := 3` that PRECEDES the `fn`), so it needs a per-fn span map + a `Ty::Func` equality decision + its own sweep. (b) is **not** a `declare`-caller bug: the checker lets a source line read a binding the hoist created *below* it, so it belongs with forward-reference resolution, not with a second copy of the `W7-42` predicate |
 | **W7-41** | `:8864` | **OPEN — a fix was written, adversarially reviewed, and REVERTED the same day; read the lesson column BEFORE attempting it again.** A `where` receiver bound is enforced for `<`, `+`, hashing and generic bounds but NOT for `==`. `struct Box[T]` with `fn eq(self, other: Self) -> bool where T: Comparable` over a non-`Comparable` `Tag`: `chezzi check` → `ok: no type errors`, `chezzi run` → `runtime error: struct 'Tag' has no 'compare' method` — the `checker-superset-of-compiler` class, which two-engine parity is structurally blind to. Leaked identically through `!=`, `[a] == [b]`, `Some(a) == Some(b)` and `in`. Cause: `<`/`+` route through `satisfies` → `satisfies_methods`, whose `where_bounds` walk fires; `==` routes through `may_be_equal` (`src/checker/proto.rs:813`), whose nominal arm compared name + arity + arg co-inhabitance only. The `equality_allowed` disjunct deleted in M23 slice 3 as "provably dead" was dead **only until conditional conformance landed** — `Box[Tag] == Box[Tag]` IS a same-type pair whose `eq` does not cover it. rustc 1.97.0 rejects the mirror at compile time (`E0369`, "an implementation of `Ord` might be missing for `Tag`") while the satisfying instantiation still compiles | **THE ATTEMPTED FIX AND WHY IT WAS REVERTED — this is the whole value of the row.** The guard tried was: in `may_be_equal`'s nominal arm, if the type declares an `eq`, require `satisfies(ty, "Eq")`. It shipped **fully green** — `cargo test --lib` 3952 passed, `chezzi test tests/chz/` 424 passed on both engines, clippy clean, the repro correctly rejected — and it **broke working programs en masse**, caught only by adversarial review running the pre-change binary on neighbours the tests never covered. `Eq` is granted intrinsically to **only the four scalars** (`proto.rs:1541`), so `where T: Eq` is unsatisfiable for every type whose `==` is structural: with `fn eq(self, o: Box[T]) -> bool where T: Eq`, `Box([1,2])`, `Box((1,2))`, `Box(b"ab")`, `Box(Some(1))` and `Box(P(1))` for any plain struct `P` all printed `true` before and became `cannot compare … for equality`. **So the prerequisite is not a guard on the equality path at all — it is making `Eq` satisfaction agree with what `==` actually accepts**, which touches every `satisfies(_, "Eq")` caller and is its own milestone. Three further traps found in the same review, all still live for the next attempt: (a) the guard must not fire on the in-tree ordinary-method escape hatch (`enum Opt[T]: fn eq(self, x: T)`, `struct H[T]: fn eq[U](self, o: U)`) — those are not `(self, Self) -> bool`, so `satisfies` fails on legal code; it needs the `Ty::Param`/`Unknown` test mirroring `validate_eq_shape`; (b) a **one-sided** guard is an asymmetry hole, because `n == m` plus co-inhabitable args ≠ identical args (the `int`/`float` and `bytes`/`bytearray` cross arms recurse in), so it must gate both operands; (c) the obvious fixture does **not** exhibit the bug — an `eq` body of `self.val == o.val` falls back to structural equality and exits 0; the fault needs a body that calls the bounded operation (`self.compare(o)` → `<`, or `.hash()`), which is what makes a test written from the fixture alone a false green. **Meta-lesson, and it is the repo's own `rule-fires-is-not-rule-is-right`: a new checker REJECT must be proven against its own premise — run the PRE-change binary on the `ok()` neighbours the premise implies, not just on the case you are fixing.** A green suite proves nothing about a widening; the suite contained no `where T: Eq` over a non-scalar |
@@ -9198,10 +9200,17 @@ both push a scope first (measured — `x := "s"` then `for x in 0..3:` leaves `x
 loop, and a top-level `for` over a `List[str]` after `x := 1` leaves a pre-existing `fn() -> int`
 closure reading `1`).
 
-### W7-43 — `?.` / `??` on a `Result` emits three errors naming variants the user never wrote — **OPEN**
+### W7-43 — `?.` / `??` on a `Result` emits three errors naming variants the user never wrote — **FIXED (2026-08-11)**
+
+> **Verdict: the FULL fix shipped — `?.` on a `Result` now MEANS `?` then `.`.** The whitespace cliff is
+> gone, not just the diagnostics. Rust owns enums/errors/control flow (CLAUDE.md) and `f()?.len()`
+> compiles in Rust; a language whose `?` propagates the `Err` and whose `.` reads the value had no
+> defensible reason to reject their concatenation over one absent space.
 
 **The single most-hit papercut in the external review** — four separate testers hit it, one of them four
 times in 30 programs.
+
+**The repro, and the before/after, both measured on the release binary.**
 
 ```chezzi
 fn f() -> Result[str, str]:
@@ -9210,41 +9219,100 @@ fn main() -> Result[int, str]:
     n := f()?.len()
 ```
 
+| | `chezzi check` |
+|---|---|
+| **BEFORE** | `type error (line 4, col 10): 'Some' is not a variant of Result`<br>`type error (line 4, col 10): 'None' is not a variant of Result`<br>`type error (line 4, col 10): non-exhaustive match on Result: missing Err, Ok` |
+| **AFTER** | `ok: no type errors` |
+
+Three errors for one non-mistake, and **none of them named `?.`**. `f()? .len()` — one space — always
+worked; that is now the *same program*, measured on both engines:
+
+| program | `chezzi run` (M:N) | `chezzi run --serial` |
+|---|---|---|
+| `f() -> Ok("hi")`, `n := f()?.len()` | `Ok(2)` rc=0 | `Ok(2)` rc=0 |
+| same, spelled `f()? .len()` | `Ok(2)` rc=0 | `Ok(2)` rc=0 |
+| `f() -> Err("boom")`, `n := f()?.len()` | `Err('boom')` rc=0 | `Err('boom')` rc=0 |
+| same, spelled `f()? .len()` | `Err('boom')` rc=0 | `Err('boom')` rc=0 |
+
+**Cause (what it was).** The lexer merges `?.` when adjacent, type-blindly
+(`src/lexer/mod.rs:819-829`). `Desugar::lower_carrier` then lowered it to a `Match` with hard-coded
+`Some`/`None` arms **before any typing** (desugar runs from `resolver::build_graph`), so the checker
+only ever saw a `Match` on a `Result` with `Some`/`None` arms and reported accordingly — all three
+diagnostics on the `OptChain` span, because the whole `Match` carried it.
+
+**Mechanism of the fix — the carriers survive desugar, exactly as `ExprKind::Try` always has.**
+`OptChain`/`NullCoalesce` are no longer lowered by desugar (which now does a plain structural walk of
+their children plus `normalize_opt_call`, so named args, omitted defaults and variadics on a `?.`
+method call are still bound); the two `unreachable!()`s asserting the node was dead are retired. The
+**checker** types the operand, picks Option-vs-Try, then **clone-lowers to a real AST shape and infers
+THAT** — `Match{Some/None}` for an `Option`, `Field`/`Call` over `Try(obj)` for a `Result`.
+
+That last detail is why **the row's own predicted cost centre cost nothing**. The row warned that the
+full version "additionally needs `infer_try`'s enclosing-fn-return-kind gate and its `recover:`/`defer:`
+cases … **that interaction is the cost centre**". Because the Result-mode clone literally *contains* an
+`ExprKind::Try`, all three of `infer_try`'s gates — `recover_depth`, `in_defer_block`, and the
+`current_ret`/`in_fn_body` return-kind gate — fire at the right nesting with **zero new gate code**. The
+cost centre was discharged **by construction**, not by re-implementing it.
+
+**The `CarrierTable`, and why it is keyed on `name_span` and not on the node's span.** The checker's
+choice is recorded in `(module_idx, frag_ctx, frag_ord, name_span)`; the compiler looks it up and
+clone-lowers with **the same shared functions** (`desugar::lower_carrier_option` /
+`lower_carrier_try`), so spans, table keys and bytecode cannot drift between the two halves. A
+**missing** entry is a hard `CompileError`, never a default — absent means the halves disagree about
+the program, and defaulting would turn that into a wrong runtime value shape under a green
+`chezzi check`.
+
+`name_span` is a **new field on `ExprKind::OptChain`** and it is load-bearing: `parse_postfix`
+(`src/parser/mod.rs:2378`) takes `let span = e.span;` **once, before the postfix match**, so every link
+of `a?.b?.c` carries the span of the primary `a`. A **mixed chain** — `a: Result`, `a.b: Option` — has
+two links with **different modes**, so keying on the node span would alias them onto one entry, the
+later insert would win, and the compiler would emit the wrong lowering for one link under a green
+`chezzi check`. A silent wrong value. The `?.`-following name token is the only per-link source
+position a chain has. (Free side-fix: `lower_carrier_option`'s synthesized `Field` now also uses the
+carrier's real `name_span`, so `a?.m(c)?.n(c)` no longer collides two distinct witness calls on one
+`WitnessKey`.)
+
+**`??` stays `Option`-only — deliberately, and now with ONE accurate error.** Reasons: it has no
+spaced alternative spelling, so there was no whitespace trap to remove — only a new operator meaning to
+invent; no ancestor supports it (Rust deliberately has no coalescing operator; Swift/Kotlin/C#'s is
+Optional-only, in languages with no `Result`); and it would silently discard an error payload, which
+contradicts `src/checker/pattern.rs`'s must-handle stance and `W7-46`. Measured:
+
 ```
-type error (line 5, col 10): 'Some' is not a variant of Result
-type error (line 5, col 10): 'None' is not a variant of Result
-type error (line 5, col 10): non-exhaustive match on Result: missing Err, Ok
+type error (line 4, col 10): '??' applies to an Option, found Result[str, str] — a Result carries an
+error that must be handled: use a match with Ok/Err arms
 ```
 
-`f()? .len()` — **one space** — works. Three errors for one mistake, and **none of them names `?.`**.
+Two more measured one-error verdicts: `?.` on a non-carrier →
+`'?.' applies to an Option or a Result, found int`; and the **migration papercut**,
+`f()?.len() ?? 0` on a `Result` → `'??' applies to an Option, found int` (the `?.` already unwrapped to
+`int`; drop the `?? 0`, or `match` if you want a fallback instead of propagation).
 
-**Cause.** The lexer merges `?.` when adjacent, type-blindly (`src/lexer/mod.rs:819-829`).
-`Desugar::lower_carrier` (`src/desugar/mod.rs:1230-1308`) then lowers it to a `Match` with hard-coded
-`Some`/`None` arms, **before any typing** (desugar runs from `resolver::build_graph`). The checker only
-ever sees a `Match` on a `Result` with `Some`/`None` arms and reports accordingly — all three
-diagnostics on the `OptChain` span.
+**`?.` on a `Result` is try-then-DOT, not a chain of tries.** It does not auto-try through a
+`Result[Option[T]]` payload: with `a: Option`, `a.b: Result`, `a?.b?.c` is an `Option[Result[T, E]]`
+followed by a field access on a `Result` — an error, and correctly so.
 
-The spaced/unspaced split is deliberate and documented (`docs/syntax.md:2474-2486`), so the *semantics*
-are not necessarily wrong. **The diagnostics are.**
+**Rejected alternative — a runtime-dispatched opcode pair.** The VM already branches on
+`VID_OK`/`VID_ERR`/`VID_SOME`/`VID_NONE_VARIANT` in `Vm::do_try` (`src/vm/stmt.rs:120`), so a
+`CarrierEnter`/`CarrierExit` pair could have decided at runtime. Cost: two opcodes, two new paths that
+must stay serial==M:N-identical, plus a runtime "was it an Option" marker so the exit knows whether to
+re-wrap. Benefit: **zero** — the checker must decide statically anyway, because the expression's type
+is `T` vs `Option[T]` and every downstream node is compiled against it. Recording a decision the
+checker is already forced to make is one HashMap insert. **The VM is unchanged**: the Result path emits
+`Op::Try` followed by the same field/method opcodes the spaced form emits — literally the same program.
 
-**Seam for the fix, and why it is structural.** The decision needs types, and the current lowering site
-has none. **`ExprKind::Try` is the precedent**: it survives to the checker and is resolved by operand
-type there (`Checker::infer_try`, `src/checker/pattern.rs:3095`) and by runtime value in the VM
-(`Op::Try`, `src/vm/exec.rs:1888` → `Vm::do_try`, `src/vm/stmt.rs:120`), with no desugaring at all. So:
-stop lowering `OptChain`/`NullCoalesce` in desugar and retire the two `unreachable!()`s that currently
-assert the node is dead (`src/checker/pattern.rs:1351-1353`, `src/compiler/mod.rs:3802-3804`).
+**Evidence.** 3991 lib tests green. `tests/chz/spec/opt_carrier_test.chz` (21 `test fn`, 450 chz tests
+in the suite) passes on **both** engines under `chz_suite_passes_both_engines`; every case is an
+**equivalence** assertion between the `?.` and `? .` spellings, which is what makes a *widening*
+testable at all (project memory: "a widening is untested by its own suite" — the pre-change suite could
+not have an opinion about a program it rejected). The load-bearing Rust test compiles `f()?.len()` and
+`f()? .len()` in the same fn and asserts the **opcode sequences are identical** (and, on
+column-aligned sources, the spans too) — it checks the *program produced*, not that a branch fired.
+`docs/syntax.md` §9 and `docs/grammar.bnf`'s two carrier comments moved with it; the grammar
+**productions did not change**, so `cargo test conformance` stayed green without a production edit.
 
-- **Minimal version** — keep Option-only semantics, emit **ONE** error naming `?.` (e.g. *"`?.` applies
-  to an Option; on a Result write `x? .field`"*). Still pays the structural cost of keeping the node
-  alive to the checker, minus the compiler work.
-- **Full version** — `?.` on a `Result` means `?` then `.`. Additionally needs `infer_try`'s
-  enclosing-fn-return-kind gate (`pattern.rs:3149-3158` and the `match` under it) and its `recover:` /
-  `defer:` cases (`pattern.rs:3100-3131`, `:3138-3147`), because `x?.f` on a `Result` is a **real early
-  return** where the Option form is a pure expression. **That interaction is the cost centre, not the
-  parsing.**
-
-Either way `docs/syntax.md:2474-2486` and `docs/grammar.bnf:580-585` state the Option-only rule and move
-with it.
+**Residual, filed not fixed: `W7-48`** — a `?` (and therefore a `?.`) inside a `spawn:` block is
+checked against the **enclosing fn's** return kind, not the task's.
 
 ### W7-44 — the documented secrets surface is dead off Linux, and `uuid.v4()` is not a CSPRNG on ANY platform — **OPEN**
 
@@ -9456,6 +9524,64 @@ nursery join is a different seam), and whether the fix belongs at the `os.exit` 
 process directly, Go-style) or at the blocking waits (make them observe a process-wide exit flag). The
 first is smaller and matches the ancestor; the second is what `--timeout`/cancel would want anyway.
 
+### W7-48 — a `?` inside `spawn:` is checked against the ENCLOSING fn's return kind, so its `Err` is accepted and then silently dropped — **OPEN**
+
+Found while landing `W7-43` (the `?.` carrier work); **pre-existing, and `?.` inherits it identically**
+because a Result-mode `?.` lowers to a real `ExprKind::Try`. Not caused by `W7-43`.
+
+**`SpawnTarget::Block` (`src/checker/sig.rs:2674-2710`) resets `in_defer_block` and `loop_depth`
+across the task boundary but NOT `current_ret` / `in_fn_body`.** Its own comment (`:2693-2696`) states
+the invariant it does not enforce:
+
+> a `?` in this task targets the task (nil-returning → reject), exactly as a bare `spawn: v := g()?`
+> does.
+
+That is **false whenever the enclosing fn returns a carrier.** Measured on the release binary,
+`chezzi check`:
+
+| enclosing fn | `spawn: v := g()?` where `g() -> Result[int, str]` | verdict |
+|---|---|---|
+| `fn main():` (nil) | `type error: '?' used in a function that returns nil, not Result or Option` | rejected — the comment's claim, but only by luck |
+| `fn main() -> Result[int, str]:` | `ok: no type errors` | **accepted** |
+| `fn main() -> Option[int]:` | `type error: '?' propagates a Result error, but the enclosing function returns Option, not Result` | rejected **for the wrong reason** — the diagnostic names the *enclosing function*, which is the bug in one sentence |
+| module top level (no fn) | `ok: no type errors` | accepted |
+
+**The accepted case is a silent swallow, not a harmless over-acceptance.** The checker validated the
+`?` against `main`'s `-> Result[int, str]`, but at runtime the `spawn` body is its **own** frame, so
+the `Err` early-returns out of the *task* — where the nursery discards a returned `Err` by design
+(Go's contract, measured in `W7-46`). Measured, both engines identical:
+
+```chezzi
+fn g() -> Result[int, str]:
+    return Err("boom")
+fn main() -> Result[int, str]:
+    parallel:
+        spawn:
+            v := g()?
+            print("never {v}")
+    print("after nursery")
+    return Ok(0)
+print(main())
+```
+
+→ `after nursery`, `Ok(0)`, **rc=0** on both `chezzi run` and `--serial`. `boom` appears nowhere. The
+program the checker approved has a propagation path the program that runs does not have.
+
+**Same shape through `?.`** (the `W7-43` spelling), also check-clean and also both engines:
+`spawn: n := f()?.len()` inside a `-> Result[int, str]` fn prints the `Ok` value on the happy path and
+silently drops the `Err` on the sad one.
+
+**Seam for the fix.** The two-line mechanical version is to save-zero-restore `current_ret`/`in_fn_body`
+in the `SpawnTarget::Block` arm beside the existing `in_defer_block` and `loop_depth` resets — the
+comment at `:2693-2696` already documents that intent, and the `infer_closure` save/restore is the
+pattern. **But that is a REJECT-widening**, which project memory flags as structurally untested by the
+suite that passes today ("a widening is untested by its own suite") — it would newly reject every `?`
+and `?.` inside a `spawn:` in a carrier-returning fn, a shape `examples/` and `tests/chz/` may already
+use. Run the **pre-change** binary over every such site before landing it. The prior decision to make
+is whether Chezzi wants the Go answer (reject: a spawned task has nowhere to propagate to, which is
+also why `errgroup` exists) or a channel-based escape hatch first; `W7-46` settled that a spawned
+`Err` value is *dropped* by design, which argues for reject.
+
 ### Safe-direction observations and smaller items (2026-08-10)
 
 - **INTERMITTENT: `accept_inside_an_executor_job_errs_instead_of_starving_the_pool` fails under suite
@@ -9507,3 +9633,74 @@ first is smaller and matches the ancestor; the second is what `--timeout`/cancel
 - **Stale doc comment (trivial).** `src/vm/exec.rs:1530`'s comment lists `op_sock_park` as one of the
   cancellation checkpoints. `grep -rn "sock_park\|SockPark" src/` returns **exactly one hit — the comment
   itself**. No such function, opcode or variant exists.
+
+### W7-49 — the three checker→compiler side tables alias across a default-parameter splice — **OPEN**
+
+**Pre-existing on `main` in two SHIPPED tables** (`KeywordTable`, `WitnessTable`); the `CarrierTable`
+`W7-43` added inherits it. Found while landing `W7-43`, and **measured**, not reasoned about.
+
+**The mechanism.** All three keys are `(graph_module_idx, frag_ctx: Span, frag_ord: usize, key_span:
+Span)` (`src/checker/ty.rs:24,43,109`), and `Span` is `{ line, col }` with **no file identity**
+(`src/lexer/mod.rs:148-152`). `desugar` splices a callee's default-parameter expression into the
+**caller's** AST as a clone that keeps the **defining** module's spans (`src/desugar/mod.rs:351-406`,
+filled in `normalize_call`), while the record site builds the key with the **calling** module's index.
+Two unrelated call sites that happen to sit at the same `line:col` in two files therefore share one
+entry; the later `insert` wins, and the type-blind compiler applies the survivor's decision to both.
+
+**Measured repro — `KeywordTable`, silent wrong value.**
+
+```chezzi
+# lib.chz
+fn h(a: int, b: int) -> int:
+    return a * 100 + b
+g := h
+fn f(x: int = g(a=7, b=9)) -> int:      # first named-arg VALUE `7` at line 6, col 19
+    return x
+```
+```chezzi
+# main.chz
+import f from lib
+fn h2(a: int, b: int) -> int:
+    return a * 100 + b
+g := h2
+fn probe() -> int:
+    vvvvvv := g(b=1, a=2)               # first named-arg VALUE `1` at line 6, col 19
+    return vvvvvv
+print(f())
+print(probe())
+```
+```
+chezzi check main.chz  →  ok: no type errors            (exit 0)
+chezzi run   main.chz  →  709
+                          102     ← WRONG; probe() is g(b=1, a=2) = h2(a=2, b=1) = 201
+```
+`102` is `h2(a=1, b=2)` — **lib's identity permutation applied to main's reversed call**. Both engines
+agree, so parity is blind to it.
+
+**Same shape on `CarrierTable`:** a `?.` inside a default-param expression in `lib.chz` colliding with
+a `?.` at the same `line:col` in `main.chz` makes the compiler emit the **Option** lowering for a
+**Result** carrier — `check` clean, then `runtime error: no match arm for variant 'Ok'`. Shifting the
+second carrier by **one column** fixes it, which is what isolates the fault to the key rather than to
+the lowering.
+
+**`WitnessTable` — predicted by code trace, NOT yet measured.** A default may be any expression that
+does not name another parameter, so it may call a generic fn with a static-protocol bound. Three modes,
+worst first: (1) wrong `argc`, because `emit_witness_args` returns `srcs.len()` and the caller widens
+the call's arity by it (`src/compiler/mod.rs:4564-4593`, `:4593`, `:5194`, `:4443`) — two colliding
+callees with different witness counts push the wrong number of hidden args; (2) the wrong concrete type
+constructed, the same shape as the keyword repro; (3) a **false** `internal: a static-type witness is
+recorded for the call to '…', which this call site does not thread` (`:4551-4557`) on a valid program.
+**Measure this before the fix lands** and record the actual mode here.
+
+**Adjacent hole, same fix commit.** `KeywordTable` alone has **no missing-entry guard**: the lookup at
+`src/compiler/mod.rs:5134-5141` falls through to `:5156-5158`, which emits `Op::Call(args.len())` and
+**silently drops every named argument**. The carrier (`:3852-3859`) and witness (`:4548`) lookups both
+hard-error on a miss. That asymmetry is how a keyword miss becomes a wrong value instead of a
+diagnostic.
+
+**The fix, and why the alternatives lost:** see the `W7-49` row in the table at the top of this file.
+Short version — give `Span` a `file: u32` assigned at the one production lex seam
+(`src/resolver/mod.rs:656-674`); the three key tuples and all nine record/lookup sites stay
+**unchanged**, because the spliced clone already carries the definer's spans and so now carries the
+definer's file id. Nesting composes with no stack. Re-spanning the spliced clone is **rejected** — a
+span in this checker *is* a table key, which `5642b55d` and `67e848a6` each learned the hard way.

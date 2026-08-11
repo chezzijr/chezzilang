@@ -2520,21 +2520,50 @@ silently swallowed). Only **module top-level** code (outside any fn) accepts eit
 the unhandled `Err`/`None` at the program boundary and exits (rc=1). A manifest `module:function` entrypoint may
 therefore legitimately be `-> T!` and use `?`; if that entry fn returns `Err`/`None`, `chezzi run` surfaces it
 as `unhandled error: <msg>` (rc=1), just like an unhandled top-level `Err`. Mixing kinds — e.g. a `Result`-`?`
-inside an `Option`-returning fn — is a compile error.
+inside an `Option`-returning fn — is a compile error. The **`?.` operator below is this same `?`** when
+its operand is a `Result`, so every rule in this paragraph applies to it verbatim.
 
-**Optional chaining `?.` and null-coalescing `??`** (on `Option`) cut the `Some`/`None` boilerplate:
+**Optional chaining `?.`** works on **both** carriers; the lowering is chosen by the operand's type:
 
 ```chezzi
-name := user?.profile?.name ?? "anon"   # None anywhere short-circuits to None, then ?? defaults
-len  := s?.trim()?.len() ?? 0           # ?. also chains method calls
+name := user?.profile?.name ?? "anon"   # Option: None anywhere short-circuits, then ?? defaults
+n    := fetch()?.len()                  # Result: propagate the Err (`?`), then `.len()` the value
 ```
 
-`x?.field` / `x?.method(args)` on an `Option[T]`: `None` short-circuits to `None`, `Some(v)` applies
-the access to `v` and re-wraps — so the result is always an `Option` (a field that is itself `Option`
-is **not** flattened: `Option[Option[U]]`). `a ?? b` returns `a`'s inner value if `Some`, else `b`;
-it is **right-associative** (`a ?? b ?? c` = `a ?? (b ?? c)`). Both require the chars **adjacent**
-(`x?.f`, not `x? .f` — the spaced form is the try `?` then `.field`). Sugar only: both desugar to a
-`match` on the `Option`.
+**On an `Option[T]`** — `x?.field` / `x?.method(args)`: `None` short-circuits to `None`, `Some(v)`
+applies the access to `v` and re-wraps, so the result is always an `Option` (a field that is itself
+`Option` is **not** flattened: `Option[Option[U]]`).
+
+**On a `Result[T, E]`** — `x?.field` / `x?.method(args)` means **`?` then `.`**: propagate the `Err`
+out of the enclosing function, then apply the access to the unwrapped `T`. It is identical to the
+spaced spelling `x? .field` — same value, same bytecode, same diagnostics — and is therefore subject
+to the **same enclosing-function return-kind rule as `?`**: a `Result`-`?.` needs a `Result`-returning
+fn (module top-level accepts either kind). Every other rule `?` carries — how it behaves inside
+`defer:` and under `recover:` — applies to it unchanged, because it *is* a `?`. `f()?.len()` is Rust's
+own idiom and compiles here for the same reason. There is no longer a whitespace cliff: `f()?.len()`
+and `f()? .len()` are the same program.
+
+Because the `Result` form is try-then-**dot**, not a chain of tries, it does **not** auto-try through
+a nested carrier: with `a: Option[X]` and `a.b: Result[Y, E]`, `a?.b?.c` is an `Option[Result[Y, E]]`
+followed by a field access on a `Result` — an error, and correctly so.
+
+**Null-coalescing `??` is `Option`-only.** `a ?? b` returns `a`'s inner value if `Some`, else `b`; it
+is **right-associative** (`a ?? b ?? c` = `a ?? (b ?? c)`). It is deliberately *not* extended to
+`Result`: a `Result` carries an error payload `??` would silently discard, and no ancestor offers the
+combination (Rust has no coalescing operator; Swift/Kotlin/C#'s is Optional-only, in languages with no
+`Result`). `??` on a `Result` is one error pointing at `match`:
+
+```
+'??' applies to an Option, found Result[str, str] — a Result carries an error that must be handled:
+use a match with Ok/Err arms
+```
+
+**Migration note.** `f()?.len() ?? 0` on a `Result` is now an error on the **`??`**: `f()?.len()` is
+already an `int`, and `??` takes an `Option`. Drop the `?? 0` (the `?` propagates), or `match` the
+`Result` if you want a fallback instead of propagation.
+
+Both operators require the two chars **adjacent** (`x?.f`, `a ?? b`); on a **non-carrier** operand
+`?.` is one error, `'?.' applies to an Option or a Result, found int`.
 
 **Unhandled errors at the top level exit the program.** An `Err`/`None` that reaches the top level —
 a bare top-level expression statement that evaluates to one (e.g. `compute()` whose result is `Err`),

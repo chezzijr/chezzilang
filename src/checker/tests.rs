@@ -29,9 +29,10 @@ fn rejects(src: &str, needle: &str) {
     );
 }
 
-/// Type-check a source string after running the desugar pass (which lowers `?.`/`??` carriers to
-/// `match`). Production always desugars before the checker (`resolver::build_graph`); these tests
-/// otherwise bypass it. Returns the collected errors.
+/// Type-check a source string after running the desugar pass (call normalization: named args,
+/// omitted defaults, variadic collapse — and, before W7-43, `?.`/`??` carrier lowering, which is
+/// now the CHECKER's job). Production always desugars before the checker (`resolver::build_graph`);
+/// these tests otherwise bypass it. Returns the collected errors.
 fn check_desugared(src: &str) -> Vec<CheckError> {
     let tokens = lexer::tokenize(src).expect("lex should succeed");
     let mut module = parser::parse(tokens).expect("parse should succeed");
@@ -9986,7 +9987,10 @@ fn defer_block_new_binding_and_nonsendable_read_ok() {
     );
 }
 
-// ===== optional chaining `?.` + null-coalescing `??` (desugared to `match`) =====
+// ===== optional chaining `?.` + null-coalescing `??` =====
+//
+// The carrier survives desugar (W7-43); the checker picks the lowering from the operand's type —
+// `match Some/None` for an Option, `?` then `.` for a Result. `??` stays Option-only.
 
 #[test]
 fn null_coalesce_some_picks_value() {
@@ -10001,8 +10005,70 @@ fn null_coalesce_result_type() {
 
 #[test]
 fn null_coalesce_lhs_must_be_option() {
-    // A Result LHS has Ok/Err, not Some/None — the desugared match is rejected.
-    rejects_desugared("r := Ok(5)\nx := r ?? 0\n", "");
+    // `??` is Option-ONLY. This test used to pass an EMPTY needle to `rejects_desugared`, i.e. it
+    // asserted only "some error happened" — which is precisely how W7-43's three bogus
+    // Option-variant errors survived undetected for so long. Pin the real message AND the count.
+    let errs = check_desugared("r := Ok(5)\nx := r ?? 0\n");
+    assert_eq!(errs.len(), 1, "exactly one error, got: {errs:?}");
+    assert!(
+        errs[0]
+            .message
+            .contains("'??' applies to an Option, found Result[int]"),
+        "got: {errs:?}"
+    );
+}
+
+#[test]
+fn null_coalesce_on_result_one_error() {
+    // The full W7-43 message: `??` names ITSELF and points at the handling the Result needs — it
+    // must not silently discard the error payload, and it gets no new semantics on a Result.
+    let errs = check_desugared("fn f() -> str!str:\n    return Ok(\"hi\")\nx := f() ?? \"d\"\n");
+    assert_eq!(errs.len(), 1, "exactly one error, got: {errs:?}");
+    assert!(
+        errs[0].message.contains(
+            "'??' applies to an Option, found Result[str, str] — a Result carries an error that \
+             must be handled: use a match with Ok/Err arms"
+        ),
+        "got: {errs:?}"
+    );
+}
+
+#[test]
+fn null_coalesce_on_a_non_carrier_one_error() {
+    let errs = check_desugared("x := 5\ny := x ?? 0\n");
+    assert_eq!(errs.len(), 1, "exactly one error, got: {errs:?}");
+    assert!(
+        errs[0]
+            .message
+            .contains("'??' applies to an Option, found int"),
+        "got: {errs:?}"
+    );
+}
+
+#[test]
+fn null_coalesce_operand_error_is_reported_exactly_once() {
+    // `infer_null_coalesce` infers the LHS ONCE and substitutes a pre-typed scratch into the lowered
+    // clone, so the clone never re-infers it. The zero half: an undefined operand must still report.
+    let errs = check_desugared("y := nope ?? 0\n");
+    assert_eq!(
+        errs.len(),
+        1,
+        "the operand's error, reported once — not zero, not twice: {errs:?}"
+    );
+    assert!(errs[0].message.contains("unknown name 'nope'"), "{errs:?}");
+
+    // …and the twice half: the operand types fine as an Option, so the clone IS inferred — the
+    // operand's own error must survive exactly once, not twice and not zero times.
+    let errs = check_desugared(
+        "fn mk(a: int) -> Option[int]:\n    return Some(a)\nr := mk(\"bad\") ?? 0\n",
+    );
+    assert_eq!(errs.len(), 1, "reported once, not twice: {errs:?}");
+    assert!(
+        errs[0]
+            .message
+            .contains("argument 1 of 'mk': expected int, found str"),
+        "{errs:?}"
+    );
 }
 
 #[test]
@@ -10015,6 +10081,48 @@ fn opt_chain_on_non_option_does_not_leak_temp_name() {
         !errs.iter().any(|e| e.message.contains("__opt")),
         "internal temp name leaked into a diagnostic: {errs:?}"
     );
+}
+
+#[test]
+fn carrier_operand_scratch_name_never_leaks_into_a_diagnostic() {
+    // The operand-scratch binding `Checker::scratch_operand` declares (so the lowered clone infers
+    // the operand ZERO extra times) is invisible to users — no diagnostic may name it. Covers all
+    // three arms that create one: `?.` on a Result, `?.` on an Option, and `??`.
+    for src in [
+        // Result arm: the clone's `?`-then-`.` errors on the missing field.
+        "fn f() -> int!str:\n    return Ok(1)\nfn g() -> int!str:\n    return Ok(f()?.zzz)\n",
+        // Option arm: the clone's match-arm body errors on the missing method.
+        "struct P:\n    x: int\nop: Option[P] = Some(P(1))\nr := op?.zzz()\n",
+        // `??` arm: the clone's `None` arm errors on the mismatched rhs.
+        "op: Option[int] = Some(1)\nr := op ?? \"s\"\n",
+        // …and a nested chain, where every link declares its own scratch.
+        "struct P:\n    x: int\n    fn m(self) -> Option[P]:\n        return Some(self)\nop: Option[P] = Some(P(1))\nr := op?.m()?.m()?.zzz\n",
+    ] {
+        let errs = check_desugared(src);
+        assert!(!errs.is_empty(), "expected a diagnostic for: {src}");
+        assert!(
+            !errs.iter().any(|e| e.message.contains("__optrecv")),
+            "operand-scratch name leaked into a diagnostic: {errs:?}"
+        );
+    }
+}
+
+#[test]
+fn opt_chain_check_time_is_linear_in_chain_length() {
+    // `?.` chains left-nest, so `a?.b?.c`'s operand IS the previous carrier. When the lowered clone
+    // still contained the operand it was inferred twice per link — `T(n) = 2·T(n-1)`, measured at
+    // 10s of `chezzi check` for 22 links and ~4× per 2 more, with `MAX_CHAIN_DEPTH = 500` sitting 15
+    // orders of magnitude above the point it becomes a hang. No wall-clock assert (flaky); the guard
+    // is that this finishes AT ALL — at 60 links the doubling shape is ~2^38 × the 22-link cost.
+    let mut src = String::from(
+        "struct A:\n    v: str\n    fn m(self) -> A!str:\n        return Ok(self)\n\
+         fn f() -> A!str:\n    return Ok(A(\"x\"))\nfn g() -> str!str:\n    return Ok(f()",
+    );
+    for _ in 0..60 {
+        src.push_str("?.m()");
+    }
+    src.push_str("?.v)\n");
+    ok_desugared(&src);
 }
 
 #[test]
@@ -10043,10 +10151,157 @@ fn opt_chain_double_option_not_flattened() {
     ok_desugared(
         "struct P:\n    maybe: Option[int]\nop := Some(P(Some(1)))\nr: Option[Option[int]] = op?.maybe\n",
     );
-    // ...so binding the same expression to `Option[int]` must fail.
+    // ...so binding the same expression to `Option[int]` must fail. (Real needle, not the empty
+    // one this used to pass — an empty needle asserts only "some error", which is how W7-43's
+    // three bogus Option-variant errors survived so long.)
     rejects_desugared(
         "struct P:\n    maybe: Option[int]\nop := Some(P(Some(1)))\nbad: Option[int] = op?.maybe\n",
-        "",
+        "cannot assign Option[Option[int]] to variable of type Option[int]",
+    );
+}
+
+// ===== W7-43 — `?.` on a Result is `?` then `.` =====
+//
+// The carrier survives desugar now; the CHECKER picks the lowering from the operand's type. Use
+// the `_desugared` helpers throughout — that is the production pipeline.
+
+/// `fn f() -> str!str` + `f()?.len()` inside a `Result`-returning fn, in both spellings.
+const RESULT_CARRIER: &str =
+    "fn f() -> str!str:\n    return Ok(\"hi\")\nfn g() -> int!str:\n    return Ok(f()?.len())\n";
+const RESULT_CARRIER_SPACED: &str =
+    "fn f() -> str!str:\n    return Ok(\"hi\")\nfn g() -> int!str:\n    return Ok(f()? .len())\n";
+
+#[test]
+fn opt_chain_on_result_is_try_then_dot() {
+    // The gap's own repro: `?.` on a Result means `?` then `.`, exactly as Rust's `f()?.len()`
+    // does — and exactly as the spaced `f()? .len()` spelling always did here.
+    ok_desugared(RESULT_CARRIER);
+    ok_desugared(RESULT_CARRIER_SPACED);
+}
+
+#[test]
+fn opt_chain_on_result_emits_no_option_variant_errors() {
+    // THE regression gate for W7-43. Before the fix this exact program emitted THREE errors, none
+    // of which mentioned `?.`, because desugar rewrote the carrier into a `match` with hard-coded
+    // Some/None arms before anything was typed. Assert their ABSENCE by name, not just that the
+    // program is clean — a future re-lowering could produce a clean program by luck, but it could
+    // not produce these three messages without having taken the Option lowering on a Result.
+    let errs = check_desugared(RESULT_CARRIER);
+    for needle in [
+        "'Some' is not a variant",
+        "'None' is not a variant",
+        "non-exhaustive match on Result",
+    ] {
+        assert!(
+            !errs.iter().any(|e| e.message.contains(needle)),
+            "the Option lowering leaked onto a Result operand ({needle:?}): {errs:?}"
+        );
+    }
+    assert!(errs.is_empty(), "expected a clean program, got: {errs:?}");
+}
+
+#[test]
+fn opt_chain_on_non_carrier_one_error() {
+    // ONE error naming `?.` itself — the count matters as much as the needle: the whole gap was
+    // three errors where one belonged.
+    let errs = check_desugared("x := 5\ny := x?.foo\n");
+    assert_eq!(errs.len(), 1, "exactly one error, got: {errs:?}");
+    assert!(
+        errs[0]
+            .message
+            .contains("'?.' applies to an Option or a Result, found int"),
+        "got: {errs:?}"
+    );
+}
+
+#[test]
+fn opt_chain_diagnostic_equals_the_spaced_spellings_message_and_span() {
+    // The load-bearing claim of the design: `f()?.len()` and `f()? .len()` are the SAME program.
+    // A rejected program is where that is observable in the checker — both must produce the same
+    // message at the same span. (`parse_postfix` reuses the primary's span for every postfix link,
+    // so the two spellings' spans coincide by construction; this pins it.)
+    let nil_fn = |carrier: &str| {
+        format!(
+            "fn f() -> str!str:\n    return Ok(\"hi\")\nfn g():\n    n := {carrier}\n    print(n)\n"
+        )
+    };
+    let dot = check_desugared(&nil_fn("f()?.len()"));
+    let spaced = check_desugared(&nil_fn("f()? .len()"));
+    assert_eq!(dot.len(), 1, "got: {dot:?}");
+    assert_eq!(spaced.len(), 1, "got: {spaced:?}");
+    assert_eq!(dot[0].message, spaced[0].message);
+    assert_eq!(dot[0].span, spaced[0].span, "spans must coincide");
+}
+
+#[test]
+fn opt_chain_on_result_inherits_infer_trys_gates() {
+    // The Result lowering builds a real `ExprKind::Try`, so all three of `infer_try`'s gates apply
+    // verbatim with zero new gate code. Each is asserted in BOTH spellings — the point of the
+    // design is that they are one program.
+    for carrier in ["f()?.len()", "f()? .len()"] {
+        // (a) a nil-returning fn body: the propagated Err would be silently swallowed.
+        rejects_desugared(
+            &format!(
+                "fn f() -> str!str:\n    return Ok(\"hi\")\nfn g():\n    n := {carrier}\n    print(n)\n"
+            ),
+            "'?' used in a function that returns nil, not Result or Option",
+        );
+        // (b) an Option-returning fn: kinds may not be mixed.
+        rejects_desugared(
+            &format!(
+                "fn f() -> str!str:\n    return Ok(\"hi\")\nfn g() -> int?:\n    return Some({carrier})\n"
+            ),
+            "'?' propagates a Result error, but the enclosing function returns Option, not Result",
+        );
+        // (c) inside `recover:` the `?` short-circuits to the boundary, whose error slot is the
+        // `Error` existential — so the propagated error must satisfy `Error`.
+        rejects_desugared(
+            &format!(
+                "struct Bare:\n    x: int\nfn f() -> str!Bare:\n    return Ok(\"hi\")\nr := recover: {carrier}\nprint(r)\n"
+            ),
+            "'?' inside a recover block propagates error Bare, which must satisfy Error",
+        );
+    }
+}
+
+#[test]
+fn opt_chain_operand_error_is_reported_exactly_once() {
+    // `infer_opt_chain` speculatively infers the OPERAND and rolls the errors back before
+    // re-inferring the lowered clone (`error()` does not dedupe). The rollback runs ONLY in the
+    // arms that re-infer — truncating in the Unknown / non-carrier arms would swallow the
+    // operand's only diagnostic, which is the zero-error half of this test.
+    let errs = check_desugared("y := x?.f\n");
+    assert_eq!(
+        errs.len(),
+        1,
+        "an undefined operand must still report, exactly once: {errs:?}"
+    );
+    assert!(errs[0].message.contains("unknown name 'x'"), "{errs:?}");
+
+    // …and the twice half: the operand types fine as a Result, so the clone IS re-inferred — the
+    // operand's own error must survive the truncate exactly once, not twice.
+    let errs = check_desugared(
+        "fn f(a: int) -> str!str:\n    return Ok(\"hi\")\nfn g() -> int!str:\n    return Ok(f(\"x\")?.len())\n",
+    );
+    assert_eq!(errs.len(), 1, "reported once, not twice: {errs:?}");
+    assert!(
+        errs[0]
+            .message
+            .contains("argument 1 of 'f': expected int, found str"),
+        "{errs:?}"
+    );
+
+    // The same twice-half for the OPTION arm — a different lowering (`match`, not `?`-then-`.`),
+    // so it needs its own case or the arm is untested by this suite.
+    let errs = check_desugared(
+        "struct P:\n    x: int\nfn mk(a: int) -> Option[P]:\n    return Some(P(a))\nr := mk(\"bad\")?.x\n",
+    );
+    assert_eq!(errs.len(), 1, "reported once, not twice: {errs:?}");
+    assert!(
+        errs[0]
+            .message
+            .contains("argument 1 of 'mk': expected int, found str"),
+        "{errs:?}"
     );
 }
 
@@ -21967,4 +22222,60 @@ fn witness_defer_target_rejection_is_not_duplicated() {
             "expected exactly one `{kw}` rejection, got: {errs:?}"
         );
     }
+}
+
+// ---------------------------------------------------------------------------------------------
+// W7-43 — the `?.` carrier-mode table's key.
+// ---------------------------------------------------------------------------------------------
+
+#[test]
+fn carrier_key_is_a_pure_tuple_build() {
+    // Single-derivation contract: the checker's record site and the compiler's lookup site both
+    // call this one helper, so it may never do anything but assemble its four arguments. Pinning
+    // that is the point — a "clever" normalization inside it would desynchronize the two halves.
+    let frag_ctx = Span { line: 3, col: 7 };
+    let name_span = Span { line: 9, col: 2 };
+    assert_eq!(
+        carrier_key(4, frag_ctx, 2, name_span),
+        (4, frag_ctx, 2, name_span)
+    );
+}
+
+#[test]
+fn chained_opt_chain_links_get_distinct_carrier_keys() {
+    // `parse_postfix` takes `let span = e.span;` ONCE before the postfix match, so BOTH links of
+    // `a?.b?.c` carry the primary `a`'s span. Keying the mode table on that span would alias them
+    // — and a mixed chain (`a: Result`, `a.b: Option`) has two links whose modes DIFFER, so the
+    // later insert would win and the compiler would emit the wrong lowering under a green check.
+    // The name TOKEN is distinct per link, which is why it is the key's fourth component.
+    let module = parser::parse(lexer::tokenize("a?.b?.c\n").expect("lex")).expect("parse");
+    let StmtKind::Expr(outer) = &module.stmts[0].kind else {
+        panic!(
+            "expected an expression statement, got {:?}",
+            module.stmts[0]
+        );
+    };
+    let ExprKind::OptChain {
+        obj,
+        name_span: outer_name,
+        ..
+    } = &outer.kind
+    else {
+        panic!("expected an OptChain, got {:?}", outer.kind);
+    };
+    let ExprKind::OptChain {
+        name_span: inner_name,
+        ..
+    } = &obj.kind
+    else {
+        panic!("expected a nested OptChain, got {:?}", obj.kind);
+    };
+    // The premise: one shared node span, two distinct name tokens.
+    assert_eq!(outer.span, obj.span, "both links share the primary's span");
+    let ctx = Span::default();
+    assert_ne!(
+        carrier_key(0, ctx, 0, *outer_name),
+        carrier_key(0, ctx, 0, *inner_name),
+        "chained `?.` links must not alias onto one CarrierKey"
+    );
 }

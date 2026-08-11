@@ -954,16 +954,27 @@ pub enum ExprKind {
     Try(Box<Expr>),
     /// Optional chaining `obj?.name` (field) or `obj?.name(args)` (method). `obj` is an `Option[T]`:
     /// `None` short-circuits to `None`, `Some(v)` applies the access to `v` and re-wraps in `Some`.
-    /// A **carrier** node produced by the parser and lowered to a `Match` by the desugar pass
-    /// (`resolver::build_graph`), so the checker and engines never see it.
+    /// A **carrier** node produced by the parser that SURVIVES desugar (W7-43): the lowering depends
+    /// on the operand's TYPE, so the checker picks it (`checker::infer_opt_chain`), records the
+    /// choice in a `CarrierTable` keyed on `name_span`, and the compiler clone-lowers with the same
+    /// `desugar::lower_carrier_*` function. On a `Result` operand `?.` means `?` then `.`, i.e. it is
+    /// byte-identical to the spaced spelling `obj? .name`.
     OptChain {
         obj: Box<Expr>,
         name: String,
+        /// The `?.`-following name token's TRUE span — the ONLY per-link source position a chain has.
+        /// `parse_postfix` takes `let span = e.span;` ONCE before the postfix match
+        /// (`parser::parse_postfix`), so every link of `a?.b?.c` shares the primary's span and cannot
+        /// key a per-link side table; the name token is a distinct source node per link. Mirrors
+        /// [`ExprKind::Field`]'s `name_span`.
+        name_span: Span,
         /// `Some(args)` ⇒ method call `obj?.name(args)`; `None` ⇒ field access `obj?.name`.
         call: Option<OptCall>,
     },
     /// Null-coalescing `lhs ?? rhs`. `lhs` is an `Option[T]`: `Some(v)` ⇒ `v`, `None` ⇒ `rhs`.
-    /// A **carrier** node lowered to a `Match` by the desugar pass; never reaches checker/engines.
+    /// A **carrier** node that survives desugar (W7-43) and is lowered to a `Match` by the checker
+    /// and the compiler via `desugar::lower_carrier_option`. Option-ONLY: `??` on a `Result` is one
+    /// clear error, never a silent discard of the error payload.
     NullCoalesce {
         lhs: Box<Expr>,
         rhs: Box<Expr>,

@@ -188,11 +188,11 @@ fn parse_expr_str(
         message: e.to_string(),
         span,
     })?;
-    let mut expr = parser::parse_expr(tokens).map_err(|e| InterpError {
+    // W7-43 — no carrier lowering here any more: `?.`/`??` are ordinary expressions that survive to
+    // the checker and the compiler, and both set the `kw_frag_ctx`/`kw_frag_ord` discriminators a
+    // fragment's `CarrierKey` needs (`checker::check_interp_chunks`, `compiler::compile_interp`).
+    parser::parse_expr(tokens).map_err(|e| InterpError {
         message: e.message,
         span,
-    })?;
-    // Fragments bypass the module-wide desugar pass; lower `?.`/`??` carriers here (both engines do).
-    crate::desugar::lower_carriers(&mut expr);
-    Ok(expr)
+    })
 }

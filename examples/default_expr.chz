@@ -27,7 +27,7 @@ fn base(n: int = 5) -> int:
 fn scaled(v: int = base()) -> int:
     return v
 
-# default = an expression with null-coalescing (a `??` carrier, lowered inside the default)
+# default = an expression with null-coalescing (a `??` carrier, lowered by the compiler inside the default)
 fn maybe() -> int?:
     return Some(9)
 

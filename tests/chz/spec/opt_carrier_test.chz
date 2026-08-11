@@ -1,0 +1,411 @@
+# tests/chz/spec/opt_carrier_test.chz — W7-43: `?.` on a `Result` is `?` then `.`.
+#
+# `f()?.len()` where `fn f() -> str!str` used to emit THREE errors, none of them mentioning `?.`
+# ("'Some' is not a variant of Result", "'None' is not a variant of Result", "non-exhaustive match
+# on Result") — the desugar pass rewrote every `?.` into a `match` with hard-coded `Some`/`None`
+# arms BEFORE anything was typed. `f()? .len()` — one space — always worked. Rust is the owning
+# ancestor for `?` (`f()?.len()` compiles there), so the whitespace cliff was a bug.
+#
+# EVERY case here is an EQUIVALENCE assertion: the `?.` spelling and the `? .` spelling produce the
+# same value. The `? .` half was green before the change, which is exactly what makes the widening
+# testable — a widened acceptance is structurally untested by the suite that passed before it, so
+# the spaced spelling is the oracle (see `docs/gaps.md` W7-43, project memory
+# "a widening is untested by its own suite").
+#
+# Option semantics for `?.` are UNCHANGED (`Some`/`None` short-circuit, no flattening) and `??`
+# stays Option-only — both are re-pinned here because the carrier now survives desugar and is
+# lowered twice (checker + compiler) instead of once.
+#
+# Serial==M:N is guarded by `test_runner::chz_suite_passes_both_engines`.
+import std.concurrency
+
+struct MyErr:
+    code: int
+    fn message(self) -> str:
+        return "err {self.code}"
+
+struct Box:
+    v: int
+    fn get(self) -> int:
+        return self.v
+    fn add(self, n: int) -> int:
+        return self.v + n
+    # a default parameter + a named one — `normalize_opt_call` is the only thing that binds these
+    # for an optional-chained call now that the carrier is no longer rewritten into a `Call`
+    fn tag(self, prefix: str = "p", n: int = 1) -> str:
+        return "{prefix}{self.v + n}"
+    fn apply(self, f: fn(int) -> int) -> int:
+        return f(self.v)
+
+fn sok() -> str!str:
+    return Ok("hello")
+
+fn serr() -> str!str:
+    return Err("boom")
+
+fn bok() -> Box!MyErr:
+    return Ok(Box(10))
+
+fn berr() -> Box!MyErr:
+    return Err(MyErr(3))
+
+fn bok_s() -> Box!str:
+    return Ok(Box(10))
+
+# ---- 1/2: the gap's own repro, both paths, against the spaced spelling ----
+
+fn len_dot() -> int!str:
+    return Ok(sok()?.len())
+
+fn len_spaced() -> int!str:
+    return Ok(sok()? .len())
+
+fn len_dot_err() -> int!str:
+    return Ok(serr()?.len())
+
+fn len_spaced_err() -> int!str:
+    return Ok(serr()? .len())
+
+test fn result_carrier_ok_path_equals_the_spaced_spelling():
+    assert "{len_dot()}" == "Ok(5)", "got {len_dot()}"
+    assert "{len_dot()}" == "{len_spaced()}", "`?.` and `? .` must agree"
+
+test fn result_carrier_err_path_equals_the_spaced_spelling():
+    # The Err is propagated by the `?`, so the CALLER binds it (a bare top-level Err exits).
+    r := len_dot_err()
+    assert "{r}" == "Err('boom')", "got {r}"
+    assert "{r}" == "{len_spaced_err()}", "`?.` and `? .` must agree on the Err path"
+    match r:
+        Ok(_): assert false, "expected Err"
+        Err(e): assert e == "boom", "payload must survive verbatim, got {e}"
+
+# ---- 3: a `?.` method call WITH arguments ----
+
+fn add_dot() -> int!MyErr:
+    return Ok(bok()?.add(5))
+
+fn add_spaced() -> int!MyErr:
+    return Ok(bok()? .add(5))
+
+fn add_dot_err() -> int!MyErr:
+    return Ok(berr()?.add(5))
+
+fn add_spaced_err() -> int!MyErr:
+    return Ok(berr()? .add(5))
+
+test fn result_carrier_method_call_with_args():
+    assert "{add_dot()}" == "Ok(15)", "got {add_dot()}"
+    assert "{add_dot()}" == "{add_spaced()}"
+    assert "{add_dot_err()}" == "{add_spaced_err()}"
+    match add_dot_err():
+        Ok(_): assert false, "expected Err"
+        Err(e): assert e.message() == "err 3", "got {e.message()}"
+
+# ---- 4: NAMED args + an OMITTED default, on a Result AND on an Option ----
+#
+# The subtlest regression in W7-43: named-arg binding and default filling used to happen only
+# because the lowered carrier WAS a `Call` and fell through the desugar walker's tail. The carrier
+# now survives, so `normalize_opt_call` has to do it explicitly.
+
+fn tag_dot() -> str!MyErr:
+    return Ok(bok()?.tag(n=5))
+
+fn tag_spaced() -> str!MyErr:
+    return Ok(bok()? .tag(n=5))
+
+fn tag_dot_both_named() -> str!MyErr:
+    return Ok(bok()?.tag(n=2, prefix="q"))
+
+fn tag_spaced_both_named() -> str!MyErr:
+    return Ok(bok()? .tag(n=2, prefix="q"))
+
+test fn result_carrier_named_args_and_omitted_default():
+    # `prefix` is omitted → its default "p" is filled; `n` is passed by NAME out of position order.
+    assert "{tag_dot()}" == "Ok('p15')", "got {tag_dot()}"
+    assert "{tag_dot()}" == "{tag_spaced()}"
+    # Both named, and in REVERSE declaration order — the permutation must be rebound positionally.
+    assert "{tag_dot_both_named()}" == "Ok('q12')", "got {tag_dot_both_named()}"
+    assert "{tag_dot_both_named()}" == "{tag_spaced_both_named()}"
+
+test fn option_carrier_named_args_and_omitted_default():
+    ob := Some(Box(10))
+    # Option mode: the access is applied to the payload and RE-WRAPPED, so the result is an Option.
+    assert "{ob?.tag(n=5)}" == "Some('p15')", "got {ob?.tag(n=5)}"
+    assert "{ob?.tag(n=2, prefix='q')}" == "Some('q12')"
+    none_box: Option[Box] = None
+    assert "{none_box?.tag(n=5)}" == "None"
+    # …and the hand-written `match` it means is the same value.
+    hand := match ob:
+        Some(b): Some(b.tag(n=5))
+        None: None
+    assert "{ob?.tag(n=5)}" == "{hand}"
+
+# ---- 5: Option semantics are UNCHANGED ----
+
+struct Inner:
+    c: int
+
+struct Outer:
+    b: Option[Inner]
+
+struct Holder:
+    maybe: Option[int]
+
+test fn option_carrier_some_and_none():
+    ob := Some(Box(4))
+    assert "{ob?.v}" == "Some(4)"
+    assert "{ob?.get()}" == "Some(4)"
+    nb: Option[Box] = None
+    assert "{nb?.v}" == "None"
+    assert "{nb?.get()}" == "None"
+
+test fn option_carrier_chains():
+    o := Some(Outer(Some(Inner(7))))
+    assert "{o?.b}" == "Some(Some(Inner(c=7)))"
+    empty := Some(Outer(None))
+    assert "{empty?.b}" == "Some(None)"
+
+test fn option_of_option_is_not_flattened():
+    h := Some(Holder(Some(1)))
+    r: Option[Option[int]] = h?.maybe
+    assert "{r}" == "Some(Some(1))"
+    n := Some(Holder(None))
+    assert "{n?.maybe}" == "Some(None)"
+
+test fn null_coalesce_stays_option_only():
+    o := Some(5)
+    assert (o ?? 0) == 5
+    n: Option[int] = None
+    assert (n ?? 0) == 0
+    # right-associative, and two carriers in one expression get distinct temps
+    assert ((n ?? 0) + (o ?? 0)) == 5
+
+# ---- 6: `?.` on a Result inside `recover:` ----
+#
+# Inside a `recover:` block a `?` short-circuits to the BOUNDARY (try-block style), so the block's
+# `Result` carries the propagated error. Its error slot is the `Error` existential → `e.message()`.
+
+test fn result_carrier_inside_recover_short_circuits_to_the_boundary():
+    r := recover: berr()?.add(1)
+    match r:
+        Ok(_): assert false, "expected Err from the propagated error"
+        Err(e): assert e.message() == "err 3", "got {e.message()}"
+    spaced := recover: berr()? .add(1)
+    assert "{r}" == "{spaced}", "`?.` and `? .` must agree inside recover:"
+    good := recover: bok()?.add(1)
+    good_spaced := recover: bok()? .add(1)
+    assert "{good}" == "Ok(11)", "got {good}"
+    assert "{good}" == "{good_spaced}"
+
+# ---- 7: `?.` on a Result inside `defer:` — observable side effects ----
+#
+# In a defer body a fired `Err` is DISCARDED at the block boundary: it short-circuits the rest of
+# the cleanup. Assert that through a Shared accumulator, never through print order.
+
+fn run_defer_dot(log: Shared[str], good: bool):
+    defer:
+        log.update(fn(s: str) -> str: s + "A")
+        n := pick(good)?.len()
+        log.update(fn(s: str) -> str: s + "{n}")
+        log.update(fn(s: str) -> str: s + "B")
+
+fn run_defer_spaced(log: Shared[str], good: bool):
+    defer:
+        log.update(fn(s: str) -> str: s + "A")
+        n := pick(good)? .len()
+        log.update(fn(s: str) -> str: s + "{n}")
+        log.update(fn(s: str) -> str: s + "B")
+
+fn pick(good: bool) -> str!str:
+    if good:
+        return Ok("hello")
+    return Err("boom")
+
+test fn result_carrier_inside_defer_matches_the_spaced_spelling():
+    ok_dot := Shared("")
+    run_defer_dot(ok_dot, true)
+    ok_spaced := Shared("")
+    run_defer_spaced(ok_spaced, true)
+    assert ok_dot.get() == "A5B", "got {ok_dot.get()}"
+    assert ok_dot.get() == ok_spaced.get()
+
+    err_dot := Shared("")
+    run_defer_dot(err_dot, false)
+    err_spaced := Shared("")
+    run_defer_spaced(err_spaced, false)
+    # the Err short-circuits the cleanup: everything after the `?.` is skipped, and it is DROPPED
+    assert err_dot.get() == "A", "got {err_dot.get()}"
+    assert err_dot.get() == err_spaced.get()
+
+# ---- 8: inside a closure with its own `-> Result`, and inside a nested `fn` ----
+
+fn closure_and_nested_dot() -> int!str:
+    g := fn() -> int!str: Ok(sok()?.len())
+    fn nested() -> int!str:
+        return Ok(sok()?.len() + 1)
+    return Ok(g()? + nested()?)
+
+fn closure_and_nested_spaced() -> int!str:
+    g := fn() -> int!str: Ok(sok()? .len())
+    fn nested() -> int!str:
+        return Ok(sok()? .len() + 1)
+    return Ok(g()? + nested()?)
+
+test fn result_carrier_in_a_closure_and_a_nested_fn():
+    assert "{closure_and_nested_dot()}" == "Ok(11)", "got {closure_and_nested_dot()}"
+    assert "{closure_and_nested_dot()}" == "{closure_and_nested_spaced()}"
+
+# ---- 9: inside `parallel:` and inside `spawn:` ----
+
+fn nursery_dot() -> int!str:
+    total := Shared(0)
+    parallel:
+        spawn:
+            n := sok()?.len()
+            total.update(fn(v: int) -> int: v + n)
+        spawn:
+            m := bok_s()?.add(5)
+            total.update(fn(v: int) -> int: v + m)
+    return Ok(total.get())
+
+fn nursery_spaced() -> int!str:
+    total := Shared(0)
+    parallel:
+        spawn:
+            n := sok()? .len()
+            total.update(fn(v: int) -> int: v + n)
+        spawn:
+            m := bok_s()? .add(5)
+            total.update(fn(v: int) -> int: v + m)
+    return Ok(total.get())
+
+test fn result_carrier_inside_parallel_and_spawn():
+    assert "{nursery_dot()}" == "Ok(20)", "got {nursery_dot()}"
+    assert "{nursery_dot()}" == "{nursery_spaced()}"
+
+# ---- 10: the MIXED chain — the key-uniqueness case ----
+#
+# `a?.b?.c` where `a` is a Result and `a.b` is an Option: the two links take DIFFERENT lowerings.
+# Both links share one node span (`parse_postfix` takes the primary's span once), so keying the
+# mode table on the node span would alias them, the later insert would win, and the compiler would
+# emit the wrong lowering for the other link — a silent WRONG VALUE under a green `chezzi check`.
+# That is why the key carries the NAME-TOKEN span.
+
+fn mkouter(has: bool) -> Outer!str:
+    if has:
+        return Ok(Outer(Some(Inner(7))))
+    return Ok(Outer(None))
+
+fn mixed_dot(has: bool) -> Result[Option[int], str]:
+    return Ok(mkouter(has)?.b?.c)
+
+fn mixed_spaced(has: bool) -> Result[Option[int], str]:
+    return Ok(mkouter(has)? .b?.c)
+
+test fn mixed_result_then_option_chain():
+    assert "{mixed_dot(true)}" == "Ok(Some(7))", "got {mixed_dot(true)}"
+    assert "{mixed_dot(false)}" == "Ok(None)", "got {mixed_dot(false)}"
+    assert "{mixed_dot(true)}" == "{mixed_spaced(true)}"
+    assert "{mixed_dot(false)}" == "{mixed_spaced(false)}"
+
+struct Outer2:
+    b: Result[Inner, str]
+
+test fn mixed_option_then_result_chain():
+    # The reverse mix: `a` is an Option, `a.b` is a Result. The single `?.` link is Option-mode, so
+    # the Result is re-wrapped, NOT unwrapped — `Option[Result[…]]`, consistent with "no flattening".
+    o := Some(Outer2(Ok(Inner(3))))
+    assert "{o?.b}" == "Some(Ok(Inner(c=3)))", "got {o?.b}"
+    bad := Some(Outer2(Err("nope")))
+    assert "{bad?.b}" == "Some(Err('nope'))", "got {bad?.b}"
+    none_o: Option[Outer2] = None
+    assert "{none_o?.b}" == "None"
+
+# ---- 11: inside string interpolation (fragment-ordinal keying) ----
+
+fn interp_dot() -> str!str:
+    return Ok("len={sok()?.len()}")
+
+fn interp_spaced() -> str!str:
+    return Ok("len={sok()? .len()}")
+
+fn interp_two_frags_dot() -> str!MyErr:
+    return Ok("{bok()?.add(1)}|{bok()?.add(2)}")
+
+fn interp_two_frags_spaced() -> str!MyErr:
+    return Ok("{bok()? .add(1)}|{bok()? .add(2)}")
+
+test fn result_carrier_inside_interpolation():
+    assert "{interp_dot()}" == "Ok('len=5')", "got {interp_dot()}"
+    assert "{interp_dot()}" == "{interp_spaced()}"
+
+test fn two_result_carrier_fragments_in_one_literal():
+    # Two fragments in ONE literal — they are told apart by the fragment ORDINAL component of the
+    # carrier key, not by their spans.
+    assert "{interp_two_frags_dot()}" == "Ok('11|12')", "got {interp_two_frags_dot()}"
+    assert "{interp_two_frags_dot()}" == "{interp_two_frags_spaced()}"
+
+test fn option_carrier_inside_interpolation():
+    o := Some("abc")
+    assert "{o?.len()}" == "Some(3)"
+    n: Option[str] = None
+    assert "{n?.len()}" == "None"
+    assert "{o?.len()}/{n?.len()}" == "Some(3)/None"
+
+# ---- 12: a `?.` method call whose ARGUMENT contains a closure ----
+#
+# `free_names_expr` / `collect_frame_binds_expr` / `find_boundary_free_expr` all carry `OptChain`
+# arms that were written defensively and had NEVER executed on these nodes until the carrier began
+# surviving desugar. A closure argument is what makes them do real work (capture analysis).
+
+fn closure_arg_dot() -> int!MyErr:
+    return Ok(bok()?.apply(fn(n: int) -> int: n * 2))
+
+fn closure_arg_spaced() -> int!MyErr:
+    return Ok(bok()? .apply(fn(n: int) -> int: n * 2))
+
+fn capturing_closure_arg_dot(k: int) -> int!MyErr:
+    return Ok(bok()?.apply(fn(n: int) -> int: n * k))
+
+fn capturing_closure_arg_spaced(k: int) -> int!MyErr:
+    return Ok(bok()? .apply(fn(n: int) -> int: n * k))
+
+test fn result_carrier_method_argument_is_a_closure():
+    assert "{closure_arg_dot()}" == "Ok(20)", "got {closure_arg_dot()}"
+    assert "{closure_arg_dot()}" == "{closure_arg_spaced()}"
+    # …and one that CAPTURES an enclosing local, so the capture walkers must see through the carrier
+    assert "{capturing_closure_arg_dot(3)}" == "Ok(30)", "got {capturing_closure_arg_dot(3)}"
+    assert "{capturing_closure_arg_dot(3)}" == "{capturing_closure_arg_spaced(3)}"
+
+test fn option_carrier_method_argument_is_a_capturing_closure():
+    ob := Some(Box(10))
+    k := 4
+    assert "{ob?.apply(fn(n: int) -> int: n * k)}" == "Some(40)"
+    nb: Option[Box] = None
+    assert "{nb?.apply(fn(n: int) -> int: n * k)}" == "None"
+
+# ---- 13: a carrier inside a function DEFAULT expression (the two-pass splice path) ----
+
+fn dflt_box() -> Option[Box]:
+    return Some(Box(4))
+
+fn dflt_none() -> Option[Box]:
+    return None
+
+fn with_optchain_default(v: int = dflt_box()?.v ?? 0) -> int:
+    return v
+
+fn with_none_default(v: int = dflt_none()?.v ?? 99) -> int:
+    return v
+
+fn with_optchain_method_default(s: str = dflt_box()?.tag(n=5) ?? "none") -> str:
+    return s
+
+test fn carrier_in_a_function_default_expression():
+    # the default is spliced into the CALL SITE and lowered there — a `?.` carrier plus a `??`
+    assert with_optchain_default() == 4
+    assert with_optchain_default(7) == 7, "an explicit argument still wins"
+    assert with_none_default() == 99
+    # …and a defaulted METHOD call inside the default keeps its own named/omitted-default binding
+    assert with_optchain_method_default() == "p9", "got {with_optchain_method_default()}"
+    assert with_optchain_method_default("x") == "x"

@@ -118,9 +118,10 @@ pub fn compile_graph(graph: &ModuleGraph) -> Result<Program, CompileError> {
     // witness params and what fills each witness at each call site. The compiler CONSUMES it — it
     // never re-derives which protocols carry a static requirement (that resolves through
     // imports/aliases/embeds, which is checker work).
-    let (kw, wt) = crate::checker::resolve_call_tables(graph);
+    let (kw, wt, ct) = crate::checker::resolve_call_tables(graph);
     c.keyword_calls = kw;
     c.witnesses = wt;
+    c.carriers = ct;
     // Pass 0: collision pre-pass — assign runtime keys for module-scoped user types. A type name
     // declared in exactly one module keeps its BARE name (the common case → unchanged Display/print
     // output); a name declared in ≥2 modules that are BOTH in the program is disambiguated (the
@@ -190,9 +191,10 @@ pub fn compile_module_standalone(module: &Module) -> Result<Program, CompileErro
     // SINGLE-RESOLVER: extern C types come from the checker's standalone pass — the SAME resolver the
     // multi-file CLI uses (no second backend resolver exists). The backend reads this table verbatim.
     c.extern_sigs = crate::checker::resolve_extern_signatures_standalone(&module.stmts);
-    let (kw, wt) = crate::checker::resolve_call_tables_standalone(&module.stmts);
+    let (kw, wt, ct) = crate::checker::resolve_call_tables_standalone(&module.stmts);
     c.keyword_calls = kw;
     c.witnesses = wt;
+    c.carriers = ct;
     let toplevel = c.compile_module(0, module, &[], true, None)?;
     let global_slots = std::mem::take(&mut c.global_slots);
     // A synthetic module id so the run driver has something to key the namespace cache on.
@@ -295,6 +297,15 @@ struct Compiler {
     /// consumed verbatim: `fns` drives the hidden trailing `$w:T` params a generic fn's proto gets,
     /// `calls` drives the extra argument each call site pushes.
     witnesses: crate::checker::WitnessTable,
+    /// W7-43 — the checker's per-`?.`-carrier lowering decision (see
+    /// [`crate::checker::CarrierTable`]), consumed verbatim: the backend is type-blind and cannot
+    /// re-derive whether a carrier's operand was an `Option` or a `Result`.
+    carriers: crate::checker::CarrierTable,
+    /// W7-43 — counter for the fresh `__optN` temp names the Option lowering mints, mirroring the
+    /// checker's own. Frame-local and `__`-prefixed (unwritable by user code), so uniqueness within
+    /// one compilation is all that is ever needed — and this makes it true by construction rather
+    /// than by argument.
+    next_opt_tmp: usize,
     /// M24 — the witness TYPE-PARAM names the NEXT [`Self::compile_fn_body`] declares as trailing
     /// `$w:T` params, in declaration order. DECLARATION only: a nested body's REACH is read off the
     /// frame it is emitting into ([`FnComp::witness_ref`]), never from here, so this cannot drift
@@ -764,6 +775,8 @@ impl Compiler {
             extern_sigs: crate::checker::ExternTable::new(),
             keyword_calls: crate::checker::KeywordTable::new(),
             witnesses: crate::checker::WitnessTable::default(),
+            carriers: crate::checker::CarrierTable::new(),
+            next_opt_tmp: 0,
             witness_locals: Vec::new(),
             pending_witnesses: Vec::new(),
             imported_fns: HashMap::new(),
@@ -3535,6 +3548,13 @@ impl Compiler {
 
     // ----- expressions -----
 
+    /// W7-43 — the next `__optN` temp index for the Option carrier lowering.
+    fn next_opt_tmp(&mut self) -> usize {
+        let n = self.next_opt_tmp;
+        self.next_opt_tmp += 1;
+        n
+    }
+
     fn compile_expr(&mut self, fc: &mut FnComp, expr: &Expr) -> Result<(), CompileError> {
         // One-way int→float widening — the collection-element hint set by a typed `let` value applies
         // to the IMMEDIATE collection literal only. Take it (clearing the field) so any non-collection
@@ -3798,9 +3818,49 @@ impl Compiler {
                 self.compile_expr(fc, inner)?;
                 fc.emit(Op::Try, expr.span);
             }
-            // `?.`/`??` carriers are lowered to `match` by the desugar pass before compilation.
-            ExprKind::OptChain { .. } | ExprKind::NullCoalesce { .. } => {
-                unreachable!("`?.`/`??` must be lowered by the desugar pass before compiling")
+            // W7-43 — `?.`/`??` carriers reach the backend intact; clone-and-lower here, then
+            // recurse, so the synthesized nodes route through the ordinary `Field`/`compile_call`
+            // arms and pick up method inline caches, keyword permutations and witness args exactly
+            // as the equivalent hand-written spelling does. Same house pattern as `DecodeCall`
+            // below. `lower_carrier_*` are the SAME functions the checker lowered with, on the same
+            // input, so spans (and therefore every table key derived from them) cannot drift.
+            ExprKind::NullCoalesce { .. } => {
+                // `??` is Option-only (the checker rejects everything else), so there is nothing to
+                // look up and no decision to make.
+                let mut c = expr.clone();
+                crate::desugar::lower_carrier_option(&mut c, self.next_opt_tmp());
+                self.compile_expr(fc, &c)?;
+            }
+            ExprKind::OptChain { name_span, .. } => {
+                let key = crate::checker::carrier_key(
+                    self.current_module_idx,
+                    self.kw_frag_ctx,
+                    self.kw_frag_ord,
+                    *name_span,
+                );
+                let mut c = expr.clone();
+                // A MISSING entry is a hard error, never a default: it means the checker's
+                // traversal and this one disagree about the program, and silently picking the
+                // Option lowering would emit an `Option[T]` where the checker promised `T` — a
+                // wrong runtime VALUE SHAPE under a green `chezzi check`. Same discipline as the
+                // missing-witness guard in `witness_srcs`.
+                match self.carriers.get(&key) {
+                    Some(crate::checker::CarrierMode::Try) => {
+                        crate::desugar::lower_carrier_try(&mut c)
+                    }
+                    Some(
+                        crate::checker::CarrierMode::Option | crate::checker::CarrierMode::Unknown,
+                    ) => crate::desugar::lower_carrier_option(&mut c, self.next_opt_tmp()),
+                    None => {
+                        return Err(CompileError {
+                            message: "internal: no lowering recorded for this '?.' — the \
+                                      type-checker and the backend disagree about this expression"
+                                .to_string(),
+                            span: expr.span,
+                        });
+                    }
+                }
+                self.compile_expr(fc, &c)?;
             }
             // A `TypeApply` (`Type[T1, T2]`) is only ever the receiver of a member access / call;
             // the checker resolves it into a variant ctor / static-method call (`infer_call`) or a
@@ -5947,7 +6007,9 @@ pub(crate) fn free_names_expr(e: &Expr, bound: &HashSet<String>, out: &mut FreeN
             out.members.insert(name.clone());
             free_names_expr(obj, bound, out);
         }
-        ExprKind::OptChain { obj, call, name } => {
+        ExprKind::OptChain {
+            obj, call, name, ..
+        } => {
             out.members.insert(name.clone());
             free_names_expr(obj, bound, out);
             if let Some(c) = call {
@@ -6948,5 +7010,141 @@ mod back_edge_tests {
             has_back_edge("fn f():\n    for x in [1, 2]:\n        print(x)\nf()\n"),
             "`for` must lower to a backward Op::Jump (the cancellation checkpoint)"
         );
+    }
+}
+
+#[cfg(test)]
+mod carrier_lowering_tests {
+    //! W7-43 — `?.` on a `Result` is `?` then `.`. THE load-bearing test in the change: the two
+    //! spellings must compile to byte-identical bytecode. If that holds, the VM, the
+    //! `recover:`/`defer:`/nursery interactions and two-engine parity are green BY CONSTRUCTION —
+    //! there is no second program to disagree about.
+    use super::*;
+    use crate::vm::op::Op;
+
+    /// Parse → desugar → compile, i.e. the production pipeline (`resolver::build_graph` always
+    /// desugars before the checker/backend). The carrier SURVIVES desugar now; the checker records
+    /// the lowering into the `CarrierTable` that `compile_module_standalone` harvests.
+    fn compile(src: &str) -> crate::vm::op::Program {
+        let tokens = crate::lexer::tokenize(src).expect("lex");
+        let mut module = crate::parser::parse(tokens).expect("parse");
+        crate::desugar::run_standalone(&mut module).expect("desugar");
+        compile_module_standalone(&module).expect("compile")
+    }
+
+    /// Every proto rendered as `name | opcodes`, in emission order. `Op` has no `PartialEq` (it is a
+    /// big hot enum, and deriving one for a test would be the tail wagging the dog), so compare its
+    /// `Debug` — which is strictly FINER than `==` would be.
+    fn ops(prog: &crate::vm::op::Program) -> Vec<String> {
+        prog.protos
+            .iter()
+            .map(|p| format!("{} | {:?}", p.name, p.code))
+            .collect()
+    }
+
+    /// The same, plus each op's source span.
+    fn ops_and_spans(prog: &crate::vm::op::Program) -> Vec<String> {
+        prog.protos
+            .iter()
+            .map(|p| format!("{} | {:?} | {:?}", p.name, p.code, p.lines))
+            .collect()
+    }
+
+    /// Compile `template` (which must contain the `?C?` marker) in three spellings and assert the
+    /// identity that W7-43 rests on.
+    ///
+    /// - `f()?.len()` vs `f()? .len()` — the two spellings a USER writes. Their OPCODES must match;
+    ///   their spans cannot, because inserting the space physically moves every column to its right
+    ///   (that is a property of the source text, not of the lowering).
+    /// - `f() ?.len()` vs `f()? .len()` — column-ALIGNED (same length, `len` at the same column), so
+    ///   here the per-op SPANS must match too. Same alignment trick as
+    ///   `desugar::tests::lower_carrier_try_matches_the_spaced_spelling_exactly`.
+    fn assert_spellings_agree(template: &str) {
+        assert!(template.contains("?C?"), "template needs the `?C?` marker");
+        let tight = compile(&template.replace("?C?", "?."));
+        let spaced = compile(&template.replace("?C?", "? ."));
+        let aligned = compile(&template.replace("?C?", " ?."));
+        assert_eq!(
+            ops(&tight),
+            ops(&spaced),
+            "`?.` and `? .` must emit identical bytecode"
+        );
+        assert_eq!(
+            ops_and_spans(&aligned),
+            ops_and_spans(&spaced),
+            "column-aligned, the per-op SPANS must match too"
+        );
+    }
+
+    #[test]
+    fn result_carrier_compiles_identically_to_the_spaced_spelling() {
+        let src = "fn f() -> str!str:\n    return Ok(\"hi\")\nfn g() -> int!str:\n    return Ok(f()?C?len())\ng()\n";
+        assert_spellings_agree(src);
+        // …and the emitted program really IS the try-then-dot one (a SHARED bug would also be
+        // "identical"): `Op::Try` is present, which only the Result lowering emits.
+        let dot = compile(&src.replace("?C?", "?."));
+        assert!(
+            dot.protos
+                .iter()
+                .any(|p| p.code.iter().any(|o| matches!(o, Op::Try))),
+            "the Result lowering must emit Op::Try"
+        );
+    }
+
+    #[test]
+    fn result_carrier_method_with_args_compiles_identically() {
+        assert_spellings_agree(
+            "struct B:\n    v: int\n    fn add(self, n: int) -> int:\n        return self.v + n\nfn f() -> B!str:\n    return Ok(B(1))\nfn g() -> int!str:\n    return Ok(f()?C?add(5))\ng()\n",
+        );
+    }
+
+    #[test]
+    fn result_carrier_with_named_args_compiles_identically() {
+        // Named args + an omitted default are bound by `normalize_opt_call` in desugar; the spaced
+        // spelling is an ordinary `Call` bound by `normalize_call`. Identical bytecode is the proof
+        // that the two normalizations agree.
+        assert_spellings_agree(
+            "struct B:\n    v: int\n    fn tag(self, prefix: str = \"p\", n: int = 1) -> str:\n        return \"{prefix}{self.v + n}\"\nfn f() -> B!str:\n    return Ok(B(1))\nfn g() -> str!str:\n    return Ok(f()?C?tag(n=5))\ng()\n",
+        );
+    }
+
+    #[test]
+    fn result_carrier_inside_a_string_fragment_compiles_identically() {
+        // Interpolation fragments are re-parsed after the module pass, so they carry their own
+        // `kw_frag_ctx`/`kw_frag_ord` key discriminators — two fragments in one literal included.
+        assert_spellings_agree(
+            "fn f() -> str!str:\n    return Ok(\"hi\")\nfn g() -> str!str:\n    return Ok(\"{f()?C?len()}|{f()?C?len()}\")\ng()\n",
+        );
+    }
+
+    #[test]
+    fn a_mixed_chain_lowers_each_link_by_its_own_operand() {
+        // `a?.b?.c` with `a: Result` and `a.b: Option` — the two links take DIFFERENT lowerings and
+        // share ONE node span, so the mode table must key on the name token. The Result link emits
+        // `Op::Try`; the Option link emits the `match` lowering (a jump, and a `None` variant
+        // construction). Both present in one proto = both links lowered on their own operand.
+        let prog = compile(
+            "struct I:\n    c: int\nstruct O:\n    b: Option[I]\nfn f() -> O!str:\n    return Ok(O(Some(I(7))))\nfn g() -> Result[Option[int], str]:\n    return Ok(f()?.b?.c)\ng()\n",
+        );
+        let g = prog
+            .protos
+            .iter()
+            .find(|p| p.name == "g")
+            .expect("proto for g");
+        assert!(
+            g.code.iter().any(|o| matches!(o, Op::Try)),
+            "the Result link must emit Op::Try; got {:?}",
+            g.code
+        );
+        assert!(
+            g.code.iter().any(|o| matches!(o, Op::Jump(_))),
+            "the Option link must emit the match lowering's jump; got {:?}",
+            g.code
+        );
+        // And the whole thing is identical to spelling the Result link with a space.
+        let spaced = compile(
+            "struct I:\n    c: int\nstruct O:\n    b: Option[I]\nfn f() -> O!str:\n    return Ok(O(Some(I(7))))\nfn g() -> Result[Option[int], str]:\n    return Ok(f()? .b?.c)\ng()\n",
+        );
+        assert_eq!(ops(&prog), ops(&spaced));
     }
 }

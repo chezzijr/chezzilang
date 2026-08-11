@@ -2,6 +2,58 @@
 
 Single source of truth for "what am I doing next." Update after every work session.
 
+> **✅ W7-43 landed 2026-08-11 — `?.` on a `Result` now MEANS `?` then `.`; the whitespace cliff is
+> gone, not just the diagnostics.** `f()?.len()` where `f() -> Result[str, str]` used to emit **three**
+> errors — `'Some' is not a variant of Result`, `'None' is not a variant of Result`, `non-exhaustive
+> match on Result: missing Err, Ok` — **none of which named `?.`**, while `f()? .len()` (one space)
+> worked. It was the most-hit papercut of the external review: four separate testers, one of them four
+> times in 30 programs. It now reports `ok: no type errors`, and the two spellings are the **same
+> program** (measured, both engines: `Ok(2)` on the happy path, `Err('boom')` on the sad one, rc=0).
+> **Rust owns enums/errors/control flow and `f()?.len()` compiles in Rust** — a language whose `?`
+> propagates the `Err` and whose `.` reads the value had no defensible reason to reject their
+> concatenation over one absent space.
+>
+> **Mechanism.** The carriers stop being lowered by desugar and survive to the checker, mirroring
+> `ExprKind::Try`, which has always done exactly that. The checker types the operand, picks
+> Option-vs-Try, then **clone-lowers to a real AST shape and infers THAT** (`Match{Some/None}` for an
+> `Option`; `Field`/`Call` over `Try(obj)` for a `Result`). So the Result-mode clone literally
+> *contains* an `ExprKind::Try`, and all three of `infer_try`'s gates — `recover_depth`,
+> `in_defer_block`, and the `current_ret`/`in_fn_body` return-kind gate — fire at the right nesting
+> with **zero new gate code**. The gap row's own predicted cost centre ("that interaction is the cost
+> centre, not the parsing") was discharged **by construction**. The chosen mode is recorded in a
+> `CarrierTable` keyed `(module_idx, frag_ctx, frag_ord, **name_span**)`; `name_span` is a new
+> `OptChain` field and it is load-bearing, because `parse_postfix` takes `let span = e.span;` **once**
+> before the postfix match, so every link of `a?.b?.c` shares the primary's span — a **mixed** chain
+> (`a: Result`, `a.b: Option`) has two links with *different* modes and node-span keying would have
+> aliased them into one wrong lowering under a green `chezzi check`. The compiler looks the mode up and
+> clone-lowers with the **same shared functions**, so spans, keys and bytecode cannot drift between the
+> halves; a **missing** entry is a hard `CompileError`, never a default. **The VM is unchanged** — the
+> Result path emits the `Op::Try` the spaced form already emitted. A runtime-dispatched
+> `CarrierEnter`/`CarrierExit` opcode pair was **rejected**: two opcodes and two new serial-vs-M:N
+> surfaces for zero benefit, since the checker must decide statically anyway (the expression's type is
+> `T` vs `Option[T]`).
+>
+> **`??` stays Option-only**, now with ONE accurate error — `'??' applies to an Option, found
+> Result[str, str] — a Result carries an error that must be handled: use a match with Ok/Err arms`. It
+> has no spaced alternative to rescue, no ancestor offers it (Rust has no coalescing operator;
+> Swift/Kotlin/C#'s is Optional-only, in languages with no `Result`), and it would silently discard an
+> error payload. `?.` on a non-carrier is likewise one error: `'?.' applies to an Option or a Result,
+> found int`. **Migration papercut:** `f()?.len() ?? 0` on a `Result` is now an error on the `??`
+> (`f()?.len()` is already an `int`). Also documented: `?.` on a `Result` is try-then-**dot**, so it
+> does not auto-try through a `Result[Option[T]]` payload.
+>
+> **Evidence.** 3991 lib tests green; `tests/chz/spec/opt_carrier_test.chz` (21 `test fn`, 450 chz
+> tests) passes on **both** engines, every case an **equivalence** assertion between the `?.` and `? .`
+> spellings — which is the only way a *widening* is testable, since the pre-change suite could not have
+> an opinion about a program it rejected. The load-bearing Rust test asserts `f()?.len()` and
+> `f()? .len()` emit **identical opcode sequences**: it checks the program produced, not that a branch
+> fired. Grammar **productions unchanged**, so `cargo test conformance` stayed green without a
+> production edit. Docs moved in the same commit (`syntax.md` §9, `grammar.bnf`'s two carrier comments,
+> `spec.md`'s pipeline + repo-layout lists, `future.md`, `examples/optchain.chz` + its golden).
+> **Residual filed as `W7-48`** — a `?` (and therefore a `?.`) inside a `spawn:` block is checked
+> against the **enclosing fn's** return kind, not the task's, so it is accepted in a carrier-returning
+> fn and its `Err` is then silently dropped by the nursery. Pre-existing; `?.` inherits it identically.
+>
 > **✅ W7-42 landed 2026-08-10 — a module-scope re-declaration may rebind a global, but not retype
 > it.** `x := 1` / `f := fn() -> int: x` / `x := "9"` used to be **check-clean** and hand a `str` out of
 > a fn declared `-> int` (`y: int = f()` accepted, `y + 1` then faulting): the checker retyped one
@@ -123,9 +175,11 @@ Single source of truth for "what am I doing next." Update after every work sessi
 >   milestone. Full post-mortem + three traps for the next attempt in the ledger row.
 >
 > **Filed open:** `W7-42` (a top-level `:=` re-declaration retypes a live binding, so a `-> int` fn
-> returns a `str` — needs a decision, the three ancestors disagree), `W7-43` (`?.` on a `Result` emits
-> three errors naming `Some`/`None`; the most-hit papercut of the review — four testers — and the fix is
-> structural, `?.` must survive desugar like `ExprKind::Try` does), `W7-44` (`crypto.secure_bytes` dead
+> returns a `str` — needs a decision, the three ancestors disagree; **fixed 2026-08-10**), ~~`W7-43`~~
+> (`?.` on a `Result` emits three errors naming `Some`/`None`; the most-hit papercut of the review —
+> four testers — and the fix is structural, `?.` must survive desugar like `ExprKind::Try` does) —
+> **fixed 2026-08-11, see the banner above: the carriers now survive desugar and `?.` on a `Result`
+> means `?` then `.`**, `W7-44` (`crypto.secure_bytes` dead
 > off Linux, and `uuid.v4()`'s 64-bit SplitMix64 state is **invertible from two outputs on every
 > platform** — docs half should not wait), `W7-45` (`W7-41`'s hole is still open on
 > `contains`/`index_of`/`dedup`/Set+Map insert, whose runtime is `values_equal`; the Set/Map halves fail

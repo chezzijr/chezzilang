@@ -1000,7 +1000,7 @@ right spelling when the type is known. The cheap scalar fills (`bool(x)` truthin
 source.chz
   → Lexer        (indent-aware: INDENT/DEDENT tokens)
   → Parser       (Pratt expr parsing + recursive-descent stmts) → AST
-  → Desugar      (AST → AST lowering: pipe, optional chaining/`??`, comprehensions, defaults)
+  → Desugar      (AST → AST lowering: pipe, comprehensions, defaults, interpolation)
   → Checker      (local inference; explicit fn sigs; machine-readable errors) → typed AST
   → Bytecode compiler → Stack VM (+ mark-sweep GC)
 ```
@@ -1018,7 +1018,10 @@ src/
   lexer/        # chars → tokens, indent stack
   parser/       # tokens → AST (Pratt)
   ast/          # node definitions
-  desugar/      # AST → AST lowering (pipe, ?., ??, comprehensions, defaults)
+  desugar/      # AST → AST lowering (pipe, comprehensions, defaults, interpolation).
+                #   `?.`/`??` are NOT lowered here — they survive to the checker, which picks the
+                #   lowering by operand type and calls `lower_carrier_option`/`lower_carrier_try`
+                #   (the compiler then calls the same two functions).
   checker/      # type inference + checking
   compiler/     # AST → bytecode
   vm/           # stack machine (sole engine; serial + M:N schedulers)

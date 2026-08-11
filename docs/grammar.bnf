@@ -483,7 +483,9 @@
 <pipeCall> ::= <postfix> "LPAREN" "RPAREN" | <postfix> "LPAREN" <exprList> "RPAREN"
 <orExpr>   ::= <coalesceExpr> | <orExpr> "OR" <coalesceExpr>
 # null-coalescing `??` (gap): looser than `and`/comparisons, tighter than `or`. RIGHT-associative
-# (`a ?? b ?? c` = `a ?? (b ?? c)`) — modeled by right-recursion. Lowered to a `match` at desugar.
+# (`a ?? b ?? c` = `a ?? (b ?? c)`) — modeled by right-recursion. `??` is Option-ONLY; it SURVIVES
+# desugar and the CHECKER lowers it to a `match` (a `Result` lhs is one error, never a silent discard
+# of the error payload).
 <coalesceExpr> ::= <andExpr> | <andExpr> "QUESTIONQUESTION" <coalesceExpr>
 <andExpr>  ::= <eqExpr>  | <andExpr> "AND" <eqExpr>
 # `in` membership sits at the equality level (same precedence as `==`/`!=`); yields a bool.
@@ -578,7 +580,10 @@
             | <postfix> "DOT" "IDENT" "LBRACKET" <typeList> "RBRACKET" "LPAREN" "RPAREN"
             | <postfix> "DOT" "IDENT" "LBRACKET" <typeList> "RBRACKET" "LPAREN" <argList> "RPAREN"
             | <postfix> "QUESTION"
-            # optional chaining `?.` (gap): field, tuple-element, or method call through an Option.
+            # optional chaining `?.` (gap): field, tuple-element, or method call through a CARRIER.
+            # Parsed identically for either carrier — the node survives desugar and the CHECKER picks
+            # the lowering by the operand's TYPE: an `Option` lowers to a `match` (short-circuit +
+            # re-wrap), a `Result` lowers to `?` then `.` (identical to the spaced `x? .name`).
             | <postfix> "QUESTIONDOT" "IDENT"
             | <postfix> "QUESTIONDOT" "INT"
             | <postfix> "QUESTIONDOT" "IDENT" "LPAREN" "RPAREN"

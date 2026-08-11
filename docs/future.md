@@ -393,7 +393,11 @@ direction that matters. Its acceptance tests are M:N-only and say so.
 5. ~~**Hex / binary / octal literals**~~ — **DONE.** `0xFF`/`0b1010`/`0o17`, lexer-only via
    `i64::from_str_radix`, `_` between digits. `examples/hex.chz`.
 6. ~~**Optional chaining + null-coalescing**~~ — **DONE.** `x?.field`/`x?.method()` + right-assoc
-   `a ?? b` on `Option`, lowered to a `match` by the desugar pass (zero checker/engine code).
+   `a ?? b`. Originally lowered to a `match` by the desugar pass (zero checker/engine code); **W7-43
+   (2026-08-11) moved that decision to the checker** — the carriers now survive desugar, the checker
+   picks the lowering by operand type (`Option` → `match`; `Result` → `?` then `.`, identical to the
+   spaced `x? .f`) and records it in a `CarrierTable` the compiler reads. `??` stays Option-only.
+   Still zero VM code: the `Result` path emits the `Op::Try` the spaced form already emitted.
    `examples/optchain.chz`.
 7. ~~**Tuple-destructuring `for` (+ `enumerate` / `zip`)**~~ — **DONE.** `for a, b in List[(A,B)]`
    (N-var over `List[tupleN]`); VM splits map vs list-of-tuples at runtime on a new `Op::IsMap`.

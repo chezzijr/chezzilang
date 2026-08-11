@@ -2494,6 +2494,10 @@ impl Parser {
                     // index). A following `(` makes it an optional-chained method CALL — but only on
                     // a named method, never a tuple index (`t?.0()` is meaningless; the `(` there is
                     // left to a following postfix iteration, keeping the grammar and parser aligned).
+                    // Capture the name token's TRUE span before consuming it — `span` above is the
+                    // PRIMARY's span, shared by every link of `a?.b?.c`, so `name_span` is the only
+                    // per-link key this node has (mirrors the `.` arm).
+                    let name_span = self.cur_span();
                     let (name, is_ident) = if let Token::Int(n) = self.peek() {
                         let n = *n;
                         self.advance();
@@ -2516,6 +2520,7 @@ impl Parser {
                         kind: ExprKind::OptChain {
                             obj: Box::new(e),
                             name,
+                            name_span,
                             call,
                         },
                         span,
@@ -3014,7 +3019,8 @@ enum InfixOp {
     Bin(BinaryOp),
     Range,
     Pipe,
-    /// Null-coalescing `??` — right-associative carrier, lowered to a `match` by the desugar pass.
+    /// Null-coalescing `??` — right-associative carrier. It SURVIVES desugar (W7-43); the checker
+    /// lowers it to a `match` via `desugar::lower_carrier_option`, and rejects a non-`Option` lhs.
     Coalesce,
 }
 
@@ -4232,7 +4238,9 @@ mod tests {
     #[test]
     fn parses_opt_chain_field() {
         match let_value("x := y?.f\n").kind {
-            ExprKind::OptChain { obj, name, call } => {
+            ExprKind::OptChain {
+                obj, name, call, ..
+            } => {
                 assert!(matches!(obj.kind, ExprKind::Ident(ref n) if n == "y"));
                 assert_eq!(name, "f");
                 assert!(call.is_none());
@@ -4265,6 +4273,42 @@ mod tests {
             }
             other => panic!("{other:?}"),
         }
+    }
+
+    #[test]
+    fn opt_chain_links_share_a_span_but_not_a_name_span() {
+        // `parse_postfix` reuses the PRIMARY's span for every postfix link, so `span` cannot key a
+        // per-link table — `name_span` (the `?.`-following name token) is what distinguishes them.
+        // `x := a?.b?.c` → cols: a=6, b=9, c=12.
+        let outer = let_value("x := a?.b?.c\n");
+        let ExprKind::OptChain {
+            obj,
+            name,
+            name_span,
+            ..
+        } = outer.kind
+        else {
+            panic!("outer must be an OptChain");
+        };
+        assert_eq!(name, "c");
+        let inner_span = obj.span;
+        let ExprKind::OptChain {
+            name: inner_name,
+            name_span: inner_name_span,
+            ..
+        } = obj.kind
+        else {
+            panic!("inner must be an OptChain");
+        };
+        assert_eq!(inner_name, "b");
+        assert_eq!(
+            outer.span, inner_span,
+            "both links carry the primary `a`'s span"
+        );
+        assert_eq!(outer.span, Span { line: 1, col: 6 });
+        assert_eq!(inner_name_span, Span { line: 1, col: 9 });
+        assert_eq!(name_span, Span { line: 1, col: 12 });
+        assert_ne!(name_span, inner_name_span, "each link needs its own key");
     }
 
     #[test]
