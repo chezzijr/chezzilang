@@ -719,8 +719,28 @@ impl Checker {
     /// COLLISION, so a key whose `eq` carries `where` bounds this instantiation does not satisfy
     /// check-cleaned and then faulted — and worse, only *sometimes*, since with distinct hashes no
     /// `eq` runs and the program printed a silent wrong answer at rc=0. `Hashable` does not embed
-    /// `Eq` (`embeds: Vec::new()`), so it has to be asked separately; **Rust spells the same pair in
-    /// the bound**: `impl<T: Eq + Hash> HashSet<T>` / `impl<K: Eq + Hash, V> HashMap<K, V>`.
+    /// `Eq` (`embeds: Vec::new()`), so it has to be asked separately.
+    ///
+    /// **The second conjunct is deliberately NOT `satisfies(t, "Eq")`, even though Rust's bound is
+    /// `impl<T: Eq + Hash> HashSet<T>`. Do not "correct" it to match Rust.** The obligation here is
+    /// narrower than Rust's because Chezzi's equality is structural by default. The runtime probe is
+    /// `values_equal`, which can only fault when it dispatches a declared **hook** `eq` whose `where`
+    /// bounds fail — exactly what [`Self::eq_bounds_unsatisfied_erased`] detects. A type carrying a
+    /// NON-hook `eq` (the in-tree ordinary-method escape hatch) falls back to structural equality and
+    /// cannot fault, yet it fails `satisfies(_, "Eq")` because the structural check sees a
+    /// wrong-signature hook. So `satisfies(t, "Eq")` would newly reject this **working, measured**
+    /// program — the exact class of regression that got the 2026-08-10 attempt reverted:
+    ///
+    /// ```text
+    /// struct Holder[T]:
+    ///     v: T
+    ///     fn hash(self) -> int: return 1
+    ///     fn eq[U](self, o: U) -> bool: return true
+    /// s := Set([Holder(1)])        # rc=0 before and after; `satisfies(_,"Eq")` would refuse it
+    /// ```
+    ///
+    /// (`Channel`/`Func` are NOT the reason — they never reach this conjunct, because the `Hashable`
+    /// gate refuses them first, and a struct merely *holding* a `Channel` satisfies `Eq` fine.)
     ///
     /// Every map-key and set-element position funnels through here (literal, comprehension,
     /// `Set(list)` construction, annotation, `m[k]` read and write, `refine_receiver`'s
