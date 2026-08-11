@@ -1775,6 +1775,19 @@ struct Checker {
     /// type. See `infer_try`. Entering a defer block also zeroes `recover_depth` (the block is its
     /// own closure — a `?` in it cannot target an outer `recover:` boundary).
     in_defer_block: bool,
+    /// True while checking statements lexically inside a `spawn:` BLOCK. Set at the task boundary
+    /// (`SpawnTarget::Block`) and cleared across every nested fn/closure boundary, where it is
+    /// saved/restored 1:1 beside `current_ret` — a `fn`/closure DECLARED inside a task has a caller
+    /// of its own, so a `?` in its body is legal.
+    ///
+    /// A spawned task is its own frame with no caller, so a `?` directly in it has nowhere to
+    /// propagate to — the nursery discards a task's returned `Err` by design (W7-46, Go's
+    /// contract). This flag exists so that rejection can say so. The alternative — zeroing
+    /// `current_ret` at the task boundary — reports "'?' used in a function that returns nil",
+    /// which reads as a claim about the ENCLOSING fn the user actually wrote, and additionally
+    /// makes `check_return` emit a second, false "function returns nothing" for a `return` in the
+    /// task. See `infer_try` (W7-48).
+    in_spawn_block: bool,
     /// Element types gathered from every `yield` during a generator's return-type inference
     /// (`infer_fn_ret`, `inferring_ret` mode). The FIRST pins the generator's element `T`
     /// (strict-first-yield); pass-2 `check_yield` validates the rest against it. Drained per-fn.

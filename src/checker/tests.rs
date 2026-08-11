@@ -20902,10 +20902,144 @@ fn spawn_block_in_defer_does_not_inherit_q_discard() {
         "import std.concurrency\nfn g() -> int!:\n    return Err(\"x\")\nfn f():\n    defer:\n        spawn:\n            v := g()?\n            print(v)\n    print(\"b\")\nf()\n",
     );
     assert!(
-        wrapped
-            .iter()
-            .any(|e| e.message.contains("returns nil, not Result or Option")),
-        "a `?` in a spawn block inside a defer must still reject (task is nil-returning), got: {wrapped:?}"
+        wrapped.iter().any(|e| e.message.contains(SPAWN_Q)),
+        "a `?` in a spawn block inside a defer must still reject (the task has no caller), got: {wrapped:?}"
+    );
+}
+
+/// W7-48 — the spawn-block `?` diagnostic.
+const SPAWN_Q: &str = "'?' is not allowed inside a spawn block";
+
+/// `rejects`, but through `check_entry` (the program imports a native std module).
+fn rejects_entry(src: &str, needle: &str) {
+    let errs = check_entry(src);
+    assert!(
+        errs.iter().any(|e| e.message.contains(needle)),
+        "expected an error containing {needle:?}, got: {errs:?}"
+    );
+}
+
+/// W7-48 — a `?`/`?.` inside a `spawn:` BLOCK is rejected regardless of the enclosing fn's return
+/// kind. Pre-fix the arm carried the enclosing frame's `current_ret`/`in_fn_body`/`recover_depth`
+/// across the task boundary, so a carrier-returning enclosing fn (or the module top level) made the
+/// `?` check clean — and at runtime the task's `Err` was discarded by the nursery. A silent swallow.
+#[test]
+fn q_inside_a_spawn_block_is_rejected_whatever_the_enclosing_fn_returns() {
+    let prog = |ret: &str, tail: &str| {
+        format!(
+            "import std.concurrency\nfn g() -> int!str:\n    return Err(\"x\")\nfn main() -> {ret}:\n    spawn:\n        v := g()?\n        print(v)\n    {tail}\nprint(main())\n"
+        )
+    };
+    // Enclosing `-> Result` — pre-fix `ok: no type errors` (the swallow).
+    rejects_entry(&prog("int!str", "return Ok(0)"), SPAWN_Q);
+    // Enclosing `-> Option` — pre-fix rejected, but naming the ENCLOSING fn ("returns Option, not
+    // Result"), which is the bug in one sentence.
+    rejects_entry(&prog("int?", "return Some(0)"), SPAWN_Q);
+    // The `?.` spelling (W7-43) lowers to a real `Try`, so it inherits the gate.
+    rejects_entry(
+        "import std.concurrency\nfn s() -> str!str:\n    return Ok(\"hi\")\nfn main() -> int!str:\n    spawn:\n        n := s()?.len()\n        print(n)\n    return Ok(0)\nprint(main())\n",
+        SPAWN_Q,
+    );
+    // Module top level (no enclosing fn) — pre-fix `ok`, because `!in_fn_body` let `Nil` accept.
+    rejects_entry(
+        "import std.concurrency\nfn g() -> int!str:\n    return Err(\"x\")\nspawn:\n    v := g()?\n    print(v)\n",
+        SPAWN_Q,
+    );
+    // Nil-returning enclosing fn — pre-fix rejected by luck, with the enclosing-fn wording.
+    rejects_entry(
+        "import std.concurrency\nfn g() -> int!str:\n    return Err(\"x\")\nfn main():\n    spawn:\n        v := g()?\n        print(v)\nmain()\n",
+        SPAWN_Q,
+    );
+    // The second hole: a `recover:` OUTSIDE the spawn used to catch the `?` via `recover_depth`, so
+    // the whole shape checked clean and the recover reported `Ok(nil)` at runtime while the error
+    // vanished. The task boundary now zeroes `recover_depth`, so this falls through to the gate.
+    rejects_entry(
+        "import std.concurrency\nfn g() -> int!str:\n    return Err(\"x\")\nfn main() -> int!str:\n    r := recover:\n        parallel:\n            spawn:\n                v := g()?\n                print(v)\n    print(r)\n    return Ok(0)\nprint(main())\n",
+        SPAWN_Q,
+    );
+}
+
+/// W7-48 — the neighbours the reject must NOT touch: every one of these has a real frame to
+/// propagate to, and every one runs correctly today.
+#[test]
+fn q_next_to_a_spawn_block_stays_legal() {
+    let head = "import std.concurrency\nfn g() -> int!str:\n    return Ok(7)\n";
+    // A `parallel:` body runs in the PARENT frame — its `?` targets the enclosing fn.
+    entry_ok(&format!(
+        "{head}fn main() -> int!str:\n    parallel:\n        v := g()?\n        print(v)\n    return Ok(0)\nprint(main())\n"
+    ));
+    // A nested fn DECLARED inside a spawn block has its own caller.
+    entry_ok(&format!(
+        "{head}fn main() -> int!str:\n    spawn:\n        fn inner() -> int!str:\n            return Ok(g()? + 1)\n        print(inner())\n    return Ok(0)\nprint(main())\n"
+    ));
+    // Same for a closure declared inside the spawn block (`infer_closure`'s reset).
+    entry_ok(&format!(
+        "{head}fn main() -> int!str:\n    spawn:\n        c := fn() -> int!str: Ok(g()? + 1)\n        print(c())\n    return Ok(0)\nprint(main())\n"
+    ));
+    // `SpawnTarget::Call` — the argument evaluates in the PARENT frame before the task starts.
+    entry_ok(&format!(
+        "{head}fn h(n: int):\n    print(n)\nfn main() -> int!str:\n    spawn h(g()?)\n    return Ok(0)\nprint(main())\n"
+    ));
+    // A `defer:` INSIDE the spawn: the discard contract is per-frame and this defer is in the
+    // task's frame, so its `?` is discarded there exactly as in any other frame.
+    entry_ok(&format!(
+        "{head}fn main() -> int!str:\n    spawn:\n        defer:\n            v := g()?\n            print(v)\n        print(\"body\")\n    return Ok(0)\nprint(main())\n"
+    ));
+    // A `recover:` INSIDE the spawn: its boundary is in the same frame as the `?`, so
+    // short-circuiting to it is correct.
+    entry_ok(&format!(
+        "{head}fn main() -> int!str:\n    spawn:\n        r := recover:\n            v := g()?\n            print(v)\n        print(r)\n    return Ok(0)\nprint(main())\n"
+    ));
+}
+
+/// W7-48 — the reject must not cost a SECOND, false diagnostic. An earlier cut of this fix zeroed
+/// `current_ret` at the task boundary; `check_return` reads the same field, so `spawn: return 5`
+/// inside `fn main() -> int` also reported "function returns nothing, cannot return a value" — a
+/// claim about `main`, which returns `int`. `in_spawn_block` gates `infer_try` before it reads
+/// `current_ret`, so the reset buys nothing and the enclosing return type stays honest.
+#[test]
+fn spawn_block_return_does_not_claim_the_enclosing_fn_returns_nothing() {
+    let errs = check_entry(
+        "import std.concurrency\nfn main() -> int:\n    spawn:\n        return 5\n    return 1\nprint(main())\n",
+    );
+    assert!(
+        errs.iter().any(|e| e
+            .message
+            .contains("'return' is not allowed inside a spawn block")),
+        "the escaping-flow guard must still own `return` in a task: {errs:?}"
+    );
+    assert!(
+        !errs.iter().any(|e| e.message.contains("returns nothing")),
+        "the enclosing fn returns `int` — no second diagnostic may claim otherwise: {errs:?}"
+    );
+}
+
+/// W7-48 — the spawn gate is shaped like the `recover:`/`defer:` gates above it: a NON-CARRIER
+/// operand keeps the type diagnostic (the spawn message would hide the real defect), and an
+/// already-`Unknown` operand stays silent rather than cascading a second error.
+#[test]
+fn q_on_a_non_carrier_in_a_spawn_block_still_reports_the_type() {
+    let errs = check_entry(
+        "import std.concurrency\nfn main() -> int!str:\n    spawn:\n        v := 5?\n        print(v)\n    return Ok(0)\nprint(main())\n",
+    );
+    assert!(
+        errs.iter().any(|e| e
+            .message
+            .contains("'?' expects Result or Option, found int")),
+        "a non-carrier operand must keep its own diagnostic, not be masked by the spawn message: {errs:?}"
+    );
+    assert!(
+        !errs.iter().any(|e| e.message.contains(SPAWN_Q)),
+        "the spawn message must not fire on an operand that is not a carrier at all: {errs:?}"
+    );
+    // An operand whose type is already `Unknown` (its own error was reported) must not cascade.
+    let cascade = check_entry(
+        "import std.concurrency\nfn main() -> int!str:\n    spawn:\n        v := nope()?\n        print(v)\n    return Ok(0)\nprint(main())\n",
+    );
+    assert_eq!(
+        cascade.len(),
+        1,
+        "an unknown operand must report once (the unknown name), not twice: {cascade:?}"
     );
 }
 

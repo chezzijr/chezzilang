@@ -3360,7 +3360,15 @@ main()
 #[test]
 fn accept_inside_an_executor_job_errs_instead_of_starving_the_pool() {
     let addr = free_addr();
-    let peer = net_peer(addr);
+    // NO `net_peer` here, deliberately. The assertion is that `accept()` in an eager job reports the
+    // would-block Err instead of pinning a worker — which only happens when the backlog is EMPTY. A
+    // peer thread retries `connect` every 10ms from before the program starts, so as soon as
+    // `net.listen` binds, a connection can land in the backlog and `accept()` returns `Ok` instead:
+    // the test then reads `GOT:hi` and fails. That race is decided by how wide the window between
+    // `listen()` and the job's `accept()` is, so it flips on unrelated scheduling changes (measured:
+    // green 2/2 full `--lib` runs, then red 2/2 after three checker tests were added elsewhere in the
+    // suite). The hang this test guards against is caught by `run_net_timeout_watchdog`'s 30s
+    // timeout, not by the peer — so the peer only ever subtracted determinism.
     let src = format!(
         "\
 import std.net
@@ -3395,7 +3403,6 @@ main()
         out,
         "listening\nERR:accept would block: std.net sockets require the --parallel engine\ndone\n"
     );
-    let _ = peer.join();
 }
 
 /// B1 — an incomplete codepoint left over when the peer CLOSES (`b"ok\xC3"` ⇒ `error_len() == None`,

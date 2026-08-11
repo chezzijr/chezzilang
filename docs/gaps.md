@@ -62,7 +62,7 @@ later edit shifts them and nobody re-numbers the whole table (`W7-27`'s was alre
 
 | item | gaps.md | what | why it is still open |
 |---|---|---|---|
-| **W7-48** | `:9525` | **A `?` inside `spawn:` is checked against the ENCLOSING fn's return kind, so its `Err` is accepted and then silently dropped.** `SpawnTarget::Block` (`src/checker/sig.rs:2674-2710`) resets `in_defer_block` and `loop_depth` across the task boundary but **not** `current_ret`/`in_fn_body`, so its own comment (`:2693-2696`) — *"a `?` in this task targets the task (nil-returning → reject)"* — is false whenever the enclosing fn returns a carrier. Measured `chezzi check`: nil-returning fn → rejected; **`-> Result[int, str]` → `ok: no type errors`**; `-> Option[int]` → rejected but with `'?' propagates a Result error, but the enclosing function returns Option` (the diagnostic names the *enclosing* fn, which is the bug in one sentence); module top level → accepted. **The accepted case is a silent swallow**: the `spawn` body is its own frame at runtime, so the `Err` early-returns out of the *task*, where the nursery discards it by design (`W7-46`). Measured both engines: `parallel: spawn: v := g()?` inside a `-> Result` fn prints `after nursery` / `Ok(0)`, rc=0 — `boom` appears nowhere. Found while landing `W7-43`; **pre-existing**, and `?.` inherits it identically (a Result-mode `?.` lowers to a real `ExprKind::Try`) | The mechanical fix is a save-zero-restore of `current_ret`/`in_fn_body` in the `SpawnTarget::Block` arm beside the two resets already there (`infer_closure` is the pattern, and the comment already documents the intent). **But it is a REJECT-widening**, the class project memory flags as structurally untested by the suite that passes today: it would newly reject every `?`/`?.` inside a `spawn:` in a carrier-returning fn — run the PRE-change binary over every such site in `examples/` and `tests/chz/` before landing. The prior decision is whether Chezzi wants the Go answer (reject: a spawned task has nowhere to propagate to, which is why `errgroup` exists) or a channel-based escape hatch first; `W7-46` settled that a spawned `Err` VALUE is dropped by design, which argues for reject |
+| ~~**W7-48**~~ | `:9525` | **FIXED 2026-08-12 — a `?`/`?.` inside a `spawn:` block is now a compile error, whatever the enclosing fn returns.** `SpawnTarget::Block` (`src/checker/sig.rs:2668`) carried the enclosing frame's `current_ret`/`in_fn_body`/`recover_depth` across the task boundary, so a carrier-returning enclosing fn made the `?` **check clean** and the `Err` then early-returned out of the *task*, where the nursery discards it by design (`W7-46`) — a **silent swallow**. Measured pre-fix `chezzi check`: `-> Result[int,str]` **`ok: no type errors`**, module top level **`ok`**, `-> Option[int]` rejected but naming the *enclosing* fn, nil fn rejected by luck. **A second hole, found while fixing:** `recover: parallel: spawn: v := g()?` was also `ok` — `recover_depth` crossed the boundary too, so the `?` was typed against a `recover:` boundary in a *different frame*; measured runtime (both engines, rc=0) `recover result: Ok(nil)`, `boom` nowhere — the recover reported **success** for an error it never saw | **Fix:** the task boundary zeroes `in_defer_block` + `recover_depth` and sets a new `in_spawn_block`, whose gate in `infer_try` sits **after** the `recover:`/`defer:` gates and **before** the return-kind match — so a `recover:`/`defer:` OUTSIDE the task falls through and is rejected, while one nested INSIDE re-arms from zero and stays legal (its boundary is in the same frame as the `?`). `current_ret`/`in_fn_body` are deliberately **NOT** zeroed: `in_spawn_block` gates `infer_try` before either is read, and their only other reader is `check_return` — an earlier cut that zeroed them made `spawn: return 5` inside `fn main() -> int` emit a second, FALSE `function returns nothing, cannot return a value`, the very enclosing-fn lie this row exists to remove (caught by adversarial review, two independent prosecutors, fixed + pinned by `spawn_block_return_does_not_claim_the_enclosing_fn_returns_nothing`). The gate is shaped like its siblings — a non-carrier operand keeps `'?' expects Result or Option, found int` and an `Unknown` operand does not cascade. Message: `'?' is not allowed inside a spawn block: a spawned task has no caller to propagate to`, matching the existing `'{kw}' is not allowed inside a spawn block` for `return`/`break`/`continue` (a `?` IS a return). **Reject-widening blast radius, measured before landing:** exactly 4 sites in all 386 `.chz` files (`tests/chz/spec/opt_carrier_test.chz` §9, added by `W7-43` to assert the buggy acceptance) — rewritten to keep their intent by moving the `?.` into the `parallel:` body (parent frame), asserted behaviour `Ok(20)` unchanged. Six `ok()` neighbours pinned: `?` in a `parallel:` body, in a nested `fn`, in a closure, in a `defer:`/`recover:` inside the task, and `spawn f(g()?)` (args evaluate in the parent) |
 | ~~**W7-49**~~ | `:9600` | **FIXED 2026-08-11 — `Span` carries a `file: u32`, so the three checker→compiler side tables are keyed injectively ACROSS MODULES again.** The hole: a default-parameter expression spliced from one module into another keeps the DEFINING module's spans but was keyed with the CALLING module's index, so two unrelated call sites at the same `line:col` shared one entry and the later insert won — a silent wrong value under a green `chezzi check`, identical on both engines (parity is blind). `KeywordKey`, `WitnessKey` and `CarrierKey` (`src/checker/ty.rs:24,43,109`) all share the tuple `(graph_module_idx, frag_ctx, frag_ord, key_span)`, and `Span` was `{line, col}` with **no file identity** (`src/lexer/mod.rs:148-152`). **Measured on `KeywordTable`, which had shipped for milestones — this was PRE-EXISTING, not introduced by `W7-43`:** `lib.chz:6 fn f(x: int = g(a=7, b=9)) -> int:` (first named-arg VALUE at col 19) + `main.chz:6     vvvvvv := g(b=1, a=2)` (first named-arg VALUE at col 19), both modules defining `fn h(a, b) = a*100+b` and `g := h` → `chezzi check` **clean**, `chezzi run` printed `709` then **`102`** where `probe()` is **`201`** (lib's identity permutation applied to main's reversed call). It now prints `709` / **`201`**. **All three tables are measured, each with a one-column-shift control that makes the fault vanish** — which is what isolates it to the KEY rather than the lowering. `CarrierTable`: an Option-mode `?.` inside a default colliding with a Result-mode `?.` at the same `line:col` gave the **Option** lowering to a **Result** carrier → `runtime error: no match arm for variant 'Ok'`. `WitnessTable`: **measured 2026-08-11, and it is mode (2) of the three that were predicted, NOT the worst-first (1)** — the wrong CONCRETE TYPE is constructed: `check` clean, then `no field 's' on Counter(n=7)` when main's `Other`-pinned `empty()` collides with lib's default `empty[Counter]()`. Neither the wrong-`argc` mode nor the false `internal:` compile error occurs when both colliding callees take one witness that resolves to a concrete key | **Fix as built: `Span` grew a `file: u32`** — assigned once at the single production lex seam `resolver::Builder::parse` (`src/resolver/mod.rs:~660`), `0` = synthesized/standalone; an interpolation fragment inherits its enclosing literal's id; `LoadedModule.file` records it, and a resolver invariant test asserts every module's id is non-zero, pairwise distinct, and stamped on that module's own spans. **The three key tuples and all nine record/lookup sites are UNCHANGED** — the spliced clone already carried the definer's spans and therefore now carries the definer's file id, so both halves keep deriving the key from the same AST with no new state to agree about. Nesting composes with **no stack**. `Span` went 16 → 24 → **12** bytes (`u32` line/col/file): the 24-byte intermediate regressed the `map` bench AND pushed `parser::MAX_DEPTH` and `vm::VM_STACK_BYTES` off their calibrated margins, so the width is now pinned by `lexer::tests::span_stays_twelve_bytes` (`Proto.lines` holds one `Span` per OPCODE, so this is hot VM data). Bench deltas: flat-or-faster everywhere except `map`, and a padding control shows that delta is **alignment, not size** — see `docs/benchmarks.md`. **Two guards landed with it.** (1) The `KeywordTable` lookup now HARD-ERRORS on a miss instead of falling through to `Op::Call(args.len())`, which silently **dropped every named argument** where the carrier (`:3852`) and witness (`:4548`) lookups already faulted; one shared `Compiler::keyword_perm` serves the call, `spawn` and `defer` sites. `print(sep=…, end=…)` — the one path that deliberately leaves `named` populated with no table entry — returns from the `prelude_fn` arm long before any of them, and `spawn`/`defer` of a named `print` is already a type error. (2) The three record sites go through `checker::record_call_table_entry`, which refuses to overwrite a key bound to a DIFFERENT value and surfaces the conflict as a hard `CompileError` (the harvest pass discards type errors, so the conflict travels as a 4th return value of `resolve_call_tables`). It compares **VALUES, never presence**: a same-key/same-value re-insert is the NORMAL case (two call sites omitting one default), and a presence-checking guard would reject every program with a same-module default. **Rejected:** a `Spliced` marker `ExprKind` (~12 walker arms, three of them capture/free-variable walkers where a missed arm is silent, *plus* it still needs the cross-half discriminator it was meant to avoid); a recomputable arg-position discriminator (~25 checker + 5 compiler arg-walk sites, unenforced, and the compiler's permuted loops walk a different order — needs a stack that a `(ctx, ord)` pair cannot express); re-spanning the spliced clone (**rejected twice already** — `5642b55d`/`67e848a6`: a span here IS a table key, and a flat re-span aliases two carriers inside ONE default). **Residual — still open, now LOUD:** the same default spliced twice into the SAME module keeps one set of spans and therefore one key; a default is cloned into the CALLER's scope, so a caller-side local can shadow the definer's global and the two splices genuinely resolve differently (measured: `709` / **`907`** where both should be `709`). The backstop turns that into a compile error. The real fix is to compile a default ONCE in its defining module — which is also where Chezzi **diverges from CPython**, which evaluates defaults at `def` time in the DEFINING scope. **Evidence note:** the corpus contains **zero** cross-module spliced non-literal defaults, so the 978-run pre/post sweep proved only *no regression* — it proves nothing about the fix working. The proof rests on the measured repro and on four new Rust tests (`src/vm/tests.rs` `a_spliced_default_*` + the residual backstop, each failing on `19f7696a` and passing now) plus `tests/chz/spec/default_splice_keys_test.chz` for the two guards' over-fire modes |
 | **W7-47** | `:9328` | **`os.exit` does not terminate the process while `main` is blocked in a socket op.** An eager `Executor` job calling `os.exit(3)` prints its marker and the process then **hangs at rc=124** under `timeout 12`, with `main` still sitting in `accept()`. Go's `os.Exit` is immediate from any goroutine (same shape measured: `listening`, the goroutine's line, **rc=3**), so this is an ancestor divergence on a seam Go owns. Cause: `os.exit` in a job only sets the worker's `pending_exit` (`src/vm/mod.rs:4137`), which `run_outcome` (`:3461-3472`) turns into a `TaskOutcome::Exit` value somebody must **observe** — surfaced only at `shutdown()`/`join_eager_jobs` or the program-exit drain, neither of which a permanently-blocked `main` ever reaches | **Pre-existing in NATURE, newly OBSERVABLE.** The deferred-through-the-join plumbing is unchanged by `W7-40`; what `W7-40` changed is that top-level `main` can now block on a socket AT ALL (before it got the immediate `Err`), which turns "deferred until the join" into "never". Compounds with the untimed `join_eager_jobs` wait below. Not investigated: whether a `parallel:`/`spawn` fiber's `os.exit` defers the same way, and whether the fix belongs at the `os.exit` native (halt the process directly, Go-style — smaller, matches the ancestor) or at the blocking waits (observe a process-wide exit flag — what `--timeout`/cancel would want anyway) |
 | ~~**W7-46**~~ | `:9247` | **FIXED 2026-08-10 — the SEMANTICS were measured correct and Go-consistent; the defect was two examples asserting an unearned success.** A spawned fn's returned `Err` is discarded while a raw fault aborts the nursery. Measured Go 1.26.5: `go func(){ _ = errors.New("boom") }()` → `main finished normally`, **rc=0** (error dropped — this is why `errgroup` exists); `go func(){ panic("boom") }()` → `panic: boom`, `exit status 2`. **Chezzi matches Go on BOTH channels**, so the "disagreement" is the Go contract, not a bug — and `Result` is a value, so there is nowhere for a statement-form `spawn`'s return to go. The real defect: `examples/echo_server.chz` / `echo_server_spawn.chz` printed a **hard-coded** `echo server handled 50 connections` at rc=0 having handled zero on `--serial`, and 3 tests asserted that vacuous line | **Fix:** both examples now count what actually happened — a shared `AtomicInt` (Go's `atomic.Int64`) bumped only by a client whose full round-trip returned `echo:ping`, read after the nursery joins. `--serial` now truthfully prints `echo server handled 0 connections`; the default engine prints the real `50`. `parity_tests.rs` `echo_server_example_terminates_on_the_serial_engine` asserts the honest `0`; `net_echo_server_services_more_conns_than_workers` + `net_echo_server_spawns_handler_per_connection` assert `all served: 100` instead of a vacuous `contains("all served")`. `docs/concurrency.md` states the two-channel contract once, with the measured Go output |
@@ -9437,8 +9437,8 @@ column-aligned sources, the spans too) — it checks the *program produced*, not
 `docs/syntax.md` §9 and `docs/grammar.bnf`'s two carrier comments moved with it; the grammar
 **productions did not change**, so `cargo test conformance` stayed green without a production edit.
 
-**Residual, filed not fixed: `W7-48`** — a `?` (and therefore a `?.`) inside a `spawn:` block is
-checked against the **enclosing fn's** return kind, not the task's.
+**Residual, since FIXED 2026-08-12: `W7-48`** — a `?` (and therefore a `?.`) inside a `spawn:` block
+was checked against the **enclosing fn's** return kind, not the task's. It is now a compile error.
 
 ### W7-44 — the documented secrets surface is dead off Linux, and `uuid.v4()` is not a CSPRNG on ANY platform — **OPEN**
 
@@ -9735,7 +9735,7 @@ nursery join is a different seam), and whether the fix belongs at the `os.exit` 
 process directly, Go-style) or at the blocking waits (make them observe a process-wide exit flag). The
 first is smaller and matches the ancestor; the second is what `--timeout`/cancel would want anyway.
 
-### W7-48 — a `?` inside `spawn:` is checked against the ENCLOSING fn's return kind, so its `Err` is accepted and then silently dropped — **OPEN**
+### W7-48 — a `?` inside `spawn:` is checked against the ENCLOSING fn's return kind, so its `Err` is accepted and then silently dropped — **FIXED 2026-08-12**
 
 Found while landing `W7-43` (the `?.` carrier work); **pre-existing, and `?.` inherits it identically**
 because a Result-mode `?.` lowers to a real `ExprKind::Try`. Not caused by `W7-43`.
@@ -9782,18 +9782,82 @@ program the checker approved has a propagation path the program that runs does n
 `spawn: n := f()?.len()` inside a `-> Result[int, str]` fn prints the `Ok` value on the happy path and
 silently drops the `Err` on the sad one.
 
-**Seam for the fix.** The two-line mechanical version is to save-zero-restore `current_ret`/`in_fn_body`
-in the `SpawnTarget::Block` arm beside the existing `in_defer_block` and `loop_depth` resets — the
-comment at `:2693-2696` already documents that intent, and the `infer_closure` save/restore is the
-pattern. **But that is a REJECT-widening**, which project memory flags as structurally untested by the
-suite that passes today ("a widening is untested by its own suite") — it would newly reject every `?`
-and `?.` inside a `spawn:` in a carrier-returning fn, a shape `examples/` and `tests/chz/` may already
-use. Run the **pre-change** binary over every such site before landing it. The prior decision to make
-is whether Chezzi wants the Go answer (reject: a spawned task has nowhere to propagate to, which is
-also why `errgroup` exists) or a channel-based escape hatch first; `W7-46` settled that a spawned
-`Err` value is *dropped* by design, which argues for reject.
+**The fix, as landed (2026-08-12).** The direction is the **Go answer — reject**: a spawned task has
+nowhere to propagate to, which is also why `errgroup` exists, and `W7-46` already settled that a
+spawned `Err` value is *dropped* by design.
+
+`SpawnTarget::Block` now zeroes `in_defer_block` + `recover_depth` at the task boundary and sets a new
+`in_spawn_block` flag, cleared again at every nested fn/closure boundary (saved/restored 1:1 beside
+`current_ret` in `check_fn_body` / `infer_fn_ret` / `infer_closure`). Its gate in `infer_try` sits
+**after** the `recover:`/`defer:` gates and **before** the return-kind match, and that order is the
+whole design: a `recover:`/`defer:` OUTSIDE the task has its state zeroed at the boundary, so its `?`
+falls through and is rejected; one nested INSIDE the task re-arms from zero, so its own (per-frame,
+correct) contract still wins.
+
+> `'?' is not allowed inside a spawn block: a spawned task has no caller to propagate to`
+
+matching the existing `'{kw}' is not allowed inside a spawn block` for `return`/`break`/`continue` —
+a `?` *is* a return.
+
+**`current_ret`/`in_fn_body` are deliberately NOT zeroed, and that is the row's own trap.** The
+"two-line mechanical version" this section previously recommended *was implemented first*, and it
+regressed a neighbouring diagnostic: `check_return` (`src/checker/sig.rs:3366`) reads the same
+`current_ret`, so `spawn: return 5` inside `fn main() -> int` emitted a second, FALSE
+`function returns nothing, cannot return a value` on top of the correct
+`'return' is not allowed inside a spawn block` — a lie about a fn that plainly returns `int`, i.e. the
+exact enclosing-fn-naming failure this row exists to remove. Two independent adversarial-review
+prosecutors converged on it from different lenses. Since `in_spawn_block` gates `infer_try` *before*
+either field is read, the reset bought nothing; dropping it removes the regression outright. Pinned by
+`spawn_block_return_does_not_claim_the_enclosing_fn_returns_nothing`. **Generalisable lesson: when a
+new flag makes an old state-reset redundant, the reset is not free — it is still read by whoever else
+consults that state.**
+
+The gate is also shaped like the two above it: a non-carrier operand keeps
+`'?' expects Result or Option, found int` (the spawn message would *hide* the real defect) and an
+already-`Unknown` operand does not cascade a second error
+(`q_on_a_non_carrier_in_a_spawn_block_still_reports_the_type`).
+
+**Reject-widening blast radius, measured on the PRE-change binary before landing** (the class project
+memory flags as structurally untested by the suite that passes today): **exactly 4 sites in all 386
+`.chz` files in the repo** — `tests/chz/spec/opt_carrier_test.chz` §9 (`nursery_dot`/`nursery_spaced`),
+added by the `W7-43` landing to assert the buggy acceptance. Zero hits in `examples/`, `std/`,
+`tests/corpus/`, `benches/`, `tests/chz/{suites,stdlib}`. Rewritten to keep the section's intent
+(dot-vs-spaced equivalence inside a nursery) by moving the `?.` into the `parallel:` body, which
+legitimately runs in the parent frame; asserted behaviour (`Ok(20)`, dot == spaced) unchanged, green on
+both engines.
+
+Six `ok()` neighbours pinned by `q_next_to_a_spawn_block_stays_legal`, each with a real frame to
+propagate to: a `?` in a `parallel:` body (parent frame), in a nested `fn` declared inside the task, in
+a closure declared inside the task, in a `defer:` inside the task, in a `recover:` inside the task, and
+in an argument to the call form `spawn f(g()?)` (arguments evaluate in the parent before the task
+starts). `SpawnTarget::Call` never had the hole for that reason.
+
+**Filed, not fixed — a pre-existing neighbour surfaced by the review.** A `?` in a **parameter
+default** is checked at both the declaration site and each call site, and reports at the *declaration's*
+span: `fn h(n: int = g()?) -> int` called from a nil fn reports **two** errors, both at `h`'s line, with
+no `spawn` anywhere in the program. So `spawn: print(h())` now reports the spawn message on a line that
+contains no `spawn` (cross-module, on a line of another file). Pre-existing — the misleading span is a
+property of how defaults are checked, not of this fix — and the same family as
+`span-keyed-table-aliasing`. Not investigated further here.
 
 ### Safe-direction observations and smaller items (2026-08-10)
+
+- **FIXED 2026-08-12: `accept_inside_an_executor_job_errs_instead_of_starving_the_pool` was
+  order-dependent, not flaky-by-timing-alone.** `src/vm/parity_tests.rs:3361`. It asserted the
+  would-block `Err` from an `accept()` in an eager job — which only happens when the backlog is
+  **empty** — while spawning a `net_peer` that retries `connect` every 10 ms from *before* the program
+  starts. Once `net.listen` binds, a connection can land in the backlog and `accept()` returns `Ok`
+  instead, so the test reads `GOT:hi`. The window between `listen()` and the job's `accept()` decides
+  it, so the verdict flips on **unrelated** scheduling changes: measured green 2/2 full `--lib` runs on
+  clean HEAD, then red 2/2 after `W7-48` added three checker tests **elsewhere in the suite** (4027 →
+  4030 tests reshuffles the `RUST_TEST_THREADS=4` interleaving). The peer was never the safety net —
+  `run_net_timeout_watchdog`'s 30 s timeout catches the hang this test guards against — so it only
+  ever subtracted determinism. Peer removed; 4031 passed / 0 failed. **Generalisable: a test that
+  asserts an operation WOULD block must not run a helper that can satisfy it.** Note also the
+  investigation trap hit on the way: running the test binary directly out of `target/debug/deps` picked
+  a *different* target's artifact (15/15 red) than the one `cargo test --lib` uses (10/10 green) — the
+  stale-binary trap, in its `find`-the-newest-artifact spelling. Verify through `cargo`, not by
+  globbing `deps/`.
 
 - **INTERMITTENT: `eager_handshake_is_driven_by_wakeups_not_by_the_poll_timeout` failed once under a
   CPU-capped full-suite run (2026-08-11, M24-6 gate).** `src/vm/tests.rs:12593`. Seen ONCE, on

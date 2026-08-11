@@ -354,6 +354,8 @@ impl Checker {
         // In a fn body during return inference (mirrors `check_fn_body`): a `?` here targets this
         // body, not module top-level. Saved/restored beside `current_ret`.
         let saved_in_fn = std::mem::replace(&mut self.in_fn_body, true);
+        // …and a fn DECLARED inside a `spawn:` block is not itself the task (W7-48).
+        let saved_in_spawn = std::mem::replace(&mut self.in_spawn_block, false);
         let saved_flag = std::mem::replace(&mut self.inferring_ret, true);
         let saved_rets = std::mem::take(&mut self.collected_rets);
         // A generator body's `yield`s must be legal (`in_generator`) and COLLECTED (`collected_yields`)
@@ -417,6 +419,7 @@ impl Checker {
         self.inferring_ret = saved_flag;
         self.current_ret = saved_ret;
         self.in_fn_body = saved_in_fn;
+        self.in_spawn_block = saved_in_spawn;
         self.current_self_ty = saved_self;
         self.witness_scope = saved_witness_scope;
         self.exit_type_params(saved_tps);
@@ -2684,11 +2687,26 @@ impl Checker {
                         // `Continue` fires at check time; a legitimate loop INSIDE the block
                         // re-increments from 0, keeping its own break/continue legal.
                         let saved_loop_depth = std::mem::replace(&mut self.loop_depth, 0);
-                        // A spawned task is its OWN closure (fresh child proto), so an enclosing
-                        // `defer:` block's `?`-discard contract must not extend into it: a `?` in
-                        // this task targets the task (nil-returning → reject), exactly as a bare
-                        // `spawn: v := g()?` does. Reset the flag across this task boundary.
+                        // A spawned task is its OWN frame (the compiler emits a fresh child proto),
+                        // so the `?`-targeting state belonging to the enclosing frame stops at this
+                        // boundary: an enclosing `defer:`'s discard contract and an enclosing
+                        // `recover:` boundary are zeroed here and restored below. `in_spawn_block`
+                        // then says what the resulting context IS — a task has no caller, so a `?`
+                        // in it is rejected with the spawn-specific diagnostic rather than one
+                        // naming the enclosing fn (W7-48). A `defer:`/`recover:` nested INSIDE the
+                        // task re-arms from zero, so its own (per-frame, correct) contract still
+                        // wins — see the gate order in `infer_try`.
+                        //
+                        // `current_ret`/`in_fn_body` are deliberately NOT zeroed. `in_spawn_block`
+                        // gates `infer_try` BEFORE it reads either, so a reset buys nothing there —
+                        // and their only other reader is `check_return` (`:3366`), where a fake
+                        // `Nil` made `spawn: return 5` inside `fn main() -> int` add a second,
+                        // FALSE error ("function returns nothing, cannot return a value") on top of
+                        // the correct "'return' is not allowed inside a spawn block" — the exact
+                        // class of enclosing-fn lie this fix exists to remove.
                         let saved_in_defer = std::mem::replace(&mut self.in_defer_block, false);
+                        let saved_recover = std::mem::replace(&mut self.recover_depth, 0);
+                        let saved_in_spawn = std::mem::replace(&mut self.in_spawn_block, true);
                         // M24 Task 4: the witness scope carries in. `compile_spawn`'s block arm
                         // appends the enclosing frame's `$w:T` bindings to the capture entries, and
                         // a witness is a plain `str` — it deep-copies across the airlock like any
@@ -2698,6 +2716,8 @@ impl Checker {
                             self.check_stmt(stmt);
                         }
                         self.pop_scope();
+                        self.in_spawn_block = saved_in_spawn;
+                        self.recover_depth = saved_recover;
                         self.in_defer_block = saved_in_defer;
                         self.loop_depth = saved_loop_depth;
                         self.capture_floors.pop();
@@ -3642,6 +3662,9 @@ impl Checker {
         let saved_recover = std::mem::replace(&mut self.recover_depth, 0);
         // …and it is NOT a defer block: a `?` inside a fn declared in a defer block targets that fn.
         let saved_in_defer = std::mem::replace(&mut self.in_defer_block, false);
+        // …nor a spawn block: a fn DECLARED inside a `spawn:` has its own caller, so a `?` in its
+        // body targets it normally (W7-48).
+        let saved_in_spawn = std::mem::replace(&mut self.in_spawn_block, false);
         // M24 — the witness params whose `$w:T` binding this body can reach, and the name the
         // contract's fn-half keys them under. A MODULE-LEVEL FREE fn keys on its own name; a MEMBER
         // (Task 5 — a method or static method declaring its own `[T]`) keys on `<type key>.<method>`,
@@ -3803,6 +3826,7 @@ impl Checker {
         self.loop_depth = saved_loop_depth;
         self.recover_depth = saved_recover;
         self.in_defer_block = saved_in_defer;
+        self.in_spawn_block = saved_in_spawn;
         self.witness_scope = saved_witness_scope;
         self.exit_type_params(saved_tps);
     }

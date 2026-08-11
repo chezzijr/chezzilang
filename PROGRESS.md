@@ -2,6 +2,34 @@
 
 Single source of truth for "what am I doing next." Update after every work session.
 
+> **✅ W7-48 landed 2026-08-12 — a `?`/`?.` inside a `spawn:` block is a compile error, so the silent
+> swallow is gone.** `docs/gaps.md`'s `W7-48` is CLOSED. `SpawnTarget::Block` carried the enclosing
+> frame's `current_ret`/`in_fn_body`/`recover_depth` across the task boundary, so `spawn: v := g()?`
+> inside `fn main() -> Result[int, str]` was `chezzi check` → *ok: no type errors*, and at runtime the
+> `Err` early-returned out of the **task**, where the nursery discards it by design (`W7-46`) —
+> measured both engines: `after nursery`, `Ok(0)`, rc=0, `boom` nowhere. A second hole found while
+> fixing: `recover: parallel: spawn: v := g()?` was also clean, and printed `recover result: Ok(nil)`
+> — a `recover:` reporting **success** for an error in a different frame. Now both report *type error:
+> '?' is not allowed inside a spawn block: a spawned task has no caller to propagate to*, matching the
+> existing `'return' is not allowed inside a spawn block` (a `?` **is** a return; Go does not compile a
+> `return err` out of a `go func(){…}()` either).
+>
+> The direction is reject, not an escape hatch. A new `in_spawn_block` flag is set at the task boundary
+> and cleared at every nested fn/closure boundary; its gate in `infer_try` sits **after** the
+> `recover:`/`defer:` gates and **before** the return-kind match, so a `recover:`/`defer:` *outside* the
+> task is rejected while one *inside* it stays legal. **`current_ret`/`in_fn_body` are deliberately NOT
+> zeroed** — the "mechanical two-line fix" the gaps row recommended was tried first and made
+> `spawn: return 5` inside `fn main() -> int` emit a second, FALSE *function returns nothing, cannot
+> return a value*, the exact enclosing-fn lie the row exists to remove. Two independent
+> adversarial-review prosecutors converged on it; `in_spawn_block` gates `infer_try` before either field
+> is read, so the reset bought nothing. **Reject-widening blast radius measured on the pre-change
+> binary: exactly 4 sites in all 386 `.chz` files** (`tests/chz/spec/opt_carrier_test.chz` §9, added by
+> `W7-43` to assert the buggy acceptance) — rewritten by moving the `?.` into the `parallel:` body
+> (parent frame), asserted `Ok(20)` unchanged, green on both engines. Six `ok()` neighbours pinned
+> (`parallel:` body, nested `fn`, closure, `defer:`/`recover:` inside the task, `spawn f(g()?)`), plus
+> two regression tests from the review. Docs in the same commit: `docs/gaps.md`, `docs/syntax.md`
+> (the `spawn:`-escape bullet list + the `?.` context rules).
+
 > **✅ W7-41 + W7-45 landed 2026-08-11 — `Eq` satisfaction is now exactly what `==` accepts, and a
 > conditional `eq` bound is enforced by the operator, not only by the method spelling.** Two linked
 > soundness rows in `docs/gaps.md` are CLOSED. `struct Box[T]` with
@@ -252,9 +280,10 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > fired. Grammar **productions unchanged**, so `cargo test conformance` stayed green without a
 > production edit. Docs moved in the same commit (`syntax.md` §9, `grammar.bnf`'s two carrier comments,
 > `spec.md`'s pipeline + repo-layout lists, `future.md`, `examples/optchain.chz` + its golden).
-> **Residual filed as `W7-48`** — a `?` (and therefore a `?.`) inside a `spawn:` block is checked
-> against the **enclosing fn's** return kind, not the task's, so it is accepted in a carrier-returning
-> fn and its `Err` is then silently dropped by the nursery. Pre-existing; `?.` inherits it identically.
+> **Residual `W7-48` — FIXED 2026-08-12** (see the top of this file): a `?` (and therefore a `?.`)
+> inside a `spawn:` block was checked against the **enclosing fn's** return kind, not the task's, so it
+> was accepted in a carrier-returning fn and its `Err` was then silently dropped by the nursery. It is
+> now a compile error. Pre-existing; `?.` inherited it identically.
 >
 > **✅ W7-42 landed 2026-08-10 — a module-scope re-declaration may rebind a global, but not retype
 > it.** `x := 1` / `f := fn() -> int: x` / `x := "9"` used to be **check-clean** and hand a `str` out of

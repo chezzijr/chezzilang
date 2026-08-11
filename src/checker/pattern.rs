@@ -3232,8 +3232,9 @@ impl Checker {
     ///
     /// Clone-and-lower rather than direct inference because direct inference would re-implement
     /// `infer_call`'s generics + witness recording + keyword resolution against a receiver with no
-    /// `Expr` to hang off. It also buys the `Result` mode all three of [`Self::infer_try`]'s gates
-    /// (`recover_depth`, `in_defer_block`, the `current_ret`/`in_fn_body` return-kind gate) with
+    /// `Expr` to hang off. It also buys the `Result` mode all of [`Self::infer_try`]'s gates
+    /// (`recover_depth`, `in_defer_block`, `in_spawn_block`, the `current_ret`/`in_fn_body`
+    /// return-kind gate) with
     /// ZERO new gate code, because the clone literally CONTAINS an `ExprKind::Try` at the right
     /// nesting. Both `lower_carrier_*` stamp every synthesized node from the carrier's own
     /// `span`/`name_span`, so the compiler — calling the same function on the same input — derives
@@ -3395,6 +3396,32 @@ impl Checker {
             return match t {
                 Ty::Result(ok, _) => *ok,
                 Ty::Option(inner) => *inner,
+                Ty::Unknown => Ty::Unknown,
+                other => {
+                    self.error(span, format!("'?' expects Result or Option, found {other}"));
+                    Ty::Unknown
+                }
+            };
+        }
+        // A spawned task is its own frame with NO CALLER: the nursery discards a task's returned
+        // `Err` by design (W7-46, Go's contract), so a `?` here propagates to nothing — reject it.
+        // The gate order is load-bearing, and is why the spawn arm zeroes `recover_depth` /
+        // `in_defer_block`: a `recover:`/`defer:` OUTSIDE the spawn has its state zeroed at the task
+        // boundary, so its `?` falls through to here and is rejected; one nested INSIDE the spawn
+        // re-arms from zero, so its own gate above fires first and stays legal (its boundary is in
+        // the same frame as the `?`).
+        // Shaped like the two gates above: a non-carrier operand keeps the `expects Result or
+        // Option` diagnostic (the spawn message would HIDE that defect), and `Unknown` stays silent
+        // so an already-reported operand does not cascade a second error.
+        if self.in_spawn_block {
+            return match t {
+                Ty::Result(..) | Ty::Option(_) => {
+                    self.error(
+                        span,
+                        "'?' is not allowed inside a spawn block: a spawned task has no caller to propagate to".to_string(),
+                    );
+                    Ty::Unknown
+                }
                 Ty::Unknown => Ty::Unknown,
                 other => {
                     self.error(span, format!("'?' expects Result or Option, found {other}"));
@@ -3882,6 +3909,10 @@ impl Checker {
         // pre-existing behavior via `current_ret == Unknown` for an unannotated closure; this keeps the
         // signal exact for an explicitly `-> nil` closure too). Saved/restored beside `current_ret`.
         let saved_in_fn = std::mem::replace(&mut self.in_fn_body, true);
+        // A closure DECLARED inside a `spawn:` block is not itself the task — it has a caller, so a
+        // `?` in its body targets the closure's own return (W7-48). Saved/restored beside
+        // `current_ret`.
+        let saved_in_spawn = std::mem::replace(&mut self.in_spawn_block, false);
         // A closure inside a generator is NOT itself a generator: clear the yield context so a stray
         // `yield` in the closure is diagnosed as "outside a generator", not bound to the enclosing
         // one. (Closure bodies are single expressions today, so this is a latent-invariant guard.)
@@ -3973,6 +4004,7 @@ impl Checker {
         self.in_defer_block = saved_in_defer;
         self.current_ret = saved_ret;
         self.in_fn_body = saved_in_fn;
+        self.in_spawn_block = saved_in_spawn;
         self.yield_ty = saved_yield;
         self.in_generator = saved_ig;
         let ret_ty = match ret {

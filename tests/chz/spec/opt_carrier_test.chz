@@ -256,26 +256,31 @@ test fn result_carrier_in_a_closure_and_a_nested_fn():
     assert "{closure_and_nested_dot()}" == "{closure_and_nested_spaced()}"
 
 # ---- 9: inside `parallel:` and inside `spawn:` ----
+#
+# The `?` sits in the `parallel:` body, NOT inside the `spawn:` blocks: a nursery body runs in the
+# PARENT frame, so its `?` propagates out of the enclosing fn normally, while a spawned task is its
+# own frame with no caller to propagate to — a `?` there is rejected (W7-48). The spawned tasks
+# still capture and use the carrier's payload, so the dot-vs-spaced equivalence is unchanged.
 
 fn nursery_dot() -> int!str:
     total := Shared(0)
     parallel:
+        n := sok()?.len()
         spawn:
-            n := sok()?.len()
             total.update(fn(v: int) -> int: v + n)
+        m := bok_s()?.add(5)
         spawn:
-            m := bok_s()?.add(5)
             total.update(fn(v: int) -> int: v + m)
     return Ok(total.get())
 
 fn nursery_spaced() -> int!str:
     total := Shared(0)
     parallel:
+        n := sok()? .len()
         spawn:
-            n := sok()? .len()
             total.update(fn(v: int) -> int: v + n)
+        m := bok_s()? .add(5)
         spawn:
-            m := bok_s()? .add(5)
             total.update(fn(v: int) -> int: v + m)
     return Ok(total.get())
 

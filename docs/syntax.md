@@ -2573,7 +2573,8 @@ out of the enclosing function, then apply the access to the unwrapped `T`. It is
 spaced spelling `x? .field` — same value, same bytecode, same diagnostics — and is therefore subject
 to the **same enclosing-function return-kind rule as `?`**: a `Result`-`?.` needs a `Result`-returning
 fn (module top-level accepts either kind). Every other rule `?` carries — how it behaves inside
-`defer:` and under `recover:` — applies to it unchanged, because it *is* a `?`. `f()?.len()` is Rust's
+`defer:` and under `recover:`, and that it is rejected inside a `spawn:` block — applies to it
+unchanged, because it *is* a `?`. `f()?.len()` is Rust's
 own idiom and compiles here for the same reason. There is no longer a whitespace cliff: `f()?.len()`
 and `f()? .len()` are the same program.
 
@@ -3166,6 +3167,15 @@ main()
   `return` nested in an `if`/`for`/`match`/`wait:` arm inside the block. A `return` in a `parallel:`
   body is fine (it runs in the parent frame), as is one inside a nested `fn` declared in a `spawn:`
   block.
+- **`?` (and `?.`) inside a `spawn:` block is a compile error** for the same reason (`'?' is not
+  allowed inside a spawn block: a spawned task has no caller to propagate to`) — a `?` *is* a return,
+  and the nursery discards a task's `Err` by design, so the propagation would be silently swallowed.
+  This holds whatever the enclosing function returns, and whether or not the `spawn:` sits inside a
+  `recover:` or a `defer:` — those boundaries stop at the task. Send the error on a
+  `Channel`/`Shared`, or `match` it inside the task. Legal next door: a `?` in a `parallel:` body
+  (parent frame), one in a nested `fn`/closure *declared* inside the task (it has its own caller),
+  one in a `defer:`/`recover:` *inside* the task (same frame), and one in an argument to the call
+  form `spawn f(g()?)` (arguments evaluate in the parent, before the task starts).
 
 ```chezzi
 fn fetch_all(urls: List[str]):
