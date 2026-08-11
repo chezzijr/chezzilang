@@ -2480,15 +2480,7 @@ impl Checker {
                 // site. Tightening it is a separate milestone — it would demand a `where` on every
                 // generic fn that compares — and it is the residual behind W7-41's known ceiling
                 // that `fn f[T](a: T, b: T) -> bool: return a == b` still faults on a `Box[Tag]`.
-                let erase = |t: &Ty| {
-                    let mut names: Vec<String> = Vec::new();
-                    ty_collect_params(t, None, &mut names);
-                    if names.is_empty() {
-                        t.clone()
-                    } else {
-                        subst(t, &names.into_iter().map(|n| (n, Ty::Unknown)).collect())
-                    }
-                };
+                // (`eq_bounds_unsatisfied_erased` is that erasure; W7-45's gates share it.)
                 // `!either_unknown` leads DELIBERATELY: on a cascade the predicate is not run at all,
                 // rather than walked and its answer thrown away. Both operands are gated because
                 // `n == m` plus co-inhabitable args is NOT identical args — `may_be_equal`'s int/float
@@ -2496,8 +2488,8 @@ impl Checker {
                 // `Box(1) == Box(1.0)` and its mirror different verdicts off one hook (W7-41 trap 2).
                 if !either_unknown
                     && let Some(why) = self
-                        .eq_bounds_unsatisfied(&erase(&l))
-                        .or_else(|| self.eq_bounds_unsatisfied(&erase(&r)))
+                        .eq_bounds_unsatisfied_erased(&l)
+                        .or_else(|| self.eq_bounds_unsatisfied_erased(&r))
                 {
                     // Decorated, not replaced: the bare text reads as "you have no equality", and the
                     // user WROTE an `eq`. Same ` — ` separator the `<` operator's note used.
@@ -2527,6 +2519,23 @@ impl Checker {
                     Ty::List(elem) | Ty::Set(elem) => {
                         if !either_unknown && !compatible(elem, &l) {
                             self.error(lhs.span, format!("cannot test membership of {l} in {r}"));
+                        }
+                        // **W7-45.** `in` runs `values_equal` per element, exactly as `==` does, but
+                        // it is typed by `compatible` — which asks co-inhabitance, not whether the
+                        // elements CAN be compared. So `Box(Tag(1)) in [Box(Tag(2))]` check-cleaned
+                        // and faulted, while its method spelling `.contains(…)` already rejected:
+                        // the same operator-vs-method split W7-41 closed for `==`. A SET element is
+                        // gated at construction/annotation instead (`key_ty_reject`), so only the
+                        // list arm can be reached with a bad element — gating both here would
+                        // double-report on `x in {…}`.
+                        else if !either_unknown
+                            && matches!(r, Ty::List(_))
+                            && let Some(why) = self.eq_bounds_unsatisfied_erased(elem)
+                        {
+                            self.error(
+                                lhs.span,
+                                format!("cannot test membership of {l} in {r} — {why}"),
+                            );
                         }
                     }
                     Ty::Map(key, _) => {

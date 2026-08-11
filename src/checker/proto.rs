@@ -2607,6 +2607,26 @@ impl Checker {
         self.eq_bounds_unsatisfied_rec(ty)
     }
 
+    /// [`Self::eq_bounds_unsatisfied`] with FREE type params erased to `Ty::Unknown` first — the
+    /// spelling every *use-site* gate wants, as opposed to a declared `where T: Eq` bound, which is
+    /// an obligation the caller discharges and so must keep the `Ty::Param` arm's refusal.
+    ///
+    /// A generic body is checked ONCE with `T` abstract, so a free `T` here is not a type that fails
+    /// the bound, it is a type not yet chosen; erasing to `Ty::Unknown` (which `satisfies_args`
+    /// treats as don't-cascade) keeps `fn f[T](xs: List[T], x: T): return xs.contains(x)` and
+    /// `fn h[T: Hashable](xs: Set[T])` accepted while a CONCRETE part of the same type
+    /// (`Map[T, Box[Tag]]`) is still judged. Shared by the `==`/`!=` gate (W7-41), the `values_equal`
+    /// `List` methods and `in` (W7-45), and [`Self::key_ty_reject`] — one erasure rule, not three.
+    pub(super) fn eq_bounds_unsatisfied_erased(&self, ty: &Ty) -> Option<String> {
+        let mut names: Vec<String> = Vec::new();
+        ty_collect_params(ty, None, &mut names);
+        if names.is_empty() {
+            return self.eq_bounds_unsatisfied(ty);
+        }
+        let erased = subst(ty, &names.into_iter().map(|n| (n, Ty::Unknown)).collect());
+        self.eq_bounds_unsatisfied(&erased)
+    }
+
     /// Enter `ty` on [`EQ_BOUNDS_IN_PROGRESS`] — the single cycle guard, used by BOTH levels of the
     /// recursion (see that constant for why it must be one).
     ///

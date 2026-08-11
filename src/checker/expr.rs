@@ -2743,6 +2743,26 @@ impl Checker {
                     );
                     return Ty::Unknown;
                 }
+                // **W7-45**, the same dispatch-time residual one line up, for the same reason. These
+                // four have a RUNTIME of `values_equal` (`vm/call.rs` contains / index_of /
+                // unique+dedup) but a harvested sig validated by `assignable` alone, so the W7-41
+                // `==` guard never sees them: `[a].contains(b)` over a `Box[Tag]` check-cleaned and
+                // then faulted with *"struct 'Tag' has no 'compare' method"*. The element type is
+                // not expressible as a `where` bound on the decl — `List` puts no bound on `T` at
+                // all — so it is enforced here, exactly where `sum`'s numeric requirement is.
+                // The four are exhaustive against the `native struct List[T]` surface: `count` and
+                // `position` take a PREDICATE (`fn(T) -> bool`) so they never compare, and there is
+                // no `remove` (it is `remove_at`, by index).
+                if matches!(method, "contains" | "index_of" | "dedup" | "unique")
+                    && let Some(why) = self.eq_bounds_unsatisfied_erased(&elem)
+                {
+                    self.infer_all(args);
+                    self.error(
+                        span,
+                        format!("{method}() compares List[{elem}] elements for equality — {why}"),
+                    );
+                    return Ty::Unknown;
+                }
                 // Every other method's sig is harvested from `std/prelude.chz`'s `native struct List[T]`
                 // (re-seeded by `seed_stdlib_structs`); the element type is substituted for `Ty::Param`.
                 // `sort`'s `where T: Comparable` bound (harvested onto the sig's `where_bounds`) is

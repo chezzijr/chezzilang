@@ -282,3 +282,58 @@ test fn a_set_probe_whose_eq_removes_an_earlier_entry_answers_the_new_container(
     dropped := mut_set.remove(Mut(3))
     assert dropped == true
     assert mut_set.len() < n0
+
+# ---- W7-45: a CONDITIONAL `eq` still dispatches, and it is only consulted on a hash collision ----
+#
+# The checker now rejects a container operation whose element/key type has an `eq` with unsatisfied
+# `where` bounds (`Cond[Tag]`, whose `eq` calls a `compare` that `Tag` lacks — it check-cleaned and
+# faulted before). Nothing here can WRITE that program, so this is the positive control for the other
+# half of the claim: the SATISFIED instantiation `Cond[int]` still routes through the same
+# `values_equal`, and its answer really is the user `eq`'s.
+#
+# `hash` is CONSTANT on purpose. Distinct hashes never probe a second candidate, so a Set/Map test
+# over a payload-derived hash passes whether or not `eq` is ever dispatched — the measured false
+# green this whole area is prone to. With one bucket, every answer below IS an `eq` answer.
+
+struct Cond[T]:
+    val: T
+    n_calls_marker: int
+    fn compare(self, o: Self) -> int where T: Comparable:
+        if self.val < o.val:
+            return -1
+        if o.val < self.val:
+            return 1
+        return 0
+    fn eq(self, o: Self) -> bool where T: Comparable:
+        return self.compare(o) == 0
+    fn hash(self) -> int:
+        return 7
+
+fn cond(v: int) -> Cond[int]:
+    return Cond(v, 0)
+
+test fn a_satisfied_conditional_eq_dispatches_from_the_list_builtins():
+    assert [cond(1)].contains(cond(1)) == true
+    assert [cond(1)].contains(cond(2)) == false
+    assert [cond(1), cond(2)].index_of(cond(2)) == 1
+    assert [cond(1), cond(1), cond(2)].dedup().len() == 2
+    assert [cond(1), cond(2), cond(1)].unique().len() == 2
+    assert (cond(1) in [cond(1)]) == true
+    assert (cond(3) in [cond(1), cond(2)]) == false
+
+test fn a_satisfied_conditional_eq_dispatches_from_set_and_map_on_a_collision():
+    # every element collides (`hash` is 7), so the container MUST ask `eq` to tell them apart
+    s := Set([cond(1), cond(2), cond(1)])
+    assert s.len() == 2, "eq is what deduped the colliding elements"
+    assert s.has(cond(2)) == true
+    assert (cond(3) in s) == false
+    s.add(cond(3))
+    assert s.len() == 3
+    m := {cond(1): "a", cond(2): "b"}
+    assert m.len() == 2
+    assert m[cond(2)] == "b"
+    assert m.has(cond(1)) == true
+    m[cond(1)] = "z"
+    assert m.len() == 2, "the insert matched the colliding key it equals, not a neighbour"
+    assert m[cond(1)] == "z"
+    assert m.get(cond(9)) == None

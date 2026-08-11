@@ -1375,6 +1375,135 @@ fn g(x: int) -> int:
     );
 }
 
+/// **W7-45 — the `List` builtins whose runtime is `values_equal`, and `in`.** W7-41 closed the hole
+/// for the OPERATOR; `contains`/`index_of`/`dedup`/`unique`/`in` reach the same `values_equal` with a
+/// signature validated by `assignable` (or, for `in`, by `compatible`) alone, so the guard was never
+/// consulted. Every rejected row below was measured check-clean-then-faulting on the pre-change
+/// binary with *"struct 'Tag' has no 'compare' method"*, rc=1.
+///
+/// The fixture's traps, both measured: an `eq` body of `self.val == o.val` falls back to structural
+/// equality and exits 0 (so the body must call the BOUNDED `compare`), and `[a].contains(a)` hits the
+/// identity shortcut in `elem_equal` (`src/vm/arith.rs`) and never dispatches (so the two values must
+/// be distinct).
+///
+/// **Rust owns the seam and agrees:** `[Boxy(Tag(1))].contains(&Boxy(Tag(2)))` needs
+/// `Boxy<Tag>: PartialEq`, which the `impl<T: Ord> PartialEq for Boxy<T>` mirror does not provide —
+/// E0277 at compile time, with the satisfying `[Boxy(1)].contains(&Boxy(2))` still compiling.
+///
+/// The `ok()` rows are the evidence, not decoration: this WIDENS what is rejected, so the suite that
+/// passed before it contains no example of what it newly affects (`widening-untested-by-its-own-suite`).
+#[test]
+fn list_equality_builtins_enforce_the_element_eq_where_bounds() {
+    const COND: &str = "\
+struct Tag:
+    n: int
+struct Box[T]:
+    val: T
+    fn compare(self, other: Self) -> int where T: Comparable:
+        if self.val < other.val:
+            return -1
+        return 0
+    fn eq(self, other: Self) -> bool where T: Comparable:
+        return self.compare(other) == 0
+    fn hash(self) -> int:
+        return 1
+a := Box(Tag(1))
+b := Box(Tag(2))
+";
+    const WHY: &str = "Box[Tag]'s `eq` requires Tag: Comparable";
+    for (expr, head) in [
+        (
+            "[a].contains(b)",
+            "contains() compares List[Box[Tag]] elements for equality — ",
+        ),
+        (
+            "[a].index_of(b)",
+            "index_of() compares List[Box[Tag]] elements for equality — ",
+        ),
+        (
+            "[a, b].dedup()",
+            "dedup() compares List[Box[Tag]] elements for equality — ",
+        ),
+        (
+            "[a, b].unique()",
+            "unique() compares List[Box[Tag]] elements for equality — ",
+        ),
+        (
+            "a in [b]",
+            "cannot test membership of Box[Tag] in List[Box[Tag]] — ",
+        ),
+    ] {
+        let errs = check_entry(&format!("{COND}print({expr})\n"));
+        assert_eq!(
+            errs.len(),
+            1,
+            "`{expr}`: expected exactly one error, got {errs:?}"
+        );
+        assert_eq!(errs[0].message, format!("{head}{WHY}"), "`{expr}`");
+    }
+    // Through a BINDING, not only a literal receiver — the element type is read off the type, so a
+    // named list is the same hook (and is what a real program writes).
+    entry_rejects(&format!("{COND}xs := [a]\nprint(xs.contains(b))\n"), WHY);
+    // NESTED: the walk already recurses, so a list-of-lists needs no second hook.
+    entry_rejects(&format!("{COND}print([[a]].contains([b]))\n"), WHY);
+
+    // ---- the boundary: every row measured green on the PRE-CHANGE binary too ----
+
+    // Scalars, a plain struct, a tuple, `bytes` — nothing here declares a conditional `eq`.
+    for elem in ["1", "\"s\"", "true", "(1, 2)", "b\"ab\"", "P(1)"] {
+        entry_ok(&format!(
+            "struct P:\n    n: int\nprint([{elem}].contains({elem}))\nprint([{elem}].index_of({elem}))\nprint([{elem}, {elem}].dedup().len())\nprint([{elem}, {elem}].unique().len())\nprint({elem} in [{elem}])\n"
+        ));
+    }
+    // The SATISFIED instantiation of the very same struct — conditional conformance, not a ban.
+    entry_ok(&format!(
+        "{COND}print([Box(1)].contains(Box(2)))\nprint([Box(1)].index_of(Box(2)))\nprint([Box(1), Box(2)].dedup().len())\nprint([Box(1), Box(2)].unique().len())\nprint(Box(1) in [Box(2)])\n"
+    ));
+    // An empty literal's element type is still `Unknown` — must not cascade.
+    entry_ok(&format!(
+        "{COND}xs: List[int] = []\nprint(xs.contains(1))\n"
+    ));
+    // ERASED: a generic body is checked once with `T` abstract, so the free param is not a type that
+    // fails the bound. Same rule as the `==` gate (`eq_bounds_unsatisfied_erased`).
+    entry_ok(&format!(
+        "{COND}fn f[T](xs: List[T], x: T) -> bool:\n    return xs.contains(x)\nprint(f([1], 2))\n"
+    ));
+    entry_ok(&format!(
+        "{COND}fn f[T](xs: List[T], x: T) -> bool:\n    return x in xs\nprint(f([1], 2))\n"
+    ));
+    // `count` takes a PREDICATE, so it never routes through `values_equal` — unaffected.
+    entry_ok(&format!(
+        "{COND}fn pos(x: Box[Tag]) -> bool:\n    return true\nprint([a].count(pos))\n"
+    ));
+    // The gated methods are not the whole surface: a non-comparing method on the SAME bad element
+    // type stays legal, which is what makes this a per-method gate rather than a ban on the type.
+    entry_ok(&format!(
+        "{COND}print([a].len())\nprint([a, b].chunk(1).len())\n"
+    ));
+    // A prior error must not cascade a bogus second diagnostic: an ELEMENT type that is already
+    // `Unknown` is not walked at all. (A bad ARGUMENT is a different matter and deliberately still
+    // reports both — the receiver's element type is concrete and genuinely uncomparable there.)
+    let errs = check_entry(&format!(
+        "{COND}xs := [nosuchfn(1)]\nprint(xs.contains(1))\n"
+    ));
+    assert!(
+        errs.iter()
+            .any(|e| e.message.contains("unknown name 'nosuchfn'"))
+            && !errs.iter().any(|e| e.message.contains("for equality")),
+        "got {errs:?}"
+    );
+    // A genuinely incompatible `in` still reports ONE diagnostic, the co-inhabitance one — the new
+    // gate is an `else if` so the two questions never both fire at one site.
+    let errs = check_entry(&format!("{COND}print(1 in [a])\n"));
+    assert_eq!(errs.len(), 1, "expected exactly one error, got {errs:?}");
+    assert!(
+        errs[0]
+            .message
+            .starts_with("cannot test membership of int in"),
+        "got {errs:?}"
+    );
+}
+
 /// **W7-41's enabling half.** `Eq` is granted to a type whose structural equality walk stays sound —
 /// NOT to one that reaches a declared `eq` whose `where` bounds do not hold for this instantiation.
 /// `Box[Tag]`'s `eq` calls `compare`, which `Tag` does not have, so `Box[Tag]` is not `Eq` and
