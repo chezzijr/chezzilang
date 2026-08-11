@@ -5224,7 +5224,12 @@ impl Compiler {
     /// Compile a string literal, splitting `{expr}` interpolations (pre-parsed at compile time)
     /// from literal text. `{{`/`}}` are literal braces. A literal-only string is a single
     /// `ConstStr`; an interpolated one builds its chunks and concatenates with `BuildStr`.
-    fn compile_str(&mut self, fc: &mut FnComp, raw: &str, span: Span) -> Result<(), CompileError> {
+    fn compile_str(
+        &mut self,
+        fc: &mut FnComp,
+        raw: &crate::ast::StrLit,
+        span: Span,
+    ) -> Result<(), CompileError> {
         let chunks = parse_interpolation(raw, span).map_err(|e| CompileError {
             message: e.message,
             span: e.span,
@@ -5673,7 +5678,7 @@ fn chunk_exprs(chunks: &[Chunk]) -> impl Iterator<Item = &Expr> {
 /// as a free variable (and therefore boxed) — in an un-desugared `Str` the interpolation exprs are
 /// embedded in the raw text, so the AST walk would otherwise miss them. A malformed interpolation
 /// yields no exprs here; the real `compile_str` surfaces that error.
-fn interp_exprs(raw: &str) -> Vec<Expr> {
+fn interp_exprs(raw: &crate::ast::StrLit) -> Vec<Expr> {
     match parse_interpolation(raw, Span::RUNTIME) {
         Ok(chunks) => chunks
             .into_iter()
@@ -6685,6 +6690,7 @@ impl FnComp {
 #[cfg(test)]
 mod interp_tests {
     use super::*;
+    use crate::ast::StrLit;
 
     fn sp() -> Span {
         Span::RUNTIME
@@ -6697,7 +6703,7 @@ mod interp_tests {
 
     #[test]
     fn parse_interpolation_attaches_spec() {
-        let chunks = parse_interpolation("{x:>5}", sp()).unwrap();
+        let chunks = parse_interpolation(&StrLit::from("{x:>5}"), sp()).unwrap();
         match &chunks[..] {
             [Chunk::Expr(_, Some(spec))] => {
                 assert_eq!(spec.width, 5);
@@ -6709,13 +6715,13 @@ mod interp_tests {
 
     #[test]
     fn parse_interpolation_bare_expr_has_no_spec() {
-        let chunks = parse_interpolation("{x}", sp()).unwrap();
+        let chunks = parse_interpolation(&StrLit::from("{x}"), sp()).unwrap();
         assert!(matches!(&chunks[..], [Chunk::Expr(_, None)]));
     }
 
     #[test]
     fn parse_interpolation_width_cap_is_compile_error() {
-        let err = parse_interpolation("{x:>99999999}", sp()).unwrap_err();
+        let err = parse_interpolation(&StrLit::from("{x:>99999999}"), sp()).unwrap_err();
         assert!(
             err.message.contains("exceeds maximum 4096"),
             "got: {}",
@@ -6726,39 +6732,39 @@ mod interp_tests {
     #[test]
     fn parse_interpolation_colon_inside_index_not_a_separator() {
         // The `:` inside the string-key index is NOT the spec separator; only the trailing one is.
-        let chunks = parse_interpolation("{m[\"a:b\"]:>3}", sp()).unwrap();
+        let chunks = parse_interpolation(&StrLit::from("{m[\"a:b\"]:>3}"), sp()).unwrap();
         match &chunks[..] {
             [Chunk::Expr(_, Some(spec))] => assert_eq!(spec.width, 3),
             _ => panic!("expected spec'd expr"),
         }
         // And with no trailing spec, the inner `:` stays part of the expression.
-        let chunks = parse_interpolation("{m[\"a:b\"]}", sp()).unwrap();
+        let chunks = parse_interpolation(&StrLit::from("{m[\"a:b\"]}"), sp()).unwrap();
         assert!(matches!(&chunks[..], [Chunk::Expr(_, None)]));
     }
 
     #[test]
     fn parse_interpolation_scanner_is_quote_and_depth_aware() {
         // A `}` inside a nested string literal does NOT close the fragment.
-        let chunks = parse_interpolation("v={d['a}}b']}", sp()).unwrap();
+        let chunks = parse_interpolation(&StrLit::from("v={d['a}}b']}"), sp()).unwrap();
         assert!(matches!(
             &chunks[..],
             [Chunk::Lit(l), Chunk::Expr(_, None)] if l == "v="
         ));
         // Nor does one nested inside `{`/`[`/`(` — the set literal's brace is at depth 1.
-        let chunks = parse_interpolation("{ {1, 2}.len() }", sp()).unwrap();
+        let chunks = parse_interpolation(&StrLit::from("{ {1, 2}.len() }"), sp()).unwrap();
         assert!(matches!(&chunks[..], [Chunk::Expr(_, None)]));
         // Padding around a fragment is insignificant (CPython allows `f"{ x }"`).
-        let chunks = parse_interpolation("{ x }", sp()).unwrap();
+        let chunks = parse_interpolation(&StrLit::from("{ x }"), sp()).unwrap();
         assert!(matches!(&chunks[..], [Chunk::Expr(_, None)]));
         // A depth-0 `}` still terminates, and an unclosed fragment is still an error.
         assert!(
-            parse_interpolation("{x", sp())
+            parse_interpolation(&StrLit::from("{x"), sp())
                 .unwrap_err()
                 .message
                 .contains("unterminated '{'")
         );
         assert!(
-            parse_interpolation("a}b", sp())
+            parse_interpolation(&StrLit::from("a}b"), sp())
                 .unwrap_err()
                 .message
                 .contains("unmatched '}'")

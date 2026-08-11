@@ -269,7 +269,8 @@ impl Parser {
     fn expect_str(&mut self) -> PResult<String> {
         match self.peek() {
             Token::Str(_) | Token::RawStr(_) => match self.advance().kind {
-                Token::Str(s) | Token::RawStr(s) => Ok(s),
+                Token::Str(s) => Ok(s.raw),
+                Token::RawStr(s) => Ok(s),
                 _ => unreachable!(),
             },
             _ => Err(self.err(format!(
@@ -1705,8 +1706,14 @@ impl Parser {
                 }
                 return Ok(Pattern::Literal(LitPattern::Int(start)));
             }
-            // A raw string is an ordinary `str` literal in pattern position too.
-            Token::Str(s) | Token::RawStr(s) => {
+            // A raw string is an ordinary `str` literal in pattern position too. (A pattern never
+            // interpolates, so the `StrLit`'s position map is dropped here on purpose.)
+            Token::Str(s) => {
+                let s = s.raw.clone();
+                self.advance();
+                return Ok(Pattern::Literal(LitPattern::Str(s)));
+            }
+            Token::RawStr(s) => {
                 let s = s.clone();
                 self.advance();
                 return Ok(Pattern::Literal(LitPattern::Str(s)));

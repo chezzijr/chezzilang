@@ -1170,15 +1170,14 @@ impl Checker {
     /// then stop (the compiler treats the same malformed string as fatal). Format-spec *validation*
     /// stays the compiler's job — we discard the parsed spec and only infer the expression.
     ///
-    /// Span: a fragment expr is parsed from the `{…}` substring via `tokenize_at`, which stamps each
-    /// fragment token span with the string literal's OPENING source line and the fragment's absolute
-    /// COLUMN — see `interpolation::parse_interpolation`. We anchor to the opening line rather than
-    /// the fragment's exact inner line because `raw` is the post-escape payload: a `\n` escape and a
-    /// genuine source newline are indistinguishable, so counting them would risk a confidently-wrong
-    /// line. Nothing is re-anchored on the way out any more: the span is a real position, so a
-    /// fragment error points at the EXPRESSION (where CPython carets inside an f-string) and two
-    /// fragments can no longer share a witness/keyword table key. Always returns `Ty::Str`.
-    pub(super) fn check_interpolation(&mut self, raw: &str, span: Span) -> Ty {
+    /// Span: a fragment expr is parsed from the `{…}` substring via `lexer::tokenize_frag`, which
+    /// re-lexes it against the literal's `PosMap` — so every fragment token span is the char's REAL
+    /// physical source position (line and column), past real newlines, `\n` escapes and any nesting
+    /// depth alike. Nothing is re-anchored on the way out: a fragment error points at the EXPRESSION
+    /// (where CPython carets inside an f-string), and two fragments can never share a
+    /// witness/keyword/carrier table key, because two distinct source chars are two distinct
+    /// positions by construction. Always returns `Ty::Str`.
+    pub(super) fn check_interpolation(&mut self, raw: &crate::ast::StrLit, span: Span) -> Ty {
         match crate::interpolation::parse_interpolation(raw, span) {
             Ok(chunks) => self.check_interp_chunks(&chunks, span),
             Err(e) => {
@@ -1191,9 +1190,10 @@ impl Checker {
     /// Check an already-parsed interpolation's chunks — the desugared [`ExprKind::Interp`] path, and
     /// the body of [`Self::check_interpolation`]'s fallback. Always returns `Ty::Str`.
     pub(super) fn check_interp_chunks(&mut self, chunks: &[crate::ast::Chunk], span: Span) -> Ty {
-        // A value+keyword call inside a `{…}` fragment is keyed by (string span, fragment
-        // ordinal) so two fragments whose first named-arg value shares a fragment-relative
-        // column don't alias one table slot (each fragment is re-lexed from a fresh source).
+        // A value+keyword call inside a `{…}` fragment is keyed by (string span, fragment ordinal).
+        // That pair used to be what kept two fragments whose first named-arg value shared a
+        // fragment-relative column off one table slot; since M24-6 a fragment's spans are real
+        // physical positions, so the pair is belt-and-braces (see `KeywordKey`'s doc).
         // Save/restore for nested interpolations. The compiler keeps the identical pair.
         let saved_ctx = self.kw_frag_ctx;
         let saved_ord = self.kw_frag_ord;

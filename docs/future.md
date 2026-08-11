@@ -633,12 +633,18 @@ interpolation's keys and both per-call tables missed. A FOURTH followed the thir
 fragment carried an absolute line but no absolute COLUMN, so two sibling nested fragments restarted
 at column 1, shared one key, and both took the last one's witness (that fix turned a loud fault into
 a silent wrong value). The key is now the **callee token** (distinct per link) and the anchor is
-**deleted**: `Lexer::base_col` gives every fragment token a real absolute column, so the map from
-(literal span, offset in the literal) to a span is strictly increasing and two call sites cannot
-alias — and with a real column there is nothing left to anchor, so the checker points at the
-expression, exactly where CPython carets inside an f-string (measured 3.14.6). The general lesson
-holds: any future checker→compiler table keyed on position inherits this hazard, and the durable fix
-is to make the position REAL rather than to correct it at a consumer.
+**deleted**: a fragment is re-lexed against the enclosing literal's `PosMap`
+(`lexer::tokenize_frag`), so every fragment token span is the char's REAL physical source position,
+and with a real position there is nothing left to anchor — the checker points at the expression,
+exactly where CPython carets inside an f-string (measured 3.14.6). The general lesson holds: any
+future checker→compiler table keyed on position inherits this hazard, and the durable fix is to make
+the position REAL rather than to correct it at a consumer. **M24-6 (2026-08-11) is that lesson
+carried to its conclusion.** The intermediate fixes above each made the position *more* injective by
+a chosen arithmetic — an absolute base line, then a base column that deliberately kept counting past
+a newline (`Lexer::base_col`, since deleted, whose price was a column that could run off the end of
+its physical line). The map replaces the arithmetic with the thing itself: keys are injective because
+two distinct source chars are two distinct positions, a property of the FILE. Same move `W7-49` made
+for module identity in the other axis.
 
 ### What stays impossible under witness passing, permanently
 

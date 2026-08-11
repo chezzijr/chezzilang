@@ -299,12 +299,16 @@ test fn an_interpolation_fragment_root_is_a_real_call_site():
 
 # ---- SIBLING nested interpolations must not alias their witness keys ----
 #
-# A `{…}` fragment is re-lexed from its own source, so its spans are stamped with the literal's
-# absolute line AND column. When only the line was stamped, every fragment restarted at column 1 —
-# so the two inner literals below shared a span, their two `reset` calls shared a `WitnessTable`
-# key, and the second entry overwrote the first. `chezzi check` stayed green and the program
-# printed `Tag(s='none')Tag(s='none')`: a SILENT WRONG VALUE, not a fault. Both orders are asserted
-# so a last-one-wins alias cannot pass by coincidence.
+# A `{…}` fragment is re-lexed from its own source against the enclosing literal's position map, so
+# every fragment token span is the REAL physical source position of that char. Two distinct source
+# chars are two distinct positions, so two fragments cannot share a `WitnessTable` key — the
+# non-aliasing property is now a property of the FILE, not of any arithmetic.
+#
+# It was not always. When only the LINE was re-anchored, every fragment restarted at column 1, the
+# two inner literals below shared a span, their two `reset` calls shared a key, and the second entry
+# overwrote the first: `chezzi check` stayed green and the program printed
+# `Tag(s='none')Tag(s='none')` — a SILENT WRONG VALUE, not a fault. Both orders are asserted so a
+# last-one-wins alias cannot pass by coincidence.
 
 fn sib_in_generic[T: Default](x: T, c: Counter) -> str:
     return "{ \"{reset(c)}\" }{ \"{T.default()}\" }"
@@ -324,12 +328,34 @@ test fn sibling_nested_fragments_inside_a_generic_fn():
     assert sib_in_generic(Tag("z"), Counter(5)) == "Counter(n=0)Tag(s='none')"
 
 test fn a_nested_fragment_past_a_newline_keeps_its_own_witness():
-    # A fragment may span a newline — brackets suppress layout, so this lexes and runs. The
-    # literal's absolute line is shared by every fragment of that literal, so if the base COLUMN were
-    # dropped past the newline both inner literals would land on `(line + 1, col 1)`, share a
-    # `WitnessTable` key again, and both print the last one's type. Same silent-wrong-value class as
-    # the sibling case above, one line further in.
+    # A fragment may span a newline — brackets suppress layout, so this lexes and runs. The two
+    # inner literals sit on the same physical line here (the `\n` is an ESCAPE, one content char),
+    # at different columns, so they key apart. Under the old fragment-relative column both second
+    # halves landed on `(line + 1, col 1)`, shared a `WitnessTable` key, and both printed the last
+    # one's type. Same silent-wrong-value class as the sibling case above, one line further in.
     assert "{['x',\n'{reset(Counter(5)).n}']}{['x',\n'{reset(Tag(\"z\")).s}']}" == "['x', '0']['x', 'none']"
+
+test fn sibling_nested_fragments_separated_by_an_escape_keep_their_own_witness():
+    # M24-6: an ESCAPE between two siblings is where a "record a position at newlines only" map
+    # drifts — `\t` is TWO source chars for one content char, so the second sibling's real column is
+    # one further right than any count over the post-escape payload says. Drift far enough and a
+    # nested fragment lands on a neighbour's key. Both orders, for the same reason as above.
+    c := Counter(5)
+    t := Tag("z")
+    assert "{ \"{reset(c)}\" }\t{ \"{reset(t)}\" }" == "Counter(n=0)\tTag(s='none')"
+    assert "{ \"{reset(t)}\" }\t{ \"{reset(c)}\" }" == "Tag(s='none')\tCounter(n=0)"
+
+test fn sibling_nested_fragments_across_a_real_newline_keep_their_own_witness():
+    # …and a REAL newline between two siblings inside a `"""` literal: the second sibling's column
+    # restarts at 1 on a NEW physical line, which is exactly the shape the old design could not
+    # allow (resetting the column aliased the two). Real positions make the reset safe, because the
+    # LINE differs. Both orders again.
+    c := Counter(5)
+    t := Tag("z")
+    assert """{ "{reset(c)}" }
+{ "{reset(t)}" }""" == "Counter(n=0)\nTag(s='none')"
+    assert """{ "{reset(t)}" }
+{ "{reset(c)}" }""" == "Tag(s='none')\nCounter(n=0)"
 
 test fn a_keyword_argument_survives_a_nested_fragment():
     # `KeywordTable` is keyed by (string span, fragment ordinal) and rides the same re-lexed spans
@@ -342,8 +368,9 @@ test fn a_keyword_argument_survives_a_nested_fragment():
 # ROOT expression at the string literal's span for diagnostics, which (a) hid the root's own entry
 # from the compiler and (b) COLLIDED with any nested call whose fragment-relative column equalled the
 # literal's column — the nested call then silently took the root's witness under a green
-# `chezzi check`. The trigger is column arithmetic, so the assert below pins the exact layout that
-# used to collide (`    s := "` puts the literal at column 10; `reset` sits at fragment column 10).
+# `chezzi check`. Nothing is re-anchored now and every span is a real physical position, so neither
+# half of that can recur; the assert below keeps the exact layout that used to collide as the
+# regression net (`    s := "` puts the literal at column 10; `reset` sat at fragment column 10).
 
 fn outer_w[T: Default](x: T, ignored: Counter) -> str:
     y := T.default()

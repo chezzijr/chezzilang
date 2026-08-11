@@ -21895,8 +21895,9 @@ fn witness_forwarding_into_an_imported_callee_ok() {
 /// fragment is re-lexed from its own source, and while only its LINE was re-anchored every column
 /// restarted at 1; three successive anchors papered over that (one mutating a cloned root's span,
 /// one carried beside the AST) and each one broke a table key or a nested fragment. The lexer now
-/// takes a base COLUMN, so there is nothing left to anchor. CPython is the ancestor and points at
-/// the expression too (3.14.6 carets `nope` in `print(f"hello {nope}")`, not the literal).
+/// re-lexes the fragment against the literal's `PosMap`, so there is nothing left to anchor.
+/// CPython is the ancestor and points at the expression too (3.14.6 carets `nope` in
+/// `print(f"hello {nope}")`, not the literal).
 #[test]
 fn interpolation_fragment_error_points_at_the_fragment() {
     // col:            1234567890123
@@ -21913,10 +21914,8 @@ fn interpolation_fragment_error_points_at_the_fragment() {
 }
 
 /// …and a fragment NESTED in another fragment's literal is a real position too — the case that
-/// reported column 1 at every depth. Single-quoted inner literal so no escape shifts the offset:
-/// `raw` is the post-escape payload, so a `\"` before the fragment moves the reported column one
-/// left (bounded, documented in `interpolation::parse_interpolation`, and never enough to alias two
-/// fragments).
+/// reported column 1 at every depth. Positions compose through the nesting: the inner literal builds
+/// its own `PosMap` out of the outer lexer's `span_at`, which already routes through the outer map.
 #[test]
 fn nested_interpolation_fragment_error_points_at_the_fragment() {
     // col:            1234567890123456789012345
@@ -21928,11 +21927,69 @@ fn nested_interpolation_fragment_error_points_at_the_fragment() {
     assert_eq!((e.span.line, e.span.col), (1, 23), "the inner `nope`");
 }
 
-/// An escape before the fragment shifts its reported column left by one (`raw` is the post-escape
-/// payload) — bounded and documented. What must NOT shift is the KEY: the two fragments below still
-/// get two different columns, which is the whole reason the base column exists.
+/// …and the composition hazard: a nested literal AFTER a parent escape. The parent's `\t` is TWO
+/// source chars for one content char, and the inner lexer sees only the content char — so any
+/// "record a position at escapes and newlines" shortcut inside `PosMap::note` misses the jump and
+/// puts the inner fragment one column LEFT of the truth, which is how a nested fragment lands on a
+/// neighbour's table key. `note` asks `span_at` per char, and `span_at` already routes through the
+/// parent map, so the jump is recorded. **This test is what fails if `note` is "simplified".**
+#[test]
+fn a_nested_literal_after_an_escape_composes() {
+    // line 3:  print("{ f('a\tb{nope}c') }")
+    // cols:    1234567890123456789
+    // `(`=6 `"`=7 `{`=8 ` `=9 `f`=10 `(`=11 `'`=12 `a`=13 `\`=14 `t`=15 `b`=16 `{`=17 → `nope`=18
+    let errs = check_src("fn f(s: str) -> str:\n    return s\nprint(\"{ f('a\\tb{nope}c') }\")\n");
+    let e = errs
+        .iter()
+        .find(|e| e.message.contains("unknown name 'nope'"))
+        .unwrap_or_else(|| panic!("expected an unknown-name error, got: {errs:?}"));
+    assert_eq!(
+        (e.span.line, e.span.col),
+        (3, 18),
+        "the doubly-nested `nope`"
+    );
+}
+
+/// The `docs/gaps.md` M24-6 repro itself: a fragment past a REAL newline points at the fragment,
+/// not at an offset from the literal's opening delimiter that runs off the end of its line.
+#[test]
+fn a_fragment_past_a_real_newline_points_at_the_fragment() {
+    // line 4:  cc {nope} dd"""
+    // cols:    12345
+    let errs = check_src("z := 0\ns := \"\"\"aaa\nbbb\ncc {nope} dd\"\"\"\n");
+    let e = errs
+        .iter()
+        .find(|e| e.message.contains("unknown name 'nope'"))
+        .unwrap_or_else(|| panic!("expected an unknown-name error, got: {errs:?}"));
+    assert_eq!((e.span.line, e.span.col), (4, 5));
+}
+
+/// …and a `\n` ESCAPE keeps the literal's line, which is the distinction the old design could not
+/// draw at all (`raw` is post-escape, so the two kinds looked identical).
+#[test]
+fn a_fragment_past_an_escape_newline_keeps_the_literals_line() {
+    // line 2:  s := "aaa\nbbb\ncc {nope} dd"
+    // `"`=6 `a`=7,8,9 `\`=10 `n`=11 `b`=12,13,14 `\`=15 `n`=16 `c`=17,18 ` `=19 `{`=20 → 21
+    let errs = check_src("z := 0\ns := \"aaa\\nbbb\\ncc {nope} dd\"\n");
+    let e = errs
+        .iter()
+        .find(|e| e.message.contains("unknown name 'nope'"))
+        .unwrap_or_else(|| panic!("expected an unknown-name error, got: {errs:?}"));
+    assert_eq!((e.span.line, e.span.col), (2, 21));
+}
+
+/// An escape before the fragment used to shift its reported column LEFT by one per escape, because
+/// `raw` is the post-escape payload and the column was an offset into it. The lexer's `PosMap` makes
+/// the column physical, so the escapes now cost exactly the source chars they occupy — asserted as
+/// exact hand-counted values, since a uniformly-wrong-by-one column reads as correct to a human.
+/// What must still hold is the KEY property: two fragments, two different columns.
 #[test]
 fn escapes_before_a_fragment_keep_two_fragments_apart() {
+    // print("\t{nope} \"x\" {nope}")
+    // 1234567890         2         3
+    //           1234567890123456789
+    // `(`=6, `"`=7, `\`=8, `t`=9, `{`=10 → first `nope` at 11; `}`=15, ` `=16, `\`=17, `"`=18,
+    // `x`=19, `\`=20, `"`=21, ` `=22, `{`=23 → second `nope` at 24.
     let errs = check_src("print(\"\\t{nope} \\\"x\\\" {nope}\")\n");
     let cols: Vec<u32> = errs
         .iter()
@@ -21940,7 +21997,47 @@ fn escapes_before_a_fragment_keep_two_fragments_apart() {
         .map(|e| e.span.col)
         .collect();
     assert_eq!(cols.len(), 2, "two fragments, got: {errs:?}");
+    assert_eq!(cols, vec![11, 24], "hand-counted physical columns");
     assert_ne!(cols[0], cols[1], "two fragments must not share a column");
+}
+
+/// Padding inside a fragment (`"{   nope   }"`, legal in Python) is insignificant, and the column
+/// must still land on the expression. This is the guard that the leading-whitespace COUNT and the
+/// `trim()` that drops it agree: they used to be two derivations in two functions, and any drift
+/// between them is a silently-shifted column. They are one derivation now — the trim moved next to
+/// the count in `interpolation::parse_interpolation`.
+#[test]
+fn padded_fragment_column_points_past_the_padding() {
+    // print("{   nope   }")
+    // `(`=6 `"`=7 `{`=8 ` `=9,10,11 → `nope` at 12
+    let errs = check_src("print(\"{   nope   }\")\n");
+    let e = errs
+        .iter()
+        .find(|e| e.message.contains("unknown name 'nope'"))
+        .unwrap_or_else(|| panic!("expected an unknown-name error, got: {errs:?}"));
+    assert_eq!((e.span.line, e.span.col), (1, 12));
+}
+
+/// A LEX error inside a fragment reports the fragment's REAL line. The fragment lexer's own
+/// `self.line` is 1 — it is lexing a substring — so `LexError` built from it said `line 1` no matter
+/// where in the file the literal sat. It asks `span_at` now, which routes through the literal's
+/// `PosMap`. (`LexError` still carries no COLUMN: `docs/gaps.md` **M24-7**.)
+#[test]
+fn a_lex_error_inside_a_fragment_reports_its_real_line() {
+    // The `\u{ZZ}` is not a valid escape, and it is inside a NESTED literal so the interpolation
+    // scanner hands the whole thing to the fragment lexer rather than tripping on the braces.
+    // Source line 3 is:  s := "ab {'\\u{ZZ}'}"   — the doubled backslash keeps the OUTER lexer out
+    // of it, so `\u{ZZ}` reaches the fragment lexer intact.
+    let errs = check_src("print(1)\nprint(2)\ns := \"ab {'\\\\u{ZZ}'}\"\n");
+    let e = errs
+        .iter()
+        .find(|e| e.message.contains("lex error"))
+        .unwrap_or_else(|| panic!("expected a lex error, got: {errs:?}"));
+    assert!(
+        e.message.contains("lex error (line 3)"),
+        "must report the literal's real line, got: {}",
+        e.message
+    );
 }
 
 /// …and the anchor must not bring the key aliasing back with it: two witness calls in ONE fragment

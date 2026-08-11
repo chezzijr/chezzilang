@@ -13,12 +13,16 @@ use std::fmt;
 /// * `module index` — module-scoped exactly like [`ExternTable`] so line:col collisions across
 ///   modules can't alias.
 /// * `fragment-context span` + `fragment ordinal` — disambiguate string-interpolation fragments.
-///   Each `{…}` fragment is re-lexed from a fresh source, so its sub-expression spans restart at
-///   `(line 1, col 1)`; two keyword calls in different fragments whose first named-arg value lands at
-///   the same fragment-relative column would otherwise collide. The context is the whole-string span
-///   and the ordinal is the fragment's 0-based index in that string (both computed identically by the
-///   checker, compiler, and interp at the interpolation boundary). Outside interpolation both are the
-///   inert defaults (`Span::default()`, `0`).
+///   Each `{…}` fragment is re-lexed from a fresh source; that source used to restart at
+///   `(line 1, col 1)`, so two keyword calls in different fragments whose first named-arg value
+///   landed at the same fragment-relative column collided. Since **M24-6** a fragment is re-lexed
+///   against the literal's `PosMap` and every span is the char's real physical position, so these
+///   two components are now belt-and-braces rather than load-bearing — kept because the cost is a
+///   tuple field and removing a key component is a widening (see project memory, "a widening is
+///   untested by its own suite"). The context is the whole-string span and the ordinal is the
+///   fragment's 0-based index in that string (both computed identically by the checker, compiler,
+///   and interp at the interpolation boundary). Outside interpolation both are the inert defaults
+///   (`Span::default()`, `0`).
 /// * `first-named-arg span` — see [`keyword_key_span`]; distinguishes chained postfix calls (which
 ///   share the primary-expression span) and multiple keyword calls within one fragment.
 pub type KeywordKey = (usize, Span, usize, Span);
@@ -107,12 +111,14 @@ pub struct WitnessTable {
 /// is a distinct source node per link, and the checker's record site and the compiler's lookup site
 /// derive it the same way (one helper, one derivation).
 ///
-/// **Not yet injective ACROSS MODULES, and neither are [`KeywordKey`]/[`WitnessKey`]** — the shared
-/// hole, measured and filed as `docs/gaps.md` W7-49. `desugar` splices a callee's default-parameter
-/// expression into the CALLER's AST as a clone that keeps the DEFINING module's spans, while the key
-/// is built with the CALLING module's index — so a `?.` inside a default in `lib.chz` and a `?.` at
-/// the same `line:col` in `main.chz` share one key. The fix is a file identity on [`Span`] itself,
-/// which leaves this tuple and every record/lookup site unchanged.
+/// Injective ACROSS MODULES since **W7-49**, which is what makes `name_span` enough: `desugar`
+/// splices a callee's default-parameter expression into the CALLER's AST as a clone that keeps the
+/// DEFINING module's spans, while the key is built with the CALLING module's index — so a `?.`
+/// inside a default in `lib.chz` and a `?.` at the same `line:col` in `main.chz` used to share one
+/// key (measured, in [`KeywordKey`] and [`WitnessKey`] too, both of which had shipped with it). The
+/// fix is a file identity on [`Span`] itself, so this tuple and every record/lookup site are
+/// unchanged. One residual, backstopped loudly rather than silently: the same default spliced twice
+/// into the SAME module — see `docs/gaps.md` W7-49 and `Checker::record_carrier`.
 pub type CarrierKey = (usize, Span, usize, Span);
 
 /// W7-43 — which lowering a `?.` carrier takes. The checker decides it from the OPERAND's type; the

@@ -13,8 +13,9 @@
 //! error type (`CompileError` / `CheckError`).
 
 use crate::ast::{Expr, Span};
-use crate::lexer;
+use crate::lexer::{self, PosMap, StrLit};
 use crate::parser;
+use std::sync::Arc;
 
 /// Re-export: a parsed chunk lives in the AST (`ExprKind::Interp` carries them), so `desugar` can
 /// store what this parser produced instead of every consumer re-parsing the raw text.
@@ -31,11 +32,15 @@ pub(crate) struct InterpError {
 /// Split an interpolated string literal into literal/expr chunks, mirroring `interp::interpolate`
 /// (but at compile time): `{{`/`}}` are literal braces; each `{ … }` is lexed + parsed as an
 /// expression. A malformed interpolation surfaces here as an error.
-pub(crate) fn parse_interpolation(raw: &str, span: Span) -> Result<Vec<Chunk>, InterpError> {
+pub(crate) fn parse_interpolation(lit_tok: &StrLit, span: Span) -> Result<Vec<Chunk>, InterpError> {
+    let raw: &str = lit_tok;
+    // The literal's content-index → source-`Span` map, resolved ONCE for all its fragments.
+    let map = map_for(lit_tok, span);
     let mut chunks = Vec::new();
     let mut lit = String::new();
-    // `i` is the char index in `raw` — it is what re-anchors a fragment's re-lexed spans to a real
-    // COLUMN (see the `base_col` computation below), so it must be tracked, not recomputed.
+    // `i` is the char index in `raw` — it is the fragment's key into `map`, so it must be tracked,
+    // not recomputed. `{{`/`}}` are consumed by `chars.next()` below, so `i` stays a true `raw`
+    // index across them.
     let mut chars = raw.chars().enumerate().peekable();
     while let Some((i, c)) = chars.next() {
         match c {
@@ -122,42 +127,24 @@ pub(crate) fn parse_interpolation(raw: &str, span: Span) -> Result<Vec<Chunk>, I
                     ),
                     None => None,
                 };
-                // Re-anchor the fragment's re-lexed spans to the string literal's OPENING source
-                // line so a runtime fault inside `"{expr}"` reports a real, never-misleading line
-                // (Bug E — previously always `line 1`). We anchor to the opening line rather than the
-                // fragment's exact inner line because `raw` is the post-escape payload: a `\n` ESCAPE
-                // and a genuine (triple-quoted) source newline are indistinguishable here, so counting
-                // newlines in `raw` would inflate the line past an escape and point at unrelated code.
-                // `base_line` offsets the fragment lexer's 1-based `self.line`; newlines INSIDE the
-                // fragment itself still compose on top (those are real source lines, not escapes).
-                let base_line = span.line.saturating_sub(1);
-                // …and the same for the COLUMN, which is not cosmetic: a span is a cross-half table
-                // key (`WitnessTable`, `KeywordTable`), so while every fragment restarted at column
-                // 1, two fragments of two SIBLING nested literals produced the SAME key and the
-                // second call silently took the first's witness — a wrong value under a green
-                // `chezzi check`. Char `k` of `raw` sits at column `span.col + 1 + k` (the opening
-                // delimiter plus the offset); this fragment's expression starts at `k = i + 1 +
-                // lead` (past its `{` and the whitespace `parse_expr_str` trims); `span_at` adds a
-                // 1-based intra-fragment offset on top, so what we hand it is one less than that.
-                // What this is NOT is the physical column in every case, and the deviations are
-                // all inherited from `raw` being the post-escape payload with the delimiter already
-                // stripped: a TRIPLE-quoted literal is short by 2, each escape consumed before the
-                // fragment shortens it by 1, and — the big one — a NEWLINE before the fragment (real
-                // or escaped) does not reset it, because `base_line` does not advance for one either
-                // (the two kinds are indistinguishable here, and advancing would point the LINE at
-                // real, unrelated code). So past a newline this is an offset from the literal's
-                // start and can exceed the physical line: filed as `docs/gaps.md` **M24-6**, with an
-                // out-of-range column chosen deliberately over an accusing line.
+                // Re-lex the fragment against the enclosing literal's source map, so every token
+                // span it produces is the REAL physical position of that char in the file — line
+                // AND column, past real newlines, `\n` escapes, `\u{…}` escapes and any nesting
+                // depth alike (`docs/gaps.md` M24-6).
                 //
-                // What it IS, unconditionally, is strictly increasing in the fragment's offset
-                // within the literal — nested literals compose inside their parent's extent — so two
-                // call sites can never share a key. That is the load-bearing property; recovering
-                // the exact column would mean carrying a per-char source map on every string token.
+                // This is not cosmetic. A span is a cross-half TABLE KEY (`WitnessTable`,
+                // `KeywordTable`, `CarrierTable`), so two fragments sharing a span means the second
+                // call silently takes the first's entry — a wrong value under a green `chezzi
+                // check`, measured and fixed once already in `2a27697e` (which bought the property
+                // by keeping a monotone OFFSET; this buys it outright, because two distinct source
+                // chars are two distinct positions by construction). Do not "reset" anything here.
+                // `PosMap`'s doc carries the injectivity proof.
+                //
+                // The trim lives HERE, not in `parse_expr_str`, so `lead` and the trim cannot
+                // disagree about what whitespace is — one derivation, not two.
                 let lead = expr_src.chars().take_while(|c| c.is_whitespace()).count();
-                // `as u32`: `i` is a char index into the string literal and `lead` a whitespace
-                // run inside it, so the sum is bounded by the source length — never near u32::MAX.
-                let base_col = span.col + (i + 1 + lead) as u32;
-                let expr = parse_expr_str(expr_src, span, base_line, base_col)?;
+                let off = i + 1 + lead;
+                let expr = parse_expr_str(expr_src.trim(), span, map.clone(), off)?;
                 chunks.push(Chunk::Expr(expr, spec));
             }
             '}' => {
@@ -175,24 +162,37 @@ pub(crate) fn parse_interpolation(raw: &str, span: Span) -> Result<Vec<Chunk>, I
     Ok(chunks)
 }
 
+/// The map a fragment of `lit` re-lexes against.
+///
+/// A brace-free literal never reaches here, so `None` means the literal was SYNTHESIZED (no lexer
+/// built it). The fallback is the affine map anchored one column past the literal's own span, which
+/// is **exactly** the truth for a single-delimiter, escape-free, newline-free literal — not an
+/// approximation of it. A fragment belongs to its enclosing literal's file by definition, so the
+/// fallback inherits `span.file` too (`docs/gaps.md` W7-49).
+fn map_for(lit: &StrLit, span: Span) -> Arc<PosMap> {
+    match &lit.map {
+        Some(m) => m.clone(),
+        None => Arc::new(PosMap::flat(Span {
+            line: span.line,
+            col: span.col + 1,
+            file: span.file,
+        })),
+    }
+}
+
+/// `src` is the fragment's expression text, ALREADY TRIMMED by the caller (which also folded the
+/// dropped leading run into `off`). It must be trimmed: the fragment is lexed as its own line, so
+/// leading whitespace (`"{ 1 + 2 }"`, legal in Python) would otherwise open an INDENT token.
 fn parse_expr_str(
     src: &str,
     span: Span,
-    base_line: u32,
-    base_col: u32,
+    map: Arc<PosMap>,
+    off: usize,
 ) -> Result<Expr, InterpError> {
-    // TRIM first: the fragment is lexed as its own line, so leading whitespace (`"{ 1 + 2 }"`,
-    // legal in Python) would otherwise open an INDENT token — "unexpected an indented block in
-    // expression". Padding around a fragment is insignificant. `base_col` already accounts for the
-    // leading run this drops.
-    let src = src.trim();
-    // A fragment belongs to its enclosing literal's file by definition — inherit it so a fragment's
-    // span keys stay module-distinct (`docs/gaps.md` W7-49).
-    let tokens =
-        lexer::tokenize_at(src, base_line, base_col, span.file).map_err(|e| InterpError {
-            message: e.to_string(),
-            span,
-        })?;
+    let tokens = lexer::tokenize_frag(src, map, off).map_err(|e| InterpError {
+        message: e.to_string(),
+        span,
+    })?;
     // W7-43 — no carrier lowering here any more: `?.`/`??` are ordinary expressions that survive to
     // the checker and the compiler, and both set the `kw_frag_ctx`/`kw_frag_ord` discriminators a
     // fragment's `CarrierKey` needs (`checker::check_interp_chunks`, `compiler::compile_interp`).

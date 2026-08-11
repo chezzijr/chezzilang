@@ -5,7 +5,7 @@
 //!
 //! Everything derives `Debug` so `chezzi ast` can pretty-print a tree with `{:#?}`.
 
-pub use crate::lexer::Span;
+pub use crate::lexer::{Span, StrLit};
 
 /// A whole parsed source file: a flat sequence of top-level statements.
 #[derive(Debug, Clone, PartialEq)]
@@ -851,7 +851,11 @@ pub enum ExprKind {
     /// [`desugar`](crate::desugar) pass rewrites any literal carrying a `{…}` interpolation into
     /// [`ExprKind::Interp`], so what survives here is a brace-free literal — or one whose
     /// interpolation failed to parse, left intact so the checker/compiler report it.
-    Str(String),
+    ///
+    /// The payload is a [`StrLit`]: the contents plus the lexer's content-index → source-position
+    /// map, which is what lets a re-lexed `{…}` fragment carry real physical spans. It `Deref`s to
+    /// `str`, so read it like the `String` it used to be.
+    Str(StrLit),
     /// An interpolated string literal, split into literal/expression [`Chunk`]s. **Produced by
     /// `desugar`, never by the parser**: the fragments must become real AST children BEFORE call
     /// arguments are normalized, or named/default/variadic arguments never reach a fragment call

@@ -1152,9 +1152,9 @@ impl Walker<'_> {
                 }
             }
             ExprKind::Interp(chunks) => {
-                // No re-anchoring to the string literal: a fragment is re-lexed with the literal's
-                // absolute line AND column, so its own span is a real source position (and the one
-                // the checker and compiler report too). See `interpolation::parse_interpolation`.
+                // No re-anchoring to the string literal: a fragment is re-lexed against the
+                // literal's `PosMap`, so its own span is the real physical source position (and the
+                // one the checker and compiler report too). See `interpolation::parse_interpolation`.
                 for c in chunks.iter_mut() {
                     if let crate::ast::Chunk::Expr(e, _) = c {
                         self.walk_expr(e)?;

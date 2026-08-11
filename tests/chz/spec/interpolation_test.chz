@@ -105,3 +105,30 @@ test fn fragment_local_shadows_fn_name():
     with_default := fn(a: int) -> int: a * 100
     assert with_default(1) == 100
     assert "{with_default(1)}" == "100"
+
+# ---- M24-6: the lexer's per-literal position map is RUNTIME-INERT ----
+#
+# A `{…}` fragment is re-lexed against a `PosMap` so its token spans are real source positions. That
+# is a diagnostics/table-key change and it must not move a single rendered char. These are pure
+# value assertions over exactly the shapes the map has to reason about: an escape that is many
+# source chars for one content char, a fragment spanning a real newline, and `{{`/`}}` (which the
+# fragment scanner consumes as content, keeping the raw index it keys on true).
+
+test fn an_astral_escape_before_a_fragment_renders():
+    n := 7
+    assert "\u{1F600}{n}" == "😀7"
+    assert "a\u{1F600}b{n}c" == "a😀b7c"
+
+test fn a_fragment_spanning_a_real_newline_renders():
+    x := 2
+    assert """{[1,
+x]}""" == "[1, 2]"
+
+test fn doubled_braces_adjacent_to_a_fragment_render():
+    # (The expected sides double their braces too — there is no `f` prefix in Chezzi, so EVERY
+    # string literal interpolates.)
+    n := 7
+    assert "{{{n}}}" == "{{7}}"
+    assert "{{ {n} }}" == "{{ 7 }}"
+    assert "{n}}}" == "7}}"
+    assert "{{{n}" == "{{7"

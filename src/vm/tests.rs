@@ -15742,6 +15742,17 @@ fn assert_fault_line(src: &str, needle: &str, expected_line: u32) {
     );
 }
 
+/// Like [`assert_fault_line`] but pins the COLUMN too — the axis M24-6 was about. A binary
+/// expression's span is its LEFT OPERAND's first char (`cc := 10 / b` faults at the `1`), so the
+/// expected column is hand-counted to there.
+fn assert_fault_at(src: &str, needle: &str, expected: (u32, u32)) {
+    assert_fault_line(src, needle, expected.0);
+    let e = run_capture(src).unwrap_err();
+    assert_eq!((e.span.line, e.span.col), expected, "serial");
+    let ep = run_capture_parallel(src).unwrap_err();
+    assert_eq!((ep.span.line, ep.span.col), expected, "M:N");
+}
+
 #[test]
 fn interpolation_div_by_zero_reports_real_line() {
     let src =
@@ -15762,24 +15773,30 @@ fn interpolation_overflow_reports_real_line() {
 }
 
 #[test]
-fn interpolation_multiline_attributes_to_opening_line() {
-    // Triple-quoted string opens on line 4; a fault in a fragment on a later physical line is
-    // attributed to the string's OPENING line (4), not `line 1`. We anchor to the opening line
-    // rather than the exact inner line (6) because `raw` is post-escape: a `\n` escape and a real
-    // source newline are indistinguishable, so counting them would risk a confidently-wrong line
-    // past an escape. Opening-line is honest and never points at unrelated code.
+fn interpolation_multiline_reports_the_fragments_real_line() {
+    // The triple-quoted string OPENS on line 4, but the faulting fragment physically sits on line
+    // 6 — and that is what gets reported, column included. This used to report the opening line
+    // (4) and a column that kept counting from the literal's start, because `raw` is post-escape
+    // and a `\n` escape was indistinguishable from a real newline. The lexer now carries a
+    // content-index → source-position map, so the two ARE distinguishable (`docs/gaps.md` M24-6).
+    //   line 6:  result = {10 / b}
+    //   cols:    1234567890
+    // `result = ` is 9 chars, `{` is col 10, so the `10` starts at col 11.
     let src = "print(\"line 1\")\nprint(\"line 2\")\nb := 0\nmsg := \"\"\"\nsome text\nresult = {10 / b}\n\"\"\"\nprint(msg)\n";
-    assert_fault_line(src, "division by zero", 4);
+    assert_fault_at(src, "division by zero", (6, 11));
 }
 
 #[test]
 fn interpolation_escape_newline_before_fragment_not_misattributed() {
-    // A `\n` ESCAPE in the literal text before a fragment must NOT shift the reported line: the
-    // string is on physical line 4, so a fault in `{10 / b}` reports line 4 (not an inflated line
-    // pointing at unrelated code). Regression guard for the escape-newline miscount.
+    // A `\n` ESCAPE is NOT a source newline, so it must not shift the reported line — and now that
+    // is proved rather than approximated: the map records where each content char physically is, so
+    // the escape costs the fragment two columns (its two source chars) and zero lines.
+    //   line 4:  msg := "a\nb {10 / b}"
+    //   cols:    12345678901234
+    // `"`=8, `a`=9, `\`=10, `n`=11, `b`=12, ` `=13, `{`=14, so the `10` starts at col 15.
     let src =
         "print(\"line 1\")\nprint(\"line 2\")\nb := 0\nmsg := \"a\\nb {10 / b}\"\nprint(msg)\n";
-    assert_fault_line(src, "division by zero", 4);
+    assert_fault_at(src, "division by zero", (4, 15));
 }
 
 #[test]
@@ -15806,10 +15823,10 @@ fn interpolation_backstop_still_faults_for_generic_str() {
 
 #[test]
 fn non_interpolation_fault_span_unchanged() {
-    // A direct top-level fault (no interpolation) still reports its real line — proves base_line=0
-    // leaves normal lexing byte-identical.
+    // A direct top-level fault (no interpolation) still reports its real position — proves
+    // `origin: None` leaves normal lexing byte-identical. `c := 10 / b`: `c`=1 … `1`=6.
     let src = "print(\"line 1\")\nprint(\"line 2\")\nb := 0\nc := 10 / b\nprint(c)\n";
-    assert_fault_line(src, "division by zero", 4);
+    assert_fault_at(src, "division by zero", (4, 6));
     // A literal-only string + a valid interpolation still runs with correct output on both engines.
     let ok = "x := 5\nprint(\"x = {x}, done\")\n";
     assert_eq!(run_capture(ok).unwrap(), "x = 5, done\n");

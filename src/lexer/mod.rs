@@ -18,7 +18,9 @@ pub enum Token {
     /// Larger magnitudes (`9223372036854775809`+) still error at lex time and never reach here.
     IntMinMagnitude,
     Float(f64),
-    Str(String), // contents only, quotes stripped. Interpolation handled later, not in M1.
+    /// Contents only, quotes stripped, plus the [`PosMap`] a re-lexed interpolation fragment needs
+    /// to report real source positions. `Deref<Target = str>` — read it like the `String` it was.
+    Str(StrLit),
     /// A `b"..."` byte-string literal: the resolved raw bytes (escapes applied, quotes stripped).
     /// Lexer-only, like the radix-prefixed int literals — no interpolation, no `\u`.
     Bytes(Vec<u8>),
@@ -193,6 +195,175 @@ impl fmt::Display for Span {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "line {}, col {}", self.line, self.col)
     }
+}
+
+/// A sparse map from a string literal's CONTENT char index (an index into the post-escape,
+/// delimiter-stripped payload) to that char's **physical source [`Span`]**.
+///
+/// It exists because `raw` is lossy: escapes are already resolved and the delimiters are gone, so a
+/// `\n` escape and a real source newline are indistinguishable downstream, and a `\u{1F600}` is nine
+/// source chars wearing one content char's clothes. An interpolation fragment is re-lexed out of
+/// `raw`, so without this map its token spans can only be an *offset* from the literal's start
+/// (`docs/gaps.md` M24-6). With it they are real positions.
+///
+/// **Injectivity on `[0, raw_len)` is the load-bearing property, not the diagnostics.** A `Span` is
+/// a cross-half TABLE KEY (`WitnessKey`/`KeywordKey`/`CarrierKey` — see [`Span`]), so two fragments
+/// that share a span silently share a table entry: a wrong value under a green `chezzi check`
+/// (measured 2026-08-10, commit `2a27697e`). Proof that `at` is injective here:
+///
+/// * every checkpoint `Span` is `Lexer::span_at(self.pos)` taken at a strictly increasing `self.pos`
+///   of the SAME lexer, so checkpoints are distinct, increasing physical positions;
+/// * between two checkpoints `note` fired and declined, which is exactly the statement that each
+///   intermediate char sits one column right of its predecessor on one line — so the interpolated
+///   run is a contiguous, strictly increasing column range;
+/// * therefore `at(idx)` is the true physical position of content char `idx`, and distinct content
+///   chars occupy distinct source chars.
+///
+/// Corollary: distinct fragments of one literal occupy disjoint `raw` sub-ranges → distinct spans; a
+/// fragment of a NESTED literal is physically inside its parent's extent at a strictly later
+/// position → distinct again; there are no zero-width escapes (`\` + newline is a `LexError`); and
+/// `{{`/`}}` are consumed as ordinary content chars, so a fragment's `raw` index stays true.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PosMap {
+    /// Where content char 0 sits. Held INLINE rather than as `pts[0]` so the overwhelmingly common
+    /// literal — no escapes, no newlines — leaves `pts` empty, and an empty `Vec` does not heap-
+    /// allocate. That is what makes the zero-cost claim on [`str_token`] true rather than aspirational.
+    start: Span,
+    /// Checkpoints AFTER content char 0, strictly increasing in `.0`. One per discontinuity (an
+    /// escape or a real newline), so a literal's cost is proportional to its escapes, not its length.
+    pts: Vec<(usize, Span)>,
+}
+
+impl PosMap {
+    /// A map that says only "content char 0 is at `first`" — i.e. the affine fallback
+    /// `col = first.col + idx` on one line. This is the EXACT truth for a single-delimiter,
+    /// escape-free, newline-free literal, not an approximation of it. Allocation-free.
+    pub fn flat(first: Span) -> Self {
+        PosMap {
+            start: first,
+            pts: Vec::new(),
+        }
+    }
+
+    /// Record that content char `idx` sits at `at` — but ONLY if that is not what the previous
+    /// checkpoint already implies. This is the whole rule.
+    ///
+    /// **Call it for EVERY content char, and do not "optimise" it into a switch on escape kinds.**
+    /// The reason is composition, not tidiness: a nested literal inside a fragment builds its own
+    /// map out of `span_at`, which routes through the PARENT's map, so a parent `\t`/`\r`/`\0`/
+    /// `\u{…}` escape shows up to the inner lexer as an ordinary char with a column jump under it.
+    /// A switch on escape kinds cannot see that jump and would put `{g()}` in
+    /// `"{ f('a\tb{g()}c') }"` one column left of the truth — the aliasing class above, wearing the
+    /// costume of a harmless optimisation.
+    fn note(&mut self, idx: usize, at: Span) {
+        // O(1): `note` is called with non-decreasing `idx`, so the governing checkpoint is the last
+        // — or `start` while none has been pushed yet.
+        let (i0, s0) = self.pts.last().copied().unwrap_or((0, self.start));
+        if s0.line != at.line || s0.col + (idx - i0) as u32 != at.col {
+            self.pts.push((idx, at));
+        }
+    }
+
+    /// The physical source position of content char `idx`. Beyond the last content char this
+    /// extrapolates from the final checkpoint (the fragment lexer's EOF span lands there).
+    pub fn at(&self, idx: usize) -> Span {
+        let (i0, s0) = match self.pts.partition_point(|(i, _)| *i <= idx) {
+            0 => (0, self.start),
+            k => self.pts[k - 1],
+        };
+        Span {
+            line: s0.line,
+            col: s0.col + (idx - i0) as u32,
+            file: s0.file,
+        }
+    }
+}
+
+/// The payload of a `str` literal: its post-escape contents plus, when the literal carries a `{`/`}`
+/// (so a fragment may be re-lexed out of it), the [`PosMap`] that turns a content index back into a
+/// real source position.
+///
+/// `Deref<Target = str>` means every existing `raw.contains('{')` / `&raw` / `raw == "x"` site keeps
+/// working, and `PartialEq` compares only `raw` so the lexer's `vec![Token::Str("…".into())]` tests
+/// stay one `.into()` away from what they were.
+///
+/// `Debug` is hand-written to print **exactly what a `String` would**, so `chezzi tokens` and
+/// `chezzi ast` — which dump derived `Debug` (`src/main.rs`) — stay byte-identical to what they were
+/// before the map existed. The map is lexer machinery, not literal content: a derived `Debug` turned
+/// one interpolated literal into a screenful of `Span` blocks under `{:#?}`, one per checkpoint.
+#[derive(Clone, Default)]
+pub struct StrLit {
+    /// The literal's contents: escapes resolved, delimiters stripped.
+    pub raw: String,
+    /// `None` means "the affine fallback from the literal's own span is EXACT" — not "unknown".
+    /// It is `None` for every brace-free literal (nothing will ever re-lex a fragment out of it)
+    /// and for a synthesized `ExprKind::Str`, which by construction has no interesting geometry.
+    pub map: Option<std::sync::Arc<PosMap>>,
+}
+
+impl std::ops::Deref for StrLit {
+    type Target = str;
+    fn deref(&self) -> &str {
+        &self.raw
+    }
+}
+
+impl PartialEq for StrLit {
+    fn eq(&self, other: &Self) -> bool {
+        self.raw == other.raw
+    }
+}
+
+impl PartialEq<str> for StrLit {
+    fn eq(&self, other: &str) -> bool {
+        self.raw == other
+    }
+}
+
+impl From<&str> for StrLit {
+    fn from(s: &str) -> Self {
+        StrLit {
+            raw: s.to_string(),
+            map: None,
+        }
+    }
+}
+
+impl From<String> for StrLit {
+    fn from(raw: String) -> Self {
+        StrLit { raw, map: None }
+    }
+}
+
+impl fmt::Display for StrLit {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.raw)
+    }
+}
+
+impl fmt::Debug for StrLit {
+    /// Prints as the bare `String` it wraps — see the type's doc for why the map is deliberately
+    /// invisible here (`chezzi tokens` / `chezzi ast` dump derived `Debug`).
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Debug::fmt(&self.raw, f)
+    }
+}
+
+/// Finish a scanned `str` literal. The map rides along only when the literal can actually spawn a
+/// fragment — the same `contains('{') || contains('}')` guard `desugar` uses to decide whether to
+/// call `parse_interpolation` at all.
+///
+/// Cost, stated exactly rather than optimistically: a literal with **no escapes and no newlines**
+/// builds a [`PosMap`] whose `pts` stays empty, so it allocates NOTHING and this guard just drops a
+/// 12-byte `Span`. A literal WITH escapes or newlines pushes one checkpoint per discontinuity, and
+/// this guard discards that `Vec` if the literal turns out to be brace-free — work proportional to
+/// escapes, thrown away. Building the map only for brace-carrying literals would need a second,
+/// escape-aware pre-scan to find the closing delimiter; not worth it until a profile says so.
+// ponytail: brace-free escape-heavy literals build a checkpoint vec and drop it. Pre-scan for
+// `{`/`}` before scanning if lexing ever shows up in a profile.
+fn str_token(text: String, map: PosMap) -> Token {
+    let map = (text.contains('{') || text.contains('}')).then(|| std::sync::Arc::new(map));
+    Token::Str(StrLit { raw: text, map })
 }
 
 /// A token paired with where it came from. The lexer emits these; the `Token` payload is the
@@ -410,35 +581,19 @@ pub struct Lexer {
     chars: Vec<char>,
     pos: usize,  // index of the next char to read
     line: usize, // current line, 1-based (for error messages)
-    /// Absolute-line offset applied to every emitted span (default 0 → normal lexing is
-    /// byte-identical). Non-zero only when lexing a string-interpolation fragment re-lexed from an
-    /// escape-processed substring: the offset re-anchors fragment token spans to their true source
-    /// line so a runtime fault inside `"{expr}"` reports `expr`'s real line (Bug E).
-    base_line: u32,
-    /// Absolute-column offset applied to spans on the fragment's FIRST line only (default 0). Same
-    /// job as `base_line` in the other axis, and the reason it exists is not cosmetic: a span is a
-    /// cross-half TABLE KEY (`WitnessTable`, `KeywordTable`), so two fragments that both restarted
-    /// at column 1 produced ONE key and the second call silently took the first's witness — a wrong
-    /// value under a green `chezzi check`. With the base column the map from (literal span, offset
-    /// in the literal) to a span is strictly increasing, so distinct call sites cannot alias.
+    /// Set only when this lexer is re-lexing a string-interpolation FRAGMENT: the enclosing
+    /// literal's [`PosMap`] plus this fragment's content offset within that literal. When it is set,
+    /// [`Lexer::span_at`] asks the map instead of counting columns, so every fragment token span is
+    /// a real physical source position — which is what makes it a safe cross-half table key (see
+    /// [`Span`]) as well as an honest diagnostic (`docs/gaps.md` M24-6).
     ///
-    /// It applies to EVERY line of the fragment, not just the first, and that is load-bearing rather
-    /// than sloppy. A fragment may span a newline (`"{['a',\n'{f()}']}"` — brackets suppress layout,
-    /// so this lexes and runs), and `base_line` is the LITERAL's opening line for every fragment of
-    /// that literal. Reset the column at the newline and two sibling fragments' second lines both
-    /// land on `(base_line + 2, 1)` — one key again, and the same silent wrong value. Keeping the
-    /// offset makes the position strictly increasing in the fragment's offset within the literal,
-    /// which is the property the keys need.
-    ///
-    /// The cost is a column that keeps counting from the literal's start once a newline is behind it
-    /// — so past a newline it can exceed the physical line's length. That is the same known
-    /// approximation `base_line` already makes in the other axis (it never advances for a newline in
-    /// `raw`, real or escaped, because the two are indistinguishable in the post-escape payload), and
-    /// it is the deliberate direction: an out-of-range column reads as degraded, where a shifted LINE
-    /// would point at real, unrelated code. Filed as `docs/gaps.md` M24-6.
-    base_col: u32,
+    /// It COMPOSES: a literal nested inside a fragment builds its own map out of `span_at`, i.e. out
+    /// of the parent's map, so positions stay true at any nesting depth. `None` → normal lexing, and
+    /// `span_at`'s formula is byte-identical to what it always was.
+    origin: Option<(std::sync::Arc<PosMap>, usize)>,
     /// Module id stamped into every emitted span's [`Span::file`] (default 0 = standalone /
     /// synthesized). Assigned by the one production graph lex seam, `resolver::Builder::parse`.
+    /// Ignored while `origin` is set — a fragment inherits its literal's file through the map.
     file: u32,
     line_start: usize, // char index where the current line begins (for column tracking)
     indents: Vec<usize>, // the indentation stack. Starts as vec![0].
@@ -457,20 +612,21 @@ pub struct Lexer {
 
 impl Lexer {
     pub fn new(source: &str) -> Self {
-        Lexer::new_at(source, 0, 0, 0)
+        Lexer::new_in(source, 0, None)
     }
 
-    /// Like [`Lexer::new`] but stamps every emitted span with an absolute `base_line` / `base_col`
-    /// offset and the module id `file` (see [`Span::file`]). Used to re-lex string-interpolation
-    /// fragments so their token spans point at the true source position (see [`Lexer::base_line`],
-    /// [`Lexer::base_col`]). `(0, 0, 0)` is identical to [`Lexer::new`].
-    pub fn new_at(source: &str, base_line: u32, base_col: u32, file: u32) -> Self {
+    /// Like [`Lexer::new`] but stamps every emitted span with the module id `file` (see
+    /// [`Span::file`]). `0` is identical to [`Lexer::new`].
+    pub fn new_file(source: &str, file: u32) -> Self {
+        Lexer::new_in(source, file, None)
+    }
+
+    fn new_in(source: &str, file: u32, origin: Option<(std::sync::Arc<PosMap>, usize)>) -> Self {
         Lexer {
             chars: source.chars().collect(),
             pos: 0,
             line: 1,
-            base_line,
-            base_col,
+            origin,
             file,
             line_start: 0,
             indents: vec![0],
@@ -484,12 +640,16 @@ impl Lexer {
 
     /// The span pointing at character index `pos` on the current line.
     fn span_at(&self, pos: usize) -> Span {
-        Span {
-            // `as u32`: both are 1-based source counters bounded by the source length — a file
-            // with 4 billion lines (or a line with 4 billion columns) is not reachable in practice.
-            line: self.line as u32 + self.base_line,
-            col: (pos - self.line_start + 1) as u32 + self.base_col,
-            file: self.file,
+        match &self.origin {
+            // A fragment: ask the enclosing literal's map for the char's REAL position.
+            Some((map, off)) => map.at(off + pos),
+            None => Span {
+                // `as u32`: both are 1-based source counters bounded by the source length — a file
+                // with 4 billion lines (or a line with 4 billion columns) is not reachable.
+                line: self.line as u32,
+                col: (pos - self.line_start + 1) as u32,
+                file: self.file,
+            },
         }
     }
 
@@ -963,9 +1123,15 @@ impl Lexer {
     }
 
     /// Small helper to build a `LexError` at the current line.
+    ///
+    /// It asks `span_at` rather than reading `self.line`, because inside a re-lexed interpolation
+    /// FRAGMENT `self.line` is the fragment-local `1` — so a lex error in `"{ 'unterminated }"` on
+    /// line 40 of a real program surfaced as `lex error (line 1)`. At top level `span_at` returns
+    /// `self.line` verbatim, so normal lexing is byte-identical. (`LexError` still carries no
+    /// COLUMN — `docs/gaps.md` **M24-7**.)
     fn error(&self, message: &str) -> LexError {
         LexError {
-            line: self.line,
+            line: self.span_at(self.pos).line as usize,
             message: message.to_string(),
         }
     }
@@ -1215,7 +1381,15 @@ impl Lexer {
     /// interpolation (`{…}`) is a separate, later pass — not handled here.
     fn string(&mut self, quote: char) -> Result<Token, LexError> {
         let mut text = String::new();
+        // Checkpoint 0 is taken HERE, where `self.pos` already sits past the opening delimiter — so
+        // the map is right for `'…'` and `"""…"""` alike with no delimiter-width arithmetic.
+        let mut map = PosMap::flat(self.span_at(self.pos));
+        let mut n = 0usize;
         while !self.is_at_end() && self.peek() != quote {
+            // Exactly one content char is produced per iteration (the `\u` arm `continue`s after
+            // pushing one). See `PosMap::note` for why this is per-char and not per-escape.
+            map.note(n, self.span_at(self.pos));
+            n += 1;
             if self.peek() == '\\' {
                 self.advance(); // consume the backslash
                 if self.is_at_end() {
@@ -1255,7 +1429,7 @@ impl Lexer {
             return Err(self.error("unterminated string literal"));
         }
         self.advance(); // consume the closing quote
-        Ok(Token::Str(text))
+        Ok(str_token(text, map))
     }
 
     /// (1d′) Scan a *triple-quoted* string literal (`"""…"""` or `'''…'''`). The opening triple
@@ -1265,6 +1439,9 @@ impl Lexer {
     /// Produces a normal `Token::Str`.
     fn triple_string(&mut self, quote: char) -> Result<Token, LexError> {
         let mut text = String::new();
+        // See `string()`: `self.pos` is already past the opening `"""`, so checkpoint 0 is right.
+        let mut map = PosMap::flat(self.span_at(self.pos));
+        let mut n = 0usize;
         // Closes only when the next THREE chars are all `quote`.
         while !(self.peek() == quote
             && self.peek_next() == quote
@@ -1273,6 +1450,8 @@ impl Lexer {
             if self.is_at_end() {
                 return Err(self.error("unterminated triple-quoted string literal"));
             }
+            map.note(n, self.span_at(self.pos));
+            n += 1;
             if self.peek() == '\\' {
                 self.advance(); // consume the backslash
                 if self.is_at_end() {
@@ -1311,7 +1490,7 @@ impl Lexer {
         self.advance();
         self.advance();
         self.advance();
-        Ok(Token::Str(text))
+        Ok(str_token(text, map))
     }
 
     /// Scan an `r"..."` / `r'...'` raw-string literal. The `r`/`R` prefix and the opening `quote`
@@ -1526,17 +1705,17 @@ pub fn tokenize(source: &str) -> Result<Vec<Tok>, LexError> {
     Lexer::new(source).tokenize()
 }
 
-/// Like [`tokenize`] but stamps every token span with an absolute `base_line` / `base_col` offset
-/// and the module id `file` ([`Span::file`]) — used to re-lex string-interpolation fragments so their
-/// spans point at the true source position (Bug E, and the witness/keyword key aliasing that
-/// fragment-relative columns caused). `(0, 0, 0)` is identical to [`tokenize`].
-pub fn tokenize_at(
+/// Re-lex a string-interpolation FRAGMENT: `source` is the fragment's expression text, `map` the
+/// enclosing literal's [`PosMap`] and `off` the fragment's content offset within that literal. Every
+/// emitted span is the real physical source position of the char it points at — the fragment's file
+/// comes along inside the map's spans, so nothing has to re-stamp it.
+pub fn tokenize_frag(
     source: &str,
-    base_line: u32,
-    base_col: u32,
-    file: u32,
+    map: std::sync::Arc<PosMap>,
+    off: usize,
 ) -> Result<Vec<Tok>, LexError> {
-    Lexer::new_at(source, base_line, base_col, file).tokenize()
+    let file = map.at(off).file;
+    Lexer::new_in(source, file, Some((map, off))).tokenize()
 }
 
 /// Convenience free function: `lexer::tokenize_with_comments(src)` — tokens plus the doc-comment
@@ -1546,7 +1725,7 @@ pub fn tokenize_with_comments(
     source: &str,
     file: u32,
 ) -> Result<(Vec<Tok>, Vec<DocComment>), LexError> {
-    Lexer::new_at(source, 0, 0, file).tokenize_with_comments()
+    Lexer::new_file(source, file).tokenize_with_comments()
 }
 
 #[cfg(test)]
@@ -1777,7 +1956,7 @@ mod tests {
             kinds("{\"a\": 1}"),
             vec![
                 Token::LBrace,
-                Token::Str("a".to_string()),
+                Token::Str("a".into()),
                 Token::Colon,
                 Token::Int(1),
                 Token::RBrace,
@@ -1903,7 +2082,7 @@ mod tests {
         assert_eq!(
             kinds(r#""a\nb\tc\\d\"e""#),
             vec![
-                Token::Str("a\nb\tc\\d\"e".to_string()),
+                Token::Str("a\nb\tc\\d\"e".into()),
                 Token::Newline,
                 Token::Eof
             ]
@@ -1914,7 +2093,7 @@ mod tests {
     fn string_escape_nul() {
         assert_eq!(
             kinds(r#""x\0y""#),
-            vec![Token::Str("x\0y".to_string()), Token::Newline, Token::Eof]
+            vec![Token::Str("x\0y".into()), Token::Newline, Token::Eof]
         );
     }
 
@@ -1929,20 +2108,20 @@ mod tests {
     fn unicode_escape_basic() {
         assert_eq!(
             kinds(r#""\u{41}""#),
-            vec![Token::Str("A".to_string()), Token::Newline, Token::Eof]
+            vec![Token::Str("A".into()), Token::Newline, Token::Eof]
         );
         assert_eq!(
             kinds(r#""\u{e9}""#),
-            vec![Token::Str("é".to_string()), Token::Newline, Token::Eof]
+            vec![Token::Str("é".into()), Token::Newline, Token::Eof]
         );
         assert_eq!(
             kinds(r#""\u{1F600}""#),
-            vec![Token::Str("😀".to_string()), Token::Newline, Token::Eof]
+            vec![Token::Str("😀".into()), Token::Newline, Token::Eof]
         );
         // surrounded by ordinary text
         assert_eq!(
             kinds(r#""x\u{41}y""#),
-            vec![Token::Str("xAy".to_string()), Token::Newline, Token::Eof]
+            vec![Token::Str("xAy".into()), Token::Newline, Token::Eof]
         );
     }
 
@@ -2090,7 +2269,7 @@ mod tests {
     fn single_quote_basic() {
         assert_eq!(
             kinds("'hello'"),
-            vec![Token::Str("hello".to_string()), Token::Newline, Token::Eof]
+            vec![Token::Str("hello".into()), Token::Newline, Token::Eof]
         );
     }
 
@@ -2101,7 +2280,7 @@ mod tests {
         // and the new \u{} escape works in single quotes too
         assert_eq!(
             kinds(r"'\u{41}'"),
-            vec![Token::Str("A".to_string()), Token::Newline, Token::Eof]
+            vec![Token::Str("A".into()), Token::Newline, Token::Eof]
         );
     }
 
@@ -2110,11 +2289,7 @@ mod tests {
         // A `"` inside a single-quoted string is a literal char (no escape needed).
         assert_eq!(
             kinds(r#"'say "hi"'"#),
-            vec![
-                Token::Str("say \"hi\"".to_string()),
-                Token::Newline,
-                Token::Eof
-            ]
+            vec![Token::Str("say \"hi\"".into()), Token::Newline, Token::Eof]
         );
     }
 
@@ -2123,7 +2298,7 @@ mod tests {
         // `\'` escapes the closing quote inside a single-quoted string.
         assert_eq!(
             kinds(r"'it\'s'"),
-            vec![Token::Str("it's".to_string()), Token::Newline, Token::Eof]
+            vec![Token::Str("it's".into()), Token::Newline, Token::Eof]
         );
     }
 
@@ -2132,7 +2307,7 @@ mod tests {
         // A `'` inside a double-quoted string is a literal char.
         assert_eq!(
             kinds(r#""it's""#),
-            vec![Token::Str("it's".to_string()), Token::Newline, Token::Eof]
+            vec![Token::Str("it's".into()), Token::Newline, Token::Eof]
         );
     }
 
@@ -2504,11 +2679,7 @@ mod tests {
         let ks: Vec<&Token> = toks.iter().map(|t| &t.kind).collect();
         assert_eq!(
             ks,
-            vec![
-                &Token::Str("x{y}z".to_string()),
-                &Token::Newline,
-                &Token::Eof
-            ]
+            vec![&Token::Str("x{y}z".into()), &Token::Newline, &Token::Eof]
         );
         assert!(!ks.contains(&&Token::LBrace) && !ks.contains(&&Token::RBrace));
     }
@@ -2850,11 +3021,6 @@ mod tests {
         assert_eq!(toks.last().map(|t| &t.kind), Some(&Token::Eof));
     }
 
-    /// A re-lexed interpolation fragment carries an absolute base LINE and base COLUMN, and the
-    /// column HOLDS past a newline inside the fragment. Dropping it there is what let two sibling
-    /// fragments' second lines both land on `(base_line + 2, 1)` — one witness-table key for two
-    /// call sites, and the second silently took the first's type. The offset must stay so the
-    /// position is strictly increasing in the fragment's offset within the literal.
     /// `Span` is 12 bytes and that is load-bearing, not incidental — `Proto.lines` holds one per
     /// OPCODE, so its width is the cache footprint of every compiled function, and it sets the
     /// calibrated headroom of `parser::MAX_DEPTH` and `vm::VM_STACK_BYTES`. When this fails, a field
@@ -2865,23 +3031,170 @@ mod tests {
         assert_eq!(std::mem::size_of::<Span>(), 12);
     }
 
+    /// A fragment may contain a REAL newline (brackets suppress layout), and so may the literal
+    /// around it. Every token span the fragment produces is the **true physical source position**.
+    ///
+    /// That is a strictly stronger statement than what this test used to assert. The old lexer took
+    /// a base COLUMN that kept counting past a newline, on purpose: resetting it put two sibling
+    /// fragments' second lines both on `(line, 1)` — one witness-table key for two call sites, the
+    /// second silently taking the first's type (`2a27697e`). Real positions get the non-aliasing
+    /// property for free, from a property of the FILE rather than of an offset we chose, and without
+    /// a column that runs off the end of its line (`docs/gaps.md` M24-6).
     #[test]
-    fn base_col_holds_past_a_newline_inside_the_fragment() {
-        let toks = tokenize_at("a\nbb", 4, 10, 0).unwrap();
+    fn a_fragment_spanning_a_newline_gets_real_source_positions() {
+        // line 1:  s = """{[          line 2:  a, bb]}"""
+        // cols:    1234567890                  1234567890
+        let src = "s = \"\"\"{[\na, bb]}\"\"\"\n";
+        let lit = tokenize(src)
+            .unwrap()
+            .into_iter()
+            .find_map(|t| match t.kind {
+                Token::Str(s) => Some(s),
+                _ => None,
+            })
+            .expect("one str token");
+        assert_eq!(lit.raw, "{[\na, bb]}");
+        let map = lit.map.clone().expect("a braced literal carries a map");
+
+        // The fragment is `[\na, bb]`, starting at content index 1 (past its `{`).
+        let toks = tokenize_frag("[\na, bb]", map.clone(), 1).unwrap();
         let spans: Vec<(u32, u32)> = toks
             .iter()
             .filter(|t| matches!(t.kind, Token::Ident(_)))
             .map(|t| (t.span.line, t.span.col))
             .collect();
-        assert_eq!(spans, vec![(5, 11), (6, 11)]);
-        // …so two fragments of ONE literal cannot collide on their second lines either
-        let a = tokenize_at("a\nbb", 4, 10, 0).unwrap();
-        let b = tokenize_at("a\nbb", 4, 40, 0).unwrap();
-        assert_ne!(a[2].span, b[2].span, "line-2 tokens must stay distinct");
-        // and (0, 0) is byte-identical to plain `tokenize`
+        assert_eq!(spans, vec![(2, 1), (2, 4)], "hand-counted from the source");
+
+        // …and two fragments of ONE literal cannot collide, even on a line they share: content
+        // index 3 is `a` at (2,1) and index 6 is the first `b` at (2,4) — distinct source chars.
+        let a = tokenize_frag("a", map.clone(), 3).unwrap();
+        let b = tokenize_frag("a", map.clone(), 6).unwrap();
+        assert_ne!(a[0].span, b[0].span, "two fragments must stay distinct");
+    }
+
+    /// The only `str` token that carries a map is one that can actually spawn a fragment. This is
+    /// the zero-cost claim, verified rather than asserted: an ordinary literal — including a
+    /// multi-line triple-quoted one, whose map would be the least trivial — allocates nothing.
+    #[test]
+    fn pos_map_is_absent_for_a_plain_literal() {
+        let one_map = |src: &str| {
+            tokenize(src)
+                .unwrap()
+                .into_iter()
+                .find_map(|t| match t.kind {
+                    Token::Str(s) => Some(s),
+                    _ => None,
+                })
+                .expect("one str token")
+                .map
+        };
+        assert!(one_map("x = \"abc\"\n").is_none(), "plain literal");
+        assert!(
+            one_map("x = \"\"\"a\nb\"\"\"\n").is_none(),
+            "brace-free triple-quoted literal"
+        );
+        // …and the moment a brace appears, the map is there.
+        assert!(one_map("x = \"a{b}\"\n").is_some(), "braced literal");
+    }
+
+    /// `PosMap::at` is exact at the geometry `raw` throws away: the opening `"""` width, each escape
+    /// width (`\u{1F600}` is NINE source chars for one content char), and a real newline resetting
+    /// the column. Columns are hand-counted absolutes, not deltas — a uniformly-wrong-by-one map
+    /// reads as correct to a human.
+    #[test]
+    fn pos_map_tracks_delimiter_escape_and_newline_widths() {
+        // line 1:  s = """a\tb{p}          line 2:  c\u{1F600}d{q}"""
+        // cols:    1234567890123                    1234567890123456789
+        let src = "s = \"\"\"a\\tb{p}\nc\\u{1F600}d{q}\"\"\"\n";
+        let lit = tokenize(src)
+            .unwrap()
+            .into_iter()
+            .find_map(|t| match t.kind {
+                Token::Str(s) => Some(s),
+                _ => None,
+            })
+            .expect("one str token");
+        assert_eq!(lit.raw, "a\tb{p}\nc\u{1F600}d{q}");
+        let m = lit.map.expect("a braced literal carries a map");
+
+        // content 0 = `a`, at col 8 (`s`,` `,`=`,` `,`"`,`"`,`"` are cols 1-7) — the `"""` width
+        // costs nothing because checkpoint 0 is taken past the delimiter.
+        assert_eq!((m.at(0).line, m.at(0).col), (1, 8));
+        // content 1 = the tab, written `\t` at cols 9-10; content 2 = `b` at col 11.
+        assert_eq!((m.at(1).line, m.at(1).col), (1, 9));
+        assert_eq!((m.at(2).line, m.at(2).col), (1, 11));
+        // content 3 = `{`, 4 = `p`, 5 = `}` at cols 12-14; content 6 is the real newline at col 15.
+        assert_eq!((m.at(4).line, m.at(4).col), (1, 13));
+        assert_eq!((m.at(6).line, m.at(6).col), (1, 15));
+        // …and the next char restarts at column 1 of line 2.
+        assert_eq!((m.at(7).line, m.at(7).col), (2, 1));
+        // content 8 = 😀, written `\u{1F600}` at cols 2-10; content 9 = `d` at col 11.
+        assert_eq!((m.at(8).line, m.at(8).col), (2, 2));
+        assert_eq!((m.at(9).line, m.at(9).col), (2, 11));
+        // content 11 = `q`, physically at col 13.
+        assert_eq!((m.at(11).line, m.at(11).col), (2, 13));
+    }
+
+    /// The two-source-char escapes, in one literal, each costing exactly its own width: `\\` and
+    /// `\"` join `\t` (above) — they are the ones an "offset into `raw`" column got wrong by one
+    /// apiece, cumulatively.
+    #[test]
+    fn pos_map_tracks_two_char_escape_widths() {
+        // s = "a\\b\"c{q}"
+        // cols: 1234567890123456
+        // `"`=5 `a`=6 `\`=7 `\`=8 `b`=9 `\`=10 `"`=11 `c`=12 `{`=13 `q`=14
+        let src = "s = \"a\\\\b\\\"c{q}\"\n";
+        let lit = tokenize(src)
+            .unwrap()
+            .into_iter()
+            .find_map(|t| match t.kind {
+                Token::Str(s) => Some(s),
+                _ => None,
+            })
+            .expect("one str token");
+        assert_eq!(lit.raw, "a\\b\"c{q}");
+        let m = lit.map.expect("a braced literal carries a map");
+        assert_eq!((m.at(0).line, m.at(0).col), (1, 6), "`a`");
+        assert_eq!((m.at(1).line, m.at(1).col), (1, 7), "the `\\\\` backslash");
+        assert_eq!((m.at(2).line, m.at(2).col), (1, 9), "`b`");
+        assert_eq!((m.at(3).line, m.at(3).col), (1, 10), "the `\\\"` quote");
+        assert_eq!((m.at(4).line, m.at(4).col), (1, 12), "`c`");
+        assert_eq!((m.at(6).line, m.at(6).col), (1, 14), "`q`");
+    }
+
+    /// Columns are 1-based CHAR columns, not byte offsets — the lexer counts `chars`, and the map
+    /// inherits that. A multi-byte char written literally (`é`, 2 bytes) and one written as an
+    /// escape (`😀`, 4 bytes / 9 source chars) both cost exactly their SOURCE-char width.
+    #[test]
+    fn unicode_columns_are_chars_not_bytes() {
+        let cols = |src: &str, n: usize| {
+            let m = tokenize(src)
+                .unwrap()
+                .into_iter()
+                .find_map(|t| match t.kind {
+                    Token::Str(s) => s.map,
+                    _ => None,
+                })
+                .expect("a braced literal carries a map");
+            (m.at(n).line, m.at(n).col)
+        };
+        // s = "héllo {nope}"   — `"`=5 `h`=6 `é`=7 `l`=8 `l`=9 `o`=10 ` `=11 `{`=12 `n`=13
         assert_eq!(
-            tokenize_at("a\nbb", 0, 0, 0).unwrap(),
-            tokenize("a\nbb").unwrap()
+            cols("s = \"héllo {nope}\"\n", 7),
+            (1, 13),
+            "`é` costs one col"
+        );
+        // s = "\u{1F600}{nope}" — `"`=5, the escape is cols 6-14, `{`=15, `n`=16
+        assert_eq!(
+            cols("s = \"\\u{1F600}{nope}\"\n", 2),
+            (1, 16),
+            "the escape costs its nine SOURCE chars"
+        );
+        // …and a 😀 written literally costs exactly one column: `"`=5 `😀`=6 `{`=7 `n`=8
+        assert_eq!(
+            cols("s = \"😀{nope}\"\n", 2),
+            (1, 8),
+            "a literal astral char costs one col"
         );
     }
 
@@ -2898,13 +3211,9 @@ mod tests {
         for t in tokenize(src).unwrap() {
             assert_eq!(t.span.file, 0, "tokenize must stamp 0, got {:?}", t);
         }
-        // base-position form — every span carries the caller's id.
-        for t in tokenize_at(src, 0, 0, 7).unwrap() {
-            assert_eq!(
-                t.span.file, 7,
-                "tokenize_at must stamp its file, got {:?}",
-                t
-            );
+        // file-stamped form — every span carries the caller's id.
+        for t in Lexer::new_file(src, 7).tokenize().unwrap() {
+            assert_eq!(t.span.file, 7, "new_file must stamp its file, got {:?}", t);
         }
         // …and so does the doc-comment/graph form the resolver uses.
         let (toks, _) = tokenize_with_comments("# d\nfn f(): 1\n", 5).unwrap();
@@ -2918,8 +3227,9 @@ mod tests {
             col: 11,
             file: 9,
         };
-        let chunks = crate::interpolation::parse_interpolation("v={a + b}!", lit_span)
-            .expect("fragment should parse");
+        let chunks =
+            crate::interpolation::parse_interpolation(&StrLit::from("v={a + b}!"), lit_span)
+                .expect("fragment should parse");
         let mut saw_expr = false;
         for c in &chunks {
             if let crate::ast::Chunk::Expr(e, _) = c {
