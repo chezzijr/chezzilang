@@ -5,20 +5,61 @@ use super::*;
 use std::collections::HashSet;
 
 thread_local! {
-    /// The types [`Checker::eq_bounds_unsatisfied`] is currently proving, innermost last — the cycle
-    /// guard that SPANS the outward hop through `satisfies` (the walk's own `stack` cannot: the far
-    /// side starts a fresh walk). Keyed on the INSTANTIATED type, so a chain of distinct types is
-    /// never cut short — only a genuine re-ask of the same obligation is. Per-THREAD, so parallel
-    /// test threads never share it, and popped by an RAII guard on every exit path.
-    static EQ_BOUNDS_IN_PROGRESS: std::cell::RefCell<Vec<String>> =
+    /// **THE cycle guard for the `Eq` walk — one stack, one key, both levels.** Holds the types
+    /// [`Checker::eq_bounds_unsatisfied`] is currently proving, innermost last.
+    ///
+    /// It has to be ONE stack because the recursion has two levels that look different and are the
+    /// same question: the walk descending into a struct's fields, and the outward hop through
+    /// `satisfies` when a reached `eq` carries a `where` bound. They were two guards keyed
+    /// differently — an instantiation-keyed one out here and a bare-NAME-keyed one down in the walk
+    /// — and each one's blind spot was a soundness hole: the name-keyed one assumed a DIFFERENT
+    /// instantiation of a name already in progress was sound (`R[T]` with a field `Option[R[Tag]]`),
+    /// and a `Display`-keyed one collides two same-named structs from different modules.
+    ///
+    /// The key is the `Ty` itself. `Ty: PartialEq` compares `Ty::Struct`'s name field, which is the
+    /// module-scoped IDENTITY key (`a::H`), not the bare display name (`H`) — so neither blind spot
+    /// survives. Per-THREAD, so parallel test threads never share it; popped by an RAII guard on
+    /// every exit path.
+    static EQ_BOUNDS_IN_PROGRESS: std::cell::RefCell<Vec<Ty>> =
         const { std::cell::RefCell::new(Vec::new()) };
 }
 
-/// Backstop on the in-progress stack: a program whose types expand without repeating (polymorphic
-/// recursion, `Node[T]` with a `Node[List[T]]` field) would otherwise walk forever and hang `check`
-/// — and the LSP with it. Hitting it REFUSES the grant, like every other decline in this predicate.
-/// Generous: real types nest a handful deep.
-const EQ_BOUNDS_MAX_IN_PROGRESS: usize = 64;
+/// Backstop on the in-progress stack. Once the guard keys on the instantiated type it no longer
+/// terminates by itself: POLYMORPHIC RECURSION never repeats an instantiation (`N[T]` with a field
+/// `Option[N[List[T]]]` expands `N[int]`, `N[List[int]]`, …), so without this `check` would hang, and
+/// the LSP with it. Hitting it REFUSES, like every other decline here.
+///
+/// **Rust agrees that this shape is unprovable** — measured, rustc 1.97.0
+/// (`scratchpad/polyrec.rs`): `#[derive(PartialEq, Eq)] struct N<T: Eq> { v: T, next:
+/// Option<Box<N<Vec<T>>>> }` is `error[E0320]: overflow while adding drop-check rules for N<i32>`.
+/// So refusing is not a Chezzi quirk; it is the same answer the owning ancestor gives.
+///
+/// **The ceiling is STACK SAFETY, not ambition, and it is measured.** Each level costs a full
+/// `satisfies` → `satisfies_args_d` → walk → `eq_where_unsatisfied` → `satisfies` round trip, so the
+/// bound has to fit the SMALLEST stack the checker runs on. Production always has room — both
+/// entry points (`main.rs`, `editor/mod.rs`) go through [`crate::on_frontend_stack`]'s 1 GiB thread,
+/// and a 500-link chain checks fine there — but the Rust test harness calls `check_graph` directly on
+/// its own thread, and a DEBUG build (frames 3-5x release) aborts with `stack overflow` somewhere
+/// between 200 and 260 links. 128 keeps ~40% headroom below the measured floor while being double the
+/// 64 that was refusing sound 63-link chains. A stack overflow is an abort — strictly worse than any
+/// wrong answer — so this is the one place the safe direction is "smaller", not "more permissive".
+const EQ_BOUNDS_MAX_IN_PROGRESS: usize = 128;
+
+/// The marker every budget refusal carries, so [`Checker::eq_where_unsatisfied`] can tell "the bound
+/// genuinely failed" from "I ran out of budget proving it" and not reword the second into the first.
+const EQ_BUDGET_MARKER: &str = "nests too deeply";
+
+/// One live entry on [`EQ_BOUNDS_IN_PROGRESS`], popped on every exit path (including `?` and panic).
+/// Minted only by [`Checker::enter_eq_obligation`], so an entry cannot be pushed without its pop.
+struct EqObligation;
+
+impl Drop for EqObligation {
+    fn drop(&mut self) {
+        EQ_BOUNDS_IN_PROGRESS.with(|s| {
+            s.borrow_mut().pop();
+        });
+    }
+}
 
 /// **The intrinsic-grant ↔ runtime-arm pairing table (W6-3's structural ratchet).**
 ///
@@ -2494,71 +2535,83 @@ impl Checker {
     /// in-progress budget — must return `Some`, never `None`. Reading `None` as "the safe default"
     /// is backwards here, and shipped three check-OK-then-runtime-fault holes when it was: this is
     /// the repo's `parked-is-not-stuck` rule (build the verdict from what is IMPOSSIBLE, and decline
-    /// in the direction that cannot lie). The one deliberate exception is documented at the
-    /// re-entrancy guard below: re-asking an obligation already in progress is a coinductive
-    /// ASSUMPTION, not a decline, and matches rustc, measured.
+    /// in the direction that cannot lie).
+    ///
+    /// **The ONE exception, and it is not a decline:** `Ty::Protocol` answers `None` because the
+    /// concrete witness is unknowable here — and it is not an exotic corner, it is on the hot path.
+    /// `Ty::result(inner)` is literally `Ty::Result(inner, Ty::Protocol("Error"))`
+    /// (`src/checker/ty.rs`), so every bare `Result[T]` carries an existential in its error slot;
+    /// refusing it would un-grant `Result` wholesale and break the `("Eq", "eq", "result")` ratchet
+    /// row. Same hole, same reason, as [`Self::reaches_user_eq`]'s. (Re-asking an obligation already
+    /// in progress also answers `None`, but that is a coinductive ASSUMPTION rather than a hole —
+    /// see [`EQ_BOUNDS_IN_PROGRESS`].)
     pub(super) fn eq_bounds_unsatisfied(&self, ty: &Ty) -> Option<String> {
-        // RE-ENTRANCY: resolving a `where T: Eq` bound below calls `satisfies`, whose D1 arm calls
-        // straight back in here — and the walk's own `stack` cannot span that hop (the far side
-        // starts a fresh walk). `struct C[T]` with `fn eq(self, o: Self) -> bool where T: Eq` plus
-        // `struct D: x: C[D]` closes the loop exactly.
-        //
-        // Re-asking an obligation already ON the stack answers `None`: this is the COINDUCTIVE
-        // assumption ("assume `D: Eq` while proving `D: Eq`"), not a decline — the walk it returns
-        // to still checks every remaining field and sibling, so nothing is skipped. **Rust, measured
-        // (rustc 1.97.0, `scratchpad/cyc.rs`):** `struct C<T: Eq>` + `struct D { x: Vec<C<D>> }` with
-        // manual `Eq` impls COMPILES and runs under `fn needs<U: Eq>` — rustc resolves the cycle the
-        // same way, and reserves `E0275 overflow` for the case that genuinely cannot be closed.
-        // The old fixed DEPTH cap was a different animal and was wrong: it abandoned the whole proof
-        // mid-way and answered "sound", so a chain of 16 distinct conditional types type-checked and
-        // then faulted at runtime. A stack of distinct types now runs to the true answer.
-        struct Pop;
-        impl Drop for Pop {
-            fn drop(&mut self) {
-                EQ_BOUNDS_IN_PROGRESS.with(|s| {
-                    s.borrow_mut().pop();
-                });
-            }
-        }
-        let key = ty.to_string();
-        let (in_progress, over_budget) = EQ_BOUNDS_IN_PROGRESS.with(|s| {
-            let st = s.borrow();
-            (st.contains(&key), st.len() >= EQ_BOUNDS_MAX_IN_PROGRESS)
-        });
-        if in_progress {
-            return None; // already being proven — the coinductive assumption, not a decline
-        }
-        EQ_BOUNDS_IN_PROGRESS.with(|s| s.borrow_mut().push(key));
-        let _guard = Pop;
-        if over_budget {
-            // DECLINE ⇒ REFUSE. A `None` here is consumed as a GRANT by `satisfies_args_d`, and a
-            // grant is a promise the runtime must honour, so "I could not finish the proof" must
-            // never be spelled the same way as "I finished it and it is sound".
-            return Some(format!(
-                "{ty} nests too deeply to prove its equality reaches no unmet `where` bound"
-            ));
-        }
-        self.eq_bounds_unsatisfied_rec(ty, &mut Vec::new())
+        self.eq_bounds_unsatisfied_rec(ty)
     }
 
-    /// [`Self::eq_bounds_unsatisfied`] with the walk's cycle guard (`stack` holds the
-    /// struct/enum/newtype names currently being walked, so `Node { next: Option[Node] }`
-    /// terminates) — mirrors [`Self::reaches_user_eq`]'s shape.
-    fn eq_bounds_unsatisfied_rec(&self, ty: &Ty, stack: &mut Vec<String>) -> Option<String> {
-        let any = |s: &Self, ts: &[Ty], stack: &mut Vec<String>| -> Option<String> {
-            ts.iter()
-                .find_map(|t| s.eq_bounds_unsatisfied_rec(t, stack))
+    /// Enter `ty` on [`EQ_BOUNDS_IN_PROGRESS`] — the single cycle guard, used by BOTH levels of the
+    /// recursion (see that constant for why it must be one).
+    ///
+    /// `Ok(guard)` = proceed, and the entry is popped when `guard` drops. `Err(verdict)` = the guard
+    /// already answered:
+    /// * `Err(None)` — `ty` is already being proven. This is the COINDUCTIVE assumption ("assume
+    ///   `D: Eq` while proving `D: Eq`"), not a decline: the walk it returns to still checks every
+    ///   remaining field and sibling, so nothing is skipped. **Rust, measured (rustc 1.97.0,
+    ///   `scratchpad/cyc.rs`):** `struct C<T: Eq>` + `struct D { x: Vec<C<D>> }` with manual `Eq`
+    ///   impls COMPILES and runs under `fn needs<U: Eq>`.
+    /// * `Err(Some(_))` — out of budget, so REFUSE. A `None` here is consumed as a GRANT by
+    ///   `satisfies_args_d`, and a grant is a promise the runtime must honour, so "I could not
+    ///   finish the proof" must never be spelled the same way as "I finished it and it is sound".
+    fn enter_eq_obligation(ty: &Ty) -> Result<EqObligation, Option<String>> {
+        let (in_progress, over_budget) = EQ_BOUNDS_IN_PROGRESS.with(|s| {
+            let st = s.borrow();
+            (st.contains(ty), st.len() >= EQ_BOUNDS_MAX_IN_PROGRESS)
+        });
+        if in_progress {
+            return Err(None);
+        }
+        if over_budget {
+            return Err(Some(Self::eq_budget_refusal(ty)));
+        }
+        EQ_BOUNDS_IN_PROGRESS.with(|s| s.borrow_mut().push(ty.clone()));
+        Ok(EqObligation)
+    }
+
+    /// Walk the MEMBERS of a nominal `ty` (fields / payloads / underlying) under the shared cycle
+    /// guard. Every nominal arm funnels through here, so entering the guard cannot be forgotten.
+    fn walk_eq_members(&self, ty: &Ty, members: &[Ty]) -> Option<String> {
+        match Self::enter_eq_obligation(ty) {
+            Err(verdict) => verdict,
+            Ok(_guard) => members
+                .iter()
+                .find_map(|m| self.eq_bounds_unsatisfied_rec(m)),
+        }
+    }
+
+    /// [`Self::eq_bounds_unsatisfied`]'s recursive body. The cycle guard is the shared thread-local,
+    /// entered by [`Self::walk_eq_members`], NOT a `stack` parameter — the walk and the outward hop
+    /// through `satisfies` are the same recursion and must not keep two disagreeing views of it.
+    fn eq_bounds_unsatisfied_rec(&self, ty: &Ty) -> Option<String> {
+        let any = |s: &Self, ts: &[Ty]| -> Option<String> {
+            ts.iter().find_map(|t| s.eq_bounds_unsatisfied_rec(t))
         };
         match ty {
-            Ty::List(t) | Ty::Set(t) | Ty::Option(t) => self.eq_bounds_unsatisfied_rec(t, stack),
+            Ty::List(t) | Ty::Set(t) | Ty::Option(t) => self.eq_bounds_unsatisfied_rec(t),
             Ty::Map(k, v) => self
-                .eq_bounds_unsatisfied_rec(k, stack)
-                .or_else(|| self.eq_bounds_unsatisfied_rec(v, stack)),
+                .eq_bounds_unsatisfied_rec(k)
+                .or_else(|| self.eq_bounds_unsatisfied_rec(v)),
             Ty::Result(t, e) => self
-                .eq_bounds_unsatisfied_rec(t, stack)
-                .or_else(|| self.eq_bounds_unsatisfied_rec(e, stack)),
-            Ty::Tuple(elems) => any(self, elems, stack),
+                .eq_bounds_unsatisfied_rec(t)
+                .or_else(|| self.eq_bounds_unsatisfied_rec(e)),
+            Ty::Tuple(elems) => any(self, elems),
             Ty::Struct(name, args) => {
+                // The BUILT-IN cursor is a `Ty::Struct` the struct tables know nothing about, so the
+                // miss-below would REFUSE it. There is genuinely nothing to prove: a cursor holds no
+                // user field and compares by identity. (It is refused the GRANT separately, at the
+                // D1 arm — this is only about not poisoning a container that merely holds one.)
+                if Self::is_cursor_ty(ty) {
+                    return None;
+                }
                 // MISS-ONLY lookup (`struct_shape`, not `self.structs`): a named-fn-imported value
                 // carries its owning module's identity key and injects nothing locally (gap #4), so
                 // a bare-table read finds no fields and the walk would silently skip them.
@@ -2568,11 +2621,8 @@ impl Checker {
                 if let Some(sig) = info.methods.get("eq") {
                     return self.eq_where_unsatisfied(ty, sig);
                 }
-                if let hit @ Some(_) = any(self, args, stack) {
+                if let hit @ Some(_) = any(self, args) {
                     return hit;
-                }
-                if stack.contains(name) {
-                    return None;
                 }
                 // INSTANTIATED, not declared: a field is stored as `Box[T]` and must be walked as
                 // `Box[Tag]`. Leaving the decl-site `T` in place both over-rejected every generic
@@ -2581,43 +2631,27 @@ impl Checker {
                 // the CALLER's lexical scope answered for it) — one bug, both directions.
                 let map = struct_param_map(info, args);
                 let fields: Vec<Ty> = info.fields.iter().map(|(_, f)| subst(f, &map)).collect();
-                stack.push(name.clone());
-                let hit = fields
-                    .iter()
-                    .find_map(|f| self.eq_bounds_unsatisfied_rec(f, stack));
-                stack.pop();
-                hit
+                self.walk_eq_members(ty, &fields)
             }
             Ty::Enum(name, args) => {
                 if let Some(sig) = self.enum_methods_of(name).and_then(|m| m.get("eq")) {
                     return self.eq_where_unsatisfied(ty, sig);
                 }
-                if let hit @ Some(_) = any(self, args, stack) {
+                if let hit @ Some(_) = any(self, args) {
                     return hit;
-                }
-                if stack.contains(name) {
-                    return None;
                 }
                 // Same two fixes as the struct arm: instantiated payloads, and the owning-module
                 // fallback `self.variants` alone does not have.
                 let Some(payloads) = self.enum_payloads_of(name, args) else {
                     return Some(Self::shape_invisible(ty));
                 };
-                stack.push(name.clone());
-                let hit = payloads
-                    .iter()
-                    .find_map(|p| self.eq_bounds_unsatisfied_rec(p, stack));
-                stack.pop();
-                hit
+                self.walk_eq_members(ty, &payloads)
             }
             Ty::NewType(name, _) => {
                 // Declaring `eq` on a newtype is a decl-site error, so the method arm is only ever
                 // reached by an already-errored program — it is here for symmetry, not soundness.
                 if let Some(sig) = self.newtype_methods_of(name).and_then(|m| m.get("eq")) {
                     return self.eq_where_unsatisfied(ty, sig);
-                }
-                if stack.contains(name) {
-                    return None;
                 }
                 // `newtype_underlying` + `nominal_param_map` rather than `newtype_unwrap_target`:
                 // both halves carry the gap-#4 owning-module fallback, the direct helper does not.
@@ -2627,10 +2661,7 @@ impl Checker {
                 let Some(under) = under else {
                     return Some(Self::shape_invisible(ty));
                 };
-                stack.push(name.clone());
-                let hit = self.eq_bounds_unsatisfied_rec(&under, stack);
-                stack.pop();
-                hit
+                self.walk_eq_members(ty, std::slice::from_ref(&under))
             }
             // A free type PARAMETER reached inside the walk must carry `Eq` among its declared
             // bounds. `may_be_equal` treats a `Param` as ERASED (`[T] == [T]` compiles once, with
@@ -2700,12 +2731,30 @@ impl Checker {
             };
             for bound in &wb.bounds {
                 let bargs: Vec<Ty> = bound.args.iter().map(|a| self.resolve_ty_ro(a)).collect();
-                if self.satisfies_args(concrete, &bound.name, &bargs).is_err() {
+                if let Err(why) = self.satisfies_args(concrete, &bound.name, &bargs) {
+                    // Normally the inner text is redundant with what we say here, so it is dropped.
+                    // A BUDGET refusal is the exception: rewording it into "requires X: Eq" would
+                    // name a bound that did not actually fail, hiding the one verdict the user needs
+                    // to act on. Carry it out verbatim instead.
+                    if why.contains(EQ_BUDGET_MARKER) {
+                        // Re-state it for THIS type rather than forwarding the inner text: the
+                        // caller wraps whatever comes back in "type X does not satisfy Eq (…)", so
+                        // forwarding would nest one wrapper per level and hand the user a message
+                        // hundreds of frames deep. The verdict is what matters and it is preserved.
+                        return Some(Self::eq_budget_refusal(ty));
+                    }
                     return Some(format!("{ty}'s `eq` requires {concrete}: {}", bound.name));
                 }
             }
         }
         None
+    }
+
+    /// The budget refusal, in one place because two sites emit it — [`Self::enter_eq_obligation`]
+    /// where it originates and [`Self::eq_where_unsatisfied`] where it is re-stated on the way out.
+    /// It carries [`EQ_BUDGET_MARKER`] so those two can recognise each other.
+    fn eq_budget_refusal(ty: &Ty) -> String {
+        format!("{ty} {EQ_BUDGET_MARKER} to prove its equality reaches no unmet `where` bound")
     }
 
     /// A struct/enum/newtype's own type params bound to the args of THIS instantiation

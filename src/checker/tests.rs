@@ -1269,9 +1269,17 @@ fn use_it(a: D, b: D) -> bool:
     return same(a, b)
 ";
     entry_ok(CYCLE);
-    // POLYMORPHIC recursion — each step is a NEW instantiation, so an instantiation-keyed guard
-    // alone would expand forever. The walk's own name-stack is what bounds this; it must terminate.
-    entry_ok(
+    // POLYMORPHIC recursion — `N[int]` → `N[List[int]]` → `N[List[List[int]]]` → … never repeats an
+    // instantiation, so the identity-keyed guard cannot close it and the SIZE backstop must: this
+    // terminates, and it REFUSES rather than granting. It used to be accepted, but only because the
+    // inner guard was keyed on the bare NAME — the same defect that let a different instantiation of
+    // an in-progress name through unchecked, so its acceptance here was never a proof of anything.
+    //
+    // **Rust refuses the same shape**, measured (rustc 1.97.0, `scratchpad/polyrec.rs`):
+    // `#[derive(PartialEq, Eq)] struct N<T: Eq> { v: T, next: Option<Box<N<Vec<T>>>> }` is
+    // `error[E0320]: overflow while adding drop-check rules for N<i32>`. Prehead rejected it too, so
+    // this is not a regression — it is the fail-closed answer agreeing with the ancestor.
+    entry_rejects(
         "\
 struct N[T]:
     v: T
@@ -1281,29 +1289,91 @@ fn same[T: Eq](a: T, b: T) -> bool:
 fn use_it(a: N[int], b: N[int]) -> bool:
     return same(a, b)
 ",
+        "nests too deeply",
+    );
+}
+
+/// **A DIFFERENT INSTANTIATION of a type already being walked is a different obligation.** The inner
+/// cycle guard was keyed on the bare NAME, so re-entering `R` with another argument was assumed
+/// sound and its fields were never walked — `R[int]` type-checked clean and then faulted at runtime
+/// on both engines. The bad type has to arrive by SUBSTITUTION into a field, which is why fixing the
+/// substitution is what exposed this: before that, an unbound decl-site param refused it by accident.
+#[test]
+fn a_different_instantiation_of_an_in_progress_type_is_still_walked() {
+    entry_rejects(
+        "\
+struct Tag:
+    n: int
+struct Bad[T]:
+    val: T
+    fn compare(self, o: Self) -> int where T: Comparable:
+        return 0
+    fn eq(self, o: Self) -> bool where T: Comparable:
+        return self.compare(o) == 0
+struct R[T]:
+    v: Bad[T]
+    w: Option[R[Tag]]
+fn needs[U: Eq](a: U, b: U) -> bool:
+    return a == b
+fn use_it(a: R[int], b: R[int]) -> bool:
+    return needs(a, b)
+",
+        "type R[int] does not satisfy Eq (Bad[Tag]'s `eq` requires Tag: Comparable)",
+    );
+}
+
+/// **A cursor nested inside another type has nothing to prove.** The fail-closed miss→refuse path
+/// caught the built-in cursor, whose `Ty::Struct("Iterator", …)` is in no struct table — so a `List`
+/// of cursors, or a struct with a cursor field, stopped satisfying `Eq` even though comparing them
+/// works (by identity). A regression against the previous commit, in the widening direction.
+#[test]
+fn a_nested_cursor_does_not_poison_its_container() {
+    entry_ok(
+        "fn eqm[T: Eq](a: T, b: T) -> bool:\n    return a == b\nprint(eqm([[1, 2].iter()], [[1, 2].iter()]))\n",
+    );
+    entry_ok(
+        "\
+struct HasIt:
+    it: Iterator[int]
+fn eqm[T: Eq](a: T, b: T) -> bool:
+    return a == b
+fn use_it(a: HasIt, b: HasIt) -> bool:
+    return eqm(a, b)
+",
+    );
+    // The cursor ITSELF is still refused the grant — that is the D1 arm's job, not the walk's.
+    entry_rejects(
+        "fn eqm[T: Eq](a: T, b: T) -> bool:\n    return a == b\nprint(eqm([1, 2].iter(), [1, 2].iter()))\n",
+        "type Iterator[int] does not satisfy Eq",
     );
 }
 
 /// **A chain of DISTINCT conditional types must be walked to its true answer, and running out of
 /// budget must REFUSE.** The first cut guarded the outward hop with a fixed re-entrancy DEPTH cap
 /// that returned "sound" when exceeded — so a 16-deep chain whose innermost link genuinely fails
-/// type-checked clean and then faulted at runtime on both engines. The guard is now an in-progress
-/// SET keyed on the instantiated type: distinct types never trip it, so the chain is decided
-/// correctly at any depth, and the size backstop that remains refuses instead of granting.
+/// type-checked clean and then faulted at runtime on both engines. The guard is now keyed on the
+/// instantiated type: distinct types never trip it, so the chain is decided correctly at depth, and
+/// the size backstop that remains refuses instead of granting.
+///
+/// **The SOUND chain is what makes this test mean anything.** An unsound chain rejects whether the
+/// walk found the bad link or merely ran out of budget, so on its own it cannot tell the two apart —
+/// it passed vacuously at N=100 while a 63-deep SOUND chain was being wrongly refused. The pair is
+/// the assertion: same shape, one link different, opposite verdicts, at every depth.
 #[test]
 fn a_long_chain_of_conditional_eq_types_is_decided_not_waved_through() {
-    // A0's field reaches `Box[Tag]`, whose `eq` needs `Tag: Comparable` — `Tag` has no `compare`, so
-    // the whole chain is unsound and every depth must say so.
-    let chain = |n: usize| {
+    // `sound` swaps the innermost link from `Box[Tag]` (no `compare`, so the chain's `where` bounds
+    // cannot hold) to `Box[int]` (Comparable, so every link is satisfiable). Nothing else differs.
+    let chain = |n: usize, sound: bool| {
+        let innermost = if sound { "Box[int]" } else { "Box[Tag]" };
         let mut s = String::from(
             "struct Tag:\n    n: int\n\
              struct Box[T]:\n    val: T\n    \
              fn compare(self, o: Self) -> int where T: Comparable:\n        return 0\n    \
              fn eq(self, o: Self) -> bool where T: Comparable:\n        return self.compare(o) == 0\n\
              struct C[T]:\n    v: T\n    \
-             fn eq(self, o: Self) -> bool where T: Eq:\n        return true\n\
-             struct A0:\n    v: Box[Tag]\n",
+             fn eq(self, o: Self) -> bool where T: Eq:\n        return true\n",
         );
+        s.push_str(&format!("struct A0:\n    v: {innermost}\n"));
         for i in 1..=n {
             s.push_str(&format!("struct A{i}:\n    v: C[A{}]\n", i - 1));
         }
@@ -1312,10 +1382,22 @@ fn a_long_chain_of_conditional_eq_types_is_decided_not_waved_through() {
         ));
         s
     };
-    // Well past the old depth cap of 16, and past the in-progress backstop of 64.
+    // Well past the old depth cap of 16, and past the old backstop of 64 that refused sound chains.
     for n in [4, 20, 100] {
-        entry_rejects(&chain(n), "does not satisfy Eq");
+        entry_rejects(
+            &chain(n, false),
+            &format!(
+                "type A{n} does not satisfy Eq (C[A{}]'s `eq` requires A{}: Eq)",
+                n - 1,
+                n - 1
+            ),
+        );
+        entry_ok(&chain(n, true));
     }
+    // PAST the backstop, a SOUND chain is refused — and the refusal SAYS it ran out of budget rather
+    // than blaming a bound that did not fail. That message used to be unreachable: it was produced
+    // inside a `satisfies` call whose `Err` the caller discarded and reworded.
+    entry_rejects(&chain(140, true), "nests too deeply");
 }
 
 /// Struct/enum conformance through a DECLARED `eq` stays structural (the `Comparable` model): the
@@ -16262,6 +16344,58 @@ fn carry(n: int) -> Carrier:
             "import mk from lib\nfn needs[U: Eq](a: U, b: U) -> bool:\n    return a == b\nprint(needs(mk(1), mk(2)))\n",
         ),
     ]);
+}
+
+/// **The `Eq` cycle guard must key on the IDENTITY key, not the display name.** Two modules may each
+/// declare a `struct H`; `Ty`'s `Display` renders both as `H` (deliberately — user-facing messages
+/// show bare names), so a `Display`-keyed in-progress stack thinks `b.H` is already being proven the
+/// moment `a.H` is, applies the coinductive assumption to a type that was never in progress, and
+/// GRANTS `Eq` to one whose field reaches an unmet `where` bound. Check-clean, then
+/// `Tag has no 'compare'` at runtime on both engines.
+///
+/// `Ty: PartialEq` compares the module-scoped key (`a::H`), which is why the guard holds the `Ty`
+/// itself. **The NAME is the only variable**, and the two controls below prove it: renaming the
+/// second struct, and collapsing the same shape into one module with distinct names, both rejected
+/// even while the collision was being granted.
+#[test]
+fn the_eq_cycle_guard_keys_on_identity_not_display_name() {
+    const A: &str = "\
+struct Tag:
+    n: int
+struct Bad[T]:
+    val: T
+    fn compare(self, o: Self) -> int where T: Comparable:
+        return 0
+    fn eq(self, o: Self) -> bool where T: Comparable:
+        return self.compare(o) == 0
+struct H:
+    v: Bad[Tag]
+fn mk_a(n: int) -> H:
+    return H(Bad(Tag(n)))
+";
+    let b = |name: &str| {
+        format!(
+            "import a\nstruct C[T]:\n    v: T\n    fn eq(self, o: Self) -> bool where T: Eq:\n        return self.v == o.v\nstruct {name}:\n    v: C[a.H]\nfn mk_b(n: int) -> {name}:\n    return {name}(C(a.mk_a(n)))\n"
+        )
+    };
+    const MAIN: &str = "import b\nfn needs[U: Eq](x: U, y: U) -> bool:\n    return x == y\nprint(needs(b.mk_b(1), b.mk_b(2)))\n";
+    // THE COLLISION: `b.H` shares a display name with `a.H`, which it reaches.
+    files_reject(
+        &[("a.chz", A), ("b.chz", &b("H")), ("main.chz", MAIN)],
+        "does not satisfy Eq",
+    );
+    // CONTROL 1 — identical program, second struct renamed. Rejected even before the fix.
+    files_reject(
+        &[("a.chz", A), ("b.chz", &b("H2")), ("main.chz", MAIN)],
+        "type H2 does not satisfy Eq (C[H]'s `eq` requires H: Eq)",
+    );
+    // CONTROL 2 — the same shape in ONE module with distinct names. Also always rejected.
+    entry_rejects(
+        &format!(
+            "{A}struct C[T]:\n    v: T\n    fn eq(self, o: Self) -> bool where T: Eq:\n        return self.v == o.v\nstruct H2:\n    v: C[H]\nfn needs[U: Eq](x: U, y: U) -> bool:\n    return x == y\nfn use_it(p: H2, q: H2) -> bool:\n    return needs(p, q)\n"
+        ),
+        "type H2 does not satisfy Eq (C[H]'s `eq` requires H: Eq)",
+    );
 }
 
 #[test]
