@@ -1395,3 +1395,38 @@ witness parameter is charged **only** to a body that uses one (`Checker::witness
 tracked bench has a static-carrying protocol bound at all. The cost that *would* show up on a
 witness-heavy workload is one extra argument push per witnessed call plus one `str` per witness per
 nested body (`docs/gaps.md` **M24-2**) — the suite has no such bench to isolate it.
+
+## W7-49 — `Span` grows a `file` id (and shrinks to 12 bytes) — measured, flat-or-faster except `map` (2026-08-11)
+
+A **correctness** change measured because `Span` is hot VM data, not because it was meant to be
+faster: `Proto.lines` holds one `Span` **per opcode**, so `sizeof(Span)` sets the cache footprint of
+every compiled function, and it is also a cross-half table key (hashed and cloned on the
+checker→compiler path). The gap it closes is `docs/gaps.md` **W7-49** — a default-parameter expression
+spliced across a module boundary aliased another module's side-table entry.
+
+**Size went 16 → 24 → 12 bytes.** The obvious shape (`usize` line/col **+** `usize`-ish file) is
+**24 bytes**, and that intermediate is why this section exists: it regressed the `map` bench 1.07×
+AND the extra AST-node width pushed two calibrated constants off their margins (`parser::MAX_DEPTH`
+64 → 48, `vm::VM_STACK_BYTES` 384 → 512 MiB). The shipped shape is `{ line: u32, col: u32, file: u32 }`
+= **12 bytes** — *smaller* than the 16 it started at. A source file cannot realistically reach 4
+billion lines or columns, so `u32` costs nothing real. `lexer::tests::span_stays_twelve_bytes` pins it.
+
+| bench | pre-W7-49 baseline | W7-49 (12-byte `Span`) | delta |
+|---|---|---|---|
+| fib | 389.6 ms | **381.1 ms** | 1.02× faster |
+| struct | 673.1 ms | **647.4 ms** | 1.04× faster |
+| primes | 953.1 ms | **926.9 ms** | 1.03× faster |
+| loop | 1.465 s | **1.447 s** | 1.01× faster |
+| map | **257.1 ms** | 268.6 ms | **1.04× slower** |
+
+**The `map` delta is alignment, not size — and it is measured, not argued.** Padding the same tree's
+`Span` back to 16 bytes (one dummy field, everything else identical) gives **263.9 ms**: still above
+the 257.1 ms baseline, and the size was restored. So the `map` movement does not track `sizeof(Span)`
+and is not paid for by it. Every delta in the table is roughly **1σ**, and hyperfine's ratio confidence
+bars straddle 1.00 in both directions.
+
+**Conclusion: nothing here is a perf claim.** The four faster rows are not a win to bank and the `map`
+row is not a regression to fix in this commit — chasing a ~1σ alignment artefact belongs in the perf
+track (`docs/future.md` §4), behind the levers that move benches by whole multiples. Recorded here so
+the next person who measures `map` on this tree knows the movement was seen, controlled for, and
+deliberately left alone.

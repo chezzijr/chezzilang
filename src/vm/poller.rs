@@ -508,7 +508,7 @@ mod tests {
     fn dl_err() -> super::super::RuntimeError {
         super::super::RuntimeError {
             message: "deadlock".into(),
-            span: Span { line: 1, col: 1 },
+            span: Span::RUNTIME,
             is_assert: false,
             is_over_memory: false,
             is_timed_out: false,
@@ -536,7 +536,7 @@ mod tests {
             state: super::super::FiberState::Ready,
             task_index: 0,
             scope_id: 0,
-            span: Span { line: 1, col: 1 },
+            span: Span::RUNTIME,
             resume_native: None,
         }
     }

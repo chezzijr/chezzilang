@@ -46,7 +46,12 @@ fn diagnostics_inner(path: &Path, source: &str) -> Vec<Diag> {
     use crate::{checker, resolver};
     match resolver::build_graph_with_entry_source(path, Some(source.to_string())) {
         // A resolve error wraps the fatal lex/parse error (or a missing/cyclic import).
-        Err(e) => vec![span_diag(source, e.span.line, e.span.col, e.message)],
+        Err(e) => vec![span_diag(
+            source,
+            e.span.line as usize,
+            e.span.col as usize,
+            e.message,
+        )],
         // M24 — the manifest-entrypoint gate is a property of the PROJECT, so the editor reports it
         // like `chezzi check` does: one derivation (`manifest::entry_fn_for`), every consumer.
         Ok(graph) => match checker::check_graph_with_entry(
@@ -56,7 +61,7 @@ fn diagnostics_inner(path: &Path, source: &str) -> Vec<Diag> {
             Ok(()) => Vec::new(),
             Err(errs) => errs
                 .into_iter()
-                .map(|e| span_diag(source, e.span.line, e.span.col, e.message))
+                .map(|e| span_diag(source, e.span.line as usize, e.span.col as usize, e.message))
                 .collect(),
         },
     }
@@ -171,18 +176,19 @@ fn utf16_to_char_col(line: &str, utf16_col: u32) -> usize {
 /// length reuses the exact per-kind logic from [`semantic_tokens`] (Ident → `chars().count()`,
 /// numbers → [`measure_number`], strings → [`measure_string`], else the lexeme length); layout tokens
 /// (Newline/Indent/Dedent/Eof) and a lex error yield `None`.
-fn token_at(source: &str, line0: usize, char_col: usize) -> Option<(usize, usize)> {
+fn token_at(source: &str, line0: usize, char_col: usize) -> Option<(u32, u32)> {
     use crate::lexer::{self, Token};
     let chars: Vec<char> = source.chars().collect();
     let line_starts = line_start_offsets(&chars);
     let toks = lexer::tokenize(source).ok()?;
-    let target_line = line0 + 1; // tokens use 1-based lines
+    let target_line = (line0 + 1) as u32; // tokens use 1-based lines
     for tok in &toks {
         if tok.span.line != target_line {
             continue;
         }
-        let start_abs =
-            line_starts.get(tok.span.line - 1).copied().unwrap_or(0) + (tok.span.col - 1);
+        // `as usize`: `Span` is `u32`-wide (see `Span`'s doc) and u32 → usize never truncates.
+        let (tl, tc) = (tok.span.line as usize, tok.span.col as usize);
+        let start_abs = line_starts.get(tl - 1).copied().unwrap_or(0) + (tc - 1);
         let char_len = match &tok.kind {
             Token::Ident(name) => name.chars().count(),
             Token::Int(_) | Token::IntMinMagnitude | Token::Float(_) => {
@@ -194,7 +200,7 @@ fn token_at(source: &str, line0: usize, char_col: usize) -> Option<(usize, usize
                 None => continue, // layout token — no extent
             },
         };
-        let start_col0 = tok.span.col - 1;
+        let start_col0 = tc - 1;
         if char_col >= start_col0 && char_col < start_col0 + char_len {
             return Some((tok.span.line, tok.span.col));
         }
@@ -267,8 +273,9 @@ pub fn semantic_tokens(source: &str) -> Vec<SemTok> {
     let overlay = semantic_overlay(source);
 
     for tok in &toks {
-        let line = tok.span.line;
-        let col = tok.span.col;
+        // `as usize`: `Span` is `u32`-wide (see `Span`'s doc); u32 → usize never truncates.
+        let line = tok.span.line as usize;
+        let col = tok.span.col as usize;
         // Absolute char offset of the token's first char.
         let start_abs = line_starts.get(line - 1).copied().unwrap_or(0) + (col - 1);
         let (ttype, char_len) = match &tok.kind {
@@ -356,7 +363,8 @@ fn overlay_mark(
     if span.line == 0 {
         return;
     }
-    map.entry((span.line, span.col)).or_insert(role);
+    map.entry((span.line as usize, span.col as usize))
+        .or_insert(role);
 }
 
 /// Walk a type annotation, marking every `Type::Named` reference `TYPE` (covers struct/enum names in

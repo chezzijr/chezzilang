@@ -294,7 +294,7 @@ mod tests {
     use super::*;
 
     fn span() -> Span {
-        Span { line: 1, col: 1 }
+        Span::RUNTIME
     }
 
     fn opt(code: Vec<Op>) -> Vec<Op> {

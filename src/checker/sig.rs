@@ -2741,10 +2741,7 @@ impl Checker {
     /// Best-effort source span for a function declaration (FnDecl has no span of its own): the first
     /// body statement, since a test fn / lifecycle hook always has a non-empty body.
     pub(super) fn fn_span(decl: &FnDecl) -> Span {
-        decl.body
-            .first()
-            .map(|s| s.span)
-            .unwrap_or(Span { line: 0, col: 0 })
+        decl.body.first().map(|s| s.span).unwrap_or_default()
     }
 
     /// A `test fn` takes no parameters (free) or only `self` (method) and returns nothing. Hard

@@ -4726,7 +4726,7 @@ main()";
     vm.gc_stress = true;
     vm.host = crate::native::HostConfig::default();
     vm.run().unwrap();
-    vm.drain_live_executors(Span { line: 1, col: 1 }).unwrap();
+    vm.drain_live_executors(Span::RUNTIME).unwrap();
     assert_eq!(vm.out, b"");
 }
 
@@ -6450,7 +6450,7 @@ fn stack_trace_reports_call_chain_on_both_engines() {
     let names: Vec<&str> = e.trace.iter().map(|f| f.function.as_str()).collect();
     assert_eq!(names, vec!["divide", "compute", "main"]);
     // Call-site lines, innermost first.
-    let lines: Vec<usize> = e.trace.iter().map(|f| f.span.line).collect();
+    let lines: Vec<u32> = e.trace.iter().map(|f| f.span.line).collect();
     assert_eq!(lines, vec![15, 18, 20]);
     let vm_fmt = format_trace(&e.message, e.span, &e.trace);
     assert!(
@@ -6537,7 +6537,7 @@ fn recursion_trace_parity_vm_vs_interp() {
 /// by the head/tail cap with a `frames elided` marker, and stays byte-identical across engines.
 #[test]
 fn format_trace_caps_distinct_name_chain() {
-    let span = Span { line: 1, col: 1 };
+    let span = Span::RUNTIME;
     let trace: Vec<TraceFrame> = (0..50)
         .map(|n| TraceFrame {
             function: format!("f{n}"),
@@ -6570,7 +6570,7 @@ fn format_trace_caps_distinct_name_chain() {
 /// line must be immediately preceded by its `at` line, head and tail alike, and engines agree.
 #[test]
 fn format_trace_cap_never_orphans_collapse_marker() {
-    let span = Span { line: 1, col: 1 };
+    let span = Span::RUNTIME;
     // 25 names × 2 consecutive frames each → 25 collapsed entries (each an `at` line + `× 1`
     // marker), > TRACE_HEAD + TRACE_TAIL so the cap fires across marker-bearing entries.
     let trace: Vec<TraceFrame> = (0..25)

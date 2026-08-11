@@ -154,7 +154,9 @@ pub(crate) fn parse_interpolation(raw: &str, span: Span) -> Result<Vec<Chunk>, I
                 // call sites can never share a key. That is the load-bearing property; recovering
                 // the exact column would mean carrying a per-char source map on every string token.
                 let lead = expr_src.chars().take_while(|c| c.is_whitespace()).count();
-                let base_col = span.col + i + 1 + lead;
+                // `as u32`: `i` is a char index into the string literal and `lead` a whitespace
+                // run inside it, so the sum is bounded by the source length — never near u32::MAX.
+                let base_col = span.col + (i + 1 + lead) as u32;
                 let expr = parse_expr_str(expr_src, span, base_line, base_col)?;
                 chunks.push(Chunk::Expr(expr, spec));
             }
@@ -176,18 +178,21 @@ pub(crate) fn parse_interpolation(raw: &str, span: Span) -> Result<Vec<Chunk>, I
 fn parse_expr_str(
     src: &str,
     span: Span,
-    base_line: usize,
-    base_col: usize,
+    base_line: u32,
+    base_col: u32,
 ) -> Result<Expr, InterpError> {
     // TRIM first: the fragment is lexed as its own line, so leading whitespace (`"{ 1 + 2 }"`,
     // legal in Python) would otherwise open an INDENT token — "unexpected an indented block in
     // expression". Padding around a fragment is insignificant. `base_col` already accounts for the
     // leading run this drops.
     let src = src.trim();
-    let tokens = lexer::tokenize_at(src, base_line, base_col).map_err(|e| InterpError {
-        message: e.to_string(),
-        span,
-    })?;
+    // A fragment belongs to its enclosing literal's file by definition — inherit it so a fragment's
+    // span keys stay module-distinct (`docs/gaps.md` W7-49).
+    let tokens =
+        lexer::tokenize_at(src, base_line, base_col, span.file).map_err(|e| InterpError {
+            message: e.to_string(),
+            span,
+        })?;
     // W7-43 — no carrier lowering here any more: `?.`/`??` are ordinary expressions that survive to
     // the checker and the compiler, and both set the `kw_frag_ctx`/`kw_frag_ord` discriminators a
     // fragment's `CarrierKey` needs (`checker::check_interp_chunks`, `compiler::compile_interp`).

@@ -1966,7 +1966,7 @@ impl Vm {
     /// [`MAX_STRUCTURAL_DEPTH`] — guarding cyclic data from overflowing the host stack.
     pub(super) fn display_guarded(&self, v: Value, depth: usize) -> Result<String, RuntimeError> {
         if depth > MAX_STRUCTURAL_DEPTH {
-            return Err(self.depth_exceeded_err(Span { line: 1, col: 1 }));
+            return Err(self.depth_exceeded_err(Span::RUNTIME));
         }
         match v.view() {
             ValueView::Int(n) => Ok(n.to_string()),

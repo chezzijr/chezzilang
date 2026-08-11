@@ -33,10 +33,20 @@ type PResult<T> = Result<T, ParseError>;
 
 /// Cap on parser recursion (nested expressions and blocks). Past this we return a `ParseError`
 /// instead of letting native stack recursion overflow and abort the process. Each nesting level is
-/// several large parser frames (~16 KB), so 64 levels ≈ 1 MiB — comfortably under a small (≈2 MiB)
-/// thread stack with real headroom for the guard to fire before the host stack overflows, while
-/// still far exceeding any realistic source nesting. (Was 128, which sat right at the test-thread
-/// stack edge; see `deep_nesting_errors_not_crash`.)
+/// several large parser frames, so this must be sized against the SMALLEST stack the parser runs on
+/// (the ≈2 MiB cargo-test worker / LSP tokio worker, in a debug build whose frames are 3-5x a release
+/// frame's), with real headroom for the guard to fire BEFORE the host stack overflows — while still
+/// far exceeding any realistic source nesting.
+///
+/// **This constant is a function of `sizeof` the AST node types, so it moves when they do.** Was 128
+/// (sat right at the test-thread stack edge), then 64 — which `deep_nesting_errors_not_crash` proved
+/// was itself at the edge when `Span` briefly grew from 16 to 24 bytes for its `file` id (W7-49):
+/// measured at 24 bytes, 56 passed and 64 aborted, so it was cut to 48. `Span` is now 12 bytes
+/// (`u32` line/col/file — see [`crate::lexer::Span`]), SMALLER than it ever was, so 64 is restored.
+/// Re-probed upward at 12 bytes on the ~2 MiB test thread: **65 passes, 66 aborts** (at 24 bytes the
+/// edge was between 56 and 64). 64 is therefore the shipped value again with ONE level to spare — it
+/// is a real edge, not slack, so any `sizeof` growth in `Expr`/`Stmt`/`Type`/`Pattern`/`Span` moves
+/// it. `deep_nesting_errors_not_crash` is the oracle: re-run the probe there, don't guess.
 const MAX_DEPTH: usize = 64;
 
 /// Cap on the length of a single ITERATIVE chain: a left-associative binary chain (`a + b + c …`) or
@@ -124,12 +134,13 @@ impl Parser {
     /// each is present in the side table. A blank/non-comment line is absent → the run stops there
     /// (so a blank line detaches earlier comments, and stacked `#` lines join). Lines join top-down
     /// with `\n`. Returns `None` when there is no adjacent comment (incl. the empty-map `parse` path).
-    fn doc_above(&self, decl_line: usize) -> Option<String> {
+    fn doc_above(&self, decl_line: u32) -> Option<String> {
         if self.docs.is_empty() {
             return None;
         }
         let mut lines: Vec<&str> = Vec::new();
-        let mut line = decl_line;
+        // `as usize`: widening a `Span` line (u32) to the doc side-table's key — never truncates.
+        let mut line = decl_line as usize;
         while line > 1 {
             line -= 1;
             match self.docs.get(&line) {
@@ -3107,7 +3118,7 @@ mod tests {
 
     /// Parse with the lexer's doc-comment side-channel attached, returning the FIRST statement's kind.
     fn first_with_docs(src: &str) -> StmtKind {
-        let (toks, comments) = lexer::tokenize_with_comments(src).unwrap();
+        let (toks, comments) = lexer::tokenize_with_comments(src, 0).unwrap();
         let mut m = parse_with_docs(toks, comments).unwrap_or_else(|e| panic!("parse failed: {e}"));
         m.stmts.remove(0).kind
     }
@@ -4305,9 +4316,30 @@ mod tests {
             outer.span, inner_span,
             "both links carry the primary `a`'s span"
         );
-        assert_eq!(outer.span, Span { line: 1, col: 6 });
-        assert_eq!(inner_name_span, Span { line: 1, col: 9 });
-        assert_eq!(name_span, Span { line: 1, col: 12 });
+        assert_eq!(
+            outer.span,
+            Span {
+                line: 1,
+                col: 6,
+                file: 0
+            }
+        );
+        assert_eq!(
+            inner_name_span,
+            Span {
+                line: 1,
+                col: 9,
+                file: 0
+            }
+        );
+        assert_eq!(
+            name_span,
+            Span {
+                line: 1,
+                col: 12,
+                file: 0
+            }
+        );
         assert_ne!(name_span, inner_name_span, "each link needs its own key");
     }
 
@@ -5857,10 +5889,12 @@ mod tests {
     /// (parse_pattern_impl — variant payloads + tuple elements).
     #[test]
     fn deep_nesting_errors_not_crash() {
-        // `MAX_DEPTH` (64) trips after ~1 MiB of parser frames — well within a *test* thread's
-        // default (~2 MiB) stack, so the guard fires cleanly instead of the host stack overflowing.
-        // (Was 128, which sat at the stack edge and needed a 64 MiB thread to test; the lower bound
-        // removed that crutch — runs inline now.) Exercises all five recursive entry points.
+        // `MAX_DEPTH` (64) trips within a *test* thread's default (~2 MiB) stack, so the guard
+        // fires cleanly instead of the host stack overflowing. (Was 128, which sat at the stack edge
+        // and needed a 64 MiB thread to test; the lower bound removed that crutch — runs inline now.)
+        // THIS TEST IS THE SIZING ORACLE for `MAX_DEPTH`: it is what caught `Span` growing 16→24
+        // bytes (W7-49) pushing the then-current 64 over the edge. A `sizeof` change to any AST node
+        // shows up here as a hard abort, not a soft failure. Exercises all five recursive entry points.
         let paren = format!("x := {}1{}\n", "(".repeat(500), ")".repeat(500));
         assert!(
             parse(lexer::tokenize(&paren).unwrap())

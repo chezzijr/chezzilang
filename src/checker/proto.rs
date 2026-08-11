@@ -3012,7 +3012,9 @@ impl Checker {
             }
         }
         if self.harvest_keywords {
-            self.witnesses.calls.insert(
+            crate::checker::record_call_table_entry(
+                &mut self.witnesses.calls,
+                &mut self.table_conflicts,
                 crate::checker::witness_key(
                     self.graph_module_idx,
                     self.kw_frag_ctx,
@@ -3020,6 +3022,8 @@ impl Checker {
                     key_span,
                 ),
                 srcs,
+                "static-witness",
+                span,
             );
         }
     }

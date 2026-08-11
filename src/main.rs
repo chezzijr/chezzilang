@@ -1000,8 +1000,9 @@ fn type_check_inner(
             return CheckOutcome::Fatal {
                 text: e.to_string(),
                 message: e.message.clone(),
-                line: e.span.line,
-                col: e.span.col,
+                // `as usize`: widening a `Span`'s u32 line/col — lossless.
+                line: e.span.line as usize,
+                col: e.span.col as usize,
             };
         }
     };

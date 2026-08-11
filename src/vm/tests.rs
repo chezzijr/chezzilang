@@ -9,7 +9,7 @@ fn run(src: &str) -> String {
 /// Build a VM `Map[str, str]` value with the given pairs (insertion order preserved), so the
 /// host-side map readers can be unit-tested without compiling a program.
 fn build_str_map(vm: &mut Vm, pairs: &[(&str, &str)]) -> Value {
-    let span = Span { line: 1, col: 1 };
+    let span = Span::RUNTIME;
     let mut map = MapData::default();
     for (k, v) in pairs {
         let kv = vm.alloc_str((*k).to_string());
@@ -58,7 +58,7 @@ fn extract_native_args_snapshots_str_map() {
         "pairs preserved in insertion order"
     );
     // A map with a non-str value (here an int) is not snapshottable → None (safe inline fallback).
-    let span = Span { line: 1, col: 1 };
+    let span = Span::RUNTIME;
     let mut bad = MapData::default();
     let kv = vm.alloc_str("k".to_string());
     let hk = vm.hash_value(kv, span).unwrap();
@@ -1807,7 +1807,7 @@ fn vm_calls_native_fn_value() {
     vm.push(Value::obj(h));
     vm.push(Value::int(40));
     vm.push(Value::int(2));
-    vm.do_call(2, Span { line: 1, col: 1 }).unwrap();
+    vm.do_call(2, Span::RUNTIME).unwrap();
     assert_eq!(vm.pop(), Value::int(42));
 }
 
@@ -1890,7 +1890,7 @@ fn vm_native_str_return_lowers_to_heap_with_no_children() {
     // A native fn handle has no GC children (guards the mark-phase claim).
     assert!(vm.heap.children(nat).is_empty());
     vm.push(Value::obj(nat));
-    vm.do_call(0, Span { line: 1, col: 1 }).unwrap();
+    vm.do_call(0, Span::RUNTIME).unwrap();
     let result = vm.pop();
     assert_eq!(vm.display(result), "hi");
 }
@@ -2110,7 +2110,7 @@ fn channel_core_shared_across_handles() {
     let Some(h2) = vm.from_wire(w).as_obj() else {
         panic!("expected handle")
     };
-    let sp = Span { line: 1, col: 1 };
+    let sp = Span::RUNTIME;
     vm.channel_method(h1, "send", &[Value::int(7)], sp).unwrap();
     // recv through the OTHER handle sees the message.
     assert_eq!(
@@ -2142,7 +2142,7 @@ fn parallel_recv_blocks_until_send_wakes_it() {
     let mut worker = Vm::new(Arc::new(empty_program()));
     worker.parallel = true;
     let wh = worker.heap.alloc(Obj::Channel(Arc::clone(&core)));
-    let sp = Span { line: 1, col: 1 };
+    let sp = Span::RUNTIME;
     // Queue first, then hand the receiving `Vm` to another thread: the value is already in the
     // shared core, so the cross-thread `recv` pops it deterministically (no interleaving race).
     sender
@@ -2881,7 +2881,7 @@ fn mn_swap_ctx_swaps_module_objs_but_not_heap_gated_state_for_cooperative_fiber(
 fn dl_err() -> RuntimeError {
     RuntimeError {
         message: DEADLOCK_MSG.to_string(),
-        span: Span { line: 1, col: 1 },
+        span: Span::RUNTIME,
         is_assert: false,
         is_over_memory: false,
         is_timed_out: false,
@@ -2899,7 +2899,7 @@ fn mk_fiber(task_index: usize) -> Fiber {
         state: FiberState::Ready,
         task_index,
         scope_id: 0,
-        span: Span { line: 1, col: 1 },
+        span: Span::RUNTIME,
         resume_native: None,
     }
 }
@@ -2909,14 +2909,14 @@ fn mk_pending_fiber(task_index: usize) -> Fiber {
     let task = PendingCall::Call {
         callee: Value::nil(),
         args: Vec::new(),
-        span: Span { line: 1, col: 1 },
+        span: Span::RUNTIME,
     };
     Fiber {
         ctx: FiberCtx::default(),
         state: FiberState::Pending(task),
         task_index,
         scope_id: 0,
-        span: Span { line: 1, col: 1 },
+        span: Span::RUNTIME,
         resume_native: None,
     }
 }
@@ -3522,7 +3522,7 @@ fn offload_native_panic_still_completes_and_faults() {
     let req = OffloadReq {
         func: panic_native,
         args: vec![],
-        span: Span { line: 1, col: 1 },
+        span: Span::RUNTIME,
         timer: None,
     };
     sched.offload(f0, req);
@@ -3741,7 +3741,7 @@ fn offload_runs_native_and_requeues_fiber_with_result() {
     let req = OffloadReq {
         func: double_native,
         args: vec![crate::native::NativeArg::Int(21)],
-        span: Span { line: 1, col: 1 },
+        span: Span::RUNTIME,
         timer: None,
     };
     sched.offload(f0, req);
@@ -3798,7 +3798,7 @@ fn timer_offload_parks_then_requeues_fiber_with_nil() {
     let req = OffloadReq {
         func: double_native,
         args: vec![],
-        span: Span { line: 1, col: 1 },
+        span: Span::RUNTIME,
         timer: Some(crate::vm::TimerSleep {
             deadline: std::time::Instant::now() + std::time::Duration::from_millis(40),
             cancel: vec![],
@@ -5292,6 +5292,286 @@ fn witness_member_cross_module_runs_both_engines() {
     assert_eq!(vo, io, "serial vs M:N divergence");
 }
 
+// ===== W7-49 — a spliced default must not alias the caller's own side-table entries =====
+//
+// These three are RUST tests, not `tests/chz/` ones, for one reason: they are inherently MULTI-FILE.
+// The bug only exists because `desugar` splices a callee's default-parameter expression into the
+// CALLER's AST as a clone that keeps the DEFINING module's spans, so it takes two files at matched
+// `line:col` to express — which `chezzi test` (one file per suite) cannot say. The single-file half
+// (both guards' over-fire modes) IS in Chezzi, at `tests/chz/spec/default_splice_keys_test.chz`.
+//
+// Each one is a `check`-clean program whose ANSWER is wrong on `19f7696a` and right now. The source
+// is laid out flush-left in raw strings on purpose: the collision IS the column alignment, so the
+// alignment has to be readable. Shift either side by one column and the fault disappears — which is
+// what isolates it to the key rather than to the lowering.
+
+/// W7-49 (1/3) — `KeywordTable`. `lib.chz`'s default `g(a=7, b=9)` and `main.chz`'s own
+/// `g(b=1, a=2)` put their FIRST NAMED-ARG VALUE at the same `line:col`, so before `Span::file` they
+/// shared one `KeywordKey`: the later insert won and lib's identity permutation was applied to
+/// main's reversed call.
+///
+/// Fails on `19f7696a` with `709` / **`102`** — `h2(a=1, b=2)`, lib's permutation on main's call —
+/// under a clean `chezzi check`, byte-identical on both engines (parity is blind to it).
+#[test]
+fn a_spliced_default_does_not_alias_the_callers_keyword_call() {
+    let dir = std::env::temp_dir().join(format!("chezzi_w749_keyword_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    // `fn f`'s first named-arg value `7` sits at line 6, col 19 (the two comments are the padding
+    // that puts it there) — the same line:col as main's `1` below.
+    std::fs::write(
+        dir.join("lib.chz"),
+        r#"# lib
+# two comment lines put `fn f` on line 6
+fn h(a: int, b: int) -> int:
+    return a * 100 + b
+g := h
+fn f(x: int = g(a=7, b=9)) -> int:
+    return x
+"#,
+    )
+    .unwrap();
+    let entry = dir.join("main.chz");
+    std::fs::write(
+        &entry,
+        r#"import f from lib
+fn h2(a: int, b: int) -> int:
+    return a * 100 + b
+g := h2
+fn probe() -> int:
+    vvvvvv := g(b=1, a=2)
+    return vvvvvv
+print(f())
+print(probe())
+"#,
+    )
+    .unwrap();
+    let graph = crate::resolver::build_graph(&entry).expect("resolve");
+    if let Err(errs) = crate::checker::check_graph(&graph) {
+        let _ = std::fs::remove_dir_all(&dir);
+        panic!("program must type-check, got: {errs:?}");
+    }
+    let (vo, _ve, vr, _vc) = run_file(&entry);
+    let (io, _ie, ir, _ic) = run_file_p(&entry);
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(vr.is_ok(), "serial VM faulted: {vr:?}");
+    assert!(ir.is_ok(), "M:N engine faulted: {ir:?}");
+    assert_eq!(
+        vo, "709\n201\n",
+        "probe() is g(b=1, a=2) = h2(a=2, b=1) = 201; 102 means lib's permutation was applied"
+    );
+    assert_eq!(vo, io, "serial vs M:N divergence");
+}
+
+/// W7-49 (2/3) — `CarrierTable`. An Option-mode `?.` inside `lib.chz`'s default-parameter
+/// expression and a Result-mode `?.` in `main.chz` land their NAME TOKENs at the same `line:col`
+/// (both `5:36`), so before `Span::file` they shared one `CarrierKey` and main's `Result` carrier
+/// got the `Option` lowering.
+///
+/// Fails on `19f7696a` with `3` then `runtime error … no match arm for variant 'Ok'`, under a clean
+/// `chezzi check`, on both engines. CONTROL: widening main's `vvv…` binder by one character (so its
+/// `len` lands at col 37) makes `19f7696a` print `3` / `4` — the fault is the KEY, not the lowering.
+#[test]
+fn a_spliced_default_carrier_does_not_alias_the_callers_carrier() {
+    let dir = std::env::temp_dir().join(format!("chezzi_w749_carrier_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    // The default is SELF-CONTAINED (`Some("abc")`, no lib global): a default is cloned into the
+    // CALLER's scope, so one that names a lib-only global would not resolve in main at all.
+    std::fs::write(
+        dir.join("lib.chz"),
+        r#"# four pad lines put `fn f` on line 5, so its
+# `len` name token lands at exactly 5:36 — the
+# same line:col as main's Result-mode carrier.
+# The default is SELF-CONTAINED (no lib global).
+fn f(x: Option[int] = Some("abc")?.len()) -> int:
+    match x:
+        Some(n): return n
+        None: return -1
+"#,
+    )
+    .unwrap();
+    let entry = dir.join("main.chz");
+    std::fs::write(
+        &entry,
+        r#"import f from lib
+fn getr() -> Result[str, str]:
+    return Ok("wxyz")
+fn probe() -> Result[int, str]:
+    vvvvvvvvvvvvvvvvvvv := getr()?.len()
+    return Ok(vvvvvvvvvvvvvvvvvvv)
+print(f())
+match probe():
+    Ok(n): print(n)
+    Err(e): print(e)
+"#,
+    )
+    .unwrap();
+    let graph = crate::resolver::build_graph(&entry).expect("resolve");
+    if let Err(errs) = crate::checker::check_graph(&graph) {
+        let _ = std::fs::remove_dir_all(&dir);
+        panic!("program must type-check, got: {errs:?}");
+    }
+    let (vo, _ve, vr, _vc) = run_file(&entry);
+    let (io, _ie, ir, _ic) = run_file_p(&entry);
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        vr.is_ok(),
+        "serial VM faulted (the Option lowering on a Result carrier): {vr:?}"
+    );
+    assert!(ir.is_ok(), "M:N engine faulted: {ir:?}");
+    assert_eq!(
+        vo, "3\n4\n",
+        "lib's Option carrier is Some(3); main's Result carrier is \"wxyz\".len() = 4"
+    );
+    assert_eq!(vo, io, "serial vs M:N divergence");
+}
+
+/// W7-49 (3/3) — `WitnessTable`. `lib.chz`'s default `empty[Counter]()` and `main.chz`'s
+/// `empty()` (pinned to `Other` by its annotated result) put their CALLEE TOKEN at the same
+/// `line:col` (`17:19`), so before `Span::file` they shared one `WitnessKey`.
+///
+/// MEASURED on `19f7696a`, not predicted: the mode is **the wrong CONCRETE TYPE constructed** —
+/// `chezzi check` is clean, then `probe()` builds lib's `Counter` and faults
+/// `no field 's' on Counter(n=7)`. The gaps row had listed three possible modes worst-first and
+/// this is the MIDDLE one; neither the wrong-`argc` mode nor the false `internal:` compile error
+/// occurs, because both colliding callees are the same one-witness `empty` and both witnesses
+/// resolve to a concrete key. CONTROL: renaming main's `vvvv` binder one character longer makes
+/// `19f7696a` print `7` / `oth`.
+#[test]
+fn a_spliced_default_witness_does_not_alias_the_callers_witness() {
+    let dir = std::env::temp_dir().join(format!("chezzi_w749_witness_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    // `empty` in `fn f`'s default sits at line 17, col 19.
+    std::fs::write(
+        dir.join("lib.chz"),
+        r#"protocol Default:
+    fn default() -> Self
+
+struct Counter:
+    n: int
+    fn default() -> Counter:
+        return Counter(7)
+
+struct Other:
+    s: str
+    fn default() -> Other:
+        return Other("oth")
+
+fn empty[T: Default]() -> T:
+    return T.default()
+
+fn f(c: Counter = empty[Counter]()) -> int:
+    return c.n
+"#,
+    )
+    .unwrap();
+    // `Counter` is imported here only because the SPLICED default's turbofish resolves in the
+    // CALLER's scope — the same residual the whole row is about, in its benign form.
+    let entry = dir.join("main.chz");
+    std::fs::write(
+        &entry,
+        r#"import f, empty, Other, Counter from lib
+# pad 2
+# pad 3
+# pad 4
+# pad 5
+# pad 6
+# pad 7
+# pad 8
+# pad 9
+# pad 10
+# pad 11
+# pad 12
+# pad 13
+# pad 14
+# pad 15
+fn probe() -> str:
+    vvvv: Other = empty()
+    return vvvv.s
+print(f())
+print(probe())
+"#,
+    )
+    .unwrap();
+    let graph = crate::resolver::build_graph(&entry).expect("resolve");
+    if let Err(errs) = crate::checker::check_graph(&graph) {
+        let _ = std::fs::remove_dir_all(&dir);
+        panic!("program must type-check, got: {errs:?}");
+    }
+    let (vo, _ve, vr, _vc) = run_file(&entry);
+    let (io, _ie, ir, _ic) = run_file_p(&entry);
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        vr.is_ok(),
+        "serial VM faulted (lib's Counter witness on main's Other call): {vr:?}"
+    );
+    assert!(ir.is_ok(), "M:N engine faulted: {ir:?}");
+    assert_eq!(
+        vo, "7\noth\n",
+        "f() witnesses Counter; probe() witnesses Other — a shared key builds Counter twice"
+    );
+    assert_eq!(vo, io, "serial vs M:N divergence");
+}
+
+/// W7-49 residual — the SURVIVING hole, made loud. `Span::file` separates modules, but the same
+/// default spliced twice into ONE module still keeps one set of spans and therefore one key; a
+/// default is cloned into the CALLER's scope, so a caller-side local can shadow the definer's global
+/// and the two splices genuinely resolve differently. Here `g` is the module global `ab(a, b)` at one
+/// site and the local `ba(b, a)` at the other, so the two permutations DIFFER.
+///
+/// On `19f7696a` this is a silent wrong value: `709` / **`907`** (both should be `709`), clean
+/// `check`, both engines. Now the checker refuses to overwrite the key and the build stops. This is
+/// a REJECT, so it is proven against its own premise, not just against the diagnostic: the same
+/// program with the shadowing local removed — and the same-value re-insert that IS the common case —
+/// stay green in `tests/chz/spec/default_splice_keys_test.chz`.
+#[test]
+fn a_double_spliced_default_that_resolves_two_ways_is_a_loud_error() {
+    let dir = std::env::temp_dir().join(format!("chezzi_w749_residual_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("lib.chz"),
+        r#"fn h(a: int, b: int) -> int:
+    return a * 100 + b
+g := h
+fn f(x: int = g(a=7, b=9)) -> int:
+    return x
+"#,
+    )
+    .unwrap();
+    let entry = dir.join("main.chz");
+    std::fs::write(
+        &entry,
+        r#"import f from lib
+fn ab(a: int, b: int) -> int:
+    return a * 100 + b
+fn ba(b: int, a: int) -> int:
+    return a * 100 + b
+g := ab
+fn probe() -> int:
+    g := ba
+    return f()
+print(f())
+print(probe())
+"#,
+    )
+    .unwrap();
+    let graph = crate::resolver::build_graph(&entry).expect("resolve");
+    // The CHECKER still accepts it — the two `g`s are both `fn(int, int) -> int`. The disagreement
+    // is a backend one, which is exactly why the backstop lives where the table is written.
+    assert!(
+        crate::checker::check_graph(&graph).is_ok(),
+        "the program is well-typed; the conflict is a side-table one"
+    );
+    let err =
+        crate::compiler::compile_graph(&graph).expect_err("the aliased key must stop the build");
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        err.message
+            .contains("two different keyword-argument decisions"),
+        "expected the side-table conflict backstop, got: {}",
+        err.message
+    );
+}
+
 /// Entry-last backstop — when the ENTRY file IS the always-injected prelude stub
 /// (`chezzi run std/prelude.chz`), the resolver dedups the entry's own visit and the entry-last
 /// reorder must restore `modules.last() == entry` so the positional-entry consumers designate the
@@ -6527,7 +6807,7 @@ fn executor_core_shut_is_shared_across_handles() {
     let Some(h2) = vm.from_wire(w).as_obj() else {
         panic!("expected handle")
     };
-    let sp = Span { line: 1, col: 1 };
+    let sp = Span::RUNTIME;
     vm.executor_method(h1, "shutdown", &[], sp).unwrap();
     let dummy = vm.heap.alloc(Obj::Str("task".into()));
     let err = vm
@@ -6560,7 +6840,7 @@ fn display_shared_renders_contents() {
 /// Build a one-proto program + a parent `Vm`, plus a zero-arg closure over proto 0 with a dummy
 /// home module (the test protos never read globals). Mirrors how `do_spawn_block` shapes a task.
 fn worker_fixture(code: Vec<Op>) -> (Vm, PendingCall) {
-    let sp = Span { line: 1, col: 1 };
+    let sp = Span::RUNTIME;
     let proto = op::Proto {
         name: "task".into(),
         arity: 0,
@@ -6774,7 +7054,7 @@ fn entry_global(vm: &Vm, name: &str) -> Value {
 }
 
 fn sp() -> Span {
-    Span { line: 1, col: 1 }
+    Span::RUNTIME
 }
 
 /// A spawned task reads a module-level constant — needs the read-only `home` snapshot (B3.3c):
@@ -8805,7 +9085,7 @@ fn struct_positional_layout_no_per_instance_names() {
     let module = parser::parse(tokens).expect("parse");
     let program = crate::compiler::compile_module_standalone(&module).expect("compile");
     let mut vm = Vm::new(Arc::new(program));
-    let span = Span { line: 1, col: 1 };
+    let span = Span::RUNTIME;
     vm.push(Value::int(1));
     vm.push(Value::int(2));
     // ROOT REDESIGN — structs are keyed by the qualified IDENTITY KEY (`<main>::Point` standalone).
@@ -8852,7 +9132,7 @@ fn enum_variant_id_stamped_at_construction() {
         .expect("Green registered")
         .variant_id;
     let mut vm = Vm::new(Arc::new(program));
-    let span = Span { line: 1, col: 1 };
+    let span = Span::RUNTIME;
     vm.new_enum("Green", green_id, 0, span).expect("new_enum");
     let Some(h) = vm.pop().as_obj() else {
         panic!("expected enum obj")
@@ -10852,7 +11132,7 @@ fn panic_fault_trips_the_scope_cancel() {
     let mut vm = Vm::new(Arc::new(empty_program()));
     let cancel = Arc::new(AtomicBool::new(false));
     vm.cancel = Some(Arc::clone(&cancel)); // as `run_one_fiber`'s swap-in re-points it, per fiber scope
-    let out = vm.panic_outcome(Box::new("worker boom"), Span { line: 1, col: 1 });
+    let out = vm.panic_outcome(Box::new("worker boom"), Span::RUNTIME);
     assert!(
         matches!(out, TaskOutcome::Fault { .. }),
         "a panicking task is a Fault"
@@ -15437,7 +15717,7 @@ print(x == y)
 // ---- Bug E: runtime faults inside string interpolation report the real source line ----
 
 /// Assert a runtime fault reports `line == expected_line` on BOTH engines (serial + M:N).
-fn assert_fault_line(src: &str, needle: &str, expected_line: usize) {
+fn assert_fault_line(src: &str, needle: &str, expected_line: u32) {
     let e = run_capture(src).unwrap_err();
     assert!(
         e.message.contains(needle),
@@ -15685,10 +15965,13 @@ fn legal_deep_nested_pattern_type_checks_and_runs() {
     // VERIFY (guards against over-rejection): a legally-nested `Some(...)` value and a matching deep
     // pattern must NOT be rejected by the new pattern-depth guard — it still type-checks, and the
     // checker's exhaustiveness + type walk and the VM matcher stay safe recursing to that depth.
-    // Depth is capped at 30 by the VALUE expression itself: each `Some(` nesting costs ~2 of the
-    // shared MAX_DEPTH=64 budget in expression position (parse_expr_bp + parse_unary), so a nested
-    // ctor value maxes out near 31 — the pattern side (1 depth/level) is the looser constraint. 30 is
-    // deep enough to prove the pattern walk is safe and shallow enough to stay legal on both axes.
+    // Depth is capped by the VALUE expression itself: each `Some(` nesting costs ~2 of the shared
+    // `parser::MAX_DEPTH` budget in expression position (parse_expr_bp + parse_unary), so a nested
+    // ctor value maxes out near MAX_DEPTH/2 — the pattern side (1 depth/level) is the looser
+    // constraint. THIS `n` IS CALIBRATED TO `parser::MAX_DEPTH` and must move with it: 30 at the
+    // shipped cap of 64. (It was cut to 20 while `Span` was briefly 24 bytes and the cap 48; `Span`
+    // is now 12 bytes, the cap is 64 again, so 30 is restored.) 30 is deep enough to prove the
+    // pattern walk is safe and shallow enough to stay legal on both axes.
     let n = 30;
     let value = format!("{}0{}", "Some(".repeat(n), ")".repeat(n));
     let pattern = format!("{}x{}", "Some(".repeat(n), ")".repeat(n));
@@ -15705,10 +15988,13 @@ fn legal_deep_nested_pattern_type_checks_and_runs() {
 /// worst case. A single flat chain just under the cap must also run and compute correctly.
 #[test]
 fn deep_accepted_chains_run_without_stack_overflow() {
-    // ~12 k-deep AST: 25 nested parens (comfortably under the MAX_DEPTH paren ceiling), each adding
-    // a near-`MAX_CHAIN_DEPTH` `+0` chain onto the left spine. Value is invariant (all `+0`) so the
-    // result is deterministic; the point is that walking/compiling/running this depth does not abort.
-    // Assign then print separately so the `print(...)` call wrapper doesn't eat into the paren budget.
+    // ~12 k-deep AST: 25 nested parens (comfortably under the `parser::MAX_DEPTH` paren ceiling, which
+    // each paren costs ~2 of), each adding a near-`MAX_CHAIN_DEPTH` `+0` chain onto the left spine.
+    // Value is invariant (all `+0`) so the result is deterministic; the point is that
+    // walking/compiling/running this depth does not abort. Assign then print separately so the
+    // `print(...)` call wrapper doesn't eat into the paren budget. THE PAREN COUNT IS CALIBRATED TO
+    // `parser::MAX_DEPTH` and must move with it: 25 at the shipped cap of 64. (It was cut to 18 while
+    // `Span` was briefly 24 bytes and the cap 48; `Span` is now 12 bytes and the cap is 64 again.)
     let mut inner = String::from("1");
     for _ in 0..25 {
         inner = format!("({inner}{})", "+0".repeat(499));
@@ -16358,7 +16644,11 @@ fn a_carried_snapshot_build_error_is_raised_at_task_preparation() {
     )
     .expect("compile");
     let mut vm = Vm::new(Arc::new(program));
-    let span = Span { line: 7, col: 3 };
+    let span = Span {
+        line: 7,
+        col: 3,
+        file: 0,
+    };
     let carried = vm.err("simulated snapshot build failure".to_string(), span);
     // Open a nursery by hand (`Op::EnterNursery`'s lockstep stacks) and queue a task whose pin FAILED.
     vm.nurseries.push(Vec::new());

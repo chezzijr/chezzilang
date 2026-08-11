@@ -409,3 +409,29 @@ test fn carrier_in_a_function_default_expression():
     # …and a defaulted METHOD call inside the default keeps its own named/omitted-default binding
     assert with_optchain_method_default() == "p9", "got {with_optchain_method_default()}"
     assert with_optchain_method_default("x") == "x"
+
+# ---- 14: a carrier the checker types MORE THAN ONCE keeps its settled lowering (W7-49 backstop) ----
+#
+# `CarrierMode::Unknown` is PROVISIONAL, not a decision. Two ordinary shapes make the checker walk a
+# `?.` before its operand's type is known, record `Unknown`, then walk it again once settled:
+#   (a) an unannotated fn whose body calls a LATER-declared unannotated fn — `infer_fn_ret`'s
+#       pre-pass types the callee `Unknown`;
+#   (b) a closure argument to a generic HOF — `infer_generic_arg_tys`' pre-pass walks it with the
+#       params still `Unknown`.
+# Treating that provisional value as a settled decision made the W7-49 conflict backstop reject both
+# of these — a fully green suite shipped it, and only adversarial review caught it. These two run.
+
+fn w749_inner():
+    return Some("xy")
+
+fn w749_outer():
+    return w749_inner()?.len()
+
+test fn a_carrier_typed_before_its_operand_is_known_still_lowers():
+    # (a) two unannotated helpers — the pre-pass records Unknown, the settled walk records Option
+    assert w749_outer() == Some(2), "got {w749_outer()}"
+
+test fn a_carrier_inside_a_closure_argument_still_lowers():
+    # (b) the closure param is Unknown during the generic-arg pre-pass
+    xs := [Some("ab"), Some("cde")]
+    assert xs.map(fn(a): a?.len()) == [Some(2), Some(3)], "got {xs.map(fn(a): a?.len())}"

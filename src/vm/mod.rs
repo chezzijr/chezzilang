@@ -256,9 +256,16 @@ const Q_GENERIC: u8 = 2;
 /// method re-entering via `run_proto`), so a large dedicated stack decouples the call-depth limit from
 /// the caller's thread. Co-tuned with `MAX_CALL_DEPTH` (10_000) so the depth guard fires *before* the
 /// host stack overflows: the recursive frame here is `run_until` (one per call-depth level), so a new
-/// dispatch arm that grows that frame eats into the margin. Sized at 384 MiB (up from 256 MiB) to keep
-/// comfortable headroom for per-arm growth in **debug** builds — debug frames are far larger than
+/// dispatch arm that grows that frame eats into the margin. Sized at 384 MiB (256 → 384, briefly 512,
+/// back to 384 — see below) to keep headroom for per-arm growth in **debug** builds — debug frames are far larger than
 /// release, and the depth-guard test (`self_referential_stringable_hits_depth_limit`) runs in debug.
+///
+/// **It is not only new dispatch arms that eat the margin — `sizeof` an AST/error type does too.**
+/// 384 MiB stopped covering 10_000 levels while `Span` was briefly 24 bytes (`usize` line/col + the
+/// `file` id, W7-49) and this was raised to 512 MiB. `Span` is now **12 bytes** (`u32` line/col/file
+/// — see [`crate::lexer::Span`]), smaller than the 16 it was before W7-49, so 384 MiB is restored and
+/// re-verified by `self_referential_stringable_hits_depth_limit`. Only virtual address space is
+/// reserved, so a bump is free until touched — but re-measure here on any `sizeof` growth.
 const VM_STACK_BYTES: usize = 384 * 1024 * 1024;
 
 /// Run `f` on a fresh thread with the VM's large [`VM_STACK_BYTES`] stack, returning its result.
@@ -3987,7 +3994,7 @@ impl crate::native::Host for VmHost<'_> {
             .ok_or_else(|| crate::native::HostError {
                 message: format!("callback argument {arg_index} is missing"),
             })?;
-        let span = Span { line: 0, col: 0 };
+        let span = Span::default();
         // Lower the C scalar args to engine `Value`s (allocations happen here, at the boundary).
         let vals: Vec<Value> = args
             .iter()
@@ -4196,7 +4203,7 @@ fn run_program_inner(src: &str) -> (Vec<u8>, Result<(), RuntimeError>) {
                 Vec::new(),
                 Err(RuntimeError {
                     message: e.to_string(),
-                    span: Span { line: 1, col: 1 },
+                    span: Span::RUNTIME,
                     is_assert: false,
                     is_over_memory: false,
                     is_timed_out: false,
@@ -4237,7 +4244,7 @@ fn run_program_inner(src: &str) -> (Vec<u8>, Result<(), RuntimeError>) {
     let mut vm = Vm::new(Arc::new(program));
     let result = vm
         .run()
-        .and_then(|()| vm.drain_live_executors(Span { line: 1, col: 1 }));
+        .and_then(|()| vm.drain_live_executors(Span::RUNTIME));
     (vm.out, result)
 }
 
@@ -4290,7 +4297,7 @@ pub fn run_capture_parallel_bytes(src: &str) -> Result<Vec<u8>, RuntimeError> {
         .spawn(move || {
             let tokens = lexer::tokenize(&src).map_err(|e| RuntimeError {
                 message: e.to_string(),
-                span: Span { line: 1, col: 1 },
+                span: Span::RUNTIME,
                 is_assert: false,
                 is_over_memory: false,
                 is_timed_out: false,
@@ -4313,7 +4320,7 @@ pub fn run_capture_parallel_bytes(src: &str) -> Result<Vec<u8>, RuntimeError> {
             let mut vm = Vm::new(Arc::new(program));
             vm.parallel = true;
             vm.run()
-                .and_then(|()| vm.drain_live_executors(Span { line: 1, col: 1 }))
+                .and_then(|()| vm.drain_live_executors(Span::RUNTIME))
                 .map(|()| vm.out)
         })
         .expect("failed to spawn VM thread")
@@ -4338,7 +4345,7 @@ pub fn run_program_parallel(src: &str) -> (String, Result<(), RuntimeError>) {
                         String::new(),
                         Err(RuntimeError {
                             message: e.to_string(),
-                            span: Span { line: 1, col: 1 },
+                            span: Span::RUNTIME,
                             is_assert: false,
                             is_over_memory: false,
                             is_timed_out: false,
@@ -4380,7 +4387,7 @@ pub fn run_program_parallel(src: &str) -> (String, Result<(), RuntimeError>) {
             vm.parallel = true;
             let result = vm
                 .run()
-                .and_then(|()| vm.drain_live_executors(Span { line: 1, col: 1 }));
+                .and_then(|()| vm.drain_live_executors(Span::RUNTIME));
             (captured(vm.out), result)
         })
         .expect("failed to spawn VM thread")
@@ -4423,7 +4430,7 @@ pub fn run_with_cfg(
                     return (
                         Err(RuntimeError {
                             message: e.to_string(),
-                            span: Span { line: 1, col: 1 },
+                            span: Span::RUNTIME,
                             is_assert: false,
                             is_over_memory: false,
                             is_timed_out: false,
@@ -4467,7 +4474,7 @@ pub fn run_with_cfg(
             vm.parallel = parallel;
             let result = vm
                 .run()
-                .and_then(|()| vm.drain_live_executors(Span { line: 1, col: 1 }));
+                .and_then(|()| vm.drain_live_executors(Span::RUNTIME));
             let live = vm.heap.live();
             (result.map(|()| captured(vm.out)), live)
         })
@@ -4488,7 +4495,7 @@ pub fn run_capture_on_stack(src: &str, stack_bytes: usize) -> Result<String, Run
         .spawn(move || {
             let tokens = lexer::tokenize(&src).map_err(|e| RuntimeError {
                 message: e.to_string(),
-                span: Span { line: 1, col: 1 },
+                span: Span::RUNTIME,
                 is_assert: false,
                 is_over_memory: false,
                 is_timed_out: false,
@@ -4510,7 +4517,7 @@ pub fn run_capture_on_stack(src: &str, stack_bytes: usize) -> Result<String, Run
                 })?;
             let mut vm = Vm::new(Arc::new(program));
             vm.run()
-                .and_then(|()| vm.drain_live_executors(Span { line: 1, col: 1 }))
+                .and_then(|()| vm.drain_live_executors(Span::RUNTIME))
                 .map(|()| captured(vm.out))
         })
         .expect("failed to spawn VM thread")
@@ -4550,7 +4557,7 @@ pub fn run_capture_nursery_len(src: &str) -> (Result<String, RuntimeError>, usiz
                     return (
                         Err(RuntimeError {
                             message: e.to_string(),
-                            span: Span { line: 1, col: 1 },
+                            span: Span::RUNTIME,
                             is_assert: false,
                             is_over_memory: false,
                             is_timed_out: false,
@@ -4592,7 +4599,7 @@ pub fn run_capture_nursery_len(src: &str) -> (Result<String, RuntimeError>, usiz
             let mut vm = Vm::new(Arc::new(program));
             let result = vm
                 .run()
-                .and_then(|()| vm.drain_live_executors(Span { line: 1, col: 1 }));
+                .and_then(|()| vm.drain_live_executors(Span::RUNTIME));
             let nursery_depth = vm.nurseries.len();
             (result.map(|()| captured(vm.out)), nursery_depth)
         })
@@ -4790,7 +4797,7 @@ fn run_file_inner(
             Some(name) => vm.invoke_entrypoint(name),
             None => Ok(()),
         })
-        .and_then(|()| vm.drain_live_executors(Span { line: 1, col: 1 }));
+        .and_then(|()| vm.drain_live_executors(Span::RUNTIME));
     // Memory probe (8B-`Value` gate): report the peak live-bytes high-water mark to real stderr,
     // gated on `CHEZZI_HEAP_STATS=1`. `.max(live_bytes())` covers workloads under the GC threshold
     // that never `sweep()` (peak would otherwise be 0). Real stderr, never `vm.out`/`vm.stderr`, so

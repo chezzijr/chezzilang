@@ -21934,7 +21934,7 @@ fn nested_interpolation_fragment_error_points_at_the_fragment() {
 #[test]
 fn escapes_before_a_fragment_keep_two_fragments_apart() {
     let errs = check_src("print(\"\\t{nope} \\\"x\\\" {nope}\")\n");
-    let cols: Vec<usize> = errs
+    let cols: Vec<u32> = errs
         .iter()
         .filter(|e| e.message.contains("unknown name 'nope'"))
         .map(|e| e.span.col)
@@ -22233,8 +22233,16 @@ fn carrier_key_is_a_pure_tuple_build() {
     // Single-derivation contract: the checker's record site and the compiler's lookup site both
     // call this one helper, so it may never do anything but assemble its four arguments. Pinning
     // that is the point — a "clever" normalization inside it would desynchronize the two halves.
-    let frag_ctx = Span { line: 3, col: 7 };
-    let name_span = Span { line: 9, col: 2 };
+    let frag_ctx = Span {
+        line: 3,
+        col: 7,
+        file: 0,
+    };
+    let name_span = Span {
+        line: 9,
+        col: 2,
+        file: 0,
+    };
     assert_eq!(
         carrier_key(4, frag_ctx, 2, name_span),
         (4, frag_ctx, 2, name_span)

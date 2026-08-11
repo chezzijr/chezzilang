@@ -540,15 +540,7 @@ impl Vm {
         self.reset_over_memory();
         self.arm_deadline();
         let home = self.entry_home();
-        self.run_proto(
-            proto,
-            home,
-            None,
-            Vec::new(),
-            true,
-            false,
-            Span { line: 1, col: 1 },
-        )?;
+        self.run_proto(proto, home, None, Vec::new(), true, false, Span::RUNTIME)?;
         Ok(())
     }
 
@@ -557,7 +549,7 @@ impl Vm {
     /// the entry module's namespace (so a re-exported import works too) and calls it with no args.
     /// A missing name (or a non-callable binding) is a clear runtime error rather than a silent no-op.
     pub fn invoke_entrypoint(&mut self, fn_name: &str) -> Result<(), RuntimeError> {
-        let span = Span { line: 1, col: 1 };
+        let span = Span::RUNTIME;
         let home = self.entry_home();
         // Read the binding by name from the entry module's slot table (mirrors `module_define`).
         let callee = match self.heap.get(home) {
@@ -611,15 +603,7 @@ impl Vm {
         self.reset_over_memory();
         self.arm_deadline();
         let home = self.entry_home();
-        self.run_proto(
-            proto,
-            home,
-            None,
-            vec![recv],
-            true,
-            false,
-            Span { line: 1, col: 1 },
-        )
+        self.run_proto(proto, home, None, vec![recv], true, false, Span::RUNTIME)
     }
 
     /// `chezzi test` — construct a suite instance via its synthetic zero-arg `__new_<Suite>` thunk.
@@ -634,7 +618,7 @@ impl Vm {
             Vec::new(),
             true,
             false,
-            Span { line: 1, col: 1 },
+            Span::RUNTIME,
         )
     }
 
@@ -716,7 +700,7 @@ impl Vm {
     /// shut down), mirroring the ordinary run's graceful reap. Best-effort: ignore drain faults so a
     /// stray resource doesn't mask the test verdict.
     pub fn reap_after_tests(&mut self) {
-        let _ = self.drain_live_executors(Span { line: 1, col: 1 });
+        let _ = self.drain_live_executors(Span::RUNTIME);
     }
 
     pub(super) fn run_module(&mut self, idx: usize) -> Result<(), RuntimeError> {
@@ -775,7 +759,7 @@ impl Vm {
             Vec::new(),
             false,
             true,
-            Span { line: 1, col: 1 },
+            Span::RUNTIME,
         )?;
         Ok(())
     }

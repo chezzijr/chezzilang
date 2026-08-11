@@ -1721,7 +1721,7 @@ impl Vm {
     /// `*_slot` helpers below). Kept `#[cfg(test)]` so no production caller swallows the fault.
     #[cfg(test)]
     pub(super) fn values_equal(&mut self, l: Value, r: Value) -> bool {
-        self.values_equal_guarded(l, r, 0, Span { line: 1, col: 1 })
+        self.values_equal_guarded(l, r, 0, Span::RUNTIME)
             .unwrap_or(false)
     }
 

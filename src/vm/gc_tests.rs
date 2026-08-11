@@ -850,7 +850,7 @@ main()";
 #[test]
 fn a_crossed_container_rebuilds_at_exact_capacity() {
     const N: usize = 4096;
-    let span = Span { line: 1, col: 1 };
+    let span = Span::RUNTIME;
     let mut src = Vm::new(Arc::new(crate::vm::tests::empty_program()));
 
     // A list and a tuple — two of the eight arms now sharing one rebuild helper.
@@ -896,7 +896,7 @@ fn a_crossed_container_rebuilds_at_exact_capacity() {
 #[test]
 fn deep_clone_all_rebuilds_at_exact_capacity() {
     const N: usize = 4096;
-    let span = Span { line: 1, col: 1 };
+    let span = Span::RUNTIME;
     let mut vm = Vm::new(Arc::new(crate::vm::tests::empty_program()));
     let vs: Vec<Value> = (0..N as i64).map(Value::int).collect();
 

@@ -56,6 +56,7 @@ impl Checker {
             harvest_keywords: false,
             witnesses: crate::checker::WitnessTable::default(),
             carriers: crate::checker::CarrierTable::new(),
+            table_conflicts: Vec::new(),
             next_opt_tmp: 0,
             witness_scope: Vec::new(),
             witness_indirect_target: None,

@@ -167,12 +167,12 @@ fn verdict_from_fault(e: crate::vm::RuntimeError) -> Verdict {
         Verdict::OverMemory { msg: e.message }
     } else if e.is_assert {
         Verdict::Fail {
-            line: e.span.line,
+            line: e.span.line as usize,
             msg: e.message,
         }
     } else {
         Verdict::Error {
-            line: e.span.line,
+            line: e.span.line as usize,
             msg: e.message,
         }
     }
@@ -636,7 +636,7 @@ fn run_suite(
             push_all_error(
                 out,
                 filtered_out,
-                e.span.line,
+                e.span.line as usize,
                 &format!("suite construction failed: {}", e.message),
             );
             return;
@@ -651,7 +651,7 @@ fn run_suite(
         push_all_error(
             out,
             filtered_out,
-            e.span.line,
+            e.span.line as usize,
             &format!("before_all failed: {}", e.message),
         );
         if let Some(ap) = hook("after_all") {
@@ -675,7 +675,7 @@ fn run_suite(
             && let Err(e) = vm.invoke_suite_method(p, instance)
         {
             verdict = Verdict::Error {
-                line: e.span.line,
+                line: e.span.line as usize,
                 msg: format!("before_each failed: {}", e.message),
             };
         }
@@ -695,7 +695,7 @@ fn run_suite(
                 && let Err(e) = ae
             {
                 verdict = Verdict::Error {
-                    line: e.span.line,
+                    line: e.span.line as usize,
                     msg: format!("after_each failed: {}", e.message),
                 };
             }

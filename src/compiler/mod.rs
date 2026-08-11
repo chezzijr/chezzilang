@@ -104,6 +104,17 @@ enum WitnessRef {
     Captured(u32),
 }
 
+/// W7-49 — a checker→compiler side-table key that was asked to hold two DIFFERENT decisions stops
+/// the build. Refusing to compile is the whole point: the backend is type-blind, so an aliased key
+/// means it would apply one expression's decision to another — a silent wrong VALUE under a green
+/// `chezzi check`, identical on both engines. First conflict wins (they share one cause).
+fn reject_table_conflicts(conflicts: crate::checker::TableConflicts) -> Result<(), CompileError> {
+    match conflicts.into_iter().next() {
+        Some((span, message)) => Err(CompileError { message, span }),
+        None => Ok(()),
+    }
+}
+
 /// Compile a whole resolved module graph in dependency order.
 pub fn compile_graph(graph: &ModuleGraph) -> Result<Program, CompileError> {
     let mut c = Compiler::new();
@@ -118,7 +129,8 @@ pub fn compile_graph(graph: &ModuleGraph) -> Result<Program, CompileError> {
     // witness params and what fills each witness at each call site. The compiler CONSUMES it — it
     // never re-derives which protocols carry a static requirement (that resolves through
     // imports/aliases/embeds, which is checker work).
-    let (kw, wt, ct) = crate::checker::resolve_call_tables(graph);
+    let (kw, wt, ct, conflicts) = crate::checker::resolve_call_tables(graph);
+    reject_table_conflicts(conflicts)?;
     c.keyword_calls = kw;
     c.witnesses = wt;
     c.carriers = ct;
@@ -191,7 +203,8 @@ pub fn compile_module_standalone(module: &Module) -> Result<Program, CompileErro
     // SINGLE-RESOLVER: extern C types come from the checker's standalone pass — the SAME resolver the
     // multi-file CLI uses (no second backend resolver exists). The backend reads this table verbatim.
     c.extern_sigs = crate::checker::resolve_extern_signatures_standalone(&module.stmts);
-    let (kw, wt, ct) = crate::checker::resolve_call_tables_standalone(&module.stmts);
+    let (kw, wt, ct, conflicts) = crate::checker::resolve_call_tables_standalone(&module.stmts);
+    reject_table_conflicts(conflicts)?;
     c.keyword_calls = kw;
     c.witnesses = wt;
     c.carriers = ct;
@@ -1413,15 +1426,15 @@ impl Compiler {
         let implicit = block_has_bare_spawn(&module.stmts);
         if implicit {
             fc.has_implicit_nursery = true;
-            fc.emit(Op::EnterNursery, Span { line: 1, col: 1 });
+            fc.emit(Op::EnterNursery, Span::RUNTIME);
             fc.nursery_scopes += 1;
         }
         self.compile_block_flat(&mut fc, &module.stmts)?;
         if implicit {
             fc.nursery_scopes -= 1;
         }
-        fc.emit(Op::Nil, Span { line: 1, col: 1 });
-        fc.emit(Op::Return, Span { line: 1, col: 1 });
+        fc.emit(Op::Nil, Span::RUNTIME);
+        fc.emit(Op::Return, Span::RUNTIME);
         Ok(self.finish(fc))
     }
 
@@ -1562,7 +1575,7 @@ impl Compiler {
         let implicit = block_has_bare_spawn(&decl.body);
         if implicit {
             fc.has_implicit_nursery = true;
-            fc.emit(Op::EnterNursery, Span { line: 1, col: 1 });
+            fc.emit(Op::EnterNursery, Span::RUNTIME);
             fc.nursery_scopes += 1;
         }
         self.compile_block_scoped(&mut fc, &decl.body)?;
@@ -1570,8 +1583,8 @@ impl Compiler {
             fc.nursery_scopes -= 1;
         }
         // Fall off the end → return Nil (do_return joins the implicit nursery).
-        fc.emit(Op::Nil, Span { line: 1, col: 1 });
-        fc.emit(Op::Return, Span { line: 1, col: 1 });
+        fc.emit(Op::Nil, Span::RUNTIME);
+        fc.emit(Op::Return, Span::RUNTIME);
         Ok(self.finish(fc))
     }
 
@@ -1591,7 +1604,7 @@ impl Compiler {
                 })
             {
                 let slot = i;
-                let span = Span { line: 1, col: 1 };
+                let span = Span::RUNTIME;
                 fc.emit_get_local_raw(slot, span);
                 fc.emit(Op::CoerceFloat, span);
                 fc.emit_set_local_raw(slot, span);
@@ -1607,7 +1620,7 @@ impl Compiler {
     fn emit_box_param_prologue(&mut self, fc: &mut FnComp, params: &[crate::ast::Param]) {
         for i in 0..params.len() {
             if fc.is_boxed_slot(i) {
-                let span = Span { line: 1, col: 1 };
+                let span = Span::RUNTIME;
                 fc.emit_get_local_raw(i, span);
                 fc.emit(Op::NewCell, span);
                 fc.emit_set_local_raw(i, span);
@@ -2138,20 +2151,10 @@ impl Compiler {
                     self.compile_expr(fc, obj)?;
                     self.compile_args(fc, args)?;
                     fc.emit(Op::SpawnMethod(name.clone(), args.len()), call.span);
-                } else if !named.is_empty()
-                    && let Some(perm) = self
-                        .keyword_calls
-                        .get(&crate::checker::keyword_key(
-                            self.current_module_idx,
-                            self.kw_frag_ctx,
-                            self.kw_frag_ord,
-                            named,
-                            call.span,
-                        ))
-                        .cloned()
-                {
+                } else if !named.is_empty() {
                     // A spawned VALUE call carrying keyword arguments: reorder to positional by the
                     // checker-recorded permutation, then spawn positionally (same as the eager form).
+                    let perm = self.keyword_perm(named, call.span)?;
                     self.compile_expr(fc, callee)?;
                     for &ci in &perm {
                         let e = if ci < args.len() {
@@ -4304,18 +4307,8 @@ impl Compiler {
         // A deferred VALUE call carrying keyword arguments (Swift-style): reorder the combined
         // `[positional ++ named]` args by the checker-recorded permutation, then defer positionally —
         // same lowering as the eager value keyword call, just via `DeferCall`.
-        if !named.is_empty()
-            && let Some(perm) = self
-                .keyword_calls
-                .get(&crate::checker::keyword_key(
-                    self.current_module_idx,
-                    self.kw_frag_ctx,
-                    self.kw_frag_ord,
-                    named,
-                    call.span,
-                ))
-                .cloned()
-        {
+        if !named.is_empty() {
+            let perm = self.keyword_perm(named, call.span)?;
             self.compile_expr(fc, callee)?;
             for &ci in &perm {
                 let e = if ci < args.len() {
@@ -5129,18 +5122,8 @@ impl Compiler {
         // recorded a slot PERMUTATION over the combined `[positional args ++ named exprs]` list. Emit
         // the callee, then the combined exprs in slot order, and a plain positional `Op::Call` — the
         // runtime ABI is unchanged. Positional-only calls (`named` empty) never consult the table.
-        if !named.is_empty()
-            && let Some(perm) = self
-                .keyword_calls
-                .get(&crate::checker::keyword_key(
-                    self.current_module_idx,
-                    self.kw_frag_ctx,
-                    self.kw_frag_ord,
-                    named,
-                    span,
-                ))
-                .cloned()
-        {
+        if !named.is_empty() {
+            let perm = self.keyword_perm(named, span)?;
             self.compile_expr(fc, callee)?;
             for &ci in &perm {
                 let e = if ci < args.len() {
@@ -5157,6 +5140,37 @@ impl Compiler {
         self.compile_args(fc, args)?;
         fc.emit(Op::Call(args.len()), span);
         Ok(())
+    }
+
+    /// The checker-recorded slot PERMUTATION for a value call carrying keyword arguments. A MISSING
+    /// entry is a hard error, never a fall-through: the plain positional `Op::Call(args.len())` this
+    /// used to fall through to silently DROPPED every named argument — a wrong value under a green
+    /// `chezzi check`, where the carrier (`compile_expr`'s `?.` arm) and witness (`witness_srcs`)
+    /// lookups both faulted (`docs/gaps.md` W7-49). Only ever called with `named` non-empty, which is
+    /// exactly the condition the checker records under; `print(sep=…, end=…)` — the one path that
+    /// deliberately leaves `named` populated without a table entry — returns from the `prelude_fn`
+    /// arm long before any of the three call sites, and `spawn`/`defer` of a `print` with named args
+    /// is a type error.
+    fn keyword_perm(
+        &self,
+        named: &[(String, Expr)],
+        span: Span,
+    ) -> Result<Vec<usize>, CompileError> {
+        self.keyword_calls
+            .get(&crate::checker::keyword_key(
+                self.current_module_idx,
+                self.kw_frag_ctx,
+                self.kw_frag_ord,
+                named,
+                span,
+            ))
+            .cloned()
+            .ok_or_else(|| CompileError {
+                message: "internal: no keyword-argument permutation recorded for this call — the \
+                          type-checker and the backend disagree about this expression"
+                    .to_string(),
+                span,
+            })
     }
 
     fn compile_closure(
@@ -5660,7 +5674,7 @@ fn chunk_exprs(chunks: &[Chunk]) -> impl Iterator<Item = &Expr> {
 /// embedded in the raw text, so the AST walk would otherwise miss them. A malformed interpolation
 /// yields no exprs here; the real `compile_str` surfaces that error.
 fn interp_exprs(raw: &str) -> Vec<Expr> {
-    match parse_interpolation(raw, Span { line: 1, col: 1 }) {
+    match parse_interpolation(raw, Span::RUNTIME) {
         Ok(chunks) => chunks
             .into_iter()
             .filter_map(|c| match c {
@@ -6673,7 +6687,7 @@ mod interp_tests {
     use super::*;
 
     fn sp() -> Span {
-        Span { line: 1, col: 1 }
+        Span::RUNTIME
     }
 
     // The compiler's standalone-path `ctype_of`/`ctype_of_visiting` second resolver was DELETED in

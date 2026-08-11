@@ -3120,6 +3120,41 @@ impl Checker {
         }
     }
 
+    /// Record one `?.` carrier's lowering, refusing to overwrite a key already bound to a DIFFERENT
+    /// mode (W7-49 — see [`crate::checker::record_call_table_entry`]).
+    /// W7-49 — record this carrier's chosen lowering, refusing to overwrite a DIFFERENT *settled*
+    /// one (see [`crate::checker::record_call_table_entry`] for why that is a hard error).
+    ///
+    /// [`CarrierMode::Unknown`] is **provisional, not a decision**: the checker types the same
+    /// expression more than once by design — `infer_generic_arg_tys`' prepass walks a closure
+    /// argument with its params still `Unknown` (`src/checker/expr.rs`), and `infer_fn_ret` walks a
+    /// body to infer an unannotated return before the callee it calls is known
+    /// (`src/checker/sig.rs`) — and on those early walks the operand types `Unknown`. The settled
+    /// walk that follows types it properly. So `Unknown` must never conflict with, nor overwrite, a
+    /// settled mode; only `Option`-vs-`Try` is a genuine disagreement. Treating the provisional
+    /// value as a decision rejected ordinary two-unannotated-helper and `xs.map(fn(a): a?.len())`
+    /// programs — measured, and caught only by adversarial review after a fully green suite.
+    fn record_carrier(&mut self, key: crate::checker::CarrierKey, mode: CarrierMode, span: Span) {
+        if mode == CarrierMode::Unknown {
+            // Provisional: never displaces a settled decision, and never reports one.
+            self.carriers.entry(key).or_insert(CarrierMode::Unknown);
+            return;
+        }
+        if self.carriers.get(&key) == Some(&CarrierMode::Unknown) {
+            // A settled decision supersedes the prepass placeholder outright.
+            self.carriers.insert(key, mode);
+            return;
+        }
+        crate::checker::record_call_table_entry(
+            &mut self.carriers,
+            &mut self.table_conflicts,
+            key,
+            mode,
+            "'?.' lowering",
+            span,
+        );
+    }
+
     /// W7-43 — infer a `?.` carrier: type the OPERAND, pick the lowering from it, record the choice
     /// for the compiler, then **clone-and-lower to a real AST shape and infer THAT**.
     ///
@@ -3156,7 +3191,7 @@ impl Checker {
         );
         match &t {
             Ty::Result(..) => {
-                self.carriers.insert(key, CarrierMode::Try);
+                self.record_carrier(key, CarrierMode::Try, span);
                 let mut c = carrier.clone();
                 let scratch = self.scratch_operand(t.clone());
                 if let ExprKind::OptChain { obj, .. } = &mut c.kind {
@@ -3168,7 +3203,7 @@ impl Checker {
                 r
             }
             Ty::Option(..) => {
-                self.carriers.insert(key, CarrierMode::Option);
+                self.record_carrier(key, CarrierMode::Option, span);
                 let mut c = carrier.clone();
                 let scratch = self.scratch_operand(t.clone());
                 if let ExprKind::OptChain { obj, .. } = &mut c.kind {
@@ -3184,11 +3219,11 @@ impl Checker {
             // The operand already errored (its diagnostic stands, un-truncated) — adding a second
             // one here would be the cascade `Ty::Unknown` exists to suppress.
             Ty::Unknown => {
-                self.carriers.insert(key, CarrierMode::Unknown);
+                self.record_carrier(key, CarrierMode::Unknown, span);
                 Ty::Unknown
             }
             other => {
-                self.carriers.insert(key, CarrierMode::Unknown);
+                self.record_carrier(key, CarrierMode::Unknown, span);
                 self.error(
                     span,
                     format!("'?.' applies to an Option or a Result, found {other}"),

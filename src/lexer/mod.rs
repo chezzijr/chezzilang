@@ -145,10 +145,48 @@ pub enum Token {
 /// other than the parser (e.g. a `Type::Named` the checker builds from an inferred name). Because
 /// the lexer's lines/cols are 1-based, `(0, 0)` can never collide with a real source position, so a
 /// synthesized span never matches an editor hover/overlay key. Diagnostic-only; runtime-inert.
+///
+/// `file` is NOT diagnostic sugar and it is NOT dead — **a `Span` is a cross-half TABLE KEY**, and
+/// `file` is what makes that key injective across modules. `KeywordKey`, `WitnessKey` and
+/// `CarrierKey` (`src/checker/ty.rs:24,43,109`) are all `(graph_module_idx, frag_ctx: Span,
+/// frag_ord, key_span: Span)`: the checker records a decision under one and the type-blind compiler
+/// looks it up under the same one. `desugar` splices a callee's default-parameter expression into
+/// the CALLER's AST as a clone that keeps the DEFINING module's spans, so without `file` two
+/// unrelated call sites at the same `line:col` in two different files collapse onto one entry, the
+/// later `insert` wins, and the survivor's decision is applied to both — a silent wrong value under
+/// a green `chezzi check`, identical on both engines (parity is blind to it). See `docs/gaps.md`
+/// **W7-49** for the measured repro. Deleting this field re-opens that hole silently.
+///
+/// `0` = synthesized / standalone single-file lex (`tokenize`, the editor overlay, `chezzi tokens`);
+/// real resolver-loaded modules get `1..n`, assigned once at `resolver::Builder::parse`.
+///
+/// **Keep this type SMALL — it is 12 bytes (3 × `u32`) and that is deliberate, not incidental.**
+/// `Proto.lines` (`src/vm/op.rs:502`) holds one `Span` PER OPCODE, so `sizeof(Span)` is hot VM data:
+/// it sets the cache footprint of every compiled function. It is also a cross-half table key (see
+/// above), which means it is cloned and hashed on the checker→compiler path. Growing it is not free
+/// and the cost is not local — at 24 bytes (`usize` line/col + `file`) the `map` bench regressed
+/// 1.07× AND the extra AST-node width pushed both `parser::MAX_DEPTH` (64 → 48) and
+/// `vm::VM_STACK_BYTES` (384 → 512 MiB) off their calibrated margins. `u32` line/col is not a limit
+/// in practice: a source file cannot realistically reach 4 billion lines or columns. A fourth field
+/// costs 4 more bytes plus padding — measure `benches/run.chz` and re-probe those two constants
+/// before adding one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct Span {
-    pub line: usize,
-    pub col: usize,
+    pub line: u32,
+    pub col: u32,
+    /// Module identity — see the type doc. `0` = synthesized / standalone.
+    pub file: u32,
+}
+
+impl Span {
+    /// The span every runtime-origin error and every compiler-synthesized opcode carries: "line 1,
+    /// col 1 of nowhere in particular". One constant so the next `Span` field costs one edit, not
+    /// forty-five.
+    pub const RUNTIME: Span = Span {
+        line: 1,
+        col: 1,
+        file: 0,
+    };
 }
 
 impl fmt::Display for Span {
@@ -376,7 +414,7 @@ pub struct Lexer {
     /// byte-identical). Non-zero only when lexing a string-interpolation fragment re-lexed from an
     /// escape-processed substring: the offset re-anchors fragment token spans to their true source
     /// line so a runtime fault inside `"{expr}"` reports `expr`'s real line (Bug E).
-    base_line: usize,
+    base_line: u32,
     /// Absolute-column offset applied to spans on the fragment's FIRST line only (default 0). Same
     /// job as `base_line` in the other axis, and the reason it exists is not cosmetic: a span is a
     /// cross-half TABLE KEY (`WitnessTable`, `KeywordTable`), so two fragments that both restarted
@@ -398,7 +436,10 @@ pub struct Lexer {
     /// `raw`, real or escaped, because the two are indistinguishable in the post-escape payload), and
     /// it is the deliberate direction: an out-of-range column reads as degraded, where a shifted LINE
     /// would point at real, unrelated code. Filed as `docs/gaps.md` M24-6.
-    base_col: usize,
+    base_col: u32,
+    /// Module id stamped into every emitted span's [`Span::file`] (default 0 = standalone /
+    /// synthesized). Assigned by the one production graph lex seam, `resolver::Builder::parse`.
+    file: u32,
     line_start: usize, // char index where the current line begins (for column tracking)
     indents: Vec<usize>, // the indentation stack. Starts as vec![0].
     at_line_start: bool, // true when the next char begins a fresh logical line
@@ -416,20 +457,21 @@ pub struct Lexer {
 
 impl Lexer {
     pub fn new(source: &str) -> Self {
-        Lexer::new_at(source, 0, 0)
+        Lexer::new_at(source, 0, 0, 0)
     }
 
     /// Like [`Lexer::new`] but stamps every emitted span with an absolute `base_line` / `base_col`
-    /// offset. Used to re-lex string-interpolation fragments so their token spans point at the true
-    /// source position (see [`Lexer::base_line`], [`Lexer::base_col`]). `(0, 0)` is identical to
-    /// [`Lexer::new`].
-    pub fn new_at(source: &str, base_line: usize, base_col: usize) -> Self {
+    /// offset and the module id `file` (see [`Span::file`]). Used to re-lex string-interpolation
+    /// fragments so their token spans point at the true source position (see [`Lexer::base_line`],
+    /// [`Lexer::base_col`]). `(0, 0, 0)` is identical to [`Lexer::new`].
+    pub fn new_at(source: &str, base_line: u32, base_col: u32, file: u32) -> Self {
         Lexer {
             chars: source.chars().collect(),
             pos: 0,
             line: 1,
             base_line,
             base_col,
+            file,
             line_start: 0,
             indents: vec![0],
             at_line_start: true,
@@ -443,8 +485,11 @@ impl Lexer {
     /// The span pointing at character index `pos` on the current line.
     fn span_at(&self, pos: usize) -> Span {
         Span {
-            line: self.line + self.base_line,
-            col: pos - self.line_start + 1 + self.base_col,
+            // `as u32`: both are 1-based source counters bounded by the source length — a file
+            // with 4 billion lines (or a line with 4 billion columns) is not reachable in practice.
+            line: self.line as u32 + self.base_line,
+            col: (pos - self.line_start + 1) as u32 + self.base_col,
+            file: self.file,
         }
     }
 
@@ -1481,18 +1526,27 @@ pub fn tokenize(source: &str) -> Result<Vec<Tok>, LexError> {
     Lexer::new(source).tokenize()
 }
 
-/// Like [`tokenize`] but stamps every token span with an absolute `base_line` / `base_col` offset —
-/// used to re-lex string-interpolation fragments so their spans point at the true source position
-/// (Bug E, and the witness/keyword key aliasing that fragment-relative columns caused).
-/// `(0, 0)` is identical to [`tokenize`].
-pub fn tokenize_at(source: &str, base_line: usize, base_col: usize) -> Result<Vec<Tok>, LexError> {
-    Lexer::new_at(source, base_line, base_col).tokenize()
+/// Like [`tokenize`] but stamps every token span with an absolute `base_line` / `base_col` offset
+/// and the module id `file` ([`Span::file`]) — used to re-lex string-interpolation fragments so their
+/// spans point at the true source position (Bug E, and the witness/keyword key aliasing that
+/// fragment-relative columns caused). `(0, 0, 0)` is identical to [`tokenize`].
+pub fn tokenize_at(
+    source: &str,
+    base_line: u32,
+    base_col: u32,
+    file: u32,
+) -> Result<Vec<Tok>, LexError> {
+    Lexer::new_at(source, base_line, base_col, file).tokenize()
 }
 
 /// Convenience free function: `lexer::tokenize_with_comments(src)` — tokens plus the doc-comment
-/// side table. The token stream is identical to [`tokenize`].
-pub fn tokenize_with_comments(source: &str) -> Result<(Vec<Tok>, Vec<DocComment>), LexError> {
-    Lexer::new(source).tokenize_with_comments()
+/// side table, with every span stamped with the module id `file` ([`Span::file`]). The token stream
+/// is identical to [`tokenize`] modulo that stamp. This is the graph lex seam (`resolver`).
+pub fn tokenize_with_comments(
+    source: &str,
+    file: u32,
+) -> Result<(Vec<Tok>, Vec<DocComment>), LexError> {
+    Lexer::new_at(source, 0, 0, file).tokenize_with_comments()
 }
 
 #[cfg(test)]
@@ -1774,7 +1828,7 @@ mod tests {
     fn doc_comments_captured_with_line_numbers() {
         // Comment-only lines are captured on the side channel with their line numbers + stripped body
         // (one leading space removed). The token stream is unchanged.
-        let (toks, comments) = tokenize_with_comments("# a\n# b\nfn f():\n    1\n").unwrap();
+        let (toks, comments) = tokenize_with_comments("# a\n# b\nfn f():\n    1\n", 0).unwrap();
         assert_eq!(comments, vec![(1, "a".to_string()), (2, "b".to_string())]);
         // token stream byte-identical to plain tokenize (no Comment tokens leaked in)
         let plain = tokenize("# a\n# b\nfn f():\n    1\n").unwrap();
@@ -1784,7 +1838,7 @@ mod tests {
     #[test]
     fn inline_trailing_comment_not_captured() {
         // A trailing comment on a content line goes through STEP B, never the side channel.
-        let (_toks, comments) = tokenize_with_comments("fn f(): 1  # not a doc\n").unwrap();
+        let (_toks, comments) = tokenize_with_comments("fn f(): 1  # not a doc\n", 0).unwrap();
         assert!(comments.is_empty());
     }
 
@@ -1815,10 +1869,17 @@ mod tests {
             .iter()
             .find(|t| t.kind == Token::Ident("y".to_string()))
             .unwrap();
-        assert_eq!(y.span, Span { line: 2, col: 5 });
+        assert_eq!(
+            y.span,
+            Span {
+                line: 2,
+                col: 5,
+                file: 0
+            }
+        );
 
         // `if` is the first token: line 1, column 1.
-        assert_eq!(toks[0].span, Span { line: 1, col: 1 });
+        assert_eq!(toks[0].span, Span::RUNTIME);
     }
 
     #[test]
@@ -2409,7 +2470,14 @@ mod tests {
             .find(|t| t.kind == Token::Ident("z".to_string()))
             .unwrap();
         // `b" z` → z is the 4th char on line 2 (1-based col 4).
-        assert_eq!(z.span, Span { line: 2, col: 4 });
+        assert_eq!(
+            z.span,
+            Span {
+                line: 2,
+                col: 4,
+                file: 0
+            }
+        );
     }
 
     // ===== Multi-line collection literals (layout suppression inside brackets) =====
@@ -2787,23 +2855,81 @@ mod tests {
     /// fragments' second lines both land on `(base_line + 2, 1)` — one witness-table key for two
     /// call sites, and the second silently took the first's type. The offset must stay so the
     /// position is strictly increasing in the fragment's offset within the literal.
+    /// `Span` is 12 bytes and that is load-bearing, not incidental — `Proto.lines` holds one per
+    /// OPCODE, so its width is the cache footprint of every compiled function, and it sets the
+    /// calibrated headroom of `parser::MAX_DEPTH` and `vm::VM_STACK_BYTES`. When this fails, a field
+    /// was added: measure `benches/run.chz` (the `map` bench moved 1.07× at 24 bytes) and re-probe
+    /// both constants before changing the number here.
+    #[test]
+    fn span_stays_twelve_bytes() {
+        assert_eq!(std::mem::size_of::<Span>(), 12);
+    }
+
     #[test]
     fn base_col_holds_past_a_newline_inside_the_fragment() {
-        let toks = tokenize_at("a\nbb", 4, 10).unwrap();
-        let spans: Vec<(usize, usize)> = toks
+        let toks = tokenize_at("a\nbb", 4, 10, 0).unwrap();
+        let spans: Vec<(u32, u32)> = toks
             .iter()
             .filter(|t| matches!(t.kind, Token::Ident(_)))
             .map(|t| (t.span.line, t.span.col))
             .collect();
         assert_eq!(spans, vec![(5, 11), (6, 11)]);
         // …so two fragments of ONE literal cannot collide on their second lines either
-        let a = tokenize_at("a\nbb", 4, 10).unwrap();
-        let b = tokenize_at("a\nbb", 4, 40).unwrap();
+        let a = tokenize_at("a\nbb", 4, 10, 0).unwrap();
+        let b = tokenize_at("a\nbb", 4, 40, 0).unwrap();
         assert_ne!(a[2].span, b[2].span, "line-2 tokens must stay distinct");
         // and (0, 0) is byte-identical to plain `tokenize`
         assert_eq!(
-            tokenize_at("a\nbb", 0, 0).unwrap(),
+            tokenize_at("a\nbb", 0, 0, 0).unwrap(),
             tokenize("a\nbb").unwrap()
         );
+    }
+
+    // W7-49 — `Span::file` is a cross-half TABLE KEY component (`KeywordKey`/`WitnessKey`/
+    // `CarrierKey`), so what the stamp must guarantee is: `tokenize` (standalone/synthesized) is 0,
+    // the base-position form carries whatever the caller assigned, and a re-lexed interpolation
+    // fragment INHERITS its enclosing literal's file (a fragment belongs to its literal's module by
+    // definition — if it reset to 0 the fragment keys would alias across modules again).
+    #[test]
+    fn span_file_is_stamped_by_the_base_position_lex_and_inherited_by_fragments() {
+        let src = "x := 1\nfn f() -> int:\n    return x\n";
+
+        // plain `tokenize` — the standalone/synthesized sentinel, 0 everywhere.
+        for t in tokenize(src).unwrap() {
+            assert_eq!(t.span.file, 0, "tokenize must stamp 0, got {:?}", t);
+        }
+        // base-position form — every span carries the caller's id.
+        for t in tokenize_at(src, 0, 0, 7).unwrap() {
+            assert_eq!(
+                t.span.file, 7,
+                "tokenize_at must stamp its file, got {:?}",
+                t
+            );
+        }
+        // …and so does the doc-comment/graph form the resolver uses.
+        let (toks, _) = tokenize_with_comments("# d\nfn f(): 1\n", 5).unwrap();
+        for t in toks {
+            assert_eq!(t.span.file, 5, "tokenize_with_comments must stamp its file");
+        }
+
+        // An interpolation fragment inherits the enclosing literal's file.
+        let lit_span = Span {
+            line: 4,
+            col: 11,
+            file: 9,
+        };
+        let chunks = crate::interpolation::parse_interpolation("v={a + b}!", lit_span)
+            .expect("fragment should parse");
+        let mut saw_expr = false;
+        for c in &chunks {
+            if let crate::ast::Chunk::Expr(e, _) = c {
+                saw_expr = true;
+                assert_eq!(
+                    e.span.file, 9,
+                    "fragment expr span must inherit the literal's file"
+                );
+            }
+        }
+        assert!(saw_expr, "expected one Expr chunk");
     }
 }

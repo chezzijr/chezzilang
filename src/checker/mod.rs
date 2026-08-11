@@ -786,8 +786,8 @@ pub enum HoverKind {
 #[allow(dead_code)]
 pub fn hover_type(
     graph: &ModuleGraph,
-    line: usize,
-    col: usize,
+    line: u32,
+    col: u32,
 ) -> Option<(String, HoverKind, Option<String>)> {
     let mut c = Checker::new();
     c.hover_probe = Some((line, col));
@@ -836,6 +836,7 @@ pub fn resolve_extern_signatures_standalone(stmts: &[Stmt]) -> ExternTable {
             ast: crate::ast::Module {
                 stmts: stmts.to_vec(),
             },
+            file: 0,
             imports: Vec::new(),
             native: None,
         }],
@@ -857,7 +858,12 @@ pub fn resolve_extern_signatures_standalone(stmts: &[Stmt]) -> ExternTable {
 /// lowering each `?.` carrier takes. Unlike the other two it is recorded UNCONDITIONALLY (not gated
 /// on `harvest_keywords`) — a gate would be a second way for this pass and [`check_graph`] to
 /// disagree about the same program.
-pub fn resolve_call_tables(graph: &ModuleGraph) -> (KeywordTable, WitnessTable, CarrierTable) {
+/// W7-49 rides it as the fourth element: the key CONFLICTS this pass refused to overwrite. This pass
+/// discards its type errors, so a conflict cannot travel as one — the compiler turns the first into a
+/// hard `CompileError`. See [`record_call_table_entry`].
+pub fn resolve_call_tables(
+    graph: &ModuleGraph,
+) -> (KeywordTable, WitnessTable, CarrierTable, TableConflicts) {
     let mut c = Checker::new();
     c.harvest_keywords = true;
     c.run_graph_pass(graph, false);
@@ -865,8 +871,13 @@ pub fn resolve_call_tables(graph: &ModuleGraph) -> (KeywordTable, WitnessTable, 
         std::mem::take(&mut c.keyword_calls),
         std::mem::take(&mut c.witnesses),
         std::mem::take(&mut c.carriers),
+        std::mem::take(&mut c.table_conflicts),
     )
 }
+
+/// W7-49 — side-table keys asked to hold two different decisions, as `(span, message)`. Empty for
+/// every well-formed program; a non-empty one is a hard compile error, never a warning.
+pub type TableConflicts = Vec<(Span, String)>;
 
 /// Resolve value-keyword calls for a SINGLE-FILE (standalone, source-string) program, through the
 /// EXACT SAME [`resolve_call_tables`] pass as the multi-file CLI (one resolver, both engines
@@ -876,7 +887,7 @@ pub fn resolve_call_tables(graph: &ModuleGraph) -> (KeywordTable, WitnessTable, 
 #[cfg(test)]
 pub fn resolve_call_tables_standalone(
     stmts: &[Stmt],
-) -> (KeywordTable, WitnessTable, CarrierTable) {
+) -> (KeywordTable, WitnessTable, CarrierTable, TableConflicts) {
     let id = crate::resolver::ModuleId(std::path::PathBuf::from("<main>"));
     let graph = ModuleGraph {
         entry: id.clone(),
@@ -886,6 +897,7 @@ pub fn resolve_call_tables_standalone(
             ast: crate::ast::Module {
                 stmts: stmts.to_vec(),
             },
+            file: 0,
             imports: Vec::new(),
             native: None,
         }],
@@ -924,6 +936,52 @@ pub fn keyword_key(
         frag_ord,
         keyword_key_span(named, call_span),
     )
+}
+
+/// W7-49 — record ONE entry into a checker→compiler side table, refusing to overwrite a key that is
+/// already bound to a DIFFERENT value.
+///
+/// This is a BACKSTOP under an already-injective key ([`Span::file`] is what makes the key injective
+/// across modules), not a substitute for one. It exists for the surviving residual: the same default
+/// expression spliced twice into the SAME module keeps one set of spans, so both splices share one
+/// key — and a default is cloned into the CALLER's scope, so a caller-side local can shadow the
+/// definer's global and the two splices can genuinely resolve differently. Overwriting there applies
+/// the second site's decision to the first: a silent wrong value under a green `chezzi check`,
+/// identical on both engines. Better loud than silent.
+///
+/// It compares VALUES, never mere presence: a same-key/same-value re-insert is NORMAL and benign
+/// (two call sites omitting the same default, or one module re-checked), and a presence-checking
+/// guard would reject every program with a same-module default.
+pub(crate) fn record_call_table_entry<K, V>(
+    map: &mut HashMap<K, V>,
+    conflicts: &mut Vec<(Span, String)>,
+    key: K,
+    value: V,
+    what: &str,
+    span: Span,
+) where
+    K: std::hash::Hash + Eq,
+    V: PartialEq,
+{
+    match map.get(&key) {
+        // Same decision recorded twice — the benign, common case.
+        Some(prev) if *prev == value => {}
+        Some(_) => conflicts.push((
+            span,
+            format!(
+                "internal: two different {what} decisions were recorded for one source position, so \
+                 the backend cannot tell the two call sites apart. The known cause is a default \
+                 parameter spliced into two call sites of one module: a default is cloned into each \
+                 CALLER's scope, so a caller-side local that shadows the definer's global makes the \
+                 two splices resolve differently — renaming that local is the workaround. If no \
+                 default parameter is involved, this is a compiler bug; please report it with the \
+                 source (docs/gaps.md W7-49)"
+            ),
+        )),
+        None => {
+            map.insert(key, value);
+        }
+    }
 }
 
 /// M24 — build the [`WitnessKey`] for a call site that needs static-witness arguments: `(module,
@@ -1306,7 +1364,7 @@ impl Checker {
                     StmtKind::Fn(d) if d.name == f => Some((d, s.span)),
                     _ => None,
                 });
-                let span = decl.map_or(Span { line: 1, col: 1 }, |(_, sp)| sp);
+                let span = decl.map_or(Span::RUNTIME, |(_, sp)| sp);
                 // Two ways the zero-argument call cannot be satisfied, one message. The DECLARED
                 // params are the plain one — `fn main(a: int)` used to check green and then die at
                 // startup with "function 'main' expects 1 argument(s), got 0", which reads as a
@@ -1801,6 +1859,12 @@ struct Checker {
     /// second way for the harvest pass and `check_graph` to disagree. Produced by
     /// [`resolve_call_tables`].
     carriers: CarrierTable,
+    /// W7-49 — side-table keys that were asked to hold two DIFFERENT decisions at once. Filled by
+    /// [`record_call_table_entry`] (never by ordinary type errors) and returned alongside the three
+    /// tables, because this pass DISCARDS its type errors — `self.error` would be swallowed here.
+    /// The compiler turns the first entry into a hard `CompileError`: an aliased key means the
+    /// backend cannot tell two expressions apart, which is a silent wrong VALUE, not a slow path.
+    table_conflicts: Vec<(Span, String)>,
     /// W7-43 — a monotonic counter for the `__opt{n}` binding the Option lowering synthesizes, so a
     /// carrier nested inside another carrier's operand can never shadow it. Mirrors the desugar
     /// walker's `next_tmp`; never reset (uniqueness within one checked graph is free).
@@ -2047,7 +2111,7 @@ struct Checker {
     bare_types: HashMap<String, String>,
     /// EDITOR HOVER (LSP): when `Some`, a single-position probe — the 1-based `(line, col)` of the
     /// token under the cursor. `None` for an ordinary check (zero overhead). See [`hover_type`].
-    hover_probe: Option<(usize, usize)>,
+    hover_probe: Option<(u32, u32)>,
     /// The entry module the probe applies to; recording is gated on `current_module_id == hover_entry`
     /// so a same-named symbol in an imported dependency can't shadow the entry-buffer hit.
     hover_entry: Option<ModuleId>,

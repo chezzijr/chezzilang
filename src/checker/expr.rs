@@ -741,7 +741,14 @@ impl Checker {
                 named,
                 span,
             );
-            self.keyword_calls.insert(key, perm);
+            crate::checker::record_call_table_entry(
+                &mut self.keyword_calls,
+                &mut self.table_conflicts,
+                key,
+                perm,
+                "keyword-argument",
+                span,
+            );
         }
     }
 

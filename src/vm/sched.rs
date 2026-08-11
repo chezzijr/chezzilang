@@ -532,7 +532,7 @@ impl Vm {
                     .into_fiber(i, 0),
             );
         }
-        let deadlock_err = self.err(DEADLOCK_MSG.to_string(), Span { line: 1, col: 1 });
+        let deadlock_err = self.err(DEADLOCK_MSG.to_string(), Span::RUNTIME);
         // Worker count must account for the early-enlisted OUTER scopes' tasks too (case-A: `main`'s `O`),
         // so a multi-task inner nursery + outer siblings still gets real parallelism. We don't yet know
         // the outer totals here, so size to a reasonable upper bound (core count) capped by total work
@@ -770,7 +770,7 @@ impl Vm {
             self.mn.is_some(),
             "an eager nursery only activates on a worker shell (gated by mn.is_some())"
         );
-        let deadlock_err = self.err(DEADLOCK_MSG.to_string(), Span { line: 1, col: 1 });
+        let deadlock_err = self.err(DEADLOCK_MSG.to_string(), Span::RUNTIME);
         // wid 0 = inline join worker; wid 1 = the dedicated raw drainer below.
         let mut inner = MnSched::new(0, 2, Arc::clone(&cancel), deadlock_err, self.heap.mem_cap());
         // gaps.md B5 — this eager sched is PRIVATE (no link to the parent). A `send`/`close` inside its
@@ -1932,7 +1932,7 @@ impl Vm {
             // It wins over any sibling fault — a hard halt is never demoted to a catchable error.
             (Some(code), _, _) => {
                 self.pending_exit = Some(code);
-                Err(self.err("exit".to_string(), Span { line: 1, col: 1 }))
+                Err(self.err("exit".to_string(), Span::RUNTIME))
             }
             // A real fault propagates normally so an outer `recover:` can still catch it (unless it
             // carries a hard-halt marker, in which case `first_hard_fault` already selected it above
@@ -2012,7 +2012,7 @@ impl Vm {
                     if self.all_children_done() {
                         return Ok(());
                     }
-                    return Err(self.err(DEADLOCK_MSG.to_string(), Span { line: 1, col: 1 }));
+                    return Err(self.err(DEADLOCK_MSG.to_string(), Span::RUNTIME));
                 }
             }
         }
@@ -2087,7 +2087,7 @@ impl Vm {
         match first_exit {
             Some((_, code)) => {
                 self.pending_exit = Some(code);
-                self.err("exit".to_string(), Span { line: 1, col: 1 })
+                self.err("exit".to_string(), Span::RUNTIME)
             }
             None => first_fault.1,
         }
@@ -2129,7 +2129,7 @@ impl Vm {
                     state: FiberState::Done,
                     task_index: i,
                     scope_id: 0,
-                    span: Span { line: 1, col: 1 },
+                    span: Span::RUNTIME,
                     resume_native: None,
                 },
             )
@@ -2540,7 +2540,7 @@ impl Vm {
         memo: &mut WireMemo,
     ) -> Result<WireValue, RuntimeError> {
         if depth > MAX_STRUCTURAL_DEPTH {
-            return Err(self.depth_exceeded_err(Span { line: 0, col: 0 }));
+            return Err(self.depth_exceeded_err(Span::default()));
         }
         // W7-4: a cross-heap STORE re-emits each cell's full definition once per depth-1 subtree, so
         // every piece an `RwShared` read view drains alone is self-contained (see [`WireMemo`]).
@@ -2835,7 +2835,7 @@ impl Vm {
                         return Err(self.err(
                             "a generator cannot be sent across tasks as part of a reference cycle"
                                 .to_string(),
-                            Span { line: 0, col: 0 },
+                            Span::default(),
                         ));
                     }
                     memo.gens_on_stack.insert(h);
@@ -2871,14 +2871,14 @@ impl Vm {
                             if g.ctx.frames.len() != 1 {
                                 return Err(self.err(
                                     "a generator suspended across more than one call frame cannot be sent across tasks".to_string(),
-                                    Span { line: 0, col: 0 },
+                                    Span::default(),
                                 ));
                             }
                             let frame = &g.ctx.frames[0];
                             if !frame.deferred.is_empty() {
                                 return Err(self.err(
                                     "a generator suspended with a pending `defer` cannot be sent across tasks".to_string(),
-                                    Span { line: 0, col: 0 },
+                                    Span::default(),
                                 ));
                             }
                             // The sole body frame's home/closure equal the core's by construction
@@ -2887,7 +2887,7 @@ impl Vm {
                             if frame.home != g.home || frame.closure != g.closure {
                                 return Err(self.err(
                                     "a generator with an inconsistent parked frame cannot be sent across tasks".to_string(),
-                                    Span { line: 0, col: 0 },
+                                    Span::default(),
                                 ));
                             }
                             let mut wstack = Vec::with_capacity(g.ctx.stack.len());
@@ -4497,7 +4497,7 @@ impl Vm {
         memo: &mut WireMemo,
     ) -> Result<SnapValue, RuntimeError> {
         if depth > MAX_STRUCTURAL_DEPTH {
-            return Err(self.depth_exceeded_err(Span { line: 0, col: 0 }));
+            return Err(self.depth_exceeded_err(Span::default()));
         }
         let h = match v.as_obj() {
             Some(h) => h,

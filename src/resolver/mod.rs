@@ -70,6 +70,11 @@ pub struct LoadedModule {
     /// Dotted path (`["core","db"]`); empty for the entry module.
     pub dotted: Vec<String>,
     pub ast: Module,
+    /// The module's [`Span::file`] id (`1..n`, never 0), stamped into every span this module's
+    /// source lexed to. Distinct per module — that is what makes the checker→compiler side-table
+    /// keys injective across the graph (`docs/gaps.md` W7-49). Kept here so a diagnostic can map a
+    /// span's `file` back to a module label.
+    pub file: u32,
     pub imports: Vec<ResolvedImport>,
     /// `Some(name)` for a **native** std module (`std.math`/`std.io`/`std.os`, M6c): a virtual
     /// module with no `.chz` file, whose members are Rust `NativeFn`s injected by each engine.
@@ -339,6 +344,7 @@ fn build_graph_impl(
         order: Vec::new(),
         entry_override,
         max_depth: MAX_IMPORT_DEPTH,
+        file_seq: std::cell::Cell::new(0),
     };
     // ALWAYS-LINK std.prelude: the eight universe builtins' SIGNATURES (`ord`/`chr`/`panic`/`int`/
     // `float`/`str`/`bytes`/`bytearray`, phase 3a) are declared here as `native fn`/`native ctor` decls
@@ -353,8 +359,8 @@ fn build_graph_impl(
     let prelude_path = ["std".to_string(), "prelude".to_string()];
     let prelude_file = module_file(&prelude_path, &b.project_root, &b.std_root);
     let prelude_id = ModuleId(canonical_or_abs(&prelude_file));
-    b.visit(&prelude_id, &prelude_path, Span { line: 1, col: 1 })?;
-    b.visit(&entry_id, &[], Span { line: 1, col: 1 })?;
+    b.visit(&prelude_id, &prelude_path, Span::RUNTIME)?;
+    b.visit(&entry_id, &[], Span::RUNTIME)?;
     let mut graph = ModuleGraph {
         entry: entry_id,
         modules: b.order,
@@ -390,6 +396,9 @@ struct Builder {
     /// Modules currently being processed (cycle detection), with their dotted labels.
     on_stack: Vec<(ModuleId, Vec<String>)>,
     order: Vec<LoadedModule>,
+    /// Monotonic source of [`LoadedModule::file`] ids. A `Cell` because `parse` runs from `&self`
+    /// contexts; the first module lexed gets 1, so 0 stays the synthesized/standalone sentinel.
+    file_seq: std::cell::Cell<u32>,
     /// If set, `(entry_id, source)` — the entry module reads from this string instead of disk.
     entry_override: Option<(ModuleId, String)>,
     /// Import-chain depth backstop (see [`MAX_IMPORT_DEPTH`]). Fielded so tests can inject a tiny
@@ -502,7 +511,7 @@ impl Builder {
                 }
             },
         };
-        let ast = self.parse(&source, dotted)?;
+        let (ast, file) = self.parse(&source, dotted)?;
         let resolved = self.resolve_ast_imports(id, dotted, &ast)?;
 
         self.visited.insert(id.clone(), ());
@@ -510,6 +519,7 @@ impl Builder {
             id: id.clone(),
             dotted: dotted.to_vec(),
             ast,
+            file,
             imports: resolved,
             native: None,
         });
@@ -597,10 +607,15 @@ impl Builder {
             return;
         }
         self.visited.insert(id.clone(), ());
+        // No source is lexed here (the AST is empty), but still burn an id so `file` is unique across
+        // EVERY module in the graph — the invariant is easier to assert than "unique among the ones
+        // that lexed".
+        self.file_seq.set(self.file_seq.get() + 1);
         self.order.push(LoadedModule {
             id: id.clone(),
             dotted: name.split('.').map(str::to_string).collect(),
             ast: Module { stmts: Vec::new() },
+            file: self.file_seq.get(),
             imports: Vec::new(),
             native: Some(name),
         });
@@ -635,7 +650,7 @@ impl Builder {
             span: import_span,
             module: Some(dotted_label(&dotted)),
         })?;
-        let ast = self.parse(&source, &dotted)?;
+        let (ast, file) = self.parse(&source, &dotted)?;
         // Resolve imports (pushing each dependency to `order` first) BEFORE marking visited + pushing
         // this module — mirrors `visit`, keeping the deps-first `order` invariant and letting a cycle
         // re-entry hit `enter_module_guard`'s `on_stack` check instead of the visited early-return.
@@ -645,33 +660,45 @@ impl Builder {
             id: id.clone(),
             dotted,
             ast,
+            file,
             imports,
             native: Some(name),
         });
         Ok(())
     }
 
-    /// Lex + parse a module's source, wrapping failures with the module label (since `Span`
-    /// carries no filename).
-    fn parse(&self, source: &str, dotted: &[String]) -> Result<Module, ResolveError> {
+    /// Lex + parse a module's source, wrapping failures with the module label (a `Span` carries a
+    /// module id, not a path, so the label is still what a human reads).
+    ///
+    /// This is the ONE production lex seam for the module graph, and therefore where each module's
+    /// [`Span::file`] id is assigned: `1..n`, never 0 (0 is reserved for synthesized / standalone
+    /// single-file lexes). That id is what keeps the checker→compiler side tables injective across
+    /// modules — see the [`Span`] doc and `docs/gaps.md` W7-49.
+    fn parse(&self, source: &str, dotted: &[String]) -> Result<(Module, u32), ResolveError> {
+        // `Cell`, not `&mut self`: `parse` is called from `&self` contexts.
+        let file = self.file_seq.get() + 1;
+        self.file_seq.set(file);
         // Capture the doc-comment side-channel alongside the tokens, so the AST the checker/hover
         // sees carries each declaration's doc. The token stream is identical to `tokenize` — docs are
         // purely informational (LSP hover) and runtime-inert — so every other resolver behavior is
         // unchanged. This is the single graph seam that threads docs in.
         let (tokens, comments) =
-            lexer::tokenize_with_comments(source).map_err(|e| ResolveError {
+            lexer::tokenize_with_comments(source, file).map_err(|e| ResolveError {
                 message: prefix(dotted, e.to_string()),
                 span: Span {
-                    line: e.line,
+                    // `as u32`: a 1-based source line counter — cannot approach u32::MAX.
+                    line: e.line as u32,
                     col: 1,
+                    file,
                 },
                 module: opt_label(dotted),
             })?;
-        parser::parse_with_docs(tokens, comments).map_err(|e| ResolveError {
+        let ast = parser::parse_with_docs(tokens, comments).map_err(|e| ResolveError {
             message: prefix(dotted, e.to_string()),
             span: e.span,
             module: opt_label(dotted),
-        })
+        })?;
+        Ok((ast, file))
     }
 
     fn scan_imports(&self, ast: &Module) -> Vec<(Import, Span)> {
@@ -1331,6 +1358,7 @@ mod tests {
             order: Vec::new(),
             entry_override: None,
             max_depth,
+            file_seq: std::cell::Cell::new(0),
         }
     }
 
@@ -1348,7 +1376,7 @@ mod tests {
         let entry_id = ModuleId(canonical_or_abs(&t.path("m0.chz")));
         let mut b = deep_chain_builder(t.0.clone(), 8);
         let err = b
-            .visit(&entry_id, &[], Span { line: 1, col: 1 })
+            .visit(&entry_id, &[], Span::RUNTIME)
             .expect_err("a 12-deep chain must trip the depth-8 guard");
         assert!(
             err.message.contains("import chain too deep"),
@@ -1372,9 +1400,7 @@ mod tests {
         t.write("m11.chz", "fn f(): print(1)\n");
         let entry_id = ModuleId(canonical_or_abs(&t.path("m0.chz")));
         let mut b = deep_chain_builder(t.0.clone(), 8);
-        let err = b
-            .visit(&entry_id, &[], Span { line: 1, col: 1 })
-            .unwrap_err();
+        let err = b.visit(&entry_id, &[], Span::RUNTIME).unwrap_err();
         // The offending import lives inside a non-entry module, so it carries a module prefix and
         // the span of the `import` statement (line 1 of that module), never the entry's synthetic {1,1}.
         assert!(
@@ -1390,5 +1416,64 @@ mod tests {
             err.module.is_some(),
             "depth error should carry the target dotted label"
         );
+    }
+
+    // W7-49 — `Span::file` is a TABLE KEY component, so the ONE thing that can make the fix silently
+    // not work is a lex seam that forgets to stamp it, leaving two modules both on `file: 0`. Assert
+    // the property as a GRAPH-LEVEL invariant over every module (not a spot check): every id is
+    // non-zero and pairwise distinct, and every span a module's own source lexed to carries that
+    // module's id. A new resolver lex path that skips the stamp fails this.
+    #[test]
+    fn every_module_gets_a_distinct_nonzero_span_file_id() {
+        let t = TmpDir::new();
+        t.write("chezzi.toml", "[project]\nname = \"g\"\n");
+        t.write("a.chz", "fn fa() -> int:\n    return 1\n");
+        t.write(
+            "b.chz",
+            "import a\nfn fb() -> int:\n    return a.fa() + 1\n",
+        );
+        let entry = t.write(
+            "main.chz",
+            "import a\nimport b\nfn main():\n    print(b.fb())\n",
+        );
+
+        let g = build_graph(&entry).expect("graph should build");
+        assert!(
+            g.modules.len() >= 3,
+            "expected at least the 3 written modules, got {}",
+            g.modules.len()
+        );
+
+        let mut seen: HashMap<u32, String> = HashMap::new();
+        for lm in &g.modules {
+            assert_ne!(
+                lm.file,
+                0,
+                "module {} got the synthesized/standalone sentinel id 0",
+                lm.label()
+            );
+            if let Some(other) = seen.insert(lm.file, lm.label()) {
+                panic!(
+                    "modules {} and {} share span file id {} — the side-table keys alias",
+                    other,
+                    lm.label(),
+                    lm.file
+                );
+            }
+            // Every span this module's own source lexed to carries this module's id.
+            for stmt in &lm.ast.stmts {
+                if stmt.span.line == 0 {
+                    continue; // synthesized
+                }
+                assert_eq!(
+                    stmt.span.file,
+                    lm.file,
+                    "a stmt span in {} carries file {} (module id is {})",
+                    lm.label(),
+                    stmt.span.file,
+                    lm.file
+                );
+            }
+        }
     }
 }

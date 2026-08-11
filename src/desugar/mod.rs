@@ -1732,6 +1732,7 @@ mod tests {
                 id,
                 dotted: vec![],
                 ast,
+                file: 0,
                 imports: vec![],
                 native: None,
             }],
@@ -1749,6 +1750,7 @@ mod tests {
                 id,
                 dotted: vec![],
                 ast,
+                file: 0,
                 imports: vec![],
                 native: None,
             }],
@@ -2321,8 +2323,22 @@ mod tests {
         };
         let (inner, outer) = name_spans("x := a?.m(c)?.n(c)\n");
         assert_ne!(inner, outer, "two witness calls must not share one key");
-        assert_eq!(inner, Span { line: 1, col: 9 });
-        assert_eq!(outer, Span { line: 1, col: 15 });
+        assert_eq!(
+            inner,
+            Span {
+                line: 1,
+                col: 9,
+                file: 0
+            }
+        );
+        assert_eq!(
+            outer,
+            Span {
+                line: 1,
+                col: 15,
+                file: 0
+            }
+        );
     }
 
     #[test]

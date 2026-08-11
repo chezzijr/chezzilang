@@ -2,6 +2,74 @@
 
 Single source of truth for "what am I doing next." Update after every work session.
 
+> **✅ W7-49 landed 2026-08-11 — a default-parameter expression spliced from one module into another
+> no longer aliases the caller's own checker→compiler side-table entries.** `Span` grew a `file: u32`
+> (and shrank: 16 → 24 → **12** bytes), so `KeywordKey` / `WitnessKey` / `CarrierKey` are injective
+> across the module graph again. **Measured, not reasoned about, and pre-existing in two SHIPPED
+> tables** — `KeywordTable` and `WitnessTable` have carried this since they landed; `W7-43`'s
+> `CarrierTable` merely inherited it.
+>
+> **The bug.** `desugar` splices a callee's default into the CALLER's AST as a clone that keeps the
+> DEFINING module's spans, while the record site builds the key with the CALLING module's index. Two
+> unrelated call sites at the same `line:col` in two files shared one entry; the later `insert` won,
+> and the type-blind compiler applied the survivor's decision to both — a **silent wrong value under a
+> green `chezzi check`**, byte-identical on both engines, so parity was blind to it. All three tables
+> reproduce, each with a **one-column-shift control** that makes the fault vanish (which is what
+> isolates it to the key, not the lowering):
+>
+> | table | before (`19f7696a`) | after |
+> |---|---|---|
+> | `KeywordTable` | `709` / **`102`** — lib's identity permutation applied to main's reversed call | `709` / `201` |
+> | `CarrierTable` | `3` / `runtime error: no match arm for variant 'Ok'` — the Option lowering emitted for a Result carrier | `3` / `4` |
+> | `WitnessTable` | `7` / `no field 's' on Counter(n=7)` — the wrong CONCRETE TYPE built | `7` / `oth` |
+>
+> The witness row is the one the gap section had only **predicted**: it listed three modes worst-first
+> and the measured one is the **middle** entry (wrong concrete type), not the wrong-`argc` one. Modes
+> (1) and (3) need colliding callees with *different* witness counts; the gaps section now records the
+> measurement instead of the guess.
+>
+> **The fix.** `file` is assigned once at the single production lex seam `resolver::Builder::parse`
+> (`1..n`; `0` stays the synthesized/standalone sentinel), an interpolation fragment inherits its
+> enclosing literal's id, and **the three key tuples and all nine record/lookup sites are unchanged** —
+> the spliced clone already carried the definer's spans, so it now carries the definer's file id and
+> both halves keep deriving the key from the same AST. Nesting composes with **no stack**. Two
+> invariant tests pin it: a graph-level resolver test (every module's id non-zero, pairwise distinct,
+> and stamped on that module's own spans — a new lex path that forgets the stamp fails it) and
+> `span_stays_twelve_bytes` (`Proto.lines` holds one `Span` per OPCODE, so the width is hot VM data;
+> the 24-byte intermediate regressed a bench AND pushed `parser::MAX_DEPTH` and `vm::VM_STACK_BYTES`
+> off their calibrated margins).
+>
+> **Two guards landed with it.** (1) The `KeywordTable` lookup now **hard-errors on a miss** instead of
+> falling through to `Op::Call(args.len())`, which silently **dropped every named argument** — the
+> carrier and witness lookups already faulted, and that asymmetry is how a keyword miss became a wrong
+> value instead of a diagnostic. One shared `Compiler::keyword_perm` serves the call, `spawn` and
+> `defer` sites; `print(sep=…, end=…)`, the one path that deliberately leaves `named` populated with no
+> table entry, returns from the `prelude_fn` arm long before any of them (verified, not assumed).
+> (2) The three record sites go through `checker::record_call_table_entry`, which refuses to overwrite
+> a key bound to a **different** value. It compares **VALUES, never presence** — a same-key/same-value
+> re-insert is the normal case (two call sites omitting one default), and a presence-checking guard
+> would have rejected every program with a same-module default.
+>
+> **Surviving residual, now loud.** The same default spliced twice into the SAME module keeps one key,
+> and a default is cloned into the CALLER's scope, so a caller-side local can shadow the definer's
+> global and the two splices resolve differently (measured `709` / **`907`** before; both should be
+> `709`). That is now a compile error naming the shadowing local. The real fix is to compile a default
+> **once in its defining module** — which is also where Chezzi **diverges from CPython**, whose
+> defaults are evaluated at `def` time in the DEFINING scope, where a caller's local can never reach
+> them.
+>
+> **Evidence, honestly bounded.** The corpus contains **zero** cross-module spliced non-literal
+> defaults, so the 978-run pre/post sweep proved only *no regression* — it proves nothing about the fix
+> working. The proof is the measured repro plus four new Rust tests (`src/vm/tests.rs`,
+> `a_spliced_default_*` + the residual backstop), each verified **failing on a binary built from
+> `19f7696a`** and passing now, and `tests/chz/spec/default_splice_keys_test.chz` (4 `test fn`, both
+> engines) for the two guards' over-fire modes. Bench: flat-or-faster everywhere except `map`, whose
+> delta a padding control shows is **alignment, not size** — recorded in `docs/benchmarks.md` and left
+> to the perf track. Two pre-existing findings from the same dig are filed, not fixed: **`W7-50`**
+> (`parser::MAX_DEPTH = 64` is a real edge — 65 passes, 66 aborts on a ~2 MiB thread — and two LSP
+> entry points reach the parser without the `on_frontend_stack` wrapper) and **`W7-51`** (third-level
+> default splicing is un-normalized; `desugar` runs exactly two passes).
+
 > **✅ W7-43 landed 2026-08-11 — `?.` on a `Result` now MEANS `?` then `.`; the whitespace cliff is
 > gone, not just the diagnostics.** `f()?.len()` where `f() -> Result[str, str]` used to emit **three**
 > errors — `'Some' is not a variant of Result`, `'None' is not a variant of Result`, `non-exhaustive
