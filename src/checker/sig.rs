@@ -1621,21 +1621,15 @@ impl Checker {
                     ("Map", [k, v]) => {
                         let key = self.resolve_type(k, span);
                         let value = self.resolve_type(v, span);
-                        if !self.is_hashable_key(&key) {
-                            self.error(
-                            span,
-                            format!("Map key type must implement Hashable (int, str, bool, or a struct/enum/newtype defining hash(self) -> int), found {key}"),
-                        );
+                        if let Some(why) = self.key_ty_reject(&key) {
+                            self.error(span, format!("Map key type {why}"));
                         }
                         Ty::map(key, value)
                     }
                     ("Set", [t]) => {
                         let elem = self.resolve_type(t, span);
-                        if !self.is_hashable_key(&elem) {
-                            self.error(
-                            span,
-                            format!("Set element type must implement Hashable (int, str, bool, or a struct/enum/newtype defining hash(self) -> int), found {elem}"),
-                        );
+                        if let Some(why) = self.key_ty_reject(&elem) {
+                            self.error(span, format!("Set element type {why}"));
                         }
                         Ty::set(elem)
                     }
@@ -3051,11 +3045,10 @@ impl Checker {
                         // expr even when the map's key type is still `Unknown` (an empty `{}`), so
                         // `m:={}; m[1.5]=..` faults here (mirrors the literal `{1.5:..}` ban) rather
                         // than slipping past check.
-                        if !idx_ty.is_unknown() && !self.is_hashable_key(&idx_ty) {
-                            self.error(
-                                index.span,
-                                format!("map key type must implement Hashable (int, str, bool, or a struct/enum/newtype defining hash(self) -> int), found {idx_ty}"),
-                            );
+                        if !idx_ty.is_unknown()
+                            && let Some(why) = self.key_ty_reject(&idx_ty)
+                        {
+                            self.error(index.span, format!("map key type {why}"));
                         }
                         self.check_assign_value(&v, op, &val_ty, target.span);
                     }

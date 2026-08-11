@@ -1577,11 +1577,10 @@ impl Checker {
                         targ_elem.unwrap_or(Ty::Unknown)
                     }
                 };
-                if !elem.is_unknown() && !self.is_hashable_key(&elem) {
-                    self.error(
-                        span,
-                        format!("Set element type must implement Hashable (int, str, bool, or a struct/enum/newtype defining hash(self) -> int), found {elem}"),
-                    );
+                if !elem.is_unknown()
+                    && let Some(why) = self.key_ty_reject(&elem)
+                {
+                    self.error(span, format!("Set element type {why}"));
                 }
                 Some(Ty::set(elem))
             }
@@ -1664,11 +1663,10 @@ impl Checker {
                         targ_kv.clone().unwrap_or((Ty::Unknown, Ty::Unknown))
                     }
                 };
-                if !k.is_unknown() && !self.is_hashable_key(&k) {
-                    self.error(
-                        span,
-                        format!("Map key type must implement Hashable (int, str, bool, or a struct/enum/newtype defining hash(self) -> int), found {k}"),
-                    );
+                if !k.is_unknown()
+                    && let Some(why) = self.key_ty_reject(&k)
+                {
+                    self.error(span, format!("Map key type {why}"));
                 }
                 Some(Ty::map(k, v))
             }

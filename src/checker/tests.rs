@@ -1235,7 +1235,6 @@ b := Box(Tag(2))
         "Some(a) == Some(b)",
         "(a,) == (b,)",
         "{\"k\": a} == {\"k\": b}",
-        "Set([a]) == Set([b])",
     ] {
         let errs = check_entry(&format!("{COND}print({expr})\n"));
         assert_eq!(
@@ -1252,6 +1251,25 @@ b := Box(Tag(2))
             errs[0].message
         );
     }
+    // A `Set` of the same element carries THREE errors, not one, and all three are real: W7-45 made
+    // `Box[Tag]` an illegal set ELEMENT, so each of the two constructions is now rejected on its own
+    // line — as rustc does, one diagnostic per site. What this arm owns is that the comparison still
+    // reports exactly once.
+    let errs = check_entry(&format!("{COND}print(Set([a]) == Set([b]))\n"));
+    assert_eq!(
+        errs.iter()
+            .filter(|e| e.message.starts_with("cannot compare "))
+            .count(),
+        1,
+        "expected exactly one comparison error, got {errs:?}"
+    );
+    assert_eq!(
+        errs.iter()
+            .filter(|e| e.message.starts_with("Set element type "))
+            .count(),
+        2,
+        "expected both constructions rejected, got {errs:?}"
+    );
     // `Result` needs an annotation to land as `Result[Box[Tag]]`, and a struct FIELD is the
     // recursion Task 1's walk owns — both reached through the same single guard.
     entry_rejects(
@@ -1501,6 +1519,114 @@ b := Box(Tag(2))
             .message
             .starts_with("cannot test membership of int in"),
         "got {errs:?}"
+    );
+}
+
+/// **W7-45, the map/set half — a key type must be `Eq`, not merely `Hashable`.** A `Map`/`Set` probe
+/// runs `values_equal` on a hash COLLISION, so a key whose `eq` has unsatisfied `where` bounds
+/// check-cleaned and then faulted. It is the worse half of the row because the verdict depended on
+/// hash values: the SAME unsound program with a constant `hash` faulted and with distinct hashes
+/// printed a silent wrong `false`, rc=0.
+///
+/// **Rust owns this seam and spells it in the bound:** `impl<T: Eq + Hash> HashSet<T>` /
+/// `impl<K: Eq + Hash, V> HashMap<K, V>` — `Hash` alone is never enough. Chezzi's `Hashable`
+/// protocol does not embed `Eq` (`embeds: Vec::new()`), so the key check has to ask both.
+///
+/// One line in `key_ty_reject` is the whole fix, because EVERY map-key and set-element position in
+/// the checker funnels through it. This test is the verification of that claim rather than an
+/// assumption about it: the literal, the comprehension, `Set(list)` construction (a site distinct
+/// from the `Set([…])` literal form), the annotation, `m[k]` read and write, and each container
+/// method are all asserted from the one change.
+#[test]
+fn a_map_key_or_set_element_must_be_eq_not_merely_hashable() {
+    const COND: &str = "\
+struct Tag:
+    n: int
+struct Box[T]:
+    val: T
+    fn compare(self, other: Self) -> int where T: Comparable:
+        if self.val < other.val:
+            return -1
+        return 0
+    fn eq(self, other: Self) -> bool where T: Comparable:
+        return self.compare(other) == 0
+    fn hash(self) -> int:
+        return 1
+a := Box(Tag(1))
+b := Box(Tag(2))
+";
+    const WHY: &str = "Box[Tag]'s `eq` requires Tag: Comparable";
+    // Each of these was measured check-clean-then-faulting on the pre-change binary.
+    for tail in [
+        "print(Set([a]).len())\n",                        // Set literal-ish ctor
+        "s := Set([a])\ns.add(b)\nprint(s.len())\n",      // .add
+        "s := Set([a])\nprint(s.has(b))\n",               // .has
+        "s := Set([a])\nprint(b in s)\n",                 // `in` over a set
+        "print({a: 1}.len())\n",                          // map literal
+        "m := {a: 1}\nprint(m.has(b))\n",                 // Map.has
+        "m := {a: 1}\nprint(m.get(b))\n",                 // Map.get
+        "m := {a: 1}\nm[b] = 2\nprint(m.len())\n",        // index write
+        "m := {a: 1}\nprint(m[b])\n",                     // index read
+        "m := {a: 1}\nprint(b in m)\n",                   // `in` over a map
+        "print({x for x in [a]}.len())\n",                // set comprehension
+        "print({x: 1 for x in [a]}.len())\n",             // map comprehension
+        "xs := [a]\nprint(Set(xs).len())\n",              // Set(list) CONSTRUCTION
+        "s: Set[Box[Tag]] = Set([])\nprint(s.len())\n",   // Set annotation
+        "m: Map[Box[Tag], int] = {}\nprint(m.len())\n",   // Map annotation
+        "s: Set[Box[Tag]] = Set([])\ns2 := s.union(s)\n", // set algebra
+        "struct W:\n    s: Set[Box[Tag]]\nprint(W(Set([a])).s.len())\n", // a struct FIELD's type
+    ] {
+        let errs = check_entry(&format!("{COND}{tail}"));
+        assert!(
+            errs.iter().any(|e| e.message.ends_with(WHY)),
+            "`{tail}`: expected the eq-bound reason, got {errs:?}"
+        );
+    }
+    // The message TAIL changes with the reason; the four prefixes do not, so no existing needle moves.
+    let errs = check_entry(&format!("{COND}print(Set([a]).len())\n"));
+    assert_eq!(
+        errs[0].message,
+        format!("Set element type {WHY}"),
+        "got {errs:?}"
+    );
+    let errs = check_entry(&format!("{COND}print({{a: 1}}.len())\n"));
+    assert_eq!(
+        errs[0].message,
+        format!("map key type {WHY}"),
+        "got {errs:?}"
+    );
+    // The Hashable half still reports the Hashable text — the new conjunct does not swallow it, and
+    // a type that fails BOTH reports only the first (`Hashable` is checked first, as before).
+    rejects(
+        "struct Bare:\n    a: int\ns: Set[Bare] = Set()\n",
+        "Set element type must implement Hashable",
+    );
+
+    // ---- the boundary: every row measured green on the PRE-CHANGE binary too ----
+
+    // Ordinary key types, at the literal / comprehension / ctor / annotation / index sites.
+    entry_ok(
+        "struct Z:\n    pass\nstruct H:\n    n: int\n    fn hash(self) -> int:\n        return self.n\nprint(Set([1]).len())\nprint(Set([\"s\"]).len())\nprint(Set([true]).len())\nprint(Set([b\"a\"]).len())\nprint(Set([Z()]).len())\nprint(Set([H(1)]).len())\nprint({\"k\": 1}.len())\nprint({x for x in [1]}.len())\nprint({x: 1 for x in [1]}.len())\nxs := [1, 2]\nprint(Set(xs).len())\nm := {\"k\": 1}\nprint(m[\"k\"])\nm[\"j\"] = 2\n",
+    );
+    // The SATISFIED instantiation of the very same conditional-`eq` struct, everywhere.
+    entry_ok(&format!(
+        "{COND}s := Set([Box(1)])\ns.add(Box(2))\nprint(s.has(Box(1)))\nm := {{Box(1): 1}}\nm[Box(2)] = 2\nprint(m[Box(1)])\nprint(Box(1) in m)\n"
+    ));
+    entry_ok(&format!(
+        "{COND}s: Set[Box[int]] = Set([])\nm: Map[Box[int], int] = {{}}\nprint(s.len() + m.len())\n"
+    ));
+    // An empty literal's element/key type is still `Unknown` — must not cascade.
+    entry_ok(&format!("{COND}print(Set([]).len())\nprint({{}}.len())\n"));
+    // ERASURE: a free `T` is a type not yet chosen. Bare `T` is rejected as before (it is not
+    // `Hashable`); a `T: Hashable` bound stays accepted, which the un-erased spelling would break —
+    // `Hashable` does not imply `Eq`, so `eq_bounds_unsatisfied` alone rejects every generic
+    // container body in the tree.
+    entry_ok(
+        "fn h[T: Hashable](xs: Set[T]) -> int:\n    return xs.len()\nfn k[T: Hashable](m: Map[T, int]) -> int:\n    return m.len()\nfn s2[T: Hashable](x: T) -> int:\n    s := Set([x])\n    s.add(x)\n    m := {x: 1}\n    return s.len() + m.len()\nprint(h(Set([1])) + k({1: 2}) + s2(1))\n",
+    );
+    rejects(
+        "fn h[T](xs: Set[T]) -> int:\n    return xs.len()\n",
+        "Set element type must implement Hashable",
     );
 }
 

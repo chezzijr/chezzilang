@@ -2115,11 +2115,10 @@ impl Checker {
         let mut elem = Ty::Unknown;
         for e in elems {
             let et = self.infer_value(e);
-            if !et.is_unknown() && !self.is_hashable_key(&et) {
-                self.error(
-                    e.span,
-                    format!("set element type must implement Hashable (int, str, bool, or a struct/enum/newtype defining hash(self) -> int), found {et}"),
-                );
+            if !et.is_unknown()
+                && let Some(why) = self.key_ty_reject(&et)
+            {
+                self.error(e.span, format!("set element type {why}"));
             }
             if elem.is_unknown() {
                 elem = et;
@@ -2145,11 +2144,10 @@ impl Checker {
         let mut value = Ty::Unknown;
         for (((k_expr, v_expr), kt), vt) in entries.iter().zip(&key_tys).zip(&val_tys) {
             let (kt, vt) = (kt.clone(), vt.clone());
-            if !kt.is_unknown() && !self.is_hashable_key(&kt) {
-                self.error(
-                    k_expr.span,
-                    format!("map key type must implement Hashable (int, str, bool, or a struct/enum/newtype defining hash(self) -> int), found {kt}"),
-                );
+            if !kt.is_unknown()
+                && let Some(why) = self.key_ty_reject(&kt)
+            {
+                self.error(k_expr.span, format!("map key type {why}"));
             }
             if key.is_unknown() {
                 key = kt;
@@ -2214,11 +2212,10 @@ impl Checker {
             CompKind::List => Ty::list(self.infer_value(elem)),
             CompKind::Set => {
                 let et = self.infer_value(elem);
-                if !et.is_unknown() && !self.is_hashable_key(&et) {
-                    self.error(
-                        elem.span,
-                        format!("set element type must implement Hashable (int, str, bool, or a struct/enum/newtype defining hash(self) -> int), found {et}"),
-                    );
+                if !et.is_unknown()
+                    && let Some(why) = self.key_ty_reject(&et)
+                {
+                    self.error(elem.span, format!("set element type {why}"));
                 }
                 Ty::set(et)
             }
@@ -2226,11 +2223,10 @@ impl Checker {
                 let key = key.expect("a map comprehension always carries a key expression");
                 let kt = self.infer_value(key);
                 let vt = self.infer_value(elem);
-                if !kt.is_unknown() && !self.is_hashable_key(&kt) {
-                    self.error(
-                        key.span,
-                        format!("map key type must implement Hashable (int, str, bool, or a struct/enum/newtype defining hash(self) -> int), found {kt}"),
-                    );
+                if !kt.is_unknown()
+                    && let Some(why) = self.key_ty_reject(&kt)
+                {
+                    self.error(key.span, format!("map key type {why}"));
                 }
                 Ty::map(kt, vt)
             }

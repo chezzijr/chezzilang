@@ -709,14 +709,31 @@ impl Checker {
             .collect()
     }
 
-    /// Does concrete `ty` structurally satisfy `protocol`? Read-only. Primitives intrinsically
-    /// satisfy `Comparable`; structs satisfy any protocol whose methods they all implement.
-    /// Valid `map` key / `set` element types: anything that satisfies the `Hashable` protocol —
-    /// the scalars `int`/`str`/`bool` intrinsically, or a struct defining `hash(self) -> int`.
-    /// `float` is rejected (NaN/equality footgun); `Unknown` is tolerated (no cascade). With this,
-    /// user structs can be map keys / set elements, hashed via their `hash()` at runtime.
-    pub(super) fn is_hashable_key(&self, t: &Ty) -> bool {
-        self.satisfies(t, "Hashable").is_ok()
+    /// Why `t` may not be a `map` key / `set` element — as the diagnostic's TAIL, so each of the nine
+    /// call sites keeps its own prefix (`"Map key type "`, `"map key type "`, `"Set element type "`,
+    /// `"set element type "`). `None` = it may. `Unknown` is tolerated (no cascade).
+    ///
+    /// **Two obligations, not one (W7-45).** `Hashable` — the scalars `int`/`str`/`bool`
+    /// intrinsically, or a struct/enum/newtype defining `hash(self) -> int`; `float` is refused
+    /// (NaN/equality footgun). AND `Eq`: a probe compares candidates with `values_equal` on a hash
+    /// COLLISION, so a key whose `eq` carries `where` bounds this instantiation does not satisfy
+    /// check-cleaned and then faulted — and worse, only *sometimes*, since with distinct hashes no
+    /// `eq` runs and the program printed a silent wrong answer at rc=0. `Hashable` does not embed
+    /// `Eq` (`embeds: Vec::new()`), so it has to be asked separately; **Rust spells the same pair in
+    /// the bound**: `impl<T: Eq + Hash> HashSet<T>` / `impl<K: Eq + Hash, V> HashMap<K, V>`.
+    ///
+    /// Every map-key and set-element position funnels through here (literal, comprehension,
+    /// `Set(list)` construction, annotation, `m[k]` read and write, `refine_receiver`'s
+    /// late-concrete element, and thereby every `Map`/`Set`/`RwShared` method), so this is the whole
+    /// of W7-45's map/set half. The `Eq` conjunct is second because a non-`Hashable` type must keep
+    /// reporting the Hashable text.
+    pub(super) fn key_ty_reject(&self, t: &Ty) -> Option<String> {
+        if self.satisfies(t, "Hashable").is_err() {
+            return Some(format!(
+                "must implement Hashable (int, str, bool, or a struct/enum/newtype defining hash(self) -> int), found {t}"
+            ));
+        }
+        self.eq_bounds_unsatisfied_erased(t)
     }
 
     /// Refine-on-first-use (empty-slot half of the `Ty::Unknown` soundness family). A bare empty
@@ -803,12 +820,9 @@ impl Checker {
         // tables don't). Map keys are handled in the `m[k]=v` index-assign refine path.
         if let Ty::Set(e) = &merged
             && !e.is_unknown()
-            && !self.is_hashable_key(e)
+            && let Some(why) = self.key_ty_reject(e)
         {
-            self.error(
-                obj.span,
-                format!("set element type must implement Hashable (int, str, bool, or a struct/enum/newtype defining hash(self) -> int), found {e}"),
-            );
+            self.error(obj.span, format!("set element type {why}"));
         }
         self.repin(name, merged);
     }
