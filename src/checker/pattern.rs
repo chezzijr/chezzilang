@@ -2489,6 +2489,11 @@ impl Checker {
                         subst(t, &names.into_iter().map(|n| (n, Ty::Unknown)).collect())
                     }
                 };
+                // `!either_unknown` leads DELIBERATELY: on a cascade the predicate is not run at all,
+                // rather than walked and its answer thrown away. Both operands are gated because
+                // `n == m` plus co-inhabitable args is NOT identical args — `may_be_equal`'s int/float
+                // and bytes/bytearray cross arms recurse in, so a left-only gate would give
+                // `Box(1) == Box(1.0)` and its mirror different verdicts off one hook (W7-41 trap 2).
                 if !either_unknown
                     && let Some(why) = self
                         .eq_bounds_unsatisfied(&erase(&l))
