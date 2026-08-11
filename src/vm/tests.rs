@@ -16427,6 +16427,22 @@ fn intrinsic_grants_all_have_vm_arms() {
             "-",
             "-",
         ),
+        // D1 — the kinds the widened `Eq` grant added. `enum`/`option`/`result` are ONE runtime
+        // shape (`Obj::Enum`), so their probes are what pin the `Obj::Enum` dispatch fallback.
+        r("tuple", "", "(1, 2)", "-", "-", "-", "-", "-", "-"),
+        r(
+            "enum",
+            "enum En:\n    A\n    B\n",
+            "En.A",
+            "-",
+            "-",
+            "-",
+            "-",
+            "-",
+            "-",
+        ),
+        r("option", "", "Some(1)", "-", "-", "-", "-", "-", "-"),
+        r("result", "", "Ok(1)", "-", "-", "-", "-", "-", "-"),
     ];
     // (method, call template) — `{r}` is the receiver, `{k}`/`{v}` the index key/value.
     let calls: &[(&str, &str)] = &[

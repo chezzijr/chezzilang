@@ -1487,6 +1487,15 @@ impl Vm {
                     self.push(v);
                     return Ok(());
                 }
+                // D1 (W6-3's rule, applied to the one dispatch arm that lacked it) — the checker
+                // grants `Eq` intrinsically to an `enum`, and `Option`/`Result` ARE `Obj::Enum` at
+                // runtime, so an erased `[T: Eq]` body's `a.eq(b)` must answer here. Miss-only, so
+                // an enum that DEFINES the method already dispatched above. Without this the grant
+                // is check-OK-then-`has no method 'eq'`, the class this whole milestone closes.
+                if let Some(v) = self.intrinsic_proto_method(recv, method, &args, span)? {
+                    self.push(v);
+                    return Ok(());
+                }
                 let display = crate::compiler::bare_display(&enum_key);
                 Err(self.err(format!("type {display} has no method '{method}'"), span))
             }

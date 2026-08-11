@@ -4,6 +4,17 @@
 use super::*;
 use std::collections::HashSet;
 
+thread_local! {
+    /// Re-entrancy depth of [`Checker::eq_bounds_unsatisfied`] — see its doc comment. Per-THREAD, so
+    /// parallel test threads never share it, and reset by the RAII guard on every exit path.
+    static EQ_BOUNDS_DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+/// How deep the `where T: Eq` ↔ structural-walk mutual recursion may go before
+/// [`Checker::eq_bounds_unsatisfied`] declines. Types nest shallowly; this only ever fires on a
+/// self-referential type argument, where the answer is "cannot prove unsound" either way.
+const EQ_BOUNDS_MAX_REENTRY: u32 = 16;
+
 /// **The intrinsic-grant ↔ runtime-arm pairing table (W6-3's structural ratchet).**
 ///
 /// One row per `(protocol, method, receiver-kind)` a built-in is granted conformance to
@@ -45,12 +56,25 @@ pub const INTRINSIC_PROTO_METHODS: &[(&str, &str, &str)] = &[
     ("Comparable", "compare", "float"),
     ("Comparable", "compare", "str"),
     ("Comparable", "compare", "newtype"),
-    // Eq — all FOUR scalars (`==` is defined on `bool` too, unlike `Comparable`) + a newtype (whose
-    // `==` unwraps to the underlying's native equality, exactly as its `<` unwraps to the ordering).
+    // Eq — D1: EVERY receiver kind whose `==` is the structural derive, which is every kind this
+    // table can key a row on except `nil` (not spellable as a value). The four scalars are all here
+    // because `==` is defined on `bool` too, unlike `Comparable`; a newtype's `==` unwraps to the
+    // underlying's native equality, exactly as its `<` unwraps to the ordering. `option`/`result`
+    // land on `Obj::Enum` at runtime, same as `enum`.
     ("Eq", "eq", "int"),
     ("Eq", "eq", "float"),
     ("Eq", "eq", "str"),
     ("Eq", "eq", "bool"),
+    ("Eq", "eq", "bytes"),
+    ("Eq", "eq", "bytearray"),
+    ("Eq", "eq", "list"),
+    ("Eq", "eq", "set"),
+    ("Eq", "eq", "map"),
+    ("Eq", "eq", "tuple"),
+    ("Eq", "eq", "struct"),
+    ("Eq", "eq", "enum"),
+    ("Eq", "eq", "option"),
+    ("Eq", "eq", "result"),
     ("Eq", "eq", "newtype"),
     // Stringable — all four scalars.
     ("Stringable", "str", "int"),
@@ -178,9 +202,22 @@ impl Checker {
             Ty::Tuple(_) => "tuple",
             Ty::Struct(..) => "struct",
             Ty::Enum(..) => "enum",
+            // `Option`/`Result` are their OWN `Ty`s but ONE runtime shape with `enum` (`Obj::Enum`);
+            // they are kinds of their own here because the ratchet keys the CHECKER's grant set, and
+            // the checker distinguishes them.
+            Ty::Option(_) => "option",
+            Ty::Result(..) => "result",
             Ty::NewType(..) => "newtype",
             _ => "?",
         }
+    }
+
+    /// The BUILT-IN cursor shape — `Ty::Struct("Iterator", [E])`, what `.iter()` mints and a
+    /// generator returns. It is a `Ty::Struct` but NOT a struct at runtime (`Obj::Iterator` /
+    /// `Obj::Generator`), and its dispatch arms deliberately expose only `next`/`iter`, so a
+    /// protocol grant keyed on `"struct"` would be check-OK-then-`has no method` for it.
+    fn is_cursor_ty(ty: &Ty) -> bool {
+        matches!(ty, Ty::Struct(n, a) if n == "Iterator" && a.len() == 1)
     }
 
     /// Grant `ty` conformance to `protocol` INTRINSICALLY (no user method) — the single funnel every
@@ -1534,12 +1571,44 @@ impl Checker {
         if protocol == "Comparable" && matches!(ty, Ty::Int | Ty::Float | Ty::Str) {
             return self.grant_intrinsic(protocol, ty);
         }
-        // `Eq` (sole method `eq(self, other: Self) -> bool`) is satisfied intrinsically by every
-        // scalar — all FOUR, because `==` is defined on `bool` as well (the membership is WIDER than
-        // `Comparable`'s, which has no ordering for `bool`). Structs/enums/newtypes fall through to
-        // the structural check below (a type without an `eq(self, Self) -> bool` stays rejected).
-        if protocol == "Eq" && matches!(ty, Ty::Int | Ty::Float | Ty::Bool | Ty::Str) {
-            return self.grant_intrinsic(protocol, ty);
+        // **D1 — `Eq` satisfaction IS what `==` accepts.** Chezzi's structural `==` is an automatic
+        // derive (`Vm::values_equal`) that never told the protocol system: `[1] == [1]`,
+        // `(1,2) == (1,2)`, `Some(1) == Some(1)`, `P(1) == P(2)` for a plain struct — every one of
+        // them works, while `where T: Eq` used to reject all of them because the grant was the four
+        // scalars and nothing else. That is what made `where T: Eq` unwritable and got the first
+        // W7-41 fix reverted (`docs/gaps.md` W7-41). **Rust owns this** — `Vec<i32>`, `(i32,i32)`,
+        // `Option<i32>`, `Vec<u8>` and `#[derive(PartialEq, Eq)] struct P` all satisfy `Eq` and all
+        // compile under `struct Boxy<T: Eq>` (measured, rustc 1.97.0); only a type with no
+        // `PartialEq` at all is `E0277`.
+        //
+        // Three conjuncts, each load-bearing:
+        // * a receiver KIND the W6-3 ratchet can key a row on. `"?"` is every handle
+        //   (`Channel`/`Shared`/`Executor`/`Socket`/…), `Func`, `Module`, `Ty::Param` and
+        //   `Ty::Protocol` — the first group compares by identity but has no constructible probe
+        //   receiver, and the last two MUST fall through: `may_be_equal(Param(_), _)` is `true` by
+        //   ERASURE, so admitting it here would make every UNBOUNDED `T` satisfy `Eq` (a soundness
+        //   hole), and a protocol existential is decided by its own arm below. `"nil"` is excluded
+        //   too: a nil-typed expression cannot be used as a value at all, so `nil == nil` is not a
+        //   writable program and the grant would have no probeable receiver.
+        // * the type does not DECLARE its own `eq`. One that does is decided structurally below,
+        //   which is what keeps the ordinary-method escape hatch (`fn eq(self, x: T)`, a generic
+        //   operand — not the hook) a wrong-signature rejection: an erased `[T: Eq]` body's
+        //   `a.eq(b)` dispatches by NAME to that method, handing it an operand it never declared.
+        // * [`Self::eq_bounds_unsatisfied`] — nothing the structural equality walk REACHES is a
+        //   declared `eq` whose `where` bounds fail for this instantiation (W7-41's actual defect).
+        if protocol == "Eq"
+            && !matches!(Self::intrinsic_recv_kind(ty), "?" | "nil")
+            && !Self::is_cursor_ty(ty)
+            && self
+                .declared_methods(ty)
+                .is_none_or(|m| !m.contains_key("eq"))
+        {
+            if let Some(why) = self.eq_bounds_unsatisfied(ty) {
+                return Err(format!("type {ty} does not satisfy Eq ({why})"));
+            }
+            if self.may_be_equal(ty, ty) {
+                return self.grant_intrinsic(protocol, ty);
+            }
         }
         // `Stringable` (sole method `str(self) -> str`) is satisfied intrinsically by every scalar —
         // all four stringify (int/float/bool/str), so a `[T: Stringable]` generic accepts them (the
@@ -1598,8 +1667,7 @@ impl Checker {
         // declared-bounds check below (so a `[S: Iterator[T]]` value forwards into another
         // iterator-generic call), since neither predicate can see through a bare param.
         if protocol == "Iterator" && !matches!(ty, Ty::Param(_) | Ty::Protocol(..)) {
-            let is_cursor = matches!(ty, Ty::Struct(n, a) if n == "Iterator" && a.len() == 1);
-            return if is_cursor || self.struct_iter_elem(ty).is_some() {
+            return if Self::is_cursor_ty(ty) || self.struct_iter_elem(ty).is_some() {
                 self.grant_intrinsic(protocol, ty)
             } else if self.iter_elem(ty).is_some() {
                 // ITERABLE but position-less (a raw collection): every remedy below actually applies
@@ -1767,10 +1835,12 @@ impl Checker {
                     && self
                         .newtype_underlying(ntkey)
                         .is_some_and(|u| u.is_numeric());
+                // (`Eq` is NOT here: D1 grants it to EVERY newtype above, numeric or not — its `==`
+                // unwraps to the underlying's native equality either way — so this arm never sees it.)
                 if numeric
                     && matches!(
                         protocol,
-                        "Add" | "Sub" | "Mul" | "Div" | "Mod" | "Comparable" | "Eq"
+                        "Add" | "Sub" | "Mul" | "Div" | "Mod" | "Comparable"
                     )
                 {
                     return self.grant_intrinsic(protocol, ty);
@@ -1788,12 +1858,14 @@ impl Checker {
                 // ordering (`compare_op`'s `same_newtype_keys` fast path), never the user `compare`, so
                 // a generic newtype (the only non-numeric case that reaches here after the numeric
                 // short-circuit) must NOT claim `Comparable` via a method — that would be check-ok /
-                // run-divergent. `Eq` is in both lists for exactly the same reason: same-newtype `==`
-                // always unwraps to the UNDERLYING's native equality, never a user `eq` method.
-                // (Hashable/Stringable/Iterable/etc. still resolve structurally below.)
+                // run-divergent. `Eq` is NOT in this list (D1): same-newtype `==` unwrapping to the
+                // UNDERLYING's native equality is a WORKING `==`, so every newtype satisfies `Eq`
+                // intrinsically at the D1 arm above — a method never enters into it, and this arm is
+                // unreachable for `Eq`. (Hashable/Stringable/Iterable/etc. still resolve structurally
+                // below.)
                 if matches!(
                     protocol,
-                    "Add" | "Sub" | "Mul" | "Div" | "Mod" | "Neg" | "Comparable" | "Eq"
+                    "Add" | "Sub" | "Mul" | "Div" | "Mod" | "Neg" | "Comparable"
                 ) {
                     return Err(format!("type {ty} does not satisfy {protocol}"));
                 }
@@ -1839,20 +1911,6 @@ impl Checker {
         // (gap #4), so a generic named-fn-imported instantiation (`Box[int]` from a factory whose TYPE
         // name is not imported) binds its params here identically to a whole-module import.
         let tymap: HashMap<String, Ty> = match ty {
-            Ty::Struct(name, targs) => self
-                .struct_shape(name)
-                .map(|info| struct_param_map(info, targs))
-                .unwrap_or_default(),
-            Ty::Enum(name, targs) => self.enum_param_map(name, targs),
-            Ty::NewType(key, targs) => self
-                .newtype_type_params_of(key)
-                .map(|tps| {
-                    tps.iter()
-                        .map(|tp| tp.name.clone())
-                        .zip(targs.iter().cloned())
-                        .collect()
-                })
-                .unwrap_or_default(),
             // A protocol existential witnessing another protocol (M22): bind its OWN params to its
             // carried args, and `Self` to the existential itself — its sigs spell `Self` exactly as
             // the requirement's do, and only the requirement side is `Self`-bound by `method_matches`.
@@ -1871,7 +1929,7 @@ impl Checker {
                 m.insert("Self".to_string(), ty.clone());
                 m
             }
-            _ => HashMap::new(),
+            _ => self.nominal_param_map(ty),
         };
         for (mname, msig) in &pinfo.methods {
             let subst_params: Vec<Ty> = msig.params.iter().map(|t| subst(t, &pmap)).collect();
@@ -2071,62 +2129,30 @@ impl Checker {
         }
     }
 
-    /// M23 — the ONE source of the `Comparable`-embeds-`Eq` migration sentence, shared by the two
-    /// rejections that need it: the `<` operator ([`Self::missing_eq_note`]) and a generic bound
-    /// ([`Self::enforce_bounds`]). `None` = no hint, so a type that never wrote `compare` keeps its
-    /// pre-M23 bare wording (the hint must not over-fire), and so does one whose `eq` exists but was
-    /// rejected for its own reason (wrong signature, unmet `where`) — telling that user to add `eq`
-    /// would misdirect.
-    fn eq_migration_hint(&self, ty: &Ty) -> Option<String> {
-        let methods = self.declared_methods(ty)?;
-        if !methods.contains_key("compare") {
+    /// A `compare`-declaring NEWTYPE is a dead end, and the bare "does not satisfy Comparable" reads
+    /// as "you forgot the comparator" — exactly wrong for someone who just wrote one. Name the real
+    /// reason instead: a newtype's `<` ALWAYS auto-flows to the underlying's native ordering
+    /// (vm `compare_op`'s same-newtype fast path), so a `compare` METHOD on one is never dispatched
+    /// and can never make it conform. `None` for anything else, so a type that never wrote `compare`
+    /// keeps the bare wording (the hint must not over-fire).
+    ///
+    /// The struct/enum half of this hint is GONE with the M23 use-site rule it advertised: "a type
+    /// defining `compare` must define `eq` too" was enforced only through the `Comparable`→`Eq`
+    /// embed, and D1 makes a plain struct satisfy `Eq`, so the rule no longer fires. It is dropped
+    /// deliberately, not re-homed — its premise was falsified in both directions by measurement (a
+    /// `compare` covering every field in declaration order agrees with structural `==` exactly, and
+    /// the repo's own motivating `Ver` DOES define both and still disagrees), and Rust — which owns
+    /// this — permits manual `Ord` beside a derived `Eq` (a clippy lint, not an error).
+    fn newtype_compare_dead_end(&self, ty: &Ty) -> Option<String> {
+        if !matches!(ty, Ty::NewType(..)) || !self.declared_methods(ty)?.contains_key("compare") {
             return None;
         }
-        match ty {
-            // A newtype is a DEAD END, not a missing method: declaring `eq` on ANY newtype is itself
-            // an error (`setup.rs` — its `==` always unwraps to the underlying's native equality), so
-            // the struct/enum sentence would be actively wrong here — no method can fix this; only a
-            // different type kind can. The claim is scoped to a `compare`-DECLARING newtype on
-            // purpose: a NUMERIC newtype does satisfy `Comparable`, intrinsically via the underlying's
-            // native ordering — but it can't reach this arm, because declaring `compare` on one is
-            // itself rejected at the decl site and the intrinsic grant means its bound never fails.
-            Ty::NewType(..) => Some(
-                "`Comparable` embeds `Eq`, and a newtype can never define `eq` (its `==` always \
-                 unwraps to the underlying's native equality, so the method and the operator would \
-                 disagree), so a `compare` method can never make a newtype satisfy `Comparable` — \
-                 use a struct if you need your own ordering"
-                    .to_string(),
-            ),
-            _ if !methods.contains_key("eq") => Some(
-                "`Comparable` embeds `Eq`, so a type defining `compare` must define `eq` too"
-                    .to_string(),
-            ),
-            _ => None,
-        }
-    }
-
-    /// M23 — `Comparable` embeds `Eq` (Rust's `Ord: Eq`), so a struct/enum that DOES define `compare`
-    /// but no `eq` stopped satisfying `Comparable`. For that user the bare "cannot compare X and Y"
-    /// actively misleads (they wrote the comparator), so name the missing half — cf. rustc appending
-    /// `note: an implementation of PartialOrd might be missing` rather than stopping at the rejection.
-    /// The reason is not re-derived: it is the `satisfies` `Err`, the same text the generic-bound path
-    /// already prints. Empty string for every other rejection, so a type with no comparator at all
-    /// keeps the pre-M23 wording.
-    pub(super) fn missing_eq_note(&self, l: &Ty, r: &Ty) -> String {
-        if !compatible(l, r) {
-            return String::new();
-        }
-        match self.satisfies(l, "Comparable") {
-            // MISSING `eq` only — a declared-but-failing `eq` (wrong signature, unmet `where`) was
-            // rejected for its own reason, and telling that user to add `eq` would misdirect. A
-            // newtype never produces this text (its arm rejects `Eq` outright), so the operator
-            // wording here is unchanged by the newtype branch of `eq_migration_hint`.
-            Err(why) if why.contains("missing method 'eq'") => self
-                .eq_migration_hint(l)
-                .map(|hint| format!(" — {why}: {hint}"))
-                .unwrap_or_default(),
-            _ => String::new(),
-        }
+        Some(
+            "a newtype's `<` always uses the underlying's native ordering, never a `compare` \
+             method, so a `compare` method can never make a newtype satisfy `Comparable` — use a \
+             struct if you need your own ordering"
+                .to_string(),
+        )
     }
 
     /// Own methods OR anything an embed requires (M22) — so `protocol Ord2: Comparable` makes
@@ -2424,6 +2450,186 @@ impl Checker {
         }
     }
 
+    /// **W7-41 — is anything the structural equality walk REACHES a declared `eq` whose `where`
+    /// bounds do not hold for this instantiation?** `None` = this type's equality is sound to reach;
+    /// `Some(reason)` = it is not, and neither `==` nor a `[T: Eq]` bound may accept it.
+    ///
+    /// Same traversal as [`Self::reaches_user_eq`] — what `Vm::values_equal_guarded` recurses
+    /// through — with two deliberate differences:
+    ///
+    /// 1. **The type's OWN `eq` is checked BEFORE its type args, and STOPS the descent.** At runtime
+    ///    a declared `eq` *replaces* the structural walk (`src/vm/arith.rs`), so `Box[Tag]`'s own
+    ///    unconditional `eq` may never touch `Tag`'s bounded one — descending first (which
+    ///    `reaches_user_eq` does, deliberately over-conservative for `Atomic.cas`) would
+    ///    over-REJECT. What that `eq`'s BODY does with the payload is guarded at its own `==` sites,
+    ///    by the same rule, when the body is checked.
+    /// 2. A satisfied bound does not end the search — a SIBLING branch (the other half of a `Map`,
+    ///    the next struct field) may still be unsound.
+    ///
+    /// **It extracts the `where_bounds` walk and must never answer by calling `satisfies`/
+    /// `satisfies_methods` on the receiver instead.** Doing so re-asks the whole conformance
+    /// question and so rejects both in-tree ordinary-method escape hatches (`enum Opt2[T]: fn
+    /// eq(self, x: T)` → *"method 'eq' has the wrong signature"*), which run fine today.
+    pub(super) fn eq_bounds_unsatisfied(&self, ty: &Ty) -> Option<String> {
+        // RE-ENTRANCY, not depth: resolving a `where T: Eq` bound below calls `satisfies`, whose D1
+        // arm calls straight back in here on the bound's own type — and the walk's `stack` cannot
+        // span that outward hop (it is a fresh walk on the other side). `struct C[T]` with
+        // `fn eq(self, o: Self) -> bool where T: Eq` plus `struct D: x: C[D]` closes the loop
+        // exactly. Past the cap the predicate DECLINES (`None` = "cannot prove unsound"), which is
+        // the pre-D1 answer and the safe direction for a rule that only ever REJECTS.
+        struct Depth;
+        impl Drop for Depth {
+            fn drop(&mut self) {
+                EQ_BOUNDS_DEPTH.with(|d| d.set(d.get() - 1));
+            }
+        }
+        let depth = EQ_BOUNDS_DEPTH.with(|d| {
+            d.set(d.get() + 1);
+            d.get()
+        });
+        let _guard = Depth;
+        if depth > EQ_BOUNDS_MAX_REENTRY {
+            return None;
+        }
+        self.eq_bounds_unsatisfied_rec(ty, &mut Vec::new())
+    }
+
+    /// [`Self::eq_bounds_unsatisfied`] with the walk's cycle guard (`stack` holds the
+    /// struct/enum/newtype names currently being walked, so `Node { next: Option[Node] }`
+    /// terminates) — mirrors [`Self::reaches_user_eq`]'s shape.
+    fn eq_bounds_unsatisfied_rec(&self, ty: &Ty, stack: &mut Vec<String>) -> Option<String> {
+        let any = |s: &Self, ts: &[Ty], stack: &mut Vec<String>| -> Option<String> {
+            ts.iter()
+                .find_map(|t| s.eq_bounds_unsatisfied_rec(t, stack))
+        };
+        match ty {
+            Ty::List(t) | Ty::Set(t) | Ty::Option(t) => self.eq_bounds_unsatisfied_rec(t, stack),
+            Ty::Map(k, v) => self
+                .eq_bounds_unsatisfied_rec(k, stack)
+                .or_else(|| self.eq_bounds_unsatisfied_rec(v, stack)),
+            Ty::Result(t, e) => self
+                .eq_bounds_unsatisfied_rec(t, stack)
+                .or_else(|| self.eq_bounds_unsatisfied_rec(e, stack)),
+            Ty::Tuple(elems) => any(self, elems, stack),
+            Ty::Struct(name, args) => {
+                if let Some(sig) = self.struct_shape(name).and_then(|i| i.methods.get("eq")) {
+                    return self.eq_where_unsatisfied(ty, sig);
+                }
+                if let hit @ Some(_) = any(self, args, stack) {
+                    return hit;
+                }
+                if stack.contains(name) {
+                    return None;
+                }
+                let fields = self.structs.get(name)?.fields.clone();
+                stack.push(name.clone());
+                let hit = fields
+                    .iter()
+                    .find_map(|(_, f)| self.eq_bounds_unsatisfied_rec(f, stack));
+                stack.pop();
+                hit
+            }
+            Ty::Enum(name, args) => {
+                if let Some(sig) = self.enum_methods_of(name).and_then(|m| m.get("eq")) {
+                    return self.eq_where_unsatisfied(ty, sig);
+                }
+                if let hit @ Some(_) = any(self, args, stack) {
+                    return hit;
+                }
+                if stack.contains(name) {
+                    return None;
+                }
+                let payloads: Vec<Ty> = self
+                    .variants
+                    .values()
+                    .filter(|v| &v.enum_name == name)
+                    .flat_map(|v| v.payload.clone())
+                    .collect();
+                stack.push(name.clone());
+                let hit = payloads
+                    .iter()
+                    .find_map(|p| self.eq_bounds_unsatisfied_rec(p, stack));
+                stack.pop();
+                hit
+            }
+            Ty::NewType(name, _) => {
+                // Declaring `eq` on a newtype is a decl-site error, so the method arm is only ever
+                // reached by an already-errored program — it is here for symmetry, not soundness.
+                if let Some(sig) = self.newtype_methods_of(name).and_then(|m| m.get("eq")) {
+                    return self.eq_where_unsatisfied(ty, sig);
+                }
+                if stack.contains(name) {
+                    return None;
+                }
+                let under = self.newtype_unwrap_target(ty)?;
+                stack.push(name.clone());
+                let hit = self.eq_bounds_unsatisfied_rec(&under, stack);
+                stack.pop();
+                hit
+            }
+            // A free type PARAMETER reached inside the walk must carry `Eq` among its declared
+            // bounds. `may_be_equal` treats a `Param` as ERASED (`[T] == [T]` compiles once, with
+            // `T` abstract) — right for the operator, wrong for a BOUND, which is an obligation the
+            // CALL SITE must discharge. **Rust, measured (rustc 1.97.0):**
+            // `fn f<T>(a: Vec<T>, b: Vec<T>) { g(a, b) }` against `fn g<U: Eq>` is E0277 *"required
+            // for `Vec<T>` to implement `Eq`"*, and adding `T: Eq` compiles. Without this arm every
+            // container of an unbounded `T` would satisfy `Eq`. (A bare `Ty::Param` never reaches
+            // here — its kind is `"?"`, so the D1 arm skips it and its own declared-bounds arm
+            // answers.)
+            Ty::Param(_) => self
+                .satisfies(ty, "Eq")
+                .err()
+                .map(|_| format!("{ty} is not bounded by Eq")),
+            _ => None,
+        }
+    }
+
+    /// One declared `eq`'s `where` bounds, resolved under the RECEIVER's own param→arg substitution
+    /// (`{T -> Tag}` for a `Box[Tag]`). The same walk [`Self::satisfies_methods`] runs for a
+    /// conditional protocol method — extracted rather than re-asked through `satisfies`, so a method
+    /// that is not the `Eq` hook at all cannot turn into a conformance failure here.
+    fn eq_where_unsatisfied(&self, ty: &Ty, sig: &FnSig) -> Option<String> {
+        let tymap = self.nominal_param_map(ty);
+        for wb in &sig.where_bounds {
+            // A `where` naming the METHOD's own `[U]` is merged into `type_params`, never into
+            // `where_bounds`, so a name missing from the receiver's map is not this rule's business.
+            let Some(concrete) = tymap.get(&wb.name) else {
+                continue;
+            };
+            for bound in &wb.bounds {
+                let bargs: Vec<Ty> = bound.args.iter().map(|a| self.resolve_ty_ro(a)).collect();
+                if self.satisfies_args(concrete, &bound.name, &bargs).is_err() {
+                    return Some(format!("{ty}'s `eq` requires {concrete}: {}", bound.name));
+                }
+            }
+        }
+        None
+    }
+
+    /// A struct/enum/newtype's own type params bound to the args of THIS instantiation
+    /// (`Box[T]` + `Box[int]` → `{T -> int}`); empty for every other `Ty`. Each arm resolves through
+    /// the miss-only owning-module helpers (gap #4), so a named-fn-imported generic instantiation
+    /// binds its params identically to a whole-module import.
+    pub(super) fn nominal_param_map(&self, ty: &Ty) -> HashMap<String, Ty> {
+        match ty {
+            Ty::Struct(name, targs) => self
+                .struct_shape(name)
+                .map(|info| struct_param_map(info, targs))
+                .unwrap_or_default(),
+            Ty::Enum(name, targs) => self.enum_param_map(name, targs),
+            Ty::NewType(key, targs) => self
+                .newtype_type_params_of(key)
+                .map(|tps| {
+                    tps.iter()
+                        .map(|tp| tp.name.clone())
+                        .zip(targs.iter().cloned())
+                        .collect()
+                })
+                .unwrap_or_default(),
+            _ => HashMap::new(),
+        }
+    }
+
     /// Resolve the element type of a value-first concurrency box (`Shared`/`RwShared`/`Atomic`) from
     /// an OPTIONAL turbofish, mirroring the container-ctor turbofish pattern (the `List` arm above).
     /// With no turbofish the value's `inferred` type wins; with one type arg that arg pins the element
@@ -2697,14 +2903,14 @@ impl Checker {
                         .map(|a| subst(&self.resolve_bound_arg(a, tps, span), sub))
                         .collect();
                     if let Err(msg) = self.satisfies_args(concrete, &bound.name, &bargs) {
-                        // M23 migration hint (the operator path's twin): a bound that requires BOTH
-                        // `compare` AND `eq` is a `Comparable`-shaped one, so a type that wrote only
-                        // `compare` gets told why it stopped conforming. Requiring both names is what
-                        // keeps this off a bare `T: Eq` bound (no `compare`) and off a user protocol
-                        // that merely has its own `compare` (no `eq`) — neither is the ratchet.
+                        // A `Comparable`-shaped bound over a newtype that WROTE `compare`: say why
+                        // the method can never satisfy it. The gate is UNCHANGED from M23 — both
+                        // names, which `Comparable` has (`eq` through its embed) and a user protocol
+                        // with only its own `compare` does not — so the sentence keeps naming
+                        // `Comparable` truthfully and cannot start firing on an unrelated bound.
                         let note = (self.protocol_has_method(&bound.name, "compare")
                             && self.protocol_has_method(&bound.name, "eq"))
-                        .then(|| self.eq_migration_hint(concrete))
+                        .then(|| self.newtype_compare_dead_end(concrete))
                         .flatten();
                         self.error(
                             span,

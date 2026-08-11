@@ -440,9 +440,10 @@ fn max[T: Comparable](a: T, b: T) -> T:
     return a
 p := max(Plain(1), Plain(2))
 ";
-    // M23: Comparable now embeds Eq, and Plain has neither — the embed loop fails on
-    // Eq (checked first) before ever reaching Comparable's own `compare` requirement.
-    rejects(src, "does not satisfy Eq");
+    rejects(
+        src,
+        "does not satisfy Comparable (missing method 'compare')",
+    );
 }
 
 #[test]
@@ -1043,10 +1044,10 @@ fn pick[T: Comparable](x: T, y: T) -> T:
     return y
 v := pick(Wrap(1), Wrap(2))
 ";
-    // M23/B5: Comparable now embeds Eq, and a generic newtype's operator-soundness gate rejects Eq
-    // the same way it already rejected Comparable (no runtime dispatch path for either) — the embed
-    // loop hits the Eq gate first, so the reported protocol is now Eq, not Comparable.
-    entry_rejects(src, "does not satisfy Eq");
+    // D1 restores the pre-M23 reading: a newtype's `==` unwraps to the underlying's native equality,
+    // which is a WORKING `==`, so the `Eq` embed is satisfied and the rejection is Comparable's own
+    // — the operator-soundness gate, which is what this test is actually about.
+    entry_rejects(src, "does not satisfy Comparable");
 }
 
 #[test]
@@ -1070,8 +1071,8 @@ fn redeclaring_eq_rejected() {
 }
 
 /// The intrinsic scalar grant: ALL FOUR scalars satisfy `Eq` with no user method — `==` is defined
-/// on every scalar (unlike `Comparable`, which excludes `bool`). A container does NOT: it has no
-/// `eq` method and no grant, so a `[T: Eq]` bound correctly rejects it.
+/// on every scalar (unlike `Comparable`, which excludes `bool`). What a NON-scalar does is D1's
+/// question, pinned by `eq_is_satisfied_by_every_type_whose_equality_is_structural` below.
 #[test]
 fn scalars_satisfy_eq_intrinsically() {
     for lit in ["1", "1.5", "\"a\"", "true"] {
@@ -1079,21 +1080,155 @@ fn scalars_satisfy_eq_intrinsically() {
             "fn same[T: Eq](a: T, b: T) -> bool:\n    return a.eq(b)\nprint(same({lit}, {lit}))\n"
         ));
     }
-    rejects(
-        "fn same[T: Eq](a: T, b: T) -> bool:\n    return a.eq(b)\nprint(same([1], [2]))\n",
-        "does not satisfy Eq",
+}
+
+/// **D1 — `Eq` satisfaction IS what `==` accepts.** Chezzi's structural `==` is an automatic derive
+/// that never told the protocol system, so every one of these had a WORKING `==` and a FAILING
+/// `[T: Eq]` bound. **Ancestor, measured, `rustc 1.97.0`:** `Vec<i32>`, `(i32, i32)`, `Option<i32>`,
+/// `Vec<u8>` and a `#[derive(PartialEq, Eq)] struct P` all satisfy `Eq` and all compile under
+/// `struct Boxy<T: Eq>`; only a type with no `PartialEq` at all (`Tag`) gives `E0277`.
+///
+/// The bound is spelled over `a == b` (not `a.eq(b)`) on purpose — the rule is defined by the
+/// operator, and this is the shape a user writes on a conditional `fn eq(…) where T: Eq`.
+#[test]
+fn eq_is_satisfied_by_every_type_whose_equality_is_structural() {
+    let same = "fn same[T: Eq](a: T, b: T) -> bool:\n    return a == b\n";
+    for (prelude, lit) in [
+        ("", "[1]"),
+        ("", "(1, 2)"),
+        ("", "Some(1)"),
+        ("", "Ok(1)"),
+        ("", "b\"ab\""),
+        ("", "bytearray(b\"ab\")"),
+        ("", "{\"k\": 1}"),
+        ("", "Set([1])"),
+        ("", "1"),
+        ("struct P:\n    x: int\n", "P(1)"),
+        ("enum Color:\n    Red\n    Blue\n", "Color.Red"),
+        ("newtype Name = str\n", "Name(\"a\")"),
+    ] {
+        entry_ok(&format!("{prelude}{same}print(same({lit}, {lit}))\n"));
+    }
+}
+
+/// **The BUILT-IN CURSOR is excluded, and the ratchet cannot see it.** `Ty::Struct("Iterator", [E])`
+/// — what `.iter()` mints and a generator returns — has kind `"struct"`, so D1 granted it `Eq` and
+/// `intrinsic_grants_all_have_vm_arms` stayed green: its `"struct"` probe receiver is a real user
+/// struct, whose dispatch arm HAS the intrinsic fallback. The cursor's and the generator's arms
+/// deliberately do not (`only next()/iter()`), so the grant was check-OK-then-run-fault — found by
+/// running the pre-change binary, not by the suite. `c == d` still WORKS (identity), so this is a
+/// deliberate narrowing of "Eq is what `==` accepts"; **the ancestors agree** — Rust's
+/// `slice::Iter` has no `PartialEq`, and CPython's iterators compare by identity with no protocol.
+#[test]
+fn the_builtin_cursor_does_not_satisfy_eq() {
+    for recv in ["[1, 2].iter()", "gen()"] {
+        entry_rejects(
+            &format!(
+                "fn gen() -> Iterator[int]:\n    yield 1\nfn eqm[T: Eq](a: T, b: T) -> bool:\n    return a.eq(b)\nprint(eqm({recv}, {recv}))\n"
+            ),
+            "type Iterator[int] does not satisfy Eq",
+        );
+    }
+    // A USER struct with `next` is a genuine `Obj::Struct` at runtime and keeps the grant.
+    entry_ok(
+        "struct Cur:\n    fn next(self) -> int?:\n        return None\nfn eqm[T: Eq](a: T, b: T) -> bool:\n    return a.eq(b)\nprint(eqm(Cur(), Cur()))\n",
     );
 }
 
-/// Struct/enum conformance is STRUCTURAL (the `Comparable` model): a `eq(self, Self) -> bool` method
-/// satisfies the bound, a type without one does not.
+/// **The `Ty::Param` exclusion.** `may_be_equal(Param(_), _)` is `true` by ERASURE (a generic body is
+/// checked once with `T` abstract), so reading the D1 rule naively would make every UNBOUNDED `T`
+/// satisfy `Eq` — the hole that lets an un-equatable type in through a forwarding call. A `Ty::Param`
+/// must keep falling through to its declared-bounds arm.
+#[test]
+fn unbounded_type_param_does_not_satisfy_eq() {
+    rejects(
+        "fn g[U: Eq](a: U, b: U) -> bool:\n    return a.eq(b)\nfn f[T](a: List[T], b: List[T]) -> bool:\n    return g(a, b)\n",
+        "does not satisfy Eq",
+    );
+    // …and a param that DOES declare the bound still forwards (the arm is not simply disabled).
+    ok(
+        "fn g[U: Eq](a: U, b: U) -> bool:\n    return a.eq(b)\nfn f[T: Eq](a: T, b: T) -> bool:\n    return g(a, b)\n",
+    );
+}
+
+/// **W7-41's enabling half.** `Eq` is granted to a type whose structural equality walk stays sound —
+/// NOT to one that reaches a declared `eq` whose `where` bounds do not hold for this instantiation.
+/// `Box[Tag]`'s `eq` calls `compare`, which `Tag` does not have, so `Box[Tag]` is not `Eq` and
+/// neither is a `List` of them (the walk recurses exactly where `values_equal` does).
+#[test]
+fn eq_is_refused_when_the_walk_reaches_an_unsatisfied_conditional_eq() {
+    const COND: &str = "\
+struct Tag:
+    n: int
+struct Box[T]:
+    val: T
+    fn compare(self, other: Self) -> int where T: Comparable:
+        if self.val < other.val:
+            return -1
+        return 0
+    fn eq(self, other: Self) -> bool where T: Comparable:
+        return self.compare(other) == 0
+fn same[T: Eq](a: T, b: T) -> bool:
+    return a == b
+";
+    // the receiver itself
+    entry_rejects(
+        &format!("{COND}print(same(Box(Tag(1)), Box(Tag(2))))\n"),
+        "does not satisfy Eq",
+    );
+    // …and REACHED through a container, exactly as `values_equal` reaches it
+    entry_rejects(
+        &format!("{COND}print(same([Box(Tag(1))], [Box(Tag(2))]))\n"),
+        "does not satisfy Eq",
+    );
+    // A SATISFYING instantiation still works — the rule is conditional conformance, not a ban.
+    entry_ok(&format!("{COND}print(same(Box(1), Box(2)))\n"));
+    // And a type whose own `eq` is unconditional keeps it even when a type ARG is not equatable
+    // through its own bounded `eq`: `Plain`'s `eq` never touches `Box[Tag]`'s.
+    entry_ok(&format!(
+        "{COND}struct Plain[T]:\n    v: T\n    fn eq(self, o: Self) -> bool:\n        return true\nprint(same(Plain(Box(Tag(1))), Plain(Box(Tag(2)))))\n"
+    ));
+}
+
+/// The `where T: Eq` bound check hops OUT of the structural walk (`satisfies` → the walk → `satisfies`
+/// again), and the walk's own name-stack does not span that hop. A type whose type ARGUMENT is itself
+/// closes the loop, so the guard must be across the boundary, not inside the walk.
+#[test]
+fn conditional_eq_bound_recursion_terminates() {
+    entry_ok(
+        "\
+struct C[T]:
+    v: T
+    fn eq(self, o: Self) -> bool where T: Eq:
+        return true
+struct D:
+    x: C[D]
+fn same[T: Eq](a: T, b: T) -> bool:
+    return a == b
+fn use_it(a: D, b: D) -> bool:
+    return same(a, b)
+",
+    );
+}
+
+/// Struct/enum conformance through a DECLARED `eq` stays structural (the `Comparable` model): the
+/// method must be the hook `eq(self, Self) -> bool`. A type WITHOUT one is now granted intrinsically
+/// (D1) — its `==` is the structural derive — which is `struct_satisfies_eq_without_a_method` below.
 #[test]
 fn struct_with_eq_satisfies_eq() {
     entry_ok(
         "struct P:\n    x: int\n    fn eq(self, o: P) -> bool:\n        return self.x == o.x\nfn same[T: Eq](a: T, b: T) -> bool:\n    return a.eq(b)\nprint(same(P(1), P(2)))\n",
     );
-    entry_rejects(
+    entry_ok(
         "struct Q:\n    x: int\nfn same[T: Eq](a: T, b: T) -> bool:\n    return a.eq(b)\nprint(same(Q(1), Q(2)))\n",
+    );
+    // The ORDINARY-METHOD escape hatch (`fn eq(self, x: T)`, a generic operand — not the hook, and
+    // `==` leaves it structural) must NOT be laundered into conformance by the D1 grant: an erased
+    // `[T: Eq]` body's `a.eq(b)` dispatches by NAME to that method, which declares an operand it
+    // would never be handed. A type that DECLARES `eq` is decided structurally, so this stays a
+    // wrong-signature rejection exactly as before D1.
+    entry_rejects(
+        "enum Opt2[T]:\n    Some(T)\n    None\n    fn eq(self, x: T) -> bool:\n        return true\nfn same[T: Eq](a: T, b: T) -> bool:\n    return a.eq(b)\nprint(same(Opt2[int].Some(1), Opt2[int].Some(2)))\n",
         "does not satisfy Eq",
     );
 }
@@ -1200,21 +1335,11 @@ b := Box(5) == Box(\"hello\")
     entry_rejects(src, "cannot compare Box[int] and Box[str] for equality");
 }
 
-/// Mirror of `generic_newtype_compare_satisfies_comparable_rejected`: a newtype's `eq` METHOD is
-/// never dispatched by `==` (it auto-flows to the underlying's native equality), so a generic newtype
-/// must NOT satisfy `Eq` through it — that would be check-ok / run-divergent.
-#[test]
-fn generic_newtype_eq_satisfies_eq_rejected() {
-    let src = "\
-newtype Wrap[T] = T:
-    fn eq(self, o: Wrap[T]) -> bool:
-        return true
-fn same[T: Eq](a: T, b: T) -> bool:
-    return a.eq(b)
-v := same(Wrap(1), Wrap(2))
-";
-    entry_rejects(src, "does not satisfy Eq");
-}
+// (`generic_newtype_eq_satisfies_eq_rejected` is DELETED with D1. Its premise — "a generic newtype
+// must not satisfy `Eq` through its `eq` METHOD" — is now answered one step earlier and more
+// strongly: declaring `eq` on ANY newtype is rejected at the DECLARATION, so the bound question
+// never arises, and a newtype's `Eq` comes from the underlying's native `==` rather than a method.
+// `newtype_eq_method_rejected_at_decl` below covers the surviving rule, on the same fixture.)
 
 /// W6-3d extended to `eq` — on EVERY newtype, not just a numeric one (`docs/gaps.md` L5, closed
 /// 2026-08-08). A newtype's `==` always unwraps to the underlying's native equality and never reaches
@@ -1639,8 +1764,10 @@ struct Box[T]:
 b := Box(0)
 r := b.biggest(Plain(1), Plain(2))
 ";
-    // M23: Comparable embeds Eq; Plain has neither, so Eq (checked first) fails.
-    rejects(src, "does not satisfy Eq");
+    rejects(
+        src,
+        "does not satisfy Comparable (missing method 'compare')",
+    );
 }
 
 #[test]
@@ -1854,8 +1981,10 @@ struct Box[T: Comparable]:
     a: T
 b := Box(Plain(1))
 ";
-    // M23: Comparable embeds Eq; Plain has neither, so Eq (checked first) fails.
-    rejects(src, "does not satisfy Eq");
+    rejects(
+        src,
+        "does not satisfy Comparable (missing method 'compare')",
+    );
 }
 
 #[test]
@@ -1867,8 +1996,10 @@ struct Box[T: Comparable]:
     a: T
 b: Box[Plain] = Box(Plain(1))
 ";
-    // M23: Comparable embeds Eq; Plain has neither, so Eq (checked first) fails.
-    rejects(src, "does not satisfy Eq");
+    rejects(
+        src,
+        "does not satisfy Comparable (missing method 'compare')",
+    );
 }
 
 #[test]
@@ -2015,8 +2146,10 @@ enum Box[T: Comparable]:
     Has(T)
 b := Box.Has(Plain(1))
 ";
-    // M23: Comparable embeds Eq; Plain has neither, so Eq (checked first) fails.
-    rejects(src, "does not satisfy Eq");
+    rejects(
+        src,
+        "does not satisfy Comparable (missing method 'compare')",
+    );
 }
 
 #[test]
@@ -2070,43 +2203,33 @@ xs.sort()
     ok(src);
 }
 
-/// M23 (B1/B2t) — `Comparable` embeds `Eq`, mirroring Rust's `Ord: Eq`: a type ordered must also be
-/// equatable, since `compare`/`==` must be free to agree. A struct with `compare` but no `eq` no
-/// longer satisfies `Comparable` — same diagnostic as the no-`compare`-at-all case above.
-#[test]
-fn compare_without_eq_rejected() {
-    let src = "\
-struct P:
-    n: int
-    fn compare(self, o: P) -> int:
-        return self.n - o.n
-xs := [P(2), P(1)]
-xs.sort()
-";
-    // The embed check runs before Comparable's own `compare` requirement, so the missing `eq` is
-    // what actually surfaces — still "P does not satisfy Comparable" in effect (Eq is Comparable's
-    // own embed), just reported via the specific unmet piece.
-    rejects(src, "does not satisfy Eq");
-}
+// ----- M23's "a type defining `compare` must define `eq` too" rule: DROPPED with D1 -----
+//
+// `compare_without_eq_rejected`, `ordering_on_compare_without_eq_names_the_missing_eq` and
+// `comparable_bound_on_compare_without_eq_names_the_missing_eq` are DELETED. The rule they pinned
+// was enforced only through the `Comparable`→`Eq` embed, and D1 makes a plain struct satisfy `Eq`,
+// so it no longer fires. It is dropped DELIBERATELY, not re-homed: its premise was falsified in both
+// directions by measurement — a `compare` covering every field in declaration order agrees with
+// structural `==` exactly (the rule would fire, wrongly), while the repo's own motivating `Ver`
+// DOES define both and still disagrees (the rule would not fire). **Rust owns this** and permits a
+// manual `Ord` beside a derived `Eq` — a clippy lint, not an error. `docs/syntax.md` already
+// concedes the checker cannot verify the coherence the rule pretended to enforce.
+//
+// The two surviving halves of those tests — the BARE wordings, which are now the only wordings —
+// are kept here.
 
+/// A `compare`-declaring struct now satisfies `Comparable` (D1: its `Eq` embed is the structural
+/// derive), so `<` WORKS on it — the M23 rejection is gone. A type with no comparator at all still
+/// gets the bare "cannot compare X and Y" (there is no note left to append).
 #[test]
-fn ordering_on_compare_without_eq_names_the_missing_eq() {
-    // MIGRATION DIAGNOSTIC: `<` is the most-travelled path into the `Comparable: Eq` ratchet, and the
-    // bare "cannot compare Ver and Ver" reads as "this type has no comparator" — exactly wrong for
-    // someone who just wrote `compare`. Rust doesn't stop at the bare rejection either (`note: an
-    // implementation of PartialOrd might be missing`), so the missing half is named.
-    let src = "\
+fn ordering_on_a_compare_only_struct_is_allowed() {
+    ok("\
 struct Ver:
     maj: int
     fn compare(self, o: Ver) -> int:
         return self.maj - o.maj
 print(Ver(1) < Ver(2))
-";
-    rejects(
-        src,
-        "cannot compare Ver and Ver — type Ver does not satisfy Eq (missing method 'eq'): `Comparable` embeds `Eq`, so a type defining `compare` must define `eq` too",
-    );
-    // A type with NO comparator at all was never misled by the old wording — it keeps it, bare.
+");
     let errs = check_src("struct P:\n    n: int\nprint(P(1) < P(2))\n");
     assert!(
         errs.iter().any(|e| e.message == "cannot compare P and P"),
@@ -2114,11 +2237,10 @@ print(Ver(1) < Ver(2))
     );
 }
 
-/// M23 follow-up — the SAME migration diagnostic on the BOUND path (`[T: Comparable]`), which Task 2
-/// wired only to the operator. One source of the sentence (`eq_migration_hint`), two call sites.
+/// Same, on the BOUND path: a `[T: Comparable]` bound is satisfied by a `compare`-only struct.
 #[test]
-fn comparable_bound_on_compare_without_eq_names_the_missing_eq() {
-    let src = "\
+fn comparable_bound_on_a_compare_only_struct_is_allowed() {
+    ok("\
 struct Ver:
     maj: int
     fn compare(self, o: Ver) -> int:
@@ -2128,15 +2250,9 @@ fn mx[T: Comparable](a: T, b: T) -> T:
         return b
     return a
 print(mx(Ver(1), Ver(2)))
-";
-    rejects(
-        src,
-        "type Ver does not satisfy Eq (missing method 'eq'): `Comparable` embeds `Eq`, so a type defining `compare` must define `eq` too",
-    );
-    // Transitively, through a user protocol that EMBEDS `Comparable` — the bound is `Ord2`, but the
-    // requirement (and so the ratchet) is still Comparable's.
-    rejects(
-        "\
+");
+    // …and transitively through a user protocol that EMBEDS `Comparable`.
+    ok("\
 protocol Ord2:
     Comparable
     fn tag(self) -> str
@@ -2149,14 +2265,12 @@ struct Ver:
 fn u[T: Ord2](a: T) -> int:
     return 0
 print(u(Ver(1)))
-",
-        "does not satisfy Eq (missing method 'eq'): `Comparable` embeds `Eq`",
-    );
+");
 }
 
-/// The bound-path hint must NOT over-fire. Three controls, each one bare-wording:
-/// no `compare` at all, a bare `T: Eq` bound (no `compare` requirement → not the ratchet), and a user
-/// protocol that has its own `compare` but no `Eq` (also not the ratchet).
+/// The newtype-`compare` hint must NOT over-fire, and the ordinary rejections stay bare. Three
+/// controls: no `compare` at all (Comparable's own requirement is what is missing), a bare `T: Eq`
+/// bound over a struct (now SATISFIED — D1), and a user protocol whose `compare` is mis-typed.
 #[test]
 fn comparable_bound_hint_does_not_over_fire() {
     let bare = |src: &str, msg: &str| {
@@ -2166,7 +2280,7 @@ fn comparable_bound_hint_does_not_over_fire() {
             "expected the bare wording {msg:?}, got: {errs:?}"
         );
     };
-    // (1) No comparator at all — never misled by the pre-M23 wording, so it keeps it.
+    // (1) No comparator at all — the missing half is `compare`, and it is named, bare.
     bare(
         "\
 struct Ver:
@@ -2175,11 +2289,11 @@ fn mx[T: Comparable](a: T, b: T) -> T:
     return a
 print(mx(Ver(1), Ver(2)))
 ",
-        "type Ver does not satisfy Eq (missing method 'eq')",
+        "type Ver does not satisfy Comparable (missing method 'compare')",
     );
-    // (2) A bare `T: Eq` bound requires no `compare`, so `Comparable` is not what the user tripped on.
-    bare(
-        "\
+    // (2) A bare `T: Eq` bound over a struct whose `==` is the structural derive is SATISFIED (D1) —
+    // this used to be the "not the ratchet, keep it bare" control and is now simply legal code.
+    ok("\
 struct Ver:
     maj: int
     fn compare(self, o: Ver) -> int:
@@ -2187,10 +2301,8 @@ struct Ver:
 fn u[T: Eq](a: T, b: T) -> bool:
     return a == b
 print(u(Ver(1), Ver(2)))
-",
-        "type Ver does not satisfy Eq (missing method 'eq')",
-    );
-    // (3) A user protocol requiring only `compare` — no `Eq` anywhere, so no `Eq` sentence.
+");
+    // (3) A user protocol requiring only `compare` — no `Eq` anywhere, so no newtype sentence.
     bare(
         "\
 protocol MyCmp:
@@ -2224,7 +2336,7 @@ print(mx(Box(1), Box(2)))
 ";
     rejects(
         src,
-        "type Box[int] does not satisfy Eq: `Comparable` embeds `Eq`, and a newtype can never define `eq` (its `==` always unwraps to the underlying's native equality, so the method and the operator would disagree), so a `compare` method can never make a newtype satisfy `Comparable` — use a struct if you need your own ordering",
+        "type Box[int] does not satisfy Comparable: a newtype's `<` always uses the underlying's native ordering, never a `compare` method, so a `compare` method can never make a newtype satisfy `Comparable` — use a struct if you need your own ordering",
     );
     // The sentence is scoped to a `compare`-declaring newtype for a reason: a NUMERIC newtype DOES
     // satisfy `Comparable`, intrinsically. It can never reach the hint (declaring `compare` on one is
@@ -2250,7 +2362,7 @@ print(mx(Box(1), Box(2)))
     );
     assert!(
         errs.iter()
-            .any(|e| e.message == "type Box[int] does not satisfy Eq"),
+            .any(|e| e.message == "type Box[int] does not satisfy Comparable"),
         "a comparator-less newtype must keep the bare wording, got: {errs:?}"
     );
 }
@@ -2265,8 +2377,10 @@ xs.sort()
 ";
     // `sort` is now file-backed as `where T: Comparable`; a non-Comparable element fails via the
     // standard bound-satisfaction diagnostic (retired the bespoke `sort() requires …` text).
-    // M23: Comparable embeds Eq; P has neither, so Eq (checked first) fails.
-    rejects(src, "does not satisfy Eq");
+    rejects(
+        src,
+        "does not satisfy Comparable (missing method 'compare')",
+    );
 }
 
 #[test]
@@ -2292,8 +2406,10 @@ fn needs_cmp[T](x: T) where T: Comparable:
 q := Q(1)
 needs_cmp(q)
 ";
-    // M23: Comparable embeds Eq; Q has neither, so Eq (checked first) fails.
-    rejects(src, "does not satisfy Eq");
+    rejects(
+        src,
+        "does not satisfy Comparable (missing method 'compare')",
+    );
 }
 
 #[test]
@@ -2378,8 +2494,7 @@ struct Box[T]:
 b := Box(Q(1))
 x := b.top()
 ",
-        // M23: Comparable embeds Eq; Q has neither, so Eq (checked first) fails.
-        "does not satisfy Eq",
+        "does not satisfy Comparable (missing method 'compare')",
     );
 }
 
@@ -2469,8 +2584,7 @@ enum Opt[T]:
 o := Opt.Some(Q(1))
 x := o.peek()
 ",
-        // M23: Comparable embeds Eq; Q has neither, so Eq (checked first) fails.
-        "does not satisfy Eq",
+        "does not satisfy Comparable (missing method 'compare')",
     );
 }
 
@@ -2495,8 +2609,7 @@ newtype Stack[T] = List[T]:
 s := Stack([Q(1)])
 x := s.top()
 ",
-        // M23: Comparable embeds Eq; Q has neither, so Eq (checked first) fails.
-        "does not satisfy Eq",
+        "does not satisfy Comparable (missing method 'compare')",
     );
 }
 
@@ -2524,8 +2637,7 @@ struct Box[T]:
 b := Box(5)
 x := b.cmp(Q(1))
 ",
-        // M23: Comparable embeds Eq; Q has neither, so Eq (checked first) fails.
-        "does not satisfy Eq",
+        "does not satisfy Comparable (missing method 'compare')",
     );
 }
 
@@ -2596,8 +2708,7 @@ struct Box[T]:
         return Box(x)
 b := Box.of(Q(1))
 ",
-        // M23: Comparable embeds Eq; Q has neither, so Eq (checked first) fails.
-        "does not satisfy Eq",
+        "does not satisfy Comparable (missing method 'compare')",
     );
 }
 
@@ -2623,8 +2734,7 @@ enum Opt[T]:
         return Opt.Some(x)
 o := Opt.build(Q(1))
 ",
-        // M23: Comparable embeds Eq; Q has neither, so Eq (checked first) fails.
-        "does not satisfy Eq",
+        "does not satisfy Comparable (missing method 'compare')",
     );
 }
 
@@ -2712,13 +2822,14 @@ struct Box[T: Comparable]:
         return Box(x)
 b := Box.of(Q(1))
 ";
-    // M23: Comparable embeds Eq; Q has neither, so Eq (checked first) fails — same dedup question,
-    // now against the Eq diagnostic.
     let n = check_src(src)
         .iter()
-        .filter(|e| e.message.contains("does not satisfy Eq"))
+        .filter(|e| {
+            e.message
+                .contains("does not satisfy Comparable (missing method 'compare')")
+        })
         .count();
-    assert_eq!(n, 1, "expected exactly one Eq diagnostic, got {n}");
+    assert_eq!(n, 1, "expected exactly one Comparable diagnostic, got {n}");
 }
 
 // ----- file-backed `sort` via `where T: Comparable` (port off the bespoke arm) -----
@@ -2741,8 +2852,10 @@ struct Q:
 xs := [Q(2), Q(1)]
 xs.sort()
 ";
-    // M23: Comparable embeds Eq; Q has neither, so Eq (checked first) fails.
-    rejects(src, "does not satisfy Eq");
+    rejects(
+        src,
+        "does not satisfy Comparable (missing method 'compare')",
+    );
 }
 
 #[test]
@@ -5871,8 +5984,7 @@ fn cmp_max_over_comparable_struct_ok() {
 fn cmp_max_over_non_comparable_struct_rejected() {
     entry_rejects(
         "import std.cmp\nstruct P:\n    n: int\nfn main():\n    p := cmp.max(P(1), P(2))\n    print(p.n)\n",
-        // M23: Comparable embeds Eq; P has neither, so Eq (checked first) fails.
-        "does not satisfy Eq",
+        "does not satisfy Comparable (missing method 'compare')",
     );
 }
 
@@ -10327,8 +10439,7 @@ fn sort_by_key_non_comparable_key_rejected() {
     // by the loop-back, then enforced — the uniform protocol-conformance diagnostic (was bespoke).
     rejects(
         "struct B:\n    n: int\nxs := [B(2), B(1)]\nxs.sort_by_key(fn(b: B) -> B: b)\n",
-        // M23: Comparable embeds Eq; B has neither, so Eq (checked first) fails.
-        "does not satisfy Eq",
+        "does not satisfy Comparable (missing method 'compare')",
     );
 }
 
@@ -19236,8 +19347,7 @@ fn generic_fn_value_into_map_bound_violation_rejected() {
     // enforce_bounds under the pin (the helper mirrors Scope A's bound enforcement).
     rejects(
         "struct Tag:\n    n: int\n\nfn cmp[T: Comparable](x: T) -> T:\n    return x\n\nfn main():\n    xs := [Tag(1), Tag(2)].map(cmp)\n    print(xs)\n",
-        // M23: Comparable embeds Eq; Tag has neither, so Eq (checked first) fails.
-        "Eq",
+        "does not satisfy Comparable (missing method 'compare')",
     );
 }
 

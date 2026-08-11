@@ -270,3 +270,41 @@ test fn a_cross_instantiation_eq_faults_recoverably():
     c: Any = EBox(2)
     d: Any = EBox(2)
     assert (c == d) == true
+
+# ---- D1 — the `Eq` grant now covers every type whose `==` is the structural derive, and an erased
+# ---- `[T: Eq]` body must be able to CALL `.eq()` on each of them (the W6-3 check-OK/run-fault class)
+#
+# `Option`/`Result` and a plain `enum` are all one runtime shape (`Obj::Enum`), and that dispatch arm
+# was the ONE of six with no `intrinsic_proto_method` fallback — so this pins the VM arm, not the
+# checker. The `.eq()` spelling is the point: `==` would never reach the method-dispatch path.
+
+enum En:
+    A
+    B
+
+struct D1Pt:
+    x: int
+
+newtype Nm = str
+
+fn eqm[T: Eq](a: T, b: T) -> bool:
+    return a.eq(b)
+
+test fn an_erased_eq_bound_can_call_eq_on_every_granted_receiver():
+    assert eqm(En.A, En.B) == false, "a plain enum"
+    assert eqm(En.A, En.A) == true
+    assert eqm(Some(1), Some(1)) == true, "Option is an Obj::Enum at runtime"
+    assert eqm(Some(1), Some(2)) == false
+    assert eqm(Ok(1), Ok(1)) == true, "Result is an Obj::Enum at runtime"
+    assert eqm([1, 2], [1, 2]) == true
+    assert eqm((1, 2), (1, 3)) == false
+    assert eqm({"k": 1}, {"k": 1}) == true
+    assert eqm(Set([1]), Set([1])) == true
+    assert eqm(b"ab", b"ab") == true
+    assert eqm(D1Pt(1), D1Pt(2)) == false, "a struct with no `eq` of its own"
+    assert eqm(Nm("a"), Nm("a")) == true
+
+test fn the_method_and_the_operator_agree_on_every_granted_receiver():
+    assert eqm(Some(1), Some(1)) == (Some(1) == Some(1))
+    assert eqm(En.A, En.B) == (En.A == En.B)
+    assert eqm(Ok(1), Ok(2)) == (Ok(1) == Ok(2))

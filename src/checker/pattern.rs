@@ -2367,8 +2367,7 @@ impl Checker {
                     || (l == Ty::Str && r == Ty::Str)
                     || self.ordering_allowed(&l, &r);
                 if !ok && !either_unknown {
-                    let note = self.missing_eq_note(&l, &r);
-                    self.error(lhs.span, format!("cannot compare {l} and {r}{note}"));
+                    self.error(lhs.span, format!("cannot compare {l} and {r}"));
                 }
                 Ty::Bool
             }
