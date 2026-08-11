@@ -1106,9 +1106,47 @@ fn eq_is_satisfied_by_every_type_whose_equality_is_structural() {
         ("struct P:\n    x: int\n", "P(1)"),
         ("enum Color:\n    Red\n    Blue\n", "Color.Red"),
         ("newtype Name = str\n", "Name(\"a\")"),
+        // GENERIC nominals — the shape the feature exists for, and the one the first cut of the
+        // walk got wrong in BOTH directions (it walked DECLARED field types, so the decl-site `T`
+        // reached the `Ty::Param` arm unbound and refused every one of these).
+        ("struct Wrap[T]:\n    v: T\n", "Wrap(1)"),
+        ("struct Pair[A, B]:\n    a: A\n    b: B\n", "Pair(1, \"s\")"),
+        (
+            "enum Opt[T]:\n    Nothing\n    Just(T)\n",
+            "Opt[int].Just(1)",
+        ),
+        // …including one whose payload nests a param inside a container.
+        (
+            "struct Bag[T]:\n    items: List[T]\n    seen: Map[str, T]\n",
+            "Bag([1], {\"k\": 1})",
+        ),
     ] {
         entry_ok(&format!("{prelude}{same}print(same({lit}, {lit}))\n"));
     }
+    // A generic from the real stdlib, reached through a normal import.
+    entry_ok(
+        "import std.collections\nfn same[T: Eq](a: T, b: T) -> bool:\n    return a == b\nd := collections.Deque[int]([], [])\nprint(same(d, d))\n",
+    );
+}
+
+/// **Conformance may not depend on the CALLER's lexical scope.** The walk resolved declaration-site
+/// params against whatever was in scope where the question was asked, so `Wrap[int]` satisfied `Eq`
+/// inside `fn outer[T: Eq]` and not at module scope — the same type, two answers, and one of them a
+/// grant. Both call sites must agree.
+#[test]
+fn eq_conformance_does_not_depend_on_the_callers_scope() {
+    entry_ok(
+        "\
+struct Wrap[T]:
+    v: T
+fn same[U: Eq](a: U, b: U) -> bool:
+    return a == b
+fn outer[T: Eq](z: T) -> bool:
+    return same(Wrap(1), Wrap(2))
+print(outer(1))
+print(same(Wrap(1), Wrap(2)))
+",
+    );
 }
 
 /// **The BUILT-IN CURSOR is excluded, and the ratchet cannot see it.** `Ty::Struct("Iterator", [E])`
@@ -1181,6 +1219,24 @@ fn same[T: Eq](a: T, b: T) -> bool:
         &format!("{COND}print(same([Box(Tag(1))], [Box(Tag(2))]))\n"),
         "does not satisfy Eq",
     );
+    // …and reached through a FIELD, which is the arm that was broken: type ARGS were substituted
+    // correctly, declared FIELD types were not, so a `Wrap[Tag]` whose field is `Box[Z]` walked the
+    // decl-site `Z` instead of `Tag`.
+    entry_rejects(
+        &format!(
+            "{COND}struct Wrap[Z]:\n    v: Box[Z]\nprint(same(Wrap(Box(Tag(1))), Wrap(Box(Tag(2)))))\n"
+        ),
+        "does not satisfy Eq (Box[Tag]'s `eq` requires Tag: Comparable)",
+    );
+    // NAME CAPTURE — the check-OK-then-run-fault the unsubstituted walk shipped: put a same-named
+    // param carrying the needed bound in the CALLER's scope and the decl-site `Z` resolved against
+    // IT, so `Wrap[Tag]` was granted and `Tag.compare` faulted at runtime on both engines.
+    entry_rejects(
+        &format!(
+            "{COND}struct Wrap[Z]:\n    v: Box[Z]\nfn trick[Z: Comparable](z: Z, a: Wrap[Tag], b: Wrap[Tag]) -> bool:\n    return same(a, b)\nprint(trick(1, Wrap(Box(Tag(1))), Wrap(Box(Tag(2)))))\n"
+        ),
+        "type Wrap[Tag] does not satisfy Eq",
+    );
     // A SATISFYING instantiation still works — the rule is conditional conformance, not a ban.
     entry_ok(&format!("{COND}print(same(Box(1), Box(2)))\n"));
     // And a type whose own `eq` is unconditional keeps it even when a type ARG is not equatable
@@ -1190,13 +1246,17 @@ fn same[T: Eq](a: T, b: T) -> bool:
     ));
 }
 
-/// The `where T: Eq` bound check hops OUT of the structural walk (`satisfies` → the walk → `satisfies`
-/// again), and the walk's own name-stack does not span that hop. A type whose type ARGUMENT is itself
-/// closes the loop, so the guard must be across the boundary, not inside the walk.
+/// The `where T: Eq` bound check hops OUT of the structural walk (`satisfies` → the walk →
+/// `satisfies` again), and the walk's own name-stack does not span that hop. A type whose type
+/// ARGUMENT is itself closes the loop, so the guard must be across the boundary.
+///
+/// Re-asking an obligation already in progress answers "assume it holds" — a COINDUCTIVE assumption,
+/// not a decline: the walk it returns to still checks every remaining field. **Rust agrees, measured
+/// (rustc 1.97.0):** `struct C<T: Eq>` + `struct D { x: Vec<C<D>> }` with manual `Eq` impls compiles
+/// and runs under `fn needs<U: Eq>`.
 #[test]
 fn conditional_eq_bound_recursion_terminates() {
-    entry_ok(
-        "\
+    const CYCLE: &str = "\
 struct C[T]:
     v: T
     fn eq(self, o: Self) -> bool where T: Eq:
@@ -1207,8 +1267,55 @@ fn same[T: Eq](a: T, b: T) -> bool:
     return a == b
 fn use_it(a: D, b: D) -> bool:
     return same(a, b)
+";
+    entry_ok(CYCLE);
+    // POLYMORPHIC recursion — each step is a NEW instantiation, so an instantiation-keyed guard
+    // alone would expand forever. The walk's own name-stack is what bounds this; it must terminate.
+    entry_ok(
+        "\
+struct N[T]:
+    v: T
+    next: Option[N[List[T]]]
+fn same[T: Eq](a: T, b: T) -> bool:
+    return a == b
+fn use_it(a: N[int], b: N[int]) -> bool:
+    return same(a, b)
 ",
     );
+}
+
+/// **A chain of DISTINCT conditional types must be walked to its true answer, and running out of
+/// budget must REFUSE.** The first cut guarded the outward hop with a fixed re-entrancy DEPTH cap
+/// that returned "sound" when exceeded — so a 16-deep chain whose innermost link genuinely fails
+/// type-checked clean and then faulted at runtime on both engines. The guard is now an in-progress
+/// SET keyed on the instantiated type: distinct types never trip it, so the chain is decided
+/// correctly at any depth, and the size backstop that remains refuses instead of granting.
+#[test]
+fn a_long_chain_of_conditional_eq_types_is_decided_not_waved_through() {
+    // A0's field reaches `Box[Tag]`, whose `eq` needs `Tag: Comparable` — `Tag` has no `compare`, so
+    // the whole chain is unsound and every depth must say so.
+    let chain = |n: usize| {
+        let mut s = String::from(
+            "struct Tag:\n    n: int\n\
+             struct Box[T]:\n    val: T\n    \
+             fn compare(self, o: Self) -> int where T: Comparable:\n        return 0\n    \
+             fn eq(self, o: Self) -> bool where T: Comparable:\n        return self.compare(o) == 0\n\
+             struct C[T]:\n    v: T\n    \
+             fn eq(self, o: Self) -> bool where T: Eq:\n        return true\n\
+             struct A0:\n    v: Box[Tag]\n",
+        );
+        for i in 1..=n {
+            s.push_str(&format!("struct A{i}:\n    v: C[A{}]\n", i - 1));
+        }
+        s.push_str(&format!(
+            "fn needs[U: Eq](a: U, b: U) -> bool:\n    return a == b\nfn use_it(a: A{n}, b: A{n}) -> bool:\n    return needs(a, b)\n"
+        ));
+        s
+    };
+    // Well past the old depth cap of 16, and past the in-progress backstop of 64.
+    for n in [4, 20, 100] {
+        entry_rejects(&chain(n), "does not satisfy Eq");
+    }
 }
 
 /// Struct/enum conformance through a DECLARED `eq` stays structural (the `Comparable` model): the
@@ -16088,6 +16195,73 @@ fn files_reject(files: &[(&str, &str)], needle: &str) {
 fn files_ok(files: &[(&str, &str)]) {
     let errs = check_files(files);
     assert!(errs.is_empty(), "expected no type errors, got: {errs:?}");
+}
+
+/// **The `Eq` walk must read the field/payload tables through the MISS-ONLY owning-module helpers
+/// (gap #4).** A named-fn import (`import make from lib`) hands back a value whose `Ty::Struct` key
+/// belongs to the DEFINING module and injects nothing into the importer's `structs` table, so the
+/// bare-table read the first cut used found no fields, walked nothing, and GRANTED `Eq` to a type
+/// whose field reaches an unmet `where` bound — check-clean, then `Tag has no 'compare'` at runtime.
+///
+/// The whole-module import of the identical program is the control: it always rejected, so the two
+/// import forms disagreeing IS the bug. Both spellings must produce the same verdict AND the same
+/// message. (`ok()`/`entry_ok()` cannot see this at all — it needs the real `check_graph` path.)
+#[test]
+fn eq_walk_sees_fields_through_every_import_form() {
+    const LIB: &str = "\
+struct Tag:
+    n: int
+struct Box[T]:
+    val: T
+    fn compare(self, o: Self) -> int where T: Comparable:
+        return 0
+    fn eq(self, o: Self) -> bool where T: Comparable:
+        return self.compare(o) == 0
+struct Holder:
+    b: Box[Tag]
+enum Carrier:
+    Empty
+    Has(Box[Tag])
+fn make(n: int) -> Holder:
+    return Holder(Box(Tag(n)))
+fn carry(n: int) -> Carrier:
+    return Carrier.Has(Box(Tag(n)))
+";
+    const NEEDLE: &str = "'s `eq` requires Tag: Comparable";
+    for (label, main) in [
+        (
+            "named-fn import (struct field)",
+            "import make from lib\nfn needs[U: Eq](a: U, b: U) -> bool:\n    return a == b\nprint(needs(make(1), make(2)))\n",
+        ),
+        (
+            "whole-module import (struct field) — the control",
+            "import lib\nfn needs[U: Eq](a: U, b: U) -> bool:\n    return a == b\nprint(needs(lib.make(1), lib.make(2)))\n",
+        ),
+        (
+            "named-fn import (enum payload)",
+            "import carry from lib\nfn needs[U: Eq](a: U, b: U) -> bool:\n    return a == b\nprint(needs(carry(1), carry(2)))\n",
+        ),
+        (
+            "whole-module import (enum payload) — the control",
+            "import lib\nfn needs[U: Eq](a: U, b: U) -> bool:\n    return a == b\nprint(needs(lib.carry(1), lib.carry(2)))\n",
+        ),
+    ] {
+        let errs = check_files(&[("lib.chz", LIB), ("main.chz", main)]);
+        assert!(
+            errs.iter().any(|e| e.message.contains(NEEDLE)),
+            "{label}: expected an error containing {NEEDLE:?}, got: {errs:?}"
+        );
+    }
+    // …and a SOUND cross-module type is still granted through both forms (the fix must not simply
+    // refuse everything it cannot see locally).
+    const OK_LIB: &str = "struct P:\n    n: int\nfn mk(n: int) -> P:\n    return P(n)\n";
+    files_ok(&[
+        ("lib.chz", OK_LIB),
+        (
+            "main.chz",
+            "import mk from lib\nfn needs[U: Eq](a: U, b: U) -> bool:\n    return a == b\nprint(needs(mk(1), mk(2)))\n",
+        ),
+    ]);
 }
 
 #[test]
