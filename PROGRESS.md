@@ -36,7 +36,9 @@ Single source of truth for "what am I doing next." Update after every work sessi
 >    is no construction choke point), and map keys / set elements through the single `is_hashable_key`
 >    choke point, now `key_ty_reject`, with 10 call sites. That one line subsumes 18 measured seams,
 >    because the three routes that could *obtain* a bad `Set`/`Map` — annotation, fn return type, struct
->    field type — all reject, making the offending type unspellable.
+>    field type — all reject too. It does NOT make the type *unspellable*: an erased generic factory never
+>    spells its element type, so `fn mk[T: Hashable](x: T) -> Set[T]` still yields an ungated `Set`
+>    (measured, not a regression, filed as W7-53's third instance).
 >
 > **Also dropped, deliberately: M23's rule that "a type defining `compare` must define `eq` too".** Its
 > premise was falsified by measurement in both directions — a field-complete `compare` that agrees with

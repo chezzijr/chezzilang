@@ -1407,9 +1407,9 @@ method: `fn of(x: T) -> Box[T] where T: Comparable` rejects `Box.of(q)` when `q`
 `Comparable`).
 
 **Conditional conformance.** When the conditional method *is* a protocol's required method — e.g. a
-`compare(self, other: Self) -> int where T: Comparable` (paired with the `eq` `Comparable`'s `Eq`
-embed also requires) makes `Box[T]` *structurally* satisfy
-`Comparable` — the receiver bound makes that conformance **conditional**: `Box[int]` satisfies
+`compare(self, other: Self) -> int where T: Comparable` makes `Box[T]` *structurally* satisfy
+`Comparable` (no companion `eq` is needed: `Comparable` embeds `Eq`, and a type whose `==` is the
+structural derive satisfies `Eq` without writing one) — the receiver bound makes that conformance **conditional**: `Box[int]` satisfies
 `Comparable` (so `Box(1) < Box(2)` and passing a `Box[int]` to a `[U: Comparable]` generic are both
 fine), but `Box[Tag]` (with `Tag` not `Comparable`) does **not** — the `<`, and the bound-check, are
 rejected at compile time. The bound is honoured *everywhere* conformance is queried — operator
@@ -1439,7 +1439,9 @@ through a shape the checker cannot judge: a **protocol existential** operand or 
 declares no bound, so there is nothing to check inside the body *or* at the call site
 (**W7-53**; rustc rejects the body instead, which would mean a `where` on every generic fn that
 compares). A **function value** also still fails `Eq` even though `f == g` works by identity
-(**W7-54**).
+(**W7-54**). And a type graph nested deeper than **160** links is REFUSED at a `[T: Eq]` bound or an
+`==` even though the VM's own equality has no such cap, so the checker rejects what the runtime
+handles (**W7-55**).
 
 **Protocols** are Go-style structural interfaces: a block of body-less method signatures. A type
 satisfies a protocol by *having* the methods — there is no `implements` declaration. `Self` inside
@@ -3019,8 +3021,8 @@ List methods (built in): `xs.push(x)` `xs.pop()` `xs.len()` `xs.reverse()` `xs.c
 `xs.index_of(v)` `xs.sum()` `xs.sort()` (ascending, in place); `xs.concat(ys)→list` (new list) and
 `xs.extend(ys)` (append in place, → nil); higher-order `xs.map(f)` `xs.filter(p)` `xs.fold(init, f)`;
 `xs.sort_by(fn(a, b) -> int)` — a custom comparator (negative = `a` before `b`), stable, in place;
-and `xs.sort_by_key(fn(x) -> K)` — sort by a derived key (`K` Comparable: int/float/str or a struct
-with `compare` **and** `eq`), stable, in place.
+and `xs.sort_by_key(fn(x) -> K)` — sort by a derived key (`K` Comparable: int/float/str, or a struct
+defining `compare`), stable, in place.
 
 > **Empty-collection element typing (refine-on-first-use).** An un-annotated empty `[]` / `{}` /
 > `Set()` has no element/key type yet; the **first** mutating op on the binding — `.push`/`.add`/

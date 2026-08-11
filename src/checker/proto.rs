@@ -23,46 +23,42 @@ thread_local! {
     static EQ_BOUNDS_IN_PROGRESS: std::cell::RefCell<Vec<Ty>> =
         const { std::cell::RefCell::new(Vec::new()) };
 
-    /// Types already PROVEN sound during the CURRENT outermost query — the memo that makes the walk
+    /// Types already proven sound during the CURRENT outermost query — the memo that makes the walk
     /// linear instead of exponential. The guard above is PATH-based: it stops a type being re-entered
     /// while it is on the stack, but says nothing about one already finished and popped. So a struct
-    /// with two fields of the same nested type re-walks that subtree twice per level — 2^N, measured
-    /// at 37s for N=26 against 0.003s pre-D1, on the same path the LSP runs on every keystroke.
+    /// with two fields of the same nested type re-walks that subtree twice per level — 4x per level
+    /// measured, i.e. 2^N, on the path the LSP runs on every keystroke.
     /// `EQ_BOUNDS_MAX_IN_PROGRESS` cannot catch it: that bounds DEPTH, and this shape stays shallow.
     ///
-    /// **Only assumption-free results may be cached** — see [`EQ_BOUNDS_ASSUMED`]. A `None` derived
-    /// while a coinductive assumption was in scope is valid only INSIDE that assumption; caching one
-    /// would let it escape to a sibling branch that never made the assumption, which is C4/C5 (a type
-    /// assumed sound without being proven) wearing a third disguise.
+    /// # Why a result reached under a coinductive assumption is still safe to cache HERE
+    ///
+    /// A `None` produced while "assume `A: Eq` while proving `A: Eq`" was in scope is only valid
+    /// while that assumption holds — cache one carelessly and a type is treated as sound without
+    /// ever being proven, which is C4/C5 in a new disguise. The reason it is nonetheless safe within
+    /// one query is a property of the walk, not an optimism: **the first `Some` ENDS the query.**
+    /// Every combinator on the path propagates it — `find_map` over fields/payloads/args, `or_else`
+    /// on `Map`/`Result`, the early `return hit`, `eq_where_unsatisfied`'s `return Some(…)` on the
+    /// first failing bound, `satisfies_args_d`'s `?` on an embed. So an assumption can only be
+    /// invalidated by its owner completing with `Some`, and the instant that happens the query
+    /// unwinds — there is no later moment at which a stale entry could be consulted. Conversely a
+    /// frame that POPS having returned `None` has discharged its assumption truthfully.
+    ///
+    /// That argument is exactly why the per-query reset below is load-bearing and not housekeeping:
+    /// it is what confines the property to the window where it holds. An earlier version also
+    /// tracked "did this subtree consume an assumption?" and refused to memoize if so — which was
+    /// redundant with the reset (measured: removing either alone still rejected the escape fixture)
+    /// **and disabled the memo on every cyclic type graph**, since one back-pointer anywhere below a
+    /// node poisoned the whole path above it. That is an ordinary shape — a node holding a reference
+    /// back to its root — and it put the 2^N behaviour straight back: 26s at N=24 versus 0.003s
+    /// pre-D1, while the acyclic graph the timing test used stayed at 0.003s and saw nothing.
     ///
     /// Scoped to one outermost query — reset by [`Checker::eq_bounds_unsatisfied`] whenever the
-    /// in-progress stack is empty on entry. That is what keeps it honest across the two things a
+    /// in-progress stack is empty on entry. That also keeps it honest across the two things a
     /// longer-lived cache would get wrong: the checker's tables still being filled in (a type's `eq`
     /// may not be hoisted yet), and one thread checking several PROGRAMS in sequence, where
     /// `main::P` means something different each time.
     static EQ_BOUNDS_PROVEN: std::cell::RefCell<Vec<Ty>> =
         const { std::cell::RefCell::new(Vec::new()) };
-
-    /// Set when the subtree just walked CONSUMED a coinductive assumption (the guard answered "this
-    /// type is already being proven"). Such a result is conditional on that assumption, so it must
-    /// not enter [`EQ_BOUNDS_PROVEN`]. Propagated outward: if a child used an assumption, the parent's
-    /// result rests on it too.
-    ///
-    /// **DO NOT DELETE THIS BECAUSE YOU CANNOT WRITE A TEST THAT FAILS WITHOUT IT.** You cannot, and
-    /// that is a property of today's traversal, not of the invariant. [`Checker::walk_eq_members`]
-    /// short-circuits on the FIRST `Some`, and within one outermost query there is a single root, so
-    /// any genuine `Some` under that root propagates to it — a poisoned entry consulted *in the same
-    /// query* can never flip that query's verdict from reject to accept. Every distinguishing shape
-    /// therefore has to span two queries, which [`EQ_BOUNDS_PROVEN`]'s per-query reset already clears.
-    /// The two defences overlap completely **today** and each alone still rejects (the 2×2 in
-    /// `eq_walk_memo_never_caches_an_assumed_result` measures exactly that).
-    ///
-    /// The overlap ends the moment `walk_eq_members` stops short-circuiting — e.g. the plausible UX
-    /// change "report EVERY unsound field, not just the first". Then a sibling branch can be walked
-    /// after the poisoned one without a `Some` riding along to invalidate it, the same-query hazard
-    /// goes live, and this flag becomes the only thing standing between a cached assumption and a
-    /// silent grant. That is C4/C5 in a fourth disguise.
-    static EQ_BOUNDS_ASSUMED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// Backstop on the in-progress stack. Once the guard keys on the instantiated type it no longer
@@ -83,16 +79,20 @@ thread_local! {
 /// Do NOT re-derive that floor as "everything goes through [`crate::on_frontend_stack`]'s 1 GiB
 /// thread". An earlier version of this comment said exactly that and it was WRONG: `editor::hover`
 /// called `checker::hover_type` directly, so hover ran the whole checker on a ~2 MiB `chezzi-lsp`
-/// tokio worker (`#[tokio::main]`, `rt-multi-thread`, no `stack_size`). That hole is closed —
-/// `editor::hover` now wraps the same way `editor::diagnostics` does — but the bound is deliberately
-/// NOT sized on the assumption that it stays closed.
+/// tokio worker. That hole is closed — `editor::hover` now wraps the same way `editor::diagnostics`
+/// does — but the bound is deliberately NOT sized on the assumption that it stays closed.
 ///
-/// Measured floor: the Rust test harness calls `check_graph` directly on its own thread, and a DEBUG
-/// build (frames 3-5x release) survives a 200-link chain and aborts with `stack overflow` by 260.
-/// 128 keeps ~40% headroom under that while being double the 64 that was refusing sound 63-link
-/// chains. A stack overflow is an abort — strictly worse than any wrong answer — so this is the one
-/// place the safe direction is "smaller", not "more permissive".
-const EQ_BOUNDS_MAX_IN_PROGRESS: usize = 128;
+/// **Measured floor** (with the cap lifted, DEBUG build, Rust test-harness thread — which calls
+/// `check_graph` directly and is the smallest stack in the tree): a chain of CONDITIONAL `eq` types,
+/// the expensive shape at ~5-10 Rust frames per level, survives 240 and overflows by 280. A chain of
+/// plain structs — the cheap shape — survives 800 and overflows by 1600. 160 is sized on the
+/// expensive one with ~1.5x headroom.
+///
+/// **This is a KNOWN CEILING and it is FILED: `docs/gaps.md` W7-55.** A type graph nested deeper
+/// than this is REFUSED at a `[T: Eq]` bound / `==` even though the VM's own equality has no such
+/// cap, so the checker rejects something the runtime handles. That is a real (if absurd-sized)
+/// divergence, not a tradeoff, which is why it is written down rather than left in a comment.
+const EQ_BOUNDS_MAX_IN_PROGRESS: usize = 160;
 
 /// The marker every budget refusal carries, so [`Checker::eq_where_unsatisfied`] can tell "the bound
 /// genuinely failed" from "I ran out of budget proving it" and not reword the second into the first.
@@ -742,10 +742,14 @@ impl Checker {
     /// (`Channel`/`Func` are NOT the reason — they never reach this conjunct, because the `Hashable`
     /// gate refuses them first, and a struct merely *holding* a `Channel` satisfies `Eq` fine.)
     ///
-    /// Every map-key and set-element position funnels through here (literal, comprehension,
-    /// `Set(list)` construction, annotation, `m[k]` read and write, `refine_receiver`'s
-    /// late-concrete element, and thereby every `Map`/`Set`/`RwShared` method), so this is the whole
-    /// of W7-45's map/set half. The `Eq` conjunct is second because a non-`Hashable` type must keep
+    /// Every map-key and set-element position that is SPELLED funnels through here (literal,
+    /// comprehension, `Set(list)` construction, annotation, `m[k]` read and write,
+    /// `refine_receiver`'s late-concrete element, and thereby every `Map`/`Set`/`RwShared` method).
+    ///
+    /// It is NOT a proof that a bad element is unconstructible, and an earlier version of this doc
+    /// said it was. A generic factory never spells the element type — `fn mk[T: Hashable](x: T) ->
+    /// Set[T]` is checked once with `T` abstract — so it hands back a `Set[Cond[Tag]]` no gate ever
+    /// saw. Measured, check-clean, filed as W7-53's third instance. The `Eq` conjunct is second because a non-`Hashable` type must keep
     /// reporting the Hashable text.
     pub(super) fn key_ty_reject(&self, t: &Ty) -> Option<String> {
         if self.satisfies(t, "Hashable").is_err() {
@@ -2636,7 +2640,6 @@ impl Checker {
         // costs work. Re-entrant calls — the hop through `satisfies` — leave them alone.
         if EQ_BOUNDS_IN_PROGRESS.with(|s| s.borrow().is_empty()) {
             EQ_BOUNDS_PROVEN.with(|m| m.borrow_mut().clear());
-            EQ_BOUNDS_ASSUMED.set(false);
         }
         self.eq_bounds_unsatisfied_rec(ty)
     }
@@ -2680,10 +2683,6 @@ impl Checker {
             (st.contains(ty), st.len() >= EQ_BOUNDS_MAX_IN_PROGRESS)
         });
         if in_progress {
-            // The answer about to be returned RESTS ON AN ASSUMPTION, so mark the walk. Everything
-            // between here and the frame that owns `ty` is now conditional, and none of it may be
-            // memoized.
-            EQ_BOUNDS_ASSUMED.set(true);
             return Err(None);
         }
         if over_budget {
@@ -2704,18 +2703,12 @@ impl Checker {
             Err(verdict) => return verdict,
             Ok(g) => g,
         };
-        // Ask whether THIS subtree consumes an assumption, independently of whatever the walk had
-        // already recorded — then hand the outer frames the union, since a parent's result rests on
-        // any assumption its children used.
-        let outer_assumed = EQ_BOUNDS_ASSUMED.replace(false);
         let hit = members
             .iter()
             .find_map(|m| self.eq_bounds_unsatisfied_rec(m));
-        let subtree_assumed = EQ_BOUNDS_ASSUMED.get();
-        if hit.is_none() && !subtree_assumed {
+        if hit.is_none() {
             EQ_BOUNDS_PROVEN.with(|m| m.borrow_mut().push(ty.clone()));
         }
-        EQ_BOUNDS_ASSUMED.set(outer_assumed || subtree_assumed);
         hit
     }
 
@@ -2881,17 +2874,25 @@ impl Checker {
         None
     }
 
-    /// The budget refusal, in one place because two sites emit it — [`Self::enter_eq_obligation`]
-    /// where it originates and [`Self::eq_where_unsatisfied`] where it is re-stated on the way out.
-    /// It carries [`EQ_BUDGET_MARKER`] so those two can recognise each other.
+    /// The budget refusal. It names the type the WALK STARTED FROM, not the one that happened to be
+    /// the 161st entry — those are different, and the second is useless: for a chain
+    /// `S160 → … → S0` the entry that trips the budget is `S0`, whose declaration (`struct S0: v:
+    /// int`) nests not at all. The user asked about the root, so the root is what the message names.
+    /// Emitted from two sites — [`Self::enter_eq_obligation`] where it originates and
+    /// [`Self::eq_where_unsatisfied`] where it is re-stated on the way out — which recognise each
+    /// other by [`EQ_BUDGET_MARKER`].
     fn eq_budget_refusal(ty: &Ty) -> String {
-        // The type is ELIDED, because the shape that trips this budget is precisely the one whose
-        // name is enormous: polymorphic recursion refuses at `N[List[List[…×128…[int]]]]`, ~1 KB on
-        // one line, per diagnostic, streamed to the editor. Keep the head — that is what the user
-        // wrote and can act on — and say plainly that the rest is omitted. (rustc has the same
-        // problem and writes the full type to a side file; eliding is the cheaper half of that.)
+        // The ROOT of the current walk: the bottom of the in-progress stack, falling back to `ty`
+        // when the stack is empty (the budget cannot actually trip then — this is just total).
+        let root = EQ_BOUNDS_IN_PROGRESS.with(|s| s.borrow().first().cloned());
+        let named = root.as_ref().unwrap_or(ty);
+        // The type is ELIDED, because one shape that trips this budget has an enormous name:
+        // polymorphic recursion refuses at `N[List[List[…×160…[int]]]]`, ~1 KB on one line, per
+        // diagnostic, streamed to the editor. Keep the head — that is what the user wrote and can
+        // act on — and say plainly that the rest is omitted. (rustc has the same problem and writes
+        // the full type to a side file; eliding is the cheaper half of that.)
         const HEAD: usize = 60;
-        let shown = ty.to_string();
+        let shown = named.to_string();
         let shown = match shown.char_indices().nth(HEAD) {
             Some((cut, _)) => format!("{}… (elided)", &shown[..cut]),
             None => shown,

@@ -2520,10 +2520,16 @@ impl Checker {
                         // it is typed by `compatible` — which asks co-inhabitance, not whether the
                         // elements CAN be compared. So `Box(Tag(1)) in [Box(Tag(2))]` check-cleaned
                         // and faulted, while its method spelling `.contains(…)` already rejected:
-                        // the same operator-vs-method split W7-41 closed for `==`. A SET element is
-                        // gated at construction/annotation instead (`key_ty_reject`), so only the
-                        // list arm can be reached with a bad element — gating both here would
-                        // double-report on `x in {…}`.
+                        // the same operator-vs-method split W7-41 closed for `==`.
+                        //
+                        // LIST-ONLY, and NOT because a bad `Set` element is impossible — it is not.
+                        // `key_ty_reject` gates every SPELLABLE set position, but an erased
+                        // `fn mk[T: Hashable](x: T) -> Set[T]` hands back a `Set[Cond[Tag]]` that
+                        // was never spelled, and `x in s` on it is check-clean (measured; filed as
+                        // W7-53's third instance). Extending this arm to `Ty::Set` DOES close that
+                        // route — measured — but then the ordinary `x in Set([...])` reports twice,
+                        // once at the construction site and once here. Two diagnostics for one bug
+                        // was judged the worse trade; the route stays filed rather than claimed shut.
                         else if !either_unknown
                             && matches!(r, Ty::List(_))
                             && let Some(why) = self.eq_bounds_unsatisfied_erased(elem)

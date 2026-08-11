@@ -1838,16 +1838,24 @@ fn a_long_chain_of_conditional_eq_types_is_decided_not_waved_through() {
     // PAST the backstop, a SOUND chain is refused — and the refusal SAYS it ran out of budget rather
     // than blaming a bound that did not fail. That message used to be unreachable: it was produced
     // inside a `satisfies` call whose `Err` the caller discarded and reworded.
-    entry_rejects(&chain(140, true), "nests too deeply");
+    entry_rejects(&chain(180, true), "nests too deeply");
 }
 
 /// **The budget refusal must not print a multi-KB type name.** The shape that trips the budget is
-/// exactly the one whose name is enormous — polymorphic recursion refuses at
-/// `N[List[List[…×128…[int]]]]` — and this diagnostic is streamed to the editor. A `"nests too
+/// often the one whose name is enormous — polymorphic recursion reaches
+/// `N[List[List[…×160…[int]]]]` — and this diagnostic is streamed to the editor. A `"nests too
 /// deeply"` needle cannot see length, so assert length.
 #[test]
 fn the_budget_refusal_elides_a_runaway_type_name() {
-    let errs = check_entry(
+    let budget_msg = |src: &str| {
+        let errs = check_entry(src);
+        errs.iter()
+            .find(|e| e.message.contains("nests too deeply"))
+            .map(|e| e.message.clone())
+            .unwrap_or_else(|| panic!("expected a budget refusal, got: {errs:?}"))
+    };
+    // Naming the walk's ROOT rather than the innermost entry already keeps this one short.
+    let msg = budget_msg(
         "\
 struct N[T]:
     v: T
@@ -1858,19 +1866,27 @@ fn use_it(a: N[int], b: N[int]) -> bool:
     return same(a, b)
 ",
     );
-    let msg = errs
-        .iter()
-        .find(|e| e.message.contains("nests too deeply"))
-        .map(|e| e.message.clone())
-        .unwrap_or_else(|| panic!("expected a budget refusal, got: {errs:?}"));
     assert!(
         msg.len() < 200,
-        "the budget refusal must elide the runaway type, got {} chars: {msg}",
+        "the budget refusal must stay short, got {} chars: {msg}",
         msg.len()
     );
+    // …and when the ROOT ITSELF is written with a huge name, the elision is what bounds the clause
+    // this predicate owns. (The enclosing `type X does not satisfy Eq (…)` wrapper still renders the
+    // type in full — that is `satisfies_args_d`'s shared wording for EVERY protocol rejection, not
+    // this refusal's, and is out of scope here.)
+    let deep = (0..40).fold("int".to_string(), |acc, _| format!("List[{acc}]"));
+    let msg = budget_msg(&format!(
+        "struct N[T]:\n    v: T\n    next: Option[N[List[T]]]\nfn same[T: Eq](a: T, b: T) -> bool:\n    return a == b\nfn use_it(a: N[{deep}], b: N[{deep}]) -> bool:\n    return same(a, b)\n"
+    ));
+    let clause = msg
+        .rfind(" (")
+        .map(|i| &msg[i..])
+        .expect("the refusal is a parenthesised clause");
     assert!(
-        msg.contains("(elided)"),
-        "an elided message must say so: {msg}"
+        clause.len() < 200 && clause.contains("(elided)"),
+        "the budget clause must elide a long root type, got {} chars: {clause}",
+        clause.len()
     );
 }
 
@@ -1906,6 +1922,82 @@ fn a_shared_field_type_graph_is_walked_once_per_type() {
     );
 }
 
+/// **The same shape with a CYCLE in it — and this is the one that matters.** The acyclic test above
+/// passed while this took 26 s at N=24, because the first memo refused to cache any result derived
+/// under a coinductive assumption, and one back-pointer anywhere below a node marks the whole path
+/// above it as assumption-derived. So the memo switched itself off on exactly the graphs it was
+/// written for: a node holding a reference back to its root is an ordinary shape, not a pathology.
+///
+/// Measured on the release binary: `abd15c1e` N=18 0.39s / N=20 1.57s / N=22 6.43s / N=24 26.2s,
+/// while the identical ACYCLIC graph was 0.003s throughout — which is precisely why the acyclic
+/// test could not see it. Pre-D1 and fixed: 0.003s at every size.
+#[test]
+fn a_cyclic_shared_field_type_graph_is_also_walked_once_per_type() {
+    let mut src = String::from("struct L0:\n    r: Option[Root]\n");
+    for i in 1..=22 {
+        src.push_str(&format!(
+            "struct L{i}:\n    x: L{}\n    y: L{}\n",
+            i - 1,
+            i - 1
+        ));
+    }
+    src.push_str("struct Root:\n    a: L22\n    b: L22\n");
+    src.push_str(
+        "fn needs[U: Eq](p: U, q: U) -> bool:\n    return p == q\nfn use_it(p: Root, q: Root) -> bool:\n    return needs(p, q)\n",
+    );
+    let start = std::time::Instant::now();
+    entry_ok(&src);
+    let elapsed = start.elapsed();
+    assert!(
+        elapsed < std::time::Duration::from_secs(5),
+        "the CYCLIC shared-field walk is exponential again: took {elapsed:?} (memoized: well under \
+         1s; assumption-poisoned memo: ~6.4s release at this size, 26s at N=24)"
+    );
+}
+
+/// The budget refusal must name the type the walk STARTED from. For a chain `S200 → … → S0` the
+/// entry that actually trips the budget is `S0` — `struct S0: v: int`, which nests not at all — so
+/// naming it told the user about the one link that is definitely fine.
+#[test]
+fn the_budget_refusal_names_the_type_the_walk_started_from() {
+    let mut src = String::from("struct S0:\n    v: int\n");
+    for i in 1..=200 {
+        src.push_str(&format!("struct S{i}:\n    v: S{}\n", i - 1));
+    }
+    src.push_str(
+        "fn needs[U: Eq](a: U, b: U) -> bool:\n    return a == b\nfn use_it(a: S200, b: S200) -> bool:\n    return needs(a, b)\n",
+    );
+    let errs = check_entry(&src);
+    let msg = errs
+        .iter()
+        .find(|e| e.message.contains("nests too deeply"))
+        .map(|e| e.message.clone())
+        .unwrap_or_else(|| panic!("expected a budget refusal, got: {errs:?}"));
+    assert!(
+        msg.contains("S200 nests too deeply"),
+        "the refusal must name the walk's ROOT, not the innermost entry: {msg}"
+    );
+    assert!(
+        !msg.contains("S0 nests"),
+        "S0 is `struct S0: v: int` — it nests not at all: {msg}"
+    );
+}
+
+/// **The depth cap must not refuse an ordinary deep chain.** It exists for shapes that cannot
+/// terminate (polymorphic recursion), and a plain 140-link chain is not one — the VM's own equality
+/// has no cap and runs it. The ceiling that remains is filed as `docs/gaps.md` W7-55.
+#[test]
+fn a_deep_but_finite_chain_stays_within_the_eq_budget() {
+    let mut src = String::from("struct S0:\n    v: int\n");
+    for i in 1..=140 {
+        src.push_str(&format!("struct S{i}:\n    v: S{}\n", i - 1));
+    }
+    src.push_str(
+        "fn needs[U: Eq](a: U, b: U) -> bool:\n    return a == b\nfn use_it(a: S140, b: S140) -> bool:\n    return needs(a, b)\n",
+    );
+    entry_ok(&src);
+}
+
 /// **A memoized `None` must never escape the coinductive assumption it was derived under.** "Assume
 /// `A: Eq` while proving `A: Eq`" is sound only while that proof is running. A descendant whose walk
 /// came back clean *because of* that assumption is proven only conditionally — and if `A` then turns
@@ -1918,16 +2010,16 @@ fn a_shared_field_type_graph_is_walked_once_per_type() {
 /// field. Asking `M` afterwards must still reject.
 ///
 /// **Measured — this is the fixture, not a plausible-looking one.** `q2`'s error is the one that
-/// disappears: the walk has two independent defences (cache only assumption-free results, and reset
-/// the memo at every outermost query) and removing EITHER alone still rejects both. Removing BOTH
-/// silently accepts `q2`, and this test is what catches it:
+/// disappears. The defence is the PER-QUERY RESET of `EQ_BOUNDS_PROVEN`: within one query the first
+/// `Some` unwinds everything, so a conditional result can never be consulted after its assumption
+/// was invalidated; across queries only the reset stops it. Remove the reset and `q2` is silently
+/// granted — 1 type error instead of 2 — which is what this test catches.
 ///
-/// | build | verdict |
-/// |---|---|
-/// | fixed | 2 type errors |
-/// | assumption flag ignored | 2 type errors |
-/// | per-query reset removed | 2 type errors |
-/// | **both removed** | **1 type error** — `q2` wrongly granted |
+/// An earlier build carried a second defence, a flag refusing to memoize any assumption-derived
+/// result. It was measured redundant with the reset (removing either alone still rejected both
+/// queries here) **and it disabled the memo on every cyclic type graph**, putting a 2^N walk back —
+/// see `a_cyclic_shared_field_type_graph_is_also_walked_once_per_type`. It is gone; this test now
+/// guards the single mechanism that actually carries the weight.
 #[test]
 fn a_memoized_eq_result_never_escapes_its_coinductive_assumption() {
     let errs = check_entry(
