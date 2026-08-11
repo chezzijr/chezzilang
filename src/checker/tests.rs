@@ -1400,6 +1400,135 @@ fn a_long_chain_of_conditional_eq_types_is_decided_not_waved_through() {
     entry_rejects(&chain(140, true), "nests too deeply");
 }
 
+/// **The budget refusal must not print a multi-KB type name.** The shape that trips the budget is
+/// exactly the one whose name is enormous — polymorphic recursion refuses at
+/// `N[List[List[…×128…[int]]]]` — and this diagnostic is streamed to the editor. A `"nests too
+/// deeply"` needle cannot see length, so assert length.
+#[test]
+fn the_budget_refusal_elides_a_runaway_type_name() {
+    let errs = check_entry(
+        "\
+struct N[T]:
+    v: T
+    next: Option[N[List[T]]]
+fn same[T: Eq](a: T, b: T) -> bool:
+    return a == b
+fn use_it(a: N[int], b: N[int]) -> bool:
+    return same(a, b)
+",
+    );
+    let msg = errs
+        .iter()
+        .find(|e| e.message.contains("nests too deeply"))
+        .map(|e| e.message.clone())
+        .unwrap_or_else(|| panic!("expected a budget refusal, got: {errs:?}"));
+    assert!(
+        msg.len() < 200,
+        "the budget refusal must elide the runaway type, got {} chars: {msg}",
+        msg.len()
+    );
+    assert!(
+        msg.contains("(elided)"),
+        "an elided message must say so: {msg}"
+    );
+}
+
+/// **The walk must be linear in a SHARED-FIELD type graph, not exponential.** The cycle guard is
+/// PATH-based: it stops a type being re-entered while it is on the stack, and says nothing about one
+/// already finished. So a struct with two fields of the same nested type re-walks that subtree twice
+/// per level — 4x per level measured, i.e. 2^N. This is a HANG, on the path the LSP runs on every
+/// keystroke, and the depth backstop cannot see it because the shape stays shallow.
+///
+/// Measured on the release binary before the memo: N=20 → 0.54s, N=22 → 2.4s, N=24 → 9.5s,
+/// N=26 → 37.2s; `chezzi-prehead` 0.003s at every size. N=24 is used here because it is ~9.5s
+/// unfixed — unambiguous against any plausible machine — while staying a fraction of a second fixed.
+#[test]
+fn a_shared_field_type_graph_is_walked_once_per_type() {
+    let mut src = String::from("struct B0:\n    x: int\n");
+    for i in 1..=24 {
+        src.push_str(&format!(
+            "struct B{i}:\n    a: B{}\n    b: B{}\n",
+            i - 1,
+            i - 1
+        ));
+    }
+    src.push_str(
+        "fn needs[U: Eq](p: U, q: U) -> bool:\n    return p == q\nfn use_it(p: B24, q: B24) -> bool:\n    return needs(p, q)\n",
+    );
+    let start = std::time::Instant::now();
+    entry_ok(&src);
+    let elapsed = start.elapsed();
+    assert!(
+        elapsed < std::time::Duration::from_secs(5),
+        "the shared-field walk is exponential again: B24 took {elapsed:?} (memoized: well under 1s; \
+         path-guard-only: ~9.5s release / far worse in debug)"
+    );
+}
+
+/// **A memoized `None` must never escape the coinductive assumption it was derived under.** "Assume
+/// `A: Eq` while proving `A: Eq`" is sound only while that proof is running. A descendant whose walk
+/// came back clean *because of* that assumption is proven only conditionally — and if `A` then turns
+/// out unsound by another branch, caching the descendant hands a later query a type that was assumed
+/// sound and never proven. That is C4/C5 in a third disguise.
+///
+/// The shape, and it is exact: `A` reaches `M` (first field) and `Bad[Tag]` (second, genuinely
+/// unsound); `M` reaches back to `A` through a `where T: Eq` bound. Asking `A` walks `M` first — `M`
+/// comes back clean, but only via the assumption on `A` — and only THEN discovers `A`'s bad second
+/// field. Asking `M` afterwards must still reject.
+///
+/// **Measured — this is the fixture, not a plausible-looking one.** `q2`'s error is the one that
+/// disappears: the walk has two independent defences (cache only assumption-free results, and reset
+/// the memo at every outermost query) and removing EITHER alone still rejects both. Removing BOTH
+/// silently accepts `q2`, and this test is what catches it:
+///
+/// | build | verdict |
+/// |---|---|
+/// | fixed | 2 type errors |
+/// | assumption flag ignored | 2 type errors |
+/// | per-query reset removed | 2 type errors |
+/// | **both removed** | **1 type error** — `q2` wrongly granted |
+#[test]
+fn a_memoized_eq_result_never_escapes_its_coinductive_assumption() {
+    let errs = check_entry(
+        "\
+struct Tag:
+    n: int
+struct Bad[T]:
+    val: T
+    fn compare(self, o: Self) -> int where T: Comparable:
+        return 0
+    fn eq(self, o: Self) -> bool where T: Comparable:
+        return self.compare(o) == 0
+struct Cond[T]:
+    v: T
+    fn eq(self, o: Self) -> bool where T: Eq:
+        return true
+struct A:
+    m: M
+    bad: Bad[Tag]
+struct M:
+    back: Cond[A]
+fn needs[U: Eq](p: U, q: U) -> bool:
+    return p == q
+fn q1(x: A, y: A) -> bool:
+    return needs(x, y)
+fn q2(x: M, y: M) -> bool:
+    return needs(x, y)
+",
+    );
+    assert!(
+        errs.iter()
+            .any(|e| e.message.contains("type A does not satisfy Eq")),
+        "q1 must reject: A's second field is unsound. got: {errs:?}"
+    );
+    assert!(
+        errs.iter()
+            .any(|e| e.message.contains("type M does not satisfy Eq")),
+        "q2 must reject — M is clean only under the assumption that A is sound, and A is not. \
+         A memo that cached that conditional result would grant it. got: {errs:?}"
+    );
+}
+
 /// Struct/enum conformance through a DECLARED `eq` stays structural (the `Comparable` model): the
 /// method must be the hook `eq(self, Self) -> bool`. A type WITHOUT one is now granted intrinsically
 /// (D1) — its `==` is the structural derive — which is `struct_satisfies_eq_without_a_method` below.

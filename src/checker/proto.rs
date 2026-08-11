@@ -22,6 +22,32 @@ thread_local! {
     /// every exit path.
     static EQ_BOUNDS_IN_PROGRESS: std::cell::RefCell<Vec<Ty>> =
         const { std::cell::RefCell::new(Vec::new()) };
+
+    /// Types already PROVEN sound during the CURRENT outermost query — the memo that makes the walk
+    /// linear instead of exponential. The guard above is PATH-based: it stops a type being re-entered
+    /// while it is on the stack, but says nothing about one already finished and popped. So a struct
+    /// with two fields of the same nested type re-walks that subtree twice per level — 2^N, measured
+    /// at 37s for N=26 against 0.003s pre-D1, on the same path the LSP runs on every keystroke.
+    /// `EQ_BOUNDS_MAX_IN_PROGRESS` cannot catch it: that bounds DEPTH, and this shape stays shallow.
+    ///
+    /// **Only assumption-free results may be cached** — see [`EQ_BOUNDS_ASSUMED`]. A `None` derived
+    /// while a coinductive assumption was in scope is valid only INSIDE that assumption; caching one
+    /// would let it escape to a sibling branch that never made the assumption, which is C4/C5 (a type
+    /// assumed sound without being proven) wearing a third disguise.
+    ///
+    /// Scoped to one outermost query — reset by [`Checker::eq_bounds_unsatisfied`] whenever the
+    /// in-progress stack is empty on entry. That is what keeps it honest across the two things a
+    /// longer-lived cache would get wrong: the checker's tables still being filled in (a type's `eq`
+    /// may not be hoisted yet), and one thread checking several PROGRAMS in sequence, where
+    /// `main::P` means something different each time.
+    static EQ_BOUNDS_PROVEN: std::cell::RefCell<Vec<Ty>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+
+    /// Set when the subtree just walked CONSUMED a coinductive assumption (the guard answered "this
+    /// type is already being proven"). Such a result is conditional on that assumption, so it must
+    /// not enter [`EQ_BOUNDS_PROVEN`]. Propagated outward: if a child used an assumption, the parent's
+    /// result rests on it too.
+    static EQ_BOUNDS_ASSUMED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// Backstop on the in-progress stack. Once the guard keys on the instantiated type it no longer
@@ -36,13 +62,21 @@ thread_local! {
 ///
 /// **The ceiling is STACK SAFETY, not ambition, and it is measured.** Each level costs a full
 /// `satisfies` → `satisfies_args_d` → walk → `eq_where_unsatisfied` → `satisfies` round trip, so the
-/// bound has to fit the SMALLEST stack the checker runs on. Production always has room — both
-/// entry points (`main.rs`, `editor/mod.rs`) go through [`crate::on_frontend_stack`]'s 1 GiB thread,
-/// and a 500-link chain checks fine there — but the Rust test harness calls `check_graph` directly on
-/// its own thread, and a DEBUG build (frames 3-5x release) aborts with `stack overflow` somewhere
-/// between 200 and 260 links. 128 keeps ~40% headroom below the measured floor while being double the
-/// 64 that was refusing sound 63-link chains. A stack overflow is an abort — strictly worse than any
-/// wrong answer — so this is the one place the safe direction is "smaller", not "more permissive".
+/// bound has to fit the SMALLEST stack the checker runs on — the repo's `recursion-guard: size for
+/// the smallest stack the path runs on` rule.
+///
+/// Do NOT re-derive that floor as "everything goes through [`crate::on_frontend_stack`]'s 1 GiB
+/// thread". An earlier version of this comment said exactly that and it was WRONG: `editor::hover`
+/// called `checker::hover_type` directly, so hover ran the whole checker on a ~2 MiB `chezzi-lsp`
+/// tokio worker (`#[tokio::main]`, `rt-multi-thread`, no `stack_size`). That hole is closed —
+/// `editor::hover` now wraps the same way `editor::diagnostics` does — but the bound is deliberately
+/// NOT sized on the assumption that it stays closed.
+///
+/// Measured floor: the Rust test harness calls `check_graph` directly on its own thread, and a DEBUG
+/// build (frames 3-5x release) survives a 200-link chain and aborts with `stack overflow` by 260.
+/// 128 keeps ~40% headroom under that while being double the 64 that was refusing sound 63-link
+/// chains. A stack overflow is an abort — strictly worse than any wrong answer — so this is the one
+/// place the safe direction is "smaller", not "more permissive".
 const EQ_BOUNDS_MAX_IN_PROGRESS: usize = 128;
 
 /// The marker every budget refusal carries, so [`Checker::eq_where_unsatisfied`] can tell "the bound
@@ -2546,6 +2580,15 @@ impl Checker {
     /// in progress also answers `None`, but that is a coinductive ASSUMPTION rather than a hole —
     /// see [`EQ_BOUNDS_IN_PROGRESS`].)
     pub(super) fn eq_bounds_unsatisfied(&self, ty: &Ty) -> Option<String> {
+        // An EMPTY in-progress stack means this is an outermost query: no assumption can be in scope,
+        // so nothing in the memo is worth keeping and nothing in it is safe to trust (the checker's
+        // tables may have grown, and on a test thread the previous query may have been a different
+        // PROGRAM whose `main::P` is not this one). Reset both; clearing is always sound, it only
+        // costs work. Re-entrant calls — the hop through `satisfies` — leave them alone.
+        if EQ_BOUNDS_IN_PROGRESS.with(|s| s.borrow().is_empty()) {
+            EQ_BOUNDS_PROVEN.with(|m| m.borrow_mut().clear());
+            EQ_BOUNDS_ASSUMED.set(false);
+        }
         self.eq_bounds_unsatisfied_rec(ty)
     }
 
@@ -2568,6 +2611,10 @@ impl Checker {
             (st.contains(ty), st.len() >= EQ_BOUNDS_MAX_IN_PROGRESS)
         });
         if in_progress {
+            // The answer about to be returned RESTS ON AN ASSUMPTION, so mark the walk. Everything
+            // between here and the frame that owns `ty` is now conditional, and none of it may be
+            // memoized.
+            EQ_BOUNDS_ASSUMED.set(true);
             return Err(None);
         }
         if over_budget {
@@ -2578,14 +2625,29 @@ impl Checker {
     }
 
     /// Walk the MEMBERS of a nominal `ty` (fields / payloads / underlying) under the shared cycle
-    /// guard. Every nominal arm funnels through here, so entering the guard cannot be forgotten.
+    /// guard, memoizing a sound result. Every nominal arm funnels through here, so neither entering
+    /// the guard nor the memo bookkeeping can be forgotten at a call site.
     fn walk_eq_members(&self, ty: &Ty, members: &[Ty]) -> Option<String> {
-        match Self::enter_eq_obligation(ty) {
-            Err(verdict) => verdict,
-            Ok(_guard) => members
-                .iter()
-                .find_map(|m| self.eq_bounds_unsatisfied_rec(m)),
+        if EQ_BOUNDS_PROVEN.with(|m| m.borrow().contains(ty)) {
+            return None; // proven sound earlier in this query, unconditionally
         }
+        let _guard = match Self::enter_eq_obligation(ty) {
+            Err(verdict) => return verdict,
+            Ok(g) => g,
+        };
+        // Ask whether THIS subtree consumes an assumption, independently of whatever the walk had
+        // already recorded — then hand the outer frames the union, since a parent's result rests on
+        // any assumption its children used.
+        let outer_assumed = EQ_BOUNDS_ASSUMED.replace(false);
+        let hit = members
+            .iter()
+            .find_map(|m| self.eq_bounds_unsatisfied_rec(m));
+        let subtree_assumed = EQ_BOUNDS_ASSUMED.get();
+        if hit.is_none() && !subtree_assumed {
+            EQ_BOUNDS_PROVEN.with(|m| m.borrow_mut().push(ty.clone()));
+        }
+        EQ_BOUNDS_ASSUMED.set(outer_assumed || subtree_assumed);
+        hit
     }
 
     /// [`Self::eq_bounds_unsatisfied`]'s recursive body. The cycle guard is the shared thread-local,
@@ -2754,7 +2816,18 @@ impl Checker {
     /// where it originates and [`Self::eq_where_unsatisfied`] where it is re-stated on the way out.
     /// It carries [`EQ_BUDGET_MARKER`] so those two can recognise each other.
     fn eq_budget_refusal(ty: &Ty) -> String {
-        format!("{ty} {EQ_BUDGET_MARKER} to prove its equality reaches no unmet `where` bound")
+        // The type is ELIDED, because the shape that trips this budget is precisely the one whose
+        // name is enormous: polymorphic recursion refuses at `N[List[List[…×128…[int]]]]`, ~1 KB on
+        // one line, per diagnostic, streamed to the editor. Keep the head — that is what the user
+        // wrote and can act on — and say plainly that the rest is omitted. (rustc has the same
+        // problem and writes the full type to a side file; eliding is the cheaper half of that.)
+        const HEAD: usize = 60;
+        let shown = ty.to_string();
+        let shown = match shown.char_indices().nth(HEAD) {
+            Some((cut, _)) => format!("{}… (elided)", &shown[..cut]),
+            None => shown,
+        };
+        format!("{shown} {EQ_BUDGET_MARKER} to prove its equality reaches no unmet `where` bound")
     }
 
     /// A struct/enum/newtype's own type params bound to the args of THIS instantiation

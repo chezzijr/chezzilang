@@ -140,12 +140,23 @@ pub struct HoverInfo {
 /// binding / field-name at that token. `None` when the cursor is off any symbol, the program fails to
 /// resolve/check, or the position carries no type (operators, keywords, desugared `?.`/`??`).
 pub fn hover(path: &Path, source: &str, line: u32, character: u32) -> Option<HoverInfo> {
-    use crate::{checker, resolver};
     // Reverse the UTF-16 column to a char column on the cursor's line.
     let line_str = source.lines().nth(line as usize)?;
     let char_col = utf16_to_char_col(line_str, character);
     // The lexer token covering that char position → its 1-based (line, col) probe key.
     let (l1, c1) = token_at(source, line as usize, char_col)?;
+    // Same dedicated front-end stack as `diagnostics`, and for the same reason: this runs resolve →
+    // desugar → check, on the ~2 MiB `chezzi-lsp` tokio worker (`#[tokio::main]`, `rt-multi-thread`,
+    // no `stack_size`). It was the ONE checker entry point still on the caller's stack, so a
+    // deep-but-valid AST — or any deep checker recursion — would SIGABRT the language server here
+    // while the identical program hovered fine through `diagnostics`.
+    let path = path.to_path_buf();
+    let source = source.to_string();
+    crate::on_frontend_stack(move || hover_inner(&path, &source, l1, c1))
+}
+
+fn hover_inner(path: &Path, source: &str, l1: u32, c1: u32) -> Option<HoverInfo> {
+    use crate::{checker, resolver};
     let graph = resolver::build_graph_with_entry_source(path, Some(source.to_string())).ok()?;
     let (display, kind, doc) = checker::hover_type(&graph, l1, c1)?;
     Some(HoverInfo { display, kind, doc })
