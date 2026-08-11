@@ -2422,10 +2422,16 @@ impl Checker {
             //
             // The runtime's cross-type pairs (`1 == 1.0`, `b"ab" == bytearray(...)`) are arms of
             // `may_be_equal` itself, so they compose through the recursion (`[1.0] == [1]`) instead
-            // of being a top-level special case. A user `eq` overload adds NOTHING to ask here: it
-            // only ever applies to a same-type pair, which `may_be_equal` already accepts.
+            // of being a top-level special case.
             // `either_unknown` keeps a prior error from cascading (and keeps both operands INFERRED,
             // which the range-in-value-position backstop depends on).
+            //
+            // **W7-41 — co-inhabitance is NOT the only question.** This file used to argue that a
+            // user `eq` overload adds nothing to ask here, "since it only ever applies to a same-type
+            // pair, which `may_be_equal` already accepts". Conditional conformance — a `where` clause
+            // on the method, landed after M23 — falsified exactly that premise: `Box[Tag] == Box[Tag]`
+            // IS a same-type pair whose `eq` does not cover it, and it check-cleaned then faulted with
+            // *"struct 'Tag' has no 'compare' method"*. So the bound is asked too, below.
             Eq | NotEq => {
                 // A `where T: <scalar>` bound is an EQUALITY constraint (`scalar_bound_ty`), not
                 // structural satisfaction: such a `T` is EXACTLY that scalar, at any nesting depth.
@@ -2446,6 +2452,57 @@ impl Checker {
                 } else {
                     (subst(&l, &pins), subst(&r, &pins))
                 };
+                // **W7-41.** Does the structural equality walk reach a declared `eq` whose `where`
+                // bounds do not hold for this instantiation? The explicit spelling `a.eq(b)` was
+                // always rejected here (the instance-method dispatch path runs `enforce_bounds`); the
+                // operator was not, so the same program had two answers. Rust owns conditional
+                // conformance and agrees — measured, rustc 1.97.0: `error[E0369]: binary operation
+                // `==` cannot be applied to type `Boxy<Tag>`` on the `impl<T: Ord> PartialEq` mirror,
+                // with `Boxy(1) == Boxy(2)` still compiling.
+                //
+                // BOTH operands, not one: `may_be_equal` accepts co-inhabitable pairs, not identical
+                // ones (the `int`/`float` and `bytes`/`bytearray` cross arms recurse in), so a
+                // left-only gate would give `Box(1) == Box(1.0)` and `Box(1.0) == Box(1)` different
+                // verdicts. And it belongs HERE rather than inside `may_be_equal`, which is `&self`,
+                // non-emitting by contract, and recursive — the predicate already walks elements,
+                // payloads and fields itself, so one call per operand covers every nesting.
+                //
+                // ERASURE, the same rule the arm above already lives by: a free `T` here is not a
+                // type that fails the bound, it is a type not yet chosen, and a generic body is
+                // checked ONCE with `T` abstract. `may_be_equal`'s `(Param(_), _) => true` says so
+                // for the operand itself and its `Protocol` arm spells the general form — erase free
+                // params to `Ty::Unknown`, which `satisfies_args` treats as don't-cascade — so this
+                // borrows that rather than a blanket skip: `fn f[T](x: Box[T], y: Box[T])` stays
+                // accepted while a CONCRETE part of the same type (`Map[T, Box[Tag]]`) is still
+                // judged. **This is where Chezzi and Rust part**, deliberately and pre-existing:
+                // rustc 1.97.0 rejects the erased body outright (`the trait bound T: Ord is not
+                // satisfied`, "consider restricting type parameter T"), Chezzi defers to the call
+                // site. Tightening it is a separate milestone — it would demand a `where` on every
+                // generic fn that compares — and it is the residual behind W7-41's known ceiling
+                // that `fn f[T](a: T, b: T) -> bool: return a == b` still faults on a `Box[Tag]`.
+                let erase = |t: &Ty| {
+                    let mut names: Vec<String> = Vec::new();
+                    ty_collect_params(t, None, &mut names);
+                    if names.is_empty() {
+                        t.clone()
+                    } else {
+                        subst(t, &names.into_iter().map(|n| (n, Ty::Unknown)).collect())
+                    }
+                };
+                if !either_unknown
+                    && let Some(why) = self
+                        .eq_bounds_unsatisfied(&erase(&l))
+                        .or_else(|| self.eq_bounds_unsatisfied(&erase(&r)))
+                {
+                    // Decorated, not replaced: the bare text reads as "you have no equality", and the
+                    // user WROTE an `eq`. Same ` — ` separator the `<` operator's note used.
+                    self.error(
+                        lhs.span,
+                        format!("cannot compare {l} and {r} for equality — {why}"),
+                    );
+                    // One diagnostic per site — do not also run the co-inhabitance question.
+                    return Ty::Bool;
+                }
                 let ok = self.may_be_equal(&l, &r);
                 if !ok && !either_unknown {
                     self.error(lhs.span, format!("cannot compare {l} and {r} for equality"));

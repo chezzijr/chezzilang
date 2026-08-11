@@ -1189,6 +1189,192 @@ fn unbounded_type_param_does_not_satisfy_eq() {
     );
 }
 
+/// **W7-41 — `==` / `!=` enforce the receiver's `eq` `where` bounds.** The explicit method spelling
+/// `a.eq(b)` was already rejected (the instance-method dispatch path runs `enforce_bounds`); the
+/// OPERATOR routed through `may_be_equal`, which asks co-inhabitance only. Same program, two answers:
+/// `check` was clean and the run faulted with *"struct 'Tag' has no 'compare' method"* — the
+/// `checker-superset-of-compiler` class two-engine parity is structurally blind to.
+///
+/// **Rust owns conditional conformance; measured, rustc 1.97.0** on the mirror
+/// `impl<T: Ord> PartialEq for Boxy<T>`: `error[E0369]: binary operation == cannot be applied to type
+/// Boxy<Tag>` / `note: an implementation of Ord might be missing for Tag`, while the satisfying
+/// instantiation `Boxy(1) == Boxy(2)` still compiles. Compile-time rejection AND a working satisfying
+/// instantiation is the shape asserted here.
+///
+/// The `ok()` rows are not decoration: this change WIDENS what is rejected, so the suite that passed
+/// before it contained no example of what it newly affects. Every one of them was measured on the
+/// pre-change binary first (`rule-fires-is-not-rule-is-right`); a previous attempt at this exact fix
+/// shipped green on 3952 tests and was reverted the same day for breaking these.
+#[test]
+fn eq_operator_enforces_the_receivers_eq_where_bounds() {
+    // The fixture's `eq` must call the BOUNDED operation. An `eq` body of `self.val == o.val` falls
+    // back to structural equality on the payload and exits 0 — the reverted attempt shipped exactly
+    // that fixture, with a docstring quoting a fault its own program never produced. This one was
+    // verified to fault on the pre-change binary before the assertion was written.
+    const COND: &str = "\
+struct Tag:
+    n: int
+struct Box[T]:
+    val: T
+    fn compare(self, other: Self) -> int where T: Comparable:
+        if self.val < other.val:
+            return -1
+        return 0
+    fn eq(self, other: Self) -> bool where T: Comparable:
+        return self.compare(other) == 0
+    fn hash(self) -> int:
+        return 1
+a := Box(Tag(1))
+b := Box(Tag(2))
+";
+    const WHY: &str = "cannot compare Box[Tag] and Box[Tag] for equality — Box[Tag]'s `eq` requires Tag: Comparable";
+    for expr in [
+        "a == b",
+        "a != b",
+        "[a] == [b]",
+        "Some(a) == Some(b)",
+        "(a,) == (b,)",
+        "{\"k\": a} == {\"k\": b}",
+        "Set([a]) == Set([b])",
+    ] {
+        let errs = check_entry(&format!("{COND}print({expr})\n"));
+        assert_eq!(
+            errs.len(),
+            1,
+            "`{expr}`: expected exactly one error, got {errs:?}"
+        );
+        assert!(
+            errs[0].message.starts_with("cannot compare ")
+                && errs[0]
+                    .message
+                    .ends_with("Box[Tag]'s `eq` requires Tag: Comparable"),
+            "`{expr}`: got {:?}",
+            errs[0].message
+        );
+    }
+    // `Result` needs an annotation to land as `Result[Box[Tag]]`, and a struct FIELD is the
+    // recursion Task 1's walk owns — both reached through the same single guard.
+    entry_rejects(
+        &format!(
+            "{COND}ra: Result[Box[Tag]] = Ok(a)\nrb: Result[Box[Tag]] = Ok(b)\nprint(ra == rb)\n"
+        ),
+        "'s `eq` requires Tag: Comparable",
+    );
+    entry_rejects(
+        &format!("{COND}struct Wrap:\n    b: Box[Tag]\nprint(Wrap(a) == Wrap(b))\n"),
+        "cannot compare Wrap and Wrap for equality — Box[Tag]'s `eq` requires Tag: Comparable",
+    );
+    // The rule cannot key on the literal `Self` token: spelling the operand `Box[T]` is the same hook.
+    entry_rejects(
+        &format!(
+            "{}print(a == b)\n",
+            COND.replace("other: Self", "other: Box[T]")
+        ),
+        WHY,
+    );
+
+    // ---- the boundary: every row measured green on the PRE-CHANGE binary too ----
+
+    // A satisfying instantiation still works — conditional conformance, not a ban.
+    entry_ok(&format!("{COND}print(Box(1) == Box(2))\n"));
+    // …and both instantiations in ONE program report exactly one error.
+    let errs = check_entry(&format!("{COND}print(Box(1) == Box(2))\nprint(a == b)\n"));
+    assert_eq!(errs.len(), 1, "expected exactly one error, got {errs:?}");
+    assert_eq!(errs[0].message, WHY);
+    // A prior error must not cascade a bogus second diagnostic.
+    let errs = check_entry(&format!("{COND}x := nosuchfn(1)\nprint(x == a)\n"));
+    assert_eq!(errs.len(), 1, "expected exactly one error, got {errs:?}");
+    assert!(
+        errs[0].message.contains("unknown name 'nosuchfn'"),
+        "got {errs:?}"
+    );
+    // An `eq` with NO `where` is unconditional, whatever the payload.
+    entry_ok(
+        "struct Tag:\n    n: int\nstruct Box[T]:\n    val: T\n    fn eq(self, other: Self) -> bool:\n        return true\nprint(Box(Tag(1)) == Box(Tag(2)))\n",
+    );
+    // The two in-tree ORDINARY-METHOD escape hatches (`tests/chz/spec/eq_protocol_test.chz`): an
+    // operand that is not `Self` is not the hook, and their `where_bounds` are empty by construction
+    // (a `where` naming the method's own `[U]` merges into `type_params`). Rejecting these is what
+    // got the 2026-08-10 attempt reverted.
+    entry_ok(
+        "enum Opt2[T]:\n    Some(T)\n    None\n    fn eq(self, x: T) -> bool:\n        return true\nstruct Holder[T]:\n    v: T\n    fn eq[U](self, o: U) -> bool:\n        return true\na := Opt2[int].Some(1)\nprint(a == Opt2[int].Some(2))\nprint(Holder(1) == Holder(1))\n",
+    );
+    // A hook-shaped `eq` whose `where` names its OWN `[U]`: the receiver's type arg must not be
+    // substituted into `U`, so the bound is not this rule's business.
+    entry_ok(
+        "struct Tag:\n    n: int\nstruct Box[T]:\n    val: T\n    fn eq[U](self, other: Self) -> bool where U: Comparable:\n        return true\nprint(Box(Tag(1)) == Box(Tag(2)))\n",
+    );
+    // `where T: Eq` over the five structurally-equatable payloads the 2026-08-10 revert was caught
+    // by. They are green only because Task 1 landed `Eq`-satisfaction-is-what-`==`-accepts first.
+    // Plus a non-numeric newtype, a function value and a `Channel` — all measured `true` today.
+    const EQB: &str = "\
+struct P:
+    n: int
+newtype Name = str
+struct Box[T]:
+    val: T
+    fn eq(self, o: Box[T]) -> bool where T: Eq:
+        return true
+fn g(x: int) -> int:
+    return x
+";
+    for payload in [
+        "[1,2]",
+        "(1,2)",
+        "P(1)",
+        "b\"ab\"",
+        "Some(1)",
+        "Name(\"a\")",
+    ] {
+        entry_ok(&format!("{EQB}print(Box({payload}) == Box({payload}))\n"));
+    }
+    // A payload Chezzi compares by IDENTITY — a `Channel`, or a function value — does NOT satisfy
+    // `Eq`, so `where T: Eq` over it is now rejected. Both printed `true` before, and both are a
+    // BEHAVIOR CHANGE on the `==` path only: the METHOD spelling `Box(c).eq(Box(c))` already
+    // rejected them, on the pre-change binary, with the same reason. Making the operator agree with
+    // the method is precisely what W7-41 is, so this is the inconsistency closing, not a new one.
+    //
+    // **The two disagree about which way is right, and both were measured (rustc 1.97.0):**
+    // * `Channel` — `Boxy(Sender<i32>) == Boxy(…)` is `error[E0369]` / `note: Sender<i32> does not
+    //   implement Eq`. Chezzi now says the same thing for the same reason. (Go is stricter still:
+    //   `invalid operation: f == h (func can only be compared to nil)`.)
+    // * a function value — `Boxy(f) == Boxy(f)` for `f: fn(i32) -> i32` COMPILES, because Rust's fn
+    //   pointers do implement `Eq`. So refusing this one is DRIFT, but it is **pre-existing and not
+    //   this rule's**: `type fn(int) -> int does not satisfy Eq` is what the pre-change binary
+    //   already answered at a `[T: Eq]` bound and at `.eq()`. The fix belongs in the `Eq` GRANT,
+    //   which cannot simply add `Func`: a grant is a promise the runtime can dispatch `eq` on the
+    //   receiver, and there is no `Obj::Func` `eq` arm. Filed as a residual.
+    for payload in ["g", "Channel[int](1)"] {
+        entry_rejects(
+            &format!("{EQB}print(Box({payload}) == Box({payload}))\n"),
+            "for equality — Box[",
+        );
+    }
+    // ERASED operands stay tolerated (`Ty::Param`), both inside a `Box` and bare. The bare form is a
+    // documented CEILING, not a success: `f(Box(Tag(1)), Box(Tag(2)))` still faults at runtime,
+    // because inside the body both operands are `Ty::Param` and `f` declares no bound to check at the
+    // call site. Closing it needs a call-site obligation, which is not this rule.
+    entry_ok(&format!(
+        "{COND}fn f[T](x: Box[T], y: Box[T]) -> bool:\n    return x == y\nprint(f(Box(1), Box(2)))\n"
+    ));
+    entry_ok(&format!(
+        "{COND}fn f[T](x: T, y: T) -> bool:\n    return x == y\nprint(f(a, b))\n"
+    ));
+
+    // ---- the coupling Task 1's walk depends on ----
+    //
+    // `eq_bounds_unsatisfied` stops at a SATISFIED declared `eq` (at runtime a declared `eq` replaces
+    // the structural walk), which is only sound because the `==` sites INSIDE that `eq`'s body are
+    // guarded by this same rule. `W`'s own `eq` is unconditional, so the walk grants `W`; the inner
+    // `self.b == o.b` is where the fault lives, and it is caught when the body is checked.
+    entry_rejects(
+        &format!(
+            "{COND}struct W:\n    b: Box[Tag]\n    fn eq(self, o: Self) -> bool:\n        return self.b == o.b\nprint(W(a) == W(b))\n"
+        ),
+        WHY,
+    );
+}
+
 /// **W7-41's enabling half.** `Eq` is granted to a type whose structural equality walk stays sound —
 /// NOT to one that reaches a declared `eq` whose `where` bounds do not hold for this instantiation.
 /// `Box[Tag]`'s `eq` calls `compare`, which `Tag` does not have, so `Box[Tag]` is not `Eq` and

@@ -308,3 +308,31 @@ test fn the_method_and_the_operator_agree_on_every_granted_receiver():
     assert eqm(Some(1), Some(1)) == (Some(1) == Some(1))
     assert eqm(En.A, En.B) == (En.A == En.B)
     assert eqm(Ok(1), Ok(2)) == (Ok(1) == Ok(2))
+
+# ---- W7-41: a CONDITIONAL `eq` runs where its `where` bound holds ----
+#
+# `==` now enforces the receiver's `eq` `where` bounds, so `Cond[Tag] == Cond[Tag]` is a compile
+# error (pinned in `src/checker/tests.rs`, where a rejection is what `assert` cannot express). This
+# is the other half of the shape, and the half a checker test cannot prove: the SATISFYING
+# instantiation still runs, dispatches the user's `eq`, and answers correctly.
+# **rustc 1.97.0, measured:** the mirror `impl<T: Ord> PartialEq for Boxy<T>` rejects `Boxy<Tag>` with
+# `error[E0369]` and compiles `Boxy(1) == Boxy(2)` — compile-time rejection AND a working satisfying
+# instantiation, which is exactly this pair of tests.
+
+struct Cond[T]:
+    val: T
+    fn compare(self, other: Self) -> int where T: Comparable:
+        if self.val < other.val:
+            return -1
+        if other.val < self.val:
+            return 1
+        return 0
+    fn eq(self, other: Self) -> bool where T: Comparable:
+        return self.compare(other) == 0
+
+test fn a_satisfied_conditional_eq_still_dispatches():
+    assert (Cond(1) == Cond(1)) == true
+    assert (Cond(1) == Cond(2)) == false
+    assert (Cond(1) != Cond(2)) == true
+    assert ([Cond("a")] == [Cond("a")]) == true, "and through the structural walk"
+    assert (Some(Cond(1)) == Some(Cond(2))) == false
