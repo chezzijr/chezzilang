@@ -47,6 +47,21 @@ thread_local! {
     /// type is already being proven"). Such a result is conditional on that assumption, so it must
     /// not enter [`EQ_BOUNDS_PROVEN`]. Propagated outward: if a child used an assumption, the parent's
     /// result rests on it too.
+    ///
+    /// **DO NOT DELETE THIS BECAUSE YOU CANNOT WRITE A TEST THAT FAILS WITHOUT IT.** You cannot, and
+    /// that is a property of today's traversal, not of the invariant. [`Checker::walk_eq_members`]
+    /// short-circuits on the FIRST `Some`, and within one outermost query there is a single root, so
+    /// any genuine `Some` under that root propagates to it — a poisoned entry consulted *in the same
+    /// query* can never flip that query's verdict from reject to accept. Every distinguishing shape
+    /// therefore has to span two queries, which [`EQ_BOUNDS_PROVEN`]'s per-query reset already clears.
+    /// The two defences overlap completely **today** and each alone still rejects (the 2×2 in
+    /// `eq_walk_memo_never_caches_an_assumed_result` measures exactly that).
+    ///
+    /// The overlap ends the moment `walk_eq_members` stops short-circuiting — e.g. the plausible UX
+    /// change "report EVERY unsound field, not just the first". Then a sibling branch can be walked
+    /// after the poisoned one without a `Some` riding along to invalidate it, the same-query hazard
+    /// goes live, and this flag becomes the only thing standing between a cached assumption and a
+    /// silent grant. That is C4/C5 in a fourth disguise.
     static EQ_BOUNDS_ASSUMED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
