@@ -1416,18 +1416,30 @@ rejected at compile time. The bound is honoured *everywhere* conformance is quer
 dispatch (`<`, `+`, …), generic bounds, and protocol-typed parameters — not just at an explicit
 `.compare()` call.
 
-**KNOWN GAP — `==` does not honour the bound yet** (`docs/gaps.md` **W7-41**, open). A conditional
-`fn eq(self, other: Self) -> bool where T: Comparable` is the hook `==`/`!=` dispatch to, but the
-equality path does not consult conformance, so `Box[Tag] == Box[Tag]` **check-cleans and then faults
-at runtime** (`struct 'Tag' has no 'compare' method`) where `Box[Tag] < Box[Tag]` is correctly
-rejected at compile time. Rust rejects both (`impl<T: Ord> PartialEq for Boxy<T>` leaves
-`Boxy<Tag> == Boxy<Tag>` un-callable, `error[E0369]`). Leaks the same way through `!=`, containers
-and payloads (`[a] == [b]`, `Some(a) == Some(b)`), `in`, and the `values_equal` builtins
-(`contains`/`index_of`/`dedup`, set/map key insert — **W7-45**). The fix is not a guard on the
-equality path alone: the `Eq` protocol is granted intrinsically only to the four scalars, so
-`where T: Eq` is unsatisfiable for every type whose `==` is structural, and a naive check rejects
-`Box[List[int]]`/`Box[(int, int)]`/`Box[SomeStruct]` — all legal today. Making `Eq` satisfaction
-agree with what `==` actually accepts is the prerequisite, and is its own milestone.
+**`==` honours the bound too** (`docs/gaps.md` **W7-41** / **W7-45**, both fixed 2026-08-11). A
+conditional `fn eq(self, other: Self) -> bool where T: Comparable` is the hook `==`/`!=` dispatch to,
+and the equality path consults conformance exactly as `<` does:
+
+```
+Box[Tag] == Box[Tag]  →  type error: cannot compare Box[Tag] and Box[Tag] for equality
+                         — Box[Tag]'s `eq` requires Tag: Comparable
+```
+
+while `Box(1) == Box(2)` still runs and prints `false`. Rust agrees (`impl<T: Ord> PartialEq for
+Boxy<T>` leaves `Boxy<Tag> == Boxy<Tag>` un-callable, `error[E0369]`). The same rule covers `!=`,
+containers and payloads (`[a] == [b]`, `Some(a) == Some(b)`, tuples, map values, struct fields,
+newtype underlyings), `x in xs`, and the builtins whose runtime is `values_equal` —
+`list.contains`/`index_of`/`dedup`/`unique`, and every map-key / set-element position, each with its
+own message naming the site (*contains() compares List[Box[Tag]] elements for equality — …*,
+*map key type Box[Tag]'s `eq` requires …*).
+
+**Known ceilings, all measured and all filed** — a conditional `eq` can still be reached at runtime
+through a shape the checker cannot judge: a **protocol existential** operand or element
+(`docs/gaps.md` **W7-52**), and an **erased generic body** — `fn f[T](a: T, b: T): return a == b`
+declares no bound, so there is nothing to check inside the body *or* at the call site
+(**W7-53**; rustc rejects the body instead, which would mean a `where` on every generic fn that
+compares). A **function value** also still fails `Eq` even though `f == g` works by identity
+(**W7-54**).
 
 **Protocols** are Go-style structural interfaces: a block of body-less method signatures. A type
 satisfies a protocol by *having* the methods — there is no `implements` declaration. `Self` inside
@@ -1448,12 +1460,13 @@ protocol Comparable:                 # PREBUILT/reserved — its shape is file-b
 struct Point:
     x: int
     y: int
-    fn compare(self, other: Point) -> int:   # ⇒ Point satisfies Comparable, structurally — but
+    fn compare(self, other: Point) -> int:   # ⇒ Point satisfies Comparable, structurally.
         return (self.x + self.y) - (other.x + other.y)
-    fn eq(self, other: Point) -> bool:       #   BOTH methods are required (Comparable embeds Eq),
-        return (self.x + self.y) == (other.x + other.y)   # and yours must agree with each other
+    fn eq(self, other: Point) -> bool:       #   `eq` is OPTIONAL here — a struct already satisfies
+        return (self.x + self.y) == (other.x + other.y)   # `Eq` structurally. Write one only to
+                                                          # OVERRIDE `==`, and keep the two agreeing.
 
-print(max(Point(1, 2), Point(3, 0)).x)   # works: Point is Comparable (compare + eq)
+print(max(Point(1, 2), Point(3, 0)).x)   # works: Point is Comparable
 ```
 
 The prebuilt **`Comparable`** protocol (`compare(self, other: Self) -> int`) is the protocol wired to
@@ -1472,9 +1485,20 @@ Equality (`==` / `!=`) is **not** routed through `compare` — it has its own pr
 redefine equality, and `<`'s ordering answer is the wrong shape for it.)
 
 The prebuilt **`Eq`** protocol (`eq(self, other: Self) -> bool`) is the protocol wired to `==`/`!=`:
-a struct/enum that defines `eq` **owns its `==` / `!=`**, exactly as `compare` owns its `<`.
-`int`/`float`/`bool`/`str` satisfy `Eq` intrinsically (all four — `==` is defined on every scalar, unlike
-ordering). A type that defines **no** `eq` keeps the structural (field-by-field) equality it always had.
+a struct/enum that defines `eq` **owns its `==` / `!=`**, exactly as `compare` owns its `<`. A type that
+defines **no** `eq` keeps the structural (field-by-field) equality it always had.
+
+**`Eq` satisfaction is exactly "`==` works on it"**, and writing an `eq` is not what earns it — the
+language's structural `==` is an automatic derive, and since 2026-08-11 it tells the protocol system so
+(`docs/gaps.md` **W7-41**). So `where T: Eq` is writable over `int`/`float`/`bool`/`str`, `bytes`,
+tuples, `List`/`Map`/`Set`, `Option`/`Result`, newtypes, and any struct or enum — the same set `==`
+accepts. Go gives structs `==` automatically, Rust spells it `#[derive(PartialEq, Eq)]`, Python
+`@dataclass(eq=True)`; Chezzi's is implicit. The one thing that revokes it is an `eq` (its own, or one
+reached through an element / entry / tuple slot / field / payload / newtype underlying) whose `where`
+bounds do not hold for the instantiation in hand — that is the `Box[Tag]` case above. **Still outside
+the grant, and filed:** a bare `T` with no bound (deliberate — a generic body is checked once with `T`
+abstract), and a **function value** (`docs/gaps.md` **W7-54**, drift from Rust: `f == g` works by
+identity but `[T: Eq]` over a function is rejected).
 
 ```chezzi
 struct Ver:
@@ -1523,9 +1547,10 @@ print(Opt[int].Some(1).eq(7))                # true  — the method still works
 print(Opt[int].Some(1) == Opt[int].Some(2))  # false — `==` stays structural
 ```
 
-Like `Comparable`, `Eq` is not satisfiable by a newtype's own `eq` method: a newtype's `==` always
-unwraps to the underlying's native equality, so a numeric newtype declaring `eq` is rejected at the
-declaration site (the method could never agree with the operator).
+A newtype cannot satisfy `Eq` through its own `eq` **method**: a newtype's `==` always unwraps to the
+underlying's native equality, so declaring `eq` on one is rejected at the declaration site (the method
+could never agree with the operator). It satisfies `Eq` anyway — via that same unwrapped equality, which
+is a working `==` — so `where T: Eq` accepts a newtype over any underlying.
 
 A user `eq` reaches **every** equality site, not just the operator — `Map`/`Set` key lookup (`m[k]`,
 `has`, `get`, `remove`, `in`, `add`), `x in xs`, `list.contains`/`index_of`/`dedup`/`unique`, set
@@ -1602,19 +1627,26 @@ cannot) enforce.
   arm matches by variant and *binds* fields rather than comparing them — so a user `eq` cannot change
   which arm is taken.
 
-**`Comparable` embeds `Eq`** (mirroring Rust's `Ord: Eq`): a type ordered must also be equatable, so a
-struct/enum satisfying `Comparable` needs BOTH `compare` and `eq` defined (the implementor's job is to
-keep them agreeing — the checker cannot verify `eq(a, b) == (compare(a, b) == 0)`). int/float/str keep
-satisfying `Comparable` intrinsically with no `eq` to write (the scalar grant short-circuits before the
-embed is flattened). A type with `compare` but no `eq` no longer satisfies `Comparable`:
+**`Comparable` embeds `Eq`** (mirroring Rust's `Ord: Eq`): a type ordered must also be equatable. It
+still does — but since a struct/enum satisfies `Eq` structurally, **`compare` alone is enough**:
 
 ```chezzi
 struct Ver:
     maj: int
     fn compare(self, o: Ver) -> int:
         return self.maj - o.maj
-    # missing `eq` — Ver does NOT satisfy Comparable until one is added
+    # no `eq` needed — Ver satisfies Comparable, and `==` stays structural
 ```
+
+M23 shipped a rule that a type defining `compare` must define `eq` too; it was **dropped 2026-08-11**
+(`docs/gaps.md` **W7-41**) because measurement falsified its premise in both directions. A
+field-complete `compare` that agrees with structural `==` exactly was a **false reject**, while a
+`compare` reading a *subset* of the fields plus an `eq` reading a different subset — this file's own
+`Ver` example above — sailed through. So it never enforced coherence; it enforced *"you typed the word
+`eq`"*. Rust, the owning ancestor, permits manual `Ord` beside a derived `Eq` (a clippy lint, not an
+error). Keeping `compare` and `eq` agreeing remains the implementor's job — the checker cannot verify
+`eq(a, b) == (compare(a, b) == 0)` and does not pretend to. int/float/str keep satisfying `Comparable`
+intrinsically (the scalar grant short-circuits before the embed is flattened).
 
 `==` / `!=` between **provably-disjoint types is a compile error** — `1 == "a"`, `Box[int] ==
 Box[str]`, or two different structs can only ever answer `false`, which is always a bug in the source.
@@ -3905,8 +3937,8 @@ Modules are `import std.X` then `X.func(...)`. Importable:
 A few cross-cutting notes (full detail in `stdlib.md`):
 
 - `min`/`max`/`clamp` live in **`std.cmp`** as generic `[T: Comparable]` functions (int/float/str and
-  any struct with `compare` **and** `eq` methods — `Comparable` embeds `Eq`); `list.sort()` is
-  likewise Comparable.
+  any struct/enum with a `compare` method — `Comparable` embeds `Eq`, and a struct/enum satisfies `Eq`
+  structurally, so no `eq` is required); `list.sort()` is likewise Comparable.
 - **`std.json`** parses/stringifies a dynamic `Json` enum, and `json.decode[T](s) -> Result[T]`
   deserializes straight into a known shape. A JSON *literal in source* needs a raw string
   (`r"""{"k": 1}"""`) or doubled braces — a bare `{…}` in a normal string is interpolation.

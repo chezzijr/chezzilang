@@ -1295,9 +1295,10 @@ serial vs M:N **as long as you await in a fixed (e.g. submission) order**. There
 ### `std.cmp` — ordering generics (`Comparable`)
 `max[T: Comparable](a, b) -> T` · `min[T: Comparable](a, b) -> T` ·
 `clamp[T: Comparable](x, lo, hi) -> T`.
-`Comparable` embeds `Eq`, so a struct/enum satisfies it by defining **both** `compare(self, other:
-Self) -> int` and `eq(self, other: Self) -> bool` (int/float/str satisfy it intrinsically, with no
-method to write). Its `compare` is **total on floats**: a `NaN` operand
+`Comparable` embeds `Eq`, but a struct/enum satisfies `Eq` **structurally**, so defining
+`compare(self, other: Self) -> int` is enough — an `eq` is optional and only needed to *override* `==`
+(int/float/str satisfy `Comparable` intrinsically, with no method to write). M23's "must also define
+`eq`" rule was dropped 2026-08-11; see `docs/gaps.md` **W7-41**. Its `compare` is **total on floats**: a `NaN` operand
 returns an ordering int (never a fault), using the same total order `List.sort()`/`sort_by_key`/`min`/
 `max` use (`f64::total_cmp`, `NaN` to one end). The `<`/`<=`/`>`/`>=` *operators* stay IEEE (`false` for
 every `NaN` comparison) — that is the one divergence. These three `std.cmp` fns are written with `<`, so

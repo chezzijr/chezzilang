@@ -2,6 +2,79 @@
 
 Single source of truth for "what am I doing next." Update after every work session.
 
+> **✅ W7-41 + W7-45 landed 2026-08-11 — `Eq` satisfaction is now exactly what `==` accepts, and a
+> conditional `eq` bound is enforced by the operator, not only by the method spelling.** Two linked
+> soundness rows in `docs/gaps.md` are CLOSED. `struct Box[T]` with
+> `fn eq(self, other: Self) -> bool where T: Comparable` over a non-`Comparable` `Tag` used to be
+> `chezzi check` → *ok: no type errors*, `chezzi run` → `runtime error (line 7, col 12): struct 'Tag'
+> has no 'compare' method` — the `checker-superset-of-compiler` class, which two-engine parity is
+> structurally blind to. Now: *type error (line 15, col 7): cannot compare Box[Tag] and Box[Tag] for
+> equality — Box[Tag]'s `eq` requires Tag: Comparable*, while `Box(1) == Box(2)` still runs and prints
+> `false`.
+>
+> **THE ORDER IS THE POINT, and it is why the 2026-08-10 attempt was reverted.** That attempt was the
+> same guard added while `Eq` was still granted only to the four scalars; it shipped fully green (3952
+> lib tests, 424 Chezzi tests both engines, clippy clean, repro rejected) and turned `Box([1,2])`,
+> `Box((1,2))`, `Box(b"ab")`, `Box(Some(1))`, `Box(P(1))` from `true` into a type error. Widening `Eq`
+> is not a prerequisite bolted on beside the fix — it **is** the fix's other half. So:
+>
+> 1. **`Eq` satisfaction = what `==` accepts** (`09622b25`…`fa99b2c3`). Measured, all ten of these were
+>    *does not satisfy Eq* before and are accepted now: `bytes`, `(int, str)`, `List[int]`,
+>    `Map[str, int]`, `Set[int]`, `Option[int]`, `Result[int, str]`, a plain struct, an enum, a newtype.
+>    Chezzi's structural `==` was an automatic derive that had never told the protocol system (Go gives
+>    structs `==`; Rust `#[derive(PartialEq, Eq)]`; Python `@dataclass(eq=True)`). `Ty::Param` is
+>    excluded explicitly, the predicate **fails closed** (its `None` feeds a grant), and the grant is
+>    pinned by the `intrinsic_grants_all_have_vm_arms` ratchet, which RUNS `x.eq(y)` on every newly
+>    granted kind on both engines. One VM change came with it: `Obj::Enum`'s dispatch arm gained the
+>    miss-only `intrinsic_proto_method` fallback the other five arms already had — `Option`/`Result`
+>    are `Obj::Enum` at runtime.
+> 2. **The `==` / `!=` guard** (`9546706a`, `0b4219fc`) — one insertion at `src/checker/pattern.rs:2485`,
+>    gating **both** operands (the `int`/`float` and `bytes`/`bytearray` cross arms recurse in, so a
+>    one-sided gate gives `Box(1) == Box(1.0)` and its mirror different verdicts).
+> 3. **The `values_equal` builtins** (`caaa5fcc`, `68f916fc`, `ef3995cb`) — `List.contains`/`index_of`/
+>    `dedup`/`unique` and `in` per-method at the `Ty::List` arm (`List` puts no bound on `T`, so there
+>    is no construction choke point), and map keys / set elements through the single `is_hashable_key`
+>    choke point, now `key_ty_reject`, with 10 call sites. That one line subsumes 18 measured seams,
+>    because the three routes that could *obtain* a bad `Set`/`Map` — annotation, fn return type, struct
+>    field type — all reject, making the offending type unspellable.
+>
+> **Also dropped, deliberately: M23's rule that "a type defining `compare` must define `eq` too".** Its
+> premise was falsified by measurement in both directions — a field-complete `compare` that agrees with
+> structural `==` exactly was a FALSE REJECT, while a subset-`compare` plus an `eq`
+> (`tests/chz/spec/eq_protocol_test.chz:1-11`, this repo's own motivating example) slipped through. It
+> enforced "you typed the word `eq`", not coherence. Rust permits manual `Ord` beside a derived `Eq`.
+> Measured: `struct Ver` with `compare` and no `eq` was two errors before and is accepted now, with
+> `cmp.max(Ver(1), Ver(3)).maj` printing `3` on both engines. **Ordering was NOT widened** — still no
+> default structural `compare` (Go has no struct `<`, Rust needs `#[derive(Ord)]`, Python
+> `@dataclass` defaults `order=False`).
+>
+> **What the green suite could not see, and this is the reusable lesson.** Four adversarial-review
+> rounds found **five Criticals and four Importants** while the full suite stayed green throughout.
+> Every one was caught by running the **pre-change binary** on the `ok()` NEIGHBOURS the premise
+> implies, then re-verifying by repro on the real binaries on both engines — the repo's
+> `rule-fires-is-not-rule-is-right` and `a-widening-is-untested-by-its-own-suite` rules, twice over,
+> since Stages 2–4 all *widen what is rejected*. The Criticals: a predicate that FAILED OPEN into a
+> grant (three faces, one of which re-introduced the very class this milestone closes); a
+> `structs.get(name)?` instead of the miss-only `struct_shape`, so a named-fn import skipped the field
+> walk while `import … as L` on the identical program rejected; a re-entrancy cap that declined in the
+> granting direction; and two cycle guards that disagreed about what a type *is* (one name-keyed, one
+> `to_string()`-keyed), merged into one identity-keyed mechanism. Plus a new hang class — a memo-less
+> path walk re-walking a shared-field graph 2^N times — fixed and re-measured here at N=26: 0.003 s.
+>
+> **Evidence.** `cargo test` **4236 passed / 0 failed** across 17 targets (4024 lib + 212 integration);
+> `chezzi test tests/chz/` **466/466 identical on M:N and `--serial`**; clippy `--all-targets -D
+> warnings` clean; grammar unchanged, `cargo test conformance` green. New Chezzi tests in
+> `tests/chz/spec/eq_protocol_test.chz` and `eq_protocol_containers_test.chz`, including the positive
+> control that a *satisfied* conditional `eq` still dispatches under a forced hash collision.
+>
+> **Residuals, filed not closed** — `docs/gaps.md` **W7-52** (`Ty::Protocol`: a fail-open hole in the
+> `Eq` walk that cannot simply be refused, because `Ty::result(inner)` is literally
+> `Ty::Result(inner, Ty::Protocol("Error"))`, plus the existential-operand leak past
+> `may_be_equal`'s `(Protocol, Protocol)` short-circuit), **W7-53** (the erased call site — three
+> measured instances; closing it needs a call-site obligation, which is its own milestone), and
+> **W7-54** (a function value does not satisfy `Eq` though `f == g` works by identity; Rust compiles the
+> mirror, so it is drift, and this milestone widened its surface from two spellings to three).
+>
 > **✅ M24-6 landed 2026-08-11 — an interpolation fragment now reports its REAL physical source
 > position, line and column, at any nesting depth.** The lexer keeps a per-literal sparse checkpoint
 > map (`PosMap`: content-char index → source `Span`) on the `str` token (`Token::Str(StrLit { raw,
@@ -292,14 +365,16 @@ Single source of truth for "what am I doing next." Update after every work sessi
 >   `Executor` jobs keep the immediate `Err` — **the `std.net` serial≠M:N divergence is narrowed, not
 >   closed**, and R1 is the measured reason it must stay. Now pinned by tests asserting the `Err` verdict
 >   in both of those contexts.
-> * **`W7-41` — REVERTED, filed OPEN.** The bug is real (a `where` receiver bound is enforced for `<`,
+> * **`W7-41` — REVERTED here, filed OPEN, and FIXED 2026-08-11** (see the banner at the top of this
+>   file). The bug is real (a `where` receiver bound is enforced for `<`,
 >   `+`, hashing and generic bounds but not `==`: check-clean then `struct 'Tag' has no 'compare'
 >   method`, the `checker-superset-of-compiler` class parity is blind to; rustc rejects the mirror with
 >   `E0369`). The fix was not. `Eq` is granted intrinsically to only the four scalars, so
 >   `where T: Eq` is unsatisfiable for every type whose `==` is structural, and the guard rejected
 >   `Box([1,2]) == Box([1,2])`, `Box((1,2))`, `Box(SomeStruct)` — all legal, all previously `true`.
->   **The prerequisite is making `Eq` satisfaction agree with what `==` accepts**, which is its own
->   milestone. Full post-mortem + three traps for the next attempt in the ledger row.
+>   **The prerequisite is making `Eq` satisfaction agree with what `==` accepts** — which was done
+>   FIRST on 2026-08-11 and is why the second attempt held. Full post-mortem + the three traps in the
+>   ledger row.
 >
 > **Filed open:** `W7-42` (a top-level `:=` re-declaration retypes a live binding, so a `-> int` fn
 > returns a `str` — needs a decision, the three ancestors disagree; **fixed 2026-08-10**), ~~`W7-43`~~
@@ -308,9 +383,10 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > **fixed 2026-08-11, see the banner above: the carriers now survive desugar and `?.` on a `Result`
 > means `?` then `.`**, `W7-44` (`crypto.secure_bytes` dead
 > off Linux, and `uuid.v4()`'s 64-bit SplitMix64 state is **invertible from two outputs on every
-> platform** — docs half should not wait), `W7-45` (`W7-41`'s hole is still open on
+> platform** — docs half should not wait), ~~`W7-45`~~ (`W7-41`'s hole is still open on
 > `contains`/`index_of`/`dedup`/Set+Map insert, whose runtime is `values_equal`; the Set/Map halves fail
-> only on a hash collision, so the silent-wrong-answer variant is the worse half). ~~`W7-46`~~ is
+> only on a hash collision, so the silent-wrong-answer variant is the worse half) — **fixed 2026-08-11
+> alongside `W7-41`, and `List.unique` belonged on that list too**. ~~`W7-46`~~ is
 > **fixed** (see the banner above): the ancestors were measured, the `spawn` semantics are Go-consistent,
 > and the real defect — two examples printing a hard-coded count they never verified — is closed. Also **`W7-47`** —
 > `os.exit` from an eager `Executor` job does **not** terminate the process while `main` is blocked in a
@@ -496,6 +572,15 @@ Single source of truth for "what am I doing next." Update after every work sessi
 >
 > # ✅ M23 follow-up — the `Comparable: Eq` migration hint now fires on the BOUND path too (2026-08-08)
 >
+> **SUPERSEDED 2026-08-11 — the rule this diagnostic explained is GONE, and so is the diagnostic's
+> struct/enum arm (`docs/gaps.md` W7-41).** A struct/enum now satisfies `Eq` structurally, so a
+> `compare`-only type satisfies `Comparable` and nothing rejects it: measured on the two binaries,
+> `struct Ver` with `compare` and no `eq` was *type error: type Ver does not satisfy Eq (missing method
+> 'eq'): `Comparable` embeds `Eq`, so a type defining `compare` must define `eq` too* twice (once for
+> `<`, once for the `[T: Comparable]` bound) and is now `ok`, with `cmp.max(Ver(1), Ver(3)).maj`
+> printing `3` on both engines. Kept below as the record of what the sentence was and why. The
+> `Ty::NewType` arm is the part that stayed live — a `compare`-declaring newtype is still a dead end.
+>
 > M23's migration diagnostic ("`Comparable` embeds `Eq`, so a type defining `compare` must define
 > `eq` too") was wired only to the `<` operator; a `[T: Comparable]` bound still printed the bare
 > `type Ver does not satisfy Eq (missing method 'eq')`. The sentence now has ONE source
@@ -503,12 +588,20 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > text only: no program's accept/reject verdict moves.
 >
 > * **The newtype case gets DIFFERENT text, because it is a dead end, not a missing method.** A
->   newtype's own `compare` can never satisfy `Comparable` — the embed requires `Eq`, and declaring
->   `eq` on any newtype is itself an error (its `==` always unwraps to the underlying's native
->   equality). So `type Box[int] does not satisfy Eq` now continues "…and a newtype can never define
->   `eq` … so a `compare` method can never make a newtype satisfy `Comparable` — use a struct if you
->   need your own ordering". Telling that user to add `eq` would have sent them straight into a second
->   diagnostic. The claim is scoped to a `compare`-declaring newtype deliberately: a **numeric**
+>   newtype's own `compare` can never satisfy `Comparable`. **The message was REWRITTEN 2026-08-11
+>   because the reason quoted here became factually false** — a newtype now DOES satisfy `Eq` (via the
+>   underlying's native equality, which is a working `==`), so "the embed requires `Eq` and you cannot
+>   write one" no longer holds; the real and unchanged reason is that a newtype's `<` always uses the
+>   underlying's native ordering, so a `compare` METHOD on one is never dispatched. Measured on both
+>   binaries, a `newtype Box = List[int]` declaring `compare`, passed to a `[T: Comparable]` bound —
+>   before: *type Box does not satisfy Eq: `Comparable` embeds `Eq`, and a newtype can never define
+>   `eq` (its `==` always unwraps to the underlying's native equality, so the method and the operator
+>   would disagree), so a `compare` method can never make a newtype satisfy `Comparable` — use a struct
+>   if you need your own ordering*; after: *type Box does not satisfy Comparable: a newtype's `<`
+>   always uses the underlying's native ordering, never a `compare` method, so a `compare` method can
+>   never make a newtype satisfy `Comparable` — use a struct if you need your own ordering*. The
+>   protocol it names moved from `Eq` to `Comparable`, which is now the one actually unsatisfied.
+>   Telling that user to add `eq` would have sent them straight into a second diagnostic. The claim is scoped to a `compare`-declaring newtype deliberately: a **numeric**
 >   newtype *does* satisfy `Comparable`, intrinsically via the underlying's native ordering (it cannot
 >   reach the hint — `compare` on it is rejected at the decl site — but the wider claim would be false).
 > * **The hint does not over-fire**, pinned by three controls: a type with no `compare` at all, a bare
