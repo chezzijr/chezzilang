@@ -370,6 +370,20 @@ a live, non-exhausted generator must never report itself EXHAUSTED (`None`). A g
 
 Each is `import std.<name>` then `name.func(...)`. Implemented in Rust (`src/native/*.rs`).
 
+### Blocking calls cannot be interrupted
+
+The `std.io` file seams, every `std.fs` syscall, every `std.process` runner (`cmd`/`run`/`run_args`/
+`run_bytes`/`run_args_bytes`) and every `std.request` call are **offloaded** to a dirty-pool thread so
+they never pin an OS-thread worker. The price: a thread sitting inside one has **no cancellation
+checkpoint until the call returns**. A sibling's fault (scope cancel), a `cancel.Token`, `os.exit` and
+`chezzi test --timeout` therefore do **not** abort a call already in flight — the halt takes effect
+when the call returns, not before. Size the operation itself (a subprocess `timeout 5 …`, a request
+timeout) if you need a bound.
+
+`chezzi test --timeout` consequently reports such a test `TIMED-OUT` **after** it finishes rather than
+cutting it short; its message says `… could not be aborted (a blocking … call has no checkpoint until
+it returns)`, which is how it reads apart from a real abort.
+
 ### `std.math`
 Functions: `abs`, `floor`, `ceil`, `round`, `pow(base, exp)`, `sqrt`, `sin`, `cos`, `tan`,
 `asin`, `acos`, `atan`, `atan2(y, x)`, `exp`, `ln`, `log2`, `log10`, `log(value, base)`.
@@ -412,6 +426,9 @@ error naming them const): `math.pi`, `math.e`, `math.inf` (positive infinity), `
 `math.nan != math.nan`).
 
 ### `std.io`
+The file seams (`read_file`/`write_file`/`read_bytes`/`write_bytes`) are
+[uninterruptible while in flight](#blocking-calls-cannot-be-interrupted).
+
 | Function | Signature | Notes |
 |----------|-----------|-------|
 | `print` | `(s: str) -> nil` | stdout + newline. |
@@ -614,6 +631,8 @@ through the resolver and module graph — its own milestone, tracked in `docs/ga
 
 ### `std.fs`
 
+Every syscall here is [uninterruptible while in flight](#blocking-calls-cannot-be-interrupted).
+
 **Every path argument is a [`PathLike`](#pathpath-input) and every path RESULT is a
 [`path.Path`](#pathpath) (W7-8).** A bare `str` literal still works with no annotation and no
 turbofish; `bytes`, `bytearray` and `path.Path` work too. The returned `Path` carries the **raw OS
@@ -691,6 +710,9 @@ reaches every timer wait, including one parked in a `parallel:` nursery with no 
 (`concurrency.md` §cancellation points; `gaps.md` **W7-16**/**W7-17**).
 
 ### `std.process`
+A running child is [uninterruptible while in flight](#blocking-calls-cannot-be-interrupted) — nothing
+in-language kills it; bound it with `timeout N …` in the command line itself.
+
 `cmd(line: str) -> Result[str]` — run `sh -c <line>`, capture stdout; `Err(stderr)` on non-zero exit
 (on failure stdout is discarded — use `run` for the full result).
 `run(line: str) -> Result[ProcResult]` — run `sh -c <line>` and return the **structured** result:
@@ -764,7 +786,8 @@ strings, so a literal backslash is doubled: `"\\d+"`, `"\\."`.
 ### `std.request`
 Returns use `struct Response { status: int, body: str, headers: Map[str, str] }` (header names
 lowercased). A ≥400 status is **not** an error — the code rides in `Response.status`; only
-transport/DNS/TLS failures become `Err`. Blocking (offloaded under the OS-thread engine).
+transport/DNS/TLS failures become `Err`. Blocking (offloaded under the OS-thread engine) and
+[uninterruptible while in flight](#blocking-calls-cannot-be-interrupted).
 `Match`, `Response`, and `ProcResult` are **module-owned** struct types (of `std.regex`, `std.request`,
 and `std.process` respectively), **not** reserved program-global names. Field access on a returned value
 (`.text`/`.status`/`.code`, …) works with **no import**; naming or constructing the type (`m: Match` /
@@ -1489,7 +1512,9 @@ string is interpolation.
 `struct Token` with methods `cancelled() -> bool` · `reason() -> str?` · `cancel() -> nil` ·
 `done() -> Channel[bool]` (use in `wait:`) · `deadline_at() -> float` · `derive() -> Token` (linked child).
 Constructors: `manual() -> Token` · `timeout(ms: int) -> Token` · `derive(parent: Token) -> Token`.
-See `concurrency.md` for the cancellation model.
+See `concurrency.md` for the cancellation model. Cancellation is **cooperative**: a task blocked in a
+`std.io`/`std.fs`/`std.process`/`std.request` call observes the token only once that call returns —
+those are [uninterruptible while in flight](#blocking-calls-cannot-be-interrupted).
 
 ---
 

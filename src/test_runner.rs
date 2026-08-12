@@ -178,6 +178,34 @@ fn verdict_from_fault(e: crate::vm::RuntimeError) -> Verdict {
     }
 }
 
+/// Post-hoc `--timeout` honesty check, applied to the measured wall clock AFTER the invoke returns.
+/// The deadline abort fires at a VM checkpoint, and a `Kind::Blocking` native (every `std.fs` /
+/// `std.io` / `std.process` / `std.request` syscall) is offloaded to the dirty pool with no checkpoint
+/// until it returns — so a test that spends its life inside one runs to completion and lands `Pass`
+/// having blown the cap by any margin. We cannot interrupt it, but reporting PASS on it teaches
+/// distrust of every green run, so it buckets `TimedOut` here instead. The message deliberately
+/// differs from the abort path's `test exceeded --timeout (Nms)` so a report distinguishes "cut
+/// short" from "overran, uninterruptible".
+///
+/// **Only `Pass` is upgraded.** A `Fail`/`Error`/`OverMemory`/already-`TimedOut` verdict keeps its own
+/// bucket: an assertion failure says more about the test than "also slow" does.
+fn apply_timeout_overrun(verdict: Verdict, duration: Duration, opts: &RunOpts) -> Verdict {
+    if opts.timeout_ms > 0
+        && matches!(verdict, Verdict::Pass)
+        && duration.as_millis() > u128::from(opts.timeout_ms)
+    {
+        return Verdict::TimedOut {
+            msg: format!(
+                "test exceeded --timeout ({}ms): ran {}ms and could not be aborted (a blocking \
+                 std.fs/std.io/std.process/std.request call has no checkpoint until it returns)",
+                opts.timeout_ms,
+                duration.as_millis()
+            ),
+        };
+    }
+    verdict
+}
+
 /// Run every `test fn` discovered under `root` (a single `*_test.chz` file or a directory walked
 /// recursively). Returns the rendered report + overall pass/fail. Never panics on a test fault — the
 /// VM stays reusable, so one failing test does not abort the rest.
@@ -551,6 +579,7 @@ fn invoke_all(
             Err(e) => verdict_from_fault(e),
         };
         let duration = start.elapsed();
+        let verdict = apply_timeout_overrun(verdict, duration, opts);
         let out = vm.take_out(); // stdout: discarded unless `--show-output` (kept reusable either way)
         let non_pass = !matches!(verdict, Verdict::Pass);
         outcomes.push(Outcome {
@@ -701,6 +730,7 @@ fn run_suite(
             }
         }
         let duration = start.elapsed();
+        let verdict = apply_timeout_overrun(verdict, duration, opts);
         let captured = vm.take_out();
         let non_pass = !matches!(verdict, Verdict::Pass);
         out.push(Outcome {
@@ -2351,6 +2381,75 @@ struct Suite:
                 report.text
             );
         }
+    }
+
+    /// A test that spends its life inside a `Kind::Blocking` native cannot be aborted — the call is
+    /// offloaded to the dirty pool and has no checkpoint until it returns — so the deadline never
+    /// fires and the invoke returns `Ok`. Pre-fix it was reported **PASS** after blowing a 300ms cap
+    /// by ~3×; the post-hoc check must bucket it `TimedOut` instead, with a message that names the
+    /// could-not-abort reason so it is distinguishable from a real abort.
+    #[test]
+    fn a_test_that_overran_inside_an_uninterruptible_blocking_native_reports_timed_out() {
+        let d = TmpDir::new();
+        let f = d.write(
+            "blockingoverrun_test.chz",
+            "import std.process\ntest fn t():\n    _ := process.cmd(\"sleep 1\")\n",
+        );
+        for parallel in [true, false] {
+            let report = run_tests_timed(&f, parallel, 0, 300);
+            assert!(
+                report.text.contains("TIMED-OUT t"),
+                "(parallel={parallel}): a test that overran its --timeout must not report PASS just \
+                 because the blocking native could not be interrupted; report:\n{}",
+                report.text
+            );
+            assert!(
+                report.text.contains("could not be aborted"),
+                "(parallel={parallel}): the post-hoc bucket must read differently from the abort \
+                 path; report:\n{}",
+                report.text
+            );
+            assert!(
+                report.text.contains("1 timed out") && !report.passed,
+                "(parallel={parallel}): summary/exit must treat it exactly like an aborted timeout; \
+                 report:\n{}",
+                report.text
+            );
+        }
+    }
+
+    /// Fences for the post-hoc check: it must fire ONLY on an over-cap pass. A quick test under the
+    /// same cap still PASSes; the same over-cap test with NO `--timeout` is untouched; and a test that
+    /// fails an assert AND overruns keeps its FAIL bucket (the assertion says more than "also slow").
+    #[test]
+    fn the_post_hoc_timeout_check_only_upgrades_an_over_cap_pass() {
+        let d = TmpDir::new();
+
+        let quick = d.write("quick_test.chz", "test fn q():\n    assert 1 + 1 == 2\n");
+        let r = run_tests_timed(&quick, true, 0, 300);
+        assert!(r.passed && r.text.contains("PASS q"), "report:\n{}", r.text);
+
+        let slow = d.write(
+            "slowuncapped_test.chz",
+            "import std.process\ntest fn t():\n    _ := process.cmd(\"sleep 1\")\n",
+        );
+        let r = run_tests_timed(&slow, true, 0, 0);
+        assert!(
+            r.passed && r.text.contains("PASS t"),
+            "no --timeout must be unaffected; report:\n{}",
+            r.text
+        );
+
+        let slow_fail = d.write(
+            "slowfail_test.chz",
+            "import std.process\ntest fn t():\n    _ := process.cmd(\"sleep 1\")\n    assert false, \"boom\"\n",
+        );
+        let r = run_tests_timed(&slow_fail, true, 0, 300);
+        assert!(
+            r.text.contains("FAIL t") && r.text.contains("boom"),
+            "a failing assert keeps its own bucket even when the test also overran; report:\n{}",
+            r.text
+        );
     }
 
     /// W7-17 companion — the OTHER direction of the same clamp: with the cap unexpired,

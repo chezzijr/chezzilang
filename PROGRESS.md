@@ -43,11 +43,19 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > `list` +1.0%, and `fib` — the zero-loop control the rung cannot touch — **also +1.2%**, so the
 > movement is layout noise.
 >
-> **One limit measured and deliberately NOT filed as a follow-up:** a fiber inside an offloaded
+> **One limit measured, then DOCUMENTED and made honest instead of filed:** a fiber inside an offloaded
 > blocking-pool native (`process.cmd("sleep 5")`) has no checkpoint after entry — identical for a
-> sibling fault (5013 ms), `os.exit` (5015 ms) and `--timeout=500` (5008 ms, test still PASSED), so it
-> is not exit-specific. Reaching it needs a signal, an fd close, or `process::exit`, and `stream.rs`
-> refuses the last for documented reasons.
+> sibling fault (5013 ms), `os.exit` (5015 ms) and `--timeout=500` (5008 ms, **test still PASSED**), so
+> it is not exit-specific; it is the price of offloading these calls so they never pin a worker.
+> Reaching it needs a signal, an fd close, or `process::exit`, and `stream.rs` refuses the last. So
+> instead: `docs/stdlib.md` gained a shared *"Blocking calls cannot be interrupted"* section (the
+> `std.io` file seams, every `std.fs` syscall, every `std.process` runner, every `std.request` call,
+> linked from all four module sections **and** from `std.cancel`, which advertises "cooperative
+> cancellation & timeouts" and would otherwise mislead), and **`chezzi test --timeout` stopped
+> reporting `PASS` on a test that overran** — a post-hoc check upgrades an over-cap `Pass` to
+> `TIMED-OUT` with a message distinguishing it from a real abort. Only `Pass` is upgraded; a `Fail` or
+> `Error` keeps its more informative bucket. Exit code, summary counts, `--fail-fast`, the quiet
+> renderer and the JSON status all treat it as a real timeout.
 
 > **✅ W7-58 landed 2026-08-12 — a nursery owner is a counted party AND a judge, so a run stuck across
 > the nursery/executor boundary faults instead of hanging.** `docs/gaps.md`'s `W7-58` is CLOSED, and
