@@ -1,0 +1,81 @@
+# tests/chz/spec/eq_protocol_existential_test.chz — W7-52: comparing a PROTOCOL-typed value defers
+# the witness's `eq` to runtime, exactly as Go's interface `==` does, and faults cleanly (never a
+# silent wrong answer, never an abort) when the concrete witness cannot satisfy the bound.
+#
+# `docs/gaps.md` W7-52 once framed this as a checker "blind spot" in two places: (a) the `Eq` bound
+# walk grants `Ty::Protocol` via its permissive catch-all, and (b) `may_be_equal`'s
+# `(Protocol, Protocol) => true` arm short-circuits before either operand's witness is visible. Both
+# are load-bearing, not bugs — see the row for the full argument. Go measured, 1.26:
+#
+#     type Sized interface{ Size() int }
+#     type Tag struct{ ns []int }          // uncomparable: holds a slice
+#     func (t Tag) Size() int { return len(t.ns) }
+#     var x Sized = Tag{[]int{1}}
+#     var y Sized = Tag{[]int{2}}
+#     fmt.Println(x == y)
+#
+#     panic: runtime error: comparing uncomparable type main.Tag
+#
+# Go compiles the comparison and panics at the point it actually runs — it cannot reject at compile
+# time because it does not know which concrete type inhabits the interface at this call site. Chezzi
+# does the same thing at the same point for the same reason (the checker deliberately erases
+# existentials): a clean, catchable runtime fault, not a silent wrong answer and not an abort.
+
+fn msg_of[T](r: Result[T, Error], where_: str) -> str:
+    match r:
+        Ok(_): assert false, where_ + " must fault"
+        Err(e): return e.message()
+    return ""
+
+protocol Sized_:
+    fn size(self) -> int
+
+# `Tag` has no `compare` — the "uncomparable" witness, Go's slice-holding `Tag` twin.
+struct Tag:
+    n: int
+    fn size(self) -> int:
+        return self.n
+
+# `Box[T]`'s `eq` genuinely USES the `Comparable` bound (not `self.val == other.val`, which would
+# fall back to structural equality and return a wrong-but-not-faulting answer instead of faulting).
+struct Box[T]:
+    val: T
+    fn eq(self, o: Box[T]) -> bool where T: Comparable:
+        return self.val.compare(o.val) == 0
+    fn size(self) -> int:
+        return 1
+
+# ---- negative: `Box[Tag]`'s witness cannot satisfy `Comparable` (Tag has no `compare`) ----
+
+test fn protocol_typed_operator_eq_faults_on_an_unsatisfied_witness():
+    x: Sized_ = Box(Tag(1))
+    y: Sized_ = Box(Tag(2))
+    r := recover: x == y
+    msg := msg_of(r, "protocol-typed `==`")
+    assert msg.contains("compare"), "the fault names the failing method: " + msg
+
+test fn protocol_typed_contains_faults_on_an_unsatisfied_witness():
+    x: Sized_ = Box(Tag(1))
+    y: Sized_ = Box(Tag(2))  # distinct from x — [a].contains(a) would hit the identity shortcut
+    xs: List[Sized_] = [x]
+    r := recover: xs.contains(y)
+    msg := msg_of(r, "protocol-typed `.contains()`")
+    assert msg.contains("compare"), "the fault names the failing method: " + msg
+
+# ---- positive control: `Box[int]`'s witness DOES satisfy `Comparable` (int has it intrinsically) —
+# the same protocol-typed `==` must give the right answer and must NOT fault ----
+
+test fn protocol_typed_operator_eq_succeeds_on_a_satisfied_witness():
+    a: Sized_ = Box(5)
+    b: Sized_ = Box(5)
+    c: Sized_ = Box(6)
+    assert (a == b) == true, "equal witnesses compare equal"
+    assert (a == c) == false, "distinct witnesses compare unequal"
+
+test fn protocol_typed_contains_succeeds_on_a_satisfied_witness():
+    a: Sized_ = Box(5)
+    b: Sized_ = Box(5)
+    c: Sized_ = Box(6)
+    xs: List[Sized_] = [a]
+    assert xs.contains(b) == true
+    assert xs.contains(c) == false

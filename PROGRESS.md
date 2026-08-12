@@ -284,14 +284,18 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > `tests/chz/spec/eq_protocol_test.chz` and `eq_protocol_containers_test.chz`, including the positive
 > control that a *satisfied* conditional `eq` still dispatches under a forced hash collision.
 >
-> **Residuals, filed not closed** — `docs/gaps.md` **W7-52** (`Ty::Protocol`: a fail-open hole in the
-> `Eq` walk that cannot simply be refused, because `Ty::result(inner)` is literally
+> **Residuals** — `docs/gaps.md` **W7-52** (`Ty::Protocol`: a fail-open hole in the `Eq` walk that
+> cannot simply be refused, because `Ty::result(inner)` is literally
 > `Ty::Result(inner, Ty::Protocol("Error"))`, plus the existential-operand leak past
-> `may_be_equal`'s `(Protocol, Protocol)` short-circuit), **W7-53** (the erased call site — three
-> measured instances; closing it needs a call-site obligation, which is its own milestone), and
-> **W7-54, since FIXED 2026-08-12** (a function value did not satisfy `Eq` though `f == g` worked by
-> identity; Rust compiles the mirror, so it was drift, and this milestone had widened its surface
-> from two spellings to three).
+> `may_be_equal`'s `(Protocol, Protocol)` short-circuit), **since RESOLVED 2026-08-12 — not a bug**
+> (comparing a protocol-typed value is Go's own interface `==`, measured: it compiles unconditionally
+> and panics at the point it runs on an uncomparable witness; Chezzi does the identical thing at the
+> identical point, both engines, and reproduces byte-identical on the pre-change binary — locked by
+> `tests/chz/spec/eq_protocol_existential_test.chz`); **W7-53** (the erased call site — three
+> measured instances; closing it needs a call-site obligation, which is its own milestone), filed not
+> closed; and **W7-54, since FIXED 2026-08-12** (a function value did not satisfy `Eq` though `f == g`
+> worked by identity; Rust compiles the mirror, so it was drift, and this milestone had widened its
+> surface from two spellings to three).
 >
 > **✅ M24-6 landed 2026-08-11 — an interpolation fragment now reports its REAL physical source
 > position, line and column, at any nesting depth.** The lexer keeps a per-literal sparse checkpoint

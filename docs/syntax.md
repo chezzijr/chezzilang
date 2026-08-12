@@ -1433,10 +1433,17 @@ newtype underlyings), `x in xs`, and the builtins whose runtime is `values_equal
 own message naming the site (*contains() compares List[Box[Tag]] elements for equality — …*,
 *map key type Box[Tag]'s `eq` requires …*).
 
+**A protocol-typed (existential) operand or element defers the same bound check to runtime, by
+design, not by gap.** Protocols are Go-style interfaces, and comparing two protocol-typed values is
+exactly Go's `interface{} == interface{}`: the checker cannot know which concrete witness inhabits
+the protocol at a given site (existentials are erased), so it compiles the comparison and the
+comparison faults cleanly, at the point it runs, if that witness's `eq` turns out unsatisfied — the
+same shape as Go's own `panic: runtime error: comparing uncomparable type …` (`docs/gaps.md`
+**W7-52**, resolved 2026-08-12 as ancestor-correct).
+
 **Known ceilings, all measured and all filed** — a conditional `eq` can still be reached at runtime
-through a shape the checker cannot judge: a **protocol existential** operand or element
-(`docs/gaps.md` **W7-52**), and an **erased generic body** — `fn f[T](a: T, b: T): return a == b`
-declares no bound, so there is nothing to check inside the body *or* at the call site
+through a shape the checker cannot judge: an **erased generic body** — `fn f[T](a: T, b: T): return a
+== b` declares no bound, so there is nothing to check inside the body *or* at the call site
 (**W7-53**; rustc rejects the body instead, which would mean a `where` on every generic fn that
 compares). And a type graph nested deeper than **160** links is REFUSED at a `[T: Eq]` bound or an
 `==` even though the VM's own equality has no such cap, so the checker rejects what the runtime
