@@ -128,6 +128,7 @@ impl Vm {
             nursery_defer_floors: Vec::new(),
             executors: Vec::new(),
             exec_registry: Arc::new(Mutex::new(Vec::new())),
+            sched_registry: Arc::new(Mutex::new(Vec::new())), // W7-56
             suspend: None,
             wait_suspend: None,
             send_suspend: None,

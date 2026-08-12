@@ -6605,6 +6605,56 @@ fn mnsched_cancelled_scope_with_a_parked_and_a_demoted_fiber_is_not_deadlock() {
     let _ = d;
 }
 
+/// W7-56 (the veto, BOTH directions): an eager `Executor` job outstanding anywhere in the run is a
+/// live sender none of the predicate's counters can see — it runs on the shared pool with no fiber of
+/// this sched, so it bumps neither `running`/`runnable` nor `inflight`, and a nursery task parked on
+/// the channel that job is about to feed reads as an all-parked quiesce. Without the veto,
+/// `ex.submit(feeder)` beside `parallel: spawn waiter()` faulted `deadlock` at ~7 ms — before the job
+/// had even run (repro: `executor_job_feeds_a_parked_nursery_task_instead_of_a_false_deadlock`).
+///
+/// Both directions in ONE test on purpose. The FIRST half is the fence against over-vetoing (this is
+/// the `parked-is-not-stuck` family: three predicates in a row have shipped green and faulted healthy
+/// programs); the SECOND pins that the veto LIFTS at `finish()`, because a veto that never expires is
+/// a permanent silent hang, which is strictly worse than the false fault it replaces.
+#[test]
+fn mnsched_outstanding_eager_job_vetoes_the_deadlock_until_it_finishes() {
+    let sched = mk_sched(1);
+    let exec = Arc::new(crate::vm::core::ExecutorCore::default());
+    sched.exec_registry.lock().unwrap().push(Arc::clone(&exec));
+    let chan = empty_core();
+    sched.seed(vec![mk_fiber(0)]);
+    let f = take_run(&sched);
+    // `submit` reserves the slot BEFORE the job is dispatched, so it counts from here.
+    let idx = exec.eager.lock().unwrap().reserve();
+    sched.park(core_key(&chan), &chan, f);
+    {
+        let c = sched.lock();
+        assert_eq!(c.parked_n, 1, "the nursery's only task is parked");
+        assert!(
+            !sched.is_deadlocked(&c),
+            "an outstanding eager job is an UNCOUNTED sender — it may still feed the parked task, so \
+             this is not a deadlock (the same veto `quiesce::QuiesceState::quiesced` applies \
+             process-wide via `parties.len() < live`)"
+        );
+    }
+    // The job ends without sending. Nothing can feed the parked task now, so the verdict must fire —
+    // `dispatch_eager_job`'s completion closure pokes every live sched so an idle worker re-runs this.
+    exec.eager.lock().unwrap().finish(
+        idx,
+        (0, false),
+        TaskOutcome::Cancelled {
+            out: Vec::new(),
+            stderr: Vec::new(),
+        },
+    );
+    let c = sched.lock();
+    assert!(
+        sched.is_deadlocked(&c),
+        "once the job is finished the veto must LIFT — a veto that never expires is a silent hang, \
+         which is worse than the false fault it replaces"
+    );
+}
+
 /// D2b: `finish` records a task's outcome in its slot, drops it from `running`, and flips
 /// `terminate` once every task is done.
 #[test]
@@ -12549,6 +12599,172 @@ ex.shutdown()
         "a healthy cap-1 handshake was reported as a deadlock in {}/12 runs: {bad:#?}",
         bad.len()
     );
+}
+
+/// W7-56 (defect 1, the false verdict) — an eager `Executor` job feeding a channel a `parallel:` task
+/// is parked on must WORK, not be pre-emptively declared a deadlock.
+///
+/// Measured pre-fix on the release binary: `child waiting`, then the nursery deadlock fault, rc=1, at
+/// **~7 ms — before `feeder`'s 50 ms sleep had even elapsed**. `MnSched::is_deadlocked`'s five gates
+/// model this sched's own fibers only, and an eager job has none: it runs on the shared pool, bumping
+/// neither `running`/`runnable` nor `inflight`. Go's equivalent (a goroutine feeding a channel a
+/// WaitGroup'd goroutine reads) prints `job sending` / `child got 7` and exits 0.
+///
+/// **M:N-ONLY, and no predicate change can or should alter that.** `--serial` never dispatches
+/// eagerly (`netio.rs`'s `if self.parallel` gate; decision D3 = queue-at-submit, drain-at-`shutdown`),
+/// so there `feeder` genuinely cannot run before the join and the program IS a real deadlock —
+/// verified post-fix: `--serial` still faults, unchanged. Not in `parity_tests.rs`/`tests/chz/` for
+/// exactly that reason (both are gated serial == M:N). Same precedent as
+/// `executor_bounded_pipeline_is_not_mistaken_for_a_deadlock`.
+///
+/// Watchdogged: an over-corrected veto turns this into a hang, which stalls the suite instead of
+/// failing it.
+#[test]
+fn executor_job_feeds_a_parked_nursery_task_instead_of_a_false_deadlock() {
+    let src = "
+import std.concurrency
+import std.time
+ch := Channel[int]()
+fn feeder():
+    time.sleep_ms(50)
+    print(\"job sending\")
+    ch.send(7)
+fn waiter():
+    print(\"child waiting\")
+    v := ch.recv()
+    print(\"child got {v}\")
+ex := Executor()
+ex.submit(feeder)
+parallel:
+    spawn waiter()
+print(\"after nursery\")
+";
+    let entry = write_temp_chz("w756_job_feeds_nursery", src);
+    let run_entry = entry.clone();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(run_file_parallel(
+            &run_entry,
+            crate::native::HostConfig::default(),
+        ));
+    });
+    let (out, _err, res, _code) = rx
+        .recv_timeout(std::time::Duration::from_secs(60))
+        .expect("an executor job feeding a parked nursery task must not hang");
+    let _ = std::fs::remove_file(&entry);
+    assert!(res.is_ok(), "a live program was faulted: {res:?}");
+    assert!(
+        out.contains("child got 7") && out.contains("after nursery"),
+        "the job's value must reach the parked task: {out:?}"
+    );
+}
+
+/// W7-56 (defect 2, the LOST WAKEUP) — the same program with an `inflight` sibling holding the
+/// predicate vetoed for 2 s, which isolates the wake bug from the verdict bug.
+///
+/// This is the one that pins R2 independently of the veto. Pre-fix output, measured: `child waiting`
+/// → `job sending` **at 50 ms — the send really happened** → `sleeper done` at 2 s → nursery deadlock
+/// at 2008 ms, **with the value sitting in the channel queue**. `child got 7` never printed. An eager
+/// job's `Vm` gets neither `mn` nor `mn_enlist_sched` (`spawn_worker` sets neither; the only `mn`
+/// assignment in the tree is `spawn_shell`'s), so `channel_send_wire` took the no-sched branch and
+/// `Vm::wake_on_send` returned immediately on its empty `scheduler_stack` — while the waiter sat in
+/// `SchedCore::parked`, drainable only by that sched's `wake_bucket`, whose idle workers `cv.wait`
+/// with no timeout. Fixed by the `Vm::sched_registry` walk in `wake_on_send`.
+///
+/// So: had R1 (the veto) landed alone, this program would have hung silently forever instead of
+/// faulting. M:N-only + watchdogged for the reasons on the test above.
+#[test]
+fn an_executor_jobs_send_wakes_a_task_parked_on_another_scheds_channel() {
+    let src = "
+import std.concurrency
+import std.time
+ch := Channel[int]()
+fn feeder():
+    time.sleep_ms(50)
+    ch.send(7)
+fn waiter():
+    v := ch.recv()
+    print(\"child got {v}\")
+fn sleeper():
+    time.sleep_ms(2000)
+ex := Executor()
+ex.submit(feeder)
+parallel:
+    spawn waiter()
+    spawn sleeper()
+";
+    let entry = write_temp_chz("w756_job_send_wakes_park", src);
+    let run_entry = entry.clone();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(run_file_parallel(
+            &run_entry,
+            crate::native::HostConfig::default(),
+        ));
+    });
+    let (out, _err, res, _code) = rx
+        .recv_timeout(std::time::Duration::from_secs(60))
+        .expect("the job's send must wake the parked task, not strand it");
+    let _ = std::fs::remove_file(&entry);
+    // Delivery IS the pin, and it is a clean binary one: with only R1 (the veto) this program behaves
+    // exactly as it did pre-fix — `sleeper` holds the predicate vetoed for 2 s, the value lands in the
+    // queue at 50 ms and nothing ever wakes the parked waiter, so the run ends in the deadlock fault
+    // with `child got 7` unprinted. Only the `wake_on_send` registry walk delivers it.
+    //
+    // No timing assertion, deliberately: this returns at the JOIN, which waits out `sleeper`'s 2 s in
+    // both the fixed and broken builds, so wall time here says nothing about when the waiter woke.
+    // (On the CLI it is visible directly — post-fix `child got 7` prints at 50 ms, before
+    // `sleeper done`; M:N capture buffers per task and flushes in slot order, so the captured string
+    // cannot show it.)
+    assert!(res.is_ok(), "a live program was faulted: {res:?}");
+    assert!(out.contains("child got 7"), "output was: {out:?}");
+}
+
+/// W7-56 (the R3 fence — the veto must EXPIRE): a job that finishes WITHOUT sending must leave the
+/// nursery free to report its genuine deadlock, not asleep forever.
+///
+/// This is the direction that makes W7-56 dangerous. Idle M:N workers `cv.wait` with no timeout, so a
+/// veto nobody revokes is a permanent SILENT HANG — strictly worse than the false fault it replaces,
+/// and it would have converted this exact program (which correctly faults at ~8 ms today) into a
+/// hang. `dispatch_eager_job`'s completion closure therefore pokes every live sched after `finish()`,
+/// taking each core lock briefly rather than a bare `notify_all` so a worker that already read
+/// `outstanding == 1` cannot miss it. Post-fix this faults at ~59 ms (once the job ends) instead of
+/// ~8 ms — later, but still a fault.
+///
+/// M:N-only + watchdogged for the reasons on the two tests above; here the watchdog IS the assertion.
+#[test]
+fn a_finished_executor_job_lets_the_genuine_nursery_deadlock_fire() {
+    let src = "
+import std.concurrency
+import std.time
+ch := Channel[int]()
+fn bail():
+    time.sleep_ms(50)
+fn waiter():
+    v := ch.recv()
+    print(\"child got {v}\")
+ex := Executor()
+ex.submit(bail)
+parallel:
+    spawn waiter()
+";
+    let entry = write_temp_chz("w756_finished_job_lifts_veto", src);
+    let run_entry = entry.clone();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(run_file_parallel(
+            &run_entry,
+            crate::native::HostConfig::default(),
+        ));
+    });
+    let (_out, _err, res, _code) = rx
+        .recv_timeout(std::time::Duration::from_secs(60))
+        .expect("a job that ends without sending must let the deadlock fire — never hang");
+    let _ = std::fs::remove_file(&entry);
+    let msg = res
+        .expect_err("nobody can ever feed `ch` once the job is done — a real deadlock")
+        .message;
+    assert!(msg.contains("deadlock"), "fault was: {msg}");
 }
 
 /// W7-13 — a healthy cap-1 handshake must be driven by WAKEUPS, not by the poll timeout.

@@ -252,10 +252,15 @@ test fn c_plain():
 /// invisible there and the nursery's deadlock error won instead — a confident wrong answer, the
 /// `parked-is-not-stuck` class. Go: rc=3.
 ///
-/// The `sleeper` sibling is load-bearing, not decoration: it keeps the nursery's deadlock predicate
-/// vetoed past the 50 ms exit, so the verdict is formed AFTER an exit exists. Without a live sibling
-/// the predicate fires at ~11 ms — before any exit — which is a separate, pre-existing false
-/// deadlock (a live eager job that WILL `send` is ignored by the same predicate), out of scope here.
+/// The predicate is now vetoed by TWO independent things while `bail` runs: the outstanding eager job
+/// itself (W7-56 — an uncounted sender vetoes) and the `inflight` `sleeper`. Either alone keeps the
+/// verdict from forming before the 50 ms exit. `sleeper` is RETAINED deliberately so this test's setup
+/// does not depend on W7-56's veto — otherwise it would quietly turn into a W7-56 regression test and
+/// stop covering what it is for.
+///
+/// (The ~11 ms fire this comment used to describe — the predicate faulting before `bail` had even run,
+/// because a live eager job that WILL `send` was invisible to it — is FIXED, by W7-56. It is covered
+/// by `vm::tests::executor_job_feeds_a_parked_nursery_task_instead_of_a_false_deadlock`.)
 #[test]
 fn eager_job_os_exit_beats_a_blocked_nurserys_deadlock_verdict() {
     let t = TmpDir::new();

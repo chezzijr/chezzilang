@@ -2,6 +2,30 @@
 
 Single source of truth for "what am I doing next." Update after every work session.
 
+> **✅ W7-56 landed 2026-08-12 — an eager `Executor` job can feed a nursery task; the nursery no longer
+> declares a live program deadlocked.** `docs/gaps.md`'s `W7-56` is CLOSED. Measured, M:N: **`deadlock`,
+> rc=1 at 7 ms (the feeder never ran) → `job sending` / `child got 7` / `after nursery`, rc=0 at 58 ms**,
+> matching Go.
+>
+> **It was two defects sharing one repro, and the second is load-bearing.** (1) `MnSched::is_deadlocked`
+> has five gates and no `ExecRegistry` term, so an outstanding job is invisible. (2) **An eager job's
+> `send` could not reach an `MnSched`-parked fiber at all** — with the predicate held vetoed by an
+> unrelated `inflight` sibling, the program printed `job sending` at 50 ms and then faulted `deadlock`
+> at 2008 ms **with the value sitting in the queue**. So a predicate-only veto would have turned the
+> wrong answer into a *permanent silent hang* (verified by mutation: rc=124, 3/3). Three parts shipped
+> together: the `outstanding_jobs > 0` veto (the same one `quiesce::quiesced` already applies
+> process-wide — reused, no new counter), a run-wide `sched_registry` walked in `Vm::wake_on_send` (the
+> shared tail of all five no-sched wake sites), and a completion poke so a job that ends WITHOUT sending
+> lets the genuine verdict fire (58 ms, still a fault). Lock order verified as one total order.
+>
+> **Costs recorded, not papered over.** A genuine nursery deadlock whose outstanding job is *also*
+> blocked forever now hangs where it used to fault at 7 ms — filed as **`W7-58`**; it is the direction
+> `parked-is-not-stuck` prescribes (correct > silent > wrong), and the old fault was right by accident.
+> Channel send/recv is **+7%** (200k pairs, 147 → 158 ms) from one uncontended lock per no-sched `send`;
+> no bench covers that path. `--serial` is unchanged and unfixable here (D3 queues at submit, so the
+> feeder genuinely cannot run before the join), which is why all four new tests are M:N-only and stay
+> out of `parity_tests.rs`/`tests/chz/`.
+
 > **✅ W7-47 landed 2026-08-12 — `os.exit` from an eager `Executor` job halts the process while `main`
 > is blocked, instead of sitting in a slot nobody reads.** `docs/gaps.md`'s `W7-47` is CLOSED. Measured
 > on the release binary under `timeout 12`: a socket-blocked `main` went **rc=124 (hang) → rc=3**, and
@@ -29,7 +53,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > moved. Both pinned by new tests in `tests/exit_status.rs`, each under a watchdog that kills and panics
 > so a hang fails rather than passing.
 >
-> **Two rows filed, not built.** **`W7-56`** — a genuinely pre-existing FALSE deadlock, confirmed on the
+> **Two rows filed, not built.** **`W7-56`** (since FIXED, see above) — a genuinely pre-existing FALSE deadlock, confirmed on the
 > unmodified pre-fix binary with no `os.exit` anywhere: a live eager `Executor` job does not veto the
 > nursery deadlock predicate, so `parallel: spawn waiter()` waiting on a job that *will* `send` dies at
 > ~11 ms with `deadlock: … the nursery cannot progress` where Go completes. `parked-is-not-stuck`

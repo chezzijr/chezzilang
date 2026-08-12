@@ -3499,7 +3499,13 @@ impl Vm {
                             span,
                         ));
                     }
-                    crate::vm::sched::dispatch_eager_job(&core, rw, self.heap.mem_cap(), pending);
+                    crate::vm::sched::dispatch_eager_job(
+                        &core,
+                        rw,
+                        self.heap.mem_cap(),
+                        pending,
+                        &self.sched_registry,
+                    );
                     drop(g);
                     // W7-26 (the SAMPLING half) — charge the results this executor has ACCUMULATED
                     // against this heap's GC pacing counter, so a live `--max-heap` actually gets

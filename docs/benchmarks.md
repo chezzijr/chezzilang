@@ -1430,3 +1430,33 @@ row is not a regression to fix in this commit — chasing a ~1σ alignment artef
 track (`docs/future.md` §4), behind the levers that move benches by whole multiples. Recorded here so
 the next person who measures `map` on this tree knows the movement was seen, controlled for, and
 deliberately left alone.
+
+## W7-56 — channel `send` on the no-sched path costs one uncontended lock (2026-08-12)
+
+`W7-56` added a run-wide `sched_registry` walk to `Vm::wake_on_send`, so a `send`/`close` from a VM
+with no scheduler in scope (top-level `main`, or an eager `Executor` job) can wake a fiber parked on
+an `MnSched`. That is a correctness fix, not a perf change, but it puts one uncontended `Mutex`
+lock on that path and the delta is real, so it is recorded here rather than discovered later.
+
+Measured on the release binary, `ch.send(i)` + `ch.recv()` ×200 000 at module top level (the only
+shape that exercises the new code), 3 runs each:
+
+| | runs | median |
+|---|---|---|
+| pre-`W7-56` | 146 / 147 / 147 ms | 147 ms |
+| post-`W7-56` | 155 / 158 / 168 ms | 158 ms |
+
+**≈ +7%, i.e. ~50 ns per send/recv pair** — consistent with one uncontended lock plus a branch. The
+registry is empty whenever no nursery is live, so the non-empty walk (upgrade + prune) is not on this
+path at all.
+
+**No bench in `benches/chz/` uses a `Channel`**, so this does not appear in `benches/run.chz` and is
+invisible to the normal perf gate. It is not on the M:N hot path either: `wake_on_send` is reached
+only from `channel_send_wire`'s `else` branch and the four other no-sched wake sites — a worker shell
+holds `mn` and routes through `sched.send_wake` instead.
+
+**Deliberately not optimised.** The obvious fast path — an atomic "registry non-empty" flag checked
+before the lock — introduces a second source of truth for the registry, which is the exact shape
+`quiesce.rs:25-28` refuses for `outstanding` ("an UNDER-count is the one error direction that produces
+a false deadlock"). A stale flag here would resurrect the lost wakeup that was half of `W7-56`. Revisit
+only if a channel bench lands and shows this on a profile.

@@ -230,7 +230,10 @@ impl QuiesceState {
 
     /// Σ `outstanding` over every executor created in this run. Snapshots the registry and drops its
     /// lock before taking any per-core lock (see [`Self::quiesced`]'s lock discipline).
-    fn outstanding_jobs(exec_registry: &ExecRegistry) -> usize {
+    ///
+    /// Also the nursery predicate's W7-56 veto ([`super::MnSched::is_deadlocked`]) — the same count,
+    /// for the same reason: an outstanding job is an UNCOUNTED sender.
+    pub(super) fn outstanding_jobs(exec_registry: &ExecRegistry) -> usize {
         let cores: Vec<_> = exec_registry
             .lock()
             .unwrap_or_else(|e| e.into_inner())

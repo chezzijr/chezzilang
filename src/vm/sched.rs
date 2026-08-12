@@ -539,13 +539,21 @@ impl Vm {
         // after enlisting is impossible to know pre-register; use core count (the inline owner alone
         // still guarantees completion, helpers only accelerate).
         let nworkers = worker_count();
-        let sched = Arc::new(MnSched::new(
+        let mut inner = MnSched::new(
             total,
             nworkers,
             Arc::clone(&cancel),
             deadlock_err,
             self.heap.mem_cap(),
-        ));
+        );
+        // gaps.md W7-56 — the deadlock predicate must see this run's outstanding eager `Executor`
+        // jobs (uncounted senders). Assigned here, not through `new`, so the predicate's unit
+        // fixtures keep an empty registry.
+        inner.exec_registry = Arc::clone(&self.exec_registry);
+        let sched = Arc::new(inner);
+        // W7-56 — publish the sched so an eager job's `send`/`close` (which runs with no sched of its
+        // own) can wake a fiber parked here: `Vm::wake_on_send`.
+        self.register_sched(&sched);
         sched.lock().scopes[0].ancestors = self.scope_ancestors();
         sched.seed(fibers);
         // Early-enlist OUTER still-pending nurseries (case-A: `main`'s sibling `O` when the builder is a
@@ -781,7 +789,10 @@ impl Vm {
         // up to it. Strictly upward: no cycle, and it wakes a receiver on the parent's HOME sched (its
         // outcome slot / JoinScope stay put).
         inner.parent_wake = self.mn.clone().or_else(|| self.mn_enlist_sched.clone());
+        // gaps.md W7-56 — see `run_mn_nursery_outermost`.
+        inner.exec_registry = Arc::clone(&self.exec_registry);
         let sched = Arc::new(inner);
+        self.register_sched(&sched);
         // Structured concurrency — an eager nursery is a nested scope: its handlers must observe the
         // enclosing scopes' cancel too (`JoinScope::ancestors`).
         sched.lock().scopes[0].ancestors = self.scope_ancestors();
@@ -2267,15 +2278,50 @@ impl Vm {
     /// on, and that outer fiber must become runnable once control unwinds back to its level. No-op
     /// under `--parallel` (workers never push `scheduler_stack`) and when no sibling is parked.
     pub(super) fn wake_on_send(&mut self, h: GcRef) {
+        let key = self.channel_core_ptr(h);
+        // W7-56 — this VM has no sched in scope (that is the only branch that calls here), but the
+        // RUN may: an eager `Executor` job's `Vm` gets neither `mn` nor `mn_enlist_sched` from
+        // `spawn_worker`, so its `send`/`close` notified the channel condvar and nothing else, while
+        // the fiber it just fed sat in some nursery's `SchedCore::parked` — which only that sched's
+        // `wake_bucket` can drain, and whose idle workers `cv.wait` untimed. Wake every live sched's
+        // bucket for this key; `wake_bucket` drains the whole bucket, so this serves `send` and
+        // `close` alike, and an over-wake (woken fiber finds the queue empty and re-parks) is the
+        // already-tolerated pattern. Dead entries are pruned as we walk (`Weak` — no deregistration).
+        //
+        // Here rather than in `channel_send_wire` because this fn is the shared tail of ALL FIVE
+        // no-sched wake sites (`close`, `trip`, `channel_send_wire`, the bounded enqueue, and the
+        // bounded slot-free wake); patching one would leave the other four broken. Every one of them
+        // has dropped `ChannelCore::q` before calling, so taking the sched lock here is q-free.
+        {
+            let mut g = self
+                .sched_registry
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            if !g.is_empty() {
+                let live: Vec<_> = g.iter().filter_map(|w| w.upgrade()).collect();
+                g.retain(|w| w.strong_count() > 0);
+                drop(g);
+                for s in live {
+                    s.wake_key(key);
+                }
+            }
+        }
         if self.scheduler_stack.is_empty() {
             return;
         }
-        let key = self.channel_core_ptr(h);
         for level in &mut self.scheduler_stack {
             if let Some(woken) = level.blocked_on.remove(&key) {
                 level.ready.extend(woken);
             }
         }
+    }
+
+    /// W7-56 — publish a freshly built `MnSched` on the run's registry (see [`Vm::sched_registry`]).
+    pub(super) fn register_sched(&self, sched: &Arc<MnSched>) {
+        self.sched_registry
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(Arc::downgrade(sched));
     }
 
     /// `chezzi test --max-heap` — collect and read the cap, at a point that is NOT an instruction
@@ -3604,6 +3650,10 @@ impl Vm {
         // …and the blocked-party registry with it, for the same reason: the process-wide deadlock
         // verdict must see every party of THIS run and none of any other's (`future.md` §2d step 0).
         worker.quiesce = Arc::clone(&self.quiesce);
+        // W7-56 — and the sched registry, so a wake from a worker that holds NO sched of its own
+        // (every eager `Executor` job: this fn sets neither `mn` nor `mn_enlist_sched`) still reaches
+        // a fiber parked on one of the run's nurseries. See `Vm::sched_registry`.
+        worker.sched_registry = Arc::clone(&self.sched_registry);
         // B3.3-threads: thread the parent's host state (process args + env) through so a
         // `--parallel` task reading `std.os.args` / an env var sees the same values instead of inert
         // defaults (the B3.2 silent-divergence owe). `args` is read-only (deep-cloned). `env` is
@@ -5049,6 +5099,7 @@ pub(super) fn dispatch_eager_job(
     rw: ReadyWorker,
     mem_cap: usize,
     pending: usize,
+    sched_registry: &crate::vm::SchedRegistry,
 ) {
     let span = rw.span;
     // W7-26r sibling — this job's rebuilt worker heap belongs to the SUBMITTER until a pool thread
@@ -5061,6 +5112,7 @@ pub(super) fn dispatch_eager_job(
         .unwrap_or_else(|e| e.into_inner())
         .reserve();
     let core = Arc::clone(core);
+    let sched_registry = Arc::clone(sched_registry);
     pool::submit(Box::new(move || {
         // W7-26r sibling — the job leaves the queue HERE: from this point its bytes are the worker
         // heap's own (charged against the worker's copy of the cap by its own sweeps), so the
@@ -5103,5 +5155,26 @@ pub(super) fn dispatch_eager_job(
                 .store(true, std::sync::atomic::Ordering::Relaxed);
         }
         core.eager_cv.notify_all();
+        // W7-56 — this job's `outstanding` just dropped, so it no longer vetoes any nursery's
+        // deadlock predicate (`MnSched::is_deadlocked`). Poke every live sched so an idle worker
+        // re-evaluates: without this, a job that ends WITHOUT sending leaves the veto's consumers
+        // asleep forever (idle workers `cv.wait` untimed) — turning a program that correctly faults
+        // `deadlock` today into a silent hang.
+        //
+        // The lock is taken and dropped rather than a bare `notify_all`, and that is what makes it
+        // reliable: a worker that read `outstanding == 1` inside `is_deadlocked` did so under this
+        // same core lock, so acquiring it here happens-after that read completes — the worker is
+        // either already on the condvar (and gets the notify) or has not yet taken the lock (and
+        // will read the new count). A bare notify could land in the gap and be lost.
+        {
+            let mut g = sched_registry.lock().unwrap_or_else(|e| e.into_inner());
+            let live: Vec<_> = g.iter().filter_map(|w| w.upgrade()).collect();
+            g.retain(|w| w.strong_count() > 0);
+            drop(g);
+            for s in live {
+                drop(s.lock());
+                s.cv.notify_all();
+            }
+        }
     }));
 }

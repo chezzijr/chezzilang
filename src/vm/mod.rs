@@ -776,6 +776,19 @@ pub struct Vm {
     /// process-global on purpose: the test harness runs many programs concurrently in one process, and
     /// a static would let one run's join reach into another run's executors.
     exec_registry: ExecRegistry,
+    /// gaps.md W7-56 — every `MnSched` alive in this run, so a wake with NO scheduler in scope can
+    /// still reach a fiber parked on one. An eager `Executor` job's `Vm` has `mn == None` AND
+    /// `mn_enlist_sched == None` (`spawn_worker` sets neither — only `spawn_shell` sets `mn`), so its
+    /// `send`/`close` took the no-sched branch and notified only the channel condvar; a fiber parked
+    /// in `SchedCore::parked` is reachable ONLY through that sched's `wake_bucket`, and idle workers
+    /// `cv.wait` untimed. The measured symptom was a job's value sitting in the queue while the
+    /// nursery slept, then faulted `deadlock`. Walked by [`Vm::wake_on_send`] — the shared tail of
+    /// every no-sched wake site (`send`/`close`/`trip`/bounded enqueue/bounded slot-free).
+    ///
+    /// `Weak`, so a finished nursery's sched drops normally and needs no deregistration; each walk
+    /// prunes the dead entries. Shared (not copied) with every worker by [`Vm::spawn_worker`], and
+    /// per-run for the same reason [`Vm::exec_registry`] is.
+    sched_registry: SchedRegistry,
     /// Concurrency B1/B2: set by a blocking `recv` (empty channel) running inside an active nursery
     /// scheduler. It records the channel handle the running fiber is waiting on; `run_until` and the
     /// re-entrant call path break (without unwinding defers) when it is set, returning control to the
@@ -1737,6 +1750,10 @@ struct WaitPark {
     claimed: AtomicBool,
 }
 
+/// gaps.md W7-56 — every `MnSched` alive in this run, by `Weak` (see [`Vm::sched_registry`] for why
+/// it exists and why the handles are weak). The [`ExecRegistry`] of schedulers.
+pub(super) type SchedRegistry = Arc<Mutex<Vec<std::sync::Weak<MnSched>>>>;
+
 /// An entry in a `SchedCore.parked` bucket: either a single fiber blocked on a plain `recv` (the
 /// common 1-key case, byte-identical to the pre-`wait` engine) OR a refcounted token referencing the
 /// one fiber blocked on a multi-channel `wait` (shared across N buckets — see [`WaitPark`]).
@@ -1819,6 +1836,16 @@ struct MnSched {
     /// consume); an over-wake (receiver finds the queue empty and re-parks) is the already-tolerated
     /// pattern. Points UP only: parent→child ("into" an eager body) is a documented residual limit.
     parent_wake: Option<Arc<MnSched>>,
+    /// gaps.md W7-56 — the run's [`ExecRegistry`], so [`MnSched::is_deadlocked`] can see an eager
+    /// `Executor` job as a live, UNCOUNTED feeder. The predicate's counters model fibers of THIS
+    /// sched only; an `ex.submit(f)` job runs on the shared pool with no fiber, no `runnable`, no
+    /// `inflight` — so a nursery whose only task parks on a channel that job is about to feed
+    /// quiesces and faults a healthy program. Same veto `quiesce::QuiesceState::quiesced` already
+    /// applies process-wide (`parties.len() < live`), for the same reason.
+    ///
+    /// Assigned AFTER construction (like `parent_wake`) rather than through `new`, so the predicate's
+    /// unit fixtures keep an empty registry — i.e. today's behaviour, which is what they test.
+    exec_registry: crate::vm::core::ExecRegistry,
 }
 
 /// Cross-nursery flat scheduler (M:N) — one nursery's JOIN RECORD (Trio/Go-style: structured
@@ -2143,6 +2170,9 @@ impl MnSched {
             mem_cap,
             // gaps.md B5 — no parent by default; `activate_eager_nursery` sets it on an eager sched.
             parent_wake: None,
+            // gaps.md W7-56 — empty by default; both `MnSched` construction sites assign the run's
+            // registry. An empty one is today's behaviour (no veto).
+            exec_registry: Default::default(),
         }
     }
 
@@ -2794,12 +2824,20 @@ impl MnSched {
     fn wake_parent_chain(&self, key: usize) {
         let mut p = self.parent_wake.clone();
         while let Some(anc) = p {
-            let mut pc = anc.lock();
-            anc.wake_bucket(&mut pc, key);
-            drop(pc);
-            anc.cv.notify_all();
+            anc.wake_key(key);
             p = anc.parent_wake.clone();
         }
+    }
+
+    /// Drain this sched's `parked` bucket for `key` and notify its workers — one link of
+    /// [`MnSched::wake_parent_chain`], also used by the W7-56 registry walk in [`Vm::wake_on_send`]
+    /// (an eager `Executor` job holds no sched, so it reaches a parked fiber only this way). Takes
+    /// the core lock itself, so the caller must hold NO sched core lock and no `ChannelCore::q`.
+    fn wake_key(&self, key: usize) {
+        let mut c = self.lock();
+        self.wake_bucket(&mut c, key);
+        drop(c);
+        self.cv.notify_all();
     }
 
     fn send_wake(&self, key: usize, core: &Arc<ChannelCore>, w: WireValue) {
@@ -3108,6 +3146,26 @@ impl MnSched {
         // counters above (a `send` doesn't bump `runnable` for a demoted fiber), but that fiber WILL pop
         // it on its next poll and make progress — so this is NOT a deadlock. Without this peek, a sibling
         // `send` racing the quiesce could spuriously fault an innocent PARKED sibling.
+        // W7-56 — an eager `Executor` job outstanding anywhere in this RUN is a live sender the
+        // counters above cannot see: it runs on the shared pool with no fiber of this sched, so it
+        // bumps neither `running`/`runnable` nor `inflight`, and a nursery task parked on the channel
+        // that job is about to feed reads as an all-parked quiesce. This is exactly the veto
+        // `quiesce::QuiesceState::quiesced` already applies process-wide (`parties.len() < live`,
+        // where `live` counts the same `outstanding`), for the same reason: an UNCOUNTED sender must
+        // veto. `outstanding` is bumped at `reserve()` (at `submit`, before dispatch) and dropped at
+        // `finish()`, so a job still queued behind a saturated pool already counts.
+        //
+        // The veto EXPIRES: `dispatch_eager_job`'s completion closure pokes every live sched after
+        // `finish()`, so a job that ends without ever sending lets an idle worker re-evaluate and
+        // report the genuine deadlock (the idle wait is untimed — without that poke this veto would
+        // be a permanent silent hang instead of a fault).
+        //
+        // Lock order: this holds `SchedCore` (A) and takes `exec_registry` → one `ExecutorCore::eager`
+        // beneath it, matching the V4 `demoted_chans` peek's A-then-`q`. Nothing acquires a sched core
+        // lock while holding either, so no cycle.
+        if crate::vm::quiesce::QuiesceState::outstanding_jobs(&self.exec_registry) > 0 {
+            return false;
+        }
         if c.demoted_chans
             .values()
             .any(|(core, _)| !core.q.lock().unwrap_or_else(|e| e.into_inner()).is_empty())
