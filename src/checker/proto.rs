@@ -158,7 +158,11 @@ pub const INTRINSIC_PROTO_METHODS: &[(&str, &str, &str)] = &[
     // `option`/`result` land on `Obj::Enum` at runtime, same as `enum`. `func` is the one exception —
     // a function value's `==` is IDENTITY (two loads of the same top-level `fn`/nested `fn` def are
     // equal, two calls to a factory are not — W7-54), not a structural walk, but it is still the same
-    // `values_equal_guarded` worker `==` uses, so `.eq()` can never disagree with `==`.
+    // `values_equal_guarded` worker `==` uses, so `.eq()` can never disagree with `==`. `func` covers
+    // BOTH `Ty::Func` (a user closure/free fn) and `Ty::BuiltinFn` (`ord`/`chr`/`panic`/first-class
+    // `print`) — they render identically and compare by the same `Obj::Builtin`/`Obj::Func` identity
+    // rule, so one row and one kind speaks for both (W7-54 follow-up: `Ty::BuiltinFn` was the same
+    // defect, just a separate `Ty` variant, and was missed the first time).
     ("Eq", "eq", "int"),
     ("Eq", "eq", "float"),
     ("Eq", "eq", "str"),
@@ -307,7 +311,13 @@ impl Checker {
             Ty::Option(_) => "option",
             Ty::Result(..) => "result",
             Ty::NewType(..) => "newtype",
-            Ty::Func { .. } => "func",
+            // `BuiltinFn` (`ord`/`chr`/`panic`/first-class `print`) renders identically to `Ty::Func`
+            // ("fn(...) -> ..." — see `impl Display for Ty`) and compares by the same runtime
+            // identity (`Obj::Builtin` name-equality, `vm/arith.rs`'s `(Obj::Builtin(a),
+            // Obj::Builtin(b))` arm); it is a DISTINCT `Ty` variant only for sendability
+            // (`docs/syntax.md`: all four universe builtins are sendable, a plain closure is not), so
+            // it shares `Ty::Func`'s kind rather than minting a second one (W7-54 follow-up).
+            Ty::Func { .. } | Ty::BuiltinFn { .. } => "func",
             _ => "?",
         }
     }
@@ -1729,10 +1739,11 @@ impl Checker {
         //
         // Four gates:
         // * kind ≠ `"?"`. That covers every handle (`Channel`/`Shared`/`Executor`/`Socket`/…),
-        //   `Func`, `Module`, `Ty::Param` and `Ty::Protocol`. The handles compare by identity but
-        //   have no constructible probe receiver; the last two MUST fall through — `may_be_equal`
-        //   treats a `Param` as ERASED, so admitting it would make every UNBOUNDED `T` satisfy `Eq`
-        //   (a soundness hole), and a protocol existential is decided by its own arm below.
+        //   `Module`, `Ty::Param` and `Ty::Protocol` (`Func`/`BuiltinFn` graduated into the `"func"`
+        //   kind in W7-54, so they no longer land here). The handles compare by identity but have no
+        //   constructible probe receiver; the last two MUST fall through — `may_be_equal` treats a
+        //   `Param` as ERASED, so admitting it would make every UNBOUNDED `T` satisfy `Eq` (a
+        //   soundness hole), and a protocol existential is decided by its own arm below.
         // * kind ≠ `"nil"`: a nil-typed expression cannot be used as a value at all, so `nil == nil`
         //   is not a writable program and the grant would have no probeable receiver.
         // * not the built-in cursor ([`Self::is_cursor_ty`]) — a `Ty::Struct` whose runtime arms

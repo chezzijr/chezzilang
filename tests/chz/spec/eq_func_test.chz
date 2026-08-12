@@ -11,6 +11,13 @@
 # `f == g` outright (`func can only be compared to nil`). Chezzi now matches CPython/Rust on all four
 # spellings. Gated serial==M:N by `test_runner::chz_suite_passes_both_engines`.
 #
+# `Ty::BuiltinFn` (a first-class universe builtin value — `ord`/`chr`/`panic`/`print`) is a SEPARATE
+# `Ty` variant from `Ty::Func` (kept apart only for sendability) but renders identically in
+# diagnostics ("fn(str) -> int") and was the SAME defect: missed by the first W7-54 pass because the
+# D1 gate's exclusion list never named it. It now shares `Ty::Func`'s `"func"` `intrinsic_recv_kind`,
+# so it is covered by the same rows below (`two_loads_of_one_builtin_fn_are_equal` etc.) — CPython:
+# `ord == ord` -> `True`, matching.
+#
 # The `.eq()` method spelling is exercised through `eqm`'s ERASED `[T: Eq]` bound, not called bare on
 # a concrete receiver — that mirrors every other intrinsically-granted kind (int/list/tuple/…): the
 # `Eq` grant makes `.eq()` callable from an erased generic body, not a new bare instance method, so
@@ -60,11 +67,48 @@ test fn a_closure_equals_itself():
     assert eqm(r, r) == true
 
 # ---- W7-41's regressed spelling, restored: `Box[T]` over a function payload ----
+#
+# The body genuinely DISPATCHES `self.val == o.val` (a `==` on a function value, inside a
+# `where T: Eq` body — the exact path W7-41's guard governs) rather than returning a constant, so
+# the assertions below can tell "the user `eq` ran and used the payload" apart from "it fell back to
+# structural equality" (two `Box(g)` structs holding the same handle would be structurally equal
+# either way, so a `return true` stub could not distinguish them).
 
 struct Box[T]:
     val: T
     fn eq(self, o: Box[T]) -> bool where T: Eq:
-        return true
+        return self.val == o.val
 
 test fn box_over_a_function_payload_satisfies_eq():
     assert (Box(g) == Box(g)) == true
+    assert (Box(g) == Box(h)) == false, "different functions, so the dispatched eq must say false"
+
+# ---- W7-54 follow-up: `Ty::BuiltinFn` (ord/chr/panic/print) is the same defect, same fix ----
+#
+# `Ty::BuiltinFn` is a distinct `Ty` variant from `Ty::Func` (kept apart only so it can be sendable
+# across `spawn`), but it renders identically ("fn(str) -> int") and was excluded from the D1 `Eq`
+# gate for the same reason `Ty::Func` was: no `intrinsic_recv_kind` classification. It now shares
+# `Ty::Func`'s `"func"` kind, so `==`, the erased `[T: Eq]` `.eq()` spelling, and `Box[T]` all agree.
+
+test fn two_loads_of_one_builtin_fn_are_equal():
+    a := ord
+    b := ord
+    assert (a == b) == true
+    assert eqm(a, b) == true, "the method spelling now agrees with the operator for a builtin too"
+
+test fn two_loads_of_a_different_builtin_fn_are_also_equal():
+    # `chr` has a different signature from `ord` (so the two can't be compared to EACH OTHER — Chezzi
+    # is statically typed and they're different `fn(...)` types), but the same identity relation
+    # holds for it independently, proving the fix isn't `ord`-specific.
+    a := chr
+    b := chr
+    assert (a == b) == true
+    assert eqm(a, b) == true
+
+test fn a_builtin_fn_equals_itself():
+    r := ord
+    assert (r == r) == true
+    assert eqm(r, r) == true
+
+test fn box_over_a_builtin_fn_payload_satisfies_eq():
+    assert (Box(ord) == Box(ord)) == true

@@ -1210,6 +1210,18 @@ fn function_value_satisfies_eq_by_identity() {
     ));
 }
 
+/// **W7-54 follow-up — `Ty::BuiltinFn` is the same defect as `Ty::Func`, same fix.** A first-class
+/// universe builtin (`ord`/`chr`/`panic`/`print`) types as the DISTINCT `Ty::BuiltinFn` variant (kept
+/// apart from `Ty::Func` only so it can be sendable across `spawn`), so `Ty::Func { .. } => "func"`
+/// alone did not cover it — it still fell to `"?"` and the D1 grant still excluded it, even though
+/// `Ty::BuiltinFn` renders identically ("fn(str) -> int") to `Ty::Func` in every diagnostic. Fixed by
+/// classifying both variants to the same `"func"` kind rather than minting a second one.
+#[test]
+fn builtin_function_value_satisfies_eq_by_identity() {
+    ok("fn same[T: Eq](a: T, b: T) -> bool:\n    return a.eq(b)\nprint(same(ord, ord))\n");
+    ok("fn same[T: Eq](a: T, b: T) -> bool:\n    return a == b\nprint(same(ord, ord))\n");
+}
+
 /// **W7-41 — `==` / `!=` enforce the receiver's `eq` `where` bounds.** The explicit method spelling
 /// `a.eq(b)` was already rejected (the instance-method dispatch path runs `enforce_bounds`); the
 /// OPERATOR routed through `may_be_equal`, which asks co-inhabitance only. Same program, two answers:

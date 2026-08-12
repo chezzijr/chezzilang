@@ -17243,7 +17243,10 @@ fn intrinsic_grants_all_have_vm_arms() {
         r("option", "", "Some(1)", "-", "-", "-", "-", "-", "-"),
         r("result", "", "Ok(1)", "-", "-", "-", "-", "-", "-"),
         // W7-54 — a function value's `Eq` grant. Only the `eq` template applies; it uses no other
-        // column.
+        // column. `Ty::BuiltinFn` (`ord`/`chr`/`panic`) shares this same `"func"` kind (W7-54
+        // follow-up) — this row's `Ty::Func` literal is the one runtime probe, and the BuiltinFn
+        // half of the runtime dispatch (`Obj::Builtin` through the same terminal `_` arm) is proven
+        // separately by `tests/chz/spec/eq_func_test.chz`'s builtin-fn tests.
         r(
             "func",
             "fn g(x: int) -> int:\n    return x\n",

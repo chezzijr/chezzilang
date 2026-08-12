@@ -7,7 +7,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > close-out on `w7-52-55-eq-residuals`). Chezzi's `==` on a function value already matched CPython
 > exactly (identity: two loads of one `fn`/nested-`fn` def equal, two calls to a factory or two
 > closures with equal captures unequal) — this was a **checker gap, not a runtime one**. `Ty::Func`
-> had no arm in `Checker::intrinsic_recv_kind` (`src/checker/proto.rs:285`), so it fell to `"?"` and
+> had no arm in `Checker::intrinsic_recv_kind` (`src/checker/proto.rs:310`), so it fell to `"?"` and
 > the D1 `Eq` grant excluded it, leaving `.eq()` and `[T: Eq]` both answering *does not satisfy Eq* —
 > and `W7-41` had widened the drift to a fourth spelling, regressing `struct Box[T]` with `fn
 > eq(self, o: Self) -> bool where T: Eq` over a function payload from `true` to a compile error.
@@ -19,13 +19,23 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > sweep (now covering `Ty::Func` for the first time) stayed green — no other protocol arm was
 > accidentally granting it a conformance. Matches rustc 1.97.0 (`Boxy<T: Eq>` over a `fn(i32) -> i32`
 > payload builds clean); Go is the one ancestor that differs (`func can only be compared to nil`).
-> **Tests:** `tests/chz/spec/eq_func_test.chz` (6 new, gated serial==M:N), plus
-> `checker::tests::function_value_satisfies_eq_by_identity` and the `W7-41` known-gap test at
+> **Same-day follow-up (review-driven):** `Ty::BuiltinFn` (`ord`/`chr`/`panic`/first-class `print`) is
+> a SEPARATE `Ty` variant from `Ty::Func` — kept apart only for sendability, but rendering identically
+> in diagnostics — and had the identical defect, missed by the first pass. Fixed by classifying it to
+> the same `"func"` kind rather than minting a second one; the matrix sweep stayed green again. Also
+> from the same review: the `Box[T]` fixture's `eq` body now dispatches a real `self.val == o.val`
+> (was a `return true` stub that couldn't tell "dispatched" from "structurally equal anyway"), and a
+> stale `docs/gaps.md`/`PROGRESS.md`/`proto.rs` comment trail was corrected (a leftover "does not
+> satisfy Eq" exclusion note, a `:285` cite that had drifted to `:310`, and this row's own now-stale
+> residual mention further down this file). **Tests:** `tests/chz/spec/eq_func_test.chz` (10, gated
+> serial==M:N — 6 from the original fix + 4 builtin-fn/Box-strengthening rows from the follow-up), plus
+> `checker::tests::function_value_satisfies_eq_by_identity`,
+> `checker::tests::builtin_function_value_satisfies_eq_by_identity`, and the `W7-41` known-gap test at
 > `checker::tests::eq_operator_enforces_the_receivers_eq_where_bounds` updated from `entry_rejects` to
 > `entry_ok` for the function-payload `Box[T]` row (now pins the fix, not the bug). Every new/changed
-> assertion measured failing on the pre-change binary first. `cargo test`: 4047 lib + integration, 0
-> failed; clippy clean; `chezzi test tests/chz/` 472/472 on both engines (was 466). Full write-up:
-> `docs/gaps.md` **W7-54**.
+> assertion measured failing on the pre-change binary first. `cargo test`: 4048 lib + integration, 0
+> failed; clippy clean; `chezzi test tests/chz/` 476/476 on both engines (was 466 before this row, 472
+> after the first pass). Full write-up: `docs/gaps.md` **W7-54**.
 
 > **✅ W7-57 landed 2026-08-12 — a run-wide `os.exit` reaches every party, not just the polling ones.**
 > `docs/gaps.md`'s `W7-57` is CLOSED, and with it the whole `W7-47` → `W7-56` → `W7-58` → `W7-57`
@@ -279,8 +289,9 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > `Ty::Result(inner, Ty::Protocol("Error"))`, plus the existential-operand leak past
 > `may_be_equal`'s `(Protocol, Protocol)` short-circuit), **W7-53** (the erased call site — three
 > measured instances; closing it needs a call-site obligation, which is its own milestone), and
-> **W7-54** (a function value does not satisfy `Eq` though `f == g` works by identity; Rust compiles the
-> mirror, so it is drift, and this milestone widened its surface from two spellings to three).
+> **W7-54, since FIXED 2026-08-12** (a function value did not satisfy `Eq` though `f == g` worked by
+> identity; Rust compiles the mirror, so it was drift, and this milestone had widened its surface
+> from two spellings to three).
 >
 > **✅ M24-6 landed 2026-08-11 — an interpolation fragment now reports its REAL physical source
 > position, line and column, at any nesting depth.** The lexer keeps a per-literal sparse checkpoint

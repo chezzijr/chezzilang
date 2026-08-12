@@ -1493,12 +1493,14 @@ defines **no** `eq` keeps the structural (field-by-field) equality it always had
 language's structural `==` is an automatic derive, and since 2026-08-11 it tells the protocol system so
 (`docs/gaps.md` **W7-41**). So `where T: Eq` is writable over `int`/`float`/`bool`/`str`, `bytes`,
 tuples, `List`/`Map`/`Set`, `Option`/`Result`, newtypes, any struct or enum, and a **function value**
-— the same set `==` accepts. Go gives structs `==` automatically, Rust spells it `#[derive(PartialEq,
+(a user closure/free fn, or a first-class universe builtin like `ord`/`chr`/`panic`/`print`) — the
+same set `==` accepts. Go gives structs `==` automatically, Rust spells it `#[derive(PartialEq,
 Eq)]`, Python `@dataclass(eq=True)`; Chezzi's is implicit. A function value compares by IDENTITY, not
-structurally — two loads of the same top-level/nested `fn` def are equal, two calls to a factory
-minting a fresh nested `fn` are not, and two closures with equal captures are not — matching CPython's
-`f == g` exactly and Rust's fn-pointer `PartialEq` (`docs/gaps.md` **W7-54**, fixed 2026-08-12; Go is
-the one ancestor that differs, rejecting `f == g` outright). The one thing that revokes the grant is an
+structurally — two loads of the same top-level/nested `fn` def (or the same builtin) are equal, two
+calls to a factory minting a fresh nested `fn` are not, and two closures with equal captures are not
+— matching CPython's `f == g` exactly and Rust's fn-pointer `PartialEq` (`docs/gaps.md` **W7-54**,
+fixed 2026-08-12; Go is the one ancestor that differs, rejecting `f == g` outright). The one thing that
+revokes the grant is an
 `eq` (its own, or one reached through an element / entry / tuple slot / field / payload / newtype
 underlying) whose `where` bounds do not hold for the instantiation in hand — that is the `Box[Tag]`
 case above. **Still outside the grant, and filed:** a bare `T` with no bound (deliberate — a generic
