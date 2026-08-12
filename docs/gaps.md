@@ -10161,7 +10161,7 @@ was a **checker gap, not a runtime one** — no change to `Vm::values_equal`/`va
 needed or made.
 
 **Root cause.** `Ty::Func` had no arm in `Checker::intrinsic_recv_kind` (`src/checker/proto.rs:310`),
-so it fell to the `"?"` catch-all. The `Eq` grant arm (D1, `src/checker/proto.rs:1744`) filters on
+so it fell to the `"?"` catch-all. The `Eq` grant arm (D1, `src/checker/proto.rs:1760`) filters on
 `!matches!(Self::intrinsic_recv_kind(ty), "?" | "nil")`, so `Ty::Func` was excluded from the grant
 before `eq_bounds_unsatisfied` was ever consulted, and with no protocol grant the structural fallback
 reported *does not satisfy Eq* at a `[T: Eq]` bound (and identically at `.eq()`, which is dispatched
@@ -10216,9 +10216,14 @@ print(eqm(a, b))   # type error (line 6): type fn(str) -> int does not satisfy E
 Fixed by classifying `Ty::BuiltinFn { .. }` to the SAME `"func"` kind rather than minting a second
 one — the runtime already answers both identically (`vm/arith.rs`'s `(Obj::Builtin(a),
 Obj::Builtin(b)) => Ok(a == b)` arm, confirmed by running it), so one kind, one row, speaks for both.
-The matrix sweep in `intrinsic_grants_all_have_vm_arms` stayed green a second time when
-`Ty::BuiltinFn` joined `"func"` — no other protocol arm grants it either. Post-fix, both `print`
-statements above output `true`.
+`intrinsic_grants_all_have_vm_arms` now carries a **second `Recv` row for the same `"func"` kind**
+whose literal is `ord`, so the matrix genuinely feeds a `Ty::BuiltinFn` to every protocol's
+`bound_probe` and the "no other protocol arm grants it" claim is asserted rather than assumed. (The
+first version of this row shipped without that second row and the sentence was false-by-construction:
+the sweep only ever saw the `Ty::Func` literal `g`. Caught in review. The invariant held — 17
+protocols probed by hand against `ord`, only `Eq` granted — but "the sweep stayed green" was not
+evidence for it, which is exactly the ratchet-culture distinction this file exists to keep.) Post-fix,
+both `print` statements above output `true`.
 
 **Tests.** `tests/chz/spec/eq_func_test.chz` (10 tests, gated serial==M:N by
 `test_runner::chz_suite_passes_both_engines`): two top-level loads of one `fn` equal (`==` and the

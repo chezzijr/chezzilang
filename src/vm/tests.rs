@@ -17243,10 +17243,7 @@ fn intrinsic_grants_all_have_vm_arms() {
         r("option", "", "Some(1)", "-", "-", "-", "-", "-", "-"),
         r("result", "", "Ok(1)", "-", "-", "-", "-", "-", "-"),
         // W7-54 — a function value's `Eq` grant. Only the `eq` template applies; it uses no other
-        // column. `Ty::BuiltinFn` (`ord`/`chr`/`panic`) shares this same `"func"` kind (W7-54
-        // follow-up) — this row's `Ty::Func` literal is the one runtime probe, and the BuiltinFn
-        // half of the runtime dispatch (`Obj::Builtin` through the same terminal `_` arm) is proven
-        // separately by `tests/chz/spec/eq_func_test.chz`'s builtin-fn tests.
+        // column.
         r(
             "func",
             "fn g(x: int) -> int:\n    return x\n",
@@ -17258,6 +17255,15 @@ fn intrinsic_grants_all_have_vm_arms() {
             "-",
             "-",
         ),
+        // SECOND row for the SAME kind, and it is not redundant: `Ty::BuiltinFn` (`ord`/`chr`/
+        // `panic`/`print`) is a DISTINCT `Ty` variant that shares `"func"`'s `intrinsic_recv_kind`
+        // (the W7-54 follow-up). The matrix sweep below loops `for rv in recvs`, so this row is what
+        // actually feeds a `Ty::BuiltinFn` to every protocol's `bound_probe` — without it the sweep
+        // would prove nothing about the variant, and a future protocol arm matching `BuiltinFn` but
+        // not `Func` would get no cell at all. `accepted` is deduped, so the shared ("Eq", "func")
+        // cell still matches `registered` exactly once; `recv_of` returns the FIRST row, so the
+        // runtime probe below stays the `Ty::Func` one.
+        r("func", "", "ord", "-", "-", "-", "-", "-", "-"),
     ];
     // (method, call template) — `{r}` is the receiver, `{k}`/`{v}` the index key/value.
     let calls: &[(&str, &str)] = &[

@@ -96,7 +96,7 @@ test fn two_loads_of_one_builtin_fn_are_equal():
     assert (a == b) == true
     assert eqm(a, b) == true, "the method spelling now agrees with the operator for a builtin too"
 
-test fn two_loads_of_a_different_builtin_fn_are_also_equal():
+test fn chr_loads_are_equal_too():
     # `chr` has a different signature from `ord` (so the two can't be compared to EACH OTHER — Chezzi
     # is statically typed and they're different `fn(...)` types), but the same identity relation
     # holds for it independently, proving the fix isn't `ord`-specific.
@@ -104,6 +104,17 @@ test fn two_loads_of_a_different_builtin_fn_are_also_equal():
     b := chr
     assert (a == b) == true
     assert eqm(a, b) == true
+
+fn u(s: str) -> int:
+    return s.len()
+
+test fn a_user_fn_and_a_builtin_of_the_same_type_are_unequal():
+    # The only FALSE-direction row available for a builtin, and it pins the cross-variant case the
+    # shared `"func"` kind creates: `u` is a `Ty::Func`, `ord` a `Ty::BuiltinFn`, same rendered type
+    # `fn(str) -> int`. Before the follow-up these DISAGREED — `u == ord` was `false` while
+    # `eqm(u, ord)` was a type error. CPython agrees they are unequal: a user `def` vs `ord` -> False.
+    assert (u == ord) == false
+    assert eqm(u, ord) == false
 
 test fn a_builtin_fn_equals_itself():
     r := ord
