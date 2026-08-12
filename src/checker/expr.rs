@@ -2242,6 +2242,13 @@ impl Checker {
         {
             return Ty::Struct("Iterator".to_string(), vec![elem]);
         }
+        // W7-53 I1′ — tell the type-blind backend which dispatch this `.eq(x)` takes. Recorded for
+        // EVERY one-arg `eq` call (both verdicts), before the per-type dispatch below, so the record
+        // site is one place and an aliased key is a hard error rather than a silent mis-lowering.
+        if method == "eq" && args.len() == 1 {
+            let proto = self.eq_is_protocol_dispatch(&obj_ty);
+            self.record_proto_eq(name_span, proto, span);
+        }
         match &obj_ty {
             // `module.fn(args)` is a plain call on the member — no `self`.
             Ty::Module(mname) => {

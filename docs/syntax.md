@@ -1580,6 +1580,30 @@ print(Opt[int].Some(1).eq(7))                # true  — the method still works
 print(Opt[int].Some(1) == Opt[int].Some(2))  # false — `==` stays structural
 ```
 
+**Through a protocol bound, `.eq()` is the protocol's equality — never the same-named ordinary
+method.** A *concrete* receiver keeps calling the ordinary method (Rust's inherent-wins rule); a
+receiver whose type is a bound type parameter resolves to the protocol, exactly as Rust resolves
+`a.eq(b)` under `T: Eq` to `<T as PartialEq>::eq`. The three spellings therefore give three answers,
+and they are the three rustc gives:
+
+```chezzi
+struct Key:
+    n: int
+    fn eq[U](self, o: U) -> bool:            # an ordinary method, NOT the Eq hook
+        return true
+
+fn eqm[T: Eq](a: T, b: T) -> bool:
+    return a.eq(b)
+
+print(Key(1).eq(Key(2)))                     # true  — concrete receiver: the ordinary method
+print(Key(1) == Key(2))                      # false — `==` stays structural
+print(eqm(Key(1), Key(2)))                   # false — through the bound: the PROTOCOL's equality
+```
+
+A real `eq` **hook** is still dispatched through the bound, of course — that is what makes `Eq`
+user-overloadable. The rule is one sentence: through a bound, `.eq()` means whatever `==` means for
+that receiver, so the method spelling and the operator can never disagree (`docs/gaps.md` **W7-53**).
+
 A newtype cannot satisfy `Eq` through its own `eq` **method**: a newtype's `==` always unwraps to the
 underlying's native equality, so declaring `eq` on one is rejected at the declaration site (the method
 could never agree with the operator). It satisfies `Eq` anyway — via that same unwrapped equality, which

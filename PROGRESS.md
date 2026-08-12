@@ -140,6 +140,28 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > `tests/chz/` tests added** (`one_eq_bound_covers_every_join_point` — one `[T: Eq]` bound over `int`/
 > `List`/`tuple`/`Option`/a struct/a function value, closing the M9 gap; `non_hook_eq_satisfies_eq_
 > too` — the C1 regression pin); `485/485` on both engines. `cargo test`: green (counts in the commit).
+> **Same-day follow-up (I1′, the last residual of this row): `.eq()` through an `[T: Eq]` bound now
+> resolves to the PROTOCOL's equality, as rustc resolves it to the trait method.** Measured, rustc
+> 1.97.0, on a `#[derive(PartialEq, Eq)] struct Key(i32)` carrying an INHERENT `fn eq<U>(&self, _o: U)
+> -> bool { true }`: `a.eq(&b)` on a CONCRETE receiver is `true` (inherent wins), `a == b` is `false`,
+> and `eqm<T: Eq>(a, b) { a.eq(b) }` is **`false`**. Chezzi answered the third `true` — a silent wrong
+> value, identical on both engines and therefore parity-blind, and NOT a regression (identical before
+> this wave). Cause: the compiler is type-blind, so `a.eq(b)` lowered to a by-name `Op::CallMethod` the
+> VM resolved against the receiver's own methods. **Fix:** the checker records, for every one-arg
+> `.eq(x)` site, whether the receiver is a type parameter whose bound resolves the `Eq` HOOK signature
+> (`Checker::eq_is_protocol_dispatch` + `is_eq_hook_protocol_sig`, `src/checker/proto.rs`), and the
+> compiler lowers such a site to **`Op::Eq` — the very opcode `==` emits** (`Compiler::is_proto_eq_
+> call`), so the two spellings are one dispatch BY CONSTRUCTION. A real user `eq` hook is still
+> dispatched through the bound (`values_equal_guarded` already does that), an EMBEDDING bound
+> (`[T: Comparable]`) dispatches the protocol too, and a CONCRETE receiver is unchanged. The side
+> table reuses `carrier_key` verbatim (the method-NAME token, file-identified since `W7-49`) and
+> records BOTH verdicts, so an aliased key is a hard `CompileError`, never a silent mis-lowering; a
+> lookup MISS is the pre-fix lowering, so it can only under-apply. **Tests:**
+> `tests/chz/spec/eq_protocol_bound_dispatch_test.chz` (8 `test fn`s; measured **5 passed / 3 failed**
+> on the PRE-fix binary, all 8 pass after) — every struct in it defines an `eq` that DISAGREES with
+> structural equality, so an assertion can only pass if dispatch went the right way. `cargo test`
+> **4284 passed / 0 failed**; `chezzi test tests/chz/` **493/493 identical on M:N and `--serial`**;
+> `cargo clippy --all-targets -D warnings` clean.
 > Full write-up: `docs/gaps.md` **W7-53**.
 
 > **✅ W7-57 landed 2026-08-12 — a run-wide `os.exit` reaches every party, not just the polling ones.**

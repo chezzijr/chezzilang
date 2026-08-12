@@ -1,0 +1,113 @@
+# tests/chz/spec/eq_protocol_bound_dispatch_test.chz — W7-53 I1′: `.eq()` THROUGH an `[T: Eq]`
+# bound is the PROTOCOL's equality, not whatever ordinary method happens to be spelled `eq`.
+#
+# Three spellings reach the same receiver and they must give the ancestor's three answers. Measured,
+# rustc 1.97.0, on `#[derive(PartialEq, Eq)] struct Key(i32)` carrying an INHERENT (non-trait)
+# `fn eq<U>(&self, _o: U) -> bool { true }`:
+#
+#   a.eq(&b)                                  -> true    inherent wins on a CONCRETE receiver
+#   a == b                                    -> false   PartialEq (structural)
+#   fn eqm<T: Eq>(a: &T, b: &T) { a.eq(b) }   -> false   the TRAIT method, through the bound
+#
+# Chezzi used to answer the third `true` — the compiler is type-blind, so `a.eq(b)` lowered to a
+# by-name `Op::CallMethod` that the VM resolved against the receiver's own methods. A silent wrong
+# answer, identical on both engines and therefore parity-blind. See `docs/gaps.md` W7-53.
+#
+# Every struct here defines an `eq` that DISAGREES with structural equality, so each assertion can
+# only pass if dispatch went the right way.
+# Serial==M:N is guarded by `test_runner::chz_suite_passes_both_engines`.
+
+# ---- the escape hatch: a method named `eq` that is NOT the `Eq` hook (its operand is a type
+# parameter, not `Self`), so `==` leaves it alone and falls back to structural equality ----
+
+struct Key:
+    n: int
+    fn eq[U](self, o: U) -> bool:
+        return true          # the OPPOSITE of structural equality for two different `n`s
+
+fn eq_via_bound[T: Eq](a: T, b: T) -> bool:
+    return a.eq(b)
+
+fn ne_via_bound[T: Eq](a: T, b: T) -> bool:
+    return a.eq(b) == false
+
+test fn a_concrete_receiver_calls_the_ordinary_method():
+    # Rust's inherent-wins rule: on a receiver whose type is KNOWN, `.eq()` is an ordinary method
+    # call and resolves to the user's own `eq`. Unchanged by W7-53 I1′.
+    assert Key(1).eq(Key(2)) == true, "the ordinary method returns true for any operand"
+    assert Key(1).eq(Key(1)) == true
+
+test fn the_operator_is_structural_for_a_non_hook_eq():
+    assert (Key(1) == Key(2)) == false, "`==` never dispatches a non-hook `eq`"
+    assert (Key(1) == Key(1)) == true
+    assert (Key(1) != Key(2)) == true
+
+test fn through_an_eq_bound_the_protocol_wins():
+    # The row that used to disagree with rustc. `.eq()` through the bound means the protocol's
+    # equality — i.e. exactly what `==` does for that receiver — NOT the same-named ordinary method.
+    assert eq_via_bound(Key(1), Key(2)) == false, "the ordinary `eq` would have said true"
+    assert eq_via_bound(Key(1), Key(1)) == true
+    assert ne_via_bound(Key(1), Key(2)) == true
+
+test fn the_bound_and_the_operator_agree_on_a_non_hook_receiver():
+    # The property `docs/syntax.md` states: through a bound, the method spelling and the operator
+    # are one dispatch. Checked pairwise so a future divergence fails here first.
+    ls := [1, 1, 2, 7]
+    rs := [1, 2, 2, 3]
+    for i in range(ls.len()):
+        a := Key(ls[i])
+        b := Key(rs[i])
+        assert eq_via_bound(a, b) == (a == b), "`.eq()` through `[T: Eq]` must equal `==`"
+
+# ---- the real hook: a user `eq(self, o: Self) -> bool` that `==` DOES own. It must still be
+# dispatched through the bound — `Eq` is user-overloadable, and that is the whole feature ----
+
+struct Parity:
+    n: int
+    fn eq(self, o: Parity) -> bool:
+        return self.n % 2 == o.n % 2   # disagrees with structural equality in BOTH directions
+
+test fn a_real_hook_still_dispatches_through_the_bound():
+    # structural would say false; the hook says true
+    assert eq_via_bound(Parity(1), Parity(3)) == true, "the user hook must win through the bound"
+    assert (Parity(1) == Parity(3)) == true
+    assert Parity(1).eq(Parity(3)) == true
+    # and the hook says false where structural equality would too
+    assert eq_via_bound(Parity(1), Parity(2)) == false
+    assert ne_via_bound(Parity(1), Parity(2)) == true
+
+test fn a_real_hook_agrees_on_every_spelling():
+    ls := [1, 1, 2, 1, 4]
+    rs := [1, 3, 4, 2, 7]
+    for i in range(ls.len()):
+        a := Parity(ls[i])
+        b := Parity(rs[i])
+        assert eq_via_bound(a, b) == (a == b), "hook: `.eq()` through the bound == `==`"
+        assert a.eq(b) == (a == b), "hook: the concrete spelling is the hook too"
+
+# ---- a bound that EMBEDS `Eq` reaches the same protocol equality ----
+
+struct Ranked:
+    n: int
+    fn compare(self, o: Ranked) -> int:
+        return self.n - o.n
+    fn eq[U](self, o: U) -> bool:
+        return true          # non-hook again: `==` stays structural
+
+fn eq_via_comparable[T: Comparable](a: T, b: T) -> bool:
+    return a.eq(b)
+
+test fn an_embedded_eq_bound_dispatches_the_protocol_too():
+    assert eq_via_comparable(Ranked(1), Ranked(2)) == false, "`Comparable` embeds `Eq`"
+    assert eq_via_comparable(Ranked(1), Ranked(1)) == true
+    assert Ranked(1).eq(Ranked(2)) == true, "the concrete receiver is unchanged"
+
+# ---- scalars and containers through the bound keep answering what `==` answers ----
+
+test fn built_in_receivers_through_the_bound_are_unchanged():
+    assert eq_via_bound(1, 1) == true
+    assert eq_via_bound(1, 2) == false
+    assert eq_via_bound("a", "a") == true
+    assert eq_via_bound([1, 2], [1, 2]) == true
+    assert eq_via_bound([1, 2], [1, 3]) == false
+    assert eq_via_bound((1, "a"), (1, "a")) == true

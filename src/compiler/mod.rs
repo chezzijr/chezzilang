@@ -129,11 +129,12 @@ pub fn compile_graph(graph: &ModuleGraph) -> Result<Program, CompileError> {
     // witness params and what fills each witness at each call site. The compiler CONSUMES it — it
     // never re-derives which protocols carry a static requirement (that resolves through
     // imports/aliases/embeds, which is checker work).
-    let (kw, wt, ct, conflicts) = crate::checker::resolve_call_tables(graph);
+    let (kw, wt, ct, pe, conflicts) = crate::checker::resolve_call_tables(graph);
     reject_table_conflicts(conflicts)?;
     c.keyword_calls = kw;
     c.witnesses = wt;
     c.carriers = ct;
+    c.proto_eq_calls = pe;
     // Pass 0: collision pre-pass — assign runtime keys for module-scoped user types. A type name
     // declared in exactly one module keeps its BARE name (the common case → unchanged Display/print
     // output); a name declared in ≥2 modules that are BOTH in the program is disambiguated (the
@@ -203,11 +204,12 @@ pub fn compile_module_standalone(module: &Module) -> Result<Program, CompileErro
     // SINGLE-RESOLVER: extern C types come from the checker's standalone pass — the SAME resolver the
     // multi-file CLI uses (no second backend resolver exists). The backend reads this table verbatim.
     c.extern_sigs = crate::checker::resolve_extern_signatures_standalone(&module.stmts);
-    let (kw, wt, ct, conflicts) = crate::checker::resolve_call_tables_standalone(&module.stmts);
+    let (kw, wt, ct, pe, conflicts) = crate::checker::resolve_call_tables_standalone(&module.stmts);
     reject_table_conflicts(conflicts)?;
     c.keyword_calls = kw;
     c.witnesses = wt;
     c.carriers = ct;
+    c.proto_eq_calls = pe;
     let toplevel = c.compile_module(0, module, &[], true, None)?;
     let global_slots = std::mem::take(&mut c.global_slots);
     // A synthetic module id so the run driver has something to key the namespace cache on.
@@ -314,6 +316,11 @@ struct Compiler {
     /// [`crate::checker::CarrierTable`]), consumed verbatim: the backend is type-blind and cannot
     /// re-derive whether a carrier's operand was an `Option` or a `Result`.
     carriers: crate::checker::CarrierTable,
+    /// W7-53 I1′ — which `.eq(x)` call sites are PROTOCOL dispatch through a generic bound. The
+    /// backend is type-blind, so this is CONSUMED from the checker and never re-derived; a MISS
+    /// means "ordinary by-name call", which is the pre-W7-53 lowering. See
+    /// [`crate::checker::ProtoEqTable`].
+    proto_eq_calls: crate::checker::ProtoEqTable,
     /// W7-43 — counter for the fresh `__optN` temp names the Option lowering mints, mirroring the
     /// checker's own. Frame-local and `__`-prefixed (unwritable by user code), so uniqueness within
     /// one compilation is all that is ever needed — and this makes it true by construction rather
@@ -789,6 +796,7 @@ impl Compiler {
             keyword_calls: crate::checker::KeywordTable::new(),
             witnesses: crate::checker::WitnessTable::default(),
             carriers: crate::checker::CarrierTable::new(),
+            proto_eq_calls: crate::checker::ProtoEqTable::new(),
             next_opt_tmp: 0,
             witness_locals: Vec::new(),
             pending_witnesses: Vec::new(),
@@ -4398,6 +4406,21 @@ impl Compiler {
     /// `Holder.build(c)`, `lib.Type.build(c)`). Keyed on the member-name TOKEN
     /// ([`crate::checker::witness_key_span`]), which is unique per link of a postfix chain — the call
     /// span is not.
+    /// W7-53 I1′ — is this `Field`-callee call the protocol-dispatched `.eq(x)` the checker marked?
+    /// Keyed on the method-NAME token, exactly like [`Self::member_witness_srcs`] and the `?.`
+    /// carriers. The `name`/arity re-test is not redundant: it keeps the lookup from ever firing on
+    /// a call shape the checker could not have recorded.
+    fn is_proto_eq_call(&self, name: &str, args: &[Expr], name_span: Span) -> bool {
+        name == "eq"
+            && args.len() == 1
+            && self.proto_eq_calls.get(&crate::checker::carrier_key(
+                self.current_module_idx,
+                self.kw_frag_ctx,
+                self.kw_frag_ord,
+                name_span,
+            )) == Some(&true)
+    }
+
     fn member_witness_srcs(&self, name_span: Span) -> Option<&Vec<crate::checker::WitnessSrc>> {
         self.witnesses.calls.get(&crate::checker::witness_key(
             self.current_module_idx,
@@ -4861,6 +4884,19 @@ impl Compiler {
                     },
                     span,
                 );
+                return Ok(());
+            }
+            // W7-53 I1′ — `.eq(x)` through a generic bound (`fn f[T: Eq](a: T, b: T): a.eq(b)`) is
+            // the PROTOCOL's equality, not whatever ordinary method the receiver happens to spell
+            // `eq`. Lower it to the very opcode `==` uses, so the two spellings are one dispatch by
+            // construction: `Op::Eq` runs `values_equal_guarded`, which already dispatches a real
+            // user `eq` HOOK and falls back to structural equality otherwise. Rust resolves the same
+            // call to `<T as PartialEq>::eq`; a CONCRETE receiver keeps the inherent-wins rule and
+            // is recorded `false` by the checker, so it never lands here.
+            if self.is_proto_eq_call(name, args, *name_span) {
+                self.compile_expr(fc, obj)?;
+                self.compile_expr(fc, &args[0])?;
+                fc.emit(Op::Eq, span);
                 return Ok(());
             }
             // M24 Task 5 — an INSTANCE method that declares its own witnessed `[T]`

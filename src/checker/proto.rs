@@ -2320,6 +2320,64 @@ impl Checker {
         }
     }
 
+    /// W7-53 I1′ — is this `.eq(x)` call PROTOCOL dispatch (the receiver is a generic type parameter
+    /// whose bound exposes `eq`) rather than an ordinary by-name method call?
+    ///
+    /// Only a `Ty::Param` receiver can be: a concrete receiver keeps Rust's inherent-wins rule
+    /// (`Key(1).eq(Key(2))` is an ordinary method call), and a `Ty::Protocol` receiver never reaches
+    /// `eq` at all — `eq(self, o: Self)` puts `Self` in a parameter slot, which the object-safety
+    /// gate in `infer_method_call` already rejects with a message pointing at `[T: Eq]`.
+    ///
+    /// The bound is asked by RESOLUTION, not by name, so an EMBEDDING bound (`[T: Comparable]`,
+    /// which embeds `Eq`) dispatches the protocol too — `protocol_method_sig` walks embeds, so this
+    /// is the same resolution the `Ty::Param` arm of `infer_method_call` uses to type the call in
+    /// the first place.
+    ///
+    /// …but the resolved method must carry the `Eq` HOOK SIGNATURE `fn eq(self, other: Self) ->
+    /// bool` (`Self` is `Ty::Param("Self")` in a registered protocol sig). A user protocol is free
+    /// to declare an unrelated `fn eq(self, o: int) -> bool`, and lowering THAT to `==` would
+    /// compare the receiver against the argument instead of calling the method — an over-fire in
+    /// the granting direction, which is the one that produces a silent wrong value.
+    pub(super) fn eq_is_protocol_dispatch(&self, obj_ty: &Ty) -> bool {
+        let Ty::Param(pname) = obj_ty else {
+            return false;
+        };
+        self.type_params.get(pname).is_some_and(|bounds| {
+            bounds.iter().any(|b| {
+                self.protocol_method_sig(&b.name, "eq")
+                    .is_some_and(|s| Self::is_eq_hook_protocol_sig(&s))
+            })
+        })
+    }
+
+    /// Is a PROTOCOL's declared `eq` the `Eq` hook `fn eq(self, other: Self) -> bool`? Deliberately
+    /// separate from [`Self::eq_sig_is_hook`], which asks the mirror question of a CONCRETE type's
+    /// declared `eq` (there the escape hatch is a bare type param; here `Self` IS one).
+    fn is_eq_hook_protocol_sig(sig: &FnSig) -> bool {
+        sig.params.len() == 2
+            && sig.params[1] == Ty::Param("Self".to_string())
+            && sig.ret == Ty::Bool
+    }
+
+    /// Record one `.eq(x)` site's dispatch for the backend, under the same key derivation the `?.`
+    /// carriers use (the method-NAME token — see [`crate::checker::CarrierKey`]).
+    pub(super) fn record_proto_eq(&mut self, name_span: Span, proto: bool, span: Span) {
+        let key = crate::checker::carrier_key(
+            self.graph_module_idx,
+            self.kw_frag_ctx,
+            self.kw_frag_ord,
+            name_span,
+        );
+        crate::checker::record_call_table_entry(
+            &mut self.proto_eq_calls,
+            &mut self.table_conflicts,
+            key,
+            proto,
+            "'.eq()' dispatch",
+            span,
+        );
+    }
+
     /// Is a struct/enum's declared `eq` [`FnSig`] the `Eq` HOOK `==`/`!=` dispatch to, or the
     /// ordinary-method escape hatch (a generic operand)? Delegates to [`Self::eq_operand_is_hook`]
     /// (`sig.rs`) — the same predicate `validate_eq_shape` already enforced at the declaration, so a

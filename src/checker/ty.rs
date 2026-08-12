@@ -138,6 +138,22 @@ pub enum CarrierMode {
 /// Option-only, so an `ExprKind::NullCoalesce` never gets an entry: there is no decision to record.
 pub type CarrierTable = HashMap<CarrierKey, CarrierMode>;
 
+/// W7-53 I1′ — which dispatch each `.eq(x)` call site takes, keyed exactly like [`CarrierKey`] (the
+/// method-NAME token, which is a distinct source node per link of a postfix chain — see
+/// [`CarrierKey`] for the full derivation and why the call node's span would alias).
+///
+/// `true` = the receiver is a generic type parameter whose bound exposes `eq`, so the call is
+/// PROTOCOL dispatch and must mean the protocol's equality (whatever `==` does for the runtime
+/// receiver). `false` = an ordinary by-name method call on a receiver whose type is known, which
+/// keeps Rust's inherent-wins behaviour.
+///
+/// BOTH decisions are recorded, never just the `true` one: a `false` entry is what lets
+/// [`crate::checker::record_call_table_entry`] see an aliased key and turn it into a hard compile
+/// error instead of silently applying one site's dispatch to another. A lookup MISS means "ordinary
+/// call", which is also the pre-W7-53 lowering — so a missing entry can only ever under-apply the
+/// fix, never mis-apply it.
+pub type ProtoEqTable = HashMap<CarrierKey, bool>;
+
 /// Surface-only parameter labels on a function type (Swift SE-0111 keyword arguments through a
 /// function VALUE). They ride PARALLEL to a `Ty::Func`'s `params`, but participate in NO type
 /// identity: two function types differing only in labels are the SAME type (mutually assignable,

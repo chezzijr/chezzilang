@@ -21,8 +21,8 @@ use std::fmt;
 pub use ty::Ty;
 use ty::compatible;
 pub use ty::{
-    CarrierKey, CarrierMode, CarrierTable, FnLabels, KeywordKey, KeywordTable, WitnessCallee,
-    WitnessKey, WitnessSrc, WitnessTable,
+    CarrierKey, CarrierMode, CarrierTable, FnLabels, KeywordKey, KeywordTable, ProtoEqTable,
+    WitnessCallee, WitnessKey, WitnessSrc, WitnessTable,
 };
 
 /// The fully-resolved C signature of one `extern` fn, computed by the checker in the defining
@@ -858,12 +858,21 @@ pub fn resolve_extern_signatures_standalone(stmts: &[Stmt]) -> ExternTable {
 /// lowering each `?.` carrier takes. Unlike the other two it is recorded UNCONDITIONALLY (not gated
 /// on `harvest_keywords`) — a gate would be a second way for this pass and [`check_graph`] to
 /// disagree about the same program.
-/// W7-49 rides it as the fourth element: the key CONFLICTS this pass refused to overwrite. This pass
+/// W7-53 I1′ rides it as the fourth element: the [`ProtoEqTable`] telling the compiler which
+/// `.eq(x)` call sites are PROTOCOL dispatch through a generic bound (and so mean `==`) rather than
+/// ordinary by-name method calls. Recorded unconditionally, exactly like the carriers.
+/// W7-49 rides it as the last element: the key CONFLICTS this pass refused to overwrite. This pass
 /// discards its type errors, so a conflict cannot travel as one — the compiler turns the first into a
 /// hard `CompileError`. See [`record_call_table_entry`].
 pub fn resolve_call_tables(
     graph: &ModuleGraph,
-) -> (KeywordTable, WitnessTable, CarrierTable, TableConflicts) {
+) -> (
+    KeywordTable,
+    WitnessTable,
+    CarrierTable,
+    ProtoEqTable,
+    TableConflicts,
+) {
     let mut c = Checker::new();
     c.harvest_keywords = true;
     c.run_graph_pass(graph, false);
@@ -871,6 +880,7 @@ pub fn resolve_call_tables(
         std::mem::take(&mut c.keyword_calls),
         std::mem::take(&mut c.witnesses),
         std::mem::take(&mut c.carriers),
+        std::mem::take(&mut c.proto_eq_calls),
         std::mem::take(&mut c.table_conflicts),
     )
 }
@@ -887,7 +897,13 @@ pub type TableConflicts = Vec<(Span, String)>;
 #[cfg(test)]
 pub fn resolve_call_tables_standalone(
     stmts: &[Stmt],
-) -> (KeywordTable, WitnessTable, CarrierTable, TableConflicts) {
+) -> (
+    KeywordTable,
+    WitnessTable,
+    CarrierTable,
+    ProtoEqTable,
+    TableConflicts,
+) {
     let id = crate::resolver::ModuleId(std::path::PathBuf::from("<main>"));
     let graph = ModuleGraph {
         entry: id.clone(),
@@ -1872,6 +1888,11 @@ struct Checker {
     /// second way for the harvest pass and `check_graph` to disagree. Produced by
     /// [`resolve_call_tables`].
     carriers: CarrierTable,
+    /// W7-53 I1′ — which dispatch each `.eq(x)` call site takes, keyed by [`carrier_key`] and
+    /// consumed verbatim by the compiler (which cannot re-derive it: the decision is the RECEIVER's
+    /// type). Recorded UNCONDITIONALLY, for the same reason [`Self::carriers`] is. See
+    /// [`ProtoEqTable`].
+    proto_eq_calls: ProtoEqTable,
     /// W7-49 — side-table keys that were asked to hold two DIFFERENT decisions at once. Filled by
     /// [`record_call_table_entry`] (never by ordinary type errors) and returned alongside the three
     /// tables, because this pass DISCARDS its type errors — `self.error` would be swallowed here.
