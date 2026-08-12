@@ -10424,6 +10424,15 @@ VM == interp == `--parallel` on every registered example. Conformance + clippy c
 
 ## Roadmap (later)
 
+- **M25 — killable subprocesses** (spec written 2026-08-12, not implemented). Cancellation is
+  cooperative, so a task inside `process.cmd("sleep 5")` ignores a sibling fault (5013 ms), `os.exit`
+  (5015 ms) and `chezzi test --timeout=500` (5008 ms) — measured. We own a child's PID, so we can end
+  what is being waited on, exactly as Go's `exec.CommandContext` does. **`std.process` only**:
+  `std.request` wants a client-side timeout, and `std.fs`/`std.io` stay uninterruptible because Go
+  does not cancel those either. Full design, the three measured traps (process **group** not PID; kill
+  `.output()`; `TERM`→grace→`KILL`), the ambient-vs-explicit divergence from Go, the four phases and
+  the verification bar: [`docs/concurrency.md` §6h](docs/concurrency.md).
+
 - VM/GC optimizations beyond M19 — NaN-boxing (own milestone), register VM, generational/incremental GC,
   Cranelift AOT/JIT. Written up in [`docs/future.md`](docs/future.md).
 - **Bug-discovery track (pre-JIT)** — automated bug finding. ✅ **CPython output-differential built**

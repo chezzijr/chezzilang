@@ -380,6 +380,10 @@ checkpoint until the call returns**. A sibling's fault (scope cancel), a `cancel
 when the call returns, not before. Size the operation itself (a subprocess `timeout 5 …`, a request
 timeout) if you need a bound.
 
+**Planned:** `std.process` calls will become killable — a cancelled task will signal the child's
+process group instead of waiting it out (`docs/concurrency.md` §6h, milestone M25). `std.fs`/`std.io`
+will stay uninterruptible, matching Go, which does not cancel file I/O either.
+
 `chezzi test --timeout` consequently reports such a test `TIMED-OUT` **after** it finishes rather than
 cutting it short; its message says `… could not be aborted (a blocking … call has no checkpoint until
 it returns)`, which is how it reads apart from a real abort.
