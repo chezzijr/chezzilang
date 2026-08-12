@@ -2065,16 +2065,26 @@ fn a_long_chain_of_conditional_eq_types_is_decided_not_waved_through() {
     //
     // W7-55: the backstop moved from 160 (`EQ_BOUNDS_MAX_IN_PROGRESS`, sized for an ambient
     // test-harness stack) to 78 000 (sized on the 1 GiB frontend stack every caller now gets by
-    // construction), so this needs a chain past THAT to still trip it. Slow to lex/parse at this size
-    // — measured ~4.8s / ~1 GB peak RSS for this one case (DEBUG test build) — but that cost buys real
-    // coverage of the new boundary rather than an assertion that would vacuously pass at 180 now.
-    entry_rejects(&chain(79_000, true), "nests too deeply");
+    // construction) and then, same day, DOWN to 10 000 (tied to the VM's own `MAX_STRUCTURAL_DEPTH` —
+    // see that constant's doc for why: the checker must not grant an `Eq` compare the VM cannot
+    // itself perform), so this needs a chain past THAT to still trip it.
+    entry_rejects(&chain(10_500, true), "nests too deeply");
 }
 
-/// **The budget refusal must not print a multi-KB type name.** The shape that trips the budget is
-/// often the one whose name is enormous — polymorphic recursion reaches
-/// `N[List[List[…×160…[int]]]]` — and this diagnostic is streamed to the editor. A `"nests too
-/// deeply"` needle cannot see length, so assert length.
+/// **The budget refusal must not print a multi-KB type name.** This diagnostic is streamed to the
+/// editor, and the shape that trips a refusal can have an enormous name — a `"nests too deeply"`
+/// needle cannot see length, so assert length.
+///
+/// **M6 (adversarial review of W7-55, same day): the FIRST half below is near-vacuous now, and
+/// deliberately kept anyway, with the explanation inline instead of a silent skip.** Its original
+/// premise was that polymorphic recursion (`N[List[List[…]]]`) organically grows the type name huge
+/// before it is refused. Guard A refuses growth in BOUNDED work (at most two consecutive growing
+/// re-entries), so the walk never gets deep enough to build a multi-KB name through recursion alone
+/// — the assertion below is true, but not because elision fired; a short root just stays short. There
+/// is no way to reconstruct the original premise without defeating Guard A (nested generic args are
+/// the only thing that makes a `Ty`'s printed name large, and that is exactly the shape Guard A now
+/// intercepts early) — so the SECOND half, which builds an already-huge ROOT by hand instead of
+/// growing one, is what actually exercises the elision path.
 #[test]
 fn the_budget_refusal_elides_a_runaway_type_name() {
     let budget_msg = |src: &str| {
@@ -2084,7 +2094,8 @@ fn the_budget_refusal_elides_a_runaway_type_name() {
             .map(|e| e.message.clone())
             .unwrap_or_else(|| panic!("expected a budget refusal, got: {errs:?}"))
     };
-    // Naming the walk's ROOT rather than the innermost entry already keeps this one short.
+    // Vacuous per the doc above: the root (`N[int]`) is short on its own, so this stays short
+    // whether or not elision fires. Kept as a cheap regression tripwire, not as elision coverage.
     let msg = budget_msg(
         "\
 struct N[T]:
@@ -2189,10 +2200,11 @@ fn a_cyclic_shared_field_type_graph_is_also_walked_once_per_type() {
 /// entry that actually trips the budget is `S0` — `struct S0: v: int`, which nests not at all — so
 /// naming it told the user about the one link that is definitely fine.
 ///
-/// W7-55: `N` moved from 200 to past the new 78 000 cap (the old 200 no longer trips it at all).
+/// W7-55: `N` moved from 200 to past the cap, then (same-day Important-4 follow-up) the cap itself
+/// moved from 78 000 to 10 000 (tied to the VM's `MAX_STRUCTURAL_DEPTH`), so `N` moved with it.
 #[test]
 fn the_budget_refusal_names_the_type_the_walk_started_from() {
-    const N: usize = 78_500;
+    const N: usize = 10_500;
     let mut src = String::from("struct S0:\n    v: int\n");
     for i in 1..=N {
         src.push_str(&format!("struct S{i}:\n    v: S{}\n", i - 1));
@@ -2231,25 +2243,16 @@ fn a_deep_but_finite_chain_stays_within_the_eq_budget() {
     entry_ok(&src);
 }
 
-/// **The EXACT boundary pair at the new cap (W7-55).** Measured empirically (via
-/// `checker::tests::stack_probe_eq_bounds_depth`): `S0..S77999` (78 000 simultaneous obligations at
-/// peak) is the LAST depth `EQ_BOUNDS_MAX_IN_PROGRESS = 78_000` accepts; `S0..S78000` (78 001) is the
-/// FIRST it refuses. Bare `==` reaches [`Checker::eq_bounds_unsatisfied`] directly (`checker/
-/// pattern.rs`'s binary-op arm calls it on both operands before falling back to `may_be_equal`), the
-/// same path the original W7-55 measurement used.
+/// **The EXACT boundary pair at the cap (W7-55, re-measured after the same-day Important-4 follow-up
+/// moved `EQ_BOUNDS_MAX_IN_PROGRESS` from 78 000 to `crate::vm::MAX_STRUCTURAL_DEPTH` = 10 000).**
+/// `S0..S9999` (10 000 simultaneous obligations at peak) is the LAST depth the cap accepts;
+/// `S0..S10000` (10 001) is the FIRST it refuses. Bare `==` reaches
+/// [`Checker::eq_bounds_unsatisfied`] directly (`checker/pattern.rs`'s binary-op arm calls it on both
+/// operands before falling back to `may_be_equal`), the same path the original W7-55 measurement used.
 ///
-/// Deliberately CHECK-only (`check_src`, not a compile+run through [`crate::vm::run_capture`]):
-/// generating two ~78 000-struct sources and compiling+executing one of them in the SAME test process
-/// pushed a 6 GiB memory cap into an OOM-kill while developing this test (a real cost of a
-/// genuinely-huge program, not a defect in the guard) — a stack overflow being worse than a wrong
-/// answer does not make an OOM in the TEST SUITE an acceptable price for one assertion. A follow-up
-/// by-hand attempt to RUN `S0..S77999` on the release CLI (`chezzi run`, its own process, nothing else
-/// running) also OOM'd, even at a 12 GiB cap — a 78 000-deep chain of nested FUNCTION CALLS is its own,
-/// unrelated, pre-existing VM resource cost (deep synchronous call recursion), independent of this
-/// row's `Eq`-walk fix, and out of this task's scope to chase. [`runtime_boundary_is_honoured_at_a_
-/// depth_the_old_cap_refused`] below covers the "the grant is honoured at runtime, not just claimed"
-/// half at an affordable depth instead — genuinely deep, well past the OLD 160/240 caps, but not at
-/// the literal new boundary, which the VM's own call-depth cost puts out of reach to actually RUN.
+/// Deliberately CHECK-only (`check_src`, not a compile+run through [`crate::vm::run_capture`]) — see
+/// [`runtime_boundary_is_honoured_at_a_depth_the_old_cap_refused`] below for the "the grant is
+/// honoured at runtime, not just claimed" half at an affordable depth instead.
 #[test]
 fn the_new_cap_boundary_accepts_then_refuses() {
     let chain_src = |n: usize| {
@@ -2262,17 +2265,17 @@ fn the_new_cap_boundary_accepts_then_refuses() {
         ));
         s
     };
-    let ok_errs = check_src(&chain_src(77_999));
+    let ok_errs = check_src(&chain_src(9_999));
     assert!(
         ok_errs.is_empty(),
-        "S0..S77999 (78 000 simultaneous obligations) is the last depth the new cap should accept: {ok_errs:?}"
+        "S0..S9999 (10 000 simultaneous obligations) is the last depth the cap should accept: {ok_errs:?}"
     );
-    let refused_errs = check_src(&chain_src(78_000));
+    let refused_errs = check_src(&chain_src(10_000));
     assert!(
         refused_errs
             .iter()
             .any(|e| e.message.contains("nests too deeply")),
-        "S0..S78000 (78 001 simultaneous obligations) must be the first refused depth: {refused_errs:?}"
+        "S0..S10000 (10 001 simultaneous obligations) must be the first refused depth: {refused_errs:?}"
     );
 }
 
@@ -2355,6 +2358,77 @@ fn use_it(a: N[int], b: N[int]) -> bool:
     assert!(
         elapsed < std::time::Duration::from_millis(500),
         "growth detection should refuse at depth ~2, not walk to the depth cap: took {elapsed:?}"
+    );
+}
+
+/// **CRITICAL 1 (adversarial review of W7-55, same day): a nominal re-entering under a LARGER
+/// instantiation is not always polymorphic recursion.** `Wrapper`'s field ignores its own type
+/// parameter — it always nests `Wrapper[List[int]]`, a CONSTANT — so the graph is finite (rustc
+/// accepts the mirror: `struct Wrapper<T> { v: T, ints: Option<Box<Wrapper<Vec<i32>>>> }` compiles)
+/// even though `Wrapper[int]` → `Wrapper[List[int]]` is one genuine SIZE increase by
+/// `Checker::ty_nodes`. A guard that refuses on the FIRST growing step cannot tell this from real
+/// polymorphic recursion; it walks `Wrapper[List[int]]` → `Wrapper[List[int]]` next, an EXACT match
+/// the ordinary cycle guard closes, so growth never repeats twice in a row here.
+///
+/// The verdict must not depend on the unrelated ROOT instantiation — before this fix, `Wrapper[int]`
+/// was refused while `Wrapper[str]` (which never relates to `List[int]` by size either way) was
+/// accepted for the same declaration, purely because of which root the caller happened to pick.
+/// Asserted together so a regression that reintroduces that asymmetry trips both halves of the pair.
+#[test]
+fn a_growing_re_entry_through_a_constant_type_argument_is_accepted() {
+    entry_ok(
+        "\
+struct Wrapper[T]:
+    v: T
+    ints: Option[Wrapper[List[int]]]
+fn same[U: Eq](a: U, b: U) -> bool:
+    return a == b
+fn use_it(a: Wrapper[int], b: Wrapper[int]) -> bool:
+    return same(a, b)
+",
+    );
+    entry_ok(
+        "\
+struct Wrapper[T]:
+    v: T
+    ints: Option[Wrapper[List[int]]]
+fn same[U: Eq](a: U, b: U) -> bool:
+    return a == b
+fn use_it(a: Wrapper[str], b: Wrapper[str]) -> bool:
+    return same(a, b)
+",
+    );
+}
+
+/// **CRITICAL 2 (adversarial review of W7-55, same day): growth detection must see EVERY `Ty`
+/// variant that can carry a growing child, not just the ones a containment check happened to list.**
+/// The predecessor of `Checker::ty_nodes` (`ty_contains_or_eq`) had a `_ => false` default that
+/// silently treated `Ty::Func` (a legal `Eq` type argument since W7-54, same branch) as a childless
+/// leaf, so a type parameter substituted into a fn type grew INVISIBLY to Guard A and walked all the
+/// way to the depth cap with an O(k)-sized `Ty` per level — the exact O(cap²) memory blow-up Guard A
+/// exists to prevent, reintroduced through the one check that wasn't exhaustive. `ty_nodes` has no
+/// catch-all arm (a new `Ty` variant is now a compile error here until sized), so this must refuse
+/// just as fast as the `List[T]` shape.
+#[test]
+fn polymorphic_recursion_through_a_func_type_argument_is_refused_in_bounded_time() {
+    let start = std::time::Instant::now();
+    entry_rejects(
+        "\
+struct N[T]:
+    v: T
+    next: Option[N[fn(T) -> int]]
+fn same[T: Eq](a: T, b: T) -> bool:
+    return a == b
+fn use_it(a: N[int], b: N[int]) -> bool:
+    return same(a, b)
+",
+        "nests too deeply",
+    );
+    let elapsed = start.elapsed();
+    assert!(
+        elapsed < std::time::Duration::from_millis(500),
+        "growth through a Func type argument should refuse in bounded work, not walk to the depth \
+         cap: took {elapsed:?}"
     );
 }
 
@@ -6788,6 +6862,18 @@ fn entry_rejects(src: &str, needle: &str) {
 /// WHOLE process, so this can only ever answer one depth per run. Left in the tree (not deleted after
 /// use) because the next time this floor needs re-deriving — a new Rust version, a changed call chain
 /// through `satisfies` — this is the harness, not a new one to write from scratch.
+///
+/// **M7 (adversarial review of W7-55, same day): the original floor measurement only ran the `cond`
+/// (hook-`eq`) shape.** After Task 3 (`89c353bd`), a NON-hook `eq` also has its `where` bounds proven
+/// AND falls through to `any(args)` + `walk_eq_members`, so it may cost more per level than `cond`
+/// does — the `nonhook` shape below (a plain field wrapped in a struct with no custom `eq` at all, so
+/// every level goes through the unconditional structural path) exists to re-derive the floor against
+/// that shape too. Not re-measured as part of this fix: the cap (`crate::vm::MAX_STRUCTURAL_DEPTH` =
+/// 10 000) sits at roughly 1/12 of the `cond` floor (118 000), so `nonhook` would need to cost >12x
+/// more per Rust stack frame than `cond` to threaten the new cap — implausible for "one more pass
+/// through a few combinators", not a new backend. Left as a probe rather than asserted because
+/// confirming that headroom precisely still means an `#[ignore]`d, cap-lifted, DEBUG-build stack
+/// overflow — exactly the resource-risk this harness exists to contain to one on-demand run.
 #[test]
 #[ignore]
 fn stack_probe_eq_bounds_depth() {
@@ -6811,11 +6897,18 @@ fn stack_probe_eq_bounds_depth() {
              fn eq(self, o: Self) -> bool where T: Eq:\n        return true\n\
              struct A0:\n    v: Box[int]\n",
         ),
-        other => panic!("unknown CHEZZI_PROBE_SHAPE {other:?}, want plain|cond"),
+        // M7's shape: a chain of generic structs with NO custom `eq` at all — every level proves
+        // `Eq` through the unconditional `any(args)` + `walk_eq_members` path Task 3 added, rather
+        // than hopping out through a `where`-hooked `eq`'s `satisfies` round trip like `cond` does.
+        "nonhook" => String::from(
+            "struct C[T]:\n    v: T\n\
+             struct A0:\n    v: int\n",
+        ),
+        other => panic!("unknown CHEZZI_PROBE_SHAPE {other:?}, want plain|cond|nonhook"),
     };
     let (prefix, per_level) = match shape.as_str() {
         "plain" => ("S", "struct {name}:\n    v: {prev}\n"),
-        "cond" => ("A", "struct {name}:\n    v: C[{prev}]\n"),
+        "cond" | "nonhook" => ("A", "struct {name}:\n    v: C[{prev}]\n"),
         _ => unreachable!(),
     };
     for i in 1..=n {

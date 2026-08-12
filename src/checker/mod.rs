@@ -826,10 +826,19 @@ pub fn hover_type(
 /// `begin_module` / `bind_import` / `module_sigs`) but harvests the extern table and ignores type
 /// errors (the error gate is `check_graph`, run separately by the CLI). The returned table is keyed
 /// by `(graph module index, fn name)`.
+///
+/// Runs on [`crate::on_frontend_stack_scoped`]'s dedicated stack — see that fn's doc comment, and
+/// `EQ_BOUNDS_MAX_IN_PROGRESS`'s doc in `checker::proto` for why this one matters: `chezzi run`/
+/// `chezzi test` call this from `compiler::compile_graph`, itself called from INSIDE the VM's own
+/// `VM_STACK_BYTES` thread (384 MiB) — a smaller stack than the checker's other two entry points get,
+/// so the `Eq` walk this pass runs (`run_graph_pass`) needs the same 1 GiB floor they do (W7-55
+/// Important-3 follow-up).
 pub fn resolve_extern_signatures(graph: &ModuleGraph) -> ExternTable {
-    let mut c = Checker::new();
-    c.run_graph_pass(graph, true);
-    std::mem::take(&mut c.extern_sigs)
+    crate::on_frontend_stack_scoped(move || {
+        let mut c = Checker::new();
+        c.run_graph_pass(graph, true);
+        std::mem::take(&mut c.extern_sigs)
+    })
 }
 
 /// Resolve extern C signatures for a SINGLE-FILE (standalone, source-string) program, going through
@@ -882,6 +891,9 @@ pub fn resolve_extern_signatures_standalone(stmts: &[Stmt]) -> ExternTable {
 /// W7-49 rides it as the last element: the key CONFLICTS this pass refused to overwrite. This pass
 /// discards its type errors, so a conflict cannot travel as one — the compiler turns the first into a
 /// hard `CompileError`. See [`record_call_table_entry`].
+/// Runs on [`crate::on_frontend_stack_scoped`]'s dedicated stack — same reason as
+/// [`resolve_extern_signatures`]: this is the other checker pass `compiler::compile_graph` runs from
+/// inside the VM's 384 MiB thread (W7-55 Important-3 follow-up).
 pub fn resolve_call_tables(
     graph: &ModuleGraph,
 ) -> (
@@ -891,16 +903,18 @@ pub fn resolve_call_tables(
     ProtoEqTable,
     TableConflicts,
 ) {
-    let mut c = Checker::new();
-    c.harvest_keywords = true;
-    c.run_graph_pass(graph, false);
-    (
-        std::mem::take(&mut c.keyword_calls),
-        std::mem::take(&mut c.witnesses),
-        std::mem::take(&mut c.carriers),
-        std::mem::take(&mut c.proto_eq_calls),
-        std::mem::take(&mut c.table_conflicts),
-    )
+    crate::on_frontend_stack_scoped(move || {
+        let mut c = Checker::new();
+        c.harvest_keywords = true;
+        c.run_graph_pass(graph, false);
+        (
+            std::mem::take(&mut c.keyword_calls),
+            std::mem::take(&mut c.witnesses),
+            std::mem::take(&mut c.carriers),
+            std::mem::take(&mut c.proto_eq_calls),
+            std::mem::take(&mut c.table_conflicts),
+        )
+    })
 }
 
 /// W7-49 — side-table keys asked to hold two different decisions, as `(span, message)`. Empty for

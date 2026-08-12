@@ -239,7 +239,12 @@ const MAX_CALL_DEPTH: usize = 10_000;
 /// Maximum structural-recursion depth for value display / equality — a cyclic data structure (e.g.
 /// a struct with a `List[Self]` field forming a cycle) would otherwise recurse unbounded on the
 /// HOST stack and SIGABRT (uncatchable). This bound turns that into a recoverable `RuntimeError`.
-const MAX_STRUCTURAL_DEPTH: usize = 10_000;
+///
+/// `pub(crate)` so `checker::proto::EQ_BOUNDS_MAX_IN_PROGRESS` can tie itself to this value directly
+/// (W7-55 Important 4) instead of repeating the literal — the checker's `Eq`-bound cap and the
+/// runtime's own equality depth cap must agree BY CONSTRUCTION, or the checker can grant a compare
+/// the VM then can't perform (the `checker-superset-of-compiler` soundness class).
+pub(crate) const MAX_STRUCTURAL_DEPTH: usize = 10_000;
 
 // M19 Tier-2 — adaptive opcode quickening (PEP 659) per-site states (see [`Vm::quicken`]).
 /// Never executed yet: on first run, observe operand types and transition to `Q_INT` or `Q_GENERIC`.

@@ -62,6 +62,28 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > `a_long_chain_of_conditional_eq_types_is_decided_not_waved_through` (past-cap case 180 → 79 000),
 > `the_budget_refusal_names_the_type_the_walk_started_from` (`S200` → `S78500`). Full write-up:
 > `docs/gaps.md` **W7-55**; session report: `.superpowers/sdd/w752-task-4-report.md`.
+>
+> **Same-day correction (2026-08-13) — an adversarial review found TWO CRITICALs in the 08-12 landing,
+> and closing them moved the cap again: 78 000 → `crate::vm::MAX_STRUCTURAL_DEPTH` (10 000, tied by
+> construction).** (1) `ty_contains_or_eq`'s `_ => false` default was blind to growth through
+> `Ty::Func` — a legal `Eq` type arg (W7-54) with growable `params`/`ret` — so `N[T]` nesting
+> `Option[N[fn(T) -> int]]` reproduced the EXACT O(cap²) OOM this row's own fix was written to close
+> (measured pre-fix: 30 s timeout, reviewer observed >4 GiB before a 97 s OOM-kill). Replaced with
+> `Checker::ty_nodes`, an EXHAUSTIVE total-node-count metric with no `_` arm, so a forgotten `Ty`
+> variant is a compile error rather than a silent leak. (2) Guard A refusing on the FIRST growing
+> re-entry (rather than the second CONSECUTIVE one) wrongly rejected a terminating type graph rustc
+> accepts — `struct Wrapper[T]: v: T; ints: Option[Wrapper[List[int]]]` (a CONSTANT arg, not
+> `T`-dependent) reaches a fixed point after one substitution, but the old cut refused it at depth 2,
+> with the verdict flipping on the unrelated root instantiation (`Wrapper[int]` refused,
+> `Wrapper[str]` accepted) — the same directional-guard failure mode this file already has three
+> recorded instances of (W7-42). Fixed by refusing only the SECOND consecutive growing re-entry against
+> the nearest ancestor; polymorphic recursion still trips it in bounded work (~3 levels). Both fixes
+> verified on the release binary (Func-growth repro: 5 ms/13.4 MB refused; both `Wrapper` roots: 4
+> ms/13.4 MB each, `ok`). Also closed the same day: `resolve_extern_signatures`/`resolve_call_tables`
+> (the checker passes the COMPILE path runs, from inside the VM's 384 MiB thread) now wrap
+> `on_frontend_stack_scoped` too — the doc block's "no smaller-stack caller left" claim was false and
+> is deleted. Full write-up: `docs/gaps.md` **W7-55**'s "Same-day corrections" section; session report:
+> `.superpowers/sdd/w752-task-4-report.md`.
 
 > **✅ W7-52 landed 2026-08-12 — a protocol-typed value satisfies a `[T: Eq]` bound too, agreeing with
 > the `==` it was already measured to agree with.** `docs/gaps.md`'s `W7-52` was first closed as a
