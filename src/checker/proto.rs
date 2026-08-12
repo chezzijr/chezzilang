@@ -162,7 +162,14 @@ pub const INTRINSIC_PROTO_METHODS: &[(&str, &str, &str)] = &[
     // BOTH `Ty::Func` (a user closure/free fn) and `Ty::BuiltinFn` (`ord`/`chr`/`panic`/first-class
     // `print`) — they render identically and compare by the same `Obj::Builtin`/`Obj::Func` identity
     // rule, so one row and one kind speaks for both (W7-54 follow-up: `Ty::BuiltinFn` was the same
-    // defect, just a separate `Ty` variant, and was missed the first time).
+    // defect, just a separate `Ty` variant, and was missed the first time). `protocol` is a SECOND
+    // exception, and a deliberately open one: a protocol-typed (existential) value's `==` DEFERS to
+    // its concrete witness at runtime, exactly as Go's interface `==` defers to the dynamic type and
+    // panics if that type is uncomparable — so this row grants the CHECK and the witness settles the
+    // ANSWER, cleanly faulting when it can't (W7-52). No other protocol row exists for `"protocol"`:
+    // `[T: Stringable]`/`[T: Hashable]`/… at `T = <protocol>` all still reject, because `Eq` is the one
+    // protocol whose grant means exactly what `==` already accepts, and `==` already accepts a
+    // protocol-typed operand (`may_be_equal`'s `(Protocol, Protocol)`/`(Protocol, concrete)` arms).
     ("Eq", "eq", "int"),
     ("Eq", "eq", "float"),
     ("Eq", "eq", "str"),
@@ -179,6 +186,7 @@ pub const INTRINSIC_PROTO_METHODS: &[(&str, &str, &str)] = &[
     ("Eq", "eq", "result"),
     ("Eq", "eq", "newtype"),
     ("Eq", "eq", "func"),
+    ("Eq", "eq", "protocol"),
     // Stringable — all four scalars.
     ("Stringable", "str", "int"),
     ("Stringable", "str", "float"),
@@ -318,6 +326,13 @@ impl Checker {
             // (`docs/syntax.md`: all four universe builtins are sendable, a plain closure is not), so
             // it shares `Ty::Func`'s kind rather than minting a second one (W7-54 follow-up).
             Ty::Func { .. } | Ty::BuiltinFn { .. } => "func",
+            // A protocol EXISTENTIAL — at runtime this is always its concrete witness object, so
+            // `.eq()`/`==`/`[T: Eq]` on it defers to whatever the witness's own `eq` dispatch does
+            // (structural derive or a declared `eq`), exactly as Go's interface `==` defers to the
+            // dynamic type and panics if that type is uncomparable (W7-52). Classified ONLY so the D1
+            // `Eq` arm below can grant it — every OTHER protocol row in `INTRINSIC_PROTO_METHODS`
+            // still excludes `"protocol"` (no row registered), so this does not widen anything but Eq.
+            Ty::Protocol(..) => "protocol",
             _ => "?",
         }
     }
@@ -1739,11 +1754,16 @@ impl Checker {
         //
         // Four gates:
         // * kind ≠ `"?"`. That covers every handle (`Channel`/`Shared`/`Executor`/`Socket`/…),
-        //   `Module`, `Ty::Param` and `Ty::Protocol` (`Func`/`BuiltinFn` graduated into the `"func"`
-        //   kind in W7-54, so they no longer land here). The handles compare by identity but have no
-        //   constructible probe receiver; the last two MUST fall through — `may_be_equal` treats a
+        //   `Module` and `Ty::Param` (`Func`/`BuiltinFn` graduated into the `"func"` kind in W7-54,
+        //   `Ty::Protocol` into the `"protocol"` kind in W7-52, so neither lands here any more). The
+        //   handles compare by identity but have no constructible probe receiver, so kind `"?"` is
+        //   the right refusal for them; `Ty::Param` MUST fall through too — `may_be_equal` treats a
         //   `Param` as ERASED, so admitting it would make every UNBOUNDED `T` satisfy `Eq` (a
-        //   soundness hole), and a protocol existential is decided by its own arm below.
+        //   soundness hole). `Ty::Protocol` no longer falls through: at runtime a protocol-typed value
+        //   IS its concrete witness, so its `Eq`-ness is exactly as decidable as any other receiver's
+        //   — undecidable here, deferred to the witness the same way `Ty::Result`'s error slot already
+        //   defers (`eq_bounds_unsatisfied_rec`'s `Ty::Protocol` catch-all, below), matching Go's
+        //   interface `==` (defers to the dynamic type, panics if it's uncomparable — W7-52).
         // * kind ≠ `"nil"`: a nil-typed expression cannot be used as a value at all, so `nil == nil`
         //   is not a writable program and the grant would have no probeable receiver.
         // * not the built-in cursor ([`Self::is_cursor_ty`]) — a `Ty::Struct` whose runtime arms
@@ -2818,10 +2838,16 @@ impl Checker {
                 .map(|_| format!("{ty} is not bounded by Eq")),
             // Scalars, the identity handles, `Func`, `Module` — nothing a user `eq` can hide behind,
             // so there is genuinely nothing to prove. `Ty::Unknown` is the don't-cascade hole (a
-            // prior error already reported). `Ty::Protocol` is the ONE permissive hole left, and it
-            // is deliberate: the concrete witness is unknowable here, and it is not exotic — every
-            // `Result[T]` carries `Ty::Protocol("Error")` in its error slot, so refusing it would
-            // un-grant `Result` wholesale (and break the `("Eq", "eq", "result")` ratchet row). Same
+            // prior error already reported). `Ty::Protocol` is the ONE permissive answer that is not
+            // "nothing to prove" but "cannot be proven here", and it is deliberate: the concrete
+            // witness is unknowable at this walk (existentials are erased by design), and it is not
+            // exotic — every `Result[T]` carries `Ty::Protocol("Error")` in its error slot, so
+            // refusing it would un-grant `Result` wholesale (and break the `("Eq", "eq", "result")`
+            // ratchet row). Since W7-52 this arm is also what `[T: Eq]`/`.eq()`/`==` over a
+            // protocol-typed value ITSELF (not just one nested inside a container/`Result`) routes
+            // through — the D1 gate above now classifies `Ty::Protocol` as kind `"protocol"` instead
+            // of refusing it, so this `None` is the grant, and the runtime witness is what actually
+            // answers `eq`/faults, exactly as Go's interface `==` defers to the dynamic type. Same
             // hole, same reason, as `reaches_user_eq`'s.
             _ => None,
         }

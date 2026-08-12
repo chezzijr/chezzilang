@@ -17264,6 +17264,21 @@ fn intrinsic_grants_all_have_vm_arms() {
         // cell still matches `registered` exactly once; `recv_of` returns the FIRST row, so the
         // runtime probe below stays the `Ty::Func` one.
         r("func", "", "ord", "-", "-", "-", "-", "-", "-"),
+        // W7-52 — a protocol-typed (existential) value's `Eq` grant. Can't write `a: Sized_ =
+        // Tag(1)` (the probe template is a bare `a := {lit}`, no annotation), so the prelude carries
+        // a factory whose RETURN type is the protocol — `a := mkp()` then really infers `a: Ty::
+        // Protocol("Sized_", [])`, not `Ty::Struct("Tag", [])`. Only the `eq` template applies.
+        r(
+            "protocol",
+            "protocol Sized_:\n    fn size(self) -> int\nstruct Tag:\n    n: int\n    fn size(self) -> int:\n        return self.n\nfn mkp() -> Sized_:\n    return Tag(1)\n",
+            "mkp()",
+            "-",
+            "-",
+            "-",
+            "-",
+            "-",
+            "-",
+        ),
     ];
     // (method, call template) — `{r}` is the receiver, `{k}`/`{v}` the index key/value.
     let calls: &[(&str, &str)] = &[

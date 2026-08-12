@@ -1222,6 +1222,107 @@ fn builtin_function_value_satisfies_eq_by_identity() {
     ok("fn same[T: Eq](a: T, b: T) -> bool:\n    return a == b\nprint(same(ord, ord))\n");
 }
 
+/// **W7-52 — a protocol-typed (existential) value satisfies `Eq` too, so `==`, `.eq()` and a
+/// `[T: Eq]` bound give one answer over it exactly as they do over every other receiver kind.**
+/// `Ty::Protocol` had no `intrinsic_recv_kind` arm (same root cause as `Ty::Func`/W7-54), so the D1
+/// grant excluded it: `x == y` (which never asks the protocol system) already worked, but a
+/// `[T: Eq]` bound fed a protocol-typed value answered *does not satisfy Eq* — one relation, two
+/// answers. **Go, measured, 1.26** (`comparable` was widened in 1.20 to admit interface types):
+/// `func eqg[T comparable](a, b T) bool { return a == b }` fed two `Sized` interface values compiles
+/// and runs; fed an uncomparable witness it compiles and panics at the comparison, matching the
+/// runtime-fault shape `tests/chz/spec/eq_protocol_existential_test.chz` pins.
+const SIZED_PRELUDE: &str = "\
+protocol Sized_:
+    fn size(self) -> int
+struct Tag:
+    n: int
+    fn size(self) -> int:
+        return self.n
+fn mkp() -> Sized_:
+    return Tag(1)
+";
+
+#[test]
+fn protocol_typed_value_satisfies_eq() {
+    // The bound itself, both spellings.
+    ok(&format!(
+        "{SIZED_PRELUDE}fn same[T: Eq](a: T, b: T) -> bool:\n    return a == b\nprint(same(mkp(), mkp()))\n"
+    ));
+    ok(&format!(
+        "{SIZED_PRELUDE}fn same[T: Eq](a: T, b: T) -> bool:\n    return a.eq(b)\nprint(same(mkp(), mkp()))\n"
+    ));
+    // The Critical's own repro: two DIFFERENT protocol-typed locals through a generic `[T: Eq]` fn,
+    // matching what the bare `==` already answered before this fix.
+    ok("\
+protocol Sized_:
+    fn size(self) -> int
+struct Tag:
+    n: int
+    fn size(self) -> int:
+        return self.n
+fn generic_eq[T: Eq](a: T, b: T) -> bool:
+    return a == b
+a: Sized_ = Tag(1)
+b: Sized_ = Tag(2)
+print(a == b)
+print(generic_eq(a, b))
+");
+}
+
+/// **Guard rail — ONLY `Eq` is granted to a protocol-typed receiver.** No other protocol row was
+/// registered for kind `"protocol"`, so a bound requiring a method `Sized_` does not structurally
+/// provide must still reject — widening `Eq` alone must not have widened the receiver-kind gate for
+/// every other protocol along with it.
+#[test]
+fn protocol_typed_value_does_not_satisfy_other_protocols() {
+    for (bound, needle) in [
+        ("Stringable", "does not satisfy Stringable"),
+        ("Hashable", "does not satisfy Hashable"),
+        ("Iterable[int]", "does not satisfy Iterable"),
+        ("Add", "does not satisfy Add"),
+    ] {
+        rejects(
+            &format!("{SIZED_PRELUDE}fn probe[T: {bound}](a: T):\n    pass\nprobe(mkp())\n"),
+            needle,
+        );
+    }
+}
+
+/// **Guard rail — `Comparable` (which EMBEDS `Eq`) must reject a protocol-typed value on the REAL
+/// reason (no `compare`), not on the now-satisfied `Eq` embed.** Before this fix `[T: Comparable]`
+/// over `Sized_` reported the confusing *"does not satisfy Eq"* — Sized_ failed the embed, not its
+/// own `compare` method, which is not what a reader asking "why doesn't my Sized_ satisfy
+/// Comparable" wants to hear. After the fix the `Eq` embed passes (Sized_'s WITNESS defers to
+/// runtime, same as the bare `Eq` bound above) and the rejection names the actual gap.
+#[test]
+fn protocol_typed_value_rejects_comparable_on_the_real_reason() {
+    rejects(
+        &format!("{SIZED_PRELUDE}fn probe[T: Comparable](a: T):\n    pass\nprobe(mkp())\n"),
+        "does not satisfy Comparable",
+    );
+    // …and NOT the pre-fix message, which named the embed instead of the missing method.
+    let errs = check_src(&format!(
+        "{SIZED_PRELUDE}fn probe[T: Comparable](a: T):\n    pass\nprobe(mkp())\n"
+    ));
+    assert!(
+        !errs
+            .iter()
+            .any(|e| e.message.contains("does not satisfy Eq")),
+        "expected the Comparable rejection to name the real reason, not the Eq embed: {errs:?}"
+    );
+}
+
+/// **Guard rail — protocol-to-protocol assignability is untouched.** `[T: Sized_]` fed a `Sized_`
+/// value is Go's interface-to-interface assignment, decided by `Ty::Protocol`'s own structural arm,
+/// never by the D1 kind gate this row widens — pinned so a future change to D1 can't be mistaken for
+/// what makes this case work.
+#[test]
+fn protocol_typed_value_still_satisfies_its_own_protocol() {
+    ok(&format!(
+        "{SIZED_PRELUDE}fn takes_sized[T: Sized_](x: T):\n    pass\ntakes_sized(mkp())\n"
+    ));
+}
+
 /// **W7-41 — `==` / `!=` enforce the receiver's `eq` `where` bounds.** The explicit method spelling
 /// `a.eq(b)` was already rejected (the instance-method dispatch path runs `enforce_bounds`); the
 /// OPERATOR routed through `may_be_equal`, which asks co-inhabitance only. Same program, two answers:

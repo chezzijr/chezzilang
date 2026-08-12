@@ -2,6 +2,43 @@
 
 Single source of truth for "what am I doing next." Update after every work session.
 
+> **✅ W7-52 landed 2026-08-12 — a protocol-typed value satisfies a `[T: Eq]` bound too, agreeing with
+> the `==` it was already measured to agree with.** `docs/gaps.md`'s `W7-52` was first closed as a
+> pure VERDICT (comparing a protocol-typed value defers to its witness at runtime, exactly Go's
+> interface `==` — no code change, test-only). An independent review of that verdict found it
+> **under-scoped**: `fn generic_eq[T: Eq](a: T, b: T) -> bool: return a == b` fed the SAME
+> protocol-typed operands the operator already handled was *type error: type Sized_ does not satisfy
+> Eq* — one relation, `==` and a `[T: Eq]` bound disagreeing, the exact invariant `W7-41` exists to
+> hold, and the identical defect SHAPE `W7-54` (`Ty::Func`) had closed a few hours earlier on this same
+> branch. Per this file's own rule, an unsure verdict must decline, never guess a confident wrong
+> answer — flatly rejecting `[T: Eq]` here was the wrong answer, not a decline, so this was FIXED
+> rather than filed. **Root cause, same as `W7-54`:** `Ty::Protocol` had no
+> `Checker::intrinsic_recv_kind` arm (`src/checker/proto.rs:335`), so it fell to `"?"` and the D1 `Eq`
+> grant excluded it before `eq_bounds_unsatisfied` was ever consulted — while the OPERATOR never asks
+> the protocol system (it routes through `may_be_equal`) and so kept answering correctly the whole
+> time. **Three checker-only edits, no VM change:** `Ty::Protocol(..) => "protocol"` added to
+> `intrinsic_recv_kind`; `("Eq", "eq", "protocol")` added to `INTRINSIC_PROTO_METHODS`; a `"protocol"`
+> `Recv` probe row added to `intrinsic_grants_all_have_vm_arms` — since the probe template is a bare
+> `a := {lit}` with no annotation, its prelude carries a factory `fn mkp() -> Sized_: return Tag(1)`
+> so `a := mkp()` genuinely infers `Ty::Protocol`, confirmed by running it. **Go, re-measured, 1.26**
+> (Go 1.20+ widened `comparable` to admit interface types): `func eqg[T comparable](a, b T) bool {
+> return a == b }` fed two `Sized` values compiles and runs; fed an uncomparable witness it compiles
+> and panics at the comparison — Chezzi now matches on both spellings. **Guard rail, swept by the full
+> (protocol × receiver-kind) matrix: `Eq` is the ONLY protocol widened** — `[T: Stringable]`/
+> `[T: Hashable]`/`[T: Iterable]`/`[T: Add]` at `T = <protocol>` all still reject; `[T: Comparable]`
+> (which embeds `Eq`) used to report the confusing *"does not satisfy Eq"* and now names the real gap,
+> *"does not satisfy Comparable"*; protocol-to-protocol assignability (Go's interface-to-interface)
+> is untouched, decided by a separate structural arm the D1 gate never routed through. **Tests:**
+> 4 new Rust checker tests (`checker::tests::protocol_typed_value_satisfies_eq` and 3 guard-rail
+> tests) plus 2 new Chezzi tests in `tests/chz/spec/eq_protocol_existential_test.chz` (now 10, gated
+> serial==M:N), whose existing positive control was ALSO strengthened per review — its `Box[T]`
+> fixture now carries a second field `eq` ignores, so a silently-stopped witness dispatch that fell
+> back to structural equality would fail the test instead of passing by coincidence, and the fault
+> assertions were tightened from `msg.contains("compare")` (which also matched the checker's own
+> unrelated "cannot compare" text) to `msg.contains("has no method 'compare'")`. `cargo clippy
+> --all-targets -D warnings` clean; `cargo test` **4283 passed / 0 failed**; `chezzi test tests/chz/`
+> **483/483 identical on M:N and `--serial`** (was 481). Full write-up: `docs/gaps.md` **W7-52**.
+
 > **✅ W7-54 landed 2026-08-12 — a function value satisfies `Eq`, so `==`, `.eq()` and a `[T: Eq]`
 > bound give one answer.** `docs/gaps.md`'s `W7-54` is CLOSED (Task 1 of the four-task `Eq` residual
 > close-out on `w7-52-55-eq-residuals`). Chezzi's `==` on a function value already matched CPython
@@ -287,11 +324,12 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > **Residuals** — `docs/gaps.md` **W7-52** (`Ty::Protocol`: a fail-open hole in the `Eq` walk that
 > cannot simply be refused, because `Ty::result(inner)` is literally
 > `Ty::Result(inner, Ty::Protocol("Error"))`, plus the existential-operand leak past
-> `may_be_equal`'s `(Protocol, Protocol)` short-circuit), **since RESOLVED 2026-08-12 — not a bug**
-> (comparing a protocol-typed value is Go's own interface `==`, measured: it compiles unconditionally
-> and panics at the point it runs on an uncomparable witness; Chezzi does the identical thing at the
-> identical point, both engines, and reproduces byte-identical on the pre-change binary — locked by
-> `tests/chz/spec/eq_protocol_existential_test.chz`); **W7-53** (the erased call site — three
+> `may_be_equal`'s `(Protocol, Protocol)` short-circuit), **since RESOLVED 2026-08-12 as ancestor-
+> correct for the operator/`.contains()` half** (comparing a protocol-typed value is Go's own
+> interface `==`, measured: it compiles unconditionally and panics at the point it runs on an
+> uncomparable witness; Chezzi does the identical thing at the identical point, both engines) **AND
+> FIXED 2026-08-12** for a `[T: Eq]` bound over a protocol-typed value, which a same-day review found
+> still disagreeing with that operator — see the entry above; **W7-53** (the erased call site — three
 > measured instances; closing it needs a call-site obligation, which is its own milestone), filed not
 > closed; and **W7-54, since FIXED 2026-08-12** (a function value did not satisfy `Eq` though `f == g`
 > worked by identity; Rust compiles the mirror, so it was drift, and this milestone had widened its

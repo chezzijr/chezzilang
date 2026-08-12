@@ -20,6 +20,22 @@
 # time because it does not know which concrete type inhabits the interface at this call site. Chezzi
 # does the same thing at the same point for the same reason (the checker deliberately erases
 # existentials): a clean, catchable runtime fault, not a silent wrong answer and not an abort.
+#
+# The verdict left ONE spelling of this relation disagreeing with the rest: `x == y` on two
+# protocol-typed operands never asked the protocol system at all (it went through `may_be_equal`),
+# but a `[T: Eq]` bound fed a protocol-typed value was rejected at CHECK time — *"does not satisfy
+# Eq"* — because `Ty::Protocol` had no `intrinsic_recv_kind` classification (the same hole `Ty::Func`
+# had, closed the same way in W7-54). Go 1.20+ widened `comparable` to admit interface types
+# (measured, 1.26): `func eqg[T comparable](a, b T) bool { return a == b }` fed two `Sized` values
+# compiles and runs; fed an uncomparable witness it compiles and panics at the comparison — the exact
+# shape this file already pins for the bare operator. `Ty::Protocol` now classifies as receiver kind
+# `"protocol"` and `("Eq", "eq", "protocol")` is a registered intrinsic grant, so `[T: Eq]` now agrees
+# with `==`/`.eq()` too — see the `a_generic_eq_bound_…` tests below. Only `Eq` was widened: every
+# other protocol (`Stringable`/`Hashable`/`Comparable`/…) still correctly rejects a
+# protocol-typed value that does not structurally provide it — pinned in
+# `checker::tests::protocol_typed_value_does_not_satisfy_other_protocols` and
+# `checker::tests::protocol_typed_value_rejects_comparable_on_the_real_reason` (Rust-side, since
+# these are compile-time REJECTIONS, not runtime behavior this suite pins).
 
 fn msg_of[T](r: Result[T, Error], where_: str) -> str:
     match r:
@@ -38,8 +54,13 @@ struct Tag:
 
 # `Box[T]`'s `eq` genuinely USES the `Comparable` bound (not `self.val == other.val`, which would
 # fall back to structural equality and return a wrong-but-not-faulting answer instead of faulting).
+# `tag` is a SECOND field `eq` deliberately ignores — `struct K` in eq_protocol_containers_test.chz's
+# shape — so the positive control below can prove dispatch really reaches the WITNESS's `eq` rather
+# than silently falling back to structural `Box` equality: two `Box`es differing only in `tag` must
+# compare EQUAL, which plain field-by-field comparison would get wrong.
 struct Box[T]:
     val: T
+    tag: str
     fn eq(self, o: Box[T]) -> bool where T: Comparable:
         return self.val.compare(o.val) == 0
     fn size(self) -> int:
@@ -48,34 +69,63 @@ struct Box[T]:
 # ---- negative: `Box[Tag]`'s witness cannot satisfy `Comparable` (Tag has no `compare`) ----
 
 test fn protocol_typed_operator_eq_faults_on_an_unsatisfied_witness():
-    x: Sized_ = Box(Tag(1))
-    y: Sized_ = Box(Tag(2))
+    x: Sized_ = Box(Tag(1), "x")
+    y: Sized_ = Box(Tag(2), "y")
     r := recover: x == y
     msg := msg_of(r, "protocol-typed `==`")
-    assert msg.contains("compare"), "the fault names the failing method: " + msg
+    assert msg.contains("has no method 'compare'"), "the fault names the failing method: " + msg
 
 test fn protocol_typed_contains_faults_on_an_unsatisfied_witness():
-    x: Sized_ = Box(Tag(1))
-    y: Sized_ = Box(Tag(2))  # distinct from x — [a].contains(a) would hit the identity shortcut
+    x: Sized_ = Box(Tag(1), "x")
+    y: Sized_ = Box(Tag(2), "y")  # distinct from x — [a].contains(a) would hit the identity shortcut
     xs: List[Sized_] = [x]
     r := recover: xs.contains(y)
     msg := msg_of(r, "protocol-typed `.contains()`")
-    assert msg.contains("compare"), "the fault names the failing method: " + msg
+    assert msg.contains("has no method 'compare'"), "the fault names the failing method: " + msg
 
 # ---- positive control: `Box[int]`'s witness DOES satisfy `Comparable` (int has it intrinsically) —
-# the same protocol-typed `==` must give the right answer and must NOT fault ----
+# the same protocol-typed `==` must give the right answer and must NOT fault. `b` differs from `a`
+# only in `tag`, which `eq` never looks at — so this is a genuine dispatch-through-the-witness proof,
+# not just an agreement-with-structural-equality coincidence: a silently-stopped dispatch that fell
+# back to structural `Box` equality would call `a == b` FALSE (tag differs) and fail this assertion.
 
 test fn protocol_typed_operator_eq_succeeds_on_a_satisfied_witness():
-    a: Sized_ = Box(5)
-    b: Sized_ = Box(5)
-    c: Sized_ = Box(6)
-    assert (a == b) == true, "equal witnesses compare equal"
-    assert (a == c) == false, "distinct witnesses compare unequal"
+    a: Sized_ = Box(5, "a")
+    b: Sized_ = Box(5, "different-tag")
+    c: Sized_ = Box(6, "a")
+    assert (a == b) == true, "eq ignores tag and agrees only on val — disagrees with structural equality"
+    assert (a == c) == false, "distinct val compares unequal regardless of tag"
 
 test fn protocol_typed_contains_succeeds_on_a_satisfied_witness():
-    a: Sized_ = Box(5)
-    b: Sized_ = Box(5)
-    c: Sized_ = Box(6)
+    a: Sized_ = Box(5, "a")
+    b: Sized_ = Box(5, "different-tag")
+    c: Sized_ = Box(6, "a")
     xs: List[Sized_] = [a]
-    assert xs.contains(b) == true
+    assert xs.contains(b) == true, "membership dispatches through the same eq the operator does"
     assert xs.contains(c) == false
+
+# ---- the CRITICAL fix: a `[T: Eq]` bound now agrees with the bare `==` over a protocol-typed value
+# ---- (previously `check` rejected it — "does not satisfy Eq" — while `==` compiled and ran)
+
+fn generic_eq[T: Eq](a: T, b: T) -> bool:
+    return a == b
+
+test fn a_generic_eq_bound_agrees_with_the_bare_operator_on_a_protocol_typed_value():
+    a: Sized_ = Tag(1)
+    b: Sized_ = Tag(2)
+    assert (a == b) == false
+    assert generic_eq(a, b) == false, "a [T: Eq] bound must give the SAME answer as `==` itself"
+    c: Sized_ = Tag(1)
+    d: Sized_ = Tag(1)
+    assert generic_eq(c, d) == true
+
+# ---- the same generic-bound spelling, on the uncomparable `Box[Tag]` witness, must fault cleanly —
+# ---- Go's `eqg[T comparable]` fed an uncomparable witness compiles and panics at the comparison,
+# ---- the identical shape ----
+
+test fn a_generic_eq_bound_faults_on_an_unsatisfied_witness_same_as_the_operator():
+    x: Sized_ = Box(Tag(1), "x")
+    y: Sized_ = Box(Tag(2), "y")
+    r := recover: generic_eq(x, y)
+    msg := msg_of(r, "a [T: Eq] bound over a protocol-typed value")
+    assert msg.contains("has no method 'compare'"), "the fault names the failing method: " + msg

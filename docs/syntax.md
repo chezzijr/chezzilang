@@ -1439,7 +1439,14 @@ exactly Go's `interface{} == interface{}`: the checker cannot know which concret
 the protocol at a given site (existentials are erased), so it compiles the comparison and the
 comparison faults cleanly, at the point it runs, if that witness's `eq` turns out unsatisfied — the
 same shape as Go's own `panic: runtime error: comparing uncomparable type …` (`docs/gaps.md`
-**W7-52**, resolved 2026-08-12 as ancestor-correct).
+**W7-52**, resolved 2026-08-12 as ancestor-correct). `Ty::Protocol` also satisfies a `[T: Eq]` BOUND
+now, agreeing with the bare `==` on the identical spelling (`fn generic_eq[T: Eq](a: T, b: T) -> bool:
+return a == b` fed two protocol-typed values, or `.eq()` directly) — matching Go 1.20+'s widened
+`comparable`, which likewise admits an interface type and panics the same way at the comparison if
+the witness cannot be compared. Every OTHER protocol still correctly rejects a protocol-typed value
+that does not structurally provide it (`[T: Stringable]`/`[T: Hashable]`/… over `Sized_` all reject);
+`Eq` is the one protocol this applies to, because `Eq`-satisfaction is defined as exactly what `==`
+already accepts, and `==` already accepted a protocol-typed operand.
 
 **Known ceilings, all measured and all filed** — a conditional `eq` can still be reached at runtime
 through a shape the checker cannot judge: an **erased generic body** — `fn f[T](a: T, b: T): return a
@@ -1499,15 +1506,18 @@ defines **no** `eq` keeps the structural (field-by-field) equality it always had
 **`Eq` satisfaction is exactly "`==` works on it"**, and writing an `eq` is not what earns it — the
 language's structural `==` is an automatic derive, and since 2026-08-11 it tells the protocol system so
 (`docs/gaps.md` **W7-41**). So `where T: Eq` is writable over `int`/`float`/`bool`/`str`, `bytes`,
-tuples, `List`/`Map`/`Set`, `Option`/`Result`, newtypes, any struct or enum, and a **function value**
-(a user closure/free fn, or a first-class universe builtin like `ord`/`chr`/`panic`/`print`) — the
-same set `==` accepts. Go gives structs `==` automatically, Rust spells it `#[derive(PartialEq,
-Eq)]`, Python `@dataclass(eq=True)`; Chezzi's is implicit. A function value compares by IDENTITY, not
-structurally — two loads of the same top-level/nested `fn` def (or the same builtin) are equal, two
-calls to a factory minting a fresh nested `fn` are not, and two closures with equal captures are not
-— matching CPython's `f == g` exactly and Rust's fn-pointer `PartialEq` (`docs/gaps.md` **W7-54**,
-fixed 2026-08-12; Go is the one ancestor that differs, rejecting `f == g` outright). The one thing that
-revokes the grant is an
+tuples, `List`/`Map`/`Set`, `Option`/`Result`, newtypes, any struct or enum, a **function value**
+(a user closure/free fn, or a first-class universe builtin like `ord`/`chr`/`panic`/`print`), and a
+**protocol-typed (existential) value** — the same set `==` accepts. Go gives structs `==`
+automatically, Rust spells it `#[derive(PartialEq, Eq)]`, Python `@dataclass(eq=True)`; Chezzi's is
+implicit. A function value compares by IDENTITY, not structurally — two loads of the same
+top-level/nested `fn` def (or the same builtin) are equal, two calls to a factory minting a fresh
+nested `fn` are not, and two closures with equal captures are not — matching CPython's `f == g`
+exactly and Rust's fn-pointer `PartialEq` (`docs/gaps.md` **W7-54**, fixed 2026-08-12; Go is the one
+ancestor that differs, rejecting `f == g` outright). A protocol-typed value defers entirely to its
+concrete witness — see the deferred-to-runtime paragraph above (`docs/gaps.md` **W7-52**, fixed
+2026-08-12; matches Go 1.20+'s `comparable`, which likewise admits an interface type). The one thing
+that revokes the grant is an
 `eq` (its own, or one reached through an element / entry / tuple slot / field / payload / newtype
 underlying) whose `where` bounds do not hold for the instantiation in hand — that is the `Box[Tag]`
 case above. **Still outside the grant, and filed:** a bare `T` with no bound (deliberate — a generic
