@@ -2,8 +2,9 @@
 
 Single source of truth for "what am I doing next." Update after every work session.
 
-> **✅ W7-55 landed 2026-08-12 — the `Eq` walk's depth cap moved from 160 to 78 000, and polymorphic
-> recursion is now refused by GROWTH DETECTION rather than by walking to the cap.** `docs/gaps.md`'s
+> **✅ W7-55 landed 2026-08-12, redesigned 2026-08-13 — the `Eq` walk is now bounded by a CUMULATIVE
+> NODE BUDGET over the in-progress path (`EQ_BOUNDS_MAX_NODES = 50 000`), and the growth CLASSIFIER
+> that preceded it was deleted rather than patched a third time.** `docs/gaps.md`'s
 > `W7-55` is CLOSED (Task 4 of the four-task `Eq` residual close-out on `w7-52-55-eq-residuals`, and
 > the last one). The original defect: `EQ_BOUNDS_MAX_IN_PROGRESS = 160` was sized on the Rust
 > test-harness's AMBIENT stack, not production's already-1-GiB `on_frontend_stack` — an inversion —
@@ -28,7 +29,8 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > not a different one. Guard B — the depth cap, now doing only its stack-safety job since Guard A
 > removes the growing shape from its reach — was re-measured on the 1 GiB stack (DEBUG build): the
 > expensive shape (conditional `eq` chain) survives **118 000**, overflows by **119 000**; the cheap
-> shape (plain struct chain) survives **570 000**, overflows by **590 000**. New cap: **78 000**
+> shape (plain struct chain) survives **570 000**, overflows by **590 000**. Cap at THAT landing:
+> **78 000** — since superseded twice (10 000, then the node budget; see the corrections below)
 > (118 000 / 1.5, matching how 160 was derived from 240). **Cost at the new cap, release binary:**
 > polyrec (refused) 3 ms / 13.6 MB — UNCHANGED from the cap-160 baseline despite the cap being 487×
 > larger, because Guard A decides it now, not the cap; `S0..S159` (accepted, runs, prints `true`) 19 ms
@@ -48,7 +50,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > `cargo test --lib checker::` suite that runs in ~14 s. `docs/gaps.md` **W7-50**'s
 > `editor::semantic_tokens` row is UNCHANGED (checked, not assumed): `semantic_overlay` calls
 > `lexer::tokenize`/`parser::parse` directly, never either wrapped checker entry point. **The exact
-> boundary, both directions, resource-appropriately:** `S0..S77999` (78 000 obligations) is the last
+> boundary of THAT landing, both directions, resource-appropriately:** `S0..S77999` (78 000 obligations) is the last
 > accepted, `S0..S78000` (78 001) the first refused, pinned CHECK-only after generating+running both
 > ~78 000-struct sources in one test process pushed a 6 GiB cap into an OOM (a real program cost, not a
 > guard defect); a follow-up by-hand attempt to literally RUN `S0..S77999` OOM'd even at 12 GiB — an
@@ -62,6 +64,26 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > `a_long_chain_of_conditional_eq_types_is_decided_not_waved_through` (past-cap case 180 → 79 000),
 > `the_budget_refusal_names_the_type_the_walk_started_from` (`S200` → `S78500`). Full write-up:
 > `docs/gaps.md` **W7-55**; session report: `.superpowers/sdd/w752-task-4-report.md`.
+>
+> **Third correction (2026-08-13, adversarial review) — the growth classifier is GONE.** Three
+> independent prosecutors attacked the branch; two of them defeated the classifier *in both
+> directions again*, the same two it had already been repaired in once. (a) Argument PERMUTATION
+> evaded it into a live OOM — `struct M[A, B]` with `next: Option[M[B, List[A]]]` is `exit 137`,
+> OOM-killed at a 2 GiB cap in ~3 s from a 9-line file, where the pre-change binary refuses in
+> milliseconds; `editor::diagnostics` runs that walk per keystroke. (b) Two CONSTANT-argument sibling
+> fields false-refused a finite graph, and **swapping the two field declarations flipped the verdict**.
+> So the classifier — which tried to decide "is this shape non-terminating?" and was wrong four times
+> across three landings, each time green on the full suite — was replaced by a direct bound on the
+> resource that was the actual hazard: `ty_nodes` summed over the in-progress path, added on push and
+> subtracted on pop. That is permutation-proof, variant-proof (the metric is exhaustive, no `_` arm)
+> and order-independent BY CONSTRUCTION rather than by care. Measured after: every pathological shape
+> refuses in **37-48 ms / 22-27 MB**, every terminating neighbour is accepted (both field orders, both
+> roots, shrinking re-entry), a 161-link chain runs, and a 10 000-link conditional-`eq` chain checks
+> clean in 142 ms. Three further verified charges fixed in the same commit: `checker::hover_type` was
+> the one `run_graph_pass` driver still unwrapped; the cap's tie to `crate::vm::MAX_STRUCTURAL_DEPTH`
+> was in the WRONG UNIT (checker obligations vs VM value depth — a 20 000-deep `Node` still checks
+> clean then faults at runtime, so the "cannot drift apart" claim is withdrawn); and the
+> `("Eq", "eq", "protocol")` ratchet row overstated what it grants.
 >
 > **Same-day correction (2026-08-13) — an adversarial review found TWO CRITICALs in the 08-12 landing,
 > and closing them moved the cap again: 78 000 → `crate::vm::MAX_STRUCTURAL_DEPTH` (10 000, tied by

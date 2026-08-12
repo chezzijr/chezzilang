@@ -2059,16 +2059,31 @@ fn a_long_chain_of_conditional_eq_types_is_decided_not_waved_through() {
         );
         entry_ok(&chain(n, true));
     }
-    // PAST the backstop, a SOUND chain is refused — and the refusal SAYS it ran out of budget rather
-    // than blaming a bound that did not fail. That message used to be unreachable: it was produced
-    // inside a `satisfies` call whose `Err` the caller discarded and reworded.
+    // This test used to end with `entry_rejects(&chain(N, true), "nests too deeply")` — "past the
+    // backstop, even a SOUND chain is refused". **That assertion is RETIRED, not silently dropped,
+    // because its premise stopped being true** when the depth cap became a cumulative NODE budget
+    // over the in-progress path (`EQ_BOUNDS_MAX_NODES`; see that constant for why the shape
+    // classifier in front of it was deleted rather than patched a third time).
     //
-    // W7-55: the backstop moved from 160 (`EQ_BOUNDS_MAX_IN_PROGRESS`, sized for an ambient
-    // test-harness stack) to 78 000 (sized on the 1 GiB frontend stack every caller now gets by
-    // construction) and then, same day, DOWN to 10 000 (tied to the VM's own `MAX_STRUCTURAL_DEPTH` —
-    // see that constant's doc for why: the checker must not grant an `Eq` compare the VM cannot
-    // itself perform), so this needs a chain past THAT to still trip it.
-    entry_rejects(&chain(10_500, true), "nests too deeply");
+    // Measured, release binary, this exact `chain` shape: N = 10 000 / 16 000 / 25 000 all check
+    // CLEAN (135 ms / 240 ms / 353 ms), because `walk_eq_members` pushes a chain link's MEMBERS, and
+    // each member here is one node — so a non-growing chain consumes budget linearly and only
+    // reaches 50 000 at a depth whose *parse* cost dominates by an order of magnitude. Widening the
+    // per-link type does not help either: a 40-wide tuple per link at 1 500 links is still `ok`
+    // (478 ms), since the wide tuple is pushed once and popped before its members are walked.
+    //
+    // That is the DESIGNED behaviour, not a gap: the budget exists to bound a walk whose types GROW,
+    // and a non-growing graph is exactly what W7-55 was filed about the checker wrongly refusing. So
+    // the budget refusal is pinned where it is actually reachable — on growing shapes — by
+    // `polymorphic_recursion_is_refused_in_bounded_work` and its permutation / `Ty::Func` siblings,
+    // which reach it in 37-48 ms and 22-27 MB. Re-adding a "sound chain is refused" assertion here
+    // would require a fixture whose cost is dominated by parsing, to assert a property the design
+    // deliberately does not have.
+    //
+    // What IS worth pinning here is the other direction, and it is the whole point of W7-55: a
+    // deep-but-finite chain is NOT refused. 3 000 links is ~19x the depth the original cap (160)
+    // rejected, and the VM compares such a value happily.
+    entry_ok(&chain(3_000, true));
 }
 
 /// **The budget refusal must not print a multi-KB type name.** This diagnostic is streamed to the
@@ -2197,34 +2212,38 @@ fn a_cyclic_shared_field_type_graph_is_also_walked_once_per_type() {
 }
 
 /// The budget refusal must name the type the walk STARTED from. For a chain `S{N} → … → S0` the
-/// entry that actually trips the budget is `S0` — `struct S0: v: int`, which nests not at all — so
-/// naming it told the user about the one link that is definitely fine.
+/// entry that actually exhausts the budget is `S0` — which nests not at all — so naming it told the
+/// user about the one link that is definitely fine.
 ///
-/// W7-55: `N` moved from 200 to past the cap, then (same-day Important-4 follow-up) the cap itself
-/// moved from 78 000 to 10 000 (tied to the VM's `MAX_STRUCTURAL_DEPTH`), so `N` moved with it.
+/// W7-55: the backstop became a cumulative NODE budget rather than a depth cap, so the chain that
+/// exhausts it is written with a type ARGUMENT (four nodes per link: `S{i}` plus `Map[int, int]`)
+/// instead of by sheer length. The property under test is unchanged.
 #[test]
 fn the_budget_refusal_names_the_type_the_walk_started_from() {
-    const N: usize = 10_500;
-    let mut src = String::from("struct S0:\n    v: int\n");
+    const N: usize = 12_600;
+    let mut src = String::from("struct S0[T]:\n    v: T\n");
     for i in 1..=N {
-        src.push_str(&format!("struct S{i}:\n    v: S{}\n", i - 1));
+        src.push_str(&format!(
+            "struct S{i}[T]:\n    v: T\n    next: S{}[T]\n",
+            i - 1
+        ));
     }
     src.push_str(&format!(
-        "fn needs[U: Eq](a: U, b: U) -> bool:\n    return a == b\nfn use_it(a: S{N}, b: S{N}) -> bool:\n    return needs(a, b)\n"
+        "fn needs[U: Eq](a: U, b: U) -> bool:\n    return a == b\nfn use_it(a: S{N}[Map[int, int]], b: S{N}[Map[int, int]]) -> bool:\n    return needs(a, b)\n"
     ));
     let errs = check_entry(&src);
     let msg = errs
         .iter()
-        .find(|e| e.message.contains("nests too deeply"))
+        .find(|e| e.message.contains(proto::EQ_BUDGET_MARKER))
         .map(|e| e.message.clone())
         .unwrap_or_else(|| panic!("expected a budget refusal, got: {errs:?}"));
     assert!(
-        msg.contains(&format!("S{N} nests too deeply")),
+        msg.contains(&format!("S{N}[Map[int, int]] {}", proto::EQ_BUDGET_MARKER)),
         "the refusal must name the walk's ROOT, not the innermost entry: {msg}"
     );
     assert!(
-        !msg.contains("S0 nests"),
-        "S0 is `struct S0: v: int` — it nests not at all: {msg}"
+        !msg.contains("S0[Map[int, int]] "),
+        "S0 is the bottom of the chain — it nests not at all: {msg}"
     );
 }
 
@@ -2243,39 +2262,27 @@ fn a_deep_but_finite_chain_stays_within_the_eq_budget() {
     entry_ok(&src);
 }
 
-/// **The EXACT boundary pair at the cap (W7-55, re-measured after the same-day Important-4 follow-up
-/// moved `EQ_BOUNDS_MAX_IN_PROGRESS` from 78 000 to `crate::vm::MAX_STRUCTURAL_DEPTH` = 10 000).**
-/// `S0..S9999` (10 000 simultaneous obligations at peak) is the LAST depth the cap accepts;
-/// `S0..S10000` (10 001) is the FIRST it refuses. Bare `==` reaches
-/// [`Checker::eq_bounds_unsatisfied`] directly (`checker/pattern.rs`'s binary-op arm calls it on both
+/// **A 10 000-deep PLAIN chain — the depth the VM\'s own `values_equal` walks — must check clean.**
+/// This is W7-55\'s original complaint in one assertion: the checker used to refuse at `S160` a type
+/// graph the runtime compares to 10 000. A plain `S{k}: v: S{k-1}` link costs one node, so this sits
+/// at a fifth of `EQ_BOUNDS_MAX_NODES` — the headroom the budget was sized for. Bare `==` reaches
+/// [`Checker::eq_bounds_unsatisfied`] directly (`checker/pattern.rs`\'s binary-op arm calls it on both
 /// operands before falling back to `may_be_equal`), the same path the original W7-55 measurement used.
 ///
 /// Deliberately CHECK-only (`check_src`, not a compile+run through [`crate::vm::run_capture`]) — see
 /// [`runtime_boundary_is_honoured_at_a_depth_the_old_cap_refused`] below for the "the grant is
 /// honoured at runtime, not just claimed" half at an affordable depth instead.
 #[test]
-fn the_new_cap_boundary_accepts_then_refuses() {
-    let chain_src = |n: usize| {
-        let mut s = String::from("struct S0:\n    v: int\n");
-        for i in 1..=n {
-            s.push_str(&format!("struct S{i}:\n    v: S{}\n", i - 1));
-        }
-        s.push_str(&format!(
-            "fn use_it(a: S{n}, b: S{n}) -> bool:\n    return a == b\n"
-        ));
-        s
-    };
-    let ok_errs = check_src(&chain_src(9_999));
+fn a_ten_thousand_deep_plain_chain_checks_clean() {
+    let mut src = String::from("struct S0:\n    v: int\n");
+    for i in 1..=10_000 {
+        src.push_str(&format!("struct S{i}:\n    v: S{}\n", i - 1));
+    }
+    src.push_str("fn use_it(a: S10000, b: S10000) -> bool:\n    return a == b\n");
+    let errs = check_src(&src);
     assert!(
-        ok_errs.is_empty(),
-        "S0..S9999 (10 000 simultaneous obligations) is the last depth the cap should accept: {ok_errs:?}"
-    );
-    let refused_errs = check_src(&chain_src(10_000));
-    assert!(
-        refused_errs
-            .iter()
-            .any(|e| e.message.contains("nests too deeply")),
-        "S0..S10000 (10 001 simultaneous obligations) must be the first refused depth: {refused_errs:?}"
+        errs.is_empty(),
+        "a 10 000-deep plain chain is exactly what the VM compares happily: {errs:?}"
     );
 }
 

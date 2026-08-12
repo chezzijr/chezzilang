@@ -801,22 +801,30 @@ pub enum HoverKind {
 ///
 /// Consumed by the lib's `editor::hover` (and through it the `chezzi-lsp` server); the default
 /// `chezzi` bin compiles `checker` privately without reaching it, so allow that target's dead-code lint.
+///
+/// Runs on [`crate::on_frontend_stack_scoped`]'s dedicated stack, like every other fn here that drives
+/// `run_graph_pass`. This one was left unwrapped and relied on `editor::hover` wrapping its caller
+/// instead — a convention, not a guarantee, and the exact hole that already bit this repo once when
+/// hover ran the whole checker on a ~2 MiB LSP tokio worker. Wrapping HERE is what makes the doc block
+/// on `EQ_BOUNDS_MAX_NODES` ("every caller is on 1 GiB by construction") true rather than aspirational.
 #[allow(dead_code)]
 pub fn hover_type(
     graph: &ModuleGraph,
     line: u32,
     col: u32,
 ) -> Option<(String, HoverKind, Option<String>)> {
-    let mut c = Checker::new();
-    c.hover_probe = Some((line, col));
-    c.hover_entry = Some(graph.entry.clone());
-    c.run_graph_pass(graph, false);
-    if !c.errors.is_empty() {
-        return None;
-    }
-    c.hover_result
-        .take()
-        .map(|(ty, kind, doc)| (ty.to_string(), kind, doc))
+    crate::on_frontend_stack_scoped(move || {
+        let mut c = Checker::new();
+        c.hover_probe = Some((line, col));
+        c.hover_entry = Some(graph.entry.clone());
+        c.run_graph_pass(graph, false);
+        if !c.errors.is_empty() {
+            return None;
+        }
+        c.hover_result
+            .take()
+            .map(|(ty, kind, doc)| (ty.to_string(), kind, doc))
+    })
 }
 
 /// FFI ROOT FIX (fix4): resolve the fully-resolved, width-bearing C signature of every `extern` fn
