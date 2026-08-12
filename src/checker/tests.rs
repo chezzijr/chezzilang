@@ -1189,6 +1189,27 @@ fn unbounded_type_param_does_not_satisfy_eq() {
     );
 }
 
+/// **W7-54 — a function value satisfies `Eq`.** `Ty::Func` had no `intrinsic_recv_kind` arm, so it
+/// fell to `"?"` and the D1 grant (above) excluded it: `f == g` (structural derive, `Vm::values_equal`)
+/// already answered `true`/`false` by IDENTITY, matching CPython's `f == g` exactly, but neither
+/// `.eq()` nor a `[T: Eq]` bound could say the same thing — a working operator and a failing method
+/// spelling for ONE relation. **rustc 1.97.0, measured:** `#[derive(PartialEq, Eq)] struct
+/// Boxy<T: Eq>(T)` over a `fn(i32) -> i32` payload builds clean and prints `true` — fn pointers
+/// implement `PartialEq`, so granting `Eq` to `Ty::Func` is the Rust-agreeing answer (Go, the one
+/// ancestor that differs, rejects `f == g` outright: `func can only be compared to nil`).
+#[test]
+fn function_value_satisfies_eq_by_identity() {
+    const G: &str = "fn g(x: int) -> int:\n    return x\n";
+    // the method spelling now agrees with the operator
+    ok(&format!(
+        "{G}fn same[T: Eq](a: T, b: T) -> bool:\n    return a.eq(b)\nprint(same(g, g))\n"
+    ));
+    // …and the bound is satisfiable spelled over the operator too (D1's own shape)
+    ok(&format!(
+        "{G}fn same[T: Eq](a: T, b: T) -> bool:\n    return a == b\nprint(same(g, g))\n"
+    ));
+}
+
 /// **W7-41 — `==` / `!=` enforce the receiver's `eq` `where` bounds.** The explicit method spelling
 /// `a.eq(b)` was already rejected (the instance-method dispatch path runs `enforce_bounds`); the
 /// OPERATOR routed through `may_be_equal`, which asks co-inhabitance only. Same program, two answers:
@@ -1322,9 +1343,9 @@ b := Box(Tag(2))
     entry_ok(
         "struct Tag:\n    n: int\nstruct Box[T]:\n    val: T\n    fn eq[U](self, other: Self) -> bool where U: Comparable:\n        return true\nprint(Box(Tag(1)) == Box(Tag(2)))\n",
     );
-    // `where T: Eq` over the five structurally-equatable payloads the 2026-08-10 revert was caught
-    // by. They are green only because Task 1 landed `Eq`-satisfaction-is-what-`==`-accepts first.
-    // Plus a non-numeric newtype, a function value and a `Channel` — all measured `true` today.
+    // `where T: Eq` over the six structurally-equatable-or-Eq-granted payloads the 2026-08-10 revert
+    // was caught by. They are green only because Task 1 landed `Eq`-satisfaction-is-what-`==`-accepts
+    // first. Plus a non-numeric newtype and a function value — all measured `true` today.
     const EQB: &str = "\
 struct P:
     n: int
@@ -1343,31 +1364,27 @@ fn g(x: int) -> int:
         "b\"ab\"",
         "Some(1)",
         "Name(\"a\")",
+        // W7-54 — a function value now satisfies `Eq` (identity, not structural), so `Box[fn]` is
+        // satisfiable again. **rustc 1.97.0, measured:** `Boxy(f) == Boxy(f)` for `f: fn(i32) -> i32`
+        // COMPILES — fn pointers implement `PartialEq`. This spelling printed `true` before W7-41,
+        // was regressed to a reject by W7-41 (the `Eq` grant excluded `Ty::Func` entirely, filed as a
+        // residual), and is restored here by widening the grant instead of special-casing the walk.
+        "g",
     ] {
         entry_ok(&format!("{EQB}print(Box({payload}) == Box({payload}))\n"));
     }
-    // A payload Chezzi compares by IDENTITY — a `Channel`, or a function value — does NOT satisfy
-    // `Eq`, so `where T: Eq` over it is now rejected. Both printed `true` before, and both are a
-    // BEHAVIOR CHANGE on the `==` path only: the METHOD spelling `Box(c).eq(Box(c))` already
-    // rejected them, on the pre-change binary, with the same reason. Making the operator agree with
-    // the method is precisely what W7-41 is, so this is the inconsistency closing, not a new one.
-    //
-    // **The two disagree about which way is right, and both were measured (rustc 1.97.0):**
-    // * `Channel` — `Boxy(Sender<i32>) == Boxy(…)` is `error[E0369]` / `note: Sender<i32> does not
-    //   implement Eq`. Chezzi now says the same thing for the same reason. (Go is stricter still:
-    //   `invalid operation: f == h (func can only be compared to nil)`.)
-    // * a function value — `Boxy(f) == Boxy(f)` for `f: fn(i32) -> i32` COMPILES, because Rust's fn
-    //   pointers do implement `Eq`. So refusing this one is DRIFT, but it is **pre-existing and not
-    //   this rule's**: `type fn(int) -> int does not satisfy Eq` is what the pre-change binary
-    //   already answered at a `[T: Eq]` bound and at `.eq()`. The fix belongs in the `Eq` GRANT,
-    //   which cannot simply add `Func`: a grant is a promise the runtime can dispatch `eq` on the
-    //   receiver, and there is no `Obj::Func` `eq` arm. Filed as a residual.
-    for payload in ["g", "Channel[int](1)"] {
-        entry_rejects(
-            &format!("{EQB}print(Box({payload}) == Box({payload}))\n"),
-            "for equality — Box[",
-        );
-    }
+    // A payload Chezzi compares by IDENTITY through a HANDLE — a `Channel` — does NOT satisfy `Eq`,
+    // so `where T: Eq` over it stays rejected. This printed `true` before W7-41 and is a deliberate
+    // BEHAVIOR CHANGE on the `==` path: the METHOD spelling `Box(c).eq(Box(c))` already rejected it,
+    // on the pre-W7-41 binary, with the same reason. Making the operator agree with the method is
+    // precisely what W7-41 is, so this is the inconsistency closing, not a new one. **rustc 1.97.0,
+    // measured:** `Boxy(Sender<i32>) == Boxy(…)` is `error[E0369]` / `note: Sender<i32> does not
+    // implement Eq` — Chezzi says the same thing for the same reason (Go is stricter still:
+    // `invalid operation: f == h (func can only be compared to nil)`).
+    entry_rejects(
+        &format!("{EQB}print(Box(Channel[int](1)) == Box(Channel[int](1)))\n"),
+        "for equality — Box[",
+    );
     // ERASED operands stay tolerated (`Ty::Param`), both inside a `Box` and bare. The bare form is a
     // documented CEILING, not a success: `f(Box(Tag(1)), Box(Tag(2)))` still faults at runtime,
     // because inside the body both operands are `Ty::Param` and `f` declares no bound to check at the

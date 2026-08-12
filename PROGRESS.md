@@ -2,6 +2,31 @@
 
 Single source of truth for "what am I doing next." Update after every work session.
 
+> **✅ W7-54 landed 2026-08-12 — a function value satisfies `Eq`, so `==`, `.eq()` and a `[T: Eq]`
+> bound give one answer.** `docs/gaps.md`'s `W7-54` is CLOSED (Task 1 of the four-task `Eq` residual
+> close-out on `w7-52-55-eq-residuals`). Chezzi's `==` on a function value already matched CPython
+> exactly (identity: two loads of one `fn`/nested-`fn` def equal, two calls to a factory or two
+> closures with equal captures unequal) — this was a **checker gap, not a runtime one**. `Ty::Func`
+> had no arm in `Checker::intrinsic_recv_kind` (`src/checker/proto.rs:285`), so it fell to `"?"` and
+> the D1 `Eq` grant excluded it, leaving `.eq()` and `[T: Eq]` both answering *does not satisfy Eq* —
+> and `W7-41` had widened the drift to a fourth spelling, regressing `struct Box[T]` with `fn
+> eq(self, o: Self) -> bool where T: Eq` over a function payload from `true` to a compile error.
+> **Three checker-only edits, no VM change** (confirmed, not assumed — `do_method_call`'s terminal `_`
+> arm already routed `Obj::Func`/`Obj::Closure` into the receiver-agnostic `("eq", 1)` intrinsic arm,
+> which calls the same `values_equal_guarded` `==` uses): `Ty::Func { .. } => "func"` added to
+> `intrinsic_recv_kind`; `("Eq", "eq", "func")` added to `INTRINSIC_PROTO_METHODS`; a `"func"` `Recv`
+> probe row added to `intrinsic_grants_all_have_vm_arms`, whose full protocol × receiver-kind matrix
+> sweep (now covering `Ty::Func` for the first time) stayed green — no other protocol arm was
+> accidentally granting it a conformance. Matches rustc 1.97.0 (`Boxy<T: Eq>` over a `fn(i32) -> i32`
+> payload builds clean); Go is the one ancestor that differs (`func can only be compared to nil`).
+> **Tests:** `tests/chz/spec/eq_func_test.chz` (6 new, gated serial==M:N), plus
+> `checker::tests::function_value_satisfies_eq_by_identity` and the `W7-41` known-gap test at
+> `checker::tests::eq_operator_enforces_the_receivers_eq_where_bounds` updated from `entry_rejects` to
+> `entry_ok` for the function-payload `Box[T]` row (now pins the fix, not the bug). Every new/changed
+> assertion measured failing on the pre-change binary first. `cargo test`: 4047 lib + integration, 0
+> failed; clippy clean; `chezzi test tests/chz/` 472/472 on both engines (was 466). Full write-up:
+> `docs/gaps.md` **W7-54**.
+
 > **✅ W7-57 landed 2026-08-12 — a run-wide `os.exit` reaches every party, not just the polling ones.**
 > `docs/gaps.md`'s `W7-57` is CLOSED, and with it the whole `W7-47` → `W7-56` → `W7-58` → `W7-57`
 > chain. **The row as filed understated the bug**: it said "none is a correctness hazard — the exit

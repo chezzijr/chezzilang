@@ -17242,6 +17242,19 @@ fn intrinsic_grants_all_have_vm_arms() {
         ),
         r("option", "", "Some(1)", "-", "-", "-", "-", "-", "-"),
         r("result", "", "Ok(1)", "-", "-", "-", "-", "-", "-"),
+        // W7-54 — a function value's `Eq` grant. Only the `eq` template applies; it uses no other
+        // column.
+        r(
+            "func",
+            "fn g(x: int) -> int:\n    return x\n",
+            "g",
+            "-",
+            "-",
+            "-",
+            "-",
+            "-",
+            "-",
+        ),
     ];
     // (method, call template) — `{r}` is the receiver, `{k}`/`{v}` the index key/value.
     let calls: &[(&str, &str)] = &[

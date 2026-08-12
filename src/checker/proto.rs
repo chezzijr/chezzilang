@@ -151,11 +151,14 @@ pub const INTRINSIC_PROTO_METHODS: &[(&str, &str, &str)] = &[
     ("Comparable", "compare", "float"),
     ("Comparable", "compare", "str"),
     ("Comparable", "compare", "newtype"),
-    // Eq — D1: EVERY receiver kind whose `==` is the structural derive, which is every kind this
-    // table can key a row on except `nil` (not spellable as a value). The four scalars are all here
-    // because `==` is defined on `bool` too, unlike `Comparable`; a newtype's `==` unwraps to the
-    // underlying's native equality, exactly as its `<` unwraps to the ordering. `option`/`result`
-    // land on `Obj::Enum` at runtime, same as `enum`.
+    // Eq — D1: EVERY receiver kind whose `==` this table can key a row on except `nil` (not
+    // spellable as a value). Most rows are the structural derive (`Vm::values_equal`): the four
+    // scalars are all here because `==` is defined on `bool` too, unlike `Comparable`; a newtype's
+    // `==` unwraps to the underlying's native equality, exactly as its `<` unwraps to the ordering;
+    // `option`/`result` land on `Obj::Enum` at runtime, same as `enum`. `func` is the one exception —
+    // a function value's `==` is IDENTITY (two loads of the same top-level `fn`/nested `fn` def are
+    // equal, two calls to a factory are not — W7-54), not a structural walk, but it is still the same
+    // `values_equal_guarded` worker `==` uses, so `.eq()` can never disagree with `==`.
     ("Eq", "eq", "int"),
     ("Eq", "eq", "float"),
     ("Eq", "eq", "str"),
@@ -171,6 +174,7 @@ pub const INTRINSIC_PROTO_METHODS: &[(&str, &str, &str)] = &[
     ("Eq", "eq", "option"),
     ("Eq", "eq", "result"),
     ("Eq", "eq", "newtype"),
+    ("Eq", "eq", "func"),
     // Stringable — all four scalars.
     ("Stringable", "str", "int"),
     ("Stringable", "str", "float"),
@@ -303,6 +307,7 @@ impl Checker {
             Ty::Option(_) => "option",
             Ty::Result(..) => "result",
             Ty::NewType(..) => "newtype",
+            Ty::Func { .. } => "func",
             _ => "?",
         }
     }

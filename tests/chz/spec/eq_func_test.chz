@@ -1,0 +1,70 @@
+# tests/chz/spec/eq_func_test.chz — W7-54: a function value satisfies `Eq`.
+#
+# `Ty::Func` had no `intrinsic_recv_kind` classification, so the D1 `Eq` grant excluded it: `==`
+# (the structural derive, `Vm::values_equal`, IDENTITY for a function value) already worked, while
+# `.eq()` and a `[T: Eq]` bound both answered "does not satisfy Eq" — one relation, three spellings,
+# three answers. **CPython 3.14, measured:** `f == g` (two loads of one `def`) -> `True`;
+# `f.__eq__(g)` -> `True`; `mk() == mk()` (two calls to a factory returning a nested `def`) -> `False`;
+# two closures with equal captures -> `False`; `r == r` -> `True`. **rustc 1.97.0, measured:**
+# `#[derive(PartialEq, Eq)] struct Boxy<T: Eq>(T)` over a `fn(i32) -> i32` payload builds clean and
+# prints `true` — fn pointers implement `PartialEq`. Go is the one ancestor that differs: it rejects
+# `f == g` outright (`func can only be compared to nil`). Chezzi now matches CPython/Rust on all four
+# spellings. Gated serial==M:N by `test_runner::chz_suite_passes_both_engines`.
+#
+# The `.eq()` method spelling is exercised through `eqm`'s ERASED `[T: Eq]` bound, not called bare on
+# a concrete receiver — that mirrors every other intrinsically-granted kind (int/list/tuple/…): the
+# `Eq` grant makes `.eq()` callable from an erased generic body, not a new bare instance method, so
+# `(1).eq(1)` / `[1].eq([1])` are (and stay) `has no method 'eq'` too. `an_erased_eq_bound_can_call_
+# eq_on_every_granted_receiver` in `eq_protocol_test.chz` pins the same shape for the other kinds.
+
+fn g(x: int) -> int:
+    return x
+
+fn h(x: int) -> int:
+    return x
+
+fn eqm[T: Eq](a: T, b: T) -> bool:
+    return a.eq(b)
+
+test fn two_loads_of_one_toplevel_fn_are_equal():
+    a := g
+    b := g
+    assert (a == b) == true
+    assert eqm(a, b) == true, "the method spelling now agrees with the operator"
+
+test fn two_different_toplevel_fns_are_unequal():
+    assert (g == h) == false
+    assert eqm(g, h) == false
+
+fn mk() -> fn(int) -> int:
+    fn inner(x: int) -> int:
+        return x
+    return inner
+
+test fn two_calls_to_a_factory_are_unequal():
+    assert (mk() == mk()) == false, "each call mints its own nested fn"
+    assert eqm(mk(), mk()) == false
+
+fn mklam(n: int) -> fn() -> int:
+    return fn() -> int: n
+
+test fn two_closures_with_equal_captures_are_unequal():
+    a := mklam(1)
+    b := mklam(1)
+    assert (a == b) == false, "equal captures, but distinct closure instances"
+    assert eqm(a, b) == false
+
+test fn a_closure_equals_itself():
+    r := mklam(1)
+    assert (r == r) == true
+    assert eqm(r, r) == true
+
+# ---- W7-41's regressed spelling, restored: `Box[T]` over a function payload ----
+
+struct Box[T]:
+    val: T
+    fn eq(self, o: Box[T]) -> bool where T: Eq:
+        return true
+
+test fn box_over_a_function_payload_satisfies_eq():
+    assert (Box(g) == Box(g)) == true

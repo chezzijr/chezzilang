@@ -1438,8 +1438,7 @@ through a shape the checker cannot judge: a **protocol existential** operand or 
 (`docs/gaps.md` **W7-52**), and an **erased generic body** — `fn f[T](a: T, b: T): return a == b`
 declares no bound, so there is nothing to check inside the body *or* at the call site
 (**W7-53**; rustc rejects the body instead, which would mean a `where` on every generic fn that
-compares). A **function value** also still fails `Eq` even though `f == g` works by identity
-(**W7-54**). And a type graph nested deeper than **160** links is REFUSED at a `[T: Eq]` bound or an
+compares). And a type graph nested deeper than **160** links is REFUSED at a `[T: Eq]` bound or an
 `==` even though the VM's own equality has no such cap, so the checker rejects what the runtime
 handles (**W7-55**).
 
@@ -1493,14 +1492,17 @@ defines **no** `eq` keeps the structural (field-by-field) equality it always had
 **`Eq` satisfaction is exactly "`==` works on it"**, and writing an `eq` is not what earns it — the
 language's structural `==` is an automatic derive, and since 2026-08-11 it tells the protocol system so
 (`docs/gaps.md` **W7-41**). So `where T: Eq` is writable over `int`/`float`/`bool`/`str`, `bytes`,
-tuples, `List`/`Map`/`Set`, `Option`/`Result`, newtypes, and any struct or enum — the same set `==`
-accepts. Go gives structs `==` automatically, Rust spells it `#[derive(PartialEq, Eq)]`, Python
-`@dataclass(eq=True)`; Chezzi's is implicit. The one thing that revokes it is an `eq` (its own, or one
-reached through an element / entry / tuple slot / field / payload / newtype underlying) whose `where`
-bounds do not hold for the instantiation in hand — that is the `Box[Tag]` case above. **Still outside
-the grant, and filed:** a bare `T` with no bound (deliberate — a generic body is checked once with `T`
-abstract), and a **function value** (`docs/gaps.md` **W7-54**, drift from Rust: `f == g` works by
-identity but `[T: Eq]` over a function is rejected).
+tuples, `List`/`Map`/`Set`, `Option`/`Result`, newtypes, any struct or enum, and a **function value**
+— the same set `==` accepts. Go gives structs `==` automatically, Rust spells it `#[derive(PartialEq,
+Eq)]`, Python `@dataclass(eq=True)`; Chezzi's is implicit. A function value compares by IDENTITY, not
+structurally — two loads of the same top-level/nested `fn` def are equal, two calls to a factory
+minting a fresh nested `fn` are not, and two closures with equal captures are not — matching CPython's
+`f == g` exactly and Rust's fn-pointer `PartialEq` (`docs/gaps.md` **W7-54**, fixed 2026-08-12; Go is
+the one ancestor that differs, rejecting `f == g` outright). The one thing that revokes the grant is an
+`eq` (its own, or one reached through an element / entry / tuple slot / field / payload / newtype
+underlying) whose `where` bounds do not hold for the instantiation in hand — that is the `Box[Tag]`
+case above. **Still outside the grant, and filed:** a bare `T` with no bound (deliberate — a generic
+body is checked once with `T` abstract).
 
 ```chezzi
 struct Ver:
