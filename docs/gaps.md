@@ -10533,6 +10533,51 @@ Tasks 1/2 closed for `Ty::Func`/`Ty::BuiltinFn`/`Ty::Protocol`, just found one b
 `ConcurrentMap`/`memoize1` over `Key` all now run correctly (verified on the release binary, both
 engines); see `tests/chz/spec/eq_protocol_test.chz`'s `non_hook_eq_satisfies_eq_too`.
 
+**Correction to the correction (C1′), found by re-reviewing the C1 fix — the first cut closed C1 by
+re-opening its mirror.** That cut short-circuited `eq_where_unsatisfied` for a non-hook `eq`, reasoning
+"`==` stays structural for such a type, so it cannot fault". True of the **operator**, false of the
+**bound**: an erased `[T: Eq]` body's `a.eq(b)` dispatches BY NAME to the escape-hatch method, so its
+`where` clause then ran unproven. Measured on the release binary at that cut, both operand spellings
+that make an `eq` non-hook (a METHOD type param `[U]`, and the OWNER's type param `T`):
+
+```chezzi
+struct Tag:
+    n: int
+struct Box[T]:
+    val: T
+    fn eq[U](self, o: U) -> bool where T: Comparable:
+        return self.val.compare(self.val) == 0
+fn eqm[T: Eq](a: T, b: T) -> bool:
+    return a.eq(b)
+print(eqm(Box(Tag(1)), Box(Tag(2))))
+```
+```
+chezzi check → ok: no type errors
+chezzi run   → runtime error (line 6, col 16): struct 'Tag' has no method 'compare'
+                 at eq (called at line 8, col 12) / at eqm (called at line 9, col 7)
+chezzi run --serial → identical
+```
+
+Verbatim the check-OK-then-fault class this whole W7-5x wave exists to eliminate, on both engines and
+therefore parity-blind. **The order is the lesson, and it is the same lesson as W7-41's:** the two
+questions a declared `eq` raises are independent and must be asked in the right order — *are its
+`where` bounds provable for this instantiation?* (ALWAYS, whatever the shape) and only then *does it
+end the walk?* (the HOOK shape only; a non-hook `eq` falls through to the structural member walk,
+because structural equality really is what its `==` does). Both `Ty::Struct` and `Ty::Enum` arms of
+`eq_bounds_unsatisfied_rec` carry it. Pinned by two `entry_rejects` (one per operand spelling) plus a
+premise-derived `ok()` neighbour — the same shapes over a payload that DOES satisfy the bound — in
+`checker::tests::struct_with_eq_satisfies_eq`, all three measured against the pre-fix binary first.
+
+**Still open in this seam, and recorded rather than lost: `.eq()` through an `[T: Eq]` bound resolves
+to a non-hook user method where Rust resolves to the trait.** Measured, rustc 1.97.0, a `#[derive(
+PartialEq, Eq)] struct Key` with an INHERENT `fn eq<U>(&self, _: U) -> bool { true }`: `a.eq(&b)` on a
+concrete receiver is `true` (inherent wins), `a == b` is `false`, and `eqm<T: Eq>(a, b) { a.eq(b) }` is
+**`false`** — through the bound, Rust picks the trait method. Chezzi gives `true` for the third,
+because the compiler is type-blind and `a.eq(b)` lowers to a by-name `Op::CallMethod` that the VM
+resolves against the receiver's user methods. It is a **silent disagreement, not a fault**, and closing
+it needs the checker to mark protocol-dispatched call sites and the compiler to emit a distinct op —
+a feature-sized change, not a rule tweak. It is NOT a regression (identical before this wave).
+
 Two `#[cfg(test)]` fixtures
 (`tests/chz/spec/eq_protocol_test.chz`'s `same`/`differs`, used to warm-then-deopt an int-specialized
 `==` site onto structs) needed the same `[T: Eq]` addition, as did roughly a dozen `checker::tests`

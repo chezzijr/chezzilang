@@ -2789,10 +2789,29 @@ impl Checker {
                 let Some(info) = self.struct_shape(name) else {
                     return Some(Self::shape_invisible(ty));
                 };
-                if let Some(sig) = info.methods.get("eq")
-                    && Self::eq_sig_is_hook(sig)
-                {
-                    return self.eq_where_unsatisfied(ty, sig);
+                // A declared `eq` has its `where` bounds checked WHATEVER its shape — but only the
+                // HOOK shape ends the walk here.
+                //
+                // The non-hook escape hatch is still REACHABLE, which is why skipping its bounds was
+                // wrong: `==` on such a type is structural (it never dispatches the method), but an
+                // erased `[T: Eq]` body's `a.eq(b)` dispatches BY NAME straight to it, and its
+                // `where` clause then runs unproven. Measured on the release binary before this
+                // guard was split: `struct Box[T]` with `fn eq[U](self, o: U) -> bool where T:
+                // Comparable` fed `Box[Tag]` through `fn eqm[T: Eq](a, b) -> bool: return a.eq(b)`
+                // was `ok: no type errors` then `runtime error: struct 'Tag' has no method
+                // 'compare'` on BOTH engines — verbatim the class W7-41/W7-45/W7-53 exist to close,
+                // re-opened in the mirror direction while closing the escape hatch's grant.
+                //
+                // So: bounds first (a `where`-less escape hatch has none, so it still costs
+                // nothing), then the hook alone short-circuits; a non-hook `eq` falls through to the
+                // structural walk below, because structural equality really is what its `==` does.
+                if let Some(sig) = info.methods.get("eq") {
+                    if let hit @ Some(_) = self.eq_where_unsatisfied(ty, sig) {
+                        return hit;
+                    }
+                    if Self::eq_sig_is_hook(sig) {
+                        return None;
+                    }
                 }
                 if let hit @ Some(_) = any(self, args) {
                     return hit;
@@ -2807,10 +2826,16 @@ impl Checker {
                 self.walk_eq_members(ty, &fields)
             }
             Ty::Enum(name, args) => {
-                if let Some(sig) = self.enum_methods_of(name).and_then(|m| m.get("eq"))
-                    && Self::eq_sig_is_hook(sig)
-                {
-                    return self.eq_where_unsatisfied(ty, sig);
+                // Bounds-then-hook, exactly as the struct arm above — see its comment for why a
+                // non-hook `eq`'s `where` clause must still be proven. (`.cloned()` because
+                // `enum_methods_of` borrows `self`, which `eq_where_unsatisfied` needs mutably-free.)
+                if let Some(sig) = self.enum_methods_of(name).and_then(|m| m.get("eq")).cloned() {
+                    if let hit @ Some(_) = self.eq_where_unsatisfied(ty, &sig) {
+                        return hit;
+                    }
+                    if Self::eq_sig_is_hook(&sig) {
+                        return None;
+                    }
                 }
                 if let hit @ Some(_) = any(self, args) {
                     return hit;

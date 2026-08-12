@@ -2309,6 +2309,43 @@ fn struct_with_eq_satisfies_eq() {
     entry_ok(
         "enum Opt2[T]:\n    Some(T)\n    None\n    fn eq(self, x: T) -> bool:\n        return true\nfn same[T: Eq](a: T, b: T) -> bool:\n    return a.eq(b)\nprint(same(Opt2[int].Some(1), Opt2[int].Some(2)))\n",
     );
+    // …but the grant above must NOT skip the escape hatch's own `where` bounds — C1' (the mirror of
+    // C1, found by re-review). The first cut of the C1 fix short-circuited `eq_where_unsatisfied`
+    // for a non-hook `eq` on the reasoning "`==` stays structural for it, so it cannot fault". That
+    // is true of the OPERATOR and false of the BOUND: an erased `[T: Eq]` body's `a.eq(b)` still
+    // dispatches BY NAME to the escape-hatch method, so its `where` clause runs unproven. Measured
+    // on the release binary at that cut: BOTH programs below were `ok: no type errors` then
+    // `runtime error: struct 'Tag' has no method 'compare'` on BOTH engines — verbatim the
+    // check-OK-then-fault class W7-41/W7-45/W7-53 exist to eliminate, re-opened while closing C1.
+    //
+    // So the walk now proves the bounds for ANY declared `eq`, and only the HOOK shape ends the
+    // walk there; a non-hook `eq` falls through to the structural member walk, which is what its
+    // `==` genuinely does. The `where`-less hatch above is unaffected — it has no bounds to prove.
+    //
+    // Both operand spellings that make an `eq` non-hook are covered, since they take different
+    // routes through `eq_sig_is_hook`: a METHOD type param (`[U]`) and the OWNER's type param (`T`).
+    let escape_hatch_with_a_bound = |operand: &str, method_params: &str| {
+        format!(
+            "struct Tag:\n    n: int\nstruct Box[T]:\n    val: T\n    \
+             fn eq{method_params}(self, o: {operand}) -> bool where T: Comparable:\n        \
+             return self.val.compare(self.val) == 0\n\
+             fn eqm[T: Eq](a: T, b: T) -> bool:\n    return a.eq(b)\n\
+             print(eqm(Box(Tag(1)), Box(Tag(2))))\n"
+        )
+    };
+    entry_rejects(
+        &escape_hatch_with_a_bound("U", "[U]"),
+        "requires Tag: Comparable",
+    );
+    entry_rejects(
+        &escape_hatch_with_a_bound("T", ""),
+        "requires Tag: Comparable",
+    );
+    // The premise-derived `ok()` neighbour: the SAME shapes over a payload that DOES satisfy the
+    // bound must still be accepted, or the rule above is an over-reject rather than a proof.
+    entry_ok(
+        "struct Box[T]:\n    val: T\n    fn eq[U](self, o: U) -> bool where T: Comparable:\n        return self.val.compare(self.val) == 0\nfn eqm[T: Eq](a: T, b: T) -> bool:\n    return a.eq(b)\nprint(eqm(Box(1), Box(2)))\n",
+    );
 }
 
 /// `eq` must be `(self, Self) -> bool`. A wrong RETURN type is a wrong signature, not a conformance —
