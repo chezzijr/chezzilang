@@ -146,6 +146,33 @@ test fn a_generic_operand_eq_is_an_ordinary_method():
 # at_decl` — so the operator's `"eq() must return bool"` fault is a backstop no checked program can
 # reach, and there is nothing left here to assert from Chezzi.)
 
+# ---- C1 (W7-53 follow-up review): a NON-hook `eq` must satisfy `Eq` too ----
+#
+# Before this fix, `Key` below had `==`/`Map`/`Set` all working (structural equality, since `eq`'s
+# generic operand means `==` never dispatches it) while `[T: Eq]`/`.eq()` refused it — `==` and a
+# `[T: Eq]` bound disagreeing about the SAME type, the identical defect shape Tasks 1/2 closed for
+# `Ty::Func`/`Ty::BuiltinFn`/`Ty::Protocol`. `k1 == k2` staying `false` while `k1.eq(k2)` answers
+# `true` is the proof that `==` really is structural here, not routed through the escape hatch.
+
+struct Key:
+    n: int
+    fn hash(self) -> int:
+        return 1
+    fn eq[U](self, o: U) -> bool:
+        return true
+
+test fn non_hook_eq_satisfies_eq_too():
+    k1 := Key(1)
+    k2 := Key(2)
+    assert (k1 == k2) == false, "== stays structural — the escape hatch is not the hook"
+    assert k1.eq(k2) == true, "the method spelling still runs"
+    assert eq_bound(k1, k2) == false, "[T: Eq] must agree with == on the SAME comparison"
+    m: Map[Key, int] = {}
+    m[k1] = 7
+    assert m[k1] == 7, "Key must be usable as a Map key (Hashable, and now Eq too)"
+    s := Set([k1, k2])
+    assert s.len() == 2, "structural dedup — a Key with a constant hash and always-true eq[U] never collides"
+
 # ---- a faulting `eq` propagates to the operator's caller ----
 
 struct Boom:
@@ -243,6 +270,31 @@ test fn a_numeric_newtype_satisfies_eq_intrinsically():
     assert eq_bound(Score(1), Score(1)) == true
     assert eq_bound(Score(1), Score(2)) == false
     assert cmp_bound(Score(1), Score(2)) == true, "Comparable embeds Eq — both must be satisfiable"
+
+# ---- W7-53 follow-up (M9) — one ERASED [T: Eq] bound, across every join-point kind ----
+#
+# Task 1 granted `Ty::Func`, Task 2 `Ty::Protocol`, and this task's D1 walk grants the rest — but
+# nothing in the suite ran the SAME erased `[T: Eq]` bound (`eq_bound`, above) across all of them
+# together. `int`/`List`/`tuple`/`Option` are the scalar/container join points; `Ver` (declared at
+# the top of this file) is the struct join point, via its HOOK `eq` (compares `maj` only, so this
+# also proves the hook actually dispatches through the erased body, not a structural fallback);
+# `double` is the function-value join point (Task 1).
+
+fn double(n: int) -> int:
+    return n * 2
+
+test fn one_eq_bound_covers_every_join_point():
+    assert eq_bound(1, 1) == true
+    assert eq_bound(1, 2) == false
+    assert eq_bound([1, 2], [1, 2]) == true
+    assert eq_bound([1, 2], [1, 3]) == false
+    assert eq_bound((1, "a"), (1, "a")) == true
+    assert eq_bound((1, "a"), (1, "b")) == false
+    assert eq_bound(Some(1), Some(1)) == true
+    assert eq_bound(Some(1), Some(2)) == false
+    assert eq_bound(Ver(1, "alpha"), Ver(1, "beta")) == true, "Ver's hook compares maj only"
+    assert eq_bound(Ver(1, "alpha"), Ver(2, "alpha")) == false
+    assert eq_bound(double, double) == true
 
 # ---- generic instantiations are ERASED, so `Any` can hand `eq` a foreign operand ----
 #

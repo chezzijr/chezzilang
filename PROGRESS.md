@@ -84,7 +84,8 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > measured:** rustc 1.97.0 rejects the DEFINITION (``error[E0369]`` + *help: consider restricting
 > type parameter `T` with trait `PartialEq`*); Go 1.26 rejects the mirror (`invalid operation: a == b
 > (incomparable types in type set)`). Chezzi now matches — all three instances reject at their own
-> declaration, naming the fix (`T is not bounded by Eq (add `where T: Eq`)`), and once bounded
+> declaration, naming the fix (`T is not bounded by Eq (add an `Eq` bound to T: `[T: Eq]`, or `where
+> T: Eq` on a fn)` — both spellings, see the same-day follow-up below), and once bounded
 > (`[T: Eq]` / `[T: Hashable + Eq]`) all three type-check and run correctly. **The fix:** the four
 > use-site gates (`==`/`!=` both operands, `in`-over-`List`, the `List` equality builtins, the map/set
 > key check) switched from the erasing `eq_bounds_unsatisfied_erased` to the plain, non-erasing
@@ -115,7 +116,31 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > warnings` clean; `cargo test` **4284 passed / 0 failed** (was 4283; +1 new Rust test fn, several
 > existing fixtures re-bounded rather than added/removed); `chezzi test tests/chz/` **483/483
 > identical on M:N and `--serial`** (unchanged count — no `.chz` test added/removed, only bounds
-> tightened). Full write-up: `docs/gaps.md` **W7-53**.
+> tightened).
+> **Same-day follow-up (review-driven): a CRITICAL — the D1 `Eq` gate wrongly refused a NON-hook
+> `eq`, so the `[K: Hashable + Eq]` fallback above shipped a real, user-visible regression.** A struct
+> whose only `eq` is the ordinary-method escape hatch (`fn eq[U](self, o: U) -> bool`, a GENERIC
+> operand — `==` never dispatches it, stays structural) had `==`/`Map`/`Set` all working while
+> `[T: Eq]`/`.eq()` wrongly refused it — the identical two-spellings-disagree defect shape `W7-54`/
+> `W7-52` closed for `Ty::Func`/`Ty::BuiltinFn`/`Ty::Protocol`, just one bug later, and the `+ Eq`
+> spelling this row added to `Counter`/`ConcurrentMap`/`memoize1` made it reachable: all three newly
+> rejected a `Key`-shaped struct that ran fine before. Fixed by making the D1 gate ask the SAME
+> hook-vs-escape-hatch question `sig.rs`'s `validate_eq_shape` already answers at the declaration
+> (`Checker::eq_sig_is_hook`, extracted as `Checker::eq_operand_is_hook` so both call the one
+> predicate) — a non-hook `eq` is now judged the same as no `eq` at all (granted via `eq_bounds_
+> unsatisfied`, same as before), while a HOOK `eq`'s `where` bounds are still enforced (`W7-41`
+> unchanged — verified: `Box[Tag]` with a hook `eq` requiring `Tag: Comparable` still rejects).
+> **Also I2 (Important):** the `Ty::Param` arm's message named only `add `where T: Eq`` — a PARSE
+> error at a declaration site (`struct Reg[K: Hashable]: m: Map[K, int]` reaches the same arm, and
+> `where` is `fn`-only grammar) — now names both spellings. **Docs corrected:** this row's "no
+> collateral" framing, `key_ty_reject`'s doc comment (`src/checker/proto.rs`), the stale message
+> quotes, the handles' exclusion reason (six of eleven — `Executor`/`Channel`/`Shared`/`RwShared`/
+> `Atomic`/`AtomicInt` — construct and compare fine; only `Socket`/`Listener`/`Writer`/`Reader`/`Ptr`
+> genuinely need a real resource), and a `Ty::Module` message quote the binary never produced. **Two
+> `tests/chz/` tests added** (`one_eq_bound_covers_every_join_point` — one `[T: Eq]` bound over `int`/
+> `List`/`tuple`/`Option`/a struct/a function value, closing the M9 gap; `non_hook_eq_satisfies_eq_
+> too` — the C1 regression pin); `485/485` on both engines. `cargo test`: green (counts in the commit).
+> Full write-up: `docs/gaps.md` **W7-53**.
 
 > **✅ W7-57 landed 2026-08-12 — a run-wide `os.exit` reaches every party, not just the polling ones.**
 > `docs/gaps.md`'s `W7-57` is CLOSED, and with it the whole `W7-47` → `W7-56` → `W7-58` → `W7-57`

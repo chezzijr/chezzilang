@@ -2859,6 +2859,19 @@ impl Checker {
     /// Newtypes are deliberately NOT covered: their `==` never dispatches to a user `eq` at all (it
     /// auto-flows to the underlying's native equality), and the numeric case already has its own
     /// decl-site rejection.
+    ///
+    /// Is an `eq` method's second parameter the hook's `Self` operand, or the ordinary-method escape
+    /// hatch (a type PARAMETER)? The single source of truth for that split, so it never grows a
+    /// second, divergent notion of "is this the hook": [`Self::validate_eq_shape`] below calls it to
+    /// decide whether to enforce the hook's remaining shape (`Self` operand, `bool` return), and
+    /// `satisfies`'s `Eq` D1 gate (`proto.rs`) calls it to decide whether a type's declared `eq` is
+    /// the one `==` actually dispatches — a NON-hook `eq` falls back to structural equality and must
+    /// still satisfy `Eq` (C1, W7-53 follow-up: `struct Key: fn eq[U](self, o: U) -> bool` did not,
+    /// even though `==`/`Map`/`Set` all worked on it — `==` and `[T: Eq]` must agree).
+    pub(super) fn eq_operand_is_hook(operand: &Ty) -> bool {
+        !matches!(operand, Ty::Param(_)) && !operand.is_unknown()
+    }
+
     pub(super) fn validate_eq_shape(&mut self, decl: &FnDecl, sig: &FnSig, self_ty: &Ty) {
         if decl.name != "eq" {
             return;
@@ -2888,7 +2901,10 @@ impl Checker {
         }
         let operand = &sig.params[1];
         // A GENERIC operand is the ordinary-method escape hatch — not the hook, and not an error.
-        if matches!(operand, Ty::Param(_)) || operand.is_unknown() {
+        // [`Self::eq_operand_is_hook`] is the single source of truth for this split — `satisfies`'s
+        // `Eq` D1 gate (`proto.rs`) asks the identical question of an already-declared `eq`, and the
+        // two must never disagree about what counts as the hook (C1, W7-53 follow-up).
+        if !Self::eq_operand_is_hook(operand) {
             return;
         }
         if operand != self_ty {

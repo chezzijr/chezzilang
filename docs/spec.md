@@ -581,7 +581,9 @@ root marker (all fields default to unset, so `entrypoint` is required only for t
   without that import, is the user's own type). The native seam grew `NativeRet::Struct`/`Map` so a
   native fn can return a structured value.
 - **Shipped since (M10):** generic enums; the `Stringable` protocol (custom `str(x)`); the `Hashable`
-  protocol — any `Hashable` type is now a valid map/set key. A key holding a genuine **reference
+  protocol — any `Hashable` type is now a valid map/set key (a CONCRETE one; a generic `[T: Hashable]`
+  that builds, indexes, or even just mentions a `Map[T, _]`/`Set[T]` needs `[T: Hashable + Eq]` too —
+  `docs/gaps.md` **W7-53**, §`Eq`/`Hashable` above). A key holding a genuine **reference
   cycle** faults *recoverably* on membership/key-equality (`Set.has`/`add`, `Map` get/insert/remove,
   `in`, set algebra, `List.contains`/`index_of`/`unique`/`dedup`) with `"maximum structural depth
   (10000) exceeded"` — the SAME fault `==` raises (container key-equality is defined by `==`), matching
@@ -1050,7 +1052,7 @@ tests/          # Rust unit + golden tests
 | ✅ **M7** | User-defined generics + structural protocols | Generic fns/structs, `Comparable` bound, `std.cmp` (`min`/`max`/`clamp`); golden tests on both engines |
 | ✅ **M8** | Tier-1 stdlib | `std.json` (+ type-directed `decode[T]`), `std.process`, `std.fs`, `std.time`; the `set` type, iterable strings (`s.chars()`) |
 | ✅ **M9** | Tier-2 stdlib | `std.regex` + `std.request` (first runtime crate deps; blocking); `Match`/`Response` structs |
-| ✅ **M10** | Type-system depth | `Stringable`/`Hashable` + operator protocols (`Add`/`Sub`/`Mul`), generic enums, type aliases, multi-bound generics, any-`Hashable` map/set keys |
+| ✅ **M10** | Type-system depth | `Stringable`/`Hashable` + operator protocols (`Add`/`Sub`/`Mul`), generic enums, type aliases, multi-bound generics, any-`Hashable` **concrete** map/set key (a generic `[T: Hashable]` needs `+ Eq` too — `docs/gaps.md` **W7-53**) |
 | ✅ **M11** | Panic recovery + Go-style errors | Phase A ✅ `Result[T, E]` + `Error` protocol; Phase B ✅ `recover:` boundary with try-block semantics. Both engines parity-tested |
 | ✅ **M12** | Tier-3 ergonomics (part) | **Iterator protocol** (user structs with `next(self) -> Option[T]` iterable in `for`, lazy); **match guards** (`pattern if cond:`) + int **range patterns** (`1..10:`). Both engines parity-tested |
 | ✅ **M13** | `Iterable[T]` / `Iterator[T]` protocols | The language's first **parameterized** protocol bounds, both recovering element type `T`: `[S: Iterable[T], T]` accepts any iterable (built-in collections, a `.iter()` cursor, a generator, a struct with `next`; an `iter`-only struct satisfies the protocol but does **not** get `T` recovered — bound that one concretely), `[S: Iterator[T], T]` only a **cursor** — something holding a position, so the body may call `.next()` (a raw collection holds none; W6-3b). Lazy adapters (Take/Mapped) were the original answer to `yield` (then a non-goal; `yield`/generators have since shipped VM-only — see above). Checker/parser/grammar only; both engines parity-tested |

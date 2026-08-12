@@ -1450,11 +1450,14 @@ already accepts, and `==` already accepted a protocol-typed operand.
 
 **A generic body that compares its own type parameter must bound it by `Eq`, at the DEFINITION —
 matching both owning ancestors.** `fn f[T](a: T, b: T) -> bool: return a == b` rejects at `f`'s own
-declaration — `cannot compare T and T for equality — T is not bounded by Eq (add `where T: Eq`)` —
-the same shape rustc 1.97.0 produces (`error[E0369]`, *help: consider restricting type parameter `T`
-with trait `PartialEq`*) and Go 1.26 produces (`invalid operation: a == b (incomparable types in type
-set)`). The same rule covers `in`/`contains`/`index_of`/`dedup`/`unique` over `List[T]` and a `T`
-reached as a map key / set element. A type parameter that is never compared pays no tax — the
+declaration — `cannot compare T and T for equality — T is not bounded by Eq (add an `Eq` bound to T:
+`[T: Eq]`, or `where T: Eq` on a fn)` — the same shape rustc 1.97.0 produces (`error[E0369]`, *help:
+consider restricting type parameter `T` with trait `PartialEq`*) and Go 1.26 produces (`invalid
+operation: a == b (incomparable types in type set)`). (The message names both spellings because the
+same check also fires at a bare type ANNOTATION — `struct Reg[K: Hashable]: m: Map[K, int]` — where
+`where` is not grammar at all.) The same rule covers `in`/`contains`/`index_of`/`dedup`/`unique` over
+`List[T]` and a `T` reached as a map key / set element. A type parameter that is never compared pays
+no tax — the
 obligation is per-USE, not a blanket requirement on every `[T]`. `Comparable` already embeds `Eq`, so
 `[T: Comparable]` needs no separate `Eq` bound; `Hashable` does **not** embed `Eq` (Rust's `Hash` has
 no `Eq` supertrait either — `HashSet<T>`/`HashMap<K, V>` spell `Eq + Hash` explicitly), so a generic
@@ -2189,15 +2192,18 @@ hash the container uses, so the method and membership can never disagree; the nu
 **unspecified** (a build-dependent 64-bit hash, possibly negative) — rely on consistency, not on a
 literal.
 
-**`Hashable` alone is not enough to build or index a `Map`/`Set` keyed on `T` — you need `Hashable`
-AND `Eq`.** `Hashable` does **not** embed `Eq` (Rust's own `Hash` trait has no `Eq` supertrait either —
-`HashSet<T>`/`HashMap<K, V>` spell `impl<T: Eq + Hash>` explicitly, not one bound), so a
-`[T: Hashable]` generic that only *calls* `T.hash()` compiles fine, but one whose body constructs or
-indexes a `Map[T, _]`/`Set[T]` (`Set(xs)`, `{x: 1}`, `m[k]`) needs `[T: Hashable + Eq]` — the map/set
-key check runs the SAME `Eq`-bound obligation on a type parameter that `==` does (`docs/gaps.md`
-**W7-53**). A concrete key/element (`Set[Box[Tag]]`) was always checked this way; what changed is that
-the check now also reaches a free `T` inside a generic body instead of skipping it as "not yet
-chosen".
+**`Hashable` alone is not enough to build, index, OR MENTION a `Map`/`Set` keyed on `T` — you need
+`Hashable` AND `Eq`.** `Hashable` does **not** embed `Eq` (Rust's own `Hash` trait has no `Eq`
+supertrait either — `HashSet<T>`/`HashMap<K, V>` spell `impl<T: Eq + Hash>` explicitly, not one
+bound), so a `[T: Hashable]` generic that only *calls* `T.hash()` compiles fine, but the map/set key
+check runs on every `Map[T, _]`/`Set[T]` TYPE the generic's signature or body spells at all — not just
+one it *constructs or indexes*. A bare SIGNATURE mention is enough: `fn h[T: Hashable](xs: Set[T]) ->
+int: return xs.len()` rejects (measured — Go 1.26 agrees: `invalid map key type T (missing comparable
+constraint)`), with no `Set(...)`/`{...}`/`m[k]` anywhere in the body. Needs `[T: Hashable + Eq]` —
+the map/set key check runs the SAME `Eq`-bound obligation on a type parameter that `==` does
+(`docs/gaps.md` **W7-53**). A concrete key/element (`Set[Box[Tag]]`) was always checked this way; what
+changed is that the check now also reaches a free `T` inside a generic body/signature instead of
+skipping it as "not yet chosen".
 
 **Keys are value types (Go model).** A `struct`/`enum`/`newtype` key or element is **snapshotted
 (deep-copied) when it is stored**, so mutating your original value *after* the insert can never reach

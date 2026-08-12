@@ -1514,7 +1514,7 @@ fn g(x: int) -> int:
     );
     entry_rejects(
         &format!("{COND}fn f[T](x: T, y: T) -> bool:\n    return x == y\nprint(f(a, b))\n"),
-        "T is not bounded by Eq (add `where T: Eq`)",
+        "T is not bounded by Eq (add an `Eq` bound to T: `[T: Eq]`, or `where T: Eq` on a fn)",
     );
 
     // ---- the coupling Task 1's walk depends on ----
@@ -1626,13 +1626,13 @@ b := Box(Tag(2))
         &format!(
             "{COND}fn f[T](xs: List[T], x: T) -> bool:\n    return xs.contains(x)\nprint(f([1], 2))\n"
         ),
-        "T is not bounded by Eq (add `where T: Eq`)",
+        "T is not bounded by Eq (add an `Eq` bound to T: `[T: Eq]`, or `where T: Eq` on a fn)",
     );
     entry_rejects(
         &format!(
             "{COND}fn f[T](xs: List[T], x: T) -> bool:\n    return x in xs\nprint(f([1], 2))\n"
         ),
-        "T is not bounded by Eq (add `where T: Eq`)",
+        "T is not bounded by Eq (add an `Eq` bound to T: `[T: Eq]`, or `where T: Eq` on a fn)",
     );
     // `count` takes a PREDICATE, so it never routes through `values_equal` — unaffected.
     entry_ok(&format!(
@@ -1694,14 +1694,14 @@ struct Box[T]:
         &format!(
             "{TAG_BOX}fn f[T](a: T, b: T) -> bool:\n    return a == b\nprint(f(Box(Tag(1)), Box(Tag(2))))\n"
         ),
-        "T is not bounded by Eq (add `where T: Eq`)",
+        "T is not bounded by Eq (add an `Eq` bound to T: `[T: Eq]`, or `where T: Eq` on a fn)",
     );
     // Instance 2 — `List[T].contains`.
     rejects(
         &format!(
             "{TAG_BOX}fn f[T](xs: List[T], b: T) -> bool:\n    return xs.contains(b)\nprint(f([Box(Tag(1))], Box(Tag(2))))\n"
         ),
-        "T is not bounded by Eq (add `where T: Eq`)",
+        "T is not bounded by Eq (add an `Eq` bound to T: `[T: Eq]`, or `where T: Eq` on a fn)",
     );
     // Instance 3 — `[T: Hashable]` alone, `Set(xs)` construction inside the body: `Hashable` does
     // NOT imply `Eq` (measured: embedding it broke the `Holder`-shaped ordinary-`eq`-method escape
@@ -1710,7 +1710,7 @@ struct Box[T]:
         &format!(
             "{TAG_BOX}fn f[T: Hashable](xs: List[T]) -> int:\n    return Set(xs).len()\nprint(f([Box(Tag(1)), Box(Tag(2))]))\n"
         ),
-        "T is not bounded by Eq (add `where T: Eq`)",
+        "T is not bounded by Eq (add an `Eq` bound to T: `[T: Eq]`, or `where T: Eq` on a fn)",
     );
 
     // ---- ok() neighbours derived from the same premise ----
@@ -1850,7 +1850,7 @@ b := Box(Tag(2))
     // `+ Eq` fix; this is the same body with the bound removed).
     rejects(
         "fn f[T: Hashable](xs: List[T]) -> int:\n    return Set(xs).len()\n",
-        "T is not bounded by Eq (add `where T: Eq`)",
+        "T is not bounded by Eq (add an `Eq` bound to T: `[T: Eq]`, or `where T: Eq` on a fn)",
     );
 }
 
@@ -2298,13 +2298,16 @@ fn struct_with_eq_satisfies_eq() {
         "struct Q:\n    x: int\nfn same[T: Eq](a: T, b: T) -> bool:\n    return a.eq(b)\nprint(same(Q(1), Q(2)))\n",
     );
     // The ORDINARY-METHOD escape hatch (`fn eq(self, x: T)`, a generic operand — not the hook, and
-    // `==` leaves it structural) must NOT be laundered into conformance by the D1 grant: an erased
-    // `[T: Eq]` body's `a.eq(b)` dispatches by NAME to that method, which declares an operand it
-    // would never be handed. A type that DECLARES `eq` is decided structurally, so this stays a
-    // wrong-signature rejection exactly as before D1.
-    entry_rejects(
+    // `==` leaves it structural) MUST now be granted `Eq` (C1, W7-53 follow-up review): before this,
+    // `==`/`Map`/`Set` all treated such a type as structurally equal (measured, working), while
+    // `[T: Eq]`/`.eq()` refused it — the exact two-spellings-disagree defect Tasks 1/2 closed for
+    // `Ty::Func`/`Ty::BuiltinFn`/`Ty::Protocol`. `eq_sig_is_hook` now tells the escape hatch apart
+    // from the hook BEFORE the D1 gate falls to the structural check, so a non-hook `eq` is judged
+    // the same as no `eq` at all — granted here since `Opt2[int]`'s payload (`int`) is trivially
+    // `Eq`. `a.eq(b)` dispatches by NAME to the escape-hatch method regardless (unchanged), so the
+    // call itself still runs; only the BOUND obligation is what changed.
+    entry_ok(
         "enum Opt2[T]:\n    Some(T)\n    None\n    fn eq(self, x: T) -> bool:\n        return true\nfn same[T: Eq](a: T, b: T) -> bool:\n    return a.eq(b)\nprint(same(Opt2[int].Some(1), Opt2[int].Some(2)))\n",
-        "does not satisfy Eq",
     );
 }
 
@@ -2317,10 +2320,14 @@ fn eq_wrong_return_type_rejected() {
         "wrong signature",
     );
     // The ARITY half of the same signature rule — `eq` takes exactly one `Self` besides the
-    // receiver. This rejected before the row existed; nothing held it.
+    // receiver. This rejected before the row existed; nothing held it. C1 (W7-53 follow-up):
+    // 1-param `eq` fails `eq_sig_is_hook`'s `params.len() == 2` too, so it is now judged the same
+    // as the ordinary-method escape hatch and D1 no longer runs the redundant structural check —
+    // the single decl-time `validate_eq_shape` error is the only diagnostic, and it already names
+    // the arity requirement directly, so "wrong signature" is no longer the right substring here.
     entry_rejects(
         "struct P:\n    x: int\n    fn eq(self) -> bool:\n        return true\nfn same[T: Eq](a: T, b: T) -> bool:\n    return a.eq(b)\nprint(same(P(1), P(2)))\n",
-        "wrong signature",
+        "it must take exactly one operand",
     );
 }
 

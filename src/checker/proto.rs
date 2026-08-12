@@ -751,32 +751,32 @@ impl Checker {
     /// `eq` runs and the program printed a silent wrong answer at rc=0. `Hashable` does not embed
     /// `Eq` (`embeds: Vec::new()`), so it has to be asked separately.
     ///
-    /// **The second conjunct is deliberately NOT `satisfies(t, "Eq")`, even though Rust's bound is
-    /// `impl<T: Eq + Hash> HashSet<T>`. Do not "correct" it to match Rust.** The obligation here is
-    /// narrower than Rust's because Chezzi's equality is structural by default. The runtime probe is
-    /// `values_equal`, which can only fault when it dispatches a declared **hook** `eq` whose `where`
-    /// bounds fail — exactly what [`Self::eq_bounds_unsatisfied`] detects. A type carrying a
-    /// NON-hook `eq` (the in-tree ordinary-method escape hatch) falls back to structural equality and
-    /// cannot fault, yet it fails `satisfies(_, "Eq")` because the structural check sees a
-    /// wrong-signature hook. So `satisfies(t, "Eq")` would newly reject this **working, measured**
-    /// program — the exact class of regression that got the 2026-08-10 attempt reverted, and got
-    /// **re-measured, W7-53** (`src/checker/mod.rs`'s `prebuilt_protocols` seed): embedding `Eq` into
-    /// `Hashable`'s `ProtocolInfo` (mirroring `Comparable`'s embed) makes THIS conjunct — the
-    /// `self.satisfies(t, "Hashable")` call two lines up — transitively demand full `Eq` satisfaction
-    /// for a CONCRETE `t`, which re-triggers the exact rejection below on a program that runs fine.
-    /// That is why `Hashable` stays `embeds: Vec::new()` — the fallback the W7-53 brief pre-approved —
-    /// and W7-53's third instance closes instead at the DECLARATION of a `[T: Hashable]` generic that
-    /// itself builds/indexes a `Set[T]`/`Map[T, _]`: the second conjunct below, now NOT erased, makes
-    /// `T`'s own `Ty::Param` arm demand `where T: Eq` explicitly (`fn f[T: Hashable + Eq](...)`),
-    /// exactly the two-bound spelling Rust's own `HashSet<T>` uses:
+    /// **The second conjunct calls [`Self::eq_bounds_unsatisfied`] directly rather than
+    /// `self.satisfies(t, "Eq")`, even though the two now agree on every verdict** (a fixed C1,
+    /// W7-53 follow-up review: `satisfies(_, "Eq")` used to WRONGLY refuse a type whose only `eq` is
+    /// the NON-hook ordinary-method escape hatch — see [`Self::eq_sig_is_hook`] — which made
+    /// `key_ty_reject`'s comment below claim this conjunct had "no collateral" from the
+    /// `[K: Hashable + Eq]` fallback; that claim was FALSE at the time W7-53 shipped, since
+    /// `Counter[Key]`/`ConcurrentMap[Key, V]`/`memoize1` over such a `Key` all newly rejected a
+    /// working program, and it is fixed by this same follow-up). Calling `eq_bounds_unsatisfied`
+    /// directly (rather than through `satisfies`) is kept anyway, for two reasons that have nothing
+    /// to do with that bug: it is the one function all FOUR W7-53 gates (`==`, `in`, the `List`
+    /// builtins, this one) already share, so their wording stays consistent; and it is the one that
+    /// carries the cycle-guard/budget machinery `Self::enter_eq_obligation` needs for a recursive
+    /// generic (`struct D { x: List[C[D]] }`) — `satisfies`'s structural fallback for a HOOK `eq`
+    /// checks that method's OWN `where` bounds through a separate, simpler loop
+    /// (`satisfies_methods`'s `where_bounds` walk) that was never exercised against that guard.
     ///
-    /// ```text
-    /// struct Holder[T]:
-    ///     v: T
-    ///     fn hash(self) -> int: return 1
-    ///     fn eq[U](self, o: U) -> bool: return true
-    /// s := Set([Holder(1)])        # rc=0 before and after; `satisfies(_,"Eq")` would refuse it
-    /// ```
+    /// **`Hashable` stays `embeds: Vec::new()` — the `[K: Hashable + Eq]` fallback the W7-53 brief
+    /// pre-approved, kept over embedding `Eq` into `Hashable` (mirroring `Comparable`'s embed).**
+    /// Embedding was re-measured as an ALTERNATIVE to fixing the `satisfies(_, "Eq")` bug above
+    /// (rather than fixing it): it does not substitute for that fix — a non-hook-`eq` `Holder`
+    /// that needed no `Eq` at all before (`Hashable` alone) newly breaks under the embed, `struct
+    /// Holder[T]: v: T; fn hash(self) -> int: return 1; fn eq[U](self, o: U) -> bool: return true`
+    /// then `Set([Holder(1)])` — because `Hashable`'s embed makes `self.satisfies(t, "Hashable")`
+    /// two lines up transitively demand `Eq`, which the STILL-buggy `satisfies` refuses. `[K:
+    /// Hashable + Eq]` is also the more faithful mirror of the ancestor either way (Rust's `Hash`
+    /// has no `Eq` supertrait; `HashSet<T>` spells `impl<T: Eq + Hash>`, not one bound).
     ///
     /// (`Channel`/`Func` are NOT the reason — they never reach this conjunct, because the `Hashable`
     /// gate refuses them first, and a struct merely *holding* a `Channel` satisfies `Eq` fine.)
@@ -1778,10 +1778,22 @@ impl Checker {
         //   is not a writable program and the grant would have no probeable receiver.
         // * not the built-in cursor ([`Self::is_cursor_ty`]) — a `Ty::Struct` whose runtime arms
         //   expose only `next`/`iter`, so the `"struct"` row does not speak for it.
-        // * the type does not DECLARE its own `eq`. One that does is decided structurally below,
-        //   which is what keeps the ordinary-method escape hatch (`fn eq(self, x: T)`, a generic
-        //   operand — not the hook) a wrong-signature rejection: an erased `[T: Eq]` body's
-        //   `a.eq(b)` dispatches by NAME to that method, handing it an operand it never declared.
+        // * the type does not declare the `eq` HOOK. A NON-hook `eq` (the ordinary-method escape
+        //   hatch, `fn eq(self, x: T)` with a generic operand) is dispatched by name only from an
+        //   explicit `.eq(b)` call — `==` never sees it and stays structural — so such a type is
+        //   graded the same as one with no `eq` at all (C1, W7-53 follow-up: before this, `Key` below
+        //   had `==` structural and working while `[T: Eq]`/`.eq()` refused it — the exact
+        //   two-spellings-disagree shape Tasks 1/2 closed for `Ty::Func`/`Ty::BuiltinFn`/
+        //   `Ty::Protocol`):
+        //   ```text
+        //   struct Key: fn hash(self) -> int: return 1
+        //               fn eq[U](self, o: U) -> bool: return true   # non-hook: generic operand
+        //   ```
+        //   A type that DOES declare the hook is decided structurally below: an erased `[T: Eq]`
+        //   body's `a.eq(b)` dispatches by NAME to it, handing it an operand it never declared.
+        //   [`Self::eq_sig_is_hook`] is the single question — same predicate `validate_eq_shape`
+        //   (`sig.rs`) enforces at the declaration, so the two can never disagree about which shape a
+        //   program's `eq` is.
         //
         // …and then the real question: [`Self::eq_bounds_unsatisfied`] — nothing the structural
         // equality walk REACHES is a declared `eq` whose `where` bounds fail for this instantiation
@@ -1792,7 +1804,8 @@ impl Checker {
             && !Self::is_cursor_ty(ty)
             && self
                 .declared_methods(ty)
-                .is_none_or(|m| !m.contains_key("eq"))
+                .and_then(|m| m.get("eq"))
+                .is_none_or(|sig| !Self::eq_sig_is_hook(sig))
         {
             return match self.eq_bounds_unsatisfied(ty) {
                 Some(why) => Err(format!("type {ty} does not satisfy Eq ({why})")),
@@ -2307,6 +2320,14 @@ impl Checker {
         }
     }
 
+    /// Is a struct/enum's declared `eq` [`FnSig`] the `Eq` HOOK `==`/`!=` dispatch to, or the
+    /// ordinary-method escape hatch (a generic operand)? Delegates to [`Self::eq_operand_is_hook`]
+    /// (`sig.rs`) — the same predicate `validate_eq_shape` already enforced at the declaration, so a
+    /// program that compiled has `eq`'s operand as either `Self` or a type parameter, nothing else.
+    fn eq_sig_is_hook(sig: &FnSig) -> bool {
+        sig.params.len() == 2 && Self::eq_operand_is_hook(&sig.params[1])
+    }
+
     /// The methods a struct/enum/newtype DECLARES (`None` for anything else) — for diagnostics that
     /// need to ask "did the user write this method at all?", which conformance alone can't answer.
     fn declared_methods(&self, ty: &Ty) -> Option<&HashMap<String, FnSig>> {
@@ -2768,7 +2789,9 @@ impl Checker {
                 let Some(info) = self.struct_shape(name) else {
                     return Some(Self::shape_invisible(ty));
                 };
-                if let Some(sig) = info.methods.get("eq") {
+                if let Some(sig) = info.methods.get("eq")
+                    && Self::eq_sig_is_hook(sig)
+                {
                     return self.eq_where_unsatisfied(ty, sig);
                 }
                 if let hit @ Some(_) = any(self, args) {
@@ -2784,7 +2807,9 @@ impl Checker {
                 self.walk_eq_members(ty, &fields)
             }
             Ty::Enum(name, args) => {
-                if let Some(sig) = self.enum_methods_of(name).and_then(|m| m.get("eq")) {
+                if let Some(sig) = self.enum_methods_of(name).and_then(|m| m.get("eq"))
+                    && Self::eq_sig_is_hook(sig)
+                {
                     return self.eq_where_unsatisfied(ty, sig);
                 }
                 if let hit @ Some(_) = any(self, args) {
@@ -2825,11 +2850,19 @@ impl Checker {
             // call-site inference), the message names the fix, the way rustc's `help:` does —
             // every one of the four gates that reach this arm wraps `why` behind an em-dash, so
             // the added clause reads naturally at each: "cannot compare T and T for equality — T is
-            // not bounded by Eq (add `where T: Eq`)".
-            Ty::Param(_) => self
-                .satisfies(ty, "Eq")
-                .err()
-                .map(|_| format!("{ty} is not bounded by Eq (add `where {ty}: Eq`)")),
+            // not bounded by Eq (…)".
+            //
+            // I2 — this arm is SITE-BLIND: it is reached both from a fn body (`==`/`in`/`contains`)
+            // where `where T: Eq` is grammar, AND from a decl-site type annotation
+            // (`struct Reg[K: Hashable]: m: Map[K, int]`, via `key_ty_reject` → `resolve_type`'s
+            // `Map`/`Set` arms) where `where` does not exist at all (`<whereClause>` is `fn`/`native
+            // fn`-only, `docs/grammar.bnf`) — `struct Reg[K: Hashable] where K: Eq:` is a PARSE
+            // error. So the message must name both spellings rather than assume a fn body.
+            Ty::Param(_) => self.satisfies(ty, "Eq").err().map(|_| {
+                format!(
+                    "{ty} is not bounded by Eq (add an `Eq` bound to {ty}: `[{ty}: Eq]`, or `where {ty}: Eq` on a fn)"
+                )
+            }),
             // Scalars, the identity handles, `Func`, `Module` — nothing a user `eq` can hide behind,
             // so there is genuinely nothing to prove. `Ty::Unknown` is the don't-cascade hole (a
             // prior error already reported). `Ty::Protocol` is the ONE permissive answer that is not
