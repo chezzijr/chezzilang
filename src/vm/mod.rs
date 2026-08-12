@@ -947,10 +947,18 @@ pub struct Vm {
     /// cap-off run does ZERO added `Instant::now()` calls on the hottest dispatch path. Threaded onto
     /// M:N workers as the SAME absolute instant, so a spawned task shares the parent's deadline.
     deadline: Option<std::time::Instant>,
-    /// `chezzi test --timeout` — a wrapping back-edge counter throttling the clock read: the deadline
-    /// is checked only every 1024th back-edge (the `Instant::now()` read is the cost; the loop
-    /// back-edge is the hottest path). Only ever touched when `deadline` is `Some`.
-    deadline_tick: u16,
+    /// A wrapping counter throttling the SAMPLED rungs of the two CPU-side checkpoints to one in 1024,
+    /// shared by both (it is a sampler, not a position — an interleaved loop and HOF simply sample more
+    /// often, which is harmless):
+    ///
+    /// * [`Vm::jump_checked`]'s loop back-edge — the `--timeout` clock read and the W7-57 `os.exit`
+    ///   flag. Ticks unconditionally there, because the exit rung needs the sample with `--timeout`
+    ///   off; the clock read itself stays behind `deadline.is_some()`.
+    /// * [`Vm::guarded`]'s per-element native-HOF re-entry — the `--timeout` clock read only (its exit
+    ///   rung is a bare atomic load and needs no throttle). Ticks only when `deadline.is_some()`.
+    ///
+    /// Either way a cap-off run does ZERO added `Instant::now()` calls on either hot path.
+    back_edge_tick: u16,
     /// Depth of deferred calls currently executing ([`Vm::run_one_deferred`]). A cancel is NEVER
     /// delivered while this is non-zero: a `defer` IS the cleanup a cancelled task is being unwound
     /// to run, so its body (loops, blocking ops, HOF callbacks — every cancellation checkpoint) must
@@ -3020,6 +3028,37 @@ impl MnSched {
         c.scopes[scope_id].cancel.store(true, Ordering::Relaxed);
     }
 
+    /// gaps.md W7-57 — the run-wide `os.exit` analogue of the intra-nursery abort teardown
+    /// (`mn_worker_loop`'s `if aborts { cancel_drain; drain_sched }`): trip **every** scope's cancel and
+    /// drain every parked fiber, so a nursery that is not the exiting party's own still dies now instead
+    /// of at its natural end. Called for each live sched by [`Vm::halt_all_scheds`].
+    ///
+    /// **The cancel stores go under the core lock** — the release edge [`trip_scope_cancel`] documents.
+    /// A bare `Relaxed` store outside it has no synchronizes-with edge, so a worker already holding the
+    /// lock to evaluate `is_deadlocked` could legally still read `false` and reap the scope's parked
+    /// fibers as `Deadlocked`, dropping their `defer`s.
+    ///
+    /// The lock is DROPPED before `cancel_drain`/`drain_sched`, which take it themselves (`drain_sched`
+    /// keeps the poller registry leaf-level and calls `complete_offload`, which locks this core).
+    ///
+    /// `scopes` is snapshotted by length: a scope registered after this instant is a nursery created
+    /// after the exit was published, whose fibers are covered by `jump_checked`'s back-edge exit rung
+    /// and by every blocking wait's `run_exit_err` — this drain is a promptness lever, not the only one.
+    pub(super) fn cancel_all(self: &Arc<Self>) {
+        let n = {
+            let c = self.lock();
+            for s in &c.scopes {
+                s.cancel.store(true, Ordering::Relaxed);
+            }
+            c.scopes.len()
+        };
+        for scope_id in 0..n {
+            self.cancel_drain(scope_id);
+        }
+        poller::drain_sched(self);
+        self.cv.notify_all();
+    }
+
     /// B3.4 — after a scope's cancel is tripped, move every parked fiber **belonging to that scope**
     /// back onto the global queue so a worker resumes it and it observes the cancel flag (at the recv
     /// re-check / a dispatch back-edge) and unwinds. Cross-nursery flat scheduler: with one global
@@ -3028,6 +3067,9 @@ impl MnSched {
     /// break structured concurrency). Parked entries whose fiber is in a different scope are kept parked
     /// (re-filed into their buckets). A `Recv` entry's scope is read by reference; a `Wait` token's is
     /// PEEKED under its fiber lock before claiming (so a non-matching wait fiber is left intact).
+    ///
+    /// (An `os.exit` reaches every scope by calling this in a loop — [`MnSched::cancel_all`] — rather
+    /// than by relaxing the scope-scoping here, which the structured-concurrency invariant forbids.)
     fn cancel_drain(&self, scope_id: usize) {
         let mut c = self.lock();
         if c.parked_n == 0 {
@@ -3432,15 +3474,12 @@ fn run_offload(
 /// before running a job, so re-arming from inside a job is safe.)
 fn arm_timer_sleep(sched: Arc<MnSched>, mut fiber: Fiber, t: TimerSleep, span: Span) {
     let now = std::time::Instant::now();
-    let halt = if t.cancel.iter().any(|c| c.load(Ordering::Relaxed)) {
-        Some(RuntimeError {
-            message: "cancelled".to_string(),
-            span,
-            is_assert: false,
-            is_over_memory: false,
-            is_timed_out: false,
-        })
-    } else if t.run_deadline.is_some_and(|rd| now >= rd) {
+    // W7-57 — `run_deadline` is evaluated BEFORE `cancel`, and the order is deliberate: a run-wide
+    // `os.exit` now trips every scope's cancel (`MnSched::cancel_all`), so an exit racing an already-
+    // expired `--timeout` would otherwise be reported as `cancelled` and the harness would lose its
+    // `timed_out` marker. `--timeout` is the outer, absolute halt and must outrank. Nothing in-tree
+    // pinned the previous order.
+    let halt = if t.run_deadline.is_some_and(|rd| now >= rd) {
         Some(
             RuntimeError {
                 message: format!("test exceeded --timeout ({}ms)", t.timeout_ms),
@@ -3451,6 +3490,14 @@ fn arm_timer_sleep(sched: Arc<MnSched>, mut fiber: Fiber, t: TimerSleep, span: S
             }
             .timed_out(),
         )
+    } else if t.cancel.iter().any(|c| c.load(Ordering::Relaxed)) {
+        Some(RuntimeError {
+            message: "cancelled".to_string(),
+            span,
+            is_assert: false,
+            is_over_memory: false,
+            is_timed_out: false,
+        })
     } else {
         None
     };
@@ -4310,7 +4357,22 @@ impl crate::native::Host for VmHost<'_> {
         // is per-`Vm`: for an eager `Executor` job it is a value only the join observes, and a `main`
         // parked in `accept()`/`recv()` never reaches the join. The run-scoped cell is what lets every
         // blocking loop see the exit (`Vm::run_exit_err`) — Go's `os.Exit` is immediate.
+        //
+        // W7-57 — the order is: code, then teardown, then flag.
+        // 1. the code first, so anything woken by step 2 already reads it;
+        // 2. halt every live nursery — a party that is SPINNING, `recv`-parked or asleep reaches no
+        //    polling wait, so without this teardown it outlives the exit (a spinner forever);
+        // 3. the flag LAST, so `true` publishes both of the above to whoever reads it.
+        //
+        // Step 3 does NOT make the cancel rung win for a scoped fiber, and an earlier revision of this
+        // comment claimed it did. An `Acquire` load orders only the reads AFTER it, while both CPU
+        // checkpoints read cancel BEFORE exit — so `cancel == false` + `exit == true` is legal, and the
+        // measured result was a sibling `defer` that ran 2/8 times and once died mid-body. That
+        // guarantee lives in [`Vm::exit_halt`], which decides from the flag's PRESENCE and so needs no
+        // ordering; this sequence is only about publishing the code and the teardown before the hint.
         self.vm.quiesce.request_exit(code);
+        self.vm.halt_all_scheds();
+        self.vm.quiesce.mark_exit_pending();
     }
 }
 

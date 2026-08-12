@@ -2094,6 +2094,19 @@ impl Vm {
     /// their un-accounting (`running += 1`, `blocked_native`, `unregister_demoted`, …) BETWEEN learning
     /// of the exit and returning it, exactly as their cancel arms do.
     pub(super) fn run_exit_err(&mut self, span: Span) -> Option<RuntimeError> {
+        // gaps.md W7-57 — NEVER while a `defer` is running, the one suppression `cancel_requested`
+        // has always had. A `defer` IS the cleanup a halt exists to run; killing it PART-WAY leaves
+        // inconsistent state and is worse than either running it or skipping it — and it is
+        // nondeterministic, since whether the exit lands mid-body depends on timing (measured: a
+        // sibling `defer` that printed 2/8, and one killed after its `ENTER` line). Guarded HERE, at
+        // the single funnel every rung routes through, rather than at the seven call sites.
+        //
+        // Cost: an infinitely-looping `defer` delays the exit. That is a pathological program and
+        // `--timeout` (checked ABOVE this rung at every site) already covers it; a half-run cleanup on
+        // an ordinary program does not trade for it.
+        if self.deferring > 0 {
+            return None;
+        }
         let code = self.quiesce.pending()?;
         self.pending_exit = Some(code);
         Some(self.err("exit".to_string(), span))
@@ -2107,7 +2120,7 @@ impl Vm {
         // Checked HERE because a blocked job never reaches `jump_checked`'s loop back-edge, which is
         // where every other path observes the deadline. Without it `chezzi test --timeout` could not
         // kill a job blocked forever on a channel — exactly the hang eager execution makes easier to
-        // write. No `deadline_tick` throttle: this runs once per `DEMOTE_POLL_BACKOFF`, not per op.
+        // write. No `back_edge_tick` throttle: this runs once per `DEMOTE_POLL_BACKOFF`, not per op.
         self.deadline_halt(span)?;
         // `shutdown_now`'s cooperative stop (D4) and an enclosing scope's cancel both arrive here.
         if self.cancel_requested() {

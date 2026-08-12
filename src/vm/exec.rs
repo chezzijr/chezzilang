@@ -157,7 +157,7 @@ impl Vm {
             quiesce: Arc::new(crate::vm::quiesce::QuiesceState::default()),
             timeout_ms: 0,
             deadline: None,
-            deadline_tick: 0,
+            back_edge_tick: 0,
             deferring: 0,
             module_snapshot: None,
             module_faulted: Vec::new(),
@@ -305,25 +305,7 @@ impl Vm {
         &mut self,
         f: impl FnOnce(&mut Self) -> Result<T, RuntimeError>,
     ) -> Result<T, RuntimeError> {
-        // CANCELLATION CHECKPOINT — a native that re-enters user code drives it from a RUST loop
-        // (`list.map`/`filter`/`fold`, `sort`'s comparator, an operator overload, an `Executor`
-        // handler: `for e in .. { self.guarded(|vm| vm.invoke_value(f, ..))? }`, call.rs). That Rust
-        // loop emits no `Op::Jump`, so `jump_checked`'s back-edge never fires inside it and a
-        // straight-line callback body has no back-edge of its own — a cancelled task would burn every
-        // remaining element (with its prints / `Shared` writes / fs writes) to completion. The
-        // per-element re-entry IS this loop's back-edge, so it is where the cancel is delivered; the
-        // `?` on `guarded` aborts the native loop, exactly as the old every-instruction check did via
-        // the callback's nested `run_until`. A DEFERRED call also runs through `guarded`
-        // (`run_one_deferred`) — `cancel_requested` is false while `deferring > 0`, so the defer body
-        // itself is never killed here (that bug swallowed the LIFO-first defer of any task that
-        // returned normally / faulted on its own under a tripped scope flag).
-        if self.cancel_requested()
-            && let Some(fr) = self.frames.last()
-        {
-            let span = fr.call_span;
-            self.cancelled = true;
-            return Err(self.err("cancelled".to_string(), span));
-        }
+        self.guarded_checkpoint()?;
         self.native_reentry += 1;
         // The guard counter MUST return to its entry value on every exit path, including an unwind:
         // it gates park-vs-demote for all blocking concurrency ops, and a re-entered FFI callback's
@@ -337,6 +319,101 @@ impl Vm {
             Ok(v) => v,
             Err(payload) => std::panic::resume_unwind(payload),
         }
+    }
+
+    /// The throttled `--timeout` clock read for [`Vm::guarded_checkpoint`]'s deadline rung, kept
+    /// OUT OF LINE — the one perf-sensitive thing about this whole rung.
+    ///
+    /// `#[cold] #[inline(never)]` is load-bearing and was arrived at by measurement, not taste.
+    /// Written inline in `guarded_checkpoint` the rung cost **+4.5 % on `benches/chz/loop.chz`
+    /// (1.451 s → 1.517 s), a bench that never calls `guarded` at all** — pure code-layout
+    /// perturbation, reproducible across 20-run A/Bs and isolated by deleting only these lines.
+    /// Moving the rungs out of the generic `guarded` body did NOT help (1.520 s); pushing this block
+    /// out of line did: 1.446 s, level with the 1.450 s of the same build without the rung.
+    /// If this is ever inlined back, re-run `hyperfine` on `loop` before believing it is free.
+    #[cold]
+    #[inline(never)]
+    fn hof_deadline_tick(&mut self) -> Result<(), RuntimeError> {
+        self.back_edge_tick = self.back_edge_tick.wrapping_add(1);
+        if self.back_edge_tick.is_multiple_of(1024)
+            && let Some(fr) = self.frames.last()
+        {
+            let span = fr.call_span;
+            self.deadline_halt(span)?;
+        }
+        Ok(())
+    }
+
+    /// The three halt rungs [`Vm::guarded`] runs before re-entering user code — `--timeout`, then
+    /// cancel, then a run-wide `os.exit`, the same order `jump_checked` uses.
+    ///
+    /// Non-generic and out of line: `guarded` is generic over its callback, so its body is
+    /// monomorphized at every call site and these rungs would be duplicated into all of them.
+    #[inline(never)]
+    fn guarded_checkpoint(&mut self) -> Result<(), RuntimeError> {
+        // CANCELLATION CHECKPOINT — a native that re-enters user code drives it from a RUST loop
+        // (`list.map`/`filter`/`fold`, `sort`'s comparator, an operator overload, an `Executor`
+        // handler: `for e in .. { self.guarded(|vm| vm.invoke_value(f, ..))? }`, call.rs). That Rust
+        // loop emits no `Op::Jump`, so `jump_checked`'s back-edge never fires inside it and a
+        // straight-line callback body has no back-edge of its own — a cancelled task would burn every
+        // remaining element (with its prints / `Shared` writes / fs writes) to completion. The
+        // per-element re-entry IS this loop's back-edge, so it is where the cancel is delivered; the
+        // `?` on `guarded` aborts the native loop, exactly as the old every-instruction check did via
+        // the callback's nested `run_until`. A DEFERRED call also runs through `guarded`
+        // (`run_one_deferred`) — `cancel_requested` is false while `deferring > 0`, so the defer body
+        // itself is never killed here (that bug swallowed the LIFO-first defer of any task that
+        // returned normally / faulted on its own under a tripped scope flag).
+        // `chezzi test --timeout` — FIRST, because a wall-clock cap outranks both cancel and exit
+        // (W7-18/W7-17), which is the rung order `jump_checked` uses. Without it this checkpoint was
+        // asymmetric with that one: `--timeout=500` killed a plain loop at 505 ms but let the same work
+        // written as `xs.map(..).fold(..)` run to 1985 ms and report **PASS**. A cap that green-lights a
+        // test which blew through it by 4× is worse than a cap that is merely late — it teaches
+        // distrust of every green run.
+        //
+        // **Not** suppressed while `deferring > 0`, unlike the cancel and exit rungs below — matching
+        // `jump_checked`'s deadline rung exactly. A cap a `defer` can outrun is the same hole one rung
+        // down, and `--timeout` is the backstop those two suppressions are allowed to lean on.
+        //
+        // This fn runs per ELEMENT of every `map`/`filter`/`fold`/`sort_by`, so the tick + clock read
+        // live in the out-of-line [`Vm::hof_deadline_tick`] (see it — the placement is measured, not
+        // stylistic) and are throttled 1/1024 on the shared `back_edge_tick`. The `deadline.is_some()`
+        // gate is checked BEFORE the call, so a run with the cap off — the common case, and every
+        // `chezzi run` — neither ticks nor reads the clock, same as `jump_checked`. `deadline_halt`
+        // produces the `.timed_out()`-marked error the runner reports as `TIMED-OUT`, rather than
+        // re-deriving the message here.
+        if self.deadline.is_some() {
+            self.hof_deadline_tick()?;
+        }
+        if self.cancel_requested()
+            && let Some(fr) = self.frames.last()
+        {
+            let span = fr.call_span;
+            self.cancelled = true;
+            return Err(self.err("cancelled".to_string(), span));
+        }
+        // gaps.md W7-57 — the run-wide `os.exit` rung, BELOW cancel exactly as in `jump_checked`. The
+        // per-element re-entry is this Rust loop's only back-edge, so without it a party with no
+        // applicable cancel flag — a top-level `main`, an eager `Executor` job — runs the whole HOF to
+        // completion after the exit. Measured on the release binary: `range(0, 10_000_000).map(f)
+        // .fold(0, g)` on `main` beside a job exiting at 50 ms ran the full 2154 ms AND printed its
+        // completion line, versus Go's immediate `os.Exit`.
+        //
+        // (`--timeout` had the identical gap at this checkpoint and is closed by the rung ABOVE — the
+        // two were found together and are fixed together; see it for why it is first and unthrottled by
+        // `deferring`.)
+        //
+        // [`Vm::exit_halt`], not `run_exit_err`: it is suppressed while `deferring > 0` — which is the
+        // whole reason this fn raises that counter before calling here — and it sends a fiber that
+        // holds a cancel flag down the `Cancelled` path so its `defer`s still run.
+        if self.quiesce.exit_pending()
+            && let Some(fr) = self.frames.last()
+        {
+            let span = fr.call_span;
+            if let Some(e) = self.exit_halt(span) {
+                return Err(e);
+            }
+        }
+        Ok(())
     }
 
     // ----- experimental generators (VM-only) -----
@@ -538,15 +615,28 @@ impl Vm {
             self.program.protos[proto].is_test,
             "invoke_test called on a non-test proto"
         );
-        self.reset_over_memory();
-        // The run-wide `os.exit` latch is per-RUN, and one `Vm` serves the whole test FILE — so a
-        // `test fn` that calls `os.exit` would otherwise halt every later test that blocks (they read
-        // the latch in `Vm::run_exit_err`). Each `test fn` is its own run for this purpose.
-        self.quiesce.clear_exit();
-        self.arm_deadline();
+        self.reset_for_invoke();
         let home = self.entry_home();
         self.run_proto(proto, home, None, Vec::new(), true, false, Span::RUNTIME)?;
         Ok(())
+    }
+
+    /// The per-invocation reset EVERY `chezzi test` entry point shares — [`Vm::invoke_test`],
+    /// [`Vm::invoke_suite_method`] (test methods AND all four lifecycle hooks) and
+    /// [`Vm::build_suite_instance`]. One `Vm` serves the whole test FILE, so whatever one invocation
+    /// latches must be dropped before the next: the heap `over_cap` latch, the wall-clock deadline,
+    /// and the run-wide `os.exit` cell.
+    ///
+    /// **The `os.exit` reset lives here, not at one call site.** W7-47's defect #1 put
+    /// `clear_exit` in `invoke_test` alone, so an `os.exit` inside a SUITE method latched for the rest
+    /// of the file: every later method and every `after_each`/`after_all` hook died with `exit`,
+    /// falsifying `test_runner`'s "after_each always runs, even on failure, like `defer`". W7-57's
+    /// back-edge rung escalated it from "later tests that BLOCK" to anything containing a loop or a
+    /// native HOF (measured: `B::b_loops`, a bare `while`, went `PASS` → `ERROR … exit`).
+    fn reset_for_invoke(&mut self) {
+        self.reset_over_memory();
+        self.quiesce.clear_exit();
+        self.arm_deadline();
     }
 
     /// Bare `chezzi run` with a `module:function` manifest entrypoint — invoke a named top-level
@@ -605,16 +695,14 @@ impl Vm {
         proto: ProtoId,
         recv: Value,
     ) -> Result<Value, RuntimeError> {
-        self.reset_over_memory();
-        self.arm_deadline();
+        self.reset_for_invoke();
         let home = self.entry_home();
         self.run_proto(proto, home, None, vec![recv], true, false, Span::RUNTIME)
     }
 
     /// `chezzi test` — construct a suite instance via its synthetic zero-arg `__new_<Suite>` thunk.
     pub fn build_suite_instance(&mut self, new_thunk: ProtoId) -> Result<Value, RuntimeError> {
-        self.reset_over_memory();
-        self.arm_deadline();
+        self.reset_for_invoke();
         let home = self.entry_home();
         self.run_proto(
             new_thunk,
@@ -681,7 +769,7 @@ impl Vm {
         } else {
             Some(std::time::Instant::now() + std::time::Duration::from_millis(self.timeout_ms))
         };
-        self.deadline_tick = 0;
+        self.back_edge_tick = 0;
     }
 
     /// Clear the heap `over_cap` latch so a tripped test never taints the next on this reused VM.
@@ -1494,20 +1582,38 @@ impl Vm {
             // Zero clock reads when the cap is OFF: the `Some` guard short-circuits before any
             // `Instant::now()`. Throttled to one read per 1024 back-edges (the read is the cost). The
             // `is_timed_out` marker alone drives the recover-bypass — no `self.cancelled` latch.
-            if let Some(dl) = self.deadline {
-                self.deadline_tick = self.deadline_tick.wrapping_add(1);
-                if self.deadline_tick.is_multiple_of(1024) && std::time::Instant::now() >= dl {
-                    return Err(self
-                        .err(
-                            format!("test exceeded --timeout ({}ms)", self.timeout_ms),
-                            span,
-                        )
-                        .timed_out());
-                }
+            // The 1/1024 sample is shared by both wall-clock rungs below. Hoisted OUT of the `deadline`
+            // guard (W7-57) because the exit rung needs it even when `--timeout` is off; the clock read
+            // itself stays behind `Some(dl)`, so an uncapped run still reads no clock.
+            self.back_edge_tick = self.back_edge_tick.wrapping_add(1);
+            let sampled = self.back_edge_tick.is_multiple_of(1024);
+            if sampled
+                && let Some(dl) = self.deadline
+                && std::time::Instant::now() >= dl
+            {
+                return Err(self
+                    .err(
+                        format!("test exceeded --timeout ({}ms)", self.timeout_ms),
+                        span,
+                    )
+                    .timed_out());
             }
             if self.cancel_requested() {
                 self.cancelled = true;
                 return Err(self.err("cancelled".to_string(), span));
+            }
+            // gaps.md W7-57 — a run-wide `os.exit` from another party. This is the checkpoint for the
+            // shapes NO blocking wait can reach: a spinning top-level `main` (`cancel == None`,
+            // `cancel_outer` empty — it hung forever) and a spinning eager `Executor` job (whose
+            // `cancel` is its executor's `shutdown_now` token, which an `os.exit` must NOT trip). So the
+            // rung is deliberately NOT gated on "has no cancel flag" — the job HAS one, it is just the
+            // wrong one.
+            //
+            // BELOW cancel, and routed through [`Vm::exit_halt`] rather than `run_exit_err` — that
+            // helper is what makes a SCOPED fiber unwind as `Cancelled` (defers intact) while a
+            // flagless one gets the exit sentinel, and what suppresses both inside a `defer`.
+            if sampled && let Some(e) = self.exit_halt(span) {
+                return Err(e);
             }
         }
         self.frames.last_mut().unwrap().ip = target;
@@ -1526,6 +1632,41 @@ impl Vm {
     ///   first deferred call returns `cancelled` and the defer body never executes.
     pub(super) fn cancel_requested(&self) -> bool {
         !self.cancel_suppressed() && self.cancel_flags().any(|c| c.load(Ordering::Relaxed))
+    }
+
+    /// gaps.md W7-57 — how the two CPU-side checkpoints ([`Vm::jump_checked`]'s loop back-edge,
+    /// [`Vm::guarded`]'s native-HOF re-entry) deliver a run-wide `os.exit`. These two are the only
+    /// halts a spinning party ever reaches, and they need one thing the blocking rungs' bare
+    /// [`Vm::run_exit_err`] does not give them:
+    ///
+    /// **A fiber that HOLDS a cancel flag unwinds as `Cancelled`, not as an exit** — so it runs its
+    /// `defer`s exactly as it does for a sibling fault, matching `--serial` and the pre-W7-57
+    /// behaviour. Ordering the publication (`request_exit` → `halt_all_scheds` → flag) does NOT
+    /// achieve this and the claim that it did was wrong: an `Acquire` load orders only the reads that
+    /// FOLLOW it, and both sites read cancel BEFORE exit, so `cancel == false` + `exit == true` is a
+    /// legal interleaving. Measured as a nondeterministic `defer`: 2/8 runs, and one killed mid-body.
+    /// Deciding it HERE, from the flag's mere presence, makes it deterministic instead.
+    ///
+    /// A party with NO flag at all still gets `pending_exit` + the `"exit"` sentinel: a top-level
+    /// `main` (`cancel == None`, `cancel_outer` empty), which is precisely the shape that hung
+    /// forever. An eager `Executor` job DOES hold one (its executor's `shutdown_now` token), so it
+    /// takes the cancel path — it still dies promptly, and its submitter's join reports the code.
+    ///
+    /// `cancel_suppressed()` gates both arms, so a `defer` body is never entered *or* truncated by
+    /// this rung; and `pending()` — the `Mutex` cell, the authority — is confirmed before either arm,
+    /// because the atomic is only a lock-free HINT and a `chezzi test` reset clears the cell.
+    fn exit_halt(&mut self, span: Span) -> Option<RuntimeError> {
+        if self.cancel_suppressed()
+            || !self.quiesce.exit_pending()
+            || self.quiesce.pending().is_none()
+        {
+            return None;
+        }
+        if self.cancel_flags().next().is_some() {
+            self.cancelled = true;
+            return Some(self.err("cancelled".to_string(), span));
+        }
+        self.run_exit_err(span)
     }
 
     /// The flags `cancel_requested()` reads: this fiber's own scope flag plus every ENCLOSING scope's

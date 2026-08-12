@@ -1317,8 +1317,27 @@ impl Vm {
             }
             self.demoted = true;
         }
-        // 3. Sleep in place (the worker is covered by the replacement).
-        std::thread::sleep(std::time::Duration::from_millis(ms));
+        // 3. Sleep in place (the worker is covered by the replacement), CHUNKED at `DEMOTE_POLL_BACKOFF`
+        //    exactly like `Vm::block_until_deadline` — W7-57. One uninterruptible `thread::sleep(ms)`
+        //    made the cancel / `os.exit` rungs below reachable only AFTER the full sleep (measured: an
+        //    `xs.map(fn(x): sleep_ms(3000))` in a nursery task survived a sibling job's `os.exit(3)` for
+        //    3012 ms). The loop decides only WHEN to stop sleeping; classification stays entirely with
+        //    the two arms below, in their existing order, so no state is touched here.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(ms);
+        loop {
+            let now = std::time::Instant::now();
+            if now >= deadline {
+                break;
+            }
+            std::thread::sleep(DEMOTE_POLL_BACKOFF.min(deadline - now));
+            // `deferring == 0` mirrors the suppression `run_exit_err` (and `cancel_requested`) apply
+            // below: inside a `defer` neither arm will fire, so cutting the sleep short here would
+            // silently SHORTEN a deferred `sleep_ms` instead of halting anything.
+            if self.cancel_requested() || (self.deferring == 0 && self.quiesce.pending().is_some())
+            {
+                break;
+            }
+        }
         // 4. Un-account inflight → running (the `+1` is essential — the fiber's next dispatch does
         //    `running -= 1`, which would underflow without this restore).
         {
@@ -1337,8 +1356,8 @@ impl Vm {
             return Err(self.err("cancelled".to_string(), span));
         }
         // W7-47 — a run-wide `os.exit` observed during/after the sleep, below cancel like every other
-        // site. Same residual as the cancel check above: the `thread::sleep` is uninterruptible, so the
-        // exit aborts the REST of the callback loop rather than the sleep already in progress.
+        // site. Since W7-57 chunked step 3 this aborts the sleep ITSELF within one
+        // `DEMOTE_POLL_BACKOFF`, not merely the rest of the callback loop (measured 3012 ms → 63 ms).
         if let Some(e) = self.run_exit_err(span) {
             return Err(e);
         }
@@ -2338,6 +2357,30 @@ impl Vm {
             if let Some(woken) = level.blocked_on.remove(&key) {
                 level.ready.extend(woken);
             }
+        }
+    }
+
+    /// gaps.md W7-57 — a run-wide `os.exit` must tear every live nursery down NOW, exactly as an
+    /// intra-nursery fault/exit already does for its OWN scope (`mn_worker_loop`'s `if aborts { … }`).
+    /// Without it the exit is observed only by the POLLING waits, so a party that is spinning, parked on
+    /// a `recv`, or asleep outlives it — Go's `os.Exit` kills all three within a few ms.
+    ///
+    /// The registry walk is [`Vm::wake_on_send`]'s, verbatim: upgrade the `Weak`s, prune the dead, DROP
+    /// the registry lock, then touch each sched. Lock order stays `sched_registry → SchedCore`, and
+    /// `request_exit` runs from an `Inline` native with no sched core lock held.
+    pub(super) fn halt_all_scheds(&self) {
+        let mut g = self
+            .sched_registry
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if g.is_empty() {
+            return;
+        }
+        let live: Vec<_> = g.iter().filter_map(|w| w.upgrade()).collect();
+        g.retain(|w| w.strong_count() > 0);
+        drop(g);
+        for s in live {
+            s.cancel_all();
         }
     }
 

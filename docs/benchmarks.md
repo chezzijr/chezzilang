@@ -1481,3 +1481,35 @@ the pre-change binary to cancel drift:
 three-way attribution (HEAD 14–15 ms / `W7-56` R1–R3 17–18 ms / plus the `W7-58` bounded wait
 16–18 ms) puts it on **`W7-56`'s R3 `quiesced()`-per-quiesce**, which shipped earlier. The bounded
 wait itself is inside the noise.
+
+## W7-57 — the halt rung must be `#[cold]`, and the control bench moved too (2026-08-12)
+
+`W7-57` added a 1/1024-sampled halt check to the interpreter's loop back-edge (`jump_checked`) and to
+`Vm::guarded` (the per-element native-HOF re-entry). Two measurements worth keeping.
+
+**1. Inlining the rung cost +4.5% on a bench that never executes it.**
+
+| `loop.chz` | |
+|---|---|
+| HEAD `3e71ac41` | 1.437 s |
+| final source minus *only* this rung | 1.451 s |
+| **rung inlined** | **1.517 s** |
+| rung inlined, hoisted out of the generic `guarded` body | 1.520 s |
+| **rung in a `#[cold] #[inline(never)]` helper** | **1.446 s** |
+
+`loop.chz` never calls `guarded`. This is pure code-layout perturbation, reproducible across 20-run
+A/Bs and isolated by deleting exactly those lines. Hoisting the rungs out of the monomorphized
+`guarded` body did nothing; pushing the sampled block **out of line** fixed it. **Re-run hyperfine
+before believing a sampled check on these paths is free.**
+
+**2. The final delta is noise, and the control proves it.** Independent hyperfine A/B, 20 runs,
+HEAD `3e71ac41` vs final:
+
+| bench | HEAD | final | delta |
+|---|---|---|---|
+| `loop` | 1.443 s ± 0.010 | 1.458 s ± 0.015 | +1.0% |
+| `list` | 579.0 ms ± 4.7 | 584.6 ms ± 6.9 | +1.0% |
+| **`fib` (control)** | 382.5 ms ± 4.9 | 387.1 ms ± 5.5 | **+1.2%** |
+
+`fib` is call-bound with **zero loops** — the back-edge rung cannot touch it — yet it moved by more
+than `loop` did. So the ~1% is build/layout noise, not the change, and the `loop` band (±1.5%) holds.

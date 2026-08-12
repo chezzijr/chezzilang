@@ -2,6 +2,53 @@
 
 Single source of truth for "what am I doing next." Update after every work session.
 
+> **✅ W7-57 landed 2026-08-12 — a run-wide `os.exit` reaches every party, not just the polling ones.**
+> `docs/gaps.md`'s `W7-57` is CLOSED, and with it the whole `W7-47` → `W7-56` → `W7-58` → `W7-57`
+> chain. **The row as filed understated the bug**: it said "none is a correctness hazard — the exit
+> code is right in every case, only its latency is wrong", and both halves were false. Measured
+> against Go 1.26.5:
+>
+> | shape | before | after | Go |
+> |---|---|---|---|
+> | spinning nursery task | **rc=124, hangs forever** | rc=3, 62 ms | rc=3, 53 ms |
+> | `recv`-parked task | rc=3 at 3012 ms, **printed a line Go never prints** | rc=3, 62 ms | rc=3, 53 ms |
+> | `sleep_ms(3000)` task | rc=3 at 3012 ms, same leak | rc=3, 62 ms | rc=3, 53 ms |
+> | spinning top-level `main` | **hangs forever** (row never named it) | rc=3, 65 ms | — |
+> | spinning eager job | **hangs forever** (row never named it) | rc=3, 62 ms | — |
+>
+> **Almost no new machinery was needed** — every checkpoint already existed, and they are all
+> `cancel_requested()` sites. What was missing is that `request_exit` never ran the teardown an
+> *intra-nursery* `os.exit` has run since B3.4. It now walks `W7-56`'s `sched_registry` and trips
+> every scope's cancel (under the core lock, for the release edge) plus `cancel_drain` +
+> `poller::drain_sched`. That one push closes the parked, sleeping, netpoller-parked and
+> in-callback shapes with **zero new polling loops**; `sleep_ms` needed no new chunking because
+> W7-16's re-arm already reads exactly those flags. Only the CPU-bound shapes needed a new rung: a
+> 1/1024-sampled atomic check on the loop back-edge and in the native-HOF re-entry, for the two
+> parties no cancel reaches.
+>
+> **Adversarial review (three prosecutors, two converging) found three defects, all reproduced before
+> acceptance.** The worst: a cancelled sibling's `defer` was **destroyed, sometimes half-run** — 0/10
+> vs 6/6 pre-fix, with bodies dying mid-loop, and it broke serial↔M:N agreement. A half-executed
+> cleanup is worse than either extreme; suppressing the rung while `deferring > 0` at the shared
+> funnel fixed it (and covered four pre-existing `W7-47` rungs nobody had charged) — now whole 30/30,
+> partial 0/30. Second: `exit_pending` **poisoned every later suite test and hook**, `W7-47`'s defect
+> #1 one layer down. Third: a memory-ordering claim that did not hold, now deleted rather than
+> softened.
+>
+> **One asymmetry this change itself created was also closed:** the new exit rung went into
+> `Vm::guarded` without the deadline check beside it, so `--timeout=500` reported **`PASS` on a test
+> that ran 1985 ms**. `guarded` now runs `deadline → cancel → exit` like `jump_checked`. Perf note
+> worth keeping: the rung had to live in a `#[cold] #[inline(never)]` helper — inlined it cost
+> **+4.5% on `loop.chz`, a bench that never calls `guarded`**. Final independent A/B: `loop` +1.0%,
+> `list` +1.0%, and `fib` — the zero-loop control the rung cannot touch — **also +1.2%**, so the
+> movement is layout noise.
+>
+> **One limit measured and deliberately NOT filed as a follow-up:** a fiber inside an offloaded
+> blocking-pool native (`process.cmd("sleep 5")`) has no checkpoint after entry — identical for a
+> sibling fault (5013 ms), `os.exit` (5015 ms) and `--timeout=500` (5008 ms, test still PASSED), so it
+> is not exit-specific. Reaching it needs a signal, an fd close, or `process::exit`, and `stream.rs`
+> refuses the last for documented reasons.
+
 > **✅ W7-58 landed 2026-08-12 — a nursery owner is a counted party AND a judge, so a run stuck across
 > the nursery/executor boundary faults instead of hanging.** `docs/gaps.md`'s `W7-58` is CLOSED, and
 > with it the last of the `W7-47`/`W7-56` chain. Measured: a job blocked forever on one channel beside a
@@ -94,7 +141,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > unmodified pre-fix binary with no `os.exit` anywhere: a live eager `Executor` job does not veto the
 > nursery deadlock predicate, so `parallel: spawn waiter()` waiting on a job that *will* `send` dies at
 > ~11 ms with `deadlock: … the nursery cannot progress` where Go completes. `parked-is-not-stuck`
-> again; it needs its own task because widening this predicate has `W7-12`'s history. **`W7-57`** — the
+> again; it needs its own task because widening this predicate has `W7-12`'s history. **`W7-57`** (since FIXED, see above) — the
 > `W7-47` residual ceilings: a CPU-spinning party, a snapshot-parked fiber, and an in-flight `sleep_ms`
 > outlive a run-wide exit (measured 312 ms vs Go's 50 ms). All three want a wake, not a check; the exit
 > *code* is right in every case, only its latency is wrong.

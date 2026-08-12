@@ -50,6 +50,7 @@
 //! runs many programs concurrently in ONE process, and a process-global registry would let one run's
 //! blocked parties be counted against another run's.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use super::core::{ChannelCore, ExecRegistry};
@@ -194,6 +195,27 @@ pub(super) struct QuiesceState {
     /// `test fn` that calls `os.exit` would latch the cell and halt every LATER test that blocks.
     /// [`Vm::invoke_test`] clears it, beside the other per-test resets.
     exit: Mutex<Option<i32>>,
+    /// gaps.md W7-57 — the lock-free mirror of `exit.is_some()`, for the two CPU-side checkpoints that
+    /// cannot afford a mutex: `jump_checked`'s loop back-edge (sampled 1/1024) and `guarded`'s
+    /// per-element native-HOF re-entry. A party that is spinning in a loop or grinding through a
+    /// `map`/`fold` reaches no blocking wait at all, so the `Mutex<Option>` above — read only by the
+    /// demote/poll loops — never reaches it and the run hangs forever, or finishes work Go would not.
+    ///
+    /// Stored **`Release` AFTER** the code and after [`super::Vm::halt_all_scheds`], and loaded
+    /// `Acquire` — which publishes the code and the scope-cancel stores to whoever reads `true`, and
+    /// nothing more. **It does NOT order the two rungs against each other**: an acquire orders only
+    /// the reads that FOLLOW it, and both CPU checkpoints read cancel BEFORE exit, so a stale
+    /// `cancel == false` beside `exit == true` is a legal interleaving. An earlier revision leaned on
+    /// that ordering to keep a scoped fiber on the `Cancelled` path and it was simply wrong — measured
+    /// as a sibling `defer` running 2/8 times, once truncated mid-body. [`super::Vm::exit_halt`]
+    /// decides from the flag's PRESENCE instead, which needs no ordering at all.
+    ///
+    /// **Only ever a HINT.** The `exit` `Mutex` above is the authority: every reader confirms
+    /// `pending()` before acting, so a stale `true` costs one uncontended lock per 1024 back-edges and
+    /// nothing else. [`clear_exit`](Self::clear_exit) still clears it (paired with the cell it
+    /// mirrors, and it saves that lock), but correctness does not rest on that store — it rests on the
+    /// cell, which every `chezzi test` entry point resets via `Vm::reset_for_invoke`.
+    exit_pending: AtomicBool,
 }
 
 impl QuiesceState {
@@ -209,9 +231,25 @@ impl QuiesceState {
         *self.exit.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    /// Drop a latched exit — the per-test reset (`Vm::invoke_test`); see the field's doc.
+    /// W7-57 — latch the back-edge flag. Called by the host `request_exit` AFTER the code is published
+    /// and after every live sched has been halted; see the field's doc for why the order is required.
+    pub(super) fn mark_exit_pending(&self) {
+        self.exit_pending.store(true, Ordering::Release);
+    }
+
+    /// W7-57 — the lock-free "is there a run-wide exit?" the CPU-side checkpoints ask, so they need no
+    /// mutex on the hot path. A `true` is only a HINT: `Vm::exit_halt` and `Vm::run_exit_err` both
+    /// confirm `pending()` before acting, so a spurious `true` is a self-healing no-op.
+    pub(super) fn exit_pending(&self) -> bool {
+        self.exit_pending.load(Ordering::Acquire)
+    }
+
+    /// Drop a latched exit — the per-invocation reset (`Vm::reset_for_invoke`, shared by every
+    /// `chezzi test` entry point); see the field's doc. The `exit` cell is the load-bearing half; the
+    /// atomic is cleared with it to keep the mirror honest and to save the confirming lock.
     pub(super) fn clear_exit(&self) {
         *self.exit.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        self.exit_pending.store(false, Ordering::Release);
     }
 
     /// Register a blocked party for as long as the returned guard lives.
