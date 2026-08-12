@@ -1460,3 +1460,24 @@ before the lock — introduces a second source of truth for the registry, which 
 `quiesce.rs:25-28` refuses for `outstanding` ("an UNDER-count is the one error direction that produces
 a false deadlock"). A stale flag here would resurrect the lost wakeup that was half of `W7-56`. Revisit
 only if a channel bench lands and shows this on a profile.
+
+## W7-58 — the nursery judge costs nothing on the healthy path (2026-08-12)
+
+`W7-58` made a nursery owner escalate to the process-wide `quiesced()` verdict, and bounded its idle
+wait to `DEMOTE_POLL_BACKOFF`. Both are gated on the sched **already being stuck-modulo-jobs**, so a
+healthy nursery keeps its untimed `cv.wait` and never runs either. Measured, interleaved A/B against
+the pre-change binary to cancel drift:
+
+| program | before | after |
+|---|---|---|
+| all **48** concurrency `examples/` | — | identical rc **and** identical wall time |
+| `primes_parallel` | 12227 ms | 12103 ms |
+| `demo_speedup` | 734 ms | 734 ms |
+| `socket_timeout` | 509 ms | 509 ms |
+| `W7-56` healthy repro (job feeds a parked nursery task) | 57 ms | 57 ms |
+| 200k channel `send`/`recv` at top level | unchanged | unchanged (no nursery, no executor — none of the new code runs) |
+
+**The one measurable cost is not this change.** 300 job↔nursery handoffs went 14 ms → 17 ms, and a
+three-way attribution (HEAD 14–15 ms / `W7-56` R1–R3 17–18 ms / plus the `W7-58` bounded wait
+16–18 ms) puts it on **`W7-56`'s R3 `quiesced()`-per-quiesce**, which shipped earlier. The bounded
+wait itself is inside the noise.

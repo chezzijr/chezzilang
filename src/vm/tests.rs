@@ -6655,6 +6655,245 @@ fn mnsched_outstanding_eager_job_vetoes_the_deadlock_until_it_finishes() {
     );
 }
 
+// ----- gaps.md W7-58 — the nursery OWNER is a counted party of the process-wide verdict -----
+
+/// W7-58, the REFACTOR FENCE. `is_deadlocked` was split into "the W7-56 outstanding-job veto" plus
+/// `is_deadlocked_ignoring_jobs` (the old body).
+///
+/// **It asserts the VERDICT, not the agreement.** With an empty registry `is_deadlocked` literally
+/// delegates, so `f(x) == f(x)` is a tautology and would stay green if the move had dropped a gate on
+/// the way. So each state below pins the concrete expected answer: drop `any_body_open`,
+/// `all_incomplete_awaiting_builder` or `any_cancelled_scope_awaiting_drain` from the moved body and
+/// exactly one of these flips. The delegation check rides along, but it is not the fence.
+///
+/// Walks the states the predicate's own gates discriminate, in order.
+#[test]
+fn w758_is_deadlocked_ignoring_jobs_matches_is_deadlocked_with_no_executors() {
+    let check = |sched: &MnSched, want: bool, what: &str| {
+        let c = sched.lock();
+        assert_eq!(
+            sched.is_deadlocked_ignoring_jobs(&c),
+            want,
+            "wrong verdict for: {what}"
+        );
+        assert_eq!(
+            sched.is_deadlocked(&c),
+            sched.is_deadlocked_ignoring_jobs(&c),
+            "with an empty registry the veto is a no-op, so the two must agree: {what}"
+        );
+    };
+    // (a) fresh, nothing seeded — no incomplete scope, so nothing to be stuck about.
+    check(&mk_sched(0), false, "no tasks at all");
+    // (b) seeded and runnable — work is queued.
+    let sched = mk_sched(1);
+    sched.seed(vec![mk_fiber(0)]);
+    check(&sched, false, "one runnable fiber");
+    // (c) running.
+    let f = take_run(&sched);
+    check(&sched, false, "one running fiber");
+    // (d) all parked, nothing runnable/inflight → the genuine deadlock state.
+    let chan = empty_core();
+    sched.park(core_key(&chan), &chan, f);
+    check(&sched, true, "all parked with no possible feeder");
+    // (e) `body_open` veto — an eager nursery body may still `inject` a feeder.
+    sched.open_body(0);
+    check(&sched, false, "body open");
+    sched.close_body(0);
+    check(&sched, true, "body closed again");
+    // (f) `awaiting_builder` veto — needs a SECOND scope (`all_incomplete_awaiting_builder` returns
+    // false at `scopes.len() == 1`), i.e. exactly the early-enlisted shape it exists for.
+    let two = mk_sched(1);
+    let s1 = two.register_scope(1, Arc::new(AtomicBool::new(false)), Vec::new());
+    two.seed(vec![mk_fiber(0)]);
+    let g = take_run(&two);
+    two.park(core_key(&chan), &chan, g);
+    check(&two, true, "two incomplete scopes, all parked");
+    {
+        let mut c = two.lock();
+        c.scopes[0].awaiting_builder = true;
+        c.scopes[s1].awaiting_builder = true;
+    }
+    check(&two, false, "every incomplete scope awaits its builder");
+    // (g) cancelled-scope-awaiting-drain veto — its parked fibers are about to be requeued to unwind.
+    sched.trip_scope_cancel(0);
+    check(&sched, false, "cancelled scope awaiting drain");
+    sched.cancel_drain(0);
+}
+
+/// W7-58 — `PartyWait::Nursery` answers the nursery's OWN predicate, live, on every evaluation.
+///
+/// This is the "a wait predicate that answers a CONSTANT is a bug waiting for a window" fence: the
+/// arm must be unsatisfiable ONLY while the sched is genuinely stuck, and satisfiable again the
+/// instant ANY of `is_deadlocked_ignoring_jobs`'s vetoes holds. Each veto is exercised in turn,
+/// because a snapshot taken at registration would pass the first assertion and fail every later one.
+#[test]
+fn w758_nursery_party_is_satisfiable_whenever_the_sched_can_still_move() {
+    let sched = Arc::new(mk_sched(1));
+    let party = crate::vm::quiesce::PartyWait::Nursery(Arc::clone(&sched));
+    sched.seed(vec![mk_fiber(0)]);
+    assert!(
+        party.satisfiable(),
+        "a runnable fiber → the nursery can move"
+    );
+    let f = take_run(&sched);
+    assert!(
+        party.satisfiable(),
+        "a running fiber → the nursery can move"
+    );
+    let chan = empty_core();
+    sched.park(core_key(&chan), &chan, f);
+    assert!(
+        !party.satisfiable(),
+        "the only fiber is parked with nothing to feed it — the owner's wait CANNOT end"
+    );
+    // …and now each veto in turn puts it back to satisfiable. `runnable`:
+    sched.inject(mk_pending_fiber(1), 0);
+    assert!(party.satisfiable(), "runnable > 0");
+    let g = take_run(&sched);
+    assert!(party.satisfiable(), "running > 0");
+    sched.park(core_key(&chan), &chan, g);
+    assert!(!party.satisfiable(), "back to stuck");
+    // `inflight` (a blocking-pool call WILL come back):
+    sched.inflight.fetch_add(1, Ordering::Relaxed);
+    assert!(party.satisfiable(), "inflight > 0");
+    sched.inflight.fetch_sub(1, Ordering::Relaxed);
+    // `blocked_native` is deliberately NOT a veto, and that asymmetry with `inflight` is the point: an
+    // `inflight` fiber WILL come back from the pool, a demoted one comes back only if a sibling sends,
+    // so an all-parked-or-demoted quiesce IS a deadlock. Assert it rather than describe it.
+    sched.blocked_native.fetch_add(1, Ordering::Relaxed);
+    assert!(
+        !party.satisfiable(),
+        "a demoted fiber is not a feeder — `blocked_native` must NOT veto the way `inflight` does"
+    );
+    sched.blocked_native.fetch_sub(1, Ordering::Relaxed);
+    // `body_open` (eager nursery still injecting):
+    sched.open_body(0);
+    assert!(party.satisfiable(), "body_open");
+    sched.close_body(0);
+    // a cancelled scope mid-teardown:
+    sched.trip_scope_cancel(0);
+    assert!(party.satisfiable(), "cancelled scope awaiting drain");
+    sched.cancel_drain(0);
+    // every scope complete → nothing to wait for at all:
+    let done = Arc::new(mk_sched(0));
+    assert!(
+        crate::vm::quiesce::PartyWait::Nursery(done).satisfiable(),
+        "a sched with no incomplete scope is not stuck"
+    );
+    // `awaiting_builder` — needs its own fixture: the veto is defined only for a MULTI-scope sched
+    // (`all_incomplete_awaiting_builder` returns false at `scopes.len() == 1`), i.e. exactly the
+    // early-enlisted shape it exists for.
+    let two = Arc::new(mk_sched(1));
+    let s1 = two.register_scope(1, Arc::new(AtomicBool::new(false)), Vec::new());
+    let two_party = crate::vm::quiesce::PartyWait::Nursery(Arc::clone(&two));
+    two.seed(vec![mk_fiber(0)]);
+    let h = take_run(&two);
+    two.park(core_key(&chan), &chan, h);
+    assert!(
+        !two_party.satisfiable(),
+        "both scopes incomplete, all parked"
+    );
+    {
+        let mut c = two.lock();
+        c.scopes[0].awaiting_builder = true;
+        c.scopes[s1].awaiting_builder = true;
+    }
+    assert!(
+        two_party.satisfiable(),
+        "an enlisted scope awaiting its builder has a LIVE feeder the counters cannot see"
+    );
+}
+
+/// W7-58, the COUNT. A nursery owner is counted against the very same `live` the verdict already
+/// used — `1 (main) + Σ outstanding` — so a stuck job PLUS a stuck nursery owner is exactly `live`
+/// parties and the verdict fires. Before the fix the owner never registered, so `parties.len() == 1 <
+/// live == 2` vetoed forever: that is W7-58's whole mechanism, and this is the direct fence for it.
+///
+/// The last leg is the fence in the OTHER direction (the one that faults live programs): drop the
+/// job's party while its slot is still reserved and the count must veto again.
+#[test]
+fn w758_quiesced_counts_a_nursery_owner_against_live() {
+    let state: Arc<crate::vm::quiesce::QuiesceState> = Arc::default();
+    let registry: crate::vm::core::ExecRegistry = Arc::default();
+    let exec = Arc::new(crate::vm::core::ExecutorCore::default());
+    registry.lock().unwrap().push(Arc::clone(&exec));
+    let _idx = exec.eager.lock().unwrap().reserve(); // live == 1 (main) + 1 (the job)
+
+    // A stuck nursery: its only fiber is parked with nothing to feed it.
+    let sched = Arc::new(mk_sched(1));
+    sched.seed(vec![mk_fiber(0)]);
+    let f = take_run(&sched);
+    let chan = empty_core();
+    sched.park(core_key(&chan), &chan, f);
+
+    let job = state.block(crate::vm::quiesce::PartyWait::Recv(empty_core()));
+    assert!(
+        !state.quiesced(&registry),
+        "the owner is not registered yet — 1 party < live 2, so the verdict must decline (this IS \
+         the W7-58 hang)"
+    );
+    let owner = state.block(crate::vm::quiesce::PartyWait::Nursery(Arc::clone(&sched)));
+    assert!(
+        state.quiesced(&registry),
+        "owner + job == live, both unsatisfiable → the run really is stuck"
+    );
+    // The nursery becomes able to move → the owner's wait is satisfiable → veto.
+    sched.inject(mk_pending_fiber(1), 0);
+    assert!(
+        !state.quiesced(&registry),
+        "a runnable fiber makes the owner's wait satisfiable, which must veto the verdict"
+    );
+    let g = take_run(&sched);
+    sched.park(core_key(&chan), &chan, g);
+    assert!(state.quiesced(&registry), "stuck again");
+    // The other direction: fewer parties than `live` must always veto.
+    drop(job);
+    assert!(
+        !state.quiesced(&registry),
+        "1 party < live 2 — an unregistered job is a RUNNING job, which may yet send"
+    );
+    drop(owner);
+}
+
+/// W7-58 — the GATE. A worker shell must never register a nursery party: it is not in `live`, so
+/// registering it would let `parties.len()` exceed `live`, which is the one error direction that
+/// faults a live program (`quiesce`'s error-direction table).
+///
+/// Also pins the deliberate WIDENING versus `is_counted_party`: a builder holding an early-enlisted
+/// sched (`mn_enlist_sched.is_some()`) is NOT a counted party by `owns_os_thread`, yet it is exactly
+/// `main`, i.e. the `1 +` in `live` — so it MUST register.
+#[test]
+fn w758_only_a_thread_with_no_scheduler_under_it_registers_a_nursery_party() {
+    let mut vm = Vm::new(Arc::new(empty_program()));
+    let sched = Arc::new(mk_sched(0));
+    assert!(
+        vm.nursery_party_guard(&sched).is_some(),
+        "top-level main owns its OS thread — it is the `1 +` in `live`"
+    );
+    vm.mn_enlist_sched = Some(Arc::clone(&sched));
+    assert!(
+        vm.nursery_party_guard(&sched).is_some(),
+        "an early-enlisted builder is still main; `is_counted_party` would wrongly exclude it"
+    );
+    vm.mn_enlist_sched = None;
+    vm.mn = Some(Arc::clone(&sched));
+    assert!(
+        vm.nursery_party_guard(&sched).is_none(),
+        "a worker SHELL is not in `live` — registering it would let parties exceed live"
+    );
+    vm.mn = None;
+    vm.scheduler_stack.push(crate::vm::Nursery {
+        parent: FiberCtx::default(),
+        children: Vec::new(),
+        ready: Default::default(),
+        blocked_on: Default::default(),
+    });
+    assert!(
+        vm.nursery_party_guard(&sched).is_none(),
+        "a cooperative nursery level under this VM means it does not own the thread"
+    );
+}
+
 /// D2b: `finish` records a task's outcome in its slot, drops it from `running`, and flips
 /// `terminate` once every task is done.
 #[test]
@@ -12765,6 +13004,350 @@ parallel:
         .expect_err("nobody can ever feed `ch` once the job is done — a real deadlock")
         .message;
     assert!(msg.contains("deadlock"), "fault was: {msg}");
+}
+
+// ----- gaps.md W7-58 — a stuck job PLUS a stuck nursery owner is a deadlock, not a hang -----
+
+/// W7-58, THE REPRO. A `parallel:` nursery whose task can never be fed, beside an eager `Executor`
+/// job that can never be fed either, HUNG FOREVER. Measured pre-fix on the release binary: rc=124 at
+/// a 20 s timeout, with `job blocking` and `child waiting` printed and nothing after. Post-fix it
+/// faults in ~7 ms. Go reports `all goroutines are asleep - deadlock!` for the same shape.
+///
+/// The two vetoes were pointing at each other. `MnSched::is_deadlocked` declined because a job was
+/// outstanding (W7-56 — an outstanding job is an uncounted sender, which is RIGHT when the job is
+/// running), and the process-wide verdict declined because `live = 1 + outstanding = 2` while only
+/// the job had registered: `main`, the `1 +`, was sitting in `mn_worker_loop`, which registered
+/// nothing. So `parties.len() == 1 < 2` — "somebody is still running" — and that somebody was `main`,
+/// which was exactly the thread that was stuck. Fixed by registering the nursery OWNER
+/// (`PartyWait::Nursery`, satisfiable iff its nursery can still move) and by giving an idle worker of
+/// that nursery the job of ASKING the verdict (an owner never reaches `block_halt_check`).
+///
+/// **W7-56's veto is untouched** — this does not weaken it, it teaches the OTHER verdict to see the
+/// owner. `executor_job_feeds_a_parked_nursery_task_instead_of_a_false_deadlock` is the fence that it
+/// stayed untouched, and it is also this change's audit (a): it runs the healthy shape (a job that
+/// sleeps 50 ms and then feeds the parked task) with the owner now registered, and must still print
+/// `child got 7`, rc=0.
+///
+/// **M:N-ONLY.** `--serial` queues eager jobs at `submit` and drains at `shutdown` (decision D3), so
+/// `other.recv()` never runs before the join and the program is a DIFFERENT (also real) deadlock,
+/// reported at a different site. Verified: `--serial` output is byte-identical pre- and post-fix.
+/// Not in `parity_tests.rs`/`tests/chz/` for that reason — both are gated serial == M:N. Same
+/// precedent as the W7-56 tests above.
+///
+/// Watchdogged: pre-fix this HANGS, and a regression must fail the suite rather than stall it.
+#[test]
+fn a_stuck_executor_job_beside_a_stuck_nursery_faults_instead_of_hanging() {
+    let src = "
+import std.concurrency
+ch := Channel[int]()
+other := Channel[int]()
+fn blocked():
+    print(\"job blocking\")
+    print(other.recv())
+fn waiter():
+    print(\"child waiting\")
+    print(ch.recv())
+ex := Executor()
+ex.submit(blocked)
+parallel:
+    spawn waiter()
+print(\"after nursery\")
+";
+    let entry = write_temp_chz("w758_stuck_job_and_stuck_nursery", src);
+    let run_entry = entry.clone();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(run_file_parallel(
+            &run_entry,
+            crate::native::HostConfig::default(),
+        ));
+    });
+    let (out, _err, res, _code) = rx
+        .recv_timeout(std::time::Duration::from_secs(60))
+        .expect("a stuck job beside a stuck nursery must FAULT — pre-fix this hung forever");
+    let _ = std::fs::remove_file(&entry);
+    let msg = res
+        .expect_err("nothing in this run can ever move again")
+        .message;
+    assert!(
+        msg.contains("deadlock"),
+        "the nursery must report its deadlock; fault was: {msg}"
+    );
+    assert!(
+        out.contains("child waiting"),
+        "the task ran before it parked: {out:?}"
+    );
+    assert!(
+        !out.contains("after nursery"),
+        "the nursery join must NOT complete: {out:?}"
+    );
+}
+
+/// W7-58, THE ANTI-FALSE-FAULT FENCE, and the highest-value test of this change. A healthy **cap-1**
+/// producer/consumer pipeline running across an eager `Executor` job and a `parallel:` nursery task
+/// must complete, every time.
+///
+/// This is the shape the `parked-is-not-stuck` family keeps killing: at steady state the party list
+/// is `[Send(job), Nursery(owner)]` with `parties.len() == live`, so the COUNT does not save it and
+/// satisfiability has to. It holds because the window in which neither party's wait looks satisfiable
+/// (a value pushed, the parked consumer not yet requeued) is OCCUPIED by the sending thread, which is
+/// either a fiber (so `running >= 1` and the nursery arm answers satisfiable) or a counted party
+/// mid-`send` (so it is UNREGISTERED, `parties.len() < live`, and the count vetoes).
+///
+/// Both directions are exercised — the job producing into the nursery and the nursery producing into
+/// the job — because a cap-1 channel is only ever half of a handshake. 300 handoffs each, which is
+/// the density that made W7-12's three false-fault predicates show up as 2–7 failures in 30 rather
+/// than never. A single green run here proves nothing; the suite gate is that it is green EVERY run.
+/// (Measured on the release binary at the CLI: 30/30 at the default width and 30/30 at
+/// `CHEZZI_THREADS=2`.)
+///
+/// M:N-only + watchdogged for the reasons on the tests above (`--serial` never dispatches eagerly).
+#[test]
+fn a_cap1_pipeline_across_a_job_and_a_nursery_is_not_mistaken_for_a_deadlock() {
+    let cases = [
+        // The JOB produces, the nursery task consumes.
+        "
+import std.concurrency
+data := Channel[int](1)
+done := Channel[int](1)
+fn producer():
+    for i in range(300):
+        data.send(i)
+    data.close()
+fn consumer():
+    total := 0
+    for v in data:
+        total = total + v
+    done.send(total)
+ex := Executor()
+ex.submit(producer)
+parallel:
+    spawn consumer()
+print(\"sum {done.recv()}\")
+ex.shutdown()
+",
+        // …and the reverse: the nursery task produces, the job consumes and answers, so BOTH
+        // directions of the cap-1 handshake cross the job/nursery boundary.
+        "
+import std.concurrency
+req := Channel[int](1)
+resp := Channel[int](1)
+fn server():
+    for v in req:
+        resp.send(v * 2)
+    resp.close()
+fn client():
+    total := 0
+    for i in range(300):
+        req.send(i)
+        total = total + resp.recv()
+    req.close()
+    print(\"sum {total}\")
+ex := Executor()
+ex.submit(server)
+parallel:
+    spawn client()
+ex.shutdown()
+",
+    ];
+    let expect = ["sum 44850", "sum 89700"];
+    for (i, src) in cases.iter().enumerate() {
+        let entry = write_temp_chz(&format!("w758_cap1_pipeline_{i}"), src);
+        let run_entry = entry.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(run_file_parallel(
+                &run_entry,
+                crate::native::HostConfig::default(),
+            ));
+        });
+        let (out, _err, res, _code) = rx
+            .recv_timeout(std::time::Duration::from_secs(60))
+            .expect("a healthy cap-1 pipeline must not hang");
+        let _ = std::fs::remove_file(&entry);
+        assert!(res.is_ok(), "a live cap-1 pipeline was faulted: {res:?}");
+        assert!(
+            out.contains(expect[i]),
+            "case {i} lost handoffs: {out:?} (wanted {})",
+            expect[i]
+        );
+    }
+}
+
+/// W7-58, THE JUDGE FENCE (R3). Two stuck nurseries and NOT ONE polling party: the top-level
+/// `parallel:` owner and the eager job that opened its own `parallel:` are both sitting in
+/// `mn_worker_loop`, which never calls `block_halt_check`. So with the party registration alone this
+/// program still hangs — nobody ever ASKS the verdict. An idle worker of a quiesced sched therefore
+/// escalates to the process-wide question on the owner's behalf.
+///
+/// Measured pre-fix: rc=124 at 20 s. Post-fix: ~7 ms.
+///
+/// **Asserts the fault, not the exact stdout.** Which of the two nurseries reports first is a
+/// legitimate race between two idle workers, and pinning it would be pinning a scheduling accident.
+///
+/// M:N-only + watchdogged for the reasons on the tests above.
+#[test]
+fn two_stuck_nurseries_with_no_polling_party_still_fault() {
+    let src = "
+import std.concurrency
+ch := Channel[int]()
+ch2 := Channel[int]()
+fn innerjob():
+    print(ch2.recv())
+fn job():
+    parallel:
+        spawn innerjob()
+fn waiter():
+    print(ch.recv())
+ex := Executor()
+ex.submit(job)
+parallel:
+    spawn waiter()
+print(\"after nursery\")
+";
+    let entry = write_temp_chz("w758_two_stuck_nurseries", src);
+    let run_entry = entry.clone();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(run_file_parallel(
+            &run_entry,
+            crate::native::HostConfig::default(),
+        ));
+    });
+    let (out, _err, res, _code) = rx
+        .recv_timeout(std::time::Duration::from_secs(60))
+        .expect("two stuck nurseries with no polling party must fault — pre-fix this hung");
+    let _ = std::fs::remove_file(&entry);
+    let msg = res.expect_err("neither nursery can ever move").message;
+    assert!(msg.contains("deadlock"), "fault was: {msg}");
+    assert!(
+        !out.contains("after nursery"),
+        "the outer join must not complete: {out:?}"
+    );
+}
+
+/// W7-58 — the judge must be LEVEL-triggered, not EDGE-triggered. A stuck sched that asked the
+/// process-wide verdict and was told "not yet" must ask again when the answer changes — and the
+/// answer changes with the PARTY SET, which lives outside this sched and notifies nothing here.
+///
+/// Measured with the judge's idle wait left untimed: **5/5 permanent hangs, rc=124 at 20 s**. The
+/// job's nursery quiesces immediately, judges (`parties.len() == 1 < live == 2` — `main` is awake and
+/// unregistered), and sleeps forever; `main`'s `Join` registration 300 ms later reaches nobody, and
+/// the run has no judge at all. The tell that isolated it: adding a third job that finishes later
+/// made the same program FAULT, because `finish` pokes every sched and the judge re-ran. Post-fix it
+/// faults at ~310 ms — the first moment the verdict is actually true.
+///
+/// The `sleep_ms` is load-bearing: without it `main` reaches `shutdown()` before the nursery
+/// quiesces, so the registration lands before the judge's first look and the bug is invisible.
+///
+/// M:N-only + watchdogged for the reasons on the tests above.
+#[test]
+fn a_nursery_judge_re_asks_the_verdict_when_a_party_registers_later() {
+    let src = "
+import std.concurrency
+import std.time
+ch := Channel[int]()
+fn innerjob():
+    print(ch.recv())
+fn job():
+    parallel:
+        spawn innerjob()
+ex := Executor()
+ex.submit(job)
+time.sleep_ms(300)
+ex.shutdown()
+print(\"done\")
+";
+    let entry = write_temp_chz("w758_judge_reasks", src);
+    let run_entry = entry.clone();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(run_file_parallel(
+            &run_entry,
+            crate::native::HostConfig::default(),
+        ));
+    });
+    let (out, _err, res, _code) = rx
+        .recv_timeout(std::time::Duration::from_secs(60))
+        .expect("a party registering AFTER the judge's last look must still be judged — this hung");
+    let _ = std::fs::remove_file(&entry);
+    let msg = res.expect_err("the job's nursery can never move").message;
+    assert!(msg.contains("deadlock"), "fault was: {msg}");
+    assert!(!out.contains("done"), "the join must not return: {out:?}");
+}
+
+/// W7-58 residual — a cycle of `Executor` joins with NO other party in it hung forever, because
+/// `join_eager_jobs` REGISTERED a party and then waited on a plain untimed condvar: it never asked
+/// the verdict it had just made answerable.
+///
+/// Measured pre-fix: three executors whose jobs each `shutdown()` the next, plus `main` joining the
+/// first — 4 parties, `live == 4`, every `Join` unsatisfiable, rc=124 at 15 s. The sibling shapes
+/// (`two_executors_deadlocking_each_other_fault`) fault in milliseconds only because SOME party in
+/// them happens to be channel-blocked and therefore polls; the fault was an accident of the shape.
+/// The join now polls at the same `DEMOTE_POLL_BACKOFF` cadence every other blocking-in-place site
+/// pays, and asks — but ONLY when every registered party is a `Join`, since any other kind of party
+/// has a judge of its own whose fault names the real blocking SITE (which is why
+/// `two_executors_deadlocking_each_other_fault` still reports `recv on an empty channel`, unchanged).
+///
+/// **The ring is STRUCTURAL and the OUTCOME is deterministic, and those are two different problems.**
+/// Two earlier cuts of this test were races and both are recorded, because the second failure is the
+/// non-obvious one:
+///
+/// 1. Three executors whose jobs each `shutdown()` the next, gated only on their `recv`s. The gate
+///    did not cover the `shutdown` that closes the ring, so the program was often not a cycle at all
+///    — measured on the release binary, it completed normally **7 of 40 runs**.
+/// 2. Two executors with a proper start BARRIER (each job announces on an unbuffered channel, `main`
+///    collects both, then releases both). That ring really is structural — instrumented with
+///    `recover:`, **60 of 60 runs detected the deadlock**. It was still **39/40** as a test, because
+///    WHICH party reports first is a legitimate race, and when `jobB` (the job of `ex2`) reports it,
+///    its fault lands in `ex2`'s slots — an executor nobody in that program ever reduces — so `jobA`
+///    completes cleanly, `main`'s `ex1.shutdown()` returns Ok, and the process exits 0.
+///
+/// A **self-join ring** removes the second problem without weakening the first: `main` and the job
+/// both wait on the SAME executor, whose only outstanding work is that job. The ring is exact (`main`
+/// waits for the job; the job waits for the executor to owe nothing, which needs the job to finish),
+/// and there is only one slot vec, the one `main` reduces — so whichever party detects the deadlock,
+/// the fault reaches `main`. 40/40 on the release binary, and 3/3 hangs at HEAD.
+///
+/// The barrier is still load-bearing: without it `ex.submit` races `ex.shutdown()` and the job can be
+/// dispatched after `main` has already drained.
+///
+/// M:N-only + watchdogged for the reasons on the tests above.
+#[test]
+fn a_cycle_of_executor_joins_faults_instead_of_hanging() {
+    let src = "
+import std.concurrency
+ex := Executor()
+started := Channel[int]()
+go := Channel[int]()
+fn job():
+    started.send(1)
+    go.recv()
+    ex.shutdown()
+ex.submit(job)
+started.recv()
+go.send(1)
+ex.shutdown()
+print(\"after\")
+";
+    let entry = write_temp_chz("w758_join_cycle", src);
+    let run_entry = entry.clone();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(run_file_parallel(
+            &run_entry,
+            crate::native::HostConfig::default(),
+        ));
+    });
+    let (out, _err, res, _code) = rx
+        .recv_timeout(std::time::Duration::from_secs(60))
+        .expect("a cycle of executor joins must fault — pre-fix this hung forever");
+    let _ = std::fs::remove_file(&entry);
+    let msg = res
+        .expect_err("every party is joining an executor that owes work")
+        .message;
+    assert!(msg.contains("deadlock"), "fault was: {msg}");
+    assert!(!out.contains("after"), "the join must not return: {out:?}");
 }
 
 /// W7-13 — a healthy cap-1 handshake must be driven by WAKEUPS, not by the poll timeout.

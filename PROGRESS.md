@@ -2,6 +2,43 @@
 
 Single source of truth for "what am I doing next." Update after every work session.
 
+> **✅ W7-58 landed 2026-08-12 — a nursery owner is a counted party AND a judge, so a run stuck across
+> the nursery/executor boundary faults instead of hanging.** `docs/gaps.md`'s `W7-58` is CLOSED, and
+> with it the last of the `W7-47`/`W7-56` chain. Measured: a job blocked forever on one channel beside a
+> `spawn`ed task blocked forever on another went **rc=124 at 20 s → rc=1 at 7 ms**.
+>
+> The root cause was arithmetic, not a missing veto. `quiesce::quiesced` computes
+> `live = 1 + outstanding_jobs`, and the `1 +` is the allowance for `main` — but a `main` inside a
+> nursery join never registers as a party (`owns_os_thread()` is false by construction there), so
+> `parties.len() = 1 < live = 2` vetoed forever. The same program with the `parallel:`/`spawn` removed
+> faulted correctly at 12 ms, which is what pinned it. Fix: split `is_deadlocked` so the `W7-56` job
+> veto stays first and byte-identical over a new `is_deadlocked_ignoring_jobs`; add
+> `PartyWait::Nursery`, satisfiable ⟺ that predicate says the sched can still move, evaluated **live**
+> at every verdict; register it RAII-scoped to the join, gated so a worker shell never registers (that
+> would let `parties.len()` exceed `live` — the one direction that faults a live program); and make the
+> owner escalate to `quiesced()` itself, since a nursery owner never reaches `block_halt_check`. The
+> lock order is one chain, `sched_registry → parties → SchedCore → exec_registry → eager → channel q`,
+> and dropping the core lock before `quiesced()` is what keeps it acyclic.
+>
+> **Adversarial review (three prosecutors, two converging) found two high-severity defects; both were
+> reproduced before acceptance and fixed.** The judge was **edge-triggered** — after judging it parked
+> in an untimed wait, and nothing notifies a sched when a *party* registers, so a verdict that became
+> true later was never asked (5/5 deterministic hangs on two repros). It is now level-triggered: the
+> idle wait is bounded to `DEMOTE_POLL_BACKOFF` **only when the sched is already stuck-modulo-jobs**, so
+> the healthy path keeps its untimed wait. And the new join-cycle test was a **coin flip** (7/40
+> completing normally) — rebuilt as a self-join ring, 40/40.
+>
+> **One further defect was found and fixed inside this change rather than filed:** `join_eager_jobs`
+> registered a party and then waited on an untimed condvar, never asking the verdict it had just made
+> answerable — three executors whose jobs each `shutdown()` the next hung forever. It now polls and
+> asks, but only when every registered party is a `Join`.
+>
+> **False-fault evidence, the bar `W7-12` set** (three predicates shipped green and faulted healthy
+> programs at 2–7/30): the cap-1 pipeline across a job and a nursery task is **30/30 at default width
+> and 30/30 at `CHEZZI_THREADS=2`, both directions**; the `W7-56` healthy repro 30/30; all 48
+> concurrency `examples/` identical rc and wall time. A socket-blocked job still vetoes, which is Go's
+> answer too, not a gap.
+
 > **✅ W7-56 landed 2026-08-12 — an eager `Executor` job can feed a nursery task; the nursery no longer
 > declares a live program deadlocked.** `docs/gaps.md`'s `W7-56` is CLOSED. Measured, M:N: **`deadlock`,
 > rc=1 at 7 ms (the feeder never ran) → `job sending` / `child got 7` / `after nursery`, rc=0 at 58 ms**,
@@ -19,7 +56,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > lets the genuine verdict fire (58 ms, still a fault). Lock order verified as one total order.
 >
 > **Costs recorded, not papered over.** A genuine nursery deadlock whose outstanding job is *also*
-> blocked forever now hangs where it used to fault at 7 ms — filed as **`W7-58`**; it is the direction
+> blocked forever now hangs where it used to fault at 7 ms — filed as **`W7-58`** and FIXED the same day (see above); it was the direction
 > `parked-is-not-stuck` prescribes (correct > silent > wrong), and the old fault was right by accident.
 > Channel send/recv is **+7%** (200k pairs, 147 → 158 ms) from one uncontended lock per no-sched `send`;
 > no bench covers that path. `--serial` is unchanged and unfixable here (D3 queues at submit, so the

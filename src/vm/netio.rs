@@ -1985,7 +1985,7 @@ impl Vm {
     /// Registering is therefore gated on this, and forgetting to register somewhere is a HANG
     /// (`blocked < live` ⇒ veto), never a false fault. See [`crate::vm::quiesce`] for the full
     /// argument and the error-direction table.
-    fn is_counted_party(&self) -> bool {
+    pub(super) fn is_counted_party(&self) -> bool {
         self.owns_os_thread() && self.native_reentry == 0
     }
 

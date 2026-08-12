@@ -1631,6 +1631,11 @@ const DEADLOCK_MSG: &str = "deadlock: every task in this parallel: block is bloc
      cannot proceed on (an empty recv() or a full send()) and no sibling can unblock it — the nursery \
      cannot progress";
 
+/// gaps.md W7-58 residual — the fault a thread blocked in an `Executor` join takes when the
+/// process-wide verdict says nothing in the run can move again. See [`Vm::join_eager_jobs`].
+const JOIN_DEADLOCK_MSG: &str = "waiting for this Executor's jobs: deadlock — every task in this run \
+     is blocked and none of them can make progress, so no job can ever finish";
+
 /// D2b — the M:N scheduler shared by every worker enlisted on one `parallel:` nursery (the joining
 /// thread + the pool shells it farms). It replaces the legacy `--parallel` "one OS thread per task,
 /// block the thread on `recv`" model with **lightweight fibers parked on `recv`** multiplexed over a
@@ -1846,6 +1851,16 @@ struct MnSched {
     /// Assigned AFTER construction (like `parent_wake`) rather than through `new`, so the predicate's
     /// unit fixtures keep an empty registry — i.e. today's behaviour, which is what they test.
     exec_registry: crate::vm::core::ExecRegistry,
+    /// gaps.md W7-58 — the run's [`quiesce::QuiesceState`], so an idle worker of this sched can JUDGE
+    /// the process-wide verdict. A nursery OWNER never reaches [`Vm::block_halt_check`] (it sits in
+    /// `mn_worker_loop`, not in a blocking native), so a run whose only stuck parties are nursery
+    /// owners has no polling judge at all and would hang with the party registration alone.
+    ///
+    /// Assigned AFTER construction (like `parent_wake`/`exec_registry`) rather than through `new`, so
+    /// the predicate's unit fixtures keep an empty state — i.e. today's behaviour, which is what they
+    /// test (an empty registry means `live == 1` and `parties` empty, so `quiesced` is never reached
+    /// past its count gate).
+    quiesce: Arc<quiesce::QuiesceState>,
 }
 
 /// Cross-nursery flat scheduler (M:N) — one nursery's JOIN RECORD (Trio/Go-style: structured
@@ -2173,6 +2188,9 @@ impl MnSched {
             // gaps.md W7-56 — empty by default; both `MnSched` construction sites assign the run's
             // registry. An empty one is today's behaviour (no veto).
             exec_registry: Default::default(),
+            // gaps.md W7-58 — empty by default; both `MnSched` construction sites assign the run's
+            // state. An empty one has no parties, so the judge below never fires.
+            quiesce: Default::default(),
         }
     }
 
@@ -2333,6 +2351,12 @@ impl MnSched {
     /// `send`/`yield` and make a sibling runnable, so an idle worker waits rather than declaring
     /// deadlock. (D4c will insert work-stealing passes between the local and the park.)
     fn take_runnable(&self, wid: usize, tick: u64, scope_id: usize) -> Take {
+        // gaps.md W7-58 — "this worker has already asked the process-wide verdict since its last
+        // wait". Bounds the (relatively expensive, `parties`-locking) escalation below to ONE call per
+        // wait, so it can never spin. It is NOT a claim that the verdict's inputs only move on a
+        // notify — they do not, which is why the idle wait below is BOUNDED whenever this is set (see
+        // there). Cleared at every wait site.
+        let mut judged = false;
         loop {
             // 0. D4d — every `GLOBAL_CHECK_INTERVAL`th schedule, pull from the global queue FIRST
             //    (before own local / stealing). Without this a worker continuously refilled by
@@ -2432,6 +2456,32 @@ impl MnSched {
                 self.cv.notify_all();
                 return Take::Stop;
             }
+            // gaps.md W7-58 — THE NURSERY OWNER'S JUDGE. The gate above declined because a job is
+            // outstanding (W7-56). That veto is right when the job is RUNNING, and wrong when the job
+            // is itself blocked forever — which is exactly W7-58's shape. The process-wide verdict can
+            // tell the two apart (a stuck job is a registered party with an unsatisfiable wait; a
+            // running one is unregistered, and `parties.len() < live` then vetoes), but ONLY a
+            // counted party polling `block_halt_check` ever asks it — and a nursery owner never
+            // reaches that call, it sits in this loop. So an idle worker asks on its behalf.
+            //
+            // **`drop(c)` is the most dangerous line in this change.** `quiesced` takes `parties` (P)
+            // and then, through `PartyWait::Nursery::satisfiable`, this same core lock (A). The one
+            // total order is P → A, so the guard MUST be released first; holding it here is a real
+            // hang, not a style nit. Everything below the gap is therefore re-derived: `continue`
+            // rather than fall through, so `c.terminate` and the queue gates at the top of the loop
+            // are re-evaluated rather than skipped with a stale verdict (a lost wakeup otherwise).
+            if !judged && self.is_deadlocked_ignoring_jobs(&c) {
+                judged = true;
+                drop(c);
+                let verdict = self.quiesce.quiesced(&self.exec_registry);
+                c = self.lock();
+                if verdict && self.is_deadlocked_ignoring_jobs(&c) {
+                    c.flag_deadlock(&self.deadlock_err);
+                    self.cv.notify_all();
+                    return Take::Stop;
+                }
+                continue;
+            }
             // D4e — runnable-gated park (replaces the D4c bounded `wait_timeout` poll). `runnable`
             // counts every fiber queued in the global queue OR any worker local (batch-grab and steal
             // move fibers between queues net-zero, so a fiber sitting in a local stays counted), PLUS
@@ -2466,14 +2516,42 @@ impl MnSched {
                     .wait_timeout(c, SPIN_BACKOFF)
                     .unwrap_or_else(|e| e.into_inner());
                 drop(guard);
+                judged = false; // W7-58 — a real wait ended: the verdict's inputs may have moved.
                 continue;
             }
             debug_assert!(
                 c.global.is_empty(),
                 "D4e park invariant: runnable==0 but the global queue is non-empty"
             );
-            let guard = self.cv.wait(c).unwrap_or_else(|e| e.into_inner());
-            drop(guard);
+            // gaps.md W7-58 — the untimed sleep is correct ONLY while the answer depends solely on
+            // this sched. When `judged` is set it does not: this worker asked the PROCESS-WIDE verdict
+            // and was told "not yet", and that verdict reads `parties` — a set that changes when some
+            // OTHER thread registers, with no notify to this sched (nothing pokes a sched on a party
+            // registration, and adding one would create a `parties → sched_registry → SchedCore` edge
+            // that inverts the P → A order this change establishes). So the untimed wait made the
+            // judge EDGE-TRIGGERED: measured, `ex.submit(job)` where `job` opens its own stuck
+            // `parallel:`, then `main` sleeping 300 ms before `ex.shutdown()`, hung 5/5 — the job's
+            // sched judged while `parties.len() == 1 < live == 2`, slept, and `main`'s later `Join`
+            // registration reached nobody. (The tell: adding a third job that finishes later made it
+            // fault, because `finish` pokes the sched.)
+            //
+            // Bounded ONLY in that state, deliberately: a sched that is not stuck-modulo-jobs still
+            // sleeps untimed, so the healthy path gains no poll at all. When it IS stuck this pays
+            // exactly the [`DEMOTE_POLL_BACKOFF`] cadence every other blocking-in-place site already
+            // pays (`block_wait_tick`, `demote_recv_block`, `demote_block_socket`,
+            // `block_until_deadline`), for the same reason: a lost wakeup then costs latency instead
+            // of the whole run.
+            if judged {
+                let (guard, _) = self
+                    .cv
+                    .wait_timeout(c, DEMOTE_POLL_BACKOFF)
+                    .unwrap_or_else(|e| e.into_inner());
+                drop(guard);
+            } else {
+                let guard = self.cv.wait(c).unwrap_or_else(|e| e.into_inner());
+                drop(guard);
+            }
+            judged = false; // W7-58 — see above.
         }
     }
 
@@ -3081,6 +3159,53 @@ impl MnSched {
     /// core lock (the caller holds `c`); `running == 0` excludes the only out-of-lock `runnable`
     /// mutator, and `inflight` is mutated only under the core lock, so both reads are sound.
     fn is_deadlocked(&self, c: &SchedCore) -> bool {
+        // W7-56 — an eager `Executor` job outstanding anywhere in this RUN is a live sender the
+        // counters below cannot see: it runs on the shared pool with no fiber of this sched, so it
+        // bumps neither `running`/`runnable` nor `inflight`, and a nursery task parked on the channel
+        // that job is about to feed reads as an all-parked quiesce. This is exactly the veto
+        // `quiesce::QuiesceState::quiesced` already applies process-wide (`parties.len() < live`,
+        // where `live` counts the same `outstanding`), for the same reason: an UNCOUNTED sender must
+        // veto. `outstanding` is bumped at `reserve()` (at `submit`, before dispatch) and dropped at
+        // `finish()`, so a job still queued behind a saturated pool already counts.
+        //
+        // The veto EXPIRES: `dispatch_eager_job`'s completion closure pokes every live sched after
+        // `finish()`, so a job that ends without ever sending lets an idle worker re-evaluate and
+        // report the genuine deadlock (the idle wait is untimed — without that poke this veto would
+        // be a permanent silent hang instead of a fault).
+        //
+        // **It stays FIRST and it stays UNCHANGED (W7-58).** W7-58 is the case where the outstanding
+        // job is itself stuck; the fix is to make the *process-wide* verdict able to see a nursery
+        // owner ([`quiesce::PartyWait::Nursery`]), NOT to weaken this veto — removing it re-opens
+        // W7-56 (a live program declared deadlocked).
+        //
+        // Lock order: this holds `SchedCore` (A) and takes `exec_registry` → one `ExecutorCore::eager`
+        // beneath it, matching the V4 `demoted_chans` peek's A-then-`q`. Nothing acquires a sched core
+        // lock while holding either, so no cycle.
+        if crate::vm::quiesce::QuiesceState::outstanding_jobs(&self.exec_registry) > 0 {
+            return false;
+        }
+        self.is_deadlocked_ignoring_jobs(c)
+    }
+
+    /// [`MnSched::is_deadlocked`] minus its W7-56 outstanding-job veto — "can THIS sched still move on
+    /// its own?", asked without reference to any executor.
+    ///
+    /// Two callers, and the split is what makes W7-58's verdict non-circular:
+    /// * [`quiesce::PartyWait::Nursery::satisfiable`] — an owner parked in a nursery join is
+    ///   satisfiable exactly when its nursery can still move. The full predicate would be useless
+    ///   there: it vetoes on `outstanding > 0`, which is precisely the W7-58 shape (a stuck job).
+    ///   Sound because that job is then a registered party of the process-wide verdict in its own
+    ///   right — an *unregistered* job is a running one, and `parties.len() < live` already vetoes.
+    /// * the W7-58 judge in [`MnSched::take_runnable`], which escalates to the process-wide verdict
+    ///   when only this sched's own predicate holds.
+    ///
+    /// **Why it is not circular, stated precisely.** It reads no party state and no `outstanding` —
+    /// so the process-wide verdict never appears on its own right-hand side. It is NOT lock-free
+    /// though: besides `SchedCore` (held by the caller) and this sched's own atomics, its last gate
+    /// peeks `ChannelCore::q` for every demoted fiber. Evaluated from `PartyWait::Nursery` that makes
+    /// the chain **P → A → Q**, which is the established total order (`parties` → `SchedCore` →
+    /// `ChannelCore::q`); `A → Q` is the order `send_wake` and the demoted peek already use.
+    pub(super) fn is_deadlocked_ignoring_jobs(&self, c: &SchedCore) -> bool {
         // The `done < total` half is now explicit (the owner-stop replaced the preceding scalar
         // `done == total` terminate check). If EVERY scope is done there is no deadlock — `finish` will
         // have (or is about to) set global `terminate`; the owner-stop returns each owner already.
@@ -3146,26 +3271,6 @@ impl MnSched {
         // counters above (a `send` doesn't bump `runnable` for a demoted fiber), but that fiber WILL pop
         // it on its next poll and make progress — so this is NOT a deadlock. Without this peek, a sibling
         // `send` racing the quiesce could spuriously fault an innocent PARKED sibling.
-        // W7-56 — an eager `Executor` job outstanding anywhere in this RUN is a live sender the
-        // counters above cannot see: it runs on the shared pool with no fiber of this sched, so it
-        // bumps neither `running`/`runnable` nor `inflight`, and a nursery task parked on the channel
-        // that job is about to feed reads as an all-parked quiesce. This is exactly the veto
-        // `quiesce::QuiesceState::quiesced` already applies process-wide (`parties.len() < live`,
-        // where `live` counts the same `outstanding`), for the same reason: an UNCOUNTED sender must
-        // veto. `outstanding` is bumped at `reserve()` (at `submit`, before dispatch) and dropped at
-        // `finish()`, so a job still queued behind a saturated pool already counts.
-        //
-        // The veto EXPIRES: `dispatch_eager_job`'s completion closure pokes every live sched after
-        // `finish()`, so a job that ends without ever sending lets an idle worker re-evaluate and
-        // report the genuine deadlock (the idle wait is untimed — without that poke this veto would
-        // be a permanent silent hang instead of a fault).
-        //
-        // Lock order: this holds `SchedCore` (A) and takes `exec_registry` → one `ExecutorCore::eager`
-        // beneath it, matching the V4 `demoted_chans` peek's A-then-`q`. Nothing acquires a sched core
-        // lock while holding either, so no cycle.
-        if crate::vm::quiesce::QuiesceState::outstanding_jobs(&self.exec_registry) > 0 {
-            return false;
-        }
         if c.demoted_chans
             .values()
             .any(|(core, _)| !core.q.lock().unwrap_or_else(|e| e.into_inner()).is_empty())

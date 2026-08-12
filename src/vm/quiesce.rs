@@ -88,6 +88,17 @@ pub(super) enum PartyWait {
     /// blocked consumer). Its wait condition is exactly `outstanding() == 0`, so that is what it
     /// answers.
     Join(Arc<super::core::ExecutorCore>),
+    /// gaps.md W7-58 — a thread blocked inside a `parallel:` nursery join, waiting on that nursery's
+    /// tasks to finish. This is the node whose absence hung the W7-58 repro: `live` counts the
+    /// top-level `main` thread unconditionally (`1 +`), but a `main` sitting in `mn_worker_loop` never
+    /// registered, so `parties.len() < live` vetoed forever whenever the *other* counted party (an
+    /// eager `Executor` job) was the one genuinely stuck.
+    ///
+    /// **A LIVE QUERY, never a snapshot.** Its wait ends exactly when the nursery can move again, so
+    /// satisfiability re-asks the nursery's own predicate every time the verdict is evaluated. A
+    /// boolean captured at registration is `quiesce.rs`'s build-bug #1 all over again (a stale party
+    /// state read against fresh channel state), which measured 6/10 false faults.
+    Nursery(Arc<super::MnSched>),
 }
 
 impl PartyWait {
@@ -103,7 +114,7 @@ impl PartyWait {
     /// one direction or the other: too generous hangs forever, too strict faults a live program. The
     /// one place the two sites genuinely disagree is `closed` on a recv, hence the separate
     /// [`PartyWait::Wait`] variant.
-    fn satisfiable(&self) -> bool {
+    pub(super) fn satisfiable(&self) -> bool {
         match self {
             // `Vm::block_recv` settles on a queued value, a `trip()` latch, or `closed` (which
             // returns `ClosedEmpty` — the `for v in ch:` ends, a bare `recv` faults; either is
@@ -142,6 +153,25 @@ impl PartyWait {
                     .unwrap_or_else(|e| e.into_inner())
                     .outstanding()
                     == 0
+            }
+            // W7-58 — a nursery join is over exactly when the nursery can still move: the sched's OWN
+            // deadlock predicate, minus its W7-56 outstanding-job veto.
+            //
+            // **Not circular.** `is_deadlocked_ignoring_jobs` reads only `SchedCore` + this sched's own
+            // atomics — never `parties`, never `outstanding` — so the process-wide verdict never
+            // appears on its own right-hand side. The `_ignoring_jobs` half is the load-bearing part:
+            // the full `is_deadlocked` vetoes on `outstanding > 0`, and the whole point of this arm is
+            // the case where the outstanding job is itself a registered, stuck party. Dropping the
+            // veto HERE is sound precisely because the job is then visible as its own party (an
+            // unregistered job is a live one, and `parties.len() < live` already vetoes).
+            //
+            // Lock order: `parties` (P) → `SchedCore` (A) → `ChannelCore::q` (Q) — the predicate's
+            // last gate peeks Q for every demoted fiber, which is the order `send_wake` already uses.
+            // The judge in `MnSched::take_runnable` DROPS its core guard before calling `quiesced`,
+            // and no other site takes `parties` while holding a core lock.
+            PartyWait::Nursery(sched) => {
+                let c = sched.lock();
+                !sched.is_deadlocked_ignoring_jobs(&c)
             }
         }
     }
@@ -210,12 +240,39 @@ impl QuiesceState {
     /// the other first. Holding the lock makes the party set and the channel reads ONE observation,
     /// and the false positive is gone.
     ///
-    /// **Lock discipline.** Order is `parties` → (`exec_registry` → one `ExecutorCore::eager`) →
-    /// `ChannelCore::q`, one at a time. Nothing anywhere acquires `parties` while holding a channel or
-    /// executor lock: every blocking site in `netio.rs` registers BEFORE it locks the queue it then
-    /// waits on, and `join_eager_jobs` registers before it takes `eager`. So this adds no cycle. (Same
-    /// rule the deleted `eager_join_deadlocked` documented; it is tightened here, not relaxed.)
+    /// **Lock discipline.** Order is `parties` (P) → `SchedCore` (A) → (`exec_registry` → one
+    /// `ExecutorCore::eager`) → `ChannelCore::q`, one at a time. Nothing anywhere acquires `parties`
+    /// while holding a channel, executor OR sched-core lock: every blocking site in `netio.rs`
+    /// registers BEFORE it locks the queue it then waits on, `join_eager_jobs` registers before it
+    /// takes `eager`, W7-58's nursery owner registers with no core lock held, and the W7-58 judge
+    /// inside `MnSched::take_runnable` DROPS its `SchedCore` guard before calling this. So this adds no
+    /// cycle. `parties` is globally exclusive, so at most one thread is ever inside this function and
+    /// it takes each `SchedCore` singly — there is no A→A' edge either. (Same rule the deleted
+    /// `eager_join_deadlocked` documented; it is tightened here, not relaxed.)
     pub(super) fn quiesced(&self, exec_registry: &ExecRegistry) -> bool {
+        self.verdict(exec_registry).is_some()
+    }
+
+    /// The verdict, PLUS "and every registered party is an [`PartyWait::Join`]" — the narrow question
+    /// [`super::Vm::join_eager_jobs`] asks (gaps.md W7-58 residual).
+    ///
+    /// A joiner must not fault while any OTHER kind of party is registered, and the reason is the
+    /// quality of the diagnostic, not caution. Every non-`Join` party has a judge of its own — a
+    /// channel/`wait:` party polls [`super::Vm::block_halt_check`] at the same 5 ms cadence, and a
+    /// `Nursery` party is judged by its own sched's idle worker — and those faults name the actual
+    /// blocking SITE (`recv on an empty channel: deadlock` at the offending line) instead of the join
+    /// that is merely downstream of it. Letting the joiner race them would make WHICH message a user
+    /// sees a coin flip (measured: `two_executors_deadlocking_each_other_fault`'s shape flipped
+    /// between the two). When every party IS a `Join`, there is no other judge at all — that is
+    /// exactly the residual, and then the joiner must speak.
+    pub(super) fn quiesced_only_joins(&self, exec_registry: &ExecRegistry) -> bool {
+        self.verdict(exec_registry) == Some(true)
+    }
+
+    /// `None` = not stuck. `Some(only_joins)` = stuck, and `only_joins` says whether every registered
+    /// party is a [`PartyWait::Join`]. One evaluation under ONE hold of the party lock, so the two
+    /// public questions can never disagree about the party set (see this function's `quiesced` doc).
+    fn verdict(&self, exec_registry: &ExecRegistry) -> Option<bool> {
         let parties = self.parties.lock().unwrap_or_else(|e| e.into_inner());
         // `1 +` is the main thread, which is a party for the whole run and is the only one not owned
         // by an executor slot. Read under the party lock so a `submit` cannot slip a new job past a
@@ -223,9 +280,12 @@ impl QuiesceState {
         // therefore already vetoes — but the read is free here and the invariant is worth pinning).
         let live = 1 + Self::outstanding_jobs(exec_registry);
         if parties.len() < live {
-            return false; // somebody is still running — they may yet send.
+            return None; // somebody is still running — they may yet send.
         }
-        !parties.iter().any(|p| p.satisfiable())
+        if parties.iter().any(|p| p.satisfiable()) {
+            return None;
+        }
+        Some(parties.iter().all(|p| matches!(**p, PartyWait::Join(_))))
     }
 
     /// Σ `outstanding` over every executor created in this run. Snapshots the registry and drops its

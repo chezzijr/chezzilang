@@ -550,6 +550,9 @@ impl Vm {
         // jobs (uncounted senders). Assigned here, not through `new`, so the predicate's unit
         // fixtures keep an empty registry.
         inner.exec_registry = Arc::clone(&self.exec_registry);
+        // gaps.md W7-58 — so an idle worker of this sched can JUDGE the process-wide verdict on
+        // behalf of a nursery owner, which never reaches `block_halt_check`.
+        inner.quiesce = Arc::clone(&self.quiesce);
         let sched = Arc::new(inner);
         // W7-56 — publish the sched so an eager job's `send`/`close` (which runs with no sched of its
         // own) can wake a fiber parked here: `Vm::wake_on_send`.
@@ -583,11 +586,16 @@ impl Vm {
             }));
         }
         let mut shell = self.spawn_shell(&sched, &cancel);
-        shell.mn_worker_loop(&sched, 0, 0); // owner of scope 0
-        // The owner returned on scope 0; reduce scope 0's sub-range. The sched is released only when no
-        // early-enlisted outer scope is still pending (else those scopes' slots must survive until their
-        // own joins reduce them — `join_enlisted_scope` releases it at the last).
-        sched.wait_for_scope(0);
+        {
+            // gaps.md W7-58 — this thread is now blocked in a nursery join; make it visible to the
+            // process-wide verdict for exactly that span (RAII, dropped before the reduce).
+            let _party = self.nursery_party_guard(&sched);
+            shell.mn_worker_loop(&sched, 0, 0); // owner of scope 0
+            // The owner returned on scope 0; reduce scope 0's sub-range. The sched is released only when
+            // no early-enlisted outer scope is still pending (else those scopes' slots must survive
+            // until their own joins reduce them — `join_enlisted_scope` releases it at the last).
+            sched.wait_for_scope(0);
+        }
         let slots = sched.take_scope_slots(0);
         if self.mn_enlisted == 0 {
             self.mn_enlist_sched = None;
@@ -625,8 +633,14 @@ impl Vm {
             sched.register_scope_seeded(Arc::clone(&cancel), self.scope_ancestors(), workers);
         let wid = self.wid;
         let mut shell = self.spawn_shell(sched, &cancel);
-        shell.mn_worker_loop(sched, wid, scope_id);
-        sched.wait_for_scope(scope_id);
+        {
+            // gaps.md W7-58 — a no-op on the `(Some(sched), _)` path (a fiber's nested nursery runs on
+            // a worker shell, `mn.is_some()`); it registers only on the `(None, Some(held))` late-spawn
+            // path, where `self` really is the top-level builder blocked in this join.
+            let _party = self.nursery_party_guard(sched);
+            shell.mn_worker_loop(sched, wid, scope_id);
+            sched.wait_for_scope(scope_id);
+        }
         let slots = sched.take_scope_slots(scope_id);
         self.reduce_task_slots(slots)
     }
@@ -706,8 +720,12 @@ impl Vm {
         // W6-2 — a shell needs no snapshot of its own: it runs no code, and every fiber it schedules in
         // carries its own module view + snapshot (`FiberCtx`).
         let mut shell = self.spawn_shell(&sched, &cancel);
-        shell.mn_worker_loop(&sched, wid, scope_id);
-        sched.wait_for_scope(scope_id);
+        {
+            // gaps.md W7-58 — the enlisted-scope join blocks this (inline builder) thread too.
+            let _party = self.nursery_party_guard(&sched);
+            shell.mn_worker_loop(&sched, wid, scope_id);
+            sched.wait_for_scope(scope_id);
+        }
         let slots = sched.take_scope_slots(scope_id);
         self.mn_enlisted -= 1;
         if self.mn_enlisted == 0 {
@@ -746,8 +764,12 @@ impl Vm {
         // W6-2 — a shell needs no snapshot (see `join_enlisted_scope`), which also retires the
         // `.expect("no fault possible")` this teardown path used to carry.
         let mut shell = self.spawn_shell(&sched, &cancel);
-        shell.mn_worker_loop(&sched, wid, scope_id);
-        sched.wait_for_scope(scope_id);
+        {
+            // gaps.md W7-58 — the cancel-teardown drain blocks this thread just as the normal join does.
+            let _party = self.nursery_party_guard(&sched);
+            shell.mn_worker_loop(&sched, wid, scope_id);
+            sched.wait_for_scope(scope_id);
+        }
         let slots = sched.take_scope_slots(scope_id);
         self.mn_enlisted -= 1;
         if self.mn_enlisted == 0 {
@@ -791,6 +813,9 @@ impl Vm {
         inner.parent_wake = self.mn.clone().or_else(|| self.mn_enlist_sched.clone());
         // gaps.md W7-56 — see `run_mn_nursery_outermost`.
         inner.exec_registry = Arc::clone(&self.exec_registry);
+        // gaps.md W7-58 — so an idle worker of this sched can JUDGE the process-wide verdict on
+        // behalf of a nursery owner, which never reaches `block_halt_check`.
+        inner.quiesce = Arc::clone(&self.quiesce);
         let sched = Arc::new(inner);
         self.register_sched(&sched);
         // Structured concurrency — an eager nursery is a nested scope: its handlers must observe the
@@ -2322,6 +2347,34 @@ impl Vm {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .push(Arc::downgrade(sched));
+    }
+
+    /// gaps.md W7-58 — register this thread as a party blocked in a `parallel:` nursery JOIN, for as
+    /// long as the returned guard lives. Without it a `main` sitting in `mn_worker_loop` is invisible
+    /// to the process-wide verdict, so `parties.len() < live` vetoes forever and a genuinely stuck
+    /// job + stuck nursery hangs instead of faulting.
+    ///
+    /// **The gate is deliberately NOT [`Vm::is_counted_party`].** `owns_os_thread` additionally
+    /// requires `mn_enlist_sched.is_none()`, which is false for the very builder that owns an
+    /// early-enlisted scope — the commonest owner there is. What `quiesce`'s `live` actually counts is
+    /// "threads with no scheduler UNDER them": top-level `main` (the `1 +`) and an eager `Executor`
+    /// job (the `Σ outstanding`). That is exactly `mn.is_none() && scheduler_stack.is_empty()`.
+    ///
+    /// **A worker SHELL (`mn.is_some()`) must never register.** It is not in `live`, so registering it
+    /// would let `parties.len()` exceed `live` — the one error direction that faults a live program.
+    /// The gate excludes it, which is also why `join_eager_nursery`/`abort_eager_nursery` need no call
+    /// here (`activate_eager_nursery` `debug_assert!`s `mn.is_some()`, so their joiner is always a
+    /// shell).
+    ///
+    /// Called with NO sched core lock held — the total order is `parties` → `SchedCore`.
+    pub(super) fn nursery_party_guard(
+        &self,
+        sched: &Arc<MnSched>,
+    ) -> Option<crate::vm::quiesce::PartyGuard> {
+        (self.mn.is_none() && self.scheduler_stack.is_empty()).then(|| {
+            self.quiesce
+                .block(crate::vm::quiesce::PartyWait::Nursery(Arc::clone(sched)))
+        })
     }
 
     /// `chezzi test --max-heap` — collect and read the cap, at a point that is NOT an instruction
@@ -4207,8 +4260,35 @@ impl Vm {
     /// Reuses [`Vm::reduce_task_slots`] verbatim, so the W7-5 fault contract, W7-5c's unconditional
     /// per-slot output flush and decision F's task-order flush all carry over unchanged.
     ///
-    /// The wait is a plain condvar wait, NOT a bounded poll: `finish` always runs (see
-    /// `dispatch_eager_job`'s panic note), so a missed wakeup is not a hazard.
+    /// The wait is a bounded [`DEMOTE_POLL_BACKOFF`] poll rather than a plain condvar wait. It used to
+    /// be the latter — `finish` always runs (see `dispatch_eager_job`'s panic note), so no wakeup is
+    /// ever missed — but a party that only REGISTERS and never ASKS leaves a whole family of genuine
+    /// deadlocks silent: a run whose every counted party sits in one of these joins has nobody to
+    /// evaluate the verdict at all. Measured (`gaps.md` W7-58, the residual hunt): three executors
+    /// whose jobs each `shutdown()` the next, plus `main` joining the first, HUNG forever — 4 parties,
+    /// `live == 4`, every `Join` unsatisfiable, and not one of them ever called `quiesced`. The
+    /// sibling shapes fault in milliseconds only because SOME party in them happens to be channel-
+    /// blocked (`two_executors_deadlocking_each_other_fault`), i.e. the fault was an accident of the
+    /// shape, not a property of the join. So this now polls at exactly the cadence every other
+    /// blocking-in-place site pays ([`Vm::block_wait_tick`], `demote_recv_block`).
+    ///
+    /// **And only when every registered party is a `Join`** ([`quiesce::QuiesceState::quiesced_only_joins`]):
+    /// any other kind of party has a judge of its own whose fault names the real blocking site, so the
+    /// joiner would only be racing it for a worse message.
+    ///
+    /// **It asks ONLY the deadlock verdict, not [`Vm::block_halt_check`].** A join deliberately does
+    /// not observe `--timeout`/cancel/`os.exit` today, and widening what a `shutdown()` unwinds on is
+    /// a different change with a different blast radius. The verdict itself is not new here — it is
+    /// the same process-wide question every channel-blocked party already asks — so this adds an
+    /// ASKER, never a predicate.
+    ///
+    /// **Lock order.** `core.eager` (G) is DROPPED before `quiesced` is called: the one total order is
+    /// `parties` (P) → … → `ExecutorCore::eager` (G), and `quiesced` takes G under P (both through
+    /// `outstanding_jobs` and through the `Join` arm's own satisfiability). Holding G across that call
+    /// is a lock inversion, i.e. a real hang.
+    ///
+    /// Gated on [`Vm::is_counted_party`] for the same reason the registration below is: a joiner
+    /// running inside a nursery task is not in `live`, so it must neither register nor judge.
     ///
     /// **A joiner is a blocked party** (`future.md` §2d step 0), and registering it here is what makes
     /// the process-wide verdict able to see `main` inside `shutdown()` — the node whose absence left
@@ -4224,14 +4304,39 @@ impl Vm {
     /// `executor_job_keeps_waiting_when_shutdown_runs_beside_a_live_producer`).
     pub(super) fn join_eager_jobs(&mut self, core: &Arc<ExecutorCore>) -> Result<(), RuntimeError> {
         let _party = self.block_party_guard(crate::vm::quiesce::PartyWait::Join(Arc::clone(core)));
+        let mut stuck = false;
         let slots = {
             let mut g = core.eager.lock().unwrap_or_else(|e| e.into_inner());
             while g.outstanding() > 0 {
-                g = core.eager_cv.wait(g).unwrap_or_else(|e| e.into_inner());
+                let (next, timed) = core
+                    .eager_cv
+                    .wait_timeout(g, DEMOTE_POLL_BACKOFF)
+                    .unwrap_or_else(|e| e.into_inner());
+                g = next;
+                if !timed.timed_out() || g.outstanding() == 0 || !self.is_counted_party() {
+                    continue;
+                }
+                // W7-58 residual — DROP `eager` (G) before taking `parties` (P). See the doc above:
+                // the order is P → G, and `quiesced` takes G beneath P.
+                drop(g);
+                let verdict = self.quiesce.quiesced_only_joins(&self.exec_registry);
+                g = core.eager.lock().unwrap_or_else(|e| e.into_inner());
+                // Re-check under the re-taken lock: a job may have finished in the gap, which is
+                // progress and makes the verdict stale.
+                if verdict && g.outstanding() > 0 {
+                    stuck = true;
+                    break;
+                }
             }
-            g.take_slots()
+            // Do NOT steal the slots on the stuck path: the jobs that own them are still outstanding
+            // and would `finish` into a vec this thread had emptied. Nothing reduces them anyway — the
+            // fault below is what propagates.
+            if stuck { Vec::new() } else { g.take_slots() }
         };
         drop(_party);
+        if stuck {
+            return Err(self.err(JOIN_DEADLOCK_MSG.to_string(), Span::RUNTIME));
+        }
         self.reduce_task_slots(slots)
     }
 
