@@ -2,7 +2,7 @@
 // Protocol hoisting/embedding, satisfies, receiver refinement, hashability.
 
 use super::*;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 thread_local! {
     /// **THE cycle guard for the `Eq` walk — one stack, one key, both levels.** Holds the types
@@ -22,6 +22,33 @@ thread_local! {
     /// every exit path.
     static EQ_BOUNDS_IN_PROGRESS: std::cell::RefCell<Vec<Ty>> =
         const { std::cell::RefCell::new(Vec::new()) };
+
+    /// O(1) membership index onto [`EQ_BOUNDS_IN_PROGRESS`] — see [`Checker::enter_eq_obligation`].
+    /// The `Vec` stays the source of truth (ORDER matters: [`Checker::eq_budget_refusal`] reads its
+    /// FIRST entry to name the walk's root), this only avoids scanning it. Kept in lockstep with the
+    /// `Vec` at its only two mutation sites (`enter_eq_obligation`'s push, `EqObligation::drop`'s
+    /// pop); the guard above it (`ty` already `in_progress`) means a `Ty` is never pushed while
+    /// already present, so push/pop counts always match 1:1 and a plain `HashSet` (not a multiset)
+    /// is exact, never just an over-approximation.
+    static EQ_BOUNDS_IN_PROGRESS_SEEN: std::cell::RefCell<HashSet<Ty>> =
+        std::cell::RefCell::new(HashSet::new());
+
+    /// **Guard A's index — every in-progress instantiation, bucketed by nominal name.** The exact-
+    /// match guard above (`EQ_BOUNDS_IN_PROGRESS_SEEN`) only catches a NAME re-entering under the
+    /// SAME args; polymorphic recursion never does that (`N[int]` → `N[List[int]]` → … repeats the
+    /// name but never the args), so without this the only thing that stops it is
+    /// `EQ_BOUNDS_MAX_IN_PROGRESS` — and that cap must fit a growing `Ty` at every level, which is
+    /// O(cap) memory PER entry and so O(cap²) total (`docs/gaps.md` W7-55's measured finding: cap
+    /// 2 000 on the polyrec fixture was 621.8 MB / 1.3 s; the non-growing control at the same cap was
+    /// 13.6 MB / 17 ms). [`Checker::is_growing_over`] reads this to refuse a strictly-growing re-entry
+    /// at depth ~2, so the cap can stay sized on STACK alone (Guard B), which is O(1) per level.
+    ///
+    /// Kept in lockstep with `EQ_BOUNDS_IN_PROGRESS` at the same two mutation sites as the `SEEN`
+    /// index above (push in `enter_eq_obligation`, pop in `EqObligation::drop`). Per name the pushes/
+    /// pops nest LIFO with the rest of the call stack, so `drop` can `pop()` the bucket instead of
+    /// searching it — the same reasoning as the plain `EQ_BOUNDS_IN_PROGRESS` `Vec`.
+    static EQ_BOUNDS_IN_PROGRESS_BY_NAME: std::cell::RefCell<HashMap<String, Vec<Ty>>> =
+        std::cell::RefCell::new(HashMap::new());
 
     /// Types already proven sound during the CURRENT outermost query — the memo that makes the walk
     /// linear instead of exponential. The guard above is PATH-based: it stops a type being re-entered
@@ -61,38 +88,64 @@ thread_local! {
         const { std::cell::RefCell::new(Vec::new()) };
 }
 
-/// Backstop on the in-progress stack. Once the guard keys on the instantiated type it no longer
-/// terminates by itself: POLYMORPHIC RECURSION never repeats an instantiation (`N[T]` with a field
-/// `Option[N[List[T]]]` expands `N[int]`, `N[List[int]]`, …), so without this `check` would hang, and
-/// the LSP with it. Hitting it REFUSES, like every other decline here.
+/// Backstop on the in-progress stack — Guard B of two (Guard A is [`Checker::is_growing_over`],
+/// checked earlier in [`Checker::enter_eq_obligation`]). **This one is a STACK-SAFETY floor only; it
+/// is not what stops polymorphic recursion.** That used to be one job — a single cap doing both
+/// "terminate the unprovable shape" and "never blow the stack" — and the two pull in opposite
+/// directions once the floor is raised (W7-55): a stack-safety floor sized on a 1 GiB frontend stack
+/// is tens of thousands deep, and letting POLYMORPHIC RECURSION (`N[T]` with a field
+/// `Option[N[List[T]]]`, which never repeats an instantiation) walk anywhere near that deep is an
+/// O(cap²) MEMORY blow-up, not just a slow refusal — see the measurement below. Guard A closes that
+/// shape in ~2 levels regardless of where this cap sits, which is what makes raising this cap safe at
+/// all. Hitting either guard REFUSES, like every other decline here.
 ///
-/// **Rust agrees that this shape is unprovable** — measured, rustc 1.97.0
+/// **Rust agrees that polymorphic recursion is unprovable** — measured, rustc 1.97.0
 /// (`scratchpad/polyrec.rs`): `#[derive(PartialEq, Eq)] struct N<T: Eq> { v: T, next:
 /// Option<Box<N<Vec<T>>>> }` is `error[E0320]: overflow while adding drop-check rules for N<i32>`.
-/// So refusing is not a Chezzi quirk; it is the same answer the owning ancestor gives.
+/// So refusing is not a Chezzi quirk; it is the same answer the owning ancestor gives — Guard A is
+/// the mechanism that reaches that answer cheaply, Guard B (this one) is only the fallback for
+/// whatever growth detection cannot classify (e.g. an unrelated same-name instantiation with no
+/// containment either way), which is bounded and not adversarial.
 ///
-/// **The ceiling is STACK SAFETY, not ambition, and it is measured.** Each level costs a full
+/// **Why the O(cap²)-memory finding matters, and why "just raise the cap" was the wrong fix.** A
+/// first attempt at this milestone raised only this cap (to fit the frontend stack) and OOM-killed the
+/// machine. The reason: for a GROWING shape, level *k*'s `Ty` has size O(k) (`N[int]`, `N[List[int]]`,
+/// `N[List[List[int]]]`, …), and [`EQ_BOUNDS_IN_PROGRESS`] holds a CLONE of every in-progress `Ty`, so
+/// the walk is O(cap²) in memory, not O(cap). Measured on the release binary, `mk(1) == mk(1)` over
+/// the polyrec shape above: cap 160 → 14 ms / a few MB; cap 2 000 → **1 342 ms / 621.8 MB**. Clean
+/// quadratic. The same cap on the NON-growing control shape (`S0: v: int` … `S159: v: S158`) was 17
+/// ms / 13.6 MB at cap 2 000 — the cost is entirely the growth, not the depth. Extrapolating the old
+/// single-cap approach to a stack-safety-sized cap (~78 000, see below) would have been tens of
+/// minutes and hundreds of gigabytes. Guard A removes the growing shape from this cap's reach
+/// entirely (it refuses at depth ~2, independent of the cap), so this cap now only ever bounds
+/// NON-growing walks, each O(1) per level — O(cap) total, not O(cap²).
+///
+/// **This cap's ceiling is STACK SAFETY, not ambition, and it is measured.** Each level costs a full
 /// `satisfies` → `satisfies_args_d` → walk → `eq_where_unsatisfied` → `satisfies` round trip, so the
-/// bound has to fit the SMALLEST stack the checker runs on — the repo's `recursion-guard: size for
-/// the smallest stack the path runs on` rule.
+/// bound has to fit the SMALLEST stack the checker runs on. That is now a STRUCTURAL guarantee rather
+/// than a convention every caller has to remember: [`crate::on_frontend_stack_scoped`] wraps BOTH
+/// checker entry points ([`checker::check`](super::check), `#[cfg(test)]`-only, and
+/// [`checker::check_graph_with_entry`](super::check_graph_with_entry), the production path
+/// `check_graph` delegates to) with a 1 GiB stack, so every caller — CLI, LSP diagnostics/hover,
+/// `test_runner`, and all ~4000 Rust test-harness callers — is on 1 GiB by construction. There is no
+/// smaller-stack caller left to size against (the previous version of this doc named `editor::hover`
+/// calling the checker directly on a ~2 MiB LSP worker as exactly that hole; it is closed the same way
+/// as the rest, structurally, not by convention).
 ///
-/// Do NOT re-derive that floor as "everything goes through [`crate::on_frontend_stack`]'s 1 GiB
-/// thread". An earlier version of this comment said exactly that and it was WRONG: `editor::hover`
-/// called `checker::hover_type` directly, so hover ran the whole checker on a ~2 MiB `chezzi-lsp`
-/// tokio worker. That hole is closed — `editor::hover` now wraps the same way `editor::diagnostics`
-/// does — but the bound is deliberately NOT sized on the assumption that it stays closed.
+/// **Measured floor** (cap lifted for probing, DEBUG build, on the 1 GiB
+/// [`crate::on_frontend_stack_scoped`] thread — see `checker::tests::stack_probe_eq_bounds_depth`, the
+/// `#[ignore]`d harness this was measured with): a chain of CONDITIONAL `eq` types, the expensive
+/// shape at ~5-10 Rust frames per level, survives 118 000 and overflows by 119 000. A chain of plain
+/// structs — the cheap shape — survives 570 000 and overflows by 590 000. `78_000` is sized on the
+/// expensive one with ~1.5x headroom (118 000 / 1.5 ≈ 78 667, rounded down), matching how the old 160
+/// was derived from 240.
 ///
-/// **Measured floor** (with the cap lifted, DEBUG build, Rust test-harness thread — which calls
-/// `check_graph` directly and is the smallest stack in the tree): a chain of CONDITIONAL `eq` types,
-/// the expensive shape at ~5-10 Rust frames per level, survives 240 and overflows by 280. A chain of
-/// plain structs — the cheap shape — survives 800 and overflows by 1600. 160 is sized on the
-/// expensive one with ~1.5x headroom.
-///
-/// **This is a KNOWN CEILING and it is FILED: `docs/gaps.md` W7-55.** A type graph nested deeper
-/// than this is REFUSED at a `[T: Eq]` bound / `==` even though the VM's own equality has no such
-/// cap, so the checker rejects something the runtime handles. That is a real (if absurd-sized)
-/// divergence, not a tradeoff, which is why it is written down rather than left in a comment.
-const EQ_BOUNDS_MAX_IN_PROGRESS: usize = 160;
+/// **This is now closed: `docs/gaps.md` W7-55, FIXED.** The checker used to refuse type graphs
+/// (`[T: Eq]` bound / `==`) at a depth the VM's own equality (no cap) handled two orders of magnitude
+/// deeper. The gap is not eliminated — a cap is still a cap — but it moved from ~160 (smaller than a
+/// hand-written type graph could plausibly hit) to ~78 000 (a depth no hand-written type graph will
+/// ever reach; the VM's own `MAX_STRUCTURAL_DEPTH` is 10 000, i.e. this cap now EXCEEDS the runtime's).
+const EQ_BOUNDS_MAX_IN_PROGRESS: usize = 78_000;
 
 /// The marker every budget refusal carries, so [`Checker::eq_where_unsatisfied`] can tell "the bound
 /// genuinely failed" from "I ran out of budget proving it" and not reword the second into the first.
@@ -105,7 +158,19 @@ struct EqObligation;
 impl Drop for EqObligation {
     fn drop(&mut self) {
         EQ_BOUNDS_IN_PROGRESS.with(|s| {
-            s.borrow_mut().pop();
+            let popped = s.borrow_mut().pop();
+            if let Some(ty) = popped {
+                EQ_BOUNDS_IN_PROGRESS_SEEN.with(|seen| {
+                    seen.borrow_mut().remove(&ty);
+                });
+                if let Some(name) = Checker::nominal_key(&ty) {
+                    EQ_BOUNDS_IN_PROGRESS_BY_NAME.with(|by_name| {
+                        if let Some(bucket) = by_name.borrow_mut().get_mut(name) {
+                            bucket.pop();
+                        }
+                    });
+                }
+            }
         });
     }
 }
@@ -2791,18 +2856,124 @@ impl Checker {
     ///   `satisfies_args_d`, and a grant is a promise the runtime must honour, so "I could not
     ///   finish the proof" must never be spelled the same way as "I finished it and it is sound".
     fn enter_eq_obligation(ty: &Ty) -> Result<EqObligation, Option<String>> {
-        let (in_progress, over_budget) = EQ_BOUNDS_IN_PROGRESS.with(|s| {
-            let st = s.borrow();
-            (st.contains(ty), st.len() >= EQ_BOUNDS_MAX_IN_PROGRESS)
+        // `in_progress` reads the O(1) `EQ_BOUNDS_IN_PROGRESS_SEEN` index, not a `Vec::contains` scan
+        // — see that thread-local's doc for why the two never drift. Was a straight `st.contains(ty)`
+        // over the `Vec`, which made the whole walk O(cap²): raising the cap off its old 160 to fit
+        // the new 1 GiB stack floor (W7-55) multiplied that scan's cost by (new/160)² and pushed the
+        // polymorphic-recursion fixture — the shape the cap exists to terminate — off a sub-second
+        // budget. `over_budget` still only needs the `Vec`'s length.
+        let (in_progress, over_budget) = EQ_BOUNDS_IN_PROGRESS_SEEN.with(|seen| {
+            let over_budget =
+                EQ_BOUNDS_IN_PROGRESS.with(|s| s.borrow().len() >= EQ_BOUNDS_MAX_IN_PROGRESS);
+            (seen.borrow().contains(ty), over_budget)
         });
         if in_progress {
             return Err(None);
+        }
+        // **Guard A — growth detection (W7-55).** The exact-match guard above only closes the loop
+        // when a name re-enters under IDENTICAL args; polymorphic recursion never does that, so left
+        // alone it would walk all the way to `EQ_BOUNDS_MAX_IN_PROGRESS` — and that cap must stay
+        // small because each level's `Ty` GROWS (`N[int]`, `N[List[int]]`, …), making the walk
+        // O(cap²) in memory, not just time (measured: `docs/gaps.md` W7-55). Refuse here, at the
+        // depth the growth first repeats a name, so the cap above can be sized on stack safety alone.
+        if let Some(name) = Self::nominal_key(ty) {
+            let growing = EQ_BOUNDS_IN_PROGRESS_BY_NAME.with(|by_name| {
+                by_name
+                    .borrow()
+                    .get(name)
+                    .into_iter()
+                    .flatten()
+                    .any(|old| Self::is_growing_over(old, ty))
+            });
+            if growing {
+                return Err(Some(Self::eq_budget_refusal(ty)));
+            }
         }
         if over_budget {
             return Err(Some(Self::eq_budget_refusal(ty)));
         }
         EQ_BOUNDS_IN_PROGRESS.with(|s| s.borrow_mut().push(ty.clone()));
+        EQ_BOUNDS_IN_PROGRESS_SEEN.with(|seen| seen.borrow_mut().insert(ty.clone()));
+        if let Some(name) = Self::nominal_key(ty) {
+            EQ_BOUNDS_IN_PROGRESS_BY_NAME.with(|by_name| {
+                by_name
+                    .borrow_mut()
+                    .entry(name.to_string())
+                    .or_default()
+                    .push(ty.clone());
+            });
+        }
         Ok(EqObligation)
+    }
+
+    /// The nominal name of a struct/enum/newtype `ty` — the only three kinds
+    /// [`Self::walk_eq_members`] ever enters an obligation for, so the only three
+    /// [`EQ_BOUNDS_IN_PROGRESS_BY_NAME`] needs to bucket on.
+    fn nominal_key(ty: &Ty) -> Option<&str> {
+        match ty {
+            Ty::Struct(n, _) | Ty::Enum(n, _) | Ty::NewType(n, _) => Some(n.as_str()),
+            _ => None,
+        }
+    }
+
+    fn nominal_args(ty: &Ty) -> Option<&[Ty]> {
+        match ty {
+            Ty::Struct(_, a) | Ty::Enum(_, a) | Ty::NewType(_, a) => Some(a),
+            _ => None,
+        }
+    }
+
+    /// True if `needle` occurs anywhere in `outer`'s structure, INCLUDING `outer` itself.
+    fn ty_contains_or_eq(outer: &Ty, needle: &Ty) -> bool {
+        if outer == needle {
+            return true;
+        }
+        match outer {
+            Ty::List(t) | Ty::Set(t) | Ty::Option(t) => Self::ty_contains_or_eq(t, needle),
+            Ty::Map(k, v) => {
+                Self::ty_contains_or_eq(k, needle) || Self::ty_contains_or_eq(v, needle)
+            }
+            Ty::Result(t, e) => {
+                Self::ty_contains_or_eq(t, needle) || Self::ty_contains_or_eq(e, needle)
+            }
+            Ty::Tuple(elems)
+            | Ty::Struct(_, elems)
+            | Ty::Enum(_, elems)
+            | Ty::NewType(_, elems) => elems.iter().any(|t| Self::ty_contains_or_eq(t, needle)),
+            _ => false,
+        }
+    }
+
+    /// **Guard A's relation, and it is DIRECTIONAL** (`docs/gaps.md` W7-42's lesson: a two-operand
+    /// guard whose real question has a direction must be asymmetric, or it silently rejects the
+    /// ordered half it was never tested against). True if `new` is a STRICTLY LARGER instantiation of
+    /// the same nominal name than `old`, already in progress:
+    ///
+    /// - `N[int]` in progress, `N[List[int]]` about to enter — `List[int]` CONTAINS `int`, so this is
+    ///   `true` and the walk refuses: polymorphic recursion, which never repeats an instantiation, so
+    ///   nothing else terminates it.
+    /// - `Pair[Pair[int]]` in progress, `Pair[int]` about to enter — `int` does NOT contain
+    ///   `Pair[int]`, so this is `false` and the walk proceeds: `Pair[int]` is a SUBTERM of what's
+    ///   already in progress, which terminates on its own (the exact-match guard closes the loop the
+    ///   next time `Pair[int]` — or anything no bigger — recurs).
+    ///
+    /// Every arg dimension must be non-shrinking (`new`'s arg contains-or-equals `old`'s, at every
+    /// index) with at least one strictly larger — an unrelated same-name instantiation (no
+    /// containment either way, e.g. `M[int, str]` vs `M[str, int]`) is left to the depth cap rather
+    /// than misclassified as growth; the depth cap terminates it fine, because it is not unbounded.
+    fn is_growing_over(old: &Ty, new: &Ty) -> bool {
+        let (Some(old_args), Some(new_args)) = (Self::nominal_args(old), Self::nominal_args(new))
+        else {
+            return false;
+        };
+        if old_args.len() != new_args.len() {
+            return false; // can't happen for the same nominal name; stay total rather than panic
+        }
+        old_args
+            .iter()
+            .zip(new_args)
+            .all(|(o, n)| Self::ty_contains_or_eq(n, o))
+            && old_args.iter().zip(new_args).any(|(o, n)| o != n)
     }
 
     /// Walk the MEMBERS of a nominal `ty` (fields / payloads / underlying) under the shared cycle

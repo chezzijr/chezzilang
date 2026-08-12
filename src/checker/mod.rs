@@ -709,18 +709,27 @@ struct EnumSigInfo {
 
 /// Type-check a single parsed module (no imports). Retained as the unit-test entry point; the CLI
 /// drives [`check_graph`] so single- and multi-file programs share one path.
+///
+/// Runs on [`crate::on_frontend_stack_scoped`]'s dedicated stack — see that fn's doc comment. This is
+/// the sole reason `check_src`/`ok`/`rejects` and the ~4000 other Rust test-harness callers that go
+/// through this fn are no longer the smallest stack in the tree: they now get the same 1 GiB frontend
+/// stack production always had, by construction, instead of whatever the ambient test thread happens
+/// to be sized at.
 #[cfg(test)]
 pub fn check(module: &crate::ast::Module) -> Result<(), Vec<CheckError>> {
-    let mut c = Checker::new();
-    // Single-module path (no graph): the always-linked std/prelude.chz was never hoisted, so seed the
-    // eight migrated universe-builtin signatures from it directly (graph path hoists them normally).
-    c.seed_native_prelude_sigs();
-    c.check_module(&module.stmts, None, &[]);
-    if c.errors.is_empty() {
-        Ok(())
-    } else {
-        Err(c.errors)
-    }
+    crate::on_frontend_stack_scoped(move || {
+        let mut c = Checker::new();
+        // Single-module path (no graph): the always-linked std/prelude.chz was never hoisted, so seed
+        // the eight migrated universe-builtin signatures from it directly (graph path hoists them
+        // normally).
+        c.seed_native_prelude_sigs();
+        c.check_module(&module.stmts, None, &[]);
+        if c.errors.is_empty() {
+            Ok(())
+        } else {
+            Err(c.errors)
+        }
+    })
 }
 
 /// Entry point for a multi-file program: type-check every module in the graph (dependencies
@@ -736,18 +745,27 @@ pub fn check_graph(graph: &ModuleGraph) -> Result<(), Vec<CheckError>> {
 /// arguments. That is CLI state the checker cannot discover, and the only thing it changes is one
 /// extra rejection (M24: such a function may not take a hidden type witness — see the entry-fn arm
 /// in `run_graph_pass`). `None` ⇒ byte-identical to `check_graph`.
+///
+/// Runs on [`crate::on_frontend_stack_scoped`]'s dedicated stack — see that fn's doc comment. This is
+/// the PRODUCTION entry point (`check_graph` delegates here), so this is where the CLI, LSP
+/// diagnostics/hover, and `test_runner` all land; wrapping HERE rather than at each of those callers
+/// makes the 1 GiB stack a structural guarantee every entry point gets by construction, not a
+/// convention each future caller has to remember. Nesting (a caller that also wraps, e.g. the CLI) is
+/// harmless — one extra thread.
 pub fn check_graph_with_entry(
     graph: &ModuleGraph,
     entry_fn: Option<&str>,
 ) -> Result<(), Vec<CheckError>> {
-    let mut c = Checker::new();
-    c.entry_fn = entry_fn.map(str::to_string);
-    c.run_graph_pass(graph, false);
-    if c.errors.is_empty() {
-        Ok(())
-    } else {
-        Err(std::mem::take(&mut c.errors))
-    }
+    crate::on_frontend_stack_scoped(move || {
+        let mut c = Checker::new();
+        c.entry_fn = entry_fn.map(str::to_string);
+        c.run_graph_pass(graph, false);
+        if c.errors.is_empty() {
+            Ok(())
+        } else {
+            Err(std::mem::take(&mut c.errors))
+        }
+    })
 }
 
 /// Classification of the symbol a hover landed on, returned alongside the inferred type display so

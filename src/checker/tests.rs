@@ -2062,7 +2062,13 @@ fn a_long_chain_of_conditional_eq_types_is_decided_not_waved_through() {
     // PAST the backstop, a SOUND chain is refused — and the refusal SAYS it ran out of budget rather
     // than blaming a bound that did not fail. That message used to be unreachable: it was produced
     // inside a `satisfies` call whose `Err` the caller discarded and reworded.
-    entry_rejects(&chain(180, true), "nests too deeply");
+    //
+    // W7-55: the backstop moved from 160 (`EQ_BOUNDS_MAX_IN_PROGRESS`, sized for an ambient
+    // test-harness stack) to 78 000 (sized on the 1 GiB frontend stack every caller now gets by
+    // construction), so this needs a chain past THAT to still trip it. Slow to lex/parse at this size
+    // — measured ~4.8s / ~1 GB peak RSS for this one case (DEBUG test build) — but that cost buys real
+    // coverage of the new boundary rather than an assertion that would vacuously pass at 180 now.
+    entry_rejects(&chain(79_000, true), "nests too deeply");
 }
 
 /// **The budget refusal must not print a multi-KB type name.** The shape that trips the budget is
@@ -2179,18 +2185,21 @@ fn a_cyclic_shared_field_type_graph_is_also_walked_once_per_type() {
     );
 }
 
-/// The budget refusal must name the type the walk STARTED from. For a chain `S200 → … → S0` the
+/// The budget refusal must name the type the walk STARTED from. For a chain `S{N} → … → S0` the
 /// entry that actually trips the budget is `S0` — `struct S0: v: int`, which nests not at all — so
 /// naming it told the user about the one link that is definitely fine.
+///
+/// W7-55: `N` moved from 200 to past the new 78 000 cap (the old 200 no longer trips it at all).
 #[test]
 fn the_budget_refusal_names_the_type_the_walk_started_from() {
+    const N: usize = 78_500;
     let mut src = String::from("struct S0:\n    v: int\n");
-    for i in 1..=200 {
+    for i in 1..=N {
         src.push_str(&format!("struct S{i}:\n    v: S{}\n", i - 1));
     }
-    src.push_str(
-        "fn needs[U: Eq](a: U, b: U) -> bool:\n    return a == b\nfn use_it(a: S200, b: S200) -> bool:\n    return needs(a, b)\n",
-    );
+    src.push_str(&format!(
+        "fn needs[U: Eq](a: U, b: U) -> bool:\n    return a == b\nfn use_it(a: S{N}, b: S{N}) -> bool:\n    return needs(a, b)\n"
+    ));
     let errs = check_entry(&src);
     let msg = errs
         .iter()
@@ -2198,7 +2207,7 @@ fn the_budget_refusal_names_the_type_the_walk_started_from() {
         .map(|e| e.message.clone())
         .unwrap_or_else(|| panic!("expected a budget refusal, got: {errs:?}"));
     assert!(
-        msg.contains("S200 nests too deeply"),
+        msg.contains(&format!("S{N} nests too deeply")),
         "the refusal must name the walk's ROOT, not the innermost entry: {msg}"
     );
     assert!(
@@ -2220,6 +2229,133 @@ fn a_deep_but_finite_chain_stays_within_the_eq_budget() {
         "fn needs[U: Eq](a: U, b: U) -> bool:\n    return a == b\nfn use_it(a: S140, b: S140) -> bool:\n    return needs(a, b)\n",
     );
     entry_ok(&src);
+}
+
+/// **The EXACT boundary pair at the new cap (W7-55).** Measured empirically (via
+/// `checker::tests::stack_probe_eq_bounds_depth`): `S0..S77999` (78 000 simultaneous obligations at
+/// peak) is the LAST depth `EQ_BOUNDS_MAX_IN_PROGRESS = 78_000` accepts; `S0..S78000` (78 001) is the
+/// FIRST it refuses. Bare `==` reaches [`Checker::eq_bounds_unsatisfied`] directly (`checker/
+/// pattern.rs`'s binary-op arm calls it on both operands before falling back to `may_be_equal`), the
+/// same path the original W7-55 measurement used.
+///
+/// Deliberately CHECK-only (`check_src`, not a compile+run through [`crate::vm::run_capture`]):
+/// generating two ~78 000-struct sources and compiling+executing one of them in the SAME test process
+/// pushed a 6 GiB memory cap into an OOM-kill while developing this test (a real cost of a
+/// genuinely-huge program, not a defect in the guard) — a stack overflow being worse than a wrong
+/// answer does not make an OOM in the TEST SUITE an acceptable price for one assertion. A follow-up
+/// by-hand attempt to RUN `S0..S77999` on the release CLI (`chezzi run`, its own process, nothing else
+/// running) also OOM'd, even at a 12 GiB cap — a 78 000-deep chain of nested FUNCTION CALLS is its own,
+/// unrelated, pre-existing VM resource cost (deep synchronous call recursion), independent of this
+/// row's `Eq`-walk fix, and out of this task's scope to chase. [`runtime_boundary_is_honoured_at_a_
+/// depth_the_old_cap_refused`] below covers the "the grant is honoured at runtime, not just claimed"
+/// half at an affordable depth instead — genuinely deep, well past the OLD 160/240 caps, but not at
+/// the literal new boundary, which the VM's own call-depth cost puts out of reach to actually RUN.
+#[test]
+fn the_new_cap_boundary_accepts_then_refuses() {
+    let chain_src = |n: usize| {
+        let mut s = String::from("struct S0:\n    v: int\n");
+        for i in 1..=n {
+            s.push_str(&format!("struct S{i}:\n    v: S{}\n", i - 1));
+        }
+        s.push_str(&format!(
+            "fn use_it(a: S{n}, b: S{n}) -> bool:\n    return a == b\n"
+        ));
+        s
+    };
+    let ok_errs = check_src(&chain_src(77_999));
+    assert!(
+        ok_errs.is_empty(),
+        "S0..S77999 (78 000 simultaneous obligations) is the last depth the new cap should accept: {ok_errs:?}"
+    );
+    let refused_errs = check_src(&chain_src(78_000));
+    assert!(
+        refused_errs
+            .iter()
+            .any(|e| e.message.contains("nests too deeply")),
+        "S0..S78000 (78 001 simultaneous obligations) must be the first refused depth: {refused_errs:?}"
+    );
+}
+
+/// **The ACCEPTED half of the cap must actually RUN, not just check clean** — `entry_ok` alone would
+/// not have caught a bug in how the walk's GRANT interacts with, say, codegen for a deep field chain.
+/// Not run at the exact new cap boundary (see the test above for why that pair stays check-only); this
+/// depth is chosen to be well past the OLD 160/240 caps — the shape that used to be wrongly refused —
+/// while staying cheap enough to compile and execute in the normal test suite.
+#[test]
+fn runtime_boundary_is_honoured_at_a_depth_the_old_cap_refused() {
+    const N: usize = 2_000;
+    let mut src = String::from("struct S0:\n    v: int\nfn mk0() -> S0:\n    return S0(v=1)\n");
+    for i in 1..=N {
+        src.push_str(&format!(
+            "struct S{i}:\n    v: S{}\nfn mk{i}() -> S{i}:\n    return S{i}(v=mk{}())\n",
+            i - 1,
+            i - 1
+        ));
+    }
+    src.push_str(&format!("print(mk{N}() == mk{N}())\n"));
+    let out = crate::vm::run_capture(&src).expect("well within the new cap, should run clean");
+    assert_eq!(out, "true\n");
+}
+
+/// **Guard A's relation is DIRECTIONAL — the SHRINKING half must still be accepted.** An ordinary
+/// generic struct instantiated with ITSELF as the type argument (`Pair[Pair[int]]`) makes the walk
+/// re-enter the same nominal name (`Pair`) under a SMALLER instantiation one level down (`Pair[int]`,
+/// walking `Pair[Pair[int]]`'s field `v: T`). That is not polymorphic recursion — it terminates in one
+/// more step on its own — so growth detection must not refuse it. A guard built from a SYMMETRIC "the
+/// args differ" test (the recorded failure mode, `docs/gaps.md` W7-42) would wrongly reject this: it
+/// cannot tell shrinking from growing, only that the two instantiations are not equal.
+#[test]
+fn a_self_nested_generic_instantiation_shrinking_inward_is_accepted() {
+    entry_ok(
+        "\
+struct Pair[T]:
+    v: T
+fn needs[U: Eq](a: U, b: U) -> bool:
+    return a == b
+fn use_it(a: Pair[Pair[int]], b: Pair[Pair[int]]) -> bool:
+    return needs(a, b)
+",
+    );
+    // Two levels of shrinking in a row — the neighbour a symmetric guard fails on FIRST, because it
+    // trips at the very first "different args" comparison (`Pair[Pair[int]]` vs `Pair[Pair[Pair[int]]]`)
+    // without ever asking which direction the difference runs.
+    entry_ok(
+        "\
+struct Pair[T]:
+    v: T
+fn needs[U: Eq](a: U, b: U) -> bool:
+    return a == b
+fn use_it(a: Pair[Pair[Pair[int]]], b: Pair[Pair[Pair[int]]]) -> bool:
+    return needs(a, b)
+",
+    );
+}
+
+/// **Guard A refuses growth immediately — not after walking to the depth cap.** Same polymorphic-
+/// recursion shape as `conditional_eq_bound_recursion_terminates`, but timed: growth detection must
+/// catch `N[int]` → `N[List[int]]` at depth ~2, so this stays fast and cheap REGARDLESS of how high
+/// `EQ_BOUNDS_MAX_IN_PROGRESS` is set — the O(cap²)-memory failure mode this guard exists to prevent
+/// (`docs/gaps.md` W7-55) only shows up if the walk is left to grow the `Ty` all the way to the cap.
+#[test]
+fn polymorphic_recursion_is_refused_in_bounded_time_by_growth_detection() {
+    let start = std::time::Instant::now();
+    entry_rejects(
+        "\
+struct N[T]:
+    v: T
+    next: Option[N[List[T]]]
+fn same[T: Eq](a: T, b: T) -> bool:
+    return a == b
+fn use_it(a: N[int], b: N[int]) -> bool:
+    return same(a, b)
+",
+        "nests too deeply",
+    );
+    let elapsed = start.elapsed();
+    assert!(
+        elapsed < std::time::Duration::from_millis(500),
+        "growth detection should refuse at depth ~2, not walk to the depth cap: took {elapsed:?}"
+    );
 }
 
 /// **A memoized `None` must never escape the coinductive assumption it was derived under.** "Assume
@@ -6640,6 +6776,61 @@ fn entry_rejects(src: &str, needle: &str) {
         errs.iter().any(|e| e.message.contains(needle)),
         "expected an error containing {needle:?}, got: {errs:?}"
     );
+}
+
+/// **ONE-OFF PROBE, not a regression test — `#[ignore]`d.** Used by hand (W7-55) to find the eq-walk's
+/// stack-overflow floor on the 1 GiB frontend stack `check_graph_with_entry` now always runs on:
+/// temporarily bump the `EQ_BOUNDS_MAX_IN_PROGRESS` constant in `checker/proto.rs` past whatever depth
+/// is under test (no env-var override exists — the cap is a plain `const`, so this means a scratch
+/// edit + rebuild, reverted before committing), then invoke this single test directly
+/// (`cargo test --lib … -- --ignored --exact`) with `CHEZZI_PROBE_SHAPE=cond|plain` and
+/// `CHEZZI_PROBE_N=<depth>` under a memory-capped `systemd-run` scope — a stack overflow aborts the
+/// WHOLE process, so this can only ever answer one depth per run. Left in the tree (not deleted after
+/// use) because the next time this floor needs re-deriving — a new Rust version, a changed call chain
+/// through `satisfies` — this is the harness, not a new one to write from scratch.
+#[test]
+#[ignore]
+fn stack_probe_eq_bounds_depth() {
+    let shape = std::env::var("CHEZZI_PROBE_SHAPE").unwrap_or_else(|_| "plain".to_string());
+    let n: usize = std::env::var("CHEZZI_PROBE_N")
+        .expect("set CHEZZI_PROBE_N")
+        .parse()
+        .expect("CHEZZI_PROBE_N must be a usize");
+    let mut src = match shape.as_str() {
+        // The CHEAP shape: a plain struct chain, one field, no method.
+        "plain" => String::from("struct S0:\n    v: int\n"),
+        // The EXPENSIVE shape: a chain of CONDITIONAL `eq` types — each level costs a full
+        // `satisfies` -> `satisfies_args_d` -> walk -> `eq_where_unsatisfied` -> `satisfies` round
+        // trip, matching what the original W7-55 floor measurement used.
+        "cond" => String::from(
+            "struct Tag:\n    n: int\n\
+             struct Box[T]:\n    val: T\n    \
+             fn compare(self, o: Self) -> int where T: Comparable:\n        return 0\n    \
+             fn eq(self, o: Self) -> bool where T: Comparable:\n        return self.compare(o) == 0\n\
+             struct C[T]:\n    v: T\n    \
+             fn eq(self, o: Self) -> bool where T: Eq:\n        return true\n\
+             struct A0:\n    v: Box[int]\n",
+        ),
+        other => panic!("unknown CHEZZI_PROBE_SHAPE {other:?}, want plain|cond"),
+    };
+    let (prefix, per_level) = match shape.as_str() {
+        "plain" => ("S", "struct {name}:\n    v: {prev}\n"),
+        "cond" => ("A", "struct {name}:\n    v: C[{prev}]\n"),
+        _ => unreachable!(),
+    };
+    for i in 1..=n {
+        let name = format!("{prefix}{i}");
+        let prev = format!("{prefix}{}", i - 1);
+        src.push_str(&per_level.replace("{name}", &name).replace("{prev}", &prev));
+    }
+    let root = format!("{prefix}{n}");
+    src.push_str(&format!(
+        "fn needs[U: Eq](a: U, b: U) -> bool:\n    return a == b\nfn use_it(a: {root}, b: {root}) -> bool:\n    return needs(a, b)\n"
+    ));
+    let errs = check_entry(&src);
+    // Print rather than assert either way — the probe's answer is whether the PROCESS survived at
+    // all (an overflow aborts before this line runs), not what the checker concluded.
+    eprintln!("PROBE shape={shape} n={n} survived, errs={}", errs.len());
 }
 
 /// BLOCKER 1 — user-facing checker errors naming a user struct/enum must render the BARE display

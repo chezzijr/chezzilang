@@ -77,3 +77,26 @@ where
         .join()
         .unwrap_or_else(|e| std::panic::resume_unwind(e))
 }
+
+/// [`on_frontend_stack`] for a closure that BORROWS instead of owning its inputs. `on_frontend_stack`
+/// requires `F: 'static`, which is why its callers historically cloned everything they passed in —
+/// fine for the CLI/editor (one `Module`/source string per call) but wrong to force on every checker
+/// entry point, which would otherwise need to clone a whole `&ModuleGraph` per call just to get onto
+/// the big stack. `std::thread::scope` + `Builder::spawn_scoped` lets the spawned thread borrow `'env`
+/// data instead, so `f` can take `&Module` / `&ModuleGraph` directly. Same panic behaviour as
+/// `on_frontend_stack`: a panic on the scoped thread is re-raised here via `resume_unwind`, never
+/// swallowed — the panic-fuzz invariant does not get a second, quieter code path.
+pub fn on_frontend_stack_scoped<F, R>(f: F) -> R
+where
+    F: FnOnce() -> R + Send,
+    R: Send,
+{
+    std::thread::scope(|scope| {
+        std::thread::Builder::new()
+            .stack_size(FRONTEND_STACK_BYTES)
+            .spawn_scoped(scope, f)
+            .expect("failed to spawn front-end stack thread")
+            .join()
+            .unwrap_or_else(|e| std::panic::resume_unwind(e))
+    })
+}

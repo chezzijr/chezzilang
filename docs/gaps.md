@@ -94,7 +94,7 @@ later edit shifts them and nobody re-numbers the whole table (`W7-27`'s was alre
 | ~~**W7-52**~~ | `:10246` | **RESOLVED 2026-08-12 (the runtime-fault deferral IS Go's answer, not a bug) — AND FIXED 2026-08-12 (a same-day review found the verdict was under-scoped: a `[T: Eq]` BOUND over a protocol-typed value was still check-rejected, disagreeing with the `==` it had just been measured to agree with).** Protocols are Go interfaces (`CLAUDE.md`), and Go compiles interface `==` unconditionally, panicking at the point it actually runs when the dynamic type turns out uncomparable — measured, Go 1.26: `panic: runtime error: comparing uncomparable type main.Tag`. Chezzi's `==`/`.contains()` already did the identical thing at the identical point, both engines, and that half is unchanged: `x: Sized_ = Box(Tag(1))` / `y: Sized_ = Box(Tag(2))` / `x == y` check-cleans then `runtime error (line 12, col 16): struct 'Tag' has no method 'compare'`; `xs.contains(y)` over `xs: List[Sized_]` faults identically. **What was missing:** `fn generic_eq[T: Eq](a: T, b: T) -> bool: return a == b` fed the SAME `a`/`b` was *type error: type Sized_ does not satisfy Eq* — one relation, `==` and a `[T: Eq]` bound disagreeing, the exact invariant `W7-41` exists to hold and the same defect shape `W7-54` (`Ty::Func`) closed a few hours earlier on the same branch. **Go, re-measured, 1.26** (`comparable` was widened in Go 1.20 to admit interface types): `func eqg[T comparable](a, b T) bool { return a == b }` fed two `Sized` interface values compiles and runs (`false`); fed an uncomparable witness it compiles and panics at the comparison — the identical shape the operator already produced. Chezzi now matches on both spellings | **The verdict's own reasoning survives untouched; only the D1 grant's receiver-kind gate was too narrow.** `Ty::Protocol` had no `Checker::intrinsic_recv_kind` arm (`src/checker/proto.rs:335`, classifying it `"protocol"` now) — the identical root cause `W7-54` fixed for `Ty::Func` — so the D1 `Eq` grant (`src/checker/proto.rs:1780`) excluded it before `eq_bounds_unsatisfied` was ever consulted. **Three edits, the same shape as `W7-54`, no VM change:** (1) `Ty::Protocol(..) => "protocol"` in `intrinsic_recv_kind`; (2) `("Eq", "eq", "protocol")` added to `INTRINSIC_PROTO_METHODS` (`src/checker/proto.rs:189`); (3) a `"protocol"` `Recv` probe row added to `intrinsic_grants_all_have_vm_arms` (`src/vm/tests.rs`) — since the probe template is a bare `a := {lit}` with no annotation, the prelude carries a factory `fn mkp() -> Sized_: return Tag(1)` and `lit = "mkp()"`, so `a` genuinely infers `Ty::Protocol`, confirmed by running it. **Neither of the row's two original arms needed to change, and neither can be narrowed even if narrowing were wanted:** (a) `eq_bounds_unsatisfied_rec`'s `Ty::Protocol` catch-all (`src/checker/proto.rs:2852`) staying `None` is what makes the new grant sound — `Ty::result(inner)` is literally `Ty::Result(inner, Ty::Protocol("Error"))` (`src/checker/ty.rs:304-313`, re-confirmed), so every bare `Result[T]` carries an existential in its error slot, and refusing the arm would un-grant `Result` wholesale and break the `("Eq", "eq", "result")` ratchet row; it is now ALSO what a protocol-typed value's OWN `[T: Eq]`/`.eq()`/`==` routes through, not just a nested one. (b) `may_be_equal`'s `(Protocol(..), Protocol(..)) => true` arm (`src/checker/proto.rs:1027`) still short-circuits before either operand's witness is visible, unchanged — the arm it precedes is Protocol-vs-CONCRETE (conformance in the wrong direction for two existentials), not a "nominal" arm, so nothing here was ever racing it; that arm's permissiveness is §B2's own open question, not this row's. **Guard rail, swept by `vm::tests::intrinsic_grants_all_have_vm_arms`'s full (protocol × receiver-kind) matrix:** `Eq` is the ONLY protocol widened — `[T: Stringable]`/`[T: Hashable]`/`[T: Iterable]`/`[T: Add]`/… at `T = <protocol>` all still reject, because `Eq`-satisfaction is defined as exactly what `==` already accepts (`W7-41`) and `==` already accepted a protocol-typed operand; no other protocol shares that premise. `[T: Comparable]` (which EMBEDS `Eq`) at `T = Sized_` used to report the confusing *"does not satisfy Eq"*; now the `Eq` embed passes and the rejection names the real gap, *"does not satisfy Comparable"* — measured, both pinned in `checker::tests::protocol_typed_value_rejects_comparable_on_the_real_reason`. Protocol-to-protocol assignability (`[T: Sized_]` fed a `Sized_` value, Go's interface-to-interface assignment) is decided by `Ty::Protocol`'s own structural arm and was never routed through the D1 kind gate — unaffected, pinned in `checker::tests::protocol_typed_value_still_satisfies_its_own_protocol`. **Tests:** `checker::tests::protocol_typed_value_satisfies_eq` (the bound and the Critical's own `generic_eq` repro, both engines implicitly since it's a checker test), `protocol_typed_value_does_not_satisfy_other_protocols`, `protocol_typed_value_rejects_comparable_on_the_real_reason`, `protocol_typed_value_still_satisfies_its_own_protocol`; runtime behavior in `tests/chz/spec/eq_protocol_existential_test.chz` (10 tests, gated serial==M:N): the original 4 (operator/`.contains()` fault + positive control, the positive control's `Box[T]` payload widened with a `tag` field `eq` ignores so a silently-stopped dispatch falling back to structural equality would fail it) plus 2 new — a `[T: Eq]` bound agreeing with the bare operator on a satisfied witness, and the SAME bound faulting cleanly, naming `compare`, on an unsatisfied one |
 | ~~**W7-53**~~ | `:10399` | **FIXED 2026-08-12 — a generic body that compares must declare the bound, matching both owning ancestors.** Three measured instances, all `ok: no type errors` then `runtime error: struct 'Tag' has no method 'compare'` on **both** engines before the fix, now all rejected AT THEIR OWN DEFINITION with a message naming the fix (`… T is not bounded by Eq (add an `Eq` bound to T: `[T: Eq]`, or `where T: Eq` on a fn)`). **A same-day follow-up review found the `[K: Hashable + Eq]` fallback below had shipped a real, user-visible regression** (a struct whose only `eq` is the non-hook ordinary-method escape hatch newly failed `Eq` — `Counter`/`ConcurrentMap`/`memoize1` over it rejected), fixed the same day — see the writeup. **Its LAST residual, `I1′`, is also FIXED 2026-08-12**: `.eq()` through an `[T: Eq]` bound resolved to a non-hook user method where rustc resolves to the trait method (`a.eq(&b)` `true` on a concrete receiver, `a == b` `false`, `eqm<T: Eq>` **`false`** — Chezzi said `true` for the third), a silent wrong value on both engines; the checker now marks protocol-dispatched `.eq()` sites and the compiler lowers them to `Op::Eq`, the opcode `==` itself emits | **Four call sites switched from the erasing `eq_bounds_unsatisfied_erased` (deleted — no caller survived) to the plain `eq_bounds_unsatisfied`, plus `Hashable` stays NON-embedding `Eq` (measured: embedding it regressed a working program) — plus the follow-up fix, `Checker::eq_sig_is_hook`.** See the detailed writeup below |
 | ~~**W7-54**~~ | `:10117` | **FIXED 2026-08-12 — a function value satisfies `Eq`, so `==`, `.eq()` and a `[T: Eq]` bound give one answer.** Measured on the pre-change binary: `f := g` / `f == g` printed `true`; `fn eqm[T: Eq](a,b): return a.eq(b)` fed `g` was *type error: type fn(int) -> int does not satisfy Eq* — the same fed through `a == b` inside the erased body gave the identical error; `struct Box[T]` with `fn eq(self, o: Self) -> bool where T: Eq` over a function payload was *cannot compare Box[fn(int) -> int] and Box[fn(int) -> int] for equality — Box[fn(int) -> int]'s `eq` requires fn(int) -> int: Eq* (a `W7-41` regression — this spelling printed `true` before it). **rustc 1.97.0, measured:** `#[derive(PartialEq, Eq)] struct Boxy<T: Eq>(T)` over a `fn(i32) -> i32` payload builds clean and prints `true` — fn pointers implement `PartialEq`. Chezzi now matches (Go is the one ancestor that differs: `func can only be compared to nil`). **Note: `print(f.eq(g))` called BARE on a concrete receiver still errors identically post-fix** (*has no method 'eq'*) — that is correct, not a residual: bare `.eq()` on a concrete receiver is `has no method 'eq'` for every D1-granted kind (`(1).eq(1)`, `[1].eq([1])` too), because the `Eq` grant makes `.eq()` callable from an ERASED `[T: Eq]` body, not a new bare instance method. "One answer" means operator ≡ erased-bound method, not that bare `.eq()` starts working. **Same-day follow-up:** `Ty::BuiltinFn` (`ord`/`chr`/`panic`/first-class `print` — a SEPARATE `Ty` variant from `Ty::Func`, kept apart only for sendability, but rendering identically in diagnostics) was the identical defect and was missed by the first pass; it now shares `Ty::Func`'s `"func"` `intrinsic_recv_kind` rather than minting a second kind, pinned by `tests/chz/spec/eq_func_test.chz`'s builtin-fn rows | `Ty::Func` had no arm in `Checker::intrinsic_recv_kind` (`src/checker/proto.rs:310`), so it fell to `"?"` and the D1 `Eq` grant's `!matches!(…, "?" \| "nil")` gate excluded it — a runtime-correct operator (`Vm::values_equal`'s identity compare for a function value already agreed with CPython) with no protocol-system grant behind it. **Three edits, all in the checker, no VM change**: (1) `Ty::Func { .. } => "func"` added to `intrinsic_recv_kind`; (2) `("Eq", "eq", "func")` added to `INTRINSIC_PROTO_METHODS`; (3) a `"func"` `Recv` row added to `intrinsic_grants_all_have_vm_arms`'s probe table (`src/vm/tests.rs`). No new VM arm was needed: `do_method_call`'s terminal `_` arm (`src/vm/call.rs`) already routes an `Obj::Func`/`Obj::Closure` receiver miss into `intrinsic_proto_method`, whose receiver-agnostic `("eq", 1)` arm calls the same `values_equal_guarded` `==` uses — confirmed by running the probe on both engines, not assumed. The matrix sweep in `intrinsic_grants_all_have_vm_arms` (which puts `Ty::Func` through every registered protocol for the first time) stayed green, so no other protocol arm was accidentally granting `Ty::Func`; the same sweep stayed green a second time when `Ty::BuiltinFn` joined the `"func"` kind. `tests/chz/spec/eq_func_test.chz` pins two top-level loads equal, two different top-level fns unequal, two factory calls unequal, two closures with equal captures unequal, a closure equal to itself, the restored `Box[fn]` spelling (now dispatching a REAL `self.val == o.val` body, not a `return true` stub, so it can tell dispatch apart from structural fallback), and the same shapes over a builtin (`ord`/`chr`) — all measured failing on the pre-change binary first |
-| **W7-55** | `Type-system / Eq` | **The `Eq` walk's depth cap REFUSES a type graph the VM compares happily — the checker is stricter than the runtime, by a fixed number.** `Checker::eq_bounds_unsatisfied` bounds its in-progress stack at `EQ_BOUNDS_MAX_IN_PROGRESS = 160` (`src/checker/proto.rs`). Past that it REFUSES (fail-closed, deliberately — a `None` there would be consumed as a `grant_intrinsic` promise). Measured: a chain `struct S0: v: int` … `struct S{N}: v: S{N-1}` plus builders, then `mk{N}() == mk{N}()`, RUNS and prints `true` for N ≤ 159 and is *type error: … S{N} nests too deeply to prove its equality reaches no unmet `where` bound* from N = 160. The VM's `values_equal_guarded` has no such cap, so this is a checker-only rejection of a working program. The same cap also refuses genuinely unprovable shapes, which is its purpose: polymorphic recursion (`struct N[T]: next: Option[N[List[T]]]`) never repeats an instantiation, so nothing else terminates it — and **rustc agrees on that half**, `error[E0320]: overflow while adding drop-check rules` on the mirror (1.97.0, measured) | **The number is a STACK-SAFETY floor, not a semantic one, and it is measured rather than chosen.** Each level costs a full `satisfies` → `satisfies_args_d` → walk → `eq_where_unsatisfied` → `satisfies` round trip. With the cap lifted, on the smallest stack the checker runs on (the Rust test harness thread, which calls `check_graph` directly; DEBUG build, frames 3-5x release): a chain of CONDITIONAL `eq` types survives 240 and overflows by 280; a chain of plain structs survives 800 and overflows by 1600. 160 is sized on the expensive shape with ~1.5x headroom. A stack overflow is an `abort`, strictly worse than any wrong answer, which is why the safe direction here is *smaller*. Raising it further needs the floor raised first — either by routing the test helpers through `crate::on_frontend_stack` as production already does (`main.rs`, and `editor::hover`/`editor::diagnostics` since 2026-08-11), or by bounding WORK rather than DEPTH so the walk stops recursing per level. Neither is a line edit; 160 already exceeds any hand-written type graph by ~2 orders of magnitude |
+| ~~**W7-55**~~ | `:10734` | **FIXED 2026-08-12 — the `Eq` walk's depth cap moved from 160 (sized on an ambient test-harness stack) to 78 000 (sized on the 1 GiB frontend stack every caller now gets structurally), and polymorphic recursion is now refused by GROWTH DETECTION, not by walking to the cap.** A first attempt raised only the cap and OOM-killed the machine: for a GROWING shape the in-progress `Ty` itself grows one level at a time, and the old guard cloned every in-progress entry, so the walk was O(cap²) in MEMORY, not just time — measured, cap 2 000 on the polyrec fixture, 621.8 MB / 1 342 ms, vs. 13.6 MB / 17 ms on a non-growing control at the same cap. **Two guards now, not one number doing both jobs** — see the writeup | **Guard A (new): growth detection.** `Checker::is_growing_over` refuses a re-entry under the same nominal name whose new instantiation strictly CONTAINS the in-progress one (`N[int]` → `N[List[int]]`), independent of the cap, at depth ~2. Directional on purpose — a SHRINKING re-entry (`Pair[Pair[int]] → Pair[int]`) is still accepted. **Guard B: the depth cap**, now doing only its stack-safety job, re-measured on the 1 GiB stack and re-derived the same way (measured/1.5). See the detailed writeup below |
 | `min`/`max` → `Option` | `:1690` | `List.min`/`max`/`min_by`/`max_by` fault on empty while `first`/`last`/`pop` return `Option[T]` | Breaking surface change: 23 call sites + docs + examples. Own milestone |
 | `List[Any]` widening | `:1731` | `List[Any] = [1, 3.0]` silently widens the int to `1.0` | Deferred pre-freeze (wave 4) |
 | **N10** | `:3456` | A `wait:` timer arm makes `--serial` inline-sleep instead of yielding to a runnable sibling (serial ≠ M:N) | Deliberate pre-freeze known-limit; fix is folded into the post-freeze serial-engine removal |
@@ -10730,3 +10730,163 @@ test` (lib unit + two-engine parity + conformance + integration) green; `./targe
 tests/chz/` and `--serial` both green, byte-identical verdicts; every touched `examples/*.chz` (
 `contains_protocol`, `newtype_generic`, `memoize`, `collections`, `concurrent_collection`,
 `concurrent_jobs`) runs and matches its `.expected` golden byte-for-byte.
+
+### W7-55 — the `Eq` walk's depth cap refused a type graph the VM compares happily — **FIXED 2026-08-12**
+
+Task 4 of the four-task `Eq` residual close-out on `w7-52-55-eq-residuals`. The original filing:
+`Checker::eq_bounds_unsatisfied`'s in-progress stack was capped at `EQ_BOUNDS_MAX_IN_PROGRESS = 160`
+(`src/checker/proto.rs`), sized on the SMALLEST stack the checker ran on — which was the Rust
+test-harness thread, an ambient default, not production (`crate::on_frontend_stack`'s 1 GiB wrapper
+already covered the CLI and `editor::diagnostics`/`editor::hover`, but not the checker's own
+`#[cfg(test)]` entry point or its production `check_graph_with_entry`). A chain `struct S0: v: int` …
+`struct S{N}: v: S{N-1}` plus builders, `mk{N}() == mk{N}()`, RAN and printed `true` for N ≤ 159 and
+was *S160 nests too deeply …* from N = 160 — a checker-only rejection of a program the VM's own
+`values_equal_guarded` (no cap at all) ran fine, at a depth two orders of magnitude smaller than
+anything a hand-written type graph would plausibly reach.
+
+**The obvious fix — raise the floor, then raise the cap — is only half right, and the other half OOM-
+killed the machine on the first attempt.** The floor half is exactly what the brief asked for and
+landed clean (below). The cap half assumed the walk's cost was uniform per level, sized only by STACK.
+It is not, for the one shape the cap exists to terminate.
+
+**The O(cap²)-MEMORY finding — the reason "just raise it" was wrong.** `EQ_BOUNDS_IN_PROGRESS` holds a
+CLONE of every in-progress `Ty`. For a NON-growing shape (`S0..S{N}`) every level's `Ty` is the same
+small size, so N levels cost O(N) memory. For a GROWING shape — polymorphic recursion, `struct N[T]: v:
+T; next: Option[N[List[T]]]` — level *k*'s `Ty` has size O(k) (`N[int]`, `N[List[int]]`,
+`N[List[List[int]]]`, …), so the walk is O(cap²) in memory, not O(cap). Measured on the release binary,
+`mk(1) == mk(1)` over the polyrec shape, cap raised with no other change:
+
+| cap | wall | peak RSS |
+|---|---|---|
+| 160 | 14 ms | small |
+| 2 000 | **1 342 ms** | **621.8 MB** |
+
+Clean quadratic — 12.5× the cap, ~96× the time, ~(12.5)² the memory. The identical cap on the
+NON-growing control (`S0..S159`) was 17 ms / 13.6 MB at cap 2 000 — the cost is entirely the growth,
+not the depth. Extrapolating the naive fix to a stack-safety-sized cap (tens of thousands, see below)
+projected to tens of minutes and hundreds of gigabytes; the first attempt at exactly that OOM-killed
+the development machine and ended its terminal session.
+
+**The corrected design: two guards, not one number doing both jobs.**
+
+**Guard A (new) — growth detection, `Checker::is_growing_over`.** When the walk is about to re-enter a
+nominal name that is already in progress under a DIFFERENT instantiation, ask whether the new
+instantiation strictly CONTAINS the in-progress one at every type-argument position (with at least one
+position strictly larger) — `Checker::ty_contains_or_eq` walks `List`/`Set`/`Option`/`Map`/`Result`/
+`Tuple`/`Struct`/`Enum`/`NewType` structurally. If so, that is polymorphic recursion and the walk
+refuses immediately, via the existing `eq_budget_refusal`/`EQ_BUDGET_MARKER` machinery (no new message
+needed — "nests too deeply" is equally true of "refused for growing" and "refused for exceeding the
+cap"). Tracked by a new thread-local, `EQ_BOUNDS_IN_PROGRESS_BY_NAME` (a `HashMap<String, Vec<Ty>>`
+bucketing in-progress instantiations by nominal name), kept in lockstep with the existing
+`EQ_BOUNDS_IN_PROGRESS` `Vec` at its same two mutation sites; per name the entries nest LIFO with the
+rest of the call stack, so `EqObligation::drop` can `pop()` the bucket rather than search it.
+
+**Rust agrees the growing shape is unprovable** — measured, rustc 1.97.0 (`scratchpad/polyrec.rs`):
+`#[derive(PartialEq, Eq)] struct N<T: Eq> { v: T, next: Option<Box<N<Vec<T>>>> }` is `error[E0320]:
+overflow while adding drop-check rules for N<i32>`. Guard A is the mechanism that reaches that same
+answer cheaply — at depth ~2, independent of the cap — rather than the mechanism that reaches it at
+all; the cap already refused it before this row, just expensively.
+
+**The relation is DIRECTIONAL, and this repo has shipped the symmetric mistake three times before**
+(`docs/gaps.md` W7-42's lesson, restated in the addendum that redirected this task after the OOM: *"a
+two-operand guard whose real question has a direction must be asymmetric, or it silently rejects the
+ordered half it was never tested against"*). `N[int]` in progress, `N[List[int]]` about to enter —
+growing, refuse. `Pair[Pair[int]]` in progress, `Pair[int]` about to enter (an ORDINARY generic struct
+instantiated with itself as its own type argument — no special recursive field needed, just
+`Pair[Pair[int]]` written by the user, whose field `v: T` walks to `Pair[int]` one level down) — that
+is a SUBTERM of what's already in progress, shrinking, terminates on its own, and MUST stay accepted.
+Built as a test — `a_self_nested_generic_instantiation_shrinking_inward_is_accepted`, including a
+TWO-level-shrink neighbour a symmetric "the args differ" guard would reject on the FIRST comparison —
+**before** the guard, per the addendum's instruction, and it passes.
+
+**Guard B — the depth cap, now doing only its stack-safety job.** With Guard A removing the growing
+shape from this cap's reach entirely, every walk the cap now bounds is non-growing (O(1) `Ty` size per
+level), so the cap is O(cap) total, not O(cap²) — the brief's original re-derivation procedure applies
+unmodified. **Floor re-measured** (cap lifted for probing, DEBUG build, on the 1 GiB
+[`crate::on_frontend_stack_scoped`] thread — see `checker::tests::stack_probe_eq_bounds_depth`, the
+`#[ignore]`d harness this was measured with, invoked directly per-depth under a `systemd-run
+--scope -p MemoryMax=4G -p MemorySwapMax=0` cap, one probe process at a time): a chain of CONDITIONAL
+`eq` types (the expensive shape, ~5-10 Rust frames per level) survives **118 000** and overflows
+(`fatal runtime error: stack overflow`, exit 134) by **119 000** — up from 240/280 on the old ambient
+test-harness stack, roughly the ~490× the 1 GiB wrapper implies over whatever that stack actually was.
+A chain of plain structs (the cheap shape) survives **570 000** and overflows by **590 000** — up from
+800/1600. `EQ_BOUNDS_MAX_IN_PROGRESS` moved from 160 to **78 000** — the expensive floor (118 000) over
+1.5, matching exactly how 160 was derived from 240, rounded down for extra headroom (78 000 × 1.5 =
+117 000 < 118 000).
+
+**Cost at the new cap, measured on the release binary — both fixtures the addendum required:**
+
+| fixture | wall | peak RSS |
+|---|---|---|
+| polyrec (`mk(1) == mk(1)`, refused) | **3 ms** | **13.6 MB** |
+| `S0..S159` plain chain (`mk159() == mk159()`, accepted, runs, prints `true`) | 19 ms | 13.6 MB |
+| `S0..S70000` plain chain, `chezzi check` only (near the new cap) | 1.225 s | 361.9 MB |
+
+The polyrec fixture is UNCHANGED from the cap-160 baseline (14 ms) despite the cap being 487× larger —
+Guard A, not the cap, decides it now, and does so before the `Ty` has grown past two levels. The
+near-cap plain-chain probe (70 000 of 78 000) confirms the SEEN-index fix (below) keeps the walk linear
+at the new size rather than reverting to O(cap²): scaling from the 159-link baseline (19 ms) by
+70 000/159 ≈ 440× predicts ~8.4 s under a naive O(N²) model; the measured 1.225 s is close to the O(N)
+prediction (440× the per-level constant) instead.
+
+**A second, independent O(cap²) fix, needed once the cap could get this large regardless of Guard A:**
+`Checker::enter_eq_obligation`'s exact-match cycle check was a linear `Vec::contains` SCAN over
+`EQ_BOUNDS_IN_PROGRESS` — cheap at cap 160, but O(cap) per call × O(cap) calls = O(cap²) TIME at
+cap 78 000 even for ordinary non-growing chains. Fixed with `EQ_BOUNDS_IN_PROGRESS_SEEN`, an O(1)
+`HashSet<Ty>` membership index kept in lockstep with the existing ordered `Vec` (which stays the source
+of truth — `eq_budget_refusal` reads its first entry to name the walk's root). `Ty` gained `derive(Eq,
+Hash)` for this (`src/checker/ty.rs`) — sound: every variant already had a total, structural
+`PartialEq`, and the one hand-written `PartialEq` (`FnLabels`, deliberately equality-neutral — every
+value equal) got a matching hand-written `Eq`/`Hash` (hash nothing, to keep "equal values hash equal").
+
+**The frontend-stack floor fix, unchanged from the brief.** `src/lib.rs` gained
+`on_frontend_stack_scoped`, a borrow-friendly sibling of `on_frontend_stack` built on
+`std::thread::scope` + `Builder::spawn_scoped` (same `resume_unwind` panic propagation, but takes
+`&Module`/`&ModuleGraph` without a `'static` clone). `checker::check` (`#[cfg(test)]`-only — the
+`check_src`/`ok`/`rejects` entry point) and `checker::check_graph_with_entry` (the production path
+`check_graph` delegates to — CLI, LSP diagnostics/hover, `test_runner`) both wrap their body in it, so
+every one of the ~4000 Rust test-harness callers is now on the SAME 1 GiB stack as production, by
+construction, rather than by a convention each future caller has to remember. Per-call cost of the
+extra thread spawn is negligible — measured, 4 000 scoped 1 GiB-stack spawns (a synthetic microbench
+matching the test-suite's actual call volume): **194.5 ms total, 48.6 µs average**, against a
+`cargo test --lib checker::` suite that runs in ~14 s.
+
+**`docs/gaps.md` W7-50's `editor::semantic_tokens` row does NOT get the same coverage, checked rather
+than assumed.** `editor::semantic_overlay` (which `semantic_tokens` calls) invokes `lexer::tokenize` +
+`parser::parse` directly — it never calls `checker::check` or `checker::check_graph_with_entry`, so
+neither wrapped entry point covers it. W7-50 is left exactly as filed.
+
+**The boundary pair at the new cap, both directions proven, resource-appropriately.** `S0..S77999`
+(78 000 simultaneous obligations at peak) is the last depth the cap accepts; `S0..S78000` (78 001) is
+the first it refuses — both sides pinned CHECK-only
+(`checker::tests::the_new_cap_boundary_accepts_then_refuses`, 466 MB / 5.3 s), after generating both
+~78 000-struct sources and compiling+running one of them in the same test process first pushed a 6 GiB
+cap into an OOM-kill (a real cost of a genuinely-huge program, not a defect in the guard). A follow-up
+by-hand attempt to actually RUN `S0..S77999` via the release CLI, alone, nothing else competing for
+memory, OOM'd even at a 12 GiB cap — a 78 000-deep chain of nested FUNCTION CALLS costs real VM stack/
+frame memory independent of anything this row touches, and chasing it is out of this task's scope.
+`checker::tests::runtime_boundary_is_honoured_at_a_depth_the_old_cap_refused` instead proves the grant
+is honoured AT RUNTIME (not just claimed by the checker) at an affordable depth (2 000) that is still
+far past the OLD 160/240 caps — the shape that used to be wrongly refused.
+
+**What still gets refused, and in bounded time — the whole point of Guard A.**
+`conditional_eq_bound_recursion_terminates`'s polymorphic-recursion case still rejects with `nests too
+deeply`; `polymorphic_recursion_is_refused_in_bounded_time_by_growth_detection` (new) times it —
+must stay under 500 ms regardless of how high the cap is set, which would not hold if growth detection
+were absent (the O(cap²)-memory table above is what the walk would cost the OLD way at this cap).
+
+**Tests.** New: `a_self_nested_generic_instantiation_shrinking_inward_is_accepted` (Guard A's
+DIRECTIONAL shrinking half, single- and two-level), `polymorphic_recursion_is_refused_in_bounded_time_
+by_growth_detection`, `the_new_cap_boundary_accepts_then_refuses`, `runtime_boundary_is_honoured_at_a_
+depth_the_old_cap_refused`, `stack_probe_eq_bounds_depth` (`#[ignore]`d, the by-hand floor-measurement
+harness, kept for the next time this floor needs re-deriving). Updated for the new cap:
+`a_long_chain_of_conditional_eq_types_is_decided_not_waved_through` (its past-the-cap case moved from
+180 to 79 000), `the_budget_refusal_names_the_type_the_walk_started_from` (`S200` → `S78500`, so it
+still trips the budget at all). `a_deep_but_finite_chain_stays_within_the_eq_budget` (140-link chain)
+needed no change — 140 was never close to either the old or new cap.
+
+**Gate:** `cargo build --release` clean; `cargo clippy --all-targets -- -D warnings` clean; `cargo test`
+**4288 passed / 0 failed** (was 4284; +4 new Rust test fns — the `#[ignore]`d probe doesn't count);
+`./target/release/chezzi test tests/chz/` and `--serial` both **493/493 identical** (unchanged — no
+`.chz` test added or removed, this row is Rust-only). Full commands and raw output in the W7-55 session
+report (`.superpowers/sdd/w752-task-4-report.md`).

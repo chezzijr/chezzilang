@@ -2,6 +2,67 @@
 
 Single source of truth for "what am I doing next." Update after every work session.
 
+> **✅ W7-55 landed 2026-08-12 — the `Eq` walk's depth cap moved from 160 to 78 000, and polymorphic
+> recursion is now refused by GROWTH DETECTION rather than by walking to the cap.** `docs/gaps.md`'s
+> `W7-55` is CLOSED (Task 4 of the four-task `Eq` residual close-out on `w7-52-55-eq-residuals`, and
+> the last one). The original defect: `EQ_BOUNDS_MAX_IN_PROGRESS = 160` was sized on the Rust
+> test-harness's AMBIENT stack, not production's already-1-GiB `on_frontend_stack` — an inversion —
+> and even the honest floor (with the inversion fixed) left a real question: raise the cap, or leave
+> the checker stricter than the VM (no cap at all) by two orders of magnitude. **The obvious fix — just
+> raise the floor, then the cap — is only half right, and a first attempt at the other half OOM-killed
+> the machine.** Root cause: for a GROWING type graph (polymorphic recursion, `struct N[T]: next:
+> Option[N[List[T]]]`) each level's `Ty` grows one layer, and the walk's cycle guard clones every
+> in-progress `Ty` into a `Vec` — so the walk is O(cap²) in MEMORY, not O(cap). Measured: cap 160 → 14
+> ms / small; cap 2 000 → **1 342 ms / 621.8 MB** on the polyrec fixture, vs. 17 ms / 13.6 MB on a
+> non-growing control at the identical cap 2 000. Extrapolated to a stack-safety-sized cap the naive
+> fix would have cost tens of minutes and hundreds of gigabytes — which is what happened. **The
+> corrected design, per a same-session addendum that redirected the task after the OOM: two guards, not
+> one number doing both jobs.** Guard A (new) — `Checker::is_growing_over` — refuses a re-entry under
+> the same nominal name whose new instantiation strictly CONTAINS the in-progress one (`N[int]` →
+> `N[List[int]]`), at depth ~2, independent of the cap; **directional on purpose** (`W7-42`'s recorded
+> lesson: a symmetric "the args differ" stand-in silently rejects the ordered half it was never tested
+> against) — a SHRINKING re-entry (`Pair[Pair[int]] → Pair[int]`, an ordinary generic struct
+> instantiated with itself) stays accepted, pinned by a test built BEFORE the guard per the addendum's
+> instruction. **Rust agrees the growing shape is unprovable** (rustc 1.97.0, measured:
+> `error[E0320]: overflow while adding drop-check rules`) — Guard A reaches that same verdict cheaply,
+> not a different one. Guard B — the depth cap, now doing only its stack-safety job since Guard A
+> removes the growing shape from its reach — was re-measured on the 1 GiB stack (DEBUG build): the
+> expensive shape (conditional `eq` chain) survives **118 000**, overflows by **119 000**; the cheap
+> shape (plain struct chain) survives **570 000**, overflows by **590 000**. New cap: **78 000**
+> (118 000 / 1.5, matching how 160 was derived from 240). **Cost at the new cap, release binary:**
+> polyrec (refused) 3 ms / 13.6 MB — UNCHANGED from the cap-160 baseline despite the cap being 487×
+> larger, because Guard A decides it now, not the cap; `S0..S159` (accepted, runs, prints `true`) 19 ms
+> / 13.6 MB; `S0..S70000` check-only (near the new cap) 1.225 s / 361.9 MB — confirms linear, not
+> quadratic, scaling at the new size. **A second, independent O(cap²) fix, needed once the cap could
+> get this large regardless of Guard A:** the exact-match cycle check was a linear `Vec::contains` scan
+> — cheap at 160, O(cap²) TIME at 78 000 — replaced with an O(1) `HashSet<Ty>` index
+> (`EQ_BOUNDS_IN_PROGRESS_SEEN`), which needed `Ty: Eq + Hash` (`src/checker/ty.rs`, sound: every
+> variant already had total structural `PartialEq`; the one hand-written `PartialEq`, `FnLabels`,
+> equality-neutral by design, got a matching hand-written `Eq`/`Hash`). **The frontend-stack floor fix,
+> as originally briefed:** `crate::on_frontend_stack_scoped` (a borrow-friendly `on_frontend_stack`
+> sibling via `std::thread::scope` + `Builder::spawn_scoped`, same panic-propagation contract) now
+> wraps both `checker::check` (`#[cfg(test)]`-only) and `checker::check_graph_with_entry` (the
+> production path), so every one of the ~4000 Rust test-harness callers is on the SAME 1 GiB stack as
+> production, structurally rather than by convention. Per-call thread-spawn overhead is negligible:
+> measured, 4 000 scoped 1 GiB-stack spawns = 194.5 ms total (48.6 µs avg), against a
+> `cargo test --lib checker::` suite that runs in ~14 s. `docs/gaps.md` **W7-50**'s
+> `editor::semantic_tokens` row is UNCHANGED (checked, not assumed): `semantic_overlay` calls
+> `lexer::tokenize`/`parser::parse` directly, never either wrapped checker entry point. **The exact
+> boundary, both directions, resource-appropriately:** `S0..S77999` (78 000 obligations) is the last
+> accepted, `S0..S78000` (78 001) the first refused, pinned CHECK-only after generating+running both
+> ~78 000-struct sources in one test process pushed a 6 GiB cap into an OOM (a real program cost, not a
+> guard defect); a follow-up by-hand attempt to literally RUN `S0..S77999` OOM'd even at 12 GiB — an
+> unrelated, pre-existing VM cost (78 000 nested function CALLS), out of this row's scope — so runtime
+> honouring of the grant is proven instead at an affordable depth (2 000) well past the OLD 160/240
+> caps. **Tests:** `checker::tests::a_self_nested_generic_instantiation_shrinking_inward_is_accepted`,
+> `polymorphic_recursion_is_refused_in_bounded_time_by_growth_detection`,
+> `the_new_cap_boundary_accepts_then_refuses`,
+> `runtime_boundary_is_honoured_at_a_depth_the_old_cap_refused`, and `stack_probe_eq_bounds_depth`
+> (`#[ignore]`d, the reusable by-hand floor-measurement harness); updated:
+> `a_long_chain_of_conditional_eq_types_is_decided_not_waved_through` (past-cap case 180 → 79 000),
+> `the_budget_refusal_names_the_type_the_walk_started_from` (`S200` → `S78500`). Full write-up:
+> `docs/gaps.md` **W7-55**; session report: `.superpowers/sdd/w752-task-4-report.md`.
+
 > **✅ W7-52 landed 2026-08-12 — a protocol-typed value satisfies a `[T: Eq]` bound too, agreeing with
 > the `==` it was already measured to agree with.** `docs/gaps.md`'s `W7-52` was first closed as a
 > pure VERDICT (comparing a protocol-typed value defers to its witness at runtime, exactly Go's

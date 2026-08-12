@@ -171,6 +171,17 @@ impl PartialEq for FnLabels {
     }
 }
 
+// `PartialEq` above says every `FnLabels` is equal, so `Eq` (a `PartialEq` that is additionally
+// reflexive — trivially true here, there being only one equivalence class) is a sound marker, and
+// `Hash` must therefore hash every `FnLabels` identically (hash nothing) to keep the "equal values
+// hash equal" contract `Ty`'s derived `Hash` below relies on — see `Ty`'s derive for why this needed
+// widening at all (the `EQ_BOUNDS_IN_PROGRESS` cycle-guard index, W7-55).
+impl Eq for FnLabels {}
+
+impl std::hash::Hash for FnLabels {
+    fn hash<H: std::hash::Hasher>(&self, _state: &mut H) {}
+}
+
 impl FnLabels {
     /// A label-less function type of `n` params (a bare `fn(T, …)` annotation, a builtin-fn value, or
     /// any construction site that has no parameter names to offer).
@@ -179,7 +190,14 @@ impl FnLabels {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+// `Eq`/`Hash` added for W7-55: the `EQ_BOUNDS_IN_PROGRESS` cycle guard in `checker::proto` needs an
+// O(1) membership index alongside its ordered `Vec<Ty>` (a linear `contains` scan made the walk
+// O(cap²), measured to dominate once the depth cap was raised off its old 160). Sound to derive:
+// no variant carries a float or other non-total-equality field, `Eq`'s laws (reflexive/symmetric/
+// transitive) hold for the derived structural `PartialEq` on every variant, and `FnLabels` (the one
+// hand-written `PartialEq`, deliberately equality-neutral) now carries a matching hand-written
+// `Eq`/`Hash` — see its impl for why.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Ty {
     Int,
     Float,
