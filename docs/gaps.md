@@ -10603,11 +10603,31 @@ entire point of `Eq` being user-overloadable, and no third notion of "the hook" 
 "the receiver is a `Ty::Param` whose bound RESOLVES an `eq`" — by resolution, not by name, so an
 EMBEDDING bound (`[T: Comparable]`, which embeds `Eq`) dispatches the protocol too. But the resolved
 protocol method must carry the `Eq` hook signature `fn eq(self, other: Self) -> bool`
-(`Checker::is_eq_hook_protocol_sig`): a user protocol may declare an unrelated `fn eq(self, o: int) ->
-bool`, and lowering THAT to `==` would compare the receiver against the argument instead of calling
-the method — an over-fire in the granting direction, which is the one that yields a silent wrong
-value. `Ty::Protocol` receivers need no arm: `eq(self, o: Self)` puts `Self` in a parameter slot,
-which `infer_method_call`'s object-safety gate already rejects with a message pointing at `[T: Eq]`.
+(`Checker::is_eq_hook_protocol_sig`), since lowering an unrelated `fn eq(self, o: int) -> bool` to
+`==` would compare the receiver against the argument instead of calling the method — an over-fire in
+the granting direction, the one that yields a silent wrong value.
+
+> **Scope correction (review).** That gate is **defence in depth, not a closed live bug** — the
+> over-fire is unreachable today, and the first wording here implied otherwise. A protocol declaring
+> `fn eq(self, o: int) -> bool` has no possible struct/enum witness, because `validate_eq_shape`
+> rejects the witness at its own declaration: *"'eq' on S is the `Eq` protocol hook `==` dispatches
+> to: its operand must be S, found int — rename the method if it is not equality"* (measured). So
+> `[T: Scorer]` over such a protocol is unsatisfiable, and the `Eq`-embed variant is separately caught
+> by *"method 'eq' conflicts with embedded protocol requirement"*. The gate keeps the path closed if
+> `validate_eq_shape` ever loosens; it was not rescuing a reachable wrong answer.
+
+`Ty::Protocol` receivers need no arm: `eq(self, o: Self)` puts `Self` in a parameter slot, which
+`infer_method_call`'s object-safety gate already rejects — verified still true after Task 2 widened
+what a protocol-typed value satisfies — with a message pointing at the fix: *"method 'eq' is not
+callable through the protocol value Eq — its signature takes `Self` … Bind the receiver with a
+generic parameter instead: `[T: Eq]`"*.
+
+**Where a key CONFLICT surfaces, and why that reads oddly.** `reject_table_conflicts` raises a
+`CompileError`, and the CLI labels every compile error `runtime error:` — so an aliased key is
+`chezzi check` → *ok: no type errors*, then `chezzi run` → *internal: two different '.eq()' dispatch
+decisions …*. That framing is pre-existing (it is how the CLI labels the whole `CompileError` class,
+which W7-49's own table already joined), not something this change introduced — but this table now
+rides it too. It is a build stop with a named workaround, never a wrong value.
 
 **The side table is keyed on the method-NAME token, NOT the call node's span**, reusing
 `crate::checker::carrier_key` verbatim — the same derivation `?.` carriers and M24's member witnesses

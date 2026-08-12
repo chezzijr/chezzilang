@@ -2353,6 +2353,14 @@ impl Checker {
     /// Is a PROTOCOL's declared `eq` the `Eq` hook `fn eq(self, other: Self) -> bool`? Deliberately
     /// separate from [`Self::eq_sig_is_hook`], which asks the mirror question of a CONCRETE type's
     /// declared `eq` (there the escape hatch is a bare type param; here `Self` IS one).
+    ///
+    /// **Defence in depth, not a live bug** — stated precisely because the first version of this
+    /// comment implied otherwise. Without it, a user protocol's unrelated `fn eq(self, o: int) ->
+    /// bool` would lower to `Op::Eq` and compare the receiver against the argument. But no such
+    /// protocol is satisfiable today: `validate_eq_shape` rejects any concrete witness at its own
+    /// declaration (*"its operand must be S, found int"*), and the `Eq`-embed variant is caught by
+    /// the embedded-requirement conflict — so the over-fire is unreachable and this gate is what
+    /// keeps it that way if `validate_eq_shape` ever loosens.
     fn is_eq_hook_protocol_sig(sig: &FnSig) -> bool {
         sig.params.len() == 2
             && sig.params[1] == Ty::Param("Self".to_string())
