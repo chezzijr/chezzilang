@@ -82,8 +82,10 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > ms/13.4 MB each, `ok`). Also closed the same day: `resolve_extern_signatures`/`resolve_call_tables`
 > (the checker passes the COMPILE path runs, from inside the VM's 384 MiB thread) now wrap
 > `on_frontend_stack_scoped` too — the doc block's "no smaller-stack caller left" claim was false and
-> is deleted. Full write-up: `docs/gaps.md` **W7-55**'s "Same-day corrections" section; session report:
-> `.superpowers/sdd/w752-task-4-report.md`.
+> is deleted. `cargo build --release` clean; `cargo clippy --all-targets -- -D warnings` clean;
+> `cargo test` **4290 passed / 0 failed** (was 4288; +2 new Rust test fns); `chezzi test tests/chz/`
+> **493/493 identical** on M:N and `--serial` (unchanged). Full write-up: `docs/gaps.md` **W7-55**'s
+> "Same-day corrections" section; session report: `.superpowers/sdd/w752-task-4-report.md`.
 
 > **✅ W7-52 landed 2026-08-12 — a protocol-typed value satisfies a `[T: Eq]` bound too, agreeing with
 > the `==` it was already measured to agree with.** `docs/gaps.md`'s `W7-52` was first closed as a

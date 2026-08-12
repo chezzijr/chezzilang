@@ -11020,5 +11020,8 @@ this row's scope; `runtime_boundary_is_honoured_at_a_depth_the_old_cap_refused` 
 still proves the grant is honoured at runtime, well past the OLD 160/240 caps.
 
 **Gate after this correction:** `cargo build --release` clean; `cargo clippy --all-targets -- -D
-warnings` clean; `cargo test` and `chezzi test tests/chz/` (both engines) counts and full output in
-`.superpowers/sdd/w752-task-4-report.md`.
+warnings` clean; `cargo test` **4290 passed / 0 failed** (was 4288; +2 new Rust test fns —
+`a_growing_re_entry_through_a_constant_type_argument_is_accepted`,
+`polymorphic_recursion_through_a_func_type_argument_is_refused_in_bounded_time`); `chezzi test
+tests/chz/` **493/493 identical** on M:N and `--serial` (unchanged — Rust-only correction). Full
+commands and raw output in `.superpowers/sdd/w752-task-4-report.md`.

@@ -1462,10 +1462,11 @@ obligation is per-USE, not a blanket requirement on every `[T]`. `Comparable` al
 `[T: Comparable]` needs no separate `Eq` bound; `Hashable` does **not** embed `Eq` (Rust's `Hash` has
 no `Eq` supertrait either — `HashSet<T>`/`HashMap<K, V>` spell `Eq + Hash` explicitly), so a generic
 that builds/indexes a `Map`/`Set` keyed on its own type parameter needs `[T: Hashable + Eq]`
-(`docs/gaps.md` **W7-53**). And a type graph nested deeper than **78 000** links is REFUSED at a
-`[T: Eq]` bound or an `==` — a growing (polymorphic-recursion) type graph is refused far shallower
-than that, at the point it first repeats a name under a strictly larger instantiation — even though
-the VM's own equality has no cap at all on the non-growing shape (`docs/gaps.md` **W7-55**).
+(`docs/gaps.md` **W7-53**). And a type graph nested deeper than **10 000** links is REFUSED at a
+`[T: Eq]` bound or an `==` — tied by construction to the VM's own equality depth cap, so the checker
+never grants a compare the runtime can't itself perform. A growing (polymorphic-recursion) type graph
+is refused far shallower than that, in bounded work (a couple of consecutive re-entries that keep
+getting strictly larger) rather than by walking to the cap (`docs/gaps.md` **W7-55**).
 
 **Protocols** are Go-style structural interfaces: a block of body-less method signatures. A type
 satisfies a protocol by *having* the methods — there is no `implements` declaration. `Self` inside
