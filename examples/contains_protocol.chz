@@ -11,8 +11,9 @@ struct Bag:
                 return true
         return false
 
-# Generic: the `contains` param type is the INSTANTIATED type arg (`Box[str]` → `str`).
-struct Box[T]:
+# Generic: the `contains` param type is the INSTANTIATED type arg (`Box[str]` → `str`). `x == self.v`
+# compares two `T`s, so `T` must be bounded by `Eq` (W7-53), matching rustc/Go at the definition.
+struct Box[T: Eq]:
     v: T
     fn contains(self, x: T) -> bool:
         return x == self.v

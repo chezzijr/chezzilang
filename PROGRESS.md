@@ -74,6 +74,49 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > failed; clippy clean; `chezzi test tests/chz/` 476/476 on both engines (was 466 before this row, 472
 > after the first pass). Full write-up: `docs/gaps.md` **W7-54**.
 
+> **✅ W7-53 landed 2026-08-12 — a generic body that compares must declare the bound, matching both
+> owning ancestors.** `docs/gaps.md`'s `W7-53` is CLOSED (Task 3 of the four-task `Eq` residual
+> close-out on `w7-52-55-eq-residuals`, the largest of the four). Three measured instances — the `==`
+> operator, `List.contains`, and a `Set(xs)` built inside a `[T: Hashable]` body — were `ok: no type
+> errors` then `runtime error: struct 'Tag' has no method 'compare'` on both engines, because the
+> checker's own `Ty::Param` arm (which already refuses an unbounded `T`) was never reached: the four
+> use-site gates erased a free type parameter to `Ty::Unknown` before asking. **Ancestor verdicts,
+> measured:** rustc 1.97.0 rejects the DEFINITION (``error[E0369]`` + *help: consider restricting
+> type parameter `T` with trait `PartialEq`*); Go 1.26 rejects the mirror (`invalid operation: a == b
+> (incomparable types in type set)`). Chezzi now matches — all three instances reject at their own
+> declaration, naming the fix (`T is not bounded by Eq (add `where T: Eq`)`), and once bounded
+> (`[T: Eq]` / `[T: Hashable + Eq]`) all three type-check and run correctly. **The fix:** the four
+> use-site gates (`==`/`!=` both operands, `in`-over-`List`, the `List` equality builtins, the map/set
+> key check) switched from the erasing `eq_bounds_unsatisfied_erased` to the plain, non-erasing
+> `eq_bounds_unsatisfied` — which then had no remaining caller and was deleted rather than kept as a
+> dead helper. **`Hashable` route decided BY MEASUREMENT, not by the initial plan:** embedding `Eq`
+> into `Hashable` (mirroring `Comparable`'s embed) was tried first and regressed a working, already-
+> relied-upon program — a struct with `hash` plus an ordinary (non-hook-shaped) `eq` method, which
+> falls back to structural equality at runtime and never faults, newly rejected once `Hashable`
+> transitively demanded a full, exact-signature `Eq` match. Reverted; the brief's pre-approved fallback
+> taken instead — explicit `[K: Hashable + Eq]` at every affected declaration, the same two-bound
+> spelling Rust's own `HashSet<T>`/`HashMap<K, V>` already use. **Blast radius, measured by building:**
+> `std/prelude.chz`'s `Map`/`Set` native structs, `std/collections.chz`'s `Counter`,
+> `std/memoize.chz`'s `_memo_get`/`memoize1`, six sites in `std/concurrency/collection.chz`, and
+> `examples/newtype_generic.chz`'s `Tally` all needed `+ Eq` added — no logic or runtime behavior
+> changed (every touched example's `.expected` golden output matches byte-for-byte). **The required
+> `_ => "?"` enumeration** (Tasks 1/2 each missed one `Ty` variant with no `intrinsic_recv_kind` arm):
+> `Ty::Param` stays excluded (this row's own fix depends on it); `Ty::Module`/`Ty::Unknown` stay
+> excluded (no spellable value / don't-cascade hole); the eleven concurrency/IO handles compare by
+> `==` identity already but stay excluded from the `Eq` GRANT — no constructible probe receiver for the
+> ratchet, and no proof obligation to grant in the first place. **Tests:**
+> `checker::tests::a_generic_body_that_compares_must_bound_its_type_param_by_eq` (the three instances
+> as `rejects()` with the help text, plus `ok()` neighbours — `[T: Eq]`, `[T: Comparable]`, an
+> unused `T`, a partially-generic `Map[T, Box[Tag]]`, and `T` reached only through a satisfied
+> conditional `eq`); roughly a dozen existing `checker::tests` fixtures updated from unbounded to
+> `[T: Eq]`/`[T: Hashable + Eq]` (several had documented, now-stale comments explicitly describing the
+> ceiling this row closes, rewritten rather than left stale); `tests/chz/spec/eq_protocol_test.chz`'s
+> int-warmed-`eq`-site deopt test. `cargo build --release` clean; `cargo clippy --all-targets -D
+> warnings` clean; `cargo test` **4284 passed / 0 failed** (was 4283; +1 new Rust test fn, several
+> existing fixtures re-bounded rather than added/removed); `chezzi test tests/chz/` **483/483
+> identical on M:N and `--serial`** (unchanged count — no `.chz` test added/removed, only bounds
+> tightened). Full write-up: `docs/gaps.md` **W7-53**.
+
 > **✅ W7-57 landed 2026-08-12 — a run-wide `os.exit` reaches every party, not just the polling ones.**
 > `docs/gaps.md`'s `W7-57` is CLOSED, and with it the whole `W7-47` → `W7-56` → `W7-58` → `W7-57`
 > chain. **The row as filed understated the bug**: it said "none is a correctness hazard — the exit
@@ -289,8 +332,10 @@ Single source of truth for "what am I doing next." Update after every work sessi
 >    choke point, now `key_ty_reject`, with 10 call sites. That one line subsumes 18 measured seams,
 >    because the three routes that could *obtain* a bad `Set`/`Map` — annotation, fn return type, struct
 >    field type — all reject too. It does NOT make the type *unspellable*: an erased generic factory never
->    spells its element type, so `fn mk[T: Hashable](x: T) -> Set[T]` still yields an ungated `Set`
->    (measured, not a regression, filed as W7-53's third instance).
+>    spells its element type, so `fn mk[T: Hashable](x: T) -> Set[T]` used to yield an ungated `Set`
+>    (measured, not a regression at the time, filed as W7-53's third instance — **since FIXED
+>    2026-08-12**: `[T: Hashable]` alone now rejects at `mk`'s own declaration; `[T: Hashable + Eq]`
+>    closes it).
 >
 > **Also dropped, deliberately: M23's rule that "a type defining `compare` must define `eq` too".** Its
 > premise was falsified by measurement in both directions — a field-complete `compare` that agrees with
@@ -329,11 +374,11 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > interface `==`, measured: it compiles unconditionally and panics at the point it runs on an
 > uncomparable witness; Chezzi does the identical thing at the identical point, both engines) **AND
 > FIXED 2026-08-12** for a `[T: Eq]` bound over a protocol-typed value, which a same-day review found
-> still disagreeing with that operator — see the entry above; **W7-53** (the erased call site — three
-> measured instances; closing it needs a call-site obligation, which is its own milestone), filed not
-> closed; and **W7-54, since FIXED 2026-08-12** (a function value did not satisfy `Eq` though `f == g`
-> worked by identity; Rust compiles the mirror, so it was drift, and this milestone had widened its
-> surface from two spellings to three).
+> still disagreeing with that operator — see the entry above; **W7-53, since FIXED 2026-08-12** (the
+> erased call site — three measured instances; closed at the DEFINITION, matching rustc/Go, not by a
+> call-site obligation); and **W7-54, since FIXED 2026-08-12** (a function value did not satisfy `Eq`
+> though `f == g` worked by identity; Rust compiles the mirror, so it was drift, and this milestone had
+> widened its surface from two spellings to three).
 >
 > **✅ M24-6 landed 2026-08-11 — an interpolation fragment now reports its REAL physical source
 > position, line and column, at any nesting depth.** The lexer keeps a per-literal sparse checkpoint

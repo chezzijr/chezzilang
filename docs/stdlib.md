@@ -1207,9 +1207,10 @@ peek is worst-case O(1). Construct directly: **`Deque([], [])`** — `T` is infe
 | `.peek_front()` / `.peek_back()` | `() -> Option[T]` | Head/tail without removing, `None` if empty. **O(1)**. |
 | `.len()` / `.is_empty()` | `() -> int` / `-> bool` | **O(1)**. |
 
-**`Counter[T: Hashable]`** — a frequency table over `Map[T, int]` (`T` must be `Hashable`, like any
-map key). Construct directly: **`Counter({})`** — `T` is inferred from the first `add`/`count`. (No
-`counter()` factory, same `T`-binding reason as `Deque`.)
+**`Counter[T: Hashable + Eq]`** — a frequency table over `Map[T, int]` (`T` must be `Hashable + Eq`,
+like any map key — `Hashable` alone does not imply `Eq`, `docs/gaps.md` W7-53). Construct directly:
+**`Counter({})`** — `T` is inferred from the first `add`/`count`. (No `counter()` factory, same
+`T`-binding reason as `Deque`.)
 
 | member | signature | semantics / complexity |
 | --- | --- | --- |
@@ -1258,7 +1259,7 @@ the bare `RwShared` ctor — only the whole-module `import std.concurrency` does
 wrapper method is flat (no nested locking), so user code is safe as long as it does not call a wrapper
 method from inside another wrapper's closure.
 
-**`ConcurrentMap[K: Hashable, V]`** — thread-safe map over `RwShared[Map[K, V]]`. `get`/`contains`/
+**`ConcurrentMap[K: Hashable + Eq, V]`** — thread-safe map over `RwShared[Map[K, V]]`. `get`/`contains`/
 `len`/`snapshot` are **concurrent reads**; `set`/`remove`/`get_or_insert` take the **exclusive write
 lock**.
 
@@ -1272,7 +1273,7 @@ lock**.
 | `.get_or_insert(key, default)` | `(K, V) -> V` | **COMPOUND-ATOMIC**: the check, the insert, AND capturing the value to return all happen inside ONE **exclusive write** lock (the value is stashed into a captured shared box by the write closure) — so there is no second lock, and no window in which a concurrent `remove` could delete the just-inserted key. Returns the existing value, or `default` if it was absent. |
 | `.snapshot()` | `() -> Map[K, V]` | **concurrent read** returning a **copy** independent of later mutations. |
 
-**`ConcurrentCounter[K: Hashable]`** — thread-safe frequency table over `RwShared[Map[K, int]]`.
+**`ConcurrentCounter[K: Hashable + Eq]`** — thread-safe frequency table over `RwShared[Map[K, int]]`.
 `count`/`total` are **concurrent reads**; `increment`/`add` take the **exclusive write lock** and do
 their read-modify-write inside **one** closure, so N tasks each incrementing the same key produce an
 **exact** final count (no lost updates — the classic race-free concurrent counter).
@@ -1343,7 +1344,8 @@ adds on demand). `xs` MUST already be sorted ascending; results are undefined ot
 
 ### `std.memoize` — result caching (`functools.cache`)
 `memoize1(f: fn(K) -> V) -> fn(K) -> V` wraps `f` so each distinct argument is computed once and the
-result cached in a captured `Map[K, V]` (`K: Hashable`). The cache is a native reference type, so it
+result cached in a captured `Map[K, V]` (`K: Hashable + Eq` — a map key needs both, `docs/gaps.md`
+W7-53). The cache is a native reference type, so it
 persists across every call to the wrapped fn; `f` runs at most once per distinct arg.
 **v1 limit (not a bug):** single-argument only. A general N-arg cache would key a `Map[tuple, V]` on
 the argument tuple, but tuples aren't Hashable map keys yet — until then curry, or pack args into a

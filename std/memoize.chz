@@ -5,14 +5,15 @@
 # the wrapped fn (a captured bare scalar would snapshot by value and lose the cache).
 # `f` runs at most once per distinct argument.
 #
-# ponytail: single-argument only — `memoize1(f: fn(K) -> V)`, keyed by the arg (`K: Hashable`). A
+# ponytail: single-argument only — `memoize1(f: fn(K) -> V)`, keyed by the arg (`K: Hashable + Eq`,
+# W7-53: a Map key needs both). A
 # general N-arg cache would key a `Map[tuple, V]` on the argument tuple, but tuples aren't Hashable
 # map keys today, so that upgrade waits on hashable tuples. Until then, curry / pack args into a
 # struct-with-`hash` and memoize the single-arg wrapper.
 
 # Cache lookup-or-compute, split out because a closure body is a single expression: the returned
 # wrapper delegates here so it can do the `Option` match + compute + store.
-fn _memo_get[K: Hashable, V](cache: Map[K, V], f: fn(K) -> V, k: K) -> V:
+fn _memo_get[K: Hashable + Eq, V](cache: Map[K, V], f: fn(K) -> V, k: K) -> V:
     match cache.get(k):
         Some(v):
             return v
@@ -23,6 +24,6 @@ fn _memo_get[K: Hashable, V](cache: Map[K, V], f: fn(K) -> V, k: K) -> V:
 
 # Wrap `f` so each distinct argument is computed once and cached. Returns a fn with the same
 # signature as `f`.
-fn memoize1[K: Hashable, V](f: fn(K) -> V) -> fn(K) -> V:
+fn memoize1[K: Hashable + Eq, V](f: fn(K) -> V) -> fn(K) -> V:
     cache: Map[K, V] = {}
     return fn(k: K) -> V: _memo_get(cache, f, k)

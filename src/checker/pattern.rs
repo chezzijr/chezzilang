@@ -2463,20 +2463,19 @@ impl Checker {
                 // non-emitting by contract, and recursive — the predicate already walks elements,
                 // payloads and fields itself, so one call per operand covers every nesting.
                 //
-                // ERASURE, the same rule the arm above already lives by: a free `T` here is not a
-                // type that fails the bound, it is a type not yet chosen, and a generic body is
-                // checked ONCE with `T` abstract. `may_be_equal`'s `(Param(_), _) => true` says so
-                // for the operand itself and its `Protocol` arm spells the general form — erase free
-                // params to `Ty::Unknown`, which `satisfies_args` treats as don't-cascade — so this
-                // borrows that rather than a blanket skip: `fn f[T](x: Box[T], y: Box[T])` stays
-                // accepted while a CONCRETE part of the same type (`Map[T, Box[Tag]]`) is still
-                // judged. **This is where Chezzi and Rust part**, deliberately and pre-existing:
-                // rustc 1.97.0 rejects the erased body outright (`the trait bound T: Ord is not
-                // satisfied`, "consider restricting type parameter T"), Chezzi defers to the call
-                // site. Tightening it is a separate milestone — it would demand a `where` on every
-                // generic fn that compares — and it is the residual behind W7-41's known ceiling
-                // that `fn f[T](a: T, b: T) -> bool: return a == b` still faults on a `Box[Tag]`.
-                // (`eq_bounds_unsatisfied_erased` is that erasure; W7-45's gates share it.)
+                // NOT erased (W7-53): a free `T` reached here goes to `eq_bounds_unsatisfied`'s own
+                // `Ty::Param` arm, which DOES fail unless `T` carries `Eq` among its declared bounds —
+                // `may_be_equal`'s `(Param(_), _) => true` still lets the OPERATOR compile with `T`
+                // abstract (co-inhabitance is not the question here), but the bound obligation is the
+                // call site's to discharge, matching both owning ancestors: rustc 1.97.0 rejects
+                // `fn f<T>(a: T, b: T) -> bool { a == b }` outright (`E0369`, "consider restricting
+                // type parameter T with trait PartialEq"), and Go 1.26 rejects the mirror
+                // (`invalid operation: a == b (incomparable types in type set)`). `fn f[T](x: Box[T],
+                // y: Box[T])` that never compares stays accepted (nothing walks `T`); a CONCRETE part
+                // of the same type (`Map[T, Box[Tag]]`) was always judged and still is. This CLOSES
+                // W7-41's known ceiling: `fn f[T](a: T, b: T) -> bool: return a == b` now rejects at
+                // its OWN definition (`add \`where T: Eq\``) instead of type-checking clean and
+                // faulting on a `Box[Tag]` three calls later.
                 // `!either_unknown` leads DELIBERATELY: on a cascade the predicate is not run at all,
                 // rather than walked and its answer thrown away. Both operands are gated because
                 // `n == m` plus co-inhabitable args is NOT identical args — `may_be_equal`'s int/float
@@ -2484,8 +2483,8 @@ impl Checker {
                 // `Box(1) == Box(1.0)` and its mirror different verdicts off one hook (W7-41 trap 2).
                 if !either_unknown
                     && let Some(why) = self
-                        .eq_bounds_unsatisfied_erased(&l)
-                        .or_else(|| self.eq_bounds_unsatisfied_erased(&r))
+                        .eq_bounds_unsatisfied(&l)
+                        .or_else(|| self.eq_bounds_unsatisfied(&r))
                 {
                     // Decorated, not replaced: the bare text reads as "you have no equality", and the
                     // user WROTE an `eq`. Same ` — ` separator the `<` operator's note used.
@@ -2522,17 +2521,19 @@ impl Checker {
                         // and faulted, while its method spelling `.contains(…)` already rejected:
                         // the same operator-vs-method split W7-41 closed for `==`.
                         //
-                        // LIST-ONLY, and NOT because a bad `Set` element is impossible — it is not.
-                        // `key_ty_reject` gates every SPELLABLE set position, but an erased
-                        // `fn mk[T: Hashable](x: T) -> Set[T]` hands back a `Set[Cond[Tag]]` that
-                        // was never spelled, and `x in s` on it is check-clean (measured; filed as
-                        // W7-53's third instance). Extending this arm to `Ty::Set` DOES close that
-                        // route — measured — but then the ordinary `x in Set([...])` reports twice,
-                        // once at the construction site and once here. Two diagnostics for one bug
-                        // was judged the worse trade; the route stays filed rather than claimed shut.
+                        // LIST-ONLY: extending this arm to `Ty::Set` would make the ordinary
+                        // `x in Set([...])` report twice, once at the construction site
+                        // (`key_ty_reject`) and once here. Two diagnostics for one bug was judged the
+                        // worse trade. A generic `fn mk[T: Hashable](x: T) -> Set[T]` that constructs
+                        // `Set[T]` inside its own body no longer needs a THIRD site here either (W7-53):
+                        // `key_ty_reject`'s own second conjunct (`eq_bounds_unsatisfied`, non-erased
+                        // since W7-53) already demands `T: Eq` at that construction site — `Hashable`
+                        // does NOT embed `Eq` (measured: embedding it regressed a working ordinary-`eq`-
+                        // method escape hatch, `key_ty_reject`'s doc), so `mk` must spell
+                        // `[T: Hashable + Eq]` for the construction to type-check at all.
                         else if !either_unknown
                             && matches!(r, Ty::List(_))
-                            && let Some(why) = self.eq_bounds_unsatisfied_erased(elem)
+                            && let Some(why) = self.eq_bounds_unsatisfied(elem)
                         {
                             self.error(
                                 lhs.span,

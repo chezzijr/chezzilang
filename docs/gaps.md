@@ -92,7 +92,7 @@ later edit shifts them and nobody re-numbers the whole table (`W7-27`'s was alre
 | **W7-50** | `Parser / LSP` | **`parser::MAX_DEPTH = 64` is a real EDGE, not slack — and the LSP reaches the parser at full depth on paths that are not stack-wrapped.** Measured while sizing `Span` (`W7-49`): a 65-level nested expression parses, a 66-level one aborts, on a ~2 MiB thread. So the constant has ~1 level of margin, not the comfortable headroom its name suggests, and any AST-node widening moves it. Separately, `crate::on_frontend_stack` (the 1 GiB wrapper) covers `editor::diagnostics` but NOT `editor::semantic_tokens` → `semantic_overlay` → `parser::parse`, which runs the full front-end on the LSP's own ~2 MiB thread. (**`editor::hover` was the other half and is FIXED 2026-08-11** — it is now wrapped like `diagnostics`, `src/editor/mod.rs:155`, landed alongside `W7-41`'s `Eq`-walk depth backstop.) Project memory's standing rule is that a recursion backstop must be sized for the SMALLEST stack its path runs on | Not fixed; found during `W7-49` Part A and **pre-existing**. Two independent halves: (a) re-derive `MAX_DEPTH` against the measured edge instead of leaving it one level from the cliff, and (b) wrap the remaining unwrapped `editor` entry point (`semantic_tokens`) in `on_frontend_stack` like `diagnostics` and now `hover` already are — (b) is the cheap one and is the one that matches the memory rule. Neither is a correctness bug today; both are a crash-under-deep-input risk that grows every time an AST node gets wider |
 | **W7-51** | `Desugar / defaults` | **Third-level default splicing is left un-normalized: `desugar`'s driver runs exactly TWO passes** (`src/desugar/mod.rs:~125`). A default spliced from module A into B may itself contain a call whose default splices from C — pass 1 pulls in A's, pass 2 pulls in C's, and a fourth level has no pass left. Found while tracing the `W7-49` splice path; not measured against a failing program | Not fixed, and deliberately not fixed blind: the fix direction is the SAME one `W7-49`'s residual names — compile a default ONCE in its defining module — which dissolves the pass-count question entirely instead of adding a third pass. File a repro first: two passes may well cover every shape the language can express, in which case this is a documentation fix on the driver's comment, not a code one |
 | ~~**W7-52**~~ | `:10246` | **RESOLVED 2026-08-12 (the runtime-fault deferral IS Go's answer, not a bug) — AND FIXED 2026-08-12 (a same-day review found the verdict was under-scoped: a `[T: Eq]` BOUND over a protocol-typed value was still check-rejected, disagreeing with the `==` it had just been measured to agree with).** Protocols are Go interfaces (`CLAUDE.md`), and Go compiles interface `==` unconditionally, panicking at the point it actually runs when the dynamic type turns out uncomparable — measured, Go 1.26: `panic: runtime error: comparing uncomparable type main.Tag`. Chezzi's `==`/`.contains()` already did the identical thing at the identical point, both engines, and that half is unchanged: `x: Sized_ = Box(Tag(1))` / `y: Sized_ = Box(Tag(2))` / `x == y` check-cleans then `runtime error (line 12, col 16): struct 'Tag' has no method 'compare'`; `xs.contains(y)` over `xs: List[Sized_]` faults identically. **What was missing:** `fn generic_eq[T: Eq](a: T, b: T) -> bool: return a == b` fed the SAME `a`/`b` was *type error: type Sized_ does not satisfy Eq* — one relation, `==` and a `[T: Eq]` bound disagreeing, the exact invariant `W7-41` exists to hold and the same defect shape `W7-54` (`Ty::Func`) closed a few hours earlier on the same branch. **Go, re-measured, 1.26** (`comparable` was widened in Go 1.20 to admit interface types): `func eqg[T comparable](a, b T) bool { return a == b }` fed two `Sized` interface values compiles and runs (`false`); fed an uncomparable witness it compiles and panics at the comparison — the identical shape the operator already produced. Chezzi now matches on both spellings | **The verdict's own reasoning survives untouched; only the D1 grant's receiver-kind gate was too narrow.** `Ty::Protocol` had no `Checker::intrinsic_recv_kind` arm (`src/checker/proto.rs:335`, classifying it `"protocol"` now) — the identical root cause `W7-54` fixed for `Ty::Func` — so the D1 `Eq` grant (`src/checker/proto.rs:1780`) excluded it before `eq_bounds_unsatisfied` was ever consulted. **Three edits, the same shape as `W7-54`, no VM change:** (1) `Ty::Protocol(..) => "protocol"` in `intrinsic_recv_kind`; (2) `("Eq", "eq", "protocol")` added to `INTRINSIC_PROTO_METHODS` (`src/checker/proto.rs:189`); (3) a `"protocol"` `Recv` probe row added to `intrinsic_grants_all_have_vm_arms` (`src/vm/tests.rs`) — since the probe template is a bare `a := {lit}` with no annotation, the prelude carries a factory `fn mkp() -> Sized_: return Tag(1)` and `lit = "mkp()"`, so `a` genuinely infers `Ty::Protocol`, confirmed by running it. **Neither of the row's two original arms needed to change, and neither can be narrowed even if narrowing were wanted:** (a) `eq_bounds_unsatisfied_rec`'s `Ty::Protocol` catch-all (`src/checker/proto.rs:2852`) staying `None` is what makes the new grant sound — `Ty::result(inner)` is literally `Ty::Result(inner, Ty::Protocol("Error"))` (`src/checker/ty.rs:304-313`, re-confirmed), so every bare `Result[T]` carries an existential in its error slot, and refusing the arm would un-grant `Result` wholesale and break the `("Eq", "eq", "result")` ratchet row; it is now ALSO what a protocol-typed value's OWN `[T: Eq]`/`.eq()`/`==` routes through, not just a nested one. (b) `may_be_equal`'s `(Protocol(..), Protocol(..)) => true` arm (`src/checker/proto.rs:1027`) still short-circuits before either operand's witness is visible, unchanged — the arm it precedes is Protocol-vs-CONCRETE (conformance in the wrong direction for two existentials), not a "nominal" arm, so nothing here was ever racing it; that arm's permissiveness is §B2's own open question, not this row's. **Guard rail, swept by `vm::tests::intrinsic_grants_all_have_vm_arms`'s full (protocol × receiver-kind) matrix:** `Eq` is the ONLY protocol widened — `[T: Stringable]`/`[T: Hashable]`/`[T: Iterable]`/`[T: Add]`/… at `T = <protocol>` all still reject, because `Eq`-satisfaction is defined as exactly what `==` already accepts (`W7-41`) and `==` already accepted a protocol-typed operand; no other protocol shares that premise. `[T: Comparable]` (which EMBEDS `Eq`) at `T = Sized_` used to report the confusing *"does not satisfy Eq"*; now the `Eq` embed passes and the rejection names the real gap, *"does not satisfy Comparable"* — measured, both pinned in `checker::tests::protocol_typed_value_rejects_comparable_on_the_real_reason`. Protocol-to-protocol assignability (`[T: Sized_]` fed a `Sized_` value, Go's interface-to-interface assignment) is decided by `Ty::Protocol`'s own structural arm and was never routed through the D1 kind gate — unaffected, pinned in `checker::tests::protocol_typed_value_still_satisfies_its_own_protocol`. **Tests:** `checker::tests::protocol_typed_value_satisfies_eq` (the bound and the Critical's own `generic_eq` repro, both engines implicitly since it's a checker test), `protocol_typed_value_does_not_satisfy_other_protocols`, `protocol_typed_value_rejects_comparable_on_the_real_reason`, `protocol_typed_value_still_satisfies_its_own_protocol`; runtime behavior in `tests/chz/spec/eq_protocol_existential_test.chz` (10 tests, gated serial==M:N): the original 4 (operator/`.contains()` fault + positive control, the positive control's `Box[T]` payload widened with a `tag` field `eq` ignores so a silently-stopped dispatch falling back to structural equality would fail it) plus 2 new — a `[T: Eq]` bound agreeing with the bare operator on a satisfied witness, and the SAME bound faulting cleanly, naming `compare`, on an unsatisfied one |
-| **W7-53** | `Type-system / Eq` | **The ERASED CALL SITE: a generic body that compares can still hand a bound-failing type to `values_equal`, because neither end of the call has anything to check.** Three measured instances, all `ok: no type errors` then `runtime error (line 7, col 12): struct 'Tag' has no 'compare' method` on **both** engines, fed `W7-41`'s `Box[Tag]`: `fn f[T](a: T, b: T) -> bool: return a == b`; `fn f[T](xs: List[T], b: T) -> bool: return xs.contains(b)`; and `fn f[T: Hashable](xs: List[T]) -> int: return Set(xs).len()` (found while landing `W7-45`'s map/set half). Inside the body both operands are `Ty::Param`, so the guard's erasure rule (`eq_bounds_unsatisfied_erased`, `src/checker/proto.rs:2654`) deliberately declines — a free `T` is not a type that fails the bound, it is a type not yet chosen — and the fn declares no `Eq`/`Comparable` bound, so there is nothing to enforce at the call site either | **Deliberate, and it is where Chezzi and Rust part.** rustc 1.97.0 rejects the erased body outright — measured on `fn f<T>(a: T, b: T) -> bool { a == b }`: *error[E0369]: binary operation `==` cannot be applied to type `T`*, *help: consider restricting type parameter `T` with trait `PartialEq`*. Chezzi defers to the call site instead, as it does for every other bound. Closing it means a **call-site obligation** — every generic fn that compares would have to declare `where T: Eq` — which is a breaking surface change across the whole tree and its own milestone, not a rule tweak. Erasing is also what keeps `fn h[T: Hashable](xs: Set[T])` compiling at all (`Hashable` does not imply `Eq`), so the erasure cannot simply be dropped. Pre-existing and unchanged by `W7-41`/`W7-45`: identical verdict on the pre-change binary |
+| ~~**W7-53**~~ | `:10399` | **FIXED 2026-08-12 — a generic body that compares must declare the bound, matching both owning ancestors.** Three measured instances, all `ok: no type errors` then `runtime error: struct 'Tag' has no method 'compare'` on **both** engines before the fix, now all rejected AT THEIR OWN DEFINITION with a message naming the fix (`… T is not bounded by Eq (add `where T: Eq`)`) | **Four call sites switched from the erasing `eq_bounds_unsatisfied_erased` (deleted — no caller survived) to the plain `eq_bounds_unsatisfied`, plus `Hashable` stays NON-embedding `Eq` (measured: embedding it regressed a working program).** See the detailed writeup below |
 | ~~**W7-54**~~ | `:10117` | **FIXED 2026-08-12 — a function value satisfies `Eq`, so `==`, `.eq()` and a `[T: Eq]` bound give one answer.** Measured on the pre-change binary: `f := g` / `f == g` printed `true`; `fn eqm[T: Eq](a,b): return a.eq(b)` fed `g` was *type error: type fn(int) -> int does not satisfy Eq* — the same fed through `a == b` inside the erased body gave the identical error; `struct Box[T]` with `fn eq(self, o: Self) -> bool where T: Eq` over a function payload was *cannot compare Box[fn(int) -> int] and Box[fn(int) -> int] for equality — Box[fn(int) -> int]'s `eq` requires fn(int) -> int: Eq* (a `W7-41` regression — this spelling printed `true` before it). **rustc 1.97.0, measured:** `#[derive(PartialEq, Eq)] struct Boxy<T: Eq>(T)` over a `fn(i32) -> i32` payload builds clean and prints `true` — fn pointers implement `PartialEq`. Chezzi now matches (Go is the one ancestor that differs: `func can only be compared to nil`). **Note: `print(f.eq(g))` called BARE on a concrete receiver still errors identically post-fix** (*has no method 'eq'*) — that is correct, not a residual: bare `.eq()` on a concrete receiver is `has no method 'eq'` for every D1-granted kind (`(1).eq(1)`, `[1].eq([1])` too), because the `Eq` grant makes `.eq()` callable from an ERASED `[T: Eq]` body, not a new bare instance method. "One answer" means operator ≡ erased-bound method, not that bare `.eq()` starts working. **Same-day follow-up:** `Ty::BuiltinFn` (`ord`/`chr`/`panic`/first-class `print` — a SEPARATE `Ty` variant from `Ty::Func`, kept apart only for sendability, but rendering identically in diagnostics) was the identical defect and was missed by the first pass; it now shares `Ty::Func`'s `"func"` `intrinsic_recv_kind` rather than minting a second kind, pinned by `tests/chz/spec/eq_func_test.chz`'s builtin-fn rows | `Ty::Func` had no arm in `Checker::intrinsic_recv_kind` (`src/checker/proto.rs:310`), so it fell to `"?"` and the D1 `Eq` grant's `!matches!(…, "?" \| "nil")` gate excluded it — a runtime-correct operator (`Vm::values_equal`'s identity compare for a function value already agreed with CPython) with no protocol-system grant behind it. **Three edits, all in the checker, no VM change**: (1) `Ty::Func { .. } => "func"` added to `intrinsic_recv_kind`; (2) `("Eq", "eq", "func")` added to `INTRINSIC_PROTO_METHODS`; (3) a `"func"` `Recv` row added to `intrinsic_grants_all_have_vm_arms`'s probe table (`src/vm/tests.rs`). No new VM arm was needed: `do_method_call`'s terminal `_` arm (`src/vm/call.rs`) already routes an `Obj::Func`/`Obj::Closure` receiver miss into `intrinsic_proto_method`, whose receiver-agnostic `("eq", 1)` arm calls the same `values_equal_guarded` `==` uses — confirmed by running the probe on both engines, not assumed. The matrix sweep in `intrinsic_grants_all_have_vm_arms` (which puts `Ty::Func` through every registered protocol for the first time) stayed green, so no other protocol arm was accidentally granting `Ty::Func`; the same sweep stayed green a second time when `Ty::BuiltinFn` joined the `"func"` kind. `tests/chz/spec/eq_func_test.chz` pins two top-level loads equal, two different top-level fns unequal, two factory calls unequal, two closures with equal captures unequal, a closure equal to itself, the restored `Box[fn]` spelling (now dispatching a REAL `self.val == o.val` body, not a `return true` stub, so it can tell dispatch apart from structural fallback), and the same shapes over a builtin (`ord`/`chr`) — all measured failing on the pre-change binary first |
 | **W7-55** | `Type-system / Eq` | **The `Eq` walk's depth cap REFUSES a type graph the VM compares happily — the checker is stricter than the runtime, by a fixed number.** `Checker::eq_bounds_unsatisfied` bounds its in-progress stack at `EQ_BOUNDS_MAX_IN_PROGRESS = 160` (`src/checker/proto.rs`). Past that it REFUSES (fail-closed, deliberately — a `None` there would be consumed as a `grant_intrinsic` promise). Measured: a chain `struct S0: v: int` … `struct S{N}: v: S{N-1}` plus builders, then `mk{N}() == mk{N}()`, RUNS and prints `true` for N ≤ 159 and is *type error: … S{N} nests too deeply to prove its equality reaches no unmet `where` bound* from N = 160. The VM's `values_equal_guarded` has no such cap, so this is a checker-only rejection of a working program. The same cap also refuses genuinely unprovable shapes, which is its purpose: polymorphic recursion (`struct N[T]: next: Option[N[List[T]]]`) never repeats an instantiation, so nothing else terminates it — and **rustc agrees on that half**, `error[E0320]: overflow while adding drop-check rules` on the mirror (1.97.0, measured) | **The number is a STACK-SAFETY floor, not a semantic one, and it is measured rather than chosen.** Each level costs a full `satisfies` → `satisfies_args_d` → walk → `eq_where_unsatisfied` → `satisfies` round trip. With the cap lifted, on the smallest stack the checker runs on (the Rust test harness thread, which calls `check_graph` directly; DEBUG build, frames 3-5x release): a chain of CONDITIONAL `eq` types survives 240 and overflows by 280; a chain of plain structs survives 800 and overflows by 1600. 160 is sized on the expensive shape with ~1.5x headroom. A stack overflow is an `abort`, strictly worse than any wrong answer, which is why the safe direction here is *smaller*. Raising it further needs the floor raised first — either by routing the test helpers through `crate::on_frontend_stack` as production already does (`main.rs`, and `editor::hover`/`editor::diagnostics` since 2026-08-11), or by bounding WORK rather than DEPTH so the walk stops recursing per level. Neither is a line edit; 160 already exceeds any hand-written type graph by ~2 orders of magnitude |
 | `min`/`max` → `Option` | `:1690` | `List.min`/`max`/`min_by`/`max_by` fault on empty while `first`/`last`/`pop` return `Option[T]` | Breaking surface change: 23 call sites + docs + examples. Own milestone |
@@ -9120,9 +9120,9 @@ keeping: a cycle HIT answers `None` because it is a **coinductive assumption**, 
 1.97.0 compiles the mirror, measured); and **`Ty::Protocol` cannot be refused** — see `W7-52`, now
 resolved as ancestor-correct (Go's own interface `==` does the same thing), not a bug.
 
-**Residuals:** `W7-52` (`Ty::Protocol`, both halves) — **since RESOLVED 2026-08-12 (verdict) + FIXED 2026-08-12 (the `[T: Eq]` bound gap)** — and
-`W7-53` (the erased call site), filed not closed, and `W7-54` (a function value did not satisfy `Eq`,
-though `f == g` worked — Rust compiles the mirror), **since FIXED 2026-08-12**.
+**Residuals:** `W7-52` (`Ty::Protocol`, both halves) — **since RESOLVED 2026-08-12 (verdict) + FIXED 2026-08-12 (the `[T: Eq]` bound gap)** —
+`W7-53` (the erased call site), **since FIXED 2026-08-12** (see the row), and `W7-54` (a function value
+did not satisfy `Eq`, though `f == g` worked — Rust compiles the mirror), **since FIXED 2026-08-12**.
 
 ### W7-42 — a top-level `:=` re-declaration retypes a LIVE binding, so the checker validates a different program than the one that runs — **FIXED (2026-08-10)**
 
@@ -9560,9 +9560,12 @@ one.
 > `fn mk[T: Hashable](x: T) -> Set[T]` returns a `Set[Cond[Tag]]` that no gate saw, and
 > `Cond(Tag(2)) in s` on it is check-clean (measured on both the pre-change and post-change binaries;
 > it is not a regression, and it is the same erased-generic route filed as **W7-53**'s third
-> instance). Extending the `in` arm to `Ty::Set` closes it — measured — at the cost of a second
-> diagnostic on the ordinary spelled `x in Set([...])`; that trade was declined, so the route stays
-> OPEN and filed. A choke point covers the positions it sees, which is not the same as a proof.
+> instance, **since FIXED 2026-08-12** — `[T: Hashable]` alone now rejects at `mk`'s OWN declaration
+> unless `Eq` is spelled too, `[T: Hashable + Eq]`, closing the route at the DEFINITION rather than by
+> widening this `in` arm). Extending the `in` arm to `Ty::Set` would still close it a second way — at
+> the cost of a second diagnostic on the ordinary spelled `x in Set([...])` — but is no longer needed
+> now that the declaration itself is judged; that trade stays declined. A choke point covers the
+> positions it sees, which is not the same as a proof.
 
 **Corrections to this row as first filed, each re-measured.**
 
@@ -9599,8 +9602,8 @@ and a constant `hash(self) = 7`, so every element collides and the container's a
 answers (`Set([cond(1), cond(2), cond(1)]).len() == 2` is `3` if `eq` never runs). Green on M:N and
 `--serial`.
 
-**Residuals:** `W7-52` (protocol existentials) — **since RESOLVED 2026-08-12 (verdict) + FIXED 2026-08-12 (the `[T: Eq]` bound gap)** — and
-`W7-53`, filed not closed — the erased call site, whose third instance
+**Residuals:** `W7-52` (protocol existentials) — **since RESOLVED 2026-08-12 (verdict) + FIXED 2026-08-12 (the `[T: Eq]` bound gap)** —
+and `W7-53`, **since FIXED 2026-08-12** — the erased call site, whose third instance
 (`fn f[T: Hashable](xs: List[T]) -> int: return Set(xs).len()`) was found here.
 
 ### W7-46 — a spawned fn's returned `Err` is silently discarded, while a raw fault aborts the nursery — **FIXED (2026-08-10)**
@@ -10395,3 +10398,168 @@ witness (the Critical's fix, both directions — equal and unequal Tags), and th
 faulting cleanly, naming `compare`, on the unsatisfied `Box[Tag]` witness, matching Go's re-measured
 `eqg[T comparable]` panic. All pinned tests were run on the actual release binary, both engines, not
 assumed from the checker tests alone.
+
+### W7-53 — a generic body that compares must declare the bound — **FIXED 2026-08-12**
+
+`W7-41`/`W7-45` closed the *declared* conditional-`eq` hole (a concrete type whose own `eq` carries an
+unsatisfiable `where`); this row is the *erased* one they both filed as a residual: a generic body is
+checked ONCE with its type parameter abstract, and the four use-site gates (`==`/`!=`, `in`, the
+`List` equality builtins, the map/set key check) erased a free `Ty::Param` to `Ty::Unknown` before
+asking `eq_bounds_unsatisfied`, so a `T` that would fail an `Eq` bound was treated as "not yet chosen"
+instead of "chosen and failing" — even though the checker's OWN `Ty::Param` arm already refused an
+unbounded `T`, it was never reached. Three measured instances, all `ok: no type errors` then
+`runtime error (line 7, col 12): struct 'Tag' has no method 'compare'` on **both** engines, fed
+`W7-41`'s `Box[T]` (declares `fn eq(self, o: Box[T]) -> bool where T: Comparable`) over `Tag` (no
+`compare`):
+
+```chezzi
+fn f[T](a: T, b: T) -> bool:
+    return a == b
+print(f(Box(Tag(1)), Box(Tag(2))))          # instance 1 — the operator
+
+fn f[T](xs: List[T], b: T) -> bool:
+    return xs.contains(b)
+print(f([Box(Tag(1))], Box(Tag(2))))        # instance 2 — List.contains
+
+fn f[T: Hashable](xs: List[T]) -> int:
+    return Set(xs).len()
+print(f([Box(Tag(1)), Box(Tag(2))]))        # instance 3 — a Set built inside the body
+```
+
+**Ancestor verdicts, measured, not assumed — both owning ancestors reject the DEFINITION, not the call
+site:**
+
+| | verdict on `fn f<T>(a: T, b: T) -> bool { a == b }` |
+|---|---|
+| rustc 1.97.0 | ``error[E0369]: binary operation `==` cannot be applied to type `T` `` + *help: consider restricting type parameter `T` with trait `PartialEq`* |
+| Go 1.26 | `invalid operation: a == b (incomparable types in type set)` |
+| CPython 3.14 | accepts (dynamically typed — not an authority here) |
+
+Chezzi now matches: all three instances above reject at `f`'s own declaration, naming the fix —
+`cannot compare T and T for equality — T is not bounded by Eq (add `where T: Eq`)` for instance 1,
+`contains() compares List[T] elements for equality — T is not bounded by Eq (add `where T: Eq`)` for
+instance 2, `Set element type T is not bounded by Eq (add `where T: Eq`)` for instance 3. Fixed with
+`[T: Eq]` (instances 1–2) / `[T: Hashable + Eq]` (instance 3), all three then type-check and run
+correctly; `Box[Tag]` itself, fed to a properly-bounded `[T: Eq]` fn, still correctly rejects at the
+CALL site (`type Box[Tag] does not satisfy Eq (method 'eq' requires Tag: Comparable)`) — the two
+obligations (bound the type parameter; satisfy it at the call site) are independent and both still
+enforced.
+
+**The fix: four call sites switched from the erasing variant to the plain one; the erasing variant had
+no remaining caller and was deleted.** `eq_bounds_unsatisfied_erased` (formerly `src/checker/proto.rs`)
+substituted every free `Ty::Param` to `Ty::Unknown` before calling `eq_bounds_unsatisfied`, so its own
+`Ty::Param` arm — which already refuses a param not bounded by `Eq` — never fired for a free `T`.
+Switched to the plain, non-erasing `eq_bounds_unsatisfied`: `src/checker/pattern.rs`'s `==`/`!=` gate
+(both operands — `may_be_equal`'s int/float and bytes/bytearray cross arms make a left-only gate
+asymmetric), `src/checker/pattern.rs`'s `in`-over-a-`List` gate, `src/checker/expr.rs`'s
+`contains`/`index_of`/`dedup`/`unique` gate, and `src/checker/proto.rs`'s `Checker::key_ty_reject` (the
+map-key/set-element choke point). After the switch `eq_bounds_unsatisfied_erased` had no caller left
+(`grep` confirmed) and was deleted along with its doc comment, rather than kept as a dead helper. The
+`Ty::Param` arm's message was extended to name the fix, the way rustc's `help:` does — from `{ty} is
+not bounded by Eq` to `{ty} is not bounded by Eq (add `where {ty}: Eq`)` — and reads sensibly at all
+four wrapping sites (`"cannot compare … — …"`, `"cannot test membership of … — …"`,
+`"…() compares List[…] elements for equality — …"`, `"…key/element type …"`).
+
+**`Comparable` already embedded `Eq` (M23), so every `[T: Comparable]` site in the tree survived
+untouched — verified**, including every `sort`/`max`/`min`-style stdlib call. `Hashable` did NOT embed
+`Eq`, which is what left instance 3 open (`[T: Hashable]` alone was never enough to make an INTERNAL
+`Set(xs)`/`{x: 1}` construction sound).
+
+**The `Hashable` route was decided BY MEASUREMENT, not by the initial plan.** Rust's own bound is
+`impl<T: Eq + Hash> HashSet<T>` — TWO bounds, not one — and the natural-looking fix (embed `Eq` into
+`Hashable`'s `ProtocolInfo`, mirroring `Comparable`'s embed) was tried first and MEASURED to regress a
+working, already-relied-upon program: `key_ty_reject`'s first conjunct (`self.satisfies(t,
+"Hashable")`) would then transitively demand FULL `Eq` satisfaction (`satisfies_args_d`'s embed-walk),
+which for a CONCRETE receiver means an exact structural signature match on any method literally named
+`eq` — rejecting the in-tree "ordinary escape hatch" (a struct defining `hash` plus an `eq` that is
+NOT the `eq(self, other: Self) -> bool` hook, e.g. `fn eq[U](self, o: U) -> bool: return true`), which
+falls back to structural equality at runtime and never faults. Measured on the debug binary with the
+embed added:
+
+```chezzi
+struct Holder[T]:
+    v: T
+    fn hash(self) -> int: return 1
+    fn eq[U](self, o: U) -> bool: return true
+s := Set([Holder(1)])   # rc=0 BEFORE the embed; type error "must implement Hashable…" WITH it
+```
+
+This is the exact regression class the `2026-08-10` `satisfies(t, "Eq")` attempt was reverted for
+(`W7-41`'s row), re-derived independently for `Hashable`'s embed rather than assumed away. Per the
+brief's decided-in-advance contingency, the embed was reverted and the FALLBACK taken instead:
+**explicit `[K: Hashable + Eq]` at every affected declaration** — the two-bound spelling Rust's own
+`HashSet<T>`/`HashMap<K, V>` already use, and the more faithful mirror of the ancestor (Rust's `Hash`
+trait has no `Eq` supertrait either; `Eq + Hash` is spelled at the container, not embedded). `Hashable`
+stays `embeds: Vec::new()` in BOTH `std/prelude.chz` and the Rust seed `prebuilt_protocols`
+(`src/checker/mod.rs`), so `Checker::assert_native_protocol_shape_matches`'s byte-match assertion needs
+no change either.
+
+**Blast radius, measured by building, not by grepping and trusting the grep:** every `[K: Hashable]` /
+`[T: Hashable]` in the tree that itself constructs or indexes a `Map`/`Set` keyed on that parameter
+needed `+ Eq` added — `native struct Map[K: Hashable, V]` / `native struct Set[T: Hashable]`
+(`std/prelude.chz` — their OWN native-fn signatures re-spell `Map[K, V]`/`Set[T]` as param/return
+types, which the map/set key gate now judges directly), `std/collections.chz`'s `Counter[T: Hashable]`,
+`std/memoize.chz`'s `_memo_get`/`memoize1`, every `[K: Hashable]` in
+`std/concurrency/collection.chz` (`ConcurrentMap`, `ConcurrentCounter`, and their six free-fn helpers),
+and `examples/newtype_generic.chz`'s `Tally[T: Hashable] = Map[T, int]`. None of these needed anything
+beyond the bound spelling — no logic changed, no runtime behavior changed (every touched example's
+`.expected` golden output still matches byte-for-byte). Two `#[cfg(test)]` fixtures
+(`tests/chz/spec/eq_protocol_test.chz`'s `same`/`differs`, used to warm-then-deopt an int-specialized
+`==` site onto structs) needed the same `[T: Eq]` addition, as did roughly a dozen `checker::tests`
+fixtures across `comparable_types_equality_still_ok`, `contains_generic_struct_substitutes_item`,
+`eq_operator_enforces_the_receivers_eq_where_bounds`, `list_equality_builtins_enforce_the_element_eq_
+where_bounds`, `a_map_key_or_set_element_must_be_eq_not_merely_hashable`, and
+`generic_newtype_ctor_infer_set_underlying_ok` — several of which had DOCUMENTED, in-tree comments
+explicitly describing the ceiling this row closes (*"ERASED: … Bare `T` is rejected as before … the
+un-erased spelling would break …"*) that were rewritten rather than left stale.
+
+**The `_ => "?"` variant enumeration required by the task brief** (Tasks 1/2 each missed one `Ty`
+variant with no `intrinsic_recv_kind` arm — `Ty::Func`, then `Ty::BuiltinFn`, then `Ty::Protocol` —
+each found only by review): the remaining `"?"` variants at `Checker::intrinsic_recv_kind` are
+`Ty::Param`, `Ty::Module`, `Ty::Unknown`, and the eleven handles `Channel`/`Shared`/`RwShared`/
+`Atomic`/`AtomicInt`/`Executor`/`Socket`/`Listener`/`Writer`/`Reader`/`Ptr`.
+
+* **`Ty::Param` must stay excluded — confirmed, not assumed.** This is precisely what this row's fix
+  depends on: `eq_bounds_unsatisfied_rec`'s `Ty::Param` arm is the refusal that makes W7-53 work, and
+  the D1 `Eq` grant admitting a bare `Ty::Param` (kind `"?"`) would make every unbounded `T`
+  intrinsically `Eq`, silently reopening this exact row.
+* **`Ty::Module`, `Ty::Unknown`** stay excluded for the reasons already documented at the classifier:
+  a module is never a value (`m == m2` is not a spellable program to begin with — measured, `import
+  std.time as a; import std.time as b; print(a == b)` is a checker error, "module ... is not a valid
+  expression", before `Eq` is ever consulted); `Ty::Unknown` is the don't-cascade hole (a prior error
+  already reported), and admitting it as `"unknown"` would need a construction discipline no other
+  kind has (there is no VALUE of type `Unknown` to probe with).
+* **The eleven handles compare by identity, and `==` already accepts that — measured** (e.g.
+  `import std.concurrency\nc1 := Channel[int](1)\nc2 := Channel[int](1)\nprint(c1 == c1)\nprint(c1 ==
+  c2)` prints `true` then `false`, both engines) — but they stay EXCLUDED from the `Eq` GRANT
+  (`[T: Eq]`/`.eq()`), and this is the documented, deliberate reason already recorded at the D1 gate
+  (`src/checker/proto.rs`, `satisfies_args_d`'s `Eq` arm): they have **no constructible probe
+  receiver** for the `intrinsic_grants_all_have_vm_arms` ratchet to run `x.eq(y)` against inside a
+  plain checker/VM unit test — `Executor`/`Socket`/`Listener`/`Writer`/`Reader` need real OS resources
+  (a thread pool, a bound socket, an open file) to construct a value at all, and even the
+  cheaper-to-construct `Channel`/`Shared`/`Atomic`/`AtomicInt`/`RwShared` would need the ratchet's probe
+  harness widened to mint one, for a grant that adds nothing `==` doesn't already give (there is no
+  declared-`eq`/structural-walk question to ask of an identity-only receiver). This is the SAME defect
+  shape as `Ty::Func`/`Ty::BuiltinFn`/`Ty::Protocol` in name only — those three had a real proof
+  obligation (`eq_bounds_unsatisfied` needed to route through them) and a cheap probe (`ord`, a bare
+  closure, an existential factory); the handles have neither, so admitting them would be a grant with no
+  runtime arm to pair it with (`INTRINSIC_UNPAIRED`'s exact carve-out condition) for zero behavioral
+  gain. Not fixed, and not filed as a new residual — this row IS the record of the decision so the next
+  person does not have to re-derive it.
+
+**Tests.** `src/checker/tests.rs`'s `a_generic_body_that_compares_must_bound_its_type_param_by_eq`: the
+three measured instances as `rejects()`, each asserting the `add `where T: Eq`` help text; `ok()`
+neighbours derived from the same premise — `[T: Eq]`; `[T: Comparable]` (works via the existing embed,
+untouched); a generic fn that takes `T` but never compares it; a partially-generic `Map[T, Box[Tag]]`
+where `T` defers to its own declared bound and only the concrete `Box[Tag]` half is walked
+structurally; and a generic fn whose `T` is reached only through a declared conditional `eq` whose
+`where` bound (`Comparable`) is satisfied by `T`'s own declared bound. Runtime: `tests/chz/`'s existing
+`[T: Eq]`-bounded generic-comparison coverage (`eq_protocol_test.chz` and others) exercises `int`,
+`List`, `tuple`, `Option`, a struct, and a **function value** (`Task 1`'s `Ty::Func` grant — the join
+point this row's fix must not break) — all pass identically on the M:N engine and `--serial`.
+
+**Gate:** `cargo build --release` clean; `cargo clippy --all-targets -- -D warnings` clean; full `cargo
+test` (lib unit + two-engine parity + conformance + integration) green; `./target/release/chezzi test
+tests/chz/` and `--serial` both green, byte-identical verdicts; every touched `examples/*.chz` (
+`contains_protocol`, `newtype_generic`, `memoize`, `collections`, `concurrent_collection`,
+`concurrent_jobs`) runs and matches its `.expected` golden byte-for-byte.

@@ -755,11 +755,20 @@ impl Checker {
     /// `impl<T: Eq + Hash> HashSet<T>`. Do not "correct" it to match Rust.** The obligation here is
     /// narrower than Rust's because Chezzi's equality is structural by default. The runtime probe is
     /// `values_equal`, which can only fault when it dispatches a declared **hook** `eq` whose `where`
-    /// bounds fail — exactly what [`Self::eq_bounds_unsatisfied_erased`] detects. A type carrying a
+    /// bounds fail — exactly what [`Self::eq_bounds_unsatisfied`] detects. A type carrying a
     /// NON-hook `eq` (the in-tree ordinary-method escape hatch) falls back to structural equality and
     /// cannot fault, yet it fails `satisfies(_, "Eq")` because the structural check sees a
     /// wrong-signature hook. So `satisfies(t, "Eq")` would newly reject this **working, measured**
-    /// program — the exact class of regression that got the 2026-08-10 attempt reverted:
+    /// program — the exact class of regression that got the 2026-08-10 attempt reverted, and got
+    /// **re-measured, W7-53** (`src/checker/mod.rs`'s `prebuilt_protocols` seed): embedding `Eq` into
+    /// `Hashable`'s `ProtocolInfo` (mirroring `Comparable`'s embed) makes THIS conjunct — the
+    /// `self.satisfies(t, "Hashable")` call two lines up — transitively demand full `Eq` satisfaction
+    /// for a CONCRETE `t`, which re-triggers the exact rejection below on a program that runs fine.
+    /// That is why `Hashable` stays `embeds: Vec::new()` — the fallback the W7-53 brief pre-approved —
+    /// and W7-53's third instance closes instead at the DECLARATION of a `[T: Hashable]` generic that
+    /// itself builds/indexes a `Set[T]`/`Map[T, _]`: the second conjunct below, now NOT erased, makes
+    /// `T`'s own `Ty::Param` arm demand `where T: Eq` explicitly (`fn f[T: Hashable + Eq](...)`),
+    /// exactly the two-bound spelling Rust's own `HashSet<T>` uses:
     ///
     /// ```text
     /// struct Holder[T]:
@@ -776,18 +785,19 @@ impl Checker {
     /// comprehension, `Set(list)` construction, annotation, `m[k]` read and write,
     /// `refine_receiver`'s late-concrete element, and thereby every `Map`/`Set`/`RwShared` method).
     ///
-    /// It is NOT a proof that a bad element is unconstructible, and an earlier version of this doc
-    /// said it was. A generic factory never spells the element type — `fn mk[T: Hashable](x: T) ->
-    /// Set[T]` is checked once with `T` abstract — so it hands back a `Set[Cond[Tag]]` no gate ever
-    /// saw. Measured, check-clean, filed as W7-53's third instance. The `Eq` conjunct is second because a non-`Hashable` type must keep
-    /// reporting the Hashable text.
+    /// **W7-53.** NOT erased any more: a free `Ty::Param` reaching the second conjunct
+    /// (`eq_bounds_unsatisfied`, not `_erased`) is judged directly, so `fn mk[T: Hashable](x: T) ->
+    /// Set[T]` that builds `Set[T]` in its own body — never spelling the element type — is now
+    /// caught at ITS OWN definition instead of handing back a `Set[Cond[Tag]]` no gate ever saw
+    /// (measured, was check-clean; W7-53's third instance). The `Eq` conjunct stays second because a
+    /// non-`Hashable` type must keep reporting the `Hashable` text.
     pub(super) fn key_ty_reject(&self, t: &Ty) -> Option<String> {
         if self.satisfies(t, "Hashable").is_err() {
             return Some(format!(
                 "must implement Hashable (int, str, bool, or a struct/enum/newtype defining hash(self) -> int), found {t}"
             ));
         }
-        self.eq_bounds_unsatisfied_erased(t)
+        self.eq_bounds_unsatisfied(t)
     }
 
     /// Refine-on-first-use (empty-slot half of the `Ty::Unknown` soundness family). A bare empty
@@ -2680,26 +2690,6 @@ impl Checker {
         self.eq_bounds_unsatisfied_rec(ty)
     }
 
-    /// [`Self::eq_bounds_unsatisfied`] with FREE type params erased to `Ty::Unknown` first — the
-    /// spelling every *use-site* gate wants, as opposed to a declared `where T: Eq` bound, which is
-    /// an obligation the caller discharges and so must keep the `Ty::Param` arm's refusal.
-    ///
-    /// A generic body is checked ONCE with `T` abstract, so a free `T` here is not a type that fails
-    /// the bound, it is a type not yet chosen; erasing to `Ty::Unknown` (which `satisfies_args`
-    /// treats as don't-cascade) keeps `fn f[T](xs: List[T], x: T): return xs.contains(x)` and
-    /// `fn h[T: Hashable](xs: Set[T])` accepted while a CONCRETE part of the same type
-    /// (`Map[T, Box[Tag]]`) is still judged. Shared by the `==`/`!=` gate (W7-41), the `values_equal`
-    /// `List` methods and `in` (W7-45), and [`Self::key_ty_reject`] — one erasure rule, not three.
-    pub(super) fn eq_bounds_unsatisfied_erased(&self, ty: &Ty) -> Option<String> {
-        let mut names: Vec<String> = Vec::new();
-        ty_collect_params(ty, None, &mut names);
-        if names.is_empty() {
-            return self.eq_bounds_unsatisfied(ty);
-        }
-        let erased = subst(ty, &names.into_iter().map(|n| (n, Ty::Unknown)).collect());
-        self.eq_bounds_unsatisfied(&erased)
-    }
-
     /// Enter `ty` on [`EQ_BOUNDS_IN_PROGRESS`] — the single cycle guard, used by BOTH levels of the
     /// recursion (see that constant for why it must be one).
     ///
@@ -2831,11 +2821,15 @@ impl Checker {
             // for `Vec<T>` to implement `Eq`"*, and adding `T: Eq` compiles. Without this arm every
             // container of an unbounded `T` would satisfy `Eq`. (A bare `Ty::Param` never reaches
             // here — its kind is `"?"`, so the D1 arm skips it and its own declared-bounds arm
-            // answers.)
+            // answers.) W7-53: since Chezzi fixes this at the DEFINITION (matching rustc/Go, not
+            // call-site inference), the message names the fix, the way rustc's `help:` does —
+            // every one of the four gates that reach this arm wraps `why` behind an em-dash, so
+            // the added clause reads naturally at each: "cannot compare T and T for equality — T is
+            // not bounded by Eq (add `where T: Eq`)".
             Ty::Param(_) => self
                 .satisfies(ty, "Eq")
                 .err()
-                .map(|_| format!("{ty} is not bounded by Eq")),
+                .map(|_| format!("{ty} is not bounded by Eq (add `where {ty}: Eq`)")),
             // Scalars, the identity handles, `Func`, `Module` — nothing a user `eq` can hide behind,
             // so there is genuinely nothing to prove. `Ty::Unknown` is the don't-cascade hole (a
             // prior error already reported). `Ty::Protocol` is the ONE permissive answer that is not

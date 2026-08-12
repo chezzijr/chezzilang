@@ -173,11 +173,12 @@ struct Deque[T]:
 # recover their element type from use).
 
 # ============================================================================
-# Counter[T] — a frequency table over the builtin `Map[T, int]` (T must be Hashable).
+# Counter[T] — a frequency table over the builtin `Map[T, int]` (T must be Hashable + Eq, W7-53: a
+# Map key needs both).
 # ============================================================================
 #
 # COMPLEXITY: add/add_n/count O(1); total O(n); most_common O(n log n) (stable sort).
-struct Counter[T: Hashable]:
+struct Counter[T: Hashable + Eq]:
     data: Map[T, int]
 
     # Increment the count of `x` by 1. O(1).

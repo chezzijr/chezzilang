@@ -1498,16 +1498,24 @@ fn g(x: int) -> int:
         &format!("{EQB}print(Box(Channel[int](1)) == Box(Channel[int](1)))\n"),
         "for equality — Box[",
     );
-    // ERASED operands stay tolerated (`Ty::Param`), both inside a `Box` and bare. The bare form is a
-    // documented CEILING, not a success: `f(Box(Tag(1)), Box(Tag(2)))` still faults at runtime,
-    // because inside the body both operands are `Ty::Param` and `f` declares no bound to check at the
-    // call site. Closing it needs a call-site obligation, which is not this rule.
-    entry_ok(&format!(
-        "{COND}fn f[T](x: Box[T], y: Box[T]) -> bool:\n    return x == y\nprint(f(Box(1), Box(2)))\n"
-    ));
-    entry_ok(&format!(
-        "{COND}fn f[T](x: T, y: T) -> bool:\n    return x == y\nprint(f(a, b))\n"
-    ));
+    // W7-53: an UNBOUNDED operand is no longer tolerated at either nesting — `f`'s own definition must
+    // carry `where T: Eq` (matching rustc's `E0369`/Go's "incomparable types"), so both now reject
+    // AT THE DEFINITION instead of type-checking clean and faulting at `f`'s call three lines later
+    // (the former documented ceiling: `f(Box(Tag(1)), Box(Tag(2)))` used to fault at runtime because
+    // inside the body both operands were `Ty::Param` and `f` declared no bound to check).
+    // Here the walk reaches `Box[T]`'s OWN declared `eq` (`where T: Comparable`) before ever asking
+    // whether `T` itself is `Eq`-bounded, so the reported reason names the MORE SPECIFIC obligation
+    // (`Comparable`, not `Eq`) — same specificity rule `eq_where_unsatisfied` already had.
+    entry_rejects(
+        &format!(
+            "{COND}fn f[T](x: Box[T], y: Box[T]) -> bool:\n    return x == y\nprint(f(Box(1), Box(2)))\n"
+        ),
+        "Box[T]'s `eq` requires T: Comparable",
+    );
+    entry_rejects(
+        &format!("{COND}fn f[T](x: T, y: T) -> bool:\n    return x == y\nprint(f(a, b))\n"),
+        "T is not bounded by Eq (add `where T: Eq`)",
+    );
 
     // ---- the coupling Task 1's walk depends on ----
     //
@@ -1611,14 +1619,21 @@ b := Box(Tag(2))
     entry_ok(&format!(
         "{COND}xs: List[int] = []\nprint(xs.contains(1))\n"
     ));
-    // ERASED: a generic body is checked once with `T` abstract, so the free param is not a type that
-    // fails the bound. Same rule as the `==` gate (`eq_bounds_unsatisfied_erased`).
-    entry_ok(&format!(
-        "{COND}fn f[T](xs: List[T], x: T) -> bool:\n    return xs.contains(x)\nprint(f([1], 2))\n"
-    ));
-    entry_ok(&format!(
-        "{COND}fn f[T](xs: List[T], x: T) -> bool:\n    return x in xs\nprint(f([1], 2))\n"
-    ));
+    // NOT ERASED any more (W7-53): a free `T` is judged directly, same rule as the `==` gate
+    // (`eq_bounds_unsatisfied`) — both now reject AT THE DEFINITION (rustc/Go's answer) instead of
+    // type-checking clean and faulting at `f([Box(Tag(1))], Box(Tag(2)))` three lines later.
+    entry_rejects(
+        &format!(
+            "{COND}fn f[T](xs: List[T], x: T) -> bool:\n    return xs.contains(x)\nprint(f([1], 2))\n"
+        ),
+        "T is not bounded by Eq (add `where T: Eq`)",
+    );
+    entry_rejects(
+        &format!(
+            "{COND}fn f[T](xs: List[T], x: T) -> bool:\n    return x in xs\nprint(f([1], 2))\n"
+        ),
+        "T is not bounded by Eq (add `where T: Eq`)",
+    );
     // `count` takes a PREDICATE, so it never routes through `values_equal` — unaffected.
     entry_ok(&format!(
         "{COND}fn pos(x: Box[Tag]) -> bool:\n    return true\nprint([a].count(pos))\n"
@@ -1650,6 +1665,77 @@ b := Box(Tag(2))
             .starts_with("cannot test membership of int in"),
         "got {errs:?}"
     );
+}
+
+/// **W7-53 — a generic body that compares must declare the bound.** Fixes AT THE DEFINITION, matching
+/// both owning ancestors (measured): rustc 1.97.0 rejects `fn f<T>(a: T, b: T) -> bool { a == b }`
+/// with `error[E0369]: binary operation \`==\` cannot be applied to type \`T\`` and *help: consider
+/// restricting type parameter \`T\` with trait \`PartialEq\``; Go 1.26 rejects the mirror with `invalid
+/// operation: a == b (incomparable types in type set)`. Before this fix all three instances below
+/// were `ok: no type errors` and then faulted at runtime with *"struct 'Tag' has no method
+/// 'compare'"* on both engines — the checker's own `Ty::Param` arm already refused an unbounded `T`,
+/// but the four use-site gates erased free params to `Ty::Unknown` first (`eq_bounds_unsatisfied_erased`,
+/// since deleted — no caller survived switching all four to the plain, non-erasing
+/// `eq_bounds_unsatisfied`), so the refusal never fired.
+#[test]
+fn a_generic_body_that_compares_must_bound_its_type_param_by_eq() {
+    const TAG_BOX: &str = "\
+struct Tag:
+    n: int
+struct Box[T]:
+    val: T
+    fn hash(self) -> int:
+        return 0
+    fn eq(self, o: Box[T]) -> bool where T: Comparable:
+        return self.val.compare(o.val) == 0
+";
+    // Instance 1 — the `==` operator, both operands bare `T`.
+    rejects(
+        &format!(
+            "{TAG_BOX}fn f[T](a: T, b: T) -> bool:\n    return a == b\nprint(f(Box(Tag(1)), Box(Tag(2))))\n"
+        ),
+        "T is not bounded by Eq (add `where T: Eq`)",
+    );
+    // Instance 2 — `List[T].contains`.
+    rejects(
+        &format!(
+            "{TAG_BOX}fn f[T](xs: List[T], b: T) -> bool:\n    return xs.contains(b)\nprint(f([Box(Tag(1))], Box(Tag(2))))\n"
+        ),
+        "T is not bounded by Eq (add `where T: Eq`)",
+    );
+    // Instance 3 — `[T: Hashable]` alone, `Set(xs)` construction inside the body: `Hashable` does
+    // NOT imply `Eq` (measured: embedding it broke the `Holder`-shaped ordinary-`eq`-method escape
+    // hatch — see `key_ty_reject`'s doc), so the map/set-key gate demands both bounds explicitly.
+    rejects(
+        &format!(
+            "{TAG_BOX}fn f[T: Hashable](xs: List[T]) -> int:\n    return Set(xs).len()\nprint(f([Box(Tag(1)), Box(Tag(2))]))\n"
+        ),
+        "T is not bounded by Eq (add `where T: Eq`)",
+    );
+
+    // ---- ok() neighbours derived from the same premise ----
+
+    // `[T: Eq]` — the direct fix.
+    ok("fn f[T: Eq](a: T, b: T) -> bool:\n    return a == b\nprint(f(1, 2))\n");
+    // `[T: Comparable]` — already works: `Comparable` embeds `Eq` (`std/prelude.chz`), untouched by
+    // this change.
+    ok("fn f[T: Comparable](a: T, b: T) -> bool:\n    return a == b\nprint(f(1, 2))\n");
+    // A generic fn that takes `T` but never compares it — the bound obligation is per-USE, not a tax
+    // on every type parameter.
+    ok("fn f[T](a: T) -> T:\n    return a\nprint(f(1))\n");
+    // A partially-generic type, `Map[T, Box[Tag]]`: `T` is bounded (deferred to its OWN declared
+    // bound, cheap — `Map`'s own key bound is `Hashable + Eq`, W7-53), so only the CONCRETE half
+    // (`Box[Tag]`, which has no declared `eq` and is structurally sound — `Tag` is a plain `int`
+    // field) is actually walked structurally.
+    ok(
+        "struct Tag:\n    n: int\nstruct Box[T]:\n    val: T\nfn same_map[T: Hashable + Eq](a: Map[T, Box[Tag]], b: Map[T, Box[Tag]]) -> bool:\n    return a == b\n",
+    );
+    // A generic fn whose `T` is never bare-compared, only reached via a declared conditional `eq`
+    // whose `where` bound IS satisfied by `T`'s own declared bound (`Comparable`, not `Eq` — the
+    // `eq_where_unsatisfied` obligation is more specific than the `Ty::Param` arm's).
+    ok(&format!(
+        "{TAG_BOX}fn f[T: Comparable](x: Box[T], y: Box[T]) -> bool:\n    return x == y\nprint(f(Box(1), Box(2)))\n"
+    ));
 }
 
 /// **W7-45, the map/set half — a key type must be `Eq`, not merely `Hashable`.** A `Map`/`Set` probe
@@ -1747,16 +1833,24 @@ b := Box(Tag(2))
     ));
     // An empty literal's element/key type is still `Unknown` — must not cascade.
     entry_ok(&format!("{COND}print(Set([]).len())\nprint({{}}.len())\n"));
-    // ERASURE: a free `T` is a type not yet chosen. Bare `T` is rejected as before (it is not
-    // `Hashable`); a `T: Hashable` bound stays accepted, which the un-erased spelling would break —
-    // `Hashable` does not imply `Eq`, so `eq_bounds_unsatisfied` alone rejects every generic
-    // container body in the tree.
+    // NOT ERASED any more (W7-53): a free `T` reaching a spelled `Set[T]`/`Map[T, _]` position inside
+    // a generic body is judged directly, so `[T: Hashable]` alone no longer accepts a body that itself
+    // builds/indexes the container — `Hashable` does not imply `Eq` (measured: embedding it broke the
+    // `Holder`-shaped ordinary-`eq`-method escape hatch, `key_ty_reject`'s doc), so the DECLARATION
+    // must spell both, exactly as Rust's own `HashSet<T>`/`HashMap<K, V>` require `Eq + Hash`.
     entry_ok(
-        "fn h[T: Hashable](xs: Set[T]) -> int:\n    return xs.len()\nfn k[T: Hashable](m: Map[T, int]) -> int:\n    return m.len()\nfn s2[T: Hashable](x: T) -> int:\n    s := Set([x])\n    s.add(x)\n    m := {x: 1}\n    return s.len() + m.len()\nprint(h(Set([1])) + k({1: 2}) + s2(1))\n",
+        "fn h[T: Hashable + Eq](xs: Set[T]) -> int:\n    return xs.len()\nfn k[T: Hashable + Eq](m: Map[T, int]) -> int:\n    return m.len()\nfn s2[T: Hashable + Eq](x: T) -> int:\n    s := Set([x])\n    s.add(x)\n    m := {x: 1}\n    return s.len() + m.len()\nprint(h(Set([1])) + k({1: 2}) + s2(1))\n",
     );
     rejects(
         "fn h[T](xs: Set[T]) -> int:\n    return xs.len()\n",
         "Set element type must implement Hashable",
+    );
+    // W7-53's third measured instance: `[T: Hashable]` alone, with a `Set(xs)` construction inside
+    // the body, is now rejected at ITS OWN definition (`s2`'s `Set([x])`/`{x: 1}` above are the
+    // `+ Eq` fix; this is the same body with the bound removed).
+    rejects(
+        "fn f[T: Hashable](xs: List[T]) -> int:\n    return Set(xs).len()\n",
+        "T is not bounded by Eq (add `where T: Eq`)",
     );
 }
 
@@ -2454,8 +2548,10 @@ fn comparable_types_equality_still_ok() {
     entry_ok(
         "fn boom() -> int!:\n    return Err(\"nope\")\nfn main():\n    match boom():\n        Ok(v): print(v)\n        Err(e): print(e == \"nope\")\nmain()\n",
     );
-    // An erased generic body compares two values of its own type param.
-    entry_ok("fn same[T](a: T, b: T) -> bool:\n    return a == b\nprint(same(1, 2))\n");
+    // A generic body comparing two values of its own type param must bound it by Eq (W7-53) — rustc/Go
+    // both reject the unbounded form at its OWN definition; see
+    // `a_generic_body_that_compares_must_bound_its_type_param_by_eq`.
+    entry_ok("fn same[T: Eq](a: T, b: T) -> bool:\n    return a == b\nprint(same(1, 2))\n");
     // ----- the shapes `compatible` alone CANNOT see (it is registry-blind), i.e. everything that
     // is NOT provably disjoint because one side is a SUPERTYPE of the other or is erased. Each of
     // these ran and printed `true` before B2 landed; all five regressed on the first cut.
@@ -2470,8 +2566,12 @@ fn comparable_types_equality_still_ok() {
     // (3) `Any` is the TOP type — the documented escape hatch, and it must work with only ONE side
     // widened (the docs spell it `u: Any = a`).
     entry_ok("fn main():\n    u: Any = 1\n    print(u == 1)\n    print(1 == u)\nmain()\n");
-    // (4) an unbounded `Ty::Param` vs a concrete: generics are erased, so nothing is provable.
-    entry_ok("fn f[T](a: T) -> bool:\n    return a == 1\nfn main():\n    print(f(1))\nmain()\n");
+    // (4) a `Ty::Param` vs a concrete: `may_be_equal`'s co-inhabitance erasure still tolerates the
+    // mismatched shape (that axis is unaffected by W7-53), but the WALK now requires `T: Eq`, same as
+    // every other free-param comparison — so this needs the bound where it once needed none.
+    entry_ok(
+        "fn f[T: Eq](a: T) -> bool:\n    return a == 1\nfn main():\n    print(f(1))\nmain()\n",
+    );
     // (5) a NESTED existential — the recursion `compatible` cannot do.
     entry_ok(
         "struct MyErr:\n    m: str\n    fn message(self) -> str:\n        return self.m\nfn main():\n    o: Option[Error] = Some(MyErr(\"x\"))\n    p: Option[MyErr] = Some(MyErr(\"x\"))\n    print(o == p)\nmain()\n",
@@ -2490,9 +2590,10 @@ fn comparable_types_equality_still_ok() {
     entry_ok(
         "struct MyErr:\n    m: str\n    fn message(self) -> str:\n        return self.m\nstruct Box[T]:\n    v: T\nfn boxes(a: Box[Error], b: Box[MyErr]) -> bool:\n    return a == b\nfn maps(a: Map[str, Error], b: Map[str, MyErr]) -> bool:\n    return a == b\nfn main():\n    o: List[Error] = [MyErr(\"x\")]\n    p: List[MyErr] = [MyErr(\"x\")]\n    print(o == p)\n    t: (Error, int) = (MyErr(\"x\"), 1)\n    u: (MyErr, int) = (MyErr(\"x\"), 1)\n    print(t == u)\nmain()\n",
     );
-    // (8) an erased param nested one level down (`List[T]`), not only bare at the top level.
+    // (8) same as (4), one level down (`List[T]`): the co-inhabitance erasure is unaffected, the
+    // walk still needs `T: Eq`.
     entry_ok(
-        "fn f[T](a: List[T]) -> bool:\n    return a == [1]\nfn main():\n    print(f([1]))\nmain()\n",
+        "fn f[T: Eq](a: List[T]) -> bool:\n    return a == [1]\nfn main():\n    print(f([1]))\nmain()\n",
     );
     // (9) the runtime's own CROSS-TYPE equality arms compose through the recursion, because they
     // are arms of `may_be_equal` rather than a top-level special case: `[1.0] == [1]` and
@@ -2515,8 +2616,12 @@ fn comparable_types_equality_still_ok() {
     // (11) a PARAMETERIZED protocol existential vs a conforming concrete, with a free `T` in the
     // protocol's args — the erasure escape did not reach into `Protocol`'s own `pargs` either, so the
     // args (not the method set) were deciding a question they cannot answer inside an erased body.
+    // `cmp`'s `a: Container[T]` is a PROTOCOL existential — `eq_bounds_unsatisfied_rec` never recurses
+    // into a protocol's args (the catch-all `_ => None`, deferred to the witness), so `T` there needs
+    // no bound. `flip`'s `a: Bag[T]` is a CONCRETE struct with a bare `T` FIELD that the walk reaches
+    // directly, so (W7-53) it needs `T: Eq`.
     entry_ok(
-        "protocol Container[T]:\n    fn get(self, i: int) -> T\nstruct Bag[T]:\n    item: T\n    fn get(self, i: int) -> T:\n        return self.item\nfn cmp[T](a: Container[T], b: Bag[int]) -> bool:\n    return a == b\nfn flip[T](a: Bag[T], b: Container[int]) -> bool:\n    return a == b\nfn main():\n    pass\nmain()\n",
+        "protocol Container[T]:\n    fn get(self, i: int) -> T\nstruct Bag[T]:\n    item: T\n    fn get(self, i: int) -> T:\n        return self.item\nfn cmp[T](a: Container[T], b: Bag[int]) -> bool:\n    return a == b\nfn flip[T: Eq](a: Bag[T], b: Container[int]) -> bool:\n    return a == b\nfn main():\n    pass\nmain()\n",
     );
 }
 
@@ -16292,7 +16397,7 @@ fn generic_newtype_ctor_infer_set_underlying_ok() {
     // A set-underlying generic newtype infers its param from the arg just like list/map —
     // `Bag({1, 2, 3})` ⇒ Bag[int] with NO turbofish (regression: `unify` lacked a `Ty::Set` arm).
     ok(
-        "newtype Bag[T: Hashable] = Set[T]\nfn main():\n    b: Bag[int] = Bag({1, 2, 3})\n    s: Set[int] = Set(b)\n    print(s)\nmain()\n",
+        "newtype Bag[T: Hashable + Eq] = Set[T]\nfn main():\n    b: Bag[int] = Bag({1, 2, 3})\n    s: Set[int] = Set(b)\n    print(s)\nmain()\n",
     );
 }
 
@@ -21935,11 +22040,13 @@ fn contains_wrong_return_rejects_with_hint() {
 /// but `"s" in Box[int](5)` is rejected (subst must not leave `Param(T)`/`Unknown`) (req 3).
 #[test]
 fn contains_generic_struct_substitutes_item() {
+    // `Box[T]`'s own `contains` body compares `x == self.v`, both `T` — W7-53 requires `T: Eq` at
+    // the struct's OWN declaration, same as a generic fn.
     ok(
-        "struct Box[T]:\n    v: T\n    fn contains(self, x: T) -> bool:\n        return x == self.v\nfn main():\n    print(2 in Box[int](5))\nmain()\n",
+        "struct Box[T: Eq]:\n    v: T\n    fn contains(self, x: T) -> bool:\n        return x == self.v\nfn main():\n    print(2 in Box[int](5))\nmain()\n",
     );
     rejects(
-        "struct Box[T]:\n    v: T\n    fn contains(self, x: T) -> bool:\n        return x == self.v\nfn main():\n    print(\"s\" in Box[int](5))\nmain()\n",
+        "struct Box[T: Eq]:\n    v: T\n    fn contains(self, x: T) -> bool:\n        return x == self.v\nfn main():\n    print(\"s\" in Box[int](5))\nmain()\n",
         "membership",
     );
 }

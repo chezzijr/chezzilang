@@ -159,7 +159,7 @@ exhaustive `match` + guards, closures/HOF, modules, GC, interpolation, pipe, `de
 `recover:`, `Iterator[T]`, slicing/indexing protocols, user-overloadable `==` via `Eq`,
 static protocol requirements callable through a generic bound via witness passing). **Concurrency** has landed through
 **Tier-D** (`spawn` / `parallel:` nursery, `Channel[T]`, `Shared[T]`, `Executor`, real
-OS-thread engine via `--parallel`, netpoller + `std.net`). ~4283 Rust tests green, plus 483 Chezzi
+OS-thread engine via `--parallel`, netpoller + `std.net`). ~4284 Rust tests green, plus 483 Chezzi
 tests identical on both engines.
 
 ## Current focus

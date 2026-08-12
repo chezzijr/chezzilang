@@ -17,9 +17,10 @@ newtype Stack[T] = List[T]:
             return None
         return Some(xs[xs.len() - 1])
 
-# A generic counter map keyed by T (Hashable, as a map key must be), methods-only. `bump` references
-# T; `total` sums the values. The Hashable bound on the param comes along like struct/enum bounds.
-newtype Tally[T: Hashable] = Map[T, int]:
+# A generic counter map keyed by T (Hashable + Eq, as a map key must be — W7-53), methods-only.
+# `bump` references T; `total` sums the values. The bounds on the param come along like struct/enum
+# bounds.
+newtype Tally[T: Hashable + Eq] = Map[T, int]:
     fn bump(self, k: T) -> Tally[T]:
         m := Map(self)
         cur := 0

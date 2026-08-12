@@ -163,10 +163,10 @@ test fn a_faulting_eq_propagates():
 # is ONE bytecode site, so warming it on ints and then handing it structs is the deopt: the fast
 # path must fall through to the `Eq`-protocol dispatch, not answer with a stale specialization.
 
-fn same[T](a: T, b: T) -> bool:
+fn same[T: Eq](a: T, b: T) -> bool:
     return a == b
 
-fn differs[T](a: T, b: T) -> bool:
+fn differs[T: Eq](a: T, b: T) -> bool:
     return a != b
 
 test fn an_int_warmed_eq_site_still_dispatches_user_eq():

@@ -1448,13 +1448,20 @@ that does not structurally provide it (`[T: Stringable]`/`[T: Hashable]`/… ove
 `Eq` is the one protocol this applies to, because `Eq`-satisfaction is defined as exactly what `==`
 already accepts, and `==` already accepted a protocol-typed operand.
 
-**Known ceilings, all measured and all filed** — a conditional `eq` can still be reached at runtime
-through a shape the checker cannot judge: an **erased generic body** — `fn f[T](a: T, b: T): return a
-== b` declares no bound, so there is nothing to check inside the body *or* at the call site
-(**W7-53**; rustc rejects the body instead, which would mean a `where` on every generic fn that
-compares). And a type graph nested deeper than **160** links is REFUSED at a `[T: Eq]` bound or an
-`==` even though the VM's own equality has no such cap, so the checker rejects what the runtime
-handles (**W7-55**).
+**A generic body that compares its own type parameter must bound it by `Eq`, at the DEFINITION —
+matching both owning ancestors.** `fn f[T](a: T, b: T) -> bool: return a == b` rejects at `f`'s own
+declaration — `cannot compare T and T for equality — T is not bounded by Eq (add `where T: Eq`)` —
+the same shape rustc 1.97.0 produces (`error[E0369]`, *help: consider restricting type parameter `T`
+with trait `PartialEq`*) and Go 1.26 produces (`invalid operation: a == b (incomparable types in type
+set)`). The same rule covers `in`/`contains`/`index_of`/`dedup`/`unique` over `List[T]` and a `T`
+reached as a map key / set element. A type parameter that is never compared pays no tax — the
+obligation is per-USE, not a blanket requirement on every `[T]`. `Comparable` already embeds `Eq`, so
+`[T: Comparable]` needs no separate `Eq` bound; `Hashable` does **not** embed `Eq` (Rust's `Hash` has
+no `Eq` supertrait either — `HashSet<T>`/`HashMap<K, V>` spell `Eq + Hash` explicitly), so a generic
+that builds/indexes a `Map`/`Set` keyed on its own type parameter needs `[T: Hashable + Eq]`
+(`docs/gaps.md` **W7-53**). And a type graph nested deeper than **160** links is REFUSED at a `[T: Eq]`
+bound or an `==` even though the VM's own equality has no such cap, so the checker rejects what the
+runtime handles (**W7-55**).
 
 **Protocols** are Go-style structural interfaces: a block of body-less method signatures. A type
 satisfies a protocol by *having* the methods — there is no `implements` declaration. `Self` inside
@@ -1692,10 +1699,16 @@ everything the runtime can genuinely compare stays legal:
   `Shared[MyErr]`. (Note these same pairs are *not* mutually **assignable** — a mutable container's
   type argument is invariant — but they can still hold equal values, which is all `==` asks.)
 * any comparison involving an **erased type parameter**, bare or nested at any depth (`a == 1` and
-  `xs == [1]` inside `fn f[T](a: T, xs: List[T])`; `a == b` inside
+  `xs == [1]` inside `fn f[T: Eq](a: T, xs: List[T])`; `a == b` inside
   `fn cmp[T](a: Channel[T], b: Channel[int])`; a free `T` in a parameterized protocol's own arguments,
   `Container[T]` vs a conforming `Bag[int]`). A `where T: <scalar>` bound is the exception: it *pins*
-  `T` to that scalar, so `fn f[T](a: T, b: int) where T: str` still rejects `a == b`.
+  `T` to that scalar, so `fn f[T](a: T, b: int) where T: str` still rejects `a == b`. This is the
+  CO-INHABITANCE question — "can these ever be equal" — a separate axis from **whether `T` may be
+  compared at all**: `T` itself still needs an `Eq` bound wherever it is genuinely walked for equality
+  (above), so `fn f[T](a: T, xs: List[T]): return a == 1` rejects at ITS OWN declaration
+  (`T is not bounded by Eq`) even though `int` and `T` would be co-inhabitable once `T` is bound. A
+  HANDLE's own element type (`Channel[T]` vs `Channel[int]`) is the identity-compare exception — the
+  handle compares by identity, never by its element, so `cmp`'s `T` needs no `Eq` bound at all.
 
 A conforming existential is not a blanket pass: a **non**-conforming concrete stays an error at every
 depth (`sh: Shape` vs a `str`, `List[Shape]` vs `List[str]`, `Container[T]` vs an `int`), and neither
@@ -2175,6 +2188,16 @@ to hash) also satisfy it intrinsically. In an erased `[T: Hashable]` body `x.has
 hash the container uses, so the method and membership can never disagree; the numeric value itself is
 **unspecified** (a build-dependent 64-bit hash, possibly negative) — rely on consistency, not on a
 literal.
+
+**`Hashable` alone is not enough to build or index a `Map`/`Set` keyed on `T` — you need `Hashable`
+AND `Eq`.** `Hashable` does **not** embed `Eq` (Rust's own `Hash` trait has no `Eq` supertrait either —
+`HashSet<T>`/`HashMap<K, V>` spell `impl<T: Eq + Hash>` explicitly, not one bound), so a
+`[T: Hashable]` generic that only *calls* `T.hash()` compiles fine, but one whose body constructs or
+indexes a `Map[T, _]`/`Set[T]` (`Set(xs)`, `{x: 1}`, `m[k]`) needs `[T: Hashable + Eq]` — the map/set
+key check runs the SAME `Eq`-bound obligation on a type parameter that `==` does (`docs/gaps.md`
+**W7-53**). A concrete key/element (`Set[Box[Tag]]`) was always checked this way; what changed is that
+the check now also reaches a free `T` inside a generic body instead of skipping it as "not yet
+chosen".
 
 **Keys are value types (Go model).** A `struct`/`enum`/`newtype` key or element is **snapshotted
 (deep-copied) when it is stored**, so mutating your original value *after* the insert can never reach

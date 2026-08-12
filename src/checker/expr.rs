@@ -2750,9 +2750,10 @@ impl Checker {
                 // all — so it is enforced here, exactly where `sum`'s numeric requirement is.
                 // The four are exhaustive against the `native struct List[T]` surface: `count` and
                 // `position` take a PREDICATE (`fn(T) -> bool`) so they never compare, and there is
-                // no `remove` (it is `remove_at`, by index).
+                // no `remove` (it is `remove_at`, by index). NOT erased (W7-53): a free `elem` must
+                // carry `Eq` among its declared bounds, same as the `==`/`in` gates — `eq_bounds_unsatisfied`.
                 if matches!(method, "contains" | "index_of" | "dedup" | "unique")
-                    && let Some(why) = self.eq_bounds_unsatisfied_erased(&elem)
+                    && let Some(why) = self.eq_bounds_unsatisfied(&elem)
                 {
                     self.infer_all(args);
                     self.error(

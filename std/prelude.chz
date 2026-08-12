@@ -87,7 +87,7 @@ native struct List[T]:
     native fn count(self, pred: fn(T) -> bool) -> int
     native fn position(self, pred: fn(T) -> bool) -> Option[int]
 
-native struct Map[K: Hashable, V]:
+native struct Map[K: Hashable + Eq, V]:
     native fn len(self) -> int
     native fn has(self, k: K) -> bool
     native fn get(self, k: K) -> Option[V]
@@ -97,7 +97,7 @@ native struct Map[K: Hashable, V]:
     native fn merge(self, other: Map[K, V]) -> Map[K, V]
     native fn update(self, other: Map[K, V]) -> nil
 
-native struct Set[T: Hashable]:
+native struct Set[T: Hashable + Eq]:
     native fn len(self) -> int
     native fn has(self, v: T) -> bool
     native fn add(self, v: T) -> nil
