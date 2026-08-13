@@ -2,6 +2,52 @@
 
 Single source of truth for "what am I doing next." Update after every work session.
 
+> **✅ W7-51 landed 2026-08-13 — a non-literal default argument is compiled ONCE, in the module that
+> DECLARES it, instead of being cloned into every caller that omits it.** `docs/gaps.md`'s **W7-51**
+> is CLOSED, and with it the last open row of the W7-50/51 pair. The row as filed named only a
+> pass-count symptom and asked for a repro first; two defects were then measured on `b1307258`.
+>
+> **Defect 1 — chained defaults break at depth 3.** `fn c5(v: int = 5)` over `c4(v = c5())` over
+> `c3(v = c4())` over `c2(v = c3())` over `c1(v = c2())`, called at every depth: `b1307258` gives
+> **5 type errors** (`'c5' expects 1 argument(s), got 0`, `'c4' …`, `'c3' …`). HEAD and CPython both
+> print `5` four times. **Defect 2 — a caller-side global silently supplies the wrong value across
+> modules.** `g.chz` = `K := 7` + `fn f(x: int = K)`; `main.chz` = `import g` + `K := 99` +
+> `print(g.f()); print(K)` → `b1307258` prints **`99` / `99`**, clean `check`, both engines. HEAD and
+> the two-module Python equivalent print `7` / `99`. In a diamond (`main` → {`l`, `r`} → `base`, with
+> `base` declaring `K := 3` and `main` declaring `K := 900`) `b1307258` printed **`910` / `920`** in
+> both import orders where the answer is `13` / `23`.
+>
+> **Mechanism.** `desugar` synthesizes a hidden zero-arg provider `fn` per non-literal default in the
+> DEFINING module (`$def$<file>$<owner>.<param>$` — `$` is unspellable), and an omitting call site
+> calls it. Cross-module reach is a synthetic `Import::From` appended to the caller's imports before
+> the checker, compiler and VM read them; `Obj::Func` already carries `home`, so the body runs in the
+> definer's namespace. **No new `ExprKind`, no new opcode, no VM arm**, and literal defaults keep the
+> old inline clone. The two-pass driver became **one** pass, which is what closed W7-50's cross-task
+> residual (see that entry). Perf A/B vs `925dd0f7`: flat, 1.00–1.05×, since every default in `std/`,
+> `examples/` and `benches/` is a literal.
+>
+> **Five behaviour changes ship with it — all documented in `docs/syntax.md` §*Default + named
+> arguments*, none filed as a gap.** (1) `?` may not propagate OUT of a default (tailored message,
+> replacing the generic `'?' used in a function that returns int`) — and it also **widens**, since
+> `fn f(x: int!str = Ok(getr()?.len()))` was rejected on `b1307258` and now prints `4` / `-1`.
+> (2) A method default declared in a module the caller does not **transitively** import is refused,
+> identically in every import order. (3) A direct cycle (`fn f(x: int = f())`) is a compile error
+> naming the parameter, where it used to expand silently to `f(f(f()))`. (4) A cycle routed through
+> an ordinary fn (`struct S: n: int = mk().n` + `fn mk() -> S`) is check-clean and then a clean
+> `maximum call depth (10000) exceeded`, rc 1, identical on both engines — the same shape as CPython's
+> `RecursionError`. (5) A variadic CALL as a default now collapses, in the pre-variadic slot and the
+> keyword-only tail alike: `fn f(a: int = sum_all(1, 2), ...xs: int, tail: int = sum_all(3, 4))` was
+> **6 type errors** on `b1307258` and now matches CPython byte for byte.
+>
+> **Tests.** `tests/chz/spec/default_scope_chain_test.chz` (10 `test fn`s) plus the multi-file half in
+> `src/vm/tests.rs` — definer's global / own fn / own import / own `import std.math`, a transitive
+> dependency two hops down, a diamond in both import orders, per-call evaluation cross-module, the
+> dependency refusal in both orders, the name-coincidence case, and a readable provider frame in a
+> trace. New golden: **`examples/default_xmod/`**, the corpus's first cross-module default coverage
+> (its absence is why this shipped broken) — `b1307258` cannot even build it.
+>
+> Chezzi suite **504/504 identical** on M:N and `--serial`. Full write-up: `docs/gaps.md` **W7-51**.
+
 > **✅ W7-50 landed 2026-08-13 — the two parser depth constants are RE-DERIVED from a measurement,
 > and the margin is an assertion instead of a prose claim.** `docs/gaps.md`'s **W7-50** is CLOSED.
 > Half (b) shipped first: `editor::semantic_tokens` (and `cmd_ast`'s `{:#?}` walk) now hop onto
@@ -117,16 +163,22 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > necessity — a host SIGABRT and a compile-time refusal are both outside what `recover:` can see),
 > verified to fail on `e1137096` in both profiles.
 >
-> **One residual stays OPEN, and it is why the claim above says "across the interpolation re-parse"
-> and not "globally".** Adversarial review of the fix found it. `desugar`'s `regs` is built once
-> before both passes, so a spliced default is raw AST, and `normalize_call` splices it in the **tail**
-> of the walk — after that node's children were visited. A splice on **pass 2** is never walked and
-> there is no pass 3, so a well-formed interpolated literal inside a default-of-a-default survives as
-> `ExprKind::Str` and is re-parsed downstream with a fresh `Parser`. Measured: `check` rc 0, guard
-> counter **15 995**, real descended tree **~31 986** nodes — **1.03×** the ~33 100 cliff. Latent (no
-> reachable abort) and **pre-existing** (accepted on `e1137096` too). Deferred on ownership: the
-> repair lives in the two-pass driver / `normalize_call`, which **W7-51 is rewriting**. Arm (c) of the
-> test pins the invariant that holds meanwhile — accepted or refused, never a signal kill.
+> **The one residual is now CLOSED, so the bound is GLOBAL and not merely "across the interpolation
+> re-parse".** Adversarial review of the fix had found it: `desugar`'s `regs` was built once before
+> both passes, so a spliced default was raw AST, and `normalize_call` spliced it in the **tail** of
+> the walk — after that node's children were visited. A splice on **pass 2** was never walked and
+> there was no pass 3, so a well-formed interpolated literal inside a default-of-a-default survived as
+> `ExprKind::Str` and was re-parsed downstream with a fresh `Parser`. Measured then: `check` rc 0,
+> guard counter **15 995**, real descended tree **~31 986** nodes — **1.03×** the ~33 100 cliff;
+> latent (no reachable abort) and pre-existing (accepted on `e1137096` too). **W7-51 removed both
+> preconditions** — there is one pass, and a non-literal default is no longer spliced as an
+> expression at all. Re-verified independently on `ed4830b3` (2026-08-13) with a probe on
+> `checker::check_interpolation`'s success arm — the arm that fires exactly when a well-formed `Str`
+> reaches the checker un-converted — both binaries identical but for the probe, on the fixture the
+> residual was recorded with: **`925dd0f7` 1 hit / peak walk depth 15 995; `ed4830b3` 0 hits / peak
+> 15 994**, and **2 hits** with the desugar `Str → Interp` conversion disabled, which is the control
+> proving the zero is a live zero rather than a dead probe. Arm (c) of the test is retained as
+> defence in depth — accepted or refused, never a signal kill.
 >
 > Review also caught a real 2-node over-rejection in the first cut: the `Str → Interp` arm re-entered
 > through the depth guard on the SAME node, charging an interpolation two AST levels, which stopped a
@@ -134,7 +186,8 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > pinned by a FIXED-number test arm — the cap-relative arm had ~97 nodes of slack and could not see a
 > 2-node narrowing.
 >
-> Chezzi suite **494/494 identical** on M:N and `--serial`. Full write-up: `docs/gaps.md` **W7-50**.
+> Chezzi suite **494/494 identical** on M:N and `--serial` at the time (504/504 as of W7-51). Full
+> write-up: `docs/gaps.md` **W7-50**.
 
 > **✅ W7-55 landed 2026-08-12, redesigned 2026-08-13 — the `Eq` walk is now bounded by a CUMULATIVE
 > NODE BUDGET over the in-progress path (`EQ_BOUNDS_MAX_NODES = 50 000`), and the growth CLASSIFIER

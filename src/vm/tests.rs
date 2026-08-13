@@ -5689,6 +5689,132 @@ fn a_cross_module_default_may_call_through_the_definers_import() {
     assert_eq!(vo, io, "serial vs M:N divergence");
 }
 
+/// W7-51 — a default that calls through the definer's own `import std.math`. The synthetic edge the
+/// caller gains points at the definer, never at the definer's imports, so a NATIVE module in the
+/// definer's namespace has to work with no extra machinery: `math` is licensed for `g` because `g`
+/// imports it, and the provider body runs with `home == g`. `b1307258`: `type error (line 2,
+/// col 17): unknown name 'math'` — main never imported `std.math`, and the clone landed in main.
+#[test]
+fn a_cross_module_default_may_call_through_the_definers_std_import() {
+    let dir = std::env::temp_dir().join(format!("chezzi_w751_stdimport_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("g.chz"),
+        "import std.math\nfn f(x: float = math.sqrt(16)) -> float:\n    return x\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.chz");
+    std::fs::write(&entry, "import g\nprint(g.f())\nprint(g.f(1.5))\n").unwrap();
+    let graph = crate::resolver::build_graph(&entry).expect("resolve");
+    if let Err(errs) = crate::checker::check_graph(&graph) {
+        let _ = std::fs::remove_dir_all(&dir);
+        panic!("program must type-check, got: {errs:?}");
+    }
+    let (vo, _ve, vr, _vc) = run_file(&entry);
+    let (io, _ie, ir, _ic) = run_file_p(&entry);
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(vr.is_ok(), "serial VM faulted: {vr:?}");
+    assert!(ir.is_ok(), "M:N engine faulted: {ir:?}");
+    assert_eq!(vo, "4.0\n1.5\n", "std.math resolves in g, not in main");
+    assert_eq!(vo, io, "serial vs M:N divergence");
+}
+
+/// W7-51 — the definer is a TRANSITIVE dependency: `main` imports `mid`, `mid` imports `deep`, and
+/// the default lives in `deep`. `main` never names `deep`, but reaches its method default through
+/// the name-keyed method path (`mid.make()` returns a `deep.S`), so the dependency rule has to admit
+/// it on the closure rather than on the direct import list — and the synthetic edge `main` gains
+/// points two hops down. `b1307258`: `type error (line 5, col 30): unknown name 'dv'` (the clone
+/// landed in `main`, where `deep`'s helper does not exist). Here: `13`.
+#[test]
+fn a_default_from_a_transitive_dependency_resolves_in_its_definer() {
+    let dir = std::env::temp_dir().join(format!("chezzi_w751_transitive_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("deep.chz"),
+        "fn dv() -> int:\n    return 3\nstruct S:\n    n: int\n    fn mprobe(self, x: int = dv()) -> int:\n        return x + self.n\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("mid.chz"),
+        "import deep\nfn make() -> deep.S:\n    return deep.S(10)\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.chz");
+    std::fs::write(&entry, "import mid\nprint(mid.make().mprobe())\n").unwrap();
+    let graph = crate::resolver::build_graph(&entry).expect("resolve");
+    if let Err(errs) = crate::checker::check_graph(&graph) {
+        let _ = std::fs::remove_dir_all(&dir);
+        panic!("program must type-check, got: {errs:?}");
+    }
+    let (vo, _ve, vr, _vc) = run_file(&entry);
+    let (io, _ie, ir, _ic) = run_file_p(&entry);
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(vr.is_ok(), "serial VM faulted: {vr:?}");
+    assert!(ir.is_ok(), "M:N engine faulted: {ir:?}");
+    assert_eq!(vo, "13\n", "deep's own dv() is 3, plus S.n = 10");
+    assert_eq!(vo, io, "serial vs M:N divergence");
+}
+
+/// W7-51 — a DIAMOND (`main` → {`l`, `r`} → `base`), asserted in BOTH orderings of `main`'s two
+/// import lines. Order-stability is the property the transitive-closure rule bought and the one that
+/// has to stay pinned: the predicate must not read a load-order index, and the two synthetic edges
+/// `main` gains (one per call site, deduped by provider name) must not depend on which sibling was
+/// visited first.
+///
+/// This is also the silent-wrong-value defect at its sharpest: `main` declares its own `K := 900`,
+/// and `b1307258` printed **`910` / `920`** in both orderings — `main`'s `K` plus each maker's `n` —
+/// where `base`'s author wrote `K := 3`. CPython's two-module equivalent prints the definer's value.
+/// Here: `13` / `23`, and `main`'s own `K` is untouched.
+#[test]
+fn a_default_in_a_diamonds_shared_base_is_the_same_in_either_import_order() {
+    for (tag, entry_src) in [
+        (
+            "lfirst",
+            "import l\nimport r\nK := 900\nprint(l.make().mprobe())\nprint(r.make().mprobe())\nprint(K)\n",
+        ),
+        (
+            "rfirst",
+            "import r\nimport l\nK := 900\nprint(l.make().mprobe())\nprint(r.make().mprobe())\nprint(K)\n",
+        ),
+    ] {
+        let dir =
+            std::env::temp_dir().join(format!("chezzi_w751_diamond_{tag}_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("base.chz"),
+            "K := 3\nstruct S:\n    n: int\n    fn mprobe(self, x: int = K) -> int:\n        return x + self.n\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("l.chz"),
+            "import base\nfn make() -> base.S:\n    return base.S(10)\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("r.chz"),
+            "import base\nfn make() -> base.S:\n    return base.S(20)\n",
+        )
+        .unwrap();
+        let entry = dir.join("main.chz");
+        std::fs::write(&entry, entry_src).unwrap();
+        let graph = crate::resolver::build_graph(&entry).expect("resolve");
+        if let Err(errs) = crate::checker::check_graph(&graph) {
+            let _ = std::fs::remove_dir_all(&dir);
+            panic!("[{tag}] program must type-check, got: {errs:?}");
+        }
+        let (vo, _ve, vr, _vc) = run_file(&entry);
+        let (io, _ie, ir, _ic) = run_file_p(&entry);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(vr.is_ok(), "[{tag}] serial VM faulted: {vr:?}");
+        assert!(ir.is_ok(), "[{tag}] M:N engine faulted: {ir:?}");
+        assert_eq!(
+            vo, "13\n23\n900\n",
+            "[{tag}] base's K (3) reaches both call sites; main's K is untouched"
+        );
+        assert_eq!(vo, io, "[{tag}] serial vs M:N divergence");
+    }
+}
+
 /// W7-51 — the cross-module guard is a DEPENDENCY rule, and the property under test is that it is
 /// **order-stable**: both orderings of the entry's two import lines must give the same verdict.
 ///
@@ -9417,6 +9543,27 @@ fn golden_keyword_value_xmod_matches_expected_and_interp() {
     let (mn_out, _e3, mn_res, _) = run_file_parallel(&path, crate::native::HostConfig::default());
     mn_res.expect("keyword_value_xmod should run on the M:N engine");
     assert_eq!(mn_out, expected, "M:N output drifted on keyword_value_xmod");
+}
+
+/// Cross-module DEFAULT golden (W7-51): `examples/default_xmod/main.chz` omits arguments whose
+/// defaults are declared in `config.chz` and spell names — a global, a fn, and `std.math` through
+/// `config`'s own import — that `main` either does not have or deliberately BINDS DIFFERENTLY
+/// (`RETRIES := 99`, `label() -> "main"`). The corpus had zero cross-module default coverage before
+/// this, which is exactly why the defect shipped. `b1307258` cannot even build it (`type error
+/// (line 15, col 25): unknown name 'math'` — the clone landed in `main`); CPython's two-module
+/// equivalent prints the same lines this does.
+#[test]
+fn golden_default_xmod_matches_expected_on_all_engines() {
+    let base = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let path = base.join("examples/default_xmod/main.chz");
+    let expected =
+        std::fs::read_to_string(base.join("examples/default_xmod/main.expected")).unwrap();
+    let (vm_out, _e1, vm_res, _) = run_file(&path);
+    vm_res.expect("default_xmod should run on the serial VM");
+    assert_eq!(vm_out, expected, "serial VM output drifted on default_xmod");
+    let (mn_out, _e2, mn_res, _) = run_file_p(&path);
+    mn_res.expect("default_xmod should run on the M:N engine");
+    assert_eq!(vm_out, mn_out, "serial vs M:N divergence on default_xmod");
 }
 
 /// Chained `elif` in expression position: `examples/expr_else_if.chz` exercises a multi-arm
@@ -17129,9 +17276,11 @@ fn deep_accepted_chains_run_without_stack_overflow() {
     // per level) to ~15 968, deliberately, because 29 940 sat at only 1.11x the ~33 100-node cliff.
     // That ~15 968 held only per-`Parser` until `desugar::Walker::walk_expr` started bounding the
     // composed tree: an interpolated `{…}` fragment is built by a second `Parser` and used to get a
-    // fresh 16 000, so depth summed across nesting levels. One residual is NOT covered even now — an
-    // interpolated literal inside a default argument spliced on `desugar`'s second pass is never
-    // walked, reaching ~31 986 nodes (latent, pre-existing, owned by W7-51; see that method).
+    // fresh 16 000, so depth summed across nesting levels. That bound is UNCONDITIONAL as of W7-51:
+    // the one seam it missed — an interpolated literal inside a default argument spliced on
+    // desugar's second pass, never walked, reaching ~31 986 nodes — needed both a second pass and a
+    // spliced default EXPRESSION, and neither exists now. Re-measured on `ed4830b3` with a probe on
+    // `checker::check_interpolation`'s success arm: `925dd0f7` 1 hit, `ed4830b3` 0.
     // Value is invariant (all `+0`) so the result is deterministic; the point is that
     // walking/compiling/running this depth does not abort. Assign then print separately so the
     // `print(...)` call wrapper doesn't eat into the paren budget. THE PAREN COUNT IS CALIBRATED TO

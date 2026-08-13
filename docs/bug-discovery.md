@@ -344,12 +344,23 @@ that remember to pass it.
 
 **And the second half of that lesson, which the review had to supply: "finished" is a claim to check,
 not a word to use.** The chosen seam is finished for everything the walk *reaches*, and `desugar`'s
-`normalize_call` splices default arguments in the **tail** of the walk, after that node's children
-have already been visited — so a splice performed on the second (last) pass is never walked, and a
-well-formed interpolated literal inside it still reaches the checker and compiler un-converted, at
+`normalize_call` spliced default arguments in the **tail** of the walk, after that node's children
+had already been visited — so a splice performed on the second (last) pass was never walked, and a
+well-formed interpolated literal inside it still reached the checker and compiler un-converted, at
 ~2× the bound. When you enforce on an artifact, enumerate every writer that can still mutate it after
 your check, not just every reader that consumes it. A tail-position mutation in the same walk is the
 easiest one to miss, because it does not look like a second pipeline stage.
+
+**Closed by W7-51, and the way it was closed is the third half of the lesson: delete the writer.**
+That residual needed two things — a second pass, and a spliced default *expression*. W7-51 removed
+both (one pass; a non-literal default is compiled once in its defining module and the call site gets
+a two-node call to it), so the class is gone by construction rather than by a third guard. **Verify a
+"gone by construction" claim with a probe on the mechanism, plus a negative control**: a probe on
+`checker::check_interpolation`'s success arm fires exactly when a well-formed `Str` reaches the
+checker un-converted, and on the fixture the residual was recorded with it read **1 hit on
+`925dd0f7`, 0 on `ed4830b3`** — with **2 hits** on the same `ed4830b3` build once the desugar
+`Str → Interp` conversion was disabled, which is what makes the zero evidence instead of an absence.
+A zero from an unfalsified probe proves nothing about the code and everything about the probe.
 
 Status: the `0..2000` gate is green, and unattended sweeps of `0..100000` (release, overflow-checks
 OFF) and `0..20000` (debug, overflow-checks ON) found **zero** panics or signal crashes — the

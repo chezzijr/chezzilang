@@ -704,9 +704,28 @@ its own line) is the normal use and stays legal. Returning `nil` from a function
 
 **Default + named arguments.** A free function (or a struct constructor) may give trailing
 parameters a **default** — any expression that does **not** reference another parameter (`= 10`,
-`= 1 + 2`, `= GLOBAL * 2`, `= compute()`; a call runs once per omitting call). Defaults are evaluated
-at the call site, so a param-referencing default (`y: int = x + 1`) is rejected. Callers may also
-pass arguments **by name**:
+`= 1 + 2`, `= GLOBAL * 2`, `= compute()`).
+
+A default is **evaluated once per omitting call**, and it is **resolved and evaluated in the module
+that DECLARES it** — never in the caller's. Those are two separate rules and Chezzi follows a
+different ancestor on each:
+
+* **Scope — same as Python, Ruby and Kotlin.** The names a default expression sees are the definer's:
+  its own module globals, its own functions, its own imports. A caller that happens to declare a
+  same-named global (or a local that shadows one) cannot reach in. So `g.chz` holding `K := 7` +
+  `fn f(x: int = K)`, imported by a `main.chz` that declares its own `K := 99`, prints **`7`** —
+  exactly what the two-module Python equivalent prints.
+* **Timing — a deliberate divergence from Python.** Python evaluates a default **once, at `def`
+  time**, and shares that one object with every call, which is the classic mutable-default footgun
+  (`def f(xs=[])` accumulates). Chezzi re-evaluates on **every omitting call**, so `f(n: int = bump())`
+  returns `1`, `2`, `3` on three calls, and `f(xs: List[int] = [])` hands each call a fresh list.
+  Passing the argument explicitly does not evaluate the default at all.
+
+Because parameters are not in scope in the declaring module's top level, a param-referencing default
+(`y: int = x + 1`) is rejected: *"default value cannot reference parameter 'x' (a default is evaluated
+on its own, where parameters are not in scope)"* — CPython raises `NameError` on the same shape.
+
+Callers may also pass arguments **by name**:
 
 ```chezzi
 fn greet(name: str, greeting: str = "Hello", punct: str = "!") -> str:
@@ -730,9 +749,15 @@ Rules: a parameter with a default may not be followed by a required one; at a ca
 arguments must precede named ones (`f(y=2, 1)` is an error); each parameter may be supplied at most
 once. Named arguments are **reordered into parameter-declaration order**, so a side-effecting named
 argument evaluates in parameter order, not source-text order (`f(y=g(), x=h())` runs `h()` before
-`g()`). Defaults — being constant literals — have no observable order. Scope: free functions (own
-module, `from`-imported, or module-qualified `mod.f(...)`), struct constructors, **and struct
-methods** (`p.greet(punct="?")`, `p.scale()` filling a default). Because a method's receiver type is
+`g()`). A default is an arbitrary expression, so it **does** have an observable order, and it is the
+same one: **every** filled slot evaluates in **parameter-declaration order**, whether its value came
+from a positional argument, a named one, or a default, and a default runs **once per omitting call**.
+Measured — `fn f(x = p("d-x"), y = p("d-y"), z = p("d-z"))` called as `f(z=p("arg-z"), x=p("arg-x"))`
+prints `arg-x`, `d-y`, `arg-z`, on both engines. Scope: free functions
+(own module, `from`-imported, or module-qualified `mod.f(...)`), struct constructors, **and struct
+methods** (`p.greet(punct="?")`, `p.scale()` filling a default) — a method's default is compiled in
+its declaring module like any other, subject to the dependency rule in *"Where a default is
+compiled"* below. Because a method's receiver type is
 unknown to the desugar pass, methods are resolved by name: if two structs define a same-named method
 with **different** parameters, a named call to it is rejected as ambiguous and — since the binding
 can't be chosen safely — its **defaults aren't filled** either (the call then fails the arity check),
@@ -750,6 +775,44 @@ supported on **closures** or on **enum variant constructors** — note this is t
 be any expression that doesn't
 reference another parameter — a literal, a global, arithmetic, or a call; only param-referencing
 defaults are rejected.)
+
+**Where a default is compiled, and the four rules that follow from it.** A non-literal default is
+compiled **once**, as a hidden zero-arg function in the module that declares it; an omitting call site
+calls that function. (A self-contained literal — `= 1`, `= -1`, `= 1 + 2`, `= None`, `= []`, a
+brace-free string — is still copied inline, which costs no call and behaves identically.) Four
+consequences are worth writing down, because each is a rule you can hit:
+
+1. **`?` cannot propagate *out of* a default.** `fn f(x: int = getr()?.len()) -> int` is a compile
+   error: *"a default expression cannot propagate with `?` — defaults are evaluated in their defining
+   module, which has no caller to propagate to; use `??` or return an Option"*. An error escaping into
+   the *caller* from an expression owned by the *definer* is exactly the coupling this design removes.
+   It also **widens**: a `Result`-typed parameter whose default propagates *inside* its own scope now
+   works, where it used to be rejected — `fn f(x: int!str = Ok(getr()?.len()))` compiles, and returns
+   `4` on the `Ok` path and the `Err` unchanged on the other. Option-mode `?.` and `??` never
+   propagated, so both are unaffected (`x: Option[int] = geto()?.len()`, `x: int = geto() ?? 0`).
+2. **A default is reachable only from a module that depends on the definer.** Because a method call is
+   resolved by *name* before types are known, a method default declared in module `a` can be reached
+   from a module `z` that never imports `a` (via a protocol-typed parameter, say). That is refused:
+   *"cannot use the default for 'x' of 'S.mprobe' here: it is declared in module 'a', which module 'z'
+   does not import (directly or transitively), so the default cannot be evaluated in its own scope —
+   pass the argument explicitly"*. It is a **dependency** rule, not a load-order one: the verdict is
+   the same however a third module orders its `import` lines. Add `import a` to `z` and the same call
+   is legal, and reads `a`'s value. (Before this rule the same program printed the *caller's* value —
+   measured `510` where the definer wrote `11` — or, when two unrelated modules happened to agree on a
+   name, the right one by coincidence. Declining beats guessing.)
+3. **A default that needs itself is a compile error.** `fn f(x: int = f())` is refused, naming the
+   parameter: *"the default for 'x' of 'f' is cyclic: evaluating it requires evaluating the default for
+   'x' of 'f' again"*. Mutual and indirect provider cycles are caught the same way.
+4. **A cycle routed through an ordinary function is a runtime fault, not a compile error.**
+   `struct S: n: int = mk().n` with `fn mk() -> S: return S()` type-checks clean and then faults with
+   `maximum call depth (10000) exceeded (infinite recursion?)`, rc 1, identically on both engines —
+   the same shape as CPython's `RecursionError` on the equivalent program. A documented limit, not a
+   defect: the compile-time check sees provider→provider edges, and this cycle's edge runs through
+   `mk`.
+
+A default may also be a **variadic call** (`fn f(a: int = sum_all(1, 2), ...xs: int, tail: int =
+sum_all(3, 4))`), in the pre-variadic slot and in the keyword-only tail alike; that shape used to be
+rejected and now matches CPython's `def f(a=sum_all(1,2), *xs, tail=sum_all(3,4))` byte for byte.
 
 Built-ins take no named arguments, with **one** exception: **`print`** accepts `sep=` (default `" "`,
 joins the positional args) and `end=` (default `"\n"`, appended after) — both `str` (see `docs/stdlib.md`).

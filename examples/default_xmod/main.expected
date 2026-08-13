@@ -1,0 +1,8 @@
+db retries=3 tag=config
+db retries=99 tag=main
+4.0
+6
+cache/6 tag=config
+cache/6 tag=main
+99
+main

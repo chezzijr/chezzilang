@@ -134,3 +134,110 @@ test fn a_field_and_method_default_resolve_through_their_provider():
     r := Runner("r")
     assert r.go() == 30, "got {r.go()}"
     assert r.go(4) == 4, "got {r.go(4)}"
+
+# --- a chain that runs THROUGH a constructor and THROUGH a method ---------------------------------
+#
+# The depth-3 chain above is fn→fn→fn. This one alternates the kinds of declaration a provider can
+# be synthesized for: a struct FIELD default (`Wrap.inner`) calls a fn whose parameter default is a
+# CONSTRUCTOR call (`Base()`), whose own field default is a literal — and a METHOD default takes the
+# same route. Measured on `b1307258`: 3 type errors, all `'Base' expects 1 argument(s), got 0` (the
+# nested ctor call in a spliced default was never normalized). Here, and in CPython: 5 / 10 / 3.
+
+struct Base:
+    v: int = 5
+
+fn from_base(b: Base = Base()) -> int:
+    return b.v
+
+struct Wrap:
+    inner: int = from_base()
+
+    fn peek(self, n: int = from_base()) -> int:
+        return n + self.inner
+
+test fn a_default_chain_runs_through_a_ctor_and_a_method():
+    assert Wrap().inner == 5, "field ← fn default ← ctor ← literal — got {Wrap().inner}"
+    assert Wrap().peek() == 10, "the method default takes the same route — got {Wrap().peek()}"
+    assert Wrap(2).peek(1) == 3, "explicit args bypass both — got {Wrap(2).peek(1)}"
+
+# --- a variadic call as a default, in the PRE-SLOT and in the keyword-only TAIL -------------------
+#
+# A v1 limit rejected a variadic CALL used as a default (`x: int = sum_all(1, 2, 3)`): the surplus-
+# positional collapse was gated to desugar's first pass while the default was spliced raw after it,
+# so the spliced call never collapsed. A provider body is walked exactly once, like any other body,
+# so the collapse fires normally — and exactly once, which is what the `[8, 7]` below pins (a second
+# collapse would nest the List).
+#
+# Measured on `b1307258`: **6 type errors** (`'sum_all' expects 1 argument(s), got 2` +
+# `argument 1 of 'sum_all': expected List[int], found int`, once for the pre-slot and twice for the
+# tail). Here — and byte for byte in CPython 3.14 with `def f(a=sum_all(1,2), *xs, tail=sum_all(3,4))`
+# — `3|[]|7`, `9|[8, 7]|7`, `9|[8, 7]|1`.
+
+fn sum_all(...xs: int) -> int:
+    total := 0
+    for x in xs:
+        total = total + x
+    return total
+
+fn slots(a: int = sum_all(1, 2), ...xs: int, tail: int = sum_all(3, 4)) -> str:
+    return "{a}|{xs}|{tail}"
+
+test fn a_variadic_call_default_fills_a_pre_slot_and_a_keyword_only_tail():
+    assert slots() == "3|[]|7", "got {slots()}"
+    assert slots(9, 8, 7) == "9|[8, 7]|7", "the collapse must fire ONCE — got {slots(9, 8, 7)}"
+    assert slots(9, 8, 7, tail=1) == "9|[8, 7]|1", "got {slots(9, 8, 7, tail=1)}"
+
+# --- the non-propagating carriers, and the ONE `?` shape that is accepted -------------------------
+#
+# `?` cannot propagate OUT of a default (see the header of `default_splice_keys_test.chz`), but
+# neither Option-mode `?.` nor `??` propagates, so both still evaluate — and a `?` INSIDE a
+# Result-typed parameter's default is fine, because the provider is declared `-> int!str` and the
+# `?` early-returns within the provider, handing the parameter the `Err`. That accepted half is the
+# widening the narrowing came with, and it is pinned here because a widening is structurally
+# untested by the suite that passed before it. Measured on `b1307258`, and on `e2d9bd4e` before the
+# diagnostic was tailored: `'?' used in a function that returns int, not Result or Option`, 1 error.
+# Here: `4` and `-1`.
+
+fn geto2() -> Option[int]:
+    return Some(3)
+
+fn getr() -> str!str:
+    return Ok("wxyz")
+
+fn coalesced(x: int = geto2() ?? 0) -> int:
+    return x
+
+fn res_param(x: int!str = Ok(getr()?.len())) -> int:
+    match x:
+        Ok(v): return v
+        Err(e): return -1
+
+test fn a_null_coalescing_default_still_evaluates():
+    assert coalesced() == 3, "got {coalesced()}"
+    assert coalesced(9) == 9, "got {coalesced(9)}"
+
+test fn a_result_typed_parameters_default_may_use_try_inside_the_provider():
+    assert res_param() == 4, "the `?` resolves INSIDE the provider — got {res_param()}"
+    e := res_param(Err("no"))
+    assert e == -1, "got {e}"
+    assert res_param(Ok(7)) == 7, "got {res_param(Ok(7))}"
+
+# --- a cycle the compile-time check cannot see ----------------------------------------------------
+#
+# A DIRECT cycle (`fn f(x: int = f())`) is a compile error naming the parameter (pinned in
+# `src/desugar/mod.rs`). A cycle routed through an ORDINARY function is invisible to that check —
+# the provider's only outgoing edge is `mk`, not another provider — so it is check-clean and then a
+# clean runtime fault, the same shape as CPython's `RecursionError` on the equivalent program. A
+# documented limit, not a defect.
+
+struct Cyc:
+    n: int = mk_cyc().n
+
+fn mk_cyc() -> Cyc:
+    return Cyc()
+
+test fn a_default_cycle_routed_through_an_ordinary_fn_faults_cleanly():
+    r := recover: Cyc().n
+    match r:
+        Ok(v): assert false, "expected a fault, got {v}"
+        Err(e): assert e.message().contains("maximum call depth"), "got {e.message()}"

@@ -79,9 +79,12 @@ mod conformance;
 /// another one, so the budgets used to compose (measured: three nested levels type-checked clean at
 /// ~46 000 nodes and SIGABRTed debug `chezzi run`). `desugar::Walker::walk_expr` re-enters its own
 /// walk on a parsed fragment's subtree, so its recursion depth is the composed tree's depth, and it
-/// refuses at `MAX_AST_DEPTH` too. One residual is NOT covered — an interpolated literal inside a
-/// default argument spliced on `desugar`'s second pass is never walked, reaching ~31 986 nodes
-/// (latent, pre-existing, owned by W7-51). See that method and `parser::MAX_AST_DEPTH`.
+/// refuses at `MAX_AST_DEPTH` too. That is now unconditional: the one seam it did not cover — an
+/// interpolated literal inside a default argument spliced on `desugar`'s *second* pass, never
+/// walked, reaching ~31 986 nodes — closed with W7-51, which deleted both the second pass and the
+/// spliced default *expression*. Re-measured on `ed4830b3` with a probe on
+/// `checker::check_interpolation`'s success arm: `925dd0f7` 1 hit / peak walk depth 15 995,
+/// `ed4830b3` **0 hits** / peak 15 994. See that method and `parser::MAX_AST_DEPTH`.
 pub const FRONTEND_STACK_BYTES: usize = 1024 * 1024 * 1024;
 
 /// Run a front-end pass on a dedicated [`FRONTEND_STACK_BYTES`] stack; see that constant for why.

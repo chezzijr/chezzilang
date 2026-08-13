@@ -171,8 +171,11 @@
 
 # A parameter may carry a default value (`x: int = expr`). Free `fn` declarations and struct methods
 # accept it; closures and protocol signatures reject it. The default may be any expression that does
-# not reference another parameter (a desugar-pass rule). These are rules the permissive grammar does
-# not model.
+# not reference another parameter (a desugar-pass rule). A NON-LITERAL default is compiled once, as a
+# hidden zero-arg fn in the module that DECLARES it, and evaluated in that module's scope on every
+# omitting call; the desugar-pass rules that follow are `?` may not propagate out of it, the default
+# must be reachable from a module that transitively imports the definer, and a default that needs its
+# own value is a cycle error. These are rules the permissive grammar does not model.
 # An optional trailing comma before the closing `)` is permitted (`fn g(a, b,)`).
 <params> ::= <param> | <param> "COMMA" | <param> "COMMA" <params>
 # A leading `...` marks a VARIADIC param (`fn f(...xs: T)`) — it collects surplus trailing positional
@@ -199,8 +202,10 @@
 <structBody>    ::= <structMembers> | "PASS" "NEWLINE"
 <structMembers> ::= <structMember> | <structMember> <structMembers>
 <structMember>  ::= <field> | <fnDecl> | <testFnDecl>
-# A field may carry a constant-literal default (`port: int = 8080`), used to fill omitted args in a
-# constructor call. Const-ness and the "no required field after a default" rule are parser-level.
+# A field may carry a default (`port: int = 8080`), used to fill omitted args in a constructor call.
+# It is any expression, not only a constant literal, and it obeys the same defining-module rules as a
+# parameter default (see <params> above). The "no required field after a default" rule is
+# parser-level.
 <field>         ::= "IDENT" "COLON" <type> "NEWLINE"
                   | "IDENT" "COLON" <type> "ASSIGN" <expr> "NEWLINE"
 

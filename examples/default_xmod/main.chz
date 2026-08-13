@@ -1,0 +1,31 @@
+# examples/default_xmod/main.chz — a default is compiled ONCE, in the module that declares it, and
+# evaluated in THAT module's scope. This file deliberately declares its own `RETRIES` and its own
+# `label()` with different values: neither can reach into `config`'s defaults.
+#
+# Before W7-51 a default was cloned into whichever module omitted the argument, so every line below
+# printed main's values (or failed to compile when main had no matching name at all). CPython's
+# two-module equivalent prints what this file prints.
+
+import config
+import Pool from config
+
+RETRIES := 99
+
+fn label() -> str:
+    return "main"
+
+# Omitted → config's own RETRIES (3) and config's own label() ("config").
+print(config.connect("db"))
+# Explicit args still win, and they are read in MAIN's scope — that is the difference between
+# passing a value and omitting one.
+print(config.connect("db", RETRIES, label()))
+# A default that calls through the DEFINER's `import std.math`; main never imports it.
+print(config.window())
+# A struct field default and a method default take the same route, through a `from` import.
+p := Pool("cache")
+print(p.size)
+print(p.describe())
+print(p.describe(label()))
+# main's own globals are untouched by any of it.
+print(RETRIES)
+print(label())

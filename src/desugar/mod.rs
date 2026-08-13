@@ -410,10 +410,16 @@ fn import_closures(
                 t < i,
                 "graph.modules must be in dependency order (deps first): module {i} imports {t}"
             );
+            // Both statements sit INSIDE the guard, so the same event degrades the same way: if the
+            // resolver ever stopped producing dependency order, this target is simply absent from
+            // the closure and `splice_default` refuses the default, instead of admitting an edge
+            // whose closure was never read — which `Vm::bind_import` would meet as an index panic on
+            // `module_objs[target_idx]` (`src/vm/exec.rs`) in a RELEASE build, where the
+            // `debug_assert` above is compiled out.
             if t < i {
                 set.extend(out[t].iter().cloned());
+                set.insert(imp.target.clone());
             }
-            set.insert(imp.target.clone());
         }
         out.push(set);
     }
@@ -630,8 +636,9 @@ fn synthesize_providers_into(stmts: &mut Vec<Stmt>, id: &ModuleId, file: u32) {
 /// `f(f(f()))` (the two-pass driver's fixed point); under providers it would be unbounded runtime
 /// recursion. Every provider body is scanned AFTER normalization, so a provider→provider edge is
 /// literally a `$def$…` identifier in the body; a back edge is a clear compile error.
-/// Cross-module edges cannot close a cycle (the splice only imports a load-order ANCESTOR, and
-/// imports are acyclic), but the DFS spans the graph anyway rather than relying on that.
+/// Cross-module edges cannot close a cycle (the splice only reaches a module in the caller's own
+/// transitive import closure, and imports are acyclic), but the DFS spans the graph anyway rather
+/// than relying on that.
 fn check_provider_cycles(graph: &ModuleGraph) -> Result<(), ResolveError> {
     let mut edges: HashMap<String, (Vec<String>, Span)> = HashMap::new();
     for m in &graph.modules {
@@ -976,9 +983,17 @@ fn walk_idents(e: &Expr, f: &mut impl FnMut(&str)) {
 }
 
 /// [`walk_idents`] plus every **type** an expression spells: a turbofish's arguments
-/// (`mk[T]()`, `obj?.m[T]()`) and a type-application head's. Only [`expr_mentions_type_param`]
-/// passes a non-empty `tf`; every other caller goes through [`walk_idents`], whose `tf` is a no-op,
-/// so no existing name-set check widened when the type channel was added.
+/// (`mk[T]()`, `obj?.m[T]()`), a type-application head's, a `decode[T](…)` target, and a closure's
+/// parameter and return annotations. Only [`expr_mentions_type_param`] passes a non-empty `tf`;
+/// every other caller goes through [`walk_idents`], whose `tf` is a no-op, so no existing name-set
+/// check widened when the type channel was added.
+///
+/// The `decode`/closure arms were added after the rest: without them `dflt_for`'s unbound-`T`
+/// carve-out missed both shapes and gave them a provider whose body spells a type parameter that is
+/// out of scope there, which is exactly the cascade the carve-out exists to prevent. Measured on
+/// `fn g[T](x: int = json.decode[T](src()).is_ok().to_int())`: `b1307258` 1 error, before this arm
+/// **3**, after it 1 again; on `fn h[T](x: int = apply(fn(a: T) -> int: 0))`: 1, **2**, 1. Both
+/// shapes were, and stay, rejected — the arms buy the diagnostic, not the verdict.
 fn walk_idents_and_types(e: &Expr, f: &mut impl FnMut(&str), tf: &mut impl FnMut(&Type)) {
     match &e.kind {
         ExprKind::Ident(n) => f(n),
@@ -1072,11 +1087,24 @@ fn walk_idents_and_types(e: &Expr, f: &mut impl FnMut(&str), tf: &mut impl FnMut
             walk_idents_and_types(lhs, f, tf);
             walk_idents_and_types(rhs, f, tf);
         }
-        ExprKind::DecodeCall { obj, arg, .. } => {
+        ExprKind::DecodeCall { obj, ty, arg } => {
             walk_idents_and_types(obj, f, tf);
+            tf(ty);
             walk_idents_and_types(arg, f, tf);
         }
-        ExprKind::Closure { body, .. } => walk_idents_and_types(body, f, tf),
+        // A closure's parameter NAMES are bindings, not references, so only their annotations and
+        // the return annotation go down the type channel; `f` is untouched.
+        ExprKind::Closure { params, ret, body } => {
+            for p in params {
+                if let Some(t) = &p.ty {
+                    tf(t);
+                }
+            }
+            if let Some(t) = ret {
+                tf(t);
+            }
+            walk_idents_and_types(body, f, tf);
+        }
         ExprKind::Match { scrutinee, arms } => {
             walk_idents_and_types(scrutinee, f, tf);
             arms.iter().for_each(|a| {

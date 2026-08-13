@@ -1,0 +1,23 @@
+# examples/default_xmod/config.chz — the module that DECLARES the defaults. Every name a default
+# below spells (`RETRIES`, `label()`, `math.sqrt`) is resolved HERE, in this module's scope, no
+# matter which module omits the argument.
+
+import std.math
+
+RETRIES := 3
+
+fn label() -> str:
+    return "config"
+
+fn connect(host: str, retries: int = RETRIES, tag: str = label()) -> str:
+    return "{host} retries={retries} tag={tag}"
+
+fn window(size: float = math.sqrt(16)) -> float:
+    return size
+
+struct Pool:
+    name: str
+    size: int = RETRIES * 2
+
+    fn describe(self, tag: str = label()) -> str:
+        return "{self.name}/{self.size} tag={tag}"

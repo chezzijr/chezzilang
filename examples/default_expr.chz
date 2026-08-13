@@ -1,7 +1,8 @@
 # examples/default_expr.chz — non-constant default expressions. A default may be any expression that
 # does NOT reference another parameter/field: a computed constant, a global, or a function call.
-# (Defaults are evaluated at the omitting call site, so param-referencing defaults like `y = x + 1`
-# are rejected.) Function calls in defaults run once per omitting call.
+# A default is evaluated ONCE PER OMITTING CALL, in the MODULE THAT DECLARES IT — so param-referencing
+# defaults like `y = x + 1` are rejected (parameters are not in scope there), and a caller's
+# same-named global cannot reach in. The cross-module half is `examples/default_xmod/`.
 
 DEFAULT_CAP := 8
 

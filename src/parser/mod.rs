@@ -108,9 +108,8 @@ pub const MAX_DEPTH: usize = 512;
 /// pins breadth, composition, and the double fold above.
 ///
 /// **Everything above holds across the interpolation re-parse only because that took a SECOND
-/// enforcement point** — see the residual below for the one splice seam it still does not cover. On
-/// its own, everything above is enforced by the `Parser` that builds a tree, so it bounds *one
-/// parse*. An interpolated `{…}` fragment is built by a **different** `Parser`:
+/// enforcement point.** On its own, everything above is enforced by the `Parser` that builds a tree,
+/// so it bounds *one parse*. An interpolated `{…}` fragment is built by a **different** `Parser`:
 /// `interpolation::parse_expr_str` re-lexes the fragment text and calls [`parse_expr`], whose
 /// `depth`/`fold_depth` start at zero. Until W7-50
 /// task 3b the budgets therefore **composed** — one fresh 16 000 per level of
@@ -128,11 +127,16 @@ pub const MAX_DEPTH: usize = 512;
 ///
 /// So the ~15 968-node worst case and its 2.07× margin above hold across the interpolation re-parse,
 /// not just within a single `parse` call: measured, total accepted depth is ~16 000 at one, two,
-/// three and four nesting levels alike, where it used to be L × 16 000. **One residual keeps this
-/// from being unqualified**: a default argument spliced in on `desugar`'s *second* pass is never
-/// walked, so a well-formed interpolated literal inside one still reaches the checker and compiler
-/// un-converted and doubles the reachable depth to ~31 986 (latent, pre-existing, and owned by the
-/// two-pass driver W7-51 is rewriting — see `desugar::Walker::walk_expr` and `docs/gaps.md` W7-50).
+/// three and four nesting levels alike, where it used to be L × 16 000. **That is unconditional as
+/// of W7-51.** The one residual that used to qualify it — a default argument spliced in on
+/// `desugar`'s *second* pass, never walked, so a well-formed interpolated literal inside one reached
+/// the checker and compiler un-converted at ~31 986 nodes — is gone by construction: there is no
+/// second pass, and a non-literal default is no longer spliced as an *expression* at all (it is
+/// compiled once, in its defining module, and the call site gets a two-node call). Re-measured with
+/// a probe on `checker::check_interpolation`'s success arm, both binaries identical but for the
+/// probe, on the fixture the residual was recorded with: `925dd0f7` **1 hit** at peak walk depth
+/// 15 995, `ed4830b3` **0 hits** at 15 994 — and 2 hits with the desugar conversion disabled, so the
+/// zero is a live zero (see `desugar::Walker::walk_expr` and `docs/gaps.md` W7-50).
 ///
 /// The five bisected shapes are identical before and after — but that is not "non-interpolated
 /// programs are unaffected": a default argument spliced by `normalize_call` composes with the
@@ -1245,10 +1249,13 @@ impl Parser {
     }
 
     /// Comma-separated `name[: Type]` until (but not consuming) the closing `)`.
-    /// Parse a parameter list. `allow_defaults` is true only for free `fn` declarations — closures,
-    /// methods, and protocol signatures reject `= default`. A defaulted param may not be followed by
+    /// Parse a parameter list. `allow_defaults` is true for free `fn` declarations, for struct /
+    /// enum / native-struct methods (every `parse_fn` / `parse_test_fn` caller passes `true`) and
+    /// for `native fn` decls; closures, `extern` fns and protocol signatures pass `false` and reject
+    /// `= default`. A defaulted param may not be followed by
     /// a required (non-defaulted) one. A default may be any expression; the desugar pass rejects one
-    /// that references another parameter (defaults are evaluated at the call site).
+    /// that references another parameter (a non-literal default is compiled as a zero-arg fn in its
+    /// DEFINING module, where no parameter is in scope).
     fn parse_params(&mut self, allow_defaults: bool) -> PResult<Vec<Param>> {
         let mut params = Vec::new();
         let mut seen_default = false;
