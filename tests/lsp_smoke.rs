@@ -275,6 +275,15 @@ fn extract_data_array(msg: &str) -> Vec<u32> {
         .collect()
 }
 
+/// Minimal JSON string escaping for embedding source text in a hand-written JSON-RPC payload above:
+/// this fixture only ever contains `"`, `\`, and printable ASCII, so a full JSON string encoder is
+/// unneeded.
+fn escape_json_string(s: &str) -> String {
+    s.replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n")
+}
+
 #[test]
 fn semantic_tokens_full_round_trip() {
     let (mut stdin, rx, _guard, init_resp) = start_server();
@@ -364,6 +373,12 @@ fn semantic_tokens_full_deep_buffer_round_trip() {
         match rx.recv_timeout(Duration::from_secs(5)) {
             Ok(msg) => {
                 if msg.contains("\"id\":2") {
+                    // Require a `data` field, not just any id-2 response — a JSON-RPC `error` object
+                    // for id 2 would otherwise also match and pass.
+                    assert!(
+                        msg.contains("\"data\""),
+                        "expected a semanticTokens/full result (with \"data\"), got an error response: {msg}"
+                    );
                     saw_response = true;
                     break;
                 }
@@ -375,15 +390,6 @@ fn semantic_tokens_full_deep_buffer_round_trip() {
         saw_response,
         "never received a semanticTokens/full response for the deep buffer (id 2) — server likely crashed"
     );
-}
-
-/// Minimal JSON string escaping for embedding source text in a hand-written JSON-RPC payload above:
-/// this fixture only ever contains `"`, `\`, and printable ASCII, so a full JSON string encoder is
-/// unneeded.
-fn escape_json_string(s: &str) -> String {
-    s.replace('\\', "\\\\")
-        .replace('"', "\\\"")
-        .replace('\n', "\\n")
 }
 
 #[test]

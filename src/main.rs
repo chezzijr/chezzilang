@@ -133,19 +133,21 @@ fn cmd_ast(path: Option<&String>) -> ExitCode {
     // Lex + parse + the `{:#?}` Debug walk of the whole AST on the dedicated front-end stack: the
     // Debug walk recurses once per AST node, and a deep-but-valid buffer (left-leaning chains the
     // parser's recursive MAX_DEPTH guard never sees) can overflow a caller stack — see
-    // `chezzi::on_frontend_stack`. Only the pipeline moves inside the closure; printing and the
-    // exit-code mapping stay on the main thread so stdout/stderr ordering is unchanged.
-    let result: Result<String, String> = chezzi::on_frontend_stack(move || {
+    // `chezzi::on_frontend_stack`. `println!` runs INSIDE the closure so it keeps streaming through
+    // stdout's `LineWriter` as the Debug walk produces it; building a `String` first and printing it
+    // outside would materialise the whole render up front (`{:#?}` indentation is quadratic in depth)
+    // before the first byte reaches stdout. Only the exit-code mapping stays on the main thread. A
+    // broken-pipe panic from `println!` still unwinds through `on_frontend_stack`'s `resume_unwind`
+    // onto this thread with the same message and exit code as before.
+    let result: Result<(), String> = chezzi::on_frontend_stack(move || {
         let tokens = lexer::tokenize(&source).map_err(|e| e.to_string())?;
         let module = parser::parse(tokens).map_err(|e| e.to_string())?;
-        Ok(format!("{module:#?}"))
+        println!("{module:#?}");
+        Ok(())
     });
 
     match result {
-        Ok(rendered) => {
-            println!("{rendered}");
-            ExitCode::SUCCESS
-        }
+        Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("{e}");
             ExitCode::FAILURE
