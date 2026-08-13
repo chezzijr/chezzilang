@@ -318,8 +318,16 @@ fn f():
   `fn(a: int) -> int` is rejected, because a call compiled to omit the argument would hand the deleted
   function's default to the new one. The other direction — the new binding accepting *more* omissions —
   keeps every existing call valid and is allowed.
-- **What the rule does NOT reach yet** (open, filed as `W7-42r` in `docs/gaps.md` — the retype is
-  check-clean and shows up at runtime): a forward read of a *hoisted* import.
+- **Reading an imported name *above* its own `import` is an error.** Imports are hoisted, so the name
+  is bound from line 1 whatever line the `import` sits on — which let a closure written above it be
+  typed against the import and then be refilled by a later `let` (`f := fn() -> str: x` / `x := 1` /
+  `import COUNT as x from lib.st` checked clean and printed `1` out of a `fn() -> str`). So the read
+  itself is rejected: *"'x' is used before its `import` on line 3"* — move the `import` above the line
+  that uses it. This also rejects `print(COUNT)` above `import COUNT from lib`, which the hoist makes
+  technically work, because both ancestors refuse it (CPython raises `NameError`, Go will not even
+  parse an `import` placed after a declaration) and it reads as a use-before-definition. It is a rule
+  about **value** reads only: a *type* name used above its import is fine, and — unlike Go — an
+  `import` may still sit anywhere at top level, as long as nothing above it uses the name it binds.
 
 ### Closure capture — uniformly by reference
 

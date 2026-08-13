@@ -8326,6 +8326,114 @@ fn module_scope_redeclare_not_suppressed_by_an_unrelated_later_import() {
 }
 
 #[test]
+fn value_read_above_its_own_import_rejected() {
+    // W7-42r shape (b). Imports are HOISTED — `check_module` runs `bind_import` for every import
+    // BEFORE the `check_stmt` loop — so an imported name sits in `scopes[0]` from line 1 whatever
+    // line its `import` is on, and a read above the `import` silently resolves to the imported
+    // binding. Measured on the pre-fix release binary: `chezzi check` said "ok: no type errors" and
+    // the program PRINTED `1` out of a closure declared `-> str` (the `x := 1` on line 2 fills the
+    // one slot the hoisted import bound, and the closure on line 1 was typed against the import).
+    // The W7-42 re-declaration rule cannot reach this: its import gate is deliberately one-way
+    // (fires only when the `import` is source-EARLIER), and inverting it would break the sound
+    // `module_scope_redeclare_over_hoisted_import_ok` below. So the forward READ is the error.
+    files_reject(
+        &[
+            ("lib/st.chz", "COUNT := \"sv\"\n"),
+            (
+                "main.chz",
+                "f := fn() -> str: x\nx := 1\nimport COUNT as x from lib.st\nprint(f())\n",
+            ),
+        ],
+        "'x' is used before its `import` on line 3",
+    );
+    // The simple form. This one is TECHNICALLY SOUND in Chezzi today — the hoist means it prints
+    // `sv` — and it is rejected anyway, deliberately, because it reads as a use-before-definition
+    // and BOTH owning ancestors refuse it (measured this session):
+    //   CPython 3.14.6: `print(COUNT)` then `from math import pi as COUNT`
+    //                   -> NameError: name 'COUNT' is not defined
+    //   Go 1.26.5:      a `func` then `import "math"`
+    //                   -> syntax error: imports must appear before other declarations
+    // Do not "fix" this back to accepting it. (Pre-fix binary: "ok: no type errors".)
+    files_reject(
+        &[
+            ("lib/st.chz", "COUNT := \"sv\"\n"),
+            ("main.chz", "print(COUNT)\nimport COUNT from lib.st\n"),
+        ],
+        "'COUNT' is used before its `import` on line 2",
+    );
+    // A whole-module bind is the same read (`Ty::Module`), and it is the shape that actually RAN
+    // wrong pre-fix: `chezzi check` said ok and `chezzi run` printed `m` from a module bound below
+    // the call.
+    files_reject(
+        &[
+            ("lib/st.chz", "fn g() -> str:\n    return \"m\"\n"),
+            ("main.chz", "print(st.g())\nimport lib.st\n"),
+        ],
+        "'st' is used before its `import` on line 2",
+    );
+    // A DEFERRED read — a top-level `fn` body above the import — is rejected too, deliberately. Here
+    // Go is the ancestor of record (it refuses the late `import` outright); CPython would accept this
+    // one, since the body runs later. In a statically-typed language the deferred read is precisely
+    // the unsound one — it is the shape the closure defect above takes — so it is the read's POSITION
+    // that decides, not whether the body runs now or later. (Pre-fix binary: "ok: no type errors".)
+    files_reject(
+        &[
+            ("lib/st.chz", "COUNT := \"sv\"\n"),
+            (
+                "main.chz",
+                "fn body() -> str:\n    return COUNT\nimport COUNT from lib.st\nprint(body())\n",
+            ),
+        ],
+        "'COUNT' is used before its `import` on line 3",
+    );
+}
+
+#[test]
+fn value_read_above_its_own_import_boundaries_ok() {
+    // THE load-bearing neighbour (`module_scope_redeclare_over_hoisted_import_ok`, above) in the
+    // form that pins the "still the import's binding" test: the closure reads `x` AFTER `x := 1`
+    // has handed the name back to this module (a module-scope `declare` clears `imported_values`),
+    // so the read is of the LET's binding and the gate must not fire even though the `import` is
+    // source-later. Same two statements as the rejected program, in the other ORDER.
+    files_ok(&[
+        ("lib/st.chz", "COUNT := \"s\"\n"),
+        (
+            "main.chz",
+            "x := 1\nf := fn() -> int: x\nimport COUNT as x from lib.st\nprint(f())\n",
+        ),
+    ]);
+    // The overwhelmingly normal case: every read BELOW its import.
+    files_ok(&[
+        ("lib/st.chz", "COUNT := \"s\"\n"),
+        ("main.chz", "import COUNT from lib.st\nprint(COUNT)\n"),
+    ]);
+    // …including through an interpolated fragment, which re-lexes with its own spans.
+    files_ok(&[
+        ("lib/st.chz", "COUNT := \"s\"\n"),
+        ("main.chz", "import COUNT from lib.st\nprint(\"{COUNT}\")\n"),
+    ]);
+    // A read above an import of a DIFFERENT name is untouched — it is the name collision that
+    // matters, not the mere presence of a late import.
+    files_ok(&[
+        ("lib/st.chz", "COUNT := \"s\"\n"),
+        (
+            "main.chz",
+            "x := 1\nprint(x)\nimport COUNT as y from lib.st\nprint(y)\n",
+        ),
+    ]);
+    // VALUE reads only: a bare TYPE name resolves through `bare_types`/`resolve_type`, never
+    // `infer_ident`, so a type used above its import stays legal (the shipped
+    // `tests/chz/spec/eq_protocol_test.chz` is the real-world instance).
+    files_ok(&[
+        ("lib/st.chz", "struct P:\n    n: int\n"),
+        (
+            "main.chz",
+            "fn mk() -> P:\n    return P(n=1)\nimport P from lib.st\nprint(mk().n)\n",
+        ),
+    ]);
+}
+
+#[test]
 fn destructuring_module_scope_redeclare_changing_type_rejected() {
     // W7-42r shape (a): the destructuring `let` returns BEFORE both carve-outs, so it re-typed the
     // module slot silently. Measured on the pre-fix release binary: `chezzi check` said "ok: no type

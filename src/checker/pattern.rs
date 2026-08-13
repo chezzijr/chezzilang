@@ -1879,6 +1879,50 @@ impl Checker {
         true
     }
 
+    /// W7-42r shape (b) — reject a VALUE read of an imported name that sits ABOVE that name's own
+    /// `import`. Imports are HOISTED (`check_module` runs `bind_import` for every import before the
+    /// `check_stmt` loop), so the name is in `scopes[0]` from line 1 whatever line the `import` is
+    /// on, and a read above it silently resolves to the imported binding — which a later
+    /// module-scope `let` then refills, handing a closure typed against the import a value of the
+    /// let's type (`f := fn() -> str: x` / `x := 1` / `import COUNT as x from lib.st` printed `1`,
+    /// check-clean). The W7-42 re-declaration rule cannot cover it: its import gate is deliberately
+    /// one-way (source-EARLIER import only), and inverting it would reject the sound
+    /// `module_scope_redeclare_over_hoisted_import_ok`. The forward READ is the error instead.
+    ///
+    /// Deliberately also rejects programs that are TECHNICALLY SOUND today (`print(COUNT)` above
+    /// `import COUNT from lib` works, because of the hoist): it reads as a use-before-definition,
+    /// and both owning ancestors refuse it — CPython raises `NameError`, Go will not even parse an
+    /// `import` after a declaration. Kept narrow on purpose: VALUE reads only (a bare type name
+    /// resolves through `bare_types`/`resolve_type`, never here), and NOT Go's full "imports before
+    /// all code" rule, which would be a grammar change.
+    ///
+    /// "Still the import's binding" is the exact test the W7-42 rule uses (`sig.rs`): a module-scope
+    /// `declare` clears `imported_values` (`setup.rs:1774`), so once a `let` has handed the name
+    /// back to this module the read is that let's, not the import's. "Above its import" is the same
+    /// directional `import_binds` span comparison, in the opposite direction — total for the same
+    /// two reasons (imports are top-level only; no statement separator, so no positional tie).
+    /// Writes need no counterpart: `check_assign` already rejects an assignment to a from-imported
+    /// global at ANY position ("cannot assign to 'x' imported from module …"), and a whole-module
+    /// bind is a `Ty::Module` that no value is assignable to.
+    fn reject_read_above_import(&mut self, name: &str, ty: &Ty, span: Span) {
+        if !(self.imported_values.contains_key(name) || matches!(ty, Ty::Module(_))) {
+            return;
+        }
+        let Some(imp) = self.import_binds.get(name).copied() else {
+            return;
+        };
+        if (span.line, span.col) < (imp.line, imp.col) {
+            self.error(
+                span,
+                format!(
+                    "'{name}' is used before its `import` on line {} (imports are hoisted, so this \
+                     reads the imported binding — move the `import` above this line)",
+                    imp.line
+                ),
+            );
+        }
+    }
+
     pub(super) fn infer_ident(&mut self, name: &str, span: Span) -> Ty {
         // BARE-VALUE position, and the same shadowing rule (`Checker::shadowing_type_param`): a type
         // parameter shadows a same-named FUNCTION or module GLOBAL for the whole body, so `g := foo`
@@ -1894,6 +1938,7 @@ impl Checker {
             );
         }
         if let Some(ty) = self.lookup(name) {
+            self.reject_read_above_import(name, &ty, span);
             // A function-local binding captured by an enclosing `spawn:` task crosses the airlock as
             // a copy; a *non-sendable* one (e.g. a captured closure that's then called) can't, so
             // reading it inside the task is an error — the read-side counterpart to the reassignment
