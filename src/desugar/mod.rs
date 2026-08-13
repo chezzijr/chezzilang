@@ -633,8 +633,9 @@ fn synthesize_providers_into(stmts: &mut Vec<Stmt>, id: &ModuleId, file: u32) {
 }
 
 /// **Provider cycle check** — `fn f(x: int = f())` used to silently expand to a three-deep
-/// `f(f(f()))` (the two-pass driver's fixed point); under providers it would be unbounded runtime
-/// recursion. Every provider body is scanned AFTER normalization, so a provider→provider edge is
+/// `f(f(f()))` (the two-pass driver's fixed point), which the checker then rejected as an arity
+/// cascade (2 × `'f' expects 1 argument(s), got 0`) rather than as the cycle it is; under providers
+/// the expansion would instead be unbounded runtime recursion. Every provider body is scanned AFTER normalization, so a provider→provider edge is
 /// literally a `$def$…` identifier in the body; a back edge is a clear compile error.
 /// Cross-module edges cannot close a cycle (the splice only reaches a module in the caller's own
 /// transitive import closure, and imports are acyclic), but the DFS spans the graph anyway rather
@@ -3250,7 +3251,8 @@ mod tests {
     #[test]
     fn a_self_referencing_default_is_a_cycle_error() {
         // Before W7-51 this silently expanded to a three-deep `f(f(f()))` (the two-pass fixed
-        // point); as a provider it would be unbounded recursion, so it is refused.
+        // point) and was then rejected as an arity cascade, not as a cycle; as a provider it would
+        // be unbounded recursion, so it is refused here, naming the parameter.
         let e = desugar_err("fn f(x: int = f()) -> int:\n    return x\nr := f()\n");
         assert!(
             e.to_string().contains("is cyclic") && e.to_string().contains("'x' of 'f'"),

@@ -32,7 +32,8 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > `fn f(x: int!str = Ok(getr()?.len()))` was rejected on `b1307258` and now prints `4` / `-1`.
 > (2) A method default declared in a module the caller does not **transitively** import is refused,
 > identically in every import order. (3) A direct cycle (`fn f(x: int = f())`) is a compile error
-> naming the parameter, where it used to expand silently to `f(f(f()))`. (4) A cycle routed through
+> naming the parameter, replacing the arity cascade the silent `f(f(f()))` expansion produced (such a
+> program was never accepted — `b1307258` gave 2 `'f' expects 1 argument(s), got 0`). (4) A cycle routed through
 > an ordinary fn (`struct S: n: int = mk().n` + `fn mk() -> S`) is check-clean and then a clean
 > `maximum call depth (10000) exceeded`, rc 1, identical on both engines — the same shape as CPython's
 > `RecursionError`. (5) A variadic CALL as a default now collapses, in the pre-variadic slot and the
