@@ -724,6 +724,10 @@ different ancestor on each:
 Because parameters are not in scope in the declaring module's top level, a param-referencing default
 (`y: int = x + 1`) is rejected: *"default value cannot reference parameter 'x' (a default is evaluated
 on its own, where parameters are not in scope)"* — CPython raises `NameError` on the same shape.
+This includes a reference made from inside an **interpolated fragment** (`x: str = "n={n}"`), which
+used to slip past the check because it runs before `"…{…}…"` is rewritten. Everything else a fragment
+can spell is still fine — a global, a call, arithmetic (`x: str = "{tag()}-{1+2}"` is legal) — so what
+is rejected is the parameter reference, not the interpolation.
 
 Callers may also pass arguments **by name**:
 
