@@ -5689,49 +5689,113 @@ fn a_cross_module_default_may_call_through_the_definers_import() {
     assert_eq!(vo, io, "serial vs M:N divergence");
 }
 
-/// W7-51 — the load-order guard, proven against its own premise rather than just its diagnostic.
+/// W7-51 — the cross-module guard is a DEPENDENCY rule, and the property under test is that it is
+/// **order-stable**: both orderings of the entry's two import lines must give the same verdict.
 ///
 /// `desugar` resolves a METHOD call by method NAME (the receiver type is unknown pre-type), so
-/// `p.mprobe()` in `z` can bind `a`'s spec even though `z` never imports `a`. A provider import edge
-/// there would point at a module the VM has not run yet (`Vm::bind_import` indexes `module_objs`,
-/// pushed per module AS IT RUNS), so it is refused with a clear compile error.
+/// `p.mprobe()` in `z` can bind `a`'s spec even though `z` never imports `a`. A synthetic provider
+/// edge there points at a module `z` does not depend on, so it is refused.
 ///
-/// The premise, MEASURED on `b1307258` rather than assumed: this exact program printed **`510`** —
-/// `z`'s own `av()` (500) plus 10 — because the definer's default was cloned into `z` and resolved
-/// there. `a`'s author wrote `11`. So the refusal replaces a silent wrong value, not a working
-/// program. The neighbour the premise implies — the SAME source with `import a` added to `z`, which
-/// makes `a` a load-order ancestor — is the next test, and it prints `11`.
+/// The premise, MEASURED on `b1307258` (not assumed): this program printed **`510`** in BOTH
+/// orderings — `z`'s own `av()` (500) plus 10 — because the definer's default was cloned into `z`
+/// and resolved there. `a`'s author wrote `11`. But "the refusal replaces a silent wrong value" is
+/// NOT true in general, which is why the property here is order-stability rather than
+/// wrongness-replacement: `a_name_coincidence_default_is_refused_even_though_it_used_to_work` below
+/// gives `z` an `av()` returning `1` as well, and `b1307258` then prints the RIGHT answer. Refusing
+/// is still correct — the value never came from `a`'s scope, and a program that is right only while
+/// two unrelated modules agree on a name is one a rename silently breaks — but the reason is
+/// *correct > silent > wrong*, not "it was broken anyway".
+///
+/// The predicate this replaced read the definer's LOAD-ORDER index. Measured on `e2d9bd4e`, same
+/// three files: `import z` / `import a` → refused; `import a` / `import z` → `11`. A cosmetic
+/// reorder in a third module flipped a compile error, and the half it let through handed `z` an
+/// import edge to a module `z` never imports — falsifying the diagnostic's own premise exactly where
+/// it accepted. Both orderings now refuse.
 #[test]
-fn a_method_default_from_a_sibling_module_is_refused_not_guessed() {
-    let dir = std::env::temp_dir().join(format!("chezzi_w751_sibling_{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    std::fs::write(
-        dir.join("a.chz"),
-        "fn av() -> int:\n    return 1\nstruct S:\n    n: int\n    fn mprobe(self, x: int = av()) -> int:\n        return x + self.n\n",
-    )
-    .unwrap();
-    std::fs::write(
-        dir.join("z.chz"),
-        "protocol HasM:\n    fn mprobe(self, x: int) -> int\nfn av() -> int:\n    return 500\nfn use_it(p: HasM) -> int:\n    return p.mprobe()\n",
-    )
-    .unwrap();
-    let entry = dir.join("main.chz");
-    std::fs::write(&entry, "import z\nimport a\nprint(z.use_it(a.S(10)))\n").unwrap();
-    let err = crate::resolver::build_graph(&entry).expect_err("the sibling edge must be refused");
-    let _ = std::fs::remove_dir_all(&dir);
-    assert!(
-        err.message.contains("a module this one does not depend on"),
-        "expected the load-order refusal, got: {}",
-        err.message
-    );
+fn a_method_default_from_a_sibling_module_is_refused_in_either_import_order() {
+    for (tag, entry_src) in [
+        ("zfirst", "import z\nimport a\nprint(z.use_it(a.S(10)))\n"),
+        ("afirst", "import a\nimport z\nprint(z.use_it(a.S(10)))\n"),
+    ] {
+        let dir =
+            std::env::temp_dir().join(format!("chezzi_w751_sibling_{tag}_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("a.chz"),
+            "fn av() -> int:\n    return 1\nstruct S:\n    n: int\n    fn mprobe(self, x: int = av()) -> int:\n        return x + self.n\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("z.chz"),
+            "protocol HasM:\n    fn mprobe(self, x: int) -> int\nfn av() -> int:\n    return 500\nfn use_it(p: HasM) -> int:\n    return p.mprobe()\n",
+        )
+        .unwrap();
+        let entry = dir.join("main.chz");
+        std::fs::write(&entry, entry_src).unwrap();
+        let err =
+            crate::resolver::build_graph(&entry).expect_err("the sibling edge must be refused");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            err.message.contains("which module 'z' does not import"),
+            "[{tag}] expected the dependency refusal naming both modules, got: {}",
+            err.message
+        );
+    }
 }
 
-/// The neighbour of the test above: add `import a` to `z` and the very same call is legal, because
-/// `a` is now a genuine load-order ancestor. `b1307258` printed `510` here too (z's `av`); the
-/// answer is `11` — `a`'s own `av()` (1) plus 10 — which is what `a`'s author wrote.
+/// The half of the premise the refusal above must NOT claim: give `z` its own `av()` returning the
+/// same `1` that `a`'s does, and `b1307258` prints **`11`** — the CORRECT answer — because the clone
+/// resolved against a name that happened to match. HEAD refuses in both import orders. Recorded so
+/// the justification stays honest: the refusal is *correct > silent > wrong*, not a rescue.
+#[test]
+fn a_name_coincidence_default_is_refused_even_though_it_used_to_work() {
+    for (tag, entry_src) in [
+        ("zfirst", "import z\nimport a\nprint(z.use_it(a.S(10)))\n"),
+        ("afirst", "import a\nimport z\nprint(z.use_it(a.S(10)))\n"),
+    ] {
+        let dir =
+            std::env::temp_dir().join(format!("chezzi_w751_coincide_{tag}_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("a.chz"),
+            "fn av() -> int:\n    return 1\nstruct S:\n    n: int\n    fn mprobe(self, x: int = av()) -> int:\n        return x + self.n\n",
+        )
+        .unwrap();
+        // z's `av` agrees with a's — on `b1307258` the spliced clone read THIS one and still got 11.
+        std::fs::write(
+            dir.join("z.chz"),
+            "protocol HasM:\n    fn mprobe(self, x: int) -> int\nfn av() -> int:\n    return 1\nfn use_it(p: HasM) -> int:\n    return p.mprobe()\n",
+        )
+        .unwrap();
+        let entry = dir.join("main.chz");
+        std::fs::write(&entry, entry_src).unwrap();
+        let err = crate::resolver::build_graph(&entry).expect_err("refused, coincidence or not");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            err.message.contains("which module 'z' does not import"),
+            "[{tag}] got: {}",
+            err.message
+        );
+    }
+}
+
+/// The neighbour of the tests above: add `import a` to `z` and the very same call is legal in BOTH
+/// entry import orders, because `a` is now a genuine dependency of `z`. `b1307258` printed `510`
+/// here too (z's `av`); the answer is `11` — `a`'s own `av()` (1) plus 10 — which is what `a`'s
+/// author wrote. Verified on the release binary in both orders.
 #[test]
 fn a_method_default_from_an_imported_module_resolves_in_that_module() {
-    let dir = std::env::temp_dir().join(format!("chezzi_w751_ancestor_{}", std::process::id()));
+    for (tag, entry_src) in [
+        ("zfirst", "import z\nimport a\nprint(z.use_it(a.S(10)))\n"),
+        ("afirst", "import a\nimport z\nprint(z.use_it(a.S(10)))\n"),
+    ] {
+        a_method_default_from_an_imported_module_case(tag, entry_src);
+    }
+}
+
+fn a_method_default_from_an_imported_module_case(tag: &str, entry_src: &str) {
+    let dir =
+        std::env::temp_dir().join(format!("chezzi_w751_ancestor_{tag}_{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(
         dir.join("a.chz"),
@@ -5744,7 +5808,7 @@ fn a_method_default_from_an_imported_module_resolves_in_that_module() {
     )
     .unwrap();
     let entry = dir.join("main.chz");
-    std::fs::write(&entry, "import z\nimport a\nprint(z.use_it(a.S(10)))\n").unwrap();
+    std::fs::write(&entry, entry_src).unwrap();
     let graph = crate::resolver::build_graph(&entry).expect("resolve");
     if let Err(errs) = crate::checker::check_graph(&graph) {
         let _ = std::fs::remove_dir_all(&dir);
@@ -5755,8 +5819,38 @@ fn a_method_default_from_an_imported_module_resolves_in_that_module() {
     let _ = std::fs::remove_dir_all(&dir);
     assert!(vr.is_ok(), "serial VM faulted: {vr:?}");
     assert!(ir.is_ok(), "M:N engine faulted: {ir:?}");
-    assert_eq!(vo, "11\n", "a's own av() is 1, not z's 500");
-    assert_eq!(vo, io, "serial vs M:N divergence");
+    assert_eq!(vo, "11\n", "[{tag}] a's own av() is 1, not z's 500");
+    assert_eq!(vo, io, "[{tag}] serial vs M:N divergence");
+}
+
+/// W7-51 item 5 — a provider frame in a stack trace is rendered as what it is. Its internal name is
+/// deliberately unspellable (`$def$2$f.x$`), which also makes it unreadable; `desugar::display_fn_name`
+/// turns it back into a phrase at `capture_trace`, so every trace consumer sees the readable form.
+#[test]
+fn a_provider_frame_in_a_trace_is_readable() {
+    let dir = std::env::temp_dir().join(format!("chezzi_w751_trace_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let entry = dir.join("main.chz");
+    std::fs::write(
+        &entry,
+        "fn boom() -> int:\n    return [1][9]\nfn f(x: int = boom()) -> int:\n    return x\nprint(f())\n",
+    )
+    .unwrap();
+    let (_o, _e, res, _c) = run_file(&entry);
+    let (_po, _pe, pres, _pc) = run_file_p(&entry);
+    let _ = std::fs::remove_dir_all(&dir);
+    for (engine, r) in [("serial", res), ("M:N", pres)] {
+        let e = r.expect_err("the default faults");
+        let trace = format_trace(&e.message, e.span, &e.trace);
+        assert!(
+            trace.contains("at <default for 'x' of 'f'>"),
+            "[{engine}] expected a readable provider frame, got:\n{trace}"
+        );
+        assert!(
+            !trace.contains(crate::desugar::PROVIDER_PREFIX),
+            "[{engine}] the internal `$def$` name must not reach a user-visible trace:\n{trace}"
+        );
+    }
 }
 
 /// W7-51 — a cross-module default is still evaluated PER CALL (Chezzi's documented divergence from

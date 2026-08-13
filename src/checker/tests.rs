@@ -20874,14 +20874,89 @@ fn variadic_call_as_param_default_collapses() {
 /// provider is declared `-> <the parameter's type>`).
 #[test]
 fn a_try_inside_a_default_is_rejected_with_the_defining_module_reason() {
+    // Exactly ONE message, the tailored one, whatever the ENCLOSING fn returns. The decl-site copy
+    // of a default is not in that fn's body — it runs in its provider — so validating its `?`
+    // against the enclosing `current_ret` both named a return type that does not describe where the
+    // default runs and duplicated this diagnostic. Measured on `e2d9bd4e`: the `-> int` shape below
+    // emitted TWO errors at one span (the stale `'?' used in a function that returns int` then this
+    // one) while `-> int!str` emitted only this one.
+    for ret in ["int", "int!str"] {
+        let body = if ret == "int" {
+            "return x"
+        } else {
+            "return Ok(x)"
+        };
+        let errs = check_desugared(&format!(
+            "fn getr() -> str!str:\n    return Ok(\"wxyz\")\n\nfn f(x: int = getr()?.len()) -> {ret}:\n    {body}\n\nfn main():\n    print(1)\n"
+        ));
+        let tailored: Vec<_> = errs
+            .iter()
+            .filter(|e| {
+                e.message
+                    .contains("a default expression cannot propagate with `?`")
+            })
+            .collect();
+        assert_eq!(
+            tailored.len(),
+            1,
+            "[-> {ret}] expected exactly one tailored message, got: {errs:?}"
+        );
+        assert_eq!(
+            errs.len(),
+            1,
+            "[-> {ret}] the tailored message must be the ONLY error, got: {errs:?}"
+        );
+    }
+}
+
+/// W7-51 — a struct FIELD default's `?` gets the same single tailored message. The field decl-site
+/// copy is inferred at module level (`current_ret == Nil`, `!in_fn_body`), so it never duplicated;
+/// this pins that the parameter-side fix did not perturb it.
+#[test]
+fn a_try_inside_a_field_default_is_rejected_once() {
     let errs = check_desugared(
-        "fn getr() -> str!str:\n    return Ok(\"wxyz\")\n\nfn f(x: int = getr()?.len()) -> int!str:\n    return Ok(x)\n\nfn main():\n    print(1)\n",
+        "fn getr() -> str!str:\n    return Ok(\"wxyz\")\n\nstruct S:\n    n: int = getr()?.len()\n\nfn main():\n    print(1)\n",
+    );
+    assert_eq!(
+        errs.len(),
+        1,
+        "expected exactly one error for a field default's `?`, got: {errs:?}"
     );
     assert!(
-        errs.iter().any(|e| e
+        errs[0]
             .message
-            .contains("a default expression cannot propagate with `?`")),
-        "expected the defining-module reason, got: {errs:?}"
+            .contains("a default expression cannot propagate with `?`"),
+        "got: {errs:?}"
+    );
+}
+
+/// W7-51 — a default whose EXPRESSION mentions an enclosing type parameter keeps the inline clone.
+/// `dflt_for` used to key only on the parameter's TYPE, so `x: int = mk[T]().n` got a provider
+/// declared `-> int` with `T` unbound and picked up two extra errors at the same span. Measured:
+/// `b1307258` 2 errors, `e2d9bd4e` 4 (`unknown type 'T'` + an undetermined-witness message), here 2.
+/// The shape is rejected either way — this is about the diagnostic being legible.
+#[test]
+fn a_default_expression_mentioning_a_type_param_stays_inline() {
+    let errs = check_desugared(
+        "protocol Default:\n    fn default() -> Self\n\nstruct N:\n    n: int\n    fn default() -> N:\n        return N(0)\n\nfn mk[T: Default]() -> T:\n    return T.default()\n\nfn g[T: Default](x: int = mk[T]().n) -> int:\n    return x\n\nfn main():\n    print(1)\n",
+    );
+    assert_eq!(
+        errs.len(),
+        2,
+        "expected the 2 pre-existing errors, got: {errs:?}"
+    );
+    assert!(
+        !errs.iter().any(|e| e.message.contains("unknown type 'T'")),
+        "a provider must not be synthesized with T unbound, got: {errs:?}"
+    );
+}
+
+/// …and the neighbour that keeps the carve-out from over-firing: a generic fn whose default mentions
+/// NO type parameter still gets a provider, so it still resolves in its defining module.
+#[test]
+fn a_generic_fns_type_param_free_default_still_gets_a_provider() {
+    ok_desugared(
+        "fn sep() -> str:\n    return \",\"\n\nfn join_all[T](xs: List[T], s: str = sep()) -> str:\n    return s\n\nfn main():\n    print(join_all([1, 2]))\n",
     );
 }
 

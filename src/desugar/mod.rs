@@ -44,8 +44,24 @@ fn provider_name(file: u32, owner: &str, param: &str) -> String {
     format!("{PROVIDER_PREFIX}{file}${owner}.{param}$")
 }
 
-/// Decode a provider name back into a human phrase for a diagnostic (`parameter 'x' of 'f'`).
-/// Total: an unparseable name (impossible for a name [`provider_name`] built) degrades to itself.
+/// Render a compiled function's name for a user-visible message — a stack-trace frame, chiefly.
+/// A synthesized provider's internal name is unspellable ON PURPOSE (`$def$2$f.x$`), which also
+/// makes it unreadable, so a frame for one is shown as what it is. Every other name passes through
+/// borrowed, so this is free on the ordinary path.
+pub fn display_fn_name(name: &str) -> std::borrow::Cow<'_, str> {
+    if name.starts_with(PROVIDER_PREFIX) {
+        std::borrow::Cow::Owned(format!("<default for {}>", provider_label(name)))
+    } else {
+        std::borrow::Cow::Borrowed(name)
+    }
+}
+
+/// Decode a provider name back into a human phrase for a diagnostic (`'x' of 'f'`), which every
+/// caller prefixes with its own "the default for …". Deliberately noun-free: the name does not
+/// record whether the slot is a **parameter** or a struct **field**, and calling a field a parameter
+/// was measurable (`struct S: n: int = S().n` reported `the default value for parameter 'n' of 'S'
+/// is cyclic`). Total: an unparseable name (impossible for one [`provider_name`] built) degrades to
+/// itself.
 fn provider_label(name: &str) -> String {
     let Some(rest) = name
         .strip_prefix(PROVIDER_PREFIX)
@@ -58,7 +74,7 @@ fn provider_label(name: &str) -> String {
         return format!("'{name}'");
     };
     match owner_param.rsplit_once('.') {
-        Some((owner, param)) => format!("parameter '{param}' of '{owner}'"),
+        Some((owner, param)) => format!("'{param}' of '{owner}'"),
         None => format!("'{owner_param}'"),
     }
 }
@@ -115,15 +131,20 @@ fn is_inline_default(e: &Expr) -> bool {
 /// provider `fn` exactly when this returns [`Dflt::Provider`], and every registry collector calls
 /// this to learn the name of the provider that was (or was not) emitted.
 ///
-/// Two shapes keep the historical inline clone even though they are not literals, because a provider
-/// is declared `-> <the parameter's type>` and neither can supply one:
+/// Three shapes keep the historical inline clone even though they are not literals, because a
+/// provider is a free top-level `fn` declared `-> <the parameter's type>` and none of them can be
+/// spelled as one:
 ///   * an **un-annotated** parameter — already `parameter 'x' needs a type annotation`;
-///   * a type mentioning an **enclosing type parameter** (`x: T = mk()`) — `T` is unbound outside the
-///     owner's signature, and the decl-site check already rejects the shape with
-///     `default value for parameter 'x': expected T, found int`.
+///   * a *type* mentioning an **enclosing type parameter** (`x: T = mk()`) — `T` is unbound outside
+///     the owner's signature, and the decl-site check already rejects the shape with
+///     `default value for parameter 'x': expected T, found int`;
+///   * an *expression* mentioning one (`x: int = mk[T]().n`) — the type is spellable but the body is
+///     not: a provider would be checked with `T` unbound and add `unknown type 'T'` plus a witness
+///     error on top of the two the shape already gets. Measured on `b1307258`: 2 errors; with a
+///     provider: 4; without: 2 again.
 ///
-/// Both are compile errors today and stay exactly one error; giving them a provider would add a
-/// second, worse one.
+/// All three are compile errors today and stay at exactly the errors they already had; giving them a
+/// provider only adds worse ones.
 fn dflt_for(
     d: &Expr,
     ty: Option<&Type>,
@@ -139,13 +160,30 @@ fn dflt_for(
     let Some(ty) = ty else {
         return Dflt::Inline(d.clone());
     };
-    if crate::checker::type_mentions_any(ty, type_params) {
+    if crate::checker::type_mentions_any(ty, type_params)
+        || expr_mentions_type_param(d, type_params)
+    {
         return Dflt::Inline(d.clone());
     }
     Dflt::Provider {
         module: module.clone(),
         name: provider_name(file, owner, param),
     }
+}
+
+/// Does the default expression `d` mention one of the owner's `type_params` — either as a value
+/// identifier (`T.default()`) or inside a turbofish type argument (`mk[T]()`)? See [`dflt_for`].
+fn expr_mentions_type_param(d: &Expr, type_params: &[String]) -> bool {
+    if type_params.is_empty() {
+        return false;
+    }
+    let hit = std::cell::Cell::new(false);
+    walk_idents_and_types(
+        d,
+        &mut |n| hit.set(hit.get() || type_params.iter().any(|t| t == n)),
+        &mut |t| hit.set(hit.get() || crate::checker::type_mentions_any(t, type_params)),
+    );
+    hit.get()
 }
 
 /// The type-parameter names in scope for a signature (`fn f[T](…) where U: …`), used by
@@ -254,6 +292,12 @@ pub fn run(graph: &mut ModuleGraph) -> Result<(), ResolveError> {
     for (i, m) in graph.modules.iter().enumerate() {
         module_index.insert(m.id.clone(), i);
     }
+    let closures = import_closures(graph, &module_index);
+    let labels: HashMap<ModuleId, String> = graph
+        .modules
+        .iter()
+        .map(|m| (m.id.clone(), m.label()))
+        .collect();
 
     // ONE pass (W7-51). The old driver ran twice because a default was spliced RAW into the tail of
     // `walk_expr_inner`, after that node's children had already been walked — so a carrier or a
@@ -262,7 +306,7 @@ pub fn run(graph: &mut ModuleGraph) -> Result<(), ResolveError> {
     // complete zero-arg call to its provider, which needs no further rewriting) and an inline one is
     // walked by `splice_default` at the moment it is cloned. Nothing is ever pushed into a subtree
     // the pass has already walked past, so depth is structural rather than pass-bounded.
-    for mi in 0..graph.modules.len() {
+    for (mi, deps) in closures.iter().enumerate() {
         // Build this module's resolution context: own id + bare from-imports + module aliases.
         let own_id = graph.modules[mi].id.clone();
         let mut bare_from: HashMap<String, ModuleId> = HashMap::new();
@@ -290,8 +334,8 @@ pub fn run(graph: &mut ModuleGraph) -> Result<(), ResolveError> {
         let ctx = Ctx {
             regs: &regs,
             own_id: &own_id,
-            own_idx: mi,
-            module_index: &module_index,
+            deps,
+            labels: &labels,
             bare_from: &bare_from,
             aliases: &aliases,
             methods: &methods,
@@ -334,6 +378,48 @@ pub fn run(graph: &mut ModuleGraph) -> Result<(), ResolveError> {
     check_provider_cycles(graph)
 }
 
+/// Each module's **transitive import closure**, parallel to `graph.modules`: every module reachable
+/// from it by following `import` edges, at any depth, excluding itself.
+///
+/// This is the predicate [`Walker::splice_default`] refuses on, and it is a *dependency* rule, not a
+/// load-order one — the same three files must compile the same way however the entry happens to
+/// order its `import` lines. Load order is only a consequence, and relying on it made a cosmetic
+/// reorder in a third module flip a compile error (measured: `import z` / `import a` refused,
+/// `import a` / `import z` accepted, same files).
+///
+/// One forward sweep suffices, and that is also where the load-order invariant the VM needs is
+/// checked: `resolver::Builder::visit` recurses into a module's imports BEFORE pushing the module
+/// itself and rejects cycles, so `graph.modules` is a topological order — a dependency always sits
+/// at a strictly lower index, and `out[t]` below is therefore already complete when read. That is
+/// exactly the property `Vm::bind_import` needs (it indexes `module_objs[target_idx]`, pushed as
+/// each module RUNS, and panics on a target that has not run yet), so a synthetic edge to a
+/// transitive dependency can never outrun its target. The `debug_assert` is the standing check that
+/// the resolver has not stopped producing that order.
+fn import_closures(
+    graph: &ModuleGraph,
+    index: &HashMap<ModuleId, usize>,
+) -> Vec<HashSet<ModuleId>> {
+    let mut out: Vec<HashSet<ModuleId>> = Vec::with_capacity(graph.modules.len());
+    for (i, m) in graph.modules.iter().enumerate() {
+        let mut set: HashSet<ModuleId> = HashSet::new();
+        for imp in &m.imports {
+            let Some(&t) = index.get(&imp.target) else {
+                continue;
+            };
+            debug_assert!(
+                t < i,
+                "graph.modules must be in dependency order (deps first): module {i} imports {t}"
+            );
+            if t < i {
+                set.extend(out[t].iter().cloned());
+            }
+            set.insert(imp.target.clone());
+        }
+        out.push(set);
+    }
+    out
+}
+
 /// Desugar a single standalone module (no imports) in place. Used by the test/standalone runners,
 /// which bypass [`build_graph`](crate::resolver::build_graph) and so must apply this pass themselves
 /// to stay consistent with the file-backed graph path.
@@ -354,14 +440,15 @@ pub fn run_standalone(module: &mut Module) -> Result<(), ResolveError> {
     collect_fn_fields_into(&module.stmts, &mut fn_fields);
     let bare_from = HashMap::new();
     let aliases = HashMap::new();
-    let module_index = HashMap::from([(id.clone(), 0usize)]);
+    let deps = HashSet::new();
+    let labels = HashMap::new();
     // ONE pass — see the comment in [`run`]. A standalone module has no imports, so every provider
     // it calls is its own and no synthetic import edge can be needed.
     let ctx = Ctx {
         regs: &regs,
         own_id: &id,
-        own_idx: 0,
-        module_index: &module_index,
+        deps: &deps,
+        labels: &labels,
         bare_from: &bare_from,
         aliases: &aliases,
         methods: &methods,
@@ -436,11 +523,15 @@ fn push_param_providers(
     let tps = tp_names(decl, extra_tps);
     for p in &decl.params {
         let Some(d) = &p.default else { continue };
+        // `dflt_for` already returns `Inline` when `p.ty` is `None`, so the `expect` is unreachable
+        // by construction — a provider always has a declared return type to carry.
         if let Dflt::Provider { name, .. } =
             dflt_for(d, p.ty.as_ref(), &tps, id, file, owner, &p.name)
-            && let Some(ty) = &p.ty
         {
-            out.push(provider_fn(name, ty.clone(), d.clone()));
+            let ty =
+                p.ty.clone()
+                    .expect("a provider default has a declared type");
+            out.push(provider_fn(name, ty, d.clone()));
         }
     }
 }
@@ -472,69 +563,67 @@ fn synthesize_providers(graph: &mut ModuleGraph) {
 
 /// [`synthesize_providers`] for one module's top-level statements.
 fn synthesize_providers_into(stmts: &mut Vec<Stmt>, id: &ModuleId, file: u32) {
-    {
-        let mut new_fns: Vec<Stmt> = Vec::new();
-        for stmt in stmts.iter() {
-            match &stmt.kind {
-                StmtKind::Fn(decl) => {
-                    push_param_providers(&mut new_fns, id, file, &decl.name, decl, &[]);
-                }
-                StmtKind::Struct {
-                    name,
-                    type_params,
-                    fields,
-                    methods,
-                    ..
-                } => {
-                    let stps: Vec<String> = type_params.iter().map(|t| t.name.clone()).collect();
-                    for f in fields {
-                        let Some(d) = &f.default else { continue };
-                        if let Dflt::Provider { name: pn, .. } =
-                            dflt_for(d, Some(&f.ty), &stps, id, file, name, &f.name)
-                        {
-                            new_fns.push(provider_fn(pn, f.ty.clone(), d.clone()));
-                        }
-                    }
-                    for mth in methods {
-                        let owner = format!("{name}.{}", mth.name);
-                        push_param_providers(&mut new_fns, id, file, &owner, mth, &stps);
-                    }
-                }
-                StmtKind::Enum {
-                    name,
-                    type_params,
-                    methods,
-                    ..
-                }
-                | StmtKind::NewType {
-                    name,
-                    type_params,
-                    methods,
-                    ..
-                } => {
-                    let stps: Vec<String> = type_params.iter().map(|t| t.name.clone()).collect();
-                    for mth in methods {
-                        let owner = format!("{name}.{}", mth.name);
-                        push_param_providers(&mut new_fns, id, file, &owner, mth, &stps);
-                    }
-                }
-                StmtKind::NativeStruct {
-                    name,
-                    type_params,
-                    bodied_methods,
-                    ..
-                } => {
-                    let stps: Vec<String> = type_params.iter().map(|t| t.name.clone()).collect();
-                    for mth in bodied_methods {
-                        let owner = format!("{name}.{}", mth.name);
-                        push_param_providers(&mut new_fns, id, file, &owner, mth, &stps);
-                    }
-                }
-                _ => {}
+    let mut new_fns: Vec<Stmt> = Vec::new();
+    for stmt in stmts.iter() {
+        match &stmt.kind {
+            StmtKind::Fn(decl) => {
+                push_param_providers(&mut new_fns, id, file, &decl.name, decl, &[]);
             }
+            StmtKind::Struct {
+                name,
+                type_params,
+                fields,
+                methods,
+                ..
+            } => {
+                let stps: Vec<String> = type_params.iter().map(|t| t.name.clone()).collect();
+                for f in fields {
+                    let Some(d) = &f.default else { continue };
+                    if let Dflt::Provider { name: pn, .. } =
+                        dflt_for(d, Some(&f.ty), &stps, id, file, name, &f.name)
+                    {
+                        new_fns.push(provider_fn(pn, f.ty.clone(), d.clone()));
+                    }
+                }
+                for mth in methods {
+                    let owner = format!("{name}.{}", mth.name);
+                    push_param_providers(&mut new_fns, id, file, &owner, mth, &stps);
+                }
+            }
+            StmtKind::Enum {
+                name,
+                type_params,
+                methods,
+                ..
+            }
+            | StmtKind::NewType {
+                name,
+                type_params,
+                methods,
+                ..
+            } => {
+                let stps: Vec<String> = type_params.iter().map(|t| t.name.clone()).collect();
+                for mth in methods {
+                    let owner = format!("{name}.{}", mth.name);
+                    push_param_providers(&mut new_fns, id, file, &owner, mth, &stps);
+                }
+            }
+            StmtKind::NativeStruct {
+                name,
+                type_params,
+                bodied_methods,
+                ..
+            } => {
+                let stps: Vec<String> = type_params.iter().map(|t| t.name.clone()).collect();
+                for mth in bodied_methods {
+                    let owner = format!("{name}.{}", mth.name);
+                    push_param_providers(&mut new_fns, id, file, &owner, mth, &stps);
+                }
+            }
+            _ => {}
         }
-        stmts.extend(new_fns);
     }
+    stmts.extend(new_fns);
 }
 
 /// **Provider cycle check** — `fn f(x: int = f())` used to silently expand to a three-deep
@@ -602,7 +691,7 @@ fn check_provider_cycles_in(
                     return Err(err(
                         *span,
                         format!(
-                            "the default value for {} is cyclic: evaluating it requires evaluating {} again",
+                            "the default for {} is cyclic: evaluating it requires evaluating the default for {} again",
                             provider_label(node),
                             provider_label(next)
                         ),
@@ -883,6 +972,14 @@ fn default_referenced_name(e: &Expr, names: &HashSet<&str>) -> Option<String> {
 /// Visit every identifier reference in an expression (a `Field`/`OptChain` member name is the member,
 /// not a reference, so only the receiver is visited).
 fn walk_idents(e: &Expr, f: &mut impl FnMut(&str)) {
+    walk_idents_and_types(e, f, &mut |_| {});
+}
+
+/// [`walk_idents`] plus every **type** an expression spells: a turbofish's arguments
+/// (`mk[T]()`, `obj?.m[T]()`) and a type-application head's. Only [`expr_mentions_type_param`]
+/// passes a non-empty `tf`; every other caller goes through [`walk_idents`], whose `tf` is a no-op,
+/// so no existing name-set check widened when the type channel was added.
+fn walk_idents_and_types(e: &Expr, f: &mut impl FnMut(&str), tf: &mut impl FnMut(&Type)) {
     match &e.kind {
         ExprKind::Ident(n) => f(n),
         ExprKind::Int(_)
@@ -890,61 +987,64 @@ fn walk_idents(e: &Expr, f: &mut impl FnMut(&str)) {
         | ExprKind::Str(_)
         | ExprKind::Bytes(_)
         | ExprKind::RawStr(_)
-        // A type-application head names a TYPE (not a value reference); its args are `Type`s.
-        | ExprKind::TypeApply { .. }
         | ExprKind::Bool(_) => {}
+        // A type-application head names a TYPE (not a value reference); its args are `Type`s.
+        ExprKind::TypeApply { args, .. } => args.iter().for_each(tf),
         // A fragment identifier IS a reference (`"{a}"` reads `a`), so descend. Only reachable
         // after `desugar` has rewritten the literal — `validate_defaults` runs before that and sees
         // the raw `Str` above, where a fragment reference is caught later by the checker instead.
         ExprKind::Interp(chunks) => chunks.iter().for_each(|c| {
             if let Chunk::Expr(e, _) = c {
-                walk_idents(e, f)
+                walk_idents_and_types(e, f, tf)
             }
         }),
         ExprKind::List(xs) | ExprKind::Tuple(xs) | ExprKind::Set(xs) => {
-            xs.iter().for_each(|x| walk_idents(x, f))
+            xs.iter().for_each(|x| walk_idents_and_types(x, f, tf))
         }
         ExprKind::Map(ps) => ps.iter().for_each(|(k, v)| {
-            walk_idents(k, f);
-            walk_idents(v, f);
+            walk_idents_and_types(k, f, tf);
+            walk_idents_and_types(v, f, tf);
         }),
         ExprKind::Comprehension {
             key, elem, clauses, ..
         } => {
             if let Some(k) = key {
-                walk_idents(k, f);
+                walk_idents_and_types(k, f, tf);
             }
-            walk_idents(elem, f);
+            walk_idents_and_types(elem, f, tf);
             for clause in clauses {
-                walk_idents(&clause.iter, f);
+                walk_idents_and_types(&clause.iter, f, tf);
                 for g in &clause.guards {
-                    walk_idents(g, f);
+                    walk_idents_and_types(g, f, tf);
                 }
             }
         }
-        ExprKind::Unary { expr, .. } => walk_idents(expr, f),
+        ExprKind::Unary { expr, .. } => walk_idents_and_types(expr, f, tf),
         ExprKind::Binary { lhs, rhs, .. } => {
-            walk_idents(lhs, f);
-            walk_idents(rhs, f);
+            walk_idents_and_types(lhs, f, tf);
+            walk_idents_and_types(rhs, f, tf);
         }
         ExprKind::Range { start, end } => {
-            walk_idents(start, f);
-            walk_idents(end, f);
+            walk_idents_and_types(start, f, tf);
+            walk_idents_and_types(end, f, tf);
         }
         ExprKind::Call {
             callee,
             args,
             named,
-            ..
+            type_args,
         } => {
-            walk_idents(callee, f);
-            args.iter().for_each(|a| walk_idents(a, f));
-            named.iter().for_each(|(_, a)| walk_idents(a, f));
+            walk_idents_and_types(callee, f, tf);
+            args.iter().for_each(|a| walk_idents_and_types(a, f, tf));
+            named
+                .iter()
+                .for_each(|(_, a)| walk_idents_and_types(a, f, tf));
+            type_args.iter().for_each(&mut *tf);
         }
-        ExprKind::Field { obj, .. } => walk_idents(obj, f),
+        ExprKind::Field { obj, .. } => walk_idents_and_types(obj, f, tf),
         ExprKind::Index { obj, index } => {
-            walk_idents(obj, f);
-            walk_idents(index, f);
+            walk_idents_and_types(obj, f, tf);
+            walk_idents_and_types(index, f, tf);
         }
         ExprKind::Slice {
             obj,
@@ -952,41 +1052,44 @@ fn walk_idents(e: &Expr, f: &mut impl FnMut(&str)) {
             end,
             step,
         } => {
-            walk_idents(obj, f);
+            walk_idents_and_types(obj, f, tf);
             for c in [start, end, step].iter().filter_map(|c| c.as_deref()) {
-                walk_idents(c, f);
+                walk_idents_and_types(c, f, tf);
             }
         }
-        ExprKind::Try(x) => walk_idents(x, f),
+        ExprKind::Try(x) => walk_idents_and_types(x, f, tf),
         ExprKind::OptChain { obj, call, .. } => {
-            walk_idents(obj, f);
+            walk_idents_and_types(obj, f, tf);
             if let Some(c) = call {
-                c.args.iter().for_each(|a| walk_idents(a, f));
-                c.named.iter().for_each(|(_, a)| walk_idents(a, f));
+                c.args.iter().for_each(|a| walk_idents_and_types(a, f, tf));
+                c.named
+                    .iter()
+                    .for_each(|(_, a)| walk_idents_and_types(a, f, tf));
+                c.type_args.iter().for_each(&mut *tf);
             }
         }
         ExprKind::NullCoalesce { lhs, rhs } => {
-            walk_idents(lhs, f);
-            walk_idents(rhs, f);
+            walk_idents_and_types(lhs, f, tf);
+            walk_idents_and_types(rhs, f, tf);
         }
         ExprKind::DecodeCall { obj, arg, .. } => {
-            walk_idents(obj, f);
-            walk_idents(arg, f);
+            walk_idents_and_types(obj, f, tf);
+            walk_idents_and_types(arg, f, tf);
         }
-        ExprKind::Closure { body, .. } => walk_idents(body, f),
+        ExprKind::Closure { body, .. } => walk_idents_and_types(body, f, tf),
         ExprKind::Match { scrutinee, arms } => {
-            walk_idents(scrutinee, f);
+            walk_idents_and_types(scrutinee, f, tf);
             arms.iter().for_each(|a| {
                 if let Some(g) = &a.guard {
-                    walk_idents(g, f);
+                    walk_idents_and_types(g, f, tf);
                 }
-                walk_idents(&a.body, f);
+                walk_idents_and_types(&a.body, f, tf);
             });
         }
         ExprKind::IfElse { cond, then, els } => {
-            walk_idents(cond, f);
-            walk_idents(then, f);
-            walk_idents(els, f);
+            walk_idents_and_types(cond, f, tf);
+            walk_idents_and_types(then, f, tf);
+            walk_idents_and_types(els, f, tf);
         }
         // A `recover:` block is never a realistic default expression; its block statements are not
         // walked (conservative under-detection only for this absurd case).
@@ -1088,11 +1191,12 @@ fn collect_module_reg(stmts: &[Stmt], id: &ModuleId, file: u32) -> ModReg {
 struct Ctx<'a> {
     regs: &'a HashMap<ModuleId, ModReg>,
     own_id: &'a ModuleId,
-    /// This module's position in `graph.modules` — i.e. its LOAD ORDER (dependencies first, entry
-    /// last). A synthetic provider import is only legal to a STRICTLY EARLIER module; see
-    /// [`Walker::splice_default`].
-    own_idx: usize,
-    module_index: &'a HashMap<ModuleId, usize>,
+    /// This module's **transitive import closure** ([`import_closures`]). A synthetic provider
+    /// import is only legal to a module in here; see [`Walker::splice_default`].
+    deps: &'a HashSet<ModuleId>,
+    /// Every module's human label, for the refusal diagnostic (empty in the standalone path, which
+    /// has no other module to name).
+    labels: &'a HashMap<ModuleId, String>,
     bare_from: &'a HashMap<String, ModuleId>,
     aliases: &'a HashMap<String, ModuleId>,
     /// Program-wide struct-method specs (see [`collect_methods`]).
@@ -1742,21 +1846,39 @@ impl Walker<'_> {
     /// inside the expression around it) and means the single pass never has to assume a literal needs
     /// no lowering. [`Dflt::Provider`] emits a complete zero-arg call — nothing left to rewrite.
     ///
-    /// **Load-order invariant.** `Vm::bind_import` indexes `self.module_objs[target_idx]`, a `Vec`
-    /// pushed as each module RUNS, so an import edge to a module that has not run yet panics.
-    /// `graph.modules` is in dependency order, so a provider reached through this module's own
-    /// `bare_from`/`aliases` is always a load-order ancestor. The name-keyed METHOD path has no
-    /// module dimension, though — it resolves `recv.m()` by method NAME across every module in the
-    /// graph, including a SIBLING that loads after this one. That is refused here rather than
-    /// assumed away, and the refusal is a real `Err`, NOT a `debug_assert!`: the path is reachable.
+    /// **The cross-module edge is a DEPENDENCY rule.** A synthetic import to the definer is emitted
+    /// only when the definer is in this module's transitive import closure ([`import_closures`]);
+    /// otherwise the call site is refused. Two things make it a dependency rule and not a load-order
+    /// one:
     ///
-    /// MEASURED, three sibling modules (`main` imports `z` then `a`; `a` declares
-    /// `struct S: fn mprobe(self, x: int = av())`; `z` calls `p.mprobe()` through a protocol-typed
-    /// param and declares its OWN `av`). On `b1307258` this printed **`510`** — z's `av` (500),
-    /// because the clone resolved in z. It should be `11`. So the program this refuses is one that
-    /// compiled to a *silently wrong value*, and refusing beats keeping it. When `z` genuinely does
-    /// `import a` — the ancestor case — the same program now prints `11` where `b1307258` printed
-    /// `510`, which is the fix rather than the refusal.
+    ///   * *Order-stability.* The predicate must not read import ORDER, or a cosmetic reorder in a
+    ///     third file flips a compile error. Measured, three files, only `main`'s two import lines
+    ///     swapped (`main` imports `z` and `a`; `a` declares `struct S: fn mprobe(self, x: int =
+    ///     av())` and `fn av() -> int: return 11`; `z` declares its own `av() -> 500` and calls
+    ///     `p.mprobe()` through a protocol-typed param): with a load-order predicate, `import z` /
+    ///     `import a` refused while `import a` / `import z` printed `11`. With this one, both refuse.
+    ///   * *Truth.* The diagnostic says the definer is not a dependency, so the accepted case must be
+    ///     one where it IS — under the load-order predicate the accepted half handed `z` an import
+    ///     edge to a module `z` never imports, making the message's own premise false exactly where
+    ///     it let the program through.
+    ///
+    /// The path that reaches this at all is the name-keyed METHOD path: it resolves `recv.m()` by
+    /// method NAME across every module in the graph, so the definer need not be related to the
+    /// caller at all. The refusal is a real `Err`, not a `debug_assert!` — the path is reachable.
+    ///
+    /// **Why refusing is right, precisely.** On `b1307258` the swapped-import program above printed
+    /// `500` — z's `av`, because the clone resolved in z — where `11` is correct. But refusing is
+    /// NOT justified by "it replaces a silent wrong value" in general: give `z` its own `av`
+    /// returning `11` too and the base binary prints the *right* answer, by name coincidence. It is
+    /// justified because the answer was never derived from `a`'s scope; a program that is right only
+    /// when two unrelated modules happen to agree on a name is one the reorder above can silently
+    /// break, and *correct > silent > wrong* says decline rather than guess.
+    ///
+    /// **Load-order safety.** `Vm::bind_import` indexes `self.module_objs[target_idx]`, a `Vec`
+    /// pushed as each module RUNS, so an edge to a module that has not run yet panics. A transitive
+    /// dependency always loads first — see the topological-order argument and its `debug_assert` in
+    /// [`import_closures`] — so this rule is strictly safer than the load-order one it replaced
+    /// (every module it accepts, that one accepted too).
     fn splice_default(
         &mut self,
         d: &Dflt,
@@ -1771,17 +1893,21 @@ impl Walker<'_> {
             }
             Dflt::Provider { module, name } => {
                 if module != self.ctx.own_id {
-                    let ok = self
-                        .ctx
-                        .module_index
-                        .get(module)
-                        .is_some_and(|&t| t < self.ctx.own_idx);
-                    if !ok {
+                    if !self.ctx.deps.contains(module) {
+                        let label = |id: &ModuleId| {
+                            self.ctx
+                                .labels
+                                .get(id)
+                                .cloned()
+                                .unwrap_or_else(|| "<unknown>".to_string())
+                        };
                         return Err(err(
                             site,
                             format!(
-                                "cannot use the default for {} here: it is declared in a module this one does not depend on, so it cannot be evaluated in its own scope — pass the argument explicitly",
-                                provider_label(name)
+                                "cannot use the default for {} here: it is declared in module '{}', which module '{}' does not import (directly or transitively), so the default cannot be evaluated in its own scope — pass the argument explicitly",
+                                provider_label(name),
+                                label(module),
+                                label(self.ctx.own_id),
                             ),
                         ));
                     }
@@ -3099,9 +3225,23 @@ mod tests {
         // point); as a provider it would be unbounded recursion, so it is refused.
         let e = desugar_err("fn f(x: int = f()) -> int:\n    return x\nr := f()\n");
         assert!(
-            e.to_string().contains("is cyclic") && e.to_string().contains("parameter 'x' of 'f'"),
+            e.to_string().contains("is cyclic") && e.to_string().contains("'x' of 'f'"),
             "got: {e}"
         );
+    }
+
+    #[test]
+    fn a_self_referencing_field_default_is_a_cycle_error_without_calling_it_a_parameter() {
+        // A provider name records the slot but NOT whether it is a parameter or a struct field, so
+        // the label is noun-free. Measured before that change: `the default value for parameter 'n'
+        // of 'S' is cyclic` — a field called a parameter.
+        let e = desugar_err("struct S:\n    n: int = S().n\nr := S().n\n");
+        let s = e.to_string();
+        assert!(
+            s.contains("is cyclic") && s.contains("'n' of 'S'"),
+            "got: {e}"
+        );
+        assert!(!s.contains("parameter"), "a field is not a parameter: {e}");
     }
 
     #[test]

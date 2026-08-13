@@ -3759,7 +3759,21 @@ impl Checker {
             // here (where type params are in scope) so a wrong-typed default is caught at the
             // declaration even when every call overrides it.
             if let Some(def) = &param.default {
+                // W7-51 — this DECL-SITE copy is not in this function's body: a default runs in its
+                // own provider, in its defining module. Validating a `?` in it against the enclosing
+                // `current_ret` therefore named a return type that does not describe where the
+                // default runs, and duplicated the tailored provider-body diagnostic at the same
+                // span (measured: `fn f(x: int = getr()?.len()) -> int` emitted BOTH the stale
+                // `'?' used in a function that returns int` and the tailored message, while the same
+                // default under a `-> int!str` enclosing fn emitted only the tailored one — the
+                // wording depended on the caller's shape). `Nil` + `!in_fn_body` is the one
+                // `current_ret` pairing `infer_try` accepts silently for both carriers, so the
+                // provider body stays the single place a default's `?` is judged.
+                let saved_ret = std::mem::replace(&mut self.current_ret, Ty::Nil);
+                let saved_in_fn = std::mem::replace(&mut self.in_fn_body, false);
                 let actual = self.infer(def);
+                self.current_ret = saved_ret;
+                self.in_fn_body = saved_in_fn;
                 // One-way int→float widening (scalar sink): a `float` param accepts an int default,
                 // coerced to f64 at the callee prologue (the default is desugar-spliced into the call
                 // when omitted). Mirrors the typed-`let`/arg/return/struct-field sinks.

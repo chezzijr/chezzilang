@@ -1082,7 +1082,10 @@ impl Vm {
             .rev()
             .filter(|f| !f.is_toplevel)
             .map(|f| TraceFrame {
-                function: self.program.protos[f.proto].name.clone(),
+                // Rendered, not raw: a W7-51 default-argument provider's internal name is
+                // deliberately unspellable (`$def$2$f.x$`) and would be unreadable in a trace.
+                function: crate::desugar::display_fn_name(&self.program.protos[f.proto].name)
+                    .into_owned(),
                 span: f.call_span,
             })
             .collect()
