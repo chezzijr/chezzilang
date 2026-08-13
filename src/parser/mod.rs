@@ -194,8 +194,10 @@ struct Parser {
     pos: usize,
     depth: usize,
     /// SYNTHESIZED (bottom-up) fold-depth: how many *fold* levels the deepest expression already
-    /// built in the current fold-loop scope contributes to the AST. Raised only by the two fold
-    /// loops (`parse_bp`'s infix `while`, `parse_postfix`'s `loop`), each of which resets it to `0`
+    /// built in the current fold-loop scope contributes to the AST. Raised only by the three fold
+    /// loops (`parse_bp`'s infix `while`, `parse_postfix`'s `loop`, and `parse_type_postfix`'s `loop`
+    /// — whose scope is opened by its caller `parse_type`, since the base type is parsed before it is
+    /// entered), each of which resets it to `0`
     /// before parsing its children and restores `outer.max(self.fold_depth + chain)` on exit — so it
     /// is a `max` over siblings (breadth costs nothing) and a `sum` up the spine (a chain folded on
     /// top of an already-deep subtree pays for both). Together with [`MAX_AST_DEPTH`] this is what
@@ -2209,11 +2211,29 @@ impl Parser {
         }
     }
 
+    /// One type, with its own **fold scope**: `parse_type_postfix` is the parser's THIRD iterative
+    /// fold loop (`T?!?…` wraps a `Type::Generic` around the tree it already built), and like the two
+    /// expression loops it must be charged against [`MAX_AST_DEPTH`] — a recursion counter never sees
+    /// it. Reset before the children so sibling type arguments cost the depth of the DEEPEST one
+    /// rather than their sum, `max`-combined into the caller on the way out, so a postfix chain
+    /// stacked on an already-deep type pays for both. Measured before this: `fn f(x: int` + `?!` ×
+    /// 350 000 + `)` reached `chezzi check` and SIGABRTed with `fatal runtime error: stack overflow`
+    /// (both `b1307258` and `dfdc7a1b`); it is now a clean `type nested too deeply`.
     fn parse_type(&mut self) -> PResult<Type> {
         self.depth += 1;
         if self.depth > MAX_DEPTH {
             return Err(self.err("type nested too deeply".to_string()));
         }
+        let outer_fold = self.fold_depth;
+        self.fold_depth = 0;
+        let ty = self.parse_type_body()?;
+        self.fold_depth = outer_fold.max(self.fold_depth);
+        self.depth -= 1;
+        Ok(ty)
+    }
+
+    /// [`Self::parse_type`]'s body — everything but the depth/fold bookkeeping.
+    fn parse_type_body(&mut self) -> PResult<Type> {
         // `fn(T1, …) -> R` — a function type in type position.
         if self.eat(&Token::Fn) {
             self.expect(&Token::LParen)?;
@@ -2238,7 +2258,6 @@ impl Parser {
                 labels,
             };
             ty = self.parse_type_postfix(ty)?;
-            self.depth -= 1;
             return Ok(ty);
         }
         // `(T)` unwraps to `T`; `(T1, T2, …)` is a tuple type. The `?`/`!` postfix still applies.
@@ -2254,7 +2273,6 @@ impl Parser {
                 Type::Tuple(types)
             };
             ty = self.parse_type_postfix(ty)?;
-            self.depth -= 1;
             return Ok(ty);
         }
         let name_span = self.cur_span();
@@ -2297,10 +2315,9 @@ impl Parser {
                 args,
             };
             let ty = self.parse_type_postfix(ty)?;
-            self.depth -= 1;
             return Ok(ty);
         }
-        let mut ty = if self.eat(&Token::LBracket) {
+        let ty = if self.eat(&Token::LBracket) {
             let mut args = vec![self.parse_type()?];
             while self.eat(&Token::Comma) {
                 args.push(self.parse_type()?);
@@ -2315,18 +2332,27 @@ impl Parser {
                 span: name_span,
             }
         };
-        ty = self.parse_type_postfix(ty)?;
-        self.depth -= 1;
-        Ok(ty)
+        self.parse_type_postfix(ty)
     }
 
     /// Postfix shorthand on a fully-parsed base type: `T?` = Option[T], `T!` = Result[T, Error],
     /// `T!E` = Result[T, E]. Stacks left-to-right (`T?!` = Result[Option[T], Error]).
+    ///
+    /// Same accounting as the two expression fold loops: each iteration adds one level to a type
+    /// tree the front-end walkers descend recursively, and this loop bumps neither `self.depth` nor
+    /// anything else. The base type's own fold-depth is already in `self.fold_depth` (the caller
+    /// [`Self::parse_type`] opened the scope), so the chain SUMS on top of it.
     fn parse_type_postfix(&mut self, mut ty: Type) -> PResult<Type> {
+        let mut chain = 0usize;
         loop {
+            if self.depth + self.fold_depth + chain > MAX_AST_DEPTH {
+                return Err(self.err("type nested too deeply".to_string()));
+            }
             if self.eat(&Token::Question) {
+                chain += 1;
                 ty = Type::Generic("Option".to_string(), vec![ty], Span::default());
             } else if self.eat(&Token::Bang) {
+                chain += 1;
                 // An explicit error type follows only if the next token can start one; otherwise
                 // `T!` defaults the error type to `Error` (resolved later by the checker).
                 if matches!(self.peek(), Token::Ident(_) | Token::LParen | Token::Fn) {
@@ -2339,6 +2365,7 @@ impl Parser {
                 break;
             }
         }
+        self.fold_depth += chain;
         Ok(ty)
     }
 
@@ -6139,6 +6166,41 @@ mod tests {
                 .message
                 .contains("too deeply")
         );
+        // The THIRD iterative fold loop, and the one the per-production sizing oracle skipped:
+        // `parse_type_postfix` (`T?`/`T!`) wraps a `Type::Generic` per operator and bumps no
+        // recursion counter, exactly like the two expression loops. Before it was counted,
+        // `fn f(x: int` + `?!` × 350 000 + `)` reached the checker's recursive type walk and the
+        // PROCESS died — `fatal runtime error: stack overflow, aborting` — on `b1307258` and on
+        // `dfdc7a1b` alike (250 000 was still fine, so it is a real boundary, not a fixture artefact).
+        // (`?!` alternating, not `?` repeated: the LEXER folds `??` into the null-coalescing token.)
+        let ty_chain = format!(
+            "fn f(x: int{}) -> int:\n    return 0\n",
+            "?!".repeat(MAX_AST_DEPTH / 2 + 5)
+        );
+        assert!(
+            parse(lexer::tokenize(&ty_chain).unwrap())
+                .unwrap_err()
+                .message
+                .contains("too deeply"),
+            "a type-postfix chain over the cap must be a clean refusal, not a host abort"
+        );
+        // …and the same shape under the cap still parses (the loop must not over-reject).
+        let ty_ok = format!(
+            "fn f(x: int{}) -> int:\n    return 0\n",
+            "?!".repeat((MAX_AST_DEPTH - 100) / 2)
+        );
+        assert!(parse(lexer::tokenize(&ty_ok).unwrap()).is_ok());
+        // …and type BREADTH is not depth: many separate one-postfix annotations are `max`-combined,
+        // not summed, so a signature far wider than the cap is fine.
+        let wide_ty = format!(
+            "fn f({}) -> int:\n    return 0\n",
+            (0..MAX_AST_DEPTH * 2)
+                .map(|i| format!("p{i}: int?"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        assert!(parse(lexer::tokenize(&wide_ty).unwrap()).is_ok());
+
         // A chain WELL UNDER the cap parses cleanly (no over-rejection of long-but-legal chains).
         let ok = format!("x := 1{}\n", "+1".repeat(MAX_AST_DEPTH - 100));
         assert!(parse(lexer::tokenize(&ok).unwrap()).is_ok());

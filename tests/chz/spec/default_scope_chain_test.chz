@@ -241,3 +241,43 @@ test fn a_default_cycle_routed_through_an_ordinary_fn_faults_cleanly():
     match r:
         Ok(v): assert false, "expected a fault, got {v}"
         Err(e): assert e.message().contains("maximum call depth"), "got {e.message()}"
+
+# --- a `Self`-typed parameter keeps the INLINE clone ----------------------------------------------
+#
+# A provider is a free top-level `fn` declared `-> <the parameter's type>`, and `Self` is not
+# spellable in one (`docs/syntax.md`: naming `Self` as a free-fn parameter is `unknown type 'Self'`).
+# So a default on a `Self`-typed parameter — or one whose type merely MENTIONS `Self`, like
+# `List[Self]` — stays an inline clone, exactly as on `b1307258`. Without that carve-out these four
+# shapes stopped compiling entirely (`unknown type 'Self'` at the declaration), and no test in the
+# tree paired `Self` with a default, which is how that shipped green.
+
+struct Q:
+    n: int
+    fn combine(self, other: Self = mkq()) -> int:
+        return self.n + other.n
+    fn twin(self, other: Self = Q(5)) -> int:
+        return self.n + other.n
+    fn tot(self, xs: List[Self] = mkl()) -> int:
+        return self.n + xs.len()
+
+fn mkq() -> Q:
+    return Q(5)
+
+fn mkl() -> List[Q]:
+    return [Q(2)]
+
+enum Pick:
+    A
+    B
+    fn other_of(self, other: Self = mk_pick()) -> str:
+        return "{self}/{other}"
+
+fn mk_pick() -> Pick:
+    return Pick.B
+
+test fn a_self_typed_parameter_default_still_works():
+    assert Q(1).combine() == 6, "got {Q(1).combine()}"
+    assert Q(1).combine(Q(9)) == 10, "got {Q(1).combine(Q(9))}"
+    assert Q(1).twin() == 6, "got {Q(1).twin()}"
+    assert Q(1).tot() == 2, "got {Q(1).tot()}"
+    assert Pick.A.other_of() == "A/B", "got {Pick.A.other_of()}"

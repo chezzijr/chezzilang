@@ -368,6 +368,9 @@ fn parser_rules_match_fns() {
         "parse_subscript",
         "parse_call_args",
         "parse_type_postfix",
+        // `parse_type_body` is `parse_type`'s body, out-of-lined so the wrapper can own the depth +
+        // fold-scope bookkeeping in one place; the `<type>` rule is `parse_type`'s.
+        "parse_type_body",
         // `parse_fn_type_param` parses ONE `fn(...)` type parameter with its optional Swift-style
         // label (`<fnParam>` in the grammar) — a structural helper of `parse_type`, no distinct rule.
         "parse_fn_type_param",

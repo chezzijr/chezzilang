@@ -5815,30 +5815,26 @@ fn a_default_in_a_diamonds_shared_base_is_the_same_in_either_import_order() {
     }
 }
 
-/// W7-51 — the cross-module guard is a DEPENDENCY rule, and the property under test is that it is
-/// **order-stable**: both orderings of the entry's two import lines must give the same verdict.
+/// W7-51 — the cross-module rule is a DEPENDENCY rule, and the property under test is that it is
+/// **order-stable**: both orderings of the entry's two import lines must behave identically.
 ///
 /// `desugar` resolves a METHOD call by method NAME (the receiver type is unknown pre-type), so
-/// `p.mprobe()` in `z` can bind `a`'s spec even though `z` never imports `a`. A synthetic provider
-/// edge there points at a module `z` does not depend on, so it is refused.
+/// `p.mprobe()` in `z` can bind `a`'s spec even though `z` never imports `a`. There is no provider
+/// to call from there — a synthetic import edge to a non-dependency is not admissible — so the
+/// default FALLS BACK to the pre-W7-51 caller-scope clone.
 ///
-/// The premise, MEASURED on `b1307258` (not assumed): this program printed **`510`** in BOTH
-/// orderings — `z`'s own `av()` (500) plus 10 — because the definer's default was cloned into `z`
-/// and resolved there. `a`'s author wrote `11`. But "the refusal replaces a silent wrong value" is
-/// NOT true in general, which is why the property here is order-stability rather than
-/// wrongness-replacement: `a_name_coincidence_default_is_refused_even_though_it_used_to_work` below
-/// gives `z` an `av()` returning `1` as well, and `b1307258` then prints the RIGHT answer. Refusing
-/// is still correct — the value never came from `a`'s scope, and a program that is right only while
-/// two unrelated modules agree on a name is one a rename silently breaks — but the reason is
-/// *correct > silent > wrong*, not "it was broken anyway".
+/// **This is the lesser of two evils and the cost is real.** The clone resolves `av` in `z`, so the
+/// program prints `510` where `a`'s author wrote `1` (+ 10). Measured on `b1307258`: the same
+/// `510`, in both orderings. What it buys is the shape in the next test: refusing instead
+/// (`e2d9bd4e`..`dfdc7a1b`) made a defaulted method argument unreachable through a protocol, which
+/// is the canonical Go-style split this language is built around and which both `b1307258` and
+/// CPython run. See `desugar::Walker::splice_default` and `docs/syntax.md` §5.
 ///
 /// The predicate this replaced read the definer's LOAD-ORDER index. Measured on `e2d9bd4e`, same
 /// three files: `import z` / `import a` → refused; `import a` / `import z` → `11`. A cosmetic
-/// reorder in a third module flipped a compile error, and the half it let through handed `z` an
-/// import edge to a module `z` never imports — falsifying the diagnostic's own premise exactly where
-/// it accepted. Both orderings now refuse.
+/// reorder in a third module flipped a compile error. Both orderings now behave the same.
 #[test]
-fn a_method_default_from_a_sibling_module_is_refused_in_either_import_order() {
+fn a_method_default_from_a_sibling_module_falls_back_to_the_caller_scope_clone() {
     for (tag, entry_src) in [
         ("zfirst", "import z\nimport a\nprint(z.use_it(a.S(10)))\n"),
         ("afirst", "import a\nimport z\nprint(z.use_it(a.S(10)))\n"),
@@ -5858,23 +5854,108 @@ fn a_method_default_from_a_sibling_module_is_refused_in_either_import_order() {
         .unwrap();
         let entry = dir.join("main.chz");
         std::fs::write(&entry, entry_src).unwrap();
-        let err =
-            crate::resolver::build_graph(&entry).expect_err("the sibling edge must be refused");
+        let graph = crate::resolver::build_graph(&entry).expect("resolve");
+        if let Err(errs) = crate::checker::check_graph(&graph) {
+            let _ = std::fs::remove_dir_all(&dir);
+            panic!("[{tag}] program must type-check, got: {errs:?}");
+        }
+        let (vo, _ve, vr, _vc) = run_file(&entry);
+        let (io, _ie, ir, _ic) = run_file_p(&entry);
         let _ = std::fs::remove_dir_all(&dir);
-        assert!(
-            err.message.contains("which module 'z' does not import"),
-            "[{tag}] expected the dependency refusal naming both modules, got: {}",
-            err.message
+        assert!(vr.is_ok(), "[{tag}] serial VM faulted: {vr:?}");
+        assert!(ir.is_ok(), "[{tag}] M:N engine faulted: {ir:?}");
+        assert_eq!(
+            vo, "510\n",
+            "[{tag}] the fallback clone resolves `av` in the CALLER (z: 500), as `b1307258` did"
         );
+        assert_eq!(vo, io, "[{tag}] serial vs M:N divergence");
     }
 }
 
-/// The half of the premise the refusal above must NOT claim: give `z` its own `av()` returning the
-/// same `1` that `a`'s does, and `b1307258` prints **`11`** — the CORRECT answer — because the clone
-/// resolved against a name that happened to match. HEAD refuses in both import orders. Recorded so
-/// the justification stays honest: the refusal is *correct > silent > wrong*, not a rescue.
+/// …and the reason the fallback exists: the ordinary protocol/implementation split. `z` declares the
+/// protocol and the function that consumes it, `a` declares the struct that satisfies it and gives
+/// the method a default. `z` cannot import `a` (that is the dependency direction the protocol
+/// exists to avoid, and `a` importing `z` would make it a cycle), so a refusal here has NO
+/// workaround other than "never default a protocol method's argument".
+///
+/// Measured: `b1307258` prints `12`, the equivalent Python prints `12`, and `dfdc7a1b` refused with
+/// `cannot use the default for 'x' of 'S.mprobe' here: it is declared in module 'a', which module
+/// 'z' does not import`. Both engines, both import orders.
 #[test]
-fn a_name_coincidence_default_is_refused_even_though_it_used_to_work() {
+fn a_defaulted_method_argument_is_reachable_through_a_protocol() {
+    for (tag, entry_src) in [
+        ("zfirst", "import z\nimport a\nprint(z.use(a.S(1)))\n"),
+        ("afirst", "import a\nimport z\nprint(z.use(a.S(1)))\n"),
+    ] {
+        let dir =
+            std::env::temp_dir().join(format!("chezzi_w751_proto_{tag}_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("u.chz"), "fn av() -> int:\n    return 11\n").unwrap();
+        std::fs::write(
+            dir.join("a.chz"),
+            "import u\nstruct S:\n    v: int\n    fn mprobe(self, x: int = u.av()) -> int:\n        return self.v + x\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("z.chz"),
+            "import u\nprotocol P:\n    fn mprobe(self, x: int) -> int\nfn use(p: P) -> int:\n    return p.mprobe()\n",
+        )
+        .unwrap();
+        let entry = dir.join("main.chz");
+        std::fs::write(&entry, entry_src).unwrap();
+        let graph = crate::resolver::build_graph(&entry).expect("resolve");
+        if let Err(errs) = crate::checker::check_graph(&graph) {
+            let _ = std::fs::remove_dir_all(&dir);
+            panic!("[{tag}] program must type-check, got: {errs:?}");
+        }
+        let (vo, _ve, vr, _vc) = run_file(&entry);
+        let (io, _ie, ir, _ic) = run_file_p(&entry);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(vr.is_ok(), "[{tag}] serial VM faulted: {vr:?}");
+        assert!(ir.is_ok(), "[{tag}] M:N engine faulted: {ir:?}");
+        assert_eq!(vo, "12\n", "[{tag}] base and CPython both print 12");
+        assert_eq!(vo, io, "[{tag}] serial vs M:N divergence");
+    }
+}
+
+/// …and the fallback's CEILING, pinned rather than claimed: the clone resolves in the caller, so if
+/// the caller cannot see a name the definer used, the program does not compile. Drop `import u` from
+/// `z` in the program above and both `b1307258` and HEAD report `unknown name 'u'` in module `z` —
+/// the same diagnostic, at the same place. The fallback restores the base behaviour exactly,
+/// including where the base behaviour was an error.
+#[test]
+fn the_fallback_clone_still_resolves_in_the_caller_so_an_unseen_name_is_an_error() {
+    let dir = std::env::temp_dir().join(format!("chezzi_w751_unseen_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("u.chz"), "fn av() -> int:\n    return 11\n").unwrap();
+    std::fs::write(
+        dir.join("a.chz"),
+        "import u\nstruct S:\n    v: int\n    fn mprobe(self, x: int = u.av()) -> int:\n        return self.v + x\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("z.chz"),
+        "protocol P:\n    fn mprobe(self, x: int) -> int\nfn use(p: P) -> int:\n    return p.mprobe()\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.chz");
+    std::fs::write(&entry, "import z\nimport a\nprint(z.use(a.S(1)))\n").unwrap();
+    let graph = crate::resolver::build_graph(&entry).expect("resolve");
+    let errs = crate::checker::check_graph(&graph).expect_err("the clone cannot see u from z");
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        errs.iter()
+            .any(|e| e.message.contains("in module 'z': unknown name 'u'")),
+        "expected the base-identical diagnostic, got: {errs:?}"
+    );
+}
+
+/// The half of the premise the fallback must not overstate: give `z` its own `av()` returning the
+/// same `1` that `a`'s does, and the clone reads THAT one and still prints `11` — the right answer,
+/// by name coincidence. `b1307258` printed `11` here too. Recorded so nobody reads the fallback as
+/// "the caller's name is the intended one": it is intended only in that refusing costs more.
+#[test]
+fn a_name_coincidence_default_reads_the_callers_name_and_still_agrees() {
     for (tag, entry_src) in [
         ("zfirst", "import z\nimport a\nprint(z.use_it(a.S(10)))\n"),
         ("afirst", "import a\nimport z\nprint(z.use_it(a.S(10)))\n"),
@@ -5887,7 +5968,7 @@ fn a_name_coincidence_default_is_refused_even_though_it_used_to_work() {
             "fn av() -> int:\n    return 1\nstruct S:\n    n: int\n    fn mprobe(self, x: int = av()) -> int:\n        return x + self.n\n",
         )
         .unwrap();
-        // z's `av` agrees with a's — on `b1307258` the spliced clone read THIS one and still got 11.
+        // z's `av` agrees with a's — the spliced clone reads THIS one and still gets 11.
         std::fs::write(
             dir.join("z.chz"),
             "protocol HasM:\n    fn mprobe(self, x: int) -> int\nfn av() -> int:\n    return 1\nfn use_it(p: HasM) -> int:\n    return p.mprobe()\n",
@@ -5895,13 +5976,18 @@ fn a_name_coincidence_default_is_refused_even_though_it_used_to_work() {
         .unwrap();
         let entry = dir.join("main.chz");
         std::fs::write(&entry, entry_src).unwrap();
-        let err = crate::resolver::build_graph(&entry).expect_err("refused, coincidence or not");
+        let graph = crate::resolver::build_graph(&entry).expect("resolve");
+        if let Err(errs) = crate::checker::check_graph(&graph) {
+            let _ = std::fs::remove_dir_all(&dir);
+            panic!("[{tag}] program must type-check, got: {errs:?}");
+        }
+        let (vo, _ve, vr, _vc) = run_file(&entry);
+        let (io, _ie, ir, _ic) = run_file_p(&entry);
         let _ = std::fs::remove_dir_all(&dir);
-        assert!(
-            err.message.contains("which module 'z' does not import"),
-            "[{tag}] got: {}",
-            err.message
-        );
+        assert!(vr.is_ok(), "[{tag}] serial VM faulted: {vr:?}");
+        assert!(ir.is_ok(), "[{tag}] M:N engine faulted: {ir:?}");
+        assert_eq!(vo, "11\n", "[{tag}] got: {vo}");
+        assert_eq!(vo, io, "[{tag}] serial vs M:N divergence");
     }
 }
 

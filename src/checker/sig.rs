@@ -3769,8 +3769,33 @@ impl Checker {
                 // wording depended on the caller's shape). `Nil` + `!in_fn_body` is the one
                 // `current_ret` pairing `infer_try` accepts silently for both carriers, so the
                 // provider body stays the single place a default's `?` is judged.
-                let saved_ret = std::mem::replace(&mut self.current_ret, Ty::Nil);
-                let saved_in_fn = std::mem::replace(&mut self.in_fn_body, false);
+                //
+                // …but ONLY when there IS a provider body. `desugar::dflt_for` keeps the historical
+                // inline clone for an un-annotated parameter, and for one whose type or expression
+                // mentions an enclosing type parameter or `Self`; for those, silencing the `?` here
+                // silences it everywhere. Measured: `fn f[T](x: T = mk[T]()?) -> T` was `1 type
+                // error` on `b1307258` and `ok: no type errors` on `dfdc7a1b`, the error reappearing
+                // only if someone CALLED `f`. So ask whether the provider exists — under the one
+                // name `desugar` would have given it — instead of assuming it does.
+                let owner = match &self_ty {
+                    Some(Ty::Struct(k, _) | Ty::Enum(k, _) | Ty::NewType(k, _)) => {
+                        format!("{k}.{}", decl.name)
+                    }
+                    _ => decl.name.clone(),
+                };
+                let judged_by_provider =
+                    self.functions
+                        .contains_key(&crate::desugar::param_provider_name(
+                            def.span.file,
+                            &owner,
+                            &param.name,
+                        ));
+                let saved_ret = self.current_ret.clone();
+                let saved_in_fn = self.in_fn_body;
+                if judged_by_provider {
+                    self.current_ret = Ty::Nil;
+                    self.in_fn_body = false;
+                }
                 let actual = self.infer(def);
                 self.current_ret = saved_ret;
                 self.in_fn_body = saved_in_fn;

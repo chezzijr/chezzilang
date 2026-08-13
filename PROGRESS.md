@@ -2,6 +2,36 @@
 
 Single source of truth for "what am I doing next." Update after every work session.
 
+> **✅ W7-50/51 post-review fix wave, 2026-08-13.** The whole-branch adversarial review filed seven
+> charges against the finished pair; every one reproduced on real binaries and all seven are fixed or
+> corrected here. **C6 (the big one) — the cross-module *refusal* is now a caller-scope FALLBACK.**
+> Refusing made a defaulted method argument unreachable through a protocol: `z` declares
+> `protocol P` + `fn use(p: P)`, `a` declares the struct with `fn mprobe(self, x: int = u.av())`,
+> and `z` cannot import `a` without an import cycle. `b1307258` and CPython both print `12`;
+> `dfdc7a1b` refused. Where the definer is NOT in the caller's transitive import closure the default
+> is now cloned into the call site exactly as the base binary did — a *known hazard*, not a safe
+> fallback (a method default whose free names resolve differently in the caller reads the caller's:
+> measured `510` where the definer wrote `11`), accepted deliberately because refusing costs more.
+> Where the definer IS reachable — every same-module call and every importing caller — the provider
+> still runs, so the definer-scope fix stands. **C4 — a `Self`-typed parameter with a non-literal
+> default stopped compiling** (`other: Self = mkq()`, `other: Self = Q(5)`, `xs: List[Self] = mkl()`,
+> struct and enum hosts: `6` / `6` / `2` on `b1307258`, `unknown type 'Self'` on `dfdc7a1b`), because
+> a provider is a free top-level `fn` and `Self` is not spellable in one. `Self` now takes the same
+> carve-out as an enclosing type parameter. **C1 — the provider name was not injective**: a struct
+> field and a same-named free fn's parameter collided (`function '$def$2$S.m$' is already defined`,
+> in `--errors=json` too); the name now carries the slot kind. **C2 — a `?` in a carve-out default
+> was silently accepted** (`b1307258` 1 error, `dfdc7a1b` clean): the decl-site check is neutralised
+> only when a provider really exists to judge it. **C3 (pre-existing) — a third iterative fold loop,
+> `parse_type_postfix`, counted by neither depth counter**: `fn f(x: int` + `?!`×350 000 + `)`
+> SIGABRTed both binaries; it is now charged against `MAX_AST_DEPTH` like the two expression loops,
+> and `parse_type` opens the fold scope so sibling type args stay breadth. A type postfix chain over
+> 16 000 is a clean `type nested too deeply`. **C5/C7 — two false doc claims corrected**: `None`/`nil`
+> being reserved does NOT stop a caller's local reaching an inline clone (measured, identical on
+> base), and `check_provider_cycles` does not catch a cycle routed through an ordinary fn (that is
+> the documented runtime fault). No constant changed (`MAX_DEPTH` 512, `MAX_AST_DEPTH` 16 000).
+> Gate: `cargo test` 4321 passed / 0 failed across 17 targets; conformance 8/8; clippy `--all-targets`
+> + fmt clean; chz **505/505 identical** on M:N and `--serial`; 231 examples check clean.
+
 > **✅ W7-51 landed 2026-08-13 — a non-literal default argument is compiled ONCE, in the module that
 > DECLARES it, instead of being cloned into every caller that omits it.** `docs/gaps.md`'s **W7-51**
 > is CLOSED, and with it the last open row of the W7-50/51 pair. The row as filed named only a
@@ -18,7 +48,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > both import orders where the answer is `13` / `23`.
 >
 > **Mechanism.** `desugar` synthesizes a hidden zero-arg provider `fn` per non-literal default in the
-> DEFINING module (`$def$<file>$<owner>.<param>$` — `$` is unspellable), and an omitting call site
+> DEFINING module (`$def$<file>$<slot>$<owner>.<param>$` — `$` is unspellable), and an omitting call site
 > calls it. Cross-module reach is a synthetic `Import::From` appended to the caller's imports before
 > the checker, compiler and VM read them; `Obj::Func` already carries `home`, so the body runs in the
 > definer's namespace. **No new `ExprKind`, no new opcode, no VM arm**, and literal defaults keep the
@@ -30,8 +60,9 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > arguments*, none filed as a gap.** (1) `?` may not propagate OUT of a default (tailored message,
 > replacing the generic `'?' used in a function that returns int`) — and it also **widens**, since
 > `fn f(x: int!str = Ok(getr()?.len()))` was rejected on `b1307258` and now prints `4` / `-1`.
-> (2) A method default declared in a module the caller does not **transitively** import is refused,
-> identically in every import order. (3) A direct cycle (`fn f(x: int = f())`) is a compile error
+> (2) A method default declared in a module the caller does not **transitively** import falls back to
+> the pre-W7-51 caller-scope clone, identically in every import order (it was *refused* until the
+> post-review fix wave below; see that block for why refusing was worse). (3) A direct cycle (`fn f(x: int = f())`) is a compile error
 > naming the parameter, replacing the arity cascade the silent `f(f(f()))` expansion produced (such a
 > program was never accepted — `b1307258` gave 2 `'f' expects 1 argument(s), got 0`). (4) A cycle routed through
 > an ordinary fn (`struct S: n: int = mk().n` + `fn mk() -> S`) is check-clean and then a clean
@@ -43,11 +74,13 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > **Tests.** `tests/chz/spec/default_scope_chain_test.chz` (10 `test fn`s) plus the multi-file half in
 > `src/vm/tests.rs` — definer's global / own fn / own import / own `import std.math`, a transitive
 > dependency two hops down, a diamond in both import orders, per-call evaluation cross-module, the
-> dependency refusal in both orders, the name-coincidence case, and a readable provider frame in a
+> non-dependency fallback in both orders, the protocol split it exists for, its ceiling (a name the
+> caller cannot see is still an error), the name-coincidence case, and a readable provider frame in a
 > trace. New golden: **`examples/default_xmod/`**, the corpus's first cross-module default coverage
 > (its absence is why this shipped broken) — `b1307258` cannot even build it.
 >
-> Chezzi suite **504/504 identical** on M:N and `--serial`. Full write-up: `docs/gaps.md` **W7-51**.
+> Chezzi suite **505/505 identical** on M:N and `--serial` (504 before the post-review fix wave's
+> `Self`-default test). Full write-up: `docs/gaps.md` **W7-51**.
 
 > **✅ W7-50 landed 2026-08-13 — the two parser depth constants are RE-DERIVED from a measurement,
 > and the margin is an assertion instead of a prose claim.** `docs/gaps.md`'s **W7-50** is CLOSED.

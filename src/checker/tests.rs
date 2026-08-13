@@ -20977,6 +20977,118 @@ fn a_non_propagating_carrier_in_a_default_and_a_try_outside_one_stay_legal() {
     );
 }
 
+/// W7-51 — the provider NAME must be injective. `$def$<file>$<owner>.<param>$` was not: a struct
+/// field (owner `S`, param `m`) and a same-named free function's parameter (owner `S`, param `m`)
+/// hashed to one name, so `desugar` emitted two `fn`s called `$def$2$S.m$` and the checker reported
+/// `function '$def$2$S.m$' is already defined` — an internal symbol in a user-facing message, and in
+/// `--errors=json`, i.e. the editor squiggle. Both declarations are legal (`b1307258`: `ok: no type
+/// errors`; `S(3)` resolves to the constructor). The name now carries the slot KIND.
+#[test]
+fn a_struct_field_and_a_same_named_fn_parameter_do_not_share_a_provider() {
+    let errs = check_desugared(
+        "fn g() -> int:\n    return 7\n\nstruct S:\n    m: int = g()\n\nfn S(m: int = g()) -> int:\n    return m\n",
+    );
+    assert!(errs.is_empty(), "expected clean, got: {errs:?}");
+    // The neighbours that were already fine, so the fix is not just "the collision moved": two
+    // structs sharing a field name, two fns sharing a param name, a field plus a METHOD param.
+    ok_desugared(
+        "fn g() -> int:\n    return 7\n\nstruct A:\n    m: int = g()\n\nstruct B:\n    m: int = g()\n",
+    );
+    ok_desugared(
+        "fn g() -> int:\n    return 7\n\nfn p(m: int = g()) -> int:\n    return m\n\nfn q(m: int = g()) -> int:\n    return m\n",
+    );
+    ok_desugared(
+        "fn g() -> int:\n    return 7\n\nstruct T:\n    m: int = g()\n    fn mm(self, m: int = g()) -> int:\n        return m\n",
+    );
+}
+
+/// …and the property behind it: no diagnostic may name a provider. The symbol is unspellable on
+/// purpose, so a message carrying one is unreadable AND unactionable — the user cannot see the
+/// declaration it names. Checked over the erroring default shapes this branch touches.
+#[test]
+fn no_diagnostic_leaks_a_provider_symbol() {
+    for src in [
+        // the collision above, plus a call site
+        "fn g() -> int:\n    return 7\n\nstruct S:\n    m: int = g()\n\nfn S(m: int = g()) -> int:\n    return m\n\nfn main():\n    print(S(3))\n",
+        // a wrong-typed non-literal default
+        "fn g() -> str:\n    return \"s\"\n\nfn f(x: int = g()) -> int:\n    return x\n",
+        // a default whose expression is an unknown name
+        "fn f(x: int = nope()) -> int:\n    return x\n",
+        // `?` propagating out of a default
+        "fn getr() -> str!str:\n    return Ok(\"w\")\n\nfn f(x: int = getr()?.len()) -> int:\n    return x\n",
+    ] {
+        for e in check_desugared(src) {
+            assert!(
+                !e.message.contains(crate::desugar::PROVIDER_PREFIX),
+                "internal provider symbol reached a user-facing message: {}",
+                e.message
+            );
+        }
+    }
+}
+
+/// W7-51 — a `?` in a default that does NOT become a provider must still be judged where it is
+/// written. `check_fn_body` neutralises `current_ret`/`in_fn_body` over the decl-site copy because
+/// the provider body judges the `?` instead — but `dflt_for` emits no provider for an un-annotated
+/// parameter, nor for one whose type or expression mentions an enclosing type parameter or `Self`,
+/// so for those the neutralisation silenced the only judge there was. Measured: `b1307258` **1 type
+/// error**, `dfdc7a1b` **`ok: no type errors`** (the error reappearing only if someone CALLED `f`).
+#[test]
+fn a_try_in_a_carve_out_default_is_still_rejected_at_the_declaration() {
+    // The type-parameter carve-out: no provider, so the decl-site check is the only one.
+    rejects_desugared(
+        "fn mk[T]() -> T!str:\n    return Err(\"no\")\n\nfn f[T](x: T = mk[T]()?) -> T:\n    return x\n",
+        "'?' used in a function that returns T",
+    );
+    // The `Self` carve-out (C4's shape), same reasoning.
+    rejects_desugared(
+        "struct Q:\n    n: int\n    fn c(self, o: Self = mkq()?) -> int:\n        return self.n + o.n\n\nfn mkq() -> Q!str:\n    return Ok(Q(5))\n",
+        "'?' used in a function that returns int",
+    );
+    // …and the provider path keeps its ONE tailored message (the reason the neutralisation exists).
+    let errs = check_desugared(
+        "fn getr() -> str!str:\n    return Ok(\"wxyz\")\n\nfn f(x: int = getr()?.len()) -> int:\n    return x\n\nfn main():\n    print(1)\n",
+    );
+    assert_eq!(
+        errs.len(),
+        1,
+        "expected one tailored message, got: {errs:?}"
+    );
+    assert!(
+        errs[0]
+            .message
+            .contains("a default expression cannot propagate with `?`"),
+        "got: {errs:?}"
+    );
+}
+
+/// W7-51 — a `Self`-typed parameter with a non-literal default keeps the INLINE clone, because a
+/// provider is a free top-level `fn` and `Self` is not spellable in one (`docs/syntax.md`: naming
+/// `Self` as a free-fn parameter is `unknown type 'Self'`). Between `e2d9bd4e` and `dfdc7a1b` these
+/// shapes stopped compiling — `type error (line 3, col 36): unknown type 'Self'` — where
+/// `b1307258` ran them (`6`, `6`, `2`); no test in the tree paired `Self` with a default, which is
+/// why it shipped green. The runnable half lives in `tests/chz/spec/default_scope_chain_test.chz`.
+#[test]
+fn a_self_typed_parameter_default_stays_inline() {
+    for src in [
+        // `Self` in the type, provider-shaped expression
+        "struct Q:\n    n: int\n    fn combine(self, other: Self = mkq()) -> int:\n        return self.n + other.n\n\nfn mkq() -> Q:\n    return Q(5)\n\nfn main():\n    print(Q(1).combine())\n",
+        // `Self` in the type, ctor-call expression
+        "struct Q:\n    n: int\n    fn combine(self, other: Self = Q(5)) -> int:\n        return self.n + other.n\n\nfn main():\n    print(Q(1).combine())\n",
+        // `Self` NESTED in the type
+        "struct Q:\n    n: int\n    fn tot(self, xs: List[Self] = mkl()) -> int:\n        return self.n + xs.len()\n\nfn mkl() -> List[Q]:\n    return [Q(2)]\n\nfn main():\n    print(Q(1).tot())\n",
+        // an ENUM host
+        "enum E:\n    A\n    B\n    fn pick(self, other: Self = mke()) -> int:\n        return 1\n\nfn mke() -> E:\n    return E.B\n\nfn main():\n    print(E.A.pick())\n",
+    ] {
+        ok_desugared(src);
+    }
+    // …and the neighbour that keeps the carve-out from over-firing: the SAME default under the
+    // spelled-out receiver type still gets a provider, so it still resolves in its own module.
+    ok_desugared(
+        "struct Q:\n    n: int\n    fn combine(self, other: Q = mkq()) -> int:\n        return self.n + other.n\n\nfn mkq() -> Q:\n    return Q(5)\n\nfn main():\n    print(Q(1).combine())\n",
+    );
+}
+
 // ===== variadic METHODS under same-name collisions across structs (regression) =====
 
 /// A variadic method call `recv.m(a,b,c)` must collapse the surplus positionals even when ANOTHER

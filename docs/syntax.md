@@ -757,7 +757,7 @@ prints `arg-x`, `d-y`, `arg-z`, on both engines. Scope: free functions
 (own module, `from`-imported, or module-qualified `mod.f(...)`), struct constructors, **and struct
 methods** (`p.greet(punct="?")`, `p.scale()` filling a default) — a method's default is compiled in
 its declaring module like any other, subject to the dependency rule in *"Where a default is
-compiled"* below. Because a method's receiver type is
+compiled"* below (which is where it falls back to the caller's scope, and why). Because a method's receiver type is
 unknown to the desugar pass, methods are resolved by name: if two structs define a same-named method
 with **different** parameters, a named call to it is rejected as ambiguous and — since the binding
 can't be chosen safely — its **defaults aren't filled** either (the call then fails the arity check),
@@ -776,10 +776,14 @@ be any expression that doesn't
 reference another parameter — a literal, a global, arithmetic, or a call; only param-referencing
 defaults are rejected.)
 
-**Where a default is compiled, and the four rules that follow from it.** A non-literal default is
+**Where a default is compiled, and the five rules that follow from it.** A non-literal default is
 compiled **once**, as a hidden zero-arg function in the module that declares it; an omitting call site
 calls that function. (A self-contained literal — `= 1`, `= -1`, `= 1 + 2`, `= None`, `= []`, a
-brace-free string — is still copied inline, which costs no call and behaves identically.) Four
+brace-free string — is still copied inline. That costs no call and behaves identically in every
+program that does not *shadow* the name: `None` and `nil` are keywords to the lexer, but a local
+binding called `None` in the caller does reach the copy — `fn f(x: int? = None)` called from a body
+containing `None := 5` reports `argument 1 of 'f': expected Option[int], found int` at the
+declaration. That corner predates this design and is unchanged by it.) Five
 consequences are worth writing down, because each is a rule you can hit:
 
 1. **`?` cannot propagate *out of* a default.** `fn f(x: int = getr()?.len()) -> int` is a compile
@@ -790,20 +794,32 @@ consequences are worth writing down, because each is a rule you can hit:
    works, where it used to be rejected — `fn f(x: int!str = Ok(getr()?.len()))` compiles, and returns
    `4` on the `Ok` path and the `Err` unchanged on the other. Option-mode `?.` and `??` never
    propagated, so both are unaffected (`x: Option[int] = geto()?.len()`, `x: int = geto() ?? 0`).
-2. **A default is reachable only from a module that depends on the definer.** Because a method call is
-   resolved by *name* before types are known, a method default declared in module `a` can be reached
-   from a module `z` that never imports `a` (via a protocol-typed parameter, say). That is refused:
-   *"cannot use the default for 'x' of 'S.mprobe' here: it is declared in module 'a', which module 'z'
-   does not import (directly or transitively), so the default cannot be evaluated in its own scope —
-   pass the argument explicitly"*. It is a **dependency** rule, not a load-order one: the verdict is
-   the same however a third module orders its `import` lines. Add `import a` to `z` and the same call
-   is legal, and reads `a`'s value. (Before this rule the same program printed the *caller's* value —
-   measured `510` where the definer wrote `11` — or, when two unrelated modules happened to agree on a
-   name, the right one by coincidence. Declining beats guessing.)
+2. **Definer-scope holds wherever the caller can see the definer; otherwise the default falls back to
+   caller-scope resolution.** Because a method call is resolved by *name* before types are known, a
+   method default declared in module `a` can be reached from a module `z` that never imports `a` — a
+   protocol-typed parameter is the ordinary way that happens (`z` declares the protocol, `a` declares
+   the struct that satisfies it). There is no way to compile the definer's expression into `z`, so
+   that one case keeps the old behaviour: the expression is **copied into the call site and resolved
+   in the caller's scope**. This is a known hazard, not a safe fallback — if `z` has its own `av()`,
+   the call reads `z`'s (measured: `510` where the definer wrote `11`), and if `z` cannot see a name
+   the definer used, the program does not compile (`unknown name 'u'` in module `z`). It is kept
+   because the alternative — refusing — makes a defaulted argument unusable through a protocol at all,
+   and `z` importing `a` is an import cycle. It is a **dependency** rule and not a load-order one: the
+   behaviour is the same however a third module orders its `import` lines. Add `import a` to `z` and
+   the definer-scope provider is used again, reading `a`'s value. Rule of thumb: **a method default
+   that must mean the definer's names should be reached only from modules that import the definer** —
+   everywhere else, pass the argument explicitly.
 3. **A default that needs itself is a compile error.** `fn f(x: int = f())` is refused, naming the
    parameter: *"the default for 'x' of 'f' is cyclic: evaluating it requires evaluating the default for
    'x' of 'f' again"*. Mutual and indirect provider cycles are caught the same way.
-4. **A cycle routed through an ordinary function is a runtime fault, not a compile error.**
+4. **A `Self`-typed parameter's default is copied inline too, for the same reason.** A provider is a
+   free top-level `fn` declared `-> <the parameter's type>`, and `Self` names the receiver type, which
+   a free fn cannot spell (see *"`Self`"* below). So `fn combine(self, other: Self = mkq())` — and any
+   default whose type merely mentions `Self`, like `List[Self]` — keeps the caller-scope clone, with
+   the same hazard as rule 2. Spell the receiver type out (`other: Q = mkq()`) to get the provider.
+   The same carve-out covers a default whose type or expression mentions an enclosing **type
+   parameter** (`x: T = mk()`, `x: int = mk[T]().n`), which is a compile error either way.
+5. **A cycle routed through an ordinary function is a runtime fault, not a compile error.**
    `struct S: n: int = mk().n` with `fn mk() -> S: return S()` type-checks clean and then faults with
    `maximum call depth (10000) exceeded (infinite recursion?)`, rc 1, identically on both engines —
    the same shape as CPython's `RecursionError` on the equivalent program. A documented limit, not a
