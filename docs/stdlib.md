@@ -765,8 +765,9 @@ the native seam carries only scalars, so it cannot return a generic `List[T]`.
 **Platform (same source as `crypto`):** the auto-seed reads OS entropy on **every unix** — Linux
 `getrandom(2)`, `/dev/urandom` elsewhere (macOS, the BSDs, Android, iOS). Only where that read fails
 (a non-unix target, or `/dev/urandom` unreadable) does it fall back to a mix of wall-clock nanos, a
-static's address and a process counter, which is guessable. `std.rand` never faults — like CPython's
-`random`, an unseedable stream is still a stream.
+static's address and a process counter, which is guessable. The **auto-seed** never faults — like
+CPython's `random`, an unseedable stream is still a stream. (The draws themselves can: `rand.int(lo, hi)`
+faults on `hi <= lo`, as above.)
 **Security:** `std.rand` is **not cryptographically secure** on any platform — the generator is a
 64-bit SplitMix64 whose output function is a bijection, so a single observed raw draw recovers the state
 *and* the seed and predicts the whole stream in both directions (see `std.uuid`'s **seeded** stream,

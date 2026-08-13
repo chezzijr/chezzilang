@@ -569,11 +569,16 @@ fn getrandom_fill(buf: &mut [u8]) -> bool {
 /// `getentropy(3)` wraps, needing no new dependency. `read_exact` retries on `EINTR` and errors on a
 /// short read, so a partial fill can never be mistaken for success.
 ///
-/// The opened fd MUST be a character device, exactly as CPython's `os.urandom` fallback `fstat`s it
-/// and refuses anything but `S_ISCHR`: in a chroot or mount namespace `/dev/urandom` can be an
+/// The opened fd MUST be a character device: in a chroot or mount namespace `/dev/urandom` can be an
 /// ordinary file an attacker planted, and reading it would hand back CHOSEN bytes labelled as OS
 /// entropy — the opposite of failing closed. `path` is a parameter so the check is testable against a
 /// regular file (the only entropy arm we can exercise negatively).
+///
+/// This is deliberately STRICTER than the ancestors, not a copy of them — do not "restore parity" by
+/// deleting it. Measured on CPython 3.14.6: `strings` over `libpython3.14.so` carries no
+/// not-a-character-device diagnostic for the `/dev/urandom` fallback (the only `S_IFCHR` hit is the
+/// `stat` module's docstring), so it reads whatever the path resolves to. The check still only
+/// narrows what counts as entropy, so a device swap (`/dev/zero`) remains out of its reach.
 #[cfg(unix)]
 fn read_entropy_from(path: &str, buf: &mut [u8]) -> Result<(), String> {
     use std::io::Read as _;
@@ -907,7 +912,7 @@ mod tests {
 
     /// A REGULAR file where the character device should be (a chroot / mount namespace an attacker
     /// controls) must be REFUSED, not read as entropy — otherwise chosen bytes come back labelled as
-    /// OS entropy. CPython's `os.urandom` fallback `fstat`s the fd for exactly this reason.
+    /// OS entropy. Stricter than CPython 3.14, which ships no such check (see `read_entropy_from`).
     #[test]
     fn entropy_source_must_be_a_char_device() {
         let p = std::env::temp_dir().join(format!("chezzi_fake_urandom_{}", std::process::id()));

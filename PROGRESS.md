@@ -674,6 +674,48 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > `Error` keeps its more informative bucket. Exit code, summary counts, `--fail-fast`, the quiet
 > renderer and the JSON status all treat it as a real timeout.
 
+> **✅ W7-42r landed 2026-08-14 — every module-global retype shape now rejects, so a hoisted `fn` and a
+> hoisted `import` stop being namespaces the re-declaration rule cannot see.** All four filed shapes were
+> re-measured live on the pre-change binary first (each `ok: no type errors`, then wrong-typed output or
+> a runtime fault) and each now rejects: **(a)** destructuring (`x := 1` / `f := fn() -> int: x` /
+> `x, y := ("s", 2)` printed `s` out of a `-> int` fn) — the two re-declaration carve-outs were extracted
+> into `Checker::reject_redeclare` and are called from `check_destructure` too, which also closed a
+> silent **un-const** (`X: const int = 1` / `X, y := (2, 3)`); **(c)/(d)** the fn namespace — `prev` now
+> falls back to `Checker::functions` as a `Ty::Func`. That rule is **symmetric**, deliberately: a top-level
+> `fn` is defined into its slot *before any statement runs* (`compiler/mod.rs:1404`, `desugar/mod.rs:689`
+> — "declaration position is irrelevant"), so the source-position test an earlier design used would have
+> missed `f := fn() -> int: helper()` / `helper := 3` / `fn helper() -> int:` — measured check-clean and
+> `'int' is not callable`. What decides it is whether anything **above** was already typed against the fn
+> (a reader-gate), which keeps CPython-matching shadowing legal: `fn f(a: int, b: int = 2)` / `f := fn(a: int) -> int: a * 100`
+> / `f(1)` prints `100` on both, and is still accepted; **(b)** the forward read of a hoisted import is
+> now an error at the READ (*"'x' is used before its `import` on line N"*) rather than a second copy of
+> the retype predicate — both ancestors refuse it (measured: CPython `NameError`, Go *"imports must appear
+> before other declarations"*), and it covers a from-imported fn in both spellings (`g := h` and `h()`) so
+> one concept stops giving two verdicts. Found and closed in the same pass, not filed: a **stricter optional
+> arity** (`fn helper(a: int = 77)` re-bound to `fn(a: int)`) printed `154` = `77 * 2`, handing the deleted
+> fn's default to a closure that never declared one — now a directional `min_or` disjunct. Adversarial
+> review then caught an **over-rejection** the corpus could not: a parameter/local/loop var shadowing a
+> later-imported name (`fn circumference(pi: float, …)` above `import pi from std.math`) was rejected with
+> a factually false message; the guard now requires the read to resolve at scope 0. Gate: `cargo test`
+> 4348 → 0 failures, clippy clean, and a **435-file corpus sweep pre-vs-post = 0 verdict changes**.
+
+> **✅ W7-44b landed 2026-08-14 — one portable unix OS-entropy source, and `uuid.v4()` is secure by
+> default.** The three duplicated `libc::getrandom` copies (`crypto`/`rand`/`uuid`) collapse into one
+> `crypto::os_entropy`: Linux `getrandom(2)`, falling through to `/dev/urandom` on any unix (macOS, the
+> BSDs) — the arm that was previously a bare fail-closed `Err`, and the reason `crypto.secure_bytes` /
+> `token_hex` were **dead off Linux**. Non-unix keeps failing closed. Unseeded `uuid.v4()` now draws 16
+> bytes from that source per call, exactly as CPython's `uuid4` is `int.from_bytes(os.urandom(16))`;
+> `uuid_seed(n)` still selects the reproducible SplitMix64 stream for goldens, documented as
+> process-global, sticky and NOT secure. **The security property was proven, not asserted:** a
+> state-recovery attack (SplitMix64's output function is a bijection, and `v4` overwrites only 6 of 128
+> bits) recovers the state from ONE unseeded uuid and predicts the next byte-exactly on the pre-change
+> binary — including recovering seed 42 as `0x9e3779b97f4a7c3f` from the repo's own frozen vector — and
+> **fails 10/10 against the post-change binary**, while the seeded stream still reproduces that vector.
+> Review hardening: the `/dev/urandom` fd must be a character device (stricter than CPython 3.14, which
+> ships no such check — verified by `strings` over `libpython3.14.so`), so a planted regular file in a
+> chroot cannot hand back chosen bytes labelled as OS entropy; and the chz-suite gate takes
+> `TEST_UUID_LOCK` + `clear_seed()` so the unseeded suite stops racing the seeded golden.
+
 > **✅ W7-58 landed 2026-08-12 — a nursery owner is a counted party AND a judge, so a run stuck across
 > the nursery/executor boundary faults instead of hanging.** `docs/gaps.md`'s `W7-58` is CLOSED, and
 > with it the last of the `W7-47`/`W7-56` chain. Measured: a job blocked forever on one channel beside a
@@ -1089,7 +1131,8 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > pre- and post-change release binaries** (23 rows keep their verdict *and* their byte-identical output;
 > all 13 changes are module-slot retypes) plus a `chezzi check` sweep of all 422 shipped `.chz` — **0**
 > hits. `docs/syntax.md` documents the scope asymmetry, the import carve-out and the re-annotate escape;
-> destructuring and the forward-read-of-a-hoisted-import remain filed as `W7-42r`.
+> destructuring and the forward-read-of-a-hoisted-import were filed as `W7-42r` and are **now closed**
+> (2026-08-14, see the `W7-42r` entry below).
 >
 > **Follow-up 2026-08-10 (adversarial review) — the `Unknown` carve-out was a two-sided veto and did
 > NOT close the defect.** An `Unknown` on *either* side silenced the rule, so `x := 1` /
@@ -1099,11 +1142,10 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > conjunct is now `merge_unknown(prev, declared) != declared`, plus a bare `declared == Unknown` guard
 > (`merge_unknown` early-returns on an unknown shape). All four holes reject; `[] -> [1]`, `{} -> {"a":1}`,
 > `None -> Some(1)` and same-type rebinds stay legal; the 80-cell import sweep is **byte-identical** to
-> its pre-repair run and the 422-file corpus check is still **0** hits. A **fourth** residual is filed
-> as `W7-42r` (d): a same-module top-level `fn` can still be retyped (`fn helper()` / `helper := 3` →
+> its pre-repair run and the 422-file corpus check is still **0** hits. A **fourth** residual was filed
+> as `W7-42r` (d): a same-module top-level `fn` could still be retyped (`fn helper()` / `helper := 3` →
 > `'int' is not callable`), because `prev` is read from `scopes[0]` and top-level fns live in
-> `Checker::functions`; fixing it opens a hoist-populated, source-position-blind reject family that
-> needs its own sweep, so it is disclosed rather than forced.
+> `Checker::functions`. **Closed 2026-08-14** — see the `W7-42r` entry below.
 
 > **✅ W7-46 landed 2026-08-10 — the two echo-server examples count the connections they actually
 > served.** The semantics were **measured correct and Go-consistent** and the engine was not touched:
@@ -1123,7 +1165,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > platform`. The `std.uuid` section gets a **Security:** line (the generator is a 64-bit SplitMix64,
 > which is invertible — so use `crypto.token_hex(n)` for tokens/session ids/secrets) and the now-false
 > blanket "auto-seeded from OS entropy" claim is corrected to name the Linux-only path. Docs-only; the
-> code half (a portable entropy source off Linux) stays filed open in `docs/gaps.md` **W7-44**.
+> code half (a portable entropy source off Linux) landed **2026-08-14** as `W7-44b` — see below.
 >
 > **Follow-up 2026-08-10 (adversarial review) — the caveat understated the risk, and `std.rand` never
 > got it.** **ONE** observed UUID suffices, not two, and it recovers the **seed**: SplitMix64's output
