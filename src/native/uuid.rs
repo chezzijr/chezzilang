@@ -173,6 +173,12 @@ mod tests {
     #[test]
     fn v4_shape_and_seeded_determinism() {
         let _g = TEST_UUID_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // Clear FIRST so this verifies that `uuid_seed` flips the switch, not that some earlier test
+        // left it flipped: the switch is process-global and sticky, so on a leftover `true` a
+        // `uuid_seed` that forgot to set it would still take the seeded branch and these frozen
+        // vectors would pass silently — the test would only be loud in the order libtest happens to
+        // pick today.
+        clear_seed();
         reseed(42);
         let a = draw();
         let b = draw();

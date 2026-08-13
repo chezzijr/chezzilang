@@ -526,7 +526,7 @@ pub(crate) fn os_entropy(buf: &mut [u8]) -> Result<(), String> {
     }
     #[cfg(unix)]
     {
-        urandom_bytes(buf)
+        read_entropy_from("/dev/urandom", buf)
     }
     #[cfg(not(unix))]
     {
@@ -565,16 +565,29 @@ fn getrandom_fill(buf: &mut [u8]) -> bool {
     true
 }
 
-/// Read the whole buffer from `/dev/urandom` — the same kernel CSPRNG `getentropy(3)` wraps, needing
-/// no new dependency. `read_exact` retries on `EINTR` and errors on a short read, so a partial fill
-/// can never be mistaken for success.
+/// Read the whole buffer from `path` (production: `/dev/urandom`) — the same kernel CSPRNG
+/// `getentropy(3)` wraps, needing no new dependency. `read_exact` retries on `EINTR` and errors on a
+/// short read, so a partial fill can never be mistaken for success.
+///
+/// The opened fd MUST be a character device, exactly as CPython's `os.urandom` fallback `fstat`s it
+/// and refuses anything but `S_ISCHR`: in a chroot or mount namespace `/dev/urandom` can be an
+/// ordinary file an attacker planted, and reading it would hand back CHOSEN bytes labelled as OS
+/// entropy — the opposite of failing closed. `path` is a parameter so the check is testable against a
+/// regular file (the only entropy arm we can exercise negatively).
 #[cfg(unix)]
-fn urandom_bytes(buf: &mut [u8]) -> Result<(), String> {
+fn read_entropy_from(path: &str, buf: &mut [u8]) -> Result<(), String> {
     use std::io::Read as _;
-    std::fs::File::open("/dev/urandom")
-        .map_err(|e| format!("/dev/urandom open failed: {e}"))?
-        .read_exact(buf)
-        .map_err(|e| format!("/dev/urandom read failed: {e}"))
+    use std::os::unix::fs::FileTypeExt as _;
+    let mut f = std::fs::File::open(path).map_err(|e| format!("{path} open failed: {e}"))?;
+    let ft = f
+        .metadata()
+        .map_err(|e| format!("{path} stat failed: {e}"))?
+        .file_type();
+    if !ft.is_char_device() {
+        return Err(format!("{path} is not a character device"));
+    }
+    f.read_exact(buf)
+        .map_err(|e| format!("{path} read failed: {e}"))
 }
 
 /// Draw exactly `n` cryptographically-secure random bytes, or fault (never weaken).
@@ -884,12 +897,31 @@ mod tests {
     fn urandom_arm_fills_and_differs() {
         let mut a = [0u8; 32];
         let mut b = [0u8; 32];
-        urandom_bytes(&mut a).expect("/dev/urandom must be readable");
-        urandom_bytes(&mut b).expect("/dev/urandom must be readable");
+        read_entropy_from("/dev/urandom", &mut a).expect("/dev/urandom must be readable");
+        read_entropy_from("/dev/urandom", &mut b).expect("/dev/urandom must be readable");
         assert_ne!(a, b, "two /dev/urandom draws must differ");
         assert!(a.iter().any(|&x| x != 0), "buffer left unfilled: {a:?}");
         // A zero-length draw is a no-op success (matches `secure_bytes(0)`).
-        urandom_bytes(&mut []).expect("empty draw must succeed");
+        read_entropy_from("/dev/urandom", &mut []).expect("empty draw must succeed");
+    }
+
+    /// A REGULAR file where the character device should be (a chroot / mount namespace an attacker
+    /// controls) must be REFUSED, not read as entropy — otherwise chosen bytes come back labelled as
+    /// OS entropy. CPython's `os.urandom` fallback `fstat`s the fd for exactly this reason.
+    #[test]
+    fn entropy_source_must_be_a_char_device() {
+        let p = std::env::temp_dir().join(format!("chezzi_fake_urandom_{}", std::process::id()));
+        std::fs::write(&p, [0xABu8; 64]).unwrap();
+        let mut buf = [0u8; 32];
+        let r = read_entropy_from(p.to_str().unwrap(), &mut buf);
+        let _ = std::fs::remove_file(&p);
+
+        let err = r.expect_err("a regular file must be refused as an entropy source");
+        assert!(err.contains("is not a character device"), "{err}");
+        assert!(
+            buf.iter().all(|&x| x == 0),
+            "the buffer must be left unwritten on refusal: {buf:?}"
+        );
     }
 
     /// RFC 1321 §A.5 MD5 test suite.

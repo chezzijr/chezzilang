@@ -769,8 +769,9 @@ static's address and a process counter, which is guessable. `std.rand` never fau
 `random`, an unseedable stream is still a stream.
 **Security:** `std.rand` is **not cryptographically secure** on any platform — the generator is a
 64-bit SplitMix64 whose output function is a bijection, so a single observed raw draw recovers the state
-*and* the seed and predicts the whole stream in both directions (see `std.uuid`, which draws from the
-same step). This carries to `iter.shuffle` / `iter.choice` / `iter.sample`, which call `rand.int`. For a
+*and* the seed and predicts the whole stream in both directions (see `std.uuid`'s **seeded** stream,
+which draws from the same step — unseeded `uuid.v4()` does not: it reads the OS CSPRNG per call and
+holds no PRNG state). This carries to `iter.shuffle` / `iter.choice` / `iter.sample`, which call `rand.int`. For a
 secret — a token, a session id, a shuffle an adversary must not predict — use `crypto.token_hex(n)` /
 `crypto.secure_bytes(n)` instead.
 **Limit (not a bug):** the PRNG state is a single process-global, so under `--parallel` *concurrent*
@@ -976,7 +977,8 @@ returns the lowercase-hex digest as a `str` (always valid UTF-8 → infallible, 
 convert a `str` key/msg with a `b"..."` literal).
 **CSPRNG** (Python `secrets`): `secure_bytes(n: int) -> bytes` returns `n` cryptographically-secure
 random bytes; `token_hex(n: int) -> str` returns `n` secure random bytes as a `2n`-char lowercase-hex
-`str`. Both draw from the OS entropy source (`getrandom`) and **fail closed** — if the OS can't supply
+`str`. Both draw from the OS entropy source (`getrandom(2)`, else `/dev/urandom` — which must be a
+character device, so a planted regular file is refused) and **fail closed** — if the OS can't supply
 entropy they raise a **recoverable fault** (catchable by `recover:`), never weak or degraded bytes.
 `n` must be `0..=1048576` (a 1 MiB cap); a negative or oversized `n` faults. Output is
 **non-deterministic** — two draws differ, so it has no fixed golden. (`token_urlsafe` (base64url) is a

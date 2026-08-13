@@ -42,8 +42,9 @@ pub(crate) fn next_u64(state: &mut u64) -> u64 {
 /// The process-global PRNG state. Lazily auto-seeded from OS entropy on first use.
 static RNG: OnceLock<Mutex<u64>> = OnceLock::new();
 
-/// Auto-seed value when no `seed(n)` has been called: try `libc::getrandom`, falling back to a
-/// time/address/counter mix run through one SplitMix64 step. Never returns zero (a zero seed is a
+/// Auto-seed value when no `seed(n)` has been called: try the shared [`super::crypto::os_entropy`]
+/// (Linux `getrandom(2)`, else `/dev/urandom`), falling back to a time/address/counter mix run
+/// through one SplitMix64 step. Never returns zero (a zero seed is a
 /// perfectly valid SplitMix64 state, but the fallback mixes to a non-trivial value regardless).
 fn auto_seed() -> u64 {
     use std::sync::atomic::{AtomicU64, Ordering};

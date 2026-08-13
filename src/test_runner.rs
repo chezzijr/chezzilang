@@ -1036,6 +1036,19 @@ struct Suite:
         // suite on BOTH the cooperative serial VM and the M:N OS-thread VM and asserting identical
         // per-test verdicts. A test that passes serial but fails M:N (or vice versa) is a parity bug
         // caught by `cargo test`, not just by `chezzi test`.
+        //
+        // `suites/uuid_entropy_test.chz` draws `uuid.v4()`, and BOTH halves of the UUID global are
+        // process-wide: the RNG state (shared with `vm::parity_tests::golden_uuid_via_run_file`,
+        // which seeds it) and the sticky `UUID_SEEDED` switch. So take the same lock the golden takes
+        // — otherwise our draws interleave between its `uuid_seed(42)` and its prints and flake it —
+        // AND clear the switch, because the lock alone does not undo an earlier test's seed (sticky
+        // by design): without the clear, whether this suite exercises the unseeded OS-entropy path it
+        // documents would depend on libtest ordering.
+        let _uuid = crate::native::uuid::TEST_UUID_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        crate::native::uuid::clear_seed();
+
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/chz");
 
         let serial = run_tests(&root, false);
