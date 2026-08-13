@@ -8399,6 +8399,30 @@ fn destructuring_over_const_keeps_const_message() {
 }
 
 #[test]
+fn destructuring_repeated_name_is_judged_on_the_element_that_lands() {
+    // A name repeated inside ONE destructure is one slot written twice with no code in between, so
+    // only the LAST element can ever be read — judging the earlier element fired on a transient the
+    // program cannot observe (CPython, measured: `x, x = (1, "s")` prints `s`; `x = "a"` then
+    // `x, x = (1, "b")` prints `b`). Both are sound and must stay legal.
+    ok("x, x := (1, \"s\")\nprint(x)\n");
+    ok("x := \"a\"\nf := fn() -> str: x\nx, x := (1, \"b\")\nprint(f())\n");
+    // ORDER neighbour — swap which element lands and the SAME shape must reject, because now a
+    // closure declared `-> int` really does hand out the `str` the slot ends up holding.
+    rejects(
+        "x := 1\nf := fn() -> int: x\nx, x := (2, \"s\")\n",
+        "int -> str",
+    );
+    // …and a first-occurrence-only cut would pass the two `ok`s above while missing exactly that.
+    // The const branch is deduped the same way: one report, not one per occurrence.
+    let errs = check_src("X: const int = 1\nX, X := (2, 3)\n");
+    assert_eq!(
+        errs.len(),
+        1,
+        "a repeated const name must report once, got: {errs:?}"
+    );
+}
+
+#[test]
 fn destructuring_error_arms_do_not_double_report() {
     // The other three `check_destructure` arms declare `Unknown` to suppress a cascade; the helper is
     // called from the Tuple SUCCESS arm only, so an already-errored destructure reports once.

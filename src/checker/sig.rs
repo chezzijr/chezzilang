@@ -2963,15 +2963,27 @@ impl Checker {
                 }
             }
             Ty::Tuple(elems) if elems.len() == names.len() => {
+                // These `declare`s hit the SAME storage slots the single-name let does, so they owe
+                // the same two carve-outs — per name, at that name's own span. Only this arm: the
+                // other three declare `Ty::Unknown` on an already-errored statement, and the const
+                // branch does not skip `Unknown`.
+                // Run every check BEFORE any `declare`, so each name is judged against the binding as
+                // it stood before this statement — and skip a name a LATER element rebinds, because a
+                // repeated name (`x, x := (1, "s")`) is one slot written twice with no code in
+                // between: only the last element can ever be read, so the earlier one is a transient
+                // the program cannot observe (CPython prints the last, measured). Judging it fired on
+                // the sound `x := "a"` / `x, x := (1, "b")`; judging only the FIRST occurrence would
+                // instead miss the real retype in `x := 1` / closure `-> int` / `x, x := (2, "s")`.
+                for (i, name) in names.iter().enumerate() {
+                    if !names[i + 1..].contains(name) {
+                        self.reject_redeclare(name, &elems[i], name_spans[i]);
+                    }
+                }
                 for ((name, ty), name_span) in names.iter().zip(elems).zip(name_spans.iter()) {
                     // EDITOR HOVER: each destructure target (`a`/`b` in `a, b := (1,2)`) is a NAME,
                     // not an `Expr` the probe visits; record its tuple-element type at its own span
                     // (no-op unless a probe is armed → zero overhead on normal checks).
                     self.hover_record_at(*name_span, ty, HoverKind::Local, None);
-                    // This `declare` hits the SAME storage slot the single-name let does, so it owes
-                    // the same two carve-outs — per name, at that name's own span. Only this arm: the
-                    // others declare `Ty::Unknown` on an already-errored statement.
-                    self.reject_redeclare(name, ty, *name_span);
                     self.declare(name, ty.clone());
                 }
             }
