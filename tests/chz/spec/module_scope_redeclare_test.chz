@@ -70,6 +70,30 @@ test fn fn_local_destructuring_redeclare_is_a_fresh_slot():
     assert n == "s", "shadowed local is {n}"
     assert m == 2, "second name is {m}"
 
+fn gfn() -> int:
+    return 7
+gfnseen := fn() -> int: gfn()
+gfn := fn() -> int: 9
+
+test fn a_top_level_fn_and_a_module_global_are_one_slot():
+    # A top-level `fn` takes the SAME global slot a `:=` writes, and it is defined into it before any
+    # statement runs — so re-binding it at the SAME type is late binding, exactly like a value global:
+    # the closure built above the re-declaration calls the NEW function. Re-binding it at a DIFFERENT
+    # type is rejected (W7-42r, `src/checker/tests.rs`) whenever code above the let already reads the
+    # name — which is why this fixture keeps the type equal.
+    assert gfnseen() == 9, "closure saw {gfnseen()}"
+    assert gfn() == 9, "global fn returns {gfn()}"
+
+fn gshadow(a: int, b: int = 2) -> int:
+    return a + b
+gshadow := fn(a: int) -> int: a * 100
+
+test fn a_later_shadow_of_a_defaulted_fn_is_a_plain_value_call():
+    # The re-declaration DOES change the fn's type here, and it stays legal because every reader is
+    # below it: this call is typed against the closure, so no default is spliced in (CPython prints
+    # `100` for the same program). Move a reader above the let and the checker rejects it.
+    assert gshadow(1) == 100, "shadowed call gave {gshadow(1)}"
+
 test fn block_scope_redeclare_does_not_touch_the_global():
     # A top-level `if:` body is scope > 1, so `gb := "s"` inside it routes to `add_local` and is a
     # fresh LOCAL shadow — it may change type and it leaves the module slot alone. That is why the

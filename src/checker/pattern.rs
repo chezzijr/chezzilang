@@ -1919,6 +1919,9 @@ impl Checker {
             // M24 — the fn-as-value wall, at the BARE read (`g := reset`): both for the Scope-A pin
             // below and for the rigid fallback after it.
             let wparams = sig.witness_params.clone();
+            // W7-42r: this expression's type is now fixed against the fn's signature, so a later
+            // module-scope `name := …` would retype the ONE slot underneath it (see `fn_reads`).
+            self.record_fn_read(name);
             if self.reject_witness_fn_value(name, &wparams, span) {
                 return Ty::Unknown;
             }

@@ -1742,6 +1742,17 @@ struct Checker {
     /// stays a clean "cannot index into fn(T) -> T" error, a documented v1 limit). Cleared per-module
     /// with `functions` (`begin_module`) and populated at the same-module fn-sig registration.
     local_fn_names: std::collections::HashSet<String>,
+    /// Names this module has already RESOLVED THROUGH `functions` — i.e. code whose types were fixed
+    /// against a top-level (or from-imported) fn's signature. Recorded at the two sites that really
+    /// type user code against a `FnSig`: the bare-value read (`infer_ident`) and the by-name call
+    /// dispatch (`infer_named_call`); NOT at the display/hover/existence lookups, which decide
+    /// nothing. It is what makes `reject_redeclare`'s fn arm fire only when a re-declaration can
+    /// actually break something: `f := fn(a: int) -> int: …` after `fn f(a: int, b: int = 2)` is
+    /// SOUND while nothing above it read `f` (CPython agrees, measured), and unsound the moment a
+    /// reader sits above the let. Keyed on the READERS, never on where the `fn` was declared — the
+    /// fn's slot is filled before any statement runs, so its position says nothing. Per-module:
+    /// cleared in `begin_module` alongside `functions`.
+    fn_reads: std::collections::HashSet<String>,
     structs: HashMap<String, StructInfo>,
     /// Structural protocols by name. Program-global (like structs). Pre-seeded with `Comparable`.
     protocols: HashMap<String, ProtocolInfo>,

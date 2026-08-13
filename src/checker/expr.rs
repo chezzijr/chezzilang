@@ -2027,6 +2027,10 @@ impl Checker {
                 }
                 // Global function?
                 if let Some(sig) = self.functions.get(name).cloned() {
+                    // W7-42r: this call site's arity/defaults/arg types are now fixed against the
+                    // fn's signature, so a later module-scope `name := …` retypes the ONE slot it
+                    // dispatches through (see `fn_reads`).
+                    self.record_fn_read(name);
                     // A `from`-imported numeric-polymorphic native fn (abs/min/max) types by its
                     // argument type, not the float-only `FnSig` (gap #12).
                     if self.imported_poly.contains(name) {

@@ -304,11 +304,22 @@ fn f():
   is a first declaration and may be any type (`x := 1` / `x, y := (2, "s")` is fine), and — like the
   single-name let — a fn-local or block-scope destructure is a fresh shadow and may retype. A
   destructure also cannot **un-const** a prior `X: const int = 1`, even at the same type.
+- **A top-level `fn` shares the slot too, and re-declaring one is judged on its readers.** `fn helper()`
+  and a later `helper := 3` are the same storage slot, and the `fn` is defined into it *before any
+  statement runs* — so **where the `fn` sits does not matter**: `f := fn() -> int: helper()` / `helper
+  := 3` / `fn helper() -> int:` is rejected exactly like the same three lines in the other order. What
+  does matter is whether anything **above** the re-declaration was already typed against the fn: if so
+  it is a type error, because those call sites keep the old signature while the slot holds the new
+  value. If every reader comes *after*, the re-declaration is just a shadow and stays legal — `fn f(a:
+  int, b: int = 2)` then `f := fn(a: int) -> int: a * 100` then `f(1)` is fine (a plain value call, no
+  default spliced in), which is what CPython does too. Same for a `from`-imported fn.
+- **Optional arity counts as part of the signature here.** A re-declaration may not be *stricter* than
+  what the previous binding promised: `fn helper(a: int = 77)` (callable as `helper()`) re-bound to
+  `fn(a: int) -> int` is rejected, because a call compiled to omit the argument would hand the deleted
+  function's default to the new one. The other direction — the new binding accepting *more* omissions —
+  keeps every existing call valid and is allowed.
 - **What the rule does NOT reach yet** (open, filed as `W7-42r` in `docs/gaps.md` — the retype is
-  check-clean and shows up at runtime): a forward read of a *hoisted* import, and re-declaring a
-  **function** name (`fn helper()` then `helper := 3`) — the rule covers **value** bindings, and
-  top-level `fn`s live in their own namespace. Treat those as the same mistake even though the checker
-  stays quiet.
+  check-clean and shows up at runtime): a forward read of a *hoisted* import.
 
 ### Closure capture — uniformly by reference
 

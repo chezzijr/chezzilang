@@ -8499,6 +8499,147 @@ fn module_scope_redeclare_to_a_subtype_rejected_deliberately() {
 }
 
 #[test]
+fn module_scope_redeclare_of_a_top_level_fn_rejected() {
+    // W7-42r shape (d). A top-level `fn` and a module global are the SAME storage slot —
+    // `collect_globals` (`compiler/mod.rs:1015`) feeds imports, then fns (`:1050-1053`), then lets
+    // (`:1080-1086`) through ONE idempotent-by-name `add` — but the checker keeps fns in `functions`,
+    // a namespace disjoint from `scopes`, so `scopes[0].get(name)` was `None` and the rule
+    // short-circuited. Measured on the pre-change release binary: `chezzi check` printed "ok: no type
+    // errors" and the program died with "runtime error (line 3, col 19): 'int' is not callable".
+    rejects(
+        "fn helper() -> int:\n    return 7\nf := fn() -> int: helper()\nhelper := 3\nprint(f())\n",
+        "cannot re-declare module-level binding 'helper'",
+    );
+    // (d′) — the SAME statements with the `fn` moved BELOW the let, and the reason this rule is
+    // SYMMETRIC with NO source-position test (unlike the import half above). A top-level fn's slot is
+    // defined before ANY statement runs: `compiler/mod.rs:1404` — "top-level `fn`s are hoisted as
+    // globals before the body" — emits `Op::MakeFunc` + `Op::DefineGlobalSlot` for the whole statement
+    // list at `:1415-1436` first, and `desugar/mod.rs:689` says it outright: "declaration position is
+    // irrelevant". A "the fn is source-earlier than the let" gate would let this exact program
+    // through. Measured pre-change: check-clean, then "runtime error (line 1, col 19): 'int' is not
+    // callable".
+    rejects(
+        "f := fn() -> int: helper()\nhelper := 3\nfn helper() -> int:\n    return 7\nprint(f())\n",
+        "cannot re-declare module-level binding 'helper'",
+    );
+}
+
+#[test]
+fn module_scope_redeclare_of_a_from_imported_fn_rejected() {
+    // W7-42r shape (c): a from-imported fn lands in `functions` too (`setup.rs:1322`) and takes the
+    // same one global slot, so it is the same defect through the import path. Measured on the
+    // pre-change binary: "ok: no type errors", then "runtime error (line 2, col 19): 'int' is not
+    // callable". Note there is no import-span gate on this arm — a from-imported FN is not in
+    // `imported_values` (only a from-imported VALUE is, `setup.rs:1351`), and it must not be: the fn's
+    // slot, like a same-module fn's, is filled before any statement runs.
+    files_reject(
+        &[
+            ("lib/st.chz", "fn g() -> str:\n    return \"m\"\n"),
+            (
+                "main.chz",
+                "import g from lib.st\nf := fn() -> str: g()\ng := 1\nprint(f())\n",
+            ),
+        ],
+        "cannot re-declare module-level binding 'g'",
+    );
+}
+
+#[test]
+fn module_scope_redeclare_of_a_fn_at_a_stricter_arity_rejected() {
+    // `FnLabels`'s `PartialEq` is deliberately always-`true` (`ty.rs:178-182`), so two `Ty::Func`s that
+    // differ only in OPTIONAL ARITY are equal and `prev != declared` cannot see this: the caller's
+    // prologue was compiled to omit `helper`'s trailing default and now hands that DELETED fn's
+    // default to a closure that never declared one. Measured on the pre-change binary: "ok: no type
+    // errors", and the program printed `154` — i.e. `77 * 2`, the dead default times the new body.
+    rejects(
+        "fn helper(a: int = 77) -> int:\n    return a\nf := fn() -> int: helper()\nhelper := fn(a: int) -> int: a * 2\nprint(f())\n",
+        "cannot re-declare module-level binding 'helper'",
+    );
+    // DIRECTIONAL, not symmetric: going LOOSER (the new binding accepts every call the old one
+    // promised) keeps every compiled call site valid and must stay legal. Measured pre-change AND
+    // post-change: prints `2`. A symmetric arity test would reject this sound program.
+    ok(
+        "fn helper(a: int) -> int:\n    return a\nfn looser(a: int = 5) -> int:\n    return a\nhelper := looser\nprint(helper(2))\n",
+    );
+}
+
+#[test]
+fn module_scope_redeclare_of_a_fn_boundaries_ok() {
+    // THE load-bearing neighbour: a same-type re-bind of a top-level fn is Python's late binding
+    // through the one slot and stays legal — in BOTH orders, because the rule is symmetric (measured
+    // pre-change and post-change: both print `9`).
+    ok("fn helper() -> int:\n    return 7\nhelper := fn() -> int: 9\nprint(helper())\n");
+    ok("helper := fn() -> int: 9\nfn helper() -> int:\n    return 7\nprint(helper())\n");
+    // INSERT-AN-UNUSED-STATEMENT neighbour: a `z := 0` between them changes no verdict.
+    ok(
+        "fn helper() -> int:\n    return 7\nz := 0\nhelper := fn() -> int: 9\nprint(helper())\nprint(z)\n",
+    );
+    // scope > 1 — a fn-local `helper := 3` is `add_local`'s fresh slot, not the global one.
+    ok("fn helper() -> int:\n    return 7\nfn f():\n    helper := 3\n    print(helper)\n");
+    // …and so is a top-level `if:` body.
+    ok("fn helper() -> int:\n    return 7\nc := true\nif c:\n    helper := 3\n    print(helper)\n");
+    // A WHOLE-module import injects no bare fn name (`functions` is cleared per module at
+    // `setup.rs:932`), so `helper := 3` in the importer is a first declaration. This is the test a
+    // span map keyed on "where the fn was declared" would have failed.
+    files_ok(&[
+        ("lib/st.chz", "fn helper() -> int:\n    return 7\n"),
+        ("main.chz", "import lib.st\nhelper := 3\nprint(helper)\n"),
+    ]);
+    // The blessed same-type from-import hand-back still passes — the `functions` fallback must not
+    // disturb the VALUE path (a from-imported value is in `scopes[0]`, which still wins).
+    files_ok(&[
+        ("lib/st.chz", "COUNT := 0\n"),
+        (
+            "main.chz",
+            "import COUNT from lib.st\nCOUNT := COUNT + 1\nprint(COUNT)\n",
+        ),
+    ]);
+}
+
+#[test]
+fn module_scope_redeclare_of_a_fn_keys_on_the_readers_not_the_declaration() {
+    // The fn arm fires on READS, not on source position — and this pair is why. Both programs
+    // declare the same fn and re-bind it at a different fn type; they differ ONLY in where the one
+    // reader sits.
+    //
+    // LEGAL — every reader follows the let, so every call is typed against the LET's binding. This
+    // is the shipped W7-24 fixture `interpolation_fragment_respects_local_shadowing`: measured on
+    // the pre-change binary it printed `100`, and so does CPython
+    // (`def f(a, b=2): …` / `f = lambda a: a * 100` / `print(f(1))` → `100`). Rejecting it would be
+    // drift from the owning ancestor, not a soundness win.
+    ok_desugared(
+        "fn f(a: int, b: int = 2) -> int:\n    return a + b\nf := fn(a: int) -> int: a * 100\nprint(\"{f(1)}\")\n",
+    );
+    // ORDER neighbour — move that single reader ABOVE the let and the same shapes must reject: `g`'s
+    // body was typed against `fn(int, int) -> int` and desugar spliced the default in, so the closure
+    // is called with 2 arguments. Measured on the pre-change binary: "ok: no type errors", then
+    // "runtime error (line 3, col 19): closure expects 1 argument(s), got 2" (CPython prints `100`,
+    // so this is Chezzi's own static-arity contract, caught at check time instead of at runtime).
+    rejects_desugared(
+        "fn f(a: int, b: int = 2) -> int:\n    return a + b\ng := fn() -> int: f(1)\nf := fn(a: int) -> int: a * 100\nprint(g())\n",
+        "cannot re-declare module-level binding 'f'",
+    );
+    // A read from an UNANNOTATED fn's body counts: return inference really did type `g` against
+    // `helper`'s signature, so the let breaks it. Measured pre-change: "ok: no type errors", then
+    // "runtime error (line 4, col 12): 'int' is not callable" (CPython: TypeError, same shape).
+    rejects(
+        "fn helper() -> int:\n    return 7\nfn g():\n    return helper()\nhelper := 3\nprint(g())\n",
+        "cannot re-declare module-level binding 'helper'",
+    );
+    // …but only a read the IN-ORDER walk makes counts. `infer_returns` walks every un-annotated
+    // body BEFORE the first statement, so it also reads through `functions` for a fn declared BELOW
+    // the let, where the real walk re-resolves the name to the LET's binding — the typing that
+    // stands. Counting those rejected this sound program (measured pre-change and in CPython: both
+    // print `100`), and every `test fn` in the chz suite is un-annotated by definition, so the whole
+    // fixture file tripped it. Hence `record_fn_read` skips while `inferring_ret`.
+    ok(
+        "fn f(a: int, b: int = 2) -> int:\n    return a + b\nf := fn(a: int) -> int: a * 100\nfn g():\n    return f(1)\nprint(g())\n",
+    );
+    // No reader at all → nothing to break, and the program runs (measured pre-change: prints `3`).
+    ok("helper := 3\nfn helper() -> int:\n    return 7\nprint(helper)\n");
+}
+
+#[test]
 fn const_from_imported_rebind_names_const() {
     // A from-imported const, rebound, gets a const-specific message (not the snapshot-mutator one
     // whose "call a mutator fn" advice is wrong for an immutable value). `math.pi` is a native const.

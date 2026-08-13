@@ -14,6 +14,7 @@ impl Checker {
             module_global_lets: std::collections::HashSet::new(),
             functions: HashMap::new(),
             local_fn_names: std::collections::HashSet::new(),
+            fn_reads: std::collections::HashSet::new(),
             structs: HashMap::new(),
             protocols: prebuilt_protocols(),
             type_params: HashMap::new(),
@@ -931,6 +932,7 @@ impl Checker {
         self.loop_vars.clear();
         self.functions.clear();
         self.local_fn_names.clear();
+        self.fn_reads.clear();
         self.name_docs.clear();
         self.type_params.clear();
         self.imported_modules.clear();
