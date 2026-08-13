@@ -329,7 +329,10 @@ fn f():
   from-imported **fn** is the same rule, in both spellings (`g := h` and `h()`), so the two do not
   disagree; a **same-module** top-level `fn` is untouched and stays position-independent. It is a rule
   about **value/callable** reads only: a *type* name used above its import is fine, and — unlike Go —
-  an `import` may still sit anywhere at top level, as long as nothing above it uses the name it binds.
+  an `import` may still sit anywhere at top level, as long as nothing above it reads *that import's
+  binding*. A read that **shadows** the name — a parameter, a fn-local `:=`, a loop variable, a
+  block-scope local — resolves to its own binding, not the import's, so it is legal wherever it sits:
+  `fn circumference(pi: float, r: float)` above `import pi from std.math` is fine.
 - **A deferred read counts as a read** — a top-level `fn` body that reads an imported name above the
   `import` is rejected too, and here the ancestors split (both measured): CPython *accepts* it, since
   the body runs after the import; Go still refuses, since it takes no late `import` at all. Chezzi

@@ -1910,6 +1910,11 @@ impl Checker {
     /// same-module top-level `fn` is never in `import_binds`, and must not be: it is legitimately
     /// position-independent (`compiler/mod.rs:1404`, `desugar/mod.rs:689`). "Above its import" is
     /// the same directional `import_binds` span comparison, in the opposite direction — total for
+    /// SHADOWING is the CALLER's job, and each caller already carries it: the value arm passes
+    /// `is_import` only when no scope above 0 holds the name (see `infer_ident`), while both
+    /// `functions`-arm callers are reached only after `lookup(name)` came back `None` — a
+    /// parameter/local/loop/block binding of that name would have resolved there first, so a
+    /// from-imported fn shadowed by an inner binding never reaches this gate at all.
     /// the same two reasons (imports are top-level only; no statement separator, so no positional
     /// tie). Writes need no counterpart: `check_assign` already rejects an assignment to a
     /// from-imported global at ANY position ("cannot assign to 'x' imported from module …"), and a
@@ -1948,7 +1953,16 @@ impl Checker {
             );
         }
         if let Some(ty) = self.lookup(name) {
-            let is_import = self.imported_values.contains_key(name) || matches!(ty, Ty::Module(_));
+            // …and only when the read actually RESOLVED to the module-global slot the import fills.
+            // `imported_values`/`Ty::Module` are keyed by BARE NAME and say nothing about the scope
+            // the read resolved in, but `lookup` walks innermost-first: a parameter, fn-local `:=`,
+            // loop variable, or block-scope binding that shadows the name owns this read, so the
+            // gate's own sentence ("this reads the imported binding") is false there and firing is a
+            // FALSE REJECT (`fn circumference(pi: float, ...)` above `import pi from std.math`).
+            // Any scope above 0 holding the name means it is not the import's binding.
+            let shadowed = self.scopes.iter().skip(1).any(|s| s.contains_key(name));
+            let is_import = !shadowed
+                && (self.imported_values.contains_key(name) || matches!(ty, Ty::Module(_)));
             self.reject_read_above_import(name, is_import, span);
             // A function-local binding captured by an enclosing `spawn:` task crosses the airlock as
             // a copy; a *non-sendable* one (e.g. a captured closure that's then called) can't, so

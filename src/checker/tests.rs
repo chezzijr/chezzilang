@@ -8473,6 +8473,103 @@ fn value_read_above_its_own_import_boundaries_ok() {
 }
 
 #[test]
+fn read_above_import_shadowed_by_an_inner_binding_ok() {
+    // The over-rejection this gate shipped with: `imported_values` is keyed by BARE NAME, so a read
+    // that resolved to a PARAMETER / fn-local / loop var / block local fired the gate anyway, and the
+    // diagnostic's own sentence ("this reads the imported binding") was simply untrue — the import's
+    // binding is shadowed at the read. All five programs RUN correctly on the fixed binary (measured:
+    // `6 s` / `5 s` / `3 s` / `9 s` / `4 s`); on the pre-fix binary each was a type error.
+    let st = ("lib/st.chz", "COUNT := \"s\"\n");
+    // parameter
+    files_ok(&[
+        st,
+        (
+            "main.chz",
+            "fn area(COUNT: int) -> int:\n    return COUNT * 2\nimport COUNT from lib.st\nprint(area(3))\nprint(COUNT)\n",
+        ),
+    ]);
+    // fn-local `:=`
+    files_ok(&[
+        st,
+        (
+            "main.chz",
+            "fn f() -> int:\n    COUNT := 5\n    return COUNT\nimport COUNT from lib.st\nprint(f())\nprint(COUNT)\n",
+        ),
+    ]);
+    // loop variable
+    files_ok(&[
+        st,
+        (
+            "main.chz",
+            "fn f() -> int:\n    s := 0\n    for COUNT in [1, 2]:\n        s = s + COUNT\n    return s\nimport COUNT from lib.st\nprint(f())\nprint(COUNT)\n",
+        ),
+    ]);
+    // `if:` block scope
+    files_ok(&[
+        st,
+        (
+            "main.chz",
+            "fn f() -> int:\n    if true:\n        COUNT := 9\n        return COUNT\n    return 0\nimport COUNT from lib.st\nprint(f())\nprint(COUNT)\n",
+        ),
+    ]);
+    // `while:` block scope
+    files_ok(&[
+        st,
+        (
+            "main.chz",
+            "fn f() -> int:\n    n := 0\n    while n < 1:\n        COUNT := 4\n        n = n + COUNT\n    return n\nimport COUNT from lib.st\nprint(f())\nprint(COUNT)\n",
+        ),
+    ]);
+
+    // The same four shapes for a from-imported FN name, in BOTH spellings (`g := h` and `h()`).
+    // These are gated a scope earlier — the `functions` arm and the `infer_call` callee funnel are
+    // reached only when `lookup(name)` is `None`, so an inner binding wins before the gate is
+    // consulted — but they are the same user-visible concept and must never regress into the value
+    // arm's defect.
+    let fns = ("lib/f.chz", "fn h() -> int:\n    return 7\n");
+    // parameter, call spelling
+    files_ok(&[
+        fns,
+        (
+            "main.chz",
+            "fn f(h: fn() -> int) -> int:\n    return h()\nimport h from lib.f\nprint(f(h))\n",
+        ),
+    ]);
+    // fn-local, bare-read spelling
+    files_ok(&[
+        fns,
+        (
+            "main.chz",
+            "fn f() -> int:\n    h := 3\n    g := h\n    return g\nimport h from lib.f\nprint(f())\nprint(h())\n",
+        ),
+    ]);
+    // fn-local of fn type, call spelling
+    files_ok(&[
+        fns,
+        (
+            "main.chz",
+            "fn f() -> int:\n    h := fn() -> int: 4\n    return h()\nimport h from lib.f\nprint(f())\nprint(h())\n",
+        ),
+    ]);
+    // loop variable
+    files_ok(&[
+        fns,
+        (
+            "main.chz",
+            "fn f() -> int:\n    s := 0\n    for h in [1, 2]:\n        s = s + h\n    return s\nimport h from lib.f\nprint(f())\nprint(h())\n",
+        ),
+    ]);
+    // `if:` block scope, call spelling
+    files_ok(&[
+        fns,
+        (
+            "main.chz",
+            "fn f() -> int:\n    if true:\n        h := fn() -> int: 9\n        return h()\n    return 0\nimport h from lib.f\nprint(f())\nprint(h())\n",
+        ),
+    ]);
+}
+
+#[test]
 fn destructuring_module_scope_redeclare_changing_type_rejected() {
     // W7-42r shape (a): the destructuring `let` returns BEFORE both carve-outs, so it re-typed the
     // module slot silently. Measured on the pre-fix release binary: `chezzi check` said "ok: no type
