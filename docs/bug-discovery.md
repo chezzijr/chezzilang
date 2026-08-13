@@ -316,6 +316,18 @@ never coexist in an ambient counter — measured, that shape parses at 45 000 no
 `chezzi run`. Same lesson as W7-55's `Eq`-walk node budget: bound the resource that is spent, and prove
 the bound against the shape that composes, not the shape you had in mind.
 
+**And the axis NARROWED, deliberately — say so, because the first writeup said the opposite.** W7-50
+originally shipped claiming 16 000 was above everything that parsed before, so nothing regressed. It
+was not: a paren level can spend BOTH fold loops (`parse_postfix`'s and `parse_bp`'s) at ~998 nodes per
+level, and `x := ` + *k* × `( … .f×499 +1×499 )` bisects to *k* = **30** (~29 940 nodes) on `b1307258`
+versus *k* = **16** (~15 968) today. Against the ~33 100-node cliff that is **1.11× → 2.07×** headroom:
+the old ceiling was accepting programs within ~10% of an uncatchable abort. Two lessons for this
+document's own method. (1) **A limit's "no regression" claim is a measurement, not a corollary** — it
+must be bisected on the PRE-change binary against the *worst* shape, and the worst shape is the one
+that spends every loop a level can spend, not the first one that came to mind. (2) When a hunt's fix
+narrows what is accepted, that is often the *win*; hiding it behind a false no-regression claim makes a
+good change unauditable (same family as `rule fires ≠ rule is right`).
+
 Status: the `0..2000` gate is green, and unattended sweeps of `0..100000` (release, overflow-checks
 OFF) and `0..20000` (debug, overflow-checks ON) found **zero** panics or signal crashes — the
 front-end is crash-safe over the *byte/token* inputs explored so far (see the deep-nesting blind spot

@@ -20,7 +20,8 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > **Measured before/after, release binary, against CPython 3.14's own limit of 200:** parens
 > **30 → 254**, nested lists **31 → 255**, nested calls **30 → 254**, nested `if` **61 → 509**
 > (CPython 99), unary **61 → 509**, generic types **62 → 510**, match patterns **60 → 508**; the
-> multiplicative `f(g(…).f×498)` fixture **15 → 31**. Parentheses build no AST node
+> multiplicative `f(g(…).f×498)` fixture **15 → 31**; the double-fold `( … .f×499 +1×499 )`
+> shape **30 → 16**, the one form this change NARROWS (below). Parentheses build no AST node
 > (`parse_primary`'s grouped arm is `return Ok(first)`), which is what makes splitting the guard
 > legitimate rather than a loosening.
 >
@@ -37,14 +38,39 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > both parse) and *sums* up the spine. All **three** backtrack sites that save/restore `self.depth`
 > restore it too, found by grepping `self.pos = save`.
 >
-> **`MAX_AST_DEPTH` is 16 000, not the 8 000 first proposed, and the reason is a corrected premise.**
-> The old `lib.rs` worst case `MAX_DEPTH × MAX_CHAIN_DEPTH ≈ 64 × 500 ≈ 32 k` was wrong in both
-> directions: the multiplicative shape costs ~4 depth units per level so its real ceiling was
-> `15 × ~498 ≈ 7 500`, but the cheapest composing shape (30 nested parens, ~2 units each, holding a
-> 500-fold chain apiece) reached **15 000** — measured on `b1307258`, and already pinned at 12 500 by
-> `vm::tests::deep_accepted_chains_run_without_stack_overflow`. 15 000 is therefore the no-regression
-> floor. **The margin is measured, not derived:** debug `chezzi run` survives **33 000** AST nodes and
-> aborts at **33 500** (the derived 33 100 was right), so 16 000 is **2.06×**.
+> **`MAX_AST_DEPTH` = 16 000 is a DELIBERATE NARROWING of what parses. The first writeup of this
+> session claimed the opposite, in five places, and was wrong.** The claim was "16 000 is above the
+> deepest AST the parser accepted before — 30 nested parens × a 500-fold chain each = 15 000 — so
+> nothing that parsed then stops parsing". That counted only the paren+**infix** shape. A paren level
+> can spend **both** fold loops, `parse_postfix`'s and `parse_bp`'s, for **~998** nodes per level, not
+> 499. **Re-measured, release binaries, bisected, source `x := ` + *k* × `( … .f×499 +1×499 )`:**
+>
+> | | last accepted *k* | worst accepted AST | margin vs the ~33 100-node cliff |
+> |---|---|---|---|
+> | `b1307258`, before | **30** (31 rejects) | ~29 940 nodes | **1.11×** |
+> | after | **16** (17 rejects) | ~15 968 nodes | **2.07×** |
+>
+> So programs between ~16 000 and ~30 000 nodes deep that parsed before no longer parse — and
+> machine-generated code is exactly where those live. **Narrowing was the correct call, and the honest
+> framing makes the change look better, not worse:** at 1.11× the parser was accepting programs within
+> ~10% of an uncatchable host `SIGABRT` on a *well-typed* program, which is the precise failure W7-50
+> exists to prevent; a `too deeply` diagnostic is recoverable, an abort is not. Buying the depth back
+> means a bigger `vm::VM_STACK_BYTES`, reserved **per M:N pool worker** — not a bigger constant.
+> Incidentally the old `lib.rs` estimate `MAX_DEPTH × MAX_CHAIN_DEPTH ≈ 64 × 500 ≈ 32 k` turns out to
+> have been nearly right at ~29 940; the "7 500" and "15 000" corrections were both undercounts, each
+> measuring a shape that spends one fold loop per level. **The margin is measured, not derived:** debug
+> `chezzi run` survives **33 000** AST nodes and aborts at **33 500** (the derived 33 100 was right).
+>
+> **Two tests now pin what prose got wrong.** `parser::tests::deep_iterative_chains_error_not_crash`
+> gained a double-fold case: it bisects the single-fold and double-fold shapes and asserts the
+> double-fold one accepts ~**half** the levels — the mechanism is measured, not re-guessed. `parser::tests::max_ast_depth_floor_holds`
+> is a **fixed** 15 000-fold fixture, deliberately not derived from `MAX_AST_DEPTH`, so silently
+> shrinking the constant fails a test. **Verified by shrinking it:** at `MAX_AST_DEPTH = 12_000`,
+> `max_ast_depth_floor_holds` is the ONLY parser test that fires — `max_depth_boundary_accepts_then_rejects`
+> (sizes `MAX_DEPTH`; all seven forms are recursion-guarded), `deep_iterative_chains_error_not_crash`
+> and all four `check_errors_json` tests (fixtures DERIVED from the constant) stay green. The one other
+> floor in the tree is the hard-coded 12 500 in `vm::tests::deep_accepted_chains_run_without_stack_overflow`,
+> which also fires at 12 000 — the same kind of rotting number this work set out to abolish.
 >
 > **Two asserting tests, Rust by necessity** (a host `SIGABRT`, a chosen thread stack size and a
 > parse-boundary bisection are outside what `tests/chz/` `assert` can express):

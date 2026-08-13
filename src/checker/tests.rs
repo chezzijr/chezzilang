@@ -6933,7 +6933,10 @@ fn stack_probe_eq_bounds_depth() {
     eprintln!("PROBE shape={shape} n={n} survived, errs={}", errs.len());
 }
 
-/// The deepest AST the parser accepts, as source. `R(0) = "a"`, `R(k) = f(g(R(k-1)).f…×498)` —
+/// A deep parser-accepted AST, as source, with a depth that is EXACTLY known per level — which is
+/// what a bytes-per-node probe needs. (It is not the *deepest* accepted shape: `( … .f×499 +1×499 )`
+/// spends both fold loops per paren and reaches further; see `parser::MAX_AST_DEPTH`.)
+/// `R(0) = "a"`, `R(k) = f(g(R(k-1)).f…×498)` —
 /// TWO call layers per level because one layer would let `parse_postfix` merge the consecutive
 /// postfix chains into a single loop and trip the fold bound (`MAX_AST_DEPTH`) instead of `MAX_DEPTH`.
 /// Each level therefore adds exactly 500 expression nodes to the deepest root-to-leaf path (one

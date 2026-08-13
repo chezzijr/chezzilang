@@ -16807,8 +16807,10 @@ fn deep_accepted_chains_run_without_stack_overflow() {
     // ~12.5 k-deep AST: 25 nested parens (comfortably under the `parser::MAX_DEPTH` paren ceiling,
     // which each paren costs ~2 of), each adding a 499-fold `+0` chain onto the left spine. This is
     // the shape that COMPOSES the two depth axes — the folds land on top of the descent — and it is
-    // why W7-50 sized `parser::MAX_AST_DEPTH` at 16 000 rather than the 8 000 first proposed: 12 500
-    // is a depth that already parsed, so 8 000 would have made this a regression, not a fixture bump.
+    // the concrete floor W7-50 had to clear when it picked `parser::MAX_AST_DEPTH` = 16 000 over the
+    // 8 000 first proposed. Note what 16 000 did NOT do: it NARROWED the worst accepted AST from
+    // ~29 940 nodes (measured on `b1307258` — a paren level can spend BOTH fold loops, at ~998 nodes
+    // per level) to ~15 968, deliberately, because 29 940 sat at only 1.11x the ~33 100-node cliff.
     // Value is invariant (all `+0`) so the result is deterministic; the point is that
     // walking/compiling/running this depth does not abort. Assign then print separately so the
     // `print(...)` call wrapper doesn't eat into the paren budget. THE PAREN COUNT IS CALIBRATED TO

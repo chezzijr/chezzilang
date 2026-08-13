@@ -60,13 +60,19 @@ mod conformance;
 ///
 /// **This 1 GiB is NOT the binding stack — `vm::VM_STACK_BYTES` (384 MiB) is.** `chezzi run` re-does
 /// `build_graph` + `compile_graph` on the VM thread, so every parser depth constant is sized against
-/// the smaller number; raising this one buys nothing on its own. Measured worst case at the shipped
-/// constants (debug `chezzi run`, W7-50): ~16 000 AST nodes accepted against a ~33 000-node cliff.
-/// The pre-W7-50 doc claimed the worst accepted AST was `MAX_DEPTH × MAX_CHAIN_DEPTH ≈ 64 × 500 ≈
-/// 32 k`; that was wrong in both directions — the multiplicative fixture costs ~4 depth units per
-/// level so its real ceiling was `15 × ~498 ≈ 7 500`, while the cheapest composing shape (nested
-/// parens, ~2 units each, holding a 500-fold chain apiece) reached **15 000**. The product is now
-/// bounded directly, by `MAX_AST_DEPTH`, instead of inferred from two constants that multiply.
+/// the smaller number; raising this one buys nothing on its own.
+///
+/// **W7-50 NARROWED the worst accepted AST, deliberately.** The pre-W7-50 doc estimated it as
+/// `MAX_DEPTH × MAX_CHAIN_DEPTH ≈ 64 × 500 ≈ 32 k`, and that estimate was very nearly right:
+/// measured on `b1307258`, `x := ` + 30 × `( … .f×499 +1×499 )` parses — ~**29 940** nodes, because a
+/// paren level can spend BOTH fold loops (`parse_postfix`'s and `parse_bp`'s) at ~998 nodes per level.
+/// Against the measured ~33 100-node walker cliff that is **1.11×** headroom: the parser was accepting
+/// programs within ~10% of an uncatchable host stack overflow. `parser::MAX_AST_DEPTH` = 16 000 now
+/// bounds the depth directly instead of as a product of two constants, and the worst accepted AST is
+/// ~**15 968** nodes — **2.07×** headroom. Programs between those two depths no longer parse; they get
+/// a clean `too deeply` diagnostic where they previously ran ~10% short of a SIGABRT. (Two earlier
+/// writeups put the old ceiling at 7 500 and at 15 000 and called the change a no-regression; both
+/// undercounted, having measured shapes that spend only one fold loop per level.)
 pub const FRONTEND_STACK_BYTES: usize = 1024 * 1024 * 1024;
 
 /// Run a front-end pass on a dedicated [`FRONTEND_STACK_BYTES`] stack; see that constant for why.

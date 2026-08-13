@@ -67,9 +67,31 @@ pub const MAX_DEPTH: usize = 512;
 /// **Derivation (measured, same probe, debug build):** the binding walker is `compile` at **12 162
 /// bytes per AST node**; 384 MiB / 12 162 ≈ **33 100** nodes of budget. Measured directly end to end
 /// (debug `chezzi run`, the shape below): 33 000 nodes is the last depth that survives, 33 500 aborts
-/// — the derived and measured cliffs agree. 16 000 is therefore a **2.06× margin**, and it is above
-/// the deepest AST the parser accepted BEFORE this constant existed (30 nested parens × a 500-fold
-/// chain each = **15 000**, measured on `b1307258`), so nothing that parsed then stops parsing.
+/// — the derived and measured cliffs agree.
+///
+/// **This constant is a DELIBERATE NARROWING of what parses, not a no-op.** The worst AST the parser
+/// accepted before it existed was ~**29 940** nodes. (An earlier writeup said 15 000 and claimed
+/// nothing that parsed then stops parsing; both were wrong, because they measured a shape that spends
+/// only ONE fold loop per nesting level.) A single paren level can spend **both** fold loops —
+/// `parse_postfix`'s and `parse_bp`'s — for ~998 nodes per level, not 499. Measured, release binaries,
+/// source `x := ` + *k* × `( … .f×499 +1×499 )`, bisected:
+///
+/// | | last accepted *k* | worst accepted AST | margin vs the 33 100-node cliff |
+/// |---|---|---|---|
+/// | `b1307258`, before | **30** | ~29 940 nodes | **1.11×** |
+/// | today | **16** | ~15 968 nodes | **2.07×** |
+///
+/// So a program between ~16 000 and ~30 000 nodes deep that parsed at `b1307258` is now rejected with
+/// a clean `expression nested too deeply` — machine-generated code is where those live. **That is the
+/// correct call, and it is the whole point of the change:** at 1.11× the parser was accepting programs
+/// within ~10% of a host stack overflow, i.e. an uncatchable SIGABRT on a well-typed program, which is
+/// the exact failure W7-50 exists to prevent. A diagnostic is recoverable; an abort is not. Buying the
+/// depth back needs a bigger `vm::VM_STACK_BYTES`, which is reserved **per M:N pool worker** — not a
+/// bigger value here.
+///
+/// `tests::max_ast_depth_floor_holds` is the floor detector: a FIXED fold fixture, deliberately not
+/// derived from this constant, so shrinking the constant below its promise fails a test instead of
+/// passing silently.
 ///
 /// **The bound is on a SYNTHESIZED (bottom-up) measure, not an ambient counter.** `Parser::fold_depth`
 /// carries the fold-depth of the deepest subtree already built in the current scope, and each fold
@@ -83,7 +105,7 @@ pub const MAX_DEPTH: usize = 512;
 /// **Breadth is never conflated with depth**: `fold_depth` is `max`-combined over siblings (a fold
 /// loop restores `outer.max(self.fold_depth + chain)`), so a 5 000-element list or a wide argument
 /// list costs the depth of its deepest element, not their sum. `tests::deep_iterative_chains_error_not_crash`
-/// pins both directions.
+/// pins breadth, composition, and the double fold above.
 pub const MAX_AST_DEPTH: usize = 16_000;
 
 /// Parse a full token stream into a `Module`.
@@ -6034,10 +6056,13 @@ mod tests {
     /// `fold_depth` must reject a chain past the cap (else the deep left-leaning AST overflows the
     /// recursive front-end walkers), while a chain UNDER the cap parses fine.
     ///
-    /// Two properties the per-loop `MAX_CHAIN_DEPTH` counter this replaced could not express, both
-    /// pinned below: sibling BREADTH still costs nothing (the `max`-combine), and folds COMPOSE up
-    /// the spine — `f(g(deep) + 1 + 1 + …)` per level is rejected once the levels add up, which the
-    /// old per-loop proxy (and an ambient counter decremented on loop exit) both let through.
+    /// Three properties pinned below. Two the per-loop `MAX_CHAIN_DEPTH` counter this replaced could
+    /// not express: sibling BREADTH still costs nothing (the `max`-combine), and folds COMPOSE up the
+    /// spine — `f(g(deep) + 1 + 1 + …)` per level is rejected once the levels add up, which the old
+    /// per-loop proxy (and an ambient counter decremented on loop exit) both let through. Third, the
+    /// DOUBLE FOLD: one level can spend BOTH loops (`.f…` through `parse_postfix`, `+1…` through
+    /// `parse_bp`) for ~2N nodes rather than N — measured as a ratio between two bisections, because
+    /// that unmeasured property is what made W7-50 ship a false "no regression" claim.
     #[test]
     fn deep_iterative_chains_error_not_crash() {
         // Runs on the production front-end stack: the accepted side of these fixtures builds a
@@ -6100,6 +6125,104 @@ mod tests {
                 .contains("too deeply"),
             "composed fold depth must be bounded, not just per-loop chain length"
         );
+
+        // DOUBLE FOLD: one nesting level can spend BOTH fold loops — `parse_postfix`'s (`.f…`) and
+        // `parse_bp`'s (`+1…`) — so it costs ~2N nodes, not N. Measured here, not re-guessed by the
+        // next person: this is the property whose absence made W7-50 first ship a FALSE "no
+        // regression" claim in five places. The before-ceiling had been measured on the paren+infix
+        // shape (~499 nodes/level) when the real worst shape is this one (~998/level): re-bisected
+        // on release binaries, `b1307258` accepted k = 30 (~29 940 nodes) where HEAD accepts k = 16
+        // (~15 968). `MAX_AST_DEPTH` is a deliberate NARROWING — see that constant.
+        //
+        // The assertion is a RATIO, so it survives any future value of `MAX_AST_DEPTH`: the
+        // double-fold shape must accept about HALF the levels of the single-fold one. If a refactor
+        // ever makes one of the two loops stop counting, the two bisections converge and this fails.
+        const N: usize = 200;
+        let bisect = |mk: &dyn Fn(usize) -> String| -> usize {
+            let accepts = |k: usize| parse(lexer::tokenize(&mk(k)).unwrap()).is_ok();
+            let (mut lo, mut hi) = (1usize, 2usize);
+            while accepts(hi) {
+                lo = hi;
+                hi *= 2;
+            }
+            while lo + 1 < hi {
+                let mid = (lo + hi) / 2;
+                if accepts(mid) {
+                    lo = mid;
+                } else {
+                    hi = mid;
+                }
+            }
+            lo
+        };
+        let nest = |k: usize, tail: &str| {
+            let mut s = String::from("1");
+            for _ in 0..k {
+                s = format!("({s}{tail})");
+            }
+            format!("x := {s}\n")
+        };
+        let single = bisect(&|k| nest(k, &"+1".repeat(N)));
+        let double = bisect(&|k| nest(k, &format!("{}{}", ".f".repeat(N), "+1".repeat(N))));
+        eprintln!(
+            "DOUBLE-FOLD: single-fold levels = {single}, double-fold levels = {double} (N = {N})"
+        );
+        assert!(
+            double < single,
+            "a level spending BOTH fold loops must accept strictly fewer levels than one spending \
+             only the infix loop, else one of the two loops is not counted \
+             (single={single}, double={double})"
+        );
+        assert!(
+            double * 2 + 2 >= single && double * 2 <= single + 2,
+            "each fold loop must contribute its own {N} nodes per level, so the double-fold shape \
+             should accept ~half the levels of the single-fold one (single={single}, double={double})"
+        );
+        assert!(
+            parse(
+                lexer::tokenize(&nest(
+                    double + 1,
+                    &format!("{}{}", ".f".repeat(N), "+1".repeat(N))
+                ))
+                .unwrap()
+            )
+            .unwrap_err()
+            .message
+            .contains("too deeply"),
+            "the double-fold boundary must be the depth guard, not some other parse error"
+        );
+    }
+
+    /// FLOOR DETECTOR for [`MAX_AST_DEPTH`] — the only depth test that fails if the constant is
+    /// silently **shrunk**.
+    ///
+    /// Every other depth test is structurally blind to that.
+    /// `max_depth_boundary_accepts_then_rejects` sizes [`MAX_DEPTH`] (all seven of its forms are
+    /// recursion-guarded); `deep_iterative_chains_error_not_crash` above and
+    /// `check_errors_json::worst_accepted_nesting_never_signal_crashes` both DERIVE their fixtures
+    /// from `MAX_AST_DEPTH`, so they stay green at any value it takes. The only other floor in the
+    /// tree is a hard-coded 12 500 in `vm::tests::deep_accepted_chains_run_without_stack_overflow`
+    /// — exactly the kind of rotting number W7-50 set out to abolish.
+    ///
+    /// **The fixture is FIXED on purpose. Do not re-derive it from the constant** — deriving it is
+    /// what makes a test unable to see the constant move. It pins the floor the shipped 16 000
+    /// promises.
+    ///
+    /// **When this fails,** `MAX_AST_DEPTH` was lowered, which narrows what programs parse. Treat it
+    /// the way 16 000 was: bisect the worst accepted AST (`x := ` + *k* × `( … .f×499 +1×499 )`, the
+    /// double-fold shape) on the pre-change binary AND after, state both numbers and the new margin
+    /// against the measured ~33 100-node walker cliff, and say plainly that programs between the two
+    /// depths stop parsing. Do not just retune the number below.
+    #[test]
+    fn max_ast_depth_floor_holds() {
+        crate::on_frontend_stack(|| {
+            let flat = format!("x := 1{}\n", "+1".repeat(15_000));
+            assert!(
+                parse(lexer::tokenize(&flat).unwrap()).is_ok(),
+                "a flat 15 000-fold chain must still parse — MAX_AST_DEPTH has been shrunk below \
+                 the floor it shipped promising (16 000). See this test's doc comment."
+            );
+        });
     }
 
     /// **THE SIZING ORACLE for [`MAX_DEPTH`].** Bisects the accepted nesting count for each guarded
