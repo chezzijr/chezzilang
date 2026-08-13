@@ -3350,6 +3350,22 @@ impl Checker {
         }
     }
 
+    /// The diagnostic for a `?` whose enclosing function returns neither `Result` nor `Option`.
+    ///
+    /// W7-51 — inside a synthesized default-argument provider the generic wording would name a
+    /// return type the user never wrote (the provider is declared `-> <the parameter's type>`), and
+    /// the advice "make the function return Result" is impossible to act on. A default is evaluated
+    /// in its DEFINING module, where there is no caller to propagate to, so say that instead.
+    fn try_outside_carrier_msg(&self, ret: &Ty) -> String {
+        if self.in_default_provider {
+            "a default expression cannot propagate with `?` — defaults are evaluated in their \
+             defining module, which has no caller to propagate to; use `??` or return an Option"
+                .to_string()
+        } else {
+            format!("'?' used in a function that returns {ret}, not Result or Option")
+        }
+    }
+
     pub(super) fn infer_try(&mut self, inner: &Expr, span: Span) -> Ty {
         let t = self.infer(inner);
         // Inside a `recover:` block, `?` short-circuits to the boundary (try-block style), not the
@@ -3463,12 +3479,7 @@ impl Checker {
                         );
                     }
                     other => {
-                        self.error(
-                            span,
-                            format!(
-                                "'?' used in a function that returns {other}, not Result or Option"
-                            ),
-                        );
+                        self.error(span, self.try_outside_carrier_msg(&other));
                     }
                 }
                 *ok
@@ -3485,12 +3496,7 @@ impl Checker {
                         );
                     }
                     other => {
-                        self.error(
-                            span,
-                            format!(
-                                "'?' used in a function that returns {other}, not Result or Option"
-                            ),
-                        );
+                        self.error(span, self.try_outside_carrier_msg(&other));
                     }
                 }
                 *inner
@@ -3910,6 +3916,8 @@ impl Checker {
         // pre-existing behavior via `current_ret == Unknown` for an unannotated closure; this keeps the
         // signal exact for an explicitly `-> nil` closure too). Saved/restored beside `current_ret`.
         let saved_in_fn = std::mem::replace(&mut self.in_fn_body, true);
+        // …and a closure inside a default-argument provider has its OWN caller (W7-51).
+        let saved_in_dflt = std::mem::replace(&mut self.in_default_provider, false);
         // A closure DECLARED inside a `spawn:` block is not itself the task — it has a caller, so a
         // `?` in its body targets the closure's own return (W7-48). Saved/restored beside
         // `current_ret`.
@@ -4005,6 +4013,7 @@ impl Checker {
         self.in_defer_block = saved_in_defer;
         self.current_ret = saved_ret;
         self.in_fn_body = saved_in_fn;
+        self.in_default_provider = saved_in_dflt;
         self.in_spawn_block = saved_in_spawn;
         self.yield_ty = saved_yield;
         self.in_generator = saved_ig;

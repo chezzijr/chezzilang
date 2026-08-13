@@ -20852,18 +20852,53 @@ fn print_builtin_sig_present_after_port() {
     assert!(c.builtin_sig("print").is_some());
 }
 
-/// KNOWN v1 LIMIT (pinned): a variadic call used as a parameter DEFAULT is not collapsed (the desugar
-/// collapse runs on pass 1 only; a default is spliced after pass 1), so it is a compile error — the
-/// same on both engines, not a parity divergence. Documented in PROGRESS.md; wrap in a fixed-arity
-/// helper. This test locks the behavior so a future collapse-idempotency fix updates it deliberately.
+/// W7-51 lifted the old v1 limit this test used to pin. A variadic call in a parameter DEFAULT was a
+/// compile error (`'sum_all' expects 1 argument(s), got 3`) because the variadic collapse was gated
+/// to desugar's FIRST pass while a default was spliced raw AFTER it, so the spliced call never
+/// collapsed. The default now lives in a provider function walked exactly once, like any other body,
+/// so the collapse fires normally. Measured on `b1307258`: two type errors; here: clean, and
+/// `chezzi run` prints `0`.
 #[test]
-fn variadic_call_as_param_default_is_compile_error() {
+fn variadic_call_as_param_default_collapses() {
     let errs = check_desugared(
         "fn sum_all(...xs: int) -> int:\n    return 0\n\nfn g(x: int = sum_all(1, 2, 3)) -> int:\n    return x\n\nfn main():\n    print(g())\n",
     );
+    assert!(errs.is_empty(), "expected clean, got: {errs:?}");
+}
+
+/// W7-51, the one ACCEPTED narrowing. A `?` inside a default used to propagate out of the CALLER —
+/// the default was cloned into the caller's body, so its `Err` early-returned from whatever function
+/// omitted the argument. A default is now compiled once, in its defining module, where there is no
+/// caller frame to propagate into, so the shape is refused. The message is specific: the generic
+/// `'?' used in a function that returns int` would name a return type the user never wrote (the
+/// provider is declared `-> <the parameter's type>`).
+#[test]
+fn a_try_inside_a_default_is_rejected_with_the_defining_module_reason() {
+    let errs = check_desugared(
+        "fn getr() -> str!str:\n    return Ok(\"wxyz\")\n\nfn f(x: int = getr()?.len()) -> int!str:\n    return Ok(x)\n\nfn main():\n    print(1)\n",
+    );
     assert!(
-        !errs.is_empty(),
-        "a variadic call as a param default is a known-limit compile error"
+        errs.iter().any(|e| e
+            .message
+            .contains("a default expression cannot propagate with `?`")),
+        "expected the defining-module reason, got: {errs:?}"
+    );
+}
+
+/// …and the neighbours the premise implies must stay legal, since this rule WIDENS what is rejected
+/// (project memory: "a widening is untested by its own suite"). An Option-mode `?.` and a `??` carry
+/// no propagation, so both still work inside a default; and the very same `?` expression is still
+/// fine when it is NOT a default (an ordinary body in a Result-returning fn).
+#[test]
+fn a_non_propagating_carrier_in_a_default_and_a_try_outside_one_stay_legal() {
+    ok_desugared(
+        "fn geto() -> Option[str]:\n    return Some(\"abc\")\n\nfn f(x: Option[int] = geto()?.len()) -> int:\n    return 1\n\nfn main():\n    print(f())\n",
+    );
+    ok_desugared(
+        "fn geto() -> Option[int]:\n    return Some(3)\n\nfn f(x: int = geto() ?? 0) -> int:\n    return x\n\nfn main():\n    print(f())\n",
+    );
+    ok_desugared(
+        "fn getr() -> str!str:\n    return Ok(\"wxyz\")\n\nfn f() -> int!str:\n    return Ok(getr()?.len())\n\nfn main():\n    print(1)\n",
     );
 }
 

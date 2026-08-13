@@ -9,8 +9,15 @@
 //! Scope: free functions (own module + `from`-imported + module-qualified `alias.f(...)`) and struct
 //! constructors. Enum-variant constructors are excluded (payloads are unnamed) and methods are
 //! deferred (resolving a receiver type needs the checker). A default may be any expression that does
-//! not reference another parameter/field — `validate_defaults` enforces this (the default is cloned
-//! into the caller's scope at the omitting call site, where parameters/fields are not bound).
+//! not reference another parameter/field — `validate_defaults` enforces this (no parameter/field is
+//! bound where a default is evaluated).
+//!
+//! **How an omitted argument is materialised (W7-51).** A self-contained literal (`= 10`, `= -1`,
+//! `= None`, `= []`) is cloned into the call site. Anything else is compiled ONCE, as a hidden
+//! zero-arg `fn` appended to the module that DECLARES the parameter ([`synthesize_providers`]), and
+//! the call site gets a call to it. That is what makes a default resolve — and evaluate — in the
+//! definer's namespace (as Python, Ruby and Kotlin all do) instead of the caller's, and what lets
+//! default chains compose to any depth. See [`Dflt`] and [`Walker::splice_default`].
 //!
 //! The pass is **scope-aware**: a local binding may shadow a top-level function name, so a call is
 //! only rewritten when its callee resolves to a registered callable and is *not* shadowed by a local
@@ -18,18 +25,145 @@
 
 use crate::ast::{
     Block, Chunk, DeferTarget, Expr, ExprKind, Import, MatchExprArm, Module, OptCall, Param,
-    Pattern, Span, SpawnTarget, Stmt, StmtKind, Type, WaitArmKind, WaitTarget,
+    Pattern, Span, SpawnTarget, Stmt, StmtKind, Type, TypeParam, WaitArmKind, WaitTarget,
 };
 use crate::resolver::{ModuleGraph, ModuleId, ResolveError};
 use std::collections::{HashMap, HashSet};
 
-/// A callable's parameter (or struct field), in declaration order, with its optional constant
+/// Name prefix of a synthesized **default-argument provider** — the hidden zero-arg function that
+/// evaluates one parameter/field default in the module that DECLARES it (W7-51). `$` is unspellable
+/// in Chezzi source, so a provider name can never collide with a user global or an import bind.
+pub const PROVIDER_PREFIX: &str = "$def$";
+
+/// The provider function's name for one parameter/field default. `file` is the DECLARING module's
+/// [`crate::resolver::LoadedModule::file`] id (already unique per module, and the same coordinate
+/// the checker→compiler side-table keys use), `owner` names the declaring callable (`f`, `S` for a
+/// struct field, `S.m` for a method). ONE function, called by both the synthesizer and every
+/// registry collector, so the two can never drift into naming a provider that does not exist.
+fn provider_name(file: u32, owner: &str, param: &str) -> String {
+    format!("{PROVIDER_PREFIX}{file}${owner}.{param}$")
+}
+
+/// Decode a provider name back into a human phrase for a diagnostic (`parameter 'x' of 'f'`).
+/// Total: an unparseable name (impossible for a name [`provider_name`] built) degrades to itself.
+fn provider_label(name: &str) -> String {
+    let Some(rest) = name
+        .strip_prefix(PROVIDER_PREFIX)
+        .and_then(|r| r.strip_suffix('$'))
+    else {
+        return format!("'{name}'");
+    };
+    // `<file>$<owner>.<param>` — the owner may itself contain a `.` (`S.m`), the param never does.
+    let Some((_, owner_param)) = rest.split_once('$') else {
+        return format!("'{name}'");
+    };
+    match owner_param.rsplit_once('.') {
+        Some((owner, param)) => format!("parameter '{param}' of '{owner}'"),
+        None => format!("'{owner_param}'"),
+    }
+}
+
+/// How an omitted argument is materialised at a call site.
+///
+/// The split is the whole of W7-51: a **self-contained literal** is cheap and context-free, so it is
+/// still cloned into the caller (`= 10`, `= -1`, `= "hi"`, `= None`, `= []`); **everything else** is
+/// compiled ONCE, as a zero-arg function in its defining module, and the caller merely calls it. A
+/// provider body therefore resolves — and evaluates — in the DEFINER's namespace (`Obj::Func` carries
+/// its `home`), which is what Python, Ruby and Kotlin all do, and what a spliced clone could not do.
+#[derive(Clone, PartialEq)]
+enum Dflt {
+    /// Cloned inline at the call site (and re-walked there, so it still spends the depth budget).
+    Inline(Expr),
+    /// Call the zero-arg provider synthesized in the module named by `module`.
+    Provider { module: ModuleId, name: String },
+}
+
+/// Is `e` a **self-contained literal** — an expression that can be cloned into any number of call
+/// sites, in any module, and mean exactly the same thing?
+///
+/// Deliberately an allow-list and deliberately narrower than "resolves to the same value": when in
+/// doubt the default becomes a provider, which is always correct and one call slower. In particular
+/// a `Str` carrying `{`/`}` is NOT inline — this same pass turns it into an `Interp` holding
+/// arbitrary sub-expressions. Excluding every `Call`/`Field`/`Ident` is also what keeps W7-49's
+/// span-keyed side tables injective: an inline default records no keyword/carrier/witness entry, so
+/// two clones of it cannot resolve two ways under one key.
+fn is_inline_default(e: &Expr) -> bool {
+    match &e.kind {
+        ExprKind::Int(_)
+        | ExprKind::Float(_)
+        | ExprKind::Bytes(_)
+        | ExprKind::RawStr(_)
+        | ExprKind::Bool(_) => true,
+        ExprKind::Str(s) => !s.contains('{') && !s.contains('}'),
+        // The only identifiers that are self-contained VALUES rather than references to a namespace:
+        // the nullary builtin variant and `nil`. Both are reserved, so no module can rebind them.
+        ExprKind::Ident(n) => n == "None" || n == "nil",
+        ExprKind::Unary { expr, .. } => is_inline_default(expr),
+        ExprKind::Binary { lhs, rhs, .. } => is_inline_default(lhs) && is_inline_default(rhs),
+        ExprKind::Range { start, end } => is_inline_default(start) && is_inline_default(end),
+        ExprKind::List(xs) | ExprKind::Tuple(xs) | ExprKind::Set(xs) => {
+            xs.iter().all(is_inline_default)
+        }
+        ExprKind::Map(ps) => ps
+            .iter()
+            .all(|(k, v)| is_inline_default(k) && is_inline_default(v)),
+        _ => false,
+    }
+}
+
+/// Classify one declared default. THE single decision point: [`synthesize_providers`] emits a
+/// provider `fn` exactly when this returns [`Dflt::Provider`], and every registry collector calls
+/// this to learn the name of the provider that was (or was not) emitted.
+///
+/// Two shapes keep the historical inline clone even though they are not literals, because a provider
+/// is declared `-> <the parameter's type>` and neither can supply one:
+///   * an **un-annotated** parameter — already `parameter 'x' needs a type annotation`;
+///   * a type mentioning an **enclosing type parameter** (`x: T = mk()`) — `T` is unbound outside the
+///     owner's signature, and the decl-site check already rejects the shape with
+///     `default value for parameter 'x': expected T, found int`.
+///
+/// Both are compile errors today and stay exactly one error; giving them a provider would add a
+/// second, worse one.
+fn dflt_for(
+    d: &Expr,
+    ty: Option<&Type>,
+    type_params: &[String],
+    module: &ModuleId,
+    file: u32,
+    owner: &str,
+    param: &str,
+) -> Dflt {
+    if is_inline_default(d) {
+        return Dflt::Inline(d.clone());
+    }
+    let Some(ty) = ty else {
+        return Dflt::Inline(d.clone());
+    };
+    if crate::checker::type_mentions_any(ty, type_params) {
+        return Dflt::Inline(d.clone());
+    }
+    Dflt::Provider {
+        module: module.clone(),
+        name: provider_name(file, owner, param),
+    }
+}
+
+/// The type-parameter names in scope for a signature (`fn f[T](…) where U: …`), used by
+/// [`dflt_for`]'s unbound-`T` carve-out. `extra` carries an enclosing struct/enum's own params.
+fn tp_names(decl: &crate::ast::FnDecl, extra: &[String]) -> Vec<String> {
+    let mut v = extra.to_vec();
+    v.extend(decl.type_params.iter().map(|t| t.name.clone()));
+    v.extend(decl.where_bounds.iter().map(|t| t.name.clone()));
+    v
+}
+
+/// A callable's parameter (or struct field), in declaration order, with its optional
 /// default. Cloned out of the AST so the per-module registry is independent of the graph we mutate.
 /// `PartialEq` lets us decide whether several same-named struct methods share one binding shape.
 #[derive(Clone, PartialEq)]
 struct PSpec {
     name: String,
-    default: Option<Expr>,
+    default: Option<Dflt>,
     /// True for a variadic parameter (`...xs: T`). `normalize_call` sweeps all surplus trailing
     /// positional args into a synthesized `List` literal at this slot; everything after it is
     /// keyword-only. At most one per spec. Struct fields are never variadic.
@@ -107,6 +241,10 @@ pub fn run(graph: &mut ModuleGraph) -> Result<(), ResolveError> {
     for m in &graph.modules {
         validate_defaults(&m.ast.stmts)?;
     }
+    // W7-51 — every non-inline default becomes a zero-arg `fn` in the module that DECLARES it,
+    // BEFORE the registries are snapshotted (so a collector's `Dflt::Provider` always names a
+    // function that exists) and before the walk (so a provider body is normalized like any other).
+    synthesize_providers(graph);
     let regs = build_registries(graph);
     let methods = collect_methods(graph);
     let methods_by_struct = collect_methods_by_struct(graph);
@@ -117,82 +255,43 @@ pub fn run(graph: &mut ModuleGraph) -> Result<(), ResolveError> {
         module_index.insert(m.id.clone(), i);
     }
 
-    // Two passes. Pass 1 lowers bodies + declaration-site defaults and splices each omitted default
-    // into its call site — but the spliced copy comes from the registry (raw, un-lowered), so a
-    // default that contains a `?.`/`??` carrier or a call to a defaulted function is still raw. Pass 2
-    // re-walks, lowering those spliced default expressions in place. Already-lowered nodes and
-    // already-filled calls are no-ops on the second pass, so this is idempotent.
-    for pass in 0..2 {
-        for mi in 0..graph.modules.len() {
-            // Build this module's resolution context: own id + bare from-imports + module aliases.
-            let own_id = graph.modules[mi].id.clone();
-            let mut bare_from: HashMap<String, ModuleId> = HashMap::new();
-            let mut aliases: HashMap<String, ModuleId> = HashMap::new();
-            for imp in &graph.modules[mi].imports {
-                match &imp.import {
-                    Import::Module { path, alias, .. } => {
-                        let local = alias
-                            .clone()
-                            .or_else(|| path.last().cloned())
-                            .unwrap_or_default();
-                        if !local.is_empty() {
-                            aliases.insert(local, imp.target.clone());
-                        }
+    // ONE pass (W7-51). The old driver ran twice because a default was spliced RAW into the tail of
+    // `walk_expr_inner`, after that node's children had already been walked — so a carrier or a
+    // nested defaulted call inside a default needed a second sweep, and a chain three deep needed a
+    // third that never came. Now a non-inline default is never spliced at all (the call site gets a
+    // complete zero-arg call to its provider, which needs no further rewriting) and an inline one is
+    // walked by `splice_default` at the moment it is cloned. Nothing is ever pushed into a subtree
+    // the pass has already walked past, so depth is structural rather than pass-bounded.
+    for mi in 0..graph.modules.len() {
+        // Build this module's resolution context: own id + bare from-imports + module aliases.
+        let own_id = graph.modules[mi].id.clone();
+        let mut bare_from: HashMap<String, ModuleId> = HashMap::new();
+        let mut aliases: HashMap<String, ModuleId> = HashMap::new();
+        for imp in &graph.modules[mi].imports {
+            match &imp.import {
+                Import::Module { path, alias, .. } => {
+                    let local = alias
+                        .clone()
+                        .or_else(|| path.last().cloned())
+                        .unwrap_or_default();
+                    if !local.is_empty() {
+                        aliases.insert(local, imp.target.clone());
                     }
-                    Import::From { names, .. } => {
-                        for (name, alias) in names {
-                            let local = alias.clone().unwrap_or_else(|| name.clone());
-                            bare_from.insert(local, imp.target.clone());
-                        }
+                }
+                Import::From { names, .. } => {
+                    for (name, alias) in names {
+                        let local = alias.clone().unwrap_or_else(|| name.clone());
+                        bare_from.insert(local, imp.target.clone());
                     }
                 }
             }
-
-            let ctx = Ctx {
-                regs: &regs,
-                own_id: &own_id,
-                bare_from: &bare_from,
-                aliases: &aliases,
-                methods: &methods,
-                methods_by_struct: &methods_by_struct,
-                fn_fields: &fn_fields,
-            };
-            let mut walker = Walker {
-                ctx,
-                scopes: Vec::new(),
-                local_struct: Vec::new(),
-                first_pass: pass == 0,
-                depth: 0,
-            };
-            // Borrow the module's AST mutably; everything `walker` reads lives in `regs`/the maps above.
-            let ast: &mut Module = &mut graph.modules[mi].ast;
-            walker.walk_block(&mut ast.stmts)?;
         }
-    }
-    Ok(())
-}
 
-/// Desugar a single standalone module (no imports) in place. Used by the test/standalone runners,
-/// which bypass [`build_graph`](crate::resolver::build_graph) and so must apply this pass themselves
-/// to stay consistent with the file-backed graph path.
-#[cfg(test)]
-pub fn run_standalone(module: &mut Module) -> Result<(), ResolveError> {
-    validate_defaults(&module.stmts)?;
-    let id = ModuleId(std::path::PathBuf::from("<main>"));
-    let mut regs = HashMap::new();
-    regs.insert(id.clone(), collect_module_reg(&module.stmts));
-    let mut methods = HashMap::new();
-    collect_methods_into(&module.stmts, &mut methods);
-    let methods_by_struct = collect_methods_by_struct_into_standalone(&module.stmts);
-    let mut fn_fields = HashSet::new();
-    collect_fn_fields_into(&module.stmts, &mut fn_fields);
-    let bare_from = HashMap::new();
-    let aliases = HashMap::new();
-    // Two passes — see the comment in [`run`] (spliced defaults are lowered on the second pass).
-    for pass in 0..2 {
         let ctx = Ctx {
             regs: &regs,
-            own_id: &id,
+            own_id: &own_id,
+            own_idx: mi,
+            module_index: &module_index,
             bare_from: &bare_from,
             aliases: &aliases,
             methods: &methods,
@@ -203,21 +302,321 @@ pub fn run_standalone(module: &mut Module) -> Result<(), ResolveError> {
             ctx,
             scopes: Vec::new(),
             local_struct: Vec::new(),
-            first_pass: pass == 0,
+            needed: std::collections::BTreeMap::new(),
             depth: 0,
         };
-        walker.walk_block(&mut module.stmts)?;
+        {
+            // Borrow the module's AST mutably; everything `walker` reads lives in `regs`/the maps above.
+            let ast: &mut Module = &mut graph.modules[mi].ast;
+            walker.walk_block(&mut ast.stmts)?;
+        }
+        // Give this module an import edge for every OTHER module's provider it now calls. The
+        // provider then binds like any ordinary `from`-imported function — no new AST node, no new
+        // opcode: the checker (`Checker::bind_import`), the compiler (`collect_globals`) and the VM
+        // (`Vm::bind_import`) all read `LoadedModule.imports`, and `desugar::run` is called from
+        // `resolver::build_graph` before every one of them. Drained in NAME order (a `BTreeMap`)
+        // because import order feeds `ModuleProto::global_slots`, which must be deterministic.
+        for (name, (target, span)) in std::mem::take(&mut walker.needed) {
+            let dotted = graph.modules[module_index[&target]].dotted.clone();
+            graph.modules[mi]
+                .imports
+                .push(crate::resolver::ResolvedImport {
+                    target,
+                    import: Import::From {
+                        path: dotted,
+                        names: vec![(name, None)],
+                        name_spans: vec![span],
+                    },
+                    span,
+                });
+        }
     }
-    Ok(())
+    check_provider_cycles(graph)
+}
+
+/// Desugar a single standalone module (no imports) in place. Used by the test/standalone runners,
+/// which bypass [`build_graph`](crate::resolver::build_graph) and so must apply this pass themselves
+/// to stay consistent with the file-backed graph path.
+#[cfg(test)]
+pub fn run_standalone(module: &mut Module) -> Result<(), ResolveError> {
+    validate_defaults(&module.stmts)?;
+    let id = ModuleId(std::path::PathBuf::from("<main>"));
+    // Mirror [`run`]: synthesize providers into the single module first. Its `file` id is whatever
+    // the test's lexer stamped; there is only one module, so any value is unique by construction.
+    let file = module.stmts.first().map_or(0, |s| s.span.file);
+    synthesize_providers_into(&mut module.stmts, &id, file);
+    let mut regs = HashMap::new();
+    regs.insert(id.clone(), collect_module_reg(&module.stmts, &id, file));
+    let mut methods = HashMap::new();
+    collect_methods_into(&module.stmts, &mut methods, &id, file);
+    let methods_by_struct = collect_methods_by_struct_into_standalone(&module.stmts, &id, file);
+    let mut fn_fields = HashSet::new();
+    collect_fn_fields_into(&module.stmts, &mut fn_fields);
+    let bare_from = HashMap::new();
+    let aliases = HashMap::new();
+    let module_index = HashMap::from([(id.clone(), 0usize)]);
+    // ONE pass — see the comment in [`run`]. A standalone module has no imports, so every provider
+    // it calls is its own and no synthetic import edge can be needed.
+    let ctx = Ctx {
+        regs: &regs,
+        own_id: &id,
+        own_idx: 0,
+        module_index: &module_index,
+        bare_from: &bare_from,
+        aliases: &aliases,
+        methods: &methods,
+        methods_by_struct: &methods_by_struct,
+        fn_fields: &fn_fields,
+    };
+    let mut walker = Walker {
+        ctx,
+        scopes: Vec::new(),
+        local_struct: Vec::new(),
+        needed: std::collections::BTreeMap::new(),
+        depth: 0,
+    };
+    walker.walk_block(&mut module.stmts)?;
+    debug_assert!(walker.needed.is_empty(), "standalone module has no imports");
+    let mut edges = HashMap::new();
+    collect_provider_edges(&module.stmts, &mut edges);
+    check_provider_cycles_in(&edges)
 }
 
 /// Snapshot each module's free functions and struct constructors into a registry keyed by module id.
 fn build_registries(graph: &ModuleGraph) -> HashMap<ModuleId, ModReg> {
     let mut regs = HashMap::new();
     for m in &graph.modules {
-        regs.insert(m.id.clone(), collect_module_reg(&m.ast.stmts));
+        regs.insert(
+            m.id.clone(),
+            collect_module_reg(&m.ast.stmts, &m.id, m.file),
+        );
     }
     regs
+}
+
+/// One synthesized provider: `fn <name>() -> <ret>: return <default>`.
+///
+/// `ret` is the parameter's **declared** type, never `None` — `None` means *inferred*
+/// (`checker::sig`), and inference errors out on a `None`-only / `[]`-only return.
+/// `is_test: false` keeps providers out of `chezzi test` discovery. Every span is the default
+/// expression's own, so a diagnostic inside the body points at the text the user actually wrote, in
+/// the module they wrote it in.
+fn provider_fn(name: String, ret: Type, default: Expr) -> Stmt {
+    let span = default.span;
+    Stmt {
+        kind: StmtKind::Fn(crate::ast::FnDecl {
+            name,
+            name_span: span,
+            type_params: Vec::new(),
+            where_bounds: Vec::new(),
+            params: Vec::new(),
+            ret: Some(ret),
+            body: vec![Stmt {
+                kind: StmtKind::Return(Some(default)),
+                span,
+            }],
+            is_generator: false,
+            is_test: false,
+            inline_expr_body: false,
+            doc: None,
+        }),
+        span,
+    }
+}
+
+/// Append the provider `fn`s for one signature's non-inline defaults.
+fn push_param_providers(
+    out: &mut Vec<Stmt>,
+    id: &ModuleId,
+    file: u32,
+    owner: &str,
+    decl: &crate::ast::FnDecl,
+    extra_tps: &[String],
+) {
+    let tps = tp_names(decl, extra_tps);
+    for p in &decl.params {
+        let Some(d) = &p.default else { continue };
+        if let Dflt::Provider { name, .. } =
+            dflt_for(d, p.ty.as_ref(), &tps, id, file, owner, &p.name)
+            && let Some(ty) = &p.ty
+        {
+            out.push(provider_fn(name, ty.clone(), d.clone()));
+        }
+    }
+}
+
+/// **W7-51 — compile each non-inline default ONCE, in the module that declares it.**
+///
+/// For every parameter/field default that [`dflt_for`] classifies as a provider, append a hidden
+/// zero-arg `fn` to the DECLARING module's top level whose body returns that default expression. A
+/// call site that omits the argument then emits a call to this function instead of a clone of the
+/// expression, which fixes two things at once:
+///
+///   * **scope** — `Obj::Func` carries its `home` module, so the body reads the definer's globals
+///     and the definer's imports, not the caller's. Before this, `fn f(x: int = K)` in `g.chz`
+///     resolved `K` in whatever module called `g.f()` — an `unknown name` at best and a *silently
+///     different value* when the caller happened to declare its own `K`.
+///   * **depth** — a nested default (`fn b(y = c())` called from `fn a(x = b())`) is an ordinary
+///     call inside an ordinary function body, so chains compose to any depth. Before this the
+///     splice happened in the tail of `walk_expr_inner`, after the node's children were walked, and
+///     the driver's two passes bounded the chain at depth 2.
+///
+/// Appended, not inserted: top-level `fn`s are hoisted by both `compiler::collect_globals` and the
+/// checker's signature pre-pass, so declaration position is irrelevant.
+fn synthesize_providers(graph: &mut ModuleGraph) {
+    for m in graph.modules.iter_mut() {
+        let (id, file) = (m.id.clone(), m.file);
+        synthesize_providers_into(&mut m.ast.stmts, &id, file);
+    }
+}
+
+/// [`synthesize_providers`] for one module's top-level statements.
+fn synthesize_providers_into(stmts: &mut Vec<Stmt>, id: &ModuleId, file: u32) {
+    {
+        let mut new_fns: Vec<Stmt> = Vec::new();
+        for stmt in stmts.iter() {
+            match &stmt.kind {
+                StmtKind::Fn(decl) => {
+                    push_param_providers(&mut new_fns, id, file, &decl.name, decl, &[]);
+                }
+                StmtKind::Struct {
+                    name,
+                    type_params,
+                    fields,
+                    methods,
+                    ..
+                } => {
+                    let stps: Vec<String> = type_params.iter().map(|t| t.name.clone()).collect();
+                    for f in fields {
+                        let Some(d) = &f.default else { continue };
+                        if let Dflt::Provider { name: pn, .. } =
+                            dflt_for(d, Some(&f.ty), &stps, id, file, name, &f.name)
+                        {
+                            new_fns.push(provider_fn(pn, f.ty.clone(), d.clone()));
+                        }
+                    }
+                    for mth in methods {
+                        let owner = format!("{name}.{}", mth.name);
+                        push_param_providers(&mut new_fns, id, file, &owner, mth, &stps);
+                    }
+                }
+                StmtKind::Enum {
+                    name,
+                    type_params,
+                    methods,
+                    ..
+                }
+                | StmtKind::NewType {
+                    name,
+                    type_params,
+                    methods,
+                    ..
+                } => {
+                    let stps: Vec<String> = type_params.iter().map(|t| t.name.clone()).collect();
+                    for mth in methods {
+                        let owner = format!("{name}.{}", mth.name);
+                        push_param_providers(&mut new_fns, id, file, &owner, mth, &stps);
+                    }
+                }
+                StmtKind::NativeStruct {
+                    name,
+                    type_params,
+                    bodied_methods,
+                    ..
+                } => {
+                    let stps: Vec<String> = type_params.iter().map(|t| t.name.clone()).collect();
+                    for mth in bodied_methods {
+                        let owner = format!("{name}.{}", mth.name);
+                        push_param_providers(&mut new_fns, id, file, &owner, mth, &stps);
+                    }
+                }
+                _ => {}
+            }
+        }
+        stmts.extend(new_fns);
+    }
+}
+
+/// **Provider cycle check** — `fn f(x: int = f())` used to silently expand to a three-deep
+/// `f(f(f()))` (the two-pass driver's fixed point); under providers it would be unbounded runtime
+/// recursion. Every provider body is scanned AFTER normalization, so a provider→provider edge is
+/// literally a `$def$…` identifier in the body; a back edge is a clear compile error.
+/// Cross-module edges cannot close a cycle (the splice only imports a load-order ANCESTOR, and
+/// imports are acyclic), but the DFS spans the graph anyway rather than relying on that.
+fn check_provider_cycles(graph: &ModuleGraph) -> Result<(), ResolveError> {
+    let mut edges: HashMap<String, (Vec<String>, Span)> = HashMap::new();
+    for m in &graph.modules {
+        collect_provider_edges(&m.ast.stmts, &mut edges);
+    }
+    check_provider_cycles_in(&edges)
+}
+
+/// One module's provider→provider edges, keyed by provider name (globally unique — the name embeds
+/// the declaring module's `file` id).
+fn collect_provider_edges(stmts: &[Stmt], edges: &mut HashMap<String, (Vec<String>, Span)>) {
+    for stmt in stmts {
+        if let StmtKind::Fn(decl) = &stmt.kind
+            && decl.name.starts_with(PROVIDER_PREFIX)
+        {
+            let mut outs: Vec<String> = Vec::new();
+            for s in &decl.body {
+                if let StmtKind::Return(Some(e)) = &s.kind {
+                    walk_idents(e, &mut |n| {
+                        if n.starts_with(PROVIDER_PREFIX) {
+                            outs.push(n.to_string());
+                        }
+                    });
+                }
+            }
+            edges.insert(decl.name.clone(), (outs, stmt.span));
+        }
+    }
+}
+
+fn check_provider_cycles_in(
+    edges: &HashMap<String, (Vec<String>, Span)>,
+) -> Result<(), ResolveError> {
+    // Iterative DFS with an explicit on-stack set: `state` is 1 = in progress, 2 = done.
+    let mut state: HashMap<&str, u8> = HashMap::new();
+    let mut order: Vec<&String> = edges.keys().collect();
+    order.sort();
+    for root in order {
+        if state.get(root.as_str()).copied() == Some(2) {
+            continue;
+        }
+        state.insert(root.as_str(), 1);
+        let mut stack: Vec<(&str, usize)> = vec![(root.as_str(), 0)];
+        while let Some((node, i)) = stack.pop() {
+            let Some((outs, span)) = edges.get(node) else {
+                state.insert(node, 2);
+                continue;
+            };
+            if i >= outs.len() {
+                state.insert(node, 2);
+                continue;
+            }
+            stack.push((node, i + 1));
+            let next = outs[i].as_str();
+            match state.get(next).copied() {
+                Some(1) => {
+                    return Err(err(
+                        *span,
+                        format!(
+                            "the default value for {} is cyclic: evaluating it requires evaluating {} again",
+                            provider_label(node),
+                            provider_label(next)
+                        ),
+                    ));
+                }
+                Some(_) => {}
+                None => {
+                    state.insert(next, 1);
+                    stack.push((next, 0));
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 /// A program-wide registry of struct **methods**, keyed by method name. A method's receiver type is
@@ -227,38 +626,82 @@ fn build_registries(graph: &ModuleGraph) -> HashMap<ModuleId, ModReg> {
 fn collect_methods(graph: &ModuleGraph) -> HashMap<String, Vec<Vec<PSpec>>> {
     let mut map: HashMap<String, Vec<Vec<PSpec>>> = HashMap::new();
     for m in &graph.modules {
-        collect_methods_into(&m.ast.stmts, &mut map);
+        collect_methods_into(&m.ast.stmts, &mut map, &m.id, m.file);
     }
     map
 }
 
-/// Add one module's struct methods to `map`. The receiver (`self`, params[0]) is dropped — a call's
-/// explicit args correspond to params[1..].
-fn collect_methods_into(stmts: &[Stmt], map: &mut HashMap<String, Vec<Vec<PSpec>>>) {
+/// The `[PSpec]` for one method's explicit parameters. The receiver (`self`, params[0]) is dropped —
+/// a call's explicit args correspond to params[1..]. `owner` is `<Type>.<method>`, matching what
+/// [`synthesize_providers`] passed for the same declaration.
+fn method_spec(
+    method: &crate::ast::FnDecl,
+    owner_type: &str,
+    type_params: &[TypeParam],
+    id: &ModuleId,
+    file: u32,
+) -> Vec<PSpec> {
+    let owner = format!("{owner_type}.{}", method.name);
+    let stps: Vec<String> = type_params.iter().map(|t| t.name.clone()).collect();
+    let tps = tp_names(method, &stps);
+    method
+        .params
+        .iter()
+        .skip(1)
+        .map(|p| PSpec {
+            name: p.name.clone(),
+            default: p
+                .default
+                .as_ref()
+                .map(|d| dflt_for(d, p.ty.as_ref(), &tps, id, file, &owner, &p.name)),
+            is_variadic: p.is_variadic,
+        })
+        .collect()
+}
+
+/// Add one module's struct methods to `map`.
+fn collect_methods_into(
+    stmts: &[Stmt],
+    map: &mut HashMap<String, Vec<Vec<PSpec>>>,
+    id: &ModuleId,
+    file: u32,
+) {
     for stmt in stmts {
         // Struct AND enum methods share one name-keyed registry (a method call is resolved by name
         // in this pre-type pass; the checker has already validated the receiver type).
-        let methods = match &stmt.kind {
-            StmtKind::Struct { methods, .. } => methods,
-            StmtKind::Enum { methods, .. } => methods,
-            StmtKind::NewType { methods, .. } => methods,
+        let (owner_type, type_params, methods) = match &stmt.kind {
+            StmtKind::Struct {
+                name,
+                type_params,
+                methods,
+                ..
+            }
+            | StmtKind::Enum {
+                name,
+                type_params,
+                methods,
+                ..
+            }
+            | StmtKind::NewType {
+                name,
+                type_params,
+                methods,
+                ..
+            } => (name, type_params, methods),
             // A native struct's BODIED methods compile like struct methods, so a caller using
             // named/default args on one needs its param-spec registered here too.
-            StmtKind::NativeStruct { bodied_methods, .. } => bodied_methods,
+            StmtKind::NativeStruct {
+                name,
+                type_params,
+                bodied_methods,
+                ..
+            } => (name, type_params, bodied_methods),
             _ => continue,
         };
         for method in methods {
-            let spec: Vec<PSpec> = method
-                .params
-                .iter()
-                .skip(1)
-                .map(|p| PSpec {
-                    name: p.name.clone(),
-                    default: p.default.clone(),
-                    is_variadic: p.is_variadic,
-                })
-                .collect();
-            map.entry(method.name.clone()).or_default().push(spec);
+            map.entry(method.name.clone())
+                .or_default()
+                .push(method_spec(method, owner_type, type_params, id, file));
         }
     }
 }
@@ -273,24 +716,30 @@ fn collect_methods_by_struct(graph: &ModuleGraph) -> HashMap<(String, String), V
     let mut map: HashMap<(String, String), Option<Vec<PSpec>>> = HashMap::new();
     for m in &graph.modules {
         for stmt in &m.ast.stmts {
-            let (name, methods) = match &stmt.kind {
-                StmtKind::Struct { name, methods, .. } => (name, methods),
-                StmtKind::Enum { name, methods, .. } => (name, methods),
-                StmtKind::NewType { name, methods, .. } => (name, methods),
+            let (name, type_params, methods) = match &stmt.kind {
+                StmtKind::Struct {
+                    name,
+                    type_params,
+                    methods,
+                    ..
+                }
+                | StmtKind::Enum {
+                    name,
+                    type_params,
+                    methods,
+                    ..
+                }
+                | StmtKind::NewType {
+                    name,
+                    type_params,
+                    methods,
+                    ..
+                } => (name, type_params, methods),
                 _ => continue,
             };
             {
                 for method in methods {
-                    let spec: Vec<PSpec> = method
-                        .params
-                        .iter()
-                        .skip(1)
-                        .map(|p| PSpec {
-                            name: p.name.clone(),
-                            default: p.default.clone(),
-                            is_variadic: p.is_variadic,
-                        })
-                        .collect();
+                    let spec: Vec<PSpec> = method_spec(method, name, type_params, &m.id, m.file);
                     let key = (name.clone(), method.name.clone());
                     // Struct names are program-global (a reused name is a hard collision error in the
                     // checker), but two modules CAN parse a same-named struct. If their specs for the
@@ -319,31 +768,40 @@ fn collect_methods_by_struct(graph: &ModuleGraph) -> HashMap<(String, String), V
 #[cfg(test)]
 fn collect_methods_by_struct_into_standalone(
     stmts: &[Stmt],
+    id: &ModuleId,
+    file: u32,
 ) -> HashMap<(String, String), Vec<PSpec>> {
     let mut map: HashMap<(String, String), Vec<PSpec>> = HashMap::new();
     for stmt in stmts {
-        let (name, methods) = match &stmt.kind {
-            StmtKind::Struct { name, methods, .. } => (name, methods),
-            StmtKind::Enum { name, methods, .. } => (name, methods),
-            StmtKind::NewType { name, methods, .. } => (name, methods),
+        let (name, type_params, methods) = match &stmt.kind {
+            StmtKind::Struct {
+                name,
+                type_params,
+                methods,
+                ..
+            }
+            | StmtKind::Enum {
+                name,
+                type_params,
+                methods,
+                ..
+            }
+            | StmtKind::NewType {
+                name,
+                type_params,
+                methods,
+                ..
+            } => (name, type_params, methods),
             StmtKind::NativeStruct {
                 name,
+                type_params,
                 bodied_methods,
                 ..
-            } => (name, bodied_methods),
+            } => (name, type_params, bodied_methods),
             _ => continue,
         };
         for method in methods {
-            let spec: Vec<PSpec> = method
-                .params
-                .iter()
-                .skip(1)
-                .map(|p| PSpec {
-                    name: p.name.clone(),
-                    default: p.default.clone(),
-                    is_variadic: p.is_variadic,
-                })
-                .collect();
+            let spec: Vec<PSpec> = method_spec(method, name, type_params, id, file);
             map.insert((name.clone(), method.name.clone()), spec);
         }
     }
@@ -351,10 +809,11 @@ fn collect_methods_by_struct_into_standalone(
 }
 
 /// Reject any parameter/field default that references another parameter/field in the same signature.
-/// A default is **cloned into the caller's scope** at the omitting call site (see `normalize_call`),
-/// where those parameters/fields are not bound — so a non-param-referencing expression (`compute()`,
-/// `1 + 2`, `GLOBAL * 2`) is fine, but `y: int = x + 1` is not. Covers top-level functions and struct
-/// methods/fields (the only places defaults are collected). Runs before the call-rewrite pass.
+/// A default is evaluated with NO parameter/field bound — in its own provider function, or as a
+/// literal clone at the call site (see [`Dflt`]) — so a non-param-referencing expression
+/// (`compute()`, `1 + 2`, `GLOBAL * 2`) is fine, but `y: int = x + 1` is not. Covers top-level
+/// functions and struct methods/fields (the only places defaults are collected). Runs before
+/// provider synthesis and the call-rewrite pass.
 fn validate_defaults(stmts: &[Stmt]) -> Result<(), ResolveError> {
     for stmt in stmts {
         match &stmt.kind {
@@ -370,7 +829,7 @@ fn validate_defaults(stmts: &[Stmt]) -> Result<(), ResolveError> {
                         return Err(err(
                             d.span,
                             format!(
-                                "default value cannot reference field '{n}' (defaults are evaluated at the call site, where fields are not in scope)"
+                                "default value cannot reference field '{n}' (a default is evaluated on its own, where fields are not in scope)"
                             ),
                         ));
                     }
@@ -400,7 +859,7 @@ fn check_param_defaults(params: &[Param]) -> Result<(), ResolveError> {
             return Err(err(
                 d.span,
                 format!(
-                    "default value cannot reference parameter '{n}' (defaults are evaluated at the call site, where parameters are not in scope)"
+                    "default value cannot reference parameter '{n}' (a default is evaluated on its own, where parameters are not in scope)"
                 ),
             ));
         }
@@ -561,31 +1020,43 @@ fn collect_fn_fields_into(stmts: &[Stmt], set: &mut HashSet<String>) {
 }
 
 /// Build the callable registry (free functions + struct constructors) for one module's top level.
-fn collect_module_reg(stmts: &[Stmt]) -> ModReg {
+fn collect_module_reg(stmts: &[Stmt], id: &ModuleId, file: u32) -> ModReg {
     let mut reg = ModReg::default();
     for stmt in stmts {
         match &stmt.kind {
             StmtKind::Fn(decl) => {
+                let tps = tp_names(decl, &[]);
                 reg.fns.insert(
                     decl.name.clone(),
                     decl.params
                         .iter()
                         .map(|p| PSpec {
                             name: p.name.clone(),
-                            default: p.default.clone(),
+                            default: p.default.as_ref().map(|d| {
+                                dflt_for(d, p.ty.as_ref(), &tps, id, file, &decl.name, &p.name)
+                            }),
                             is_variadic: p.is_variadic,
                         })
                         .collect(),
                 );
             }
-            StmtKind::Struct { name, fields, .. } => {
+            StmtKind::Struct {
+                name,
+                type_params,
+                fields,
+                ..
+            } => {
+                let tps: Vec<String> = type_params.iter().map(|t| t.name.clone()).collect();
                 reg.structs.insert(
                     name.clone(),
                     fields
                         .iter()
                         .map(|f| PSpec {
                             name: f.name.clone(),
-                            default: f.default.clone(),
+                            default: f
+                                .default
+                                .as_ref()
+                                .map(|d| dflt_for(d, Some(&f.ty), &tps, id, file, name, &f.name)),
                             is_variadic: false,
                         })
                         .collect(),
@@ -617,6 +1088,11 @@ fn collect_module_reg(stmts: &[Stmt]) -> ModReg {
 struct Ctx<'a> {
     regs: &'a HashMap<ModuleId, ModReg>,
     own_id: &'a ModuleId,
+    /// This module's position in `graph.modules` — i.e. its LOAD ORDER (dependencies first, entry
+    /// last). A synthetic provider import is only legal to a STRICTLY EARLIER module; see
+    /// [`Walker::splice_default`].
+    own_idx: usize,
+    module_index: &'a HashMap<ModuleId, usize>,
     bare_from: &'a HashMap<String, ModuleId>,
     aliases: &'a HashMap<String, ModuleId>,
     /// Program-wide struct-method specs (see [`collect_methods`]).
@@ -655,10 +1131,11 @@ struct Walker<'a> {
     /// `recv.m(args)` resolve `m`'s param defaults/variadic against the receiver's *actual* struct (so
     /// a sibling struct's same-named method does not derail the decision).
     local_struct: Vec<HashMap<String, String>>,
-    /// Variadic-collapse runs on the FIRST pass only. The module pass walks the tree twice (to lower
-    /// spliced defaults); the collapse is NOT idempotent (re-running it on pass 2 would wrap the
-    /// synthesized `List` in another `List`), so it must fire exactly once.
-    first_pass: bool,
+    /// Providers in OTHER modules this module's call sites now call, `name → (declaring module,
+    /// first call site)`. Drained into synthetic `from` imports after the walk. A `BTreeMap` so the
+    /// drain order is the (globally unique) provider name — import order feeds the compiler's
+    /// `global_slots`, which must not depend on hash iteration order.
+    needed: std::collections::BTreeMap<String, (ModuleId, Span)>,
     /// Current [`Walker::walk_expr`] recursion depth — see that method. This counter is what turns
     /// [`crate::parser::MAX_AST_DEPTH`] into a **global** bound instead of a per-`Parser` one.
     depth: usize,
@@ -835,9 +1312,11 @@ impl Walker<'_> {
                 self.walk_expr(value)?;
             }
             StmtKind::Fn(decl) => {
-                // Param defaults are evaluated in the caller's scope (no params bound), so normalize
-                // their inner calls + lower their `?.`/`??` carriers here, outside the param scope.
-                // `validate_defaults` guarantees a default references no param, so this is sound.
+                // The DECL-SITE copy of each default is normalized here, outside the param scope
+                // (no param is bound where a default runs; `validate_defaults` guarantees it
+                // references none). This copy is what the checker type-checks against the param's
+                // declared type, and what `compile_suite_new_thunk` compiles for a test suite's
+                // fields; the provider carries an independent copy of the same expression.
                 for p in decl.params.iter_mut() {
                     if let Some(d) = &mut p.default {
                         self.walk_expr(d)?;
@@ -854,8 +1333,8 @@ impl Walker<'_> {
             StmtKind::Struct {
                 fields, methods, ..
             } => {
-                // Field defaults are spliced into the constructor call site — normalize them like
-                // param defaults (outside any scope; they reference no field, per `validate_defaults`).
+                // Field defaults: normalize the decl-site copy like param defaults (outside any
+                // scope; they reference no field, per `validate_defaults`).
                 for f in fields.iter_mut() {
                     if let Some(d) = &mut f.default {
                         self.walk_expr(d)?;
@@ -1036,20 +1515,21 @@ impl Walker<'_> {
     /// `checker::check_interpolation`, `checker::scan_expr_for_pin`, `compiler::compile_str` /
     /// `interp_exprs` — fire only on an `ExprKind::Str` this walk did not convert.
     ///
-    /// **KNOWN RESIDUAL, and the reason this doc says "the tree this walk reaches" and not "every
-    /// tree".** There is one way an *un-converted but well-formed* `Str` survives to those callers: a
-    /// default argument spliced in during **pass 2**. `regs` is built once, before both passes, so a
-    /// spliced default is raw declaration AST; `normalize_call` splices it in the TAIL of
-    /// `walk_expr_inner`, after this node's children were walked; and there is no pass 3. A
-    /// default-of-a-default is exactly that shape. Measured on a working-tree release binary,
-    /// `fn g(a: int = "{ 1+1×15990 }".len())` / `fn h(b: int = g())` / `x := h()+1×15990`:
-    /// `check` rc 0, this counter peaked at **15 995**, and the tree the checker and compiler
-    /// actually descend is **~31 986** nodes — ~1.03× the measured ~33 100-node cliff. Latent, not
-    /// live (no abort reachable: the decl-site walk caps the spliced default at ~16 000, and a
-    /// three-deep default chain hits an unrelated pre-existing arity error), and **pre-existing** —
-    /// the same fixture is accepted on `e1137096`. Not closed here because the fix belongs in the
-    /// two-pass driver / `normalize_call`, which W7-51 is rewriting; closing it there means walking a
-    /// pass-2 splice, or building `regs` from already-lowered ASTs. `docs/gaps.md` W7-50 tracks it.
+    /// **The W7-50 residual is CLOSED by W7-51 — measured, not argued.** Until then there was one
+    /// way an *un-converted but well-formed* `Str` could survive to those callers: a default
+    /// argument spliced in on the driver's **second pass**, after this walk had gone past it, with
+    /// no third pass to catch it. There is now no such splice. A non-literal default is never
+    /// cloned at all (the call site gets a call to its provider, whose body is walked as an
+    /// ordinary top-level `fn`), and the literal class that IS cloned excludes any `Str` carrying
+    /// `{`/`}` *and* is re-walked by [`Self::splice_default`] anyway.
+    ///
+    /// Measured on the same fixture the residual was recorded with —
+    /// `fn g(a: int = "{ 1+1×15990 }".len())` / `fn h(b: int = g())` / `x := h()+1×15990` — with a
+    /// temporary probe on `checker::check_interpolation`'s success arm (which fires exactly when a
+    /// well-formed `Str` reached the checker un-converted): **`925dd0f7`: 1 hit**, peak walk depth
+    /// 15 995, i.e. the ~31 986-node composed tree. **Here: 0 hits**, peak walk depth 15 994, and
+    /// `chezzi run` prints `15995`. The counter is therefore now an upper bound on the tree the
+    /// checker and compiler descend, which is what the bound was for.
     ///
     /// **Non-interpolated programs are unaffected**, bisected before and after: double fold *k* = 16,
     /// flat fold 15 997, postfix 15 996, composed `f(g(…)+1×99)` 127, parens 254 — all identical. An
@@ -1254,6 +1734,75 @@ impl Walker<'_> {
         Ok(())
     }
 
+    /// Materialise one omitted argument into `out` — the single replacement for the three
+    /// `default.clone()` sites this pass used to have.
+    ///
+    /// [`Dflt::Inline`] still clones, but is WALKED here, in the caller's own walk: that charges the
+    /// composed tree's [`crate::parser::MAX_AST_DEPTH`] budget for the clone (a spliced default nests
+    /// inside the expression around it) and means the single pass never has to assume a literal needs
+    /// no lowering. [`Dflt::Provider`] emits a complete zero-arg call — nothing left to rewrite.
+    ///
+    /// **Load-order invariant.** `Vm::bind_import` indexes `self.module_objs[target_idx]`, a `Vec`
+    /// pushed as each module RUNS, so an import edge to a module that has not run yet panics.
+    /// `graph.modules` is in dependency order, so a provider reached through this module's own
+    /// `bare_from`/`aliases` is always a load-order ancestor. The name-keyed METHOD path has no
+    /// module dimension, though — it resolves `recv.m()` by method NAME across every module in the
+    /// graph, including a SIBLING that loads after this one. That is refused here rather than
+    /// assumed away, and the refusal is a real `Err`, NOT a `debug_assert!`: the path is reachable.
+    ///
+    /// MEASURED, three sibling modules (`main` imports `z` then `a`; `a` declares
+    /// `struct S: fn mprobe(self, x: int = av())`; `z` calls `p.mprobe()` through a protocol-typed
+    /// param and declares its OWN `av`). On `b1307258` this printed **`510`** — z's `av` (500),
+    /// because the clone resolved in z. It should be `11`. So the program this refuses is one that
+    /// compiled to a *silently wrong value*, and refusing beats keeping it. When `z` genuinely does
+    /// `import a` — the ancestor case — the same program now prints `11` where `b1307258` printed
+    /// `510`, which is the fix rather than the refusal.
+    fn splice_default(
+        &mut self,
+        d: &Dflt,
+        site: Span,
+        out: &mut Vec<Expr>,
+    ) -> Result<(), ResolveError> {
+        match d {
+            Dflt::Inline(e) => {
+                let mut e = e.clone();
+                self.walk_expr(&mut e)?;
+                out.push(e);
+            }
+            Dflt::Provider { module, name } => {
+                if module != self.ctx.own_id {
+                    let ok = self
+                        .ctx
+                        .module_index
+                        .get(module)
+                        .is_some_and(|&t| t < self.ctx.own_idx);
+                    if !ok {
+                        return Err(err(
+                            site,
+                            format!(
+                                "cannot use the default for {} here: it is declared in a module this one does not depend on, so it cannot be evaluated in its own scope — pass the argument explicitly",
+                                provider_label(name)
+                            ),
+                        ));
+                    }
+                    self.needed
+                        .entry(name.clone())
+                        .or_insert_with(|| (module.clone(), site));
+                }
+                out.push(Expr {
+                    kind: ExprKind::Call {
+                        callee: Box::new(ident_expr(name, site)),
+                        args: Vec::new(),
+                        named: Vec::new(),
+                        type_args: Vec::new(),
+                    },
+                    span: site,
+                });
+            }
+        }
+        Ok(())
+    }
+
     /// W7-43 — normalize the CALL PART of an optional-chained method call (`obj?.m(args)`): named →
     /// positional binding, omitted defaults, variadic collapse.
     ///
@@ -1268,10 +1817,7 @@ impl Walker<'_> {
     /// never `Type::Named`, and `Some(...)`/`Ok(...)` is not a registered struct ctor), so this
     /// reproduces the old `__optN` receiver's behaviour exactly — while not being WRONG if
     /// `local_struct` ever learns to track more receivers.
-    ///
-    /// Idempotent on pass 2 for the same reason `normalize_call` is: the variadic collapse inside it
-    /// is `first_pass`-gated, and an already-bound call has empty `named` and full arity.
-    fn normalize_opt_call(&self, expr: &mut Expr) -> Result<(), ResolveError> {
+    fn normalize_opt_call(&mut self, expr: &mut Expr) -> Result<(), ResolveError> {
         let span = expr.span;
         let ExprKind::OptChain {
             obj,
@@ -1309,7 +1855,7 @@ impl Walker<'_> {
     /// Resolve `expr` (a `Call`) to a callable and rewrite named/omitted args into positional. Leaves
     /// the call untouched when the callee is not a registered callable (unless it carries named args,
     /// which is then an error).
-    fn normalize_call(&self, expr: &mut Expr) -> Result<(), ResolveError> {
+    fn normalize_call(&mut self, expr: &mut Expr) -> Result<(), ResolveError> {
         let span = expr.span;
         let ExprKind::Call {
             callee,
@@ -1464,13 +2010,10 @@ impl Walker<'_> {
         // call is an ordinary fully-positional call, so the checker AND both engines need zero
         // variadic-specific logic (parity by construction). This must run BEFORE the fixed-arity gates
         // below (a `f(1,2,3)` into a single `List` slot is "too many" by those rules).
-        // Collapse on the FIRST pass only: after pass 1 the call is already in final collapsed form
-        // (`args = [pre..., List, kwonly...]`, `named` empty), so re-running it on pass 2 would wrap
-        // the synthesized `List` in another `List`. On pass 2 the collapsed call falls through to the
-        // fixed-arity gate below, which is a no-op for it.
-        if self.first_pass
-            && let Some(v) = params.iter().position(|p| p.is_variadic)
-        {
+        // Un-gated since W7-51: the driver walks each module ONCE, so the collapse (which is not
+        // idempotent — a second run would wrap the synthesized `List` in another `List`) fires
+        // exactly once by construction.
+        if let Some(v) = params.iter().position(|p| p.is_variadic) {
             let ExprKind::Call { args, named, .. } = &mut expr.kind else {
                 return Ok(());
             };
@@ -1484,7 +2027,7 @@ impl Walker<'_> {
                 match supplied {
                     Some(e) => out.push(e),
                     None => match &pspec.default {
-                        Some(d) => out.push(d.clone()),
+                        Some(d) => self.splice_default(d, span, &mut out)?,
                         None => {
                             return Err(err(
                                 span,
@@ -1526,7 +2069,7 @@ impl Walker<'_> {
                 if let Some(e) = kw.remove(&pspec.name) {
                     out.push(e);
                 } else if let Some(d) = &pspec.default {
-                    out.push(d.clone());
+                    self.splice_default(d, span, &mut out)?;
                 } else {
                     return Err(err(
                         span,
@@ -1592,7 +2135,7 @@ impl Walker<'_> {
             match slot {
                 Some(e) => out.push(e),
                 None => match &params[i].default {
-                    Some(d) => out.push(d.clone()),
+                    Some(d) => self.splice_default(d, span, &mut out)?,
                     None => {
                         return Err(err(
                             span,
@@ -2449,23 +2992,115 @@ mod tests {
 
     // ===== non-constant default expressions =====
 
+    /// The last `let` in a module — NOT `stmts.last()`, since W7-51 APPENDS the synthesized
+    /// providers after the user's own statements (top-level `fn`s are hoisted, so position is
+    /// irrelevant to behavior, but it moves the tail).
+    fn last_let(stmts: &[Stmt]) -> &Expr {
+        stmts
+            .iter()
+            .rev()
+            .find_map(|st| match &st.kind {
+                StmtKind::Let { value, .. } => Some(value),
+                _ => None,
+            })
+            .expect("a let statement")
+    }
+
+    /// The single zero-arg argument an omitting call site now carries, and the body of the provider
+    /// it names. Panics with a readable message if the call was not rewritten into a provider call.
+    fn provider_arg<'a>(stmts: &'a [Stmt], call: &Expr) -> &'a Expr {
+        let ExprKind::Call { args, .. } = &call.kind else {
+            panic!("expected a Call, got {:?}", call.kind)
+        };
+        assert_eq!(args.len(), 1, "the omitted default was filled");
+        let ExprKind::Call {
+            callee,
+            args: pargs,
+            ..
+        } = &args[0].kind
+        else {
+            panic!(
+                "the filled slot must be a provider CALL, got {:?}",
+                args[0].kind
+            )
+        };
+        assert!(pargs.is_empty(), "a provider takes no arguments");
+        let ExprKind::Ident(name) = &callee.kind else {
+            panic!("provider callee must be a bare Ident")
+        };
+        assert!(
+            name.starts_with(PROVIDER_PREFIX),
+            "expected a `$def$…` provider, got '{name}'"
+        );
+        for st in stmts {
+            if let StmtKind::Fn(decl) = &st.kind
+                && &decl.name == name
+            {
+                assert!(
+                    !decl.is_test,
+                    "a provider must not be discovered by `chezzi test`"
+                );
+                assert!(decl.ret.is_some(), "a provider declares its return type");
+                let [
+                    Stmt {
+                        kind: StmtKind::Return(Some(e)),
+                        ..
+                    },
+                ] = decl.body.as_slice()
+                else {
+                    panic!("a provider body is exactly `return <default>`")
+                };
+                return e;
+            }
+        }
+        panic!("no provider named '{name}' was synthesized into the module")
+    }
+
     #[test]
     fn non_const_default_filled() {
-        // A call expression as a default is cloned into the call site (left as a Call to evaluate).
+        // W7-51 — a non-literal default is no longer cloned into the caller: the call site gets a
+        // zero-arg call to a provider synthesized in the DECLARING module, whose body is the
+        // default expression.
         let s = desugar_ok(
             "fn g() -> int:\n    return 9\nfn f(x: int = g() + 1):\n    print(x)\nr := f()\n",
         );
-        let last = s.last().unwrap();
-        let StmtKind::Let { value, .. } = &last.kind else {
-            panic!("let")
-        };
-        let ExprKind::Call { args, .. } = &value.kind else {
+        let body = provider_arg(&s, last_let(&s));
+        assert!(
+            matches!(body.kind, ExprKind::Binary { .. }),
+            "the provider returns the `g() + 1` expr, got {:?}",
+            body.kind
+        );
+    }
+
+    #[test]
+    fn a_literal_default_is_still_cloned_inline() {
+        // The inline class costs no call and records no side-table key — `= 1 + 2` is spliced as
+        // the literal expression itself, exactly as before W7-51.
+        let s = desugar_ok("fn f(x: int = 1 + 2):\n    print(x)\nr := f()\n");
+        let ExprKind::Call { args, .. } = &last_let(&s).kind else {
             panic!("call")
         };
-        assert_eq!(args.len(), 1, "the omitted default was filled");
         assert!(
             matches!(args[0].kind, ExprKind::Binary { .. }),
-            "default is the `g() + 1` expr"
+            "an inline literal default is cloned, not provided — got {:?}",
+            args[0].kind
+        );
+        assert!(
+            !s.iter().any(
+                |st| matches!(&st.kind, StmtKind::Fn(d) if d.name.starts_with(PROVIDER_PREFIX))
+            ),
+            "no provider is synthesized for a self-contained literal"
+        );
+    }
+
+    #[test]
+    fn a_self_referencing_default_is_a_cycle_error() {
+        // Before W7-51 this silently expanded to a three-deep `f(f(f()))` (the two-pass fixed
+        // point); as a provider it would be unbounded recursion, so it is refused.
+        let e = desugar_err("fn f(x: int = f()) -> int:\n    return x\nr := f()\n");
+        assert!(
+            e.to_string().contains("is cyclic") && e.to_string().contains("parameter 'x' of 'f'"),
+            "got: {e}"
         );
     }
 
@@ -2505,41 +3140,29 @@ mod tests {
         let s = desugar_ok(
             "fn g(a: int = 7) -> int:\n    return a\nfn f(x: int = g()):\n    print(x)\nr := f()\n",
         );
-        let last = s.last().unwrap();
-        let StmtKind::Let { value, .. } = &last.kind else {
-            panic!("let")
-        };
-        let ExprKind::Call { args, .. } = &value.kind else {
-            panic!("call f")
-        };
-        // f's single arg is the spliced default `g(7)` — a Call with one positional arg.
-        let ExprKind::Call { args: ginner, .. } = &args[0].kind else {
-            panic!("inner call g")
+        // f's provider body is `g(7)` — `g`'s own omitted default was filled by the same one pass.
+        let body = provider_arg(&s, last_let(&s));
+        let ExprKind::Call { args: ginner, .. } = &body.kind else {
+            panic!("inner call g, got {:?}", body.kind)
         };
         assert_eq!(
             ginner.len(),
             1,
-            "g()'s own default was filled in the spliced default"
+            "g()'s own default was filled inside the provider body"
         );
     }
 
     #[test]
     fn carrier_in_default_survives_with_a_normalized_child() {
-        // W7-43 inverted this: a `??` carrier spliced from a default SURVIVES desugar. What must
-        // still hold is that the two-pass splice normalized its children — here `h()`'s own omitted
-        // default is filled inside the spliced carrier's lhs.
+        // W7-43 inverted this: a `??` carrier in a default SURVIVES desugar. What must still hold is
+        // that the walk normalized its children — here `h()`'s own omitted default is filled inside
+        // the carrier's lhs, now in the provider body rather than a spliced clone.
         let s = desugar_ok(
             "fn h(k: int = 3) -> int?:\n    return Some(k)\nfn f(x: int = h() ?? 0):\n    print(x)\nr := f()\n",
         );
-        let last = s.last().unwrap();
-        let StmtKind::Let { value, .. } = &last.kind else {
-            panic!("let")
-        };
-        let ExprKind::Call { args, .. } = &value.kind else {
-            panic!("call f")
-        };
-        let ExprKind::NullCoalesce { lhs, .. } = &args[0].kind else {
-            panic!("carrier survives, got {:?}", args[0].kind)
+        let body = provider_arg(&s, last_let(&s));
+        let ExprKind::NullCoalesce { lhs, .. } = &body.kind else {
+            panic!("carrier survives, got {:?}", body.kind)
         };
         let ExprKind::Call { args: hargs, .. } = &lhs.kind else {
             panic!("call h")

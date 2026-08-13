@@ -28,9 +28,6 @@ g := ab
 fn geto() -> Option[str]:
     return Some("abc")
 
-fn getr() -> str!str:
-    return Ok("wxyz")
-
 # A keyword call INSIDE a default (a `KeywordTable` entry recorded from a spliced clone), and a `?.`
 # carrier inside a default over BOTH carrier kinds (two `CarrierTable` entries, one per mode).
 fn kw_default(x: int = g(a=7, b=9)) -> int:
@@ -40,15 +37,6 @@ fn opt_default(x: Option[int] = geto()?.len()) -> int:
     match x:
         Some(n): return n
         None: return -1
-
-fn res_default(x: int = getr()?.len()) -> int!str:
-    return Ok(x)
-
-# A `?` is spliced into the CALLER's body along with the rest of the default, so a caller that omits
-# `x` must itself return a Result — a `test fn` returns nil. That is the splice semantics, not a
-# carrier restriction: `res_default(1)` supplies the argument and is callable from anywhere.
-fn omit_res_default() -> int!str:
-    return Ok(res_default()?)
 
 test fn the_same_default_omitted_at_two_call_sites():
     # Two splices of one default → the same key, the same permutation. Benign, and the case a
@@ -71,10 +59,12 @@ test fn a_carrier_inside_a_default_over_both_kinds():
     assert opt_default() == 3, "got {opt_default()}"
     assert opt_default(Some(9)) == 9, "an explicit argument bypasses the splice"
     assert opt_default(None) == -1, "got {opt_default(None)}"
-    # Try mode: the SAME shape one module over used to get the Option lowering and fault with
-    # "no match arm for variant 'Ok'" (`docs/gaps.md` W7-49).
-    assert "{omit_res_default()}" == "Ok(4)", "got {omit_res_default()}"
-    assert "{res_default(1)}" == "Ok(1)", "got {res_default(1)}"
+    # W7-51 — the Result-MODE carrier that used to sit here (`x: int = getr()?.len()`, omitted from
+    # an `int!str` caller so the `?` early-returned out of the CALLER) is now a compile error: a
+    # default is compiled once, in its defining module, which has no caller frame to propagate into.
+    # The rejection is pinned in `src/checker/tests.rs`
+    # (`a_try_inside_a_default_is_rejected_with_the_defining_module_reason`); the Option-mode carrier
+    # above is unaffected, which is the whole distinction.
 
 test fn print_keyword_arguments_still_compile():
     # The keyword-miss guard must NOT fire here: desugar deliberately leaves `named` populated for

@@ -1824,6 +1824,12 @@ struct Checker {
     /// the runtime unwinds an unhandled Err/None at the program boundary) vs a nil-returning fn body
     /// (illegal — the propagated Err/None would be silently swallowed). See `infer_try`.
     in_fn_body: bool,
+    /// True while checking the body of a **default-argument provider** — the hidden zero-arg fn
+    /// `desugar` synthesizes for a non-inline parameter/field default (`desugar::PROVIDER_PREFIX`).
+    /// Its only reader is [`Checker::infer_try`]: a `?` there has no caller to propagate to, and the
+    /// generic "returns int, not Result" wording would name a return type the user never wrote.
+    /// Saved/restored 1:1 beside `current_ret` at every fn/closure boundary.
+    in_default_provider: bool,
     /// True while checking statements lexically inside a `defer:` BLOCK (reset across nested
     /// fn/closure boundaries, like `recover_depth`). A `?` here is DISCARDED at the block boundary
     /// (`syntax.md`: "a `?` short-circuit inside the block is discarded — a cleanup body has no
@@ -2805,7 +2811,7 @@ fn subst_sig(sig: &FnSig, map: &HashMap<String, Ty>) -> FnSig {
 /// Does the type ANNOTATION `t` mention any of `names` anywhere, at any nesting depth? Used to spot
 /// an owner type param buried inside an embed's type argument (`Contains[List[T]]`), which the
 /// read-only resolver cannot re-spell — see `validate_protocol_embeds`.
-fn type_mentions_any(t: &Type, names: &[String]) -> bool {
+pub(crate) fn type_mentions_any(t: &Type, names: &[String]) -> bool {
     match t {
         Type::Named { name, .. } => names.contains(name),
         Type::Qualified { args, .. } => args.iter().any(|a| type_mentions_any(a, names)),

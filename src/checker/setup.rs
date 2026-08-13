@@ -41,6 +41,7 @@ impl Checker {
             collected_rets: Vec::new(),
             in_generator: false,
             in_fn_body: false,
+            in_default_provider: false,
             in_defer_block: false,
             in_spawn_block: false,
             collected_yields: Vec::new(),
@@ -967,6 +968,7 @@ impl Checker {
         self.seed_stdlib_structs();
         self.current_ret = Ty::Nil;
         self.in_fn_body = false;
+        self.in_default_provider = false;
         self.inferring_ret = false;
         self.collected_rets.clear();
         self.current_module_label = label;

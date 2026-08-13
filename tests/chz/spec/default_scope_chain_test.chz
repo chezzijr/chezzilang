@@ -1,0 +1,136 @@
+# tests/chz/spec/default_scope_chain_test.chz — W7-51: a non-literal default argument is compiled
+# ONCE, as a hidden zero-arg function in the module that DECLARES it, and the omitting call site
+# calls that function instead of receiving a clone of the expression.
+#
+# What that buys, and what this file pins:
+#
+#   • **Chains compose to any depth.** `fn a(x = b())` over `fn b(y = c())` over `fn c(z = 1)` used
+#     to fail at depth 3 with `'c' expects 1 argument(s), got 0` — the old pass spliced the default
+#     into the tail of `walk_expr_inner`, after that node's children had been walked, and the driver
+#     ran exactly two passes, so the third link never got normalized. Verified on the pre-change
+#     binary: depth 2 printed `1`, depth 3 errored, depth 4 errored twice. Python prints `1` at
+#     every depth.
+#   • **Per-call evaluation is preserved.** Chezzi deliberately re-evaluates a default on every
+#     omitting call (Python evaluates it once, at def time — the classic mutable-default footgun).
+#     A provider is a plain function call, so that stays true: three omitting calls run the body
+#     three times.
+#   • **A self-contained literal is still cloned inline** (`= 1 + 2`, `= None`, `= []`, `= -1`, a
+#     brace-free string). That class records no checker→compiler side-table entry, so cloning it
+#     into many call sites cannot alias a span key (W7-49), and it costs no call.
+#
+# The cross-MODULE half — a default resolving in the DEFINER's namespace rather than the caller's —
+# is inherently multi-file and lives in `src/vm/tests.rs`
+# (`a_cross_module_default_resolves_in_its_definer_not_the_caller` and siblings).
+#
+# Serial==M:N is guarded by `test_runner::chz_suite_passes_both_engines`.
+
+# --- chained defaults, depth 3, 4 and 5 -------------------------------------------------------
+
+fn c5(v: int = 5) -> int:
+    return v
+
+fn c4(v: int = c5()) -> int:
+    return v
+
+fn c3(v: int = c4()) -> int:
+    return v
+
+fn c2(v: int = c3()) -> int:
+    return v
+
+fn c1(v: int = c2()) -> int:
+    return v
+
+test fn a_default_chain_resolves_at_depth_three_four_and_five():
+    assert c3() == 5, "depth 3 — got {c3()}"
+    assert c2() == 5, "depth 4 — got {c2()}"
+    assert c1() == 5, "depth 5 — got {c1()}"
+    # …and supplying the argument still bypasses every link.
+    assert c1(9) == 9, "got {c1(9)}"
+    assert c3(7) == 7, "got {c3(7)}"
+
+# --- per-call evaluation ----------------------------------------------------------------------
+
+counter := 0
+
+fn bump() -> int:
+    counter = counter + 1
+    return counter
+
+fn takes_bumped(n: int = bump()) -> int:
+    return n
+
+test fn a_default_is_evaluated_once_per_omitting_call():
+    # Python would freeze this at 1 (defaults evaluate at def time); Chezzi's documented choice is
+    # to run it per call, which is what a provider CALL preserves.
+    assert takes_bumped() == 1, "first call"
+    assert takes_bumped() == 2, "second call"
+    assert takes_bumped() == 3, "third call"
+    # An explicit argument does not run the default at all.
+    assert takes_bumped(100) == 100, "explicit argument"
+    assert counter == 3, "the default must not have run a fourth time — got {counter}"
+
+# --- the inline (cloned, not provided) class ----------------------------------------------------
+
+fn lit_arith(n: int = 1 + 2) -> int:
+    return n
+
+fn lit_neg(n: int = -1) -> int:
+    return n
+
+fn lit_none(o: Option[int] = None) -> int:
+    match o:
+        Some(v): return v
+        None: return -7
+
+fn lit_empty(xs: List[int] = []) -> int:
+    return xs.len()
+
+fn lit_str(s: str = "hi") -> str:
+    return s
+
+test fn a_self_contained_literal_default_still_evaluates():
+    assert lit_arith() == 3, "got {lit_arith()}"
+    assert lit_neg() == -1, "got {lit_neg()}"
+    assert lit_none() == -7, "got {lit_none()}"
+    assert lit_none(Some(4)) == 4, "got {lit_none(Some(4))}"
+    assert lit_empty() == 0, "got {lit_empty()}"
+    assert lit_empty([1, 2, 3]) == 3, "got {lit_empty([1, 2, 3])}"
+    assert lit_str() == "hi", "got {lit_str()}"
+
+test fn an_empty_list_default_is_fresh_per_call():
+    # The inline clone is a fresh `[]` literal at each call site, so Python's shared-mutable-default
+    # footgun cannot happen here either.
+    a := lit_empty_ref()
+    a.push(1)
+    b := lit_empty_ref()
+    assert b.len() == 0, "the second call must get its own list — got {b}"
+
+fn lit_empty_ref(xs: List[int] = []) -> List[int]:
+    return xs
+
+# --- defaults on struct fields and methods ------------------------------------------------------
+
+BASE := 10
+
+fn scale() -> int:
+    return BASE * 3
+
+struct Cfg:
+    a: int = scale()
+    b: int = 1 + 1
+
+struct Runner:
+    tag: str
+
+    fn go(self, n: int = scale()) -> int:
+        return n
+
+test fn a_field_and_method_default_resolve_through_their_provider():
+    c := Cfg()
+    assert c.a == 30, "got {c.a}"
+    assert c.b == 2, "got {c.b}"
+    assert Cfg(1, 2).a == 1, "explicit ctor args still win"
+    r := Runner("r")
+    assert r.go() == 30, "got {r.go()}"
+    assert r.go(4) == 4, "got {r.go(4)}"

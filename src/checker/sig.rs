@@ -354,6 +354,10 @@ impl Checker {
         // In a fn body during return inference (mirrors `check_fn_body`): a `?` here targets this
         // body, not module top-level. Saved/restored beside `current_ret`.
         let saved_in_fn = std::mem::replace(&mut self.in_fn_body, true);
+        let saved_in_dflt = std::mem::replace(
+            &mut self.in_default_provider,
+            decl.name.starts_with(crate::desugar::PROVIDER_PREFIX),
+        );
         // …and a fn DECLARED inside a `spawn:` block is not itself the task (W7-48).
         let saved_in_spawn = std::mem::replace(&mut self.in_spawn_block, false);
         let saved_flag = std::mem::replace(&mut self.inferring_ret, true);
@@ -419,6 +423,7 @@ impl Checker {
         self.inferring_ret = saved_flag;
         self.current_ret = saved_ret;
         self.in_fn_body = saved_in_fn;
+        self.in_default_provider = saved_in_dflt;
         self.in_spawn_block = saved_in_spawn;
         self.current_self_ty = saved_self;
         self.witness_scope = saved_witness_scope;
@@ -3632,6 +3637,13 @@ impl Checker {
         // Err/None), unlike module top-level where `Nil` accepts either. Saved/restored beside
         // `current_ret`.
         let saved_in_fn = std::mem::replace(&mut self.in_fn_body, true);
+        // W7-51 — is this a synthesized default-argument provider? Read off the name (the `$` prefix
+        // is unspellable in source), and saved/restored beside `current_ret` so a closure or nested
+        // fn INSIDE a provider clears it and keeps its own `?` diagnostics.
+        let saved_in_dflt = std::mem::replace(
+            &mut self.in_default_provider,
+            decl.name.starts_with(crate::desugar::PROVIDER_PREFIX),
+        );
         // `Self` in this method body resolves to the enclosing type (`None` for a free fn / nested fn,
         // which resets an enclosing method's binding). Restored below beside `current_ret`.
         let saved_self = std::mem::replace(&mut self.current_self_ty, self_ty.clone());
@@ -3835,6 +3847,7 @@ impl Checker {
         self.pop_scope();
         self.current_ret = saved_ret;
         self.in_fn_body = saved_in_fn;
+        self.in_default_provider = saved_in_dflt;
         self.current_self_ty = saved_self;
         self.yield_ty = saved_yield;
         self.in_generator = saved_ig;

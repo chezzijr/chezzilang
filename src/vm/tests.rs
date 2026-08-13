@@ -5464,8 +5464,10 @@ fn f(c: Counter = empty[Counter]()) -> int:
 "#,
     )
     .unwrap();
-    // `Counter` is imported here only because the SPLICED default's turbofish resolves in the
-    // CALLER's scope — the same residual the whole row is about, in its benign form.
+    // `Counter` is imported here only to keep the fixture byte-identical to the one that pinned the
+    // W7-49 alias. It is no longer NEEDED: since W7-51 the default's turbofish resolves in `lib`,
+    // where `Counter` is declared, not in this caller's scope. Left in place so the before/after of
+    // this test is a pure key question.
     let entry = dir.join("main.chz");
     std::fs::write(
         &entry,
@@ -5512,19 +5514,24 @@ print(probe())
     assert_eq!(vo, io, "serial vs M:N divergence");
 }
 
-/// W7-49 residual — the SURVIVING hole, made loud. `Span::file` separates modules, but the same
-/// default spliced twice into ONE module still keeps one set of spans and therefore one key; a
-/// default is cloned into the CALLER's scope, so a caller-side local can shadow the definer's global
-/// and the two splices genuinely resolve differently. Here `g` is the module global `ab(a, b)` at one
-/// site and the local `ba(b, a)` at the other, so the two permutations DIFFER.
+/// W7-51 — the W7-49 residual DISSOLVED, on the same source, byte for byte. The hole was that one
+/// default cloned into two call sites of ONE module keeps one set of spans and therefore one
+/// side-table key, while resolving differently at each site: here `g` is the module global
+/// `ab(a, b)` at the outer call and the caller-local `ba(b, a)` inside `probe()`.
 ///
-/// On `19f7696a` this is a silent wrong value: `709` / **`907`** (both should be `709`), clean
-/// `check`, both engines. Now the checker refuses to overwrite the key and the build stops. This is
-/// a REJECT, so it is proven against its own premise, not just against the diagnostic: the same
-/// program with the shadowing local removed — and the same-value re-insert that IS the common case —
-/// stay green in `tests/chz/spec/default_splice_keys_test.chz`.
+/// Three measured verdicts on one unchanged program:
+///   * `19f7696a` — a silent wrong value, `709` / **`907`**, clean `check`, both engines.
+///   * `b1307258` — the W7-49 backstop refuses the conflicting key: `internal: two different
+///     keyword-argument decisions were recorded for one source position …`, no output.
+///   * now — `709` / `709`. There is nothing to disagree about: the default is compiled ONCE, in
+///     `lib`, where `g` is unambiguously `h`, and the caller's `ba` never enters the picture. The
+///     conflict channel stays in place as defence in depth, but the class is now unrepresentable —
+///     a non-literal default expression exists exactly once in the whole program.
+///
+/// This also pins the SCOPE half in its sharpest form: a caller-side local shadowing the definer's
+/// global must not change the value. Python agrees (`709` twice).
 #[test]
-fn a_double_spliced_default_that_resolves_two_ways_is_a_loud_error() {
+fn a_default_that_a_caller_local_shadows_still_resolves_in_its_definer() {
     let dir = std::env::temp_dir().join(format!("chezzi_w749_residual_{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(
@@ -5555,21 +5562,236 @@ print(probe())
     )
     .unwrap();
     let graph = crate::resolver::build_graph(&entry).expect("resolve");
-    // The CHECKER still accepts it — the two `g`s are both `fn(int, int) -> int`. The disagreement
-    // is a backend one, which is exactly why the backstop lives where the table is written.
-    assert!(
-        crate::checker::check_graph(&graph).is_ok(),
-        "the program is well-typed; the conflict is a side-table one"
+    if let Err(errs) = crate::checker::check_graph(&graph) {
+        let _ = std::fs::remove_dir_all(&dir);
+        panic!("program must type-check, got: {errs:?}");
+    }
+    let (vo, _ve, vr, _vc) = run_file(&entry);
+    let (io, _ie, ir, _ic) = run_file_p(&entry);
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(vr.is_ok(), "serial VM faulted: {vr:?}");
+    assert!(ir.is_ok(), "M:N engine faulted: {ir:?}");
+    assert_eq!(
+        vo, "709\n709\n",
+        "the default is `g(a=7, b=9)` in lib, where `g` is `h`; probe's local `ba` is irrelevant"
     );
-    let err =
-        crate::compiler::compile_graph(&graph).expect_err("the aliased key must stop the build");
+    assert_eq!(vo, io, "serial vs M:N divergence");
+}
+
+// ===== W7-51 — a default resolves in the module that DECLARES it =====
+//
+// RUST, not `tests/chz/`, for the same reason as the W7-49 trio above: the defect is inherently
+// MULTI-FILE. The single-file half (chained depth, per-call evaluation, the inline class) is in
+// `tests/chz/spec/default_scope_chain_test.chz`.
+//
+// Every row below is measured on `b1307258` in the task report; each `expected` is CPython's answer
+// for the equivalent two-module program.
+
+/// W7-51 (1/3) — the sharp one: a default reading the DEFINER's module global, where the caller
+/// happens to declare a global of the same name. On `b1307258` this prints **`99`** — the caller's
+/// value, silently, with a clean `check`, on both engines. Python prints `7`.
+///
+/// Without the caller's `K` the same program is not merely wrong but unbuildable on `b1307258`
+/// (`type error (line 2, col 15): unknown name 'K'`), which is the second row of the table.
+#[test]
+fn a_cross_module_default_resolves_in_its_definer_not_the_caller() {
+    let dir = std::env::temp_dir().join(format!("chezzi_w751_global_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("g.chz"),
+        "K := 7\nfn f(x: int = K) -> int:\n    return x\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.chz");
+    // The caller declares its OWN `K`. Under a spliced clone that value won; under a provider the
+    // body runs against `g`'s namespace, so it cannot.
+    std::fs::write(&entry, "import g\nK := 99\nprint(g.f())\nprint(K)\n").unwrap();
+    let graph = crate::resolver::build_graph(&entry).expect("resolve");
+    if let Err(errs) = crate::checker::check_graph(&graph) {
+        let _ = std::fs::remove_dir_all(&dir);
+        panic!("program must type-check, got: {errs:?}");
+    }
+    let (vo, _ve, vr, _vc) = run_file(&entry);
+    let (io, _ie, ir, _ic) = run_file_p(&entry);
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(vr.is_ok(), "serial VM faulted: {vr:?}");
+    assert!(ir.is_ok(), "M:N engine faulted: {ir:?}");
+    assert_eq!(
+        vo, "7\n99\n",
+        "the default reads g's K (7), not the caller's (99); the caller's own K is untouched"
+    );
+    assert_eq!(vo, io, "serial vs M:N divergence");
+}
+
+/// W7-51 (2/3) — a default that CALLS a function the definer declares and the caller never imports.
+/// `b1307258`: `type error (line 3, col 15): unknown name 'cval'`. Python: `3`.
+#[test]
+fn a_cross_module_default_may_call_the_definers_own_function() {
+    let dir = std::env::temp_dir().join(format!("chezzi_w751_ownfn_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("g.chz"),
+        "fn cval() -> int:\n    return 3\nfn f(x: int = cval()) -> int:\n    return x\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.chz");
+    std::fs::write(&entry, "import g\nprint(g.f())\nprint(g.f(8))\n").unwrap();
+    let graph = crate::resolver::build_graph(&entry).expect("resolve");
+    if let Err(errs) = crate::checker::check_graph(&graph) {
+        let _ = std::fs::remove_dir_all(&dir);
+        panic!("program must type-check, got: {errs:?}");
+    }
+    let (vo, _ve, vr, _vc) = run_file(&entry);
+    let (io, _ie, ir, _ic) = run_file_p(&entry);
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(vr.is_ok(), "serial VM faulted: {vr:?}");
+    assert!(ir.is_ok(), "M:N engine faulted: {ir:?}");
+    assert_eq!(
+        vo, "3\n8\n",
+        "the definer's own fn runs; an explicit arg bypasses it"
+    );
+    assert_eq!(vo, io, "serial vs M:N divergence");
+}
+
+/// W7-51 (3/3) — a default that calls through the DEFINER'S OWN IMPORT, three modules deep and via a
+/// `from`-import at the omitting site rather than a module alias. `b1307258`: `type error (line 2,
+/// col 15): unknown name 'c2'`. Python: `3`.
+///
+/// This is also the load-order case the synthetic import edge has to get right: `main` gains an edge
+/// to `g`, which is already a load-order ancestor because `main` imports it, and `g`'s own provider
+/// call to `c2` needs no edge at all (same module).
+#[test]
+fn a_cross_module_default_may_call_through_the_definers_import() {
+    let dir = std::env::temp_dir().join(format!("chezzi_w751_defimport_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("c2.chz"), "fn c() -> int:\n    return 3\n").unwrap();
+    std::fs::write(
+        dir.join("g.chz"),
+        "import c2\nfn f(x: int = c2.c()) -> int:\n    return x\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.chz");
+    std::fs::write(&entry, "import f from g\nprint(f())\n").unwrap();
+    let graph = crate::resolver::build_graph(&entry).expect("resolve");
+    if let Err(errs) = crate::checker::check_graph(&graph) {
+        let _ = std::fs::remove_dir_all(&dir);
+        panic!("program must type-check, got: {errs:?}");
+    }
+    let (vo, _ve, vr, _vc) = run_file(&entry);
+    let (io, _ie, ir, _ic) = run_file_p(&entry);
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(vr.is_ok(), "serial VM faulted: {vr:?}");
+    assert!(ir.is_ok(), "M:N engine faulted: {ir:?}");
+    assert_eq!(
+        vo, "3\n",
+        "the default resolves g's own import, not main's namespace"
+    );
+    assert_eq!(vo, io, "serial vs M:N divergence");
+}
+
+/// W7-51 — the load-order guard, proven against its own premise rather than just its diagnostic.
+///
+/// `desugar` resolves a METHOD call by method NAME (the receiver type is unknown pre-type), so
+/// `p.mprobe()` in `z` can bind `a`'s spec even though `z` never imports `a`. A provider import edge
+/// there would point at a module the VM has not run yet (`Vm::bind_import` indexes `module_objs`,
+/// pushed per module AS IT RUNS), so it is refused with a clear compile error.
+///
+/// The premise, MEASURED on `b1307258` rather than assumed: this exact program printed **`510`** —
+/// `z`'s own `av()` (500) plus 10 — because the definer's default was cloned into `z` and resolved
+/// there. `a`'s author wrote `11`. So the refusal replaces a silent wrong value, not a working
+/// program. The neighbour the premise implies — the SAME source with `import a` added to `z`, which
+/// makes `a` a load-order ancestor — is the next test, and it prints `11`.
+#[test]
+fn a_method_default_from_a_sibling_module_is_refused_not_guessed() {
+    let dir = std::env::temp_dir().join(format!("chezzi_w751_sibling_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("a.chz"),
+        "fn av() -> int:\n    return 1\nstruct S:\n    n: int\n    fn mprobe(self, x: int = av()) -> int:\n        return x + self.n\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("z.chz"),
+        "protocol HasM:\n    fn mprobe(self, x: int) -> int\nfn av() -> int:\n    return 500\nfn use_it(p: HasM) -> int:\n    return p.mprobe()\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.chz");
+    std::fs::write(&entry, "import z\nimport a\nprint(z.use_it(a.S(10)))\n").unwrap();
+    let err = crate::resolver::build_graph(&entry).expect_err("the sibling edge must be refused");
     let _ = std::fs::remove_dir_all(&dir);
     assert!(
-        err.message
-            .contains("two different keyword-argument decisions"),
-        "expected the side-table conflict backstop, got: {}",
+        err.message.contains("a module this one does not depend on"),
+        "expected the load-order refusal, got: {}",
         err.message
     );
+}
+
+/// The neighbour of the test above: add `import a` to `z` and the very same call is legal, because
+/// `a` is now a genuine load-order ancestor. `b1307258` printed `510` here too (z's `av`); the
+/// answer is `11` — `a`'s own `av()` (1) plus 10 — which is what `a`'s author wrote.
+#[test]
+fn a_method_default_from_an_imported_module_resolves_in_that_module() {
+    let dir = std::env::temp_dir().join(format!("chezzi_w751_ancestor_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("a.chz"),
+        "fn av() -> int:\n    return 1\nstruct S:\n    n: int\n    fn mprobe(self, x: int = av()) -> int:\n        return x + self.n\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("z.chz"),
+        "import a\nfn av() -> int:\n    return 500\nfn use_it(p: a.S) -> int:\n    return p.mprobe()\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.chz");
+    std::fs::write(&entry, "import z\nimport a\nprint(z.use_it(a.S(10)))\n").unwrap();
+    let graph = crate::resolver::build_graph(&entry).expect("resolve");
+    if let Err(errs) = crate::checker::check_graph(&graph) {
+        let _ = std::fs::remove_dir_all(&dir);
+        panic!("program must type-check, got: {errs:?}");
+    }
+    let (vo, _ve, vr, _vc) = run_file(&entry);
+    let (io, _ie, ir, _ic) = run_file_p(&entry);
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(vr.is_ok(), "serial VM faulted: {vr:?}");
+    assert!(ir.is_ok(), "M:N engine faulted: {ir:?}");
+    assert_eq!(vo, "11\n", "a's own av() is 1, not z's 500");
+    assert_eq!(vo, io, "serial vs M:N divergence");
+}
+
+/// W7-51 — a cross-module default is still evaluated PER CALL (Chezzi's documented divergence from
+/// Python's evaluate-at-def-time), and the counter it bumps is the DEFINER's, reached through the
+/// provider's `home` module rather than the caller's namespace.
+#[test]
+fn a_cross_module_default_is_evaluated_per_call_in_the_definers_module() {
+    let dir = std::env::temp_dir().join(format!("chezzi_w751_percall_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("g.chz"),
+        "n := 0\nfn bump() -> int:\n    n = n + 1\n    return n\nfn f(x: int = bump()) -> int:\n    return x\nfn seen() -> int:\n    return n\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.chz");
+    std::fs::write(
+        &entry,
+        "import g\nn := 100\nprint(g.f())\nprint(g.f())\nprint(g.seen())\nprint(n)\n",
+    )
+    .unwrap();
+    let graph = crate::resolver::build_graph(&entry).expect("resolve");
+    if let Err(errs) = crate::checker::check_graph(&graph) {
+        let _ = std::fs::remove_dir_all(&dir);
+        panic!("program must type-check, got: {errs:?}");
+    }
+    let (vo, _ve, vr, _vc) = run_file(&entry);
+    let (io, _ie, ir, _ic) = run_file_p(&entry);
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(vr.is_ok(), "serial VM faulted: {vr:?}");
+    assert!(ir.is_ok(), "M:N engine faulted: {ir:?}");
+    assert_eq!(
+        vo, "1\n2\n2\n100\n",
+        "two omitting calls bump g's own counter twice; main's same-named global is untouched"
+    );
+    assert_eq!(vo, io, "serial vs M:N divergence");
 }
 
 /// Entry-last backstop — when the ENTRY file IS the always-injected prelude stub
