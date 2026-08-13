@@ -808,7 +808,10 @@ consequences are worth writing down, because each is a rule you can hit:
    behaviour is the same however a third module orders its `import` lines. Add `import a` to `z` and
    the definer-scope provider is used again, reading `a`'s value. Rule of thumb: **a method default
    that must mean the definer's names should be reached only from modules that import the definer** —
-   everywhere else, pass the argument explicitly.
+   everywhere else, pass the argument explicitly. The change that would remove the hazard entirely —
+   filling omitted arguments in the **callee** at runtime, where the receiver's module is already on
+   the stack — is specified in [`docs/future.md` §3d](future.md); it is an `Op::Call` ABI change and
+   its own milestone.
 3. **A default that needs itself is a compile error.** `fn f(x: int = f())` is refused, naming the
    parameter: *"the default for 'x' of 'f' is cyclic: evaluating it requires evaluating the default for
    'x' of 'f' again"*. Mutual and indirect provider cycles are caught the same way.
