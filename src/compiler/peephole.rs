@@ -45,6 +45,8 @@ fn jump_target(op: &Op) -> Option<usize> {
         | Op::JumpIfTrueKeep(t)
         | Op::PushHandler(t)
         | Op::MatchArm { next: t, .. } => Some(*t),
+        // The SECOND field is the target; the first is a SLOT index and must never be relocated.
+        Op::JumpIfProvided(_, t) => Some(*t),
         _ => None,
     }
 }
@@ -58,6 +60,8 @@ fn jump_target_mut(op: &mut Op) -> Option<&mut usize> {
         | Op::JumpIfTrueKeep(t)
         | Op::PushHandler(t)
         | Op::MatchArm { next: t, .. } => Some(t),
+        // The SECOND field is the target; the first is a SLOT index and must never be relocated.
+        Op::JumpIfProvided(_, t) => Some(t),
         _ => None,
     }
 }

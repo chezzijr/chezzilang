@@ -20675,17 +20675,38 @@ fn kw_value_unknown_label_rejected() {
     );
 }
 
-/// SCOPE-CUT: a value call omitting a defaulted parameter is a TYPE ERROR (defaults do NOT fill
-/// through a value), while a DIRECT call still fills the default.
+/// **The old SCOPE-CUT, now lifted.** A value call omitting a defaulted parameter used to be a type
+/// error — *"a call through a function value must supply every parameter (defaults do not apply
+/// through a value)"* — because nothing could fill it: the caller has no signature to consult and the
+/// callee had no prologue. The callee fills its own trailing defaults now, so `h := hasdefault; h()`
+/// is legal and prints `5`. Measured on `0104d57b`: `'closure' expects 1 argument(s), got 0`.
+///
+/// What it can NOT do is fill a hole before a supplied argument: a short call pushes fewer values,
+/// which cannot express a middle gap. That stays an error, with a message that says so instead of
+/// the now-false "defaults do not apply through a value".
 #[test]
-fn kw_value_scope_cut_defaults() {
-    // Direct call fills the default (a desugar feature) — clean.
+fn kw_value_defaults_fill_a_trailing_gap_but_not_a_middle_one() {
+    // Direct call fills the default (a desugar rewrite) — unchanged.
     ok_desugared("fn hasdefault(x: int = 5):\n    print(x)\nhasdefault()\n");
-    // Through a value: every parameter must be supplied (defaults do NOT fill through a value).
-    rejects_desugared(
-        "fn hasdefault(x: int = 5):\n    print(x)\nh := hasdefault\nh()\n",
-        "argument",
+    // Through a value, positionally: the callee fills it.
+    ok_desugared("fn hasdefault(x: int = 5):\n    print(x)\nh := hasdefault\nh()\n");
+    // Through a value, by keyword, omitting only the TRAILING default.
+    ok_desugared(
+        "fn f(a: int, b: int = 2, c: int = 3) -> int:\n    return a\nh := f\nprint(h(a=1, b=7))\n",
     );
+    // A genuine MIDDLE hole is still refused, and says why.
+    rejects_desugared(
+        "fn f(a: int, b: int = 2, c: int = 3) -> int:\n    return a\nh := f\nprint(h(1, c=9))\n",
+        "can only omit TRAILING defaulted parameters",
+    );
+    // A parameter with NO default is still required through a value.
+    rejects_desugared(
+        "fn need(a: int, b: int) -> int:\n    return a\nh := need\nprint(h(1))\n",
+        "expects 2 argument(s), got 1",
+    );
+    // …and supplying the optional tail through a value still works (it used to be truncated away
+    // for a CROSS-MODULE fn value, making `f(url, ms)` a spurious "too many arguments").
+    ok_desugared("fn f(a: int, b: int = 2) -> int:\n    return a\nh := f\nprint(h(1, 5))\n");
 }
 
 /// A first-class BUILTIN function value takes NO keyword arguments (labels are a user-fn surface).

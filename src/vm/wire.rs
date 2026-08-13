@@ -310,6 +310,10 @@ pub struct WireCallFrame {
     pub nursery_len: usize,
     pub has_implicit_nursery: bool,
     pub call_span: Span,
+    /// The frame's entry argument count (`CallFrame::argc`). Carried rather than recomputed: the
+    /// rebuilt stack no longer distinguishes supplied arguments from nil-reserved locals, and a
+    /// resumed frame must keep answering `Op::JumpIfProvided` the same way it did before it parked.
+    pub argc: usize,
 }
 
 impl WireValue {

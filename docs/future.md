@@ -987,55 +987,6 @@ assumption. *(Checked when B landed: it does not — see the header above.)*
 
 ---
 
-## 3d. Defaults filled by the CALLEE — the one thing that would close W7-51's last hazard (planned — NOT started)
-
-**Why this exists.** `W7-51` (2026-08-13) made a non-literal default compile **once, in its defining
-module**, as a synthesized zero-arg provider `fn` reached through a synthetic `Import::From`. That is
-correct wherever the calling module can see the definer — which is almost everywhere. It cannot be
-made correct for **a method reached from a module that does not import the definer**, because
-`desugar` resolves a method **by name** before types are known, so at the call site there is no
-receiver type and therefore no module coordinate to compile against; the provider's import edge would
-also outrun load order. The canonical shape is a protocol:
-
-```chezzi
-# z.chz — declares the protocol and the caller     # a.chz — declares the implementor
-protocol P:                                        import u
-    fn mprobe(self, x: int) -> int                 struct S:
-fn use(p: P) -> int:                                   v: int
-    return p.mprobe()                                  fn mprobe(self, x: int = u.av()) -> int: …
-```
-
-`z` never imports `a`, and it cannot — `a` imports the protocol, so the edge would be a cycle.
-**Shipped behaviour: the default is copied into the call site and resolved in the caller's scope**
-(the pre-`W7-51` behaviour, kept for this one case). `docs/syntax.md` §5 rule 2 documents it as a
-**hazard, not a safe fallback**: if `z` has its own `av()` the call reads `z`'s (measured: `510`
-where the definer wrote `11`), and if `z` cannot see a name the definer used the program does not
-compile. The alternative — refusing — was built, measured and **rejected**, because it makes a
-defaulted argument unusable through a protocol at all with no workaround. Rule 4 (`Self`-typed
-parameters) is the same carve-out for the same reason.
-
-**The fix that actually closes it: fill omitted arguments in the CALLEE, at runtime.** The receiver's
-own module is on the stack at dispatch time, so the callee can evaluate its own defaults in its own
-namespace with no import edge, no name-keyed guess and no caller-scope copy. Both carve-outs above
-dissolve — `Self` is spellable inside the method, and the protocol case needs no coordinate.
-
-**Why it was deferred, not done.** It is an `Op::Call` ABI change, not a desugar change:
-
-- Middle holes are expressible today (`f(1, c=3)` over `fn f(a, b=2, c=3)`), so "argc is short" cannot
-  encode which arguments are missing — it needs a `Value` hole sentinel that must **never** escape
-  into user-visible state, which is exactly the class of invariant this codebase has been bitten by
-  (`docs/gaps.md` W7-11's dangling `Backref`, the airlock's `Nil` poison).
-- `min_params` (`src/checker/sig.rs`) is currently a statement about the *post-desugar* AST and would
-  become a real arity contract, rewiring the checker plus every path that builds a call frame:
-  `spawn`/`defer` targets, generators, and the wire/snapshot path in `vm/sched.rs`.
-- It would also fix the genuinely-dishonest case this row does not touch: a defaulted fn called
-  through a **first-class function value** (`f := g; f()`), which no desugar-side design can reach.
-
-Its own milestone, after the JIT freeze. Do **not** fold it into a bug-fix wave — the hole sentinel is
-the part that needs the design attention, and it is a value-model change.
-
----
-
 ## 4. Optimizations (ranked effort → payoff)
 
 > **Live numbers:** `docs/benchmarks.md` tracks Chezzi vs CPython (reproducible via

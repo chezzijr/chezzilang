@@ -147,8 +147,11 @@ impl Checker {
                 }
             })
             .collect();
+        let wparams = self.witness_params_of(decl);
         FnSig {
-            min_params: params.len(),
+            // Trailing defaulted parameters are filled by the CALLEE's own prologue, so a call may
+            // omit them. Same predicate the compiler sizes `Proto::min_arity` with.
+            min_params: crate::ast::min_callable_params(&decl.params, !wparams.is_empty()),
             labels,
             params,
             ret,
@@ -163,7 +166,7 @@ impl Checker {
             doc: decl.doc.clone(),
             // M24 — computed HERE (the one site with the declaration's body in hand) so every
             // consumer reads this one answer instead of re-deriving it.
-            witness_params: self.witness_params_of(decl),
+            witness_params: wparams,
             variadic: decl.params.iter().position(|p| p.is_variadic),
         }
     }
@@ -451,7 +454,7 @@ impl Checker {
         // recursion / cascade) is ABSORBED by the other side, so a recursive fn still resolves to its
         // concrete base during the fixpoint (matching the old first-concrete-wins timing). An empty
         // branch set is `Nil` (void). A conflict yields `Err((X, Y))`.
-        let folded: Result<Ty, (Ty, Ty)> = {
+        let folded: Result<Ty, Box<(Ty, Ty)>> = {
             let mut iter = branches.into_iter();
             match iter.next() {
                 None => Ok(Ty::Nil),
@@ -466,7 +469,8 @@ impl Checker {
         // FINALIZE pass: emit the conflict diagnostic, else fill the E-default / reject residual
         // un-inferable `Unknown`.
         match folded {
-            Err((x, y)) => {
+            Err(conflict) => {
+                let (x, y) = *conflict;
                 if !body_had_err {
                     self.error(
                         decl.name_span,
@@ -493,7 +497,7 @@ impl Checker {
     ///    NewType) → MERGE SLOT-WISE via [`Self::join_slot`].
     /// 5. otherwise (incl. Nil-vs-value, two distinct structs) → CONFLICT. There is deliberately NO
     ///    common-supertype / protocol / `Any` search: a protocol return must be spelled explicitly.
-    fn join_ret(&self, a: &Ty, b: &Ty) -> Result<Ty, (Ty, Ty)> {
+    fn join_ret(&self, a: &Ty, b: &Ty) -> Result<Ty, Box<(Ty, Ty)>> {
         use Ty::*;
         if a == b {
             return Ok(a.clone());
@@ -542,7 +546,7 @@ impl Checker {
             (NewType(n1, a1), NewType(n2, a2)) if n1 == n2 && a1.len() == a2.len() => Ok(
                 Ty::NewType(n1.clone(), Self::join_slots(a1, a2).ok_or_else(conflict)?),
             ),
-            _ => Err(conflict()),
+            _ => Err(Box::new(conflict())),
         }
     }
 
@@ -1540,7 +1544,7 @@ impl Checker {
                 ret: Box::new(self.resolve_type(ret, span)),
                 // Carry the annotation's optional labels onto the type (surface-only), so a value call
                 // through e.g. a HOF param `f: fn(name: str) -> nil` can resolve `f(name="X")`.
-                labels: FnLabels(labels.clone()),
+                labels: FnLabels::new(labels.clone()),
             },
             Type::Tuple(ts) => Ty::Tuple(ts.iter().map(|t| self.resolve_type(t, span)).collect()),
             Type::Generic(n, args, head_span) => {
@@ -2158,7 +2162,7 @@ impl Checker {
                             Ty::Func {
                                 params: sig.params.clone(),
                                 ret: Box::new(Ty::Unknown),
-                                labels: crate::checker::FnLabels(sig.labels.clone()),
+                                labels: crate::checker::FnLabels::new(sig.labels.clone()),
                             },
                         );
                         let inferred = self.infer_fn_ret(decl, None, &sig, true);
@@ -2172,7 +2176,7 @@ impl Checker {
                         Ty::Func {
                             params: sig.params.clone(),
                             ret: Box::new(sig.ret.clone()),
-                            labels: crate::checker::FnLabels(sig.labels.clone()),
+                            labels: crate::checker::FnLabels::new(sig.labels.clone()),
                         },
                     );
                     // B3.3 (Task 2a): record the nested fn's non-sendable LOCAL captures keyed by its

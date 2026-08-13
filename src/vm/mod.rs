@@ -372,6 +372,14 @@ struct CallFrame {
     /// Source span of the call site that pushed this frame (where the function was invoked). Used to
     /// build a runtime stack trace; not part of execution.
     call_span: Span,
+    /// How many argument values this frame was actually entered with — `stack.len() - base` at
+    /// [`Vm::finish_frame`], i.e. BEFORE the remaining local slots are nil-reserved. Read only by
+    /// [`crate::vm::op::Op::JumpIfProvided`], so the callee's own prologue can tell an OMITTED
+    /// trailing argument (which it must fill from the parameter's declared default) from one the
+    /// caller supplied. Computed at the single shared frame-entry point, so every door —
+    /// `push_frame`, `push_frame_in_place`, generators, `spawn`, `defer`, the wire path — gets it
+    /// without threading anything through the call sites.
+    argc: usize,
 }
 
 /// Experimental generators — a generator's private execution context. While the generator runs its

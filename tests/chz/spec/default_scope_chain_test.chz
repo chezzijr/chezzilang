@@ -247,9 +247,11 @@ test fn a_default_cycle_routed_through_an_ordinary_fn_faults_cleanly():
 # A provider is a free top-level `fn` declared `-> <the parameter's type>`, and `Self` is not
 # spellable in one (`docs/syntax.md`: naming `Self` as a free-fn parameter is `unknown type 'Self'`).
 # So a default on a `Self`-typed parameter — or one whose type merely MENTIONS `Self`, like
-# `List[Self]` — stays an inline clone, exactly as on `b1307258`. Without that carve-out these four
-# shapes stopped compiling entirely (`unknown type 'Self'` at the declaration), and no test in the
-# tree paired `Self` with a default, which is how that shipped green.
+# `List[Self]` — must keep working. Without a carve-out these four shapes stopped compiling entirely
+# (`unknown type 'Self'` at the declaration), and no test in the tree paired `Self` with a default,
+# which is how that shipped green. They no longer take the inline clone: on a NON-generic host `Self`
+# names one concrete type and is substituted into a real provider, so the default resolves in its
+# DEFINING module like every other. The generic-host case (below) is filled by the callee instead.
 
 struct Q:
     n: int
@@ -281,3 +283,52 @@ test fn a_self_typed_parameter_default_still_works():
     assert Q(1).twin() == 6, "got {Q(1).twin()}"
     assert Q(1).tot() == 2, "got {Q(1).tot()}"
     assert Pick.A.other_of() == "A/B", "got {Pick.A.other_of()}"
+
+
+# --- callee-filled defaults ------------------------------------------------------------------
+#
+# Two shapes no call-site rewrite can reach, so the CALLEE fills them from a prologue compiled into
+# the declaring module: a call through a first-class function VALUE (the caller has no signature to
+# consult), and a `Self`-typed default on a GENERIC host (`Self` is `G[T]`, and `T` is unbound in the
+# free `fn` a provider would be). Both used to be errors or caller-scope clones.
+
+fn cf_base() -> int:
+    return 4
+
+fn cf_one(x: int = cf_base()) -> int:
+    return x
+
+fn cf_three(a: int, x: int = 4, y: int = 5) -> int:
+    return a * 100 + x * 10 + y
+
+struct GHost[T]:
+    v: T
+    fn count(self, xs: List[Self] = gh_empty()) -> int:
+        return xs.len()
+
+fn gh_empty[T]() -> List[GHost[T]]:
+    return []
+
+test fn a_default_fills_through_a_function_value():
+    f := cf_one
+    assert f() == 4, "got {f()}"
+    assert f(9) == 9, "got {f(9)}"
+
+test fn a_function_value_fills_only_the_omitted_suffix():
+    f := cf_three
+    assert f(1) == 145, "got {f(1)}"
+    assert f(1, 2) == 125, "got {f(1, 2)}"
+    assert f(1, 2, 3) == 123, "got {f(1, 2, 3)}"
+
+test fn a_keyword_call_through_a_value_may_omit_a_trailing_default():
+    f := cf_three
+    assert f(a=1, x=7) == 175, "got {f(a=1, x=7)}"
+
+test fn a_generic_host_self_default_is_filled_by_the_callee():
+    assert GHost(1).count() == 0, "got {GHost(1).count()}"
+    assert GHost(1).count([GHost(2)]) == 1, "got {GHost(1).count([GHost(2)])}"
+
+test fn a_callee_filled_default_is_evaluated_per_call():
+    f := cf_one
+    assert f() == 4, "first"
+    assert f() == 4, "second"

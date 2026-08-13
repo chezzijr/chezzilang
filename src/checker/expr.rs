@@ -549,7 +549,8 @@ impl Checker {
                 ret,
                 labels,
             } if !named.is_empty() => {
-                self.check_value_keyword_call(&params, &labels.0, args, named, span);
+                let minp = labels.min_or(params.len());
+                self.check_value_keyword_call(&params, &labels.names, minp, args, named, span);
                 *ret
             }
             // A first-class builtin fn value (`f := ord; f("a")`) checks its args against the builtin's
@@ -570,12 +571,26 @@ impl Checker {
                 );
                 *ret
             }
-            Ty::Func { params, ret, .. } | Ty::BuiltinFn { params, ret } => {
+            Ty::Func {
+                params,
+                ret,
+                labels,
+            } => {
                 // STRICT — no int→float widening through a function VALUE. A `Ty::Func` does not say
                 // which declaration it came from: a GENERIC fn instantiated at float (`f := id[float]`)
                 // has the declared param `T`, so the callee prologue emits NO `Op::CoerceFloat` and an
                 // int argument would sit in the slot under a static `float`. The checker cannot tell
                 // that value apart from a plain `fn(x: float)`, so neither adapts — write `f(1.0)`.
+                //
+                // Arity is a RANGE when the underlying declaration's trailing parameters carry
+                // defaults: the callee fills the omitted ones itself, so `f := g; f()` is legal and so
+                // is `f(1)`. `min_or` collapses to exact arity for everything else (a bare `fn(T)`
+                // annotation, a closure, a builtin) — those carry no optional tail.
+                let minp = labels.min_or(params.len());
+                self.check_args_range("closure", &params, minp, args, span);
+                *ret
+            }
+            Ty::BuiltinFn { params, ret } => {
                 self.check_args("closure", &params, args, span);
                 *ret
             }
@@ -628,6 +643,7 @@ impl Checker {
         &mut self,
         params: &[Ty],
         labels: &[Option<String>],
+        min_params: usize,
         args: &[Expr],
         named: &[(String, Expr)],
         span: Span,
@@ -694,21 +710,47 @@ impl Checker {
                 }
             }
         }
-        // SCOPE-CUT: every slot must be filled — defaults do NOT apply through a value.
-        let missing: Vec<String> = (0..params.len())
-            .filter(|&i| fill[i].is_none())
-            .map(|i| {
+        // A slot may be left unfilled only if the CALLEE can fill it, and the callee fills a
+        // trailing run: a short call simply pushes fewer values, which cannot express a hole before a
+        // supplied argument. So the unfilled slots must be exactly the suffix `min_params..`.
+        let filled_upto = (0..params.len())
+            .position(|i| fill[i].is_none())
+            .unwrap_or(params.len());
+        let hole: Option<usize> = (filled_upto..params.len()).find(|&i| fill[i].is_some());
+        if let Some(h) = hole {
+            // A genuine middle hole: `f(1, c=3)` over `fn f(a, b=2, c=3)` through a VALUE.
+            let name_of = |i: usize| {
                 labels
                     .get(i)
                     .and_then(|l| l.clone())
                     .unwrap_or_else(|| format!("#{}", i + 1))
-            })
-            .collect();
-        if !missing.is_empty() {
+            };
+            let missing: Vec<String> = (filled_upto..h)
+                .filter(|&i| fill[i].is_none())
+                .map(name_of)
+                .collect();
             self.error(
                 span,
                 format!(
-                    "a call through a function value must supply every parameter (defaults do not apply through a value); missing: {}",
+                    "a call through a function value can only omit TRAILING defaulted parameters, and {} come(s) before the supplied '{}' — supply it, or call the function directly by name",
+                    missing.join(", "),
+                    name_of(h)
+                ),
+            );
+            ok = false;
+        } else if filled_upto < min_params {
+            let missing: Vec<String> = (filled_upto..min_params)
+                .map(|i| {
+                    labels
+                        .get(i)
+                        .and_then(|l| l.clone())
+                        .unwrap_or_else(|| format!("#{}", i + 1))
+                })
+                .collect();
+            self.error(
+                span,
+                format!(
+                    "a call through a function value must supply every parameter that has no default; missing: {}",
                     missing.join(", ")
                 ),
             );
@@ -727,9 +769,11 @@ impl Checker {
             return;
         }
 
-        // Type-check each slot against the combined expr that fills it (slot order = eval order).
-        for (i, pt) in params.iter().enumerate() {
-            let ci = fill[i].expect("every slot filled");
+        // Type-check each SUPPLIED slot against the combined expr that fills it (slot order = eval
+        // order). Slots past `filled_upto` were omitted and the callee fills them from its own
+        // declared defaults, which its own module already type-checked.
+        for (i, pt) in params.iter().enumerate().take(filled_upto) {
+            let ci = fill[i].expect("every slot below `filled_upto` is filled");
             let e = if ci < args.len() {
                 &args[ci]
             } else {
@@ -756,7 +800,13 @@ impl Checker {
 
         // Record the permutation for the backends (only while harvesting; the error-gate discards it).
         if self.harvest_keywords {
-            let perm: Vec<usize> = fill.iter().map(|f| f.expect("filled")).collect();
+            // Only the SUPPLIED prefix: the backends push exactly these, and a short `Op::Call`
+            // is what tells the callee's prologue to fill the rest from its own defaults.
+            let perm: Vec<usize> = fill
+                .iter()
+                .take(filled_upto)
+                .map(|f| f.expect("every slot below `filled_upto` is filled"))
+                .collect();
             let key = keyword_key(
                 self.graph_module_idx,
                 self.kw_frag_ctx,
@@ -2466,6 +2516,9 @@ impl Checker {
                             // M24 Task 5 — the METHOD's own witnessed params (never the struct's)
                             sig.witness_params.clone(),
                             sig.is_static,
+                            // Trailing parameters the CALLEE fills; the receiver slot is dropped
+                            // below, so this is compared against `args.len() + 1`.
+                            sig.min_params,
                             sig.doc.clone(),
                             sig.where_bounds.clone(),
                             map,
@@ -2479,6 +2532,7 @@ impl Checker {
                     mtps,
                     mwitness,
                     is_static,
+                    mminp,
                     mdoc,
                     where_bounds,
                     rmap,
@@ -2536,7 +2590,14 @@ impl Checker {
                                 );
                             }
                             let dec = declared.split_first().map_or(&[][..], |(_, d)| d);
-                            self.check_args_subst(method, expected, dec, args, span)
+                            self.check_args_subst(
+                                method,
+                                expected,
+                                dec,
+                                mminp.saturating_sub(1),
+                                args,
+                                span,
+                            )
                         }
                         None => {
                             self.error(
@@ -2600,6 +2661,9 @@ impl Checker {
                             // M24 Task 5 — the METHOD's own witnessed params (never the host type's)
                             sig.witness_params.clone(),
                             sig.is_static,
+                            // Trailing parameters the CALLEE fills; the receiver slot is dropped
+                            // below, so this is compared against `args.len() + 1`.
+                            sig.min_params,
                             sig.where_bounds.clone(),
                             map,
                         )
@@ -2612,6 +2676,7 @@ impl Checker {
                     mtps,
                     mwitness,
                     is_static,
+                    mminp,
                     where_bounds,
                     rmap,
                 )) = resolved
@@ -2644,7 +2709,14 @@ impl Checker {
                     match params.split_first() {
                         Some((_receiver, expected)) => {
                             let dec = declared.split_first().map_or(&[][..], |(_, d)| d);
-                            self.check_args_subst(method, expected, dec, args, span)
+                            self.check_args_subst(
+                                method,
+                                expected,
+                                dec,
+                                mminp.saturating_sub(1),
+                                args,
+                                span,
+                            )
                         }
                         None => {
                             self.error(
@@ -2682,6 +2754,9 @@ impl Checker {
                             // M24 Task 5 — the METHOD's own witnessed params (never the host type's)
                             sig.witness_params.clone(),
                             sig.is_static,
+                            // Trailing parameters the CALLEE fills; the receiver slot is dropped
+                            // below, so this is compared against `args.len() + 1`.
+                            sig.min_params,
                             sig.where_bounds.clone(),
                             map,
                         )
@@ -2694,6 +2769,7 @@ impl Checker {
                     mtps,
                     mwitness,
                     is_static,
+                    mminp,
                     where_bounds,
                     rmap,
                 )) = resolved
@@ -2724,7 +2800,14 @@ impl Checker {
                     match params.split_first() {
                         Some((_receiver, expected)) => {
                             let dec = declared.split_first().map_or(&[][..], |(_, d)| d);
-                            self.check_args_subst(method, expected, dec, args, span)
+                            self.check_args_subst(
+                                method,
+                                expected,
+                                dec,
+                                mminp.saturating_sub(1),
+                                args,
+                                span,
+                            )
                         }
                         None => {
                             self.error(
@@ -3728,6 +3811,7 @@ impl Checker {
         name: &str,
         params: &[Ty],
         declared: &[Ty],
+        min_params: usize,
         args: &[Expr],
         span: Span,
     ) {
@@ -3735,7 +3819,7 @@ impl Checker {
             name,
             params,
             Some(declared),
-            params.len(),
+            min_params.min(params.len()),
             args,
             span,
             true,

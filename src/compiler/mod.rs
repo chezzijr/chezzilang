@@ -1611,6 +1611,8 @@ impl Compiler {
         }
         // A `float` param coerces any int argument at the callee prologue — so EVERY caller (incl. an
         // int VARIABLE, not just a literal) widens.
+        // Callee-side default fill FIRST, so a filled value is coerced and boxed like a supplied one.
+        self.emit_default_param_prologue(&mut fc, &decl.params);
         self.emit_float_param_prologue(&mut fc, &decl.params);
         // Uniform by-reference capture: box any param captured by a nested closure (after coercion).
         self.emit_box_param_prologue(&mut fc, &decl.params);
@@ -1651,6 +1653,63 @@ impl Compiler {
         fc.emit(Op::Nil, Span::RUNTIME);
         fc.emit(Op::Return, Span::RUNTIME);
         Ok(self.finish(fc))
+    }
+
+    /// **Callee-side default fill.** For each trailing parameter that carries a default, emit
+    ///
+    /// ```text
+    ///     JumpIfProvided(slot, after)
+    ///     <the default expression>
+    ///     SetLocal(slot)
+    ///   after:
+    /// ```
+    ///
+    /// and lower [`FnComp::min_arity`] accordingly, so the runtime arity checks admit a call that
+    /// omits them. The default is compiled HERE, in the module that declares the function, which is
+    /// what makes this correct for the shapes no call-site rewrite can reach: a call through a
+    /// first-class function value (the caller has no signature to consult) and a default whose type
+    /// mentions `Self` or an enclosing type parameter (unspellable in the free `fn` a provider is).
+    ///
+    /// Runs BEFORE [`Compiler::emit_float_param_prologue`] so a filled `int` default still widens
+    /// into a `float` parameter, and therefore before [`Compiler::emit_box_param_prologue`] so a
+    /// filled value is boxed like a supplied one.
+    ///
+    /// **Emits nothing, and leaves `min_arity == arity`, unless every condition holds:**
+    /// the parameters carrying defaults form a SUFFIX (a short call can only ever drop a suffix, so
+    /// a hole before a supplied argument is not expressible), the proto carries no hidden trailing
+    /// WITNESS parameters (they live past the declared ones, so a short declared count would land a
+    /// witness in a defaulted slot), and no parameter is VARIADIC (its surplus collapse is a
+    /// call-site rewrite the callee cannot reconstruct). A function with no defaults is
+    /// byte-identical to before.
+    fn emit_default_param_prologue(&mut self, fc: &mut FnComp, params: &[crate::ast::Param]) {
+        // ONE shared predicate with the checker — see `ast::min_callable_params` for why they must
+        // agree by construction rather than by hand-sync.
+        let first = crate::ast::min_callable_params(params, !self.witness_locals.is_empty());
+        if first == params.len() {
+            return; // no short entry for this shape (no trailing defaults, variadic, or witnesses)
+        }
+        // A default before a non-defaulted parameter cannot be filled by a short call; if any
+        // exists, only the suffix above is fillable, which is exactly what `first` already is.
+        for (i, p) in params.iter().enumerate().skip(first) {
+            let Some(d) = &p.default else { continue };
+            let span = d.span;
+            // Patched below once the body's length is known.
+            let jump_at = fc.code.len();
+            fc.emit(Op::JumpIfProvided(i as u32, usize::MAX), span);
+            if self.compile_expr(fc, d).is_err() {
+                // A default the callee cannot lower keeps the call-site rewrite as its only filler:
+                // roll the branch back and leave `min_arity` alone rather than shipping a half prologue.
+                fc.code.truncate(jump_at);
+                fc.lines.truncate(jump_at);
+                return;
+            }
+            fc.emit_set_local_raw(i, span);
+            let after = fc.code.len();
+            if let Op::JumpIfProvided(_, t) = &mut fc.code[jump_at] {
+                *t = after;
+            }
+        }
+        fc.min_arity = first;
     }
 
     /// One-way int→float widening — emit the callee-prologue coercion for every `float`-typed param:
@@ -1700,6 +1759,7 @@ impl Compiler {
         self.program.protos.push(Proto {
             name: fc.name,
             arity: fc.arity,
+            min_arity: fc.min_arity,
             n_slots: fc.max_slots,
             code,
             lines,
@@ -6431,6 +6491,8 @@ fn stmt_has_bare_spawn(s: &Stmt) -> bool {
 struct FnComp {
     name: String,
     arity: usize,
+    /// See [`crate::vm::op::Proto::min_arity`]. Starts at `arity`; only the default prologue lowers it.
+    min_arity: usize,
     is_toplevel: bool,
     code: Vec<Op>,
     lines: Vec<Span>,
@@ -6478,6 +6540,9 @@ impl FnComp {
         FnComp {
             name,
             arity,
+            // Short entry is opt-in: `emit_default_param_prologue` lowers this when, and only when,
+            // it actually emits a fill for a trailing defaulted parameter.
+            min_arity: arity,
             is_toplevel,
             code: Vec::new(),
             lines: Vec::new(),

@@ -51,10 +51,38 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > Gate: `cargo test` **4093 lib + all 16 integration targets, 0 failed**; conformance 8/8; clippy
 > `--all-targets -D warnings` clean.
 >
-> **Still open, phase 2 (same milestone, `docs/future.md` §3d is deleted when it lands):** a defaulted
-> fn called through a first-class function value (`f := g; f()` is `'closure' expects 1 argument(s),
-> got 0`), and the generic-host `Self`/type-param carve-out above. Both need callee-side filling,
-> which is a `min_params` change, not a desugar one.
+> **✅ Phase 2, same day — `docs/future.md` §3d is DELETED.** The two shapes no call-site rewrite can
+> reach are now filled by the CALLEE, from a prologue compiled into the declaring module:
+> `f := g; f()` (was `'closure' expects 1 argument(s), got 0`, now `4`) and the generic-host `Self`
+> carve-out (measured on the phase-1 commit `cd9d609b`: the CALLER's `mkl()` ran; now the definer's).
+>
+> **No `Op::Call` ABI change, no `Value` hole sentinel and no provided-mask** — §3d assumed all three.
+> A short call drops a SUFFIX, and the parser already forbids a required parameter after a defaulted
+> one, so `argc` alone identifies what was omitted: `CallFrame::argc` is computed at the single shared
+> frame-entry point (`finish_frame`), which is why generators, `spawn`, `defer` and the wire path
+> needed no plumbing. One new opcode `Op::JumpIfProvided(slot, target)` (registered in BOTH
+> `peephole::jump_target` and `jump_target_mut` — the second field is the target, the first is a slot)
+> plus `Proto::min_arity`. The checker's `FnSig::min_params` and the compiler's `Proto::min_arity` are
+> sized by **one shared predicate**, `ast::min_callable_params`, so checker-accepts ⟺
+> compiler-can-lower by construction rather than by hand-sync — the recurring soundness class here.
+> The ~11 inlined VM arity compares are consolidated into one `check_proto_arity` range check.
+>
+> **Two things this also fixed.** A cross-module fn value used to be TRUNCATED to `params[..min_params]`
+> (`f := request.get; f(url, 5)` was a spurious "too many arguments"); it now carries the full list
+> plus the optional arity. And a keyword call through a value may omit a trailing default
+> (`h(a=1, b=7)`), where the old scope-cut refused every omission with a message — *"defaults do not
+> apply through a value"* — that is no longer true. A genuine MIDDLE hole is still refused, now with a
+> message that says which parameter blocks it.
+>
+> **Measured neutral:** fib 1.01x, struct 1.01x, poly_method 1.00x, loop 1.01x vs `cd9d609b`, all
+> within noise (no bench declares a default, so the prologue emits nothing and the bytecode is
+> unchanged; `CallFrame` grew by one `usize`). One knock-on worth naming: carrying the optional arity
+> on `FnLabels` grew the checker's `Ty` from 64 to 72 bytes, which pushed `join_ret`'s
+> `Result<Ty, (Ty, Ty)>` past clippy's `result_large_err` threshold — the `Err` payload is now boxed,
+> which is the right shape for a rare error path anyway.
+>
+> Gate: `cargo test` **4096 lib + all 16 integration targets, 0 failed**; `tests/chz/` default suite
+> **16/16 identical on M:N and `--serial`**; clippy `--all-targets -D warnings` and `cargo fmt` clean.
 
 
 > **✅ W7-50/51 post-review fix wave, 2026-08-13.** The whole-branch adversarial review filed seven

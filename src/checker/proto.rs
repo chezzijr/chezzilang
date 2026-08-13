@@ -1483,7 +1483,7 @@ impl Checker {
                     .map(|p| self.resolve_ty_ro_d(p, depth + 1))
                     .collect(),
                 ret: Box::new(self.resolve_ty_ro_d(ret, depth + 1)),
-                labels: FnLabels(labels.clone()),
+                labels: FnLabels::new(labels.clone()),
             },
             Type::Tuple(ts) => Ty::Tuple(
                 ts.iter()
@@ -4161,7 +4161,7 @@ impl Checker {
         let declared = Ty::Func {
             params: sig.params.clone(),
             ret: Box::new(sig.ret.clone()),
-            labels: FnLabels(sig.labels.clone()),
+            labels: FnLabels::new(sig.labels.clone()),
         };
         let mut m: HashMap<String, Ty> = HashMap::new();
         unify(&declared, want, &mut m);

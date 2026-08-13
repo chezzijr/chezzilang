@@ -334,6 +334,17 @@ pub enum Op {
     /// `providers` exists because the caller's module is compiled BEFORE the definer's, so the
     /// definer's `ProtoId` does not exist yet at emit time.
     MakeFuncIn(u32),
+    /// `if frame.argc > slot { ip = target }` — the callee-side default prologue's only branch.
+    ///
+    /// A caller that omits trailing defaulted arguments pushes fewer values, so slot `i` was
+    /// supplied iff `i < argc`. When it was NOT, control falls through to the compiled default
+    /// expression and a `SetLocal(slot)`; when it was, this jumps past both. Emitted only for
+    /// parameters that carry a default, so a function without defaults is byte-identical.
+    ///
+    /// The `usize` is the TARGET (a jump destination the peephole pass must relocate); the `u32` is
+    /// a SLOT index and must not be. Mirrors `MatchArm`, whose `next` is a target while its
+    /// `scrut`/`bind_start` are slots.
+    JumpIfProvided(u32, usize),
     /// Build a `Cffi` value from `Program.cffi_defs[id]`: `dlopen` the library + resolve the symbol
     /// at module init (eager — a missing library/symbol fails here). Pushed onto the stack, then
     /// bound to its global slot by the following `DefineGlobalSlot`.
@@ -515,6 +526,15 @@ pub struct WaitMeta {
 pub struct Proto {
     pub name: String,
     pub arity: usize,
+    /// The FEWEST arguments this proto may be entered with. Equals `arity` for everything that
+    /// cannot be short-called; smaller when trailing parameters carry defaults the callee fills
+    /// itself (`Op::JumpIfProvided`). The runtime arity checks accept `min_arity..=arity`.
+    ///
+    /// Deliberately `arity` whenever short entry would misplace a value: a proto carrying M24's
+    /// hidden trailing WITNESS parameters (they sit after the declared ones, so a short declared
+    /// count would land a witness in a defaulted slot) or a VARIADIC parameter (whose surplus
+    /// collapse is a call-site rewrite, not something the callee can reconstruct).
+    pub min_arity: usize,
     pub n_slots: usize,
     pub code: Vec<Op>,
     pub lines: Vec<Span>,

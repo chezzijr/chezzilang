@@ -823,10 +823,16 @@ consequences are worth writing down, because each is a rule you can hit:
    the provider's declared return type and the default behaves like any other: `fn combine(self,
    other: Self = mkq())` — and any default whose type merely mentions `Self`, like `List[Self]` —
    resolves in its defining module. On a **generic** host `Self` is `Q[T]`, whose `T` is still unbound
-   in a free fn, so those keep the inline clone and with it caller-scope resolution. The same
-   carve-out covers a default whose type or expression mentions an enclosing **type parameter**
-   (`x: T = mk()`, `x: int = mk[T]().n`), which is a compile error either way, and a default whose
-   *expression* literally spells `Self` (`= Self.mk()`).
+   in a free fn, so no provider can be written for it — the **callee** fills it instead, from a
+   prologue compiled into the declaring module where `Self` and `T` are both in scope, and the call
+   site simply omits the argument. The same route covers a default whose type or expression mentions
+   an enclosing **type parameter** and one whose expression literally spells `Self` (`= Self.mk()`).
+   So every non-literal default resolves in its definer, whichever route it takes.
+
+   The one shape that cannot: a **keyword** call that supplies a later parameter while omitting an
+   earlier callee-filled one (`G(1).m(k=3)` over `fn m(self, xs: List[Self] = mkl(), k: int = 9)`).
+   A short call drops a suffix; it cannot leave a gap. That is a compile error naming the parameter
+   to pass explicitly — not a silent fall back to the caller's scope.
 
 5. **A cycle routed through an ordinary function is a runtime fault, not a compile error.**
    `struct S: n: int = mk().n` with `fn mk() -> S: return S()` type-checks clean and then faults with
@@ -908,8 +914,11 @@ fn apply(f: fn(name: str) -> nil):     # labels ride on the fn TYPE
 Labels are **surface-only** (Swift SE-0111): `fn(str) -> nil` and `fn(name: str) -> nil` are the **same
 type** — mutually assignable, so an unlabelled callback flows into a labelled parameter and vice-versa
 (no impact on existing HOF/callback/protocol code). Two limits, both by design: **(1)** a value call
-must supply **every** parameter — declaration-site **defaults do not fill through a value** (`h :=
-hasdefault; h()` is an error, while a **direct** `hasdefault()` still fills the default); **(2)**
+may omit only a **trailing** run of defaulted parameters — `h := hasdefault; h()` fills the default
+(the CALLEE does it, from the declaration, so the value never had to carry it), and `h(a=1, b=7)` may
+omit a trailing `c`, but a value call cannot leave a HOLE before an argument it does supply
+(`h(1, c=9)` over `fn f(a, b=2, c=3)`), because a short call is exactly "fewer values pushed" and
+cannot express a gap — call the function directly by name for that shape; **(2)**
 first-class **built-in** function values (`p := ord`) take **no** keyword arguments (labels are a
 user-function surface). Named arguments through a value evaluate in **parameter-declaration order**, the
 same as a direct named call, and work in `defer`/`spawn` position too (`defer d(name="Zoe")`). Resolution

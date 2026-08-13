@@ -1915,6 +1915,7 @@ impl Checker {
             let params = sig.params.clone();
             let ret = sig.ret.clone();
             let labels = sig.labels.clone();
+            let minp = sig.min_params;
             // M24 — the fn-as-value wall, at the BARE read (`g := reset`): both for the Scope-A pin
             // below and for the rigid fallback after it.
             let wparams = sig.witness_params.clone();
@@ -1950,7 +1951,7 @@ impl Checker {
                 let declared = Ty::Func {
                     params: params.clone(),
                     ret: Box::new(ret.clone()),
-                    labels: FnLabels(labels.clone()),
+                    labels: FnLabels::new(labels.clone()),
                 };
                 let mut map = HashMap::new();
                 unify(&declared, &expected, &mut map);
@@ -1963,8 +1964,9 @@ impl Checker {
                 params,
                 ret: Box::new(ret),
                 // A user fn's value type carries its param NAMES as labels, so `g := greet` yields a
-                // labelled function value and `g(name="Bob")` resolves through it.
-                labels: FnLabels(labels),
+                // labelled function value and `g(name="Bob")` resolves through it — and its optional
+                // arity, so `f := g; f()` may omit the trailing defaults the CALLEE fills.
+                labels: FnLabels::new(labels).with_min(minp),
             };
         }
         // A first-class universe builtin fn used in value position (`f := ord`, HOF arg, bare
@@ -2928,14 +2930,15 @@ impl Checker {
                     .and_then(|id| self.module_sigs.get(id))
                     .map(|sig| {
                         if let Some(fsig) = sig.functions.get(name) {
-                            // A first-class function VALUE is fixed-arity (Ty::Func carries no
-                            // optional tail), so expose only the REQUIRED params — `f := request.get`
-                            // then `f(url)` keeps working. The optional tail (e.g. timeout_ms) is
-                            // reachable via a direct `request.get(url, ms)` call.
+                            // Expose the FULL parameter list plus the optional arity, so both
+                            // `f := request.get; f(url)` and `f(url, 5)` work. This used to TRUNCATE
+                            // to `params[..min_params]`, which made supplying the optional tail
+                            // through a value a spurious "too many arguments".
                             Some(Ty::Func {
-                                params: fsig.params[..fsig.min_params].to_vec(),
+                                params: fsig.params.clone(),
                                 ret: Box::new(fsig.ret.clone()),
-                                labels: crate::checker::FnLabels::default(),
+                                labels: crate::checker::FnLabels::none(fsig.params.len())
+                                    .with_min(fsig.min_params),
                             })
                         } else {
                             sig.values.get(name).cloned()
@@ -3001,7 +3004,7 @@ impl Checker {
                         &Ty::Func {
                             params,
                             ret: Box::new(ret),
-                            labels: FnLabels(labels),
+                            labels: FnLabels::new(labels),
                         },
                         &map,
                     );
@@ -4050,7 +4053,7 @@ impl Checker {
         Ty::Func {
             params: param_tys,
             ret: Box::new(ret_ty),
-            labels: FnLabels(labels),
+            labels: FnLabels::new(labels),
         }
     }
 

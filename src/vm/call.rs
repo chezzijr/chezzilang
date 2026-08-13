@@ -23,13 +23,7 @@ impl Vm {
                 // the error path leaves `[callee, args…]` intact for the trace / `recover:`.
                 let arity = self.program.protos[proto].arity;
                 if clo.is_none() {
-                    self.check_arity(
-                        "function",
-                        &self.program.protos[proto].name,
-                        arity,
-                        argc,
-                        span,
-                    )?;
+                    self.check_proto_arity(proto, argc, span)?;
                 } else if argc != arity {
                     return Err(self.err(
                         format!("closure expects {arity} argument(s), got {argc}"),
@@ -128,14 +122,7 @@ impl Vm {
                 };
                 match callee_kind {
                     Callee::Func { proto, home } => {
-                        // `&...name` (no clone): `check_arity` only formats the message on mismatch.
-                        self.check_arity(
-                            "function",
-                            &self.program.protos[proto].name,
-                            self.program.protos[proto].arity,
-                            argc,
-                            span,
-                        )?;
+                        self.check_proto_arity(proto, argc, span)?;
                         // Experimental generators — allocate, don't run (see `do_call`'s fast path).
                         if self.program.protos[proto].is_generator {
                             return Ok(self.alloc_generator(proto, home, None, args));
@@ -828,6 +815,39 @@ impl Vm {
         v.as_obj().expect("as_obj on non-object")
     }
 
+    /// Arity check for a call that enters a compiled PROTO, accepting `min_arity..=arity`.
+    ///
+    /// A proto whose trailing parameters carry defaults may be entered short — the callee's own
+    /// prologue fills the omitted slots (`Op::JumpIfProvided`). Everything else keeps
+    /// `min_arity == arity`, so this is the exact old check for every function without defaults.
+    ///
+    /// Every proto-entering site routes through here rather than inlining its own compare, so the
+    /// relaxation cannot reach some call paths and miss others — the failure mode where a method
+    /// call accepts a short arity that the same function rejects through a value.
+    pub(super) fn check_proto_arity(
+        &self,
+        proto: ProtoId,
+        got: usize,
+        span: Span,
+    ) -> Result<(), RuntimeError> {
+        let p = &self.program.protos[proto];
+        if (p.min_arity..=p.arity).contains(&got) {
+            return Ok(());
+        }
+        let want = if p.min_arity == p.arity {
+            format!("{}", p.arity)
+        } else {
+            format!("{}-{}", p.min_arity, p.arity)
+        };
+        Err(self.err(
+            format!(
+                "function '{}' expects {want} argument(s), got {got}",
+                p.name
+            ),
+            span,
+        ))
+    }
+
     pub(super) fn check_arity(
         &self,
         _kind: &str,
@@ -871,17 +891,7 @@ impl Vm {
         else {
             return Ok(false);
         };
-        if self.program.protos[proto].arity != argc + 1 {
-            return Err(self.err(
-                format!(
-                    "function '{}' expects {} argument(s), got {}",
-                    self.program.protos[proto].name,
-                    self.program.protos[proto].arity,
-                    argc + 1
-                ),
-                span,
-            ));
-        }
+        self.check_proto_arity(proto, argc + 1, span)?;
         let home = self.module_objs[prog.native_home[key]];
         if self.program.protos[proto].is_generator {
             let mut gen_args = Vec::with_capacity(argc + 1);
@@ -995,18 +1005,7 @@ impl Vm {
                 }
                 if let Some(cell) = hit {
                     let proto = cell.proto;
-                    let arity = self.program.protos[proto].arity;
-                    if arity != argc + 1 {
-                        return Err(self.err(
-                            format!(
-                                "function '{}' expects {} argument(s), got {}",
-                                self.program.protos[proto].name,
-                                arity,
-                                argc + 1
-                            ),
-                            span,
-                        ));
-                    }
+                    self.check_proto_arity(proto, argc + 1, span)?;
                     let home = self.module_objs[cell.module_idx as usize];
                     // Experimental generators — a generator method allocates rather than running (else its
                     // `Op::Yield` would poison the host run with no `generator_next` to drive it).
@@ -1326,18 +1325,7 @@ impl Vm {
                 let def_module_idx = def.module_idx;
                 if let Some(proto) = resolved {
                     let home = self.module_objs[def_module_idx];
-                    if self.program.protos[proto].arity != argc + 1 {
-                        // `self` + explicit args.
-                        return Err(self.err(
-                            format!(
-                                "function '{}' expects {} argument(s), got {}",
-                                self.program.protos[proto].name,
-                                self.program.protos[proto].arity,
-                                argc + 1
-                            ),
-                            span,
-                        ));
-                    }
+                    self.check_proto_arity(proto, argc + 1, span)?;
                     // Experimental generators — a generator method allocates rather than running (else
                     // its `Op::Yield` would poison the host run). Covers both the IC-flatten and the
                     // re-entrant `run_proto` paths below; never IC-cached (it returns, not push-frame).
@@ -1450,17 +1438,7 @@ impl Vm {
                     // An enum method's home module is the enum's declaring module (recorded in
                     // `enum_home`), so its body resolves top-level names against the right globals.
                     let home = self.module_objs[self.enum_home_module(&enum_key)];
-                    if self.program.protos[proto].arity != argc + 1 {
-                        return Err(self.err(
-                            format!(
-                                "function '{}' expects {} argument(s), got {}",
-                                self.program.protos[proto].name,
-                                self.program.protos[proto].arity,
-                                argc + 1
-                            ),
-                            span,
-                        ));
-                    }
+                    self.check_proto_arity(proto, argc + 1, span)?;
                     if self.program.protos[proto].is_generator {
                         let mut gen_args = Vec::with_capacity(argc + 1);
                         gen_args.push(recv);
@@ -1510,17 +1488,7 @@ impl Vm {
                     .and_then(|ms| ms.get(method).copied());
                 if let Some(proto) = resolved {
                     let home = self.module_objs[self.newtype_home_module(&nt_key)];
-                    if self.program.protos[proto].arity != argc + 1 {
-                        return Err(self.err(
-                            format!(
-                                "function '{}' expects {} argument(s), got {}",
-                                self.program.protos[proto].name,
-                                self.program.protos[proto].arity,
-                                argc + 1
-                            ),
-                            span,
-                        ));
-                    }
+                    self.check_proto_arity(proto, argc + 1, span)?;
                     if self.program.protos[proto].is_generator {
                         let mut gen_args = Vec::with_capacity(argc + 1);
                         gen_args.push(recv);
@@ -1624,16 +1592,8 @@ impl Vm {
                 span,
             ));
         };
-        // A static method has NO receiver, so its arity equals `argc` exactly (no `+ 1`).
-        if self.program.protos[proto].arity != argc {
-            return Err(self.err(
-                format!(
-                    "function '{}' expects {} argument(s), got {}",
-                    self.program.protos[proto].name, self.program.protos[proto].arity, argc
-                ),
-                span,
-            ));
-        }
+        // A static method has NO receiver, so its argument count is `argc` exactly (no `+ 1`).
+        self.check_proto_arity(proto, argc, span)?;
         let home = self.module_objs[home_idx];
         if self.program.protos[proto].is_generator {
             let at = self.stack.len() - argc;

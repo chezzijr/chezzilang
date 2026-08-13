@@ -5964,6 +5964,81 @@ fn a_default_naming_an_import_the_caller_cannot_see_now_compiles_and_resolves_in
     }
 }
 
+/// **`f := g; f()` — the shape the deleted `docs/future.md` §3d existed for, and the one no call-site rewrite can
+/// reach.** `desugar` never rewrites a call through a first-class function VALUE (a local `Ident`
+/// callee resolves to no signature), so the omitted default cannot be filled by the caller; the
+/// CALLEE fills it, from its own prologue, in its own module. Measured on `0104d57b`:
+/// `'closure' expects 1 argument(s), got 0`.
+///
+/// The neighbours matter as much as the case: supplying the optional argument must still work, a
+/// partial suffix must fill only what was omitted, a genuinely missing REQUIRED argument must still
+/// be refused, and too many arguments must still be refused.
+#[test]
+fn a_default_fills_through_a_first_class_function_value() {
+    let out = run_capture(
+        "fn av() -> int:\n    return 4\nfn g(x: int = av()) -> int:\n    return x\nf := g\nprint(f())\nprint(f(9))\n",
+    )
+    .expect("run");
+    assert_eq!(out, "4\n9\n");
+    let p = run_capture_parallel(
+        "fn av() -> int:\n    return 4\nfn g(x: int = av()) -> int:\n    return x\nf := g\nprint(f())\nprint(f(9))\n",
+    )
+    .expect("run");
+    assert_eq!(out, p, "serial vs M:N divergence");
+
+    // A partial suffix: only the omitted tail is filled.
+    let out = run_capture(
+        "fn g(a: int, x: int = 4, y: int = 5) -> int:\n    return a * 100 + x * 10 + y\nf := g\nprint(f(1))\nprint(f(1, 2))\nprint(f(1, 2, 3))\n",
+    )
+    .expect("run");
+    assert_eq!(out, "145\n125\n123\n");
+
+    // The defaults are the DEFINER's, evaluated per call, on a worker as well as on the host.
+    let out = run_capture_parallel(
+        "fn av() -> int:\n    return 4\nfn g(x: int = av()) -> int:\n    return x\nfn main():\n    ch := Channel[int](1)\n    f := g\n    parallel:\n        spawn:\n            ch.send(f())\n    print(ch.recv())\nmain()\n",
+    )
+    .expect("run");
+    assert_eq!(out, "4\n");
+}
+
+/// The last expression still copied into a caller, and its removal. A default whose type names
+/// `Self` on a GENERIC host (`Q[T]`) cannot become a free provider `fn` — `Self` is `Q[T]` and `T` is
+/// unbound outside the signature — so it kept the inline clone, and with it caller-scope resolution.
+/// Measured on `cd9d609b` (i.e. AFTER the cross-module fix), a definer whose `mkl()` prints
+/// `definer's mkl` and a caller declaring its own: the CALLER's ran. The callee's prologue owns it
+/// now, so the definer's does.
+#[test]
+fn a_generic_host_self_default_resolves_in_its_definer() {
+    let dir = std::env::temp_dir().join(format!("chezzi_carveout_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("a.chz"),
+        "struct G[T]:\n    v: T\n    fn all(self, xs: List[Self] = mkl()) -> int:\n        return xs.len()\nfn mkl[T]() -> List[G[T]]:\n    print(\"definer\")\n    return []\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.chz");
+    std::fs::write(
+        &entry,
+        "import G from a\nfn mkl[T]() -> List[G[T]]:\n    print(\"caller\")\n    return []\nprint(G(1).all())\n",
+    )
+    .unwrap();
+    let graph = crate::resolver::build_graph(&entry).expect("resolve");
+    if let Err(errs) = crate::checker::check_graph(&graph) {
+        let _ = std::fs::remove_dir_all(&dir);
+        panic!("must type-check, got: {errs:?}");
+    }
+    let (vo, _e, vr, _c) = run_file(&entry);
+    let (io, _e2, ir, _c2) = run_file_p(&entry);
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(vr.is_ok(), "serial VM faulted: {vr:?}");
+    assert!(ir.is_ok(), "M:N engine faulted: {ir:?}");
+    assert_eq!(
+        vo, "definer\n0\n",
+        "the generic-host `Self` default must resolve in its DEFINER, not the caller"
+    );
+    assert_eq!(vo, io, "serial vs M:N divergence");
+}
+
 /// **The M:N half, and the one that a `chezzi check` cannot see.** A worker VM faults a module's
 /// globals in LAZILY (`Vm::module_global`'s D1 note), so a NEW cross-module reader that forgets
 /// `ensure_module_faulted` observes an empty module and fails to resolve — on the M:N engine only.
@@ -7788,6 +7863,7 @@ fn worker_fixture(code: Vec<Op>) -> (Vm, PendingCall) {
     let proto = op::Proto {
         name: "task".into(),
         arity: 0,
+        min_arity: 0,
         n_slots: 0,
         lines: vec![sp; code.len()],
         code,

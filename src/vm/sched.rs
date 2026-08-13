@@ -3085,6 +3085,7 @@ impl Vm {
                                     nursery_len: frame.nursery_len,
                                     has_implicit_nursery: frame.has_implicit_nursery,
                                     call_span: frame.call_span,
+                                    argc: frame.argc,
                                 },
                                 stack: wstack,
                                 call_depth: g.ctx.call_depth,
@@ -3637,6 +3638,7 @@ impl Vm {
                             nursery_len: frame.nursery_len,
                             has_implicit_nursery: frame.has_implicit_nursery,
                             call_span: frame.call_span,
+                            argc: frame.argc,
                         };
                         // Backlog arm (b): the live `recover:` handlers cross as plain-data (`Copy`,
                         // `GcRef`-free), so they need no reconstruction — their `usize` indices

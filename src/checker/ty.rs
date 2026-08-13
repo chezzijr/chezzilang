@@ -163,7 +163,17 @@ pub type ProtoEqTable = HashMap<CarrierKey, bool>;
 /// labels are consulted ONLY when resolving a value call that carries keyword arguments
 /// (`g(name="Bob")`), turning each label into a positional slot.
 #[derive(Debug, Clone, Default)]
-pub struct FnLabels(pub Vec<Option<String>>);
+pub struct FnLabels {
+    /// Surface parameter names, parallel to the function type's `params`.
+    pub names: Vec<Option<String>>,
+    /// The FEWEST arguments a call through this value may supply — `Some(n)` when the underlying
+    /// declaration's trailing parameters carry defaults the CALLEE fills itself
+    /// (`crate::vm::op::Op::JumpIfProvided`), `None` when nothing is known and every parameter is
+    /// required. Lives here rather than as a new `Ty::Func` field so it inherits this wrapper's
+    /// equality-neutrality: two function types that differ only in how many arguments may be OMITTED
+    /// are still the same type for assignment, unification, protocol conformance and display.
+    pub min: Option<usize>,
+}
 
 impl PartialEq for FnLabels {
     fn eq(&self, _: &Self) -> bool {
@@ -186,7 +196,23 @@ impl FnLabels {
     /// A label-less function type of `n` params (a bare `fn(T, …)` annotation, a builtin-fn value, or
     /// any construction site that has no parameter names to offer).
     pub fn none(n: usize) -> FnLabels {
-        FnLabels(vec![None; n])
+        FnLabels::new(vec![None; n])
+    }
+
+    /// Labels with nothing known about optional arity.
+    pub fn new(names: Vec<Option<String>>) -> FnLabels {
+        FnLabels { names, min: None }
+    }
+
+    /// Record that a call through this value may supply as few as `min` arguments.
+    pub fn with_min(mut self, min: usize) -> FnLabels {
+        self.min = Some(min);
+        self
+    }
+
+    /// The fewest arguments a call may supply, given the value's declared parameter count.
+    pub fn min_or(&self, params: usize) -> usize {
+        self.min.unwrap_or(params).min(params)
     }
 }
 

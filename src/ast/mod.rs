@@ -666,6 +666,36 @@ impl PartialEq for Import {
 /// `Type::Named` with the same name compare equal regardless of their source spans. The span is pure
 /// editor-tooling metadata (the LSP overlay marks type references `type`); making position flip
 /// equality would break the parser tests that compare whole `Type`s and is semantically meaningless
+/// **The single source of truth for "how few arguments may this declaration be entered with".**
+///
+/// A caller that omits trailing defaulted arguments simply pushes fewer values; the callee's own
+/// prologue fills the rest from the declared defaults (`crate::vm::op::Op::JumpIfProvided`). That
+/// only works for a SUFFIX — a short call cannot express a hole before a supplied argument — and
+/// only when nothing else occupies the trailing slots.
+///
+/// Called by BOTH the checker (`FnSig::min_params`, which decides what is accepted) and the compiler
+/// (`Proto::min_arity` + the prologue, which decides what can actually be lowered). They must agree
+/// by construction: the compiler is type-blind, so a checker that accepted a shorter call than the
+/// compiler emitted a prologue for would be a check-clean program that faults at runtime — the
+/// recurring soundness class in this codebase.
+///
+/// Returns `params.len()` (i.e. "no short entry") when:
+///   * no trailing parameter carries a default;
+///   * any parameter is VARIADIC — the surplus collapse is a call-site rewrite the callee cannot
+///     reconstruct from a raw argument count;
+///   * `has_witness_params` — M24's hidden witness arguments are appended AFTER the declared ones,
+///     so a short declared count would land a witness in a defaulted slot.
+pub fn min_callable_params(params: &[Param], has_witness_params: bool) -> usize {
+    if has_witness_params || params.iter().any(|p| p.is_variadic) {
+        return params.len();
+    }
+    let mut first = params.len();
+    while first > 0 && params[first - 1].default.is_some() {
+        first -= 1;
+    }
+    first
+}
+
 /// (no non-test code compares `Type`s — all uses are `matches!`/`if let`). Runtime-inert.
 #[derive(Debug, Clone)]
 pub enum Type {

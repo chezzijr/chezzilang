@@ -130,6 +130,17 @@ enum Dflt {
     Inline(Expr),
     /// Call the zero-arg provider synthesized in the module named by `module`.
     Provider { module: ModuleId, name: String },
+    /// **Left to the CALLEE.** The default cannot be hoisted into a free top-level provider `fn` — its
+    /// type or expression names `Self` on a GENERIC host (`Q[T]`, whose `T` is unbound outside the
+    /// signature) or an enclosing type parameter. Rather than clone it into the caller and resolve it
+    /// there (the caller-scope hazard this whole design exists to delete), the call site simply omits
+    /// the argument: the callee's own prologue fills it from the declaration, in the declaring module,
+    /// where `Self` and `T` are both in scope (`crate::vm::op::Op::JumpIfProvided`).
+    ///
+    /// Only expressible as a TRAILING omission — see [`Walker::normalize_call`] for the one shape
+    /// that cannot be (a keyword call supplying a LATER parameter), which is refused rather than
+    /// silently cloned.
+    CalleeFilled,
 }
 
 /// Is `e` a **self-contained literal** — an expression that can be cloned into any number of call
@@ -226,7 +237,7 @@ fn dflt_for(
         unbound.push("Self".to_string());
     }
     if crate::checker::type_mentions_any(ty, &unbound) {
-        return Dflt::Inline(d.clone());
+        return Dflt::CalleeFilled;
     }
     // The EXPRESSION channel keeps `Self` unbound either way: rewriting `Self` inside the provider's
     // BODY (`Self()`, `Self.mk()`) needs a mutating expression walker, which is deliberately not part
@@ -234,7 +245,7 @@ fn dflt_for(
     let mut expr_unbound: Vec<String> = type_params.to_vec();
     expr_unbound.push("Self".to_string());
     if expr_mentions_type_param(d, &expr_unbound) {
-        return Dflt::Inline(d.clone());
+        return Dflt::CalleeFilled;
     }
     Dflt::Provider {
         module: module.clone(),
@@ -2089,6 +2100,15 @@ impl Walker<'_> {
         out: &mut Vec<Expr>,
     ) -> Result<(), ResolveError> {
         match d {
+            // Never reached: `normalize_call` handles this by NOT calling here (the argument is
+            // simply omitted and the callee fills it). Kept exhaustive so a future producer of this
+            // variant cannot silently fall into the clone path.
+            Dflt::CalleeFilled => {
+                debug_assert!(
+                    false,
+                    "a callee-filled default must not be spliced at the call site"
+                );
+            }
             Dflt::Inline(e) => {
                 let mut e = e.clone();
                 self.walk_expr(&mut e)?;
@@ -2454,12 +2474,19 @@ impl Walker<'_> {
             slots[idx] = Some(e);
         }
 
-        let mut out = Vec::with_capacity(params.len());
+        // Build the positional list. A `Dflt::CalleeFilled` slot contributes NOTHING: the callee's
+        // own prologue fills it, so the call is simply short by that many trailing arguments.
+        let mut out: Vec<Option<Expr>> = Vec::with_capacity(params.len());
         for (i, slot) in slots.into_iter().enumerate() {
             match slot {
-                Some(e) => out.push(e),
+                Some(e) => out.push(Some(e)),
                 None => match &params[i].default {
-                    Some(d) => self.splice_default(d, span, &mut out)?,
+                    Some(Dflt::CalleeFilled) => out.push(None),
+                    Some(d) => {
+                        let mut one = Vec::new();
+                        self.splice_default(d, span, &mut one)?;
+                        out.extend(one.into_iter().map(Some));
+                    }
                     None => {
                         return Err(err(
                             span,
@@ -2469,7 +2496,37 @@ impl Walker<'_> {
                 },
             }
         }
-        *args = out;
+        // Drop the trailing run of callee-filled slots — that is exactly what a short call encodes.
+        while matches!(out.last(), Some(None)) {
+            out.pop();
+        }
+        // Anything still unfilled now sits BEFORE a supplied argument, which a short call cannot
+        // express (it pushes fewer values; it cannot leave a gap). Refuse instead of falling back to
+        // the caller-scope clone: that clone resolving in the caller is the defect this design
+        // removes, and it must not survive in the one corner nobody looks at. Reachable only by a
+        // KEYWORD call that supplies a later parameter while omitting a `Self`-on-a-generic-host
+        // default — the parser already forbids a required parameter after a defaulted one, so
+        // positional calls can never produce this shape.
+        if let Some(i) = out.iter().position(Option::is_none) {
+            let later = params
+                .iter()
+                .enumerate()
+                .skip(i + 1)
+                .find(|(j, _)| out.get(*j).is_some_and(Option::is_some))
+                .map(|(_, p)| p.name.clone())
+                .unwrap_or_default();
+            return Err(err(
+                span,
+                format!(
+                    "the default for '{}' is filled by the callee and can only be omitted from the END of a call, but '{later}' is supplied after it — pass '{}' explicitly",
+                    params[i].name, params[i].name
+                ),
+            ));
+        }
+        *args = out
+            .into_iter()
+            .map(|e| e.expect("no holes remain"))
+            .collect();
         Ok(())
     }
 }
@@ -2981,6 +3038,25 @@ mod tests {
         )
         .message
         .contains("unknown named argument 'z'"));
+    }
+
+    /// The ONE shape a callee-filled default cannot cover, refused rather than silently cloned.
+    ///
+    /// A `Self`-typed default on a GENERIC host cannot become a free provider `fn`, so the CALLEE
+    /// fills it — which a short call encodes by pushing fewer values, and which therefore cannot
+    /// leave a HOLE before a supplied argument. The parser already forbids a required parameter
+    /// after a defaulted one, so only a KEYWORD call supplying a later parameter can produce this.
+    /// Falling back to the caller-scope clone here would keep, in the one corner nobody looks at,
+    /// exactly the defect this design removes.
+    #[test]
+    fn a_callee_filled_default_cannot_be_omitted_before_a_supplied_argument() {
+        assert!(
+            desugar_err(
+                "struct G[T]:\n    v: T\n    fn m(self, xs: List[Self] = mkl(), k: int = 9) -> int:\n        return xs.len() + k\nfn mkl[T]() -> List[G[T]]:\n    return []\nfn main():\n    print(G(1).m(k=3))\n",
+            )
+            .message
+            .contains("can only be omitted from the END of a call")
+        );
     }
 
     #[test]

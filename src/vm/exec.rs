@@ -1053,6 +1053,10 @@ impl Vm {
         span: Span,
     ) {
         let n_slots = self.program.protos[proto].n_slots;
+        // How many arguments actually arrived, BEFORE the nil-reservation below makes that
+        // unknowable. A short count means the caller omitted trailing defaulted parameters and the
+        // callee's own prologue must fill them (`Op::JumpIfProvided`).
+        let argc = self.stack.len() - base;
         // Reserve the remaining (non-parameter) local slots.
         while self.stack.len() < base + n_slots {
             self.stack.push(Value::nil());
@@ -1070,6 +1074,7 @@ impl Vm {
             nursery_len: self.nurseries.len(),
             has_implicit_nursery: self.program.protos[proto].has_implicit_nursery,
             call_span: span,
+            argc,
         });
         self.cur_base = base;
     }
@@ -2158,6 +2163,13 @@ impl Vm {
             // must be a clean `RuntimeError` on both engines, never an index panic on a pool thread.
             // The module's globals themselves fault in lazily — the provider's own `GetGlobalSlot`
             // calls `ensure_module_faulted` — so nothing is forced here.
+            // Callee-side default fill: the argument WAS supplied, so skip the compiled default.
+            // Falling through runs it and stores it into the slot.
+            Op::JumpIfProvided(slot, target) => {
+                if self.frames.last().unwrap().argc > *slot as usize {
+                    self.jump(*target);
+                }
+            }
             Op::MakeFuncIn(id) => {
                 let (proto, midx) = self.program.providers[*id as usize];
                 let Some(&home) = self.module_objs.get(midx) else {
