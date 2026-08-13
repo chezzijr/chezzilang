@@ -325,9 +325,17 @@ fn f():
   itself is rejected: *"'x' is used before its `import` on line 3"* — move the `import` above the line
   that uses it. This also rejects `print(COUNT)` above `import COUNT from lib`, which the hoist makes
   technically work, because both ancestors refuse it (CPython raises `NameError`, Go will not even
-  parse an `import` placed after a declaration) and it reads as a use-before-definition. It is a rule
-  about **value** reads only: a *type* name used above its import is fine, and — unlike Go — an
-  `import` may still sit anywhere at top level, as long as nothing above it uses the name it binds.
+  parse an `import` placed after a declaration) and it reads as a use-before-definition. A
+  from-imported **fn** is the same rule, in both spellings (`g := h` and `h()`), so the two do not
+  disagree; a **same-module** top-level `fn` is untouched and stays position-independent. It is a rule
+  about **value/callable** reads only: a *type* name used above its import is fine, and — unlike Go —
+  an `import` may still sit anywhere at top level, as long as nothing above it uses the name it binds.
+- **A deferred read counts as a read** — a top-level `fn` body that reads an imported name above the
+  `import` is rejected too, and here the ancestors split (both measured): CPython *accepts* it, since
+  the body runs after the import; Go still refuses, since it takes no late `import` at all. Chezzi
+  follows Go, because the hoist makes the sound and the unsound case indistinguishable **at the read
+  site**: the same read is fine until some later `let` refills the slot, and nothing there tells the
+  two apart. Move the `import` up; do not expect this to be loosened to "immediate reads only".
 
 ### Closure capture — uniformly by reference
 

@@ -497,6 +497,15 @@ impl Checker {
         if let ExprKind::Ident(name) = &callee.kind {
             // Shadowing local (e.g. a closure bound to a variable) wins over a global of the same name.
             if self.lookup(name).is_none() {
+                // A DIRECT call of a from-imported fn (`h()`) above its own `import` is the same
+                // use-before-import as the bare read (`g := h`), but a direct callee never reaches
+                // `infer_ident` — so the guard is repeated at this funnel, or the two spellings of
+                // one concept would disagree. Gated on `functions` so a from-imported TYPE's ctor
+                // call stays out (a type position, deliberately not covered) and so a same-module
+                // fn — never in `import_binds` — is untouched.
+                if self.functions.contains_key(name) {
+                    self.reject_read_above_import(name, true, callee.span);
+                }
                 // Editor hover (probe-gated no-op): record a DISPLAY function type at the callee
                 // token so hovering a CALL's callee yields its signature — the callee never reaches
                 // `infer()`/`hover_record_expr`, so without this it returns None. We build the display

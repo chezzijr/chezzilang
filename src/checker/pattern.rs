@@ -1892,20 +1892,30 @@ impl Checker {
     /// Deliberately also rejects programs that are TECHNICALLY SOUND today (`print(COUNT)` above
     /// `import COUNT from lib` works, because of the hoist): it reads as a use-before-definition,
     /// and both owning ancestors refuse it — CPython raises `NameError`, Go will not even parse an
-    /// `import` after a declaration. Kept narrow on purpose: VALUE reads only (a bare type name
-    /// resolves through `bare_types`/`resolve_type`, never here), and NOT Go's full "imports before
-    /// all code" rule, which would be a grammar change.
+    /// `import` after a declaration. Kept narrow on purpose: VALUE/CALLABLE reads only (a bare type
+    /// name resolves through `bare_types`/`resolve_type`, never here), and NOT Go's full "imports
+    /// before all code" rule, which would be a grammar change.
+    ///
+    /// A DEFERRED read — a top-level `fn` body above the `import` — is rejected too, and there the
+    /// ancestors SPLIT (measured): CPython accepts it, because the body runs after the import; Go
+    /// still refuses, because it will not take a late `import` at all. We follow Go, because the
+    /// hoist makes the sound and the unsound case indistinguishable AT THE READ SITE: the same
+    /// `COUNT` in the same position is fine until some later `let` refills the slot, and the reader
+    /// cannot see which it is. Do not loosen this to "only immediate reads".
     ///
     /// "Still the import's binding" is the exact test the W7-42 rule uses (`sig.rs`): a module-scope
     /// `declare` clears `imported_values` (`setup.rs:1774`), so once a `let` has handed the name
-    /// back to this module the read is that let's, not the import's. "Above its import" is the same
-    /// directional `import_binds` span comparison, in the opposite direction — total for the same
-    /// two reasons (imports are top-level only; no statement separator, so no positional tie).
-    /// Writes need no counterpart: `check_assign` already rejects an assignment to a from-imported
-    /// global at ANY position ("cannot assign to 'x' imported from module …"), and a whole-module
-    /// bind is a `Ty::Module` that no value is assignable to.
-    fn reject_read_above_import(&mut self, name: &str, ty: &Ty, span: Span) {
-        if !(self.imported_values.contains_key(name) || matches!(ty, Ty::Module(_))) {
+    /// back to this module the read is that let's, not the import's. For a from-imported FN the
+    /// caller passes `is_import = true` and the `import_binds` lookup below is the whole gate — a
+    /// same-module top-level `fn` is never in `import_binds`, and must not be: it is legitimately
+    /// position-independent (`compiler/mod.rs:1404`, `desugar/mod.rs:689`). "Above its import" is
+    /// the same directional `import_binds` span comparison, in the opposite direction — total for
+    /// the same two reasons (imports are top-level only; no statement separator, so no positional
+    /// tie). Writes need no counterpart: `check_assign` already rejects an assignment to a
+    /// from-imported global at ANY position ("cannot assign to 'x' imported from module …"), and a
+    /// whole-module bind is a `Ty::Module` that no value is assignable to.
+    pub(super) fn reject_read_above_import(&mut self, name: &str, is_import: bool, span: Span) {
+        if !is_import {
             return;
         }
         let Some(imp) = self.import_binds.get(name).copied() else {
@@ -1938,7 +1948,8 @@ impl Checker {
             );
         }
         if let Some(ty) = self.lookup(name) {
-            self.reject_read_above_import(name, &ty, span);
+            let is_import = self.imported_values.contains_key(name) || matches!(ty, Ty::Module(_));
+            self.reject_read_above_import(name, is_import, span);
             // A function-local binding captured by an enclosing `spawn:` task crosses the airlock as
             // a copy; a *non-sendable* one (e.g. a captured closure that's then called) can't, so
             // reading it inside the task is an error — the read-side counterpart to the reassignment
@@ -1967,6 +1978,12 @@ impl Checker {
             // W7-42r: this expression's type is now fixed against the fn's signature, so a later
             // module-scope `name := …` would retype the ONE slot underneath it (see `fn_reads`).
             self.record_fn_read(name);
+            // …and a FROM-IMPORTED fn read above its own `import` is the same use-before-import the
+            // value arm rejects (`g := h` above `import h from lib.fns`). Leaving it accepted gave
+            // two verdicts for one user-visible concept; both ancestors reject it too (CPython:
+            // `NameError`; Go refuses the late `import`). `import_binds` is the whole gate — a
+            // same-module top-level `fn` is not in it and stays position-independent.
+            self.reject_read_above_import(name, true, span);
             if self.reject_witness_fn_value(name, &wparams, span) {
                 return Ty::Unknown;
             }

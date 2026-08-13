@@ -8371,11 +8371,40 @@ fn value_read_above_its_own_import_rejected() {
         ],
         "'st' is used before its `import` on line 2",
     );
-    // A DEFERRED read — a top-level `fn` body above the import — is rejected too, deliberately. Here
-    // Go is the ancestor of record (it refuses the late `import` outright); CPython would accept this
-    // one, since the body runs later. In a statically-typed language the deferred read is precisely
-    // the unsound one — it is the shape the closure defect above takes — so it is the read's POSITION
-    // that decides, not whether the body runs now or later. (Pre-fix binary: "ok: no type errors".)
+    // A FROM-IMPORTED FN read above its own `import` is the same use-before-import, and must give
+    // the SAME verdict as the value form — an internal split ("`print(COUNT)` rejected but `g := h`
+    // accepted") is arbitrary from the user's side. Ancestors agree here too: CPython raises
+    // `NameError` for `g = h` before `from lib import h`, Go refuses the late `import` outright.
+    // (Pre-fix binary AND the first cut of this rule: "ok: no type errors".)
+    files_reject(
+        &[
+            ("lib/fns.chz", "fn h() -> str:\n    return \"fnval\"\n"),
+            ("main.chz", "g := h\nimport h from lib.fns\nprint(g())\n"),
+        ],
+        "'h' is used before its `import` on line 2",
+    );
+    // …and the DIRECT call spelling of the same thing. A direct callee never reaches `infer_ident`,
+    // so without its own guard `h()` would be accepted while `g := h` is rejected — the very split
+    // this case exists to close. Exactly one error, not two (the callee is not re-inferred).
+    let errs = check_files(&[
+        ("lib/fns.chz", "fn h() -> str:\n    return \"fnval\"\n"),
+        ("main.chz", "print(h())\nimport h from lib.fns\n"),
+    ]);
+    assert_eq!(
+        errs.iter()
+            .filter(|e| e.message.contains("is used before its `import`"))
+            .count(),
+        1,
+        "expected exactly one use-before-import error, got: {errs:?}"
+    );
+    // A DEFERRED read — a top-level `fn` body above the import — is rejected too, deliberately, and
+    // here the ancestors SPLIT (both measured this session):
+    //   CPython 3.14.6: accepts it — the body runs after the import, so there is no NameError.
+    //   Go 1.26.5:      refuses — `syntax error: imports must appear before other declarations`.
+    // We follow Go, because the hoist makes the sound and the unsound case indistinguishable AT THE
+    // READ SITE: this exact program is fine until some later `let` refills the slot (which is the
+    // closure defect above), and nothing at the read tells the two apart. Do NOT loosen this to
+    // "only immediate reads". (Pre-fix binary: "ok: no type errors".)
     files_reject(
         &[
             ("lib/st.chz", "COUNT := \"sv\"\n"),
@@ -8421,8 +8450,18 @@ fn value_read_above_its_own_import_boundaries_ok() {
             "x := 1\nprint(x)\nimport COUNT as y from lib.st\nprint(y)\n",
         ),
     ]);
-    // VALUE reads only: a bare TYPE name resolves through `bare_types`/`resolve_type`, never
-    // `infer_ident`, so a type used above its import stays legal (the shipped
+    // ORDER neighbour for the from-imported fn: the same read placed BELOW its import is legal.
+    files_ok(&[
+        ("lib/fns.chz", "fn h() -> str:\n    return \"fnval\"\n"),
+        ("main.chz", "import h from lib.fns\ng := h\nprint(g())\n"),
+    ]);
+    // …and a SAME-MODULE top-level `fn` is untouched wherever it is read: it is not in
+    // `import_binds`, and it is legitimately position-independent (its slot is filled before any
+    // statement runs — `compiler/mod.rs:1404`, `desugar/mod.rs:689`), so reading it above its own
+    // declaration, and above an unrelated later let, stays legal.
+    ok("g := h\nk := 1\nfn h() -> str:\n    return \"m\"\nprint(g())\nprint(k)\n");
+    // VALUE/CALLABLE reads only: a bare TYPE name resolves through `bare_types`/`resolve_type`,
+    // never `infer_ident`, so a type used above its import stays legal (the shipped
     // `tests/chz/spec/eq_protocol_test.chz` is the real-world instance).
     files_ok(&[
         ("lib/st.chz", "struct P:\n    n: int\n"),
