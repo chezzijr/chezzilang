@@ -1,0 +1,29 @@
+# tests/chz/suites/uuid_entropy_test.chz — std.uuid v4() on the DEFAULT (unseeded) path, which draws
+# 16 bytes from the OS CSPRNG per call (CPython's uuid4 shape).
+# Output is INTENTIONALLY non-deterministic, so there is NO byte-exact golden and NO both-engine
+# parity entry — serial and M:N each draw DIFFERENT uuids. We assert PROPERTIES only: uniqueness and
+# the RFC 4122 v4 shape (36 chars, version nibble '4', variant in 8/9/a/b).
+# It must NOT call uuid_seed: `chezzi test` runs the whole suite in ONE process and the seeded switch
+# is process-global and sticky, so seeding here would poison every later v4() in the run.
+# Run: `cargo run -- test tests/chz/suites/uuid_entropy_test.chz` (M:N) / `--serial` — both pass.
+
+import std.uuid
+
+test fn t_v4_draws_differ():
+    # Two unseeded draws differ with overwhelming probability (128 bits from the OS CSPRNG).
+    assert uuid.v4() != uuid.v4()
+
+test fn t_v4_shape():
+    u := uuid.v4()
+    assert u.len() == 36
+    assert u[8:9] == "-"
+    assert u[13:14] == "-"
+    assert u[18:19] == "-"
+    assert u[23:24] == "-"
+    assert u[14:15] == "4", "version nibble not 4: {u}"
+    assert u[19:20] in "89ab", "variant char not in 8/9/a/b: {u}"
+
+test fn t_v4_lowercase_hex():
+    u := uuid.v4()
+    for c in u:
+        assert c in "0123456789abcdef-", "non-lowercase-hex char: {c}"

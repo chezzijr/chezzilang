@@ -4,18 +4,27 @@
 //! version nibble forced to `4` and the variant bits to `10` (so position 19 is one of `8/9/a/b`).
 //! `uuid_seed(n)` reseeds the generator deterministically (for golden/reproducible runs).
 //!
-//! State is this module's OWN process-global `OnceLock<Mutex<u64>>` (separate from `std.rand`'s
-//! stream so a `v4()` draw never perturbs a program's `rand.float()` sequence), auto-seeded from OS
-//! entropy on first use. The 128 random bits come from two [`super::rand::next_u64`] draws (the
-//! shared SplitMix64 step is reused — the RNG algorithm is not duplicated).
+//! TWO streams, switched by `uuid_seed`:
+//!   * DEFAULT (no `uuid_seed` call) — 16 bytes straight from the OS CSPRNG per draw
+//!     ([`super::crypto::os_entropy`]), no PRNG state at all. Same shape as CPython's `uuid.uuid4()`
+//!     (`int.from_bytes(os.urandom(16))`), so an id is unpredictable and one leak reveals nothing.
+//!   * SEEDED (after `uuid_seed(n)`) — the reproducible 64-bit SplitMix64 stream, for golden runs.
+//!     Two [`super::rand::next_u64`] draws over this module's OWN process-global `OnceLock<Mutex<u64>>`
+//!     (separate from `std.rand`'s stream so a `v4()` draw never perturbs `rand.float()`). This stream
+//!     is PREDICTABLE from one observed UUID — never use it for secrets.
 //!
-//! `v4`/`uuid_seed` are pure CPU transforms (no I/O) → [`super::Kind::Inline`] on their registry entry; they run inline
-//! on every engine. LIMIT (same as `std.rand`): under `--parallel`, CONCURRENT draws from multiple
-//! tasks interleave nondeterministically on the shared global, so an EXACT seeded value is only
-//! deterministic for strictly-sequential draws — the goldens draw sequentially.
+//! The switch is process-global and STICKY: once seeded, every later `v4()` in the process is seeded.
+//!
+//! `v4`/`uuid_seed` are a fast entropy syscall / a pure CPU transform (no blocking I/O) →
+//! [`super::Kind::Inline`] on their registry entry, exactly like `crypto.secure_bytes`; they run
+//! inline on every engine. LIMIT (same as `std.rand`, SEEDED path only — the default path holds no
+//! state): under `--parallel`, CONCURRENT draws from multiple tasks interleave nondeterministically on
+//! the shared global, so an EXACT seeded value is only deterministic for strictly-sequential draws —
+//! the goldens draw sequentially.
 
 use super::rand::next_u64;
 use super::{Host, HostError, Kind, NativeFn, NativeRet, expect_args};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 /// A process-wide lock serializing every test that draws from the shared global UUID RNG (the unit
@@ -23,34 +32,25 @@ use std::sync::{Mutex, OnceLock};
 #[cfg(test)]
 pub(crate) static TEST_UUID_LOCK: Mutex<()> = Mutex::new(());
 
-/// This module's own process-global PRNG state, lazily auto-seeded from OS entropy.
+/// This module's own process-global PRNG state. Only ever READ on the seeded path, and `uuid_seed`
+/// overwrites it before flipping the switch — so the lazy init value is irrelevant (no auto-seed).
 static UUID_RNG: OnceLock<Mutex<u64>> = OnceLock::new();
 
-/// Auto-seed from OS entropy (reuses `std.rand`'s strategy), mixing the address so two modules don't
-/// share a seed when the OS-entropy path is unavailable.
-fn auto_seed() -> u64 {
-    #[cfg(target_os = "linux")]
-    {
-        let mut buf = [0u8; 8];
-        // SAFETY: writing `buf.len()` bytes into our own stack buffer; flags=0.
-        let n = unsafe { libc::getrandom(buf.as_mut_ptr() as *mut libc::c_void, buf.len(), 0) };
-        if n == buf.len() as isize {
-            return u64::from_ne_bytes(buf);
-        }
-    }
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos() as u64)
-        .unwrap_or(0);
-    let addr = &UUID_RNG as *const _ as u64;
-    let mut s = nanos ^ addr ^ 0x9E37_79B9_7F4A_7C15;
-    next_u64(&mut s)
-}
+/// Has `uuid_seed(n)` been called? Unset → `v4()` draws from the OS CSPRNG; set → from `UUID_RNG`.
+/// Process-global and sticky, exactly like the seeded stream it selects.
+static UUID_SEEDED: AtomicBool = AtomicBool::new(false);
 
 fn with_state<R>(f: impl FnOnce(&mut u64) -> R) -> R {
-    let m = UUID_RNG.get_or_init(|| Mutex::new(auto_seed()));
+    let m = UUID_RNG.get_or_init(|| Mutex::new(0));
     let mut guard = m.lock().unwrap_or_else(|e| e.into_inner());
     f(&mut guard)
+}
+
+/// Back to the default OS-entropy path. Tests only — the switch is sticky by design, so an unseeded
+/// test must be able to undo an earlier test's `uuid_seed` (hold `TEST_UUID_LOCK` across it).
+#[cfg(test)]
+pub(crate) fn clear_seed() {
+    UUID_SEEDED.store(false, Ordering::Relaxed);
 }
 
 /// Format 16 bytes as the canonical `8-4-4-4-12` lowercase-hex UUID string.
@@ -71,10 +71,18 @@ fn format_uuid(b: &[u8; 16]) -> String {
 
 fn v4(h: &mut dyn Host) -> Result<NativeRet, HostError> {
     expect_args(h, "v4", 0)?;
-    let (hi, lo) = with_state(|s| (next_u64(s), next_u64(s)));
     let mut b = [0u8; 16];
-    b[0..8].copy_from_slice(&hi.to_be_bytes());
-    b[8..16].copy_from_slice(&lo.to_be_bytes());
+    if UUID_SEEDED.load(Ordering::Relaxed) {
+        // Reproducible stream (explicitly asked for): two SplitMix64 draws, byte-identical to before.
+        let (hi, lo) = with_state(|s| (next_u64(s), next_u64(s)));
+        b[0..8].copy_from_slice(&hi.to_be_bytes());
+        b[8..16].copy_from_slice(&lo.to_be_bytes());
+    } else {
+        // Default: 16 fresh bytes from the OS CSPRNG, failing closed (never a weak id).
+        super::crypto::os_entropy(&mut b).map_err(|tail| HostError {
+            message: format!("v4: {tail}"),
+        })?;
+    }
     // Version 4: high nibble of byte 6.
     b[6] = (b[6] & 0x0F) | 0x40;
     // Variant 10xx: top two bits of byte 8.
@@ -86,6 +94,9 @@ fn uuid_seed(h: &mut dyn Host) -> Result<NativeRet, HostError> {
     expect_args(h, "uuid_seed", 1)?;
     let n = h.arg_int(0)?;
     with_state(|s| *s = n as u64);
+    // Flip AFTER the state is in place, so a concurrent `v4()` never reads a stale seed. Sticky: every
+    // later `v4()` in this process is reproducible (and predictable) until the process exits.
+    UUID_SEEDED.store(true, Ordering::Relaxed);
     Ok(NativeRet::Nil)
 }
 
@@ -167,28 +178,53 @@ mod tests {
         let b = draw();
 
         // Shape: 36 chars, dashes at 8/13/18/23, version '4' at 14, variant in {8,9,a,b} at 19.
-        for u in [&a, &b] {
-            assert_eq!(u.len(), 36, "uuid not 36 chars: {u}");
-            let chars: Vec<char> = u.chars().collect();
-            for idx in [8, 13, 18, 23] {
-                assert_eq!(chars[idx], '-', "expected '-' at {idx} in {u}");
-            }
-            assert_eq!(chars[14], '4', "version nibble not 4 in {u}");
-            assert!(
-                matches!(chars[19], '8' | '9' | 'a' | 'b'),
-                "variant char not in 8/9/a/b in {u}"
-            );
-            for (idx, c) in chars.iter().enumerate() {
-                if matches!(idx, 8 | 13 | 18 | 23) {
-                    continue;
-                }
-                assert!(c.is_ascii_hexdigit(), "non-hex char at {idx} in {u}");
-                assert!(!c.is_ascii_uppercase(), "uppercase hex in {u}");
-            }
-        }
+        assert_v4_shape(&a);
+        assert_v4_shape(&b);
 
         // Seeded determinism: frozen pair (captured from a real run; regen if the format changes).
         assert_eq!(a, "bdd73226-2feb-4e95-a8ef-e333b266f103");
         assert_eq!(b, "47526757-130f-4f52-981c-e1ff0e4ae394");
+    }
+
+    /// Check the shape invariants RFC 4122 v4 pins, on any draw.
+    fn assert_v4_shape(u: &str) {
+        assert_eq!(u.len(), 36, "uuid not 36 chars: {u}");
+        let chars: Vec<char> = u.chars().collect();
+        for idx in [8, 13, 18, 23] {
+            assert_eq!(chars[idx], '-', "expected '-' at {idx} in {u}");
+        }
+        assert_eq!(chars[14], '4', "version nibble not 4 in {u}");
+        assert!(
+            matches!(chars[19], '8' | '9' | 'a' | 'b'),
+            "variant char not in 8/9/a/b in {u}"
+        );
+        for (idx, c) in chars.iter().enumerate() {
+            if matches!(idx, 8 | 13 | 18 | 23) {
+                continue;
+            }
+            assert!(c.is_ascii_hexdigit(), "non-hex char at {idx} in {u}");
+            assert!(!c.is_ascii_uppercase(), "uppercase hex in {u}");
+        }
+    }
+
+    /// The security property: with NO `uuid_seed` call, `v4()` draws from the OS CSPRNG, not from the
+    /// process-global SplitMix64 — so its first value is NOT the seed-42 vector (which is what a
+    /// default-seeded PRNG would hand back after the state was pinned) and two draws differ.
+    #[test]
+    fn v4_unseeded_draws_from_os_entropy() {
+        let _g = TEST_UUID_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // The seeded flag is process-global and sticky — an earlier test may have set it.
+        reseed(42);
+        clear_seed();
+
+        let a = draw();
+        let b = draw();
+        assert_v4_shape(&a);
+        assert_v4_shape(&b);
+        assert_ne!(a, b, "two unseeded v4() draws must differ");
+        assert_ne!(
+            a, "bdd73226-2feb-4e95-a8ef-e333b266f103",
+            "unseeded v4() must not replay the seeded PRNG stream"
+        );
     }
 }

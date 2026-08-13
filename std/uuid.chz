@@ -6,8 +6,13 @@
 # module's SIGNATURE source — retiring the hand-built `native_module_sig` uuid arm.
 #
 # Every declaration is BODY-LESS: the implementations stay native (name-keyed in `src/native/uuid.rs`,
-# dispatched via `native_members("std.uuid")`). `v4()` → random UUID str; `uuid_seed(n)` → deterministic
-# reseed of the process-global RNG (for golden runs), returning nil.
+# dispatched via `native_members("std.uuid")`).
 
+# `v4()` → a fresh random UUID str. By DEFAULT it draws 16 bytes from the OS CSPRNG per call (the same
+# source as crypto.secure_bytes, the same shape as CPython's uuid.uuid4) — unpredictable, no PRNG
+# state, fails closed if the OS can't supply entropy.
 native fn v4() -> str
+# `uuid_seed(n)` OPTS OUT of that: it switches v4() to a reproducible 64-bit SplitMix64 stream for
+# golden runs. The switch is process-global and STICKY (no way back), and that stream is PREDICTABLE
+# from one observed UUID — never call it in a program whose ids are tokens or session ids.
 native fn uuid_seed(n: int) -> nil

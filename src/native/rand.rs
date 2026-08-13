@@ -10,8 +10,9 @@
 //! State is a single PROCESS-GLOBAL `OnceLock<Mutex<u64>>` (NOT thread-local, NOT Host-side): all
 //! three engines (interp / cooperative VM / M:N) share one stream at the NativeFn seam, so any
 //! SEQUENTIAL draw sequence is byte-identical across engines (3-engine parity by construction). The
-//! global auto-seeds from OS entropy (`libc::getrandom`, with a time/address-mix fallback) on first
-//! use; `seed(n)` overwrites it to make the stream deterministic.
+//! global auto-seeds from OS entropy ([`super::crypto::os_entropy`] — portable across unix, with a
+//! time/address-mix fallback only where that fails) on first use; `seed(n)` overwrites it to make the
+//! stream deterministic.
 //!
 //! LIMIT (documented, not a bug): under `--parallel`, CONCURRENT draws from multiple tasks interleave
 //! nondeterministically on the shared global — so engines may diverge ONLY for concurrent draws. The
@@ -48,17 +49,11 @@ fn auto_seed() -> u64 {
     use std::sync::atomic::{AtomicU64, Ordering};
     static COUNTER: AtomicU64 = AtomicU64::new(0);
 
-    // 1) OS entropy (Linux glibc >= 2.25). `getrandom(buf, buflen, flags) -> ssize_t`: a full read
-    //    fills our 8-byte buffer; a short read or -1 falls through to the mix below.
-    #[cfg(target_os = "linux")]
-    {
-        let mut buf = [0u8; 8];
-        // SAFETY: writing `buf.len()` bytes into our own stack buffer; flags=0 (blocking, but the
-        // pool is seeded once at process start so there is effectively always entropy available).
-        let n = unsafe { libc::getrandom(buf.as_mut_ptr() as *mut libc::c_void, buf.len(), 0) };
-        if n == buf.len() as isize {
-            return u64::from_ne_bytes(buf);
-        }
+    // 1) OS entropy — the shared `crypto::os_entropy` (Linux `getrandom(2)`, else `/dev/urandom`), so
+    //    the auto-seed is unpredictable on every unix, not just Linux.
+    let mut buf = [0u8; 8];
+    if super::crypto::os_entropy(&mut buf).is_ok() {
+        return u64::from_ne_bytes(buf);
     }
 
     // 2) Fallback: mix wall-clock nanos, an address, and a process-unique counter through one step.

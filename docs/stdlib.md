@@ -762,10 +762,11 @@ Pseudo-random scalars (SplitMix64 PRNG). `seed(n: int) -> nil` (reseed determini
 The stream auto-seeds on first use; call `seed(n)` to make it reproducible. Draws are
 inline CPU (not I/O). Generic collection helpers (`shuffle`/`choice`/`sample`) live in `std.iter` —
 the native seam carries only scalars, so it cannot return a generic `List[T]`.
-**Platform (same gate as `crypto`):** the auto-seed reads OS entropy only on **Linux**
-(`getrandom(2)`); on every other target (macOS, Windows, the BSDs, Android, iOS — the gate is
-`not(target_os = "linux")`) it falls back to a mix of wall-clock nanos, a static's address and a
-process counter, which is guessable.
+**Platform (same source as `crypto`):** the auto-seed reads OS entropy on **every unix** — Linux
+`getrandom(2)`, `/dev/urandom` elsewhere (macOS, the BSDs, Android, iOS). Only where that read fails
+(a non-unix target, or `/dev/urandom` unreadable) does it fall back to a mix of wall-clock nanos, a
+static's address and a process counter, which is guessable. `std.rand` never faults — like CPython's
+`random`, an unseedable stream is still a stream.
 **Security:** `std.rand` is **not cryptographically secure** on any platform — the generator is a
 64-bit SplitMix64 whose output function is a bijection, so a single observed raw draw recovers the state
 *and* the seed and predicts the whole stream in both directions (see `std.uuid`, which draws from the
@@ -980,11 +981,11 @@ entropy they raise a **recoverable fault** (catchable by `recover:`), never weak
 `n` must be `0..=1048576` (a 1 MiB cap); a negative or oversized `n` faults. Output is
 **non-deterministic** — two draws differ, so it has no fixed golden. (`token_urlsafe` (base64url) is a
 deferred follow-up.)
-**Platform:** the only wired entropy source is Linux `getrandom(2)`. On every other target (macOS,
-Windows, the BSDs, Android, iOS — the gate is `not(target_os = "linux")`) both fns
-**fail closed** — a recoverable fault with the exact message `secure_bytes: no secure entropy source on
-this platform` — rather than falling back to a weaker source; portable entropy is a filed follow-up
-(`docs/gaps.md`, row W7-44 half (b)).
+**Platform:** entropy is portable across **unix** — Linux `getrandom(2)`, falling back to
+`/dev/urandom` (the same kernel CSPRNG) on macOS, the BSDs, Android, iOS, and on Linux itself if
+`getrandom` is unavailable. Only on a **non-unix** target (Windows — already unsupported) do both fns
+**fail closed** with a recoverable fault whose message ends `no secure entropy source on this
+platform`, rather than falling back to a weaker source.
 **Security:** MD5 **and SHA-1** are **cryptographically broken** — use them only for checksums / git
 object ids / legacy interop, never for passwords, signatures, or integrity against an adversary.
 Password hashing (bcrypt/argon2) is not yet provided.
@@ -993,20 +994,27 @@ Password hashing (bcrypt/argon2) is not yet provided.
 ### `std.uuid`
 RFC 4122 version-4 (random) UUIDs. `v4() -> str` returns a fresh random UUID as the canonical 36-char
 `8-4-4-4-12` lowercase-hex string (version nibble `4`, variant in `8/9/a/b`). `uuid_seed(n: int) -> nil`
-reseeds the generator deterministically (for reproducible/golden runs). The generator has its **own**
-process-global stream (separate from `std.rand`, auto-seeded from Linux `getrandom` where available, a
-timestamp-derived seed elsewhere), so a `v4()` draw never perturbs a program's `rand` sequence.
-*Pure CPU draws (no I/O); inline on every engine.*
-**Limit (not a bug, same as `std.rand`):** the stream is a single process-global, so under `--parallel`
-*concurrent* `v4()` draws interleave nondeterministically; an EXACT seeded value is reproducible only for
-*sequential* draws.
-**Security:** `v4()` is **not cryptographically secure**, regardless of platform — the generator is a
-64-bit SplitMix64, whose output function is a bijection, and `v4` overwrites only **6** of the 128 drawn
-bits (4 version + 2 variant). **ONE observed UUID is enough:** inverting its first half over the 16
-version candidates and filtering on the second half's surviving 62 bits leaves exactly one state, which
-also **recovers the seed** — so every later UUID *and* every earlier one is predictable byte-exactly
-(measured against this repo's own frozen seed-42 vector). One leaked id compromises the whole stream.
-Use `crypto.token_hex(n)` for tokens, session ids, or any other secret.
+switches the stream to a reproducible one (for golden runs).
+**By default `v4()` is secure:** it draws 16 fresh bytes from the OS CSPRNG per call — the same source
+as `crypto.secure_bytes`, and the same shape as CPython's `uuid.uuid4()`
+(`int.from_bytes(os.urandom(16))`) — with no PRNG state at all, so an id is unpredictable, one leaked
+id reveals nothing about any other, and a `v4()` draw never perturbs a program's `rand` sequence. It
+**fails closed** like `crypto` (a recoverable fault) if the OS can't supply entropy; see `std.crypto`
+for the platform matrix. *Inline on every engine (a fast entropy syscall, no blocking I/O).*
+**`uuid_seed(n)` opts OUT of that**, permanently: it switches `v4()` to a reproducible 64-bit
+SplitMix64 stream, and the switch is **process-global and sticky** — every later `v4()` anywhere in the
+process is seeded, there is no way back. Use it only for reproducible/golden runs, e.g.
+`examples/uuid_shape.chz`.
+**Security (seeded stream only):** the seeded `v4()` is **not cryptographically secure** — the generator
+is a 64-bit SplitMix64 whose output function is a bijection, and `v4` overwrites only **6** of the 128
+drawn bits (4 version + 2 variant). **ONE observed UUID is enough:** inverting its first half over the
+16 version candidates and filtering on the second half's surviving 62 bits leaves exactly one state,
+which also **recovers the seed** — so every later UUID *and* every earlier one is predictable
+byte-exactly (measured against this repo's own frozen seed-42 vector). One leaked id compromises the
+whole seeded stream, so never call `uuid_seed` in a program whose ids are tokens or session ids.
+**Limit (not a bug, same as `std.rand`):** the *seeded* stream is a single process-global, so under
+`--parallel` *concurrent* `v4()` draws interleave nondeterministically; an EXACT seeded value is
+reproducible only for *sequential* draws. (Unseeded draws are independent — no shared state.)
 
 ---
 

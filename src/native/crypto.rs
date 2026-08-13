@@ -502,55 +502,88 @@ fn hmac_sha256_fn(h: &mut dyn Host) -> Result<NativeRet, HostError> {
 
 // ---- CSPRNG (secrets.token_bytes / token_hex) ----
 //
-// Fills exactly `n` bytes from the OS entropy source, FAILING CLOSED: unlike `uuid.rs::auto_seed`
-// there is NO weak `SystemTime` fallback — if the OS can't give us entropy we return a recoverable
+// Fills exactly `n` bytes from the OS entropy source, FAILING CLOSED: there is NO weak `SystemTime`
+// fallback anywhere on this path — if the OS can't give us entropy we return a recoverable
 // `HostError` rather than degraded bytes. A CSPRNG that silently weakens is a security bug.
 const SECURE_BYTES_MAX: usize = 1 << 20; // 1 MiB — reject absurd n before allocating (no OOM).
 
-/// Draw exactly `n` cryptographically-secure random bytes. Linux: loops `getrandom(2)` to fill the
-/// whole buffer, retrying the remainder on short reads and `EINTR` (large / signal-interrupted draws),
-/// and faulting on any hard error or a `0` return (source exhausted → fail closed). Non-Linux: no
-/// wired entropy source → fault (never weaken).
-fn secure_random_bytes(n: usize) -> Result<Vec<u8>, HostError> {
+/// Fill `buf` from the OS CSPRNG. THE one entropy source for the whole runtime — `rand::auto_seed`
+/// and `uuid::v4` call it too, so there is a single copy of the OS-specific code.
+///
+/// Returns the error MESSAGE TAIL only; each caller prefixes its own name (`secure_bytes: {tail}`).
+///
+/// Arms: Linux `getrandom(2)`, then `/dev/urandom` on any unix (macOS/BSD/Android/iOS — and Linux
+/// itself when `getrandom` fails, which is what CPython's `os.urandom` and Go's `crypto/rand` both
+/// do). Non-unix has no wired source → fail closed (never weaken).
+pub(crate) fn os_entropy(buf: &mut [u8]) -> Result<(), String> {
     #[cfg(target_os = "linux")]
     {
-        let mut buf = vec![0u8; n];
-        let mut filled = 0usize;
-        while filled < n {
-            // SAFETY: writing into our own heap buffer at `filled`, at most `n - filled` bytes; flags=0.
-            let r = unsafe {
-                libc::getrandom(
-                    buf.as_mut_ptr().add(filled) as *mut libc::c_void,
-                    n - filled,
-                    0,
-                )
-            };
-            if r < 0 {
-                let err = std::io::Error::last_os_error();
-                if err.raw_os_error() == Some(libc::EINTR) {
-                    continue; // interrupted before reading any bytes — retry the remainder.
-                }
-                return Err(HostError {
-                    message: format!("secure_bytes: getrandom failed: {err}"),
-                });
-            }
-            if r == 0 {
-                // Entropy source returned nothing — fail closed rather than spin or weaken.
-                return Err(HostError {
-                    message: "secure_bytes: getrandom returned no entropy".into(),
-                });
-            }
-            filled += r as usize;
+        if getrandom_fill(buf) {
+            return Ok(());
         }
-        Ok(buf)
+        // getrandom unavailable (pre-3.17 kernel / seccomp) — fall through to /dev/urandom, the same
+        // CSPRNG, rather than failing while a working source is right there.
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(unix)]
     {
-        let _ = n;
-        Err(HostError {
-            message: "secure_bytes: no secure entropy source on this platform".into(),
-        })
+        urandom_bytes(buf)
     }
+    #[cfg(not(unix))]
+    {
+        let _ = buf;
+        Err("no secure entropy source on this platform".into())
+    }
+}
+
+/// Loop `getrandom(2)` to fill the whole buffer, retrying the remainder on short reads and `EINTR`
+/// (large / signal-interrupted draws). `false` on any hard error or a `0` return (source exhausted) —
+/// the caller then tries `/dev/urandom`.
+#[cfg(target_os = "linux")]
+fn getrandom_fill(buf: &mut [u8]) -> bool {
+    let n = buf.len();
+    let mut filled = 0usize;
+    while filled < n {
+        // SAFETY: writing into our own buffer at `filled`, at most `n - filled` bytes; flags=0.
+        let r = unsafe {
+            libc::getrandom(
+                buf.as_mut_ptr().add(filled) as *mut libc::c_void,
+                n - filled,
+                0,
+            )
+        };
+        if r < 0 {
+            if std::io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
+                continue; // interrupted before reading any bytes — retry the remainder.
+            }
+            return false;
+        }
+        if r == 0 {
+            return false; // returned nothing — don't spin, let the caller fall back.
+        }
+        filled += r as usize;
+    }
+    true
+}
+
+/// Read the whole buffer from `/dev/urandom` — the same kernel CSPRNG `getentropy(3)` wraps, needing
+/// no new dependency. `read_exact` retries on `EINTR` and errors on a short read, so a partial fill
+/// can never be mistaken for success.
+#[cfg(unix)]
+fn urandom_bytes(buf: &mut [u8]) -> Result<(), String> {
+    use std::io::Read as _;
+    std::fs::File::open("/dev/urandom")
+        .map_err(|e| format!("/dev/urandom open failed: {e}"))?
+        .read_exact(buf)
+        .map_err(|e| format!("/dev/urandom read failed: {e}"))
+}
+
+/// Draw exactly `n` cryptographically-secure random bytes, or fault (never weaken).
+fn secure_random_bytes(n: usize) -> Result<Vec<u8>, HostError> {
+    let mut buf = vec![0u8; n];
+    os_entropy(&mut buf).map_err(|tail| HostError {
+        message: format!("secure_bytes: {tail}"),
+    })?;
+    Ok(buf)
 }
 
 /// Guard `n`: reject negative (fail closed) and oversized (no OOM) before allocating.
@@ -842,6 +875,21 @@ mod tests {
         );
         // token_hex(-1) → Err.
         assert!(token_hex(&mut IntHost { ints: vec![-1] }).is_err());
+    }
+
+    /// The `/dev/urandom` arm is what every non-Linux unix (macOS, the BSDs, Android, iOS) takes, and
+    /// it is unreachable through `os_entropy` here because Linux's `getrandom(2)` arm succeeds first —
+    /// so call it DIRECTLY. This is the only verification that arm gets on this box / in CI.
+    #[test]
+    fn urandom_arm_fills_and_differs() {
+        let mut a = [0u8; 32];
+        let mut b = [0u8; 32];
+        urandom_bytes(&mut a).expect("/dev/urandom must be readable");
+        urandom_bytes(&mut b).expect("/dev/urandom must be readable");
+        assert_ne!(a, b, "two /dev/urandom draws must differ");
+        assert!(a.iter().any(|&x| x != 0), "buffer left unfilled: {a:?}");
+        // A zero-length draw is a no-op success (matches `secure_bytes(0)`).
+        urandom_bytes(&mut []).expect("empty draw must succeed");
     }
 
     /// RFC 1321 §A.5 MD5 test suite.
