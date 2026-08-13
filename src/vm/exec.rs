@@ -2149,6 +2149,29 @@ impl Vm {
                 });
                 self.push(Value::obj(h));
             }
+            // A default-argument provider declared in a module this one does not import — see
+            // [`Op::MakeFuncIn`]. `home` comes from the DEFINER's module index, not this frame's, so
+            // the default resolves in its own namespace with no import edge.
+            //
+            // `.get()` rather than `[]`: `module_objs` grows as modules RUN (and a worker's copy holds
+            // only the modules that had run when it was snapshotted), so a not-yet-initialized definer
+            // must be a clean `RuntimeError` on both engines, never an index panic on a pool thread.
+            // The module's globals themselves fault in lazily — the provider's own `GetGlobalSlot`
+            // calls `ensure_module_faulted` — so nothing is forced here.
+            Op::MakeFuncIn(id) => {
+                let (proto, midx) = self.program.providers[*id as usize];
+                let Some(&home) = self.module_objs.get(midx) else {
+                    return Err(self.err(
+                        format!(
+                            "the module that declares {} has not been initialized yet",
+                            crate::desugar::display_fn_name(&self.program.protos[proto].name)
+                        ),
+                        span,
+                    ));
+                };
+                let h = self.heap.alloc(Obj::Func { proto, home });
+                self.push(Value::obj(h));
+            }
             // Body in an `#[inline(never)]` helper so `step`'s frame stays small (the deep-recursion
             // depth-guard test overflows in debug if `step` grows — same discipline as `ToStrFmt`).
             Op::MakeCffi(id) => self.op_make_cffi(*id, span)?,

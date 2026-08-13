@@ -1,0 +1,19 @@
+# examples/default_protocol/boxes.chz — declares the IMPLEMENTOR. It imports the protocol module
+# (`shapes`), so `shapes` can never import it back: that edge would be a cycle. The default below is
+# therefore reached from a module that cannot name anything this file can see — and it still means
+# what this file wrote.
+
+import shapes
+import units
+
+fn unit() -> int:
+    return 2
+
+struct Box:
+    w: int
+    h: int
+
+    # `units.factor()` is spelled through an import `shapes` does not have, and `unit()` is a name
+    # `shapes` also declares (as 1000). Both resolve HERE.
+    fn area(self, scale: int = units.factor() * unit()) -> int:
+        return self.w * self.h * scale

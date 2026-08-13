@@ -1,0 +1,24 @@
+# A default argument on a method reached through a PROTOCOL resolves in the module that DECLARED it,
+# even though that module is not — and cannot be — importable from the one making the call.
+#
+# `shapes` declares `protocol Sized` + `describe(p: Sized)`; `boxes` imports `shapes` and declares the
+# struct satisfying it. So `shapes` cannot import `boxes` (cycle), and `describe` calls `p.area()`
+# with no idea where the default lives.
+#
+# Before this was fixed, the default expression was COPIED into `shapes` and resolved there: it read
+# `shapes`'s own `unit()` (1000) and failed to compile at all on `units.factor()`, a name `shapes`
+# cannot see. The equivalent CPython program prints what this one prints.
+
+import shapes
+import boxes
+
+# boxes: units.factor() * unit() == 5 * 2 == 10; 3 * 4 * 10
+print(shapes.describe(boxes.Box(3, 4)))
+# Passing the argument explicitly reads MAIN's scope, which is the difference between passing a
+# value and omitting one.
+print(boxes.Box(3, 4).area(2))
+# main's own `unit` is untouched by any of it.
+print(unit())
+
+fn unit() -> int:
+    return 7

@@ -21040,9 +21040,13 @@ fn a_try_in_a_carve_out_default_is_still_rejected_at_the_declaration() {
         "fn mk[T]() -> T!str:\n    return Err(\"no\")\n\nfn f[T](x: T = mk[T]()?) -> T:\n    return x\n",
         "'?' used in a function that returns T",
     );
-    // The `Self` carve-out (C4's shape), same reasoning.
+    // The `Self` carve-out, same reasoning — but only a GENERIC host still takes it. On a
+    // non-generic host `Self` names one concrete type, so `desugar` now substitutes it and the
+    // default gets a real provider (see the sibling test below); `Q[T]`'s `Self` is `Q[T]`, whose
+    // `T` is unbound in the free `fn` a provider is, so that one keeps the inline clone and the
+    // decl-site copy stays the only judge there is.
     rejects_desugared(
-        "struct Q:\n    n: int\n    fn c(self, o: Self = mkq()?) -> int:\n        return self.n + o.n\n\nfn mkq() -> Q!str:\n    return Ok(Q(5))\n",
+        "struct Q[T]:\n    v: T\n    fn c(self, o: Self = mkq()?) -> int:\n        return 1\n\nfn mkq[T]() -> Q[T]!str:\n    return Err(\"no\")\n",
         "'?' used in a function that returns int",
     );
     // …and the provider path keeps its ONE tailored message (the reason the neutralisation exists).
@@ -21062,14 +21066,22 @@ fn a_try_in_a_carve_out_default_is_still_rejected_at_the_declaration() {
     );
 }
 
-/// W7-51 — a `Self`-typed parameter with a non-literal default keeps the INLINE clone, because a
-/// provider is a free top-level `fn` and `Self` is not spellable in one (`docs/syntax.md`: naming
-/// `Self` as a free-fn parameter is `unknown type 'Self'`). Between `e2d9bd4e` and `dfdc7a1b` these
-/// shapes stopped compiling — `type error (line 3, col 36): unknown type 'Self'` — where
-/// `b1307258` ran them (`6`, `6`, `2`); no test in the tree paired `Self` with a default, which is
-/// why it shipped green. The runnable half lives in `tests/chz/spec/default_scope_chain_test.chz`.
+/// A `Self`-typed parameter with a non-literal default must keep type-checking. W7-51 made these
+/// shapes keep the INLINE clone, because a provider is a free top-level `fn` and `Self` is not
+/// spellable in one (`docs/syntax.md`: naming `Self` as a free-fn parameter is `unknown type
+/// 'Self'`); between `e2d9bd4e` and `dfdc7a1b` they stopped compiling altogether — `type error
+/// (line 3, col 36): unknown type 'Self'` — where `b1307258` ran them (`6`, `6`, `2`), and no test
+/// in the tree paired `Self` with a default, which is why that shipped green.
+///
+/// They now get a real **provider** instead: on a NON-generic host `Self` names exactly one
+/// concrete type, so `desugar::subst_self_ty` rewrites it in the provider's declared return type.
+/// The assertions below are unchanged — what changed is that the default now resolves in its
+/// DEFINING module rather than being cloned into the caller. Measured, release CLI, a definer
+/// declaring `fn mkq() -> Q: return Q(5)` and a caller declaring its own `fn mkq() -> Q: return
+/// Q(900)`: `0104d57b` printed **901** (the caller's), and this prints **6** (the definer's).
+/// The runnable half lives in `tests/chz/spec/default_scope_chain_test.chz`.
 #[test]
-fn a_self_typed_parameter_default_stays_inline() {
+fn a_self_typed_parameter_default_still_type_checks() {
     for src in [
         // `Self` in the type, provider-shaped expression
         "struct Q:\n    n: int\n    fn combine(self, other: Self = mkq()) -> int:\n        return self.n + other.n\n\nfn mkq() -> Q:\n    return Q(5)\n\nfn main():\n    print(Q(1).combine())\n",
@@ -21087,6 +21099,53 @@ fn a_self_typed_parameter_default_stays_inline() {
     ok_desugared(
         "struct Q:\n    n: int\n    fn combine(self, other: Q = mkq()) -> int:\n        return self.n + other.n\n\nfn mkq() -> Q:\n    return Q(5)\n\nfn main():\n    print(Q(1).combine())\n",
     );
+    // …and the GENERIC host, which still cannot be substituted (`Self` is `Q[T]`, and `T` is
+    // unbound in a free `fn`) and therefore still takes the inline carve-out. Pinned so a later
+    // cleanup cannot assume the carve-out is gone.
+    ok_desugared(
+        "struct Q[T]:\n    v: T\n    fn tot(self, xs: List[Self] = mkl()) -> int:\n        return xs.len()\n\nfn mkl[T]() -> List[Q[T]]:\n    return []\n\nfn main():\n    print(Q(1).tot())\n",
+    );
+}
+
+/// A METHOD default's `?` must produce **exactly one** diagnostic — the tailored provider one.
+///
+/// `check_fn_body` decides whether to neutralise the decl-site copy by asking whether `desugar`
+/// emitted a provider, looking it up under the name `desugar` would have chosen. `desugar` names a
+/// method's provider with the type's **bare** name, but `Ty::Struct`'s key is the module-scoped
+/// IDENTITY key (`<module-key>::Name`), so the two never matched and the decl-site copy re-judged a
+/// `?` the provider body had already judged. Measured on `0104d57b`, release CLI:
+/// `struct Q: fn c(self, o: Q = mkq()?)` gave **2 type errors** — the stale `'?' used in a function
+/// that returns int` plus the tailored one — where the free-fn shape correctly gave **1**.
+///
+/// **This must go through `check_entry`, not `check_desugared`.** The single-module helpers key
+/// types by their BARE name, under which the lookup accidentally matched, so the bug was invisible
+/// to every `*_desugared` test and visible only to the CLI or a multi-module program.
+#[test]
+fn a_method_defaults_try_is_judged_once_not_twice() {
+    for src in [
+        // struct host
+        "struct Q:\n    n: int\n    fn c(self, o: Q = mkq()?) -> int:\n        return self.n + o.n\n\nfn mkq() -> Q!str:\n    return Ok(Q(5))\n",
+        // `Self`-typed on a non-generic host — the same path, now that `Self` substitutes
+        "struct Q:\n    n: int\n    fn c(self, o: Self = mkq()?) -> int:\n        return self.n + o.n\n\nfn mkq() -> Q!str:\n    return Ok(Q(5))\n",
+    ] {
+        let errs = check_entry(src);
+        assert_eq!(
+            errs.len(),
+            1,
+            "expected exactly one diagnostic, got: {errs:?}"
+        );
+        assert!(
+            errs[0]
+                .message
+                .contains("a default expression cannot propagate with `?`"),
+            "expected the tailored provider message, got: {errs:?}"
+        );
+    }
+    // The free-fn shape was always correct; pinned as the control.
+    let errs = check_entry(
+        "fn getr() -> str!str:\n    return Ok(\"wxyz\")\n\nfn f(x: int = getr()?.len()) -> int:\n    return x\n",
+    );
+    assert_eq!(errs.len(), 1, "free-fn control, got: {errs:?}");
 }
 
 // ===== variadic METHODS under same-name collisions across structs (regression) =====

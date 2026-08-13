@@ -2,9 +2,64 @@
 
 Single source of truth for "what am I doing next." Update after every work session.
 
+> **✅ Default-argument caller-scope hazard CLOSED, 2026-08-13 (phase 1 of 2).** A non-literal default
+> now resolves in the module that DECLARES it in **every** case, including the one `W7-51` had to
+> leave as a documented hazard. Measured on `0104d57b`, three modules, `z` declaring `protocol P` +
+> `fn use_it(p: P)` and its own `av() -> 500`, `a` declaring the implementor with
+> `fn mprobe(self, x: int = av())` over `av() -> 1`, receiver `S(10)`: **`510`** where the definer
+> wrote 1 — a clean `chezzi check`, identical on both engines, so two-engine parity was structurally
+> blind to it. The equivalent CPython 3.14.6 program (two module objects, `z` never importing `a`)
+> prints **`11`**. It now prints `11`.
+>
+> **Mechanism — no call-ABI change.** `W7-51`'s provider `fn` already existed in the definer's module
+> for every non-literal default; the only thing missing was a way for an out-of-closure caller to
+> NAME it. A synthetic `from` import cannot be used there because `Vm::bind_import` resolves its
+> target when the CALLER's module loads, and a non-dependency can load later. So the call site now
+> holds a **direct, call-time reference** instead: one new cold opcode `Op::MakeFuncIn(u32)`
+> (`step` only — no `run_until` arm, not jump-like, so `peephole` is untouched) indexing a new
+> `Program::providers` table of `(proto, declaring module index)`. That is the same coordinate every
+> cross-module struct/enum method and operator overload already resolves its home by. The table is
+> materialized last (`Compiler::build_provider_table`, beside `build_eq_hooks`) because the caller's
+> module compiles BEFORE the definer's; a mentioned provider with no compiled declaration is a hard
+> `CompileError`, never a hole.
+>
+> **Three user-visible consequences.** (1) The `510` hazard is gone. (2) A default naming an import
+> the caller cannot see now **compiles** — `z` without `import u` was `unknown name 'u'` on
+> `0104d57b` and now prints `12`, so a whole class of program that could not be written now can be.
+> (3) `docs/syntax.md` §5 **rule 4** narrows: a `Self`-typed default on a NON-generic host is
+> substituted to the concrete owner type and gets a real provider (measured: definer's `mkq()`, `6`,
+> where `0104d57b` printed the caller's `901`). A GENERIC host (`Self` = `Q[T]`, `T` unbound in a free
+> fn) still takes the inline clone — that residual is phase 2b.
+>
+> **Pre-existing bug found and fixed on the way:** `check_fn_body` asked whether a provider existed
+> using the type's IDENTITY key (`<module-key>::Name`) while `desugar` names providers with the BARE
+> type name, so the lookup never matched for a METHOD and the decl-site copy re-judged a `?` the
+> provider had already judged — **2 diagnostics at one span** on `0104d57b`
+> (`struct Q: fn c(self, o: Q = mkq()?)`), where the free-fn shape correctly gave 1. Invisible to the
+> whole `*_desugared` test family, which keys types by their bare name; pinned now through
+> `check_entry`.
+>
+> **Tests.** Three tests that pinned the old behaviour are inverted
+> (`a_method_default_from_a_sibling_module_resolves_in_its_definer`,
+> `a_default_naming_an_import_the_caller_cannot_see_now_compiles_and_resolves_in_its_definer`,
+> `a_default_whose_name_the_caller_also_declares_reads_the_definers`), plus new coverage for the M:N
+> worker path (the default evaluated inside a `spawn` in a `parallel:` nursery — the shape a missed
+> `ensure_module_faulted` would break, invisible to `chezzi check` and to `--serial`), the definer's
+> toplevel still running, the no-bypass check that an explicit wrong-typed argument is still rejected,
+> and `a_method_defaults_try_is_judged_once_not_twice`. New golden **`examples/default_protocol/`** —
+> the corpus's first protocol-reached cross-module default, byte-identical to the CPython mirror.
+> Gate: `cargo test` **4093 lib + all 16 integration targets, 0 failed**; conformance 8/8; clippy
+> `--all-targets -D warnings` clean.
+>
+> **Still open, phase 2 (same milestone, `docs/future.md` §3d is deleted when it lands):** a defaulted
+> fn called through a first-class function value (`f := g; f()` is `'closure' expects 1 argument(s),
+> got 0`), and the generic-host `Self`/type-param carve-out above. Both need callee-side filling,
+> which is a `min_params` change, not a desugar one.
+
+
 > **✅ W7-50/51 post-review fix wave, 2026-08-13.** The whole-branch adversarial review filed seven
 > charges against the finished pair; every one reproduced on real binaries and all seven are fixed or
-> corrected here. **C6 (the big one) — the cross-module *refusal* is now a caller-scope FALLBACK.**
+> corrected here. **[SUPERSEDED 2026-08-13 — see the entry at the top of this file: the fallback, and its hazard, are gone; the provider is now reached by a direct call-time reference.]** **C6 (the big one) — the cross-module *refusal* is now a caller-scope FALLBACK.**
 > Refusing made a defaulted method argument unreachable through a protocol: `z` declares
 > `protocol P` + `fn use(p: P)`, `a` declares the struct with `fn mprobe(self, x: int = u.av())`,
 > and `z` cannot import `a` without an import cycle. `b1307258` and CPython both print `12`;
@@ -62,7 +117,9 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > `fn f(x: int!str = Ok(getr()?.len()))` was rejected on `b1307258` and now prints `4` / `-1`.
 > (2) A method default declared in a module the caller does not **transitively** import falls back to
 > the pre-W7-51 caller-scope clone, identically in every import order (it was *refused* until the
-> post-review fix wave below; see that block for why refusing was worse). (3) A direct cycle (`fn f(x: int = f())`) is a compile error
+> post-review fix wave below; see that block for why refusing was worse).
+> **[SUPERSEDED 2026-08-13: neither — it now resolves in the definer, like every other default. See
+> the entry at the top of this file.]** (3) A direct cycle (`fn f(x: int = f())`) is a compile error
 > naming the parameter, replacing the arity cascade the silent `f(f(f()))` expansion produced (such a
 > program was never accepted — `b1307258` gave 2 `'f' expects 1 argument(s), got 0`). (4) A cycle routed through
 > an ordinary fn (`struct S: n: int = mk().n` + `fn mk() -> S`) is check-clean and then a clean

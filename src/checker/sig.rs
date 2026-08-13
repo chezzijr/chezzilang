@@ -3777,9 +3777,22 @@ impl Checker {
                 // error` on `b1307258` and `ok: no type errors` on `dfdc7a1b`, the error reappearing
                 // only if someone CALLED `f`. So ask whether the provider exists — under the one
                 // name `desugar` would have given it — instead of assuming it does.
+                // `desugar` names a method's provider with the type's **bare** name
+                // (`synthesize_providers_into` passes `format!("{name}.{}", mth.name)` off the AST
+                // declaration), while `Ty::Struct`'s `k` is the module-scoped IDENTITY key
+                // (`<module-key>::Name`). Comparing them unstripped never matched, so
+                // `judged_by_provider` was permanently `false` for every METHOD default and the
+                // decl-site copy re-judged a `?` the provider body had already judged — two
+                // diagnostics at one span. Measured on `0104d57b`, release CLI:
+                // `struct Q: fn c(self, o: Q = mkq()?)` → **2 type errors** (the stale
+                // `'?' used in a function that returns int` plus the tailored one), where the free-fn
+                // shape `fn f(x: int = getr()?.len())` correctly gave **1**. It went unnoticed because
+                // the single-module checker test helpers key types by their BARE name, so only the
+                // CLI (and any multi-module program) could show it.
                 let owner = match &self_ty {
                     Some(Ty::Struct(k, _) | Ty::Enum(k, _) | Ty::NewType(k, _)) => {
-                        format!("{k}.{}", decl.name)
+                        let bare = k.rsplit("::").next().unwrap_or(k.as_str());
+                        format!("{bare}.{}", decl.name)
                     }
                     _ => decl.name.clone(),
                 };

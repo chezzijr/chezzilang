@@ -51,6 +51,29 @@ impl Checker {
             }
             return Ty::Nil;
         }
+        // An **out-of-closure default provider** call. `desugar` lowers every omitted non-literal
+        // default to a call on the hidden zero-arg provider `fn` its defining module declares. When
+        // the definer IS in this module's transitive import closure a synthetic `from` import binds
+        // that name into `self.functions` (`setup.rs`'s `Import::From` arm), and the call resolves
+        // on the ordinary, fully-typed path below. When it is NOT — the name-keyed METHOD path can
+        // reach a definer this module has no relation to at all, which is the ordinary
+        // protocol/implementation split — no import may be synthesized (it would outrun load order),
+        // so there is no local symbol and the compiler emits a direct, call-time reference to the
+        // definer's proto instead. Type it as the parameter slot it fills: `infer_arg` has already
+        // threaded that slot's declared type in as the expected-type hint.
+        //
+        // **Sound, not a bypass.** The two checks that matter have already run, elsewhere: the
+        // DEFINER's own module type-checks the default expression against the declared parameter
+        // type (`check_fn_body`'s decl-site copy — *"default value for parameter 'x': expected …,
+        // found …"*), and protocol conformance forces the protocol's declared parameter type to
+        // match the implementor's (`method_matches`). A provider name is unspellable by a user
+        // (`$def$…`), so this arm can only ever see an expression `desugar` synthesized.
+        if let ExprKind::Ident(n) = &callee.kind
+            && n.starts_with(crate::desugar::PROVIDER_PREFIX)
+            && !self.functions.contains_key(n)
+        {
+            return expected.cloned().unwrap_or(Ty::Unknown);
+        }
         // Explicit call-site type arguments `name[T, …](…)`. Resolved once here; only generic
         // by-name calls (fn / struct / variant constructors) can consume them.
         let targs: Vec<Ty> = type_args

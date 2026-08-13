@@ -315,6 +315,25 @@ pub enum Op {
     },
     /// Build a `Func` value over `ProtoId`, capturing the current frame's home module.
     MakeFunc(ProtoId),
+    /// Build a `Func` for a **default-argument provider declared in ANOTHER module**, resolving its
+    /// home at CALL time rather than at the caller's module-load time. The operand indexes
+    /// [`Program::providers`].
+    ///
+    /// `desugar` compiles every non-literal default once, as a hidden zero-arg provider `fn` in the
+    /// module that declares it, and an omitting call site calls it. When the definer is in the
+    /// caller's transitive import closure a synthetic `from` import binds the name and the ordinary
+    /// global path is used. When it is NOT — the name-keyed METHOD lookup can reach a definer the
+    /// caller has no relation to, which is the ordinary protocol/implementation split — no import may
+    /// be synthesized, because [`crate::vm::Vm::bind_import`] resolves its target when the CALLER's
+    /// module loads and a non-dependency can load later. Resolving lazily, here, has no such
+    /// constraint: reaching the method at all requires a VALUE of the implementor's type, so the
+    /// definer's module has necessarily run by the time this executes.
+    ///
+    /// This is the same coordinate every cross-module struct/enum method and operator overload
+    /// already resolves its home by (`module_objs[def.module_idx]`); the indirection through
+    /// `providers` exists because the caller's module is compiled BEFORE the definer's, so the
+    /// definer's `ProtoId` does not exist yet at emit time.
+    MakeFuncIn(u32),
     /// Build a `Cffi` value from `Program.cffi_defs[id]`: `dlopen` the library + resolve the symbol
     /// at module init (eager — a missing library/symbol fails here). Pushed onto the stack, then
     /// bound to its global slot by the following `DefineGlobalSlot`.
@@ -592,6 +611,10 @@ pub struct Program {
     /// analogue of `enum_methods` (a newtype is a 1-field nominal wrapper). Looked up by
     /// `do_method_call`, `resolve_overload_method` (str/hash), and the stringify/hash paths.
     pub newtype_methods: HashMap<String, HashMap<String, ProtoId>>,
+    /// Default-argument providers reachable by [`Op::MakeFuncIn`], indexed by the operand:
+    /// `(the provider's proto, the index of the module that declares it)`. Built once every module is
+    /// compiled — see `Compiler::build_provider_table`, which errors rather than shipping a hole.
+    pub providers: Vec<(ProtoId, usize)>,
     /// Newtype runtime key → the index of the module that declared it (home-globals for its methods),
     /// mirroring `enum_home`.
     pub newtype_home: HashMap<String, usize>,

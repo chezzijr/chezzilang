@@ -756,8 +756,8 @@ Measured — `fn f(x = p("d-x"), y = p("d-y"), z = p("d-z"))` called as `f(z=p("
 prints `arg-x`, `d-y`, `arg-z`, on both engines. Scope: free functions
 (own module, `from`-imported, or module-qualified `mod.f(...)`), struct constructors, **and struct
 methods** (`p.greet(punct="?")`, `p.scale()` filling a default) — a method's default is compiled in
-its declaring module like any other, subject to the dependency rule in *"Where a default is
-compiled"* below (which is where it falls back to the caller's scope, and why). Because a method's receiver type is
+its declaring module like any other, and resolves there however the caller reaches it (see *"Where a
+default is compiled"* below). Because a method's receiver type is
 unknown to the desugar pass, methods are resolved by name: if two structs define a same-named method
 with **different** parameters, a named call to it is rejected as ambiguous and — since the binding
 can't be chosen safely — its **defaults aren't filled** either (the call then fails the arity check),
@@ -794,34 +794,40 @@ consequences are worth writing down, because each is a rule you can hit:
    works, where it used to be rejected — `fn f(x: int!str = Ok(getr()?.len()))` compiles, and returns
    `4` on the `Ok` path and the `Err` unchanged on the other. Option-mode `?.` and `??` never
    propagated, so both are unaffected (`x: Option[int] = geto()?.len()`, `x: int = geto() ?? 0`).
-2. **Definer-scope holds wherever the caller can see the definer; otherwise the default falls back to
-   caller-scope resolution.** Because a method call is resolved by *name* before types are known, a
-   method default declared in module `a` can be reached from a module `z` that never imports `a` — a
+2. **A default always resolves in the module that DECLARES it — including where the caller cannot
+   name that module.** Because a method call is resolved by *name* before types are known, a method
+   default declared in module `a` can be reached from a module `z` that never imports `a`; a
    protocol-typed parameter is the ordinary way that happens (`z` declares the protocol, `a` declares
-   the struct that satisfies it). There is no way to compile the definer's expression into `z`, so
-   that one case keeps the old behaviour: the expression is **copied into the call site and resolved
-   in the caller's scope**. This is a known hazard, not a safe fallback — if `z` has its own `av()`,
-   the call reads `z`'s (measured: `510` where the definer wrote `11`), and if `z` cannot see a name
-   the definer used, the program does not compile (`unknown name 'u'` in module `z`). It is kept
-   because the alternative — refusing — makes a defaulted argument unusable through a protocol at all,
-   and `z` importing `a` is an import cycle. It is a **dependency** rule and not a load-order one: the
-   behaviour is the same however a third module orders its `import` lines. Add `import a` to `z` and
-   the definer-scope provider is used again, reading `a`'s value. Rule of thumb: **a method default
-   that must mean the definer's names should be reached only from modules that import the definer** —
-   everywhere else, pass the argument explicitly. The change that would remove the hazard entirely —
-   filling omitted arguments in the **callee** at runtime, where the receiver's module is already on
-   the stack — is specified in [`docs/future.md` §3d](future.md); it is an `Op::Call` ABI change and
-   its own milestone.
+   the struct that satisfies it, and `z` cannot import `a` without a cycle). Where the definer *is* a
+   transitive dependency, a hidden `from` import binds the provider and the call resolves through it.
+   Where it is not, no import may be synthesized — an import edge is resolved when the *caller's*
+   module loads, and a non-dependency can load later — so the call site instead holds a **direct,
+   call-time reference** to the definer's provider. Either way the answer is the definer's.
+
+   This used to be a documented **hazard**: the expression was copied into the call site and resolved
+   in the caller's scope, so `z`'s own `av()` won (measured: `510` where the definer wrote `11`), and
+   a name `z` could not see was a compile error (`unknown name 'u'` in module `z`) even though the
+   definer's module imported it perfectly well. Both are gone. The equivalent two-module CPython
+   program prints the definer's value, and so does this.
+
+   Passing the argument explicitly is unchanged and still reads the *caller's* scope — that is the
+   difference between passing a value and omitting one.
+
 3. **A default that needs itself is a compile error.** `fn f(x: int = f())` is refused, naming the
    parameter: *"the default for 'x' of 'f' is cyclic: evaluating it requires evaluating the default for
    'x' of 'f' again"*. Mutual and indirect provider cycles are caught the same way.
-4. **A `Self`-typed parameter's default is copied inline too, for the same reason.** A provider is a
-   free top-level `fn` declared `-> <the parameter's type>`, and `Self` names the receiver type, which
-   a free fn cannot spell (see *"`Self`"* below). So `fn combine(self, other: Self = mkq())` — and any
-   default whose type merely mentions `Self`, like `List[Self]` — keeps the caller-scope clone, with
-   the same hazard as rule 2. Spell the receiver type out (`other: Q = mkq()`) to get the provider.
-   The same carve-out covers a default whose type or expression mentions an enclosing **type
-   parameter** (`x: T = mk()`, `x: int = mk[T]().n`), which is a compile error either way.
+4. **A `Self`-typed parameter's default gets a provider on a non-generic host, and the inline clone
+   on a generic one.** A provider is a free top-level `fn` declared `-> <the parameter's type>`, and
+   `Self` names the receiver type, which a free fn cannot spell (see *"`Self`"* below). On a
+   **non-generic** host `Self` names exactly one concrete type, so it is substituted for that type in
+   the provider's declared return type and the default behaves like any other: `fn combine(self,
+   other: Self = mkq())` — and any default whose type merely mentions `Self`, like `List[Self]` —
+   resolves in its defining module. On a **generic** host `Self` is `Q[T]`, whose `T` is still unbound
+   in a free fn, so those keep the inline clone and with it caller-scope resolution. The same
+   carve-out covers a default whose type or expression mentions an enclosing **type parameter**
+   (`x: T = mk()`, `x: int = mk[T]().n`), which is a compile error either way, and a default whose
+   *expression* literally spells `Self` (`= Self.mk()`).
+
 5. **A cycle routed through an ordinary function is a runtime fault, not a compile error.**
    `struct S: n: int = mk().n` with `fn mk() -> S: return S()` type-checks clean and then faults with
    `maximum call depth (10000) exceeded (infinite recursion?)`, rc 1, identically on both engines —

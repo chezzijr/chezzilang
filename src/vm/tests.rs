@@ -1747,6 +1747,7 @@ pub(crate) fn empty_program() -> Program {
         enum_home: Default::default(),
         newtype_methods: Default::default(),
         newtype_home: Default::default(),
+        providers: Default::default(),
         native_methods: Default::default(),
         native_home: Default::default(),
         variants: Default::default(),
@@ -5815,26 +5816,19 @@ fn a_default_in_a_diamonds_shared_base_is_the_same_in_either_import_order() {
     }
 }
 
-/// W7-51 — the cross-module rule is a DEPENDENCY rule, and the property under test is that it is
-/// **order-stable**: both orderings of the entry's two import lines must behave identically.
+/// **The hazard this row exists to delete.** A method default declared in module `a` and reached
+/// from module `z` that does not import `a` used to be CLONED into `z` and resolved in `z`'s scope,
+/// so `z`'s own `av()` won: the call printed `510` where `a`'s author wrote `1` (+ the receiver's
+/// 10). A clean `chezzi check`, identical on both engines — two-engine parity is structurally blind
+/// to it. Measured on `0104d57b`: **`510`**. The equivalent CPython program, two module objects with
+/// `z` never importing `a`, prints **`11`**, because Python binds a default in the scope that
+/// DECLARES it.
 ///
-/// `desugar` resolves a METHOD call by method NAME (the receiver type is unknown pre-type), so
-/// `p.mprobe()` in `z` can bind `a`'s spec even though `z` never imports `a`. There is no provider
-/// to call from there — a synthetic import edge to a non-dependency is not admissible — so the
-/// default FALLS BACK to the pre-W7-51 caller-scope clone.
-///
-/// **This is the lesser of two evils and the cost is real.** The clone resolves `av` in `z`, so the
-/// program prints `510` where `a`'s author wrote `1` (+ 10). Measured on `b1307258`: the same
-/// `510`, in both orderings. What it buys is the shape in the next test: refusing instead
-/// (`e2d9bd4e`..`dfdc7a1b`) made a defaulted method argument unreachable through a protocol, which
-/// is the canonical Go-style split this language is built around and which both `b1307258` and
-/// CPython run. See `desugar::Walker::splice_default` and `docs/syntax.md` §5.
-///
-/// The predicate this replaced read the definer's LOAD-ORDER index. Measured on `e2d9bd4e`, same
-/// three files: `import z` / `import a` → refused; `import a` / `import z` → `11`. A cosmetic
-/// reorder in a third module flipped a compile error. Both orderings now behave the same.
+/// It now prints `11`: the default is compiled once, in `a`, and the call site reaches that provider
+/// through a direct call-time reference (`Op::MakeFuncIn`) instead of needing an import edge it
+/// cannot have — `a` imports `z` for the protocol, so `z` importing `a` would be a cycle.
 #[test]
-fn a_method_default_from_a_sibling_module_falls_back_to_the_caller_scope_clone() {
+fn a_method_default_from_a_sibling_module_resolves_in_its_definer() {
     for (tag, entry_src) in [
         ("zfirst", "import z\nimport a\nprint(z.use_it(a.S(10)))\n"),
         ("afirst", "import a\nimport z\nprint(z.use_it(a.S(10)))\n"),
@@ -5865,22 +5859,26 @@ fn a_method_default_from_a_sibling_module_falls_back_to_the_caller_scope_clone()
         assert!(vr.is_ok(), "[{tag}] serial VM faulted: {vr:?}");
         assert!(ir.is_ok(), "[{tag}] M:N engine faulted: {ir:?}");
         assert_eq!(
-            vo, "510\n",
-            "[{tag}] the fallback clone resolves `av` in the CALLER (z: 500), as `b1307258` did"
+            vo, "11\n",
+            "[{tag}] the default must resolve in its DEFINER (a: 1 + 10), not the caller (z: 500); \
+             `0104d57b` printed 510 and CPython prints 11"
         );
         assert_eq!(vo, io, "[{tag}] serial vs M:N divergence");
     }
 }
 
-/// …and the reason the fallback exists: the ordinary protocol/implementation split. `z` declares the
+/// …and the shape it all exists for: the ordinary protocol/implementation split. `z` declares the
 /// protocol and the function that consumes it, `a` declares the struct that satisfies it and gives
 /// the method a default. `z` cannot import `a` (that is the dependency direction the protocol
-/// exists to avoid, and `a` importing `z` would make it a cycle), so a refusal here has NO
-/// workaround other than "never default a protocol method's argument".
+/// exists to avoid, and `a` importing `z` would make it a cycle), so REFUSING here has no
+/// workaround other than "never default a protocol method's argument" — which is why the refusal
+/// shipped between `e2d9bd4e` and `dfdc7a1b` was reverted.
 ///
 /// Measured: `b1307258` prints `12`, the equivalent Python prints `12`, and `dfdc7a1b` refused with
 /// `cannot use the default for 'x' of 'S.mprobe' here: it is declared in module 'a', which module
-/// 'z' does not import`. Both engines, both import orders.
+/// 'z' does not import`. Both engines, both import orders. Here `u.av()` is reachable from `z` as
+/// well, so this case agreed with the definer even under the old clone; its sibling below is the
+/// one that could not.
 #[test]
 fn a_defaulted_method_argument_is_reachable_through_a_protocol() {
     for (tag, entry_src) in [
@@ -5918,14 +5916,136 @@ fn a_defaulted_method_argument_is_reachable_through_a_protocol() {
     }
 }
 
-/// …and the fallback's CEILING, pinned rather than claimed: the clone resolves in the caller, so if
-/// the caller cannot see a name the definer used, the program does not compile. Drop `import u` from
-/// `z` in the program above and both `b1307258` and HEAD report `unknown name 'u'` in module `z` —
-/// the same diagnostic, at the same place. The fallback restores the base behaviour exactly,
-/// including where the base behaviour was an error.
+/// The old clone's CEILING, now removed. Because the default was resolved in the CALLER, a name the
+/// caller could not see was a compile error: drop `import u` from `z` in the program above and
+/// `b1307258` and `0104d57b` both reported **`in module 'z': unknown name 'u'`** — refusing a
+/// program whose definer is perfectly well-formed, purely because the consumer of a protocol cannot
+/// see the implementor's imports.
+///
+/// It now compiles and prints `12`. `z` resolves nothing: the default is compiled once, in `a`,
+/// where `u` IS imported, and reached by a direct call-time reference. This is the clearest
+/// user-visible consequence of the change — a whole class of program that could not be written now
+/// can be.
 #[test]
-fn the_fallback_clone_still_resolves_in_the_caller_so_an_unseen_name_is_an_error() {
-    let dir = std::env::temp_dir().join(format!("chezzi_w751_unseen_{}", std::process::id()));
+fn a_default_naming_an_import_the_caller_cannot_see_now_compiles_and_resolves_in_its_definer() {
+    for (tag, entry_src) in [
+        ("zfirst", "import z\nimport a\nprint(z.use(a.S(1)))\n"),
+        ("afirst", "import a\nimport z\nprint(z.use(a.S(1)))\n"),
+    ] {
+        let dir =
+            std::env::temp_dir().join(format!("chezzi_w751_unseen_{tag}_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("u.chz"), "fn av() -> int:\n    return 11\n").unwrap();
+        std::fs::write(
+            dir.join("a.chz"),
+            "import u\nstruct S:\n    v: int\n    fn mprobe(self, x: int = u.av()) -> int:\n        return self.v + x\n",
+        )
+        .unwrap();
+        // NOTE: no `import u` here — that is the whole point.
+        std::fs::write(
+            dir.join("z.chz"),
+            "protocol P:\n    fn mprobe(self, x: int) -> int\nfn use(p: P) -> int:\n    return p.mprobe()\n",
+        )
+        .unwrap();
+        let entry = dir.join("main.chz");
+        std::fs::write(&entry, entry_src).unwrap();
+        let graph = crate::resolver::build_graph(&entry).expect("resolve");
+        if let Err(errs) = crate::checker::check_graph(&graph) {
+            let _ = std::fs::remove_dir_all(&dir);
+            panic!("[{tag}] must now type-check (was `unknown name 'u'`), got: {errs:?}");
+        }
+        let (vo, _ve, vr, _vc) = run_file(&entry);
+        let (io, _ie, ir, _ic) = run_file_p(&entry);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(vr.is_ok(), "[{tag}] serial VM faulted: {vr:?}");
+        assert!(ir.is_ok(), "[{tag}] M:N engine faulted: {ir:?}");
+        assert_eq!(vo, "12\n", "[{tag}] definer's u.av() (11) + 1");
+        assert_eq!(vo, io, "[{tag}] serial vs M:N divergence");
+    }
+}
+
+/// **The M:N half, and the one that a `chezzi check` cannot see.** A worker VM faults a module's
+/// globals in LAZILY (`Vm::module_global`'s D1 note), so a NEW cross-module reader that forgets
+/// `ensure_module_faulted` observes an empty module and fails to resolve — on the M:N engine only.
+/// Here the out-of-closure default is evaluated inside a `spawn` in a `parallel:` nursery, i.e. on a
+/// worker whose `module_objs` copy holds the definer unfaulted. It resolves because the provider's
+/// own frame reads its home through `Op::GetGlobalSlot`, which faults first; `Op::MakeFuncIn`
+/// deliberately forces nothing, keeping the "no eager cascade" property snapshots rely on.
+#[test]
+fn an_out_of_closure_default_resolves_on_an_m_n_worker() {
+    let dir = std::env::temp_dir().join(format!("chezzi_w751_worker_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("u.chz"), "fn av() -> int:\n    return 11\n").unwrap();
+    std::fs::write(
+        dir.join("a.chz"),
+        "import u\nstruct S:\n    v: int\n    fn mprobe(self, x: int = u.av()) -> int:\n        return self.v + x\n",
+    )
+    .unwrap();
+    // `z` imports neither `a` nor `u`, and evaluates the default on a spawned worker.
+    std::fs::write(
+        dir.join("z.chz"),
+        "protocol P:\n    fn mprobe(self, x: int) -> int\nfn use(p: P) -> int:\n    ch := Channel[int](1)\n    parallel:\n        spawn:\n            ch.send(p.mprobe())\n    return ch.recv()\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.chz");
+    std::fs::write(&entry, "import z\nimport a\nprint(z.use(a.S(1)))\n").unwrap();
+    let graph = crate::resolver::build_graph(&entry).expect("resolve");
+    if let Err(errs) = crate::checker::check_graph(&graph) {
+        let _ = std::fs::remove_dir_all(&dir);
+        panic!("must type-check, got: {errs:?}");
+    }
+    let (vo, _ve, vr, _vc) = run_file(&entry);
+    let (io, _ie, ir, _ic) = run_file_p(&entry);
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(vr.is_ok(), "serial VM faulted: {vr:?}");
+    assert!(ir.is_ok(), "M:N engine faulted: {ir:?}");
+    assert_eq!(vo, "12\n", "definer's u.av() (11) + 1 on a worker");
+    assert_eq!(vo, io, "serial vs M:N divergence");
+}
+
+/// The definer's module is still RUNNING when its own default is first needed: `a`'s toplevel calls
+/// through `z` on a line ABOVE the `fn av()` the default names. It resolves, because top-level `fn`s
+/// are hoisted — the compiler emits every `MakeFunc`/`DefineGlobalSlot` before the module body's
+/// other statements — so the provider and the name it spells are both bound before any toplevel
+/// expression runs. Pinned because the lazy reference is what made this shape reachable at all, and
+/// because it is the closest thing to a load-order counterexample that exists.
+#[test]
+fn an_out_of_closure_default_resolves_while_its_definers_toplevel_is_running() {
+    let dir = std::env::temp_dir().join(format!("chezzi_w751_midrun_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("z.chz"),
+        "protocol P:\n    fn mprobe(self, x: int) -> int\nfn use(p: P) -> int:\n    return p.mprobe()\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("a.chz"),
+        "import z\nstruct S:\n    v: int\n    fn mprobe(self, x: int = av()) -> int:\n        return self.v + x\nprint(z.use(S(1)))\nfn av() -> int:\n    return 11\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.chz");
+    std::fs::write(&entry, "import a\n").unwrap();
+    let graph = crate::resolver::build_graph(&entry).expect("resolve");
+    if let Err(errs) = crate::checker::check_graph(&graph) {
+        let _ = std::fs::remove_dir_all(&dir);
+        panic!("must type-check, got: {errs:?}");
+    }
+    let (vo, _ve, vr, _vc) = run_file(&entry);
+    let (io, _ie, ir, _ic) = run_file_p(&entry);
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(vr.is_ok(), "serial VM faulted: {vr:?}");
+    assert!(ir.is_ok(), "M:N engine faulted: {ir:?}");
+    assert_eq!(vo, "12\n");
+    assert_eq!(vo, io, "serial vs M:N divergence");
+}
+
+/// **The relaxed call-site typing is not a bypass.** An out-of-closure provider call is typed from
+/// the parameter slot it fills rather than by resolving the definer's signature; that must not leak
+/// into the slots the USER wrote. An explicit, wrong-typed argument to the same method is still a
+/// type error, at the call site, with the ordinary message.
+#[test]
+fn an_explicit_argument_is_still_type_checked_where_a_default_would_be_relaxed() {
+    let dir = std::env::temp_dir().join(format!("chezzi_w751_nobypass_{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join("u.chz"), "fn av() -> int:\n    return 11\n").unwrap();
     std::fs::write(
@@ -5939,14 +6059,19 @@ fn the_fallback_clone_still_resolves_in_the_caller_so_an_unseen_name_is_an_error
     )
     .unwrap();
     let entry = dir.join("main.chz");
-    std::fs::write(&entry, "import z\nimport a\nprint(z.use(a.S(1)))\n").unwrap();
+    std::fs::write(&entry, "import z\nimport a\nprint(a.S(1).mprobe(\"x\"))\n").unwrap();
     let graph = crate::resolver::build_graph(&entry).expect("resolve");
-    let errs = crate::checker::check_graph(&graph).expect_err("the clone cannot see u from z");
+    let errs = crate::checker::check_graph(&graph).expect_err("a str where an int is declared");
     let _ = std::fs::remove_dir_all(&dir);
     assert!(
         errs.iter()
-            .any(|e| e.message.contains("in module 'z': unknown name 'u'")),
-        "expected the base-identical diagnostic, got: {errs:?}"
+            .any(|e| e.message.contains("expected int, found str")),
+        "expected the ordinary argument type error, got: {errs:?}"
+    );
+    assert!(
+        errs.iter()
+            .all(|e| !e.message.contains(crate::desugar::PROVIDER_PREFIX)),
+        "an internal provider symbol reached a user-facing message: {errs:?}"
     );
 }
 
@@ -5955,7 +6080,7 @@ fn the_fallback_clone_still_resolves_in_the_caller_so_an_unseen_name_is_an_error
 /// by name coincidence. `b1307258` printed `11` here too. Recorded so nobody reads the fallback as
 /// "the caller's name is the intended one": it is intended only in that refusing costs more.
 #[test]
-fn a_name_coincidence_default_reads_the_callers_name_and_still_agrees() {
+fn a_default_whose_name_the_caller_also_declares_reads_the_definers() {
     for (tag, entry_src) in [
         ("zfirst", "import z\nimport a\nprint(z.use_it(a.S(10)))\n"),
         ("afirst", "import a\nimport z\nprint(z.use_it(a.S(10)))\n"),
@@ -5968,7 +6093,9 @@ fn a_name_coincidence_default_reads_the_callers_name_and_still_agrees() {
             "fn av() -> int:\n    return 1\nstruct S:\n    n: int\n    fn mprobe(self, x: int = av()) -> int:\n        return x + self.n\n",
         )
         .unwrap();
-        // z's `av` agrees with a's — the spliced clone reads THIS one and still gets 11.
+        // z declares an `av` too, and it agrees with a's. Under the old clone THIS one was read
+        // (right answer, wrong reason); now a's own is read. Kept so nobody re-reads the caller's
+        // name as the intended one.
         std::fs::write(
             dir.join("z.chz"),
             "protocol HasM:\n    fn mprobe(self, x: int) -> int\nfn av() -> int:\n    return 1\nfn use_it(p: HasM) -> int:\n    return p.mprobe()\n",
@@ -5986,7 +6113,7 @@ fn a_name_coincidence_default_reads_the_callers_name_and_still_agrees() {
         let _ = std::fs::remove_dir_all(&dir);
         assert!(vr.is_ok(), "[{tag}] serial VM faulted: {vr:?}");
         assert!(ir.is_ok(), "[{tag}] M:N engine faulted: {ir:?}");
-        assert_eq!(vo, "11\n", "[{tag}] got: {vo}");
+        assert_eq!(vo, "11\n", "[{tag}] a's own av() (1) + 10; got: {vo}");
         assert_eq!(vo, io, "[{tag}] serial vs M:N divergence");
     }
 }
@@ -9650,6 +9777,33 @@ fn golden_default_xmod_matches_expected_on_all_engines() {
     let (mn_out, _e2, mn_res, _) = run_file_p(&path);
     mn_res.expect("default_xmod should run on the M:N engine");
     assert_eq!(vm_out, mn_out, "serial vs M:N divergence on default_xmod");
+}
+
+/// The protocol golden — the shape the cross-module default fix exists for, and the one the corpus
+/// had no coverage of at all. `shapes` declares the protocol and the consumer; `boxes` imports
+/// `shapes` and declares the implementor, so `shapes` cannot import `boxes` without a cycle. The
+/// method default spells a name only `boxes` can see (`units.factor()`) AND a name `shapes` also
+/// declares with a different value (`unit()`), so a caller-scope resolution would both fail to
+/// compile and silently disagree. The checked-in `.expected` is byte-identical to what the
+/// equivalent CPython program prints.
+#[test]
+fn golden_default_protocol_matches_expected_on_all_engines() {
+    let base = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let path = base.join("examples/default_protocol/main.chz");
+    let expected =
+        std::fs::read_to_string(base.join("examples/default_protocol/main.expected")).unwrap();
+    let (vm_out, _e1, vm_res, _) = run_file(&path);
+    vm_res.expect("default_protocol should run on the serial VM");
+    assert_eq!(
+        vm_out, expected,
+        "serial VM output drifted on default_protocol"
+    );
+    let (mn_out, _e2, mn_res, _) = run_file_p(&path);
+    mn_res.expect("default_protocol should run on the M:N engine");
+    assert_eq!(
+        vm_out, mn_out,
+        "serial vs M:N divergence on default_protocol"
+    );
 }
 
 /// Chained `elif` in expression position: `examples/expr_else_if.chz` exercises a multi-arm

@@ -1,0 +1,3 @@
+# examples/default_protocol/units.chz — imported only by `boxes`.
+fn factor() -> int:
+    return 5

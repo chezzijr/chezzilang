@@ -129,13 +129,7 @@ enum Dflt {
     /// Cloned inline at the call site (and re-walked there, so it still spends the depth budget).
     Inline(Expr),
     /// Call the zero-arg provider synthesized in the module named by `module`.
-    Provider {
-        module: ModuleId,
-        name: String,
-        /// The default expression itself, for the ONE call site the provider cannot serve: a caller
-        /// that does not import `module`, even transitively. See [`Walker::splice_default`].
-        fallback: Expr,
-    },
+    Provider { module: ModuleId, name: String },
 }
 
 /// Is `e` a **self-contained literal** — an expression that can be cloned into any number of call
@@ -205,6 +199,7 @@ fn dflt_for(
     d: &Expr,
     ty: Option<&Type>,
     type_params: &[String],
+    self_ty: Option<&str>,
     module: &ModuleId,
     name: String,
 ) -> Dflt {
@@ -214,17 +209,76 @@ fn dflt_for(
     let Some(ty) = ty else {
         return Dflt::Inline(d.clone());
     };
-    // `Self` is an implicit type parameter of every method: unbound in the free top-level `fn` a
-    // provider is, exactly like `T`, so it takes the same carve-out.
+    // `Self` is an implicit type parameter of every method. On a **non-generic** host it names one
+    // concrete type, which a free top-level `fn` CAN spell — so the caller hands us that name and we
+    // substitute it into the provider's declared return type, and `Self` is no longer unbound. On a
+    // generic host `Self` is `Q[T]`, whose `T` is still unbound in a free fn, so those callers pass
+    // `None` and the historical carve-out stands.
+    let subst;
+    let ty = if self_ty.is_some() {
+        subst = subst_self_ty(ty, self_ty);
+        &subst
+    } else {
+        ty
+    };
     let mut unbound: Vec<String> = type_params.to_vec();
-    unbound.push("Self".to_string());
-    if crate::checker::type_mentions_any(ty, &unbound) || expr_mentions_type_param(d, &unbound) {
+    if self_ty.is_none() {
+        unbound.push("Self".to_string());
+    }
+    if crate::checker::type_mentions_any(ty, &unbound) {
+        return Dflt::Inline(d.clone());
+    }
+    // The EXPRESSION channel keeps `Self` unbound either way: rewriting `Self` inside the provider's
+    // BODY (`Self()`, `Self.mk()`) needs a mutating expression walker, which is deliberately not part
+    // of this change — such a default keeps the inline carve-out for now.
+    let mut expr_unbound: Vec<String> = type_params.to_vec();
+    expr_unbound.push("Self".to_string());
+    if expr_mentions_type_param(d, &expr_unbound) {
         return Dflt::Inline(d.clone());
     }
     Dflt::Provider {
         module: module.clone(),
         name,
-        fallback: d.clone(),
+    }
+}
+
+/// Rewrite `Self` to the owner type's name throughout a declared type, so a method's default can be
+/// hoisted into a free top-level provider `fn` declared `-> <that type>`. `None` (a free fn, or a
+/// GENERIC host whose `Self` is `Q[T]`) clones unchanged. See [`dflt_for`].
+fn subst_self_ty(t: &Type, self_ty: Option<&str>) -> Type {
+    let Some(owner) = self_ty else {
+        return t.clone();
+    };
+    match t {
+        Type::Named { name, span } if name == "Self" => Type::Named {
+            name: owner.to_string(),
+            span: *span,
+        },
+        Type::Named { .. } => t.clone(),
+        Type::Qualified { module, name, args } => Type::Qualified {
+            module: module.clone(),
+            name: name.clone(),
+            args: args.iter().map(|a| subst_self_ty(a, self_ty)).collect(),
+        },
+        Type::Generic(head, args, span) => Type::Generic(
+            if head == "Self" {
+                owner.to_string()
+            } else {
+                head.clone()
+            },
+            args.iter().map(|a| subst_self_ty(a, self_ty)).collect(),
+            *span,
+        ),
+        Type::Func {
+            params,
+            ret,
+            labels,
+        } => Type::Func {
+            params: params.iter().map(|a| subst_self_ty(a, self_ty)).collect(),
+            ret: Box::new(subst_self_ty(ret, self_ty)),
+            labels: labels.clone(),
+        },
+        Type::Tuple(ts) => Type::Tuple(ts.iter().map(|a| subst_self_ty(a, self_ty)).collect()),
     }
 }
 
@@ -573,6 +627,7 @@ fn push_param_providers(
     owner: &str,
     decl: &crate::ast::FnDecl,
     extra_tps: &[String],
+    self_ty: Option<&str>,
 ) {
     let tps = tp_names(decl, extra_tps);
     for p in &decl.params {
@@ -583,15 +638,25 @@ fn push_param_providers(
             d,
             p.ty.as_ref(),
             &tps,
+            self_ty,
             id,
             provider_name(file, Slot::Param, owner, &p.name),
         ) {
             let ty =
                 p.ty.clone()
                     .expect("a provider default has a declared type");
-            out.push(provider_fn(name, ty, d.clone()));
+            // The SAME substitution `dflt_for` classified against, so the emitted provider's declared
+            // return type and the decision to emit one can never disagree.
+            out.push(provider_fn(name, subst_self_ty(&ty, self_ty), d.clone()));
         }
     }
+}
+
+/// The owner type name to substitute for `Self` in a method's provider, or `None` when there is
+/// nothing spellable to substitute: a GENERIC host (`Self` is `Q[T]`, and `T` is unbound in the free
+/// `fn` a provider is) keeps the historical inline carve-out. See [`dflt_for`].
+fn self_ty_for<'a>(owner_type: &'a str, host_type_params: &[String]) -> Option<&'a str> {
+    host_type_params.is_empty().then_some(owner_type)
 }
 
 /// **W7-51 — compile each non-inline default ONCE, in the module that declares it.**
@@ -625,7 +690,7 @@ fn synthesize_providers_into(stmts: &mut Vec<Stmt>, id: &ModuleId, file: u32) {
     for stmt in stmts.iter() {
         match &stmt.kind {
             StmtKind::Fn(decl) => {
-                push_param_providers(&mut new_fns, id, file, &decl.name, decl, &[]);
+                push_param_providers(&mut new_fns, id, file, &decl.name, decl, &[], None);
             }
             StmtKind::Struct {
                 name,
@@ -641,6 +706,7 @@ fn synthesize_providers_into(stmts: &mut Vec<Stmt>, id: &ModuleId, file: u32) {
                         d,
                         Some(&f.ty),
                         &stps,
+                        None,
                         id,
                         provider_name(file, Slot::Field, name, &f.name),
                     ) {
@@ -649,7 +715,15 @@ fn synthesize_providers_into(stmts: &mut Vec<Stmt>, id: &ModuleId, file: u32) {
                 }
                 for mth in methods {
                     let owner = format!("{name}.{}", mth.name);
-                    push_param_providers(&mut new_fns, id, file, &owner, mth, &stps);
+                    push_param_providers(
+                        &mut new_fns,
+                        id,
+                        file,
+                        &owner,
+                        mth,
+                        &stps,
+                        self_ty_for(name, &stps),
+                    );
                 }
             }
             StmtKind::Enum {
@@ -667,7 +741,15 @@ fn synthesize_providers_into(stmts: &mut Vec<Stmt>, id: &ModuleId, file: u32) {
                 let stps: Vec<String> = type_params.iter().map(|t| t.name.clone()).collect();
                 for mth in methods {
                     let owner = format!("{name}.{}", mth.name);
-                    push_param_providers(&mut new_fns, id, file, &owner, mth, &stps);
+                    push_param_providers(
+                        &mut new_fns,
+                        id,
+                        file,
+                        &owner,
+                        mth,
+                        &stps,
+                        self_ty_for(name, &stps),
+                    );
                 }
             }
             StmtKind::NativeStruct {
@@ -679,7 +761,15 @@ fn synthesize_providers_into(stmts: &mut Vec<Stmt>, id: &ModuleId, file: u32) {
                 let stps: Vec<String> = type_params.iter().map(|t| t.name.clone()).collect();
                 for mth in bodied_methods {
                     let owner = format!("{name}.{}", mth.name);
-                    push_param_providers(&mut new_fns, id, file, &owner, mth, &stps);
+                    push_param_providers(
+                        &mut new_fns,
+                        id,
+                        file,
+                        &owner,
+                        mth,
+                        &stps,
+                        self_ty_for(name, &stps),
+                    );
                 }
             }
             _ => {}
@@ -816,6 +906,7 @@ fn method_spec(
                     d,
                     p.ty.as_ref(),
                     &tps,
+                    self_ty_for(owner_type, &stps),
                     id,
                     provider_name(file, Slot::Param, &owner, &p.name),
                 )
@@ -1238,6 +1329,7 @@ fn collect_module_reg(stmts: &[Stmt], id: &ModuleId, file: u32) -> ModReg {
                                     d,
                                     p.ty.as_ref(),
                                     &tps,
+                                    None,
                                     id,
                                     provider_name(file, Slot::Param, &decl.name, &p.name),
                                 )
@@ -1265,6 +1357,7 @@ fn collect_module_reg(stmts: &[Stmt], id: &ModuleId, file: u32) -> ModReg {
                                     d,
                                     Some(&f.ty),
                                     &tps,
+                                    None,
                                     id,
                                     provider_name(file, Slot::Field, name, &f.name),
                                 )
@@ -2001,21 +2094,21 @@ impl Walker<'_> {
                 self.walk_expr(&mut e)?;
                 out.push(e);
             }
-            Dflt::Provider {
-                module,
-                name,
-                fallback,
-            } => {
-                if module != self.ctx.own_id {
-                    if !self.ctx.deps.contains(module) {
-                        // Out of reach: no import edge may be synthesized to a module this one does
-                        // not depend on, so there is no provider to call. Clone the expression into
-                        // the call site — the pre-W7-51 behaviour, caller-scope hazard included.
-                        let mut e = fallback.clone();
-                        self.walk_expr(&mut e)?;
-                        out.push(e);
-                        return Ok(());
-                    }
+            Dflt::Provider { module, name } => {
+                // A cross-module provider is reached one of two ways, and BOTH resolve in the
+                // definer's namespace — the difference is only how the caller names it.
+                //
+                //   * **In this module's transitive import closure** — synthesize a `from` import
+                //     and call the bound name. The checker types the call fully.
+                //   * **Out of the closure** — no import may be synthesized (`Vm::bind_import`
+                //     resolves its target when the CALLER's module loads, and a non-dependency can
+                //     load later), so nothing is recorded here: the compiler lowers the bare
+                //     provider ident to a direct, call-time reference to the definer's proto
+                //     (`Op::MakeFuncIn`), and the checker types the call from the parameter slot it
+                //     fills. This is the path the name-keyed METHOD lookup reaches — the ordinary
+                //     protocol/implementation split, where the definer need not be related to the
+                //     caller at all.
+                if module != self.ctx.own_id && self.ctx.deps.contains(module) {
                     self.needed
                         .entry(name.clone())
                         .or_insert_with(|| (module.clone(), site));

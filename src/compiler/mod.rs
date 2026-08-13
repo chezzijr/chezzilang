@@ -167,6 +167,7 @@ pub fn compile_graph(graph: &ModuleGraph) -> Result<Program, CompileError> {
     c.program.method_ic_sites = c.method_ic_next;
     c.program.rebuild_struct_names();
     c.build_eq_hooks();
+    c.build_provider_table()?;
     Ok(c.program)
 }
 
@@ -242,6 +243,13 @@ struct Compiler {
     /// `variant_id`-indexed `Program::eq_struct` / `eq_enum` by [`Compiler::build_eq_hooks`] once every
     /// module is compiled (the dense ids are only final then).
     eq_hooks: HashMap<String, (ProtoId, usize)>,
+    /// Default-argument provider NAME → its dense `Op::MakeFuncIn` operand. Ids are handed out at
+    /// EMIT sites (a call site in a module that cannot name the provider), which run before the
+    /// declaring module is compiled — hence the indirection. See [`Compiler::build_provider_table`].
+    provider_ids: HashMap<String, u32>,
+    /// Default-argument provider NAME → `(its proto, the index of the module declaring it)`, filled
+    /// as each declaring module is compiled. Materialized into `Program::providers` at the end.
+    provider_defs: HashMap<String, (ProtoId, usize)>,
     /// The GENERIC type-param names currently in scope (enclosing type's `[T]` + the fn's own `[U]`).
     /// A type param SHADOWS a module-level `type F = float` alias, exactly as it does in the checker's
     /// scoped `resolve_type` — so every `FloatAliases` lookup below must exclude these names, or the
@@ -682,6 +690,46 @@ impl Compiler {
     /// Materialize the `Eq`-hook tables the VM's `==` reads (`Program::eq_struct` / `eq_enum`) from
     /// the key-based `eq_hooks` gathered while compiling. Runs last: `tid`s and `variant_id`s are the
     /// index space, and both are only final once every module has been hoisted and compiled.
+    /// Materialize `Program::providers` from the emit-site ids and the declaration-site protos.
+    /// Runs last, for the same reason [`Compiler::build_eq_hooks`] does: the caller's module is
+    /// compiled BEFORE the definer's, so a provider's `ProtoId` is only known once every module has
+    /// been compiled.
+    ///
+    /// A mentioned provider with no compiled declaration is a hard `CompileError`, never a hole in
+    /// the table. That is what makes the checker's side of this safe: it types an out-of-closure
+    /// provider call from the parameter slot rather than resolving the definer's signature, so a
+    /// desugar/compiler disagreement about which defaults get providers must surface as a build
+    /// failure here rather than as a missing runtime symbol.
+    fn build_provider_table(&mut self) -> Result<(), CompileError> {
+        if self.provider_ids.is_empty() {
+            return Ok(());
+        }
+        let mut table = vec![None; self.provider_ids.len()];
+        for (name, &id) in &self.provider_ids {
+            let Some(&def) = self.provider_defs.get(name) else {
+                return Err(CompileError {
+                    message: format!(
+                        "internal: no provider function was compiled for {}",
+                        crate::desugar::display_fn_name(name)
+                    ),
+                    span: Span::RUNTIME,
+                });
+            };
+            table[id as usize] = Some(def);
+        }
+        self.program.providers = table
+            .into_iter()
+            .map(|e| e.expect("every id was just filled"))
+            .collect();
+        Ok(())
+    }
+
+    /// The dense `Op::MakeFuncIn` operand for `name`, allocating one on first mention.
+    fn provider_id(&mut self, name: &str) -> u32 {
+        let next = self.provider_ids.len() as u32;
+        *self.provider_ids.entry(name.to_string()).or_insert(next)
+    }
+
     fn build_eq_hooks(&mut self) {
         if self.eq_hooks.is_empty() {
             return; // the overwhelmingly common case — leave both tables empty (every lookup misses)
@@ -708,6 +756,7 @@ impl Compiler {
             enum_home: HashMap::new(),
             newtype_methods: HashMap::new(),
             newtype_home: HashMap::new(),
+            providers: Vec::new(),
             native_methods: HashMap::new(),
             native_home: HashMap::new(),
             variants: HashMap::new(),
@@ -782,6 +831,8 @@ impl Compiler {
             eq_hooks: HashMap::new(),
             float_shadow: std::collections::HashSet::new(),
             globals: HashMap::new(),
+            provider_ids: HashMap::new(),
+            provider_defs: HashMap::new(),
             fn_names: std::collections::HashSet::new(),
             global_slots: Vec::new(),
             field_ic_next: 0,
@@ -1371,6 +1422,12 @@ impl Compiler {
                     .cloned()
                     .unwrap_or_default();
                 let pid = self.compile_fn(decl, false)?;
+                // A hidden default-argument provider is reachable from a module that cannot name it
+                // (`Op::MakeFuncIn`); record where it lives so `build_provider_table` can resolve it.
+                if decl.name.starts_with(crate::desugar::PROVIDER_PREFIX) {
+                    self.provider_defs
+                        .insert(decl.name.clone(), (pid, module_idx));
+                }
                 fc.emit(Op::MakeFunc(pid), stmt.span);
                 fc.emit(
                     Op::DefineGlobalSlot(self.global_slot(&decl.name)),
@@ -4616,6 +4673,21 @@ impl Compiler {
         named: &[(String, Expr)],
         span: Span,
     ) -> Result<(), CompileError> {
+        // A default-argument provider call whose declaring module this one cannot name — no synthetic
+        // import was (or could be) emitted for it, so there is no global slot to read. Lower it to a
+        // direct, call-time reference to the definer's proto. See [`Op::MakeFuncIn`] and
+        // `desugar::Walker::splice_default`. Same-module and in-closure providers have a global slot
+        // and fall through to the ordinary path below.
+        if let ExprKind::Ident(n) = &callee.kind
+            && n.starts_with(crate::desugar::PROVIDER_PREFIX)
+            && fc.is_unbound(n)
+            && !self.globals.contains_key(n)
+        {
+            let id = self.provider_id(n);
+            fc.emit(Op::MakeFuncIn(id), span);
+            fc.emit(Op::Call(0), span);
+            return Ok(());
+        }
         // Method / module-member call: `obj.name(args)`.
         if let ExprKind::Field {
             obj,

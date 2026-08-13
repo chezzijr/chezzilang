@@ -1,0 +1,12 @@
+# examples/default_protocol/shapes.chz — declares the PROTOCOL and the function that consumes it.
+# It knows nothing about who implements it, and it deliberately declares its own `unit()` and its own
+# `scale()` with different values, to show that neither can reach into an implementor's default.
+
+fn unit() -> int:
+    return 1000
+
+protocol Sized:
+    fn area(self, scale: int) -> int
+
+fn describe(p: Sized) -> str:
+    return "area={p.area()}"
