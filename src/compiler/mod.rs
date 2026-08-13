@@ -1612,7 +1612,7 @@ impl Compiler {
         // A `float` param coerces any int argument at the callee prologue — so EVERY caller (incl. an
         // int VARIABLE, not just a literal) widens.
         // Callee-side default fill FIRST, so a filled value is coerced and boxed like a supplied one.
-        self.emit_default_param_prologue(&mut fc, &decl.params);
+        self.emit_default_param_prologue(&mut fc, &decl.params)?;
         self.emit_float_param_prologue(&mut fc, &decl.params);
         // Uniform by-reference capture: box any param captured by a nested closure (after coercion).
         self.emit_box_param_prologue(&mut fc, &decl.params);
@@ -1681,28 +1681,45 @@ impl Compiler {
     /// witness in a defaulted slot), and no parameter is VARIADIC (its surplus collapse is a
     /// call-site rewrite the callee cannot reconstruct). A function with no defaults is
     /// byte-identical to before.
-    fn emit_default_param_prologue(&mut self, fc: &mut FnComp, params: &[crate::ast::Param]) {
+    fn emit_default_param_prologue(
+        &mut self,
+        fc: &mut FnComp,
+        params: &[crate::ast::Param],
+    ) -> Result<(), CompileError> {
         // ONE shared predicate with the checker — see `ast::min_callable_params` for why they must
         // agree by construction rather than by hand-sync.
         let first = crate::ast::min_callable_params(params, !self.witness_locals.is_empty());
         if first == params.len() {
-            return; // no short entry for this shape (no trailing defaults, variadic, or witnesses)
+            return Ok(()); // no short entry for this shape (no trailing defaults, variadic, witnesses)
         }
-        // A default before a non-defaulted parameter cannot be filled by a short call; if any
-        // exists, only the suffix above is fillable, which is exactly what `first` already is.
         for (i, p) in params.iter().enumerate().skip(first) {
             let Some(d) = &p.default else { continue };
             let span = d.span;
             // Patched below once the body's length is known.
             let jump_at = fc.code.len();
             fc.emit(Op::JumpIfProvided(i as u32, usize::MAX), span);
-            if self.compile_expr(fc, d).is_err() {
-                // A default the callee cannot lower keeps the call-site rewrite as its only filler:
-                // roll the branch back and leave `min_arity` alone rather than shipping a half prologue.
-                fc.code.truncate(jump_at);
-                fc.lines.truncate(jump_at);
-                return;
-            }
+            // **The default is evaluated in MODULE scope, not the callee's.** `docs/syntax.md`: "a
+            // default is evaluated on its own, where parameters are not in scope" — and the provider
+            // `fn` that serves every reachable call site is a free top-level function, so it resolves
+            // its free names against the module's globals. This prologue must give the SAME answer, or
+            // one function's default means two different things depending on whether the caller could
+            // see the definer. Measured before this hid the locals, `n := 100` at module level and
+            // `fn f(n: int, x: str = "n={n}")`: a direct `f(3)` printed `n=100` (provider, module
+            // scope) while `g := f; g(3)` printed `n=3` (prologue, callee scope) — the same default,
+            // two answers, identical on both engines. Hiding the frame's bindings for the duration of
+            // this one expression makes the prologue resolve exactly as the provider does.
+            let saved_locals = std::mem::take(&mut fc.locals);
+            let saved_slots = fc.slot_count;
+            let saved_caps = std::mem::take(&mut fc.captured_names);
+            let compiled = self.compile_expr(fc, d);
+            fc.locals = saved_locals;
+            fc.slot_count = saved_slots;
+            fc.captured_names = saved_caps;
+            // Propagate rather than swallow: the checker has ALREADY advertised short entry for this
+            // signature (`FnSig::min_params`), so silently declining to emit the fill would leave a
+            // call the checker accepts and the runtime rejects — the exact checker⊆compiler violation
+            // `ast::min_callable_params` exists to make impossible.
+            compiled?;
             fc.emit_set_local_raw(i, span);
             let after = fc.code.len();
             if let Op::JumpIfProvided(_, t) = &mut fc.code[jump_at] {
@@ -1710,6 +1727,7 @@ impl Compiler {
             }
         }
         fc.min_arity = first;
+        Ok(())
     }
 
     /// One-way int→float widening — emit the callee-prologue coercion for every `float`-typed param:

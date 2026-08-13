@@ -1093,20 +1093,26 @@ impl Checker {
             (Tuple(e), Tuple(a)) => {
                 e.len() == a.len() && e.iter().zip(a).all(|(x, y)| self.assignable(x, y))
             }
-            // Labels are surface-only: assignability matches on arity + param/ret only (`..`).
+            // Parameter NAMES are surface-only, but the OPTIONAL ARITY riding on the same wrapper is
+            // directional — see the matching arm in `compatible`. `expected` says how the slot will be
+            // called, so a value requiring MORE arguments than the slot promises cannot be stored in
+            // it: `h := a; h = b` over `fn a(x: int = 1)` / `fn b(x: int)` was check-clean and then
+            // `function 'b' expects 1 argument(s), got 0` at runtime, on both engines. The reverse
+            // (a defaulted fn into a plain `fn(int) -> int`) is strictly more permissive and stays legal.
             (
                 Func {
                     params: p1,
                     ret: r1,
-                    ..
+                    labels: l1,
                 },
                 Func {
                     params: p2,
                     ret: r2,
-                    ..
+                    labels: l2,
                 },
             ) => {
                 p1.len() == p2.len()
+                    && l2.min_or(p2.len()) <= l1.min_or(p1.len())
                     && p1.iter().zip(p2).all(|(a, b)| self.assignable(a, b))
                     && self.assignable(r1, r2)
             }
@@ -4015,6 +4021,10 @@ impl Checker {
         recv_ty: &Ty,
         targs: &[Ty],
         args: &[Expr],
+        // The declaration's `FnSig::min_params` — how few arguments it accepts INCLUDING the
+        // receiver slot. `usize::MAX` for a caller with no signature to hand over (a synthesized
+        // builtin sig), which collapses to the exact-arity check below.
+        min_params: usize,
         key_span: Span,
         span: Span,
     ) -> Ty {
@@ -4028,14 +4038,18 @@ impl Checker {
             self.infer_all(args);
             return Ty::Unknown;
         };
-        if args.len() != expected.len() {
+        // Trailing defaulted parameters are filled by the CALLEE, so the accepted count is a range;
+        // `min_params` counts the receiver slot, which `expected` has already dropped.
+        let min_args = min_params.saturating_sub(1).min(expected.len());
+        if !(min_args..=expected.len()).contains(&args.len()) {
+            let want = if min_args == expected.len() {
+                format!("{}", expected.len())
+            } else {
+                format!("{min_args}-{}", expected.len())
+            };
             self.error(
                 span,
-                format!(
-                    "'{method}' expects {} argument(s), got {}",
-                    expected.len(),
-                    args.len()
-                ),
+                format!("'{method}' expects {want} argument(s), got {}", args.len()),
             );
         }
         let mut arg_tys = self.infer_generic_arg_tys(args);

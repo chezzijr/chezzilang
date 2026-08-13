@@ -404,6 +404,34 @@ impl Ty {
 
 /// Structural compatibility for assignment / argument passing. [`Ty::Unknown`] on either side
 /// (at any depth) matches anything, which is what keeps one error from cascading.
+/// A trailing clarification for a function-type mismatch whose two sides DISPLAY identically —
+/// which is what an optional-arity mismatch always looks like, since parameter counts match and the
+/// optional arity is not part of `Display`. Empty for every other mismatch.
+pub fn fn_arity_note(expected: &Ty, actual: &Ty) -> String {
+    if let (
+        Ty::Func {
+            params: p1,
+            labels: l1,
+            ..
+        },
+        Ty::Func {
+            params: p2,
+            labels: l2,
+            ..
+        },
+    ) = (expected, actual)
+        && p1.len() == p2.len()
+    {
+        let (e, a) = (l1.min_or(p1.len()), l2.min_or(p2.len()));
+        if a > e {
+            return format!(
+                " — the value requires {a} argument(s) but the target may be called with as few as {e} (its trailing parameters have defaults, and this one's do not)"
+            );
+        }
+    }
+    String::new()
+}
+
 pub fn compatible(expected: &Ty, actual: &Ty) -> bool {
     use Ty::*;
     match (expected, actual) {
@@ -451,20 +479,30 @@ pub fn compatible(expected: &Ty, actual: &Ty) -> bool {
         | (Ptr, Ptr) => true,
         (Module(a), Module(b)) | (Param(a), Param(b)) => a == b,
         // Labels are surface-only: two function types differing only in parameter labels are the SAME
-        // type — `compatible` matches on arity + param/ret compatibility and IGNORES labels (`..`).
+        // type — `compatible` matches on arity + param/ret compatibility and IGNORES the names.
+        //
+        // The OPTIONAL ARITY on those same labels is NOT surface-only, and is the one part of a
+        // function type that is DIRECTIONAL. `expected` describes how the slot will be CALLED: an
+        // `expected` admitting 0 arguments may be called with 0, so the `actual` stored into it must
+        // accept 0 too. A value that requires MORE arguments than the slot promises is unsound —
+        // `h := a; h = b` over `fn a(x: int = 1)` / `fn b(x: int)` type-checked clean and then faulted
+        // with `function 'b' expects 1 argument(s), got 0`, on both engines. The reverse is fine and
+        // must stay accepted: a defaulted fn flows into a plain `fn(int) -> int` annotation, because
+        // accepting fewer required arguments is strictly more permissive.
         (
             Func {
                 params: p1,
                 ret: r1,
-                ..
+                labels: l1,
             },
             Func {
                 params: p2,
                 ret: r2,
-                ..
+                labels: l2,
             },
         ) => {
             p1.len() == p2.len()
+                && l2.min_or(p2.len()) <= l1.min_or(p1.len())
                 && p1.iter().zip(p2).all(|(a, b)| compatible(a, b))
                 && compatible(r1, r2)
         }

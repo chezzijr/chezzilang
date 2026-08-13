@@ -658,14 +658,6 @@ impl PartialEq for Import {
     }
 }
 
-// ===== types =====
-
-/// A type annotation: `int`, `str`, `Point`, or a generic `list[int]`, `map[K, V]`, `Result[int]`.
-///
-/// `PartialEq` is hand-written (NOT derived) so the `Named` span is EQUALITY-NEUTRAL: two
-/// `Type::Named` with the same name compare equal regardless of their source spans. The span is pure
-/// editor-tooling metadata (the LSP overlay marks type references `type`); making position flip
-/// equality would break the parser tests that compare whole `Type`s and is semantically meaningless
 /// **The single source of truth for "how few arguments may this declaration be entered with".**
 ///
 /// A caller that omits trailing defaulted arguments simply pushes fewer values; the callee's own
@@ -696,6 +688,14 @@ pub fn min_callable_params(params: &[Param], has_witness_params: bool) -> usize 
     first
 }
 
+// ===== types =====
+
+/// A type annotation: `int`, `str`, `Point`, or a generic `list[int]`, `map[K, V]`, `Result[int]`.
+///
+/// `PartialEq` is hand-written (NOT derived) so the `Named` span is EQUALITY-NEUTRAL: two
+/// `Type::Named` with the same name compare equal regardless of their source spans. The span is pure
+/// editor-tooling metadata (the LSP overlay marks type references `type`); making position flip
+/// equality would break the parser tests that compare whole `Type`s and is semantically meaningless
 /// (no non-test code compares `Type`s — all uses are `matches!`/`if let`). Runtime-inert.
 #[derive(Debug, Clone)]
 pub enum Type {

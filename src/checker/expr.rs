@@ -635,10 +635,15 @@ impl Checker {
     /// against the value's surface parameter `labels` (parallel to `params`). Builds the slot
     /// PERMUTATION `perm[i]` = index into the combined `[positional args ++ named exprs]` list that
     /// fills parameter slot `i`, records it into [`Self::keyword_calls`] (when harvesting) for the
-    /// backends to lower to a positional `Op::Call`, and type-checks each slot. SCOPE-CUT (Swift
-    /// SE-0111): every parameter must be supplied — declaration-site defaults do NOT apply through a
-    /// value. Eval order is slot order, matching how direct keyword calls already reorder in desugar,
-    /// so all three engines observe identical argument side-effect order.
+    /// backends to lower to a positional `Op::Call`, and type-checks each slot.
+    ///
+    /// A TRAILING run of defaulted parameters may be omitted (`min_params`): those are filled by the
+    /// callee's own prologue, so the recorded permutation covers only the SUPPLIED prefix and the
+    /// emitted call is short by the rest. A hole BEFORE a supplied argument is refused — a short call
+    /// pushes fewer values and cannot express a gap. (This used to be an unconditional Swift SE-0111
+    /// scope-cut, "every parameter must be supplied, defaults do not apply through a value".)
+    /// Eval order is slot order, matching how direct keyword calls already reorder in desugar, so
+    /// both engines observe identical argument side-effect order.
     pub(super) fn check_value_keyword_call(
         &mut self,
         params: &[Ty],
@@ -2207,6 +2212,9 @@ impl Checker {
                 obj_ty,
                 type_args,
                 args,
+                // The harvest strips `self` and the receiver is prepended just above, so the
+                // declaration's own minimum shifts by one to match `params`.
+                sig.min_params.saturating_add(1),
                 name_span,
                 span,
             ));
@@ -2562,7 +2570,7 @@ impl Checker {
                     if !mtps.is_empty() {
                         return self.infer_generic_method(
                             method, &params, &ret, &mtps, &mwitness, &obj_ty, type_args, args,
-                            name_span, span,
+                            mminp, name_span, span,
                         );
                     }
                     // The first param is the receiver (bound implicitly from `obj`), so the call's
@@ -2703,7 +2711,7 @@ impl Checker {
                     if !mtps.is_empty() {
                         return self.infer_generic_method(
                             method, &params, &ret, &mtps, &mwitness, &obj_ty, type_args, args,
-                            name_span, span,
+                            mminp, name_span, span,
                         );
                     }
                     match params.split_first() {
@@ -2794,7 +2802,7 @@ impl Checker {
                     if !mtps.is_empty() {
                         return self.infer_generic_method(
                             method, &params, &ret, &mtps, &mwitness, &obj_ty, type_args, args,
-                            name_span, span,
+                            mminp, name_span, span,
                         );
                     }
                     match params.split_first() {
@@ -2905,6 +2913,9 @@ impl Checker {
                             &Ty::list(elem.clone()),
                             type_args,
                             args,
+                            // The harvest strips `self` and the receiver is prepended just above, so
+                            // the harvested minimum shifts by one to line up with `params`.
+                            sig.min_params.saturating_add(1),
                             name_span,
                             span,
                         );
@@ -3107,6 +3118,7 @@ impl Checker {
                         &obj_ty,
                         type_args,
                         args,
+                        usize::MAX, // synthesized builtin sig: exact arity
                         name_span,
                         span,
                     )

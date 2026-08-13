@@ -769,7 +769,8 @@ struct-returning function call (`mk().add(...)`). A genuine builtin receiver (a 
 value) keeps routing to the builtin method untouched; a named call to a builtin-colliding method whose
 receiver type is *not* statically known (e.g. an unannotated parameter, or an inferred `m := E.Variant`)
 is rejected with an accurate "reuses a built-in method name — bind it to a typed local or pass
-positionally" error. Defaults are **not**
+positionally" error. A **static** method (no `self` parameter) takes defaults like any other — its explicit arguments
+start at parameter 0, so `S.mk()` fills them. Defaults are **not**
 supported on **closures** or on **enum variant constructors** — note this is the variant
 *constructor*; an enum's *methods* take defaults just like struct methods. (Per §above, a default may
 be any expression that doesn't
@@ -920,7 +921,13 @@ omit a trailing `c`, but a value call cannot leave a HOLE before an argument it 
 (`h(1, c=9)` over `fn f(a, b=2, c=3)`), because a short call is exactly "fewer values pushed" and
 cannot express a gap — call the function directly by name for that shape; **(2)**
 first-class **built-in** function values (`p := ord`) take **no** keyword arguments (labels are a
-user-function surface). Named arguments through a value evaluate in **parameter-declaration order**, the
+user-function surface).
+
+How few arguments a function value may be called with is part of what it means to store one: a
+binding typed from `fn a(x: int = 1)` may be called with none, so a function that *requires* an
+argument cannot be assigned into it (`h := a; h = b` over `fn b(x: int)` is a type error). The
+reverse is fine — a defaulted function is strictly more permissive, so it flows into a plain
+`fn(int) -> int` slot. Named arguments through a value evaluate in **parameter-declaration order**, the
 same as a direct named call, and work in `defer`/`spawn` position too (`defer d(name="Zoe")`). Resolution
 is fully static (the checker rewrites the keyword call to a positional one; the runtime `Op::Call` /
 `DeferCall` / `SpawnCall` stay positional), so all engines produce identical output.

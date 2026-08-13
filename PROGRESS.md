@@ -81,8 +81,50 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > `Result<Ty, (Ty, Ty)>` past clippy's `result_large_err` threshold — the `Err` payload is now boxed,
 > which is the right shape for a rare error path anyway.
 >
-> Gate: `cargo test` **4096 lib + all 16 integration targets, 0 failed**; `tests/chz/` default suite
-> **16/16 identical on M:N and `--serial`**; clippy `--all-targets -D warnings` and `cargo fmt` clean.
+> **A third pre-existing bug found while probing, and fixed:** a STATIC method's default could never
+> be filled by anything. `desugar`'s per-method spec dropped parameter 0 unconditionally as "the
+> receiver", but a static method (the "no `self` ⇒ static" rule) has no receiver, so this deleted its
+> FIRST real parameter — and that parameter's default — from the spec calls are filled from.
+> Measured on `0104d57b` AND on the phase-1 commit: `struct S: fn mk(a: int = 5)` called as `S.mk()`
+> was `'mk' expects 1 argument(s), got 0`. It now prints `5`. Undocumented; the skip is now
+> conditional on the first parameter actually being named `self`.
+>
+> **✅ ADVERSARIAL REVIEW of both phases — seven charges, every one reproduced on the built binary
+> and fixed.** Two prosecutors (state/lifecycle, contract/spec) independently found the same
+> **Critical**, which is recorded here because a green suite could not have caught any of it.
+>
+> 1. **Critical — a check-clean program faulted at runtime.** The optional arity rides on the
+>    equality-neutral label wrapper, so `h := a; h = b` over `fn a(x: int = 1)` / `fn b(x: int)` was
+>    *ok: no type errors* and then `function 'b' expects 1 argument(s), got 0` on BOTH engines
+>    (`0104d57b` rejected it at check time — a regression introduced by phase 2). Also via a closure
+>    and via `xs := [a, b]`. **Fix:** optional arity is DIRECTIONAL — `compatible` and `assignable`
+>    now require the value to accept at least as few arguments as the slot promises. The permissive
+>    direction (a defaulted fn into a plain `fn(int) -> int`) stays legal, and the diagnostic carries
+>    a note, since the two sides display identically.
+> 2. **High — the same default meant two different things.** The prologue compiled the default into
+>    the callee's `FnComp`, where the parameters are already bound, so it resolved names in CALLEE
+>    scope while the provider resolves them in MODULE scope: `n := 100` + `fn f(n: int, x: str =
+>    "n={n}")` printed `n=100` for a direct call and `n=3` through a function value, identically on
+>    both engines. **Fix:** the prologue hides the frame's bindings for that one expression, so it
+>    resolves exactly as the provider does. Root cause behind it: `validate_defaults` runs before the
+>    `Str -> Interp` rewrite, so *"a default may not reference a parameter"* could not see an
+>    interpolated fragment — and the claim in its own comment that the checker caught it later was
+>    false. That walk now parses the fragment; the shape is refused, which also removes a
+>    `compiler: global 'n' has no slot` **host panic** on a check-clean program.
+> 3. **Medium — a generic method's callee-filled default was rejected at the user's own call site**
+>    (`'tot' expects 2 argument(s), got 1`): `infer_generic_method` was the one method arm the arity
+>    range was not threaded into. Fixing it surfaced a second bug in the same pass — the native
+>    `List` arm PREPENDS the receiver, so its harvested minimum needed the same `+1` shift;
+>    without it `[1,2,3].map()` type-checked clean (caught by two existing tests).
+> 4. **Medium — a swallowed `compile_expr` error** left `min_arity` at `arity` while the checker had
+>    already advertised short entry, i.e. the exact checker⊆compiler violation the shared predicate
+>    exists to prevent. It propagates now.
+> 5. **Low ×2** — the new `ast` helper had been spliced into the middle of `Type`'s doc comment, and
+>    `check_value_keyword_call`'s doc still asserted the deleted scope-cut.
+>
+> Gate: `cargo test` **4099 lib + all 16 integration targets, 0 failed**; `chezzi test tests/chz/`
+> **512/512 identical on M:N and `--serial`**; clippy `--all-targets -D warnings` and `cargo fmt`
+> clean.
 
 
 > **✅ W7-50/51 post-review fix wave, 2026-08-13.** The whole-branch adversarial review filed seven

@@ -20709,6 +20709,55 @@ fn kw_value_defaults_fill_a_trailing_gap_but_not_a_middle_one() {
     ok_desugared("fn f(a: int, b: int = 2) -> int:\n    return a\nh := f\nprint(h(1, 5))\n");
 }
 
+/// **Optional arity is DIRECTIONAL, and storing a value into a function-typed binding must respect
+/// it.** A binding whose type admits a short call may actually be CALLED short, so a value that
+/// requires more arguments cannot be stored in it. Because the optional arity rides on the
+/// equality-neutral label wrapper, plain type equality says these two `fn(int) -> int`s are the same
+/// type — assignability has to carry the direction instead. Without it, `chezzi check` said
+/// *ok: no type errors* and both engines then faulted with
+/// `function 'b' expects 1 argument(s), got 0`.
+///
+/// The reverse must stay legal: a defaulted fn is strictly more permissive, so it flows into a plain
+/// `fn(int) -> int` slot.
+#[test]
+fn a_function_value_needing_more_arguments_cannot_be_stored_where_fewer_are_promised() {
+    // Reassignment: `h` is typed from `a` (may be called with 0), `b` requires 1.
+    rejects_desugared(
+        "fn a(x: int = 1) -> int:\n    return x\nfn b(x: int) -> int:\n    return x * 2\nfn main():\n    h := a\n    h = b\n    print(h())\n",
+        "cannot assign",
+    );
+    // A CLOSURE is exact-arity at runtime, so the same rule must cover it.
+    rejects_desugared(
+        "fn g(x: int = 5) -> int:\n    return x\nfn main():\n    c := 2\n    fn h(x: int) -> int:\n        return x + c\n    f := g\n    f = h\n    print(f())\n",
+        "cannot assign",
+    );
+    // A list literal cannot silently join them either.
+    rejects_desugared(
+        "fn a(x: int = 1) -> int:\n    return x\nfn b(x: int) -> int:\n    return x\nfn main():\n    xs := [a, b]\n    for f in xs:\n        print(f())\n",
+        "differ",
+    );
+    // The permissive direction stays legal: a defaulted fn into a plain `fn(int) -> int` slot.
+    ok_desugared(
+        "fn a(x: int = 1) -> int:\n    return x\nfn take(f: fn(int) -> int) -> int:\n    return f(2)\nfn main():\n    print(take(a))\n",
+    );
+}
+
+/// A GENERIC method whose trailing default is callee-filled: `desugar` omits the argument, so the
+/// generic method arm must accept the short call like every other method arm. It was the one arm the
+/// range was not threaded into, so the checker rejected the user's own call —
+/// `'tot' expects 2 argument(s), got 1`.
+#[test]
+fn a_generic_methods_callee_filled_default_may_be_omitted() {
+    ok_desugared(
+        "struct G[T]:\n    v: T\n    fn tot[U](self, u: U, xs: List[Self] = mkl()) -> int:\n        return xs.len()\nfn mkl[T]() -> List[G[T]]:\n    return []\nfn main():\n    print(G(1).tot(2))\n",
+    );
+    // …and the neighbour that must NOT be relaxed with it: a genuinely missing argument.
+    rejects_desugared(
+        "struct G[T]:\n    v: T\n    fn tot[U](self, u: U, xs: List[Self] = mkl()) -> int:\n        return xs.len()\nfn mkl[T]() -> List[G[T]]:\n    return []\nfn main():\n    print(G(1).tot())\n",
+        "argument(s), got 0",
+    );
+}
+
 /// A first-class BUILTIN function value takes NO keyword arguments (labels are a user-fn surface).
 #[test]
 fn kw_value_builtin_rejects_keywords() {

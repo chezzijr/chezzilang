@@ -1944,8 +1944,9 @@ impl Checker {
                             self.error(
                                 value.span,
                                 format!(
-                                    "cannot assign {val_ty} to variable of type {expected}{}",
-                                    widen_note(&expected, &val_ty, value)
+                                    "cannot assign {val_ty} to variable of type {expected}{}{}",
+                                    widen_note(&expected, &val_ty, value),
+                                    crate::checker::ty::fn_arity_note(&expected, &val_ty)
                                 ),
                             );
                         }
@@ -3279,7 +3280,13 @@ impl Checker {
         match op {
             AssignOp::Eq => {
                 if !self.assignable(target_ty, val_ty) {
-                    self.error(span, format!("cannot assign {val_ty} to {target_ty}"));
+                    self.error(
+                        span,
+                        format!(
+                            "cannot assign {val_ty} to {target_ty}{}",
+                            crate::checker::ty::fn_arity_note(target_ty, val_ty)
+                        ),
+                    );
                 }
             }
             // Numeric compound ops `+= -= *= /= %=` (and str+str for `+=`). No implicit widening:

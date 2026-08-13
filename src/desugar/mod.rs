@@ -906,10 +906,16 @@ fn method_spec(
     let owner = format!("{owner_type}.{}", method.name);
     let stps: Vec<String> = type_params.iter().map(|t| t.name.clone()).collect();
     let tps = tp_names(method, &stps);
+    // Drop the RECEIVER slot only when there is one. A STATIC method (the "no `self` ⇒ static" rule
+    // the checker classifies by, `FnSig::is_static`) has no receiver, so its explicit arguments start
+    // at param 0; skipping unconditionally dropped its FIRST real parameter, which silently deleted
+    // that parameter's default from the spec — `struct S: fn mk(a: int = 5)` called as `S.mk()` was
+    // `'mk' expects 1 argument(s), got 0` on `0104d57b`, i.e. a default that could never be filled.
+    let skip = usize::from(method.params.first().is_some_and(|p| p.name == "self"));
     method
         .params
         .iter()
-        .skip(1)
+        .skip(skip)
         .map(|p| PSpec {
             name: p.name.clone(),
             default: p.default.as_ref().map(|d| {
@@ -1169,17 +1175,35 @@ fn walk_idents(e: &Expr, f: &mut impl FnMut(&str)) {
 fn walk_idents_and_types(e: &Expr, f: &mut impl FnMut(&str), tf: &mut impl FnMut(&Type)) {
     match &e.kind {
         ExprKind::Ident(n) => f(n),
+        // A STILL-RAW interpolated literal. `validate_defaults` runs BEFORE the `Str -> Interp`
+        // rewrite, so the only way to see the references a fragment makes is to parse it here. This
+        // used to be skipped, with a comment claiming the checker caught such a reference later — it
+        // does not: the decl-site copy is inferred with the parameters in scope, so
+        // `fn f(n: int, x: str = "n={n}")` type-checked clean. That left the default meaning two
+        // different things (the provider resolves `n` in MODULE scope, so a direct call printed the
+        // global while a call through a function value printed the parameter), and, where no such
+        // global existed at all, reached the backend as `compiler: global 'n' has no slot` — a host
+        // panic on a check-clean program. A parse failure is ignored: the real parse reports it.
+        ExprKind::Str(raw) => {
+            if raw.contains('{')
+                && let Ok(chunks) = crate::interpolation::parse_interpolation(raw, e.span)
+            {
+                for c in &chunks {
+                    if let Chunk::Expr(inner, _) = c {
+                        walk_idents_and_types(inner, f, tf);
+                    }
+                }
+            }
+        }
         ExprKind::Int(_)
         | ExprKind::Float(_)
-        | ExprKind::Str(_)
         | ExprKind::Bytes(_)
         | ExprKind::RawStr(_)
         | ExprKind::Bool(_) => {}
         // A type-application head names a TYPE (not a value reference); its args are `Type`s.
         ExprKind::TypeApply { args, .. } => args.iter().for_each(tf),
-        // A fragment identifier IS a reference (`"{a}"` reads `a`), so descend. Only reachable
-        // after `desugar` has rewritten the literal — `validate_defaults` runs before that and sees
-        // the raw `Str` above, where a fragment reference is caught later by the checker instead.
+        // A fragment identifier IS a reference (`"{a}"` reads `a`), so descend. Reached once
+        // `desugar` has rewritten the literal; before that the raw-`Str` arm above parses it.
         ExprKind::Interp(chunks) => chunks.iter().for_each(|c| {
             if let Chunk::Expr(e, _) = c {
                 walk_idents_and_types(e, f, tf)
@@ -3038,6 +3062,37 @@ mod tests {
         )
         .message
         .contains("unknown named argument 'z'"));
+    }
+
+    /// A default may not reference a parameter — **including through an interpolated fragment**.
+    ///
+    /// `validate_defaults` runs BEFORE the `Str -> Interp` rewrite, so the name walk saw only a raw
+    /// literal and this slipped through. It was not caught later either: the decl-site copy is
+    /// inferred with the parameters in scope, so `fn f(n: int, x: str = "n={n}")` type-checked clean
+    /// and then meant two different things — the provider resolves `n` in MODULE scope, so a direct
+    /// `f(3)` printed the module's `n` while `g := f; g(3)` printed the PARAMETER. Where no such
+    /// global existed at all it reached the backend as `compiler: global 'n' has no slot`, a host
+    /// panic on a check-clean program.
+    #[test]
+    fn a_default_cannot_reference_a_parameter_through_an_interpolated_fragment() {
+        assert!(
+            desugar_err("n := 100\nfn f(n: int, x: str = \"n={n}\") -> str:\n    return x\n")
+                .message
+                .contains("cannot reference parameter 'n'")
+        );
+        // A fragment naming something that is NOT a parameter stays legal.
+        assert!(
+            crate::desugar::run_standalone(
+                &mut crate::parser::parse(
+                    crate::lexer::tokenize(
+                        "g := 1\nfn f(n: int, x: str = \"g={g}\") -> str:\n    return x\n"
+                    )
+                    .unwrap()
+                )
+                .unwrap()
+            )
+            .is_ok()
+        );
     }
 
     /// The ONE shape a callee-filled default cannot cover, refused rather than silently cloned.
