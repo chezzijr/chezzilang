@@ -52,13 +52,21 @@ mod conformance;
 /// The parser's `MAX_DEPTH` recursion guard bounds *recursively*-parsed nesting, but left-associative
 /// binary chains (`a + b + c …`) and postfix chains (`x.f.f…`, `a[0][0]…`, `f().g()…`) parse in
 /// *iterative* loops, so they build a left-leaning AST far deeper than `MAX_DEPTH` without ever
-/// tripping it (the parser's `MAX_CHAIN_DEPTH` cap bounds that depth, but well above a normal stack's
-/// capacity). Running the front-end on its own large stack — mirroring the VM's dedicated
+/// tripping it — that depth is what `parser::MAX_AST_DEPTH` bounds, well above a normal stack's
+/// capacity. Running the front-end on its own large stack — mirroring the VM's dedicated
 /// `VM_STACK_BYTES` thread — decouples front-end recursion depth from the *caller's* stack, which may
-/// be small: the ~2 MiB LSP tokio worker (`editor::diagnostics`) or the test-harness worker, not just
-/// the 8 MiB CLI main thread. Sized (1 GiB, virtual/lazily-committed) so the worst parser-accepted AST
-/// depth — `MAX_DEPTH` (64) paren levels each nesting a `MAX_CHAIN_DEPTH` chain — fits with headroom on
-/// a debug build (whose frames are far larger than release).
+/// be small: the ~2 MiB LSP tokio worker (`editor::diagnostics`/`hover`/`semantic_tokens`) or the
+/// test-harness worker, not just the 8 MiB CLI main thread.
+///
+/// **This 1 GiB is NOT the binding stack — `vm::VM_STACK_BYTES` (384 MiB) is.** `chezzi run` re-does
+/// `build_graph` + `compile_graph` on the VM thread, so every parser depth constant is sized against
+/// the smaller number; raising this one buys nothing on its own. Measured worst case at the shipped
+/// constants (debug `chezzi run`, W7-50): ~16 000 AST nodes accepted against a ~33 000-node cliff.
+/// The pre-W7-50 doc claimed the worst accepted AST was `MAX_DEPTH × MAX_CHAIN_DEPTH ≈ 64 × 500 ≈
+/// 32 k`; that was wrong in both directions — the multiplicative fixture costs ~4 depth units per
+/// level so its real ceiling was `15 × ~498 ≈ 7 500`, while the cheapest composing shape (nested
+/// parens, ~2 units each, holding a 500-fold chain apiece) reached **15 000**. The product is now
+/// bounded directly, by `MAX_AST_DEPTH`, instead of inferred from two constants that multiply.
 pub const FRONTEND_STACK_BYTES: usize = 1024 * 1024 * 1024;
 
 /// Run a front-end pass on a dedicated [`FRONTEND_STACK_BYTES`] stack; see that constant for why.

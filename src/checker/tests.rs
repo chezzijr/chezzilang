@@ -6935,7 +6935,7 @@ fn stack_probe_eq_bounds_depth() {
 
 /// The deepest AST the parser accepts, as source. `R(0) = "a"`, `R(k) = f(g(R(k-1)).f…×498)` —
 /// TWO call layers per level because one layer would let `parse_postfix` merge the consecutive
-/// postfix chains into a single loop and trip `MAX_CHAIN_DEPTH` (500) instead of `MAX_DEPTH` (64).
+/// postfix chains into a single loop and trip the fold bound (`MAX_AST_DEPTH`) instead of `MAX_DEPTH`.
 /// Each level therefore adds exactly 500 expression nodes to the deepest root-to-leaf path (one
 /// `Call` for `f`, 498 `Field`s, one `Call` for `g`), so `depth(R(lv)) = 1 + 500·lv`.
 ///
@@ -11840,7 +11840,7 @@ fn carrier_operand_scratch_name_never_leaks_into_a_diagnostic() {
 fn opt_chain_check_time_is_linear_in_chain_length() {
     // `?.` chains left-nest, so `a?.b?.c`'s operand IS the previous carrier. When the lowered clone
     // still contained the operand it was inferred twice per link — `T(n) = 2·T(n-1)`, measured at
-    // 10s of `chezzi check` for 22 links and ~4× per 2 more, with `MAX_CHAIN_DEPTH = 500` sitting 15
+    // 10s of `chezzi check` for 22 links and ~4× per 2 more, with the parser's fold bound sitting 15
     // orders of magnitude above the point it becomes a hang. No wall-clock assert (flaky); the guard
     // is that this finishes AT ALL — at 60 links the doubling shape is ~2^38 × the 22-link cost.
     let mut src = String::from(

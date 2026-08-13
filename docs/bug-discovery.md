@@ -274,6 +274,17 @@ distinct axis from the byte/token fuzzing here — either add a grammar-aware ge
 nests each production to `MAX_DEPTH+N`, or (cheaper) assert every recursive-descent parse fn shares the
 one depth guard. Until then, "zero fuzzer crashes" does not certify the deep-nesting axis.
 
+**Now partly asserted (W7-50, 2026-08-13).** `parser::tests::max_depth_boundary_accepts_then_rejects`
+is the per-production depth assertion this section asks for: it **bisects** the accepted nesting count
+for each of the seven guarded productions (parens, lists, calls, blocks, unary, generic types, match
+patterns), asserts `k` parses / `k+1` rejects with `"too deeply"` (never a host abort), and asserts
+`k >= 200` — CPython 3.14's own limit — for the four directly comparable forms. The boundary is
+measured, never hard-coded, so a widening AST node shows up as a *number in a failure message* instead
+of as a silent shrink. Its end-to-end sibling
+`check_errors_json::worst_accepted_nesting_never_signal_crashes` drives `ast`/`check`/`run` over the
+worst program the parser accepts. What is still missing is a *generator* that reaches these shapes from
+the fuzzer, so the corpus axis remains uncertified.
+
 **Post-parse walker depth axis (iterative chains) — found 2026-07-12, fixed `fix/frontend-deep-stack`.**
 The `dcde045` guard closed deep *recursively-parsed* constructs (patterns, parens, types). But the
 `MAX_DEPTH` guards only bound the parser's *recursion* — and left-associative binary chains (`1+1+…`)
@@ -284,7 +295,7 @@ checker's inference walk, the compiler's lowering — then overflowed on (SIGABR
 main thread *and* the ~2 MiB LSP worker; uncatchable by `recover:` — it is a *compile-time* host abort
 on a well-typed program, strictly worse than the malformed-input pattern case). Two-part fix: (1) a
 `MAX_CHAIN_DEPTH` per-loop cap in both iterative loops bounds a single chain's length (so accepted AST
-depth is bounded by `MAX_DEPTH` × `MAX_CHAIN_DEPTH`); (2) the whole front-end (resolve → desugar →
+depth is bounded by `MAX_DEPTH` × `MAX_CHAIN_DEPTH` — **superseded by W7-50**, see below); (2) the whole front-end (resolve → desugar →
 check, and `run`'s build+compile) runs on a dedicated large stack — `chezzi::on_frontend_stack` /
 `FRONTEND_STACK_BYTES`, mirroring the VM's `VM_STACK_BYTES` thread — so that bounded depth is walked
 with headroom regardless of the caller's stack size. A parser cap **alone** cannot fix it: any cap high
@@ -293,6 +304,17 @@ is load-bearing (this is the `recursion-guard-smallest-stack` rule — a bare de
 the *smallest* stack the guarded recursion runs on). Lesson: crash-safety has a **post-parse walker**
 depth axis distinct from parse-time recursion; a recursive AST walker must run on a stack sized for the
 worst parser-accepted depth (or share the depth guard), not just the parser.
+
+**Superseding correction (W7-50, 2026-08-13).** The `MAX_DEPTH` × `MAX_CHAIN_DEPTH` product was a
+*bound*, not a *measurement*, and it stopped holding the moment `MAX_DEPTH` was raised from 64 to 512
+to reach CPython parity (512 × 500 = 256 k nodes, against a measured ~33 k-node cliff). The per-loop
+proxy is gone; `parser::MAX_AST_DEPTH` (16 000) now bounds the resource directly — the *synthesized*
+fold depth of the tree being built (`Parser::fold_depth`), so it composes across nesting levels the way
+the tree does. An **ambient** counter decremented on loop exit was tried and rejected with evidence: a
+fold loop runs AFTER the descent it sits above, so in `f(g(DEEP) + 1 + 1 + …)` the folds and the descent
+never coexist in an ambient counter — measured, that shape parses at 45 000 nodes deep and SIGABRTs
+`chezzi run`. Same lesson as W7-55's `Eq`-walk node budget: bound the resource that is spent, and prove
+the bound against the shape that composes, not the shape you had in mind.
 
 Status: the `0..2000` gate is green, and unattended sweeps of `0..100000` (release, overflow-checks
 OFF) and `0..20000` (debug, overflow-checks ON) found **zero** panics or signal crashes — the

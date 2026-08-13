@@ -2,6 +2,65 @@
 
 Single source of truth for "what am I doing next." Update after every work session.
 
+> **✅ W7-50 landed 2026-08-13 — the two parser depth constants are RE-DERIVED from a measurement,
+> and the margin is an assertion instead of a prose claim.** `docs/gaps.md`'s **W7-50** is CLOSED.
+> Half (b) shipped first: `editor::semantic_tokens` (and `cmd_ast`'s `{:#?}` walk) now hop onto
+> `crate::on_frontend_stack` like `diagnostics`/`hover`, so **no production parse runs on a small
+> stack any more** — which is what let half (a) happen at all. Half (a) is not a bump. An `--ignored`
+> probe (`checker::tests::stack_probe_frontend_walker_depth`) measured the two resources separately
+> in a debug build: parse recursion costs **7 753 B per `MAX_DEPTH` unit**, and the binding post-parse
+> walker is `compile` at **12 162 B per AST node** (`desugar` 11 323, `check` 6 850). Against the
+> SMALLER of the two big stacks — `vm::VM_STACK_BYTES` = 384 MiB, which `chezzi run` re-does
+> `build_graph` + `compile_graph` on — that is ~51 900 depth units and ~33 100 AST nodes of budget.
+> **One constant was being asked to bound two different resources**, which is why no single value
+> could reach CPython parity (it needed ~402 and afforded ~132). Split into
+> **`MAX_DEPTH` 64 → 512** (parse recursion only, ~4 MB of 384 MiB — a **~100× margin**) and
+> **`MAX_CHAIN_DEPTH` (500, per-loop) → `MAX_AST_DEPTH` = 16 000** (AST depth the walkers descend).
+>
+> **Measured before/after, release binary, against CPython 3.14's own limit of 200:** parens
+> **30 → 254**, nested lists **31 → 255**, nested calls **30 → 254**, nested `if` **61 → 509**
+> (CPython 99), unary **61 → 509**, generic types **62 → 510**, match patterns **60 → 508**; the
+> multiplicative `f(g(…).f×498)` fixture **15 → 31**. Parentheses build no AST node
+> (`parse_primary`'s grouped arm is `return Ok(first)`), which is what makes splitting the guard
+> legitimate rather than a loosening.
+>
+> **The planned design was UNSOUND and was replaced with evidence, not worked around.** The plan
+> bounded `self.depth + chain_total` with `chain_total` an *ambient* per-path fold count decremented
+> on loop exit. A fold loop runs AFTER the descent it sits above, so in `f(g(DEEP) + 1 + 1 + …)` the
+> folds are counted only once `DEEP` has popped its own counts — the two never coexist in an ambient
+> counter even though they add in the tree. **Measured on a probe build with `MAX_DEPTH = 512`: that
+> shape parses at 45 000 nodes deep and `chezzi run` dies with `has overflowed its stack`, rc = -6** —
+> the exact crash the gap exists to prevent. The shipped bound is **synthesized** instead:
+> `Parser::fold_depth` carries the fold depth of the deepest subtree already built; each fold loop
+> resets it before its children and restores `outer.max(self.fold_depth + chain)` on exit, so it
+> `max`-combines over siblings (breadth still free — a 48 000-element list and a 48 000-argument call
+> both parse) and *sums* up the spine. All **three** backtrack sites that save/restore `self.depth`
+> restore it too, found by grepping `self.pos = save`.
+>
+> **`MAX_AST_DEPTH` is 16 000, not the 8 000 first proposed, and the reason is a corrected premise.**
+> The old `lib.rs` worst case `MAX_DEPTH × MAX_CHAIN_DEPTH ≈ 64 × 500 ≈ 32 k` was wrong in both
+> directions: the multiplicative shape costs ~4 depth units per level so its real ceiling was
+> `15 × ~498 ≈ 7 500`, but the cheapest composing shape (30 nested parens, ~2 units each, holding a
+> 500-fold chain apiece) reached **15 000** — measured on `b1307258`, and already pinned at 12 500 by
+> `vm::tests::deep_accepted_chains_run_without_stack_overflow`. 15 000 is therefore the no-regression
+> floor. **The margin is measured, not derived:** debug `chezzi run` survives **33 000** AST nodes and
+> aborts at **33 500** (the derived 33 100 was right), so 16 000 is **2.06×**.
+>
+> **Two asserting tests, Rust by necessity** (a host `SIGABRT`, a chosen thread stack size and a
+> parse-boundary bisection are outside what `tests/chz/` `assert` can express):
+> `parser::tests::max_depth_boundary_accepts_then_rejects` **bisects** the boundary for all seven
+> guarded productions, asserts `k` parses / `k+1` says `"too deeply"`, asserts `k >= 200` for the four
+> CPython-comparable forms, and prints the measured `k` on failure — a hard-coded boundary rots into
+> prose the moment a parser frame changes width, which is exactly how 64 came to sit one level from
+> the cliff. `check_errors_json::worst_accepted_nesting_never_signal_crashes` drives `ast`/`check`/`run`
+> over the worst program the parser accepts — the only test exercising both constants, both big stacks
+> and the `cmd_ast` hop together, in the debug profile that binds. **Known, pre-existing, out of
+> scope:** `chezzi ast`'s `{:#?}` render is worse than quadratic (200 nodes 2.2 s, 400 nodes 17 s,
+> 800 nodes > 90 s), so its arm runs on a 200-node chain; the depth at which `ast` becomes a stack
+> hazard is unreachable in tolerable wall-clock, which is why it is a LATENT crash path.
+>
+> Chezzi suite **493/493 identical** on M:N and `--serial`. Full write-up: `docs/gaps.md` **W7-50**.
+
 > **✅ W7-55 landed 2026-08-12, redesigned 2026-08-13 — the `Eq` walk is now bounded by a CUMULATIVE
 > NODE BUDGET over the in-progress path (`EQ_BOUNDS_MAX_NODES = 50 000`), and the growth CLASSIFIER
 > that preceded it was deleted rather than patched a third time.** `docs/gaps.md`'s

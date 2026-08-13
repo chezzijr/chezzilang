@@ -271,6 +271,14 @@ const Q_GENERIC: u8 = 2;
 /// — see [`crate::lexer::Span`]), smaller than the 16 it was before W7-49, so 384 MiB is restored and
 /// re-verified by `self_referential_stringable_hits_depth_limit`. Only virtual address space is
 /// reserved, so a bump is free until touched — but re-measure here on any `sizeof` growth.
+///
+/// **It is reserved PER M:N POOL WORKER, not once** (`src/vm/pool.rs:45`, `src/vm/blocking_pool.rs:108`,
+/// `src/vm/sched.rs:828`/`:1602`): 384 MiB × 12 workers is already 4.6 GiB of reservation on a
+/// 12-core box. That is why raising this number to buy front-end depth margin is the LAST resort and
+/// not the first — it is also the smaller of the two big stacks a front-end walk can land on
+/// (`chezzi run` re-does `build_graph` + `compile_graph` here, not on the 1 GiB
+/// [`crate::FRONTEND_STACK_BYTES`] thread), so it is what `parser::MAX_DEPTH` and
+/// `parser::MAX_AST_DEPTH` are sized against.
 const VM_STACK_BYTES: usize = 384 * 1024 * 1024;
 
 /// Run `f` on a fresh thread with the VM's large [`VM_STACK_BYTES`] stack, returning its result.

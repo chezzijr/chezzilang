@@ -16795,8 +16795,8 @@ fn legal_deep_nested_pattern_type_checks_and_runs() {
     assert_eq!(run_capture(&src).unwrap().trim(), "0");
 }
 
-/// Crash-safety over the ITERATIVE-chain / composed-nesting depth axis: the deepest AST the parser
-/// ACCEPTS (bounded by `MAX_DEPTH` paren nesting × `MAX_CHAIN_DEPTH` per chain ≈ 15 k here) must run
+/// Crash-safety over the ITERATIVE-chain / composed-nesting depth axis: a deep AST the parser
+/// ACCEPTS (~12.5 k nodes here, against `parser::MAX_AST_DEPTH` = 16 000) must run
 /// on the VM's dedicated stack without a host stack overflow. This is the regression guard for the
 /// deep-`1+1+…` / `a.f.f…` SIGABRT: the parser cap keeps the depth bounded, and the large VM /
 /// front-end stacks absorb the walk. Runs on the debug test-harness → the 384 MiB `VM_STACK_BYTES`
@@ -16804,13 +16804,15 @@ fn legal_deep_nested_pattern_type_checks_and_runs() {
 /// worst case. A single flat chain just under the cap must also run and compute correctly.
 #[test]
 fn deep_accepted_chains_run_without_stack_overflow() {
-    // ~12 k-deep AST: 25 nested parens (comfortably under the `parser::MAX_DEPTH` paren ceiling, which
-    // each paren costs ~2 of), each adding a near-`MAX_CHAIN_DEPTH` `+0` chain onto the left spine.
+    // ~12.5 k-deep AST: 25 nested parens (comfortably under the `parser::MAX_DEPTH` paren ceiling,
+    // which each paren costs ~2 of), each adding a 499-fold `+0` chain onto the left spine. This is
+    // the shape that COMPOSES the two depth axes — the folds land on top of the descent — and it is
+    // why W7-50 sized `parser::MAX_AST_DEPTH` at 16 000 rather than the 8 000 first proposed: 12 500
+    // is a depth that already parsed, so 8 000 would have made this a regression, not a fixture bump.
     // Value is invariant (all `+0`) so the result is deterministic; the point is that
     // walking/compiling/running this depth does not abort. Assign then print separately so the
     // `print(...)` call wrapper doesn't eat into the paren budget. THE PAREN COUNT IS CALIBRATED TO
-    // `parser::MAX_DEPTH` and must move with it: 25 at the shipped cap of 64. (It was cut to 18 while
-    // `Span` was briefly 24 bytes and the cap 48; `Span` is now 12 bytes and the cap is 64 again.)
+    // `parser::MAX_AST_DEPTH` (25 × 500 = 12 500, against 16 000) and must move with it.
     let mut inner = String::from("1");
     for _ in 0..25 {
         inner = format!("({inner}{})", "+0".repeat(499));

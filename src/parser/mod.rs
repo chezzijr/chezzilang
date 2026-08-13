@@ -31,43 +31,60 @@ impl fmt::Display for ParseError {
 
 type PResult<T> = Result<T, ParseError>;
 
-/// Cap on parser recursion (nested expressions and blocks). Past this we return a `ParseError`
-/// instead of letting native stack recursion overflow and abort the process. Each nesting level is
-/// several large parser frames, so this must be sized against the SMALLEST stack the parser runs on
-/// (the ≈2 MiB cargo-test worker / LSP tokio worker, in a debug build whose frames are 3-5x a release
-/// frame's), with real headroom for the guard to fire BEFORE the host stack overflows — while still
-/// far exceeding any realistic source nesting.
+/// Cap on parser **recursion** (nested expressions, types, patterns and blocks). Past this we return
+/// a `ParseError` instead of letting native stack recursion overflow and abort the process.
 ///
-/// **This constant is a function of `sizeof` the AST node types, so it moves when they do.** Was 128
-/// (sat right at the test-thread stack edge), then 64 — which `deep_nesting_errors_not_crash` proved
-/// was itself at the edge when `Span` briefly grew from 16 to 24 bytes for its `file` id (W7-49):
-/// measured at 24 bytes, 56 passed and 64 aborted, so it was cut to 48. `Span` is now 12 bytes
-/// (`u32` line/col/file — see [`crate::lexer::Span`]), SMALLER than it ever was, so 64 is restored.
-/// Re-probed upward at 12 bytes on the ~2 MiB test thread: **65 passes, 66 aborts** (at 24 bytes the
-/// edge was between 56 and 64). 64 is therefore the shipped value again with ONE level to spare — it
-/// is a real edge, not slack, so any `sizeof` growth in `Expr`/`Stmt`/`Type`/`Pattern`/`Span` moves
-/// it. `deep_nesting_errors_not_crash` is the oracle: re-run the probe there, don't guess.
-const MAX_DEPTH: usize = 64;
+/// This bounds ONE resource: the parser's own stack. It is no longer "sized against the ~2 MiB test
+/// worker" — since W7-50 every production front-end entry point (CLI, resolver, `editor::diagnostics`
+/// / `hover` / `semantic_tokens`) runs the parse on the dedicated [`crate::FRONTEND_STACK_BYTES`]
+/// (1 GiB) thread, and the smaller of the two big stacks a parse can land on is the VM's 384 MiB
+/// `vm::VM_STACK_BYTES` worker (`chezzi run` re-does `build_graph` on it).
+///
+/// **Derivation (measured, `checker::tests::stack_probe_frontend_walker_depth`, debug build):** one
+/// `MAX_DEPTH` unit of recursive-descent costs **7 753 bytes** of parser stack. 384 MiB / 7 753 ≈
+/// **51 900** units of budget; 512 spends ≈ 4 MB, a **~100× margin**. That buys ≥ 200 levels of every
+/// CPython-comparable nesting form (`((1))`, `[[…]]`, `f(f(…))`, nested `if`) — CPython 3.14's own
+/// limit is 200 — where 64 bought only 30.
+///
+/// **It is still a function of `sizeof` the AST node types** (Was 128 → 64 → briefly 48 when `Span`
+/// grew 16→24 bytes for its `file` id in W7-49; `Span` is now 12 bytes, see [`crate::lexer::Span`]),
+/// but at a ~100× margin a `sizeof` change no longer moves it — it moves the margin.
+/// `tests::max_depth_boundary_accepts_then_rejects` is the SIZING ORACLE: it bisects the real accepted
+/// nesting per production and fails with the measured number when a constant drifts. Re-run the stack
+/// probe (`cargo test --lib stack_probe_frontend_walker_depth -- --ignored --nocapture`) to
+/// re-derive, don't guess.
+pub const MAX_DEPTH: usize = 512;
 
-/// Cap on the length of a single ITERATIVE chain: a left-associative binary chain (`a + b + c …`) or
-/// a postfix chain (`x.f.f…`, `a[0][0]…`, `f().g()…`). Distinct from `MAX_DEPTH` because these forms
-/// parse in the `while`/`loop` bodies of `parse_bp` / `parse_postfix`, which do NOT recurse per fold,
-/// so the `self.depth` guard never fires — yet each fold adds one level to a LEFT-leaning AST whose
-/// depth == chain length. Without this cap a valid but very long chain builds an AST thousands of
-/// nodes deep that the recursive front-end walkers (desugar/checker/compiler) then overflow on.
+/// Cap on the **AST depth** the parser is willing to hand to the recursive front-end walkers
+/// (`desugar::walk_expr`, the checker's inference walk, the compiler's lowering) — a different
+/// resource from [`MAX_DEPTH`], which is why it is a different constant.
 ///
-/// This bound only makes the *stack sizing* provable: the walkers run on a large dedicated stack, so
-/// the actual crash-safety comes from that stack; this cap just guarantees the worst parser-accepted
-/// AST depth (`MAX_DEPTH` paren levels each nesting a `MAX_CHAIN_DEPTH` chain = 64 × 500 ≈ 32 k) stays
-/// within it and bounds pathological memory/time. Two stacks must hold that worst case: `chezzi check`
-/// runs the front-end on the 1 GiB [`crate::FRONTEND_STACK_BYTES`] stack, but `chezzi run` re-does
-/// `build_graph` + `compile_graph` on the VM's smaller 384 MiB `VM_STACK_BYTES` thread — so the cap is
-/// sized for the *smaller* of the two in a debug build (larger frames). 500 keeps the 32 k worst case
-/// well inside 384 MiB while staying ≫ any realistic single chain (real code has 100+-term arithmetic
-/// and long builder chains). Enforced by a PER-LOOP LOCAL counter (each `parse_bp`/`parse_postfix`
-/// invocation counts its own chain), so sibling BREADTH (a 5000-element list, a wide arg list) is never
-/// conflated with chain DEPTH.
-const MAX_CHAIN_DEPTH: usize = 500;
+/// `MAX_DEPTH` cannot bound it: left-associative binary chains (`a + b + c …`) and postfix chains
+/// (`x.f.f…`, `a[0][0]…`, `f().g()…`) fold in the `while`/`loop` bodies of `parse_bp` /
+/// `parse_postfix`, which do NOT recurse per fold, so `self.depth` never sees them — yet each fold
+/// adds one level to a LEFT-leaning AST.
+///
+/// **Derivation (measured, same probe, debug build):** the binding walker is `compile` at **12 162
+/// bytes per AST node**; 384 MiB / 12 162 ≈ **33 100** nodes of budget. Measured directly end to end
+/// (debug `chezzi run`, the shape below): 33 000 nodes is the last depth that survives, 33 500 aborts
+/// — the derived and measured cliffs agree. 16 000 is therefore a **2.06× margin**, and it is above
+/// the deepest AST the parser accepted BEFORE this constant existed (30 nested parens × a 500-fold
+/// chain each = **15 000**, measured on `b1307258`), so nothing that parsed then stops parsing.
+///
+/// **The bound is on a SYNTHESIZED (bottom-up) measure, not an ambient counter.** `Parser::fold_depth`
+/// carries the fold-depth of the deepest subtree already built in the current scope, and each fold
+/// loop checks `self.depth + self.fold_depth + chain`. An *ambient* per-path counter that is
+/// decremented when its loop exits cannot work, because a fold loop runs AFTER the descent it sits
+/// above: in `f(g(DEEP) + 1 + 1 + …)` the 498 folds are counted only once `DEEP` has finished and
+/// popped its own counts, so the two never coexist in an ambient counter even though they add in the
+/// tree. Measured: with an ambient bound and `MAX_DEPTH = 512`, that shape parses at 45 000 nodes deep
+/// and **SIGABRTs `chezzi run`**. The synthesized measure composes across levels and rejects it.
+///
+/// **Breadth is never conflated with depth**: `fold_depth` is `max`-combined over siblings (a fold
+/// loop restores `outer.max(self.fold_depth + chain)`), so a 5 000-element list or a wide argument
+/// list costs the depth of its deepest element, not their sum. `tests::deep_iterative_chains_error_not_crash`
+/// pins both directions.
+pub const MAX_AST_DEPTH: usize = 16_000;
 
 /// Parse a full token stream into a `Module`.
 pub fn parse(tokens: Vec<Tok>) -> PResult<Module> {
@@ -113,6 +130,15 @@ struct Parser {
     toks: Vec<Tok>,
     pos: usize,
     depth: usize,
+    /// SYNTHESIZED (bottom-up) fold-depth: how many *fold* levels the deepest expression already
+    /// built in the current fold-loop scope contributes to the AST. Raised only by the two fold
+    /// loops (`parse_bp`'s infix `while`, `parse_postfix`'s `loop`), each of which resets it to `0`
+    /// before parsing its children and restores `outer.max(self.fold_depth + chain)` on exit — so it
+    /// is a `max` over siblings (breadth costs nothing) and a `sum` up the spine (a chain folded on
+    /// top of an already-deep subtree pays for both). Together with [`MAX_AST_DEPTH`] this is what
+    /// keeps the recursive front-end walkers off the stack cliff; see that constant for why an
+    /// ambient, decremented-on-loop-exit counter cannot do the job.
+    fold_depth: usize,
     /// Doc-comment side table: source-line → stripped comment text, for every comment-only line.
     /// Empty for `parse` (so every existing caller gets `doc = None`); populated by `parse_with_docs`
     /// from the lexer side-channel. Consulted by `doc_above` at each declaration's keyword line.
@@ -125,6 +151,7 @@ impl Parser {
             toks,
             pos: 0,
             depth: 0,
+            fold_depth: 0,
             docs: std::collections::HashMap::new(),
         }
     }
@@ -2261,17 +2288,20 @@ impl Parser {
         if self.depth > MAX_DEPTH {
             return Err(self.err("expression nested too deeply".to_string()));
         }
+        // Each fold below adds one level to a left-leaning AST that the recursive front-end walkers
+        // descend. Iterative, so the `self.depth` guard above never sees it — the bound is
+        // `MAX_AST_DEPTH` over the synthesized `fold_depth` (see that constant). Reset before the
+        // children so their fold-depths accumulate here, restore `max`-combined on the way out.
+        let outer_fold = self.fold_depth;
+        self.fold_depth = 0;
         let mut lhs = self.parse_unary()?;
-        // Bound this chain's length: each fold below adds one level to a left-leaning AST that the
-        // recursive front-end walkers descend. Iterative, so the `self.depth` guard above never sees
-        // it — a separate per-loop counter (see `MAX_CHAIN_DEPTH`).
         let mut chain = 0usize;
         while let Some((op, l_bp, r_bp)) = infix_op(self.peek()) {
             if l_bp < min_bp {
                 break;
             }
             chain += 1;
-            if chain > MAX_CHAIN_DEPTH {
+            if self.depth + self.fold_depth + chain > MAX_AST_DEPTH {
                 return Err(self.err("expression nested too deeply".to_string()));
             }
             self.advance(); // the operator
@@ -2337,6 +2367,7 @@ impl Parser {
                 },
             };
         }
+        self.fold_depth = outer_fold.max(self.fold_depth + chain);
         self.depth -= 1;
         Ok(lhs)
     }
@@ -2383,14 +2414,17 @@ impl Parser {
 
     /// A primary expression followed by any chain of `(call)`, `.field`, `[index]`, `?`.
     fn parse_postfix(&mut self) -> PResult<Expr> {
+        // Same accounting as the infix loop in `parse_bp`: `x.f.f…` / `a[0][0]…` / `f().g()…` build a
+        // left-leaning AST the walkers descend, and this loop never bumps `self.depth`. Count every
+        // iteration (incl. the turbofish `continue` and the final non-folding one — an overcount of
+        // at most one per frame, itself bounded by `MAX_DEPTH`).
+        let outer_fold = self.fold_depth;
+        self.fold_depth = 0;
         let mut e = self.parse_primary()?;
-        // Bound this postfix chain's length for the same reason as the infix loop in `parse_bp`:
-        // `x.f.f…` / `a[0][0]…` / `f().g()…` build a left-leaning AST the walkers descend, and this
-        // loop never bumps `self.depth`. Count every iteration (incl. the turbofish `continue`).
         let mut chain = 0usize;
         loop {
             chain += 1;
-            if chain > MAX_CHAIN_DEPTH {
+            if self.depth + self.fold_depth + chain > MAX_AST_DEPTH {
                 return Err(self.err("expression nested too deeply".to_string()));
             }
             let span = e.span;
@@ -2428,13 +2462,18 @@ impl Parser {
                     // etc.). Only `.decode[<type>](…)` is stolen.
                     let decode = if name == "decode" && self.check(&Token::LBracket) {
                         let save = self.pos;
-                        let save_depth = self.depth; // `parse_type` leaks depth on a swallowed fail
+                        // A swallowed fail leaks both counters: `parse_type` bumps `self.depth` and
+                        // only unwinds it on success, and the speculative argument parse can raise
+                        // `self.fold_depth`. Restore both, else the retry over-rejects.
+                        let save_depth = self.depth;
+                        let save_fold = self.fold_depth;
                         self.advance(); // '['
                         match self.try_parse_decode_tail(e.clone(), span) {
                             Some(expr) => Some(expr),
                             None => {
                                 self.pos = save; // restore — not a decode form
                                 self.depth = save_depth;
+                                self.fold_depth = save_fold;
                                 None
                             }
                         }
@@ -2547,6 +2586,7 @@ impl Parser {
                 _ => break,
             };
         }
+        self.fold_depth = outer_fold.max(self.fold_depth + chain);
         Ok(e)
     }
 
@@ -2656,7 +2696,9 @@ impl Parser {
         let span = name_expr.span;
         let save = self.pos;
         // `parse_type` bumps `self.depth` and only unwinds it on success; restore on backtrack.
+        // `fold_depth` rides along for the same reason (see `MAX_AST_DEPTH`).
         let save_depth = self.depth;
+        let save_fold = self.fold_depth;
         self.advance(); // '['
         let mut args = Vec::new();
         let mut saw_comma = false;
@@ -2666,6 +2708,7 @@ impl Parser {
                 Err(_) => {
                     self.pos = save;
                     self.depth = save_depth;
+                    self.fold_depth = save_fold;
                     return Ok(None);
                 }
             }
@@ -2680,6 +2723,7 @@ impl Parser {
         if !saw_comma || !self.eat(&Token::RBracket) || !self.check(&Token::Dot) {
             self.pos = save;
             self.depth = save_depth;
+            self.fold_depth = save_fold;
             return Ok(None);
         }
         Ok(Some(Expr {
@@ -2700,8 +2744,9 @@ impl Parser {
         let save = self.pos;
         // `parse_type` bumps `self.depth` and only unwinds it on success; on a swallowed (backtrack)
         // failure we must restore depth too, else every plain `name[idx]` leaks a level and many
-        // such indexes spuriously trip MAX_DEPTH.
+        // such indexes spuriously trip MAX_DEPTH. `fold_depth` rides along for the same reason.
         let save_depth = self.depth;
+        let save_fold = self.fold_depth;
         self.advance(); // '['
         let mut type_args = Vec::new();
         loop {
@@ -2710,6 +2755,7 @@ impl Parser {
                 Err(_) => {
                     self.pos = save;
                     self.depth = save_depth;
+                    self.fold_depth = save_fold;
                     return Ok(None);
                 }
             }
@@ -2720,6 +2766,7 @@ impl Parser {
         if !self.eat(&Token::RBracket) || !self.check(&Token::LParen) {
             self.pos = save;
             self.depth = save_depth;
+            self.fold_depth = save_fold;
             return Ok(None);
         }
         self.advance(); // '(' — committed to a type-argument call now.
@@ -5894,15 +5941,23 @@ mod tests {
     /// across all five recursive entry points: parens (parse_bp), unary chains (parse_unary),
     /// nested generics (parse_type), nested blocks (parse_stmt), and nested match patterns
     /// (parse_pattern_impl — variant payloads + tuple elements).
+    ///
+    /// This is the **guard-fires** test: every production must REJECT rather than abort. It is no
+    /// longer the sizing oracle — [`max_depth_boundary_accepts_then_rejects`] is (it bisects the real
+    /// boundary per production), and `check_errors_json::worst_accepted_nesting_never_signal_crashes`
+    /// is the margin oracle (worst accepted program, end to end, through the real binary).
     #[test]
     fn deep_nesting_errors_not_crash() {
-        // `MAX_DEPTH` (64) trips within a *test* thread's default (~2 MiB) stack, so the guard
-        // fires cleanly instead of the host stack overflowing. (Was 128, which sat at the stack edge
-        // and needed a 64 MiB thread to test; the lower bound removed that crutch — runs inline now.)
-        // THIS TEST IS THE SIZING ORACLE for `MAX_DEPTH`: it is what caught `Span` growing 16→24
-        // bytes (W7-49) pushing the then-current 64 over the edge. A `sizeof` change to any AST node
-        // shows up here as a hard abort, not a soft failure. Exercises all five recursive entry points.
-        let paren = format!("x := {}1{}\n", "(".repeat(500), ")".repeat(500));
+        // At `MAX_DEPTH = 512` the guard fires ~4 MB into the parser's stack, which is over a test
+        // worker's ~2 MiB default — so the body runs on the production front-end stack, the same one
+        // every real parse path now takes (W7-50 Task 1). Nesting counts are `MAX_DEPTH * 2` so every
+        // production is comfortably over its own per-level cost (the cheapest is ~1 unit/level).
+        let n = MAX_DEPTH * 2;
+        crate::on_frontend_stack(move || deep_nesting_errors_not_crash_body(n));
+    }
+
+    fn deep_nesting_errors_not_crash_body(n: usize) {
+        let paren = format!("x := {}1{}\n", "(".repeat(n), ")".repeat(n));
         assert!(
             parse(lexer::tokenize(&paren).unwrap())
                 .unwrap_err()
@@ -5910,7 +5965,7 @@ mod tests {
                 .contains("too deeply")
         );
 
-        let unary = format!("x := {}y\n", "not ".repeat(500));
+        let unary = format!("x := {}y\n", "not ".repeat(n));
         assert!(
             parse(lexer::tokenize(&unary).unwrap())
                 .unwrap_err()
@@ -5918,7 +5973,7 @@ mod tests {
                 .contains("too deeply")
         );
 
-        let generic = format!("z: {}int{} = w\n", "List[".repeat(500), "]".repeat(500));
+        let generic = format!("z: {}int{} = w\n", "List[".repeat(n), "]".repeat(n));
         assert!(
             parse(lexer::tokenize(&generic).unwrap())
                 .unwrap_err()
@@ -5928,11 +5983,11 @@ mod tests {
 
         let blocks = {
             let mut s = String::new();
-            for i in 0..500 {
+            for i in 0..n {
                 s.push_str(&"    ".repeat(i));
                 s.push_str("if x:\n");
             }
-            s.push_str(&"    ".repeat(500));
+            s.push_str(&"    ".repeat(n));
             s.push_str("y = 1\n");
             s
         };
@@ -5949,8 +6004,8 @@ mod tests {
         // guard). Before the guard these overflow the native stack (SIGABRT); after, a clean error.
         let variant_pat = format!(
             "x := match o:\n    {}0{}: 1\n    _: 0\n",
-            "Some(".repeat(500),
-            ")".repeat(500)
+            "Some(".repeat(n),
+            ")".repeat(n)
         );
         assert!(
             parse(lexer::tokenize(&variant_pat).unwrap())
@@ -5961,8 +6016,8 @@ mod tests {
 
         let tuple_pat = format!(
             "x := match o:\n    {}0{}: 1\n    _: 0\n",
-            "(".repeat(500),
-            ")".repeat(500)
+            "(".repeat(n),
+            ")".repeat(n)
         );
         assert!(
             parse(lexer::tokenize(&tuple_pat).unwrap())
@@ -5972,15 +6027,27 @@ mod tests {
         );
     }
 
-    /// The ITERATIVE sibling of `deep_nesting_errors_not_crash`: a long left-associative binary
-    /// chain (`1+1+…`) and a long postfix chain (`x.f.f…`, `a[0][0]…`) parse in the `parse_bp` /
-    /// `parse_postfix` LOOPS, which never bump `self.depth`, so the `MAX_DEPTH` guard cannot see them.
-    /// The `MAX_CHAIN_DEPTH` per-loop counter must reject a chain past the cap (else the deep left-
-    /// leaning AST overflows the recursive front-end walkers). A chain UNDER the cap must parse fine.
+    /// The ITERATIVE sibling of `deep_nesting_errors_not_crash`, and like it a **guard-fires** test,
+    /// not a sizing oracle: a long left-associative binary chain (`1+1+…`) and a long postfix chain
+    /// (`x.f.f…`, `a[0][0]…`) fold in the `parse_bp` / `parse_postfix` LOOPS, which never bump
+    /// `self.depth`, so the `MAX_DEPTH` guard cannot see them. [`MAX_AST_DEPTH`] over the synthesized
+    /// `fold_depth` must reject a chain past the cap (else the deep left-leaning AST overflows the
+    /// recursive front-end walkers), while a chain UNDER the cap parses fine.
+    ///
+    /// Two properties the per-loop `MAX_CHAIN_DEPTH` counter this replaced could not express, both
+    /// pinned below: sibling BREADTH still costs nothing (the `max`-combine), and folds COMPOSE up
+    /// the spine — `f(g(deep) + 1 + 1 + …)` per level is rejected once the levels add up, which the
+    /// old per-loop proxy (and an ambient counter decremented on loop exit) both let through.
     #[test]
     fn deep_iterative_chains_error_not_crash() {
+        // Runs on the production front-end stack: the accepted side of these fixtures builds a
+        // 16 000-node AST whose recursive `Drop` is the same stack hazard as the parse.
+        crate::on_frontend_stack(deep_iterative_chains_error_not_crash_body);
+    }
+
+    fn deep_iterative_chains_error_not_crash_body() {
         // Binary chain over the cap → clean "too deeply", not an accepted N-deep AST.
-        let bin = format!("x := 1{}\n", "+1".repeat(MAX_CHAIN_DEPTH + 5));
+        let bin = format!("x := 1{}\n", "+1".repeat(MAX_AST_DEPTH + 5));
         assert!(
             parse(lexer::tokenize(&bin).unwrap())
                 .unwrap_err()
@@ -5988,7 +6055,7 @@ mod tests {
                 .contains("too deeply")
         );
         // Postfix field chain over the cap.
-        let field = format!("x := a{}\n", ".f".repeat(MAX_CHAIN_DEPTH + 5));
+        let field = format!("x := a{}\n", ".f".repeat(MAX_AST_DEPTH + 5));
         assert!(
             parse(lexer::tokenize(&field).unwrap())
                 .unwrap_err()
@@ -5996,7 +6063,7 @@ mod tests {
                 .contains("too deeply")
         );
         // Postfix index chain over the cap.
-        let index = format!("x := a{}\n", "[0]".repeat(MAX_CHAIN_DEPTH + 5));
+        let index = format!("x := a{}\n", "[0]".repeat(MAX_AST_DEPTH + 5));
         assert!(
             parse(lexer::tokenize(&index).unwrap())
                 .unwrap_err()
@@ -6004,12 +6071,137 @@ mod tests {
                 .contains("too deeply")
         );
         // A chain WELL UNDER the cap parses cleanly (no over-rejection of long-but-legal chains).
-        let ok = format!("x := 1{}\n", "+1".repeat(MAX_CHAIN_DEPTH - 100));
+        let ok = format!("x := 1{}\n", "+1".repeat(MAX_AST_DEPTH - 100));
         assert!(parse(lexer::tokenize(&ok).unwrap()).is_ok());
         // Sibling BREADTH must NOT be conflated with chain depth: a wide list literal far exceeding
-        // the cap in element count is fine (each element is its own shallow parse_bp).
-        let wide = format!("x := [{}]\n", "1,".repeat(MAX_CHAIN_DEPTH * 3));
+        // the cap in element count is fine (each element is its own shallow, `max`-combined parse).
+        let wide = format!("x := [{}]\n", "1,".repeat(MAX_AST_DEPTH * 3));
         assert!(parse(lexer::tokenize(&wide).unwrap()).is_ok());
+        // …and neither is a WIDE argument list (the other breadth axis, through `parse_postfix`).
+        let wide_args = format!("x := f({}1)\n", "1,".repeat(MAX_AST_DEPTH * 3));
+        assert!(parse(lexer::tokenize(&wide_args).unwrap()).is_ok());
+
+        // COMPOSITION: folds stacked on top of an already-deep subtree add. Each level of
+        // `f(g(inner) + 1 …×99)` contributes ~101 AST levels, so ~160 levels blow the 16 000 cap even
+        // though no single loop folds more than 101 times and no ambient counter ever holds more
+        // than one level's worth (the folds run AFTER the descent has popped its own counts).
+        let compose = |lv: usize| {
+            let mut s = String::from("0");
+            for _ in 0..lv {
+                s = format!("f(g({s}){})", "+1".repeat(99));
+            }
+            format!("x := {s}\n")
+        };
+        assert!(parse(lexer::tokenize(&compose(20)).unwrap()).is_ok());
+        assert!(
+            parse(lexer::tokenize(&compose(400)).unwrap())
+                .unwrap_err()
+                .message
+                .contains("too deeply"),
+            "composed fold depth must be bounded, not just per-loop chain length"
+        );
+    }
+
+    /// **THE SIZING ORACLE for [`MAX_DEPTH`].** Bisects the accepted nesting count for each guarded
+    /// production and asserts (a) a boundary exists at all — `k` parses, `k+1` rejects with
+    /// `"too deeply"`, never a host abort — and (b) `k` clears CPython 3.14's own 200-level limit for
+    /// the four directly comparable forms. The boundary is MEASURED, never hard-coded: a hard-coded
+    /// number rots into prose the moment a parser frame changes width, which is exactly how
+    /// `MAX_DEPTH = 64` came to sit one level from the cliff (W7-49/W7-50).
+    ///
+    /// On failure the message prints the measured `k`, so a red run says "update the constant", not
+    /// "go chase the parser".
+    #[test]
+    fn max_depth_boundary_accepts_then_rejects() {
+        crate::on_frontend_stack(max_depth_boundary_body);
+    }
+
+    fn max_depth_boundary_body() {
+        /// (name, source builder, CPython 3.14's limit for the comparable construct — 0 = no peer)
+        type Form = (&'static str, Box<dyn Fn(usize) -> String>, usize);
+        let forms: Vec<Form> = vec![
+            (
+                "parens",
+                Box::new(|n| format!("x := {}1{}\n", "(".repeat(n), ")".repeat(n))),
+                200,
+            ),
+            (
+                "lists",
+                Box::new(|n| format!("x := {}{}\n", "[".repeat(n), "]".repeat(n))),
+                200,
+            ),
+            (
+                "calls",
+                Box::new(|n| format!("x := {}1{}\n", "f(".repeat(n), ")".repeat(n))),
+                200,
+            ),
+            (
+                "blocks",
+                Box::new(|n| {
+                    let mut s = String::new();
+                    for i in 0..n {
+                        s.push_str(&"    ".repeat(i));
+                        s.push_str("if x:\n");
+                    }
+                    s.push_str(&"    ".repeat(n));
+                    s.push_str("y = 1\n");
+                    s
+                }),
+                // CPython's own nested-`if` ceiling is 99 (its compiler's block depth, lower than the
+                // 200 parser limit); Chezzi must clear the 200 bar here too, not merely the 99.
+                200,
+            ),
+            (
+                "unary",
+                Box::new(|n| format!("x := {}y\n", "not ".repeat(n))),
+                200,
+            ),
+            (
+                "generic types",
+                Box::new(|n| format!("z: {}int{} = w\n", "List[".repeat(n), "]".repeat(n))),
+                0,
+            ),
+            (
+                "match patterns",
+                Box::new(|n| {
+                    format!(
+                        "x := match o:\n    {}0{}: 1\n    _: 0\n",
+                        "Some(".repeat(n),
+                        ")".repeat(n)
+                    )
+                }),
+                0,
+            ),
+        ];
+
+        for (name, build, cpython) in forms {
+            let parses = |n: usize| parse(lexer::tokenize(&build(n)).unwrap()).is_ok();
+            assert!(parses(1), "{name}: the 1-level case must parse");
+            // Bisect: double to find a rejecting bound, then narrow. `MAX_DEPTH * 8` is far past any
+            // per-level cost ≥ 1/8 of a depth unit, so the doubling always terminates.
+            let mut lo = 1usize;
+            let mut hi = MAX_DEPTH * 8;
+            assert!(!parses(hi), "{name}: no boundary below {hi} levels");
+            while lo + 1 < hi {
+                let mid = lo + (hi - lo) / 2;
+                if parses(mid) { lo = mid } else { hi = mid }
+            }
+            let k = lo;
+            eprintln!("BOUNDARY {name}: max accepted nesting = {k} (CPython {cpython})");
+            let err = parse(lexer::tokenize(&build(k + 1)).unwrap()).unwrap_err();
+            assert!(
+                err.message.contains("too deeply"),
+                "{name}: the level past the boundary (k = {k}) must be a depth diagnostic, got: {}",
+                err.message
+            );
+            if cpython > 0 {
+                assert!(
+                    k >= cpython,
+                    "{name}: max accepted nesting is {k}, below CPython 3.14's {cpython} — \
+                     raise parser::MAX_DEPTH (currently {MAX_DEPTH}) until it clears"
+                );
+            }
+        }
     }
 
     /// A compound statement cannot be the inline body of a block — that would make a trailing

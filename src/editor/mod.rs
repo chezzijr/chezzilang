@@ -2052,7 +2052,7 @@ mod tests {
     /// recursing once per node) on the CALLER's stack. `chezzi-lsp`'s `textDocument/semanticTokens/full`
     /// calls it from a `#[tokio::main]` worker with the default ~2 MiB stack — far smaller than the
     /// 8 MiB CLI main thread — so a deep-but-PARSER-ACCEPTED buffer (a left-leaning chain the parser's
-    /// own recursive `MAX_DEPTH` guard never sees, only its iterative `MAX_CHAIN_DEPTH` cap) would
+    /// own recursive `MAX_DEPTH` guard never sees, only its `MAX_AST_DEPTH` fold-depth bound) would
     /// SIGABRT the language server. `semantic_tokens` now hops onto the dedicated 1 GiB front-end
     /// stack (`crate::on_frontend_stack`), same as `diagnostics`/`hover`.
     ///
@@ -2064,7 +2064,7 @@ mod tests {
     fn deep_but_legal_input_does_not_crash_semantic_tokens() {
         use crate::{lexer, parser};
         let src = deep_but_legal_source(15);
-        // Fails loudly (not silently going shallow) if `MAX_DEPTH`/`MAX_CHAIN_DEPTH` ever move.
+        // Fails loudly (not silently going shallow) if `MAX_DEPTH`/`MAX_AST_DEPTH` ever move.
         assert!(
             parser::parse(lexer::tokenize(&src).unwrap()).is_ok(),
             "fixture must still be parser-accepted at lv=15"

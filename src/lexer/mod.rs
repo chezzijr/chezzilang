@@ -3023,9 +3023,13 @@ mod tests {
 
     /// `Span` is 12 bytes and that is load-bearing, not incidental — `Proto.lines` holds one per
     /// OPCODE, so its width is the cache footprint of every compiled function, and it sets the
-    /// calibrated headroom of `parser::MAX_DEPTH` and `vm::VM_STACK_BYTES`. When this fails, a field
-    /// was added: measure `benches/run.chz` (the `map` bench moved 1.07× at 24 bytes) and re-probe
-    /// both constants before changing the number here.
+    /// calibrated headroom of `parser::MAX_DEPTH`, `parser::MAX_AST_DEPTH` and `vm::VM_STACK_BYTES`.
+    /// When this fails, a field was added: measure `benches/run.chz` (the `map` bench moved 1.07× at
+    /// 24 bytes) and re-probe those constants before changing the number here. The re-probe is four
+    /// things now, not a hand-run: `parser::tests::max_depth_boundary_accepts_then_rejects` (the
+    /// per-production sizing oracle), `check_errors_json::worst_accepted_nesting_never_signal_crashes`
+    /// (the end-to-end margin oracle), `checker::tests::stack_probe_frontend_walker_depth`
+    /// (`--ignored`, re-derives bytes/node) and `self_referential_stringable_hits_depth_limit`.
     #[test]
     fn span_stays_twelve_bytes() {
         assert_eq!(std::mem::size_of::<Span>(), 12);
