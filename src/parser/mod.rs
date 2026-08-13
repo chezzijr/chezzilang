@@ -107,10 +107,12 @@ pub const MAX_DEPTH: usize = 512;
 /// list costs the depth of its deepest element, not their sum. `tests::deep_iterative_chains_error_not_crash`
 /// pins breadth, composition, and the double fold above.
 ///
-/// **The bound is GLOBAL, and that took a SECOND enforcement point.** Everything above is enforced
-/// by the `Parser` that builds a tree, so on its own it bounds *one parse*. An interpolated `{…}`
-/// fragment is built by a **different** `Parser`: `interpolation::parse_expr_str` re-lexes the
-/// fragment text and calls [`parse_expr`], whose `depth`/`fold_depth` start at zero. Until W7-50
+/// **Everything above holds across the interpolation re-parse only because that took a SECOND
+/// enforcement point** — see the residual below for the one splice seam it still does not cover. On
+/// its own, everything above is enforced by the `Parser` that builds a tree, so it bounds *one
+/// parse*. An interpolated `{…}` fragment is built by a **different** `Parser`:
+/// `interpolation::parse_expr_str` re-lexes the fragment text and calls [`parse_expr`], whose
+/// `depth`/`fold_depth` start at zero. Until W7-50
 /// task 3b the budgets therefore **composed** — one fresh 16 000 per level of
 /// `"{ <15 985 deep> }".len()` — and a three-level program type-checked clean at ~46 000 nodes
 /// (measured: peak walk depth 15 000 / 30 000 / 45 000 for one, two, three levels), which SIGABRTed
@@ -132,9 +134,14 @@ pub const MAX_DEPTH: usize = 512;
 /// un-converted and doubles the reachable depth to ~31 986 (latent, pre-existing, and owned by the
 /// two-pass driver W7-51 is rewriting — see `desugar::Walker::walk_expr` and `docs/gaps.md` W7-50).
 ///
-/// Non-interpolated programs are unaffected — the five bisected shapes are identical before and
-/// after. An interpolated literal is now charged for the nodes it hangs beneath, so a fragment within
-/// ~4 nodes of the ceiling is refused where the parser alone accepted it.
+/// The five bisected shapes are identical before and after — but that is not "non-interpolated
+/// programs are unaffected": a default argument spliced by `normalize_call` composes with the
+/// caller's expression the same way an interpolated fragment does, and is a SIXTH shape the
+/// bisection above never covered. Measured, release binary: `fn f(a: int = <15 000-deep chain>) ->
+/// int: return a` called as `x := f() + <2000-deep chain>` — `check` accepted it (rc 0) and `run`
+/// printed the answer on `e1137096`; HEAD refuses it with `expression nested too deeply`. An
+/// interpolated literal or a spliced default is now charged for the nodes it hangs beneath, so
+/// either one within ~4 nodes of the ceiling is refused where the parser alone accepted it.
 /// `check_errors_json::composed_interp_depth_is_bounded_globally` detects the interpolation seam.
 pub const MAX_AST_DEPTH: usize = 16_000;
 

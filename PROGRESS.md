@@ -111,8 +111,9 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > bisected before/after on release, the five shapes are unchanged — double-fold *k* = 16 (~15 968
 > nodes), flat fold 15 997, postfix 15 996, composed `f(g(…)+1×99)` 127, parens 254. What narrowed is
 > only composition: L ≥ 2 now gets `resolve error (line 1, col 39): expression nested too deeply
-> (limit 16000); an interpolated `{…}` fragment nests INSIDE the expression around it and spends the
-> same budget`. Pinned by `check_errors_json::composed_interp_depth_is_bounded_globally` (Rust by
+> (limit 16000); this counts the whole expression after desugaring, and an interpolated `{…}`
+> fragment or a spliced default argument nests INSIDE the expression around it and spends the same
+> budget`. Pinned by `check_errors_json::composed_interp_depth_is_bounded_globally` (Rust by
 > necessity — a host SIGABRT and a compile-time refusal are both outside what `recover:` can see),
 > verified to fail on `e1137096` in both profiles.
 >
@@ -133,7 +134,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > pinned by a FIXED-number test arm — the cap-relative arm had ~97 nodes of slack and could not see a
 > 2-node narrowing.
 >
-> Chezzi suite **493/493 identical** on M:N and `--serial`. Full write-up: `docs/gaps.md` **W7-50**.
+> Chezzi suite **494/494 identical** on M:N and `--serial`. Full write-up: `docs/gaps.md` **W7-50**.
 
 > **✅ W7-55 landed 2026-08-12, redesigned 2026-08-13 — the `Eq` walk is now bounded by a CUMULATIVE
 > NODE BUDGET over the in-progress path (`EQ_BOUNDS_MAX_NODES = 50 000`), and the growth CLASSIFIER

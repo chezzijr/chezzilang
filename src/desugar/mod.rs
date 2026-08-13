@@ -1062,8 +1062,9 @@ impl Walker<'_> {
             return Err(err(
                 expr.span,
                 format!(
-                    "expression nested too deeply (limit {}); an interpolated `{{…}}` fragment \
-                     nests INSIDE the expression around it and spends the same budget",
+                    "expression nested too deeply (limit {}); this counts the whole expression \
+                     after desugaring, and an interpolated `{{…}}` fragment or a spliced default \
+                     argument nests INSIDE the expression around it and spends the same budget",
                     crate::parser::MAX_AST_DEPTH
                 ),
             ));
