@@ -8326,6 +8326,97 @@ fn module_scope_redeclare_not_suppressed_by_an_unrelated_later_import() {
 }
 
 #[test]
+fn destructuring_module_scope_redeclare_changing_type_rejected() {
+    // W7-42r shape (a): the destructuring `let` returns BEFORE both carve-outs, so it re-typed the
+    // module slot silently. Measured on the pre-fix release binary: `chezzi check` said "ok: no type
+    // errors" and the program printed `s` TWICE — once out of `f()` declared `-> int`, once out of
+    // the `z: int = f()` that was also accepted.
+    rejects(
+        "x := 1\nf := fn() -> int: x\nx, y := (\"s\", 2)\n",
+        "cannot re-declare module-level binding 'x' with a different type (int -> str)",
+    );
+}
+
+#[test]
+fn destructuring_module_scope_redeclare_boundaries_ok() {
+    // Same-type rebind stays legal, exactly as for the single-name let.
+    ok("x := 1\nx, y := (2, 3)\nprint(x)\nprint(y)\n");
+    // The one-sided `merge_unknown` refinement carve-out must survive the extraction: `x := []` then
+    // a destructure binding `[1]` REFINES the slot, it does not retype it.
+    ok("x := []\nx, y := ([1], 2)\nprint(x)\nprint(y)\n");
+    // scope > 1: a top-level `if:` body routes to `add_local`, a fresh shadow that may change type.
+    ok("x := 1\nc := true\nif c:\n    x, y := (\"s\", 2)\n    print(x)\n    print(y)\n");
+    // fn-local is a fresh slot too.
+    ok("fn f():\n    x := 1\n    x, y := (\"s\", 2)\n    print(x)\n    print(y)\n");
+    // Only the FRESH name changes type — `x` keeps `int`, so nothing is retyped.
+    ok("x := 1\nx, y := (2, \"s\")\nprint(x)\nprint(y)\n");
+    // ORDER neighbour: swap the tuple elements and the SAME two statements must now reject.
+    rejects("x := 1\nx, y := (\"s\", 2)\n", "int -> str");
+    // INSERT-AN-UNUSED-STATEMENT neighbour: an unrelated let between the two changes neither verdict.
+    ok("x := 1\nz := 0\nx, y := (2, \"s\")\nprint(x)\nprint(y)\nprint(z)\n");
+    rejects("x := 1\nz := 0\nx, y := (\"s\", 2)\n", "int -> str");
+}
+
+#[test]
+fn destructuring_module_scope_redeclare_inferred_return_no_double_fire() {
+    // The `!inferring_ret` gate must come through the extraction: return inference truncates errors
+    // and re-walks the body inside one open scope, so the rule must fire exactly once.
+    ok("x := 1\nfn g():\n    return x\nx, y := (2, 3)\nprint(g())\n");
+    let errs = check_src("x := 1\nfn g():\n    return x\nx, y := (\"s\", 2)\nprint(g())\n");
+    assert_eq!(
+        errs.iter()
+            .filter(|e| e.message.contains("module-level binding"))
+            .count(),
+        1,
+        "expected exactly one retype error, got: {errs:?}"
+    );
+}
+
+#[test]
+fn destructuring_over_const_keeps_const_message() {
+    // The parser rejects `const` ON a destructuring let, but a destructure could silently UN-const a
+    // prior one (`declare` clears the const mark). Measured pre-fix: `X: const int = 1` then
+    // `X, y := (2, 3)` was check-clean and printed `2`. The const branch wins exclusively, as for the
+    // single-name let — a type-CHANGING tuple, so the exclusivity is meaningful.
+    rejects(
+        "X: const int = 1\nX, y := (\"s\", 2)\n",
+        "cannot re-declare const binding",
+    );
+    let errs = check_src("X: const int = 1\nX, y := (\"s\", 2)\n");
+    assert!(
+        !errs.iter().any(|e| e.message.contains("module-level")),
+        "a live const must not ALSO report the retype error, got: {errs:?}"
+    );
+    // The same-type un-const is caught too (the const branch fires at ANY scope depth).
+    rejects(
+        "X: const int = 1\nX, y := (2, 3)\n",
+        "cannot re-declare const binding",
+    );
+    rejects(
+        "fn f():\n    X: const int = 1\n    X, y := (2, 3)\n    print(X)\n",
+        "cannot re-declare const binding",
+    );
+}
+
+#[test]
+fn destructuring_error_arms_do_not_double_report() {
+    // The other three `check_destructure` arms declare `Unknown` to suppress a cascade; the helper is
+    // called from the Tuple SUCCESS arm only, so an already-errored destructure reports once.
+    let errs = check_src("X: const int = 1\nX, y := (1, 2, 3)\n");
+    assert_eq!(
+        errs.len(),
+        1,
+        "an arity-mismatch destructure must report once, got: {errs:?}"
+    );
+    let errs = check_src("X: const int = 1\nX, y := 5\n");
+    assert_eq!(
+        errs.len(),
+        1,
+        "a non-tuple destructure must report once, got: {errs:?}"
+    );
+}
+
+#[test]
 fn from_import_hand_back_at_a_different_type_rejected_deliberately() {
     // The blessed hand-back idiom (`import COUNT from lib` / `COUNT := COUNT + 1`) keeps working, but
     // ONLY at the same type — handing the name back at a DIFFERENT type is rejected, deliberately, and

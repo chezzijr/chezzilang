@@ -49,6 +49,27 @@ gbseen := fn() -> int: gb
 if true:
     gb := "s"
 
+gd := 1
+gdseen := fn() -> int: gd
+gd, gdfresh := (2, "s")
+
+test fn destructuring_module_redeclare_shares_one_slot():
+    # A destructuring `let` reaches the SAME global slot, so the same rule applies: re-binding at the
+    # frozen type is legal and late-binds, RETYPING it is rejected (`src/checker/tests.rs`, W7-42r).
+    # A name that is FRESH in the tuple (`gdfresh`) is a first declaration and may be any type.
+    assert gdseen() == 2, "closure saw {gdseen()}"
+    assert gd == 2, "global is {gd}"
+    assert gdfresh == "s", "fresh name is {gdfresh}"
+
+test fn fn_local_destructuring_redeclare_is_a_fresh_slot():
+    # fn-local stays a Rust-style shadow: `peek` keeps the FIRST `n`, and the destructure may retype.
+    n := 1
+    peek := fn() -> int: n
+    n, m := ("s", 2)
+    assert peek() == 1, "fn-local closure saw {peek()}"
+    assert n == "s", "shadowed local is {n}"
+    assert m == 2, "second name is {m}"
+
 test fn block_scope_redeclare_does_not_touch_the_global():
     # A top-level `if:` body is scope > 1, so `gb := "s"` inside it routes to `add_local` and is a
     # fresh LOCAL shadow — it may change type and it leaves the module slot alone. That is why the

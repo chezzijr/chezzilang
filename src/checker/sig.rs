@@ -1994,76 +1994,7 @@ impl Checker {
                     };
                     self.hover_record_binding(span, &declared, name, HoverKind::Local, doc);
                 }
-                // A live const in THIS scope cannot be re-declared away (`X := 2` / `X: T = 2` after
-                // `X: const T = 1`). For a module global that is the SAME storage slot, so a silent
-                // re-bind would defeat the guarantee, not shadow it (`declare` would otherwise drop the
-                // const mark). An INNER-scope binding of the same name is a genuine fresh shadow and is
-                // untouched (the outer scope's const set is not `.last()`). Skipped during return
-                // inference, whose truncate-and-rerun can re-walk a body within one open scope.
-                if !self.inferring_ret
-                    && self
-                        .const_decls
-                        .last()
-                        .is_some_and(|s| s.contains(name.as_str()))
-                {
-                    self.error(
-                        span,
-                        format!("cannot re-declare const binding '{name}' (a const cannot be rebound — not even with ':=' or a new typed let)"),
-                    );
-                }
-                // A MODULE-scope re-declaration may rebind the global but not RETYPE it. At scope 0 the
-                // compiler's `collect_globals` is idempotent by NAME, so `x := "9"` after `x := 1` reuses
-                // the ONE global slot: a closure built before this line still reads it and hands the new
-                // type out of its declared one (`fn() -> int` yielding a `str`, check-clean). The
-                // fn-local path is deliberately untouched — `add_local` pushes a FRESH slot there, so a
-                // local re-declare is a genuine Rust-style shadow and may change type. `scopes.len() == 1`
-                // is the discriminator that maps 1:1 onto the compiler's `is_global_scope()`; a top-level
-                // `if:`/`for:` block body is scope > 1 and routes to `add_local`, so it stays legal.
-                // The `Unknown` carve-out is ONE-SIDED, not a two-sided veto: the question is only "is
-                // `declared` a REFINEMENT of `prev`?", which is exactly `merge_unknown` (fill `prev`'s
-                // `Unknown` slots from `declared`'s shape; unchanged on a shape/name/arity mismatch). So
-                // `x := []` then `x := [1]` refines and stays legal, while `x := []` then `x := 42` —
-                // and `x := 1` then `x := None` — are retypes and fire. A symmetric "either side has an
-                // `Unknown` ⇒ skip" test silenced the rule for BOTH, letting a closure declared
-                // `-> int` hand out a `None`, check-clean (the original W7-42 defect). The bare
-                // `declared == Unknown` guard is load-bearing: `merge_unknown` early-returns `a` when
-                // the SHAPE is unknown, so `int -> Unknown` would otherwise fire off the don't-know
-                // sentinel. Skipped during return inference, whose truncate-and-rerun can re-walk a
-                // body within one scope.
-                // When `prev` is an IMPORT's binding, it fires only if the `import` is SOURCE-EARLIER
-                // than this let. Imports are HOISTED, so the checker binds them before every top-level
-                // statement no matter where they sit in the file; keying on "the name was ever imported"
-                // would reject the sound `x := 1` … `import … as x from lib` (nothing before the let can
-                // read the import's binding), while the span comparison rejects the unsound
-                // `import COUNT from lib` … `COUNT := "s"` (the closure between them reads the one slot).
-                // `import_binds` already records that span, per bound name, per module.
-                // The span is consulted ONLY while `prev` really is the import's binding: a module-scope
-                // `declare` hands the name back to this module and clears `imported_values`
-                // (`setup.rs:1764-1766`), so after one `let` the previous binding is that LET's and where
-                // some later `import` happens to sit stopped being the question — keying on the span
-                // unconditionally made an unused source-later import a per-NAME suppressor that re-opened
-                // the original defect (`x := 1` / closure / `x := "s"` / `import … as x`).
-                // Two axes make the comparison total: imports are syntactically top-level only, so there
-                // is no nested-scope case, and the language has no statement separator, so two top-level
-                // statements can never share a position — `<` has no reachable tie, and a tie-break for
-                // it would be dead code.
-                else if !self.inferring_ret
-                    && self.scopes.len() == 1
-                    && let Some(prev) = self.scopes[0].get(name).cloned()
-                    && (!(self.imported_values.contains_key(name) || matches!(prev, Ty::Module(_)))
-                        || self
-                            .import_binds
-                            .get(name)
-                            .is_some_and(|i| (i.line, i.col) < (span.line, span.col)))
-                    && prev != declared
-                    && !matches!(declared, Ty::Unknown)
-                    && crate::checker::merge_unknown(&prev, &declared) != declared
-                {
-                    self.error(
-                        span,
-                        format!("cannot re-declare module-level binding '{name}' with a different type ({prev} -> {declared}) — a module global is ONE storage slot whose type is frozen at its first declaration, so any code that reads or writes '{name}' is typed against {prev} while the slot now holds {declared} (rename it, or keep its type; a fn-local ':=' is a fresh binding and may change type)"),
-                    );
-                }
+                self.reject_redeclare(name, &declared, span);
                 self.declare(name, declared);
                 if is_const {
                     self.declare_const(name);
@@ -2937,6 +2868,84 @@ impl Checker {
         }
     }
 
+    /// The two re-declaration carve-outs every binding `let` must pass before `declare` overwrites
+    /// the previous binding (W7-42, W7-42r). Shared by the single-name let and — per name — by
+    /// `check_destructure`'s tuple SUCCESS arm, because both reach the same `declare` and so the same
+    /// one storage slot; a destructuring let re-typed a module global silently until it called this.
+    /// The two branches are NOT one gate and must stay exclusive: the const check fires at ANY scope
+    /// depth off `const_decls.last()`, the retype check only at module scope, and a live const must
+    /// report the const message ALONE. Call it only where a REAL type is being declared — the error
+    /// arms of `check_destructure` declare `Ty::Unknown` to suppress a cascade, and while the retype
+    /// branch skips `Unknown` the const branch does not.
+    pub(super) fn reject_redeclare(&mut self, name: &str, declared: &Ty, span: Span) {
+        // A live const in THIS scope cannot be re-declared away (`X := 2` / `X: T = 2` after
+        // `X: const T = 1`). For a module global that is the SAME storage slot, so a silent
+        // re-bind would defeat the guarantee, not shadow it (`declare` would otherwise drop the
+        // const mark). An INNER-scope binding of the same name is a genuine fresh shadow and is
+        // untouched (the outer scope's const set is not `.last()`). Skipped during return
+        // inference, whose truncate-and-rerun can re-walk a body within one open scope.
+        if !self.inferring_ret && self.const_decls.last().is_some_and(|s| s.contains(name)) {
+            self.error(
+                span,
+                format!("cannot re-declare const binding '{name}' (a const cannot be rebound — not even with ':=' or a new typed let)"),
+            );
+        }
+        // A MODULE-scope re-declaration may rebind the global but not RETYPE it. At scope 0 the
+        // compiler's `collect_globals` is idempotent by NAME, so `x := "9"` after `x := 1` reuses
+        // the ONE global slot: a closure built before this line still reads it and hands the new
+        // type out of its declared one (`fn() -> int` yielding a `str`, check-clean). The
+        // fn-local path is deliberately untouched — `add_local` pushes a FRESH slot there, so a
+        // local re-declare is a genuine Rust-style shadow and may change type. `scopes.len() == 1`
+        // is the discriminator that maps 1:1 onto the compiler's `is_global_scope()`; a top-level
+        // `if:`/`for:` block body is scope > 1 and routes to `add_local`, so it stays legal.
+        // The `Unknown` carve-out is ONE-SIDED, not a two-sided veto: the question is only "is
+        // `declared` a REFINEMENT of `prev`?", which is exactly `merge_unknown` (fill `prev`'s
+        // `Unknown` slots from `declared`'s shape; unchanged on a shape/name/arity mismatch). So
+        // `x := []` then `x := [1]` refines and stays legal, while `x := []` then `x := 42` —
+        // and `x := 1` then `x := None` — are retypes and fire. A symmetric "either side has an
+        // `Unknown` ⇒ skip" test silenced the rule for BOTH, letting a closure declared
+        // `-> int` hand out a `None`, check-clean (the original W7-42 defect). The bare
+        // `declared == Unknown` guard is load-bearing: `merge_unknown` early-returns `a` when
+        // the SHAPE is unknown, so `int -> Unknown` would otherwise fire off the don't-know
+        // sentinel. Skipped during return inference, whose truncate-and-rerun can re-walk a
+        // body within one scope.
+        // When `prev` is an IMPORT's binding, it fires only if the `import` is SOURCE-EARLIER
+        // than this let. Imports are HOISTED, so the checker binds them before every top-level
+        // statement no matter where they sit in the file; keying on "the name was ever imported"
+        // would reject the sound `x := 1` … `import … as x from lib` (nothing before the let can
+        // read the import's binding), while the span comparison rejects the unsound
+        // `import COUNT from lib` … `COUNT := "s"` (the closure between them reads the one slot).
+        // `import_binds` already records that span, per bound name, per module.
+        // The span is consulted ONLY while `prev` really is the import's binding: a module-scope
+        // `declare` hands the name back to this module and clears `imported_values`
+        // (`setup.rs:1764-1766`), so after one `let` the previous binding is that LET's and where
+        // some later `import` happens to sit stopped being the question — keying on the span
+        // unconditionally made an unused source-later import a per-NAME suppressor that re-opened
+        // the original defect (`x := 1` / closure / `x := "s"` / `import … as x`).
+        // Two axes make the comparison total: imports are syntactically top-level only, so there
+        // is no nested-scope case, and the language has no statement separator, so two top-level
+        // statements can never share a position — `<` has no reachable tie, and a tie-break for
+        // it would be dead code. (A destructuring let passes each name's OWN span, which is on the
+        // same line as the statement and so orders identically against any import.)
+        else if !self.inferring_ret
+            && self.scopes.len() == 1
+            && let Some(prev) = self.scopes[0].get(name).cloned()
+            && (!(self.imported_values.contains_key(name) || matches!(prev, Ty::Module(_)))
+                || self
+                    .import_binds
+                    .get(name)
+                    .is_some_and(|i| (i.line, i.col) < (span.line, span.col)))
+            && prev != *declared
+            && !matches!(declared, Ty::Unknown)
+            && crate::checker::merge_unknown(&prev, declared) != *declared
+        {
+            self.error(
+                span,
+                format!("cannot re-declare module-level binding '{name}' with a different type ({prev} -> {declared}) — a module global is ONE storage slot whose type is frozen at its first declaration, so any code that reads or writes '{name}' is typed against {prev} while the slot now holds {declared} (rename it, or keep its type; a fn-local ':=' is a fresh binding and may change type)"),
+            );
+        }
+    }
+
     /// Check a destructuring let `a, b, … := value`. The value's type must be a tuple whose arity
     /// matches the binding count; each name is then declared with its element type. An `Unknown`
     /// value (an already-reported error) declares all names `Unknown` so no cascade follows.
@@ -2959,6 +2968,10 @@ impl Checker {
                     // not an `Expr` the probe visits; record its tuple-element type at its own span
                     // (no-op unless a probe is armed → zero overhead on normal checks).
                     self.hover_record_at(*name_span, ty, HoverKind::Local, None);
+                    // This `declare` hits the SAME storage slot the single-name let does, so it owes
+                    // the same two carve-outs — per name, at that name's own span. Only this arm: the
+                    // others declare `Ty::Unknown` on an already-errored statement.
+                    self.reject_redeclare(name, ty, *name_span);
                     self.declare(name, ty.clone());
                 }
             }

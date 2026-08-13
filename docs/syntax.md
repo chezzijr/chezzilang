@@ -298,11 +298,17 @@ fn f():
 - **The from-import hand-back (`import COUNT from lib` then `COUNT := COUNT + 1`) keeps working, at the
   same type only.** Handing the name back at a *different* type is a retype of the same slot; there is
   no annotation escape (`COUNT: int = 0` declares the same `int`), so **rename**.
+- **A destructuring `let` is covered too, per name.** `x := 1` then `x, y := ("s", 2)` is rejected —
+  the destructure writes the same one global slot, so it was the same lie (measured before the fix:
+  check-clean, then a `str` out of a closure declared `-> int`). A name that is **fresh** in the tuple
+  is a first declaration and may be any type (`x := 1` / `x, y := (2, "s")` is fine), and — like the
+  single-name let — a fn-local or block-scope destructure is a fresh shadow and may retype. A
+  destructure also cannot **un-const** a prior `X: const int = 1`, even at the same type.
 - **What the rule does NOT reach yet** (open, filed as `W7-42r` in `docs/gaps.md` — the retype is
-  check-clean and shows up at runtime): a **destructuring** re-declaration (`a, b := ("s", 2)` retyping
-  an `a` that was an `int`), a forward read of a *hoisted* import, and re-declaring a **function** name
-  (`fn helper()` then `helper := 3`) — the rule covers **value** bindings, and top-level `fn`s live in
-  their own namespace. Treat those as the same mistake even though the checker stays quiet.
+  check-clean and shows up at runtime): a forward read of a *hoisted* import, and re-declaring a
+  **function** name (`fn helper()` then `helper := 3`) — the rule covers **value** bindings, and
+  top-level `fn`s live in their own namespace. Treat those as the same mistake even though the checker
+  stays quiet.
 
 ### Closure capture — uniformly by reference
 
