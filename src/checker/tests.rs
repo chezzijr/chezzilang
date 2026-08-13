@@ -6933,6 +6933,202 @@ fn stack_probe_eq_bounds_depth() {
     eprintln!("PROBE shape={shape} n={n} survived, errs={}", errs.len());
 }
 
+/// The deepest AST the parser accepts, as source. `R(0) = "a"`, `R(k) = f(g(R(k-1)).f…×498)` —
+/// TWO call layers per level because one layer would let `parse_postfix` merge the consecutive
+/// postfix chains into a single loop and trip `MAX_CHAIN_DEPTH` (500) instead of `MAX_DEPTH` (64).
+/// Each level therefore adds exactly 500 expression nodes to the deepest root-to-leaf path (one
+/// `Call` for `f`, 498 `Field`s, one `Call` for `g`), so `depth(R(lv)) = 1 + 500·lv`.
+///
+/// `f`, `g` and `a` are DECLARED (three extra top-level stmts that add no depth to the deep one):
+/// `compiler::global_slot` panics on an undefined global rather than compiling it, because the
+/// checker is supposed to have rejected the program first — so an undeclared fixture makes the
+/// `compile` phase unprobeable. The `.f` folds still fail to type-check (`int` has no field `f`);
+/// that is fine and intended, the walkers descend the whole chain either way.
+fn probe_deep_expr_source(lv: usize) -> String {
+    let folds = ".f".repeat(498);
+    let mut s = String::from("a");
+    for _ in 0..lv {
+        s = format!("f(g({s}){folds})");
+    }
+    format!(
+        "fn f(v: int) -> int:\n    return v\nfn g(v: int) -> int:\n    return v\na := 0\nx := {s}\n"
+    )
+}
+
+/// Longest root-to-leaf expression-node path. Deliberately TOTAL over only the three `ExprKind`s
+/// [`probe_deep_expr_source`] can produce — anything else panics rather than silently under-counting
+/// the very number the probe exists to report.
+fn probe_expr_depth(e: &crate::ast::Expr) -> usize {
+    use crate::ast::ExprKind;
+    1 + match &e.kind {
+        ExprKind::Ident(_) => 0,
+        ExprKind::Field { obj, .. } => probe_expr_depth(obj),
+        ExprKind::Call {
+            callee,
+            args,
+            named,
+            ..
+        } => {
+            assert!(named.is_empty(), "fixture uses no named args");
+            std::iter::once(&**callee)
+                .chain(args.iter())
+                .map(probe_expr_depth)
+                .max()
+                .unwrap_or(0)
+        }
+        other => panic!("fixture produced an unexpected ExprKind: {other:?}"),
+    }
+}
+
+/// **ONE-OFF PROBE, not a regression test — `#[ignore]`d.** Companion to
+/// [`stack_probe_eq_bounds_depth`] above, measuring a different axis: **bytes of DEBUG-build stack
+/// consumed per AST node by each recursive front-end walker** (W7-50). That number is what decides
+/// how far `parser::MAX_DEPTH` can rise now that every production front-end entry point runs on
+/// `crate::FRONTEND_STACK_BYTES` (1 GiB) rather than whatever stack the caller happened to have —
+/// the binding budget is no longer the ~2 MiB test worker but `vm::VM_STACK_BYTES` (384 MiB), which
+/// is what `chezzi run` re-does `build_graph` + `compile_graph` on.
+///
+/// **Method — fix `N`, bisect the stack.** The fixture is held at one depth and the probe THREAD's
+/// stack is the variable: the smallest stack the phase survives, divided by the AST depth, is the
+/// per-node cost. A stack overflow aborts the whole process, so exactly one data point fits in one
+/// run; drive it from a shell loop over `CHEZZI_PROBE_STACK_MIB`, treating a non-zero exit (the
+/// `has overflowed its stack` abort, 134) as "too small" and the `PROBE … survived` line as "big
+/// enough". Distinguish that from exit 137, which is the `systemd-run` memory cap, not a stack limit.
+///
+/// ```sh
+/// for m in 1 2 4 8 16 32 64 128; do
+///   systemd-run --user --scope --quiet -p MemoryMax=6G -p MemorySwapMax=0 -- \
+///     env CHEZZI_PROBE_PHASE=compile CHEZZI_PROBE_N=15 CHEZZI_PROBE_STACK_MIB=$m \
+///     cargo test --lib -- --ignored --exact --nocapture \
+///       checker::tests::stack_probe_frontend_walker_depth
+/// done
+/// ```
+///
+/// `CHEZZI_PROBE_PHASE` is `parse` | `desugar` | `check` | `compile`. Everything a phase does NOT
+/// measure is done up-front on the 1 GiB front-end stack and moved into the probe thread, so each
+/// number is that walker's own cost and not its predecessor's. Two consequences worth knowing when
+/// reading the output:
+///
+/// * `parse` builds the AST inside the probe thread, so its cost is per **`MAX_DEPTH` depth unit**
+///   (4 per fixture level), not per AST node — it is not comparable to the other three.
+/// * `compile` goes through `compiler::compile_module_standalone`, which clones the module and runs
+///   `desugar::run_standalone` itself, so its floor is the MAX of those peaks, not the compiler
+///   walk alone. Deep ASTs are `std::mem::forget`-ed rather than dropped where the probe controls
+///   the drop, because recursive drop glue is stack cost that belongs to no walker.
+///
+/// **`check` has no separable inner fn.** `checker::check` and `check_graph_with_entry` wrap their
+/// own bodies in `crate::on_frontend_stack_scoped`, so calling either from the probe thread would
+/// measure the 1 GiB stack and report a meaningless number. The `check` arm below therefore inlines
+/// the exact body of `checker::check` (`Checker::new` → `seed_native_prelude_sigs` → `check_module`),
+/// which `checker::tests` can reach as a child module. If that body ever changes, change it here too.
+///
+/// **`overlay` is NOT probeable from here and is deliberately absent.** `editor::semantic_overlay`
+/// is private to `crate::editor` and its only public route, `editor::semantic_tokens`, wraps itself
+/// in `crate::on_frontend_stack`; adding a phase for it would silently measure 1 GiB. It is also not
+/// the binding case — the overlay walk always gets the 1 GiB stack in production, unlike the
+/// compiler walk, which `chezzi run` performs on the VM's 384 MiB thread.
+#[test]
+#[ignore]
+fn stack_probe_frontend_walker_depth() {
+    let phase = std::env::var("CHEZZI_PROBE_PHASE").unwrap_or_else(|_| "parse".to_string());
+    let lv: usize = std::env::var("CHEZZI_PROBE_N")
+        .map(|s| s.parse().expect("CHEZZI_PROBE_N must be a usize"))
+        .unwrap_or(15);
+    // `parse` recurses once per `MAX_DEPTH` unit (≤64 of them), so its floor lands far below 1 MiB —
+    // `CHEZZI_PROBE_STACK_KIB` exists to bisect it at a resolution `…_MIB` cannot express. Exactly
+    // one of the two must be set.
+    let stack_kib: usize = match (
+        std::env::var("CHEZZI_PROBE_STACK_KIB"),
+        std::env::var("CHEZZI_PROBE_STACK_MIB"),
+    ) {
+        (Ok(k), _) => k.parse().expect("CHEZZI_PROBE_STACK_KIB must be a usize"),
+        (_, Ok(m)) => {
+            m.parse::<usize>()
+                .expect("CHEZZI_PROBE_STACK_MIB must be a usize")
+                * 1024
+        }
+        _ => panic!("set CHEZZI_PROBE_STACK_MIB or CHEZZI_PROBE_STACK_KIB"),
+    };
+
+    let src = probe_deep_expr_source(lv);
+    // Parse + measure the depth on the BIG stack, so nothing here perturbs the bisection. Also pins
+    // the fixture's documented edge: lv=15 is the last level `MAX_DEPTH` accepts.
+    let depth = crate::on_frontend_stack_scoped(|| {
+        let module =
+            parser::parse(lexer::tokenize(&src).expect("lex")).expect("fixture must parse");
+        let StmtKind::Let { value, .. } = &module.stmts.last().expect("stmts").kind else {
+            panic!("fixture's LAST stmt must be the deep `x := …` let");
+        };
+        let d = probe_expr_depth(value);
+        if lv == 15 {
+            let over = probe_deep_expr_source(16);
+            let err = parser::parse(lexer::tokenize(&over).expect("lex"))
+                .expect_err("lv=16 must exceed MAX_DEPTH");
+            assert!(
+                err.message.contains("nested too deeply"),
+                "lv=16 must fail on depth, got: {}",
+                err.message
+            );
+        }
+        assert_eq!(d, 1 + 500 * lv, "derived depth must match 1 + 500·lv");
+        d
+    });
+
+    // Anything the phase under test does NOT own is prepared on the big stack and moved in.
+    let prepared: Option<crate::ast::Module> = match phase.as_str() {
+        "parse" => None,
+        "desugar" | "check" | "compile" => Some(crate::on_frontend_stack_scoped(|| {
+            parser::parse(lexer::tokenize(&src).expect("lex")).expect("fixture must parse")
+        })),
+        other => panic!("unknown CHEZZI_PROBE_PHASE {other:?}, want parse|desugar|check|compile"),
+    };
+
+    let ph = phase.clone();
+    let note = std::thread::Builder::new()
+        .stack_size(stack_kib * 1024)
+        .spawn(move || match ph.as_str() {
+            "parse" => {
+                let module =
+                    parser::parse(lexer::tokenize(&src).expect("lex")).expect("parse must Ok");
+                let n = module.stmts.len();
+                std::mem::forget(module);
+                format!("stmts={n}")
+            }
+            "desugar" => {
+                let mut module = prepared.expect("prepared");
+                let r = crate::desugar::run_standalone(&mut module);
+                std::mem::forget(module);
+                format!("desugar_ok={}", r.is_ok())
+            }
+            // Verbatim body of `checker::check`, minus its `on_frontend_stack_scoped` wrap.
+            "check" => {
+                let module = prepared.expect("prepared");
+                let mut c = Checker::new();
+                c.seed_native_prelude_sigs();
+                c.check_module(&module.stmts, None, &[]);
+                let errs = c.errors.len();
+                std::mem::forget(module);
+                std::mem::forget(c);
+                format!("errs={errs}")
+            }
+            "compile" => {
+                let module = prepared.expect("prepared");
+                let r = crate::compiler::compile_module_standalone(&module);
+                let ok = r.is_ok();
+                std::mem::forget(r);
+                std::mem::forget(module);
+                format!("compile_ok={ok}")
+            }
+            _ => unreachable!(),
+        })
+        .expect("spawn probe thread")
+        .join()
+        .unwrap_or_else(|e| std::panic::resume_unwind(e));
+
+    // Reached only if the probe thread did NOT overflow — an overflow aborts the process first.
+    eprintln!("PROBE phase={phase} stack_kib={stack_kib} lv={lv} depth={depth} survived {note}");
+}
+
 /// BLOCKER 1 — user-facing checker errors naming a user struct/enum must render the BARE display
 /// name, NOT the qualified IDENTITY key the redesign introduced (`<module-key>::Name`). Asserts the
 /// WHOLE message (`==`, not `contains`) across field / method / type-mismatch sites so a leaked
