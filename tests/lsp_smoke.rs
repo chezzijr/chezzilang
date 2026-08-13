@@ -259,6 +259,133 @@ fn hover_enum_variant_decl_name_round_trip() {
     assert!(saw_hover, "never received a hover response for id 2");
 }
 
+/// Extract the flat `u32` array following `"data":[` in a `semanticTokens/full` JSON-RPC response
+/// body (hand-parsed rather than pulling in a JSON dep just for this one field — `tower-lsp` never
+/// emits nested brackets inside this particular array).
+fn extract_data_array(msg: &str) -> Vec<u32> {
+    let start = msg
+        .find("\"data\":[")
+        .expect("response missing \"data\" array")
+        + "\"data\":[".len();
+    let end = msg[start..].find(']').expect("unterminated \"data\" array") + start;
+    msg[start..end]
+        .split(',')
+        .filter(|s| !s.trim().is_empty())
+        .map(|s| s.trim().parse().expect("data element must be a u32"))
+        .collect()
+}
+
+#[test]
+fn semantic_tokens_full_round_trip() {
+    let (mut stdin, rx, _guard, init_resp) = start_server();
+    assert!(
+        init_resp.contains("semanticTokensProvider"),
+        "initialize did not advertise semanticTokensProvider: {init_resp}"
+    );
+
+    // Shallow buffer: didOpen, then request semanticTokens/full and check the encoding shape.
+    send(
+        &mut stdin,
+        r#"{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///tmp/chezzi_lsp_semtok.chz","languageId":"chezzi","version":1,"text":"x := 41\n"}}}"#,
+    );
+    send(
+        &mut stdin,
+        r#"{"jsonrpc":"2.0","id":2,"method":"textDocument/semanticTokens/full","params":{"textDocument":{"uri":"file:///tmp/chezzi_lsp_semtok.chz"}}}"#,
+    );
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    let mut saw_tokens = false;
+    while std::time::Instant::now() < deadline {
+        match rx.recv_timeout(Duration::from_secs(5)) {
+            Ok(msg) => {
+                if msg.contains("\"id\":2") {
+                    let data = extract_data_array(&msg);
+                    assert!(
+                        !data.is_empty(),
+                        "expected non-empty semantic-token data: {msg}"
+                    );
+                    assert_eq!(
+                        data.len() % 5,
+                        0,
+                        "semantic-token data must be a flat multiple of 5: {msg}"
+                    );
+                    for chunk in data.chunks_exact(5) {
+                        let token_type = chunk[3];
+                        assert!(
+                            (token_type as usize) < chezzi::editor::SEMANTIC_TOKEN_TYPES.len(),
+                            "token_type {token_type} out of legend bounds: {msg}"
+                        );
+                    }
+                    saw_tokens = true;
+                    break;
+                }
+            }
+            Err(_) => break,
+        }
+    }
+    assert!(
+        saw_tokens,
+        "never received a semanticTokens/full response for id 2"
+    );
+}
+
+#[test]
+fn semantic_tokens_full_deep_buffer_round_trip() {
+    let (mut stdin, rx, _guard, _init_resp) = start_server();
+
+    // The R3 deep-but-parser-accepted shape (W7-50): R(0) = "a", R(k) = "f(g(" + R(k-1) + ")" +
+    // ".f".repeat(498) + ")", lv = 15 — the deepest level the parser still accepts. Round-tripping it
+    // through the real stdio server (not just the in-process unit test) confirms the LSP's actual
+    // tokio worker survives the request end to end, not just the library call in isolation.
+    fn r(k: usize) -> String {
+        if k == 0 {
+            "a".to_string()
+        } else {
+            format!("f(g({}){})", r(k - 1), ".f".repeat(498))
+        }
+    }
+    let src = format!("x := {}\n", r(15));
+    let text_json = escape_json_string(&src);
+
+    send(
+        &mut stdin,
+        &format!(
+            r#"{{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{{"textDocument":{{"uri":"file:///tmp/chezzi_lsp_semtok_deep.chz","languageId":"chezzi","version":1,"text":"{text_json}"}}}}}}"#
+        ),
+    );
+    send(
+        &mut stdin,
+        r#"{"jsonrpc":"2.0","id":2,"method":"textDocument/semanticTokens/full","params":{"textDocument":{"uri":"file:///tmp/chezzi_lsp_semtok_deep.chz"}}}"#,
+    );
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    let mut saw_response = false;
+    while std::time::Instant::now() < deadline {
+        match rx.recv_timeout(Duration::from_secs(5)) {
+            Ok(msg) => {
+                if msg.contains("\"id\":2") {
+                    saw_response = true;
+                    break;
+                }
+            }
+            Err(_) => break,
+        }
+    }
+    assert!(
+        saw_response,
+        "never received a semanticTokens/full response for the deep buffer (id 2) — server likely crashed"
+    );
+}
+
+/// Minimal JSON string escaping for embedding source text in a hand-written JSON-RPC payload above:
+/// this fixture only ever contains `"`, `\`, and printable ASCII, so a full JSON string encoder is
+/// unneeded.
+fn escape_json_string(s: &str) -> String {
+    s.replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n")
+}
+
 #[test]
 fn diagnostics_round_trip() {
     let mut child = Command::new(env!("CARGO_BIN_EXE_chezzi-lsp"))

@@ -267,7 +267,21 @@ pub struct SemTok {
 /// are recovered by a `#`-scan that skips hashes living inside string literals.
 ///
 /// A lexer error yields no tokens (the editor still shows the error via [`diagnostics`]).
+///
+/// Runs on the dedicated front-end stack: unlike [`diagnostics`]/[`hover`] this never touches the
+/// resolver/checker, but it still lexes + parses the buffer (`semantic_overlay`, below) and then
+/// walks the resulting AST with `overlay_expr`'s per-node recursion — the same class of
+/// deep-but-valid-AST overflow those two guard against, on the same ~2 MiB LSP tokio worker
+/// (`textDocument/semanticTokens/full`). The hop has to sit at THIS outer function, not inside
+/// `semantic_overlay`: the token/comment classification passes below also recurse (line-splitting,
+/// comment scanning) and would otherwise stay on the small stack even with the overlay walk moved.
+/// See `crate::on_frontend_stack`.
 pub fn semantic_tokens(source: &str) -> Vec<SemTok> {
+    let source = source.to_string();
+    crate::on_frontend_stack(move || semantic_tokens_inner(&source))
+}
+
+fn semantic_tokens_inner(source: &str) -> Vec<SemTok> {
     use crate::lexer::{self, Token};
     let chars: Vec<char> = source.chars().collect();
     let line_starts = line_start_offsets(&chars);
@@ -2016,6 +2030,52 @@ mod tests {
             Some(VARIABLE),
             "ident f stays variable"
         );
+    }
+
+    /// Build the measured worst-parser-accepted-depth source: `R(0) = "a"`, `R(k) = "f(g(" +
+    /// R(k-1) + ")" + ".f".repeat(498) + ")"`. `lv = 15` is the deepest level the parser still
+    /// accepts; `lv = 16` trips the parser's own "expression nested too deeply" — this is a
+    /// MEASURED value, not re-derived here.
+    fn deep_but_legal_source(lv: usize) -> String {
+        fn r(k: usize) -> String {
+            if k == 0 {
+                "a".to_string()
+            } else {
+                format!("f(g({}){})", r(k - 1), ".f".repeat(498))
+            }
+        }
+        format!("x := {}\n", r(lv))
+    }
+
+    /// Regression for W7-50: `semantic_tokens` used to run its post-parse AST walk (`overlay_expr`,
+    /// recursing once per node) on the CALLER's stack. `chezzi-lsp`'s `textDocument/semanticTokens/full`
+    /// calls it from a `#[tokio::main]` worker with the default ~2 MiB stack — far smaller than the
+    /// 8 MiB CLI main thread — so a deep-but-PARSER-ACCEPTED buffer (a left-leaning chain the parser's
+    /// own recursive `MAX_DEPTH` guard never sees, only its iterative `MAX_CHAIN_DEPTH` cap) would
+    /// SIGABRT the language server. `semantic_tokens` now hops onto the dedicated 1 GiB front-end
+    /// stack (`crate::on_frontend_stack`), same as `diagnostics`/`hover`.
+    ///
+    /// On regression this test ABORTS the whole test-process run rather than failing a single
+    /// assertion — the same honesty `parser::tests::deep_nesting_errors_not_crash`'s doc-comment
+    /// gives its own stack-overflow class: a red run here looks like a killed `cargo test` process,
+    /// not a reported failure line.
+    #[test]
+    fn deep_but_legal_input_does_not_crash_semantic_tokens() {
+        use crate::{lexer, parser};
+        let src = deep_but_legal_source(15);
+        // Fails loudly (not silently going shallow) if `MAX_DEPTH`/`MAX_CHAIN_DEPTH` ever move.
+        assert!(
+            parser::parse(lexer::tokenize(&src).unwrap()).is_ok(),
+            "fixture must still be parser-accepted at lv=15"
+        );
+        let handle = std::thread::Builder::new()
+            .stack_size(2 * 1024 * 1024) // matches the tokio default the LSP worker actually gets
+            .spawn(move || crate::editor::semantic_tokens(&src))
+            .expect("spawn 2 MiB probe thread");
+        let toks = handle
+            .join()
+            .expect("semantic_tokens must not crash the 2 MiB worker");
+        assert!(!toks.is_empty());
     }
 
     fn st(line: u32, start: u32, len: u32, ty: u32) -> SemTok {
