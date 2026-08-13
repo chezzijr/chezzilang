@@ -162,6 +162,7 @@ pub fn run(graph: &mut ModuleGraph) -> Result<(), ResolveError> {
                 scopes: Vec::new(),
                 local_struct: Vec::new(),
                 first_pass: pass == 0,
+                depth: 0,
             };
             // Borrow the module's AST mutably; everything `walker` reads lives in `regs`/the maps above.
             let ast: &mut Module = &mut graph.modules[mi].ast;
@@ -203,6 +204,7 @@ pub fn run_standalone(module: &mut Module) -> Result<(), ResolveError> {
             scopes: Vec::new(),
             local_struct: Vec::new(),
             first_pass: pass == 0,
+            depth: 0,
         };
         walker.walk_block(&mut module.stmts)?;
     }
@@ -657,6 +659,9 @@ struct Walker<'a> {
     /// spliced defaults); the collapse is NOT idempotent (re-running it on pass 2 would wrap the
     /// synthesized `List` in another `List`), so it must fire exactly once.
     first_pass: bool,
+    /// Current [`Walker::walk_expr`] recursion depth — see that method. This counter is what turns
+    /// [`crate::parser::MAX_AST_DEPTH`] into a **global** bound instead of a per-`Parser` one.
+    depth: usize,
 }
 
 impl Walker<'_> {
@@ -1004,7 +1009,72 @@ impl Walker<'_> {
         Ok(())
     }
 
+    /// **THE GLOBAL AST-DEPTH BOUND** (W7-50). [`crate::parser::MAX_AST_DEPTH`] is enforced by the
+    /// `Parser` that builds a tree, and an interpolated `{…}` fragment is built by a *different*
+    /// `Parser` — `interpolation::parse_expr_str` re-lexes the fragment text and calls
+    /// [`crate::parser::parse_expr`], whose `depth`/`fold_depth` start at zero. So before this guard
+    /// the budgets **composed**: each nesting level of `"{ <15 985 deep> }".len()` bought a fresh
+    /// 16 000, and three levels type-checked clean at ~46 000 AST nodes — past the measured ~33 100
+    /// node cliff of the binding walker, i.e. an uncatchable SIGABRT on a well-typed program
+    /// (`chezzi run`, debug, on the 384 MiB [`crate::vm::VM_STACK_BYTES`] worker).
+    ///
+    /// [`Self::walk_expr_inner`] is the seam where that composition physically happens: its
+    /// `ExprKind::Str` arm calls `parse_interpolation` and then **re-enters this walk on the
+    /// fragment's subtree**, so one `Walker` descends the whole composed tree. Measured on the
+    /// three-level fixture, pre-guard: peak `walk_expr` depth 15 000 / 30 000 / 45 000 for one, two
+    /// and three levels — exactly the sum. That makes this counter the depth of the tree the checker
+    /// and the compiler descend afterwards, not a per-parse estimate of it, which is why the bound
+    /// lives here rather than as a remaining-budget parameter threaded through the re-parse: there is
+    /// one number, and no caller can forget to pass it. Measured after: total accepted depth is
+    /// ~16 000 at one, two, three and four nesting levels alike, where it used to be L × 16 000.
+    ///
+    /// **Every front-end path routes through here.** `resolver::build_graph` ends in
+    /// [`run`], and `chezzi check` / `run` / `test` and the LSP all go through `build_graph` — for
+    /// `chezzi run` on the VM thread too, *before* the compile walk. (`chezzi ast` and the LSP's
+    /// `semantic_overlay` parse without the resolver, but both treat `ExprKind::Str` as a LEAF, so
+    /// they never descend a fragment at all.) The three other `parse_interpolation` callers —
+    /// `checker::check_interpolation`, `checker::scan_expr_for_pin`, `compiler::compile_str` /
+    /// `interp_exprs` — fire only on an `ExprKind::Str` this walk did not convert.
+    ///
+    /// **KNOWN RESIDUAL, and the reason this doc says "the tree this walk reaches" and not "every
+    /// tree".** There is one way an *un-converted but well-formed* `Str` survives to those callers: a
+    /// default argument spliced in during **pass 2**. `regs` is built once, before both passes, so a
+    /// spliced default is raw declaration AST; `normalize_call` splices it in the TAIL of
+    /// `walk_expr_inner`, after this node's children were walked; and there is no pass 3. A
+    /// default-of-a-default is exactly that shape. Measured on a working-tree release binary,
+    /// `fn g(a: int = "{ 1+1×15990 }".len())` / `fn h(b: int = g())` / `x := h()+1×15990`:
+    /// `check` rc 0, this counter peaked at **15 995**, and the tree the checker and compiler
+    /// actually descend is **~31 986** nodes — ~1.03× the measured ~33 100-node cliff. Latent, not
+    /// live (no abort reachable: the decl-site walk caps the spliced default at ~16 000, and a
+    /// three-deep default chain hits an unrelated pre-existing arity error), and **pre-existing** —
+    /// the same fixture is accepted on `e1137096`. Not closed here because the fix belongs in the
+    /// two-pass driver / `normalize_call`, which W7-51 is rewriting; closing it there means walking a
+    /// pass-2 splice, or building `regs` from already-lowered ASTs. `docs/gaps.md` W7-50 tracks it.
+    ///
+    /// **Non-interpolated programs are unaffected**, bisected before and after: double fold *k* = 16,
+    /// flat fold 15 997, postfix 15 996, composed `f(g(…)+1×99)` 127, parens 254 — all identical. An
+    /// interpolated literal is now charged for the nodes it hangs beneath (`.len()`, the `Interp`
+    /// itself), so a fragment within ~4 nodes of the ceiling is refused where the parser alone
+    /// accepted it; that is the bound doing its job, not slack. Statement nesting cannot compose (a
+    /// `{…}` fragment holds an expression, never a block) and is bounded by `parser::MAX_DEPTH`.
     fn walk_expr(&mut self, expr: &mut Expr) -> Result<(), ResolveError> {
+        if self.depth >= crate::parser::MAX_AST_DEPTH {
+            return Err(err(
+                expr.span,
+                format!(
+                    "expression nested too deeply (limit {}); an interpolated `{{…}}` fragment \
+                     nests INSIDE the expression around it and spends the same budget",
+                    crate::parser::MAX_AST_DEPTH
+                ),
+            ));
+        }
+        self.depth += 1;
+        let r = self.walk_expr_inner(expr);
+        self.depth -= 1;
+        r
+    }
+
+    fn walk_expr_inner(&mut self, expr: &mut Expr) -> Result<(), ResolveError> {
         // Recurse into children first, so nested calls are normalized regardless of this node.
         match &mut expr.kind {
             ExprKind::Unary { expr: inner, .. } => self.walk_expr(inner)?,
@@ -1148,7 +1218,11 @@ impl Walker<'_> {
             ExprKind::Str(raw) if raw.contains('{') || raw.contains('}') => {
                 if let Ok(chunks) = crate::interpolation::parse_interpolation(raw, expr.span) {
                     expr.kind = ExprKind::Interp(chunks);
-                    return self.walk_expr(expr);
+                    // `walk_expr_inner`, NOT `walk_expr`: this is a re-entry on the SAME node, which
+                    // occupies one AST level, not two. Going back through the depth guard charged an
+                    // extra level per interpolation and measurably over-rejected — a lone
+                    // `x := "{ 1+1×15997 }".len()` at the parser's own flat ceiling stopped building.
+                    return self.walk_expr_inner(expr);
                 }
             }
             ExprKind::Interp(chunks) => {

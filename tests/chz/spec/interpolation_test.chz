@@ -27,6 +27,19 @@ test fn nested_string_literal_in_fragment():
     # Chezzi interpolates every string, so the nested literal interpolates too (no `f` prefix here).
     assert "outer {'inner {n}'}" == "outer inner 5"
 
+test fn three_nesting_levels_still_render():
+    # `desugar` re-enters its own expression walk on each parsed fragment, which is what makes
+    # `parser::MAX_AST_DEPTH` a GLOBAL bound (W7-50: before that, each level bought a fresh budget
+    # and three deep levels SIGABRTed `chezzi run`). Shallow here on purpose — the depth REFUSAL is
+    # a compile-time resolve error, which `recover:` cannot catch, so it is pinned in Rust by
+    # `check_errors_json::composed_interp_depth_is_bounded_globally`. What this pins is that the
+    # walk that now carries the counter still renders every level. Each level needs its own quote
+    # style, or the fragment fails to lex.
+    n := 5
+    assert "L1 {'L2 {\"L3 {n}\"}'}" == "L1 L2 L3 5"
+    # …and the value still flows back out as an int through `.len()`, the shape the depth fixture uses.
+    assert "{ \"{ 1+1 }\".len() }" == "1"
+
 test fn set_literal_in_fragment():
     assert "{ {1, 2}.len() }" == "2"
 

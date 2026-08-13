@@ -328,6 +328,29 @@ that spends every loop a level can spend, not the first one that came to mind. (
 narrows what is accepted, that is often the *win*; hiding it behind a false no-regression claim makes a
 good change unauditable (same family as `rule fires ≠ rule is right`).
 
+**Third correction (same gap, follow-up): a per-*instance* limit is not a limit on the axis.**
+`MAX_AST_DEPTH` was enforced by the `Parser` object that builds a tree — and an interpolated `{…}`
+fragment is re-lexed and built by a **second** `Parser` whose counters start at zero. So the axis had
+no bound at all: *L* nested levels of `"{ <15 985 deep> }".len()` bought *L* × 16 000, measured at
+peak walk depth 15 000 / 30 000 / 45 000 for L = 1/2/3, and debug `chezzi run` SIGABRTed at L = 3 on a
+program `chezzi check` accepted. The generalizable lesson for this document: **when a bound lives on
+an object, ask what happens when the pipeline makes a second one.** Grep for every constructor of the
+bound-carrying type (`Parser::new` here) — a re-parse, a re-lex, a spliced fragment or a macro
+expansion is a fresh instance, and a resource bound that resets per instance is a bound on nothing.
+The repair that composes is to enforce on the **finished artifact** at a seam every consumer routes
+through — here `desugar::Walker::walk_expr`, whose recursion depth is the composed tree's depth —
+rather than to thread a remaining budget through each re-entry, which is only as good as the callers
+that remember to pass it.
+
+**And the second half of that lesson, which the review had to supply: "finished" is a claim to check,
+not a word to use.** The chosen seam is finished for everything the walk *reaches*, and `desugar`'s
+`normalize_call` splices default arguments in the **tail** of the walk, after that node's children
+have already been visited — so a splice performed on the second (last) pass is never walked, and a
+well-formed interpolated literal inside it still reaches the checker and compiler un-converted, at
+~2× the bound. When you enforce on an artifact, enumerate every writer that can still mutate it after
+your check, not just every reader that consumes it. A tail-position mutation in the same walk is the
+easiest one to miss, because it does not look like a second pipeline stage.
+
 Status: the `0..2000` gate is green, and unattended sweeps of `0..100000` (release, overflow-checks
 OFF) and `0..20000` (debug, overflow-checks ON) found **zero** panics or signal crashes — the
 front-end is crash-safe over the *byte/token* inputs explored so far (see the deep-nesting blind spot

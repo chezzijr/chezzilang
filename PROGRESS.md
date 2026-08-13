@@ -64,8 +64,10 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > **Two tests now pin what prose got wrong.** `parser::tests::deep_iterative_chains_error_not_crash`
 > gained a double-fold case: it bisects the single-fold and double-fold shapes and asserts the
 > double-fold one accepts ~**half** the levels — the mechanism is measured, not re-guessed. `parser::tests::max_ast_depth_floor_holds`
-> is a **fixed** 15 000-fold fixture, deliberately not derived from `MAX_AST_DEPTH`, so silently
-> shrinking the constant fails a test. **Verified by shrinking it:** at `MAX_AST_DEPTH = 12_000`,
+> is a **fixed** 15 950-fold fixture, deliberately not derived from `MAX_AST_DEPTH`, so silently
+> shrinking the constant fails a test. (It shipped at 15 000, which left a 998-wide blind spot: the
+> flat chain's real ceiling is 15 997, so `MAX_AST_DEPTH` could have been cut to 15 100 with every
+> depth test still green. 15 950 is ~0.3% off the measured ceiling.) **Verified by shrinking it:** at `MAX_AST_DEPTH = 12_000`,
 > `max_ast_depth_floor_holds` is the ONLY parser test that fires — `max_depth_boundary_accepts_then_rejects`
 > (sizes `MAX_DEPTH`; all seven forms are recursion-guarded), `deep_iterative_chains_error_not_crash`
 > and all four `check_errors_json` tests (fixtures DERIVED from the constant) stay green. The one other
@@ -84,6 +86,52 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > scope:** `chezzi ast`'s `{:#?}` render is worse than quadratic (200 nodes 2.2 s, 400 nodes 17 s,
 > 800 nodes > 90 s), so its arm runs on a 200-node chain; the depth at which `ast` becomes a stack
 > hazard is unreachable in tolerable wall-clock, which is why it is a LATENT crash path.
+>
+> **The bound is GLOBAL only since the follow-up — before it, an interpolated fragment bought a
+> fresh budget.** `MAX_AST_DEPTH` is enforced by the `Parser` that builds a tree, and a `{…}`
+> fragment is built by a **second** `Parser` (`interpolation::parse_expr_str` → `parser::parse_expr`,
+> counters at zero), so the budgets **composed** and every claim above was a per-parse claim wearing
+> a global one's clothes. Measured on `e1137096`: a program of *L* levels of
+> `"{ <15 985 deep> }".len()` — three distinct quote styles, every value `int` so it type-checks
+> clean, the paren wraps OUTSIDE the literal — reaches peak `desugar::walk_expr` depth
+> **15 000 / 30 000 / 45 000** for L = 1 / 2 / 3, exactly the sum. `chezzi check` accepted L = 3 and 4
+> (rc 0, ~46 000 and ~62 000 nodes against the ~33 100-node cliff) and debug `chezzi run` died
+> **rc 134, `fatal runtime error: stack overflow, aborting`** — the uncatchable SIGABRT on a
+> well-typed program that W7-50 exists to prevent, one enforcement point short.
+>
+> **Fix: bound the composed depth where the composition physically happens**, rather than threading a
+> remaining-budget parameter through the re-parse. `desugar::Walker::walk_expr`'s `ExprKind::Str` arm
+> parses the fragment and **re-enters its own walk on the fragment's subtree**, so one `Walker`
+> descends the whole composed tree and its recursion depth *is* the real depth of what the checker and
+> compiler descend next — a measurement of the finished tree, not a per-parse estimate, and no caller
+> can forget to pass it. Every front-end path routes through it (`resolver::build_graph` ends in
+> `desugar::run`; `chezzi run` re-does that on the VM thread before the compile walk). The other three
+> `parse_interpolation` callers are fallbacks for a literal desugar could NOT parse — malformed, so
+> they re-fail immediately and descend nothing. **Nothing that parsed before stops parsing:**
+> bisected before/after on release, the five shapes are unchanged — double-fold *k* = 16 (~15 968
+> nodes), flat fold 15 997, postfix 15 996, composed `f(g(…)+1×99)` 127, parens 254. What narrowed is
+> only composition: L ≥ 2 now gets `resolve error (line 1, col 39): expression nested too deeply
+> (limit 16000); an interpolated `{…}` fragment nests INSIDE the expression around it and spends the
+> same budget`. Pinned by `check_errors_json::composed_interp_depth_is_bounded_globally` (Rust by
+> necessity — a host SIGABRT and a compile-time refusal are both outside what `recover:` can see),
+> verified to fail on `e1137096` in both profiles.
+>
+> **One residual stays OPEN, and it is why the claim above says "across the interpolation re-parse"
+> and not "globally".** Adversarial review of the fix found it. `desugar`'s `regs` is built once
+> before both passes, so a spliced default is raw AST, and `normalize_call` splices it in the **tail**
+> of the walk — after that node's children were visited. A splice on **pass 2** is never walked and
+> there is no pass 3, so a well-formed interpolated literal inside a default-of-a-default survives as
+> `ExprKind::Str` and is re-parsed downstream with a fresh `Parser`. Measured: `check` rc 0, guard
+> counter **15 995**, real descended tree **~31 986** nodes — **1.03×** the ~33 100 cliff. Latent (no
+> reachable abort) and **pre-existing** (accepted on `e1137096` too). Deferred on ownership: the
+> repair lives in the two-pass driver / `normalize_call`, which **W7-51 is rewriting**. Arm (c) of the
+> test pins the invariant that holds meanwhile — accepted or refused, never a signal kill.
+>
+> Review also caught a real 2-node over-rejection in the first cut: the `Str → Interp` arm re-entered
+> through the depth guard on the SAME node, charging an interpolation two AST levels, which stopped a
+> lone `x := "{ 1+1×15996 }".len()` from building. Fixed (`walk_expr_inner`, not `walk_expr`) and
+> pinned by a FIXED-number test arm — the cap-relative arm had ~97 nodes of slack and could not see a
+> 2-node narrowing.
 >
 > Chezzi suite **493/493 identical** on M:N and `--serial`. Full write-up: `docs/gaps.md` **W7-50**.
 

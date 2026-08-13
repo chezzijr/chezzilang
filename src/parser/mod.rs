@@ -106,6 +106,36 @@ pub const MAX_DEPTH: usize = 512;
 /// loop restores `outer.max(self.fold_depth + chain)`), so a 5 000-element list or a wide argument
 /// list costs the depth of its deepest element, not their sum. `tests::deep_iterative_chains_error_not_crash`
 /// pins breadth, composition, and the double fold above.
+///
+/// **The bound is GLOBAL, and that took a SECOND enforcement point.** Everything above is enforced
+/// by the `Parser` that builds a tree, so on its own it bounds *one parse*. An interpolated `{…}`
+/// fragment is built by a **different** `Parser`: `interpolation::parse_expr_str` re-lexes the
+/// fragment text and calls [`parse_expr`], whose `depth`/`fold_depth` start at zero. Until W7-50
+/// task 3b the budgets therefore **composed** — one fresh 16 000 per level of
+/// `"{ <15 985 deep> }".len()` — and a three-level program type-checked clean at ~46 000 nodes
+/// (measured: peak walk depth 15 000 / 30 000 / 45 000 for one, two, three levels), which SIGABRTed
+/// debug `chezzi run` on the 384 MiB `vm::VM_STACK_BYTES` worker.
+///
+/// The composed depth is now bounded where the composition physically happens:
+/// `desugar::Walker::walk_expr` re-enters its own walk on a parsed fragment's subtree, so its
+/// recursion depth **is** the real depth of the composed tree the checker and compiler then descend,
+/// and it refuses at this same constant. See that method for why every front-end path routes through
+/// it and why the other three `parse_interpolation` callers need no budget of their own. It is a
+/// measurement of the finished tree rather than a remaining-budget parameter threaded through the
+/// re-parse: one number, exact, and no caller can forget to pass it.
+///
+/// So the ~15 968-node worst case and its 2.07× margin above hold across the interpolation re-parse,
+/// not just within a single `parse` call: measured, total accepted depth is ~16 000 at one, two,
+/// three and four nesting levels alike, where it used to be L × 16 000. **One residual keeps this
+/// from being unqualified**: a default argument spliced in on `desugar`'s *second* pass is never
+/// walked, so a well-formed interpolated literal inside one still reaches the checker and compiler
+/// un-converted and doubles the reachable depth to ~31 986 (latent, pre-existing, and owned by the
+/// two-pass driver W7-51 is rewriting — see `desugar::Walker::walk_expr` and `docs/gaps.md` W7-50).
+///
+/// Non-interpolated programs are unaffected — the five bisected shapes are identical before and
+/// after. An interpolated literal is now charged for the nodes it hangs beneath, so a fragment within
+/// ~4 nodes of the ceiling is refused where the parser alone accepted it.
+/// `check_errors_json::composed_interp_depth_is_bounded_globally` detects the interpolation seam.
 pub const MAX_AST_DEPTH: usize = 16_000;
 
 /// Parse a full token stream into a `Module`.
@@ -6134,10 +6164,28 @@ mod tests {
         // on release binaries, `b1307258` accepted k = 30 (~29 940 nodes) where HEAD accepts k = 16
         // (~15 968). `MAX_AST_DEPTH` is a deliberate NARROWING — see that constant.
         //
-        // The assertion is a RATIO, so it survives any future value of `MAX_AST_DEPTH`: the
-        // double-fold shape must accept about HALF the levels of the single-fold one. If a refactor
-        // ever makes one of the two loops stop counting, the two bisections converge and this fails.
+        // The assertion is a RATIO — the double-fold shape must accept about HALF the levels of the
+        // single-fold one — so a refactor that makes one of the two loops stop counting converges
+        // the two bisections and fails this test.
+        //
+        // The ratio holds only while BOTH bisections are bounded by `MAX_AST_DEPTH`. Each `(…)`
+        // level also costs ~2 frames of parse recursion, so the single-fold bisection saturates
+        // against `MAX_DEPTH` at ~254 levels; past that it stops growing with `MAX_AST_DEPTH` while
+        // the double-fold one keeps shrinking, and the ratio assert goes red blaming a fold loop
+        // when the CONSTANT is what moved (measured: `MAX_AST_DEPTH = 60_000` fails exactly so).
+        // Hence the explicit precondition below. It is a `const` block, so past ~51 200 the lib test
+        // target fails to BUILD with that message rather than going red at run time — earlier and
+        // louder, but note it is a compile error, not a test failure.
         const N: usize = 200;
+        const {
+            assert!(
+                MAX_AST_DEPTH / N < MAX_DEPTH / 2,
+                "PRECONDITION, not a fold-loop bug: the ratio assert below needs BOTH bisections \
+                 bounded by MAX_AST_DEPTH, but MAX_AST_DEPTH/N has reached the MAX_DEPTH \
+                 paren-recursion saturation point (~MAX_DEPTH/2 levels). Raise N, or bound the \
+                 claim — the fold loops are not at fault."
+            )
+        };
         let bisect = |mk: &dyn Fn(usize) -> String| -> usize {
             let accepts = |k: usize| parse(lexer::tokenize(&mk(k)).unwrap()).is_ok();
             let (mut lo, mut hi) = (1usize, 2usize);
@@ -6216,12 +6264,20 @@ mod tests {
     #[test]
     fn max_ast_depth_floor_holds() {
         crate::on_frontend_stack(|| {
-            let flat = format!("x := 1{}\n", "+1".repeat(15_000));
+            // 15 950, not 15 000: the flat chain's last accepted length is 15 997 (bisected,
+            // release), so 15 000 left a 998-wide blind spot in which `MAX_AST_DEPTH` could be
+            // shrunk to 15 100 with every depth test still green. This is ~0.3% off the real
+            // ceiling, close enough that any meaningful shrink trips it and far enough that a
+            // one-node accounting change in the parser does not.
+            let flat = format!("x := 1{}\n", "+1".repeat(15_950));
             assert!(
                 parse(lexer::tokenize(&flat).unwrap()).is_ok(),
-                "a flat 15 000-fold chain must still parse — MAX_AST_DEPTH has been shrunk below \
+                "a flat 15 950-fold chain must still parse — MAX_AST_DEPTH has been shrunk below \
                  the floor it shipped promising (16 000). See this test's doc comment."
             );
+            // NOTE the floor's GLOBAL half is not testable here: `parse` leaves a `{…}` fragment as
+            // raw literal text, so the composed budget (`desugar`, see `MAX_AST_DEPTH`) never runs.
+            // `check_errors_json::composed_interp_depth_is_bounded_globally` covers that end to end.
         });
     }
 

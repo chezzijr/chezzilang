@@ -73,6 +73,15 @@ mod conformance;
 /// a clean `too deeply` diagnostic where they previously ran ~10% short of a SIGABRT. (Two earlier
 /// writeups put the old ceiling at 7 500 and at 15 000 and called the change a no-regression; both
 /// undercounted, having measured shapes that spend only one fold loop per level.)
+///
+/// **Both numbers hold across the interpolation re-parse only because a SECOND enforcement point
+/// exists.** A `Parser` bounds the tree *it* builds, and an interpolated `{…}` fragment is built by
+/// another one, so the budgets used to compose (measured: three nested levels type-checked clean at
+/// ~46 000 nodes and SIGABRTed debug `chezzi run`). `desugar::Walker::walk_expr` re-enters its own
+/// walk on a parsed fragment's subtree, so its recursion depth is the composed tree's depth, and it
+/// refuses at `MAX_AST_DEPTH` too. One residual is NOT covered — an interpolated literal inside a
+/// default argument spliced on `desugar`'s second pass is never walked, reaching ~31 986 nodes
+/// (latent, pre-existing, owned by W7-51). See that method and `parser::MAX_AST_DEPTH`.
 pub const FRONTEND_STACK_BYTES: usize = 1024 * 1024 * 1024;
 
 /// Run a front-end pass on a dedicated [`FRONTEND_STACK_BYTES`] stack; see that constant for why.

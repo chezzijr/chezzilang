@@ -261,3 +261,156 @@ fn worst_accepted_nesting_never_signal_crashes() {
         );
     }
 }
+
+/// One level of `"{ <deep> }".len()` nesting, the shape whose budgets used to compose.
+///
+/// `quote` must DIFFER per level: the fragment text is spliced back into a literal of the enclosing
+/// level, so reusing a delimiter fails to lex at level 3. Four styles nest four levels unescaped.
+/// The `k` paren wraps go OUTSIDE the closing quote on purpose — that is what makes the enclosing
+/// parser and the fragment parser each spend a budget of their own. And every value stays `int`
+/// (hence `.len()` after each literal, and `+1` folds), because a type error short-circuits before
+/// the walk that used to abort.
+fn interp_layer(inner: &str, quote: &str, k: usize, folds: usize) -> String {
+    let mut s = format!("{quote}{{ {inner}{} }}{quote}.len()", "+1".repeat(folds));
+    for _ in 0..k {
+        s = format!("({s}{})", "+1".repeat(499));
+    }
+    s
+}
+
+fn interp_nest(levels: usize, k: usize, folds: usize) -> String {
+    const QUOTES: [&str; 4] = ["\"", "'", "\"\"\"", "'''"];
+    let mut s = String::from("1");
+    for i in 0..levels {
+        s = interp_layer(&s, QUOTES[i % 4], k, folds);
+    }
+    format!("print({s})\n")
+}
+
+/// **THE COMPOSED-BUDGET REGRESSION** (W7-50 task 3b). `parser::MAX_AST_DEPTH` is enforced by the
+/// `Parser` that builds a tree, and an interpolated `{…}` fragment is built by a *second* `Parser`
+/// (`interpolation::parse_expr_str`) whose counters start at zero — so the budgets composed and the
+/// bound was per-parse, not global. `desugar::Walker::walk_expr` now bounds the composed depth,
+/// because it re-enters its own walk on the fragment's subtree and therefore sees the real total.
+///
+/// **Pre-fix observation (`e1137096`), recorded so this test's detection is not a guess:** debug
+/// `chezzi run` on the three-level fixture below exited 134 with
+/// `thread '<unknown>' has overflowed its stack / fatal runtime error: stack overflow, aborting` —
+/// an uncatchable host abort on a program that `chezzi check` accepted (rc 0). Release did not abort
+/// but accepted ~46 000 nodes against a ~33 100-node walker cliff. So arm (b) fails pre-fix in BOTH
+/// profiles: `code() == None` in debug, a missing diagnostic in release. Driven through the real
+/// binary in a subprocess so a regression is an assertion failure instead of killing the test run.
+///
+/// This cannot be a `tests/chz/` test: `recover:` catches runtime faults, and this refusal is a
+/// compile-time resolve error — and a host SIGABRT is not observable from inside the program at all.
+#[test]
+fn composed_interp_depth_is_bounded_globally() {
+    let t = TmpDir::new();
+    let cap = chezzi::parser::MAX_AST_DEPTH;
+
+    // (a0) THE TIGHT one, and a FIXED number on purpose. A cap-relative fixture cannot see a
+    // narrowing narrower than its own slack, so it would miss exactly the regression this arm
+    // exists for: charging an interpolation level twice cost ~2 nodes and pushed a lone
+    // `x := "{ 1+1×15996 }".len()` — inside the parser's own flat ceiling of 15 997 — over the cap.
+    // 15 996 is the last folds count that builds; it must keep building.
+    let lone = t.write(
+        "interp_lone.chz",
+        "x := \"{ 1{} }\".len()\n"
+            .replace("{}", &"+1".repeat(15_996))
+            .as_str(),
+    );
+    let out = Command::new(env!("CARGO_BIN_EXE_chezzi"))
+        .args(["check", lone.to_str().unwrap()])
+        .output()
+        .expect("run chezzi check");
+    assert!(
+        out.status.success(),
+        "a LONE 15 996-fold interpolation fragment must still build — the composed bound is \
+         charging an interpolation level more than the one AST level it occupies: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // (a) NO OVER-REJECTION, near the boundary: one level, ~cap−95 nodes deep, still runs. The
+    // fragment holds `1 +1×folds` (value `folds + 1`), the literal stringifies it, `.len()` is its
+    // digit count, and the single paren wrap adds 499 more.
+    let folds = cap - 600;
+    let deep_ok = t.write("interp_ok.chz", &interp_nest(1, 1, folds));
+    let out = Command::new(env!("CARGO_BIN_EXE_chezzi"))
+        .args(["run", deep_ok.to_str().unwrap()])
+        .output()
+        .expect("run chezzi run");
+    assert!(
+        out.status.success(),
+        "a one-level interpolation ~{} nodes deep must still run — the composed bound has narrowed \
+         a single-parse program: {}",
+        folds + 502,
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let expect = (folds + 1).to_string().len() + 499;
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout).trim(),
+        expect.to_string(),
+        "…and must still compute the right value"
+    );
+
+    // (b) THE REGRESSION: three levels, each tuned just under the cap on its own
+    // (`folds + k*499 = 15 485`), so ONLY composition can reject it. Must be a clean diagnostic —
+    // never a signal kill, never an accept.
+    let f = t.write("interp_deep.chz", &interp_nest(3, 15, 8_000));
+    for cmd in ["check", "run"] {
+        let out = Command::new(env!("CARGO_BIN_EXE_chezzi"))
+            .args([cmd, f.to_str().unwrap()])
+            .output()
+            .unwrap_or_else(|e| panic!("run chezzi {cmd}: {e}"));
+        assert!(
+            out.status.code().is_some(),
+            "chezzi {cmd} on three composed interpolation levels signal-crashed the host — the \
+             composed AST-depth bound is gone"
+        );
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            !out.status.success() && stderr.contains("too deeply"),
+            "chezzi {cmd} must refuse three composed levels with a depth diagnostic, got {:?}: \
+             {stderr}",
+            out.status
+        );
+        // Diagnostic quality: the enclosing context consumed the budget, so a bare "too deeply"
+        // pointing inside a fragment would leave the user with no idea why.
+        assert!(
+            stderr.contains("interpolated") && stderr.contains(&cap.to_string()),
+            "the diagnostic must name the interpolation and the limit, got: {stderr}"
+        );
+    }
+
+    // (c) THE KNOWN RESIDUAL, pinned at the only invariant that actually holds today. A default
+    // argument spliced in on desugar's SECOND pass is never walked (`regs` is raw, `normalize_call`
+    // splices in the walk's tail, there is no pass 3), so a well-formed interpolated literal inside
+    // one still reaches the checker and compiler un-converted and doubles the reachable depth to
+    // ~31 986 nodes — ~1.03× the measured ~33 100-node cliff. Latent and PRE-EXISTING (accepted on
+    // `e1137096` too), and the fix belongs in the two-pass driver W7-51 is rewriting, so this does
+    // not assert a refusal. What it asserts is the line that must never be crossed: it may be
+    // accepted, it may be refused, it must NEVER signal-crash the host. See
+    // `desugar::Walker::walk_expr`'s residual note and `docs/gaps.md` W7-50.
+    let f = 15_990;
+    let splice = t.write(
+        "interp_default_splice.chz",
+        &format!(
+            "fn g(a: int = \"{{ 1{f1} }}\".len()) -> int:\n    return a\n\n\
+             fn h(b: int = g()) -> int:\n    return b\n\n\
+             x := h(){f2}\nprint(x)\n",
+            f1 = "+1".repeat(f),
+            f2 = "+1".repeat(f),
+        ),
+    );
+    for cmd in ["check", "run"] {
+        let out = Command::new(env!("CARGO_BIN_EXE_chezzi"))
+            .args([cmd, splice.to_str().unwrap()])
+            .output()
+            .unwrap_or_else(|e| panic!("run chezzi {cmd}: {e}"));
+        assert!(
+            out.status.code().is_some(),
+            "chezzi {cmd} signal-crashed on the pass-2 default-splice seam — that residual went \
+             from latent to LIVE; see desugar::Walker::walk_expr"
+        );
+    }
+}
