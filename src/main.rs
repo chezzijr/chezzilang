@@ -138,7 +138,9 @@ fn cmd_ast(path: Option<&String>) -> ExitCode {
     // outside would materialise the whole render up front (`{:#?}` indentation is quadratic in depth)
     // before the first byte reaches stdout. Only the exit-code mapping stays on the main thread. A
     // broken-pipe panic from `println!` still unwinds through `on_frontend_stack`'s `resume_unwind`
-    // onto this thread with the same message and exit code as before.
+    // onto this thread with the same exit code as before (101). The panic line now names
+    // `<unnamed>` rather than `main`, since the write happens on the spawned thread and
+    // `resume_unwind` does not re-run the panic hook — measured, and the only observable delta.
     let result: Result<(), String> = chezzi::on_frontend_stack(move || {
         let tokens = lexer::tokenize(&source).map_err(|e| e.to_string())?;
         let module = parser::parse(tokens).map_err(|e| e.to_string())?;

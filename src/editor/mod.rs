@@ -272,10 +272,11 @@ pub struct SemTok {
 /// resolver/checker, but it still lexes + parses the buffer (`semantic_overlay`, below) and then
 /// walks the resulting AST with `overlay_expr`'s per-node recursion — the same class of
 /// deep-but-valid-AST overflow those two guard against, on the same ~2 MiB LSP tokio worker
-/// (`textDocument/semanticTokens/full`). The hop has to sit at THIS outer function, not inside
-/// `semantic_overlay`: the deep `Module` built there must also be **dropped** on the big stack
-/// (recursive `Drop` is the same stack trap as recursive walk), and wrapping only the overlay call
-/// would drop it back on the caller's stack the moment the wrap returns. See `crate::on_frontend_stack`.
+/// (`textDocument/semanticTokens/full`). The `Module` is built, walked and **dropped** entirely
+/// inside `semantic_overlay` (recursive `Drop` is the same stack trap as a recursive walk), so
+/// wrapping the overlay call alone would also be sound; the hop sits at THIS outer public function
+/// because that is one spawn per request and it matches [`diagnostics`]/[`hover`], which is the
+/// convention a future entry point should copy. See `crate::on_frontend_stack`.
 pub fn semantic_tokens(source: &str) -> Vec<SemTok> {
     let source = source.to_string();
     crate::on_frontend_stack(move || semantic_tokens_inner(&source))

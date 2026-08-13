@@ -276,8 +276,8 @@ fn extract_data_array(msg: &str) -> Vec<u32> {
 }
 
 /// Minimal JSON string escaping for embedding source text in a hand-written JSON-RPC payload above:
-/// this fixture only ever contains `"`, `\`, and printable ASCII, so a full JSON string encoder is
-/// unneeded.
+/// these fixtures only ever contain newlines and printable ASCII, so handling `"`, `\` and `\n` is
+/// enough and a full JSON string encoder is unneeded.
 fn escape_json_string(s: &str) -> String {
     s.replace('\\', "\\\\")
         .replace('"', "\\\"")
