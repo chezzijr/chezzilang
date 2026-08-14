@@ -1149,3 +1149,52 @@ fn shadowed_module_forward[T: Default](math: Holder, x: T) -> T:
 test fn a_parameter_shadowing_a_std_module_keeps_the_witness():
     assert shadowed_module_forward(Holder(1), Counter(9)).n == 0
     assert shadowed_module_forward(Holder(1), Tag("hi")).s == "none"
+
+# ===== M24-2 — a body whose ONLY witness use is a MEMBER forward is CHARGED =====
+#
+# `h.make[T](x)` spells `T` as a type ARGUMENT (no free-name walk collects those) and heads the call
+# with a RECEIVER (so it is no module-qualified `CallSite` either). Both of the forwarding charge's
+# original channels are blind to it, so the fn was never charged a `$w:T` and its own call was then
+# REJECTED — "no hidden type witness for 'T' is reachable at this call site" — leaving the program
+# with no spelling at all. `Checker::witness_member_names` adds the member channel, keyed on the one
+# coordinate the walk carries: the METHOD NAME. Both directions run below with TWO concrete types, so
+# a wrong witness cannot pass by coincidence.
+
+fn member_only_forward[T: Default](h: Holder, x: T) -> T:
+    return h.make[T](x)
+
+fn member_only_inferred[T: Default](h: Holder, x: T) -> T:
+    return h.make(x)
+
+fn member_only_in_a_closure[T: Default](h: Holder, x: T) -> T:
+    f := fn(): h.make[T](x)
+    return f()
+
+test fn a_member_forward_is_charged_as_the_only_witness_use():
+    assert member_only_forward(Holder(1), Counter(9)).n == 0
+    assert member_only_forward(Holder(1), Tag("hi")).s == "none"
+    # the same call without the turbofish — `T` is inferred from the ARGUMENT, still a forward
+    assert member_only_inferred(Holder(1), Counter(9)).n == 0
+    assert member_only_inferred(Holder(1), Tag("hi")).s == "none"
+    # and through the M24-2 capture: the closure must carry the `$w:T` this charge created
+    assert member_only_in_a_closure(Holder(1), Counter(9)).n == 0
+    assert member_only_in_a_closure(Holder(1), Tag("hi")).s == "none"
+
+# The counterweight, and why the member channel is not just "any member call": a charge COSTS the fn
+# its function-value / `spawn`-target positions, so a call whose every argument is concrete — which
+# pins the callee's own witness and forwards nothing of `T` — must keep answering "not a forward",
+# even though `make` is a witnessed method name on THREE other types in this file.
+
+struct PlainMaker:
+    v: int
+    fn make(self, k: int) -> int:
+        return k + self.v
+
+fn concrete_member_call_keeps_its_value_position[T: Default](x: T, p: PlainMaker) -> int:
+    return p.make(1)
+
+fn apply_maker(f: fn(Counter, PlainMaker) -> int, p: PlainMaker) -> int:
+    return f(Counter(1), p)
+
+test fn a_concrete_member_call_does_not_charge_its_caller():
+    assert apply_maker(concrete_member_call_keeps_its_value_position, PlainMaker(10)) == 11

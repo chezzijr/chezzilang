@@ -6257,6 +6257,15 @@ pub(crate) struct FreeNames {
     /// syntactic walk does not carry. So the readers that must not UNDER-approximate
     /// ([`nested_body_needs_witness`]) treat it as "could be one".
     pub opaque_calls: bool,
+    /// Every `<anything>.m(…)` / `<anything>?.m(…)` the walk passed, as a [`CallSite`] whose `name` is
+    /// the METHOD name — the one thing a member call carries that a syntactic walk can match against
+    /// a declaration — and whose `module` is the head ident when there is one. Recorded for EVERY
+    /// field-headed callee, including the ones that also land in `calls` (`lib.f(…)`, `T.default()`):
+    /// the head's MEANING is exactly what those two channels disagree about, and a reader that must
+    /// not under-approximate wants both readings. `Checker::witness_params_of` uses it to charge a
+    /// body whose only witness use is a MEMBER forward (`h.build[T](x)`), which appears in neither
+    /// `names` (`T` is a type ARGUMENT) nor `calls` (the head is a receiver).
+    pub member_calls: Vec<CallSite>,
 }
 
 /// One call the free-name walk passed, recorded only when the callee is a plain name or a
@@ -6290,13 +6299,24 @@ fn record_call_site(
 ) {
     let (module, name) = match &callee.kind {
         ExprKind::Ident(n) if !bound.contains(n) => (None, n.clone()),
-        ExprKind::Field { obj, name, .. } => match &obj.kind {
-            ExprKind::Ident(m) if !bound.contains(m) => (Some(m.clone()), name.clone()),
-            _ => {
-                out.opaque_calls = true;
-                return;
+        ExprKind::Field { obj, name, .. } => {
+            // Every field-headed callee is a possible MEMBER call, whatever its head turns out to be.
+            out.member_calls.push(CallSite {
+                module: match &obj.kind {
+                    ExprKind::Ident(m) => Some(m.clone()),
+                    _ => None,
+                },
+                name: name.clone(),
+                closed_arg_heads: closed_arg_heads(args, named, type_args, bound),
+            });
+            match &obj.kind {
+                ExprKind::Ident(m) if !bound.contains(m) => (Some(m.clone()), name.clone()),
+                _ => {
+                    out.opaque_calls = true;
+                    return;
+                }
             }
-        },
+        }
         _ => {
             out.opaque_calls = true;
             return;
@@ -6593,12 +6613,22 @@ pub(crate) fn free_names_expr(e: &Expr, bound: &HashSet<String>, out: &mut FreeN
         ExprKind::Field { obj, .. } => {
             free_names_expr(obj, bound, out);
         }
-        ExprKind::OptChain { obj, call, .. } => {
+        ExprKind::OptChain {
+            obj, call, name, ..
+        } => {
             free_names_expr(obj, bound, out);
             if let Some(c) = call {
-                // `a?.m(…)` is a member call this walk records nothing for — and a member call is a
-                // possible witness call (see [`FreeNames::opaque_calls`]).
+                // `a?.m(…)` is a member call `record_call_site` never sees — and a member call is a
+                // possible witness call (see [`FreeNames::opaque_calls`] / `member_calls`).
                 out.opaque_calls = true;
+                // No type-argument channel on an `?.` call (`a?.m[T]()` does not parse), and the
+                // arguments are the ordinary ones — so the pin question is asked exactly as it is
+                // for a plain member call.
+                out.member_calls.push(CallSite {
+                    module: None,
+                    name: name.clone(),
+                    closed_arg_heads: closed_arg_heads(&c.args, &c.named, &[], bound),
+                });
                 c.args.iter().for_each(|a| free_names_expr(a, bound, out));
                 c.named
                     .iter()

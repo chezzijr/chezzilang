@@ -1443,9 +1443,21 @@ in expression position (`T.default()`), or it *forwards* — it calls a witness-
 could pass its own still-abstract `T` along. A call whose arguments are all concrete forwards nothing
 (`fn concrete[T: Default](x: T) -> int: return reset(Counter(1)).n` keeps its value position), and
 merely naming a module that exports a witness-taking fn is not a call to it (`lib.plain(1)` costs
-nothing, `lib.reset(x)` charges). Anything the rule cannot positively read as concrete charges —
-a zero-argument call, a local, a turbofish naming `T`, a generic constructor head — because an
-under-charge is a forward the checker then has to refuse.
+nothing, `lib.reset(x)` charges). A **member** forward charges the same way (`h.build[T](x)`, and
+`h.build(x)` with `x: T`) — even when that is the body's ONLY use of `T`, which no free-name reading
+of the body could see: the type argument is not a name, and the receiver is not a module. A member
+call is judged by its METHOD NAME, so a concrete call to a method that merely SHARES a name with a
+witnessed one still costs nothing (`p.build(1)`), while any same-named method being witnessed
+anywhere in the program makes an unpinned one charge. Anything the rule cannot positively read as
+concrete charges — a zero-argument call, a local, a turbofish naming `T`, a generic constructor head
+— because an under-charge is a forward the checker then has to refuse.
+
+One shape is still refused for want of a charge, and it is the same fence on both channels: a `T`
+that occurs in **neither** a parameter type nor the return type of its own fn is never charged for a
+forward (`fn f[T: Default](h: Holder, k: int) -> int: q := h.mk[T](); return k`, and the free-fn
+`q := empty[T]()` equally), because a charge whose type no argument can determine would make the fn
+uncallable. Give `T` a place in the signature, or construct through it directly (`T.default()`),
+which is charged regardless.
 
 A type parameter **SHADOWS a same-named declaration for its whole body, in every position** — the
 annotation `x: Item`, the static call `Item.tag()`, the type-level turbofish `Item[int].tag()`, the

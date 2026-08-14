@@ -1516,7 +1516,17 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > that program to a runtime `no type witness in scope` on both engines. **The narrowing covers a
 > small slice on purpose:** any call whose head is a non-module ident, any `a.b.c()`, `xs[i].m()`,
 > `f()()`, `a?.m()` or shadowed module name retains EVERY witness, so the win is confined to nested
-> bodies doing only arithmetic, indexing and free-fn calls. **M24-1 is also FIXED** (2026-08-14):
+> bodies doing only arithmetic, indexing and free-fn calls. **The CHECKER's matching member blind spot
+> is closed in the same pass:** its forwarding charge read free names and module-qualified calls only,
+> so `fn f[T: Default](h: Holder, x: T) -> T: return h.build[T](x)` — whose only use of `T` is a
+> member forward — was never charged and was then rejected with *"no hidden type witness for 'T' is
+> reachable"*, unwritable in any spelling. The free-name walk gained a MEMBER channel and the checker
+> a graph-wide method-name index (name → can ARGUMENTS pin this witness?), built from the declarations
+> at the hoist so the free-fn fixpoint can read it. A member call with all-concrete arguments still
+> charges nothing, which is what keeps `p.build(1)` from costing its enclosing generic the
+> function-value position. One shape stays refused on purpose — a `T` in neither a parameter nor the
+> return type — because that fence (`ty_param_in_sig`) answers the same on the free-fn channel and
+> lifting it needs types the hoist does not have. **M24-1 is also FIXED** (2026-08-14):
 > the forwarding charge was two name-only questions over the whole body, and it is now one question
 > per CALL SITE. A body calling a witness-taking fn with only concrete arguments
 > (`return reset(Counter(1)).n`) keeps its fn-VALUE position, and a struct method that merely shares

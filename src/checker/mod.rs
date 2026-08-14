@@ -1978,6 +1978,30 @@ struct Checker {
     /// A type param of the enclosing TYPE (`struct Bx[T]`) is never in here: its
     /// witness would have to live in the instance, which is a different mechanism.
     witness_scope: Vec<String>,
+    /// M24-2 — every METHOD NAME in the program that MIGHT take hidden witness arguments (a method of
+    /// a struct / enum / newtype declaring a type param with a static-carrying bound), mapped to
+    /// whether ARGUMENTS can pin that witness: `true` iff every such param of every declaration with
+    /// this name occurs in that declaration's PARAMETER types. Graph-wide and never cleared per
+    /// module — modules are checked deps-first, so an imported type's methods are already in here
+    /// when an importer hoists.
+    ///
+    /// It answers the one question a member call lets a syntactic walk ask. A member witness call
+    /// (`h.build[T](x)`) is invisible to both of [`Checker::witness_params_of`]'s other channels —
+    /// `T` is a type ARGUMENT, not a free name, and the head is a RECEIVER, not a module — so
+    /// without this the fn is never charged and `h.build[T](x)` is REJECTED ("no hidden type witness
+    /// for 'T' is reachable at this call site") in a program that has no other way to be written.
+    ///
+    /// Deliberately keyed on the NAME alone, and on the DECLARATION rather than on the derived
+    /// [`FnSig::witness_params`]: the name is all a pre-type walk has, and the declaration is the
+    /// only reading that does not depend on the fixpoint's own output — which keeps this monotone and
+    /// order-independent, so the free-fn fixpoint can read it before methods are finalized. Both
+    /// approximations err toward CHARGING, which is the safe direction (an under-charge is a call the
+    /// checker accepts and the compiler cannot lower). The pinnability flag exists because the OTHER
+    /// direction is not free either: a charge costs the fn its function-value / `spawn`-target
+    /// positions, so `p.build(1)` — every argument concrete, the witness determined by them — must
+    /// keep answering "not a forward" even when some *other* type's `build` takes a witness. It is
+    /// the member twin of [`Checker::call_forwards_a_witness`]'s `args_pin_the_witnesses`.
+    witness_member_names: std::collections::HashMap<String, bool>,
     /// M24 — the manifest `[project] entrypoint`'s FUNCTION name, when this check is for a bare
     /// `chezzi run` (`check_graph_with_entry`). `None` for `chezzi check <file>` and every library
     /// caller: a file run never invokes a function by name.

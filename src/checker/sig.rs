@@ -942,24 +942,7 @@ impl Checker {
     /// stored on [`FnSig::witness_params`] and every consumer reads it from there. The compiler never
     /// asks it (it cannot — protocol identity resolves through imports/aliases/embeds).
     pub(super) fn witness_params_of(&self, decl: &FnDecl) -> Vec<String> {
-        let cands: Vec<String> = decl
-            .type_params
-            .iter()
-            .filter(|tp| {
-                // A free fn's `where T: P` is merged into `type_params` by `fn_sig`, but this runs
-                // BEFORE/independently of that merge, so consider both spellings.
-                let wheres = decl
-                    .where_bounds
-                    .iter()
-                    .filter(|w| w.name == tp.name)
-                    .flat_map(|w| w.bounds.iter());
-                tp.bounds
-                    .iter()
-                    .chain(wheres)
-                    .any(|b| self.protocol_has_static_method(&b.name))
-            })
-            .map(|tp| tp.name.clone())
-            .collect();
+        let cands = self.static_bounded_type_params(decl);
         if cands.is_empty() {
             return cands; // the overwhelmingly common case — no body walk at all
         }
@@ -982,13 +965,50 @@ impl Checker {
         // call the checker accepts and the compiler cannot lower.
         // The question is asked PER CALL SITE ([`crate::compiler::CallSite`]), never over the body's
         // name set: a name is not a call, and a call is not necessarily a forward.
+        // M24-2 — the MEMBER channel. A member witness call (`h.build[T](x)`) shows up in neither
+        // `mentioned` (`T` is a type ARGUMENT, which no free-name walk collects) nor `calls` (its head
+        // is a RECEIVER, not a module), so without this the body is never charged and its own
+        // `h.build[T](x)` is then REJECTED — "no hidden type witness for 'T' is reachable at this
+        // call site" — with no way to write the program at all. What the walk carries is the METHOD
+        // NAME; `witness_member_names` is the set of names that might take witnesses, indexed off the
+        // DECLARATIONS at the hoist. Name-keyed, so a same-named method on an unrelated type charges
+        // too: over-charge is the safe direction here, and `ty_param_in_sig` below still keeps the
+        // charged param determinable at every call site.
         let forwards = walk
             .calls
             .iter()
-            .any(|c| self.call_forwards_a_witness(c, decl));
+            .any(|c| self.call_forwards_a_witness(c, decl))
+            || walk
+                .member_calls
+                .iter()
+                .any(|c| self.member_call_forwards_a_witness(c, decl));
         cands
             .into_iter()
-            .filter(|t| mentioned.contains(t) || (forwards && Self::ty_param_in_sig(decl, t)))
+            .filter(|t| mentioned.contains(t) || (forwards && Self::ty_param_in_sig(decl, t, true)))
+            .collect()
+    }
+
+    /// M24 — `decl`'s type params with at least one bound (declared or `where`) whose protocol
+    /// carries a STATIC requirement: the CANDIDATES for a hidden witness argument, before any body
+    /// question. Read by [`Self::witness_params_of`] and, for methods, by the hoist's
+    /// [`Checker::witness_member_names`] index — which must key on the declaration alone.
+    pub(super) fn static_bounded_type_params(&self, decl: &FnDecl) -> Vec<String> {
+        decl.type_params
+            .iter()
+            .filter(|tp| {
+                // A free fn's `where T: P` is merged into `type_params` by `fn_sig`, but this runs
+                // BEFORE/independently of that merge, so consider both spellings.
+                let wheres = decl
+                    .where_bounds
+                    .iter()
+                    .filter(|w| w.name == tp.name)
+                    .flat_map(|w| w.bounds.iter());
+                tp.bounds
+                    .iter()
+                    .chain(wheres)
+                    .any(|b| self.protocol_has_static_method(&b.name))
+            })
+            .map(|tp| tp.name.clone())
             .collect()
     }
 
@@ -1038,6 +1058,31 @@ impl Checker {
         !args_pin_the_witnesses
     }
 
+    /// M24-2 — does this ONE MEMBER call site inside `decl`'s body forward a witness of `decl`'s own?
+    /// The member twin of [`Self::call_forwards_a_witness`], asking the same two questions off the
+    /// only coordinate a member call gives a pre-type walk — its METHOD NAME:
+    /// * **could the callee take witnesses at all?** [`Checker::witness_member_names`] holds every
+    ///   method name declared with a static-carrying bound. Name-keyed, so a same-named method on an
+    ///   unrelated type answers yes too — the walk cannot know the receiver's type, and the
+    ///   over-charge only costs positions.
+    /// * **could `decl`'s own type param be what is forwarded?** Same argument-pinning test as the
+    ///   free-fn twin, with the name-keyed pinnability flag standing in for the callee's
+    ///   `witness_params`: a call whose every argument is a concrete constructor pins the callee's
+    ///   witness itself and forwards nothing — which is what keeps `p.build(1)` from charging its
+    ///   enclosing generic merely because some other type's `build` is witnessed. A turbofish or an
+    ///   EMPTY argument list is never "closed" ([`crate::compiler::CallSite::closed_arg_heads`]), so
+    ///   `h.build[T](x)` and `h.mk[T]()` both forward.
+    fn member_call_forwards_a_witness(&self, c: &crate::compiler::CallSite, decl: &FnDecl) -> bool {
+        let Some(&pinnable) = self.witness_member_names.get(&c.name) else {
+            return false;
+        };
+        let args_pin = pinnable
+            && c.closed_arg_heads
+                .as_ref()
+                .is_some_and(|heads| heads.iter().all(|h| self.concrete_ctor_head(h, decl)));
+        !args_pin
+    }
+
     /// M24 — does the call-argument constructor head `head` name a NON-GENERIC struct visible here?
     /// Then `head(…)`'s type is fixed by the declaration alone and cannot mention any type parameter.
     /// Anything else is `false` (charge): one of `decl`'s own type params, a plain function whose
@@ -1084,11 +1129,14 @@ impl Checker {
         sig.params.iter().any(|p| subst(p, &probe) != *p)
     }
 
-    /// M24 — does type param `t` occur in `decl`'s own signature (any parameter's annotation or the
-    /// return annotation)? A param that occurs in NEITHER can never be bound by a call site, so it
-    /// can never be the type a witness is forwarded for — charging it would only make the fn
-    /// uncallable. Syntactic on purpose: this runs at the signature hoist, before resolution.
-    fn ty_param_in_sig(decl: &FnDecl, t: &str) -> bool {
+    /// M24 — does type param `t` occur in `decl`'s own signature (any parameter's annotation and,
+    /// with `with_ret`, the return annotation)? A param that occurs in NEITHER can never be bound by
+    /// a call site, so it can never be the type a witness is forwarded for — charging it would only
+    /// make the fn uncallable. Syntactic on purpose: this runs at the signature hoist, before
+    /// resolution. `with_ret = false` asks the PARAMS only, which is the different question "can this
+    /// declaration's witness be pinned by ARGUMENTS?" — the decl-side twin of
+    /// [`Self::ty_param_in_params`], used to index a member's pinnability at the hoist.
+    pub(super) fn ty_param_in_sig(decl: &FnDecl, t: &str, with_ret: bool) -> bool {
         fn mentions(ty: &crate::ast::Type, t: &str) -> bool {
             match ty {
                 crate::ast::Type::Named { name, .. } => name == t,
@@ -1105,7 +1153,7 @@ impl Checker {
         decl.params
             .iter()
             .filter_map(|p| p.ty.as_ref())
-            .chain(decl.ret.as_ref())
+            .chain(decl.ret.as_ref().filter(|_| with_ret))
             .any(|ty| mentions(ty, t))
     }
 

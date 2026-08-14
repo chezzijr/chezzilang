@@ -63,6 +63,7 @@ impl Checker {
             table_conflicts: Vec::new(),
             next_opt_tmp: 0,
             witness_scope: Vec::new(),
+            witness_member_names: std::collections::HashMap::new(),
             entry_fn: None,
             graph_module_idx: 0,
             kw_frag_ctx: Span::default(),
@@ -2903,6 +2904,35 @@ impl Checker {
         // unconditional backstop, not the argument: were some future edit to break that one-way
         // property too, this loop would still EXIT — with the last pass's state, which need not be a
         // fixpoint — rather than spin.
+        // M24-2 — index the MEMBER names that might take witnesses BEFORE either loop below. A body
+        // whose only witness use is a member forward (`h.build[T](x)`) is charged off this set
+        // (`Checker::witness_member_names`), and reading the DECLARATION rather than the derived
+        // `witness_params` is what makes that legal here: it needs no fixpoint of its own, so the
+        // free-fn loop can consult it while method charges are still unfinished.
+        for s in stmts {
+            let methods = match &s.kind {
+                StmtKind::Struct { methods, .. }
+                | StmtKind::Enum { methods, .. }
+                | StmtKind::NewType { methods, .. } => methods,
+                _ => continue,
+            };
+            for m in methods {
+                let cands = self.static_bounded_type_params(m);
+                if cands.is_empty() {
+                    continue;
+                }
+                // Can a CALL's arguments pin this declaration's witness? Only if every candidate
+                // occurs in a PARAMETER type — one that occurs solely in the return type is inferred
+                // from the expected type at the call site, which may be the caller's own `T`.
+                let pinnable = cands.iter().all(|t| Checker::ty_param_in_sig(m, t, false));
+                // Name-keyed across every declaring type, so the CONSERVATIVE reading wins: one
+                // unpinnable `build` makes every `x.build(...)` unpinnable.
+                self.witness_member_names
+                    .entry(m.name.clone())
+                    .and_modify(|p| *p &= pinnable)
+                    .or_insert(pinnable);
+            }
+        }
         let fn_decls: Vec<&crate::ast::FnDecl> = stmts
             .iter()
             .filter_map(|s| match &s.kind {
