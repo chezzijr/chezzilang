@@ -3,6 +3,34 @@
 
 use super::*;
 
+/// §2c1 — the RAII pair [`Vm::block_party_guard`] hands back: the process-wide blocked-party
+/// registration (absent when this thread is not a counted party) plus the `body_blocked` marks on
+/// every eager nursery this thread owns. Both are released together when the block returns.
+///
+/// The marks are what let a genuine `main`-plus-sibling deadlock still FAULT under §2c1's eager
+/// start: a top-level nursery's `body_open` spans essentially the whole program, and it vetoes the
+/// deadlock predicate, so without clearing it for the duration of the block the verdict could never
+/// fire. See [`super::JoinScope::body_blocked`].
+pub(super) struct BlockGuard {
+    _party: Option<quiesce::PartyGuard>,
+    /// Whether this guard also raised `awaiting_builder` — a NESTED-JOIN block does, a channel block
+    /// does not. See `MnSched::set_body_blocked`.
+    awaiting: bool,
+    bodies: Vec<(Arc<MnSched>, usize)>,
+    /// This block's wait, published on every sched in `bodies` for the duration. See
+    /// `SchedCore::body_waits` — this is what keeps the `body_blocked` relaxation from false-faulting
+    /// a rendezvous. `None` for a nested-join block, which waits on no channel.
+    wait: Option<Arc<quiesce::PartyWait>>,
+}
+
+impl Drop for BlockGuard {
+    fn drop(&mut self) {
+        for (s, scope) in &self.bodies {
+            s.set_body_wait(*scope, self.wait.as_ref(), false, self.awaiting);
+        }
+    }
+}
+
 /// Generate a `pub(super) fn <name>(&self, GcRef) -> Arc<CoreType>` that clones out the shared
 /// `Arc` behind a handle of the given `Obj` variant (refcount bump). See [`Vm::channel_core`] for
 /// the rationale (the `Arc` is held only for the calling method, so it does not borrow the heap);
@@ -21,10 +49,16 @@ macro_rules! core_accessor {
 /// The shared fault for a `send` on a FULL bounded channel that cannot park (top level with no
 /// nursery, or inside a native callback). ONE const so every non-parkable full-send path — on BOTH
 /// engines — emits byte-identical text (parity). Mirrors `chan_recv_step`'s empty-recv deadlock note.
+///
+/// §2c1 — the spawn hint is now scoped to `--serial` and says so. It used to read "*the nursery body
+/// runs before its spawned tasks start*" unqualified, which is false on the M:N engine (a task starts
+/// at its `spawn`) but still TRUE on the cooperative one, where it is also the only guidance a user
+/// gets. Deleting it outright regressed `--serial` diagnostics; naming the engine keeps one const,
+/// keeps the two engines byte-identical, and keeps every word of it true on both.
 const FULL_SEND_DEADLOCK: &str = "send on a full channel: deadlock — the bounded channel is at \
-    capacity and no runnable task can receive to free a slot. If a consumer is spawned in the same \
-    `parallel:` nursery, note the nursery body runs before its spawned tasks start, so a blocking \
-    send in the body can't reach it — put the producer in a `spawn:` too.";
+    capacity and no runnable task can receive to free a slot. (On `--serial` a spawned consumer does \
+    not start until the nursery's join, so a blocking send in the body cannot reach it — drop \
+    `--serial`, or put the producer in a `spawn:` too.)";
 
 /// The shared fault for a `send` to a CLOSED channel. ONE const for the same reason
 /// [`FULL_SEND_DEADLOCK`] is one: the top-of-`send` guard, the `wait:` send arm and the eager
@@ -41,15 +75,15 @@ const CLOSED_RECV: &str = "receive on a closed channel";
 /// and was then judged deadlocked by the process-wide verdict ([`crate::vm::quiesce`]): ONE const so
 /// every spelling of the same verdict is byte-identical.
 const EMPTY_RECV_DEADLOCK: &str = "recv on an empty channel: deadlock — no runnable task can send. \
-    If a producer is spawned in the same `parallel:` nursery, note the nursery body runs before its \
-    spawned tasks start, so a blocking recv / `for v in ch:` in the body can't reach it — put the \
-    consumer in a `spawn:` too.";
+    (On `--serial` a spawned producer does not start until the nursery's join, so a blocking recv / \
+    `for v in ch:` in the body cannot reach it — drop `--serial`, or put the consumer in a `spawn:` \
+    too.)";
 
 /// The `wait:` sibling of [`EMPTY_RECV_DEADLOCK`] — every arm empty and nobody left to send.
 const EMPTY_WAIT_DEADLOCK: &str = "wait on channels that are all empty: deadlock — no runnable task \
-    can send. If a producer is spawned in the same `parallel:` nursery, note the nursery body runs \
-    before its spawned tasks start, so a blocking `wait:` in the body can't reach it — put the \
-    `wait:` in a `spawn:` too.";
+    can send. (On `--serial` a spawned producer does not start until the nursery's join, so a \
+    blocking `wait:` in the body cannot reach it — drop `--serial`, or put the `wait:` in a `spawn:` \
+    too.)";
 
 /// Test-only instrumentation: how many waits [`Vm::block_wait_tick`] has performed, process-wide.
 /// A COVERAGE floor for [`BLOCK_WAITS_SLEPT_WHILE_READY`] — "this program really did block on a
@@ -2078,12 +2112,62 @@ impl Vm {
     }
 
     /// Register this thread as a blocked party for as long as the returned guard lives, so the
-    /// process-wide verdict can see it parked. `None` when this thread is not a counted party.
-    pub(super) fn block_party_guard(
+    /// process-wide verdict can see it parked. The party half is `None` when this thread is not a
+    /// counted party.
+    ///
+    /// §2c1 — it ALSO marks every eager nursery this thread owns as `body_blocked` for the same span.
+    /// A body that is parked here cannot reach another `spawn`, so its `body_open` flag must stop
+    /// vetoing the deadlock predicate (see [`super::JoinScope::body_blocked`]). This is the one funnel
+    /// every counted-party block goes through, which is why the mark lives here rather than at each
+    /// blocking site. Unmarked on drop, in `BlockGuard`'s `Drop`.
+    pub(super) fn block_party_guard(&self, wait: quiesce::PartyWait) -> BlockGuard {
+        // The wait is published WITH the `body_blocked` mark, in one `SchedCore` acquisition per
+        // sched (`set_body_wait`) — see its doc for the race that two acquisitions leave open. The
+        // party (P) is taken after, with no `SchedCore` held, so the documented P → A order holds.
+        // ONE `Arc<PartyWait>` is shared by the sched registration and the party, so the two can
+        // never disagree about what this thread is waiting for.
+        let wait = Arc::new(wait);
+        let mut g = self.blocked_bodies_guard_with(false, Some(Arc::clone(&wait)));
+        g._party = self
+            .is_counted_party()
+            .then(|| self.quiesce.block_shared(wait));
+        g
+    }
+
+    /// §2c1 — the `body_blocked` half of [`Vm::block_party_guard`] on its own: mark every eager
+    /// nursery scope open on THIS thread as unable to inject, for as long as the guard lives.
+    ///
+    /// Used directly wherever the body stops running without registering a party — a NESTED eager
+    /// nursery's join, where the enclosing body sits in `mn_worker_loop` rather than in a channel
+    /// wait. Without it the enclosing scope's `body_open` vetoes the deadlock predicate for the whole
+    /// duration of that join, and a genuine nested deadlock hangs
+    /// (`parallel_cross_nursery_genuine_nested_deadlock_still_faults`).
+    pub(super) fn blocked_bodies_guard(&self, awaiting_builder: bool) -> BlockGuard {
+        self.blocked_bodies_guard_with(awaiting_builder, None)
+    }
+
+    /// [`Vm::blocked_bodies_guard`] plus the wait this block is on — published on every eager sched of
+    /// this thread, atomically with the `body_blocked` mark.
+    fn blocked_bodies_guard_with(
         &self,
-        wait: quiesce::PartyWait,
-    ) -> Option<quiesce::PartyGuard> {
-        self.is_counted_party().then(|| self.quiesce.block(wait))
+        awaiting_builder: bool,
+        wait: Option<Arc<quiesce::PartyWait>>,
+    ) -> BlockGuard {
+        BlockGuard {
+            _party: None,
+            awaiting: awaiting_builder,
+            bodies: self
+                .eager_scheds
+                .iter()
+                .flatten()
+                .map(|s| {
+                    s.sched
+                        .set_body_wait(s.scope, wait.as_ref(), true, awaiting_builder);
+                    (Arc::clone(&s.sched), s.scope)
+                })
+                .collect(),
+            wait,
+        }
     }
 
     /// The `chezzi test --timeout` wall-clock halt, on its own so the ops that PARK a fiber can observe

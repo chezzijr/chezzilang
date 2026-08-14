@@ -1386,7 +1386,7 @@ impl Vm {
                         // Reclaim any `parallel:` nursery the fault unwound past (its `JoinNursery`
                         // never ran) — the nursery list is always reclaimed on unwind.
                         // TASK B: route through `drain_escaped_nursery` so a `?` caught by `recover:`
-                        // cancels-and-reports its unstarted tasks IDENTICALLY to an uncaught `?`.
+                        // cancels its tasks IDENTICALLY to an uncaught `?`.
                         self.drain_escaped_nursery(h.nursery_len);
                         if self.pending_exit.is_some() {
                             return Err(rte);
@@ -1720,6 +1720,64 @@ impl Vm {
     /// to happen HERE, where the child's flag chain is built. The serial engine severs identically
     /// (`run_scheduler`'s `in_defer` → `self.cancel.take()`, sched.rs) — that is what this keeps parity
     /// with. The defer's OWN nursery still gets a fresh flag, so it can cancel its own children.
+    /// `Op::EnterNursery` — outlined from the dispatch `match` deliberately.
+    ///
+    /// §2c1 grew this arm from three lines to a page, and `run_until`'s hot loop pays for every arm's
+    /// code size whether or not the program ever reaches it: `benches/loop.chz` executes no nursery
+    /// opcode at all and still measured **+3.1%** with the arm inline (1437 → 1481 ms, medians of 80
+    /// runs, minima non-overlapping), the same shape `W7-57` measured at +4.5% on this same bench.
+    /// `#[inline(never)]` keeps the arm one call instruction.
+    #[inline(never)]
+    fn op_enter_nursery(&mut self) {
+        // W6-2 — invalidation rule 2: a nursery's tasks must see module globals as of THIS open,
+        // and a global holding a mutable aggregate can have been mutated IN PLACE (`q.push(1)`,
+        // `m[k] = v`, `p.x = 1`) since the cached snapshot was built, with no module-slot write
+        // for rule 1 (`set_global_slot`/`module_define`) to catch. So drop a non-`reusable` cache
+        // entry here; an all-immutable view keeps its one snapshot for the whole run (a
+        // nursery-in-a-loop program builds exactly one). See `ModuleSnapshot::reusable`.
+        if self.snapshot_memo.as_ref().is_some_and(|s| !s.reusable) {
+            self.snapshot_memo = None;
+            // W7-4c — the registry numbers that snapshot; drop it with the cache.
+            self.snapshot_cells = std::sync::Arc::new(super::fxhash::FxHashMap::default());
+        }
+        self.nurseries.push(Vec::new());
+        self.mn_scopes.push(None); // lockstep — set Some(scope_id) only if early-enlisted
+        // TASK B — capture this parallel body's defer floor so a recover-scoped `?` can run
+        // the body's defers before the nursery reclaim (see `nursery_defer_floors`).
+        let floor = self.frames.last().map(|f| f.deferred.len()).unwrap_or(0);
+        self.nursery_defer_floors.push(floor);
+        // §2c1 — EVERY nursery on the M:N engine activates an EAGER sched NOW, so a `spawn`
+        // in the body injects a LIVE fiber that runs concurrently with the rest of the body.
+        // That is Go's `go f()`: the task starts at the `spawn`, and the join keeps its own
+        // (orthogonal) job of guaranteeing COMPLETION by the barrier. The cooperative engine
+        // stays lazy (queue-at-join → `None`) — it has one thread, so Go's semantics are
+        // unreachable on it by construction (`docs/future.md` §2b/§2c1).
+        //
+        // `mn.is_some()` WAS the defect and is gone: a top-level nursery has no worker shell,
+        // so it was lazy by construction and its tasks could not start until the join. A
+        // nursery entered on a thread that already has an eager scope open does not build a
+        // sched at all — it registers a SCOPE on that one (`activate_eager_nursery`), which is
+        // what keeps sibling nurseries mutually visible.
+        //
+        // `worker_count() >= 2` STAYS, and only for `mn.is_some()` — a nursery entered inside a
+        // spawned task, the one shape that still builds a private sched with its own dedicated
+        // raw drainer thread. That is the case its original rationale was written for (an eager
+        // inner join blocking its parent's OUTER worker while a handler needs an outer sibling
+        // to progress — impossible when the outer nursery has one worker), and it is also the
+        // only per-nursery THREAD source left: dropping it broke `pool.rs`'s documented bound
+        // that live threads stay at `N + joiners` "regardless of `parallel:` nesting depth" —
+        // measured, depth 7 / 128 leaves at `--threads=1` went 3 threads → 130.
+        //
+        // A top-level nursery has no outer worker to starve and creates exactly ONE drainer per
+        // thread, so it is unconditional.
+        let eager = self.parallel && (self.mn.is_none() || worker_count() >= 2);
+        // `flatten` — `activate_eager_nursery` returns `None` if the OS refuses its drainer
+        // thread, which falls back to the lazy queue-at-join path rather than leaving a
+        // worker-less eager scope that would hang a blocking body.
+        let scope = eager.then(|| self.activate_eager_nursery()).flatten();
+        self.eager_scheds.push(scope);
+    }
+
     pub(super) fn scope_ancestors(&self) -> Vec<Arc<AtomicBool>> {
         if self.deferring > 0 {
             return Vec::new();
@@ -2434,43 +2492,9 @@ impl Vm {
                 };
                 return Err(self.err(format!("no match arm for variant '{variant}'"), span));
             }
-            Op::EnterNursery => {
-                // W6-2 — invalidation rule 2: a nursery's tasks must see module globals as of THIS open,
-                // and a global holding a mutable aggregate can have been mutated IN PLACE (`q.push(1)`,
-                // `m[k] = v`, `p.x = 1`) since the cached snapshot was built, with no module-slot write
-                // for rule 1 (`set_global_slot`/`module_define`) to catch. So drop a non-`reusable` cache
-                // entry here; an all-immutable view keeps its one snapshot for the whole run (a
-                // nursery-in-a-loop program builds exactly one). See `ModuleSnapshot::reusable`.
-                if self.snapshot_memo.as_ref().is_some_and(|s| !s.reusable) {
-                    self.snapshot_memo = None;
-                    // W7-4c — the registry numbers that snapshot; drop it with the cache.
-                    self.snapshot_cells = std::sync::Arc::new(super::fxhash::FxHashMap::default());
-                }
-                self.nurseries.push(Vec::new());
-                self.mn_scopes.push(None); // lockstep — set Some(scope_id) only if early-enlisted
-                // TASK B — capture this parallel body's defer floor so a recover-scoped `?` can run
-                // the body's defers before the cancel-report (see `nursery_defer_floors`).
-                let floor = self.frames.last().map(|f| f.deferred.len()).unwrap_or(0);
-                self.nursery_defer_floors.push(floor);
-                // Per-connection spawn — a NESTED nursery under `--parallel` (entered inside a live
-                // fiber, `mn.is_some()`) activates an EAGER sched NOW so `spawn`s in the body inject
-                // handlers that run concurrently with the accept loop. The top-level nursery
-                // (`mn.is_none()`) and the cooperative engine stay lazy (queue-at-join → `None`).
-                //
-                // Gated on ≥2 hardware threads: an eager inner join blocks the parent's OUTER worker
-                // (decision B — parent participates) while it waits for handlers, and a handler that
-                // services an OUTER sibling (a client) needs that sibling to make progress — which it
-                // can't if the outer nursery has only ONE worker (a 1-core box → every nursery is
-                // single-worker → deadlock). With ≥2 hw threads the outer nursery has a spare worker.
-                // On a single core we fall back to the lazy queue-at-join path (handlers drain at the
-                // join), which still serves a realistic parallel-client server and never deadlocks —
-                // and `--parallel` on one core is already a degenerate config.
-                let eager = self.parallel && self.mn.is_some() && worker_count() >= 2;
-                let scope = eager.then(|| self.activate_eager_nursery());
-                self.eager_scheds.push(scope);
-            }
+            Op::EnterNursery => self.op_enter_nursery(),
             Op::JoinNursery => self.join_nursery()?,
-            // TASK B — `break`/`continue` leaving a `parallel:` scope: cancel-and-report its unstarted
+            // TASK B — `break`/`continue` leaving a `parallel:` scope: cancel its
             // tasks and pop exactly that one level (the compiler emits one per escaped scope).
             Op::ReclaimNursery => {
                 let from = self.nurseries.len().saturating_sub(1);

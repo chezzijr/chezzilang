@@ -168,7 +168,20 @@ pub fn deregister(key: usize) -> bool {
 /// [`super::MnSched::cancel_drain`] (which drains the channel-`recv` park set); together they reach
 /// every parked fiber. A no-op if this nursery has nothing parked on the poller (the common case).
 pub fn drain_sched(sched: &Arc<MnSched>) {
-    SERVICE.get_or_init(NetPoller::new).drain_sched(sched);
+    SERVICE.get_or_init(NetPoller::new).drain_sched(sched, None);
+}
+
+/// §2c1 — [`drain_sched`] narrowed to ONE scope of a sched.
+///
+/// Selecting by sched alone was scope-selective for free while every eager nursery owned a private
+/// sched. It no longer is: a nested eager nursery is a SCOPE on the enclosing scope's sched
+/// (`EagerScope::scope`), so a nested escape draining by sched would yank every socket-parked fiber
+/// of the OUTER scope off the netpoller and re-inject it. The latched `poll_deadline` keeps that
+/// safe, but it is a gratuitous unpark/re-arm of siblings that are not being cancelled.
+pub fn drain_scope(sched: &Arc<MnSched>, scope_id: usize) {
+    SERVICE
+        .get_or_init(NetPoller::new)
+        .drain_sched(sched, Some(scope_id));
 }
 
 /// D6b — schedule `job` to run on (or just after) `deadline`, on the netpoller's single poll thread
@@ -294,18 +307,21 @@ impl NetPoller {
         }
     }
 
-    fn drain_sched(&self, sched: &Arc<MnSched>) {
+    fn drain_sched(&self, sched: &Arc<MnSched>, scope_id: Option<usize>) {
         // Collect-and-remove the matching entries UNDER the registry lock, then release it before
         // touching the scheduler: `complete_offload` takes the sched lock, so doing it here (registry
         // lock held) would nest registry→sched, whereas the fire path nests sched alone — keep the
         // registry lock leaf-level to rule out any lock-order inversion. Selection is by `Arc::ptr_eq`
-        // (same scheduler instance), not the deadlock-error/cancel token, so sibling nurseries are
-        // never disturbed.
+        // (same scheduler instance), not the deadlock-error/cancel token — plus, when `scope_id` is
+        // given, the fiber's own scope, because §2c1 makes NESTED nurseries share one sched and
+        // sched-identity alone stopped being scope-selective. Sibling nurseries are never disturbed.
         let drained: Vec<Parked> = {
             let mut reg = self.lock_registry();
             let keys: Vec<usize> = reg
                 .iter()
-                .filter(|(_, p)| Arc::ptr_eq(&p.sched, sched))
+                .filter(|(_, p)| {
+                    Arc::ptr_eq(&p.sched, sched) && scope_id.is_none_or(|s| p.fiber.scope_id == s)
+                })
                 .map(|(k, _)| *k)
                 .collect();
             keys.into_iter()

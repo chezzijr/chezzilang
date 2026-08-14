@@ -2019,9 +2019,9 @@ impl Compiler {
                 // Drain the current iteration's loop-body defers (and any nested block defers) before
                 // jumping out, so they run at the `break`, not at function return.
                 self.emit_loop_body_drain(fc, stmt.span);
-                // TASK B — cancel-and-report any `parallel:` nursery this `break` leaves before its
+                // TASK B — cancel any `parallel:` nursery this `break` leaves before its
                 // join. Order on the jump path is body defers first, then the nursery reclaim
-                // (cancel-and-report) — distinct from the fall-through order (JoinNursery then the
+                // (silent cancel, §2c1) — distinct from the fall-through order (JoinNursery then the
                 // block's LeaveDeferScope), because a `break` cancels the nursery rather than joining
                 // its children.
                 self.emit_loop_nursery_drain(fc, stmt.span);
@@ -2230,7 +2230,7 @@ impl Compiler {
     ) -> Result<(), CompileError> {
         fc.emit(Op::EnterNursery, span);
         // TASK B — track the open nursery scope so a `break`/`continue` inside `body` knows to emit a
-        // `ReclaimNursery` (cancel-and-report) before its loop-exit jump. Mirrors `defer_scopes`.
+        // `ReclaimNursery` (silent cancel) before its loop-exit jump. Mirrors `defer_scopes`.
         fc.nursery_scopes += 1;
         let has_defer = block_has_defer(body);
         if has_defer {

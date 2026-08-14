@@ -3373,7 +3373,9 @@ main()
 ```
 
 - **`parallel:` is a nursery** — all tasks spawned inside join at the dedent, then the parent
-  proceeds. `spawn` returns immediately (the parent continues); tasks run at the barrier.
+  proceeds. `spawn` returns immediately (the parent continues) and the task **starts there**, running
+  beside the rest of the body — Go's `go f()`. The barrier guarantees *completion*, not start.
+  (`--serial` is single-threaded and queues the task until the join instead; see `concurrency.md` §4.)
 - **Every function body (and the module top level) is an implicit nursery** (M-C) — a bare `spawn`
   is legal anywhere and joins at the body's `return`/end (the module top level joins at program exit).
   `return`, fall-through, and `?` are all join points (tasks run, *then* control leaves); `defer`s run
@@ -3401,7 +3403,8 @@ main()
 fn fetch_all(urls: List[str]):
     for u in urls:
         spawn fetch(u)        # no `parallel:` needed — joins when fetch_all returns
-    print("dispatched")       # runs before the tasks; they join at end-of-function
+    print("dispatched")       # the tasks are already running (Go's `go f()`); they JOIN at
+                              # end-of-function, so print order against them is undefined
 ```
 - **`Channel[T]`** — a mailbox (buffered FIFO): `ch.send(v)`, `ch.recv() -> T`,
   `ch.try_recv() -> T?` (non-blocking poll — `Some(v)`/`None`, never blocks or faults), `ch.len()`,

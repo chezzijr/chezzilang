@@ -8,8 +8,15 @@
 #
 #   chezzi run --parallel examples/parallel_cross_nursery_late_spawn.chz
 #
-# NOTE: under the cooperative engine (plain `run`) the spawned tasks run at the join; this example is
-# kept --parallel-only for parity with the other cross-nursery goldens.
+# NOTE: under the cooperative engine (`--serial`) the spawned tasks run at the join; this example is
+# kept M:N-only for parity with the other cross-nursery goldens.
+#
+# §2c1 — the enlist-then-refill shape this guards is no longer how M:N gets here: every nursery is
+# now EAGER, so O1/O2 are live fibers injected at their own `spawn` and the outer task vec is never
+# populated for a nested join to drain. The drop this example was written to catch is unreachable on
+# the shipping engine. It is kept because the OBSERVABLE contract — every task runs, the joins nest
+# correctly, nothing is dropped — is the same one, and because `early_enlist_outer` still serves the
+# fallback path (`activate_eager_nursery` returning `None` when the OS refuses a drainer thread).
 fn inner():
     spawn:
         print("inner ran")

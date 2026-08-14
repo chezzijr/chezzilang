@@ -1,6 +1,11 @@
-# C1 concurrency: `parallel:` nursery + `spawn` (sequential executor).
-# Spawned tasks register at the spawn point and run to completion at the block's dedent (FIFO);
+# Concurrency: `parallel:` nursery + `spawn`.
+# A spawned task STARTS at its `spawn`, like Go's `go f()`. The block's dedent is a join BARRIER:
 # the parent continues only after every child has finished — no leaks, no WaitGroup.
+#
+# The line order below is the BUFFERED sink (every Rust test helper, and `--serial`), where a task's
+# output is flushed at the join in spawn order. `chezzi run` STREAMS, so there a task's output can
+# interleave with the parent's. A join guarantees COMPLETION by the barrier, never that the task
+# could not have started (and printed) earlier.
 
 fn worker(id: int, label: str):
     print("{label} worker {id} ran")
@@ -19,11 +24,11 @@ fn main():
     # Reaching here means all three tasks finished.
     print("after nursery")
 
-    # Tasks run at the dedent, so statements that lexically follow a spawn *inside* the block
-    # run before the spawned bodies (the deterministic sequential approximation).
+    # The task is already running when the next statement executes; only the FLUSH is ordered by
+    # the buffered sink, which is why "body continues" lands first in `parallel.expected`.
     parallel:
         spawn worker(10, "second")
-        print("queued, not yet run")
+        print("body continues")
     print("done")
 
 main()

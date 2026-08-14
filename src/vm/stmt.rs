@@ -65,7 +65,7 @@ impl Vm {
     /// cleanup runs as the stack unwinds, before a `recover:` boundary regains control (or before
     /// the program exits on an uncaught fault). A fault in a deferred call supersedes the original.
     ///
-    /// `report_escaped` — a genuine fault (not a B3.4 cancel / `std.os.exit`) cancels-and-reports
+    /// `report_escaped` — a genuine fault (not a B3.4 cancel / `std.os.exit`) cancels
     /// each discarded frame's escaped nurseries (its implicit nursery + any inner `parallel:` the
     /// fault unwound past) BEFORE that frame's `defer`s run — matching the interp oracle, which
     /// reports in `exec_parallel` / `leave_implicit_nursery` as the body unwinds and only then runs
@@ -156,7 +156,7 @@ impl Vm {
                         .defer_markers
                         .truncate(h.markers_len);
                     // TASK B — a recover-scoped `?` jumps past the `JoinNursery` of any `parallel:`
-                    // opened inside the recover block: cancel-and-report its unstarted tasks HERE
+                    // opened inside the recover block: cancel its tasks HERE
                     // (before the handler binds its result and execution continues), so a recover-caught
                     // `?` reports IDENTICALLY-AND-AS-EARLY as an uncaught one — matching the interp,
                     // whose `exec_parallel` reports during the `?` unwind, before the recover's value is
@@ -164,7 +164,7 @@ impl Vm {
                     // report then trailed `print("recovered")`, an interp/VM divergence).
                     //
                     // ORDERING (matches the interp oracle): the escaped `parallel:` BODY's own defers
-                    // must run BEFORE the cancel-report, and the recover block's defers AFTER it —
+                    // must run BEFORE the nursery reclaim, and the recover block's defers AFTER it —
                     // because in the interp the body is its own `exec_scoped_block` whose defers drain
                     // as the `?` unwinds out of the body, and only then does `exec_parallel` report;
                     // the recover block's defers run later, at the recover boundary. So: drain the

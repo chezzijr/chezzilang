@@ -453,20 +453,27 @@ pub enum Op {
     /// No arm matched the enum in `slot` — runtime error.
     MatchNoArm(usize),
 
-    // ----- concurrency (C4: sequential, run-to-completion executor) -----
-    /// `parallel:` entry — push a fresh, empty task list on the VM's nursery stack. The block body
-    /// follows; spawned tasks register on this list; the matching `JoinNursery` drains it.
+    // ----- concurrency (M:N OS-thread engine; `--serial` runs the same ops cooperatively) -----
+    /// `parallel:` entry — open a nursery scope.
+    ///
+    /// On the M:N engine (§2c1) this ACTIVATES a live scheduler for the scope, so a `spawn` in the
+    /// body injects a running fiber immediately — Go's `go f()`. On the cooperative engine (and on
+    /// the M:N fallback taken when the OS refuses the scope's drainer thread) it pushes a fresh,
+    /// empty task list on the VM's nursery stack instead, and the matching `JoinNursery` drains it.
     EnterNursery,
-    /// `parallel:` dedent (the join barrier) — drain the innermost nursery FIFO, running each
-    /// registered task to completion (results discarded). The first task to fault aborts the
-    /// remaining siblings and propagates (composing with `recover:` / `defer`).
+    /// `parallel:` dedent (the join BARRIER) — wait for every task of the innermost nursery to
+    /// finish, then reduce their buffered output in spawn order. It guarantees COMPLETION by this
+    /// point, never that a task could not have started earlier. On the lazy path it also RUNS the
+    /// queued tasks here (results discarded). The first task to fault aborts the remaining siblings
+    /// and propagates (composing with `recover:` / `defer`).
     JoinNursery,
     /// TASK B — emitted on the `break`/`continue` jump path for each `parallel:` scope the jump leaves
     /// before its `JoinNursery` runs (mirrors the `LeaveDeferScope` drain `break`/`continue` emit for
-    /// defer scopes). Pops the innermost nursery and CANCELS-AND-REPORTS its unstarted tasks via
-    /// `drain_escaped_nursery` (one report line when non-empty) — the block-scoped reclaim for the
-    /// net-new in-frame escape site (`do_return` covers the whole-frame return; this covers in-frame
-    /// loop exits). Reclaims exactly one level so nested parallels each report their own count.
+    /// defer scopes). Pops the innermost nursery and CANCELS its tasks via `drain_escaped_nursery`
+    /// — the block-scoped reclaim for the net-new in-frame escape site (`do_return` covers the
+    /// whole-frame return; this covers in-frame loop exits). Reclaims exactly one level so nested
+    /// parallels are each torn down in their own right. §2c1 — the cancel is SILENT; the
+    /// `"{n} pending task(s) cancelled…"` line it used to write is deleted.
     ReclaimNursery,
     /// `spawn f(args)` — stack `[callee, arg0, …]`; pops `argc + 1`, deep-copies the args across the
     /// airlock (the callee passes by handle, like `defer`), and registers the task on the innermost

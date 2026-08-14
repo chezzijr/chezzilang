@@ -3,6 +3,6 @@ fanout worker 1 ran
 fanout worker 2 ran
 fanout worker 3 ran
 after nursery
-queued, not yet run
+body continues
 second worker 10 ran
 done

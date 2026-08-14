@@ -294,7 +294,10 @@ outer `shutdown_now()` stops the nested executor's jobs at their checkpoints too
 so a later `submit` to such an executor **faults** — `submit on an Executor whose creating job was
 cancelled` — rather than accepting work it would immediately cancel. **Read results after
 `shutdown()`, never between it and the `submit`** —
-that window is the one place the two engines deliberately disagree.
+that window is one of the **two** places the two engines deliberately disagree. The other is **when a
+`spawn`ed task starts**: eager at the `spawn` on M:N (Go's `go f()`), queued until the nursery's join
+on `--serial`, which has one thread and cannot run it beside the body (`concurrency.md` §4,
+`future.md` §2c1).
 
 A blocking `recv`/`send`/`wait:` inside a job, or in `main` while jobs are running, **blocks and waits**
 — it does not assume "no scheduler means nobody can send". A `deadlock` fault is raised only once the

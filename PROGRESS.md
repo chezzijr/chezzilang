@@ -2,6 +2,76 @@
 
 Single source of truth for "what am I doing next." Update after every work session.
 
+> **✅ §2c1 landed 2026-08-14 — a `spawn`ed task starts at the `spawn`, like Go's `go f()`, instead of
+> at its nursery's join.** `docs/gaps.md`'s `bare spawn: start time` row is CLOSED; `docs/future.md`
+> §2c1 is SHIPPED. Measured on the release binary: `print("A")` / `spawn: print("SPAWNED")` /
+> `time.sleep_ms(300)` / `print("B")` went **`A B SPAWNED` → `A SPAWNED B`**, which is what the paired Go
+> program (`go fmt.Println(...)`, go1.26.5) prints; `spawn: ch.send(1)` beside `print(ch.recv())` went
+> from faulting **`recv on an empty channel: deadlock`** to printing **`1`**; and the `spawn`-based TCP
+> repro that surfaced the row (`l.accept()` on the accepting frame, dialer in a bare `spawn`) hung
+> forever pre-fix and now completes. The join keeps its own orthogonal job — it guarantees **completion**
+> by the barrier, never that a task could not have started (and printed) earlier. **Engine split,
+> deliberate:** eager on M:N (the default `chezzi run`), **lazy on `--serial`**, which has one
+> cooperative thread and so cannot reach Go's semantics by construction and is slated for removal
+> (`future.md` §2b). That makes **two** places the engines deliberately disagree; the first is
+> `Executor.submit` (D3, `docs/stdlib.md`). **The `EnterNursery` eager gate dropped both its clauses**
+> (`self.parallel && self.mn.is_some() && worker_count() >= 2` → `self.parallel`), each re-derived
+> rather than carried forward: `mn.is_some()` WAS the defect (a top-level nursery has no worker shell,
+> so it was lazy by construction), and `worker_count() >= 2` guarded an eager inner join starving its
+> parent's outer worker — a premise gone now that the outer nursery is eager too and an eager nursery
+> owns a **dedicated raw drainer thread** rather than a bounded-pool slot. **The plan's "three edits"
+> were badly incomplete, and the real work was elsewhere: eager start makes every nursery a live
+> SCHEDULER, so two invariants that used to be optimisations became load-bearing.** (1) **Nesting must
+> share ONE sched per thread** — a nested `parallel:` registers a SCOPE on the enclosing scope's sched
+> (`EagerScope::scope`, retired at its join by `MnSched::retire_last_scope`) instead of building a
+> private sibling sched. Sibling scheds are mutually invisible (`send_wake` scans its own sched then
+> `wake_parent_chain`, strictly upward), so private-per-nursery **false-faulted**
+> `examples/parallel_cross_nursery_{circular,fanout}.chz` — the goldens that exist for exactly this.
+> (2) **The deadlock verdict needed two extensions**, because eager start breaks the invariant
+> `quiesce.rs`'s `live` count rested on ("a nursery fiber never coexists with a counted party").
+> `QuiesceState::eager_bodies` adds one to `live` per outermost eager nursery holding an undone task
+> (without it, `spawn: ch.send(1)` + `ch.recv()` on `main` **false-faults deadlock**), and
+> `JoinScope::body_blocked` + `SchedCore::any_body_injecting` stop the `body_open` veto applying while
+> the body's own thread is blocked (without it, a genuine `main`+sibling deadlock and a genuine NESTED
+> deadlock both **hang instead of faulting**). A body parked in a nested JOIN additionally raises the
+> pre-existing `awaiting_builder` — it will resume and may still `send`, which is exactly what that flag
+> already means; treating it as a dead feeder false-faulted three more healthy goldens
+> (`inline_send`, `inline_close`, `late_spawn_parked`). **Four wrong turns, all measured before being
+> abandoned, and a FIFTH found only by adversarial review after a fully green suite:** the blocked
+> body is not only unable to `spawn`, it is very often the RENDEZVOUS PARTNER of one of its own
+> sched's parked fibers — `ch := Channel[int](1)` with `spawn: ch.send(0); ch.send(1)` and two body
+> `recv`s printed `0` then faulted `recv on an empty channel: deadlock` **4 runs in 8**, against Go's
+> `0 1`. Fixed by publishing the body's own `PartyWait` on the sched (`SchedCore::body_waits`) — the
+> WAIT, not the channel, because the pre-existing demoted-queue peek asks the receiver's question and
+> is inverted for a body blocked on a full `send` (that variant killed a live consumer **12 runs in
+> 12**), and atomically with the `body_blocked` mark, because two lock acquisitions leave a window an
+> idle worker samples (**5 runs in 6**). **Neither the 4 123-test suite nor any of the ten repro
+> programs could see it**, and neither could the in-process harness — `run_capture_parallel` uses the
+> BUFFERED sink, under which both broken shapes pass 12/12; the guard is
+> `tests/spawn_eager_rendezvous.rs`, driving the real binary. The other four:
+> registering the eager nursery as a `PartyWait` instead of counting it into `live` (a
+> party is a BLOCKED THREAD; a non-thread inflates `parties.len()` toward `live`, which false-faulted
+> `spawn: print(…)` beside `time.sleep_ms(300)` — a program with no channel in it); that party's
+> `satisfiable()` reading an all-scopes-DONE nursery as "can still move" (a `main` left blocked after
+> its sibling was reaped hung forever — **774 verdict evaluations** while `main` waited); the private
+> sibling scheds of (1); and the dead-feeder reading of (2). **None of the four was caught by a repro**
+> — all ten hand-written repro programs stayed green through every one of them; `cargo test --lib` found
+> them all. **Perf, measured A/B against pristine `main`:** 120k-`spawn` storm **0.965 s → 0.646 s
+> (−33%)**, which closes `docs/gaps.md`'s open +10.2% spawn-storm residual; `primes_parallel`
+> **14.349 s → 13.300 s (−7%)**; `parallel:` in a tight loop **1.579 s → 2.016 s (+28%)**, one raw
+> drainer thread per nursery — halved from the first cut by skipping the join-time pool farm for a
+> nursery holding fewer than 2 unfinished tasks. **Collateral, deliberate:** the
+> `"{n} pending task(s) cancelled on early exit from parallel:"` report is **deleted** — with eager start
+> there are no unstarted tasks to count and any residual number would be racy, and `trio` /
+> `asyncio.TaskGroup` print nothing here either; tasks are still cancelled, silently. **The predicted
+> test churn was largely wrong, and the reason is worth keeping:** the implicit-nursery order pins all
+> survived and `examples/parallel.expected` is unchanged, because the Rust harness prints into the
+> **buffered** sink (per-fiber buffer, flushed at the join in task order), so an earlier *start* moves no
+> expected line — those pins assert order-of-flush, not order-of-execution. Only the cancel-report group
+> actually broke. The forecast's "the `tests/chz` gate needs a per-engine story before any of these may
+> diverge" was also over-stated: `chz_suite_passes_both_engines` (`src/test_runner.rs:1032`) compares
+> per-test **verdicts**, never output, and no suite file asserts inter-task print order.
+
 > **✅ W7-59 landed 2026-08-14 — `net.connect` stopped blocking a shared pool worker in a private
 > sleep-spin, and the "obvious" fix shape was measured wrong before it shipped.** `docs/gaps.md`'s
 > `W7-59` is CLOSED. The in-flight (`EINPROGRESS`) arm gated on a bare `self.mn.is_some()` and everything

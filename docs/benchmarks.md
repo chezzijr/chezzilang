@@ -1513,3 +1513,68 @@ HEAD `3e71ac41` vs final:
 
 `fib` is call-bound with **zero loops** — the back-edge rung cannot touch it — yet it moved by more
 than `loop` did. So the ~1% is build/layout noise, not the change, and the `loop` band (±1.5%) holds.
+
+## §2c1 — eager `spawn` start — 2026-08-14 (behaviour change, bench-neutral on the serial set)
+
+`§2c1` makes a `spawn`ed task start **at its `spawn`** instead of at its nursery's join, on the M:N
+engine: `Op::EnterNursery` now activates an eager sched for **every** nursery (`self.parallel` alone —
+the old `mn.is_some() && worker_count() >= 2` gate is gone), so a spawn injects a live fiber that runs
+concurrently with the rest of the body. That is Go's `go f()`. It is a **semantics** change, not a perf
+lever, and the closest precedent for how it lands here is the cross-nursery flat scheduler entry above:
+**`benches/run.chz` contains no `spawn` and no `parallel:`** (verified by grep over `benches/` — the
+only hits are the prose in `README.md` and a comment in `chz/primes.chz` pointing at
+`examples/primes_parallel.chz`), and `Op::EnterNursery` is only emitted for a block that lexically
+contains a spawn, so the eager path is **never entered** by any bench in the set. Expectation was flat.
+
+Measured anyway. Interleaved A/B, hyperfine `-N --warmup 2`, pristine `main` (`ccd78003`, built into a
+**separate** `CARGO_TARGET_DIR=/tmp/claude-1000/base-target`) vs the branch binary in the repo's own
+`target/`, both invoked by absolute path; each bench run twice with the command order **reversed** on
+the second pass to cancel ordering/thermal drift, medians over both passes (10–15 runs per pass, 50 for
+`empty`).
+
+| bench | main | eager | delta | CPython | main × | eager × |
+|-------|-----:|------:|------:|--------:|-------:|--------:|
+| fib | 388.4 ms | 381.0 ms | −1.9% | 134.3 ms | 2.89× | 2.84× |
+| str | 242.9 ms | 243.4 ms | +0.2% | 131.6 ms | 1.85× | 1.85× |
+| primes | 941.0 ms | 942.0 ms | +0.1% | 445.7 ms | 2.11× | 2.11× |
+| **loop** | **1437.2 ms** | **1481.1 ms** | **+3.1%** | 1394.8 ms | 1.03× | 1.06× |
+| list | 567.2 ms | 574.9 ms | +1.4% | 255.3 ms | 2.22× | 2.25× |
+| struct | 633.0 ms | 639.9 ms | +1.1% | 264.9 ms | 2.39× | 2.42× |
+| poly_method | 1937.4 ms | 1970.6 ms | +1.7% | 492.6 ms | 3.93× | 4.00× |
+| map | 237.3 ms | 232.3 ms | −2.1% | 134.9 ms | 1.76× | 1.72× |
+| empty | 4.0 ms | 3.8 ms | −4.4% | 14.9 ms | 3.7× faster | 3.9× faster |
+
+**`loop` moved, and it is not noise.** Re-measured on its own, 80 runs per binary across four
+alternating-order hyperfine invocations: **1433.6 ms → 1483.4 ms, +3.5%**, with the *minima* separated
+too (1422.6 ms vs 1456.2 ms — no overlap). That is well outside the ±1.5% `loop` band this file has
+held since `W7-57`. The direction is not a global drift artefact: `fib`, `map` and `empty` moved
+*down* in the same sweep. `loop.chz` executes no nursery opcode at all, and the only edit reachable
+from it is that the rewritten `Op::EnterNursery` arm sits in the same `run_until` match as the hot
+dispatch loop — the same shape `W7-57` measured at +4.5% on this exact bench from a rung it never
+executes. Recorded as measured; **not** attributed, and not optimised away here.
+
+(The `empty` column reads ~3.8× faster than CPython rather than the ~11× of the older entries. That is
+this measurement environment, not the branch — both binaries were measured in it and are level.)
+
+**The concurrency shapes — where the change actually lands.** Same two binaries, absolute paths,
+hyperfine medians (15 runs each × 2 reversed passes for the storm, 5 runs for the others):
+
+| shape | main | eager | delta |
+|---|---:|---:|---:|
+| 120k-`spawn` storm (one `parallel:`, 120 000 `spawn f(i)`) | 0.882 s | 0.732 s | **−17%** |
+| `examples/primes_parallel.chz` (4-way CPU fan-out) | 13.917 s | 12.464 s | **−10%** |
+| `parallel:` inside a loop, 20 000 single-task nurseries | 1.477 s | 1.863 s | **+26%** |
+
+The storm's win is the noisiest of the three: the eager binary's minimum is **0.444 s** against a
+0.732 s median, so its spread is much wider than main's (min 0.812 s). An earlier same-session
+measurement of the same program put the win at **−33%**; this 30-run pair says **−17%**. Both are
+wins, the magnitude is not pinned — treat the storm figure as "clearly faster, size run-dependent".
+
+The **+26%** on the loop-of-nurseries shape is the price, and it is structural: one raw OS drainer
+thread per nursery, so a program that opens 20 000 nurseries pays 20 000 thread spawns. That buys an
+eager body that is live on **any** core count and pool-independent under nesting. It was already
+halved from a first cut by skipping the join-time pool farm when a nursery holds fewer than 2
+unfinished tasks (`Vm::farm_outermost_eager_helpers`).
+
+`docs/gaps.md` carries an open **+10.2% 120k-spawn-storm** perf residual from the earlier eager-nursery
+work; the storm win here repays it (that row is already marked CLOSED there).

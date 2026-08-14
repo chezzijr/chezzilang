@@ -778,7 +778,7 @@ pub struct Vm {
     /// TASK B — parallel to [`Vm::nurseries`] (same length, pushed/popped in lockstep): the value of
     /// the current frame's `deferred.len()` captured when each nursery was entered (`EnterNursery`),
     /// i.e. the defer floor of that `parallel:` body. A recover-scoped `?` escaping a `parallel:`
-    /// must run the body's defers (those at `deferred[floor..]`) BEFORE writing the cancel-report and
+    /// must run the body's defers (those at `deferred[floor..]`) BEFORE reclaiming the nursery and
     /// only THEN run the recover block's own defers — matching the interp, whose `exec_parallel`
     /// reports after the body's `exec_scoped_block` has already drained its defers.
     nursery_defer_floors: Vec<usize>,
@@ -1786,7 +1786,28 @@ struct EagerScope {
     /// `join_eager_nursery`/`abort_eager_nursery` (it exits once the sched terminates). `None` only if
     /// the thread failed to spawn (then the inline join worker is the sole drainer — bounded loops
     /// still complete, just without mid-body concurrency).
+    ///
+    /// §2c1 — `Some` exactly when this scope OWNS `sched` (it is the OUTERMOST eager nursery on its
+    /// thread, so it built the sched and the drainer, and tears both down at its join). A NESTED eager
+    /// nursery on the same thread is a *scope* on the enclosing scope's sched and has no drainer of its
+    /// own — the owner's one drainer serves every scope, because it drains the GLOBAL queue.
+    ///
+    /// It is never `None` for an owner: `activate_eager_nursery` returns `None` rather than build a
+    /// drainer-less owner, so the caller falls back to the lazy queue-at-join path instead of leaving
+    /// a nursery with no worker at all during its body.
     drainer: Option<std::thread::JoinHandle<()>>,
+    /// §2c1 — this nursery's scope id on `sched`. `0` for an owner; a fresh appended scope for a
+    /// nested eager nursery sharing the owner's sched.
+    ///
+    /// **Why nesting must share ONE sched.** Two sibling nurseries on two private scheds cannot wake
+    /// each other: `send_wake` scans its own sched and then `wake_parent_chain`, which is strictly
+    /// upward, so there is no sideways or downward path. Giving each nursery its own sched
+    /// reintroduced exactly the cross-nursery deadlock the flat scheduler was built to kill —
+    /// measured, `examples/parallel_cross_nursery_{circular,fanout}.chz` both faulted
+    /// `deadlock: every task in this parallel: block is blocked…`. One sched with one scope per
+    /// nursery restores it: the inline owner drains the GLOBAL queue, so it runs a sibling scope's
+    /// fiber, and `is_deadlocked` sees the enclosing scope's still-open body and vetoes.
+    scope: usize,
 }
 
 /// §6d M:N `wait` (select) park — ONE blocked fiber shared across the N arm-channel buckets it parks
@@ -1940,13 +1961,33 @@ struct JoinScope {
     /// terminate the global sched and `is_deadlocked` is vetoed (the body is live work the sched can't
     /// see). `JoinNursery` clears it. Always `false` for a lazy (queue-at-join) nursery.
     body_open: bool,
+    /// §2c1 — `true` while this eager scope's body thread is itself BLOCKED in place (parked on a
+    /// channel / `wait:` / an executor join — every counted-party block funnels through
+    /// [`super::Vm::block_party_guard`], which sets and clears this).
+    ///
+    /// `body_open` means "the body may still `inject`". While the body is blocked that is FALSE — it
+    /// cannot reach another `spawn` until something wakes it — so the DEADLOCK predicate must stop
+    /// vetoing on it, or a top-level nursery (whose body is open for essentially the whole program)
+    /// would turn every genuine `main`-plus-sibling deadlock into a hang. Derived from what is
+    /// *impossible*, not from what looks idle — the same shape as `awaiting_builder` below.
+    ///
+    /// **TERMINATE still vetoes on plain `body_open`** (`all_scopes_done() && !any_body_open()`): the
+    /// body is only blocked, not finished, and it may well `spawn` again after it wakes. Only
+    /// [`SchedCore::any_body_injecting`] — the deadlock predicate's question — honours this flag.
+    body_blocked: bool,
     /// Cross-nursery flat scheduler — `true` while this scope is an EARLY-ENLISTED outer nursery still
     /// awaiting the inline builder's own `JoinNursery` (`early_enlist_outer` sets it; `join_enlisted_scope`
     /// / `abort_enlisted_scope` clear it as the builder begins draining the scope). While set, the scope's
     /// parked fibers have a live external feeder — the builder body, which may still `send`/`close`/`spawn`
     /// — so a quiesce in which EVERY incomplete scope is `awaiting_builder` is NOT a deadlock: the builder
     /// has finished all nested service and will return to the body to feed them (see
-    /// `all_incomplete_awaiting_builder` + `is_deadlocked`). Always `false` for an owned/eager scope.
+    /// `all_incomplete_awaiting_builder` + `is_deadlocked`).
+    ///
+    /// §2c1 — an EAGER scope now raises it too, for the span in which its body is parked in a NESTED
+    /// nursery's join (`Vm::blocked_bodies_guard(true)`). The meaning is identical: a builder will
+    /// return to this scope and may then `send`/`close`, so a quiesce in which the inner scope is DONE
+    /// is not a deadlock. It stays `false` for a body blocked on a CHANNEL — that body resumes only if
+    /// somebody feeds it, so it promises no progress.
     awaiting_builder: bool,
     /// This scope's cancel token (the SAME `Arc` cloned onto fibers running in this scope; distinct
     /// per nursery so an inner fault cancels ONLY its scope, never an outer sibling — the structured-
@@ -2011,6 +2052,19 @@ struct SchedCore {
     /// genuine deadlock. Registered/un-registered under core lock A, 1:1 with `blocked_native`.
     demote_cancel_watch: std::collections::HashMap<u64, Vec<Arc<AtomicBool>>>,
     next_demote_tok: u64,
+    /// §2c1 — the waits of every BLOCKED BODY on this sched's thread (`Vm::block_party_guard`).
+    ///
+    /// A body that is parked on a channel is very often the RENDEZVOUS PARTNER of one of this sched's
+    /// own fibers, and the counter-only predicate cannot see it — so lifting the `body_open` veto for
+    /// a blocked body (`JoinScope::body_blocked`) is only sound once the body's wait is visible HERE.
+    /// `is_deadlocked_ignoring_jobs` vetoes while any of these is satisfiable.
+    ///
+    /// **It carries the wait, not the channel, because DIRECTION decides satisfiability.** The
+    /// pre-existing `demoted_chans` peek asks `!q.is_empty()`, which is the RECEIVER's question; for a
+    /// body blocked on a full `send` the answer is inverted — an empty queue means it can proceed.
+    /// Reusing that peek killed a live consumer 12 runs in 12 on `Channel[int](1)` with the sender in
+    /// the body. `PartyWait::satisfiable` already answers both directions, so it is what is stored.
+    body_waits: Vec<Arc<crate::vm::quiesce::PartyWait>>,
 }
 
 impl SchedCore {
@@ -2031,6 +2085,17 @@ impl SchedCore {
             return self.scopes[0].body_open;
         }
         self.scopes.iter().any(|s| s.body_open)
+    }
+
+    /// §2c1 — the DEADLOCK predicate's half of [`Self::any_body_open`]: any scope whose eager body can
+    /// still `inject`. A body that is itself BLOCKED in place cannot reach another `spawn`, so it is
+    /// not live work and must not veto the verdict (see [`JoinScope::body_blocked`]). Terminate keeps
+    /// asking `any_body_open`, which ignores this flag.
+    fn any_body_injecting(&self) -> bool {
+        if self.scopes.len() == 1 {
+            return self.scopes[0].body_open && !self.scopes[0].body_blocked;
+        }
+        self.scopes.iter().any(|s| s.body_open && !s.body_blocked)
     }
 
     /// Cross-nursery flat scheduler — true when EVERY still-incomplete scope is one merely awaiting the
@@ -2124,7 +2189,7 @@ impl SchedCore {
 
     /// Cross-nursery flat scheduler — some scope has unfinished tasks (the `done < total` half of the
     /// global deadlock predicate). Fast path for the common single-nursery case.
-    fn any_scope_incomplete(&self) -> bool {
+    pub(super) fn any_scope_incomplete(&self) -> bool {
         if self.scopes.len() == 1 {
             let s = &self.scopes[0];
             return s.done < s.total;
@@ -2215,6 +2280,7 @@ impl MnSched {
                     done: 0,
                     bytes: 0,
                     body_open: false,
+                    body_blocked: false,
                     awaiting_builder: false,
                     cancel: Arc::clone(&cancel),
                     // The creator wires the enclosing scopes' flags in (`Vm::scope_ancestors`)
@@ -2225,6 +2291,7 @@ impl MnSched {
                 demoted_chans: std::collections::HashMap::new(),
                 demote_cancel_watch: std::collections::HashMap::new(),
                 next_demote_tok: 0,
+                body_waits: Vec::new(),
             }),
             cv: Condvar::new(),
             deadlock_err,
@@ -2269,6 +2336,7 @@ impl MnSched {
             done: 0,
             bytes: 0,
             body_open: false,
+            body_blocked: false,
             awaiting_builder: false,
             cancel,
             ancestors,
@@ -2310,6 +2378,7 @@ impl MnSched {
             done: 0,
             bytes: 0,
             body_open: false,
+            body_blocked: false,
             awaiting_builder: false,
             cancel,
             ancestors,
@@ -2392,6 +2461,100 @@ impl MnSched {
     fn close_body(&self, scope_id: usize) {
         self.lock().scopes[scope_id].body_open = false;
         self.cv.notify_all();
+    }
+
+    /// §2c1 — a NESTED eager scope has joined and every one of its tasks is done: pop it and give its
+    /// slots back, so the enclosing scope is the LAST scope again and its own later `inject`s stay
+    /// contiguous (`inject`'s invariant, and `take_scope_slots`' `base..base+total` slice).
+    ///
+    /// Sound because eager scopes on one thread nest strictly LIFO — `EnterNursery`/`JoinNursery` are
+    /// properly nested in the bytecode and an escape reclaims innermost-first — so the scope being
+    /// retired owns the TAIL of `slots` and no live fiber holds an index into it (they are all done).
+    /// A no-op if it is somehow not the last scope, which keeps the slot ranges valid at worst-case
+    /// cost of a stale empty scope rather than corrupting a live one.
+    fn retire_last_scope(&self, scope_id: usize) {
+        let mut c = self.lock();
+        if scope_id + 1 != c.scopes.len() {
+            return;
+        }
+        let s = &c.scopes[scope_id];
+        if s.done < s.total {
+            return;
+        }
+        let base = s.base_index;
+        c.slots.truncate(base);
+        c.scopes.pop();
+    }
+
+    /// §2c1 — how many of this sched's tasks are still unfinished, across every scope. Used by
+    /// `Vm::farm_outermost_eager_helpers` to skip the pool entirely for a nursery the inline joiner
+    /// can finish alone.
+    pub(super) fn outstanding_tasks(&self) -> usize {
+        let c = self.lock();
+        c.scopes
+            .iter()
+            .map(|s| s.total.saturating_sub(s.done))
+            .sum()
+    }
+
+    /// §2c1 — register (or drop) a BLOCKED BODY's channel waits as demoted participants of this
+    /// sched, so `is_deadlocked_ignoring_jobs`' demoted-queue peek can see them.
+    ///
+    /// This is what makes the `body_blocked` relaxation SOUND. Lifting `body_open` tells the predicate
+    /// "this body cannot inject" — true — but says nothing about the body being the RENDEZVOUS PARTNER
+    /// of one of the sched's own parked fibers, which it very often is. Registering the channel puts
+    /// the body in the same set the demoted-worker path uses, so the peek vetoes exactly when a value
+    /// is already queued for it. Measured: without it, `Channel[int](1)` + `spawn: ch.send(0);
+    /// ch.send(1)` + two body `recv`s false-faulted `recv on an empty channel: deadlock` on 4 runs in
+    /// 8, against Go's `0 1`.
+    ///
+    /// Keyed by `Arc::as_ptr(core)`, the same key space `Vm::channel_core_ptr` uses, so a body and a
+    /// demoted worker blocked on the SAME channel share one refcounted entry.
+    /// **Both halves move under ONE lock acquisition, and that is a correctness requirement, not
+    /// tidiness.** Raising `body_blocked` lifts the deadlock veto; registering the channel is what
+    /// makes the un-vetoed predicate reach the right answer. Doing them as two acquisitions leaves a
+    /// window in which the veto is down and the channel is invisible, and an idle worker sampling
+    /// there reaps a perfectly satisfiable parked fiber: measured on `Channel[int](1)` with the
+    /// consumer in the `spawn` and the sender in the body, the consumer was killed after ONE `recv`
+    /// (`scopes=[(1,1)]`) and `main` then faulted `send on a full channel: deadlock`, 5 runs in 6.
+    pub(super) fn set_body_wait(
+        &self,
+        scope_id: usize,
+        wait: Option<&Arc<crate::vm::quiesce::PartyWait>>,
+        blocked: bool,
+        awaiting: bool,
+    ) {
+        {
+            let mut c = self.lock();
+            // ON: publish the wait BEFORE lifting the veto. OFF: drop the veto BEFORE retracting it.
+            // Either way the un-vetoed state is never observable without the wait.
+            if blocked && let Some(w) = wait {
+                c.body_waits.push(Arc::clone(w));
+            }
+            if let Some(s) = c.scopes.get_mut(scope_id) {
+                s.body_blocked = blocked;
+                // §2c1 — a body parked in a NESTED nursery's join is not merely unable to inject: it
+                // WILL resume the moment that inner scope completes, and may then `send`/`close` to a
+                // sibling. That is exactly what `awaiting_builder` already means, so say it rather
+                // than invent a second flag — `all_incomplete_awaiting_builder` then vetoes when the
+                // inner scope is DONE (the builder is about to resume and feed) and does NOT veto
+                // while the inner scope is itself incomplete-and-stuck (a genuine nested deadlock,
+                // which must fault). A body blocked on a CHANNEL leaves it false: that body resumes
+                // only if somebody feeds it, so it is not a promise of progress.
+                if awaiting {
+                    s.awaiting_builder = blocked;
+                }
+            }
+            if !blocked
+                && let Some(w) = wait
+                && let Some(i) = c.body_waits.iter().position(|x| Arc::ptr_eq(x, w))
+            {
+                c.body_waits.swap_remove(i);
+            }
+        }
+        if blocked {
+            self.cv.notify_all();
+        }
     }
 
     /// Pop a runnable fiber for worker `wid`, marking it `running`. Search order (D4b): the worker's
@@ -3301,10 +3464,22 @@ impl MnSched {
         }
         // Per-connection spawn — an eager nursery whose body is still running is live work the sched
         // can't account (the acceptor runs inline and may `inject` a handler that wakes a parked
-        // sibling). Never declare deadlock while ANY body is open; `close_body` at `JoinNursery`
-        // re-enables the predicate so a genuine post-join deadlock still fires. Always `false` on the
-        // lazy path — unchanged.
-        if c.any_body_open() {
+        // sibling). Never declare deadlock while ANY body can still inject; `close_body` at
+        // `JoinNursery` re-enables the predicate so a genuine post-join deadlock still fires. Always
+        // `false` on the lazy path — unchanged.
+        //
+        // §2c1 — `any_body_injecting`, not `any_body_open`: a body BLOCKED in place (or parked in a
+        // NESTED nursery's join) cannot reach another `spawn`, so it is not the live feeder this veto
+        // exists for. Without the distinction an eager top-level nursery — whose body spans
+        // essentially the whole program — vetoes forever, and both a genuine `main`-plus-sibling
+        // deadlock and a genuine nested deadlock HANG instead of faulting.
+        //
+        // **This is only safe because nesting shares ONE sched** (`EagerScope::scope`). With a private
+        // sched per nursery the sibling that would feed the blocked body was invisible here, and this
+        // exact relaxation false-faulted `examples/parallel_cross_nursery_{circular,fanout}.chz`. Now
+        // that sibling is another SCOPE on this same sched, so it shows up in `running`/`runnable` and
+        // vetoes on its own merits.
+        if c.any_body_injecting() {
             return false;
         }
         // Cross-nursery flat scheduler — if every still-incomplete scope is an early-enlisted outer
@@ -3362,6 +3537,12 @@ impl MnSched {
             .values()
             .any(|(core, _)| !core.q.lock().unwrap_or_else(|e| e.into_inner()).is_empty())
         {
+            return false;
+        }
+        // §2c1 — the same question for a BLOCKED BODY of this sched's thread, asked in the direction
+        // that body actually waits in (`SchedCore::body_waits`). A satisfiable body is about to
+        // resume and feed one of the fibers below, so this is not a deadlock. Chain A → Q, as above.
+        if c.body_waits.iter().any(|w| w.satisfiable()) {
             return false;
         }
         true

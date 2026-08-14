@@ -25,7 +25,6 @@ pub mod manifest;
 pub mod native;
 pub mod parser;
 pub mod resolver;
-pub mod runtime;
 pub mod slice;
 pub mod test_runner;
 // `Obj::Generator` is a `pub` field wrapping the `pub(crate)` `GeneratorCore`; that is fine for the

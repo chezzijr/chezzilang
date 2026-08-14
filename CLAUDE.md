@@ -87,7 +87,7 @@ UPDATE_EDITOR_ASSETS=1 cargo test --test editor_tmlanguage    # regenerate the V
 - Commits: single-line conventional (`feat:`, `fix:`, `chore:`, `docs:`, `test:`). No body.
 - Each compiler phase is its own module under `src/`: `lexer` → `parser` → `ast` →
   `desugar` → `checker` → `compiler` → `vm` (the engine of record; its `impl Vm` is split across
-  `vm/{exec,arith,call,sched,netio,stmt}.rs`), plus `gc`, `native` + `runtime` (builtins / std),
+  `vm/{exec,arith,call,sched,netio,stmt}.rs`), plus `gc`, `native` (builtins / std),
   `resolver` (module paths). (The tree-walk `interp` engine has been removed.)
 - Keep modules small and single-purpose.
 - **New builtin types/ctors/fns go in their owning `std.*` module (import-gated), NOT the global

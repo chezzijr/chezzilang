@@ -30,8 +30,9 @@ per-heap stop-the-world GC stays untouched).
   (the sanctioned cross-task mutable box — an owner-task serialises writes, Elixir's `Agent` trick).
 - **Staging (this doc's central decision):** ship the full *surface + type system + both engines* on
   a **sequential, run-to-completion executor** first (milestones **C1–C4**); add real fibers /
-  multicore later (**C5**) behind the same syntax. See [§4](#4-execution-semantics) and
-  [§9](#9-implementation-roadmap-c1c5).
+  multicore later (**C5**) behind the same syntax. **C5 shipped**: the M:N OS-thread engine is the
+  default, tasks start at their `spawn` and interleave, and the surface did not change — exactly as the
+  staging bet predicted. See [§4](#4-execution-semantics) and [§9](#9-implementation-roadmap-c1c5).
 
 ---
 
@@ -222,6 +223,11 @@ This is **structured concurrency**, the modern consensus that postdates Go: Pyth
   function body and the module top level is an *implicit nursery*; a bare `spawn` binds to it and
   joins at the body's `return`/end (the module top level joins at program exit). An explicit
   `parallel:` is an inner sub-nursery that joins earlier, at its dedent.
+- **A task *starts* at its `spawn`, not at that join** — Go's `go f()` ([§4](#4-execution-semantics)).
+  The join is a **completion** barrier and nothing more: it guarantees the task is *done* by the
+  dedent/`return`, never that it could not have started (and printed) earlier. **`--serial` is the
+  exception** — the cooperative single-thread engine queues the task and runs it at the join, because
+  one thread cannot run it beside the body. That engine is slated for removal (`docs/future.md` §2b).
 - **Function-boundary rule (the safety invariant).** A `spawn` binds to a nursery **within its own
   function** — it can **never** reach an enclosing function's or the module's nursery. This is what
   stops a task spawned in `fn worker()` from outliving `worker`'s return:
@@ -253,42 +259,70 @@ This is **structured concurrency**, the modern consensus that postdates Go: Pyth
 
 ## 4. Execution semantics
 
-### Staged executor
+### When a task starts, and when it is done
 
-The **C1–C4 executor is sequential, run-to-completion** — no scheduler, no OS threads, no `Send`.
-It is chosen so the full surface, channels, `Shared`, type-checking, and both engines ship *now*; the
-hard multicore work is isolated behind the executor seam ([§9 C5](#9-implementation-roadmap-c1c5)) and
-**does not change the surface** when it lands.
+Two separate guarantees, and conflating them is the mistake this section exists to prevent:
 
-How a `parallel:` block runs:
+- **start** — a task starts **at its `spawn`**, running concurrently with the rest of the nursery
+  body. This is Go's `go f()`.
+- **completion** — the nursery's join (an explicit `parallel:`'s dedent, a function's `return`/end,
+  program exit for the module top level) waits until every task of that nursery has finished. It
+  guarantees the task is *done* by the barrier; it says nothing about when it *started*.
+
+How a `parallel:` block runs on the M:N engine (`chezzi run` — the default):
 
 1. Executing `spawn X` **evaluates the call's callee + arguments eagerly, at the spawn point** (Go's
    arg-evaluation timing), **deep-copies them across the airlock** ([§7](#7-sendability)), and
-   **registers** the task on the innermost nursery. **The parent then continues to the next statement
+   **starts** the task on the innermost nursery. **The parent then continues to the next statement
    immediately** — `spawn` does not block.
-2. At the nursery **dedent (the barrier)**, the registered tasks **run to completion in FIFO order**.
+2. The task runs **concurrently** with the statements that follow it and with its siblings. There is
+   no FIFO order between tasks and no defined order against the parent's own statements.
 3. The first task to error **aborts the remaining siblings** and propagates out of the `parallel:`
    statement (composes with `recover:` / `defer`).
-4. The parent proceeds past the block.
+4. At the **barrier**, the parent waits for every task, then proceeds past the block.
 
 ```chezzi
-parallel:
-    spawn worker(1, ch)    # registered; parent continues
-    spawn worker(2, ch)    # registered; parent continues
-    print("both spawned")  # runs NOW — parent didn't block on spawn
-# barrier: worker 1 then worker 2 run to completion here
-print("all done")
+print("A")
+spawn:
+    print("SPAWNED")
+time.sleep_ms(300)
+print("B")
 ```
 
-### Documented consequence (sequential only)
+`chezzi run` prints `A SPAWNED B` — the same as the paired Go program (`go fmt.Println("SPAWNED")`,
+go1.26.5). The task runs *during* the sleep; it is not deferred to the end-of-main join.
 
-Because tasks run *at the barrier*, statements after a `spawn` **inside** the block run **before** the
-spawned bodies, and tasks **do not interleave** — they run one after another, FIFO. This is the
-deterministic sequential approximation of concurrency. It is correct for **fan-out / collect** (spawn
-N workers, read their results after the block — the common 80% case). It is **not** enough for tasks
-that must communicate *mid-flight* (a producer a live consumer waits on): under run-to-completion the
-consumer's `recv` can never be satisfied, so it is a **deadlock-detect error**, not a hang. Real
-interleaving and mid-flight communication arrive with **C5** — same syntax, no surface change.
+Because a task is already running, a **live consumer can wait on a producer mid-flight**:
+
+```chezzi
+ch := Channel[int]()
+spawn:
+    ch.send(1)
+print(ch.recv())    # 1 — the spawned sender is running, so the recv is satisfiable
+```
+
+### `--serial` starts late — by construction
+
+The cooperative single-thread engine **queues** a task at its `spawn` and runs it at the join. It has
+one thread, so running the task beside the body is unreachable there; the same program prints
+`A B SPAWNED`. This is the **second** of two places the two engines deliberately disagree — the first
+is `Executor.submit` (`docs/stdlib.md`, decision D3). `--serial` is slated for removal
+(`docs/future.md` §2b); the M:N engine is the standard of correct, not the engine agreement.
+
+### Output ordering: streaming CLI vs buffered sink
+
+A spawned task's stdout is a **private per-fiber buffer flushed at the join, in task order**, under
+the **buffered** sink — every Rust test helper, and `--serial`. `chezzi run` **streams**, so on the
+real CLI a task's output can interleave with the parent's. Cross-task print order is nondeterministic
+by contract; do not build a program (or a golden) on it. `examples/implicit_nursery.chz`'s header
+comment is the worked statement of this.
+
+### Early exit from a `parallel:` cancels silently
+
+A `break`/`continue`/`return`/fault that leaves a `parallel:` body early **cancels** the nursery's
+tasks, and prints **nothing** about it. There is no "N pending task(s) cancelled" report: a task
+starts at its `spawn`, so there are no unstarted tasks to count, and any residual number would be a
+race. `trio` and `asyncio.TaskGroup` are silent here too.
 
 ---
 
@@ -326,10 +360,18 @@ c := bch.cap()             # capacity: 2 here; 0 for an unbounded Channel[T]()
   (top level, no nursery, or inside a native callback) is a **deadlock fault**, not a silent over-fill.
   As with `try_recv`, `try_send`'s full-vs-not decision under multi-sender contention is nondeterministic
   — the same class as `try_recv`'s `None`-vs-`Some` under contention; it is not "fixed".
-- **`recv` on an empty channel** is a **deadlock-detect RuntimeError** under C1–C4 (*"recv would block
-  forever — sequential executor; real blocking arrives in C5"*), preserving the C5 blocking surface.
-  In the fan-out pattern (workers `send` during the block, main `recv`s after the dedent) the queue is
-  already full, so `recv` succeeds — guard with `len()` if unsure.
+- **`recv` on an empty channel BLOCKS** until a sibling sends. It faults `recv on an empty channel:
+  deadlock` only when the run is provably stuck — every counted party blocked with no satisfiable
+  wait — which is Go's own detector (`fatal error: all goroutines are asleep - deadlock!`). Since
+  §2c1 a `spawn`ed producer is already running when the body reaches its `recv`, so Go's plainest
+  channel idiom works verbatim:
+
+  ```chezzi
+  ch := Channel[int]()
+  spawn:
+      ch.send(1)
+  print(ch.recv())     # 1
+  ```
 - **Move-on-send** = Go's O(1) send cost without Go's sharing (the sender can't touch the value after
   — the checker enforces it, like a Rust channel). Deep-copy is the fallback when the sender wants to
   keep its copy.
@@ -1837,17 +1879,18 @@ SIBLINGS in ONE nursery (the doc case C pattern).
   - **Join semantics.** `return <value>`, fall-through end, and a `?` early-return are all **join
     points**: the function's spawned tasks run to completion FIFO, *then* control leaves. An explicit
     inner `parallel:` joins earlier at its dedent; a `return`/`?` that *escapes* an inner `parallel:`
-    still cancels-and-reports that inner nursery (unchanged) while joining the function's implicit one.
-    An uncaught **fault** propagating out of a body cancels-and-reports the implicit nursery's
-    unstarted tasks (abnormal exit, not a join). `defer`s run *after* the implicit join (tasks
-    complete, then cleanup) — and identically for an **explicit** `parallel:` block: a `defer`
-    directly inside the block flushes *after* the block's dedent join (its spawned children run to
-    completion first, then the block's deferred cleanup), same order as the implicit body nursery.
-    The report is emitted **per nursery** (innermost-first — two stacked
-    nurseries print two lines), identically on both engines (serial `--serial` and default M:N). The
-    **module** top-level nursery is the one exception: an uncaught *top-level* fault leaves it silent
-    (it joins only on a clean run to program end). [resolved 2026-06-12 — see PROGRESS.md; previously
-    the VM dropped these reports while the interp printed them.]
+    still cancels that inner nursery (silently — §2c1) while joining the function's implicit one.
+    An uncaught **fault** propagating out of a body cancels the implicit nursery's tasks (abnormal
+    exit, not a join). `defer`s run *after* the implicit join (tasks complete, then cleanup) — and
+    identically for an **explicit** `parallel:` block: a `defer` directly inside the block flushes
+    *after* the block's dedent join (its spawned children run to completion first, then the block's
+    deferred cleanup), same order as the implicit body nursery. Each nursery on the unwind path is
+    reclaimed separately, innermost-first, on both engines.
+    [**§2c1, 2026-08-14:** the cancel is now SILENT. This used to write one
+    `"{n} pending task(s) cancelled on early exit from parallel:"` line per nursery; with eager start
+    there are no unstarted tasks to count and any residual number would be racy, so the report is
+    deleted — `trio` and `asyncio.TaskGroup` print nothing here either. Earlier history: resolved
+    2026-06-12, when the VM dropped these reports while the tree-walk interp printed them.]
   - **Zero-overhead gate.** A body gets an implicit nursery only if it lexically contains a bare
     `spawn` (a compile-time pre-scan, `compiler::block_has_bare_spawn`); bodies without one emit
     byte-identical bytecode to pre-M-C. Implemented as a single join site — the compiler emits the

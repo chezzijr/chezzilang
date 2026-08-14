@@ -297,10 +297,11 @@ impl Vm {
             // The eager nursery owns its OWN sched (a single scope 0 — see `activate_eager_nursery`);
             // `inject` overwrites the `0` placeholder `task_index` under its lock. This path PREPARES the
             // task right here, so a snapshot build failure surfaces right here too (prepare instant).
+            let sid = scope.scope;
             let fiber = self
                 .prepare_worker(task, Some(snap?), &cell_ids)?
-                .into_fiber(0, 0);
-            sched.inject(fiber, 0);
+                .into_fiber(0, sid);
+            sched.inject(fiber, sid);
             return Ok(());
         }
         self.nurseries[i].push(QueuedTask {
@@ -318,48 +319,46 @@ impl Vm {
     /// the old FIFO run-to-completion drain, so non-blocking programs are byte-for-byte unchanged.
     /// The first child fault (or `std.os.exit`) aborts the remaining siblings and propagates; on that
     /// path the parent's restored `run_until` handles `recover:`/unwind in its own context.
-    /// TASK B — cancel-and-report when a `parallel:` body escapes its `JoinNursery` early (`?` /
+    /// TASK B — cancel a `parallel:` body's tasks when it escapes its `JoinNursery` early (`?` /
     /// `return` / `break` / `continue`) or when a fault unwinds past it. Pop every nursery entry ABOVE
-    /// `from_len` (the level the escaping construct should restore to); for each lazy nursery that
-    /// holds unstarted [`PendingCall`]s, write ONE report line to stdout (`out`, the stream the parity
-    /// harnesses read) — emitting PER-NURSERY, innermost-first, byte-identical to the serial-VM oracle,
-    /// whose `exec_parallel` / `leave_implicit_nursery` report once per frame/block as it unwinds (two
-    /// stacked nurseries → two lines, not one combined `2 pending`). The tasks are then DROPPED: they
-    /// never started, so there is no fiber to cancel and no buffered output to flush. This preserves
-    /// the old `truncate`'s no-leak behavior (depth returns to `from_len`) and adds the observable
-    /// report. Replaces the bare `self.nurseries.truncate(from_len)` at every reclaim site.
+    /// `from_len` (the level the escaping construct should restore to), innermost-first: an eager or
+    /// early-enlisted nursery's tasks are LIVE fibers, so they are cancelled + drained + flushed; a
+    /// lazy nursery's entries never started, so they are simply DROPPED (no fiber to cancel, no
+    /// buffered output to flush). Depth returns to `from_len` — the old `truncate`'s no-leak behavior
+    /// — at every reclaim site.
+    ///
+    /// §2c1 — this used to write ONE observable line per lazy nursery
+    /// (`"{n} pending task(s) cancelled on early exit from parallel:"`). **That report is deleted.**
+    /// A task now starts at its `spawn`, so on the M:N engine there are no unstarted tasks to count,
+    /// and any residual count would be racy — a task injected into the run queue may or may not have
+    /// been picked up before the escape. A confident wrong number on stdout is worse than no line
+    /// (`docs/gaps.md` W7-12: an uncertain verdict must decline). trio and `asyncio.TaskGroup` print
+    /// nothing here either. The eager path never reported, so this also removes a pre-existing
+    /// eager-vs-lazy observable split rather than creating one.
     pub(super) fn drain_escaped_nursery(&mut self, from_len: usize) {
         if self.nurseries.len() <= from_len {
             return; // nothing escaped past the join (e.g. normal fall-through already popped it)
         }
         while self.nurseries.len() > from_len {
-            self.nursery_defer_floors.pop(); // lockstep with `nurseries`
-            let mn_scope = self.mn_scopes.pop().flatten(); // lockstep — Some if early-enlisted
-            let nursery = self.nurseries.pop().unwrap_or_default();
+            // All four stacks pop TOGETHER, unconditionally — `nurseries`, `nursery_defer_floors`,
+            // `mn_scopes` and `eager_scheds` are lockstep, and the enlisted arm below `continue`s.
+            self.nursery_defer_floors.pop();
+            let mn_scope = self.mn_scopes.pop().flatten(); // Some if early-enlisted
+            let eager = self.eager_scheds.pop().flatten(); // Some if this nursery is eager
+            self.nurseries.pop(); // unstarted tasks — dropped, never run (see the doc above)
             // Cross-nursery flat scheduler — an EARLY-ENLISTED nursery's tasks are LIVE fibers already
             // seeded into the global sched (its `tasks` vec was drained), so an escape past its join must
             // CANCEL + drain them (trip the scope cancel, requeue parked, settle), exactly like an eager
-            // nursery's `abort_eager_nursery`. No pending-task report (the tasks DID start).
+            // nursery's `abort_eager_nursery`. (A nursery is never both: the enlist only happens on the
+            // lazy path, so `eager` is `None` here.)
             if let Some(scope_id) = mn_scope {
                 self.abort_enlisted_scope(scope_id);
-                // A `spawn:` issued after the enlist refilled `nursery` with unstarted late tasks; on an
-                // escape they never started → report them cancelled (parity with the lazy arm below and
-                // with coop), rather than silently dropping them. (Cross-nursery flat scheduler — #3.)
-                if !nursery.is_empty() {
-                    self.emit_out(&crate::runtime::pending_cancel_report(nursery.len()));
-                }
                 continue;
             }
-            // Per-connection spawn — pop the eager scope in lockstep. An eager nursery's handlers are
-            // already-started live fibers (no unstarted `PendingCall`s to count): cancel + drain + flush
-            // them. A lazy nursery's entries are unstarted tasks → report one line per such nursery.
-            match self.eager_scheds.pop().flatten() {
-                Some(scope) => self.abort_eager_nursery(scope),
-                None => {
-                    if !nursery.is_empty() {
-                        self.emit_out(&crate::runtime::pending_cancel_report(nursery.len()));
-                    }
-                }
+            // Per-connection spawn / §2c1 — an eager nursery's tasks are already-started live fibers:
+            // cancel + drain + flush them.
+            if let Some(scope) = eager {
+                self.abort_eager_nursery(scope);
             }
         }
     }
@@ -793,16 +792,55 @@ impl Vm {
     /// D5-owe-#3 demote replacement) is unconditional and pool-independent — exactly one extra OS thread
     /// per open eager nursery, joined when the nursery completes. Handlers within one eager nursery
     /// multiplex over this one drainer + the join worker (M:N — handlers park on socket ops, so one
-    /// thread serves many); multi-core handler parallelism is future work.
-    pub(super) fn activate_eager_nursery(&mut self) -> EagerScope {
+    /// thread serves many); multi-core handler parallelism arrives at the JOIN — see
+    /// [`Vm::join_eager_nursery`], which farms the bounded pool once the body is closed.
+    ///
+    /// §2c1 — this now runs for the OUTERMOST nursery too (`mn.is_none()`, top-level `main`), which is
+    /// what makes a `spawn` start at the `spawn`. Returns `None` when the drainer thread cannot be
+    /// created, so the caller falls back to the lazy queue-at-join path: an eager scope with no
+    /// drainer has NO worker at all between `EnterNursery` and `JoinNursery`, so a body that blocks
+    /// (an accept loop) would hang outright.
+    pub(super) fn activate_eager_nursery(&mut self) -> Option<EagerScope> {
+        // §2c1 — a NESTED eager nursery on THIS thread joins the enclosing scope's sched as a new
+        // SCOPE instead of building a private sibling sched. Two private scheds cannot wake each
+        // other (`send_wake` scans its own sched then `wake_parent_chain`, strictly upward), which is
+        // the cross-nursery deadlock the flat scheduler exists to prevent — see `EagerScope::scope`.
+        //
+        // Only when `mn.is_none()`. On a WORKER SHELL the enclosing eager scope belongs to a
+        // different nursery generation and the private-sched-plus-`parent_wake` shape is the
+        // per-connection-spawn design; that path is unchanged.
+        if self.mn.is_none()
+            && let Some(outer) = self.eager_scheds.iter().flatten().next_back()
+        {
+            let sched = Arc::clone(&outer.sched);
+            let cancel = Arc::new(AtomicBool::new(false));
+            let scope = sched.register_scope_seeded(
+                Arc::clone(&cancel),
+                self.nursery_ancestors(),
+                Vec::new(),
+            );
+            sched.open_body(scope);
+            return Some(EagerScope {
+                sched,
+                cancel,
+                drainer: None, // the OWNER's drainer serves this scope too — it drains the global queue
+                scope,
+            });
+        }
         let cancel = Arc::new(AtomicBool::new(false));
-        debug_assert!(
-            self.mn.is_some(),
-            "an eager nursery only activates on a worker shell (gated by mn.is_some())"
-        );
         let deadlock_err = self.err(DEADLOCK_MSG.to_string(), Span::RUNTIME);
-        // wid 0 = inline join worker; wid 1 = the dedicated raw drainer below.
-        let mut inner = MnSched::new(0, 2, Arc::clone(&cancel), deadlock_err, self.heap.mem_cap());
+        // wid 0 = inline join worker, wid 1 = the dedicated raw drainer below, wids 2.. = the pool
+        // helpers `join_eager_nursery` farms for an OUTERMOST scope. `MnSched::new` allocates the
+        // per-worker local queues up front (`locals: (0..nworkers)`), so the count must be sized here
+        // even though most of those workers are farmed later; an unused local queue is inert.
+        let nworkers = worker_count().max(2);
+        let mut inner = MnSched::new(
+            0,
+            nworkers,
+            Arc::clone(&cancel),
+            deadlock_err,
+            self.heap.mem_cap(),
+        );
         // gaps.md B5 — this eager sched is PRIVATE (no link to the parent). A `send`/`close` inside its
         // body only scans its OWN parked set, so a receiver parked in the PARENT nursery on a shared
         // channel is never woken → the parent spuriously faults `deadlock`. Point `parent_wake` at the
@@ -810,6 +848,11 @@ impl Vm {
         // `mn_enlist_sched` on the inline outermost builder) so `send_wake`/`close_wake` route the wake
         // up to it. Strictly upward: no cycle, and it wakes a receiver on the parent's HOME sched (its
         // outcome slot / JoinScope stay put).
+        //
+        // §2c1 — at the TOP LEVEL both are `None`, and that is CORRECT rather than merely convenient:
+        // a top-level eager sched IS the outermost scheduler, so there is no parked receiver above it
+        // for a wake to reach. (The wake still reaches SIBLING scheds through the run's
+        // `sched_registry` — `Vm::wake_on_send` — which is a different, non-hierarchical path.)
         inner.parent_wake = self.mn.clone().or_else(|| self.mn_enlist_sched.clone());
         // gaps.md W7-56 — see `run_mn_nursery_outermost`.
         inner.exec_registry = Arc::clone(&self.exec_registry);
@@ -820,7 +863,7 @@ impl Vm {
         self.register_sched(&sched);
         // Structured concurrency — an eager nursery is a nested scope: its handlers must observe the
         // enclosing scopes' cancel too (`JoinScope::ancestors`).
-        sched.lock().scopes[0].ancestors = self.scope_ancestors();
+        sched.lock().scopes[0].ancestors = self.nursery_ancestors();
         sched.open_body(0);
         let mut shell = self.spawn_shell(&sched, &cancel);
         let drain_sched = Arc::clone(&sched);
@@ -832,12 +875,43 @@ impl Vm {
                     shell.mn_worker_loop(&drain_sched, 1, 0)
                 }));
             })
-            .ok();
-        EagerScope {
+            .ok()?; // no drainer ⇒ no worker during the body ⇒ fall back to lazy (see the doc above)
+        // §2c1 — an OUTERMOST eager nursery publishes itself so the process-wide verdict counts its
+        // undone fibers as uncounted senders. Without it, top-level `main` blocked on `ch.recv()`
+        // while a live sibling is about to `send` is `parties.len() >= live` with nothing satisfiable
+        // — a false deadlock on a live program. NESTED eager nurseries are not registered: their body
+        // runs on a worker shell, which is never a counted party, so the invariant was never broken
+        // there. See `quiesce::QuiesceState::eager_bodies`.
+        if self.mn.is_none() {
+            self.quiesce.register_eager_body(&sched);
+        }
+        Some(EagerScope {
             sched,
             cancel,
-            drainer,
+            drainer: Some(drainer),
+            scope: 0,
+        })
+    }
+
+    /// §2c1 — the cancel chain a new nursery scope must observe: this fiber's own chain
+    /// ([`Vm::scope_ancestors`]) PLUS every eager nursery scope still open on this thread, outermost
+    /// first.
+    ///
+    /// `scope_ancestors` alone is not enough once the top level is eager: on `main` there is no fiber,
+    /// so `cancel`/`cancel_outer` are empty and a nested scope would observe no ancestor at all —
+    /// an outer escape could then leave its inner scope's fibers uncancellable, which is the
+    /// structured-concurrency invariant.
+    pub(super) fn nursery_ancestors(&self) -> Vec<Arc<AtomicBool>> {
+        let mut a = self.scope_ancestors();
+        if self.deferring == 0 {
+            a.extend(
+                self.eager_scheds
+                    .iter()
+                    .flatten()
+                    .map(|s| Arc::clone(&s.cancel)),
+            );
         }
+        a
     }
 
     /// Per-connection spawn — `JoinNursery` for an eager nursery (the normal fall-through path). Close
@@ -845,22 +919,87 @@ impl Vm {
     /// the inline join worker (`wid` 0) to help drain remaining handlers, wait for every slot to fill,
     /// and reduce (Decision-F output flush in spawn order; a handler fault propagates as the
     /// acceptor's body fault, which the outer nursery then sees). Mirrors `run_mn_nursery`'s tail.
+    ///
+    /// §2c1 — two additions once the OUTERMOST nursery takes this path:
+    /// - **Pool helpers.** The body ran on one raw drainer, which is right for a server whose
+    ///   handlers park on sockets but would cost a CPU-bound fan-out (`examples/primes_parallel.chz`)
+    ///   every core but two. Once the body is CLOSED there is no acceptor left to starve, so farm the
+    ///   bounded pool exactly as `run_mn_nursery_outermost` does — same helper count, same
+    ///   `SENTINEL_SCOPE`, and the same thread-hold window (join → completion) as before this change.
+    ///   Only for an outermost scope: a NESTED eager join already runs on a worker thread whose pool
+    ///   siblings are busy, and farming there is what the old `worker_count() >= 2` gate was about.
+    /// - **The W7-58 party guard.** The joiner used to be a worker shell by construction, so it was
+    ///   never a counted party; a top-level joiner IS one, and without registering, `main` sitting in
+    ///   `mn_worker_loop` is invisible to the process-wide verdict (`parties.len() < live` vetoes
+    ///   forever). `nursery_party_guard` self-gates on `mn.is_none() && scheduler_stack.is_empty()`,
+    ///   so it stays a no-op on a shell.
     pub(super) fn join_eager_nursery(&mut self, scope: EagerScope) -> Result<(), RuntimeError> {
         let EagerScope {
             sched,
             cancel,
             drainer,
-            ..
+            scope: sid,
         } = scope;
-        sched.close_body(0);
+        sched.close_body(sid);
         let mut shell = self.spawn_shell(&sched, &cancel);
-        shell.mn_worker_loop(&sched, 0, 0);
-        sched.wait_for_completion();
+        // §2c1 — a NESTED scope shares the owner's sched: run the inline owner SCOPE-SCOPED (it
+        // returns the instant ITS scope is done, having drained the GLOBAL queue meanwhile — that
+        // drain is what runs a sibling scope's fiber), reduce only its sub-range, and retire it so the
+        // enclosing scope is the last scope again. It must NOT touch the sched's drainer or its other
+        // scopes' slots — those belong to the owner's join. Mirrors `run_mn_nursery_nested`.
+        if drainer.is_none() {
+            {
+                // §2c1 — the ENCLOSING body is parked here for the duration, so it cannot inject:
+                // clear its `body_open` veto or a genuine nested deadlock hangs.
+                let _bodies = self.blocked_bodies_guard(true);
+                let _party = self.nursery_party_guard(&sched);
+                shell.mn_worker_loop(&sched, 0, sid);
+                sched.wait_for_scope(sid);
+            }
+            let slots = sched.take_scope_slots(sid);
+            sched.retire_last_scope(sid);
+            return self.reduce_task_slots(slots);
+        }
+        self.farm_outermost_eager_helpers(&sched, &cancel);
+        {
+            let _party = self.nursery_party_guard(&sched);
+            shell.mn_worker_loop(&sched, 0, 0);
+            sched.wait_for_completion();
+        }
         if let Some(h) = drainer {
             let _ = h.join();
         }
         let slots = sched.take_slots();
         self.reduce_task_slots(slots)
+    }
+
+    /// §2c1 — farm the bounded pool onto an OUTERMOST eager sched whose body has just closed, so a
+    /// CPU-bound fan-out gets every core instead of the drainer + the inline joiner. `wid`s 2.. —
+    /// `0` is the inline joiner and `1` is the raw drainer; `activate_eager_nursery` sized `locals`
+    /// for all of them. SENTINEL, as in `run_mn_nursery_outermost`: drain the whole queue until
+    /// global terminate.
+    ///
+    /// Two guards, both measured:
+    /// - **nested scope** (`mn.is_some()`) — a nested eager join already runs on a worker thread
+    ///   whose pool siblings are busy; farming there is what the old `worker_count() >= 2` gate at
+    ///   `EnterNursery` was about.
+    /// - **fewer than 2 tasks left** — the inline joiner alone finishes those, so every submission
+    ///   would be pure overhead. That matters because a `parallel:` INSIDE A LOOP reaches this once
+    ///   per iteration: unguarded, a 20 000-iteration loop submitted ~200 000 pool jobs for nurseries
+    ///   holding a single task each.
+    fn farm_outermost_eager_helpers(&mut self, sched: &Arc<MnSched>, cancel: &Arc<AtomicBool>) {
+        if self.mn.is_some() || sched.outstanding_tasks() < 2 {
+            return;
+        }
+        for wid in 2..worker_count().max(2) {
+            let mut shell = self.spawn_shell(sched, cancel);
+            let sched = Arc::clone(sched);
+            pool::submit(Box::new(move || {
+                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    shell.mn_worker_loop(&sched, wid, SENTINEL_SCOPE)
+                }));
+            }));
+        }
     }
 
     /// Per-connection spawn — reclaim an eager nursery whose body ESCAPED early (`?`/`return`/`break`/
@@ -875,7 +1014,7 @@ impl Vm {
             sched,
             cancel,
             drainer,
-            ..
+            scope: sid,
         } = scope;
         // N4 — trip the cancel UNDER the core lock (`trip_scope_cancel`, scope 0 = the eager scope, whose
         // `JoinScope::cancel` IS this `cancel` Arc) and BEFORE `close_body` clears the `any_body_open`
@@ -883,13 +1022,39 @@ impl Vm {
         // to evaluate the deadlock predicate (a bare `Relaxed` store outside the lock has no
         // synchronizes-with edge, so a worker could read a stale `false` and reap this scope's parked
         // handlers as `Deadlocked` — dropping them without `unwind_deferred`, skipping their `defer`s).
-        sched.trip_scope_cancel(0);
-        sched.close_body(0);
-        sched.cancel_drain(0);
-        poller::drain_sched(&sched);
+        sched.trip_scope_cancel(sid);
+        sched.close_body(sid);
+        sched.cancel_drain(sid);
+        // §2c1 — scope-selective: a nested eager nursery shares the enclosing scope's sched, so
+        // draining by sched alone would unpark the OUTER scope's socket-parked fibers too.
+        if drainer.is_some() {
+            poller::drain_sched(&sched);
+        } else {
+            poller::drain_scope(&sched, sid);
+        }
         let mut shell = self.spawn_shell(&sched, &cancel);
-        shell.mn_worker_loop(&sched, 0, 0);
-        sched.wait_for_completion();
+        // §2c1 — a NESTED scope settles and reduces only ITSELF, then retires (see
+        // `join_eager_nursery`'s nested arm); the owner's drainer and sibling scopes are untouched.
+        if drainer.is_none() {
+            {
+                let _bodies = self.blocked_bodies_guard(true); // see `join_eager_nursery`'s nested arm
+                let _party = self.nursery_party_guard(&sched);
+                shell.mn_worker_loop(&sched, 0, sid);
+                sched.wait_for_scope(sid);
+            }
+            let slots = sched.take_scope_slots(sid);
+            sched.retire_last_scope(sid);
+            let _ = self.reduce_task_slots(slots);
+            return;
+        }
+        {
+            // §2c1 — same reason as `join_eager_nursery`: a top-level escape settles its handlers on
+            // `main`, which must be a counted party for that span or the process-wide verdict vetoes
+            // forever. No-op on a worker shell.
+            let _party = self.nursery_party_guard(&sched);
+            shell.mn_worker_loop(&sched, 0, 0);
+            sched.wait_for_completion();
+        }
         if let Some(h) = drainer {
             let _ = h.join();
         }
@@ -2419,9 +2584,12 @@ impl Vm {
     ///
     /// **A worker SHELL (`mn.is_some()`) must never register.** It is not in `live`, so registering it
     /// would let `parties.len()` exceed `live` — the one error direction that faults a live program.
-    /// The gate excludes it, which is also why `join_eager_nursery`/`abort_eager_nursery` need no call
-    /// here (`activate_eager_nursery` `debug_assert!`s `mn.is_some()`, so their joiner is always a
-    /// shell).
+    /// The gate excludes it.
+    ///
+    /// §2c1 — `join_eager_nursery`/`abort_eager_nursery` DO call this now. They used to be exempt
+    /// because `activate_eager_nursery` `debug_assert!`ed `mn.is_some()`, so their joiner was always a
+    /// shell; the outermost nursery is eager now, so its joiner is top-level `main`. The gate keeps
+    /// those calls no-ops on the nested (shell) path.
     ///
     /// Called with NO sched core lock held — the total order is `parties` → `SchedCore`.
     pub(super) fn nursery_party_guard(

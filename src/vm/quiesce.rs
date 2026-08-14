@@ -182,6 +182,24 @@ impl PartyWait {
 #[derive(Default)]
 pub(super) struct QuiesceState {
     parties: Mutex<Vec<Arc<PartyWait>>>,
+    /// §2c1 — every OUTERMOST eager nursery alive in this run, by `Weak` (like [`super::SchedRegistry`]).
+    ///
+    /// It exists because eager start broke the invariant `live`'s soundness rests on — *a nursery
+    /// fiber never coexists with a counted party*. It can now: top-level `main` runs the `parallel:`
+    /// body itself, so `main` blocked on `ch.recv()` while a live sibling is about to `send` registers
+    /// an (correctly) unsatisfiable `Recv` party while `live == 1` counts no nursery fibers at all —
+    /// `parties.len() >= live` with nothing satisfiable, i.e. a **false deadlock on a live program**,
+    /// the one unacceptable direction ([`Self::verdict`]'s table above).
+    ///
+    /// [`Self::live_eager_bodies`] adds one to `live` per nursery that still has an undone task, which
+    /// is the *safe* direction (an over-count only vetoes). It is deliberately NOT a `PartyWait`: a
+    /// party is a BLOCKED THREAD, and registering a non-thread inflates `parties.len()` toward `live`
+    /// — measured, that false-faulted `spawn: print(…)` beside `time.sleep_ms(300)` on `main`, a
+    /// program with no channel in it at all.
+    ///
+    /// Pruned lazily on read; a nursery that has JOINED contributes nothing anyway (its scope is
+    /// complete), so nothing has to deregister.
+    eager_bodies: Mutex<Vec<std::sync::Weak<super::MnSched>>>,
     /// The run-wide `os.exit` request (W7-47). `os.exit` writes `pending_exit` on whichever `Vm` ran
     /// the native, which for an eager `Executor` job is that job's isolated worker — a value nobody
     /// observes until the join. A party blocked in a socket/channel wait never reaches the join, so
@@ -254,7 +272,13 @@ impl QuiesceState {
 
     /// Register a blocked party for as long as the returned guard lives.
     pub(super) fn block(self: &Arc<Self>, wait: PartyWait) -> PartyGuard {
-        let wait = Arc::new(wait);
+        self.block_shared(Arc::new(wait))
+    }
+
+    /// §2c1 — [`Self::block`] over an `Arc` the caller already holds, so ONE `PartyWait` can be both
+    /// the registered party AND the sched-side `SchedCore::body_waits` entry. Two separately-built
+    /// waits for the same block could disagree about what the thread waits for; one cannot.
+    pub(super) fn block_shared(self: &Arc<Self>, wait: Arc<PartyWait>) -> PartyGuard {
         self.parties
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -316,7 +340,10 @@ impl QuiesceState {
         // by an executor slot. Read under the party lock so a `submit` cannot slip a new job past a
         // count already taken (it could only be issued by a RUNNING party, which is unregistered and
         // therefore already vetoes — but the read is free here and the invariant is worth pinning).
-        let live = 1 + Self::outstanding_jobs(exec_registry);
+        // §2c1 — plus one per OUTERMOST eager nursery that still holds an undone task: those fibers
+        // are uncounted senders, and this is the term that stops a healthy `spawn: ch.send(1)` beside
+        // a blocking `ch.recv()` on `main` from reading as a deadlock. See `eager_bodies`.
+        let live = 1 + Self::outstanding_jobs(exec_registry) + self.live_eager_bodies();
         if parties.len() < live {
             return None; // somebody is still running — they may yet send.
         }
@@ -324,6 +351,51 @@ impl QuiesceState {
             return None;
         }
         Some(parties.iter().all(|p| matches!(**p, PartyWait::Join(_))))
+    }
+
+    /// §2c1 — publish an OUTERMOST eager nursery's sched, so [`Self::live_eager_bodies`] can count its
+    /// fibers as uncounted senders for as long as they are undone. Takes only this lock.
+    pub(super) fn register_eager_body(&self, sched: &Arc<super::MnSched>) {
+        let mut g = self.eager_bodies.lock().unwrap_or_else(|e| e.into_inner());
+        // A `parallel:` inside a loop registers once per iteration, and a run that never blocks never
+        // calls `live_eager_bodies` to prune — so compact here too, or 20 000 iterations leave 20 000
+        // dead `Weak`s behind. Amortised: the scan runs only when the vec has actually grown.
+        if g.len() >= 64 {
+            g.retain(|w| w.strong_count() > 0);
+        }
+        g.push(Arc::downgrade(sched));
+    }
+
+    /// §2c1 — how many live eager nurseries still hold an undone task. ONE per nursery, not one per
+    /// task: a single un-blocked sender is all it takes to veto the verdict, and `live` only has to
+    /// EXCEED `parties.len()`.
+    ///
+    /// Snapshots the registry and DROPS its lock before taking any `SchedCore` — the same walk
+    /// `Vm::halt_all_scheds` and `outstanding_jobs` use, so the established `parties` (P) →
+    /// `SchedCore` (A) order is unchanged and this lock never nests under one.
+    ///
+    /// A nursery that has JOINED reports every scope complete, so it contributes nothing and needs no
+    /// deregistration; dead `Weak`s are pruned here.
+    fn live_eager_bodies(&self) -> usize {
+        let live: Vec<_> = {
+            let mut g = self.eager_bodies.lock().unwrap_or_else(|e| e.into_inner());
+            if g.is_empty() {
+                return 0;
+            }
+            let live: Vec<_> = g.iter().filter_map(|w| w.upgrade()).collect();
+            g.retain(|w| w.strong_count() > 0);
+            live
+        };
+        // "Can this nursery still send?" — it must have UNDONE work AND be able to move. Counting
+        // merely-incomplete nurseries over-counts `live` forever once their fibers are stuck, which
+        // vetoes the verdict and HANGS a genuinely deadlocked run (measured on three `*_still_fault`
+        // tests). The blocked-body-aware variant is the right question HERE and only here.
+        live.iter()
+            .filter(|s| {
+                let c = s.lock();
+                c.any_scope_incomplete() && !s.is_deadlocked_ignoring_jobs(&c)
+            })
+            .count()
     }
 
     /// Σ `outstanding` over every executor created in this run. Snapshots the registry and drops its
