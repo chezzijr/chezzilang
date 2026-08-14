@@ -62,3 +62,12 @@ test fn parse_int_base():
     match math.parse_int_base("-9223372036854775808", 10):
         Ok(v): assert v == -9223372036854775808, "i64::MIN parses"
         Err(_): assert false, "i64::MIN"
+
+# M24-5 — a native module FUNCTION is an ordinary `defer` target and really runs. Its neighbour, a
+# native CONSTRUCTOR reached the same way (`concurrency.Shared(0)`, `time.timer(10)`), is refused by
+# the checker like the bare `defer Shared(0)` spelling — see
+# checker::tests::a_qualified_native_constructor_is_not_a_spawn_or_defer_target_rejected. This side
+# used to compile to the same module-member load that faulted at run time, so it is the control.
+test fn deferred_native_module_fn_runs():
+    defer math.abs(-3)
+    assert math.abs(-3) == 3

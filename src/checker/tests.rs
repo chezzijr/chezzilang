@@ -25300,6 +25300,48 @@ fn a_dotted_constructor_is_not_a_spawn_or_defer_target_rejected() {
     }
 }
 
+/// M24-5 — the LAST spelling of that same constructor rule: a NATIVE ctor reached through its std
+/// module object (`concurrency.Shared(0)`, `time.timer(10)`, whole-module or ALIASED). One concept,
+/// one verdict — this used to be `check`-clean and then fault at run time with "module
+/// 'std.concurrency' has no member 'Shared'", the bare `defer Shared(0)` spelling having been
+/// refused correctly all along.
+#[test]
+fn a_qualified_native_constructor_is_not_a_spawn_or_defer_target_rejected() {
+    const NEEDLE: &str = "constructors must be wrapped in a function";
+    for (import, target) in [
+        ("import std.concurrency", "concurrency.Shared(0)"),
+        ("import std.concurrency", "concurrency.RwShared(0)"),
+        ("import std.concurrency", "concurrency.Atomic(0)"),
+        ("import std.concurrency", "concurrency.AtomicInt(0)"),
+        ("import std.concurrency", "concurrency.Executor()"),
+        ("import std.concurrency as cc", "cc.Shared(0)"),
+        ("import std.time", "time.timer(10)"),
+    ] {
+        entry_rejects(
+            &format!("{import}\nfn main():\n    defer {target}\nmain()\n"),
+            NEEDLE,
+        );
+        entry_rejects(
+            &format!("{import}\nfn main():\n    spawn {target}\nmain()\n"),
+            NEEDLE,
+        );
+    }
+}
+
+/// …and the control the same arm must NOT touch: an ordinary native module FUNCTION is a plain call,
+/// so it stays a legal `defer` target. (That it still RUNS — the other half of check/run agreement —
+/// is `tests/chz/stdlib/math_test.chz::deferred_native_module_fn_runs`, on both engines.)
+#[test]
+fn a_native_module_function_is_a_defer_target_ok() {
+    entry_ok("import std.math\nfn main():\n    defer math.abs(-3)\n    print(\"done\")\nmain()\n");
+    // …and a LOCAL that merely SHADOWS a std module's bound name is a RECEIVER, not a module: this
+    // `time.timer(10)` is an ordinary method call and must stay one. (The arm's `!is_local_binding`
+    // guard — a scope-blind name test would reject this with a factually false message.)
+    entry_ok(
+        "import std.time\nstruct Clock:\n    n: int\n    fn timer(self, ms: int) -> int:\n        return ms\nfn main(time: Clock):\n    defer time.timer(10)\nmain(Clock(1))\n",
+    );
+}
+
 /// …and the neighbours the same rule must NOT touch — derived from its premise ("the call CONSTRUCTS
 /// and discards"), not from the rejected list: a STATIC METHOD in every head spelling still builds a
 /// value too, and is still an ordinary call. A `from`-imported head is here because its global slot

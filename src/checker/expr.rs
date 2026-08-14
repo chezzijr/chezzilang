@@ -408,10 +408,7 @@ impl Checker {
                 && let Some(sig) = self.module_sigs.get(&mid).cloned()
                 && sig.types.contains(name)
             {
-                if matches!(
-                    name.as_str(),
-                    "Shared" | "RwShared" | "Atomic" | "AtomicInt" | "Executor" | "timer"
-                ) {
+                if Self::qualified_native_ctor(name) {
                     return self
                         .infer_named_call(name, args, &targs, *name_span, span, None, expected)
                         .unwrap_or(Ty::Unknown);

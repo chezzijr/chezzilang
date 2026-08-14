@@ -848,6 +848,19 @@ impl Checker {
         }
     }
 
+    /// Does this reserved native `sig.types` NAME have a from-nothing CONSTRUCTOR reachable by
+    /// qualified path (`concurrency.Shared(0)`, `time.timer(100)`)? The rest of `sig.types`
+    /// (`Socket`/`Listener`/`Writer`/`Reader`, the FFI widths, `ptr`) is type-only — a value comes
+    /// from a module function. Single source for the two rules that must agree on the set:
+    /// `infer_call`'s qualified-native-ctor arm, and `dotted_ctor_target`'s refusal of a
+    /// constructor in `defer`/`spawn` statement position.
+    pub(super) fn qualified_native_ctor(name: &str) -> bool {
+        matches!(
+            name,
+            "Shared" | "RwShared" | "Atomic" | "AtomicInt" | "Executor" | "timer"
+        )
+    }
+
     /// Expected type-argument arity for a builtin TYPE reached by qualified path (the generic
     /// concurrency boxes take exactly one; every other in-scope native type is non-generic).
     pub(super) fn qualified_builtin_arity(name: &str) -> usize {
@@ -2333,10 +2346,11 @@ impl Checker {
                 // struct/enum constructors are not first-class values — wrap them in a function.
                 match &e.kind {
                     ExprKind::Call { callee, named, .. } => match &callee.kind {
-                        // M24-5b — a dotted CONSTRUCTOR (`Color.Val(3)`, `lib.Point(3)`) is a
-                        // constructor like the bare `P(3)` below, so it gets that rule and that
-                        // message. A dotted STATIC METHOD (`H.build(3)`) is an ordinary call and
-                        // falls through to the accepting arm.
+                        // M24-5b — a dotted CONSTRUCTOR (`Color.Val(3)`, `lib.Point(3)`,
+                        // `concurrency.Shared(0)`) is a constructor like the bare `P(3)` below, so
+                        // it gets that rule and that message. A dotted STATIC METHOD (`H.build(3)`)
+                        // and an ordinary module FUNCTION (`math.abs(-3)`) are ordinary calls and
+                        // fall through to the accepting arm.
                         ExprKind::Field { .. } if self.dotted_ctor_target(callee) => {
                             self.error(
                                 e.span,
@@ -2433,8 +2447,9 @@ impl Checker {
                         // function. Mirrors `defer`'s guard so the two features agree.
                         if let ExprKind::Call { callee, named, .. } = &e.kind {
                             match &callee.kind {
-                                // M24-5b — a dotted CONSTRUCTOR belongs with the bare-constructor
-                                // rule below; a dotted STATIC METHOD is an ordinary call.
+                                // M24-5b — a dotted CONSTRUCTOR (user or native) belongs with the
+                                // bare-constructor rule below; a dotted STATIC METHOD is an
+                                // ordinary call.
                                 ExprKind::Field { .. } if self.dotted_ctor_target(callee) => {
                                     self.error(
                                         e.span,
@@ -4619,9 +4634,10 @@ impl Checker {
     /// ordinary call and is NOT rejected — it lowers through the eager-args wrapper, and Go accepts
     /// its analogue (`defer pkg.F(x)`).
     ///
-    /// The spellings mirror `infer_call`'s constructor arms: bare `Enum.Variant` and its two
-    /// turbofish carriers, qualified `module.Enum.Variant` (turbofished too), and the qualified
-    /// struct/newtype constructor `module.Point(…)`.
+    /// The spellings mirror `infer_call`'s constructor arms — ALL of them, so one concept gets one
+    /// verdict: bare `Enum.Variant` and its two turbofish carriers, qualified `module.Enum.Variant`
+    /// (turbofished too), the qualified struct/newtype constructor `module.Point(…)`, and the
+    /// qualified NATIVE constructor `concurrency.Shared(…)` / `time.timer(…)`.
     pub(super) fn dotted_ctor_target(&self, callee: &Expr) -> bool {
         let ExprKind::Field { obj, name, .. } = &callee.kind else {
             return false;
@@ -4645,6 +4661,24 @@ impl Checker {
             && let Some(mid) = self.imported_modules.get(mname)
             && let Some(sig) = self.module_sigs.get(mid)
             && (sig.struct_defs.contains_key(name) || sig.newtype_defs.contains_key(name))
+        {
+            return true;
+        }
+        // `concurrency.Shared(…)` / `time.timer(…)` — a qualified NATIVE constructor, the same
+        // concept as the bare `Shared(0)` the `Ident` arm already refuses. Mirrors `infer_call`'s
+        // native-ctor arm (`expr.rs`), sharing `qualified_native_ctor` so the two can't drift: the
+        // head is the MODULE and the member a reserved ctor name living only in the owning std
+        // module's `sig.types`. Without this the compiler lowers it to a module-MEMBER load — a
+        // reserved ctor is not a module member — so `chezzi check` passed a program only
+        // `chezzi run` refused ("module 'std.concurrency' has no member 'Shared'"). Type-only
+        // native names (`net.Socket`) are excluded: `infer_call` gives them their own, better
+        // message ("has no constructor"), and doubling it would say less.
+        if let ExprKind::Ident(mname) = &obj.kind
+            && !self.is_local_binding(mname)
+            && Self::qualified_native_ctor(name)
+            && let Some(mid) = self.imported_modules.get(mname)
+            && let Some(sig) = self.module_sigs.get(mid)
+            && sig.types.contains(name)
         {
             return true;
         }

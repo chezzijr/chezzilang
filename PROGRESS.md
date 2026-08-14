@@ -1523,7 +1523,14 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > `defer pkg.F(x)`), so every static spelling now lowers through a wrapper proto that replays the
 > call via `compile_call` — eager args, LIFO `defer`, no new opcode, no VM change. A CONSTRUCTOR head
 > (`defer E.A(3)`, `defer lib.Pt(3)`) is rejected by the **checker**, with the message and phase the
-> bare `defer P(3)` rule already used.
+> bare `defer P(3)` rule already used — and that rule now covers its **last** spelling too: a native
+> constructor reached through its std module object (`defer concurrency.Shared(0)`,
+> `defer time.timer(10)`, aliased imports included) used to be `chezzi check`-clean and then fault at
+> run time with *module 'std.concurrency' has no member 'Shared'*, one concept with two verdicts.
+> `Checker::dotted_ctor_target` and `infer_call`'s qualified-native-ctor arm now share one
+> `Checker::qualified_native_ctor` name set so they cannot drift; a type-only native name
+> (`net.Socket`) keeps its own better check-time message, and an ordinary module FUNCTION
+> (`defer math.abs(-3)`) is untouched and still runs on both engines.
 >
 > **Round 4 (2026-08-10) — three hunters, eight findings, four root causes, all fixed at the root.**
 > (A) the fragment column above — the third patch of that family had turned a loud fault into a

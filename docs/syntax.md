@@ -2921,12 +2921,16 @@ closure, or a name bound to one). The four **universe builtin functions** `print
 bound and passed like any function (`f := ord; f("a")`, a HOF arg). **Type / container / runtime
 constructors** (`int`, `str`, `List`, `Map`, `Channel`, `range`, …) and user struct/enum constructors
 are **not** first-class values — wrap them: `fn log(m: str): print(m)` then `defer log("done")`.
-That constructor rule reaches the **dotted** spellings too: a variant constructor (`defer E.A(3)`,
-`defer E[int].A(3)`, `defer lib.Col.Val(3)`) and a module-qualified struct/newtype constructor
-(`defer lib.Pt(3)`) are rejected with the same message, since they only build a value and throw it
-away. A **static method** is *not* a constructor and *is* an ordinary target, in every spelling that
-works as a call — `defer Holder.build(3)`, `defer Gen[int].build(3)`, `defer T.default()` inside a
-generic, `defer lib.Holder.build(3)`, and a `from`-imported head. Arguments are evaluated **eagerly at
+That constructor rule reaches **every dotted spelling of a constructor**, since they all merely build
+a value and throw it away: a variant constructor (`defer E.A(3)`, `defer E[int].A(3)`,
+`defer lib.Col.Val(3)`), a module-qualified struct/newtype constructor (`defer lib.Pt(3)`), and a
+**native constructor reached through its std module** (`defer concurrency.Shared(0)` — likewise
+`RwShared`/`Atomic`/`AtomicInt`/`Executor` — and `defer time.timer(10)`, aliased imports included).
+All are rejected by `chezzi check` with the same message as the bare `defer Shared(0)`. An ordinary
+**module function** is *not* a constructor and stays a legal target: `defer math.abs(-3)` compiles and
+runs. A **static method** is *not* a constructor either and *is* an ordinary target, in every spelling
+that works as a call — `defer Holder.build(3)`, `defer Gen[int].build(3)`, `defer T.default()` inside
+a generic, `defer lib.Holder.build(3)`, and a `from`-imported head. Arguments are evaluated **eagerly at
 the statement**, like every other `defer`/`spawn` argument (and like Go's `defer pkg.F(x)`), and
 `defer` keeps its LIFO order. Both spawn too.
 Note: the **value form of `print`** (a bound `p := print`) is a **fixed one-argument call** using the
