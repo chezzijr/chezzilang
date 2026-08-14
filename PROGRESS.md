@@ -1530,7 +1530,18 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > `Checker::dotted_ctor_target` and `infer_call`'s qualified-native-ctor arm now share one
 > `Checker::qualified_native_ctor` name set so they cannot drift; a type-only native name
 > (`net.Socket`) keeps its own better check-time message, and an ordinary module FUNCTION
-> (`defer math.abs(-3)`) is untouched and still runs on both engines.
+> (`defer math.abs(-3)`) is untouched and still runs on both engines. **The family's last asymmetry
+> closed the same day:** a module-qualified function was a legal `defer` target but not a legal
+> `spawn` target — `spawn lib3.helper(3)` / `spawn math.abs(-3)` were refused with *cannot spawn on a
+> non-sendable receiver of type module lib3* while the `defer` twins ran. A module is a NAMESPACE, not
+> a receiver value, so the sendability sweep was asking about the wrong thing; Go accepts
+> `go pkg.F(x)` exactly as it accepts `defer pkg.F(x)` (measured go1.26.5). The checker's receiver
+> sweep now skips exactly `Ty::Module` and `Compiler::receiverless_call_head` answers yes for a module
+> head, so the call is replayed through the same wrapper proto the static heads use and nothing
+> module-shaped crosses the airlock — **both** legs were needed, since the checker-only cut just moved
+> the refusal to a runtime *a module handle cannot cross* fault. Real sendability is unweakened: a
+> container holding a module, a local that SHADOWS a module name, and every non-sendable argument are
+> still refused with byte-identical messages.
 >
 > **Round 4 (2026-08-10) — three hunters, eight findings, four root causes, all fixed at the root.**
 > (A) the fragment column above — the third patch of that family had turned a loud fault into a

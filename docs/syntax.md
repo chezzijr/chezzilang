@@ -2927,8 +2927,15 @@ a value and throw it away: a variant constructor (`defer E.A(3)`, `defer E[int].
 **native constructor reached through its std module** (`defer concurrency.Shared(0)` — likewise
 `RwShared`/`Atomic`/`AtomicInt`/`Executor` — and `defer time.timer(10)`, aliased imports included).
 All are rejected by `chezzi check` with the same message as the bare `defer Shared(0)`. An ordinary
-**module function** is *not* a constructor and stays a legal target: `defer math.abs(-3)` compiles and
-runs. A **static method** is *not* a constructor either and *is* an ordinary target, in every spelling
+**module function** is *not* a constructor and stays a legal target — and a **module name is a
+NAMESPACE, not a receiver value**, so `mod.f(x)` is a plain call in `spawn` position exactly as it is
+in `defer` position: `defer math.abs(-3)` and `spawn math.abs(-3)`, `defer lib.helper(3)` and
+`spawn lib.helper(3)`, aliased imports and witness-taking generics (`spawn lib.reset(c)`) included,
+all compile and run (Go accepts `go pkg.F(x)` and `defer pkg.F(x)` alike). Nothing module-shaped
+crosses the airlock — the call is replayed inside the task — so the spawn **sendability** rules are
+unchanged: a genuine non-sendable *receiver* (`spawn v.m()`, including a local that merely **shadows**
+a module name) and a non-sendable *argument* are still rejected by `chezzi check`.
+A **static method** is *not* a constructor either and *is* an ordinary target, in every spelling
 that works as a call — `defer Holder.build(3)`, `defer Gen[int].build(3)`, `defer T.default()` inside
 a generic, `defer lib.Holder.build(3)`, and a `from`-imported head. Arguments are evaluated **eagerly at
 the statement**, like every other `defer`/`spawn` argument (and like Go's `defer pkg.F(x)`), and

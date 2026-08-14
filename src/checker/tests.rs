@@ -14188,6 +14188,54 @@ fn imported_module_used_in_spawn_block_ok() {
     );
 }
 
+// ----- M24-5: a module-qualified call is a spawn TARGET, not a spawn on a receiver -----
+
+/// A module is a NAMESPACE, not a receiver value, so `spawn lib.helper(3)` is a plain call — the
+/// same shape `defer lib.helper(3)` has always accepted, and the one Go accepts as `go pkg.F(x)`.
+/// It used to be refused with "cannot spawn on a non-sendable receiver of type module lib" because
+/// the receiver sweep asked whether the MODULE could cross the airlock. The RUNNING proof (a user
+/// module, an alias, a bare `spawn`, and a native module, on both engines) is
+/// `tests/chz/spec/spawn_module_target_test.chz`.
+#[test]
+fn spawn_on_module_qualified_fn_ok() {
+    entry_ok("import std.math\nfn main():\n    parallel:\n        spawn math.abs(-3)\nmain()\n");
+    entry_ok("import std.math as m\nfn main():\n    parallel:\n        spawn m.abs(-3)\nmain()\n");
+    // …and without a `parallel:` nursery — the function's implicit nursery owns the task.
+    entry_ok("import std.math\nfn main():\n    spawn math.abs(-3)\nmain()\n");
+}
+
+/// NON-REGRESSION for the fix above: the receiver sweep still refuses a GENUINE non-sendable
+/// receiver. The skip is keyed on the resolved type being exactly `Ty::Module` — a container that
+/// merely holds a module (the only non-sendable leaf the type system still has) is unaffected, and
+/// so is a local that SHADOWS the module name, which resolves to its own type and stays a receiver.
+/// Both messages are byte-identical to the pre-fix binary's.
+#[test]
+fn spawn_on_non_sendable_receiver_still_rejected() {
+    entry_rejects(
+        "import std.math\nfn main():\n    xs := [math]\n    parallel:\n        spawn xs.clear()\nmain()\n",
+        "cannot spawn on a non-sendable receiver of type List[module math]",
+    );
+    // A local SHADOWING the module name is a real receiver, not a namespace.
+    entry_rejects(
+        "import std.math\nfn main():\n    math := [math]\n    parallel:\n        spawn math.clear()\nmain()\n",
+        "cannot spawn on a non-sendable receiver of type List[module math]",
+    );
+}
+
+/// NON-REGRESSION for the fix above: the ARGUMENT sweep is untouched — a non-sendable value handed
+/// to a spawned call is still refused, as a bare module and inside a container alike.
+#[test]
+fn spawn_non_sendable_argument_still_rejected() {
+    entry_rejects(
+        "import std.math\nfn take(m: int) -> int:\n    return m\nfn main():\n    parallel:\n        spawn take(math)\nmain()\n",
+        "cannot pass a non-sendable value of type module math to a spawned task",
+    );
+    entry_rejects(
+        "import std.math\nfn take(m: int) -> int:\n    return m\nfn main():\n    xs := [math]\n    parallel:\n        spawn take(xs)\nmain()\n",
+        "cannot pass a non-sendable value of type List[module math] to a spawned task",
+    );
+}
+
 #[test]
 fn top_level_closure_used_in_spawn_block_ok() {
     // Regression: a top-level (module-scope) binding is a global, not a per-task capture — reading
@@ -23968,9 +24016,10 @@ fn witness_static_call_cross_module_ok() {
 
 /// M24-5 — `defer f(...)` pushes the hidden witness at its own emit site like any other call, so a
 /// witness-taking callee is a legal target in the CROSS-MODULE spellings too (Go accepts the same
-/// program: `defer reset(c, "defer")` on a `func reset[T Defaulter[T]]`). (`spawn lib.f(...)` stays
-/// walled by the non-sendable module receiver — an unrelated rule; the bare `from`-imported
-/// spelling reaches the same `FnSig` as a local one.)
+/// program: `defer reset(c, "defer")` on a `func reset[T Defaulter[T]]`). The `spawn` twin agrees
+/// now: a module is a NAMESPACE, so `spawn lib.reset(...)` is a plain call, not a spawn on a
+/// non-sendable module receiver (the RUNNING proof, both engines, is
+/// `tests/chz/spec/spawn_module_target_test.chz`).
 #[test]
 fn witness_fn_is_a_cross_module_defer_target_ok() {
     let lib = (
@@ -23991,16 +24040,13 @@ fn witness_fn_is_a_cross_module_defer_target_ok() {
             "import reset, Counter from lib\nfn main():\n    defer reset(Counter(9))\n    print(1)\nmain()\n",
         ),
     ]);
-    files_reject(
-        &[
-            lib,
-            (
-                "main.chz",
-                "import lib\nfn main():\n    parallel:\n        spawn lib.reset(lib.Counter(9))\nmain()\n",
-            ),
-        ],
-        "spawn",
-    );
+    files_ok(&[
+        lib,
+        (
+            "main.chz",
+            "import lib\nfn main():\n    parallel:\n        spawn lib.reset(lib.Counter(9))\nmain()\n",
+        ),
+    ]);
 }
 
 /// Generic-calls-generic with the caller's `U` still abstract: slice 2 FORWARDS the caller's own

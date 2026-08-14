@@ -4635,10 +4635,11 @@ impl Compiler {
     /// whose slot exists and holds `Nil` — faulted with `type nil has no method`. Both are answered
     /// by [`Self::compile_receiverless_target`] instead.
     ///
-    /// The question asked is deliberately "does the head NAME A TYPE", not "which of
-    /// [`Self::compile_call`]'s receiverless arms matches" — one stable question rather than a second
-    /// copy of that arm list to drift out of sync with. A head that is a local/capture, a module, or
-    /// any other value never answers yes, so every receiver shape keeps its `SpawnMethod`/`DeferMethod`
+    /// The question asked is deliberately "does the head NAME A TYPE OR A MODULE" — a NAMESPACE
+    /// rather than a value — not "which of [`Self::compile_call`]'s receiverless arms matches": one
+    /// stable question rather than a second copy of that arm list to drift out of sync with. A head
+    /// that is a local/capture (including one SHADOWING a type or module name) or any other value
+    /// never answers yes, so every genuine receiver shape keeps its `SpawnMethod`/`DeferMethod`
     /// lowering.
     fn receiverless_call_head(&self, fc: &FnComp, callee: &Expr) -> bool {
         // A member-side turbofish (`Type[T].member[U](x)`) wraps the `Field` in an `Index`.
@@ -4651,6 +4652,19 @@ impl Compiler {
         };
         // `module.Type` / `module.Type[T…]` — a type reached through a bound module name.
         if self.qualified_turbofish_key(fc, &obj.kind).is_some() {
+            return true;
+        }
+        // `module.helper(…)` — a plain call through a NAMESPACE. A module is not a receiver value,
+        // so lowering it as one pushed the module HANDLE as the receiver: `defer` survives that
+        // (it runs in the same task) but `spawn` cannot — the airlock refuses a module handle at
+        // run time, on a program `chezzi check` had just passed. Replaying the call through the
+        // wrapper proto emits exactly the module-member call the eager spelling emits, so nothing
+        // module-shaped crosses. `is_unbound` first, so a local that merely SHADOWS the module name
+        // stays a genuine receiver (mirroring the checker's `Ty::Module` skip in `sig.rs`).
+        if let ExprKind::Ident(mname) = &obj.kind
+            && fc.is_unbound(mname)
+            && self.imported_modules.contains_key(mname)
+        {
             return true;
         }
         if let ExprKind::Field {

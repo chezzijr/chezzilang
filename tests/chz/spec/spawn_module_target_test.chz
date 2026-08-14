@@ -1,0 +1,48 @@
+# A MODULE-QUALIFIED function is a `spawn` target, exactly as it is a `defer` target (gaps.md M24-5).
+#
+# `spawn lib.helper(x)` is a plain call through a NAMESPACE — a module is not a receiver value — but
+# the spawn path ran it through the "spawn on a receiver" sendability rule and asked whether the
+# MODULE could cross the airlock: `cannot spawn on a non-sendable receiver of type module lib`, while
+# `defer lib.helper(x)` checked clean and ran. Go accepts `go pkg.F(x)` and `defer pkg.F(x)` alike.
+# One concept, one verdict. Gated serial==M:N by `chz_suite_passes_both_engines`.
+import std.concurrency
+import std.fs
+import std.io
+import std.os
+import spawn_module_target_lib
+import spawn_module_target_lib as blib
+
+# A USER module's function, spawned under a `parallel:` nursery.
+test fn spawn_user_module_fn():
+    box := Shared(0)
+    parallel:
+        spawn spawn_module_target_lib.bump(box, 5)
+    assert box.get() == 5, "spawned user-module fn did not run: " + str(box.get())
+
+# The same call through an ALIASED import.
+test fn spawn_aliased_module_fn():
+    box := Shared(0)
+    parallel:
+        spawn blib.bump(box, 7)
+    assert box.get() == 7, "spawned aliased-module fn did not run: " + str(box.get())
+
+# A bare `spawn` (no `parallel:` nursery) — the function's implicit nursery joins at its end, so the
+# write is visible to the caller.
+fn bare_spawner(box: Shared[int]):
+    spawn spawn_module_target_lib.bump(box, 9)
+
+test fn spawn_module_fn_without_nursery():
+    box := Shared(0)
+    bare_spawner(box)
+    assert box.get() == 9, "bare-spawned module fn did not run: " + str(box.get())
+
+# A NATIVE module's function. `io.write_file` is observable after the nursery joins; the `defer`
+# cleanup is itself a module-qualified defer — the spelling that always worked.
+test fn spawn_native_module_fn():
+    p := os.temp_dir().str() + "/chz_m24_5_spawn_mod_" + str(os.getpid()) + ".txt"
+    defer fs.remove_file(p)
+    parallel:
+        spawn io.write_file(p, "spawned")
+    match io.read_file(p):
+        Ok(s): assert s == "spawned", "spawned native-module fn wrote: " + s
+        Err(e): assert false, "spawned native-module fn did not write: " + e.message()

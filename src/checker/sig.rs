@@ -2503,7 +2503,15 @@ impl Checker {
                             let mut bad: Vec<(Span, String)> = Vec::new();
                             if let ExprKind::Field { obj, .. } = &callee.kind {
                                 let rty = self.infer(obj);
-                                if !self.sendable(&rty) {
+                                // A module-qualified callee (`lib.helper(3)`, `math.abs(-3)`) is a
+                                // PLAIN CALL through a NAMESPACE, not a call on a receiver value —
+                                // nothing about the module crosses the airlock, so asking whether it
+                                // is sendable is a question about the wrong thing. `defer` already
+                                // treats this shape as a plain call, and Go accepts `go pkg.F(x)`
+                                // exactly as it accepts `defer pkg.F(x)`; one concept, one verdict
+                                // (M24-5). A local that SHADOWS the module name infers to its OWN
+                                // type here, so it stays a genuine receiver and is still checked.
+                                if !matches!(rty, Ty::Module(_)) && !self.sendable(&rty) {
                                     bad.push((
                                         obj.span,
                                         format!(
