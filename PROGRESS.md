@@ -10254,6 +10254,26 @@ branch names) is in the git log.
   `checker::tests::a_lex_error_inside_a_fragment_reports_its_real_line` (pins the OUTER `e.span` at
   col 16, the fragment column only the `PosMap` knows), and
   `check_errors_json::lex_error_carries_a_real_column` (CLI-level JSON + plain text).
+  **Closed the same seam's other three-and-a-half discards (2026-08-14).** The lex arm was one of
+  four error paths through `interpolation::parse_interpolation`, and the other four all still
+  reported the string literal's opening quote. Every one now names a real character, each measured
+  against CPython 3.14. A fragment **parse** error: `s := "a\tb{1 + }c"` → *(line 2, col 6)* →
+  **(line 2, col 15)**, one past the last token consumed — the identical rule the top-level parser
+  uses for that message (`y := 1 + ` → col 10); `tokenize_frag` had made `ParseError.span` correct
+  all along and only this seam threw it away, so the fix is `span: e.span` (CPython points inside the
+  fragment too, at the `+`, offset 14). **Unterminated `{`**: `s := "a\tb{1 + c"` → col 6 → **col
+  17**, the closing delimiter — exactly CPython's offset 17. **Unmatched `}`**: `s := "a\tb}c"` →
+  col 6 → **col 11**, the `}` itself — exactly CPython's offset 11. **Format-spec error**:
+  `s := "a\tb{x:>99999999}c"` → col 6 → **col 14**, the spec's first char (`fmtspec::parse` reports
+  no offset of its own, and a format spec is a runtime concern in CPython, so there is no ancestor to
+  copy — the rule is simply "inside the fragment, as precise as the information allows"). Checker
+  errors on a fragment *expression* were already right (`"a\tb{nope}c"` → col 12) — the AST they run
+  on carries `tokenize_frag`'s spans — and `desugar`'s two `parse_interpolation` callers discard the
+  error entirely, so the whole seam is closed. Tests:
+  `checker::tests::a_parse_error_inside_a_fragment_reports_the_fragments_own_position` and
+  `literal_shape_errors_point_at_their_own_char`, both with a real `\t` escape before the offending
+  char so a column counted off the post-escape content instead of composed through the `PosMap`
+  fails them.
 
 - **`examples/panic.chz` type-checks — the last allow-listed example is gone, and its recorded reason
   was wrong (2026-08-06).** `chezzi check examples/panic.chz` failed with `line 29, col 22: expression

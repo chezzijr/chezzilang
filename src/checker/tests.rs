@@ -24889,6 +24889,67 @@ fn a_lex_error_inside_a_fragment_reports_its_real_line() {
     );
 }
 
+/// The PARSE half of the same seam. `tokenize_frag` already gives every fragment token — EOF
+/// included — its real physical span, so `ParseError.span` was correct all along and only
+/// `parse_expr_str` threw it away for the string literal's own span. CPython 3.14 puts the caret
+/// inside the fragment too (`compile('y = f"a\tb{1 + }c"', …)` → `offset=14`, the `+`).
+#[test]
+fn a_parse_error_inside_a_fragment_reports_the_fragments_own_position() {
+    // Source line 3 is:  s := "a\tb{1 + }c"   — a REAL `\t` escape (two source columns, one content
+    // char) sits before the fragment, so a column counted off the post-escape content instead of
+    // composed through the literal's `PosMap` lands one to the left and this test fails.
+    // `s`1 ` `2 `:`3 `=`4 ` `5 `"`6 `a`7 `\`8 `t`9 `b`10 `{`11 `1`12 ` `13 `+`14 ` `←15 `}`16
+    // — col 15 is one past the last token the fragment parser consumed, which is exactly where the
+    // TOP-LEVEL parser points for the same message (`y := 1 + ` → col 10). One rule, two contexts.
+    let errs = check_src("print(1)\nprint(2)\ns := \"a\\tb{1 + }c\"\n");
+    let e = errs
+        .iter()
+        .find(|e| e.message.contains("unexpected end of line"))
+        .unwrap_or_else(|| panic!("expected a parse error, got: {errs:?}"));
+    assert_eq!(
+        (e.span.line, e.span.col),
+        (3, 15),
+        "the squiggled position must be inside the fragment, got: {}",
+        e.message
+    );
+    // The literal's own span is col 6 (the opening quote) — the position this used to report, and
+    // the one that is useless the moment a literal holds two fragments.
+    assert_ne!(e.span.col, 6, "must not fall back to the opening quote");
+    // Nothing prefixes the position the caller is about to render.
+    assert_eq!(e.message, "unexpected end of line in expression");
+}
+
+/// The three remaining interpolation errors that are ABOUT the literal's shape rather than about a
+/// fragment expression. Each has a char it can name, so each names it — and each is measured against
+/// CPython 3.14, which points at the same char (the third has no CPython analogue: a format spec is
+/// a runtime concern there, so the rule is simply "the spec's first char").
+#[test]
+fn literal_shape_errors_point_at_their_own_char() {
+    // Every case carries a `\t` before the offending char, so a raw-content count is off by one.
+    // `s`1 ` `2 `:`3 `=`4 ` `5 `"`6 `a`7 `\`8 `t`9 `b`10 …
+    for (src, want_col, needle) in [
+        // `s := "a\tb{1 + c"` — `{`11 `1`12 ` `13 `+`14 ` `15 `c`16 `"`←17.
+        // CPython: `f"a\tb{1 + c"` → offset 17, the closing quote.
+        ("s := \"a\\tb{1 + c\"\n", 17, "unterminated '{'"),
+        // `s := "a\tb}c"` — `}`←11. CPython: offset 11, the `}` itself.
+        ("s := \"a\\tb}c\"\n", 11, "unmatched '}'"),
+        // `s := "a\tb{x:>99999999}c"` — `{`11 `x`12 `:`13 `>`←14, the spec's first char.
+        ("s := \"a\\tb{x:>99999999}c\"\n", 14, "format spec:"),
+    ] {
+        let errs = check_src(src);
+        let e = errs
+            .iter()
+            .find(|e| e.message.contains(needle))
+            .unwrap_or_else(|| panic!("expected {needle:?}, got: {errs:?}"));
+        assert_eq!(
+            (e.span.line, e.span.col),
+            (1, want_col),
+            "{needle}: wrong position ({})",
+            e.message
+        );
+    }
+}
+
 /// …and the anchor must not bring the key aliasing back with it: two witness calls in ONE fragment
 /// still resolve to their own witnesses (the key is the callee token, which the re-anchor of the
 /// fragment ROOT cannot touch).

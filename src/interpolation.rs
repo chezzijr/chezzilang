@@ -21,8 +21,11 @@ use std::sync::Arc;
 /// store what this parser produced instead of every consumer re-parsing the raw text.
 pub(crate) use crate::ast::Chunk;
 
-/// A neutral interpolation-parse error: a message and the (whole-string) span. Callers map this to
-/// their own error type.
+/// A neutral interpolation-parse error: a message and the span an editor squiggles. That span is the
+/// **offending char's real physical position**, composed through the literal's [`PosMap`] — never the
+/// enclosing string literal's own span, which points at the opening quote and is useless once a
+/// literal holds more than one fragment (`docs/gaps.md` M24-7). Callers map this to their own error
+/// type.
 #[derive(Debug)]
 pub(crate) struct InterpError {
     pub message: String,
@@ -111,9 +114,13 @@ pub(crate) fn parse_interpolation(lit_tok: &StrLit, span: Span) -> Result<Vec<Ch
                     inner.push(ic);
                 }
                 if !closed {
+                    // One past the last content char — the literal's closing delimiter, which is
+                    // where CPython 3.14 points too (`f"a\tb{1 + c"` → caret on the closing `"`,
+                    // offset 17). `PosMap::at` extrapolates past the end from the last checkpoint,
+                    // so this composes through the literal's escapes like every other position here.
                     return Err(InterpError {
                         message: "unterminated '{' in interpolated string".to_string(),
-                        span,
+                        span: map.at(raw.chars().count()),
                     });
                 }
                 // Split on the first top-level `:` into (expr, spec); a `:` inside brackets/quotes
@@ -121,10 +128,14 @@ pub(crate) fn parse_interpolation(lit_tok: &StrLit, span: Span) -> Result<Vec<Ch
                 // surfaced as compile errors (good UX); type/value mismatches are deferred to the VM.
                 let (expr_src, spec_src) = crate::fmtspec::split_spec(&inner);
                 let spec = match spec_src {
-                    Some(s) => Some(
-                        crate::fmtspec::parse(s)
-                            .map_err(|message| InterpError { message, span })?,
-                    ),
+                    Some(s) => Some(crate::fmtspec::parse(s).map_err(|message| InterpError {
+                        message,
+                        // The spec's first char: past the `{`, the expression and the `:`.
+                        // `fmtspec::parse` reports no offset of its own, so the spec's start is the
+                        // most precise position available — and it is inside the fragment, which
+                        // the literal's opening quote never was.
+                        span: map.at(i + 1 + expr_src.chars().count() + 1),
+                    })?),
                     None => None,
                 };
                 // Re-lex the fragment against the enclosing literal's source map, so every token
@@ -148,9 +159,11 @@ pub(crate) fn parse_interpolation(lit_tok: &StrLit, span: Span) -> Result<Vec<Ch
                 chunks.push(Chunk::Expr(expr, spec));
             }
             '}' => {
+                // The offending `}` itself — CPython 3.14 points there too (`f"a\tb}c"` → caret on
+                // the `}`, offset 11).
                 return Err(InterpError {
                     message: "unmatched '}' in string (use '}}' for a literal brace)".to_string(),
-                    span,
+                    span: map.at(i),
                 });
             }
             _ => lit.push(c),
@@ -205,8 +218,14 @@ fn parse_expr_str(
     // W7-43 — no carrier lowering here any more: `?.`/`??` are ordinary expressions that survive to
     // the checker and the compiler, and both set the `kw_frag_ctx`/`kw_frag_ord` discriminators a
     // fragment's `CarrierKey` needs (`checker::check_interp_chunks`, `compiler::compile_interp`).
+    // Same rule as the lex arm above, and for the same reason: `tokenize_frag` gave every token —
+    // EOF included — its real physical span through the literal's `PosMap`, so `ParseError.span` is
+    // ALREADY correct and only this seam threw it away for the string literal's opening quote.
+    // CPython 3.14 points inside the fragment too (`f"a\tb{1 + }c"` → caret on the `+`, offset 14).
+    // The message needs no phase prefix: unlike `LexError`, `ParseError.message` never carried a
+    // rendered position, so there is nothing to strip and nothing to stutter.
     parser::parse_expr(tokens).map_err(|e| InterpError {
         message: e.message,
-        span,
+        span: e.span,
     })
 }
