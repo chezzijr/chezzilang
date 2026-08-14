@@ -378,39 +378,102 @@ impl Vm {
         };
         match name {
             "connect" => match crate::native::net::connect_nonblocking(&addr) {
-                // Connected synchronously (the common loopback case) — wrap + return at once.
+                // Connected synchronously — wrap + return at once. RARE, and this comment used to
+                // claim it was "the common loopback case", which is measured false on Linux: a
+                // non-blocking `connect` reports `EINPROGRESS` even to a LIVE loopback listener
+                // (and to a closed loopback port — `connect_ex(('127.0.0.1', <closed>))` → `115`).
+                // The arm below is the normal path, not the fallback, which is why W7-59's gate
+                // choice there decides `net.connect`'s whole behaviour rather than a corner of it.
                 Ok((stream, false)) => {
                     Ok(self.alloc_socket_ok(stream, core::next_poll_key(), core::new_in_flight()))
                 }
-                // Handshake in flight: park the fiber on writability under the M:N engine; off it (the
-                // cooperative / top-level v1 fallback, where there is no fiber to park), block until the
-                // handshake settles. net targets `--parallel`.
+                // Handshake in flight: park the fiber on writability under the M:N engine; off it,
+                // block until the handshake settles — everywhere except an eager `Executor` job,
+                // whose thread is shared (W7-59).
                 Ok((stream, true)) => {
                     if self.mn.is_some() && self.native_reentry == 0 {
                         self.park_on_connect(stream, span);
                         Ok(Value::nil()) // parked sentinel; `poll_park` gates the result-push at `do_call`
-                    } else if self.mn.is_some() {
-                        // `native_reentry > 0` — a `connect` reached inside a native callback (operator
-                        // overload, list HOF, `Shared.update`, ...). The caller's loop state lives on the
-                        // Rust stack, so the fiber can't park; and blocking here would pin a worker
-                        // thread on the handshake. Fail loud, exactly as `read`/`write`/`accept` do.
+                    } else if self.eager_core.is_some() {
+                        // W7-59 — an eager `Executor` job. A job does not own its thread: it runs on the
+                        // bounded, process-wide `vm::pool` (`worker_count()`, never grown on demand) with
+                        // no `MnSched` under it to spin a replacement, so blocking here steals width from
+                        // every other job and every `parallel:` nursery sharing that pool — measured at
+                        // `CHEZZI_THREADS=1` as a 10 s pin on a black-hole address. Same family as
+                        // `W7-40`'s R2, and the same message the four sibling ops give this context.
+                        //
+                        // This gate is deliberately NARROWER than the siblings'
+                        // [`Vm::may_block_socket_in_place`], and the difference is not an oversight.
+                        // `accept`/`read` wait on a CHEZZI peer — a fiber that can only run on the very
+                        // thread they would block — so blocking the sole `--serial` thread there is
+                        // self-starvation (`W7-40` R1). A `connect` handshake is completed by the
+                        // KERNEL, so no chezzi party is starved by waiting for it, and both ancestors
+                        // block: CPython `socket.connect` from the main thread returns in 0.1 ms, Go
+                        // `net.Dial` from the main goroutine in 314 µs. Refusing it on `--serial` would
+                        // be a divergence with nothing behind it — and it would take away a working
+                        // connect+write client (pre-`W7-59` `--serial` reached `read` before failing).
                         Ok(self.sock_err(
                             "connect would block: std.net sockets require the --parallel engine",
                         ))
                     } else {
-                        // Top-level / cooperative: no fiber to park, so block (bounded) until the
-                        // handshake settles. net targets `--parallel`; this keeps a top-level
-                        // `net.connect` usable as the v1 fallback.
-                        let v = self.block_until_connected(stream);
-                        // W7-18 — the spin above is bounded by the run deadline, but it can only END
-                        // the spin: it returns a `Value`, so a `--timeout` expiry would come back as a
-                        // CATCHABLE `Err("connect failed: timed out")` and the test would carry on to
-                        // report PASS/FAIL instead of TIMED-OUT — a `--timeout` that `recover:` can
-                        // swallow, which is exactly what the hard-abort contract forbids. Raise it
-                        // here, where the call still has a `Result` to fault through. The test BODY is
-                        // this path (`mn` is set only on worker shells), and it is straight-line code:
-                        // `jump_checked`'s back-edge is the sole generic checkpoint and a body with no
-                        // loop never reaches one.
+                        // Everywhere the thread is the program's own — `--serial`, top-level `main` on
+                        // the default engine, a `connect` inside a native callback on M:N: block, but
+                        // through the SHARED demote loop rather than a private sleep-spin, so the wait
+                        // gets that loop's escapes (`--timeout`, `cancel`, a run-wide `os.exit` — W7-47 —
+                        // and a torn-down nursery) and, on a worker shell, `demote_socket_enter`'s
+                        // replacement worker.
+                        //
+                        // The 10 s connect cap is deliberately NOT clamped by `self.deadline`, unlike the
+                        // spin this replaces. `demote_block_socket` re-reads the run deadline at the top
+                        // of every iteration and caps its kernel wait at `DEMOTE_POLL_BACKOFF`, so a
+                        // `--timeout` is observed within 5 ms and raised as a HARD `Err`. Clamping would
+                        // make the op's OWN deadline expire in the same instant, and the op's expiry is
+                        // the CATCHABLE `Err("timeout")` — i.e. the clamp would turn W7-18's swallow into
+                        // a race instead of preventing it.
+                        let dl = std::time::Instant::now()
+                            + std::time::Duration::from_secs(CONNECT_BLOCK_TIMEOUT_SECS);
+                        let fd = stream.as_raw_fd();
+                        // The closure is `FnMut`, so it cannot move `stream` out on the ready edge —
+                        // hold it in an `Option` and `take()` it there. It must outlive the wait either
+                        // way: it owns the fd the poller watches.
+                        let mut pending = Some(stream);
+                        let v = self.demote_block_socket(
+                            fd,
+                            poller::Interest::Write,
+                            Some(dl),
+                            span,
+                            move |vm| {
+                                let Some(s) = pending.as_ref() else {
+                                    // Unreachable: the ready edge below is the only `take`, and it also
+                                    // ends the loop.
+                                    return SockPoll::Ready(Ok(
+                                        vm.sock_err("connect failed: already completed")
+                                    ));
+                                };
+                                match crate::native::net::finish_connect(s) {
+                                    // SO_ERROR clear AND the peer is reachable ⇒ connected.
+                                    Ok(()) if s.peer_addr().is_ok() => {
+                                        let s = pending.take().expect("checked above");
+                                        SockPoll::Ready(Ok(vm.alloc_socket_ok(
+                                            s,
+                                            core::next_poll_key(),
+                                            core::new_in_flight(),
+                                        )))
+                                    }
+                                    Err(e) => SockPoll::Ready(Ok(
+                                        vm.sock_err(format!("connect failed: {e}"))
+                                    )),
+                                    Ok(()) => SockPoll::WouldBlock, // not settled yet
+                                }
+                            },
+                        )?;
+                        // W7-18 — kept as a fence, no longer the mechanism. `demote_block_socket`'s own
+                        // rung raises the run deadline as a HARD `Err` within 5 ms, so this fires only
+                        // if a future change re-clamps the op deadline (see above) or reorders that
+                        // loop's two deadline checks — either of which would let a `--timeout` come
+                        // back as the CATCHABLE `Err("timeout")` and be swallowed by a `recover:`,
+                        // exactly what the hard-abort contract forbids. It costs one `Instant::now()`,
+                        // and only when a `--timeout` is armed at all.
                         self.deadline_halt(span)?;
                         Ok(v)
                     }
@@ -491,41 +554,6 @@ impl Vm {
             in_flight,
             deadline: self.deadline,
         });
-    }
-
-    /// D6b — the top-level connect fallback (no fiber to park): block until the handshake settles, then
-    /// return `Ok(Socket)` / `Err`. Bounded by a wall-clock deadline so a black-hole address (no RST,
-    /// no SYN-ACK — `SO_ERROR` never sets, the fd never becomes writable) returns a clean timeout
-    /// instead of spinning for the kernel's multi-minute connect timeout. net targets the M:N
-    /// `--parallel` engine, so this path exists only to keep a top-level `net.connect` usable.
-    pub(super) fn block_until_connected(&mut self, stream: std::net::TcpStream) -> Value {
-        // W7-18 — bounded by the SOONER of the 10 s connect cap and the run's `--timeout` deadline.
-        // Unclamped, a black-hole address spun the full 10 s under `--timeout=300` — a 33× cap
-        // violation. This only ENDS the spin (it returns a `Value`, not a `Result`); the caller
-        // raises the hard halt immediately after, because the `Err("connect failed: timed out")`
-        // produced here is CATCHABLE and would otherwise swallow the abort.
-        let mut deadline =
-            std::time::Instant::now() + std::time::Duration::from_secs(CONNECT_BLOCK_TIMEOUT_SECS);
-        if let Some(run) = self.deadline {
-            deadline = deadline.min(run);
-        }
-        loop {
-            match crate::native::net::finish_connect(&stream) {
-                // SO_ERROR clear AND the peer is reachable ⇒ connected.
-                Ok(()) if stream.peer_addr().is_ok() => {
-                    return self.alloc_socket_ok(
-                        stream,
-                        core::next_poll_key(),
-                        core::new_in_flight(),
-                    );
-                }
-                Err(e) => return self.sock_err(format!("connect failed: {e}")),
-                Ok(()) if std::time::Instant::now() >= deadline => {
-                    return self.sock_err("connect failed: timed out");
-                }
-                Ok(()) => std::thread::sleep(std::time::Duration::from_millis(1)), // not settled yet
-            }
-        }
     }
 
     /// R1/B1 — `Socket.read_bytes(n) -> Result[bytes]` / `read_bytes(n, timeout_ms)`: the BINARY read.

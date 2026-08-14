@@ -2,6 +2,80 @@
 
 Single source of truth for "what am I doing next." Update after every work session.
 
+> **✅ W7-59 landed 2026-08-14 — `net.connect` stopped blocking a shared pool worker in a private
+> sleep-spin, and the "obvious" fix shape was measured wrong before it shipped.** `docs/gaps.md`'s
+> `W7-59` is CLOSED. The in-flight (`EINPROGRESS`) arm gated on a bare `self.mn.is_some()` and everything
+> else fell into `Vm::block_until_connected` — a 1 ms poll under a 10 s cap that bypassed
+> `Vm::demote_block_socket` entirely, so it had no cancel check, no `run_exit_err`, no `sched.terminate`,
+> and on a worker shell no replacement worker. The arm is now three: an M:N fiber still parks on the
+> netpoller; `self.eager_core.is_some()` — an eager `Executor` job, whose thread belongs to the bounded
+> process-wide pool — returns the four sibling ops' verbatim `Err("connect would block: std.net sockets
+> require the --parallel engine")`; **everywhere else** blocks through `demote_block_socket`
+> (`Interest::Write`, `attempt` = `finish_connect` + `peer_addr`) and so inherits `--timeout`, cancel,
+> `os.exit` and terminate, plus the replacement worker. `block_until_connected` is **deleted**. Measured
+> on the shape that cost the most: an executor job dialling the TEST-NET-1 black hole `192.0.2.1:9` with
+> an outer `shutdown_now()` at 200 ms — **10 009 ms → 209 ms**. **The wrong turn, avoided by measuring:**
+> the gap row's own proposal was to route `connect` through `Vm::may_block_socket_in_place` like its four
+> siblings. That predicate refuses `--serial` too, and on Linux a non-blocking `connect` reports
+> `EINPROGRESS` even to a **live loopback listener** — so the old code's "connected synchronously (the
+> common loopback case)" comment was false and the wide gate would have broken `--serial` `net.connect`
+> outright (pre-fix `--serial` connect+write worked; only `read` refused). The asymmetry has a reason:
+> `accept`/`read` wait on a **chezzi peer fiber** that can only run on the very thread they would block,
+> so refusing on `--serial` prevents self-starvation (`W7-40` R1); a `connect` handshake is completed by
+> the **kernel**, starves no chezzi party, and both ancestors block — CPython `socket.connect` **0.1 ms**,
+> Go `net.Dial` **314 µs**, each from the sole/main thread. Tests (`src/vm/parity_tests.rs`):
+> `connect_on_serial_main_still_reaches_a_live_listener` is the capability fence, verified RED under the
+> wide gate; `connect_inside_an_executor_job_errs_instead_of_pinning_a_pool_worker` verified RED pre-fix
+> (10 s, then `ERR:connect failed: timed out`). `net_connect_top_level_dead_port_errors_not_hangs` was
+> rewritten to assert `e.message()` on **both** engines — it discarded the message before and so passed
+> identically pre- and post-fix, which is why it detected none of this.
+
+> **✅ W7-60 landed 2026-08-14 — an `Executor` join observes `--timeout` and cancel, so a job parked in a
+> nested join stops outliving the run that gave up on it.** `docs/gaps.md`'s `W7-60` is CLOSED. **The row
+> as filed was partly stale and is corrected in the fix:** `W7-58` had already replaced the untimed
+> `eager_cv.wait` with a `DEMOTE_POLL_BACKOFF` `wait_timeout` poll asking `quiesced_only_joins`, so the
+> deadlock verdict was covered — what was genuinely missing, and what the function's own doc admitted, is
+> that the join observed **neither `--timeout` nor cancel**. `Vm::join_eager_jobs` (`src/vm/sched.rs`) now
+> runs the `Vm::block_halt_check` rungs in its poll loop, in the canonical order **`--timeout` > cancel >
+> deadlock verdict**. Neither new rung is gated on `is_counted_party()` — they are facts about the RUN,
+> not about who may judge it; only the verdict keeps that gate, exactly as `block_halt_check` gates its
+> own three. Both are evaluated while the `eager` lock is **HELD**, deliberately: neither takes a lock, so
+> there is no inversion, and holding it removes the window in which a cancel could be observed, latch
+> `self.cancelled = true`, and then be discarded as stale — which would leave the fiber permanently
+> `cancel_suppressed`. Every bail-out goes through one `Option<RuntimeError>` and takes **no slots**.
+> **Three defects in the first cut, all found by `adversarial-review` and all reproduced before
+> acceptance — two of them charged independently by both prosecutors.** **(A1)** the bail ended the
+> WAITER without stopping the WORK: every other `--timeout`/cancel observation happens INSIDE a job,
+> where `run_outcome` trips the executor's cancel, but this one is on the JOINER and stored nothing —
+> and `Vm::do_call`'s blocking-native offload gates on `cancel_requested()`, so a job part-way through a
+> sequence of blocking calls **started the next one after the run had already reported TIMED-OUT**
+> (measured: a fresh subprocess spawned ~1 s after a `--timeout=300` run finished). Fixed by storing
+> `core.cancel` on every bail — the executor is already `shut`, so `drain_live_executors` never revisits
+> it and the bail is the last chance to ask. **(A2)** the bail returned `Vec::new()` and so skipped
+> `reduce_task_slots`, the ONLY writer of a FINISHED job's buffered output (`W7-5c`) — measured, a job
+> that printed and completed at 50 ms lost its line. It cannot `take_slots()` (outstanding jobs hold
+> indices into that vec), so a new length-preserving `EagerState::take_finished` flushes the finished
+> slots and leaves the rest; `reduce_task_slots` now tolerates the `None` those leave. **(A3)** the first
+> cut's stated reason for omitting an `os.exit` rung was **false** — it claimed `W7-47` makes
+> `outstanding()` drop, which holds only for a job that HAS a checkpoint; measured, `os.exit(3)` beside a
+> `process.run("sleep 5")` job exits after **5.014 s**. The rung stays omitted, but for the real reason:
+> it would unblock the waiter while the uninterruptible child kept running — `docs/stdlib.md`'s
+> documented blocking-native ceiling, not something a join can lift. Two charges were **dismissed** on
+> evidence (a stale `poll_partial` cannot reach `connect`; `may_block_socket_in_place` admits, not
+> refuses, the contexts alleged). **Accepted collateral:** a cancel bail leaves the joined
+> executor marked `shut` with jobs outstanding, so the exit drain skips it — not a new class (the
+> pre-existing deadlock bail-out leaves the same state), and it is what `shutdown_now`'s documented "ask
+> running jobs to stop **cooperatively**" means for a job parked in a join. **Measured red→green, both
+> halves, using `process.run` deliberately** — it is documented as having no cancellation checkpoint until
+> it returns, so a `Channel`-blocked job would have been ended by the pre-existing verdict and a
+> `time.sleep_ms` job by its own `W7-16` checkpoint, and neither would have failed pre-fix: **cancel** —
+> an outer `shutdown_now()` at 200 ms over a job parked in an inner `shutdown()` whose job runs
+> `process.run("sleep 6")`: **6 011 ms → 213 ms**; **`--timeout`** — `chezzi test --timeout=500` over a
+> job running `process.run("sleep 9")`: pre-fix `TIMED-OUT` only after **9 010 ms** with the "could not be
+> aborted" suffix, post-fix **509 ms**. This closes a violation of Chezzi's OWN documented contract:
+> `docs/stdlib.md`'s "a scope cancel or an `Executor.shutdown_now()` ends the wait within ~5 ms" promise
+> did not hold once the blocked party was a nested join.
+
 > **✅ Default-argument caller-scope hazard CLOSED, 2026-08-13 (phase 1 of 2).** A non-literal default
 > now resolves in the module that DECLARES it in **every** case, including the one `W7-51` had to
 > leave as a documented hazard. Measured on `0104d57b`, three modules, `z` declaring `protocol P` +

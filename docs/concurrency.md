@@ -1066,7 +1066,12 @@ non-deterministic cross-task **print order** (byte-identical compare flags order
 > `main` on the **default engine** (Go-identical: `ln.Accept()` on the main goroutine blocks until a
 > client arrives) and an M:N worker inside a native callback (which spins a replacement worker first).
 > Everywhere else it returns `Err("<op> would block: std.net sockets require the --parallel engine")`,
-> and that is deliberate rather than an unfinished corner:
+> and that is deliberate rather than an unfinished corner. **The op set is `accept`/`read`/`read_bytes`/
+> `write`; `connect` joins it ONLY inside an eager `Executor` job** — those four wait on a Chezzi peer
+> fiber that can only run on the very thread they would block, so `--serial` must refuse them, whereas a
+> `connect` handshake is completed by the kernel and starves no chezzi party, so `--serial` and
+> top-level `main` block it and succeed, as CPython (0.1 ms) and Go (314 µs) both do (`gaps.md`
+> **W7-59**):
 >
 > - **On top-level `main`, an untimed op has NO escape but SIGINT.** The escapes are the op's own
 >   `timeout_ms`, the run's `--timeout`, and cancellation — and under `chezzi run` two of those three do
@@ -1086,12 +1091,17 @@ non-deterministic cross-task **print order** (byte-identical compare flags order
 > - **`--serial`** runs every fiber on one thread, so blocking it starves the peer fiber that would make
 >   the fd ready — a permanent hang with no escape (`--timeout` is rejected alongside `--serial`, and no
 >   other fiber can run to deliver a cancel). Net programs target the default engine;
->   `examples/echo_server.chz --serial` therefore reports this `Err` instead of serving.
+>   `examples/echo_server.chz --serial` therefore reports this `Err` instead of serving. **`connect` is
+>   exempt**: nothing in-language has to run for the handshake to finish, so it blocks and succeeds
+>   here — a `--serial` client can `connect` and `write`, it is the `read` that refuses.
 > - **Inside an eager `Executor` job**: a job does not own its thread — it runs on the bounded,
 >   process-wide job pool (`CHEZZI_THREADS`, never grown on demand) and has no scheduler under it to
 >   spin a replacement, so a blocked job starves every other job and every `parallel:` nursery sharing
->   that pool (measured at `CHEZZI_THREADS=1`: an `accept` job plus a later `connect` job = hang). Use
->   `spawn`/`parallel:` for socket work, which parks instead of blocking.
+>   that pool (measured at `CHEZZI_THREADS=1`, before either op refused here: an `accept` job plus a
+>   later `connect` job = hang). This is the one context where **`connect` refuses too** (`W7-59`) —
+>   before that it spun in place for up to 10 s, pinning a pool worker with no cancel or `--timeout`
+>   escape (measured: an outer `shutdown_now()` at 200 ms took **10 009 ms** to end the run, now
+>   **209 ms**). Use `spawn`/`parallel:` for socket work, which parks instead of blocking.
 
 `--check-parity` is mutually exclusive with `--serial`/`--parallel` (it runs both). `--threads=N`
 still sizes its M:N leg (the serial leg ignores it). **Limitation:** both legs share the one real
@@ -1525,8 +1535,10 @@ supervised tasks) — Go's float-free `go` is the model both ecosystems *rejecte
 > `shutdown_now` is not a guarantee that a submitted job did not run. `submit` after either is a fault.
 > Reap with `defer ex.shutdown()` as shown.
 >
-> **A job sleeping or waiting a timer IS ended by `shutdown_now()`** (measured: 55 ms against a
-> `time.sleep_ms(3000)`, and the code after the sleep never runs) — that deadline is ours, so it is a
+> **A job sleeping, waiting a timer, or parked in a NESTED `Executor` join IS ended by
+> `shutdown_now()`** (measured: 55 ms against a `time.sleep_ms(3000)`, and the code after the sleep
+> never runs; **213 ms**, was 6 011 ms, against a job parked in an inner `shutdown()` whose own job
+> runs `process.run("sleep 6")` — `W7-60`) — that deadline is ours, so it is a
 > *continuous* checkpoint, not an entry-only one (§cancellation points; `docs/gaps.md` **W7-16**). This
 > is a **deliberate divergence from CPython** and the one place Chezzi's executor does not follow it:
 > `ThreadPoolExecutor.shutdown(cancel_futures=True)` does not interrupt a running `time.sleep(3)`
@@ -1624,7 +1636,7 @@ fn main():
 |--------|-----------|
 | `submit(f)` | **start** a detached, side-effect-only job at once on the shared pool (results leave via a `Channel`, like `spawn`); returns immediately without waiting for it. `--serial` enqueues it for the drain instead (D3). **Faults** on an executor that no longer accepts work: after its own `shutdown()`/`shutdown_now()` (`submit on a shut-down Executor`), or — because the inherited cancel chain is sticky — after the job that CREATED it was cancelled (`submit on an Executor whose creating job was cancelled`); the alternative was accepting work that is immediately cancelled and silently vanishes |
 | `shutdown()` | **graceful** — stop accepting new work, then **wait** for the submitted work (every job runs on an ordinary fault, per W7-5's fault contract above; a hard halt is a separate kill switch — see the engine-asymmetry note above and `docs/gaps.md` **W7-5d**) |
-| `shutdown_now()` | **attempt to stop** — drop work that has not started and ask running jobs to stop at their next cancellation point, then wait for them (Java `shutdownNow`). **Cooperative, not pre-emptive:** a job with no cancellation point (a bare CPU loop with no back-edge, a syscall already in the kernel) still finishes, so on the default engine this is not a guarantee the job did not run. A job **sleeping or waiting a timer IS ended** — that wait's deadline is ours, so it is a continuous checkpoint (see §cancellation points). **It reaches jobs of a NESTED executor too** — an executor a job creates inherits that job's cancel, so the whole subtree stops at its checkpoints. Unaffected by the W7-5 run-all contract above |
+| `shutdown_now()` | **attempt to stop** — drop work that has not started and ask running jobs to stop at their next cancellation point, then wait for them (Java `shutdownNow`). **Cooperative, not pre-emptive:** a job with no cancellation point (a bare CPU loop with no back-edge, a syscall already in the kernel) still finishes, so on the default engine this is not a guarantee the job did not run. A job **sleeping, waiting a timer, or parked in a nested `Executor` join IS ended** — that wait's deadline is ours, so it is a continuous checkpoint (see §cancellation points; the join rung is `W7-60`). **It reaches jobs of a NESTED executor too** — an executor a job creates inherits that job's cancel, so the whole subtree stops at its checkpoints. Unaffected by the W7-5 run-all contract above |
 
 - **`defer` is the lifetime knob.** A task "persists through scopes" because its *owner* — the
   `Executor` — does. Bind that owner's reaping to any scope with `defer ex.shutdown()` (a function, a

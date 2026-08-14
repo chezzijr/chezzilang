@@ -572,6 +572,27 @@ impl EagerState {
         std::mem::take(&mut self.slots)
     }
 
+    /// W7-60 — take the outcomes of the jobs that have ALREADY finished, leaving the slot vector at
+    /// its current LENGTH (each taken slot becomes `None` again). For the bail-out paths in
+    /// [`super::Vm::join_eager_jobs`], which unwind while other jobs are still outstanding: those jobs
+    /// hold indices into this vector and will `finish` into them, so [`take_slots`](Self::take_slots)'s
+    /// `mem::take` is not available — but the jobs that DID finish still own buffered output, and
+    /// dropping it is a silent loss (a `print` that ran, completed, and never reached stdout).
+    ///
+    /// Length-preserving, so a concurrent `finish` stays in range; idempotent, so a second call
+    /// returns nothing and the same bytes can never be flushed twice. The byte accounting is reset
+    /// for what leaves, exactly as `take_slots` does — what remains is re-accrued by the outstanding
+    /// jobs' own `finish` calls.
+    pub(super) fn take_finished(&mut self) -> Vec<super::TaskOutcome> {
+        let taken: Vec<_> = self.slots.iter_mut().filter_map(Option::take).collect();
+        if !taken.is_empty() {
+            self.bytes = 0;
+            self.dirty = false;
+            self.charged = 0;
+        }
+        taken
+    }
+
     /// W7-26, the SAMPLING half — the growth in `bytes` since this was last called, to be charged
     /// against the SUBMITTING heap's GC pacing counter (`Heap::charge_bytes`).
     ///

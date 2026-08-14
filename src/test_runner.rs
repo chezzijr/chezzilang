@@ -2688,16 +2688,203 @@ struct Suite:
         );
     }
 
-    /// W7-18 — the THIRD socket-block path: a `net.connect` on the test body itself, which parks on
-    /// nothing at all. `mn` is set only on worker shells, so a body-level connect takes the bounded
-    /// spin in `block_until_connected` rather than the netpoller.
+    /// W7-60 — `chezzi test --timeout` must reach a test whose executor job cannot be cancelled at
+    /// all. `join_eager_jobs` observed only the deadlock verdict, so `ex.shutdown()` ignored the
+    /// wall-clock cap outright and the run continued for as long as the job did.
     ///
-    /// Bounding that spin by the run deadline is necessary but NOT sufficient, and the difference is
-    /// the whole fence: the spin returns a `Value`, so a `--timeout` expiry came back as a catchable
+    /// **`process.run` is the point, not a detail.** It is documented as having no cancellation
+    /// checkpoint until it returns (`docs/stdlib.md` §std.process), so nothing but the joiner's own
+    /// rung can end this. A `time.sleep_ms` job already aborted pre-fix through its OWN checkpoint
+    /// (`W7-16`), and a `Channel`-blocked job already faulted through the verdict — so neither shape
+    /// would have failed before this change, and neither is a test of it.
+    ///
+    /// Measured on the release binary: pre-fix the runner reported `TIMED-OUT` only after **9 010 ms**,
+    /// with the "could not be aborted" suffix; post-fix it aborts at **509 ms** under a 500 ms cap.
+    /// The elapsed assertion is what distinguishes them — the bucket alone was already `TIMED-OUT`.
+    #[test]
+    fn timeout_aborts_a_joiner_whose_job_has_no_checkpoint() {
+        let d = TmpDir::new();
+        let f = d.write(
+            "joinnocp_test.chz",
+            "import std.concurrency\n\
+             import std.process\n\
+             fn uninterruptible():\n    \
+                 r := recover: process.run(\"sleep 2\")\n\
+             test fn t():\n    \
+                 ex := Executor()\n    \
+                 ex.submit(uninterruptible)\n    \
+                 ex.shutdown()\n    \
+                 assert true\n",
+        );
+        let started = std::time::Instant::now();
+        let (text, passed) = run_tests_timed_watchdog("joinnocp_test.chz", &f, 500);
+        let elapsed = started.elapsed();
+        assert!(!passed, "report:\n{text}");
+        assert!(text.contains("TIMED-OUT t"), "report:\n{text}");
+        // The `sleep 2` is the discriminator: pre-fix the join waited the child out (measured 9 010 ms
+        // with a `sleep 9`); post-fix it aborts at ~509 ms. Kept SHORT because this strands one
+        // process-global `vm::pool` worker for the child's whole lifetime after the test returns.
+        assert!(
+            elapsed < std::time::Duration::from_secs(1),
+            "the cap did not reach the joiner: {elapsed:?}; report:\n{text}"
+        );
+    }
+
+    /// W7-60 review, charge A2 — a job that ALREADY FINISHED must not lose its buffered output when
+    /// the join it was part of bails.
+    ///
+    /// The bail cannot `take_slots()` (jobs still outstanding hold indices into that vector and will
+    /// `finish` into them), and the first cut therefore returned `Vec::new()` and skipped
+    /// `reduce_task_slots` entirely — which is the ONLY writer of a finished job's buffered bytes
+    /// (W7-5c). So a `print` that ran to completion at 50 ms simply never reached stdout. Measured
+    /// pre-fix: this fixture reported `BODY OUT` alone; post-fix `BODY OUT` + `QUICK DONE`.
+    /// `EagerState::take_finished` is the length-preserving flush that fixes it.
+    ///
+    /// This is the same loss the `join_eager_jobs` doc cites when explaining the `os.exit` rung — so
+    /// leaving it in the deadline path would have been the very inconsistency that doc warns about.
+    #[test]
+    fn a_finished_jobs_output_survives_a_timeout_bail() {
+        let d = TmpDir::new();
+        let f = d.write(
+            "bailflush_test.chz",
+            "import std.concurrency\n\
+             import std.process\n\
+             import std.time\n\
+             fn quick():\n    \
+                 print(\"QUICK DONE\")\n\
+             fn slow():\n    \
+                 r := recover: process.run(\"sleep 2\")\n\
+             test fn t():\n    \
+                 print(\"BODY OUT\")\n    \
+                 ex := Executor()\n    \
+                 ex.submit(quick)\n    \
+                 time.sleep_ms(150)\n    \
+                 ex.submit(slow)\n    \
+                 ex.shutdown()\n    \
+                 assert true\n",
+        );
+        let (text, passed) = run_tests_timed_watchdog("bailflush_test.chz", &f, 500);
+        assert!(!passed, "report:\n{text}");
+        assert!(text.contains("TIMED-OUT t"), "report:\n{text}");
+        assert!(
+            text.contains("BODY OUT"),
+            "the test body's own output must survive; report:\n{text}"
+        );
+        assert!(
+            text.contains("QUICK DONE"),
+            "a job that finished BEFORE the bail must still have its output flushed; report:\n{text}"
+        );
+    }
+
+    /// W7-60 review, charge A1 — the bail must ASK THE WORK TO STOP, not merely stop waiting for it.
+    ///
+    /// Every other `--timeout` observation happens inside a job, where `run_outcome` trips the
+    /// executor's cancel; this one is on the JOINER. Without a `core.cancel` store the abandoned jobs
+    /// never learn, and `Vm::do_call`'s blocking-native offload gates on `cancel_requested()` — so a
+    /// job part-way through a sequence of blocking calls STARTS THE NEXT ONE after the run has already
+    /// reported TIMED-OUT. Measured pre-fix: the marker file below was created ~1 s after a
+    /// `--timeout=300` run reported TIMED-OUT. The executor is already `shut`, so
+    /// `drain_live_executors` never revisits it — the bail is the last chance to ask.
+    ///
+    /// The first `process.run` is deliberately uninterruptible (it has no checkpoint, so it runs to
+    /// completion either way — that ceiling is `docs/stdlib.md`'s, not this rung's); the assertion is
+    /// about the SECOND one, which must never start.
+    #[test]
+    fn a_bailed_join_stops_its_jobs_from_starting_new_work() {
+        let d = TmpDir::new();
+        let marker = d.0.join("started_after_abort");
+        let f = d.write(
+            "bailcancel_test.chz",
+            &format!(
+                "import std.concurrency\n\
+                 import std.process\n\
+                 fn two_blocking():\n    \
+                     r1 := recover: process.run(\"sleep 1\")\n    \
+                     r2 := recover: process.run(\"touch {}\")\n\
+                 test fn t():\n    \
+                     ex := Executor()\n    \
+                     ex.submit(two_blocking)\n    \
+                     ex.shutdown()\n    \
+                     assert true\n",
+                marker.display()
+            ),
+        );
+        let (text, passed) = run_tests_timed_watchdog("bailcancel_test.chz", &f, 300);
+        assert!(!passed, "report:\n{text}");
+        assert!(text.contains("TIMED-OUT t"), "report:\n{text}");
+        // Outlive the first (uninterruptible) `sleep 1`, so the second call would have had time to run.
+        std::thread::sleep(std::time::Duration::from_millis(2500));
+        assert!(
+            !marker.exists(),
+            "the abandoned job started a NEW blocking call after the run reported TIMED-OUT"
+        );
+    }
+
+    /// W7-60 FALSE-FAULT FENCE — the counter-direction of the test above, and the one the 503-run
+    /// fence campaign could not supply: a job that is **slow but perfectly healthy**, joined at the
+    /// program-EXIT drain, under a generous cap and under no cap at all.
+    ///
+    /// This is the shape the new rungs are most likely to break. `Vm::drain_live_executors` calls
+    /// `join_eager_jobs` at every clean program end, so `--timeout` and cancel are now evaluated
+    /// there on every run — and every pre-existing exit-drain fence completes in under 10 ms, i.e.
+    /// they exercise the rungs against near-instant completion rather than against a job that
+    /// legitimately outlives a poll interval. A wrongly-armed deadline (or a cancel flag that
+    /// reaches `main`, which holds none) would show up here as a `TIMED-OUT`/error on a program
+    /// whose only sin is taking 800 ms.
+    ///
+    /// No explicit `shutdown()`: the drain is the join under test. Deliberately paired with the
+    /// no-cap run, because a cap of `0` takes a different path (`deadline == None`) and only the two
+    /// together say "the rungs fire on expiry and never before it".
+    #[test]
+    fn a_slow_but_healthy_job_at_the_exit_drain_is_untouched() {
+        let d = TmpDir::new();
+        let f = d.write(
+            "slowdrain_test.chz",
+            "import std.concurrency\n\
+             import std.time\n\
+             fn slow():\n    \
+                 time.sleep_ms(800)\n    \
+                 print(\"job done\")\n\
+             test fn t():\n    \
+                 ex := Executor()\n    \
+                 ex.submit(slow)\n    \
+                 assert true\n",
+        );
+        for cap in [30_000, 0] {
+            let started = std::time::Instant::now();
+            let (text, passed) = run_tests_timed_watchdog("slowdrain_test.chz", &f, cap);
+            let elapsed = started.elapsed();
+            assert!(
+                passed,
+                "cap={cap}: a healthy 800 ms job must PASS; report:\n{text}"
+            );
+            assert!(
+                !text.contains("TIMED-OUT"),
+                "cap={cap}: the exit drain must not abort a job under the cap; report:\n{text}"
+            );
+            // The drain must WAIT, not merely decline to fault: a rung that broke the join early
+            // would return here in ~5 ms with the job abandoned, and `passed` alone cannot tell that
+            // apart from a correct wait. (The job's own `print` lands on its executor slot, which the
+            // runner does not fold into the per-test report, so the clock is the observable.)
+            assert!(
+                elapsed >= std::time::Duration::from_millis(700),
+                "cap={cap}: the exit drain returned in {elapsed:?} — it abandoned the job instead of \
+                 joining it; report:\n{text}"
+            );
+        }
+    }
+
+    /// W7-18 — the THIRD socket-block path: a `net.connect` on the test body itself, which parks on
+    /// nothing at all. `mn` is set only on worker shells, so a body-level connect blocks in place
+    /// (through `demote_block_socket` since `W7-59`) rather than on the netpoller.
+    ///
+    /// Bounding that wait by the run deadline is necessary but NOT sufficient, and the difference is
+    /// the whole fence: the wait returns a `Value`, so a `--timeout` expiry came back as a catchable
     /// `Err("connect failed: timed out")` and the body carried on to report **`FAIL … SWALLOWED` at
-    /// 304 ms** — a `--timeout` a `match` arm swallowed. (Unclamped it was worse only in latency: the
-    /// same swallow after the full 10 s `CONNECT_BLOCK_TIMEOUT_SECS` spin.) The hard abort is raised
-    /// at the call site instead, where there is still a `Result` to fault through.
+    /// 304 ms** — a `--timeout` a `match` arm swallowed. The hard abort is raised at the call site
+    /// instead, where there is still a `Result` to fault through. Since `W7-59` the demote loop's own
+    /// `deadline_halt` rung raises it first, within `DEMOTE_POLL_BACKOFF`, and the call-site raise is
+    /// kept as the fence against that ever being reordered or re-clamped.
     ///
     /// The body is straight-line on purpose: `jump_checked`'s back-edge is the only generic
     /// checkpoint, so with no loop there is no later place for the halt to land.

@@ -1630,7 +1630,8 @@ impl Vm {
 
     /// THE cancel predicate — every cancellation checkpoint (`jump_checked`'s loop back-edge,
     /// `guarded`'s native-HOF re-entry, the blocking-native offload, `chan_recv_step`, `op_wait_poll`,
-    /// `op_sock_park`) asks exactly this, on BOTH engines. Two suppressions, both load-bearing:
+    /// [`Vm::demote_block_socket`], [`Vm::join_eager_jobs`]) asks exactly this, on BOTH engines. Two
+    /// suppressions, both load-bearing:
     ///
     /// * `!self.cancelled` — latch: once the cancel unwind is in flight, a checkpoint inside it must
     ///   not re-fire and skip the remaining `defer`s.

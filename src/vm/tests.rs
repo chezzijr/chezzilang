@@ -14129,6 +14129,80 @@ print(\"after\")
     assert!(!out.contains("after"), "the join must not return: {out:?}");
 }
 
+/// W7-60 — an `Executor.shutdown_now()` must reach a job that is itself parked in an INNER
+/// `shutdown()`. Before this, `join_eager_jobs` observed only the deadlock verdict, so the inner
+/// join was uncancellable and the outer `shutdown_now` waited for work it had just asked to stop.
+///
+/// **The inner job is deliberately uninterruptible.** `process.run` is documented as having no
+/// cancellation checkpoint until it returns (`docs/stdlib.md` §std.process), so the ONLY party that
+/// can end this wait early is the joiner itself — which is exactly the rung under test. A job
+/// blocked on a `Channel` instead would be ended by the deadlock verdict that already existed, and a
+/// `time.sleep_ms` job would be ended by its own cancel checkpoint (`W7-16`); neither would fail
+/// pre-fix, and neither would be testing this.
+///
+/// Measured on the release binary, `chezzi run`: pre-fix **6 011 ms** (the full `sleep 6`), post-fix
+/// **213 ms** (with `sleep 6`; the fixture below uses `sleep 2` so it strands a process-global
+/// pool worker for as little time as still discriminates) — against `docs/stdlib.md`'s own "ends the wait within ~5 ms" promise. The cancelled
+/// joiner's own output is SWALLOWED, as every cancelled task's is, so `job past inner join` must NOT
+/// appear; that is the observable half of the assertion and the reason it is not a pure timing test.
+///
+/// M:N-only (`--serial` queues eager jobs at `shutdown` instead of running them) + watchdogged, for
+/// the reasons on the tests above.
+#[test]
+fn shutdown_now_cancels_a_job_parked_in_a_nested_executor_join() {
+    let src = "
+import std.concurrency
+import std.process
+import std.time
+fn uninterruptible():
+    r := recover: process.run(\"sleep 2\")
+fn nested():
+    inner := Executor()
+    inner.submit(uninterruptible)
+    print(\"job joining inner\")
+    inner.shutdown()
+    print(\"job past inner join\")
+ex := Executor()
+ex.submit(nested)
+time.sleep_ms(200)
+ex.shutdown_now()
+print(\"main done\")
+";
+    let entry = write_temp_chz("w760_cancel_nested_join", src);
+    let run_entry = entry.clone();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let started = std::time::Instant::now();
+    std::thread::spawn(move || {
+        let _ = tx.send(run_file_parallel(
+            &run_entry,
+            crate::native::HostConfig::default(),
+        ));
+    });
+    let (out, _err, res, _code) = rx
+        .recv_timeout(std::time::Duration::from_secs(60))
+        .expect("shutdown_now must not wait out an uninterruptible nested job");
+    let elapsed = started.elapsed();
+    let _ = std::fs::remove_file(&entry);
+    res.expect("the program itself completes normally");
+    assert!(
+        out.contains("job joining inner") && out.contains("main done"),
+        "the run must complete: {out:?}"
+    );
+    assert!(
+        !out.contains("job past inner join"),
+        "the cancelled joiner's outcome is swallowed, so its later print must not appear: {out:?}"
+    );
+    // The `sleep 2` is the discriminator: pre-fix this waited the child out (measured 6 011 ms with
+    // a `sleep 6`); post-fix it returns at ~213 ms. 1 s sits between the two with room either way.
+    // Kept SHORT on purpose: `vm::pool` is a process-wide `OnceLock` of `worker_count()` threads that
+    // never grows (`pool.rs`), and this test strands one of them for the child's whole lifetime after
+    // returning — a long sleep here starves concurrent `Executor` tests on a narrow box.
+    assert!(
+        elapsed < std::time::Duration::from_secs(1),
+        "shutdown_now waited {elapsed:?} for a job parked in a nested join"
+    );
+}
+
 /// W7-13 — a healthy cap-1 handshake must be driven by WAKEUPS, not by the poll timeout.
 ///
 /// `block_wait_tick` used to hand a freshly-taken `core.q` guard straight to `cv.wait_timeout` with no

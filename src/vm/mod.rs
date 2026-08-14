@@ -1133,9 +1133,16 @@ const CONTEXT_REDS: u32 = 4000;
 /// payloads (`read` returns the actual byte count). Mirrors `io::read_file`'s read limit.
 const MAX_SOCKET_READ: usize = 16 * 1024 * 1024;
 
-/// D6b — wall-clock cap on the top-level (no-fiber-to-park) blocking `connect` fallback, so a
-/// black-hole address returns a clean timeout instead of spinning for the kernel's ~2-minute connect
-/// timeout. Generous (the M:N engine, which parks instead of blocking, is the real target).
+/// D6b — wall-clock cap on the blocking (no-fiber-to-park) `connect` wait, so a black-hole address
+/// returns a clean timeout instead of waiting out the kernel's ~2-minute connect timeout. Generous
+/// (the M:N engine, which parks instead of blocking, is the real target).
+///
+/// W7-59 — this is the op's OWN deadline, handed to [`Vm::demote_block_socket`], and it is
+/// deliberately **not** clamped by the run's `--timeout`. That loop re-reads the run deadline at the
+/// top of every iteration and raises it as a HARD `Err`, while its own deadline expiring yields the
+/// CATCHABLE `Err("timeout")` — so clamping the two to the same instant would not shorten anything,
+/// it would only make which of the two fires a race, and half of that race is a `--timeout` a
+/// `recover:` can swallow.
 const CONNECT_BLOCK_TIMEOUT_SECS: u64 = 10;
 
 /// D5 owe #3 (Path C) — how long a demoted worker thread waits on the channel condvar between
@@ -1643,6 +1650,23 @@ enum TaskOutcome {
         out: Vec<u8>,
         stderr: Vec<u8>,
     },
+}
+
+impl TaskOutcome {
+    /// W7-60 — the buffered `(stdout, stderr)` this outcome carries, whatever its variant. Every
+    /// variant owns a pair and `reduce_task_slots` flushes all five unconditionally (W7-5c), so a
+    /// caller that wants only the OUTPUT — the bail-out path in [`Vm::join_eager_jobs`], which must
+    /// not also propagate a finished job's fault over the halt that is already unwinding — needs one
+    /// accessor rather than a second five-arm `match` that could drift from the first.
+    fn streams(&self) -> (&[u8], &[u8]) {
+        match self {
+            TaskOutcome::Done(wr) => (&wr.out, &wr.stderr),
+            TaskOutcome::Cancelled { out, stderr }
+            | TaskOutcome::Exit { out, stderr, .. }
+            | TaskOutcome::Fault { out, stderr, .. }
+            | TaskOutcome::Deadlocked { out, stderr, .. } => (out, stderr),
+        }
+    }
 }
 
 // B3.3-threads had a `TaskSlots` alias + a `DoneSignal` completion guard here, both owned by the

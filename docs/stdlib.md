@@ -279,8 +279,9 @@ instead (`concurrency.md` §8, decision D3) ·
 `shutdown() -> nil` (**wait** for the submitted work — every job runs; raises the lowest-index fault,
 see `concurrency.md` §8) ·
 `shutdown_now() -> nil` (drop work that has not started, ask running jobs to stop **cooperatively**,
-then wait — Java `shutdownNow`; a job with no cancellation point still finishes, but one **sleeping or
-waiting a timer is ended** — see `concurrency.md` §cancellation points) ·
+then wait — Java `shutdownNow`; a job with no cancellation point still finishes, but one **sleeping,
+waiting a timer, or parked in a nested `Executor` join is ended** — see `concurrency.md`
+§cancellation points) ·
 `submit_result[T](f: fn() -> T) -> Channel[T]` — submit `f` and get back a cap-1 `Channel[T]` carrying
 its result (`.recv()` it **after** `shutdown()`). This is the result-returning primitive
 `std.concurrency.task.submit_task` / `Task[T]` wraps.
@@ -711,7 +712,13 @@ Both `sleep_ms` and a `timer(ms)` `recv` are **continuous cancellation checkpoin
 the runtime's own, so a scope cancel or an `Executor.shutdown_now()` ends the wait within ~5 ms instead
 of after it, and the task still runs its `defer`s. `chezzi test --timeout` rides the same checkpoint and
 reaches every timer wait, including one parked in a `parallel:` nursery with no runnable sibling
-(`concurrency.md` §cancellation points; `gaps.md` **W7-16**/**W7-17**).
+(`concurrency.md` §cancellation points; `gaps.md` **W7-16**/**W7-17**). **The same ~5 ms bound covers a
+nested `Executor` JOIN** — a job parked in an inner `shutdown()`/`shutdown_now()` observes an outer
+cancel and `--timeout` on the join's own poll, not only when its innermost wait happens to be a
+checkpoint (measured 2026-08-14: cancel 6 011 ms → **213 ms**, `--timeout=500` 9 010 ms → **509 ms**
+over a job running `process.run`, which has no checkpoint of its own; `gaps.md` **W7-60**). What the
+bound still cannot cross is the [uninterruptible in-flight call](#blocking-calls-cannot-be-interrupted)
+itself: the join unwinds within ~5 ms, the child process it was waiting on runs to completion.
 
 ### `std.process`
 A running child is [uninterruptible while in flight](#blocking-calls-cannot-be-interrupted) — nothing
@@ -827,6 +834,17 @@ or `import Socket from std.net`) — they are reserved names, not global builtin
 codepoint is carried across reads and reassembled exactly, while a **binary** payload is a clear `Err`
 (never silent U+FFFD). For binary, use `Socket.read_bytes` / `write_bytes` (§3): they never decode, and
 `read_bytes` drains any carry, so bytes a str `read` refused are recovered rather than stranded.
+**`connect` and the engines.** Inside an eager `Executor` job `connect` returns
+`Err("connect would block: std.net sockets require the --parallel engine")` — a job runs on the
+bounded, process-wide pool with no scheduler under it, so blocking there steals width from every other
+job and every `parallel:` nursery (measured at `CHEZZI_THREADS=1`: a 10 s pin on a black-hole address).
+**Everywhere else `connect` blocks and succeeds** — a `spawn`/`parallel:` fiber parks on the netpoller,
+and top-level `main` *and `--serial`* block their thread, matching both ancestors (CPython
+`socket.connect` 0.1 ms, Go `net.Dial` 314 µs, each from the sole/main thread). That is narrower than
+`accept`/`read`/`read_bytes`/`write`, which additionally refuse on `--serial`: those wait on a **Chezzi
+peer fiber** that can only run on the very thread they would block, while a `connect` handshake is
+completed by the **kernel** and starves no one. The wait honours `--timeout`, cancellation and
+`os.exit` (`concurrency.md`; `gaps.md` **W7-40**/**W7-59**).
 
 ### `std.ffi`
 C-ABI vocabulary for `extern "lib":` blocks (see the FFI section of `syntax.md`).

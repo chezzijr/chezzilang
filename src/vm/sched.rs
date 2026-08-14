@@ -1378,14 +1378,21 @@ impl Vm {
     ///   is skipped entirely — hence the `Option` sched — and only the wait loop runs. Until 2026-08-10
     ///   the four callers returned `Err("… requires the --parallel engine")` here too, on the DEFAULT
     ///   engine, because `mn.is_some()` means "worker shell", not "parallel is on" (`Vm::parallel`) —
-    ///   which made the hello-world TCP server unwritable. `connect` had had this fallback all along
-    ///   ([`Vm::block_until_connected`]); the other four were simply left behind (the repo's recurring
-    ///   fixed-some-arms-of-an-N-way-set finding, W7-22).
+    ///   which made the hello-world TCP server unwritable. `connect` had had a fallback all along — its
+    ///   own private sleep-spin, deleted by `W7-59`, which now routes it here like the other four; they
+    ///   were simply left behind (the repo's recurring fixed-some-arms-of-an-N-way-set finding, W7-22).
     ///
     /// **Not, deliberately: `--serial` and an eager `Executor` job.** Neither owns its thread — serial
     /// runs every fiber on one thread, and a job runs on the bounded process-wide [`crate::vm::pool`] —
     /// so blocking in place there starves the peer that would make the fd ready. Both were measured as
     /// permanent hangs when a first attempt at this widening let them in; they keep the loud `Err`.
+    ///
+    /// **`connect` is the one caller that reaches this loop on `--serial`, and that is not an
+    /// oversight** (`W7-59`): the starvation argument above is about waiting on a CHEZZI peer fiber,
+    /// which only `accept`/`read`/`write` do. A `connect` handshake is completed by the KERNEL, so no
+    /// chezzi party is starved by waiting for it — and both ancestors block (measured: CPython
+    /// `socket.connect` 0.1 ms, Go `net.Dial` 314 µs, each from the sole/main thread). `connect`
+    /// therefore gates on `eager_core.is_some()` alone, not on [`Vm::may_block_socket_in_place`].
     ///
     /// **Consequence, deliberate: an fd that never becomes ready is now a HANG, not an immediate `Err`.**
     /// That is Go-identical (`ln.Accept()` on the main goroutine with nobody dialing blocks forever) and
@@ -1772,8 +1779,8 @@ impl Vm {
                 // test body's `assert` would run: W7-17's original SWALLOWED symptom, re-created on
                 // the connect path by the fix meant to close it. Raising also avoids handing back the
                 // `Ok(Socket)` `finish_pending_connect` would produce for a handshake still in flight
-                // (it reports on `SO_ERROR` alone; `block_until_connected` additionally checks
-                // `peer_addr`). The unwind + re-stamp is the `resume_native` arm's, verbatim: without
+                // (it reports on `SO_ERROR` alone; the blocking arm's `attempt` closure additionally
+                // checks `peer_addr`). The unwind + re-stamp is the `resume_native` arm's, verbatim: without
                 // it the aborted task skips every `defer` (W7-16's bug, W7-17 lesson 2).
                 if std::mem::take(&mut self.poll_timed_out) {
                     let rte = self
@@ -1934,7 +1941,14 @@ impl Vm {
         let mut first_hard_fault: Option<RuntimeError> = None;
         let mut deadlock_err: Option<RuntimeError> = None;
         for slot in slots {
-            match slot.expect("every task slot was filled before join returned") {
+            // W7-60 — a `None` here means the slot was already drained by `EagerState::take_finished`
+            // on a `join_eager_jobs` bail-out (its output is flushed, its outcome consumed), which is
+            // the one way a reduce can legitimately see an empty slot. The invariant the old
+            // `.expect("every task slot was filled before join returned")` guarded — a job that never
+            // filled its slot — is still asserted, at the place that actually knows: the join only
+            // reaches `take_slots` with `outstanding() == 0`.
+            let Some(outcome) = slot else { continue };
+            match outcome {
                 TaskOutcome::Done(wr) => {
                     self.out.extend_from_slice(&wr.out);
                     self.stderr.extend_from_slice(&wr.stderr);
@@ -4321,11 +4335,41 @@ impl Vm {
     /// any other kind of party has a judge of its own whose fault names the real blocking site, so the
     /// joiner would only be racing it for a worse message.
     ///
-    /// **It asks ONLY the deadlock verdict, not [`Vm::block_halt_check`].** A join deliberately does
-    /// not observe `--timeout`/cancel/`os.exit` today, and widening what a `shutdown()` unwinds on is
-    /// a different change with a different blast radius. The verdict itself is not new here — it is
-    /// the same process-wide question every channel-blocked party already asks — so this adds an
-    /// ASKER, never a predicate.
+    /// **W7-60 — it also observes `--timeout` and cancel**, in [`Vm::block_halt_check`]'s order
+    /// (`--timeout` > cancel > the verdict). Before this it observed neither, so a job blocked in an
+    /// inner wait made its joiner both uncancellable and immune to the wall-clock cap: measured, an
+    /// outer `shutdown_now()` at 200 ms did not end a run until **10 009 ms**, against
+    /// `docs/stdlib.md`'s own promise that "a scope cancel or an `Executor.shutdown_now()` ends the
+    /// wait within ~5 ms". Neither rung is gated on [`Vm::is_counted_party`] — they are facts about
+    /// the RUN, not about who may judge it — which is exactly how `block_halt_check` gates its own
+    /// three (only the verdict at the bottom carries that test).
+    ///
+    /// **There is deliberately NO `os.exit` rung, and the reason is narrower than it first looks.**
+    /// W7-47 routes a run-wide exit through each JOB's own blocking wait, so for any job that HAS a
+    /// cancellation checkpoint `outstanding()` drops and this join releases through the mechanism it
+    /// already has — a rung here would be redundant. That argument does **not** extend to a job with
+    /// no checkpoint at all: measured (W7-60 review, charge A3), `os.exit(3)` at 200 ms beside a job
+    /// running `process.run("sleep 5")` exits after **5.014 s**, not promptly. An exit rung would not
+    /// fix that either — it would unblock the WAITER while the uninterruptible child kept running,
+    /// which is the documented ceiling of a blocking native (`docs/stdlib.md` §"blocking calls cannot
+    /// be interrupted"), not something a join can lift. What the bail-out CAN do about an abandoned
+    /// job, it now does unconditionally: it trips `core.cancel` (see the store below), so every job
+    /// that owns a checkpoint stops at it.
+    ///
+    /// **Both rungs are evaluated while `eager` (G) is HELD, deliberately.** `deadline_halt` takes no
+    /// lock and `cancel_requested` takes none either, so there is no inversion to avoid — and holding
+    /// G means there is no window in which a job could finish between the check and the decision.
+    /// That matters because the cancel rung LATCHES (`self.cancelled = true`): a halt observed in
+    /// such a window and then discarded as stale would leave this fiber permanently
+    /// `cancel_suppressed`, no-opping every later checkpoint. Only the verdict needs the drop, and
+    /// only because `quiesced_only_joins` takes P and then G.
+    ///
+    /// **Collateral of the cancel rung, accepted:** unwinding here leaves the joined executor marked
+    /// `shut` with jobs still outstanding, so the exit drain skips it. That is not a new class — the
+    /// pre-existing deadlock bail-out below leaves exactly the same state — and it is what
+    /// `shutdown_now`'s documented "ask running jobs to stop cooperatively" means for a job that is
+    /// itself parked in a join. The cancelled joiner's own outcome is SWALLOWED, as every cancelled
+    /// task's is.
     ///
     /// **Lock order.** `core.eager` (G) is DROPPED before `quiesced` is called: the one total order is
     /// `parties` (P) → … → `ExecutorCore::eager` (G), and `quiesced` takes G under P (both through
@@ -4349,7 +4393,10 @@ impl Vm {
     /// `executor_job_keeps_waiting_when_shutdown_runs_beside_a_live_producer`).
     pub(super) fn join_eager_jobs(&mut self, core: &Arc<ExecutorCore>) -> Result<(), RuntimeError> {
         let _party = self.block_party_guard(crate::vm::quiesce::PartyWait::Join(Arc::clone(core)));
-        let mut stuck = false;
+        // W7-60 — carried out of the loop rather than `?`-ed, so the slot rule below can read it: on
+        // EVERY bail-out the jobs that own the remaining slots are still outstanding, so this thread must
+        // not empty the vec they will `finish` into (the FINISHED ones are flushed instead).
+        let mut bail: Option<RuntimeError> = None;
         let slots = {
             let mut g = core.eager.lock().unwrap_or_else(|e| e.into_inner());
             while g.outstanding() > 0 {
@@ -4358,7 +4405,27 @@ impl Vm {
                     .wait_timeout(g, DEMOTE_POLL_BACKOFF)
                     .unwrap_or_else(|e| e.into_inner());
                 g = next;
-                if !timed.timed_out() || g.outstanding() == 0 || !self.is_counted_party() {
+                if g.outstanding() == 0 {
+                    continue; // progress — leave through the loop head and reduce normally
+                }
+                // W7-60 — the run-wide halts, in `block_halt_check`'s order. Ungated (see the doc
+                // above) and evaluated under G, which is what keeps the cancel latch from being set
+                // on a verdict this thread might then discard as stale. Checked on every wake, not
+                // only a timed-out one: they are free, and a notified wake is as good a moment as
+                // any to notice the run is over.
+                if let Err(e) = self.deadline_halt(Span::RUNTIME) {
+                    bail = Some(e);
+                    break;
+                }
+                if self.cancel_requested() {
+                    self.cancelled = true;
+                    bail = Some(self.err("cancelled".to_string(), Span::RUNTIME));
+                    break;
+                }
+                // The deadlock verdict keeps BOTH of its old gates: only on a timed-out wait (a
+                // notified wake means something just moved, so the party set is least trustworthy
+                // right then), and only from a party the count can judge.
+                if !timed.timed_out() || !self.is_counted_party() {
                     continue;
                 }
                 // W7-58 residual — DROP `eager` (G) before taking `parties` (P). See the doc above:
@@ -4369,18 +4436,45 @@ impl Vm {
                 // Re-check under the re-taken lock: a job may have finished in the gap, which is
                 // progress and makes the verdict stale.
                 if verdict && g.outstanding() > 0 {
-                    stuck = true;
+                    bail = Some(self.err(JOIN_DEADLOCK_MSG.to_string(), Span::RUNTIME));
                     break;
                 }
             }
-            // Do NOT steal the slots on the stuck path: the jobs that own them are still outstanding
-            // and would `finish` into a vec this thread had emptied. Nothing reduces them anyway — the
-            // fault below is what propagates.
-            if stuck { Vec::new() } else { g.take_slots() }
+            // Do NOT steal the WHOLE slot vec on a bail-out: the jobs that own the remaining slots are
+            // still outstanding and would `finish` into a vec this thread had emptied. But the jobs
+            // that ALREADY finished own buffered output, and dropping it is a silent loss — a `print`
+            // that ran to completion and never reached stdout. `take_finished` is the length-preserving
+            // half: it flushes those and leaves the outstanding indices intact (W7-60 review, charge
+            // A2 — reproduced as a missing `QUICK DONE` under `--timeout`).
+            if bail.is_some() {
+                let done = g.take_finished();
+                drop(g);
+                for o in done {
+                    let (out, stderr) = o.streams();
+                    self.out.extend_from_slice(out);
+                    self.stderr.extend_from_slice(stderr);
+                }
+                Vec::new()
+            } else {
+                g.take_slots()
+            }
         };
         drop(_party);
-        if stuck {
-            return Err(self.err(JOIN_DEADLOCK_MSG.to_string(), Span::RUNTIME));
+        if let Some(e) = bail {
+            // W7-60 review, charge A1 — ASK THE WORK TO STOP, don't just stop waiting for it. Every
+            // other `--timeout`/cancel observation happens INSIDE a job, where `run_outcome` trips the
+            // executor's cancel for us; this one is on the JOINER, and without this store the abandoned
+            // jobs never learn. That is not merely untidy: `Vm::do_call`'s blocking-native offload gates
+            // on `cancel_requested()`, so a job part-way through a sequence of blocking calls would
+            // launch the NEXT one after the run had already reported TIMED-OUT (measured: a fresh
+            // subprocess spawned at ~1.3 s under `--timeout=300`). The executor is already `shut`, so
+            // `drain_live_executors` will never revisit it and this is the last chance to ask.
+            //
+            // It is a REQUEST, not a kill — a job with no cancellation checkpoint (an in-flight
+            // `process.run` child, `docs/stdlib.md` §"blocking calls cannot be interrupted") still runs
+            // to completion. That ceiling is the documented one, unchanged here.
+            core.cancel.store(true, Ordering::Relaxed);
+            return Err(e);
         }
         self.reduce_task_slots(slots)
     }

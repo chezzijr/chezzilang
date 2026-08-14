@@ -3405,6 +3405,109 @@ main()
     );
 }
 
+/// W7-59 — the capability fence for the narrow gate. A `--serial` `net.connect` to a LIVE loopback
+/// listener must still SUCCEED, and the `write` after it must go through.
+///
+/// This is the test that distinguishes `W7-59`'s gate from the obvious wrong one. Routing `connect`
+/// through `may_block_socket_in_place()` — the predicate its four sibling ops use, and the shape
+/// `docs/gaps.md:80` originally proposed — refuses here, because a non-blocking `connect` reports
+/// `EINPROGRESS` even on loopback to a listening peer (measured; the "connected synchronously" arm
+/// is rare, not "the common loopback case" its comment used to claim). That would have taken away a
+/// working `--serial` client with no starvation to justify it: the handshake is finished by the
+/// KERNEL, not by a chezzi fiber, so blocking briefly starves nobody, and both ancestors block —
+/// CPython `socket.connect` 0.1 ms, Go `net.Dial` 314 µs, each from the sole/main thread.
+///
+/// `read` still refuses on `--serial` (`W7-40` R1 — THAT one waits on a chezzi peer), so the program
+/// stops at the read, which is exactly where it stopped before `W7-59`.
+#[test]
+fn connect_on_serial_main_still_reaches_a_live_listener() {
+    // A Rust LISTENER (the mirror of `net_peer`, which is a client): chezzi is the one dialling
+    // here, so the peer has to be already bound before the program runs — that is what makes the
+    // handshake a live one rather than a refusal.
+    let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = l.local_addr().unwrap();
+    let peer = std::thread::spawn(move || {
+        use std::io::Read;
+        let Ok((mut c, _)) = l.accept() else {
+            return "<peer accept failed>".to_string();
+        };
+        let mut buf = [0u8; 64];
+        match c.read(&mut buf) {
+            Ok(n) => String::from_utf8_lossy(&buf[..n]).into_owned(),
+            Err(e) => format!("<peer read failed: {e}>"),
+        }
+    });
+    let src = format!(
+        "\
+import std.net
+
+fn main():
+    match net.connect(\"{addr}\"):
+        Ok(s):
+            print(\"connected\")
+            match s.write(\"hi\"):
+                Ok(_): print(\"wrote\")
+                Err(e): print(\"WERR:\" + e.message())
+        Err(e): print(\"CERR:\" + e.message())
+
+main()
+"
+    );
+    let out = run_net_watchdog_engine("connect_on_serial_main", &src, false);
+    assert_eq!(
+        out, "connected\nwrote\n",
+        "--serial connect to a live listener must not be refused"
+    );
+    assert_eq!(peer.join().unwrap(), "hi");
+}
+
+/// W7-59 — the `connect` twin of the test above. `net.connect` was the FIFTH would-block socket op
+/// and the only one that never asked `may_block_socket_in_place()`: it tested a bare `mn.is_some()`,
+/// so an eager `Executor` job fell into the private blocking spin and pinned a pool worker for up to
+/// the 10 s connect cap. Same family as `W7-40`'s R2, which the four other ops closed.
+///
+/// TEST-NET-1 (`192.0.2.0/24`, RFC 5737) is a documented black hole: no RST, no SYN-ACK, so
+/// `SO_ERROR` never sets and the fd never becomes writable — the handshake cannot settle and the
+/// pre-fix spin ran the full cap. Measured on the pre-fix release binary via the `chezzi run` shape
+/// of this program: **10 009 ms**; post-fix **210 ms**, the wait replaced by the prompt `Err`.
+///
+/// Written as the `Err` rather than as the starvation repro for the reason spelled out above: pool
+/// width is process-global, so a width-1 test would be flaky under the parallel harness and a 30 s
+/// hang when it regressed.
+#[test]
+fn connect_inside_an_executor_job_errs_instead_of_pinning_a_pool_worker() {
+    let src = "\
+import std.net
+
+fn dial():
+    match net.connect(\"192.0.2.1:9\"):
+        Ok(_): print(\"ERR:connected to a black hole\")
+        Err(e): print(\"ERR:\" + e.message())
+
+fn main():
+    ex := Executor()
+    ex.submit(dial)
+    ex.shutdown()
+    print(\"done\")
+
+main()
+"
+    .to_string();
+    let started = std::time::Instant::now();
+    let out = run_net_timeout_watchdog("connect_in_executor_job", &src);
+    assert_eq!(
+        out,
+        "ERR:connect would block: std.net sockets require the --parallel engine\ndone\n"
+    );
+    // The Err is the contract; this is the property it exists for. The pre-fix path took the full
+    // 10 s cap, so any threshold well under it distinguishes the two without racing a slow box.
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(5),
+        "a black-hole connect in an eager job pinned a pool worker for {:?}",
+        started.elapsed()
+    );
+}
+
 /// B1 — an incomplete codepoint left over when the peer CLOSES (`b"ok\xC3"` ⇒ `error_len() == None`,
 /// then EOF) is a real error, never a silent drop and never U+FFFD. The valid prefix is still
 /// delivered; the dangling lead byte errors on the read that sees the close.
@@ -3998,10 +4101,26 @@ main()
     );
 }
 
-/// D6b — the top-level (no-`--parallel`) blocking connect fallback returns a clean `Err` rather
-/// than hanging: `net.connect` to a dead loopback port (bound-then-dropped) settles to a refusal
-/// through `block_until_connected`. Guards the bounded-spin fix — a regression to an unbounded spin
-/// on a non-completing handshake would surface as a watchdog timeout here.
+/// D6b/W7-59 — `net.connect` to a dead loopback port (bound-then-dropped) returns a clean `Err`
+/// rather than hanging, and the two engines answer with the message their contract says they should.
+///
+/// A dead LOOPBACK port still reports `EINPROGRESS` (measured: `connect_ex(('127.0.0.1', <closed>))`
+/// → `115 EINPROGRESS`), so this really does reach the would-block gate rather than the synchronous
+/// arm — which is what makes it the pin for `W7-59`. The pre-`W7-59` version asserted only that the
+/// `Err` arm was taken and discarded `e.message()`, so it passed identically before and after the
+/// change and would not have noticed either engine losing its answer.
+///
+/// **Both** engines must report the kernel's refusal. `W7-59` narrowed the block-in-place gate to
+/// the eager-`Executor` job alone — NOT to `may_block_socket_in_place()`, which would have refused
+/// `--serial` too. The difference is load-bearing: `accept`/`read` wait on a chezzi peer fiber that
+/// can only run on the very thread they would block, so refusing on `--serial` prevents
+/// self-starvation (`W7-40` R1); a `connect` handshake is completed by the KERNEL, starves no chezzi
+/// party, and both ancestors block on it (CPython `socket.connect` 0.1 ms, Go `net.Dial` 314 µs from
+/// the main goroutine). So `--serial` keeps its answer here, and gets `demote_block_socket`'s
+/// escapes on the way.
+///
+/// Guards the bounded-wait property too: a regression to an unbounded wait on a non-completing
+/// handshake surfaces as the watchdog timeout below.
 #[test]
 fn net_connect_top_level_dead_port_errors_not_hangs() {
     let dead = {
@@ -4009,25 +4128,32 @@ fn net_connect_top_level_dead_port_errors_not_hangs() {
         l.local_addr().unwrap()
     };
     let src = format!(
-        "import std.net\nfn main():\n    match net.connect(\"{dead}\"):\n        Ok(_): print(\"connected\")\n        Err(e): print(\"refused\")\nmain()\n"
+        "import std.net\nfn main():\n    match net.connect(\"{dead}\"):\n        Ok(_): print(\"connected\")\n        Err(e): print(\"ERR: {{e.message()}}\")\nmain()\n"
     );
-    let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let t = TmpDir::new();
-        let entry = t.write("main.chz", &src);
-        let (out, _e, res, _c) = run_file(&entry); // cooperative (no --parallel) ⇒ the blocking fallback
-        let _ = tx.send((out, res));
-    });
-    match rx.recv_timeout(std::time::Duration::from_secs(15)) {
-        Ok((out, res)) => {
-            res.expect("top-level connect program runs");
-            assert_eq!(
-                out, "refused\n",
-                "dead port ⇒ Err branch (bounded, no hang)"
-            );
-        }
-        Err(_) => {
-            panic!("hung: top-level connect to a dead port did not return (unbounded spin?)")
+    for (parallel, want) in [(true, "connect failed: "), (false, "connect failed: ")] {
+        let src = src.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let t = TmpDir::new();
+            let entry = t.write("main.chz", &src);
+            let (out, _e, res, _c) = if parallel {
+                run_file_p(&entry)
+            } else {
+                run_file(&entry)
+            };
+            let _ = tx.send((out, res));
+        });
+        match rx.recv_timeout(std::time::Duration::from_secs(15)) {
+            Ok((out, res)) => {
+                res.expect("top-level connect program runs");
+                assert!(
+                    out.starts_with(&format!("ERR: {want}")),
+                    "parallel={parallel}: dead port ⇒ Err branch (bounded, no hang); got {out:?}"
+                );
+            }
+            Err(_) => panic!(
+                "hung: top-level connect to a dead port did not return (parallel={parallel})"
+            ),
         }
     }
 }
