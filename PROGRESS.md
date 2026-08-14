@@ -1510,7 +1510,15 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > argument is a literal or a **non-generic** struct constructor **and** every witness the callee takes
 > occurs in its PARAMETER types — `fn conv[T: Default, U](a: U) -> T` called as `conv(1)` takes its
 > `T` from the caller's expected type (measured: it runs), so it still charges, as does every shape
-> the syntactic walk cannot positively read. **M24-3 and M24-4 are
+> the syntactic walk cannot positively read. The fn-VALUE position it gives back is also given back
+> ACROSS MODULES — `wlib.renew(Seed(1))`, a qualified call to another module's witness-taking fn with
+> only concrete arguments, charges nothing either. The `spawn`/`defer` STATEMENT target was already
+> legal for a CHARGED fn (M24-5, above), but un-charging changes how it lowers — no witness pushed,
+> against a proto compiled without one — so both statement positions now carry running tests in
+> `tests/chz/spec/static_witness_test.chz` beside the cross-module one. Declaration order does not matter: the
+> hoist fixpoint recomputes the answer once the struct table is complete, which REMOVES the
+> conservative charge `fn_sig` seeded (so that loop is not monotone — its termination argument is
+> spelled out at the loop). **M24-3 and M24-4 are
 > now FIXED** (2026-08-10): a type parameter **shadows** a same-named type — Rust prints `1` for
 > `fn f<Item: D>(_x: Item) -> i32 { Item::tag() }` with `f(Counter)` and so does Chezzi, where it
 > used to print `7`; aligning both halves on the struct was agreement bought at correctness's

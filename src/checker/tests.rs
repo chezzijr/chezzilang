@@ -24858,6 +24858,14 @@ fn witness_forwarding_still_charges_every_unpinned_shape_rejected() {
     charged(
         "fn conv[T: Default, U](a: U) -> T:\n    return T.default()\nfn f[T: Default](x: T) -> T:\n    return conv(1)\n",
     );
+    // a witness carried by a DEFAULTED parameter the call site never supplies. `ty_param_in_params`
+    // is arity-blind — it sees `b: T?` mention `T` and says the arguments pin it — so this charges
+    // only because the inline default is SPLICED IN before the checker looks (`conv(1, None)`, and
+    // `None` is not a closed argument). This case is the pin on that ordering: if default splicing
+    // ever moves after the signature hoist, it goes green-then-broken here first.
+    charged(
+        "fn conv[T: Default](a: int, b: T? = None) -> T:\n    return T.default()\nfn f[T: Default](x: T) -> T:\n    return conv(1)\n",
+    );
     // a nested ctor whose own argument is not closed
     charged("fn f[T: Default](x: T) -> Counter:\n    k := 1\n    return reset(Counter(k))\n");
     // a GENERIC struct's ctor head — its args could name a type param, so it is not concrete

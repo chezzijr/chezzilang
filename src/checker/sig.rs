@@ -927,8 +927,11 @@ impl Checker {
     ///
     /// Because forwarding is transitive (`a` forwards into `b` which constructs), this answer depends
     /// on OTHER fns' answers, and a fn is hoisted before its callees. [`Checker::hoist`] therefore
-    /// re-runs this to a FIXPOINT over the module's free fns once every signature exists. The
-    /// iteration is monotone — a charge is only ever added — so it converges. A forwarding target in
+    /// re-runs this to a FIXPOINT over the module's free fns once every signature exists. That loop
+    /// is NOT monotone: `fn_sig`'s seed answer was computed mid-hoist against a struct table that did
+    /// not yet hold the declarations below the fn, so the first re-run REMOVES charges as well as
+    /// adding them. What makes it settle — and what the iteration cap does and does not buy — is
+    /// spelled out at the loop itself. A forwarding target in
     /// ANOTHER module needs no fixpoint: modules are checked deps-first, so an imported callee's
     /// `witness_params` is already final when this module hoists (Task 3).
     ///
@@ -1039,8 +1042,13 @@ impl Checker {
     /// Then `head(…)`'s type is fixed by the declaration alone and cannot mention any type parameter.
     /// Anything else is `false` (charge): one of `decl`'s own type params, a plain function whose
     /// return type this syntactic walk cannot see, a generic struct (its args could be `T`), a
-    /// newtype, or a name this module does not know. An ENUM never reaches here — a variant is
-    /// spelled `Enum.Variant(…)`, whose callee is a field, not an ident head.
+    /// newtype, or a name this module does not know. A USER enum's variant never reaches here — bare
+    /// it is a checker error (`Sq(2)` → "'Sq' is a variant of enum 'Shape'; write it qualified as
+    /// 'Shape.Sq'"), and qualified its callee is a field, not an ident head. The BUILTIN variants DO
+    /// reach here: `Ok(1)` / `Err(e)` / `Some(x)` are accepted bare, and each is an ident-headed call,
+    /// so `head` really can be `"Ok"`. They answer `false` — a builtin variant is not in
+    /// `struct_names` — which is the CHARGE direction, i.e. the safe one; that they are conservatively
+    /// charged rather than unreachable is the accurate statement.
     fn concrete_ctor_head(&self, head: &str, decl: &FnDecl) -> bool {
         !decl.type_params.iter().any(|tp| tp.name == head)
             && self.struct_names.contains(head)
@@ -1051,6 +1059,26 @@ impl Checker {
 
     /// M24 — does type param `w` occur in `sig`'s PARAMETER types (the return type does not count)?
     /// Reuses [`subst`] as the occurs-check: replacing `w` changes the type iff `w` was in it.
+    ///
+    /// OCCURRENCE, not supply. It asks whether SOME parameter mentions `w`, never whether the call
+    /// site passed that parameter — so on paper `fn conv[T: Default](a: int, b: T? = None) -> T`
+    /// called as `conv(1)` satisfies this clause while supplying nothing that pins `T`. What keeps
+    /// that from being an UNDER-charge is not this clause but two properties of defaults, both
+    /// measured and both load-bearing:
+    /// * an inline default is spliced into the CALL SITE by `desugar` before the checker runs, so the
+    ///   recorded [`crate::compiler::CallSite`] is `conv(1, None)` — and the inline defaults a
+    ///   `w`-mentioning slot can take are not CLOSED shapes: `compiler::closed_expr` admits only
+    ///   scalar literals and ident-headed calls, and `None` / `[]` / `{}` are neither (a scalar
+    ///   literal would fit only a slot whose `w` is already pinned to that scalar). So
+    ///   `closed_arg_heads` is `None`, and `call_forwards_a_witness` never reaches this clause; and
+    /// * the callee-filled alternative — a NON-inline default, which stays out of the call site — is
+    ///   refused for such a slot altogether: `fn conv[T](a: int, b: List[T] = List())` called as
+    ///   `conv(1)` is `conv() expects 2 argument(s), got 1`, while the identical default on a
+    ///   `List[int]` slot is accepted and runs.
+    ///
+    /// A change to either — splicing moved after the hoist, or that arity refusal lifted — re-opens
+    /// the hole silently. The defaulted-parameter case in
+    /// `witness_forwarding_still_charges_every_unpinned_shape_rejected` is the pin.
     fn ty_param_in_params(sig: &FnSig, w: &str) -> bool {
         let probe: HashMap<String, Ty> = [(w.to_string(), Ty::Unknown)].into_iter().collect();
         sig.params.iter().any(|p| subst(p, &probe) != *p)

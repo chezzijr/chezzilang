@@ -6255,7 +6255,10 @@ fn closed_arg_heads(
 /// (`"a{x}"` is `str` whatever `x` is — and a call INSIDE the interpolation is its own [`CallSite`],
 /// judged separately), and so is an ident-headed call whose arguments are all closed — its head is
 /// pushed onto `heads` for the reader to identify. A head SHADOWED by a binding in scope is not the
-/// declaration the reader would look up, so it is not closed. Everything else defaults to NOT closed.
+/// declaration the reader would look up, so it is not closed. Everything else defaults to NOT closed
+/// — a bare ident included, `nil` with it: `nil` has no value spelling in this language (`f(nil)`,
+/// `x: int? = nil` and a `= nil` parameter default are all "unknown name 'nil'"), so an arm admitting
+/// it could only ever loosen the charge for a program the checker already rejects.
 fn closed_expr(e: &Expr, bound: &HashSet<String>, heads: &mut Vec<String>) -> bool {
     match &e.kind {
         ExprKind::Int(_)
@@ -6265,7 +6268,6 @@ fn closed_expr(e: &Expr, bound: &HashSet<String>, heads: &mut Vec<String>) -> bo
         | ExprKind::RawStr(_)
         | ExprKind::Interp(_)
         | ExprKind::Bytes(_) => true,
-        ExprKind::Ident(n) => n == "nil" && !bound.contains(n),
         ExprKind::Call {
             callee,
             args,

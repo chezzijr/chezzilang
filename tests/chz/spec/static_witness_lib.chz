@@ -1,0 +1,16 @@
+# Helper MODULE for `static_witness_test.chz` — the OTHER module a witness forward can point at.
+#
+# Not a `*_test.chz`, so `chezzi test` never picks it up on its own. It exists so the test next door
+# can spell a module-qualified call to a witness-taking generic (`wlib.renew(Seed(1))`) and show that
+# a forward with only CONCRETE arguments charges nothing even across a module boundary — the
+# qualified half of M24-1's per-call-site rule, which resolves the module bind and the callee name as
+# one pair.
+#
+# The protocol is deliberately NOT named `Default`: a bare `import` brings this module's protocol
+# names into the importer's scope, and the test file declares a `Default` of its own.
+
+protocol Fresh:
+    fn fresh() -> Self
+
+fn renew[T: Fresh](old: T) -> T:
+    return T.fresh()

@@ -2883,8 +2883,26 @@ impl Checker {
         // its CALLEES' answers, and a fn is hoisted before them. Re-run the ONE derivation
         // (`witness_params_of`) over this module's free fns to a fixpoint, so the answer is
         // order-independent (`a` → `b` → `c` charges `a` even with `c` declared last, and mutual
-        // recursion converges). Monotone — a charge is only ever added — so a pass that changes
-        // nothing is the fixpoint, and the pass count is bounded by the number of fns.
+        // recursion converges).
+        //
+        // A pass ADDS and REMOVES charges — it is NOT monotone, and the seed is not a lower bound.
+        // `fn_sig` ran mid-hoist against tables that still lacked every declaration below the fn, so
+        // it is wrong in both directions: a later-declared callee was not yet in `self.functions`
+        // (under-charge), and a later-declared struct was not yet in `self.structs`, so
+        // `Checker::concrete_ctor_head`'s shape lookup missed and a concrete-argument forward read as
+        // a real one (over-charge). Pass 1 sees the complete tables and DROPS that over-charge —
+        // measured: `fn a[T: Default](x: T) -> int: return b(Later(1))` beside a witness-taking
+        // `fn b[T: Default]`, with `struct Later` declared LAST, is accepted as a function value,
+        // which happens only because the charge `fn_sig` installed is removed here.
+        //
+        // What makes it settle: from pass 1 on, every input `witness_params_of` reads EXCEPT the
+        // witness sets is frozen (structs, protocols, imports, and each signature's params/ret), and
+        // in the witness sets alone the derivation only grows — a callee that gains a charge can make
+        // `call_forwards_a_witness` answer yes for its callers, never stop it — over a finite lattice
+        // (each fn's charge ⊆ its own static-bounded type params). The `fn_decls.len()` bound is the
+        // unconditional backstop, not the argument: were some future edit to break that one-way
+        // property too, this loop would still EXIT — with the last pass's state, which need not be a
+        // fixpoint — rather than spin.
         let fn_decls: Vec<&crate::ast::FnDecl> = stmts
             .iter()
             .filter_map(|s| match &s.kind {

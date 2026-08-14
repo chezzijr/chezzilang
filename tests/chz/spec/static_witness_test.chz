@@ -15,6 +15,8 @@
 # Serial==M:N is guarded by `test_runner::chz_suite_passes_both_engines`.
 
 import std.concurrency
+# the OTHER module a forward can point at — see the M24-1 section at the bottom of this file
+import static_witness_lib as wlib
 
 protocol Default:
     fn default() -> Self
@@ -1067,3 +1069,61 @@ test fn a_forward_with_only_concrete_arguments_stays_a_function_value():
     g := concrete_only[Counter]
     assert g(Counter(3)) == 100
     assert apply_counter(concrete_only, Counter(4)) == 100
+
+# …and the same forward in `spawn` / `defer` STATEMENT position. Un-charging changed how these
+# LOWER, which is why they are worth their own tests: M24-5 had already made a charged fn a legal
+# statement target by pushing its hidden witness after the declared args, so both spellings ran
+# before (measured on `8922fba9`, the commit just before the narrowing: the equivalent standalone
+# programs print the same). Now the same call sites push NO witness, against a proto without one —
+# argc agreement nothing else in this file exercises from a statement target. Each assertion checks
+# the CONSTRUCTED value, not just that the call ran: the forward builds `Tag`, the type of its own
+# concrete argument, never the caller's `T` (`Counter`), so a witness threaded from the wrong side
+# cannot pass by coincidence.
+
+fn defaults_into[T: Default](x: T, box: Shared[str]) -> int:
+    box.set(reset(Tag("x")).s)
+    return 1
+
+test fn an_uncharged_forward_is_a_spawn_target():
+    box := Shared("")
+    parallel:
+        spawn defaults_into(Counter(3), box)
+    assert box.get() == "none"
+
+fn deferred_forward(box: Shared[str]) -> int:
+    defer defaults_into(Counter(3), box)
+    box.set("body")
+    return 1
+
+test fn an_uncharged_forward_is_a_defer_target():
+    box := Shared("")
+    assert deferred_forward(box) == 1
+    # the deferred forward ran at frame exit, AFTER the body's own write
+    assert box.get() == "none"
+
+# The callee may also live in ANOTHER module. `wlib.renew` takes a witness, so pre-change a
+# qualified call to it charged this fn whatever it passed; the qualified half now resolves the module
+# bind and the callee name as one pair and asks the same concrete-argument question, so `Seed(1)`
+# forwards nothing of `T`. The fn-VALUE spelling is the half that really flips: on `8922fba9` the
+# equivalent standalone program spawned this shape fine (M24-5) and was still refused at
+# `g := <the fn>` with "cannot be used as a function value: its bound on T requires a static
+# protocol method…".
+
+struct Seed:
+    v: int
+    fn fresh() -> Seed:
+        return Seed(42)
+
+fn cross_module_forward[T: Default](x: T, box: Shared[int]) -> int:
+    box.set(wlib.renew(Seed(1)).v)
+    return 1
+
+test fn a_cross_module_concrete_forward_keeps_every_position():
+    box := Shared(0)
+    parallel:
+        spawn cross_module_forward(Counter(3), box)
+    assert box.get() == 42
+    direct := Shared(0)
+    g := cross_module_forward[Counter]
+    assert g(Counter(4), direct) == 1
+    assert direct.get() == 42
