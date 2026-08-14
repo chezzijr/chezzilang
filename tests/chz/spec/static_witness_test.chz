@@ -543,6 +543,112 @@ test fn a_spawned_value_call_keeps_its_head_links_witness():
         spawn chain_sink(Counter(9), sink)(5)
     assert sink == ["Counter(n=0)"]
 
+# ===== M24-5 — a witness-taking generic as the `spawn`/`defer` STATEMENT TARGET =====
+#
+# `defer reset(c)` / `spawn reset(c)` used to be REFUSED ("'reset' takes a static-protocol bound (T),
+# so it cannot be the target of `defer` yet"): the four dedicated emit sites (`Op::SpawnCall` /
+# `SpawnMethod` / `DeferCall` / `DeferMethod`) pushed no hidden argument, so the call would have
+# lowered one `argc` short. They push it now — TRAILING, exactly as `Op::Call`/`CallMethod` do — and
+# the VM needed nothing: `do_defer`/`do_spawn` are argc-generic and a witness is a plain `str`, so it
+# deep-copies across the spawn airlock like any other sendable value.
+#
+# Go is the ancestor and accepts both (measured 2026-08-14, Go 1.26.5 — `defer reset(c, "defer")`
+# plus `go reset(c, "go")` on `func reset[T Defaulter[T]]` print `go reset ran -> {7}`,
+# `main body done`, `defer reset ran -> {7}`: the deferred call runs AFTER the body).
+#
+# Every case asserts the CONSTRUCTED value with TWO concrete types — a mis-ordered witness would
+# still RUN the call and merely build the wrong type.
+
+fn reset_into[T: Default](old: T, sink: List[str]) -> T:
+    v := T.default()
+    sink.push("{v}")
+    return v
+
+fn reset_send[T: Default](old: T, ch: Channel[str]):
+    ch.send("{T.default()}")
+
+struct Recorder:
+    k: int
+    fn note[T: Default](self, old: T, sink: List[str]) -> T:
+        v := T.default()
+        sink.push("{self.k}:{v}")
+        return v
+    fn emit[T: Default](self, old: T, ch: Channel[str]):
+        ch.send("{self.k}:{T.default()}")
+
+test fn a_deferred_witness_call_constructs_the_callers_type():
+    sink: List[str] = []
+    fn body():
+        defer reset_into(Counter(9), sink)
+        defer reset_into(Tag("hi"), sink)
+        sink.push("body")
+    body()
+    # the body runs first (Go's ordering), then the deferrals LIFO
+    assert sink == ["body", "Tag(s='none')", "Counter(n=0)"]
+
+test fn a_spawned_witness_call_constructs_the_callers_type():
+    ch := Channel[str](4)
+    parallel:
+        spawn reset_send(Counter(9), ch)
+    assert ch.recv() == "Counter(n=0)"
+    parallel:
+        spawn reset_send(Tag("hi"), ch)
+    assert ch.recv() == "Tag(s='none')"
+
+test fn a_keyword_spelled_deferred_witness_call_keeps_its_witness_last():
+    # the hidden argument is TRAILING, so it must land after the arguments have been permuted into
+    # their declared slots — including when they are spelled out of order
+    sink: List[str] = []
+    fn body():
+        defer reset_into(old=Counter(9), sink=sink)
+        defer reset_into(sink=sink, old=Tag("hi"))
+    body()
+    assert sink == ["Tag(s='none')", "Counter(n=0)"]
+
+test fn a_deferred_member_witness_call_constructs_the_callers_type():
+    sink: List[str] = []
+    r := Recorder(4)
+    fn body():
+        defer r.note(Counter(9), sink)
+        defer r.note(Tag("hi"), sink)
+        sink.push("body")
+    body()
+    assert sink == ["body", "4:Tag(s='none')", "4:Counter(n=0)"]
+
+test fn a_spawned_member_witness_call_constructs_the_callers_type():
+    ch := Channel[str](4)
+    r := Recorder(7)
+    parallel:
+        spawn r.emit(Counter(9), ch)
+    assert ch.recv() == "7:Counter(n=0)"
+    parallel:
+        spawn r.emit(Tag("hi"), ch)
+    assert ch.recv() == "7:Tag(s='none')"
+
+# …and the target inside a GENERIC body, where the witness stops being a constant and becomes a
+# FORWARD of the enclosing frame's own `$w:T` — for `spawn`, across the airlock.
+
+fn defer_forward[T: Default](x: T, sink: List[str]):
+    defer reset_into(x, sink)
+    sink.push("body")
+
+fn spawn_forward[T: Default](x: T, ch: Channel[str]):
+    parallel:
+        spawn reset_send(x, ch)
+
+test fn a_deferred_target_forwards_the_enclosing_witness():
+    sink: List[str] = []
+    defer_forward(Counter(9), sink)
+    defer_forward(Tag("hi"), sink)
+    assert sink == ["body", "Counter(n=0)", "body", "Tag(s='none')"]
+
+test fn a_spawned_target_forwards_the_enclosing_witness_across_the_airlock():
+    ch := Channel[str](4)
+    spawn_forward(Counter(9), ch)
+    assert ch.recv() == "Counter(n=0)"
+    spawn_forward(Tag("hi"), ch)
+    assert ch.recv() == "Tag(s='none')"
+
 # ===== Task 4 — the witness REACHES a nested body =====
 #
 # A closure, a nested `fn`, a `spawn:` block and a `defer:` block each compile to their own proto and

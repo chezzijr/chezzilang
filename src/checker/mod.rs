@@ -1974,16 +1974,6 @@ struct Checker {
     /// A type param of the enclosing TYPE (`struct Bx[T]`) is never in here: its
     /// witness would have to live in the instance, which is a different mechanism.
     witness_scope: Vec<String>,
-    /// M24 Task 5 — set while type-checking a `spawn <call>` / `defer <call>` TARGET: the target
-    /// call's [`witness_key_span`], the keyword, and whether
-    /// [`Checker::reject_witness_spawn_defer_target`] ALREADY reported this target.
-    /// `record_witness_call` refuses a call whose key span matches, because both statements lower at
-    /// emit sites that push no hidden argument — but stays SILENT when the flag says the identical
-    /// message was already emitted at the identical span (the two arms overlap on a bare free-fn
-    /// target; one error, one message). The key span (not the call span) is the discriminator so
-    /// that an ARGUMENT which is itself a witness call — evaluated eagerly in this frame — stays
-    /// legal.
-    witness_indirect_target: Option<(Span, &'static str, bool)>,
     /// M24 — the manifest `[project] entrypoint`'s FUNCTION name, when this check is for a bare
     /// `chezzi run` (`check_graph_with_entry`). `None` for `chezzi check <file>` and every library
     /// caller: a file run never invokes a function by name.

@@ -1026,95 +1026,6 @@ impl Checker {
             .any(|ty| mentions(ty, t))
     }
 
-    /// M24 Task 5 — arm [`Checker::witness_indirect_target`] for the `spawn`/`defer` target `e`,
-    /// returning the previous value to restore. Covers the shapes
-    /// [`Self::reject_witness_spawn_defer_target`] cannot name (an instance method `h.make(c)`, a
-    /// static method `Holder.build(c)`) — there the callee's requirement is only known once the
-    /// receiver is typed, which is inside `infer`.
-    ///
-    /// Armed ONLY for a callee that NAMES its target — a bare `Ident` or a member `Field`. A VALUE
-    /// callee (`defer resetter(c)(5)`, whose callee is itself a `Call`) must arm nothing: `Op::Call`
-    /// is not a by-name emit site, the value it defers is already computed, and — the actual bug —
-    /// `parse_postfix` gives that outer link the same span as its HEAD, so arming it would refuse the
-    /// head's own witness call, which evaluates eagerly in this frame and lowered fine before Task 5.
-    /// Same shape rule as `reject_witness_spawn_defer_target`, which only classifies those two
-    /// callee spellings — and `reported` is that function's answer, so the two arms (which overlap
-    /// on a bare free-fn target) emit the message ONCE.
-    pub(super) fn enter_witness_indirect_target(
-        &mut self,
-        e: &Expr,
-        kw: &'static str,
-        reported: bool,
-    ) -> Option<(Span, &'static str, bool)> {
-        let key = match &e.kind {
-            ExprKind::Call { callee, .. }
-                if matches!(callee.kind, ExprKind::Ident(_) | ExprKind::Field { .. }) =>
-            {
-                crate::checker::witness_key_span(callee, e.span)
-            }
-            _ => return self.witness_indirect_target,
-        };
-        self.witness_indirect_target.replace((key, kw, reported))
-    }
-
-    /// M24 — reject `spawn f(...)` / `defer f(...)` when `f` is a generic fn that needs hidden
-    /// witness arguments. Both statements lower at DEDICATED emit sites (`Op::SpawnCall` /
-    /// `Op::DeferCall`), not through `compile_call`, so the witness would never be pushed and the
-    /// runtime `argc` would be one short. Rejected here rather than widened (M24 Task 4).
-    /// Returns whether it REPORTED, so the overlapping `record_witness_call` arm stays silent
-    /// instead of emitting the identical string at the identical span.
-    pub(super) fn reject_witness_spawn_defer_target(&mut self, e: &Expr, kw: &str) -> bool {
-        let ExprKind::Call { callee, .. } = &e.kind else {
-            return false;
-        };
-        // Both callee spellings that can name a module-level generic fn: bare (local or
-        // `from`-imported — one `FnSig` table), and module-QUALIFIED (`lib.reset(...)`, whose sig
-        // lives in the bound module's `ModuleSig`). Task 3 made the qualified one callable, so it is
-        // a `defer` target the emit site would silently push short — wall it here too. (`spawn
-        // lib.f(...)` is additionally refused as a non-sendable module receiver; this fires first and
-        // says why.)
-        let (fname, w) = match &callee.kind {
-            ExprKind::Ident(fname) if self.lookup(fname).is_none() => (
-                fname,
-                self.functions.get(fname).map(|s| s.witness_params.clone()),
-            ),
-            ExprKind::Field { obj, name, .. } => {
-                let ExprKind::Ident(mname) = &obj.kind else {
-                    return false;
-                };
-                // A whole-module bind lands in the VALUE namespace as `Ty::Module`, so a plain
-                // `lookup(..).is_some()` would skip every qualified call. Anything else bound to the
-                // name is a genuine local shadow, i.e. an ordinary method call.
-                if !matches!(self.lookup(mname), None | Some(Ty::Module(_))) {
-                    return false;
-                }
-                let w = self
-                    .imported_modules
-                    .get(mname)
-                    .and_then(|id| self.module_sigs.get(id))
-                    .and_then(|s| s.functions.get(name))
-                    .map(|f| f.witness_params.clone());
-                (name, w)
-            }
-            _ => return false, // a local shadow, or a callee that is not a named fn
-        };
-        let Some(w) = w else {
-            return false;
-        };
-        if w.is_empty() {
-            return false;
-        }
-        self.error(
-            e.span,
-            format!(
-                "'{fname}' takes a static-protocol bound ({}), so it cannot be the target of `{kw}` yet — \
-                 call it eagerly and `{kw}` the result, or wrap the call in a closure",
-                w.join(", ")
-            ),
-        );
-        true
-    }
-
     /// Find the first STATIC-CTOR protocol embedded ANYWHERE in a (possibly nested) already-resolved
     /// `Ty` — directly (`Convert[int]`), or nested under a container / `Option` / tuple / `Result` /
     /// `Func` / struct-or-enum type arg. Read-only. This is the value-position gate for a `Ty` that
@@ -2452,11 +2363,8 @@ impl Checker {
                     },
                     _ => self.error(e.span, "defer requires a function or method call"),
                 }
-                let reported = self.reject_witness_spawn_defer_target(e, "defer");
                 // Type-check the call (and its args); the result is discarded, like an expr stmt.
-                let saved_wt = self.enter_witness_indirect_target(e, "defer", reported);
                 self.infer(e);
-                self.witness_indirect_target = saved_wt;
             }
             StmtKind::Defer(DeferTarget::Block(body)) => {
                 // `defer:` block — an ordinary nested scope checked in place. Unlike a `spawn:` block
@@ -2541,12 +2449,9 @@ impl Checker {
                                 _ => {}
                             }
                         }
-                        let reported = self.reject_witness_spawn_defer_target(e, "spawn");
                         // Full type-check of the call (callee, arity, args) — the single source of
                         // type diagnostics for the sub-expressions.
-                        let saved_wt = self.enter_witness_indirect_target(e, "spawn", reported);
                         self.infer(e);
-                        self.witness_indirect_target = saved_wt;
                         // Every value crossing the airlock must be sendable: the arguments, and
                         // (for a method spawn) the receiver the task talks through. Re-inferring
                         // here would duplicate the type errors `infer(e)` already reported, so we

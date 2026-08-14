@@ -18434,3 +18434,74 @@ fn module_global_fn_value_call_runs_both_engines() {
         "serial and M:N diverged on a module fn-value call"
     );
 }
+
+/// M24-5 — a receiver-less member call (a STATIC method, a variant constructor) may not be a
+/// `spawn`/`defer` target, and saying so must be a clean diagnostic. `Op::SpawnMethod`/`DeferMethod`
+/// record a RECEIVER value plus a name; these have no receiver, so the compiler tried to load the
+/// TYPE NAME as a value and panicked in `global_slot` ("global 'Holder' has no slot") on a program
+/// `chezzi check` had just called clean. Pre-existing and witness-INDEPENDENT (the plain
+/// `fn build(old: int)` below reproduced it on `main`); it only became reachable from the
+/// witness-taking spelling once M24-5 removed the checker's blanket refusal of a witness target.
+/// Every head spelling the panic could take: a bare struct, a generic-host turbofish, an enum
+/// static, and a variant constructor.
+#[test]
+fn a_receiverless_member_is_not_a_spawn_or_defer_target_rejected() {
+    let srcs = [
+        "struct Holder:\n    v: int\n    fn build(old: int) -> int:\n        return old\ndefer Holder.build(3)\n",
+        "struct Holder:\n    v: int\n    fn build(old: int) -> int:\n        return old\nparallel:\n    spawn Holder.build(3)\n",
+        "struct Gen[K]:\n    k: K\n    fn build(old: int) -> int:\n        return old\ndefer Gen[int].build(3)\n",
+        "enum E:\n    A\n    fn build(old: int) -> int:\n        return old\ndefer E.build(3)\n",
+        "enum E:\n    A(int)\n    B\ndefer E.A(3)\n",
+    ];
+    for src in srcs {
+        let e = run_capture(src).unwrap_err().message;
+        assert!(
+            e.contains("has no receiver value") && e.contains("cannot be the target of"),
+            "expected the receiver-less-target diagnostic, got: {e}\nfor: {src}"
+        );
+    }
+    // …and an INSTANCE method target is untouched.
+    assert_eq!(
+        run_capture(
+            "struct Holder:\n    v: int\n    fn make(self, old: int) -> int:\n        print(old)\n        return old\nfn body():\n    defer Holder(1).make(3)\n    print(\"body\")\nbody()\n"
+        )
+        .unwrap(),
+        "body\n3\n"
+    );
+}
+
+/// M24-5 — the CROSS-MODULE `defer` target. `defer lib.reset(c)` lowers as `Op::DeferMethod` on the
+/// module object, so the hidden witness rides on the member call's widened `argc` exactly as the
+/// eager `lib.reset(c)` rides on `Op::CallMethod`'s. The checker half is
+/// `checker::tests::witness_fn_is_a_cross_module_defer_target_ok`; this is the RUNNING half — that
+/// the key threaded across the module boundary constructs the CALLER's type, on both engines. Two
+/// concrete types, so a wrong witness cannot pass by coincidence. (`spawn lib.f(..)` stays refused
+/// by the unrelated non-sendable-module-receiver rule.)
+#[test]
+fn cross_module_witness_defer_target_runs_both_engines() {
+    let dir = std::env::temp_dir().join(format!("chezzi_vm_m245_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("lib.chz"),
+        "protocol Default:\n    fn default() -> Self\nstruct Counter:\n    n: int\n    fn default() -> Counter:\n        return Counter(7)\nstruct Tag:\n    s: str\n    fn default() -> Tag:\n        return Tag(\"none\")\nfn reset[T: Default](old: T) -> T:\n    print(T.default())\n    return T.default()\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.chz");
+    std::fs::write(
+        &entry,
+        "import lib\nfn body():\n    defer lib.reset(lib.Counter(1))\n    defer lib.reset(lib.Tag(\"x\"))\n    print(\"body\")\nbody()\n",
+    )
+    .unwrap();
+    let (vm_out, _e, vm_res, _) = run_file(&entry);
+    let (par_out, _pe, par_res, _) =
+        run_file_parallel(&entry, crate::native::HostConfig::default());
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(vm_res.is_ok(), "serial faulted: {vm_res:?}");
+    assert!(par_res.is_ok(), "M:N faulted: {par_res:?}");
+    // body first (Go's ordering), then LIFO — each deferral constructing ITS OWN caller-side type
+    assert_eq!(vm_out, "body\nTag(s='none')\nCounter(n=7)\n");
+    assert_eq!(
+        vm_out, par_out,
+        "serial and M:N diverged on a cross-module witness defer target"
+    );
+}

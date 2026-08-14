@@ -1509,7 +1509,14 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > used to print `7`; aligning both halves on the struct was agreement bought at correctness's
 > expense. And the **entrypoint gate** now runs wherever a file is *checked* (`chezzi check`, bare
 > `chezzi run`, the editor), off one derivation `manifest::entry_fn_for`.
-> The `spawn`/`defer` STATEMENT target is a deferral, not a wall — filed as M24-5.
+> **M24-5 is now FIXED** (2026-08-14): the `spawn`/`defer` STATEMENT target was a deferral, not a
+> wall, and the six emit lines in `compile_spawn`/`compile_defer` now push the hidden witness after
+> the declared (or keyword-permuted) args and widen `Op::SpawnCall`/`SpawnMethod`/`DeferCall`/
+> `DeferMethod`'s `argc` — the VM needed nothing (`do_defer`/`do_spawn` are argc-generic and a
+> witness is a sendable `str`). Go accepts the same program (`defer reset(c, "defer")` + `go
+> reset(c, "go")`, measured 2026-08-14) and Chezzi's ordering matches. Its sibling **M24-5b**
+> (found while fixing it) is fixed too: a receiver-less target (`defer Holder.build(3)`, a variant
+> ctor) used to PANIC the compiler on a check-clean program and now says so cleanly.
 >
 > **Round 4 (2026-08-10) — three hunters, eight findings, four root causes, all fixed at the root.**
 > (A) the fragment column above — the third patch of that family had turned a loud fault into a

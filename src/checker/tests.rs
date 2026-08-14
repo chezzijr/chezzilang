@@ -23966,37 +23966,31 @@ fn witness_static_call_cross_module_ok() {
     ]);
 }
 
-/// `defer f(...)` lowers at its own emit site (`Op::DeferCall`), which pushes no witness — so a
-/// witness-taking callee is refused there in the CROSS-MODULE spellings too. (`spawn lib.f(...)` is
-/// already walled by the non-sendable module receiver; the bare `from`-imported spellings reach the
-/// same `FnSig` as a local one.)
+/// M24-5 — `defer f(...)` pushes the hidden witness at its own emit site like any other call, so a
+/// witness-taking callee is a legal target in the CROSS-MODULE spellings too (Go accepts the same
+/// program: `defer reset(c, "defer")` on a `func reset[T Defaulter[T]]`). (`spawn lib.f(...)` stays
+/// walled by the non-sendable module receiver — an unrelated rule; the bare `from`-imported
+/// spelling reaches the same `FnSig` as a local one.)
 #[test]
-fn witness_fn_cannot_be_cross_module_defer_target_rejected() {
+fn witness_fn_is_a_cross_module_defer_target_ok() {
     let lib = (
         "lib.chz",
         "protocol Default:\n    fn default() -> Self\nstruct Counter:\n    n: int\n    fn default() -> Counter:\n        return Counter(7)\nfn reset[T: Default](old: T) -> T:\n    return T.default()\n",
     );
-    let needle = "cannot be the target of `defer`";
-    files_reject(
-        &[
-            lib,
-            (
-                "main.chz",
-                "import lib\nfn main():\n    defer lib.reset(lib.Counter(9))\n    print(1)\nmain()\n",
-            ),
-        ],
-        needle,
-    );
-    files_reject(
-        &[
-            lib,
-            (
-                "main.chz",
-                "import reset, Counter from lib\nfn main():\n    defer reset(Counter(9))\n    print(1)\nmain()\n",
-            ),
-        ],
-        needle,
-    );
+    files_ok(&[
+        lib,
+        (
+            "main.chz",
+            "import lib\nfn main():\n    defer lib.reset(lib.Counter(9))\n    print(1)\nmain()\n",
+        ),
+    ]);
+    files_ok(&[
+        lib,
+        (
+            "main.chz",
+            "import reset, Counter from lib\nfn main():\n    defer reset(Counter(9))\n    print(1)\nmain()\n",
+        ),
+    ]);
     files_reject(
         &[
             lib,
@@ -24090,23 +24084,25 @@ fn witness_static_call_for_an_enclosing_type_param_still_rejected() {
     );
 }
 
-/// `spawn f(..)` / `defer f(..)` lower at dedicated emit sites that never push the hidden argument,
-/// so a witness-taking callee cannot be their target (the runtime `argc` would be one short).
+/// M24-5 — `spawn f(..)` / `defer f(..)` push the hidden witness at their own emit sites (widening
+/// `Op::SpawnCall`/`DeferCall`'s `argc`), so a witness-taking callee is an ordinary target. Go is
+/// the ancestor and accepts both (`go reset(c, "go")` / `defer reset(c, "defer")`, measured
+/// 2026-08-14). The RUNNING half — that the type constructed is the caller's — is
+/// `tests/chz/spec/static_witness_test.chz`.
 #[test]
-fn witness_fn_cannot_be_spawn_or_defer_target_rejected() {
+fn witness_fn_is_a_spawn_or_defer_target_ok() {
     let head = "protocol Default:\n    fn default() -> Self\nstruct Counter:\n    n: int\n    fn default() -> Counter:\n        return Counter(0)\nfn reset[T: Default](old: T) -> T:\n    return T.default()\n";
-    entry_rejects(
-        &format!(
-            "{head}fn main():\n    c := Counter(9)\n    parallel:\n        spawn reset(c)\nmain()\n"
-        ),
-        "cannot be the target of `spawn`",
-    );
-    entry_rejects(
-        &format!(
-            "{head}fn main():\n    c := Counter(9)\n    defer reset(c)\n    print(1)\nmain()\n"
-        ),
-        "cannot be the target of `defer`",
-    );
+    entry_ok(&format!(
+        "{head}fn main():\n    c := Counter(9)\n    parallel:\n        spawn reset(c)\nmain()\n"
+    ));
+    entry_ok(&format!(
+        "{head}fn main():\n    c := Counter(9)\n    defer reset(c)\n    print(1)\nmain()\n"
+    ));
+    // the KEYWORD spelling — desugar normalizes it into the positional slot, so the hidden witness
+    // still rides last
+    entry_ok(&format!(
+        "{head}fn main():\n    c := Counter(9)\n    defer reset(old=c)\n    print(1)\nmain()\n"
+    ));
 }
 
 /// PERMANENT: a function VALUE erases the concrete type, and the witness is exactly that type — so a
@@ -24347,36 +24343,21 @@ fn witness_member_as_value_rejected() {
     );
 }
 
-/// `spawn`/`defer` lower a member call at `Op::SpawnMethod`/`DeferMethod`, which push no hidden
-/// argument — so a witness-taking member cannot be their target either, in any spelling. An
-/// ARGUMENT that is itself a witness call stays legal: it is evaluated eagerly in this frame.
+/// M24-5 — `spawn`/`defer` lower a member call at `Op::SpawnMethod`/`DeferMethod`, which now push
+/// the hidden witness on top of the declared args, so a witness-taking INSTANCE method is an
+/// ordinary target. An ARGUMENT that is itself a witness call stays legal: it is evaluated eagerly
+/// in this frame. (A STATIC-method target — `Holder.build(c)` — is refused for an unrelated,
+/// witness-independent reason: those two emit sites record a RECEIVER value and a static method has
+/// none. See `vm::tests::a_receiverless_member_is_not_a_spawn_or_defer_target_rejected`.)
 #[test]
-fn witness_member_cannot_be_spawn_or_defer_target_rejected() {
+fn witness_member_is_a_spawn_or_defer_target_ok() {
     let head = "protocol Default:\n    fn default() -> Self\nstruct Counter:\n    n: int\n    fn default() -> Counter:\n        return Counter(0)\nstruct Holder:\n    k: int\n    fn make[T: Default](self, old: T) -> T:\n        return T.default()\n    fn build[T: Default](old: T) -> T:\n        return T.default()\nfn sink(c: Counter) -> int:\n    return c.n\n";
-    entry_rejects(
-        &format!(
-            "{head}fn main():\n    h := Holder(1)\n    c := Counter(9)\n    parallel:\n        spawn h.make(c)\nmain()\n"
-        ),
-        "cannot be the target of `spawn`",
-    );
-    entry_rejects(
-        &format!(
-            "{head}fn main():\n    h := Holder(1)\n    c := Counter(9)\n    defer h.make(c)\n    print(1)\nmain()\n"
-        ),
-        "cannot be the target of `defer`",
-    );
-    entry_rejects(
-        &format!(
-            "{head}fn main():\n    c := Counter(9)\n    parallel:\n        spawn Holder.build(c)\nmain()\n"
-        ),
-        "cannot be the target of `spawn`",
-    );
-    entry_rejects(
-        &format!(
-            "{head}fn main():\n    c := Counter(9)\n    defer Holder.build(c)\n    print(1)\nmain()\n"
-        ),
-        "cannot be the target of `defer`",
-    );
+    entry_ok(&format!(
+        "{head}fn main():\n    h := Holder(1)\n    c := Counter(9)\n    parallel:\n        spawn h.make(c)\nmain()\n"
+    ));
+    entry_ok(&format!(
+        "{head}fn main():\n    h := Holder(1)\n    c := Counter(9)\n    defer h.make(c)\n    print(1)\nmain()\n"
+    ));
     // the ARGUMENT position is untouched — the witness call runs before the task/deferral exists
     entry_ok(&format!(
         "{head}fn main():\n    h := Holder(1)\n    c := Counter(9)\n    defer print(h.make(c).n)\n    parallel:\n        spawn sink(h.make(c))\nmain()\n"
@@ -24573,10 +24554,10 @@ fn witness_forwarding_unbounded_param_rejected() {
 }
 
 /// A fn that becomes witness-needing ONLY through forwarding is charged a hidden parameter exactly
-/// like one that constructs directly — so it loses the same positions. The shared fn-value wall and
-/// the `spawn`/`defer`-target wall must both see the transitive charge.
+/// like one that constructs directly — so it loses the fn-VALUE position, which is the position the
+/// charge genuinely costs (a value erases the very type the witness names).
 #[test]
-fn witness_forwarding_fn_loses_value_and_spawn_positions_rejected() {
+fn witness_forwarding_fn_loses_the_value_position_rejected() {
     let head = format!("{FWD_HEAD}fn fwd[T: Default](x: T) -> T:\n    return reset(x)\n");
     entry_rejects(
         &format!("{head}fn main():\n    g := fwd\n    print(1)\nmain()\n"),
@@ -24585,12 +24566,6 @@ fn witness_forwarding_fn_loses_value_and_spawn_positions_rejected() {
     entry_rejects(
         &format!("{head}fn main():\n    g := fwd[Counter]\n    print(1)\nmain()\n"),
         "cannot be used as a function value",
-    );
-    entry_rejects(
-        &format!(
-            "{head}fn main():\n    c := Counter(9)\n    parallel:\n        spawn fwd(c)\nmain()\n"
-        ),
-        "cannot be the target of `spawn`",
     );
     // …but a CALL across a module boundary keeps working (Task 3): the caller pushes the witness at
     // the call site, which is exactly the position a function VALUE cannot offer.
@@ -24604,6 +24579,20 @@ fn witness_forwarding_fn_loses_value_and_spawn_positions_rejected() {
             "import lib\nfn main():\n    print(lib.fwd(lib.Counter(9)).n)\nmain()\n",
         ),
     ]);
+}
+
+/// …and the STATEMENT-TARGET position it does NOT lose (M24-5): a forwarding fn is a `spawn`/`defer`
+/// target like a directly-constructing one — the transitive charge is threaded at the emit site, not
+/// walled there.
+#[test]
+fn witness_forwarding_fn_keeps_the_spawn_and_defer_positions_ok() {
+    let head = format!("{FWD_HEAD}fn fwd[T: Default](x: T) -> T:\n    return reset(x)\n");
+    entry_ok(&format!(
+        "{head}fn main():\n    c := Counter(9)\n    parallel:\n        spawn fwd(c)\nmain()\n"
+    ));
+    entry_ok(&format!(
+        "{head}fn main():\n    c := Counter(9)\n    defer fwd(c)\n    print(1)\nmain()\n"
+    ));
 }
 
 /// A generic with a static-carrying bound whose type param this signature can never BIND must not
@@ -25206,30 +25195,9 @@ fn witness_static_call_dead_ends_name_the_type_parameter() {
     ));
 }
 
-/// G — the `spawn`/`defer` rejection is emitted ONCE. Two arms overlap on a bare free-fn target
-/// (`reject_witness_spawn_defer_target`, then `record_witness_call`'s indirect arm) and both emitted
-/// the identical string at the identical span.
-#[test]
-fn witness_defer_target_rejection_is_not_duplicated() {
-    for kw in ["defer", "spawn"] {
-        let src = if kw == "defer" {
-            format!("{FWD_HEAD}fn main():\n    defer reset(Counter(1))\n    print(1)\nmain()\n")
-        } else {
-            format!(
-                "{FWD_HEAD}fn main():\n    parallel:\n        spawn reset(Counter(1))\nmain()\n"
-            )
-        };
-        let errs = check_entry(&src);
-        let hits = errs
-            .iter()
-            .filter(|e| e.message.contains("cannot be the target of"))
-            .count();
-        assert_eq!(
-            hits, 1,
-            "expected exactly one `{kw}` rejection, got: {errs:?}"
-        );
-    }
-}
+// G — the `spawn`/`defer` witness-target rejection (and the de-dup test that pinned it to ONE
+// message) is gone with M24-5: the hidden argument is threaded at those emit sites, so there is
+// nothing left to refuse.
 
 // ---------------------------------------------------------------------------------------------
 // W7-43 — the `?.` carrier-mode table's key.

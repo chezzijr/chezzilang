@@ -1431,9 +1431,9 @@ fn make[T: Convert[int]](seed: T, n: int) -> T:
 |---|---|---|
 | `T` declared by the enclosing **TYPE** (`struct Bx[T: Default]` … `T.default()` in a method) | the concrete type is erased once a `Bx` *value* exists — only a value could hold the witness | declare the parameter on the **member** (`fn fresh[T: Default](self, …)`), whose witness rides on the call |
 | reading a witness-taking fn as a **function value** — `g := reset`, `reset[Counter]` as a value, passing it to a HOF, a cross-module read | a `fn` value erases which declaration it came from, so no witness can be recovered. **A permanent wall, not a v1 limit** | call it directly, or take a factory closure: `fn make[T](mk: fn() -> T) -> T` |
-| `spawn f(...)` / `defer f(...)` with a witness-taking callee as the **statement target** | a **deferral, not the wall above**: the target is never read as a value, but its emit sites (`SpawnCall`/`DeferCall`/…) push no hidden argument, so it would lower one argument short. `docs/gaps.md` **M24-5** | call it eagerly and `spawn`/`defer` the result, or wrap the call in a closure (`defer: … f(x) …` as a *block* works) |
 | a `T` **not determined** at the call site | there is no concrete type to build a key from | pin it (`nodet[Counter]()`) or annotate the result |
 | a bound witnessed by a **newtype** or a **scalar** | neither can host a static method | use a struct or an enum |
+| a receiver-less member as a `spawn`/`defer` **statement target** — `defer Holder.build(3)`, `spawn Gen[int].build(3)`, `defer E.A(3)` (a static method or a variant constructor; witness-taking or not) | those emit sites record a **receiver value** plus a member name, and these have none | call it eagerly and `spawn`/`defer` the result, or wrap it in a closure / the block form. An INSTANCE method (`defer h.make(c)`) and a free or module-qualified fn (`defer reset(c)`, `defer lib.reset(c)`) are ordinary targets, witness or not |
 | a **manifest entrypoint** that takes a witness or any declared parameter (`entrypoint = "src.main:main"` where `fn main[T: Default]()` or `fn main(a: int)`) | it is invoked with no arguments, so nothing supplies the key (or the argument) | give the entrypoint a nullary, non-generic signature and construct / read inputs in a helper it calls. Reported by `chezzi check` and by bare `chezzi run`; an explicit `chezzi run <file>` is script mode and runs the top level regardless |
 
 The turbofish *call* form is fine — `reset[Counter](Counter(1))` works; it is only reading
@@ -1442,7 +1442,7 @@ The turbofish *call* form is fine — `reset[Counter](Counter(1))` works; it is 
 One known rough edge, filed as `docs/gaps.md` **M24-1**: the hidden parameter is charged by a coarse
 body scan, so a generic that calls a witness-taking fn with only *concrete* types — or names a struct
 method sharing a name with an imported witness-taking fn — can be charged one it never uses, which
-costs it value / `spawn` / `defer` position (an over-*rejection*, never a wrong answer; move the
+costs it the fn-VALUE position (an over-*rejection*, never a wrong answer; move the
 concrete call into a non-generic helper).
 
 A type parameter **SHADOWS a same-named declaration for its whole body, in every position** — the

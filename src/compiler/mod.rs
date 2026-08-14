@@ -2289,11 +2289,20 @@ impl Compiler {
                         span,
                     });
                 };
-                self.reject_witness_indirect_call(fc, callee, "spawn", call.span)?;
-                if let ExprKind::Field { obj, name, .. } = &callee.kind {
+                self.reject_receiverless_member_target(fc, callee, "spawn", call.span)?;
+                if let ExprKind::Field {
+                    obj,
+                    name,
+                    name_span,
+                } = &callee.kind
+                {
                     self.compile_expr(fc, obj)?;
                     self.compile_args(fc, args)?;
-                    fc.emit(Op::SpawnMethod(name.clone(), args.len()), call.span);
+                    // M24-5: the hidden witness arguments ride LAST, exactly as they do on the eager
+                    // `Op::CallMethod`, so the widened `argc` reaches the same proto.
+                    let w =
+                        self.emit_member_witness_args(fc, callee, name, *name_span, call.span)?;
+                    fc.emit(Op::SpawnMethod(name.clone(), args.len() + w), call.span);
                 } else if !named.is_empty() {
                     // A spawned VALUE call carrying keyword arguments: reorder to positional by the
                     // checker-recorded permutation, then spawn positionally (same as the eager form).
@@ -2307,11 +2316,14 @@ impl Compiler {
                         };
                         self.compile_expr(fc, e)?;
                     }
-                    fc.emit(Op::SpawnCall(perm.len()), call.span);
+                    // M24-5: TRAILING — after the permuted args, never in source order.
+                    let w = self.emit_indirect_witness_args(fc, callee, call.span)?;
+                    fc.emit(Op::SpawnCall(perm.len() + w), call.span);
                 } else {
                     self.compile_expr(fc, callee)?;
                     self.compile_args(fc, args)?;
-                    fc.emit(Op::SpawnCall(args.len()), call.span);
+                    let w = self.emit_indirect_witness_args(fc, callee, call.span)?;
+                    fc.emit(Op::SpawnCall(args.len() + w), call.span);
                 }
                 Ok(())
             }
@@ -4440,11 +4452,18 @@ impl Compiler {
                 span,
             });
         };
-        self.reject_witness_indirect_call(fc, callee, "defer", call.span)?;
-        if let ExprKind::Field { obj, name, .. } = &callee.kind {
+        self.reject_receiverless_member_target(fc, callee, "defer", call.span)?;
+        if let ExprKind::Field {
+            obj,
+            name,
+            name_span,
+        } = &callee.kind
+        {
             self.compile_expr(fc, obj)?;
             self.compile_args(fc, args)?;
-            fc.emit(Op::DeferMethod(name.clone(), args.len()), call.span);
+            // M24-5: the hidden witness arguments ride LAST, exactly as on the eager `Op::CallMethod`.
+            let w = self.emit_member_witness_args(fc, callee, name, *name_span, call.span)?;
+            fc.emit(Op::DeferMethod(name.clone(), args.len() + w), call.span);
             return Ok(());
         }
         // A deferred VALUE call carrying keyword arguments (Swift-style): reorder the combined
@@ -4461,12 +4480,15 @@ impl Compiler {
                 };
                 self.compile_expr(fc, e)?;
             }
-            fc.emit(Op::DeferCall(perm.len()), call.span);
+            // M24-5: TRAILING — after the permuted args, never in source order.
+            let w = self.emit_indirect_witness_args(fc, callee, call.span)?;
+            fc.emit(Op::DeferCall(perm.len() + w), call.span);
             return Ok(());
         }
         self.compile_expr(fc, callee)?;
         self.compile_args(fc, args)?;
-        fc.emit(Op::DeferCall(args.len()), call.span);
+        let w = self.emit_indirect_witness_args(fc, callee, call.span)?;
+        fc.emit(Op::DeferCall(args.len() + w), call.span);
         Ok(())
     }
 
@@ -4594,41 +4616,93 @@ impl Compiler {
         Ok(())
     }
 
-    /// M24 — `spawn f(...)` / `defer f(...)` lower at their OWN emit sites (`Op::SpawnCall` /
-    /// `Op::DeferCall`), which do not push witness arguments. The checker already rejects a
-    /// witness-needing callee there; this is the backstop that makes a miss a loud compile error
-    /// instead of a silently short `argc`. Both callee spellings, since Task 3 made the
-    /// module-qualified one (`defer lib.reset(c)`) reachable.
-    fn reject_witness_indirect_call(
+    /// M24-5 — `spawn Type.m(..)` / `defer Type.m(..)`: `Op::SpawnMethod`/`DeferMethod` record a
+    /// RECEIVER value plus a member name, and a STATIC method (or a variant constructor) has no
+    /// receiver. The head would be compiled as a VALUE, and a type name has no global slot — which
+    /// panicked in [`Self::global_slot`] on a program `chezzi check` called clean. Refuse it here
+    /// instead, in every head spelling: a bare struct/enum name, and a turbofish (`Gen[int].build`).
+    /// Witness-INDEPENDENT: `defer Holder.build(3)` on a plain `fn build(old: int)` panicked the
+    /// same way, so this is the root-cause guard, not a witness rule.
+    fn reject_receiverless_member_target(
         &self,
         fc: &FnComp,
         callee: &Expr,
         kw: &str,
         span: Span,
     ) -> Result<(), CompileError> {
-        let fname = match &callee.kind {
-            ExprKind::Ident(fname) => fname,
-            ExprKind::Field { name, .. } => name,
-            _ => return Ok(()),
+        let ExprKind::Field { obj, name, .. } = &callee.kind else {
+            return Ok(());
         };
-        // M24 Task 5 — a MEMBER target (`spawn h.make(c)`, `defer Holder.build(c)`) lowers as
-        // `Op::SpawnMethod`/`DeferMethod`, which push no hidden argument either. The compiler cannot
-        // type the receiver, so the signal is the checker's own record at this call site: an entry
-        // here means a witness is required and this emit site would drop it. The checker refuses the
-        // shape first (with a diagnostic that names the target); this is the loud backstop.
-        if self
-            .member_witness_srcs(crate::checker::witness_key_span(callee, span))
-            .is_some()
-            || self.callee_takes_witnesses(fc, callee, fname)
-        {
-            return Err(CompileError {
-                message: format!(
-                    "'{fname}' takes a static-protocol bound, so it cannot be the target of `{kw}` yet"
-                ),
-                span,
-            });
+        // Peel a member-side turbofish (`Gen[int].build(x)` puts an `Index` under the `Field`).
+        let mut head = &**obj;
+        while let ExprKind::Index { obj: inner, .. } = &head.kind {
+            head = inner;
         }
-        Ok(())
+        // A head that names neither a local/capture nor a module global is not a value at all — it
+        // is a TYPE (module binds, imports and top-level fns/lets are all globals, so a genuine
+        // receiver never lands here).
+        let ExprKind::Ident(h) = &head.kind else {
+            return Ok(());
+        };
+        if !fc.is_unbound(h) || self.globals.contains_key(h) {
+            return Ok(());
+        }
+        Err(CompileError {
+            message: format!(
+                "'{h}.{name}' has no receiver value, so it cannot be the target of `{kw}` yet — \
+                 call it eagerly and `{kw}` the result, or wrap the call in a closure"
+            ),
+            span,
+        })
+    }
+
+    /// M24-5 — the hidden witness arguments a `spawn`/`defer` VALUE-callee target must push on top
+    /// of its already-pushed declared args; the count widens `Op::SpawnCall`/`Op::DeferCall`'s
+    /// `argc`. Same by-name shape rule as the eager `Op::Call` site: only a bare `Ident` naming a
+    /// module-level fn can be a witness call, so a chained head link (`defer mk(c)(5)`, whose callee
+    /// is itself a `Call`) never reads its head's entry.
+    fn emit_indirect_witness_args(
+        &mut self,
+        fc: &mut FnComp,
+        callee: &Expr,
+        span: Span,
+    ) -> Result<usize, CompileError> {
+        let ExprKind::Ident(fname) = &callee.kind else {
+            return Ok(0);
+        };
+        if !fc.is_unbound(fname) {
+            return Ok(0);
+        }
+        match self.witness_srcs(fc, callee, fname, span)? {
+            Some(srcs) => {
+                let fname = fname.clone();
+                self.emit_witness_args(fc, &srcs, &fname, span)
+            }
+            None => Ok(0),
+        }
+    }
+
+    /// M24-5 — the same, for a MEMBER target (`spawn h.make(c)`, `defer lib.reset(c)`). The
+    /// module-QUALIFIED spelling goes through [`Self::witness_srcs`] so its stray-entry guard still
+    /// applies; an instance method has no `witness_fn_key`, so it reads the checker's record at the
+    /// method-NAME token directly ([`Self::member_witness_srcs`]) — the same key `Op::CallMethod`
+    /// uses for the eager form.
+    fn emit_member_witness_args(
+        &mut self,
+        fc: &mut FnComp,
+        callee: &Expr,
+        name: &str,
+        name_span: Span,
+        span: Span,
+    ) -> Result<usize, CompileError> {
+        let srcs = match self.witness_srcs(fc, callee, name, span)? {
+            Some(srcs) => Some(srcs),
+            None => self.member_witness_srcs(name_span).cloned(),
+        };
+        match srcs {
+            Some(srcs) => self.emit_witness_args(fc, &srcs, name, span),
+            None => Ok(0),
+        }
     }
 
     /// M24 Task 3 — does the fn a call site NAMES take hidden trailing witness params?

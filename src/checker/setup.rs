@@ -63,7 +63,6 @@ impl Checker {
             table_conflicts: Vec::new(),
             next_opt_tmp: 0,
             witness_scope: Vec::new(),
-            witness_indirect_target: None,
             entry_fn: None,
             graph_module_idx: 0,
             kw_frag_ctx: Span::default(),

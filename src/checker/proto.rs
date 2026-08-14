@@ -3747,8 +3747,10 @@ impl Checker {
     /// ([`crate::checker::witness_key`]), which is the module the compiler is emitting when it looks
     /// it up; the callee's own requirement rides on its [`FnSig::witness_params`], which crosses the
     /// boundary inside its `ModuleSig`. So a `from`-imported callee (`reset(c)`) and a qualified one
-    /// (`lib.reset(c)`) record exactly like a local one. What is NOT recorded here — a `defer`/`spawn`
-    /// target — is walled by [`Self::reject_witness_spawn_defer_target`], in every spelling.
+    /// (`lib.reset(c)`) record exactly like a local one. M24-5 — a `defer`/`spawn` STATEMENT TARGET
+    /// records here too: `compile_defer`/`compile_spawn` thread the witness at their own emit sites,
+    /// widening `Op::DeferCall`/`DeferMethod`/`SpawnCall`/`SpawnMethod`'s `argc` exactly as a plain
+    /// call widens `Op::Call`'s.
     ///
     /// `key_span` is the [`crate::checker::witness_key_span`] of this call site (the member-name
     /// token for a `Field` callee, the call node otherwise) and is a TABLE KEY only; every
@@ -3762,28 +3764,6 @@ impl Checker {
         span: Span,
         recv: WitnessCallee,
     ) {
-        // A `spawn`/`defer` TARGET lowers at its own emit site (`Op::SpawnCall`/`SpawnMethod`/
-        // `DeferCall`/`DeferMethod`), none of which push a hidden argument — so the call is refused
-        // rather than lowered one `argc` short. Matched on the call site's own KEY span, which is
-        // unique per call node, so only the target itself is refused: an ARGUMENT that is a witness
-        // call (`spawn f(reset(c))`) evaluates eagerly in this frame and stays legal.
-        if let Some((target, kw, reported)) = self.witness_indirect_target
-            && target == key_span
-        {
-            // …unless `reject_witness_spawn_defer_target` already said exactly this, at exactly this
-            // span (the two arms overlap on a bare free-fn target). One error, one message.
-            if !reported {
-                self.error(
-                    span,
-                    format!(
-                        "'{name}' takes a static-protocol bound ({}), so it cannot be the target of \
-                         `{kw}` yet — call it eagerly and `{kw}` the result, or wrap the call in a closure",
-                        wparams.join(", ")
-                    ),
-                );
-            }
-            return;
-        }
         let mut srcs = Vec::with_capacity(wparams.len());
         for w in wparams {
             // Presence in `sub` is NOT enough: `enforce_bounds` silently SKIPS a param missing from

@@ -1038,14 +1038,10 @@ State these when the questions recur; they are not oversights:
   showing through to users, and the one item on this list that is arguably a bug rather than a wall.
 - **Specialized numeric containers.** Needs typed containers, independent of this decision.
 
-**Not on that list — the `spawn f(...)` / `defer f(...)` STATEMENT TARGET is a DEFERRAL, not a wall.**
-It rejects with its own message: *"'reset' takes a static-protocol bound (T), so it cannot be the
-target of `defer` yet — call it eagerly and `defer` the result, or wrap the call in a closure"*. The
-"yet" is honest: a statement target is not read as a function value at all, it lowers at its own emit
-site (`Op::SpawnCall` / `SpawnMethod` / `DeferCall` / `DeferMethod`), and none of those push the
-hidden argument — so this is arity plumbing nobody has needed, not erasure. Workarounds as the message
-says, or use the **block** form (`defer:` / `spawn:`), which the witness already reaches. Filed as
-`docs/gaps.md` **M24-5**.
+**Never on that list — the `spawn f(...)` / `defer f(...)` STATEMENT TARGET was a DEFERRAL, and it is
+now FIXED** (2026-08-14, `docs/gaps.md` **M24-5**): the six emit lines push the hidden witness after
+the declared args and widen `Op::SpawnCall`/`SpawnMethod`/`DeferCall`/`DeferMethod`'s `argc`, which
+is all it ever needed — the VM was already argc-generic. It was arity plumbing, not erasure.
 
 ### Not the same problem — do not fold it in
 
