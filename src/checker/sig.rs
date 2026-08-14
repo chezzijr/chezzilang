@@ -2333,7 +2333,18 @@ impl Checker {
                 // struct/enum constructors are not first-class values — wrap them in a function.
                 match &e.kind {
                     ExprKind::Call { callee, named, .. } => match &callee.kind {
-                        ExprKind::Field { .. } => {} // method call
+                        // M24-5b — a dotted CONSTRUCTOR (`Color.Val(3)`, `lib.Point(3)`) is a
+                        // constructor like the bare `P(3)` below, so it gets that rule and that
+                        // message. A dotted STATIC METHOD (`H.build(3)`) is an ordinary call and
+                        // falls through to the accepting arm.
+                        ExprKind::Field { .. } if self.dotted_ctor_target(callee) => {
+                            self.error(
+                                e.span,
+                                "defer requires a function or method call (built-ins and \
+                                 constructors must be wrapped in a function)",
+                            );
+                        }
+                        ExprKind::Field { .. } => {} // method or static-method call
                         ExprKind::Ident(name)
                             if self.lookup(name).is_none()
                                 && !self.functions.contains_key(name)
@@ -2422,7 +2433,16 @@ impl Checker {
                         // function. Mirrors `defer`'s guard so the two features agree.
                         if let ExprKind::Call { callee, named, .. } = &e.kind {
                             match &callee.kind {
-                                ExprKind::Field { .. } => {} // method call
+                                // M24-5b — a dotted CONSTRUCTOR belongs with the bare-constructor
+                                // rule below; a dotted STATIC METHOD is an ordinary call.
+                                ExprKind::Field { .. } if self.dotted_ctor_target(callee) => {
+                                    self.error(
+                                        e.span,
+                                        "spawn requires a function or method call (built-ins and \
+                                         constructors must be wrapped in a function)",
+                                    );
+                                }
+                                ExprKind::Field { .. } => {} // method or static-method call
                                 ExprKind::Ident(name)
                                     if self.lookup(name).is_none()
                                         && !self.functions.contains_key(name)
@@ -4588,6 +4608,87 @@ impl Checker {
         }
         let map = struct_param_map(info, targs);
         Some(info.fields.iter().map(|(_, t)| subst(t, &map)).collect())
+    }
+
+    /// M24-5b — is this `defer`/`spawn` target's dotted callee a CONSTRUCTOR rather than a call?
+    /// `defer Color.Val(3)` builds a value and throws it away, exactly like the bare `defer P(3)`
+    /// the same rule already rejects — a variant constructor IS a constructor — so it earns that
+    /// rule's message and, crucially, its PHASE: the compiler has no receiver value for it, and a
+    /// refusal that lives there is a program `chezzi check` calls clean and only `chezzi run`
+    /// refuses. A dotted STATIC METHOD (`H.build(3)`, `B[int].make(3)`, `lib.Holder.build(3)`) is an
+    /// ordinary call and is NOT rejected — it lowers through the eager-args wrapper, and Go accepts
+    /// its analogue (`defer pkg.F(x)`).
+    ///
+    /// The spellings mirror `infer_call`'s constructor arms: bare `Enum.Variant` and its two
+    /// turbofish carriers, qualified `module.Enum.Variant` (turbofished too), and the qualified
+    /// struct/newtype constructor `module.Point(…)`.
+    pub(super) fn dotted_ctor_target(&self, callee: &Expr) -> bool {
+        let ExprKind::Field { obj, name, .. } = &callee.kind else {
+            return false;
+        };
+        // `Enum.Variant(…)` / `Enum[T].Variant(…)`
+        if let Some(ename) = bare_head_name(&obj.kind)
+            && !self.is_local_binding(ename)
+            && self.enum_names.contains(ename)
+            && self
+                .variants
+                .contains_key(&(self.bare_key(ename), name.clone()))
+        {
+            return true;
+        }
+        // `module.Point(…)` / `module.Meters(…)` — the head is the MODULE and the member the type.
+        // A reserved native handle (`net.Socket`) has a `struct_defs` entry for its method table but
+        // no constructor; `infer_call` skips it the same way, so its own diagnostic stays single.
+        if let ExprKind::Ident(mname) = &obj.kind
+            && !self.is_local_binding(mname)
+            && self.qualified_builtin_ty(name, &[]).is_none()
+            && let Some(mid) = self.imported_modules.get(mname)
+            && let Some(sig) = self.module_sigs.get(mid)
+            && (sig.struct_defs.contains_key(name) || sig.newtype_defs.contains_key(name))
+        {
+            return true;
+        }
+        // `module.Enum.Variant(…)` / `module.Enum[T].Variant(…)`
+        if let Some((mname, ename)) = qualified_head_names(&obj.kind)
+            && !self.is_local_binding(mname)
+            && let Some(mid) = self.imported_modules.get(mname)
+            && let Some(sig) = self.module_sigs.get(mid)
+            && let Some(edef) = sig.enum_defs.get(ename)
+            && edef.variant_names.iter().any(|v| v == name)
+        {
+            return true;
+        }
+        false
+    }
+}
+
+/// M24-5b — the bare type NAME a dotted callee's head spells, peeling either type-level turbofish
+/// carrier (`Enum[T]` parses as an `Index` over the name, `E[T, U]` as a `TypeApply`).
+fn bare_head_name(kind: &ExprKind) -> Option<&str> {
+    match kind {
+        ExprKind::Ident(n) => Some(n),
+        ExprKind::TypeApply { name, .. } => Some(name),
+        ExprKind::Index { obj, .. } => match &obj.kind {
+            ExprKind::Ident(n) => Some(n),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// M24-5b — the `(module, type)` a dotted callee's head spells, peeling the same turbofish carrier
+/// (`module.Enum[T]` is an `Index` over the `Field`).
+fn qualified_head_names(kind: &ExprKind) -> Option<(&str, &str)> {
+    let field = match kind {
+        ExprKind::Index { obj, .. } => &obj.kind,
+        k => k,
+    };
+    match field {
+        ExprKind::Field { obj, name, .. } => match &obj.kind {
+            ExprKind::Ident(m) => Some((m, name)),
+            _ => None,
+        },
+        _ => None,
     }
 }
 

@@ -18435,31 +18435,55 @@ fn module_global_fn_value_call_runs_both_engines() {
     );
 }
 
-/// M24-5 — a receiver-less member call (a STATIC method, a variant constructor) may not be a
-/// `spawn`/`defer` target, and saying so must be a clean diagnostic. `Op::SpawnMethod`/`DeferMethod`
-/// record a RECEIVER value plus a name; these have no receiver, so the compiler tried to load the
-/// TYPE NAME as a value and panicked in `global_slot` ("global 'Holder' has no slot") on a program
-/// `chezzi check` had just called clean. Pre-existing and witness-INDEPENDENT (the plain
-/// `fn build(old: int)` below reproduced it on `main`); it only became reachable from the
-/// witness-taking spelling once M24-5 removed the checker's blanket refusal of a witness target.
-/// Every head spelling the panic could take: a bare struct, a generic-host turbofish, an enum
-/// static, and a variant constructor.
+/// M24-5b — a receiver-less member call (a STATIC method) IS an ordinary `spawn`/`defer` target.
+/// `Op::SpawnMethod`/`DeferMethod` record a RECEIVER value plus a name and a static has none, so the
+/// compiler used to load the TYPE NAME as a value and panic in `global_slot` ("global 'Holder' has
+/// no slot") on a program `chezzi check` had just called clean. The inconsistency was internal —
+/// `print(H.build(3))` and `defer print(H.build(3))` both worked while `defer H.build(3)` did not —
+/// and Go accepts its analogue (`defer pkg.F(x)`), so the fix is to make it WORK.
+///
+/// The spellings are re-derived from `Compiler::receiverless_call_head`, the one predicate that now
+/// decides this, NOT from the old refusal's list: a bare type name (`bare_types` — struct, enum, and
+/// a `from`-imported type, whose global slot EXISTS and holds `Nil`, so the old head test missed it
+/// and the run died late with "type nil has no method"), a type-level turbofish in both carriers, a
+/// combined `Type[T].m[U]` (an `Index` OVER the `Field`, which the old guard never even saw), and a
+/// generic `T` reached through its `$w:T` witness. The module-qualified heads are the test below.
 #[test]
-fn a_receiverless_member_is_not_a_spawn_or_defer_target_rejected() {
+fn a_static_method_head_is_a_spawn_or_defer_target_runs_both_engines() {
+    let holder = "struct Holder:\n    v: int\n    fn build(old: int) -> int:\n        print(old)\n        return old\n";
     let srcs = [
-        "struct Holder:\n    v: int\n    fn build(old: int) -> int:\n        return old\ndefer Holder.build(3)\n",
-        "struct Holder:\n    v: int\n    fn build(old: int) -> int:\n        return old\nparallel:\n    spawn Holder.build(3)\n",
-        "struct Gen[K]:\n    k: K\n    fn build(old: int) -> int:\n        return old\ndefer Gen[int].build(3)\n",
-        "enum E:\n    A\n    fn build(old: int) -> int:\n        return old\ndefer E.build(3)\n",
-        "enum E:\n    A(int)\n    B\ndefer E.A(3)\n",
+        // bare struct static
+        format!("{holder}fn body():\n    defer Holder.build(3)\n    print(\"body\")\nbody()\n"),
+        // bare enum static
+        "enum E:\n    A\n    fn build(old: int) -> int:\n        print(old)\n        return old\nfn body():\n    defer E.build(3)\n    print(\"body\")\nbody()\n".to_string(),
+        // type-level turbofish, single-arg (`Index`) and multi-arg (`TypeApply`) carriers
+        "struct Gen[K]:\n    k: K\n    fn build(old: int) -> int:\n        print(old)\n        return old\nfn body():\n    defer Gen[int].build(3)\n    print(\"body\")\nbody()\n".to_string(),
+        "struct Gen2[K, V]:\n    k: K\n    v: V\n    fn build(old: int) -> int:\n        print(old)\n        return old\nfn body():\n    defer Gen2[int, str].build(3)\n    print(\"body\")\nbody()\n".to_string(),
+        // combined turbofish — the method's own `[U]` wraps the `Field` in an `Index`
+        "struct Gen[K]:\n    k: K\n    fn build[U](old: int) -> int:\n        print(old)\n        return old\nfn body():\n    defer Gen[int].build[str](3)\n    print(\"body\")\nbody()\n".to_string(),
+        // a generic `T`'s static requirement, reached through the frame's hidden `$w:T` witness
+        "protocol Tagged:\n    fn tag(old: int) -> int\nstruct Holder:\n    v: int\n    fn tag(old: int) -> int:\n        print(old)\n        return old\nfn body[T: Tagged](x: T):\n    defer T.tag(3)\n    print(\"body\")\nbody(Holder(1))\n".to_string(),
     ];
-    for src in srcs {
-        let e = run_capture(src).unwrap_err().message;
-        assert!(
-            e.contains("has no receiver value") && e.contains("cannot be the target of"),
-            "expected the receiver-less-target diagnostic, got: {e}\nfor: {src}"
+    for src in &srcs {
+        // the frame's own work first, then the deferred/spawned static — Go's ordering
+        assert_eq!(
+            run_capture(src).unwrap(),
+            "body\n3\n",
+            "serial engine on: {src}"
+        );
+        assert_eq!(
+            run_capture_parallel(src).unwrap(),
+            "body\n3\n",
+            "M:N engine on: {src}"
         );
     }
+    // The SPAWNED twin. A task starts at its `spawn` (721b9f18, Go's `go f()`), so the two lines
+    // race on the M:N engine — compare the line multiset, never the exact order.
+    let spawned = format!(
+        "{holder}fn body():\n    parallel:\n        spawn Holder.build(3)\n    print(\"body\")\nbody()\n"
+    );
+    crate::vm::assert_same_lines(&run_capture(&spawned).unwrap(), "body\n3\n");
+    crate::vm::assert_same_lines(&run_capture_parallel(&spawned).unwrap(), "body\n3\n");
     // …and an INSTANCE method target is untouched.
     assert_eq!(
         run_capture(
@@ -18468,6 +18492,42 @@ fn a_receiverless_member_is_not_a_spawn_or_defer_target_rejected() {
         .unwrap(),
         "body\n3\n"
     );
+}
+
+/// M24-5b — the MODULE-reached static heads, which need real files: a `from`-imported type
+/// (`import Holder from lib` — its global slot exists and holds `Nil`, so this one used to fail LATE
+/// with `type nil has no method 'build'` rather than panicking), the qualified `lib.Holder.build(3)`
+/// (which used to fault with `module 'lib' has no member 'Holder'`), and the qualified turbofish.
+/// All three now emit exactly the `Op::CallStatic` their eager spelling emits.
+#[test]
+fn module_reached_static_heads_are_defer_targets_both_engines() {
+    let dir = std::env::temp_dir().join(format!("chezzi_vm_m245b_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("lib.chz"),
+        "struct Holder:\n    v: int\n    fn build(old: int) -> int:\n        print(old)\n        return old\nstruct Gen[K]:\n    k: K\n    fn build(old: int) -> int:\n        print(old)\n        return old\n",
+    )
+    .unwrap();
+    let entries = [
+        "import Holder from lib\nfn body():\n    defer Holder.build(3)\n    print(\"body\")\nbody()\n",
+        "import lib\nfn body():\n    defer lib.Holder.build(3)\n    print(\"body\")\nbody()\n",
+        "import lib\nfn body():\n    defer lib.Gen[int].build(3)\n    print(\"body\")\nbody()\n",
+    ];
+    for (i, src) in entries.iter().enumerate() {
+        let entry = dir.join(format!("main{i}.chz"));
+        std::fs::write(&entry, src).unwrap();
+        let (vm_out, _e, vm_res, _) = run_file(&entry);
+        let (par_out, _pe, par_res, _) =
+            run_file_parallel(&entry, crate::native::HostConfig::default());
+        assert!(vm_res.is_ok(), "serial faulted on {src}: {vm_res:?}");
+        assert!(par_res.is_ok(), "M:N faulted on {src}: {par_res:?}");
+        assert_eq!(vm_out, "body\n3\n", "serial output on: {src}");
+        assert_eq!(
+            vm_out, par_out,
+            "serial and M:N diverged on a module-reached static defer target: {src}"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// M24-5 — the CROSS-MODULE `defer` target. `defer lib.reset(c)` lowers as `Op::DeferMethod` on the

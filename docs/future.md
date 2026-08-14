@@ -1041,7 +1041,10 @@ State these when the questions recur; they are not oversights:
 **Never on that list — the `spawn f(...)` / `defer f(...)` STATEMENT TARGET was a DEFERRAL, and it is
 now FIXED** (2026-08-14, `docs/gaps.md` **M24-5**): the six emit lines push the hidden witness after
 the declared args and widen `Op::SpawnCall`/`SpawnMethod`/`DeferCall`/`DeferMethod`'s `argc`, which
-is all it ever needed — the VM was already argc-generic. It was arity plumbing, not erasure.
+is all it ever needed — the VM was already argc-generic. It was arity plumbing, not erasure. The
+receiver-less head found beside it (`defer Holder.build(3)`, which PANICKED the compiler) is fixed in
+the same row: a static method is an ordinary call, so every static spelling now lowers through a
+wrapper proto that replays it — still no new opcode, still no VM change.
 
 ### Not the same problem — do not fold it in
 

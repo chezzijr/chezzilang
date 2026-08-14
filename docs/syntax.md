@@ -1433,7 +1433,6 @@ fn make[T: Convert[int]](seed: T, n: int) -> T:
 | reading a witness-taking fn as a **function value** — `g := reset`, `reset[Counter]` as a value, passing it to a HOF, a cross-module read | a `fn` value erases which declaration it came from, so no witness can be recovered. **A permanent wall, not a v1 limit** | call it directly, or take a factory closure: `fn make[T](mk: fn() -> T) -> T` |
 | a `T` **not determined** at the call site | there is no concrete type to build a key from | pin it (`nodet[Counter]()`) or annotate the result |
 | a bound witnessed by a **newtype** or a **scalar** | neither can host a static method | use a struct or an enum |
-| a receiver-less member as a `spawn`/`defer` **statement target** — `defer Holder.build(3)`, `spawn Gen[int].build(3)`, `defer E.A(3)` (a static method or a variant constructor; witness-taking or not) | those emit sites record a **receiver value** plus a member name, and these have none | call it eagerly and `spawn`/`defer` the result, or wrap it in a closure / the block form. An INSTANCE method (`defer h.make(c)`) and a free or module-qualified fn (`defer reset(c)`, `defer lib.reset(c)`) are ordinary targets, witness or not |
 | a **manifest entrypoint** that takes a witness or any declared parameter (`entrypoint = "src.main:main"` where `fn main[T: Default]()` or `fn main(a: int)`) | it is invoked with no arguments, so nothing supplies the key (or the argument) | give the entrypoint a nullary, non-generic signature and construct / read inputs in a helper it calls. Reported by `chezzi check` and by bare `chezzi run`; an explicit `chezzi run <file>` is script mode and runs the top level regardless |
 
 The turbofish *call* form is fine — `reset[Counter](Counter(1))` works; it is only reading
@@ -2922,6 +2921,14 @@ closure, or a name bound to one). The four **universe builtin functions** `print
 bound and passed like any function (`f := ord; f("a")`, a HOF arg). **Type / container / runtime
 constructors** (`int`, `str`, `List`, `Map`, `Channel`, `range`, …) and user struct/enum constructors
 are **not** first-class values — wrap them: `fn log(m: str): print(m)` then `defer log("done")`.
+That constructor rule reaches the **dotted** spellings too: a variant constructor (`defer E.A(3)`,
+`defer E[int].A(3)`, `defer lib.Col.Val(3)`) and a module-qualified struct/newtype constructor
+(`defer lib.Pt(3)`) are rejected with the same message, since they only build a value and throw it
+away. A **static method** is *not* a constructor and *is* an ordinary target, in every spelling that
+works as a call — `defer Holder.build(3)`, `defer Gen[int].build(3)`, `defer T.default()` inside a
+generic, `defer lib.Holder.build(3)`, and a `from`-imported head. Arguments are evaluated **eagerly at
+the statement**, like every other `defer`/`spawn` argument (and like Go's `defer pkg.F(x)`), and
+`defer` keeps its LIFO order. Both spawn too.
 Note: the **value form of `print`** (a bound `p := print`) is a **fixed one-argument call** using the
 defaults **`sep=" "`, `end="\n"`** — the variadic multi/zero-arg shapes AND the `sep=`/`end=` named
 arguments stay **direct-call-only** (`print(a, b, sep=",")`), because they need the specialized print

@@ -2289,7 +2289,13 @@ impl Compiler {
                         span,
                     });
                 };
-                self.reject_receiverless_member_target(fc, callee, "spawn", call.span)?;
+                // M24-5b — `spawn Type.m(..)`: no receiver value to hold, so it rides the eager-args
+                // wrapper instead of `Op::SpawnMethod`.
+                if self.receiverless_call_head(fc, callee) {
+                    let n = self.compile_receiverless_target(fc, callee, args, named, call.span)?;
+                    fc.emit(Op::SpawnCall(n), call.span);
+                    return Ok(());
+                }
                 if let ExprKind::Field {
                     obj,
                     name,
@@ -4452,7 +4458,13 @@ impl Compiler {
                 span,
             });
         };
-        self.reject_receiverless_member_target(fc, callee, "defer", call.span)?;
+        // M24-5b — `defer Type.m(..)`: no receiver value to hold, so it rides the eager-args wrapper
+        // instead of `Op::DeferMethod`.
+        if self.receiverless_call_head(fc, callee) {
+            let n = self.compile_receiverless_target(fc, callee, args, named, call.span)?;
+            fc.emit(Op::DeferCall(n), call.span);
+            return Ok(());
+        }
         if let ExprKind::Field {
             obj,
             name,
@@ -4616,44 +4628,110 @@ impl Compiler {
         Ok(())
     }
 
-    /// M24-5 — `spawn Type.m(..)` / `defer Type.m(..)`: `Op::SpawnMethod`/`DeferMethod` record a
-    /// RECEIVER value plus a member name, and a STATIC method (or a variant constructor) has no
-    /// receiver. The head would be compiled as a VALUE, and a type name has no global slot — which
-    /// panicked in [`Self::global_slot`] on a program `chezzi check` called clean. Refuse it here
-    /// instead, in every head spelling: a bare struct/enum name, and a turbofish (`Gen[int].build`).
-    /// Witness-INDEPENDENT: `defer Holder.build(3)` on a plain `fn build(old: int)` panicked the
-    /// same way, so this is the root-cause guard, not a witness rule.
-    fn reject_receiverless_member_target(
-        &self,
-        fc: &FnComp,
+    /// M24-5b — does this `spawn`/`defer` call target have a TYPE, rather than a value, at its head?
+    /// `Op::SpawnMethod`/`DeferMethod` record a RECEIVER value plus a member name, and
+    /// `Type.static_method(..)` has no receiver: compiling the head as a value panicked in
+    /// [`Self::global_slot`] (a bare type name has no global slot) or — for a `from`-imported type,
+    /// whose slot exists and holds `Nil` — faulted with `type nil has no method`. Both are answered
+    /// by [`Self::compile_receiverless_target`] instead.
+    ///
+    /// The question asked is deliberately "does the head NAME A TYPE", not "which of
+    /// [`Self::compile_call`]'s receiverless arms matches" — one stable question rather than a second
+    /// copy of that arm list to drift out of sync with. A head that is a local/capture, a module, or
+    /// any other value never answers yes, so every receiver shape keeps its `SpawnMethod`/`DeferMethod`
+    /// lowering.
+    fn receiverless_call_head(&self, fc: &FnComp, callee: &Expr) -> bool {
+        // A member-side turbofish (`Type[T].member[U](x)`) wraps the `Field` in an `Index`.
+        let inner = match &callee.kind {
+            ExprKind::Index { obj, .. } => obj,
+            _ => callee,
+        };
+        let ExprKind::Field { obj, .. } = &inner.kind else {
+            return false;
+        };
+        // `module.Type` / `module.Type[T…]` — a type reached through a bound module name.
+        if self.qualified_turbofish_key(fc, &obj.kind).is_some() {
+            return true;
+        }
+        if let ExprKind::Field {
+            obj: mobj,
+            name: tname,
+            ..
+        } = &obj.kind
+            && let ExprKind::Ident(mname) = &mobj.kind
+            && fc.is_unbound(mname)
+            && let Some(&tidx) = self.imported_modules.get(mname)
+            && self
+                .module_types
+                .get(tidx)
+                .is_some_and(|t| t.contains(tname))
+        {
+            return true;
+        }
+        // A bare `Type` / `Type[T…]` (local, `from`-imported or std — exactly `bare_types`), or a
+        // generic type PARAM whose hidden `$w:T` witness is reachable here. `is_unbound` first, so a
+        // local/param/loop var that merely SHADOWS a type name stays an ordinary receiver.
+        let Some(head) = type_apply_head_name(&obj.kind).or(match &obj.kind {
+            ExprKind::Ident(n) => Some(n.as_str()),
+            _ => None,
+        }) else {
+            return false;
+        };
+        fc.is_unbound(head)
+            && (self.bare_types.contains_key(head) || fc.witness_ref(head).is_some())
+    }
+
+    /// M24-5b — lower a receiverless `defer Type.m(a, b)` / `spawn Type.m(a, b)`. The arguments are
+    /// evaluated EAGERLY here (Go semantics — `defer pkg.F(x)` snapshots `x`, and so does every other
+    /// Chezzi `defer`/`spawn` argument) and handed to a synthetic wrapper proto whose body REPLAYS the
+    /// original callee through [`Self::compile_call`] with the parameters standing in for the
+    /// arguments. So every static spelling — bare, type-level turbofish, `from`-imported,
+    /// module-qualified, combined turbofish, and the `$w:T` witness call — reaches exactly the
+    /// bytecode its eager form emits, and there is no second dispatch list to keep in sync.
+    ///
+    /// The wrapper is a `MakeClosure` rather than a `MakeFunc` only so it can reach the enclosing
+    /// frame's `$w:T` witnesses the way a `defer:` block does ([`with_witness_captures`]); nothing
+    /// else is captured, so a witness-free target is still a capture-free callee and crosses the
+    /// `spawn` airlock by handle. Returns the operand count for `DeferCall`/`SpawnCall`.
+    fn compile_receiverless_target(
+        &mut self,
+        fc: &mut FnComp,
         callee: &Expr,
-        kw: &str,
+        args: &[Expr],
+        named: &[(String, Expr)],
         span: Span,
-    ) -> Result<(), CompileError> {
-        let ExprKind::Field { obj, name, .. } = &callee.kind else {
-            return Ok(());
-        };
-        // Peel a member-side turbofish (`Gen[int].build(x)` puts an `Index` under the `Field`).
-        let mut head = &**obj;
-        while let ExprKind::Index { obj: inner, .. } = &head.kind {
-            head = inner;
+    ) -> Result<usize, CompileError> {
+        let argc = args.len() + named.len();
+        let snap = fc.snapshot_entries();
+        let entries = with_witness_captures(&snap, Vec::new());
+        let mut child = FnComp::new("<deferred static call>".to_string(), argc, false);
+        child.captured_names = entries.iter().map(|e| e.name.clone()).collect();
+        // One unspellable parameter per argument, in source order, so the replayed call reads them
+        // back as ordinary locals. `$` is not an identifier character (same trick as `$w:`).
+        let params: Vec<Expr> = (0..argc)
+            .map(|i| {
+                let n = format!("$a{i}");
+                child.add_local(n.clone());
+                Expr {
+                    kind: ExprKind::Ident(n),
+                    span,
+                }
+            })
+            .collect();
+        let kw: Vec<(String, Expr)> = named
+            .iter()
+            .map(|(k, _)| k.clone())
+            .zip(params[args.len()..].iter().cloned())
+            .collect();
+        self.compile_call(&mut child, callee, &params[..args.len()], &kw, span)?;
+        child.emit(Op::Return, span);
+        let pid = self.finish(child);
+        fc.emit(Op::MakeClosure(pid, entries), span);
+        self.compile_args(fc, args)?;
+        for (_, e) in named {
+            self.compile_expr(fc, e)?;
         }
-        // A head that names neither a local/capture nor a module global is not a value at all — it
-        // is a TYPE (module binds, imports and top-level fns/lets are all globals, so a genuine
-        // receiver never lands here).
-        let ExprKind::Ident(h) = &head.kind else {
-            return Ok(());
-        };
-        if !fc.is_unbound(h) || self.globals.contains_key(h) {
-            return Ok(());
-        }
-        Err(CompileError {
-            message: format!(
-                "'{h}.{name}' has no receiver value, so it cannot be the target of `{kw}` yet — \
-                 call it eagerly and `{kw}` the result, or wrap the call in a closure"
-            ),
-            span,
-        })
+        Ok(argc)
     }
 
     /// M24-5 — the hidden witness arguments a `spawn`/`defer` VALUE-callee target must push on top

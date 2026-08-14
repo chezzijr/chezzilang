@@ -14,6 +14,8 @@
 # (`// ===== M24` section), not here: they never reach a runtime.
 # Serial==M:N is guarded by `test_runner::chz_suite_passes_both_engines`.
 
+import std.concurrency
+
 protocol Default:
     fn default() -> Self
 
@@ -936,3 +938,110 @@ test fn a_witness_call_inside_a_nested_interpolation_keeps_its_key():
 test fn a_keyword_call_inside_a_nested_interpolation_keeps_its_key():
     # the KeywordTable twin of the case above — it keys off the same fragment context
     assert "{ \"{greet(1, b=2)}\" }" == "1-2"
+
+# ---- M24-5b: a STATIC-METHOD head is an ordinary `defer` / `spawn` statement target ----
+#
+# `print(H.build(3))` worked, `defer print(H.build(4))` worked, `defer H.build(4)` did not — it
+# panicked the compiler ("global 'H' has no slot"), because `Op::DeferMethod` holds a RECEIVER value
+# and a type name is not one. That inconsistency is internal to Chezzi, and Go agrees with the side
+# that works (`defer pkg.F(x)`, `defer Holder.Make(h, 2)` — both measured, go1.26.5). It now lowers
+# through a wrapper proto that replays the call, so every static spelling reaches the same bytecode
+# its eager form emits. A CONSTRUCTOR head (`defer Col.Red`-style variant ctors) stays rejected, by
+# the CHECKER, with the message the bare `defer P(3)` rule already uses — `src/checker/tests.rs`.
+
+struct Bumper:
+    n: int
+    fn bump(box: Shared[int], by: int) -> int:
+        box.update(fn(v: int) -> int: v + by)
+        return by
+
+struct Gbump[T]:
+    n: int
+    fn bump(box: Shared[int], by: int) -> int:
+        box.update(fn(v: int) -> int: v * by)
+        return by
+
+fn deferred_static(box: Shared[int]):
+    defer Bumper.bump(box, 3)
+    box.set(1)
+
+test fn a_static_method_head_is_a_defer_target():
+    box := Shared(0)
+    deferred_static(box)
+    # the deferred static ran at frame exit, on the box the enclosing fn had set to 1
+    assert box.get() == 4
+
+fn deferred_static_lifo(box: Shared[int]):
+    # LIFO, like every other `defer`: the SECOND registration runs FIRST, so 0 -> *10 -> +3
+    defer Bumper.bump(box, 3)
+    defer Gbump[str].bump(box, 10)
+    box.set(2)
+
+test fn defer_of_a_static_head_keeps_lifo_order_and_reaches_a_turbofish_head():
+    box := Shared(0)
+    deferred_static_lifo(box)
+    assert box.get() == 23
+
+fn deferred_static_snapshots_args(box: Shared[int]) -> int:
+    n := 1
+    defer Bumper.bump(box, n)
+    n = 99
+    return n
+
+test fn a_deferred_static_head_snapshots_its_arguments_eagerly():
+    box := Shared(0)
+    # the argument was evaluated AT the `defer` (Go semantics), so the later `n = 99` is not seen
+    assert deferred_static_snapshots_args(box) == 99
+    assert box.get() == 1
+
+test fn a_static_method_head_is_a_spawn_target():
+    box := Shared(0)
+    parallel:
+        spawn Bumper.bump(box, 5)
+        spawn Gbump[int].bump(box, 1)
+    # both spawned statics ran and were joined by the nursery; *1 and +5 commute
+    assert box.get() == 5
+
+fn spawned_static_snapshots_args(box: Shared[int]) -> int:
+    n := 7
+    parallel:
+        spawn Bumper.bump(box, n)
+        n = 99
+    return n
+
+test fn a_spawned_static_head_snapshots_its_arguments_eagerly():
+    box := Shared(0)
+    assert spawned_static_snapshots_args(box) == 99
+    assert box.get() == 7
+
+# …and the CONSTRUCTED value the deferred static returns is the real one: a generic static reached
+# through a type-level turbofish still builds its own type.
+
+struct Boxed[T]:
+    v: int
+    fn make(o: int) -> Boxed[T]:
+        return Boxed[T](o)
+
+fn deferred_ctor_witness(box: Shared[int]):
+    defer box.set(Boxed[str].make(9).v)
+
+test fn a_deferred_turbofish_static_constructs_its_own_type():
+    box := Shared(0)
+    deferred_ctor_witness(box)
+    assert box.get() == 9
+    assert Boxed[int].make(4).v == 4
+
+# The WITNESS head — `T.default()` inside a generic fn — is the same statement target, reached
+# through the enclosing frame's hidden `$w:T` (captured into the wrapper exactly as a `defer:` block
+# captures it). Two concrete types, so a wrong witness cannot pass by coincidence.
+
+fn deferred_witness_static[T: Default](x: T, box: Shared[str]):
+    defer box.set("{T.default()}")
+    box.set("body")
+
+test fn a_witness_static_head_is_a_defer_target():
+    box := Shared("")
+    deferred_witness_static(Counter(1), box)
+    assert box.get() == "Counter(n=0)"
+    deferred_witness_static(Tag("hi"), box)
+    assert box.get() == "Tag(s='none')"

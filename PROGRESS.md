@@ -1514,9 +1514,16 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > the declared (or keyword-permuted) args and widen `Op::SpawnCall`/`SpawnMethod`/`DeferCall`/
 > `DeferMethod`'s `argc` — the VM needed nothing (`do_defer`/`do_spawn` are argc-generic and a
 > witness is a sendable `str`). Go accepts the same program (`defer reset(c, "defer")` + `go
-> reset(c, "go")`, measured 2026-08-14) and Chezzi's ordering matches. Its sibling **M24-5b**
-> (found while fixing it) is fixed too: a receiver-less target (`defer Holder.build(3)`, a variant
-> ctor) used to PANIC the compiler on a check-clean program and now says so cleanly.
+> reset(c, "go")`, measured 2026-08-14) and Chezzi's ordering matches. The sibling defect found while
+> fixing it (briefly filed as M24-5b, now folded into the M24-5 row) is fixed too, and fixed by
+> making it WORK rather than by refusing it: a RECEIVER-LESS head — `defer Holder.build(3)`,
+> `spawn Gen[int].build(3)` — used to PANIC the compiler on a check-clean program, because
+> `Op::SpawnMethod`/`DeferMethod` hold a receiver value and a static method has none. A static method
+> is an ordinary call (Chezzi already ran `defer print(H.build(3))`, and Go accepts
+> `defer pkg.F(x)`), so every static spelling now lowers through a wrapper proto that replays the
+> call via `compile_call` — eager args, LIFO `defer`, no new opcode, no VM change. A CONSTRUCTOR head
+> (`defer E.A(3)`, `defer lib.Pt(3)`) is rejected by the **checker**, with the message and phase the
+> bare `defer P(3)` rule already used.
 >
 > **Round 4 (2026-08-10) — three hunters, eight findings, four root causes, all fixed at the root.**
 > (A) the fragment column above — the third patch of that family had turned a loud fault into a

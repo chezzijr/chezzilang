@@ -24346,9 +24346,10 @@ fn witness_member_as_value_rejected() {
 /// M24-5 — `spawn`/`defer` lower a member call at `Op::SpawnMethod`/`DeferMethod`, which now push
 /// the hidden witness on top of the declared args, so a witness-taking INSTANCE method is an
 /// ordinary target. An ARGUMENT that is itself a witness call stays legal: it is evaluated eagerly
-/// in this frame. (A STATIC-method target — `Holder.build(c)` — is refused for an unrelated,
-/// witness-independent reason: those two emit sites record a RECEIVER value and a static method has
-/// none. See `vm::tests::a_receiverless_member_is_not_a_spawn_or_defer_target_rejected`.)
+/// in this frame. (A STATIC-method target — `Holder.build(c)` — is an ordinary target too, by an
+/// unrelated, witness-independent route: those two emit sites record a RECEIVER value and a static
+/// method has none, so M24-5b lowers it through a wrapper proto instead. See
+/// `vm::tests::a_static_method_head_is_a_spawn_or_defer_target_runs_both_engines`.)
 #[test]
 fn witness_member_is_a_spawn_or_defer_target_ok() {
     let head = "protocol Default:\n    fn default() -> Self\nstruct Counter:\n    n: int\n    fn default() -> Counter:\n        return Counter(0)\nstruct Holder:\n    k: int\n    fn make[T: Default](self, old: T) -> T:\n        return T.default()\n    fn build[T: Default](old: T) -> T:\n        return T.default()\nfn sink(c: Counter) -> int:\n    return c.n\n";
@@ -25261,4 +25262,70 @@ fn chained_opt_chain_links_get_distinct_carrier_keys() {
         carrier_key(0, ctx, 0, *inner_name),
         "chained `?.` links must not alias onto one CarrierKey"
     );
+}
+
+// ===== M24-5b — a receiver-less `defer`/`spawn` head. A STATIC METHOD is an ordinary target (Go
+// accepts `defer pkg.F(x)`, and Chezzi already accepted `defer print(H.build(3))`); a CONSTRUCTOR is
+// not. Both halves of that split are decided HERE, in the checker: the refusal used to live in the
+// compiler, so `chezzi check` printed "ok: no type errors" on a program `chezzi run` then refused —
+// this project's named checker-superset-of-compiler class, which the editor/LSP shows green on.
+
+/// A dotted CONSTRUCTOR head — a variant ctor in either turbofish carrier, and a module-qualified
+/// struct/newtype/variant ctor — earns the message the bare `defer P(3)` rule already uses, because
+/// it IS that rule: the call builds a value and throws it away.
+#[test]
+fn a_dotted_constructor_is_not_a_spawn_or_defer_target_rejected() {
+    const NEEDLE: &str = "constructors must be wrapped in a function";
+    let e = "enum E:\n    A(int)\n    B\n";
+    let g = "enum G[T]:\n    A(int)\n    B\n";
+    rejects(&format!("{e}defer E.A(3)\n"), NEEDLE);
+    rejects(&format!("{e}parallel:\n    spawn E.A(3)\n"), NEEDLE);
+    rejects(&format!("{g}defer G[int].A(3)\n"), NEEDLE);
+    rejects(&format!("{g}parallel:\n    spawn G[int].A(3)\n"), NEEDLE);
+    // …and the same three constructor kinds reached through a bound MODULE name.
+    let lib = (
+        "lib.chz",
+        "enum Col:\n    Val(int)\n    Red\nenum GCol[T]:\n    Val(int)\n    Red\nstruct Pt:\n    x: int\nnewtype Meters = int\n",
+    );
+    for target in [
+        "lib.Col.Val(3)",
+        "lib.GCol[int].Val(3)",
+        "lib.Pt(3)",
+        "lib.Meters(3)",
+    ] {
+        files_reject(
+            &[lib, ("main.chz", &format!("import lib\ndefer {target}\n"))],
+            NEEDLE,
+        );
+    }
+}
+
+/// …and the neighbours the same rule must NOT touch — derived from its premise ("the call CONSTRUCTS
+/// and discards"), not from the rejected list: a STATIC METHOD in every head spelling still builds a
+/// value too, and is still an ordinary call. A `from`-imported head is here because its global slot
+/// EXISTS (holding `Nil`), which is exactly what let it slip past the compiler's old head test and
+/// fault late with "type nil has no method".
+#[test]
+fn a_dotted_static_method_is_a_spawn_or_defer_target_ok() {
+    let h = "struct Holder:\n    v: int\n    fn build(old: int) -> int:\n        return old\n";
+    let g = "struct Gen[K]:\n    k: K\n    fn build(old: int) -> int:\n        return old\n";
+    ok(&format!("{h}defer Holder.build(3)\n"));
+    ok(&format!("{h}parallel:\n    spawn Holder.build(3)\n"));
+    ok(&format!("{g}defer Gen[int].build(3)\n"));
+    ok(&format!("{g}parallel:\n    spawn Gen[int].build(3)\n"));
+    // an enum STATIC (not a variant) keeps the accepting side of the same enum head
+    ok(
+        "enum E:\n    A(int)\n    B\n    fn build(old: int) -> int:\n        return old\ndefer E.build(3)\n",
+    );
+    let lib = (
+        "lib.chz",
+        "struct Holder:\n    v: int\n    fn build(old: int) -> int:\n        return old\nstruct Gen[K]:\n    k: K\n    fn build(old: int) -> int:\n        return old\n",
+    );
+    for main in [
+        "import Holder from lib\ndefer Holder.build(3)\n",
+        "import lib\ndefer lib.Holder.build(3)\n",
+        "import lib\ndefer lib.Gen[int].build(3)\n",
+    ] {
+        files_ok(&[lib, ("main.chz", main)]);
+    }
 }
