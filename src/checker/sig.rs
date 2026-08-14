@@ -906,32 +906,24 @@ impl Checker {
     /// cross-module call sites and its `spawn`/`defer` target position — all legal before M24. A
     /// witness parameter is arity, so it must be paid for only where it is used.
     ///
-    /// The body scan is deliberately COARSE (any mention of the bare name `T` in expression position,
-    /// not just `T.m(...)`; any mention of a witness-taking fn's name, not just a call forwarding
-    /// `T` into it): over-inclusion can only cost a fn positions it would lose anyway, while
-    /// under-inclusion would mean a body whose `T.static()` or forward cannot lower.
+    /// The DIRECT half (`T` mentioned anywhere in expression position) stays coarse: over-inclusion
+    /// can only cost a fn positions it would lose anyway, while under-inclusion would mean a body
+    /// whose `T.static()` cannot lower.
     ///
-    /// The FORWARDING half is fenced by three conditions, because over-charging there does more than
-    /// cost a position — a charged param that no call site can determine makes the fn UNCALLABLE
-    /// ("type parameter 'T' … is not determined here"), which would break programs that compile
-    /// today:
-    /// * the witness-taking name must not be SHADOWED by one of this fn's own params
-    ///   (`fn label[T: Spawnable](x: T, reset: int)` calls the param, never the module's `reset`),
-    ///   which is why the free-name walk subtracts the parameter names;
+    /// The FORWARDING half is asked PER CALL SITE ([`Self::call_forwards_a_witness`]), not over the
+    /// body's name set, because over-charging there does more than cost a position — a charged param
+    /// that no call site can determine makes the fn UNCALLABLE ("type parameter 'T' … is not
+    /// determined here"). A name is not a call (naming `lib` while some member is spelled `reset`
+    /// never was `lib.reset(x)`), and a call is not necessarily a forward (a call whose every
+    /// argument is a concrete constructor takes nothing of THIS fn's `T`). On top of the per-call
+    /// answer two whole-fn fences remain:
+    /// * the callee name must not be SHADOWED by one of this fn's own params
+    ///   (`fn label[T: Spawnable](x: T, reset: int)` calls the param, never the module's `reset`) —
+    ///   the free-name walk subtracts the parameter names, so no [`crate::compiler::CallSite`] is
+    ///   recorded for it; and
     /// * the param must actually OCCUR in this fn's own signature ([`Self::ty_param_in_sig`]). A
     ///   param that appears in neither a parameter type nor the return type can never be bound to
-    ///   anything at a call site, so it can never be the thing forwarded; and
-    /// * a MODULE-QUALIFIED forwarding target needs BOTH halves of its spelling to appear — the
-    ///   module bind as a free name AND the callee as a `Field` member name
-    ///   ([`crate::compiler::FreeNames::members`]). Merely naming a module that exports SOME
-    ///   witness-taking fn is not a forward, and charging for it poisoned every static-bounded
-    ///   generic in any file that imported such a module (`Convert[S]` is reserved, so that reached
-    ///   code which never asked for M24).
-    ///
-    /// What survives is one real over-charge: a generic with a static-carrying bound whose body calls
-    /// a witness-taking fn with only CONCRETE types is charged a hidden param it never uses, so it
-    /// loses value/`spawn`/cross-module position. It stays CALLABLE (the param is still inferred from
-    /// its arguments); the fix is to move the concrete call into a non-generic helper.
+    ///   anything at a call site, so it can never be the thing forwarded.
     ///
     /// Because forwarding is transitive (`a` forwards into `b` which constructs), this answer depends
     /// on OTHER fns' answers, and a fn is hoisted before its callees. [`Checker::hoist`] therefore
@@ -985,33 +977,83 @@ impl Checker {
         // can do (it runs long after this), so every static-bounded param THAT THIS SIGNATURE CAN
         // BIND is charged. A charge that turns out unused is inert arity; a MISSING one would be a
         // call the checker accepts and the compiler cannot lower.
-        // A name is a forwarding target either as a FN this module can call bare (declared here or
-        // `from`-imported — one table), or as a member of a bound MODULE (`lib.reset(x)`), which
-        // needs BOTH halves of the spelling: the module bind is a free NAME, the callee is the
-        // `Field`'s MEMBER name. Requiring both is what keeps merely NAMING a module from charging
-        // every static-bounded generic in the file — a module exports many fns and only some take
-        // witnesses, so `lib.name(1)` inside `fn label[T: Spawnable]` must cost nothing. Each half
-        // stays name-only (a mention, not a proven call), the same trade as the bare half:
-        // over-inclusion costs positions, under-inclusion is a forward the checker then REFUSES
-        // (`witness_scope` has no `$w:T` to load), never one that lowers wrong.
-        let forwards = mentioned.iter().any(|n| {
-            self.functions
-                .get(n)
-                .is_some_and(|s| !s.witness_params.is_empty())
-                || self
-                    .imported_modules
-                    .get(n)
-                    .and_then(|id| self.module_sigs.get(id))
-                    .is_some_and(|s| {
-                        s.functions.iter().any(|(fname, f)| {
-                            !f.witness_params.is_empty() && walk.members.contains(fname)
-                        })
-                    })
-        });
+        // The question is asked PER CALL SITE ([`crate::compiler::CallSite`]), never over the body's
+        // name set: a name is not a call, and a call is not necessarily a forward.
+        let forwards = walk
+            .calls
+            .iter()
+            .any(|c| self.call_forwards_a_witness(c, decl));
         cands
             .into_iter()
             .filter(|t| mentioned.contains(t) || (forwards && Self::ty_param_in_sig(decl, t)))
             .collect()
+    }
+
+    /// M24 — does this ONE call site inside `decl`'s body forward a witness of `decl`'s own?
+    ///
+    /// Two independent questions, both of which must answer yes:
+    /// * **does the callee take witnesses at all?** A bare `f(…)` resolves through `self.functions`
+    ///   (this module's fns and its `from`-imports — one table, so `import reset as again from m` is
+    ///   covered); a qualified `m.f(…)` resolves the module bind, then looks up *that exact function
+    ///   name* in its `ModuleSig`. The PAIR, never two independent halves: a module exports many fns
+    ///   and only some take witnesses, so naming `lib` in a body that also happens to spell some
+    ///   member `reset` is not a call to `lib.reset`.
+    /// * **could this fn's own type param be what is forwarded?** Only if the call does NOT pin the
+    ///   callee's witnesses itself. It pins them when every argument is provably closed
+    ///   ([`crate::compiler::CallSite::closed_arg_heads`]) with every constructor head naming a
+    ///   NON-GENERIC struct in scope — so the argument types cannot mention a type parameter — AND
+    ///   every witness the callee takes occurs in the callee's PARAMETER types, so the arguments
+    ///   really do determine them. A witness that occurs only in the callee's RETURN type is
+    ///   inferred from the expected type at this call site, which is this fn's own `T`
+    ///   (`fn conv[T: Default, U](a: U) -> T` called as `conv(1)`), so that is a forward however
+    ///   concrete the arguments look.
+    ///
+    /// Everything the walk could not positively identify — an unrecognised argument shape, a head
+    /// that is not a known non-generic struct, an unknown callee — answers "forwards", because an
+    /// under-charge is a forward the checker then REFUSES (`witness_scope` has no `$w:T` to load)
+    /// or, worse, one the compiler cannot lower, while an over-charge only costs positions.
+    fn call_forwards_a_witness(&self, c: &crate::compiler::CallSite, decl: &FnDecl) -> bool {
+        let sig = match &c.module {
+            None => self.functions.get(&c.name),
+            Some(m) => self
+                .imported_modules
+                .get(m)
+                .and_then(|id| self.module_sigs.get(id))
+                .and_then(|s| s.functions.get(&c.name)),
+        };
+        let Some(sig) = sig.filter(|s| !s.witness_params.is_empty()) else {
+            return false;
+        };
+        let args_pin_the_witnesses = c
+            .closed_arg_heads
+            .as_ref()
+            .is_some_and(|heads| heads.iter().all(|h| self.concrete_ctor_head(h, decl)))
+            && sig
+                .witness_params
+                .iter()
+                .all(|w| Self::ty_param_in_params(sig, w));
+        !args_pin_the_witnesses
+    }
+
+    /// M24 — does the call-argument constructor head `head` name a NON-GENERIC struct visible here?
+    /// Then `head(…)`'s type is fixed by the declaration alone and cannot mention any type parameter.
+    /// Anything else is `false` (charge): one of `decl`'s own type params, a plain function whose
+    /// return type this syntactic walk cannot see, a generic struct (its args could be `T`), a
+    /// newtype, or a name this module does not know. An ENUM never reaches here — a variant is
+    /// spelled `Enum.Variant(…)`, whose callee is a field, not an ident head.
+    fn concrete_ctor_head(&self, head: &str, decl: &FnDecl) -> bool {
+        !decl.type_params.iter().any(|tp| tp.name == head)
+            && self.struct_names.contains(head)
+            && self
+                .struct_shape(&self.bare_key(head))
+                .is_some_and(|info| info.type_params.is_empty())
+    }
+
+    /// M24 — does type param `w` occur in `sig`'s PARAMETER types (the return type does not count)?
+    /// Reuses [`subst`] as the occurs-check: replacing `w` changes the type iff `w` was in it.
+    fn ty_param_in_params(sig: &FnSig, w: &str) -> bool {
+        let probe: HashMap<String, Ty> = [(w.to_string(), Ty::Unknown)].into_iter().collect();
+        sig.params.iter().any(|p| subst(p, &probe) != *p)
     }
 
     /// M24 — does type param `t` occur in `decl`'s own signature (any parameter's annotation or the

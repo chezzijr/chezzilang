@@ -1045,3 +1045,25 @@ test fn a_witness_static_head_is_a_defer_target():
     assert box.get() == "Counter(n=0)"
     deferred_witness_static(Tag("hi"), box)
     assert box.get() == "Tag(s='none')"
+
+# ---- M24-1: a forward whose arguments are ALL concrete forwards nothing ----
+#
+# `concrete_only` calls the witness-taking `reset`, but with a `Counter` it builds itself: none of
+# its own `T` flows in, so it is charged no hidden parameter and keeps the function-VALUE position
+# an ordinary generic has. The checker half is `src/checker/tests.rs`
+# (`witness_forwarding_with_only_concrete_arguments_does_not_charge_ok`); this is the half that
+# proves the COMPILED proto's arity agrees — a value call pushes no witness, so a fn still compiled
+# with one would read a shifted argument or fault.
+
+fn concrete_only[T: Default](x: T) -> int:
+    return reset(Counter(1)).n + 100
+
+fn apply_counter(f: fn(Counter) -> int, x: Counter) -> int:
+    return f(x)
+
+test fn a_forward_with_only_concrete_arguments_stays_a_function_value():
+    assert concrete_only(Counter(3)) == 100
+    assert concrete_only(Tag("hi")) == 100
+    g := concrete_only[Counter]
+    assert g(Counter(3)) == 100
+    assert apply_counter(concrete_only, Counter(4)) == 100

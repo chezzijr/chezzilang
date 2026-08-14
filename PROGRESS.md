@@ -1499,11 +1499,18 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > new number in `docs/benchmarks.md` — the opcode is on a cold path and the charge is off unless a
 > body uses it.
 >
-> **Residuals, filed honestly** as `docs/gaps.md` **M24-1..M24-5**: witness **over-charge** (a body
-> that calls a witness-taking fn with only concrete types, or names a struct method matching an
-> imported witness-taking fn, is charged one it never uses — an over-*rejection* only, never a
-> mis-lowering; every syntactic narrowing tried under-charges some shape, which is the unsafe
-> direction) and **unused captures** (one `str` per witness per nested body). **M24-3 and M24-4 are
+> **Residuals, filed honestly** as `docs/gaps.md` **M24-1..M24-5**: witness **over-charge** and
+> **unused captures** (one `str` per witness per nested body). **M24-1 is now FIXED** (2026-08-14):
+> the forwarding charge was two name-only questions over the whole body, and it is now one question
+> per CALL SITE. A body calling a witness-taking fn with only concrete arguments
+> (`return reset(Counter(1)).n`) keeps its fn-VALUE position, and a struct method that merely shares
+> a name with an imported witness-taking fn (`h.reset()` beside `lib.reset`) charges nothing — that
+> file now runs and prints `42`, where the isolation control (delete ` + lib.plain(1)`) already
+> printed `40`. The narrowing is fenced on the safe side: a call only counts as concrete when every
+> argument is a literal or a **non-generic** struct constructor **and** every witness the callee takes
+> occurs in its PARAMETER types — `fn conv[T: Default, U](a: U) -> T` called as `conv(1)` takes its
+> `T` from the caller's expected type (measured: it runs), so it still charges, as does every shape
+> the syntactic walk cannot positively read. **M24-3 and M24-4 are
 > now FIXED** (2026-08-10): a type parameter **shadows** a same-named type — Rust prints `1` for
 > `fn f<Item: D>(_x: Item) -> i32 { Item::tag() }` with `f(Counter)` and so does Chezzi, where it
 > used to print `7`; aligning both halves on the struct was agreement bought at correctness's

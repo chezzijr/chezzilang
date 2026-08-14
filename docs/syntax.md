@@ -1438,11 +1438,14 @@ fn make[T: Convert[int]](seed: T, n: int) -> T:
 The turbofish *call* form is fine — `reset[Counter](Counter(1))` works; it is only reading
 `reset[Counter]` as a **value** that hits the wall.
 
-One known rough edge, filed as `docs/gaps.md` **M24-1**: the hidden parameter is charged by a coarse
-body scan, so a generic that calls a witness-taking fn with only *concrete* types — or names a struct
-method sharing a name with an imported witness-taking fn — can be charged one it never uses, which
-costs it the fn-VALUE position (an over-*rejection*, never a wrong answer; move the
-concrete call into a non-generic helper).
+**When the hidden parameter is charged.** Only a body that can actually use one pays: it names `T`
+in expression position (`T.default()`), or it *forwards* — it calls a witness-taking fn in a way that
+could pass its own still-abstract `T` along. A call whose arguments are all concrete forwards nothing
+(`fn concrete[T: Default](x: T) -> int: return reset(Counter(1)).n` keeps its value position), and
+merely naming a module that exports a witness-taking fn is not a call to it (`lib.plain(1)` costs
+nothing, `lib.reset(x)` charges). Anything the rule cannot positively read as concrete charges —
+a zero-argument call, a local, a turbofish naming `T`, a generic constructor head — because an
+under-charge is a forward the checker then has to refuse.
 
 A type parameter **SHADOWS a same-named declaration for its whole body, in every position** — the
 annotation `x: Item`, the static call `Item.tag()`, the type-level turbofish `Item[int].tag()`, the

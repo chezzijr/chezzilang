@@ -6178,15 +6178,110 @@ fn filter_entries_free_block(
 }
 
 /// What a free-variable walk collects. `names` is the free-variable answer every capture consumer
-/// wants. `members` is the MEMBER name of every `obj.member` seen on the way — the walk otherwise
-/// drops it (the `Field` arm recurses into `obj` only, so `lib.mk(x)` yields just `lib`). M24's
-/// forwarding charge needs it to tell a real qualified forward (`lib.mk(x)`) from merely naming a
-/// module that happens to export a witness-taking fn; nothing else reads it, and no member name is
-/// ever a free VARIABLE, so the two sets never mix.
+/// wants. `calls` is the walk's second channel: the CALL STRUCTURE of every bare (`f(…)`) or
+/// module-qualified (`m.f(…)`) call it passed, which M24's witness-forwarding charge asks
+/// per-call-site (`Checker::witness_params_of`). A name alone cannot answer that question — naming
+/// `lib` and having *some* member spelled `reset` is not a call to `lib.reset`, and a call whose
+/// arguments are all concrete forwards nothing of the caller's own type param.
 #[derive(Default)]
 pub(crate) struct FreeNames {
     pub names: HashSet<String>,
-    pub members: HashSet<String>,
+    pub calls: Vec<CallSite>,
+}
+
+/// One call the free-name walk passed, recorded only when the callee is a plain name or a
+/// `module.name` pair (every other callee shape — a method receiver, an indexed value, a closure
+/// result — records nothing and is invisible to the readers of this channel).
+pub(crate) struct CallSite {
+    /// `Some(m)` for `m.f(…)`, `None` for a bare `f(…)`.
+    pub module: Option<String>,
+    /// The callee name `f`.
+    pub name: String,
+    /// `Some(heads)` when EVERY argument (positional and named) is provably closed — a literal, or
+    /// an ident-headed call whose own arguments are all closed — and `heads` lists those ident
+    /// heads, so a reader can ask what each one names. `None` means "not provably closed", which is
+    /// the DEFAULT for every shape not listed in [`closed_expr`]: an EMPTY argument list (a
+    /// zero-arg generic call takes its type from the expected type, invisible here), an explicit
+    /// turbofish (`f[T](1)` names the caller's own type param), an identifier, a field read, an
+    /// operator — anything whose type this syntactic walk cannot pin.
+    pub closed_arg_heads: Option<Vec<String>>,
+}
+
+/// Record `f(…)` / `m.f(…)` on `out`. A callee that is neither a free name nor a free name's field
+/// is not recorded at all.
+fn record_call_site(
+    callee: &Expr,
+    args: &[Expr],
+    named: &[(String, Expr)],
+    type_args: &[crate::ast::Type],
+    bound: &HashSet<String>,
+    out: &mut FreeNames,
+) {
+    let (module, name) = match &callee.kind {
+        ExprKind::Ident(n) if !bound.contains(n) => (None, n.clone()),
+        ExprKind::Field { obj, name, .. } => match &obj.kind {
+            ExprKind::Ident(m) if !bound.contains(m) => (Some(m.clone()), name.clone()),
+            _ => return,
+        },
+        _ => return,
+    };
+    out.calls.push(CallSite {
+        module,
+        name,
+        closed_arg_heads: closed_arg_heads(args, named, type_args, bound),
+    });
+}
+
+/// `Some(heads)` iff every argument is provably closed (see [`CallSite::closed_arg_heads`]).
+fn closed_arg_heads(
+    args: &[Expr],
+    named: &[(String, Expr)],
+    type_args: &[crate::ast::Type],
+    bound: &HashSet<String>,
+) -> Option<Vec<String>> {
+    if !type_args.is_empty() || (args.is_empty() && named.is_empty()) {
+        return None;
+    }
+    let mut heads = Vec::new();
+    for a in args.iter().chain(named.iter().map(|(_, v)| v)) {
+        if !closed_expr(a, bound, &mut heads) {
+            return None;
+        }
+    }
+    Some(heads)
+}
+
+/// Is `e`'s type fixed by its own syntax, independent of any enclosing type parameter? Literals are
+/// (`"a{x}"` is `str` whatever `x` is — and a call INSIDE the interpolation is its own [`CallSite`],
+/// judged separately), and so is an ident-headed call whose arguments are all closed — its head is
+/// pushed onto `heads` for the reader to identify. A head SHADOWED by a binding in scope is not the
+/// declaration the reader would look up, so it is not closed. Everything else defaults to NOT closed.
+fn closed_expr(e: &Expr, bound: &HashSet<String>, heads: &mut Vec<String>) -> bool {
+    match &e.kind {
+        ExprKind::Int(_)
+        | ExprKind::Float(_)
+        | ExprKind::Bool(_)
+        | ExprKind::Str(_)
+        | ExprKind::RawStr(_)
+        | ExprKind::Interp(_)
+        | ExprKind::Bytes(_) => true,
+        ExprKind::Ident(n) => n == "nil" && !bound.contains(n),
+        ExprKind::Call {
+            callee,
+            args,
+            named,
+            type_args,
+        } => match &callee.kind {
+            ExprKind::Ident(n) if type_args.is_empty() && !bound.contains(n) => {
+                heads.push(n.clone());
+                args.iter()
+                    .chain(named.iter().map(|(_, v)| v))
+                    .all(|a| closed_expr(a, bound, heads))
+            }
+            _ => false,
+        },
+        _ => false,
+    }
 }
 
 /// [`free_names_block`] for callers that want only the free-variable set.
@@ -6366,22 +6461,19 @@ pub(crate) fn free_names_expr(e: &Expr, bound: &HashSet<String>, out: &mut FreeN
             callee,
             args,
             named,
-            ..
+            type_args,
         } => {
+            record_call_site(callee, args, named, type_args, bound, out);
             free_names_expr(callee, bound, out);
             args.iter().for_each(|a| free_names_expr(a, bound, out));
             named
                 .iter()
                 .for_each(|(_, v)| free_names_expr(v, bound, out));
         }
-        ExprKind::Field { obj, name, .. } => {
-            out.members.insert(name.clone());
+        ExprKind::Field { obj, .. } => {
             free_names_expr(obj, bound, out);
         }
-        ExprKind::OptChain {
-            obj, call, name, ..
-        } => {
-            out.members.insert(name.clone());
+        ExprKind::OptChain { obj, call, .. } => {
             free_names_expr(obj, bound, out);
             if let Some(c) = call {
                 c.args.iter().for_each(|a| free_names_expr(a, bound, out));

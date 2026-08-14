@@ -24763,6 +24763,122 @@ fn witness_forwarding_into_an_imported_callee_ok() {
     );
 }
 
+// ===== M24-1 — the witness OVER-CHARGE. The forwarding charge used to be two name-only questions
+// over the whole body ("is any name a witness-taking fn?" / "is any name a module that exports one,
+// and is any `obj.member` spelled like one of its members?"). Both over-fired, and the cost is not
+// cosmetic: the charged fn loses the function-VALUE position permanently. The charge is now asked
+// per CALL SITE (`crate::compiler::CallSite`), against real call structure.
+
+/// Shape (a) — a forwarding call whose arguments are ALL concrete forwards nothing of the caller's
+/// own `T`, so it costs nothing. Pre-fix `g := concrete` was refused ("its bound on T requires a
+/// static protocol method"). Its RUNNING half — the value is really callable, so the compiled
+/// proto's arity agrees — is `a_forward_with_only_concrete_arguments_stays_a_function_value` in
+/// `tests/chz/spec/static_witness_test.chz`.
+#[test]
+fn witness_forwarding_with_only_concrete_arguments_does_not_charge_ok() {
+    let head = format!(
+        "{FWD_HEAD}fn concrete[T: Default](x: T) -> int:\n    return reset(Counter(1)).n\n"
+    );
+    entry_ok(&format!(
+        "{head}fn main():\n    g := concrete\n    print(concrete(Counter(3)))\nmain()\n"
+    ));
+    // …in every function-value spelling: turbofished, and passed to a HOF
+    entry_ok(&format!(
+        "{head}fn apply(f: fn(Counter) -> int, c: Counter) -> int:\n    return f(c)\nfn main():\n    g := concrete[Counter]\n    print(g(Counter(3)))\n    print(apply(concrete, Counter(4)))\nmain()\n"
+    ));
+    // a NESTED concrete ctor is still concrete (`Tag("x")` inside `second_of_two`'s arg list)
+    entry_ok(&format!(
+        "{FWD_HEAD}fn pair[T: Default, U: Default](a: T, b: U) -> U:\n    return U.default()\nfn concrete[T: Default](x: T) -> Tag:\n    return pair(Counter(1), Tag(\"x\"))\nfn main():\n    g := concrete\n    print(concrete(Counter(3)).s)\nmain()\n"
+    ));
+}
+
+/// Shape (b) — a struct METHOD that merely shares a name with an imported witness-taking fn. The
+/// module half asked its two halves independently ("is `lib` named?" AND "is some member spelled
+/// `reset`?"), so `Holder.reset` — which has nothing to do with `lib.reset` — charged `tagged` for
+/// a call it never makes. The pair is now looked up together: `lib.plain` is not witness-taking, so
+/// nothing is charged.
+#[test]
+fn witness_forwarding_module_half_matches_the_exact_callee_ok() {
+    let lib = (
+        "lib.chz",
+        "protocol LibDefault:\n    fn default() -> Self\nstruct Counter:\n    n: int\n    fn default() -> Counter:\n        return Counter(7)\nfn reset[T: LibDefault](old: T) -> T:\n    return T.default()\nfn plain(a: int) -> int:\n    return a + 1\n",
+    );
+    files_ok(&[
+        lib,
+        (
+            "main.chz",
+            "import lib\nprotocol Default:\n    fn default() -> Self\nstruct Counter:\n    n: int\n    fn default() -> Counter:\n        return Counter(7)\nstruct Holder:\n    k: int\n    fn reset(self) -> int:\n        return self.k * 10\nfn tagged[T: Default](x: T) -> int:\n    h := Holder(4)\n    return h.reset() + lib.plain(1)\nfn main():\n    print(tagged(Counter(3)))\n    g := tagged\n    print(1)\nmain()\n",
+        ),
+    ]);
+    // the isolation control the gap row measured: deleting ` + lib.plain(1)` always passed, so the
+    // charge came from naming `lib` at all — the two spellings must now agree
+    files_ok(&[
+        lib,
+        (
+            "main.chz",
+            "import lib\nprotocol Default:\n    fn default() -> Self\nstruct Counter:\n    n: int\n    fn default() -> Counter:\n        return Counter(7)\nstruct Holder:\n    k: int\n    fn reset(self) -> int:\n        return self.k * 10\nfn tagged[T: Default](x: T) -> int:\n    h := Holder(4)\n    return h.reset()\nfn main():\n    print(tagged(Counter(3)))\n    g := tagged\n    print(1)\nmain()\n",
+        ),
+    ]);
+    // …and the real qualified forward into that same module STILL charges
+    files_reject(
+        &[
+            lib,
+            (
+                "main.chz",
+                "import lib\nfn qfwd[T: LibDefault](x: T) -> T:\n    return lib.reset(x)\nfn main():\n    g := qfwd\n    print(1)\nmain()\n",
+            ),
+        ],
+        "cannot be used as a function value",
+    );
+}
+
+/// The must-STILL-charge neighbours. Every one of these was rejected before the narrowing and must
+/// stay rejected: an under-charge is a forward the checker then refuses with a worse message, or one
+/// the compiler cannot lower. Anything the syntactic walk cannot positively identify as concrete
+/// charges.
+#[test]
+fn witness_forwarding_still_charges_every_unpinned_shape_rejected() {
+    let tail = "fn main():\n    g := f\n    print(1)\nmain()\n";
+    let charged = |body: &str| {
+        entry_rejects(
+            &format!("{FWD_HEAD}{body}{tail}"),
+            "cannot be used as a function value",
+        )
+    };
+    // the parameter itself
+    charged("fn f[T: Default](x: T) -> T:\n    return reset(x)\n");
+    // a LOCAL bound to it — never concrete, whatever it holds
+    charged("fn f[T: Default](x: T) -> T:\n    y := x\n    return reset(y)\n");
+    // a ZERO-ARG witness-taking call: its `T` comes from the expected type, invisible to this walk
+    charged(
+        "fn empty[T: Default]() -> T:\n    return T.default()\nfn f[T: Default](x: T) -> T:\n    y: T = empty()\n    return y\n",
+    );
+    // a witness pinned by the callee's RETURN type only — the arguments look concrete but decide
+    // nothing, so `T` is still inferred from THIS fn's return position
+    charged(
+        "fn conv[T: Default, U](a: U) -> T:\n    return T.default()\nfn f[T: Default](x: T) -> T:\n    return conv(1)\n",
+    );
+    // a nested ctor whose own argument is not closed
+    charged("fn f[T: Default](x: T) -> Counter:\n    k := 1\n    return reset(Counter(k))\n");
+    // a GENERIC struct's ctor head — its args could name a type param, so it is not concrete
+    charged(
+        "struct GBox[U]:\n    v: U\nfn reset2[T: Default](old: T, extra: GBox[int]) -> T:\n    return T.default()\nfn f[T: Default](x: T) -> Counter:\n    return reset2(Counter(1), GBox(2))\n",
+    );
+    // an argument headed by the type parameter itself
+    charged("fn f[T: Default](x: T) -> T:\n    return reset(T.default())\n");
+    // an explicit turbofish naming this fn's own type param, with a closed argument list
+    charged(
+        "fn mk2[T: Default](n: int) -> T:\n    return T.default()\nfn f[T: Default](x: T) -> T:\n    return mk2[T](1)\n",
+    );
+    // a forward from a NESTED body (`defer:` block / closure), which the walk descends into
+    charged(
+        "fn f[T: Default](x: T) -> int:\n    defer:\n        y := reset(x)\n        print(y)\n    return 1\n",
+    );
+    charged(
+        "fn apply[V](g: fn() -> V) -> V:\n    return g()\nfn f[T: Default](x: T) -> T:\n    return apply(fn(): reset(x))\n",
+    );
+}
+
 /// E — an interpolation-fragment diagnostic points at the FRAGMENT EXPRESSION's real column. A
 /// fragment is re-lexed from its own source, and while only its LINE was re-anchored every column
 /// restarted at 1; three successive anchors papered over that (one mutating a cloned root's span,
