@@ -71,28 +71,6 @@ fn witness_local(t: &str) -> String {
 /// The prefix of every [`witness_local`] name — the marker a capture-entry filter matches on.
 const WITNESS_PREFIX: &str = "$w:";
 
-/// M24 Task 4 — append the enclosing frame's hidden `$w:T` bindings to a nested body's capture
-/// entries (closure, nested `fn`, `spawn:`/`defer:` block). They can never survive the
-/// free-variable filter — `$` is unspellable, so no source name makes one free — so a child proto
-/// reaches its witness only because this puts it back. `snapshot` is the SAME `snapshot_entries()`
-/// the free filter ran over, so a `$w:T` the enclosing frame itself only CAPTURED (a closure in a
-/// closure) rides along with its `CapSrc::Captured` stamp already correct.
-///
-/// Unconditional, and that is the point: the compiler captures a witness into EVERY nested body, so
-/// "is a witness for `T` reachable here?" has one answer — [`FnComp::witness_ref`] — and the
-/// checker's [`crate::checker::Checker::witness_scope`] agrees with it by construction rather than
-/// by a second, similar-looking rule. The cost is one extra captured `str` per nested body of a
-/// witness-taking fn; a `str` is sendable, so even the `spawn:` airlock is indifferent.
-fn with_witness_captures(snapshot: &[CapEntry], mut entries: Vec<CapEntry>) -> Vec<CapEntry> {
-    entries.extend(
-        snapshot
-            .iter()
-            .filter(|e| e.name.starts_with(WITNESS_PREFIX))
-            .cloned(),
-    );
-    entries
-}
-
 /// M24 Task 4 — where a frame keeps the hidden witness for a type param: its own trailing `$w:T`
 /// parameter, or a capture of the enclosing frame's.
 #[derive(Clone, Copy)]
@@ -100,7 +78,7 @@ enum WitnessRef {
     /// A plain, never-boxed local slot (`$w:T` cannot be in `boxed_names` — it is unspellable).
     Local(usize),
     /// A positional capture slot, holding the witness `str` RAW (not a cell) — see
-    /// [`with_witness_captures`], which snapshots the local's value, not a cell handle.
+    /// [`Compiler::with_witness_captures`], which snapshots the local's value, not a cell handle.
     Captured(u32),
 }
 
@@ -1947,10 +1925,9 @@ impl Compiler {
                     // (relative to its own params). The recursive self-name is free in a recursive
                     // body → stays captured → the self-call resolves through the cell above.
                     let snap = fc.snapshot_entries();
-                    let entries = with_witness_captures(
-                        &snap,
-                        filter_entries_free_block(&snap, &decl.body, &decl.params),
-                    );
+                    let (kept, free) =
+                        filter_entries_free_block(&snap, &decl.body, &decl.params);
+                    let entries = self.with_witness_captures(&snap, kept, Some(&free));
                     let captured_names: Vec<String> =
                         entries.iter().map(|e| e.name.clone()).collect();
                     let pid = self.compile_fn_captured(decl, captured_names)?;
@@ -1966,10 +1943,9 @@ impl Compiler {
                     // locals — it just needs no self-cell because nothing captures it.)
                     // Free-variable capture (Finding D): keep only referenced names.
                     let snap = fc.snapshot_entries();
-                    let entries = with_witness_captures(
-                        &snap,
-                        filter_entries_free_block(&snap, &decl.body, &decl.params),
-                    );
+                    let (kept, free) =
+                        filter_entries_free_block(&snap, &decl.body, &decl.params);
+                    let entries = self.with_witness_captures(&snap, kept, Some(&free));
                     let captured_names: Vec<String> =
                         entries.iter().map(|e| e.name.clone()).collect();
                     let pid = self.compile_fn_captured(decl, captured_names)?;
@@ -2339,8 +2315,8 @@ impl Compiler {
                 // zero-arg proto whose free names resolve via `GetCaptured`. Free-variable capture
                 // (Finding D) avoids dragging unused non-sendable siblings across the airlock.
                 let snap = fc.snapshot_entries();
-                let entries =
-                    with_witness_captures(&snap, filter_entries_free_block(&snap, body, &[]));
+                let (kept, free) = filter_entries_free_block(&snap, body, &[]);
+                let entries = self.with_witness_captures(&snap, kept, Some(&free));
                 let captured_names: Vec<String> = entries.iter().map(|e| e.name.clone()).collect();
                 let mut child = FnComp::new("<spawned task>".to_string(), 0, false);
                 // Uniform by-reference capture (Task A): the block's own boxed-name set (unwired).
@@ -4415,8 +4391,8 @@ impl Compiler {
                 // airlock), then defer-invoke it with 0 args. Reuses `MakeClosure` + `DeferCall` — no
                 // new op. Free-variable capture (Finding D): only names the block references.
                 let snap = fc.snapshot_entries();
-                let entries =
-                    with_witness_captures(&snap, filter_entries_free_block(&snap, body, &[]));
+                let (kept, free) = filter_entries_free_block(&snap, body, &[]);
+                let entries = self.with_witness_captures(&snap, kept, Some(&free));
                 let captured_names: Vec<String> = entries.iter().map(|e| e.name.clone()).collect();
                 let mut child = FnComp::new("<deferred block>".to_string(), 0, false);
                 // Uniform by-reference capture (Task A): the block's own boxed-name set (unwired).
@@ -4704,7 +4680,7 @@ impl Compiler {
     /// bytecode its eager form emits, and there is no second dispatch list to keep in sync.
     ///
     /// The wrapper is a `MakeClosure` rather than a `MakeFunc` only so it can reach the enclosing
-    /// frame's `$w:T` witnesses the way a `defer:` block does ([`with_witness_captures`]); nothing
+    /// frame's `$w:T` witnesses the way a `defer:` block does ([`Self::with_witness_captures`]); nothing
     /// else is captured, so a witness-free target is still a capture-free callee and crosses the
     /// `spawn` airlock by handle. Returns the operand count for `DeferCall`/`SpawnCall`.
     fn compile_receiverless_target(
@@ -4717,7 +4693,10 @@ impl Compiler {
     ) -> Result<usize, CompileError> {
         let argc = args.len() + named.len();
         let snap = fc.snapshot_entries();
-        let entries = with_witness_captures(&snap, Vec::new());
+        // No free-name walk exists for a SYNTHESIZED body: the wrapper replays `callee(args)`, which
+        // is a call site of the ENCLOSING body — so every witness rides (`None`), and the replay's
+        // own `compile_call` finds whatever it needs.
+        let entries = self.with_witness_captures(&snap, Vec::new(), None);
         let mut child = FnComp::new("<deferred static call>".to_string(), argc, false);
         child.captured_names = entries.iter().map(|e| e.name.clone()).collect();
         // One unspellable parameter per argument, in source order, so the replayed call reads them
@@ -4814,21 +4793,79 @@ impl Compiler {
     /// module-level fn.
     fn witness_fn_key(&self, fc: &FnComp, callee: &Expr, fname: &str) -> Option<(usize, String)> {
         match &callee.kind {
-            ExprKind::Ident(_) if fc.is_unbound(fname) => Some(
-                self.imported_fns
-                    .get(fname)
-                    .cloned()
-                    .unwrap_or((self.current_module_idx, fname.to_string())),
-            ),
+            ExprKind::Ident(_) if fc.is_unbound(fname) => self.witness_fn_key_named(None, fname),
             ExprKind::Field { obj, .. } => match &obj.kind {
-                ExprKind::Ident(m) if fc.is_unbound(m) => self
-                    .imported_modules
-                    .get(m)
-                    .map(|&idx| (idx, fname.to_string())),
+                ExprKind::Ident(m) if fc.is_unbound(m) => self.witness_fn_key_named(Some(m), fname),
                 _ => None,
             },
             _ => None,
         }
+    }
+
+    /// The module-resolution half of [`Self::witness_fn_key`], for a callee already reduced to the
+    /// `(module, name)` pair a [`CallSite`] carries. `None` for a qualified head that names no
+    /// imported module (a receiver value, or a type).
+    fn witness_fn_key_named(&self, module: Option<&str>, name: &str) -> Option<(usize, String)> {
+        match module {
+            None => Some(
+                self.imported_fns
+                    .get(name)
+                    .cloned()
+                    .unwrap_or((self.current_module_idx, name.to_string())),
+            ),
+            Some(m) => self
+                .imported_modules
+                .get(m)
+                .map(|&idx| (idx, name.to_string())),
+        }
+    }
+
+    /// M24-2 — could a call the free-name walk recorded as `name(…)` / `module.name(…)` take hidden
+    /// witness arguments? The [`nested_body_needs_witness`] lookup: a by-name fn is answered exactly
+    /// from [`crate::checker::WitnessTable::fns`]; a qualified head that is NOT an imported module is
+    /// a RECEIVER or a TYPE, i.e. a possible Task-5 MEMBER witness call whose record is keyed on a
+    /// span this walk does not carry — so it answers yes rather than risk an under-capture.
+    fn call_may_take_witnesses(&self, module: Option<&str>, name: &str) -> bool {
+        match module {
+            Some(m) if !self.imported_modules.contains_key(m) => true,
+            _ => self
+                .witness_fn_key_named(module, name)
+                .is_some_and(|k| self.witnesses.fns.contains_key(&k)),
+        }
+    }
+
+    /// M24 Task 4 — append the enclosing frame's hidden `$w:T` bindings to a nested body's capture
+    /// entries (closure, nested `fn`, `spawn:`/`defer:` block). They can never survive the
+    /// free-variable filter — `$` is unspellable, so no source name makes one free — so a child proto
+    /// reaches its witness only because this puts it back. `snapshot` is the SAME `snapshot_entries()`
+    /// the free filter ran over, so a `$w:T` the enclosing frame itself only CAPTURED (a closure in a
+    /// closure) rides along with its `CapSrc::Captured` stamp already correct.
+    ///
+    /// M24-2 — a witness rides only when the body can REACH it ([`nested_body_needs_witness`], which
+    /// states the invariant that keeps `FnComp::witness_ref` a superset of the checker's
+    /// `witness_scope`). `free` is that body's already-computed free-name walk; `None` means the body
+    /// is SYNTHESIZED rather than written — the receiverless `defer Type.m(…)` wrapper replays a call
+    /// that is in no walk at all — so every witness rides, as it did everywhere before.
+    fn with_witness_captures(
+        &self,
+        snapshot: &[CapEntry],
+        mut entries: Vec<CapEntry>,
+        free: Option<&FreeNames>,
+    ) -> Vec<CapEntry> {
+        entries.extend(
+            snapshot
+                .iter()
+                .filter(|e| match e.name.strip_prefix(WITNESS_PREFIX) {
+                    // The suffix is the whole type-PARAM name (`witness_local` formats exactly
+                    // `$w:<t>`, and a type param is a bare identifier — never module-qualified).
+                    Some(t) => free.is_none_or(|f| {
+                        nested_body_needs_witness(f, t, &|m, n| self.call_may_take_witnesses(m, n))
+                    }),
+                    None => false,
+                })
+                .cloned(),
+        );
+        entries
     }
 
     /// M24 — the witness arguments this call site must push, `None` when the callee takes none.
@@ -5538,18 +5575,20 @@ impl Compiler {
         // airlock → check-OK/run-fault (Finding D). `free_names_expr` is a trusted over-approximation
         // (it also drives cell-boxing), so this is behavior-identical and strictly smaller.
         let params_set: HashSet<String> = params.iter().map(|p| p.name.clone()).collect();
-        let free = free_names_of_expr(body, &params_set);
+        let mut free = FreeNames::default();
+        free_names_expr(body, &params_set, &mut free);
         let snap = fc.snapshot_entries();
         // M24 Task 4: a closure captures only FREE VARIABLES, and the enclosing frame's `$w:T` is
-        // never spelled in the source — so it is appended explicitly, and travels BY VALUE (the
-        // point of case 1: a closure that outlives its defining frame still constructs the right
-        // type).
-        let entries: Vec<CapEntry> = with_witness_captures(
+        // never spelled in the source — so it is appended explicitly (M24-2: when this body can
+        // reach it), and travels BY VALUE (the point of case 1: a closure that outlives its defining
+        // frame still constructs the right type).
+        let entries: Vec<CapEntry> = self.with_witness_captures(
             &snap,
             snap.iter()
-                .filter(|e| free.contains(&e.name))
+                .filter(|e| free.names.contains(&e.name))
                 .cloned()
                 .collect(),
+            Some(&free),
         );
         let captured_names: Vec<String> = entries.iter().map(|e| e.name.clone()).collect();
 
@@ -6163,18 +6202,23 @@ fn find_boundary_free_expr(e: &Expr, out: &mut HashSet<String>) {
 /// only the names it references — not every visible local (Finding D: over-capture dragged unused
 /// non-sendable siblings across the spawn airlock). Positional GetCaptured slot indices stay aligned
 /// because both `MakeClosure`'s entries and the child's `captured_names` derive from THIS filtered vec.
+///
+/// Returns the walk alongside the entries: M24-2's witness question is asked of the SAME walk, never
+/// a second one over the same body.
 fn filter_entries_free_block(
     entries: &[CapEntry],
     stmts: &[Stmt],
     params: &[crate::ast::Param],
-) -> Vec<CapEntry> {
+) -> (Vec<CapEntry>, FreeNames) {
     let bound: HashSet<String> = params.iter().map(|p| p.name.clone()).collect();
-    let free = free_names_of_block(stmts, &bound);
-    entries
+    let mut free = FreeNames::default();
+    free_names_block(stmts, &bound, &mut free);
+    let kept = entries
         .iter()
-        .filter(|e| free.contains(&e.name))
+        .filter(|e| free.names.contains(&e.name))
         .cloned()
-        .collect()
+        .collect();
+    (kept, free)
 }
 
 /// What a free-variable walk collects. `names` is the free-variable answer every capture consumer
@@ -6187,6 +6231,13 @@ fn filter_entries_free_block(
 pub(crate) struct FreeNames {
     pub names: HashSet<String>,
     pub calls: Vec<CallSite>,
+    /// True once the walk passed a call whose callee it could NOT put in `calls` — a method on a
+    /// non-ident receiver (`a.b.c()`), an indexed one (`xs[i].m()`), a call result (`f()()`), a
+    /// bound-name head. Such a call can still be a witness call: M24 Task 5 threads witnesses
+    /// through MEMBERS too, and the checker keys those on the method-NAME TOKEN, a coordinate this
+    /// syntactic walk does not carry. So the readers that must not UNDER-approximate
+    /// ([`nested_body_needs_witness`]) treat it as "could be one".
+    pub opaque_calls: bool,
 }
 
 /// One call the free-name walk passed, recorded only when the callee is a plain name or a
@@ -6208,7 +6259,8 @@ pub(crate) struct CallSite {
 }
 
 /// Record `f(…)` / `m.f(…)` on `out`. A callee that is neither a free name nor a free name's field
-/// is not recorded at all.
+/// is not recorded at all — it raises [`FreeNames::opaque_calls`] instead, so a reader that must not
+/// under-approximate can see that SOME call went unclassified.
 fn record_call_site(
     callee: &Expr,
     args: &[Expr],
@@ -6221,9 +6273,15 @@ fn record_call_site(
         ExprKind::Ident(n) if !bound.contains(n) => (None, n.clone()),
         ExprKind::Field { obj, name, .. } => match &obj.kind {
             ExprKind::Ident(m) if !bound.contains(m) => (Some(m.clone()), name.clone()),
-            _ => return,
+            _ => {
+                out.opaque_calls = true;
+                return;
+            }
         },
-        _ => return,
+        _ => {
+            out.opaque_calls = true;
+            return;
+        }
     };
     out.calls.push(CallSite {
         module,
@@ -6284,6 +6342,41 @@ fn closed_expr(e: &Expr, bound: &HashSet<String>, heads: &mut Vec<String>) -> bo
         },
         _ => false,
     }
+}
+
+/// M24-2 — can this nested body (closure, nested `fn`, `spawn:`/`defer:` block) REACH a witness for
+/// the enclosing frame's type param `t`? `free` is the body's already-computed free-name walk;
+/// `is_witness_fn` answers "could a call spelled `(module, name)` take hidden witness arguments?".
+///
+/// **The invariant: the compiler captures `$w:t` into a nested body whenever that body can reach a
+/// witness for `t`.** It holds by construction, because there are exactly three ways a body reaches
+/// one and each raises a disjunct here:
+/// * a DIRECT `t.static(…)` — parses as a `Field` on `Ident(t)`, so `t` is a free name of the body;
+/// * a FORWARD into a by-name fn that takes witnesses — recorded as a [`CallSite`];
+/// * a FORWARD into a MEMBER that declares its own witnessed `[T]` (Task 5) — whose callee is a
+///   receiver or a type, not a module, and whose type argument is not a free name either, so it is
+///   covered CONSERVATIVELY: any member-shaped call answers yes, as does an unclassified one
+///   ([`FreeNames::opaque_calls`]).
+///
+/// There is no fourth way: `$w:` is unspellable (`$` is not an identifier character), so no source
+/// name reaches a witness directly, and [`free_names_block`]/[`free_names_expr`] flatten every
+/// nested body's names AND calls into the enclosing walk — a `t.default()` two levels down keeps the
+/// outer capture alive. So the checker's `witness_scope`, carried unconditionally into nested
+/// bodies, stays a SUBSET of what the compiler can serve and needs no mirroring rule.
+///
+/// Being too narrow here is not a silent wrong value: [`FnComp::witness_ref`] returns `None` and the
+/// compile fails loudly ("no type witness in scope to forward").
+pub(crate) fn nested_body_needs_witness(
+    free: &FreeNames,
+    t: &str,
+    is_witness_fn: &dyn Fn(Option<&str>, &str) -> bool,
+) -> bool {
+    free.names.contains(t)
+        || free.opaque_calls
+        || free
+            .calls
+            .iter()
+            .any(|c| is_witness_fn(c.module.as_deref(), &c.name))
 }
 
 /// [`free_names_block`] for callers that want only the free-variable set.
@@ -6478,6 +6571,9 @@ pub(crate) fn free_names_expr(e: &Expr, bound: &HashSet<String>, out: &mut FreeN
         ExprKind::OptChain { obj, call, .. } => {
             free_names_expr(obj, bound, out);
             if let Some(c) = call {
+                // `a?.m(…)` is a member call this walk records nothing for — and a member call is a
+                // possible witness call (see [`FreeNames::opaque_calls`]).
+                out.opaque_calls = true;
                 c.args.iter().for_each(|a| free_names_expr(a, bound, out));
                 c.named
                     .iter()
@@ -7075,7 +7171,7 @@ impl FnComp {
 
     /// M24 — THE derivation of "is the hidden type witness for `t` reachable in this frame?": it is
     /// either this body's own trailing `$w:t` parameter, or — Task 4 — a capture appended by
-    /// [`with_witness_captures`] at the nested-body construction site. Nothing else can produce a
+    /// [`Compiler::with_witness_captures`] at the nested-body construction site. Nothing else can produce a
     /// `$w:` binding, so this answer IS the compiler's real capture behavior, which is what the
     /// checker's `witness_scope` predicate has to mirror.
     fn witness_ref(&self, t: &str) -> Option<WitnessRef> {

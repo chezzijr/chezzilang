@@ -1449,8 +1449,9 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > * **The witness REACHES every nested body** — a closure (including one that **escapes** its defining
 >   frame), a nested `fn`, a `defer:` block, a `spawn:`/`parallel:` block, and a generator's closure
 >   over a suspended frame. `$w:T` is unspellable so it is never a free variable; it is appended to
->   those capture entries unconditionally and travels **by value** (a `str`), which is what lets it
->   cross the airlock and outlive its frame.
+>   those capture entries explicitly and travels **by value** (a `str`), which is what lets it
+>   cross the airlock and outlive its frame. Since **M24-2** (2026-08-14) it is appended only where
+>   the nested body can REACH a witness, never to every nested body.
 >
 > **What stays impossible — each a clear diagnostic naming the workaround, not a v1 gap.**
 > * **A witness-taking generic read as a FUNCTION VALUE** (`g := reset`, a turbofish read as a value,
@@ -1500,7 +1501,15 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > body uses it.
 >
 > **Residuals, filed honestly** as `docs/gaps.md` **M24-1..M24-5**: witness **over-charge** and
-> **unused captures** (one `str` per witness per nested body). **M24-1 is now FIXED** (2026-08-14):
+> **unused captures** (one `str` per witness per nested body). **M24-2 is now FIXED** (2026-08-14):
+> a nested body keeps `$w:T` only when it can REACH a witness — it names `T`, or it makes a call that
+> could forward one. The predicate reads the free-name walk that capture site already ran (no second
+> walk) and its invariant is stated where it lives (`compiler::nested_body_needs_witness`): the
+> compiler's capture set stays a SUPERSET of the checker's `witness_scope`, which is therefore left
+> alone — a mirroring narrowing there would provably never change an outcome. A Task-5 MEMBER forward
+> (`f := fn(): h.build[T]()`) spells `T` only as a type ARGUMENT and heads the call with a RECEIVER,
+> so neither disjunct sees it and it is covered conservatively; without that third clause the fix
+> turns a program that runs today into a hard compile error. **M24-1 is also FIXED** (2026-08-14):
 > the forwarding charge was two name-only questions over the whole body, and it is now one question
 > per CALL SITE. A body calling a witness-taking fn with only concrete arguments
 > (`return reset(Counter(1)).n`) keeps its fn-VALUE position, and a struct method that merely shares

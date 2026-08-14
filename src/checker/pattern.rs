@@ -4016,9 +4016,10 @@ impl Checker {
         // `yield_ty.take()`; closures are single-expression so a closure `yield` is unparseable today.)
         let saved_ig = std::mem::replace(&mut self.in_generator, false);
         // M24 Task 4: the witness scope CARRIES INTO a closure body. `$w:T` is never a free variable
-        // (it is unspellable), so `compile_closure` appends it to the capture entries explicitly and
-        // unconditionally — the witness crosses BY VALUE, so a closure that outlives its defining
-        // frame still constructs the right type.
+        // (it is unspellable), so `compile_closure` appends it to the capture entries explicitly —
+        // and, since M24-2, only where the body can REACH it, which is a strict superset of what
+        // this scope licenses (`compiler::nested_body_needs_witness`). The witness crosses BY VALUE,
+        // so a closure that outlives its defining frame still constructs the right type.
         // Mark BEFORE param binding so the free-closure finalize (below) is suppressed if EITHER an
         // un-inferable PARAM (`cannot infer type of parameter`) or the body emits a real error — a
         // residual `Unknown` return is then a cascade, not a genuine un-inferable return.

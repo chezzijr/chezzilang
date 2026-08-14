@@ -5285,6 +5285,148 @@ fn witness_member_cross_module_runs_both_engines() {
     assert_eq!(vo, io, "serial vs M:N divergence");
 }
 
+// ===== M24-2 — a nested body captures `$w:T` only when it can REACH a witness =====
+//
+// RUST, not `tests/chz/`: the subject is a proto's CAPTURE LIST, which is bytecode internals no
+// `assert` can see. The behavioural half (the witness still WORKS wherever it is genuinely used) is
+// `tests/chz/spec/static_witness_test.chz` and the both-engines runner below.
+
+/// The `capture_names` of every proto named `proto`, in compile order.
+fn capture_names_of(src: &str, proto: &str) -> Vec<Vec<String>> {
+    let module = parser::parse(lexer::tokenize(src).unwrap()).unwrap();
+    let program = crate::compiler::compile_module_standalone(&module).unwrap();
+    program
+        .protos
+        .iter()
+        .filter(|p| p.name == proto)
+        .map(|p| p.capture_names.clone())
+        .collect()
+}
+
+/// The shared preamble: a static requirement, a type that answers it, and a witness-taking free fn.
+const W_PRELUDE: &str = "protocol Default:\n    fn default() -> Self\n\
+     struct Counter:\n    n: int\n    fn default() -> Counter:\n        return Counter(0)\n\
+     fn reset[T: Default](old: T) -> T:\n    return T.default()\n";
+
+#[test]
+fn m24_2_a_nested_body_that_uses_no_witness_captures_none() {
+    // `outer` is charged `$w:T` (its own body calls `T.default()`), but the closure only adds ints.
+    let src = format!(
+        "{W_PRELUDE}fn outer[T: Default](x: int) -> int:\n    c := T.default()\n    \
+         f := fn(): x + 1\n    return f() + c.n\nprint(outer[Counter](1))\n"
+    );
+    let caps = capture_names_of(&src, "<closure>");
+    assert_eq!(caps.len(), 1, "one closure proto");
+    assert_eq!(
+        caps[0],
+        vec!["x".to_string()],
+        "the closure reaches no witness, so it captures none"
+    );
+}
+
+#[test]
+fn m24_2_a_sibling_closure_that_calls_the_static_keeps_its_witness() {
+    // Same frame, two closures: only the one naming `T` carries `$w:T`.
+    let src = format!(
+        "{W_PRELUDE}fn outer[T: Default](x: int) -> int:\n    f := fn(): x + 1\n    \
+         g := fn(): T.default().n\n    return f() + g()\nprint(outer[Counter](1))\n"
+    );
+    let caps = capture_names_of(&src, "<closure>");
+    assert_eq!(caps.len(), 2, "two closure protos");
+    assert!(
+        !caps[0].iter().any(|n| n.starts_with("$w:")),
+        "the witness-free sibling captures no witness: {:?}",
+        caps[0]
+    );
+    assert!(
+        caps[1].contains(&"$w:T".to_string()),
+        "the `T.default()` closure keeps its witness: {:?}",
+        caps[1]
+    );
+}
+
+#[test]
+fn m24_2_a_witness_two_levels_down_keeps_both_captures() {
+    // Only `inner` names `T`; `mid` must still capture, or `inner`'s MakeClosure has nothing to
+    // snapshot. The free-name walk flattens a nested body's names into the enclosing one, which is
+    // exactly what makes the outer capture survive.
+    let src = format!(
+        "{W_PRELUDE}fn outer[T: Default]() -> int:\n    fn mid() -> int:\n        \
+         fn inner() -> int:\n            return T.default().n\n        return inner()\n    \
+         return mid()\nprint(outer[Counter]())\n"
+    );
+    for name in ["mid", "inner"] {
+        let caps = capture_names_of(&src, name);
+        assert_eq!(caps.len(), 1, "one `{name}` proto");
+        assert!(
+            caps[0].contains(&"$w:T".to_string()),
+            "`{name}` keeps the witness: {:?}",
+            caps[0]
+        );
+    }
+}
+
+#[test]
+fn m24_2_a_nested_body_that_only_forwards_keeps_its_witness() {
+    // The closure never spells `T` — it calls a witness-TAKING fn with a non-concrete argument, so
+    // the checker records a `Forward(T)` there and the compiler must have `$w:T` to push.
+    let src = format!(
+        "{W_PRELUDE}fn outer[T: Default](v: T) -> int:\n    f := fn(): reset(v)\n    \
+         _ := f()\n    return 0\nprint(outer(Counter(1)))\n"
+    );
+    let caps = capture_names_of(&src, "<closure>");
+    assert_eq!(caps.len(), 1, "one closure proto");
+    assert!(
+        caps[0].contains(&"$w:T".to_string()),
+        "a forwarding body needs the witness: {:?}",
+        caps[0]
+    );
+}
+
+#[test]
+fn m24_2_a_nested_body_forwarding_through_a_member_keeps_its_witness() {
+    // The forward goes through an instance method that declares its OWN witnessed `[T]` (Task 5).
+    // The call is `h.build[T]()`: `T` appears only as a type ARGUMENT (which no free-name walk
+    // collects) and the callee is a RECEIVER, not a module — so neither half of a name-only
+    // predicate sees it. The checker still records `Forward(T)` here, so the witness must ride.
+    let src = format!(
+        "{W_PRELUDE}struct Holder:\n    k: int\n    fn build[T: Default](self) -> T:\n        \
+         return T.default()\nfn outer[T: Default](h: Holder) -> int:\n    c := T.default()\n    \
+         f := fn(): h.build[T]()\n    _ := f()\n    return c.n\nprint(outer[Counter](Holder(1)))\n"
+    );
+    let caps = capture_names_of(&src, "<closure>");
+    assert_eq!(caps.len(), 1, "one closure proto");
+    assert!(
+        caps[0].contains(&"$w:T".to_string()),
+        "a member forward needs the witness: {:?}",
+        caps[0]
+    );
+    // …and it really runs, on both engines.
+    let vo = run_capture(&src).expect("serial VM");
+    let io = run_capture_parallel(&src).expect("M:N engine");
+    assert_eq!(vo, "0\n", "serial VM output");
+    assert_eq!(vo, io, "serial vs M:N divergence");
+}
+
+#[test]
+fn m24_2_a_spawn_and_defer_block_without_a_witness_capture_none() {
+    // The other two capture sites (`spawn:` / `defer:` blocks), same rule.
+    let src = format!(
+        "{W_PRELUDE}fn outer[T: Default](x: int) -> int:\n    c := T.default()\n    \
+         defer:\n        print(x)\n    parallel:\n        spawn:\n            print(x + 1)\n    \
+         return c.n\nprint(outer[Counter](1))\n"
+    );
+    for name in ["<deferred block>", "<spawned task>"] {
+        let caps = capture_names_of(&src, name);
+        assert_eq!(caps.len(), 1, "one `{name}` proto");
+        assert_eq!(
+            caps[0],
+            vec!["x".to_string()],
+            "`{name}` reaches no witness, so it captures none"
+        );
+    }
+}
+
 // ===== W7-49 — a spliced default must not alias the caller's own side-table entries =====
 //
 // These three are RUST tests, not `tests/chz/` ones, for one reason: they are inherently MULTI-FILE.

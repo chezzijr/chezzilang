@@ -1967,7 +1967,11 @@ struct Checker {
     ///
     /// Task 4 — it CARRIES INTO every nested body (a closure, a `spawn:`/`defer:` block, a nested
     /// `fn`), because the compiler appends the enclosing frame's `$w:T` bindings to that body's
-    /// capture entries unconditionally (`compiler::with_witness_captures`). The witness is a plain
+    /// capture entries (`compiler::with_witness_captures`). M24-2 narrowed the compiler side to the
+    /// bodies that can REACH a witness, and this side deliberately did NOT follow: the compiler's
+    /// capture set is a provable SUPERSET of this scope
+    /// (`compiler::nested_body_needs_witness` states why), so a mirroring narrowing here would be a
+    /// second, similar-looking rule that can never change an outcome. The witness is a plain
     /// `str`, so it crosses BY VALUE — a closure outliving its defining frame, and the `spawn:`
     /// airlock, both stay correct. `T.static_method()` is accepted ONLY when `T` is in here, which
     /// is exactly what the compiler can lower (`compiler::FnComp::witness_ref` is the other half).

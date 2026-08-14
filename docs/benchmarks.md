@@ -1394,7 +1394,9 @@ not luck: the new `Op::CallStaticDyn` only appears where a generic body calls `T
 witness parameter is charged **only** to a body that uses one (`Checker::witness_params_of`), and no
 tracked bench has a static-carrying protocol bound at all. The cost that *would* show up on a
 witness-heavy workload is one extra argument push per witnessed call plus one `str` per witness per
-nested body (`docs/gaps.md` **M24-2**) — the suite has no such bench to isolate it.
+nested body that can REACH one (`docs/gaps.md` **M24-2**, which narrowed that from *every* nested
+body on 2026-08-14 — a capture-list change, not a measurable one) — the suite has no such bench to
+isolate it.
 
 ## W7-49 — `Span` grows a `file` id (and shrinks to 12 bytes) — measured, flat-or-faster except `map` (2026-08-11)
 
