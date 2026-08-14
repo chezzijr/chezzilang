@@ -186,6 +186,190 @@ ancestors (Python/Java) already have.
 
 ---
 
+## 2c1. `spawn` moves to eager execution (planned — NOT started)
+
+> **Numbering.** This is §2c's sequel and sits next to it deliberately. It is **not** `§2d`: that number
+> is already the deadlock-detection milestone below and is cross-referenced from `src/vm/{sched,netio,mod,
+> quiesce,tests}.rs`, `PROGRESS.md`, `docs/gaps.md`, `docs/stdlib.md` and `docs/concurrency.md`.
+> Renumbering would break ~20 live pointers to buy nothing. `3a1` is the same house convention.
+
+> **Why this is filed (2026-08-14).** A spawned task does not start at its `spawn` — it starts at its
+> nursery's **join**. Go, which owns the concurrency seam, starts at the `go`. Nothing in the docs ever
+> claimed the Chezzi behaviour: `docs/concurrency.md:221-224` defines the implicit nursery **only** by
+> where a bare `spawn` *joins* and says nothing about when a task *starts*. So this is a divergence from
+> the owning ancestor with no documented decision behind it — a defect, not a note. `docs/gaps.md`'s
+> `bare spawn: start time` row (`:82`) is **not an open ledger item**; it is a pointer to this milestone.
+
+### The defect, measured 2026-08-14 on the release binary
+
+```chezzi
+print("A")
+spawn:
+    print("SPAWNED")
+time.sleep_ms(300)
+print("B")
+```
+
+| | output |
+|---|---|
+| Chezzi, **both** engines | `A` `B` `SPAWNED` |
+| Go (`go fmt.Println(...)`, go1.26.5) | `A` `SPAWNED` `B` |
+
+**It is not bare-`spawn`-only.** An explicit `parallel:` defers identically — measured: a `parallel:`
+whose body sleeps 300 ms prints `A B SPAWNED C`. The runtime already tells users so in two fault-hint
+strings: `src/vm/netio.rs:26` (`FULL_SEND_DEADLOCK`) and `:44` (`EMPTY_RECV_DEADLOCK`) both read "*the
+nursery body runs before its spawned tasks start*".
+
+**The known user-visible harm — and the milestone's failing test.** A `spawn`-based TCP repro
+self-deadlocks: `l.accept()` in `main` waits for a dialer that is queued behind the end-of-main join, so
+the accept can never be satisfied. Write that program first, red, then make it green.
+
+### Why it is structural, not a scheduling accident
+
+Every step below was re-read 2026-08-14; the line numbers are current.
+
+- `Op::SpawnBlock` / `Op::SpawnCall` (`src/vm/exec.rs:2479-2481`) reach `Vm::register_task`
+  (`src/vm/sched.rs:279-312`), which pushes a `QueuedTask` onto `self.nurseries` — a plain
+  `Vec<Vec<QueuedTask>>` (`src/vm/mod.rs:767-772`). A `Vec` entry is inert; nothing polls it.
+- **The eager/lazy choice is made ONCE, at `EnterNursery`** (`src/vm/exec.rs:2455-2470`):
+  `let eager = self.parallel && self.mn.is_some() && worker_count() >= 2;` (`:2468`). A **top-level**
+  nursery has `mn == None`, so it is *always* lazy — by construction, not by timing. The single
+  immediate-start path in the whole VM is `sched.inject(fiber, 0)` (`src/vm/sched.rs:303`), reachable
+  only from that eager arm.
+- **No `MnSched`, no fiber and no worker thread exists for the task until the join.**
+  `Vm::join_nursery` (`src/vm/sched.rs:367`) → `run_mn_nursery_outermost` (`:520`) builds the fibers,
+  allocates the sched, seeds it, and only then farms workers. `main` becomes a worker at
+  `shell.mn_worker_loop(&sched, 0, 0)` (`:593`, "owner of scope 0") — from the join onward, never before.
+- **There is no yield point that could rescue it.** `time.sleep_ms` on `main` is `native::Kind::TimedWait`
+  with `mn == None`, so it takes `Vm::block_until_deadline` (`src/vm/netio.rs:2206`) — it blocks the OS
+  thread and never touches `self.nurseries`. Waiting longer cannot help; there is nothing to wake.
+
+**Partial precedent for the fix already exists.** `Vm::early_enlist_outer` (`src/vm/sched.rs:654`) seeds
+an *outer* nursery's pending tasks into a **live** sched when some nested nursery joins first. That is
+the same "queued task, meet running scheduler" move this milestone needs at the top level.
+
+### Target semantics, and the engine split
+
+**A `spawn` starts at the `spawn`, not at the join.** Go owns this; the join keeps its existing job —
+it guarantees *completion* by the barrier, which is orthogonal to *start*.
+
+**§2c's precedent applies directly, and settles the serial question.** `Executor.submit` already ships
+eager on M:N and lazy on `--serial` (decision D3), documented at `docs/stdlib.md:296` as "*that window is
+the one place the two engines deliberately disagree*". The same reasoning holds here, only harder:
+`--serial` is single-threaded and cooperative, so Go's semantics are **unreachable on it by
+construction**, and it is slated for removal in §2b. Therefore:
+
+- **eager on M:N** (the engine Chezzi actually ships),
+- **documented lazy on `--serial`**,
+- **the parity harness splits for the affected programs** rather than the M:N engine bending to what one
+  cooperative thread can reproduce. That is §2b's own stated debt argument — byte-identity is already
+  forcing per-engine forks whose only purpose is keeping serial matching M:N; this adds one more rather
+  than paying for it in wrong M:N behaviour.
+
+`docs/stdlib.md:296`'s "one place" becomes two, and that sentence must be reworded in the same commit.
+
+### Mechanism (three edits, in this order)
+
+1. **Widen the `EnterNursery` eager gate** (`src/vm/exec.rs:2468`) to admit the top-level
+   `mn.is_none()` case. The existing `worker_count() >= 2` guard exists for a *nested* eager join
+   blocking its parent's outer worker (see the comment at `:2460-2467`); re-derive whether it applies to
+   a top-level nursery, which has no outer worker to starve — do not copy it forward unexamined.
+2. **Give `Vm::activate_eager_nursery` (`src/vm/sched.rs:797`) a no-parent form.** Two things there
+   assume a parent sched exists: `debug_assert!(self.mn.is_some(), …)` (`:799-802`) and
+   `inner.parent_wake = self.mn.clone().or_else(|| self.mn_enlist_sched.clone())` (`:813`). The
+   `parent_wake` link is the `gaps.md B5` fix — a private eager sched that cannot route `send_wake` /
+   `close_wake` upward spuriously faults a receiver parked in the parent. At the top level there **is**
+   no parent, so establish that `None` is correct there rather than assuming it (a top-level eager sched
+   is the outermost scheduler; there is nobody above it to wake). `exec_registry` (`:815`, `W7-56`) and
+   `quiesce` (`:818`, `W7-58`) must still be wired — the process-wide deadlock verdict of §2d step 0
+   depends on it.
+3. **Teach `join_nursery` (`src/vm/sched.rs:367`) to JOIN an already-running sched** instead of building
+   one. Today it unconditionally routes to `run_mn_nursery_outermost` (`:520`), which constructs. When
+   the top-level nursery is already eager, the join must attach `main` as the inline worker and wait —
+   the shape `join_eager_nursery` already has for nested scopes.
+
+**Do not touch a deadlock predicate.** The process-wide quiescence verdict (§2d step 0,
+`src/vm/quiesce.rs`) is the thing that keeps an eagerly-started task from turning a fault into a hang;
+it is already correct for parties that own an OS thread. If a change here appears to need a new
+predicate, that is a signal the mechanism is wrong, not that the detector is.
+
+### Test churn — enumerated so it is never rediscovered
+
+**Every path and line number below was verified against the tree on 2026-08-14.** Two corrections to the
+first survey are marked. Each of these asserts either that task output lands **after** the post-spawn
+statements, or that a task was still **unstarted** at fault time.
+
+**`src/vm/tests.rs` — implicit-nursery order pins** (all confirmed on the `fn` line):
+`:161` `implicit_nursery_basic_vm` (`"a\nb\nw\n"` — the sharpest of the group) · `:170`
+`implicit_nursery_return_joins_vm` · `:181` `implicit_nursery_toplevel_vm` · `:201`
+`implicit_nursery_defer_orders_tasks_then_defers` · `:423` `implicit_nursery_try_joins_before_propagating`
+· `:431` `implicit_nursery_respects_function_boundary` · `:438` `implicit_nursery_nested_functions` ·
+`:447` `implicit_nursery_try_preserves_error_value` · `:456` `implicit_nursery_spawn_in_defer_block`.
+
+**`src/vm/tests.rs` — cancel-report pins. These REQUIRE the task to be unstarted** (they assert
+`N pending task(s) cancelled on early exit from parallel:` and, in several, a `print("should not run")`
+that must not appear). This group is the hard design question of the milestone, not mechanical churn —
+an eagerly-started task cannot be "cancelled before it ran", so decide what the report *means* under
+eager start before editing any of them:
+`:464` `implicit_nursery_fault_cancels_pending_tasks` · `:502` `uncaught_fault_reports_implicit_nursery` ·
+`:513` `uncaught_fault_reports_explicit_parallel` · `:525`
+`uncaught_fault_reports_each_nursery_separately` · `:535`
+`uncaught_toplevel_fault_does_not_report_module_nursery` · `:544`
+`recover_caught_fault_reports_each_nursery_separately` · `:555`
+`uncaught_fault_reports_before_frame_defers` · `:565` `recover_caught_fault_reports_before_frame_defers` ·
+`:577` `uncaught_fault_interleaves_report_and_defer_per_frame`.
+
+**`src/vm/parity_tests.rs` — CORRECTION: audit, but they probably survive.** The surveyed line numbers
+`:11578`, `:11602`, `:11616` are mid-body lines, not test starts; the enclosing tests are
+`serial_module_global_direct_mutation_forms_isolate_parity` (`:11537`) and
+`channel_park_keeps_module_snapshot_parity` (`:11605`). Both are **module-global isolation** assertions,
+and in both the parent's `print` sits *after* the nursery's dedent — so an earlier start does not move
+their output. Re-run them; expect green, and do not pre-emptively rewrite them.
+
+**Goldens** (`examples/`):
+
+- **`parallel.chz` + `.expected` — the sharpest artifact in the repo for this milestone.** The golden
+  pins `queued, not yet run` **before** `second worker 10 ran`, and the source comment states the
+  behaviour as intent: "*Tasks run at the dedent, so statements that lexically follow a spawn inside the
+  block run before the spawned bodies (the deterministic sequential approximation)*". Both the program
+  and its prose are being rewritten, not just its expected output.
+- **`implicit_nursery.chz` + `.expected` — read its header comment before assuming churn.** It already
+  documents the correct contract: the exact line order holds for the **buffered test sink** (every lib
+  helper, both engines) and `--serial`; `chezzi run` **streams**, and "*a join point guarantees
+  COMPLETION by the barrier, never that the task could not have started (and printed) earlier*". This is
+  the seam the whole milestone should lean on — the buffered harness is where the real pins live.
+- **`parallel_cross_nursery_late_spawn` — CORRECTION: 2 variants, 4 files**, not 5: `.chz`/`.expected`
+  plus `_parked.chz`/`_parked.expected`.
+- **`airlock_cycle.chz` + `.expected`** — its `spawn use_it(a)` / `spawn use_wide(xs)` sections are inside
+  `recover:` blocks whose `match` prints follow the dedent; verify rather than assume they move.
+
+**`tests/chz` — the gate is the blocker, not the files.** 13 suite files use `spawn` (verified by grep,
+2026-08-14), and they are gated **serial == M:N** by `chz_suite_passes_both_engines`, which runs the
+whole suite on both engines and asserts identical verdicts. **That gate needs a per-engine story before
+any of these may diverge** — it is the first thing to design, ahead of the VM edits, because it decides
+whether the engine split above is even expressible in the native suite:
+`spec/{static_witness,airlock_shared_binding,cancel_defer_recover,airlock_native,eq_func,module_global_freshness,opt_carrier,struct_name_resolution}_test.chz`,
+`stdlib/{fs_bytes_roundtrip,sleep_cancel,process}_test.chz`,
+`suites/{concurrent_collection,rwshared_readview}_test.chz`.
+
+### Docs that move WITH the change, not before it
+
+- **`docs/concurrency.md:221-224`** — the nursery-scoping bullet. It states only where a `spawn` *joins*;
+  it must now also state when a task *starts*, and name the `--serial` exception.
+- **`docs/concurrency.md:263-291`** — the C1–C4-era justification, and the load-bearing one. It says
+  tasks "*run to completion in FIFO order*" at the barrier (`:267`), and §"Documented consequence
+  (sequential only)" (`:283-291`) calls the behaviour "*the deterministic sequential approximation of
+  concurrency*" with real interleaving deferred to **C5**. C5 shipped and became the default engine;
+  this passage was written before that and has never been revisited. Rewrite it, do not patch it.
+- **`docs/syntax.md:3404`** — `print("dispatched")  # runs before the tasks; they join at end-of-function`.
+- **`src/vm/op.rs:456-463`** — the `EnterNursery` / `JoinNursery` doc comments, under a section header
+  that still reads `// ----- concurrency (C4: sequential, run-to-completion executor) -----`.
+- **`src/vm/netio.rs:26` and `:44`** — the two fault hints quoted above. Once tasks start eagerly the
+  advice they give ("*put the producer in a `spawn:` too*") is aimed at a cause that no longer exists.
+- **`docs/stdlib.md:296`** — "the one place the two engines deliberately disagree" becomes two places.
+
+---
+
 ## 2d. Deadlock detection: from quiescence counting to a wait-for graph (planned — NOT started)
 
 > **Why this is filed (2026-08-03).** Eager `Executor` execution (§2c) exposed that Chezzi has *two*
