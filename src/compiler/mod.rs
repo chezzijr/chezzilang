@@ -4822,12 +4822,29 @@ impl Compiler {
 
     /// M24-2 — could a call the free-name walk recorded as `name(…)` / `module.name(…)` take hidden
     /// witness arguments? The [`nested_body_needs_witness`] lookup: a by-name fn is answered exactly
-    /// from [`crate::checker::WitnessTable::fns`]; a qualified head that is NOT an imported module is
-    /// a RECEIVER or a TYPE, i.e. a possible Task-5 MEMBER witness call whose record is keyed on a
-    /// span this walk does not carry — so it answers yes rather than risk an under-capture.
-    fn call_may_take_witnesses(&self, module: Option<&str>, name: &str) -> bool {
+    /// from [`crate::checker::WitnessTable::fns`]; a qualified head that is not a MODULE is a RECEIVER
+    /// or a TYPE, i.e. a possible Task-5 MEMBER witness call whose record is keyed on a span this walk
+    /// does not carry — so it answers yes rather than risk an under-capture.
+    ///
+    /// A head is a module only when it names an import that NO enclosing binding shadows — the same
+    /// `is_unbound` question [`Self::witness_fn_key`] asks, answered here from `snapshot` (the
+    /// enclosing frame's whole visible binding set, locals + captures), because the walk's own `bound`
+    /// set holds only the names bound INSIDE the nested body. Without it a parameter or local named
+    /// `lib` / `math` is recorded indistinguishably from a real module qualification, the fn-key
+    /// lookup misses, and the witness is silently dropped from a program that compiled before.
+    fn call_may_take_witnesses(
+        &self,
+        snapshot: &[CapEntry],
+        module: Option<&str>,
+        name: &str,
+    ) -> bool {
         match module {
-            Some(m) if !self.imported_modules.contains_key(m) => true,
+            Some(m)
+                if !self.imported_modules.contains_key(m)
+                    || snapshot.iter().any(|e| e.name == m) =>
+            {
+                true
+            }
             _ => self
                 .witness_fn_key_named(module, name)
                 .is_some_and(|k| self.witnesses.fns.contains_key(&k)),
@@ -4859,7 +4876,9 @@ impl Compiler {
                     // The suffix is the whole type-PARAM name (`witness_local` formats exactly
                     // `$w:<t>`, and a type param is a bare identifier — never module-qualified).
                     Some(t) => free.is_none_or(|f| {
-                        nested_body_needs_witness(f, t, &|m, n| self.call_may_take_witnesses(m, n))
+                        nested_body_needs_witness(f, t, &|m, n| {
+                            self.call_may_take_witnesses(snapshot, m, n)
+                        })
                     }),
                     None => false,
                 })
@@ -6349,20 +6368,26 @@ fn closed_expr(e: &Expr, bound: &HashSet<String>, heads: &mut Vec<String>) -> bo
 /// `is_witness_fn` answers "could a call spelled `(module, name)` take hidden witness arguments?".
 ///
 /// **The invariant: the compiler captures `$w:t` into a nested body whenever that body can reach a
-/// witness for `t`.** It holds by construction, because there are exactly three ways a body reaches
-/// one and each raises a disjunct here:
-/// * a DIRECT `t.static(…)` — parses as a `Field` on `Ident(t)`, so `t` is a free name of the body;
-/// * a FORWARD into a by-name fn that takes witnesses — recorded as a [`CallSite`];
-/// * a FORWARD into a MEMBER that declares its own witnessed `[T]` (Task 5) — whose callee is a
-///   receiver or a type, not a module, and whose type argument is not a free name either, so it is
-///   covered CONSERVATIVELY: any member-shaped call answers yes, as does an unclassified one
-///   ([`FreeNames::opaque_calls`]).
+/// witness for `t`.** `$w:` is unspellable (`$` is not an identifier character), so a body reaches a
+/// witness only by CALLING something that consumes one, and every call the walk passes lands in
+/// exactly one of the three channels below — so the disjunction is exhaustive over calls:
+/// * `free.names` — a DIRECT `t.static(…)` parses as a `Field` on `Ident(t)`, so `t` is a free name;
+/// * `free.opaque_calls` — a callee [`record_call_site`] could not classify at all (a non-ident
+///   receiver, an indexed head, a call result, a name bound inside the body): always yes;
+/// * `free.calls` — a classified `f(…)` / `head.f(…)`, put to `is_witness_fn`.
 ///
-/// There is no fourth way: `$w:` is unspellable (`$` is not an identifier character), so no source
-/// name reaches a witness directly, and [`free_names_block`]/[`free_names_expr`] flatten every
-/// nested body's names AND calls into the enclosing walk — a `t.default()` two levels down keeps the
-/// outer capture alive. So the checker's `witness_scope`, carried unconditionally into nested
-/// bodies, stays a SUBSET of what the compiler can serve and needs no mirroring rule.
+/// `is_witness_fn` (`Compiler::call_may_take_witnesses`) answers NO only for a callee the compiler
+/// itself would not thread a witness into at a real call site: a by-name or MODULE-qualified fn
+/// absent from [`crate::checker::WitnessTable::fns`]. Every other head — a receiver, a type, or a
+/// module name SHADOWED by an enclosing binding (which the walk records identically to a real module
+/// qualification, since its `bound` set holds only names bound inside the body) — answers yes,
+/// because a MEMBER witness call (Task 5) is keyed on the method-name token, a coordinate this
+/// syntactic walk does not carry, and it names `T` only as a type ARGUMENT, which is not a free name.
+///
+/// [`free_names_block`]/[`free_names_expr`] flatten every nested body's names AND calls into the
+/// enclosing walk, so a `t.default()` two levels down keeps the outer capture alive. Hence
+/// `FnComp::witness_ref` stays a SUPERSET of the checker's `witness_scope`, which is carried
+/// unconditionally into nested bodies and needs no mirroring rule.
 ///
 /// Being too narrow here is not a silent wrong value: [`FnComp::witness_ref`] returns `None` and the
 /// compile fails loudly ("no type witness in scope to forward").

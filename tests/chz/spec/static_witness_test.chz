@@ -15,6 +15,8 @@
 # Serial==M:N is guarded by `test_runner::chz_suite_passes_both_engines`.
 
 import std.concurrency
+# a module bind a PARAMETER can shadow — see the M24-2 section at the bottom of this file
+import std.math
 # the OTHER module a forward can point at — see the M24-1 section at the bottom of this file
 import static_witness_lib as wlib
 
@@ -1127,3 +1129,23 @@ test fn a_cross_module_concrete_forward_keeps_every_position():
     g := cross_module_forward[Counter]
     assert g(Counter(4), direct) == 1
     assert direct.get() == 42
+
+# ===== M24-2 — a nested body's witness capture must see through a SHADOWED module bind =====
+#
+# The free-name walk records `math.make[T](x)` as `(Some("math"), "make")` whether `math` is the
+# imported std module or a PARAMETER that shadows it — its `bound` set holds only the names bound
+# INSIDE the nested body. A capture predicate that reads that pair as a module qualification looks
+# `make` up as a module-level fn of `std.math`, misses, drops `$w:T`, and the program dies with
+# "internal: no type witness in scope to forward as 'T' into the call to 'make'" under a clean
+# `chezzi check`. Any of `math time os io fs net json path log rand csv cmp iter string regex` is a
+# plausible variable name, and a USER module bind (`lib`) shadows the same way — the multi-file half
+# is `src/vm/tests.rs::m24_2_a_parameter_shadowing_a_user_module_keeps_the_witness`.
+
+fn shadowed_module_forward[T: Default](math: Holder, x: T) -> T:
+    seed := T.default()           # this is what charges the frame its `$w:T`
+    f := fn(): math.make[T](x)    # the head is the PARAMETER, not `std.math`
+    return f()
+
+test fn a_parameter_shadowing_a_std_module_keeps_the_witness():
+    assert shadowed_module_forward(Holder(1), Counter(9)).n == 0
+    assert shadowed_module_forward(Holder(1), Tag("hi")).s == "none"

@@ -1509,7 +1509,14 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > alone — a mirroring narrowing there would provably never change an outcome. A Task-5 MEMBER forward
 > (`f := fn(): h.build[T]()`) spells `T` only as a type ARGUMENT and heads the call with a RECEIVER,
 > so neither disjunct sees it and it is covered conservatively; without that third clause the fix
-> turns a program that runs today into a hard compile error. **M24-1 is also FIXED** (2026-08-14):
+> turns a program that runs today into a hard compile error. The same is true of a module name a
+> parameter or local SHADOWS (`fn outer[T](v: T, lib: Holder)` calling `lib.build[T](v)`): the walk
+> records it exactly like a real module qualification, so the predicate asks the enclosing frame's
+> capture snapshot whether the head is shadowed — the first cut of the fix did not, and regressed
+> that program to a runtime `no type witness in scope` on both engines. **The narrowing covers a
+> small slice on purpose:** any call whose head is a non-module ident, any `a.b.c()`, `xs[i].m()`,
+> `f()()`, `a?.m()` or shadowed module name retains EVERY witness, so the win is confined to nested
+> bodies doing only arithmetic, indexing and free-fn calls. **M24-1 is also FIXED** (2026-08-14):
 > the forwarding charge was two name-only questions over the whole body, and it is now one question
 > per CALL SITE. A body calling a witness-taking fn with only concrete arguments
 > (`return reset(Counter(1)).n`) keeps its fn-VALUE position, and a struct method that merely shares

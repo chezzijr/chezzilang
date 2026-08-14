@@ -5392,7 +5392,7 @@ fn m24_2_a_nested_body_forwarding_through_a_member_keeps_its_witness() {
     let src = format!(
         "{W_PRELUDE}struct Holder:\n    k: int\n    fn build[T: Default](self) -> T:\n        \
          return T.default()\nfn outer[T: Default](h: Holder) -> int:\n    c := T.default()\n    \
-         f := fn(): h.build[T]()\n    _ := f()\n    return c.n\nprint(outer[Counter](Holder(1)))\n"
+         f := fn(): h.build[T]()\n    _ := f()\n    return 1\nprint(outer[Counter](Holder(1)))\n"
     );
     let caps = capture_names_of(&src, "<closure>");
     assert_eq!(caps.len(), 1, "one closure proto");
@@ -5401,10 +5401,59 @@ fn m24_2_a_nested_body_forwarding_through_a_member_keeps_its_witness() {
         "a member forward needs the witness: {:?}",
         caps[0]
     );
-    // …and it really runs, on both engines.
+    // …and it really runs, on both engines. The source is one the REAL pipeline accepts: `run_capture`
+    // skips the checker, so a program the checker rejects would "pass" here while `chezzi run` failed.
+    assert!(
+        crate::checker::check(&parser::parse(lexer::tokenize(&src).unwrap()).unwrap()).is_ok(),
+        "the program must type-check, or this test pins nothing `chezzi run` would accept"
+    );
     let vo = run_capture(&src).expect("serial VM");
     let io = run_capture_parallel(&src).expect("M:N engine");
-    assert_eq!(vo, "0\n", "serial VM output");
+    assert_eq!(vo, "1\n", "serial VM output");
+    assert_eq!(vo, io, "serial vs M:N divergence");
+}
+
+/// M24-2 fix pass — the walk's `bound` set holds only the names bound INSIDE the nested body, so a
+/// PARAMETER named `lib` is recorded as `(Some("lib"), "build")`, indistinguishable from a real
+/// module qualification. Reading that as a module looks `build` up as a module-level fn of `lib`,
+/// misses, drops `$w:T`, and this check-clean program dies at runtime with "internal: no type witness
+/// in scope to forward as 'T' into the call to 'build'" — on BOTH engines (parity is blind to it).
+///
+/// Multi-file on purpose: only a real `import lib` puts `lib` in `imported_modules`, which is the
+/// table the shadow has to defeat. The std-module half (`import std.math` + a parameter named
+/// `math`) is single-file and lives in `tests/chz/spec/static_witness_test.chz`.
+#[test]
+fn m24_2_a_parameter_shadowing_a_user_module_keeps_the_witness() {
+    let dir = std::env::temp_dir().join(format!("chezzi_m24_2_shadow_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("lib.chz"),
+        "protocol Default:\n    fn default() -> Self\n\
+         struct Counter:\n    n: int\n    fn default() -> Counter:\n        return Counter(0)\n\
+         struct Holder:\n    k: int\n    fn build[T: Default](self, old: T) -> T:\n        \
+         return T.default()\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.chz");
+    std::fs::write(
+        &entry,
+        "import lib\nimport Counter, Holder from lib\n\
+         fn outer[T: Default](v: T, lib: Holder) -> int:\n    z := T.default()\n    \
+         f := fn(): lib.build[T](v)\n    g := f()\n    return 14\n\
+         print(outer(Counter(1), Holder(2)))\n",
+    )
+    .unwrap();
+    let graph = crate::resolver::build_graph(&entry).expect("resolve");
+    if let Err(errs) = crate::checker::check_graph(&graph) {
+        let _ = std::fs::remove_dir_all(&dir);
+        panic!("program must type-check, got: {errs:?}");
+    }
+    let (vo, _ve, vr, _vc) = run_file(&entry);
+    let (io, _ie, ir, _ic) = run_file_p(&entry);
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(vr.is_ok(), "serial VM faulted: {vr:?}");
+    assert!(ir.is_ok(), "M:N engine faulted: {ir:?}");
+    assert_eq!(vo, "14\n", "serial VM output");
     assert_eq!(vo, io, "serial vs M:N divergence");
 }
 
