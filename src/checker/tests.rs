@@ -24872,10 +24872,20 @@ fn a_lex_error_inside_a_fragment_reports_its_real_line() {
     // Column 16 is hand-counted off source line 3 — `s`1 ` `2 `:`3 `=`4 ` `5 `"`6 `a`7 `b`8 ` `9
     // `{`10 `'`11 `\`12 `\`13 `u`14 `{`15 `Z`←16 — i.e. the physical position of the first `Z`,
     // which only the literal's `PosMap` knows (the fragment's own cursor says col 5).
-    assert!(
-        e.message.contains("lex error (line 3, col 16)"),
-        "must report the literal's real line AND column, got: {}",
+    //
+    // The assertion that matters is on `e.span`: that is the OUTER position — what the LSP
+    // squiggles and what `--errors=json` emits. It used to be the string literal's own span
+    // (col 6, the opening quote), which threw away the column the lexer had just worked out.
+    assert_eq!(
+        (e.span.line, e.span.col),
+        (3, 16),
+        "the squiggled position must be the offending char, got: {}",
         e.message
+    );
+    // …and the message names the phase without re-printing the position the caller just rendered.
+    assert_eq!(
+        e.message, "lex error: invalid hex digit in unicode escape",
+        "the message must not stutter the position"
     );
 }
 

@@ -1181,7 +1181,10 @@ impl Checker {
         match crate::interpolation::parse_interpolation(raw, span) {
             Ok(chunks) => self.check_interp_chunks(&chunks, span),
             Err(e) => {
-                self.error(span, e.message);
+                // `e.span`, not `span`: a fragment's lex error carries the offending char's real
+                // position, and that is the one an editor squiggles. Errors about the literal as a
+                // whole set `e.span == span` anyway, so this is a strict improvement (M24-7).
+                self.error(e.span, e.message);
                 Ty::Str
             }
         }

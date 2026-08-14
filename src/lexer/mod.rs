@@ -3360,10 +3360,22 @@ mod tests {
     /// | bad char inside a `\u{…}` escape    | the offending char     | rustc `badu.rs:2:20`|
     /// | unknown / invalid escape            | the escape char        | rustc `num.rs:3:16` |
     /// | malformed number                    | the literal's start    | rustc `num.rs:2:13` |
+    /// | …**except** a misplaced `'_'`       | the offending `_`      | CPython 3.14.6: `y = 1__0` → offset **6**, the first `_` (rustc has no opinion — it ACCEPTS `1__0`) |
     /// | unterminated string / triple / byte | the OPENING delimiter  | rustc `unterm.rs:2:13`, CPython |
+    /// | a line continuation (`\` + newline) | the `\`                | no ancestor — rustc and CPython both SUPPORT it; Chezzi rejects, and points at the `\` that opens the unsupported escape |
+    /// | an error about a `\u{…}` escape AS A WHOLE | the escape's `{` | Chezzi's own rule — see below |
     ///
     /// The unterminated cases also pin the LINE: the cursor has run to EOF, so reading the position
     /// off `self.pos` reported the line the file ENDS on, not the line the literal opens on.
+    ///
+    /// **The last row diverges from rustc by 1-2 columns, deliberately.** Measured rustc 1.97.0: the
+    /// four whole-escape diagnostics (`"x\uZ"` incorrect, `"y\u{}"` empty, a 7-digit body overlong,
+    /// `"w\u{D800}"` surrogate) all anchor at the `\` and CARET-SPAN the whole escape. `LexError`
+    /// carries a point, not a span, so it names a char inside the escape instead: the offending char
+    /// where there is one (the `Z`, the 7th digit), and otherwise the escape's opening `{` — the same
+    /// "an unterminated delimiter points at its opener" rule the string families use. Every one is a
+    /// real character on the right line and inside the construct the message is about, which is the
+    /// bar; matching rustc's anchor exactly would need a span, not a column.
     #[test]
     fn lex_error_points_at_the_offending_character() {
         // (source, expected line, expected col, message substring)
@@ -3408,6 +3420,76 @@ mod tests {
             ),
             // y := ~   — the char itself, at col 6 (the cursor is already past it)
             ("x := 1\ny := ~\n", 2, 6, "unexpected character '~'"),
+            // ----- the positions this change CHOSE (no prior measurement covered them) -----
+            // A misplaced `_` in a number → the `_`, NOT the literal's start. Ancestor: CPython
+            // 3.14.6, `y = 1__0` → `lineno 2 offset 6`, the FIRST underscore (measured; rustc has
+            // no opinion here — it accepts `1__0` and emits nothing).
+            // y := 1__0   — cols: y1 ␠2 :3 =4 ␠5 1←6 _←7
+            (
+                "x := 1\ny := 1__0\n",
+                2,
+                7,
+                "'_' in a number must be between digits",
+            ),
+            // …and the radix body takes the same rule: CPython `y = 0b1__0` → offset 8, its first
+            // underscore. y := 0b1__0 — cols: y1 ␠2 :3 =4 ␠5 0←6 b7 1←8 _←9
+            (
+                "x := 1\ny := 0b1__0\n",
+                2,
+                9,
+                "'_' in a number must be between digits",
+            ),
+            // A line continuation → the `\`. No ancestor: rustc and CPython both SUPPORT `\`+newline
+            // in a string; Chezzi rejects it, so the position is its own choice — the `\` that opens
+            // the escape, which is where the construct starts.
+            // y := "ab\⏎   — cols: y1 ␠2 :3 =4 ␠5 "6 a7 b8 \←9
+            (
+                "x := 1\ny := \"ab\\\ncd\"\n",
+                2,
+                9,
+                "line continuations are not supported",
+            ),
+            // …inside a TRIPLE-quoted literal the `\` is on a later line than the opener, which is
+            // the case that pins the line axis of this arm: the arm errors right after consuming the
+            // newline, so `self.line`/`line_start` still describe the `\`'s own line.
+            // line 3 is `cd\`   — cols: c1 d2 \←3
+            (
+                "x := 1\ny := \"\"\"ab\ncd\\\nef\"\"\"\n",
+                3,
+                3,
+                "line continuations are not supported",
+            ),
+            // …and in a byte-string, where the `b` prefix shifts everything one right.
+            // y := b"ab\⏎   — cols: y1 ␠2 :3 =4 ␠5 b6 "7 a8 b9 \←10
+            (
+                "x := 1\ny := b\"ab\\\ncd\"\n",
+                2,
+                10,
+                "line continuations are not supported",
+            ),
+            // An error about a `\u{…}` escape AS A WHOLE → the escape's opening `{` (see the doc
+            // comment: rustc anchors these at the `\` and spans the escape; a column can only name
+            // one char, and the `{` is the escape body's opener).
+            // y := "a\u{12   — cols: y1 ␠2 :3 =4 ␠5 "6 a7 \8 u9 {←10. No trailing newline: the
+            // escape must hit EOF, or the newline is just a non-hex char and site #31 fires first.
+            (
+                "x := 1\ny := \"a\\u{12",
+                2,
+                10,
+                "unterminated unicode escape",
+            ),
+            // y := "a\u{}b"  — same count: the `{` is col 10
+            ("x := 1\ny := \"a\\u{}b\"\n", 2, 10, "empty unicode escape"),
+            // y := "a\u{D800}b" — a surrogate; again the `{` at col 10
+            (
+                "x := 1\ny := \"a\\u{D800}b\"\n",
+                2,
+                10,
+                "invalid unicode code point",
+            ),
+            // (The fourth whole-escape site, `invalid unicode escape: {e}`, is unreachable: its
+            // `from_str_radix` is fed 1-6 chars already validated as ASCII hex, which always parses.
+            // It shares `brace` with the three above by construction.)
         ];
         for (src, line, col, msg) in cases {
             let e = tokenize(src).expect_err(&format!("expected a lex error for {src:?}"));

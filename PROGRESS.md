@@ -10230,18 +10230,30 @@ branch names) is in the git log.
   the position was being read off the cursor after it ran to EOF. **The rule** (measured against
   rustc + CPython, table in `docs/gaps.md` M24-7 and in the test's doc comment): point at the
   offending character; an unterminated delimiter points at its opener; a malformed number points at
-  the literal's start; an escape error points at the escape char, not the `\`. Mechanism: `col` on
+  the literal's start — **except a misplaced `'_'` separator, which points at the `_` itself**
+  (CPython measured: `y = 1__0` → offset 6; rustc has no opinion, it accepts `1__0`) — and an escape
+  error points at the escape char, not the `\`. A `\`+newline line continuation points at the `\`
+  (neither ancestor rejects it, so the choice is Chezzi's), and an error about a `\u{…}` escape *as a
+  whole* points at its `{` — 1-2 columns left of rustc, which anchors those at the `\` and
+  caret-**spans** the escape; a `LexError` carries a point, not a span. Mechanism: `col` on
   `LexError`, `Display` is `lex error (line {}, col {}): {}` (matching `Span`'s), and
   `src/resolver/mod.rs` reads `e.col` — the LSP, `--errors=json` and the plain-text renderer all ride
   along unedited. `Lexer::error` stays the sole constructor path, now `error()` → `error_at(pos)` →
   `error_span(span)`; `error_at` asks `span_at`, so a column inside a re-lexed interpolation fragment
   composes through the M24-6 `PosMap` for free. All 35 construction sites audited. `Span` untouched
-  (still 12 bytes). Tests: `lexer::tests::lex_error_points_at_the_offending_character` (10-case
-  table, every column hand-counted from the source rather than read off the implementation),
-  `lex_error_display_carries_the_column`, the extended
-  `checker::tests::a_lex_error_inside_a_fragment_reports_its_real_line` (now pins col 16, the
-  fragment column only the `PosMap` knows), and `check_errors_json::lex_error_carries_a_real_column`
-  (CLI-level JSON + plain text).
+  (still 12 bytes). **The interpolation seam needed one more edit to actually deliver it:**
+  `interpolation::parse_expr_str` built its `InterpError` from the *string literal's* span, so
+  `s := "a\tb{1 + @}c"` reported *type error (line 2, col 6): lex error (line 2, col 16): unexpected
+  character '@'* — the inner text named the `@`, the outer position (the one the LSP squiggles) named
+  the opening quote. The `InterpError` now carries the `LexError`'s own line/col, the checker reports
+  `e.span`, and the doubled position is gone: *type error (line 2, col 16): lex error: unexpected
+  character '@'*. Tests: `lexer::tests::lex_error_points_at_the_offending_character` (18-case table,
+  every column hand-counted from the source rather than read off the implementation, and covering the
+  three families this change *chose* rather than measured — the `'_'` sites, the three line
+  continuations, the whole-escape `\u{…}` sites), `lex_error_display_carries_the_column`, the extended
+  `checker::tests::a_lex_error_inside_a_fragment_reports_its_real_line` (pins the OUTER `e.span` at
+  col 16, the fragment column only the `PosMap` knows), and
+  `check_errors_json::lex_error_carries_a_real_column` (CLI-level JSON + plain text).
 
 - **`examples/panic.chz` type-checks — the last allow-listed example is gone, and its recorded reason
   was wrong (2026-08-06).** `chezzi check examples/panic.chz` failed with `line 29, col 22: expression

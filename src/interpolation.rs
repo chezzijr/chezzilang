@@ -189,9 +189,18 @@ fn parse_expr_str(
     map: Arc<PosMap>,
     off: usize,
 ) -> Result<Expr, InterpError> {
+    // The `LexError` already knows the offending char's REAL physical position (`span_at` composed
+    // it through the literal's `PosMap`), so the `InterpError` carries THAT, not the literal's own
+    // span — the outer span is what an editor squiggles, and pointing it at the opening quote threw
+    // the whole point of M24-7 away. The message drops `LexError`'s own `(line, col)` prefix with
+    // it: the caller re-renders the position, and printing it twice stutters.
     let tokens = lexer::tokenize_frag(src, map, off).map_err(|e| InterpError {
-        message: e.to_string(),
-        span,
+        message: format!("lex error: {}", e.message),
+        span: Span {
+            line: e.line as u32,
+            col: e.col as u32,
+            file: span.file,
+        },
     })?;
     // W7-43 — no carrier lowering here any more: `?.`/`??` are ordinary expressions that survive to
     // the checker and the compiler, and both set the `kw_frag_ctx`/`kw_frag_ord` discriminators a
