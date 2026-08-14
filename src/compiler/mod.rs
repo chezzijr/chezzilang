@@ -4820,35 +4820,24 @@ impl Compiler {
         }
     }
 
-    /// M24-2 — could a call the free-name walk recorded as `name(…)` / `module.name(…)` take hidden
-    /// witness arguments? The [`nested_body_needs_witness`] lookup: a by-name fn is answered exactly
-    /// from [`crate::checker::WitnessTable::fns`]; a qualified head that is not a MODULE is a RECEIVER
-    /// or a TYPE, i.e. a possible Task-5 MEMBER witness call whose record is keyed on a span this walk
-    /// does not carry — so it answers yes rather than risk an under-capture.
+    /// M24-2 — could a call the free-name walk recorded as `name(…)` / `head.name(…)` take hidden
+    /// witness arguments? The [`nested_body_needs_witness`] lookup.
     ///
-    /// A head is a module only when it names an import that NO enclosing binding shadows — the same
-    /// `is_unbound` question [`Self::witness_fn_key`] asks, answered here from `snapshot` (the
-    /// enclosing frame's whole visible binding set, locals + captures), because the walk's own `bound`
-    /// set holds only the names bound INSIDE the nested body. Without it a parameter or local named
-    /// `lib` / `math` is recorded indistinguishably from a real module qualification, the fn-key
-    /// lookup misses, and the witness is silently dropped from a program that compiled before.
-    fn call_may_take_witnesses(
-        &self,
-        snapshot: &[CapEntry],
-        module: Option<&str>,
-        name: &str,
-    ) -> bool {
-        match module {
-            Some(m)
-                if !self.imported_modules.contains_key(m)
-                    || snapshot.iter().any(|e| e.name == m) =>
-            {
-                true
-            }
-            _ => self
-                .witness_fn_key_named(module, name)
-                .is_some_and(|k| self.witnesses.fns.contains_key(&k)),
-        }
+    /// A FIELD-HEADED call always answers yes. What the head `X` in `X.name(…)` denotes — an imported
+    /// module, a struct/enum/newtype TYPE, a receiver value, or a module name shadowed by an enclosing
+    /// binding — is a question about the enclosing scopes and the type namespace that this syntactic
+    /// walk does not carry, and two rounds of guessing at it each shipped a check-ok/run-fault (a
+    /// shadowing param, then a type named like an imported module). Answering yes for every head
+    /// retires the whole class by construction: there is no head shape left to classify.
+    ///
+    /// So a NO comes only from a BARE-IDENT callee, resolved through the real
+    /// [`crate::checker::WitnessTable::fns`] table — a call the compiler itself would thread no
+    /// witness into at a real call site.
+    fn call_may_take_witnesses(&self, module: Option<&str>, name: &str) -> bool {
+        module.is_some()
+            || self
+                .witness_fn_key_named(None, name)
+                .is_some_and(|k| self.witnesses.fns.contains_key(&k))
     }
 
     /// M24 Task 4 — append the enclosing frame's hidden `$w:T` bindings to a nested body's capture
@@ -4876,9 +4865,7 @@ impl Compiler {
                     // The suffix is the whole type-PARAM name (`witness_local` formats exactly
                     // `$w:<t>`, and a type param is a bare identifier — never module-qualified).
                     Some(t) => free.is_none_or(|f| {
-                        nested_body_needs_witness(f, t, &|m, n| {
-                            self.call_may_take_witnesses(snapshot, m, n)
-                        })
+                        nested_body_needs_witness(f, t, &|m, n| self.call_may_take_witnesses(m, n))
                     }),
                     None => false,
                 })
@@ -6396,13 +6383,23 @@ fn closed_expr(e: &Expr, bound: &HashSet<String>, heads: &mut Vec<String>) -> bo
 ///   receiver, an indexed head, a call result, a name bound inside the body): always yes;
 /// * `free.calls` — a classified `f(…)` / `head.f(…)`, put to `is_witness_fn`.
 ///
-/// `is_witness_fn` (`Compiler::call_may_take_witnesses`) answers NO only for a callee the compiler
-/// itself would not thread a witness into at a real call site: a by-name or MODULE-qualified fn
-/// absent from [`crate::checker::WitnessTable::fns`]. Every other head — a receiver, a type, or a
-/// module name SHADOWED by an enclosing binding (which the walk records identically to a real module
-/// qualification, since its `bound` set holds only names bound inside the body) — answers yes,
-/// because a MEMBER witness call (Task 5) is keyed on the method-name token, a coordinate this
-/// syntactic walk does not carry, and it names `T` only as a type ARGUMENT, which is not a free name.
+/// `is_witness_fn` (`Compiler::call_may_take_witnesses`) answers NO in exactly ONE case: a BARE-IDENT
+/// callee `f(…)` whose resolved key is absent from [`crate::checker::WitnessTable::fns`] — i.e. a
+/// callee the compiler itself would thread no witness into at a real call site. A bare ident is the
+/// only head this walk resolves the way the emitter does, because a bare call carries no head to
+/// misread.
+///
+/// EVERY field-headed call `X.f(…)` answers yes, whatever `X` turns out to name — an imported module,
+/// a TYPE, a receiver value, or a module name shadowed by an enclosing binding. The walk cannot tell
+/// those apart (its `bound` set holds only names bound INSIDE the body, and it sees no type
+/// namespace), and a Task-5 MEMBER witness call is keyed on the method-name token, a coordinate it
+/// does not carry, while naming `T` only as a type ARGUMENT, which is not a free name. Two earlier
+/// cuts tried to classify the head and each shipped a check-ok/run-fault; not classifying it at all
+/// is what makes the disjunction exhaustive rather than merely untested.
+///
+/// The narrowing that remains is therefore modest and worth stating exactly: a nested body keeps
+/// every witness unless it does only arithmetic, indexing, literal/name work and bare calls to
+/// non-witness fns. Any `x.m(…)`, `a.b.c()`, `xs[i].m()`, `f()()` or `a?.m()` keeps them all.
 ///
 /// [`free_names_block`]/[`free_names_expr`] flatten every nested body's names AND calls into the
 /// enclosing walk, so a `t.default()` two levels down keeps the outer capture alive. Hence

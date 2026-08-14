@@ -17,6 +17,8 @@
 import std.concurrency
 # a module bind a PARAMETER can shadow — see the M24-2 section at the bottom of this file
 import std.math
+# a module bind a TYPE declared in this file shadows — see the M24-2 section at the bottom
+import std.time
 # the OTHER module a forward can point at — see the M24-1 section at the bottom of this file
 import static_witness_lib as wlib
 
@@ -1149,6 +1151,31 @@ fn shadowed_module_forward[T: Default](math: Holder, x: T) -> T:
 test fn a_parameter_shadowing_a_std_module_keeps_the_witness():
     assert shadowed_module_forward(Holder(1), Counter(9)).n == 0
     assert shadowed_module_forward(Holder(1), Tag("hi")).s == "none"
+
+# ===== M24-2 — …and a TYPE whose name equals a module bind is the same question =====
+#
+# The head of `time.make[T](x)` is a `struct`/`enum` DECLARED HERE, which wins the name over the
+# `import std.time` bind. A capture predicate that asks "does an enclosing VALUE binding shadow this
+# module?" sees nothing — a type is in no value table — reads the head as `std.time`, misses `make`
+# in that module's fns, and drops `$w:T`: clean `chezzi check`, then "internal: no type witness in
+# scope to forward as 'T' into the call to 'make'" on BOTH engines. That is why the predicate stopped
+# classifying the head at all: every field-headed call keeps every witness. The USER-module spelling
+# (`import Shape` beside `struct Shape`) is the multi-file half, in
+# `src/vm/tests.rs::m24_2_a_type_named_like_a_user_module_keeps_the_witness`.
+
+struct time:
+    k: int
+    fn make[T: Default](x: T) -> T:
+        return T.default()
+
+fn type_named_like_a_module_forward[T: Default](x: T) -> T:
+    seed := T.default()          # this is what charges the frame its `$w:T`
+    f := fn(): time.make[T](x)   # the head is the STRUCT above, not `std.time`
+    return f()
+
+test fn a_type_named_like_a_std_module_keeps_the_witness():
+    assert type_named_like_a_module_forward(Counter(9)).n == 0
+    assert type_named_like_a_module_forward(Tag("hi")).s == "none"
 
 # ===== M24-2 — a body whose ONLY witness use is a MEMBER forward is CHARGED =====
 #

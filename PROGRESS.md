@@ -1509,14 +1509,15 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > alone — a mirroring narrowing there would provably never change an outcome. A Task-5 MEMBER forward
 > (`f := fn(): h.build[T]()`) spells `T` only as a type ARGUMENT and heads the call with a RECEIVER,
 > so neither disjunct sees it and it is covered conservatively; without that third clause the fix
-> turns a program that runs today into a hard compile error. The same is true of a module name a
-> parameter or local SHADOWS (`fn outer[T](v: T, lib: Holder)` calling `lib.build[T](v)`): the walk
-> records it exactly like a real module qualification, so the predicate asks the enclosing frame's
-> capture snapshot whether the head is shadowed — the first cut of the fix did not, and regressed
-> that program to a runtime `no type witness in scope` on both engines. **The narrowing covers a
-> small slice on purpose:** any call whose head is a non-module ident, any `a.b.c()`, `xs[i].m()`,
-> `f()()`, `a?.m()` or shadowed module name retains EVERY witness, so the win is confined to nested
-> bodies doing only arithmetic, indexing and free-fn calls. **The CHECKER's matching member blind spot
+> turns a program that runs today into a hard compile error. **The predicate deliberately does NOT
+> ask what the head of an `X.f(…)` call names** — two cuts that did each shipped green with a
+> check-ok/run-fault (a parameter SHADOWING a module bind, then a `struct`/`enum` whose name equals
+> an imported module, which no VALUE-binding shadow test can see), so every field-headed call now
+> answers "may take witnesses" and the whole head-classification class is retired by construction. A
+> NO comes only from a BARE-IDENT callee resolved through the real witness table, or from a body with
+> no calls at all. **The narrowing covers a small slice on purpose:** every field-headed call —
+> `h.build(…)`, `lib.f(…)`, `a.b.c()`, `xs[i].m()`, `f()()`, `a?.m()` — retains EVERY witness, so the
+> win is confined to nested bodies doing only arithmetic, indexing and bare calls to non-witness fns. **The CHECKER's matching member blind spot
 > is closed in the same pass:** its forwarding charge read free names and module-qualified calls only,
 > so `fn f[T: Default](h: Holder, x: T) -> T: return h.build[T](x)` — whose only use of `T` is a
 > member forward — was never charged and was then rejected with *"no hidden type witness for 'T' is
