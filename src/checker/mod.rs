@@ -526,9 +526,12 @@ struct FnSig {
     /// (excluded from `fn_sig_eq`). Covers free fns AND methods/static methods (all reuse `FnSig`).
     doc: Option<String>,
     /// M24 — the type params this fn takes a hidden trailing `$w:T` witness argument for, in
-    /// declaration order (empty for everything else, which is nearly every signature). Computed ONCE
-    /// by [`Checker::witness_params_of`] at the signature hoist — where the declaration BODY is still
-    /// available — and read from here by every consumer (the body's `witness_scope`, the
+    /// declaration order (empty for everything else, which is nearly every signature). Computed by
+    /// [`Checker::witness_params_of`] at the signature hoist — where the declaration BODY is still
+    /// available — then re-derived to a fixpoint over the module's free fns (and re-passed once over
+    /// its members) in [`Checker::hoist`], since forwarding makes the answer depend on the callees'.
+    /// [`FnSig::min_params`] is DERIVED from this and is rewritten wherever this is, so the two can
+    /// never disagree. Read from here by every consumer (the body's `witness_scope`, the
     /// [`WitnessTable::fns`] entry the compiler lowers, the fn-as-value wall, the `spawn`/`defer`
     /// target rejection, and the per-call-site record). Crosses the module boundary inside
     /// [`ModuleSig`]. Excluded from `fn_sig_eq` (a lowering detail, not type identity). On a METHOD's
@@ -1978,6 +1981,23 @@ struct Checker {
     /// A type param of the enclosing TYPE (`struct Bx[T]`) is never in here: its
     /// witness would have to live in the instance, which is a different mechanism.
     witness_scope: Vec<String>,
+    /// M24-2 — every METHOD NAME in the program that some declaration takes a hidden witness for (a
+    /// method of a struct / enum / newtype declaring a type param with a static-carrying bound).
+    /// Graph-wide and never cleared per module — modules are checked deps-first, so an imported
+    /// type's methods are already in here when an importer hoists.
+    ///
+    /// It is the NECESSARY half of [`Checker::member_call_forwards_a_witness`], never the sufficient
+    /// one. A member call gives a pre-type walk no callee to resolve, so the charge asks THIS CALL
+    /// SITE what of `decl`'s own it carries; this set answers the other question that site cannot —
+    /// whether the callee could take a witness AT ALL. `sink.push(x)` on a builtin `List` satisfies
+    /// the call-site half (`x: T`) and is still not a forward, because no declaration anywhere
+    /// declares a witness-taking `push`; keying the charge on this set ALONE was the opposite error,
+    /// one unpinnable `get` poisoning every `m.get("a")` in the program.
+    ///
+    /// Keyed on the NAME (all a pre-type walk has) and read off the DECLARATION rather than the
+    /// derived [`FnSig::witness_params`], so it needs no fixpoint of its own and the free-fn loop can
+    /// consult it while method charges are still unfinished. Both approximations err toward CHARGING.
+    witness_member_names: std::collections::HashSet<String>,
     /// M24 — the manifest `[project] entrypoint`'s FUNCTION name, when this check is for a bare
     /// `chezzi run` (`check_graph_with_entry`). `None` for `chezzi check <file>` and every library
     /// caller: a file run never invokes a function by name.

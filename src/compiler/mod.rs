@@ -4636,7 +4636,10 @@ impl Compiler {
         // run time, on a program `chezzi check` had just passed. Replaying the call through the
         // wrapper proto emits exactly the module-member call the eager spelling emits, so nothing
         // module-shaped crosses. `is_unbound` first, so a local that merely SHADOWS the module name
-        // stays a genuine receiver (mirroring the checker's `Ty::Module` skip in `sig.rs`).
+        // — or is BOUND to it (`m := math`) — stays a genuine receiver. The checker's spawn-receiver
+        // skip (`sig.rs`) asks this same question, on the same two clauses, so the check-time verdict
+        // and the lowering cannot disagree; keying it there on the resolved `Ty::Module` alone was
+        // exactly that disagreement (check ok, then a run-time airlock fault).
         if let ExprKind::Ident(mname) = &obj.kind
             && fc.is_unbound(mname)
             && self.imported_modules.contains_key(mname)
@@ -6259,14 +6262,20 @@ pub(crate) struct FreeNames {
     pub record_members: bool,
 }
 
-/// M24-2 — one MEMBER call (`recv.m(…)`), carrying the two things a PRE-TYPE walk can hand the
-/// forwarding charge: the call's own TYPE ARGUMENTS, and every identifier occurring anywhere in an
-/// argument expression. `Checker::member_call_forwards_a_witness` charges its enclosing fn when
-/// either names something of that fn's — a type parameter in the turbofish (`h.make[T](x)`), or a
-/// value parameter whose annotation mentions one (`h.make(x)` with `x: T`). The method NAME is
-/// deliberately absent: matching it against a graph-wide index of witnessed method names made one
-/// unpinnable `get` anywhere poison every `m.get("a")` in the program.
+/// M24-2 — one MEMBER call (`recv.m(…)`), carrying the three things a PRE-TYPE walk can hand the
+/// forwarding charge: the method NAME, the call's own TYPE ARGUMENTS, and every identifier occurring
+/// anywhere in an argument expression. `Checker::member_call_forwards_a_witness` charges its
+/// enclosing fn only when BOTH halves answer yes — this call site carries something of that fn's (a
+/// type parameter in the turbofish `h.make[T](x)`, or a value parameter whose annotation mentions
+/// one, `h.make(x)` with `x: T`) AND the NAME is declared as a witness-taking member somewhere in
+/// the module graph. The name is a NECESSARY condition, never a sufficient one: alone it made one
+/// unpinnable `get` poison every `m.get("a")` in the program; alone the call-site half charged
+/// `sink.push(x)` on a BUILTIN `List`, which can never take a witness at all.
 pub(crate) struct MemberCall {
+    /// The method name (`h.make(x)` → `make`). Matched against the graph-wide index of method names
+    /// that some declaration DOES take a witness for — a receiver whose method name is nowhere
+    /// declared witness-taking is a builtin or a plain method, and cannot be a forward.
+    pub name: String,
     /// The call's explicit type arguments (`h.make[T](x)` → `[T]`); empty for an inferred call and
     /// for `a?.m(…)`, which has no type-argument syntax.
     pub type_args: Vec<crate::ast::Type>,
@@ -6312,7 +6321,7 @@ fn record_call_site(
             // Every field-headed callee is a possible MEMBER call, whatever its head turns out to be.
             if out.record_members {
                 out.member_calls
-                    .push(member_call(args, named, type_args.to_vec()));
+                    .push(member_call(name, args, named, type_args.to_vec()));
             }
             match &obj.kind {
                 ExprKind::Ident(m) if !bound.contains(m) => (Some(m.clone()), name.clone()),
@@ -6334,8 +6343,9 @@ fn record_call_site(
     });
 }
 
-/// Build a [`MemberCall`] from one member call site's arguments and type arguments.
+/// Build a [`MemberCall`] from one member call site's name, arguments and type arguments.
 fn member_call(
+    name: &str,
     args: &[Expr],
     named: &[(String, Expr)],
     type_args: Vec<crate::ast::Type>,
@@ -6347,6 +6357,7 @@ fn member_call(
         .flat_map(|a| free_names_of_expr(a, &nothing_bound))
         .collect();
     MemberCall {
+        name: name.to_string(),
         type_args,
         arg_idents,
     }
@@ -6646,7 +6657,9 @@ pub(crate) fn free_names_expr(e: &Expr, bound: &HashSet<String>, out: &mut FreeN
         ExprKind::Field { obj, .. } => {
             free_names_expr(obj, bound, out);
         }
-        ExprKind::OptChain { obj, call, .. } => {
+        ExprKind::OptChain {
+            obj, name, call, ..
+        } => {
             free_names_expr(obj, bound, out);
             if let Some(c) = call {
                 // `a?.m(…)` is a member call `record_call_site` never sees — and a member call is a
@@ -6657,7 +6670,7 @@ pub(crate) fn free_names_expr(e: &Expr, bound: &HashSet<String>, out: &mut FreeN
                 // is for a plain member call.
                 if out.record_members {
                     out.member_calls
-                        .push(member_call(&c.args, &c.named, Vec::new()));
+                        .push(member_call(name, &c.args, &c.named, Vec::new()));
                 }
                 c.args.iter().for_each(|a| free_names_expr(a, bound, out));
                 c.named

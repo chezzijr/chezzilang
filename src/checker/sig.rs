@@ -150,7 +150,10 @@ impl Checker {
         let wparams = self.witness_params_of(decl);
         FnSig {
             // Trailing defaulted parameters are filled by the CALLEE's own prologue, so a call may
-            // omit them. Same predicate the compiler sizes `Proto::min_arity` with.
+            // omit them. Same predicate the compiler sizes `Proto::min_arity` with — and because
+            // this reading DEPENDS on `wparams`, which the hoist fixpoint re-derives (non-monotone:
+            // it adds and removes charges), the fixpoint re-derives this alongside it. Neither may
+            // be written without the other.
             min_params: crate::ast::min_callable_params(&decl.params, !wparams.is_empty()),
             labels,
             params,
@@ -975,9 +978,11 @@ impl Checker {
         // `h.build[T](x)` is then REJECTED — "no hidden type witness for 'T' is reachable at this
         // call site" — with no way to write the program at all. The question is asked PER CALL SITE
         // and only about THIS declaration ([`Self::member_call_forwards_a_witness`]): does a type
-        // argument or an argument carry something of `decl`'s own into the callee? A graph-wide index
-        // of witnessed method NAMES cannot: it made one unpinnable `get`/`push` poison that name for
-        // every member call in every static-bounded generic, builtin methods included.
+        // argument or an argument carry something of `decl`'s own into the callee, AND can the
+        // callee take a witness at all? Either half alone over-fires — the name index alone made one
+        // unpinnable `get`/`push` poison that name for every member call in every static-bounded
+        // generic, and the call-site half alone charged a BUILTIN `sink.push(x)` that has no witness
+        // parameter to receive anything.
         let forwards = walk
             .calls
             .iter()
@@ -985,7 +990,7 @@ impl Checker {
             || walk
                 .member_calls
                 .iter()
-                .any(|c| self.member_call_forwards_a_witness(c, decl));
+                .any(|c| self.member_call_forwards_a_witness(c, decl, &cands));
         cands
             .into_iter()
             .filter(|t| mentioned.contains(t) || (forwards && Self::ty_param_in_sig(decl, t, true)))
@@ -1070,36 +1075,50 @@ impl Checker {
     /// M24-2 — does this ONE MEMBER call site inside `decl`'s body forward a witness of `decl`'s own?
     ///
     /// A member call gives a pre-type walk no callee to resolve — the receiver's type is exactly what
-    /// is not known yet — so the question is asked of THIS CALL SITE, about `decl`, and never of a
-    /// graph-wide index of method names. It charges when something of `decl`'s own could be flowing
-    /// into the callee's type parameter:
-    /// * a **TYPE ARGUMENT** names one of `decl`'s type params (`h.make[T](x)`, `h.mk[T]()`); or
-    /// * an **ARGUMENT mentions a value parameter of `decl` whose annotation mentions one of
-    ///   `decl`'s type params** (`h.make(x)` with `x: T`, and `h.make(f(xs[0]))` with `xs: List[T]`
-    ///   — [`crate::compiler::MemberCall::arg_idents`] is collected at any depth for exactly that).
+    /// is not known yet — so neither half of the question can be answered alone, and BOTH must say
+    /// yes:
     ///
-    /// Nothing else charges, and that is the whole point: `m.get("a")` on a `Map` and `xs.push(1)` on
-    /// a `List` name none of `decl`'s own, so an unrelated `Box.get[T: Default]` or `Sink.push[T:
-    /// Default]` somewhere in the program cannot cost `decl` its function-value position. The
-    /// name-keyed index this replaced did exactly that: one unpinnable witnessed method poisoned its
-    /// NAME for every member call in every static-bounded generic, builtin methods included.
+    /// 1. **this call site carries something of `decl`'s own** — a TYPE ARGUMENT names one of
+    ///    `decl`'s witness CANDIDATES (`h.make[T](x)`, `h.mk[T]()`), or an ARGUMENT mentions a value
+    ///    parameter of `decl` whose annotation mentions one of `decl`'s type params (`h.make(x)` with
+    ///    `x: T`, and `h.make(f(xs[0]))` with `xs: List[T]` —
+    ///    [`crate::compiler::MemberCall::arg_idents`] is collected at any depth for exactly that);
+    ///    **and**
+    /// 2. **the method NAME is declared as witness-taking somewhere in the module graph**
+    ///    ([`Checker::witness_member_names`]) — otherwise the callee is a builtin or a plain method
+    ///    and there is no witness parameter for anything to flow into.
+    ///
+    /// Each half alone is a measured defect. Half 2 alone made one unpinnable `get` poison every
+    /// `m.get("a")` in the program. Half 1 alone charged `sink.push(x)` where `sink: List[T]` — a
+    /// BUILTIN `List.push`, which can never take a witness — costing `label` its function-value
+    /// position for a forward that does not exist. ANDed they are strictly narrower than either:
+    /// `m.get("a")` fails 1 (a literal argument names nothing of `decl`'s), `sink.push(x)` fails 2
+    /// unless some user type really declares a witness-taking `push`.
     ///
     /// **Under-charging is the unsafe direction** (the charge and the capture must agree, and the
-    /// checker then refuses a forward it did not charge), so both clauses read conservatively: type
-    /// args are matched against ALL of `decl`'s type params, not just the static-bounded candidates,
-    /// and `arg_idents` carries every ident in an argument with no bound-name subtraction. What it
-    /// still cannot see is a `T` that reaches the argument through something other than a parameter
-    /// — a LOCAL (`v := x` then `h.make(v)`), a field, a call result — which is refused with "no
-    /// hidden type witness for 'T' is reachable at this call site"; the turbofish (`h.make[T](v)`)
-    /// is the spelling that always charges.
+    /// checker then refuses a forward it did not charge), so within half 1 both clauses stay
+    /// generous: `arg_idents` carries every ident in an argument with no bound-name subtraction, and
+    /// the parameter clause reads ALL of `decl`'s type params. Type ARGUMENTS are matched against the
+    /// static-bounded candidates only, because those are the only params a witness can ever be
+    /// charged for — `cands` is what the caller then filters by, so a non-candidate turbofish could
+    /// only charge an unrelated `T`. What this still cannot see is a `T` that reaches the argument
+    /// through something other than a parameter — a LOCAL (`v := x` then `h.make(v)`), a field, a
+    /// call result — which is refused with "no hidden type witness for 'T' is reachable at this call
+    /// site"; the turbofish (`h.make[T](v)`) is the spelling that always charges.
     fn member_call_forwards_a_witness(
         &self,
         c: &crate::compiler::MemberCall,
         decl: &FnDecl,
+        cands: &[String],
     ) -> bool {
+        if !self.witness_member_names.contains(&c.name) {
+            return false;
+        }
         let names_a_type_param =
             |ty: &crate::ast::Type| decl.type_params.iter().any(|tp| ty_mentions(ty, &tp.name));
-        c.type_args.iter().any(&names_a_type_param)
+        c.type_args
+            .iter()
+            .any(|ty| cands.iter().any(|t| ty_mentions(ty, t)))
             || c.arg_idents.iter().any(|a| {
                 decl.params
                     .iter()
@@ -2638,9 +2657,21 @@ impl Checker {
                                 // is sendable is a question about the wrong thing. `defer` already
                                 // treats this shape as a plain call, and Go accepts `go pkg.F(x)`
                                 // exactly as it accepts `defer pkg.F(x)`; one concept, one verdict
-                                // (M24-5). A local that SHADOWS the module name infers to its OWN
-                                // type here, so it stays a genuine receiver and is still checked.
-                                if !matches!(rty, Ty::Module(_)) && !self.sendable(&rty) {
+                                // (M24-5).
+                                //
+                                // The skip is keyed on the same thing the compiler's
+                                // [`crate::compiler::Compiler::receiverless_call_head`] is — an
+                                // UNBOUND module NAME — not on the resolved type being `Ty::Module`.
+                                // A module bound to a local (`m := math`) is `Ty::Module` but is not
+                                // a namespace head: the compiler lowers it as a real receiver, and
+                                // the airlock then refuses the module handle at RUN time on a
+                                // program `chezzi check` had just passed. Two halves of one rule, so
+                                // they ask one question (M24-5b).
+                                let namespace_head = matches!(rty, Ty::Module(_))
+                                    && matches!(&obj.kind, ExprKind::Ident(n)
+                                        if self.imported_modules.contains_key(n)
+                                            && !self.is_local_binding(n));
+                                if !namespace_head && !self.sendable(&rty) {
                                     bad.push((
                                         obj.span,
                                         format!(

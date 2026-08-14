@@ -63,6 +63,7 @@ impl Checker {
             table_conflicts: Vec::new(),
             next_opt_tmp: 0,
             witness_scope: Vec::new(),
+            witness_member_names: std::collections::HashSet::new(),
             entry_fn: None,
             graph_module_idx: 0,
             kw_frag_ctx: Span::default(),
@@ -2879,6 +2880,25 @@ impl Checker {
                 _ => {}
             }
         }
+        // M24-2 — index the MEMBER names some declaration takes a witness for BEFORE either loop
+        // below. It is the NECESSARY half of the member-forward charge (`witness_member_names`): a
+        // `recv.m(x)` whose name is nowhere declared witness-taking is a builtin or a plain method
+        // and can forward nothing. Reading the DECLARATION rather than the derived `witness_params`
+        // is what makes it legal here — it needs no fixpoint of its own, so the free-fn loop can
+        // consult it while method charges are still unfinished.
+        for s in stmts {
+            let methods = match &s.kind {
+                StmtKind::Struct { methods, .. }
+                | StmtKind::Enum { methods, .. }
+                | StmtKind::NewType { methods, .. } => methods,
+                _ => continue,
+            };
+            for m in methods {
+                if !self.static_bounded_type_params(m).is_empty() {
+                    self.witness_member_names.insert(m.name.clone());
+                }
+            }
+        }
         // M24 slice 2 — witness FORWARDING makes "does this fn need hidden witness params" depend on
         // its CALLEES' answers, and a fn is hoisted before them. Re-run the ONE derivation
         // (`witness_params_of`) over this module's free fns to a fixpoint, so the answer is
@@ -2918,6 +2938,14 @@ impl Checker {
                     && sig.witness_params != w
                 {
                     sig.witness_params = w;
+                    // `min_params` is DERIVED from the witness set, so it is re-derived with it. The
+                    // seed `fn_sig` computed is mid-hoist, and this loop adds AND removes charges, so
+                    // leaving it behind means the checker's accepted arity and the compiler's
+                    // `Proto::min_arity` — which reads the FINAL set through the same
+                    // `min_callable_params` — disagree by construction. That is the divergence the
+                    // one-source-of-truth predicate exists to prevent.
+                    sig.min_params =
+                        crate::ast::min_callable_params(&d.params, !sig.witness_params.is_empty());
                     changed = true;
                 }
             }
@@ -2954,6 +2982,9 @@ impl Checker {
                 };
                 if let Some(sig) = slot {
                     sig.witness_params = w;
+                    // …and its derived arity floor with it (see the free-fn loop above).
+                    sig.min_params =
+                        crate::ast::min_callable_params(&m.params, !sig.witness_params.is_empty());
                 }
             }
         }

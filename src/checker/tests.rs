@@ -14220,6 +14220,20 @@ fn spawn_on_non_sendable_receiver_still_rejected() {
         "import std.math\nfn main():\n    math := [math]\n    parallel:\n        spawn math.clear()\nmain()\n",
         "cannot spawn on a non-sendable receiver of type List[module math]",
     );
+    // …and so is a local BOUND to the module (`m := math`): the type is `Ty::Module`, but the head
+    // is a value, not a namespace, so the compiler lowers a `SpawnMethod` on the module HANDLE and
+    // the airlock refuses it at run time. Keying the skip on the type alone let this one through
+    // `chezzi check` and fault at run time instead.
+    entry_rejects(
+        "import std.math\nfn main():\n    m := math\n    parallel:\n        spawn m.abs(-3)\nmain()\n",
+        "cannot spawn on a non-sendable receiver of type module math",
+    );
+    // Same shape re-bound under the module's OWN name — the skip must resolve the SCOPE, not just
+    // the spelling.
+    entry_rejects(
+        "import std.math\nfn main():\n    math := math\n    parallel:\n        spawn math.abs(-3)\nmain()\n",
+        "cannot spawn on a non-sendable receiver of type module math",
+    );
 }
 
 /// NON-REGRESSION for the fix above: the ARGUMENT sweep is untouched — a non-sendable value handed
@@ -24664,6 +24678,44 @@ fn witness_forwarding_does_not_overcharge_ok() {
     ));
 }
 
+/// M24-2 — a member call on a receiver that can NEVER take a witness. `List.push` / `Map.get` /
+/// `Set.add` are BUILTINS, so passing this fn's own `x: T` to one forwards nothing: there is no
+/// witness parameter on the other side. Asking only "does this call site carry something of
+/// `decl`'s?" charged every one of these, and the charge costs the fn its function-value position —
+/// so a program that compiled before stopped compiling. The method NAME must ALSO be declared
+/// witness-taking somewhere in the graph.
+#[test]
+fn witness_member_forward_on_a_builtin_receiver_does_not_charge_ok() {
+    // the filed repro: a `List[T]` sink taking the fn's own `T`
+    entry_ok(&format!(
+        "{FWD_HEAD}fn label[T: Default](x: T, sink: List[T]) -> int:\n    sink.push(x)\n    return sink.len()\nfn main():\n    g := label\n    print(label(Counter(1), []))\nmain()\n"
+    ));
+    // …the same shape through a `Map`, a `Set` and an `Option` — and through a turbofish-free
+    // nested argument (`xs[0]`), which the ident walk reads at any depth
+    entry_ok(&format!(
+        "{FWD_HEAD}fn label[T: Default](x: T, m: Map[str, T]) -> int:\n    m.update({{\"a\": x}})\n    return m.len()\nfn main():\n    g := label\n    print(label(Counter(1), {{}}))\nmain()\n"
+    ));
+    entry_ok(&format!(
+        "{FWD_HEAD}fn label[T: Default](x: T, xs: List[T]) -> int:\n    xs.insert(0, x)\n    return xs.len()\nfn main():\n    g := label\n    print(label(Counter(1), []))\nmain()\n"
+    ));
+    entry_ok(&format!(
+        "{FWD_HEAD}fn label[T: Default](xs: List[T], sink: List[T]) -> int:\n    sink.push(xs[0])\n    return sink.len()\nfn main():\n    g := label\n    print(label([Counter(1)], []))\nmain()\n"
+    ));
+    // …and the caller that FORWARDS its own `T` into such a fn is uncharged too — the charge used to
+    // propagate one call further out.
+    entry_ok(&format!(
+        "{FWD_HEAD}fn label[T: Default](x: T, sink: List[T]) -> int:\n    sink.push(x)\n    return sink.len()\nfn outer[T: Default](x: T) -> int:\n    return label(x, [])\nfn main():\n    g := outer\n    print(outer(Counter(1)))\nmain()\n"
+    ));
+    // NON-REGRESSION, the unsafe direction: once a USER type really declares a witness-taking
+    // `push`, the identical body charges again and loses the value position.
+    entry_rejects(
+        &format!(
+            "{FWD_HEAD}struct Sink:\n    v: int\n    fn push[U: Default](self, old: U) -> U:\n        return U.default()\nfn label[T: Default](x: T, sink: List[T]) -> int:\n    sink.push(x)\n    return sink.len()\nfn main():\n    g := label\n    print(1)\nmain()\n"
+        ),
+        "cannot be used as a function value",
+    );
+}
+
 /// A witness call that is the ROOT of a `{…}` interpolation fragment (`"{reset(c)}"`, no trailing
 /// `.field`). The checker anchors a fragment root at the STRING LITERAL's span so a fragment error
 /// points at the literal — which also moved the witness key, and the compiler looked the call up
@@ -25106,6 +25158,50 @@ fn literal_shape_errors_point_at_their_own_char() {
             (1, want_col),
             "{needle}: wrong position ({})",
             e.message
+        );
+    }
+}
+
+/// …and the position it names must EXIST IN THE FILE. "Unterminated `{`" points at the literal's
+/// closing delimiter, which the lexer checkpoints; extrapolating it from the last content char
+/// instead ran off the end of THAT char's line whenever the literal ended in a real newline, so a
+/// two-character line was reported at col 4 and a run of blank lines drifted the caret onto one of
+/// them. A confidently wrong column is worse than a coarse one.
+#[test]
+fn unterminated_fragment_points_at_the_real_closing_delimiter() {
+    // `x`1 ` `2 `:`3 `=`4 ` `5 `"`6 `"`7 `"`8 `a`9 / line 2 `{b` / line 3 `"""` ← the delimiter.
+    for (src, want) in [
+        ("x := \"\"\"a\n{b\n\"\"\"\n", (3, 1)),
+        // …with blank lines before the terminator, which is where the drift was visible
+        ("x := \"\"\"a\n{b\n\n\n\n\"\"\"\n", (6, 1)),
+        // …a single-line literal is unchanged: the delimiter is one past the last content char
+        // (`s`1 ` `2 `:`3 `=`4 ` `5 `"`6 `a`7 `{`8 `b`9 `"`←10)
+        ("s := \"a{b\"\n", (1, 10)),
+        // …and a `\n` ESCAPE is one content char on one line, so the delimiter is still to its right
+        // (`s`1 ` `2 `:`3 `=`4 ` `5 `"`6 `{`7 `a`8 `\`9 `n`10 `"`←11)
+        ("s := \"{a\\nb\"\n", (1, 12)),
+    ] {
+        let errs = check_src(src);
+        let e = errs
+            .iter()
+            .find(|e| e.message.contains("unterminated '{'"))
+            .unwrap_or_else(|| panic!("expected an unterminated-brace error, got: {errs:?}"));
+        assert_eq!(
+            (e.span.line, e.span.col),
+            want,
+            "must point at the literal's closing delimiter"
+        );
+        // …and, independently of the expected value: the position must be a real one — a column no
+        // further than one past the end of a line the file actually has.
+        let line = src
+            .lines()
+            .nth(e.span.line as usize - 1)
+            .unwrap_or_else(|| panic!("line {} is past the end of the file", e.span.line));
+        assert!(
+            (e.span.col as usize) <= line.chars().count() + 1,
+            "col {} does not exist on line {} ({line:?})",
+            e.span.col,
+            e.span.line
         );
     }
 }

@@ -1450,11 +1450,14 @@ under-charge is a forward the checker then has to refuse.
 A **member** forward charges too (`h.build[T](x)`, and `h.build(x)` with `x: T`) — even when that is
 the body's ONLY use of `T`, which no free-name reading of the body could see: the type argument is
 not a name, and the receiver is not a module. A member call has no callee to resolve before types
-exist, so it is judged **by its own call site, about the fn it sits in**: it charges when a type
-argument names one of that fn's type params, or when an argument mentions one of its parameters
-whose annotation does (at any depth — `h.build(xs[0])` with `xs: List[T]` charges). It therefore
+exist, so it is judged on **two** conditions, both required: this **call site** carries something of
+the enclosing fn's (a type argument naming one of its type params, or an argument mentioning one of
+its parameters whose annotation does — at any depth, so `h.build(xs[0])` with `xs: List[T]` charges),
+**and** the method **name** is declared as witness-taking somewhere in the program. It therefore
 costs nothing to call a method that merely shares a name with a witnessed one (`p.build(1)`), or to
-call an ordinary builtin (`m.get("a")`, `xs.push(1)`) from inside a static-bounded generic.
+call an ordinary builtin from inside a static-bounded generic — `m.get("a")` fails the first
+condition, and `xs.push(x)` with `x: T` on a `List[T]` fails the second, since `List.push` is a
+builtin that can take no witness.
 
 Two shapes are still refused for want of a charge. First, the same fence as on the free-fn channel:
 a `T` that occurs in **neither** a parameter type nor the return type of its own fn is never charged
@@ -2955,7 +2958,9 @@ in `defer` position: `defer math.abs(-3)` and `spawn math.abs(-3)`, `defer lib.h
 all compile and run (Go accepts `go pkg.F(x)` and `defer pkg.F(x)` alike). Nothing module-shaped
 crosses the airlock — the call is replayed inside the task — so the spawn **sendability** rules are
 unchanged: a genuine non-sendable *receiver* (`spawn v.m()`, including a local that merely **shadows**
-a module name) and a non-sendable *argument* are still rejected by `chezzi check`.
+a module name, and one **bound to** it — `m := math` then `spawn m.abs(-3)`) and a non-sendable
+*argument* are still rejected by `chezzi check`. The namespace rule is keyed on an **unbound module
+name**, the same clause the compiler lowers on, so `check` and `run` cannot disagree.
 A **static method** is *not* a constructor either and *is* an ordinary target, in every spelling
 that works as a call — `defer Holder.build(3)`, `defer Gen[int].build(3)`, `defer T.default()` inside
 a generic, `defer lib.Holder.build(3)`, and a `from`-imported head. Arguments are evaluated **eagerly at

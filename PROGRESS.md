@@ -1522,18 +1522,29 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > so `fn f[T: Default](h: Holder, x: T) -> T: return h.build[T](x)` — whose only use of `T` is a
 > member forward — was never charged and was then rejected with *"no hidden type witness for 'T' is
 > reachable"*, unwritable in any spelling. The free-name walk gained a MEMBER channel carrying each
-> member call's TYPE ARGUMENTS and every identifier occurring in an argument, and the charge asks
-> **that one call site about that one declaration**: does a type argument name one of this fn's type
-> params (`h.build[T](x)`), or does an argument mention a parameter annotated with one (`h.build(x)`
-> with `x: T`, `h.build(xs[0])` with `xs: List[T]`)? Nothing else charges, so `m.get("a")` on a `Map`
-> and `xs.push(1)` on a `List` cost their enclosing generic nothing — the first cut keyed the charge
-> on the method NAME across the whole graph, and one unpinnable `get`/`push` anywhere then poisoned
-> that name for every member call in every static-bounded generic, builtin methods included, breaking
-> programs that had compiled for milestones. Two shapes stay refused on purpose: a `T` in neither a
+> member call's NAME, TYPE ARGUMENTS and every identifier occurring in an argument, and the charge
+> asks **two** questions, both required: does *this call site* carry something of *this declaration's*
+> — a type argument naming one of its type params (`h.build[T](x)`), or an argument mentioning a
+> parameter annotated with one (`h.build(x)` with `x: T`, `h.build(xs[0])` with `xs: List[T]`) — **and**
+> is the method NAME declared witness-taking anywhere in the graph? Either half alone is a measured
+> defect. The name half alone (the first cut) let one unpinnable `get`/`push` poison that name for
+> every member call in every static-bounded generic, builtin methods included. The call-site half
+> alone (the second cut) charged `sink.push(x)` where `sink: List[T]` — a BUILTIN `List.push` with no
+> witness parameter to receive anything — so `fn label[T: Default](x: T, sink: List[T])` lost its
+> function-value position and a program that had compiled stopped compiling. ANDed, `m.get("a")` fails
+> the first and `xs.push(x)` fails the second, and both cost their enclosing generic nothing. Two shapes stay refused on purpose: a `T` in neither a
 > parameter nor the return type — that fence (`ty_param_in_sig`) answers the same on the free-fn
 > channel and lifting it needs types the hoist does not have — and an argument whose `T` arrives
 > through a LOCAL rather than a parameter (`v := x` then `h.build(v)`), which a per-call-site rule
-> cannot see; the turbofish (`h.build[T](v)`) always charges and is the spelling to reach for. **M24-1 is also FIXED** (2026-08-14):
+> cannot see; the turbofish (`h.build[T](v)`) always charges and is the spelling to reach for.
+> **The hoist fixpoint now re-derives `FnSig::min_params` wherever it writes `witness_params`
+> (2026-08-15).** `min_params` is DERIVED from the witness set through `ast::min_callable_params` —
+> the one predicate the compiler also sizes `Proto::min_arity` with — but only the mid-hoist SEED was
+> ever written, and the fixpoint is non-monotone (it adds and removes charges), so the checker's
+> accepted arity and the compiler's emitted prologue could disagree by construction. No observable
+> divergence was reproducible (the desugar default-splice masks it, and two other rules lean on that
+> arity refusal), which is exactly why it is closed at the source rather than left as a comment
+> claiming an invariant the code did not hold. **M24-1 is also FIXED** (2026-08-14):
 > the forwarding charge was two name-only questions over the whole body, and it is now one question
 > per CALL SITE. A body calling a witness-taking fn with only concrete arguments
 > (`return reset(Counter(1)).n`) keeps its fn-VALUE position, and a struct method that merely shares
@@ -1589,7 +1600,13 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > module-shaped crosses the airlock — **both** legs were needed, since the checker-only cut just moved
 > the refusal to a runtime *a module handle cannot cross* fault. Real sendability is unweakened: a
 > container holding a module, a local that SHADOWS a module name, and every non-sendable argument are
-> still refused with byte-identical messages.
+> still refused with byte-identical messages. **The two legs had to ask the SAME question, and for one
+> commit they did not (fixed 2026-08-15):** the checker skipped the receiver sweep for the resolved
+> TYPE `Ty::Module`, the compiler routed only an UNBOUND module NAME through the wrapper proto — so a
+> module bound to a local (`m := math` then `spawn m.abs(-3)`) fell between them, passing
+> `chezzi check` and faulting at run time with *a module handle cannot cross*. The checker now asks
+> the compiler's question — an unbound module name, scope-resolved so a re-bind under the module's own
+> name (`math := math`) is a receiver too.
 >
 > **Round 4 (2026-08-10) — three hunters, eight findings, four root causes, all fixed at the root.**
 > (A) the fragment column above — the third patch of that family had turned a loud fault into a
