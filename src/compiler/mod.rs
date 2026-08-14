@@ -6244,15 +6244,37 @@ pub(crate) struct FreeNames {
     /// syntactic walk does not carry. So the readers that must not UNDER-approximate
     /// ([`nested_body_needs_witness`]) treat it as "could be one".
     pub opaque_calls: bool,
-    /// Every `<anything>.m(…)` / `<anything>?.m(…)` the walk passed, as a [`CallSite`] whose `name` is
-    /// the METHOD name — the one thing a member call carries that a syntactic walk can match against
-    /// a declaration — and whose `module` is the head ident when there is one. Recorded for EVERY
-    /// field-headed callee, including the ones that also land in `calls` (`lib.f(…)`, `T.default()`):
-    /// the head's MEANING is exactly what those two channels disagree about, and a reader that must
-    /// not under-approximate wants both readings. `Checker::witness_params_of` uses it to charge a
-    /// body whose only witness use is a MEMBER forward (`h.build[T](x)`), which appears in neither
-    /// `names` (`T` is a type ARGUMENT) nor `calls` (the head is a receiver).
-    pub member_calls: Vec<CallSite>,
+    /// Every `<anything>.m(…)` / `<anything>?.m(…)` the walk passed — recorded for EVERY field-headed
+    /// callee, including the ones that also land in `calls` (`lib.f(…)`, `T.default()`), since the
+    /// head's MEANING is exactly what those two channels disagree about.
+    /// `Checker::witness_params_of` uses it to charge a body whose only witness use is a MEMBER
+    /// forward (`h.build[T](x)`), which appears in neither `names` (`T` is a type ARGUMENT) nor
+    /// `calls` (the head is a receiver).
+    ///
+    /// Empty unless [`Self::record_members`] is set — only the checker reads this channel, and the
+    /// compiler runs the same walk at every capture site.
+    pub member_calls: Vec<MemberCall>,
+    /// Opt in to [`Self::member_calls`]. Off by default so the compiler's per-capture-site walks —
+    /// which read only `names` / `opaque_calls` / `calls` — allocate nothing for it.
+    pub record_members: bool,
+}
+
+/// M24-2 — one MEMBER call (`recv.m(…)`), carrying the two things a PRE-TYPE walk can hand the
+/// forwarding charge: the call's own TYPE ARGUMENTS, and every identifier occurring anywhere in an
+/// argument expression. `Checker::member_call_forwards_a_witness` charges its enclosing fn when
+/// either names something of that fn's — a type parameter in the turbofish (`h.make[T](x)`), or a
+/// value parameter whose annotation mentions one (`h.make(x)` with `x: T`). The method NAME is
+/// deliberately absent: matching it against a graph-wide index of witnessed method names made one
+/// unpinnable `get` anywhere poison every `m.get("a")` in the program.
+pub(crate) struct MemberCall {
+    /// The call's explicit type arguments (`h.make[T](x)` → `[T]`); empty for an inferred call and
+    /// for `a?.m(…)`, which has no type-argument syntax.
+    pub type_args: Vec<crate::ast::Type>,
+    /// Every identifier occurring in any positional or named argument, at any depth and with NO
+    /// bound-name subtraction — `h.make(f(xs[0]))` records `f`, `xs`. Depth and the empty bound set
+    /// are both the CHARGE direction: a name that turns out to be a local rather than the enclosing
+    /// fn's parameter merely over-charges, while missing one under-charges.
+    pub arg_idents: Vec<String>,
 }
 
 /// One call the free-name walk passed, recorded only when the callee is a plain name or a
@@ -6288,14 +6310,10 @@ fn record_call_site(
         ExprKind::Ident(n) if !bound.contains(n) => (None, n.clone()),
         ExprKind::Field { obj, name, .. } => {
             // Every field-headed callee is a possible MEMBER call, whatever its head turns out to be.
-            out.member_calls.push(CallSite {
-                module: match &obj.kind {
-                    ExprKind::Ident(m) => Some(m.clone()),
-                    _ => None,
-                },
-                name: name.clone(),
-                closed_arg_heads: closed_arg_heads(args, named, type_args, bound),
-            });
+            if out.record_members {
+                out.member_calls
+                    .push(member_call(args, named, type_args.to_vec()));
+            }
             match &obj.kind {
                 ExprKind::Ident(m) if !bound.contains(m) => (Some(m.clone()), name.clone()),
                 _ => {
@@ -6314,6 +6332,24 @@ fn record_call_site(
         name,
         closed_arg_heads: closed_arg_heads(args, named, type_args, bound),
     });
+}
+
+/// Build a [`MemberCall`] from one member call site's arguments and type arguments.
+fn member_call(
+    args: &[Expr],
+    named: &[(String, Expr)],
+    type_args: Vec<crate::ast::Type>,
+) -> MemberCall {
+    let nothing_bound = HashSet::new();
+    let arg_idents = args
+        .iter()
+        .chain(named.iter().map(|(_, v)| v))
+        .flat_map(|a| free_names_of_expr(a, &nothing_bound))
+        .collect();
+    MemberCall {
+        type_args,
+        arg_idents,
+    }
 }
 
 /// `Some(heads)` iff every argument is provably closed (see [`CallSite::closed_arg_heads`]).
@@ -6610,22 +6646,19 @@ pub(crate) fn free_names_expr(e: &Expr, bound: &HashSet<String>, out: &mut FreeN
         ExprKind::Field { obj, .. } => {
             free_names_expr(obj, bound, out);
         }
-        ExprKind::OptChain {
-            obj, call, name, ..
-        } => {
+        ExprKind::OptChain { obj, call, .. } => {
             free_names_expr(obj, bound, out);
             if let Some(c) = call {
                 // `a?.m(…)` is a member call `record_call_site` never sees — and a member call is a
                 // possible witness call (see [`FreeNames::opaque_calls`] / `member_calls`).
                 out.opaque_calls = true;
                 // No type-argument channel on an `?.` call (`a?.m[T]()` does not parse), and the
-                // arguments are the ordinary ones — so the pin question is asked exactly as it is
-                // for a plain member call.
-                out.member_calls.push(CallSite {
-                    module: None,
-                    name: name.clone(),
-                    closed_arg_heads: closed_arg_heads(&c.args, &c.named, &[], bound),
-                });
+                // arguments are the ordinary ones — so the forward question is asked exactly as it
+                // is for a plain member call.
+                if out.record_members {
+                    out.member_calls
+                        .push(member_call(&c.args, &c.named, Vec::new()));
+                }
                 c.args.iter().for_each(|a| free_names_expr(a, bound, out));
                 c.named
                     .iter()

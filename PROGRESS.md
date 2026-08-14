@@ -1521,13 +1521,19 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > is closed in the same pass:** its forwarding charge read free names and module-qualified calls only,
 > so `fn f[T: Default](h: Holder, x: T) -> T: return h.build[T](x)` — whose only use of `T` is a
 > member forward — was never charged and was then rejected with *"no hidden type witness for 'T' is
-> reachable"*, unwritable in any spelling. The free-name walk gained a MEMBER channel and the checker
-> a graph-wide method-name index (name → can ARGUMENTS pin this witness?), built from the declarations
-> at the hoist so the free-fn fixpoint can read it. A member call with all-concrete arguments still
-> charges nothing, which is what keeps `p.build(1)` from costing its enclosing generic the
-> function-value position. One shape stays refused on purpose — a `T` in neither a parameter nor the
-> return type — because that fence (`ty_param_in_sig`) answers the same on the free-fn channel and
-> lifting it needs types the hoist does not have. **M24-1 is also FIXED** (2026-08-14):
+> reachable"*, unwritable in any spelling. The free-name walk gained a MEMBER channel carrying each
+> member call's TYPE ARGUMENTS and every identifier occurring in an argument, and the charge asks
+> **that one call site about that one declaration**: does a type argument name one of this fn's type
+> params (`h.build[T](x)`), or does an argument mention a parameter annotated with one (`h.build(x)`
+> with `x: T`, `h.build(xs[0])` with `xs: List[T]`)? Nothing else charges, so `m.get("a")` on a `Map`
+> and `xs.push(1)` on a `List` cost their enclosing generic nothing — the first cut keyed the charge
+> on the method NAME across the whole graph, and one unpinnable `get`/`push` anywhere then poisoned
+> that name for every member call in every static-bounded generic, builtin methods included, breaking
+> programs that had compiled for milestones. Two shapes stay refused on purpose: a `T` in neither a
+> parameter nor the return type — that fence (`ty_param_in_sig`) answers the same on the free-fn
+> channel and lifting it needs types the hoist does not have — and an argument whose `T` arrives
+> through a LOCAL rather than a parameter (`v := x` then `h.build(v)`), which a per-call-site rule
+> cannot see; the turbofish (`h.build[T](v)`) always charges and is the spelling to reach for. **M24-1 is also FIXED** (2026-08-14):
 > the forwarding charge was two name-only questions over the whole body, and it is now one question
 > per CALL SITE. A body calling a witness-taking fn with only concrete arguments
 > (`return reset(Counter(1)).n`) keeps its fn-VALUE position, and a struct method that merely shares

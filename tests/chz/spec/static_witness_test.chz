@@ -1207,10 +1207,22 @@ test fn a_member_forward_is_charged_as_the_only_witness_use():
     assert member_only_in_a_closure(Holder(1), Counter(9)).n == 0
     assert member_only_in_a_closure(Holder(1), Tag("hi")).s == "none"
 
+# An argument does not have to BE the parameter — the charge reads every identifier in the argument
+# expression at any depth, so `xs[0]` with `xs: List[T]` forwards too. Under-charging here is what
+# the checker then has to refuse, so the reading is deliberately generous.
+
+fn member_only_nested_arg[T: Default](h: Holder, xs: List[T]) -> T:
+    return h.make(xs[0])
+
+test fn a_member_forward_reads_idents_at_any_depth():
+    assert member_only_nested_arg(Holder(1), [Counter(9)]).n == 0
+    assert member_only_nested_arg(Holder(1), [Tag("hi")]).s == "none"
+
 # The counterweight, and why the member channel is not just "any member call": a charge COSTS the fn
-# its function-value / `spawn`-target positions, so a call whose every argument is concrete — which
-# pins the callee's own witness and forwards nothing of `T` — must keep answering "not a forward",
-# even though `make` is a witnessed method name on THREE other types in this file.
+# its function-value / `spawn`-target positions, so a call that carries nothing of the CALLER's own
+# — no type argument naming one of its type params, no argument mentioning a parameter annotated
+# with one — must keep answering "not a forward", even though `make` is a witnessed method name on
+# THREE other types in this file.
 
 struct PlainMaker:
     v: int
@@ -1225,3 +1237,45 @@ fn apply_maker(f: fn(Counter, PlainMaker) -> int, p: PlainMaker) -> int:
 
 test fn a_concrete_member_call_does_not_charge_its_caller():
     assert apply_maker(concrete_member_call_keeps_its_value_position, PlainMaker(10)) == 11
+
+
+# ===== M24-2 — the charge asks THIS call site, never a graph-wide method-name index =====
+#
+# `Bin.get` and `Sink.push` are witnessed methods whose names collide with BUILTIN methods on `Map`
+# and `List`. A charge keyed on the method NAME, AND-folding pinnability across every declaration of
+# that name, let one unpinnable `get` anywhere in the program poison `get` EVERYWHERE: `m.get("a")`
+# — a `Map` lookup with no relation to any witness — charged `uses_builtin_get`, which then could
+# not be read as a function value and the program stopped compiling ("'uses_builtin_get' cannot be
+# used as a function value"). Nothing of the caller's own crosses either call, so neither charges.
+# `Shared.get()` at the top of this file is the same collision, one builtin further away.
+
+struct Bin:
+    v: int
+    fn get[T: Default](self) -> T:
+        return T.default()
+
+struct Sink:
+    v: int
+    fn push[T: Default](self) -> T:
+        return T.default()
+
+fn uses_builtin_get[T: Default](x: T, m: Map[str, int]) -> T:
+    y := m.get("a")
+    return x
+
+fn uses_builtin_push[T: Default](x: T, xs: List[int]) -> T:
+    xs.push(1)
+    return x
+
+fn apply_get(f: fn(Counter, Map[str, int]) -> Counter, m: Map[str, int]) -> int:
+    return f(Counter(3), m).n
+
+fn apply_push(f: fn(Counter, List[int]) -> Counter) -> int:
+    return f(Counter(5), [1]).n
+
+test fn a_builtin_member_call_does_not_charge_its_caller():
+    assert apply_get(uses_builtin_get, {"a": 1}) == 3
+    assert apply_push(uses_builtin_push) == 5
+    # and the witnessed methods whose names they collide with still work
+    assert Bin(1).get[Counter]().n == 0
+    assert Sink(1).push[Tag]().s == "none"

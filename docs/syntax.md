@@ -1443,21 +1443,27 @@ in expression position (`T.default()`), or it *forwards* — it calls a witness-
 could pass its own still-abstract `T` along. A call whose arguments are all concrete forwards nothing
 (`fn concrete[T: Default](x: T) -> int: return reset(Counter(1)).n` keeps its value position), and
 merely naming a module that exports a witness-taking fn is not a call to it (`lib.plain(1)` costs
-nothing, `lib.reset(x)` charges). A **member** forward charges the same way (`h.build[T](x)`, and
-`h.build(x)` with `x: T`) — even when that is the body's ONLY use of `T`, which no free-name reading
-of the body could see: the type argument is not a name, and the receiver is not a module. A member
-call is judged by its METHOD NAME, so a concrete call to a method that merely SHARES a name with a
-witnessed one still costs nothing (`p.build(1)`), while any same-named method being witnessed
-anywhere in the program makes an unpinned one charge. Anything the rule cannot positively read as
-concrete charges — a zero-argument call, a local, a turbofish naming `T`, a generic constructor head
-— because an under-charge is a forward the checker then has to refuse.
+nothing, `lib.reset(x)` charges). Anything the rule cannot positively read as concrete charges —
+a zero-argument call, a local, a turbofish naming `T`, a generic constructor head — because an
+under-charge is a forward the checker then has to refuse.
 
-One shape is still refused for want of a charge, and it is the same fence on both channels: a `T`
-that occurs in **neither** a parameter type nor the return type of its own fn is never charged for a
-forward (`fn f[T: Default](h: Holder, k: int) -> int: q := h.mk[T](); return k`, and the free-fn
-`q := empty[T]()` equally), because a charge whose type no argument can determine would make the fn
-uncallable. Give `T` a place in the signature, or construct through it directly (`T.default()`),
-which is charged regardless.
+A **member** forward charges too (`h.build[T](x)`, and `h.build(x)` with `x: T`) — even when that is
+the body's ONLY use of `T`, which no free-name reading of the body could see: the type argument is
+not a name, and the receiver is not a module. A member call has no callee to resolve before types
+exist, so it is judged **by its own call site, about the fn it sits in**: it charges when a type
+argument names one of that fn's type params, or when an argument mentions one of its parameters
+whose annotation does (at any depth — `h.build(xs[0])` with `xs: List[T]` charges). It therefore
+costs nothing to call a method that merely shares a name with a witnessed one (`p.build(1)`), or to
+call an ordinary builtin (`m.get("a")`, `xs.push(1)`) from inside a static-bounded generic.
+
+Two shapes are still refused for want of a charge. First, the same fence as on the free-fn channel:
+a `T` that occurs in **neither** a parameter type nor the return type of its own fn is never charged
+for a forward (`fn f[T: Default](h: Holder, k: int) -> int: q := h.mk[T](); return k`, and the
+free-fn `q := empty[T]()` equally), because a charge whose type no argument can determine would make
+the fn uncallable. Second, a member forward whose `T` reaches the argument through a **local** rather
+than a parameter (`v := x` then `h.build(v)`) — the call site alone cannot see where `v` got its
+type. Give `T` a place in the signature, spell the member turbofish (`h.build[T](v)`, always
+charged), or construct through it directly (`T.default()`, charged regardless).
 
 A type parameter **SHADOWS a same-named declaration for its whole body, in every position** — the
 annotation `x: Item`, the static call `Item.tag()`, the type-level turbofish `Item[int].tag()`, the

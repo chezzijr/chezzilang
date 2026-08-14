@@ -955,7 +955,11 @@ impl Checker {
         // name, and if they did the param would shadow the type anyway.)
         let params: std::collections::HashSet<String> =
             decl.params.iter().map(|p| p.name.clone()).collect();
-        let mut walk = crate::compiler::FreeNames::default();
+        let mut walk = crate::compiler::FreeNames {
+            // the MEMBER channel is checker-only; the compiler's capture-site walks skip it
+            record_members: true,
+            ..Default::default()
+        };
         crate::compiler::free_names_block(&decl.body, &params, &mut walk);
         let mentioned = walk.names;
         // Slice 2 — the body names a fn that takes witnesses, so this body can FORWARD into it. Which
@@ -969,11 +973,11 @@ impl Checker {
         // `mentioned` (`T` is a type ARGUMENT, which no free-name walk collects) nor `calls` (its head
         // is a RECEIVER, not a module), so without this the body is never charged and its own
         // `h.build[T](x)` is then REJECTED — "no hidden type witness for 'T' is reachable at this
-        // call site" — with no way to write the program at all. What the walk carries is the METHOD
-        // NAME; `witness_member_names` is the set of names that might take witnesses, indexed off the
-        // DECLARATIONS at the hoist. Name-keyed, so a same-named method on an unrelated type charges
-        // too: over-charge is the safe direction here, and `ty_param_in_sig` below still keeps the
-        // charged param determinable at every call site.
+        // call site" — with no way to write the program at all. The question is asked PER CALL SITE
+        // and only about THIS declaration ([`Self::member_call_forwards_a_witness`]): does a type
+        // argument or an argument carry something of `decl`'s own into the callee? A graph-wide index
+        // of witnessed method NAMES cannot: it made one unpinnable `get`/`push` poison that name for
+        // every member call in every static-bounded generic, builtin methods included.
         let forwards = walk
             .calls
             .iter()
@@ -990,8 +994,7 @@ impl Checker {
 
     /// M24 — `decl`'s type params with at least one bound (declared or `where`) whose protocol
     /// carries a STATIC requirement: the CANDIDATES for a hidden witness argument, before any body
-    /// question. Read by [`Self::witness_params_of`] and, for methods, by the hoist's
-    /// [`Checker::witness_member_names`] index — which must key on the declaration alone.
+    /// question. Read by [`Self::witness_params_of`].
     pub(super) fn static_bounded_type_params(&self, decl: &FnDecl) -> Vec<String> {
         decl.type_params
             .iter()
@@ -1034,7 +1037,13 @@ impl Checker {
     /// Everything the walk could not positively identify — an unrecognised argument shape, a head
     /// that is not a known non-generic struct, an unknown callee — answers "forwards", because an
     /// under-charge is a forward the checker then REFUSES (`witness_scope` has no `$w:T` to load)
-    /// or, worse, one the compiler cannot lower, while an over-charge only costs positions.
+    /// or, worse, one the compiler cannot lower.
+    ///
+    /// An over-charge is the LESS bad direction, not a free one: the position it costs is the
+    /// difference between compiling and not. A charged fn can no longer be read as a function value,
+    /// passed to a HOF, or used as a `spawn f(…)` / `defer f(…)` target — so a wrong charge does not
+    /// merely make a program slower, it makes an unrelated program stop compiling (`m.get("a")` once
+    /// did exactly that to every `uses_get`-shaped generic). Both directions need a reason.
     fn call_forwards_a_witness(&self, c: &crate::compiler::CallSite, decl: &FnDecl) -> bool {
         let sig = match &c.module {
             None => self.functions.get(&c.name),
@@ -1059,28 +1068,43 @@ impl Checker {
     }
 
     /// M24-2 — does this ONE MEMBER call site inside `decl`'s body forward a witness of `decl`'s own?
-    /// The member twin of [`Self::call_forwards_a_witness`], asking the same two questions off the
-    /// only coordinate a member call gives a pre-type walk — its METHOD NAME:
-    /// * **could the callee take witnesses at all?** [`Checker::witness_member_names`] holds every
-    ///   method name declared with a static-carrying bound. Name-keyed, so a same-named method on an
-    ///   unrelated type answers yes too — the walk cannot know the receiver's type, and the
-    ///   over-charge only costs positions.
-    /// * **could `decl`'s own type param be what is forwarded?** Same argument-pinning test as the
-    ///   free-fn twin, with the name-keyed pinnability flag standing in for the callee's
-    ///   `witness_params`: a call whose every argument is a concrete constructor pins the callee's
-    ///   witness itself and forwards nothing — which is what keeps `p.build(1)` from charging its
-    ///   enclosing generic merely because some other type's `build` is witnessed. A turbofish or an
-    ///   EMPTY argument list is never "closed" ([`crate::compiler::CallSite::closed_arg_heads`]), so
-    ///   `h.build[T](x)` and `h.mk[T]()` both forward.
-    fn member_call_forwards_a_witness(&self, c: &crate::compiler::CallSite, decl: &FnDecl) -> bool {
-        let Some(&pinnable) = self.witness_member_names.get(&c.name) else {
-            return false;
-        };
-        let args_pin = pinnable
-            && c.closed_arg_heads
-                .as_ref()
-                .is_some_and(|heads| heads.iter().all(|h| self.concrete_ctor_head(h, decl)));
-        !args_pin
+    ///
+    /// A member call gives a pre-type walk no callee to resolve — the receiver's type is exactly what
+    /// is not known yet — so the question is asked of THIS CALL SITE, about `decl`, and never of a
+    /// graph-wide index of method names. It charges when something of `decl`'s own could be flowing
+    /// into the callee's type parameter:
+    /// * a **TYPE ARGUMENT** names one of `decl`'s type params (`h.make[T](x)`, `h.mk[T]()`); or
+    /// * an **ARGUMENT mentions a value parameter of `decl` whose annotation mentions one of
+    ///   `decl`'s type params** (`h.make(x)` with `x: T`, and `h.make(f(xs[0]))` with `xs: List[T]`
+    ///   — [`crate::compiler::MemberCall::arg_idents`] is collected at any depth for exactly that).
+    ///
+    /// Nothing else charges, and that is the whole point: `m.get("a")` on a `Map` and `xs.push(1)` on
+    /// a `List` name none of `decl`'s own, so an unrelated `Box.get[T: Default]` or `Sink.push[T:
+    /// Default]` somewhere in the program cannot cost `decl` its function-value position. The
+    /// name-keyed index this replaced did exactly that: one unpinnable witnessed method poisoned its
+    /// NAME for every member call in every static-bounded generic, builtin methods included.
+    ///
+    /// **Under-charging is the unsafe direction** (the charge and the capture must agree, and the
+    /// checker then refuses a forward it did not charge), so both clauses read conservatively: type
+    /// args are matched against ALL of `decl`'s type params, not just the static-bounded candidates,
+    /// and `arg_idents` carries every ident in an argument with no bound-name subtraction. What it
+    /// still cannot see is a `T` that reaches the argument through something other than a parameter
+    /// — a LOCAL (`v := x` then `h.make(v)`), a field, a call result — which is refused with "no
+    /// hidden type witness for 'T' is reachable at this call site"; the turbofish (`h.make[T](v)`)
+    /// is the spelling that always charges.
+    fn member_call_forwards_a_witness(
+        &self,
+        c: &crate::compiler::MemberCall,
+        decl: &FnDecl,
+    ) -> bool {
+        let names_a_type_param =
+            |ty: &crate::ast::Type| decl.type_params.iter().any(|tp| ty_mentions(ty, &tp.name));
+        c.type_args.iter().any(&names_a_type_param)
+            || c.arg_idents.iter().any(|a| {
+                decl.params
+                    .iter()
+                    .any(|p| p.name == *a && p.ty.as_ref().is_some_and(&names_a_type_param))
+            })
     }
 
     /// M24 — does the call-argument constructor head `head` name a NON-GENERIC struct visible here?
@@ -1137,24 +1161,11 @@ impl Checker {
     /// declaration's witness be pinned by ARGUMENTS?" — the decl-side twin of
     /// [`Self::ty_param_in_params`], used to index a member's pinnability at the hoist.
     pub(super) fn ty_param_in_sig(decl: &FnDecl, t: &str, with_ret: bool) -> bool {
-        fn mentions(ty: &crate::ast::Type, t: &str) -> bool {
-            match ty {
-                crate::ast::Type::Named { name, .. } => name == t,
-                crate::ast::Type::Qualified { args, .. } => args.iter().any(|a| mentions(a, t)),
-                crate::ast::Type::Generic(head, args, _) => {
-                    head == t || args.iter().any(|a| mentions(a, t))
-                }
-                crate::ast::Type::Func { params, ret, .. } => {
-                    params.iter().any(|p| mentions(p, t)) || mentions(ret, t)
-                }
-                crate::ast::Type::Tuple(items) => items.iter().any(|i| mentions(i, t)),
-            }
-        }
         decl.params
             .iter()
             .filter_map(|p| p.ty.as_ref())
             .chain(decl.ret.as_ref().filter(|_| with_ret))
-            .any(|ty| mentions(ty, t))
+            .any(|ty| ty_mentions(ty, t))
     }
 
     /// Find the first STATIC-CTOR protocol embedded ANYWHERE in a (possibly nested) already-resolved
@@ -4889,4 +4900,22 @@ fn min_arity(ty: &Ty) -> usize {
 fn fn_min_arity_grew(prev: &Ty, declared: &Ty) -> bool {
     matches!((prev, declared), (Ty::Func { .. }, Ty::Func { .. }))
         && min_arity(declared) > min_arity(prev)
+}
+
+/// Does the SYNTACTIC type `ty` mention the type-parameter name `t` anywhere? A plain occurs-check
+/// over the AST type — no resolution, so it is usable before/independently of `resolve_type`. Read by
+/// [`Checker::ty_param_in_sig`] and by [`Checker::member_call_forwards_a_witness`], which asks it of a
+/// member call's TYPE ARGUMENTS as well as of a parameter's annotation.
+fn ty_mentions(ty: &crate::ast::Type, t: &str) -> bool {
+    match ty {
+        crate::ast::Type::Named { name, .. } => name == t,
+        crate::ast::Type::Qualified { args, .. } => args.iter().any(|a| ty_mentions(a, t)),
+        crate::ast::Type::Generic(head, args, _) => {
+            head == t || args.iter().any(|a| ty_mentions(a, t))
+        }
+        crate::ast::Type::Func { params, ret, .. } => {
+            params.iter().any(|p| ty_mentions(p, t)) || ty_mentions(ret, t)
+        }
+        crate::ast::Type::Tuple(items) => items.iter().any(|i| ty_mentions(i, t)),
+    }
 }
