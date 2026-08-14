@@ -116,8 +116,11 @@ pub(crate) fn parse_interpolation(lit_tok: &StrLit, span: Span) -> Result<Vec<Ch
                 if !closed {
                     // One past the last content char — the literal's closing delimiter, which is
                     // where CPython 3.14 points too (`f"a\tb{1 + c"` → caret on the closing `"`,
-                    // offset 17). `PosMap::at` extrapolates past the end from the last checkpoint,
-                    // so this composes through the literal's escapes like every other position here.
+                    // offset 17). The lexer CHECKPOINTS that index with the delimiter's own span
+                    // (`PosMap::note`), so this is the delimiter's real position and not an
+                    // extrapolation: extrapolating ran off the end of the last content char's LINE
+                    // whenever the literal ended in a real newline, reporting a column the file does
+                    // not have (a `"""a\n{b\n"""` said line 2, col 4 of a two-char line).
                     return Err(InterpError {
                         message: "unterminated '{' in interpolated string".to_string(),
                         span: map.at(raw.chars().count()),

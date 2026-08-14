@@ -10372,6 +10372,25 @@ branch names) is in the git log.
   char so a column counted off the post-escape content instead of composed through the `PosMap`
   fails them.
 
+- **The last two stutters/drifts in that family, closed 2026-08-15.** (1) The **primary** lex-error
+  seam still doubled its position: `resolver::parse` built the message from `LexError::to_string()`,
+  so a module-graph lex error rendered *resolve error (line 1, col 8): in module 'dtest.badmod': lex
+  error (line 1, col 8): unexpected character '@'* — once from the outer renderer, once from the
+  inner `Display`. It now uses `e.message` under the `lex error: ` prefix the interpolation seam
+  already used; one rendering rule for both paths (`check_errors_json::lex_error_carries_a_real_column`
+  asserts the whole line). (2) The **unterminated `{`** column could name a position the file does
+  not have. It is `map.at(<content length>)`, which used to EXTRAPOLATE from the last checkpoint —
+  correct only while the literal's final content char shares the delimiter's line, so a literal
+  ending in a real newline reported a column past the end of the PREVIOUS line: `x := """a` /
+  `{b` / `"""` said *(line 2, col 4)* of a two-character line, and blank lines before the
+  terminator drifted the caret onto one of them (fuzzing: 37/5000 interpolation inputs produced an
+  out-of-range column, all from this arm). The lexer now checkpoints one-past-the-end with the
+  closing delimiter's own span (one extra `PosMap::note` after the scan loop in `string()` and
+  `triple_string()`), so `at(len)` is a real position by construction — those two cases now report
+  *(line 3, col 1)* and *(line 6, col 1)*, the delimiter itself, and single-line literals are
+  unchanged. Test: `checker::tests::unterminated_fragment_points_at_the_real_closing_delimiter`,
+  which also asserts the reported column exists on the reported line.
+
 - **`examples/panic.chz` type-checks — the last allow-listed example is gone, and its recorded reason
   was wrong (2026-08-06).** `chezzi check examples/panic.chz` failed with `line 29, col 22: expression
   returns no value (nil) and cannot be used as a value`, while `checker::tests::all_shipped_examples_typecheck`

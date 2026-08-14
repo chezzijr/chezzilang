@@ -130,9 +130,11 @@ fn lex_error_carries_a_real_column() {
         .output()
         .expect("run chezzi check");
     let stderr = String::from_utf8_lossy(&out.stderr);
+    // The position is rendered ONCE, by the caller, from the span the seam now carries — the inner
+    // `LexError::Display` prefix would only stutter it (the interpolation seam strips it too).
     assert!(
-        stderr.contains("lex error (line 2, col 6): empty hexadecimal literal"),
-        "plain text must render both axes, got: {stderr}"
+        stderr.contains("resolve error (line 2, col 6): lex error: empty hexadecimal literal"),
+        "plain text must render both axes exactly once, got: {stderr}"
     );
 }
 

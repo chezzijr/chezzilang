@@ -248,6 +248,12 @@ impl PosMap {
     /// Record that content char `idx` sits at `at` — but ONLY if that is not what the previous
     /// checkpoint already implies. This is the whole rule.
     ///
+    /// Called once more with `idx == <content length>` and the CLOSING DELIMITER's span, so
+    /// [`Self::at`] answers one-past-the-end with a real source position too. That position is what
+    /// the "unterminated `{`" diagnostic reports, and extrapolating it instead put the caret past the
+    /// end of the last content char's line — a column that does not exist — whenever the literal's
+    /// final content char was a real newline.
+    ///
     /// **Call it for EVERY content char, and do not "optimise" it into a switch on escape kinds.**
     /// The reason is composition, not tidiness: a nested literal inside a fragment builds its own
     /// map out of `span_at`, which routes through the PARENT's map, so a parent `\t`/`\r`/`\0`/
@@ -264,8 +270,9 @@ impl PosMap {
         }
     }
 
-    /// The physical source position of content char `idx`. Beyond the last content char this
-    /// extrapolates from the final checkpoint (the fragment lexer's EOF span lands there).
+    /// The physical source position of content char `idx`. `idx == <content length>` is the literal's
+    /// CLOSING DELIMITER — a real checkpoint the lexer records, not an extrapolation. Past that it
+    /// does extrapolate from the final checkpoint (the fragment lexer's EOF span lands there).
     pub fn at(&self, idx: usize) -> Span {
         let (i0, s0) = match self.pts.partition_point(|(i, _)| *i <= idx) {
             0 => (0, self.start),
@@ -1488,6 +1495,11 @@ impl Lexer {
         if self.is_at_end() {
             return Err(self.error_span(open, "unterminated string literal"));
         }
+        // The CLOSING DELIMITER's own position, recorded at index `n` (one past the last content
+        // char). See `PosMap::note` — without it `at(n)` extrapolates a column off the end of
+        // whatever line the last content char sat on, which for a literal ending in a real newline is
+        // a column that does not exist in the file.
+        map.note(n, self.span_at(self.pos));
         self.advance(); // consume the closing quote
         Ok(str_token(text, map))
     }
@@ -1558,6 +1570,9 @@ impl Lexer {
                 text.push(self.advance());
             }
         }
+        // The closing triple's FIRST quote, at index `n` — see `string()` for why one-past-the-end
+        // is a recorded checkpoint and not an extrapolation.
+        map.note(n, self.span_at(self.pos));
         // consume the closing triple
         self.advance();
         self.advance();
