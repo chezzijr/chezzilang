@@ -383,12 +383,20 @@ pub type DocComment = (usize, String);
 #[derive(Debug, Clone, PartialEq)]
 pub struct LexError {
     pub line: usize,
+    /// 1-based column of the offending character. Built from the same [`Span`] as `line` — see
+    /// [`Lexer::error_span`] for the position rule (point at the offending char; an unterminated
+    /// delimiter points at its opener).
+    pub col: usize,
     pub message: String,
 }
 
 impl fmt::Display for LexError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "lex error (line {}): {}", self.line, self.message)
+        write!(
+            f,
+            "lex error (line {}, col {}): {}",
+            self.line, self.col, self.message
+        )
     }
 }
 
@@ -1116,22 +1124,52 @@ impl Lexer {
                 c if c.is_ascii_digit() => self.number(start)?,
                 c if c.is_alphabetic() || c == '_' => self.identifier(start),
 
-                other => return Err(self.error(&format!("unexpected character {other:?}"))),
+                // `start`, not the cursor: the char was consumed at the top of this match.
+                other => {
+                    return Err(self.error_at(start, &format!("unexpected character {other:?}")));
+                }
             };
             return Ok(Tok { kind, span });
         }
     }
 
-    /// Small helper to build a `LexError` at the current line.
+    /// Build a `LexError` at the CURRENT cursor. Use it only where the cursor still sits on the
+    /// offending character; everywhere the scanner has already munched past it, use [`error_at`]
+    /// (or [`error_span`]) with the real position.
     ///
-    /// It asks `span_at` rather than reading `self.line`, because inside a re-lexed interpolation
-    /// FRAGMENT `self.line` is the fragment-local `1` — so a lex error in `"{ 'unterminated }"` on
-    /// line 40 of a real program surfaced as `lex error (line 1)`. At top level `span_at` returns
-    /// `self.line` verbatim, so normal lexing is byte-identical. (`LexError` still carries no
-    /// COLUMN — `docs/gaps.md` **M24-7**.)
+    /// [`error_at`]: Lexer::error_at
+    /// [`error_span`]: Lexer::error_span
     fn error(&self, message: &str) -> LexError {
+        self.error_at(self.pos, message)
+    }
+
+    /// Build a `LexError` pointing at char index `pos` **on the current line**.
+    ///
+    /// It asks `span_at` rather than reading `self.line`/`self.line_start`, because inside a
+    /// re-lexed interpolation FRAGMENT those are fragment-local — so a lex error in
+    /// `"{ 'unterminated }"` on line 40 of a real program surfaced as `lex error (line 1)`.
+    /// `span_at` composes through the enclosing literal's `PosMap`, so a column inside a fragment
+    /// is right for free. At top level it returns `self.line` verbatim.
+    ///
+    /// **`pos` must not predate `self.line_start`** — `span_at` derives the column as
+    /// `pos - self.line_start`, so a position on an EARLIER line underflows. When the offending
+    /// position can be on an earlier line (an unterminated literal, whose opener is often lines
+    /// back), capture its `Span` at scan-entry and use [`error_span`] instead.
+    ///
+    /// [`error_span`]: Lexer::error_span
+    fn error_at(&self, pos: usize, message: &str) -> LexError {
+        self.error_span(self.span_at(pos), message)
+    }
+
+    /// The sole `LexError` constructor. `span` is the position the diagnostic points at, and the
+    /// rule for choosing it is: **point at the offending character; an unterminated delimiter
+    /// points at its opener** (rustc/CPython — see the `lex_error_points_at_the_offending_character`
+    /// test for the measured table). Never invent a position: if it is genuinely unknown, report
+    /// the token's start, never a filler `1`.
+    fn error_span(&self, span: Span, message: &str) -> LexError {
         LexError {
-            line: self.span_at(self.pos).line as usize,
+            line: span.line as usize,
+            col: span.col as usize,
             message: message.to_string(),
         }
     }
@@ -1269,7 +1307,8 @@ impl Lexer {
                 }
                 let body: Vec<char> = self.chars[body_start..self.pos].to_vec();
                 if body.is_empty() {
-                    return Err(self.error(&format!("empty {name} literal")));
+                    // The whole `0x` is consumed → anchor on the literal's first char.
+                    return Err(self.error_at(start, &format!("empty {name} literal")));
                 }
                 // Underscores: only between two valid digits (mirrors decimal rule).
                 let is_digit = |c: char| c.is_digit(radix);
@@ -1278,13 +1317,17 @@ impl Lexer {
                         let prev_ok = i > 0 && is_digit(body[i - 1]);
                         let next_ok = body.get(i + 1).is_some_and(|n| is_digit(*n));
                         if !(prev_ok && next_ok) {
-                            return Err(self.error("'_' in a number must be between digits"));
+                            // The offending `_` itself: body index `i` is char `body_start + i`.
+                            return Err(self.error_at(
+                                body_start + i,
+                                "'_' in a number must be between digits",
+                            ));
                         }
                     }
                 }
                 let digits: String = body.into_iter().filter(|c| *c != '_').collect();
                 let v = i64::from_str_radix(&digits, radix)
-                    .map_err(|e| self.error(&format!("invalid {name} literal: {e}")))?;
+                    .map_err(|e| self.error_at(start, &format!("invalid {name} literal: {e}")))?;
                 return Ok(Token::Int(v));
             }
         }
@@ -1342,14 +1385,18 @@ impl Lexer {
                 let prev_ok = i > 0 && word[i - 1].is_ascii_digit();
                 let next_ok = word.get(i + 1).is_some_and(|n| n.is_ascii_digit());
                 if !(prev_ok && next_ok) {
-                    return Err(self.error("'_' in a number must be between digits"));
+                    // The offending `_` itself: `word` is `chars[start..pos]`, so index `i` is
+                    // char `start + i`.
+                    return Err(self.error_at(start + i, "'_' in a number must be between digits"));
                 }
             }
         }
 
         let num: String = word.into_iter().filter(|c| *c != '_').collect();
         if is_float {
-            let v = num.parse::<f64>().map_err(|e| self.error(&e.to_string()))?;
+            let v = num
+                .parse::<f64>()
+                .map_err(|e| self.error_at(start, &e.to_string()))?;
             Ok(Token::Float(v))
         } else {
             match num.parse::<i64>() {
@@ -1362,7 +1409,8 @@ impl Lexer {
                     if num.parse::<u64>() == Ok(9_223_372_036_854_775_808) {
                         Ok(Token::IntMinMagnitude)
                     } else {
-                        Err(self.error(&e.to_string()))
+                        // The whole literal is consumed → anchor on its first char.
+                        Err(self.error_at(start, &e.to_string()))
                     }
                 }
             }
@@ -1381,6 +1429,9 @@ impl Lexer {
     /// interpolation (`{…}`) is a separate, later pass — not handled here.
     fn string(&mut self, quote: char) -> Result<Token, LexError> {
         let mut text = String::new();
+        // An unterminated literal points at its OPENER, which by then may be lines behind the
+        // cursor — so capture the SPAN now, while the opener is still on the current line.
+        let open = self.span_at(self.pos - 1);
         // Checkpoint 0 is taken HERE, where `self.pos` already sits past the opening delimiter — so
         // the map is right for `'…'` and `"""…"""` alike with no delimiter-width arithmetic.
         let mut map = PosMap::flat(self.span_at(self.pos));
@@ -1393,7 +1444,9 @@ impl Lexer {
             if self.peek() == '\\' {
                 self.advance(); // consume the backslash
                 if self.is_at_end() {
-                    return Err(self.error("unterminated string literal (trailing '\\')"));
+                    return Err(
+                        self.error_span(open, "unterminated string literal (trailing '\\')")
+                    );
                 }
                 let esc = self.advance();
                 let translated = match esc {
@@ -1409,12 +1462,19 @@ impl Lexer {
                         text.push(self.unicode_escape()?);
                         continue;
                     }
+                    // The `\` (2 back: the backslash and the newline are both consumed).
                     '\n' | '\r' => {
-                        return Err(self.error(
+                        return Err(self.error_at(
+                            self.pos - 2,
                             "line continuations are not supported; close the string or use \\n",
                         ));
                     }
-                    other => return Err(self.error(&format!("unknown escape '\\{other}'"))),
+                    // The escape CHAR, not the `\` before it (rustc points here).
+                    other => {
+                        return Err(
+                            self.error_at(self.pos - 1, &format!("unknown escape '\\{other}'"))
+                        );
+                    }
                 };
                 text.push(translated);
             } else {
@@ -1426,7 +1486,7 @@ impl Lexer {
             }
         }
         if self.is_at_end() {
-            return Err(self.error("unterminated string literal"));
+            return Err(self.error_span(open, "unterminated string literal"));
         }
         self.advance(); // consume the closing quote
         Ok(str_token(text, map))
@@ -1439,7 +1499,10 @@ impl Lexer {
     /// Produces a normal `Token::Str`.
     fn triple_string(&mut self, quote: char) -> Result<Token, LexError> {
         let mut text = String::new();
-        // See `string()`: `self.pos` is already past the opening `"""`, so checkpoint 0 is right.
+        // See `string()`: the opener (here 3 chars wide) may be lines behind the cursor by the time
+        // an unterminated literal is detected, so capture its span up front.
+        let open = self.span_at(self.pos - 3);
+        // `self.pos` is already past the opening `"""`, so checkpoint 0 is right.
         let mut map = PosMap::flat(self.span_at(self.pos));
         let mut n = 0usize;
         // Closes only when the next THREE chars are all `quote`.
@@ -1448,14 +1511,16 @@ impl Lexer {
             && self.chars.get(self.pos + 2) == Some(&quote))
         {
             if self.is_at_end() {
-                return Err(self.error("unterminated triple-quoted string literal"));
+                return Err(self.error_span(open, "unterminated triple-quoted string literal"));
             }
             map.note(n, self.span_at(self.pos));
             n += 1;
             if self.peek() == '\\' {
                 self.advance(); // consume the backslash
                 if self.is_at_end() {
-                    return Err(self.error("unterminated string literal (trailing '\\')"));
+                    return Err(
+                        self.error_span(open, "unterminated string literal (trailing '\\')")
+                    );
                 }
                 let esc = self.advance();
                 let translated = match esc {
@@ -1470,12 +1535,19 @@ impl Lexer {
                         text.push(self.unicode_escape()?);
                         continue;
                     }
+                    // The `\` (2 back: the backslash and the newline are both consumed).
                     '\n' | '\r' => {
-                        return Err(self.error(
+                        return Err(self.error_at(
+                            self.pos - 2,
                             "line continuations are not supported; close the string or use \\n",
                         ));
                     }
-                    other => return Err(self.error(&format!("unknown escape '\\{other}'"))),
+                    // The escape CHAR, not the `\` before it.
+                    other => {
+                        return Err(
+                            self.error_at(self.pos - 1, &format!("unknown escape '\\{other}'"))
+                        );
+                    }
                 };
                 text.push(translated);
             } else {
@@ -1501,6 +1573,8 @@ impl Lexer {
     /// the triple form). Produces a [`Token::RawStr`].
     fn raw_string(&mut self, quote: char) -> Result<Token, LexError> {
         let mut text = String::new();
+        // The opener is `r"` — 2 chars, both already consumed. See `string()`.
+        let open = self.span_at(self.pos - 2);
         while !self.is_at_end() && self.peek() != quote {
             if self.peek() == '\n' {
                 self.line += 1; // a *literal* newline → multi-line string; keep line count honest
@@ -1509,7 +1583,7 @@ impl Lexer {
             text.push(self.advance());
         }
         if self.is_at_end() {
-            return Err(self.error("unterminated raw string literal"));
+            return Err(self.error_span(open, "unterminated raw string literal"));
         }
         self.advance(); // consume the closing quote
         Ok(Token::RawStr(text))
@@ -1521,13 +1595,15 @@ impl Lexer {
     /// quote-heavy data (e.g. JSON) is embedded. Closes only on the next triple `quote`.
     fn raw_triple_string(&mut self, quote: char) -> Result<Token, LexError> {
         let mut text = String::new();
+        // The opener is `r"""` — 4 chars, all already consumed. See `string()`.
+        let open = self.span_at(self.pos - 4);
         // Closes only when the next THREE chars are all `quote`.
         while !(self.peek() == quote
             && self.peek_next() == quote
             && self.chars.get(self.pos + 2) == Some(&quote))
         {
             if self.is_at_end() {
-                return Err(self.error("unterminated triple-quoted raw string literal"));
+                return Err(self.error_span(open, "unterminated triple-quoted raw string literal"));
             }
             if self.peek() == '\n' {
                 self.line += 1; // keep the line count honest across embedded newlines
@@ -1551,9 +1627,11 @@ impl Lexer {
     /// char (a code point > 0x7F) are REJECTED — a byte literal is byte-exact, never UTF-8 text.
     fn byte_string(&mut self, quote: char) -> Result<Token, LexError> {
         let mut bytes = Vec::new();
+        // The opener is `b"` — 2 chars, both already consumed. See `string()`.
+        let open = self.span_at(self.pos - 2);
         while !self.is_at_end() && self.peek() != quote {
             if self.peek() == '\\' {
-                self.byte_escape(&mut bytes)?;
+                self.byte_escape(&mut bytes, open)?;
             } else {
                 let c = self.advance();
                 if c == '\n' {
@@ -1564,7 +1642,7 @@ impl Lexer {
             }
         }
         if self.is_at_end() {
-            return Err(self.error("unterminated byte-string literal"));
+            return Err(self.error_span(open, "unterminated byte-string literal"));
         }
         self.advance(); // closing quote
         Ok(Token::Bytes(bytes))
@@ -1574,15 +1652,17 @@ impl Lexer {
     /// only on a triple of `quote`, so a lone quote inside is an ordinary byte.
     fn byte_triple_string(&mut self, quote: char) -> Result<Token, LexError> {
         let mut bytes = Vec::new();
+        // The opener is `b"""` — 4 chars, all already consumed. See `string()`.
+        let open = self.span_at(self.pos - 4);
         while !(self.peek() == quote
             && self.peek_next() == quote
             && self.chars.get(self.pos + 2) == Some(&quote))
         {
             if self.is_at_end() {
-                return Err(self.error("unterminated triple-quoted byte-string literal"));
+                return Err(self.error_span(open, "unterminated triple-quoted byte-string literal"));
             }
             if self.peek() == '\\' {
-                self.byte_escape(&mut bytes)?;
+                self.byte_escape(&mut bytes, open)?;
             } else {
                 let c = self.advance();
                 if c == '\n' {
@@ -1605,15 +1685,20 @@ impl Lexer {
             bytes.push(c as u8);
             Ok(())
         } else {
-            Err(self.error("non-ASCII byte in byte literal; use \\xHH escape"))
+            // `c` is already consumed by the caller, and it is non-ASCII so it is never a newline.
+            Err(self.error_at(
+                self.pos - 1,
+                "non-ASCII byte in byte literal; use \\xHH escape",
+            ))
         }
     }
 
-    /// Process one backslash escape inside a byte literal. The cursor sits on the `\`.
-    fn byte_escape(&mut self, bytes: &mut Vec<u8>) -> Result<(), LexError> {
+    /// Process one backslash escape inside a byte literal. The cursor sits on the `\`; `open` is the
+    /// enclosing literal's opening-delimiter span (only an unterminated literal points there).
+    fn byte_escape(&mut self, bytes: &mut Vec<u8>, open: Span) -> Result<(), LexError> {
         self.advance(); // consume the backslash
         if self.is_at_end() {
-            return Err(self.error("unterminated byte-string literal (trailing '\\')"));
+            return Err(self.error_span(open, "unterminated byte-string literal (trailing '\\')"));
         }
         let esc = self.advance();
         let byte = match esc {
@@ -1631,14 +1716,23 @@ impl Lexer {
                 bytes.push((hi << 4) | lo);
                 return Ok(());
             }
+            // The `u`, not the `\` before it.
             'u' => {
-                return Err(self.error("\\u not allowed in a byte literal; use \\xHH"));
+                return Err(
+                    self.error_at(self.pos - 1, "\\u not allowed in a byte literal; use \\xHH")
+                );
             }
+            // The `\` (2 back: the backslash and the newline are both consumed).
             '\n' | '\r' => {
-                return Err(self
-                    .error("line continuations are not supported; close the literal or use \\n"));
+                return Err(self.error_at(
+                    self.pos - 2,
+                    "line continuations are not supported; close the literal or use \\n",
+                ));
             }
-            other => return Err(self.error(&format!("unknown escape '\\{other}'"))),
+            // The escape CHAR, not the `\` before it.
+            other => {
+                return Err(self.error_at(self.pos - 1, &format!("unknown escape '\\{other}'")));
+            }
         };
         bytes.push(byte);
         Ok(())
@@ -1651,9 +1745,13 @@ impl Lexer {
             return Err(self.error(&format!("{who} escape needs two hex digits")));
         }
         let c = self.advance();
-        c.to_digit(16)
-            .map(|d| d as u8)
-            .ok_or_else(|| self.error(&format!("invalid hex digit '{c}' in {who} escape")))
+        c.to_digit(16).map(|d| d as u8).ok_or_else(|| {
+            // The bad digit itself — `advance` already stepped past it.
+            self.error_at(
+                self.pos - 1,
+                &format!("invalid hex digit '{c}' in {who} escape"),
+            )
+        })
     }
 
     /// Scan the body of a `\u{HEX}` escape. The `\u` is already consumed; the cursor sits on
@@ -1661,13 +1759,17 @@ impl Lexer {
     /// Rejects a missing `{`, an empty `{}`, more than 6 hex digits, any non-hex char, an
     /// unterminated brace, and invalid code points (surrogates D800-DFFF, > 10FFFF).
     fn unicode_escape(&mut self) -> Result<char, LexError> {
+        // The `{` opens the escape: the errors that are about the escape AS A WHOLE point here.
+        // `unicode_escape` never touches `self.line_start`, so this index stays on the current line.
+        let brace = self.pos;
         if !self.match_char('{') {
+            // The cursor still sits on the offending char (`match_char` declined).
             return Err(self.error("expected '{' after \\u in unicode escape"));
         }
         let mut digits = String::new();
         loop {
             if self.is_at_end() {
-                return Err(self.error("unterminated unicode escape"));
+                return Err(self.error_at(brace, "unterminated unicode escape"));
             }
             let c = self.peek();
             if c == '}' {
@@ -1682,12 +1784,13 @@ impl Lexer {
             }
             digits.push(self.advance());
         }
+        // These three are about the escape as a whole (its body is already consumed) → the `{`.
         if digits.is_empty() {
-            return Err(self.error("empty unicode escape"));
+            return Err(self.error_at(brace, "empty unicode escape"));
         }
         let cp = u32::from_str_radix(&digits, 16)
-            .map_err(|e| self.error(&format!("invalid unicode escape: {e}")))?;
-        char::from_u32(cp).ok_or_else(|| self.error("invalid unicode code point"))
+            .map_err(|e| self.error_at(brace, &format!("invalid unicode escape: {e}")))?;
+        char::from_u32(cp).ok_or_else(|| self.error_at(brace, "invalid unicode code point"))
     }
 
     // Indentation (offside rule) — implemented in `scan_indentation`:
@@ -3245,5 +3348,91 @@ mod tests {
             }
         }
         assert!(saw_expr, "expected one Expr chunk");
+    }
+
+    /// A `LexError` points at the offending CHARACTER, on both axes (`docs/gaps.md` M24-7).
+    ///
+    /// Every expected column below is hand-counted from the source, from the position rule the
+    /// ancestors set (measured 2026-08-14, rustc 1.x):
+    ///
+    /// | family                              | position               | evidence            |
+    /// |-------------------------------------|------------------------|---------------------|
+    /// | bad char inside a `\u{…}` escape    | the offending char     | rustc `badu.rs:2:20`|
+    /// | unknown / invalid escape            | the escape char        | rustc `num.rs:3:16` |
+    /// | malformed number                    | the literal's start    | rustc `num.rs:2:13` |
+    /// | unterminated string / triple / byte | the OPENING delimiter  | rustc `unterm.rs:2:13`, CPython |
+    ///
+    /// The unterminated cases also pin the LINE: the cursor has run to EOF, so reading the position
+    /// off `self.pos` reported the line the file ENDS on, not the line the literal opens on.
+    #[test]
+    fn lex_error_points_at_the_offending_character() {
+        // (source, expected line, expected col, message substring)
+        let cases: &[(&str, usize, usize, &str)] = &[
+            // z := "ab\u{12zz}cd"   — cols: z1 ␠2 :3 =4 ␠5 "6 a7 b8 \9 u10 {11 1←12 2←13 z←14
+            (
+                "print(1)\nprint(2)\nz := \"ab\\u{12zz}cd\"\n",
+                3,
+                14,
+                "invalid hex digit in unicode escape",
+            ),
+            // y := "abc   — the opening quote is col 6, and the line is 2 even though EOF is line 3
+            ("x := 1\ny := \"abc\n", 2, 6, "unterminated string literal"),
+            // y := """abc  — the opening triple starts at col 6
+            (
+                "x := 1\ny := \"\"\"abc\n",
+                2,
+                6,
+                "unterminated triple-quoted string literal",
+            ),
+            // y := 0x   — the literal starts at col 6 (the `0`)
+            ("x := 1\ny := 0x\n", 2, 6, "empty hexadecimal literal"),
+            // blank line in between: the line axis still holds. d := 0b starts at col 6.
+            ("a := 1\n\nb := 2\nd := 0b\n", 4, 6, "empty binary literal"),
+            // y := "a\qb"   — cols: y1 ␠2 :3 =4 ␠5 "6 a7 \8 q←9
+            ("x := 1\ny := \"a\\qb\"\n", 2, 9, "unknown escape '\\q'"),
+            // y := b"a\qb"  — the `b` prefix shifts everything one right: \9 q←10
+            ("x := 1\ny := b\"a\\qb\"\n", 2, 10, "unknown escape '\\q'"),
+            // y := b"\xZZ"  — cols: y1 ␠2 :3 =4 ␠5 b6 "7 \8 x9 Z←10
+            (
+                "x := 1\ny := b\"\\xZZ\"\n",
+                2,
+                10,
+                "invalid hex digit 'Z' in \\x escape",
+            ),
+            // y := r"abc   — a raw literal's opener is its `r`, at col 6
+            (
+                "x := 1\ny := r\"abc\n",
+                2,
+                6,
+                "unterminated raw string literal",
+            ),
+            // y := ~   — the char itself, at col 6 (the cursor is already past it)
+            ("x := 1\ny := ~\n", 2, 6, "unexpected character '~'"),
+        ];
+        for (src, line, col, msg) in cases {
+            let e = tokenize(src).expect_err(&format!("expected a lex error for {src:?}"));
+            assert!(
+                e.message.contains(msg),
+                "wrong message for {src:?}: got {:?}, want {msg:?}",
+                e.message
+            );
+            assert_eq!(
+                (e.line, e.col),
+                (*line, *col),
+                "wrong position for {src:?} ({})",
+                e.message
+            );
+        }
+    }
+
+    /// …and the `Display` carries both axes, exactly like every other diagnostic in the compiler
+    /// (`impl Display for Span` is `line {}, col {}`).
+    #[test]
+    fn lex_error_display_carries_the_column() {
+        let e = tokenize("x := 1\ny := 0x\n").unwrap_err();
+        assert_eq!(
+            e.to_string(),
+            "lex error (line 2, col 6): empty hexadecimal literal"
+        );
     }
 }

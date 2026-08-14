@@ -105,6 +105,37 @@ fn resolve_error_plaintext_unchanged_and_attributed() {
     );
 }
 
+/// A LEX error carries a real COLUMN through the resolver seam, in JSON and in plain text alike
+/// (`docs/gaps.md` M24-7). The seam used to hardcode `col: 1`, so the LSP squiggle and the JSON
+/// both landed on the start of the line rather than on the offending character.
+#[test]
+fn lex_error_carries_a_real_column() {
+    let t = TmpDir::new();
+    // Line 2 is `y := 0x` — the malformed literal starts at column 6 (`y`1 ` `2 `:`3 `=`4 ` `5 `0`6).
+    let main = t.write("main.chz", "x := 1\ny := 0x\n");
+
+    let out = Command::new(env!("CARGO_BIN_EXE_chezzi"))
+        .args(["check", main.to_str().unwrap(), "--errors=json"])
+        .output()
+        .expect("run chezzi check --errors=json");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stdout = stdout.trim();
+    assert!(
+        stdout.contains("\"line\":2") && stdout.contains("\"col\":6"),
+        "lex error JSON must carry the offending char's line AND column, got: {stdout}"
+    );
+
+    let out = Command::new(env!("CARGO_BIN_EXE_chezzi"))
+        .args(["check", main.to_str().unwrap()])
+        .output()
+        .expect("run chezzi check");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("lex error (line 2, col 6): empty hexadecimal literal"),
+        "plain text must render both axes, got: {stderr}"
+    );
+}
+
 /// Crash-safety regression: a valid but very long left-associative binary chain or postfix chain
 /// used to build an AST deep enough to overflow the recursive front-end walkers → host stack
 /// overflow (SIGABRT, exit code None). The `MAX_AST_DEPTH` parser cap + the dedicated front-end

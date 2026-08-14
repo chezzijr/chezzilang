@@ -24854,10 +24854,10 @@ fn padded_fragment_column_points_past_the_padding() {
     assert_eq!((e.span.line, e.span.col), (1, 12));
 }
 
-/// A LEX error inside a fragment reports the fragment's REAL line. The fragment lexer's own
-/// `self.line` is 1 — it is lexing a substring — so `LexError` built from it said `line 1` no matter
-/// where in the file the literal sat. It asks `span_at` now, which routes through the literal's
-/// `PosMap`. (`LexError` still carries no COLUMN: `docs/gaps.md` **M24-7**.)
+/// A LEX error inside a fragment reports the fragment's REAL line AND column. The fragment lexer's
+/// own `self.line` is 1 — it is lexing a substring — so `LexError` built from it said `line 1` no
+/// matter where in the file the literal sat. It asks `span_at` now, which routes through the
+/// literal's `PosMap`; both axes compose through it (`docs/gaps.md` M24-6 + M24-7).
 #[test]
 fn a_lex_error_inside_a_fragment_reports_its_real_line() {
     // The `\u{ZZ}` is not a valid escape, and it is inside a NESTED literal so the interpolation
@@ -24869,9 +24869,12 @@ fn a_lex_error_inside_a_fragment_reports_its_real_line() {
         .iter()
         .find(|e| e.message.contains("lex error"))
         .unwrap_or_else(|| panic!("expected a lex error, got: {errs:?}"));
+    // Column 16 is hand-counted off source line 3 — `s`1 ` `2 `:`3 `=`4 ` `5 `"`6 `a`7 `b`8 ` `9
+    // `{`10 `'`11 `\`12 `\`13 `u`14 `{`15 `Z`←16 — i.e. the physical position of the first `Z`,
+    // which only the literal's `PosMap` knows (the fragment's own cursor says col 5).
     assert!(
-        e.message.contains("lex error (line 3)"),
-        "must report the literal's real line, got: {}",
+        e.message.contains("lex error (line 3, col 16)"),
+        "must report the literal's real line AND column, got: {}",
         e.message
     );
 }

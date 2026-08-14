@@ -686,9 +686,9 @@ impl Builder {
             lexer::tokenize_with_comments(source, file).map_err(|e| ResolveError {
                 message: prefix(dotted, e.to_string()),
                 span: Span {
-                    // `as u32`: a 1-based source line counter — cannot approach u32::MAX.
+                    // `as u32`: 1-based source counters — cannot approach u32::MAX.
                     line: e.line as u32,
-                    col: 1,
+                    col: e.col as u32,
                     file,
                 },
                 module: opt_label(dotted),

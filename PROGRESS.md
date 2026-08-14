@@ -1114,7 +1114,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 >
 > **Also fixed, same commit:** `Lexer::error` reads `span_at(self.pos).line` instead of the
 > fragment-local `self.line`, so a lex error inside a fragment no longer says `lex error (line 1)`
-> inside a real program. `LexError` still carries no COLUMN — filed as **M24-7**.
+> inside a real program. (**M24-7**, the missing COLUMN, is fixed too — 2026-08-14, see below.)
 >
 > **Tests:** Rust for what `assert` cannot see (`pos_map_is_absent_for_a_plain_literal`,
 > `pos_map_tracks_delimiter_escape_and_newline_widths`, `pos_map_tracks_two_char_escape_widths`,
@@ -10219,6 +10219,29 @@ no longer a non-goal — complete VM-only support shipped** (see below).
 
 One bullet per milestone/epic. Full landing detail (TDD notes, review-panel findings, test-count deltas,
 branch names) is in the git log.
+
+- **A lex error points at the offending CHARACTER, on both axes (M24-7, 2026-08-14).** `LexError`
+  carried a line but no column, and the resolver seam hardcoded `col: 1`, so a lex error was the one
+  diagnostic in the compiler that could not point at a character — the LSP squiggle landed on the
+  start of the line. Measured `chezzi check`, before → after: `z := "ab\u{12zz}cd"` →
+  `lex error (line 3): …` → `lex error (line 3, col 14): …` (the first `z` of `12zz`); `y := 0x` →
+  col 6 (the `0`); `y := "a\qb"` → col 9 (the `q`); `y := "abc` unterminated on line 2 of a 2-line
+  file → `(line 3, col 1)` → `(line 2, col 6)`, the opening quote — which fixes the **line** too, as
+  the position was being read off the cursor after it ran to EOF. **The rule** (measured against
+  rustc + CPython, table in `docs/gaps.md` M24-7 and in the test's doc comment): point at the
+  offending character; an unterminated delimiter points at its opener; a malformed number points at
+  the literal's start; an escape error points at the escape char, not the `\`. Mechanism: `col` on
+  `LexError`, `Display` is `lex error (line {}, col {}): {}` (matching `Span`'s), and
+  `src/resolver/mod.rs` reads `e.col` — the LSP, `--errors=json` and the plain-text renderer all ride
+  along unedited. `Lexer::error` stays the sole constructor path, now `error()` → `error_at(pos)` →
+  `error_span(span)`; `error_at` asks `span_at`, so a column inside a re-lexed interpolation fragment
+  composes through the M24-6 `PosMap` for free. All 35 construction sites audited. `Span` untouched
+  (still 12 bytes). Tests: `lexer::tests::lex_error_points_at_the_offending_character` (10-case
+  table, every column hand-counted from the source rather than read off the implementation),
+  `lex_error_display_carries_the_column`, the extended
+  `checker::tests::a_lex_error_inside_a_fragment_reports_its_real_line` (now pins col 16, the
+  fragment column only the `PosMap` knows), and `check_errors_json::lex_error_carries_a_real_column`
+  (CLI-level JSON + plain text).
 
 - **`examples/panic.chz` type-checks — the last allow-listed example is gone, and its recorded reason
   was wrong (2026-08-06).** `chezzi check examples/panic.chz` failed with `line 29, col 22: expression
