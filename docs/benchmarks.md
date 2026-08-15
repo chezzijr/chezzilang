@@ -6,6 +6,58 @@ re-stamp this table when the runtime changes. The optimization backlog these num
 justify lives in **[`future.md §4`](future.md)**; the scheduled work is roadmap **M19**
 (`spec.md` / `PROGRESS.md`).
 
+> **Reading note (added 2026-08-16).** Rows below labelled `--serial` are **dated measurements** taken
+> on the cooperative single-thread engine, which was **removed 2026-08-16** (`docs/future.md` §2b).
+> They are kept as the record of what was measured at the time; they are not reproducible on today's
+> binary, and "serial == M:N parity green" in an older section means the gate that existed then.
+
+## Serial-engine removal — 2026-08-16 — behaviour-preserving, one measured regression
+
+The `--serial` engine, the `--check-parity` flag, the cooperative scheduler and every per-engine fork
+were deleted (+287/−1125 in the scheduler commit alone; ~1100 lines net). **Nothing was added to any
+benchmark's execution path — every edit on those paths is a removal.**
+
+Full `benches/run.chz` against the phase-0 baseline recorded at the start of the branch (all values are
+"CPython is N× faster than Chezzi", except `empty`, where Chezzi is faster):
+
+| bench | baseline | after removal | Δ |
+|---|---|---|---|
+| fib | 2.86 | 2.88 ± 0.03 | noise |
+| str | 1.83 | 1.80 ± 0.02 | noise (better) |
+| primes | 2.06 | 2.07 ± 0.02 | noise |
+| loop | 1.03 | 1.02 ± 0.02 | noise (better) |
+| list | 2.20 | 2.24 ± 0.03 | +1.8 % |
+| struct | 2.41 | 2.39 ± 0.03 | noise |
+| poly_method | 3.91 | 3.98 ± 0.06 | +1.8 % |
+| map | 1.67 | 1.71 ± 0.08 | noise |
+| empty *(Chezzi faster)* | 3.85 | 3.90 ± 0.12 | noise (better) |
+
+`list` and `poly_method` sat at the noise boundary against a number recorded on another day, so they
+were re-measured as a **direct A/B**: the actual pre-change binary (`71810774`) was built in its own
+`CARGO_TARGET_DIR` and **both binaries were copied into the same tmpfs directory**, killing the
+filesystem confound (m = 20 each):
+
+```
+poly_method   base 71810774 : 1.904 s ± 0.014 s
+              new  89f20591 : 1.946 s ± 0.014 s     → 2.2 % SLOWER (1.02 ± 0.01)
+list          base 71810774 :  566.3 ms ± 9.2 ms
+              new  89f20591 :  576.9 ms ± 9.7 ms    → 1.9 % slower (1.02 ± 0.02), ~1σ
+fib           base  386.5 ms ± 8.3 ms · new 384.0 ms ± 3.8 ms   → unchanged
+map           base  228.6 ms ± 6.6 ms · new 243.1 ms ± 29.4 ms  → not significant
+```
+
+**`poly_method` is reproducibly ~2.2 % slower** (σ = 0.014 s on both sides — outside noise). That is
+the measurement; the following is an **attribution, not a measured cause**. `poly_method` and `list`
+use no nursery, no channel, no `Executor` and no socket, so nothing the removal touched runs on their
+paths, and every edit there is a deletion (`Vm::collect` lost the always-empty `scheduler_stack` loop;
+`swap_ctx` lost a release-mode-free `debug_assert`). The plausible mechanism is **struct/code layout
+drift**: `Vm` lost a `bool` and a `Vec` (~24 B), repacking the offset of every field after them —
+including the ones `run_until`'s hot loop touches — and deleting ~1100 lines shifts inlining and code
+placement. This is the classic ±2 % layout artifact this file already records as moving a *different*
+bench than predicted. Review judged the attribution plausible and found nothing that genuinely got
+slower. Not chased: the mechanism is not in the diff's semantics, and `Vm`-size/layout tuning belongs
+to the M19 track, where **NaN-boxing `Value`** is the named lever for exactly this.
+
 ## Memory baseline — Go vs Chezzi — 2026-07-25
 
 Peak process RSS (honest apples-to-apples: full runtime + stacks + heap; the internal

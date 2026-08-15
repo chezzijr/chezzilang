@@ -1,5 +1,10 @@
 # Cross-nursery wakeups — flat-scheduler fix (design + resolution)
 
+> **Reading note (added 2026-08-16).** A **dated design record**, kept as written. The "cooperative
+> (`--serial`) still serializes nested nursery levels" caveat below, and the deferred
+> cooperative-engine flatten it promises, are both **moot**: that engine was removed 2026-08-16
+> (`docs/future.md` §2b). Only the M:N behaviour described here is live.
+
 > **Status: RESOLVED under `--parallel` (M:N).** The circular outer-sibling case (§1–§2 below) is fixed
 > by the flat scheduler described in §4. The landed fix covers: the circular wakeup, the inline
 > outer-body's own `send`/`close` waking an enlisted parked sibling, a `spawn:` issued *after* the

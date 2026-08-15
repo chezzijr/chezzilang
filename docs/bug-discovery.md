@@ -15,13 +15,19 @@ the techniques, who uses them, and the ranked plan for Chezzi.
 
 ## The blind spot in our current setup
 
-Chezzi has a **two-VM parity oracle**: every golden test asserts the serial `--serial` VM and the
-default M:N VM produce byte-identical output. This is a real differential for *concurrent* programs (it
-catches scheduler-dependent divergence) — but it has one structural blind spot:
+**Historical framing (2026-06/07), kept because the lesson outlived the mechanism.** Chezzi then had a
+**two-VM parity oracle**: every golden test asserted the cooperative `--serial` VM and the default M:N
+VM produced byte-identical output. That was a real differential for *concurrent* programs — but it had
+one structural blind spot:
 
-> **Both engines are the same `Vm`; for sequential programs they run identical bytecode.** So for
-> non-concurrent code, parity is a determinism check, not a differential — it catches
+> **Both engines were the same `Vm`; for sequential programs they ran identical bytecode.** So for
+> non-concurrent code, parity was a determinism check, not a differential — it caught
 > *divergence*, never *shared wrongness*.
+
+**`--serial` was removed 2026-08-16** (`docs/future.md` §2b), so that oracle no longer exists at all;
+what stands in its place for accidental *schedule*-dependent divergence is the two-worker-count gate
+(Tier 2 #4 below). The blind spot argument is unchanged by the removal — it is the reason the CPython
+differential and the DSA known-answer harness were built, and both are live.
 
 Every bug found in the June 2026 hunt was invisible to parity because **both** engines had it:
 - `List.sum()` silently wrapped i64 overflow on both engines → parity green → undetected.
@@ -34,7 +40,8 @@ The remedy is twofold and is the core of this strategy:
 
 ## What we already have
 
-- **Two-VM parity oracle** — `assert_parity` / golden `examples/*.chz` + `.expected` (~2736 unit tests). Catches serial-vs-M:N scheduler divergence (a determinism check for sequential code, which runs identical bytecode on both engines).
+- **Golden suite** — `assert_parity_*` (the name is historical) / golden `examples/*.chz` + `.expected`. Each runs the one engine and compares against a literal expectation. The two-VM parity oracle these grew out of was removed with `--serial` on 2026-08-16.
+- **Two-worker-count schedule differential** — `tests/chezzi_threads_cli.rs` runs the whole `tests/chz` suite through the built binary at the default worker count and again at `CHEZZI_THREADS=2`, each in its own process/pool, asserting the same verdicts. This is what replaced `serial == M:N` as the standing accidental-divergence detector; it is narrower (a curated corpus, two fixed schedules).
 - **Grammar conformance** — `docs/grammar.bnf` is executed and differential-tested against the parser (`src/conformance.rs`, `tests/corpus/`, `cargo test conformance`). Syntax-level only — not semantics.
 - **CPython bench harness** — `benches/run.chz` runs paired programs in `benches/chz/` (Chezzi) and `benches/py/` (Python) and compares **timing**. The paired programs seeded the output-differential oracle below.
 - **CPython differential oracle** — ✅ **built** (lever #2). `src/difftest/` generates random semantically-equivalent programs, renders each as both Chezzi and Python, runs both, and diffs stdout. Wired as the `tests/difftest.rs` CI gate (fixed seed range, reproducible) and the `src/bin/difffuzz` long-runner. See "Differential oracle" below.
@@ -174,11 +181,13 @@ Every finding so far falls into one of these (use as a "what am I hunting" check
      from *intended design*. Chezzi's intended Python-divergences (i64 not bignum, truncating `/`,`%`,
      static typing) are **not** bugs; silent wrapping / UB / a runtime fault on an accepted program is.
    - **Write tiny focused `.chz` probes**, one angle each.
-   - **Run on BOTH engines** (`run` and `run --serial`) **and** `check`. Divergence = bug. Where the
-     semantics should match Python, diff against `python3`.
+   - **Run `run` AND `check`**, and — for anything concurrent — run it again under `CHEZZI_THREADS=1`
+     and `CHEZZI_THREADS=2`. A verdict that changes with the worker count is a bug. Where the
+     semantics should match Python, diff against `python3`; where they should match Go, write and run
+     the Go program.
    - **Evidence-gated, reproduced-only.** Each finding: minimal repro + exact command + EXPECTED (cite
-     spec) + ACTUAL (quoted) + serial/M:N divergence? + severity. No speculation; "clean" if an angle
-     yields nothing, with the angles covered listed.
+     spec) + ACTUAL (quoted) + does the worker count change it? + severity. No speculation; "clean" if
+     an angle yields nothing, with the angles covered listed.
 4. **Triage each confirmed bug** through `auto-task` (research → plan → TDD → prosecute/defend) →
    merge → `post-merge-gate`. Batch by file seam (most checker bugs touch `src/checker/mod.rs` in
    *disjoint functions* — safe to parallelize as separate auto-tasks, merge serially).

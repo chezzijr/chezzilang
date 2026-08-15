@@ -58,7 +58,7 @@ Closest existing cousins (read, don't copy): **Crystal**, **Nim**.
   (a larger spec is a parse error — never a giant allocation). String `.N` truncates; an unknown type
   char or a type/value mismatch is reported before any output (runtime-prefixed; not caught by
   `check`). A bare interpolated ternary works; parenthesize to give it a spec (`{(if b: 1 else: 2):>5}`).
-  The spec parser+formatter is shared by both engines (`src/fmtspec.rs`) → byte-identical output for
+  The spec parser+formatter is one module (`src/fmtspec.rs`) → one format path for
   well-formed programs. Full grammar in [`syntax.md` §10](syntax.md).
 - **Literal forms** — int (`42`, `0xFF`/`0b1010`/`0o17`, `_` separators), float (`3.14`, scientific `6.022e23`/`1e3`/`1.5e-9` — any exponent ⇒ float), str in either `"…"` or `'…'` (interchangeable: same escapes & interpolation), also **triple-quoted** `"""…"""` / `'''…'''` (same escapes/interpolation, but unescaped quotes allowed inside) with escapes `\n \t \r \\ \" \' \0` and `\u{HEX}` unicode (1-6 hex digits), and **raw** `r"…"` / `r'…'` / triple `r"""…"""` (verbatim `str` — NO escapes, NO interpolation, braces literal; the escape hatch for the always-on `{…}`). See `docs/syntax.md §2/§10`.
 - **Membership & assignment ops** — `x in xs` membership (`bool`; list/set element, map **key**, str substring; a user struct/enum via the **`Contains[Item]`** protocol's `contains(self, item) -> bool` method); compound assignment `+= -= *= /= %= &= |= ^= <<= >>=` (= `x = x OP v`; bitwise forms int-only); and multi-target / tuple-swap assignment `a, b = b, a` (RHS evaluated first). See `docs/syntax.md §3/§4`.
@@ -92,7 +92,7 @@ param collects the surplus trailing positional args into a `List[T]`, so it is h
 "pass an explicit `list`". At most one variadic per signature; it must carry an element type and may
 not carry a default; everything after it is **keyword-only** (a defaulted post-variadic param is an
 optional keyword arg, a defaultless one is required-by-keyword — like Python's `*args`). The collapse
-happens in the desugar pass (a synthesized `List` literal), so both engines see an ordinary positional
+happens in the desugar pass (a synthesized `List` literal), so the backend sees an ordinary positional
 call. Used as a first-class **value**, a variadic fn takes the collapsed `List[T]` slot (no per-arg
 spread through a value — the same fixed-value-form rule as `print`). Variadic GENERICS (`Foo[T...]`)
 remain a **non-goal** — generics are always fixed-arity. The **`Any`** top type (an empty structural
@@ -111,7 +111,7 @@ g(name="Bob")` and a `fn(name: str)->nil` HOF parameter both accept keywords). L
 typing — and a value call is scope-cut: it must supply every parameter (declaration-site **defaults do
 not fill through a value**; a direct call still does), and built-in fn values take no keywords.
 Resolution is fully static (the checker rewrites the keyword call to positional), so the runtime ABI
-stays positional and all engines agree. **Spread/unpack syntax** (`[*a, *b]`, `{**m}`, `f(*args)`)
+stays positional and the backend never sees a keyword. **Spread/unpack syntax** (`[*a, *b]`, `{**m}`, `f(*args)`)
 is likewise dropped — list concatenation and map merge are served by plain methods/operators, not
 new syntax.
 
@@ -120,8 +120,8 @@ new syntax.
 unbounded `Channel[T]()` or bounded `Channel[T](cap)` with backpressure,
 `close`/`for v in ch`/`try_send`/`cap`), `Shared[T]`, and `Executor`. `chezzi run` defaults to the real
 OS-thread engine (size its worker pool with `--threads=N` / `CHEZZI_THREADS`, `0` = all cores);
-`--serial` selects the cooperative engine (kept as the byte-identical parity oracle). The OS-thread
-engine is a **M:N work-stealing scheduler** (reduction-counting
+that is the **only** engine (the cooperative `--serial` VM was removed 2026-08-16). It is a
+**M:N work-stealing scheduler** (reduction-counting
 preemption, a dirty/blocking pool for opaque blocking natives, and an epoll/kqueue netpoller backing
 non-blocking `std.net` TCP). **M-C implicit nurseries shipped** — every function body and the module
 top level is an implicit nursery that joins at its `return`/end, so a bare `spawn` is legal anywhere
@@ -129,13 +129,13 @@ top level is an implicit nursery that joins at its `return`/end, so a bare `spaw
 in [`docs/concurrency.md`](concurrency.md); phase history in
 [`docs/concurrency-tier-d.md`](concurrency-tier-d.md) + [`docs/concurrency-b3.md`](concurrency-b3.md).
 
-**Cancellation semantics (both engines).** A cancel — a sibling's fault, an `os.exit`, a scope teardown
+**Cancellation semantics.** A cancel — a sibling's fault, an `os.exit`, a scope teardown
 — is delivered at **cancellation points**: **loop back-edges**, **blocking/park ops** (`recv`, `wait:`,
 socket ops, blocking natives) and **native→user-code re-entries** (a `map`/`filter`/`fold`/`sort`
 callback — that native's per-element Rust loop is its back-edge). Not at every instruction. So a
 **task always runs its straight-line prologue**, which means a `defer` it registers is **always**
-registered before anything can kill it and **always** runs on the cancel unwind — on the M:N engine and
-on `--serial`. Every spawned task starts, even into an already-cancelled scope. A CPU loop stays
+registered before anything can kill it and **always** runs on the cancel unwind. Every spawned task
+starts, even into an already-cancelled scope. A CPU loop stays
 promptly cancellable (the back-edge is a checkpoint); **loop-free recursion is not a checkpoint** and
 runs to completion first (Trio's model — pure CPU code is not interrupted). A **`defer` is never itself cancelled**: no checkpoint fires inside a deferred call, so every
 registered `defer` runs in full (LIFO) — and a `recover:` installed *inside* a defer body catches faults
@@ -143,8 +143,8 @@ raised beneath it, so a panic in cleanup step 1 does not skip cleanup step 2 (it
 the task's life). Cancelling a scope also cancels its **nested** scopes. A `recover:` *outside* the defer in a
 cancelled task never catches the cancel (a cancelled task must die). `std.os.exit` is the one thing that
 skips `defer`s by design. Genuine deadlock is the one known limit (`docs/gaps.md` N5). **Cross-task
-stdout order is nondeterministic on both engines** (one `print` = one locked, line-atomic write); the
-line *set*, the exit code and whether a `defer` ran are what both engines agree on.
+stdout order is nondeterministic** (one `print` = one locked, line-atomic write); the
+line *set*, the exit code and whether a `defer` ran are what IS guaranteed.
 
 **Still deferred (YAGNI v1):** macros, package registry, and native backend (a Cranelift AOT/JIT is
 the stretch end-game). **Level-3 dynamic C-ABI FFI is now partially shipped** (`extern "lib":` blocks
@@ -186,7 +186,7 @@ that reaches no `yield`) errors `cannot infer generator element type; annotate t
 Iterator[T]`; and a **numeric mix** (`yield 1` then `yield 2.0`) is rejected — there is no `int`→`float`
 coercion at a `yield`, so the second yield conflicts with the pinned `int` (annotate `-> Iterator[float]`
 to opt in). An explicit `-> Iterator[T]` still overrides inference and validates every yield against `T`.
-Generators run on **both** VM engines (serial `--serial` and the default M:N). A **live** generator held
+A **live** generator held
 in a frame **local** is now **sendable across a task airlock BY VALUE** (F3 path C): it is serialized —
 its `proto`, backing closure, and parked operand-stack/args — and rebuilt as an **independent deep copy**
 on the receiver (advancing one copy never affects the other), with every parked slot checked sendable at
@@ -223,19 +223,19 @@ snapshot + position on the receiver), exactly like a `list`. A frame-holding **g
 an **independent deep copy** (its parked frame rebuilt on the receiver), with each parked slot
 recursively wired so a non-sendable slot rejects at the crossing. Because every task already gets its own
 frozen per-task copy of every module global, two tasks reaching the same module-global generator each
-drive their **own** independent copy (and the parent keeps its own), on both engines byte-identically.
+drive their **own** independent copy (and the parent keeps its own), byte-identically.
 The reject shapes stay: a genuinely non-sendable parked slot (a `Module` handle, or a
 >depth-cap acyclic nest), a value cycle threaded through the generator, and the three HARD-ARM parked
 shapes (mid-`recover:` is now sendable; pending `defer` and multi-frame are checker-unreachable defensive
 guards) all reject cleanly with a graceful, catchable `... cannot be sent across tasks` error, **never** a
-panic, identically on both engines. (The earlier **Option-B reach-gate + poison→`nil`** model for
+panic, identically. (The earlier **Option-B reach-gate + poison→`nil`** model for
 module-global generators is retired — safety is now provided by the by-value deep copy, which rebuilds a
 fresh generator on the receiving heap and never shares a cross-heap handle, not by an inert `nil` leaf.)
 
 A generator is likewise **not re-entrant**: resuming one that is *already running* — a `.next()` or a
 `for` over the generator currently executing, reached from inside its own body — raises the same shape
 of **graceful, catchable** runtime error (`generator already running`, Python's `ValueError: generator
-already executing`), **never** a panic, identically on both engines. A live generator must never report
+already executing`), **never** a panic, identically. A live generator must never report
 itself EXHAUSTED, so this is a fault, not a `None`. The guard is the resume path's own active-generator
 root list, so it clears on every unwind path (yield, exhaustion, an early consumer `break`, a fault in
 the body, a fault caught by an enclosing `recover:`) — a generator can never be poisoned as permanently
@@ -251,8 +251,8 @@ reusing an exhausted one yields nothing.
 > captured **loop variable** gets a fresh cell per iteration (Go ≥1.22). The one place sharing stops is
 > the **task boundary**: a plain captured local — **and every module global** — sent across
 > `spawn`/`parallel:` is snapshot-copied into an independent per-task view (F1 — the sole deliberate
-> divergence from Go, byte-identical serial vs M:N; module globals are deep-copied per task at the spawn
-> boundary on BOTH engines as of 2026-07-21, replacing the earlier frozen-module-global checker rule, and
+> divergence from Go, byte-identical across runs; module globals are deep-copied per task at the spawn
+> boundary as of 2026-07-21, replacing the earlier frozen-module-global checker rule, and
 > the copy is taken FRESH per task at its `spawn`, at every depth, as of 2026-07-25), so
 > cross-task shared mutation still requires `Shared[T]` et al. Internally a captured local is
 > boxed into a VM `Obj::Cell` (type-invisible — a boxed `x: int` still types as `int`). This reverses
@@ -425,7 +425,7 @@ would be an unknown type (matches the module-owned `Match`/`Response`/`ProcResul
 canonical **identity key** — always module-qualified, `<module-key>::Name` (the module key is the
 declaring module's dotted path, or the entry file's stem) — used uniformly as the runtime type tag and
 as the key into every layout table (construction, field/method resolution, `match`-pattern variant
-ids, `json.decode` targets, the `--parallel` wire/snapshot format; checker, compiler, and both engines
+ids, `json.decode` targets, the `--parallel` wire/snapshot format; checker, compiler, and the VM
 derive it identically). Because the key is unique by construction there is **no** collision special-
 case: two modules' `Point` are simply `a::Point` and `b::Point`. The **display name** is the bare
 `Name`, carried separately on the type's def: all user-facing output — print/`str`, error messages,
@@ -524,7 +524,7 @@ root marker (all fields default to unset, so `entrypoint` is required only for t
   numeric type, and the expected-type-directed path already sanctions the heterogeneous literal, so
   nothing asks for the coercion. The checker records that verdict per literal and the type-blind
   backend consumes it. The compiler emits a real conversion
-  (`Op::CoerceFloat`) so the checked path and the parity harness are byte-identical across both engines.
+  (`Op::CoerceFloat`) so the checked path and the golden harness see the same value.
   The checker's accepted set is a strict SUBSET of what the type-blind compiler can coerce (one shared
   predicate, `ast::const_num`), so no sink can hold a runtime `Int` under a static `float`. Lossy
   conversions stay type errors (`y: int = 2.3`, `-> int: return 2.3`, `float` into `List[int]`,
@@ -639,8 +639,8 @@ root marker (all fields default to unset, so `entrypoint` is required only for t
   satisfies `Comparable` by its underlying's *native* order (not a user `compare` method — the same-type
   `<`/`>` arm auto-flows to the underlying), so `<`/`>` AND `List[newtype].sort()`/`.min()`/`.max()`
   order by the wrapped scalar; a `str`/`bool` newtype is not `Comparable` in v1. Methods
-  + `Stringable`/`Hashable` work via the newtype's own methods (`str`/`hash` dispatched at runtime in
-  both engines); the **operator** protocols (`Add`/`Sub`/`Mul`/`Div`/`Mod`/`Neg`/`Comparable`/`Eq`)
+  + `Stringable`/`Hashable` work via the newtype's own methods (`str`/`hash` dispatched at runtime);
+  the **operator** protocols (`Add`/`Sub`/`Mul`/`Div`/`Mod`/`Neg`/`Comparable`/`Eq`)
   are NOT satisfiable by a newtype method (a newtype's own `add`/`div`/`compare`/`eq` is never
   dispatched as an operator — the same-type arm auto-flows to the underlying's native op/order/
   equality; W6-3d), so `Comparable` comes only from a numeric underlying's intrinsic auto-flow and
@@ -692,7 +692,7 @@ root marker (all fields default to unset, so `entrypoint` is required only for t
 > type-side form. Inference is unchanged: `Box.Has(5)` (no turbofish) still infers `Box[int]`; the
 > turbofish is needed only when args can't bind the params (`Box[int].Empty`, multi-param enums). The
 > change is in the checker's resolution + the value's inferred type args only — runtime is type-erased,
-> so both engines stay byte-identical.
+> so the lowering stays uniform.
 
 > **Turbofish at the declaration site — member-side (PART 2, landed).** Completes the rule: a **member**
 > declares its OWN type args (`fn make[U]`, `fn first[A, B](self, …)`), pinned on the member and
@@ -712,8 +712,8 @@ root marker (all fields default to unset, so `entrypoint` is required only for t
 > now needs parens on any receiver — `(recv.name[k])(args)` (the bare-ident receiver already required
 > this); the numeric form `arr[0].handlers[0](20)` still parses as index-then-call (an int is not a
 > type). A method turbofish on a generic **variant** ctor (`Box[int].Has[str](5)`) is an error.
-> Runtime is type-erased (dispatch to the existing `CallStatic` / method paths), so both engines
-> (serial `--serial` VM and the default M:N VM) are byte-identical (`examples/turbofish_member_args.chz`). Still out of scope: static
+> Runtime is type-erased (dispatch to the existing `CallStatic` / method paths), pinned by the golden
+> `examples/turbofish_member_args.chz`. Still out of scope: static
 > methods on `newtype`. (Associated protocol requirements (`T.zero()`) were out of scope here too;
 > they **landed in M24** — see `docs/syntax.md §7a`.)
 
@@ -730,7 +730,7 @@ root marker (all fields default to unset, so `entrypoint` is required only for t
 > (`e: Stack[str] = Stack([])`) and a return-only param of a generic fn (`xs: List[int] = empty()` for
 > `fn empty[T]() -> List[T]`). Checker-only (a new expected-type hint threaded into the ctor/call
 > inference, consumed by `unify` before the un-inferable-closure-param probe); runtime is type-erased,
-> so both engines stay byte-identical. **Remaining gap:** the hint does not yet reach a
+> so the lowering stays uniform. **Remaining gap:** the hint does not yet reach a
 > generic ctor nested inside a **container literal** (`a: List[Heap[int]] = [Heap([], …)]`) — that
 > outer expression is a list literal, not a call, so annotate the closure params or turbofish there.
 > The same expected-type / turbofish machinery now also pins a generic fn used as a **VALUE** (not
@@ -777,7 +777,7 @@ root marker (all fields default to unset, so `entrypoint` is required only for t
 >   registers vs by-hidden-pointer — is libffi's, never hand-rolled), keeping `Cffi` `Send + Sync`. A
 >   struct return uses the raw `ffi_call` with an own rvalue buffer sized `max(struct_size,
 >   sizeof(ffi_arg))` (the register-width floor the narrow-int-return fix established), reading each field
->   at its libffi offset into a `NativeRet::Struct` both engines already lower. See `examples/ffi_struct.chz`.
+>   at its libffi offset into a `NativeRet::Struct` the VM already lowers. See `examples/ffi_struct.chz`.
 >   **v1 limits:** nested structs, `str`/`owned_str` struct fields, and generic structs are rejected (a
 >   struct with a non-scalar field errors naming the struct + field); **sync scalar callbacks shipped**
 >   (a `fn(scalars) -> scalar` extern param → a libffi closure trampoline C calls back synchronously,
@@ -934,7 +934,7 @@ param/default, `-> float` return, `float` struct field, mixed-numeric-constant c
 `int` value never implicitly converts — write `float(x)`, and a call through a function VALUE never
 widens at all. It is **scalar-or-element-at-the-sink**: never propagated into a nested/type-argument slot
 (`List[List[float]] = [[1]]`, `float? = Some(3)` stay errors), and the reverse (`float` → `int`) is always
-a lossy type error. Emitted as `Op::CoerceFloat` so both engines are byte-identical. (Full rules in the
+a lossy type error. Emitted as `Op::CoerceFloat` so the lowering is uniform. (Full rules in the
 numeric-arithmetic section above.)
 
 **Newtype boundary** (`newtype Name = <T>`) — nominally distinct, so crossing is always explicit:
@@ -1030,8 +1030,8 @@ source.chz
 (Historically a Phase-1 tree-walk interpreter ran first as the reference semantics; it has since been
 removed — the bytecode VM is the sole engine.)
 
-Each component is an isolated, separately-testable module. Golden tests assert the two VM engines
-(the serial `--serial` VM and the default M:N VM) produce identical output.
+Each component is an isolated, separately-testable module. Golden tests assert the VM's output
+against a literal expectation.
 
 ### Repo layout
 
@@ -1046,7 +1046,7 @@ src/
                 #   (the compiler then calls the same two functions).
   checker/      # type inference + checking
   compiler/     # AST → bytecode
-  vm/           # stack machine (sole engine; serial + M:N schedulers)
+  vm/           # stack machine (the sole engine; M:N scheduler)
   gc/           # mark-sweep
   runtime/      # builtins + native std modules
   resolver/     # module path resolution
@@ -1067,20 +1067,20 @@ tests/          # Rust unit + golden tests
 | ✅ **M4** | Type checker (local inference) | Type errors caught pre-run with clear messages; `--errors=json` mode |
 | ✅ **M4.5** | Modules / imports + resolver | Multi-file program runs; `chezzi.toml` root detection works |
 | ✅ **M5** | Bytecode compiler + stack VM + mark-sweep GC | Runs on VM (default); ~4–6.5× over the tree-walker; golden + parity tests match |
-| ✅ **M6** | Stdlib fill-out + pipe `\|>` operator + core-type methods | **Done**: str/list methods + pipe chains, plus M6c — the Level-2 native FFI seam (`NativeFn`+`Host`) shipping `std.math`/`io`/`os` (native) and `std.string` (Chezzi), running identically on both engines |
-| ✅ **M7** | User-defined generics + structural protocols | Generic fns/structs, `Comparable` bound, `std.cmp` (`min`/`max`/`clamp`); golden tests on both engines |
+| ✅ **M6** | Stdlib fill-out + pipe `\|>` operator + core-type methods | **Done**: str/list methods + pipe chains, plus M6c — the Level-2 native FFI seam (`NativeFn`+`Host`) shipping `std.math`/`io`/`os` (native) and `std.string` (Chezzi), running identically |
+| ✅ **M7** | User-defined generics + structural protocols | Generic fns/structs, `Comparable` bound, `std.cmp` (`min`/`max`/`clamp`); golden tests |
 | ✅ **M8** | Tier-1 stdlib | `std.json` (+ type-directed `decode[T]`), `std.process`, `std.fs`, `std.time`; the `set` type, iterable strings (`s.chars()`) |
 | ✅ **M9** | Tier-2 stdlib | `std.regex` + `std.request` (first runtime crate deps; blocking); `Match`/`Response` structs |
 | ✅ **M10** | Type-system depth | `Stringable`/`Hashable` + operator protocols (`Add`/`Sub`/`Mul`), generic enums, type aliases, multi-bound generics, any-`Hashable` **concrete** map/set key (a generic `[T: Hashable]` needs `+ Eq` too — `docs/gaps.md` **W7-53**) |
-| ✅ **M11** | Panic recovery + Go-style errors | Phase A ✅ `Result[T, E]` + `Error` protocol; Phase B ✅ `recover:` boundary with try-block semantics. Both engines parity-tested |
-| ✅ **M12** | Tier-3 ergonomics (part) | **Iterator protocol** (user structs with `next(self) -> Option[T]` iterable in `for`, lazy); **match guards** (`pattern if cond:`) + int **range patterns** (`1..10:`). Both engines parity-tested |
-| ✅ **M13** | `Iterable[T]` / `Iterator[T]` protocols | The language's first **parameterized** protocol bounds, both recovering element type `T`: `[S: Iterable[T], T]` accepts any iterable (built-in collections, a `.iter()` cursor, a generator, a struct with `next`; an `iter`-only struct satisfies the protocol but does **not** get `T` recovered — bound that one concretely), `[S: Iterator[T], T]` only a **cursor** — something holding a position, so the body may call `.next()` (a raw collection holds none; W6-3b). Lazy adapters (Take/Mapped) were the original answer to `yield` (then a non-goal; `yield`/generators have since shipped VM-only — see above). Checker/parser/grammar only; both engines parity-tested |
-| ✅ **M14** | Generics depth | **Method-level type params** (a method's own `[U]`, inferred at call) + **user-defined parameterized protocols** (`protocol Container[T]`, structural conformance with concrete-arg bounds `[X: Container[int]]`, and first-class **value/annotation types** `c: Container[int]` — statically witnessed at every store/pass boundary, runtime-erased, strictly invariant `Container[int]` ≠ `Container[str]` ≠ bare `Container`, method-return element recovery) — the special-cased `Iterator[T]` generalized. Checker/parser/grammar only; both engines parity-tested |
-| ✅ **M15** | Slicing + indexing protocols | Python-style `xs[a:b:c]` / `s[0:2]` / `xs[::-1]` (open bounds, step, reverse, bounds-clamped) + negative indexing `xs[-1]` (plain index faults out of range, slice bounds clamp — Python's asymmetry); the `..` operator stays the for-loop/match range (and a slice receiver — a range is **not a value** in any other position, and the checker now enforces that; use `range(a, b)` to materialize a `List[int]`). Prebuilt **`Index[K, V]` + `IndexSet[K, V]` + `Slice[R]`** structural protocols — built-in `list`/`map`/`str` conform intrinsically, user structs via `index`/`set_index`/`slice(self, start: int?=None, end: int?=None, step: int?=None)`, so `custom[k]`/`custom[k]=v`/`custom[a:b:c]` work and a generic can be bounded by `Index[int, V]`. Both engines parity-tested |
+| ✅ **M11** | Panic recovery + Go-style errors | Phase A ✅ `Result[T, E]` + `Error` protocol; Phase B ✅ `recover:` boundary with try-block semantics. Golden-tested |
+| ✅ **M12** | Tier-3 ergonomics (part) | **Iterator protocol** (user structs with `next(self) -> Option[T]` iterable in `for`, lazy); **match guards** (`pattern if cond:`) + int **range patterns** (`1..10:`). Golden-tested |
+| ✅ **M13** | `Iterable[T]` / `Iterator[T]` protocols | The language's first **parameterized** protocol bounds, both recovering element type `T`: `[S: Iterable[T], T]` accepts any iterable (built-in collections, a `.iter()` cursor, a generator, a struct with `next`; an `iter`-only struct satisfies the protocol but does **not** get `T` recovered — bound that one concretely), `[S: Iterator[T], T]` only a **cursor** — something holding a position, so the body may call `.next()` (a raw collection holds none; W6-3b). Lazy adapters (Take/Mapped) were the original answer to `yield` (then a non-goal; `yield`/generators have since shipped VM-only — see above). Checker/parser/grammar only; golden-tested |
+| ✅ **M14** | Generics depth | **Method-level type params** (a method's own `[U]`, inferred at call) + **user-defined parameterized protocols** (`protocol Container[T]`, structural conformance with concrete-arg bounds `[X: Container[int]]`, and first-class **value/annotation types** `c: Container[int]` — statically witnessed at every store/pass boundary, runtime-erased, strictly invariant `Container[int]` ≠ `Container[str]` ≠ bare `Container`, method-return element recovery) — the special-cased `Iterator[T]` generalized. Checker/parser/grammar only; golden-tested |
+| ✅ **M15** | Slicing + indexing protocols | Python-style `xs[a:b:c]` / `s[0:2]` / `xs[::-1]` (open bounds, step, reverse, bounds-clamped) + negative indexing `xs[-1]` (plain index faults out of range, slice bounds clamp — Python's asymmetry); the `..` operator stays the for-loop/match range (and a slice receiver — a range is **not a value** in any other position, and the checker now enforces that; use `range(a, b)` to materialize a `List[int]`). Prebuilt **`Index[K, V]` + `IndexSet[K, V]` + `Slice[R]`** structural protocols — built-in `list`/`map`/`str` conform intrinsically, user structs via `index`/`set_index`/`slice(self, start: int?=None, end: int?=None, step: int?=None)`, so `custom[k]`/`custom[k]=v`/`custom[a:b:c]` work and a generic can be bounded by `Index[int, V]`. Golden-tested |
 | ✅ **M16–M18** | Concurrency + `defer` | `spawn` / `parallel:` nursery, `Channel`/`Shared`/`Executor`, real OS-thread M:N engine (`--parallel`) with work-stealing + reduction-counting preemption + netpoller + `std.net`; `defer` (call + block forms). Design in [`docs/concurrency.md`](concurrency.md), phases in [`docs/concurrency-tier-d.md`](concurrency-tier-d.md) |
-| 🟦 **M19** | Perf track (in progress) | Landed: peephole + const-fold, superinstructions, global-slotting, struct-field inline cache, FxHash, `ConstStr` interning, call-loop flatten, small-string optimization. Behavior-preserving + two-engine parity on every change. Backlog ranked in [`docs/future.md §4`](future.md); measured deltas in [`docs/benchmarks.md`](benchmarks.md) |
+| 🟦 **M19** | Perf track (in progress) | Landed: peephole + const-fold, superinstructions, global-slotting, struct-field inline cache, FxHash, `ConstStr` interning, call-loop flatten, small-string optimization. Behavior-preserving on every change. Backlog ranked in [`docs/future.md §4`](future.md); measured deltas in [`docs/benchmarks.md`](benchmarks.md) |
 | ✅ **M20** | In-language tests | `assert <cond>[, "<msg>"]` (both-engine statement primitive, faults with its source line), the `test fn` marker (free tests + struct **suites** with `before_all`/`after_all`/`before_each`/`after_each` hooks + a shared typed fixture), and `chezzi test [path]` — a Rust-side VM-only runner over `*_test.chz` files (`PASS/FAIL name (file:line) msg`, non-zero exit on failure). Surface in [`docs/syntax.md §9c`](syntax.md) |
-| ✅ **M21** | Nominal `newtype` | `newtype Name = <type>` — a DISTINCT type wrapping the underlying (Go defined-type model), not a transparent alias: construct (`Name(x)`) / cast-unwrap (`int(n)`) cross the boundary; accidental mixing with the raw underlying or a different newtype is a compile error. Numeric (`int`/`float`) same-type operators auto-flow (native op, unwrap→op→rewrap); a `str`/`bool` newtype does not auto-inherit `+`/`<` (define a method); methods + `Stringable`/`Hashable` via the newtype's own methods (runtime hash/str dispatch, both engines) — the **operator** protocols (`Add`/…/`Neg`/`Comparable`/`Eq`) are never satisfied by a newtype method, only by a numeric underlying's auto-flow (W6-3d). **Generic newtypes** (`newtype Stack[T] = List[T]`, Go defined-type model + generics): methods-only (no native operator auto-flow even for `Box[T] = T`); ctor infers type args (from the binding/return/parameter annotation — `e: Stack[str] = Stack([])` — or a turbofish `Stack[int]([])` when an empty literal can't bind `T`); cast-unwrap propagates the instantiation (`List(s)` for `s: Stack[int]` ⇒ `List[int]`). v1 limits: aggregate underlyings get identity+construct+unwrap+own-methods only; no `derive`; no static / associated methods **on a newtype** (`Type.method()`) yet — a follow-up (static methods HAVE landed for struct + enum; see the "Static methods" note); declaring one is **rejected with a clear "not supported yet" error** (decl site + call site), not a cryptic "unknown name". Surface in [`docs/syntax.md §7b`](syntax.md) |
+| ✅ **M21** | Nominal `newtype` | `newtype Name = <type>` — a DISTINCT type wrapping the underlying (Go defined-type model), not a transparent alias: construct (`Name(x)`) / cast-unwrap (`int(n)`) cross the boundary; accidental mixing with the raw underlying or a different newtype is a compile error. Numeric (`int`/`float`) same-type operators auto-flow (native op, unwrap→op→rewrap); a `str`/`bool` newtype does not auto-inherit `+`/`<` (define a method); methods + `Stringable`/`Hashable` via the newtype's own methods (runtime hash/str dispatch) — the **operator** protocols (`Add`/…/`Neg`/`Comparable`/`Eq`) are never satisfied by a newtype method, only by a numeric underlying's auto-flow (W6-3d). **Generic newtypes** (`newtype Stack[T] = List[T]`, Go defined-type model + generics): methods-only (no native operator auto-flow even for `Box[T] = T`); ctor infers type args (from the binding/return/parameter annotation — `e: Stack[str] = Stack([])` — or a turbofish `Stack[int]([])` when an empty literal can't bind `T`); cast-unwrap propagates the instantiation (`List(s)` for `s: Stack[int]` ⇒ `List[int]`). v1 limits: aggregate underlyings get identity+construct+unwrap+own-methods only; no `derive`; no static / associated methods **on a newtype** (`Type.method()`) yet — a follow-up (static methods HAVE landed for struct + enum; see the "Static methods" note); declaring one is **rejected with a clear "not supported yet" error** (decl site + call site), not a cryptic "unknown name". Surface in [`docs/syntax.md §7b`](syntax.md) |
 | ✅ **M22** | Operator protocols + protocol embedding | New per-operator protocols **`Div`/`Mod`/`Neg`** (methods `div`/`mod`/`neg`, powering `/`/`%`/unary `-`; `int`/`float` intrinsic, structs/enums via the method, numeric scalar newtypes via the underlying's native auto-flow (`Div`/`Mod` only — `Neg` is out of scope for newtypes, and a newtype operator *method* is never dispatched) wired exactly like `Add`/`Sub`/`Mul`. **Protocol embedding** — a protocol body may list embed lines (`Add + Sub`, order-free, interleaved with `fn` sigs); a type satisfies it iff it satisfies every embed (transitively) AND every own method, flattened at every use site — a bound AND an interface value alike (a protocol value also satisfies the protocols it embeds, Go's interface-to-interface assignment). **Object safety** bounds the value form: since a protocol value erases which witness it holds, a method TAKING `Self` is unusable wherever two witnesses could meet — `a.add(b)` on a value, the operator forms (`+ - * / % <`, all `(self, Self) -> Self`), and a protocol value witnessing a generic type param whose bound needs one. Assignability and embed-satisfaction are unaffected, and `Self` in the RETURN widens to the protocol and stays callable. Collision rules: own-fn-vs-embed = error, same-sig embed diamond dedups, differing-sig embed = error, cyclic embed = error. Builtin **`Arithmetic`** bundle = `Add + Sub + Mul + Div`. Checker/parser/grammar + both-engine operator dispatch; parity-tested. Surface in [`docs/syntax.md`](syntax.md) |
 | ✅ **M23** | The `Eq` protocol — user-overloadable `==` | Prebuilt reserved **`Eq`** (`eq(self, other: Self) -> bool`): a struct/enum defining `eq` **owns its `==`/`!=`**, closing the hole where a type could define `compare` (so `<` was yours) but never `==`. All four scalars satisfy it intrinsically (**`bool` included**, unlike `Comparable`); a **newtype** never satisfies it through a METHOD — its `==` unwraps to the underlying's native equality, so declaring `eq` on a newtype (any underlying, any operand signature) is a decl-site error (W6-3d widened, `docs/gaps.md` §L5) — while EVERY newtype satisfies it intrinsically via that same native equality. **`Comparable` embeds `Eq`** (Rust's `Ord: Eq`). **Superseded 2026-08-11 (`docs/gaps.md` W7-41), on two counts:** (a) `Eq` satisfaction is no longer a four-scalar grant — it is exactly what `==` accepts, so `bytes`, tuples, `List`/`Map`/`Set`, `Option`/`Result`, newtypes and every struct/enum satisfy it, and `where T: Eq` is writable over all of them (measured: all ten were *does not satisfy Eq* before and are accepted now); and (b) the "a struct/enum with `compare` must also define `eq`" rule is **DROPPED** — its premise was falsified in both directions by measurement, and Rust permits manual `Ord` beside a derived `Eq`. What replaced it is the enforcement M23 lacked: a conditional `eq` (`where T: Comparable`) is now honoured by `==`/`!=`, by `in`, by `contains`/`index_of`/`dedup`/`unique`, and by every map-key / set-element position, closing a check-OK-then-runtime-fault hole (W7-41 + W7-45). Dispatch is by the operands' **runtime type** and reaches **every** equality site, not just the operator: `in`, `list.contains`/`index_of`/`dedup`/`unique`, `Map`/`Set` key probes, set algebra, and the recursive element/field/entry compares — so `x == y`, `y in xs` and `m[y]` can no longer give three answers. `!=` is the same dispatch negated (no separate hook); `match` never dispatches `eq`; `Atomic[T].cas` stays structural — a payload that REACHES a user `eq` (its own or one nested in an element/entry/field/payload) is a check-time error, and the VM switches the hook off for the compare so the property does not rest on that walk. The hook is gated on its **exact** signature at the declaration, so a method merely sharing the name (a *generic* operand, `Opt[T].eq(self, x: T)`) stays an ordinary method. **Through a protocol bound, though, `.eq()` is the protocol's equality, never that same-named ordinary method** (`docs/gaps.md` **W7-53** I1′, fixed 2026-08-12): a protocol-dispatched `.eq(x)` lowers to the very opcode `==` emits, so the two spellings are one dispatch by construction — a CONCRETE receiver keeps calling the ordinary method, exactly as rustc's inherent-wins rule does, while `fn f[T: Eq](a: T, b: T): a.eq(b)` resolves like `<T as PartialEq>::eq`. Also closes **`docs/gaps.md` §B2**: `==`/`!=` between provably-disjoint types is now a compile error, decided by co-inhabitability (`Checker::may_be_equal`), with the `Any` existential as the escape hatch — a deliberate divergence from Python's runtime `False`, matching Go, Rust and mypy `--strict-equality`. Cost: `map` +4.1%, everything else flat ([`benchmarks.md`](benchmarks.md)). **Comparing two protocol-typed (existential) values defers the witness's `eq` bound check to runtime, as in Go's own interface `==`** — the checker cannot see which concrete type inhabits a protocol at a given site, so it compiles the comparison and it faults cleanly, at the point it runs, if that witness cannot satisfy the bound (`docs/gaps.md` **W7-52**, resolved 2026-08-12 as ancestor-correct, not a checker gap). **A `[T: Eq]` bound over a protocol-typed value now agrees with that operator** (same-day review found the bound was still rejecting it, disagreeing with the `==` that had just been ruled correct — a genuine drift, fixed rather than filed, `docs/gaps.md` **W7-52**): `Ty::Protocol` is now a classified `Eq`-grant receiver kind, matching Go 1.20+'s `comparable`, which likewise admits an interface type and panics at the comparison for an uncomparable witness. `Eq` is the only protocol this applies to — `Eq`-satisfaction is exactly what `==` accepts, and `==` already accepted a protocol-typed operand; every other protocol still requires the witness to structurally provide it. Surface in [`docs/syntax.md §7b`](syntax.md) |
 | ✅ **M24** | Static protocol requirements through a bound — **witness passing** | A protocol may require a **static** (no-`self`) method, and a generic bounded by it may **call it through the type parameter**: `fn reset[T: Default](old: T) -> T: return T.default()`. Generics stay **erased** — a type param whose bound carries a static requirement AND whose body needs it gets a **hidden trailing parameter** holding the concrete type's runtime identity key; `T.method(...)` lowers to a new `Op::CallStaticDyn` that pops that key and runs the same dispatch as `Type.method(...)`. Nothing is monomorphized and no type argument reaches the VM. Charged **only** to a body that uses one, so a generic that merely has a static-carrying bound keeps every position it had. Covers struct + enum hosts, same- and cross-module calls in every import spelling, `T` inferred / turbofish-pinned / annotation-pinned, transitive + recursive + mutual **forwarding** of a still-abstract `T`, a type param declared by a **MEMBER** (instance or static, plain or generic host), and the call inside a closure (incl. an escaping one), a nested `fn`, a `defer:` block and a `spawn:`/`parallel:` block (the witness crosses the airlock by value). Closes `Convert[S]`'s last slice — `fn make[T: Convert[int]](…): return T.convert(n)`. Permanent walls (each a clear diagnostic naming the workaround): a type param of the enclosing **TYPE**, a witness-taking fn read as a **function value** (a `fn` value erases its declaration), an undetermined `T`, a newtype/scalar witness, and a witness-taking manifest entrypoint; a `spawn`/`defer` **statement target** is an ordinary call site — M24-5, fixed 2026-08-14. A type parameter **shadows** a same-named type in static-call position, as in Rust and Go. Bench-neutral (measured). Surface in [`docs/syntax.md §7a`](syntax.md); the strategy ruling in [`docs/future.md §3a1`](future.md) |
@@ -1103,7 +1103,7 @@ tests/          # Rust unit + golden tests
 ## Verification
 
 - **Per-phase Rust unit tests** — lexer token streams, parser AST shapes, checker accept/reject cases.
-- **Golden tests** — `examples/*.chz` + `*.expected`; harness runs each through both VM engines (serial `--serial` and default M:N), asserts identical stdout.
+- **Golden tests** — `examples/*.chz` + `*.expected`; the harness runs each on the VM and asserts stdout matches the `.expected` file.
 - **Manual end-to-end** via the `chezzi` CLI subcommand for each phase (`tokens`/`ast`/`run`).
 - **LLM-codegen eval** — feed the grammar cheatsheet + `--errors=json` to a model, measure first-try compile rate; failures feed grammar/error-message work.
 - **Perf check** — tracked against CPython via the `benches/` harness (`benches/run.chz`, hyperfine);

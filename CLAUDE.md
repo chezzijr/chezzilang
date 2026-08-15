@@ -34,18 +34,18 @@ Claude implements directly. Ship working, tested code each session.
 ```sh
 cargo build --release    # compile (release; the VM is only fast optimized)
 # Tests: `src/main.rs` (the `chezzi` CLI) is a thin shim over the `chezzi` library crate (src/lib.rs,
-# the front-end + editor tooling), so the front-end compiles ONCE and its unit tests + two-engine
-# parity + conformance run ONCE (in the lib test target). `cargo test` is the normal full command.
+# the front-end + editor tooling), so the front-end compiles ONCE and its unit tests + goldens +
+# conformance run ONCE (in the lib test target). `cargo test` is the normal full command.
 cargo test                       # FULL pre-commit suite: lib unit suite + parity + conformance + integration
 # ^ includes `tests/chezzi_threads_cli.rs`: with `--serial` gone, the standing differential is
-#   `tests/chz` (~550 Chezzi behavioural tests) run at TWO worker counts (default + `CHEZZI_THREADS=2`)
+#   `tests/chz` (569 Chezzi behavioural tests) run at TWO worker counts (default + `CHEZZI_THREADS=2`)
 #   via the built binary, each its own process/pool. NOT a gate over the ~4150 Rust lib tests — that
 #   pool is ONE process-wide `OnceLock`, so forcing a count inside `cargo test --lib` either no-ops or
 #   (worse) pins the WHOLE run's pool and starves concurrently-running tests (measured: 8
 #   failures/hangs at `RUST_TEST_THREADS=4`, >54 min unfinished at `=1`) — don't re-attempt an
 #   in-process version of this gate. Also NOT `docs/future.md` §2b's Go-paired-programs differential
 #   or a seeded/interleaving M:N mode; both are unbuilt and separately planned.
-cargo test --lib                 # INNER LOOP: just the lib unit suite (unit + two-engine parity + conformance, no integration/bin)
+cargo test --lib                 # INNER LOOP: just the lib unit suite (unit + goldens + conformance, no integration/bin)
 cargo test --lib checker::       # scope to the area you're editing → seconds (use while implementing)
 cargo test --features lsp --test lsp_smoke   # the feature-gated LSP server smoke test (off the default build)
 # Local shortcut: `.cargo/config.toml` (git-excluded) aliases these as `cargo tfast` / `tfull` / `tlsp`.
@@ -59,8 +59,7 @@ cargo run -- ast    examples/hello.chz   # parsed AST (M2)
 cargo run -- check  examples/hello.chz   # type-check only (M4); --errors=json for machine output
 cargo run -- run    examples/hello.chz   # type-check + run on the VM, OS-thread engine (default, M5)
 cargo run -- run                         # no file → run the manifest [project] entrypoint (walks up for chezzi.toml)
-cargo run -- run --serial   examples/hello.chz   # cooperative single-thread VM (the byte-identical parity oracle for the default M:N engine)
-cargo run -- run --parallel examples/primes_parallel.chz   # accepted no-op alias (engine is now default)
+cargo run -- run --parallel examples/primes_parallel.chz   # accepted no-op alias (the M:N engine is the only engine)
 cargo run -- run --threads=4 examples/primes_parallel.chz  # size the OS-thread pool (0/omitted = all cores; env CHEZZI_THREADS)
 cargo run -- test examples/              # run every `test fn` in *_test.chz (M20); file or dir, default cwd
 CHEZZI_THREADS=4 cargo run -- test tests/chz   # `test` sizes the same pool as `run`, env-only (no `--threads` flag on `test`)
@@ -82,14 +81,11 @@ UPDATE_EDITOR_ASSETS=1 cargo test --test editor_tmlanguage    # regenerate the V
 > top-to-bottom, and with a `:function` suffix that function is then called (missing/non-function =
 > clear error). Without the suffix the module top-level runs only. `chezzi run <file>` runs that file
 > (top-level only, scripting model).
-> `chezzi run` defaults to the VM's real-thread OS-thread (M:N) engine. `--serial` selects the
-> cooperative single-thread VM — the byte-identical **parity oracle** for the default M:N engine
-> (both are the same `Vm`, toggled by the `parallel` flag; only the scheduler differs). `--parallel`
-> is kept as a no-op alias for the default.
-> `--threads=N` (or env `CHEZZI_THREADS`) sizes the OS-thread engine's worker pool — `0`/omitted = all
-> cores, the flag wins over the env, and it errors with `--serial` (not multi-threaded).
-> `--parallel`/`--serial` are mutually exclusive. (The tree-walk interpreter has been **removed**; the
-> two-engine parity tests now assert serial-VM == M:N-VM.)
+> `chezzi run` runs the VM on its real-thread OS-thread (M:N) scheduler. That is the **only** engine;
+> `--parallel` is kept as an accepted no-op alias for it.
+> `--threads=N` (or env `CHEZZI_THREADS`) sizes the worker pool — `0`/omitted = all cores, and the flag
+> wins over the env. (Both the tree-walk interpreter and the cooperative single-thread `--serial`
+> engine have been **removed** — `--serial` and `--check-parity` are now `unknown flag` errors.)
 
 ## Conventions
 
@@ -121,7 +117,7 @@ UPDATE_EDITOR_ASSETS=1 cargo test --test editor_tmlanguage    # regenerate the V
 - **Two auto-task runs in parallel MUST NOT share a release target dir.** Both writing the same warm
   `CARGO_TARGET_DIR` (e.g. `~/.cache/chezzi-target`) means one run's `release/chezzi` overwrites the
   other's, cargo then reports "up to date", and the binary you verify SILENTLY LACKS your change — a
-  green two-engine run proving nothing (hit 2026-07-26). Give each concurrent run its own
+  a green test run proving nothing (hit 2026-07-26). Give each concurrent run its own
   `CARGO_TARGET_DIR`, or confirm the binary really contains the change (`strings … | grep <new msg>`).
   Same family as the worktree stale-binary trap: when verifying, also beware that a `cd` into a worktree
   PERSISTS across shell calls, so a later `./target/release/chezzi` silently means the worktree's binary
@@ -131,34 +127,37 @@ UPDATE_EDITOR_ASSETS=1 cargo test --test editor_tmlanguage    # regenerate the V
   A test that asserts a program's **observable behavior** (a value, a collection, a fault message)
   belongs in the native suite **`tests/chz/`** as `test fn` + `assert` (`spec/` = language behavior,
   `stdlib/` = std modules, `suites/` = struct suites with lifecycle hooks). It runs via `chezzi test`
-  (M:N engine by default; `--serial` opts out) and is gated by the `cargo test` gate
-  `test_runner::chz_suite_passes` (runs the whole suite on the M:N engine, asserts every test
-  passes). Prefer this: it dogfoods the language and shrinks the Rust test surface. **Fault-path IS
+  and is gated by the `cargo test` gate `chz_suite_passes` (`tests/chz_suite.rs`, its own process —
+  `vm::pool` is one process-wide `OnceLock`), which runs the whole suite and asserts every test
+  passes; `tests/chezzi_threads_cli.rs` then runs it again at `CHEZZI_THREADS=2`. Prefer this: it dogfoods the language and shrinks the Rust test surface. **Fault-path IS
   Chezzi-able** — `r := recover: <faulting expr>` then `assert r` is `Err` and check `e.message()`
   (don't reach for Rust just because a test expects a panic). **Fall back to Rust `#[cfg(test)]` ONLY
   for what `assert` genuinely can't express:** compile-time checker diagnostics (`rejects`/`ok`),
   token/AST/bytecode/GC internals, gc-stress rooting (`run_capture_stress`), and concurrency
-  timing/scheduler parity. Golden `examples/*.chz` + `.expected` stay fine for print-shape demos. When
-  you delete a Rust behavioral test after porting, the dual-engine gate must stay green. Full rationale
-  + ranked runner follow-ups: `docs/future.md §3b`; the suite's own guide: `tests/chz/README.md`.
-- **Tree-walk interpreter REMOVED.** The bytecode VM is the sole engine. Two-engine parity is now
-  **serial-VM (`parallel=false`) == M:N-VM (`parallel=true`)** — both are the same `Vm`, only the
-  scheduler differs. Test helpers: `run_capture`/`run_program`/`run_file` are the serial engine;
-  `run_capture_parallel`/`run_program_parallel`/`run_file_p` are the M:N oracle. Keep them in sync —
-  a VM change that diverges serial vs M:N is a bug.
-- **CORRECTNESS OUTRANKS ENGINE AGREEMENT — always, and never the reverse.** Parity is a *detector*
-  for accidental divergence, never the definition of right. Two engines can agree on a wrong answer,
-  and `--serial` is **scheduled for removal** (`docs/future.md` §2b), so it can never be the standard
-  of correct. Whenever behavior is in question, judge it against the ancestor that owns the feature and
-  **run the reference program** rather than reasoning about it: **Go** for concurrency/interfaces,
-  **Python** for scripting feel + `Executor`-family semantics, **Rust** for enums/errors/control flow.
-  If Chezzi disagrees with the owning ancestor and the difference isn't a documented deliberate
-  decision, that is a **bug** — including when the drift exists to keep the parity oracle tidy.
-  "Both engines agree" / "`--serial` does it too" is NOT a defense of a behavior; state the ancestor's
-  measured output instead. Corollary for any heuristic verdict (deadlock detection, resource caps,
-  inference fallbacks): when unsure it must **decline** (hang / stay silent / ask), never emit a
-  confident wrong answer — a missing answer is recoverable, a wrong one teaches distrust of every
-  answer. Worked example + measured Go/CPython table: `docs/gaps.md` **W7-12**.
+  timing/scheduler behavior. Golden `examples/*.chz` + `.expected` stay fine for print-shape demos.
+  When you delete a Rust behavioral test after porting, the `tests/chz` gates must stay green. Full
+  rationale + ranked runner follow-ups: `docs/future.md §3b`; the suite's own guide:
+  `tests/chz/README.md`.
+- **ONE ENGINE.** The bytecode VM on its M:N scheduler is the sole engine — the tree-walk interpreter
+  and the cooperative `--serial` VM are both **removed** (`--serial` since 2026-08-16). There are no
+  per-engine test-helper pairs any more: `run_capture`/`run_program`/`run_file` (and the `parity_*`
+  helpers, which keep their historical names) all run the one engine and compare against a **literal
+  golden**. A helper that runs the program twice and diffs the two runs against each other proves
+  nothing — give it a real expectation.
+- **CORRECTNESS IS JUDGED AGAINST THE ANCESTOR — there is no engine agreement to hide behind.**
+  With one engine there is no cross-engine oracle at all, so "both engines agree" is not merely a weak
+  defense, it is not available. Whenever behavior is in question, judge it against the ancestor that
+  owns the feature and **run the reference program** rather than reasoning about it: **Go** for
+  concurrency/interfaces, **Python** for scripting feel + `Executor`-family semantics, **Rust** for
+  enums/errors/control flow. If Chezzi disagrees with the owning ancestor and the difference isn't a
+  documented deliberate decision, that is a **bug**. State the ancestor's measured output; never
+  defend a behavior by citing another run of Chezzi. What replaced the cross-engine detector for
+  ACCIDENTAL divergence: the CPython differential (`src/difftest/`) and the two-worker-count schedule
+  differential (`tests/chezzi_threads_cli.rs`) — see `docs/bug-discovery.md` Tier 2. Corollary for any
+  heuristic verdict (deadlock detection, resource caps, inference fallbacks): when unsure it must
+  **decline** (hang / stay silent / ask), never emit a confident wrong answer — a missing answer is
+  recoverable, a wrong one teaches distrust of every answer. Worked example + measured Go/CPython
+  table: `docs/gaps.md` **W7-12**.
 
 ## Where things stand
 
@@ -167,9 +166,9 @@ generic structs + enums, `Result`/`Option` + `?`, generics + structural protocol
 exhaustive `match` + guards, closures/HOF, modules, GC, interpolation, pipe, `defer`,
 `recover:`, `Iterator[T]`, slicing/indexing protocols, user-overloadable `==` via `Eq`,
 static protocol requirements callable through a generic bound via witness passing). **Concurrency** has landed through
-**Tier-D** (`spawn` / `parallel:` nursery, `Channel[T]`, `Shared[T]`, `Executor`, real
-OS-thread engine via `--parallel`, netpoller + `std.net`). ~4396 Rust tests green, plus 550 Chezzi
-tests identical on both engines.
+**Tier-D** (`spawn` / `parallel:` nursery, `Channel[T]`, `Shared[T]`, `Executor`, the real
+OS-thread M:N engine, netpoller + `std.net`). **4337 Rust tests** green across 20 targets (**4153** in the lib target), plus **569** Chezzi
+tests green at two worker counts.
 
 ## Current focus
 
@@ -177,9 +176,10 @@ See **[`PROGRESS.md`](PROGRESS.md)** — single source of truth for "what's next
 
 Right now: **pre-JIT/pre-freeze bug-hunt + drift-fix hunt** is the active phase (Go-concurrency,
 checker↔runtime, and IO drift — live ledger in `docs/gaps.md`), with **M19 — Perf track** paused
-in-progress alongside it. Both share the same bar: **behavior-preserving + two-engine parity** on
-every change —
-a VM speedup that diverges between the serial and M:N engines (or changes observable output) is a bug, not a win.
+in-progress alongside it. Both share the same bar: **behavior-preserving** on every change — a VM
+speedup that changes observable output, or that only holds at one worker count, is a bug, not a win.
+(Since 2026-08-16 there is no second engine to diff against; the standing accidental-divergence
+detectors are the CPython differential and the two-worker-count run of `tests/chz`.)
 (The language is still evolving — new features can land; they just go through their own milestone,
 not silently inside a perf change.)
 Landed: peephole/const-fold, superinstructions, `invoke_value` clone-kill, in-place call args,
@@ -190,15 +190,16 @@ call-bound `fib` 3.54×; `loop` 1.32× is at the dispatch floor), startup ~11× 
 **Next perf batch (ranked, not started — start here next session).** The remaining gap is **call
 overhead + per-op dispatch + a few alloc paths**, not the value model or GC; target is CPython 3.14
 (specializing interpreter + optional JIT). Do **Tier 1 in order**: (1) **method-call IC + flatten
-`do_method_call`** (hits `struct`/OO), (2) **trim per-op overhead in `run_until`** (lazy `span`, split
-serial-vs-MN loop, inline the hottest ops — hits `loop`/`primes`), (3) **call-site specialization for
+`do_method_call`** (hits `struct`/OO), (2) **trim per-op overhead in `run_until`** (lazy `span`,
+inline the hottest ops — hits `loop`/`primes`), (3) **call-site specialization for
 `Op::Call`** (hits `fib`). Then Tier 2 (adaptive opcode quickening, PEP 659) → Tier 3 (Cranelift
 method-JIT). Full ranked detail + `file:line`s in **[`docs/future.md §4` "Post-M19 next levers"]**
 and **[`PROGRESS.md` "Next perf batch"]**. Same discipline: measure (`benches/run.chz`) → failing-then-
-green correctness test → keep parity → re-measure → record the delta in `docs/benchmarks.md`.
+green correctness test → keep the suite green at both worker counts → re-measure → record the delta in
+`docs/benchmarks.md`.
 
 **How to work a perf task here:** measure first (`cargo run --release -- run benches/run.chz`), land
-behind a failing-then-green correctness test, keep parity green, re-measure, record the delta in
+behind a failing-then-green correctness test, keep the suite green, re-measure, record the delta in
 `docs/benchmarks.md` + `PROGRESS.md`. Don't trust a lever's a-priori payoff guess — several in the
 backlog moved a *different* bench than predicted (logged in `docs/benchmarks.md`).
 

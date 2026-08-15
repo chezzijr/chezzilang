@@ -191,22 +191,28 @@ positional struct/enum/closure layout (memory levers #1/#2/#3).
 
 ---
 
-## 🗑️ Deprecated-engine (`--interp` / `--serial`) — WON'T-FIX pending removal
+## 🗑️ ~~Deprecated-engine (`--interp` / `--serial`)~~ — **BOTH ENGINES REMOVED; this whole section is closed**
 
-Both cooperative engines are slated for removal, leaving M:N `--parallel` as sole engine. Items below are
-coop-only limits M:N already handles → don't invest in a coop fix. **Tradeoff:** `--interp`/`--serial`
-are the parity oracles (differential testing caught most resolved bugs); removing them ends that net.
-`--serial` is cheap to keep (shares VM compiler/opcodes) — consider dropping only `--interp`, give
-`--serial` the D3 back-edge yield budget to keep oracle + close CPU-preempt.
+**Closed 2026-08-16.** The tree-walk `--interp` engine was removed earlier; the cooperative `--serial`
+engine was removed 2026-08-16 (`docs/future.md` §2b). The M:N VM is the sole engine, so every item below
+is moot — none of them describes a code path that still exists. The section is kept struck rather than
+deleted because its **tradeoff paragraph records a decision this project reversed**: it argued
+`--serial` was "cheap to keep" and worth retaining as the parity oracle, and recommended dropping only
+`--interp`. That is not what happened. What replaced the oracle is the CPython differential plus the
+two-worker-count schedule differential (`tests/chezzi_threads_cli.rs`); the Go paired-programs
+differential and the seeded-interleaving M:N mode named in §2b are **still unbuilt**.
 
-- **Cross-nursery coop flatten.** Resolved under `--parallel`
-  (`examples/parallel_cross_nursery_circular.chz`); coop can't flatten an outer-nursery fiber woken by an
-  inner one (`concurrency-tier-d.md:342`).
-- **Coop + `--interp` can't preempt CPU-bound tasks** — switch only at yield points. Pure-CPU loop
-  monopolizes the thread → sibling canceller never runs. 2e9-iter worker under cancel aborts ~0.5s on
-  `--parallel`, runs ~69s on coop (`examples/parallel_cancel.chz` carries no golden). M:N preempts (`vm:2871`).
-- **`--serial` generator airlock** — `--serial` runs a generator across the spawn airlock (parent/task
-  share one mutable generator); default OS-thread engine correctly rejects. `--serial` going away.
+The original items, all moot:
+
+- ~~**Cross-nursery coop flatten.**~~ Resolved under M:N
+  (`examples/parallel_cross_nursery_circular.chz`); the cooperative engine could not flatten an
+  outer-nursery fiber woken by an inner one, and the promised "coop flatten" was never built.
+- ~~**Coop + `--interp` can't preempt CPU-bound tasks.**~~ A pure-CPU loop monopolized the thread, so a
+  sibling canceller never ran: a 2e9-iteration worker under cancel aborted ~0.5 s on M:N and ran ~69 s
+  on coop. M:N preempts; `--threads=1` is the safe single-thread mode.
+- ~~**`--serial` generator airlock.**~~ The cooperative engine ran a generator across the spawn airlock
+  (parent and task sharing one mutable generator) where the OS-thread engine correctly rejects. Only the
+  correct behaviour is left.
 
 ---
 

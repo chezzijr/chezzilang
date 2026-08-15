@@ -205,7 +205,7 @@ blocks) · `recv() -> T` · `try_recv() -> Option[T]` · `close() -> nil` ·
 it always delivers `true`; the primitive behind `std.cancel`'s `done()`) · `len() -> int` · `cap() -> int`
 (the bound, or `0` for unbounded). Iterate received values with `for v in ch:` (ends when closed and drained). Backpressure only
 changes *which* task runs *when*, never the value sequence a consumer sees — bounded channels are
-byte-identical serial vs M:N.
+byte-identical across runs.
 
 ### `Shared[T]` — cross-task shared cell
 `get() -> T` · `set(x: T) -> nil` · `update(f: fn(T) -> T) -> nil`. `get` is a **snapshot copy out**
@@ -215,9 +215,7 @@ throwaway, not the box, and is silently lost. Mutate via `update` (or `set` a wh
 `update(f)` runs `f` **under the box's exclusive write lock** (read-modify-write is atomic against other
 tasks — this is why it exists over a `get`-then-`set`, which races). **Reentrancy limit:** `f` must not
 touch the **same** box — calling `s.update`/`s.set`/`s.get` on `s` from inside `s.update`'s own `f`
-re-acquires a lock it already holds and **self-deadlocks** (on the real M:N engine it hangs; the
-cooperative `--serial` oracle has no real lock, so it instead completes with a silently lost inner
-write — either way, don't). Mutate a *different* box, or restructure so the nested step runs after `update` returns.
+re-acquires a lock it already holds and **self-deadlocks** — it hangs. Mutate a *different* box, or restructure so the nested step runs after `update` returns.
 
 ### `RwShared[T]` — cross-task read-write cell (many readers OR one writer)
 `get() -> T` · `set(x: T) -> nil` · `read(f: fn(T) -> R) -> R` (shared read guard; returns `f`'s
@@ -274,8 +272,7 @@ type error).
 
 ### `Executor` — task pool
 `submit(task: fn() -> _) -> nil` — **starts the job immediately** on the shared pool (detached,
-fire-and-forget), like Python's `ThreadPoolExecutor.submit`; `--serial` queues it for `shutdown()`
-instead (`concurrency.md` §8, decision D3) ·
+fire-and-forget), like Python's `ThreadPoolExecutor.submit` ·
 `shutdown() -> nil` (**wait** for the submitted work — every job runs; raises the lowest-index fault,
 see `concurrency.md` §8) ·
 `shutdown_now() -> nil` (drop work that has not started, ask running jobs to stop **cooperatively**,
@@ -306,11 +303,10 @@ outer `shutdown_now()` stops the nested executor's jobs at their checkpoints too
 §cancellation points). That inheritance is **sticky** (a cancelled parent stays cancelled, as in Go),
 so a later `submit` to such an executor **faults** — `submit on an Executor whose creating job was
 cancelled` — rather than accepting work it would immediately cancel. **Read results after
-`shutdown()`, never between it and the `submit`** —
-that window is one of the **two** places the two engines deliberately disagree. The other is **when a
-`spawn`ed task starts**: eager at the `spawn` on M:N (Go's `go f()`), queued until the nursery's join
-on `--serial`, which has one thread and cannot run it beside the body (`concurrency.md` §4,
-`future.md` §2c1).
+`shutdown()`, never between it and the `submit`** — in that window a job is already running (eager
+`submit`, like CPython's `ThreadPoolExecutor`), so what you observe is a race with it, not a defined
+state. The same holds for a `spawn`ed task, which also starts at the `spawn` (Go's `go f()`) rather
+than at the nursery's join (`concurrency.md` §4, `future.md` §2c1).
 
 A blocking `recv`/`send`/`wait:` inside a job, or in `main` while jobs are running, **blocks and waits**
 — it does not assume "no scheduler means nobody can send". A `deadlock` fault is raised only once the
@@ -376,7 +372,7 @@ in `syntax.md`.
 
 **Re-entrancy.** A generator cannot be resumed while it is already running: a `.next()` (or a `for`)
 on the generator that is *currently executing*, reached from inside its own body, is a recoverable
-`generator already running` fault — catchable by `recover:`, never a panic, identical on both engines
+`generator already running` fault — catchable by `recover:`, never a panic, identical
 (Python raises `ValueError: generator already executing`). It is a fault rather than an answer because
 a live, non-exhausted generator must never report itself EXHAUSTED (`None`). A generator whose body
 **faulted** is *closed*, like Python's: a later `.next()` answers `None`.
@@ -596,7 +592,7 @@ nursery, `Executor.submit`, the entry task); no task is ever handed a false EOF.
 the whole remainder (so a later read in any task sees EOF), `read_char` consumes one scalar at a time.
 
 - A line goes to **exactly one** task: never duplicated, never dropped.
-- **Which** task gets a given line is **nondeterministic**, on both engines — concurrent readers race
+- **Which** task gets a given line is **nondeterministic** — concurrent readers race
   for lines, like Go/Python. Want a deterministic distribution? Have the entry task read and fan the
   lines out over a `Channel[str]` — the same "order it yourself" answer as concurrent `print`.
 - `None` means stdin is **genuinely exhausted** (a real EOF).
@@ -621,7 +617,7 @@ the whole remainder (so a later read in any task sees EOF), `read_char` consumes
 | `chdir` | `(p: PathLike) -> Result[nil]` | Change the **real process cwd** (`Err` on failure). **Process-global** — shared by all M:N workers, so a task's `chdir` shifts sibling tasks' relative paths (Python/Go have the same ceiling). |
 | `exit` | `(code: int) -> never` | Hard, uncatchable halt, unwinding past any `recover:`. **Does NOT run `defer`s.** The process status is the **low 8 bits** of `code` (`code & 0xff`), exactly like POSIX `exit(3)` / bash / Python / Go: `os.exit(-1)` → **255**, `os.exit(300)` → **44**, `os.exit(0)` → `0`. (It is a *mask*, not a clamp — a negative code must never report SUCCESS.) |
 
-**Env source:** `env` / `environ` / `setenv` all read/write the engine's injected env config (deterministic + testable). The env map is **shared** across M:N workers (an `Arc<Mutex<…>>`, not a per-worker copy), so a `setenv` from inside a task is visible to the parent + siblings — process-global, matching the serial engine (one Vm, one map) and Python/Go. `environ` sorts by key so both engines emit identical output. A `setenv` is **not** seen by a child spawned via `process.cmd` (which inherits the real process env). `getpid` / `platform` / `hostname` / `home_dir` / `temp_dir` are engine-agnostic queries (serial == M:N).
+**Env source:** `env` / `environ` / `setenv` all read/write the engine's injected env config (deterministic + testable). The env map is **shared** across M:N workers (an `Arc<Mutex<…>>`, not a per-worker copy), so a `setenv` from inside a task is visible to the parent + siblings — process-global, matching Python/Go. `environ` sorts by key so its output is deterministic. A `setenv` is **not** seen by a child spawned via `process.cmd` (which inherits the real process env). `getpid` / `platform` / `hostname` / `home_dir` / `temp_dir` are plain queries.
 
 **Non-UTF-8 argv / env (v1 decoding rule):** the OS hands argv and the environment over as raw bytes,
 which need not be valid UTF-8. Chezzi `str` is UTF-8, so the CLI decodes both **lossily** at startup —
@@ -688,7 +684,7 @@ value with no import, but to name the type you must `import std.fs` (or `import 
 `p` as full paths, in a **deterministic** order: each directory's entries are sorted by name,
 a directory is listed before its children (pre-order). A **symlinked directory is listed but not
 descended** (cycle guard). `Err` on an unreadable root. (The sorted order is required for
-serial == M:N engine parity.)
+determinism.)
 
 **Mutations** (all `Result[nil]` — a permission-denied / missing-parent failure is a catchable `Err`,
 never a panic):
@@ -798,9 +794,9 @@ which draws from the same step — unseeded `uuid.v4()` does not: it reads the O
 holds no PRNG state). This carries to `iter.shuffle` / `iter.choice` / `iter.sample`, which call `rand.int`. For a
 secret — a token, a session id, a shuffle an adversary must not predict — use `crypto.token_hex(n)` /
 `crypto.secure_bytes(n)` instead.
-**Limit (not a bug):** the PRNG state is a single process-global, so under `--parallel` *concurrent*
-draws from multiple tasks interleave nondeterministically (engines may diverge). *Sequential* draws
-are deterministic and byte-identical across all engines once seeded — draw in one task, or guard with a
+**Limit (not a bug):** the PRNG state is a single process-global, so *concurrent* draws from multiple
+tasks interleave nondeterministically. *Sequential* draws are deterministic and byte-identical across
+runs once seeded — draw in one task, or guard with a
 `Shared`/lock, when you need reproducibility under concurrency.
 
 ### `std.regex`
@@ -855,11 +851,11 @@ codepoint is carried across reads and reassembled exactly, while a **binary** pa
 bounded, process-wide pool with no scheduler under it, so blocking there steals width from every other
 job and every `parallel:` nursery (measured at `CHEZZI_THREADS=1`: a 10 s pin on a black-hole address).
 **Everywhere else `connect` blocks and succeeds** — a `spawn`/`parallel:` fiber parks on the netpoller,
-and top-level `main` *and `--serial`* block their thread, matching both ancestors (CPython
-`socket.connect` 0.1 ms, Go `net.Dial` 314 µs, each from the sole/main thread). That is narrower than
-`accept`/`read`/`read_bytes`/`write`, which additionally refuse on `--serial`: those wait on a **Chezzi
-peer fiber** that can only run on the very thread they would block, while a `connect` handshake is
-completed by the **kernel** and starves no one. The wait honours `--timeout`, cancellation and
+and top-level `main` blocks its thread, matching both ancestors (CPython `socket.connect` 0.1 ms,
+Go `net.Dial` 314 µs, each from the sole/main thread). `connect` is admitted where
+`accept`/`read`/`read_bytes`/`write` are not, because those wait on a **Chezzi peer fiber** that can
+only run on the very thread they would block, while a `connect` handshake is completed by the
+**kernel** and starves no one. The wait honours `--timeout`, cancellation and
 `os.exit` (`concurrency.md`; `gaps.md` **W7-40**/**W7-59**).
 
 ### `std.ffi`
@@ -1159,7 +1155,7 @@ buffer with `bytearray(p.bytes())` (there is no `bytearray` method).
 ### `std.datetime` — civil-calendar date/time (UTC-only)
 Pure-Chezzi civil-calendar decomposition / construction / duration arithmetic layered on the native
 `std.time` clock (`time.now()` only). Built from pure integer math (Howard Hinnant's branch-free
-civil-calendar algorithms), so it is **identical across both engines**. `import std.datetime`
+civil-calendar algorithms), so it is **identical across runs**. `import std.datetime`
 (or `as dt`).
 
 **CONTRACT — load-bearing semantics (these are contractual, not incidental):**
@@ -1212,8 +1208,8 @@ The `DateTime` struct lives in the module
 — use the module-qualified name.
 
 ### `std.collections` — generic single-threaded data structures
-Pure-Chezzi generic structs over `T` built on the builtin `list`/`map`, so they are **identical
-across both engines** (serial `--serial` / default M:N). `import std.collections` (or `as col`).
+Pure-Chezzi generic structs over `T` built on the builtin `list`/`map` — no native surface of their
+own. `import std.collections` (or `as col`).
 
 **EMPTY SEMANTICS (load-bearing, consistent):** every removal/peek returns `Option[T]` — an empty
 container yields `None`, never a fault, matching the builtin `list.pop() -> Option[T]`.
@@ -1266,7 +1262,7 @@ like any map key — `Hashable` alone does not imply `Eq`, `docs/gaps.md` W7-53)
 | `.most_common(k)` | `(int) -> List[(T, int)]` | Top `k` `(item, count)` pairs by **descending count**; `k` clamped to `[0, len]` (`k<=0`→`[]`, `k>=len`→all). **O(n log n)**. |
 
 **Counter tie-break:** equal counts keep **insertion order** — guaranteed because `map.keys()` yields
-insertion order **and** the list `sort_by` is a **stable** merge sort (both engines). This is a
+insertion order **and** the list `sort_by` is a **stable** merge sort. This is a
 load-bearing dependency on stable sort; do not swap `sort_by` to an unstable sort.
 
 **No ordered-map wrapper (intentional):** the builtin `map` is **already insertion-ordered**
@@ -1276,8 +1272,8 @@ on it). Use the builtin `map` directly — there is no `OrderedMap` here (and no
 
 ### `std.concurrency.collection` — thread-safe collections over `RwShared`
 Pure-Chezzi generic structs wrapping the `RwShared[Map[...]]` runtime cell (many concurrent readers
-**or** one exclusive writer), so they are **identical across both engines** (serial `--serial` /
-default M:N). `import std.concurrency.collection` (or `as col`). This is the **first nested std
+**or** one exclusive writer) — no native surface of their own.
+`import std.concurrency.collection` (or `as col`). This is the **first nested std
 module** — the dotted path resolves to `std/concurrency/collection.chz` with no special-casing.
 
 **Why over raw `RwShared`:** raw `read`/`write` closures are verbose, and the **compound** mutations
@@ -1343,7 +1339,7 @@ already `Atomic`. There is no `ConcurrentList`/`ConcurrentSet`/`ConcurrentQueue`
 | `pmap_limited` | `pmap_limited[T, U](xs: List[T], f: fn(T) -> U, limit: int) -> List[U]` | same, but at most `limit` tasks run `f` at once (a channel-as-semaphore token bucket). `limit > 0` required (`limit <= 0` deadlocks — no permits). |
 
 Determinism comes from reassembling by submission index (a `sort_by_key` on the tagged results),
-**never** completion order — so two engines that finish tasks in different orders still return the
+**never** completion order — so a run that finishes tasks in a different order still returns the
 identical `List[U]`. The nursery lives inside the helper and joins before the collect, so a task can
 never outlive the call (structured concurrency); `f` crosses the airlock into each task by value.
 `pmap_limited` is also the standard concurrency limiter — cap parallel calls into a rate-limited
@@ -1356,13 +1352,13 @@ gap that bare `Executor.submit(f)` is fire-and-forget (returns nothing).
 
 | item | signature | semantics |
 | --- | --- | --- |
-| `submit_task` | `submit_task[T](ex: Executor, f: fn() -> T) -> Task[T]` | submit `f` to `ex` for detached execution and get a handle for its result. The work STARTS at the submit and is waited for by `shutdown()` (or the program-exit join); `--serial` runs it at that wait instead. |
+| `submit_task` | `submit_task[T](ex: Executor, f: fn() -> T) -> Task[T]` | submit `f` to `ex` for detached execution and get a handle for its result. The work STARTS at the submit and is waited for by `shutdown()` (or the program-exit join). |
 | `Task.get` | `get(self) -> T` | block until the result is available, then return it. **Memoized** — idempotent, safe to call repeatedly (a second call returns the cache, not a second `recv`). |
 | `Task.done` | `done(self) -> bool` | whether the result has landed yet. Never blocks. |
 
 Canonical shape: submit every task, `shutdown()`, then `.get()` each. **Parity rule:** a `Task`'s value
 is deterministic (it is `f()`); only *when* it runs varies by engine — so `.get()` is byte-identical
-serial vs M:N **as long as you await in a fixed (e.g. submission) order**. There is deliberately no
+across runs **as long as you await in a fixed (e.g. submission) order**. There is deliberately no
 `join_next()`/select-on-completion API — completion order is nondeterministic and would break parity.
 
 ### `std.cmp` — ordering generics (`Comparable`)
@@ -1571,4 +1567,4 @@ those are [uninterruptible while in flight](#blocking-calls-cannot-be-interrupte
 
 > Where this lives: native modules are Rust under `src/native/*.rs`; the pure-Chezzi modules are real
 > `.chz` files under `std/`. Built-in type methods and global builtins are dispatched by the checker
-> (`src/checker/mod.rs`) and both engines.
+> (`src/checker/mod.rs`) and the VM.

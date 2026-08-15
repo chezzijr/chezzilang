@@ -1,5 +1,11 @@
 # Tier-D — M:N scheduler + async I/O (phased breakdown)
 
+> **Reading note (added 2026-08-16).** This file is a **dated design + landing record** for the Tier-D
+> phase ladder, kept as written. It talks throughout about a cooperative `--serial` engine that was the
+> "frozen parity oracle" and about `--parallel` as an opt-in. Both framings are historical: the M:N
+> engine is now the **default and only** engine, `--parallel` is an accepted no-op alias, and `--serial`
+> was **removed 2026-08-16** (`docs/future.md` §2b). Nothing in the phase ladder itself changed.
+
 Companion to [`concurrency.md` §10](concurrency.md) (the design) the way
 [`concurrency-b3.md`](concurrency-b3.md) is the companion to §9 for the B3 epic. §10 says *what*
 Tier-D is and *why*; this file is the *how* — the phase ladder **D0…D6**, each independently

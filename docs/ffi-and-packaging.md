@@ -77,7 +77,7 @@ qualified/imported return struct whose fields are typed via the defining module'
 (`core/cdefs.chz`: `type Half = int32` + `struct DivT{quot:Half; rem:Half}`; `main`:
 `extern fn div(...) -> cdefs.DivT`) marshals correctly — a colliding/invisible `Half` in the importer
 can't drop the field. A cyclic alias chain is a clean "not C-marshallable" error (never a hang).
-(2-engine parity: serial `--serial` / default M:N; verified silent-safe — the prior bug returned void with
+(Verified silent-safe — the prior bug returned void with
 `check` passing.) There is exactly **one** extern-type resolver — the checker — for single-file source
 and multi-file projects alike; the backends do zero type resolution of their own, so a second resolver
 cannot drift.

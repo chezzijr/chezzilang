@@ -117,9 +117,9 @@ element-type carry a separate typed backing (`Vec<u8>` strided by the struct's f
   above). So `xs[0]` yields a **view/handle into the inline store**, not a copy. The moment `y`
   escapes (returned, stored, captured), the analysis must force `xs` to a boxed representation — or
   the view dangles. This is the subtlest case and the main reason (ii) is stage-3, not stage-1.
-- **Two-engine parity.** Every change must be byte-identical serial vs M:N (`chz_suite_passes_both
-  _engines`). Representation choice must not leak into observable output (Display, `==`, iteration
-  order, hash).
+- **Observable behaviour is fixed.** Every change must keep the goldens and `tests/chz` byte-identical
+  (`chz_suite_passes` in `tests/chz_suite.rs`, and the `CHEZZI_THREADS=2` re-run). Representation
+  choice must not leak into observable output (Display, `==`, iteration order, hash).
 - **`match` / destructuring** on an unboxed struct must bind fields without materializing a boxed
   object (or must box on demand transparently).
 
@@ -153,7 +153,7 @@ is a shippable increment.
   dispatch, `==`, hash, Display, wire, snap, `match`) must handle both boxed and unboxed, or box-on-
   demand. This is a permanent tax on the VM. Kill-criterion: if Stage 0 shows the analysis rarely
   fires on real code, the tax isn't worth it — stop.
-- **Parity.** Any serial-vs-M:N divergence is a bug, not a win (repo discipline).
+- **Determinism.** Any behaviour that changes with the worker count is a bug, not a win (repo discipline).
 - **Effort.** Realistically multi-session: Stage 0 (analysis) is itself a checker-grade pass; Stages
   1–3 each touch the value model + GC. This is a milestone, not a task.
 

@@ -1,7 +1,7 @@
 # Chezzi — Concurrency & Parallelism (`spawn` / `parallel:`)
 
 > **Status:** canonical design doc — **implemented through Tier-D**. The surface (`spawn`,
-> `parallel:`, `Channel`/`Shared`/`Executor`) and both engines ship; `--parallel` is a real OS-thread
+> `parallel:`, `Channel`/`Shared`/`Executor`) ship; the M:N engine is a real OS-thread
 > M:N work-stealing scheduler with reduction-counting preemption, a dirty/blocking pool, and an
 > epoll/kqueue netpoller behind non-blocking `std.net`. Phase history: [`concurrency-tier-d.md`](concurrency-tier-d.md)
 > (D0–D6c) + [`concurrency-b3.md`](concurrency-b3.md) (the B3 OS-thread foundation). **M-C implicit
@@ -28,7 +28,7 @@ per-heap stop-the-world GC stays untouched).
   children at the dedent. No `async`/`await` colouring, no `WaitGroup`.
 - **Primitives:** `Channel[T]` (the sync primitive — a mailbox outside every heap) and `Shared[T]`
   (the sanctioned cross-task mutable box — an owner-task serialises writes, Elixir's `Agent` trick).
-- **Staging (this doc's central decision):** ship the full *surface + type system + both engines* on
+- **Staging (this doc's central decision):** ship the full *surface + type system + engine* on
   a **sequential, run-to-completion executor** first (milestones **C1–C4**); add real fibers /
   multicore later (**C5**) behind the same syntax. **C5 shipped**: the M:N OS-thread engine is the
   default, tasks start at their `spawn` and interleave, and the surface did not change — exactly as the
@@ -69,7 +69,7 @@ That permanently taxes the common case and hands users the entire data-race bug 
 Heaps are share-nothing, but the **process** is one process: a task inherits the parent's `std.os.args`
 and env, and **stdin is ONE source every task shares** (Go's `os.Stdin` / Python's `sys.stdin`, not
 entry-task-owned). Any task may `io.read_line()` / `io.input()`; a line goes to **exactly one** task
-(never duplicated, never dropped); **which** task gets it is nondeterministic on both engines — order it
+(never duplicated, never dropped); **which** task gets it is nondeterministic — order it
 yourself (entry task reads, fans out over a `Channel[str]`), exactly as with concurrent `print`. `None`
 means stdin is genuinely exhausted. Details + the v1 core-worker-pinning limit: `docs/stdlib.md` §`std.io`.
 
@@ -84,14 +84,13 @@ counter := 0
 parallel:
     spawn: counter = counter + 1   # compiles, but each task mutates its OWN isolated copy of
                                     # `counter` — a module global is deep-copied per spawned task at
-                                    # the spawn boundary on BOTH engines, so the parent's `counter`
+                                    # the spawn boundary, so the parent's `counter`
                                     # stays 0 — no shared write, no race.
 print(counter)                     # 0  — to actually share, use a Shared[int] (below)
 ```
 
-**Module globals isolate per task on both engines.** A `spawn`ed task gets its own deep copy of every
-module global (and of every captured local) — mutating one inside a task never propagates out, on
-`--serial` or the default M:N engine alike (they snapshot identically; `serial == M:N` by construction).
+**Module globals isolate per task.** A `spawn`ed task gets its own deep copy of every
+module global (and of every captured local) — mutating one inside a task never propagates out.
 
 **The copy is taken FRESH, per task, at its `spawn` — at every depth.** A task sees the values current
 when it was spawned (the Go rule: a goroutine reads whatever a package-level var holds when `go` runs).
@@ -100,18 +99,17 @@ code *between* two nurseries is visible to the second nursery's tasks, two spawn
 assignment see the old and the new value respectively, and a task that mutates its own copy and then
 opens a **nested** `parallel:` gives its children the **task's** current view, not the parent module's.
 In-place mutation of an aggregate global (`q.push(x)`, `m[k] = v`, `p.x = 1`) is picked up by the next
-nursery too. An `Executor` job has no nursery, so it sees the globals as of the instant it **starts** —
-which is the **`submit`** on the default engine (a job starts at once) and the **drain** on `--serial`,
-which still queues (decision D3, §C5). The two agree unless a global is mutated between the `submit`
-and the `shutdown()`; that window is the documented serial-vs-M:N divergence, not a parity bug. Within
-an engine it is identical at every `--threads`.
+nursery too. An `Executor` job has no nursery, so it sees the globals as of the instant it **starts**,
+which under eager execution is its **`submit`**. Reading a global that is mutated between the `submit`
+and the `shutdown()` is racing a running job, not observing a defined state. The view is identical at
+every `--threads`.
 
 One sub-statement caveat, because in-place aggregate mutation writes no module slot for the runtime to
 notice: **within one nursery**, consecutive `spawn`s share one view, which is refreshed by a global
 *assignment* (`g = …`, `q = […]`) but not by an in-place mutation. So if a `spawn` is followed by
 `q.push(x)` and then another `spawn` into the SAME nursery — with no assignment in between — the second
 task still sees the pre-`push` `q`. Every task's view is a single coherent instant (never a mix of old
-and new values), and it is the same instant on both engines; only its freshness stops at the last
+and new values), and it is the same instant; only its freshness stops at the last
 assignment / nursery open. Open a new `parallel:`, assign the global, pass the value as a spawn argument,
 or send it through a `Channel` if a task must see an in-place mutation made mid-nursery.
 To actually **share** mutable cross-task state, use `Shared[T]` / `RwShared[T]` / `Atomic[T]` (below) or a
@@ -225,9 +223,7 @@ This is **structured concurrency**, the modern consensus that postdates Go: Pyth
   `parallel:` is an inner sub-nursery that joins earlier, at its dedent.
 - **A task *starts* at its `spawn`, not at that join** — Go's `go f()` ([§4](#4-execution-semantics)).
   The join is a **completion** barrier and nothing more: it guarantees the task is *done* by the
-  dedent/`return`, never that it could not have started (and printed) earlier. **`--serial` is the
-  exception** — the cooperative single-thread engine queues the task and runs it at the join, because
-  one thread cannot run it beside the body. That engine is slated for removal (`docs/future.md` §2b).
+  dedent/`return`, never that it could not have started (and printed) earlier.
 - **Function-boundary rule (the safety invariant).** A `spawn` binds to a nursery **within its own
   function** — it can **never** reach an enclosing function's or the module's nursery. This is what
   stops a task spawned in `fn worker()` from outliving `worker`'s return:
@@ -301,14 +297,6 @@ spawn:
 print(ch.recv())    # 1 — the spawned sender is running, so the recv is satisfiable
 ```
 
-### `--serial` starts late — by construction
-
-The cooperative single-thread engine **queues** a task at its `spawn` and runs it at the join. It has
-one thread, so running the task beside the body is unreachable there; the same program prints
-`A B SPAWNED`. This is the **second** of two places the two engines deliberately disagree — the first
-is `Executor.submit` (`docs/stdlib.md`, decision D3). `--serial` is slated for removal
-(`docs/future.md` §2b); the M:N engine is the standard of correct, not the engine agreement.
-
 ### Output ordering: streaming CLI vs buffered sink
 
 A concurrent task's stdout is a **private per-task buffer flushed at the join, in task order**, under
@@ -366,8 +354,8 @@ c := bch.cap()             # capacity: 2 here; 0 for an unbounded Channel[T]()
 - **`Channel[T]()` is an unbounded FIFO** — `send` never blocks. **`Channel[T](cap)`** (`cap > 0`; a
   `cap <= 0` is a runtime fault) is a **bounded** FIFO: a `send` blocks/parks once `cap` messages are
   queued and resumes when a `recv` frees a slot (Go's buffered channel). Backpressure changes *which*
-  task runs *when*, never the value sequence a consumer sees, so a bounded channel is byte-identical
-  serial vs M:N by the same argument as a blocking `recv`. A full `send` with no possible consumer
+  task runs *when*, never the value sequence a consumer sees, so a bounded channel gives the same value
+  sequence at every worker count, by the same argument as a blocking `recv`. A full `send` with no possible consumer
   (top level, no nursery, or inside a native callback) is a **deadlock fault**, not a silent over-fill.
   As with `try_recv`, `try_send`'s full-vs-not decision under multi-sender contention is nondeterministic
   — the same class as `try_recv`'s `None`-vs-`Some` under contention; it is not "fixed".
@@ -387,9 +375,8 @@ c := bch.cap()             # capacity: 2 here; 0 for an unbounded Channel[T]()
   — the checker enforces it, like a Rust channel). Deep-copy is the fallback when the sender wants to
   keep its copy.
 - **Channels are themselves sendable** — pass a `Channel` over a `Channel` for reply channels.
-- **`try_recv() -> T?` is shipped (A1, both engines).** The non-blocking sibling of `recv`: it
-  pops-or-returns-`None` and never blocks, faults, or suspends a fiber — so it is identical under
-  both engines (serial `--serial` and default M:N) (parity-tested). With B1/B2's blocking `recv`, a fiber
+- **`try_recv() -> T?` is shipped (A1).** The non-blocking sibling of `recv`: it
+  pops-or-returns-`None` and never blocks, faults, or suspends a fiber. With B1/B2's blocking `recv`, a fiber
   can also drain a mailbox's residue after a blocking `recv` resumes. `recv -> T` stays primary; reach
   for `try_recv` to poll without guarding on `len()`.
 
@@ -403,8 +390,8 @@ The report-channel + one-`spawn`-per-element + join + reassemble pattern is comm
 - `pmap_limited[T, U](xs, f, limit) -> List[U]` — same, capping in-flight `f`-executions at `limit`
   via a channel-as-semaphore token bucket (also the standard **concurrency limiter**; `limit > 0`).
 
-Determinism/parity comes from reassembling by submission INDEX (`sort_by_key`), never completion
-order — so serial `--serial` == M:N byte-for-byte. The nursery lives inside the helper and joins
+Determinism comes from reassembling by submission INDEX (`sort_by_key`), never completion order — so
+the result is byte-identical at every worker count. The nursery lives inside the helper and joins
 before the collect (structured concurrency — a task can't outlive the call); `f` crosses the airlock
 into each task by value. See `docs/stdlib.md` for signatures.
 
@@ -417,7 +404,7 @@ future-style handle (memoization + readiness poll):
 
 - `submit_task[T](ex, f) -> Task[T]` — submit `f` detached, get a handle (builds over
   `ex.submit_result(f)`). The work starts at the `submit` and is waited for by `shutdown()` (or the
-  program-exit join); on `--serial` it runs at that wait instead. Read the result AFTER that call.
+  program-exit join). Read the result AFTER that call.
 - `Task.get() -> T` — block until the result lands, then return it; **memoized** (idempotent).
 - `Task.done() -> bool` — non-blocking readiness poll.
 
@@ -679,14 +666,14 @@ It is **level-triggered**: any `recv` at or after the deadline yields `true` (th
 once). Delivery is handled at `recv` time, in the receiver's own engine — so a `timer` created at the top
 level can be `recv`'d inside a `--parallel` child. On `--parallel` the receiver parks and a background
 job (on the netpoller timer thread) `send`s `true` at the deadline, accounted so it can't trip a false
-deadlock; the cooperative `--serial` VM inline-sleeps to the deadline (single-threaded, like its
-`sleep_ms`). Observable output is identical across both engines for a *lone* timer `recv` — but a
-`timer` arm inside a `wait:` with a **runnable sibling** diverges when the waiter is a cooperative
-fiber inside a nursery (serial inline-sleeps instead of yielding): `docs/gaps.md` **N10**, a pre-freeze
-known-limit (M:N is correct; the serial oracle is wrong). A waiter that owns its OS thread — an eager
-`Executor` job, or the top-level `main` thread, **including inside a native callback** — does **not**
-inline-sleep on either engine: it blocks with the timer as one more arm, so a sibling value that
-arrives first wins (`gaps.md` **W7-14**).
+deadlock. A waiter that owns its OS thread — an eager `Executor` job, or the top-level `main` thread,
+**including inside a native callback** — does **not** park: it blocks with the timer as one more arm,
+so a sibling value that arrives first wins (`gaps.md` **W7-14**).
+
+**One shape still inline-sleeps.** A `wait:` reached in the INLINE body of an outermost `parallel:`
+builder has no worker loop under it to drive a park, so a live timer arm there sleeps to the deadline
+and takes it **without re-polling siblings** — a runnable sibling that could satisfy another arm is
+stranded until the timer fires. `docs/gaps.md` **N10** records exactly this.
 
 > **v1 limitation:** a `timer.recv()` reached *inside a native callback* (a `Shared.update` closure, a
 > list-HOF, an `Executor` task) under `--parallel` pins that worker for the timeout rather than demoting a
@@ -695,17 +682,15 @@ arrives first wins (`gaps.md` **W7-14**).
 
 ---
 
-## 6d. `wait` — racing multiple channel receives *(shipped on both engines)*
+## 6d. `wait` — racing multiple channel receives *(shipped)*
 
 > **Status:** the surface and semantics below are **locked** (brainstormed 2026-06) and **implemented on
-> both engines** (2026-06-13): lexer→parser→checker→VM, with non-blocking arms (`else:`, an
-> already-ready arm, a `timer` arm) AND the **blocking multi-channel park** working in **both** engines —
-> the serial `--serial` cooperative scheduler (sequential poll/inline-sleep) and the **M:N
-> (`--parallel`) blocking park** (landed 2026-06-13, the M:N park notes below). A blocking `wait` under
-> `--parallel` now parks one fiber on N channels (woken by the first sender, swept out of the other
-> buckets) instead of faulting. **SEND-arms** (`ch.send(v):`, deterministic source-order selection, a
-> bounded send-arm parks until a receiver frees a slot) landed 2026-07-22 — see `examples/wait_send.chz`.
-> Both examples are byte-identical across serial `--serial` / default M:N.
+> the VM** (2026-06-13): lexer→parser→checker→VM, with non-blocking arms (`else:`, an already-ready
+> arm, a `timer` arm) AND the **blocking multi-channel park** (landed 2026-06-13, the M:N park notes
+> below): a blocking `wait` parks one fiber on N channels (woken by the first sender, swept out of the
+> other buckets) instead of faulting. **SEND-arms** (`ch.send(v):`, deterministic source-order
+> selection, a bounded send-arm parks until a receiver frees a slot) landed 2026-07-22 — see
+> `examples/wait_send.chz`. Both examples carry byte-exact goldens.
 
 `wait` is Chezzi's `select`: block until **whichever of several channels is ready first**, run that arm.
 Both directions are supported — **recv-arms** (`x := ch.recv():`, bind the received value) and **send-arms**
@@ -725,10 +710,10 @@ wait:
 ```
 
 **Selection is deterministic SOURCE ORDER** (first ready arm wins, recv OR send), **not** Go's uniform-random
-`select` fairness. This is Chezzi's one principled divergence from Go here, and it is *required*: it is what
-makes the serial `--serial` oracle and the M:N (`--parallel`) engine byte-identical (`chezzi run --check-parity`)
-— with **one** known exception, a live `timer` arm racing a runnable sibling (`docs/gaps.md` **N10**), a
-pre-freeze known-limit deferred to the post-freeze serial removal (`docs/future.md` §2b).
+`select` fairness. This is Chezzi's one principled divergence from Go here, and it is deliberate: a
+`wait:` over already-ready arms gives the same answer on every run and at every worker count, which is
+what makes a `wait:`-using program goldenable at all. The one shape that is still schedule-sensitive is
+a live `timer` arm reached in an inline outermost-`parallel:` body (`docs/gaps.md` **N10**).
 All arm channel handles and send values are evaluated **once**, top to bottom, on entry (Go's rule). `else`
 runs only if **no** arm is ready — so a `wait` containing an unbounded or closed send-arm never blocks (that arm
 is always ready). See `examples/wait_send.chz`.
@@ -752,8 +737,8 @@ is always ready). See `examples/wait_send.chz`.
 
 **Runtime semantics.**
 1. Evaluate each arm's channel handle (and, for a send-arm, its value) once, in source order.
-2. Poll arms in **source order** (deterministic priority, not Go's random fairness — required for
-   serial == M:N parity): the first **ready** arm wins. A recv-arm is ready with a queued value → pop, bind,
+2. Poll arms in **source order** (deterministic priority, not Go's random fairness — so a `wait:` over
+   already-ready arms gives the same answer on every run): the first **ready** arm wins. A recv-arm is ready with a queued value → pop, bind,
    run its block. A send-arm is ready when the channel can accept the value (bounded-with-space / unbounded /
    closed) → enqueue (or, if closed, *fault* `"send on a closed channel"`), run its block, bind nothing.
 3. A **closed + empty** channel's *recv*-arm is **skipped** (option B); a closed *send*-arm is instead
@@ -763,7 +748,7 @@ is always ready). See `examples/wait_send.chz`.
    live arm channels and re-poll on the first wake. A recv-arm wakes on a **sender**; a bounded send-arm wakes
    on a **receiver** freeing a slot (reusing the bounded-`send` `wake_senders` / `recv_wake` path).
 
-**Implementation notes.** *(Done on both engines. A new `Op::WaitPoll` holds the arm operands on the
+**Implementation notes.** *(Done. A new `Op::WaitPoll` holds the arm operands on the
 operand stack — one slot per recv-arm (the channel), TWO per send-arm (channel THEN value, walked via a
 per-arm slot cursor keyed on `WaitMeta.is_send`) — polls source order, and jumps to the chosen arm's body /
 `else`, handles a live `timer` arm (see below), faults all-closed / send-to-closed, or parks. The cooperative
@@ -778,18 +763,17 @@ dead recv-arm ready, would spin requeue→re-poll→re-park; but an **all-dead**
 
 > **v1 limitation — send-arm inside a native callback.** A **full bounded** send-arm reached *inside a
 > native callback* (a `Shared.update` closure, a list-HOF, an `Executor` task) can only block, and neither
-> engine can carry it: the M:N engine can't snapshot-park there and its in-callback demote path pops arm
-> queues (recv semantics), while the cooperative `--serial` VM has no yield point inside a callback. So a
-> `wait` with a live send-arm on that path **faults** — with the **byte-identical** full-send-in-callback
-> message `chan_send_step` already raises, on **both** engines (the fault is decided before the engine
-> split, preserving serial == M:N parity), rather than blocking. Same class as the existing in-callback
-> full-`send` / `timer.recv()` v1 limits; the upgrade path is a demote-in-place send block.
+> engine path can carry it: the M:N engine can't snapshot-park there and its in-callback demote path pops
+> arm queues (recv semantics). So a `wait` with a live send-arm on that path **faults** — with the
+> full-send-in-callback message `chan_send_step` already raises — rather than blocking. Same class as the
+> existing in-callback full-`send` / `timer.recv()` v1 limits; the upgrade path is a demote-in-place send
+> block.
 
-> **Timer arm under `--parallel` — timed-park, not inline-sleep.** A live `timer(ms)` arm is handled
-> differently per *waiter*. A **cooperative fiber** (inside a nursery on `--serial`) has no thread of its
-> own, so it **inline-sleeps** to the soonest deadline then takes the timer arm. **Known-limit
-> (`docs/gaps.md` N10):** the inline-sleep fires
-> *before* the cooperative park, so if a **runnable sibling** could satisfy a non-timer arm, serial strands it
+> **Timer arm — timed-park, not inline-sleep.** A live `timer(ms)` arm is handled differently per
+> *waiter*. A waiter with no worker loop under it — the INLINE body of an outermost `parallel:` builder
+> — has no thread of its own, so it **inline-sleeps** to the soonest deadline then takes the timer arm.
+> **Known-limit (`docs/gaps.md` N10):** the inline-sleep fires
+> *before* the park, so if a **runnable sibling** could satisfy a non-timer arm, that waiter strands it
 > and takes the timer where M:N takes the sibling's `send` — a serial ≠ M:N divergence (M:N is correct). Fix
 > deferred to the post-freeze serial removal (`docs/future.md` §2b). The M:N engine (`--parallel`) must **not** inline-sleep: that would
 > pin the OS worker and strand a sibling `send` that lands mid-window. Instead it arms **one** background
@@ -810,7 +794,7 @@ dead recv-arm ready, would spin requeue→re-poll→re-park; but an **all-dead**
 > did. The `native_reentry > 0` demote path threads the deadline into its bounded poll (channel scan first,
 > so a real send still beats the timer).
 - *Non-blocking* (`else` present) and the *poll* step reuse the existing `try_recv` path (a timer arm's
-  `try_recv` is already deadline-aware) — straightforward in all engines. **(Done.)**
+  `try_recv` is already deadline-aware) — straightforward in the VM. **(Done.)**
 - *Blocking* (no `else`) needs a **multi-channel park** — **done in both schedulers.** A fiber parks in one
   `parked[key]` bucket (`MnSched::park`/`send_wake`/`close_wake`) and is woken by a send to that key. `wait`
   needs one fiber parked on N keys, woken by the first sender, and **swept out of the other N-1 buckets** —
@@ -836,7 +820,7 @@ dead recv-arm ready, would spin requeue→re-poll→re-park; but an **all-dead**
   while the fiber heap is live (mirrors `Disp::Park`). The single-channel `recv` park stays the **1-key
   `ParkedEntry::Recv` special case** (alloc-free, provably unchanged — regression test
   `vm_wait_single_arm_recv_park_unchanged_under_parallel`).
-- *Cooperative `--serial` VM* (sequential): poll arms once in source order; first ready wins; else if `else`,
+- *A waiter with no worker loop* (the inline outermost-`parallel:` body): poll arms once in source order; first ready wins; else if `else`,
   run it; else if any arm is timer-backed **and the waiter is a cooperative fiber** (it has no thread to
   clamp; a party that owns its OS thread blocks in place with the timer clamped instead — W7-14),
   inline-sleep to the soonest deadline and take that arm; else
@@ -914,7 +898,7 @@ fn serve(tok: Token, io: Channel[str]):
         _ := tok.done().recv(): cleanup()   # cancelled (timeout or manual) → take this arm
 ```
 
-> **Cancellation is delivered at CHECKPOINTS — and a registered `defer` ALWAYS runs (BOTH engines).**
+> **Cancellation is delivered at CHECKPOINTS — and a registered `defer` ALWAYS runs.**
 > A cancel (a sibling's fault, an `os.exit`, a scope teardown) is observed only at **cancellation
 > points**: **loop back-edges** and **blocking / park ops** (`recv`, `wait:`, a socket op, a blocking
 > native like `sleep_ms`). It is *not* observed at every instruction. Two consequences, both intended
@@ -941,10 +925,9 @@ fn serve(tok: Token, io: Channel[str]):
 >
 > Three precisions, all measured:
 >
-> - **`--serial` has the checkpoint but nothing to observe.** Nothing else runs while its one thread
->   sleeps, so a *sibling's* cancel cannot arrive mid-sleep at all — serial is entry-only in practice,
->   not by a different rule. What serial *does* gain is `--timeout`: the wall clock advances whether or
->   not anything runs.
+>   (Historically the cooperative `--serial` engine had this checkpoint but nothing to observe at it:
+>   nothing else ran while its one thread slept, so a *sibling's* cancel could not arrive mid-sleep at
+>   all. That engine was removed 2026-08-16.)
 > - **`chezzi test --timeout` reaches every blocking wait** — `sleep_ms` and `timer(ms).recv()`,
 >   top-level, in a nursery and in an `Executor`, blocked in place or PARKED. The timer-park half is
 >   **W7-17** (fixed 2026-08-05): a parked fiber observes nothing, so its timer job is armed for the
@@ -960,20 +943,18 @@ fn serve(tok: Token, io: Channel[str]):
 >
 > A cancelled task then unwinds through its `defer`s — cancelled while running (back-edge), while parked
 > on a `recv`/`wait:`, while parked on a socket, or while parked when a *sibling*'s fault tore the
-> nursery down — **on the M:N engine and on `--serial` alike** (serial's scheduler cancels and re-drives
-> its still-parked children before propagating the fault). `defer` is the language's only cleanup
+> nursery down. `defer` is the language's only cleanup
 > mechanism (no destructors, no `with`), so this is the guarantee cleanup rests on. At a `recv`/`wait:`
 > checkpoint **cancel wins** over a queued value, a tripped `done()` latch and a fired timer.
 >
 > Exactly one thing deliberately skips a `defer`: **`std.os.exit`**, a hard halt by design. (An
 > `os.exit` executed *by* a cancelled task's `defer` is honored — it beats the sibling's fault and sets
-> the process exit code, identically on both engines.)
+> the process exit code, identically.)
 >
 > **Every spawned task starts — even into an already-cancelled scope.** A `spawn`ed task is *always*
 > run: M:N cannot do otherwise (a scope completes only at `done == total`, so a queued fiber is picked
-> up even after a sibling has faulted), and `--serial`'s cancel drain therefore starts its
-> never-started children too. So the task runs its prologue, prints what it prints, registers its
-> `defer`, and dies at its first checkpoint — on **both** engines, with the same line set. (This is why
+> up even after a sibling has faulted). So the task runs its prologue, prints what it prints, registers
+> its `defer`, and dies at its first checkpoint. (This is why
 > a sibling of a task that calls `std.os.exit` still runs its prologue: the exit is a hard halt for the
 > *program*, reduced at the nursery join, not a freeze-frame on already-spawned tasks.)
 >
@@ -984,7 +965,7 @@ fn serve(tok: Token, io: Channel[str]):
 > tripped the scope cancel. The suppression covers the work the cleanup *delegates*, too: a `spawn` /
 > `parallel:` opened inside a `defer` gets a **clean slate** — it does not inherit the already-tripped
 > enclosing cancel, so its children run to completion (they are still cancellable by their *own*
-> nursery's faults). Both engines.
+> nursery's faults).
 >
 > **A `recover:` INSIDE a defer body catches — even while the task is being torn down.** Since no
 > cancellation point fires inside a deferred call, a fault raised *beneath* a `recover:` that the defer
@@ -1001,27 +982,26 @@ fn serve(tok: Token, io: Channel[str]):
 > engines, with no cap (`defer time.sleep_ms(10000)` in a cancelled task = a 10s join). That is
 > Go's rule for a deferred function during a panic, and it is the price of "cleanup is never truncated".
 >
-> **The one thing a `defer` cannot do on `--serial`: PARK.** A defer body runs during frame teardown,
-> whose LIFO drain is host-stack state, so it runs *guarded* — like a `list.map` callback, it cannot
-> snapshot-park (the **C5** limit). Time/IO blocking is fine (it runs inline / demotes). But a `recv`
-> inside a cleanup that needs a value from a **live sibling** cannot yield to that sibling on `--serial`:
-> it faults in place with the deadlock error, so that cleanup stops there, while the same cleanup
-> *completes* on M:N (the demoted worker blocks in place and the sibling's `send` reaches it). A real,
-> recorded **serial ≠ M:N** limit (`docs/gaps.md` **C5/N6g**) — lifting it needs a resumable native
+> **A `defer` body cannot snapshot-PARK.** It runs during frame teardown, whose LIFO drain is host-stack
+> state, so it runs *guarded* — like a `list.map` callback, it cannot snapshot-park (the **C5** limit).
+> On the M:N engine this costs nothing observable: a `recv` in a cleanup DEMOTES (the worker blocks in
+> place on its own thread, a replacement is spun) and the sibling's `send` reaches it, so the cleanup
+> completes. It was the since-removed cooperative engine that could not do this at all — it faulted in
+> place with the deadlock error and the cleanup stopped there (`docs/gaps.md` **C5/N6g**, dissolved
+> 2026-08-16). Lifting the guard itself would still need a resumable native
 > re-entry, not a cancellation change. Cleanup that only sends, sleeps, closes or computes is unaffected.
 >
 > **Cleanup that can NEVER complete is REPORTED, never a silent hang.** A `defer` whose body waits for
 > something that can never arrive (`ch.recv()` no one will ever answer) leaves the program quiesced —
-> and the deadlock detector still fires, on **both** engines (serial faults the `recv` in place; on M:N
-> the demoted worker self-detects the quiesce). If a sibling's fault is what cancelled the task, *that*
-> fault is what is reported — the stuck cleanup's own error is swallowed with its cancelled task, so
-> both engines print the same line set and exit code.
+> and the deadlock detector still fires (the demoted worker self-detects the quiesce). If a sibling's
+> fault is what cancelled the task, *that* fault is what is reported — the stuck cleanup's own error is
+> swallowed with its cancelled task.
 >
 > **Cancelling a scope cancels its nested scopes — at their CHECKPOINTS.** A `parallel:` entered from a
 > task that is then cancelled dies with it: its children observe the enclosing cancel at their own
 > checkpoints (a spinning grandchild cannot wedge the teardown). A nested nursery still keeps its own
 > cancel token for its own faults: an inner fault never cancels an *outer sibling*.
-> One limit, in the N5 family and identical on both engines: a grandchild that is already **parked**
+> One limit, in the N5 family and identical: a grandchild that is already **parked**
 > (`recv`/`wait:`) when the *outer* scope is cancelled is not re-driven — the cancel drain is scope-
 > scoped, and a parked fiber has no checkpoint to observe the inherited flag — so it is torn down by the
 > deadlock reap **without running its `defer`s** (`docs/gaps.md` **N5**, which is the deliberate
@@ -1035,7 +1015,7 @@ fn serve(tok: Token, io: Channel[str]):
 > `Op::Jump` — so a cancelled task sitting in a loop-free recursive computation (`fib(34)`) runs it to
 > completion before it dies. This is Trio's model (pure-CPU code is not interrupted); making `Op::Call`
 > a checkpoint would put a checkpoint *before the `defer` line* of any prologue that calls a function and
-> would give back exactly the bug this design removed. Both engines behave identically, so it is a limit,
+> would give back exactly the bug this design removed. Behaviour is identical across runs, so it is a limit,
 > not a divergence. Bound a recursive computation yourself if a task must tear down promptly.
 >
 > **Cross-task output order is NOT part of the contract.** One `print` = one locked write = line-atomic;
@@ -1058,23 +1038,20 @@ fn serve(tok: Token, io: Channel[str]):
 background canceller task — so a self-polling timeout loop stops on time identically on **every**
 engine. (`done()`'s deadline delivery rides the proven `timer(ms)` path, §6c.)
 
-**Cooperative contract (by design).** A token *signals* cancellation; it cannot forcibly interrupt.
-On the single-threaded `--serial` oracle, a pure-CPU loop that never polls `cancelled()`
-and never yields runs to completion — a sibling's manual `cancel()` only lands when that sibling gets
-the thread. The default OS-thread engine preempts such a loop. So a *manual* cancel of a non-polling
-CPU sibling **diverges by engine** (this is why `examples/cancel_cpu.chz` carries no golden
+**Cooperative contract (by design).** A token *signals* cancellation; it cannot forcibly interrupt. The
+M:N engine runs the sibling on a real OS thread, so the kernel preempts a pure-CPU loop and the cancel
+lands — but WHERE it lands is a scheduling fact, so a *manual* cancel of a non-polling CPU sibling is
+**timing-dependent** (this is why `examples/cancel_cpu.chz` carries no golden
 `.expected`, like `examples/parallel_cancel.chz`); a self-polling *timeout* does not. Guidance: **poll
 `cancelled()` in CPU loops; `wait:` on `done()` in IO loops** — exactly Go's `ctx.Done()` contract.
 
 The **same root** covers the *automatic* cancel that structured concurrency issues when a sibling
-faults (`docs/gaps.md` **N8/N9**): a `parallel:` with one task in an unbounded CPU loop and one that
-`panic`s **hangs on `--serial`** (the spinner never yields, so the faulting sibling never gets the
-thread to trip the cancel), and a task cancelled mid-loop emits a different **line set** per engine
-(how far it got before yielding is a scheduling fact). This is **not a bug to fix** — it is the
-cooperative oracle behaving cooperatively. `--serial` exists only as the byte-identical **parity
-oracle** for bug-finding; it is never the recommended runtime for CPU-bound concurrent tasks. For safe
-single-thread execution use **`--threads=1`** (still the OS-thread M:N engine — the kernel preempts the
-spinner, so it faults promptly, verified 0/15 hangs) or the default engine. Lifting the limit would
+faults (`docs/gaps.md` **N8/N9**): a task cancelled mid-loop emits a different **line set** from run to
+run, because how far it got before the cancel landed is a scheduling fact. This is **not a bug to fix**.
+(Historically the same shape *hung* on the since-removed cooperative `--serial` engine — the spinner
+never yielded, so the faulting sibling never got the thread to trip the cancel. That engine is gone;
+**`--threads=1`** is the safe single-thread mode, still the OS-thread M:N engine, where the kernel
+preempts the spinner and it faults promptly — verified 0/15 hangs.) Lifting the limit would
 require teaching the cooperative scheduler to time-slice a *running* fiber (its own milestone), which
 `--threads=1` already makes unnecessary for users.
 
@@ -1087,30 +1064,26 @@ out to any number of receivers — like a passed `timer` deadline, but flipped o
 once.) `trip()` is idempotent and reuses `close()`'s wake fan-out (minus the `closed` flag, so a
 `wait:` arm stays *ready* rather than *skipped*). See `examples/channel_trip.chz`.
 
-### 6g. Run the parity oracle yourself: `--check-parity`
+### 6g. Checking your own program for schedule-dependence
 
-`chezzi run --check-parity <file>` runs a program once on `--serial`, once on the default M:N engine,
-and asserts byte-identical stdout/stderr/terminal result — a one-command check on **your own**
-program:
+`chezzi run --check-parity` is **gone** — it ran the program on the cooperative `--serial` engine and
+on M:N and diffed the two, and `--serial` was removed 2026-08-16 (`docs/future.md` §2b). Both flags are
+now `unknown flag` errors.
+
+What replaced it, for a program you want to be schedule-independent, is running it at more than one
+worker count and diffing yourself:
 
 ```sh
-chezzi run --check-parity examples/concurrent_jobs.chz
-# … program stdout printed once …
-# parity OK (serial == M:N)        (on stderr; exit 0)
+chezzi run examples/concurrent_jobs.chz > a.txt
+CHEZZI_THREADS=2 chezzi run examples/concurrent_jobs.chz > b.txt
+diff a.txt b.txt
 ```
 
-It type-checks once, then runs the program **twice** — the cooperative serial oracle, then the M:N
-OS-thread engine — each into a buffered sink, and diffs the two captures byte-for-byte. Identical →
-the captured output is printed once and `parity OK (serial == M:N)` goes to stderr (exit 0, even if
-BOTH engines errored *identically* — a held parity is a pass). Divergent → a greppable side-by-side
-report headed `parity DIVERGENCE (serial != M:N)` naming the first differing stream and line, and a
-non-zero exit.
-
-A divergence is a **signal to investigate**, not automatically a bug: it can be a genuine
-order-dependence / airlock / scheduler fault (the real prize), *or* one of the documented
-serial-vs-M:N asymmetries above — a task cancelled mid-loop emitting a different **line set** (§6e), a
-non-deterministic cross-task **print order** (byte-identical compare flags order too), or an accepted
-`--parallel`-only path (`std.net`).
+That is exactly what the repo's own standing gate does over `tests/chz`
+(`tests/chezzi_threads_cli.rs`). A difference is a **signal to investigate**, not automatically a bug:
+it can be a genuine order-dependence / airlock / scheduler fault (the real prize), *or* simply a
+**non-deterministic cross-task print order**, which `chezzi run` does not promise (§"Output ordering").
+Compare a line SET, or make the program deterministic by construction, before calling a diff a defect.
 
 > **`std.net` and the engines — exactly where a would-block socket op blocks.** A `spawn`/`parallel:`
 > fiber on the default engine parks on the netpoller (that is the whole D6 design). A socket op reached
@@ -1120,10 +1093,9 @@ non-deterministic cross-task **print order** (byte-identical compare flags order
 > Everywhere else it returns `Err("<op> would block: std.net sockets require the --parallel engine")`,
 > and that is deliberate rather than an unfinished corner. **The op set is `accept`/`read`/`read_bytes`/
 > `write`; `connect` joins it ONLY inside an eager `Executor` job** — those four wait on a Chezzi peer
-> fiber that can only run on the very thread they would block, so `--serial` must refuse them, whereas a
-> `connect` handshake is completed by the kernel and starves no chezzi party, so `--serial` and
-> top-level `main` block it and succeed, as CPython (0.1 ms) and Go (314 µs) both do (`gaps.md`
-> **W7-59**):
+> fiber that can only run on the very thread they would block, whereas a `connect` handshake is
+> completed by the kernel and starves no chezzi party, so top-level `main` blocks it and succeeds, as
+> CPython (0.1 ms) and Go (314 µs) both do (`gaps.md` **W7-59**):
 >
 > - **On top-level `main`, an untimed op has NO escape but SIGINT.** The escapes are the op's own
 >   `timeout_ms`, the run's `--timeout`, and cancellation — and under `chezzi run` two of those three do
@@ -1133,19 +1105,11 @@ non-deterministic cross-task **print order** (byte-identical compare flags order
 >   that never becomes ready — Go-identical, and the reason to pass a `timeout_ms` when you need a bound.
 > - **A socket-blocked `main` SUPPRESSES the process-wide deadlock verdict** while its op is outstanding
 >   — for a never-ready fd, permanently. `main` in `accept()` plus an `Executor` job blocked on a
->   `Channel` nothing can send: the default engine prints `listening` and hangs (rc=124); `--serial` on
->   the same source prints `Err('accept would block: …')` and then the full `recv on an empty channel:
->   deadlock` diagnostic (exit 1). **Not a parity bug**: Go hangs identically (an open socket is a
->   runnable party, so `all goroutines are asleep` never fires — measured, rc=124), and `--serial`
->   differs only because it refuses the socket op at all, per the bullet below.
+>   `Channel` nothing can send: Chezzi prints `listening` and hangs (rc=124). **Not a bug**: Go hangs
+>   identically — an open socket is a runnable party, so `all goroutines are asleep` never fires
+>   (measured, rc=124).
 >
 
-> - **`--serial`** runs every fiber on one thread, so blocking it starves the peer fiber that would make
->   the fd ready — a permanent hang with no escape (`--timeout` is rejected alongside `--serial`, and no
->   other fiber can run to deliver a cancel). Net programs target the default engine;
->   `examples/echo_server.chz --serial` therefore reports this `Err` instead of serving. **`connect` is
->   exempt**: nothing in-language has to run for the handshake to finish, so it blocks and succeeds
->   here — a `--serial` client can `connect` and `write`, it is the `read` that refuses.
 > - **Inside an eager `Executor` job**: a job does not own its thread — it runs on the bounded,
 >   process-wide job pool (`CHEZZI_THREADS`, never grown on demand) and has no scheduler under it to
 >   spin a replacement, so a blocked job starves every other job and every `parallel:` nursery sharing
@@ -1154,11 +1118,6 @@ non-deterministic cross-task **print order** (byte-identical compare flags order
 >   before that it spun in place for up to 10 s, pinning a pool worker with no cancel or `--timeout`
 >   escape (measured: an outer `shutdown_now()` at 200 ms took **10 009 ms** to end the run, now
 >   **209 ms**). Use `spawn`/`parallel:` for socket work, which parks instead of blocking.
-
-`--check-parity` is mutually exclusive with `--serial`/`--parallel` (it runs both). `--threads=N`
-still sizes its M:N leg (the serial leg ignores it). **Limitation:** both legs share the one real
-process stdin fd and run sequentially, so a **stdin-reading** program diverges by construction — leg 2
-sees EOF after leg 1 drains the input. Don't use `--check-parity` on programs that read stdin.
 
 ---
 
@@ -1245,10 +1204,6 @@ case — the one that motivated this milestone — still broken.
 - **Idempotence + reaping.** Kill must be safe to call twice and after natural exit, and must always
   `wait()` the group so no zombie survives — including on the `os.exit` path, where the run is ending
   anyway.
-- **`--serial`.** The cooperative engine has no concurrent canceller for the ambient case (it never
-  dispatches an eager job at `submit`), so an explicit `Token` cancelled by the same task is the only
-  reachable shape there. Expect and document an engine difference rather than contorting the design;
-  every test for the ambient path is M:N-only, as `W7-56`/`W7-57`/`W7-58` already established.
 - **Non-unix.** `process_group`/`kill(-pgid)` are unix-only. Decide the Windows story (job objects) or
   state the platform limit in `docs/stdlib.md`; do not leave it implied.
 
@@ -1256,7 +1211,7 @@ case — the one that motivated this milestone — still broken.
 
 | phase | deliverable | runnable proof |
 |---|---|---|
-| **M25a** | `spawn_shell` → `spawn()` + retained `Child` + `process_group(0)`; pipe draining on the handle | every existing `std.process` test unchanged, both engines; no behaviour change yet |
+| **M25a** | `spawn_shell` → `spawn()` + retained `Child` + `process_group(0)`; pipe draining on the handle | every existing `std.process` test unchanged, no behaviour change yet |
 | **M25b** | group kill on the **ambient** scope cancel, TERM→grace→KILL | the three rows in the table above abort in ~ms instead of running to completion; `chezzi test --timeout` reports a real abort, not the `W7-57` post-hoc `TIMED-OUT` |
 | **M25c** | explicit `Token` parameter, precedence over ambient | a `cancel.timeout(200)` threaded into a `cmd` kills it; a derived child token cascades (§6e) |
 | **M25d** | docs + the `std.request` follow-on decision | `docs/stdlib.md`'s *Blocking calls cannot be interrupted* note narrows to `fs`/`io`/`request`; `std.cancel` §6e gains the effective-cancellation case |
@@ -1317,7 +1272,7 @@ captured **local** crosses as an independent per-task **copy** — a task may re
 stays on the isolated copy, invisible to the parent); a **module global** behaves the same way: a task
 may reassign it or mutate it in place, and the write lands on that task's own copy,
 invisible to the parent and to sibling tasks. (The earlier G1 checker rule — a compile error for both —
-was retired when module globals started deep-copying per task on both engines.)
+was retired when module globals started deep-copying per task.)
 
 - **Sendable:** scalars (`int`/`float`/`bool`), `str`, containers + structs whose contents are all
   sendable, **`Channel`** itself (reply channels), an **`Atomic[T]`** handle, an **`AtomicInt`** handle,
@@ -1349,7 +1304,7 @@ was retired when module globals started deep-copying per task on both engines.)
   module-global snapshot) and **round-trips** — every container `WireValue` arm carries a per-serialization
   `id` + a `WireValue::Backref(id)` for a back-edge, exactly like `Cell`/`Closure`. `from_wire` ties the
   knot on the receiver (placeholder-alloc → register `id` → recurse → patch); `Map`/`Set` reuse the carried
-  hash so a cyclic key is never re-hashed. **Byte-identical on both engines.** For **data** the identity is
+  hash so a cyclic key is never re-hashed. **Byte-identical across runs.** For **data** the identity is
   **back-edge-only** (a node is popped off the serialize DFS stack on exit), so an acyclic **DAG alias**
   (the same node appearing twice off the cycle) is re-serialized as **two independent deep copies**, never
   collapsed into one shared node (mutating one copy in a task leaves the other untouched). The depth cap
@@ -1413,7 +1368,7 @@ was retired when module globals started deep-copying per task on both engines.)
   capture graph is **cyclic** (`Closure → Cell → Closure`). The same `id` + `Backref` machinery (above)
   preserves that identity. So a recursive local `fn` — and a **mutually-recursive closure pair**
   (`Closure_f → Cell_g → Closure_g → Cell_f`) — crosses **any** airlock (`spawn:` block, `spawn f()`
-  callee, `spawn f(g)` arg, `Channel[fn].send`) and computes correctly, **byte-identical on both engines**.
+  callee, `spawn f(g)` arg, `Channel[fn].send`) and computes correctly, **byte-identical**.
   A recursive closure that ALSO reads an outer local carries the self-edge as a `Backref` and the outer
   local as an independent deep copy. A **mixed** struct+closure cycle — a self-capturing closure held
   *inside* a struct/list/map so the cycle passes through a container — now **also round-trips** (every
@@ -1428,7 +1383,7 @@ was retired when module globals started deep-copying per task on both engines.)
   witness crosses by deep value copy like any other value. The concrete witness's own sendability is
   checked at each widening site; a witness that genuinely can't serialize (one carrying a live host
   resource, or a module handle) is rejected at the **runtime airlock** (`ensure_crossable`), recoverably
-  and identically on serial == M:N — not at construction. (A native/FFI *fn value* is pure code and now
+  identically on every run — not at construction. (A native/FFI *fn value* is pure code and now
   crosses by value / shared `Arc` — `WireValue::Native`/`Cffi` — so it is no longer rejected there.)
 - **Not sendable (checker):** native handles (file/regex/HTTP `Response`/etc.) and a **module
   namespace**. Capturing or passing either across the airlock is a **compile error** at a direct
@@ -1472,7 +1427,7 @@ was retired when module globals started deep-copying per task on both engines.)
   or not, so it must NOT eager-fault on a generator the program merely *holds*. Instead `to_snap`'s slow arm
   snapshots such a generator as an inert **`Nil` placeholder** — a task that never touches it runs **clean**,
   and one that **reaches** it faults recoverably **at the use site** (`cannot iterate over nil`), byte-identical
-  on both engines. (Fault only when reached; the frame-local crossing, by contrast, rejects eagerly at the
+ . (Fault only when reached; the frame-local crossing, by contrast, rejects eagerly at the
   `to_wire` serialize point because it crosses only the value actually sent.) (The earlier **Option-B
   reach-gate** model — which scanned each task for a *possible* reach and faulted it — is **retired**:
   by-value crossing removes the "why can a frame-local generator cross but not a module-global one?" drift.)
@@ -1482,7 +1437,7 @@ was retired when module globals started deep-copying per task on both engines.)
   engines. To produce output visible to the parent, use a `Channel` or a `Shared`. (Reads are always
   fine, and a task reads the values current when its nursery opened — [§2](#2-the-model).) *(History: a
   G1 checker rule once made both a **compile error**, because the serial engine shared the globals while
-  M:N snapshotted them. Deep-copying per task on BOTH engines removed the divergence, and the rule — and
+  M:N snapshotted them. Deep-copying per task removed the divergence, and the rule — and
   its partially-covered indirect forms — was retired with it.)*
 - **Cyclic sendables round-trip (identity-preserving copy).** The airlock copies a sendable by a
   structural deep walk (`spawn` arg / `Channel.send` / `Shared(...)` / worker return / module-global
@@ -1540,20 +1495,15 @@ supervised tasks) — Go's float-free `go` is the model both ecosystems *rejecte
 
 ### The escape hatch (C5): `Executor` — a separately-owned work queue
 
-> **Status (shipped — EAGER on the default engine, queued on `--serial`):** `submit` **starts the job
-> immediately** on the shared pool and `shutdown()` **waits** for the submitted work — the
-> `ThreadPoolExecutor` / `ExecutorService` model. `--serial` keeps the older queue-at-`submit`,
-> drain-at-`shutdown` behaviour (decision D3), which is why the two engines can disagree about a job's
-> effect *between* those two calls. **The test/usage shape that keeps you on the agreed side: read or
-> assert after `shutdown()`, never between it and the `submit`.**
+> **Status (shipped — EAGER):** `submit` **starts the job immediately** on the shared pool and
+> `shutdown()` **waits** for the submitted work — the `ThreadPoolExecutor` / `ExecutorService` model.
+> **The usage shape that keeps you out of a race: read or assert after `shutdown()`, never between it
+> and the `submit`** — in that window the job is already running.
 >
-> That window is no longer the *only* disagreement, so do not read it as a closed list. Because the
-> serial drain runs queued jobs one at a time and cannot interleave them, a program that needs two
-> jobs alive at once is inexpressible there and the two engines can differ in the terminating fault
-> itself — including *after* an explicit `shutdown()`. The measured case is `docs/gaps.md`
-> **W7-13r(c)**: a job blocked on a full channel that another job closes faults `send on a closed
-> channel` on M:N (matching Go) and `send on a full channel: deadlock` on `--serial`. Deliberate, and
-> resolved by §2b retiring `--serial`.
+> (The older queue-at-`submit`, drain-at-`shutdown` behaviour — decision D3 — was the cooperative
+> engine's, and it is gone with that engine as of 2026-08-16. `docs/gaps.md` **W7-13r(c)** recorded the
+> resulting divergence: a job blocked on a full channel that another job closes faults `send on a closed
+> channel` here, matching Go, where the lazy drain faulted `send on a full channel: deadlock`.)
 >
 > The fault contract is unchanged by eager execution: **every submitted job runs**, and the **first
 > fault in submission order** (lowest index — not first-to-fail, which would be nondeterministic)
@@ -1569,9 +1519,8 @@ supervised tasks) — Go's float-free `go` is the model both ecosystems *rejecte
 > For structured first-fault-aborts-everything semantics, use a `parallel:` nursery, which is the
 > primitive that means that. **The run-all guarantee is for an ORDINARY job fault** — a RESOURCE CAP
 > (an over-memory/`--timeout` abort) is a separate, unconditional kill switch that trumps it, because a
-> bound a sibling can outlive is not a bound: `--serial` stops popping the queue the instant one fires,
-> so later-queued jobs never run; on the default engine every job was dispatched at its `submit`, so
-> the cap stops the ones that have not yet reached a cancellation point. **A dead stdout is NOT such a
+> bound a sibling can outlive is not a bound: every job was dispatched at its `submit`, so the cap stops
+> the ones that have not yet reached a cancellation point. **A dead stdout is NOT such a
 > cap** (W7-5d, fixed 2026-08-05): a broken pipe raises an ordinary fault in the job that printed, and
 > every sibling still runs to completion — matching CPython's `ThreadPoolExecutor`, the ancestor that
 > owns `Executor` semantics, which runs every submitted job at every `max_workers`. The cost is
@@ -1606,7 +1555,7 @@ supervised tasks) — Go's float-free `go` is the model both ecosystems *rejecte
 > inner executor's jobs at *their* checkpoints — the same structured-concurrency rule as "cancelling a
 > scope cancels its nested scopes" (§cancellation points). Measured on the nested repro (an outer job
 > creates an inner executor, submits a `sleep_ms(8000)`, then sleeps 8000 itself; `shutdown_now()` at
-> 50 ms): **56 ms with no job line printed**, on the default engine and `--serial` alike — it was
+> 50 ms): **56 ms with no job line printed** — it was
 > 8.005 s with the inner job's line printed. The ancestors are **split** here, so this is a decision,
 > not a copy: CPython's nested `ThreadPoolExecutor` does **not** propagate — with
 > `shutdown(wait=False, cancel_futures=True)` the call returns at 51 ms but the *process* still takes
@@ -1618,13 +1567,13 @@ supervised tasks) — Go's float-free `go` is the model both ecosystems *rejecte
 > One spelling of one wait cannot have two cancellation rules.
 > **A non-terminating sibling still blocks `shutdown()`, by design.** Run-all deliberately drops the
 > old fast-fail: if one submitted job faults but another never reaches a cancellation point (a tight
-> loop, a blocking sleep with no polling), `shutdown()` now waits for it on both engines instead of
+> loop, a blocking sleep with no polling), `shutdown()` now waits for it instead of
 > killing it — the old abort-on-first-fault contract would have ended it at its next back-edge. This
 > is accepted, matching Python/Java/Go's run-all default above; reach for a `std.cancel.Token` (§6e) if
 > a submitted job needs to notice a sibling's fault and stop itself.
-> **Program-exit join (A2, both engines):** an `Executor` is **detached** — it outlives the scope that
-> created it — so an executor never explicitly `shutdown`/`shutdown_now`-ed is joined at a clean program
-> exit, in creation order: the default engine waits for its in-flight work, `--serial` runs its queue.
+> **Program-exit join (A2):** an `Executor` is **detached** — it outlives the scope that created it —
+> so an executor never explicitly `shutdown`/`shutdown_now`-ed is joined at a clean program exit, in
+> creation order: the run waits for its in-flight work.
 >
 > **What "detached" means, precisely: detached from NURSERIES, not from an enclosing executor job.**
 > An `Executor` created inside a `parallel:`/`spawn` task is not a child of that nursery — the nursery
@@ -1653,10 +1602,10 @@ supervised tasks) — Go's float-free `go` is the model both ecosystems *rejecte
 > the verdict is unsure: an accepted hang is a missing answer, a false fault is a wrong one. Residuals
 > — an all-joiner cycle, bounded-pool starvation, and PARTIAL deadlock (a subset stuck while the rest
 > runs on, which Go cannot report either) — are in `docs/gaps.md` `W7-12r / W7-15`.
-> **Captures cross by value on both engines:** `submit` wires the closure through the same by-value
+> **Captures cross by value:** `submit` wires the closure through the same by-value
 > airlock (`wire_callable` → `to_wire`) that `spawn` uses, so its captures are deep-copied and isolated
 > at submit time and the generator sendability enforcement runs — identically on the
-> cooperative default and `--parallel` (serial == M:N for every submitted closure). A mutation of a
+> cooperative default and `--parallel` (the capture is a copy for every submitted closure). A mutation of a
 > captured collection after the `submit` is NOT observed by the job.
 
 The sanctioned tool for "a task that **outlives its scope** / runs in the background" is **not** a
@@ -1686,7 +1635,7 @@ fn main():
 
 | Method | Behaviour |
 |--------|-----------|
-| `submit(f)` | **start** a detached, side-effect-only job at once on the shared pool (results leave via a `Channel`, like `spawn`); returns immediately without waiting for it. `--serial` enqueues it for the drain instead (D3). **Faults** on an executor that no longer accepts work: after its own `shutdown()`/`shutdown_now()` (`submit on a shut-down Executor`), or — because the inherited cancel chain is sticky — after the job that CREATED it was cancelled (`submit on an Executor whose creating job was cancelled`); the alternative was accepting work that is immediately cancelled and silently vanishes |
+| `submit(f)` | **start** a detached, side-effect-only job at once on the shared pool (results leave via a `Channel`, like `spawn`); returns immediately without waiting for it. **Faults** on an executor that no longer accepts work: after its own `shutdown()`/`shutdown_now()` (`submit on a shut-down Executor`), or — because the inherited cancel chain is sticky — after the job that CREATED it was cancelled (`submit on an Executor whose creating job was cancelled`); the alternative was accepting work that is immediately cancelled and silently vanishes |
 | `shutdown()` | **graceful** — stop accepting new work, then **wait** for the submitted work (every job runs on an ordinary fault, per W7-5's fault contract above; a hard halt is a separate kill switch — see the engine-asymmetry note above and `docs/gaps.md` **W7-5d**) |
 | `shutdown_now()` | **attempt to stop** — drop work that has not started and ask running jobs to stop at their next cancellation point, then wait for them (Java `shutdownNow`). **Cooperative, not pre-emptive:** a job with no cancellation point (a bare CPU loop with no back-edge, a syscall already in the kernel) still finishes, so on the default engine this is not a guarantee the job did not run. A job **sleeping, waiting a timer, or parked in a nested `Executor` join IS ended** — that wait's deadline is ours, so it is a continuous checkpoint (see §cancellation points; the join rung is `W7-60`). **It reaches jobs of a NESTED executor too** — an executor a job creates inherits that job's cancel, so the whole subtree stops at its checkpoints. Unaffected by the W7-5 run-all contract above |
 
@@ -1800,12 +1749,12 @@ and shippable now; Group B is gated on **B1**. The surface of `spawn` / `paralle
 
 | # | Item | Status |
 |---|------|--------|
-| **A2** | `Executor` **program-exit join** — wait for any executor never explicitly `shutdown`-ed at a clean exit (creation order; `os.exit` skips it; a faulting program is not joined). Covers an executor created inside a task (W7-5b). | ✅ **done, both engines** (see [§8](#the-escape-hatch-c5-executor--a-separately-owned-work-queue)) |
+| **A2** | `Executor` **program-exit join** — wait for any executor never explicitly `shutdown`-ed at a clean exit (creation order; `os.exit` skips it; a faulting program is not joined). Covers an executor created inside a task (W7-5b). | ✅ **done** (see [§8](#the-escape-hatch-c5-executor--a-separately-owned-work-queue)) |
 | **A3a** | Reject a non-sendable **read through a nested closure** inside a `spawn:` block. | ✅ **enforced for a non-sendable local** — emergent from the persistent `capture_floors` + the `infer_ident` read gate. **Updated (B3.3 / Task 2a):** a plain **closure** read through a nested closure is now *accepted* (closures cross by value), so the pin is `read_captured_capturefree_closure_through_nested_closure_in_spawn_block_ok`. |
-| **A1** | `Channel.try_recv() -> T?` — a **non-blocking poll** (`Some(v)`/`None`, never blocks/faults/suspends). Originally deferred (its motivating mid-flight-producer scenario needed the engine), un-deferred once B1/B2 landed. | ✅ **done, both engines, parity-tested** (it never suspends, so both engines run it identically — see [§5](#5-channelt--a-mailbox-outside-every-heap)). |
+| **A1** | `Channel.try_recv() -> T?` — a **non-blocking poll** (`Some(v)`/`None`, never blocks/faults/suspends). Originally deferred (its motivating mid-flight-producer scenario needed the engine), un-deferred once B1/B2 landed. | ✅ **done** (it never suspends, so it is schedule-independent — see [§5](#5-channelt--a-mailbox-outside-every-heap)). |
 
 > *Dropped from Group A, shipped in B3.6:* **A3b** (`Executor.submit` capture sendability gate). The
-> submitted closure now crosses **by value on both engines** (`wire_callable` → `to_wire`), so a
+> submitted closure now crosses **by value** (`wire_callable` → `to_wire`), so a
 > non-sendable capture (a live generator, a native handle) faults at submit — identically on the
 > cooperative default and `--parallel`.
 
@@ -1851,11 +1800,11 @@ no host call stack to rebuild. The design (all in `src/vm/mod.rs`):
 removed) was kept frozen at the **sequential concurrency subset** as the differential-testing parity
 oracle for the non-blocking language surface — its value was catching VM / GC / compiler bugs, not
 running concurrent workloads. Suspendable execution would have required stackful coroutines or a full
-CPS rewrite of `eval`, a cost the oracle did not need. **The VM is the sole engine.** Today's parity
-contract is between the two VM schedulers (serial `--serial` and default M:N); both run identical
-bytecode for the sequential subset and diverge only in scheduling. (Historically, while the interp
-existed, a **blocking `recv` was VM-only** — under the old `--interp` it faulted `deadlock`; A1
-(`Channel.try_recv`), being non-blocking, ran identically on all engines and stayed parity-tested.)
+CPS rewrite of `eval`, a cost the oracle did not need. **The VM is the sole engine**, and since
+2026-08-16 it has a single scheduler (M:N) — the cooperative `--serial` one was removed too
+(`docs/future.md` §2b), so there is no cross-engine parity contract left at all. (Historically, while
+the interp existed, a **blocking `recv` was VM-only** — under the old `--interp` it faulted
+`deadlock`.)
 
 **Landed (VM):** **B3** OS-thread multicore (the alternative bet, taken — B3.0–B3.6), **B4** real
 `Shared`, **B5** real `Executor` pool (+ A3b) — then **Tier-D** rebuilt `--parallel` as an M:N
@@ -1870,10 +1819,9 @@ owner stop), plus early-enlisting an outer nursery's siblings so a nested owner 
 queue — runs them. The fix also routes the inline outer-body's own `send`/`close` through the held sched
 (so they wake an enlisted, parked sibling), runs a `spawn:` issued *after* the enlist, and makes the
 enlist atomic — see §11 below and [`docs/cross-nursery-flat-scheduler.md`](cross-nursery-flat-scheduler.md).
-The cooperative `--serial` engine still serializes nested nursery levels, so the
-same program **still faults `deadlock` on `--serial`**; the cooperative-engine flatten is a
-**separate, later commit**. Workaround on the cooperative engine: keep mutually-dependent blocking tasks as
-SIBLINGS in ONE nursery (the doc case C pattern).
+(The cooperative engine serialized nested nursery levels and faulted `deadlock` on the same program; the
+"cooperative flatten" that would have fixed it was never built and is now moot — that engine was removed
+2026-08-16.)
 
 ---
 
@@ -1895,7 +1843,7 @@ SIBLINGS in ONE nursery (the doc case C pattern).
     identically for an **explicit** `parallel:` block: a `defer` directly inside the block flushes
     *after* the block's dedent join (its spawned children run to completion first, then the block's
     deferred cleanup), same order as the implicit body nursery. Each nursery on the unwind path is
-    reclaimed separately, innermost-first, on both engines.
+    reclaimed separately, innermost-first.
     [**§2c1, 2026-08-14:** the cancel is now SILENT. This used to write one
     `"{n} pending task(s) cancelled on early exit from parallel:"` line per nursery; with eager start
     there are no unstarted tasks to count and any residual number would be racy, so the report is
@@ -1988,9 +1936,10 @@ flush-on-join) as the default and demote two-engine (serial-vs-M:N) parity to a 
 an explicit `--serial` flag. **(Settled for the CLI, 2026-07-13 — Interactive CLI milestone:** the
 per-task buffer + task-order flush is a **TEST-harness** property of the captured sink the lib helpers
 run, NOT a user-facing guarantee. `chezzi run` **streams**: prints are line-atomic and cross-task order
-is nondeterministic on both engines, like Python/Go/Rust. Parity is asserted on the buffered sink,
-which every test helper still uses.**)** Serial is **never deleted** — it stays permanently as the deterministic
-parity oracle + reproducible-debug engine. Not a date; a checklist.
+is nondeterministic, like Python/Go/Rust.**)** The last clause of this item read *"Serial is **never
+deleted** — it stays permanently as the deterministic parity oracle + reproducible-debug engine"*;
+**that was overturned and the serial engine was removed 2026-08-16** (`docs/future.md` §2b). Recorded
+rather than edited away, because it is a decision this project reversed.
 
 - **Reuse map for the implementer:** builtin method dispatch (VM `core_method` — `src/vm/mod.rs`); parameterized
   types (`Type::Generic` — `src/ast/mod.rs`; `Ty::List/Map/Set` — `src/checker/ty.rs`;
@@ -2058,10 +2007,9 @@ reinvented; none is scheduled. (B3–B5 itself is planned in [`concurrency-b3.md
     differ from the cooperative engine, or it may deadlock-fault. It is NOT gated and NOT special-cased;
     it only must never PANIC and never HANG (completes or faults `deadlock` cleanly — see
     `parallel_cross_nursery_contended_never_panics`). Same gap the cooperative flatten would close.
-  - **Cooperative (`--serial`)** still serializes nested nursery levels, so the same program
-    **still faults `deadlock`** there — the cooperative-engine flatten is a separate, later commit.
-    Workaround: keep mutually-dependent blocking tasks as SIBLINGS in ONE nursery
-    (`examples/parallel_cross_nursery_ok.chz`, the doc case C pattern).
+  - *(Historical: the cooperative `--serial` engine serialized nested nursery levels, so the same
+    program faulted `deadlock` there. That engine was removed 2026-08-16, so the promised
+    "cooperative flatten" is moot.)*
   - **Inline outer-body *blocking* recv (case B)** — the cross-nursery fix is **wake-side only**. The
     inline `parallel:` builder body runs with no scheduler frame, so a *blocking* `recv`/`for v in ch:`/
     `wait:` issued directly in the body (not inside a `spawn:`) still faults with a "deadlock — no
@@ -2091,7 +2039,7 @@ reinvented; none is scheduled. (B3–B5 itself is planned in [`concurrency-b3.md
   `Shared.update`'s hold-and-wait (won't-fix by design, separate). Details in
   [`concurrency-tier-d.md` § "D5 owe #3"](concurrency-tier-d.md).
 
-- **`Channel.close()` + closed-channel semantics** — **LANDED** (both engines, branch
+- **`Channel.close()` + closed-channel semantics** — **LANDED** (branch
   `feat/channel-close`). The natural complement to B1/B2's blocking `recv`: a consumer looping past the
   producer's last value used to deadlock-fault. Resolved surface (decided with the user):
   - **`for v in ch:`** — blocking iteration; drains buffered + future values, ends cleanly when

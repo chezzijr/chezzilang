@@ -804,7 +804,7 @@ argument evaluates in parameter order, not source-text order (`f(y=g(), x=h())` 
 same one: **every** filled slot evaluates in **parameter-declaration order**, whether its value came
 from a positional argument, a named one, or a default, and a default runs **once per omitting call**.
 Measured — `fn f(x = p("d-x"), y = p("d-y"), z = p("d-z"))` called as `f(z=p("arg-z"), x=p("arg-x"))`
-prints `arg-x`, `d-y`, `arg-z`, on both engines. Scope: free functions
+prints `arg-x`, `d-y`, `arg-z`. Scope: free functions
 (own module, `from`-imported, or module-qualified `mod.f(...)`), struct constructors, **and struct
 methods** (`p.greet(punct="?")`, `p.scale()` filling a default) — a method's default is compiled in
 its declaring module like any other, and resolves there however the caller reaches it (see *"Where a
@@ -888,7 +888,7 @@ consequences are worth writing down, because each is a rule you can hit:
 
 5. **A cycle routed through an ordinary function is a runtime fault, not a compile error.**
    `struct S: n: int = mk().n` with `fn mk() -> S: return S()` type-checks clean and then faults with
-   `maximum call depth (10000) exceeded (infinite recursion?)`, rc 1, identically on both engines —
+   `maximum call depth (10000) exceeded (infinite recursion?)`, rc 1, identically —
    the same shape as CPython's `RecursionError` on the equivalent program. A documented limit, not a
    defect: the compile-time check sees provider→provider edges, and this cycle's edge runs through
    `mk`.
@@ -981,7 +981,7 @@ reverse is fine — a defaulted function is strictly more permissive, so it flow
 `fn(int) -> int` slot. Named arguments through a value evaluate in **parameter-declaration order**, the
 same as a direct named call, and work in `defer`/`spawn` position too (`defer d(name="Zoe")`). Resolution
 is fully static (the checker rewrites the keyword call to a positional one; the runtime `Op::Call` /
-`DeferCall` / `SpawnCall` stay positional), so all engines produce identical output.
+`DeferCall` / `SpawnCall` stay positional), so the VM produce identical output.
 
 **A GENERIC fn as a value.** A generic function (`fn ident[T](x: T) -> T`) becomes a usable **value**
 once its type parameters are **pinned** — either with an explicit **turbofish** or against a **known
@@ -1019,7 +1019,7 @@ closure-taking container methods) pins its `[T]` from the element type — `[1,2
 `conv[T](x: T) -> str` type-checks to `List[str]`, and `[1,2,3].fold(0, add)` for an `add[T: Add]` pins
 `T=int` and enforces the bound — even though those methods also carry their own result type parameter.
 The runtime is generic-**erased** — the value *is* the underlying function — so an indirect call
-adds no overhead and behaves identically on both engines.
+adds no overhead and behaves identically.
 
 A **bare, un-pinned** generic fn value — `g := ident`, with no turbofish and nothing that determines
 `[T]` — is rejected **at the read**, whether or not it is ever called. This is Go's rule
@@ -1305,8 +1305,7 @@ literal is legal in at all — it is **not a value** anywhere else (see the rang
 **Negative indexing** counts from the end (`xs[-1]` is the last element) for plain indexing *and*
 slice bounds, on `list`/`str`, including as an assignment target (`xs[-1] = v`). The out-of-range
 rule follows Python's asymmetry: a plain `xs[-100]` on a short list **faults** (`index -100 out of
-bounds (len N)`), while a slice bound `xs[-100:]` **clamps** to the start (never faults). Both engines
-emit byte-identical messages.
+bounds (len N)`), while a slice bound `xs[-100:]` **clamps** to the start (never faults).
 
 `List[T]` slices to `List[T]`, `str` to `str`. Indexing and slicing are **protocols**, so custom
 types opt in — see `Index`/`IndexSet`/`Slice` in §7b. A user `Slice` impl gets the full Python
@@ -3123,15 +3122,16 @@ the current directory; a single `*_test.chz` file runs that file, a directory is
 Each test runs in isolation (one failure doesn't abort the rest); the report is
 `PASS/FAIL name (file:line) msg` plus a summary, and the exit code is non-zero if anything failed. A
 suite runs `before_all? → [before_each? → test → after_each? (always, even on failure)]* → after_all?`,
-constructing the suite instance once. Tests run on the **M:N OS-thread engine by default** (like
-`chezzi run`); `--serial` selects the cooperative single-thread VM (they are mutually exclusive). Known
+constructing the suite instance once. Tests run on the **M:N OS-thread engine** (like `chezzi run`);
+`CHEZZI_THREADS` sizes its worker pool. Known
 limit: an assert that faults inside *imported* (non-test) code reports the test file's path, not the
 library file's.
 
 The dedicated native suite lives in **`tests/chz/`** (`spec/` for language behavior, `stdlib/` for
 module behavior, `suites/` for lifecycle-hook suites) — kept separate from `examples/` (print-and-golden
-demos). It runs via the `cargo test` gate `test_runner::chz_suite_passes`, which runs the whole
-`tests/chz/` suite on the M:N engine and asserts every test passes. A fault's *message*
+demos). It runs via the `cargo test` gate `chz_suite_passes` (`tests/chz_suite.rs`, its own process),
+which runs the whole `tests/chz/` suite and asserts every test passes;
+`tests/chezzi_threads_cli.rs` then runs it again at `CHEZZI_THREADS=2`. A fault's *message*
 **can** be asserted in-language via `recover:` — `r := recover: <expr>` then
 `match r: Err(e): assert e.message().contains(...)` — so fault-path tests port here too; only
 compile-time checker diagnostics (`rejects`/`ok`) and engine internals (AST/bytecode/GC, scheduler
@@ -3305,7 +3305,7 @@ The **runtime** validation stays as an identical backstop (same wording, single-
 `spec_valid_for_scalar`): it still fires for a value whose type the checker can't pin to a concrete
 scalar — a generic `fn show[T](v: T): "{v:.2f}"` instantiated with a `str`, an `Unknown`, or a
 protocol existential — where the mismatch is only knowable at run time. The spec is parsed once,
-shared by both engines (`src/fmtspec.rs`), so both engines produce byte-identical output. The `:` split is bracket/quote-aware — a `:` inside an index, string key, or
+one module (`src/fmtspec.rs`), so its output is byte-identical across runs. The `:` split is bracket/quote-aware — a `:` inside an index, string key, or
 slice (`{m["a:b"]}`, `{xs[1:2]}`) is *not* the spec separator. **Ternaries:** a bare interpolated
 ternary `{if b: a else: b}` works (its colons are part of the expression, not a spec); to attach a
 spec to a ternary, **parenthesize** it — `{(if b: 1 else: 2):>5}`.
@@ -3453,8 +3453,8 @@ print(total)                                         # 60
 
 > **Implemented — shipped through Tier-D.** `chezzi run` defaults to the real OS-thread M:N scheduler
 > (`Channel`/`Shared`/`Executor`, netpoller-backed `std.net`); size its worker pool with
-> `--threads=N` / `CHEZZI_THREADS` (`0` = all cores). `--serial` selects the cooperative
-> engine (the byte-identical parity oracle). Full
+> `--threads=N` / `CHEZZI_THREADS` (`0` = all cores). It is the only engine — the cooperative
+> `--serial` VM was removed 2026-08-16. Full
 > design in [`concurrency.md`](concurrency.md); phase history in
 > [`concurrency-tier-d.md`](concurrency-tier-d.md).
 
@@ -3481,7 +3481,6 @@ main()
 - **`parallel:` is a nursery** — all tasks spawned inside join at the dedent, then the parent
   proceeds. `spawn` returns immediately (the parent continues) and the task **starts there**, running
   beside the rest of the body — Go's `go f()`. The barrier guarantees *completion*, not start.
-  (`--serial` is single-threaded and queues the task until the join instead; see `concurrency.md` §4.)
 - **Every function body (and the module top level) is an implicit nursery** (M-C) — a bare `spawn`
   is legal anywhere and joins at the body's `return`/end (the module top level joins at program exit).
   `return`, fall-through, and `?` are all join points (tasks run, *then* control leaves); `defer`s run
@@ -3593,8 +3592,8 @@ fn fetch_all(urls: List[str]):
   ready when the channel can accept the value: bounded-with-space / unbounded / closed→faults), an optional
   non-blocking `else:` (must be last), and `timer` arms for timeouts. A closed+empty *recv*-arm is skipped;
   a closed *send*-arm faults `"send on a closed channel"`; all-closed + no ready send + no `else` faults.
-  **Shipped on both engines** — the serial `--serial` VM and the default M:N VM (the multi-channel blocking
-  park, including a bounded send-arm that parks until a receiver frees a slot, has landed). See
+  **Shipped**, including the multi-channel blocking park and a bounded send-arm that parks until a
+  receiver frees a slot. See
   [`concurrency.md §6d`](concurrency.md), `examples/wait_select.chz`, and `examples/wait_send.chz`.
 - **`std.cancel` (cancellation token)** — `import std.cancel`; `cancel.manual()` / `cancel.timeout(ms)`
   build a `Token` you thread down a call tree (sendable). Poll `tok.cancelled() -> bool` in CPU loops,
@@ -3607,7 +3606,7 @@ fn fetch_all(urls: List[str]):
 - **`Channel.trip()`** — flip a permanent level-trigger latch: the channel is then ready (`recv`/
   `try_recv`/`wait` → `true`) for every receiver (the manual fan-out behind `std.cancel`'s `done()`).
 - **Sendability:** a captured local — AND every module global — crosses into a task as an **independent
-  per-task copy** (writes in the task stay local, on both engines; a module global is deep-copied at the
+  per-task copy** (writes in the task stay local; a module global is deep-copied at the
   spawn boundary just like a captured local, so reassigning or in-place-mutating either inside a task is
   fine and simply invisible to the parent). Sendable types
   (scalars/str/containers+structs of sendable/`Channel`/`Atomic`/`AtomicInt`/`Shared`/`RwShared`/a `std.cancel`
@@ -3766,8 +3765,7 @@ a non-numeric arg like a `str`/`bool` is still rejected). A no-return signature 
 `-> nil` — maps to C `void`; `nil` is a **return-only** type (it is rejected as a parameter). A
 **flat-scalar `struct`** marshals **by value** as a C struct (see below). The checker rejects any
 other non-marshallable param/return (list/map/set/tuple/enum/generic struct/struct-with-non-scalar-
-field/…) with a *not C-marshallable* error. Calls run inline (a slow C call pins its worker under
-`--parallel`) and produce identical output on both engines (serial `--serial` / default M:N).
+field/…) with a *not C-marshallable* error. Calls run inline, so a slow C call pins its worker.
 
 **Structs by value.** Name a Chezzi `struct` as an extern param and/or return type to pass/return a C
 struct **by value** (not by pointer). The struct's **field order + types define the C layout** — libffi
@@ -3818,7 +3816,7 @@ print(apply(10, fn(n: int) -> int: n * n))   # C runs f(10) -> 100, then returns
 
 If the Chezzi callback faults (or panics), the error is **re-raised** as the extern call's own error
 (recoverable via `recover:`) — stronger than CPython `ctypes`, which swallows it to stderr and returns
-`0`. Both engines run the callback identically (two-engine parity), and it fires on the calling thread
+`0`. The callback runs identically on every run, and it fires on the calling thread
 under `--parallel` (no cross-thread hand-off).
 
 **A callback C STORES is not supported — and says so, loudly.** The trampoline is only valid for the
@@ -3947,7 +3945,7 @@ else:
 ```
 
 A `ptr` prints as `<ptr null>` / `<ptr>` — never the raw address (it is non-deterministic across
-runs/engines, so printing it would break two-engine parity). A `ptr` is **sendable** (a plain
+runs/engines, so printing it would be nondeterministic). A `ptr` is **sendable** (a plain
 address) — it crosses a `spawn`/channel airlock by value.
 
 `std.ffi` exports both **value members** — `null()` / `is_null(p)` (above) — and **eight fixed-width

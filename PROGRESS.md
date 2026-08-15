@@ -2,6 +2,78 @@
 
 Single source of truth for "what am I doing next." Update after every work session.
 
+> **Reading note.** Entries dated before **2026-08-16** that measure `--serial`, compare `serial`
+> against `M:N`, or call `--serial` "the parity oracle" are **dated records of what was true then**
+> and are kept verbatim — that is what this tracker is for. Since 2026-08-16 there is **one engine**
+> and no cross-engine gate; see the entry directly below.
+
+> **✅ The `--serial` engine is REMOVED, 2026-08-16 (14 commits).** The cooperative single-thread VM,
+> the `--serial` and `--check-parity` flags, the cooperative scheduler and every per-engine fork are
+> gone. **The bytecode VM on its M:N scheduler is the sole engine.** `docs/future.md` §2b is marked
+> SHIPPED — and it shipped **pre**-freeze, reversing its own "not before the JIT freeze" ordering,
+> because doing it first means the JIT is not designed against a byte-identity constraint that was
+> already scheduled to die.
+> Gate: `cargo test` all targets **0 failed** (lib **4153 passed / 0 failed / 2 ignored**, ~28 s on a
+> quiet host), clippy `--all-targets -D warnings` clean, `chezzi test tests/chz` **569/569**,
+> conformance green.
+>
+> **What replaced the oracle — stated without overclaiming.** §2b promised four replacement oracles.
+> **Two exist**: the CPython differential (`src/difftest/`, pre-dating the removal, untouched) and a
+> **new** two-worker-count schedule differential (`tests/chezzi_threads_cli.rs`) that runs the whole
+> `tests/chz` suite through the built binary at the default worker count and again at
+> `CHEZZI_THREADS=2`, each in its own process/pool. **Two do not**: the **Go paired-programs
+> differential** and the **seeded/interleaving M:N mode** are unbuilt and still planned. That is a real
+> gap in race-finding coverage, and it is why §2b stays in the file rather than being deleted.
+> That task also found that **`chezzi test` never read `CHEZZI_THREADS` at all** — only `cmd_run` did —
+> so an earlier hand-measured "552/552 at both worker counts" had been a silent no-op proving nothing.
+> Fixed, with a causal proof: on a "needs ≥2 pool workers" repro, `CHEZZI_THREADS=1` genuinely times
+> out while `=2` and the default fault fast. *A knob is not a gate until you have shown it changes an
+> outcome.*
+>
+> **Ledger:** `docs/gaps.md` **N10** is struck (closed **for the cooperative fiber**), **N6g** is
+> dissolved, and **W6-9r items 1–3** are closed — **item 4 (the `captured()` DISPLAY boundary) stays
+> OPEN on its own terms**, since it is a property of the capture surface, not of the deleted
+> comparators. Six new rows were added for work this branch did beyond the removal.
+>
+> **The one deliberate non-removal.** `op_wait_poll`'s live-timer **inline-sleep** block was **KEPT**.
+> It was never serial-only: it is still reachable on M:N by the inline outermost-`parallel:` builder
+> (`mn == None`, `mn_enlist_sched == Some`; `src/vm/sched.rs:527`), which owns no worker loop to drive a
+> park. **That surviving arm still sleeps to the deadline without re-polling siblings**, so N10 is
+> closed for the *cooperative fiber* only — read the row, not the strikethrough.
+>
+> **Four bugs found while doing it, none caused by it:**
+>
+> | what | evidence |
+> |---|---|
+> | **An `Executor` join waited for the joiner's own job** (`3f293c60`) — `join_eager_jobs` waited for `outstanding()==0` even when the waiting thread was itself one of the counted jobs, so its `PartyWait::Join` was never satisfiable and `quiesced_only_joins` called a completed run dead | **9/60** debug runs faulted `waiting for this Executor's jobs: deadlock`; the graceful `shutdown()` variant **8/8**. CPython 3.14.6's `ThreadPoolExecutor` equivalent completes **every** run. Fix discounts the joiner's own slot (`slack`): **240/240 debug + 240/240 release**. A fourth instance of the [[parked-is-not-stuck]] family |
+> | **A self-shut `Executor`'s slots were never reduced** (`3fb223ee`) — `drain_live_executors` read `shut` as "already handled" | Buffered output **lost 10/10**, and **a sibling's failing `assert` made the run return `Ok(())`** — a silent wrong result on the path a test runner reads. Fixed with `ExecutorCore::unreduced` (acknowledged `ponytail:` race window); 150/150 after |
+> | **The `EagerState` doc claimed an ordering guarantee that never existed** (`3fb223ee`) — **the doc was the defect** | Job output streams live under `chezzi run` (`HostConfig::stream`, one write site), so the submission-ordered per-slot flush governs only the buffered sink. With **real work**: Chezzi's nursery printed reversed **100/100**, CPython's `ThreadPoolExecutor` held submission order **0/30**. Mis-diagnosed as a runtime bug **twice** — the control used trivial job bodies, where submission order survives by accident |
+> | **`List[Any]` widened an int to a float** (`ee13cf6f`, `5883dc98`, `da3a87fa`) — the tracked wave-4 gap | `[1, 3.0]` now keeps the int like CPython at **every** slot position. Grepping the SHAPE found a **fifth** position enumeration had missed (a struct-constructor argument). The `if`/`match` scalar path was deliberately left alone: branches must unify, and **Rust rejects `if c {1} else {2.0}`** outright. `chezzi test` 552 → 565 |
+>
+> **…and a FOURTH instance of the span-keyed side-table aliasing class** (`da3a87fa`), found by review
+> that was pointed at it on purpose. `ListWidenTable`'s key aliased the synthesized variadic pack onto a
+> piped list literal: `vari([1, 3.0], 2.5, 1)` gave `[[1.0, 3.0], …]` while `[1, 3.0] |> vari(2.5, 1)`
+> gave `[[1, 3.0], …]` — a check-clean **silent wrong value** — plus a third pack-to-pack shape in a pipe
+> chain. Fixed by making the coordinate **real** (an `Option<Span>` origin on `ExprKind::List`), **never
+> by re-anchoring a span**, per the rule the three prior instances established. The class now reads
+> **M24-6 / W7-49 / W7-43 / ListWidenTable — four, not three.**
+>
+> **Test-suite determinism** (`06ad7451`): `cargo test --lib` was failing **8/8** on
+> `chz_suite_passes`'s embedded `shutdown_now_interrupts_a_sleeping_job`, because `src/vm/pool.rs` is
+> **one process-wide pool** shared by `RUST_TEST_THREADS=4` concurrent tests. The gate moved to its own
+> binary `tests/chz_suite.rs`; `gc_tests::shared_box_survives_gc_stress`'s order-exact assertion was
+> relaxed to order-independent after 300 stress iterations showed both orderings. **Rule for future
+> tests: one needing exclusive pool access belongs in `tests/`, not the lib suite** — there are now four
+> such binaries.
+>
+> **Perf: one measured regression, recorded rather than explained away.** `poly_method` is
+> **+2.2% slower** (1.904 s → 1.946 s, σ=0.014 both sides), reproducible via a direct A/B with both
+> binaries in the same tmpfs dir; `list` +1.9% (~1σ); `fib` and `map` unchanged. **No code was added to
+> those paths — only removals** — so the attribution (*stated as an attribution, not a measured cause*)
+> is struct/code layout drift: `Vm` lost a `bool` and a `Vec` (~24 B), repacking every field after them.
+> Review judged that plausible and found nothing that genuinely got slower. Full numbers in
+> `docs/benchmarks.md`.
+
 > **✅ M24's last four residuals CLOSED + the generic-function-value family, 2026-08-15 (21 commits).**
 > `docs/gaps.md` rows **M24-1, M24-2, M24-5, M24-7** are all struck through FIXED, and **no new row was
 > filed** — every defect found while fixing them was closed in-branch. Gate at merge: 18 targets,
@@ -5684,10 +5756,20 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 ## Current focus
 
-**Live phase (2026-07-23):** pre-JIT/pre-freeze **bug-hunt + drift-fix hunt** — Go-concurrency,
-checker↔runtime, and IO drift; live ledger in `docs/gaps.md`. **M19 — Perf track** is paused
-in-progress alongside it (see "Next perf batch" below). The Type-Conversion track below is a
-**completed/paused** milestone, kept for reference, not the current focus.
+**Live phase (2026-07-23, engine note updated 2026-08-16):** pre-JIT/pre-freeze **bug-hunt +
+drift-fix hunt** — Go-concurrency, checker↔runtime, and IO drift; live ledger in `docs/gaps.md`.
+**M19 — Perf track** is paused in-progress alongside it (see "Next perf batch" below). The
+Type-Conversion track below is a **completed/paused** milestone, kept for reference, not the current
+focus.
+
+**Engine count is ONE.** The cooperative `--serial` VM was removed 2026-08-16 (`docs/future.md` §2b),
+so there is no cross-engine parity gate and no `serial == M:N` bar on a change. The standing
+accidental-divergence detectors are the **CPython differential** (`src/difftest/`) and the
+**two-worker-count** run of `tests/chz` (`tests/chezzi_threads_cli.rs`). Correctness is judged against
+the owning ancestor — Go for concurrency, Python for scripting feel and the `Executor` family, Rust for
+enums/errors — by **running the reference program**, never by citing a second run of Chezzi. Entries
+below dated before 2026-08-16 that measure `--serial`, compare `serial` against `M:N`, or call it the
+parity oracle are **dated records** and are kept verbatim.
 
 ### Paused track — Type Conversion (2026-07-07)
 
@@ -9811,9 +9893,9 @@ remaining gap is **call frame-setup + the alloc/hash paths**, not per-op dispatc
 to ~1.1×). Target is CPython 3.14 (specializing interpreter + optional JIT).
 - **Tier 1 (cheap→medium):** ✅ 1. method-call IC + flatten `do_method_call` (Phase 6, `struct` −9%).
   ✅ 2. trim per-op overhead in `run_until` — landed as **inline hot ops** (Phase 7; every op-bound bench
-  faster, `loop`/`list` −15/−17%). The other two sub-levers (lazy `span`, serial/MN loop split) were left
-  unshipped — predictably-false cheap branches, low expected payoff vs the inline win; revisit only if a
-  profile shows them. ⏸️ 3. call-site specialization for `Op::Call` — **deferred (no-gain after inline);**
+  faster, `loop`/`list` −15/−17%). The other two sub-levers (lazy `span`, and a serial/MN loop split
+  that is moot now that there is one scheduler) were left unshipped — predictably-false cheap branches,
+  low expected payoff vs the inline win; revisit only if a profile shows them. ⏸️ 3. call-site specialization for `Op::Call` — **deferred (no-gain after inline);**
   see the Phase 8 bullet above + `docs/benchmarks.md`.
 - **Tier 2 (structural):** ✅ 4. **adaptive opcode quickening (PEP 659) — v1 binops LANDED (2026-06-13):**
   the un-fused generic binop arms (`Add..GtEq` reached by stack operands; `Eq`/`NotEq`, never fused)
@@ -9840,7 +9922,7 @@ to ~1.1×). Target is CPython 3.14 (specializing interpreter + optional JIT).
 - **Tier 3 (big, separate):** 6. **Cranelift method-JIT** (end-game; the only path to match/beat fib;
   #4 is the stepping stone). 7. NaN-boxing (BLOCKED, above). 8. register VM / generational GC (low ROI).
 
-### Robustness pass (landed, both engines)
+### Robustness pass (landed)
 - **Map/Set now snapshot a struct/enum/newtype key on INSERT (Go value-key model, 2026-07-12).**
   A `struct`/`enum`/`newtype` key/element was stored BY REFERENCE (aliased to the caller's live
   value). Because structs are mutable, mutating the value AFTER using it as a key/element silently

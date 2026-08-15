@@ -14,8 +14,8 @@ fn main():
 
 ## Status
 
-**Core language implemented through M23 (still evolving; M19 perf in progress); concurrency shipped through Tier-D.** Currently in
-**M19** (a perf track — optimization-focused). ~4109 tests green, both engines.
+**Core language implemented through M24 (still evolving; M19 perf in progress); concurrency shipped through Tier-D.** Currently in
+**M19** (a perf track — optimization-focused).
 - [`PROGRESS.md`](PROGRESS.md) — live milestone tracker (single source of truth for "what's next")
 - [`docs/spec.md`](docs/spec.md) — full language design
 - [`docs/syntax.md`](docs/syntax.md) — syntax cheat-sheet (every construct, by example)
@@ -24,10 +24,10 @@ fn main():
 ## Design at a glance
 
 - **Host:** Rust — no GC, max perf, real memory learning.
-- **Execution:** bytecode stack VM (the engine of record) + a **deprecated** tree-walk interpreter
-  (slated for removal) kept for now as the byte-for-byte parity oracle. `chezzi run` defaults to the real-thread multicore engine (size its
-  worker pool with `--threads=N` / `CHEZZI_THREADS`, `0` = all cores); `--serial` selects the
-  cooperative single-thread VM (the parity oracle).
+- **Execution:** a bytecode stack VM — the **sole** engine. `chezzi run` runs it on the real-thread
+  multicore (M:N) scheduler; size the worker pool with `--threads=N` / `CHEZZI_THREADS` (`0` = all
+  cores). (The tree-walk interpreter and the cooperative single-thread `--serial` engine have both
+  been removed.)
 - **Types:** static with local inference — explicit function signatures, inferred locals (`x := 5`).
 - **Syntax:** indentation blocks (Python-feel).
 - **Errors:** `Result`/`Option` + `?` — errors as values, no hidden control flow.

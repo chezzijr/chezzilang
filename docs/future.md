@@ -52,15 +52,22 @@ and composes cleanly with `recover:`. **Recommend `defer`.**
 
 ---
 
-## 2b. Post-freeze: retire the serial engine + rebuild the oracle layer (planned — NOT before the JIT freeze)
+## 2b. Retire the serial engine + rebuild the oracle layer — ✅ **THE REMOVAL SHIPPED 2026-08-16**, the oracle layer is **partly built**
 
-> **Decision (2026-07-22).** The cooperative `--serial` engine is **not the model Chezzi ships** — the
-> real runtime is M:N (and, post-freeze, a JIT'd M:N). `--serial` exists today only as the byte-identical
-> **parity oracle**. Post-freeze it will be **removed**, and its oracle job re-covered by a layered set of
-> better-targeted oracles. This is deliberately deferred **past** the JIT freeze; nothing changes pre-freeze
-> except documenting the plan and the one pre-freeze limit it exposes (`docs/gaps.md` **N10**).
+> **Decision (2026-07-22), executed 2026-08-16.** The cooperative `--serial` engine was **not the model
+> Chezzi ships** — the real runtime is M:N (and, post-JIT, a JIT'd M:N). `--serial` existed only as the
+> byte-identical **parity oracle**, and it is now **deleted**: the flag, the `--check-parity` assertion,
+> the cooperative scheduler, and every per-engine fork.
+>
+> **It shipped PRE-freeze, not post-freeze.** The original decision deferred it past the JIT freeze;
+> that ordering was reversed once the removal turned out to be the *cheaper* of the two, and doing it
+> first means the JIT is not designed against a byte-identity constraint that was already scheduled to
+> die. Nothing about the JIT plan depended on the deferral.
+>
+> **This section stays in the file because two of the four replacement oracles are still UNBUILT.** Do
+> not read the removal as "the oracle layer is done" — see the status column in the table below.
 
-**Why remove it (two independent reasons):**
+**Why it was removed (two independent reasons):**
 1. **It can't truly test concurrency.** The serial engine is single-threaded and cooperative — it cannot
    preempt a running fiber (`docs/gaps.md` **N8**), so a whole class of concurrent programs either hangs
    (CPU-bound sibling) or takes a different schedule than M:N and diverges (**N9**, **N10**). As a
@@ -72,14 +79,16 @@ and composes cleanly with `recover:`. **Recommend `defer`.**
    Executor drain) with per-engine branches whose *only* purpose is to keep serial matching M:N. Post-JIT,
    a JIT'd M:N can't be byte-identical to a tree-walking cooperative loop at all, so this debt only grows.
 
-**The replacement oracle layer** (each covers a class serial did, better and without the byte-identity tax):
+**The replacement oracle layer** (each covers a class serial did, better and without the byte-identity
+tax). **Two of the four are built; two are not** — and that gap is why this section is still here:
 
-| Bug class | Replacement oracle |
-|---|---|
-| Sequential shared wrongness (both engines agree, both wrong) | **CPython differential** — `src/difftest/` (already built) |
-| Channel/select semantic wrongness (Chezzi's model vs the reference) | **Go paired-programs differential** — new; restricted to programs with a *deterministic outcome* despite nondeterministic scheduling (sort output lines where only order varies). Go's channels/`select`/close/backpressure map ~1:1 to `Channel[T]`/`wait:`. Catches *shared* wrongness serial couldn't (identical bytecode both engines). Sweet spot only — Go has **no** equivalent for the airlock or structured-nursery semantics. |
-| Scheduler races / lost-wakeups | **Seeded / deterministic-interleaving mode for M:N** (the `loom`/`shuttle` pattern): explore many schedules from a seed, replay on failure. This — not an external language — is the real replacement for serial's race-finding job; a reference language's scheduler is *also* nondeterministic, so diffing two nondeterministic schedulers catches nothing. Stronger than serial==M:N (one schedule pair). |
-| Airlock / structured-concurrency semantics (no external equivalent) | Hand-written **known-answer** tests |
+| Bug class | Replacement oracle | Status |
+|---|---|---|
+| Sequential shared wrongness (both engines agree, both wrong) | **CPython differential** — `src/difftest/`, `tests/difftest.rs` gate + `src/bin/difffuzz` long-runner | ✅ **BUILT** (pre-dates the removal; untouched by it) |
+| Accidental *schedule*-dependent divergence — the detector job serial actually did | **Two worker-count differential** — `tests/chezzi_threads_cli.rs` runs the whole `tests/chz` suite through the built binary at the default worker count and again at `CHEZZI_THREADS=2`, each in its own process/pool, and asserts the same verdicts | ✅ **BUILT 2026-08-16** (task 5). Not in the original plan; it is what actually replaced `serial == M:N` as the standing `cargo test` differential. Narrower than what serial covered: a *curated* corpus at *two* worker counts, not arbitrary programs. |
+| Channel/select semantic wrongness (Chezzi's model vs the reference) | **Go paired-programs differential** — restricted to programs with a *deterministic outcome* despite nondeterministic scheduling (sort output lines where only order varies). Go's channels/`select`/close/backpressure map ~1:1 to `Channel[T]`/`wait:`. Catches *shared* wrongness serial couldn't (identical bytecode both engines). Sweet spot only — Go has **no** equivalent for the airlock or structured-nursery semantics. | ❌ **NOT BUILT.** Still planned. Nothing in the repo generates or runs Go programs. |
+| Scheduler races / lost-wakeups | **Seeded / deterministic-interleaving mode for M:N** (the `loom`/`shuttle` pattern): explore many schedules from a seed, replay on failure. This — not an external language — is the real replacement for serial's race-finding job; a reference language's scheduler is *also* nondeterministic, so diffing two nondeterministic schedulers catches nothing. | ❌ **NOT BUILT.** Still planned. The two-worker-count gate above is a weak stand-in: two fixed schedules, not an explored space. |
+| Airlock / structured-concurrency semantics (no external equivalent) | Hand-written **known-answer** tests | ✅ the existing hand-written Rust + `tests/chz` tests already are this; no new mechanism was needed |
 
 **Every oracle in that table compares RAW BYTES.** `String::from_utf8_lossy` is not injective (`ff`
 and `fe` both become one U+FFFD), so a decoded compare reports agreement for a run whose two sides put
@@ -89,21 +98,39 @@ can emit non-UTF-8. This has already been the live shape of three separate holes
 CPython differential itself — `gaps.md` W7-30), so the Go paired-programs differential must be born
 with it: capture `Vec<u8>`, keep the decode for *display and text heuristics only*, never for a verdict.
 
-**Net:** CPython (sequential) + Go (channel/select semantics) + seeded-M:N (races) + known-answer (airlock)
-together cover **more** than serial==M:N did, and none of them constrain the M:N engine's design. The
-freeze is the natural cut point: post-JIT, serial byte-identity is impossible anyway.
+**Net, and stated honestly:** CPython (sequential) + two-worker-count (accidental schedule divergence)
++ known-answer (airlock) are live today. Go (channel/select semantics) and seeded-M:N (races) are
+**not**, so the *race-finding* half of what serial did is currently covered only by two fixed
+schedules over a curated corpus. That is a smaller net than the plan promised — recorded here rather
+than papered over, because the two unbuilt rows are the reason this section survives the removal.
+None of the live oracles constrain the M:N engine's design, which was the point.
 
-**Migration mechanics (when it happens):** delete the `--serial`/`parallel=false` cooperative scheduler path
-and the `run --check-parity` two-engine assertion; convert the `parity_entry`/`run_capture` parity tests to
-single-engine (M:N) golden tests or move their intent into the layer above; drop the per-engine split
-branches whose sole job was byte-identity (the `if self.mn.is_some()` forks in `op_wait_poll`, the serial
-module-global snapshot in `join_nursery`, the serial Executor inline drain). The `--threads=1` M:N mode
-(kernel-preempted, safe single-thread) already covers every legitimate user need `--serial` was ever
-mistaken for.
+**Migration mechanics — DONE 2026-08-16, in this order:** every bare `assert_parity(src)` site was
+first given a real, run-derived golden (so nothing lost its expectation when the second engine went
+away); then every test helper collapsed onto M:N (`run_file_p`/`parallel_outcome`/`run_capture_parallel`
+and friends deleted, `parity_entry_cfg_lines` reduced to a single run); then `--serial` and
+`--check-parity` dropped from the CLI; then the cooperative scheduler itself, with every serial-only
+fork, field and signature parameter. `src/vm/parity_tests.rs` keeps its name for history and diff size,
+but every helper in it now runs the one engine once and compares against a literal expectation. The
+`--threads=1` M:N mode (kernel-preempted, safe single-thread) covers every legitimate user need
+`--serial` was ever mistaken for.
+
+**One deliberate exception to "drop the per-engine forks":** `op_wait_poll`'s live-timer **inline-sleep**
+block was **KEPT**. It is not serial-only — it is still reachable on M:N by the inline
+outermost-`parallel:` builder (`mn == None`, `mn_enlist_sched == Some`; `src/vm/sched.rs:527`), which
+owns no worker loop to drive a park. That surviving arm still sleeps to the deadline and takes the
+timer arm **without re-polling siblings**. See `docs/gaps.md` **N10** for exactly what that does and
+does not guarantee.
 
 ---
 
 ## 2c. `Executor` moves to eager execution — ✅ **SHIPPED 2026-08-03**
+
+> **Reading note (added 2026-08-16).** This section is a **dated design record** of the 2026-08-03
+> decision, kept as written. Its present-tense statements about `--serial` describe the engine as it
+> was then; that engine was **removed 2026-08-16** (§2b), so decision **D3** (queue-at-`submit` /
+> drain-at-`shutdown`) now has no execution path at all — every `submit` is eager. The `inner` queue
+> field survives in the code but is provably always empty.
 
 `Executor.submit(f)` executes eagerly on the default M:N engine — the job starts immediately rather
 than waiting for the drain — and `shutdown()` waits for in-flight work. This matches Python
@@ -187,6 +214,11 @@ ancestors (Python/Java) already have.
 ---
 
 ## 2c1. `spawn` moves to eager execution — ✅ **SHIPPED 2026-08-14**
+
+> **Reading note (added 2026-08-16).** Same as §2c: a **dated design record**. The "documented engine
+> split" it describes (eager on M:N, lazy on `--serial`) no longer exists — `--serial` was removed
+> 2026-08-16 (§2b), so only the eager half remains, and `docs/stdlib.md` / `docs/concurrency.md` have
+> been updated to state the single behaviour.
 
 > **Numbering.** This is §2c's sequel and sits next to it deliberately. It is **not** `§2d`: that number
 > is already the deadlock-detection milestone below and is cross-referenced from `src/vm/{sched,netio,mod,
@@ -519,7 +551,7 @@ their output. Re-run them; expect green, and do not pre-emptively rewrite them.
   `recover:` blocks whose `match` prints follow the dedent; verify rather than assume they move.
 
 **`tests/chz` — CORRECTION: the gate was never the blocker.** The forecast called
-`chz_suite_passes` (`src/test_runner.rs:1032`) "the first thing to design, ahead of the VM
+`chz_suite_passes` (`tests/chz_suite.rs`) "the first thing to design, ahead of the VM
 edits". It was **over-stated**: that gate compares per-test **verdicts**, never output, and no suite file
 asserts inter-task print order. All 13 `spawn`-using suite files pass on both engines unchanged, and the
 engine split needed no per-engine story in the native suite at all. (The files, for reference:
@@ -710,15 +742,14 @@ through `adversarial-review` — a full green gate had no opinion on any of the 
 Step 0 followed that order and it paid: the Go/CPython table came first, and the two false positives it
 did hit were caught by an existing looping fence (a 300-handoff pipeline), not by reasoning.
 
-**Sequencing note — RELAXED 2026-08-04, and step 0 confirmed it was right.** This previously said "do
-§2b (remove `--serial`) first, because a detector that must stay byte-identical across two engines is
-much harder". That constraint is gone: correctness now outranks engine agreement (project `CLAUDE.md`),
-and `--serial` is scheduled for deletion regardless, so **build the detector M:N-only and let the
-serial engine keep its crude arms until it is removed.** In the event the shared code degenerated
-correctly on `--serial` anyway (`live` is 1 there, since that engine queues at `submit` and has no
-eager jobs, so a top-level block faults on its first halt check exactly as it always did) — the only
-divergence step 0 introduced is that M:N now RUNS the programs `--serial` still faults on, which is the
-direction that matters. Its acceptance tests are M:N-only and say so.
+**Sequencing note — RELAXED 2026-08-04, and step 0 confirmed it was right; MOOT since 2026-08-16.**
+This previously said "do §2b (remove `--serial`) first, because a detector that must stay
+byte-identical across two engines is much harder". That constraint was relaxed instead: correctness
+outranks engine agreement (project `CLAUDE.md`), so the detector was built M:N-only while the serial
+engine kept its crude arms. In the event the shared code degenerated correctly on the cooperative
+engine anyway, and the only divergence step 0 introduced was that M:N RAN programs the cooperative
+engine still faulted on — the direction that matters. **§2b has since shipped (2026-08-16) and there is
+only one engine**, so nothing here constrains the remaining steps 1–4.
 
 ---
 
@@ -746,8 +777,8 @@ direction that matters. Its acceptance tests are M:N-only and say so.
    a complete, VM-only feature** (was a permanent non-goal): any `fn` that uses `yield` is a generator
    (the `-> Iterator[T]` annotation is optional — the element type is inferred from the first `yield`);
    the call returns a suspendable generator (one-shot cooperative coroutine, own private
-   frame/stack swapped into the VM, resumed by an intrinsic `.next()`). Generators run on **both** VM
-   engines (serial `--serial` and default M:N). A **live** generator held in a frame **local** is now
+   frame/stack swapped into the VM, resumed by an intrinsic `.next()`). A **live** generator held in a
+   frame **local** is now
    sendable across a task airlock **BY VALUE** (F3 path C — deep-copied + rebuilt on the receiver, parked
    slots checked sendable at serialize time; mid-`recover:` / pending-`defer` / multi-frame suspensions
    reject cleanly). A **module-global** generator is not serialized by value — it stays reach-gated + a
@@ -1061,9 +1092,9 @@ what the compiler cannot lower. Keep the two tracked separately.
 M20 shipped: `assert`, free `test fn`, struct **suites** with lifecycle hooks
 (`before_all`/`after_all`/`before_each`/`after_each`) + a typed shared fixture, and the `chezzi test`
 runner (`src/test_runner.rs`). The native suite lives in **`tests/chz/`** (`spec/`/`stdlib/`/`suites/`),
-run M:N-by-default (like `chezzi run`, `--serial` opt-out), with a `cargo test` gate
-`test_runner::chz_suite_passes` asserting the whole suite passes on the M:N engine. These are the
-ranked follow-ups.
+run on the M:N engine (the only engine), with a `cargo test` gate `chz_suite_passes`
+(`tests/chz_suite.rs`) asserting the whole suite passes and `tests/chezzi_threads_cli.rs` re-running it
+at `CHEZZI_THREADS=2`. These are the ranked follow-ups.
 
 Current semantics: `assert true`=PASS, `assert false`=FAIL (with `file:line` + message; the message is
 any `str` **expression**, not just a literal — variable/interpolation/concat all work, checker-enforced
@@ -1092,7 +1123,7 @@ render ERROR too (whole file, before any test runs), counted separately as `file
    exit non-zero; summary appends `, M over-memory` only when `M>0` so cap-off output is byte-identical
    to before). **Deterministic-in-VM, NOT OS RSS:** the cap is checked against `Heap::live_bytes()` —
    the same value already computed once per `sweep()` for the peak probe — a per-heap high-water, so it
-   is deterministic and the dual-engine gate `chz_suite_passes` (which runs cap-OFF) is
+   is deterministic and the `chz_suite_passes` gate (which runs cap-OFF) is
    untouched. Mechanism mirrors the cancel bypass-recover unwind: `Heap` gained `mem_cap`/`over_cap`;
    `sweep()` sets `over_cap = mem_cap != 0 && lb > mem_cap`; `run_until`'s post-collect boundary
    hard-aborts via `unwind_deferred(base_level, false)`. The check is **re-observed at every GC boundary
@@ -1138,8 +1169,8 @@ render ERROR too (whole file, before any test runs), counted separately as `file
    run pays extra sweeps plus a second `wire_summary` walk per store (+11% measured, `docs/benchmarks.md`).
    Residual SAMPLING escapes were listed in gaps.md `W6-10s`, which is **CLOSED 2026-08-06** — its
    filed premise (uncharged by-hand airlock paths) did not survive re-derivation: the only one storing
-   persistently off-heap through the QUEUE is `Executor.submit`, and only on `--serial`, which
-   `--max-heap` refuses at the CLI. (That sentence read "the only one storing persistently off-heap"
+   persistently off-heap through the QUEUE is `Executor.submit`, and only on the cooperative engine
+   (removed 2026-08-16), which `--max-heap` refused at the CLI. (That sentence read "the only one storing persistently off-heap"
    until `W7-26` measured its blind spot the same day: on M:N `submit` runs EAGERLY, so the same call
    stores persistently in the core's *other* half — `eager` — which nothing counted and nothing
    sampled. Both are fixed; `W7-26r` tracks what still is not sampled.) The reachable escape from
@@ -1170,19 +1201,16 @@ render ERROR too (whole file, before any test runs), counted separately as `file
    PER-HEAP, so its guarantee is: any single execution context (the test's own heap; a `spawn`'d worker's
    heap on M:N) whose live heap — including the off-heap wire payloads it can REACH, which a worker that
    allocated nothing itself may still hold a handle to — exceeds `N` is aborted — a real runaway trips on whichever heap runs it,
-   the SAME verdict for a real runaway.** **M:N ENGINE ONLY — `--max-heap` errors if combined with
-   `--serial`**, which is what makes the cap sound-by-construction. The cooperative `--serial` engine
-   shares ONE heap across the parent + every `spawn`/`parallel:` fiber (so its `live_bytes` is
-   `parent-baseline + Σ live tasks`), while M:N isolates each worker on its own fresh heap (measured
-   alone). So a *concurrent* test near the boundary — allocation *split* below `N` per-fiber but summing
-   above it, or a single sub-`N` task plus a non-trivial parent baseline — would bucket `OverMemory` on
-   `--serial` yet pass on M:N: a serial≠M:N divergence. The only cross-engine-identical aggregate would be
-   a global RSS-style measure, which is non-deterministic (rejected — it would break the very gate the cap
-   protects), and the M:N aggregate peak is itself non-deterministic (task interleaving). Rather than ship
-   that divergence, the flag is **restricted to the default M:N engine**, where the cap is
-   per-worker/per-context and fully deterministic — there is no second engine to disagree. `--serial` is
-   the parity oracle, slated for post-freeze removal ([serial-engine post-freeze removal](§2b)), so the
-   restriction costs nothing real. `chezzi run` never sets the cap (test-runner-scoped). k/m/g
+   the SAME verdict for a real runaway.** **Historical restriction, now moot:** while the cooperative
+   engine existed, `--max-heap` errored if combined with `--serial`, and that is what made the cap
+   sound-by-construction. That engine shared ONE heap across the parent + every `spawn`/`parallel:`
+   fiber (so its `live_bytes` was `parent-baseline + Σ live tasks`), while M:N isolates each worker on
+   its own fresh heap. A *concurrent* test near the boundary would therefore have bucketed `OverMemory`
+   there yet passed on M:N. The only cross-engine-identical aggregate would have been a global RSS-style
+   measure, which is non-deterministic (rejected — it would break the very gate the cap protects).
+   `--serial` was **removed 2026-08-16** (§2b), so the cap is now simply per-worker/per-context and
+   fully deterministic, with nothing to disagree with it. `chezzi run` never sets the cap
+   (test-runner-scoped). k/m/g
    suffixes and `chezzi run --max-heap` are deliberately out of scope (later waves). (`--timeout` — the
    wall-clock sibling — has since landed; see #4 below.)
 
@@ -1195,7 +1223,8 @@ render ERROR too (whole file, before any test runs), counted separately as `file
    — WIP + platform-gated tests. Cheap; needs a skip signal the runner counts separately (`S skipped`).
 
 **Runner ergonomics + CLI options & output format** (independent of the semantics above; `cmd_test` is
-`src/main.rs:541`, accepts `[path]` + `--serial`/`--parallel` + `--max-heap` + `--timeout`):
+`src/main.rs`, accepts `[path]` + `--max-heap` + `--timeout`; the worker count comes from
+`CHEZZI_THREADS`):
 
 4. **Per-test timeout (`--timeout=<ms>`) — DONE.** The wall-clock sibling of `--max-heap` (#1b), same
    arc. Opt-in `chezzi test --timeout=<MS>` (ms; `0`/omitted = OFF, the default): a test running longer
@@ -1214,8 +1243,9 @@ render ERROR too (whole file, before any test runs), counted separately as `file
    **Zero overhead when off:** the check is `if let Some(dl) = self.deadline` FIRST, short-circuiting
    before any clock read, so a cap-off `chezzi run`/`chezzi test` does ZERO added `Instant::now()` calls
    on the hot path; when on, the read is throttled to one per 1024 back-edges (a wrapping counter).
-   **M:N ENGINE ONLY — `--timeout` errors if combined with `--serial`** (a wall-clock trip is
-   non-deterministic → no serial==M:N parity; the dual-engine gate runs timeout-OFF and is untouched).
+   **A wall-clock trip is non-deterministic**, which is why the flag is opt-in and OFF by default; the
+   `tests/chz` gates all run timeout-OFF and are untouched by it. (While the cooperative engine existed,
+   `--timeout` additionally errored if combined with `--serial`; that engine was removed 2026-08-16.)
    VM + runner + `main.rs` flag only — no checker/compiler change. **v1 limits (documented, watchdog-
    thread follow-up):** the trip is observed only at loop back-edges (+ the M:N reds checkpoint), so a
    test blocked in a **native call** (a blocking syscall, `Channel.recv` with no traffic) or spinning in
@@ -1242,7 +1272,7 @@ render ERROR too (whole file, before any test runs), counted separately as `file
      to a bool in `cmd_test`; the runner never probes the tty, so the captured (non-tty) test harness +
      the byte-identity gate never see ANSI.
    - Per-test + total **timing** — `-v`/json ONLY, NEVER in default/quiet output (non-deterministic → it
-     would break the byte-identical `chz_suite_passes` gate).
+     would break the byte-exact `chz_suite_passes` gate).
    - `--fail-fast` (stop at the first non-pass verdict) for tight iteration loops.
    - Ordering is deterministic (sorted files → free tests → suites, all declaration order); documented in
      `chezzi test`'s USAGE + the `run_tests_opts` doc-comment. **Default (no-flag) output is unchanged.**

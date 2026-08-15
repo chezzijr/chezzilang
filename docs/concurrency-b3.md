@@ -1,5 +1,9 @@
 # Chezzi — B3: Tier-C Shared-Nothing OS-Thread Multicore (phased plan + landing notes)
 
+> **Reading note (added 2026-08-16).** A **dated design + landing record**, kept as written. Its
+> references to a cooperative `--serial` parity oracle are historical: that engine was **removed
+> 2026-08-16** (`docs/future.md` §2b), and the M:N scheduler is now the sole engine.
+
 > **Status: B3 epic COMPLETE** (B3.0–B3.6 all landed). Superseded by **Tier-D**
 > ([`concurrency-tier-d.md`](concurrency-tier-d.md)), which rebuilt `--parallel` as an M:N
 > work-stealing scheduler on top of B3's share-nothing OS-thread foundation. This file is retained as
