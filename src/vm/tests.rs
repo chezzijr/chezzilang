@@ -12400,28 +12400,16 @@ fn parallel_recover_inside_worker_does_not_catch_cancel() {
 }
 
 /// C2 golden: `Channel[T]` fan-out — workers `send` at the dedent, the parent `recv`s after the
-/// join.
-///
-/// **KNOWN DEFECT (recorded 2026-08-16, deliberately NOT fixed in the doc sweep that found it).**
-/// The exact-order `assert_eq!(vm_out, expected)` below was only ever valid on the cooperative
-/// `--serial` VM, which delivered a deterministic FIFO in spawn order. On the M:N engine the three
-/// workers `send` **concurrently**, so the queued strings arrive in EITHER order — as this comment
-/// already said before the engine was removed. `run_capture` is now the M:N engine, so the exact
-/// compare is asserting an order the runtime does not promise: observed failing once as
-/// `task-1 task-3 task-2` against an expected `task-1 task-2 task-3`, and passing on the next full
-/// run. It is a **latent, load-dependent flake**, introduced by the helper collapse (`1de5d5c0`) and
-/// not by anything about this program.
-///
-/// The fix is to compare the line SET against `expected` (`assert_lines_multiset`) instead of the
-/// exact string — the same treatment `golden_try_recv` already has. Note that the second assertion
-/// below compares two M:N runs **against each other**, which is a stability check, not an
-/// expectation.
+/// join. The three workers send **concurrently**, so the queued strings arrive in either order (see
+/// `channel.chz`'s own header comment) — the line SET is asserted against `expected`, not the exact
+/// order. The second assertion compares two M:N runs **against each other**, a stability check, not
+/// an expectation.
 #[test]
 fn golden_channel_chz_matches_expected_and_interp() {
     let src = include_str!("../../examples/channel.chz");
     let expected = include_str!("../../examples/channel.expected");
     let vm_out = run_capture(src).expect("vm run");
-    assert_eq!(vm_out, expected);
+    assert_same_lines(expected, &vm_out);
     assert_same_lines(&vm_out, &run_capture(src).expect("M:N run"));
 }
 
