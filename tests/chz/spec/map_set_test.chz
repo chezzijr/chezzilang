@@ -2,7 +2,7 @@
 #
 # Ported from src/vm/parity_tests.rs (`parity_map_*` / `parity_set_struct_algebra`) and
 # src/vm/tests.rs (map/set comprehensions + equality). Run: `cargo run -- test tests/chz/`.
-# Gated by `test_runner::chz_suite_passes` (the M:N-engine gate).
+# Gated by `chz_suite_passes` (`tests/chz_suite.rs`).
 #
 # Fault-path (missing-key read / compound-assign / missing-hash) and gc-stress rooting stay in Rust.
 

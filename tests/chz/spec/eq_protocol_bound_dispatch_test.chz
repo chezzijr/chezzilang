@@ -15,7 +15,7 @@
 #
 # Every struct here defines an `eq` that DISAGREES with structural equality, so each assertion can
 # only pass if dispatch went the right way.
-# Gated by `test_runner::chz_suite_passes` (the M:N-engine gate).
+# Gated by `chz_suite_passes` (`tests/chz_suite.rs`).
 
 # ---- the escape hatch: a method named `eq` that is NOT the `Eq` hook (its operand is a type
 # parameter, not `Self`), so `==` leaves it alone and falls back to structural equality ----

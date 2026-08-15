@@ -19,7 +19,8 @@
 //! debug and release alike). The red evidence for the fix itself is the release measurement above,
 //! reproduced by reverting the one `if` in `MnSched::is_deadlocked_ignoring_jobs`.
 //!
-//! **M:N only, deliberately.** On the serial engine a spawned task does not start until the nursery's join,
+//! **The rendezvous needs real worker threads.** On the since-removed cooperative engine a spawned
+//! task did not start until the nursery's join,
 //! so a blocking body can never reach it and the program faults by design (`EMPTY_RECV_DEADLOCK`'s
 //! own hint says so). Pre-§2c1 BOTH engines faulted these, 6 runs in 6.
 //!

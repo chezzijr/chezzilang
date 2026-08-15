@@ -3,7 +3,7 @@
 # into the one shared `RwShared[map]` (under the exclusive write lock), the nursery joins, then the
 # parent `read`s the whole map back. The output is order-independent — no reader observes a mid-write,
 # because every read happens after the join. Reach for `RwShared` over `Shared` when reads dominate.
-# Run with: chezzi run examples/rwshared.chz  (also --serial / --parallel — byte-identical)
+# Run with: chezzi run examples/rwshared.chz
 
 import std.concurrency
 

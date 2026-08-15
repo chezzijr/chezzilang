@@ -453,13 +453,13 @@ pub enum Op {
     /// No arm matched the enum in `slot` — runtime error.
     MatchNoArm(usize),
 
-    // ----- concurrency (M:N OS-thread engine; `--serial` runs the same ops cooperatively) -----
+    // ----- concurrency (the M:N OS-thread engine — the sole engine) -----
     /// `parallel:` entry — open a nursery scope.
     ///
     /// On the M:N engine (§2c1) this ACTIVATES a live scheduler for the scope, so a `spawn` in the
-    /// body injects a running fiber immediately — Go's `go f()`. On the cooperative engine (and on
-    /// the M:N fallback taken when the OS refuses the scope's drainer thread) it pushes a fresh,
-    /// empty task list on the VM's nursery stack instead, and the matching `JoinNursery` drains it.
+    /// body injects a running fiber immediately — Go's `go f()`. On the LAZY fallback (taken when the
+    /// OS refuses the scope's drainer thread) it pushes a fresh, empty task list on the VM's nursery
+    /// stack instead, and the matching `JoinNursery` drains it.
     EnterNursery,
     /// `parallel:` dedent (the join BARRIER) — wait for every task of the innermost nursery to
     /// finish, then reduce their buffered output in spawn order. It guarantees COMPLETION by this

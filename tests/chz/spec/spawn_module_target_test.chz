@@ -4,7 +4,7 @@
 # the spawn path ran it through the "spawn on a receiver" sendability rule and asked whether the
 # MODULE could cross the airlock: `cannot spawn on a non-sendable receiver of type module lib`, while
 # `defer lib.helper(x)` checked clean and ran. Go accepts `go pkg.F(x)` and `defer pkg.F(x)` alike.
-# One concept, one verdict. Gated by `test_runner::chz_suite_passes` (the M:N-engine gate).
+# One concept, one verdict. Gated by `chz_suite_passes` (`tests/chz_suite.rs`).
 import std.concurrency
 import std.fs
 import std.io

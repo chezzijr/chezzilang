@@ -3,7 +3,7 @@
 //! These cannot be expressed as in-VM assertions: the property under test is *when* the bytes leave
 //! the process (a prompt must be readable while the child is still blocked on an unanswered stdin;
 //! a killed program must retain what it already printed). The lib test helpers keep the BUFFERED
-//! sink (the serial-vs-M:N parity oracle) — only the CLI streams.
+//! sink (every in-process test helper) — only the CLI streams.
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::PathBuf;
@@ -344,7 +344,7 @@ drain()
 /// released the stdin lock between the lead and continuation byte, a second reader would grab the
 /// continuation (0xA9, a bare continuation byte) → a spurious `stdin: stream is not valid UTF-8` fault
 /// and/or a torn scalar. Assert: exit 0, and the multiset of emitted scalars is exactly N × `é`.
-/// M:N only (the race needs real worker threads); the serial engine runs natives atomically anyway.
+/// The race needs real worker threads.
 fn read_char_concurrent_atomic() {
     const N: usize = 400;
     let t = TmpDir::new();

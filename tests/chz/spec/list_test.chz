@@ -3,7 +3,7 @@
 # Ported from the Rust string-goldens in src/vm/tests.rs (`list_*_parity`) and
 # src/vm/parity_tests.rs (`parity_list_*`): those printed a value and matched stdout; here we
 # assert the value directly. Run: `cargo run -- test tests/chz/`. Every test here is asserted to
-# pass by the `cargo test` gate `test_runner::chz_suite_passes` (the M:N-engine gate).
+# pass by the `cargo test` gate `chz_suite_passes` (`tests/chz_suite.rs`).
 #
 # Fault-path cases (empty min()/max(), OOB remove_at, non-positive chunk(), overflow sum) stay in
 # Rust — `assert` cannot catch a runtime fault's message, so they have no in-language equivalent.
@@ -180,7 +180,7 @@ test fn map_filter_fold():
 # the pin the checker records is the one the erased fn actually runs with. The rejections (`pred`
 # whose `T` appears nowhere, `mk` whose `T` is return-only) are `src/checker/tests.rs`
 # (`undetermined_generic_fn_value_rejected_in_argument_position`) — they never reach a runtime.
-# Gated by `test_runner::chz_suite_passes` (the M:N-engine gate).
+# Gated by `chz_suite_passes` (`tests/chz_suite.rs`).
 
 fn gid[T](x: T) -> T:
     return x

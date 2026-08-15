@@ -1860,7 +1860,7 @@ impl Vm {
         // worker the module's slots fault in LAZILY: without this the write indexed an empty `slots` vec
         // and PANICKED the pool thread (`index out of bounds: the len is 0`) while `--serial` printed the
         // right answer. Rooted here (the sole slot-write helper) so both write ops and any future caller
-        // are covered; a free no-op on the top-level / cooperative engines (no snapshot installed).
+        // are covered; a free no-op wherever no snapshot is installed (top-level `main`).
         self.ensure_module_faulted(module);
         // W6-2 — a module-slot write invalidates the snapshot CACHE: the next `spawn` must snapshot the
         // NEW value instead of replaying an earlier copy. One of exactly two module-slot mutators (with
@@ -2104,10 +2104,10 @@ impl Vm {
                     "AtomicInt({})",
                     core.v.load(std::sync::atomic::Ordering::SeqCst)
                 )),
-                // Work not yet finished, on EITHER engine: `--serial` keeps it in the queue,
-                // the eager M:N engine has already dispatched it and counts it as outstanding. Summing
-                // both is what keeps this honest — reading only the queue would report `pending=0`
-                // while jobs are running. Exactly one term is ever non-zero for a given executor.
+                // Work not yet finished, counted across BOTH halves: the lazy `inner` queue (which
+                // only the since-removed cooperative engine ever filled) and the eager outstanding
+                // count. Summing both is what keeps this honest — reading only the queue would report
+                // `pending=0` while jobs are running. Exactly one term is ever non-zero today.
                 Obj::Executor(core) => Ok(format!(
                     "Executor(pending={})",
                     core.inner.lock().unwrap().len()

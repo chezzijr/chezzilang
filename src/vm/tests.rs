@@ -3399,8 +3399,9 @@ fn mn_park_wait_one_closed_one_live_still_parks_and_is_deadlock() {
 }
 
 /// W7-2 end-to-end (RACY — loop it): a `close()` racing a sibling's `wait:` park must never produce
-/// a spurious `deadlock:` fault. `--serial` never fails; pre-fix the M:N engine lost the wakeup
-/// whenever the `close` landed inside the poll→park window.
+/// a spurious `deadlock:` fault. Pre-fix the M:N engine lost the wakeup whenever the `close` landed
+/// inside the poll→park window (the since-removed cooperative engine never did, which is how the
+/// divergence was spotted).
 ///
 /// PRE-FIX MEASURED (this exact 200-iteration loop, `park_wait` reverted to the pre-fix predicate,
 /// `cargo test --lib -- --test-threads=1`, 12-core box): **43 / 45 / 50 / 56 failures out of 200**
@@ -12399,9 +12400,22 @@ fn parallel_recover_inside_worker_does_not_catch_cancel() {
 }
 
 /// C2 golden: `Channel[T]` fan-out — workers `send` at the dedent, the parent `recv`s after the
-/// join. Byte-identical to the `.expected` file on the cooperative VM (deterministic FIFO in spawn
-/// order); on the M:N engine the three workers `send` concurrently, so the queued strings arrive in
-/// EITHER order — the line SET is identical, asserted order-insensitively (like `golden_try_recv`).
+/// join.
+///
+/// **KNOWN DEFECT (recorded 2026-08-16, deliberately NOT fixed in the doc sweep that found it).**
+/// The exact-order `assert_eq!(vm_out, expected)` below was only ever valid on the cooperative
+/// `--serial` VM, which delivered a deterministic FIFO in spawn order. On the M:N engine the three
+/// workers `send` **concurrently**, so the queued strings arrive in EITHER order — as this comment
+/// already said before the engine was removed. `run_capture` is now the M:N engine, so the exact
+/// compare is asserting an order the runtime does not promise: observed failing once as
+/// `task-1 task-3 task-2` against an expected `task-1 task-2 task-3`, and passing on the next full
+/// run. It is a **latent, load-dependent flake**, introduced by the helper collapse (`1de5d5c0`) and
+/// not by anything about this program.
+///
+/// The fix is to compare the line SET against `expected` (`assert_lines_multiset`) instead of the
+/// exact string — the same treatment `golden_try_recv` already has. Note that the second assertion
+/// below compares two M:N runs **against each other**, which is a stability check, not an
+/// expectation.
 #[test]
 fn golden_channel_chz_matches_expected_and_interp() {
     let src = include_str!("../../examples/channel.chz");
@@ -13280,10 +13294,10 @@ fn executor_shutdown_now_is_cooperative_not_preemptive() {
 /// resolvable through the single-module test helper, so a handshake stands in for the sleep). If main
 /// wins anyway the assertion still holds, so it costs coverage in the rare case, never a flake.
 ///
-/// The handshake leg is M:N-ONLY, and that is the point rather than a gap: on `--serial` the job does
-/// not exist until `shutdown()` (decision D3), so `ready.recv()` at top level has genuinely nobody to
-/// send to it and deadlocks — correctly. The second program drops the handshake and pins the same
-/// end state on BOTH engines.
+/// The handshake leg depends on EAGER dispatch: the job must already be running when top-level
+/// `main` reaches `ready.recv()`. Under the lazy queue-at-`submit` model (decision D3, which the
+/// since-removed cooperative engine used) the same program is a genuine deadlock. The second program
+/// drops the handshake and pins the same end state without depending on dispatch timing at all.
 ///
 /// Watchdogged because the failure mode of getting this wrong the OTHER way (never waking) is a hang.
 #[test]
@@ -13334,14 +13348,15 @@ print("done")
 /// have filled must FAULT, not hang. `main` sends only after `shutdown()`, so it is stuck waiting for
 /// the job while the job waits for it — a real deadlock, and the caller's mistake.
 ///
-/// Eager execution (§2c) regressed this from "faults in 0s on both engines" to "faults on `--serial`,
-/// hangs forever on M:N": the `recv` arm decides by "am I inside a scheduler?", which cannot tell this
+/// Eager execution (§2c) regressed this from "faults in 0s" to "hangs forever on M:N" (the
+/// since-removed cooperative engine still faulted, which is how it was caught): the `recv` arm
+/// decides by "am I inside a scheduler?", which cannot tell this
 /// program apart from the one above. The fix asks the one question that can — is this executor already
 /// being JOINED, with every job it still owes parked — so the two programs keep their opposite verdicts.
 ///
-/// Asserted on BOTH engines with the SAME text: the M:N fault now travels out of a worker `Vm` through
-/// `reduce_task_slots` rather than an inline drain, so byte-identity with `--serial` (and so with the
-/// pre-eager behaviour) is a real claim, not a formality.
+/// The M:N fault travels out of a worker `Vm` through `reduce_task_slots` rather than an inline
+/// drain, so the message and exit status are byte-identical to the pre-eager behaviour — a real
+/// claim, not a formality, and the golden below is what holds it.
 ///
 /// Watchdogged: getting this wrong is a hang, which would otherwise stall the suite rather than fail it.
 #[test]
@@ -13380,8 +13395,8 @@ ch.send(42)
 /// (`fatal error: all goroutines are asleep - deadlock!`, measured, rc=2, two goroutines on one empty
 /// channel behind a `WaitGroup`); CPython hangs. We now match Go.
 ///
-/// M:N-only: `--serial` queues at `submit` (decision D3), so it faults here for an unrelated reason and
-/// is not evidence about anything this change touches (`--serial` is scheduled for removal, §2b).
+/// Depends on EAGER dispatch: under the lazy queue-at-`submit` model (decision D3) this program
+/// faults for an unrelated reason, so it would be no evidence about anything this change touches.
 ///
 /// **Needs ≥2 free pool threads.** With one, the second job is reserved but never dispatched, so it
 /// counts toward `live` while never registering as blocked and the verdict correctly declines — the
@@ -13510,9 +13525,10 @@ ex.submit(fn(): print("job got {ch.recv()}"))
 /// every scheduler. `main` now blocks there like any other counted party, and the verdict declines
 /// while the job is live.
 ///
-/// M:N-only, and the divergence is recorded rather than defended: `--serial` queues at `submit` (D3),
-/// so the job cannot run before `main`'s `recv` and it still faults there. That engine is scheduled
-/// for removal (§2b) and is not a standard of correctness.
+/// Depends on EAGER dispatch: under the lazy queue-at-`submit` model (D3) the job cannot run before
+/// `main`'s `recv`, so the program faults there for an unrelated reason. The since-removed
+/// cooperative engine did exactly that, and the divergence was recorded rather than defended — an
+/// engine is never the standard of correctness, the ancestor is.
 #[test]
 fn main_recv_completes_when_an_eager_job_sends() {
     let src = r#"
@@ -13628,9 +13644,9 @@ exA.shutdown()
 /// `spawn: … ch.send(42)` is one handshake away from sending, so the job must still WAIT.
 ///
 /// Caught by review, not by the suite: the first cut armed the predicate at every explicit
-/// `shutdown()`, which made this exact program fault on M:N while `--serial` printed `job got 42` —
-/// re-opening, in a new place, precisely the engine divergence W7-12 exists to close. Asserted on both
-/// engines for that reason.
+/// `shutdown()`, which made this exact program fault while the since-removed cooperative engine
+/// printed `job got 42` — re-opening, in a new place, precisely the divergence W7-12 exists to close.
+/// `job got 42` is the answer CPython's `ThreadPoolExecutor` gives, and it is what this pins.
 ///
 /// Run through the FILE helpers, not `run_capture`, for one reason: the producer has to be slower
 /// than the verdict's own debounce (2 × `DEMOTE_POLL_BACKOFF`) or the send lands first and the program
@@ -13677,8 +13693,8 @@ print(\"end\")
 /// The measure of correct here is the ancestor, not the parity oracle. Python's `ThreadPoolExecutor`
 /// runs this program to completion — `x.submit(consumer)`, `y.submit(producer)`, `x.shutdown()` prints
 /// `got 1` — so reporting a deadlock is a WRONG ANSWER about a live program, not a tolerable engine
-/// difference. The first cut of this fix did exactly that, and was defended with "`--serial` faults
-/// there too", which is an argument about agreement and not about correctness.
+/// difference. The first cut of this fix did exactly that, and was defended with "the other engine
+/// faults there too", which is an argument about agreement and not about correctness.
 ///
 /// W7-12's predicate bought that by sweeping the executor registry and going silent while any OTHER
 /// executor still owed work — at the cost of the opposite error, two mutually-deadlocked executors
@@ -13686,9 +13702,9 @@ print(\"end\")
 /// y's job is itself blocked with nothing satisfiable, so a live producer vetoes and a deadlocked one
 /// does not, and the cost is gone (`two_executors_deadlocking_each_other_fault`).
 ///
-/// M:N-only for the same reason as its sibling above: `--serial` queues at `submit` (decision D3), so
-/// x's consumer does not exist until `x.shutdown()` drains it, and this shape faults there regardless
-/// of anything W7-12 touches.
+/// Depends on EAGER dispatch for the same reason as its sibling above: under the lazy
+/// queue-at-`submit` model (decision D3) x's consumer would not exist until `x.shutdown()` drains it,
+/// and the shape would fault regardless of anything W7-12 touches.
 #[test]
 fn executor_job_keeps_waiting_while_another_executor_still_owes_work() {
     let src = "
@@ -13740,10 +13756,10 @@ print(\"end\")
 /// and the counters cannot be misread. This test is the fence, and it LOOPS because one pass proves
 /// nothing about a race — the buggy form passed most runs.
 ///
-/// M:N-ONLY, and not for lack of trying: on `--serial` this program faults `send on a full channel`
-/// regardless of anything W7-12 touches, because that engine queues at `submit` (decision D3) and runs
-/// the producer to completion before the consumer exists. Adding a serial arm would go red for an
-/// unrelated reason. A progress-counter variant of the predicate that would have allowed multi-job
+/// Depends on EAGER dispatch, and not for lack of trying: under the lazy queue-at-`submit` model
+/// (decision D3) the producer runs to completion before the consumer exists, so the program faults
+/// `send on a full channel` regardless of anything W7-12 touches. A progress-counter variant of the
+/// predicate that would have allowed multi-job
 /// verdicts was tried and measured to fail this very test (6/40) — see `docs/gaps.md` W7-12.
 #[test]
 fn executor_bounded_pipeline_is_not_mistaken_for_a_deadlock() {
@@ -13797,11 +13813,9 @@ ex.shutdown()
 /// neither `running`/`runnable` nor `inflight`. Go's equivalent (a goroutine feeding a channel a
 /// WaitGroup'd goroutine reads) prints `job sending` / `child got 7` and exits 0.
 ///
-/// **M:N-ONLY, and no predicate change can or should alter that.** `--serial` never dispatches
-/// eagerly (`netio.rs`'s `if self.parallel` gate; decision D3 = queue-at-submit, drain-at-`shutdown`),
-/// so there `feeder` genuinely cannot run before the join and the program IS a real deadlock —
-/// verified post-fix: `--serial` still faults, unchanged. Not in `parity_tests.rs`/`tests/chz/` for
-/// exactly that reason (both are gated serial == M:N). Same precedent as
+/// **Depends on EAGER dispatch, and no predicate change can or should alter that.** Under a lazy
+/// queue-at-submit / drain-at-`shutdown` model (decision D3) `feeder` genuinely cannot run before the
+/// join and the program IS a real deadlock. Same precedent as
 /// `executor_bounded_pipeline_is_not_mistaken_for_a_deadlock`.
 ///
 /// Watchdogged: an over-corrected veto turns this into a hang, which stalls the suite instead of
@@ -13976,11 +13990,9 @@ parallel:
 /// sleeps 50 ms and then feeds the parked task) with the owner now registered, and must still print
 /// `child got 7`, rc=0.
 ///
-/// **M:N-ONLY.** `--serial` queues eager jobs at `submit` and drains at `shutdown` (decision D3), so
-/// `other.recv()` never runs before the join and the program is a DIFFERENT (also real) deadlock,
-/// reported at a different site. Verified: `--serial` output is byte-identical pre- and post-fix.
-/// Not in `parity_tests.rs`/`tests/chz/` for that reason — both are gated serial == M:N. Same
-/// precedent as the W7-56 tests above.
+/// **Depends on EAGER dispatch.** Under the lazy queue-at-`submit` / drain-at-`shutdown` model
+/// (decision D3) `other.recv()` never runs before the join and the program is a DIFFERENT (also real)
+/// deadlock, reported at a different site. Same precedent as the W7-56 tests above.
 ///
 /// Watchdogged: pre-fix this HANGS, and a regression must fail the suite rather than stall it.
 #[test]
@@ -14049,7 +14061,7 @@ print(\"after nursery\")
 /// (Measured on the release binary at the CLI: 30/30 at the default width and 30/30 at
 /// `CHEZZI_THREADS=2`.)
 ///
-/// M:N-only + watchdogged for the reasons on the tests above (`--serial` never dispatches eagerly).
+/// Depends on eager dispatch + watchdogged, for the reasons on the tests above.
 #[test]
 fn a_cap1_pipeline_across_a_job_and_a_nursery_is_not_mistaken_for_a_deadlock() {
     let cases = [
@@ -14433,8 +14445,8 @@ done.recv()
 /// joiner's own output is SWALLOWED, as every cancelled task's is, so `job past inner join` must NOT
 /// appear; that is the observable half of the assertion and the reason it is not a pure timing test.
 ///
-/// M:N-only (`--serial` queues eager jobs at `shutdown` instead of running them) + watchdogged, for
-/// the reasons on the tests above.
+/// Depends on eager dispatch (a lazy queue-at-`submit` model has no running job to cancel) +
+/// watchdogged, for the reasons on the tests above.
 #[test]
 fn shutdown_now_cancels_a_job_parked_in_a_nested_executor_join() {
     let src = "
@@ -14626,12 +14638,12 @@ ex.shutdown()
 /// program hangs — before AND after this fix, and equally on `main`. See `pool.rs`'s "Known v1
 /// hazard". The 30 s guard below turns that into a clear failure rather than a hung suite.
 ///
-/// **M:N-only.** On `--serial` both jobs are queued at `submit` and the drain runs them one at a
-/// time, so `blocker` faults `FULL_SEND_DEADLOCK` before `closer` gets to run its `close()` — the
-/// engine cannot interleave them, so it cannot express this program at all (it is NOT that the closer
-/// is absent: it does run, and does close the channel, after the fault). `docs/gaps.md` W7-13r
-/// records that divergence deliberately, under the standing rule that correctness outranks engine
-/// agreement and `--serial` is scheduled for removal.
+/// **Depends on real interleaving.** Under the lazy queue-at-`submit` model both jobs are queued and
+/// the drain runs them one at a time, so `blocker` would fault `FULL_SEND_DEADLOCK` before `closer`
+/// got to run its `close()` — that model cannot express this program at all (it is NOT that the
+/// closer is absent: it runs, and closes the channel, after the fault). `docs/gaps.md` W7-13r records
+/// that as a deliberate divergence of the since-removed cooperative engine, under the standing rule
+/// that correctness outranks engine agreement.
 #[test]
 fn eager_send_blocked_on_a_full_channel_faults_when_the_channel_is_closed() {
     let src = "
@@ -15235,7 +15247,8 @@ main()
 /// It did not before: `Vm.executors` is a `Vec<GcRef>`, heap-keyed and swapped per fiber, so a nested
 /// executor landed in the task's throwaway worker list and was dropped when the task finished — its
 /// jobs never ran, were never reaped, and raised no fault. Verified on the pre-change binary: M:N
-/// printed `main done` alone while `--serial` (one shared heap, so its list survived) ran both jobs.
+/// printed `main done` alone, while the since-removed cooperative engine (one shared heap, so its
+/// list survived) ran both jobs — which is how the heap-keying was identified as the cause.
 /// The fix is the heap-independent `ExecRegistry`, which every worker shares.
 ///
 /// The jobs print their own evidence rather than a counter being read at the end, because the exit
@@ -15333,8 +15346,8 @@ print("main done")
 /// cancelled at 50 ms) — so the deciding argument is W7-16's, applied one level down: an executor that
 /// disagrees with the nursery beside it is the defect.
 ///
-/// M:N only — eager `submit` requires `self.parallel`; `--serial` queues jobs and runs them at the
-/// drain, where there is no running inner job to cancel. Wall-clock asserted under a `recv_timeout`
+/// Depends on eager `submit`: under a lazy queue-and-drain model there is no running inner job to
+/// cancel. Wall-clock asserted under a `recv_timeout`
 /// watchdog so a regression FAILS loud instead of hanging the suite for 8 s a run.
 #[test]
 fn nested_executor_job_is_cancelled_by_an_outer_shutdown_now_mn() {
@@ -15391,7 +15404,7 @@ print("done")
 /// (`ExecutorCore::creator_cancel`, captured at `Op::NewExecutor`) is what makes both this and the
 /// nested case right at once: `shared` was created by `main`, so it inherits nothing from anyone.
 ///
-/// M:N only, for the same reason as its twin — `--serial` queues jobs and runs them at the drain.
+/// Depends on eager `submit`, for the same reason as its twin.
 #[test]
 fn a_job_submitted_to_mains_executor_survives_another_executors_shutdown_now_mn() {
     let src = r#"
@@ -15455,7 +15468,8 @@ print("done")
 /// `print` the job finishes before reaching one and runs to completion (D4 is cooperative, not
 /// preemptive) — a test written without it is a false green that proves nothing.
 ///
-/// M:N only: `--serial` never sets `eager_core`, so `creator_cancel` is always empty there.
+/// Depends on eager `submit`: `creator_cancel` is captured at `Op::NewExecutor` and only ever read
+/// on the eager path.
 #[test]
 fn submit_to_an_executor_whose_creating_job_was_cancelled_faults_mn() {
     let src = r#"
@@ -17063,7 +17077,8 @@ go()
 
 /// W7-4a — a DISCARDED speculative wire attempt must not forge a `Backref`. Found by adversarial
 /// review, and it was a live host PANIC, not a theoretical one: `main.chz` below aborted the M:N task
-/// with `CellLoad on a non-handle value` while `--serial` printed `7`.
+/// with `CellLoad on a non-handle value` (the since-removed cooperative engine printed `7`, which is
+/// how the wire path was identified as the culprit).
 ///
 /// Mechanism: `H := (k, k.C.get)` embeds a module, so the tuple fails `to_snap`'s `!has_handle()`
 /// fast lane — but the attempt ALREADY marked `k.C.get`'s cell as emitted, and that cell's id was

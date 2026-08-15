@@ -5,7 +5,7 @@
 # emptied the in-VM buffer and left the drained bytes sitting unflushed in the inner `BufWriter`, so a
 # later flush/close saw an empty buffer, returned early, and persisted NOTHING.
 # Temp paths carry the pid (the suite runs concurrently with other `cargo test` / `chezzi test` runs).
-# Run: `cargo run -- test tests/chz/`. Gated by `test_runner::chz_suite_passes` (the M:N-engine gate).
+# Run: `cargo run -- test tests/chz/`. Gated by `chz_suite_passes` (`tests/chz_suite.rs`).
 
 import std.io
 import std.os

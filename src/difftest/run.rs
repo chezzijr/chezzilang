@@ -586,7 +586,7 @@ mod tests {
     /// `Match` for a run where Chezzi and CPython put DIFFERENT bytes on fd 1. Both sides can
     /// emit non-UTF-8 today (`io.stdout().write_bytes` since W6-9; CPython's
     /// `sys.stdout.buffer.write` always could), and this oracle is the one `docs/future.md §2b`
-    /// keeps after `--serial` is deleted. Same class as the parity-oracle hole W6-9b closed.
+    /// keeps now that `--serial` is deleted. Same class as the parity-oracle hole W6-9b closed.
     #[test]
     fn a_byte_only_divergence_is_not_a_match() {
         let chz = cap(vec![0xff, 0xfe]);

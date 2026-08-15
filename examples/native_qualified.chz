@@ -1,9 +1,9 @@
 # Golden: first-class native (Rust-implemented) types reached by the QUALIFIED / aliased module-member
 # path — `concurrency.Shared(0)`, aliased `c.Shared(0)`, `time.timer(0)` — plus a type-alias and a
 # newtype over a qualified `concurrency.Shared`. These lower to the SAME opcodes as the bare-after-import
-# names, so the output is byte-identical on interp, the cooperative VM (--serial), and the M:N engine
-# (--parallel). This is the two-engine parity gate for the additive qualified native-ctor path.
-# Run with: chezzi run examples/native_qualified.chz   (also --serial / --parallel — byte-identical)
+# names, so the output is byte-identical to the bare-name spelling. This is the golden gate for the
+# additive qualified native-ctor path.
+# Run with: chezzi run examples/native_qualified.chz
 import std.concurrency
 import std.concurrency as c
 import std.time

@@ -728,8 +728,8 @@ impl Vm {
 
     /// `chezzi test --timeout=<MS>` — set the per-test wall-clock cap in ms (`0` = OFF, the default).
     /// A test running longer than `MS` is hard-aborted (bypassing `recover:`) and bucketed `TimedOut`.
-    /// M:N-engine-only (a wall-clock trip is non-deterministic → no serial==M:N parity); the CLI guard
-    /// rejects `--timeout` with `--serial`. Observed at the loop back-edge (+ spawned fibers), and —
+    /// A wall-clock trip is non-deterministic, which is why it is OFF unless a test asks for it.
+    /// Observed at the loop back-edge (+ spawned fibers), and —
     /// for the ops a back-edge cannot reach — in `block_halt_check` (blocked in place),
     /// `block_until_deadline` (a wait whose deadline we own, W7-16) and at `chan_recv_step` /
     /// `op_wait_poll`'s PARK, which is the only path to a parked fiber (W7-17).
@@ -1564,8 +1564,7 @@ impl Vm {
     /// [`Vm::run_exit_err`] does not give them:
     ///
     /// **A fiber that HOLDS a cancel flag unwinds as `Cancelled`, not as an exit** — so it runs its
-    /// `defer`s exactly as it does for a sibling fault, matching `--serial` and the pre-W7-57
-    /// behaviour. Ordering the publication (`request_exit` → `halt_all_scheds` → flag) does NOT
+    /// `defer`s exactly as it does for a sibling fault, matching the pre-W7-57 behaviour. Ordering the publication (`request_exit` → `halt_all_scheds` → flag) does NOT
     /// achieve this and the claim that it did was wrong: an `Acquire` load orders only the reads that
     /// FOLLOW it, and both sites read cancel BEFORE exit, so `cancel == false` + `exit == true` is a
     /// legal interleaving. Measured as a nondeterministic `defer`: 2/8 runs, and one killed mid-body.

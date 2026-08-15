@@ -4,8 +4,7 @@
 # `native enum Result[T, E]` in std/prelude.chz), but the `?` operator, exhaustive `match`, top-level
 # error propagation, and Some/None/Ok/Err CONSTRUCTION all stay Rust-wired. This program exercises that
 # whole surface — construction, `?` on a Result-returning AND an Option-returning fn, and exhaustive
-# matches — so its byte-identical output across interp / --serial VM / M:N VM is the phase-5b
-# behavior-preservation gate.
+# matches — so its byte-identical golden output is the phase-5b behavior-preservation gate.
 
 # A Result-returning fn (`int!` = Result[int, Error]); the Err path short-circuits its `?` caller.
 fn safe_at(xs: List[int], i: int) -> int!:

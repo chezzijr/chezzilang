@@ -1,7 +1,7 @@
 # examples/fs_mutations.chz — the std.fs MUTATION surface (M8+): mkdir / append / rename / copy /
 # remove_file / remove_dir, exercised as a self-cleaning round-trip. Output is FIXED status lines +
 # read-back contents only (never an absolute path), so the golden is deterministic and
-# path-independent across run / --serial / --parallel. The scratch dir is `examples/.fs_scratch`
+# path-independent on every run. The scratch dir is `examples/.fs_scratch`
 # (gitignored) and is fully torn down at the end.
 
 import std.fs

@@ -627,10 +627,10 @@ main()";
 }
 
 /// Executor: a submitted task closure must survive GC firing between the `submit` and the job's
-/// completion, and across each task's re-entrant call. On `--serial` the closure sits in the heap obj's
-/// queue until the drain; on the default engine it has already crossed into its own worker heap at the
-/// `submit`, so this covers both sides of the wire. Each task allocates a string into a Channel — a missing root would corrupt the output or
-/// dangle a `GcRef`.
+/// completion, and across each task's re-entrant call. Under eager `submit` the closure has already
+/// crossed into its own worker heap by the time `submit` returns, so this covers the wire crossing as
+/// well as the heap root. Each task allocates a string into a Channel — a missing root would corrupt
+/// the output or dangle a `GcRef`.
 /// Eager `Executor` + GC stress on the M:N engine, where the dispatch actually happens.
 ///
 /// The specific hazard: `submit` rebuilds the closure into a fresh worker heap, and a closure that

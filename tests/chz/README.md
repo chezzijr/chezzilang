@@ -14,18 +14,25 @@ print-and-golden demo programs, `*.chz` + `*.expected`).
 ## Run
 
 ```sh
-cargo run -- test tests/chz/            # run the whole suite (M:N engine, default), PASS/FAIL + summary
-cargo run -- test --serial tests/chz/   # cooperative single-thread VM instead
+cargo run -- test tests/chz/                     # run the whole suite, PASS/FAIL + summary
+CHEZZI_THREADS=2 cargo run -- test tests/chz/    # ...again at a second worker count
 cargo run -- test tests/chz/spec/list_test.chz   # one file
 ```
 
 ## The gate (why this replaces Rust `parity_*` tests)
 
-A single `chezzi test` invocation runs **one** engine (M:N by default, `--serial` to switch). The Rust
-tests these are ported from also asserted **serial VM == M:N VM** (byte-identical); that comparison is
-gone now that `--serial` is not the engine of record. What remains is the `cargo test` gate
-`test_runner::chz_suite_passes`, which runs this entire suite on the M:N engine and asserts every
-test passes. So `cargo test` — not just `chezzi test` — is the authoritative gate.
+The bytecode VM on its M:N scheduler is the **sole** engine. The Rust tests these are ported from used
+to also assert *serial VM == M:N VM* (byte-identical); the cooperative `--serial` engine was removed
+2026-08-16, so that cross-engine comparison no longer exists. Two `cargo test` gates carry the suite:
+
+- **`chz_suite_passes`** (`tests/chz_suite.rs`) runs this entire suite and asserts every test passes.
+- **`chezzi_threads_cli`** (`tests/chezzi_threads_cli.rs`) runs it again at `CHEZZI_THREADS=2` — a
+  *second schedule*, which is what replaced the cross-engine oracle as the accidental-divergence
+  detector (`docs/bug-discovery.md` Tier 2).
+
+Both live in `tests/`, not the lib unit suite: `vm::pool` is one process-wide `OnceLock`, so a test
+that needs uncontended pool workers must have its own process. So `cargo test` — not just
+`chezzi test` — is the authoritative gate.
 
 ## What stays in Rust (not portable)
 

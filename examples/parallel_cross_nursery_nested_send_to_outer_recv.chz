@@ -1,12 +1,12 @@
 # gaps.md B5 — a `send` from inside a NESTED (child) `parallel:` nursery must wake a receiver
 # parked on that channel in an OUTER/ancestor nursery. Before the eager child→parent wake-routing
-# fix, the DEFAULT M:N engine spuriously faulted `deadlock` here (the value landed in the shared
-# ChannelCore but the parked outer receiver was never woken across sched scopes), while `--serial`
-# ran it correctly. Uncontended 1-sender / 1-receiver cross-nursery wake.
+# fix, the M:N engine spuriously faulted `deadlock` here (the value landed in the shared ChannelCore
+# but the parked outer receiver was never woken across sched scopes); the since-removed cooperative
+# engine ran it correctly, which is how the bug was found. Uncontended 1-sender / 1-receiver
+# cross-nursery wake.
 #
 # Run:
-#   chezzi run --serial   examples/parallel_cross_nursery_nested_send_to_outer_recv.chz   # → receiver got 1
-#   chezzi run            examples/parallel_cross_nursery_nested_send_to_outer_recv.chz   # → receiver got 1
+#   chezzi run examples/parallel_cross_nursery_nested_send_to_outer_recv.chz   # → receiver got 1
 import std.concurrency
 
 fn main():

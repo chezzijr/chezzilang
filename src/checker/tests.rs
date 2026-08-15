@@ -19545,7 +19545,7 @@ fn index_and_slice_on_a_protocol_existential() {
 
 /// A newtype defining a `neg` method must NOT make unary `-` type-check (no newtype Neg dispatch on
 /// any engine; Neg is out of scope for newtypes). Regression: M22 added a `satisfies(Neg)` path that
-/// wrongly admitted newtypes (`check` ok, `run`/`run --serial` → "cannot apply Neg to newtype").
+/// wrongly admitted newtypes (`check` ok, `run` → "cannot apply Neg to newtype").
 #[test]
 fn newtype_neg_method_rejected() {
     rejects(

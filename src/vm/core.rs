@@ -518,8 +518,9 @@ pub struct EagerState {
     slots: Vec<Option<super::TaskOutcome>>,
     /// W7-26 — cached `(bytes, dirty)` of the collected outcomes, the shape `ChanState`/`ExecState`
     /// already carry. Without it a finished job's result was reachable by `Heap::live_bytes`
-    /// NOWHERE: `--max-heap` reads the executor core, and the only half it could read was `inner`,
-    /// the `--serial` queue — which the eager (default M:N) engine leaves empty forever.
+    /// NOWHERE: `--max-heap` reads the executor core, and the only half it could read was `inner`, the
+    /// lazy QUEUE half — which eager execution leaves empty forever (and which, since the cooperative
+    /// engine was removed, no execution path fills at all).
     bytes: usize,
     dirty: bool,
     /// How much of `bytes` has already been reported to a submitting heap's GC pacing counter — see

@@ -1,7 +1,7 @@
 # tests/chz/spec/conversions_test.chz — scalar constructor / conversion semantics.
 #
 # Ported from src/vm/parity_tests.rs (`scalar_ctor_conversions_parity`, `bool_ctor_parity`).
-# Run: `cargo run -- test tests/chz/`. Gated by `test_runner::chz_suite_passes` (the M:N-engine gate).
+# Run: `cargo run -- test tests/chz/`. Gated by `chz_suite_passes` (`tests/chz_suite.rs`).
 
 test fn int_ctor():
     assert int("5") == 5

@@ -9,7 +9,7 @@
 # The undecodable byte is SYNTHESIZED with `io.write_bytes` — `printf '\377'` is shell/locale dependent.
 # Temp paths carry the pid (the suite runs concurrently with other `cargo test` / `chezzi test` runs)
 # and are SINGLE-QUOTED into any shell line (TMPDIR may contain a space/glob).
-# Run: `cargo run -- test tests/chz/`. Gated by `test_runner::chz_suite_passes` (the M:N-engine gate).
+# Run: `cargo run -- test tests/chz/`. Gated by `chz_suite_passes` (`tests/chz_suite.rs`).
 
 import std.process as pr
 import std.io

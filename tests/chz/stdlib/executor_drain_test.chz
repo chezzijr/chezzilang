@@ -7,7 +7,7 @@
 #
 # These assert on an `AtomicInt` accumulator read AFTER the drain returns, never on inter-task print
 # order (N9 / nondeterministic cross-task ordering). Gated by
-# `test_runner::chz_suite_passes` (the M:N-engine gate).
+# `chz_suite_passes` (`tests/chz_suite.rs`).
 # Run: `cargo run -- test tests/chz/stdlib/executor_drain_test.chz`
 
 import std.concurrency

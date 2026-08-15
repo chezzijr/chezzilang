@@ -13,7 +13,7 @@
 #
 # The printed number is MEASURED, not asserted: a `spawn`ed fiber's return value is discarded (this is
 # Go's `go f()`), so the count lives in a shared `AtomicInt` — Go's `atomic.Int64` — that only a client
-# which completed the whole round-trip bumps. On `--serial` that prints a truthful `0 connections`.
+# which completed the whole round-trip bumps.
 
 import std.net
 import std.concurrency

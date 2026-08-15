@@ -141,7 +141,7 @@ fn run_capped(entry: &std::path::Path, secs: u64) -> (i32, String) {
 /// exit code sat on the job's isolated worker `Vm` until a join `main` could never reach, and the run
 /// hung forever (rc=124 under `timeout`) — so the watchdog above IS the assertion.
 ///
-/// M:N only: the serial engine refuses the socket op outright (W7-40's documented engine difference) and so
+/// Needs real worker threads (the since-removed cooperative engine refused the socket op outright — W7-40's documented engine difference) and so
 /// already exits 3 today by a different route. An ephemeral port (`:0`), never a fixed one — CI collides.
 #[test]
 fn eager_job_os_exit_terminates_a_socket_blocked_main() {
@@ -220,7 +220,7 @@ print("got {v}")
 /// builds ONE `Vm` per test FILE and reuses it (`invoke_all`), and `pending_exit` is reset per
 /// invocation while the cell is not — so before the reset in `Vm::invoke_test`, a `test fn` calling
 /// `os.exit` made every LATER test that blocks fail with `exit`. Order-dependent and identical on
-/// both engines, so the `.chz` suite's serial==M:N gate is structurally blind to it — it has to be
+/// the VM's own buffered sink, so an in-process `.chz` test is structurally blind to it — it has to be
 /// asserted at the runner level, here.
 #[test]
 fn a_test_fn_that_exits_does_not_poison_later_blocking_tests() {

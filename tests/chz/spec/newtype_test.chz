@@ -3,7 +3,7 @@
 # A numeric `newtype` satisfies `Comparable` (checker grants it for numeric underlyings), so
 # `.sort()`/`.min()`/`.max()` on a `List[newtype]` must order by the wrapped scalar's NATIVE order —
 # same as bare `<`/`>`. Regression guard for the value_order/compare newtype-unwrap fix.
-# Gated by `test_runner::chz_suite_passes` (the M:N-engine gate).
+# Gated by `chz_suite_passes` (`tests/chz_suite.rs`).
 
 import std.math
 

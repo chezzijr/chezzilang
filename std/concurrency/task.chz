@@ -1,6 +1,6 @@
 # std.concurrency.task — result handles for `Executor`-submitted work. Pure Chezzi over existing
-# primitives (a cap-1 bounded `Channel[T]` as a one-shot result slot), so every engine (cooperative
-# `--serial` oracle, real-thread M:N) behaves identically.
+# primitives (a cap-1 bounded `Channel[T]` as a one-shot result slot) — it has no native scheduler
+# surface of its own.
 #
 # WHY: `Executor.submit(f)` is fire-and-forget — it returns nothing, so the only way to get a value
 # back is to hand-plumb a result `Channel` and `recv` it yourself. `submit_task` bakes that in: it
@@ -14,8 +14,8 @@
 #
 # MODEL: `submit_task` wraps the closure so it sends its result into a private cap-1 channel, then
 # hands you a `Task` over that channel. Like a bare `Executor.submit`, the work STARTS at the submit
-# and is waited for by `shutdown()` (or the program-exit join); `--serial` queues it and runs it at
-# that wait instead. Either way the canonical shape is the same: submit every task, `shutdown()`, then
+# and is waited for by `shutdown()` (or the program-exit join). The canonical shape is: submit every
+# task, `shutdown()`, then
 # `.get()` each. Calling `.get()` BEFORE `shutdown()` is the one shape to avoid — there is no runnable
 # sender from the caller's point of view, so it faults `deadlock` rather than waiting.
 

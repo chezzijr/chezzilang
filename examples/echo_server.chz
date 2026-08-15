@@ -5,9 +5,7 @@
 # All N+1 fibers multiplex over a core-sized worker pool: a would-block accept/read parks the fiber
 # on the epoll/kqueue netpoller instead of pinning a thread, so #connections >> #workers.
 #
-# net sockets are non-blocking and park on the M:N scheduler, so this needs the default engine (the
-# cooperative `--serial` oracle runs every fiber on ONE thread, so it has no fiber to park and no peer
-# to make the fd ready — a would-block op there returns "requires the --parallel engine"):
+# net sockets are non-blocking and park a fiber on the M:N scheduler's netpoller:
 #
 #   chezzi run examples/echo_server.chz
 #
@@ -16,7 +14,7 @@
 #
 # The printed number is MEASURED, not asserted: a `spawn`ed fiber's return value is discarded (this is
 # Go's `go f()`), so the count lives in a shared `AtomicInt` — Go's `atomic.Int64` — that only a client
-# which completed the whole round-trip bumps. On `--serial` that prints a truthful `0 connections`.
+# which completed the whole round-trip bumps.
 
 import std.net
 import std.concurrency

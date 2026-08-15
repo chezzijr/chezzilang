@@ -2,7 +2,7 @@
 # whose checker sigs are now file-backed in std/prelude.chz (channel/str/bytes/bytearray), replacing the
 # retired bespoke Rust `*_method_sig` fns. These are REGRESSION guards: the migration is checker-only
 # (sigs byte-match the retired arms, runtime dispatch untouched), so every assertion below must hold
-# exactly as before. Gated by `test_runner::chz_suite_passes` (the M:N-engine gate).
+# exactly as before. Gated by `chz_suite_passes` (`tests/chz_suite.rs`).
 #
 # The Channel tests stay single-task + unbounded so `recv`/for-drain never block the serial oracle.
 

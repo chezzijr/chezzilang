@@ -1,6 +1,6 @@
 # examples/encoding.chz — std.encoding codecs: base64 (std + url-safe), hex, URL percent-encoding.
-# All deterministic str<->str round-trips (no entropy), so the golden is byte-identical across
-# run / --serial / --parallel and on both engines.
+# All deterministic str<->str round-trips (no entropy), so the golden is byte-identical on every run
+# and at every worker count.
 
 import std.encoding as enc
 import std.io

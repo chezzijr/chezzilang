@@ -1,9 +1,8 @@
 # Golden: variadic parameters (`...xs: T`) + the `Any` top type. A variadic call collapses its
 # surplus trailing positionals into a fresh `List[T]` in the desugar pass, so the call is an ordinary
-# positional call to both engines — byte-identical on interp, the cooperative VM (--serial), and the
-# M:N engine (default / --parallel). `Any` is an empty structural protocol satisfied by every type
-# (scalars included), used here as a universal parameter slot.
-# Run with: chezzi run examples/variadic.chz   (also --serial / --parallel — byte-identical)
+# positional call by the time the backend sees it. `Any` is an empty structural protocol satisfied by
+# every type (scalars included), used here as a universal parameter slot.
+# Run with: chezzi run examples/variadic.chz
 
 fn sum_all(...xs: int) -> int:
     total := 0

@@ -1,6 +1,6 @@
 # examples/crypto.chz — std.crypto digests (sha256, sha1, sha512, md5) + HMAC-SHA256 of fixed inputs.
 # Digests are deterministic lowercase-hex strings (published FIPS-180 / RFC 1321 / RFC 4231 vectors),
-# so the golden is byte-identical across run / --serial / --parallel and on both engines. MD5 and
+# so the golden is byte-identical on every run and at every worker count. MD5 and
 # SHA-1 are here for checksums/interop only — they are NOT cryptographically secure.
 
 import std.crypto

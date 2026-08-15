@@ -986,9 +986,9 @@ impl Heap {
                         g.summary().0
                     }
                 }
-                // W7-26 — BOTH payload halves, because the engine decides which one is in use:
-                // `inner` is the `--serial` QUEUE, while on the default M:N engine `submit` runs
-                // EAGERLY, so `inner` stays empty forever and every finished job's result lands in
+                // W7-26 — BOTH payload halves. `inner` is the lazy QUEUE half (filled only by the
+                // since-removed cooperative engine); under eager `submit` it stays empty forever and
+                // every finished job's result lands in
                 // `eager` instead (300 × ~1 MB of results measured **PASS at 313 MB against an
                 // 8 MB cap** while only `inner` was read). W7-27 — what a finished job leaves in
                 // `eager` is now its buffered `out`/`stderr` only: the return value is dropped, since
@@ -1654,8 +1654,8 @@ mod iter_obj_tests {
         let _ = ir;
     }
 
-    /// W7-26 — the `Obj::Executor` arm used to read only `inner`, the `--serial` QUEUE half. The
-    /// default M:N engine runs `submit` EAGERLY, so `inner` stays empty forever and every finished
+    /// W7-26 — the `Obj::Executor` arm used to read only `inner`, the lazy QUEUE half. `submit` runs
+    /// EAGERLY, so `inner` stays empty forever and every finished
     /// job's result sits in `eager` instead: measured on the release binary, 300 × ~1 MB of results
     /// **PASSED an 8 MB `--max-heap` at 313 MB peak RSS**.
     ///

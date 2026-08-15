@@ -3,7 +3,7 @@
 # called `Type.method(args)` instead of `value.method(args)`. The Rust `fn new` ergonomic. This is
 # ADDITIVE — the positional `Name(...)` ctor still works; static methods unlock named/alternative and
 # VALIDATING constructors (returning Result/Option) the positional ctor cannot express.
-# Three-engine parity (VM, --serial, --parallel) — byte-identical, no time-dependent behavior.
+# Deterministic golden — byte-identical at every worker count, no time-dependent behavior.
 
 # A named/alternative ctor: `Rect.square(s)` builds a Rect — the positional ctor can't name itself.
 struct Rect:

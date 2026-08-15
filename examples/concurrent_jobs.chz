@@ -3,8 +3,8 @@
 # This is a REAL program that computes real answers, then checks every concurrently-produced result
 # against an independently-computed SEQUENTIAL golden. So it is two tests at once:
 #   1. Correctness — a wrong aggregate fails a `check` and the run ends "... N FAILURES".
-#   2. Parity      — the whole thing is deterministic by construction, so `--serial` and the default
-#                    M:N engine MUST print byte-for-byte identical output. Any diff is a real
+#   2. Determinism — the whole thing is deterministic by construction, so EVERY run, at every worker
+#                    count, MUST print byte-for-byte identical output. Any diff is a real
 #                    airlock/scheduler bug.
 #
 # It deliberately touches EVERY concurrency primitive Chezzi offers:
@@ -15,13 +15,13 @@
 #   std.cancel (manual/timeout/derive/done/cancelled/reason/cancel) · std.time.timer · defer cleanup ·
 #   and the airlock: recursive-closure + protocol-existential + mid-`recover:` generator crossing.
 #
-# Determinism discipline (why serial == M:N): all concurrent accumulation is commutative or lock-RMW
+# Determinism discipline (why every schedule agrees): all concurrent accumulation is commutative or lock-RMW
 # (order-independent); no RNG / no wall-clock in any asserted value; `timer` is only used where it
 # provably always times out (a channel nobody feeds); cancellation fires only AFTER the work is drained;
 # Atomic cas/exchange are single-threaded; every worker loop has a recv/wait back-edge (never CPU-spins).
 #
-# Run:  chezzi run --serial playground/concurrent_jobs.chz   (parity oracle)
-#       chezzi run          playground/concurrent_jobs.chz   (M:N — must match byte-for-byte)
+# Run:  chezzi run                  examples/concurrent_jobs.chz
+#       CHEZZI_THREADS=2 chezzi run examples/concurrent_jobs.chz   (second worker count — must match byte-for-byte)
 
 import std.concurrency
 import std.concurrency.collection

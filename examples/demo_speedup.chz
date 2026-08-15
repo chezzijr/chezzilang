@@ -1,8 +1,7 @@
 # CPU-bound speedup demo: W independent workers each count primes up to `limit` (trial division —
 # pure, shared-nothing CPU work), results collected over a channel. The whole nursery is timed with
-# std.time.monotonic(). Run the SAME file under different engines to see the wall-clock difference:
+# std.time.monotonic(). Run the SAME file at different worker counts to see the wall-clock difference:
 #
-#   chezzi run --serial      examples/demo_speedup.chz   # cooperative VM, 1 thread
 #   chezzi run --threads=1   examples/demo_speedup.chz   # M:N engine, 1 worker
 #   chezzi run --threads=4   examples/demo_speedup.chz   # M:N engine, 4 workers
 #   chezzi run               examples/demo_speedup.chz   # M:N engine, all cores

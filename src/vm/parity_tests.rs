@@ -923,7 +923,7 @@ fn match_arm_scrutinee_driven_three_engine() {
 
 /// BLOCKER 2/3 divergence case — `import b` FIRST, then `import a`; scrutinee is `a.Color.Blue`,
 /// a variant that exists ONLY in `a`. A scrutinee-blind import-iterating resolver picked `b`
-/// (which has no `Blue`) and crashed (`--serial`/`--parallel`) or matched the wrong arm (VM). The
+/// (which has no `Blue`) and either crashed or matched the wrong arm. The
 /// match-arm key MUST come from the scrutinee's `a::Color`. Looped 50x across all three engines.
 #[test]
 fn match_arm_only_in_a_variant_three_engine() {
@@ -3908,11 +3908,12 @@ main()
 ///
 /// **Both** engines must report the kernel's refusal. `W7-59` narrowed the block-in-place gate to
 /// the eager-`Executor` job alone — NOT to `may_block_socket_in_place()`, which would have refused
-/// `--serial` too. The difference is load-bearing: `accept`/`read` wait on a chezzi peer fiber that
-/// can only run on the very thread they would block, so refusing on `--serial` prevents
+/// the cooperative engine too, while it existed. The difference is load-bearing: `accept`/`read` wait
+/// on a chezzi peer fiber that can only run on the very thread they would block, so refusing there
+/// prevented
 /// self-starvation (`W7-40` R1); a `connect` handshake is completed by the KERNEL, starves no chezzi
 /// party, and both ancestors block on it (CPython `socket.connect` 0.1 ms, Go `net.Dial` 314 µs from
-/// the main goroutine). So `--serial` keeps its answer here, and gets `demote_block_socket`'s
+/// the main goroutine). So the cooperative engine kept its answer here, and got `demote_block_socket`'s
 /// escapes on the way.
 ///
 /// Guards the bounded-wait property too: a regression to an unbounded wait on a non-completing
@@ -6653,7 +6654,7 @@ fn deferred_fault_trace_supersedes_on_both_engines() {
 }
 
 /// gaps.md B4: an uncaught fault thrown from an `Executor.submit(...)` closure must print the SAME
-/// backtrace frames on both engines. Previously `--serial` drained the submitted task INLINE on the
+/// backtrace frames. Previously the cooperative engine drained the submitted task INLINE on the
 /// entry `Vm`, so the task's callee frames survived into `fault_trace` and printed `at boom` /
 /// `at <closure>` / `at main`, while M:N ran each task on an isolated worker `Vm` and discarded that
 /// worker's trace, printing only `at main`. Both engines now converge on `[main]` — matching a plain
@@ -6879,7 +6880,7 @@ fn golden_iter_adapters_via_run_file() {
 /// `Iterable[T]` + `.iter()` — a list flows into the Take/Mapped adapter pipeline, `.iter()`+manual
 /// `.next()` on every collection, a pure-`Iterable` struct drives `for`, an `[S: Iterable[T]]` fn
 /// over a list AND a struct iterator, empty/idempotent cursors, `List(xs.iter())` round-trip. Byte-
-/// identical on VM + interp (the `--serial` third engine is asserted in the regression script).
+/// identical across runs.
 #[test]
 fn golden_iterable_via_run_file() {
     let path = fixture("examples/iterable.chz");
@@ -8891,7 +8892,7 @@ main()";
 // A generator (whether held in a frame LOCAL or a MODULE GLOBAL — see the item-B tests below) is
 // serialized by `to_wire`/`from_wire` and rebuilt on the receiving heap as an INDEPENDENT copy. Every
 // parked slot is checked sendable at serialize time, so a non-sendable slot still rejects at the
-// crossing. All tests assert serial (`--serial` oracle) == M:N.
+// crossing. All tests run on the M:N engine against a literal golden.
 
 /// A PENDING generator (never driven) captured into a `spawn:` block crosses by value; the receiving
 /// task drives it fully, and the sender's copy is INDEPENDENT (deep-copy: sender also drives the full
@@ -9127,7 +9128,7 @@ main()";
 // task now crosses BY VALUE exactly like a frame-local one (F3 path C): each task gets its own frozen
 // per-task snapshot (F1) whose generator arm deep-copies via `to_wire`/`from_wire` into the worker heap.
 // A genuinely non-sendable parked slot (deep acyclic nest) or a reference cycle still REJECTS at
-// serialize time — the direct `to_wire` reject, NOT a silent poison→Nil. serial (`--serial` oracle) == M:N.
+// serialize time — the direct `to_wire` reject, NOT a silent poison→Nil.
 
 /// A module-global PENDING generator reached by a spawned task crosses by value and drives fully; the
 /// parent's own `g` is an INDEPENDENT copy (drives the full sequence after the join). Was the reach-gate
@@ -11460,7 +11461,8 @@ fn sequential_mutation_between_nurseries_reads_fresh_parity() {
 /// W6-19 — a spawned task whose FIRST module-global access is a WRITE. `Op::GetGlobalSlot` calls
 /// `ensure_module_faulted`, but `DefineGlobalSlot`/`SetGlobalSlot` did not, so on M:N the write indexed
 /// an unfaulted (empty-slots) worker module and PANICKED the pool thread
-/// (`index out of bounds: the len is 0`) → `internal error: a parallel task panicked`, while `--serial`
+/// (`index out of bounds: the len is 0`) → `internal error: a parallel task panicked`, while the
+/// since-removed cooperative engine
 /// printed the right answer. Rooted at `set_global_slot` (one guard, all callers).
 #[test]
 fn spawn_task_first_global_access_is_write_parity() {

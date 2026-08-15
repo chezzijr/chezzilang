@@ -1,14 +1,15 @@
 # tests/chz/suites/uuid_entropy_test.chz — std.uuid v4() on the DEFAULT (unseeded) path, which draws
 # 16 bytes from the OS CSPRNG per call (CPython's uuid4 shape).
-# Output is INTENTIONALLY non-deterministic, so there is NO byte-exact golden and NO both-engine
-# parity entry — serial and M:N each draw DIFFERENT uuids. We assert PROPERTIES only: uniqueness and
-# the RFC 4122 v4 shape (36 chars, version nibble '4', variant in 8/9/a/b).
+# Output is INTENTIONALLY non-deterministic, so there is NO byte-exact golden — every run draws
+# DIFFERENT uuids. We assert PROPERTIES only: uniqueness and the RFC 4122 v4 shape (36 chars, version
+# nibble '4', variant in 8/9/a/b).
 # It must NOT call uuid_seed: `chezzi test` runs the whole suite in ONE process and the seeded switch
 # is process-global and sticky, so seeding here would poison every later v4() in the run.
-# Under `cargo test` the suite runs in-process alongside tests that DO seed, so the unseeded path is
-# only guaranteed because the `chz_suite_passes` gate takes the UUID test lock and calls
-# `clear_seed()` first — without that, test order would decide which stream this file exercises.
-# Run: `cargo run -- test tests/chz/suites/uuid_entropy_test.chz` (M:N) / `--serial` — both pass.
+# Under `cargo test` the gate is `chz_suite_passes` (`tests/chz_suite.rs`), an integration-test binary
+# with its own process and its own copy of every `static`. The seeding tests it used to race
+# (`vm::parity_tests::golden_uuid_via_run_file`) live in the LIB binary, which cargo sequences
+# strictly before/after — so the unseeded path is guaranteed by process isolation, not by a lock.
+# Run: `cargo run -- test tests/chz/suites/uuid_entropy_test.chz`.
 
 import std.uuid
 

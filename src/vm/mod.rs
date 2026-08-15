@@ -57,8 +57,8 @@ use crate::{lexer, parser};
 /// forced back onto whatever error emerges from the unwind, and read first by `verdict_from_fault`
 /// (bucket `TimedOut`). The abort site differs (a back-edge deadline check, not a GC boundary), but
 /// the recover-bypass is identical: the `run_until` Err funnel bypasses `recover:` whenever it is set.
-/// Timeout is M:N-engine-only (a wall-clock trip is non-deterministic → no serial==M:N parity), so
-/// this is always `false` under `--serial` and off the `chezzi test --timeout` path.
+/// A wall-clock trip is non-deterministic, so this is always `false` off the `chezzi test --timeout`
+/// path — which is the only place that sets a deadline at all.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct RuntimeError {
     pub message: String,
@@ -97,7 +97,7 @@ impl RuntimeError {
 /// that answers "is this ERROR a hard halt": once stdout died, every fault anywhere became a hard
 /// halt. What the term bought was a whole-queue kill whose shape depended on how many jobs the pool
 /// had started first — measured on the `Executor` + spew + two file-writing markers shape, neither
-/// marker ran at `--threads=1` or `--serial`, both ran at `--threads=3+`, and `--threads=2` gave
+/// marker ran at `--threads=1`, both ran at `--threads=3+`, and `--threads=2` gave
 /// either answer across repeated runs. **CPython's `ThreadPoolExecutor` — the ancestor that owns
 /// `Executor` semantics — runs every submitted job at `max_workers` 1/2/4**, so a broken pipe kills
 /// the printer, not its siblings. (The `invoke_native` `stream_halt` gate is the same fix applied to
@@ -109,7 +109,7 @@ impl RuntimeError {
 /// `shutdown()`, a job that never prints and never returns — `ex.submit(fn(): while true: j = j + 1)`
 /// — used to die with the queue and now runs forever, so `chezzi run x.chz | head -1` on that program
 /// hangs where it exited in 4 ms. That is run-all keeping its promise, NOT a new uncancellable job
-/// class: `shutdown_now()` still kills the same job in 54 ms on `--serial`/`--threads=1`/default (a
+/// class: `shutdown_now()` still kills the same job in 54 ms at `--threads=1` and at the default (a
 /// loop back-edge is a cancellation point, and `shutdown_now` trips the per-core cancel flag).
 /// CPython hangs on the identical `ThreadPoolExecutor` shape (measured), so this follows the owning
 /// ancestor. Go exits — but by taking SIGPIPE on fd 1 and killing the process, a signal policy Chezzi
@@ -4698,11 +4698,15 @@ fn run_program_inner(src: &str) -> (Vec<u8>, Result<(), RuntimeError>) {
     (vm.out, result)
 }
 
-/// Assert two program outputs contain the SAME lines regardless of order. For a concurrency test
-/// where the cooperative and M:N engines deliver the same *set* of results but the interleaving —
-/// and hence line order — legitimately differs under the M:N scheduler (racing spawns / Executor
-/// tasks / multi-producer channel drains). The deterministic exact order stays asserted on the
-/// cooperative engine separately; this only cross-checks that M:N produced the same multiset.
+/// Assert two program outputs contain the SAME lines regardless of order — for a concurrency test
+/// whose line ORDER legitimately varies between runs under the M:N scheduler (racing spawns /
+/// `Executor` tasks / multi-producer channel drains) while the line SET does not.
+///
+/// **Both arguments are M:N runs.** Before 2026-08-16 the first was the cooperative `--serial`
+/// engine, which delivered a deterministic order, and the exact order was asserted there separately;
+/// that engine is gone, so no run of any program pins a cross-task order any more. Comparing two runs
+/// of the same program against each other is a *stability* check and nothing more — if a test wants a
+/// real expectation, give it a literal line set.
 #[cfg(test)]
 pub fn assert_same_lines(cooperative: &str, mn: &str) {
     let mut a: Vec<&str> = cooperative.lines().collect();
@@ -4711,7 +4715,7 @@ pub fn assert_same_lines(cooperative: &str, mn: &str) {
     b.sort_unstable();
     assert_eq!(
         a, b,
-        "serial vs M:N line multiset differs\n serial:\n{cooperative}\n M:N:\n{mn}"
+        "line multiset differs between the two runs\n first:\n{cooperative}\n second:\n{mn}"
     );
 }
 

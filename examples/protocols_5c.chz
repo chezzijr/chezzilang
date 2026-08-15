@@ -1,6 +1,6 @@
 # Phase 5c-protocols — behavior-preservation exercise for the reserved/builtin protocols whose SHAPE is
 # now file-backed in std/prelude.chz. Conformance + operator binding stay Rust-wired, so this program
-# must produce byte-identical output on all three engines (interp, --serial VM, default M:N VM).
+# must produce byte-identical golden output at every worker count.
 #
 # Covers: int/float INTRINSIC Add (no method); a user 4-op struct under + - * / AND through
 # `[T: Arithmetic]`; `[T: Comparable]` max over a Comparable struct; a user Iterator struct driven by

@@ -5,7 +5,7 @@
 # have no `as_path` method of their own), so the grant must be genuinely CALLABLE from an erased
 # generic body (`Vm::intrinsic_proto_method`) or the program type-checks and then faults `has no
 # method`. `path.Path` satisfies it STRUCTURALLY through its own `as_path`.
-# Run: `cargo run -- test tests/chz/`. Gated by `test_runner::chz_suite_passes` (the M:N-engine gate).
+# Run: `cargo run -- test tests/chz/`. Gated by `chz_suite_passes` (`tests/chz_suite.rs`).
 
 import std.path
 

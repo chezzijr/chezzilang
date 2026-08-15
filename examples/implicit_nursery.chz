@@ -2,9 +2,9 @@
 # `parallel:`) is legal anywhere and joins at the function's `return`/end. `parallel:` still works as
 # an explicit *inner* sub-nursery that joins earlier (at its dedent).
 #
-# `implicit_nursery.expected`'s exact line order is the BUFFERED test sink (every lib helper, both
-# engines) and `--serial`. `chezzi run` STREAMS: cross-task print order is nondeterministic on both
-# engines by contract (docs/concurrency.md, "the user-facing contract"), so e.g. `outer ran` may
+# `implicit_nursery.expected`'s exact line order is the BUFFERED test sink (every lib helper), where
+# a task's output is flushed at the join in spawn order. `chezzi run` STREAMS: cross-task print order
+# is nondeterministic by contract (docs/concurrency.md, "the user-facing contract"), so e.g. `outer ran` may
 # print before `after inner nursery` there. A join point guarantees COMPLETION by the barrier, never
 # that the task could not have started (and printed) earlier.
 

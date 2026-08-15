@@ -2,8 +2,9 @@
 # into a shared mailbox; the parent collects them after the join. Move-on-send keeps each task's
 # heap isolated — only the channel handle is shared.
 #
-# `channel.expected`'s exact line order is the BUFFERED test sink (every lib helper) and `--serial`.
-# `chezzi run` STREAMS: cross-task print order is nondeterministic on both engines by contract
+# `channel.expected`'s exact line order is the BUFFERED test sink (every lib helper), where a task's
+# output is flushed at the join in spawn order.
+# `chezzi run` STREAMS: cross-task print order is nondeterministic by contract
 # (docs/concurrency.md, "the user-facing contract"), so diffing streamed CLI output against the
 # golden is not a supported comparison — the M:N golden asserts the line SET (`assert_same_lines`).
 

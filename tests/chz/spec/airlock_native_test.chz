@@ -2,7 +2,7 @@
 # code (a fn pointer + name) with no heap-local GcRef, so it must cross the wire-value airlock BY
 # VALUE — via Channel.send / Shared / a spawn fn-arg — exactly as it already crossed the SNAPSHOT path
 # (a `spawn:` block capturing it). Previously the wire path lumped Native with Module and rejected it.
-# Gated by `test_runner::chz_suite_passes` (the M:N-engine gate).
+# Gated by `chz_suite_passes` (`tests/chz_suite.rs`).
 import std.math
 import std.concurrency
 

@@ -1,6 +1,6 @@
 # std.concurrency.pmap — scoped parallel-map helpers. Pure Chezzi over existing primitives (a
-# `parallel:` nursery + `spawn:` blocks + a `Channel[T]`), so every engine (cooperative `--serial`
-# oracle, real-thread M:N) behaves identically.
+# `parallel:` nursery + `spawn:` blocks + a `Channel[T]`) — it has no native scheduler surface of
+# its own.
 #
 # WHY: every concurrent "map a fn over a list in parallel, collect the results" program here repeats
 # the same boilerplate — a report channel, one `spawn` per element, a join, then reassemble. These

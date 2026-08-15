@@ -9,7 +9,7 @@
 # Generics stay erased: one body, nothing monomorphized, no type argument reaches the VM.
 # Rust is the ancestor — `fn reset<T: Default>(_: T) -> T { T::default() }` is the same program.
 #
-# Two-engine parity (default M:N and `--serial`) — byte-identical, no time-dependent behavior.
+# Deterministic golden — byte-identical at every worker count, no time-dependent behavior.
 
 protocol Default:
     fn default() -> Self

@@ -8,7 +8,7 @@
 #
 # SCOPE: the OPERATOR. The container ripple (Map/Set probes, `in`, `list.contains`/`index_of`/
 # `dedup`/`unique`, and the recursive container arms) lives in `eq_protocol_containers_test.chz`.
-# Gated by `test_runner::chz_suite_passes` (the M:N-engine gate).
+# Gated by `chz_suite_passes` (`tests/chz_suite.rs`).
 
 fn msg_of[T](r: Result[T, Error], where_: str) -> str:
     match r:

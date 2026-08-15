@@ -1212,9 +1212,8 @@ struct Suite:
     }
 
     /// W7-26 — the same backlog held by an `Executor`'s finished jobs. `--max-heap` read only the
-    /// core's `inner` queue, which is the `--serial` half: the default M:N engine runs `submit`
-    /// eagerly, so `inner` stays empty and each finished job's outcome lands in `eager` instead,
-    /// reached by `live_bytes` nowhere. Both engines, because each one exercises a different half.
+    /// core's `inner` queue, the lazy half: `submit` runs eagerly, so `inner` stays empty and each
+    /// finished job's outcome lands in `eager` instead, reached by `live_bytes` nowhere.
     ///
     /// W7-27 re-base: the backlog is the jobs' buffered OUTPUT, not their return values. Return
     /// values are no longer retained at all (nothing can read them — see
@@ -1233,10 +1232,9 @@ struct Suite:
         const CAP: usize = 8_000_000;
         let d = TmpDir::new();
         // ~100 KB blob built once, CAPTURED by 300 jobs that each print it — 30 MB of buffered
-        // output held until `shutdown()`. The capture is load-bearing twice over: on `--serial` it
-        // is the queued task closure that trips the cap, and on M:N wiring it at each submit is what
-        // paces the parent's sweeps (a job building its own payload leaves the parent with nothing
-        // to trigger a GC on; see the W7-26r sampling residual on the gaps.md row).
+        // output held until `shutdown()`. The capture is load-bearing: wiring it at each submit is
+        // what paces the parent's sweeps (a job building its own payload leaves the parent with
+        // nothing to trigger a GC on; see the W7-26r sampling residual on the gaps.md row).
         let ex = d.write(
             "ex_test.chz",
             "import std.concurrency\n\ntest fn execres():\n    parts: List[str] = []\n    \
@@ -1293,9 +1291,8 @@ struct Suite:
     /// `MemoryError` in the WORKER at job 57/500 while `main` sat in `ex.shutdown()`; Go 1.26 under
     /// `GOMEMLIMIT=32MiB` ran 7 GC cycles while `main` was blocked in `wg.Wait()`.
     ///
-    /// M:N only (`--max-heap` is refused with `--serial`). Payload here is ~100 KB × 300 = ~30 MB of
-    /// backlog against the same 8 MB cap — enough to trip several times over without making the test
-    /// suite carry the 700 MB repro.
+    /// Payload here is ~100 KB × 300 = ~30 MB of backlog against the same 8 MB cap — enough to trip
+    /// several times over without making the test suite carry the 700 MB repro.
     #[test]
     fn over_memory_trips_while_the_parent_is_blocked_in_a_join() {
         // Serialize against the other heavy `Executor` `--max-heap` tests — see the lock's doc.
@@ -1563,9 +1560,6 @@ struct Suite:
     /// See the attribution proof further down; do not credit these verdicts to the worker-side
     /// mechanisms (`Vm::sample_mem_cap` at the fiber door, `Heap::request_collect` at the job door).
     ///
-    /// M:N only — `--max-heap` is refused with `--serial` at the CLI (`main.rs`), and the serial
-    /// engine shares ONE heap with the parent anyway, so there is no born-big worker heap to miss.
-    ///
     /// **W7-28 re-base — the worker path can no longer be ATTRIBUTED, and that is a proof, not a
     /// gap.** The `nospawn` control below did exactly the job it was written for: the parent-side
     /// sampling fix landed (byte-paced `should_collect`, W7-28) and it failed LOUDLY. There is no
@@ -1693,10 +1687,6 @@ struct Suite:
     ///   and masks the bug. The eager arm (`self.mn.is_none() || worker_count() >= 2`)
     ///   consumes the task into `prepare_worker` immediately, so that copy is garbage within the same
     ///   opcode and the parent never trips.
-    ///
-    /// M:N only, like `over_memory_trips_on_a_worker_payload_with_no_task_allocation`: `--max-heap` is
-    /// refused with `--serial` at the CLI, and the serial engine shares ONE heap with the parent — the
-    /// parent's next instruction boundary samples the copy, so there is no unsampled task heap to miss.
     ///
     /// Sized DOWN to 8 K elements against a 1 MB cap (the repros used 300 K / 8 MB): the generous-cap
     /// controls must run to completion on the DEBUG VM, and a slow test here perturbs this suite's
@@ -2185,9 +2175,8 @@ struct Suite:
         // sibling's own back-edge trips the deadline at 303 ms and hides the bug entirely, which is
         // exactly how it survived W7-16's test pass.
         //
-        // Both engines: the deadline is the only mid-sleep halt a single-threaded engine can observe,
-        // so the serial arm is the regression fence for it. (`chezzi test --timeout` rejects `--serial`
-        // at the CLI; `run_tests_timed` is the layer below that gate.)
+        // The deadline is the only mid-sleep halt available to a party with no runnable sibling, which
+        // is what these two fixtures are: `run_tests_timed` is the regression fence for it.
         for (name, body) in [
             (
                 "toplevelsleep_test.chz",
@@ -2496,9 +2485,7 @@ struct Suite:
     /// gets no reply, so the non-blocking connect stays `EINPROGRESS` forever — the same address
     /// `parity_tests::net_connect_parks_and_is_drained_on_fault` relies on.
     ///
-    /// M:N only: net requires the `--parallel` engine (a socket op off it fails loud rather than
-    /// parking) and the CLI rejects `--timeout` with `--serial` anyway. Port `0` throughout — the
-    /// fixed port in the original gap repro is a flake waiting to happen.
+    /// Port `0` throughout — the fixed port in the original gap repro is a flake waiting to happen.
     #[test]
     fn timeout_aborts_a_netpoller_parked_test() {
         for (name, body) in [

@@ -3509,8 +3509,7 @@ impl Vm {
                 // Read-only after construction (no lock), and EMPTY for an executor created by `main`
                 // or by a `parallel:`/`spawn` fiber — those are untouched. The core's OWN `cancel` is
                 // deliberately NOT checked here: `shutdown_now` sets `shut` first, so the check above
-                // already owns that case and adding it would double-report. (`--serial` never sets
-                // `eager_core`, so `creator_cancel` is always empty there — no parity delta.)
+                // already owns that case and adding it would double-report.
                 if core
                     .creator_cancel
                     .iter()

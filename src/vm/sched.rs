@@ -1500,13 +1500,14 @@ impl Vm {
     ///   own private sleep-spin, deleted by `W7-59`, which now routes it here like the other four; they
     ///   were simply left behind (the repo's recurring fixed-some-arms-of-an-N-way-set finding, W7-22).
     ///
-    /// **Not, deliberately: `--serial` and an eager `Executor` job.** Neither owns its thread — serial
-    /// runs every fiber on one thread, and a job runs on the bounded process-wide [`crate::vm::pool`] —
-    /// so blocking in place there starves the peer that would make the fd ready. Both were measured as
-    /// permanent hangs when a first attempt at this widening let them in; they keep the loud `Err`.
+    /// **Not, deliberately: an eager `Executor` job.** It does not own its thread — it runs on the
+    /// bounded process-wide [`crate::vm::pool`] — so blocking in place there starves the peer that would
+    /// make the fd ready. Measured as a permanent hang when a first attempt at this widening let it in;
+    /// it keeps the loud `Err`. (The since-removed cooperative engine was excluded for the same reason:
+    /// it ran every fiber on one thread.)
     ///
-    /// **`connect` is the one caller that reaches this loop on `--serial`, and that is not an
-    /// oversight** (`W7-59`): the starvation argument above is about waiting on a CHEZZI peer fiber,
+    /// **`connect` is deliberately admitted even though it is a wait a non-thread-owning party can
+    /// reach** (`W7-59`): the starvation argument above is about waiting on a CHEZZI peer fiber,
     /// which only `accept`/`read`/`write` do. A `connect` handshake is completed by the KERNEL, so no
     /// chezzi party is starved by waiting for it — and both ancestors block (measured: CPython
     /// `socket.connect` 0.1 ms, Go `net.Dial` 314 µs, each from the sole/main thread). `connect`
@@ -1540,17 +1541,16 @@ impl Vm {
     /// It does, however, **SUPPRESS** the process-wide verdict for as long as the op is outstanding —
     /// which for an fd that never becomes ready is FOREVER, not merely "delayed" (an earlier version of
     /// this note claimed the latter; measured, it is wrong). Repro: `main` blocks in `accept()` while an
-    /// eager `Executor` job blocks on a `Channel` nothing can ever send. The default engine prints
-    /// `listening` and hangs (rc=124 under `timeout 12`); `--serial` on the IDENTICAL source prints
-    /// `Err('accept would block: …')` and then the full `recv on an empty channel: deadlock` diagnostic,
-    /// exit 1.
+    /// eager `Executor` job blocks on a `Channel` nothing can ever send. Chezzi prints `listening` and
+    /// hangs (rc=124 under `timeout 12`).
     ///
-    /// **That engine difference is not a parity bug — do not "fix" it in code.** Go behaves exactly like
-    /// the default engine: an open socket is a runnable party, so `all goroutines are asleep` does not
-    /// fire (measured — `main` in `ln.Accept()` plus a goroutine on an empty `chan int`: prints
-    /// `listening`, hangs, rc=124). `--serial` differs only because it REFUSES the socket op outright
-    /// (the documented narrowed contract above), which is what leaves its channel party alone in the
-    /// predicate. The engine that matches the ancestor is the default one.
+    /// **That is the ancestor's answer — do not "fix" it in code.** Go behaves the same way: an open
+    /// socket is a runnable party, so `all goroutines are asleep` does not fire (measured — `main` in
+    /// `ln.Accept()` plus a goroutine on an empty `chan int`: prints `listening`, hangs, rc=124). The
+    /// since-removed cooperative engine printed `Err('accept would block: …')` and then the full
+    /// `recv on an empty channel: deadlock`, exit 1 — but only because it REFUSED the socket op
+    /// outright, which is what left its channel party alone in the predicate. It was the engine that
+    /// did NOT match the ancestor.
     ///
     /// On an M:N worker it is accounted `inflight` (NOT `blocked_native`): a socket op is woken by external OS readiness, so
     /// it must VETO the deadlock predicate — exactly the netpoller-park accounting (a lone in-callback
@@ -1583,9 +1583,9 @@ impl Vm {
         span: Span,
         mut attempt: impl FnMut(&mut Vm) -> SockPoll,
     ) -> Result<Value, RuntimeError> {
-        // `None` when there is no worker pool at all (top-level `main`, an eager `Executor` job, a
-        // `--serial` run): the calling thread is its own, so there is nothing to demote FROM and the
-        // scheduler bookkeeping below is skipped. The wait loop itself is engine-agnostic.
+        // `None` when there is no worker pool at all (top-level `main`, an eager `Executor` job): the
+        // calling thread is its own, so there is nothing to demote FROM and the scheduler bookkeeping
+        // below is skipped. The wait loop itself does not care either way.
         let sched = self.mn.as_ref().map(Arc::clone);
         if sched.is_some() {
             self.demote_socket_enter(span)?;
@@ -2296,11 +2296,11 @@ impl Vm {
     /// deleting either.
     ///
     /// COST CEILING: this is a FULL mark-sweep of the heap the fiber runs on, once per task start.
-    /// On the M:N engine that heap is the worker's own and freshly born, so it is small. On the
-    /// SERIAL engine every fiber shares one heap, making a capped serial run O(live heap × tasks).
-    /// Acceptable because `--max-heap` is refused with `--serial` at the CLI (`main.rs`) — only the
-    /// in-process `run_tests_capped` test helper can reach that combination — but if the cap is ever
-    /// opened up to serial runs, this is the line that needs a cheaper trigger.
+    /// The heap is the M:N worker's own and freshly born, so it is small. (An engine where every fiber
+    /// shared ONE heap would make a capped run O(live heap × tasks); the cooperative engine that did
+    /// that has been removed, and `--max-heap` was refused with it at the CLI anyway. If a
+    /// shared-heap execution mode is ever reintroduced, this is the line that needs a cheaper
+    /// trigger.)
     ///
     /// **Collecting with `self.frames` EMPTY is sound.** Empty frames stop `run_until`'s *loop*; they
     /// do not make a direct [`collect`](Vm::collect) unsafe. `collect` roots the operand stack first
@@ -3924,9 +3924,9 @@ impl Vm {
     /// W6-2 — an `Executor` has no nursery, so there is no pin: the snapshot is taken where this is
     /// called, which is the instant the job actually starts. Under EAGER execution that is the
     /// `submit` (a job observes the globals as of its submission), where the pre-eager queueing model
-    /// took it at the drain. `--serial` still queues and still snapshots at the drain (decision D3),
-    /// so this instant is one of the two deliberate serial-vs-M:N divergences — observable only by a
-    /// program that inspects a job's effect BETWEEN `submit` and `shutdown()`.
+    /// took it at the drain. The difference is observable only by a program that inspects a job's
+    /// effect BETWEEN `submit` and `shutdown()` — which is exactly the shape the `Executor` docs tell
+    /// you not to write.
     pub(super) fn prepare_worker_from_wire(
         &mut self,
         task: WireValue,

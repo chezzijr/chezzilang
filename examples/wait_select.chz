@@ -2,9 +2,8 @@
 # first, bind its value, and run that arm (source-order priority, not Go's random fairness).
 #
 # This example uses only NON-blocking arms — a value already queued, a fired `timer`, or `else:` —
-# so the M:N (`--parallel`) and serial (`--serial`) engines both produce identical output.
-# (A `wait` that truly blocks until a sibling produces is a VM/cooperative capability; see the
-# `vm_wait_blocks_then_wakes_on_second_channel` test.)
+# so its output is deterministic at every worker count. (A `wait` that truly blocks until a sibling
+# produces is exercised by the `vm_wait_blocks_then_wakes_on_second_channel` test.)
 
 import std.time
 
@@ -31,8 +30,9 @@ fn main():
 
     # 4. A `timer` arm fires once its deadline passes. For a waiter that owns its OS thread (`main`,
     #    an `Executor` job) or a `parallel:` fiber it is just another arm — a sibling value arriving
-    #    first wins the wait (`docs/gaps.md` W7-14). A `--serial` fiber inside a nursery still
-    #    inline-sleeps to the deadline (N10, the frozen parity oracle).
+    #    first wins the wait (`docs/gaps.md` W7-14). One shape still inline-sleeps to the deadline
+    #    without re-polling siblings: the INLINE outermost-`parallel:` builder, which owns no worker
+    #    loop to drive a park (`src/vm/netio.rs` op_wait_poll; `docs/gaps.md` N10).
     wait:
         _ := timer(1).recv(): print("timeout")
 

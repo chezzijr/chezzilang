@@ -4,7 +4,7 @@
 # instance's `tid` via `Program::struct_name_of_tid`. This exercises that resolution on the three
 # paths it touches: (a) LOCAL Display/str, (b) METHOD dispatch, (c) CROSS-HEAP (Channel across a
 # spawned task). Asserts on RECEIVED VALUES (never inter-task print order).
-# Gated by `test_runner::chz_suite_passes` (the M:N-engine gate).
+# Gated by `chz_suite_passes` (`tests/chz_suite.rs`).
 import std.concurrency
 
 struct Point:

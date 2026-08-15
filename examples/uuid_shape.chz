@@ -1,5 +1,5 @@
 # examples/uuid_shape.chz — std.uuid v4 generation. uuid_seed(N) makes the stream deterministic so
-# the golden is byte-identical across run / --serial / --parallel and on both engines (an UNSEEDED
+# the golden is byte-identical on every run and at every worker count (an UNSEEDED
 # v4() draws from OS entropy and cannot be value-golden — only its SHAPE is stable). The drawn UUIDs
 # satisfy RFC 4122 v4: 36 chars, version nibble '4', variant in 8/9/a/b.
 

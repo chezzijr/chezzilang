@@ -16,7 +16,7 @@
 # stays Option-only — both are re-pinned here because the carrier now survives desugar and is
 # lowered twice (checker + compiler) instead of once.
 #
-# Gated by `test_runner::chz_suite_passes` (the M:N-engine gate).
+# Gated by `chz_suite_passes` (`tests/chz_suite.rs`).
 import std.concurrency
 
 struct MyErr:

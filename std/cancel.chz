@@ -8,9 +8,9 @@
 # a `trip()`-able `Channel[bool]` for manual cancel). See docs/concurrency.md §6e.
 #
 # Cooperative contract: a token SIGNALS cancellation; it cannot forcibly interrupt. A CPU loop must
-# poll `cancelled()`; an IO loop must `wait:` on `done()`. A self-polling timeout loop stops on time
-# on every engine; a manual cancel of a non-polling pure-CPU sibling is only preempted on the default
-# OS-thread engine (the `--serial`/`--interp` oracles run it to completion).
+# poll `cancelled()`; an IO loop must `wait:` on `done()`. A self-polling timeout loop stops on time;
+# a manual cancel of a non-polling pure-CPU sibling is preempted only because the M:N engine runs the
+# sibling on a real OS thread.
 #
 # TREE-STRUCTURED. A child token is `derive()`d from a parent (Go `context.WithCancel`): cancelling
 # or timing out the parent cancels every transitively-derived child, recursively down the tree, while

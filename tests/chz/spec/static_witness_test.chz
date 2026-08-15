@@ -12,7 +12,7 @@
 # constructed. The compile-time rejections (cross-module, forwarding, fn-as-value, unpinned `T`, a
 # witness call inside a closure/`spawn:`/`defer:`/nested-fn/method) are `src/checker/tests.rs`
 # (`// ===== M24` section), not here: they never reach a runtime.
-# Gated by `test_runner::chz_suite_passes` (the M:N-engine gate).
+# Gated by `chz_suite_passes` (`tests/chz_suite.rs`).
 
 import std.concurrency
 # a module bind a PARAMETER can shadow — see the M24-2 section at the bottom of this file
