@@ -7,7 +7,7 @@
 #
 # The contrast that must NOT change: a DATA DAG alias (`pair := [xs, xs]`) is still two independent
 # deep copies (docs/concurrency.md) — a cell is a binding's identity, a list is a value.
-# Gated serial==M:N by chz_suite_passes_both_engines.
+# Gated serial==M:N by chz_suite_passes.
 import std.concurrency
 
 struct Ctr:

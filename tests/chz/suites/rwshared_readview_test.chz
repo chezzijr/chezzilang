@@ -1,7 +1,7 @@
 # Tests for the zero-copy READ-view methods on RwShared[List[E]] — len/at/slice/for_each/fold.
 # These walk the stored heap-independent WireValue::List under the read guard and from_wire ONE
 # element at a time (O(1) memory), so they are naturally serial==M:N byte-identical. The
-# chz_suite_passes_both_engines gate runs this file on BOTH engines and asserts identical verdicts.
+# chz_suite_passes gate runs this file on BOTH engines and asserts identical verdicts.
 import std.concurrency
 
 # len / at (incl. negative index) / slice. `at` is the SAFE index: out of range is None, never a

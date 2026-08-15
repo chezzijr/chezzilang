@@ -3805,7 +3805,7 @@ impl Compiler {
                 // what stops this error from surfacing at RUN time on a program `chezzi check`
                 // called clean. It stays because the compiler is also driven WITHOUT the checker:
                 // synthesized ASTs (difftest / panicfuzz) and the VM test helpers `run_capture` /
-                // `run_capture_parallel` skip type-checking entirely.
+                // `run_capture` skip type-checking entirely.
                 return Err(CompileError {
                     message: "a range can only be used as the iterable of a `for` loop".to_string(),
                     span: expr.span,

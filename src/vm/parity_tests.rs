@@ -1,66 +1,21 @@
 // Extracted from vm/mod.rs (test module). `super::` == the `vm` module.
-//! Cross-engine parity: the serial VM (`parallel=false`) and the M:N VM (`parallel=true`) must
-//! agree on stdout *and* error for every program. NB: both drive the same `Vm` bytecode, so for a
-//! sequential program this is a determinism check on one engine; the differential bite is on
-//! concurrent programs (scheduler/airlock/fault-report), where the two paths genuinely differ.
-//! (Historically these compared the VM against a separate tree-walk interpreter, since removed.)
+//! Single-engine (M:N) regression tests, most as a literal golden. (`--serial` and the cross-engine
+//! oracle it enabled have been removed; the file keeps its name/module path for history and low
+//! diff, but every helper here now runs the M:N engine once and compares against a real expectation.)
 use super::*;
 use std::path::PathBuf;
 
-/// Outcome of a run in the sink's RAW BYTES — what the ORACLE compares (see
-/// [`assert_outcome_parity`]). `from_utf8_lossy` is not injective, so a decoded compare would pass a
-/// run whose two engines emitted DIFFERENT invalid UTF-8 (W6-9b).
-fn parallel_outcome_bytes(src: &str) -> Result<Vec<u8>, String> {
-    run_capture_parallel_bytes(src).map_err(|e| e.to_string())
-}
+/// Outcome of a run in the sink's RAW BYTES, for a caller that needs the exact bytes (non-UTF-8
+/// output) rather than the lossily-decoded `String` (W6-9b).
 fn vm_outcome_bytes(src: &str) -> Result<Vec<u8>, String> {
     run_capture_bytes(src).map_err(|e| e.to_string())
 }
 
-/// The decoded shape, for SINGLE-ENGINE assertions only — `assert_eq!(vm_outcome(src).unwrap(),
-/// "6\n")`, `.contains(..)`, the fn-pointer arrays. These are NOT oracles: they pin one engine's
-/// output against a literal, so the decode can't hide anything. The cross-engine oracle is
-/// [`assert_outcome_parity`], which compares bytes.
-fn parallel_outcome(src: &str) -> Result<String, String> {
-    parallel_outcome_bytes(src).map(captured)
-}
+/// The decoded shape — `assert_eq!(vm_outcome(src).unwrap(), "6\n")`, `.contains(..)`, the
+/// fn-pointer arrays. Pins the M:N engine's output against a literal, so the lossy decode can't
+/// hide anything.
 fn vm_outcome(src: &str) -> Result<String, String> {
     vm_outcome_bytes(src).map(captured)
-}
-
-/// Cross-engine compare of two capture outcomes: text first (a readable failure), then the RAW
-/// BYTES on top — the compare that catches a divergence the lossy decode erases. Mirrors
-/// [`assert_file_parity`]/[`assert_stream_parity`].
-fn assert_outcome_parity(vm: &Result<Vec<u8>, String>, mn: &Result<Vec<u8>, String>, src: &str) {
-    let text = |r: &Result<Vec<u8>, String>| {
-        r.as_ref()
-            .map(|b| captured(b.clone()))
-            .map_err(String::clone)
-    };
-    assert_eq!(text(vm), text(mn), "VM/interp divergence for:\n{src}");
-    assert_eq!(
-        vm, mn,
-        "VM/interp BYTE divergence for:\n{src} (equal only after a lossy decode)"
-    );
-}
-
-fn assert_parity(src: &str) {
-    assert_outcome_parity(&vm_outcome_bytes(src), &parallel_outcome_bytes(src), src);
-}
-
-/// W6-9b — the capture oracle must diff BYTES. Two engines emitting different invalid UTF-8
-/// (`ff fe` vs `fe ff`) decode to the same U+FFFD run, so a `String` compare reports parity OK on a
-/// byte-divergent run. Direct on the helper: `run_capture*` compiles standalone (no module graph,
-/// hence no `import std.io`), so no real program can reach this path with non-UTF-8 output — the
-/// file oracle's end-to-end proof is `file_parity_catches_a_byte_only_divergence`.
-#[test]
-fn outcome_parity_catches_a_byte_only_divergence() {
-    let a: Result<Vec<u8>, String> = Ok(vec![0xff, 0xfe]);
-    let b: Result<Vec<u8>, String> = Ok(vec![0xfe, 0xff]);
-    assert!(
-        std::panic::catch_unwind(|| assert_outcome_parity(&a, &b, "<synthetic>")).is_err(),
-        "a byte-only divergence must FAIL the capture parity oracle"
-    );
 }
 
 /// Native-prelude phase 2b — the GENERIC / reserved-type container CTORS (range/List/Map/Set) are
@@ -239,23 +194,10 @@ fn type_param_named_like_reserved_rejected_at_check() {
     }
 }
 
-/// Cross-engine compare of ONE captured stream (stdout or stderr): text first (a readable failure),
-/// then the RAW BYTES on top — the compare that catches a divergence the lossy `captured` decode
-/// erases (`ff fe` vs `fe ff` both decode to two U+FFFD). Shared by every file-based oracle
-/// (`assert_parity_file`, `parity_entry_cfg`, `assert_file_parity`) so they can't drift apart.
-fn assert_stream_parity(a: &[u8], b: &[u8], what: &str, label: &str) {
-    let text = |x: &[u8]| String::from_utf8_lossy(x).into_owned();
-    assert_eq!(text(a), text(b), "{what} divergence {label}");
-    assert_eq!(
-        a, b,
-        "{what} BYTE divergence {label} (equal only after a lossy decode)"
-    );
-}
-
-/// Run a multi-file program (one or more `.chz` files) through BOTH engines via `run_file`,
-/// assert they agree on stdout and on ok/err, and return the agreed stdout. `files` is
-/// `(relative_path, contents)`; `entry` names the file to run. Needed because the single-file
-/// `assert_parity` can't exercise imports (and std modules require the import path).
+/// Run a multi-file program (one or more `.chz` files) through the M:N engine via `run_file_bytes`,
+/// and return its stdout. `files` is `(relative_path, contents)`; `entry` names the file to run.
+/// Needed because the single-file `run_capture` can't exercise imports (and std modules require the
+/// import path). RAW BYTES (W6-9b) so a non-UTF-8-emitting program can still be asserted precisely.
 fn assert_parity_file(files: &[(&str, &str)], entry: &str) -> String {
     let t = TmpDir::new();
     let mut entry_path = None;
@@ -266,35 +208,14 @@ fn assert_parity_file(files: &[(&str, &str)], entry: &str) -> String {
         }
     }
     let entry_path = entry_path.expect("entry must be one of the files");
-    // RAW BYTES on both legs (W6-9b): `run_file_p`/`run_file` hand back the lossily-decoded capture,
-    // which would fold a genuine non-UTF-8 divergence (`ff` vs `fe`) into equal U+FFFDs. Same
-    // arguments as those two wrappers (default `HostConfig`, no entry fn, no pinned root).
-    let raw = |parallel| {
-        crate::vm::run_file_bytes(
-            &entry_path,
-            crate::native::HostConfig::default(),
-            parallel,
-            None,
-            None,
-        )
-    };
-    let (io, ie_out, ir, _) = raw(true);
-    let (vo, ve_out, vr, _) = raw(false);
-    let label = format!("(interp vs vm) for entry {entry}");
-    assert_stream_parity(&io, &vo, "stdout", &label);
-    assert_stream_parity(&ie_out, &ve_out, "stderr", &label);
-    match (&ir, &vr) {
-        (Ok(()), Ok(())) => {}
-        (Err(ie), Err(ve)) => {
-            assert_eq!(
-                ie.to_string(),
-                ve.to_string(),
-                "error divergence (interp vs vm)"
-            );
-        }
-        _ => panic!("ok/err divergence: interp={ir:?} vm={vr:?}"),
-    }
-    captured(io)
+    let (out, _err, _result, _code) = crate::vm::run_file_bytes(
+        &entry_path,
+        crate::native::HostConfig::default(),
+        true,
+        None,
+        None,
+    );
+    captured(out)
 }
 
 /// Convenience: a single entry file (the common std-module case).
@@ -302,36 +223,15 @@ fn parity_entry(src: &str) -> String {
     assert_parity_file(&[("main.chz", src)], "main.chz")
 }
 
-/// W6-9b, end-to-end — the FILE oracle on a REAL byte-divergent program (the fixture
-/// `tests/check_parity.rs::check_parity_reports_a_byte_only_divergence` already pins through the
-/// CLI). The channel orders the two tasks, so each engine's byte order is deterministic: serial
-/// prints live (`fe ff`), M:N flushes each task's slot in task order (`ff fe`). Both decode to two
-/// U+FFFD, so only a byte-level diff sees it. CANARY: if M:N slot ordering ever changes so the
-/// engines agree, this flips to failing — fix the ordering or the fixture, do NOT weaken the
-/// compare (the CLI pin would move with it).
-#[test]
-fn file_parity_catches_a_byte_only_divergence() {
-    let src = "import std.io\n\nfn main():\n    ch := Channel[int]()\n    parallel:\n        spawn:\n            _ := ch.recv()\n            _ := io.stdout().write_bytes(b\"\\xff\")\n        spawn:\n            _ := io.stdout().write_bytes(b\"\\xfe\")\n            ch.send(1)\nmain()\n";
-    let src = src.to_string();
-    assert!(
-        std::panic::catch_unwind(move || parity_entry(&src)).is_err(),
-        "a byte-only divergence must FAIL the file parity oracle"
-    );
-}
-
-/// Like [`parity_entry`], but for a program that must FAULT on BOTH engines: runs the graph path on
-/// the serial + M:N engines, asserts both error with an identical message, and returns that message
-/// so the caller can assert its content.
+/// Like [`parity_entry`], but for a program that must FAULT: runs the graph path on the M:N engine
+/// and returns the fault message so the caller can assert its content.
 #[cfg(test)]
 fn parity_entry_fault(src: &str) -> String {
     let t = TmpDir::new();
     let p = t.write("main.chz", src);
-    let (_io, _ie, ir, _) = run_file_p(&p);
-    let (_vo, _ve, vr, _) = run_file(&p);
-    let ie = ir.expect_err("M:N engine must fault");
-    let ve = vr.expect_err("serial engine must fault");
-    assert_eq!(ve.to_string(), ie.to_string(), "serial == M:N fault");
-    ve.to_string()
+    let (_out, _err, result, _code) = run_file(&p);
+    let e = result.expect_err("program must fault");
+    e.to_string()
 }
 
 // ----- Task 2 (option a): user protocol existentials cross the airlock -----
@@ -566,7 +466,7 @@ fn regex_offsets_are_codepoint_slicable_parity() {
     assert_eq!(out, "ll\ntrue\n");
     let t = TmpDir::new();
     let path = t.write("main.chz", src);
-    let (mn_out, _e, mn_res, _) = run_file_parallel(&path, crate::native::HostConfig::default());
+    let (mn_out, _e, mn_res, _) = run_file_with(&path, crate::native::HostConfig::default());
     mn_res.expect("regex codepoint-offset program should run on the M:N engine");
     assert_eq!(
         mn_out, out,
@@ -603,7 +503,7 @@ fn regex_match_file_backed_three_engine_parity() {
     // …and the M:N OS-thread engine agrees (needs the graph path — write a file, drive run_file_*).
     let t = TmpDir::new();
     let path = t.write("main.chz", src);
-    let (mn_out, _e, mn_res, _) = run_file_parallel(&path, crate::native::HostConfig::default());
+    let (mn_out, _e, mn_res, _) = run_file_with(&path, crate::native::HostConfig::default());
     mn_res.expect("regex Match stub program should run on the M:N engine");
     assert_eq!(
         mn_out, out,
@@ -657,7 +557,7 @@ fn process_request_file_backed_three_engine_parity() {
     // …and the M:N OS-thread engine agrees.
     let t = TmpDir::new();
     let path = t.write("main.chz", src);
-    let (mn_out, _e, mn_res, _) = run_file_parallel(&path, crate::native::HostConfig::default());
+    let (mn_out, _e, mn_res, _) = run_file_with(&path, crate::native::HostConfig::default());
     mn_res.expect("process/request ctor program should run on the M:N engine");
     assert_eq!(
         mn_out, out,
@@ -862,9 +762,9 @@ fn imported_struct_across_airlock_three_engine() {
         }
     }
     let entry = entry.unwrap();
-    let (io, _, ir, _) = run_file_p(&entry);
+    let (io, _, ir, _) = run_file(&entry);
     let (vo, _, vr, _) = run_file(&entry);
-    let (po, _, pr, _) = run_file_parallel(&entry, crate::native::HostConfig::default());
+    let (po, _, pr, _) = run_file_with(&entry, crate::native::HostConfig::default());
     assert!(
         ir.is_ok() && vr.is_ok() && pr.is_ok(),
         "a run faulted: i={ir:?} v={vr:?} p={pr:?}"
@@ -971,9 +871,9 @@ fn decode_collision_three_engine() {
         }
     }
     let entry = entry.unwrap();
-    let (io, _, ir, _) = run_file_p(&entry);
+    let (io, _, ir, _) = run_file(&entry);
     let (vo, _, vr, _) = run_file(&entry);
-    let (po, _, pr, _) = run_file_parallel(&entry, crate::native::HostConfig::default());
+    let (po, _, pr, _) = run_file_with(&entry, crate::native::HostConfig::default());
     assert!(
         ir.is_ok() && vr.is_ok() && pr.is_ok(),
         "a run faulted: i={ir:?} v={vr:?} p={pr:?}"
@@ -1009,9 +909,9 @@ fn match_arm_scrutinee_driven_three_engine() {
     }
     let entry = entry.unwrap();
     for _ in 0..50 {
-        let (io, _, ir, _) = run_file_p(&entry);
+        let (io, _, ir, _) = run_file(&entry);
         let (vo, _, vr, _) = run_file(&entry);
-        let (po, _, pr, _) = run_file_parallel(&entry, crate::native::HostConfig::default());
+        let (po, _, pr, _) = run_file_with(&entry, crate::native::HostConfig::default());
         assert!(
             ir.is_ok() && vr.is_ok() && pr.is_ok(),
             "a run faulted: i={ir:?} v={vr:?} p={pr:?}"
@@ -1046,9 +946,9 @@ fn match_arm_only_in_a_variant_three_engine() {
     }
     let entry = entry.unwrap();
     for _ in 0..50 {
-        let (io, _, ir, _) = run_file_p(&entry);
+        let (io, _, ir, _) = run_file(&entry);
         let (vo, _, vr, _) = run_file(&entry);
-        let (po, _, pr, _) = run_file_parallel(&entry, crate::native::HostConfig::default());
+        let (po, _, pr, _) = run_file_with(&entry, crate::native::HostConfig::default());
         assert!(
             ir.is_ok() && vr.is_ok() && pr.is_ok(),
             "a run faulted: i={ir:?} v={vr:?} p={pr:?}"
@@ -1080,9 +980,9 @@ fn collision_struct_sent_across_task() {
         }
     }
     let entry = entry.unwrap();
-    let (io, _, ir, _) = run_file_p(&entry);
+    let (io, _, ir, _) = run_file(&entry);
     let (vo, _, vr, _) = run_file(&entry);
-    let (po, _, pr, _) = run_file_parallel(&entry, crate::native::HostConfig::default());
+    let (po, _, pr, _) = run_file_with(&entry, crate::native::HostConfig::default());
     assert!(
         ir.is_ok() && vr.is_ok() && pr.is_ok(),
         "a run faulted: i={ir:?} v={vr:?} p={pr:?}"
@@ -1211,9 +1111,8 @@ match regex.split(",", "a,b,c"):
     assert_eq!(out, "1\n22\n333\na#b#c\na|b|c\n");
 }
 
-/// `std.request` against a loopback server, run through BOTH engines (exercises `NativeRet::Map`
-/// lowering on each). The server serves one canned response per connection; interp and vm each
-/// open one, so it accepts twice.
+/// `std.request` against a loopback server (exercises `NativeRet::Map` lowering). The server serves
+/// one canned response for the M:N engine's one connection.
 #[test]
 fn request_get_parity_against_local_server() {
     use std::io::{Read, Write};
@@ -1222,18 +1121,16 @@ fn request_get_parity_against_local_server() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
     let server = std::thread::spawn(move || {
-        for _ in 0..2 {
-            let (mut stream, _) = listener.accept().unwrap();
-            let mut buf = [0u8; 1024];
-            let _ = stream.read(&mut buf);
-            let body = "pong";
-            let resp = format!(
-                "HTTP/1.1 200 OK\r\nX-Test: hi\r\nContent-Length: {}\r\n\r\n{}",
-                body.len(),
-                body
-            );
-            stream.write_all(resp.as_bytes()).unwrap();
-        }
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut buf = [0u8; 1024];
+        let _ = stream.read(&mut buf);
+        let body = "pong";
+        let resp = format!(
+            "HTTP/1.1 200 OK\r\nX-Test: hi\r\nContent-Length: {}\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        stream.write_all(resp.as_bytes()).unwrap();
     });
 
     let src = format!(
@@ -1244,11 +1141,11 @@ fn request_get_parity_against_local_server() {
     assert_eq!(out, "200\npong\nhi\n");
 }
 
-/// `std.request` new verbs + custom headers, run through BOTH engines against a loopback server
-/// that records every request's wire bytes. Each engine issues a `put` and a header-carrying
-/// `request("DELETE", …)`, so the server accepts 4 times (2 per engine). Asserts (a) identical
-/// stdout across VM and interp and (b) the right method line + custom header reached the wire —
-/// locking the off-heap `NativeArg::Map` headers path and the verb wrappers under parity.
+/// `std.request` new verbs + custom headers, against a loopback server that records every request's
+/// wire bytes. The M:N run issues a `put` and a header-carrying `request("DELETE", …)`, so the
+/// server accepts twice. Asserts (a) the expected stdout and (b) the right method line + custom
+/// header reached the wire — locking the off-heap `NativeArg::Map` headers path and the verb
+/// wrappers.
 #[test]
 fn request_verbs_and_headers_parity_against_local_server() {
     use std::io::{Read, Write};
@@ -1260,7 +1157,7 @@ fn request_verbs_and_headers_parity_against_local_server() {
     let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let seen_srv = Arc::clone(&seen);
     let server = std::thread::spawn(move || {
-        for _ in 0..4 {
+        for _ in 0..2 {
             let (mut stream, _) = listener.accept().unwrap();
             let mut buf = [0u8; 1024];
             let n = stream.read(&mut buf).unwrap_or(0);
@@ -1268,38 +1165,32 @@ fn request_verbs_and_headers_parity_against_local_server() {
                 .lock()
                 .unwrap()
                 .push(String::from_utf8_lossy(&buf[..n]).into_owned());
-            // `Connection: close` so ureq's thread-local pool (shared across both engine runs on
-            // this test thread) never reuses a server-closed socket — one fresh conn per request.
+            // `Connection: close` so ureq's thread-local pool never reuses a server-closed socket —
+            // one fresh conn per request.
             let resp = "HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: 2\r\n\r\nok";
             stream.write_all(resp.as_bytes()).unwrap();
         }
     });
 
-    // Each engine: a PUT verb wrapper, then a header-carrying general DELETE.
+    // A PUT verb wrapper, then a header-carrying general DELETE.
     let src = format!(
         "import std.request\nmatch request.put(\"http://{addr}/\", \"payload\"):\n    Ok(r): print(str(r.status))\n    Err(e): print(e)\nmatch request.request(\"DELETE\", \"http://{addr}/\", \"\", {{\"X-Custom\": \"value\"}}):\n    Ok(r): print(str(r.status))\n    Err(e): print(e)\n"
     );
     let out = parity_entry(&src);
     server.join().unwrap();
-    assert_eq!(
-        out, "200\n200\n",
-        "VM/interp must agree and both requests succeed"
-    );
+    assert_eq!(out, "200\n200\n", "both requests must succeed");
 
     let reqs = seen.lock().unwrap();
-    assert_eq!(reqs.len(), 4, "two requests per engine");
+    assert_eq!(reqs.len(), 2, "one PUT and one DELETE");
     let puts = reqs.iter().filter(|r| r.starts_with("PUT ")).count();
     let deletes = reqs.iter().filter(|r| r.starts_with("DELETE ")).count();
     let with_header = reqs
         .iter()
         .filter(|r| r.contains("X-Custom: value"))
         .count();
-    assert_eq!(puts, 2, "both engines must send PUT");
-    assert_eq!(deletes, 2, "both engines must send DELETE");
-    assert_eq!(
-        with_header, 2,
-        "the custom header must reach the wire on both engines"
-    );
+    assert_eq!(puts, 1, "must send PUT");
+    assert_eq!(deletes, 1, "must send DELETE");
+    assert_eq!(with_header, 1, "the custom header must reach the wire");
 }
 
 #[test]
@@ -1319,10 +1210,9 @@ match regex.find("([a-z]+)@([a-z]+)", "xx ann@host"):
 
 // ----- break / continue parity (both engines must agree AND produce the right output) -----
 
-/// Assert both engines agree AND that the (shared) stdout equals `expect`. A hang here means a
-/// `continue` is landing on the wrong target (re-test without advancing → infinite loop).
+/// Assert the M:N engine's stdout equals `expect`. A hang here means a `continue` is landing on
+/// the wrong target (re-test without advancing → infinite loop).
 fn assert_parity_out(src: &str, expect: &str) {
-    assert_parity(src);
     assert_eq!(
         vm_outcome(src).expect("program should run"),
         expect,
@@ -1387,12 +1277,10 @@ fn xor_fold_single_number_parity() {
 #[test]
 fn shift_out_of_range_error_parity() {
     // Dynamic shift the checker can't catch — both engines must raise the same runtime error.
-    assert_parity("print(1 << 64)\n");
     assert_eq!(
         vm_outcome("print(1 << 64)\n").unwrap_err(),
         "runtime error (line 1, col 7): shift amount 64 out of range (0..64)"
     );
-    assert_parity("print(1 << -1)\n");
     assert_eq!(
         vm_outcome("print(1 << -1)\n").unwrap_err(),
         "runtime error (line 1, col 7): shift amount -1 out of range (0..64)"
@@ -1872,8 +1760,7 @@ fn ord_index_digit_value_parity() {
 
 #[test]
 fn ord_empty_string_error_parity() {
-    // Runtime error (checker can't catch it) — message must match across engines.
-    assert_parity("print(ord(\"\"))\n");
+    // Runtime error (checker can't catch it).
     assert_eq!(
         vm_outcome("print(ord(\"\"))\n").unwrap_err(),
         "runtime error (line 1, col 7): ord() of an empty string"
@@ -1882,12 +1769,10 @@ fn ord_empty_string_error_parity() {
 
 #[test]
 fn chr_invalid_codepoint_error_parity() {
-    assert_parity("print(chr(-1))\n");
     assert_eq!(
         vm_outcome("print(chr(-1))\n").unwrap_err(),
         "runtime error (line 1, col 7): chr(): -1 is not a valid Unicode codepoint"
     );
-    assert_parity("print(chr(2000000))\n");
     assert_eq!(
         vm_outcome("print(chr(2000000))\n").unwrap_err(),
         "runtime error (line 1, col 7): chr(): 2000000 is not a valid Unicode codepoint"
@@ -2228,7 +2113,7 @@ fn math_abs_min_overflows() {
     let src = "import std.math\nfn main():\n    x := -9223372036854775807 - 1\n    print(math.abs(x))\nmain()";
     let t = TmpDir::new();
     let entry = t.write("main.chz", src);
-    let ie = run_file_p(&entry).2.unwrap_err().to_string();
+    let ie = run_file(&entry).2.unwrap_err().to_string();
     let ve = run_file(&entry).2.unwrap_err().to_string();
     assert_eq!(
         ie, ve,
@@ -2252,7 +2137,7 @@ fn exit_threads_code_through_both_engines() {
     let src = "import std.os\nfn main():\n    print(\"before\")\n    os.exit(3)\n    print(\"after\")\nmain()";
     let t = TmpDir::new();
     let entry = t.write("main.chz", src);
-    let (io, _ie, ir, ic) = run_file_p(&entry);
+    let (io, _ie, ir, ic) = run_file(&entry);
     let (vo, _ve, vr, vc) = run_file(&entry);
     assert_eq!(io, "before\n", "interp stdout");
     assert_eq!(vo, "before\n", "vm stdout");
@@ -2271,7 +2156,7 @@ fn defer_top_level_skipped_by_os_exit() {
     let src = "import std.os\nfn log(s: str):\n    print(s)\ndefer log(\"cleanup\")\nprint(\"before\")\nos.exit(2)\nprint(\"after\")\n";
     let t = TmpDir::new();
     let entry = t.write("main.chz", src);
-    let (io, _ie, ir, ic) = run_file_p(&entry);
+    let (io, _ie, ir, ic) = run_file(&entry);
     let (vo, _ve, vr, vc) = run_file(&entry);
     assert_eq!(io, "before\n", "interp: cleanup defer skipped by os.exit");
     assert_eq!(vo, "before\n", "vm: cleanup defer skipped by os.exit");
@@ -2293,7 +2178,7 @@ fn exit_negative_code_masks_to_255() {
         let src = format!("import std.os\nfn main():\n    os.exit({code})\nmain()");
         let t = TmpDir::new();
         let entry = t.write("main.chz", &src);
-        let (_io, _ie, ir, ic) = run_file_p(&entry);
+        let (_io, _ie, ir, ic) = run_file(&entry);
         let (_vo, _ve, vr, vc) = run_file(&entry);
         assert_eq!(ic, Some(want), "M:N exit code for os.exit({code})");
         assert_eq!(vc, Some(want), "serial exit code for os.exit({code})");
@@ -2328,7 +2213,6 @@ fn main():
         print(x)
 main()
 "#;
-    assert_parity(src);
     assert_eq!(
         vm_outcome(src).unwrap_err(),
         "runtime error (line 6, col 24): generator already running",
@@ -2462,7 +2346,7 @@ fn defer_top_level_runs_on_unhandled_error() {
     let src = "fn log(s: str):\n    print(s)\nfn boom() -> int!:\n    return Err(\"nope\")\ndefer log(\"cleanup\")\nprint(\"before\")\nx := boom()?\nprint(\"after\")\n";
     let t = TmpDir::new();
     let entry = t.write("main.chz", src);
-    let (io, _ie, ir, _ic) = run_file_p(&entry);
+    let (io, _ie, ir, _ic) = run_file(&entry);
     let (vo, _ve, vr, _vc) = run_file(&entry);
     assert_eq!(
         io, "before\ncleanup\n",
@@ -2484,7 +2368,7 @@ fn exit_is_not_caught_by_recover() {
     let src = "import std.os\nfn main():\n    x := recover:\n        os.exit(7)\n    print(\"unreachable\")\nmain()";
     let t = TmpDir::new();
     let entry = t.write("main.chz", src);
-    let (io, _ie, _ir, ic) = run_file_p(&entry);
+    let (io, _ie, _ir, ic) = run_file(&entry);
     let (vo, _ve, _vr, vc) = run_file(&entry);
     assert_eq!(io, "", "interp: nothing after the recover runs");
     assert_eq!(vo, "", "vm: nothing after the recover runs");
@@ -2507,7 +2391,7 @@ fn exit_in_spawned_child_aborts_siblings() {
     let src = "import std.os\nfn a():\n    print(\"a\")\n    os.exit(3)\nfn b():\n    print(\"b\")\nfn main():\n    parallel:\n        spawn a()\n        spawn b()\n    print(\"after\")\nmain()\n";
     let t = TmpDir::new();
     let entry = t.write("main.chz", src);
-    let (io, _ie, ir, ic) = run_file_p(&entry);
+    let (io, _ie, ir, ic) = run_file(&entry);
     let (vo, _ve, vr, vc) = run_file(&entry);
     assert!(
         vo.contains('a') && vo.contains('b'),
@@ -2539,7 +2423,7 @@ fn parallel_child_os_exit_halts_with_code() {
     let src = "import std.os\nfn a():\n    print(\"a\")\n    os.exit(3)\nfn b():\n    print(\"b\")\nfn main():\n    parallel:\n        spawn a()\n        spawn b()\n    print(\"after\")\nmain()\n";
     let t = TmpDir::new();
     let entry = t.write("main.chz", src);
-    let (out, _err, res, code) = run_file_parallel(&entry, crate::native::HostConfig::default());
+    let (out, _err, res, code) = run_file_with(&entry, crate::native::HostConfig::default());
     assert_eq!(
         code,
         Some(3),
@@ -2568,7 +2452,7 @@ fn parallel_os_exit_aborts_recv_blocked_sibling() {
     let src = "import std.os\nfn exiter(ch: Channel[int]):\n    os.exit(5)\nfn consumer(ch: Channel[int]):\n    ch.recv()\n    print(\"consumed\")\nfn main():\n    ch := Channel[int]()\n    parallel:\n        spawn exiter(ch)\n        spawn consumer(ch)\nmain()\n";
     let t = TmpDir::new();
     let entry = t.write("main.chz", src);
-    let (out, _err, _res, code) = run_file_parallel(&entry, crate::native::HostConfig::default());
+    let (out, _err, _res, code) = run_file_with(&entry, crate::native::HostConfig::default());
     assert_eq!(
         code,
         Some(5),
@@ -2589,10 +2473,7 @@ fn run_parallel_watchdog(src: &str) -> RunOutput {
     let entry = t.write("main.chz", src);
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
-        let _ = tx.send(run_file_parallel(
-            &entry,
-            crate::native::HostConfig::default(),
-        ));
+        let _ = tx.send(run_file_with(&entry, crate::native::HostConfig::default()));
     });
     match rx.recv_timeout(std::time::Duration::from_secs(5)) {
         Ok(r) => r,
@@ -2808,21 +2689,17 @@ main()
 /// can legitimately take longer than `run_parallel_watchdog`'s 5 s, and a regressed timeout would
 /// HANG rather than fault). Returns the captured stdout, or panics loudly on a hang.
 fn run_net_timeout_watchdog(tag: &str, src: &str) -> String {
-    run_net_watchdog_engine(tag, src, true)
+    run_net_watchdog_engine(tag, src)
 }
 
-/// The same watchdog, engine-selectable: `parallel = false` runs the serial (cooperative) VM. Used by
-/// the "a would-block socket op blocks in place" tests, which must hold on BOTH engines — a
-/// regression there is a HANG, so the watchdog is mandatory rather than a nicety.
-fn run_net_watchdog_engine(tag: &str, src: &str, parallel: bool) -> String {
+/// The same watchdog, on the M:N engine — a regression there is a HANG, so the watchdog is mandatory
+/// rather than a nicety.
+fn run_net_watchdog_engine(tag: &str, src: &str) -> String {
     let t = TmpDir::new();
     let entry = t.write("main.chz", src);
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
-        let _ = tx.send(match parallel {
-            true => run_file_parallel(&entry, crate::native::HostConfig::default()),
-            false => run_file(&entry),
-        });
+        let _ = tx.send(run_file_with(&entry, crate::native::HostConfig::default()));
     });
     match rx.recv_timeout(std::time::Duration::from_secs(30)) {
         Ok((out, _err, res, _code)) => {
@@ -3252,9 +3129,7 @@ fn free_addr() -> std::net::SocketAddr {
 /// Accept blocks for the full 50 ms and succeeds. CPython's `socket.accept()` on the main thread is
 /// the same.
 ///
-/// **DEFAULT ENGINE ONLY** — see `socket_op_on_serial_main_errs_instead_of_wedging_the_only_thread`
-/// below for why `--serial` deliberately keeps the `Err` instead of matching Go here.
-fn accept_from_main_blocks(parallel: bool) {
+fn accept_from_main_blocks() {
     let addr = free_addr();
     let peer = net_peer(addr);
     let src = format!(
@@ -3280,76 +3155,14 @@ fn main():
 main()
 "
     );
-    let out = run_net_watchdog_engine("accept_from_main", &src, parallel);
-    assert_eq!(
-        out, "listening\nGOT:hi\ndone\n",
-        "engine parallel={parallel}"
-    );
+    let out = run_net_watchdog_engine("accept_from_main", &src);
+    assert_eq!(out, "listening\nGOT:hi\ndone\n");
     assert_eq!(peer.join().unwrap(), "echo:hi");
 }
 
 #[test]
 fn accept_from_main_blocks_instead_of_erroring_mn() {
-    accept_from_main_blocks(true);
-}
-
-/// The `--serial` twin of the test above, and it asserts the OPPOSITE — the cooperative engine keeps
-/// `Err("accept would block: std.net sockets require the --parallel engine")`.
-///
-/// This test used to call `accept_from_main_blocks(false)` and pass, because its peer is an external
-/// Rust thread that always dials: `main` blocking in place is harmless when the thing that makes the
-/// fd ready is not a chezzi fiber. That is precisely the case the block-in-place widening was measured
-/// on, and it hid the general one — on `--serial` ONE thread runs every fiber, so a `main` (or fiber)
-/// blocking in place starves the peer FIBER that would connect, and nothing can ever end the wait:
-/// `--timeout` is rejected alongside `--serial` (`main.rs`), and no other fiber can run to deliver a
-/// cancel. `examples/echo_server.chz --serial` hung forever (measured, `rc=124`), which is why the
-/// widening is narrowed to the default engine and pinned here rather than deleted.
-///
-/// Correctness outranks ancestor-matching only where the ancestor's shape does not exist: Go has no
-/// single-threaded-runtime mode to copy, and a hang with no escape is never the honest answer.
-#[test]
-fn socket_op_on_serial_main_errs_instead_of_wedging_the_only_thread() {
-    let addr = free_addr();
-    let peer = net_peer(addr);
-    let src = format!(
-        "\
-import std.net
-
-fn main():
-    match net.listen(\"{addr}\"):
-        Ok(l):
-            print(\"listening\")
-            match l.accept():
-                Ok(_): print(\"accepted\")
-                Err(e): print(\"ERR:\" + e.message())
-            l.close()
-        Err(e): print(\"ERR:\" + e.message())
-
-main()
-"
-    );
-    let out = run_net_watchdog_engine("serial_main_accept", &src, false);
-    assert_eq!(
-        out,
-        "listening\nERR:accept would block: std.net sockets require the --parallel engine\n"
-    );
-    let _ = peer.join();
-}
-
-/// The whole-program shape of the same regression: `examples/echo_server.chz` on `--serial` — a
-/// `parallel:` acceptor fiber plus 50 client fibers, all on the cooperative engine's ONE thread.
-///
-/// With the block-in-place path open to `--serial` this ran forever (`timeout 15 chezzi run --serial
-/// examples/echo_server.chz` → `rc=124`): the acceptor blocked the only thread inside `accept`, so no
-/// client fiber could ever be scheduled to connect. It must TERMINATE — the watchdog is still the
-/// primary assertion. The printed count is now a real observation: the example bumps a shared
-/// `AtomicInt` only from a client that completed the whole round-trip, so `--serial` — where every
-/// would-block op is W7-40's engine `Err` — reports the truthful `0`, not an unearned `50` (W7-46).
-#[test]
-fn echo_server_example_terminates_on_the_serial_engine() {
-    let src = include_str!("../../examples/echo_server.chz");
-    let out = run_net_watchdog_engine("echo_server_serial", src, false);
-    assert_eq!(out, "echo server handled 0 connections\n");
+    accept_from_main_blocks();
 }
 
 /// The `read_bytes` arm of the same fix — the fourth op, covered directly rather than by symmetry.
@@ -3446,62 +3259,6 @@ main()
         out,
         "listening\nERR:accept would block: std.net sockets require the --parallel engine\ndone\n"
     );
-}
-
-/// W7-59 — the capability fence for the narrow gate. A `--serial` `net.connect` to a LIVE loopback
-/// listener must still SUCCEED, and the `write` after it must go through.
-///
-/// This is the test that distinguishes `W7-59`'s gate from the obvious wrong one. Routing `connect`
-/// through `may_block_socket_in_place()` — the predicate its four sibling ops use, and the shape
-/// `docs/gaps.md:80` originally proposed — refuses here, because a non-blocking `connect` reports
-/// `EINPROGRESS` even on loopback to a listening peer (measured; the "connected synchronously" arm
-/// is rare, not "the common loopback case" its comment used to claim). That would have taken away a
-/// working `--serial` client with no starvation to justify it: the handshake is finished by the
-/// KERNEL, not by a chezzi fiber, so blocking briefly starves nobody, and both ancestors block —
-/// CPython `socket.connect` 0.1 ms, Go `net.Dial` 314 µs, each from the sole/main thread.
-///
-/// `read` still refuses on `--serial` (`W7-40` R1 — THAT one waits on a chezzi peer), so the program
-/// stops at the read, which is exactly where it stopped before `W7-59`.
-#[test]
-fn connect_on_serial_main_still_reaches_a_live_listener() {
-    // A Rust LISTENER (the mirror of `net_peer`, which is a client): chezzi is the one dialling
-    // here, so the peer has to be already bound before the program runs — that is what makes the
-    // handshake a live one rather than a refusal.
-    let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let addr = l.local_addr().unwrap();
-    let peer = std::thread::spawn(move || {
-        use std::io::Read;
-        let Ok((mut c, _)) = l.accept() else {
-            return "<peer accept failed>".to_string();
-        };
-        let mut buf = [0u8; 64];
-        match c.read(&mut buf) {
-            Ok(n) => String::from_utf8_lossy(&buf[..n]).into_owned(),
-            Err(e) => format!("<peer read failed: {e}>"),
-        }
-    });
-    let src = format!(
-        "\
-import std.net
-
-fn main():
-    match net.connect(\"{addr}\"):
-        Ok(s):
-            print(\"connected\")
-            match s.write(\"hi\"):
-                Ok(_): print(\"wrote\")
-                Err(e): print(\"WERR:\" + e.message())
-        Err(e): print(\"CERR:\" + e.message())
-
-main()
-"
-    );
-    let out = run_net_watchdog_engine("connect_on_serial_main", &src, false);
-    assert_eq!(
-        out, "connected\nwrote\n",
-        "--serial connect to a live listener must not be refused"
-    );
-    assert_eq!(peer.join().unwrap(), "hi");
 }
 
 /// W7-59 — the `connect` twin of the test above. `net.connect` was the FIFTH would-block socket op
@@ -4038,10 +3795,7 @@ fn example_socket_timeout_matches_expected() {
         .expect("read examples/socket_timeout.expected");
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
-        let _ = tx.send(run_file_parallel(
-            &entry,
-            crate::native::HostConfig::default(),
-        ));
+        let _ = tx.send(run_file_with(&entry, crate::native::HostConfig::default()));
     });
     match rx.recv_timeout(std::time::Duration::from_secs(30)) {
         Ok((out, _err, res, _code)) => {
@@ -4173,31 +3927,23 @@ fn net_connect_top_level_dead_port_errors_not_hangs() {
     let src = format!(
         "import std.net\nfn main():\n    match net.connect(\"{dead}\"):\n        Ok(_): print(\"connected\")\n        Err(e): print(\"ERR: {{e.message()}}\")\nmain()\n"
     );
-    for (parallel, want) in [(true, "connect failed: "), (false, "connect failed: ")] {
-        let src = src.clone();
-        let (tx, rx) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
-            let t = TmpDir::new();
-            let entry = t.write("main.chz", &src);
-            let (out, _e, res, _c) = if parallel {
-                run_file_p(&entry)
-            } else {
-                run_file(&entry)
-            };
-            let _ = tx.send((out, res));
-        });
-        match rx.recv_timeout(std::time::Duration::from_secs(15)) {
-            Ok((out, res)) => {
-                res.expect("top-level connect program runs");
-                assert!(
-                    out.starts_with(&format!("ERR: {want}")),
-                    "parallel={parallel}: dead port ⇒ Err branch (bounded, no hang); got {out:?}"
-                );
-            }
-            Err(_) => panic!(
-                "hung: top-level connect to a dead port did not return (parallel={parallel})"
-            ),
+    let want = "connect failed: ";
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let t = TmpDir::new();
+        let entry = t.write("main.chz", &src);
+        let (out, _e, res, _c) = run_file(&entry);
+        let _ = tx.send((out, res));
+    });
+    match rx.recv_timeout(std::time::Duration::from_secs(15)) {
+        Ok((out, res)) => {
+            res.expect("top-level connect program runs");
+            assert!(
+                out.starts_with(&format!("ERR: {want}")),
+                "dead port ⇒ Err branch (bounded, no hang); got {out:?}"
+            );
         }
+        Err(_) => panic!("hung: top-level connect to a dead port did not return"),
     }
 }
 
@@ -4600,50 +4346,26 @@ fn parallel_finished_task_leaves_sibling_deadlocked() {
     );
 }
 
-/// Run an entry through both engines with a freshly-built [`crate::native::HostConfig`] each
-/// (the config isn't `Clone` — `mk_cfg` produces an identical one per engine). Asserts stdout +
-/// ok/err parity; returns the agreed stdout.
+/// Run an entry through the M:N engine with a freshly-built [`crate::native::HostConfig`]. Returns
+/// stdout (raw bytes, W6-9b, decoded here — so a non-UTF-8-emitting program can still be asserted
+/// precisely by a caller that goes through [`crate::vm::run_file_bytes`] directly).
 fn parity_entry_cfg(src: &str, mk_cfg: impl Fn() -> crate::native::HostConfig) -> String {
     let t = TmpDir::new();
     let entry = t.write("main.chz", src);
-    // RAW BYTES on both legs (W6-9b) — same arguments `run_file_parallel`/`run_file_with` pass,
-    // minus their lossy decode. `mk_cfg()` still runs ONCE PER ENGINE (fresh stdin queue).
-    let (io, ie_out, ir, _ic) = crate::vm::run_file_bytes(&entry, mk_cfg(), true, None, None);
-    let (vo, ve_out, vr, _vc) = crate::vm::run_file_bytes(&entry, mk_cfg(), false, None, None);
-    assert_stream_parity(&io, &vo, "stdout", "(interp vs vm)");
-    assert_stream_parity(&ie_out, &ve_out, "stderr", "(interp vs vm)");
-    assert_eq!(
-        ir.is_ok(),
-        vr.is_ok(),
-        "ok/err divergence: interp={ir:?} vm={vr:?}"
-    );
-    captured(io)
+    let (out, _err, _result, _code) = crate::vm::run_file_bytes(&entry, mk_cfg(), true, None, None);
+    captured(out)
 }
 
-/// Like [`parity_entry_cfg`], but for a program whose stdout is a deterministic MULTISET with a
-/// nondeterministic ORDER — a shared, consumable stdin read from several tasks: which task gets
-/// which line is nondeterministic BY DESIGN (Go/Python), so a byte-equal stdout assert here would be
-/// a flake built on purpose. Asserts ok/err parity + that the two engines agree on the line multiset
-/// (the existing [`crate::vm::assert_same_lines`]), and returns both engines' stdout.
-///
-/// A FRESH cfg per engine (`mk_cfg` is called twice): the two engines must not share one `Arc` stdin
-/// queue, or the second engine would find it already drained.
-fn parity_entry_cfg_lines(
-    src: &str,
-    mk_cfg: impl Fn() -> crate::native::HostConfig,
-) -> (String, String) {
+/// Like [`parity_entry_cfg`], but documents that the returned stdout is a deterministic MULTISET
+/// with a nondeterministic ORDER — a shared, consumable stdin read from several tasks: which task
+/// gets which line is nondeterministic BY DESIGN (Go/Python), so a byte-equal stdout assert here
+/// would be a flake built on purpose. Callers assert with [`assert_lines_multiset`].
+fn parity_entry_cfg_lines(src: &str, mk_cfg: impl Fn() -> crate::native::HostConfig) -> String {
     let t = TmpDir::new();
     let entry = t.write("main.chz", src);
-    let (mn, mn_err, mr, _mc) = run_file_parallel(&entry, mk_cfg());
-    let (se, se_err, sr, _sc) = run_file_with(&entry, mk_cfg());
-    assert_eq!(
-        mr.is_ok(),
-        sr.is_ok(),
-        "ok/err divergence: M:N={mr:?} serial={sr:?}"
-    );
-    assert_eq!(mn_err, se_err, "stderr divergence");
-    crate::vm::assert_same_lines(&se, &mn);
-    (mn, se)
+    let (out, _err, result, _code) = run_file_with(&entry, mk_cfg());
+    result.expect("program should run");
+    out
 }
 
 /// Assert stdout is EXACTLY the `want` lines, in ANY order (sorted compare). Do NOT "fix" a caller
@@ -4672,7 +4394,7 @@ fn parity_std_io_read_write_file() {
         "import std.io\nfn main():\n    match io.write_file(\"{data}\", \"hello\\nworld\"):\n        Ok(_): io.print(\"wrote\")\n        Err(e): io.print(e)\n    match io.read_file(\"{data}\"):\n        Ok(s): io.print(s)\n        Err(e): io.print(e)\nmain()"
     );
     let entry = t.write("main.chz", &src);
-    let (io_out, _ie, ir, _) = run_file_p(&entry);
+    let (io_out, _ie, ir, _) = run_file(&entry);
     let (vo, _ve, vr, _) = run_file(&entry);
     assert!(ir.is_ok() && vr.is_ok(), "interp={ir:?} vm={vr:?}");
     assert_eq!(io_out, vo);
@@ -4766,13 +4488,11 @@ fn parity_std_io_input_prompt_then_line_and_flush_is_a_noop() {
 fn parity_spawned_tasks_share_stdin_exactly_once() {
     use crate::native::{HostConfig, Stdin};
     let src = "import std.io\nfn t():\n    match io.read_line():\n        Some(v): io.print(\"got {v}\")\n        None: io.print(\"eof\")\nfn main():\n    parallel:\n        spawn: t()\n        spawn: t()\n    t()\nmain()";
-    let (mn, se) = parity_entry_cfg_lines(src, || HostConfig {
+    let out = parity_entry_cfg_lines(src, || HostConfig {
         stdin: Stdin::lines(["a".to_string(), "b".to_string(), "c".to_string()]),
         ..Default::default()
     });
-    for out in [&mn, &se] {
-        assert_lines_multiset(out, &["got a", "got b", "got c"]);
-    }
+    assert_lines_multiset(&out, &["got a", "got b", "got c"]);
 }
 
 /// Same shared-stdin contract at the OTHER task-entry family: `Executor.submit` (the cooperative
@@ -4781,13 +4501,11 @@ fn parity_spawned_tasks_share_stdin_exactly_once() {
 fn parity_executor_tasks_share_stdin_exactly_once() {
     use crate::native::{HostConfig, Stdin};
     let src = "import std.io\nimport std.concurrency\nfn t():\n    match io.read_line():\n        Some(v): io.print(\"got {v}\")\n        None: io.print(\"eof\")\nfn main():\n    e := Executor()\n    e.submit(t)\n    e.submit(t)\n    e.shutdown()\n    t()\nmain()";
-    let (mn, se) = parity_entry_cfg_lines(src, || HostConfig {
+    let out = parity_entry_cfg_lines(src, || HostConfig {
         stdin: Stdin::lines(["a".to_string(), "b".to_string(), "c".to_string()]),
         ..Default::default()
     });
-    for out in [&mn, &se] {
-        assert_lines_multiset(out, &["got a", "got b", "got c"]);
-    }
+    assert_lines_multiset(&out, &["got a", "got b", "got c"]);
 }
 
 #[test]
@@ -5275,7 +4993,6 @@ const PROGRAMS: &[(&str, Result<&str, &str>)] = &[
 #[test]
 fn parity_full_suite_vm_vs_interp() {
     for (src, expect) in PROGRAMS {
-        assert_parity(src);
         match expect {
             Ok(want) => assert_eq!(
                 vm_outcome(src).expect("program should run"),
@@ -5296,23 +5013,19 @@ fn parity_full_suite_vm_vs_interp() {
 fn manifest_entrypoint_err_surfaced_both_engines() {
     let dir = TmpDir::new();
     let entry = dir.write("main.chz", "fn main() -> int!:\n    return Err(\"boom\")\n");
-    for parallel in [false, true] {
-        let (_out, _err, outcome, _rc) = crate::vm::run_file_with_entry(
-            &entry,
-            crate::native::HostConfig::default(),
-            parallel,
-            Some("main"),
-            None,
-        );
-        let e = outcome.expect_err(&format!(
-            "entry fn returning Err must surface a runtime error (parallel={parallel})"
-        ));
-        assert!(
-            e.message.contains("unhandled error: boom"),
-            "expected 'unhandled error: boom', got {:?} (parallel={parallel})",
-            e.message
-        );
-    }
+    let (_out, _err, outcome, _rc) = crate::vm::run_file_with_entry(
+        &entry,
+        crate::native::HostConfig::default(),
+        true,
+        Some("main"),
+        None,
+    );
+    let e = outcome.expect_err("entry fn returning Err must surface a runtime error");
+    assert!(
+        e.message.contains("unhandled error: boom"),
+        "expected 'unhandled error: boom', got {:?}",
+        e.message
+    );
 }
 
 // GUARD: an entry fn returning `Ok(..)` runs clean (rc=0) — the surfacing gate is Err/None only.
@@ -5323,23 +5036,18 @@ fn manifest_entrypoint_ok_runs_clean_both_engines() {
         "main.chz",
         "fn main() -> int!:\n    print(\"ran\")\n    return Ok(0)\n",
     );
-    for parallel in [false, true] {
-        let (out, _err, outcome, _rc) = crate::vm::run_file_with_entry(
-            &entry,
-            crate::native::HostConfig::default(),
-            parallel,
-            Some("main"),
-            None,
-        );
-        assert!(
-            outcome.is_ok(),
-            "entry fn returning Ok must run clean (parallel={parallel}), got {outcome:?}"
-        );
-        assert!(
-            out.contains("ran"),
-            "expected 'ran' in output (parallel={parallel})"
-        );
-    }
+    let (out, _err, outcome, _rc) = crate::vm::run_file_with_entry(
+        &entry,
+        crate::native::HostConfig::default(),
+        true,
+        Some("main"),
+        None,
+    );
+    assert!(
+        outcome.is_ok(),
+        "entry fn returning Ok must run clean, got {outcome:?}"
+    );
+    assert!(out.contains("ran"), "expected 'ran' in output");
 }
 
 #[test]
@@ -5352,7 +5060,6 @@ fn parity_index_assign() {
 
 #[test]
 fn parity_index_assign_out_of_bounds() {
-    assert_parity("xs := [1, 2, 3]\nxs[9] = 0\nprint(xs)\n");
     assert_eq!(
         vm_outcome("xs := [1, 2, 3]\nxs[9] = 0\nprint(xs)\n").unwrap_err(),
         "runtime error (line 2, col 1): index 9 out of bounds (len 3)"
@@ -5364,7 +5071,6 @@ fn parity_compound_index_oob_vs_rhs_error_order() {
     // Compound `xs[i] += rhs` on an out-of-bounds `i` where `rhs` ALSO errors: both engines
     // must agree on which error wins. The VM reads the target (bounds-check) before `rhs`;
     // the interp must do the same.
-    assert_parity("xs := [1, 2, 3]\nz := 0\nxs[5] += 1 / z\n");
     assert_eq!(
         vm_outcome("xs := [1, 2, 3]\nz := 0\nxs[5] += 1 / z\n").unwrap_err(),
         "runtime error (line 3, col 1): index 5 out of bounds (len 3)"
@@ -5375,7 +5081,6 @@ fn parity_compound_index_oob_vs_rhs_error_order() {
 fn parity_compound_index_oob_skips_rhs_side_effect() {
     // On an out-of-bounds compound assign, neither engine should run the rhs side effect.
     let src = "fn side() -> int:\n    print(\"rhs ran\")\n    return 0\nxs := [1, 2, 3]\nxs[5] += side()\nprint(\"after\")\n";
-    assert_parity(src);
     assert_eq!(
         vm_outcome(src).unwrap_err(),
         "runtime error (line 5, col 1): index 5 out of bounds (len 3)",
@@ -5407,7 +5112,6 @@ fn parity_hof_param() {
 #[test]
 fn parity_list_sum_overflow() {
     let src = "print([9223372036854775807, 1].sum())\n";
-    assert_parity(src);
     assert_eq!(
         vm_outcome(src).unwrap_err(),
         "runtime error (line 1, col 7): integer overflow in Add",
@@ -5575,34 +5279,6 @@ fn fixture(rel: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(rel)
 }
 
-/// Run a file through both engines and assert identical (stdout, error).
-fn assert_file_parity(rel: &str) {
-    let path = fixture(rel);
-    // RAW BYTES on both legs (see `RunOutputRaw`): a `String` compare would fold a genuine
-    // non-UTF-8 divergence (`ff` vs `fe`) into equal U+FFFDs and pass a byte-divergent run.
-    let raw = |parallel| {
-        crate::vm::run_file_bytes(
-            &path,
-            crate::native::HostConfig::default(),
-            parallel,
-            None,
-            None,
-        )
-    };
-    let (vm_out, vm_err, vm_res, _) = raw(false);
-    let (ip_out, ip_err, ip_res, _) = raw(true);
-    // Text compare first (readable failure), then the byte compare that catches a divergence a
-    // lossy decode would erase.
-    let label = format!("for {rel}");
-    assert_stream_parity(&vm_out, &ip_out, "stdout", &label);
-    assert_stream_parity(&vm_err, &ip_err, "stderr", &label);
-    assert_eq!(
-        vm_res.err().map(|e| e.to_string()),
-        ip_res.err().map(|e| e.to_string()),
-        "error divergence for {rel}"
-    );
-}
-
 #[test]
 fn golden_hello_via_run_file() {
     let path = fixture("examples/hello.chz");
@@ -5628,7 +5304,6 @@ fn golden_concurrent_jobs_both_engines() {
         out.contains("ALL PASS (49 checks)"),
         "self-test must fully pass:\n{out}"
     );
-    assert_file_parity("examples/concurrent_jobs.chz");
 }
 
 /// M6 golden: core-type methods + pipe run end-to-end on the VM and byte-match the interp.
@@ -5639,7 +5314,6 @@ fn golden_methods_via_run_file() {
     let (out, _err, res, _) = run_file(&path);
     assert!(res.is_ok(), "{res:?}");
     assert_eq!(out, expected);
-    assert_file_parity("examples/methods.chz");
 }
 
 /// Golden: in-place index & field assignment run end-to-end on the VM and byte-match the interp.
@@ -5650,7 +5324,6 @@ fn golden_mutate_via_run_file() {
     let (out, _err, res, _) = run_file(&path);
     assert!(res.is_ok(), "{res:?}");
     assert_eq!(out, expected);
-    assert_file_parity("examples/mutate.chz");
 }
 
 /// `examples/collection_ops.chz` — golden coverage of every collection operator (gap #3): list
@@ -5664,7 +5337,6 @@ fn golden_collection_ops_via_run_file() {
     let (out, _err, res, _) = run_file(&path);
     assert!(res.is_ok(), "{res:?}");
     assert_eq!(out, expected);
-    assert_file_parity("examples/collection_ops.chz");
 }
 
 /// Golden: `Self` usable in inherent struct/enum/newtype method signatures + bodies (not
@@ -5677,7 +5349,6 @@ fn golden_self_method_via_run_file() {
     let (out, _err, res, _) = run_file(&path);
     assert!(res.is_ok(), "{res:?}");
     assert_eq!(out, expected);
-    assert_file_parity("examples/self_method.chz");
 }
 
 /// Golden: the `Contains` operator protocol (L5) — `x in obj` dispatches to a user
@@ -5690,7 +5361,6 @@ fn golden_contains_protocol_via_run_file() {
     let (out, _err, res, _) = run_file(&path);
     assert!(res.is_ok(), "{res:?}");
     assert_eq!(out, expected);
-    assert_file_parity("examples/contains_protocol.chz");
 }
 
 /// Golden: compound assignment (`+=`/`-=`/…) honors struct/enum/newtype operator overloading —
@@ -5703,7 +5373,6 @@ fn golden_compound_overload_via_run_file() {
     let (out, _err, res, _) = run_file(&path);
     assert!(res.is_ok(), "{res:?}");
     assert_eq!(out, expected);
-    assert_file_parity("examples/compound_overload.chz");
 }
 
 /// M6c golden: the std-library demo (native std.io/math/os + Chezzi std.string) runs end-to-end on
@@ -5715,7 +5384,6 @@ fn golden_std_demo_via_run_file() {
     let (out, _err, res, _) = run_file(&path);
     assert!(res.is_ok(), "{res:?}");
     assert_eq!(out, expected);
-    assert_file_parity("examples/std_demo.chz");
 }
 
 // ----- std.io TTY detection (gaps §6) — separated block near golden_std_demo to shrink the
@@ -5846,7 +5514,6 @@ fn golden_math_more_via_run_file() {
     let (out, _err, res, _) = run_file(&path);
     assert!(res.is_ok(), "{res:?}");
     assert_eq!(out, expected);
-    assert_file_parity("examples/math_more.chz");
 }
 
 /// `std.bisect` — binary search + sorted-insert over the full boundary matrix (empty, all-equal,
@@ -5859,7 +5526,6 @@ fn golden_bisect_via_run_file() {
     let (out, _err, res, _) = run_file(&path);
     assert!(res.is_ok(), "{res:?}");
     assert_eq!(out, expected);
-    assert_file_parity("examples/bisect.chz");
 }
 
 /// `std.memoize` — `memoize1` caches per distinct argument (single-eval proven by a captured
@@ -5872,7 +5538,6 @@ fn golden_memoize_via_run_file() {
     let (out, _err, res, _) = run_file(&path);
     assert!(res.is_ok(), "{res:?}");
     assert_eq!(out, expected);
-    assert_file_parity("examples/memoize.chz");
 }
 
 /// `std.duration` — Go-like time spans (pure-Chezzi). `to_string`/`parse` across the shape space,
@@ -5885,7 +5550,6 @@ fn golden_duration_via_run_file() {
     let (out, _err, res, _) = run_file(&path);
     assert!(res.is_ok(), "{res:?}");
     assert_eq!(out, expected);
-    assert_file_parity("examples/duration.chz");
 }
 
 // ----- std.csv (gaps §7) — separate labeled block to shrink the hand-resolved conflict with the
@@ -5901,7 +5565,6 @@ fn golden_csv_via_run_file() {
     let (out, _err, res, _) = run_file(&path);
     assert!(res.is_ok(), "{res:?}");
     assert_eq!(out, expected);
-    assert_file_parity("examples/csv.chz");
 }
 
 /// `Channel.trip()` — the manual level-trigger latch (behind `std.cancel`'s `done()`). Tripping
@@ -5914,7 +5577,6 @@ fn golden_channel_trip_via_run_file() {
     let (out, _err, res, _) = run_file(&path);
     assert!(res.is_ok(), "{res:?}");
     assert_eq!(out, expected);
-    assert_file_parity("examples/channel_trip.chz");
 }
 
 /// `std.cancel` — a manual token: `cancelled()`/`reason()` before/after `cancel()`, `done()`
@@ -5926,7 +5588,6 @@ fn golden_cancel_manual_via_run_file() {
     let (out, _err, res, _) = run_file(&path);
     assert!(res.is_ok(), "{res:?}");
     assert_eq!(out, expected);
-    assert_file_parity("examples/cancel_manual.chz");
 }
 
 /// `std.cancel` — timeouts + `wait:` integration (`done()` as a wait arm). All cases deterministic
@@ -5939,27 +5600,19 @@ fn golden_cancel_timeout_wait_via_run_file() {
     let (out, _err, res, _) = run_file(&path);
     assert!(res.is_ok(), "{res:?}");
     assert_eq!(out, expected);
-    assert_file_parity("examples/cancel_timeout_wait.chz");
 }
 
-/// `std.cancel` — cooperative CPU-loop cancellation DIVERGES by engine, so it has no `.expected`
-/// (cf. `examples/parallel_cancel.chz`). A sibling's manual `cancel()` aborts the polling worker
-/// early on the default OS-thread engine (preemption); the single-threaded cooperative oracle runs
-/// the worker to completion first (the canceller only runs at the sequential join). Asserts both.
+/// `std.cancel` — cooperative CPU-loop cancellation on the M:N engine: a sibling's manual
+/// `cancel()` aborts the polling worker early (preemption), so it has no `.expected` (cf.
+/// `examples/parallel_cancel.chz`).
 #[test]
-fn cancel_cpu_diverges_by_engine() {
+fn cancel_cpu_aborts_early_on_mn() {
     let path = fixture("examples/cancel_cpu.chz");
-    let (par_out, _e, par_res, _) = run_file_parallel(&path, crate::native::HostConfig::default());
+    let (par_out, _e, par_res, _) = run_file_with(&path, crate::native::HostConfig::default());
     assert!(par_res.is_ok(), "{par_res:?}");
     assert_eq!(
         par_out, "worker aborted early\n",
-        "default OS-thread engine should preempt + abort"
-    );
-    let (coop_out, _e, coop_res, _) = run_file(&path);
-    assert!(coop_res.is_ok(), "{coop_res:?}");
-    assert_eq!(
-        coop_out, "worker ran to completion\n",
-        "cooperative oracle should run to completion"
+        "the M:N engine should preempt + abort"
     );
 }
 
@@ -6099,7 +5752,6 @@ fn golden_cancel_tree_via_run_file() {
     let (out, _err, res, _) = run_file(&path);
     assert!(res.is_ok(), "{res:?}");
     assert_eq!(out, expected);
-    assert_file_parity("examples/cancel_tree.chz");
 }
 
 /// C-ABI FFI golden (VM twin of `interp::golden_ffi_chz`): the `extern "lib":` block calls
@@ -6113,7 +5765,6 @@ fn golden_ffi_chz_via_run_file() {
     let (out, _err, res, _) = run_file(&path);
     assert!(res.is_ok(), "{res:?}");
     assert_eq!(out, expected);
-    assert_file_parity("examples/ffi.chz");
 }
 
 /// C-ABI opaque `ptr` handle golden (VM twin of `interp::golden_ffi_ptr_chz`): the `extern "lib":`
@@ -6128,7 +5779,6 @@ fn golden_ffi_ptr_chz_via_run_file() {
     let (out, _err, res, _) = run_file(&path);
     assert!(res.is_ok(), "{res:?}");
     assert_eq!(out, expected);
-    assert_file_parity("examples/ffi_ptr.chz");
 }
 
 /// C struct BY VALUE golden (VM twin of `interp::golden_ffi_struct_chz`): the `extern "lib":`
@@ -6146,7 +5796,6 @@ fn golden_ffi_struct_chz_via_run_file() {
     let (out, _err, res, _) = run_file(&path);
     assert!(res.is_ok(), "{res:?}");
     assert_eq!(out, expected);
-    assert_file_parity("examples/ffi_struct.chz");
 }
 
 /// CAPSTONE C-buffer FFI golden (VM twin of `interp::golden_ffi_qsort_chz`): sort a Chezzi list
@@ -6163,13 +5812,12 @@ fn golden_ffi_qsort_chz_via_run_file() {
     let (out, _err, res, _) = run_file(&path);
     assert!(res.is_ok(), "{res:?}");
     assert_eq!(out, expected);
-    assert_file_parity("examples/ffi_qsort.chz");
     // Also exercise the M:N `--parallel` engine: the qsort comparator re-enters the VM as a
     // libffi callback under worker pinning — the highest-risk callback+alloc composition, and
     // the one path the cooperative-VM + interp parity above does not cover. Keeps the engine
     // matrix honest (the sibling deref test runs `--parallel` too).
     let (par_out, _par_err, par_res, _) =
-        run_file_parallel(&path, crate::native::HostConfig::default());
+        run_file_with(&path, crate::native::HostConfig::default());
     assert!(par_res.is_ok(), "{par_res:?}");
     assert_eq!(
         par_out, expected,
@@ -6188,7 +5836,6 @@ fn golden_ffi_str_chz_via_run_file() {
     let (out, _err, res, _) = run_file(&path);
     assert!(res.is_ok(), "{res:?}");
     assert_eq!(out, expected);
-    assert_file_parity("examples/ffi_str.chz");
 }
 
 /// C-ABI fixed-width integer marshalling golden (VM twin of `interp::golden_ffi_int_chz`): `atoi
@@ -6204,7 +5851,6 @@ fn golden_ffi_int_chz_via_run_file() {
     let (out, _err, res, _) = run_file(&path);
     assert!(res.is_ok(), "{res:?}");
     assert_eq!(out, expected);
-    assert_file_parity("examples/ffi_int.chz");
 }
 
 /// A complete self-contained program (merge sort + binary search + stats over std.math) runs on
@@ -6218,7 +5864,6 @@ fn golden_overflow_via_run_file() {
     let (out, _err, res, _) = run_file(&path);
     assert!(res.is_ok(), "{res:?}");
     assert_eq!(out, expected);
-    assert_file_parity("examples/overflow.chz");
 }
 
 #[test]
@@ -6228,7 +5873,6 @@ fn golden_stats_app_via_run_file() {
     let (out, _err, res, _) = run_file(&path);
     assert!(res.is_ok(), "{res:?}");
     assert_eq!(out, expected);
-    assert_file_parity("examples/stats.chz");
 }
 
 /// G3 golden: `examples/stdlib_cmp.chz` — `import std.cmp`, generic `min`/`max`/`clamp` over
@@ -6241,7 +5885,6 @@ fn golden_stdlib_cmp_via_run_file() {
     let (out, _err, res, _) = run_file(&path);
     assert!(res.is_ok(), "{res:?}");
     assert_eq!(out, expected);
-    assert_file_parity("examples/stdlib_cmp.chz");
 }
 
 /// std.flag: `--name value` + `--count=3` `=`-form + a trailing positional, both engines.
@@ -6341,7 +5984,6 @@ fn golden_flag_demo_via_run_file() {
     let (out, _err, res, _) = run_file(&path);
     assert!(res.is_ok(), "{res:?}");
     assert_eq!(out, expected);
-    assert_file_parity("examples/flag_demo.chz");
 }
 
 /// std.log golden: `examples/log_demo.chz` exercises gating, all 4 level formats, set_level, an
@@ -6359,7 +6001,6 @@ fn golden_log_demo_via_run_file() {
     // (stderr) logger's messages do NOT — and vice versa.
     assert!(out.contains("WARN pure") && out.contains("INFO stdout-line"));
     assert!(!out.contains("served") && !err.contains("stdout-line"));
-    assert_file_parity("examples/log_demo.chz");
 }
 
 /// std.string helpers golden: `examples/str_more.chz` — the additive ends_with/index_of/count/
@@ -6372,7 +6013,6 @@ fn golden_str_more_via_run_file() {
     let (out, _err, res, _) = run_file(&path);
     assert!(res.is_ok(), "{res:?}");
     assert_eq!(out, expected);
-    assert_file_parity("examples/str_more.chz");
 }
 
 /// str receiver-method golden: `examples/str_methods.chz` — the gap #1 forwarder methods
@@ -6386,7 +6026,6 @@ fn golden_str_methods_via_run_file() {
     let (out, _err, res, _) = run_file(&path);
     assert!(res.is_ok(), "{res:?}");
     assert_eq!(out, expected);
-    assert_file_parity("examples/str_methods.chz");
 }
 
 /// `iter.reduce` has no seed, so an empty list has no accumulator to start from. It used to leak the
@@ -6448,7 +6087,6 @@ fn golden_iter_more_via_run_file() {
     let (out, _err, res, _) = run_file(&path);
     assert!(res.is_ok(), "{res:?}");
     assert_eq!(out, expected);
-    assert_file_parity("examples/iter_more.chz");
 }
 
 // --- lazy iterator adapters (gaps §3) — count/repeat/cycle/chain/islice/imap/ifilter ---
@@ -6557,7 +6195,6 @@ fn golden_rand_via_run_file() {
         let (out, _err, res, _) = run_file(&path);
         assert!(res.is_ok(), "{rel}: {res:?}");
         assert_eq!(out, expected, "stdout mismatch for {rel}");
-        assert_file_parity(rel);
     }
 }
 
@@ -6571,7 +6208,6 @@ fn golden_path_via_run_file() {
     let (out, _err, res, _) = run_file(&path);
     assert!(res.is_ok(), "{res:?}");
     assert_eq!(out, expected);
-    assert_file_parity("examples/path.chz");
 }
 
 /// std.datetime golden: `examples/datetime.chz` — the pure-Chezzi civil-calendar module
@@ -6584,7 +6220,6 @@ fn golden_datetime_via_run_file() {
     let (out, _err, res, _) = run_file(&path);
     assert!(res.is_ok(), "{res:?}");
     assert_eq!(out, expected);
-    assert_file_parity("examples/datetime.chz");
 }
 
 /// std.concurrency.collection golden: `examples/concurrent_collection.chz` — the pure-Chezzi
@@ -6600,7 +6235,6 @@ fn golden_concurrent_collection_via_run_file() {
     let (out, _err, res, _) = run_file(&path);
     assert!(res.is_ok(), "{res:?}");
     assert_eq!(out, expected);
-    assert_file_parity("examples/concurrent_collection.chz");
 }
 
 /// std.collections golden: `examples/collections.chz` — the pure-Chezzi Heap/Deque/Counter
@@ -6613,7 +6247,6 @@ fn golden_collections_via_run_file() {
     let (out, _err, res, _) = run_file(&path);
     assert!(res.is_ok(), "{res:?}");
     assert_eq!(out, expected);
-    assert_file_parity("examples/collections.chz");
 }
 
 /// M8-M5 golden: `examples/json_decode.chz` — type-directed `json.decode[T]` into struct /
@@ -6626,7 +6259,6 @@ fn golden_json_decode_via_run_file() {
     let (out, _err, res, _) = run_file(&path);
     assert!(res.is_ok(), "{res:?}");
     assert_eq!(out, expected);
-    assert_file_parity("examples/json_decode.chz");
 }
 
 /// M8-M3 golden: `examples/sys.chz` — the native trio std.process/std.fs/std.time, end-to-end
@@ -6638,7 +6270,6 @@ fn golden_sys_via_run_file() {
     let (out, _err, res, _) = run_file(&path);
     assert!(res.is_ok(), "{res:?}");
     assert_eq!(out, expected);
-    assert_file_parity("examples/sys.chz");
 }
 
 /// std.process polish golden: `examples/process_polish.chz` — the structured `run`/`run_args`
@@ -6652,7 +6283,6 @@ fn golden_process_polish_via_run_file() {
     let (out, _err, res, _) = run_file(&path);
     assert!(res.is_ok(), "{res:?}");
     assert_eq!(out, expected);
-    assert_file_parity("examples/process_polish.chz");
 }
 
 /// M8+ golden: `examples/fs_mutations.chz` — the std.fs mutation surface (mkdir/append/rename/
@@ -6672,7 +6302,6 @@ fn golden_fs_mutations_via_run_file() {
     let (out, _err, res, _) = run_file(&path);
     assert!(res.is_ok(), "{res:?}");
     assert_eq!(out, expected);
-    assert_file_parity("examples/fs_mutations.chz");
     // The round-trip removes its own scratch; assert nothing leaked into the working tree.
     assert!(
         !scratch.exists(),
@@ -6693,7 +6322,6 @@ fn golden_encoding_crypto_via_run_file() {
         let (out, _err, res, _) = run_file(&path);
         assert!(res.is_ok(), "{rel}: {res:?}");
         assert_eq!(out, expected, "stdout mismatch for {rel}");
-        assert_file_parity(rel);
     }
 }
 
@@ -6712,7 +6340,6 @@ fn golden_uuid_via_run_file() {
     let (out, _err, res, _) = run_file(&path);
     assert!(res.is_ok(), "{res:?}");
     assert_eq!(out, expected);
-    assert_file_parity("examples/uuid_shape.chz");
 }
 
 /// Comprehensions golden: `examples/comprehensions.chz` — list/set/map comprehensions, a guard,
@@ -6724,7 +6351,6 @@ fn golden_comprehensions_via_run_file() {
     let (out, _err, res, _) = run_file(&path);
     assert!(res.is_ok(), "{res:?}");
     assert_eq!(out, expected);
-    assert_file_parity("examples/comprehensions.chz");
 }
 
 /// Nested-clause comprehensions golden: `examples/comprehensions_nested.chz` — 2- and 3-clause
@@ -6738,7 +6364,6 @@ fn golden_comprehensions_nested_via_run_file() {
     let (out, _err, res, _) = run_file(&path);
     assert!(res.is_ok(), "{res:?}");
     assert_eq!(out, expected);
-    assert_file_parity("examples/comprehensions_nested.chz");
 }
 
 /// Stateful-iterator comprehension golden: `examples/comprehension_iter_state.chz` — a
@@ -6753,7 +6378,6 @@ fn golden_comprehension_iter_state_via_run_file() {
     let (out, _err, res, _) = run_file(&path);
     assert!(res.is_ok(), "{res:?}");
     assert_eq!(out, expected);
-    assert_file_parity("examples/comprehension_iter_state.chz");
 }
 
 /// Radix-literal golden: `examples/hex.chz` — hex/binary/octal literals feeding bitwise +
@@ -6765,7 +6389,6 @@ fn golden_hex_via_run_file() {
     let (out, _err, res, _) = run_file(&path);
     assert!(res.is_ok(), "{res:?}");
     assert_eq!(out, expected);
-    assert_file_parity("examples/hex.chz");
 }
 
 /// List concat/extend + map merge/update golden: `examples/concat_merge.chz`. New-vs-mutate
@@ -6777,7 +6400,6 @@ fn golden_concat_merge_via_run_file() {
     let (out, _err, res, _) = run_file(&path);
     assert!(res.is_ok(), "{res:?}");
     assert_eq!(out, expected);
-    assert_file_parity("examples/concat_merge.chz");
 }
 
 /// Tuple-destructuring `for` + `std.iter` golden: `examples/for_tuple.chz` — destructure a list
@@ -6790,7 +6412,6 @@ fn golden_for_tuple_via_run_file() {
     let (out, _err, res, _) = run_file(&path);
     assert!(res.is_ok(), "{res:?}");
     assert_eq!(out, expected);
-    assert_file_parity("examples/for_tuple.chz");
 }
 
 /// Optional chaining + null-coalescing golden: `examples/optchain.chz` — `?.field`, `?.method()`,
@@ -6803,7 +6424,6 @@ fn golden_optchain_via_run_file() {
     let (out, _err, res, _) = run_file(&path);
     assert!(res.is_ok(), "{res:?}");
     assert_eq!(out, expected);
-    assert_file_parity("examples/optchain.chz");
 }
 
 /// Runtime stack trace: a faulting nested call reports the error line + the call chain (innermost
@@ -6827,7 +6447,7 @@ fn stack_trace_reports_call_chain_on_both_engines() {
     );
 
     // Interp parity: identical formatted trace.
-    let (_o, _er, ip_res, _) = run_file_p(&path);
+    let (_o, _er, ip_res, _) = run_file(&path);
     let ie = ip_res.expect_err("program should fault");
     let ip_fmt = format_trace(&ie.message, ie.span, &ie.trace);
     assert_eq!(vm_fmt, ip_fmt, "engines must produce the same stack trace");
@@ -6892,7 +6512,7 @@ fn recursion_trace_parity_vm_vs_interp() {
     let (_o, _e, res, _) = run_file(&path);
     let e = res.expect_err("deep recursion should fault");
     let vm_fmt = format_trace(&e.message, e.span, &e.trace);
-    let (_o2, _e2, ip_res, _) = run_file_p(&path);
+    let (_o2, _e2, ip_res, _) = run_file(&path);
     let ie = ip_res.expect_err("deep recursion should fault");
     let ip_fmt = format_trace(&ie.message, ie.span, &ie.trace);
     assert_eq!(
@@ -7026,7 +6646,7 @@ fn deferred_fault_trace_supersedes_on_both_engines() {
         "deferred fault's chain"
     );
     let vm_fmt = format_trace(&e.message, e.span, &e.trace);
-    let (_o2, _e2, ip_res, _) = run_file_p(&path);
+    let (_o2, _e2, ip_res, _) = run_file(&path);
     let ie = ip_res.expect_err("should fault");
     let ip_fmt = format_trace(&ie.message, ie.span, &ie.trace);
     assert_eq!(
@@ -7051,7 +6671,7 @@ fn executor_task_fault_trace_matches_on_both_engines() {
     let ex_path = dir.join("ex.chz");
     std::fs::write(&ex_path, ex_src).unwrap();
     let (_o, _e, se, _) = run_file(&ex_path);
-    let (_o, _e, mn, _) = run_file_p(&ex_path);
+    let (_o, _e, mn, _) = run_file(&ex_path);
     let se = se.expect_err("serial should fault");
     let mn = mn.expect_err("M:N should fault");
     let se_names: Vec<&str> = se.trace.iter().map(|f| f.function.as_str()).collect();
@@ -7068,7 +6688,7 @@ fn executor_task_fault_trace_matches_on_both_engines() {
     let nu_path = dir.join("nu.chz");
     std::fs::write(&nu_path, nu_src).unwrap();
     let (_o, _e, nse, _) = run_file(&nu_path);
-    let (_o, _e, nmn, _) = run_file_p(&nu_path);
+    let (_o, _e, nmn, _) = run_file(&nu_path);
     let nse = nse.expect_err("serial nursery should fault");
     let nmn = nmn.expect_err("M:N nursery should fault");
     let nse_names: Vec<&str> = nse.trace.iter().map(|f| f.function.as_str()).collect();
@@ -7083,7 +6703,7 @@ fn executor_task_fault_trace_matches_on_both_engines() {
     let im_path = dir.join("implicit.chz");
     std::fs::write(&im_path, im_src).unwrap();
     let (_o, _e, ise, _) = run_file(&im_path);
-    let (_o, _e, imn, _) = run_file_p(&im_path);
+    let (_o, _e, imn, _) = run_file(&im_path);
     let ise = ise.expect_err("serial implicit drain should fault");
     let imn = imn.expect_err("M:N implicit drain should fault");
     let ise_names: Vec<&str> = ise.trace.iter().map(|f| f.function.as_str()).collect();
@@ -7108,7 +6728,7 @@ fn executor_task_fault_trace_matches_on_both_engines() {
     let df_path = dir.join("defer_unwind.chz");
     std::fs::write(&df_path, df_src).unwrap();
     let (_o, _e, dse, _) = run_file(&df_path);
-    let (_o, _e, dmn, _) = run_file_p(&df_path);
+    let (_o, _e, dmn, _) = run_file(&df_path);
     let dse = dse.expect_err("serial defer-unwind should fault");
     let dmn = dmn.expect_err("M:N defer-unwind should fault");
     let dse_names: Vec<&str> = dse.trace.iter().map(|f| f.function.as_str()).collect();
@@ -7133,7 +6753,6 @@ fn golden_default_expr_via_run_file() {
     let (out, _err, res, _) = run_file(&path);
     assert!(res.is_ok(), "{res:?}");
     assert_eq!(out, expected);
-    assert_file_parity("examples/default_expr.chz");
 }
 
 /// Function-typed field call golden: `examples/fn_field.chz` — `recv.f(args)` where `f` is a
@@ -7146,7 +6765,6 @@ fn golden_fn_field_via_run_file() {
     let (out, _err, res, _) = run_file(&path);
     assert!(res.is_ok(), "{res:?}");
     assert_eq!(out, expected);
-    assert_file_parity("examples/fn_field.chz");
 }
 
 /// `sort_by_key` golden: `examples/sort_by_key.chz` — sort in place by a derived key (int/str
@@ -7159,7 +6777,6 @@ fn golden_sort_by_key_via_run_file() {
     let (out, _err, res, _) = run_file(&path);
     assert!(res.is_ok(), "{res:?}");
     assert_eq!(out, expected);
-    assert_file_parity("examples/sort_by_key.chz");
 }
 
 /// `const T` golden: `examples/const_binding.chz` — the immutable binding modifier. A module-global
@@ -7173,7 +6790,6 @@ fn golden_const_binding_via_run_file() {
     let (out, _err, res, _) = run_file(&path);
     assert!(res.is_ok(), "{res:?}");
     assert_eq!(out, expected);
-    assert_file_parity("examples/const_binding.chz");
 }
 
 /// Tuple destructuring + match-on-tuple + guards golden: `examples/tuple_match.chz` — `a, b :=
@@ -7186,7 +6802,6 @@ fn golden_tuple_match_via_run_file() {
     let (out, _err, res, _) = run_file(&path);
     assert!(res.is_ok(), "{res:?}");
     assert_eq!(out, expected);
-    assert_file_parity("examples/tuple_match.chz");
 }
 
 /// `std.os.exit(code)` golden: `examples/exit.chz` halts at the negative branch with status 2.
@@ -7196,7 +6811,7 @@ fn golden_exit_via_run_file() {
     let path = fixture("examples/exit.chz");
     let expected = std::fs::read_to_string(fixture("examples/exit.expected")).unwrap();
     let (vo, _ve, vr, vc) = run_file(&path);
-    let (io, _ie, ir, ic) = run_file_p(&path);
+    let (io, _ie, ir, ic) = run_file(&path);
     assert!(
         vr.is_ok() && ir.is_ok(),
         "exit is a clean halt: vm={vr:?} interp={ir:?}"
@@ -7217,7 +6832,6 @@ fn golden_json_dynamic_via_run_file() {
     let (out, _err, res, _) = run_file(&path);
     assert!(res.is_ok(), "{res:?}");
     assert_eq!(out, expected);
-    assert_file_parity("examples/json_dynamic.chz");
 }
 
 /// M9 golden: `examples/regex_demo.chz` — `import std.regex` (is_match / find with capture
@@ -7230,7 +6844,6 @@ fn golden_regex_demo_via_run_file() {
     let (out, _err, res, _) = run_file(&path);
     assert!(res.is_ok(), "{res:?}");
     assert_eq!(out, expected);
-    assert_file_parity("examples/regex_demo.chz");
 }
 
 /// Golden: `examples/knapsack.chz` fills an int DP table with `cmp.max` (std.cmp generic over
@@ -7242,7 +6855,6 @@ fn golden_knapsack_via_run_file() {
     let (out, _err, res, _) = run_file(&path);
     assert!(res.is_ok(), "{res:?}");
     assert_eq!(out, expected);
-    assert_file_parity("examples/knapsack.chz");
 }
 
 /// `Iterator[T]` golden: a generic fn bounded `[S: Iterator[T], T]` over list/str/set/struct,
@@ -7254,7 +6866,6 @@ fn golden_iterator_bound_via_run_file() {
     let (out, _err, res, _) = run_file(&path);
     assert!(res.is_ok(), "{res:?}");
     assert_eq!(out, expected);
-    assert_file_parity("examples/iterator_bound.chz");
 }
 
 /// Lazy iterator adapters (Take/Mapped over an infinite Count) — the no-`yield` story. The inner
@@ -7266,7 +6877,6 @@ fn golden_iter_adapters_via_run_file() {
     let (out, _err, res, _) = run_file(&path);
     assert!(res.is_ok(), "{res:?}");
     assert_eq!(out, expected);
-    assert_file_parity("examples/iter_adapters.chz");
 }
 
 /// `Iterable[T]` + `.iter()` — a list flows into the Take/Mapped adapter pipeline, `.iter()`+manual
@@ -7280,7 +6890,6 @@ fn golden_iterable_via_run_file() {
     let (out, _err, res, _) = run_file(&path);
     assert!(res.is_ok(), "{res:?}");
     assert_eq!(out, expected);
-    assert_file_parity("examples/iterable.chz");
 }
 
 #[test]
@@ -7289,7 +6898,6 @@ fn golden_multi_file_project_via_vm() {
     let (out, _err, res, _) = run_file(&fixture("tests/fixtures/proj/main.chz"));
     assert!(res.is_ok());
     assert_eq!(out, expected);
-    assert_file_parity("tests/fixtures/proj/main.chz");
 }
 
 /// The M4.5 headline bug, now on the VM: an imported function reading its module's top-level
@@ -7300,7 +6908,6 @@ fn imported_fn_uses_home_globals() {
     let (out, _err, res, _) = run_file(&fixture("tests/fixtures/homeglobals/main.chz"));
     assert!(res.is_ok());
     assert_eq!(out, "from-lib\nfrom-main\n");
-    assert_file_parity("tests/fixtures/homeglobals/main.chz");
 }
 
 /// Whole multi-file project is byte-identical under GC stress.
@@ -7322,7 +6929,6 @@ fn multi_file_identical_under_gc_stress() {
 fn parity_map_missing_key_read_errors() {
     // Both engines must error identically on a missing key.
     let src = "m := {\"a\": 1}\nprint(m[\"z\"])\n";
-    assert_parity(src);
     assert_eq!(
         vm_outcome(src).unwrap_err(),
         "runtime error (line 2, col 7): key not found",
@@ -7339,7 +6945,6 @@ fn parity_map_missing_key_read_errors() {
 fn parity_map_compound_assign_missing_key_errors() {
     // Compound on a missing key is an error (consistent with read-missing).
     let src = "m := {\"a\": 1}\nm[\"z\"] += 1\n";
-    assert_parity(src);
     assert_eq!(
         vm_outcome(src).unwrap_err(),
         "runtime error (line 2, col 1): key not found",
@@ -7365,7 +6970,6 @@ fn main():
     m: Map[P, int] = {}
     m[P(1)] = 5
 main()";
-    assert_parity(src);
     assert_eq!(
         vm_outcome(src).unwrap_err(),
         "runtime error (line 5, col 5): struct 'P' has no 'hash' method (needed to use it as a map/set key)",
@@ -7379,7 +6983,6 @@ main()";
 #[test]
 fn parity_list_non_int_index_still_errors() {
     let src = "xs := [1, 2, 3]\nprint(xs[\"a\"])\n";
-    assert_parity(src);
     assert_eq!(
         vm_outcome(src).unwrap_err(),
         "runtime error (line 2, col 7): expected int, found str",
@@ -7394,7 +6997,6 @@ fn parity_list_non_int_index_still_errors() {
     );
     // And on assignment (SetIndex relocation).
     let src2 = "xs := [1, 2, 3]\nxs[\"a\"] = 9\n";
-    assert_parity(src2);
     assert_eq!(
         vm_outcome(src2).unwrap_err(),
         "runtime error (line 2, col 1): expected int, found str",
@@ -7507,13 +7109,11 @@ fn slice_clamped_parity() {
     // Slice bounds CLAMP (no fault) even far out of range...
     assert_parity_out("print([1, 2, 3][-100:])\n", "[1, 2, 3]\n");
     // ...but a plain out-of-range negative index FAULTS, byte-identically.
-    assert_parity("print([1, 2, 3][0 - 100])\n");
     assert_eq!(
         vm_outcome("print([1, 2, 3][0 - 100])\n").unwrap_err(),
         "runtime error (line 1, col 7): index -100 out of bounds (len 3)"
     );
     // Zero step faults with the same message in both engines.
-    assert_parity("print([1, 2, 3][::0])\n");
     assert_eq!(
         vm_outcome("print([1, 2, 3][::0])\n").unwrap_err(),
         "runtime error (line 1, col 7): slice step cannot be zero"
@@ -7592,8 +7192,8 @@ fn golden_closure_capture_chz_matches_expected_and_interp() {
     let expected = include_str!("../../examples/closure_capture.expected");
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, expected);
-    assert_eq!(vm_out, run_capture_parallel(src).expect("interp run"));
-    assert_eq!(vm_out, run_capture_parallel(src).expect("parallel run"));
+    assert_eq!(vm_out, run_capture(src).expect("interp run"));
+    assert_eq!(vm_out, run_capture(src).expect("parallel run"));
 }
 
 /// Closure-capture-across-scopes golden: `examples/closure_capture_scopes.chz` test-locks the
@@ -7611,8 +7211,8 @@ fn golden_closure_capture_scopes_chz_matches_expected_and_interp() {
     let entry = dir.join("main.chz");
     std::fs::write(&entry, src).unwrap();
     let (vo, _ve, vr, _vc) = run_file(&entry);
-    let (io, _ie, ir, _ic) = run_file_p(&entry);
-    let (po, _pe, pr, _pc) = run_file_parallel(&entry, crate::native::HostConfig::default());
+    let (io, _ie, ir, _ic) = run_file(&entry);
+    let (po, _pe, pr, _pc) = run_file_with(&entry, crate::native::HostConfig::default());
     let _ = std::fs::remove_dir_all(&dir);
     assert!(vr.is_ok(), "VM faulted: {vr:?}");
     assert!(ir.is_ok(), "interp faulted: {ir:?}");
@@ -7624,7 +7224,7 @@ fn golden_closure_capture_scopes_chz_matches_expected_and_interp() {
 
 // ----- Uniform by-reference closure capture (the acceptance matrix, §4 of the design). Each row is
 // a runnable `examples/capture_*.chz` + `.expected`, asserted `run_capture (serial) ==
-// run_capture_parallel (M:N) == .expected`. Capture is now by REFERENCE: a closure shares the
+// run_capture (M:N) == .expected`. Capture is now by REFERENCE: a closure shares the
 // closest binding of a captured name and sees/makes writes to it. The one deliberate divergence from
 // Go is F1 (a plain capture into a `spawn` is an isolated per-task copy, not shared+raced). -----
 
@@ -7637,7 +7237,7 @@ fn golden_capture_outer_write() {
     assert_eq!(out, expected, "serial vs .expected");
     assert_eq!(
         out,
-        run_capture_parallel(src).expect("parallel run"),
+        run_capture(src).expect("parallel run"),
         "serial vs M:N"
     );
 }
@@ -7652,7 +7252,7 @@ fn golden_capture_closure_write() {
     assert_eq!(out, expected, "serial vs .expected");
     assert_eq!(
         out,
-        run_capture_parallel(src).expect("parallel run"),
+        run_capture(src).expect("parallel run"),
         "serial vs M:N"
     );
 }
@@ -7667,7 +7267,7 @@ fn golden_capture_shared_counter() {
     assert_eq!(out, expected, "serial vs .expected");
     assert_eq!(
         out,
-        run_capture_parallel(src).expect("parallel run"),
+        run_capture(src).expect("parallel run"),
         "serial vs M:N"
     );
 }
@@ -7682,7 +7282,7 @@ fn golden_capture_nested_grandparent() {
     assert_eq!(out, expected, "serial vs .expected");
     assert_eq!(
         out,
-        run_capture_parallel(src).expect("parallel run"),
+        run_capture(src).expect("parallel run"),
         "serial vs M:N"
     );
 }
@@ -7697,7 +7297,7 @@ fn golden_capture_destructure() {
     assert_eq!(out, expected, "serial vs .expected");
     assert_eq!(
         out,
-        run_capture_parallel(src).expect("parallel run"),
+        run_capture(src).expect("parallel run"),
         "serial vs M:N"
     );
 }
@@ -7712,7 +7312,7 @@ fn golden_capture_match_bind() {
     assert_eq!(out, expected, "serial vs .expected");
     assert_eq!(
         out,
-        run_capture_parallel(src).expect("parallel run"),
+        run_capture(src).expect("parallel run"),
         "serial vs M:N"
     );
 }
@@ -7727,7 +7327,7 @@ fn golden_capture_loop_var_fresh() {
     assert_eq!(out, expected, "serial vs .expected");
     assert_eq!(
         out,
-        run_capture_parallel(src).expect("parallel run"),
+        run_capture(src).expect("parallel run"),
         "serial vs M:N"
     );
 }
@@ -7742,7 +7342,7 @@ fn golden_capture_loop_accumulator() {
     assert_eq!(out, expected, "serial vs .expected");
     assert_eq!(
         out,
-        run_capture_parallel(src).expect("parallel run"),
+        run_capture(src).expect("parallel run"),
         "serial vs M:N"
     );
 }
@@ -7757,7 +7357,7 @@ fn golden_capture_defer_latest() {
     assert_eq!(out, expected, "serial vs .expected");
     assert_eq!(
         out,
-        run_capture_parallel(src).expect("parallel run"),
+        run_capture(src).expect("parallel run"),
         "serial vs M:N"
     );
 }
@@ -7778,7 +7378,7 @@ fn golden_capture_cell_closure_into_spawn() {
     assert_eq!(out, expected, "serial vs .expected");
     assert_eq!(
         out,
-        run_capture_parallel(src).expect("parallel run"),
+        run_capture(src).expect("parallel run"),
         "serial vs M:N (cell-bearing closure crosses consistently)"
     );
 }
@@ -7798,7 +7398,7 @@ fn golden_capture_spawn_closure_mutates_isolated() {
     assert_eq!(out, expected, "serial vs .expected (isolated push → [1])");
     assert_eq!(
         out,
-        run_capture_parallel(src).expect("parallel run"),
+        run_capture(src).expect("parallel run"),
         "serial vs M:N (capture-bearing closure crosses by deep value on both engines)"
     );
 }
@@ -7821,7 +7421,7 @@ fn golden_capture_spawn_closure_owner_write_isolated() {
     );
     assert_eq!(
         out,
-        run_capture_parallel(src).expect("parallel run"),
+        run_capture(src).expect("parallel run"),
         "serial vs M:N (owner write after spawn is invisible to the task's isolated cell)"
     );
 }
@@ -7842,7 +7442,7 @@ fn golden_capture_spawn_isolated() {
     );
     assert_eq!(
         out,
-        run_capture_parallel(src).expect("parallel run"),
+        run_capture(src).expect("parallel run"),
         "serial vs M:N (both isolate → 0)"
     );
 }
@@ -7876,7 +7476,7 @@ fn golden_capture_rebind_heap() {
     assert_eq!(out, expected, "serial vs .expected");
     assert_eq!(
         out,
-        run_capture_parallel(src).expect("parallel run"),
+        run_capture(src).expect("parallel run"),
         "serial vs M:N"
     );
 }
@@ -7911,7 +7511,7 @@ fn golden_capture_recursion_percall() {
     assert_eq!(out, expected, "serial vs .expected");
     assert_eq!(
         out,
-        run_capture_parallel(src).expect("parallel run"),
+        run_capture(src).expect("parallel run"),
         "serial vs M:N"
     );
 }
@@ -8219,7 +7819,7 @@ main()";
     assert_eq!(out, "0\n", "serial: nested fn capture isolated at airlock");
     assert_eq!(
         out,
-        run_capture_parallel(src).expect("parallel run"),
+        run_capture(src).expect("parallel run"),
         "serial vs M:N (nested-fn closure crosses the airlock by deep value)"
     );
 }
@@ -8264,7 +7864,7 @@ fn golden_capture_escape_reader() {
     assert_eq!(out, expected, "serial vs .expected");
     assert_eq!(
         out,
-        run_capture_parallel(src).expect("parallel run"),
+        run_capture(src).expect("parallel run"),
         "serial vs M:N"
     );
 }
@@ -8402,7 +8002,7 @@ fn main():
 main()";
     assert_parity_out(src, "42\n");
     assert_eq!(
-        run_capture_parallel(src).expect("parallel"),
+        run_capture(src).expect("parallel"),
         "42\n",
         "--parallel capture wire"
     );
@@ -8492,10 +8092,7 @@ fn bytes_crosses_channel() {
     // Three-engine parity: cooperative VM, --parallel M:N, and interp all agree.
     assert_parity_out(src, "b'\\x01\\x02'\n");
     assert_eq!(run_capture(src).expect("vm"), "b'\\x01\\x02'\n");
-    assert_eq!(
-        run_capture_parallel(src).expect("parallel"),
-        "b'\\x01\\x02'\n"
-    );
+    assert_eq!(run_capture(src).expect("parallel"), "b'\\x01\\x02'\n");
 }
 
 // ===== bytearray type (mutable sibling of bytes) =====
@@ -8640,7 +8237,7 @@ fn bytearray_crosses_channel_deep_copy() {
     assert_parity_out(src, "bytearray(b'\\x01\\x02')\n");
     assert_eq!(run_capture(src).expect("vm"), "bytearray(b'\\x01\\x02')\n");
     assert_eq!(
-        run_capture_parallel(src).expect("parallel"),
+        run_capture(src).expect("parallel"),
         "bytearray(b'\\x01\\x02')\n"
     );
 }
@@ -8875,7 +8472,7 @@ fn cursor_crosses_spawn_airlock_three_engine_parity() {
     );
     assert_parity_out(src, "Some(1)\n");
     assert_eq!(
-        run_capture_parallel(src).expect("--parallel"),
+        run_capture(src).expect("--parallel"),
         "Some(1)\n",
         "cursor crosses the M:N airlock"
     );
@@ -8900,15 +8497,9 @@ fn generator_iter_returns_self_vm() {
 
 // ===== one-way int→float implicit widening (Architecture C: real runtime coercion) =====
 
-/// Assert BOTH engines (serial VM + M:N VM) produce `want`. (The tree-walk interp is gone; this used
-/// to call the M:N engine twice under a stale "interp" label.)
+/// Assert the M:N engine produces `want`.
 fn widen_three_engines(src: &str, want: &str) {
-    assert_eq!(run_capture(src).expect("serial"), want, "serial engine");
-    assert_eq!(
-        run_capture_parallel(src).expect("parallel"),
-        want,
-        "M:N engine"
-    );
+    assert_eq!(run_capture(src).expect("program should run"), want);
 }
 
 /// A `float`-annotated let binding stores a genuine `f64` (display `3.0`), and `x / 2` is FLOAT
@@ -9296,8 +8887,7 @@ fn main():
     parallel:
         spawn task()
 main()";
-    assert_eq!(vm_outcome(src).expect("serial"), "1\n");
-    assert_eq!(parallel_outcome(src).expect("M:N"), "1\n");
+    assert_eq!(vm_outcome(src).expect("program should run"), "1\n");
 }
 
 // ----- F3 path C: a frame-holding generator crosses the airlock BY VALUE (deep copy) -----
@@ -9332,8 +8922,7 @@ fn main():
         print(x)
 main()";
     let expect = "1\n2\n3\n0\n1\n2\n3\n";
-    assert_eq!(vm_outcome(src).expect("serial"), expect);
-    assert_eq!(parallel_outcome(src).expect("M:N"), expect);
+    assert_eq!(vm_outcome(src).expect("program should run"), expect);
 }
 
 /// A SUSPENDED generator (driven once → one parked frame) captured into a `spawn:` block crosses by
@@ -9362,8 +8951,7 @@ fn main():
         print(x)
 main()";
     let expect = "2\n3\n0\n2\n3\n";
-    assert_eq!(vm_outcome(src).expect("serial"), expect);
-    assert_eq!(parallel_outcome(src).expect("M:N"), expect);
+    assert_eq!(vm_outcome(src).expect("program should run"), expect);
 }
 
 /// A CLOSURE-backed generator (a nested `fn` capturing a local) crosses by value: `to_wire` wires the
@@ -9392,8 +8980,7 @@ fn main():
         print(x)
 main()";
     let expect = "101\n102\n0\n101\n102\n";
-    assert_eq!(vm_outcome(src).expect("serial"), expect);
-    assert_eq!(parallel_outcome(src).expect("M:N"), expect);
+    assert_eq!(vm_outcome(src).expect("program should run"), expect);
 }
 
 /// A generator crossing over an explicit `Channel[Iterator[int]]` into a task: the parent SENDS it
@@ -9421,8 +9008,7 @@ fn main():
         print(x)
 main()";
     let expect = "10\n20\n10\n20\n";
-    assert_eq!(vm_outcome(src).expect("serial"), expect);
-    assert_eq!(parallel_outcome(src).expect("M:N"), expect);
+    assert_eq!(vm_outcome(src).expect("program should run"), expect);
 }
 
 /// A suspended generator whose PARKED SLOT holds a non-sendable value rejects cleanly at the crossing —
@@ -9452,11 +9038,8 @@ fn main():
             for x in it:
                 out.send(x)
 main()";
-    let ve = vm_outcome(src).expect_err("serial: non-sendable parked slot must reject");
-    let pe = parallel_outcome(src).expect_err("M:N: non-sendable parked slot must reject");
-    assert!(ve.contains("maximum structural depth"), "serial: {ve}");
-    assert!(pe.contains("maximum structural depth"), "M:N: {pe}");
-    assert_eq!(ve, pe, "serial == M:N fault");
+    let ve = vm_outcome(src).expect_err("non-sendable parked slot must reject");
+    assert!(ve.contains("maximum structural depth"), "{ve}");
 }
 
 /// REGRESSION (silent generator DUPLICATION, the e8dcad7 wrong-result class): a value CYCLE that passes
@@ -9482,11 +9065,8 @@ fn main():
             for x in g:
                 print(\"got {x}\")
 main()";
-    let ve = vm_outcome(src).expect_err("serial: generator in a data cycle must reject");
-    let pe = parallel_outcome(src).expect_err("M:N: generator in a data cycle must reject");
-    assert!(ve.contains("reference cycle"), "serial: {ve}");
-    assert!(pe.contains("reference cycle"), "M:N: {pe}");
-    assert_eq!(ve, pe, "serial == M:N fault");
+    let ve = vm_outcome(src).expect_err("generator in a data cycle must reject");
+    assert!(ve.contains("reference cycle"), "{ve}");
 }
 
 /// REGRESSION (bug #2, the SUSPENDED shape): a SUSPENDED single-frame generator whose PARKED STACK SLOT
@@ -9512,12 +9092,8 @@ fn main():
             for x in g:
                 print(\"got {x}\")
 main()";
-    let ve = vm_outcome(src).expect_err("serial: suspended generator in a data cycle must reject");
-    let pe =
-        parallel_outcome(src).expect_err("M:N: suspended generator in a data cycle must reject");
-    assert!(ve.contains("reference cycle"), "serial: {ve}");
-    assert!(pe.contains("reference cycle"), "M:N: {pe}");
-    assert_eq!(ve, pe, "serial == M:N fault");
+    let ve = vm_outcome(src).expect_err("suspended generator in a data cycle must reject");
+    assert!(ve.contains("reference cycle"), "{ve}");
 }
 
 /// Identity-preserving airlock, generator path — a suspended generator whose PARKED SLOT holds a
@@ -9581,8 +9157,7 @@ fn main():
         print(x)
 main()";
     let expect = "1\n2\n3\nparent:\n1\n2\n3\n";
-    assert_eq!(vm_outcome(src).expect("serial"), expect);
-    assert_eq!(parallel_outcome(src).expect("M:N"), expect);
+    assert_eq!(vm_outcome(src).expect("program should run"), expect);
 }
 
 /// A module-global generator driven ONCE at top level (suspended, one parked frame) then reached by a
@@ -9606,8 +9181,7 @@ fn main():
     print(out.recv())
 main()";
     let expect = "2\n3\n";
-    assert_eq!(vm_outcome(src).expect("serial"), expect);
-    assert_eq!(parallel_outcome(src).expect("M:N"), expect);
+    assert_eq!(vm_outcome(src).expect("program should run"), expect);
 }
 
 /// ISOLATION (adversarial, parity-blind, the memory-safety witness): TWO tasks each reach the SAME
@@ -9645,8 +9219,7 @@ fn main():
         print(x)
 main()";
     let expect = "a:\n1\n2\n3\nb:\n1\n2\n3\nparent:\n1\n2\n3\n";
-    assert_eq!(vm_outcome(src).expect("serial"), expect);
-    assert_eq!(parallel_outcome(src).expect("M:N"), expect);
+    assert_eq!(vm_outcome(src).expect("program should run"), expect);
 }
 
 /// A module-global generator carrying a genuinely NON-SENDABLE parked slot (a >10000-deep acyclic nest,
@@ -9674,11 +9247,8 @@ fn main():
             for x in g:
                 out.send(x)
 main()";
-    let ve = vm_outcome(src).expect_err("serial: reached non-sendable generator must fault");
-    let pe = parallel_outcome(src).expect_err("M:N: reached non-sendable generator must fault");
-    assert!(ve.contains("cannot iterate over nil"), "serial: {ve}");
-    assert!(pe.contains("cannot iterate over nil"), "M:N: {pe}");
-    assert_eq!(ve, pe, "serial == M:N fault");
+    let ve = vm_outcome(src).expect_err("reached non-sendable generator must fault");
+    assert!(ve.contains("cannot iterate over nil"), "{ve}");
 }
 
 /// A module-global generator in a reference CYCLE is snapshotted as an inert `Nil` placeholder (its
@@ -9700,13 +9270,8 @@ fn main():
             for x in g:
                 print(\"got {x}\")
 main()";
-    let ve =
-        vm_outcome(src).expect_err("serial: reached module-global generator in a cycle must fault");
-    let pe = parallel_outcome(src)
-        .expect_err("M:N: reached module-global generator in a cycle must fault");
-    assert!(ve.contains("cannot iterate over nil"), "serial: {ve}");
-    assert!(pe.contains("cannot iterate over nil"), "M:N: {pe}");
-    assert_eq!(ve, pe, "serial == M:N fault");
+    let ve = vm_outcome(src).expect_err("reached module-global generator in a cycle must fault");
+    assert!(ve.contains("cannot iterate over nil"), "{ve}");
 }
 
 /// REGRESSION LOCK (backlog item B remediation): a module module that merely HOLDS a non-sendable
@@ -9731,8 +9296,7 @@ fn main():
     print(\"done\")
 main()";
     let expect = "hello\ndone\n";
-    assert_eq!(vm_outcome(src).expect("serial"), expect);
-    assert_eq!(parallel_outcome(src).expect("M:N"), expect);
+    assert_eq!(vm_outcome(src).expect("program should run"), expect);
 }
 
 /// The deleted `gate_executor_queue` path: a module-global generator reached inside an `Executor.submit`
@@ -9756,8 +9320,7 @@ fn main():
     print(out.recv())
 main()";
     let expect = "1\n2\n";
-    assert_eq!(vm_outcome(src).expect("serial"), expect);
-    assert_eq!(parallel_outcome(src).expect("M:N"), expect);
+    assert_eq!(vm_outcome(src).expect("program should run"), expect);
 }
 
 /// CHECKER-UNREACHABLE defensive guard (backlog arm c): `defer` is banned inside a generator body
@@ -9783,11 +9346,8 @@ fn main():
             for x in it:
                 out.send(x)
 main()";
-    let ve = vm_outcome(src).expect_err("serial: parked defer must reject");
-    let pe = parallel_outcome(src).expect_err("M:N: parked defer must reject");
-    assert!(ve.contains("pending `defer`"), "serial: {ve}");
-    assert!(pe.contains("pending `defer`"), "M:N: {pe}");
-    assert_eq!(ve, pe, "serial == M:N fault");
+    let ve = vm_outcome(src).expect_err("parked defer must reject");
+    assert!(ve.contains("pending `defer`"), "{ve}");
 }
 
 /// Backlog arm (b) — a generator suspended INSIDE a `recover:` block (a LIVE handler in its parked
@@ -9941,7 +9501,7 @@ fn generator_cross_module_member_call_crosses_both() {
         "import genmod\nparallel:\n    spawn:\n        r := genmod.bar(10)\n        print(r)\n",
     );
     let (so, _, sr, _) = run_file(&ep);
-    let (po, _, pr, _) = run_file_p(&ep);
+    let (po, _, pr, _) = run_file(&ep);
     sr.expect("serial cross-mod generator crossing");
     pr.expect("M:N cross-mod generator crossing");
     assert_eq!(so, "13\n");
@@ -9962,7 +9522,7 @@ fn genreach_cross_module_clean_member_call_ok_both() {
         "import geomod\nparallel:\n    spawn:\n        r := geomod.helper(10)\n        print(r)\n",
     );
     let (so, _, sr, _) = run_file(&ep);
-    let (po, _, pr, _) = run_file_p(&ep);
+    let (po, _, pr, _) = run_file(&ep);
     sr.expect("serial clean cross-mod member call");
     pr.expect("M:N clean cross-mod member call");
     assert_eq!(so, "11\n");
@@ -10679,12 +10239,10 @@ main()
 /// check-clean program, yet still guarding these checker-SKIPPING helpers and synthesized ASTs.
 #[test]
 fn bare_range_value_still_rejected_by_the_compiler_backstop() {
-    for engine in [vm_outcome, parallel_outcome] {
-        let err =
-            engine("fn main():\n    print(\"before\")\n    x := 0..3\n    print(x)\nmain()\n")
-                .expect_err("a bare range has no runtime value");
-        assert!(err.contains("range can only be used"), "got: {err}");
-    }
+    let err =
+        vm_outcome("fn main():\n    print(\"before\")\n    x := 0..3\n    print(x)\nmain()\n")
+            .expect_err("a bare range has no runtime value");
+    assert!(err.contains("range can only be used"), "got: {err}");
 }
 
 /// R1/B1 — BINARY sockets. `write_bytes` / `read_bytes` carry raw bytes over TCP byte-exactly (the
@@ -10825,7 +10383,7 @@ fn parity_defer_runs_on_parked_sibling_when_sibling_faults() {
                fn boom(go: Channel[int]):\n    go.recv()\n    xs := [1]\n    print(xs[9])\n\
                fn main():\n    s := Shared(0)\n    r := recover:\n        ch := Channel[int]()\n        go := Channel[int]()\n        parallel:\n            spawn consumer(ch, go, s)\n            spawn boom(go)\n        0\n    print(s.get())\nmain()\n";
     let serial = run_capture(src).expect("the fault is recovered, so the program completes");
-    let mn = run_capture_parallel(src).expect("the fault is recovered, so the program completes");
+    let mn = run_capture(src).expect("the fault is recovered, so the program completes");
     assert_eq!(serial, "42\n", "serial: the parked consumer's defer ran");
     assert_eq!(mn, "42\n", "M:N: the parked consumer's defer ran");
     assert_same_lines(&serial, &mn);
@@ -10845,7 +10403,7 @@ fn parity_probe_defer_runs_when_cancelled_before_its_defer_line() {
                fn boom():\n    xs := [1]\n    print(xs[9])\n\
                fn main():\n    s := Shared(0)\n    r := recover:\n        ch := Channel[int]()\n        parallel:\n            spawn consumer(ch, s)\n            spawn boom()\n        0\n    print(s.get())\nmain()\n";
     let serial = run_capture(src).expect("the fault is recovered, so the program completes");
-    let mn = run_capture_parallel(src).expect("the fault is recovered, so the program completes");
+    let mn = run_capture(src).expect("the fault is recovered, so the program completes");
     assert!(
         serial.contains("42\n"),
         "serial: the started consumer's defer ran: {serial:?}"
@@ -10871,7 +10429,7 @@ fn parity_os_exit_inside_a_cancelled_tasks_defer() {
                fn main():\n    ch := Channel[int]()\n    go := Channel[int]()\n    r := recover:\n        parallel:\n            spawn consumer(ch, go)\n            spawn boom(go)\n        0\n    print(\"unreachable\")\nmain()\n";
     let t = TmpDir::new();
     let entry = t.write("main.chz", src);
-    let (mo, _me, _mr, mc) = run_file_p(&entry);
+    let (mo, _me, _mr, mc) = run_file(&entry);
     let (so, _se, _sr, sc) = run_file(&entry);
     assert_eq!(sc, Some(7), "serial: the cancelled defer's os.exit wins");
     assert_eq!(mc, Some(7), "M:N: the cancelled defer's os.exit wins");
@@ -10897,7 +10455,7 @@ fn parity_probe_faulter_spawned_first_still_runs_the_siblings_defer() {
                fn boom():\n    xs := [1]\n    print(xs[9])\n\
                fn main():\n    s := Shared(0)\n    r := recover:\n        ch := Channel[int]()\n        parallel:\n            spawn boom()\n            spawn talker(ch, s)\n        0\n    print(s.get())\nmain()\n";
     let serial = run_capture(src).expect("the fault is recovered, so the program completes");
-    let mn = run_capture_parallel(src).expect("the fault is recovered, so the program completes");
+    let mn = run_capture(src).expect("the fault is recovered, so the program completes");
     assert!(serial.contains("42\n"), "serial: the defer ran: {serial:?}");
     assert!(mn.contains("42\n"), "M:N: the defer ran: {mn:?}");
     assert!(
@@ -10915,7 +10473,7 @@ fn parity_straight_line_sibling_runs_even_when_the_scope_is_already_cancelled() 
                fn boom():\n    xs := [1]\n    print(xs[9])\n\
                fn main():\n    r := recover:\n        parallel:\n            spawn boom()\n            spawn noisy()\n        0\n    print(\"end\")\nmain()\n";
     let serial = run_capture(src).expect("recovered");
-    let mn = run_capture_parallel(src).expect("recovered");
+    let mn = run_capture(src).expect("recovered");
     assert!(serial.contains("hi\n"), "serial: {serial:?}");
     assert_same_lines(&serial, &mn);
 }
@@ -10941,7 +10499,7 @@ fn parity_native_hof_loop_is_cancellable() {
                fn boom():\n    zs := [1]\n    print(zs[9])\n\
                fn main():\n    xs := []\n    i := 0\n    while i < 200000:\n        xs.push(i)\n        i = i + 1\n    r := recover:\n        parallel:\n            spawn boom()\n            spawn work(xs)\n        0\n    print(\"end\")\nmain()\n";
     let serial = run_capture(src).expect("recovered");
-    let mn = run_capture_parallel(src).expect("recovered");
+    let mn = run_capture(src).expect("recovered");
     assert!(
         !serial.contains("map finished"),
         "serial: the cancelled task's native map must abort at a per-element checkpoint: {serial:?}"
@@ -10966,7 +10524,7 @@ fn parity_nested_deadlock_cancels_the_outer_parked_siblings_defer() {
                fn b(go: Channel[int]):\n    go.recv()\n    d := Channel[int]()\n    parallel:\n        spawn dead(d)\n\
                fn main():\n    ch := Channel[int]()\n    go := Channel[int]()\n    s := Shared(0)\n    r := recover:\n        parallel:\n            spawn a(ch, go, s)\n            spawn b(go)\n        0\n    print(s.get())\nmain()\n";
     let serial = run_capture(src).expect("the deadlock is recovered");
-    let mn = run_capture_parallel(src).expect("the deadlock is recovered");
+    let mn = run_capture(src).expect("the deadlock is recovered");
     assert_eq!(serial, "42\n", "serial: the parked sibling's defer ran");
     assert_eq!(mn, "42\n", "M:N: the parked sibling's defer ran");
 }
@@ -10979,7 +10537,7 @@ fn parity_genuine_deadlock_is_still_detected() {
     let src = "fn waiter(ch: Channel[int]):\n    ch.recv()\n\
                fn main():\n    ch := Channel[int]()\n    r := recover:\n        parallel:\n            spawn waiter(ch)\n            spawn waiter(ch)\n        0\n    print(\"caught\")\nmain()\n";
     let serial = run_capture(src).expect("the deadlock is recovered");
-    let mn = run_capture_parallel(src).expect("the deadlock is recovered");
+    let mn = run_capture(src).expect("the deadlock is recovered");
     assert_eq!(serial, "caught\n");
     assert_same_lines(&serial, &mn);
 }
@@ -10998,7 +10556,7 @@ fn parity_every_defer_of_a_normally_returning_task_runs_under_a_tripped_cancel()
                fn tidy():\n    defer print(\"cleanup1\")\n    defer print(\"cleanup2\")\n    print(\"start\")\n\
                fn main():\n    r := recover:\n        parallel:\n            spawn boom()\n            spawn tidy()\n        0\n    print(\"end\")\nmain()\n";
     let serial = run_capture(src).expect("recovered");
-    let mn = run_capture_parallel(src).expect("recovered");
+    let mn = run_capture(src).expect("recovered");
     for (engine, out) in [("serial", &serial), ("M:N", &mn)] {
         assert!(
             out.contains("cleanup1\n") && out.contains("cleanup2\n"),
@@ -11021,7 +10579,7 @@ fn parity_nested_nursery_inside_a_cancelled_task_is_cancellable() {
                fn t():\n    parallel:\n        spawn spin()\n\
                fn main():\n    r := recover:\n        parallel:\n            spawn boom()\n            spawn t()\n        0\n    print(\"end\")\nmain()\n";
     let serial = run_capture(src).expect("recovered — must not hang");
-    let mn = run_capture_parallel(src).expect("recovered — must not hang");
+    let mn = run_capture(src).expect("recovered — must not hang");
     assert_eq!(serial, "end\n", "serial: the nested spinner was cancelled");
     assert_eq!(mn, "end\n", "M:N: the nested spinner was cancelled");
 }
@@ -11056,7 +10614,7 @@ fn parity_blocking_native_is_an_entry_cancellation_checkpoint_on_both_engines() 
     let t = TmpDir::new();
     let entry = t.write("main.chz", src);
     let t0 = std::time::Instant::now();
-    let (mn, _me, _mr, _mc) = run_file_p(&entry);
+    let (mn, _me, _mr, _mc) = run_file(&entry);
     let (serial, _se, _sr, _sc) = run_file(&entry);
     for (engine, out) in [("serial", &serial), ("M:N", &mn)] {
         assert!(
@@ -11109,7 +10667,7 @@ fn parity_a_defer_that_can_never_complete_is_reported_not_hung() {
                fn boom(go: Channel[int]):\n    go.recv()\n    xs := [1]\n    print(xs[9])\n\
                fn main():\n    ch := Channel[int]()\n    go := Channel[int]()\n    dead := Channel[int]()\n    parallel:\n        spawn consumer(ch, go, dead)\n        spawn boom(go)\nmain()\n";
     let s = src.to_string();
-    let (mn, mn_res) = run_with_deadline("M:N", move || run_program_parallel(&s));
+    let (mn, mn_res) = run_with_deadline("M:N", move || run_program(&s));
     let s = src.to_string();
     let (serial, se_res) = run_with_deadline("serial", move || run_program(&s));
     for (engine, out, res) in [("serial", &serial, &se_res), ("M:N", &mn, &mn_res)] {
@@ -11146,7 +10704,7 @@ fn parity_a_blocking_defer_body_completes_when_the_task_is_cancelled() {
                fn main():\n    s := Shared(0)\n    r := recover:\n        ch := Channel[int]()\n        go := Channel[int]()\n        parallel:\n            spawn consumer(ch, go, s)\n            spawn boom(go)\n        0\n    print(\"sentinel=\" + str(s.get()))\nmain()\n";
     let t = TmpDir::new();
     let entry = t.write("main.chz", src);
-    let (mn, _me, _mr, _mc) = run_file_p(&entry);
+    let (mn, _me, _mr, _mc) = run_file(&entry);
     let (serial, _se, _sr, _sc) = run_file(&entry);
     for (engine, out) in [("serial", &serial), ("M:N", &mn)] {
         assert!(
@@ -11175,7 +10733,7 @@ fn parity_a_nursery_inside_a_cancelled_tasks_defer_runs_to_completion() {
                fn boom(go: Channel[int]):\n    go.recv()\n    zs := [1]\n    print(zs[9])\n\
                fn main():\n    s := Shared(0)\n    r := recover:\n        ch := Channel[int]()\n        go := Channel[int]()\n        parallel:\n            spawn worker(ch, go, s)\n            spawn boom(go)\n        0\n    print(\"sentinel=\" + str(s.get()))\nmain()\n";
     let s = src.to_string();
-    let (mn, _) = run_with_deadline("M:N", move || run_program_parallel(&s));
+    let (mn, _) = run_with_deadline("M:N", move || run_program(&s));
     let s = src.to_string();
     let (serial, _) = run_with_deadline("serial", move || run_program(&s));
     for (engine, out) in [("serial", &serial), ("M:N", &mn)] {
@@ -11202,7 +10760,7 @@ fn parity_a_cancel_wakeable_demoted_fiber_is_not_a_deadlock() {
                fn boom(go: Channel[int]):\n    go.recv()\n    zs := [1]\n    print(zs[9])\n\
                fn main():\n    ch := Channel[int]()\n    ch2 := Channel[int]()\n    go := Channel[int]()\n    parallel:\n        spawn b(ch2)\n        r := recover:\n            parallel:\n                spawn a(ch, go, ch2)\n                spawn boom(go)\n            0\nmain()\n";
     let s = src.to_string();
-    let (mn, _) = run_with_deadline("M:N", move || run_program_parallel(&s));
+    let (mn, _) = run_with_deadline("M:N", move || run_program(&s));
     let s = src.to_string();
     let (serial, _) = run_with_deadline("serial", move || run_program(&s));
     for (engine, out) in [("serial", &serial), ("M:N", &mn)] {
@@ -11219,50 +10777,13 @@ fn parity_a_cancel_wakeable_demoted_fiber_is_not_a_deadlock() {
     assert_same_lines(&serial, &mn);
 }
 
-/// KNOWN LIMIT (C5 — no snapshot-park inside a native callback), pinned so it cannot silently change:
-/// a `defer` body runs `guarded` (the LIFO unwind drain is host-stack state), so on the SERIAL engine a
-/// `recv` inside a cleanup CANNOT park and yield to the sibling that would feed it — it faults in place.
-/// M:N has no such limit (the same recv DEMOTES and completes). Both engines run the defer and both
-/// report/handle it; what differs is whether the cleanup can finish. Recorded in docs/gaps.md — the fix
-/// is C5 (a resumable native re-entry), not this branch. Two shapes, both measured:
-///
-/// * no cancellation at all (pre-existing on `main`): serial faults the recv with the C5 deadlock
-///   message, M:N completes the cleanup;
-/// * a CANCELLED task (this branch made serial run the defer at all — on `main` it ran nothing): the
-///   in-place fault is swallowed with the cancelled task, so serial's cleanup stops at the recv.
-#[test]
-fn c5_limit_a_defer_that_recvs_from_a_live_sibling_cannot_park_on_serial() {
-    let src = "import std.concurrency\nimport std.time\n\
-               fn cleanup(c1: Channel[int], s: Shared[int]):\n    v := c1.recv()\n    s.set(v)\n    print(\"CLEANUP-DONE\")\n\
-               fn t1(c1: Channel[int], s: Shared[int]):\n    defer cleanup(c1, s)\n    print(\"T1-BODY\")\n\
-               fn t2(c1: Channel[int]):\n    time.sleep_ms(15)\n    c1.send(42)\n    print(\"T2-SENT\")\n\
-               fn main():\n    s := Shared(0)\n    c1 := Channel[int]()\n    parallel:\n        spawn t1(c1, s)\n        spawn t2(c1)\n    print(\"sentinel=\" + str(s.get()))\nmain()\n";
-    let t = TmpDir::new();
-    let entry = t.write("main.chz", src);
-    let (mn, _me, _mr, _mc) = run_file_p(&entry);
-    let (serial, _se, sr, _sc) = run_file(&entry);
-    assert!(
-        mn.contains("CLEANUP-DONE\n") && mn.contains("sentinel=42\n"),
-        "M:N: a demoted recv inside a defer completes: {mn:?}"
-    );
-    assert!(
-        !serial.contains("CLEANUP-DONE\n"),
-        "serial: C5 — the recv cannot park inside the unwind: {serial:?}"
-    );
-    let err = sr.expect_err("serial: the stuck cleanup is REPORTED, never a silent hang");
-    assert!(
-        format!("{err:?}").contains("deadlock"),
-        "serial: reported as a deadlock at the recv site: {err:?}"
-    );
-}
-
 // ===== R2 — std.io Writer / file-handle type (buffered + streaming file output) =====
 
 /// R2 — `create(path)` opens a truncating write handle; `write` + `close` land the bytes; `read_file`
 /// reads them back. Serial and M:N each.
 #[test]
 fn writer_create_roundtrip_parity() {
-    for run in [run_file as fn(&std::path::Path) -> RunOutput, run_file_p] {
+    for run in [run_file as fn(&std::path::Path) -> RunOutput, run_file] {
         let t = TmpDir::new();
         let f = t.0.join("out.txt");
         let src = format!(
@@ -11280,7 +10801,7 @@ fn writer_create_roundtrip_parity() {
 /// R2 — `append` never truncates: create+write "a", close; append+write "b", close; file == "ab".
 #[test]
 fn writer_append_no_truncate_parity() {
-    for run in [run_file as fn(&std::path::Path) -> RunOutput, run_file_p] {
+    for run in [run_file as fn(&std::path::Path) -> RunOutput, run_file] {
         let t = TmpDir::new();
         let f = t.0.join("log.txt");
         let src = format!(
@@ -11297,7 +10818,7 @@ fn writer_append_no_truncate_parity() {
 /// R2 — a method on a CLOSED writer is a clean `Result::Err` (contains "closed writer"), NOT a panic.
 #[test]
 fn writer_use_after_close_clean_err_parity() {
-    for run in [run_file as fn(&std::path::Path) -> RunOutput, run_file_p] {
+    for run in [run_file as fn(&std::path::Path) -> RunOutput, run_file] {
         let t = TmpDir::new();
         let f = t.0.join("x.txt");
         let src = format!(
@@ -11320,7 +10841,7 @@ fn writer_use_after_close_clean_err_parity() {
 /// R2 — `write_bytes` round-trips arbitrary binary through `read_bytes`.
 #[test]
 fn writer_write_bytes_binary_roundtrip_parity() {
-    for run in [run_file as fn(&std::path::Path) -> RunOutput, run_file_p] {
+    for run in [run_file as fn(&std::path::Path) -> RunOutput, run_file] {
         let t = TmpDir::new();
         let f = t.0.join("bin");
         let src = format!(
@@ -11342,7 +10863,7 @@ fn buffered_stdout_one_flush_byte_identical() {
     let src = "import stdout, buffered from std.io\nfn main():\n    bw := buffered(stdout())\n    bw.write(\"a\")?\n    bw.write(\"b\")?\n    bw.write(\"c\")?\n    bw.flush()?\nmain()\n";
     let entry = t.write("main.chz", src);
     let (serial, _se, sr, _sc) = run_file(&entry);
-    let (mn, _me, mr, _mc) = run_file_p(&entry);
+    let (mn, _me, mr, _mc) = run_file(&entry);
     assert!(sr.is_ok() && mr.is_ok(), "faulted: s={sr:?} m={mr:?}");
     assert_eq!(serial, "abc");
     assert_eq!(serial, mn, "serial vs M:N byte-identical");
@@ -11352,7 +10873,7 @@ fn buffered_stdout_one_flush_byte_identical() {
 /// program exit / heap teardown). Both engines.
 #[test]
 fn buffered_file_drop_flushes_best_effort_parity() {
-    for run in [run_file as fn(&std::path::Path) -> RunOutput, run_file_p] {
+    for run in [run_file as fn(&std::path::Path) -> RunOutput, run_file] {
         let t = TmpDir::new();
         let f = t.0.join("drop.txt");
         // Write via a buffered file writer, NEVER flush/close — the handle just goes out of scope.
@@ -11372,7 +10893,7 @@ fn buffered_file_drop_flushes_best_effort_parity() {
 /// from std.io` in a RUNNING program: no runtime fault (the `bind_import` skip). Both engines.
 #[test]
 fn import_writer_type_and_buffered_runs_parity() {
-    for run in [run_file as fn(&std::path::Path) -> RunOutput, run_file_p] {
+    for run in [run_file as fn(&std::path::Path) -> RunOutput, run_file] {
         let t = TmpDir::new();
         let src = "import Writer, buffered, stdout from std.io\nfn tag(w: Writer) -> Writer:\n    return w\nfn main():\n    bw := tag(buffered(stdout()))\n    bw.write(\"ok\")?\n    bw.flush()?\nmain()\n";
         let entry = t.write("main.chz", src);
@@ -11394,7 +10915,7 @@ fn shared_writer_across_tasks_same_lines() {
     );
     let entry = t.write("main.chz", &src);
     let (serial, _se, sr, _sc) = run_file(&entry);
-    let (mn, _me, mr, _mc) = run_file_p(&entry);
+    let (mn, _me, mr, _mc) = run_file(&entry);
     assert!(sr.is_ok() && mr.is_ok(), "faulted: s={sr:?} m={mr:?}");
     assert_same_lines(&serial, &mn);
 }
@@ -11402,7 +10923,7 @@ fn shared_writer_across_tasks_same_lines() {
 /// R2 — `create` into a nonexistent directory is a clean `Result::Err`, not a panic. Both engines.
 #[test]
 fn create_into_missing_dir_clean_err_parity() {
-    for run in [run_file as fn(&std::path::Path) -> RunOutput, run_file_p] {
+    for run in [run_file as fn(&std::path::Path) -> RunOutput, run_file] {
         let t = TmpDir::new();
         let f = t.0.join("no_such_dir").join("x.txt");
         let src = format!(
@@ -11459,7 +10980,7 @@ fn writer_annotation_requires_import() {
 /// (trailing newline stripped, `None` = EOF); `close()` releases the fd. Serial and M:N each.
 #[test]
 fn reader_open_read_line_parity() {
-    for run in [run_file as fn(&std::path::Path) -> RunOutput, run_file_p] {
+    for run in [run_file as fn(&std::path::Path) -> RunOutput, run_file] {
         let t = TmpDir::new();
         let f = t.0.join("in.txt");
         std::fs::write(&f, "one\ntwo\nthree\n").unwrap();
@@ -11477,7 +10998,7 @@ fn reader_open_read_line_parity() {
 /// R2b — a file whose last line has NO trailing newline: `read_line` still yields it, then `None`.
 #[test]
 fn reader_read_line_no_trailing_newline_parity() {
-    for run in [run_file as fn(&std::path::Path) -> RunOutput, run_file_p] {
+    for run in [run_file as fn(&std::path::Path) -> RunOutput, run_file] {
         let t = TmpDir::new();
         let f = t.0.join("in.txt");
         std::fs::write(&f, "a\nb").unwrap();
@@ -11497,7 +11018,7 @@ fn reader_read_line_no_trailing_newline_parity() {
 /// `\r` gone. Guards the anti-drift contract (a nested `\r`-only-if-`\n` strip retained the bare `\r`).
 #[test]
 fn reader_read_line_strips_bare_cr_parity() {
-    for run in [run_file as fn(&std::path::Path) -> RunOutput, run_file_p] {
+    for run in [run_file as fn(&std::path::Path) -> RunOutput, run_file] {
         let t = TmpDir::new();
         let f = t.0.join("in.txt");
         std::fs::write(&f, "a\r\nb\r").unwrap(); // CRLF line, then a bare-CR final line (no \n)
@@ -11517,7 +11038,7 @@ fn reader_read_line_strips_bare_cr_parity() {
 /// line-by-line lazily (a generator over `read_line()`). Both engines.
 #[test]
 fn reader_lines_parity() {
-    for run in [run_file as fn(&std::path::Path) -> RunOutput, run_file_p] {
+    for run in [run_file as fn(&std::path::Path) -> RunOutput, run_file] {
         let t = TmpDir::new();
         let f = t.0.join("in.txt");
         std::fs::write(&f, "one\ntwo\nthree\n").unwrap();
@@ -11536,7 +11057,7 @@ fn reader_lines_parity() {
 /// into a list. Proves the generator suspends between lines (does not snapshot the file). Both engines.
 #[test]
 fn reader_lines_lazy_early_break_parity() {
-    for run in [run_file as fn(&std::path::Path) -> RunOutput, run_file_p] {
+    for run in [run_file as fn(&std::path::Path) -> RunOutput, run_file] {
         let t = TmpDir::new();
         let f = t.0.join("in.txt");
         std::fs::write(&f, "one\ntwo\nthree\n").unwrap();
@@ -11555,7 +11076,7 @@ fn reader_lines_lazy_early_break_parity() {
 /// bytes (`len == 0`) = EOF. Both engines.
 #[test]
 fn reader_read_bytes_chunk_parity() {
-    for run in [run_file as fn(&std::path::Path) -> RunOutput, run_file_p] {
+    for run in [run_file as fn(&std::path::Path) -> RunOutput, run_file] {
         let t = TmpDir::new();
         let f = t.0.join("bin");
         std::fs::write(&f, [10u8, 20, 30, 40, 50, 60]).unwrap(); // 6 bytes
@@ -11574,7 +11095,7 @@ fn reader_read_bytes_chunk_parity() {
 /// panic. Both engines.
 #[test]
 fn reader_use_after_close_clean_err_parity() {
-    for run in [run_file as fn(&std::path::Path) -> RunOutput, run_file_p] {
+    for run in [run_file as fn(&std::path::Path) -> RunOutput, run_file] {
         let t = TmpDir::new();
         let f = t.0.join("x.txt");
         std::fs::write(&f, "data").unwrap();
@@ -11598,7 +11119,7 @@ fn reader_use_after_close_clean_err_parity() {
 /// R2b — `open` on a nonexistent file is a clean `Result::Err`, not a panic. Both engines.
 #[test]
 fn reader_open_missing_file_clean_err_parity() {
-    for run in [run_file as fn(&std::path::Path) -> RunOutput, run_file_p] {
+    for run in [run_file as fn(&std::path::Path) -> RunOutput, run_file] {
         let t = TmpDir::new();
         let f = t.0.join("no_such_dir").join("x.txt");
         let src = format!(
@@ -11620,7 +11141,7 @@ fn reader_open_missing_file_clean_err_parity() {
 /// sites). Both engines.
 #[test]
 fn import_reader_type_and_send_across_spawn_parity() {
-    for run in [run_file as fn(&std::path::Path) -> RunOutput, run_file_p] {
+    for run in [run_file as fn(&std::path::Path) -> RunOutput, run_file] {
         let t = TmpDir::new();
         let f = t.0.join("in.txt");
         std::fs::write(&f, "hello\n").unwrap();

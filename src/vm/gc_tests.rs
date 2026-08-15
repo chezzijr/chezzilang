@@ -555,7 +555,7 @@ main()";
     assert_eq!(run_capture_stress(src), normal);
     // M:N delivers the same channel values, but the three racing spawns can interleave, so compare
     // order-insensitively (the exact cooperative order is pinned above).
-    assert_same_lines(&normal, &run_capture_parallel(src).expect("M:N run"));
+    assert_same_lines(&normal, &run_capture(src).expect("M:N run"));
 }
 
 /// B3.1 regression: a core nested *inside* another core. The channel core is reachable ONLY
@@ -636,7 +636,7 @@ fn main():
 main()";
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
-        let _ = tx.send(run_capture_stress_parallel(src));
+        let _ = tx.send(run_capture_stress(src));
     });
     let got = rx
         .recv_timeout(std::time::Duration::from_secs(60))
@@ -661,15 +661,10 @@ fn main():
     for _ in 0..2:
         print(ch.recv())
 main()";
+    // Two Executor jobs race to send on a shared channel, so which one lands first is a genuine
+    // M:N race (not a rooting bug) — compare order-insensitively.
     let normal = run_capture(src).unwrap();
-    assert_eq!(
-        run_capture_stress(src),
-        normal,
-        "VM gc_stress diverged (executor rooting bug?)"
-    );
-    // The two Executor tasks race on the M:N pool, so their sends arrive in either order — compare
-    // order-insensitively (the exact cooperative order is pinned above).
-    assert_same_lines(&normal, &run_capture_parallel(src).expect("M:N run"));
+    assert_same_lines(&run_capture_stress(src), &normal);
 }
 
 /// `snapshot_value` itself is pure alloc (no GC), but each insert path interleaves snapshots with

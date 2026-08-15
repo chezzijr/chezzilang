@@ -4620,12 +4620,11 @@ fn format_float(x: f64) -> String {
 /// (the path a program's bytes actually reach an fd) and never passes through this.
 ///
 /// This decode is NOT a comparison boundary: it is lossy AND not injective (`ff` and `fe` both
-/// become one U+FFFD), so an oracle diffing its output would pass a byte-divergent run. EVERY
-/// serial==M:N oracle takes a raw-bytes path instead — `--check-parity` and `assert_file_parity`
-/// via [`RunOutputRaw`]/[`run_file_bytes`] (W6-9), and the capture-based `assert_parity` /
-/// `assert_parity_file` / `parity_entry_cfg` via [`run_capture_bytes`] /
-/// [`run_capture_parallel_bytes`] / [`run_file_bytes`] (W6-9b). Anything comparing two engines'
-/// output must do the same: decode for a readable message, then assert on the BYTES.
+/// become one U+FFFD), so an oracle diffing its output would pass a byte-divergent run. Any future
+/// byte-exact oracle (CPython differential, golden-file diff) takes a raw-bytes path instead —
+/// [`RunOutputRaw`]/[`run_file_bytes`] (W6-9), and the capture-based [`run_capture_bytes`]
+/// (W6-9b). Anything comparing two runs' output must do the same: decode for a readable message,
+/// then assert on the BYTES.
 fn captured(buf: Vec<u8>) -> String {
     String::from_utf8_lossy(&buf).into_owned()
 }
@@ -4699,6 +4698,7 @@ fn run_program_inner(src: &str) -> (Vec<u8>, Result<(), RuntimeError>) {
         }
     };
     let mut vm = Vm::new(Arc::new(program));
+    vm.parallel = true;
     let result = vm
         .run()
         .and_then(|()| vm.drain_live_executors(Span::RUNTIME));
@@ -4728,135 +4728,12 @@ pub fn run_capture(src: &str) -> Result<String, RuntimeError> {
     run_capture_bytes(src).map(captured)
 }
 
-/// [`run_capture`] without the lossy [`captured`] decode — the serial leg of the capture-based
-/// parity oracle (`assert_parity`, W6-9b).
+/// [`run_capture`] without the lossy [`captured`] decode — for callers that need the raw bytes
+/// (W6-9b), e.g. a golden comparison sensitive to non-UTF-8 output.
 #[cfg(test)]
 pub fn run_capture_bytes(src: &str) -> Result<Vec<u8>, RuntimeError> {
     let (out, result) = run_program_bytes(src);
     result.map(|()| out)
-}
-
-/// B3.3-threads — run a single-file program on the `--parallel` engine (real OS-thread pool +
-/// condvar `recv`) and return its stdout or error. The deterministic-by-construction `--parallel`
-/// unit tests/goldens drive this (decision A: the cooperative default stays the parity oracle).
-#[cfg(test)]
-pub fn run_capture_parallel(src: &str) -> Result<String, RuntimeError> {
-    run_capture_parallel_bytes(src).map(captured)
-}
-
-/// [`run_capture_parallel`] without the lossy [`captured`] decode — the M:N leg of the
-/// capture-based parity oracle (`assert_parity`, W6-9b).
-#[cfg(test)]
-pub fn run_capture_parallel_bytes(src: &str) -> Result<Vec<u8>, RuntimeError> {
-    let src = src.to_string();
-    std::thread::Builder::new()
-        .stack_size(VM_STACK_BYTES)
-        .spawn(move || {
-            let tokens = lexer::tokenize(&src).map_err(|e| RuntimeError {
-                message: e.to_string(),
-                span: Span::RUNTIME,
-                is_assert: false,
-                is_over_memory: false,
-                is_timed_out: false,
-            })?;
-            let module = parser::parse(tokens).map_err(|e| RuntimeError {
-                message: e.message,
-                span: e.span,
-                is_assert: false,
-                is_over_memory: false,
-                is_timed_out: false,
-            })?;
-            let program =
-                crate::compiler::compile_module_standalone(&module).map_err(|e| RuntimeError {
-                    message: e.message,
-                    span: e.span,
-                    is_assert: false,
-                    is_over_memory: false,
-                    is_timed_out: false,
-                })?;
-            let mut vm = Vm::new(Arc::new(program));
-            vm.parallel = true;
-            vm.run()
-                .and_then(|()| vm.drain_live_executors(Span::RUNTIME))
-                .map(|()| vm.out)
-        })
-        .expect("failed to spawn VM thread")
-        .join()
-        .expect("VM thread panicked")
-}
-
-/// Parallel (M:N) counterpart of [`run_program`]: parse + compile + run with `parallel = true`,
-/// returning `(stdout, result)` so buffered stdout is observable even when the program faults. The
-/// M:N engine is the post-interp parity oracle for the cooperative VM (both live in [`Vm`]; only the
-/// scheduler differs), replacing the removed tree-walk interpreter.
-#[cfg(test)]
-pub fn run_program_parallel(src: &str) -> (String, Result<(), RuntimeError>) {
-    let src = src.to_string();
-    std::thread::Builder::new()
-        .stack_size(VM_STACK_BYTES)
-        .spawn(move || {
-            let tokens = match lexer::tokenize(&src) {
-                Ok(t) => t,
-                Err(e) => {
-                    return (
-                        String::new(),
-                        Err(RuntimeError {
-                            message: e.to_string(),
-                            span: Span::RUNTIME,
-                            is_assert: false,
-                            is_over_memory: false,
-                            is_timed_out: false,
-                        }),
-                    );
-                }
-            };
-            let module = match parser::parse(tokens) {
-                Ok(m) => m,
-                Err(e) => {
-                    return (
-                        String::new(),
-                        Err(RuntimeError {
-                            message: e.message,
-                            span: e.span,
-                            is_assert: false,
-                            is_over_memory: false,
-                            is_timed_out: false,
-                        }),
-                    );
-                }
-            };
-            let program = match crate::compiler::compile_module_standalone(&module) {
-                Ok(p) => p,
-                Err(e) => {
-                    return (
-                        String::new(),
-                        Err(RuntimeError {
-                            message: e.message,
-                            span: e.span,
-                            is_assert: false,
-                            is_over_memory: false,
-                            is_timed_out: false,
-                        }),
-                    );
-                }
-            };
-            let mut vm = Vm::new(Arc::new(program));
-            vm.parallel = true;
-            let result = vm
-                .run()
-                .and_then(|()| vm.drain_live_executors(Span::RUNTIME));
-            (captured(vm.out), result)
-        })
-        .expect("failed to spawn VM thread")
-        .join()
-        .expect("VM thread panicked")
-}
-
-/// Parallel (M:N) counterpart of [`run_file`] with default host config — the file-based parity
-/// oracle for the cooperative VM after the tree-walk interpreter's removal.
-#[cfg(test)]
-pub fn run_file_p(entry: &std::path::Path) -> RunOutput {
-    run_file_parallel(entry, crate::native::HostConfig::default())
 }
 
 /// Run a single-file program, returning stdout (or error) plus the final live-object count.
@@ -4864,7 +4741,7 @@ pub fn run_file_p(entry: &std::path::Path) -> RunOutput {
 /// allocation-threshold trigger drives collection (test helper for GC assertions).
 #[cfg(test)]
 pub fn run_with(src: &str, stress: bool) -> (Result<String, RuntimeError>, usize) {
-    run_with_cfg(src, stress, false)
+    run_with_cfg(src, stress, true)
 }
 
 /// [`run_with`] with the engine selectable, so a GC-stress test can run on the M:N engine too. The
@@ -4973,6 +4850,7 @@ pub fn run_capture_on_stack(src: &str, stack_bytes: usize) -> Result<String, Run
                     is_timed_out: false,
                 })?;
             let mut vm = Vm::new(Arc::new(program));
+            vm.parallel = true;
             vm.run()
                 .and_then(|()| vm.drain_live_executors(Span::RUNTIME))
                 .map(|()| captured(vm.out))
@@ -4982,18 +4860,11 @@ pub fn run_capture_on_stack(src: &str, stack_bytes: usize) -> Result<String, Run
         .expect("VM thread panicked")
 }
 
-/// Stdout from a stress-mode run (panics on error) — convenience for parity-under-GC tests.
+/// Stdout from a stress-mode run (panics on error) — convenience for parity-under-GC tests. Runs on
+/// the M:N engine (via [`run_with`]) so it exercises the eager `Executor` dispatch.
 #[cfg(test)]
 pub fn run_capture_stress(src: &str) -> String {
     run_with(src, true)
-        .0
-        .unwrap_or_else(|e| panic!("unexpected runtime error under GC stress: {e}"))
-}
-
-/// [`run_capture_stress`] on the M:N engine — the leg that exercises the eager `Executor` dispatch.
-#[cfg(test)]
-pub fn run_capture_stress_parallel(src: &str) -> String {
-    run_with_cfg(src, true, true)
         .0
         .unwrap_or_else(|e| panic!("unexpected runtime error under GC stress: {e}"))
 }
@@ -5054,6 +4925,7 @@ pub fn run_capture_nursery_len(src: &str) -> (Result<String, RuntimeError>, usiz
                 }
             };
             let mut vm = Vm::new(Arc::new(program));
+            vm.parallel = true;
             let result = vm
                 .run()
                 .and_then(|()| vm.drain_live_executors(Span::RUNTIME));
@@ -5082,7 +4954,7 @@ pub fn run_file_entry(entry: &std::path::Path, entry_fn: &str) -> RunOutput {
     run_file_with_entry(
         entry,
         crate::native::HostConfig::default(),
-        false,
+        true,
         Some(entry_fn),
         None,
     )
@@ -5112,14 +4984,6 @@ fn to_str_output((out, err, res, code): RunOutputRaw) -> RunOutput {
 /// CLI calls [`run_file_with_entry`] directly so a `module:function` entrypoint can name a function.
 #[cfg(test)]
 pub fn run_file_with(entry: &std::path::Path, cfg: crate::native::HostConfig) -> RunOutput {
-    to_str_output(run_file_engine(entry, cfg, false, None, None, false))
-}
-
-/// Like [`run_file_with`], but runs on the **B3.3-threads `--parallel` engine** (real OS-thread
-/// pool + condvar `recv`). Test-only convenience over [`run_file_with_entry`]; the parity tests use
-/// it to exercise the OS-thread engine.
-#[cfg(test)]
-pub fn run_file_parallel(entry: &std::path::Path, cfg: crate::native::HostConfig) -> RunOutput {
     to_str_output(run_file_engine(entry, cfg, true, None, None, false))
 }
 

@@ -16,7 +16,7 @@
 # stays Option-only — both are re-pinned here because the carrier now survives desugar and is
 # lowered twice (checker + compiler) instead of once.
 #
-# Serial==M:N is guarded by `test_runner::chz_suite_passes_both_engines`.
+# Serial==M:N is guarded by `test_runner::chz_suite_passes`.
 import std.concurrency
 
 struct MyErr:

@@ -34,22 +34,19 @@ impl Drop for TmpDir {
     }
 }
 
-/// Run `chezzi run [--serial] <file>` on a program that calls `os.exit(code)`; return the process
-/// exit status the OS reports.
-fn exit_status(code: &str, serial: bool) -> i32 {
+/// Run `chezzi run <file>` on a program that calls `os.exit(code)`; return the process exit status
+/// the OS reports.
+fn exit_status(code: &str) -> i32 {
     let t = TmpDir::new();
     let entry = t.write("main.chz", &format!("import std.os\nos.exit({code})\n"));
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_chezzi"));
     cmd.arg("run");
-    if serial {
-        cmd.arg("--serial");
-    }
     let out = cmd.arg(&entry).output().expect("spawn chezzi");
     out.status.code().expect("exited with a status (no signal)")
 }
 
 #[test]
-fn os_exit_status_is_the_low_8_bits_on_both_engines() {
+fn os_exit_status_is_the_low_8_bits() {
     // (code, expected process status) — the POSIX mask, both ends.
     let cases = [
         ("0", 0),     // boundary: success stays success
@@ -61,15 +58,11 @@ fn os_exit_status_is_the_low_8_bits_on_both_engines() {
         ("-2", 254),  // a second negative, to pin two's-complement masking
     ];
     for (code, want) in cases {
-        for serial in [false, true] {
-            let got = exit_status(code, serial);
-            assert_eq!(
-                got,
-                want,
-                "os.exit({code}) on {} engine: expected process status {want}, got {got}",
-                if serial { "serial" } else { "M:N" }
-            );
-        }
+        let got = exit_status(code);
+        assert_eq!(
+            got, want,
+            "os.exit({code}): expected process status {want}, got {got}"
+        );
     }
 }
 
@@ -93,12 +86,6 @@ fn a_program_that_never_exits_explicitly_succeeds() {
 /// deadlock on a full buffer.
 fn run_capped_sub(sub: &str, entry: &std::path::Path, secs: u64) -> (i32, String) {
     let (status, out, _) = run_capped_timed(&[sub], entry, secs);
-    (status, out)
-}
-
-/// `chezzi run --serial <file>` under the same watchdog — the parity half of the W7-57 defer tests.
-fn run_capped_serial(entry: &std::path::Path, secs: u64) -> (i32, String) {
-    let (status, out, _) = run_capped_timed(&["run", "--serial"], entry, secs);
     (status, out)
 }
 
@@ -154,7 +141,7 @@ fn run_capped(entry: &std::path::Path, secs: u64) -> (i32, String) {
 /// exit code sat on the job's isolated worker `Vm` until a join `main` could never reach, and the run
 /// hung forever (rc=124 under `timeout`) — so the watchdog above IS the assertion.
 ///
-/// M:N only: `--serial` refuses the socket op outright (W7-40's documented engine difference) and so
+/// M:N only: the serial engine refuses the socket op outright (W7-40's documented engine difference) and so
 /// already exits 3 today by a different route. An ephemeral port (`:0`), never a fixed one — CI collides.
 #[test]
 fn eager_job_os_exit_terminates_a_socket_blocked_main() {
@@ -376,10 +363,10 @@ print("after nursery")
 // `request_exit`, plus an exit rung at the two CPU-side checkpoints no blocking wait covers: the loop
 // back-edge (sampled 1/1024) and `guarded`'s native-HOF per-element re-entry.
 //
-// **M:N only, deliberately.** `--serial` does not dispatch an eager `Executor` job at `submit` — it
-// runs jobs at the exit drain — so on that engine the exiting party does not exist while the nursery
-// runs. These programs are outside the two-engine parity contract by construction; `--serial` is
-// unchanged by this fix (verified by hand on the release binary).
+// **M:N only, deliberately.** The serial engine does not dispatch an eager `Executor` job at `submit`
+// — it runs jobs at the exit drain — so on that engine the exiting party does not exist while the
+// nursery runs. These programs are outside the two-engine parity contract by construction; the serial
+// engine is unchanged by this fix (verified by hand on the release binary).
 //
 // Every one asserts ELAPSED as well as the status: on the pre-fix binary shapes (b)/(c) already
 // returned 3.
@@ -692,7 +679,7 @@ print("after nursery")
 /// program contains no `defer` at all, so the citation pinned nothing.
 ///
 /// The first cut of the W7-57 rungs broke this two ways at once: M:N stopped running the defer while
-/// `--serial` still did (an engine divergence, and the code asserted the opposite of what it did), and
+/// the serial engine still did (an engine divergence, and the code asserted the opposite of what it did), and
 /// worse, a defer that had already STARTED was killed part-way — measured at 2/8 and 6/6 depending on
 /// timing. A half-executed cleanup is worse than either running or skipping it: inconsistent state,
 /// nondeterministically. Fixed by suppressing the exit rung inside a `defer` (`run_exit_err`) and by
@@ -734,23 +721,16 @@ print("after nursery")
 "#
         ),
     );
-    for (label, (status, out)) in [
-        ("M:N", run_capped(&entry, 30)),
-        ("serial", run_capped_serial(&entry, 30)),
-    ] {
-        assert_eq!(
-            status, 3,
-            "{label}: the job's exit is the status (out: {out:?})"
-        );
-        assert!(
-            out.contains("DEFER ENTER"),
-            "{label}: the sibling's defer ran (out: {out:?})"
-        );
-        assert!(
-            out.contains("DEFER EXIT 3000000 0"),
-            "{label}: …and ran to COMPLETION, never truncated mid-body (out: {out:?})"
-        );
-    }
+    let (status, out) = run_capped(&entry, 30);
+    assert_eq!(status, 3, "the job's exit is the status (out: {out:?})");
+    assert!(
+        out.contains("DEFER ENTER"),
+        "the sibling's defer ran (out: {out:?})"
+    );
+    assert!(
+        out.contains("DEFER EXIT 3000000 0"),
+        "…and ran to COMPLETION, never truncated mid-body (out: {out:?})"
+    );
 }
 
 /// W7-57 review defect 1, the other half — the shapes the `defer` suppression must NOT rescue. A
@@ -859,28 +839,22 @@ struct S:
         assert 1 == 1
 "#,
     );
-    for engine in [vec!["test"], vec!["test", "--serial"]] {
-        let (_status, out, _) = run_capped_timed(&engine, &entry, 30);
-        let label = engine.join(" ");
-        assert!(
-            out.contains("ERROR A::a_exits"),
-            "{label}: the exiting suite method errors: {out:?}"
-        );
-        assert!(
-            out.contains("PASS S::s_loops"),
-            "{label}: a LATER suite method that only LOOPS must not inherit the exit: {out:?}"
-        );
-        assert!(
-            out.contains("PASS S::s_plain"),
-            "{label}: nor a plain one: {out:?}"
-        );
-        // A truncated `after_each`/`after_all` surfaces as a hook error line; `after_all`'s
-        // `assert self.n == 2` is what makes truncation observable at all.
-        assert!(
-            !out.contains("after_all") && !out.contains("after_each"),
-            "{label}: no lifecycle hook faulted — they ran whole: {out:?}"
-        );
-    }
+    let (_status, out, _) = run_capped_timed(&["test"], &entry, 30);
+    assert!(
+        out.contains("ERROR A::a_exits"),
+        "the exiting suite method errors: {out:?}"
+    );
+    assert!(
+        out.contains("PASS S::s_loops"),
+        "a LATER suite method that only LOOPS must not inherit the exit: {out:?}"
+    );
+    assert!(out.contains("PASS S::s_plain"), "nor a plain one: {out:?}");
+    // A truncated `after_each`/`after_all` surfaces as a hook error line; `after_all`'s
+    // `assert self.n == 2` is what makes truncation observable at all.
+    assert!(
+        !out.contains("after_all") && !out.contains("after_each"),
+        "no lifecycle hook faulted — they ran whole: {out:?}"
+    );
 }
 
 /// W7-57 review, prosecutor 2 charge 2 — DOCUMENTED CEILING, pinned so it cannot drift silently.

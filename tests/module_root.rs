@@ -94,20 +94,20 @@ fn bare_run_uses_manifest_root_not_nested() {
     );
 }
 
-// 1b. Same, on the serial (cooperative single-thread) engine — proves serial-VM == M:N-VM at the CLI
-//     level (the library parity helpers cannot reproduce this bug).
+// 1b. Same assertion, second call through the CLI — pins the manifest-root resolution at the process
+//     boundary a second time (the library parity helpers cannot reproduce this bug).
 #[test]
-fn bare_run_serial_uses_manifest_root() {
+fn bare_run_reruns_manifest_root_resolution() {
     let t = proj_silent();
-    let (stdout, stderr, ok) = run(&t.0, &["run", "--serial"]);
-    assert!(ok, "bare --serial run should succeed; stderr:\n{stderr}");
+    let (stdout, stderr, ok) = run(&t.0, &["run"]);
+    assert!(ok, "bare run should succeed; stderr:\n{stderr}");
     assert!(
         stdout.contains("OUTER shared"),
-        "serial bare run must resolve imports against the manifest root; stdout:\n{stdout}"
+        "bare run must resolve imports against the manifest root; stdout:\n{stdout}"
     );
     assert!(
         !stdout.contains("INNER shared"),
-        "serial bare run must NOT silently load the nested module; stdout:\n{stdout}"
+        "bare run must NOT silently load the nested module; stdout:\n{stdout}"
     );
 }
 

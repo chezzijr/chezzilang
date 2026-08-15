@@ -112,7 +112,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > **buffered** sink (per-fiber buffer, flushed at the join in task order), so an earlier *start* moves no
 > expected line — those pins assert order-of-flush, not order-of-execution. Only the cancel-report group
 > actually broke. The forecast's "the `tests/chz` gate needs a per-engine story before any of these may
-> diverge" was also over-stated: `chz_suite_passes_both_engines` (`src/test_runner.rs:1032`) compares
+> diverge" was also over-stated: `chz_suite_passes` (`src/test_runner.rs:1032`) compares
 > per-test **verdicts**, never output, and no suite file asserts inter-task print order.
 
 > **✅ W7-59 landed 2026-08-14 — `net.connect` stopped blocking a shared pool worker in a private
@@ -3981,7 +3981,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > the three legacy positional fns (`run_tests`/`run_tests_capped`/`run_tests_timed`) are now thin shims
 > over it (`RunOpts::default()` = every feature OFF). **The load-bearing invariant: `RunOpts::default()`
 > reproduces the pre-batch output BYTE-FOR-BYTE** — every clause is gated on its field being non-default,
-> so the no-flag render path is unchanged and the `chz_suite_passes_both_engines` byte-identity gate stays
+> so the no-flag render path is unchanged and the `chz_suite_passes` byte-identity gate stays
 > green. **Flags:** `-k`/`--filter <substr>` (run a subset by displayed name, filtered at the invoke site
 > so they don't run; `(K filtered out)` summary clause; zero-match = `— no tests matched '<pat>'` failure);
 > `--fail-fast` (stop at first non-pass, deterministic order: sorted files → free tests → suites, all
@@ -4031,7 +4031,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > TIMED-OUT, proven RED-first: it hung under a `timeout 90` wrapper with the back-edge check disabled,
 > exit 124), `timeout_control_passes_under_generous_timeout` (fast test / 60s cap → PASS, no clause),
 > `recover_does_not_catch_timeout` (`recover:` can't swallow it), `timed_out_across_spawn` (spawned hang →
-> TIMED-OUT). `chz_suite_passes_both_engines` green (runs timeout-off). **v1 limits (watchdog follow-up,
+> TIMED-OUT). `chz_suite_passes` green (runs timeout-off). **v1 limits (watchdog follow-up,
 > §3b #4):** a test blocked in a **native call** (blocking syscall, `Channel.recv` with no traffic) or in
 > **loop-free infinite recursion** (hits the stack guard) is NOT caught — a true watchdog thread is the
 > next seam. Ms granularity; sub-ms overshoot. Verified end-to-end on the release binary (TIMED-OUT + exit
@@ -4071,7 +4071,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > `over_memory_concurrent_under_cap_passes_on_both_engines`, `recover_does_not_catch_over_memory` + the
 > native-reentry variant `recover_does_not_catch_over_memory_via_native_reentry`,
 > `over_memory_buckets_across_spawn_on_both_engines`, and `over_memory_defer_is_still_capped_during_unwind`
-> — the hard-abort + parity + defer-bounding proofs); `chz_suite_passes_both_engines` green (runs cap-off).
+> — the hard-abort + parity + defer-bounding proofs); `chz_suite_passes` green (runs cap-off).
 > **Guarantee + v1 limits (deterministic, documented in §3b #1b):** the cap is **per-heap** — any single
 > execution context whose live heap exceeds `N` is aborted, so a real runaway trips on whichever worker
 > heap runs it. **`--max-heap` is M:N-ENGINE-ONLY** (errors if combined with `--serial`) — this avoids a
@@ -4104,7 +4104,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > dual-engine gate parser learned the `ERROR ` prefix so an errored test participates in serial==M:N.
 > The `Verdict` enum is the extension point for the ergonomics wave's `TimedOut`/`OverMemory` buckets.
 > Tests: 4 new runner `#[cfg(test)]` (error-bucket / fail-bucket / passing / hook-is-error); existing 9
-> runner tests + `chz_suite_passes_both_engines` green; verified end-to-end on both engines (one FAIL +
+> runner tests + `chz_suite_passes` green; verified end-to-end on both engines (one FAIL +
 > one ERROR + one PASS, identical, exit 1). **NO checker/compiler change.**
 >
 > **✅ CLEANUP (2026-07-23) — code-review dedup + doc-freshness (behavior-preserving, −202 LOC).** A 5-domain
@@ -4230,7 +4230,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > runs a SINGLE engine, so porting Rust `parity_*` tests would drop the serial==M:N dimension. Fixed by
 > teaching the runner a `parallel` flag (`test_runner::run_tests(path, parallel)` → new `invoke_all`;
 > M:N runs on `crate::vm::on_vm_stack` + `Vm::set_parallel`) and a `cargo test` gate
-> `chz_suite_passes_both_engines` that runs the whole `tests/chz/` suite on BOTH engines and asserts
+> `chz_suite_passes` that runs the whole `tests/chz/` suite on BOTH engines and asserts
 > identical per-test verdicts (verdicts parsed from the report). Verified real: breaking one `.chz`
 > assert fails the gate with `file:line`. **`chezzi test` CLI defaults to the M:N engine** (matches
 > `chezzi run`, forward-compatible with the post-freeze serial removal); `--serial` opts into the
@@ -4270,7 +4270,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > atomic snapshot (a concurrent/in-callback `set` may be seen mid-walk — use `read`/`get` for a stable
 > snapshot; index re-checked each step so a shrinking list can't panic). serial == M:N byte-identical
 > (walks a heap-independent wire form) — proven by
-> `tests/chz/suites/rwshared_readview_test.chz` (both engines via `chz_suite_passes_both_engines`, incl. a
+> `tests/chz/suites/rwshared_readview_test.chz` (both engines via `chz_suite_passes`, incl. a
 > nested-read-under-concurrent-writer stress case that deadlocked the pre-fix impl) + checker `rejects`/`ok`
 > pair. Extended to `Map`/`Set` — see the entry above. Docs: `std/concurrency.chz`, `docs/stdlib.md`,
 > `docs/concurrency.md §6f`.
@@ -4295,7 +4295,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > guard, `from_wire`, `values_equal_guarded` (collisions keep scanning; the guard is NEVER held across
 > hash/eq/closure — same deadlock invariant as List). serial == M:N byte-identical (heap-independent wire
 > walk) — proven by the extended `tests/chz/suites/rwshared_readview_test.chz` (both engines via
-> `chz_suite_passes_both_engines`, incl. Map+Set nested-read-under-writer + AB-BA cross-box deadlock
+> `chz_suite_passes`, incl. Map+Set nested-read-under-writer + AB-BA cross-box deadlock
 > regressions) + checker `rejects`/`ok` boundary tests (`container_where_bound_*`, `rwshared_map/set_*`).
 > The `where T: List/Map/Set` bound is now a genuine, tested surface bound (a user generic `fn f[T: List]`
 > accepts a list, rejects an int). Docs: `std/concurrency.chz`, `docs/stdlib.md`, `docs/concurrency.md §6f`.
@@ -9665,7 +9665,7 @@ conformance` green.
   (56 B payload + 8 B discriminant). ~one cold pointer hop off the module-member path; every heap object
   shrinks. Mechanical VM-only change (checker never names `Obj`); GC `children()` still traces
   `m.slots`, `live_bytes` still counts `m.slots.capacity()*size_of::<Value>()`. Behavior-preserving +
-  serial==M:N parity (full `cargo test` incl. `chz_suite_passes_both_engines`); guard-pinned at 64 B
+  serial==M:N parity (full `cargo test` incl. `chz_suite_passes`); guard-pinned at 64 B
   (`heap.rs` + `chzstr.rs`). RSS delta measured post-merge.
 
 - **Memory layout #5 — inline small struct `fields`.** `Obj::Struct.fields` was a `Vec<Value>` — a
@@ -9682,7 +9682,7 @@ conformance` green.
   `as_mut_slice`). GC `children()` still traces every field (unused `Inline` nil slots yield no gcref);
   `live_bytes` counts `Inline`→0, `Spill`→`len*size_of::<Value>()` via `Fields::heap_bytes`. Mechanical
   VM-only change (checker never names `Obj`); behavior-preserving + serial==M:N parity (full `cargo test`
-  incl. `chz_suite_passes_both_engines` + `conformance`). RSS delta measured post-merge.
+  incl. `chz_suite_passes` + `conformance`). RSS delta measured post-merge.
 
 - **Memory layout #6 — GC mark bit → parallel bitset.** `Slot` was `{ obj: Option<Obj>, mark: bool }`
   — `Option<Obj>` is already 64B (`Obj`'s spare-discriminant niche makes `None` free), so the `mark: bool`
@@ -9695,7 +9695,7 @@ conformance` green.
   post-sweep invariant: all bits 0). Saves the 8B mark padding per slot (≈16MB on the 2M `many_struct`
   bench) and lets the sweep mark-scan iterate a compact bit array instead of touching each payload.
   `src/vm/heap.rs` GC-internal only — no `Obj`/`Fields`/checker/observable change; behavior-preserving +
-  serial==M:N parity (full `cargo test` incl. `chz_suite_passes_both_engines` + `conformance`, all
+  serial==M:N parity (full `cargo test` incl. `chz_suite_passes` + `conformance`, all
   GC-stress rooting green), clippy clean. RSS delta measured post-merge.
 
 - **Memory layout #7 — drop `Obj::Struct.name: Box<str>`, resolve the type name from `tid`.** Every
@@ -9716,7 +9716,7 @@ conformance` green.
   identical cross-worker crossing, workers share `Arc<Program>` so `tid` is stable. `Obj` stays 64B
   (`MapData`/`SetData` still cap the payload at 56; guard-pinned `obj_iter_within_size_cap`). Mechanical
   VM-only change (checker never names `Obj`); behavior-preserving + serial==M:N parity (full `cargo test`
-  incl. `chz_suite_passes_both_engines` + `conformance` + all `*_gc_stress`), clippy clean. RSS delta
+  incl. `chz_suite_passes` + `conformance` + all `*_gc_stress`), clippy clean. RSS delta
   measured post-merge.
 
 **Remaining / blocked levers:**

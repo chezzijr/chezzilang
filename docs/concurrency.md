@@ -1078,10 +1078,9 @@ once.) `trip()` is idempotent and reuses `close()`'s wake fan-out (minus the `cl
 
 ### 6g. Run the parity oracle yourself: `--check-parity`
 
-The test suite proves **serial == M:N** for every example (the in-tree `assert_file_parity` oracle:
-run once on `--serial`, once on the default M:N engine, assert byte-identical stdout/stderr/terminal
-result). `chezzi run --check-parity <file>` exposes that same oracle as a one-command check on **your
-own** program:
+`chezzi run --check-parity <file>` runs a program once on `--serial`, once on the default M:N engine,
+and asserts byte-identical stdout/stderr/terminal result — a one-command check on **your own**
+program:
 
 ```sh
 chezzi run --check-parity examples/concurrent_jobs.chz

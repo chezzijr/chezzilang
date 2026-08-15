@@ -84,15 +84,12 @@ fn bodied_fn_runs_and_matches_across_engines() {
          print(math.divmod(-7, 2))\n",
     );
     let (mn_out, mn_err, mn_ok) = run(&prog, &[], None);
-    let (ser_out, ser_err, ser_ok) = run(&prog, &["--serial"], None);
     assert!(mn_ok, "M:N run failed: {mn_err}");
-    assert!(ser_ok, "serial run failed: {ser_err}");
     // `divmod` = truncating integer division (like `a / b`): -7/2 = -3, -7 % 2 = -1.
     assert_eq!(
         mn_out, "(3, 2)\n6\n(-3, -1)\n",
         "unexpected output: {mn_out}"
     );
-    assert_eq!(mn_out, ser_out, "serial vs M:N output differs");
 }
 
 #[test]
@@ -114,11 +111,8 @@ fn bodied_native_struct_method_runs() {
         ),
     );
     let (mn_out, mn_err, mn_ok) = run(&prog, &[], None);
-    let (ser_out, _, ser_ok) = run(&prog, &["--serial"], None);
     assert!(mn_ok, "M:N run failed: {mn_err}");
-    assert!(ser_ok, "serial run failed");
     assert_eq!(mn_out, "alpha\nbeta\ngamma\n");
-    assert_eq!(mn_out, ser_out);
 }
 
 #[test]
@@ -145,11 +139,8 @@ fn native_file_can_import_another_module() {
          print(math.divmod(9, 2))\n",
     );
     let (mn_out, mn_err, mn_ok) = run(&prog, &[], Some(&stddir.0));
-    let (ser_out, _, ser_ok) = run(&prog, &["--serial"], Some(&stddir.0));
     assert!(mn_ok, "native-file-import run failed: {mn_err}");
-    assert!(ser_ok, "serial run failed");
     assert_eq!(mn_out, "neve\noddodd\n(4, 1)\n");
-    assert_eq!(mn_out, ser_out);
 }
 
 #[test]

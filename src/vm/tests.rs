@@ -161,7 +161,7 @@ fn vm_host_arg_str_list_reads_live_list() {
 fn implicit_nursery_basic_vm() {
     let src = "fn w():\n    print(\"w\")\nfn main():\n    print(\"a\")\n    spawn w()\n    print(\"b\")\nmain()\n";
     assert_eq!(run(src), "a\nb\nw\n");
-    assert_eq!(run_capture_parallel(src).expect("parallel"), "a\nb\nw\n");
+    assert_eq!(run_capture(src).expect("parallel"), "a\nb\nw\n");
 }
 
 /// M-C: `return <value>` is a JOIN point — pending spawned tasks run to completion, THEN the
@@ -170,10 +170,7 @@ fn implicit_nursery_basic_vm() {
 fn implicit_nursery_return_joins_vm() {
     let src = "fn w(n: int):\n    print(\"w{n}\")\nfn f() -> int:\n    spawn w(1)\n    spawn w(2)\n    print(\"x\")\n    return 0\nfn main():\n    print(f())\nmain()\n";
     assert_eq!(run(src), "x\nw1\nw2\n0\n");
-    assert_eq!(
-        run_capture_parallel(src).expect("parallel"),
-        "x\nw1\nw2\n0\n"
-    );
+    assert_eq!(run_capture(src).expect("parallel"), "x\nw1\nw2\n0\n");
 }
 
 /// M-C: the module top level is an implicit nursery that joins at program exit.
@@ -181,7 +178,7 @@ fn implicit_nursery_return_joins_vm() {
 fn implicit_nursery_toplevel_vm() {
     let src = "fn w():\n    print(\"w\")\nprint(\"end\")\nspawn w()\n";
     assert_eq!(run(src), "end\nw\n");
-    assert_eq!(run_capture_parallel(src).expect("parallel"), "end\nw\n");
+    assert_eq!(run_capture(src).expect("parallel"), "end\nw\n");
 }
 
 /// Assert a program yields `expected` on both VM engines (cooperative + M:N `--parallel`) — the
@@ -189,11 +186,7 @@ fn implicit_nursery_toplevel_vm() {
 #[cfg(test)]
 fn assert_mc_parity(src: &str, expected: &str) {
     assert_eq!(run(src), expected, "cooperative VM");
-    assert_eq!(
-        run_capture_parallel(src).expect("M:N"),
-        expected,
-        "M:N engine"
-    );
+    assert_eq!(run_capture(src).expect("M:N"), expected, "M:N engine");
 }
 
 /// M-C: spawned tasks JOIN before the frame's `defer`s run (tasks complete, then cleanup).
@@ -479,7 +472,7 @@ fn assert_fault_parity(src: &str, expected_out: &str) {
     let (vm_out, vm_res) = run_program(src);
     assert!(vm_res.is_err(), "VM expected to fault, got {vm_out:?}");
     assert_eq!(vm_out, expected_out, "cooperative VM stdout");
-    let (it_out, it_res) = run_program_parallel(src);
+    let (it_out, it_res) = run_program(src);
     assert!(it_res.is_err(), "interp expected to fault, got {it_out:?}");
     assert_eq!(it_out, expected_out, "interp stdout");
     assert_eq!(
@@ -491,12 +484,12 @@ fn assert_fault_parity(src: &str, expected_out: &str) {
 /// Like [`assert_fault_parity`] but asserts the order-INSENSITIVE SET of stdout lines matches
 /// (`assert_same_lines`), for a genuinely-racing multi-printer deadlock where the interleaving is
 /// nondeterministic under M:N. Both engines must fault. Goes through the `(stdout, result)` harness
-/// (NOT `run_capture_parallel`, which drops stdout on `Err`) so the parked buffers are observable.
+/// (NOT `run_capture`, which drops stdout on `Err`) so the parked buffers are observable.
 #[cfg(test)]
 fn assert_fault_same_lines(src: &str) {
     let (vm_out, vm_res) = run_program(src);
     assert!(vm_res.is_err(), "VM expected to fault, got {vm_out:?}");
-    let (mn_out, mn_res) = run_program_parallel(src);
+    let (mn_out, mn_res) = run_program(src);
     assert!(mn_res.is_err(), "M:N expected to fault, got {mn_out:?}");
     assert_same_lines(&vm_out, &mn_out);
 }
@@ -863,7 +856,7 @@ fn fxhash_set_dedup_and_ops() {
 // change and stay green AFTER.
 fn idx_parity(src: &str) {
     let vm = run_capture(src).map_err(|e| e.to_string());
-    let interp = run_capture_parallel(src).map_err(|e| e.to_string());
+    let interp = run_capture(src).map_err(|e| e.to_string());
     assert_eq!(
         vm, interp,
         "vm/interp divergence (index specialization must be behavior-preserving):\n{src}"
@@ -930,7 +923,7 @@ fn idxspec_int_float_key_collision_resolves() {
 /// and return the shared output. The field IC is a VM-only speedup, so any divergence is a bug.
 fn run_parity(src: &str) -> String {
     let vm = run_capture(src).expect("vm run");
-    let interp = run_capture_parallel(src).expect("interp run");
+    let interp = run_capture(src).expect("interp run");
     assert_eq!(
         vm, interp,
         "vm/interp divergence (field IC must be behavior-preserving)"
@@ -1032,7 +1025,7 @@ fn ic_struct_under_parallel_engine() {
                    p := Pt(3, 4)\n\
                    acc := 0\ni := 0\nwhile i < 100:\n    acc = acc + p.sum()\n    p.x = p.x + 1\n    i = i + 1\n\
                    print(acc)\nprint(p.x)\n";
-    assert_eq!(run_capture_parallel(src).expect("parallel"), run(src));
+    assert_eq!(run_capture(src).expect("parallel"), run(src));
 }
 
 #[test]
@@ -1312,7 +1305,7 @@ fn method_ic_under_parallel_engine() {
     let src = "struct Pt:\n    x: int\n    y: int\n\n    fn sum(self) -> int:\n        return self.x + self.y\n\
                    p := Pt(3, 4)\nacc := 0\ni := 0\nwhile i < 100:\n    acc = acc + p.sum()\n    p.x = p.x + 1\n    i = i + 1\n\
                    print(acc)\nprint(p.x)\n";
-    assert_eq!(run_capture_parallel(src).expect("parallel"), run(src));
+    assert_eq!(run_capture(src).expect("parallel"), run(src));
 }
 
 #[test]
@@ -1366,7 +1359,7 @@ fn method_ic_uncaught_fault_on_hit_path() {
     let src = "struct Bomb:\n    n: int\n\n    fn blow(self, d: int) -> int:\n        return self.n / d\n\
                    b := Bomb(10)\nprint(b.blow(2))\nprint(b.blow(0))\n";
     let vm_err = run_err(src);
-    let interp_err = match run_capture_parallel(src) {
+    let interp_err = match run_capture(src) {
         Ok(o) => panic!("expected interp error, got {o:?}"),
         Err(e) => e.message,
     };
@@ -1390,7 +1383,7 @@ fn method_ic_survives_fiber_park_under_parallel() {
                    fn producer(ch: Channel[int]):\n    i := 0\n    while i < 4:\n        ch.send(i)\n        i = i + 1\n\
                    fn main():\n    ch := Channel[int]()\n    parallel:\n        spawn consumer(ch)\n        spawn producer(ch)\nmain()\n";
     // total = 4*1000 + (0+1+2+3) = 4006
-    assert_eq!(run_capture_parallel(src).expect("parallel"), run(src));
+    assert_eq!(run_capture(src).expect("parallel"), run(src));
     assert_eq!(run(src), "4006\n");
 }
 
@@ -1522,7 +1515,7 @@ fn inlined_hot_ops_path_matches_step() {
     // x=0,3*?: i=0 x=0 x%3==0 acc+=f(0,0)=0; i=1 x=2 no acc+=1; i=2 x=4 no +1; i=3 x=6 yes +f(6,3)=9;
     // i=4 x=8 no +1; i=5 x=10 no +1; i=6 x=12 yes +f(12,6)=18; ... let the engines agree on the value.
     let out = run_parity(src);
-    assert_eq!(out, run_capture_parallel(src).expect("interp"));
+    assert_eq!(out, run_capture(src).expect("interp"));
     assert!(!out.is_empty());
 }
 
@@ -1714,7 +1707,7 @@ fn main():
 main()
 ";
     let vm = run_capture(src).expect("vm run");
-    let interp = run_capture_parallel(src).expect("interp run");
+    let interp = run_capture(src).expect("interp run");
     // Two-engine parity (the hard rule).
     assert_eq!(
         vm, interp,
@@ -2151,7 +2144,7 @@ fn bounded_channel_cap_method_both_engines() {
     let src = "b := Channel[int](3)\nprint(b.cap())\nu := Channel[int]()\nprint(u.cap())\n";
     let out = run(src);
     assert_eq!(out, "3\n0\n");
-    assert_eq!(out, run_capture_parallel(src).expect("M:N run"));
+    assert_eq!(out, run_capture(src).expect("M:N run"));
 }
 
 /// `Channel[T](0)` / a negative capacity is a runtime fault (cap must be > 0), on both engines with
@@ -2164,9 +2157,7 @@ fn bounded_channel_zero_cap_faults_both_engines() {
     ] {
         let e = run_err(src);
         assert!(e.contains("Channel capacity must be > 0"), "serial: {e}");
-        let ep = run_capture_parallel(src)
-            .expect_err("M:N should fault")
-            .message;
+        let ep = run_capture(src).expect_err("M:N should fault").message;
         assert_eq!(e, ep, "serial and M:N fault text must match");
     }
 }
@@ -2183,7 +2174,7 @@ fn bounded_channel_try_send_full_returns_false_both_engines() {
                print(c.recv())\n";
     let out = run(src);
     assert_eq!(out, "true\nfalse\n1\ntrue\n3\n");
-    assert_eq!(out, run_capture_parallel(src).expect("M:N run"));
+    assert_eq!(out, run_capture(src).expect("M:N run"));
 }
 
 /// A `send` on a FULL bounded channel with NO possible consumer (top level, no nursery) is a
@@ -2193,9 +2184,7 @@ fn bounded_channel_full_send_top_level_deadlocks_both_engines() {
     let src = "c := Channel[int](1)\nc.send(1)\nc.send(2)\nprint(\"unreached\")\n";
     let e = run_err(src);
     assert!(e.contains("send on a full channel"), "serial: {e}");
-    let ep = run_capture_parallel(src)
-        .expect_err("M:N should fault")
-        .message;
+    let ep = run_capture(src).expect_err("M:N should fault").message;
     assert_eq!(e, ep, "serial and M:N deadlock text must match");
 }
 
@@ -2218,9 +2207,7 @@ fn bounded_channel_nursery_send_deadlock_names_full_send_both_engines() {
         e.contains("full send()"),
         "serial diagnostic must name the send stall: {e}"
     );
-    let ep = run_capture_parallel(src)
-        .expect_err("M:N should fault")
-        .message;
+    let ep = run_capture(src).expect_err("M:N should fault").message;
     assert_eq!(e, ep, "serial and M:N deadlock text must match");
 }
 
@@ -2243,7 +2230,7 @@ fn bounded_channel_fanout_golden_both_engines() {
                main()\n";
     let out = run(src);
     assert_eq!(out, "0\n1\n2\n3\n4\n");
-    assert_eq!(out, run_capture_parallel(src).expect("M:N run"));
+    assert_eq!(out, run_capture(src).expect("M:N run"));
 }
 
 // ===== §6d `wait:` SEND-arms (Go-`select` symmetry) =====
@@ -2263,7 +2250,7 @@ fn golden_wait_send_both_engines() {
     );
     assert_eq!(
         out,
-        run_capture_parallel(src).expect("M:N run"),
+        run_capture(src).expect("M:N run"),
         "serial/M:N divergence on wait_send"
     );
 }
@@ -2290,7 +2277,7 @@ fn wait_send_arm_park_wake_stress_parallel() {
     assert_eq!(run(src), expected); // serial oracle
     for trial in 0..40 {
         assert_eq!(
-            run_capture_parallel(src).expect("M:N run"),
+            run_capture(src).expect("M:N run"),
             expected,
             "M:N send-arm park/wake diverged on trial {trial}"
         );
@@ -2314,9 +2301,7 @@ fn wait_send_arm_closed_channel_faults_both_engines() {
         e.contains("send on a closed channel"),
         "closed send arm must fault, got: {e}"
     );
-    let ep = run_capture_parallel(src)
-        .expect_err("M:N should fault")
-        .message;
+    let ep = run_capture(src).expect_err("M:N should fault").message;
     assert_eq!(e, ep, "serial and M:N closed-send fault text must match");
 }
 
@@ -2338,9 +2323,7 @@ fn wait_send_arm_in_callback_faults_same_on_both_engines() {
                \x20           print([1].map(f))\n\
                main()\n";
     let serial = run_capture(src).expect_err("serial should fault").message;
-    let par = run_capture_parallel(src)
-        .expect_err("M:N should fault")
-        .message;
+    let par = run_capture(src).expect_err("M:N should fault").message;
     assert_eq!(
         serial, par,
         "wait send-arm in-callback fault text must be byte-identical on both engines"
@@ -2362,7 +2345,7 @@ fn wait_unbounded_send_arm_always_ready_both_engines() {
                \x20   print(\"q={u.recv()}\")\n\
                main()\n";
     assert_eq!(run(src), "sent\nq=1\n");
-    assert_eq!(run_capture_parallel(src).expect("M:N run"), "sent\nq=1\n");
+    assert_eq!(run_capture(src).expect("M:N run"), "sent\nq=1\n");
 }
 
 /// Deterministic source-order tie-break: with BOTH an (earlier) ready recv-arm and a (later) ready
@@ -2382,7 +2365,7 @@ fn wait_send_source_order_first_ready_wins_both_engines() {
                main()\n";
     assert_eq!(run(recv_first), "recv 7\nslen=0\n");
     assert_eq!(
-        run_capture_parallel(recv_first).expect("M:N run"),
+        run_capture(recv_first).expect("M:N run"),
         "recv 7\nslen=0\n"
     );
     // send-arm first + ready (unbounded), recv-arm empty → send wins.
@@ -2395,10 +2378,7 @@ fn wait_send_source_order_first_ready_wins_both_engines() {
                \x20   print(\"q={s.recv()}\")\n\
                main()\n";
     assert_eq!(run(send_first), "sent\nq=9\n");
-    assert_eq!(
-        run_capture_parallel(send_first).expect("M:N run"),
-        "sent\nq=9\n"
-    );
+    assert_eq!(run_capture(send_first).expect("M:N run"), "sent\nq=9\n");
 }
 
 /// Bugs 1/3 — `try_send` on a bounded channel must be ATOMIC (check-space + enqueue under the same
@@ -2423,7 +2403,7 @@ fn bounded_channel_try_send_atomic_no_overfill_both_engines() {
                \x20   print(over)\n\
                main()\n";
     assert_eq!(run(src), "0\n");
-    assert_eq!(run_capture_parallel(src).expect("M:N run"), "0\n");
+    assert_eq!(run_capture(src).expect("M:N run"), "0\n");
 }
 
 /// Bug 2 — a full bounded `send` issued on the INLINE outermost-`parallel:` builder VM (`self.mn ==
@@ -2454,7 +2434,7 @@ fn bounded_channel_inline_builder_full_send_faults_not_hang() {
                main()\n";
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
-        let _ = tx.send(run_capture_parallel(src));
+        let _ = tx.send(run_capture(src));
     });
     match rx.recv_timeout(std::time::Duration::from_secs(30)) {
         Ok(r) => {
@@ -2477,7 +2457,7 @@ fn bounded_channel_inline_builder_full_send_faults_not_hang() {
 fn pmap_both(tag: &str, src: &str) -> String {
     let entry = write_temp_chz(tag, src);
     let (s_out, _e, s_res, _c) = run_file(&entry);
-    let (m_out, _e2, m_res, _c2) = run_file_parallel(&entry, crate::native::HostConfig::default());
+    let (m_out, _e2, m_res, _c2) = run_file_with(&entry, crate::native::HostConfig::default());
     let _ = std::fs::remove_file(&entry);
     assert!(s_res.is_ok(), "serial faulted: {s_res:?}");
     assert!(m_res.is_ok(), "M:N faulted: {m_res:?}");
@@ -2628,7 +2608,7 @@ fn main():
 
 main()
 ";
-    assert_eq!(run_capture_parallel(src).expect("parallel run"), "99\n");
+    assert_eq!(run_capture(src).expect("parallel run"), "99\n");
 }
 
 /// L7 round 1 — `Channel[int!]` (the `Error`-existential is sendable-bounded) runs identically on
@@ -2658,7 +2638,7 @@ main()
 ";
     let expected = "ok 7\nerr boom\n";
     assert_eq!(run_capture(src).expect("serial run"), expected);
-    assert_eq!(run_capture_parallel(src).expect("parallel run"), expected);
+    assert_eq!(run_capture(src).expect("parallel run"), expected);
 }
 
 /// L7 round 3, Test 1 (Option-B regression) — an INFERRED return (no `-> int!`/`-> Result[..]`
@@ -2701,7 +2681,7 @@ main()
 ";
     let expected = "1\nx\n";
     assert_eq!(run_capture(src).expect("serial run"), expected);
-    assert_eq!(run_capture_parallel(src).expect("parallel run"), expected);
+    assert_eq!(run_capture(src).expect("parallel run"), expected);
 }
 
 /// D2a: an M:N fiber carries its OWN heap (share-nothing). `swap_ctx` swaps that heap with the
@@ -3435,7 +3415,7 @@ fn wait_park_close_race_no_spurious_deadlock_parallel() {
     let src = "fn w(a: Channel[int]):\n    r := recover:\n        wait:\n            v := a.recv(): print(\"got\", v)\n    print(\"waiter done\")\nfn main():\n    a := Channel[int]()\n    parallel:\n        spawn w(a)\n        spawn: a.close()\n    print(\"end\")\nmain()\n";
     let mut failures = Vec::new();
     for i in 0..200 {
-        match run_capture_parallel(src) {
+        match run_capture(src) {
             Ok(out) => {
                 if !out.contains("waiter done") || !out.contains("end") {
                     failures.push(format!("iter {i}: missing lines in {out:?}"));
@@ -4004,7 +3984,7 @@ main()
     // sum_{k=0}^{499} sum_{i=10k}^{10k+9} i = sum_{k=0}^{499} (100k + 45) = 12_475_000 + 22_500.
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
-        let _ = tx.send(run_capture_parallel(src));
+        let _ = tx.send(run_capture(src));
     });
     match rx.recv_timeout(std::time::Duration::from_secs(30)) {
         Ok(r) => assert_eq!(r.expect("mixed work-steal nursery completed"), "12497500\n"),
@@ -4056,7 +4036,7 @@ main()
         let want = expected.clone();
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            let _ = tx.send(run_capture_parallel(src));
+            let _ = tx.send(run_capture(src));
         });
         match rx.recv_timeout(std::time::Duration::from_secs(20)) {
             Ok(r) => assert_eq!(
@@ -4113,7 +4093,7 @@ main()
     );
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
-        let _ = tx.send(run_capture_parallel(&src));
+        let _ = tx.send(run_capture(&src));
     });
     match rx.recv_timeout(std::time::Duration::from_secs(30)) {
         Ok(r) => assert_eq!(
@@ -4161,7 +4141,7 @@ main()
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         let start = std::time::Instant::now();
-        let out = run_file_parallel(&run_entry, crate::native::HostConfig::default());
+        let out = run_file_with(&run_entry, crate::native::HostConfig::default());
         let _ = tx.send((out, start.elapsed()));
     });
     let result = rx.recv_timeout(std::time::Duration::from_secs(30));
@@ -4222,7 +4202,7 @@ main()
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         let start = std::time::Instant::now();
-        let out = run_file_parallel(&run_entry, crate::native::HostConfig::default());
+        let out = run_file_with(&run_entry, crate::native::HostConfig::default());
         let _ = tx.send((out, start.elapsed()));
     });
     let result = rx.recv_timeout(std::time::Duration::from_secs(30));
@@ -4270,7 +4250,7 @@ main()
     let run_entry = entry.clone();
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
-        let _ = tx.send(run_file_parallel(
+        let _ = tx.send(run_file_with(
             &run_entry,
             crate::native::HostConfig::default(),
         ));
@@ -4348,7 +4328,7 @@ main()
     let run_entry = entry.clone();
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
-        let _ = tx.send(run_file_parallel(
+        let _ = tx.send(run_file_with(
             &run_entry,
             crate::native::HostConfig::default(),
         ));
@@ -4426,7 +4406,7 @@ main()
     let run_entry = entry.clone();
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
-        let _ = tx.send(run_file_parallel(
+        let _ = tx.send(run_file_with(
             &run_entry,
             crate::native::HostConfig::default(),
         ));
@@ -4478,7 +4458,7 @@ main()
     let run_entry = entry.clone();
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
-        let _ = tx.send(run_file_parallel(
+        let _ = tx.send(run_file_with(
             &run_entry,
             crate::native::HostConfig::default(),
         ));
@@ -4533,7 +4513,7 @@ main()
     let run_entry = entry.clone();
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
-        let _ = tx.send(run_file_parallel(
+        let _ = tx.send(run_file_with(
             &run_entry,
             crate::native::HostConfig::default(),
         ));
@@ -4603,7 +4583,7 @@ main()
     let run_entry = entry.clone();
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
-        let _ = tx.send(run_file_parallel(
+        let _ = tx.send(run_file_with(
             &run_entry,
             crate::native::HostConfig::default(),
         ));
@@ -4650,7 +4630,7 @@ main()
     let entry = write_temp_chz("d5_owe3_hofs", src);
     let cfg = crate::native::HostConfig::default;
     let (vo, _ve, vr, _vc) = run_file_with(&entry, cfg());
-    let (io, _ie, ir, _ic) = run_file_p(&entry);
+    let (io, _ie, ir, _ic) = run_file(&entry);
     let _ = std::fs::remove_file(&entry);
     assert!(vr.is_ok(), "vm run faulted: {vr:?}");
     assert!(ir.is_ok(), "interp run faulted: {ir:?}");
@@ -4705,7 +4685,7 @@ main()
     let run_entry = entry.clone();
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
-        let _ = tx.send(run_file_parallel(
+        let _ = tx.send(run_file_with(
             &run_entry,
             crate::native::HostConfig::default(),
         ));
@@ -4753,7 +4733,7 @@ main()
     let run_entry = entry.clone();
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
-        let _ = tx.send(run_file_parallel(
+        let _ = tx.send(run_file_with(
             &run_entry,
             crate::native::HostConfig::default(),
         ));
@@ -4819,7 +4799,7 @@ main()
     let run_entry = entry.clone();
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
-        let _ = tx.send(run_file_parallel(
+        let _ = tx.send(run_file_with(
             &run_entry,
             crate::native::HostConfig::default(),
         ));
@@ -4877,7 +4857,7 @@ main()
     let run_entry = entry.clone();
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
-        let _ = tx.send(run_file_parallel(
+        let _ = tx.send(run_file_with(
             &run_entry,
             crate::native::HostConfig::default(),
         ));
@@ -4926,7 +4906,7 @@ main()
     let run_entry = entry.clone();
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
-        let _ = tx.send(run_file_parallel(
+        let _ = tx.send(run_file_with(
             &run_entry,
             crate::native::HostConfig::default(),
         ));
@@ -4973,7 +4953,7 @@ main()
         let run_entry = entry.clone();
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            let _ = tx.send(run_file_parallel(
+            let _ = tx.send(run_file_with(
                 &run_entry,
                 crate::native::HostConfig::default(),
             ));
@@ -5035,7 +5015,7 @@ main()
     let run_entry = entry.clone();
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
-        let _ = tx.send(run_file_parallel(
+        let _ = tx.send(run_file_with(
             &run_entry,
             crate::native::HostConfig::default(),
         ));
@@ -5052,7 +5032,7 @@ main()
 }
 
 /// D5 test helper: write a Chezzi source to a uniquely-named temp `.chz` file and return its path
-/// (so `run_file_parallel` resolves `import std.*` through the real module graph, unlike
+/// (so `run_file_with` resolves `import std.*` through the real module graph, unlike
 /// `compile_module_standalone`). The caller removes it after the run.
 fn write_temp_chz(tag: &str, src: &str) -> std::path::PathBuf {
     static SEQ: AtomicUsize = AtomicUsize::new(0);
@@ -5074,8 +5054,7 @@ fn extern_in_spawn_parallel_snapshot() {
                    r := ch.recv()\nprint(r)\n";
     let entry = write_temp_chz("ffi_spawn", src);
     let (vm_out, _e, vm_res, _) = run_file(&entry);
-    let (par_out, _pe, par_res, _) =
-        run_file_parallel(&entry, crate::native::HostConfig::default());
+    let (par_out, _pe, par_res, _) = run_file_with(&entry, crate::native::HostConfig::default());
     let _ = std::fs::remove_file(&entry);
     assert!(vm_res.is_ok(), "cooperative VM faulted: {vm_res:?}");
     assert!(par_res.is_ok(), "parallel engine faulted: {par_res:?}");
@@ -5118,8 +5097,7 @@ fn extern_cross_module_alias_runs() {
         )
         .unwrap();
     let (vm_out, _e, vm_res, _) = run_file(&entry);
-    let (par_out, _pe, par_res, _) =
-        run_file_parallel(&entry, crate::native::HostConfig::default());
+    let (par_out, _pe, par_res, _) = run_file_with(&entry, crate::native::HostConfig::default());
     let _ = std::fs::remove_dir_all(&dir);
     assert!(
         vm_res.is_ok(),
@@ -5158,8 +5136,8 @@ fn match_module_qualified_variant_three_engine_parity() {
         .unwrap();
     let cfg = crate::native::HostConfig::default;
     let (vo, _ve, vr, _vc) = run_file_with(&entry, cfg());
-    let (po, _pe, pr, _pc) = run_file_parallel(&entry, cfg());
-    let (io, _ie, ir, _ic) = run_file_p(&entry);
+    let (po, _pe, pr, _pc) = run_file_with(&entry, cfg());
+    let (io, _ie, ir, _ic) = run_file(&entry);
     let _ = std::fs::remove_dir_all(&dir);
     assert!(vr.is_ok(), "VM faulted: {vr:?}");
     assert!(pr.is_ok(), "--parallel faulted: {pr:?}");
@@ -5194,7 +5172,7 @@ fn struct_match_qualified_whole_module_runs_both_engines() {
         panic!("program must type-check, got: {errs:?}");
     }
     let (vo, _ve, vr, _vc) = run_file(&entry);
-    let (io, _ie, ir, _ic) = run_file_p(&entry);
+    let (io, _ie, ir, _ic) = run_file(&entry);
     let _ = std::fs::remove_dir_all(&dir);
     assert!(vr.is_ok(), "serial VM faulted: {vr:?}");
     assert!(ir.is_ok(), "M:N engine faulted: {ir:?}");
@@ -5237,7 +5215,7 @@ fn witness_cross_module_runs_both_engines() {
         panic!("program must type-check, got: {errs:?}");
     }
     let (vo, _ve, vr, _vc) = run_file(&entry);
-    let (io, _ie, ir, _ic) = run_file_p(&entry);
+    let (io, _ie, ir, _ic) = run_file(&entry);
     let _ = std::fs::remove_dir_all(&dir);
     assert!(vr.is_ok(), "serial VM faulted: {vr:?}");
     assert!(ir.is_ok(), "M:N engine faulted: {ir:?}");
@@ -5274,7 +5252,7 @@ fn witness_member_cross_module_runs_both_engines() {
         panic!("program must type-check, got: {errs:?}");
     }
     let (vo, _ve, vr, _vc) = run_file(&entry);
-    let (io, _ie, ir, _ic) = run_file_p(&entry);
+    let (io, _ie, ir, _ic) = run_file(&entry);
     let _ = std::fs::remove_dir_all(&dir);
     assert!(vr.is_ok(), "serial VM faulted: {vr:?}");
     assert!(ir.is_ok(), "M:N engine faulted: {ir:?}");
@@ -5408,7 +5386,7 @@ fn m24_2_a_nested_body_forwarding_through_a_member_keeps_its_witness() {
         "the program must type-check, or this test pins nothing `chezzi run` would accept"
     );
     let vo = run_capture(&src).expect("serial VM");
-    let io = run_capture_parallel(&src).expect("M:N engine");
+    let io = run_capture(&src).expect("M:N engine");
     assert_eq!(vo, "1\n", "serial VM output");
     assert_eq!(vo, io, "serial vs M:N divergence");
 }
@@ -5449,7 +5427,7 @@ fn m24_2_a_parameter_shadowing_a_user_module_keeps_the_witness() {
         panic!("program must type-check, got: {errs:?}");
     }
     let (vo, _ve, vr, _vc) = run_file(&entry);
-    let (io, _ie, ir, _ic) = run_file_p(&entry);
+    let (io, _ie, ir, _ic) = run_file(&entry);
     let _ = std::fs::remove_dir_all(&dir);
     assert!(vr.is_ok(), "serial VM faulted: {vr:?}");
     assert!(ir.is_ok(), "M:N engine faulted: {ir:?}");
@@ -5491,7 +5469,7 @@ fn m24_2_a_type_named_like_a_user_module_keeps_the_witness() {
         panic!("program must type-check, got: {errs:?}");
     }
     let (vo, _ve, vr, _vc) = run_file(&entry);
-    let (io, _ie, ir, _ic) = run_file_p(&entry);
+    let (io, _ie, ir, _ic) = run_file(&entry);
     let _ = std::fs::remove_dir_all(&dir);
     assert!(vr.is_ok(), "serial VM faulted: {vr:?}");
     assert!(ir.is_ok(), "M:N engine faulted: {ir:?}");
@@ -5577,7 +5555,7 @@ print(probe())
         panic!("program must type-check, got: {errs:?}");
     }
     let (vo, _ve, vr, _vc) = run_file(&entry);
-    let (io, _ie, ir, _ic) = run_file_p(&entry);
+    let (io, _ie, ir, _ic) = run_file(&entry);
     let _ = std::fs::remove_dir_all(&dir);
     assert!(vr.is_ok(), "serial VM faulted: {vr:?}");
     assert!(ir.is_ok(), "M:N engine faulted: {ir:?}");
@@ -5637,7 +5615,7 @@ match probe():
         panic!("program must type-check, got: {errs:?}");
     }
     let (vo, _ve, vr, _vc) = run_file(&entry);
-    let (io, _ie, ir, _ic) = run_file_p(&entry);
+    let (io, _ie, ir, _ic) = run_file(&entry);
     let _ = std::fs::remove_dir_all(&dir);
     assert!(
         vr.is_ok(),
@@ -5726,7 +5704,7 @@ print(probe())
         panic!("program must type-check, got: {errs:?}");
     }
     let (vo, _ve, vr, _vc) = run_file(&entry);
-    let (io, _ie, ir, _ic) = run_file_p(&entry);
+    let (io, _ie, ir, _ic) = run_file(&entry);
     let _ = std::fs::remove_dir_all(&dir);
     assert!(
         vr.is_ok(),
@@ -5793,7 +5771,7 @@ print(probe())
         panic!("program must type-check, got: {errs:?}");
     }
     let (vo, _ve, vr, _vc) = run_file(&entry);
-    let (io, _ie, ir, _ic) = run_file_p(&entry);
+    let (io, _ie, ir, _ic) = run_file(&entry);
     let _ = std::fs::remove_dir_all(&dir);
     assert!(vr.is_ok(), "serial VM faulted: {vr:?}");
     assert!(ir.is_ok(), "M:N engine faulted: {ir:?}");
@@ -5838,7 +5816,7 @@ fn a_cross_module_default_resolves_in_its_definer_not_the_caller() {
         panic!("program must type-check, got: {errs:?}");
     }
     let (vo, _ve, vr, _vc) = run_file(&entry);
-    let (io, _ie, ir, _ic) = run_file_p(&entry);
+    let (io, _ie, ir, _ic) = run_file(&entry);
     let _ = std::fs::remove_dir_all(&dir);
     assert!(vr.is_ok(), "serial VM faulted: {vr:?}");
     assert!(ir.is_ok(), "M:N engine faulted: {ir:?}");
@@ -5868,7 +5846,7 @@ fn a_cross_module_default_may_call_the_definers_own_function() {
         panic!("program must type-check, got: {errs:?}");
     }
     let (vo, _ve, vr, _vc) = run_file(&entry);
-    let (io, _ie, ir, _ic) = run_file_p(&entry);
+    let (io, _ie, ir, _ic) = run_file(&entry);
     let _ = std::fs::remove_dir_all(&dir);
     assert!(vr.is_ok(), "serial VM faulted: {vr:?}");
     assert!(ir.is_ok(), "M:N engine faulted: {ir:?}");
@@ -5904,7 +5882,7 @@ fn a_cross_module_default_may_call_through_the_definers_import() {
         panic!("program must type-check, got: {errs:?}");
     }
     let (vo, _ve, vr, _vc) = run_file(&entry);
-    let (io, _ie, ir, _ic) = run_file_p(&entry);
+    let (io, _ie, ir, _ic) = run_file(&entry);
     let _ = std::fs::remove_dir_all(&dir);
     assert!(vr.is_ok(), "serial VM faulted: {vr:?}");
     assert!(ir.is_ok(), "M:N engine faulted: {ir:?}");
@@ -5937,7 +5915,7 @@ fn a_cross_module_default_may_call_through_the_definers_std_import() {
         panic!("program must type-check, got: {errs:?}");
     }
     let (vo, _ve, vr, _vc) = run_file(&entry);
-    let (io, _ie, ir, _ic) = run_file_p(&entry);
+    let (io, _ie, ir, _ic) = run_file(&entry);
     let _ = std::fs::remove_dir_all(&dir);
     assert!(vr.is_ok(), "serial VM faulted: {vr:?}");
     assert!(ir.is_ok(), "M:N engine faulted: {ir:?}");
@@ -5973,7 +5951,7 @@ fn a_default_from_a_transitive_dependency_resolves_in_its_definer() {
         panic!("program must type-check, got: {errs:?}");
     }
     let (vo, _ve, vr, _vc) = run_file(&entry);
-    let (io, _ie, ir, _ic) = run_file_p(&entry);
+    let (io, _ie, ir, _ic) = run_file(&entry);
     let _ = std::fs::remove_dir_all(&dir);
     assert!(vr.is_ok(), "serial VM faulted: {vr:?}");
     assert!(ir.is_ok(), "M:N engine faulted: {ir:?}");
@@ -6029,7 +6007,7 @@ fn a_default_in_a_diamonds_shared_base_is_the_same_in_either_import_order() {
             panic!("[{tag}] program must type-check, got: {errs:?}");
         }
         let (vo, _ve, vr, _vc) = run_file(&entry);
-        let (io, _ie, ir, _ic) = run_file_p(&entry);
+        let (io, _ie, ir, _ic) = run_file(&entry);
         let _ = std::fs::remove_dir_all(&dir);
         assert!(vr.is_ok(), "[{tag}] serial VM faulted: {vr:?}");
         assert!(ir.is_ok(), "[{tag}] M:N engine faulted: {ir:?}");
@@ -6079,7 +6057,7 @@ fn a_method_default_from_a_sibling_module_resolves_in_its_definer() {
             panic!("[{tag}] program must type-check, got: {errs:?}");
         }
         let (vo, _ve, vr, _vc) = run_file(&entry);
-        let (io, _ie, ir, _ic) = run_file_p(&entry);
+        let (io, _ie, ir, _ic) = run_file(&entry);
         let _ = std::fs::remove_dir_all(&dir);
         assert!(vr.is_ok(), "[{tag}] serial VM faulted: {vr:?}");
         assert!(ir.is_ok(), "[{tag}] M:N engine faulted: {ir:?}");
@@ -6132,7 +6110,7 @@ fn a_defaulted_method_argument_is_reachable_through_a_protocol() {
             panic!("[{tag}] program must type-check, got: {errs:?}");
         }
         let (vo, _ve, vr, _vc) = run_file(&entry);
-        let (io, _ie, ir, _ic) = run_file_p(&entry);
+        let (io, _ie, ir, _ic) = run_file(&entry);
         let _ = std::fs::remove_dir_all(&dir);
         assert!(vr.is_ok(), "[{tag}] serial VM faulted: {vr:?}");
         assert!(ir.is_ok(), "[{tag}] M:N engine faulted: {ir:?}");
@@ -6180,7 +6158,7 @@ fn a_default_naming_an_import_the_caller_cannot_see_now_compiles_and_resolves_in
             panic!("[{tag}] must now type-check (was `unknown name 'u'`), got: {errs:?}");
         }
         let (vo, _ve, vr, _vc) = run_file(&entry);
-        let (io, _ie, ir, _ic) = run_file_p(&entry);
+        let (io, _ie, ir, _ic) = run_file(&entry);
         let _ = std::fs::remove_dir_all(&dir);
         assert!(vr.is_ok(), "[{tag}] serial VM faulted: {vr:?}");
         assert!(ir.is_ok(), "[{tag}] M:N engine faulted: {ir:?}");
@@ -6205,7 +6183,7 @@ fn a_default_fills_through_a_first_class_function_value() {
     )
     .expect("run");
     assert_eq!(out, "4\n9\n");
-    let p = run_capture_parallel(
+    let p = run_capture(
         "fn av() -> int:\n    return 4\nfn g(x: int = av()) -> int:\n    return x\nf := g\nprint(f())\nprint(f(9))\n",
     )
     .expect("run");
@@ -6219,7 +6197,7 @@ fn a_default_fills_through_a_first_class_function_value() {
     assert_eq!(out, "145\n125\n123\n");
 
     // The defaults are the DEFINER's, evaluated per call, on a worker as well as on the host.
-    let out = run_capture_parallel(
+    let out = run_capture(
         "fn av() -> int:\n    return 4\nfn g(x: int = av()) -> int:\n    return x\nfn main():\n    ch := Channel[int](1)\n    f := g\n    parallel:\n        spawn:\n            ch.send(f())\n    print(ch.recv())\nmain()\n",
     )
     .expect("run");
@@ -6253,7 +6231,7 @@ fn a_generic_host_self_default_resolves_in_its_definer() {
         panic!("must type-check, got: {errs:?}");
     }
     let (vo, _e, vr, _c) = run_file(&entry);
-    let (io, _e2, ir, _c2) = run_file_p(&entry);
+    let (io, _e2, ir, _c2) = run_file(&entry);
     let _ = std::fs::remove_dir_all(&dir);
     assert!(vr.is_ok(), "serial VM faulted: {vr:?}");
     assert!(ir.is_ok(), "M:N engine faulted: {ir:?}");
@@ -6295,7 +6273,7 @@ fn an_out_of_closure_default_resolves_on_an_m_n_worker() {
         panic!("must type-check, got: {errs:?}");
     }
     let (vo, _ve, vr, _vc) = run_file(&entry);
-    let (io, _ie, ir, _ic) = run_file_p(&entry);
+    let (io, _ie, ir, _ic) = run_file(&entry);
     let _ = std::fs::remove_dir_all(&dir);
     assert!(vr.is_ok(), "serial VM faulted: {vr:?}");
     assert!(ir.is_ok(), "M:N engine faulted: {ir:?}");
@@ -6331,7 +6309,7 @@ fn an_out_of_closure_default_resolves_while_its_definers_toplevel_is_running() {
         panic!("must type-check, got: {errs:?}");
     }
     let (vo, _ve, vr, _vc) = run_file(&entry);
-    let (io, _ie, ir, _ic) = run_file_p(&entry);
+    let (io, _ie, ir, _ic) = run_file(&entry);
     let _ = std::fs::remove_dir_all(&dir);
     assert!(vr.is_ok(), "serial VM faulted: {vr:?}");
     assert!(ir.is_ok(), "M:N engine faulted: {ir:?}");
@@ -6409,7 +6387,7 @@ fn a_default_whose_name_the_caller_also_declares_reads_the_definers() {
             panic!("[{tag}] program must type-check, got: {errs:?}");
         }
         let (vo, _ve, vr, _vc) = run_file(&entry);
-        let (io, _ie, ir, _ic) = run_file_p(&entry);
+        let (io, _ie, ir, _ic) = run_file(&entry);
         let _ = std::fs::remove_dir_all(&dir);
         assert!(vr.is_ok(), "[{tag}] serial VM faulted: {vr:?}");
         assert!(ir.is_ok(), "[{tag}] M:N engine faulted: {ir:?}");
@@ -6454,7 +6432,7 @@ fn a_method_default_from_an_imported_module_case(tag: &str, entry_src: &str) {
         panic!("program must type-check, got: {errs:?}");
     }
     let (vo, _ve, vr, _vc) = run_file(&entry);
-    let (io, _ie, ir, _ic) = run_file_p(&entry);
+    let (io, _ie, ir, _ic) = run_file(&entry);
     let _ = std::fs::remove_dir_all(&dir);
     assert!(vr.is_ok(), "serial VM faulted: {vr:?}");
     assert!(ir.is_ok(), "M:N engine faulted: {ir:?}");
@@ -6476,7 +6454,7 @@ fn a_provider_frame_in_a_trace_is_readable() {
     )
     .unwrap();
     let (_o, _e, res, _c) = run_file(&entry);
-    let (_po, _pe, pres, _pc) = run_file_p(&entry);
+    let (_po, _pe, pres, _pc) = run_file(&entry);
     let _ = std::fs::remove_dir_all(&dir);
     for (engine, r) in [("serial", res), ("M:N", pres)] {
         let e = r.expect_err("the default faults");
@@ -6516,7 +6494,7 @@ fn a_cross_module_default_is_evaluated_per_call_in_the_definers_module() {
         panic!("program must type-check, got: {errs:?}");
     }
     let (vo, _ve, vr, _vc) = run_file(&entry);
-    let (io, _ie, ir, _ic) = run_file_p(&entry);
+    let (io, _ie, ir, _ic) = run_file(&entry);
     let _ = std::fs::remove_dir_all(&dir);
     assert!(vr.is_ok(), "serial VM faulted: {vr:?}");
     assert!(ir.is_ok(), "M:N engine faulted: {ir:?}");
@@ -6539,8 +6517,8 @@ fn entry_is_always_linked_stub_runs_clean_three_engine() {
     let entry = manifest.join("std").join("prelude.chz");
     let cfg = crate::native::HostConfig::default;
     let (vo, _ve, vr, _vc) = run_file_with(&entry, cfg());
-    let (po, _pe, pr, _pc) = run_file_parallel(&entry, cfg());
-    let (io, _ie, ir, _ic) = run_file_p(&entry);
+    let (po, _pe, pr, _pc) = run_file_with(&entry, cfg());
+    let (io, _ie, ir, _ic) = run_file(&entry);
     assert!(vr.is_ok(), "cooperative VM faulted on prelude.chz: {vr:?}");
     assert!(pr.is_ok(), "--parallel faulted on prelude.chz: {pr:?}");
     assert!(ir.is_ok(), "interp faulted on prelude.chz: {ir:?}");
@@ -6564,7 +6542,7 @@ fn concurrency_whole_module_runs_both_engines() {
         )
         .unwrap();
     let (vo, _ve, vr, _vc) = run_file(&entry);
-    let (io, _ie, ir, _ic) = run_file_p(&entry);
+    let (io, _ie, ir, _ic) = run_file(&entry);
     let _ = std::fs::remove_dir_all(&dir);
     assert!(vr.is_ok(), "VM faulted: {vr:?}");
     assert!(ir.is_ok(), "interp faulted: {ir:?}");
@@ -6588,7 +6566,7 @@ fn concurrency_from_import_runs_both_engines() {
     )
     .unwrap();
     let (vo, _ve, vr, _vc) = run_file(&entry);
-    let (io, _ie, ir, _ic) = run_file_p(&entry);
+    let (io, _ie, ir, _ic) = run_file(&entry);
     let _ = std::fs::remove_dir_all(&dir);
     assert!(vr.is_ok(), "VM faulted (bind_import skip missing?): {vr:?}");
     assert!(
@@ -6618,7 +6596,7 @@ fn net_from_import_runs_both_engines() {
         let entry = dir.join("main.chz");
         std::fs::write(&entry, src).unwrap();
         let (vo, _ve, vr, _vc) = run_file(&entry);
-        let (io, _ie, ir, _ic) = run_file_p(&entry);
+        let (io, _ie, ir, _ic) = run_file(&entry);
         let _ = std::fs::remove_dir_all(&dir);
         assert!(vr.is_ok(), "VM faulted (bind_import skip missing?): {vr:?}");
         assert!(
@@ -6645,7 +6623,7 @@ fn timer_whole_module_runs_both_engines() {
     )
     .unwrap();
     let (vo, _ve, vr, _vc) = run_file(&entry);
-    let (io, _ie, ir, _ic) = run_file_p(&entry);
+    let (io, _ie, ir, _ic) = run_file(&entry);
     let _ = std::fs::remove_dir_all(&dir);
     assert!(vr.is_ok(), "VM faulted: {vr:?}");
     assert!(ir.is_ok(), "interp faulted: {ir:?}");
@@ -6668,7 +6646,7 @@ fn timer_from_import_runs_both_engines() {
     )
     .unwrap();
     let (vo, _ve, vr, _vc) = run_file(&entry);
-    let (io, _ie, ir, _ic) = run_file_p(&entry);
+    let (io, _ie, ir, _ic) = run_file(&entry);
     let _ = std::fs::remove_dir_all(&dir);
     assert!(vr.is_ok(), "VM faulted (bind_import skip missing?): {vr:?}");
     assert!(
@@ -6704,9 +6682,8 @@ fn extern_qualified_return_struct_runs() {
     )
     .unwrap();
     let (vm_out, _e, vm_res, _) = run_file(&entry);
-    let (io, _ie, ir, _) = run_file_p(&entry);
-    let (par_out, _pe, par_res, _) =
-        run_file_parallel(&entry, crate::native::HostConfig::default());
+    let (io, _ie, ir, _) = run_file(&entry);
+    let (par_out, _pe, par_res, _) = run_file_with(&entry, crate::native::HostConfig::default());
     let _ = std::fs::remove_dir_all(&dir);
     assert!(
         vm_res.is_ok(),
@@ -6754,9 +6731,8 @@ fn extern_qualified_width_alias_param_runs() {
         )
         .unwrap();
     let (vm_out, _e, vm_res, _) = run_file(&entry);
-    let (io, _ie, ir, _) = run_file_p(&entry);
-    let (par_out, _pe, par_res, _) =
-        run_file_parallel(&entry, crate::native::HostConfig::default());
+    let (io, _ie, ir, _) = run_file(&entry);
+    let (par_out, _pe, par_res, _) = run_file_with(&entry, crate::native::HostConfig::default());
     let _ = std::fs::remove_dir_all(&dir);
     assert!(
         vm_res.is_ok(),
@@ -6803,9 +6779,8 @@ fn extern_qualified_width_alias_param_collision_runs() {
     )
     .unwrap();
     let (vm_out, _e, vm_res, _) = run_file(&entry);
-    let (io, _ie, ir, _) = run_file_p(&entry);
-    let (par_out, _pe, par_res, _) =
-        run_file_parallel(&entry, crate::native::HostConfig::default());
+    let (io, _ie, ir, _) = run_file(&entry);
+    let (par_out, _pe, par_res, _) = run_file_with(&entry, crate::native::HostConfig::default());
     let _ = std::fs::remove_dir_all(&dir);
     assert!(
         vm_res.is_ok(),
@@ -6858,9 +6833,8 @@ fn extern_qualified_width_alias_chain_depth2_collision_runs() {
         )
         .unwrap();
     let (vm_out, _e, vm_res, _) = run_file(&entry);
-    let (io, _ie, ir, _) = run_file_p(&entry);
-    let (par_out, _pe, par_res, _) =
-        run_file_parallel(&entry, crate::native::HostConfig::default());
+    let (io, _ie, ir, _) = run_file(&entry);
+    let (par_out, _pe, par_res, _) = run_file_with(&entry, crate::native::HostConfig::default());
     let _ = std::fs::remove_dir_all(&dir);
     assert!(
         vm_res.is_ok(),
@@ -6911,9 +6885,8 @@ fn extern_qualified_width_alias_chain_depth3_collision_runs() {
         )
         .unwrap();
     let (vm_out, _e, vm_res, _) = run_file(&entry);
-    let (io, _ie, ir, _) = run_file_p(&entry);
-    let (par_out, _pe, par_res, _) =
-        run_file_parallel(&entry, crate::native::HostConfig::default());
+    let (io, _ie, ir, _) = run_file(&entry);
+    let (par_out, _pe, par_res, _) = run_file_with(&entry, crate::native::HostConfig::default());
     let _ = std::fs::remove_dir_all(&dir);
     assert!(
         vm_res.is_ok(),
@@ -7033,9 +7006,8 @@ fn extern_qualified_width_alias_named_import_hop_collision_runs() {
     )
     .unwrap();
     let (vm_out, _e, vm_res, _) = run_file(&entry);
-    let (io, _ie, ir, _) = run_file_p(&entry);
-    let (par_out, _pe, par_res, _) =
-        run_file_parallel(&entry, crate::native::HostConfig::default());
+    let (io, _ie, ir, _) = run_file(&entry);
+    let (par_out, _pe, par_res, _) = run_file_with(&entry, crate::native::HostConfig::default());
     let _ = std::fs::remove_dir_all(&dir);
     assert!(
         vm_res.is_ok(),
@@ -7090,9 +7062,8 @@ fn extern_qualified_return_struct_aliased_field_runs() {
         )
         .unwrap();
     let (vm_out, _e, vm_res, _) = run_file(&entry);
-    let (io, _ie, ir, _) = run_file_p(&entry);
-    let (par_out, _pe, par_res, _) =
-        run_file_parallel(&entry, crate::native::HostConfig::default());
+    let (io, _ie, ir, _) = run_file(&entry);
+    let (par_out, _pe, par_res, _) = run_file_with(&entry, crate::native::HostConfig::default());
     let _ = std::fs::remove_dir_all(&dir);
     assert!(
         vm_res.is_ok(),
@@ -7166,9 +7137,8 @@ fn extern_qualified_width_alias_mixed_chain_collision_runs() {
         )
         .unwrap();
     let (vm_out, _e, vm_res, _) = run_file(&entry);
-    let (io, _ie, ir, _) = run_file_p(&entry);
-    let (par_out, _pe, par_res, _) =
-        run_file_parallel(&entry, crate::native::HostConfig::default());
+    let (io, _ie, ir, _) = run_file(&entry);
+    let (par_out, _pe, par_res, _) = run_file_with(&entry, crate::native::HostConfig::default());
     let _ = std::fs::remove_dir_all(&dir);
     assert!(
         vm_res.is_ok(),
@@ -7226,7 +7196,7 @@ main()
 ";
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
-        let _ = tx.send(run_capture_parallel(src));
+        let _ = tx.send(run_capture(src));
     });
     match rx.recv_timeout(std::time::Duration::from_secs(30)) {
         Ok(r) => assert_eq!(r.expect("hog/short nursery completed"), "50\n"),
@@ -7260,7 +7230,7 @@ main()
 ";
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
-        let _ = tx.send(run_capture_parallel(src));
+        let _ = tx.send(run_capture(src));
     });
     match rx.recv_timeout(std::time::Duration::from_secs(60)) {
         Ok(r) => assert_eq!(r.expect("10k-fiber nursery completed"), "10000\n"),
@@ -7308,7 +7278,7 @@ fn main():
 main()
 ";
     // sum_{i=0}^{99999} (2*i + 1) = 100000 * 100000.
-    assert_eq!(run_capture_parallel(src).unwrap(), "10000000000\n");
+    assert_eq!(run_capture(src).unwrap(), "10000000000\n");
 }
 
 /// D2b park-gap guard (the lost-wakeup fix): if a message is already queued when `park` runs (a
@@ -7928,7 +7898,7 @@ fn main():
     print(acc.get())
 main()
 ";
-    assert_eq!(run_capture_parallel(src).unwrap(), "2016\n"); // sum 0..64
+    assert_eq!(run_capture(src).unwrap(), "2016\n"); // sum 0..64
 }
 
 /// D2b: 1000 producer fibers + 1 consumer recv-looping 1000 times, multiplexed over the
@@ -7954,7 +7924,7 @@ fn main():
     print(acc.get())
 main()
 ";
-    assert_eq!(run_capture_parallel(src).unwrap(), "499500\n"); // sum 0..1000
+    assert_eq!(run_capture(src).unwrap(), "499500\n"); // sum 0..1000
 }
 
 /// D2a: a cooperative fiber carries NO heap (`heap: None`) — every cooperative fiber aliases the
@@ -8628,7 +8598,7 @@ fn superinstruction_overflow_via_inc_and_mul() {
 #[test]
 fn superinstructions_run_under_parallel_engine() {
     // Drives BinLocalConst / BinLocalLocal / IncLocal through the M:N engine (reduction path).
-    let out = run_capture_parallel("fn main():\n    total := 0\n    i := 0\n    while i < 1000:\n        total += i\n        i += 1\n    print(total)\nmain()").unwrap();
+    let out = run_capture("fn main():\n    total := 0\n    i := 0\n    while i < 1000:\n        total += i\n        i += 1\n    print(total)\nmain()").unwrap();
     assert_eq!(out, "499500\n");
 }
 
@@ -8909,7 +8879,7 @@ fn top_level_try_err_reports_real_line() {
 fn inline_panic_body_faults_both_engines() {
     let src = "fn boom(): panic(\"x\")\nfn main():\n    print(\"start\")\n    boom()\nmain()\n";
     let (s_out, s_res) = run_program(src);
-    let (m_out, m_res) = run_program_parallel(src);
+    let (m_out, m_res) = run_program(src);
     assert_eq!(s_out, "start\n");
     assert_eq!(m_out, "start\n");
     assert_eq!(s_res.unwrap_err().message, "x");
@@ -8917,7 +8887,7 @@ fn inline_panic_body_faults_both_engines() {
     // A `recover:` around the call catches it as `Err("x")` — recoverable, both engines.
     let rec = "fn boom(): panic(\"x\")\nfn main():\n    r := recover:\n        boom()\n        0\n    match r:\n        Ok(v): print(\"ok {v}\")\n        Err(e): print(\"caught {e.message()}\")\nmain()\n";
     assert_eq!(run_capture(rec).unwrap(), "caught x\n");
-    assert_eq!(run_capture_parallel(rec).unwrap(), "caught x\n");
+    assert_eq!(run_capture(rec).unwrap(), "caught x\n");
 }
 
 // ----- for loops -----
@@ -9191,8 +9161,8 @@ fn main():
     print(m[\"k\"])
 main()";
     let vm_out = run_capture(src).expect("vm");
-    assert_eq!(vm_out, run_capture_parallel(src).expect("interp"));
-    assert_eq!(vm_out, run_capture_parallel(src).expect("parallel"));
+    assert_eq!(vm_out, run_capture(src).expect("interp"));
+    assert_eq!(vm_out, run_capture(src).expect("parallel"));
 }
 
 #[test]
@@ -9216,8 +9186,8 @@ main()";
         vm_out,
         "true\nfalse\ntrue\nfalse\ntrue\nfalse\ntrue\nfalse\n"
     );
-    assert_eq!(vm_out, run_capture_parallel(src).expect("interp"));
-    assert_eq!(vm_out, run_capture_parallel(src).expect("parallel"));
+    assert_eq!(vm_out, run_capture(src).expect("interp"));
+    assert_eq!(vm_out, run_capture(src).expect("parallel"));
 }
 
 #[test]
@@ -9244,8 +9214,8 @@ fn main():
 main()";
     let vm_out = run_capture(src).expect("vm");
     assert_eq!(vm_out, "2\n1\n[30, 20, 10]\n9\n7\n");
-    assert_eq!(vm_out, run_capture_parallel(src).expect("interp"));
-    assert_eq!(vm_out, run_capture_parallel(src).expect("parallel"));
+    assert_eq!(vm_out, run_capture(src).expect("interp"));
+    assert_eq!(vm_out, run_capture(src).expect("parallel"));
 }
 
 #[test]
@@ -9437,7 +9407,7 @@ fn vm_or_pattern_literals() {
     let src = "fn f(n: int) -> str:\n    return match n:\n        1 | 2 | 3: \"low\"\n        _: \"high\"\nprint(f(2))\nprint(f(5))\n";
     let out = run(src);
     assert_eq!(out, "low\nhigh\n");
-    assert_eq!(out, run_capture_parallel(src).expect("interp"));
+    assert_eq!(out, run_capture(src).expect("interp"));
 }
 
 /// A 3-variant enum or-pattern is exhaustive and matches each alternative; the interp agrees.
@@ -9446,7 +9416,7 @@ fn vm_or_pattern_enum_variants() {
     let src = "enum Color:\n    Red\n    Green\n    Blue\nfn name(c: Color) -> str:\n    return match c:\n        Color.Red | Color.Green | Color.Blue: \"primary\"\nprint(name(Color.Green))\nprint(name(Color.Blue))\n";
     let out = run(src);
     assert_eq!(out, "primary\nprimary\n");
-    assert_eq!(out, run_capture_parallel(src).expect("interp"));
+    assert_eq!(out, run_capture(src).expect("interp"));
 }
 
 /// A binding or-pattern (`A(a) | B(a)`) writes `a` into the same slot regardless of alternative.
@@ -9455,7 +9425,7 @@ fn vm_or_pattern_binding() {
     let src = "enum E:\n    A(int)\n    B(int)\nfn val(e: E) -> int:\n    return match e:\n        E.A(a) | E.B(a): a\nprint(val(E.A(7)))\nprint(val(E.B(9)))\n";
     let out = run(src);
     assert_eq!(out, "7\n9\n");
-    assert_eq!(out, run_capture_parallel(src).expect("interp"));
+    assert_eq!(out, run_capture(src).expect("interp"));
 }
 
 /// A guard on an or-pattern: `p | q if cond:` falls through to the next arm when the guard fails.
@@ -9464,7 +9434,7 @@ fn vm_or_pattern_with_guard() {
     let src = "fn f(n: int) -> str:\n    return match n:\n        1 | 2 | 3 if n == 2: \"two\"\n        _: \"other\"\nprint(f(2))\nprint(f(1))\n";
     let out = run(src);
     assert_eq!(out, "two\nother\n");
-    assert_eq!(out, run_capture_parallel(src).expect("interp"));
+    assert_eq!(out, run_capture(src).expect("interp"));
 }
 
 /// A nested nullary variant (`Some(None)`) is a refutable variant match; the interp agrees.
@@ -9477,7 +9447,7 @@ fn vm_nested_nullary_variant() {
     let src = "fn f(oo: Option[Option[int]]) -> str:\n    return match oo:\n        Some(None): \"inner-none\"\n        _: \"other\"\nx: Option[Option[int]] = Some(None)\ny: Option[Option[int]] = Some(Some(5))\nprint(f(x))\nprint(f(y))\n";
     let out = run(src);
     assert_eq!(out, "inner-none\nother\n");
-    assert_eq!(out, run_capture_parallel(src).expect("interp"));
+    assert_eq!(out, run_capture(src).expect("interp"));
 }
 
 // ----- experimental generators (VM-only) -----
@@ -9517,7 +9487,7 @@ fn vm_generator_never_yields() {
 fn vm_generator_inferred_no_annotation() {
     let src = "fn count():\n    yield 1\n    yield 2\n    yield 3\nfn main():\n    for x in count():\n        print(x)\nmain()\n";
     assert_eq!(run(src), "1\n2\n3\n");
-    assert_eq!(run_capture_parallel(src).unwrap(), "1\n2\n3\n");
+    assert_eq!(run_capture(src).unwrap(), "1\n2\n3\n");
 }
 
 /// Q1: the struct-method arm of generator inference also RUNS on both engines — an un-annotated
@@ -9526,7 +9496,7 @@ fn vm_generator_inferred_no_annotation() {
 fn vm_generator_inferred_struct_method() {
     let src = "struct Box:\n    n: int\n    fn each(self):\n        i := 0\n        while i < self.n:\n            yield i\n            i = i + 1\nfn main():\n    b := Box(3)\n    for x in b.each():\n        print(x)\nmain()\n";
     assert_eq!(run(src), "0\n1\n2\n");
-    assert_eq!(run_capture_parallel(src).unwrap(), "0\n1\n2\n");
+    assert_eq!(run_capture(src).unwrap(), "0\n1\n2\n");
 }
 
 /// Q1 golden: the inference-only `examples/generators_inferred.chz` showcase (free-fn + struct-method
@@ -9536,7 +9506,7 @@ fn golden_generators_inferred_chz() {
     let src = include_str!("../../examples/generators_inferred.chz");
     let expect = "0\n1\n2\n3\n4\n2\n4\n6\n";
     assert_eq!(run(src), expect);
-    assert_eq!(run_capture_parallel(src).unwrap(), expect);
+    assert_eq!(run_capture(src).unwrap(), expect);
 }
 
 /// F3 path C: a PENDING generator passed DIRECTLY as a spawn arg now CROSSES the airlock BY VALUE
@@ -9554,7 +9524,7 @@ fn generator_passed_to_spawn_crosses_by_value() {
         "main()\n"
     );
     assert_eq!(run_capture(src).expect("serial"), "hi\n");
-    assert_eq!(run_capture_parallel(src).expect("M:N"), "hi\n");
+    assert_eq!(run_capture(src).expect("M:N"), "hi\n");
 }
 
 /// F3 path C: a generator nested inside a LIST spawn arg crosses BY VALUE too (the container recursion
@@ -9572,7 +9542,7 @@ fn generator_in_list_arg_to_spawn_crosses_by_value() {
         "main()\n"
     );
     assert_eq!(run_capture(src).expect("serial"), "hi\n");
-    assert_eq!(run_capture_parallel(src).expect("M:N"), "hi\n");
+    assert_eq!(run_capture(src).expect("M:N"), "hi\n");
 }
 
 /// F3 path C: a generator stored into `Shared(...)` now crosses BY VALUE (deep copy into the box)
@@ -9588,7 +9558,7 @@ fn generator_into_shared_crosses_by_value() {
         "main()\n"
     );
     assert_eq!(run_capture(src).expect("serial"), "stored\n");
-    assert_eq!(run_capture_parallel(src).expect("M:N"), "stored\n");
+    assert_eq!(run_capture(src).expect("M:N"), "stored\n");
 }
 
 /// F3 path C: a generator stored into `Atomic(...)` now crosses BY VALUE (deep copy into the box).
@@ -9604,7 +9574,7 @@ fn generator_into_atomic_crosses_by_value() {
         "main()\n"
     );
     assert_eq!(run_capture(src).expect("serial"), "stored\n");
-    assert_eq!(run_capture_parallel(src).expect("M:N"), "stored\n");
+    assert_eq!(run_capture(src).expect("M:N"), "stored\n");
 }
 
 /// F3 path C: a closure CAPTURING a local generator submitted to an `Executor` under `--parallel` now
@@ -9621,7 +9591,7 @@ fn generator_captured_in_executor_submit_crosses_by_value() {
         "    ex.shutdown()\n",
         "main()\n"
     );
-    assert_eq!(run_capture_parallel(src).expect("M:N"), "Some(1)\n");
+    assert_eq!(run_capture(src).expect("M:N"), "Some(1)\n");
 }
 
 /// F3 path C: an `Executor` task that RETURNS a generator under `--parallel` now crosses the return
@@ -9639,7 +9609,7 @@ fn generator_returned_from_executor_task_crosses_by_value() {
         "    ex.shutdown()\n",
         "main()\n"
     );
-    assert_eq!(run_capture_parallel(src).expect("M:N"), "");
+    assert_eq!(run_capture(src).expect("M:N"), "");
 }
 
 /// F3 path C: a generator into `Channel.send(...)` now crosses BY VALUE (deep copy into the queue)
@@ -9656,7 +9626,7 @@ fn generator_into_channel_crosses_by_value() {
         "main()\n"
     );
     assert_eq!(run_capture(src).expect("serial"), "sent\n");
-    assert_eq!(run_capture_parallel(src).expect("M:N"), "sent\n");
+    assert_eq!(run_capture(src).expect("M:N"), "sent\n");
 }
 
 /// Captured args mutate across yields; an infinite generator terminates via `break`.
@@ -9707,7 +9677,7 @@ fn golden_pass_noop_chz_matches_expected_and_interp() {
     let src = include_str!("../../examples/pass_noop.chz");
     let expected = include_str!("../../examples/pass_noop.expected");
     let vm_out = run_capture(src).expect("vm run");
-    let interp_out = run_capture_parallel(src).expect("interp run");
+    let interp_out = run_capture(src).expect("interp run");
     assert_eq!(
         vm_out, expected,
         "vm output drifted from pass_noop.expected"
@@ -9724,7 +9694,7 @@ fn golden_empty_protocol_chz_matches_expected_and_interp() {
     let src = include_str!("../../examples/empty_protocol.chz");
     let expected = include_str!("../../examples/empty_protocol.expected");
     let vm_out = run_capture(src).expect("vm run");
-    let interp_out = run_capture_parallel(src).expect("interp run");
+    let interp_out = run_capture(src).expect("interp run");
     assert_eq!(
         vm_out, expected,
         "vm output drifted from empty_protocol.expected"
@@ -9741,7 +9711,7 @@ fn golden_empty_struct_chz_matches_expected_and_interp() {
     let src = include_str!("../../examples/empty_struct.chz");
     let expected = include_str!("../../examples/empty_struct.expected");
     let vm_out = run_capture(src).expect("vm run");
-    let interp_out = run_capture_parallel(src).expect("interp run");
+    let interp_out = run_capture(src).expect("interp run");
     assert_eq!(
         vm_out, expected,
         "vm output drifted from empty_struct.expected"
@@ -9758,7 +9728,7 @@ fn golden_container_ctor_chz_matches_expected_and_interp() {
     let src = include_str!("../../examples/container_ctor.chz");
     let expected = include_str!("../../examples/container_ctor.expected");
     let vm_out = run_capture(src).expect("vm run");
-    let interp_out = run_capture_parallel(src).expect("interp run");
+    let interp_out = run_capture(src).expect("interp run");
     assert_eq!(
         vm_out, expected,
         "vm output drifted from container_ctor.expected"
@@ -9771,7 +9741,7 @@ fn golden_container_ctor_chz_matches_expected_and_interp() {
 /// aliased `c.Shared(0)`, qualified RwShared/Atomic/Executor, `time.timer(0)`, plus a type-alias
 /// and a newtype over a qualified `concurrency.Shared`. These lower to the SAME opcodes as the
 /// bare-after-import names, so output is byte-identical on interp, the cooperative VM, AND the M:N
-/// engine (`run_capture_parallel`) — the three-engine parity gate for the qualified-ctor lowering.
+/// engine (`run_capture`) — the three-engine parity gate for the qualified-ctor lowering.
 #[test]
 fn golden_native_qualified_chz_matches_expected_and_interp() {
     // Imports (`std.concurrency` / `std.time`) require the module-graph path, so drive `run_file`
@@ -9787,10 +9757,10 @@ fn golden_native_qualified_chz_matches_expected_and_interp() {
         vm_out, expected,
         "vm output drifted from native_qualified.expected"
     );
-    let (ip_out, _e2, ip_res, _) = run_file_p(&path);
+    let (ip_out, _e2, ip_res, _) = run_file(&path);
     ip_res.expect("native_qualified.chz should run on the interp");
     assert_eq!(vm_out, ip_out, "vm/interp divergence on native_qualified");
-    let (mn_out, _e3, mn_res, _) = run_file_parallel(&path, crate::native::HostConfig::default());
+    let (mn_out, _e3, mn_res, _) = run_file_with(&path, crate::native::HostConfig::default());
     mn_res.expect("native_qualified.chz should run on the M:N engine");
     assert_eq!(mn_out, expected, "M:N output drifted on native_qualified");
 }
@@ -9812,10 +9782,10 @@ fn golden_conditional_method_chz_matches_expected_and_interp() {
         vm_out, expected,
         "vm output drifted from conditional_method.expected"
     );
-    let (ip_out, _e2, ip_res, _) = run_file_p(&path);
+    let (ip_out, _e2, ip_res, _) = run_file(&path);
     ip_res.expect("conditional_method.chz should run on the interp");
     assert_eq!(vm_out, ip_out, "vm/interp divergence on conditional_method");
-    let (mn_out, _e3, mn_res, _) = run_file_parallel(&path, crate::native::HostConfig::default());
+    let (mn_out, _e3, mn_res, _) = run_file_with(&path, crate::native::HostConfig::default());
     mn_res.expect("conditional_method.chz should run on the M:N engine");
     assert_eq!(mn_out, expected, "M:N output drifted on conditional_method");
 }
@@ -9831,10 +9801,10 @@ fn golden_where_sort_sum_chz_matches_expected_and_interp() {
         vm_out, expected,
         "vm output drifted from where_sort_sum.expected"
     );
-    let (ip_out, _e2, ip_res, _) = run_file_p(&path);
+    let (ip_out, _e2, ip_res, _) = run_file(&path);
     ip_res.expect("where_sort_sum.chz should run on the interp");
     assert_eq!(vm_out, ip_out, "vm/interp divergence on where_sort_sum");
-    let (mn_out, _e3, mn_res, _) = run_file_parallel(&path, crate::native::HostConfig::default());
+    let (mn_out, _e3, mn_res, _) = run_file_with(&path, crate::native::HostConfig::default());
     mn_res.expect("where_sort_sum.chz should run on the M:N engine");
     assert_eq!(mn_out, expected, "M:N output drifted on where_sort_sum");
 }
@@ -9852,10 +9822,10 @@ fn golden_variadic_chz_matches_expected_and_interp() {
     let (vm_out, _e1, vm_res, _) = run_file(&path);
     vm_res.expect("variadic.chz should run on the VM");
     assert_eq!(vm_out, expected, "vm output drifted from variadic.expected");
-    let (ip_out, _e2, ip_res, _) = run_file_p(&path);
+    let (ip_out, _e2, ip_res, _) = run_file(&path);
     ip_res.expect("variadic.chz should run on the interp");
     assert_eq!(vm_out, ip_out, "vm/interp divergence on variadic");
-    let (mn_out, _e3, mn_res, _) = run_file_parallel(&path, crate::native::HostConfig::default());
+    let (mn_out, _e3, mn_res, _) = run_file_with(&path, crate::native::HostConfig::default());
     mn_res.expect("variadic.chz should run on the M:N engine");
     assert_eq!(mn_out, expected, "M:N output drifted on variadic");
 }
@@ -9887,10 +9857,10 @@ fn golden_std_native_4d_chz_matches_expected_and_interp() {
         vm_out, expected,
         "vm output drifted from std_native_4d.expected"
     );
-    let (ip_out, _e2, ip_res, _) = run_file_p(&path);
+    let (ip_out, _e2, ip_res, _) = run_file(&path);
     ip_res.expect("std_native_4d.chz should run on the interp");
     assert_eq!(vm_out, ip_out, "vm/interp divergence on std_native_4d");
-    let (mn_out, _e3, mn_res, _) = run_file_parallel(&path, crate::native::HostConfig::default());
+    let (mn_out, _e3, mn_res, _) = run_file_with(&path, crate::native::HostConfig::default());
     mn_res.expect("std_native_4d.chz should run on the M:N engine");
     assert_eq!(mn_out, expected, "M:N output drifted on std_native_4d");
 }
@@ -9914,10 +9884,10 @@ fn golden_std_native_4c_chz_matches_expected_and_interp() {
         vm_out, expected,
         "vm output drifted from std_native_4c.expected"
     );
-    let (ip_out, _e2, ip_res, _) = run_file_p(&path);
+    let (ip_out, _e2, ip_res, _) = run_file(&path);
     ip_res.expect("std_native_4c.chz should run on the interp");
     assert_eq!(vm_out, ip_out, "vm/interp divergence on std_native_4c");
-    let (mn_out, _e3, mn_res, _) = run_file_parallel(&path, crate::native::HostConfig::default());
+    let (mn_out, _e3, mn_res, _) = run_file_with(&path, crate::native::HostConfig::default());
     mn_res.expect("std_native_4c.chz should run on the M:N engine");
     assert_eq!(mn_out, expected, "M:N output drifted on std_native_4c");
 }
@@ -9941,10 +9911,10 @@ fn golden_native_enum_smoke_chz_matches_expected_and_interp() {
         vm_out, expected,
         "vm output drifted from native_enum_smoke.expected"
     );
-    let (ip_out, _e2, ip_res, _) = run_file_p(&path);
+    let (ip_out, _e2, ip_res, _) = run_file(&path);
     ip_res.expect("native_enum_smoke.chz should run on the interp");
     assert_eq!(vm_out, ip_out, "vm/interp divergence on native_enum_smoke");
-    let (mn_out, _e3, mn_res, _) = run_file_parallel(&path, crate::native::HostConfig::default());
+    let (mn_out, _e3, mn_res, _) = run_file_with(&path, crate::native::HostConfig::default());
     mn_res.expect("native_enum_smoke.chz should run on the M:N engine");
     assert_eq!(mn_out, expected, "M:N output drifted on native_enum_smoke");
 }
@@ -9967,10 +9937,10 @@ fn golden_qualified_static_chz_matches_expected_and_interp() {
         vm_out, expected,
         "vm output drifted from qualified_static/main.expected"
     );
-    let (ip_out, _e2, ip_res, _) = run_file_p(&path);
+    let (ip_out, _e2, ip_res, _) = run_file(&path);
     ip_res.expect("qualified_static/main.chz should run on the interp");
     assert_eq!(vm_out, ip_out, "vm/interp divergence on qualified_static");
-    let (mn_out, _e3, mn_res, _) = run_file_parallel(&path, crate::native::HostConfig::default());
+    let (mn_out, _e3, mn_res, _) = run_file_with(&path, crate::native::HostConfig::default());
     mn_res.expect("qualified_static/main.chz should run on the M:N engine");
     assert_eq!(mn_out, expected, "M:N output drifted on qualified_static");
 }
@@ -9992,7 +9962,7 @@ fn golden_ffi_qualified_chz_matches_expected_and_interp() {
         vm_out, expected,
         "vm output drifted from ffi_qualified.expected"
     );
-    let (ip_out, _e2, ip_res, _) = run_file_p(&path);
+    let (ip_out, _e2, ip_res, _) = run_file(&path);
     ip_res.expect("ffi_qualified.chz should run on the interp");
     assert_eq!(vm_out, ip_out, "vm/interp divergence on ffi_qualified");
 }
@@ -10006,7 +9976,7 @@ fn golden_inline_fn_chz_matches_expected_and_interp() {
     let src = include_str!("../../examples/inline_fn.chz");
     let expected = include_str!("../../examples/inline_fn.expected");
     let vm_out = run_capture(src).expect("vm run");
-    let interp_out = run_capture_parallel(src).expect("interp run");
+    let interp_out = run_capture(src).expect("interp run");
     assert_eq!(
         vm_out, expected,
         "vm output drifted from inline_fn.expected"
@@ -10030,10 +10000,10 @@ fn golden_keyword_value_chz_matches_expected_and_interp() {
         vm_out, expected,
         "vm output drifted from keyword_value.expected"
     );
-    let (ip_out, _e2, ip_res, _) = run_file_p(&path);
+    let (ip_out, _e2, ip_res, _) = run_file(&path);
     ip_res.expect("keyword_value.chz should run on the interp");
     assert_eq!(vm_out, ip_out, "vm/interp divergence on keyword_value");
-    let (mn_out, _e3, mn_res, _) = run_file_parallel(&path, crate::native::HostConfig::default());
+    let (mn_out, _e3, mn_res, _) = run_file_with(&path, crate::native::HostConfig::default());
     mn_res.expect("keyword_value.chz should run on the M:N engine");
     assert_eq!(mn_out, expected, "M:N output drifted on keyword_value");
 }
@@ -10051,10 +10021,10 @@ fn golden_keyword_value_xmod_matches_expected_and_interp() {
     let (vm_out, _e1, vm_res, _) = run_file(&path);
     vm_res.expect("keyword_value_xmod should run on the VM");
     assert_eq!(vm_out, expected, "vm output drifted on keyword_value_xmod");
-    let (ip_out, _e2, ip_res, _) = run_file_p(&path);
+    let (ip_out, _e2, ip_res, _) = run_file(&path);
     ip_res.expect("keyword_value_xmod should run on the interp");
     assert_eq!(vm_out, ip_out, "vm/interp divergence on keyword_value_xmod");
-    let (mn_out, _e3, mn_res, _) = run_file_parallel(&path, crate::native::HostConfig::default());
+    let (mn_out, _e3, mn_res, _) = run_file_with(&path, crate::native::HostConfig::default());
     mn_res.expect("keyword_value_xmod should run on the M:N engine");
     assert_eq!(mn_out, expected, "M:N output drifted on keyword_value_xmod");
 }
@@ -10075,7 +10045,7 @@ fn golden_default_xmod_matches_expected_on_all_engines() {
     let (vm_out, _e1, vm_res, _) = run_file(&path);
     vm_res.expect("default_xmod should run on the serial VM");
     assert_eq!(vm_out, expected, "serial VM output drifted on default_xmod");
-    let (mn_out, _e2, mn_res, _) = run_file_p(&path);
+    let (mn_out, _e2, mn_res, _) = run_file(&path);
     mn_res.expect("default_xmod should run on the M:N engine");
     assert_eq!(vm_out, mn_out, "serial vs M:N divergence on default_xmod");
 }
@@ -10099,7 +10069,7 @@ fn golden_default_protocol_matches_expected_on_all_engines() {
         vm_out, expected,
         "serial VM output drifted on default_protocol"
     );
-    let (mn_out, _e2, mn_res, _) = run_file_p(&path);
+    let (mn_out, _e2, mn_res, _) = run_file(&path);
     mn_res.expect("default_protocol should run on the M:N engine");
     assert_eq!(
         vm_out, mn_out,
@@ -10115,7 +10085,7 @@ fn golden_expr_else_if_chz_matches_expected_and_interp() {
     let src = include_str!("../../examples/expr_else_if.chz");
     let expected = include_str!("../../examples/expr_else_if.expected");
     let vm_out = run_capture(src).expect("vm run");
-    let interp_out = run_capture_parallel(src).expect("interp run");
+    let interp_out = run_capture(src).expect("interp run");
     assert_eq!(
         vm_out, expected,
         "vm output drifted from expr_else_if.expected"
@@ -10127,7 +10097,7 @@ fn golden_expr_else_if_chz_matches_expected_and_interp() {
 fn golden_hello_chz_matches_interpreter() {
     let src = include_str!("../../examples/hello.chz");
     let vm_out = run_capture(src).expect("vm run");
-    let interp_out = run_capture_parallel(src).expect("interp run");
+    let interp_out = run_capture(src).expect("interp run");
     assert_eq!(vm_out, interp_out);
 }
 
@@ -10140,7 +10110,7 @@ fn golden_newtype_chz_matches_expected_and_interp() {
     let src = include_str!("../../examples/newtype.chz");
     let expected = include_str!("../../examples/newtype.expected");
     let vm_out = run_capture(src).expect("vm run");
-    let interp_out = run_capture_parallel(src).expect("interp run");
+    let interp_out = run_capture(src).expect("interp run");
     assert_eq!(vm_out, expected, "vm output drifted from newtype.expected");
     assert_eq!(vm_out, interp_out, "vm/interp divergence on newtype");
 }
@@ -10154,7 +10124,7 @@ fn golden_builtin_named_method_chz_matches_expected_and_interp() {
     let src = include_str!("../../examples/builtin_named_method.chz");
     let expected = include_str!("../../examples/builtin_named_method.expected");
     let vm_out = run_capture(src).expect("vm run");
-    let interp_out = run_capture_parallel(src).expect("interp run");
+    let interp_out = run_capture(src).expect("interp run");
     assert_eq!(
         vm_out, expected,
         "vm output drifted from builtin_named_method.expected"
@@ -10173,8 +10143,8 @@ fn golden_arithmetic_protocol_chz_matches_expected_and_interp() {
     let src = include_str!("../../examples/arithmetic_protocol.chz");
     let expected = include_str!("../../examples/arithmetic_protocol.expected");
     let vm_out = run_capture(src).expect("vm run");
-    let interp_out = run_capture_parallel(src).expect("interp run");
-    let par_out = run_capture_parallel(src).expect("parallel run");
+    let interp_out = run_capture(src).expect("interp run");
+    let par_out = run_capture(src).expect("parallel run");
     assert_eq!(
         vm_out, expected,
         "vm output drifted from arithmetic_protocol.expected"
@@ -10198,8 +10168,8 @@ fn golden_generic_operator_overload_chz_matches_expected_and_interp() {
     let src = include_str!("../../examples/generic_operator_overload.chz");
     let expected = include_str!("../../examples/generic_operator_overload.expected");
     let vm_out = run_capture(src).expect("vm run");
-    let interp_out = run_capture_parallel(src).expect("interp run");
-    let par_out = run_capture_parallel(src).expect("parallel run");
+    let interp_out = run_capture(src).expect("interp run");
+    let par_out = run_capture(src).expect("parallel run");
     assert_eq!(
         vm_out, expected,
         "vm output drifted from generic_operator_overload.expected"
@@ -10221,9 +10191,9 @@ fn struct_div_mod_neg_runs() {
     let src = "struct V:\n    n: int\n    fn div(self, o: V) -> V:\n        return V(self.n / o.n)\n    fn mod(self, o: V) -> V:\n        return V(self.n % o.n)\n    fn neg(self) -> V:\n        return V(-self.n)\nfn main():\n    a := V(7)\n    b := V(2)\n    print((a / b).n)\n    print((a % b).n)\n    print((-a).n)\nmain()\n";
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, "3\n1\n-7\n");
-    let interp_out = run_capture_parallel(src).expect("interp run");
+    let interp_out = run_capture(src).expect("interp run");
     assert_eq!(vm_out, interp_out, "vm/interp divergence on div/mod/neg");
-    let par_out = run_capture_parallel(src).expect("parallel run");
+    let par_out = run_capture(src).expect("parallel run");
     assert_eq!(vm_out, par_out, "vm/parallel divergence on div/mod/neg");
 }
 
@@ -10238,8 +10208,8 @@ fn golden_static_methods_chz_matches_expected_and_interp() {
     let src = include_str!("../../examples/static_methods.chz");
     let expected = include_str!("../../examples/static_methods.expected");
     let vm_out = run_capture(src).expect("vm run");
-    let interp_out = run_capture_parallel(src).expect("interp run");
-    let par_out = run_capture_parallel(src).expect("parallel run");
+    let interp_out = run_capture(src).expect("interp run");
+    let par_out = run_capture(src).expect("parallel run");
     assert_eq!(
         vm_out, expected,
         "vm output drifted from static_methods.expected"
@@ -10263,7 +10233,7 @@ fn golden_static_witness_chz_matches_expected_and_parallel() {
     let src = include_str!("../../examples/static_witness.chz");
     let expected = include_str!("../../examples/static_witness.expected");
     let vm_out = run_capture(src).expect("vm run");
-    let par_out = run_capture_parallel(src).expect("parallel run");
+    let par_out = run_capture(src).expect("parallel run");
     assert_eq!(
         vm_out, expected,
         "vm output drifted from static_witness.expected"
@@ -10285,7 +10255,7 @@ fn golden_newtype_generic_chz_matches_expected_and_interp() {
     let src = include_str!("../../examples/newtype_generic.chz");
     let expected = include_str!("../../examples/newtype_generic.expected");
     let vm_out = run_capture(src).expect("vm run");
-    let interp_out = run_capture_parallel(src).expect("interp run");
+    let interp_out = run_capture(src).expect("interp run");
     assert_eq!(
         vm_out, expected,
         "vm output drifted from newtype_generic.expected"
@@ -10297,7 +10267,7 @@ fn golden_newtype_generic_chz_matches_expected_and_interp() {
     // 3-engine bar (M21/M19): the M:N --parallel engine must agree too.
     assert_eq!(
         vm_out,
-        run_capture_parallel(src).expect("parallel run"),
+        run_capture(src).expect("parallel run"),
         "parallel drifted from vm on newtype_generic"
     );
 }
@@ -10322,7 +10292,7 @@ fn golden_raw_string_chz_matches_expected_and_interp() {
     let src = include_str!("../../examples/raw_string.chz");
     let expected = include_str!("../../examples/raw_string.expected");
     let vm_out = run_capture(src).expect("vm run");
-    let interp_out = run_capture_parallel(src).expect("interp run");
+    let interp_out = run_capture(src).expect("interp run");
     assert_eq!(
         vm_out, expected,
         "vm output drifted from raw_string.expected"
@@ -10351,7 +10321,7 @@ fn golden_struct_layout_chz_matches_expected_and_interp() {
     let src = include_str!("../../examples/struct_layout.chz");
     let expected = include_str!("../../examples/struct_layout.expected");
     let vm_out = run_capture(src).expect("vm run");
-    let interp_out = run_capture_parallel(src).expect("interp run");
+    let interp_out = run_capture(src).expect("interp run");
     assert_eq!(
         vm_out, expected,
         "vm output drifted from struct_layout.expected"
@@ -10488,7 +10458,7 @@ fn native_result_option_have_fixed_variant_ids() {
 fn user_variant_shadow_does_not_collapse_native_option_equality() {
     let src = "enum Foo:\n    Some(int)\n    Bar\nfn opt() -> int?:\n    return [5].pop()\nfn main():\n    a := opt()\n    b := Foo.Some(5)\n    print(a == b)\nmain()\n";
     let vm_out = run_capture(src).expect("vm run");
-    let interp_out = run_capture_parallel(src).expect("interp run");
+    let interp_out = run_capture(src).expect("interp run");
     assert_eq!(
         vm_out, "false\n",
         "native Option::Some must not equal user Foo::Some (distinct enums)"
@@ -10506,7 +10476,7 @@ fn user_variant_shadow_does_not_collapse_native_option_equality() {
 fn shared_variant_name_dispatches_per_enum() {
     let src = "enum Color:\n    Red\n    Blue\nenum Light:\n    Red\n    Green\nfn cname(c: Color) -> str:\n    return match c:\n        Color.Red: \"c-red\"\n        Color.Blue: \"c-blue\"\nfn lname(l: Light) -> str:\n    return match l:\n        Light.Red: \"l-red\"\n        Light.Green: \"l-green\"\nfn main():\n    print(cname(Color.Red))\n    print(lname(Light.Red))\n    print(cname(Color.Blue))\nmain()\n";
     let vm_out = run_capture(src).expect("vm run");
-    let interp_out = run_capture_parallel(src).expect("interp run");
+    let interp_out = run_capture(src).expect("interp run");
     assert_eq!(vm_out, "c-red\nl-red\nc-blue\n");
     assert_eq!(
         vm_out, interp_out,
@@ -10522,7 +10492,7 @@ fn shared_variant_name_dispatches_per_enum() {
 fn try_operator_works_on_native_option_under_variant_shadow() {
     let src = "enum Foo:\n    Some(int)\n    Bar\nfn first(xs: List[int]) -> int?:\n    v := xs.pop()?\n    return Some(v)\nfn main():\n    print(\"first\", first([10, 20]))\nmain()\n";
     let vm_out = run_capture(src).expect("vm run");
-    let interp_out = run_capture_parallel(src).expect("interp run");
+    let interp_out = run_capture(src).expect("interp run");
     assert_eq!(
         vm_out, "first Some(20)\n",
         "? must unwrap a genuine native Option even under Some shadowing"
@@ -10572,7 +10542,7 @@ fn golden_enum_layout_chz_matches_expected_and_interp() {
     let src = include_str!("../../examples/enum_layout.chz");
     let expected = include_str!("../../examples/enum_layout.expected");
     let vm_out = run_capture(src).expect("vm run");
-    let interp_out = run_capture_parallel(src).expect("interp run");
+    let interp_out = run_capture(src).expect("interp run");
     assert_eq!(
         vm_out, expected,
         "vm output drifted from enum_layout.expected"
@@ -10583,7 +10553,7 @@ fn golden_enum_layout_chz_matches_expected_and_interp() {
     );
     assert_eq!(
         vm_out,
-        run_capture_parallel(src).expect("parallel run"),
+        run_capture(src).expect("parallel run"),
         "parallel engine diverged on enum_layout (wire/snap variant-id rebuild)"
     );
 }
@@ -10617,12 +10587,12 @@ fn golden_enum_methods_chz_matches_expected_and_interp() {
     );
     assert_eq!(
         vm_out,
-        run_capture_parallel(src).expect("interp run"),
+        run_capture(src).expect("interp run"),
         "vm/interp divergence on enum_methods (enum methods must be behavior-preserving)"
     );
     assert_eq!(
         vm_out,
-        run_capture_parallel(src).expect("parallel run"),
+        run_capture(src).expect("parallel run"),
         "parallel engine diverged on enum_methods"
     );
 }
@@ -10636,7 +10606,7 @@ fn golden_literals_chz_matches_expected_and_interp() {
     let expected = include_str!("../../examples/literals.expected");
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, expected);
-    assert_eq!(vm_out, run_capture_parallel(src).expect("interp run"));
+    assert_eq!(vm_out, run_capture(src).expect("interp run"));
 }
 
 /// Large-integral float golden: `examples/float_large_integral.chz`. Floats print with CPython
@@ -10650,7 +10620,7 @@ fn golden_float_large_integral_matches_expected_and_interp() {
     let expected = include_str!("../../examples/float_large_integral.expected");
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, expected);
-    assert_eq!(vm_out, run_capture_parallel(src).expect("interp run"));
+    assert_eq!(vm_out, run_capture(src).expect("interp run"));
 }
 
 /// bytes golden: `examples/bytes.chz` (the full operation table — `b"..."` literal with `\xHH`
@@ -10663,7 +10633,7 @@ fn golden_bytes_chz_matches_expected_and_interp() {
     let expected = include_str!("../../examples/bytes.expected");
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, expected);
-    assert_eq!(vm_out, run_capture_parallel(src).expect("interp run"));
+    assert_eq!(vm_out, run_capture(src).expect("interp run"));
 }
 
 /// conversions golden: `examples/conversions.chz` (str.encode()/bytes.decode()/bytearray.decode()
@@ -10677,7 +10647,7 @@ fn golden_conversions_chz_matches_expected_and_interp() {
     let expected = include_str!("../../examples/conversions.expected");
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, expected);
-    assert_eq!(vm_out, run_capture_parallel(src).expect("interp run"));
+    assert_eq!(vm_out, run_capture(src).expect("interp run"));
 }
 
 /// encode/decode UTF-8 round-trip (multi-byte char): `str.encode()` then `bytes.decode()` returns
@@ -10687,7 +10657,7 @@ fn encode_decode_roundtrip_multibyte() {
     let src = "fn main():\n    s := \"héllo\"\n    print(s.encode().decode())\n    print(s.encode().decode() == s)\nmain()\n";
     let out = run(src);
     assert_eq!(out, "héllo\ntrue\n");
-    assert_eq!(out, run_capture_parallel(src).expect("interp run"));
+    assert_eq!(out, run_capture(src).expect("interp run"));
 }
 
 /// `bytearray.decode()` mirrors `bytes.decode()` exactly (decode the current buffer).
@@ -10696,7 +10666,7 @@ fn bytearray_decode_matches_bytes() {
     let src = "fn main():\n    print(bytearray([104, 105]).decode())\n    print(b\"hi\".decode())\nmain()\n";
     let out = run(src);
     assert_eq!(out, "hi\nhi\n");
-    assert_eq!(out, run_capture_parallel(src).expect("interp run"));
+    assert_eq!(out, run_capture(src).expect("interp run"));
 }
 
 /// Invalid UTF-8 `decode()` is a RECOVERABLE fault (catchable by `recover:`), not a panic — and the
@@ -10706,11 +10676,11 @@ fn invalid_utf8_decode_recoverable() {
     let src = "fn main():\n    r := recover:\n        b\"\\xff\\xfe\".decode()\n    match r:\n        Ok(v): print(v)\n        Err(e): print(\"caught\")\nmain()\n";
     let out = run(src);
     assert_eq!(out, "caught\n");
-    assert_eq!(out, run_capture_parallel(src).expect("interp run"));
+    assert_eq!(out, run_capture(src).expect("interp run"));
     // Uncaught, the same fault propagates as a recoverable RuntimeError with the same message.
     let bare = "fn main():\n    print(b\"\\xff\".decode())\nmain()\n";
     let (_, vm_res) = run_program(bare);
-    let (_, it_res) = run_program_parallel(bare);
+    let (_, it_res) = run_program(bare);
     assert_eq!(vm_res.unwrap_err().message, "invalid UTF-8 in decode()");
     assert_eq!(it_res.unwrap_err().message, "invalid UTF-8 in decode()");
 }
@@ -10722,7 +10692,7 @@ fn constructors_over_user_iterator_and_dupkey() {
     let src = "struct C:\n    n: int\n    limit: int\n    fn next(self) -> Option[int]:\n        if self.n >= self.limit:\n            return None\n        v := self.n\n        self.n = self.n + 1\n        return Some(v)\nfn main():\n    print(List(C(0, 4)).sum())\n    print(Set(C(0, 4)).len())\n    m := Map([(1, \"a\"), (1, \"b\")])\n    print(m.len())\n    print(m[1])\nmain()\n";
     let out = run(src);
     assert_eq!(out, "6\n4\n1\nb\n");
-    assert_eq!(out, run_capture_parallel(src).expect("interp run"));
+    assert_eq!(out, run_capture(src).expect("interp run"));
 }
 
 /// bytearray golden: `examples/bytearray.chz` (the full mutable-buffer table — all 4 constructor
@@ -10736,7 +10706,7 @@ fn golden_bytearray_chz_matches_expected_and_interp() {
     let expected = include_str!("../../examples/bytearray.expected");
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, expected);
-    assert_eq!(vm_out, run_capture_parallel(src).expect("interp run"));
+    assert_eq!(vm_out, run_capture(src).expect("interp run"));
 }
 
 /// Qualified enum-variant access golden: `examples/enum_qualified.chz` (the dotted `Enum.Variant`
@@ -10749,7 +10719,7 @@ fn golden_enum_qualified_chz_matches_expected_and_interp() {
     let expected = include_str!("../../examples/enum_qualified.expected");
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, expected);
-    assert_eq!(vm_out, run_capture_parallel(src).expect("interp run"));
+    assert_eq!(vm_out, run_capture(src).expect("interp run"));
 }
 
 /// Parity edge: a top-level `fn` named like an enum must NOT shadow qualified-variant access
@@ -10761,7 +10731,7 @@ fn qualified_variant_not_shadowed_by_function_parity() {
     let src =
         "enum Color:\n    Red\n    Green\nfn Color() -> int:\n    return 5\nprint(Color.Red)\n";
     let vm_out = run_capture(src).expect("vm run");
-    let interp_out = run_capture_parallel(src).expect("interp run");
+    let interp_out = run_capture(src).expect("interp run");
     assert_eq!(
         vm_out, interp_out,
         "engines diverged on fn-vs-qualified-variant"
@@ -10780,7 +10750,7 @@ fn golden_poly_method_chz_matches_expected_and_interp() {
     let expected = include_str!("../../examples/poly_method.expected");
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, expected);
-    assert_eq!(vm_out, run_capture_parallel(src).expect("interp run"));
+    assert_eq!(vm_out, run_capture(src).expect("interp run"));
 }
 
 /// or-pattern golden: `examples/match_or.chz` (or-patterns with + without bindings, a 3-variant
@@ -10793,8 +10763,8 @@ fn golden_match_or_chz_matches_expected_and_interp() {
     let expected = include_str!("../../examples/match_or.expected");
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, expected);
-    assert_eq!(vm_out, run_capture_parallel(src).expect("interp run"));
-    assert_eq!(vm_out, run_capture_parallel(src).expect("parallel run"));
+    assert_eq!(vm_out, run_capture(src).expect("interp run"));
+    assert_eq!(vm_out, run_capture(src).expect("parallel run"));
 }
 
 /// QoL golden: `examples/membership.chz` (the `in` operator across list/set/map-key/substring,
@@ -10806,8 +10776,8 @@ fn golden_membership_chz_matches_expected_and_interp() {
     let expected = include_str!("../../examples/membership.expected");
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, expected);
-    assert_eq!(vm_out, run_capture_parallel(src).expect("interp run"));
-    assert_eq!(vm_out, run_capture_parallel(src).expect("parallel run"));
+    assert_eq!(vm_out, run_capture(src).expect("interp run"));
+    assert_eq!(vm_out, run_capture(src).expect("parallel run"));
 }
 
 /// QoL golden: `examples/compound_assign.chz` (the 8 compound-assign ops across var/index/field/
@@ -10819,8 +10789,8 @@ fn golden_compound_assign_chz_matches_expected_and_interp() {
     let expected = include_str!("../../examples/compound_assign.expected");
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, expected);
-    assert_eq!(vm_out, run_capture_parallel(src).expect("interp run"));
-    assert_eq!(vm_out, run_capture_parallel(src).expect("parallel run"));
+    assert_eq!(vm_out, run_capture(src).expect("interp run"));
+    assert_eq!(vm_out, run_capture(src).expect("parallel run"));
 }
 
 /// Concurrency demo golden: `examples/demo_spawn.chz` (`spawn` in a `parallel:` nursery, results
@@ -10832,8 +10802,8 @@ fn golden_demo_spawn_chz_matches_expected_and_interp() {
     let expected = include_str!("../../examples/demo_spawn.expected");
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, expected);
-    assert_eq!(vm_out, run_capture_parallel(src).expect("interp run"));
-    assert_eq!(vm_out, run_capture_parallel(src).expect("parallel run"));
+    assert_eq!(vm_out, run_capture(src).expect("interp run"));
+    assert_eq!(vm_out, run_capture(src).expect("parallel run"));
 }
 
 /// Concurrency demo golden: `examples/demo_executor.chz` (the `Executor` twin of `demo_spawn` —
@@ -10845,8 +10815,8 @@ fn golden_demo_executor_chz_matches_expected_and_interp() {
     let expected = include_str!("../../examples/demo_executor.expected");
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, expected);
-    assert_eq!(vm_out, run_capture_parallel(src).expect("interp run"));
-    assert_eq!(vm_out, run_capture_parallel(src).expect("parallel run"));
+    assert_eq!(vm_out, run_capture(src).expect("interp run"));
+    assert_eq!(vm_out, run_capture(src).expect("parallel run"));
 }
 
 /// QoL golden: `examples/multiline_str.chz` (triple-quoted strings — unescaped quotes, `\n`,
@@ -10858,8 +10828,8 @@ fn golden_multiline_str_chz_matches_expected_and_interp() {
     let expected = include_str!("../../examples/multiline_str.expected");
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, expected);
-    assert_eq!(vm_out, run_capture_parallel(src).expect("interp run"));
-    assert_eq!(vm_out, run_capture_parallel(src).expect("parallel run"));
+    assert_eq!(vm_out, run_capture(src).expect("interp run"));
+    assert_eq!(vm_out, run_capture(src).expect("parallel run"));
 }
 
 /// QoL golden: `examples/tuple_swap.chz` (multi-target assignment — vars, list elements, struct
@@ -10872,8 +10842,8 @@ fn golden_tuple_swap_chz_matches_expected_and_interp() {
     let expected = include_str!("../../examples/tuple_swap.expected");
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, expected);
-    assert_eq!(vm_out, run_capture_parallel(src).expect("interp run"));
-    assert_eq!(vm_out, run_capture_parallel(src).expect("parallel run"));
+    assert_eq!(vm_out, run_capture(src).expect("interp run"));
+    assert_eq!(vm_out, run_capture(src).expect("parallel run"));
 }
 
 /// M8-M4 golden: `examples/set.chz` (the set type — literals, membership, algebra, iteration)
@@ -10884,7 +10854,7 @@ fn golden_set_chz_matches_expected_and_interp() {
     let expected = include_str!("../../examples/set.expected");
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, expected);
-    assert_eq!(vm_out, run_capture_parallel(src).expect("interp run"));
+    assert_eq!(vm_out, run_capture(src).expect("interp run"));
 }
 
 /// `timer(ms)` golden: a one-shot timeout channel delivers `true`. Byte-identical on the
@@ -10899,8 +10869,8 @@ fn golden_wait_select_chz_matches_expected_and_interp() {
     let expected = include_str!("../../examples/wait_select.expected");
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, expected);
-    assert_eq!(vm_out, run_capture_parallel(src).expect("interp run"));
-    assert_eq!(run_capture_parallel(src).expect("parallel"), expected);
+    assert_eq!(vm_out, run_capture(src).expect("interp run"));
+    assert_eq!(run_capture(src).expect("parallel"), expected);
 }
 
 /// delivers the same value via the background timer `send` (asserted separately).
@@ -10910,8 +10880,8 @@ fn golden_timer_chz_matches_expected_and_interp() {
     let expected = include_str!("../../examples/timer.expected");
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, expected);
-    assert_eq!(vm_out, run_capture_parallel(src).expect("interp run"));
-    assert_eq!(run_capture_parallel(src).expect("parallel"), expected);
+    assert_eq!(vm_out, run_capture(src).expect("interp run"));
+    assert_eq!(run_capture(src).expect("parallel"), expected);
 }
 
 /// Phase 4e — the selective `import timer from std.time` form still licenses the bare `timer(ms)`
@@ -10922,8 +10892,8 @@ fn golden_timer_selective_import_three_engine() {
     let src = "import timer from std.time\nfn main():\n    print(timer(20).recv())\nmain()\n";
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, "true\n");
-    assert_eq!(vm_out, run_capture_parallel(src).expect("interp run"));
-    assert_eq!(run_capture_parallel(src).expect("parallel"), "true\n");
+    assert_eq!(vm_out, run_capture(src).expect("interp run"));
+    assert_eq!(run_capture(src).expect("parallel"), "true\n");
 }
 
 /// `timer(ms)` under `--parallel`: a spawned fiber recv-blocks on the timeout channel, PARKS, and
@@ -10934,7 +10904,7 @@ fn golden_timer_selective_import_three_engine() {
 fn parallel_timer_wakes_blocked_recv() {
     let src = "fn waiter(t: Channel[bool]):\n    print(t.recv())\n\
                    fn main():\n    parallel:\n        spawn waiter(timer(20))\nmain()\n";
-    assert_eq!(run_capture_parallel(src).expect("parallel"), "true\n");
+    assert_eq!(run_capture(src).expect("parallel"), "true\n");
 }
 
 /// `Atomic[T]` golden: single-thread load/store/add/sub/exchange/cas sequence, byte-identical on
@@ -10945,7 +10915,7 @@ fn golden_atomic_chz_matches_expected_and_interp() {
     let expected = include_str!("../../examples/atomic.expected");
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, expected);
-    assert_eq!(vm_out, run_capture_parallel(src).expect("interp run"));
+    assert_eq!(vm_out, run_capture(src).expect("interp run"));
 }
 
 /// Multi-line literals golden: `examples/multiline_literals.chz` (newline/indent suppression
@@ -10957,7 +10927,7 @@ fn golden_multiline_literals_chz_matches_expected_and_interp() {
     let expected = include_str!("../../examples/multiline_literals.expected");
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, expected);
-    assert_eq!(vm_out, run_capture_parallel(src).expect("interp run"));
+    assert_eq!(vm_out, run_capture(src).expect("interp run"));
 }
 
 /// Format-spec parity: every supported `{expr:spec}` case (align/fill/width/zero-pad/precision/
@@ -10978,12 +10948,12 @@ print(\"bare={5.0}|fmt={5.0:.2f}|w={5.0:>8}\")
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(
         vm_out,
-        run_capture_parallel(src).expect("interp run"),
+        run_capture(src).expect("interp run"),
         "interp parity"
     );
     assert_eq!(
         vm_out,
-        run_capture_parallel(src).expect("parallel run"),
+        run_capture(src).expect("parallel run"),
         "parallel parity"
     );
 }
@@ -11002,12 +10972,12 @@ print(\"fmt={(if b: 1 else: 2):>5}\")
     assert_eq!(vm_out, "val=10\nfmt=    1\n");
     assert_eq!(
         vm_out,
-        run_capture_parallel(src).expect("interp run"),
+        run_capture(src).expect("interp run"),
         "interp parity"
     );
     assert_eq!(
         vm_out,
-        run_capture_parallel(src).expect("parallel run"),
+        run_capture(src).expect("parallel run"),
         "parallel parity"
     );
 }
@@ -11023,7 +10993,7 @@ fn pathological_width_rejected() {
         vm_err.to_string().contains("exceeds maximum 4096"),
         "vm: {vm_err}"
     );
-    let interp_err = run_capture_parallel(src).expect_err("interp must reject");
+    let interp_err = run_capture(src).expect_err("interp must reject");
     assert!(
         interp_err.to_string().contains("exceeds maximum 4096"),
         "interp: {interp_err}"
@@ -11038,8 +11008,8 @@ fn golden_format_specs_chz_matches_expected_and_interp() {
     let expected = include_str!("../../examples/format_specs.expected");
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, expected);
-    assert_eq!(vm_out, run_capture_parallel(src).expect("interp run"));
-    assert_eq!(vm_out, run_capture_parallel(src).expect("parallel run"));
+    assert_eq!(vm_out, run_capture(src).expect("interp run"));
+    assert_eq!(vm_out, run_capture(src).expect("parallel run"));
 }
 
 /// Slicing golden: `examples/slicing.chz` (list/str slicing + the `Index`/`IndexSet`/`Slice`
@@ -11050,7 +11020,7 @@ fn golden_slicing_chz_matches_expected_and_interp() {
     let expected = include_str!("../../examples/slicing.expected");
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, expected);
-    assert_eq!(vm_out, run_capture_parallel(src).expect("interp run"));
+    assert_eq!(vm_out, run_capture(src).expect("interp run"));
 }
 
 /// `range` golden: `examples/range_step.chz` (3-arg up/down/by-N, empty / wrong-direction cases,
@@ -11062,7 +11032,7 @@ fn golden_range_step_chz_matches_expected_and_interp() {
     let expected = include_str!("../../examples/range_step.expected");
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, expected);
-    assert_eq!(vm_out, run_capture_parallel(src).expect("interp run"));
+    assert_eq!(vm_out, run_capture(src).expect("interp run"));
 }
 
 /// `print` kwargs golden: `examples/print_kwargs.chz` (default form, `end=""`, `sep=`, both, and
@@ -11074,7 +11044,7 @@ fn golden_print_kwargs_chz_matches_expected_and_interp() {
     let expected = include_str!("../../examples/print_kwargs.expected");
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, expected);
-    assert_eq!(vm_out, run_capture_parallel(src).expect("interp run"));
+    assert_eq!(vm_out, run_capture(src).expect("interp run"));
 }
 
 /// First-class universe builtin fn golden: `examples/defer_builtin_value.chz` — `defer print(...)`
@@ -11087,8 +11057,8 @@ fn golden_defer_builtin_value_chz_matches_expected_and_interp() {
     let expected = include_str!("../../examples/defer_builtin_value.expected");
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, expected);
-    assert_eq!(vm_out, run_capture_parallel(src).expect("interp run"));
-    assert_eq!(vm_out, run_capture_parallel(src).expect("mn run"));
+    assert_eq!(vm_out, run_capture(src).expect("interp run"));
+    assert_eq!(vm_out, run_capture(src).expect("mn run"));
 }
 
 /// Phase 3a golden: `examples/native_prelude.chz` exercises the eight universe builtins now
@@ -11101,8 +11071,8 @@ fn golden_native_prelude_chz_matches_expected_and_interp() {
     let expected = include_str!("../../examples/native_prelude.expected");
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, expected);
-    assert_eq!(vm_out, run_capture_parallel(src).expect("interp run"));
-    assert_eq!(vm_out, run_capture_parallel(src).expect("mn run"));
+    assert_eq!(vm_out, run_capture(src).expect("interp run"));
+    assert_eq!(vm_out, run_capture(src).expect("mn run"));
 }
 
 /// `panic` AS A VALUE (`p := panic; p("boom")`) raises the recoverable `RuntimeError` through the
@@ -11112,7 +11082,7 @@ fn golden_native_prelude_chz_matches_expected_and_interp() {
 fn panic_as_value_uncaught_raises_both_engines() {
     let src = "fn main():\n    p := panic\n    p(\"boom\")\nmain()\n";
     let vm_err = run_capture(src).expect_err("vm: panic value must fault");
-    let it_err = run_capture_parallel(src).expect_err("interp: panic value must fault");
+    let it_err = run_capture(src).expect_err("interp: panic value must fault");
     assert_eq!(vm_err.message, "boom");
     assert_eq!(it_err.message, "boom");
 }
@@ -11125,7 +11095,7 @@ fn ord_chr_as_value_both_engines() {
         "fn main():\n    f := ord\n    g := chr\n    print(f(\"a\"))\n    print(g(66))\nmain()\n";
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, "97\nB\n");
-    assert_eq!(vm_out, run_capture_parallel(src).expect("interp run"));
+    assert_eq!(vm_out, run_capture(src).expect("interp run"));
 }
 
 /// Regression (bugs 1 & 3): a user binding named like a first-class builtin fn SHADOWS the builtin
@@ -11138,24 +11108,15 @@ fn user_binding_shadows_firstclass_builtin_both_engines() {
     // parameter shadow
     let a = "fn f(ord: int):\n    print(ord)\nf(42)\n";
     assert_eq!(run_capture(a).expect("vm"), "42\n");
-    assert_eq!(
-        run_capture(a).expect("vm"),
-        run_capture_parallel(a).expect("interp")
-    );
+    assert_eq!(run_capture(a).expect("vm"), run_capture(a).expect("interp"));
     // top-level global (`:=`) shadow, read in value position
     let b = "chr := \"hello\"\nx := chr\nprint(x)\n";
     assert_eq!(run_capture(b).expect("vm"), "hello\n");
-    assert_eq!(
-        run_capture(b).expect("vm"),
-        run_capture_parallel(b).expect("interp")
-    );
+    assert_eq!(run_capture(b).expect("vm"), run_capture(b).expect("interp"));
     // loop-variable shadow
     let c = "for chr in [\"a\", \"b\"]:\n    print(chr)\n";
     assert_eq!(run_capture(c).expect("vm"), "a\nb\n");
-    assert_eq!(
-        run_capture(c).expect("vm"),
-        run_capture_parallel(c).expect("interp")
-    );
+    assert_eq!(run_capture(c).expect("vm"), run_capture(c).expect("interp"));
 }
 
 /// Bug 2 / bug 4: two first-class builtin-fn VALUES compare by NAME, byte-identical VM == interp.
@@ -11169,8 +11130,8 @@ fn builtin_value_equality_both_engines() {
     let src = "fn main():\n    f := ord\n    g := ord\n    print(f == g)\n    print(ord == ord)\n    print(chr == ord)\n    print([print] == [print])\nmain()\n";
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, "true\ntrue\nfalse\ntrue\n");
-    assert_eq!(vm_out, run_capture_parallel(src).expect("interp run"));
-    assert_eq!(vm_out, run_capture_parallel(src).expect("mn run"));
+    assert_eq!(vm_out, run_capture(src).expect("interp run"));
+    assert_eq!(vm_out, run_capture(src).expect("mn run"));
 }
 
 /// Bug 3: all four first-class builtins are SENDABLE — a builtin bound to a local and CAPTURED
@@ -11183,8 +11144,8 @@ fn builtin_value_sendable_across_airlock_both_engines() {
     let src = "import std.concurrency\nfn main():\n    f := ord\n    p := print\n    parallel:\n        spawn:\n            p(f(\"a\"))\nmain()\n";
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, "97\n");
-    assert_eq!(vm_out, run_capture_parallel(src).expect("interp run"));
-    assert_eq!(vm_out, run_capture_parallel(src).expect("mn run"));
+    assert_eq!(vm_out, run_capture(src).expect("interp run"));
+    assert_eq!(vm_out, run_capture(src).expect("mn run"));
 }
 
 /// A first-class builtin fn value spawned as a DIRECT CALL callee (`f := print; spawn f(x)`,
@@ -11198,8 +11159,8 @@ fn spawn_builtin_fn_value_as_call_callee_both_engines() {
     let src = "import std.concurrency\nfn main():\n    g := print\n    parallel:\n        spawn g(\"from-task\")\nmain()\n";
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, "from-task\n");
-    assert_eq!(vm_out, run_capture_parallel(src).expect("interp run"));
-    assert_eq!(vm_out, run_capture_parallel(src).expect("mn run"));
+    assert_eq!(vm_out, run_capture(src).expect("interp run"));
+    assert_eq!(vm_out, run_capture(src).expect("mn run"));
 }
 
 /// `spawn print("hi")` — a bare first-class builtin spawned DIRECTLY (no intermediate binding),
@@ -11211,8 +11172,8 @@ fn spawn_bare_builtin_print_both_engines() {
     let src = "fn main():\n    parallel:\n        spawn print(\"hi\")\nmain()\n";
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, "hi\n");
-    assert_eq!(vm_out, run_capture_parallel(src).expect("interp run"));
-    assert_eq!(vm_out, run_capture_parallel(src).expect("mn run"));
+    assert_eq!(vm_out, run_capture(src).expect("interp run"));
+    assert_eq!(vm_out, run_capture(src).expect("mn run"));
 }
 
 /// Value-form `print` (`f := print; f(x)`) keeps its (single) arg GC-ROOTED while stringifying —
@@ -11227,7 +11188,7 @@ fn print_as_value_arg_rooted_under_gc_stress() {
     let stressed = run_capture_stress(src);
     assert_eq!(stressed, "L7\n");
     assert_eq!(stressed, run_capture(src).expect("vm run"));
-    assert_eq!(stressed, run_capture_parallel(src).expect("interp run"));
+    assert_eq!(stressed, run_capture(src).expect("interp run"));
 }
 
 /// `assert` golden: `examples/assert.chz` (bare + message forms, all passing) byte-identical on
@@ -11238,7 +11199,7 @@ fn golden_assert_chz_matches_expected_and_interp() {
     let expected = include_str!("../../examples/assert.expected");
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, expected);
-    assert_eq!(vm_out, run_capture_parallel(src).expect("interp run"));
+    assert_eq!(vm_out, run_capture(src).expect("interp run"));
 }
 
 // ---- user-callable panic(msg) builtin (VM half + cross-engine parity) ----
@@ -11251,7 +11212,7 @@ fn vm_panic_under_recover_yields_err_with_message() {
     assert_eq!(run(src), "recovered: boom\n");
     assert_eq!(
         run_capture(src).expect("vm run"),
-        run_capture_parallel(src).expect("interp run")
+        run_capture(src).expect("interp run")
     );
 }
 
@@ -11270,7 +11231,7 @@ fn vm_panic_runs_defers_during_unwind() {
     assert_eq!(run(src), "cleanup ran\nrecovered: kaboom\n");
     assert_eq!(
         run_capture(src).expect("vm run"),
-        run_capture_parallel(src).expect("interp run")
+        run_capture(src).expect("interp run")
     );
 }
 
@@ -11283,7 +11244,7 @@ fn golden_panic_chz_matches_expected_and_interp() {
     let expected = include_str!("../../examples/panic.expected");
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, expected);
-    assert_eq!(vm_out, run_capture_parallel(src).expect("interp run"));
+    assert_eq!(vm_out, run_capture(src).expect("interp run"));
 }
 
 /// `defer` golden: LIFO order, method + free-fn calls, the `?` short-circuit path, args evaluated
@@ -11297,7 +11258,7 @@ fn golden_defer_chz_matches_expected_and_interp() {
     let expected = include_str!("../../examples/defer.expected");
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, expected);
-    assert_eq!(vm_out, run_capture_parallel(src).expect("interp run"));
+    assert_eq!(vm_out, run_capture(src).expect("interp run"));
 }
 
 // ----- concurrency C4 (VM parity for spawn / parallel: / Channel / Shared) -----
@@ -11311,10 +11272,10 @@ fn golden_parallel_chz_matches_expected_and_interp() {
     let expected = include_str!("../../examples/parallel.expected");
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, expected);
-    assert_eq!(vm_out, run_capture_parallel(src).expect("interp run"));
+    assert_eq!(vm_out, run_capture(src).expect("interp run"));
 }
 
-/// B3.3-threads sub-step 1: the `--parallel` engine is selectable (`run_capture_parallel` sets
+/// B3.3-threads sub-step 1: the `--parallel` engine is selectable (`run_capture` sets
 /// `Vm::parallel`). A `parallel:` with task-order output (no cross-task blocking) yields the same
 /// result as the cooperative engine — proving the flag plumbs through without changing
 /// well-ordered output.
@@ -11322,7 +11283,7 @@ fn golden_parallel_chz_matches_expected_and_interp() {
 fn parallel_engine_runs_simple_program() {
     let src = include_str!("../../examples/parallel.chz");
     let expected = include_str!("../../examples/parallel.expected");
-    assert_eq!(run_capture_parallel(src).expect("parallel run"), expected);
+    assert_eq!(run_capture(src).expect("parallel run"), expected);
 }
 
 /// M-C golden: implicit nurseries — bare `spawn` at function scope joins at the body's
@@ -11334,8 +11295,8 @@ fn golden_implicit_nursery_chz_matches_expected_and_interp() {
     let expected = include_str!("../../examples/implicit_nursery.expected");
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, expected);
-    assert_eq!(vm_out, run_capture_parallel(src).expect("interp run"));
-    assert_eq!(run_capture_parallel(src).expect("parallel run"), expected);
+    assert_eq!(vm_out, run_capture(src).expect("interp run"));
+    assert_eq!(run_capture(src).expect("parallel run"), expected);
 }
 
 /// B3.3-threads golden: N real OS-thread tasks `update` one `Shared[int]` concurrently; the box
@@ -11346,7 +11307,7 @@ fn golden_implicit_nursery_chz_matches_expected_and_interp() {
 fn golden_parallel_shared_chz_matches_expected() {
     let src = include_str!("../../examples/parallel_shared.chz");
     let expected = include_str!("../../examples/parallel_shared.expected");
-    assert_eq!(run_capture_parallel(src).expect("parallel run"), expected);
+    assert_eq!(run_capture(src).expect("parallel run"), expected);
     // Same program on the cooperative default engine is identical (decision A oracle).
     assert_eq!(run_capture(src).expect("vm run"), expected);
 }
@@ -11360,8 +11321,8 @@ fn golden_rwshared_concurrent_matches_expected() {
     let src = include_str!("../../examples/rwshared.chz");
     let expected = include_str!("../../examples/rwshared.expected");
     assert_eq!(run_capture(src).expect("vm run"), expected);
-    assert_eq!(run_capture_parallel(src).expect("parallel run"), expected);
-    assert_eq!(run_capture_parallel(src).expect("interp run"), expected);
+    assert_eq!(run_capture(src).expect("parallel run"), expected);
+    assert_eq!(run_capture(src).expect("interp run"), expected);
 }
 
 /// Airlock identity: a `RwShared` mutated from a spawned task is observed by the parent — the
@@ -11370,8 +11331,8 @@ fn golden_rwshared_concurrent_matches_expected() {
 fn rwshared_mutation_from_spawn_is_observed_by_parent() {
     let src = "fn bump(r: RwShared[int]):\n    r.write(fn(x): x + 1)\nfn main():\n    r := RwShared(0)\n    parallel:\n        spawn bump(r)\n    print(r.get())\nmain()\n";
     assert_eq!(run_capture(src).expect("vm run"), "1\n");
-    assert_eq!(run_capture_parallel(src).expect("parallel run"), "1\n");
-    assert_eq!(run_capture_parallel(src).expect("interp"), "1\n");
+    assert_eq!(run_capture(src).expect("parallel run"), "1\n");
+    assert_eq!(run_capture(src).expect("interp"), "1\n");
 }
 
 /// B3.3-threads golden: the collector task `recv`s before any producer runs, so on the real-thread
@@ -11382,7 +11343,7 @@ fn rwshared_mutation_from_spawn_is_observed_by_parent() {
 fn golden_parallel_channel_chz_matches_expected() {
     let src = include_str!("../../examples/parallel_channel.chz");
     let expected = include_str!("../../examples/parallel_channel.expected");
-    assert_eq!(run_capture_parallel(src).expect("parallel run"), expected);
+    assert_eq!(run_capture(src).expect("parallel run"), expected);
 }
 
 /// The "correct pattern" companion to the cross-nursery deadlock: two mutually-dependent
@@ -11394,7 +11355,7 @@ fn golden_parallel_cross_nursery_ok_chz_matches_expected() {
     let src = include_str!("../../examples/parallel_cross_nursery_ok.chz");
     let expected = include_str!("../../examples/parallel_cross_nursery_ok.expected");
     assert_eq!(run_capture(src).expect("vm run"), expected);
-    assert_eq!(run_capture_parallel(src).expect("parallel run"), expected);
+    assert_eq!(run_capture(src).expect("parallel run"), expected);
 }
 
 // ---- Channel.close() + closed semantics (both engines) ----
@@ -11454,7 +11415,7 @@ fn vm_wait_all_closed_multi_arm_faults_both_engines() {
     let src = "fn main():\n    a := Channel[int]()\n    b := Channel[int]()\n    a.close()\n    b.close()\n    wait:\n        v := a.recv(): print(v)\n        w := b.recv(): print(w)\nmain()\n";
     let serial = run_err(src);
     assert!(serial.contains("all channels closed"), "{serial}");
-    let mn = match run_capture_parallel(src) {
+    let mn = match run_capture(src) {
         Ok(o) => panic!("expected a fault, got {o:?}"),
         Err(e) => e.message,
     };
@@ -11475,7 +11436,7 @@ fn vm_wait_live_empty_no_else_top_level_deadlocks() {
 #[test]
 fn vm_wait_real_deadlock_still_reported_parallel() {
     let src = "fn w(a: Channel[int], b: Channel[int]):\n    wait:\n        v := a.recv(): print(v)\n        u := b.recv(): print(u)\nfn main():\n    a := Channel[int]()\n    b := Channel[int]()\n    parallel:\n        spawn w(a, b)\nmain()\n";
-    let mn = match run_capture_parallel(src) {
+    let mn = match run_capture(src) {
         Ok(o) => panic!("expected a deadlock fault, got {o:?}"),
         Err(e) => e.message,
     };
@@ -11507,7 +11468,7 @@ fn vm_wait_assign_to_field_and_index_matches_interp() {
     let src = "struct Box:\n    v: int\nfn main():\n    ch := Channel[int]()\n    ch.send(7)\n    b := Box(0)\n    wait:\n        b.v = ch.recv(): print(b.v)\n    xs := [0, 0]\n    ch.send(9)\n    wait:\n        xs[1] = ch.recv(): print(xs[1])\nmain()\n";
     let vm = run(src);
     assert_eq!(vm, "7\n9\n");
-    assert_eq!(vm, run_capture_parallel(src).expect("interp run"));
+    assert_eq!(vm, run_capture(src).expect("interp run"));
 }
 
 /// A single-arm `wait` reduces to a plain `recv`: ready value taken (the recv-park 1-key special
@@ -11524,8 +11485,7 @@ fn vm_wait_single_arm_takes_ready_value() {
 #[test]
 fn vm_wait_lone_blocked_parallel_deadlocks() {
     let src = "fn consumer(a: Channel[int], b: Channel[int]):\n    wait:\n        v := a.recv(): print(v)\n        w := b.recv(): print(w)\nfn main():\n    a := Channel[int]()\n    b := Channel[int]()\n    parallel:\n        spawn consumer(a, b)\nmain()\n";
-    let err =
-        run_capture_parallel(src).expect_err("lone blocked wait under --parallel must deadlock");
+    let err = run_capture(src).expect_err("lone blocked wait under --parallel must deadlock");
     assert!(err.message.contains("deadlock"), "{}", err.message);
 }
 
@@ -11535,10 +11495,7 @@ fn vm_wait_lone_blocked_parallel_deadlocks() {
 #[test]
 fn vm_wait_blocks_then_wakes_on_second_channel_parallel() {
     let src = "fn consumer(a: Channel[int], b: Channel[int]):\n    wait:\n        v := a.recv(): print(\"a {v}\")\n        w := b.recv(): print(\"b {w}\")\nfn producer(b: Channel[int]):\n    b.send(99)\nfn main():\n    a := Channel[int]()\n    b := Channel[int]()\n    parallel:\n        spawn consumer(a, b)\n        spawn producer(b)\nmain()\n";
-    assert_eq!(
-        run_capture_parallel(src).expect("parallel wait park"),
-        "b 99\n"
-    );
+    assert_eq!(run_capture(src).expect("parallel wait park"), "b 99\n");
     assert_eq!(run(src), "b 99\n");
 }
 
@@ -11555,7 +11512,7 @@ fn vm_wait_sweeps_other_buckets_after_waking_parallel() {
     for _ in 0..20 {
         // `.expect` catches a panic-to-fault ("scheduled a Done fiber") or a hang-then-deadlock; the
         // membership check tolerates the genuine producer race.
-        let out = run_capture_parallel(src).expect("parallel wait sweep must not panic or hang");
+        let out = run_capture(src).expect("parallel wait sweep must not panic or hang");
         assert!(
             out == "1\n" || out == "2\n",
             "unexpected sweep output: {out:?}"
@@ -11570,7 +11527,7 @@ fn vm_wait_sweeps_other_buckets_after_waking_parallel() {
 fn vm_wait_sibling_send_vetoes_deadlock_parallel() {
     let src = "fn consumer(a: Channel[int], b: Channel[int]):\n    wait:\n        v := a.recv(): print(\"got {v}\")\n        w := b.recv(): print(\"got {w}\")\nfn producer(a: Channel[int]):\n    a.send(5)\nfn main():\n    a := Channel[int]()\n    b := Channel[int]()\n    parallel:\n        spawn consumer(a, b)\n        spawn producer(a)\nmain()\n";
     assert_eq!(
-        run_capture_parallel(src).expect("live sibling vetoes deadlock"),
+        run_capture(src).expect("live sibling vetoes deadlock"),
         "got 5\n"
     );
     assert_eq!(run(src), "got 5\n");
@@ -11587,7 +11544,7 @@ fn vm_wait_timer_loses_to_midwindow_send_parallel() {
     let src = "fn consumer(ch: Channel[int], t: Channel[bool]):\n    wait:\n        v := ch.recv(): print(\"got {v}\")\n        _ := t.recv(): print(\"timeout\")\nfn producer(ch: Channel[int]):\n    d := timer(5)\n    _ := d.recv()\n    ch.send(7)\nfn main():\n    ch := Channel[int]()\n    t := timer(2000)\n    parallel:\n        spawn consumer(ch, t)\n        spawn producer(ch)\nmain()\n";
     for _ in 0..20 {
         assert_eq!(
-            run_capture_parallel(src).expect("mid-window send must win the channel arm"),
+            run_capture(src).expect("mid-window send must win the channel arm"),
             "got 7\n",
             "timer arm took the wait instead of the mid-window send (WAIT-1)"
         );
@@ -11602,7 +11559,7 @@ fn vm_wait_timer_loses_to_midwindow_send_parallel() {
 fn vm_wait_short_timer_fires_when_no_send_parallel() {
     let src = "fn consumer(ch: Channel[int], t: Channel[bool]):\n    wait:\n        v := ch.recv(): print(\"got {v}\")\n        _ := t.recv(): print(\"timeout\")\nfn main():\n    ch := Channel[int]()\n    t := timer(5)\n    parallel:\n        spawn consumer(ch, t)\nmain()\n";
     assert_eq!(
-        run_capture_parallel(src).expect("short timer must fire its arm, not hang"),
+        run_capture(src).expect("short timer must fire its arm, not hang"),
         "timeout\n"
     );
 }
@@ -11617,8 +11574,7 @@ fn vm_wait_timer_arm_survives_channel_close_repark_parallel() {
     let src = "fn consumer(ch: Channel[int], t: Channel[bool]):\n    wait:\n        v := ch.recv(): print(\"got {v}\")\n        _ := t.recv(): print(\"timeout\")\nfn closer(ch: Channel[int]):\n    d := timer(5)\n    _ := d.recv()\n    ch.close()\nfn main():\n    ch := Channel[int]()\n    t := timer(40)\n    parallel:\n        spawn consumer(ch, t)\n        spawn closer(ch)\nmain()\n";
     for _ in 0..20 {
         assert_eq!(
-            run_capture_parallel(src)
-                .expect("timer arm must fire after a mid-window close; no hang"),
+            run_capture(src).expect("timer arm must fire after a mid-window close; no hang"),
             "timeout\n",
             "a channel close that re-parks the wait stranded the timer arm"
         );
@@ -11634,7 +11590,7 @@ fn vm_wait_arm_break_in_loop() {
     let src = "fn main():\n    found := -1\n    i := 0\n    while i < 3:\n        a := Channel[int]()\n        a.send(i * 10)\n        wait:\n            v := a.recv():\n                if v == 10:\n                    found = v\n                    break\n        i += 1\n    print(found)\nmain()\n";
     let vm = run(src);
     assert_eq!(vm, "10\n");
-    assert_eq!(vm, run_capture_parallel(src).expect("interp"));
+    assert_eq!(vm, run_capture(src).expect("interp"));
 }
 
 /// A `wait` arm body that `continue`s the enclosing loop.
@@ -11643,7 +11599,7 @@ fn vm_wait_arm_continue_in_loop() {
     let src = "fn main():\n    total := 0\n    i := 0\n    while i < 3:\n        a := Channel[int]()\n        a.send(i)\n        i += 1\n        wait:\n            v := a.recv():\n                if v == 1:\n                    continue\n                total += v\n    print(total)\nmain()\n";
     let vm = run(src);
     assert_eq!(vm, "2\n");
-    assert_eq!(vm, run_capture_parallel(src).expect("interp"));
+    assert_eq!(vm, run_capture(src).expect("interp"));
 }
 
 /// A `wait` arm body that `return`s a value from the enclosing function.
@@ -11652,7 +11608,7 @@ fn vm_wait_arm_return() {
     let src = "fn pick(a: Channel[int]) -> int:\n    wait:\n        v := a.recv():\n            return v * 100\nfn main():\n    a := Channel[int]()\n    a.send(7)\n    print(pick(a))\nmain()\n";
     let vm = run(src);
     assert_eq!(vm, "700\n");
-    assert_eq!(vm, run_capture_parallel(src).expect("interp"));
+    assert_eq!(vm, run_capture(src).expect("interp"));
 }
 
 /// A `wait` arm body containing ANOTHER `wait` (nested select).
@@ -11661,7 +11617,7 @@ fn vm_wait_nested() {
     let src = "fn main():\n    a := Channel[int]()\n    b := Channel[int]()\n    a.send(1)\n    b.send(2)\n    wait:\n        v := a.recv():\n            wait:\n                w := b.recv(): print(v + w)\nmain()\n";
     let vm = run(src);
     assert_eq!(vm, "3\n");
-    assert_eq!(vm, run_capture_parallel(src).expect("interp"));
+    assert_eq!(vm, run_capture(src).expect("interp"));
 }
 
 /// A `wait` inside a loop that blocks, wakes, re-iterates, and blocks again under `--parallel`: the
@@ -11670,10 +11626,7 @@ fn vm_wait_nested() {
 fn vm_wait_in_loop_reparks_parallel() {
     let src = "fn consumer(ch: Channel[int], done: Channel[int]):\n    sum := 0\n    i := 0\n    while i < 3:\n        wait:\n            v := ch.recv(): sum += v\n        i += 1\n    done.send(sum)\nfn producer(ch: Channel[int]):\n    ch.send(10)\n    ch.send(20)\n    ch.send(30)\nfn main():\n    ch := Channel[int]()\n    done := Channel[int]()\n    parallel:\n        spawn consumer(ch, done)\n        spawn producer(ch)\n    print(done.recv())\nmain()\n";
     assert_eq!(run(src), "60\n");
-    assert_eq!(
-        run_capture_parallel(src).expect("parallel repark loop"),
-        "60\n"
-    );
+    assert_eq!(run_capture(src).expect("parallel repark loop"), "60\n");
 }
 
 /// A `wait` arm body containing a bare `spawn` (exercises `block_has_bare_spawn`'s recursion into
@@ -11683,7 +11636,7 @@ fn vm_wait_arm_bare_spawn() {
     let src = "fn worker():\n    print(\"worker ran\")\nfn main():\n    a := Channel[int]()\n    a.send(1)\n    wait:\n        v := a.recv():\n            spawn worker()\n    print(\"after wait\")\nmain()\n";
     let vm = run(src);
     assert_eq!(vm, "after wait\nworker ran\n");
-    assert_eq!(vm, run_capture_parallel(src).expect("interp"));
+    assert_eq!(vm, run_capture(src).expect("interp"));
 }
 
 /// §6d regression — a multi-arm `wait` whose arm body references an OUTER local inside a fused
@@ -11695,7 +11648,7 @@ fn vm_wait_arm_body_outer_local_in_binop_matches_interp() {
     let src = "fn pick(a: Channel[int], b: Channel[int], x: int) -> int:\n    wait:\n        v := a.recv(): return x + v\n        w := b.recv(): return x + w\nfn main():\n    a := Channel[int]()\n    b := Channel[int]()\n    b.send(65)\n    print(pick(a, b, 1))\nmain()\n";
     let vm = run(src);
     assert_eq!(vm, "66\n");
-    assert_eq!(vm, run_capture_parallel(src).expect("interp"));
+    assert_eq!(vm, run_capture(src).expect("interp"));
 }
 
 /// 1-key regression PIN (TDD step 1): an ordinary blocking `recv` (NOT a `wait`) under
@@ -11705,10 +11658,7 @@ fn vm_wait_arm_body_outer_local_in_binop_matches_interp() {
 #[test]
 fn vm_wait_single_arm_recv_park_unchanged_under_parallel() {
     let src = "fn consumer(a: Channel[int]):\n    v := a.recv()\n    print(\"got {v}\")\nfn producer(a: Channel[int]):\n    a.send(7)\nfn main():\n    a := Channel[int]()\n    parallel:\n        spawn consumer(a)\n        spawn producer(a)\nmain()\n";
-    assert_eq!(
-        run_capture_parallel(src).expect("parallel recv park"),
-        "got 7\n"
-    );
+    assert_eq!(run_capture(src).expect("parallel recv park"), "got 7\n");
     assert_eq!(run(src), "got 7\n");
 }
 
@@ -11724,14 +11674,14 @@ fn vm_channel_recv_on_closed_empty_faults() {
 fn vm_channel_drains_buffered_after_close() {
     let src = "fn main():\n    ch := Channel[int]()\n    ch.send(1)\n    ch.send(2)\n    ch.close()\n    print(ch.recv())\n    print(ch.recv())\nmain()\n";
     assert_eq!(run(src), "1\n2\n");
-    assert_eq!(run(src), run_capture_parallel(src).expect("interp"));
+    assert_eq!(run(src), run_capture(src).expect("interp"));
 }
 
 #[test]
 fn vm_channel_try_send_false_when_closed() {
     let src = "fn main():\n    ch := Channel[int]()\n    print(ch.try_send(1))\n    ch.close()\n    print(ch.try_send(2))\nmain()\n";
     assert_eq!(run(src), "true\nfalse\n");
-    assert_eq!(run(src), run_capture_parallel(src).expect("interp"));
+    assert_eq!(run(src), run_capture(src).expect("interp"));
 }
 
 #[test]
@@ -11744,14 +11694,14 @@ fn vm_channel_double_close_ok() {
 fn vm_channel_close_then_len_zero() {
     let src = "fn main():\n    ch := Channel[int]()\n    ch.close()\n    print(ch.len())\nmain()\n";
     assert_eq!(run(src), "0\n");
-    assert_eq!(run(src), run_capture_parallel(src).expect("interp"));
+    assert_eq!(run(src), run_capture(src).expect("interp"));
 }
 
 #[test]
 fn vm_channel_try_recv_closed_empty_is_none() {
     let src = "fn main():\n    ch := Channel[int]()\n    ch.close()\n    match ch.try_recv():\n        Some(v): print(v)\n        None: print(\"none\")\nmain()\n";
     assert_eq!(run(src), "none\n");
-    assert_eq!(run(src), run_capture_parallel(src).expect("interp"));
+    assert_eq!(run(src), run_capture(src).expect("interp"));
 }
 
 #[test]
@@ -11759,7 +11709,7 @@ fn vm_for_over_channel_drains_then_exits() {
     // Producer-first (no concurrency needed): the channel is closed+full before the `for` runs.
     let src = "fn main():\n    ch := Channel[int]()\n    ch.send(1)\n    ch.send(2)\n    ch.send(3)\n    ch.close()\n    total := 0\n    for v in ch:\n        total = total + v\n    print(total)\nmain()\n";
     assert_eq!(run(src), "6\n");
-    assert_eq!(run(src), run_capture_parallel(src).expect("interp"));
+    assert_eq!(run(src), run_capture(src).expect("interp"));
 }
 
 /// `--parallel`: a `for v in ch:` consumer that runs ahead of the producer PARKS on the empty
@@ -11783,7 +11733,7 @@ fn main():
     print(out.recv())
 main()
 ";
-    assert_eq!(run_capture_parallel(src).expect("parallel run"), "0\n");
+    assert_eq!(run_capture(src).expect("parallel run"), "0\n");
 }
 
 /// `--parallel`: a single `close()` must wake EVERY receiver parked on the channel (not just one,
@@ -11810,7 +11760,7 @@ fn main():
     print(total)
 main()
 ";
-    assert_eq!(run_capture_parallel(src).expect("parallel run"), "3\n");
+    assert_eq!(run_capture(src).expect("parallel run"), "3\n");
 }
 
 /// `--parallel`: a consumer that loops `recv` past the producer's last value used to deadlock-fault;
@@ -11837,7 +11787,7 @@ fn main():
 main()
 ";
     // 1+2+3+4+5 = 15, however the producer/consumer interleave.
-    assert_eq!(run_capture_parallel(src).expect("parallel run"), "15\n");
+    assert_eq!(run_capture(src).expect("parallel run"), "15\n");
 }
 
 /// Channel.close() golden: producer sends a run + `close()`s; consumer `for v in ch:` drains then
@@ -11850,14 +11800,14 @@ fn golden_parallel_channel_close_chz_matches_expected_and_interp() {
     let expected = include_str!("../../examples/parallel_channel_close.expected");
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, expected);
-    assert_eq!(vm_out, run_capture_parallel(src).expect("interp run"));
+    assert_eq!(vm_out, run_capture(src).expect("interp run"));
 }
 
 #[test]
 fn golden_parallel_channel_close_chz_parallel_engine() {
     let src = include_str!("../../examples/parallel_channel_close.chz");
     let expected = include_str!("../../examples/parallel_channel_close.expected");
-    assert_eq!(run_capture_parallel(src).expect("parallel run"), expected);
+    assert_eq!(run_capture(src).expect("parallel run"), expected);
 }
 
 #[test]
@@ -11871,7 +11821,7 @@ fn main():
             ch.send(1)
 main()
 ";
-    let err = run_capture_parallel(src).expect_err("send after close should fault");
+    let err = run_capture(src).expect_err("send after close should fault");
     assert!(
         err.message.contains("send on a closed channel"),
         "{}",
@@ -11888,7 +11838,7 @@ main()
 fn golden_executor_pool_chz_matches_expected() {
     let src = include_str!("../../examples/executor_pool.chz");
     let expected = include_str!("../../examples/executor_pool.expected");
-    assert_eq!(run_capture_parallel(src).expect("parallel run"), expected);
+    assert_eq!(run_capture(src).expect("parallel run"), expected);
     assert_eq!(run_capture(src).expect("vm run"), expected);
 }
 
@@ -11915,7 +11865,7 @@ fn main():
     print(a + b)
 main()
 ";
-    assert_eq!(run_capture_parallel(src).expect("parallel run"), "203\n");
+    assert_eq!(run_capture(src).expect("parallel run"), "203\n");
     assert_eq!(run_capture(src).expect("vm run"), "203\n");
 }
 
@@ -11935,7 +11885,7 @@ fn parallel_many_spawns_cheap_and_correct() {
     }
     src.push_str("    print(s.get())\nmain()\n");
     let start = std::time::Instant::now();
-    let out = run_capture_parallel(&src).expect("parallel run");
+    let out = run_capture(&src).expect("parallel run");
     let elapsed = start.elapsed();
     assert_eq!(out, format!("{N}\n"));
     assert!(
@@ -11953,7 +11903,7 @@ fn executor_submitted_closure_captures_by_value() {
     let src =
         "fn main():\n    n := 7\n    ex := Executor()\n    ex.submit(fn(): print(n))\nmain()\n";
     assert_eq!(run_capture(src).expect("vm run"), "7\n");
-    assert_eq!(run_capture_parallel(src).expect("parallel run"), "7\n");
+    assert_eq!(run_capture(src).expect("parallel run"), "7\n");
 }
 
 /// A submitted closure crosses the airlock **by value** on BOTH engines: it isolates its captures at
@@ -11973,7 +11923,7 @@ fn executor_cooperative_submit_isolates_captures_by_value() {
         "cooperative submit isolates the captured list by value at submit time"
     );
     assert_eq!(
-        run_capture_parallel(src).expect("parallel run"),
+        run_capture(src).expect("parallel run"),
         "[1]\n",
         "M:N submit isolates the captured list by value — parity with serial"
     );
@@ -11987,7 +11937,7 @@ fn parallel_nested_nursery_on_pool() {
     let src = "fn inner(s: Shared[int]):\n    s.update(fn(x): x + 1)\n\
                    fn outer(s: Shared[int]):\n    parallel:\n        spawn inner(s)\n        spawn inner(s)\n\
                    fn main():\n    s := Shared(0)\n    parallel:\n        spawn outer(s)\n        spawn outer(s)\n    print(s.get())\nmain()\n";
-    assert_eq!(run_capture_parallel(src).expect("parallel run"), "4\n");
+    assert_eq!(run_capture(src).expect("parallel run"), "4\n");
 }
 
 /// Eager `Executor` — the successor to B3.3-threads' `done_signal_bumps_counter_on_panic`. That test
@@ -12010,7 +11960,7 @@ fn executor_faulting_job_does_not_hang_shutdown() {
                    Err(e): print(\"caught: {e.message()}\")\n";
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
-        let _ = tx.send(run_capture_parallel(src));
+        let _ = tx.send(run_capture(src));
     });
     let got = rx
         .recv_timeout(std::time::Duration::from_secs(30))
@@ -12026,7 +11976,7 @@ fn parallel_output_flushes_in_task_order() {
     let src = "fn emit(s: str):\n    print(s)\n\
                    fn main():\n    parallel:\n        spawn emit(\"alpha\")\n        spawn emit(\"beta\")\n        spawn emit(\"gamma\")\nmain()\n";
     assert_eq!(
-        run_capture_parallel(src).expect("parallel run"),
+        run_capture(src).expect("parallel run"),
         "alpha\nbeta\ngamma\n"
     );
 }
@@ -12040,7 +11990,7 @@ fn parallel_pool_task_fault_propagates() {
     let src = "fn ok_task(s: Shared[int]):\n    s.update(fn(x): x + 1)\n\
                    fn boom():\n    xs := [1]\n    print(xs[9])\n\
                    fn main():\n    s := Shared(0)\n    parallel:\n        spawn ok_task(s)\n        spawn boom()\n    print(\"unreached\")\nmain()\n";
-    let err = run_capture_parallel(src).expect_err("expected the pool task fault to propagate");
+    let err = run_capture(src).expect_err("expected the pool task fault to propagate");
     assert!(
         err.message.contains("out of bounds"),
         "got: {}",
@@ -12070,7 +12020,7 @@ fn parallel_return_escape_leaves_clean_nursery_stack() {
     );
     assert_eq!(
         vm_out,
-        run_capture_parallel(src).expect("interp run"),
+        run_capture(src).expect("interp run"),
         "VM/interp parity"
     );
     assert_eq!(
@@ -12099,7 +12049,7 @@ fn parallel_try_escape_leaves_clean_nursery_stack() {
     let (vm_so_far, vm_res) = run_program(src);
     assert!(vm_res.is_err());
     assert_eq!(vm_so_far, "", "VM: nothing on stdout before the fault");
-    let (interp_so_far, interp_res) = run_program_parallel(src);
+    let (interp_so_far, interp_res) = run_program(src);
     assert!(interp_res.is_err());
     assert_eq!(interp_so_far, vm_so_far, "interp/VM stdout-so-far parity");
 }
@@ -12126,7 +12076,7 @@ fn parallel_try_caught_by_recover_leaves_clean_nursery_stack() {
     );
     assert_eq!(
         vm_out,
-        run_capture_parallel(src).expect("interp run"),
+        run_capture(src).expect("interp run"),
         "VM/interp parity"
     );
     assert_eq!(
@@ -12148,7 +12098,7 @@ fn parallel_recover_scoped_try_orders_report_after_body_defer() {
                    fn boom() -> int!:\n    return Err(\"x\")\n\
                    fn main():\n    r := recover:\n        parallel:\n            defer pdefer()\n            spawn noop()\n            y := boom()?\n            print(y)\n        0\n    print(\"recovered\")\nmain()\n";
     let expected = "PDEFER\nrecovered\n";
-    let interp_out = run_capture_parallel(src).expect("interp run");
+    let interp_out = run_capture(src).expect("interp run");
     assert_eq!(
         interp_out, expected,
         "interp oracle: body-defer precedes report precedes recover"
@@ -12164,7 +12114,7 @@ fn parallel_recover_scoped_try_orders_report_after_body_defer() {
         "the recover-caught nursery is reclaimed, not leaked"
     );
     assert_eq!(
-        run_capture_parallel(src).expect("--parallel run"),
+        run_capture(src).expect("--parallel run"),
         expected,
         "VM --parallel parity"
     );
@@ -12208,10 +12158,10 @@ fn parallel_try_escape_cancels_pending_silently() {
     let (vm_so_far, vm_res) = run_program(src);
     assert!(vm_res.is_err());
     assert_eq!(vm_so_far, "", "serial: nothing on stdout before the fault");
-    let (mn_so_far, mn_res) = run_program_parallel(src);
+    let (mn_so_far, mn_res) = run_program(src);
     assert!(mn_res.is_err());
     assert_eq!(mn_so_far, vm_so_far, "serial/M:N stdout-so-far parity");
-    assert!(run_capture_parallel(src).is_err(), "M:N also faults");
+    assert!(run_capture(src).is_err(), "M:N also faults");
 }
 
 /// §2c1 — the cancel still BITES on a task that HAS started. `side()` parks forever on a channel
@@ -12225,7 +12175,7 @@ fn an_escaped_nursery_cancels_a_started_task() {
                    fn main():\n    print(worker())\nmain()\n";
     assert_eq!(run(src), "5\n", "serial: the escape value wins");
     assert_eq!(
-        run_capture_parallel(src).expect("M:N run"),
+        run_capture(src).expect("M:N run"),
         "5\n",
         "M:N: the started task is cancelled, so the escape still completes"
     );
@@ -12249,12 +12199,12 @@ fn parallel_return_escape_cancels_pending_silently() {
         "the return-escaped nursery must be reclaimed, not leaked"
     );
     assert_eq!(
-        run_capture_parallel(src).expect("interp run"),
+        run_capture(src).expect("interp run"),
         expected,
         "interp parity"
     );
     assert_eq!(
-        run_capture_parallel(src).expect("parallel run"),
+        run_capture(src).expect("parallel run"),
         expected,
         "--parallel parity"
     );
@@ -12281,12 +12231,12 @@ fn parallel_break_escape_cancels_pending_silently() {
         "the break-escaped nursery must be reclaimed, not leaked"
     );
     assert_eq!(
-        run_capture_parallel(src).expect("interp run"),
+        run_capture(src).expect("interp run"),
         expected,
         "interp parity"
     );
     assert_eq!(
-        run_capture_parallel(src).expect("parallel run"),
+        run_capture(src).expect("parallel run"),
         expected,
         "--parallel parity"
     );
@@ -12303,8 +12253,7 @@ fn parallel_recv_blocked_sibling_aborts_on_sibling_fault() {
     let src = "fn boom(ch: Channel[int]):\n    xs := [1]\n    print(xs[9])\n\
                    fn consumer(ch: Channel[int]):\n    ch.recv()\n    print(\"consumed\")\n\
                    fn main():\n    ch := Channel[int]()\n    parallel:\n        spawn boom(ch)\n        spawn consumer(ch)\nmain()\n";
-    let err =
-        run_capture_parallel(src).expect_err("expected the producer fault to propagate, not hang");
+    let err = run_capture(src).expect_err("expected the producer fault to propagate, not hang");
     assert!(
         err.message.contains("out of bounds"),
         "got: {}",
@@ -12323,7 +12272,7 @@ fn parallel_cpu_sibling_aborts_on_sibling_fault() {
     let src = "fn looper(go: Channel[int], s: Shared[int]):\n    s.set(1)\n    go.send(0)\n    i := 0\n    while i < 1000000000:\n        i = i + 1\n    s.set(99)\n\
                    fn trigger(go: Channel[int]):\n    go.recv()\n    xs := [1]\n    print(xs[9])\n\
                    fn main():\n    go := Channel[int]()\n    s := Shared(0)\n    r := recover:\n        parallel:\n            spawn looper(go, s)\n            spawn trigger(go)\n        0\n    print(s.get())\nmain()\n";
-    let out = run_capture_parallel(src).expect("the fault is recovered, so the program completes");
+    let out = run_capture(src).expect("the fault is recovered, so the program completes");
     assert_eq!(
         out, "1\n",
         "looper started (1) but was cancelled before completing (never wrote 99)"
@@ -12355,8 +12304,7 @@ fn parallel_defer_runs_on_cancelled_sibling() {
                    fn consumer(ch: Channel[int], go: Channel[int], s: Shared[int]):\n    defer cleanup(s)\n    go.send(0)\n    ch.recv()\n\
                    fn boom(go: Channel[int]):\n    go.recv()\n    xs := [1]\n    print(xs[9])\n\
                    fn main():\n    s := Shared(0)\n    r := recover:\n        ch := Channel[int]()\n        go := Channel[int]()\n        parallel:\n            spawn consumer(ch, go, s)\n            spawn boom(go)\n        0\n    print(s.get())\nmain()\n";
-    let out = run_capture_parallel(src)
-        .expect("the producer fault is recovered, so the program completes");
+    let out = run_capture(src).expect("the producer fault is recovered, so the program completes");
     assert_eq!(
         out, "42\n",
         "the cancelled consumer's defer ran on the unwind"
@@ -12375,7 +12323,7 @@ fn parallel_spinning_sibling_does_not_hang_the_nursery_under_cancel() {
                    fn main():\n    go := Channel[int]()\n    s := Shared(0)\n    r := recover:\n        parallel:\n            spawn spinner(go, s)\n            spawn trigger(go)\n        0\n    print(s.get())\nmain()\n";
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
-        let _ = tx.send(run_capture_parallel(src));
+        let _ = tx.send(run_capture(src));
     });
     let out = rx
         .recv_timeout(std::time::Duration::from_secs(30))
@@ -12399,7 +12347,7 @@ fn parallel_spinning_sibling_does_not_hang_the_nursery_under_cancel() {
 /// `gate` (the nested nursery's task) consumes the token `task` sends only AFTER registering its
 /// `defer`, so the inner join — and therefore the escape — happens-after the defer is registered.
 /// Natural window: `cleanup=0` ~1/100 under CPU contention; with a 30ms sleep probing the gap it was
-/// 20/20 pre-fix and 0/20 after. M:N only (`run_capture_parallel`): the serial engine never STARTS a
+/// 20/20 pre-fix and 0/20 after. M:N only (`run_capture`): the serial engine never STARTS a
 /// lazy nursery's pending task before the escape, so no `defer` is registered there at all and it
 /// prints `0` — a pre-existing engine divergence in what a not-yet-started task does (gaps.md N6), not
 /// this bug.
@@ -12410,7 +12358,7 @@ fn parallel_defer_runs_when_enlisted_nursery_escapes() {
                    fn gate(go: Channel[int]):\n    go.recv()\n\
                    fn outer(ch: Channel[int], go: Channel[int], s: Shared[int]):\n    parallel:\n        spawn task(ch, go, s)\n        parallel:\n            spawn gate(go)\n        return\n\
                    fn main():\n    ch := Channel[int]()\n    go := Channel[int]()\n    s := Shared(0)\n    outer(ch, go, s)\n    print(s.get())\nmain()\n";
-    let out = run_capture_parallel(src).expect("the escape is not a fault — the program completes");
+    let out = run_capture(src).expect("the escape is not a fault — the program completes");
     assert_eq!(
         out, "42\n",
         "the enlisted scope's cancelled task unwound through its defer (no spurious deadlock reaped it)"
@@ -12453,8 +12401,7 @@ fn parallel_defer_runs_on_back_edge_cancel() {
                    fn worker(go: Channel[int], s: Shared[int]):\n    defer cleanup(s)\n    go.send(0)\n    i := 0\n    while i < 1000000000:\n        i = i + 1\n\
                    fn trigger(go: Channel[int]):\n    go.recv()\n    xs := [1]\n    print(xs[9])\n\
                    fn main():\n    go := Channel[int]()\n    s := Shared(0)\n    r := recover:\n        parallel:\n            spawn worker(go, s)\n            spawn trigger(go)\n        0\n    print(s.get())\nmain()\n";
-    let out = run_capture_parallel(src)
-        .expect("the trigger fault is recovered, so the program completes");
+    let out = run_capture(src).expect("the trigger fault is recovered, so the program completes");
     assert_eq!(
         out, "42\n",
         "the CPU-cancelled worker's defer ran on the back-edge unwind"
@@ -12471,8 +12418,7 @@ fn parallel_recover_inside_worker_does_not_catch_cancel() {
     let src = "fn victim(go: Channel[int], s: Shared[int]):\n    s.set(1)\n    go.send(0)\n    r := recover:\n        i := 0\n        while i < 1000000000:\n            i = i + 1\n        0\n    s.set(99)\n\
                    fn trigger(go: Channel[int]):\n    go.recv()\n    xs := [1]\n    print(xs[9])\n\
                    fn main():\n    go := Channel[int]()\n    s := Shared(0)\n    r := recover:\n        parallel:\n            spawn victim(go, s)\n            spawn trigger(go)\n        0\n    print(s.get())\nmain()\n";
-    let out = run_capture_parallel(src)
-        .expect("the trigger fault is recovered, so the program completes");
+    let out = run_capture(src).expect("the trigger fault is recovered, so the program completes");
     assert_eq!(
         out, "1\n",
         "victim's inner recover must NOT catch the cancel; it never reaches s.set(99)"
@@ -12489,7 +12435,7 @@ fn golden_channel_chz_matches_expected_and_interp() {
     let expected = include_str!("../../examples/channel.expected");
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, expected);
-    assert_same_lines(&vm_out, &run_capture_parallel(src).expect("M:N run"));
+    assert_same_lines(&vm_out, &run_capture(src).expect("M:N run"));
 }
 
 /// `Atomic[int].add` cross-thread atomicity: N real-OS-thread fibers each `add(1)` one shared
@@ -12501,10 +12447,7 @@ fn parallel_atomic_add_is_exact() {
         "fn work(a: Atomic[int]):\n    a.add(1)\n\
              fn main():\n    a := Atomic(0)\n    parallel:\n        for _ in 0..{n}:\n            spawn work(a)\n    print(a.load())\nmain()\n"
     );
-    assert_eq!(
-        run_capture_parallel(&src).expect("parallel"),
-        format!("{n}\n")
-    );
+    assert_eq!(run_capture(&src).expect("parallel"), format!("{n}\n"));
 }
 
 /// `Atomic[int].cas` under contention: N fibers each increment via a load-then-CAS retry loop. A
@@ -12517,10 +12460,7 @@ fn parallel_atomic_cas_increment_is_exact() {
         "fn bump(a: Atomic[int]):\n    while true:\n        cur := a.load()\n        if a.cas(cur, cur + 1):\n            break\n\
              fn main():\n    a := Atomic(0)\n    parallel:\n        for _ in 0..{n}:\n            spawn bump(a)\n    print(a.load())\nmain()\n"
     );
-    assert_eq!(
-        run_capture_parallel(&src).expect("parallel"),
-        format!("{n}\n")
-    );
+    assert_eq!(run_capture(&src).expect("parallel"), format!("{n}\n"));
 }
 
 /// `Atomic[float]` add/sub/exchange/cas must behave identically on both engines (covers the
@@ -12530,7 +12470,7 @@ fn atomic_float_ops_two_engine_parity() {
     let src = "fn main():\n    a := Atomic(1.5)\n    print(a.add(2.0))\n    print(a.sub(0.5))\n    print(a.exchange(9.0))\n    print(a.cas(9.0, 4.0))\n    print(a.load())\nmain()\n";
     assert_eq!(
         run_capture(src).expect("vm"),
-        run_capture_parallel(src).expect("interp")
+        run_capture(src).expect("interp")
     );
 }
 
@@ -12541,7 +12481,7 @@ fn atomic_cas_on_list_two_engine_parity() {
     let src = "fn main():\n    a := Atomic([1, 2])\n    print(a.cas([1, 2], [9]))\n    print(a.load())\n    print(a.cas([1, 2], [0]))\n    print(a.load())\nmain()\n";
     assert_eq!(
         run_capture(src).expect("vm"),
-        run_capture_parallel(src).expect("interp")
+        run_capture(src).expect("interp")
     );
 }
 
@@ -12551,8 +12491,8 @@ fn timer_zero_delivers_immediately() {
     let src = "fn main():\n    print(timer(0).recv())\nmain()\n";
     let out = run_capture(src).expect("vm");
     assert_eq!(out, "true\n");
-    assert_eq!(out, run_capture_parallel(src).expect("interp"));
-    assert_eq!(run_capture_parallel(src).expect("parallel"), "true\n");
+    assert_eq!(out, run_capture(src).expect("interp"));
+    assert_eq!(run_capture(src).expect("parallel"), "true\n");
 }
 
 /// A1 golden: `Channel[T].try_recv()` — a non-blocking poll returning `T?`. Workers `send` at the
@@ -12566,23 +12506,23 @@ fn golden_try_recv_chz_matches_expected_and_interp() {
     assert_eq!(vm_out, expected);
     // M:N workers send concurrently, so the parent's try_recv drains them in either order — the set
     // is identical (exact order pinned on the cooperative engine above).
-    assert_same_lines(&vm_out, &run_capture_parallel(src).expect("M:N run"));
+    assert_same_lines(&vm_out, &run_capture(src).expect("M:N run"));
     assert_eq!(run_capture_stress(src), expected);
 }
 
-/// B1+B2 golden (VM-only): blocking `recv`. The consumer is scheduled first, parks on the empty
-/// channel, the cooperative scheduler runs the producer, and the consumer resumes to receive. The
-/// interpreter still faults `deadlock` on the same program (documented parity gap — see the interp
-/// twin `channel_block_chz_faults_deadlock_on_interp`), so this asserts the VM output + `.expected`
-/// only, NOT cross-engine parity.
+/// B1+B2 golden: blocking `recv`. The consumer is scheduled first, parks on the empty channel, the
+/// scheduler runs the producer, and the consumer resumes to receive. The LINE SET is fixed by the
+/// program's logic; the exact print order is a genuine M:N race between the two fibers' stdout
+/// (unlike the single-threaded cooperative engine this golden was originally pinned against), so
+/// compare order-insensitively.
 #[test]
 fn golden_channel_block_chz_matches_expected() {
     let src = include_str!("../../examples/channel_block.chz");
     let expected = include_str!("../../examples/channel_block.expected");
     let vm_out = run_capture(src).expect("vm run");
-    assert_eq!(vm_out, expected);
-    // Parked fibers must survive collection: the same program under GC stress is byte-identical.
-    assert_eq!(run_capture_stress(src), expected);
+    crate::vm::assert_same_lines(&vm_out, expected);
+    // Same result under GC stress — parked fibers survive collection.
+    crate::vm::assert_same_lines(&run_capture_stress(src), expected);
 }
 
 /// Cross-nursery circular wakeup — the case-A flat-scheduler fix (M:N / `--parallel` ONLY).
@@ -12600,7 +12540,7 @@ fn golden_parallel_cross_nursery_circular_chz_matches_expected() {
     let expected = include_str!("../../examples/parallel_cross_nursery_circular.expected");
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
-        let _ = tx.send(run_capture_parallel(src));
+        let _ = tx.send(run_capture(src));
     });
     match rx.recv_timeout(std::time::Duration::from_secs(30)) {
         Ok(r) => assert_eq!(r.expect("parallel run"), expected),
@@ -12619,7 +12559,7 @@ fn golden_parallel_cross_nursery_fanout_chz_matches_expected() {
     let expected = include_str!("../../examples/parallel_cross_nursery_fanout.expected");
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
-        let _ = tx.send(run_capture_parallel(src));
+        let _ = tx.send(run_capture(src));
     });
     match rx.recv_timeout(std::time::Duration::from_secs(30)) {
         Ok(r) => assert_eq!(r.expect("parallel run"), expected),
@@ -12639,7 +12579,7 @@ fn golden_parallel_cross_nursery_inline_send_chz_matches_expected() {
     let expected = include_str!("../../examples/parallel_cross_nursery_inline_send.expected");
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
-        let _ = tx.send(run_capture_parallel(src));
+        let _ = tx.send(run_capture(src));
     });
     match rx.recv_timeout(std::time::Duration::from_secs(30)) {
         Ok(r) => assert_eq!(r.expect("parallel run"), expected),
@@ -12659,7 +12599,7 @@ fn golden_parallel_cross_nursery_inline_close_chz_matches_expected() {
     let expected = include_str!("../../examples/parallel_cross_nursery_inline_close.expected");
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
-        let _ = tx.send(run_capture_parallel(src));
+        let _ = tx.send(run_capture(src));
     });
     match rx.recv_timeout(std::time::Duration::from_secs(30)) {
         Ok(r) => assert_eq!(r.expect("parallel run"), expected),
@@ -12687,7 +12627,7 @@ fn golden_parallel_cross_nursery_multilevel_chz_matches_expected() {
     );
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
-        let _ = tx.send(run_capture_parallel(src));
+        let _ = tx.send(run_capture(src));
     });
     match rx.recv_timeout(std::time::Duration::from_secs(30)) {
         Ok(r) => assert_eq!(r.expect("parallel run"), expected),
@@ -12708,7 +12648,7 @@ fn parallel_cross_nursery_independent_3level_runs_all() {
     let s = src.to_string();
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
-        let _ = tx.send(run_capture_parallel(&s));
+        let _ = tx.send(run_capture(&s));
     });
     match rx.recv_timeout(std::time::Duration::from_secs(30)) {
         Ok(r) => {
@@ -12739,7 +12679,7 @@ fn parallel_cross_nursery_late_spawn_into_middle_runs() {
     let s = src.to_string();
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
-        let _ = tx.send(run_capture_parallel(&s));
+        let _ = tx.send(run_capture(&s));
     });
     match rx.recv_timeout(std::time::Duration::from_secs(30)) {
         Ok(r) => {
@@ -12769,7 +12709,7 @@ fn parallel_cross_nursery_contended_never_panics() {
     let s = src.to_string();
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
-        let _ = tx.send(run_capture_parallel(&s));
+        let _ = tx.send(run_capture(&s));
     });
     match rx.recv_timeout(std::time::Duration::from_secs(30)) {
         // Delivery order is concurrent-divergent by design: accept Ok OR a clean deadlock fault.
@@ -12801,7 +12741,7 @@ fn parallel_cross_nursery_late_spawn_parked_matches_coop() {
         let (tx, rx) = std::sync::mpsc::channel();
         let s = src.to_string();
         std::thread::spawn(move || {
-            let _ = tx.send(run_capture_parallel(&s));
+            let _ = tx.send(run_capture(&s));
         });
         match rx.recv_timeout(std::time::Duration::from_secs(30)) {
             Ok(r) => assert_eq!(
@@ -12823,7 +12763,7 @@ fn parallel_cross_nursery_genuine_nested_deadlock_still_faults() {
     let src = "fn inner(dead: Channel[int]):\n    spawn:\n        v := dead.recv()\n        print(\"never {v}\")\nfn main():\n    dead := Channel[int]()\n    parallel:\n        spawn:\n            print(\"O ran\")\n        inner(dead)\n    print(\"done\")\nmain()\n";
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
-        let _ = tx.send(run_capture_parallel(src));
+        let _ = tx.send(run_capture(src));
     });
     match rx.recv_timeout(std::time::Duration::from_secs(30)) {
         Ok(r) => {
@@ -12862,7 +12802,7 @@ fn golden_parallel_cross_nursery_nested_send_to_outer_recv_matches_expected() {
         let (tx, rx) = std::sync::mpsc::channel();
         let s = src.to_string();
         std::thread::spawn(move || {
-            let _ = tx.send(run_capture_parallel(&s));
+            let _ = tx.send(run_capture(&s));
         });
         match rx.recv_timeout(std::time::Duration::from_secs(30)) {
             Ok(r) => assert_eq!(
@@ -12884,7 +12824,7 @@ fn parallel_cross_nursery_nested_no_send_still_deadlocks() {
     let src = "import std.concurrency\nfn main():\n    ready := Channel[int]()\n    parallel:\n        spawn:\n            parallel:\n                spawn:\n                    print(\"grandchild ran\")\n        spawn:\n            v := ready.recv()\n            print(\"receiver got {v}\")\nmain()\n";
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
-        let _ = tx.send(run_capture_parallel(src));
+        let _ = tx.send(run_capture(src));
     });
     match rx.recv_timeout(std::time::Duration::from_secs(30)) {
         Ok(r) => {
@@ -12911,7 +12851,7 @@ fn parallel_cross_nursery_nested_real_fault_reports_real_error() {
     let src = "import std.concurrency\nfn main():\n    ready := Channel[int]()\n    parallel:\n        spawn:\n            parallel:\n                spawn:\n                    xs := [1]\n                    ready.send(xs[9])\n        spawn:\n            v := ready.recv()\n            print(\"receiver got {v}\")\nmain()\n";
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
-        let _ = tx.send(run_capture_parallel(src));
+        let _ = tx.send(run_capture(src));
     });
     match rx.recv_timeout(std::time::Duration::from_secs(30)) {
         Ok(r) => {
@@ -12943,7 +12883,7 @@ fn parallel_cross_nursery_parent_to_child_residual_never_panics() {
     let src = "import std.concurrency\nfn main():\n    ready := Channel[int]()\n    parallel:\n        spawn:\n            parallel:\n                spawn:\n                    v := ready.recv()\n                    print(\"got {v}\")\n        spawn:\n            ready.send(1)\nmain()\n";
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
-        let _ = tx.send(run_capture_parallel(src));
+        let _ = tx.send(run_capture(src));
     });
     match rx.recv_timeout(std::time::Duration::from_secs(30)) {
         Ok(Ok(_)) => {}
@@ -12967,7 +12907,7 @@ fn golden_parallel_cross_nursery_late_spawn_chz_matches_expected() {
     let expected = include_str!("../../examples/parallel_cross_nursery_late_spawn.expected");
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
-        let _ = tx.send(run_capture_parallel(src));
+        let _ = tx.send(run_capture(src));
     });
     match rx.recv_timeout(std::time::Duration::from_secs(30)) {
         Ok(r) => assert_eq!(r.expect("parallel run"), expected),
@@ -12988,7 +12928,7 @@ fn parallel_cross_nursery_late_spawn_escape_reclaims_the_late_task() {
     let src = "fn inner():\n    spawn:\n        print(\"inner ran\")\nfn run():\n    parallel:\n        spawn:\n            print(\"O1 ran\")\n        inner()\n        spawn:\n            print(\"O2 ran\")\n        return\nfn main():\n    run()\n    print(\"after\")\nmain()\n";
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
-        let _ = tx.send(run_capture_parallel(src));
+        let _ = tx.send(run_capture(src));
     });
     match rx.recv_timeout(std::time::Duration::from_secs(30)) {
         Ok(r) => {
@@ -13010,7 +12950,7 @@ fn golden_parallel_deadlock_still_faults() {
     let src = include_str!("../../examples/parallel_deadlock.chz");
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
-        let _ = tx.send(run_capture_parallel(src));
+        let _ = tx.send(run_capture(src));
     });
     match rx.recv_timeout(std::time::Duration::from_secs(30)) {
         Ok(r) => {
@@ -13031,14 +12971,17 @@ fn golden_parallel_deadlock_still_faults() {
 
 /// Ping-pong across two channels exercises many suspend↔resume cycles: each fiber repeatedly
 /// parks on an empty `recv`, the scheduler runs the sibling whose `send` wakes it, and the parked
-/// fiber resumes mid-`while`-loop with its locals intact.
+/// fiber resumes mid-`while`-loop with its locals intact. The LINE SET is fixed by the program's
+/// logic; the exact print order is a genuine M:N race (each worker's stdout can batch-flush out of
+/// wall-clock step with the other), so compare order-insensitively — same idiom as
+/// `assert_same_lines` elsewhere.
 #[test]
 fn fibers_ping_pong_interleaves() {
     let src = "fn ping(a: Channel[int], b: Channel[int]):\n    i := 0\n    while i < 3:\n        b.send(i)\n        x := a.recv()\n        print(\"ping {x}\")\n        i = i + 1\nfn pong(a: Channel[int], b: Channel[int]):\n    i := 0\n    while i < 3:\n        y := b.recv()\n        print(\"pong {y}\")\n        a.send(y + 100)\n        i = i + 1\nfn main():\n    a := Channel[int]()\n    b := Channel[int]()\n    parallel:\n        spawn ping(a, b)\n        spawn pong(a, b)\nmain()\n";
     let expected = "pong 0\nping 100\npong 1\nping 101\npong 2\nping 102\n";
-    assert_eq!(run(src), expected);
+    crate::vm::assert_same_lines(&run(src), expected);
     // Same result under GC stress — parked fibers' frames/locals are rooted while they wait.
-    assert_eq!(run_capture_stress(src), expected);
+    crate::vm::assert_same_lines(&run_capture_stress(src), expected);
 }
 
 /// All siblings parked on empty channels that no one will fill ⇒ a real deadlock (detected by the
@@ -13049,40 +12992,36 @@ fn fibers_all_blocked_is_deadlock() {
     assert!(run_err(src).contains("deadlock"), "expected deadlock");
 }
 
-/// Native-reentry guard: a blocking `recv` reached inside a list-HOF callback cannot park (the
-/// HOF's loop state is on the Rust stack), so it faults `deadlock` even though a sibling could
-/// otherwise supply the value — the documented B1 v1 limitation, kept memory-safe.
+/// Native-reentry guard, M:N: a blocking `recv` reached inside a list-HOF callback (the HOF's loop
+/// state is on the Rust stack, so it cannot PARK in place) now completes via the M:N engine's
+/// DEMOTION path instead — same C5/N6g mechanism as a `defer`red `recv` (`docs/gaps.md` N6g): a
+/// replacement worker takes over scheduling while this thread blocks synchronously waiting for the
+/// sibling's send. On the (removed) cooperative engine this had no replacement worker to demote to
+/// and faulted `deadlock` instead — a documented, accepted engine-capability difference, not a bug.
 #[test]
-fn fibers_recv_inside_map_callback_faults() {
+fn fibers_recv_inside_map_callback_demotes_on_mn() {
     let src = "fn use_map(ch: Channel[int]):\n    xs := [0]\n    ys := xs.map(fn(x): ch.recv())\n    print(ys)\nfn fill(ch: Channel[int]):\n    ch.send(1)\nfn main():\n    ch := Channel[int]()\n    parallel:\n        spawn use_map(ch)\n        spawn fill(ch)\nmain()\n";
-    assert!(
-        run_err(src).contains("deadlock"),
-        "recv inside map must fault, not suspend"
-    );
+    assert_eq!(run(src), "[1]\n");
 }
 
-/// Native-reentry guard: a blocking `recv` inside a struct `index`/`slice`/`set_index` operator
-/// overload (run from the native indexing opcodes, host-stack state) cannot park — it faults
-/// `deadlock`. Regression for a guard gap that would otherwise corrupt the operand stack.
+/// Native-reentry guard, M:N: a blocking `recv` inside a struct `index`/`slice`/`set_index`
+/// operator overload (run from the native indexing opcodes, host-stack state) now completes via
+/// M:N's demotion path — same mechanism as `fibers_recv_inside_map_callback_demotes_on_mn`.
 #[test]
-fn fibers_recv_inside_index_overload_faults() {
+fn fibers_recv_inside_index_overload_demotes_on_mn() {
     let src = "struct Src:\n    ch: Channel[int]\n    fn index(self, k: int) -> int:\n        return self.ch.recv()\nfn use_index(s: Src):\n    print(s[0])\nfn fill(ch: Channel[int]):\n    ch.send(7)\nfn main():\n    ch := Channel[int]()\n    s := Src(ch)\n    parallel:\n        spawn use_index(s)\n        spawn fill(ch)\nmain()\n";
-    assert!(
-        run_err(src).contains("deadlock"),
-        "recv inside index overload must fault, not suspend"
-    );
+    assert_eq!(run(src), "7\n");
 }
 
-/// Native-reentry guard: a blocking `recv` inside a `defer`red call (run during frame teardown,
-/// off the suspendable path) faults rather than parking. The `recv` is in the deferred function's
-/// body — only the receiver handle is captured at the `defer` statement — so it runs at teardown.
+/// Native-reentry guard, M:N: a blocking `recv` inside a `defer`red call (run during frame
+/// teardown, off the suspendable path) now completes via M:N's demotion path — the exact mechanism
+/// `docs/gaps.md` N6g documents ("M:N demotes and completes the cleanup"). The `recv` is in the
+/// deferred function's body — only the receiver handle is captured at the `defer` statement — so it
+/// runs at teardown.
 #[test]
-fn fibers_recv_inside_defer_faults() {
+fn fibers_recv_inside_defer_demotes_on_mn() {
     let src = "fn consume(ch: Channel[int]):\n    ch.recv()\nfn worker(ch: Channel[int]):\n    defer consume(ch)\n    print(\"body\")\nfn sender(ch: Channel[int]):\n    ch.send(5)\nfn main():\n    ch := Channel[int]()\n    parallel:\n        spawn worker(ch)\n        spawn sender(ch)\nmain()\n";
-    assert!(
-        run_err(src).contains("deadlock"),
-        "recv inside defer must fault, not suspend"
-    );
+    assert_eq!(run(src), "body\n");
 }
 
 /// A nested `parallel:` inside a child fiber runs its own scheduler level (recursively); the
@@ -13168,7 +13107,7 @@ fn golden_shared_chz_matches_expected_and_interp() {
     let expected = include_str!("../../examples/shared.expected");
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, expected);
-    assert_eq!(vm_out, run_capture_parallel(src).expect("interp run"));
+    assert_eq!(vm_out, run_capture(src).expect("interp run"));
 }
 
 /// C5 golden: the `Executor` escape hatch — submit/shutdown (FIFO drain), `defer ex.shutdown()`,
@@ -13179,7 +13118,7 @@ fn golden_executor_chz_matches_expected_and_interp() {
     let expected = include_str!("../../examples/executor.expected");
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, expected);
-    assert_eq!(vm_out, run_capture_parallel(src).expect("interp run"));
+    assert_eq!(vm_out, run_capture(src).expect("interp run"));
 }
 
 // Micro-tests mirroring the interpreter's C2/C3 unit tests (src/interp/mod.rs), to pin the VM's
@@ -13265,7 +13204,7 @@ fn vm_rwshared_get_set_read_write_roundtrip() {
     let src = "fn main():\n    r := RwShared(10)\n    print(r.get())\n    r.set(20)\n    print(r.read(fn(x): x + 1))\n    r.write(fn(x): x * 2)\n    print(r.get())\nmain()\n";
     assert_eq!(run(src), "10\n21\n40\n");
     // Byte-identical on the interpreter (the frozen oracle).
-    assert_eq!(run(src), run_capture_parallel(src).expect("interp run"));
+    assert_eq!(run(src), run_capture(src).expect("interp run"));
 }
 
 #[test]
@@ -13288,7 +13227,7 @@ fn executor_submit_runs_fifo_at_shutdown() {
     assert_eq!(run(src), "0\n1\n2\n");
     // M:N drains the two Executor tasks on the pool, so `1`/`2` can print in either order (`0` is
     // the parent's, always first). Same multiset — cooperative FIFO order pinned above.
-    assert_same_lines(&run(src), &run_capture_parallel(src).expect("M:N run"));
+    assert_same_lines(&run(src), &run_capture(src).expect("M:N run"));
 }
 
 #[test]
@@ -13297,33 +13236,25 @@ fn executor_submit_after_shutdown_errors() {
     let err = run_err(src);
     assert!(err.contains("shut-down Executor"), "got: {err}");
     // Parity: same fault message on the interpreter.
-    let interp = run_capture_parallel(src)
-        .expect_err("interp should fault")
-        .message;
+    let interp = run_capture(src).expect_err("interp should fault").message;
     assert_eq!(err, interp, "VM/interp error divergence");
 }
 
 /// `shutdown_now` is "attempts to stop" (decision D4) — COOPERATIVE, not preemptive, exactly like
-/// Java's `shutdownNow`. The two engines therefore give it different reach, and that difference is
-/// deliberate rather than a parity break:
+/// Java's `shutdownNow`. The M:N engine starts the job at its `submit`, so by the time
+/// `shutdown_now` trips the cancel flag the job may already have run to completion — a job with no
+/// cancellation point in it (this one is a single `print`) cannot be stopped at all. So the only
+/// thing assertable is that `shutdown_now` returns promptly and the program finishes.
 ///
-/// * `--serial` still queues at `submit` (decision D3), so the job has provably not started and
-///   `shutdown_now` discards it outright. This leg is byte-exact and unchanged from the pre-eager era.
-/// * The default M:N engine starts the job at its `submit`, so by the time `shutdown_now` trips the
-///   cancel flag the job may already have run to completion — a job with no cancellation point in it
-///   (this one is a single `print`) cannot be stopped at all. So the only thing assertable across both
-///   engines is that `shutdown_now` returns promptly and the program finishes.
-///
-/// Asserting the M:N leg as a SET rather than a sequence is what keeps this honest: pinning it to
+/// Asserting the result as a SET rather than a sequence is what keeps this honest: pinning it to
 /// either outcome would encode a race as a guarantee.
 #[test]
 fn executor_shutdown_now_is_cooperative_not_preemptive() {
     let src = "fn j():\n    print(99)\nfn main():\n    ex := Executor()\n    ex.submit(fn(): j())\n    ex.shutdown_now()\n    print(0)\nmain()\n";
-    assert_eq!(run(src), "0\n", "serial discards work that never started");
-    let mn = run_capture_parallel(src).expect("mn run");
+    let mn = run_capture(src).expect("mn run");
     assert!(
         mn == "0\n" || mn == "99\n0\n",
-        "M:N must either stop the job or let it finish, never anything else; got {mn:?}"
+        "shutdown_now must either stop the job or let it finish, never anything else; got {mn:?}"
     );
 }
 
@@ -13378,9 +13309,9 @@ print("done")
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         let _ = tx.send((
-            run_capture_parallel(handshake),
+            run_capture(handshake),
             run_capture(plain),
-            run_capture_parallel(plain),
+            run_capture(plain),
         ));
     });
     let (mn_handshake, serial_plain, mn_plain) = rx
@@ -13417,7 +13348,7 @@ ch.send(42)
 "#;
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
-        let _ = tx.send((run_capture(src), run_capture_parallel(src)));
+        let _ = tx.send((run_capture(src), run_capture(src)));
     });
     let (serial, mn) = rx
         .recv_timeout(std::time::Duration::from_secs(60))
@@ -13463,7 +13394,7 @@ ex.shutdown()
 "#;
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
-        let _ = tx.send(run_capture_parallel(src));
+        let _ = tx.send(run_capture(src));
     });
     let mn = rx.recv_timeout(std::time::Duration::from_secs(60)).expect(
         "two jobs deadlocked in one executor must fault, not hang — or this host has <2 free \
@@ -13505,7 +13436,7 @@ y.shutdown()
 "#;
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
-        let _ = tx.send(run_capture_parallel(src));
+        let _ = tx.send(run_capture(src));
     });
     let mn = rx.recv_timeout(std::time::Duration::from_secs(60)).expect(
         "two mutually-deadlocked executors must fault, not hang — or this host has <2 free pool \
@@ -13543,7 +13474,7 @@ ex.submit(fn(): print("job got {ch.recv()}"))
 "#;
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
-        let _ = tx.send(run_capture_parallel(src));
+        let _ = tx.send(run_capture(src));
     });
     let mn = rx
         .recv_timeout(std::time::Duration::from_secs(60))
@@ -13586,7 +13517,7 @@ ex.shutdown()
 "#;
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
-        let _ = tx.send(run_capture_parallel(src));
+        let _ = tx.send(run_capture(src));
     });
     let out = rx
         .recv_timeout(std::time::Duration::from_secs(60))
@@ -13620,7 +13551,7 @@ wait:
 "#;
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
-        let _ = tx.send((run_capture(src), run_capture_parallel(src)));
+        let _ = tx.send((run_capture(src), run_capture(src)));
     });
     let (serial, mn) = rx
         .recv_timeout(std::time::Duration::from_secs(60))
@@ -13667,7 +13598,7 @@ exA.shutdown()
     std::thread::spawn(move || {
         let mut bad = Vec::new();
         for _ in 0..15 {
-            match run_capture_parallel(src) {
+            match run_capture(src) {
                 Ok(o) if o == "got 1\n" => {}
                 other => bad.push(format!("{other:?}")),
             }
@@ -13720,7 +13651,7 @@ print(\"end\")
     std::thread::spawn(move || {
         let cfg = crate::native::HostConfig::default;
         let (so, _se, sr, _sc) = run_file_with(&e, cfg());
-        let (mo, _me, mr, _mc) = run_file_p(&e);
+        let (mo, _me, mr, _mc) = run_file(&e);
         let _ = tx.send((so, sr, mo, mr));
     });
     let (so, sr, mo, mr) = rx
@@ -13774,7 +13705,7 @@ print(\"end\")
     let (tx, rx) = std::sync::mpsc::channel();
     let e = entry.clone();
     std::thread::spawn(move || {
-        let _ = tx.send(run_file_p(&e));
+        let _ = tx.send(run_file(&e));
     });
     let (mo, _me, mr, _mc) = rx
         .recv_timeout(std::time::Duration::from_secs(60))
@@ -13832,7 +13763,7 @@ ex.shutdown()
     std::thread::spawn(move || {
         let mut bad = Vec::new();
         for _ in 0..12 {
-            let (o, _e2, r, _c) = run_file_p(&e);
+            let (o, _e2, r, _c) = run_file(&e);
             if r.is_err() || o != "sum 1225\n" {
                 bad.push(format!("{r:?} / out={o:?}"));
             }
@@ -13892,7 +13823,7 @@ print(\"after nursery\")
     let run_entry = entry.clone();
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
-        let _ = tx.send(run_file_parallel(
+        let _ = tx.send(run_file_with(
             &run_entry,
             crate::native::HostConfig::default(),
         ));
@@ -13946,7 +13877,7 @@ parallel:
     let run_entry = entry.clone();
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
-        let _ = tx.send(run_file_parallel(
+        let _ = tx.send(run_file_with(
             &run_entry,
             crate::native::HostConfig::default(),
         ));
@@ -14001,7 +13932,7 @@ parallel:
     let run_entry = entry.clone();
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
-        let _ = tx.send(run_file_parallel(
+        let _ = tx.send(run_file_with(
             &run_entry,
             crate::native::HostConfig::default(),
         ));
@@ -14067,7 +13998,7 @@ print(\"after nursery\")
     let run_entry = entry.clone();
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
-        let _ = tx.send(run_file_parallel(
+        let _ = tx.send(run_file_with(
             &run_entry,
             crate::native::HostConfig::default(),
         ));
@@ -14166,7 +14097,7 @@ ex.shutdown()
         let run_entry = entry.clone();
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            let _ = tx.send(run_file_parallel(
+            let _ = tx.send(run_file_with(
                 &run_entry,
                 crate::native::HostConfig::default(),
             ));
@@ -14219,7 +14150,7 @@ print(\"after nursery\")
     let run_entry = entry.clone();
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
-        let _ = tx.send(run_file_parallel(
+        let _ = tx.send(run_file_with(
             &run_entry,
             crate::native::HostConfig::default(),
         ));
@@ -14272,7 +14203,7 @@ print(\"done\")
     let run_entry = entry.clone();
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
-        let _ = tx.send(run_file_parallel(
+        let _ = tx.send(run_file_with(
             &run_entry,
             crate::native::HostConfig::default(),
         ));
@@ -14344,7 +14275,7 @@ print(\"after\")
     let run_entry = entry.clone();
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
-        let _ = tx.send(run_file_parallel(
+        let _ = tx.send(run_file_with(
             &run_entry,
             crate::native::HostConfig::default(),
         ));
@@ -14404,7 +14335,7 @@ print(\"main done\")
     let (tx, rx) = std::sync::mpsc::channel();
     let started = std::time::Instant::now();
     std::thread::spawn(move || {
-        let _ = tx.send(run_file_parallel(
+        let _ = tx.send(run_file_with(
             &run_entry,
             crate::native::HostConfig::default(),
         ));
@@ -14500,7 +14431,7 @@ ex.shutdown()
     std::thread::spawn(move || {
         let mut bad = Vec::new();
         for _ in 0..6 {
-            let (o, _e2, r, _c) = run_file_p(&e);
+            let (o, _e2, r, _c) = run_file(&e);
             if r.is_err() || o != "sum 19900\n" {
                 bad.push(format!("{r:?} / out={o:?}"));
             }
@@ -14601,7 +14532,7 @@ ex.submit(closer)
     let (tx, rx) = std::sync::mpsc::channel();
     let e = entry.clone();
     std::thread::spawn(move || {
-        let (o, _e2, r, _c) = run_file_p(&e);
+        let (o, _e2, r, _c) = run_file(&e);
         let _ = tx.send((o, format!("{r:?}"), r.is_err()));
     });
     let outcome = rx.recv_timeout(std::time::Duration::from_secs(30));
@@ -14694,7 +14625,7 @@ print(done.recv())
     let e = entry.clone();
     std::thread::spawn(move || {
         let t0 = std::time::Instant::now();
-        let (o, _e2, r, _c) = run_file_p(&e);
+        let (o, _e2, r, _c) = run_file(&e);
         let _ = tx.send((o, format!("{r:?}"), r.is_err(), t0.elapsed()));
     });
     let outcome = rx.recv_timeout(std::time::Duration::from_secs(60));
@@ -14762,7 +14693,7 @@ print(out.recv())
     let (tx, rx) = std::sync::mpsc::channel();
     let e = entry.clone();
     std::thread::spawn(move || {
-        let (o, _e2, r, _c) = run_file_p(&e);
+        let (o, _e2, r, _c) = run_file(&e);
         let _ = tx.send((o, format!("{r:?}"), r.is_err()));
     });
     let outcome = rx.recv_timeout(std::time::Duration::from_secs(30));
@@ -14821,7 +14752,7 @@ ex.shutdown()
     let (tx, rx) = std::sync::mpsc::channel();
     let e = entry.clone();
     std::thread::spawn(move || {
-        let (o, _e2, r, _c) = run_file_p(&e);
+        let (o, _e2, r, _c) = run_file(&e);
         let _ = tx.send((o, format!("{r:?}"), r.is_err()));
     });
     let outcome = rx.recv_timeout(std::time::Duration::from_secs(30));
@@ -14904,7 +14835,7 @@ ex.shutdown()
     let e = entry.clone();
     std::thread::spawn(move || {
         let t0 = std::time::Instant::now();
-        let (o, _e2, r, _c) = run_file_p(&e);
+        let (o, _e2, r, _c) = run_file(&e);
         let _ = tx.send((o, format!("{r:?}"), r.is_err(), t0.elapsed()));
     });
     let outcome = rx.recv_timeout(std::time::Duration::from_secs(60));
@@ -14961,7 +14892,7 @@ ex.shutdown()
     let e = entry.clone();
     std::thread::spawn(move || {
         let t0 = std::time::Instant::now();
-        let (o, _e2, r, _c) = run_file_p(&e);
+        let (o, _e2, r, _c) = run_file(&e);
         let _ = tx.send((o, format!("{r:?}"), r.is_err(), t0.elapsed()));
     });
     let outcome = rx.recv_timeout(std::time::Duration::from_secs(60));
@@ -15024,7 +14955,7 @@ ex.shutdown()
     let e = entry.clone();
     std::thread::spawn(move || {
         let t0 = std::time::Instant::now();
-        let (o, _e2, r, _c) = run_file_p(&e);
+        let (o, _e2, r, _c) = run_file(&e);
         let _ = tx.send((o, format!("{r:?}"), r.is_err(), t0.elapsed()));
     });
     let outcome = rx.recv_timeout(std::time::Duration::from_secs(60));
@@ -15081,7 +15012,7 @@ print(\"main done\")
     let e = entry.clone();
     std::thread::spawn(move || {
         let t0 = std::time::Instant::now();
-        let (o, _e2, r, _c) = run_file_p(&e);
+        let (o, _e2, r, _c) = run_file(&e);
         let _ = tx.send((o, format!("{r:?}"), t0.elapsed()));
     });
     let outcome = rx.recv_timeout(std::time::Duration::from_secs(30));
@@ -15146,7 +15077,7 @@ main()
     let e = entry.clone();
     std::thread::spawn(move || {
         let t0 = std::time::Instant::now();
-        let (o, _e2, r, _c) = run_file_p(&e);
+        let (o, _e2, r, _c) = run_file(&e);
         let _ = tx.send((o, format!("{r:?}"), t0.elapsed()));
     });
     let outcome = rx.recv_timeout(std::time::Duration::from_secs(30));
@@ -15197,7 +15128,7 @@ print("main done")
 "#;
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
-        let _ = tx.send((run_capture(src), run_capture_parallel(src)));
+        let _ = tx.send((run_capture(src), run_capture(src)));
     });
     let (serial, mn) = rx
         .recv_timeout(std::time::Duration::from_secs(60))
@@ -15239,7 +15170,7 @@ print("main done")
 "#;
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
-        let _ = tx.send((run_capture(src), run_capture_parallel(src)));
+        let _ = tx.send((run_capture(src), run_capture(src)));
     });
     let (serial, mn) = rx
         .recv_timeout(std::time::Duration::from_secs(60))
@@ -15303,7 +15234,7 @@ print("done")
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         let t0 = std::time::Instant::now();
-        let out = run_file_p(&run_entry);
+        let out = run_file(&run_entry);
         let _ = tx.send((out, t0.elapsed()));
     });
     let result = rx.recv_timeout(std::time::Duration::from_secs(30));
@@ -15360,7 +15291,7 @@ print("done")
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         let t0 = std::time::Instant::now();
-        let out = run_file_p(&run_entry);
+        let out = run_file(&run_entry);
         let _ = tx.send((out, t0.elapsed()));
     });
     let result = rx.recv_timeout(std::time::Duration::from_secs(30));
@@ -15423,7 +15354,7 @@ inner.shutdown()
 print("main done")
 "#;
     let entry = write_temp_chz("submit_after_creator_cancel", src);
-    let (out, _err, res, _code) = run_file_p(&entry);
+    let (out, _err, res, _code) = run_file(&entry);
     let _ = std::fs::remove_file(&entry);
     let e = res.expect_err(&format!(
         "the poisoned submit was accepted silently: {out:?}"
@@ -15464,7 +15395,7 @@ inner.shutdown()
 print("main done")
 "#;
     let entry = write_temp_chz("submit_after_creator_graceful", src);
-    let (out, _err, res, _code) = run_file_p(&entry);
+    let (out, _err, res, _code) = run_file(&entry);
     let _ = std::fs::remove_file(&entry);
     assert!(res.is_ok(), "the program faulted: {res:?}");
     assert!(
@@ -15495,7 +15426,7 @@ mine.shutdown()
 print("done")
 "#;
     let entry = write_temp_chz("submit_mains_own_after_unrelated_now", src);
-    let (out, _err, res, _code) = run_file_p(&entry);
+    let (out, _err, res, _code) = run_file(&entry);
     let _ = std::fs::remove_file(&entry);
     assert!(res.is_ok(), "the program faulted: {res:?}");
     assert!(
@@ -15514,7 +15445,7 @@ fn golden_executor_autodrain_matches_expected_and_interp() {
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, expected);
     // M:N auto-drains the two jobs on the pool — same lines, order may differ.
-    assert_same_lines(&vm_out, &run_capture_parallel(src).expect("M:N run"));
+    assert_same_lines(&vm_out, &run_capture(src).expect("M:N run"));
 }
 
 #[test]
@@ -15522,14 +15453,14 @@ fn executor_autodrain_runs_unshut_at_exit() {
     let src = "fn j(n: int):\n    print(n)\nfn main():\n    ex := Executor()\n    ex.submit(fn(): j(1))\n    ex.submit(fn(): j(2))\n    print(0)\nmain()\n";
     assert_eq!(run(src), "0\n1\n2\n");
     // M:N drains the two jobs on the pool, racing `1`/`2`; same multiset (`0` is the parent's).
-    assert_same_lines(&run(src), &run_capture_parallel(src).expect("M:N run"));
+    assert_same_lines(&run(src), &run_capture(src).expect("M:N run"));
 }
 
 #[test]
 fn executor_autodrain_not_redrained_after_explicit_shutdown() {
     let src = "fn j(n: int):\n    print(n)\nfn main():\n    ex := Executor()\n    ex.submit(fn(): j(1))\n    ex.shutdown()\n    print(0)\nmain()\n";
     assert_eq!(run(src), "1\n0\n");
-    assert_eq!(run(src), run_capture_parallel(src).expect("interp run"));
+    assert_eq!(run(src), run_capture(src).expect("interp run"));
 }
 
 #[test]
@@ -15592,7 +15523,7 @@ fn main():
 main()
 "#;
     let serial = run_capture(src).expect("serial run");
-    let mn = run_capture_parallel(src).expect("M:N run");
+    let mn = run_capture(src).expect("M:N run");
     for out in [&serial, &mn] {
         assert!(out.contains("a-before-fault"), "lost job 0's output: {out}");
         assert!(out.contains("b-before-fault"), "lost job 1's output: {out}");
@@ -15605,22 +15536,11 @@ main()
 }
 
 #[test]
-fn executor_reentrant_shutdown_now_during_drain() {
-    // A task that calls `shutdown_now()` mid-drain discards the remaining siblings on BOTH
-    // engines (the drain pops from the live queue, so the clear takes effect) — pins the C1 fix.
-    let src = "fn stop(e: Executor):\n    e.shutdown_now()\nfn main():\n    ex := Executor()\n    ex.submit(fn(): print(\"A\"))\n    ex.submit(fn(): stop(ex))\n    ex.submit(fn(): print(\"C\"))\n    ex.shutdown()\n    print(\"end\")\nmain()\n";
-    let vm = run_capture(src).expect("vm run");
-    assert_eq!(vm, "A\nend\n");
-    // Cooperative-engine invariant: the M:N engine's pooled Executor drains differently — not a
-    // serial-vs-M:N parity comparison.
-}
-
-#[test]
 fn spawn_first_error_aborts_siblings() {
     // The first task to fault aborts the remaining siblings and propagates out of `parallel:`.
     let src = "fn boom():\n    x := [1]\n    print(x[5])\nfn quiet():\n    print(\"ran\")\nfn main():\n    parallel:\n        spawn boom()\n        spawn quiet()\nmain()\n";
     let vm = run_err(src);
-    let interp = match run_capture_parallel(src) {
+    let interp = match run_capture(src) {
         Ok(o) => panic!("expected error, got {o:?}"),
         Err(e) => e.message,
     };
@@ -15633,7 +15553,7 @@ fn spawn_composes_with_recover() {
     let src = "fn boom():\n    x := [1]\n    print(x[9])\nfn main():\n    r := recover:\n        parallel:\n            spawn boom()\n        0\n    print(\"recovered\")\nmain()\n";
     let vm = run_capture(src).expect("vm run");
     assert_eq!(vm, "recovered\n");
-    assert_eq!(vm, run_capture_parallel(src).expect("interp run"));
+    assert_eq!(vm, run_capture(src).expect("interp run"));
 }
 
 /// Block-scoped defer: assert VM == interp == `expected` for a snippet.
@@ -15641,7 +15561,7 @@ fn assert_defer_scope(src: &str, expected: &str) {
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, expected, "vm output");
     assert_eq!(
-        run_capture_parallel(src).expect("interp run"),
+        run_capture(src).expect("interp run"),
         expected,
         "interp output"
     );
@@ -15840,7 +15760,7 @@ fn golden_hof_chz_matches_expected_and_interp() {
     let expected = include_str!("../../examples/hof.expected");
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, expected);
-    assert_eq!(vm_out, run_capture_parallel(src).expect("interp run"));
+    assert_eq!(vm_out, run_capture(src).expect("interp run"));
 }
 
 /// `examples/list_hof.chz` — `map`/`filter`/`fold`, incl. an element-type-changing map.
@@ -15850,7 +15770,7 @@ fn golden_list_hof_chz_matches_expected_and_interp() {
     let expected = include_str!("../../examples/list_hof.expected");
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, expected);
-    assert_eq!(vm_out, run_capture_parallel(src).expect("interp run"));
+    assert_eq!(vm_out, run_capture(src).expect("interp run"));
 }
 
 /// `examples/list_hof_shrink.chz` — map/filter/fold iterate a snapshot, so a callback that
@@ -15862,7 +15782,7 @@ fn golden_list_hof_shrink_chz_matches_expected_and_interp() {
     let expected = include_str!("../../examples/list_hof_shrink.expected");
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, expected);
-    assert_eq!(vm_out, run_capture_parallel(src).expect("interp run"));
+    assert_eq!(vm_out, run_capture(src).expect("interp run"));
 }
 
 /// `examples/list_methods.chz` — pop/reverse/contains/index_of/sum + value/iter ergonomics
@@ -15873,7 +15793,7 @@ fn golden_list_methods_chz_matches_expected_and_interp() {
     let expected = include_str!("../../examples/list_methods.expected");
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, expected);
-    assert_eq!(vm_out, run_capture_parallel(src).expect("interp run"));
+    assert_eq!(vm_out, run_capture(src).expect("interp run"));
 }
 
 /// `examples/loops.chz` — break/continue across for-range, for-list, and while loops.
@@ -15883,7 +15803,7 @@ fn golden_loops_chz_matches_expected_and_interp() {
     let expected = include_str!("../../examples/loops.expected");
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, expected);
-    assert_eq!(vm_out, run_capture_parallel(src).expect("interp run"));
+    assert_eq!(vm_out, run_capture(src).expect("interp run"));
 }
 
 /// `examples/match_value.chz` — `match` on int/str literals with `_`, stmt + expr forms.
@@ -15893,7 +15813,7 @@ fn golden_match_value_chz_matches_expected_and_interp() {
     let expected = include_str!("../../examples/match_value.expected");
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, expected);
-    assert_eq!(vm_out, run_capture_parallel(src).expect("interp run"));
+    assert_eq!(vm_out, run_capture(src).expect("interp run"));
 }
 
 /// `examples/pair.chz` — tuples, multi-return, destructuring let, `.0`/`.1` access.
@@ -15903,7 +15823,7 @@ fn golden_pair_chz_matches_expected_and_interp() {
     let expected = include_str!("../../examples/pair.expected");
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, expected);
-    assert_eq!(vm_out, run_capture_parallel(src).expect("interp run"));
+    assert_eq!(vm_out, run_capture(src).expect("interp run"));
 }
 
 /// `examples/method_default_args.chz` — default + named args on methods (was parity-only).
@@ -15913,7 +15833,7 @@ fn golden_method_default_args_chz_matches_expected_and_interp() {
     let expected = include_str!("../../examples/method_default_args.expected");
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, expected);
-    assert_eq!(vm_out, run_capture_parallel(src).expect("interp run"));
+    assert_eq!(vm_out, run_capture(src).expect("interp run"));
 }
 
 /// `examples/method_type_params.chz` — a method's own `[U]` inferred per call (was parity-only).
@@ -15923,7 +15843,7 @@ fn golden_method_type_params_chz_matches_expected_and_interp() {
     let expected = include_str!("../../examples/method_type_params.expected");
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, expected);
-    assert_eq!(vm_out, run_capture_parallel(src).expect("interp run"));
+    assert_eq!(vm_out, run_capture(src).expect("interp run"));
 }
 
 /// `examples/param_protocol.chz` — a user-defined parameterized protocol bound (was parity-only).
@@ -15933,7 +15853,7 @@ fn golden_param_protocol_chz_matches_expected_and_interp() {
     let expected = include_str!("../../examples/param_protocol.expected");
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, expected);
-    assert_eq!(vm_out, run_capture_parallel(src).expect("interp run"));
+    assert_eq!(vm_out, run_capture(src).expect("interp run"));
 }
 
 /// `examples/edge_cases.chz` — torture test: arithmetic faults under `recover:`, int/float
@@ -15945,7 +15865,7 @@ fn golden_edge_cases_chz_matches_expected_and_interp() {
     let expected = include_str!("../../examples/edge_cases.expected");
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, expected);
-    assert_eq!(vm_out, run_capture_parallel(src).expect("interp run"));
+    assert_eq!(vm_out, run_capture(src).expect("interp run"));
 }
 
 /// Left-shift overflow is a recoverable fault (`integer overflow in Shl`), matching the
@@ -15958,7 +15878,7 @@ fn shift_left_overflow_is_recoverable_fault() {
     for src in ["print(1 << 63)", "print(3 << 62)", "print(2 << 62)"] {
         let vm = run_capture(src).expect_err("vm: shift overflow should fault");
         assert_eq!(vm.message, "integer overflow in Shl");
-        let it = run_capture_parallel(src).expect_err("interp: shift overflow");
+        let it = run_capture(src).expect_err("interp: shift overflow");
         assert_eq!(it.message, "integer overflow in Shl");
     }
 
@@ -15973,7 +15893,7 @@ fn shift_left_overflow_is_recoverable_fault() {
     ] {
         let vm = run_capture(src).expect("vm: non-overflowing shift");
         assert_eq!(vm, want, "vm mismatch for `{src}`");
-        assert_eq!(run_capture_parallel(src).expect("interp"), want);
+        assert_eq!(run_capture(src).expect("interp"), want);
     }
 }
 
@@ -15999,7 +15919,7 @@ fn pad_left_empty_fill_is_recoverable_fault() {
             "serial mismatch for `{src}`"
         );
         assert_eq!(
-            run_capture_parallel(src)
+            run_capture(src)
                 .expect_err("M:N: empty fill should fault")
                 .message,
             MSG,
@@ -16020,7 +15940,7 @@ fn pad_left_empty_fill_is_recoverable_fault() {
                main()\n";
     let want = format!("caught {MSG}\n");
     assert_eq!(run_capture(rec).expect("serial: recover"), want);
-    assert_eq!(run_capture_parallel(rec).expect("M:N: recover"), want);
+    assert_eq!(run_capture(rec).expect("M:N: recover"), want);
 }
 
 /// A multi-character `fill` is a repeating cycle TRUNCATED to fit: the result is EXACTLY `width`
@@ -16047,7 +15967,7 @@ fn pad_left_multi_char_fill_is_exactly_width() {
             "serial mismatch for `{src}`"
         );
         assert_eq!(
-            run_capture_parallel(src).expect("M:N"),
+            run_capture(src).expect("M:N"),
             want,
             "M:N mismatch for `{src}`"
         );
@@ -16073,7 +15993,7 @@ fn pad_left_codepoints_not_bytes() {
             "serial mismatch for `{call}`"
         );
         assert_eq!(
-            run_capture_parallel(&src).expect("M:N"),
+            run_capture(&src).expect("M:N"),
             want,
             "M:N mismatch for `{call}`"
         );
@@ -16097,7 +16017,7 @@ fn pad_left_huge_width_is_recoverable_fault() {
             "serial mismatch for `{src}`"
         );
         assert_eq!(
-            run_capture_parallel(src)
+            run_capture(src)
                 .expect_err("M:N: huge pad should fault")
                 .message,
             "string pad capacity overflow",
@@ -16115,7 +16035,7 @@ fn str_repeat_capacity_overflow_is_recoverable_fault() {
     let src = r#"print("ab".repeat(9223372036854775807))"#;
     let vm = run_capture(src).expect_err("vm: repeat overflow should fault");
     assert_eq!(vm.message, "string repeat capacity overflow");
-    let it = run_capture_parallel(src).expect_err("interp: repeat overflow should fault");
+    let it = run_capture(src).expect_err("interp: repeat overflow should fault");
     assert_eq!(it.message, "string repeat capacity overflow");
 
     // Huge-but-representable count: passes the `isize::MAX` byte guard but the allocation is
@@ -16123,7 +16043,7 @@ fn str_repeat_capacity_overflow_is_recoverable_fault() {
     let huge = r#"print("ab".repeat(100000000000000000))"#;
     let vm = run_capture(huge).expect_err("vm: huge repeat should fault");
     assert_eq!(vm.message, "string repeat capacity overflow");
-    let it = run_capture_parallel(huge).expect_err("interp: huge repeat should fault");
+    let it = run_capture(huge).expect_err("interp: huge repeat should fault");
     assert_eq!(it.message, "string repeat capacity overflow");
 
     // Empty receiver with a huge count: `total == 0` passes BOTH the byte guard and
@@ -16133,12 +16053,12 @@ fn str_repeat_capacity_overflow_is_recoverable_fault() {
     // returns if no hang occurred.
     let empty_huge = r#"print("".repeat(100000000000000000))"#;
     assert_eq!(run_capture(empty_huge).expect("vm"), "\n");
-    assert_eq!(run_capture_parallel(empty_huge).expect("interp"), "\n");
+    assert_eq!(run_capture(empty_huge).expect("interp"), "\n");
 
     // Sane repeats are unaffected and agree across engines.
     let ok = r#"print("ab".repeat(3))"#;
     assert_eq!(run_capture(ok).expect("vm"), "ababab\n");
-    assert_eq!(run_capture_parallel(ok).expect("interp"), "ababab\n");
+    assert_eq!(run_capture(ok).expect("interp"), "ababab\n");
 }
 
 /// Collection operators (gap #3): list `+` (concat) / `*` (repeat) and set `| & - ^`
@@ -16202,7 +16122,7 @@ fn collection_compound_assign_eval_correct() {
             "vm mismatch for `{src}`"
         );
         assert_eq!(
-            run_capture_parallel(src).expect("interp"),
+            run_capture(src).expect("interp"),
             want,
             "interp mismatch for `{src}`"
         );
@@ -16216,7 +16136,7 @@ fn list_repeat_capacity_overflow_is_recoverable_fault() {
     let src = "print([0] * 9223372036854775807)";
     let vm = run_capture(src).expect_err("vm: list repeat overflow should fault");
     assert_eq!(vm.message, "list repeat capacity overflow");
-    let it = run_capture_parallel(src).expect_err("interp: list repeat overflow");
+    let it = run_capture(src).expect_err("interp: list repeat overflow");
     assert_eq!(it.message, "list repeat capacity overflow");
 
     // Huge-but-representable count: passes the `isize::MAX` byte guard (1e17 * 16B = 1.6e18 <
@@ -16225,13 +16145,13 @@ fn list_repeat_capacity_overflow_is_recoverable_fault() {
     let huge = "print([0] * 100000000000000000)";
     let vm = run_capture(huge).expect_err("vm: huge list repeat should fault");
     assert_eq!(vm.message, "list repeat capacity overflow");
-    let it = run_capture_parallel(huge).expect_err("interp: huge list repeat");
+    let it = run_capture(huge).expect_err("interp: huge list repeat");
     assert_eq!(it.message, "list repeat capacity overflow");
 
     // Boundary: small repeats still work on both engines.
     assert_eq!(run_capture("print([0] * 3)").expect("vm"), "[0, 0, 0]\n");
     assert_eq!(
-        run_capture_parallel("print([0] * 3)").expect("interp"),
+        run_capture("print([0] * 3)").expect("interp"),
         "[0, 0, 0]\n"
     );
 }
@@ -16244,7 +16164,7 @@ fn golden_evaluator_chz_matches_expected_and_interp() {
     let expected = include_str!("../../examples/evaluator.expected");
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, expected);
-    assert_eq!(vm_out, run_capture_parallel(src).expect("interp run"));
+    assert_eq!(vm_out, run_capture(src).expect("interp run"));
 }
 
 /// `examples/ledger.chz` — account ledger: a map of mutable structs, overdraft `Result`s, a
@@ -16255,7 +16175,7 @@ fn golden_ledger_chz_matches_expected_and_interp() {
     let expected = include_str!("../../examples/ledger.expected");
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, expected);
-    assert_eq!(vm_out, run_capture_parallel(src).expect("interp run"));
+    assert_eq!(vm_out, run_capture(src).expect("interp run"));
 }
 
 /// M1 (tier-1) golden: `examples/string_iter.chz` (chars + iterable strings) byte-identical
@@ -16266,7 +16186,7 @@ fn golden_string_iter_chz_matches_expected_and_interp() {
     let expected = include_str!("../../examples/string_iter.expected");
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, expected);
-    assert_eq!(vm_out, run_capture_parallel(src).expect("interp run"));
+    assert_eq!(vm_out, run_capture(src).expect("interp run"));
 }
 
 /// Default + named arguments on free functions: `examples/default_args.chz` byte-identical on
@@ -16277,7 +16197,7 @@ fn golden_default_args_chz_matches_expected_and_interp() {
     let expected = include_str!("../../examples/default_args.expected");
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, expected);
-    assert_eq!(vm_out, run_capture_parallel(src).expect("interp run"));
+    assert_eq!(vm_out, run_capture(src).expect("interp run"));
 }
 
 /// Default + named arguments on struct constructors: `examples/named_struct.chz` byte-identical
@@ -16288,7 +16208,7 @@ fn golden_named_struct_chz_matches_expected_and_interp() {
     let expected = include_str!("../../examples/named_struct.expected");
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, expected);
-    assert_eq!(vm_out, run_capture_parallel(src).expect("interp run"));
+    assert_eq!(vm_out, run_capture(src).expect("interp run"));
 }
 
 /// Gap #5 golden: `examples/map.chz` is byte-identical to its `.expected` on the VM,
@@ -16299,7 +16219,7 @@ fn golden_map_chz_matches_expected_and_interp() {
     let expected = include_str!("../../examples/map.expected");
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, expected);
-    assert_eq!(vm_out, run_capture_parallel(src).expect("interp run"));
+    assert_eq!(vm_out, run_capture(src).expect("interp run"));
 }
 
 /// M10-G1 golden: `examples/stringable.chz` (the `Stringable` protocol — `str(self)` dispatch
@@ -16310,7 +16230,7 @@ fn golden_stringable_chz_matches_expected_and_interp() {
     let expected = include_str!("../../examples/stringable.expected");
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, expected);
-    assert_eq!(vm_out, run_capture_parallel(src).expect("interp run"));
+    assert_eq!(vm_out, run_capture(src).expect("interp run"));
 }
 
 /// M10-G3 golden: `examples/operators.chz` (operator overloading via `Add`/`Sub`/`Mul` + the
@@ -16321,7 +16241,7 @@ fn golden_operators_chz_matches_expected_and_interp() {
     let expected = include_str!("../../examples/operators.expected");
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, expected);
-    assert_eq!(vm_out, run_capture_parallel(src).expect("interp run"));
+    assert_eq!(vm_out, run_capture(src).expect("interp run"));
 }
 
 /// M10-G3 golden: `examples/type_alias.chz` (transparent type aliases) byte-identical on the
@@ -16332,7 +16252,7 @@ fn golden_type_alias_chz_matches_expected_and_interp() {
     let expected = include_str!("../../examples/type_alias.expected");
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, expected);
-    assert_eq!(vm_out, run_capture_parallel(src).expect("interp run"));
+    assert_eq!(vm_out, run_capture(src).expect("interp run"));
 }
 
 /// G1 golden: `examples/generics.chz` (generics + structural `Comparable`) is byte-identical
@@ -16343,7 +16263,7 @@ fn golden_generics_chz_matches_expected_and_interp() {
     let expected = include_str!("../../examples/generics.expected");
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, expected);
-    assert_eq!(vm_out, run_capture_parallel(src).expect("interp run"));
+    assert_eq!(vm_out, run_capture(src).expect("interp run"));
 }
 
 /// G2 golden: generic structs are byte-identical on the VM, interpreter, and `.expected`.
@@ -16353,7 +16273,7 @@ fn golden_generic_structs_chz_matches_expected_and_interp() {
     let expected = include_str!("../../examples/generic_structs.expected");
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, expected);
-    assert_eq!(vm_out, run_capture_parallel(src).expect("interp run"));
+    assert_eq!(vm_out, run_capture(src).expect("interp run"));
 }
 
 /// Tier-2 golden: generic enums (Tree[T] / Either[A, B]) — byte-identical VM, interp, expected.
@@ -16363,7 +16283,7 @@ fn golden_generic_enum_chz_matches_expected_and_interp() {
     let expected = include_str!("../../examples/generic_enum.expected");
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, expected);
-    assert_eq!(vm_out, run_capture_parallel(src).expect("interp run"));
+    assert_eq!(vm_out, run_capture(src).expect("interp run"));
 }
 
 /// Golden: real hash-table map/set with Hashable struct keys — byte-identical VM, interp, expected.
@@ -16373,7 +16293,7 @@ fn golden_hashmap_keys_chz_matches_expected_and_interp() {
     let expected = include_str!("../../examples/hashmap_keys.expected");
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, expected);
-    assert_eq!(vm_out, run_capture_parallel(src).expect("interp run"));
+    assert_eq!(vm_out, run_capture(src).expect("interp run"));
 }
 
 /// Tech-debt golden: `examples/explicit_type_args.chz` (explicit call-site type arguments on a
@@ -16384,7 +16304,7 @@ fn golden_explicit_type_args_chz_matches_expected_and_interp() {
     let expected = include_str!("../../examples/explicit_type_args.expected");
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, expected);
-    assert_eq!(vm_out, run_capture_parallel(src).expect("interp run"));
+    assert_eq!(vm_out, run_capture(src).expect("interp run"));
 }
 
 /// Type-side declaration-site turbofish (PART 1): `examples/turbofish_type_args.chz` exercises
@@ -16406,12 +16326,12 @@ fn golden_turbofish_type_args_chz_matches_expected_and_interp() {
     assert_eq!(vm_out, expected, "vm output drifted from .expected");
     assert_eq!(
         vm_out,
-        run_capture_parallel(src).expect("interp run"),
+        run_capture(src).expect("interp run"),
         "interp drifted from vm"
     );
     assert_eq!(
         vm_out,
-        run_capture_parallel(src).expect("parallel run"),
+        run_capture(src).expect("parallel run"),
         "parallel drifted from vm"
     );
 }
@@ -16437,12 +16357,12 @@ fn golden_turbofish_member_args_chz_matches_expected_and_interp() {
     assert_eq!(vm_out, expected, "vm output drifted from .expected");
     assert_eq!(
         vm_out,
-        run_capture_parallel(src).expect("interp run"),
+        run_capture(src).expect("interp run"),
         "interp drifted from vm"
     );
     assert_eq!(
         vm_out,
-        run_capture_parallel(src).expect("parallel run"),
+        run_capture(src).expect("parallel run"),
         "parallel drifted from vm"
     );
 }
@@ -16455,7 +16375,7 @@ fn golden_set_eq_chz_matches_expected_and_interp() {
     let expected = include_str!("../../examples/set_eq.expected");
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, expected);
-    assert_eq!(vm_out, run_capture_parallel(src).expect("interp run"));
+    assert_eq!(vm_out, run_capture(src).expect("interp run"));
 }
 
 /// Golden: `examples/map_eq.chz` — map equality is order-independent (same key→value pairs
@@ -16467,7 +16387,7 @@ fn golden_map_eq_chz_matches_expected_and_interp() {
     let expected = include_str!("../../examples/map_eq.expected");
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, expected);
-    assert_eq!(vm_out, run_capture_parallel(src).expect("interp run"));
+    assert_eq!(vm_out, run_capture(src).expect("interp run"));
 }
 
 /// Golden: `examples/cycle_guard.chz` — a cyclic data structure makes `print`/`==` a recoverable
@@ -16480,7 +16400,7 @@ fn golden_cycle_guard_chz_matches_expected_and_interp() {
     let expected = include_str!("../../examples/cycle_guard.expected");
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, expected);
-    assert_eq!(vm_out, run_capture_parallel(src).expect("interp run"));
+    assert_eq!(vm_out, run_capture(src).expect("interp run"));
 }
 
 /// FLIPPED (item A, was `airlock_cyclic_struct_recoverable_both_engines`) — a SELF-REFERENTIAL value
@@ -16825,8 +16745,7 @@ main()
     )
     .unwrap();
     let (vm_out, _e, vm_res, _) = run_file(&entry);
-    let (par_out, _pe, par_res, _) =
-        run_file_parallel(&entry, crate::native::HostConfig::default());
+    let (par_out, _pe, par_res, _) = run_file_with(&entry, crate::native::HostConfig::default());
     // Modules fault in LAZILY, so a cell built by `k`'s fault sits in the `Vm`-lived rebuild map
     // across real safepoints before `l`'s and `main`'s faults tie to it. (The map is also rooted by
     // `collect`; that root is belt-and-braces today — this test still passes without it, because
@@ -16893,8 +16812,7 @@ main()
     )
     .unwrap();
     let (vm_out, _e, vm_res, _) = run_file(&entry);
-    let (par_out, _pe, par_res, _) =
-        run_file_parallel(&entry, crate::native::HostConfig::default());
+    let (par_out, _pe, par_res, _) = run_file_with(&entry, crate::native::HostConfig::default());
     let (stress_out, _se, stress_res, _) = run_file_stress(&entry, true);
     let _ = std::fs::remove_dir_all(&dir);
     assert!(vm_res.is_ok(), "serial faulted: {vm_res:?}");
@@ -16944,8 +16862,7 @@ main()
     )
     .unwrap();
     let (vm_out, _e, vm_res, _) = run_file(&entry);
-    let (par_out, _pe, par_res, _) =
-        run_file_parallel(&entry, crate::native::HostConfig::default());
+    let (par_out, _pe, par_res, _) = run_file_with(&entry, crate::native::HostConfig::default());
     let _ = std::fs::remove_dir_all(&dir);
     assert!(
         vm_res.is_ok(),
@@ -17004,8 +16921,7 @@ go()
     )
     .unwrap();
     let (vm_out, _e, vm_res, _) = run_file(&entry);
-    let (par_out, _pe, par_res, _) =
-        run_file_parallel(&entry, crate::native::HostConfig::default());
+    let (par_out, _pe, par_res, _) = run_file_with(&entry, crate::native::HostConfig::default());
     let _ = std::fs::remove_dir_all(&dir);
     assert!(vm_res.is_ok(), "serial faulted: {vm_res:?}");
     assert!(par_res.is_ok(), "M:N faulted: {par_res:?}");
@@ -17070,8 +16986,7 @@ main()
     )
     .unwrap();
     let (vm_out, _e, vm_res, _) = run_file(&entry);
-    let (par_out, _pe, par_res, _) =
-        run_file_parallel(&entry, crate::native::HostConfig::default());
+    let (par_out, _pe, par_res, _) = run_file_with(&entry, crate::native::HostConfig::default());
     let _ = std::fs::remove_dir_all(&dir);
     assert!(vm_res.is_ok(), "serial faulted: {vm_res:?}");
     assert!(
@@ -17106,7 +17021,7 @@ main()
 /// once containers are identity-preserved, the cyclic `Node` serializes with a `Backref` instead of
 /// tripping the depth cap, and `to_snap` rides that fast path. Self-referential module-global data now
 /// crosses exactly like local self-referential data (the consistent, no-drift behavior). This path is
-/// M:N-ONLY: the serial engine never snapshots module globals, so this is a `run_capture_parallel`-only
+/// M:N-ONLY: the serial engine never snapshots module globals, so this is a `run_capture`-only
 /// assertion (NOT `assert_mc_parity`). The `parallel:` nursery forces worker-prep (`snapshot_modules` →
 /// `to_snap`) to walk the cyclic global; the worker prints `w`, then the recover returns `done`.
 #[test]
@@ -17131,7 +17046,7 @@ fn main():
         Err(e): print(\"caught: {e.message()}\")
 main()
 ";
-    let out = run_capture_parallel(src).expect("M:N run should not crash");
+    let out = run_capture(src).expect("M:N run should not crash");
     assert_eq!(out, "w\nok: done\n");
 }
 
@@ -17166,7 +17081,7 @@ fn golden_airlock_cycle_chz_matches_expected() {
     let expected = include_str!("../../examples/airlock_cycle.expected");
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, expected);
-    assert_eq!(vm_out, run_capture_parallel(src).expect("M:N run"));
+    assert_eq!(vm_out, run_capture(src).expect("M:N run"));
 }
 
 /// Tech-debt parity: a `set` nested inside a struct / list must compare unordered on BOTH
@@ -17184,7 +17099,7 @@ print(a == b)
 print([Set([1, 2])] == [Set([2, 1])])
 ";
     let vm = run_capture(src).expect("vm");
-    let interp = run_capture_parallel(src).expect("interp");
+    let interp = run_capture(src).expect("interp");
     assert_eq!(vm, interp);
     assert_eq!(vm, "true\ntrue\n");
 }
@@ -17314,7 +17229,7 @@ fn primitive_str_method_on_vm() {
     let src = "fn show[T: Stringable](v: T) -> str:\n    return v.str()\nprint(show(5))\nprint(show(3.14))\nprint(show(true))\nprint(show(\"hi\"))\n";
     let out = run_capture(src).expect("vm run");
     assert_eq!(out, "5\n3.14\ntrue\nhi\n");
-    assert_eq!(out, run_capture_parallel(src).expect("M:N run"));
+    assert_eq!(out, run_capture(src).expect("M:N run"));
 }
 
 /// Gap #11 golden: `examples/sort_by.chz` (custom comparators, stable order, tuple-field sort)
@@ -17325,7 +17240,7 @@ fn golden_sort_by_chz_matches_expected_and_interp() {
     let expected = include_str!("../../examples/sort_by.expected");
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, expected);
-    assert_eq!(vm_out, run_capture_parallel(src).expect("interp run"));
+    assert_eq!(vm_out, run_capture(src).expect("interp run"));
 }
 
 /// Call-flattening guarantee: deep *plain-function* recursion no longer consumes host Rust stack
@@ -17346,7 +17261,7 @@ print(sum_to(5000))
     let out = super::run_capture_on_stack(src, 1024 * 1024)
         .expect("deep plain recursion should run on a 1 MiB host stack after call-flattening");
     assert_eq!(out, "12502500\n");
-    assert_eq!(out, run_capture_parallel(src).expect("interp run"));
+    assert_eq!(out, run_capture(src).expect("interp run"));
 }
 
 /// M19 — guards the `run_until` per-entry program borrow (the hoisted `Arc::clone` →
@@ -17381,7 +17296,7 @@ print(rec(3))
 ";
     let out = run_capture(src).expect("vm run");
     assert_eq!(out, "leave 0\nleave 1\nleave 2\nleave 3\n36\n");
-    assert_eq!(out, run_capture_parallel(src).expect("interp run"));
+    assert_eq!(out, run_capture(src).expect("interp run"));
 }
 
 /// Gap #10 golden: `examples/cipher.chz` (ord/chr — ROT13 + manual digit parsing) is
@@ -17392,7 +17307,7 @@ fn golden_cipher_chz_matches_expected_and_interp() {
     let expected = include_str!("../../examples/cipher.expected");
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, expected);
-    assert_eq!(vm_out, run_capture_parallel(src).expect("interp run"));
+    assert_eq!(vm_out, run_capture(src).expect("interp run"));
 }
 
 /// Gap #14 (+ #11) golden: `examples/word_freq.chz` iterates a map with `for w, c in counts`
@@ -17403,7 +17318,7 @@ fn golden_word_freq_chz_matches_expected_and_interp() {
     let expected = include_str!("../../examples/word_freq.expected");
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, expected);
-    assert_eq!(vm_out, run_capture_parallel(src).expect("interp run"));
+    assert_eq!(vm_out, run_capture(src).expect("interp run"));
 }
 
 /// Gap #15 golden: `examples/match_nested.chz` (tuple patterns, nested `Some((a, b))`, nested
@@ -17414,7 +17329,7 @@ fn golden_match_nested_chz_matches_expected_and_interp() {
     let expected = include_str!("../../examples/match_nested.expected");
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, expected);
-    assert_eq!(vm_out, run_capture_parallel(src).expect("interp run"));
+    assert_eq!(vm_out, run_capture(src).expect("interp run"));
 }
 
 /// L2 golden: `examples/match_struct.chz` (struct positional destructuring in `match` — single-arm
@@ -17426,7 +17341,7 @@ fn golden_match_struct_chz_matches_expected_and_parity() {
     let expected = include_str!("../../examples/match_struct.expected");
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, expected);
-    assert_eq!(vm_out, run_capture_parallel(src).expect("M:N run"));
+    assert_eq!(vm_out, run_capture(src).expect("M:N run"));
 }
 
 /// Match-guard golden: `examples/match_guard.chz` (`pattern if cond:` arms, expr + stmt forms)
@@ -17437,7 +17352,7 @@ fn golden_match_guard_chz_matches_expected_and_interp() {
     let expected = include_str!("../../examples/match_guard.expected");
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, expected);
-    assert_eq!(vm_out, run_capture_parallel(src).expect("interp run"));
+    assert_eq!(vm_out, run_capture(src).expect("interp run"));
 }
 
 /// Range-pattern golden: `examples/match_range.chz` (half-open `start..end` int patterns) is
@@ -17448,7 +17363,7 @@ fn golden_match_range_chz_matches_expected_and_interp() {
     let expected = include_str!("../../examples/match_range.expected");
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, expected);
-    assert_eq!(vm_out, run_capture_parallel(src).expect("interp run"));
+    assert_eq!(vm_out, run_capture(src).expect("interp run"));
 }
 
 /// Gap #13 golden: `examples/bits.chz` (`& | ^ << >>` — XOR-fold + bitmask) is byte-identical
@@ -17459,7 +17374,7 @@ fn golden_bits_chz_matches_expected_and_interp() {
     let expected = include_str!("../../examples/bits.expected");
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, expected);
-    assert_eq!(vm_out, run_capture_parallel(src).expect("interp run"));
+    assert_eq!(vm_out, run_capture(src).expect("interp run"));
 }
 
 /// Round-2 probe goldens: recursive data-structure + evaluator programs that surfaced the
@@ -17470,7 +17385,7 @@ fn golden_bst_chz_matches_expected_and_interp() {
     let expected = include_str!("../../examples/bst.expected");
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, expected);
-    assert_eq!(vm_out, run_capture_parallel(src).expect("interp run"));
+    assert_eq!(vm_out, run_capture(src).expect("interp run"));
 }
 
 #[test]
@@ -17479,7 +17394,7 @@ fn golden_linked_list_chz_matches_expected_and_interp() {
     let expected = include_str!("../../examples/linked_list.expected");
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, expected);
-    assert_eq!(vm_out, run_capture_parallel(src).expect("interp run"));
+    assert_eq!(vm_out, run_capture(src).expect("interp run"));
 }
 
 #[test]
@@ -17488,7 +17403,7 @@ fn golden_calc_chz_matches_expected_and_interp() {
     let expected = include_str!("../../examples/calc.expected");
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, expected);
-    assert_eq!(vm_out, run_capture_parallel(src).expect("interp run"));
+    assert_eq!(vm_out, run_capture(src).expect("interp run"));
 }
 
 // ----- struct iterator protocol (`for x in s` driven by `next(self) -> Option[T]`) -----
@@ -17497,14 +17412,14 @@ fn golden_calc_chz_matches_expected_and_interp() {
 fn for_over_struct_iterator_counts() {
     let src = "struct Counter:\n    n: int\n    limit: int\n    fn next(self) -> Option[int]:\n        if self.n >= self.limit:\n            return None\n        v := self.n\n        self.n = self.n + 1\n        return Some(v)\nfn main():\n    for x in Counter(0, 5):\n        print(x)\nmain()\n";
     assert_eq!(run(src), "0\n1\n2\n3\n4\n");
-    assert_eq!(run(src), run_capture_parallel(src).expect("interp run"));
+    assert_eq!(run(src), run_capture(src).expect("interp run"));
 }
 
 #[test]
 fn for_over_struct_iterator_break_lazy() {
     let src = "struct Fib:\n    a: int\n    b: int\n    fn next(self) -> Option[int]:\n        v := self.a\n        nb := self.a + self.b\n        self.a = self.b\n        self.b = nb\n        return Some(v)\nfn main():\n    for x in Fib(0, 1):\n        if x > 10:\n            break\n        print(x)\nmain()\n";
     assert_eq!(run(src), "0\n1\n1\n2\n3\n5\n8\n");
-    assert_eq!(run(src), run_capture_parallel(src).expect("interp run"));
+    assert_eq!(run(src), run_capture(src).expect("interp run"));
 }
 
 /// Golden: the iterator example runs on the VM with exactly the expected output, matching interp.
@@ -17514,7 +17429,7 @@ fn golden_iterator_chz_matches_expected_and_interp() {
     let expected = include_str!("../../examples/iterator.expected");
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, expected);
-    assert_eq!(vm_out, run_capture_parallel(src).expect("interp run"));
+    assert_eq!(vm_out, run_capture(src).expect("interp run"));
 }
 
 // ----- cyclic-data structural-depth guard + order-independent map == -----
@@ -17612,7 +17527,7 @@ fn assert_fault_line(src: &str, needle: &str, expected_line: u32) {
         "serial: expected line {expected_line}, got {} (col {})",
         e.span.line, e.span.col
     );
-    let ep = run_capture_parallel(src).unwrap_err();
+    let ep = run_capture(src).unwrap_err();
     assert!(
         ep.message.contains(needle),
         "M:N: expected message to contain {needle:?}, got {:?}",
@@ -17632,7 +17547,7 @@ fn assert_fault_at(src: &str, needle: &str, expected: (u32, u32)) {
     assert_fault_line(src, needle, expected.0);
     let e = run_capture(src).unwrap_err();
     assert_eq!((e.span.line, e.span.col), expected, "serial");
-    let ep = run_capture_parallel(src).unwrap_err();
+    let ep = run_capture(src).unwrap_err();
     assert_eq!((ep.span.line, ep.span.col), expected, "M:N");
 }
 
@@ -17689,7 +17604,7 @@ fn interpolation_backstop_still_faults_for_generic_str() {
     // with the identical message on BOTH engines — proving the runtime backstop is intact.
     let src = "fn show[T](v: T) -> str:\n    return \"{v:.2f}\"\nfn main():\n    print(show(\"hi\"))\nmain()\n";
     let e1 = run_capture(src).unwrap_err().message;
-    let e2 = run_capture_parallel(src).unwrap_err().message;
+    let e2 = run_capture(src).unwrap_err().message;
     assert!(
         e1.contains("type 'f' not valid for a string"),
         "serial: {e1}"
@@ -17701,7 +17616,7 @@ fn interpolation_backstop_still_faults_for_generic_str() {
     // A valid concrete-float `{x:.2f}` still renders identically on both engines.
     let ok = "x: float = 3.14159\nprint(\"{x:.2f}\")\n";
     assert_eq!(run_capture(ok).unwrap(), "3.14\n");
-    assert_eq!(run_capture_parallel(ok).unwrap(), "3.14\n");
+    assert_eq!(run_capture(ok).unwrap(), "3.14\n");
 }
 
 #[test]
@@ -17713,7 +17628,7 @@ fn non_interpolation_fault_span_unchanged() {
     // A literal-only string + a valid interpolation still runs with correct output on both engines.
     let ok = "x := 5\nprint(\"x = {x}, done\")\n";
     assert_eq!(run_capture(ok).unwrap(), "x = 5, done\n");
-    assert_eq!(run_capture_parallel(ok).unwrap(), "x = 5, done\n");
+    assert_eq!(run_capture(ok).unwrap(), "x = 5, done\n");
 }
 
 // ---- Bug B: print's `str(self)` display hook is used only when it CONFORMS to Stringable ----
@@ -17959,7 +17874,7 @@ fn iter_sum_delegates_and_empty_is_zero() {
     let (out, _e, res, _c) = run_file(&entry);
     assert!(res.is_ok(), "serial iter.sum faulted: {res:?}");
     assert_eq!(out, "6\n0\n", "serial");
-    let (pout, _pe, pres, _pc) = run_file_parallel(&entry, crate::native::HostConfig::default());
+    let (pout, _pe, pres, _pc) = run_file_with(&entry, crate::native::HostConfig::default());
     let _ = std::fs::remove_file(&entry);
     assert!(pres.is_ok(), "M:N iter.sum faulted: {pres:?}");
     assert_eq!(pout, "6\n0\n", "M:N");
@@ -17981,7 +17896,7 @@ print(total)                                         # 60
     let (out, _e, res, _c) = run_file(&entry);
     assert!(res.is_ok(), "serial docs §11 faulted: {res:?}");
     assert_eq!(out, "60\n", "serial");
-    let (pout, _pe, pres, _pc) = run_file_parallel(&entry, crate::native::HostConfig::default());
+    let (pout, _pe, pres, _pc) = run_file_with(&entry, crate::native::HostConfig::default());
     let _ = std::fs::remove_file(&entry);
     assert!(pres.is_ok(), "M:N docs §11 faulted: {pres:?}");
     assert_eq!(pout, "60\n", "M:N");
@@ -18028,7 +17943,7 @@ print(f())
 /// Run a std-module-importing program on BOTH engines (a `import std.*` program needs the resolver,
 /// so it runs from a file) and assert identical stdout.
 ///
-/// TYPE-CHECKS FIRST — `run_file`/`run_file_p` are resolve → compile → run and skip `check_graph`
+/// TYPE-CHECKS FIRST — `run_file`/`run_file` are resolve → compile → run and skip `check_graph`
 /// (the known test-helper-vs-CLI divergence), so without this gate a test could assert a program
 /// green that `chezzi run` rejects outright. Every R1 program here is what the CLI would run.
 fn assert_mc_parity_file(tag: &str, src: &str, expected: &str) {
@@ -18040,7 +17955,7 @@ fn assert_mc_parity_file(tag: &str, src: &str, expected: &str) {
     let (out, _e, res, _c) = run_file(&entry);
     assert!(res.is_ok(), "serial VM faulted: {res:?}");
     assert_eq!(out, expected, "serial VM");
-    let (out_p, _e, res_p, _c) = run_file_p(&entry);
+    let (out_p, _e, res_p, _c) = run_file(&entry);
     assert!(res_p.is_ok(), "M:N engine faulted: {res_p:?}");
     assert_eq!(out_p, expected, "M:N engine");
     let _ = std::fs::remove_file(&entry);
@@ -18513,7 +18428,7 @@ fn intrinsic_grants_all_have_vm_arms() {
                 "serial",
                 run_capture as fn(&str) -> Result<String, RuntimeError>,
             ),
-            ("M:N", run_capture_parallel),
+            ("M:N", run_capture),
         ] {
             if let Err(e) = run(&src) {
                 panic!(
@@ -18656,8 +18571,7 @@ fn module_global_fn_value_call_runs_both_engines() {
     )
     .unwrap();
     let (vm_out, _e, vm_res, _) = run_file(&entry);
-    let (par_out, _pe, par_res, _) =
-        run_file_parallel(&entry, crate::native::HostConfig::default());
+    let (par_out, _pe, par_res, _) = run_file_with(&entry, crate::native::HostConfig::default());
     let _ = std::fs::remove_dir_all(&dir);
     assert!(vm_res.is_ok(), "serial faulted: {vm_res:?}");
     assert!(par_res.is_ok(), "M:N faulted: {par_res:?}");
@@ -18705,7 +18619,7 @@ fn a_static_method_head_is_a_spawn_or_defer_target_runs_both_engines() {
             "serial engine on: {src}"
         );
         assert_eq!(
-            run_capture_parallel(src).unwrap(),
+            run_capture(src).unwrap(),
             "body\n3\n",
             "M:N engine on: {src}"
         );
@@ -18716,7 +18630,7 @@ fn a_static_method_head_is_a_spawn_or_defer_target_runs_both_engines() {
         "{holder}fn body():\n    parallel:\n        spawn Holder.build(3)\n    print(\"body\")\nbody()\n"
     );
     crate::vm::assert_same_lines(&run_capture(&spawned).unwrap(), "body\n3\n");
-    crate::vm::assert_same_lines(&run_capture_parallel(&spawned).unwrap(), "body\n3\n");
+    crate::vm::assert_same_lines(&run_capture(&spawned).unwrap(), "body\n3\n");
     // …and an INSTANCE method target is untouched.
     assert_eq!(
         run_capture(
@@ -18751,7 +18665,7 @@ fn module_reached_static_heads_are_defer_targets_both_engines() {
         std::fs::write(&entry, src).unwrap();
         let (vm_out, _e, vm_res, _) = run_file(&entry);
         let (par_out, _pe, par_res, _) =
-            run_file_parallel(&entry, crate::native::HostConfig::default());
+            run_file_with(&entry, crate::native::HostConfig::default());
         assert!(vm_res.is_ok(), "serial faulted on {src}: {vm_res:?}");
         assert!(par_res.is_ok(), "M:N faulted on {src}: {par_res:?}");
         assert_eq!(vm_out, "body\n3\n", "serial output on: {src}");
@@ -18786,8 +18700,7 @@ fn cross_module_witness_defer_target_runs_both_engines() {
     )
     .unwrap();
     let (vm_out, _e, vm_res, _) = run_file(&entry);
-    let (par_out, _pe, par_res, _) =
-        run_file_parallel(&entry, crate::native::HostConfig::default());
+    let (par_out, _pe, par_res, _) = run_file_with(&entry, crate::native::HostConfig::default());
     let _ = std::fs::remove_dir_all(&dir);
     assert!(vm_res.is_ok(), "serial faulted: {vm_res:?}");
     assert!(par_res.is_ok(), "M:N faulted: {par_res:?}");

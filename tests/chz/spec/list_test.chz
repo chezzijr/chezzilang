@@ -3,7 +3,7 @@
 # Ported from the Rust string-goldens in src/vm/tests.rs (`list_*_parity`) and
 # src/vm/parity_tests.rs (`parity_list_*`): those printed a value and matched stdout; here we
 # assert the value directly. Run: `cargo run -- test tests/chz/`. The serial==M:N parity these
-# carried in Rust is preserved by the dual-engine gate (`test_runner::chz_suite_passes_both_engines`),
+# carried in Rust is preserved by the dual-engine gate (`test_runner::chz_suite_passes`),
 # which runs this whole suite on both engines and asserts identical verdicts.
 #
 # Fault-path cases (empty min()/max(), OOB remove_at, non-positive chunk(), overflow sum) stay in
@@ -181,7 +181,7 @@ test fn map_filter_fold():
 # the pin the checker records is the one the erased fn actually runs with. The rejections (`pred`
 # whose `T` appears nowhere, `mk` whose `T` is return-only) are `src/checker/tests.rs`
 # (`undetermined_generic_fn_value_rejected_in_argument_position`) — they never reach a runtime.
-# Serial==M:N is guarded by `test_runner::chz_suite_passes_both_engines`.
+# Serial==M:N is guarded by `test_runner::chz_suite_passes`.
 
 fn gid[T](x: T) -> T:
     return x

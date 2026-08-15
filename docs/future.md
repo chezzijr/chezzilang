@@ -519,7 +519,7 @@ their output. Re-run them; expect green, and do not pre-emptively rewrite them.
   `recover:` blocks whose `match` prints follow the dedent; verify rather than assume they move.
 
 **`tests/chz` — CORRECTION: the gate was never the blocker.** The forecast called
-`chz_suite_passes_both_engines` (`src/test_runner.rs:1032`) "the first thing to design, ahead of the VM
+`chz_suite_passes` (`src/test_runner.rs:1032`) "the first thing to design, ahead of the VM
 edits". It was **over-stated**: that gate compares per-test **verdicts**, never output, and no suite file
 asserts inter-task print order. All 13 `spawn`-using suite files pass on both engines unchanged, and the
 engine split needed no per-engine story in the native suite at all. (The files, for reference:
@@ -1061,8 +1061,9 @@ what the compiler cannot lower. Keep the two tracked separately.
 M20 shipped: `assert`, free `test fn`, struct **suites** with lifecycle hooks
 (`before_all`/`after_all`/`before_each`/`after_each`) + a typed shared fixture, and the `chezzi test`
 runner (`src/test_runner.rs`). The native suite lives in **`tests/chz/`** (`spec/`/`stdlib/`/`suites/`),
-run M:N-by-default (like `chezzi run`, `--serial` opt-out), with a `cargo test` dual-engine gate
-`test_runner::chz_suite_passes_both_engines` asserting serial==M:N. These are the ranked follow-ups.
+run M:N-by-default (like `chezzi run`, `--serial` opt-out), with a `cargo test` gate
+`test_runner::chz_suite_passes` asserting the whole suite passes on the M:N engine. These are the
+ranked follow-ups.
 
 Current semantics: `assert true`=PASS, `assert false`=FAIL (with `file:line` + message; the message is
 any `str` **expression**, not just a literal — variable/interpolation/concat all work, checker-enforced
@@ -1091,7 +1092,7 @@ render ERROR too (whole file, before any test runs), counted separately as `file
    exit non-zero; summary appends `, M over-memory` only when `M>0` so cap-off output is byte-identical
    to before). **Deterministic-in-VM, NOT OS RSS:** the cap is checked against `Heap::live_bytes()` —
    the same value already computed once per `sweep()` for the peak probe — a per-heap high-water, so it
-   is deterministic and the dual-engine gate `chz_suite_passes_both_engines` (which runs cap-OFF) is
+   is deterministic and the dual-engine gate `chz_suite_passes` (which runs cap-OFF) is
    untouched. Mechanism mirrors the cancel bypass-recover unwind: `Heap` gained `mem_cap`/`over_cap`;
    `sweep()` sets `over_cap = mem_cap != 0 && lb > mem_cap`; `run_until`'s post-collect boundary
    hard-aborts via `unwind_deferred(base_level, false)`. The check is **re-observed at every GC boundary
@@ -1241,7 +1242,7 @@ render ERROR too (whole file, before any test runs), counted separately as `file
      to a bool in `cmd_test`; the runner never probes the tty, so the captured (non-tty) test harness +
      the byte-identity gate never see ANSI.
    - Per-test + total **timing** — `-v`/json ONLY, NEVER in default/quiet output (non-deterministic → it
-     would break the byte-identical `chz_suite_passes_both_engines` gate).
+     would break the byte-identical `chz_suite_passes` gate).
    - `--fail-fast` (stop at the first non-pass verdict) for tight iteration loops.
    - Ordering is deterministic (sorted files → free tests → suites, all declaration order); documented in
      `chezzi test`'s USAGE + the `run_tests_opts` doc-comment. **Default (no-flag) output is unchanged.**

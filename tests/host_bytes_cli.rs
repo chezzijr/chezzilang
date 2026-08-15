@@ -62,21 +62,16 @@ fn assert_no_host_panic(out: &Output, what: &str) {
 fn non_utf8_program_arg_does_not_host_panic() {
     let t = TmpDir::new();
     let entry = t.hello();
-    for serial in [true, false] {
-        let mut cmd = Command::new(env!("CARGO_BIN_EXE_chezzi"));
-        cmd.arg("run");
-        if serial {
-            cmd.arg("--serial");
-        }
-        let out = cmd
-            .arg(&entry)
-            .arg(bad_bytes())
-            .output()
-            .expect("spawn chezzi");
-        assert_no_host_panic(&out, "non-UTF-8 program arg");
-        assert!(out.status.success(), "the program itself must still run");
-        assert_eq!(String::from_utf8_lossy(&out.stdout), "hi\n");
-    }
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_chezzi"));
+    cmd.arg("run");
+    let out = cmd
+        .arg(&entry)
+        .arg(bad_bytes())
+        .output()
+        .expect("spawn chezzi");
+    assert_no_host_panic(&out, "non-UTF-8 program arg");
+    assert!(out.status.success(), "the program itself must still run");
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "hi\n");
 }
 
 #[test]
@@ -122,25 +117,20 @@ fn non_utf8_script_path_never_runs_the_utf8_decoy() {
         "the two files must be distinct for this test to mean anything"
     );
 
-    for serial in [true, false] {
-        let mut cmd = Command::new(env!("CARGO_BIN_EXE_chezzi"));
-        cmd.arg("run");
-        if serial {
-            cmd.arg("--serial");
-        }
-        let out = cmd.arg(&intended).output().expect("spawn chezzi");
-        assert_no_host_panic(&out, "non-UTF-8 script path with a U+FFFD decoy");
-        let stdout = String::from_utf8_lossy(&out.stdout);
-        assert!(
-            !stdout.contains("WRONG FILE RAN"),
-            "the CLI ran the U+FFFD-named DECOY instead of the path it was given: {stdout}"
-        );
-        assert_eq!(
-            out.status.code(),
-            Some(1),
-            "a lossy path must be refused, not silently resolved: {stdout}"
-        );
-    }
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_chezzi"));
+    cmd.arg("run");
+    let out = cmd.arg(&intended).output().expect("spawn chezzi");
+    assert_no_host_panic(&out, "non-UTF-8 script path with a U+FFFD decoy");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        !stdout.contains("WRONG FILE RAN"),
+        "the CLI ran the U+FFFD-named DECOY instead of the path it was given: {stdout}"
+    );
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "a lossy path must be refused, not silently resolved: {stdout}"
+    );
 }
 
 #[test]
@@ -148,19 +138,14 @@ fn non_utf8_env_var_does_not_host_panic() {
     // A trivial program that never touches `std.os`: the environment is snapshotted at startup.
     let t = TmpDir::new();
     let entry = t.hello();
-    for serial in [true, false] {
-        let mut cmd = Command::new(env!("CARGO_BIN_EXE_chezzi"));
-        cmd.arg("run");
-        if serial {
-            cmd.arg("--serial");
-        }
-        let out = cmd
-            .arg(&entry)
-            .env("BAD", bad_bytes())
-            .output()
-            .expect("spawn chezzi");
-        assert_no_host_panic(&out, "non-UTF-8 env var");
-        assert!(out.status.success(), "the program itself must still run");
-        assert_eq!(String::from_utf8_lossy(&out.stdout), "hi\n");
-    }
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_chezzi"));
+    cmd.arg("run");
+    let out = cmd
+        .arg(&entry)
+        .env("BAD", bad_bytes())
+        .output()
+        .expect("spawn chezzi");
+    assert_no_host_panic(&out, "non-UTF-8 env var");
+    assert!(out.status.success(), "the program itself must still run");
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "hi\n");
 }

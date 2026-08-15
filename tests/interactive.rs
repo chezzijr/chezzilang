@@ -36,13 +36,10 @@ impl Drop for TmpDir {
     }
 }
 
-/// Spawn `chezzi run [--serial] <file>` with piped stdin/stdout/stderr. Flags go BEFORE the file.
-fn spawn(entry: &PathBuf, serial: bool) -> Child {
+/// Spawn `chezzi run <file>` with piped stdin/stdout/stderr. Flags go BEFORE the file.
+fn spawn(entry: &PathBuf) -> Child {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_chezzi"));
     cmd.arg("run");
-    if serial {
-        cmd.arg("--serial");
-    }
     cmd.arg(entry)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -103,10 +100,10 @@ match n:
     None: print(\"hi ?\")
 ";
 
-fn prompt_before_stdin_answer(serial: bool) {
+fn prompt_before_stdin_answer() {
     let t = TmpDir::new();
     let entry = t.write("main.chz", PROMPT_PROG);
-    let mut child = spawn(&entry, serial);
+    let mut child = spawn(&entry);
     let out = child.stdout.take().unwrap();
     // The child has NOT been given any stdin yet — it is blocked in read_line. The prompt must
     // already be readable. (Today: nothing is written until the VM returns → times out.)
@@ -121,21 +118,16 @@ fn prompt_before_stdin_answer(serial: bool) {
 
 #[test]
 fn prompt_before_stdin_answer_mn() {
-    prompt_before_stdin_answer(false);
+    prompt_before_stdin_answer();
 }
 
-#[test]
-fn prompt_before_stdin_answer_serial() {
-    prompt_before_stdin_answer(true);
-}
-
-fn killed_program_retains_output(serial: bool) {
+fn killed_program_retains_output() {
     let t = TmpDir::new();
     let entry = t.write(
         "main.chz",
         "print(\"alive\")\nx := 0\nwhile true:\n    x = x + 1\n",
     );
-    let mut child = spawn(&entry, serial);
+    let mut child = spawn(&entry);
     let out = child.stdout.take().unwrap();
     let line = read_line_timeout(out).expect("no output from a program that never exits");
     assert_eq!(line.trim_end(), "alive");
@@ -145,12 +137,7 @@ fn killed_program_retains_output(serial: bool) {
 
 #[test]
 fn killed_program_retains_output_mn() {
-    killed_program_retains_output(false);
-}
-
-#[test]
-fn killed_program_retains_output_serial() {
-    killed_program_retains_output(true);
+    killed_program_retains_output();
 }
 
 const SPAWN_PROG: &str = "\
@@ -164,10 +151,10 @@ parallel:
     spawn: worker()
 ";
 
-fn spawned_task_print_visible_before_join(serial: bool) {
+fn spawned_task_print_visible_before_join() {
     let t = TmpDir::new();
     let entry = t.write("main.chz", SPAWN_PROG);
-    let mut child = spawn(&entry, serial);
+    let mut child = spawn(&entry);
     let out = child.stdout.take().unwrap();
     let line = read_line_timeout(out).expect("spawned task's print never arrived before the join");
     assert_eq!(line.trim_end(), "task-live");
@@ -177,12 +164,7 @@ fn spawned_task_print_visible_before_join(serial: bool) {
 
 #[test]
 fn spawned_task_print_visible_before_join_mn() {
-    spawned_task_print_visible_before_join(false);
-}
-
-#[test]
-fn spawned_task_print_visible_before_join_serial() {
-    spawned_task_print_visible_before_join(true);
+    spawned_task_print_visible_before_join();
 }
 
 const CONCURRENT_PROG: &str = "\
@@ -194,14 +176,11 @@ parallel:
         spawn: task(i)
 ";
 
-fn concurrent_prints_interleave_all_lines(serial: bool) {
+fn concurrent_prints_interleave_all_lines() {
     let t = TmpDir::new();
     let entry = t.write("main.chz", CONCURRENT_PROG);
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_chezzi"));
     cmd.arg("run");
-    if serial {
-        cmd.arg("--serial");
-    }
     let out = cmd.arg(&entry).output().expect("spawn chezzi");
     assert!(out.status.success());
     let mut got: Vec<String> = String::from_utf8_lossy(&out.stdout)
@@ -217,12 +196,7 @@ fn concurrent_prints_interleave_all_lines(serial: bool) {
 
 #[test]
 fn concurrent_prints_interleave_all_lines_mn() {
-    concurrent_prints_interleave_all_lines(false);
-}
-
-#[test]
-fn concurrent_prints_interleave_all_lines_serial() {
-    concurrent_prints_interleave_all_lines(true);
+    concurrent_prints_interleave_all_lines();
 }
 
 const INPUT_PROG: &str = "\
@@ -233,10 +207,10 @@ match n:
     None: print(\"hi ?\")
 ";
 
-fn input_prompt_roundtrip(serial: bool) {
+fn input_prompt_roundtrip() {
     let t = TmpDir::new();
     let entry = t.write("main.chz", INPUT_PROG);
-    let mut child = spawn(&entry, serial);
+    let mut child = spawn(&entry);
     let out = child.stdout.take().unwrap();
     let got = read_bytes_timeout(out, 6).expect("input()'s prompt did not arrive before the read");
     assert_eq!(got, "name? ");
@@ -249,12 +223,7 @@ fn input_prompt_roundtrip(serial: bool) {
 
 #[test]
 fn input_prompt_roundtrip_mn() {
-    input_prompt_roundtrip(false);
-}
-
-#[test]
-fn input_prompt_roundtrip_serial() {
-    input_prompt_roundtrip(true);
+    input_prompt_roundtrip();
 }
 
 const STDIN_TASKS_PROG: &str = "\
@@ -274,10 +243,10 @@ t()
 /// `Lines` variant): three piped lines, two spawned readers + the entry reader ⇒ every line is read
 /// exactly ONCE, by SOME reader, and no reader sees a false EOF. This pins that `std::io::stdin()`'s
 /// internal lock really is line-atomic across the M:N engine's real worker threads.
-fn task_reads_piped_stdin(serial: bool) {
+fn task_reads_piped_stdin() {
     let t = TmpDir::new();
     let entry = t.write("main.chz", STDIN_TASKS_PROG);
-    let mut child = spawn(&entry, serial);
+    let mut child = spawn(&entry);
     let mut stdin = child.stdin.take().unwrap();
     stdin.write_all(b"a\nb\nc\n").unwrap();
     drop(stdin); // real EOF after the three lines
@@ -296,12 +265,7 @@ fn task_reads_piped_stdin(serial: bool) {
 
 #[test]
 fn task_reads_piped_stdin_mn() {
-    task_reads_piped_stdin(false);
-}
-
-#[test]
-fn task_reads_piped_stdin_serial() {
-    task_reads_piped_stdin(true);
+    task_reads_piped_stdin();
 }
 
 const READ_ALL_PROG: &str = "\
@@ -313,10 +277,10 @@ io.print(io.read_all())
 /// multi-line, multibyte-UTF-8 payload with NO trailing newline and assert the WHOLE stream comes
 /// back byte-exact (the injected-`Lines` parity test cannot observe this — it reconstructs a trailing
 /// `\n` the real stream lacks). `print` adds exactly one `\n`.
-fn read_all_reads_whole_stdin(serial: bool) {
+fn read_all_reads_whole_stdin() {
     let t = TmpDir::new();
     let entry = t.write("main.chz", READ_ALL_PROG);
-    let mut child = spawn(&entry, serial);
+    let mut child = spawn(&entry);
     let mut stdin = child.stdin.take().unwrap();
     // "héllo\nwörld" (é, ö multibyte), no trailing newline.
     stdin.write_all(b"h\xc3\xa9llo\nw\xc3\xb6rld").unwrap();
@@ -328,12 +292,7 @@ fn read_all_reads_whole_stdin(serial: bool) {
 
 #[test]
 fn read_all_reads_whole_stdin_mn() {
-    read_all_reads_whole_stdin(false);
-}
-
-#[test]
-fn read_all_reads_whole_stdin_serial() {
-    read_all_reads_whole_stdin(true);
+    read_all_reads_whole_stdin();
 }
 
 const READ_CHAR_PROG: &str = "\
@@ -348,10 +307,10 @@ while true:
 
 /// `io.read_char()` on the REAL process stdin: pipe a multibyte payload and assert each Unicode
 /// scalar comes back WHOLE (the 2-byte `é` is one char, never split into bytes), then `None` at EOF.
-fn read_char_yields_whole_scalars(serial: bool) {
+fn read_char_yields_whole_scalars() {
     let t = TmpDir::new();
     let entry = t.write("main.chz", READ_CHAR_PROG);
-    let mut child = spawn(&entry, serial);
+    let mut child = spawn(&entry);
     let mut stdin = child.stdin.take().unwrap();
     stdin.write_all(b"a\xc3\xa9").unwrap(); // "aé", no trailing newline
     drop(stdin); // EOF
@@ -362,12 +321,7 @@ fn read_char_yields_whole_scalars(serial: bool) {
 
 #[test]
 fn read_char_yields_whole_scalars_mn() {
-    read_char_yields_whole_scalars(false);
-}
-
-#[test]
-fn read_char_yields_whole_scalars_serial() {
-    read_char_yields_whole_scalars(true);
+    read_char_yields_whole_scalars();
 }
 
 const READ_CHAR_CONCURRENT_PROG: &str = "\
@@ -395,7 +349,7 @@ fn read_char_concurrent_atomic() {
     const N: usize = 400;
     let t = TmpDir::new();
     let entry = t.write("main.chz", READ_CHAR_CONCURRENT_PROG);
-    let mut child = spawn(&entry, false);
+    let mut child = spawn(&entry);
     let mut stdin = child.stdin.take().unwrap();
     let payload = "é".repeat(N).into_bytes(); // 0xC3 0xA9 × N, no ASCII, no newline
     stdin.write_all(&payload).unwrap();
@@ -450,10 +404,10 @@ fn wait_timeout(child: &mut Child, secs: u64) -> Option<std::process::ExitStatus
 /// The status must be NON-ZERO: the program did not finish, and its output was truncated. It must
 /// also not borrow the `os.exit` channel to say so — see `fault_under_broken_pipe_is_not_success`,
 /// the regression this contract exists to prevent.
-fn broken_pipe_terminates_with_fault(serial: bool) {
+fn broken_pipe_terminates_with_fault() {
     let t = TmpDir::new();
     let entry = t.write("main.chz", "while true:\n    print(\"x\")\n");
-    let mut child = spawn(&entry, serial);
+    let mut child = spawn(&entry);
     drop(child.stdout.take()); // close the read end immediately
     let mut err = String::new();
     let mut stderr = child.stderr.take().unwrap();
@@ -474,12 +428,7 @@ fn broken_pipe_terminates_with_fault(serial: bool) {
 
 #[test]
 fn broken_pipe_terminates_with_fault_mn() {
-    broken_pipe_terminates_with_fault(false);
-}
-
-#[test]
-fn broken_pipe_terminates_with_fault_serial() {
-    broken_pipe_terminates_with_fault(true);
+    broken_pipe_terminates_with_fault();
 }
 
 /// R2 (N1 for the `Writer` path): a `stdout()`-backed `Writer` routes `write()` through the same
@@ -489,13 +438,13 @@ fn broken_pipe_terminates_with_fault_serial() {
 /// Writer arm, the writes silently no-op, the loop spins forever, and the unbounded stream queue grows
 /// without bound. `write`'s `Result` is deliberately IGNORED here: the halt is a VM fault raised at the
 /// call site (like `print`, which returns `Nil`), independent of the `Result` value.
-fn writer_stdout_broken_pipe_terminates_with_fault(serial: bool) {
+fn writer_stdout_broken_pipe_terminates_with_fault() {
     let t = TmpDir::new();
     let entry = t.write(
         "main.chz",
         "import stdout from std.io\n\nw := stdout()\nwhile true:\n    w.write(\"x\\n\")\n",
     );
-    let mut child = spawn(&entry, serial);
+    let mut child = spawn(&entry);
     drop(child.stdout.take()); // close the read end immediately
     let mut err = String::new();
     let mut stderr = child.stderr.take().unwrap();
@@ -516,12 +465,7 @@ fn writer_stdout_broken_pipe_terminates_with_fault(serial: bool) {
 
 #[test]
 fn writer_stdout_broken_pipe_terminates_with_fault_mn() {
-    writer_stdout_broken_pipe_terminates_with_fault(false);
-}
-
-#[test]
-fn writer_stdout_broken_pipe_terminates_with_fault_serial() {
-    writer_stdout_broken_pipe_terminates_with_fault(true);
+    writer_stdout_broken_pipe_terminates_with_fault();
 }
 
 /// REGRESSION (the bug this milestone shipped in its first cut): a dead stdout must NEVER be signalled
@@ -533,13 +477,13 @@ fn writer_stdout_broken_pipe_terminates_with_fault_serial() {
 /// The `defer:` that prints is load-bearing: it is what runs a `print` DURING the fault unwind, on the
 /// now-dead pipe. The first cut's own broken-pipe test could not see the bug because its program
 /// printed nothing on the unwind path.
-fn fault_under_broken_pipe_is_not_success(serial: bool) {
+fn fault_under_broken_pipe_is_not_success() {
     let t = TmpDir::new();
     let entry = t.write(
         "main.chz",
         "import std.time\n\nfn main():\n    defer:\n        print(\"cleanup\")\n    print(\"hello\")\n    time.sleep_ms(150)\n    xs := [1]\n    print(xs[5])\n\nmain()\n",
     );
-    let mut child = spawn(&entry, serial);
+    let mut child = spawn(&entry);
     drop(child.stdout.take()); // the reader is gone, as under `| head -1`
     let status = wait_timeout(&mut child, 20).expect("hung on a dead pipe");
     assert!(
@@ -550,12 +494,7 @@ fn fault_under_broken_pipe_is_not_success(serial: bool) {
 
 #[test]
 fn fault_under_broken_pipe_is_not_success_mn() {
-    fault_under_broken_pipe_is_not_success(false);
-}
-
-#[test]
-fn fault_under_broken_pipe_is_not_success_serial() {
-    fault_under_broken_pipe_is_not_success(true);
+    fault_under_broken_pipe_is_not_success();
 }
 
 /// W7-5d — a dead stdout kills the job that touched it, NOT its siblings, and NOT the rest of a
@@ -569,7 +508,7 @@ fn fault_under_broken_pipe_is_not_success_serial() {
 ///    never printed. Now gated on `Vm::stdout_writes` moving during that call.
 ///
 /// Both were NONDETERMINISTIC before the gate: how much of each sibling survived depended on how far
-/// the pool had got when the pipe broke — for (1), neither marker at `--threads=1`/`--serial`, both
+/// the pool had got when the pipe broke — for (1), neither marker at `--threads=1`, both
 /// at `--threads=3+`, either answer at `--threads=2` across runs; for (2), 1 of 3 writes usually and
 /// 3 of 3 sometimes at `--threads=2`. `--threads=1` is the load-bearing configuration: it is the one
 /// that fails again the moment either gate becomes reachable.
@@ -611,9 +550,6 @@ fn dead_stdout_does_not_cancel_sibling_executor_jobs(
     );
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_chezzi"));
     cmd.arg("run");
-    if serial {
-        cmd.arg("--serial");
-    }
     if let Some(n) = threads {
         cmd.arg(format!("--threads={n}"));
     }
@@ -662,11 +598,6 @@ fn dead_stdout_does_not_cancel_sibling_executor_jobs_mn_one_thread() {
 }
 
 #[test]
-fn dead_stdout_does_not_cancel_sibling_executor_jobs_serial() {
-    dead_stdout_does_not_cancel_sibling_executor_jobs(true, None, 1);
-}
-
-#[test]
 fn dead_stdout_does_not_tear_a_multi_native_sibling_mn() {
     dead_stdout_does_not_cancel_sibling_executor_jobs(false, None, 3);
 }
@@ -676,15 +607,10 @@ fn dead_stdout_does_not_tear_a_multi_native_sibling_mn_one_thread() {
     dead_stdout_does_not_cancel_sibling_executor_jobs(false, Some(1), 3);
 }
 
-#[test]
-fn dead_stdout_does_not_tear_a_multi_native_sibling_serial() {
-    dead_stdout_does_not_cancel_sibling_executor_jobs(true, None, 3);
-}
-
 /// A stdout that CANNOT be written (`> /dev/full` → ENOSPC) must not be silently dropped: the run
 /// fails loudly (diagnostic + non-zero exit), never "exit 0 with no output". Same policy as
 /// `chezzi docs` (main.rs `write_stdout`): BrokenPipe = clean, any other errno = FAILURE.
-fn write_error_is_reported(serial: bool) {
+fn write_error_is_reported() {
     let full = std::path::Path::new("/dev/full");
     if !full.exists() {
         return; // not Linux — nothing to assert against
@@ -693,9 +619,6 @@ fn write_error_is_reported(serial: bool) {
     let entry = t.write("main.chz", "for i in range(100):\n    print(\"line\", i)\n");
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_chezzi"));
     cmd.arg("run");
-    if serial {
-        cmd.arg("--serial");
-    }
     let out = cmd
         .arg(&entry)
         .stdout(std::fs::File::create(full).unwrap())
@@ -717,12 +640,7 @@ fn write_error_is_reported(serial: bool) {
 
 #[test]
 fn write_error_is_reported_mn() {
-    write_error_is_reported(false);
-}
-
-#[test]
-fn write_error_is_reported_serial() {
-    write_error_is_reported(true);
+    write_error_is_reported();
 }
 
 /// A STALLED reader must not stall the engine. A streamed `print` used to be an inline, blocking
@@ -731,7 +649,7 @@ fn write_error_is_reported_serial() {
 /// nursery starved for as long as the consumer stalled (the D5 invariant: no blocking syscall on a
 /// core worker). Witness: a task that sleeps, then writes a file — it must make progress while
 /// nothing is draining stdout.
-fn stalled_reader_does_not_starve_other_tasks(serial: bool) {
+fn stalled_reader_does_not_starve_other_tasks() {
     let t = TmpDir::new();
     let witness = t.0.join("witness.txt");
     let src = format!(
@@ -745,11 +663,7 @@ fn stalled_reader_does_not_starve_other_tasks(serial: bool) {
     let entry = t.write("main.chz", &src);
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_chezzi"));
     cmd.arg("run");
-    if serial {
-        cmd.arg("--serial");
-    } else {
-        cmd.arg("--threads=2"); // errors with --serial; 8 printers >> workers
-    }
+    cmd.arg("--threads=2"); // 8 printers >> workers
     let mut child = cmd
         .arg(&entry)
         .stdin(Stdio::piped())
@@ -777,12 +691,7 @@ fn stalled_reader_does_not_starve_other_tasks(serial: bool) {
 
 #[test]
 fn stalled_reader_does_not_starve_other_tasks_mn() {
-    stalled_reader_does_not_starve_other_tasks(false);
-}
-
-#[test]
-fn stalled_reader_does_not_starve_other_tasks_serial() {
-    stalled_reader_does_not_starve_other_tasks(true);
+    stalled_reader_does_not_starve_other_tasks();
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -793,7 +702,7 @@ fn stalled_reader_does_not_starve_other_tasks_serial() {
 /// stderr is a DIAGNOSTIC channel: an unwritable stderr (`2> /dev/full`, a dead `2> >(head -1)`
 /// reader) must not touch a healthy program. It used to kill the process mid-run — exit 1 for a
 /// program that had no error, with its stdout results truncated.
-fn stderr_failure_does_not_kill_the_run(serial: bool) {
+fn stderr_failure_does_not_kill_the_run() {
     let full = std::path::Path::new("/dev/full");
     if !full.exists() {
         return; // not Linux
@@ -806,9 +715,6 @@ fn stderr_failure_does_not_kill_the_run(serial: bool) {
     );
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_chezzi"));
     cmd.arg("run");
-    if serial {
-        cmd.arg("--serial");
-    }
     let out = cmd
         .arg(&entry)
         .stdout(Stdio::piped())
@@ -830,18 +736,13 @@ fn stderr_failure_does_not_kill_the_run(serial: bool) {
 
 #[test]
 fn stderr_failure_does_not_kill_the_run_mn() {
-    stderr_failure_does_not_kill_the_run(false);
-}
-
-#[test]
-fn stderr_failure_does_not_kill_the_run_serial() {
-    stderr_failure_does_not_kill_the_run(true);
+    stderr_failure_does_not_kill_the_run();
 }
 
 /// A closed stdout reader must not swallow the program's OUTCOME: a run that faults after the pipe
 /// broke still reports FAILURE with its trace on stderr (it used to exit 0, silently, from the writer
 /// thread — `main`'s exit-status handling never ran).
-fn fault_after_broken_pipe_still_reports_the_fault(serial: bool) {
+fn fault_after_broken_pipe_still_reports_the_fault() {
     let t = TmpDir::new();
     let entry = t.write(
         "main.chz",
@@ -849,7 +750,7 @@ fn fault_after_broken_pipe_still_reports_the_fault(serial: bool) {
         // genuine fault, with no further print to halt on: the FAULT must decide the exit status.
         "import std.time\nprint(\"a\")\ntime.sleep_ms(300)\nxs := [1]\nprint(xs[5])\n",
     );
-    let mut child = spawn(&entry, serial);
+    let mut child = spawn(&entry);
     drop(child.stdout.take()); // close the read end immediately
     let err = child.stderr.take().unwrap();
     let status = wait_timeout(&mut child, 20).expect("never exited");
@@ -866,24 +767,19 @@ fn fault_after_broken_pipe_still_reports_the_fault(serial: bool) {
 
 #[test]
 fn fault_after_broken_pipe_still_reports_the_fault_mn() {
-    fault_after_broken_pipe_still_reports_the_fault(false);
-}
-
-#[test]
-fn fault_after_broken_pipe_still_reports_the_fault_serial() {
-    fault_after_broken_pipe_still_reports_the_fault(true);
+    fault_after_broken_pipe_still_reports_the_fault();
 }
 
 /// `2>&1 | head -1` — BOTH writer threads take EPIPE in the same window. Two threads calling libc
 /// `exit(3)` concurrently is undefined (a hang in the exit-handler lock, atexit run twice); no thread
 /// exits the process any more, so this just terminates.
-fn both_streams_broken_terminates(serial: bool) {
+fn both_streams_broken_terminates() {
     let t = TmpDir::new();
     let entry = t.write(
         "main.chz",
         "import std.io\nwhile true:\n    io.print(\"o\")\n    io.eprint(\"e\")\n",
     );
-    let mut child = spawn(&entry, serial);
+    let mut child = spawn(&entry);
     drop(child.stdout.take());
     drop(child.stderr.take());
     let status = wait_timeout(&mut child, 20).expect("did not terminate with both pipes closed");
@@ -892,25 +788,20 @@ fn both_streams_broken_terminates(serial: bool) {
 
 #[test]
 fn both_streams_broken_terminates_mn() {
-    both_streams_broken_terminates(false);
-}
-
-#[test]
-fn both_streams_broken_terminates_serial() {
-    both_streams_broken_terminates(true);
+    both_streams_broken_terminates();
 }
 
 /// A PARTIAL line (`print(x, end="")`, no newline) must reach the terminal as it is produced — a
 /// progress indicator, and the "a killed program keeps what it printed" contract. `std::io::stdout()`
 /// is a `LineWriter`, so the writer thread must flush every message; otherwise nothing appears until
 /// a newline (or ever, if the program is killed).
-fn partial_line_print_is_visible_without_flush(serial: bool) {
+fn partial_line_print_is_visible_without_flush() {
     let t = TmpDir::new();
     let entry = t.write(
         "main.chz",
         "print(\".\", end=\"\")\nwhile true:\n    x := 1\n",
     );
-    let mut child = spawn(&entry, serial);
+    let mut child = spawn(&entry);
     let out = child.stdout.take().unwrap();
     let got = read_bytes_timeout(out, 1);
     let _ = child.kill();
@@ -924,19 +815,14 @@ fn partial_line_print_is_visible_without_flush(serial: bool) {
 
 #[test]
 fn partial_line_print_is_visible_without_flush_mn() {
-    partial_line_print_is_visible_without_flush(false);
-}
-
-#[test]
-fn partial_line_print_is_visible_without_flush_serial() {
-    partial_line_print_is_visible_without_flush(true);
+    partial_line_print_is_visible_without_flush();
 }
 
 /// D5, the `io.flush()` seam: a stalled stdout consumer must not starve unrelated tasks. `flush`
 /// (and `input`/`read_line`, which used to pre-flush) must never WAIT on the writer thread — that
 /// thread is parked in `write(2)` on the full pipe, so waiting pins the fiber's core worker for as
 /// long as the consumer stalls. Witness: a task that sleeps, then writes a file.
-fn stalled_reader_flush_does_not_starve_other_tasks(serial: bool) {
+fn stalled_reader_flush_does_not_starve_other_tasks() {
     let t = TmpDir::new();
     let witness = t.0.join("witness_flush.txt");
     let src = format!(
@@ -950,11 +836,7 @@ fn stalled_reader_flush_does_not_starve_other_tasks(serial: bool) {
     let entry = t.write("main.chz", &src);
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_chezzi"));
     cmd.arg("run");
-    if serial {
-        cmd.arg("--serial");
-    } else {
-        cmd.arg("--threads=2");
-    }
+    cmd.arg("--threads=2");
     let mut child = cmd
         .arg(&entry)
         .stdin(Stdio::piped())
@@ -982,12 +864,7 @@ fn stalled_reader_flush_does_not_starve_other_tasks(serial: bool) {
 
 #[test]
 fn stalled_reader_flush_does_not_starve_other_tasks_mn() {
-    stalled_reader_flush_does_not_starve_other_tasks(false);
-}
-
-#[test]
-fn stalled_reader_flush_does_not_starve_other_tasks_serial() {
-    stalled_reader_flush_does_not_starve_other_tasks(true);
+    stalled_reader_flush_does_not_starve_other_tasks();
 }
 
 /// gap N1: a FINITE program whose print(s) land in a pipe the reader already closed drops bytes but
@@ -996,12 +873,12 @@ fn stalled_reader_flush_does_not_starve_other_tasks_serial() {
 /// 1 (writer won). It must now be DETERMINISTIC non-zero, matching Python's `BrokenPipeError`: the
 /// post-`flush_stream()` `out_dead_reason()` check in `main`. The reader is dropped at time 0, so the
 /// write is GUARANTEED to EPIPE (no race in the test) and the run must fail every time.
-fn last_print_into_closed_pipe_is_deterministically_nonzero(serial: bool) {
+fn last_print_into_closed_pipe_is_deterministically_nonzero() {
     let t = TmpDir::new();
     // A single print → exactly one write, no next print site: purest exercise of the post-flush path.
     let entry = t.write("main.chz", "print(\"bye\")\n");
     for _ in 0..30 {
-        let mut child = spawn(&entry, serial);
+        let mut child = spawn(&entry);
         drop(child.stdout.take()); // reader gone before any byte is written → the write must EPIPE
         let mut err = String::new();
         let mut stderr = child.stderr.take().unwrap();
@@ -1022,22 +899,17 @@ fn last_print_into_closed_pipe_is_deterministically_nonzero(serial: bool) {
 
 #[test]
 fn last_print_into_closed_pipe_is_deterministically_nonzero_mn() {
-    last_print_into_closed_pipe_is_deterministically_nonzero(false);
-}
-
-#[test]
-fn last_print_into_closed_pipe_is_deterministically_nonzero_serial() {
-    last_print_into_closed_pipe_is_deterministically_nonzero(true);
+    last_print_into_closed_pipe_is_deterministically_nonzero();
 }
 
 /// N1 no-regression (risk a): when the reader DRAINS every byte to EOF before closing (the reader
 /// read everything — nothing was dropped), NO write fails, OUT_DEAD stays unset, and the run must
 /// still exit 0. Proves the N1 fix does not over-fire on a clean finite run.
-fn fully_drained_output_stays_success(serial: bool) {
+fn fully_drained_output_stays_success() {
     let t = TmpDir::new();
     let entry = t.write("main.chz", "for i in range(5):\n    print(i)\n");
     for _ in 0..30 {
-        let mut child = spawn(&entry, serial);
+        let mut child = spawn(&entry);
         // Drain stdout fully to EOF on a helper thread — the reader reads EVERYTHING, so no write
         // ever fails. (Not via read_line-then-drop: that would manufacture a broken pipe.)
         let out = child.stdout.take().unwrap();
@@ -1060,12 +932,7 @@ fn fully_drained_output_stays_success(serial: bool) {
 
 #[test]
 fn fully_drained_output_stays_success_mn() {
-    fully_drained_output_stays_success(false);
-}
-
-#[test]
-fn fully_drained_output_stays_success_serial() {
-    fully_drained_output_stays_success(true);
+    fully_drained_output_stays_success();
 }
 
 // ===== W6-9 — `Writer.write_bytes` on `io.stdout()`/`io.stderr()` must be BYTE-EXACT =====
@@ -1077,23 +944,21 @@ fn fully_drained_output_stays_success_serial() {
 // These live here rather than in `tests/chz/` because the in-VM test runner hands stdout back as a
 // Rust `String`: only a real child process can witness the bytes that actually reach fd 1/2.
 
-/// Run `chezzi run [--serial] <file>` to completion, returning its raw stdout/stderr bytes.
-fn run_bytes(entry: &PathBuf, serial: bool) -> (Vec<u8>, Vec<u8>, std::process::ExitStatus) {
+/// Run `chezzi run <file>` to completion, returning its raw stdout/stderr bytes.
+fn run_bytes(entry: &PathBuf) -> (Vec<u8>, Vec<u8>, std::process::ExitStatus) {
     // `wait_with_output` closes our end of the child's stdin first, so a program that never reads
     // stdin cannot deadlock here.
-    let out = spawn(entry, serial)
-        .wait_with_output()
-        .expect("wait_with_output");
+    let out = spawn(entry).wait_with_output().expect("wait_with_output");
     (out.stdout, out.stderr, out.status)
 }
 
-fn stdout_write_bytes_is_byte_exact(serial: bool) {
+fn stdout_write_bytes_is_byte_exact() {
     let t = TmpDir::new();
     let entry = t.write(
         "main.chz",
         "import std.io\n\nw := io.stdout()\nw.write_bytes(b\"\\xff\\xfe\")\n",
     );
-    let (out, err, status) = run_bytes(&entry, serial);
+    let (out, err, status) = run_bytes(&entry);
     assert!(
         status.success(),
         "exit: {status:?}, stderr: {}",
@@ -1108,22 +973,17 @@ fn stdout_write_bytes_is_byte_exact(serial: bool) {
 
 #[test]
 fn stdout_write_bytes_is_byte_exact_mn() {
-    stdout_write_bytes_is_byte_exact(false);
-}
-
-#[test]
-fn stdout_write_bytes_is_byte_exact_serial() {
-    stdout_write_bytes_is_byte_exact(true);
+    stdout_write_bytes_is_byte_exact();
 }
 
 /// The sibling arm — a fix applied to only SOME arms of an N-way set is the recurring meta-finding.
-fn stderr_write_bytes_is_byte_exact(serial: bool) {
+fn stderr_write_bytes_is_byte_exact() {
     let t = TmpDir::new();
     let entry = t.write(
         "main.chz",
         "import std.io\n\nw := io.stderr()\nw.write_bytes(b\"\\xff\\xfe\")\n",
     );
-    let (out, err, status) = run_bytes(&entry, serial);
+    let (out, err, status) = run_bytes(&entry);
     assert!(status.success(), "exit: {status:?}");
     assert!(out.is_empty(), "nothing was written to stdout: {out:?}");
     assert_eq!(
@@ -1135,18 +995,13 @@ fn stderr_write_bytes_is_byte_exact(serial: bool) {
 
 #[test]
 fn stderr_write_bytes_is_byte_exact_mn() {
-    stderr_write_bytes_is_byte_exact(false);
-}
-
-#[test]
-fn stderr_write_bytes_is_byte_exact_serial() {
-    stderr_write_bytes_is_byte_exact(true);
+    stderr_write_bytes_is_byte_exact();
 }
 
 /// `io.buffered(io.stdout(), n)` reaches the `Stdout` backing through `write_to_core`'s drain
 /// recursion (buffer-full) AND `flush_core`'s (explicit flush) — both must stay byte-exact. 6 bytes
 /// through a cap-4 buffer, then 2 more + `flush()`, exercises each path in order.
-fn buffered_stdout_write_bytes_is_byte_exact(serial: bool) {
+fn buffered_stdout_write_bytes_is_byte_exact() {
     let t = TmpDir::new();
     let entry = t.write(
         "main.chz",
@@ -1154,7 +1009,7 @@ fn buffered_stdout_write_bytes_is_byte_exact(serial: bool) {
          w.write_bytes(b\"\\xff\\xfe\\x00\\x01\\x80\\x81\")\n\
          w.write_bytes(b\"\\xfd\\xfc\")\nw.flush()\n",
     );
-    let (out, err, status) = run_bytes(&entry, serial);
+    let (out, err, status) = run_bytes(&entry);
     assert!(
         status.success(),
         "exit: {status:?}, stderr: {}",
@@ -1169,10 +1024,5 @@ fn buffered_stdout_write_bytes_is_byte_exact(serial: bool) {
 
 #[test]
 fn buffered_stdout_write_bytes_is_byte_exact_mn() {
-    buffered_stdout_write_bytes_is_byte_exact(false);
-}
-
-#[test]
-fn buffered_stdout_write_bytes_is_byte_exact_serial() {
-    buffered_stdout_write_bytes_is_byte_exact(true);
+    buffered_stdout_write_bytes_is_byte_exact();
 }

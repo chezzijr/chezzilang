@@ -3119,9 +3119,8 @@ library file's.
 
 The dedicated native suite lives in **`tests/chz/`** (`spec/` for language behavior, `stdlib/` for
 module behavior, `suites/` for lifecycle-hook suites) — kept separate from `examples/` (print-and-golden
-demos). Because a single `chezzi test` invocation runs one engine, the serial==M:N parity of ported
-behavioral tests is guarded by the `cargo test` gate `test_runner::chz_suite_passes_both_engines`, which
-runs the whole `tests/chz/` suite on both engines and asserts identical verdicts. A fault's *message*
+demos). It runs via the `cargo test` gate `test_runner::chz_suite_passes`, which runs the whole
+`tests/chz/` suite on the M:N engine and asserts every test passes. A fault's *message*
 **can** be asserted in-language via `recover:` — `r := recover: <expr>` then
 `match r: Err(e): assert e.message().contains(...)` — so fault-path tests port here too; only
 compile-time checker diagnostics (`rejects`/`ok`) and engine internals (AST/bytecode/GC, scheduler

@@ -22,7 +22,7 @@
 # is inherently multi-file and lives in `src/vm/tests.rs`
 # (`a_cross_module_default_resolves_in_its_definer_not_the_caller` and siblings).
 #
-# Serial==M:N is guarded by `test_runner::chz_suite_passes_both_engines`.
+# Serial==M:N is guarded by `test_runner::chz_suite_passes`.
 
 # --- chained defaults, depth 3, 4 and 5 -------------------------------------------------------
 

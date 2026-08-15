@@ -6,7 +6,7 @@
 //! bookkeeping saw the other until eager start put them in the same program at the same time.
 //!
 //! **This lives in `tests/`, driving the real binary, because the in-process harness cannot see the
-//! bug at all.** `run_capture_parallel` runs with the BUFFERED stdout sink, which serialises the two
+//! bug at all.** `run_capture` runs with the BUFFERED stdout sink, which serialises the two
 //! sides differently: with the fix reverted, both programs below pass 12 runs in 12 there. Through
 //! the CLI they fail.
 //!
@@ -19,7 +19,7 @@
 //! debug and release alike). The red evidence for the fix itself is the release measurement above,
 //! reproduced by reverting the one `if` in `MnSched::is_deadlocked_ignoring_jobs`.
 //!
-//! **M:N only, deliberately.** On `--serial` a spawned task does not start until the nursery's join,
+//! **M:N only, deliberately.** On the serial engine a spawned task does not start until the nursery's join,
 //! so a blocking body can never reach it and the program faults by design (`EMPTY_RECV_DEADLOCK`'s
 //! own hint says so). Pre-§2c1 BOTH engines faulted these, 6 runs in 6.
 //!

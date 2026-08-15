@@ -6,7 +6,7 @@
 # It must NOT call uuid_seed: `chezzi test` runs the whole suite in ONE process and the seeded switch
 # is process-global and sticky, so seeding here would poison every later v4() in the run.
 # Under `cargo test` the suite runs in-process alongside tests that DO seed, so the unseeded path is
-# only guaranteed because the `chz_suite_passes_both_engines` gate takes the UUID test lock and calls
+# only guaranteed because the `chz_suite_passes` gate takes the UUID test lock and calls
 # `clear_seed()` first — without that, test order would decide which stream this file exercises.
 # Run: `cargo run -- test tests/chz/suites/uuid_entropy_test.chz` (M:N) / `--serial` — both pass.
 

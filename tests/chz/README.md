@@ -23,7 +23,7 @@ cargo run -- test tests/chz/spec/list_test.chz   # one file
 
 A single `chezzi test` invocation runs **one** engine (M:N by default, `--serial` to switch). The Rust tests these are ported from also asserted
 **serial VM == M:N VM** (byte-identical). That dimension is preserved by the `cargo test` gate
-`test_runner::chz_suite_passes_both_engines`, which runs this entire suite on **both** engines and
+`test_runner::chz_suite_passes`, which runs this entire suite on **both** engines and
 asserts identical per-test verdicts. So `cargo test` — not just `chezzi test` — is the authoritative
 gate; a test that passes on one engine but fails on the other is a parity bug caught there.
 

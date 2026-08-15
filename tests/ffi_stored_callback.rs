@@ -50,21 +50,18 @@ impl Drop for TmpDir {
     }
 }
 
-/// `chezzi run [--serial] <entry>` with **core dumps disabled** in the child. One of these tests
-/// aborts the child on purpose; without this the suite deposits a core dump per run per engine on
-/// any host with `kernel.core_pattern=|…systemd-coredump` (i.e. a stock distro).
-fn chezzi(serial: bool, entry: &PathBuf) -> std::process::Output {
-    chezzi_cmd(serial, entry).output().expect("spawn chezzi")
+/// `chezzi run <entry>` with **core dumps disabled** in the child. One of these tests aborts the
+/// child on purpose; without this the suite deposits a core dump per run on any host with
+/// `kernel.core_pattern=|…systemd-coredump` (i.e. a stock distro).
+fn chezzi(entry: &PathBuf) -> std::process::Output {
+    chezzi_cmd(entry).output().expect("spawn chezzi")
 }
 
 /// The `Command` behind [`chezzi`], for the one test that needs to control WHEN the child's stdout
 /// pipe is drained.
-fn chezzi_cmd(serial: bool, entry: &PathBuf) -> Command {
+fn chezzi_cmd(entry: &PathBuf) -> Command {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_chezzi"));
     cmd.arg("run");
-    if serial {
-        cmd.arg("--serial");
-    }
     cmd.arg(entry);
     // `RLIMIT_CORE = 1`, not 0: a stock distro pipes `kernel.core_pattern` into `systemd-coredump`,
     // and for a PIPED pattern the kernel ignores the size limit — except for the special value 1,
@@ -122,11 +119,10 @@ print(raise(10))
 
 #[test]
 fn stored_callback_aborts_loudly_on_both_engines() {
-    for serial in [false, true] {
+    {
         let t = TmpDir::new();
         let entry = t.write("main.chz", REPRO);
-        let out = chezzi(serial, &entry);
-        let engine = if serial { "--serial" } else { "M:N" };
+        let out = chezzi(&entry);
         let stderr = String::from_utf8_lossy(&out.stderr);
 
         // SIGABRT (6), never SIGSEGV (11) and never a silent success: the poison stub must abort,
@@ -134,19 +130,19 @@ fn stored_callback_aborts_loudly_on_both_engines() {
         assert_eq!(
             out.status.signal(),
             Some(libc::SIGABRT),
-            "[{engine}] a stored FFI callback must abort loudly, got status {:?} signal {:?}; \
+            "a stored FFI callback must abort loudly, got status {:?} signal {:?}; \
              stderr: {stderr}",
             out.status.code(),
             out.status.signal(),
         );
         assert!(
             stderr.contains("stored/cross-thread callbacks are not supported"),
-            "[{engine}] the abort must name the unsupported feature; stderr: {stderr}"
+            "the abort must name the unsupported feature; stderr: {stderr}"
         );
         // An intentional abort must not litter the host with core dumps (see `chezzi()`).
         assert!(
             !out.status.core_dumped(),
-            "[{engine}] the deliberately-aborting child must not dump core"
+            "the deliberately-aborting child must not dump core"
         );
     }
 }
@@ -182,15 +178,14 @@ print("about to raise")
 h := signal(10, handler)
 r := raise(10)
 "#;
-    for serial in [false, true] {
+    {
         let t = TmpDir::new();
         let entry = t.write("main.chz", SRC);
-        let mut child = chezzi_cmd(serial, &entry)
+        let mut child = chezzi_cmd(&entry)
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .spawn()
             .expect("spawn chezzi");
-        let engine = if serial { "--serial" } else { "M:N" };
         // Poll for exit WITHOUT reading stdout, so the writer thread stays parked on the full pipe
         // for the whole window. A poison path that waits on that writer never exits and trips the
         // deadline; `write(2)` + `abort()` exits promptly regardless of the pipe's state.
@@ -202,7 +197,7 @@ r := raise(10)
                     let _ = child.kill();
                     let _ = child.wait();
                     panic!(
-                        "[{engine}] the poison abort HUNG with the stdout pipe full and unread — \
+                        "the poison abort HUNG with the stdout pipe full and unread — \
                          `callback_poison_abort` must call nothing but write(2) and abort()"
                     );
                 }
@@ -215,11 +210,11 @@ r := raise(10)
         assert_eq!(
             status.signal(),
             Some(libc::SIGABRT),
-            "[{engine}] expected the poison abort; stderr: {stderr}"
+            "expected the poison abort; stderr: {stderr}"
         );
         assert!(
             stderr.contains("stored/cross-thread callbacks are not supported"),
-            "[{engine}] the abort must name the unsupported feature; stderr: {stderr}"
+            "the abort must name the unsupported feature; stderr: {stderr}"
         );
     }
 }
@@ -254,28 +249,27 @@ print("created {rc}")
 u := usleep(2000000)
 print("NO ABORT")
 "#;
-    for serial in [false, true] {
+    {
         let t = TmpDir::new();
         let entry = t.write("main.chz", SRC);
-        let out = chezzi(serial, &entry);
-        let engine = if serial { "--serial" } else { "M:N" };
+        let out = chezzi(&entry);
         let stdout = String::from_utf8_lossy(&out.stdout);
         let stderr = String::from_utf8_lossy(&out.stderr);
         assert_eq!(
             out.status.signal(),
             Some(libc::SIGABRT),
-            "[{engine}] a callback invoked from a C-spawned thread must abort, got status {:?} \
+            "a callback invoked from a C-spawned thread must abort, got status {:?} \
              signal {:?}; stdout: {stdout} stderr: {stderr}",
             out.status.code(),
             out.status.signal(),
         );
         assert!(
             stderr.contains("stored/cross-thread callbacks are not supported"),
-            "[{engine}] the abort must name the unsupported feature; stderr: {stderr}"
+            "the abort must name the unsupported feature; stderr: {stderr}"
         );
         assert!(
             !stdout.contains("VM RE-ENTERED OFF-THREAD") && !stdout.contains("NO ABORT"),
-            "[{engine}] the foreign thread must never run the Chezzi callback body; stdout: {stdout}"
+            "the foreign thread must never run the Chezzi callback body; stdout: {stdout}"
         );
     }
 }
@@ -312,16 +306,15 @@ print("errs={{errs}} hwm={{hw}}")
         )
     };
     const ITERS: usize = 50_000;
-    for serial in [false, true] {
-        let engine = if serial { "--serial" } else { "M:N" };
+    {
         let peak = |iters: usize| {
             let t = TmpDir::new();
             let entry = t.write("main.chz", &src(iters));
-            let out = chezzi(serial, &entry);
+            let out = chezzi(&entry);
             let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
             assert!(
                 stdout.starts_with(&format!("errs={iters} hwm=")),
-                "[{engine}] every attempt must fault recoverably; stdout: {stdout} stderr: {}",
+                "every attempt must fault recoverably; stdout: {stdout} stderr: {}",
                 String::from_utf8_lossy(&out.stderr)
             );
             stdout
@@ -339,7 +332,7 @@ print("errs={{errs}} hwm={{hw}}")
         let assert_probed = |kb: i64, iters: usize| {
             assert!(
                 kb > 0,
-                "[{engine}] the VmHWM probe failed (sentinel {kb}) at {iters} iterations — the leak \
+                "the VmHWM probe failed (sentinel {kb}) at {iters} iterations — the leak \
                  assertion below would be vacuous"
             );
             kb
@@ -349,7 +342,7 @@ print("errs={{errs}} hwm={{hw}}")
         let (base, looped) = (assert_probed(peak(0), 0), assert_probed(peak(ITERS), ITERS));
         assert!(
             looped - base < 8_000,
-            "[{engine}] an unarmed callback trampoline must be freed, not leaked: peak RSS grew \
+            "an unarmed callback trampoline must be freed, not leaked: peak RSS grew \
              {base} kB -> {looped} kB over {ITERS} never-armed attempts"
         );
     }
@@ -408,22 +401,21 @@ print("survived")
 "#,
         rlimit_as = libc::RLIMIT_AS,
     );
-    for serial in [false, true] {
+    {
         let t = TmpDir::new();
         let entry = t.write("main.chz", &src);
-        let out = chezzi(serial, &entry);
-        let engine = if serial { "--serial" } else { "M:N" };
+        let out = chezzi(&entry);
         let stdout = String::from_utf8_lossy(&out.stdout);
         assert_eq!(
             out.status.signal(),
             None,
-            "[{engine}] running the closure pool dry must not kill the process; stdout: {stdout} \
+            "running the closure pool dry must not kill the process; stdout: {stdout} \
              stderr: {}",
             String::from_utf8_lossy(&out.stderr)
         );
         assert!(
             stdout.contains("FFI closure pool is exhausted") && stdout.ends_with("survived\n"),
-            "[{engine}] exhaustion must be a recoverable fault; stdout: {stdout} stderr: {}",
+            "exhaustion must be a recoverable fault; stdout: {stdout} stderr: {}",
             String::from_utf8_lossy(&out.stderr)
         );
     }

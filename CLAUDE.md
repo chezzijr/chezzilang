@@ -122,9 +122,9 @@ UPDATE_EDITOR_ASSETS=1 cargo test --test editor_tmlanguage    # regenerate the V
   A test that asserts a program's **observable behavior** (a value, a collection, a fault message)
   belongs in the native suite **`tests/chz/`** as `test fn` + `assert` (`spec/` = language behavior,
   `stdlib/` = std modules, `suites/` = struct suites with lifecycle hooks). It runs via `chezzi test`
-  (M:N engine by default; `--serial` opts out) and is gated **serial==M:N** by the `cargo test` gate
-  `test_runner::chz_suite_passes_both_engines` (runs the whole suite on both engines, asserts identical
-  verdicts). Prefer this: it dogfoods the language and shrinks the Rust test surface. **Fault-path IS
+  (M:N engine by default; `--serial` opts out) and is gated by the `cargo test` gate
+  `test_runner::chz_suite_passes` (runs the whole suite on the M:N engine, asserts every test
+  passes). Prefer this: it dogfoods the language and shrinks the Rust test surface. **Fault-path IS
   Chezzi-able** — `r := recover: <faulting expr>` then `assert r` is `Err` and check `e.message()`
   (don't reach for Rust just because a test expects a panic). **Fall back to Rust `#[cfg(test)]` ONLY
   for what `assert` genuinely can't express:** compile-time checker diagnostics (`rejects`/`ok`),
