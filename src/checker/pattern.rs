@@ -2042,6 +2042,69 @@ impl Checker {
                     return subst(&declared, &map);
                 }
             }
+            // …and when NOTHING determines the type params — no turbofish (that never reaches here,
+            // it lands in `infer_index`'s Scope B) and no expected type at all — the value can never
+            // be formed. Go refuses exactly this spelling, at the READ: `cannot use generic function
+            // id without instantiation`. Chezzi used to accept the binding and blame the eventual
+            // call ("argument 1 of 'closure': expected T, found int" — a `closure` the user never
+            // wrote, naming a `T` there is no way to act on), or accept it silently when the value was
+            // never called. Reported here, where the name and its parameters are still known.
+            //
+            // Gated on a hint that DETERMINES nothing — absent, or `Unknown`. With a real hint present,
+            // either Scope A pinned above, or the hint is the real problem (wrong arity, non-concrete,
+            // not even a fn) and the existing assignability diagnostic says so accurately — this
+            // message would not. `Unknown` must count as "nothing", or the rule cancels itself on an
+            // INFERRED return type (`fn get(): return id`): the return-inference pass reads the fn's
+            // body, takes the `Ty::Unknown` this arm returns as the inferred return, and the real pass
+            // then re-checks the same `return id` against a `Some(Unknown)` hint — turning a reject
+            // into a silent ACCEPT (measured: `g := get(); g(1)` printed `1`, check-clean). Same-module
+            // (`local_fn_names`), matching Scope A / Scope B: an IMPORTED generic fn value is already
+            // refused on every path (a documented v1 limit). The witness wall above wins first — its
+            // advice differs (a turbofish does not help there).
+            if !type_params.is_empty()
+                && self.local_fn_names.contains(name)
+                && matches!(self.expected_hint, None | Some(Ty::Unknown))
+                && !self.generic_fn_value_prepass
+            {
+                // Render the annotation spelling from the fn's OWN signature with each undetermined
+                // parameter shown as a `<T>` placeholder, so the advice fits this declaration instead
+                // of a made-up one.
+                let holes: HashMap<String, Ty> = type_params
+                    .iter()
+                    .map(|tp| (tp.name.clone(), Ty::Param(format!("<{}>", tp.name))))
+                    .collect();
+                let sig = subst(
+                    &Ty::Func {
+                        params: params.clone(),
+                        ret: Box::new(ret.clone()),
+                        labels: FnLabels::new(labels.clone()),
+                    },
+                    &holes,
+                );
+                let names = type_params
+                    .iter()
+                    .map(|tp| tp.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                // A turbofish carries exactly ONE type argument (`infer_index` / `seed_targs`), so it
+                // is only a fix for a single-parameter generic — offering it for two would be advice
+                // that cannot work.
+                let turbofish = if type_params.len() == 1 {
+                    format!("write the type argument (`{name}[<{names}>]`), or ")
+                } else {
+                    String::new()
+                };
+                self.error(
+                    span,
+                    format!(
+                        "'{name}' is generic and nothing here determines {names}, so it cannot \
+                         become a function value — {turbofish}annotate the binding with a concrete \
+                         function type (`g: {sig} = {name}`), writing a real type in place of each \
+                         `<…>`"
+                    ),
+                );
+                return Ty::Unknown;
+            }
             return Ty::Func {
                 params,
                 ret: Box::new(ret),

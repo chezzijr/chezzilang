@@ -1008,11 +1008,27 @@ closure-taking container methods) pins its `[T]` from the element type — `[1,2
 `conv[T](x: T) -> str` type-checks to `List[str]`, and `[1,2,3].fold(0, add)` for an `add[T: Add]` pins
 `T=int` and enforces the bound — even though those methods also carry their own result type parameter.
 The runtime is generic-**erased** — the value *is* the underlying function — so an indirect call
-adds no overhead and behaves identically on both engines. A **bare, un-pinned** generic fn value (`g :=
-ident` with no turbofish and no expected `fn(...) -> ...` type, then called) stays an **error**: add a
-turbofish (`ident[int]`) or a `fn(...) -> ...` annotation. First-class (rank-N) polymorphism — one
-binding used at two different types — is a future addition. (v1 limit: the pin currently requires a
-**same-module** generic fn — an *imported* generic fn used bare as a value stays the un-pinned error.)
+adds no overhead and behaves identically on both engines.
+
+A **bare, un-pinned** generic fn value — `g := ident`, with no turbofish and no expected
+`fn(...) -> ...` type anywhere — is rejected **at the read**, whether or not it is ever called. This is
+Go's rule (`cannot use generic function id without instantiation`); the diagnostic names the
+undetermined parameters and both working spellings:
+
+```chezzi
+g := ident        # 'ident' is generic and nothing here determines T, so it cannot become a function
+                  # value — write the type argument (`ident[<T>]`), or annotate the binding with a
+                  # concrete function type (`g: fn(<T>) -> <T> = ident`), writing a real type in
+                  # place of each `<…>`
+```
+
+The same read inside a `[...]`/`{...}` literal, in a `return` from a fn with an **inferred** return
+type, or as a `print` argument is the same error — no hint reaches it in any of those. A generic with
+**two or more** type parameters is only fixable by annotation: a fn-value turbofish carries exactly one
+type argument (`pair[int]` for `pair[A, B]` is an arity error), so the diagnostic does not offer it.
+First-class (rank-N) polymorphism — one binding used at two different types — is a future addition;
+Go and Rust refuse it too. (v1 limit: the pin requires a **same-module** generic fn — an *imported*
+generic fn used bare as a value stays rejected on every path.)
 
 **`?` inside a closure.** A closure body may use `?` (§9) — but only when the closure carries an
 **explicit `-> Result[…]`/`-> Option[…]`** return type. The `?` propagates to *that closure's*

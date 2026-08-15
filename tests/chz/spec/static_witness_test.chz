@@ -201,7 +201,10 @@ fn apply_tag(f: fn(Node) -> str, x: Node) -> str:
 
 test fn a_generic_that_never_constructs_stays_a_function_value():
     assert tagged(Node(2)) == "node2"
-    g := tagged
+    # instantiated (`[Node]`), because a BARE `g := tagged` determines nothing — that binding is now
+    # refused at the read, Go-style. The value position this test guards is the one that WORKS.
+    g := tagged[Node]
+    assert g(Node(4)) == "node4"
     assert apply_tag(tagged, Node(3)) == "node3"
 
 test fn a_generic_that_never_constructs_can_be_a_spawn_or_defer_target():

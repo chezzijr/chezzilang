@@ -10317,6 +10317,32 @@ no longer a non-goal — complete VM-only support shipped** (see below).
 One bullet per milestone/epic. Full landing detail (TDD notes, review-panel findings, test-count deltas,
 branch names) is in the git log.
 
+- **An UNINSTANTIATED generic fn value is refused at the binding, Go's rule (2026-08-15).** `g := id`
+  for `fn id[T](x: T) -> T` was accepted, and the mistake surfaced at the eventual call as
+  *argument 1 of 'closure': expected T, found int* — blaming a `closure` the user never wrote and
+  naming a `T` there is no way to act on; a binding that was never called was accepted **silently**
+  (`g := id` alone: `ok: no type errors`, and `g := mk` for `mk[T](n: int) -> List[T]` even ran,
+  printing `[]`). Go refuses exactly this spelling at the READ (*cannot use generic function id
+  without instantiation*); every other shape already agreed with Go, so this was the single
+  divergence. Now: *'id' is generic and nothing here determines T, so it cannot become a function
+  value — write the type argument (`id[<T>]`), or annotate the binding with a concrete function type
+  (`g: fn(<T>) -> <T> = id`), writing a real type in place of each `<…>`*. The `<…>` shape is rendered
+  from the fn's OWN signature, the undetermined parameters are named, and the turbofish is offered
+  only for a **single**-parameter generic — a fn-value turbofish carries exactly one type argument, so
+  suggesting `pair[int]` for `pair[A, B]` would be advice that cannot work. Fires only when nothing
+  determines the params: every pinned spelling is untouched (turbofish, annotation, HOF parameter,
+  return position, struct-field slot, `.map`/`.fold`/`.filter` element slot), as is a non-generic or
+  builtin fn value and any local/param that merely shadows the name. Two traps found while building
+  it: (1) the `.map(conv)` prepass reads the fn bare with no slot type yet and is pinned *afterwards*
+  by `try_pin_generic_fn_value_arg`, so the wall is held back there (`generic_fn_value_prepass`);
+  (2) gating on `expected_hint.is_none()` alone let the rule **cancel itself** through an inferred
+  return — `fn get(): return id` took the rule's own `Ty::Unknown` as the inferred return type, and
+  the re-check then saw a `Some(Unknown)` hint, so `g := get(); g(1)` printed `1` check-clean;
+  `Unknown` determines nothing and now counts as nothing. The witness wall
+  (`reject_witness_fn_value`) still fires first — its advice differs, since a turbofish does not help
+  there. 438-file `.chz` corpus sweep, pre vs post binary: **one** verdict change, the
+  `g := tagged` probe in `tests/chz/spec/static_witness_test.chz` (now `tagged[Node]`, and it asserts
+  the call). `docs/syntax.md` §7b, `docs/spec.md`.
 - **A lex error points at the offending CHARACTER, on both axes (M24-7, 2026-08-14).** `LexError`
   carried a line but no column, and the resolver seam hardcoded `col: 1`, so a lex error was the one
   diagnostic in the compiler that could not point at a character — the LSP squiggle landed on the

@@ -3587,6 +3587,15 @@ impl Checker {
                     self.generic_arg_prepass = saved;
                     self.errors.truncate(mark);
                     t
+                } else if matches!(a.kind, ExprKind::Ident(_)) {
+                    // A bare same-module generic fn here (`[1,2,3].map(conv)`) types RIGID — this pass
+                    // has no substituted slot to pin it from; `try_pin_generic_fn_value_arg` does that
+                    // afterwards. So hold back `infer_ident`'s "nothing determines T" wall: the read is
+                    // not the final word on the type here, unlike a binding.
+                    let saved = std::mem::replace(&mut self.generic_fn_value_prepass, true);
+                    let t = self.infer_value(a);
+                    self.generic_fn_value_prepass = saved;
+                    t
                 } else {
                     self.infer_value(a)
                 }

@@ -21918,6 +21918,117 @@ fn bare_unpinned_generic_fn_value_stays_error() {
     );
 }
 
+/// …and the error lands at the BINDING, naming the fn and its undetermined type parameter — Go's
+/// rule (`cannot use generic function id without instantiation`, reported at the read), with both
+/// working spellings added. Before this, the binding was accepted and the CALL below reported
+/// "argument 1 of 'closure': expected T, found int" — a `closure` the user never wrote, naming a `T`
+/// there is no way to act on. A read that is never called at all was accepted silently.
+#[test]
+fn bare_unpinned_generic_fn_value_rejected_at_the_binding() {
+    for src in [
+        "fn ident[T](x: T) -> T:\n    return x\n\nfn main():\n    g := ident\n    print(g(5))\n",
+        // …never called: the binding alone is the mistake, so it must not need a use to be caught.
+        "fn ident[T](x: T) -> T:\n    return x\n\nfn main():\n    g := ident\n    print(1)\n",
+    ] {
+        let errs = check_src(src);
+        let joined = errs
+            .iter()
+            .map(|e| e.message.clone())
+            .collect::<Vec<_>>()
+            .join(" | ");
+        assert!(
+            joined.contains("'ident' is generic and nothing here determines T"),
+            "expected the binding-site diagnostic, got: {joined}"
+        );
+        assert!(
+            joined.contains("`ident[<T>]`") && joined.contains("fn(<T>) -> <T>"),
+            "expected both working spellings, got: {joined}"
+        );
+        assert!(
+            !joined.contains("closure"),
+            "must not blame a 'closure' the user never wrote: {joined}"
+        );
+    }
+    // TWO type params: both are named, and the turbofish is NOT offered — it carries exactly one
+    // type argument, so `pair[int]` is an arity error, not a fix.
+    let errs = check_src(
+        "fn pair[A, B](a: A, b: B) -> A:\n    return a\n\nfn main():\n    g := pair\n    print(1)\n",
+    );
+    let joined = errs
+        .iter()
+        .map(|e| e.message.clone())
+        .collect::<Vec<_>>()
+        .join(" | ");
+    assert!(
+        joined.contains("'pair' is generic and nothing here determines A, B")
+            && joined.contains("fn(<A>, <B>) -> <A>")
+            && !joined.contains("`pair[<"),
+        "expected a two-param diagnostic without turbofish advice, got: {joined}"
+    );
+    // …and the same read in a collection literal, where no element hint reaches it either.
+    let errs = check_src(
+        "fn ident[T](x: T) -> T:\n    return x\n\nfn main():\n    xs := [ident]\n    print(xs.len())\n",
+    );
+    assert!(
+        errs.iter()
+            .any(|e| e.message.contains("nothing here determines T")),
+        "a list-literal element is a binding too: {errs:?}"
+    );
+}
+
+/// The INFERRED-return bypass: a first cut of the rule gated on `expected_hint.is_none()` and was
+/// cancelled by its own `Ty::Unknown`. `fn get(): return id` has no declared return, so the
+/// return-inference pass reads the body, takes the rule's `Unknown` as the inferred return type, and
+/// the real pass re-checks the SAME `return id` against a `Some(Unknown)` hint — no hint-free read
+/// left, no error. Measured: `g := get(); g(1)` printed `1`, `chezzi check` clean. `Unknown`
+/// determines nothing and must count as nothing.
+#[test]
+fn uninstantiated_generic_fn_value_through_an_inferred_return_rejected() {
+    rejects(
+        "fn ident[T](x: T) -> T:\n    return x\n\nfn get():\n    return ident\n\nfn main():\n    g := get()\n    print(g(1))\n",
+        "'ident' is generic and nothing here determines T",
+    );
+    // …and a return-only type param, which no argument can ever bind either. Pre-change this printed
+    // `[]` — an accepted `List[T]` value with T undetermined.
+    rejects(
+        "fn mk[T](n: int) -> List[T]:\n    return []\n\nfn main():\n    g := mk\n    print(g(1))\n",
+        "'mk' is generic and nothing here determines T",
+    );
+}
+
+/// Every neighbour the rule's premise implies but does NOT cover — one condition of "nothing
+/// determines the type parameters" undone at a time. All of these were measured accepted before the
+/// change and must stay accepted.
+#[test]
+fn a_determined_generic_fn_value_is_untouched_ok() {
+    let id = "fn ident[T](x: T) -> T:\n    return x\n";
+    // a struct FIELD with a concrete fn type — the ctor argument's slot is the hint
+    ok(&format!(
+        "{id}\nstruct Bx:\n    f: fn(int) -> int\n\nfn main():\n    b := Bx(ident)\n    print(b.f(3))\n"
+    ));
+    // a return-only type param, pinned by an annotation and by a turbofish
+    ok(
+        "fn mk[T](n: int) -> List[T]:\n    return []\n\nfn main():\n    h: fn(int) -> List[int] = mk\n    print(h(1).len())\n",
+    );
+    ok(
+        "fn mk[T](n: int) -> List[T]:\n    return []\n\nfn main():\n    g := mk[int]\n    print(g(1).len())\n",
+    );
+    // TWO type params, both pinned by the annotation (a turbofish cannot do this — one type arg)
+    ok(
+        "fn pair[A, B](a: A, b: B) -> A:\n    return a\n\nfn main():\n    h: fn(int, str) -> int = pair\n    print(h(1, \"x\"))\n",
+    );
+    // a NON-generic fn, and a first-class BUILTIN fn, as values
+    ok("fn plain(x: int) -> int:\n    return x\n\nfn main():\n    g := plain\n    print(g(5))\n");
+    ok("fn main():\n    p := ord\n    print(p(\"a\"))\n");
+    // a PARAM and a LOCAL that merely SHADOW the generic fn's name: the read is theirs, not the fn's
+    ok(&format!(
+        "{id}\nfn use1(ident: int) -> int:\n    g := ident\n    return g\n\nfn main():\n    print(use1(4))\n"
+    ));
+    ok(&format!(
+        "{id}\nfn use2() -> int:\n    ident := 7\n    g := ident\n    return g\n\nfn main():\n    print(use2())\n"
+    ));
+}
+
 #[test]
 fn generic_fn_direct_call_unchanged() {
     ok("fn ident[T](x: T) -> T:\n    return x\n\nfn main():\n    print(ident(5) + 1)\n");
@@ -24221,7 +24332,7 @@ fn witness_only_charged_when_the_body_uses_it_ok() {
     // position (binding + HOF argument), `spawn`/`defer` target, and a same-module call all stay.
     let head = "protocol Spawnable:\n    fn make() -> Self\n    fn tag(self) -> str\nstruct N:\n    v: int\n    fn make() -> N:\n        return N(0)\n    fn tag(self) -> str:\n        return \"n\"\nfn label[T: Spawnable](x: T) -> str:\n    return x.tag()\n";
     entry_ok(&format!(
-        "{head}fn apply(f: fn(N) -> str, x: N) -> str:\n    return f(x)\nfn main():\n    g := label\n    print(apply(label, N(2)))\n    print(label[N](N(3)))\nmain()\n"
+        "{head}fn apply(f: fn(N) -> str, x: N) -> str:\n    return f(x)\nfn main():\n    g := label[N]\n    print(apply(label, N(2)))\n    print(label[N](N(3)))\nmain()\n"
     ));
     entry_ok(&format!(
         "{head}fn main():\n    defer label(N(1))\n    parallel:\n        spawn label(N(2))\nmain()\n"
@@ -24239,7 +24350,7 @@ fn witness_only_charged_when_the_body_uses_it_ok() {
     ]);
     // The same for the RESERVED `Convert[S]` bound with a body that never converts.
     entry_ok(
-        "struct Port:\n    v: int\n    fn convert(x: int) -> Port:\n        return Port(x + 1)\nfn wrap[T: Convert[int]](seed: T, n: int) -> T:\n    return seed\nfn main():\n    g := wrap\n    print(wrap(Port(1), 2).v)\nmain()\n",
+        "struct Port:\n    v: int\n    fn convert(x: int) -> Port:\n        return Port(x + 1)\nfn wrap[T: Convert[int]](seed: T, n: int) -> T:\n    return seed\nfn main():\n    g := wrap[Port]\n    print(wrap(Port(1), 2).v)\nmain()\n",
     );
 }
 
@@ -24291,7 +24402,7 @@ fn non_witness_generics_unaffected_by_hidden_param_ok() {
     // A NON-static bound (`Comparable` requires `fn compare(self, ..)`) takes no witness: still
     // callable, still passable as a function VALUE, arity unchanged.
     entry_ok(
-        "fn biggest[T: Comparable](a: T, b: T) -> T:\n    if a < b:\n        return b\n    return a\nfn apply2(f: fn(int, int) -> int, a: int, b: int) -> int:\n    return f(a, b)\nfn main():\n    print(biggest(3, 7))\n    g := biggest\n    print(apply2(biggest, 4, 1))\nmain()\n",
+        "fn biggest[T: Comparable](a: T, b: T) -> T:\n    if a < b:\n        return b\n    return a\nfn apply2(f: fn(int, int) -> int, a: int, b: int) -> int:\n    return f(a, b)\nfn main():\n    print(biggest(3, 7))\n    g := biggest[int]\n    print(apply2(biggest, 4, 1))\nmain()\n",
     );
     // An UNBOUNDED generic fn is untouched.
     entry_ok(
@@ -24674,7 +24785,7 @@ fn witness_forwarding_does_not_overcharge_ok() {
     // a PARAM named `reset` shadows the module-level `reset`, so this body forwards nothing and
     // keeps its value position.
     entry_ok(&format!(
-        "{FWD_HEAD}fn label[T: Default](x: T, reset: int) -> int:\n    return reset + 1\nfn main():\n    g := label\n    print(label(Counter(1), 2))\nmain()\n"
+        "{FWD_HEAD}fn label[T: Default](x: T, reset: int) -> int:\n    return reset + 1\nfn main():\n    g := label[Counter]\n    print(label(Counter(1), 2))\nmain()\n"
     ));
 }
 
@@ -24688,23 +24799,23 @@ fn witness_forwarding_does_not_overcharge_ok() {
 fn witness_member_forward_on_a_builtin_receiver_does_not_charge_ok() {
     // the filed repro: a `List[T]` sink taking the fn's own `T`
     entry_ok(&format!(
-        "{FWD_HEAD}fn label[T: Default](x: T, sink: List[T]) -> int:\n    sink.push(x)\n    return sink.len()\nfn main():\n    g := label\n    print(label(Counter(1), []))\nmain()\n"
+        "{FWD_HEAD}fn label[T: Default](x: T, sink: List[T]) -> int:\n    sink.push(x)\n    return sink.len()\nfn main():\n    g := label[Counter]\n    print(label(Counter(1), []))\nmain()\n"
     ));
     // …the same shape through a `Map`, a `Set` and an `Option` — and through a turbofish-free
     // nested argument (`xs[0]`), which the ident walk reads at any depth
     entry_ok(&format!(
-        "{FWD_HEAD}fn label[T: Default](x: T, m: Map[str, T]) -> int:\n    m.update({{\"a\": x}})\n    return m.len()\nfn main():\n    g := label\n    print(label(Counter(1), {{}}))\nmain()\n"
+        "{FWD_HEAD}fn label[T: Default](x: T, m: Map[str, T]) -> int:\n    m.update({{\"a\": x}})\n    return m.len()\nfn main():\n    g := label[Counter]\n    print(label(Counter(1), {{}}))\nmain()\n"
     ));
     entry_ok(&format!(
-        "{FWD_HEAD}fn label[T: Default](x: T, xs: List[T]) -> int:\n    xs.insert(0, x)\n    return xs.len()\nfn main():\n    g := label\n    print(label(Counter(1), []))\nmain()\n"
+        "{FWD_HEAD}fn label[T: Default](x: T, xs: List[T]) -> int:\n    xs.insert(0, x)\n    return xs.len()\nfn main():\n    g := label[Counter]\n    print(label(Counter(1), []))\nmain()\n"
     ));
     entry_ok(&format!(
-        "{FWD_HEAD}fn label[T: Default](xs: List[T], sink: List[T]) -> int:\n    sink.push(xs[0])\n    return sink.len()\nfn main():\n    g := label\n    print(label([Counter(1)], []))\nmain()\n"
+        "{FWD_HEAD}fn label[T: Default](xs: List[T], sink: List[T]) -> int:\n    sink.push(xs[0])\n    return sink.len()\nfn main():\n    g := label[Counter]\n    print(label([Counter(1)], []))\nmain()\n"
     ));
     // …and the caller that FORWARDS its own `T` into such a fn is uncharged too — the charge used to
     // propagate one call further out.
     entry_ok(&format!(
-        "{FWD_HEAD}fn label[T: Default](x: T, sink: List[T]) -> int:\n    sink.push(x)\n    return sink.len()\nfn outer[T: Default](x: T) -> int:\n    return label(x, [])\nfn main():\n    g := outer\n    print(outer(Counter(1)))\nmain()\n"
+        "{FWD_HEAD}fn label[T: Default](x: T, sink: List[T]) -> int:\n    sink.push(x)\n    return sink.len()\nfn outer[T: Default](x: T) -> int:\n    return label(x, [])\nfn main():\n    g := outer[Counter]\n    print(outer(Counter(1)))\nmain()\n"
     ));
     // NON-REGRESSION, the unsafe direction: once a USER type really declares a witness-taking
     // `push`, the identical body charges again and loses the value position.
@@ -24832,7 +24943,7 @@ fn witness_forwarding_with_only_concrete_arguments_does_not_charge_ok() {
         "{FWD_HEAD}fn concrete[T: Default](x: T) -> int:\n    return reset(Counter(1)).n\n"
     );
     entry_ok(&format!(
-        "{head}fn main():\n    g := concrete\n    print(concrete(Counter(3)))\nmain()\n"
+        "{head}fn main():\n    g := concrete[Counter]\n    print(concrete(Counter(3)))\nmain()\n"
     ));
     // …in every function-value spelling: turbofished, and passed to a HOF
     entry_ok(&format!(
@@ -24840,7 +24951,7 @@ fn witness_forwarding_with_only_concrete_arguments_does_not_charge_ok() {
     ));
     // a NESTED concrete ctor is still concrete (`Tag("x")` inside `second_of_two`'s arg list)
     entry_ok(&format!(
-        "{FWD_HEAD}fn pair[T: Default, U: Default](a: T, b: U) -> U:\n    return U.default()\nfn concrete[T: Default](x: T) -> Tag:\n    return pair(Counter(1), Tag(\"x\"))\nfn main():\n    g := concrete\n    print(concrete(Counter(3)).s)\nmain()\n"
+        "{FWD_HEAD}fn pair[T: Default, U: Default](a: T, b: U) -> U:\n    return U.default()\nfn concrete[T: Default](x: T) -> Tag:\n    return pair(Counter(1), Tag(\"x\"))\nfn main():\n    g := concrete[Counter]\n    print(concrete(Counter(3)).s)\nmain()\n"
     ));
 }
 
@@ -24859,7 +24970,7 @@ fn witness_forwarding_module_half_matches_the_exact_callee_ok() {
         lib,
         (
             "main.chz",
-            "import lib\nprotocol Default:\n    fn default() -> Self\nstruct Counter:\n    n: int\n    fn default() -> Counter:\n        return Counter(7)\nstruct Holder:\n    k: int\n    fn reset(self) -> int:\n        return self.k * 10\nfn tagged[T: Default](x: T) -> int:\n    h := Holder(4)\n    return h.reset() + lib.plain(1)\nfn main():\n    print(tagged(Counter(3)))\n    g := tagged\n    print(1)\nmain()\n",
+            "import lib\nprotocol Default:\n    fn default() -> Self\nstruct Counter:\n    n: int\n    fn default() -> Counter:\n        return Counter(7)\nstruct Holder:\n    k: int\n    fn reset(self) -> int:\n        return self.k * 10\nfn tagged[T: Default](x: T) -> int:\n    h := Holder(4)\n    return h.reset() + lib.plain(1)\nfn main():\n    print(tagged(Counter(3)))\n    g := tagged[Counter]\n    print(1)\nmain()\n",
         ),
     ]);
     // the isolation control the gap row measured: deleting ` + lib.plain(1)` always passed, so the
@@ -24868,7 +24979,7 @@ fn witness_forwarding_module_half_matches_the_exact_callee_ok() {
         lib,
         (
             "main.chz",
-            "import lib\nprotocol Default:\n    fn default() -> Self\nstruct Counter:\n    n: int\n    fn default() -> Counter:\n        return Counter(7)\nstruct Holder:\n    k: int\n    fn reset(self) -> int:\n        return self.k * 10\nfn tagged[T: Default](x: T) -> int:\n    h := Holder(4)\n    return h.reset()\nfn main():\n    print(tagged(Counter(3)))\n    g := tagged\n    print(1)\nmain()\n",
+            "import lib\nprotocol Default:\n    fn default() -> Self\nstruct Counter:\n    n: int\n    fn default() -> Counter:\n        return Counter(7)\nstruct Holder:\n    k: int\n    fn reset(self) -> int:\n        return self.k * 10\nfn tagged[T: Default](x: T) -> int:\n    h := Holder(4)\n    return h.reset()\nfn main():\n    print(tagged(Counter(3)))\n    g := tagged[Counter]\n    print(1)\nmain()\n",
         ),
     ]);
     // …and the real qualified forward into that same module STILL charges

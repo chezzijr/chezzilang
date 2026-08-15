@@ -36,6 +36,7 @@ impl Checker {
             yield_ty: None,
             recover_depth: 0,
             generic_arg_prepass: false,
+            generic_fn_value_prepass: false,
             expected_hint: None,
             float_elem_hint: None,
             inferring_ret: false,

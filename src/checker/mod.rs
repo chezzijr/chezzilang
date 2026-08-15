@@ -2099,6 +2099,15 @@ struct Checker {
     /// (sources #2/#3) must NOT pin it here, or a body use like `x.upper()` would force `x: str` and
     /// corrupt unification (e.g. `Mapped(int_iter, fn(x): x.upper())`).
     generic_arg_prepass: bool,
+    /// True while inferring a BARE IDENTIFIER argument of a generic ctor/call/method in that same
+    /// prepass. Such an argument gets no `expected_hint` (the slot type isn't substituted yet), so a
+    /// same-module generic fn passed there types rigid (`fn(T) -> str` for `[1,2,3].map(conv)`) and is
+    /// pinned AFTERWARDS from the substituted slot by [`Checker::try_pin_generic_fn_value_arg`]. The
+    /// "nothing determines T" wall in [`Checker::infer_ident`] must therefore stay silent here — the
+    /// read is not yet the final word on the type. Only set for an `Ident` arg (which cannot nest a
+    /// call), so it never suppresses the wall inside some deeper expression. Separate from
+    /// `generic_arg_prepass`, which also changes closure-param binding and hover recording.
+    generic_fn_value_prepass: bool,
     /// Expected-type HINT (checking-mode) for the OUTERMOST generic ctor / generic fn-call currently
     /// being inferred — pure transport from the three annotation sites (a `let`-binding's declared
     /// type, a `return`'s declared return type, a call argument's declared parameter type) into
