@@ -1022,8 +1022,9 @@ g := ident        # 'ident' is generic and T is not determined here, so it canno
 ```
 
 The same read is the same error inside a `[...]`/`{...}` literal, in a `return` from a fn with an
-**inferred** return type, as a `print` argument, and as an argument to a generic **constructor** or
-generic **free fn** (`Bx(ident)`, `take(ident)`) — nothing there determines `T` either. A generic with
+**inferred** return type, as a `print` argument, and in a generic **constructor** / generic **free fn**
+argument whose slot is not a function type (`Bx(ident)`, `take(ident)` on `fn take[U](f: U) -> int`) —
+nothing there determines `T` either. A generic with
 **two or more** type parameters is only fixable by giving the position a concrete function type: a
 fn-value turbofish carries exactly one type argument (`pair[int]` for `pair[A, B]` is an arity error),
 so the diagnostic does not offer it. First-class (rank-N) polymorphism — one binding used at two
@@ -1047,6 +1048,17 @@ suppressed** — a slot the other arguments determine still pins straight throug
 carve-out is the *receiver's* `?` only: a type parameter of the method itself that ends up
 undetermined is still reported, so `Bx(0).two(ident, ident)` on
 `fn two[U](self, f: fn(U) -> U, g: fn(U) -> U) -> List[U]` is an error (Go: `cannot infer U`).
+
+**The HOF may be generic itself.** When the slot belongs to a *generic* callee, that callee's own type
+parameters are pinned first — by the other arguments, a call-site turbofish, or the enclosing
+annotation — and only then does the passed fn unify against the now-concrete slot. So for
+`fn applyg[U](f: fn(U) -> U, n: U) -> U`, all of `applyg(ident, 5)`, `applyr(5, ident)`,
+`applyg[int](ident, 5)` and `xs: List[int] = mklist(ident)` type-check and run, and
+`fn twop[A, B](f: fn(A) -> B, a: A) -> B` infers `B` from the passed fn's own return
+(`twop(text, 5)` is `str`). Go and Rust infer the same instantiations. What the callee cannot pin is
+still refused with the same diagnostic: `nopin(ident)` on `fn nopin[U](f: fn(U) -> U) -> int` has
+nothing that determines `U` (Go: `cannot infer U`), `twop(mk, 5)` can reach `B` only through `mk`'s own
+undetermined `T` (Go: `cannot infer B`), and `applyg(mk, 5)` cannot match the shapes at all.
 
 One position is deliberately **not** covered, because the concrete type is present but does not reach
 the read: a parameter or field **default value** (`fn run(f: fn(int) -> int = id)`) has a concrete slot

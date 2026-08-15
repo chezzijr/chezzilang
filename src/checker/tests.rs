@@ -22327,6 +22327,144 @@ fn a_method_type_param_degraded_to_unknown_still_reports_its_fn_value_args() {
     );
 }
 
+/// The heads for the GENERIC-HOF cases: a generic fn read as a value (`ident`), one whose `T` is
+/// return-only (`mk`), and four generic HOFs whose OWN type parameter must be pinned by the other
+/// arguments before the passed fn's parameters can unify against the slot.
+const GHOF_HEAD: &str = "fn ident[T](x: T) -> T:\n    return x\nfn mk[T](n: int) -> List[T]:\n    return []\nfn applyg[U](f: fn(U) -> U, n: U) -> U:\n    return f(n)\nfn applyr[U](n: U, f: fn(U) -> U) -> U:\n    return f(n)\nfn nopin[U](f: fn(U) -> U) -> int:\n    return 1\nfn twop[A, B](f: fn(A) -> B, a: A) -> B:\n    return f(a)\n";
+
+/// A bare generic fn passed to a **generic** HOF's fn-typed slot: the callee's own `[U]` is pinned by
+/// the OTHER arguments first, and only then can the passed fn's parameters unify against the
+/// now-concrete slot. The three shapes below were REFUSED before this (`'ident' is generic and T is
+/// not determined here`) while both ancestors infer them — measured this session, Go 1.26.5 and Rust
+/// 1.97 each print `5` for `applyg(id, 5)` / `applyr(5, id)` / `twop(id, 5)`. The deferral that makes
+/// it work is the SAME one `infer_generic_method` uses for `[1,2,3].fold(0, pick)`, now on the
+/// free-fn path too; the running half (asserting the VALUE, both engines) is
+/// `tests/chz/spec/list_test.chz`.
+#[test]
+fn a_generic_fn_argument_to_a_generic_hof_is_pinned_by_the_other_arguments() {
+    // pinned by a LATER argument (the fn is argument 0) …
+    ok(&format!(
+        "{GHOF_HEAD}fn main():\n    print(applyg(ident, 5))\n"
+    ));
+    // … by an EARLIER one (the fn is argument 1) …
+    ok(&format!(
+        "{GHOF_HEAD}fn main():\n    print(applyr(5, ident))\n"
+    ));
+    // … and across TWO callee parameters: `A` from the value argument, `B` only through the fn.
+    ok(&format!(
+        "{GHOF_HEAD}fn main():\n    print(twop(ident, 5))\n"
+    ));
+    // A turbofish ON THE CALL pins the callee's `[U]` with no value argument in sight.
+    ok(&format!(
+        "{GHOF_HEAD}fn main():\n    print(applyg[int](ident, 5))\n"
+    ));
+    // A turbofish on the ARGUMENT is not a bare read at all — unchanged, and still fine.
+    ok(&format!(
+        "{GHOF_HEAD}fn main():\n    print(applyg(ident[int], 5))\n"
+    ));
+    // The fn's OWN return can pin a callee parameter no argument reaches (`B` ← `str`).
+    ok(&format!(
+        "{GHOF_HEAD}fn to_text[T](x: T) -> str:\n    return \"{{x}}\"\nfn main():\n    print(twop(to_text, 5))\n"
+    ));
+    // Two generic HOFs nested, and one fn value used at TWO different types in one call — each pin
+    // runs against a FRESH substitution map, so neither can launder into the other.
+    ok(&format!(
+        "{GHOF_HEAD}fn main():\n    print(applyg(ident, applyg(ident, 5)))\n"
+    ));
+    ok(&format!(
+        "{GHOF_HEAD}fn twice[A, B](f: fn(A) -> A, g: fn(B) -> B, a: A, b: B) -> str:\n    return \"{{f(a)}}{{g(b)}}\"\nfn main():\n    print(twice(ident, ident, 1, \"x\"))\n"
+    ));
+    // A passed fn with TWO type parameters, BOTH reachable from the slot.
+    ok(&format!(
+        "{GHOF_HEAD}fn pair2[T, S](a: T, b: S) -> T:\n    return a\nfn app2[U](f: fn(U, U) -> U, a: U) -> U:\n    return f(a, a)\nfn main():\n    print(app2(pair2, 5))\n"
+    ));
+    // The enclosing annotation pins the callee's return-only `[U]`, which then pins the fn — the same
+    // `seed_from_hint` precedence (turbofish > args > annotation) every other generic call uses, which
+    // is why the deferred pin runs AFTER it. Rust infers this too; Go has no assignment-context
+    // inference at all and refuses it, as it refuses `xs: List[int] = empty()`.
+    ok(&format!(
+        "{GHOF_HEAD}fn mklist[U](f: fn(U) -> U) -> List[U]:\n    return []\nfn main():\n    xs: List[int] = mklist(ident)\n    print(xs)\n"
+    ));
+}
+
+/// …and the half that must KEEP rejecting, because the information genuinely is not there. Go 1.26.5,
+/// measured: `cannot infer U` / `type func[T any](n int) []T of mk does not match inferred type
+/// func(int) int` / `cannot infer B`. Rust 1.97 agrees on all three (`E0282`, `E0308`, `E0282`).
+#[test]
+fn a_generic_hof_that_pins_nothing_still_refuses_the_generic_fn_value() {
+    // NOTHING pins the callee's `[U]`: no value argument, no turbofish, no annotation.
+    rejects(
+        &format!("{GHOF_HEAD}fn main():\n    print(nopin(ident))\n"),
+        "'ident' is generic and T is not determined here",
+    );
+    // The slot IS concrete (`fn(int) -> int`) and the shapes still cannot match: `mk`'s `T` is
+    // return-only and the slot's return is `int`.
+    rejects(
+        &format!("{GHOF_HEAD}fn main():\n    print(applyg(mk, 5))\n"),
+        "'mk' is generic and T is not determined here",
+    );
+    // `B` is reachable ONLY through `mk`'s own undetermined `T`, so pinning `A` does not help.
+    rejects(
+        &format!("{GHOF_HEAD}fn main():\n    print(twop(mk, 5))\n"),
+        "'mk' is generic and T is not determined here",
+    );
+    // A type parameter that appears NOWHERE in the passed fn's signature is unreachable from any
+    // slot (Go: `in call to applyg, cannot infer S`).
+    rejects(
+        &format!(
+            "{GHOF_HEAD}fn konst[T, S](x: T) -> T:\n    return x\nfn main():\n    print(applyg(konst, 5))\n"
+        ),
+        "'konst' is generic and T, S are not determined here",
+    );
+    // A generic callee whose slot is a BARE type parameter — nothing about that position is a
+    // function type, so the read can never be pinned there (this is the pre-existing `take(ident)`
+    // case, which the free-fn deferral must not swallow).
+    rejects(
+        &format!(
+            "{GHOF_HEAD}fn take[U](f: U) -> int:\n    return 1\nfn main():\n    print(take(ident))\n"
+        ),
+        "'ident' is generic and T is not determined here",
+    );
+    // …and one where the pinned slot is concrete but WRONG (`fn(int) -> str` into `fn(int) -> int`):
+    // the pin succeeds and the ordinary assignability diagnostic owns the verdict, as it does for a
+    // non-generic HOF. Go rejects it too (`cannot use 5 … as string value`).
+    rejects(
+        &format!(
+            "{GHOF_HEAD}fn to_text[T](x: T) -> str:\n    return \"{{x}}\"\nfn main():\n    print(applyg(to_text, 5))\n"
+        ),
+        "expected fn(int) -> int",
+    );
+}
+
+/// The "this read is re-pinned afterwards" licence covers the IMMEDIATE bare-identifier arguments and
+/// nothing deeper. Silencing the wall for a whole generic-argument prepass leaked it into every NESTED
+/// read: `take2(Bx(ident), 5)` check-cleanly built a `Bx[fn(T) -> T]` — a stored value whose type
+/// nothing determines — the moment the free-fn path started silencing (measured), and the METHOD
+/// spelling had been accepting it since the licence was introduced (measured on `3f8b6d06`).
+#[test]
+fn the_repin_licence_does_not_leak_into_a_nested_argument() {
+    let head = "fn ident[T](x: T) -> T:\n    return x\nstruct Bx[T]:\n    f: T\n";
+    rejects(
+        &format!(
+            "{head}fn take2[U](a: U, b: int) -> int:\n    return 1\nfn main():\n    print(take2(Bx(ident), 5))\n"
+        ),
+        "'ident' is generic and T is not determined here",
+    );
+    rejects(
+        &format!(
+            "{head}struct Holder:\n    n: int\n    fn m[U](self, a: U, b: int) -> int:\n        return 1\nfn main():\n    print(Holder(0).m(Bx(ident), 5))\n"
+        ),
+        "'ident' is generic and T is not determined here",
+    );
+    // …and the licence still works for the argument it IS for, in both spellings.
+    ok(&format!(
+        "{head}fn applyg[U](f: fn(U) -> U, n: U) -> U:\n    return f(n)\nfn main():\n    print(applyg(ident, 5))\n"
+    ));
+    ok(&format!(
+        "{head}fn main():\n    print([1, 2, 3].map(ident))\n"
+    ));
+}
+
 #[test]
 fn generic_fn_direct_call_unchanged() {
     ok("fn ident[T](x: T) -> T:\n    return x\n\nfn main():\n    print(ident(5) + 1)\n");

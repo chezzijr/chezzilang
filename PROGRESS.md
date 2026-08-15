@@ -10317,6 +10317,45 @@ no longer a non-goal — complete VM-only support shipped** (see below).
 One bullet per milestone/epic. Full landing detail (TDD notes, review-panel findings, test-count deltas,
 branch names) is in the git log.
 
+- **A bare generic fn passed to a GENERIC hof is now INFERRED, the way Go and Rust infer it
+  (2026-08-15).** The leftover the entry below named: the deferral it built lived only on
+  `infer_generic_method`, so when the fn-typed slot belonged to a **generic free fn** the callee's own
+  `[U]` was never pinned first and the read was refused. Measured pre-change: `applyg(id, 5)`,
+  `applyr(5, id)` and `twop(id, 5)` (for `applyg[U](f: fn(U) -> U, n: U)`, `applyr[U](n: U, f: fn(U) ->
+  U)`, `twop[A, B](f: fn(A) -> B, a: A)`) all reported *'id' is generic and T is not determined here*,
+  while **Go 1.26.5 and Rust 1.97 each print `5` for all three** — and the control proves the diagnosis:
+  making the same HOF non-generic (`applyc(f: fn(int) -> int, n: int)`) already worked. This is a
+  **missing inference**, not a rejection relaxed: the information is at the call site, in the other
+  arguments. `infer_generic_call` now runs the SAME three pieces `infer_generic_method` does — the
+  prepass wall silenced (`generic_fn_value_prepass`), a bare generic-fn argument the slot cannot pin
+  YET deferred past pass-1 unification instead of binding the callee's `[U]` to its own leaked
+  `Ty::Param` (first-binding-wins makes that permanent), and the verdict re-asked at the end by
+  `report_undetermined_generic_fn_value_args`. **No second derivation**: `pin_generic_fn_value` /
+  `try_pin_generic_fn_value_arg` / the one diagnostic are reused as-is; the only free-fn-specific
+  choice is WHERE the deferred pass runs — after `seed_from_hint`, because this path has an annotation
+  source the method path does not, and before `enforce_bounds` so a bound on a param it fills is still
+  checked. So `xs: List[int] = mklist(id)` pins `U` from the annotation (Rust infers this; Go has no
+  assignment-context inference at all and refuses it, as it refuses `xs: List[int] = empty()`). **What
+  must stay refused, and does — Go and Rust agree on every one:** `nopin(id)` (nothing determines `U`;
+  Go *cannot infer U*), `applyg(mk, 5)` (shapes cannot match), `twop(mk, 5)` (`B` reachable only through
+  `mk`'s own undetermined `T`; Go *cannot infer B*), `applyg(konst, 5)` for a `konst[T, S]` whose `S` is
+  in no position, and `take(id)` on `fn take[U](f: U) -> int`, whose slot is not a function type at all.
+  A slot that pins CONCRETELY but WRONG (`applyg(to_text, 5)` → `fn(int) -> str` into `fn(int) -> int`)
+  now gets the ordinary assignability diagnostic, which is what Go says there too. Because this
+  **widens** what compiles, every newly accepted program was RUN and its value asserted on both engines
+  (`tests/chz/spec/list_test.chz`), including the downstream uses that prove the type is real and not an
+  unresolved placeholder — `applyg(id, 5) * 2 == 10`, `applyg(id, "s").upper() == "S"`, and
+  `applyg(id, 5).upper()` still rejected. **One defect found by re-deriving the premise rather than by
+  the suite, which stayed green through it:** the silencing licence is a `Checker` flag, so wrapping the
+  whole argument prepass in it leaked into every NESTED read — `take2(Bx(ident), 5)` went from a clean
+  reject to `ok: no type errors`, check-cleanly building a `Bx[fn(T) -> T]`, exactly the
+  value-of-unresolved-type this widening had to avoid. The licence now covers the IMMEDIATE
+  bare-identifier arguments only (the one shape `bare_generic_fn_value_arg` can re-pin), scoped inside
+  the shared `infer_generic_arg_tys` — which also closes the same hole on the METHOD path, where
+  `Holder(0).m(Bx(ident), 5)` had been wrongly accepted since the licence was introduced. 438-file
+  `.chz` corpus sweep, pre vs post binary (both built from THIS worktree, so no stdlib-path noise):
+  **zero** verdict changes. 4160 lib tests + 550 Chezzi tests identical on both engines.
+  `docs/syntax.md` §7b, `docs/spec.md`.
 - **The empty-receiver carve-out suppresses the REPORT, never the PIN — and stops hiding the rule's
   own subject (2026-08-15).** Two defects in the argument-position rule below, both found by
   adversarial review and reproduced against the `69aa9efc` binary. (1) **A regression.** The
@@ -10375,10 +10414,11 @@ branch names) is in the git log.
   `take_while`, `drop_while`, `count`, `position`, plus `RwShared`'s `for_each`/`for_each_entry`/
   `fold`/`fold_entries` and `Shared.update`/`RwShared.write`. Still NOT covered, unchanged and
   measured: a parameter/field default value (`fn run(f: fn(int) -> int = id)` — a concrete slot the
-  checker does not thread into the hint), and the generic FREE-fn HOF path (`applyg(id, 5)` for
-  `fn applyg[U](f: fn(U) -> U, x: U) -> U`), which rejects at the read on both binaries — its pass-1
+  checker does not thread into the hint). The generic FREE-fn HOF path (`applyg(id, 5)` for
+  `fn applyg[U](f: fn(U) -> U, x: U) -> U`) rejected at the read on both binaries here — its pass-1
   leak is the same one fixed above but on `infer_generic_call`, and moving it there is a widening of
-  what is ACCEPTED, so it belongs in its own change with its own proof. 438-file `.chz` corpus sweep,
+  what is ACCEPTED, so it got its own change with its own proof (the entry above, same day).
+  438-file `.chz` corpus sweep,
   pre vs post binary: **zero** verdict changes outside the file the new tests were added to. 4156 lib
   tests + 549 Chezzi tests identical on both engines. `docs/syntax.md` §7b, `docs/spec.md`.
 - **An UNINSTANTIATED generic fn value is refused at the binding, Go's rule (2026-08-15).** `g := id`

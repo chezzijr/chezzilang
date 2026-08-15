@@ -228,3 +228,64 @@ fn empty_of[T](n: int) -> List[T]:
 
 fn gsum[T: Add](a: T, b: T) -> T:
     return a + b
+
+# ---- …and when the HOF is itself GENERIC ----
+#
+# One level up from the block above: the slot belongs to a generic callee, so the callee's OWN type
+# parameter has to be pinned by the other arguments (or the turbofish, or the annotation) FIRST, and
+# only then can the passed fn's parameters unify against the now-concrete slot. The same end-of-call
+# deferral does it — the free-fn path just has more sources to wait for. Measured this session, Go
+# 1.26.5 and Rust 1.97 both print `5` for every one of these; Chezzi refused them until the deferral
+# ran here too. The shapes that must KEEP being refused (`nopin(gid)`, `applyg(empty_of, 5)`,
+# `twop(empty_of, 5)` — Go: `cannot infer U` / shape mismatch / `cannot infer B`) are in
+# `src/checker/tests.rs`; they never reach a runtime. This is the RUNNING half, and it is the whole
+# point of the tests: a widening that type-checks but yields a value of unresolved type would be far
+# worse than the false reject it replaces, so every assert below pins the VALUE.
+
+fn applyg[U](f: fn(U) -> U, n: U) -> U:
+    return f(n)
+
+fn applyr[U](n: U, f: fn(U) -> U) -> U:
+    return f(n)
+
+fn twop[A, B](f: fn(A) -> B, a: A) -> B:
+    return f(a)
+
+fn gtext[T](x: T) -> str:
+    return "{x}"
+
+fn gfirst[T, S](a: T, b: S) -> T:
+    return a
+
+fn app2[U](f: fn(U, U) -> U, a: U) -> U:
+    return f(a, a)
+
+fn mklist[U](f: fn(U) -> U) -> List[U]:
+    return []
+
+test fn a_generic_fn_argument_to_a_generic_hof():
+    # the callee's `U` comes from a LATER argument, then pins `gid`'s `T`
+    assert applyg(gid, 5) == 5
+    assert applyg(gid, "s") == "s"
+    # …and from an EARLIER one
+    assert applyr(5, gid) == 5
+    # two callee parameters: `A` from the value argument, `B` only through the passed fn's return
+    assert twop(gid, 5) == 5
+    assert twop(gtext, 5) == "5"
+    # nested generic HOFs, and one fn value used at TWO types in one call (each pin gets a fresh map)
+    assert applyg(gid, applyg(gid, 5)) == 5
+    assert applyg(gid, 1) + applyg(gid, 2) == 3
+    assert applyg(gid, "a") + twop(gtext, 2) == "a2"
+    # a turbofish on the CALL pins the callee with no value argument in sight …
+    assert applyg[int](gid, 5) == 5
+    # … and one on the ARGUMENT is not a bare read at all
+    assert applyg(gid[int], 5) == 5
+    # a passed fn with TWO type parameters, both reachable from the slot
+    assert app2(gfirst, 5) == 5
+    # the enclosing annotation pins the callee's return-only `U`, which then pins the fn
+    xs: List[int] = mklist(gid)
+    assert xs == []
+    # the inferred type is REAL, not an unresolved placeholder: these only compile as `int`/`str`
+    assert applyg(gid, 5) * 2 == 10
+    assert applyg(gid, "s").upper() == "S"
+    assert twop(gtext, 5).upper() == "5"

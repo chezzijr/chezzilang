@@ -3883,14 +3883,47 @@ impl Checker {
         if args.len() != sig.params.len() {
             self.check_arity(name, sig.params.len(), args, span);
         }
-        let arg_tys = self.infer_generic_arg_tys(args);
+        // A bare same-module GENERIC fn read as an ARGUMENT here is NOT the final word on its type:
+        // this call re-pins it below, exactly as `infer_generic_method` does for `[1,2,3].fold(0,
+        // pick)`. So `infer_ident`'s "not determined here" wall must stay silent for the prepass and
+        // the DEFERRED end-of-call check owns the verdict instead. Set HERE, not in the shared
+        // `infer_generic_arg_tys` — its ctor callers pin nothing afterwards, so there the read IS
+        // final. The helper scopes what is set here to the immediate bare-identifier arguments.
+        let saved = std::mem::replace(&mut self.generic_fn_value_prepass, true);
+        let mut arg_tys = self.infer_generic_arg_tys(args);
+        self.generic_fn_value_prepass = saved;
         // Explicit call-site type arguments (`max[int](…)`) seed the substitution; remaining (or
         // all, when none given) parameters are inferred from positional arguments. `unify` only
         // binds a parameter that isn't already in the map, so explicit args take precedence and a
         // conflicting argument is caught by the per-argument check below.
         let mut subst_map: HashMap<String, Ty> =
             self.seed_targs(name, &sig.type_params, targs, span);
-        for (i, (decl, actual)) in sig.params.iter().zip(&arg_tys).enumerate() {
+        // Bare generic-fn args this pass could not pin YET — re-pinned once everything else has had
+        // its turn (see the second pass below).
+        let mut deferred_fn_args: Vec<usize> = Vec::new();
+        // Clamp to the shorter of the two, exactly as the `zip` this loop replaced did: `arg_tys.len()
+        // == args.len()` can be < `sig.params.len()` when the call is short an argument (the arity
+        // error is already reported above and does not early-return), so nothing may index past it.
+        for i in 0..sig.params.len().min(arg_tys.len()) {
+            let decl = &sig.params[i];
+            // The GENERIC-callee ordering: a bare same-module generic fn is prepass-typed rigid
+            // (`fn(T) -> T`, its OWN free params) because the prepass has no expected hint. Re-pin its
+            // `[T]` from the slot with everything bound SO FAR; when that is not enough yet, the rigid
+            // type must NOT unify either — it carries no information about this call, and `unify` is
+            // first-binding-wins, so binding the callee's `[U]` to that leaked `T` is permanent and a
+            // LATER argument that really determines `U` could never correct it (`applyg(ident, 5)`).
+            // Same shape as `infer_generic_method`'s deferral, one level up. `try_pin_…` only fires on
+            // a bare-ident generic fn that pins FULLY concrete; otherwise nothing changes here.
+            if self.bare_generic_fn_value_arg(&args[i]).is_some() {
+                let want = subst(decl, &subst_map);
+                if let Some(refined) = self.try_pin_generic_fn_value_arg(&args[i], &want, span) {
+                    arg_tys[i] = refined;
+                } else {
+                    deferred_fn_args.push(i);
+                    continue;
+                }
+            }
+            let actual = &arg_tys[i];
             // Bug D (free-fn analog): for an unannotated CLOSURE arg, unify against a RETURN-MASKED
             // copy so only its PARAMETER positions can bind a function type param in pass 1. Its
             // prepass return may be a leaked `Ty::Param` (an unannotated body that is a nested free
@@ -3943,6 +3976,21 @@ impl Checker {
         // hint — so `xs: List[int] = empty()` pins a return-only `T`, and the deadlock probe below
         // sees it bound. After arg-unification ⇒ turbofish/args win.
         seed_from_hint(hint, &sig.ret, &mut subst_map);
+        // Second pass for the deferred bare generic-fn args, placed HERE — after every sibling value
+        // argument, the closure-return recovery, the `Iterator`/index recovery AND the annotation
+        // hint have bound what they bind, and before `enforce_bounds` so a bound on a param this pass
+        // fills is still checked. That is the same "last moment that can still pin" the method path
+        // uses; it just has more sources to wait for (the method path has no hint to seed). A pin
+        // replaces the rigid prepass type and unifies the CONCRETE result; one that still cannot pin
+        // unifies its rigid type after all, so the existing assignability diagnostic still fires — by
+        // now every real binding has already won, so the leak can no longer displace one.
+        for i in std::mem::take(&mut deferred_fn_args) {
+            let want = subst(&sig.params[i], &subst_map);
+            if let Some(refined) = self.try_pin_generic_fn_value_arg(&args[i], &want, span) {
+                arg_tys[i] = refined;
+            }
+            unify(&sig.params[i], &arg_tys[i].clone(), &mut subst_map);
+        }
         // Same un-inferable closure-param deadlock guard as the struct-ctor path: report the cause
         // (and bind the params to Unknown) before the per-arg closure body is checked.
         self.report_uninferable_closure_params(
@@ -3970,6 +4018,11 @@ impl Checker {
             span,
             false,
         );
+        // …and NOW — with `subst_map` as bound as it will ever get — the deferred half of the
+        // uninstantiated-generic-fn-value rule, the verdict the silenced prepass wall handed over.
+        // The SAME reporter the method path calls, so `applyg(ident, 5)` and `[1,2,3].fold(0, pick)`
+        // get one answer from one derivation.
+        self.report_undetermined_generic_fn_value_args(args, &sig.params, &subst_map, span);
         // M24 — half two of the static-witness contract, recorded LAST: `recover_return_only_params`
         // above can still bind a param that `enforce_bounds` never saw, so anything earlier would
         // read a param as un-determined that the call actually pins.
@@ -4032,13 +4085,15 @@ impl Checker {
                 format!("'{method}' expects {want} argument(s), got {}", args.len()),
             );
         }
-        // THE ONE prepass whose bare-ident arg is re-pinned afterwards (`try_pin_generic_fn_value_arg`
-        // below), so a same-module generic fn read here is NOT the final word on its type and
-        // `infer_ident`'s "not determined here" wall must stay silent for it. Set at THIS call site
-        // only: the other six `infer_generic_arg_tys` callers (generic free fn, struct/qualified/enum/
-        // newtype ctor) pin nothing afterwards, so there the read IS final and the wall must fire —
-        // setting the flag inside the shared helper silenced it at all seven, which let `Bx(ident)`
-        // through to the very "argument 1 of 'f': expected T, found int" this rule exists to replace.
+        // One of the TWO prepasses whose bare-ident arg is re-pinned afterwards
+        // (`try_pin_generic_fn_value_arg` below; the other is `infer_generic_call`), so a same-module
+        // generic fn read here is NOT the final word on its type and `infer_ident`'s "not determined
+        // here" wall must stay silent for it. Set at THIS call site: the ctor `infer_generic_arg_tys`
+        // callers (struct/qualified/enum/newtype) pin nothing afterwards, so there the read IS final
+        // and the wall must fire — setting the flag inside the shared helper silenced it at all seven,
+        // which let `Bx(ident)` through to the very "argument 1 of 'f': expected T, found int" this
+        // rule exists to replace. (The helper does SCOPE what is set here to the immediate bare-ident
+        // arguments, so a nested `Bx(ident)` still faces the wall.)
         let saved = std::mem::replace(&mut self.generic_fn_value_prepass, true);
         let mut arg_tys = self.infer_generic_arg_tys(args);
         self.generic_fn_value_prepass = saved;

@@ -732,7 +732,10 @@ root marker (all fields default to unset, so `entrypoint` is required only for t
 > both working spellings in the message. ARGUMENT position asks the same question and gives the same
 > answer — `[1,2,3].filter(pred)` / `.map(mk)` are errors when nothing determines `[T]` — but only at
 > the END of the call's inference, so `[1,2,3].fold(0, pick)`, pinned by the accumulator that precedes
-> it, still checks (see `docs/syntax.md`, "A GENERIC fn as a value").
+> it, still checks. The HOF may be **generic itself**: its own type parameters are pinned first (by the
+> other arguments, a call turbofish, or the annotation) and the passed fn then unifies against the
+> concrete slot, so `applyg(ident, 5)` for `fn applyg[U](f: fn(U) -> U, n: U) -> U` infers exactly what
+> Go and Rust infer (see `docs/syntax.md`, "A GENERIC fn as a value").
 
 > **Native FFI — Level-2 SHIPPED in M6c; Level-3 dynamic C-ABI v1 SHIPPED.** Because Chezzi is
 > written in Rust, the native-stdlib mechanism doubles as a foreign-function interface: bind a Rust fn

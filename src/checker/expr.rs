@@ -3576,8 +3576,20 @@ impl Checker {
     /// generic ctor/variant/fn/method path uses this pair so closure params are pinned by the field/
     /// param type, not left `Unknown`.
     pub(super) fn infer_generic_arg_tys(&mut self, args: &[Expr]) -> Vec<Ty> {
-        args.iter()
+        // The "this read is re-pinned afterwards" licence ([`Checker::generic_fn_value_prepass`],
+        // set by the two callers that DO re-pin) belongs to the IMMEDIATE bare-identifier arguments
+        // only — they are the only shape `bare_generic_fn_value_arg` can ever re-pin. Any other
+        // argument is a whole SUBTREE whose own reads this call will never revisit, so the licence
+        // must not leak into it: without this, `take2(Bx(ident), 5)` on a generic callee silenced the
+        // nested ctor's wall too and check-cleanly built a `Bx[fn(T) -> T]` — a stored value whose
+        // type nothing determines. Scoped here, in the ONE helper every generic-argument prepass goes
+        // through, so it covers the method path's identical leak (`Holder(0).m(Bx(ident), 5)`, wrongly
+        // accepted since the licence was introduced) in the same place.
+        let repins = std::mem::take(&mut self.generic_fn_value_prepass);
+        let tys = args
+            .iter()
             .map(|a| {
+                self.generic_fn_value_prepass = repins && matches!(a.kind, ExprKind::Ident(_));
                 if matches!(a.kind, ExprKind::Closure { .. }) {
                     let mark = self.errors.len();
                     // Keep the closure's unannotated params `Unknown` in the unification prepass —
@@ -3591,7 +3603,10 @@ impl Checker {
                     self.infer_value(a)
                 }
             })
-            .collect()
+            .collect();
+        // Hand the licence back exactly as it was found — the caller owns its own save/restore.
+        self.generic_fn_value_prepass = repins;
+        tys
     }
 
     /// Per-argument check for a generic ctor/call/method. `expected` is the arg's SUBSTITUTED declared
