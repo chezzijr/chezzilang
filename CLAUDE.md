@@ -37,6 +37,14 @@ cargo build --release    # compile (release; the VM is only fast optimized)
 # the front-end + editor tooling), so the front-end compiles ONCE and its unit tests + two-engine
 # parity + conformance run ONCE (in the lib test target). `cargo test` is the normal full command.
 cargo test                       # FULL pre-commit suite: lib unit suite + parity + conformance + integration
+# ^ includes `tests/chezzi_threads_cli.rs`: with `--serial` gone, the standing differential is
+#   `tests/chz` (~550 Chezzi behavioural tests) run at TWO worker counts (default + `CHEZZI_THREADS=2`)
+#   via the built binary, each its own process/pool. NOT a gate over the ~4150 Rust lib tests — that
+#   pool is ONE process-wide `OnceLock`, so forcing a count inside `cargo test --lib` either no-ops or
+#   (worse) pins the WHOLE run's pool and starves concurrently-running tests (measured: 8
+#   failures/hangs at `RUST_TEST_THREADS=4`, >54 min unfinished at `=1`) — don't re-attempt an
+#   in-process version of this gate. Also NOT `docs/future.md` §2b's Go-paired-programs differential
+#   or a seeded/interleaving M:N mode; both are unbuilt and separately planned.
 cargo test --lib                 # INNER LOOP: just the lib unit suite (unit + two-engine parity + conformance, no integration/bin)
 cargo test --lib checker::       # scope to the area you're editing → seconds (use while implementing)
 cargo test --features lsp --test lsp_smoke   # the feature-gated LSP server smoke test (off the default build)
@@ -55,6 +63,7 @@ cargo run -- run --serial   examples/hello.chz   # cooperative single-thread VM 
 cargo run -- run --parallel examples/primes_parallel.chz   # accepted no-op alias (engine is now default)
 cargo run -- run --threads=4 examples/primes_parallel.chz  # size the OS-thread pool (0/omitted = all cores; env CHEZZI_THREADS)
 cargo run -- test examples/              # run every `test fn` in *_test.chz (M20); file or dir, default cwd
+CHEZZI_THREADS=4 cargo run -- test tests/chz   # `test` sizes the same pool as `run`, env-only (no `--threads` flag on `test`)
 cargo run -- docs                        # print docs: no topic = full LLM reference bundle; `docs <topic>` = one (spec/syntax/stdlib); `docs topics` lists them
 
 cargo run -- run benches/run.chz         # Chezzi-vs-CPython bench harness (see docs/benchmarks.md)

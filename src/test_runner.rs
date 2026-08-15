@@ -1752,10 +1752,15 @@ struct Suite:
         // house pattern for process-global test state (`native::rand::TEST_RNG_LOCK`); the guard
         // bundles it with the restore so an assertion failure below cannot leave the rest of the
         // suite running at a forced worker count.
+        //
+        // Restore to `test_baseline_worker_count()`, NOT a hardcoded `0`: under `CHEZZI_THREADS=2
+        // cargo test` the process baseline is 2, not auto, and every test that runs after this one
+        // in the same process must still see it — hardcoding `0` here would silently drop the
+        // `CHEZZI_THREADS` differential for the rest of the run the moment this test finishes.
         struct Workers(#[allow(dead_code)] std::sync::MutexGuard<'static, ()>);
         impl Drop for Workers {
             fn drop(&mut self) {
-                crate::vm::set_worker_count(0); // 0 = auto
+                crate::vm::set_worker_count(crate::vm::test_baseline_worker_count());
             }
         }
         let _workers = Workers(

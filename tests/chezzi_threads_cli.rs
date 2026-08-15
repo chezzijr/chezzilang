@@ -1,0 +1,179 @@
+//! Task 5 (continued) — the second-worker-count differential gate for `tests/chz`
+//! (`docs/bug-discovery.md` Tier 2; `--serial` is gone, so "run the suite at two worker counts" is
+//! the standing differential in its place, over the M:N engine's only remaining knob:
+//! `CHEZZI_THREADS`).
+//!
+//! **Lives in `tests/`, driving the built binary — not `test_runner::run_tests` in-process.**
+//! `vm::pool` is ONE process-wide `OnceLock`, sized to `vm::worker_count()` exactly once, lazily, on
+//! first use, for the life of the process (`src/vm/pool.rs`) — nothing can resize it afterward. Under
+//! `cargo test --lib`, many tests run concurrently against that ONE shared pool; forcing a count from
+//! inside a single test either does nothing (another test already created the pool at a different
+//! size) or, if it happens to run first, permanently pins the WHOLE test binary's pool to that count
+//! for the rest of the run. Measured (task-5b brief): whole-process `CHEZZI_THREADS=2 cargo test`
+//! under `RUST_TEST_THREADS=4` starved 4 concurrently-running tests contending for 2 pool workers (8
+//! failures/hangs — exactly the tests already annotated "needs ≥2 free pool threads", pool risk G3,
+//! `docs/gaps.md` W7-12r); `RUST_TEST_THREADS=1` took >54 minutes without finishing. A subprocess
+//! gets its own process, so its own freshly-sized pool — same reason `executor_reentrant_shutdown.rs`
+//! / `executor_results_not_retained.rs` already run the built binary instead of calling in-process.
+//!
+//! **This differential is over the ~550 Chezzi behavioural tests in `tests/chz`, not the ~4150 Rust
+//! lib tests** — the lib suite has no such gate (measured above: starves, or is impractically slow at
+//! `RUST_TEST_THREADS=1`). It is NOT `docs/future.md` §2b's Go-paired-programs differential and NOT a
+//! seeded/interleaving M:N mode; both remain unbuilt and separately planned.
+//!
+//! **`chezzi test` did not honor `CHEZZI_THREADS` at all before this task** — only `cmd_run` read it;
+//! `cmd_test` never called `vm::set_worker_count`, so a `CHEZZI_THREADS=2 chezzi test` differential
+//! was a silent no-op (both runs used the same auto-sized pool). `test_runner.rs`'s
+//! `over_memory_trips_on_an_all_native_task_body` test already documented this exact gap ("the env
+//! var is read by `main::cmd_run`, not by `run_tests_capped`"). `main::apply_env_worker_count` closes
+//! it for `test` too — `chezzi_test_cli_honors_chezzi_threads_via_a_two_worker_precondition` below is
+//! the black-box proof that it actually reaches the pool through the CLI `test` path, not merely
+//! `worker_count()` in the lib test binary (which `vm::tests::chezzi_threads_env_reaches_worker_count`
+//! already covers separately).
+
+use std::path::Path;
+use std::process::Command;
+
+/// Run `chezzi test <path>`, optionally forcing `CHEZZI_THREADS`, with an optional `--timeout=N`ms
+/// bound (so a genuine "needs more workers than we gave it" hang can't wedge the test binary).
+/// Returns `(exit_success, summary_line, full_stdout, stderr)`.
+fn run_chz_test(
+    path: &Path,
+    threads: Option<&str>,
+    timeout_ms: Option<u64>,
+) -> (bool, String, String, String) {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_chezzi"));
+    cmd.arg("test");
+    if let Some(ms) = timeout_ms {
+        cmd.arg(format!("--timeout={ms}"));
+    }
+    cmd.arg(path);
+    match threads {
+        Some(n) => {
+            cmd.env("CHEZZI_THREADS", n);
+        }
+        None => {
+            cmd.env_remove("CHEZZI_THREADS");
+        }
+    }
+    let out = cmd.output().expect("run chezzi test");
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    let summary = stdout
+        .lines()
+        .find(|l| l.contains("test(s):"))
+        .unwrap_or("<no summary line found>")
+        .trim()
+        .to_string();
+    (out.status.success(), summary, stdout, stderr)
+}
+
+/// The differential itself: `tests/chz` must pass identically at the default (auto-sized) worker
+/// count and at `CHEZZI_THREADS=2`. ~550 real behavioural assertions, run twice, each in its own
+/// process/pool — the standing second-schedule gate now that `--serial` is gone.
+#[test]
+fn chz_suite_passes_at_a_second_worker_count() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/chz");
+
+    let (ok_default, summary_default, out_default, err_default) = run_chz_test(&root, None, None);
+    assert!(
+        ok_default,
+        "tests/chz must pass at the default worker count\nsummary: {summary_default}\nstderr: {err_default}\nstdout tail:\n{}",
+        tail(&out_default)
+    );
+    assert!(
+        summary_default.contains(" passed, 0 failed, 0 errored"),
+        "default run must be all-passing: {summary_default}"
+    );
+
+    let (ok_2, summary_2, out_2, err_2) = run_chz_test(&root, Some("2"), None);
+    assert!(
+        ok_2,
+        "tests/chz must pass with CHEZZI_THREADS=2\nsummary: {summary_2}\nstderr: {err_2}\nstdout tail:\n{}",
+        tail(&out_2)
+    );
+    assert!(
+        summary_2.contains(" passed, 0 failed, 0 errored"),
+        "CHEZZI_THREADS=2 run must be all-passing: {summary_2}"
+    );
+
+    // Same suite discovered both times (apples-to-apples): the total test count in the summary must
+    // match, so a broken/short-circuited second run can't silently "pass" by running fewer tests.
+    assert_eq!(
+        summary_default, summary_2,
+        "the two worker counts must produce the identical pass tally over the same discovered suite"
+    );
+    // A sanity floor: catches a `path`/discovery regression that quietly ran zero tests and "passed"
+    // vacuously (`summary_default == summary_2` alone can't tell "0 == 0" from "550 == 550").
+    assert!(
+        !summary_default.starts_with("0 test(s)"),
+        "the suite must not be empty: {summary_default}"
+    );
+}
+
+/// The causal proof that `CHEZZI_THREADS` actually reaches the pool through the `chezzi test` CLI
+/// path specifically (not merely `vm::worker_count()` in the lib test binary). Uses the exact "needs
+/// ≥2 free pool threads" shape documented in `docs/gaps.md` (pool risk G3): a bounded channel already
+/// full, one `Executor` job blocked trying to send into it, a second job that must close the channel
+/// to unblock the first. `Vm::mn_join`'s eager dispatch means the first job PERMANENTLY holds its
+/// pool thread (no replacement spin — a documented v1 hazard, not a bug), so:
+/// - at 1 worker, the closer can never be dispatched → genuine hang (bounded here by `--timeout`, so
+///   this test cannot itself wedge the runner);
+/// - at ≥2 workers, the closer runs on the second, the blocked send observes the close and faults
+///   `send on a closed channel` — fast (measured: single-digit ms).
+///
+/// A dropped/no-op env read would make ALL THREE runs behave like the default (>=2 cores on any CI
+/// box) — i.e. all three would fault fast, none would time out. Seeing the 1-worker run actually
+/// time out is the proof the knob has power, not just that something passed twice.
+#[test]
+fn chezzi_test_cli_honors_chezzi_threads_via_a_two_worker_precondition() {
+    let dir = std::env::temp_dir().join(format!("chz-threads-cli-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let path = dir.join("needs_two_workers_test.chz");
+    std::fs::write(
+        &path,
+        "import std.concurrency\n\n\
+         test fn needs_two_workers():\n    \
+         ch := Channel[int](1)\n    \
+         ch.send(0)\n    \
+         ex := Executor()\n    \
+         ex.submit(fn(): ch.send(1))\n    \
+         ex.submit(fn(): ch.close())\n    \
+         ex.shutdown()\n    \
+         assert true\n",
+    )
+    .expect("write program");
+
+    // Default (auto — >=2 workers on any real box): the second job gets its own pool thread and
+    // closes the channel; the blocked send faults immediately. Bounded to 5s as a smoke guard, not
+    // because this run is expected to need it.
+    let (_, summary, out, _) = run_chz_test(&path, None, Some(5_000));
+    assert!(
+        summary.contains("1 errored") && out.contains("send on a closed channel"),
+        "default worker count should fault fast on the closed channel, not hang: {summary}\n{out}"
+    );
+
+    // CHEZZI_THREADS=2: same shape, explicit count instead of auto.
+    let (_, summary, out, _) = run_chz_test(&path, Some("2"), Some(5_000));
+    assert!(
+        summary.contains("1 errored") && out.contains("send on a closed channel"),
+        "CHEZZI_THREADS=2 should fault fast on the closed channel, not hang: {summary}\n{out}"
+    );
+
+    // CHEZZI_THREADS=1: the closer can never be dispatched — this must TIME OUT, not fault and not
+    // pass. If it instead faults fast (or passes), the env var never reached the pool.
+    let (_, summary, out, _) = run_chz_test(&path, Some("1"), Some(2_000));
+    assert!(
+        summary.contains("1 timed out"),
+        "CHEZZI_THREADS=1 must starve the two-worker precondition and TIME OUT — a fault or a pass \
+         here means CHEZZI_THREADS did not reach chezzi test's pool: {summary}\n{out}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+fn tail(s: &str) -> String {
+    let lines: Vec<&str> = s.lines().collect();
+    let start = lines.len().saturating_sub(15);
+    lines[start..].join("\n")
+}

@@ -18835,3 +18835,47 @@ fn cross_module_witness_defer_target_runs_both_engines() {
         "serial and M:N diverged on a cross-module witness defer target"
     );
 }
+
+/// Proves `CHEZZI_THREADS` actually reaches [`worker_count`] in THIS test process, rather than being
+/// silently ignored — the second-schedule differential gate (`docs/bug-discovery.md` Tier 2,
+/// `CHEZZI_THREADS=2 cargo test`) is worthless if the knob does nothing: a dropped env read would
+/// make the "second" run byte-identical to the default one and nobody would notice. Locked against
+/// `over_memory_trips_on_an_all_native_task_body` (the one test that transiently forces a count) so
+/// this can't read its critical section and flake.
+///
+/// - default `cargo test` (`CHEZZI_THREADS` unset): `worker_count()` must equal the auto-sized
+///   `available_parallelism()` — not some override leaked from another test.
+/// - `CHEZZI_THREADS=N cargo test`: `worker_count()` must be exactly `N`. If the startup hook were
+///   ever skipped, or read the var too late, this would see the host's core count instead and fail —
+///   that failure IS the proof the wiring works, not a duplicate of it.
+#[test]
+fn chezzi_threads_env_reaches_worker_count() {
+    let _guard = super::TEST_WORKER_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let want = match std::env::var("CHEZZI_THREADS") {
+        Ok(raw) if !raw.trim().is_empty() => raw
+            .trim()
+            .parse::<usize>()
+            .expect("CHEZZI_THREADS set to a non-integer — the outer env is broken, not this test"),
+        _ => 0,
+    };
+    let got = super::worker_count();
+    if want == 0 {
+        let auto = std::thread::available_parallelism()
+            .map(|x| x.get())
+            .unwrap_or(1)
+            .max(1);
+        assert_eq!(
+            got, auto,
+            "CHEZZI_THREADS is unset but worker_count() != available_parallelism() — an override \
+             leaked from another test"
+        );
+    } else {
+        assert_eq!(
+            got, want,
+            "CHEZZI_THREADS='{want}' did not reach worker_count() — the test-startup hook \
+             (vm::test_baseline_worker_count) is not wired"
+        );
+    }
+}

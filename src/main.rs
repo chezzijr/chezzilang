@@ -259,16 +259,8 @@ fn cmd_run(args: &[String]) -> ExitCode {
     // applies. `0`/unset both mean auto (all cores).
     if let Some(n) = threads_flag {
         vm::set_worker_count(n);
-    } else if let Ok(raw) = std::env::var("CHEZZI_THREADS") {
-        let s = raw.trim();
-        if !s.is_empty() {
-            match s.parse::<usize>() {
-                Ok(n) => vm::set_worker_count(n),
-                Err(_) => eprintln!(
-                    "chezzi run: ignoring invalid CHEZZI_THREADS='{s}' (expected a non-negative integer; 0 = all cores)"
-                ),
-            }
-        }
+    } else {
+        apply_env_worker_count("run");
     }
 
     if read_source(&path).is_none() {
@@ -357,6 +349,37 @@ fn cmd_run(args: &[String]) -> ExitCode {
     }
 }
 
+/// Parse a raw `CHEZZI_THREADS` value (as read from the env, or `None` if unset) into a worker
+/// count. `None`/empty/whitespace-only means "not set" (`Ok(None)`, caller leaves the engine at its
+/// existing default). A pure function — no I/O — so parsing is unit-tested directly instead of via
+/// env-var mutation, which would race other tests in this binary.
+fn resolve_threads_env(raw: Option<&str>) -> Result<Option<usize>, String> {
+    match raw.map(str::trim) {
+        None | Some("") => Ok(None),
+        Some(s) => s.parse::<usize>().map(Some).map_err(|_| s.to_string()),
+    }
+}
+
+/// Apply `CHEZZI_THREADS`, if set, to the engine's worker count. Shared by `cmd_run` (which layers an
+/// explicit `--threads=N` flag on top — the flag wins, this is only the env fallback) and `cmd_test`
+/// (env-only; `test` takes no `--threads` flag). `cmd` names the caller in the warning so an invalid
+/// value is traceable to which subcommand read it.
+///
+/// Before this, `chezzi test` silently ignored `CHEZZI_THREADS` — only `cmd_run` read it
+/// (`test_runner.rs`'s `over_memory_trips_on_an_all_native_task_body` test documents exactly this
+/// gap: "`CHEZZI_THREADS=1` does NOT reproduce that — the env var is read by `main::cmd_run`, not by
+/// `run_tests_capped`"). That made a `CHEZZI_THREADS=2 chezzi test tests/chz` differential a no-op:
+/// both runs used the same (auto) worker count. This closes it for `test` too.
+fn apply_env_worker_count(cmd: &str) {
+    match resolve_threads_env(std::env::var("CHEZZI_THREADS").ok().as_deref()) {
+        Ok(Some(n)) => vm::set_worker_count(n),
+        Ok(None) => {}
+        Err(bad) => eprintln!(
+            "chezzi {cmd}: ignoring invalid CHEZZI_THREADS='{bad}' (expected a non-negative integer; 0 = all cores)"
+        ),
+    }
+}
+
 /// Resolve what to run for a bare `chezzi run` (no file argument): find the project root by walking
 /// up from the cwd for `chezzi.toml`, parse the manifest, require a `[project] entrypoint`, and map
 /// it to a file root-relatively. The entrypoint is a dotted module path optionally suffixed with
@@ -397,6 +420,7 @@ fn resolve_entrypoint() -> Result<(String, Option<String>, std::path::PathBuf), 
 /// `chezzi test [path]` — discover + run every `test fn` in `*_test.chz` files under `path` (default
 /// cwd; a single `*_test.chz` file runs that file; a directory is walked recursively). Reports
 /// `PASS/FAIL name (file:line) msg` per test, a summary, and a non-zero exit if anything failed.
+/// Runs on the M:N engine, sized by `CHEZZI_THREADS` like `chezzi run` (no `--threads` flag here).
 fn cmd_test(args: &[String]) -> ExitCode {
     use chezzi::test_runner::{RunOpts, Verbosity};
     let mut path: Option<String> = None;
@@ -495,7 +519,10 @@ fn cmd_test(args: &[String]) -> ExitCode {
         opts.color = false;
     }
     let root = path.unwrap_or_else(|| ".".to_string());
-    // The engine is the M:N OS-thread VM, matching `chezzi run` — the sole engine.
+    // The engine is the M:N OS-thread VM, matching `chezzi run` — the sole engine. Same worker-count
+    // knob as `run`, minus the `--threads` flag (env only; see `apply_env_worker_count`'s doc for
+    // why this wasn't wired before).
+    apply_env_worker_count("test");
     let report = test_runner::run_tests_opts(std::path::Path::new(&root), opts);
     print!("{}", report.text);
     if report.passed {
@@ -1241,5 +1268,39 @@ mod init_tests {
                 "entrypoint {bad:?} err should mention '.' separators, got: {e}"
             );
         }
+    }
+
+    /// `resolve_threads_env` is the parsing half of `CHEZZI_THREADS` for both `cmd_run` and
+    /// `cmd_test` (task 5's fix: `test` used to silently ignore the var). Pure function, no env-var
+    /// mutation, so this is race-free against every other test in this binary.
+    #[test]
+    fn resolve_threads_env_cases() {
+        assert_eq!(super::resolve_threads_env(None), Ok(None), "unset");
+        assert_eq!(super::resolve_threads_env(Some("")), Ok(None), "empty");
+        assert_eq!(
+            super::resolve_threads_env(Some("   ")),
+            Ok(None),
+            "whitespace-only"
+        );
+        assert_eq!(
+            super::resolve_threads_env(Some("0")),
+            Ok(Some(0)),
+            "0 = auto"
+        );
+        assert_eq!(super::resolve_threads_env(Some("2")), Ok(Some(2)));
+        assert_eq!(
+            super::resolve_threads_env(Some(" 4 ")),
+            Ok(Some(4)),
+            "surrounding whitespace trimmed"
+        );
+        assert_eq!(
+            super::resolve_threads_env(Some("nope")),
+            Err("nope".to_string())
+        );
+        assert_eq!(
+            super::resolve_threads_env(Some("-1")),
+            Err("-1".to_string()),
+            "negative is not a valid usize"
+        );
     }
 }

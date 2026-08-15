@@ -318,10 +318,60 @@ pub fn set_worker_count(n: usize) {
     WORKER_OVERRIDE.store(n, Ordering::Relaxed);
 }
 
+/// Test-only: the process baseline worker count established by `CHEZZI_THREADS` for this test
+/// binary — `0` (auto) if the var is unset/empty. Resolved and applied to [`WORKER_OVERRIDE`]
+/// exactly once, on the first call, which [`worker_count`] makes as its own first statement — so
+/// there is no caller anywhere (including [`pool`]'s lazy sizing) that can read `worker_count()`
+/// before this has run. That is what turns `CHEZZI_THREADS=2 cargo test` into a real second-schedule
+/// differential over the whole suite (`docs/bug-discovery.md` Tier 2) instead of a no-op: every test
+/// that ever reaches `worker_count()` gets the override, not just the ones that happen to run late.
+///
+/// Returns the resolved baseline so callers that transiently override the count under
+/// [`TEST_WORKER_LOCK`] can restore to it instead of hardcoding `0` — hardcoding `0` would silently
+/// drop the `CHEZZI_THREADS` differential for every test that runs later in the same process, right
+/// after the one that restores it.
+///
+/// An unparseable `CHEZZI_THREADS` panics with a clear message rather than falling back to auto: a
+/// broken env var should fail the run loudly, not quietly execute the suite at `auto` while claiming
+/// to gate a second schedule (deliberately stricter than `main::cmd_run`'s CLI path, which only warns
+/// and keeps running the program — a differential gate that can silently do nothing is not a gate).
+/// Not synchronized with [`TEST_WORKER_LOCK`]: the only test that forces a count holds that lock
+/// across its own `worker_count()` reads, and taking a non-reentrant `Mutex` again on the same thread
+/// here would deadlock. The two CAN interleave (this may resolve mid that test's critical section, on
+/// whichever thread first calls `worker_count()` anywhere in the process), but the only value this
+/// ever writes is what `CHEZZI_THREADS` asked for (the gate runs it at `2`), which still satisfies
+/// every `>= 2` eager-arm / "needs ≥2 free pool threads" precondition in the suite either way.
+#[cfg(test)]
+static TEST_WORKER_BASELINE: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+
+#[cfg(test)]
+pub(crate) fn test_baseline_worker_count() -> usize {
+    *TEST_WORKER_BASELINE.get_or_init(|| {
+        let n = match std::env::var("CHEZZI_THREADS") {
+            Ok(raw) if !raw.trim().is_empty() => {
+                let s = raw.trim();
+                s.parse::<usize>().unwrap_or_else(|_| {
+                    panic!(
+                        "CHEZZI_THREADS='{s}' is not a valid worker count for the test binary \
+                         (expected a non-negative integer; 0 = all cores)"
+                    )
+                })
+            }
+            _ => 0,
+        };
+        if n != 0 {
+            set_worker_count(n);
+        }
+        n
+    })
+}
+
 /// The effective M:N worker count: the configured override, or `available_parallelism()` when unset
 /// (`0`). Always `>= 1`. Read by the pool size, the scheduler's `nworkers`, and the eager-nursery
 /// gate so all three agree.
 pub fn worker_count() -> usize {
+    #[cfg(test)]
+    test_baseline_worker_count();
     match WORKER_OVERRIDE.load(Ordering::Relaxed) {
         0 => std::thread::available_parallelism()
             .map(|x| x.get())

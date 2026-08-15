@@ -85,8 +85,13 @@ cases.
 **Tier 2 — structural, medium effort:**
 
 4. **`proptest` properties:** `parse∘print == id`; peephole on == off; const-fold result == unfolded
-   result; `--serial` == default over *randomly generated* programs (extends parity beyond
-   the curated corpus).
+   result. (`--serial` is **removed** — the "`--serial` == default" property this bullet used to name
+   can no longer be written. Its replacement is narrower, not a proptest: `tests/chezzi_threads_cli.rs`
+   runs the curated `tests/chz` suite, unchanged, at two worker counts — default and
+   `CHEZZI_THREADS=2` — as a standing `cargo test` gate. That is a differential over worker-count
+   *scheduling*, not over *randomly generated* programs, and it does not extend parity beyond the
+   curated corpus the way this bullet's original idea would have; a generative version of this
+   property remains unbuilt.)
 5. **Generative grammar fuzzer** from `grammar.bnf` → random *valid* programs → run both engines +
    CPython. Complements #1 (which targets the error paths) by targeting the *accept* paths.
 6. **TSan / loom on the concurrency engine** — channels, `Shared`, `Executor`, netpoller under race
