@@ -606,10 +606,24 @@ fn main():
         spawn push_one(s, str(2))
     print(s.get())
 main()";
-    let normal = run_capture(src).unwrap();
-    assert_eq!(run_capture_stress(src), normal);
-    // (No M:N cross-check: the two spawns race under the pooled engine, so their push order — and
-    // thus the printed list — is not deterministic. GC survival, the point here, is cooperative.)
+    // The two spawns race for `s`'s lock under the pooled engine (the only engine now `--serial` is
+    // gone), so which of "1"/"2" lands first is NOT guaranteed — measured: 300 stress-mode runs under
+    // `RUST_TEST_THREADS=4` contention produced BOTH `['0','1','2']` and `['0','2','1']`, so an
+    // order-exact comparison here is a real (if rare) flake, not a guaranteed invariant. What IS
+    // guaranteed, and what this test is actually for, is that every pushed element survives GC — so
+    // compare as a sorted multiset, order-independent.
+    let out = run_capture_stress(src);
+    let mut got: Vec<&str> = out
+        .trim()
+        .trim_matches(|c| c == '[' || c == ']')
+        .split(", ")
+        .collect();
+    got.sort_unstable();
+    assert_eq!(
+        got,
+        vec!["'0'", "'1'", "'2'"],
+        "all three pushes must survive GC (order not guaranteed)"
+    );
 }
 
 /// Executor: a submitted task closure must survive GC firing between the `submit` and the job's

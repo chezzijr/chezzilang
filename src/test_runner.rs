@@ -1010,32 +1010,13 @@ struct Suite:
         );
     }
 
-    #[test]
-    fn chz_suite_passes() {
-        // The dedicated native suite (`tests/chz/`) is the dogfood guard: `chezzi test` runs it on
-        // the M:N OS-thread VM, and this gate asserts every test passes.
-        //
-        // `suites/uuid_entropy_test.chz` draws `uuid.v4()`, and BOTH halves of the UUID global are
-        // process-wide: the RNG state (shared with `vm::parity_tests::golden_uuid_via_run_file`,
-        // which seeds it) and the sticky `UUID_SEEDED` switch. So take the same lock the golden takes
-        // — otherwise our draws interleave between its `uuid_seed(42)` and its prints and flake it —
-        // AND clear the switch, because the lock alone does not undo an earlier test's seed (sticky
-        // by design): without the clear, whether this suite exercises the unseeded OS-entropy path it
-        // documents would depend on libtest ordering.
-        let _uuid = crate::native::uuid::TEST_UUID_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        crate::native::uuid::clear_seed();
-
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/chz");
-
-        let report = run_tests(&root);
-        assert!(
-            report.passed,
-            "tests/chz must pass on the M:N VM; report:\n{}",
-            report.text
-        );
-    }
+    // `chz_suite_passes` moved to `tests/chz_suite.rs` (Task 7b): `vm::pool` is one process-wide
+    // `OnceLock`, and running the whole `tests/chz` dogfood suite inside this shared lib-test binary
+    // meant it contended with ~4150 unrelated tests for that one pool under `RUST_TEST_THREADS=4` —
+    // measured 8/8 failures on `shutdown_now_interrupts_a_sleeping_job`'s wall-clock bound
+    // (`tests/chz/stdlib/sleep_cancel_test.chz:45`). A dedicated integration-test binary gets the
+    // pool to itself (cargo runs test binaries one at a time), matching the same fix already applied
+    // to `executor_results_not_retained.rs` / `executor_reentrant_shutdown.rs` / `chezzi_threads_cli.rs`.
 
     #[test]
     fn error_bucket_for_non_assert_fault() {
