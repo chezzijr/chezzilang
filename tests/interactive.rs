@@ -526,11 +526,7 @@ fn fault_under_broken_pipe_is_not_success_mn() {
 /// The `spew` job is what breaks the pipe. The markers write FILES, never stdout, so they are
 /// observable after the pipe is gone — and the run must STILL fault non-zero naming the pipe, or this
 /// would pass with `stream_halt` deleted outright.
-fn dead_stdout_does_not_cancel_sibling_executor_jobs(
-    serial: bool,
-    threads: Option<usize>,
-    writes: usize,
-) {
+fn dead_stdout_does_not_cancel_sibling_executor_jobs(threads: Option<usize>, writes: usize) {
     let t = TmpDir::new();
     let dir = t.0.display().to_string();
     let markers: Vec<String> = (1..=writes).map(|i| format!("m{i}.txt")).collect();
@@ -567,7 +563,7 @@ fn dead_stdout_does_not_cancel_sibling_executor_jobs(
     let mut err = String::new();
     use std::io::Read;
     let _ = stderr.read_to_string(&mut err);
-    let cfg = format!("serial={serial}, threads={threads:?}, writes={writes}");
+    let cfg = format!("threads={threads:?}, writes={writes}");
     for m in &markers {
         assert!(
             t.0.join(m).exists(),
@@ -589,22 +585,22 @@ fn dead_stdout_does_not_cancel_sibling_executor_jobs(
 
 #[test]
 fn dead_stdout_does_not_cancel_sibling_executor_jobs_mn() {
-    dead_stdout_does_not_cancel_sibling_executor_jobs(false, None, 1);
+    dead_stdout_does_not_cancel_sibling_executor_jobs(None, 1);
 }
 
 #[test]
 fn dead_stdout_does_not_cancel_sibling_executor_jobs_mn_one_thread() {
-    dead_stdout_does_not_cancel_sibling_executor_jobs(false, Some(1), 1);
+    dead_stdout_does_not_cancel_sibling_executor_jobs(Some(1), 1);
 }
 
 #[test]
 fn dead_stdout_does_not_tear_a_multi_native_sibling_mn() {
-    dead_stdout_does_not_cancel_sibling_executor_jobs(false, None, 3);
+    dead_stdout_does_not_cancel_sibling_executor_jobs(None, 3);
 }
 
 #[test]
 fn dead_stdout_does_not_tear_a_multi_native_sibling_mn_one_thread() {
-    dead_stdout_does_not_cancel_sibling_executor_jobs(false, Some(1), 3);
+    dead_stdout_does_not_cancel_sibling_executor_jobs(Some(1), 3);
 }
 
 /// A stdout that CANNOT be written (`> /dev/full` → ENOSPC) must not be silently dropped: the run
