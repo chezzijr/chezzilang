@@ -47,18 +47,15 @@ macro_rules! core_accessor {
 }
 
 /// The shared fault for a `send` on a FULL bounded channel that cannot park (top level with no
-/// nursery, or inside a native callback). ONE const so every non-parkable full-send path — on BOTH
-/// engines — emits byte-identical text (parity). Mirrors `chan_recv_step`'s empty-recv deadlock note.
+/// nursery, or inside a native callback). ONE const so every non-parkable full-send path emits
+/// byte-identical text (parity). Mirrors `chan_recv_step`'s empty-recv deadlock note.
 ///
-/// §2c1 — the spawn hint is now scoped to `--serial` and says so. It used to read "*the nursery body
-/// runs before its spawned tasks start*" unqualified, which is false on the M:N engine (a task starts
-/// at its `spawn`) but still TRUE on the cooperative one, where it is also the only guidance a user
-/// gets. Deleting it outright regressed `--serial` diagnostics; naming the engine keeps one const,
-/// keeps the two engines byte-identical, and keeps every word of it true on both.
+/// §2c1 — a spawned task starts running at its `spawn`, not at the nursery's join, so this verdict
+/// means no task that could receive is spawned at all, or the one that was has already exited: the
+/// hint names that rather than a nursery-ordering quirk.
 const FULL_SEND_DEADLOCK: &str = "send on a full channel: deadlock — the bounded channel is at \
-    capacity and no runnable task can receive to free a slot. (On `--serial` a spawned consumer does \
-    not start until the nursery's join, so a blocking send in the body cannot reach it — drop \
-    `--serial`, or put the producer in a `spawn:` too.)";
+    capacity and no runnable task can receive to free a slot. (Make sure a task that receives from \
+    this channel is spawned with `spawn:` and is still running.)";
 
 /// The shared fault for a `send` to a CLOSED channel. ONE const for the same reason
 /// [`FULL_SEND_DEADLOCK`] is one: the top-of-`send` guard, the `wait:` send arm and the eager
@@ -75,15 +72,12 @@ const CLOSED_RECV: &str = "receive on a closed channel";
 /// and was then judged deadlocked by the process-wide verdict ([`crate::vm::quiesce`]): ONE const so
 /// every spelling of the same verdict is byte-identical.
 const EMPTY_RECV_DEADLOCK: &str = "recv on an empty channel: deadlock — no runnable task can send. \
-    (On `--serial` a spawned producer does not start until the nursery's join, so a blocking recv / \
-    `for v in ch:` in the body cannot reach it — drop `--serial`, or put the consumer in a `spawn:` \
-    too.)";
+    (Make sure a task that sends to this channel is spawned with `spawn:` and is still running.)";
 
 /// The `wait:` sibling of [`EMPTY_RECV_DEADLOCK`] — every arm empty and nobody left to send.
 const EMPTY_WAIT_DEADLOCK: &str = "wait on channels that are all empty: deadlock — no runnable task \
-    can send. (On `--serial` a spawned producer does not start until the nursery's join, so a \
-    blocking `wait:` in the body cannot reach it — drop `--serial`, or put the `wait:` in a `spawn:` \
-    too.)";
+    can send. (Make sure a task that sends to one of these channels is spawned with `spawn:` and is \
+    still running.)";
 
 /// Test-only instrumentation: how many waits [`Vm::block_wait_tick`] has performed, process-wide.
 /// A COVERAGE floor for [`BLOCK_WAITS_SLEPT_WHILE_READY`] — "this program really did block on a
@@ -439,19 +433,18 @@ impl Vm {
                         // This gate is deliberately NARROWER than the siblings'
                         // [`Vm::may_block_socket_in_place`], and the difference is not an oversight.
                         // `accept`/`read` wait on a CHEZZI peer — a fiber that can only run on the very
-                        // thread they would block — so blocking the sole `--serial` thread there is
+                        // thread they would block — so blocking the one thread that owns it is
                         // self-starvation (`W7-40` R1). A `connect` handshake is completed by the
                         // KERNEL, so no chezzi party is starved by waiting for it, and both ancestors
                         // block: CPython `socket.connect` from the main thread returns in 0.1 ms, Go
-                        // `net.Dial` from the main goroutine in 314 µs. Refusing it on `--serial` would
-                        // be a divergence with nothing behind it — and it would take away a working
-                        // connect+write client (pre-`W7-59` `--serial` reached `read` before failing).
+                        // `net.Dial` from the main goroutine in 314 µs — refusing it here would be a
+                        // divergence with nothing behind it.
                         Ok(self.sock_err(
                             "connect would block: std.net sockets require the --parallel engine",
                         ))
                     } else {
-                        // Everywhere the thread is the program's own — `--serial`, top-level `main` on
-                        // the default engine, a `connect` inside a native callback on M:N: block, but
+                        // Everywhere the thread is the program's own — top-level `main` on the
+                        // default engine, a `connect` inside a native callback on M:N: block, but
                         // through the SHARED demote loop rather than a private sleep-spin, so the wait
                         // gets that loop's escapes (`--timeout`, `cancel`, a run-wide `os.exit` — W7-47 —
                         // and a torn-down nursery) and, on a worker shell, `demote_socket_enter`'s
@@ -719,11 +712,11 @@ impl Vm {
         }
     }
 
-    /// D6/B1 — `Socket.read(n) -> Result[str]` / `read(n, timeout_ms)`. On a would-block, under the M:N
-    /// engine the fiber PARKS on the netpoller (re-root the receiver, rewind `ip` so the op re-executes
-    /// on resume, set the `poll_park` sentinel — mirrors the channel `recv` park, but routed to the
-    /// poller). Off the M:N engine (top level / cooperative) there is no fiber to park, so the op fails
-    /// loud (a documented v1 fallback — net targets `--parallel`).
+    /// D6/B1 — `Socket.read(n) -> Result[str]` / `read(n, timeout_ms)`. On a would-block, on an M:N
+    /// worker shell the fiber PARKS on the netpoller (re-root the receiver, rewind `ip` so the op
+    /// re-executes on resume, set the `poll_park` sentinel — mirrors the channel `recv` park, but
+    /// routed to the poller). Off a worker shell (top level) there is no fiber to park, so the op
+    /// fails loud (a documented v1 fallback — net targets `--parallel`).
     ///
     /// Decodes through [`Vm::decode_carry`] (never `from_utf8_lossy`). Contract: `n` bounds the NEW
     /// bytes taken off the fd; a ≤3-byte incomplete-codepoint tail carried from the previous read is
@@ -1281,7 +1274,7 @@ impl Vm {
 
     /// D6 — the M:N park half shared by every would-block socket op. Returns `Ok(true)` if the fiber
     /// was parked on the netpoller; `Ok(false)` when this Vm is not an M:N worker shell (top-level
-    /// `main`, an eager `Executor` job, `--serial`) or is inside a native callback whose Rust-stack
+    /// `main`, an eager `Executor` job) or is inside a native callback whose Rust-stack
     /// state can't be parked. The caller then asks [`Vm::may_block_socket_in_place`]: on the two
     /// contexts that own their whole thread (an M:N in-callback demote, and top-level `main` on the
     /// default engine — Go-identical, and what makes the hello-world TCP server writable) it falls
@@ -1289,7 +1282,7 @@ impl Vm {
     /// the run's `--timeout`, or a cancel — and on top-level `main` under `chezzi run` **only the first
     /// of those three exists**: `--timeout` is a `chezzi test` flag (`chezzi run` rejects it as an
     /// unknown flag) and `main` has no scope cancel to trip, so an untimed op there blocks until SIGINT
-    /// (see [`Vm::demote_block_socket`]'s doc); everywhere else — `--serial`, an eager `Executor` job, a
+    /// (see [`Vm::demote_block_socket`]'s doc); everywhere else — an eager `Executor` job, a
     /// callback on a non-M:N thread — it keeps the loud `Err("<op> would block: std.net sockets
     /// require the --parallel engine")`, because blocking a SHARED thread starves the very peer that
     /// would make the fd ready (both shapes measured as hangs; see that helper's doc).
@@ -1332,13 +1325,13 @@ impl Vm {
         // blocking, and a `defer` that would PARK past the deadline is a hang, not cleanup.
         self.deadline_halt(span)?;
         // CANCELLATION CHECKPOINT — a socket op is a blocking op, so it is a cancel-delivery point
-        // (the single choke point for `accept`/`read`/`write`/`connect`), on BOTH engines: the check
-        // sits OUTSIDE the `mn.is_some()` gate, because serial runs the op as a BLOCKING syscall below
-        // and would otherwise have no cancel-delivery point at a socket at all. On M:N a cancelled
-        // fiber must also not RE-park: `poller::drain_sched` re-injects a poller-parked fiber on
-        // cancel and the rewound op re-runs here — without this check it would would-block and re-park
-        // forever (the every-instruction check that used to kill it at the dispatch loop top is gone;
-        // see `run_until`), wedging the nursery.
+        // (the single choke point for `accept`/`read`/`write`/`connect`): the check sits OUTSIDE the
+        // `mn.is_some()` gate, because top-level `main` (and any other non-worker-shell context) runs
+        // the op as a BLOCKING syscall below and would otherwise have no cancel-delivery point at a
+        // socket at all. On M:N a cancelled fiber must also not RE-park: `poller::drain_sched`
+        // re-injects a poller-parked fiber on cancel and the rewound op re-runs here — without this
+        // check it would would-block and re-park forever (the every-instruction check that used to
+        // kill it at the dispatch loop top is gone; see `run_until`), wedging the nursery.
         if self.native_reentry == 0 && self.cancel_requested() {
             self.cancelled = true;
             return Err(self.err("cancelled".to_string(), span));
@@ -2466,12 +2459,10 @@ impl Vm {
         };
         // v1 limit (§6d): a live SEND arm reaching the block section INSIDE a native callback
         // (`native_reentry > 0`) can only be a FULL bounded send (a ready arm — unbounded/closed/
-        // free-slot — was taken at poll), and it cannot be parked or demoted on EITHER engine: the
-        // M:N demote path POPS recv queues (`demote_wait_block`) and would wrongly steal a send-arm
-        // channel's queued message as a received value, and the serial engine has no cooperative
-        // yield inside a callback. Fault identically on BOTH engines here — before the engine split —
-        // so serial and M:N emit byte-identical text (the FULL_SEND_DEADLOCK doc-comment's parity
-        // contract), matching the plain in-callback full-send fault (`chan_send_step`, netio.rs:1383).
+        // free-slot — was taken at poll), and it cannot be parked or demoted: the M:N demote path
+        // POPS recv queues (`demote_wait_block`) and would wrongly steal a send-arm channel's queued
+        // message as a received value. Fault here, matching the plain in-callback full-send fault
+        // (`chan_send_step`, netio.rs:1383) and the FULL_SEND_DEADLOCK doc-comment's parity contract.
         // ponytail: upgrade path = a demote-in-place send block (mirror `demote_recv_block`).
         if self.native_reentry > 0 && keys.iter().any(|&(_, is_send)| is_send) {
             return Err(self.err(FULL_SEND_DEADLOCK.to_string(), span));
@@ -3641,7 +3632,7 @@ impl Vm {
                 {
                     let mut g = core.inner.lock().unwrap();
                     g.shut = true;
-                    g.clear(); // the serial queue; empty on M:N (eager submit never fills it)
+                    g.clear(); // always empty (eager submit never fills it); cleared defensively
                 }
                 // D4 — "attempts to stop", COOPERATIVE not preemptive: trip the per-core cancel
                 // flag so a job already running dies at its next back-edge, and one the pool has
@@ -3677,7 +3668,7 @@ impl Vm {
         // EAGER (D1) — the executor is DETACHED: its work is already running, and this is where
         // the program waits for it. Walk the heap-independent registry, not `self.executors`:
         // that list is heap-keyed, so an executor created inside a task never reached it and its
-        // work was silently lost (W7-5b). Creation order, matching the serial reap below.
+        // work was silently lost (W7-5b). Creation order.
         //
         // Re-scan from the top each round rather than snapshotting: a job joined here can itself
         // construct and submit to a NEW executor, which must also be joined. Marking `shut`

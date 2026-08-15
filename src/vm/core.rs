@@ -458,30 +458,13 @@ pub struct ExecState {
 }
 
 impl ExecState {
-    /// Enqueue a task with its PRE-COMPUTED [`wire_summary`] — see [`ChanState::push`].
-    pub fn push(&mut self, sum: (usize, bool), w: WireValue) {
-        self.bytes += sum.0;
-        self.dirty |= sum.1;
-        self.queue.push_back((sum.0, w));
-    }
-
-    pub fn pop(&mut self) -> Option<WireValue> {
-        let (b, w) = self.queue.pop_front()?;
-        self.bytes = self.bytes.saturating_sub(b);
-        if self.queue.is_empty() {
-            self.bytes = 0;
-            self.dirty = false;
-        }
-        Some(w)
-    }
-
-    /// Drain the whole queue (the `shutdown` FIFO drain) — also a free resync point.
-    pub fn take_all(&mut self) -> Vec<WireValue> {
-        self.bytes = 0;
-        self.dirty = false;
-        self.queue.drain(..).map(|(_, w)| w).collect()
-    }
-
+    /// The eager (M:N) engine dispatches at `submit` rather than filling this queue (decision D3),
+    /// so it is permanently empty — but `len`/`iter`/`summary`/`clear` below are still live: the
+    /// `Executor` `Display` impl, the GC live-bytes walk and rooting pass, and `shutdown_now` all
+    /// read or reset it unconditionally rather than special-case an executor that could — in a build
+    /// with a queueing decision — actually hold work. `push`/`pop`/`take_all` had no such reader left
+    /// once the queue-at-submit path was removed and are deleted; `is_empty` is kept as a trivial
+    /// wrapper purely for `clippy::len_without_is_empty` — it has no caller of its own.
     pub fn clear(&mut self) {
         self.queue.clear();
         self.bytes = 0;
@@ -652,7 +635,7 @@ impl EagerState {
 /// once per finished job, beside a thread handoff and a condvar notify, right after that job's own
 /// `O(payload)` `to_wire` — so gating it would buy nothing and would make `live_bytes` mean two
 /// different things depending on a flag (both ancestors keep accounting live and the *limit*
-/// separate: Go's `runtime.MemStats` vs `GOMEMLIMIT`). `ExecState::push` charges unconditionally
+/// separate: Go's `runtime.MemStats` vs `GOMEMLIMIT`). [`ChanState::push`] charges unconditionally
 /// for the same reason.
 ///
 /// Called OFF the `eager` lock (see [`EagerState::finish`]) — the walk is O(result).
