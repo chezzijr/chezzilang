@@ -1,0 +1,41 @@
+# tests/chz/spec/list_any_no_widen_test.chz — a `List[Any]` annotation does not widen int elements.
+#
+# `Any` is the EMPTY top protocol, not a numeric type, so nothing in the slot asks for the one-way
+# int→float element widen: the element stays an `int`, exactly as CPython's `[1, 3.0]` keeps it.
+# The widen IS right when a numeric type asks for it — a `List[float]` annotation, or an
+# un-annotated literal whose elements must unify to one type — so both are pinned here too: the
+# narrowing must not spread past the `Any` slot. (`docs/gaps.md` wave-4 row.)
+#
+# `Any` carries no methods, so an element cannot be interrogated directly; `str()` of the whole list
+# is the observable that separates `1` from `1.0`.
+
+test fn list_any_keeps_int_element():
+    xs: List[Any] = [1, 3.0]
+    assert str(xs) == "[1, 3.0]", "List[Any] must not widen the int (CPython prints [1, 3.0])"
+
+test fn list_any_keeps_int_element_float_first():
+    # Order-independent: the peephole is a whole-literal predicate, so the suppression must be too.
+    xs: List[Any] = [3.0, 1]
+    assert str(xs) == "[3.0, 1]"
+
+test fn list_float_annotation_still_widens():
+    ys: List[float] = [1, 3.0]
+    assert str(ys) == "[1.0, 3.0]"
+
+test fn unannotated_mixed_list_still_widens():
+    zs := [1, 3.0]
+    assert str(zs) == "[1.0, 3.0]"
+
+test fn list_any_homogeneous_and_non_numeric_unchanged():
+    a: List[Any] = [1, 2]
+    assert str(a) == "[1, 2]"
+    b: List[Any] = [1, "a"]
+    assert str(b) == "[1, 'a']"
+    c: List[Any] = [1, 3.0, "a"]
+    assert str(c) == "[1, 3.0, 'a']"
+
+test fn nested_literal_under_list_any_still_widens():
+    # The hint is consumed by the IMMEDIATE literal only, so the inner list is un-annotated and
+    # unifies to `List[float]` as usual.
+    n: List[Any] = [[1, 3.0]]
+    assert str(n) == "[[1.0, 3.0]]"

@@ -405,6 +405,18 @@ impl FloatAliases {
             {
                 Some(crate::ast::ElemFloatHint::MapValue)
             }
+            // `List[Any]` — the SUPPRESSION hint: nothing numeric asks for the widen, so the
+            // literal's own float sibling must not license it either. `!shadow.contains("Any")`
+            // because a generic type param named `Any` shadows the protocol (the checker resolves it
+            // to a `Ty::Param`, so its twin gate declines too).
+            Type::Generic(n, args, ..)
+                if n == "List"
+                    && args.len() == 1
+                    && crate::ast::is_any_ty(&args[0])
+                    && !shadow.contains("Any") =>
+            {
+                Some(crate::ast::ElemFloatHint::AnyElem)
+            }
             _ => None,
         }
     }
@@ -3716,9 +3728,12 @@ impl Compiler {
             ExprKind::List(items) => {
                 // One-way int→float widening for THIS list: widen an element when the `List[float]`
                 // annotation says so OR the constant peephole fires (≥1 untyped float CONSTANT sibling
-                // → widen the untyped int CONSTANT siblings). The checker accepts nothing else.
+                // → widen the untyped int CONSTANT siblings) — UNLESS a `List[Any]` annotation
+                // suppresses it, where the slot sanctions the mix and no numeric type asks for the
+                // widen. The checker accepts nothing else, and declines the widen on the same hint.
                 let annotated = elem_hint == Some(crate::ast::ElemFloatHint::Elem);
-                let peephole = literal_numeric_mix(items.iter());
+                let peephole = elem_hint != Some(crate::ast::ElemFloatHint::AnyElem)
+                    && literal_numeric_mix(items.iter());
                 for it in items {
                     self.compile_expr(fc, it)?;
                     if annotated || (peephole && crate::ast::untyped_int_const(it)) {

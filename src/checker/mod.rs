@@ -200,6 +200,25 @@ fn float_elem_hint_ty(ty: &Ty) -> Option<crate::ast::ElemFloatHint> {
     }
 }
 
+/// The widen-SUPPRESSION twin of [`float_elem_hint_ty`]: a `let` annotated `List[Any]` declines the
+/// int→float element widen entirely (see [`crate::ast::ElemFloatHint::AnyElem`]).
+///
+/// Gated on BOTH the syntactic `List[Any]` the backend matches (`FloatAliases::elem_hint`) and the
+/// resolved `Ty`, so the two sides decide identically in every case: an alias (`type A = Any`) fails
+/// the syntactic half on both, and a generic type param named `Any` fails the resolved half here
+/// exactly where the backend's `shadow` set fails it there. A one-sided suppression would be a
+/// checker-says-`float`/backend-stores-`int` hole in one direction and a cosmetic drift in the other.
+fn any_elem_hint_ty(
+    written: &crate::ast::Type,
+    resolved: &Ty,
+) -> Option<crate::ast::ElemFloatHint> {
+    let syntactic = matches!(written, crate::ast::Type::Generic(n, args, ..)
+        if n == "List" && args.len() == 1 && crate::ast::is_any_ty(&args[0]));
+    let is_any = matches!(resolved, Ty::List(e)
+        if matches!(&**e, Ty::Protocol(n, a) if n == "Any" && a.is_empty()));
+    (syntactic && is_any).then_some(crate::ast::ElemFloatHint::AnyElem)
+}
+
 /// A short, surface-faithful label for a return-only extern `Type` in a marshallability error
 /// (`owned_str`, `str?`, `owned_str?`). Only ever called on the forms `is_return_only_extern_type`
 /// already matched, so non-matching shapes fall back to a generic label.

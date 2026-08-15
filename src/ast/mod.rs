@@ -851,6 +851,25 @@ pub enum ElemFloatHint {
     Elem,
     /// `Map[_, float]` — widen every VALUE, leave keys untouched.
     MapValue,
+    /// `List[Any]` — widen NOTHING, and SUPPRESS the `literal_numeric_mix` peephole that would
+    /// otherwise fire on the literal's own float sibling. `Any` is the empty top protocol, not a
+    /// numeric type: the slot already sanctions a heterogeneous literal (`infer_list`'s
+    /// expected-type-directed path), so no target type asks for the int→float widen and applying it
+    /// only destroys the element's type — CPython's `xs = [1, 3.0]` keeps the `int`.
+    /// (`Map[_, Any]` has no counterpart: `Map` has no expected-type-directed path, so a `Map[_, Any]`
+    /// annotation cannot be satisfied by any literal at all — invariance rejects it before the widen
+    /// is reachable.)
+    AnyElem,
+}
+
+/// The syntactic `Any` element test behind [`ElemFloatHint::AnyElem`] — the twin of the compiler's
+/// `FloatAliases::is_float` for the top type. Deliberately SYNTAX-only (no alias resolution): both
+/// sides read the same written token, so `type A = Any; xs: List[A] = …` is simply not a hint on
+/// either side, exactly like the whole-collection alias carve-out on the `float` path. A generic type
+/// param named `Any` shadows the protocol, so each side additionally rules that out with the
+/// scope knowledge it has (compiler: its `float_shadow` set; checker: the resolved `Ty`).
+pub fn is_any_ty(ty: &Type) -> bool {
+    matches!(ty, Type::Named { name, .. } if name == "Any")
 }
 
 // (The hint itself is DERIVED on each side: the compiler resolves it from the syntactic `Type` with

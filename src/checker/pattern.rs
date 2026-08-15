@@ -1285,11 +1285,7 @@ impl Checker {
                 // hint drives THIS literal's element type and never leaks into a nested element
                 // call. `None` keeps the ordinary bottom-up inference.
                 let hint = self.expected_hint.take();
-                self.infer_list(
-                    items,
-                    hint.as_ref(),
-                    elem_hint == Some(crate::ast::ElemFloatHint::Elem),
-                )
+                self.infer_list(items, hint.as_ref(), elem_hint)
             }
             ExprKind::Tuple(items) => {
                 Ty::Tuple(items.iter().map(|e| self.infer_value(e)).collect())
@@ -2289,7 +2285,12 @@ impl Checker {
         }
     }
 
-    pub(super) fn infer_list(&mut self, items: &[Expr], expected: Option<&Ty>, hint: bool) -> Ty {
+    pub(super) fn infer_list(
+        &mut self,
+        items: &[Expr],
+        expected: Option<&Ty>,
+        hint: Option<crate::ast::ElemFloatHint>,
+    ) -> Ty {
         // EXPECTED-TYPE-DIRECTED path: when the slot type is a concrete `List[E]` (an annotated
         // `let xs: List[Any] = …`, a `List[E]` call arg — INCLUDING the synthesized variadic list
         // for `...xs: E` — or a `List[E]` return), drive `E` down onto each element instead of
@@ -2304,8 +2305,16 @@ impl Checker {
         let mut tys: Vec<Ty> = items.iter().map(|it| self.infer_value(it)).collect();
         // Element widening runs FIRST, so the widened element type is what BOTH the expected-type
         // path and the bottom-up path see — the compiler's peephole coerces the same items regardless
-        // of the slot, so the checker must not disagree with it in a `List[Any]` / variadic slot.
-        self.elem_widen(items.iter(), &mut tys, hint);
+        // of the slot, so the checker must not disagree with it in a variadic / un-annotated slot.
+        // A written `List[Any]` annotation is the one slot that suppresses the widen outright: the
+        // backend declines on the SAME hint (`ElemFloatHint::AnyElem`), so the two still agree.
+        if hint != Some(crate::ast::ElemFloatHint::AnyElem) {
+            self.elem_widen(
+                items.iter(),
+                &mut tys,
+                hint == Some(crate::ast::ElemFloatHint::Elem),
+            );
+        }
         if let Some(Ty::List(e)) = expected
             && !e.is_unknown()
             && !items.is_empty()

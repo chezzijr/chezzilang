@@ -1985,9 +1985,13 @@ impl Checker {
                         // a static `float`. Set ONLY here (never for a call arg / return: the compiler
                         // has no annotation there); `infer_kind` `take()`s it so nothing nested
                         // inherits the license.
+                        // A `List[Any]` annotation instead SUPPRESSES the widen (`any_elem_hint_ty`):
+                        // the slot sanctions a heterogeneous literal, so nothing numeric asks for it
+                        // and the backend declines on the same hint.
                         self.float_elem_hint = match t {
                             crate::ast::Type::Generic(n, ..) if n == "List" || n == "Map" => {
                                 float_elem_hint_ty(&expected)
+                                    .or_else(|| any_elem_hint_ty(t, &expected))
                             }
                             _ => None,
                         };
