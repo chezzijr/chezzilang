@@ -98,3 +98,42 @@ test fn alias_of_any_element_keeps_int_element():
     assert str(xs) == "[1, 3.0]"
 
 type AnyAlias = Any
+
+# --- The synthesized variadic pack has no source text of its own, so it carries the CALL's span --
+# and a pipe gives every link of `a |> f() |> g()` the LHS primary's span. When that primary IS a
+# list literal, the pack and the user's own literal used to key one slot in the checker→compiler
+# widen table, and the pack's verdict was applied to the literal: a silent wrong value that only the
+# PIPED spelling produced. Each test below asserts the piped form equals the form it desugars to.
+
+fn vari_head_float(xs: List[float], ...rest: Any) -> float:
+    return xs[0] / 2
+
+fn vari_any_tail_float(a: str, ...ys: float) -> str:
+    return a + "|" + str(ys)
+
+test fn piped_variadic_pack_does_not_alias_the_piped_literal():
+    # The pack `[[1, 3.0], 2.5, 1]` and the argument `[1, 3.0]` share a span; only the pack's slot is
+    # `Any`. Piping must not change the answer.
+    assert ([1, 3.0] |> vari_any(2.5, 1)) == vari_any([1, 3.0], 2.5, 1)
+    assert ([1, 3.0] |> vari_any(2.5, 1)) == "[[1.0, 3.0], 2.5, 1]"
+
+test fn piped_literal_into_a_typed_first_param_still_widens():
+    # Same collision, opposite verdicts (`List[float]` param vs the `Any` pack): this spelling used
+    # to abort with an `internal:` table-conflict error rather than run.
+    assert ([1, 3.0] |> vari_head_float(2.5, 1)) == vari_head_float([1, 3.0], 2.5, 1)
+    assert ([1, 3.0] |> vari_head_float(2.5, 1)) == 0.5
+
+test fn two_variadic_packs_in_one_pipe_chain_do_not_alias():
+    # Both packs are synthesized, both carry the SAME shared chain span, and their verdicts differ
+    # (`Any` declines, `float` widens) — so the pack marker has to be per-callee, not a flag.
+    piped := [1, 3.0] |> vari_any(2.5, 7) |> vari_any_tail_float(1, 2.0)
+    assert piped == vari_any_tail_float(vari_any([1, 3.0], 2.5, 7), 1, 2.0)
+    assert piped == "[[1.0, 3.0], 2.5, 7]|[1.0, 2.0]"
+
+test fn list_any_slot_reaches_an_if_arm_literal():
+    # An `if`/`match` ARM inherits the expected hint, so a `List[Any]` slot reaches the arm literal
+    # and it declines like any other `List[Any]` literal. (The SCALAR numeric-mix path is untouched:
+    # `if true: 1 else: 2.0` still unifies to float — see the case below.)
+    assert take_any(if true: [1, 3.0] else: [2, 4.0]) == "[1, 3.0]"
+    s: Any = if true: 1 else: 2.0
+    assert str(s) == "1.0"

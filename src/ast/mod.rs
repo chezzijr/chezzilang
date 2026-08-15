@@ -904,8 +904,26 @@ pub enum ExprKind {
     RawStr(String),
     Bool(bool),
     Ident(String),
-    /// `[a, b, c]`
-    List(Vec<Expr>),
+    /// `[a, b, c]` — plus the node's ORIGIN, which is `None` for every list the user wrote and
+    /// `Some(callee_key_span)` for the ONE synthesized list in the compiler: the variadic argument
+    /// pack `desugar::normalize_call` collapses a call's surplus positionals into
+    /// (`src/desugar/mod.rs`, the `is_variadic` arm).
+    ///
+    /// That second component is a TABLE KEY component, not decoration. The pack carries the CALL's
+    /// span because it has no source text of its own, and a pipe gives every link of `a |> f() |> g()`
+    /// the LHS primary's span (measured: `[1, 3.0] |> f(2.5) |> g(1, 2.0)` — the literal, the inner
+    /// `Call` and the outer `Call` all report `line 1, col 6`). So `[1, 3.0] |> vari(2.5, 1)` had the
+    /// pack and the user's own inner literal sharing one [`crate::checker::ListWidenTable`] key, and
+    /// the pack's "decline the widen" verdict was applied to the inner literal — an `Int` stored under
+    /// a static `List[float]`, a silent wrong value under a green `chezzi check`. Two packs in one pipe
+    /// chain aliased the same way.
+    ///
+    /// The repo's rule for this failure class (`docs/gaps.md` M24-6, W7-49, W7-43) is **make the
+    /// coordinate real, never re-anchor a span** — re-spanning the pack only moves the collision. The
+    /// callee's key span is that real coordinate: it is a distinct source token per link in both a
+    /// postfix and a pipe chain, and it is derived by the SAME [`crate::checker::witness_key_span`]
+    /// `WitnessKey`/`CarrierKey` already use, so it inherits their derivation rather than adding one.
+    List(Vec<Expr>, Option<Span>),
     /// `(a, b, …)` — a tuple literal (always ≥2 elements).
     Tuple(Vec<Expr>),
     /// `{k: v, …}` — insertion-ordered map literal. Each pair is `(key, value)`.
@@ -1148,7 +1166,7 @@ pub fn expr_recover_blocks<'a>(e: &'a Expr, out: &mut Vec<&'a Block>) {
                 expr_recover_blocks(e, out);
             }
         }),
-        ExprKind::List(es) | ExprKind::Tuple(es) | ExprKind::Set(es) => es.iter().for_each(go),
+        ExprKind::List(es, _) | ExprKind::Tuple(es) | ExprKind::Set(es) => es.iter().for_each(go),
         ExprKind::Map(pairs) => pairs.iter().for_each(|(k, v)| {
             expr_recover_blocks(k, out);
             expr_recover_blocks(v, out);

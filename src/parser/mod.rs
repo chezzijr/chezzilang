@@ -2952,7 +2952,7 @@ impl Parser {
                 // comprehension (`[elem for x in xs if g]`); otherwise a plain list literal.
                 if self.check(&Token::RBracket) {
                     self.advance();
-                    ExprKind::List(Vec::new())
+                    ExprKind::List(Vec::new(), None)
                 } else {
                     let first = self.parse_expr()?;
                     if self.check(&Token::For) {
@@ -2974,7 +2974,7 @@ impl Parser {
                             elems.push(self.parse_expr()?);
                         }
                         self.expect(&Token::RBracket)?;
-                        ExprKind::List(elems)
+                        ExprKind::List(elems, None)
                     }
                 }
             }
@@ -5409,7 +5409,7 @@ mod tests {
             panic!()
         };
         match e.kind {
-            ExprKind::List(elems) => assert_eq!(elems.len(), 3),
+            ExprKind::List(elems, _) => assert_eq!(elems.len(), 3),
             other => panic!("{other:?}"),
         }
     }
@@ -6728,7 +6728,7 @@ mod tests {
             panic!()
         };
         assert_eq!(a.kind, b.kind);
-        assert!(matches!(&b.kind, ExprKind::List(es) if es.len() == 2));
+        assert!(matches!(&b.kind, ExprKind::List(es, _) if es.len() == 2));
         parse_err("[,]\n");
         // map
         let StmtKind::Expr(a) = only("{\"a\": 1}\n") else {

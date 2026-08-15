@@ -21,8 +21,8 @@ use std::fmt;
 pub use ty::Ty;
 use ty::compatible;
 pub use ty::{
-    CarrierKey, CarrierMode, CarrierTable, FnLabels, KeywordKey, KeywordTable, ListWidenTable,
-    ProtoEqTable, WitnessCallee, WitnessKey, WitnessSrc, WitnessTable,
+    CarrierKey, CarrierMode, CarrierTable, FnLabels, KeywordKey, KeywordTable, ListWidenKey,
+    ListWidenTable, ProtoEqTable, WitnessCallee, WitnessKey, WitnessSrc, WitnessTable,
 };
 
 /// The fully-resolved C signature of one `extern` fn, computed by the checker in the defining
@@ -1047,12 +1047,11 @@ pub(crate) fn record_call_table_entry<K, V>(
             span,
             format!(
                 "internal: two different {what} decisions were recorded for one source position, so \
-                 the backend cannot tell the two call sites apart. The known cause is a default \
-                 parameter spliced into two call sites of one module: a default is cloned into each \
-                 CALLER's scope, so a caller-side local that shadows the definer's global makes the \
-                 two splices resolve differently — renaming that local is the workaround. If no \
-                 default parameter is involved, this is a compiler bug; please report it with the \
-                 source (docs/gaps.md W7-49)"
+                 the backend cannot tell the two sites apart. This is a compiler bug — please report \
+                 it with the source (docs/gaps.md W7-49). One trigger has a workaround: if a call here \
+                 omits an argument that has a DEFAULT, the default is cloned into each caller's \
+                 scope, and a caller-side local that shadows the definer's global makes two splices of \
+                 it resolve differently — renaming that local avoids it"
             ),
         )),
         None => {
@@ -1089,6 +1088,20 @@ pub fn carrier_key(
     name_span: Span,
 ) -> crate::checker::CarrierKey {
     (module_idx, frag_ctx, frag_ord, name_span)
+}
+
+/// Build the [`ListWidenKey`] for one list literal: a [`carrier_key`] on the literal's own node span,
+/// plus the node's ORIGIN — `ExprKind::List`'s second component, verbatim. The checker's record site
+/// and the compiler's lookup site call this one helper on the same AST node, so they cannot derive it
+/// differently. See [`ListWidenKey`] for why the span alone aliases.
+pub fn list_widen_key(
+    module_idx: usize,
+    frag_ctx: Span,
+    frag_ord: usize,
+    span: Span,
+    origin: Option<Span>,
+) -> crate::checker::ListWidenKey {
+    (carrier_key(module_idx, frag_ctx, frag_ord, span), origin)
 }
 
 /// M24 Task 5 — the span component of a call site's [`WitnessKey`], from the CALLEE and the call

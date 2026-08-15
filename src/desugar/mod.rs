@@ -171,7 +171,7 @@ fn is_inline_default(e: &Expr) -> bool {
         ExprKind::Unary { expr, .. } => is_inline_default(expr),
         ExprKind::Binary { lhs, rhs, .. } => is_inline_default(lhs) && is_inline_default(rhs),
         ExprKind::Range { start, end } => is_inline_default(start) && is_inline_default(end),
-        ExprKind::List(xs) | ExprKind::Tuple(xs) | ExprKind::Set(xs) => {
+        ExprKind::List(xs, _) | ExprKind::Tuple(xs) | ExprKind::Set(xs) => {
             xs.iter().all(is_inline_default)
         }
         ExprKind::Map(ps) => ps
@@ -1209,7 +1209,7 @@ fn walk_idents_and_types(e: &Expr, f: &mut impl FnMut(&str), tf: &mut impl FnMut
                 walk_idents_and_types(e, f, tf)
             }
         }),
-        ExprKind::List(xs) | ExprKind::Tuple(xs) | ExprKind::Set(xs) => {
+        ExprKind::List(xs, _) | ExprKind::Tuple(xs) | ExprKind::Set(xs) => {
             xs.iter().for_each(|x| walk_idents_and_types(x, f, tf))
         }
         ExprKind::Map(ps) => ps.iter().for_each(|(k, v)| {
@@ -1905,7 +1905,7 @@ impl Walker<'_> {
                 self.walk_expr(start)?;
                 self.walk_expr(end)?;
             }
-            ExprKind::List(xs) | ExprKind::Set(xs) | ExprKind::Tuple(xs) => {
+            ExprKind::List(xs, _) | ExprKind::Set(xs) | ExprKind::Tuple(xs) => {
                 for x in xs.iter_mut() {
                     self.walk_expr(x)?;
                 }
@@ -2234,6 +2234,11 @@ impl Walker<'_> {
         else {
             return Ok(());
         };
+        // The ORIGIN stamp for a synthesized variadic pack (see `ExprKind::List`). Captured here, in
+        // the immutable borrow, because the collapse below re-borrows `expr.kind` mutably. It is the
+        // callee's own token — the one component that stays distinct per link of a pipe/postfix chain,
+        // where the CALL span does not.
+        let pack_origin = crate::checker::witness_key_span(callee, span);
 
         // Resolve a free function / struct ctor / module-qualified callee (clone the spec so we can
         // then mutate `expr`).
@@ -2409,7 +2414,10 @@ impl Walker<'_> {
             // so a positional can never land in a keyword-only slot.
             let elems: Vec<Expr> = positional.into_iter().skip(v).flatten().collect();
             out.push(Expr {
-                kind: ExprKind::List(elems),
+                // `Some(..)` marks this as the synthesized pack, NOT a list the user wrote: `span` is
+                // the CALL's, which a pipe shares with the LHS primary, so the pack and a piped list
+                // literal would otherwise key the same `ListWidenTable` slot. See `ExprKind::List`.
+                kind: ExprKind::List(elems, Some(pack_origin)),
                 span,
             });
             // Keyword-only tail (indices v+1..): named args may name ONLY these slots. Naming the
@@ -3665,7 +3673,7 @@ mod tests {
     }
 
     fn list_ints(k: &ExprKind) -> Vec<i64> {
-        let ExprKind::List(es) = k else {
+        let ExprKind::List(es, _) = k else {
             panic!("expected a List literal, got {k:?}");
         };
         es.iter()

@@ -2046,7 +2046,7 @@ impl Checker {
                 // pre-existing witness-wall spelling, which produced the identical bogus pair). Ask the
                 // EXPRESSION, which is the thing that knows.
                 let empty_literal = match &value.kind {
-                    ExprKind::List(xs) | ExprKind::Set(xs) => xs.is_empty(),
+                    ExprKind::List(xs, _) | ExprKind::Set(xs) => xs.is_empty(),
                     ExprKind::Map(entries) => entries.is_empty(),
                     _ => true, // `Set()` / `List()` ctor calls and everything else: unchanged
                 };

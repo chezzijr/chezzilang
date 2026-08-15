@@ -3721,7 +3721,7 @@ impl Compiler {
             ExprKind::RawStr(s) => fc.emit(Op::ConstStr(s.clone()), expr.span),
             ExprKind::Bytes(b) => fc.emit(Op::ConstBytes(b.clone().into_boxed_slice()), expr.span),
             ExprKind::Ident(name) => self.compile_ident(fc, name, expr.span),
-            ExprKind::List(items) => {
+            ExprKind::List(items, origin) => {
                 // One-way int→float widening for THIS list: widen an element when the `List[float]`
                 // annotation says so OR the constant peephole fires (≥1 untyped float CONSTANT sibling
                 // → widen the untyped int CONSTANT siblings) — UNLESS the checker recorded that this
@@ -3732,11 +3732,12 @@ impl Compiler {
                 // A miss = widen, the pre-fix lowering.
                 let annotated = elem_hint == Some(crate::ast::ElemFloatHint::Elem);
                 let peephole = literal_numeric_mix(items.iter())
-                    && self.list_widen.get(&crate::checker::carrier_key(
+                    && self.list_widen.get(&crate::checker::list_widen_key(
                         self.current_module_idx,
                         self.kw_frag_ctx,
                         self.kw_frag_ord,
                         expr.span,
+                        *origin,
                     )) != Some(&true);
                 for it in items {
                     self.compile_expr(fc, it)?;
@@ -6136,7 +6137,7 @@ fn find_boundary_free_expr(e: &Expr, out: &mut HashSet<String>) {
         | ExprKind::Bool(_)
         | ExprKind::Ident(_)
         | ExprKind::TypeApply { .. } => {}
-        ExprKind::List(es) | ExprKind::Tuple(es) | ExprKind::Set(es) => {
+        ExprKind::List(es, _) | ExprKind::Tuple(es) | ExprKind::Set(es) => {
             es.iter().for_each(|x| find_boundary_free_expr(x, out))
         }
         ExprKind::Map(pairs) => pairs.iter().for_each(|(k, v)| {
@@ -6630,7 +6631,7 @@ pub(crate) fn free_names_expr(e: &Expr, bound: &HashSet<String>, out: &mut FreeN
         | ExprKind::RawStr(_)
         | ExprKind::Bool(_)
         | ExprKind::TypeApply { .. } => {}
-        ExprKind::List(es) | ExprKind::Tuple(es) | ExprKind::Set(es) => {
+        ExprKind::List(es, _) | ExprKind::Tuple(es) | ExprKind::Set(es) => {
             es.iter().for_each(|x| free_names_expr(x, bound, out))
         }
         ExprKind::Map(pairs) => pairs.iter().for_each(|(k, v)| {
@@ -6779,7 +6780,7 @@ fn collect_frame_binds_expr(e: &Expr, out: &mut HashSet<String>) {
         | ExprKind::Bool(_)
         | ExprKind::Ident(_)
         | ExprKind::TypeApply { .. } => {}
-        ExprKind::List(es) | ExprKind::Tuple(es) | ExprKind::Set(es) => {
+        ExprKind::List(es, _) | ExprKind::Tuple(es) | ExprKind::Set(es) => {
             es.iter().for_each(|x| collect_frame_binds_expr(x, out))
         }
         ExprKind::Map(pairs) => pairs.iter().for_each(|(k, v)| {

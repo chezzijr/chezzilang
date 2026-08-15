@@ -1279,7 +1279,7 @@ impl Checker {
             ExprKind::Bytes(_) => Ty::Bytes,
             ExprKind::Bool(_) => Ty::Bool,
             ExprKind::Ident(name) => self.infer_ident(name, expr.span),
-            ExprKind::List(items) => {
+            ExprKind::List(items, origin) => {
                 // Consume any expected-type hint (a `List[E]` slot: an annotated `let`, a call
                 // arg, a return position — or the synthesized variadic list). `take()` so the
                 // hint drives THIS literal's element type and never leaks into a nested element
@@ -1289,7 +1289,7 @@ impl Checker {
                 // re-derive the slot's element type. One record site ⇒ every position an expected
                 // `List[E]` reaches a literal (annotated `let`, call arg, struct ctor arg, the
                 // synthesized variadic pack, `return`) is served by one channel.
-                self.record_list_widen(expr.span, items, hint.as_ref());
+                self.record_list_widen(expr.span, items, *origin, hint.as_ref());
                 self.infer_list(items, hint.as_ref(), elem_hint)
             }
             ExprKind::Tuple(items) => {
@@ -3483,17 +3483,24 @@ impl Checker {
     /// Both verdicts are recorded where those hold, so an aliased key is a loud error rather than one
     /// literal's verdict silently applied to another. A backend MISS means "widen": the pre-fix
     /// lowering, so an unrecorded literal can only under-apply the fix.
-    fn record_list_widen(&mut self, span: Span, items: &[Expr], expected: Option<&Ty>) {
+    fn record_list_widen(
+        &mut self,
+        span: Span,
+        items: &[Expr],
+        origin: Option<Span>,
+        expected: Option<&Ty>,
+    ) {
         if !matches!(expected, Some(Ty::List(e)) if !e.is_unknown())
             || !crate::compiler::literal_numeric_mix(items.iter())
         {
             return;
         }
-        let key = crate::checker::carrier_key(
+        let key = crate::checker::list_widen_key(
             self.graph_module_idx,
             self.kw_frag_ctx,
             self.kw_frag_ord,
             span,
+            origin,
         );
         crate::checker::record_call_table_entry(
             &mut self.list_widen,
@@ -3912,7 +3919,7 @@ impl Checker {
             // A nested closure is its own scope — never descend (it may shadow `name`).
             ExprKind::Closure { .. } => {}
             // Every other expression: recurse into its child expressions.
-            ExprKind::List(es) | ExprKind::Tuple(es) | ExprKind::Set(es) => {
+            ExprKind::List(es, _) | ExprKind::Tuple(es) | ExprKind::Set(es) => {
                 for c in es {
                     self.scan_expr_for_pin(name, c, match_pin, member_pin);
                 }

@@ -688,7 +688,7 @@ fn overlay_expr(expr: &crate::ast::Expr, map: &mut std::collections::HashMap<(us
                 }
             }
         }
-        ExprKind::List(es) | ExprKind::Tuple(es) | ExprKind::Set(es) => {
+        ExprKind::List(es, _) | ExprKind::Tuple(es) | ExprKind::Set(es) => {
             for e in es {
                 overlay_expr(e, map);
             }

@@ -1870,7 +1870,7 @@ impl Checker {
     pub(super) fn drop_value_escape_sites(&mut self, value: &Expr) {
         match &value.kind {
             ExprKind::Ident(name) => self.drop_empty_site(name),
-            ExprKind::List(elems) | ExprKind::Set(elems) | ExprKind::Tuple(elems) => {
+            ExprKind::List(elems, _) | ExprKind::Set(elems) | ExprKind::Tuple(elems) => {
                 for e in elems {
                     if let ExprKind::Ident(n) = &e.kind {
                         self.drop_empty_site(n);

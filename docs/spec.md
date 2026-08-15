@@ -516,7 +516,9 @@ root marker (all fields default to unset, so `entrypoint` is required only for t
   the backend has no declared `float` to coerce from.
   The element widening belongs to the LITERAL, but only where a NUMERIC element type asks for it: an
   `Any` element SLOT declines it at every position the slot reaches a literal — an annotated `let`, a
-  call argument, a struct constructor argument, the synthesized variadic pack, a `return` — so
+  call argument, a struct constructor argument, the synthesized variadic pack, an `if`/`match` arm
+  under any of those, a `return` — and the SPELLING of the position never changes the answer, so a
+  piped call (`[1, -2.5] |> f()`) means what `f([1, -2.5])` means. Hence
   `xs: List[Any] = [1, -2.5]`, `f([1, -2.5])` for `fn f(xs: List[Any])` and `f(1, -2.5)` for
   `fn f(...xs: Any)` all keep the `1` an `int`, as CPython does. `Any` is the empty top protocol, not a
   numeric type, and the expected-type-directed path already sanctions the heterogeneous literal, so

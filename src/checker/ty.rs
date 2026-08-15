@@ -154,9 +154,27 @@ pub type CarrierTable = HashMap<CarrierKey, CarrierMode>;
 /// fix, never mis-apply it.
 pub type ProtoEqTable = HashMap<CarrierKey, bool>;
 
-/// Whether a mixed-numeric LIST LITERAL declines the int→float element widen, keyed exactly like
-/// [`CarrierKey`] but on the literal's OWN node span (a list literal is a primary expression, so its
-/// span is its own token range — it is never the shared primary span of a postfix/pipe chain link).
+/// The [`ListWidenTable`] key: a [`CarrierKey`] on the list literal's OWN node span, plus the node's
+/// ORIGIN (`ExprKind::List`'s second component — `None` for a list the user wrote, the callee's key
+/// span for the synthesized variadic argument pack).
+///
+/// The span alone is NOT injective, and the origin is what makes it so. A list literal the user wrote
+/// is a primary expression, so its span is its own bracket range — but the synthesized pack has no
+/// source text and carries the CALL's span, and a pipe gives every link of `a |> f() |> g()` the LHS
+/// primary's span. Measured on `[1, 3.0] |> f(2.5) |> g(1, 2.0)`: the literal, the inner `Call` and the
+/// outer `Call` all report `line 1, col 6`. So without the origin, `[1, 3.0] |> vari(2.5, 1)` gave the
+/// pack and the user's inner literal one key — the pack's "decline" verdict reached the inner literal
+/// and stored an `Int` under a static `List[float]`, a silent wrong value (`[[1, 3.0], 2.5, 1]` where
+/// the un-piped spelling of the same program prints `[[1.0, 3.0], 2.5, 1]`) — and two variadic calls
+/// in one pipe chain aliased pack-to-pack, turning a valid program into a hard `internal:` error.
+///
+/// This is instance #4 of the repo's span-keyed-table aliasing class (`docs/gaps.md` M24-6, W7-49,
+/// W7-43), and it takes those rows' remedy: make the coordinate REAL, never re-anchor a span (a
+/// re-spanned pack only relocates the collision — a computed callee falls back to the call span again).
+pub type ListWidenKey = (CarrierKey, Option<Span>);
+
+/// Whether a mixed-numeric LIST LITERAL declines the int→float element widen, keyed by
+/// [`ListWidenKey`].
 ///
 /// `true` = the slot's element type is the `Any` top protocol, so nothing numeric asks for the
 /// coercion and the backend must leave the int an int (CPython: `[1, 3.0]`). The backend is
@@ -171,7 +189,7 @@ pub type ProtoEqTable = HashMap<CarrierKey, bool>;
 /// recorded where it does fire, so [`crate::checker::record_call_table_entry`] can turn an aliased
 /// key into a hard error instead of silently applying one literal's verdict to another. A lookup MISS
 /// means "widen", which is the pre-fix lowering — a missing entry can only ever under-apply the fix.
-pub type ListWidenTable = HashMap<CarrierKey, bool>;
+pub type ListWidenTable = HashMap<ListWidenKey, bool>;
 
 /// Surface-only parameter labels on a function type (Swift SE-0111 keyword arguments through a
 /// function VALUE). They ride PARALLEL to a `Ty::Func`'s `params`, but participate in NO type

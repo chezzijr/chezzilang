@@ -514,7 +514,10 @@ that declaration is what the backend coerces from — not exceptions):
   named `Any` shadows the protocol and is not an `Any` slot. A TYPED int element is never touched
   either way (`a := 1; xs: List[Any] = [a, -2.5]` keeps `1`), and the hint stays on the IMMEDIATE
   literal — a nested one is un-annotated and unifies as usual (`n: List[Any] = [[1, -2.5]]` →
-  `[[1.0, -2.5]]`).
+  `[[1.0, -2.5]]`). An `if`/`match` ARM inherits the slot, so `f(if c: [1, -2.5] else: [2, -4.0])`
+  keeps its `1` an `int` too; the SCALAR numeric-mix path is untouched — `x: Any = if c: 1 else: 2.5`
+  still unifies its branches and stores `1.0`. And the SPELLING of a position never changes the
+  answer: `[1, -2.5] |> f()` means exactly what `f([1, -2.5])` means, piped or not.
 
 Un-annotated, there is no type context, so **no** adaptation: `f := 2.5; xs := [1, f]` is an error
 (`list elements differ: int vs float`) — annotate `xs: List[float] = [1, f]`. Likewise a TYPED int
