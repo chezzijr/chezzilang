@@ -4240,6 +4240,15 @@ impl Checker {
             if !sig.witness_params.is_empty() {
                 continue;
             }
+            // The empty-collection carve-out, asked of the UNSUBSTITUTED slot (see
+            // `fn_slot_params_have_unknown`): `[].map(ident)`'s `fn(?) -> U` carries the receiver's
+            // sentinel and runs fine. Asking it of the SUBSTITUTED slot instead let the rule's own
+            // subject escape — `Bx(0).two(ident, ident)` on `fn two[U](f: fn(U) -> U, g: fn(U) -> U)
+            // -> List[U]` degrades `U` to `?` and then read as the sentinel, so the check went silent
+            // and printed a `List[U]` nothing determines (Go: "cannot infer U").
+            if fn_slot_params_have_unknown(decl) {
+                continue;
+            }
             let declared = Ty::Func {
                 params: sig.params.clone(),
                 ret: Box::new(sig.ret.clone()),

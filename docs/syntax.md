@@ -1039,8 +1039,14 @@ parameters: `[1,2,3].filter(pred)` for a `pred[T](n: int) -> bool` whose `T` app
 argument has had its chance to pin: `[1,2,3].fold(0, pick)` for `pick[T](a: T, b: T) -> T` is pinned
 by the accumulator, which is the *first* argument while `pick` is the second — and a user generic
 method may spell the two slots either way round (`b.app(ident, 5)` works as well as
-`b.app2(5, ident)`). An **empty** receiver is the one carve-out: its element type is `?`, not a
-type parameter nothing determined, so `[].map(ident)` still type-checks and prints `[]`.
+`b.app2(5, ident)`). An **empty** receiver is the one carve-out, and it suppresses only the *report*:
+its element type is `?`, which is a slot nothing filled rather than a type parameter nothing
+determined, so `[].map(ident)` and `[].map(mk)` still type-check and print `[]`. The **pin is never
+suppressed** — a slot the other arguments determine still pins straight through an empty receiver, so
+`[].fold(0, add)` runs and prints `0`, exactly as Go's `Fold([]int{}, 0, add)` returns `0`. And the
+carve-out is the *receiver's* `?` only: a type parameter of the method itself that ends up
+undetermined is still reported, so `Bx(0).two(ident, ident)` on
+`fn two[U](self, f: fn(U) -> U, g: fn(U) -> U) -> List[U]` is an error (Go: `cannot infer U`).
 
 One position is deliberately **not** covered, because the concrete type is present but does not reach
 the read: a parameter or field **default value** (`fn run(f: fn(int) -> int = id)`) has a concrete slot

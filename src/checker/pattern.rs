@@ -2153,7 +2153,13 @@ impl Checker {
                     // read is not the final word, and the deferred end-of-call check
                     // (`report_undetermined_generic_fn_value_args`) owns the verdict instead. The
                     // witness wall above wins first — its advice differs (a turbofish does not help).
-                    FnValuePin::Undetermined if !self.generic_fn_value_prepass => {
+                    // …gated by the hint's own parameter positions (see `fn_slot_params_concrete`):
+                    // a hint that is not concrete there cannot answer the question, so the rigid
+                    // arm's assignability diagnostic owns it. No hint at all still reports (`g := id`).
+                    FnValuePin::Undetermined
+                        if !self.generic_fn_value_prepass
+                            && hint.as_ref().is_none_or(fn_slot_params_concrete) =>
+                    {
                         self.reject_undetermined_generic_fn_value(
                             name,
                             &type_params,

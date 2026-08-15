@@ -215,6 +215,16 @@ test fn a_generic_fn_as_a_higher_order_argument():
     assert a.fn_first(gid, "s") == "s"
     # a turbofish pins a return-only type param the slot cannot
     assert [1, 2].map(empty_of[str]) == [[], []]
+    # an EMPTY receiver suppresses the REPORT, never the PIN: `fold`'s slot reads `fn(A, ?) -> A`,
+    # non-concrete because there is no element type — but argument ZERO determines `T` outright, and
+    # Go's `Fold([]int{}, 0, add)` returns `0`. `map`'s slot has no concrete parameter, so only
+    # `fold` catches a pin that the empty receiver killed.
+    assert [].fold(0, gsum) == 0
+    assert [].fold("", gsecond) == ""
+    assert [1, 2, 3].fold(0, gsum) == 6
 
 fn empty_of[T](n: int) -> List[T]:
     return []
+
+fn gsum[T: Add](a: T, b: T) -> T:
+    return a + b

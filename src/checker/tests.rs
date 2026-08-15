@@ -22294,6 +22294,37 @@ fn a_generic_fn_argument_pinned_by_anything_stays_ok() {
     // not evidence the fn is un-instantiable. Both of these print `[]` today and must keep doing so.
     ok(&format!("{head}fn main():\n    print([].map(ident))\n"));
     ok(&format!("{head}fn main():\n    print([].map(mk))\n"));
+    // …and the empty receiver must suppress the REPORT ONLY, never the PIN. `map`'s slot has no
+    // concrete parameter to expose that — `fold`'s does: `fn(A, ?) -> A` reads non-concrete because
+    // the receiver is empty, yet argument ZERO (the accumulator) determines `T` completely, and Go's
+    // `Fold([]int{}, 0, add)` returns `0`. Killing the pin here reported the pre-rule wording
+    // ("argument to 'fold' has type fn(T, T) -> T") that this whole rule exists to replace.
+    ok(&format!(
+        "{head}fn add[T: Add](a: T, b: T) -> T:\n    return a + b\nfn main():\n    print([].fold(0, add))\n    print([].fold(\"\", pick))\n"
+    ));
+    entry_ok(&format!(
+        "import std.concurrency\n{head}fn add[T: Add](a: T, b: T) -> T:\n    return a + b\nfn main():\n    s := RwShared([])\n    print(s.fold(0, add))\nmain()\n"
+    ));
+}
+
+/// The rule's own subject, escaping through the carve-out meant for the EMPTY-collection sentinel:
+/// `two`'s `[U]` is determined by nothing, `recover_return_only_params` degrades it to `?`, and a
+/// carve-out that reads the slot AFTER substitution cannot tell that `?` from an empty receiver's.
+/// Measured pre-fix: `check` said `ok: no type errors` and `run` printed `[]` — a `List[U]` with `U`
+/// determined by nothing. Go: `in call to two, cannot infer U`.
+#[test]
+fn a_method_type_param_degraded_to_unknown_still_reports_its_fn_value_args() {
+    rejects(
+        "struct Bx[T]:\n    v: T\n    fn two[U](self, f: fn(U) -> U, g: fn(U) -> U) -> List[U]:\n        return []\nfn ident[T](x: T) -> T:\n    return x\nfn main():\n    print(Bx(0).two(ident, ident))\n",
+        "'ident' is generic and T is not determined here",
+    );
+    // …and the same method still accepts every spelling that DOES determine `U`.
+    ok(
+        "struct Bx[T]:\n    v: T\n    fn two[U](self, f: fn(U) -> U, g: fn(U) -> U) -> List[U]:\n        return []\nfn ident[T](x: T) -> T:\n    return x\nfn main():\n    print(Bx(0).two(ident[int], ident[int]))\n",
+    );
+    ok(
+        "struct Bx[T]:\n    v: T\n    fn two[U](self, x: U, f: fn(U) -> U) -> List[U]:\n        return []\nfn ident[T](x: T) -> T:\n    return x\nfn main():\n    print(Bx(0).two(5, ident))\n",
+    );
 }
 
 #[test]

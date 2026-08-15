@@ -2733,10 +2733,32 @@ enum FnValuePin {
     /// can determine it, so the read cannot become a function value — the rule reports.
     Undetermined,
     /// Not this rule's business, and never an error here: the slot is not a matching-arity `fn(..)`
-    /// (an arity / shape diagnostic owns that and says it accurately), the slot's own PARAMETER
-    /// positions are not concrete (`[].map(ident)`'s `fn(?) -> U` — the empty-collection sentinel,
-    /// which runs fine and prints `[]`), or the pin came out `Unknown`-cored.
+    /// (an arity / shape diagnostic owns that and says it accurately), or the pin came out
+    /// `Unknown`-cored (`[].map(ident)`'s `fn(?) -> ?` — the empty-collection sentinel, which runs
+    /// fine and prints `[]`).
     Skip,
+}
+
+/// The REPORT half's carve-out, asked by the two callers that can EMIT the diagnostic — never by the
+/// pin. Each asks it of a different type, because they are different questions:
+///
+/// * an expected-type HINT (`infer_ident`'s Scope A) is already as substituted as it will get, so a
+///   non-concrete parameter there means the position genuinely cannot answer — including a RIGID
+///   outer type param (`fn f[T](): g: fn(T) -> T = ident` is legal and must stay accepted).
+/// * a generic METHOD's declared slot still carries the method's own free `[U]`, which is normal.
+///   The sentinel to carve out there is a `Ty::Unknown` that was in the slot BEFORE the call's
+///   bindings were substituted in — i.e. one the receiver's element type contributed
+///   (`[].map(ident)`'s `fn(?) -> U`), not one `recover_return_only_params` degraded a live `[U]`
+///   into (`Bx(0).two(ident, ident)`'s `fn(U) -> U`, which nothing determines and Go refuses).
+fn fn_slot_params_concrete(t: &Ty) -> bool {
+    matches!(t, Ty::Func { params, .. } if params.iter().all(ty_fully_concrete))
+}
+
+/// See [`fn_slot_params_concrete`] — the declared-slot half: does a PARAMETER position of `t` hold
+/// the empty-collection `Unknown` sentinel?
+fn fn_slot_params_have_unknown(t: &Ty) -> bool {
+    matches!(t, Ty::Func { params, .. }
+        if params.iter().any(|p| p.is_unknown() || contains_unknown_in_slot(p)))
 }
 
 /// THE derivation behind the uninstantiated-generic-function-value rule, asked at every position a
@@ -2750,14 +2772,17 @@ enum FnValuePin {
 /// caller's responsibility. The argument-position caller must ask it only once the whole call has
 /// been inferred — `[1,2,3].fold(0, pick)` pins `pick`'s `T` from the FIRST argument while `pick` is
 /// the SECOND, so asking per-argument would refuse a program Go accepts.
+///
+/// NOTHING about the SLOT gates the pin — only the RESULT does (`ty_has_param` + `ty_fully_concrete`
+/// on `refined`). A non-concrete slot position is not evidence the read is un-instantiable: `[]
+/// .fold(0, add)`'s slot reads `fn(int, ?) -> int` because the receiver is empty, yet argument ZERO
+/// pins `T = int` completely and Go's `Fold([]int{}, 0, add)` returns `0`. The carve-out belongs to
+/// the REPORT (see [`fn_slot_params_concrete`]), which each reporting caller applies itself.
 fn pin_generic_fn_value(type_params: &[TypeParam], declared: &Ty, want: &Ty) -> FnValuePin {
     let (Ty::Func { params: dp, .. }, Ty::Func { params: wp, .. }) = (declared, want) else {
         return FnValuePin::Skip;
     };
-    // Only the slot's PARAMETERS are gated: its RETURN may legitimately be `Unknown` (a
-    // discarded-return HOF slot like `for_each`'s `fn(int) -> ?`) and the question is still
-    // answerable — a fn whose `T` appears nowhere is undetermined there just the same.
-    if dp.len() != wp.len() || !wp.iter().all(ty_fully_concrete) {
+    if dp.len() != wp.len() {
         return FnValuePin::Skip;
     }
     let mut map: HashMap<String, Ty> = HashMap::new();

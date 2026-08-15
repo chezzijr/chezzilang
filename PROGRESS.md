@@ -10317,6 +10317,30 @@ no longer a non-goal — complete VM-only support shipped** (see below).
 One bullet per milestone/epic. Full landing detail (TDD notes, review-panel findings, test-count deltas,
 branch names) is in the git log.
 
+- **The empty-receiver carve-out suppresses the REPORT, never the PIN — and stops hiding the rule's
+  own subject (2026-08-15).** Two defects in the argument-position rule below, both found by
+  adversarial review and reproduced against the `69aa9efc` binary. (1) **A regression.** The
+  `!wp.iter().all(ty_fully_concrete)` gate lived in the SHARED derivation, so it disabled the pin as
+  well as the report: `[].fold(0, add)` for `add[T: Add](a: T, b: T) -> T` printed `0` before the rule
+  and afterwards reported *argument to 'fold' has type fn(T, T) -> T, expected fn(int, ?) -> int* —
+  the pre-rule wording the rule exists to replace. `fold`'s slot is `fn(A, E) -> A`, and an empty
+  receiver makes `E` = `?`, so the whole slot read non-concrete even though argument ZERO determines
+  `T` outright; Go's `Fold([]int{}, 0, add)` returns `0`. The carve-out was only ever tested on `map`,
+  whose slot has **no concrete parameter** to expose it — so the new test uses `fold`. `pin_generic_fn_value`
+  now gates the pin on the RESULT alone (`ty_has_param` + `ty_fully_concrete` on `refined`), and each
+  REPORTING caller applies the carve-out itself. (2) **A pre-existing escape**, the rule's own subject:
+  `Bx(0).two(ident, ident)` on `fn two[U](self, f: fn(U) -> U, g: fn(U) -> U) -> List[U]` checked clean
+  and printed `[]` on BOTH binaries — a `List[U]` with `U` determined by nothing (Go: *in call to two,
+  cannot infer U*). Both fn args defer, neither pins, `recover_return_only_params` degrades `U` to `?`,
+  and the carve-out — asked of the SUBSTITUTED slot — could not tell that `?` from an empty receiver's.
+  The method-path report now asks it of the **unsubstituted** slot (`fn_slot_params_have_unknown`):
+  `[].map(ident)`'s `fn(?) -> U` carries the receiver's sentinel *before* any binding, `two`'s
+  `fn(U) -> U` does not. The hint path (`infer_ident` Scope A) keeps its own predicate
+  (`fn_slot_params_concrete`) because a hint is already fully substituted and may hold a RIGID outer
+  type param — `fn f[T](): g: fn(T) -> T = ident` is legal and stays accepted. 438-file `.chz` corpus
+  sweep, pre vs post binary: **zero** verdict changes outside the file the new tests were added to
+  (`std/*.chz` differ only because a binary built from another worktree fails its own stdlib-path gate
+  — the `69aa9efc` binary shows the same). 4157 lib tests + 549 Chezzi tests identical on both engines.
 - **…and at an ARGUMENT-position read too, deferred to the end of the call (2026-08-15).** The rule
   above only asked its question where an `expected_hint` was absent, so one function got two verdicts
   depending on where it was read. Measured on the pre-change binary: `g := pred` rejected, but
