@@ -102,6 +102,44 @@ test fn a_pre_cancelled_token_stops_the_jobs():
     ex.shutdown()
     assert c.load() == 0, "a cancelled token must stop the later jobs, got " + str(c.load())
 
+# A JOIN NEVER WAITS FOR ITSELF. A job that shuts down the executor it is running under is itself one
+# of that executor's outstanding jobs, so a join over "outstanding == 0" waits for an event the waiting
+# thread is the only obstacle to. That made the joiner's blocked-party entry permanently unsatisfiable,
+# and with `main` parked in its own `shutdown()` every party in the run was such a join — so the
+# process-wide verdict declared a program whose every job had ALREADY RUN to be deadlocked. Measured on
+# the pre-fix debug binary: 8/8 runs faulted for the graceful `shutdown()` below, and 8/60 for
+# `shutdown_now()` (the rest escaped only because `shutdown_now` trips the cancel flag, which the joiner
+# usually noticed before `main`'s 5 ms poll reached the verdict — a coin flip, not a verdict).
+#
+# Reference, CPython 3.14.6, measured: `shutdown(wait=True)` from inside its own worker raises
+# `RuntimeError: cannot join current thread` and `shutdown(wait=False, cancel_futures=True)` returns in
+# 0.000 s — the self-join is refused or skipped, and in neither case is the RUN declared dead. Chezzi
+# joins over a COUNT rather than over thread handles, so it can do better than refuse: it waits for
+# everything the executor owes EXCEPT this job.
+#
+# The self-shutdown job is submitted LAST on purpose: it marks the executor `shut`, so a submit racing
+# behind it would be rejected with "submit on a shut-down Executor" (CPython raises there too).
+test fn a_job_may_gracefully_shut_down_its_own_executor():
+    ex := Executor()
+    c := AtomicInt(0)
+    ex.submit(fn(): bump(c, 1))
+    ex.submit(fn(): bump(c, 10))
+    ex.submit(fn(): ex.shutdown())
+    ex.shutdown()
+    # A graceful shutdown trips no cancel, so the siblings the self-join waits for all run.
+    assert c.load() == 11, "a self-joining job must wait for its siblings, not report a deadlock; got " + str(c.load())
+
+test fn a_job_may_shutdown_now_its_own_executor():
+    # The reentrant-cancel half of the same seam. No accumulator assertion: `shutdown_now` trips the
+    # per-core cancel flag, so whether a sibling reaches its next checkpoint first is genuinely
+    # nondeterministic. What must be deterministic is that nobody calls this run dead.
+    ex := Executor()
+    ex.submit(fn(): ex.shutdown_now())
+    r := recover: ex.shutdown()
+    match r:
+        Ok(_): pass
+        Err(e): assert false, "a job that shuts down its own executor must not fault: " + e.message()
+
 test fn an_uncancelled_token_is_a_no_op():
     ex := Executor()
     tok := cancel.manual()

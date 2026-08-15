@@ -4083,20 +4083,51 @@ impl Vm {
     /// sibling task may be the very producer the blocked job needs (pinned by
     /// `executor_job_keeps_waiting_when_shutdown_runs_beside_a_live_producer`).
     pub(super) fn join_eager_jobs(&mut self, core: &Arc<ExecutorCore>) -> Result<(), RuntimeError> {
-        let _party = self.block_party_guard(crate::vm::quiesce::PartyWait::Join(Arc::clone(core)));
+        // A JOIN NEVER WAITS FOR ITSELF. When this thread is an eager job OF THIS CORE — a job that
+        // calls `ex.shutdown()`/`ex.shutdown_now()` on the executor it is running under — its own
+        // slot is one of the `outstanding` below and stays so until it returns from here. Waiting
+        // for `0` is then waiting for an event this thread is itself the only obstacle to, and it
+        // showed up as the one unacceptable outcome: the party registered just below answered
+        // "never satisfiable", every other party in the run was a `Join` too, and the verdict
+        // declared a program in which EVERY JOB HAD ALREADY RUN to be deadlocked — measured 8/60
+        // debug runs for `shutdown_now` (the other 52 escaped only because `shutdown_now` trips
+        // `core.cancel`, so the self-joining job usually reached the cancel rung below before
+        // `main`'s poll reached the verdict — a coin flip between two 5 ms pollers) and 8/8 for the
+        // graceful `shutdown()`, which has no cancel to escape through.
+        //
+        // The ancestor refuses the self-join rather than hanging on it: CPython 3.14.6, measured,
+        // raises `RuntimeError: cannot join current thread` from `shutdown(wait=True)` inside its
+        // own worker and returns in 0.000 s from `shutdown(wait=False)`; in neither case is the RUN
+        // declared dead. Chezzi's join is over a COUNT rather than over thread handles, so it can
+        // do better than refuse: it waits for everything the executor owes EXCEPT this job, which
+        // is the same wait with the impossible term removed. `slack` is that term.
+        //
+        // Discounting can only ever RELEASE a wait or VETO a verdict, never manufacture a fault —
+        // the safe direction of `quiesce`'s error table. Sibling shapes are untouched: two jobs of
+        // DIFFERENT executors joining each other get `slack == 0` on both sides and still fault
+        // (`two_executors_deadlocking_each_other_fault`), and a self-joiner whose sibling is
+        // genuinely stuck on a channel is still unsatisfiable at `slack` and is judged by that
+        // sibling's own blocking site, which names the real line.
+        let slack = usize::from(
+            self.eager_core
+                .as_ref()
+                .is_some_and(|mine| Arc::ptr_eq(mine, core)),
+        );
+        let _party =
+            self.block_party_guard(crate::vm::quiesce::PartyWait::Join(Arc::clone(core), slack));
         // W7-60 — carried out of the loop rather than `?`-ed, so the slot rule below can read it: on
         // EVERY bail-out the jobs that own the remaining slots are still outstanding, so this thread must
         // not empty the vec they will `finish` into (the FINISHED ones are flushed instead).
         let mut bail: Option<RuntimeError> = None;
         let slots = {
             let mut g = core.eager.lock().unwrap_or_else(|e| e.into_inner());
-            while g.outstanding() > 0 {
+            while g.outstanding() > slack {
                 let (next, timed) = core
                     .eager_cv
                     .wait_timeout(g, DEMOTE_POLL_BACKOFF)
                     .unwrap_or_else(|e| e.into_inner());
                 g = next;
-                if g.outstanding() == 0 {
+                if g.outstanding() <= slack {
                     continue; // progress — leave through the loop head and reduce normally
                 }
                 // W7-60 — the run-wide halts, in `block_halt_check`'s order. Ungated (see the doc
@@ -4126,7 +4157,7 @@ impl Vm {
                 g = core.eager.lock().unwrap_or_else(|e| e.into_inner());
                 // Re-check under the re-taken lock: a job may have finished in the gap, which is
                 // progress and makes the verdict stale.
-                if verdict && g.outstanding() > 0 {
+                if verdict && g.outstanding() > slack {
                     bail = Some(self.err(JOIN_DEADLOCK_MSG.to_string(), Span::RUNTIME));
                     break;
                 }
@@ -4137,6 +4168,15 @@ impl Vm {
             // that ran to completion and never reached stdout. `take_finished` is the length-preserving
             // half: it flushes those and leaves the outstanding indices intact (W7-60 review, charge
             // A2 — reproduced as a missing `QUICK DONE` under `--timeout`).
+            // …and a SELF-JOIN must not steal it either, for the same reason plus a sharper one: this
+            // thread's OWN slot is still reserved and it will `finish` into that index the moment it
+            // returns from here, so `take_slots`' `mem::take` would leave `finish` writing past the
+            // end (the `debug_assert` in `EagerState::finish`, an out-of-bounds panic on a pool
+            // thread in release). It takes NOTHING at all, not even the finished outcomes: the
+            // enclosing join — `main`'s `shutdown()` or the program-exit drain — reduces the whole
+            // vector in SUBMISSION order, which keeps every sibling's output at its own slot
+            // position (W7-5c) and lets a sibling's fault surface from the executor that owns it
+            // rather than being re-raised inside an unrelated job.
             if bail.is_some() {
                 let done = g.take_finished();
                 drop(g);
@@ -4145,6 +4185,8 @@ impl Vm {
                     self.out.extend_from_slice(out);
                     self.stderr.extend_from_slice(stderr);
                 }
+                Vec::new()
+            } else if slack > 0 {
                 Vec::new()
             } else {
                 g.take_slots()

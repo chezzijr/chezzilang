@@ -88,7 +88,18 @@ pub(super) enum PartyWait {
     /// window faulted a live program (measured 2/20 runs on a loop of drained shutdowns beside a
     /// blocked consumer). Its wait condition is exactly `outstanding() == 0`, so that is what it
     /// answers.
-    Join(Arc<super::core::ExecutorCore>),
+    ///
+    /// **…minus the joiner's OWN slot** — the `usize` is 1 when the joining thread is itself an
+    /// eager job of this very core, else 0. A job that calls `ex.shutdown()`/`ex.shutdown_now()` on
+    /// the executor it is running under stays counted in that core's `outstanding` for the whole
+    /// wait, so a flat `outstanding() == 0` made its party self-referentially unsatisfiable: nothing
+    /// the run could do would ever satisfy it, which is exactly the shape the verdict reads as
+    /// "unfeedable". Measured on a healthy program whose every job ran to completion (`A` and `C`
+    /// both printed), `main`'s join faulted `deadlock` in 8/60 debug runs with `shutdown_now` and
+    /// 8/8 with `shutdown`. [`super::Vm::join_eager_jobs`] computes the identical slack for its own
+    /// wait loop — the two must agree, or a joiner would return while its party still claimed to be
+    /// stuck.
+    Join(Arc<super::core::ExecutorCore>, usize),
     /// gaps.md W7-58 — a thread blocked inside a `parallel:` nursery join, waiting on that nursery's
     /// tasks to finish. This is the node whose absence hung the W7-58 repro: `live` counts the
     /// top-level `main` thread unconditionally (`1 +`), but a `main` sitting in `mn_worker_loop` never
@@ -146,14 +157,15 @@ impl PartyWait {
                         || core.timer.is_some()
                 }
             }),
-            // A join is over exactly when the executor owes nothing. See the variant's doc: answering
-            // a flat `false` here faulted an already-drained `shutdown()`.
-            PartyWait::Join(core) => {
+            // A join is over exactly when the executor owes nothing BUT this joiner's own job. See
+            // the variant's doc: answering a flat `false` here faulted an already-drained
+            // `shutdown()`, and ignoring `slack` faulted a job that shut down its own executor.
+            PartyWait::Join(core, slack) => {
                 core.eager
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
                     .outstanding()
-                    == 0
+                    <= *slack
             }
             // W7-58 — a nursery join is over exactly when the nursery can still move: the sched's OWN
             // deadlock predicate, minus its W7-56 outstanding-job veto.
@@ -350,7 +362,7 @@ impl QuiesceState {
         if parties.iter().any(|p| p.satisfiable()) {
             return None;
         }
-        Some(parties.iter().all(|p| matches!(**p, PartyWait::Join(_))))
+        Some(parties.iter().all(|p| matches!(**p, PartyWait::Join(..))))
     }
 
     /// §2c1 — publish an OUTERMOST eager nursery's sched, so [`Self::live_eager_bodies`] can count its

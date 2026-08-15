@@ -14230,14 +14230,26 @@ print(\"done\")
 ///    its fault lands in `ex2`'s slots — an executor nobody in that program ever reduces — so `jobA`
 ///    completes cleanly, `main`'s `ex1.shutdown()` returns Ok, and the process exits 0.
 ///
-/// A **self-join ring** removes the second problem without weakening the first: `main` and the job
-/// both wait on the SAME executor, whose only outstanding work is that job. The ring is exact (`main`
-/// waits for the job; the job waits for the executor to owe nothing, which needs the job to finish),
-/// and there is only one slot vec, the one `main` reduces — so whichever party detects the deadlock,
-/// the fault reaches `main`. 40/40 on the release binary, and 3/3 hangs at HEAD.
+/// 3. A **one-job SELF-join ring**: `main` and the executor's only job both wait on that same
+///    executor. It was 40/40 and it kept the fault reaching `main`, but its ring was an ARTEFACT of
+///    the bug this file now fixes, not a property of the program. The job was waiting for
+///    `outstanding` to reach 0 while being the only thing keeping it above 0 — waiting for itself.
+///    `Vm::join_eager_jobs` now discounts the joiner's own slot, so that program is healthy (it is
+///    the `shutdown_now`-from-inside-its-own-job shape, which CPython 3.14.6 completes: measured
+///    `A\nC\nend`, rc 0, 40/40) and this test would have been pinning the false fault in place.
 ///
-/// The barrier is still load-bearing: without it `ex.submit` races `ex.shutdown()` and the job can be
-/// dispatched after `main` has already drained.
+/// **TWO jobs of ONE executor, each joining it**, keeps every virtue of cut 3 and is a genuine
+/// deadlock: each job waits for the executor to owe nothing but itself, i.e. for the OTHER job to
+/// finish, and neither ever will. `main` waits for both. Three parties, all `Join`, none satisfiable
+/// — the exact W7-58 residual shape. Still one executor and one slot vec, the one `main` reduces, so
+/// whichever party detects it the fault reaches `main`. Measured on the debug binary: 40/40 fault
+/// after the self-join fix, 30/30 before it (the fix does not touch this shape — `slack` is 1 on
+/// each job and `outstanding` is 2). For contrast, the cross-executor ring cut 1 warns about is
+/// still a race under the same harness: three executors each shutting down the next measured 28/30
+/// fault, 2/30 clean exit, IDENTICALLY before and after the fix.
+///
+/// The barrier is still load-bearing: without it `ex.submit` races `ex.shutdown()` and a job can be
+/// dispatched after `main` has already drained, or rejected by the `shut` flag the first job sets.
 ///
 /// M:N-only + watchdogged for the reasons on the tests above.
 #[test]
@@ -14252,7 +14264,10 @@ fn job():
     go.recv()
     ex.shutdown()
 ex.submit(job)
+ex.submit(job)
 started.recv()
+started.recv()
+go.send(1)
 go.send(1)
 ex.shutdown()
 print(\"after\")
