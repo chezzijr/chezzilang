@@ -2438,7 +2438,7 @@ struct Suite:
     /// Every other fence in this module calls `run_tests_*` inline, which is fine when a regression
     /// FAILS. A netpoller-park regression does not fail, it HANGS (measured pre-fix: no verdict at
     /// all, killed by an external `timeout 10` at 10001 ms) — inline, that wedges `cargo test`
-    /// itself. Same shape as `parity_tests::run_net_timeout_watchdog`, one layer up: that helper
+    /// itself. Same shape as `golden_tests::run_net_timeout_watchdog`, one layer up: that helper
     /// drives `run_file_with`, which has no `--timeout` at all.
     fn run_tests_timed_watchdog(
         tag: &str,
@@ -2483,7 +2483,7 @@ struct Suite:
     /// nursery would join, and `assert false` would report `FAIL … SWALLOWED`, W7-17's original
     /// symptom re-created by the fix meant to close it. `192.0.2.1` is TEST-NET-1 (RFC 5737): the SYN
     /// gets no reply, so the non-blocking connect stays `EINPROGRESS` forever — the same address
-    /// `parity_tests::net_connect_parks_and_is_drained_on_fault` relies on.
+    /// `golden_tests::net_connect_parks_and_is_drained_on_fault` relies on.
     ///
     /// Port `0` throughout — the fixed port in the original gap repro is a flake waiting to happen.
     #[test]

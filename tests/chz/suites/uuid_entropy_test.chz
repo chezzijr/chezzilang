@@ -7,7 +7,7 @@
 # is process-global and sticky, so seeding here would poison every later v4() in the run.
 # Under `cargo test` the gate is `chz_suite_passes` (`tests/chz_suite.rs`), an integration-test binary
 # with its own process and its own copy of every `static`. The seeding tests it used to race
-# (`vm::parity_tests::golden_uuid_via_run_file`) live in the LIB binary, which cargo sequences
+# (`vm::golden_tests::golden_uuid_via_run_file`) live in the LIB binary, which cargo sequences
 # strictly before/after — so the unseeded path is guaranteed by process isolation, not by a lock.
 # Run: `cargo run -- test tests/chz/suites/uuid_entropy_test.chz`.
 

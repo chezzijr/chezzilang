@@ -40,7 +40,7 @@ The remedy is twofold and is the core of this strategy:
 
 ## What we already have
 
-- **Golden suite** — `assert_parity_*` (the name is historical) / golden `examples/*.chz` + `.expected`. Each runs the one engine and compares against a literal expectation. The two-VM parity oracle these grew out of was removed with `--serial` on 2026-08-16.
+- **Golden suite** — `assert_golden_out`/`golden_entry*` (`src/vm/golden_tests.rs`, renamed 2026-08-16 from `assert_parity_*`/`parity_tests.rs`) / golden `examples/*.chz` + `.expected`. Each runs the one engine and compares against a literal expectation. The two-VM parity oracle these grew out of was removed with `--serial` on 2026-08-16.
 - **Two-worker-count schedule differential** — `tests/chezzi_threads_cli.rs` runs the whole `tests/chz` suite through the built binary at the default worker count and again at `CHEZZI_THREADS=2`, each in its own process/pool, asserting the same verdicts. This is what replaced `serial == M:N` as the standing accidental-divergence detector; it is narrower (a curated corpus, two fixed schedules).
 - **Grammar conformance** — `docs/grammar.bnf` is executed and differential-tested against the parser (`src/conformance.rs`, `tests/corpus/`, `cargo test conformance`). Syntax-level only — not semantics.
 - **CPython bench harness** — `benches/run.chz` runs paired programs in `benches/chz/` (Chezzi) and `benches/py/` (Python) and compares **timing**. The paired programs seeded the output-differential oracle below.

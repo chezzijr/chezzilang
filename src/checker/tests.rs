@@ -112,7 +112,7 @@ fn widen_int_elems_into_annotated_float_collection_accepted() {
 fn widen_int_default_into_float_param_accepted() {
     // The default-value-vs-param-type check fires at the DECLARATION (so a wrong-typed default is
     // caught even when every call overrides it); declaration-only keeps this off the desugar/arity
-    // path. The omitted-default RUNTIME coercion is covered by vm::parity_tests::widen_default_param_division.
+    // path. The omitted-default RUNTIME coercion is covered by vm::golden_tests::widen_default_param_division.
     ok("fn g(a: float = 3) -> float:\n    return a\n");
 }
 
@@ -7380,7 +7380,7 @@ fn checker_named_fn_import_resolves_transitive_stdlib_method() {
 }
 
 /// Stdlib gate: `import manual from std.cancel; manual().cancelled()` must type-check (checker gate;
-/// the runtime arm lives in vm parity_tests). Pre-fix: "type Token has no method 'cancelled'".
+/// the runtime arm lives in vm golden_tests). Pre-fix: "type Token has no method 'cancelled'".
 #[test]
 fn checker_named_stdlib_factory_resolves_method() {
     entry_ok("import manual from std.cancel\nfn main():\n    print(manual().cancelled())\n");
@@ -12694,7 +12694,7 @@ fn channel_protocol_element_is_sendable() {
     // Task 2 (option a): a protocol existential element type is now SENDABLE (Go `chan interface`
     // parity) — the erased witness crosses by value. A witness that genuinely can't serialize (an
     // FFI/native handle) is rejected at the RUNTIME airlock, not here — see
-    // `vm::parity_tests::ffi_handle_cannot_cross_airlock_three_engine`. (Was rejected under the old
+    // `vm::golden_tests::ffi_handle_cannot_cross_airlock_three_engine`. (Was rejected under the old
     // Error-only sendable-bounded rule.)
     entry_ok(
         "protocol NS:\n    fn tag(self) -> int\nfn main():\n    ch := Channel[NS]()\n    print(ch.len())\nmain()\n",
@@ -12877,7 +12877,7 @@ fn spawn_arg_closure_capturing_protocol_local_ok() {
     // The capture gate routes through `self.sendable()`, so this flipped when protocols became
     // sendable; the old rejection was a false positive. A capture that genuinely can't cross (an
     // FFI/native handle) is still rejected at the RUNTIME airlock — see
-    // `vm::parity_tests::ffi_handle_cannot_cross_airlock_three_engine`.
+    // `vm::golden_tests::ffi_handle_cannot_cross_airlock_three_engine`.
     entry_ok(
         "protocol NS:\n    fn tag(self) -> int\nstruct Boxy:\n    v: int\n    fn tag(self) -> int:\n        return self.v\nfn run(f: fn() -> int):\n    print(f())\nfn main():\n    p: NS = Boxy(0)\n    g := fn() -> int: p.tag()\n    parallel:\n        spawn run(g)\nmain()\n",
     );
@@ -24065,7 +24065,7 @@ fn contains_through_bound_ok_and_item_mismatch_rejects() {
 /// just the built-in `Error`: `Channel[Drawable]`, `Channel[int!]`, `Channel[Error]`, and
 /// `Channel[NS]` over any user protocol all type-check. A genuinely-unserializable element (one
 /// carrying an FFI/native handle) is rejected at the RUNTIME airlock, not at construction — see
-/// `vm::parity_tests::ffi_handle_cannot_cross_airlock_three_engine`.
+/// `vm::golden_tests::ffi_handle_cannot_cross_airlock_three_engine`.
 #[test]
 fn channel_of_any_protocol_existential_is_sendable() {
     entry_ok(
@@ -24081,7 +24081,7 @@ fn channel_of_any_protocol_existential_is_sendable() {
 /// Task 2 (option a) — a user protocol existential is now SENDABLE across the airlock (Go
 /// `chan interface` parity): the erased witness crosses by value like any other type; a witness that
 /// genuinely can't cross (one carrying an FFI/native handle) is rejected at the runtime airlock, not
-/// at construction (see `vm::parity_tests::ffi_handle_cannot_cross_airlock_three_engine`).
+/// at construction (see `vm::golden_tests::ffi_handle_cannot_cross_airlock_three_engine`).
 #[test]
 fn protocol_existential_is_sendable_across_airlock() {
     // Bare `Channel[UserProto]()` type-checks.
@@ -24103,7 +24103,7 @@ fn protocol_existential_is_sendable_across_airlock() {
 /// type-checks (and runs: prints `sent`). This was rejected under the old Error-only rule, where a
 /// protocol-field struct was the canonical "non-sendable Error witness"; that class no longer exists
 /// at the checker level. A witness carrying an FFI/native handle is checker-sendable and rejected at
-/// the RUNTIME airlock instead (`vm::parity_tests::ffi_handle_cannot_cross_airlock_three_engine`).
+/// the RUNTIME airlock instead (`vm::golden_tests::ffi_handle_cannot_cross_airlock_three_engine`).
 #[test]
 fn channel_send_sendable_error_literal_ok() {
     entry_ok(

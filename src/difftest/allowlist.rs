@@ -19,7 +19,7 @@
 //! as `docs/gaps.md` §W7-32 and **FIXED there 2026-08-07** (`fmtspec::repr_float` now re-renders an
 //! odd-last-digit shortest repr half-to-even and keeps it if it round-trips). It was never
 //! allow-list material — it was a bug, and this oracle SHOULD have reported it. Note also that
-//! `vm/parity_tests.rs::python_float_repr_str_parity` is a serial==M:N golden against a hardcoded
+//! `vm/golden_tests.rs::python_float_repr_str_parity` is a serial==M:N golden against a hardcoded
 //! literal, not a CPython differential: it cannot vouch for parity with CPython, and citing it as
 //! if it could is how W7-32 stayed invisible.
 

@@ -5117,6 +5117,6 @@ fn run_file_inner(
 #[cfg(test)]
 mod gc_tests;
 #[cfg(test)]
-mod parity_tests;
+mod golden_tests;
 #[cfg(test)]
 mod tests;

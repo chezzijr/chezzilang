@@ -12106,7 +12106,7 @@ fn parallel_recover_scoped_try_orders_report_after_body_defer() {
 // 2. **"the task did NOT run" is no longer a fact on the M:N engine.** The task is a live fiber by
 //    the time the body escapes, so whether its straight-line prologue got a slice is a RACE — the
 //    same property trio and `asyncio.TaskGroup` have, and the same one
-//    `parity_tests::exit_in_spawned_child_aborts_siblings` already documents ("a spawned task always
+//    `golden_tests::exit_in_spawned_child_aborts_siblings` already documents ("a spawned task always
 //    runs its straight-line prologue before it can observe that cancel"). So the spawned bodies
 //    below are SILENT, and what is asserted is what is actually invariant: the escape's own value
 //    wins, nothing extra reaches stdout, and the nursery is reclaimed.
@@ -16055,7 +16055,7 @@ fn pad_left_empty_fill_is_recoverable_fault() {
     }
 
     // (The `std.string` free fn's identical fault needs the module-graph runner — it is asserted in
-    // `parity_tests::parity_std_str_pad_left_empty_fill_faults`.)
+    // `golden_tests::parity_std_str_pad_left_empty_fill_faults`.)
 
     // The fault is CATCHABLE by `recover:` (a recoverable fault, not a host panic).
     let rec = "fn main():\n\
@@ -16101,7 +16101,7 @@ fn pad_left_multi_char_fill_is_exactly_width() {
     }
 
     // (The `std.string` free fn is a byte-identical alias — asserted in
-    // `parity_tests::parity_std_str_pad_left_matches_native_method`.)
+    // `golden_tests::parity_std_str_pad_left_matches_native_method`.)
 }
 
 /// Padding counts CODEPOINTS, not bytes — a non-ASCII fill char counts as 1 and no mid-char slice

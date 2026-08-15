@@ -16,7 +16,7 @@
 //! outside contention.
 //!
 //! No `TEST_UUID_LOCK`/`clear_seed()` dance here (unlike the in-process version this replaces): that
-//! guarded against interleaving with `vm::parity_tests::golden_uuid_via_run_file`, which lives in the
+//! guarded against interleaving with `vm::golden_tests::golden_uuid_via_run_file`, which lives in the
 //! LIB test binary. A separate integration-test binary is a separate OS process with its own copy of
 //! every `static`, sequenced strictly before/after the lib binary by cargo — interleaving is no longer
 //! physically possible, so the guard has nothing left to guard against here.

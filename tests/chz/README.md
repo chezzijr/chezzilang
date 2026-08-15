@@ -7,7 +7,7 @@ print-and-golden demo programs, `*.chz` + `*.expected`).
 ## Layout
 
 - `spec/` — language behavior (list/str/map/set/control-flow/…), ported from the Rust string-goldens
-  in `src/vm/tests.rs` and `src/vm/parity_tests.rs`.
+  in `src/vm/tests.rs` and `src/vm/golden_tests.rs`.
 - `stdlib/` — stdlib module behavior (math/encoding/crypto/…), ported from `src/native/*`.
 - `suites/` — `struct`-based test suites with lifecycle hooks + shared fixtures.
 

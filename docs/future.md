@@ -110,10 +110,11 @@ first given a real, run-derived golden (so nothing lost its expectation when the
 away); then every test helper collapsed onto M:N (`run_file_p`/`parallel_outcome`/`run_capture_parallel`
 and friends deleted, `parity_entry_cfg_lines` reduced to a single run); then `--serial` and
 `--check-parity` dropped from the CLI; then the cooperative scheduler itself, with every serial-only
-fork, field and signature parameter. `src/vm/parity_tests.rs` keeps its name for history and diff size,
-but every helper in it now runs the one engine once and compares against a literal expectation. The
-`--threads=1` M:N mode (kernel-preempted, safe single-thread) covers every legitimate user need
-`--serial` was ever mistaken for.
+fork, field and signature parameter. `src/vm/parity_tests.rs` and its `assert_parity*`/`parity_entry*`
+helpers were renamed to `src/vm/golden_tests.rs` / `assert_golden_out`+`golden_entry*` once the doc
+sweep that shipped this removal flagged the old names as a leftover — every helper in it runs the one
+engine once and compares against a literal expectation. The `--threads=1` M:N mode (kernel-preempted,
+safe single-thread) covers every legitimate user need `--serial` was ever mistaken for.
 
 **One deliberate exception to "drop the per-engine forks":** `op_wait_poll`'s live-timer **inline-sleep**
 block was **KEPT**. It is not serial-only — it is still reachable on M:N by the inline
@@ -526,7 +527,7 @@ eager start before editing any of them:
 `uncaught_fault_reports_before_frame_defers` · `:565` `recover_caught_fault_reports_before_frame_defers` ·
 `:577` `uncaught_fault_interleaves_report_and_defer_per_frame`.
 
-**`src/vm/parity_tests.rs` — CORRECTION: audit, but they probably survive.** The surveyed line numbers
+**`src/vm/golden_tests.rs` (formerly `parity_tests.rs`) — CORRECTION: audit, but they probably survive.** The surveyed line numbers
 `:11578`, `:11602`, `:11616` are mid-body lines, not test starts; the enclosing tests are
 `serial_module_global_direct_mutation_forms_isolate_parity` (`:11537`) and
 `channel_park_keeps_module_snapshot_parity` (`:11605`). Both are **module-global isolation** assertions,

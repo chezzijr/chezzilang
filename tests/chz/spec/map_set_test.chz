@@ -1,6 +1,6 @@
 # tests/chz/spec/map_set_test.chz — Map / Set behavior spec, dogfooded with `assert`.
 #
-# Ported from src/vm/parity_tests.rs (`parity_map_*` / `parity_set_struct_algebra`) and
+# Ported from src/vm/golden_tests.rs (`parity_map_*` / `parity_set_struct_algebra`) and
 # src/vm/tests.rs (map/set comprehensions + equality). Run: `cargo run -- test tests/chz/`.
 # Gated by `chz_suite_passes` (`tests/chz_suite.rs`).
 #
