@@ -1090,8 +1090,11 @@ Compare a line SET, or make the program deterministic by construction, before ca
 > where there is no fiber to park **blocks its thread in place** in exactly two contexts — top-level
 > `main` on the **default engine** (Go-identical: `ln.Accept()` on the main goroutine blocks until a
 > client arrives) and an M:N worker inside a native callback (which spins a replacement worker first).
-> Everywhere else it returns `Err("<op> would block: std.net sockets require the --parallel engine")`,
-> and that is deliberate rather than an unfinished corner. **The op set is `accept`/`read`/`read_bytes`/
+> Everywhere else — an eager `Executor` job — it returns `Err("<op> would block: an Executor job
+> doesn't own its thread — blocking here would starve every other job and `parallel:` nursery
+> sharing the pool. Do this socket op inside `spawn:` or a `parallel:` nursery instead, where it
+> parks rather than blocking a shared thread.")`, and that is deliberate rather than an unfinished
+> corner. **The op set is `accept`/`read`/`read_bytes`/
 > `write`; `connect` joins it ONLY inside an eager `Executor` job** — those four wait on a Chezzi peer
 > fiber that can only run on the very thread they would block, whereas a `connect` handshake is
 > completed by the kernel and starves no chezzi party, so top-level `main` blocks it and succeeds, as

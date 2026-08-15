@@ -440,7 +440,10 @@ impl Vm {
                         // `net.Dial` from the main goroutine in 314 µs — refusing it here would be a
                         // divergence with nothing behind it.
                         Ok(self.sock_err(
-                            "connect would block: std.net sockets require the --parallel engine",
+                            "connect would block: an Executor job doesn't own its thread — \
+                            blocking here would starve every other job and `parallel:` nursery \
+                            sharing the pool. Do this socket op inside `spawn:` or a `parallel:` \
+                            nursery instead, where it parks rather than blocking a shared thread.",
                         ))
                     } else {
                         // Everywhere the thread is the program's own — top-level `main` on the
@@ -671,7 +674,10 @@ impl Vm {
                 // ([`Vm::may_block_socket_in_place`]) — else the pre-existing loud error.
                 if !self.may_block_socket_in_place() {
                     return Ok(self.sock_err(
-                        "read_bytes would block: std.net sockets require the --parallel engine",
+                        "read_bytes would block: an Executor job doesn't own its thread — \
+                        blocking here would starve every other job and `parallel:` nursery \
+                        sharing the pool. Do this socket op inside `spawn:` or a `parallel:` \
+                        nursery instead, where it parks rather than blocking a shared thread.",
                     ));
                 }
                 let core = Arc::clone(&core);
@@ -871,7 +877,10 @@ impl Vm {
                     // ([`Vm::may_block_socket_in_place`]).
                     if !self.may_block_socket_in_place() {
                         return Ok(self.sock_err(
-                            "read would block: std.net sockets require the --parallel engine",
+                            "read would block: an Executor job doesn't own its thread — \
+                            blocking here would starve every other job and `parallel:` nursery \
+                            sharing the pool. Do this socket op inside `spawn:` or a `parallel:` \
+                            nursery instead, where it parks rather than blocking a shared thread.",
                         ));
                     }
                     let core = Arc::clone(&core);
@@ -1013,7 +1022,10 @@ impl Vm {
                 // backoff-poll the non-blocking write in place (#3 socket half).
                 if !self.may_block_socket_in_place() {
                     return Ok(self.sock_err(
-                        "write would block: std.net sockets require the --parallel engine",
+                        "write would block: an Executor job doesn't own its thread — \
+                        blocking here would starve every other job and `parallel:` nursery \
+                        sharing the pool. Do this socket op inside `spawn:` or a `parallel:` \
+                        nursery instead, where it parks rather than blocking a shared thread.",
                     ));
                 }
                 let core = Arc::clone(&core);
@@ -1143,7 +1155,10 @@ impl Vm {
                 // backoff-poll the non-blocking accept in place (#3 socket half).
                 if !self.may_block_socket_in_place() {
                     return Ok(self.sock_err(
-                        "accept would block: std.net sockets require the --parallel engine",
+                        "accept would block: an Executor job doesn't own its thread — \
+                        blocking here would starve every other job and `parallel:` nursery \
+                        sharing the pool. Do this socket op inside `spawn:` or a `parallel:` \
+                        nursery instead, where it parks rather than blocking a shared thread.",
                     ));
                 }
                 let core = Arc::clone(&core);
@@ -1283,8 +1298,8 @@ impl Vm {
     /// of those three exists**: `--timeout` is a `chezzi test` flag (`chezzi run` rejects it as an
     /// unknown flag) and `main` has no scope cancel to trip, so an untimed op there blocks until SIGINT
     /// (see [`Vm::demote_block_socket`]'s doc); everywhere else — an eager `Executor` job, a
-    /// callback on a non-M:N thread — it keeps the loud `Err("<op> would block: std.net sockets
-    /// require the --parallel engine")`, because blocking a SHARED thread starves the very peer that
+    /// callback on a non-M:N thread — it keeps the loud `Err("<op> would block: an Executor job
+    /// doesn't own its thread …")`, because blocking a SHARED thread starves the very peer that
     /// would make the fd ready (both shapes measured as hangs; see that helper's doc).
     /// `Err` only for a **concurrent op on a shared socket**: oneshot epoll allows ONE registration per
     /// fd, so a second fiber reaching a would-block op while the first is parked (`in_flight` already
@@ -2059,7 +2074,7 @@ impl Vm {
     }
 
     /// May a would-block socket op BLOCK ITS THREAD in place ([`Vm::demote_block_socket`]) instead of
-    /// surfacing `Err("<op> would block: std.net sockets require the --parallel engine")`?
+    /// surfacing `Err("<op> would block: an Executor job doesn't own its thread …")`?
     ///
     /// Only where the calling thread runs nothing else, so blocking it starves nobody:
     /// - an M:N worker INSIDE a native callback (`mn.is_some() && native_reentry > 0`) — the original

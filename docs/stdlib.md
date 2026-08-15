@@ -847,9 +847,12 @@ codepoint is carried across reads and reassembled exactly, while a **binary** pa
 (never silent U+FFFD). For binary, use `Socket.read_bytes` / `write_bytes` (§3): they never decode, and
 `read_bytes` drains any carry, so bytes a str `read` refused are recovered rather than stranded.
 **`connect` and the engines.** Inside an eager `Executor` job `connect` returns
-`Err("connect would block: std.net sockets require the --parallel engine")` — a job runs on the
-bounded, process-wide pool with no scheduler under it, so blocking there steals width from every other
-job and every `parallel:` nursery (measured at `CHEZZI_THREADS=1`: a 10 s pin on a black-hole address).
+`Err("connect would block: an Executor job doesn't own its thread — blocking here would starve
+every other job and \`parallel:\` nursery sharing the pool. Do this socket op inside \`spawn:\` or a
+\`parallel:\` nursery instead, where it parks rather than blocking a shared thread.")` — a job runs
+on the bounded, process-wide pool with no scheduler under it, so blocking there steals width from
+every other job and every `parallel:` nursery (measured at `CHEZZI_THREADS=1`: a 10 s pin on a
+black-hole address).
 **Everywhere else `connect` blocks and succeeds** — a `spawn`/`parallel:` fiber parks on the netpoller,
 and top-level `main` blocks its thread, matching both ancestors (CPython `socket.connect` 0.1 ms,
 Go `net.Dial` 314 µs, each from the sole/main thread). `connect` is admitted where

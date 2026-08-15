@@ -3120,7 +3120,7 @@ fn free_addr() -> std::net::SocketAddr {
 
 /// W7 — a would-block socket op reached where the fiber CANNOT park (top-level `main`: `Vm::mn` is
 /// `None`, because `mn` is set only on an M:N worker shell) must BLOCK IN PLACE, not return
-/// `Err("accept would block: std.net sockets require the --parallel engine")` — which it did even
+/// `Err("accept would block: an Executor job doesn't own its thread …")` — which it did even
 /// while running the default M:N engine, making the hello-world TCP server unwritable.
 ///
 /// **Go is the ancestor and blocks.** `ln, _ := net.Listen("tcp","127.0.0.1:0")` on the MAIN
@@ -3263,7 +3263,10 @@ main()
     let out = run_net_timeout_watchdog("accept_in_executor_job", &src);
     assert_eq!(
         out,
-        "listening\nERR:accept would block: std.net sockets require the --parallel engine\ndone\n"
+        "listening\nERR:accept would block: an Executor job doesn't own its thread — blocking \
+        here would starve every other job and `parallel:` nursery sharing the pool. Do this \
+        socket op inside `spawn:` or a `parallel:` nursery instead, where it parks rather than \
+        blocking a shared thread.\ndone\n"
     );
 }
 
@@ -3303,7 +3306,10 @@ main()
     let out = run_net_timeout_watchdog("connect_in_executor_job", &src);
     assert_eq!(
         out,
-        "ERR:connect would block: std.net sockets require the --parallel engine\ndone\n"
+        "ERR:connect would block: an Executor job doesn't own its thread — blocking here \
+        would starve every other job and `parallel:` nursery sharing the pool. Do this socket \
+        op inside `spawn:` or a `parallel:` nursery instead, where it parks rather than \
+        blocking a shared thread.\ndone\n"
     );
     // The Err is the contract; this is the property it exists for. The pre-fix path took the full
     // 10 s cap, so any threshold well under it distinguishes the two without racing a slow box.
