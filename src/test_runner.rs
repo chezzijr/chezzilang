@@ -1740,6 +1740,15 @@ struct Suite:
                 .unwrap_or_else(|e| e.into_inner()),
         );
         crate::vm::set_worker_count(4);
+        // Belt-and-suspenders: this whole test's premise is the eager arm arming, which needs
+        // `worker_count() >= 2` (see the doc above). If a future change reopens a way for the
+        // `CHEZZI_THREADS` baseline to land AFTER this forced override, this fails loudly right here
+        // instead of the test quietly passing on the hardware-arm path for the wrong reason.
+        assert_eq!(
+            crate::vm::worker_count(),
+            4,
+            "forced worker count did not stick — the CHEZZI_THREADS baseline clobbered it"
+        );
 
         const CAP: usize = 1_000_000;
         // 8 K × 100 chars — the producer holds 8 K aliases of ONE interned literal (~130 KB, under

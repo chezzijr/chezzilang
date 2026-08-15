@@ -314,17 +314,25 @@ pub(crate) static TEST_WORKER_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new
 
 /// Override the M:N engine's worker count. `0` restores auto (= `available_parallelism()`). Must be
 /// called before the first parallel run; see [`WORKER_OVERRIDE`].
+///
+/// `#[cfg(test)]` forces [`test_baseline_worker_count`] first — see its doc for why: this is the
+/// defined point that makes a test's forced count immune to the `CHEZZI_THREADS` baseline racing in
+/// after it, rather than before.
 pub fn set_worker_count(n: usize) {
+    #[cfg(test)]
+    test_baseline_worker_count();
     WORKER_OVERRIDE.store(n, Ordering::Relaxed);
 }
 
 /// Test-only: the process baseline worker count established by `CHEZZI_THREADS` for this test
-/// binary — `0` (auto) if the var is unset/empty. Resolved and applied to [`WORKER_OVERRIDE`]
-/// exactly once, on the first call, which [`worker_count`] makes as its own first statement — so
-/// there is no caller anywhere (including [`pool`]'s lazy sizing) that can read `worker_count()`
-/// before this has run. That is what turns `CHEZZI_THREADS=2 cargo test` into a real second-schedule
-/// differential over the whole suite (`docs/bug-discovery.md` Tier 2) instead of a no-op: every test
-/// that ever reaches `worker_count()` gets the override, not just the ones that happen to run late.
+/// binary — `0` (auto) if the var is unset/empty. Resolved into [`WORKER_OVERRIDE`] exactly once,
+/// forced at TWO defined points rather than left to whichever thread happens to read
+/// `worker_count()` first: [`worker_count`] forces it (as its own first statement, same as before)
+/// for plain readers, and — this is what closes the hazard below — [`set_worker_count`] ALSO forces
+/// it, before its own store, for every WRITER. That is what turns `CHEZZI_THREADS=2 cargo test` into
+/// a real second-schedule differential over the whole suite (`docs/bug-discovery.md` Tier 2): every
+/// test that ever reaches `worker_count()` gets the override, not just the ones that happen to run
+/// late.
 ///
 /// Returns the resolved baseline so callers that transiently override the count under
 /// [`TEST_WORKER_LOCK`] can restore to it instead of hardcoding `0` — hardcoding `0` would silently
@@ -335,12 +343,20 @@ pub fn set_worker_count(n: usize) {
 /// broken env var should fail the run loudly, not quietly execute the suite at `auto` while claiming
 /// to gate a second schedule (deliberately stricter than `main::cmd_run`'s CLI path, which only warns
 /// and keeps running the program — a differential gate that can silently do nothing is not a gate).
-/// Not synchronized with [`TEST_WORKER_LOCK`]: the only test that forces a count holds that lock
-/// across its own `worker_count()` reads, and taking a non-reentrant `Mutex` again on the same thread
-/// here would deadlock. The two CAN interleave (this may resolve mid that test's critical section, on
-/// whichever thread first calls `worker_count()` anywhere in the process), but the only value this
-/// ever writes is what `CHEZZI_THREADS` asked for (the gate runs it at `2`), which still satisfies
-/// every `>= 2` eager-arm / "needs ≥2 free pool threads" precondition in the suite either way.
+///
+/// The init closure stores to [`WORKER_OVERRIDE`] DIRECTLY rather than through [`set_worker_count`]
+/// — calling back into `set_worker_count` here would reenter this very `OnceLock::get_or_init` on the
+/// thread that is still inside it, which is UB (the std docs: current implementation deadlocks).
+/// That direct store is also why a test forcing a count is provably immune to this baseline, not just
+/// probably immune: [`set_worker_count`] forces this `OnceLock` to finish resolving (running the
+/// closure itself, or blocking on a concurrent racer who is) BEFORE it performs its own store, so by
+/// the time a forced `set_worker_count(4)` returns, the baseline write — if the closure had one left
+/// to do — has already happened and cannot land after it. Before this, the only synchronization was
+/// [`TEST_WORKER_LOCK`], which does not exclude this `OnceLock`: the initializer runs under the same
+/// lock, on the same thread, so `worker_count()` reached from inside a forced test's own body could
+/// still be the FIRST call in the whole process and fire the closure there — at `CHEZZI_THREADS=1`
+/// that clobbered a forced `4` down to `1` mid-test, voiding whatever the forced count existed to
+/// arm.
 #[cfg(test)]
 static TEST_WORKER_BASELINE: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
 
@@ -360,7 +376,7 @@ pub(crate) fn test_baseline_worker_count() -> usize {
             _ => 0,
         };
         if n != 0 {
-            set_worker_count(n);
+            WORKER_OVERRIDE.store(n, Ordering::Relaxed);
         }
         n
     })
