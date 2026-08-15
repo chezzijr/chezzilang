@@ -2204,18 +2204,17 @@ void* mkrec(void) { static struct R r = { -3, 70000, 2.5 }; return &r; }
 
     #[test]
     fn callback_two_engine_parity() {
-        // End-to-end: a real `.chz` program passing a Chezzi closure as a callback to a C fn, run
-        // through BOTH the serial and M:N VM engines. `apply(10, n => n*n) == 10*10 + 1`.
+        // End-to-end: a real `.chz` program passing a Chezzi closure as a callback to a C fn.
+        // `apply(10, n => n*n) == 10*10 + 1`. (Formerly run through both the serial and M:N VM
+        // engines and cross-checked against each other; M:N is the only engine now, so one run
+        // compared against the known-correct output is the whole test.)
         let so = build_callback_so();
         let src = format!(
             "extern \"{}\":\n    fn apply(x: int, f: fn(int) -> int) -> int\n\nprint(apply(10, fn(n: int) -> int: n * n))\n",
             so.to_str().unwrap()
         );
-        let vm_out = crate::vm::run_capture(&src).expect("vm run");
-        let interp_out = crate::vm::run_capture(&src).expect("interp run");
-        assert_eq!(vm_out, "101\n", "vm stdout");
-        assert_eq!(interp_out, "101\n", "interp stdout");
-        assert_eq!(vm_out, interp_out, "two-engine parity");
+        let out = crate::vm::run_capture(&src).expect("run");
+        assert_eq!(out, "101\n");
     }
 
     #[test]
@@ -2225,26 +2224,23 @@ void* mkrec(void) { static struct R r = { -3, 70000, 2.5 }; return &r; }
             "extern \"{}\":\n    fn applyd(x: float, f: fn(float) -> float) -> float\n\nprint(applyd(2.5, fn(n: float) -> float: n + 1.0))\n",
             so.to_str().unwrap()
         );
-        let vm_out = crate::vm::run_capture(&src).expect("vm run");
-        let interp_out = crate::vm::run_capture(&src).expect("interp run");
-        assert_eq!(vm_out, "3.5\n", "vm stdout");
-        assert_eq!(interp_out, "3.5\n", "interp stdout");
-        assert_eq!(vm_out, interp_out, "two-engine parity");
+        let out = crate::vm::run_capture(&src).expect("run");
+        assert_eq!(out, "3.5\n");
     }
 
     #[test]
     fn callback_three_engine_parity() {
-        // The M:N --parallel engine reuses the VM's invoke_value re-entry; a sync callback fires on
-        // the calling worker thread (no cross-thread hand-off), so it matches serial VM + interp.
+        // The M:N engine reuses the VM's invoke_value re-entry; a sync callback fires on the
+        // calling worker thread (no cross-thread hand-off). (Formerly cross-checked against a
+        // second serial/parallel run; M:N is the only engine now, so one run compared against the
+        // known-correct output is the whole test.)
         let so = build_callback_so();
         let src = format!(
             "extern \"{}\":\n    fn apply(x: int, f: fn(int) -> int) -> int\n\nprint(apply(10, fn(n: int) -> int: n * n))\n",
             so.to_str().unwrap()
         );
-        let serial = crate::vm::run_capture(&src).expect("vm serial run");
-        let parallel = crate::vm::run_capture(&src).expect("vm parallel run");
-        assert_eq!(serial, "101\n");
-        assert_eq!(parallel, serial, "M:N parity with serial VM");
+        let out = crate::vm::run_capture(&src).expect("run");
+        assert_eq!(out, "101\n");
     }
 
     /// Write a `.chz` program to a unique temp file (so `import std.ffi` resolves via the graph
@@ -2262,10 +2258,12 @@ void* mkrec(void) { static struct R r = { -3, 70000, 2.5 }; return &r; }
     #[test]
     fn ffi_deref_load_two_engine_parity() {
         // End-to-end: a C fn returns a `ptr` to a struct { int32 a@0; int64 b@8; double c@16 }; the
-        // Chezzi side reads each field via the ffi load builtins and prints them. Run through BOTH the
-        // serial and M:N VM engines and assert identical, expected output. This is the
+        // Chezzi side reads each field via the ffi load builtins and prints them. This is the
         // end-to-end golden for the deref builtins (callbacks set the precedent: no examples/ file,
-        // only the in-crate parity test — an examples/ golden would need `cc` at golden-test time).
+        // only the in-crate golden test — an examples/ golden would need `cc` at golden-test time).
+        // (Formerly run through both the serial and M:N VM engines and cross-checked against each
+        // other; M:N is the only engine now, so one run compared against the known-correct output
+        // is the whole test.)
         let so = build_callback_so();
         let src = format!(
             "import std.ffi\n\
@@ -2277,22 +2275,16 @@ print(ffi.load_float_at(p, 16))\n",
             so.to_str().unwrap()
         );
         let entry = write_deref_chz(&src);
-        let (vm_out, _e, vm_res, _) = crate::vm::run_file(&entry);
-        let (interp_out, _ie, interp_res, _) = crate::vm::run_file(&entry);
+        let (out, _e, res, _) = crate::vm::run_file(&entry);
         let _ = std::fs::remove_file(&entry);
-        assert!(vm_res.is_ok(), "vm faulted: {vm_res:?}");
-        assert!(interp_res.is_ok(), "interp faulted: {interp_res:?}");
-        assert_eq!(vm_out, "-3\n70000\n2.5\n", "vm stdout");
-        assert_eq!(interp_out, "-3\n70000\n2.5\n", "interp stdout");
-        assert_eq!(vm_out, interp_out, "two-engine parity");
+        assert!(res.is_ok(), "faulted: {res:?}");
+        assert_eq!(out, "-3\n70000\n2.5\n");
     }
 
     #[test]
     fn ffi_deref_store_then_load_two_engine_parity() {
         // Round-trip through C-owned memory: store into the static record's fields, then read back.
-        // (mkrec returns the SAME static each call, so a store is observable on the next load.) Both
-        // engines must agree. Both runs dlopen the SAME `.so` (same static `R`); the store-then-load
-        // sequence is self-contained within each run, so they produce identical output.
+        // (mkrec returns the SAME static each call, so a store is observable on the next load.)
         let so = build_callback_so();
         let src = format!(
             "import std.ffi\n\
@@ -2305,20 +2297,20 @@ print(ffi.load_float_at(p, 16))\n",
             so.to_str().unwrap()
         );
         let entry = write_deref_chz(&src);
-        let (vm_out, _e, vm_res, _) = crate::vm::run_file(&entry);
-        let (interp_out, _ie, interp_res, _) = crate::vm::run_file(&entry);
+        let (out, _e, res, _) = crate::vm::run_file(&entry);
         let _ = std::fs::remove_file(&entry);
-        assert!(vm_res.is_ok(), "vm faulted: {vm_res:?}");
-        assert!(interp_res.is_ok(), "interp faulted: {interp_res:?}");
-        assert_eq!(vm_out, "99\n1.5\n", "vm stdout");
-        assert_eq!(interp_out, "99\n1.5\n", "interp stdout");
-        assert_eq!(vm_out, interp_out, "two-engine parity");
+        assert!(res.is_ok(), "faulted: {res:?}");
+        assert_eq!(out, "99\n1.5\n");
     }
 
     #[test]
     fn ffi_deref_three_engine_parity() {
-        // The M:N --parallel engine reaches the deref builtins through the same engine-neutral host
-        // path — parity by construction. (mkrec's static is process-global; this test only reads.)
+        // The M:N engine reaches the deref builtins through the engine-neutral host path.
+        // (mkrec's static is process-global; this test only reads.) (Formerly cross-checked
+        // `run_file` against `run_file_with(entry, HostConfig::default())` — but `run_file` IS
+        // verbatim `run_file_with(entry, HostConfig::default())` (`vm::run_file`'s doc), so that
+        // was a tautology comparing a value to itself under two spellings; M:N is the only engine
+        // now, so one run compared against the known-correct output is the whole test.)
         let so = build_callback_so();
         let src = format!(
             "import std.ffi\n\
@@ -2328,20 +2320,17 @@ print(ffi.load_int32_at(p, 0))\n",
             so.to_str().unwrap()
         );
         let entry = write_deref_chz(&src);
-        let (serial, _e, sres, _) = crate::vm::run_file(&entry);
-        let (parallel, _pe, pres, _) =
-            crate::vm::run_file_with(&entry, crate::native::HostConfig::default());
+        let (out, _e, res, _) = crate::vm::run_file(&entry);
         let _ = std::fs::remove_file(&entry);
-        assert!(sres.is_ok(), "vm serial faulted: {sres:?}");
-        assert!(pres.is_ok(), "vm parallel faulted: {pres:?}");
-        assert_eq!(serial, "-3\n");
-        assert_eq!(parallel, serial, "M:N parity with serial VM");
+        assert!(res.is_ok(), "faulted: {res:?}");
+        assert_eq!(out, "-3\n");
     }
 
     /// C-buffer alloc layer end-to-end: `ffi.alloc` a buffer of N int64 slots, fill it from a Chezzi
-    /// list via `store_int64_at`, read them back via `load_int64_at`, `ffi.free`. Run through BOTH the
-    /// serial and M:N VM engines and assert identical, expected output. No `.so` needed
-    /// (the buffer is process-local libc memory). Linux-gated like the other ffi goldens.
+    /// list via `store_int64_at`, read them back via `load_int64_at`, `ffi.free`. No `.so` needed
+    /// (the buffer is process-local libc memory). Linux-gated like the other ffi goldens. (Formerly
+    /// run through both the serial and M:N VM engines and cross-checked against each other; M:N is
+    /// the only engine now, so one run compared against the known-correct output is the whole test.)
     #[test]
     #[cfg(target_os = "linux")]
     fn ffi_alloc_fill_read_two_engine_parity() {
@@ -2356,17 +2345,13 @@ print(ffi.load_int32_at(p, 0))\n",
             "ffi.free(p)\n",
         );
         let entry = write_deref_chz(src);
-        let (vm_out, _e, vm_res, _) = crate::vm::run_file(&entry);
-        let (interp_out, _ie, interp_res, _) = crate::vm::run_file(&entry);
+        let (out, _e, res, _) = crate::vm::run_file(&entry);
         let _ = std::fs::remove_file(&entry);
-        assert!(vm_res.is_ok(), "vm faulted: {vm_res:?}");
-        assert!(interp_res.is_ok(), "interp faulted: {interp_res:?}");
-        assert_eq!(vm_out, "10\n20\n30\n40\n", "vm stdout");
-        assert_eq!(interp_out, "10\n20\n30\n40\n", "interp stdout");
-        assert_eq!(vm_out, interp_out, "two-engine parity");
+        assert!(res.is_ok(), "faulted: {res:?}");
+        assert_eq!(out, "10\n20\n30\n40\n");
     }
 
-    /// `alloc_zeroed` returns zeroed memory; reading before any store yields 0 on both engines.
+    /// `alloc_zeroed` returns zeroed memory; reading before any store yields 0.
     #[test]
     #[cfg(target_os = "linux")]
     fn ffi_alloc_zeroed_two_engine_parity() {
@@ -2378,14 +2363,10 @@ print(ffi.load_int32_at(p, 0))\n",
             "ffi.free(p)\n",
         );
         let entry = write_deref_chz(src);
-        let (vm_out, _e, vm_res, _) = crate::vm::run_file(&entry);
-        let (interp_out, _ie, interp_res, _) = crate::vm::run_file(&entry);
+        let (out, _e, res, _) = crate::vm::run_file(&entry);
         let _ = std::fs::remove_file(&entry);
-        assert!(vm_res.is_ok(), "vm faulted: {vm_res:?}");
-        assert!(interp_res.is_ok(), "interp faulted: {interp_res:?}");
-        assert_eq!(vm_out, "0\n0\n0\n0\n", "vm stdout");
-        assert_eq!(interp_out, "0\n0\n0\n0\n", "interp stdout");
-        assert_eq!(vm_out, interp_out, "two-engine parity");
+        assert!(res.is_ok(), "faulted: {res:?}");
+        assert_eq!(out, "0\n0\n0\n0\n");
     }
 
     /// The poison abort's only value is its message, and it goes out through a raw `write(2)` (Rust's
