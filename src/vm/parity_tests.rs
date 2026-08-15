@@ -211,7 +211,6 @@ fn assert_parity_file(files: &[(&str, &str)], entry: &str) -> String {
     let (out, _err, _result, _code) = crate::vm::run_file_bytes(
         &entry_path,
         crate::native::HostConfig::default(),
-        true,
         None,
         None,
     );
@@ -4352,7 +4351,7 @@ fn parallel_finished_task_leaves_sibling_deadlocked() {
 fn parity_entry_cfg(src: &str, mk_cfg: impl Fn() -> crate::native::HostConfig) -> String {
     let t = TmpDir::new();
     let entry = t.write("main.chz", src);
-    let (out, _err, _result, _code) = crate::vm::run_file_bytes(&entry, mk_cfg(), true, None, None);
+    let (out, _err, _result, _code) = crate::vm::run_file_bytes(&entry, mk_cfg(), None, None);
     captured(out)
 }
 
@@ -4620,7 +4619,7 @@ main()";
     vm.gc_stress = true;
     vm.host = crate::native::HostConfig::default();
     vm.run().unwrap();
-    vm.drain_live_executors(Span::RUNTIME).unwrap();
+    vm.drain_live_executors().unwrap();
     assert_eq!(vm.out, b"");
 }
 
@@ -5016,7 +5015,6 @@ fn manifest_entrypoint_err_surfaced_both_engines() {
     let (_out, _err, outcome, _rc) = crate::vm::run_file_with_entry(
         &entry,
         crate::native::HostConfig::default(),
-        true,
         Some("main"),
         None,
     );
@@ -5039,7 +5037,6 @@ fn manifest_entrypoint_ok_runs_clean_both_engines() {
     let (out, _err, outcome, _rc) = crate::vm::run_file_with_entry(
         &entry,
         crate::native::HostConfig::default(),
-        true,
         Some("main"),
         None,
     );

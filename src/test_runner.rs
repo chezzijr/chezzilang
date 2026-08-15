@@ -209,15 +209,14 @@ fn apply_timeout_overrun(verdict: Verdict, duration: Duration, opts: &RunOpts) -
 /// Run every `test fn` discovered under `root` (a single `*_test.chz` file or a directory walked
 /// recursively). Returns the rendered report + overall pass/fail. Never panics on a test fault — the
 /// VM stays reusable, so one failing test does not abort the rest.
-pub fn run_tests(root: &Path, parallel: bool) -> TestReport {
-    run_tests_opts(root, parallel, RunOpts::default())
+pub fn run_tests(root: &Path) -> TestReport {
+    run_tests_opts(root, RunOpts::default())
 }
 
 /// Like [`run_tests`], plus the opt-in `--max-heap` per-test cap (`max_heap`: byte count, `0` = OFF).
-pub fn run_tests_capped(root: &Path, parallel: bool, max_heap: usize) -> TestReport {
+pub fn run_tests_capped(root: &Path, max_heap: usize) -> TestReport {
     run_tests_opts(
         root,
-        parallel,
         RunOpts {
             max_heap,
             ..Default::default()
@@ -227,15 +226,9 @@ pub fn run_tests_capped(root: &Path, parallel: bool, max_heap: usize) -> TestRep
 
 /// Like [`run_tests_capped`], plus the opt-in `--timeout` per-test wall-clock cap (`timeout_ms`: ms,
 /// `0` = OFF).
-pub fn run_tests_timed(
-    root: &Path,
-    parallel: bool,
-    max_heap: usize,
-    timeout_ms: u64,
-) -> TestReport {
+pub fn run_tests_timed(root: &Path, max_heap: usize, timeout_ms: u64) -> TestReport {
     run_tests_opts(
         root,
-        parallel,
         RunOpts {
             max_heap,
             timeout_ms,
@@ -244,7 +237,7 @@ pub fn run_tests_timed(
     )
 }
 
-/// The core runner. `parallel` selects the engine (serial oracle vs M:N); `opts` carries every opt-in
+/// The core runner. `opts` carries every opt-in
 /// ergonomics knob. **`RunOpts::default()` reproduces the pre-wave output byte-for-byte** — every new
 /// clause is gated on its field being non-default, so the render path a no-flag run takes is unchanged
 /// and the `chz_suite_passes` regression gate stays green.
@@ -252,7 +245,7 @@ pub fn run_tests_timed(
 /// **Determinism / ordering:** files run in sorted path order; within a file, free tests run in
 /// declaration order, then each suite's methods in declaration order. `--fail-fast` stops at the first
 /// non-pass in exactly that order (later tests simply don't run).
-pub fn run_tests_opts(root: &Path, parallel: bool, opts: RunOpts) -> TestReport {
+pub fn run_tests_opts(root: &Path, opts: RunOpts) -> TestReport {
     let files = match collect_test_files(root) {
         Ok(f) => f,
         Err(e) => {
@@ -278,7 +271,7 @@ pub fn run_tests_opts(root: &Path, parallel: bool, opts: RunOpts) -> TestReport 
     let mut filtered_out = 0usize;
 
     for file in &files {
-        match run_file(file, parallel, &opts) {
+        match run_file(file, &opts) {
             Ok((mut file_outcomes, skipped)) => {
                 filtered_out += skipped;
                 let hit_non_pass = file_outcomes
@@ -520,7 +513,7 @@ fn render_json(
 /// 8 MB main thread but not the 384 MB VM stack). This matches `chezzi run` (both engines run on
 /// [`crate::vm::run_file_with_entry`]'s VM-stack thread), so a `test` verdict mirrors a `run`.
 /// Returns `(per-test outcomes, count filtered out by `--filter`)` or a whole-file compile-error msg.
-fn run_file(file: &Path, parallel: bool, opts: &RunOpts) -> Result<(Vec<Outcome>, usize), String> {
+fn run_file(file: &Path, opts: &RunOpts) -> Result<(Vec<Outcome>, usize), String> {
     let graph = crate::resolver::build_graph(file).map_err(|e| e.to_string())?;
     if let Err(errs) = crate::checker::check_graph(&graph) {
         // Surface the first type error (matches `chezzi check`'s headline).
@@ -535,21 +528,18 @@ fn run_file(file: &Path, parallel: bool, opts: &RunOpts) -> Result<(Vec<Outcome>
     let file_label = file.display().to_string();
     let opts = opts.clone();
 
-    crate::vm::on_vm_stack(move || invoke_all(program, file_label, parallel, &opts))
+    crate::vm::on_vm_stack(move || invoke_all(program, file_label, &opts))
 }
 
 /// Run every `test fn` + suite in a compiled program on a fresh VM, returning per-test outcomes (or
-/// an init-error message for the whole file). Engine-agnostic: `parallel` selects serial vs M:N via
-/// [`Vm::set_parallel`] before the module top-levels run. Ownership (not `&Arc`) so the M:N variant
-/// can move it onto its own stack thread.
+/// an init-error message for the whole file). Ownership (not `&Arc`) so it can be moved onto its own
+/// stack thread.
 fn invoke_all(
     program: Arc<Program>,
     file_label: String,
-    parallel: bool,
     opts: &RunOpts,
 ) -> Result<(Vec<Outcome>, usize), String> {
     let mut vm = Vm::for_program(Arc::clone(&program));
-    vm.set_parallel(parallel);
     // `--max-heap` cap (0 = off). Per-test reset of the over-memory latch is VM-side (in each invoke
     // entry point), so `run_suite` needs no cap threading — the VM is already configured.
     vm.set_max_heap(opts.max_heap);
@@ -833,7 +823,7 @@ mod tests {
             "math_test.chz",
             "test fn one():\n    assert 1 + 1 == 2\ntest fn two():\n    assert \"a\" + \"b\" == \"ab\"\n",
         );
-        let report = run_tests(&f, true);
+        let report = run_tests(&f);
         assert!(
             report.passed,
             "all tests should pass; report:\n{}",
@@ -856,7 +846,7 @@ mod tests {
             "fail_test.chz",
             "test fn boom():\n    x := 1\n    assert x == 2, \"x must be two\"\n",
         );
-        let report = run_tests(&f, true);
+        let report = run_tests(&f);
         assert!(
             !report.passed,
             "the run must fail; report:\n{}",
@@ -885,7 +875,7 @@ mod tests {
         d.write("a_test.chz", "test fn a():\n    assert true\n");
         d.write("b_test.chz", "test fn b():\n    assert true\n");
         d.write("not_a_test.chz", "print(\"ignored\")\n"); // no `_test.chz` suffix
-        let report = run_tests(&d.0, true);
+        let report = run_tests(&d.0);
         assert!(report.passed, "report:\n{}", report.text);
         assert!(report.text.contains("PASS a"), "report:\n{}", report.text);
         assert!(report.text.contains("PASS b"), "report:\n{}", report.text);
@@ -902,7 +892,7 @@ mod tests {
         // A type error (assert on a non-bool) fails the whole file before any test runs. It must be
         // reported ONCE as ERROR, not as a phantom `FAIL …:0`, and must not inflate the test count.
         let f = d.write("broken_test.chz", "test fn t():\n    assert 1\n");
-        let report = run_tests(&f, true);
+        let report = run_tests(&f);
         assert!(!report.passed, "report:\n{}", report.text);
         assert!(report.text.contains("ERROR"), "report:\n{}", report.text);
         assert!(
@@ -931,7 +921,7 @@ mod tests {
             "empty_test.chz",
             "fn helper():\n    print(\"not a test\")\n",
         );
-        let report = run_tests(&f, true);
+        let report = run_tests(&f);
         assert!(
             !report.passed,
             "zero discovered tests must fail; report:\n{}",
@@ -948,7 +938,7 @@ mod tests {
     fn non_test_file_path_errors() {
         let d = TmpDir::new();
         let f = d.write("plain.chz", "print(\"hi\")\n");
-        let report = run_tests(&f, true);
+        let report = run_tests(&f);
         assert!(!report.passed);
         assert!(
             report.text.contains("not a *_test.chz file"),
@@ -983,7 +973,7 @@ struct Suite:
         assert self.log == [\"before_all\", \"before_each\", \"after_each\", \"before_each\"], \"second ordering\"
 ";
         let f = d.write("suite_test.chz", src);
-        let report = run_tests(&f, true);
+        let report = run_tests(&f);
         assert!(
             report.passed,
             "suite ordering should hold; report:\n{}",
@@ -1020,7 +1010,7 @@ struct Suite:
 
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/chz");
 
-        let report = run_tests(&root, true);
+        let report = run_tests(&root);
         assert!(
             report.passed,
             "tests/chz must pass on the M:N VM; report:\n{}",
@@ -1038,7 +1028,7 @@ struct Suite:
             "boom_test.chz",
             "test fn boom():\n    xs := [1]\n    y := xs[5]\n    print(y)\n",
         );
-        let report = run_tests(&f, true);
+        let report = run_tests(&f);
         assert!(
             !report.passed,
             "an errored test fails the run; report:\n{}",
@@ -1069,7 +1059,7 @@ struct Suite:
             "af_test.chz",
             "test fn boom():\n    assert false, \"nope\"\n",
         );
-        let report = run_tests(&f, true);
+        let report = run_tests(&f);
         assert!(!report.passed, "report:\n{}", report.text);
         assert!(
             report.text.contains("FAIL boom"),
@@ -1095,7 +1085,7 @@ struct Suite:
             "ok_test.chz",
             "test fn one():\n    assert true\ntest fn two():\n    assert true\n",
         );
-        let report = run_tests(&f, true);
+        let report = run_tests(&f);
         assert!(report.passed, "report:\n{}", report.text);
         assert!(
             report
@@ -1123,7 +1113,7 @@ struct Suite:
         assert true
 ";
         let f = d.write("hook_test.chz", src);
-        let report = run_tests(&f, true);
+        let report = run_tests(&f);
         assert!(!report.passed, "report:\n{}", report.text);
         assert!(
             report.text.contains("ERROR Suite::t"),
@@ -1151,7 +1141,7 @@ struct Suite:
         );
         {
             let parallel = true;
-            let report = run_tests_capped(&f, parallel, 1_000_000);
+            let report = run_tests_capped(&f, 1_000_000);
             assert!(
                 !report.passed,
                 "over-memory must fail the run (parallel={parallel}); report:\n{}",
@@ -1203,7 +1193,7 @@ struct Suite:
         for (label, f) in [("backlog", &backlog), ("parked", &parked)] {
             {
                 let parallel = true;
-                let report = run_tests_capped(f, parallel, CAP);
+                let report = run_tests_capped(f, CAP);
                 assert!(
                     report.text.contains(&format!("OVER-MEMORY {label}")),
                     "off-heap wire storage must trip the cap ({label}, parallel={parallel}); \
@@ -1254,7 +1244,7 @@ struct Suite:
         );
         {
             let parallel = true;
-            let report = run_tests_capped(&ex, parallel, CAP);
+            let report = run_tests_capped(&ex, CAP);
             assert!(
                 report.text.contains("OVER-MEMORY execres"),
                 "an executor's buffered-output backlog must trip the cap (parallel={parallel}); \
@@ -1266,7 +1256,7 @@ struct Suite:
                 "must be OVER-MEMORY, not FAIL/ERROR (parallel={parallel}); report:\n{}",
                 report.text
             );
-            let generous = run_tests_capped(&ex, parallel, 4_000_000_000);
+            let generous = run_tests_capped(&ex, 4_000_000_000);
             assert!(
                 generous.text.contains("PASS execres"),
                 "the same program under a generous cap must still PASS (parallel={parallel}); \
@@ -1303,7 +1293,7 @@ struct Suite:
              blob := \"\".join(parts)\n    ex := Executor()\n    for i in range(300):\n        \
              ex.submit(fn() -> str: blob)\n    ex.shutdown()\n    assert true\n",
         );
-        let report = run_tests_capped(&ex, true, CAP);
+        let report = run_tests_capped(&ex, CAP);
         assert!(
             report.text.contains("PASS execret"),
             "300 discarded ~1 MB job results must not be retained; report:\n{}",
@@ -1352,7 +1342,7 @@ struct Suite:
             ),
         );
         for (label, f) in [("exjoin", &ex), ("nursjoin", &nursery)] {
-            let report = run_tests_capped(f, true, CAP);
+            let report = run_tests_capped(f, CAP);
             assert!(
                 report.text.contains(&format!("OVER-MEMORY {label}")),
                 "a backlog grown entirely while the parent is blocked in its join must trip the cap \
@@ -1367,7 +1357,7 @@ struct Suite:
             );
             // The negative direction: the trip needs the RETAINED BACKLOG ALONE to exceed the whole
             // cap, so the identical program under a generous one must still run to completion.
-            let generous = run_tests_capped(f, true, 4_000_000_000);
+            let generous = run_tests_capped(f, 4_000_000_000);
             assert!(
                 generous.text.contains(&format!("PASS {label}")),
                 "the same program under a generous cap must still PASS ({label}); report head:\n{}",
@@ -1424,13 +1414,13 @@ struct Suite:
                 "        time.sleep_ms(60)\n        return blob.len()",
             ),
         );
-        let report = run_tests_capped(&slow, true, CAP);
+        let report = run_tests_capped(&slow, CAP);
         assert!(
             report.text.contains("OVER-MEMORY queued"),
             "jobs queued but not started must be charged to the submitter; report head:\n{}",
             &report.text[..report.text.len().min(2000)]
         );
-        let generous = run_tests_capped(&slow, true, 4_000_000_000);
+        let generous = run_tests_capped(&slow, 4_000_000_000);
         assert!(
             generous.text.contains("PASS queued"),
             "the same program under a generous cap must still PASS; report head:\n{}",
@@ -1448,7 +1438,7 @@ struct Suite:
                 "        time.sleep_ms(60)\n        return blob.len()",
             ),
         );
-        let report = run_tests_capped(&small, true, CAP);
+        let report = run_tests_capped(&small, CAP);
         assert!(
             report.text.contains("PASS queued"),
             "a queue whose whole contents fit under the cap must not trip; report head:\n{}",
@@ -1468,7 +1458,7 @@ struct Suite:
              ex := Executor()\n    for i in range(60):\n        ex.submit(job)\n    \
              ex.shutdown()\n    assert true\n",
         );
-        let report = run_tests_capped(&shared, true, 20_000_000);
+        let report = run_tests_capped(&shared, 20_000_000);
         assert!(
             report.text.contains("PASS queued"),
             "60 queued jobs sharing ONE ~1 MB box hold ~1 MB, not ~60 MB; report head:\n{}",
@@ -1486,7 +1476,7 @@ struct Suite:
              fn job() -> int:\n        mine := ex\n        return 1\n    \
              ex.submit(job)\n    ex.shutdown()\n    assert true\n",
         );
-        let report = run_tests_capped(&selfcap, true, CAP);
+        let report = run_tests_capped(&selfcap, CAP);
         assert!(
             report.text.contains("PASS queued"),
             "a job capturing its own executor must not deadlock the submit; report head:\n{}",
@@ -1514,7 +1504,7 @@ struct Suite:
         );
         {
             let parallel = true;
-            let report = run_tests_capped(&nested, parallel, CAP);
+            let report = run_tests_capped(&nested, CAP);
             assert!(
                 report.text.contains("OVER-MEMORY nested"),
                 "a backlog behind a nested core must trip the cap (parallel={parallel}); \
@@ -1559,7 +1549,7 @@ struct Suite:
         for (label, f) in [("msg", &msg), ("ints", &ints)] {
             {
                 let parallel = true;
-                let report = run_tests_capped(f, parallel, CAP);
+                let report = run_tests_capped(f, CAP);
                 assert!(
                     report.text.contains(&format!("OVER-MEMORY {label}")),
                     "off-heap growth must PACE a sweep so the cap is sampled ({label}, \
@@ -1671,7 +1661,7 @@ struct Suite:
              assert blob.len() == 200000\n",
         );
         for (label, f) in [("quiet", &quiet), ("noisy", &noisy)] {
-            let report = run_tests_capped(f, true, CAP);
+            let report = run_tests_capped(f, CAP);
             assert!(
                 report.text.contains(&format!("OVER-MEMORY {label}")),
                 "a worker heap born over the cap must be SAMPLED even though the task allocates \
@@ -1679,7 +1669,7 @@ struct Suite:
                 report.text
             );
         }
-        let report = run_tests_capped(&nospawn, true, CAP);
+        let report = run_tests_capped(&nospawn, CAP);
         assert!(
             report.text.contains("OVER-MEMORY nospawn"),
             "a parent heap grown over the cap by `push` alone must sample and trip (W7-28); \
@@ -1688,7 +1678,7 @@ struct Suite:
         );
         // …and the same shape under a generous cap must still PASS, so the line above is a
         // measurement and not "a `push` loop trips".
-        let generous = run_tests_capped(&nospawn, true, 4_000_000_000);
+        let generous = run_tests_capped(&nospawn, 4_000_000_000);
         assert!(
             generous.text.contains("PASS nospawn"),
             "the same payload under a generous cap must still PASS; report:\n{}",
@@ -1717,7 +1707,7 @@ struct Suite:
     ///   is what keeps the producer under the cap while the task's heap is far over it.
     /// - the NESTED `parallel:` is load-bearing. On the lazy `register_task` path the parent's own
     ///   `deep_clone_all` copy stays rooted in `self.nurseries` until the join, so the PARENT trips
-    ///   and masks the bug. The eager arm (`self.parallel && self.mn.is_some() && worker_count() >= 2`)
+    ///   and masks the bug. The eager arm (`self.mn.is_none() || worker_count() >= 2`)
     ///   consumes the task into `prepare_worker` immediately, so that copy is garbage within the same
     ///   opcode and the parent never trips.
     ///
@@ -1737,7 +1727,7 @@ struct Suite:
     ///   producer's own live set is under the cap, so a payload-size drift cannot silently take over
     ///   the trip.
     /// - a FORCED worker count of 4. The discrimination rests entirely on the eager arm arming
-    ///   (`self.parallel && self.mn.is_some() && worker_count() >= 2`), and on a genuinely
+    ///   (`self.mn.is_none() || worker_count() >= 2`), and on a genuinely
     ///   single-core runner it cannot: the lazy `register_task` path keeps the parent's own
     ///   `deep_clone_all` copy — which is the SAME non-re-interned amplification, `deep_clone_all`
     ///   being a `to_wire`/`from_wire` round-trip into the parent's heap — rooted in `self.nurseries`
@@ -1809,7 +1799,7 @@ struct Suite:
                 "a".repeat(100)
             ),
         );
-        let prod_report = run_tests_capped(&prod, true, CAP);
+        let prod_report = run_tests_capped(&prod, CAP);
         assert!(
             prod_report.text.contains("PASS prod"),
             "the payload ALONE must stay under the cap, or the OVER-MEMORY verdicts below are the \
@@ -1817,7 +1807,7 @@ struct Suite:
             prod_report.text
         );
         for (label, f) in [("nat", &nat), ("bc", &bc)] {
-            let report = run_tests_capped(f, true, CAP);
+            let report = run_tests_capped(f, CAP);
             assert!(
                 report.text.contains(&format!("OVER-MEMORY {label}")),
                 "a task heap over the cap must be sampled at task start whatever the body runs \
@@ -1833,7 +1823,7 @@ struct Suite:
         }
         // The negative direction: the same program under a generous cap must still PASS, so the trip
         // above is a MEASUREMENT and not "an all-native spawn is over the cap".
-        let generous = run_tests_capped(&nat, true, 4_000_000_000);
+        let generous = run_tests_capped(&nat, 4_000_000_000);
         assert!(
             generous.text.contains("PASS nat"),
             "the same program under a generous cap must still PASS; report:\n{}",
@@ -1905,7 +1895,7 @@ struct Suite:
         ] {
             {
                 let parallel = true;
-                let report = run_tests_capped(f, parallel, CAP);
+                let report = run_tests_capped(f, CAP);
                 assert!(
                     report.text.contains(&format!("OVER-MEMORY {label}")),
                     "inline-scalar container growth must PACE a sweep so the cap is sampled \
@@ -1922,7 +1912,7 @@ struct Suite:
             }
             // The negative direction: the same program under a generous cap must still PASS — the
             // trip is a MEASUREMENT, not "a loop that pushes is over the cap".
-            let generous = run_tests_capped(f, true, 4_000_000_000);
+            let generous = run_tests_capped(f, 4_000_000_000);
             assert!(
                 generous.text.contains(&format!("PASS {label}")),
                 "the same program under a generous cap must still PASS ({label}); report:\n{}",
@@ -1952,7 +1942,7 @@ struct Suite:
         );
         {
             let parallel = true;
-            let report = run_tests_capped(&f, parallel, 8_000_000);
+            let report = run_tests_capped(&f, 8_000_000);
             assert!(
                 report.text.contains("PASS alias"),
                 "50 handles to one core must not multiply its payload (parallel={parallel}); \
@@ -1976,7 +1966,7 @@ struct Suite:
             "spin_test.chz",
             "test fn spin():\n    while true:\n        pass\n",
         );
-        let report = run_tests_timed(&f, true, 0, 50);
+        let report = run_tests_timed(&f, 0, 50);
         assert!(
             !report.passed,
             "an infinite loop must fail the run; report:\n{}",
@@ -2000,7 +1990,7 @@ struct Suite:
         // false-trips a fast test.
         let d = TmpDir::new();
         let f = d.write("fast_test.chz", "test fn quick():\n    assert 1 + 1 == 2\n");
-        let report = run_tests_timed(&f, true, 0, 60_000);
+        let report = run_tests_timed(&f, 0, 60_000);
         assert!(report.passed, "report:\n{}", report.text);
         assert!(
             report.text.contains("PASS quick"),
@@ -2023,7 +2013,7 @@ struct Suite:
             "rectimeout_test.chz",
             "test fn t():\n    r := recover:\n        while true:\n            pass\n    assert false\n",
         );
-        let report = run_tests_timed(&f, true, 0, 50);
+        let report = run_tests_timed(&f, 0, 50);
         assert!(!report.passed, "report:\n{}", report.text);
         assert!(
             report.text.contains("TIMED-OUT t"),
@@ -2048,7 +2038,7 @@ struct Suite:
             "recdefertimeout_test.chz",
             "test fn t():\n    defer:\n        r := recover:\n            while true:\n                pass\n        assert false, \"SWALLOWED-{r}\"\n    while true:\n        pass\n",
         );
-        let report = run_tests_timed(&f, true, 0, 50);
+        let report = run_tests_timed(&f, 0, 50);
         assert!(!report.passed, "report:\n{}", report.text);
         assert!(
             !report.text.contains("SWALLOWED"),
@@ -2072,7 +2062,7 @@ struct Suite:
             "spawnspin_test.chz",
             "fn spin() -> int:\n    while true:\n        pass\n    return 0\ntest fn t():\n    parallel:\n        spawn spin()\n",
         );
-        let report = run_tests_timed(&f, true, 0, 50);
+        let report = run_tests_timed(&f, 0, 50);
         assert!(!report.passed, "report:\n{}", report.text);
         assert!(
             report.text.contains("TIMED-OUT t"),
@@ -2104,7 +2094,7 @@ struct Suite:
             "exhalt_test.chz",
             "import std.concurrency\nfn boom():\n    panic(\"ordinary\")\nfn spin():\n    while true:\n        pass\ntest fn t():\n    ex := Executor()\n    ex.submit(boom)\n    ex.submit(spin)\n    r := recover: ex.shutdown()\n    assert false, \"SWALLOWED\"\n",
         );
-        let report = run_tests_timed(&f, true, 0, 50);
+        let report = run_tests_timed(&f, 0, 50);
         assert!(!report.passed, "report:\n{}", report.text);
         assert!(
             !report.text.contains("SWALLOWED"),
@@ -2159,7 +2149,7 @@ struct Suite:
         ] {
             let d = TmpDir::new();
             let f = d.write(name, body);
-            let report = run_tests_timed(&f, true, 0, 300);
+            let report = run_tests_timed(&f, 0, 300);
             assert!(!report.passed, "{name} report:\n{}", report.text);
             assert!(
                 report.text.contains("TIMED-OUT t"),
@@ -2244,7 +2234,7 @@ struct Suite:
                 let d = TmpDir::new();
                 let f = d.write(name, body);
                 let t0 = std::time::Instant::now();
-                let report = run_tests_timed(&f, parallel, 0, 300);
+                let report = run_tests_timed(&f, 0, 300);
                 let elapsed = t0.elapsed();
                 assert!(
                     !report.passed,
@@ -2299,7 +2289,6 @@ struct Suite:
             let parallel = true;
             let report = run_tests_opts(
                 &f,
-                parallel,
                 opts_with(|o| {
                     o.timeout_ms = 300;
                     o.show_output = true;
@@ -2338,7 +2327,6 @@ struct Suite:
             let parallel = true;
             let report = run_tests_opts(
                 &f,
-                parallel,
                 opts_with(|o| {
                     o.timeout_ms = 300;
                     o.show_output = true;
@@ -2373,7 +2361,7 @@ struct Suite:
         );
         {
             let parallel = true;
-            let report = run_tests_timed(&f, parallel, 0, 300);
+            let report = run_tests_timed(&f, 0, 300);
             assert!(
                 report.text.contains("TIMED-OUT t"),
                 "(parallel={parallel}): a test that overran its --timeout must not report PASS just \
@@ -2403,14 +2391,14 @@ struct Suite:
         let d = TmpDir::new();
 
         let quick = d.write("quick_test.chz", "test fn q():\n    assert 1 + 1 == 2\n");
-        let r = run_tests_timed(&quick, true, 0, 300);
+        let r = run_tests_timed(&quick, 0, 300);
         assert!(r.passed && r.text.contains("PASS q"), "report:\n{}", r.text);
 
         let slow = d.write(
             "slowuncapped_test.chz",
             "import std.process\ntest fn t():\n    _ := process.cmd(\"sleep 1\")\n",
         );
-        let r = run_tests_timed(&slow, true, 0, 0);
+        let r = run_tests_timed(&slow, 0, 0);
         assert!(
             r.passed && r.text.contains("PASS t"),
             "no --timeout must be unaffected; report:\n{}",
@@ -2421,7 +2409,7 @@ struct Suite:
             "slowfail_test.chz",
             "import std.process\ntest fn t():\n    _ := process.cmd(\"sleep 1\")\n    assert false, \"boom\"\n",
         );
-        let r = run_tests_timed(&slow_fail, true, 0, 300);
+        let r = run_tests_timed(&slow_fail, 0, 300);
         assert!(
             r.text.contains("FAIL t") && r.text.contains("boom"),
             "a failing assert keeps its own bucket even when the test also overran; report:\n{}",
@@ -2459,7 +2447,7 @@ struct Suite:
         ] {
             let d = TmpDir::new();
             let f = d.write(name, body);
-            let report = run_tests_timed(&f, true, 0, 5000);
+            let report = run_tests_timed(&f, 0, 5000);
             assert!(
                 report.passed,
                 "{name}: a live timer must be unaffected by an unexpired `--timeout`; report:\n{}",
@@ -2489,7 +2477,7 @@ struct Suite:
                 o.timeout_ms = timeout_ms;
                 o.show_output = true;
             });
-            let r = run_tests_opts(&owned, true, opts);
+            let r = run_tests_opts(&owned, opts);
             let _ = tx.send((r.text, r.passed));
         });
         match rx.recv_timeout(std::time::Duration::from_secs(10)) {
@@ -2918,7 +2906,7 @@ struct Suite:
             "ctl_test.chz",
             "test fn small():\n    xs := []\n    for i in range(100):\n        xs.push(i)\n    assert xs.len() == 100\n",
         );
-        let report = run_tests_capped(&f, true, 100_000_000);
+        let report = run_tests_capped(&f, 100_000_000);
         assert!(report.passed, "report:\n{}", report.text);
         assert!(
             report.text.contains("PASS small"),
@@ -2936,7 +2924,7 @@ struct Suite:
             "rec_test.chz",
             "fn boom() -> int:\n    xs := []\n    for i in range(1000000):\n        xs.push([i])\n    return 0\ntest fn t():\n    r := recover: boom()\n    assert true\n",
         );
-        let report = run_tests_capped(&f, true, 1_000_000);
+        let report = run_tests_capped(&f, 1_000_000);
         assert!(!report.passed, "report:\n{}", report.text);
         assert!(
             report.text.contains("OVER-MEMORY t"),
@@ -2958,7 +2946,7 @@ struct Suite:
         );
         {
             let parallel = true;
-            let report = run_tests_capped(&f, parallel, 1_000_000);
+            let report = run_tests_capped(&f, 1_000_000);
             assert!(
                 !report.passed,
                 "(parallel={parallel}) report:\n{}",
@@ -2985,7 +2973,7 @@ struct Suite:
         );
         {
             let parallel = true;
-            let report = run_tests_capped(&f, parallel, 1_000_000);
+            let report = run_tests_capped(&f, 1_000_000);
             assert!(
                 !report.passed,
                 "(parallel={parallel}) report:\n{}",
@@ -3020,7 +3008,7 @@ struct Suite:
         );
         {
             let parallel = true;
-            let report = run_tests_capped(&f, parallel, 100_000_000);
+            let report = run_tests_capped(&f, 100_000_000);
             assert!(
                 report.passed,
                 "a concurrent test well under a generous cap must pass (parallel={parallel}); report:\n{}",
@@ -3063,7 +3051,7 @@ struct Suite:
         );
         {
             let parallel = true;
-            let report = run_tests_capped(&f, parallel, 1_000_000);
+            let report = run_tests_capped(&f, 1_000_000);
             assert!(
                 report.text.contains("OVER-MEMORY trip"),
                 "the tripping test must bucket OVER-MEMORY (parallel={parallel}); report:\n{}",
@@ -3102,7 +3090,7 @@ struct Suite:
             "abg_test.chz",
             "test fn alpha():\n    assert true\ntest fn beta():\n    assert true\ntest fn gamma():\n    assert true\n",
         );
-        let report = run_tests_opts(&f, true, opts_with(|o| o.filter = Some("alpha".into())));
+        let report = run_tests_opts(&f, opts_with(|o| o.filter = Some("alpha".into())));
         assert!(report.passed, "report:\n{}", report.text);
         assert!(
             report.text.contains("PASS alpha"),
@@ -3130,7 +3118,7 @@ struct Suite:
             "abg2_test.chz",
             "test fn alpha():\n    assert true\ntest fn beta():\n    assert true\n",
         );
-        let report = run_tests_opts(&f, true, opts_with(|o| o.filter = Some("zzz".into())));
+        let report = run_tests_opts(&f, opts_with(|o| o.filter = Some("zzz".into())));
         assert!(
             !report.passed,
             "a zero-match filter must fail; report:\n{}",
@@ -3147,7 +3135,7 @@ struct Suite:
     fn fail_fast_stops_at_first_failure() {
         let d = TmpDir::new();
         let f = three_test_file(&d);
-        let report = run_tests_opts(&f, true, opts_with(|o| o.fail_fast = true));
+        let report = run_tests_opts(&f, opts_with(|o| o.fail_fast = true));
         assert!(!report.passed, "report:\n{}", report.text);
         assert!(
             report.text.contains("PASS alpha"),
@@ -3173,14 +3161,14 @@ struct Suite:
             "print_test.chz",
             "test fn boom():\n    print(\"hello-debug\")\n    assert false\n",
         );
-        let shown = run_tests_opts(&f, true, opts_with(|o| o.show_output = true));
+        let shown = run_tests_opts(&f, opts_with(|o| o.show_output = true));
         assert!(
             shown.text.contains("hello-debug"),
             "--show-output must surface a failing test's stdout; report:\n{}",
             shown.text
         );
         // Control: default discards it.
-        let hidden = run_tests(&f, true);
+        let hidden = run_tests(&f);
         assert!(
             !hidden.text.contains("hello-debug"),
             "default must discard stdout; report:\n{}",
@@ -3195,7 +3183,7 @@ struct Suite:
             "printok_test.chz",
             "test fn ok():\n    print(\"secret\")\n    assert true\n",
         );
-        let report = run_tests_opts(&f, true, opts_with(|o| o.show_output = true));
+        let report = run_tests_opts(&f, opts_with(|o| o.show_output = true));
         assert!(
             !report.text.contains("secret"),
             "a PASSing test's stdout stays discarded (show-on-failure); report:\n{}",
@@ -3207,7 +3195,7 @@ struct Suite:
     fn json_emits_parseable_per_test_and_totals() {
         let d = TmpDir::new();
         let f = three_test_file(&d);
-        let report = run_tests_opts(&f, true, opts_with(|o| o.json = true));
+        let report = run_tests_opts(&f, opts_with(|o| o.json = true));
         let t = &report.text;
         assert!(
             t.trim_start().starts_with('{'),
@@ -3241,13 +3229,13 @@ struct Suite:
     fn verbose_shows_timing_default_does_not() {
         let d = TmpDir::new();
         let f = d.write("v_test.chz", "test fn quick():\n    assert true\n");
-        let verbose = run_tests_opts(&f, true, opts_with(|o| o.verbosity = Verbosity::Verbose));
+        let verbose = run_tests_opts(&f, opts_with(|o| o.verbosity = Verbosity::Verbose));
         assert!(
             verbose.text.contains("ms"),
             "-v output must carry timing; report:\n{}",
             verbose.text
         );
-        let default = run_tests(&f, true);
+        let default = run_tests(&f);
         assert!(
             !default.text.contains("ms"),
             "default output must NOT carry timing (byte-identical invariant); report:\n{}",
@@ -3262,7 +3250,7 @@ struct Suite:
             "q_test.chz",
             "test fn a():\n    assert true\ntest fn b():\n    assert false\n",
         );
-        let report = run_tests_opts(&f, true, opts_with(|o| o.verbosity = Verbosity::Quiet));
+        let report = run_tests_opts(&f, opts_with(|o| o.verbosity = Verbosity::Quiet));
         assert!(
             report.text.contains(".F") || report.text.contains(".\nF"),
             "quiet must render one char per test; report:\n{}",
@@ -3284,13 +3272,13 @@ struct Suite:
     fn color_absent_under_harness_present_when_forced() {
         let d = TmpDir::new();
         let f = d.write("col_test.chz", "test fn a():\n    assert true\n");
-        let plain = run_tests(&f, true);
+        let plain = run_tests(&f);
         assert!(
             !plain.text.contains("\x1b["),
             "default (color off) must emit no ANSI so the captured harness is stable; report:\n{:?}",
             plain.text
         );
-        let colored = run_tests_opts(&f, true, opts_with(|o| o.color = true));
+        let colored = run_tests_opts(&f, opts_with(|o| o.color = true));
         assert!(
             colored.text.contains("\x1b[32m"),
             "color:true must green the PASS tag; report:\n{:?}",
@@ -3317,7 +3305,7 @@ struct Suite:
         assert self.log == [\"ae\"], \"after_each must run on failure\"
 ";
         let f = d.write("ae_test.chz", src);
-        let report = run_tests(&f, true);
+        let report = run_tests(&f);
         assert!(!report.passed, "first must fail; report:\n{}", report.text);
         assert!(
             report.text.contains("FAIL Suite::first"),

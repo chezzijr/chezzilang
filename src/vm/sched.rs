@@ -398,57 +398,10 @@ impl Vm {
         if tasks.is_empty() {
             return Ok(());
         }
-        // D2b: under `--parallel`, run the tasks as lightweight M:N fibers on the OS-thread pool
-        // (park-on-`recv`), instead of cooperative fibers (decision A keeps the cooperative path the
-        // default below).
-        if self.parallel {
-            return self.run_mn_nursery(tasks);
-        }
-        // Task 1 — deep-copy the module globals into each child's OWN `module_objs` view (in the shared
-        // heap) via `prepare_serial_child`, exactly as M:N does per worker. A cooperative child mutates
-        // its private copy → invisible to the parent → `serial == M:N` by construction.
-        // W6-2 — each task replays the snapshot PINNED at its own `spawn` (`register_task`), the one
-        // instant both engines share. Snapshotting HERE instead would diverge: M:N may prepare a
-        // nursery's tasks earlier, at a nested nursery's join (`early_enlist_outer`) or — for an eager
-        // per-connection nursery — at the spawn itself. A task whose pin FAILED to build raises that
-        // error here, at its preparation (a module-global generator with a non-sendable parked slot or
-        // reference cycle, an over-deep global), already stamped with the spawn-site span.
-        let mut children: Vec<Fiber> = Vec::with_capacity(tasks.len());
-        for (i, t) in tasks.into_iter().enumerate() {
-            let span = t.span();
-            let (pending, module_objs, module_faulted) =
-                self.prepare_serial_child(t.call, t.snap?, &t.cell_ids)?;
-            children.push(Fiber {
-                span,
-                ctx: FiberCtx {
-                    module_objs,
-                    module_faulted,
-                    ..FiberCtx::default()
-                },
-                state: FiberState::Pending(pending),
-                task_index: i,
-                scope_id: 0,
-                resume_native: None,
-            });
-        }
-        // D0: every child starts `Pending` ⇒ runnable, so seed `ready` with all indices in order.
-        let ready = (0..children.len()).collect();
-        // Park the parent: move its live context into the nursery, leaving `self.*` as the fresh,
-        // empty arena the children execute in. The nursery (parent + children) is GC-rooted while on
-        // `scheduler_stack`.
-        let mut nursery = Nursery {
-            parent: FiberCtx::default(),
-            children,
-            ready,
-            blocked_on: std::collections::HashMap::new(),
-        };
-        self.swap_ctx(&mut nursery.parent);
-        self.scheduler_stack.push(nursery);
-        let result = self.run_scheduler();
-        // Tear the level down and restore the parent context on every path (normal / fault / exit).
-        let mut nursery = self.scheduler_stack.pop().expect("scheduler level present");
-        self.swap_ctx(&mut nursery.parent);
-        result
+        // D2b: run the tasks as lightweight M:N fibers on the OS-thread pool (park-on-`recv`). This is
+        // the only engine — the cooperative scheduler that used to live here was deleted with
+        // `--serial` (`docs/future.md` §2b).
+        self.run_mn_nursery(tasks)
     }
 
     /// D2b — the `--parallel` M:N engine: run a nursery's tasks as **lightweight fibers parked on
@@ -931,7 +884,7 @@ impl Vm {
     /// - **The W7-58 party guard.** The joiner used to be a worker shell by construction, so it was
     ///   never a counted party; a top-level joiner IS one, and without registering, `main` sitting in
     ///   `mn_worker_loop` is invisible to the process-wide verdict (`parties.len() < live` vetoes
-    ///   forever). `nursery_party_guard` self-gates on `mn.is_none() && scheduler_stack.is_empty()`,
+    ///   forever). `nursery_party_guard` self-gates on `mn.is_none()`,
     ///   so it stays a no-op on a shell.
     pub(super) fn join_eager_nursery(&mut self, scope: EagerScope) -> Result<(), RuntimeError> {
         let EagerScope {
@@ -1963,7 +1916,6 @@ impl Vm {
             let res = match state {
                 FiberState::Pending(task) => self.start_task(task),
                 FiberState::Ready | FiberState::Blocked => self.run_until(0),
-                FiberState::Done => unreachable!("mn_worker_loop scheduled a Done fiber"),
             };
             if res.is_ok() && self.offload.is_some() {
                 // D5 — the fiber hit a blocking native; hand it to the dirty pool. Mutually exclusive
@@ -2212,275 +2164,6 @@ impl Vm {
         }
     }
 
-    /// Cooperatively drive the children of the innermost scheduler level until all are `Done`. D0:
-    /// pops the lowest-index runnable child from the level's `ready` set each turn (O(log N), vs the
-    /// old O(N) `pick_runnable` linear scan — same lowest-index order, so byte-identical). A child
-    /// that blocks on an empty channel leaves `ready` and is re-added by a sibling `send`
-    /// ([`Vm::wake_on_send`]). When `ready` empties: all children `Done` ⇒ the nursery is finished;
-    /// otherwise every remaining child is parked on an empty channel no sibling can fill — a deadlock.
-    pub(super) fn run_scheduler(&mut self) -> Result<(), RuntimeError> {
-        // A nursery scope's cancel state is per-scope on M:N (a fresh flag cloned into each worker,
-        // `cancelled` reset at every fiber swap-in). Serial keeps both in VM-globals, so save/restore
-        // them around the level. What the level STARTS with:
-        //
-        // * The enclosing scope's cancel flag is INHERITED (structured concurrency: cancelling a scope
-        //   cancels its descendants). Severing it would make a nested `parallel:` inside a cancelled
-        //   task uncancellable — its children's back-edge checkpoints would have no flag to read and a
-        //   spinning grandchild would hang the drain forever.
-        // * …EXCEPT inside a `defer` (`deferring > 0`), where the enclosing cancel must NOT reach:
-        //   a `parallel:` in a cancelled task's cleanup gets a clean slate and runs to completion (and
-        //   `deferring` itself resets, so THAT nursery can still cancel its OWN children on a fault).
-        // * `cancelled` starts false — this level's fibers have not observed anything yet.
-        //
-        // On the way out `cancelled` is restored, EXCEPT when the level propagates an error while the
-        // enclosing scope is itself cancelled: the parent fiber is dying of that cancel, so the latch
-        // stays set and it unwinds as a cancel (defers run, `recover:` bypassed — exec.rs) rather than
-        // as a catchable fault. Conversely a leaked `cancelled == true` from an ordinary child fault
-        // would bypass the PARENT's `recover:`, which is what the restore prevents.
-        let in_defer = self.deferring > 0;
-        let saved_cancel = if in_defer {
-            self.cancel.take()
-        } else {
-            self.cancel.clone()
-        };
-        let saved_cancelled = std::mem::replace(&mut self.cancelled, false);
-        let saved_deferring = std::mem::replace(&mut self.deferring, 0);
-        let r = self.run_scheduler_level();
-        self.deferring = saved_deferring;
-        self.cancel = saved_cancel;
-        self.cancelled = saved_cancelled;
-        if r.is_err() && self.cancel_requested() {
-            self.cancelled = true;
-        }
-        r
-    }
-
-    fn run_scheduler_level(&mut self) -> Result<(), RuntimeError> {
-        loop {
-            let next = self
-                .scheduler_stack
-                .last_mut()
-                .expect("scheduler level present")
-                .ready
-                .pop_first();
-            match next {
-                Some(i) => {
-                    if let Err(e) = self.run_child(i) {
-                        // N6 — the child faulted / `os.exit`ed. Its siblings must not be abandoned
-                        // where they sit: cancel them and re-drive each one so it unwinds through
-                        // its `defer`s (Go runs a cancelled goroutine's deferred functions; `defer`
-                        // is Chezzi's only cleanup mechanism). M:N already did this (`cancel_drain`
-                        // + the fibers' cancel-recheck-on-park); serial used to propagate this `Err`
-                        // straight out with a bare `?`. THIS is serial's ONLY child-error
-                        // propagation point — every other nursery path is `self.parallel`-gated.
-                        return Err(self.drain_cancelled_children(i, e));
-                    }
-                }
-                None => {
-                    if self.all_children_done() {
-                        return Ok(());
-                    }
-                    return Err(self.err(DEADLOCK_MSG.to_string(), Span::RUNTIME));
-                }
-            }
-        }
-    }
-
-    /// N6 — serial's cancel teardown, the cooperative twin of M:N's `cancel_drain`: after child
-    /// `faulted` of the innermost level faults or `os.exit`s, drive every still-PARKED sibling to a
-    /// real end so each runs its `defer`s, then return the error the nursery propagates.
-    ///
-    /// Every sibling that is not already `Done` is driven, in task order, with the cancel flag
-    /// tripped (serial has no worker race, so this is ordering, not locking) — INCLUDING a `Pending`
-    /// (never-started) one. That is not a nicety: M:N is structurally forced to start every spawned
-    /// fiber (a scope only completes at `done == total`, and `take_runnable` never consults the scope
-    /// cancel), so a cancelled-scope M:N sibling still runs its prologue, prints, and runs any `defer`
-    /// it registers. Serial must do the same or the two engines disagree on the LINE SET — the very
-    /// thing this contract declares parity (measured before this drain: `spawn boom(); spawn talker()`
-    /// → serial `{"0"}`, M:N `{"hi", "42"}`, 20/20). Cancellation points make the two orders converge:
-    /// a started task always runs its straight-line prologue, then dies at its first checkpoint.
-    ///
-    /// `cancelled` is a per-VM latch, so it is cleared before EACH child (else only the first sibling
-    /// unwinds). `pending_exit` too (`unwind_deferred`, stmt.rs, refuses to run ANY defer while an
-    /// exit is pending — one task's exiting `defer` would otherwise poison every later sibling's
-    /// cleanup). Exits and faults are then REDUCED exactly like M:N's `reduce_task_slots`: `Exit`
-    /// beats `Fault` (a hard halt is never demoted to a catchable error), and within each, the lowest
-    /// task index wins — so a drained sibling that faults *ahead* of `faulted` propagates ITS error,
-    /// as M:N's slot reduction does. A drained child that dies of the cancel itself is not a fault.
-    ///
-    /// Output: a drained child's bytes STAY (serial prints live into the shared `out` and cannot
-    /// un-print; M:N now flushes a `Cancelled` fiber's buffer at its task slot for the same reason).
-    /// Cross-task ORDER is nondeterministic on both engines and is not part of the parity contract.
-    ///
-    /// Genuine DEADLOCK of THIS level (all parked, nothing cancelled) is reported from
-    /// `run_scheduler_level`'s `None` arm, which never reaches here — so a deadlocked level still
-    /// tears its parked fibers down without running their defers, identically on both engines
-    /// (docs/gaps.md §N5, unchanged).
-    fn drain_cancelled_children(&mut self, faulted: usize, err: RuntimeError) -> RuntimeError {
-        // Exit-over-fault, lowest task index wins — M:N's `reduce_task_slots` precedence.
-        let mut first_exit: Option<(usize, i32)> = self.pending_exit.take().map(|c| (faulted, c));
-        let mut first_fault: (usize, RuntimeError) = (faulted, err);
-        let cancel = Arc::new(AtomicBool::new(true));
-        let n = self
-            .scheduler_stack
-            .last()
-            .expect("scheduler level present")
-            .children
-            .len();
-        for i in 0..n {
-            if i == faulted || matches!(self.child_state(i), FiberState::Done) {
-                continue;
-            }
-            self.cancel = Some(Arc::clone(&cancel));
-            self.cancelled = false;
-            self.pending_exit = None;
-            let r = self.run_child(i);
-            if let Err(e) = r
-                && !self.cancelled
-                && i < first_fault.0
-            {
-                // A real fault (not the cancel unwind) from a sibling AHEAD of the faulter: M:N's
-                // slot reduction reports the lowest-index fault, so serial must too.
-                first_fault = (i, e);
-            }
-            if let Some(code) = self.pending_exit.take() {
-                // The child's `defer` (or its cancelled-but-still-running body) called `os.exit` —
-                // carry the code (M:N's `Exit` arm does the same); never discard it.
-                if first_exit.is_none_or(|(j, _)| i < j) {
-                    first_exit = Some((i, code));
-                }
-            }
-        }
-        self.cancel = None; // `run_scheduler` restores the enclosing scope's flag on the way out
-        match first_exit {
-            Some((_, code)) => {
-                self.pending_exit = Some(code);
-                self.err("exit".to_string(), Span::RUNTIME)
-            }
-            None => first_fault.1,
-        }
-    }
-
-    fn child_state(&self, i: usize) -> &FiberState {
-        &self
-            .scheduler_stack
-            .last()
-            .expect("scheduler level present")
-            .children[i]
-            .state
-    }
-
-    pub(super) fn all_children_done(&self) -> bool {
-        self.scheduler_stack
-            .last()
-            .expect("scheduler level present")
-            .children
-            .iter()
-            .all(|c| matches!(c.state, FiberState::Done))
-    }
-
-    /// Run (start or resume) child `i` of the top scheduler level until it completes or blocks. The
-    /// child is taken out of the level (replaced by a `Done` placeholder) so its context can be
-    /// swapped into `self.*` without holding a `scheduler_stack` borrow across the run — a nested
-    /// `parallel:` pushes/pops its own level meanwhile. On return the child's context is parked back
-    /// and its new state recorded.
-    pub(super) fn run_child(&mut self, i: usize) -> Result<(), RuntimeError> {
-        let mut child = {
-            let level = self
-                .scheduler_stack
-                .last_mut()
-                .expect("scheduler level present");
-            std::mem::replace(
-                &mut level.children[i],
-                Fiber {
-                    ctx: FiberCtx::default(),
-                    state: FiberState::Done,
-                    task_index: i,
-                    scope_id: 0,
-                    span: Span::RUNTIME,
-                    resume_native: None,
-                },
-            )
-        };
-        self.swap_ctx(&mut child.ctx); // self.* = child's execution context
-        self.suspend = None; // clear any prior wait before (re)running
-        self.wait_suspend = None;
-        self.send_suspend = None;
-        // `wait` (§6d) multi-channel park: this fiber may be filed under SEVERAL `blocked_on` keys.
-        // A sibling `send` to ONE of them woke it (draining only that bucket); sweep the index out of
-        // every other bucket here, before it re-runs, so a later `send` to one of those channels can
-        // never re-wake a fiber that already moved on (the doc's "swept out of the other buckets").
-        // A no-op for an ordinary single-`recv` park (already removed from its one bucket by the wake).
-        if let Some(level) = self.scheduler_stack.last_mut() {
-            for bucket in level.blocked_on.values_mut() {
-                bucket.retain(|&x| x != i);
-            }
-            level.blocked_on.retain(|_, v| !v.is_empty());
-        }
-        let outcome = match std::mem::replace(&mut child.state, FiberState::Ready) {
-            FiberState::Pending(task) => self.start_task(task),
-            // Resume: the saved frames replay via the rewound `recv` op and ordinary `Return`s — no
-            // host-stack nesting is rebuilt (run_until is frame-count driven).
-            FiberState::Ready | FiberState::Blocked => self.run_until(0),
-            FiberState::Done => unreachable!("run_child on a Done fiber"),
-        };
-        self.swap_ctx(&mut child.ctx); // park the (possibly-suspended) context back into the child
-        // D0: a run always ends `Done` or `Blocked` (never left `Ready`), so a finished child is
-        // simply dropped from scheduling; a blocked child registers in `blocked_on` under its
-        // channel's core pointer so a sibling `send` can re-add it to `ready` ([`wake_on_send`]).
-        let result = match outcome {
-            Ok(()) => {
-                child.state = if let Some(handles) = self.wait_suspend.take() {
-                    // `wait` blocking park: file this child under EVERY live arm-channel key, so a
-                    // sibling that frees the gap re-runs the `WaitPoll` (which re-polls source order).
-                    // Kind-agnostic here — a recv waiter wakes on a `send`, a send waiter on a `recv`
-                    // (both drain `blocked_on[key]` via `wake_on_send`/`wake_senders`); the re-poll
-                    // sorts out which arm is actually ready.
-                    for (h, _is_send) in handles {
-                        let key = self.channel_core_ptr(h);
-                        self.scheduler_stack
-                            .last_mut()
-                            .expect("scheduler level present")
-                            .blocked_on
-                            .entry(key)
-                            .or_default()
-                            .push(i);
-                    }
-                    FiberState::Blocked
-                } else {
-                    // A `recv` park (`suspend`) OR a full-bounded-`send` park (`send_suspend`): both
-                    // file under the channel key so a sibling that frees the gap (`send` for a recv
-                    // waiter, `recv` for a send waiter — both drain `blocked_on[key]` via
-                    // `wake_on_send`/`wake_senders`) re-runs this fiber, which re-checks + proceeds.
-                    match self.suspend.take().or_else(|| self.send_suspend.take()) {
-                        Some(h) => {
-                            let key = self.channel_core_ptr(h);
-                            self.scheduler_stack
-                                .last_mut()
-                                .expect("scheduler level present")
-                                .blocked_on
-                                .entry(key)
-                                .or_default()
-                                .push(i);
-                            FiberState::Blocked
-                        }
-                        None => FiberState::Done,
-                    }
-                };
-                Ok(())
-            }
-            Err(e) => {
-                child.state = FiberState::Done;
-                Err(e)
-            }
-        };
-        self.scheduler_stack
-            .last_mut()
-            .expect("scheduler level present")
-            .children[i] = child;
-        result
-    }
-
     /// D0 — the `ChannelCore` identity (`Arc::as_ptr as usize`) behind a channel handle, the stable
     /// key for [`Nursery::blocked_on`]. Stable across the distinct `GcRef`s sibling fibers hold for
     /// the same channel (cooperative `spawn` deep-clones the handle onto the shared `Arc`).
@@ -2495,11 +2178,8 @@ impl Vm {
         }
     }
 
-    /// D0 — a `send` into channel `h` may unblock siblings parked on its `recv`. Drain the matching
-    /// `blocked_on` bucket back onto `ready` for **every** scheduler level (not just the innermost):
-    /// a fiber nested in an inner `parallel:` can `send` to a channel an outer-level sibling parked
-    /// on, and that outer fiber must become runnable once control unwinds back to its level. No-op
-    /// under `--parallel` (workers never push `scheduler_stack`) and when no sibling is parked.
+    /// D0 — a `send` into channel `h` may unblock fibers parked on its `recv`. Wake the matching
+    /// bucket on every live `MnSched`.
     pub(super) fn wake_on_send(&mut self, h: GcRef) {
         let key = self.channel_core_ptr(h);
         // W7-56 — this VM has no sched in scope (that is the only branch that calls here), but the
@@ -2527,14 +2207,6 @@ impl Vm {
                 for s in live {
                     s.wake_key(key);
                 }
-            }
-        }
-        if self.scheduler_stack.is_empty() {
-            return;
-        }
-        for level in &mut self.scheduler_stack {
-            if let Some(woken) = level.blocked_on.remove(&key) {
-                level.ready.extend(woken);
             }
         }
     }
@@ -2580,7 +2252,7 @@ impl Vm {
     /// requires `mn_enlist_sched.is_none()`, which is false for the very builder that owns an
     /// early-enlisted scope — the commonest owner there is. What `quiesce`'s `live` actually counts is
     /// "threads with no scheduler UNDER them": top-level `main` (the `1 +`) and an eager `Executor`
-    /// job (the `Σ outstanding`). That is exactly `mn.is_none() && scheduler_stack.is_empty()`.
+    /// job (the `Σ outstanding`). That is exactly `mn.is_none()`.
     ///
     /// **A worker SHELL (`mn.is_some()`) must never register.** It is not in `live`, so registering it
     /// would let `parties.len()` exceed `live` — the one error direction that faults a live program.
@@ -2596,7 +2268,7 @@ impl Vm {
         &self,
         sched: &Arc<MnSched>,
     ) -> Option<crate::vm::quiesce::PartyGuard> {
-        (self.mn.is_none() && self.scheduler_stack.is_empty()).then(|| {
+        self.mn.is_none().then(|| {
             self.quiesce
                 .block(crate::vm::quiesce::PartyWait::Nursery(Arc::clone(sched)))
         })
@@ -3922,7 +3594,6 @@ impl Vm {
         worker.set_timeout(self.timeout_ms);
         // Workers run on the pool too, so a nested `parallel:` inside a task recurses onto threads
         // (and a worker's `recv` blocks on the condvar, not a fiber). B3.3-threads.
-        worker.parallel = self.parallel;
         // W7-5b — SHARE (not copy) the run's executor registry, so an `Executor` constructed inside a
         // task is still reachable by the program-exit join after this worker's heap is gone. This is
         // the whole fix: the parallel `Vm.executors` list is heap-keyed and dies with the task.
@@ -4032,7 +3703,7 @@ impl Vm {
     /// the CURRENT (parent/shell) heap: home indices resolve against `self.module_objs`, and every
     /// crossing value goes through `to_wire`/`ensure_crossable` (rejecting a non-isolable callee). Split
     /// out of [`Vm::prepare_worker`] so the serial engine can reuse the exact M:N lowering
-    /// ([`Vm::prepare_serial_child`]) — a behavior-preserving extraction.
+    /// — a behavior-preserving extraction.
     ///
     /// W7-4: ONE [`WireMemo`] spans the whole lowering (closure captures + args, or receiver + args),
     /// matched by ONE rebuild map in [`rebuild_ready`](Vm::rebuild_ready). Per-value memos re-split a
@@ -4161,9 +3832,8 @@ impl Vm {
 
     /// PHASE 3 of task preparation — rebuild a [`Lowered`] task's callable/receiver + args INTO THIS
     /// VM's heap, resolving home indices against `self.module_objs` (the just-installed module view).
-    /// Split out of [`Vm::prepare_worker`] so both the M:N worker (into its own heap) and the serial
-    /// child (into the shared heap, under a per-child module view — [`Vm::prepare_serial_child`]) reuse
-    /// the identical reconstruction. Infallible (all crossing checks happened in [`Vm::lower_task`]).
+    /// Split out of [`Vm::prepare_worker`]. Infallible (all crossing checks happened in
+    /// [`Vm::lower_task`]).
     ///
     /// W7-4: ONE rebuild map spans the whole `Lowered`, mirroring `lower_task`'s single [`WireMemo`]
     /// and reconstructing in the SAME order it serialized (a `Call`'s args before the callee's
@@ -4242,153 +3912,6 @@ impl Vm {
             self.snapshot_rebuild = owned;
         }
         out
-    }
-
-    /// Task 1 — the SERIAL analogue of [`Vm::prepare_worker`]: deep-copy this module graph into a fresh
-    /// per-child `module_objs` view **in the SHARED heap** (not a separate worker heap), so a cooperative
-    /// child mutates its OWN copy of every module global — making `serial == M:N` by construction. Reuses
-    /// the exact `to_snap` lowering (so `Shared`/`Atomic`/`Channel`/`Cffi` still cross by shared `Arc`,
-    /// NOT by deep copy — the escape hatch) and the eager `fault_module` replay.
-    ///
-    /// Returns the re-homed [`PendingCall`] (callee/receiver/args now point at the child's module copy)
-    /// plus the child's `module_objs` + `module_faulted`, which the caller stores in the child's
-    /// [`FiberCtx`] so they swap in per-fiber via [`Vm::swap_ctx`].
-    ///
-    /// GC-safe: no dispatch safepoint runs between install and restore (allocation never collects
-    /// inline — only [`Vm::run_until`] does), so the shell's real modules parked in `saved_objs` cannot
-    /// be swept during the window. The child modules are reachable via `self.module_objs` while being
-    /// built; once installed in a `FiberCtx`, `root_ctx` roots them.
-    pub(super) fn prepare_serial_child(
-        &mut self,
-        task: PendingCall,
-        snap: Arc<ModuleSnapshot>,
-        cell_ids: &[(GcRef, u32)],
-    ) -> Result<(PendingCall, Vec<GcRef>, Vec<bool>), RuntimeError> {
-        // Phase 1: lower against the SHELL's live module_objs (home indices resolve to the parent).
-        let lowered = self.lower_task(task, cell_ids)?;
-        // Phase 2: install a fresh child module view into the SHARED heap and eager-fault every global,
-        // materializing the deep copy. The child's `FiberCtx` carries NO snapshot (W6-2: `module_snapshot`
-        // swaps per fiber, and a cooperative child's is `None`) — else `ensure_module_faulted` would try
-        // to lazy-fault the shell's REAL modules. Eager fault + `None` sidesteps all lazy machinery; the
-        // take/restore below is what keeps THIS (parent) VM's own snapshot out of the child's window.
-        let saved_objs = std::mem::take(&mut self.module_objs);
-        let saved_faulted = std::mem::take(&mut self.module_faulted);
-        let saved_snap = self.module_snapshot.take();
-        // W6-2 — the cache describes the view, so it rides the same take/restore: the child's view must
-        // not leave its snapshot cached on the parent (and vice versa).
-        let saved_memo = self.snapshot_memo.take();
-        // W7-4a — and so does the rebuild map (see `with_serial_child_modules`). The child's map is
-        // DROPPED on the way out: every cell in it is reachable from `child_objs`, which the child
-        // fiber carries and `root_ctx` roots, so nothing is lost — and leaving it on the shell would
-        // tie the shell's next view to this child's private copy.
-        let saved_rebuild = std::mem::take(&mut self.snapshot_rebuild);
-        // W7-4c — the registry is keyed to the SHELL's heap objects; the child's window must not see
-        // or clobber it (`install_snapshot` clears it, `module_define` in the fault loop clears it).
-        let saved_cells = std::mem::take(&mut self.snapshot_cells);
-        let saved_next_id = self.snapshot_next_id;
-        self.install_snapshot(snap);
-        // W7-4c — REBUILD THE TASK'S OWN CROSSING FIRST, then fault the modules. `from_wire_memo`'s
-        // `Cell` arm is FIRST-WINS, so with one shared rebuild map the writer that runs first decides
-        // the shared cell's VALUE — and the two crossings can hold DIFFERENT values for one binding: a
-        // write through a cell does not drop `snapshot_memo` (only a module-SLOT write does), so a
-        // cached snapshot can carry a stale cell while the task's clone carries the value at its own
-        // `spawn`. The task's clone is the correct one (CPython: a task sees the binding as of its
-        // spawn), and M:N already produced it — it rebuilds here and faults lazily afterwards. Serial
-        // faulted first and so kept the STALE snapshot value: `0` where CPython and M:N both measure
-        // `1`, an engine divergence AND a regression against serial's own pre-W7-4c answer. Ordering
-        // the two the same way on both engines is what makes the shared map safe.
-        //
-        // Safe to move: `rebuild_ready` resolves homes through `worker_home`, which needs the module
-        // OBJECTS (pre-alloced empty by `install_snapshot` just above), not their contents.
-        let (call, span) = self.rebuild_ready(lowered, !cell_ids.is_empty());
-        for i in 0..self.module_objs.len() {
-            self.fault_module(i);
-        }
-        self.module_snapshot = None;
-        // Capture the child view, restore the shell's real modules/snapshot.
-        let child_objs = std::mem::replace(&mut self.module_objs, saved_objs);
-        let child_faulted = std::mem::replace(&mut self.module_faulted, saved_faulted);
-        self.module_snapshot = saved_snap;
-        self.snapshot_memo = saved_memo;
-        self.snapshot_rebuild = saved_rebuild;
-        self.snapshot_cells = saved_cells;
-        self.snapshot_next_id = saved_next_id;
-        let pending = match call {
-            ReadyCall::Invoke { callee, args } => PendingCall::Call { callee, args, span },
-            ReadyCall::Method { recv, name, args } => PendingCall::Method {
-                recv,
-                name,
-                args,
-                span,
-            },
-        };
-        Ok((pending, child_objs, child_faulted))
-    }
-
-    /// Task 1 (Executor path) — run `body` with a fresh per-task child `module_objs` view installed in
-    /// the SHARED heap (a deep copy of every module global via `snap`), then restore the shell's real
-    /// modules on every path. The SERIAL cooperative analogue of the M:N `prepare_worker_from_wire` →
-    /// own-heap snapshot: an `Executor` task drained inline on the cooperative engine mutates its OWN
-    /// module-global copy — so `serial == M:N` for a module global mutated from a submitted closure,
-    /// exactly like the nursery path ([`Vm::prepare_serial_child`]). Both the `from_wire` rebuild of the
-    /// task closure AND its `invoke_value` must run inside `body` so its `home` resolves to — and its
-    /// mutations land on — the child copy. Reuses `to_snap`/`install_snapshot`, so `Shared`/`Atomic`/
-    /// `Channel`/`Cffi` module globals still cross by shared `Arc` (the escape hatch), never deep-copied.
-    ///
-    /// GC-safe: `self.module_objs` (swapped to the child view for the duration) is a GC root, so the
-    /// child copy survives an alloc-triggered collection during the task's `invoke_value`; the shell's
-    /// real modules parked in `saved_objs` are only swept if unrooted, but they are restored before any
-    /// safepoint runs on the shell again.
-    pub(super) fn with_serial_child_modules<R>(
-        &mut self,
-        snap: Arc<ModuleSnapshot>,
-        body: impl FnOnce(&mut Self) -> R,
-    ) -> R {
-        // Install a fresh child module view into the SHARED heap and eager-fault every global (the same
-        // dance as `prepare_serial_child`). The task body runs on THIS VM (no fiber swap), so clear
-        // `module_snapshot` after eager-faulting — else `ensure_module_faulted` would try to lazy-fault the
-        // shell's REAL modules once we restore them below.
-        let saved_objs = std::mem::take(&mut self.module_objs);
-        // GC PIN (Task 1 fix): this window can run with EMPTY frames (the serial `Executor` exit-drain,
-        // after `run()` pops the top-level frame), so the shell's real modules — now only in `saved_objs`
-        // — are rooted by nothing. `install_snapshot`/`fault_module`/`body` all allocate on the SHARED
-        // heap and can trip a safepoint GC; without this pin those modules get swept and the restore
-        // below reinstalls dangling `GcRef`s (use-after-free). `collect()` scans `pinned_module_roots`.
-        // NOT panic-safe: a raw Rust unwind through `body` skips the `truncate`/restore below, leaving
-        // `pinned_module_roots` + `module_objs` corrupt. Safe today — `guarded` re-raises panics and the
-        // serial VM is discarded on unwind (no catch-and-reuse); recoverable faults return via `Err`,
-        // which restores cleanly. Revisit if serial-VM panic recovery is ever added.
-        // Append (not assign) so a NESTED serial drain — an Executor job that drains another Executor —
-        // keeps every outer level's shell modules pinned too; truncate back to the base on exit.
-        let pin_base = self.pinned_module_roots.len();
-        self.pinned_module_roots.extend_from_slice(&saved_objs);
-        let saved_faulted = std::mem::take(&mut self.module_faulted);
-        let saved_snap = self.module_snapshot.take();
-        // W6-2 — the snapshot cache describes the view, so it rides the same take/restore dance.
-        let saved_memo = self.snapshot_memo.take();
-        // W7-4a — so does the rebuild map: it holds the CHILD view's cells, and leaking them onto the
-        // shell would tie a later shell-view replay to cells from a dead child copy.
-        let saved_rebuild = std::mem::take(&mut self.snapshot_rebuild);
-        // W7-4c — the registry is keyed to the SHELL's heap objects; the child's window must not see
-        // or clobber it (`install_snapshot` clears it, `module_define` in the fault loop clears it).
-        let saved_cells = std::mem::take(&mut self.snapshot_cells);
-        let saved_next_id = self.snapshot_next_id;
-        self.install_snapshot(snap);
-        for i in 0..self.module_objs.len() {
-            self.fault_module(i);
-        }
-        self.module_snapshot = None;
-        let r = body(self);
-        // Restore the shell's real modules/snapshot (the child copy is dropped — GC reclaims it).
-        self.pinned_module_roots.truncate(pin_base);
-        self.module_objs = saved_objs;
-        self.module_faulted = saved_faulted;
-        self.module_snapshot = saved_snap;
-        self.snapshot_memo = saved_memo;
-        self.snapshot_rebuild = saved_rebuild;
-        self.snapshot_cells = saved_cells;
-        self.snapshot_next_id = saved_next_id;
-        r
     }
 
     /// B3.6 — the `Executor`-drain analogue of [`prepare_worker`]: build a worker, install the shared
@@ -5295,7 +4818,7 @@ impl Vm {
         // every module that references the cell, which is what `try_wire_speculative`'s `emit_undo`
         // journal guarantees (a discarded attempt must not leave a forged `emitted` marking).
         // Taken out of `self` for the borrow and put back below; it lives
-        // on the `Vm` (rooted by `collect`/`root_ctx`) because a cell built by this fault can sit in it
+        // on the `Vm` (rooted by `collect`) because a cell built by this fault can sit in it
         // across a safepoint before a later module's fault ties to it.
         let mut rb = std::mem::take(&mut self.snapshot_rebuild);
         // W7-4b — this replay is a WHOLE crossing (the module's globals under the one memo that

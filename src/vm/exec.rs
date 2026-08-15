@@ -119,7 +119,6 @@ impl Vm {
             fault_trace: None,
             fault_trace_depth: 0,
             gc_stress: false,
-            parallel: false,
             nurseries: Vec::new(),
             mn_scopes: Vec::new(),
             mn_enlisted: 0,
@@ -149,7 +148,6 @@ impl Vm {
             active_generators: Vec::new(),
             wid: 0,         // D5 owe #3 (Path C) — set in mn_worker_loop
             demoted: false, // D5 owe #3 (Path C)
-            scheduler_stack: Vec::new(),
             cancel: None,
             cancel_outer: Vec::new(),
             cancelled: false,
@@ -217,20 +215,15 @@ impl Vm {
         std::mem::swap(&mut self.eager_scheds, &mut ctx.eager_scheds);
         std::mem::swap(&mut self.fault_trace, &mut ctx.fault_trace);
         std::mem::swap(&mut self.fault_trace_depth, &mut ctx.fault_trace_depth);
-        // stdin is NOT swapped: it is ONE source every task shares (Go/Python), so a cooperative
-        // fiber reads the same `Vm::host.stdin` the entry task does — see `Stdin` and `spawn_worker`,
-        // which hands the M:N worker the same shared handle.
+        // stdin is NOT swapped: it is ONE source every task shares (Go/Python) — see `Stdin` and
+        // `spawn_worker`, which hands the M:N worker the same shared handle.
         //
-        // Task 1 — the fiber's module-globals view swaps for EVERY fiber, cooperative OR M:N. A serial
-        // child now carries its OWN deep-copied `module_objs` (allocated in the shared heap by
-        // `prepare_serial_child`) so its module-global mutations hit its private copy — `serial == M:N`
-        // by construction. (For M:N these `GcRef`s index the fiber's own heap swapped just below; for a
-        // cooperative fiber they index the shared heap. Either way they travel WITH the fiber.) The
-        // parent's REAL modules move into `ctx.module_objs` on its swap-out and are GC-rooted there by
-        // `root_ctx`. W6-2 — `module_snapshot` + `snapshot_memo` swap WITH them: a snapshot describes a
+        // Task 1 — the fiber's module-globals view swaps for EVERY fiber; those `GcRef`s index the
+        // fiber's own heap, swapped just below, so they travel WITH the fiber. The parent's REAL
+        // modules move into `ctx.module_objs` on its swap-out. W6-2 — `module_snapshot` + `snapshot_memo` swap WITH them: a snapshot describes a
         // module VIEW, and one shell drains fibers holding DIFFERENT views, so each must fault in (and
-        // re-snapshot) from its OWN. They carry no `GcRef` (heap-independent `SnapValue`), so `root_ctx`
-        // is unaffected.
+        // re-snapshot) from its OWN. They carry no `GcRef` (heap-independent `SnapValue`), so GC
+        // rooting is unaffected.
         std::mem::swap(&mut self.module_objs, &mut ctx.module_objs);
         std::mem::swap(&mut self.module_faulted, &mut ctx.module_faulted);
         std::mem::swap(&mut self.module_snapshot, &mut ctx.module_snapshot);
@@ -253,10 +246,6 @@ impl Vm {
         // the fiber's remaining heap-keyed side state (out/stderr/executors/intern), so they move
         // atomically WITH the heap their `GcRef`s index. A cooperative fiber swaps none of that.
         if let Some(ctx_heap) = ctx.heap.as_mut() {
-            debug_assert!(
-                self.parallel,
-                "cooperative fiber must never carry its own heap (decision A)"
-            );
             std::mem::swap(&mut self.heap, ctx_heap);
             std::mem::swap(&mut self.out, &mut ctx.out);
             std::mem::swap(&mut self.stderr, &mut ctx.stderr);
@@ -726,13 +715,6 @@ impl Vm {
         Vm::new(program)
     }
 
-    /// `chezzi test` — select the engine before `init_for_tests`: `false` = cooperative serial VM,
-    /// `true` = M:N OS-thread VM (must run on a [`crate::vm::on_vm_stack`] thread). The dual-engine
-    /// gate runs the same suite both ways and asserts identical per-test outcomes (serial == M:N).
-    pub fn set_parallel(&mut self, on: bool) {
-        self.parallel = on;
-    }
-
     /// `chezzi test --max-heap=<N>` — set the per-test live-heap cap in bytes (`0` = OFF, the
     /// default). A test whose live heap exceeds `N` is hard-aborted (bypassing `recover:`) and
     /// bucketed `OverMemory`. Deterministic-in-VM (not OS RSS). The trip point is a per-heap
@@ -793,7 +775,7 @@ impl Vm {
     /// shut down), mirroring the ordinary run's graceful reap. Best-effort: ignore drain faults so a
     /// stray resource doesn't mask the test verdict.
     pub fn reap_after_tests(&mut self) {
-        let _ = self.drain_live_executors(Span::RUNTIME);
+        let _ = self.drain_live_executors();
     }
 
     pub(super) fn run_module(&mut self, idx: usize) -> Result<(), RuntimeError> {
@@ -1417,43 +1399,6 @@ impl Vm {
     /// Mark-sweep collection. Roots: the whole operand stack (which contains every frame's local
     /// slots *and* any in-flight expression temporaries), each frame's home module + backing
     /// closure, and the module namespace cache. Everything else is garbage.
-    /// Collect the GC roots held in a parked fiber context (B1): operand-stack objects, each frame's
-    /// home/closure and pending deferred calls, and not-yet-run nursery tasks. Mirrors the
-    /// live-context rooting in [`Vm::collect`].
-    pub(super) fn root_ctx(ctx: &FiberCtx, work: &mut Vec<GcRef>) {
-        for v in &ctx.stack {
-            if let Some(h) = v.child_gcref() {
-                work.push(h);
-            }
-        }
-        for f in &ctx.frames {
-            work.push(f.home);
-            if let Some(c) = f.closure {
-                work.push(c);
-            }
-            for d in &f.deferred {
-                work.extend(d.roots());
-            }
-        }
-        for nursery in &ctx.nurseries {
-            for task in nursery {
-                work.extend(task.roots());
-            }
-        }
-        // Task 1 — a cooperative fiber now carries its OWN deep-copied module globals (allocated in the
-        // SHARED heap by `prepare_serial_child`), reachable ONLY via this `FiberCtx` while the fiber is
-        // parked. Root them or a sibling's alloc-triggered GC would sweep the child's live module copy
-        // (and, after the parent's swap-out, the REAL modules parked in `nursery.parent.module_objs`).
-        work.extend(ctx.module_objs.iter().copied());
-        // W7-4a — same argument as `ctx.module_objs`: a cooperative fiber's rebuild map indexes the
-        // SHARED heap, so root it where the view is rooted. Empty in practice (a cooperative child is
-        // eager-faulted with `module_snapshot` cleared), and belt-and-braces even when not — see the
-        // matching note in `collect`.
-        work.extend(ctx.snapshot_rebuild.values().copied());
-        // W7-4c — and the registry's keys, for the reason in `collect`.
-        work.extend(ctx.snapshot_cells.keys().copied());
-    }
-
     pub(super) fn collect(&mut self) {
         let mut work: Vec<GcRef> = Vec::new();
         for v in &self.stack {
@@ -1523,36 +1468,6 @@ impl Vm {
         // in `deep_clone_all`/`lower_task` would then identify with the dead cell's id and merge into
         // the wrong binding. A rooted key is never swept, so never recycled.
         work.extend(self.snapshot_cells.keys().copied());
-        // Parked fibers in active cooperative schedulers (B1/B2): each level's joining-fiber context
-        // plus every child fiber's context are roots while the children run. The CURRENTLY running
-        // fiber's context is the live `self.{stack,frames,nurseries}` already rooted above; a parked
-        // fiber's context lives in its `FiberCtx` (or, for a not-yet-started child, in its `Pending`
-        // task). Without this, a blocked fiber's locals would be swept while it waits.
-        // D2a — `scheduler_stack` is the COOPERATIVE engine's parked fibers, which all alias this
-        // single `self.heap` (decision A), so `root_ctx` traces their roots into it directly. They
-        // carry no heap of their own (`ctx.heap == None`); a parked M:N fiber (D2b) instead owns a
-        // share-nothing heap that lives off this `Vm` and is quiescent while parked — it is NEVER
-        // traced cross-heap here, only collected when that fiber is next scheduled in and runs its
-        // own `run_until` safepoint. (A `--parallel` worker `Vm` has an empty `scheduler_stack`, so
-        // this loop is a no-op on workers.)
-        for nursery in &self.scheduler_stack {
-            debug_assert!(
-                nursery.parent.heap.is_none(),
-                "a cooperative parked fiber must not own a heap (decision A)"
-            );
-            Self::root_ctx(&nursery.parent, &mut work);
-            for child in &nursery.children {
-                debug_assert!(
-                    child.ctx.heap.is_none(),
-                    "a cooperative child fiber must not own a heap (decision A)"
-                );
-                Self::root_ctx(&child.ctx, &mut work);
-                if let FiberState::Pending(task) = &child.state {
-                    work.extend(task.roots());
-                }
-            }
-        }
-
         while let Some(h) = work.pop() {
             if self.heap.mark(h) {
                 work.extend(self.heap.children(h));
@@ -1717,9 +1632,8 @@ impl Vm {
     /// children die at their first checkpoint and the cleanup is silently truncated through the back
     /// door. The `deferring > 0` suppression that makes a defer uncancellable is per-VM and does NOT
     /// cross the airlock into a worker fiber (a fresh `Vm` with `deferring == 0`), so the severance has
-    /// to happen HERE, where the child's flag chain is built. The serial engine severs identically
-    /// (`run_scheduler`'s `in_defer` → `self.cancel.take()`, sched.rs) — that is what this keeps parity
-    /// with. The defer's OWN nursery still gets a fresh flag, so it can cancel its own children.
+    /// to happen HERE, where the child's flag chain is built. The defer's OWN nursery still gets a
+    /// fresh flag, so it can cancel its own children.
     /// `Op::EnterNursery` — outlined from the dispatch `match` deliberately.
     ///
     /// §2c1 grew this arm from three lines to a page, and `run_until`'s hot loop pays for every arm's
@@ -1770,7 +1684,7 @@ impl Vm {
         //
         // A top-level nursery has no outer worker to starve and creates exactly ONE drainer per
         // thread, so it is unconditional.
-        let eager = self.parallel && (self.mn.is_none() || worker_count() >= 2);
+        let eager = self.mn.is_none() || worker_count() >= 2;
         // `flatten` — `activate_eager_nursery` returns `None` if the OS refuses its drainer
         // thread, which falls back to the lazy queue-at-join path rather than leaving a
         // worker-less eager scope that would hang a blocking body.

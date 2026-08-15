@@ -311,7 +311,7 @@ fn cmd_run(args: &[String]) -> ExitCode {
     cfg.stream = true;
     let (errored, exit_code) = {
         let (_out, _err, result, code) =
-            vm::run_file_with_entry(p, cfg, true, entry_fn.as_deref(), root_override.clone());
+            vm::run_file_with_entry(p, cfg, entry_fn.as_deref(), root_override.clone());
         (
             result
                 .err()
@@ -496,7 +496,7 @@ fn cmd_test(args: &[String]) -> ExitCode {
     }
     let root = path.unwrap_or_else(|| ".".to_string());
     // The engine is the M:N OS-thread VM, matching `chezzi run` — the sole engine.
-    let report = test_runner::run_tests_opts(std::path::Path::new(&root), true, opts);
+    let report = test_runner::run_tests_opts(std::path::Path::new(&root), opts);
     print!("{}", report.text);
     if report.passed {
         ExitCode::SUCCESS
@@ -1027,13 +1027,8 @@ mod init_tests {
         // The scaffolded main.chz no longer self-calls `main` — the manifest's `:main` entrypoint
         // does. Running the FILE directly is scripting-mode (top-level only): it defines `main` but
         // prints nothing.
-        let (stdout, stderr, result, _exit) = vm::run_file_with_entry(
-            &main,
-            native::HostConfig::from_process(vec![]),
-            false,
-            None,
-            None,
-        );
+        let (stdout, stderr, result, _exit) =
+            vm::run_file_with_entry(&main, native::HostConfig::from_process(vec![]), None, None);
         assert!(
             result.is_ok(),
             "scaffolded main.chz must load; stderr:\n{stderr}"
@@ -1047,7 +1042,6 @@ mod init_tests {
         let (stdout, stderr, result, _exit) = vm::run_file_with_entry(
             &main,
             native::HostConfig::from_process(vec![]),
-            false,
             Some("main"),
             None,
         );
@@ -1061,7 +1055,7 @@ mod init_tests {
         );
 
         // And run the scaffolded test file through the real `chezzi test` runner: both pass.
-        let report = test_runner::run_tests(&d.0, true);
+        let report = test_runner::run_tests(&d.0);
         assert!(
             report.passed,
             "scaffolded tests must pass; report:\n{}",
@@ -1112,7 +1106,6 @@ mod init_tests {
         let (stdout, stderr, result, _exit) = vm::run_file_with_entry(
             &entry,
             native::HostConfig::from_process(vec![]),
-            false,
             Some(entry_fn.unwrap()),
             None,
         );
@@ -1126,7 +1119,6 @@ mod init_tests {
         let (_o, _e, result, _exit) = vm::run_file_with_entry(
             &entry,
             native::HostConfig::from_process(vec![]),
-            false,
             Some("nope"),
             None,
         );

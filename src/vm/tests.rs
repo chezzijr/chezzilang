@@ -2124,7 +2124,6 @@ fn parallel_recv_blocks_until_send_wakes_it() {
     let mut sender = Vm::new(Arc::new(empty_program()));
     let sh = sender.heap.alloc(Obj::Channel(Arc::clone(&core)));
     let mut worker = Vm::new(Arc::new(empty_program()));
-    worker.parallel = true;
     let wh = worker.heap.alloc(Obj::Channel(Arc::clone(&core)));
     let sp = Span::RUNTIME;
     // Queue first, then hand the receiving `Vm` to another thread: the value is already in the
@@ -2691,7 +2690,6 @@ main()
 #[test]
 fn swap_ctx_round_trips_an_mn_fiber_heap() {
     let mut vm = Vm::new(Arc::new(empty_program()));
-    vm.parallel = true; // M:N fibers only carry their own heap under --parallel (decision A).
     let hv = vm.heap.alloc(Obj::Str("vm-obj".into()));
 
     let mut fiber_heap = Heap::new();
@@ -2720,7 +2718,6 @@ fn swap_ctx_round_trips_an_mn_fiber_heap() {
 #[test]
 fn mn_swap_ctx_round_trips_fiber_side_state() {
     let mut vm = Vm::new(Arc::new(empty_program()));
-    vm.parallel = true;
     vm.out.extend_from_slice(b"host-out");
     vm.stderr.extend_from_slice(b"host-err");
     let host_mod = vm.heap.alloc(Obj::Str("host-mod".into()));
@@ -2780,7 +2777,6 @@ fn mn_swap_ctx_round_trips_fiber_side_state() {
 #[test]
 fn eager_scope_round_trips_with_fiber_ctx() {
     let mut vm = Vm::new(Arc::new(empty_program()));
-    vm.parallel = true;
     let host_sched = Arc::new(mk_sched(0));
     vm.eager_scheds.push(Some(EagerScope {
         sched: Arc::clone(&host_sched),
@@ -2828,7 +2824,7 @@ fn eager_scope_round_trips_with_fiber_ctx() {
 /// fiber (`heap: None`) still leaves the shell's HEAP-GATED side state (`out`/`executors`) untouched —
 /// but `module_objs`/`module_faulted` now swap UNCONDITIONALLY (Task 1: a serial child carries its own
 /// deep-copied module view). So swapping in a child with an empty view parks the host's REAL modules
-/// into the ctx (where `root_ctx` keeps them rooted).
+/// into the ctx.
 #[test]
 fn mn_swap_ctx_swaps_module_objs_but_not_heap_gated_state_for_cooperative_fiber() {
     let mut vm = Vm::new(Arc::new(empty_program()));
@@ -7796,17 +7792,6 @@ fn w758_only_a_thread_with_no_scheduler_under_it_registers_a_nursery_party() {
         vm.nursery_party_guard(&sched).is_none(),
         "a worker SHELL is not in `live` — registering it would let parties exceed live"
     );
-    vm.mn = None;
-    vm.scheduler_stack.push(crate::vm::Nursery {
-        parent: FiberCtx::default(),
-        children: Vec::new(),
-        ready: Default::default(),
-        blocked_on: Default::default(),
-    });
-    assert!(
-        vm.nursery_party_guard(&sched).is_none(),
-        "a cooperative nursery level under this VM means it does not own the thread"
-    );
 }
 
 /// D2b: `finish` records a task's outcome in its slot, drops it from `running`, and flips
@@ -7945,7 +7930,6 @@ fn swap_ctx_leaves_heap_untouched_for_cooperative_fiber() {
 #[test]
 fn collect_under_swapped_in_fiber_heap_preserves_parked_host_object() {
     let mut vm = Vm::new(Arc::new(empty_program()));
-    vm.parallel = true;
     let hv = vm.heap.alloc(Obj::Str("vm-obj".into()));
     vm.push(Value::obj(hv)); // keep the host object stack-rooted
 
@@ -7978,7 +7962,6 @@ fn collect_under_swapped_in_fiber_heap_preserves_parked_host_object() {
 #[test]
 fn collect_under_swapped_in_fiber_heap_leaves_parked_host_heap_quiescent() {
     let mut vm = Vm::new(Arc::new(empty_program()));
-    vm.parallel = true;
     // Rooted by nothing — a host-heap collect would sweep it.
     let garbage = vm.heap.alloc(Obj::Str("host-garbage".into()));
 
@@ -16754,7 +16737,7 @@ main()
     // `collect`; that root is belt-and-braces today — this test still passes without it, because
     // every entry is reachable from the global it was `module_define`d into. It is the LAZY-FAULT
     // window this run locks down, not the root line.)
-    let (stress_out, _se, stress_res, _) = run_file_stress(&entry, true);
+    let (stress_out, _se, stress_res, _) = run_file_stress(&entry);
     let _ = std::fs::remove_dir_all(&dir);
     assert!(vm_res.is_ok(), "serial faulted: {vm_res:?}");
     assert!(par_res.is_ok(), "M:N faulted: {par_res:?}");
@@ -16816,7 +16799,7 @@ main()
     .unwrap();
     let (vm_out, _e, vm_res, _) = run_file(&entry);
     let (par_out, _pe, par_res, _) = run_file_with(&entry, crate::native::HostConfig::default());
-    let (stress_out, _se, stress_res, _) = run_file_stress(&entry, true);
+    let (stress_out, _se, stress_res, _) = run_file_stress(&entry);
     let _ = std::fs::remove_dir_all(&dir);
     assert!(vm_res.is_ok(), "serial faulted: {vm_res:?}");
     assert!(par_res.is_ok(), "M:N faulted: {par_res:?}");

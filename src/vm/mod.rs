@@ -552,13 +552,6 @@ impl PendingCall {
             .chain(args.iter())
             .filter_map(|v| v.child_gcref())
     }
-
-    /// The spawning span of this task (D2b — carried onto the fiber for fault attribution).
-    fn span(&self) -> Span {
-        match self {
-            PendingCall::Call { span, .. } | PendingCall::Method { span, .. } => *span,
-        }
-    }
 }
 
 /// A task queued on a nursery: the call itself plus the [`ModuleSnapshot`] PINNED at its `spawn`.
@@ -604,11 +597,6 @@ impl QueuedTask {
     /// The GcRefs this pending task keeps alive — see [`PendingCall::roots`].
     fn roots(&self) -> impl Iterator<Item = GcRef> + '_ {
         self.call.roots()
-    }
-
-    /// The spawning span of this task (D2b — carried onto the fiber for fault attribution).
-    fn span(&self) -> Span {
-        self.call.span()
     }
 }
 
@@ -758,12 +746,6 @@ pub struct Vm {
     fault_trace_depth: usize,
     /// Test mode: collect before *every* instruction, to surface any missing GC root.
     gc_stress: bool,
-    /// B3.3-threads: `--parallel` engine selected. When set, `join_nursery` runs a nursery's tasks
-    /// on the real OS-thread pool (each in its own worker `Vm`) instead of cooperative fibers, and a
-    /// blocking `recv` on an empty channel waits on the channel's `Condvar` rather than parking a
-    /// fiber. Default `false` keeps the cooperative single-thread engine (decision A). Workers
-    /// inherit it (see [`Vm::spawn_worker`]) so nested `parallel:` recurses onto the pool too.
-    parallel: bool,
     /// Active `parallel:` nurseries (C4), innermost last. `EnterNursery` pushes; each `spawn`
     /// registers a [`QueuedTask`] on the innermost list; `JoinNursery` drains it FIFO at the
     /// dedent. Tasks are GC roots while pending. A `recover:` boundary truncates this stack back to
@@ -814,8 +796,8 @@ pub struct Vm {
     /// scheduler. It records the channel handle the running fiber is waiting on; `run_until` and the
     /// re-entrant call path break (without unwinding defers) when it is set, returning control to the
     /// scheduler so a sibling can run. Cleared by the scheduler when it resumes a fiber. It is a
-    /// VM-global (not part of [`FiberCtx`]): only one fiber runs at a time, so at most one suspend is
-    /// pending. See [`Vm::run_scheduler`].
+    /// VM-global (not part of [`FiberCtx`]): only one fiber runs at a time per shell, so at most one
+    /// suspend is pending.
     suspend: Option<GcRef>,
     /// `wait` (§6d) — the multi-channel analogue of `suspend`: the live arm-channel handles a blocking
     /// `wait:` parked the running fiber on. Set by [`Vm::op_wait_poll`] (cooperative engine only; the
@@ -916,24 +898,19 @@ pub struct Vm {
     /// means a sibling thread's write during my native call fires MY halt — the same cross-job
     /// contamination W7-5d removed, one layer down. Per-`Vm` is the correct shape.
     stdout_writes: u64,
-    /// Active cooperative-scheduler levels (B1/B2), innermost last. Each [`Nursery`] holds the parked
-    /// joining (parent) fiber's context plus its child fibers; non-empty means a `recv` may suspend.
-    /// Every parked fiber here is a GC root (see [`Vm::collect`]).
-    scheduler_stack: Vec<Nursery>,
     /// B3.4: the cancel flag of the `parallel:` nursery this worker `Vm` runs under (`--parallel`
     /// only; cloned in by [`Vm::run_parallel_nursery`]). The first sibling to fault or `os.exit`
     /// sets it; every other worker observes it at a dispatch back-edge (loop top) or inside a
     /// blocking `recv`'s re-checking wait, and unwinds as the `cancelled` sentinel — so a faulted
-    /// nursery aborts running siblings instead of join-then-report. `None` on the cooperative engine
-    /// (it already aborts via the scheduler unwind) and on the top-level VM (never a worker).
+    /// nursery aborts running siblings instead of join-then-report. `None` on the top-level VM
+    /// (never a worker).
     cancel: Option<Arc<AtomicBool>>,
     /// The cancel flags of the ENCLOSING scopes of the scope this VM currently runs in (outermost
     /// first; empty at the top level and in the outermost nursery). Cancelling a scope must cancel its
     /// descendants, so every checkpoint reads these too ([`Vm::cancel_requested`]) — a nested nursery
     /// keeps its OWN `cancel` (an inner fault must not cancel an outer sibling) but its fibers still
     /// die when an outer scope is cancelled. Re-pointed per fiber swap-in from
-    /// [`JoinScope::ancestors`], exactly like `cancel`. (The cooperative engine inherits differently —
-    /// see `run_scheduler` — so this stays empty there.)
+    /// [`JoinScope::ancestors`], exactly like `cancel`.
     cancel_outer: Vec<Arc<AtomicBool>>,
     /// B3.4: set true only when *this* worker observed [`Vm::cancel`] and bailed, so the join can
     /// tell a swallowed cooperative abort apart from a real fault (a cancelled task is dropped, not
@@ -1020,9 +997,8 @@ pub struct Vm {
     /// to tie to one cell. Reset by `install_snapshot` (a fresh view rebuilds from scratch).
     ///
     /// Heap-keyed, like `module_objs`: its `GcRef`s index whatever heap is current while this view is
-    /// (an M:N fiber's own heap, or the shared heap inside a `prepare_serial_child` window), so it
-    /// swaps WITH `module_snapshot`/`module_faulted` and is a GC root in both `collect` and
-    /// `root_ctx`.
+    /// (the M:N fiber's own heap), so it swaps WITH `module_snapshot`/`module_faulted` and is a GC
+    /// root in `collect`.
     ///
     /// **Cells ONLY.** `from_wire_memo` registers every identity-preserved node it rebuilds
     /// (List/Map/Set/Struct/Tuple/Closure too), but only a cell can be back-referenced from a LATER
@@ -1057,12 +1033,11 @@ pub struct Vm {
     /// module view.
     snapshot_builds: usize,
     /// Task 1 — GC pin for the shell's REAL `module_objs` while they are swapped OUT of
-    /// `self.module_objs` during a serial child-modules window (`with_serial_child_modules` /
-    /// `prepare_serial_child`). `collect()` roots `self.module_objs` (the child copy) but not the
-    /// swapped-out shell modules; when the window runs with EMPTY frames (the serial `Executor`
-    /// exit-drain) nothing else roots them, so an alloc-triggered safepoint GC would sweep them and the
-    /// restore would reinstall dangling `GcRef`s (use-after-free). Stashing them here — scanned by
-    /// `collect()` — keeps them live for the window. Empty outside such a window.
+    /// `self.module_objs` during a child-modules window. `collect()` roots `self.module_objs` (the
+    /// child copy) but not the swapped-out shell modules; when the window runs with EMPTY frames
+    /// nothing else roots them, so an alloc-triggered safepoint GC would sweep them and the restore
+    /// would reinstall dangling `GcRef`s (use-after-free). Stashing them here — scanned by `collect()`
+    /// — keeps them live for the window. Empty outside such a window.
     pinned_module_roots: Vec<GcRef>,
     /// D2b — set on an M:N **worker shell** to the scheduler of the `parallel:` nursery it is draining.
     /// `Some` flips the `recv`/`send` arms onto the park/wake protocol ([`MnSched`]) instead of the
@@ -1229,28 +1204,24 @@ struct FiberCtx {
     /// (`heap.is_some()`); a cooperative fiber keeps `Vec::new()` and aliases the shell's buffers.
     out: Vec<u8>,
     stderr: Vec<u8>,
-    /// D2b / Task 1 — the fiber's module-namespace objects + lazy-fault flags (D1). For an M:N fiber
-    /// each is a `GcRef` into the fiber's OWN heap (travels via `heap` above). For a COOPERATIVE fiber
-    /// (Task 1) it is the fiber's own DEEP COPY of the module globals in the SHARED heap, built by
-    /// `prepare_serial_child` at the spawn boundary — so a serially-spawned task mutates its private
-    /// copy, matching M:N by construction. Either way these roots swap per-fiber (`swap_ctx` swaps them
-    /// UNCONDITIONALLY now) and are GC-rooted while parked by `root_ctx`. `module_faulted` is inert on
-    /// cooperative fibers (eager-faulted, `module_snapshot` cleared) but still swaps for symmetry.
+    /// D2b / Task 1 — the fiber's module-namespace objects + lazy-fault flags (D1). Each is a `GcRef`
+    /// into the fiber's OWN heap (travels via `heap` above), so a spawned task mutates its private copy
+    /// of every module global. These roots swap per-fiber (`swap_ctx` swaps them UNCONDITIONALLY).
     module_objs: Vec<GcRef>,
     module_faulted: Vec<bool>,
     /// W6-2 — the snapshot this fiber's `module_objs` fault in from, and the cache of the snapshot of
     /// its CURRENT view. Both describe the module view above, so they travel with it (see
     /// [`Vm::module_snapshot`]): a shell drains fibers from several scopes, each built from its own
-    /// per-task snapshot. Heap-independent ([`SnapValue`] carries no `GcRef`), so `root_ctx` needs
-    /// nothing for them. `None`/`None` for a cooperative child (eager-faulted at the spawn boundary).
+    /// per-task snapshot. Heap-independent ([`SnapValue`] carries no `GcRef`), so GC rooting needs
+    /// nothing for them.
     module_snapshot: Option<Arc<ModuleSnapshot>>,
     snapshot_memo: Option<Arc<ModuleSnapshot>>,
     /// W7-4a — the fiber's snapshot rebuild map (see [`Vm::snapshot_rebuild`]). UNLIKE the two above
-    /// it IS heap-keyed, so `root_ctx` roots it — for a cooperative fiber that is the shared heap;
-    /// an M:N fiber's own heap is never traced while parked, and its map travels with the heap here.
+    /// it IS heap-keyed. A fiber's own heap is never traced while parked, and its map travels with the
+    /// heap here.
     snapshot_rebuild: fxhash::FxHashMap<u32, GcRef>,
     /// W7-4c — the fiber's snapshot cell registry (see [`Vm::snapshot_cells`]). Heap-keyed like
-    /// `snapshot_rebuild`, and rooted by `root_ctx` for the same reason.
+    /// `snapshot_rebuild`, and travels with the heap for the same reason.
     ///
     /// `snapshot_next_id` travels WITH it, and must: the "ids are monotonic, so a stale one MISSES"
     /// guarantee is only true while the counter is at least as high as every id in the registry. Every
@@ -1293,18 +1264,15 @@ struct FiberCtx {
     poll_partial: Option<usize>,
 }
 
-/// Scheduling state of a child fiber within a [`Nursery`].
+/// Scheduling state of a fiber on the M:N scheduler.
 enum FiberState {
     /// Spawned but not yet started; holds the task to launch on first schedule.
     Pending(PendingCall),
     /// Started and runnable — resume by re-entering its `run_until`.
     Ready,
-    /// Parked on an empty channel; runnable again once a sibling `send`s (D0 records the parked
-    /// index in [`Nursery::blocked_on`] under the channel's core pointer — the receiver handle
-    /// itself stays rooted on the fiber's own operand stack, so this variant carries no payload).
+    /// Parked on an empty channel; runnable again once a sibling `send`s (the receiver handle stays
+    /// rooted on the fiber's own operand stack, so this variant carries no payload).
     Blocked,
-    /// Ran to completion.
-    Done,
 }
 
 /// One child fiber: its saved context plus scheduling state. While the fiber is the one actively
@@ -1314,12 +1282,12 @@ struct Fiber {
     state: FiberState,
     /// D2b — the fiber's stable Decision-F outcome slot. Under the cross-nursery flat scheduler this is
     /// the GLOBAL flat index into `SchedCore::slots` (= `scopes[scope_id].base_index + local_i`),
-    /// assigned at nursery build / `inject`. Unused by the cooperative engine (it carries the child index).
+    /// assigned at nursery build / `inject`.
     task_index: usize,
     /// Cross-nursery flat scheduler (M:N) — which nursery scope this fiber belongs to (indexes
     /// `SchedCore::scopes`). Independent of `task_index` (the flat slot). Drives the scope-scoped owner
-    /// stop, per-scope done accounting, and per-scope cancel. Zero for the cooperative engine / the
-    /// single-nursery fast path's sole scope.
+    /// stop, per-scope done accounting, and per-scope cancel. Zero for the single-nursery fast
+    /// path's sole scope.
     scope_id: usize,
     /// D2b — the spawning task's span, for fault/panic attribution when this fiber faults under M:N.
     span: Span,
@@ -1340,26 +1308,6 @@ const _: fn() = || {
     fn assert_send<T: Send>() {}
     assert_send::<Fiber>();
 };
-
-/// One active `parallel:` scheduler level (B1/B2): the parked context of the joining (parent) fiber
-/// and the child fibers spawned into the nursery. Pushed on `JoinNursery`, popped when every child
-/// is `Done`.
-struct Nursery {
-    /// The joining fiber's context, parked while its children run cooperatively.
-    parent: FiberCtx,
-    children: Vec<Fiber>,
-    /// D0 — runnable child indices, ordered (a `BTreeSet`, not a FIFO queue, so `pop_first` always
-    /// returns the **lowest-index** runnable child — byte-identical to the old `pick_runnable`
-    /// linear scan, but O(log N) instead of O(N) per turn). Seeded with every child index on
-    /// `JoinNursery` (all start `Pending`); a child re-enters only via [`Vm::wake_on_send`].
-    ready: std::collections::BTreeSet<usize>,
-    /// D0 — child indices parked on an empty channel, keyed by the channel's `ChannelCore` pointer
-    /// (`Arc::as_ptr as usize`), NOT its `GcRef`: cooperative `spawn` deep-clones a channel
-    /// (`from_wire` allocs a fresh handle onto the same `Arc<ChannelCore>`), so sibling fibers hold
-    /// distinct handles aliasing one core — a handle key would lose the wakeup. A sibling `send`
-    /// drains the matching bucket back onto `ready`.
-    blocked_on: std::collections::HashMap<usize, Vec<usize>>,
-}
 
 /// A snapshot taken at a `recover:` boundary (`Op::PushHandler`). On a caught fault the VM restores
 /// the operand stack, call frames, and call-depth to these values, then jumps to `ip` in the
@@ -1677,9 +1625,7 @@ impl TaskOutcome {
 // becomes a `Fault` slot instead of leaving `EagerState::outstanding` short and hanging `shutdown`
 // forever. Covered by `executor_faulting_job_does_not_hang_shutdown`.
 
-/// The `deadlock` fault message, shared by the cooperative scheduler ([`Vm::run_scheduler`]) and
-/// the `--parallel` M:N detector ([`MnSched::take_runnable`]) so the error is byte-identical across
-/// engines.
+/// The `deadlock` fault message raised by the M:N detector ([`MnSched::take_runnable`]).
 const DEADLOCK_MSG: &str = "deadlock: every task in this parallel: block is blocked on a channel it \
      cannot proceed on (an empty recv() or a full send()) and no sibling can unblock it — the nursery \
      cannot progress";
@@ -4698,10 +4644,7 @@ fn run_program_inner(src: &str) -> (Vec<u8>, Result<(), RuntimeError>) {
         }
     };
     let mut vm = Vm::new(Arc::new(program));
-    vm.parallel = true;
-    let result = vm
-        .run()
-        .and_then(|()| vm.drain_live_executors(Span::RUNTIME));
+    let result = vm.run().and_then(|()| vm.drain_live_executors());
     (vm.out, result)
 }
 
@@ -4741,7 +4684,7 @@ pub fn run_capture_bytes(src: &str) -> Result<Vec<u8>, RuntimeError> {
 /// allocation-threshold trigger drives collection (test helper for GC assertions).
 #[cfg(test)]
 pub fn run_with(src: &str, stress: bool) -> (Result<String, RuntimeError>, usize) {
-    run_with_cfg(src, stress, true)
+    run_with_cfg(src, stress)
 }
 
 /// [`run_with`] with the engine selectable, so a GC-stress test can run on the M:N engine too. The
@@ -4749,11 +4692,7 @@ pub fn run_with(src: &str, stress: bool) -> (Result<String, RuntimeError>, usize
 /// the parent holds the executor's core lock) exist only on that engine, and the serial-only
 /// [`run_capture_stress`] cannot reach them.
 #[cfg(test)]
-pub fn run_with_cfg(
-    src: &str,
-    stress: bool,
-    parallel: bool,
-) -> (Result<String, RuntimeError>, usize) {
+pub fn run_with_cfg(src: &str, stress: bool) -> (Result<String, RuntimeError>, usize) {
     let src = src.to_string();
     std::thread::Builder::new()
         .stack_size(VM_STACK_BYTES)
@@ -4805,10 +4744,7 @@ pub fn run_with_cfg(
             };
             let mut vm = Vm::new(Arc::new(program));
             vm.gc_stress = stress;
-            vm.parallel = parallel;
-            let result = vm
-                .run()
-                .and_then(|()| vm.drain_live_executors(Span::RUNTIME));
+            let result = vm.run().and_then(|()| vm.drain_live_executors());
             let live = vm.heap.live();
             (result.map(|()| captured(vm.out)), live)
         })
@@ -4850,9 +4786,8 @@ pub fn run_capture_on_stack(src: &str, stack_bytes: usize) -> Result<String, Run
                     is_timed_out: false,
                 })?;
             let mut vm = Vm::new(Arc::new(program));
-            vm.parallel = true;
             vm.run()
-                .and_then(|()| vm.drain_live_executors(Span::RUNTIME))
+                .and_then(|()| vm.drain_live_executors())
                 .map(|()| captured(vm.out))
         })
         .expect("failed to spawn VM thread")
@@ -4925,10 +4860,7 @@ pub fn run_capture_nursery_len(src: &str) -> (Result<String, RuntimeError>, usiz
                 }
             };
             let mut vm = Vm::new(Arc::new(program));
-            vm.parallel = true;
-            let result = vm
-                .run()
-                .and_then(|()| vm.drain_live_executors(Span::RUNTIME));
+            let result = vm.run().and_then(|()| vm.drain_live_executors());
             let nursery_depth = vm.nurseries.len();
             (result.map(|()| captured(vm.out)), nursery_depth)
         })
@@ -4954,7 +4886,6 @@ pub fn run_file_entry(entry: &std::path::Path, entry_fn: &str) -> RunOutput {
     run_file_with_entry(
         entry,
         crate::native::HostConfig::default(),
-        true,
         Some(entry_fn),
         None,
     )
@@ -4984,27 +4915,26 @@ fn to_str_output((out, err, res, code): RunOutputRaw) -> RunOutput {
 /// CLI calls [`run_file_with_entry`] directly so a `module:function` entrypoint can name a function.
 #[cfg(test)]
 pub fn run_file_with(entry: &std::path::Path, cfg: crate::native::HostConfig) -> RunOutput {
-    to_str_output(run_file_engine(entry, cfg, true, None, None, false))
+    to_str_output(run_file_engine(entry, cfg, None, None, false))
 }
 
 /// Resolve, compile, and run a program from its entry path on the dedicated VM thread, then — if
 /// `entry_fn` is `Some` — invoke that named top-level function of the entry module (the
 /// `module:function` manifest entrypoint). `None` runs the module top-level only (scripting model).
-/// `parallel` selects the OS-thread engine. This is the single entry the CLI's `chezzi run` uses.
+/// This is the single entry the CLI's `chezzi run` uses.
 ///
 /// `root` pins the module-graph root (the "one root per run" invariant): the bare-`chezzi run`
 /// manifest path passes `Some(root)` — the manifest that declared the entrypoint, computed ONCE by
 /// the CLI — so every `import` resolves against the SAME root that located the entry file. `None`
 /// (the explicit `chezzi run FILE` path) derives the root by walking up from the entry file (nearest
-/// marker, unchanged). Both the serial and M:N engines route through here, so one root pins both.
+/// marker, unchanged).
 pub fn run_file_with_entry(
     entry: &std::path::Path,
     cfg: crate::native::HostConfig,
-    parallel: bool,
     entry_fn: Option<&str>,
     root: Option<std::path::PathBuf>,
 ) -> RunOutput {
-    to_str_output(run_file_bytes(entry, cfg, parallel, entry_fn, root))
+    to_str_output(run_file_bytes(entry, cfg, entry_fn, root))
 }
 
 /// [`run_file_with_entry`] without the lossy decode — the parity ORACLES' entry point (see
@@ -5012,29 +4942,20 @@ pub fn run_file_with_entry(
 pub fn run_file_bytes(
     entry: &std::path::Path,
     cfg: crate::native::HostConfig,
-    parallel: bool,
     entry_fn: Option<&str>,
     root: Option<std::path::PathBuf>,
 ) -> RunOutputRaw {
-    run_file_engine(
-        entry,
-        cfg,
-        parallel,
-        entry_fn.map(str::to_string),
-        root,
-        false,
-    )
+    run_file_engine(entry, cfg, entry_fn.map(str::to_string), root, false)
 }
 
 /// W7-4a — a MULTI-FILE run under GC stress (collect at every safepoint). The single-source
 /// `run_capture_stress` cannot reach the lazy per-module fault path, which is exactly where a cell
 /// now sits parked in `Vm::snapshot_rebuild` across real safepoints between two modules' faults.
 #[cfg(test)]
-pub fn run_file_stress(entry: &std::path::Path, parallel: bool) -> RunOutput {
+pub fn run_file_stress(entry: &std::path::Path) -> RunOutput {
     to_str_output(run_file_engine(
         entry,
         crate::native::HostConfig::default(),
-        parallel,
         None,
         None,
         true,
@@ -5044,7 +4965,6 @@ pub fn run_file_stress(entry: &std::path::Path, parallel: bool) -> RunOutput {
 fn run_file_engine(
     entry: &std::path::Path,
     cfg: crate::native::HostConfig,
-    parallel: bool,
     entry_fn: Option<String>,
     root: Option<std::path::PathBuf>,
     stress: bool,
@@ -5052,7 +4972,7 @@ fn run_file_engine(
     let entry = entry.to_path_buf();
     std::thread::Builder::new()
         .stack_size(VM_STACK_BYTES)
-        .spawn(move || run_file_inner(&entry, cfg, parallel, entry_fn.as_deref(), root, stress))
+        .spawn(move || run_file_inner(&entry, cfg, entry_fn.as_deref(), root, stress))
         .expect("failed to spawn VM thread")
         .join()
         .expect("VM thread panicked")
@@ -5061,7 +4981,6 @@ fn run_file_engine(
 fn run_file_inner(
     entry: &std::path::Path,
     cfg: crate::native::HostConfig,
-    parallel: bool,
     entry_fn: Option<&str>,
     root: Option<std::path::PathBuf>,
     stress: bool,
@@ -5106,7 +5025,6 @@ fn run_file_inner(
     };
     let mut vm = Vm::new(Arc::new(program));
     vm.host = cfg;
-    vm.parallel = parallel;
     vm.gc_stress = stress;
     // On a clean finish, gracefully reap any Executor never explicitly shut down (C5 / A2). Skipped
     // on a fault (the program is already erroring) and on a hard `std.os.exit` (handled inside
@@ -5118,7 +5036,7 @@ fn run_file_inner(
             Some(name) => vm.invoke_entrypoint(name),
             None => Ok(()),
         })
-        .and_then(|()| vm.drain_live_executors(Span::RUNTIME));
+        .and_then(|()| vm.drain_live_executors());
     // Memory probe (8B-`Value` gate): report the peak live-bytes high-water mark to real stderr,
     // gated on `CHEZZI_HEAP_STATS=1`. `.max(live_bytes())` covers workloads under the GC threshold
     // that never `sweep()` (peak would otherwise be 0). Real stderr, never `vm.out`/`vm.stderr`, so
