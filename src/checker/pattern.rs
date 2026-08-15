@@ -1941,6 +1941,102 @@ impl Checker {
         }
     }
 
+    /// THE ONE diagnostic for "this read of generic fn `name` cannot become a function value here",
+    /// shared by both positions that can reach the verdict: the immediate read (`infer_ident`, whose
+    /// expected-type hint either determines the params or does not) and the DEFERRED end-of-call
+    /// check on a generic method's argument ([`Checker::report_undetermined_generic_fn_value_args`]).
+    /// One rule, one sentence — the whole point of the extension is that a binding and an argument
+    /// stop giving one function two verdicts.
+    #[allow(clippy::too_many_arguments)] // the fn's signature pieces, verbatim, for the advice text
+    pub(super) fn reject_undetermined_generic_fn_value(
+        &mut self,
+        name: &str,
+        type_params: &[TypeParam],
+        params: &[Ty],
+        ret: &Ty,
+        labels: &[Option<String>],
+        min_params: usize,
+        span: Span,
+    ) {
+        // Render the wanted shape from the fn's OWN signature with each undetermined parameter shown
+        // as a `<T>` placeholder, so the advice fits this declaration instead of a made-up one.
+        // `with_min` so a fn with DEFAULTED params does not advertise a stricter arity than a plain fn
+        // read gives (`fn rep[T](x: T, n: int = 2)` — a non-generic `g := rep; g(1)` works, so the
+        // suggested type must permit it too).
+        let holes: HashMap<String, Ty> = type_params
+            .iter()
+            .map(|tp| (tp.name.clone(), Ty::Param(format!("<{}>", tp.name))))
+            .collect();
+        let sig = subst(
+            &Ty::Func {
+                params: params.to_vec(),
+                ret: Box::new(ret.clone()),
+                labels: FnLabels::new(labels.to_vec()).with_min(min_params),
+            },
+            &holes,
+        );
+        let names = type_params
+            .iter()
+            .map(|tp| tp.name.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sig = sig.to_string();
+        // A turbofish carries exactly ONE type argument (`infer_index` / `seed_targs`), so it is only
+        // a fix for a single-parameter generic — offering it for two would be advice that cannot work
+        // (measured: `pair[int]` → "expects 2 type argument(s), found 1"; `pair[int, str]` → a parse
+        // error).
+        let turbofish = if type_params.len() == 1 {
+            format!("instantiate it (`{name}[<{names}>]`), or ")
+        } else {
+            String::new()
+        };
+        // Which parameters actually OCCUR in the signature? Only those can be reached by giving the
+        // position a concrete function type. One that appears NOWHERE (`pred[T](n: int) -> bool`,
+        // reachable from a HOF slot) renders no `<…>` hole at all, so the "write a real type in place
+        // of each `<…>`" tail would point at nothing and the suggested `fn(int) -> bool` is the type
+        // the position ALREADY has — advice the user has, by construction, already followed. Testing
+        // the RENDERED text is the exact question: does the advice contain a hole for this parameter?
+        let absent = type_params
+            .iter()
+            .map(|tp| tp.name.as_str())
+            .filter(|n| !sig.contains(&format!("<{n}>")))
+            .collect::<Vec<_>>();
+        // WORDING IS LOAD-BEARING. Say what is true of THIS read — the parameters are not determined
+        // HERE — never "nothing determines them", and never "annotate the binding". The rule also
+        // fires in positions that DO carry a concrete type Chezzi simply does not thread into
+        // `expected_hint` (a parameter/field DEFAULT value: `fn run(f: fn(int) -> int = id)`, whose
+        // slot pins T=int by inspection), and in positions with no binding to annotate at all
+        // (`print(id)`, a `yield`, a list/map element, a HOF argument). Both earlier phrasings were
+        // then FACTUALLY FALSE, and the second told a user who had already written
+        // `xs: List[fn(int) -> int] = [id]` to do the thing they had done. Naming the POSITION keeps
+        // the sentence true everywhere and still points at the fix.
+        let advice = if absent.is_empty() {
+            format!(
+                "{turbofish}give this position a concrete function type (`{sig}`), writing a real \
+                 type in place of each `<…>`"
+            )
+        } else {
+            // The genuinely-unused parameter. A type at this position can never reach it, so the only
+            // honest remedies are the turbofish (single-parameter generics only) and deleting it.
+            let plural = if absent.len() == 1 { "s" } else { "" };
+            format!(
+                "{} appear{plural} nowhere in its signature (`{sig}`), so no type at this position \
+                 can reach {}: {turbofish}drop the unused type parameter{}",
+                absent.join(", "),
+                if absent.len() == 1 { "it" } else { "them" },
+                if absent.len() == 1 { "" } else { "s" },
+            )
+        };
+        self.error(
+            span,
+            format!(
+                "'{name}' is generic and {names} {} not determined here, so it cannot become \
+                 a function value — {advice}",
+                if type_params.len() == 1 { "is" } else { "are" }
+            ),
+        );
+    }
+
     pub(super) fn infer_ident(&mut self, name: &str, span: Span) -> Ty {
         // BARE-VALUE position, and the same shadowing rule (`Checker::shadowing_type_param`): a type
         // parameter shadows a same-named FUNCTION or module GLOBAL for the whole body, so `g := foo`
@@ -2005,117 +2101,75 @@ impl Checker {
                 return Ty::Unknown;
             }
             // Scope A — a GENERIC fn referenced in value position (a bare `Name`, NOT the callee of a
-            // direct call) whose type params can be PINNED from a concrete expected `fn(..) -> ..`
-            // hint (a `let` annotation, a HOF param, or a return position — all delivered via the
-            // `expected_hint` slot). Unify the fn's declared signature against the hint to bind its
-            // params, enforce its declared bounds against the bindings, then give the value the
-            // fully-substituted CONCRETE fn type. Runtime is generic-ERASED — the value is just the
-            // underlying function, so an indirect call already works; this is a checker-only pin.
+            // direct call) whose type params can be PINNED from an expected `fn(..) -> ..` hint (a
+            // `let` annotation, a HOF param, or a return position — all delivered via the
+            // `expected_hint` slot), and its refusal half: a hint that CANNOT determine them. Both
+            // verdicts come from the one shared derivation, [`pin_generic_fn_value`], which the
+            // deferred argument-position check asks too. Runtime is generic-ERASED — the value is just
+            // the underlying function, so an indirect call already works; the pin is checker-only.
             //
             // SOUNDNESS: `unify` is first-binding-wins + a silent no-op on mismatch, so an
             // unsatisfiable hint (`g: fn(str) -> int = ident`) binds `T=str` (the param position wins)
             // and we return the CONCRETE `fn(str) -> str` — NEVER `expected` — leaving the existing
-            // assignability / arg / return check to reject it against `fn(str) -> int`. When the hint
-            // fails to pin EVERY param (or is absent / not a matching-arity concrete `Ty::Func`), fall
-            // through to the rigid `fn(T) -> T` arm, preserving the out-of-scope bare `g := ident`
-            // error (a still-free `Ty::Param` must never leak into a binding).
+            // assignability / arg / return check to reject it against `fn(str) -> int`.
             //
             // Gated on a SAME-MODULE fn (`local_fn_names`) — the identical same-module restriction the
             // turbofish B-path + the compiler's erase set use, so accept ⟺ runtime stays in lockstep
             // (an imported generic-fn-as-value stays the rigid error, a documented v1 limit).
-            if !type_params.is_empty()
-                && self.local_fn_names.contains(name)
-                && let Some(expected) = self.expected_hint.clone()
-                && let Ty::Func { params: ep, .. } = &expected
-                && ep.len() == params.len()
-                && ty_fully_concrete(&expected)
-            {
+            if !type_params.is_empty() && self.local_fn_names.contains(name) {
                 let declared = Ty::Func {
                     params: params.clone(),
                     ret: Box::new(ret.clone()),
                     labels: FnLabels::new(labels.clone()),
                 };
-                let mut map = HashMap::new();
-                unify(&declared, &expected, &mut map);
-                if type_params.iter().all(|tp| map.contains_key(&tp.name)) {
-                    self.enforce_bounds(&type_params, &map, span);
-                    return subst(&declared, &map);
-                }
-            }
-            // …and when NOTHING determines the type params — no turbofish (that never reaches here,
-            // it lands in `infer_index`'s Scope B) and no expected type at all — the value can never
-            // be formed. Go refuses exactly this spelling, at the READ: `cannot use generic function
-            // id without instantiation`. Chezzi used to accept the binding and blame the eventual
-            // call ("argument 1 of 'closure': expected T, found int" — a `closure` the user never
-            // wrote, naming a `T` there is no way to act on), or accept it silently when the value was
-            // never called. Reported here, where the name and its parameters are still known.
-            //
-            // Gated on a hint that DETERMINES nothing — absent, or `Unknown`. With a real hint present,
-            // either Scope A pinned above, or the hint is the real problem (wrong arity, non-concrete,
-            // not even a fn) and the existing assignability diagnostic says so accurately — this
-            // message would not. `Unknown` must count as "nothing", or the rule cancels itself on an
-            // INFERRED return type (`fn get(): return id`): the return-inference pass reads the fn's
-            // body, takes the `Ty::Unknown` this arm returns as the inferred return, and the real pass
-            // then re-checks the same `return id` against a `Some(Unknown)` hint — turning a reject
-            // into a silent ACCEPT (measured: `g := get(); g(1)` printed `1`, check-clean). Same-module
-            // (`local_fn_names`), matching Scope A / Scope B: an IMPORTED generic fn value is already
-            // refused on every path (a documented v1 limit). The witness wall above wins first — its
-            // advice differs (a turbofish does not help there).
-            if !type_params.is_empty()
-                && self.local_fn_names.contains(name)
-                && matches!(self.expected_hint, None | Some(Ty::Unknown))
-                && !self.generic_fn_value_prepass
-            {
-                // Render the wanted shape from the fn's OWN signature with each undetermined
-                // parameter shown as a `<T>` placeholder, so the advice fits this declaration instead
-                // of a made-up one. `with_min` so a fn with DEFAULTED params does not advertise a
-                // stricter arity than a plain fn read gives (`fn rep[T](x: T, n: int = 2)` — a
-                // non-generic `g := rep; g(1)` works, so the suggested type must permit it too).
-                let holes: HashMap<String, Ty> = type_params
-                    .iter()
-                    .map(|tp| (tp.name.clone(), Ty::Param(format!("<{}>", tp.name))))
-                    .collect();
-                let sig = subst(
-                    &Ty::Func {
-                        params: params.clone(),
-                        ret: Box::new(ret.clone()),
-                        labels: FnLabels::new(labels.clone()).with_min(minp),
-                    },
-                    &holes,
-                );
-                let names = type_params
-                    .iter()
-                    .map(|tp| tp.name.as_str())
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                // A turbofish carries exactly ONE type argument (`infer_index` / `seed_targs`), so it
-                // is only a fix for a single-parameter generic — offering it for two would be advice
-                // that cannot work (measured: `pair[int]` → "expects 2 type argument(s), found 1";
-                // `pair[int, str]` → a parse error).
-                let turbofish = if type_params.len() == 1 {
-                    format!("instantiate it (`{name}[<{names}>]`), or ")
-                } else {
-                    String::new()
+                // A hint of `Unknown` DETERMINES NOTHING and must count as no hint at all, or the rule
+                // cancels itself on an INFERRED return type (`fn get(): return id`): the
+                // return-inference pass reads the body, takes the `Ty::Unknown` this arm returns as the
+                // inferred return, and the real pass re-checks the same `return id` against a
+                // `Some(Unknown)` hint — turning a reject into a silent ACCEPT (measured: `g := get();
+                // g(1)` printed `1`, check-clean).
+                let hint = match &self.expected_hint {
+                    Some(Ty::Unknown) | None => None,
+                    Some(h) => Some(h.clone()),
                 };
-                // WORDING IS LOAD-BEARING. Say what is true of THIS read — the parameters are not
-                // determined HERE — never "nothing determines them", and never "annotate the binding".
-                // The guard also fires in positions that DO carry a concrete type Chezzi simply does
-                // not thread into `expected_hint` (a parameter/field DEFAULT value: `fn run(f: fn(int)
-                // -> int = id)`, whose slot pins T=int by inspection), and in positions with no
-                // binding to annotate at all (`print(id)`, a `yield`, a list/map element). Both earlier
-                // phrasings were then FACTUALLY FALSE, and the second told a user who had already
-                // written `xs: List[fn(int) -> int] = [id]` to do the thing they had done. Naming the
-                // POSITION keeps the sentence true everywhere and still points at the fix.
-                self.error(
-                    span,
-                    format!(
-                        "'{name}' is generic and {names} {} not determined here, so it cannot become \
-                         a function value — {turbofish}give this position a concrete function type \
-                         (`{sig}`), writing a real type in place of each `<…>`",
-                        if type_params.len() == 1 { "is" } else { "are" }
-                    ),
-                );
-                return Ty::Unknown;
+                let verdict = match &hint {
+                    Some(h) => pin_generic_fn_value(&type_params, &declared, h),
+                    // No hint at all: nothing in this position can determine anything.
+                    None => FnValuePin::Undetermined,
+                };
+                match verdict {
+                    FnValuePin::Pinned(map, refined) => {
+                        self.enforce_bounds(&type_params, &map, span);
+                        return refined;
+                    }
+                    // …the value can never be formed. Go refuses exactly this spelling, at the READ:
+                    // `cannot use generic function id without instantiation` (and, in argument
+                    // position, `in call to takeBool, cannot infer T`). Chezzi used to accept it and
+                    // blame the eventual call ("argument 1 of 'closure': expected T, found int" — a
+                    // `closure` the user never wrote, naming a `T` there is no way to act on), or
+                    // accept it silently when the value was never called. Reported here, where the name
+                    // and its parameters are still known. `generic_fn_value_prepass` holds the wall
+                    // back for the ONE pass whose bare-ident arg is re-pinned afterwards — there the
+                    // read is not the final word, and the deferred end-of-call check
+                    // (`report_undetermined_generic_fn_value_args`) owns the verdict instead. The
+                    // witness wall above wins first — its advice differs (a turbofish does not help).
+                    FnValuePin::Undetermined if !self.generic_fn_value_prepass => {
+                        self.reject_undetermined_generic_fn_value(
+                            name,
+                            &type_params,
+                            &params,
+                            &ret,
+                            &labels,
+                            minp,
+                            span,
+                        );
+                        return Ty::Unknown;
+                    }
+                    // Not this rule's business (see [`FnValuePin::Skip`]) — fall through to the rigid
+                    // `fn(T) -> T` arm and let the existing assignability diagnostic, which is the
+                    // accurate one there, speak.
+                    _ => {}
+                }
             }
             return Ty::Func {
                 params,

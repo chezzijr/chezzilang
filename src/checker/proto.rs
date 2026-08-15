@@ -4053,6 +4053,9 @@ impl Checker {
         // when the method is called with too few arguments. The arity error is already reported above
         // (it does not early-return), so this loop must not index `args[i]`/`arg_tys[i]` out of bounds;
         // the base `expected.iter().zip(&arg_tys)` clamped implicitly, this preserves that.
+        // Bare generic-fn args whose slot could not pin them YET (see the `continue` below) — re-pinned
+        // in the second pass after the loop, once the VALUE args have bound what they bind.
+        let mut deferred_fn_args: Vec<usize> = Vec::new();
         for i in 0..expected.len().min(arg_tys.len()) {
             let decl = &expected[i];
             // Scope-A-through-a-method-slot: a bare same-module GENERIC fn passed as a non-closure arg
@@ -4066,6 +4069,17 @@ impl Checker {
             let want = subst(decl, &mmap);
             if let Some(refined) = self.try_pin_generic_fn_value_arg(&args[i], &want, span) {
                 arg_tys[i] = refined;
+            } else if self.bare_generic_fn_value_arg(&args[i]).is_some() {
+                // …and when the slot can NOT pin it yet, the rigid prepass type (`fn(T) -> T`, the
+                // CALLEE's own free params) must not unify either: it carries no information about
+                // this call, and `unify` is first-binding-wins, so binding the method's `[U]` to that
+                // leaked `T` is permanent — a LATER argument that really determines `U` can never
+                // correct it (`b.app(id, 5)` on `fn app[U](self, f: fn(U) -> U, x: U) -> U` reported
+                // "argument to 'app' has type int, expected T"). Defer it past the value args, the
+                // mirror of `.fold`'s accumulator ordering for a slot the other way round. Same shape
+                // as Bug D's `mask_closure_ret` for an unannotated closure.
+                deferred_fn_args.push(i);
+                continue;
             }
             let actual = &arg_tys[i];
             // Bug D: for a CLOSURE arg, unify against a RETURN-MASKED copy so only its PARAMETER
@@ -4083,6 +4097,18 @@ impl Checker {
             } else {
                 unify(decl, actual, &mut mmap);
             }
+        }
+        // Second pass for the deferred bare generic-fn args: every value argument has now bound what
+        // it binds, so their slots are as substituted as they will get. A pin here replaces the rigid
+        // prepass type and unifies the CONCRETE result; one that still cannot pin unifies its rigid
+        // type after all, so the existing assignability diagnostic still fires — by now every real
+        // binding has already won, so the leak can no longer displace one.
+        for i in std::mem::take(&mut deferred_fn_args) {
+            let want = subst(&expected[i], &mmap);
+            if let Some(refined) = self.try_pin_generic_fn_value_arg(&args[i], &want, span) {
+                arg_tys[i] = refined;
+            }
+            unify(&expected[i], &arg_tys[i].clone(), &mut mmap);
         }
         // Recover element types from `Iterator[T]` bounds, then enforce every declared bound.
         self.recover_iter_elems(mtps, &mut mmap, span);
@@ -4107,6 +4133,11 @@ impl Checker {
         self.recover_return_only_params(
             method, expected, &arg_tys, args, params, mtps, &mut mmap, span, true,
         );
+        // …and NOW — with `mmap` as bound as it will ever get — the deferred half of the
+        // uninstantiated-generic-fn-value rule. This is the LAST possible moment, which is the whole
+        // design: `[1,2,3].fold(0, pick)` is pinned by the accumulator, argument ZERO, while `pick` is
+        // argument one.
+        self.report_undetermined_generic_fn_value_args(args, expected, &mmap, span);
         // M24 Task 5 — half two of the static-witness contract for a MEMBER-declared type param,
         // recorded LAST for the same reason the free-fn path does it last (`recover_return_only_params`
         // can still bind a param nothing else saw). The receiver's own type args are already
@@ -4139,8 +4170,32 @@ impl Checker {
     /// preserving the Category-1 leak guard and every clean reject. A FRESH substitution map per call
     /// means two distinct pins never launder.
     fn try_pin_generic_fn_value_arg(&mut self, arg: &Expr, want: &Ty, span: Span) -> Option<Ty> {
-        // Only a bare identifier that is NOT shadowed by an in-scope binding (`lookup` None) and IS a
-        // same-module generic fn — mirrors Scope A's gate exactly.
+        let (_, sig) = self.bare_generic_fn_value_arg(arg)?;
+        let declared = Ty::Func {
+            params: sig.params.clone(),
+            ret: Box::new(sig.ret.clone()),
+            labels: FnLabels::new(sig.labels.clone()),
+        };
+        // Accept ONLY the fully-pinned verdict. A slot position that is still a free method param
+        // (`.fold` arg1 before `init` binds `U`) or a return-only arg-fn param never pinned leaves the
+        // shared derivation at `Undetermined`/`Skip` → bail, arg type unchanged. Reporting an
+        // `Undetermined` here would be an EAGER check and would refuse `[1,2,3].fold(0, pick)`; the
+        // verdict is re-asked once, at the end of the call, by
+        // [`Checker::report_undetermined_generic_fn_value_args`].
+        let FnValuePin::Pinned(m, refined) =
+            pin_generic_fn_value(&sig.type_params, &declared, want)
+        else {
+            return None;
+        };
+        // Enforce the arg fn's declared bounds against the bindings, exactly as Scope A does.
+        self.enforce_bounds(&sig.type_params, &m, span);
+        Some(refined)
+    }
+
+    /// The gate both halves of the argument-position rule share: is `arg` a BARE reference to a
+    /// same-module GENERIC fn — an identifier not shadowed by an in-scope binding (`lookup` None)?
+    /// Mirrors `infer_ident`'s Scope A gate exactly. Returns the name and a clone of its signature.
+    fn bare_generic_fn_value_arg(&self, arg: &Expr) -> Option<(String, FnSig)> {
         let ExprKind::Ident(name) = &arg.kind else {
             return None;
         };
@@ -4151,36 +4206,66 @@ impl Checker {
         if sig.type_params.is_empty() {
             return None;
         }
-        // The slot must be a concrete-arity `fn(..) -> ..` (everything pinned so far); its param slots
-        // drive the pin (`unify` binds the arg fn's params from them).
-        let Ty::Func { params: wp, .. } = want else {
-            return None;
-        };
-        if wp.len() != sig.params.len() {
-            return None;
+        Some((name.clone(), sig.clone()))
+    }
+
+    /// The DEFERRED half of the uninstantiated-generic-fn-value rule: after EVERYTHING that could pin
+    /// a bare generic fn passed as an argument has had its chance — every sibling argument, the
+    /// receiver, the turbofish, the loop-back — re-ask [`pin_generic_fn_value`] with the FINAL
+    /// bindings and report each argument nothing determined.
+    ///
+    /// WHY AT THE END, and not per-argument: `[1,2,3].fold(0, pick)` (`pick[T](a: T, b: T) -> T`) is
+    /// pinned by the FIRST argument, the accumulator, while `pick` is the SECOND. An eager check at
+    /// the moment the argument is encountered refuses a program that runs today (`3`) and that Go
+    /// accepts. `map`'s `U` is likewise only known after the loop-back. Being deferred also makes
+    /// this idempotent with the interleaved pin above: `mmap` only grows (`unify` is
+    /// first-binding-wins), so anything that pinned there still pins here.
+    ///
+    /// `arg_decls` are the per-argument declared slot types (receiver already dropped), parallel to
+    /// `args`; `map` is the call's completed substitution.
+    fn report_undetermined_generic_fn_value_args(
+        &mut self,
+        args: &[Expr],
+        arg_decls: &[Ty],
+        map: &HashMap<String, Ty>,
+        span: Span,
+    ) {
+        for (decl, arg) in arg_decls.iter().zip(args) {
+            let Some((name, sig)) = self.bare_generic_fn_value_arg(arg) else {
+                continue;
+            };
+            // The witness wall (`reject_witness_fn_value`) is a stricter, unconditional refusal with
+            // different advice, and it already fired at the READ — do not stack a second message on
+            // top of it.
+            if !sig.witness_params.is_empty() {
+                continue;
+            }
+            let declared = Ty::Func {
+                params: sig.params.clone(),
+                ret: Box::new(sig.ret.clone()),
+                labels: FnLabels::new(sig.labels.clone()),
+            };
+            if matches!(
+                pin_generic_fn_value(&sig.type_params, &declared, &subst(decl, map)),
+                FnValuePin::Undetermined
+            ) {
+                // The argument's own span, not the call's: the mistake is this read.
+                let at = if arg.span == Span::default() {
+                    span
+                } else {
+                    arg.span
+                };
+                self.reject_undetermined_generic_fn_value(
+                    &name,
+                    &sig.type_params,
+                    &sig.params,
+                    &sig.ret,
+                    &sig.labels,
+                    sig.min_params,
+                    at,
+                );
+            }
         }
-        // Clone sig fields before the &mut-self `enforce_bounds` call (mirrors infer_ident Scope A).
-        let type_params = sig.type_params.clone();
-        let declared = Ty::Func {
-            params: sig.params.clone(),
-            ret: Box::new(sig.ret.clone()),
-            labels: FnLabels::new(sig.labels.clone()),
-        };
-        let mut m: HashMap<String, Ty> = HashMap::new();
-        unify(&declared, want, &mut m);
-        // Accept ONLY when every arg-fn param bound AND the refined type is fully concrete. A slot
-        // position that is still a free method param (`.fold` arg1 before `init` binds `U`) or a
-        // return-only arg-fn param never pinned leaves a `Ty::Param` in `refined` → bail, unchanged.
-        if !type_params.iter().all(|tp| m.contains_key(&tp.name)) {
-            return None;
-        }
-        let refined = subst(&declared, &m);
-        if !ty_fully_concrete(&refined) {
-            return None;
-        }
-        // Enforce the arg fn's declared bounds against the bindings, exactly as Scope A does.
-        self.enforce_bounds(&type_params, &m, span);
-        Some(refined)
     }
 
     /// Bug D's closure-return recovery, shared by the generic-METHOD (`infer_generic_method`) and

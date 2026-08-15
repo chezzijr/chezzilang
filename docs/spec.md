@@ -729,7 +729,10 @@ root marker (all fields default to unset, so `entrypoint` is required only for t
 > called, or called indirectly): `g := ident[int]` (turbofish) and `h: fn(int) -> int = ident` /
 > HOF-param / return-position (against a concrete `fn(...) -> ...`) yield the substituted concrete fn
 > value; a bare un-pinned generic fn value is rejected **at the read** (Go's rule), named parameters and
-> both working spellings in the message (see `docs/syntax.md`, "A GENERIC fn as a value").
+> both working spellings in the message. ARGUMENT position asks the same question and gives the same
+> answer — `[1,2,3].filter(pred)` / `.map(mk)` are errors when nothing determines `[T]` — but only at
+> the END of the call's inference, so `[1,2,3].fold(0, pick)`, pinned by the accumulator that precedes
+> it, still checks (see `docs/syntax.md`, "A GENERIC fn as a value").
 
 > **Native FFI — Level-2 SHIPPED in M6c; Level-3 dynamic C-ABI v1 SHIPPED.** Because Chezzi is
 > written in Rust, the native-stdlib mechanism doubles as a foreign-function interface: bind a Rust fn

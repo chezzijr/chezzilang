@@ -171,3 +171,50 @@ test fn map_filter_fold():
     assert [1, 2, 3, 4].filter(fn(x: int) -> bool: x % 2 == 0) == [2, 4]
     assert ["a", "b", "c"].fold("", fn(a: str, x: str) -> str: a + x) == "abc"
     assert [1, 2, 3, 4].fold(0, fn(a: int, x: int) -> int: a + x) == 10
+
+# ---- a bare GENERIC fn passed as a higher-order argument ----
+#
+# The rule is "every type parameter must be determined at every position the fn is READ as a value",
+# and the argument position's verdict is DEFERRED to the end of the call — `[1,2,3].fold(0, dup)`
+# pins `dup`'s `T` from the FIRST argument (the accumulator) while `dup` is the SECOND, so a
+# per-argument eager check would refuse a program Go accepts. This is the RUNNING half: it proves
+# the pin the checker records is the one the erased fn actually runs with. The rejections (`pred`
+# whose `T` appears nowhere, `mk` whose `T` is return-only) are `src/checker/tests.rs`
+# (`undetermined_generic_fn_value_rejected_in_argument_position`) — they never reach a runtime.
+# Serial==M:N is guarded by `test_runner::chz_suite_passes_both_engines`.
+
+fn gid[T](x: T) -> T:
+    return x
+
+fn gsecond[T](a: T, b: T) -> T:
+    return b
+
+fn geven[T](x: T) -> bool:
+    return true
+
+struct Applier:
+    n: int
+    # the fn slot BEFORE the argument that pins it — the order no builtin can spell
+    fn fn_first[U](self, f: fn(U) -> U, x: U) -> U:
+        return f(x)
+    fn fn_last[U](self, x: U, f: fn(U) -> U) -> U:
+        return f(x)
+
+test fn a_generic_fn_as_a_higher_order_argument():
+    # pinned by the RECEIVER's element type
+    assert [1, 2, 3].map(gid) == [1, 2, 3]
+    assert ["a", "b"].map(gid) == ["a", "b"]
+    assert [1, 2, 3].filter(geven) == [1, 2, 3]
+    # THE ordering case: the accumulator is argument 0, the generic fn is argument 1
+    assert [1, 2, 3].fold(0, gsecond) == 3
+    assert ["a", "b", "c"].fold("", gsecond) == "c"
+    # …and both orders on a user generic method, where the pin can come from the LATER argument too
+    a := Applier(0)
+    assert a.fn_first(gid, 5) == 5
+    assert a.fn_last(5, gid) == 5
+    assert a.fn_first(gid, "s") == "s"
+    # a turbofish pins a return-only type param the slot cannot
+    assert [1, 2].map(empty_of[str]) == [[], []]
+
+fn empty_of[T](n: int) -> List[T]:
+    return []

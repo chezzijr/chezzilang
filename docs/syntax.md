@@ -1010,10 +1010,10 @@ closure-taking container methods) pins its `[T]` from the element type — `[1,2
 The runtime is generic-**erased** — the value *is* the underlying function — so an indirect call
 adds no overhead and behaves identically on both engines.
 
-A **bare, un-pinned** generic fn value — `g := ident`, with no turbofish and no expected
-`fn(...) -> ...` type anywhere — is rejected **at the read**, whether or not it is ever called. This is
-Go's rule (`cannot use generic function id without instantiation`); the diagnostic names the
-undetermined parameters and the working spellings:
+A **bare, un-pinned** generic fn value — `g := ident`, with no turbofish and nothing that determines
+`[T]` — is rejected **at the read**, whether or not it is ever called. This is Go's rule
+(`cannot use generic function id without instantiation`); the diagnostic names the undetermined
+parameters and the working spellings:
 
 ```chezzi
 g := ident        # 'ident' is generic and T is not determined here, so it cannot become a function
@@ -1029,14 +1029,24 @@ fn-value turbofish carries exactly one type argument (`pair[int]` for `pair[A, B
 so the diagnostic does not offer it. First-class (rank-N) polymorphism — one binding used at two
 different types — is a future addition; Go and Rust refuse it too.
 
-Two positions are deliberately **not** covered, both because the concrete type is present but does not
-reach the read. A parameter or field **default value** (`fn run(f: fn(int) -> int = id)`) has a
-concrete slot the checker does not thread into the expected-type hint, so the bare read is refused
-there and `= id[int]` is the spelling that works. And a **builtin container HOF** whose pin declines —
-`[1,2,3].map(mk)` for a return-only `mk[T](n: int) -> List[T]` — still type-checks and runs
-(`[[], [], []]`); the pin owns that slot and bails by design when the slot is not yet concrete, so the
-wall stays out of its way. (v1 limit: the pin requires a **same-module** generic fn — an *imported*
-generic fn used bare as a value stays rejected on every path.)
+**Argument position asks the same question.** A bare generic fn handed to a HOF — a user one, or any
+builtin container HOF (`map`, `filter`, `fold`, `sort_by`, `sort_by_key`, `min_by`, `max_by`,
+`take_while`, `drop_while`, `count`, `position`, `for_each`/`fold_entries`, `Shared.update`,
+`RwShared.write`) — is refused with the *same* diagnostic when the slot cannot determine its type
+parameters: `[1,2,3].filter(pred)` for a `pred[T](n: int) -> bool` whose `T` appears nowhere, and
+`[1,2,3].map(mk)` for a return-only `mk[T](n: int) -> List[T]`, are both errors. Go answers the same
+(`in call to takeBool, cannot infer T`). The check runs at the **end of the call**, once every
+argument has had its chance to pin: `[1,2,3].fold(0, pick)` for `pick[T](a: T, b: T) -> T` is pinned
+by the accumulator, which is the *first* argument while `pick` is the second — and a user generic
+method may spell the two slots either way round (`b.app(ident, 5)` works as well as
+`b.app2(5, ident)`). An **empty** receiver is the one carve-out: its element type is `?`, not a
+type parameter nothing determined, so `[].map(ident)` still type-checks and prints `[]`.
+
+One position is deliberately **not** covered, because the concrete type is present but does not reach
+the read: a parameter or field **default value** (`fn run(f: fn(int) -> int = id)`) has a concrete slot
+the checker does not thread into the expected-type hint, so the bare read is refused there and
+`= id[int]` is the spelling that works. (v1 limit: the pin requires a **same-module** generic fn — an
+*imported* generic fn used bare as a value stays rejected on every path.)
 
 **`?` inside a closure.** A closure body may use `?` (§9) — but only when the closure carries an
 **explicit `-> Result[…]`/`-> Option[…]`** return type. The `?` propagates to *that closure's*

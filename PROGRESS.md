@@ -10317,6 +10317,46 @@ no longer a non-goal — complete VM-only support shipped** (see below).
 One bullet per milestone/epic. Full landing detail (TDD notes, review-panel findings, test-count deltas,
 branch names) is in the git log.
 
+- **…and at an ARGUMENT-position read too, deferred to the end of the call (2026-08-15).** The rule
+  above only asked its question where an `expected_hint` was absent, so one function got two verdicts
+  depending on where it was read. Measured on the pre-change binary: `g := pred` rejected, but
+  `take_bool(pred)` printed `1`, `[1,2,3].filter(pred)` printed `[1, 2, 3]`, and `[1,2,3].map(mk)`
+  printed `[[], [], []]` — a `List[List[T]]` whose `T` nothing ever determined. Go refuses all three
+  (`./e.go:12:10: in call to takeBool, cannot infer T`). Now every one of them gets the SAME sentence
+  the binding gives, at the argument's own span. **The ordering is the whole difficulty and the reason
+  the check is DEFERRED**: `[1,2,3].fold(0, pick)` for `pick[T](a: T, b: T) -> T` is pinned by the
+  accumulator, argument ZERO, while `pick` is argument one — a per-argument eager check refuses a
+  program that runs today (`3`) and that Go accepts. So the verdict is re-asked once, after
+  `recover_return_only_params`, when the call's substitution is as bound as it will ever get
+  (`report_undetermined_generic_fn_value_args`); it is idempotent with the interleaved pin because
+  `unify` is first-binding-wins, so the map only grows. **ONE derivation, not a second look-alike
+  rule:** `pin_generic_fn_value` (`src/checker/mod.rs`) is now the single answer to *"does this
+  position determine every type parameter?"*, returning `Pinned` / `Undetermined` / `Skip`, and
+  `reject_undetermined_generic_fn_value` (`src/checker/pattern.rs`) is the single diagnostic — asked by
+  `infer_ident`'s Scope A (expected-type hint), by the generic-method argument pin
+  (`try_pin_generic_fn_value_arg`), and by the deferred check. `Skip` is what keeps the rule honest:
+  a non-matching-arity or non-`fn` slot belongs to the arity/shape diagnostic, and a slot whose own
+  PARAMETER positions are `Unknown` is the empty-collection sentinel, not an undetermined parameter —
+  `[].map(id)` and `[].map(mk)` still print `[]`. A slot's `Unknown` RETURN does not excuse anything
+  (`RwShared[List].for_each`'s `fn(int) -> ?` slot rejects a `sink[T](n: int)` whose `T` is nowhere).
+  Two things the one derivation fixed for free: `q.for_each(gs)` for `gs[T](x: T)` was a FALSE reject
+  (*argument 1 of 'for_each': expected fn(int) -> ?, found fn(T) -> nil*) because the old Scope A
+  demanded a fully concrete hint including the return; and `b.app(ident, 5)` on
+  `fn app[U](self, f: fn(U) -> U, x: U) -> U` — the fn slot BEFORE the argument that pins it, the order
+  no builtin can spell — reported *argument to 'app' has type int, expected T*, because pass-1 `unify`
+  bound `U` to the rigid callee's leaked `T` and first-binding-wins made it permanent. A bare
+  generic-fn argument the slot cannot pin yet now DEFERS its pass-1 unification past the value
+  arguments (same shape as Bug D's `mask_closure_ret`), so both argument orders work. Every builtin
+  HOF enumerated and covered: `map`, `filter`, `fold`, `sort_by`, `sort_by_key`, `min_by`, `max_by`,
+  `take_while`, `drop_while`, `count`, `position`, plus `RwShared`'s `for_each`/`for_each_entry`/
+  `fold`/`fold_entries` and `Shared.update`/`RwShared.write`. Still NOT covered, unchanged and
+  measured: a parameter/field default value (`fn run(f: fn(int) -> int = id)` — a concrete slot the
+  checker does not thread into the hint), and the generic FREE-fn HOF path (`applyg(id, 5)` for
+  `fn applyg[U](f: fn(U) -> U, x: U) -> U`), which rejects at the read on both binaries — its pass-1
+  leak is the same one fixed above but on `infer_generic_call`, and moving it there is a widening of
+  what is ACCEPTED, so it belongs in its own change with its own proof. 438-file `.chz` corpus sweep,
+  pre vs post binary: **zero** verdict changes outside the file the new tests were added to. 4156 lib
+  tests + 549 Chezzi tests identical on both engines. `docs/syntax.md` §7b, `docs/spec.md`.
 - **An UNINSTANTIATED generic fn value is refused at the binding, Go's rule (2026-08-15).** `g := id`
   for `fn id[T](x: T) -> T` was accepted, and the mistake surfaced at the eventual call as
   *argument 1 of 'closure': expected T, found int* — blaming a `closure` the user never wrote and

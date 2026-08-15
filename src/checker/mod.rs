@@ -2704,6 +2704,77 @@ fn ty_fully_concrete(ty: &Ty) -> bool {
     }
 }
 
+/// Does `ty` still mention a type PARAMETER anywhere? Strictly weaker than `!ty_fully_concrete`: a
+/// `Ty::Unknown` does NOT count. That split is the whole point — an `Unknown` is the empty-collection
+/// / cascade sentinel (a slot nothing filled), whereas a surviving `Ty::Param` is a type parameter
+/// that was never determined. Arm-for-arm identical to `ty_fully_concrete`, so the two stay in
+/// lockstep as `Ty` grows.
+fn ty_has_param(ty: &Ty) -> bool {
+    match ty {
+        Ty::Param(_) => true,
+        Ty::Unknown => false,
+        Ty::List(x) | Ty::Option(x) | Ty::Set(x) => ty_has_param(x),
+        Ty::Map(k, v) => ty_has_param(k) || ty_has_param(v),
+        Ty::Result(a, b) => ty_has_param(a) || ty_has_param(b),
+        Ty::Struct(_, a) | Ty::Enum(_, a) | Ty::Protocol(_, a) => a.iter().any(ty_has_param),
+        Ty::Tuple(ts) => ts.iter().any(ty_has_param),
+        Ty::Func { params, ret, .. } => params.iter().any(ty_has_param) || ty_has_param(ret),
+        _ => false,
+    }
+}
+
+/// The verdict of [`pin_generic_fn_value`] — the ONE answer to *"does this position determine every
+/// type parameter of the generic function read here?"*.
+enum FnValuePin {
+    /// Every type param bound to a concrete type. Carries the bindings (so the caller can
+    /// `enforce_bounds`) and the fully-substituted concrete `fn(..) -> ..` the value takes on.
+    Pinned(HashMap<String, Ty>, Ty),
+    /// A type param is unbound, or bound to a still-free `Ty::Param`. Nothing about this position
+    /// can determine it, so the read cannot become a function value — the rule reports.
+    Undetermined,
+    /// Not this rule's business, and never an error here: the slot is not a matching-arity `fn(..)`
+    /// (an arity / shape diagnostic owns that and says it accurately), the slot's own PARAMETER
+    /// positions are not concrete (`[].map(ident)`'s `fn(?) -> U` — the empty-collection sentinel,
+    /// which runs fine and prints `[]`), or the pin came out `Unknown`-cored.
+    Skip,
+}
+
+/// THE derivation behind the uninstantiated-generic-function-value rule, asked at every position a
+/// generic fn is read as a VALUE: a binding / annotation / return (via `infer_ident`'s expected-type
+/// hint), a generic method's argument slot (the interleaved pin in `try_pin_generic_fn_value_arg`),
+/// and again at the END of that call, where `report_undetermined_generic_fn_value_args` reports the
+/// [`FnValuePin::Undetermined`] ones. `declared` is the fn's own signature (type params still free);
+/// `want` is the expected type / declared slot with everything known SO FAR substituted in.
+///
+/// ORDERING: this is a pure question about the bindings it is handed, so *when* it is asked is the
+/// caller's responsibility. The argument-position caller must ask it only once the whole call has
+/// been inferred — `[1,2,3].fold(0, pick)` pins `pick`'s `T` from the FIRST argument while `pick` is
+/// the SECOND, so asking per-argument would refuse a program Go accepts.
+fn pin_generic_fn_value(type_params: &[TypeParam], declared: &Ty, want: &Ty) -> FnValuePin {
+    let (Ty::Func { params: dp, .. }, Ty::Func { params: wp, .. }) = (declared, want) else {
+        return FnValuePin::Skip;
+    };
+    // Only the slot's PARAMETERS are gated: its RETURN may legitimately be `Unknown` (a
+    // discarded-return HOF slot like `for_each`'s `fn(int) -> ?`) and the question is still
+    // answerable — a fn whose `T` appears nowhere is undetermined there just the same.
+    if dp.len() != wp.len() || !wp.iter().all(ty_fully_concrete) {
+        return FnValuePin::Skip;
+    }
+    let mut map: HashMap<String, Ty> = HashMap::new();
+    unify(declared, want, &mut map);
+    if !type_params.iter().all(|tp| map.contains_key(&tp.name)) {
+        return FnValuePin::Undetermined;
+    }
+    let refined = subst(declared, &map);
+    if ty_has_param(&refined) {
+        return FnValuePin::Undetermined;
+    }
+    if !ty_fully_concrete(&refined) {
+        return FnValuePin::Skip;
+    }
+    FnValuePin::Pinned(map, refined)
+}
+
 /// True iff `t` is a COMPOUND type whose recursive structure contains a `Ty::Unknown` anywhere in a
 /// type-argument / element / key / value position. A bare top-level `Ty::Unknown` returns FALSE —
 /// that is the cascade-suppression sentinel (a real type error already happened, or a permissive

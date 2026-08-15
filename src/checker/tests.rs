@@ -22096,6 +22096,206 @@ fn a_determined_generic_fn_value_is_untouched_ok() {
     ));
 }
 
+/// The heads the argument-position cases share: `T` in NO position (`pred`), `T` in the RETURN only
+/// (`mk`), `T` pinnable from the argument (`ident`), and a two-argument `pick` whose `T` the
+/// ACCUMULATOR pins.
+const ARGPOS_HEAD: &str = "fn pred[T](n: int) -> bool:\n    return true\nfn mk[T](n: int) -> List[T]:\n    return []\nfn ident[T](x: T) -> T:\n    return x\nfn pick[T](a: T, b: T) -> T:\n    return b\n";
+
+/// An ARGUMENT-position read of a generic fn is the same read as a binding, so it owes the same
+/// answer. Measured on `69aa9efc` (pre-change), all accepted-and-running: `take_bool(pred)` → `1`,
+/// `[1,2,3].filter(pred)` → `[1, 2, 3]`, `[1,2,3].map(mk)` → `[[], [], []]` — one function with two
+/// verdicts depending on the position it is read in. Go refuses each (`in call to takeBool, cannot
+/// infer T`); `[1,2,3].map(mk)`'s `[[], [], []]` is a `List[List[T]]` with `T` never determined.
+#[test]
+fn undetermined_generic_fn_value_rejected_in_argument_position() {
+    // a USER HOF with a concrete declared parameter type (the hint reaches the read, and cannot
+    // determine `T`)
+    rejects(
+        &format!(
+            "{ARGPOS_HEAD}fn take_bool(f: fn(int) -> bool) -> int:\n    return 1\nfn main():\n    print(take_bool(pred))\n"
+        ),
+        "'pred' is generic and T is not determined here",
+    );
+    // every BUILTIN higher-order method: the NON-generic ones (hint path) …
+    for (call, who) in [
+        ("[1,2,3].filter(pred)", "pred"),
+        ("[1,2,3].take_while(pred)", "pred"),
+        ("[1,2,3].drop_while(pred)", "pred"),
+        ("[1,2,3].count(pred)", "pred"),
+        ("[1,2,3].position(pred)", "pred"),
+        ("[1,2,3].sort_by(cmp2)", "cmp2"),
+        // … and the GENERIC ones (`map[U]`/`fold[U]`/`sort_by_key[K]`/`min_by[K]`/`max_by[K]`),
+        // whose verdict is the DEFERRED end-of-call one.
+        ("[1,2,3].map(mk)", "mk"),
+        ("[1,2,3].fold(0, acc)", "acc"),
+        ("[1,2,3].sort_by_key(key)", "key"),
+        ("[1,2,3].min_by(key)", "key"),
+        ("[1,2,3].max_by(key)", "key"),
+    ] {
+        rejects(
+            &format!(
+                "{ARGPOS_HEAD}fn key[T](n: int) -> int:\n    return n\nfn cmp2[T](a: int, b: int) -> int:\n    return a - b\nfn acc[T](a: int, b: int) -> int:\n    return a + b\nfn main():\n    print({call})\n"
+            ),
+            &format!("'{who}' is generic and T is not determined here"),
+        );
+    }
+    // …and the `std.concurrency` handles' function slots, including `RwShared[List]`'s `for_each`,
+    // whose slot return is deliberately `?` (any return accepted) while its PARAMETER is concrete —
+    // an `Unknown` return must not excuse an undetermined type param.
+    for call in [
+        "s := Shared(1)\n    s.update(bump)",
+        "s := RwShared(1)\n    s.write(bump)",
+        "s := RwShared([1,2,3])\n    s.for_each(sink)",
+        "s := RwShared([1,2,3])\n    print(s.fold(0, acc))",
+    ] {
+        entry_rejects(
+            &format!(
+                "import std.concurrency\n{ARGPOS_HEAD}fn bump[T](n: int) -> int:\n    return n + 1\nfn acc[T](a: int, b: int) -> int:\n    return a + b\nfn sink[T](n: int):\n    print(n)\nfn main():\n    {call}\nmain()\n"
+            ),
+            "is generic and T is not determined here",
+        );
+    }
+    // The diagnostic is the one the BINDING already gives — same sentence, same spellings, and never
+    // a 'closure' the user did not write. `mk`'s `T` occurs in its signature, so the concrete-fn-type
+    // advice has a `<T>` hole to point at …
+    let joined = joined_errs(&format!(
+        "{ARGPOS_HEAD}fn main():\n    print([1,2,3].map(mk))\n"
+    ));
+    assert!(
+        joined.contains("'mk' is generic and T is not determined here")
+            && joined.contains("instantiate it (`mk[<T>]`)")
+            && joined
+                .contains("give this position a concrete function type (`fn(int) -> List[<T>]`)")
+            && !joined.contains("closure"),
+        "argument position must reuse the binding's diagnostic verbatim, got: {joined}"
+    );
+    // … and `pred`'s `T` occurs NOWHERE, so it must NOT: `fn(int) -> bool` is the type the slot
+    // already has, so "give this position a concrete function type (`fn(int) -> bool`)" would be
+    // advice the user has already followed, with no `<…>` for the tail to point at. Only the
+    // turbofish and deleting the parameter can actually reach it.
+    let joined = joined_errs(&format!(
+        "{ARGPOS_HEAD}fn main():\n    print([1,2,3].filter(pred))\n"
+    ));
+    assert!(
+        joined.contains("T appears nowhere in its signature (`fn(int) -> bool`)")
+            && joined.contains("instantiate it (`pred[<T>]`)")
+            && joined.contains("drop the unused type parameter")
+            && !joined.contains("give this position a concrete function type"),
+        "an unused type parameter must not be told to annotate the position, got: {joined}"
+    );
+    // …and with TWO unused parameters, the turbofish is not offered either (it carries one type arg).
+    let joined = joined_errs(
+        "fn two[A, B](n: int) -> bool:\n    return true\nfn main():\n    print([1,2,3].filter(two))\n",
+    );
+    assert!(
+        joined.contains("'two' is generic and A, B are not determined here")
+            && joined.contains("A, B appear nowhere in its signature (`fn(int) -> bool`)")
+            && joined.contains("drop the unused type parameters")
+            && !joined.contains("`two[<"),
+        "two unused parameters take neither remedy but deletion, got: {joined}"
+    );
+}
+
+/// Every check error of `src`, joined — for asserting on a diagnostic's exact wording.
+fn joined_errs(src: &str) -> String {
+    check_src(src)
+        .iter()
+        .map(|e| e.message.clone())
+        .collect::<Vec<_>>()
+        .join(" | ")
+}
+
+/// THE ordering constraint. `[1,2,3].fold(0, pick)` pins `pick`'s `T` from the FIRST argument (the
+/// accumulator) while `pick` is the SECOND, so the check can only run at the END of the call's
+/// inference — a per-argument eager check rejects a program that runs today (`3`) and that Go
+/// accepts. Every other way a parameter can get pinned is here too, one per line.
+#[test]
+fn a_generic_fn_argument_pinned_by_anything_stays_ok() {
+    let head = ARGPOS_HEAD;
+    // pinned by a SIBLING argument inferred EARLIER (the accumulator) — the deferred-check proof
+    ok(&format!(
+        "{head}fn main():\n    print([1,2,3].fold(0, pick))\n"
+    ));
+    // …and BOTH argument orders on a user generic METHOD, whose slots can be spelled either way
+    // round (no builtin can): the fn LAST, like `fold`, and the fn FIRST, pinned by an argument the
+    // check only sees later. Pre-change the fn-FIRST spelling reported "argument to 'app' has type
+    // int, expected T" — pass-1 `unify` had already bound `U` to the rigid callee's leaked `T`.
+    let bx = "struct Bx:\n    n: int\n    fn app[U](self, f: fn(U) -> U, x: U) -> U:\n        return f(x)\n    fn app2[U](self, x: U, f: fn(U) -> U) -> U:\n        return f(x)\n";
+    ok(&format!(
+        "{head}{bx}fn main():\n    b := Bx(0)\n    print(b.app(ident, 5))\n    print(b.app2(5, ident))\n"
+    ));
+    // …and the same two orders still REJECT the fn nothing can determine.
+    rejects(
+        &format!("{head}{bx}fn main():\n    b := Bx(0)\n    print(b.app(mk, 5))\n"),
+        "'mk' is generic and T is not determined here",
+    );
+    // pinned by the RECEIVER's element type
+    ok(&format!(
+        "{head}fn main():\n    print([1,2,3].map(ident))\n"
+    ));
+    // pinned by a TURBOFISH at the argument
+    ok(&format!(
+        "{head}fn main():\n    print([1,2].map(mk[str]))\n"
+    ));
+    ok(&format!(
+        "{head}fn main():\n    print([1,2,3].filter(pred[int]))\n"
+    ));
+    // pinned by the HOF parameter's DECLARED type (including a return-only `T`)
+    ok(&format!(
+        "{head}fn take_strs(f: fn(int) -> List[str]) -> int:\n    return 0\nfn main():\n    print(take_strs(mk))\n"
+    ));
+    ok(&format!(
+        "{head}fn apply(f: fn(int) -> int, x: int) -> int:\n    return f(x)\nfn main():\n    print(apply(ident, 7))\n"
+    ));
+    // pinned by the enclosing BINDING's annotation, and by a turbofish at the binding
+    ok(&format!(
+        "{head}fn main():\n    h: fn(int) -> int = ident\n    print(h(5))\n"
+    ));
+    ok(&format!(
+        "{head}fn main():\n    g := ident[int]\n    print(g(5))\n"
+    ));
+    // pinned by a RETURN annotation
+    ok(&format!(
+        "{head}fn get() -> fn(int) -> int:\n    return ident\nfn main():\n    print(get()(9))\n"
+    ));
+    // pinned by a struct FIELD's concrete fn type
+    ok(&format!(
+        "{head}struct Bx:\n    f: fn(int) -> int\nfn main():\n    b := Bx(ident)\n    print(b.f(3))\n"
+    ));
+    // a DIRECT call is not a value read at all
+    ok(&format!(
+        "{head}fn main():\n    print(ident(5))\n    print(ident(\"a\"))\n"
+    ));
+    // every builtin HOF again, with a generic fn whose `T` the slot DOES determine
+    for call in [
+        "[1,2,3].filter(gp)",
+        "[1,2,3].take_while(gp)",
+        "[1,2,3].drop_while(gp)",
+        "[1,2,3].count(gp)",
+        "[1,2,3].position(gp)",
+        "[1,2,3].map(gi)",
+        "[1,2,3].fold(0, pick)",
+        "[1,2,3].min_by(gi)",
+        "[1,2,3].max_by(gi)",
+    ] {
+        ok(&format!(
+            "{head}fn gp[T](x: T) -> bool:\n    return true\nfn gi[T](x: T) -> T:\n    return x\nfn main():\n    print({call})\n"
+        ));
+    }
+    // the two in-place sorts, whose slot is a `-> nil` statement, not a value
+    ok(&format!(
+        "{head}fn gc[T](a: T, b: T) -> int:\n    return 0\nfn gi[T](x: T) -> T:\n    return x\nfn main():\n    xs := [3,1,2]\n    xs.sort_by(gc)\n    xs.sort_by_key(gi)\n    print(xs)\n"
+    ));
+    // `std.concurrency`'s slots, including `for_each`'s deliberately-`?` return
+    entry_ok(&format!(
+        "import std.concurrency\n{head}fn gi[T](x: T) -> T:\n    return x\nfn gs[T](x: T):\n    print(x)\nfn main():\n    s := Shared(1)\n    s.update(gi)\n    r := RwShared(1)\n    r.write(gi)\n    q := RwShared([1,2,3])\n    q.for_each(gs)\nmain()\n"
+    ));
+    // an EMPTY receiver leaves the slot's own parameter `Unknown` — the empty-collection sentinel,
+    // not evidence the fn is un-instantiable. Both of these print `[]` today and must keep doing so.
+    ok(&format!("{head}fn main():\n    print([].map(ident))\n"));
+    ok(&format!("{head}fn main():\n    print([].map(mk))\n"));
+}
+
 #[test]
 fn generic_fn_direct_call_unchanged() {
     ok("fn ident[T](x: T) -> T:\n    return x\n\nfn main():\n    print(ident(5) + 1)\n");
