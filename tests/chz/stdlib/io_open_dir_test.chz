@@ -3,7 +3,7 @@
 # `File::open` succeeds on a directory, so `io.open` used to hand back an `Ok(Reader)` whose every
 # read failed — and `read_line`'s message advised `read_bytes`, which fails too. `io.read_file(dir)`
 # already Err'd at the call; `io.open` now matches it (and Python's `IsADirectoryError`).
-# Run: `cargo run -- test tests/chz/`. Serial==M:N guarded by the dual-engine gate.
+# Run: `cargo run -- test tests/chz/`. Gated by `test_runner::chz_suite_passes` (the M:N-engine gate).
 
 import std.io
 import std.os

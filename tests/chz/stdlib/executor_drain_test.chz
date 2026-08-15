@@ -6,8 +6,8 @@
 # Early-stop is opt-in via a `std.cancel.Token`, not a drain mode.
 #
 # These assert on an `AtomicInt` accumulator read AFTER the drain returns, never on inter-task print
-# order (N9 / nondeterministic cross-task ordering). Gated serial==M:N by
-# `test_runner::chz_suite_passes`.
+# order (N9 / nondeterministic cross-task ordering). Gated by
+# `test_runner::chz_suite_passes` (the M:N-engine gate).
 # Run: `cargo run -- test tests/chz/stdlib/executor_drain_test.chz`
 
 import std.concurrency

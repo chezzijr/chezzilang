@@ -18,7 +18,7 @@
 #     same decision under the same key, which is normal and benign. A presence-checking guard would
 #     reject every program with a same-module default — i.e. most of this file.
 #
-# Serial==M:N is guarded by `test_runner::chz_suite_passes`.
+# Gated by `test_runner::chz_suite_passes` (the M:N-engine gate).
 
 fn ab(a: int, b: int) -> int:
     return a * 100 + b

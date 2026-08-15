@@ -19,13 +19,13 @@ cargo run -- test --serial tests/chz/   # cooperative single-thread VM instead
 cargo run -- test tests/chz/spec/list_test.chz   # one file
 ```
 
-## The parity gate (why this replaces Rust `parity_*` tests)
+## The gate (why this replaces Rust `parity_*` tests)
 
-A single `chezzi test` invocation runs **one** engine (M:N by default, `--serial` to switch). The Rust tests these are ported from also asserted
-**serial VM == M:N VM** (byte-identical). That dimension is preserved by the `cargo test` gate
-`test_runner::chz_suite_passes`, which runs this entire suite on **both** engines and
-asserts identical per-test verdicts. So `cargo test` — not just `chezzi test` — is the authoritative
-gate; a test that passes on one engine but fails on the other is a parity bug caught there.
+A single `chezzi test` invocation runs **one** engine (M:N by default, `--serial` to switch). The Rust
+tests these are ported from also asserted **serial VM == M:N VM** (byte-identical); that comparison is
+gone now that `--serial` is not the engine of record. What remains is the `cargo test` gate
+`test_runner::chz_suite_passes`, which runs this entire suite on the M:N engine and asserts every
+test passes. So `cargo test` — not just `chezzi test` — is the authoritative gate.
 
 ## What stays in Rust (not portable)
 
@@ -47,5 +47,4 @@ comparisons and fault-message checks port here; the rest stays in Rust.
 
 Mirror an existing file. Free tests: `test fn name(): assert <expr>[, "msg"]`. Suites: a `struct`
 with `test fn name(self)` methods + optional `before_all`/`after_all`/`before_each`/`after_each`
-hooks — see `suites/suite_test.chz`. Keep every assertion a deterministic value comparison so it
-holds identically on both engines.
+hooks — see `suites/suite_test.chz`. Keep every assertion a deterministic value comparison.

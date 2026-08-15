@@ -4533,23 +4533,24 @@ main()
 }
 
 /// D5 owe #3 (Path A) — a blocking `recv` reached **through a chezzi-source HOF** (`iter.map`,
-/// `std/iter.chz`) parks instead of faulting `deadlock`, unlike the native `.map` (whose Rust loop
-/// frame breaks the snapshot chain). Every frame from the fiber's entry to the `recv` is a VM frame
-/// (`map`'s `for`-loop + the closure), so the park is sound. The exact A/B of the contrast test
-/// `fibers_recv_inside_map_callback_faults` (native `xs.map` → `deadlock`); here `iter.map` succeeds.
-///
-/// The **cooperative** leg is the deterministic guard: tasks run in spawn order on one thread, so
-/// `consume` (spawned first) reaches `recv` on the still-empty channel and **must park** before the
-/// `produce` sibling can run — a regressed park/wake faults `deadlock` or hangs, never flake-passes.
-/// (Under `--parallel` the producer races the consumer on another thread and may fill the unbounded
-/// FIFO before the first `recv`, so that leg can't *force* a park — it's the real-engine + hang
-/// guard, run under a 30 s watchdog.) Sum `66` proves all three recvs threaded through the closure.
+/// `std/iter.chz`) parks (snapshot-suspends) instead of demoting, unlike the native `.map`
+/// (`fibers_recv_inside_map_callback_demotes_on_mn`, whose Rust loop frame breaks the snapshot
+/// chain and must demote a worker instead). Every frame from the fiber's entry to the `recv` is a
+/// VM frame (`map`'s `for`-loop + the closure), so the park-in-place path is sound and no
+/// replacement worker is needed. Both mechanisms now converge on the same result (M:N is the only
+/// engine), so the thing worth pinning is that Path A really did *park*, not just get lucky with an
+/// already-filled buffer: `produce` delays its first `send` (`time.sleep_ms`, same technique as
+/// `d5_owe3_path_c_recv_in_native_map_callback_demotes`) so `consume`'s first `recv` is guaranteed
+/// empty, forcing a real park deterministically. Sum `66` proves all three recvs threaded through
+/// the closure. 30 s watchdog so a park/wake regression hangs loud instead of hanging the suite.
 #[test]
 fn d5_owe3_recv_in_iter_map_callback_parks() {
     let src = "\
 import std.iter
+import std.time
 
 fn produce(ch: Channel[int]):
+    time.sleep_ms(50)
     ch.send(10)
     ch.send(20)
     ch.send(30)
@@ -4569,17 +4570,6 @@ fn main():
 main()
 ";
     let entry = write_temp_chz("d5_owe3_iter_map", src);
-    // Cooperative leg — deterministic: `consume` parks on the empty channel before `produce` runs.
-    let (co, _ce, cr, _cc) = run_file_with(&entry, crate::native::HostConfig::default());
-    assert!(
-        cr.is_ok(),
-        "cooperative iter.map recv-in-callback faulted (park regressed): {cr:?}"
-    );
-    assert_eq!(
-        co, "66\n",
-        "cooperative iter.map recv-in-callback wrong sum"
-    );
-    // Parallel leg — the real M:N engine, under a watchdog so a park/wake hang fails loud.
     let run_entry = entry.clone();
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
@@ -4594,9 +4584,9 @@ main()
         Ok((out, _err, res, _code)) => {
             assert!(
                 res.is_ok(),
-                "parallel iter.map recv-in-callback nursery faulted: {res:?}"
+                "iter.map recv-in-callback nursery faulted: {res:?}"
             );
-            assert_eq!(out, "66\n");
+            assert_eq!(out, "66\n", "iter.map recv-in-callback wrong sum");
         }
         Err(_) => {
             panic!("hung — D5 owe #3 Path A regressed (recv inside iter.map did not park)")
@@ -4646,9 +4636,9 @@ main()
 /// faults `deadlock` under `--parallel`: the worker thread is **demoted** (blocks in place on the
 /// channel condvar, a fresh replacement worker covers its `wid`), and **resumes in place** when a
 /// sibling `send`s — Go's `handoffp`. The contrast to Path A (`d5_owe3_recv_in_iter_map_callback_parks`,
-/// where `iter.map` is chezzi source → pure VM frames → snapshot-parks) and to the cooperative-engine
-/// pin (`fibers_recv_inside_map_callback_faults`, which still faults — demotion is M:N-only). The
-/// result is written with `Shared.set` (NOT `update`) so the recv site is the `xs.map` callback only,
+/// where `iter.map` is chezzi source → pure VM frames → snapshot-parks, no demotion needed) and to
+/// `fibers_recv_inside_map_callback_demotes_on_mn` (the same native-callback shape, pinned in
+/// isolation). The result is written with `Shared.set` (NOT `update`) so the recv site is the `xs.map` callback only,
 /// avoiding the `update_lock`-held-while-blocked hazard. Sum `66` = (1+10)+(2+20)+(3+30): all three
 /// recvs threaded through the native map callback. Parallel-only, under a 30 s watchdog so a
 /// demote/resume hang fails loud instead of hanging the suite. The producer `sleep_ms`s before its
@@ -12971,10 +12961,23 @@ fn golden_parallel_deadlock_still_faults() {
 
 /// Ping-pong across two channels exercises many suspend↔resume cycles: each fiber repeatedly
 /// parks on an empty `recv`, the scheduler runs the sibling whose `send` wakes it, and the parked
-/// fiber resumes mid-`while`-loop with its locals intact. The LINE SET is fixed by the program's
-/// logic; the exact print order is a genuine M:N race (each worker's stdout can batch-flush out of
-/// wall-clock step with the other), so compare order-insensitively — same idiom as
-/// `assert_same_lines` elsewhere.
+/// fiber resumes mid-`while`-loop with its locals intact.
+///
+/// The program's own print order IS deterministic, not a race: every print is causally chained
+/// through a channel handoff (`pong 0` → `a.send(100)` → `a.recv()` → `ping 100` → `b.send(1)` →
+/// `pong 1` → …), and the real CLI's stdout sink is one locked write per `print` — line-atomic, no
+/// per-thread buffering (`docs/concurrency.md:1030`) — so the happens-before chain pins the
+/// interleaving exactly there (verified against the release binary: 20/20 runs identical,
+/// `pong 0\nping 100\n…`).
+///
+/// This Rust unit test, though, does NOT go through that sink — `run`/`run_capture` use the
+/// in-process BUFFERED `Vm::out`, and under the M:N engine each spawned task's buffer is `mem::take`n
+/// per-fiber (`Vm::swap_ctx`) and only spliced back into the parent at the join, in SPAWN-SLOT
+/// order, not completion or causal order (`reduce_task_slots`, `src/vm/sched.rs:2118`). So what this
+/// harness actually observes is each task's ENTIRE output as one block, concatenated ping-then-pong
+/// (spawn order) — an artifact of the capture path, not of the program. Compare order-insensitively
+/// for that reason; the load-bearing assertion is that every VALUE threaded correctly across the
+/// suspend/resume cycles, which order-insensitive comparison still catches.
 #[test]
 fn fibers_ping_pong_interleaves() {
     let src = "fn ping(a: Channel[int], b: Channel[int]):\n    i := 0\n    while i < 3:\n        b.send(i)\n        x := a.recv()\n        print(\"ping {x}\")\n        i = i + 1\nfn pong(a: Channel[int], b: Channel[int]):\n    i := 0\n    while i < 3:\n        y := b.recv()\n        print(\"pong {y}\")\n        a.send(y + 100)\n        i = i + 1\nfn main():\n    a := Channel[int]()\n    b := Channel[int]()\n    parallel:\n        spawn ping(a, b)\n        spawn pong(a, b)\nmain()\n";
@@ -18629,7 +18632,6 @@ fn a_static_method_head_is_a_spawn_or_defer_target_runs_both_engines() {
     let spawned = format!(
         "{holder}fn body():\n    parallel:\n        spawn Holder.build(3)\n    print(\"body\")\nbody()\n"
     );
-    crate::vm::assert_same_lines(&run_capture(&spawned).unwrap(), "body\n3\n");
     crate::vm::assert_same_lines(&run_capture(&spawned).unwrap(), "body\n3\n");
     // …and an INSTANCE method target is untouched.
     assert_eq!(

@@ -1,13 +1,15 @@
-# B1 + B2 (VM engine): blocking `recv`. The consumer is spawned first, so the cooperative scheduler
-# starts it first; it blocks on an empty channel, the scheduler switches to the producer, the
-# producer sends, and the consumer then RESUMES exactly where it parked and receives. This is the
-# canonical mid-flight producer/consumer that the sequential executor could not express.
+# B1 + B2 (VM engine): blocking `recv`. The consumer is spawned first; it blocks on the empty
+# channel, the producer sends, and the consumer then RESUMES exactly where it parked and receives.
+# This is the canonical mid-flight producer/consumer that a sequential executor could not express.
 #
 # NOTE: needs suspendable execution (a blocking `recv` that parks mid-flight). The LINE SET below
-# is fixed by the program's logic on every engine; the exact print order is a genuine race under
-# the M:N engine's real parallel threads (unlike the single-threaded cooperative engine this file
-# was originally captured against) — see `golden_channel_block_chz_matches_expected`'s
-# order-insensitive compare.
+# is guaranteed by the program's logic, and running this file for real (`chezzi run`, the streaming
+# stdout sink, line-atomic per print) gives the interleaved order shown above, deterministically.
+# `golden_channel_block_chz_matches_expected` still compares order-insensitively: it runs through
+# the Rust suite's in-process BUFFERED capture, where each spawned task's whole output is merged in
+# at the join by spawn order rather than print order (`Vm::reduce_task_slots`), so what that harness
+# actually observes is "consumer: waiting/got/got" as one block ahead of "producer: send/send" — a
+# property of the test capture path, not a race in the engine.
 
 fn consumer(ch: Channel[int]):
     print("consumer: waiting")

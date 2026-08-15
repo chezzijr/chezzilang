@@ -1,7 +1,7 @@
 # tests/chz/stdlib/math_test.chz — std.math number/integer surface.
 #
 # Ported from src/vm/parity_tests.rs (`math_number_fns_parity`). Values match Python `math`.
-# Run: `cargo run -- test tests/chz/`. Serial==M:N guarded by the dual-engine gate.
+# Run: `cargo run -- test tests/chz/`. Gated by `test_runner::chz_suite_passes` (the M:N-engine gate).
 
 import std.math
 

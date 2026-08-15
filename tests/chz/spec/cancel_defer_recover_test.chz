@@ -6,8 +6,8 @@
 # pending cancel must resume travelling up once the defer body finishes.
 #
 # Asserts on a Shared accumulator read AFTER the join (never inter-task print order), and uses a
-# sleeping sibling + a blocking `recv` (never a busy loop — N8). Runs on BOTH engines via
-# test_runner::chz_suite_passes.
+# sleeping sibling + a blocking `recv` (never a busy loop — N8). Gated by
+# `test_runner::chz_suite_passes` (the M:N-engine gate).
 import std.time
 import std.concurrency
 

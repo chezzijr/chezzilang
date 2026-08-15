@@ -3,8 +3,8 @@
 # `Obj::Struct` no longer stores a per-instance `name: Box<str>`; the type name is resolved from the
 # instance's `tid` via `Program::struct_name_of_tid`. This exercises that resolution on the three
 # paths it touches: (a) LOCAL Display/str, (b) METHOD dispatch, (c) CROSS-HEAP (Channel across a
-# spawned task). Asserts on RECEIVED VALUES (never inter-task print order) so it stays serial==M:N.
-# Runs on BOTH engines via test_runner::chz_suite_passes.
+# spawned task). Asserts on RECEIVED VALUES (never inter-task print order).
+# Gated by `test_runner::chz_suite_passes` (the M:N-engine gate).
 import std.concurrency
 
 struct Point:

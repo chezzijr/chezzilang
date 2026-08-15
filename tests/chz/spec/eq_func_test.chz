@@ -9,7 +9,7 @@
 # `#[derive(PartialEq, Eq)] struct Boxy<T: Eq>(T)` over a `fn(i32) -> i32` payload builds clean and
 # prints `true` — fn pointers implement `PartialEq`. Go is the one ancestor that differs: it rejects
 # `f == g` outright (`func can only be compared to nil`). Chezzi now matches CPython/Rust on all four
-# spellings. Gated serial==M:N by `test_runner::chz_suite_passes`.
+# spellings. Gated by `test_runner::chz_suite_passes` (the M:N-engine gate).
 #
 # `Ty::BuiltinFn` (a first-class universe builtin value — `ord`/`chr`/`panic`/`print`) is a SEPARATE
 # `Ty` variant from `Ty::Func` (kept apart only for sendability) but renders identically in

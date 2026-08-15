@@ -6,7 +6,7 @@
 # ISOLATION is unchanged: a task mutates its OWN deep copy and never writes through to the parent;
 # `Shared`/`RwShared`/`Atomic`/`Channel` stay the only real sharing. A NESTED `parallel:` inside a
 # task sees the TASK's current view, not the parent module's.
-# Gated serial==M:N by chz_suite_passes.
+# Gated by `test_runner::chz_suite_passes` (the M:N-engine gate).
 import std.concurrency
 
 # --- W6-2 repro: a first nursery BEFORE `n` is initialized ------------------------------------

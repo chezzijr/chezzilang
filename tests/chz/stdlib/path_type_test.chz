@@ -6,7 +6,7 @@
 #   p.str()    lossy, U+FFFD substituted, NEVER faults  (Stringable)
 #   p.decode() exact, recoverable fault on non-UTF-8     (mirrors `bytes.decode()`)
 #   p.bytes()  the raw OS bytes                          (never faults)
-# Run: `cargo run -- test tests/chz/`. Serial==M:N guarded by the dual-engine gate.
+# Run: `cargo run -- test tests/chz/`. Gated by `test_runner::chz_suite_passes` (the M:N-engine gate).
 
 import std.path
 import std.fs

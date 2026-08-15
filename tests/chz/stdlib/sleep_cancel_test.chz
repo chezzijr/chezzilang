@@ -14,8 +14,7 @@
 # the job's post-sleep code. Both forms below are deterministically red on the pre-fix binary.
 #
 # These assert on an `AtomicInt` read after the reap plus a wall-clock bound with 3× headroom, never
-# on inter-task print order. Gated serial==M:N by `test_runner::chz_suite_passes` (serial
-# reaches the same verdict by a different route: its drain never starts a `shutdown_now`-ed job).
+# on inter-task print order. Gated by `test_runner::chz_suite_passes` (the M:N-engine gate).
 # Run: `cargo run -- test tests/chz/stdlib/sleep_cancel_test.chz`
 
 import std.time

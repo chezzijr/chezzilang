@@ -8,7 +8,7 @@
 # These are the RUNNING half of the fix. Runtime dispatch is by NAME and always worked, so a green
 # run here proves the lowering, never that the checker's rejection is gone — that claim is fenced
 # separately by the `ok()`/`rejects()` tests in `src/checker/tests.rs` (the M22 embed block).
-# Serial==M:N is guarded by `test_runner::chz_suite_passes`.
+# Gated by `test_runner::chz_suite_passes` (the M:N-engine gate).
 
 protocol Named:
     fn name(self) -> str

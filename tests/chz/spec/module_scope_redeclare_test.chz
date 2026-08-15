@@ -6,7 +6,7 @@
 # a closure built BEFORE the second `x := …` reads the new value through that shared slot. A fn-local
 # re-declare is a different backend path (`add_local` pushes a fresh slot), so it is a Rust-style
 # shadow and may change type — the closure there keeps the OLD binding.
-# Gated serial==M:N by chz_suite_passes.
+# Gated by `test_runner::chz_suite_passes` (the M:N-engine gate).
 
 gx := 1
 gseen := fn() -> int: gx

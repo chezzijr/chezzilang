@@ -8,7 +8,7 @@
 # than skipping), `read_bytes` (drains it, a carry-only short read), `lines()` (a pure-Chezzi
 # generator over `read_line`, so it inherits both), `close()` (discards it).
 # Temp paths carry the pid AND the test name (the suite runs concurrently under M:N).
-# Run: `cargo run -- test tests/chz/`. Serial==M:N guarded by the dual-engine gate.
+# Run: `cargo run -- test tests/chz/`. Gated by `test_runner::chz_suite_passes` (the M:N-engine gate).
 
 import std.io
 import std.os

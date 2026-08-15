@@ -4,7 +4,7 @@
 # Neg/Hashable/Comparable/Stringable/Index/IndexSet/Slice with NO user method, so an erased generic
 # body may call `a.add(b)` / `x.hash()` / `c.index(k)` on a concrete built-in. Every arm must be
 # OBSERVATIONALLY IDENTICAL to its operator form (same value, same fault message).
-# Serial==M:N is guarded by `test_runner::chz_suite_passes`.
+# Gated by `test_runner::chz_suite_passes` (the M:N-engine gate).
 
 # ---- erased generic bodies (the shape under test) ----
 

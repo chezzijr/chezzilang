@@ -3,7 +3,7 @@
 # A `"` opens a quoted field ONLY at FIELD START (CPython `csv.reader` parity). Anywhere else it is
 # an ORDINARY character kept literally. Before the fix `a,b"c` parsed as [["a","bc"]] — the quote was
 # silently DELETED, a third answer neither CPython (keep it) nor Go (error) gives.
-# Pure compute, no IO — serial==M:N by construction. Run: `cargo run -- test tests/chz/`.
+# Pure compute, no IO. Run: `cargo run -- test tests/chz/`.
 
 import std.csv
 

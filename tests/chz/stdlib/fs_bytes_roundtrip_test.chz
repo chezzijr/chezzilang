@@ -4,7 +4,7 @@
 # non-UTF-8 name came back with U+FFFD substituted — a path that names NOTHING, with no diagnostic
 # (`fs.exists` on it was FALSE). They now hand back `path.Path` (raw bytes), so the name round-trips.
 # Temp dirs carry the pid AND the test name (the suite runs concurrently under M:N).
-# Run: `cargo run -- test tests/chz/`. Serial==M:N guarded by the dual-engine gate.
+# Run: `cargo run -- test tests/chz/`. Gated by `test_runner::chz_suite_passes` (the M:N-engine gate).
 
 import std.fs
 import std.io
