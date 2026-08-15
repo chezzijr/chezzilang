@@ -97,7 +97,7 @@ fn main():
 
 main()
 "#;
-    assert_parity(src);
+    assert_parity_out(src, "5\n1\n3\n5\n7\n9\n2\n10\na\n0\n1\n0\n3\n0\n");
 }
 
 /// M19 SSO — string ops must stay byte-identical across both engines for strings that straddle
@@ -171,7 +171,10 @@ fn main():
 
 main()
 "#;
-    assert_parity(src);
+    assert_parity_out(
+        src,
+        "21\n22\n23\n43\naaaaaaaaaaaaaaaaaaaaabbbbbbbbbbbbbbbbbbbbbb\naaaaaaaaaaaaaaaaaaaaaz\nbbbbbbbbbbbbbbbbbbbbbbz\ntrue\ntrue\nc\nc\n23\ncccccccccccccccccccccc\nccccccccccccccccccccccc\naaaaaaaaaaaaaaaaaaaaab\nBBBBBBBBBBBBBBBBBBBBBB\nccccccccccccccccccccccc\nHÉLLO-WÖRLD-STRASSE\nleft-segment-twelve\nright-side-thirteen\ntrue\nprefix-pad-prefix-pad-0\nprefix-pad-prefix-pad-1\nprefix-pad-prefix-pad-2\nprefix-pad-prefix-pad-3\nprefix-pad-prefix-pad-4\n11\n11\n15\n15\n1\n2\n",
+    );
 }
 
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -339,7 +342,7 @@ fn parity_entry_fault(src: &str) -> String {
 #[test]
 fn protocol_value_crosses_channel_three_engine() {
     let src = "protocol Drawable:\n    fn draw(self) -> str\nstruct Sq:\n    s: int\n    fn draw(self) -> str:\n        return \"sq\"\nfn main():\n    ch := Channel[Drawable]()\n    d: Drawable = Sq(1)\n    ch.send(d)\n    parallel:\n        spawn:\n            print(ch.recv().draw())\nmain()\n";
-    assert_parity(src);
+    assert_parity_out(src, "sq\n");
 }
 
 /// An FFI fn (`Cffi`) crosses the wire-value airlock BY VALUE (its shared `Arc<Cffi>`, the same the
@@ -1385,7 +1388,15 @@ fn xor_fold_single_number_parity() {
 fn shift_out_of_range_error_parity() {
     // Dynamic shift the checker can't catch — both engines must raise the same runtime error.
     assert_parity("print(1 << 64)\n");
+    assert_eq!(
+        vm_outcome("print(1 << 64)\n").unwrap_err(),
+        "runtime error (line 1, col 7): shift amount 64 out of range (0..64)"
+    );
     assert_parity("print(1 << -1)\n");
+    assert_eq!(
+        vm_outcome("print(1 << -1)\n").unwrap_err(),
+        "runtime error (line 1, col 7): shift amount -1 out of range (0..64)"
+    );
 }
 
 #[test]
@@ -1417,7 +1428,7 @@ fn match_nested_heap_payload_gc_stress() {
     // Nested pattern binding heap values (strings) inside a tuple inside a variant; a GC mid-bind
     // must not collect the still-referenced payload.
     let src = "o: (str, str)? = Some((\"a\" + \"b\", \"c\" + \"d\"))\nmatch o:\n    None: print(\"none\")\n    Some((x, y)): print(x + y)\n";
-    assert_parity(src);
+    assert_parity_out(src, "abcd\n");
     assert_eq!(vm_outcome(src).unwrap(), "abcd\n");
     assert_eq!(
         run_capture_stress(src),
@@ -1863,12 +1874,24 @@ fn ord_index_digit_value_parity() {
 fn ord_empty_string_error_parity() {
     // Runtime error (checker can't catch it) — message must match across engines.
     assert_parity("print(ord(\"\"))\n");
+    assert_eq!(
+        vm_outcome("print(ord(\"\"))\n").unwrap_err(),
+        "runtime error (line 1, col 7): ord() of an empty string"
+    );
 }
 
 #[test]
 fn chr_invalid_codepoint_error_parity() {
     assert_parity("print(chr(-1))\n");
+    assert_eq!(
+        vm_outcome("print(chr(-1))\n").unwrap_err(),
+        "runtime error (line 1, col 7): chr(): -1 is not a valid Unicode codepoint"
+    );
     assert_parity("print(chr(2000000))\n");
+    assert_eq!(
+        vm_outcome("print(chr(2000000))\n").unwrap_err(),
+        "runtime error (line 1, col 7): chr(): 2000000 is not a valid Unicode codepoint"
+    );
 }
 
 #[test]
@@ -1894,7 +1917,7 @@ fn sort_by_comparator_mutates_list_parity() {
     // Both sort a snapshot taken at call time and overwrite the list with the sorted result, so
     // the in-comparator `xs[0] = 100` is discarded.
     let src = "xs := [3, 1, 2]\nfn cmp(a: int, b: int) -> int:\n    xs[0] = 100\n    return a - b\nxs.sort_by(cmp)\nprint(xs)\n";
-    assert_parity(src);
+    assert_parity_out(src, "[1, 2, 3]\n");
     assert_eq!(vm_outcome(src).unwrap(), "[1, 2, 3]\n");
 }
 
@@ -1988,40 +2011,52 @@ fn break_list_for_parity() {
 
 #[test]
 fn match_int_literals_stmt_parity() {
-    assert_parity(
+    assert_parity_out(
         "n := 2\nmatch n:\n    0: print(\"zero\")\n    1: print(\"one\")\n    _: print(\"many\")\n",
+        "many\n",
     );
 }
 
 #[test]
 fn match_str_literals_expr_parity() {
-    assert_parity("c := \"x\"\ns := match c:\n    \"a\": \"first\"\n    _: \"other\"\nprint(s)\n");
+    assert_parity_out(
+        "c := \"x\"\ns := match c:\n    \"a\": \"first\"\n    _: \"other\"\nprint(s)\n",
+        "other\n",
+    );
 }
 
 #[test]
 fn match_bool_literals_parity() {
-    assert_parity(
+    assert_parity_out(
         "b := false\nmatch b:\n    true: print(\"yes\")\n    false: print(\"no\")\n    _: print(\"?\")\n",
+        "no\n",
     );
 }
 
 #[test]
 fn match_literal_matched_arm_parity() {
     // The matching literal arm fires (wildcard not reached).
-    assert_parity("n := 1\ns := match n:\n    0: \"a\"\n    1: \"b\"\n    _: \"z\"\nprint(s)\n");
+    assert_parity_out(
+        "n := 1\ns := match n:\n    0: \"a\"\n    1: \"b\"\n    _: \"z\"\nprint(s)\n",
+        "b\n",
+    );
 }
 
 #[test]
 fn match_wildcard_reached_parity() {
     // No literal matches → the `_` arm fires.
-    assert_parity("n := 9\ns := match n:\n    0: \"a\"\n    1: \"b\"\n    _: \"z\"\nprint(s)\n");
+    assert_parity_out(
+        "n := 9\ns := match n:\n    0: \"a\"\n    1: \"b\"\n    _: \"z\"\nprint(s)\n",
+        "z\n",
+    );
 }
 
 #[test]
 fn match_variant_regression_parity() {
     // A variant match still lowers via the variant path unchanged.
-    assert_parity(
+    assert_parity_out(
         "o := Some(5)\nmatch o:\n    Some(v): print(\"got {v}\")\n    None: print(\"none\")\n",
+        "got 5\n",
     );
 }
 
@@ -2158,7 +2193,7 @@ fn parity_sort_by_key_nan_float_key_deterministic() {
     // would be a non-portable test. `assert_parity` proves the real guarantees portably: the sort
     // never faults and VM↔interp agree byte-identically on whatever order this machine produces.
     let src = "fn main():\n    xs := [1.0, 0.0 / 0.0, 2.0, 0.0 / 0.0, 0.5]\n    xs.sort_by_key(fn(x: float) -> float: x)\n    for v in xs:\n        print(v)\nmain()";
-    assert_parity(src);
+    assert_parity_out(src, "NaN\nNaN\n0.5\n1.0\n2.0\n");
 }
 
 #[test]
@@ -2294,6 +2329,11 @@ fn main():
 main()
 "#;
     assert_parity(src);
+    assert_eq!(
+        vm_outcome(src).unwrap_err(),
+        "runtime error (line 6, col 24): generator already running",
+        "for:\n{src}"
+    );
     let e = vm_outcome(src).expect_err("a re-entrant resume must fault, not answer None");
     assert!(e.contains("generator already running"), "{e}");
     // The value the consumer already pulled is neither lost nor duplicated, and the bogus
@@ -2333,7 +2373,7 @@ fn main():
     print("still alive")
 main()
 "#;
-    assert_parity(src);
+    assert_parity_out(src, "1\ncaught: generator already running\nstill alive\n");
     let out = run_capture(src).expect("the fault is CAUGHT — the program exits Ok, no host panic");
     assert!(out.contains("caught:"), "the fault is recoverable: {out:?}");
     assert!(
@@ -2406,7 +2446,10 @@ fn main():
         print("d {x}")
 main()
 "#;
-    assert_parity(src);
+    assert_parity_out(
+        src,
+        "a 0\na 1\na2 0\na2 1\nb 0\nb-resume Some(1)\nc 1\nc caught\nc closed None\nc-after 0\nc-after 1\nd 0\nd 10\n",
+    );
     let out = run_capture(src).expect("no path leaves a generator poisoned as running");
     let want = "a 0\na 1\na2 0\na2 1\nb 0\nb-resume Some(1)\nc 1\nc caught\nc closed None\nc-after 0\nc-after 1\nd 0\nd 10\n";
     assert_eq!(out, want, "every unwind path clears the running guard");
@@ -4967,109 +5010,280 @@ fn native_returned_heap_values_survive_gc_stress() {
 }
 
 /// A spread of programs exercising every feature class — run through BOTH engines.
-const PROGRAMS: &[&str] = &[
+const PROGRAMS: &[(&str, Result<&str, &str>)] = &[
     // arithmetic + promotion + truncation
-    "print(7 / 2)\nprint(1 + 2.0)\nprint(2.5 * 2.0)\nprint(10 % 3)",
+    (
+        "print(7 / 2)\nprint(1 + 2.0)\nprint(2.5 * 2.0)\nprint(10 % 3)",
+        Ok("3\n3.0\n5.0\n1\n"),
+    ),
     // string concat + interpolation + escapes
-    "fn main():\n    n := \"x\"\n    print(\"a{n}b {1 + 2} {{lit}}\")\nmain()",
+    (
+        "fn main():\n    n := \"x\"\n    print(\"a{n}b {1 + 2} {{lit}}\")\nmain()",
+        Ok("axb 3 {lit}\n"),
+    ),
     // comparison + equality + bool logic
-    "print(1 < 2)\nprint(2 == 2.0)\nprint(true and false)\nprint(false or true)\nprint(not true)",
+    (
+        "print(1 < 2)\nprint(2 == 2.0)\nprint(true and false)\nprint(false or true)\nprint(not true)",
+        Ok("true\ntrue\nfalse\ntrue\nfalse\n"),
+    ),
     // lists, indexing, len
-    "print([1, 2, 3])\nprint([10, 20, 30][2])\nprint([1, 2].len())",
+    (
+        "print([1, 2, 3])\nprint([10, 20, 30][2])\nprint([1, 2].len())",
+        Ok("[1, 2, 3]\n30\n2\n"),
+    ),
     // structs + methods
-    "struct P:\n    x: int\n    y: int\n    fn sum(self) -> int:\n        return self.x + self.y\nfn main():\n    p := P(3, 4)\n    print(p)\n    print(p.sum())\nmain()",
+    (
+        "struct P:\n    x: int\n    y: int\n    fn sum(self) -> int:\n        return self.x + self.y\nfn main():\n    p := P(3, 4)\n    print(p)\n    print(p.sum())\nmain()",
+        Ok("P(x=3, y=4)\n7\n"),
+    ),
     // enums + match + payload binding
-    "enum S:\n    C(int)\n    Sq(int)\nfn a(s: S) -> int:\n    match s:\n        S.C(r): return r * r\n        S.Sq(n): return n * n\nfn main():\n    print(a(S.C(3)))\n    print(a(S.Sq(4)))\nmain()",
+    (
+        "enum S:\n    C(int)\n    Sq(int)\nfn a(s: S) -> int:\n    match s:\n        S.C(r): return r * r\n        S.Sq(n): return n * n\nfn main():\n    print(a(S.C(3)))\n    print(a(S.Sq(4)))\nmain()",
+        Ok("9\n16\n"),
+    ),
     // generic enum (type-erased): same enum at two element types + match payload substitution
-    "enum Tree[T]:\n    Leaf\n    Node(T, Tree[T], Tree[T])\nfn sum(t: Tree[int]) -> int:\n    match t:\n        Tree.Leaf: return 0\n        Tree.Node(v, l, r): return sum(l) + v + sum(r)\nfn main():\n    t: Tree[int] = Tree.Node(2, Tree.Node(1, Tree.Leaf, Tree.Leaf), Tree.Node(3, Tree.Leaf, Tree.Leaf))\n    print(sum(t))\nmain()",
+    (
+        "enum Tree[T]:\n    Leaf\n    Node(T, Tree[T], Tree[T])\nfn sum(t: Tree[int]) -> int:\n    match t:\n        Tree.Leaf: return 0\n        Tree.Node(v, l, r): return sum(l) + v + sum(r)\nfn main():\n    t: Tree[int] = Tree.Node(2, Tree.Node(1, Tree.Leaf, Tree.Leaf), Tree.Node(3, Tree.Leaf, Tree.Leaf))\n    print(sum(t))\nmain()",
+        Ok("6\n"),
+    ),
     // closures
-    "fn adder(n: int):\n    return fn(x: int) -> int: x + n\nfn main():\n    f := adder(10)\n    print(f(5))\nmain()",
+    (
+        "fn adder(n: int):\n    return fn(x: int) -> int: x + n\nfn main():\n    f := adder(10)\n    print(f(5))\nmain()",
+        Ok("15\n"),
+    ),
     // ? operator (Ok + Err propagation)
-    "fn d(a: int, b: int) -> Result[int]:\n    if b == 0:\n        return Err(\"zero\")\n    return Ok(a / b)\nfn use() -> Result[int]:\n    r := d(10, 0)?\n    return Ok(r)\nfn main():\n    match use():\n        Ok(v): print(v)\n        Err(e): print(e)\nmain()",
+    (
+        "fn d(a: int, b: int) -> Result[int]:\n    if b == 0:\n        return Err(\"zero\")\n    return Ok(a / b)\nfn use() -> Result[int]:\n    r := d(10, 0)?\n    return Ok(r)\nfn main():\n    match use():\n        Ok(v): print(v)\n        Err(e): print(e)\nmain()",
+        Ok("zero\n"),
+    ),
     // for + while loops
-    "fn main():\n    t := 0\n    for i in 0..100:\n        t += i\n    print(t)\n    n := 5\n    while n > 0:\n        n -= 1\n    print(n)\nmain()",
+    (
+        "fn main():\n    t := 0\n    for i in 0..100:\n        t += i\n    print(t)\n    n := 5\n    while n > 0:\n        n -= 1\n    print(n)\nmain()",
+        Ok("4950\n0\n"),
+    ),
     // builtins
-    "print(range(4))\nprint(int(\"7\") + 1)\nprint(float(3))\nprint([1, 2, 3].len())\nprint(str(42))",
+    (
+        "print(range(4))\nprint(int(\"7\") + 1)\nprint(float(3))\nprint([1, 2, 3].len())\nprint(str(42))",
+        Ok("[0, 1, 2, 3]\n8\n3.0\n3\n42\n"),
+    ),
     // recursion
-    "fn fib(n: int) -> int:\n    if n < 2:\n        return n\n    return fib(n - 1) + fib(n - 2)\nfn main():\n    print(fib(15))\nmain()",
+    (
+        "fn fib(n: int) -> int:\n    if n < 2:\n        return n\n    return fib(n - 1) + fib(n - 2)\nfn main():\n    print(fib(15))\nmain()",
+        Ok("610\n"),
+    ),
     // inferred return type (no `-> T`): runtime is unaffected, both engines agree
-    "fn add(a: int, b: int):\n    return a + b\nfn classify(n: int):\n    if n == 0:\n        return Some(0)\n    return None\nfn main():\n    print(add(2, 3))\n    match classify(0):\n        Some(v): print(v)\n        None: print(\"none\")\nmain()",
+    (
+        "fn add(a: int, b: int):\n    return a + b\nfn classify(n: int):\n    if n == 0:\n        return Some(0)\n    return None\nfn main():\n    print(add(2, 3))\n    match classify(0):\n        Some(v): print(v)\n        None: print(\"none\")\nmain()",
+        Ok("5\n0\n"),
+    ),
     // expression-valued match (multiline) + if (inline): both engines must agree on the value
-    "fn lookup(k: int) -> int?:\n    if k == 0:\n        return None\n    return Some(k)\nfn main():\n    found := match lookup(7):\n        Some(v): v\n        None: -1\n    print(found)\n    sign := if found > 0: \"pos\" else: \"neg\"\n    print(sign)\n    none := match lookup(0):\n        Some(v): v\n        None: -1\n    print(none)\nmain()",
+    (
+        "fn lookup(k: int) -> int?:\n    if k == 0:\n        return None\n    return Some(k)\nfn main():\n    found := match lookup(7):\n        Some(v): v\n        None: -1\n    print(found)\n    sign := if found > 0: \"pos\" else: \"neg\"\n    print(sign)\n    none := match lookup(0):\n        Some(v): v\n        None: -1\n    print(none)\nmain()",
+        Ok("7\npos\n-1\n"),
+    ),
     // ----- M6: core-type methods (str) -----
-    "print(\"abcd\".len())\nprint(\"Hi There\".upper())\nprint(\"Hi There\".lower())\nprint(\"  pad  \".trim())",
+    (
+        "print(\"abcd\".len())\nprint(\"Hi There\".upper())\nprint(\"Hi There\".lower())\nprint(\"  pad  \".trim())",
+        Ok("4\nHI THERE\nhi there\npad\n"),
+    ),
     // str conforms to Error: message() returns the string itself
-    "print(\"boom\".message())",
+    ("print(\"boom\".message())", Ok("boom\n")),
     // Go-style Result[T, E]: custom struct error (T!E), match, message() dispatch
-    "struct DbErr:\n    code: int\n    fn message(self) -> str:\n        return \"db {self.code}\"\nfn q(ok: bool) -> int!DbErr:\n    if ok:\n        return Ok(1)\n    return Err(DbErr(503))\nfn main():\n    match q(false):\n        Ok(v): print(v)\n        Err(e): print(e.message())\n    match q(true):\n        Ok(v): print(v)\n        Err(e): print(e.message())\nmain()",
+    (
+        "struct DbErr:\n    code: int\n    fn message(self) -> str:\n        return \"db {self.code}\"\nfn q(ok: bool) -> int!DbErr:\n    if ok:\n        return Ok(1)\n    return Err(DbErr(503))\nfn main():\n    match q(false):\n        Ok(v): print(v)\n        Err(e): print(e.message())\n    match q(true):\n        Ok(v): print(v)\n        Err(e): print(e.message())\nmain()",
+        Ok("db 503\n1\n"),
+    ),
     // default-Error path: Err(str) flows as Result[int, Error], consumed via message()
-    "fn parse(ok: bool) -> int!:\n    if ok:\n        return Ok(42)\n    return Err(\"bad input\")\nfn main():\n    match parse(false):\n        Ok(v): print(v)\n        Err(e): print(e.message())\nmain()",
+    (
+        "fn parse(ok: bool) -> int!:\n    if ok:\n        return Ok(42)\n    return Err(\"bad input\")\nfn main():\n    match parse(false):\n        Ok(v): print(v)\n        Err(e): print(e.message())\nmain()",
+        Ok("bad input\n"),
+    ),
     // ----- M11 Phase B: recover boundary -----
     // recover catches index-OOB; Ok path wraps the trailing value
-    "fn main():\n    r := recover:\n        [1, 2][9]\n    match r:\n        Ok(v): print(\"ok {v}\")\n        Err(e): print(\"recovered: {e.message()}\")\nmain()",
+    (
+        "fn main():\n    r := recover:\n        [1, 2][9]\n    match r:\n        Ok(v): print(\"ok {v}\")\n        Err(e): print(\"recovered: {e.message()}\")\nmain()",
+        Ok("recovered: index 9 out of bounds (len 2)\n"),
+    ),
     // recover catches divide-by-zero
-    "fn main():\n    r := recover:\n        10 / 0\n    match r:\n        Ok(v): print(v)\n        Err(e): print(\"err: {e.message()}\")\nmain()",
+    (
+        "fn main():\n    r := recover:\n        10 / 0\n    match r:\n        Ok(v): print(v)\n        Err(e): print(\"err: {e.message()}\")\nmain()",
+        Ok("err: division by zero\n"),
+    ),
     // recover catches integer overflow
-    "fn main():\n    r := recover:\n        9223372036854775807 * 2\n    match r:\n        Ok(v): print(v)\n        Err(e): print(\"ovf\")\nmain()",
+    (
+        "fn main():\n    r := recover:\n        9223372036854775807 * 2\n    match r:\n        Ok(v): print(v)\n        Err(e): print(\"ovf\")\nmain()",
+        Ok("ovf\n"),
+    ),
     // recover ok-path wraps the value
-    "fn main():\n    r := recover:\n        2 + 3\n    match r:\n        Ok(v): print(\"ok {v}\")\n        Err(e): print(\"err\")\nmain()",
+    (
+        "fn main():\n    r := recover:\n        2 + 3\n    match r:\n        Ok(v): print(\"ok {v}\")\n        Err(e): print(\"err\")\nmain()",
+        Ok("ok 5\n"),
+    ),
     // a fault three calls deep is caught at the boundary (no per-call wrapping)
-    "fn a() -> int:\n    return b()\nfn b() -> int:\n    return c()\nfn c() -> int:\n    return [1][9]\nfn main():\n    r := recover:\n        a()\n    match r:\n        Ok(v): print(v)\n        Err(e): print(\"deep recovered\")\nmain()",
+    (
+        "fn a() -> int:\n    return b()\nfn b() -> int:\n    return c()\nfn c() -> int:\n    return [1][9]\nfn main():\n    r := recover:\n        a()\n    match r:\n        Ok(v): print(v)\n        Err(e): print(\"deep recovered\")\nmain()",
+        Ok("deep recovered\n"),
+    ),
     // `?` inside recover short-circuits to `r` (try-block): the Err lands in `r`, and code
     // AFTER the recover still runs — the enclosing fn returns a plain str, so this only works
     // if `?` did NOT exit the function.
-    "fn d(b: int) -> int!:\n    if b == 0:\n        return Err(\"zero\")\n    return Ok(10 / b)\nfn use() -> str:\n    r := recover:\n        x := d(0)?\n        x + 1\n    match r:\n        Ok(v): return \"ok\"\n        Err(e): return \"caught {e.message()}\"\nfn main():\n    print(use())\nmain()",
+    (
+        "fn d(b: int) -> int!:\n    if b == 0:\n        return Err(\"zero\")\n    return Ok(10 / b)\nfn use() -> str:\n    r := recover:\n        x := d(0)?\n        x + 1\n    match r:\n        Ok(v): return \"ok\"\n        Err(e): return \"caught {e.message()}\"\nfn main():\n    print(use())\nmain()",
+        Ok("caught zero\n"),
+    ),
     // `?` Ok path inside recover: value unwrapped, trailing expression becomes the Ok result
-    "fn d(b: int) -> int!:\n    return Ok(10 / b)\nfn main():\n    r := recover:\n        x := d(2)?\n        x + 1\n    match r:\n        Ok(v): print(\"ok {v}\")\n        Err(e): print(e.message())\nmain()",
+    (
+        "fn d(b: int) -> int!:\n    return Ok(10 / b)\nfn main():\n    r := recover:\n        x := d(2)?\n        x + 1\n    match r:\n        Ok(v): print(\"ok {v}\")\n        Err(e): print(e.message())\nmain()",
+        Ok("ok 6\n"),
+    ),
     // side effects before a caught fault PERSIST (keep semantics) — both engines must agree
-    "fn main():\n    x := 1\n    r := recover:\n        x = 99\n        [1][9]\n    match r:\n        Ok(v): print(\"ok\")\n        Err(e): print(\"recovered\")\n    print(\"x={x}\")\nmain()",
+    (
+        "fn main():\n    x := 1\n    r := recover:\n        x = 99\n        [1][9]\n    match r:\n        Ok(v): print(\"ok\")\n        Err(e): print(\"recovered\")\n    print(\"x={x}\")\nmain()",
+        Ok("recovered\nx=99\n"),
+    ),
     // nested recover: the inner boundary catches, the outer sees a normal value
-    "fn main():\n    r := recover:\n        inner := recover:\n            [1][9]\n        match inner:\n            Ok(v): v\n            Err(e): 0\n    match r:\n        Ok(v): print(\"outer ok {v}\")\n        Err(e): print(\"outer err\")\nmain()",
+    (
+        "fn main():\n    r := recover:\n        inner := recover:\n            [1][9]\n        match inner:\n            Ok(v): v\n            Err(e): 0\n    match r:\n        Ok(v): print(\"outer ok {v}\")\n        Err(e): print(\"outer err\")\nmain()",
+        Ok("outer ok 0\n"),
+    ),
     // recovered value composes with `?` after the boundary\n
-    "fn run() -> int!:\n    r := recover:\n        [10, 20][0]\n    v := r?\n    return Ok(v + 1)\nfn main():\n    match run():\n        Ok(v): print(v)\n        Err(e): print(e.message())\nmain()",
-    "print(\"a,b,c\".split(\",\"))\nprint(\",\".join([\"a\", \"b\", \"c\"]))",
-    "print(\"abc\".starts_with(\"ab\"))\nprint(\"abc\".starts_with(\"z\"))\nprint(\"abc\".contains(\"b\"))\nprint(\"abc\".contains(\"q\"))",
+    (
+        "fn run() -> int!:\n    r := recover:\n        [10, 20][0]\n    v := r?\n    return Ok(v + 1)\nfn main():\n    match run():\n        Ok(v): print(v)\n        Err(e): print(e.message())\nmain()",
+        Ok("11\n"),
+    ),
+    (
+        "print(\"a,b,c\".split(\",\"))\nprint(\",\".join([\"a\", \"b\", \"c\"]))",
+        Ok("['a', 'b', 'c']\na,b,c\n"),
+    ),
+    (
+        "print(\"abc\".starts_with(\"ab\"))\nprint(\"abc\".starts_with(\"z\"))\nprint(\"abc\".contains(\"b\"))\nprint(\"abc\".contains(\"q\"))",
+        Ok("true\nfalse\ntrue\nfalse\n"),
+    ),
     // chained core-type methods
-    "print(\"  Hello,World  \".trim().lower().split(\",\"))",
+    (
+        "print(\"  Hello,World  \".trim().lower().split(\",\"))",
+        Ok("['hello', 'world']\n"),
+    ),
     // ----- M6: core-type methods (list) -----
-    "fn main():\n    xs := [1, 2]\n    xs.push(3)\n    xs.push(4)\n    print(xs)\n    print(xs.len())\nmain()",
+    (
+        "fn main():\n    xs := [1, 2]\n    xs.push(3)\n    xs.push(4)\n    print(xs)\n    print(xs.len())\nmain()",
+        Ok("[1, 2, 3, 4]\n4\n"),
+    ),
     // ----- M6: pipe operator -----
-    "fn inc(n: int) -> int: n + 1\nfn dbl(n: int) -> int: n * 2\nfn main():\n    print(5 |> inc() |> dbl())\nmain()",
-    "fn shout(s: str) -> str: s.upper()\nfn main():\n    print(\"hi\" |> shout())\nmain()",
+    (
+        "fn inc(n: int) -> int: n + 1\nfn dbl(n: int) -> int: n * 2\nfn main():\n    print(5 |> inc() |> dbl())\nmain()",
+        Ok("12\n"),
+    ),
+    (
+        "fn shout(s: str) -> str: s.upper()\nfn main():\n    print(\"hi\" |> shout())\nmain()",
+        Ok("HI\n"),
+    ),
     // ----- error parity -----
-    "print(1 / 0)",
-    "print([1, 2][9])",
-    "print(1 + \"x\")",
-    "fn loop(n: int) -> int:\n    return loop(n + 1)\nfn main():\n    print(loop(0))\nmain()",
+    (
+        "print(1 / 0)",
+        Err("runtime error (line 1, col 7): division by zero"),
+    ),
+    (
+        "print([1, 2][9])",
+        Err("runtime error (line 1, col 7): index 9 out of bounds (len 2)"),
+    ),
+    (
+        "print(1 + \"x\")",
+        Err("runtime error (line 1, col 7): cannot apply Add to int and str"),
+    ),
+    (
+        "fn loop(n: int) -> int:\n    return loop(n + 1)\nfn main():\n    print(loop(0))\nmain()",
+        Err(
+            "runtime error (line 2, col 12): maximum call depth (10000) exceeded (infinite recursion?)",
+        ),
+    ),
     // M6 method error parity
-    "print(\"hi\".upper(\"extra\"))",
-    "print(\"hi\".frobnicate())",
-    "print(\",\".join([1, 2]))",
-    "print((5).upper())",
+    (
+        "print(\"hi\".upper(\"extra\"))",
+        Err("runtime error (line 1, col 7): upper() expects 0 argument(s), got 1"),
+    ),
+    (
+        "print(\"hi\".frobnicate())",
+        Err("runtime error (line 1, col 7): type str has no method 'frobnicate'"),
+    ),
+    (
+        "print(\",\".join([1, 2]))",
+        Err(
+            "runtime error (line 1, col 7): join() expects a list of str, got an element of type int",
+        ),
+    ),
+    (
+        "print((5).upper())",
+        Err("runtime error (line 1, col 8): type int has no method 'upper'"),
+    ),
     // arg-eval order: a bad method/receiver with an erroring arg must report the SAME error on
     // both engines — the VM evaluates args (operands) before the call, so the interp must too.
-    "print((5).frob(1 / 0))",
-    "print(\"hi\".frob(1 / 0))",
+    (
+        "print((5).frob(1 / 0))",
+        Err("runtime error (line 1, col 16): division by zero"),
+    ),
+    (
+        "print(\"hi\".frob(1 / 0))",
+        Err("runtime error (line 1, col 17): division by zero"),
+    ),
     // ----- entry model: no auto-main; unhandled top-level Err/None exits -----
-    "fn main():\n    print(\"hi\")", // main defined but never called → no output
-    "Err(\"boom\")",                 // bare top-level Err → unhandled error
-    "x := Err(\"oops\")?",           // top-level `?` Err → unhandled error
-    "fn g() -> Option[int]:\n    return None\ng()", // bare None → unhandled error
-    "fn f() -> Result[int]:\n    return Err(\"x\")\nr := f()\nprint(\"handled\")", // Err bound = handled → no exit
-    "fn main():\n    print(\"before\")\n    x := Err(\"boom\")?\n    print(\"after\")\nmain()", // partial output then exit
+    ("fn main():\n    print(\"hi\")", Ok("")), // main defined but never called → no output
+    (
+        "Err(\"boom\")",
+        Err("runtime error (line 1, col 1): unhandled error: boom"),
+    ), // bare top-level Err → unhandled error
+    (
+        "x := Err(\"oops\")?",
+        Err("runtime error (line 1, col 6): unhandled error: oops"),
+    ), // top-level `?` Err → unhandled error
+    (
+        "fn g() -> Option[int]:\n    return None\ng()",
+        Err("runtime error (line 3, col 1): unhandled error: None"),
+    ), // bare None → unhandled error
+    (
+        "fn f() -> Result[int]:\n    return Err(\"x\")\nr := f()\nprint(\"handled\")",
+        Ok("handled\n"),
+    ), // Err bound = handled → no exit
+    (
+        "fn main():\n    print(\"before\")\n    x := Err(\"boom\")?\n    print(\"after\")\nmain()",
+        Err("runtime error (line 5, col 1): unhandled error: boom"),
+    ), // partial output then exit
     // a user enum shadowing `Err` is a normal value: bare one must NOT exit, `?` must reject it
-    "enum Signal:\n    Err(int)\n    Quiet\nErr(5)\nprint(\"made it\")",
-    "enum Signal:\n    Err(int)\n    Quiet\nfn f() -> int:\n    x := Err(5)?\n    return x\nf()",
+    (
+        "enum Signal:\n    Err(int)\n    Quiet\nErr(5)\nprint(\"made it\")",
+        Err("runtime error (line 4, col 1): unhandled error: 5"),
+    ),
+    (
+        "enum Signal:\n    Err(int)\n    Quiet\nfn f() -> int:\n    x := Err(5)?\n    return x\nf()",
+        Err("runtime error (line 7, col 1): unhandled error: 5"),
+    ),
     // unhandled top-level error INSIDE a top-level block (interp: call_depth 0, VM: is_toplevel)
-    "if true:\n    Err(\"boom\")\nprint(\"after\")", // bare Err in `if` → exit, no "after"
-    "for i in 0..1:\n    Err(\"x\")\nprint(\"after\")", // bare Err in `for` → exit
-    "fn d() -> Result[int]:\n    return Err(\"z\")\nif true:\n    x := d()?\n    print(x)", // top-level `?` in block → exit (same span both engines)
+    (
+        "if true:\n    Err(\"boom\")\nprint(\"after\")",
+        Err("runtime error (line 2, col 5): unhandled error: boom"),
+    ), // bare Err in `if` → exit, no "after"
+    (
+        "for i in 0..1:\n    Err(\"x\")\nprint(\"after\")",
+        Err("runtime error (line 2, col 5): unhandled error: x"),
+    ), // bare Err in `for` → exit
+    (
+        "fn d() -> Result[int]:\n    return Err(\"z\")\nif true:\n    x := d()?\n    print(x)",
+        Err("runtime error (line 4, col 10): unhandled error: z"),
+    ), // top-level `?` in block → exit (same span both engines)
 ];
 
 #[test]
 fn parity_full_suite_vm_vs_interp() {
-    for src in PROGRAMS {
+    for (src, expect) in PROGRAMS {
         assert_parity(src);
+        match expect {
+            Ok(want) => assert_eq!(
+                vm_outcome(src).expect("program should run"),
+                *want,
+                "for:\n{src}"
+            ),
+            Err(want) => assert_eq!(&vm_outcome(src).unwrap_err(), want, "for:\n{src}"),
+        }
     }
 }
 
@@ -5130,12 +5344,19 @@ fn manifest_entrypoint_ok_runs_clean_both_engines() {
 
 #[test]
 fn parity_index_assign() {
-    assert_parity("xs := [1, 2, 3]\nxs[1] = 9\nxs[0] += 4\nxs[2] -= 1\nprint(xs)\n");
+    assert_parity_out(
+        "xs := [1, 2, 3]\nxs[1] = 9\nxs[0] += 4\nxs[2] -= 1\nprint(xs)\n",
+        "[5, 9, 2]\n",
+    );
 }
 
 #[test]
 fn parity_index_assign_out_of_bounds() {
     assert_parity("xs := [1, 2, 3]\nxs[9] = 0\nprint(xs)\n");
+    assert_eq!(
+        vm_outcome("xs := [1, 2, 3]\nxs[9] = 0\nprint(xs)\n").unwrap_err(),
+        "runtime error (line 2, col 1): index 9 out of bounds (len 3)"
+    );
 }
 
 #[test]
@@ -5144,20 +5365,29 @@ fn parity_compound_index_oob_vs_rhs_error_order() {
     // must agree on which error wins. The VM reads the target (bounds-check) before `rhs`;
     // the interp must do the same.
     assert_parity("xs := [1, 2, 3]\nz := 0\nxs[5] += 1 / z\n");
+    assert_eq!(
+        vm_outcome("xs := [1, 2, 3]\nz := 0\nxs[5] += 1 / z\n").unwrap_err(),
+        "runtime error (line 3, col 1): index 5 out of bounds (len 3)"
+    );
 }
 
 #[test]
 fn parity_compound_index_oob_skips_rhs_side_effect() {
     // On an out-of-bounds compound assign, neither engine should run the rhs side effect.
-    assert_parity(
-        "fn side() -> int:\n    print(\"rhs ran\")\n    return 0\nxs := [1, 2, 3]\nxs[5] += side()\nprint(\"after\")\n",
+    let src = "fn side() -> int:\n    print(\"rhs ran\")\n    return 0\nxs := [1, 2, 3]\nxs[5] += side()\nprint(\"after\")\n";
+    assert_parity(src);
+    assert_eq!(
+        vm_outcome(src).unwrap_err(),
+        "runtime error (line 5, col 1): index 5 out of bounds (len 3)",
+        "for:\n{src}"
     );
 }
 
 #[test]
 fn parity_field_assign() {
-    assert_parity(
+    assert_parity_out(
         "struct P:\n    x: int\n    y: int\np := P(1, 2)\np.x = 9\np.y += 3\nprint(p.x)\nprint(p.y)\n",
+        "9\n5\n",
     );
 }
 
@@ -5168,7 +5398,7 @@ fn parity_field_assign() {
 #[test]
 fn parity_hof_param() {
     let src = "fn apply(f: fn(int) -> int, v: int) -> int:\n    return f(v)\ninc := fn(x: int) -> int: x + 1\nprint(apply(inc, 4))\n";
-    assert_parity(src);
+    assert_parity_out(src, "5\n");
     assert_eq!(vm_outcome(src).unwrap(), "5\n");
 }
 
@@ -5178,6 +5408,11 @@ fn parity_hof_param() {
 fn parity_list_sum_overflow() {
     let src = "print([9223372036854775807, 1].sum())\n";
     assert_parity(src);
+    assert_eq!(
+        vm_outcome(src).unwrap_err(),
+        "runtime error (line 1, col 7): integer overflow in Add",
+        "for:\n{src}"
+    );
     let err = vm_outcome(src).expect_err("expected a runtime error, not wraparound");
     assert!(
         err.contains("integer overflow in Add"),
@@ -5190,7 +5425,7 @@ fn parity_list_sum_overflow() {
 #[test]
 fn parity_list_sum_mixed_float() {
     let src = "print([9223372036854775807, 1, 0.0].sum())\n";
-    assert_parity(src);
+    assert_parity_out(src, "9.223372036854776e+18\n");
 }
 
 // ===== higher-order list methods: map / filter / fold =====
@@ -5205,7 +5440,7 @@ fn parity_list_map_to_str_gc_stress() {
     // Each element maps to a freshly-allocated string (heap), so collection mid-map matters.
     let src =
         "xs := [1,2,3]\nys := xs.map(fn(x: int) -> str: \"n{x}\")\nfor y in ys:\n    print(y)\n";
-    assert_parity(src);
+    assert_parity_out(src, "n1\nn2\nn3\n");
     let expected = "n1\nn2\nn3\n";
     assert_eq!(vm_outcome(src).unwrap(), expected);
     assert_eq!(
@@ -5219,7 +5454,7 @@ fn parity_list_map_to_str_gc_stress() {
 fn parity_list_map_to_nested_list_gc_stress() {
     // Maps each element to a nested list (heap); the result list holds heap children.
     let src = "xs := [1,2,3]\nys := xs.map(fn(x: int) -> List[int]: [x, x])\nprint(ys[1][0])\n";
-    assert_parity(src);
+    assert_parity_out(src, "2\n");
     assert_eq!(vm_outcome(src).unwrap(), "2\n");
     assert_eq!(
         run_capture_stress(src),
@@ -5232,7 +5467,7 @@ fn parity_list_map_to_nested_list_gc_stress() {
 fn parity_list_filter_gc_stress() {
     // Filter over string elements; kept elements are heap objects pushed into the result.
     let src = "xs := [\"a\",\"bb\",\"ccc\",\"d\"]\nys := xs.filter(fn(x: str) -> bool: x.len() > 1)\nprint(ys.len())\nprint(ys[0])\n";
-    assert_parity(src);
+    assert_parity_out(src, "2\nbb\n");
     let expected = "2\nbb\n";
     assert_eq!(vm_outcome(src).unwrap(), expected);
     assert_eq!(
@@ -5247,7 +5482,7 @@ fn parity_list_fold_str_acc_gc_stress() {
     // Fold building a string accumulator (heap) — each step allocates a new acc string, so the
     // rooted accumulator slot must survive the next element's closure call.
     let src = "xs := [\"a\",\"b\",\"c\"]\ns := xs.fold(\"\", fn(a: str, x: str) -> str: a + x)\nprint(s)\n";
-    assert_parity(src);
+    assert_parity_out(src, "abc\n");
     assert_eq!(vm_outcome(src).unwrap(), "abc\n");
     assert_eq!(
         run_capture_stress(src),
@@ -5261,7 +5496,7 @@ fn parity_list_sort_by_str_gc_stress() {
     // Sort heap-string elements by length; the comparator re-enters the VM and a collection can
     // fire mid-sort. The source list must stay rooted (we permute indices, not raw Values).
     let src = "xs := [\"ccc\",\"a\",\"dd\",\"b\"]\nxs.sort_by(fn(a: str, b: str) -> int: a.len() - b.len())\nfor x in xs:\n    print(x)\n";
-    assert_parity(src);
+    assert_parity_out(src, "a\nb\ndd\nccc\n");
     let expected = "a\nb\ndd\nccc\n";
     assert_eq!(vm_outcome(src).unwrap(), expected);
     assert_eq!(
@@ -5276,7 +5511,7 @@ fn parity_list_sort_by_nested_list_gc_stress() {
     // Elements are nested lists (heap); sort by first element. Exercises rooting of heap children
     // across comparator calls under stress.
     let src = "xs := [[3,0],[1,0],[2,0]]\nxs.sort_by(fn(a: List[int], b: List[int]) -> int: a[0] - b[0])\nprint(xs[0][0])\nprint(xs[2][0])\n";
-    assert_parity(src);
+    assert_parity_out(src, "1\n3\n");
     assert_eq!(vm_outcome(src).unwrap(), "1\n3\n");
     assert_eq!(
         run_capture_stress(src),
@@ -5291,7 +5526,7 @@ fn parity_map_closure_free_generic_call() {
     // closure-return loop-back recovers `map`'s `U` from the nested free generic call). Runtime is
     // generic-erased, so both engines print the same `2`.
     let src = "fn ident[T](x: T) -> T:\n    return x\nfn main():\n    xs := [1, 2, 3]\n    ys := xs.map(fn(x): ident(x))\n    print(ys[0] + 1)\nmain()\n";
-    assert_parity(src);
+    assert_parity_out(src, "2\n");
     assert_eq!(vm_outcome(src).unwrap(), "2\n");
 }
 
@@ -5302,7 +5537,7 @@ fn parity_fold_closure_free_generic_call() {
     // returns the last element via identity → `s = 3`, `print(s + 1)` = `4`. Generic-erased runtime,
     // so both engines print the same.
     let src = "fn ident[T](x: T) -> T:\n    return x\nfn main():\n    xs := [1, 2, 3]\n    s := xs.fold(0, fn(acc, x): ident(x))\n    print(s + 1)\nmain()\n";
-    assert_parity(src);
+    assert_parity_out(src, "4\n");
     assert_eq!(vm_outcome(src).unwrap(), "4\n");
 }
 
@@ -5312,7 +5547,7 @@ fn parity_free_fn_hof_map() {
     // type-checks to List[int] (the closure-return loop-back now runs on the free-fn path too). Runtime
     // is generic-erased, so both engines print the same `3` (ys=[2,4,6], ys[0]+1).
     let src = "fn mymap[U](xs: List[int], f: fn(int) -> U) -> List[U]:\n    return xs.map(f)\nfn main():\n    ys := mymap([1, 2, 3], fn(x): x * 2)\n    print(ys[0] + 1)\nmain()\n";
-    assert_parity(src);
+    assert_parity_out(src, "3\n");
     assert_eq!(vm_outcome(src).unwrap(), "3\n");
 }
 
@@ -5321,7 +5556,7 @@ fn parity_free_fn_hof_apply_sibling() {
     // `apply[A,B](f: fn(A)->B, a: A) -> B` with `apply(fn(x): x*2, 5)`: A pinned int by the sibling
     // value arg, B (return-only) recovered from the closure body → int, so `y + 1` = 11. Both engines.
     let src = "fn apply[A, B](f: fn(A) -> B, a: A) -> B:\n    return f(a)\nfn main():\n    y := apply(fn(x): x * 2, 5)\n    print(y + 1)\nmain()\n";
-    assert_parity(src);
+    assert_parity_out(src, "11\n");
     assert_eq!(vm_outcome(src).unwrap(), "11\n");
 }
 
@@ -5332,7 +5567,7 @@ fn parity_free_fn_hof_sibling_closure_param() {
     // before the un-inferable-param probe runs, so the SECOND closure's `x: T` param is not rejected.
     // Runtime is generic-erased → both engines print `6`.
     let src = "fn pair[T](f: fn() -> T, g: fn(T) -> int) -> int:\n    return g(f())\nfn main():\n    print(pair(fn(): 5, fn(x): x + 1))\nmain()\n";
-    assert_parity(src);
+    assert_parity_out(src, "6\n");
     assert_eq!(vm_outcome(src).unwrap(), "6\n");
 }
 
@@ -7088,6 +7323,11 @@ fn parity_map_missing_key_read_errors() {
     // Both engines must error identically on a missing key.
     let src = "m := {\"a\": 1}\nprint(m[\"z\"])\n";
     assert_parity(src);
+    assert_eq!(
+        vm_outcome(src).unwrap_err(),
+        "runtime error (line 2, col 7): key not found",
+        "for:\n{src}"
+    );
     assert!(
         vm_outcome(src).unwrap_err().contains("key not found"),
         "{:?}",
@@ -7100,6 +7340,11 @@ fn parity_map_compound_assign_missing_key_errors() {
     // Compound on a missing key is an error (consistent with read-missing).
     let src = "m := {\"a\": 1}\nm[\"z\"] += 1\n";
     assert_parity(src);
+    assert_eq!(
+        vm_outcome(src).unwrap_err(),
+        "runtime error (line 2, col 1): key not found",
+        "for:\n{src}"
+    );
     assert!(
         vm_outcome(src).unwrap_err().contains("key not found"),
         "{:?}",
@@ -7121,6 +7366,11 @@ fn main():
     m[P(1)] = 5
 main()";
     assert_parity(src);
+    assert_eq!(
+        vm_outcome(src).unwrap_err(),
+        "runtime error (line 5, col 5): struct 'P' has no 'hash' method (needed to use it as a map/set key)",
+        "for:\n{src}"
+    );
 }
 
 /// REGRESSION (AsInt relocation): a non-int LIST index now errors at runtime in `GetIndex`,
@@ -7130,6 +7380,11 @@ main()";
 fn parity_list_non_int_index_still_errors() {
     let src = "xs := [1, 2, 3]\nprint(xs[\"a\"])\n";
     assert_parity(src);
+    assert_eq!(
+        vm_outcome(src).unwrap_err(),
+        "runtime error (line 2, col 7): expected int, found str",
+        "for:\n{src}"
+    );
     assert!(
         vm_outcome(src)
             .unwrap_err()
@@ -7140,6 +7395,11 @@ fn parity_list_non_int_index_still_errors() {
     // And on assignment (SetIndex relocation).
     let src2 = "xs := [1, 2, 3]\nxs[\"a\"] = 9\n";
     assert_parity(src2);
+    assert_eq!(
+        vm_outcome(src2).unwrap_err(),
+        "runtime error (line 2, col 1): expected int, found str",
+        "for:\n{src2}"
+    );
     assert!(
         vm_outcome(src2)
             .unwrap_err()
@@ -7155,7 +7415,7 @@ fn parity_map_gc_stress_heap_keys_and_values() {
     // `Heap::children` tracing of BOTH keys and values is exercised (a use-after-free if either
     // is untraced). The keys()/values() lists also hold heap children.
     let src = "fn main():\n    i := 0\n    while i < 200:\n        m := {\"k{i}\": \"v{i}\"}\n        m[\"extra\"] = \"x{i}\"\n        if i == 199:\n            print(m[\"k{i}\"])\n            print(m.values())\n        i += 1\nmain()\n";
-    assert_parity(src);
+    assert_parity_out(src, "v199\n['v199', 'x199']\n");
     let expected = "v199\n['v199', 'x199']\n";
     assert_eq!(vm_outcome(src).unwrap(), expected);
     assert_eq!(
@@ -7185,7 +7445,7 @@ fn parity_tuple_element_access() {
 fn parity_tuple_element_out_of_range_errors() {
     // The checker would catch `.2` statically, but `t` here is built so both engines hit the
     // runtime bounds check with the identical message — parity on the error path.
-    assert_parity("t := (1, 2)\nprint(t.0)\nprint(t.1)\n");
+    assert_parity_out("t := (1, 2)\nprint(t.0)\nprint(t.1)\n", "1\n2\n");
 }
 
 #[test]
@@ -7212,7 +7472,7 @@ fn parity_tuple_heap_elements_gc_stress() {
     // A tuple of heap values (a string + a list). Under GC stress a collection happens between
     // building the tuple and reading it back — proving `Heap::children` traces tuple elements.
     let src = "t := (\"hi\", [1, 2, 3])\nprint(t.0)\nprint(t.1)\n";
-    assert_parity(src);
+    assert_parity_out(src, "hi\n[1, 2, 3]\n");
     assert_eq!(
         run_capture_stress(src),
         "hi\n[1, 2, 3]\n",
@@ -7248,8 +7508,16 @@ fn slice_clamped_parity() {
     assert_parity_out("print([1, 2, 3][-100:])\n", "[1, 2, 3]\n");
     // ...but a plain out-of-range negative index FAULTS, byte-identically.
     assert_parity("print([1, 2, 3][0 - 100])\n");
+    assert_eq!(
+        vm_outcome("print([1, 2, 3][0 - 100])\n").unwrap_err(),
+        "runtime error (line 1, col 7): index -100 out of bounds (len 3)"
+    );
     // Zero step faults with the same message in both engines.
     assert_parity("print([1, 2, 3][::0])\n");
+    assert_eq!(
+        vm_outcome("print([1, 2, 3][::0])\n").unwrap_err(),
+        "runtime error (line 1, col 7): slice step cannot be zero"
+    );
 }
 
 #[test]
@@ -7302,7 +7570,7 @@ fn slice_survives_gc_stress() {
     // The sliced list shares the source's element handles; a GC during the slice alloc must not
     // collect them. (Source is an inline temporary, unrooted except by the slice path.)
     let src = "print([1, 2, 3, 4, 5][1:4])\n";
-    assert_parity(src);
+    assert_parity_out(src, "[2, 3, 4]\n");
     assert_eq!(
         run_capture_stress(src),
         "[2, 3, 4]\n",
@@ -8161,7 +8429,7 @@ fn vm_bytes_ops() {
         "    print(b\"ab\" != b\"ac\")\n", // true
         "main()\n"
     );
-    assert_parity(src);
+    assert_parity_out(src, "1\n3\nb'\\x03\\x02\\x01'\n6\n3\ntrue\nfalse\ntrue\n");
     assert_eq!(
         run_capture(src).expect("vm"),
         "1\n3\nb'\\x03\\x02\\x01'\n6\n3\ntrue\nfalse\ntrue\n"
@@ -8181,7 +8449,7 @@ fn vm_bytes_index_out_of_range_recoverable() {
         "        Err(e): print(\"caught\")\n",
         "main()\n"
     );
-    assert_parity(src);
+    assert_parity_out(src, "caught\n");
     assert_eq!(run_capture(src).expect("vm"), "caught\n");
 }
 
@@ -8197,14 +8465,14 @@ fn vm_bytes_repr_and_map_key() {
         "    print(m[b\"b\"])\n", // 2
         "main()\n"
     );
-    assert_parity(src);
+    assert_parity_out(src, "b'hi\\n'\nb'\\xff'\n1\n2\n");
     assert_eq!(run_capture(src).expect("vm"), "b'hi\\n'\nb'\\xff'\n1\n2\n");
 }
 
 #[test]
 fn vm_bytes_slice_step_parity() {
     let src = "print(b\"\\x00\\x01\\x02\\x03\\x04\"[1:4:2])\nprint(b\"abc\"[1:])\n";
-    assert_parity(src);
+    assert_parity_out(src, "b'\\x01\\x03'\nb'bc'\n");
 }
 
 #[test]
@@ -8222,7 +8490,7 @@ fn bytes_crosses_channel() {
         "main()\n"
     );
     // Three-engine parity: cooperative VM, --parallel M:N, and interp all agree.
-    assert_parity(src);
+    assert_parity_out(src, "b'\\x01\\x02'\n");
     assert_eq!(run_capture(src).expect("vm"), "b'\\x01\\x02'\n");
     assert_eq!(
         run_capture_parallel(src).expect("parallel"),
@@ -8261,7 +8529,10 @@ fn vm_bytearray_ops() {
         "    print(bytearray([1]) != bytearray([2]))\n", // true
         "main()\n"
     );
-    assert_parity(src);
+    assert_parity_out(
+        src,
+        "bytearray(b'')\nbytearray(b'\\x00\\x00\\x00')\nbytearray(b'\\x01\\x02')\nbytearray(b'\\x01\\x02\\x03')\n1\n3\nbytearray(b'\\x03\\x02\\x01')\n6\n3\nbytearray(b'\\x01\\x02\\x03\\x04')\nSome(4)\nbytearray(b'\\x01\\x02\\x03\\xff\\x07\\x08')\ntrue\ntrue\n",
+    );
     assert_eq!(
         run_capture(src).expect("vm"),
         "bytearray(b'')\nbytearray(b'\\x00\\x00\\x00')\nbytearray(b'\\x01\\x02')\nbytearray(b'\\x01\\x02\\x03')\n1\n3\nbytearray(b'\\x03\\x02\\x01')\n6\n3\nbytearray(b'\\x01\\x02\\x03\\x04')\nSome(4)\nbytearray(b'\\x01\\x02\\x03\\xff\\x07\\x08')\ntrue\ntrue\n"
@@ -8281,7 +8552,7 @@ fn vm_bytearray_index_write_and_shared_mutation() {
         "    print(ba[1])\n", // 66 — observed through the other binding
         "main()\n"
     );
-    assert_parity(src);
+    assert_parity_out(src, "65\n66\n");
     assert_eq!(run_capture(src).expect("vm"), "65\n66\n");
 }
 
@@ -8303,7 +8574,7 @@ fn vm_bytearray_oob_and_value_range_recoverable() {
         "        Err(e): print(\"caught bad value\")\n",
         "main()\n"
     );
-    assert_parity(src);
+    assert_parity_out(src, "caught oob index\ncaught bad value\n");
     assert_eq!(
         run_capture(src).expect("vm"),
         "caught oob index\ncaught bad value\n"
@@ -8323,7 +8594,7 @@ fn vm_bytearray_huge_size_is_recoverable_not_abort() {
         "        Err(e): print(\"caught huge\")\n",
         "main()\n"
     );
-    assert_parity(src);
+    assert_parity_out(src, "caught huge\n");
     assert_eq!(run_capture(src).expect("vm"), "caught huge\n");
 }
 
@@ -8343,7 +8614,10 @@ fn vm_bytearray_conversion_bridge() {
         "    print(bytearray(b))\n", // bytearray(b'\x01\x02\x03')
         "main()\n"
     );
-    assert_parity(src);
+    assert_parity_out(
+        src,
+        "b'\\x01\\x02\\x03'\nb'\\x01\\x02\\x03'\nbytearray(b'\\n\\x08')\nbytearray(b'\\x01\\x02\\x03')\n",
+    );
     assert_eq!(
         run_capture(src).expect("vm"),
         "b'\\x01\\x02\\x03'\nb'\\x01\\x02\\x03'\nbytearray(b'\\n\\x08')\nbytearray(b'\\x01\\x02\\x03')\n"
@@ -8363,7 +8637,7 @@ fn bytearray_crosses_channel_deep_copy() {
         "    print(ch.recv())\n",
         "main()\n"
     );
-    assert_parity(src);
+    assert_parity_out(src, "bytearray(b'\\x01\\x02')\n");
     assert_eq!(run_capture(src).expect("vm"), "bytearray(b'\\x01\\x02')\n");
     assert_eq!(
         run_capture_parallel(src).expect("parallel"),
@@ -8390,20 +8664,20 @@ fn iter_empty_collection_none_immediately() {
 #[test]
 fn iter_snapshot_order_matches_for() {
     // For each collection, the cursor's element sequence must equal `for x in X`.
-    for coll in [
-        "[1, 2, 3]",
-        "{1, 2, 3}",
-        "{1: \"a\", 2: \"b\"}", // map → keys
-        "\"abc\"",
-        "b\"hi\"",
-        "bytearray([7, 8])",
+    for (coll, want) in [
+        ("[1, 2, 3]", "1\n2\n3\n"),
+        ("{1, 2, 3}", "1\n2\n3\n"),
+        ("{1: \"a\", 2: \"b\"}", "1\n2\n"), // map → keys
+        ("\"abc\"", "a\nb\nc\n"),
+        ("b\"hi\"", "104\n105\n"),
+        ("bytearray([7, 8])", "7\n8\n"),
     ] {
         let via_for = format!("fn main():\n    for x in {coll}:\n        print(x)\nmain()\n");
         let via_iter = format!(
             "fn main():\n    it := ({coll}).iter()\n    while true:\n        match it.next():\n            Some(x):\n                print(x)\n            None:\n                break\nmain()\n"
         );
-        assert_parity(&via_for);
-        assert_parity(&via_iter);
+        assert_parity_out(&via_for, want);
+        assert_parity_out(&via_iter, want);
         let for_out = vm_outcome(&via_for);
         let iter_out = vm_outcome(&via_iter);
         assert_eq!(
@@ -8505,7 +8779,7 @@ fn for_named_cursor_partial_consume_then_drain() {
         "main()\n"
     );
     assert_eq!(run_capture(src).unwrap().trim(), "seen=2 rest=[3, 4]");
-    assert_parity(src);
+    assert_parity_out(src, "seen=2 rest=[3, 4]\n");
 }
 
 #[test]
@@ -8521,7 +8795,7 @@ fn for_named_cursor_two_pass_second_yields_nothing() {
         "main()\n"
     );
     assert_eq!(run_capture(src).unwrap(), "1\n2\n3\n");
-    assert_parity(src);
+    assert_parity_out(src, "1\n2\n3\n");
 }
 
 #[test]
@@ -8536,7 +8810,7 @@ fn next_after_for_over_named_cursor_is_none() {
         "main()\n"
     );
     assert_eq!(run_capture(src).unwrap(), "10\n20\nNone\n");
-    assert_parity(src);
+    assert_parity_out(src, "10\n20\nNone\n");
 }
 
 #[test]
@@ -8552,7 +8826,7 @@ fn for_over_collection_reiterates_fully_twice() {
         "main()\n"
     );
     assert_eq!(run_capture(src).unwrap(), "1\n2\n3\n1\n2\n3\n");
-    assert_parity(src);
+    assert_parity_out(src, "1\n2\n3\n1\n2\n3\n");
 }
 
 #[test]
@@ -8567,7 +8841,7 @@ fn iter_of_iter_fresh_cursor() {
         "main()\n"
     );
     assert_eq!(run_capture(src).unwrap(), "Some(5)\n6\n");
-    assert_parity(src);
+    assert_parity_out(src, "Some(5)\n6\n");
 }
 
 #[test]
@@ -8580,7 +8854,7 @@ fn for_over_fresh_temp_cursor_full() {
         "main()\n"
     );
     assert_eq!(run_capture(src).unwrap(), "7\n8\n9\n");
-    assert_parity(src);
+    assert_parity_out(src, "7\n8\n9\n");
 }
 
 #[test]
@@ -10389,7 +10663,10 @@ fn main():
     print(Set(range(0, 3)).len())
 main()
 ";
-    assert_parity(src);
+    assert_parity_out(
+        src,
+        "10\n[0, 1, 2]\n[0, 2, 4, 6, 8]\n[0, 2, 4, 6, 8]\n[1, 4, 7]\n[4, 3, 2, 1, 0]\nin\n[0, 1, 2]\n3\n",
+    );
     assert_eq!(
         vm_outcome(src),
         Ok("10\n[0, 1, 2]\n[0, 2, 4, 6, 8]\n[0, 2, 4, 6, 8]\n[1, 4, 7]\n[4, 3, 2, 1, 0]\nin\n[0, 1, 2]\n3\n".to_string())
