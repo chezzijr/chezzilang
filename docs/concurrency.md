@@ -311,11 +311,22 @@ is `Executor.submit` (`docs/stdlib.md`, decision D3). `--serial` is slated for r
 
 ### Output ordering: streaming CLI vs buffered sink
 
-A spawned task's stdout is a **private per-fiber buffer flushed at the join, in task order**, under
-the **buffered** sink — every Rust test helper, and `--serial`. `chezzi run` **streams**, so on the
-real CLI a task's output can interleave with the parent's. Cross-task print order is nondeterministic
-by contract; do not build a program (or a golden) on it. `examples/implicit_nursery.chz`'s header
-comment is the worked statement of this.
+A concurrent task's stdout is a **private per-task buffer flushed at the join, in task order**, under
+the **buffered** sink — every Rust test helper and every embedder. `chezzi run` **streams** instead:
+a `print` reaches the real fd at the moment it runs (line-atomic, never withheld), so on the real CLI
+a task's output interleaves with the parent's and with its siblings' in **completion** order.
+Cross-task print order is nondeterministic by contract; do not build a program (or a golden) on it.
+`examples/implicit_nursery.chz`'s header comment is the worked statement of this.
+
+**This covers `Executor` jobs exactly as it covers `spawn`ed tasks** — the two are not different
+here. An `Executor`'s slots are indexed by *submission* order, and that is what decides which fault
+wins and what order the **buffered** sink emits; it is **not** a promise about live CLI output. Three
+jobs that each `print` once and return will usually come out in submission order simply because they
+are too short to overlap, and that is luck, not a guarantee: give them real work and they come out in
+completion order. The ancestor is the same — CPython 3.14.6 `ThreadPoolExecutor` with
+`shutdown(wait=True)` over three jobs doing a few million loop iterations each held submission order
+in **0 of 30** measured runs. If you need ordered output, collect the results (`submit_result` /
+`std.concurrency.task`) and print them yourself after the join.
 
 ### Early exit from a `parallel:` cancels silently
 

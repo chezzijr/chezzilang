@@ -1,7 +1,9 @@
 # Concurrency A1: `Channel[T].try_recv()` — a non-blocking poll returning `T?`. Workers run at the
 # nursery's dedent and queue their results FIFO; the parent then DRAINS the mailbox with `try_recv`
 # (`Some(v)` per queued value, `None` once empty) instead of guarding every `recv` with `len()`.
-# `try_recv` never blocks and never faults on an empty channel — byte-identical on both engines.
+# `try_recv` never blocks and never faults on an empty channel. The three workers send CONCURRENTLY,
+# so the order of the `got` lines is scheduling, not semantics — `.expected` records one valid run;
+# `empty` last is the part that is guaranteed. See concurrency.md §"Output ordering".
 
 fn worker(id: int, out: Channel[int]):
     out.send(id * 10)

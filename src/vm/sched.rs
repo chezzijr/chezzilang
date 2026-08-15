@@ -4113,6 +4113,23 @@ impl Vm {
                 .as_ref()
                 .is_some_and(|mine| Arc::ptr_eq(mine, core)),
         );
+        // A self-join reduces NOTHING (see the slot rule at the end of this fn), so it owes the core
+        // to a LATER join — and the caller marked the core `shut` a moment ago, which is what used to
+        // make `drain_live_executors` skip it and drop every sibling's buffered output and fault.
+        // Marked HERE, before the wait, not after it: the wait is unbounded (it waits for the
+        // siblings), and for that whole time the core is already `shut` and already unreduced, so a
+        // mark placed after the wait would leave the exit drain blind for exactly as long as the job
+        // takes. Cleared again below on the two paths that discharge the debt.
+        //
+        // ponytail: the remaining window is the few instructions between the caller's `shut = true`
+        // and this store — the flag is not under `inner`'s lock, because taking `inner` here would
+        // invert the fixed inner → eager order. A drain landing inside that window skips the core, but
+        // it would also be exiting while a job is mid-`shutdown()`, which is the pre-existing
+        // exit-mid-job hazard `Executor.shutdown_now` already documents, not something this adds.
+        // Move the flag into `ExecState` (beside `shut`, under the same lock) if that ever bites.
+        if slack > 0 {
+            core.unreduced.store(true, Ordering::Release);
+        }
         let _party =
             self.block_party_guard(crate::vm::quiesce::PartyWait::Join(Arc::clone(core), slack));
         // W7-60 — carried out of the loop rather than `?`-ed, so the slot rule below can read it: on
@@ -4172,12 +4189,26 @@ impl Vm {
             // thread's OWN slot is still reserved and it will `finish` into that index the moment it
             // returns from here, so `take_slots`' `mem::take` would leave `finish` writing past the
             // end (the `debug_assert` in `EagerState::finish`, an out-of-bounds panic on a pool
-            // thread in release). It takes NOTHING at all, not even the finished outcomes: the
-            // enclosing join — `main`'s `shutdown()` or the program-exit drain — reduces the whole
-            // vector in SUBMISSION order, which keeps every sibling's output at its own slot
-            // position (W7-5c) and lets a sibling's fault surface from the executor that owns it
-            // rather than being re-raised inside an unrelated job.
+            // thread in release). It takes NOTHING at all, not even the finished outcomes, so that a
+            // LATER join reduces the whole vector in SUBMISSION order — which keeps every sibling's
+            // output at its own slot position (W7-5c) and lets a sibling's fault surface from the
+            // executor that owns it rather than being re-raised inside an unrelated job.
+            //
+            // That later join has to be guaranteed, and it was not. This join marks the core `shut`,
+            // and `drain_live_executors` used to read `shut` as "already handled" and skip it — so a
+            // job that shut down its own executor with no enclosing `shutdown()` left the whole
+            // vector unreduced: every sibling's buffered output dropped, every sibling's fault
+            // swallowed, the run exiting 0. (Under `chezzi run` the output half is invisible, since a
+            // streamed `print` already reached fd 1 at the moment it ran; on the buffered sink — every
+            // embedder, `run_capture` — the slot IS the only copy.) `ExecutorCore::unreduced`, set
+            // above, is the hand-off: the exit drain picks such a core up exactly once.
             if bail.is_some() {
+                // Debt discharged the only way a bail can: flush what finished, and CLEAR the mark —
+                // a self-join that bailed has no successor to promise, and re-joining at exit a core
+                // whose join just reported a deadlock would undo the "last chance to ask" reasoning
+                // below. This branch is why the mark cannot be inferred from "the slot vector is
+                // non-empty": `take_finished` is length-preserving, so it leaves one behind.
+                core.unreduced.store(false, Ordering::Release);
                 let done = g.take_finished();
                 drop(g);
                 for o in done {
@@ -4189,6 +4220,10 @@ impl Vm {
             } else if slack > 0 {
                 Vec::new()
             } else {
+                // The vector is reduced here and cannot refill (`shut` is set before every join, and
+                // `submit` refuses a shut core), so the hand-off is discharged for good — which is
+                // what stops `drain_live_executors` re-picking this core forever.
+                core.unreduced.store(false, Ordering::Release);
                 g.take_slots()
             }
         };
@@ -4200,8 +4235,9 @@ impl Vm {
             // jobs never learn. That is not merely untidy: `Vm::do_call`'s blocking-native offload gates
             // on `cancel_requested()`, so a job part-way through a sequence of blocking calls would
             // launch the NEXT one after the run had already reported TIMED-OUT (measured: a fresh
-            // subprocess spawned at ~1.3 s under `--timeout=300`). The executor is already `shut`, so
-            // `drain_live_executors` will never revisit it and this is the last chance to ask.
+            // subprocess spawned at ~1.3 s under `--timeout=300`). The executor is already `shut` and
+            // this path deliberately leaves `unreduced` clear, so `drain_live_executors` will never
+            // revisit it — this is the last chance to ask.
             //
             // It is a REQUEST, not a kill — a job with no cancellation checkpoint (an in-flight
             // `process.run` child, `docs/stdlib.md` §"blocking calls cannot be interrupted") still runs

@@ -286,6 +286,19 @@ waiting a timer, or parked in a nested `Executor` join is ended** — see `concu
 its result (`.recv()` it **after** `shutdown()`). This is the result-returning primitive
 `std.concurrency.task.submit_task` / `Task[T]` wraps.
 
+**Jobs do not print in submission order, and `shutdown()` does not withhold their output.** Under
+`chezzi run` a job's `print` reaches stdout the moment it runs, so concurrent jobs interleave in
+completion order — same as `spawn`, same as `ThreadPoolExecutor` (measured: three CPython jobs each
+doing real work held submission order in 0 of 30 runs; three jobs that only `print` held it 30/30,
+because they are too short to overlap). What submission order *does* fix is which job's fault wins
+(`shutdown()` raises the lowest-index one) and the byte order of the **buffered** sink embedders get.
+For ordered output, collect results with `submit_result` and print them after the join.
+Full statement: `concurrency.md` §"Output ordering".
+
+A job may `shutdown()`/`shutdown_now()` the executor it is itself running under: that join waits for
+the executor's *other* jobs and not for itself, and the enclosing join — or, if there is none, the
+program-exit join — reduces the slots, so no sibling's output or fault is lost.
+
 An `Executor` is **detached**: it outlives the scope that made it, and the program waits for its
 outstanding work at exit. Detached is about **lifetime**, not cancellation — an executor created inside
 a *running job* of another executor is still joined at exit, but it inherits that job's cancel, so an

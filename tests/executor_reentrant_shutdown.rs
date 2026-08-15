@@ -27,6 +27,16 @@
 //! measured 40/40 identical: `A\nC\nend\n`, exit 0. That is the reference this test pins against,
 //! and the reason it exists — Chezzi's `Executor` must not drift from the ancestor it models.
 //!
+//! **`A` before `C` is NOT part of that reference, and this test does not assert it.** Both engines
+//! stream a job's `print` to the real fd at the moment it runs; neither withholds it until the join,
+//! so two concurrent jobs interleave in COMPLETION order. CPython's 40/40 above is an artifact of
+//! jobs too short to overlap — give the same three `ThreadPoolExecutor` jobs a few million loop
+//! iterations each and submission order survives **0/30 runs** (measured, 3.14.6). Chezzi behaves
+//! the same, and asserting the incidental order here is what made task 4b's tally show 1/60
+//! "ordering divergence" on this very program. So: the first two lines are the SET `{A, C}`, and
+//! `end` is last — that one IS guaranteed, because `main` prints it after `ex.shutdown()` returns.
+//! See `EagerState`'s doc for what the submission-ordered slots do and do not promise.
+//!
 //! **This was a retry loop until the self-join fix.** It tolerated an intermittent
 //! `waiting for this Executor's jobs: deadlock` (measured 7/60 on the debug binary, 0/60 on
 //! release) as a "known unrelated race". It was neither unrelated nor a mere flake: a job joining
@@ -70,8 +80,19 @@ fn executor_reentrant_shutdown_now_during_drain() {
         "reentrant shutdown_now during drain must not fault: status {:?}\nstdout: {stdout}\nstderr: {stderr}",
         out.status.code(),
     );
+    let lines: Vec<&str> = stdout.lines().collect();
     assert_eq!(
-        stdout, "A\nC\nend\n",
-        "reentrant shutdown_now during drain: wrong output/order (see module doc for the CPython reference)"
+        lines.last(),
+        Some(&"end"),
+        "`end` is printed by `main` after `ex.shutdown()` returns, so it must be last: {stdout:?}"
+    );
+    let mut jobs = lines[..lines.len().saturating_sub(1)].to_vec();
+    jobs.sort_unstable();
+    assert_eq!(
+        jobs,
+        vec!["A", "C"],
+        "reentrant shutdown_now during drain: every dispatched job's output must survive, in any \
+         order (see module doc for the CPython reference and why the order is not asserted): \
+         {stdout:?}"
     );
 }

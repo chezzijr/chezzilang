@@ -12469,18 +12469,34 @@ fn timer_zero_delivers_immediately() {
 }
 
 /// A1 golden: `Channel[T].try_recv()` — a non-blocking poll returning `T?`. Workers `send` at the
-/// dedent; the parent drains with `try_recv` (`Some` per value, then `None`). Never blocks/faults,
-/// so byte-identical on the VM, the interpreter, and the `.expected` file.
+/// dedent; the parent drains with `try_recv` (`Some` per value, then `None`). Never blocks/faults.
+///
+/// **The three `got` lines are a SET, not a sequence, and this test used to assert the sequence.**
+/// Three workers `send` into one channel concurrently, so which arrives first is scheduling, not
+/// semantics. The exact `assert_eq!(vm_out, expected)` was sound only while the first `run_capture`
+/// meant the cooperative single-thread engine, which ran the workers in spawn order; with that
+/// engine deleted every run is M:N and the pin became a load-sensitive flake — reproduced at 1 in 4
+/// full `cargo test --lib` runs on a clean tree, and never once when the test runs alone. It is the
+/// same defect as the order assertion removed from `tests/executor_reentrant_shutdown.rs`: an
+/// assertion on an order the language explicitly does not guarantee (`concurrency.md` §"Output
+/// ordering"). What IS guaranteed is asserted below — the multiset of lines, and `empty` LAST, since
+/// the drain runs after the nursery has joined so exactly three values are queued and the fourth
+/// poll is `None`.
 #[test]
 fn golden_try_recv_chz_matches_expected_and_interp() {
     let src = include_str!("../../examples/try_recv.chz");
     let expected = include_str!("../../examples/try_recv.expected");
     let vm_out = run_capture(src).expect("vm run");
-    assert_eq!(vm_out, expected);
-    // M:N workers send concurrently, so the parent's try_recv drains them in either order — the set
-    // is identical (exact order pinned on the cooperative engine above).
+    assert_same_lines(expected, &vm_out);
     assert_same_lines(&vm_out, &run_capture(src).expect("M:N run"));
-    assert_eq!(run_capture_stress(src), expected);
+    assert_same_lines(expected, &run_capture_stress(src));
+    for (label, out) in [("run", &vm_out), ("expected", &expected.to_string())] {
+        assert_eq!(
+            out.lines().last(),
+            Some("empty"),
+            "the 4th poll drains an already-empty channel, so `empty` must be last ({label}): {out}"
+        );
+    }
 }
 
 /// B1+B2 golden: blocking `recv`. The consumer is scheduled first, parks on the empty channel, the
@@ -14251,6 +14267,14 @@ print(\"done\")
 /// The barrier is still load-bearing: without it `ex.submit` races `ex.shutdown()` and a job can be
 /// dispatched after `main` has already drained, or rejected by the `shut` flag the first job sets.
 ///
+/// **Needs ≥2 free pool threads.** The two-job shape above needs both jobs RUNNING at once, where
+/// cut 3's one-job shape needed only one — and `pool.rs` is a fixed-size pool with no grow-on-stall
+/// (risk G3). With one free thread the second job is reserved but never dispatched, so it counts
+/// toward `live` while never registering as blocked, the verdict correctly declines, and this test
+/// times out after 60 s with a diagnosis that has nothing to do with the detector. Same constraint
+/// as `two_blocked_jobs_in_one_executor_fault_instead_of_hanging` and
+/// `two_executors_deadlocking_each_other_fault`; verified at `--threads=1` on the CLI.
+///
 /// M:N-only + watchdogged for the reasons on the tests above.
 #[test]
 fn a_cycle_of_executor_joins_faults_instead_of_hanging() {
@@ -14281,15 +14305,84 @@ print(\"after\")
             crate::native::HostConfig::default(),
         ));
     });
-    let (out, _err, res, _code) = rx
-        .recv_timeout(std::time::Duration::from_secs(60))
-        .expect("a cycle of executor joins must fault — pre-fix this hung forever");
+    let (out, _err, res, _code) = rx.recv_timeout(std::time::Duration::from_secs(60)).expect(
+        "a cycle of executor joins must fault, not hang — or this host has <2 free pool \
+             threads, in which case the second job is queued-but-undispatched and the verdict \
+             correctly declines (pool.rs risk G3)",
+    );
     let _ = std::fs::remove_file(&entry);
     let msg = res
         .expect_err("every party is joining an executor that owes work")
         .message;
     assert!(msg.contains("deadlock"), "fault was: {msg}");
     assert!(!out.contains("after"), "the join must not return: {out:?}");
+}
+
+/// A job that shuts down the executor it is running under leaves that core's submission slots
+/// UNREDUCED — its own slot is still live, so `join_eager_jobs` may not `mem::take` the vector. The
+/// program-exit drain must therefore pick the core up even though it is already `shut`, or every
+/// sibling's buffered output and every sibling's fault is dropped on the floor.
+///
+/// **Rust and not `tests/chz/`, on purpose.** The observable is the run's CAPTURED stdout — the
+/// buffered sink at the Rust capture boundary. Chezzi cannot read its own stdout, so `assert`
+/// genuinely cannot express this. It is also invisible from `chezzi run` (a streamed `print` already
+/// reached fd 1 when it ran) and from `chezzi test` (the runner takes each test's `out` BEFORE the
+/// file-level `reap_after_tests` drain, so it discards this output for a never-shut executor too —
+/// measured 6/6). `run_capture` is the only sink where the slot IS the only copy, which is exactly
+/// what every embedder gets.
+///
+/// The `done` channel is load-bearing: it makes `main` reach the drain only AFTER the inner
+/// `shutdown()` has returned, so the core is reliably `shut`-with-unreduced-slots rather than
+/// racing `main` into an ordinary `slack == 0` join that would have reduced it anyway.
+///
+/// Measured on the pre-fix binary: the first program captured `"end\n"` (A and C silently lost,
+/// 10/10) and the second exited **Ok** with the sibling's assertion failure swallowed.
+#[test]
+fn a_self_shut_executor_still_has_its_slots_reduced_at_program_exit() {
+    let out = run_capture(
+        "
+import std.concurrency
+ex := Executor()
+done := Channel[int]()
+fn closer():
+    ex.shutdown()
+    done.send(1)
+ex.submit(fn(): print(\"A\"))
+ex.submit(closer)
+ex.submit(fn(): print(\"C\"))
+done.recv()
+print(\"end\")
+",
+    )
+    .expect("a job shutting down its own executor is healthy — see the self-join fix");
+    // `end` first: `main` prints it before the exit drain, which is what then flushes the slots.
+    // A before C is the W7-5c per-slot flush on the buffered sink, in SUBMISSION order — that half
+    // IS ordered, unlike the streamed `chezzi run` path (see `EagerState`'s doc).
+    assert_eq!(
+        out, "end\nA\nC\n",
+        "a self-shut executor's buffered job output must survive to the captured stdout"
+    );
+
+    // The same hand-off carries FAULTS: a swallowed one exits 0 on a program that failed.
+    let (_out, res) = run_program(
+        "
+import std.concurrency
+ex := Executor()
+done := Channel[int]()
+fn closer():
+    ex.shutdown()
+    done.send(1)
+fn boom():
+    assert 1 == 2
+ex.submit(boom)
+ex.submit(closer)
+done.recv()
+",
+    );
+    let msg = res
+        .expect_err("the sibling job's assertion failure must reach the run, not be dropped")
+        .message;
+    assert!(msg.contains("assertion failed"), "fault was: {msg}");
 }
 
 /// W7-60 — an `Executor.shutdown_now()` must reach a job that is itself parked in an INNER

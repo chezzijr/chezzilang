@@ -3671,15 +3671,29 @@ impl Vm {
         // work was silently lost (W7-5b). Creation order.
         //
         // Re-scan from the top each round rather than snapshotting: a job joined here can itself
-        // construct and submit to a NEW executor, which must also be joined. Marking `shut`
-        // before joining is what makes that terminate — a joined executor is never re-picked.
+        // construct and submit to a NEW executor, which must also be joined.
+        //
+        // `shut` alone is NOT "already handled", and reading it as such lost work: a job that shuts
+        // down the executor it runs under marks it `shut` while reducing NOTHING, so with no
+        // enclosing `shutdown()` this drain used to skip the core and drop every sibling's buffered
+        // output and every sibling's fault. `ExecutorCore::unreduced` is that job's hand-off — see
+        // its doc for why it is a flag and not "the slot vector is non-empty".
+        //
+        // Termination is the same one-way step as before: a picked core is marked `shut` AND joined,
+        // and a join on this thread always has `slack == 0` (a top-level/`main` `Vm` is never one of
+        // the core's eager jobs — see the caller table on `join_eager_jobs`), so it ends in
+        // `take_slots`, which clears `unreduced`. Each core is therefore picked at most twice: once
+        // while live, once to collect what a self-join left behind.
         loop {
             let next = self
                 .exec_registry
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .iter()
-                .find(|c| !c.inner.lock().unwrap_or_else(|e| e.into_inner()).shut)
+                .find(|c| {
+                    !c.inner.lock().unwrap_or_else(|e| e.into_inner()).shut
+                        || c.unreduced.load(std::sync::atomic::Ordering::Acquire)
+                })
                 .map(Arc::clone);
             let Some(core) = next else { break };
             core.inner.lock().unwrap_or_else(|e| e.into_inner()).shut = true;

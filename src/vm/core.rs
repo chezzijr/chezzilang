@@ -489,13 +489,25 @@ impl ExecState {
     }
 }
 
-/// The eager (M:N) half of an [`ExecutorCore`] — see [`EagerState`]. Empty/zero on `--serial`, which
-/// keeps the queue-at-submit / drain-at-`shutdown` model (decision D3).
+/// The eager (M:N) half of an [`ExecutorCore`]. Eager dispatch is the only path: a job starts at its
+/// `submit` and `shutdown` is purely the join.
 ///
 /// `slots` is indexed by SUBMISSION ORDER, which is the whole reason eager execution keeps the W7-5
 /// fault contract for free: `shutdown` hands this vector straight to `Vm::reduce_task_slots`, so
-/// lowest-index-fault selection, hard-halt-over-ordinary precedence and the unconditional per-slot
-/// output flush (W7-5c) are inherited rather than re-implemented.
+/// lowest-index-fault selection, hard-halt-over-ordinary precedence and the per-slot output flush
+/// (W7-5c) are inherited rather than re-implemented.
+///
+/// **What that flush does and does NOT order.** It governs the BUFFERED stdout sink only — the
+/// `out`/`stderr` a job's worker `Vm` accumulates when [`HostConfig::stream`] is off, which is what
+/// every test helper and every embedder gets. `chezzi run` sets `stream`, and a streamed `print`
+/// goes to the real fd at the moment it runs (line-atomic, never withheld — the D5 invariant in
+/// [`Vm::emit_out`]); a job's slot buffers are then EMPTY and this flush reorders nothing. So under
+/// `chezzi run` an `Executor`'s jobs interleave their output in COMPLETION order, with no
+/// submission-order guarantee — exactly like the `parallel:` nursery, and exactly like the ancestor
+/// (`ThreadPoolExecutor`, CPython 3.14.6, three jobs each doing real work: measured 0/30 runs in
+/// submission order; three jobs that only `print`: 30/30, because they are too short to overlap).
+/// Do not read the submission-order slot indexing as a promise about interleaved live output — it is
+/// a promise about WHICH fault wins and about the buffered sink's byte order.
 #[derive(Debug, Default)]
 pub struct EagerState {
     /// Submitted-but-not-yet-finished jobs. `shutdown` waits for this to reach 0.
@@ -726,11 +738,9 @@ pub(super) fn halt_over_backlog(
     }
 }
 
-/// `Executor` core (B3.1 / C5 escape hatch): the explicitly-owned work queue. On `--serial`, `submit`
-/// enqueues a wire-form task closure (rejected once `shut`); `shutdown` drains FIFO; `shutdown_now`
-/// discards. On the M:N engine `submit` runs EAGERLY (the job goes straight to the pool, matching
-/// Python's `ThreadPoolExecutor` / Java's `ExecutorService`) and the queue stays empty — the pending
-/// work lives in `eager` instead.
+/// `Executor` core (B3.1 / C5 escape hatch): the explicitly-owned work queue. `submit` runs EAGERLY
+/// (the job goes straight to the pool, matching Python's `ThreadPoolExecutor` / Java's
+/// `ExecutorService`) and [`ExecState::queue`] stays empty — the pending work lives in `eager`.
 /// `shut` lives in the **shared** core, so any handle aliasing this core sees the same shutdown state
 /// (this is what prevents a `from_wire`'d alias from being drained twice at program exit).
 #[derive(Debug, Default)]
@@ -777,6 +787,23 @@ pub struct ExecutorCore {
     /// Set once at construction and read-only afterwards — the core crosses threads by `Arc`, so a
     /// plain `Vec` (no lock) is only sound because nothing ever writes it again.
     pub creator_cancel: Vec<Arc<AtomicBool>>,
+    /// This core was marked `shut` by a join that will reduce NOTHING, so its submission slots are
+    /// still owed a reduce. Set by exactly one site: `Vm::join_eager_jobs`, on entry, when the
+    /// joining thread is itself one of this core's jobs (`slack > 0`) and therefore may not
+    /// `take_slots` — its own index is still live. Cleared by the two paths that discharge the debt:
+    /// the `take_slots` that finally reduces the vector, and a bail-out (which flushes what finished
+    /// and has no successor to promise).
+    ///
+    /// Without it, `shut` was read as "already handled" and [`Vm::drain_live_executors`] skipped the
+    /// core, dropping every sibling's buffered `out`/`stderr` and any fault they raised. Invisible
+    /// under `chezzi run` (streamed output already reached fd 1) and a silent loss on the buffered
+    /// sink, where the slot is the only copy.
+    ///
+    /// A dedicated flag rather than "the slot vector is non-empty": the deadlock-BAIL path also
+    /// leaves a non-empty vector behind (`take_finished` is length-preserving), and re-joining a
+    /// core whose join just reported a deadlock would undo the "last chance to ask" reasoning in
+    /// `join_eager_jobs`. Only the self-join promises someone else will reduce, so only it marks.
+    pub unreduced: AtomicBool,
 }
 
 /// Every `ExecutorCore` created during one run, in creation order — the list the program-exit join
