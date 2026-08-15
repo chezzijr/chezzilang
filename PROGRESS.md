@@ -10324,13 +10324,13 @@ branch names) is in the git log.
   (`g := id` alone: `ok: no type errors`, and `g := mk` for `mk[T](n: int) -> List[T]` even ran,
   printing `[]`). Go refuses exactly this spelling at the READ (*cannot use generic function id
   without instantiation*); every other shape already agreed with Go, so this was the single
-  divergence. Now: *'id' is generic and nothing here determines T, so it cannot become a function
-  value — write the type argument (`id[<T>]`), or annotate the binding with a concrete function type
-  (`g: fn(<T>) -> <T> = id`), writing a real type in place of each `<…>`*. The `<…>` shape is rendered
+  divergence. Now: *'id' is generic and T is not determined here, so it cannot become a function
+  value — instantiate it (`id[<T>]`), or give this position a concrete function type
+  (`fn(<T>) -> <T>`), writing a real type in place of each `<…>`*. The `<…>` shape is rendered
   from the fn's OWN signature, the undetermined parameters are named, and the turbofish is offered
   only for a **single**-parameter generic — a fn-value turbofish carries exactly one type argument, so
-  suggesting `pair[int]` for `pair[A, B]` would be advice that cannot work. Fires only when nothing
-  determines the params: every pinned spelling is untouched (turbofish, annotation, HOF parameter,
+  suggesting `pair[int]` for `pair[A, B]` would be advice that cannot work. Fires only where the
+  parameters are undetermined: every pinned spelling is untouched (turbofish, annotation, HOF parameter,
   return position, struct-field slot, `.map`/`.fold`/`.filter` element slot), as is a non-generic or
   builtin fn value and any local/param that merely shadows the name. Two traps found while building
   it: (1) the `.map(conv)` prepass reads the fn bare with no slot type yet and is pinned *afterwards*
@@ -10343,6 +10343,32 @@ branch names) is in the git log.
   there. 438-file `.chz` corpus sweep, pre vs post binary: **one** verdict change, the
   `g := tagged` probe in `tests/chz/spec/static_witness_test.chz` (now `tagged[Node]`, and it asserts
   the call). `docs/syntax.md` §7b, `docs/spec.md`.
+- **Adversarial review of the rule above, applied (2026-08-15).** Two prosecutors ran the change
+  against the pre-change binary over ~160 probes plus a 104-case context fuzz. Four defects, all fixed
+  in the follow-up commit. (1) **The message was FACTUALLY FALSE in three positions.** A parameter or
+  field DEFAULT value has a fully concrete slot (`fn run(f: fn(int) -> int = id)`) that Chezzi simply
+  does not thread into `expected_hint`, so "nothing here determines T" was untrue — and the accurate
+  pre-change diagnostic (*"default value for parameter 'f': expected fn(int) -> int, found
+  fn(T) -> T"*) had been replaced by it. Worse, `xs: List[fn(int) -> int] = [id]` was told to *"annotate
+  the binding with a concrete function type"* — which the user had already done, at the only
+  annotatable point. And `print(id)` / a `yield` have no binding to annotate at all. The message now
+  says what is true of THIS read — `'id' is generic and T is not determined here … instantiate it
+  (`id[<T>]`), or give this position a concrete function type (`fn(<T>) -> <T>`)` — naming the
+  POSITION, never claiming no information exists anywhere. (2) **The suppression flag was set in the
+  shared `infer_generic_arg_tys`, silencing the wall at all SEVEN of its callers** when only ONE
+  (`infer_generic_method`) re-pins the argument afterwards. So a generic CTOR argument slipped through
+  to the very message this rule exists to replace: `struct Bx[T]: f: T` + `b := Bx(ident)` still said
+  *"argument 1 of 'f': expected T, found int"*. The flag moved to that one call site; the other six
+  now reject at the read. (3) **The guard's `Ty::Unknown` drew a false second error**: a ONE-element
+  `xs := [id]` matched `is_unrefined_empty_coll` (a test on the TYPE) and the finalize added *"cannot
+  infer element type of empty collection; add a type annotation"* — both halves false, and the
+  suggested annotation does not help. Pre-existing (the witness wall reached the identical pair via
+  `xs := [reset]` on the pre-change binary), but this rule made it far more reachable; the registration
+  now asks the EXPRESSION whether the literal is empty. (4) The rendered signature dropped optional
+  arity, advertising a stricter value than a plain fn read gives; `with_min` restored. Charges that did
+  NOT stick, after genuine effort: no soundness break, no check-clean-then-runtime fault, no flag leak,
+  no sibling of the inferred-return bypass, and 0 corpus diffs. Re-swept after the fixes: **0** verdict
+  changes over 438 files.
 - **A lex error points at the offending CHARACTER, on both axes (M24-7, 2026-08-14).** `LexError`
   carried a line but no column, and the resolver seam hardcoded `col: 1`, so a lex error was the one
   diagnostic in the compiler that could not point at a character — the LSP squiggle landed on the

@@ -2099,14 +2099,20 @@ struct Checker {
     /// (sources #2/#3) must NOT pin it here, or a body use like `x.upper()` would force `x: str` and
     /// corrupt unification (e.g. `Mapped(int_iter, fn(x): x.upper())`).
     generic_arg_prepass: bool,
-    /// True while inferring a BARE IDENTIFIER argument of a generic ctor/call/method in that same
-    /// prepass. Such an argument gets no `expected_hint` (the slot type isn't substituted yet), so a
-    /// same-module generic fn passed there types rigid (`fn(T) -> str` for `[1,2,3].map(conv)`) and is
-    /// pinned AFTERWARDS from the substituted slot by [`Checker::try_pin_generic_fn_value_arg`]. The
-    /// "nothing determines T" wall in [`Checker::infer_ident`] must therefore stay silent here — the
-    /// read is not yet the final word on the type. Only set for an `Ident` arg (which cannot nest a
-    /// call), so it never suppresses the wall inside some deeper expression. Separate from
-    /// `generic_arg_prepass`, which also changes closure-param binding and hover recording.
+    /// True while inferring the arguments of a generic METHOD call ([`Checker::infer_generic_method`],
+    /// the ONE prepass whose bare-ident arg is re-pinned afterwards by
+    /// [`Checker::try_pin_generic_fn_value_arg`]). Such an argument gets no `expected_hint` — the slot
+    /// type isn't substituted yet — so a same-module generic fn passed there types rigid
+    /// (`fn(T) -> str` for `[1,2,3].map(conv)`) and only becomes concrete after the pin. The
+    /// "not determined here" wall in [`Checker::infer_ident`] must therefore stay silent for it: the
+    /// read is not yet the final word on the type.
+    ///
+    /// SET AT THAT ONE CALL SITE, not inside `infer_generic_arg_tys`. The helper's other six callers
+    /// (generic free fn, struct / qualified-struct / enum-variant / newtype ctor) pin nothing
+    /// afterwards, so there the read IS final and the wall must fire. Setting it in the shared helper
+    /// silenced all seven and let `Bx(ident)` through to the very "argument 1 of 'f': expected T,
+    /// found int" this rule exists to replace. Separate from `generic_arg_prepass`, which also changes
+    /// closure-param binding and hover recording.
     generic_fn_value_prepass: bool,
     /// Expected-type HINT (checking-mode) for the OUTERMOST generic ctor / generic fn-call currently
     /// being inferred — pure transport from the three annotation sites (a `let`-binding's declared

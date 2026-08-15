@@ -1013,21 +1013,29 @@ adds no overhead and behaves identically on both engines.
 A **bare, un-pinned** generic fn value — `g := ident`, with no turbofish and no expected
 `fn(...) -> ...` type anywhere — is rejected **at the read**, whether or not it is ever called. This is
 Go's rule (`cannot use generic function id without instantiation`); the diagnostic names the
-undetermined parameters and both working spellings:
+undetermined parameters and the working spellings:
 
 ```chezzi
-g := ident        # 'ident' is generic and nothing here determines T, so it cannot become a function
-                  # value — write the type argument (`ident[<T>]`), or annotate the binding with a
-                  # concrete function type (`g: fn(<T>) -> <T> = ident`), writing a real type in
-                  # place of each `<…>`
+g := ident        # 'ident' is generic and T is not determined here, so it cannot become a function
+                  # value — instantiate it (`ident[<T>]`), or give this position a concrete function
+                  # type (`fn(<T>) -> <T>`), writing a real type in place of each `<…>`
 ```
 
-The same read inside a `[...]`/`{...}` literal, in a `return` from a fn with an **inferred** return
-type, or as a `print` argument is the same error — no hint reaches it in any of those. A generic with
-**two or more** type parameters is only fixable by annotation: a fn-value turbofish carries exactly one
-type argument (`pair[int]` for `pair[A, B]` is an arity error), so the diagnostic does not offer it.
-First-class (rank-N) polymorphism — one binding used at two different types — is a future addition;
-Go and Rust refuse it too. (v1 limit: the pin requires a **same-module** generic fn — an *imported*
+The same read is the same error inside a `[...]`/`{...}` literal, in a `return` from a fn with an
+**inferred** return type, as a `print` argument, and as an argument to a generic **constructor** or
+generic **free fn** (`Bx(ident)`, `take(ident)`) — nothing there determines `T` either. A generic with
+**two or more** type parameters is only fixable by giving the position a concrete function type: a
+fn-value turbofish carries exactly one type argument (`pair[int]` for `pair[A, B]` is an arity error),
+so the diagnostic does not offer it. First-class (rank-N) polymorphism — one binding used at two
+different types — is a future addition; Go and Rust refuse it too.
+
+Two positions are deliberately **not** covered, both because the concrete type is present but does not
+reach the read. A parameter or field **default value** (`fn run(f: fn(int) -> int = id)`) has a
+concrete slot the checker does not thread into the expected-type hint, so the bare read is refused
+there and `= id[int]` is the spelling that works. And a **builtin container HOF** whose pin declines —
+`[1,2,3].map(mk)` for a return-only `mk[T](n: int) -> List[T]` — still type-checks and runs
+(`[[], [], []]`); the pin owns that slot and bails by design when the slot is not yet concrete, so the
+wall stays out of its way. (v1 limit: the pin requires a **same-module** generic fn — an *imported*
 generic fn used bare as a value stays rejected on every path.)
 
 **`?` inside a closure.** A closure body may use `?` (§9) — but only when the closure carries an

@@ -2033,7 +2033,24 @@ impl Checker {
                 // The annotated branch never reaches here as an unrefined-empty (a `List[int]`
                 // annotation leaves no `Unknown`-in-slot), and an expression-position literal (`f([])`,
                 // `return []`) binds no local, so the false-positive guards fall out structurally.
-                if ty.is_none() && !self.inferring_ret && Self::is_unrefined_empty_coll(&declared) {
+                // …and the literal must actually BE empty. `is_unrefined_empty_coll` is a test on the
+                // TYPE, so a NON-empty literal whose elements all typed `Unknown` — because each one
+                // errored (`xs := [ident]` for a generic fn, `xs := [reset]` for a witness-taking one)
+                // — matched it too, and the finalize then added *"cannot infer element type of empty
+                // collection; add a type annotation"* to a one-element list. Both halves are false:
+                // the collection is not empty, and the annotation does not help (measured on the
+                // pre-existing witness-wall spelling, which produced the identical bogus pair). Ask the
+                // EXPRESSION, which is the thing that knows.
+                let empty_literal = match &value.kind {
+                    ExprKind::List(xs) | ExprKind::Set(xs) => xs.is_empty(),
+                    ExprKind::Map(entries) => entries.is_empty(),
+                    _ => true, // `Set()` / `List()` ctor calls and everything else: unchanged
+                };
+                if ty.is_none()
+                    && !self.inferring_ret
+                    && empty_literal
+                    && Self::is_unrefined_empty_coll(&declared)
+                {
                     self.empty_coll_sites
                         .push((self.scopes.len() - 1, name.clone(), span));
                 } else if ty.is_some()

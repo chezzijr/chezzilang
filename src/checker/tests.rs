@@ -21937,7 +21937,7 @@ fn bare_unpinned_generic_fn_value_rejected_at_the_binding() {
             .collect::<Vec<_>>()
             .join(" | ");
         assert!(
-            joined.contains("'ident' is generic and nothing here determines T"),
+            joined.contains("'ident' is generic and T is not determined here"),
             "expected the binding-site diagnostic, got: {joined}"
         );
         assert!(
@@ -21960,19 +21960,86 @@ fn bare_unpinned_generic_fn_value_rejected_at_the_binding() {
         .collect::<Vec<_>>()
         .join(" | ");
     assert!(
-        joined.contains("'pair' is generic and nothing here determines A, B")
+        joined.contains("'pair' is generic and A, B are not determined here")
             && joined.contains("fn(<A>, <B>) -> <A>")
             && !joined.contains("`pair[<"),
         "expected a two-param diagnostic without turbofish advice, got: {joined}"
     );
-    // …and the same read in a collection literal, where no element hint reaches it either.
-    let errs = check_src(
+    // …and the same read in a collection literal, where no element hint reaches it either. EXACTLY
+    // ONE error: the guard returns `Ty::Unknown`, which made the one-element list look like an
+    // unrefined EMPTY collection and drew a second, factually false *"cannot infer element type of
+    // empty collection; add a type annotation"* (a pre-existing trap — the witness wall reached it too
+    // via `xs := [reset]` — that this rule made far more reachable).
+    for src in [
         "fn ident[T](x: T) -> T:\n    return x\n\nfn main():\n    xs := [ident]\n    print(xs.len())\n",
-    );
+        "fn ident[T](x: T) -> T:\n    return x\n\nfn main():\n    m := {\"a\": ident}\n    print(m.len())\n",
+    ] {
+        let errs = check_src(src);
+        assert!(
+            errs.iter()
+                .any(|e| e.message.contains("T is not determined here")),
+            "a collection element is a value position too: {errs:?}"
+        );
+        assert!(
+            !errs.iter().any(|e| e.message.contains("empty collection")),
+            "a ONE-element literal is not an empty collection: {errs:?}"
+        );
+    }
+    // The message must stay TRUE in positions that carry a concrete type Chezzi does not thread into
+    // `expected_hint` (a parameter DEFAULT value), and in positions with no binding to annotate at all
+    // (`print`). Neither may claim "nothing determines T" or tell the user to annotate a binding.
+    for src in [
+        "fn ident[T](x: T) -> T:\n    return x\n\nfn run(x: int, f: fn(int) -> int = ident) -> int:\n    return f(x)\n\nfn main():\n    print(run(5))\n",
+        "fn ident[T](x: T) -> T:\n    return x\n\nfn main():\n    print(ident)\n",
+    ] {
+        let joined = check_src(src)
+            .iter()
+            .map(|e| e.message.clone())
+            .collect::<Vec<_>>()
+            .join(" | ");
+        assert!(
+            joined.contains("T is not determined here")
+                && !joined.contains("nothing here determines")
+                && !joined.contains("annotate the binding"),
+            "the message must not claim more than it knows: {joined}"
+        );
+    }
+    // A DEFAULTED parameter must not be advertised with a stricter arity than a plain fn read gives:
+    // `fn rep[T](x: T, n: int = 2)` suggests `fn(<T>, int) -> str`, which must still accept `g(1)`.
+    let joined = check_src(
+        "fn rep[T](x: T, n: int = 2) -> str:\n    return \"{x}{n}\"\n\nfn main():\n    g := rep\n    print(g(1))\n",
+    )
+    .iter()
+    .map(|e| e.message.clone())
+    .collect::<Vec<_>>()
+    .join(" | ");
     assert!(
-        errs.iter()
-            .any(|e| e.message.contains("nothing here determines T")),
-        "a list-literal element is a binding too: {errs:?}"
+        joined.contains("fn(<T>, int = ) -> str") || joined.contains("fn(<T>, int) -> str"),
+        "rendered signature: {joined}"
+    );
+}
+
+/// The suppression that lets `[1,2,3].map(conv)` through belongs to the ONE prepass that re-pins its
+/// argument. Set inside the shared `infer_generic_arg_tys` it covered all seven callers, so a generic
+/// CTOR argument — where nothing pins afterwards — stayed silent and delivered the old
+/// blame-the-later-call message this rule exists to replace.
+#[test]
+fn uninstantiated_generic_fn_value_as_a_generic_ctor_arg_rejected() {
+    rejects(
+        "fn ident[T](x: T) -> T:\n    return x\n\nstruct Bx[T]:\n    f: T\n\nfn main():\n    b := Bx(ident)\n    print(b.f(3))\n",
+        "'ident' is generic and T is not determined here",
+    );
+    // …the generic FREE-FN argument spelling of the same thing.
+    rejects(
+        "fn ident[T](x: T) -> T:\n    return x\n\nfn take[U](f: U) -> int:\n    return 1\n\nfn main():\n    print(take(ident))\n",
+        "'ident' is generic and T is not determined here",
+    );
+    // …while the pinning path is untouched: `.map`/`.fold`/`.filter` still pin a bare generic fn.
+    ok(
+        "fn conv[T](x: T) -> str:\n    return str(x)\n\nfn main():\n    xs := [1, 2, 3].map(conv)\n    s: str = xs[0]\n    print(s)\n",
+    );
+    ok(
+        "fn add[T: Add](a: T, b: T) -> T:\n    return a + b\n\nfn main():\n    n: int = [1, 2, 3].fold(0, add)\n    print(n)\n",
     );
 }
 
@@ -21986,13 +22053,13 @@ fn bare_unpinned_generic_fn_value_rejected_at_the_binding() {
 fn uninstantiated_generic_fn_value_through_an_inferred_return_rejected() {
     rejects(
         "fn ident[T](x: T) -> T:\n    return x\n\nfn get():\n    return ident\n\nfn main():\n    g := get()\n    print(g(1))\n",
-        "'ident' is generic and nothing here determines T",
+        "'ident' is generic and T is not determined here",
     );
     // …and a return-only type param, which no argument can ever bind either. Pre-change this printed
     // `[]` — an accepted `List[T]` value with T undetermined.
     rejects(
         "fn mk[T](n: int) -> List[T]:\n    return []\n\nfn main():\n    g := mk\n    print(g(1))\n",
-        "'mk' is generic and nothing here determines T",
+        "'mk' is generic and T is not determined here",
     );
 }
 

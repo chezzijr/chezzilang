@@ -4032,7 +4032,16 @@ impl Checker {
                 format!("'{method}' expects {want} argument(s), got {}", args.len()),
             );
         }
+        // THE ONE prepass whose bare-ident arg is re-pinned afterwards (`try_pin_generic_fn_value_arg`
+        // below), so a same-module generic fn read here is NOT the final word on its type and
+        // `infer_ident`'s "not determined here" wall must stay silent for it. Set at THIS call site
+        // only: the other six `infer_generic_arg_tys` callers (generic free fn, struct/qualified/enum/
+        // newtype ctor) pin nothing afterwards, so there the read IS final and the wall must fire —
+        // setting the flag inside the shared helper silenced it at all seven, which let `Bx(ident)`
+        // through to the very "argument 1 of 'f': expected T, found int" this rule exists to replace.
+        let saved = std::mem::replace(&mut self.generic_fn_value_prepass, true);
         let mut arg_tys = self.infer_generic_arg_tys(args);
+        self.generic_fn_value_prepass = saved;
         // Explicit member-level turbofish seeds the `[U]` params (arity-checked); `unify` only binds
         // a param not already in the map, so an explicit targ wins and a conflicting arg is caught by
         // the per-argument check below.

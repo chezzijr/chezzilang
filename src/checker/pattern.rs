@@ -2066,9 +2066,11 @@ impl Checker {
                 && matches!(self.expected_hint, None | Some(Ty::Unknown))
                 && !self.generic_fn_value_prepass
             {
-                // Render the annotation spelling from the fn's OWN signature with each undetermined
+                // Render the wanted shape from the fn's OWN signature with each undetermined
                 // parameter shown as a `<T>` placeholder, so the advice fits this declaration instead
-                // of a made-up one.
+                // of a made-up one. `with_min` so a fn with DEFAULTED params does not advertise a
+                // stricter arity than a plain fn read gives (`fn rep[T](x: T, n: int = 2)` — a
+                // non-generic `g := rep; g(1)` works, so the suggested type must permit it too).
                 let holes: HashMap<String, Ty> = type_params
                     .iter()
                     .map(|tp| (tp.name.clone(), Ty::Param(format!("<{}>", tp.name))))
@@ -2077,7 +2079,7 @@ impl Checker {
                     &Ty::Func {
                         params: params.clone(),
                         ret: Box::new(ret.clone()),
-                        labels: FnLabels::new(labels.clone()),
+                        labels: FnLabels::new(labels.clone()).with_min(minp),
                     },
                     &holes,
                 );
@@ -2088,19 +2090,29 @@ impl Checker {
                     .join(", ");
                 // A turbofish carries exactly ONE type argument (`infer_index` / `seed_targs`), so it
                 // is only a fix for a single-parameter generic — offering it for two would be advice
-                // that cannot work.
+                // that cannot work (measured: `pair[int]` → "expects 2 type argument(s), found 1";
+                // `pair[int, str]` → a parse error).
                 let turbofish = if type_params.len() == 1 {
-                    format!("write the type argument (`{name}[<{names}>]`), or ")
+                    format!("instantiate it (`{name}[<{names}>]`), or ")
                 } else {
                     String::new()
                 };
+                // WORDING IS LOAD-BEARING. Say what is true of THIS read — the parameters are not
+                // determined HERE — never "nothing determines them", and never "annotate the binding".
+                // The guard also fires in positions that DO carry a concrete type Chezzi simply does
+                // not thread into `expected_hint` (a parameter/field DEFAULT value: `fn run(f: fn(int)
+                // -> int = id)`, whose slot pins T=int by inspection), and in positions with no
+                // binding to annotate at all (`print(id)`, a `yield`, a list/map element). Both earlier
+                // phrasings were then FACTUALLY FALSE, and the second told a user who had already
+                // written `xs: List[fn(int) -> int] = [id]` to do the thing they had done. Naming the
+                // POSITION keeps the sentence true everywhere and still points at the fix.
                 self.error(
                     span,
                     format!(
-                        "'{name}' is generic and nothing here determines {names}, so it cannot \
-                         become a function value — {turbofish}annotate the binding with a concrete \
-                         function type (`g: {sig} = {name}`), writing a real type in place of each \
-                         `<…>`"
+                        "'{name}' is generic and {names} {} not determined here, so it cannot become \
+                         a function value — {turbofish}give this position a concrete function type \
+                         (`{sig}`), writing a real type in place of each `<…>`",
+                        if type_params.len() == 1 { "is" } else { "are" }
                     ),
                 );
                 return Ty::Unknown;
