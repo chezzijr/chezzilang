@@ -74,6 +74,32 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > Review judged that plausible and found nothing that genuinely got slower. Full numbers in
 > `docs/benchmarks.md`.
 
+> **Three more findings from an adversarial panel on the same `--serial`-removal branch, fixed same
+> day.** (a) Five would-block socket-op errors (`connect`/`read`/`read_bytes`/`write`/`accept`) still
+> told the user to reach for `--parallel`, which is now a no-op alias — the same class `fd02e57b`
+> already fixed for the deadlock faults. Reworded to name the real reason (an eager `Executor` job
+> doesn't own its thread, so blocking it starves every other job and `parallel:` nursery sharing the
+> pool) and the real fix (`spawn:` / a `parallel:` nursery instead, where the op parks rather than
+> blocks). (b) `vm::worker_count()` lazily resolved the `CHEZZI_THREADS` test baseline into
+> `WORKER_OVERRIDE` on whichever thread read it first — including, under `CHEZZI_THREADS=1`, from
+> inside `over_memory_trips_on_an_all_native_task_body`'s own forced-`4` critical section, silently
+> clobbering it back to `1` and voiding the eager-arm premise the test exists to force. Fixed at the
+> root: `set_worker_count` now forces the baseline `OnceLock` to finish resolving *before* its own
+> store, so a writer's override always lands after the baseline rather than racing it. Proved, not
+> asserted: reverting the fix and running the forced-count test in isolation under
+> `CHEZZI_THREADS=1 cargo test --lib over_memory_trips_on_an_all_native_task_body` fails
+> `left: 1 right: 4`; with the fix it passes, and the test now asserts `worker_count() == 4` itself so
+> a future regression fails loudly instead of passing vacuously. (c) Eight `src/native/cffi.rs`
+> callback/FFI tests ran the identical program twice and asserted the two results matched under a
+> `"two-engine parity"`/`"M:N parity with serial VM"` message — a tautology now that there is one
+> engine (`2b86cc41` closed one instance of exactly this and missed these eight; one pair even called
+> the same function twice under two different spellings, `run_file` and
+> `run_file_with(entry, HostConfig::default())`, which `run_file` already is verbatim). All eight kept
+> a genuine assertion against a known-correct literal alongside the tautology, so all eight collapsed
+> to one run plus that assertion; none needed a new assertion invented from scratch. Gate unchanged:
+> `cargo test` 20/20 targets green (lib 4153/0/2), `chezzi test tests/chz` 569/569, conformance 8/8,
+> clippy clean.
+
 > **✅ M24's last four residuals CLOSED + the generic-function-value family, 2026-08-15 (21 commits).**
 > `docs/gaps.md` rows **M24-1, M24-2, M24-5, M24-7** are all struck through FIXED, and **no new row was
 > filed** — every defect found while fixing them was closed in-branch. Gate at merge: 18 targets,
