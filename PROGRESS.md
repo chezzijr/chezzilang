@@ -2,6 +2,49 @@
 
 Single source of truth for "what am I doing next." Update after every work session.
 
+> **✅ M24's last four residuals CLOSED + the generic-function-value family, 2026-08-15 (21 commits).**
+> `docs/gaps.md` rows **M24-1, M24-2, M24-5, M24-7** are all struck through FIXED, and **no new row was
+> filed** — every defect found while fixing them was closed in-branch. Gate at merge: 18 targets,
+> **4396 passed / 0 failed**, clippy `--all-targets -D warnings` clean, `chezzi test tests/chz/`
+> **550/550 identical on M:N and `--serial`**, corpus 438 `.chz` files with **0 verdict changes**.
+>
+> | row | before | after |
+> |---|---|---|
+> | **M24-7** | `lex error (line 3)` — the one diagnostic that could not name a character | `(line 3, col 14)`, on the offending char; unterminated literals point at their OPENING quote (rustc + CPython measured), and the fragment seam's **5** error paths stopped pointing at the literal's opening quote |
+> | **M24-5** | `defer reset(c)` → *"takes a static-protocol bound … cannot be the target"* | runs. Go accepts `defer f(x)` / `go f(x)` for a `T`-constructing generic (go1.26.5, measured) |
+> | **M24-1** | `g := concrete` refused although the body forwards only CONCRETE types | runs; the forwarding charge is asked per CALL SITE instead of by two name-only whole-body questions |
+> | **M24-2** | every nested body captured `$w:T` unread | captured only when the body can REACH a witness |
+>
+> **Found and fixed in-branch rather than filed** (the reason there is no new row): `defer H.build(3)`
+> printed `ok: no type errors` then **panicked the compiler** (`global 'H' has no slot`);
+> `defer concurrency.Shared(0)` checked clean then faulted at run time; `spawn lib3.helper(3)` was
+> refused as a *"non-sendable receiver of type module"* while `defer` of the same call ran — Go accepts
+> `go pkg.F(x)`.
+>
+> **Then the generic-function-value family, same session.** `g := id` for `fn id[T](x: T) -> T` was
+> accepted at the binding and failed at the CALL blaming a `closure` the user never wrote. Erasure was
+> ruled out by measurement — `id(5)` and `g := id[int]` both work, fully erased — so the wall was the
+> *uninstantiated* binding, which Go refuses outright. Chezzi now refuses it at the binding with a
+> better message than Go's (naming the undetermined parameter and both working spellings), extends the
+> same question to **argument positions** (~20 shapes across `map/filter/fold/sort_by/min_by/…`, the
+> `Shared`/`RwShared` family, user HOFs and user generic methods), and **infers** the case both
+> ancestors infer: `applyg(id, 5)` / `applyr(5, id)` / `twop(id, 5)` now print `5` like Go 1.26.5 and
+> Rust 1.97, while `nopin(id)`, `applyg(mk, 5)` and `twop(mk, 5)` stay refused because the information
+> genuinely is not there — which is what Go says too.
+>
+> **Process note worth carrying forward: three of four review rounds found a Critical that a fully
+> green gate had passed.** The sharpest was `[].fold(0, add)`, which went `0` → *rejected* because a
+> suppression sat in a SHARED derivation and disabled the PIN, not just the report. It survived its own
+> carve-out test because that test used `map`, whose slot `fn(E) -> U` has no concrete parameter to
+> expose the bug; `fold`'s `fn(A, E) -> A` does. Pick a carve-out's test shape by which variant *can*
+> expose a mistake.
+>
+> **Deliberately left, with the ancestor measured and stated, not filed:** an argument whose `T`
+> arrives through a local (`v := x` then `h.build(v)`) still needs `h.build[T](v)` — closing it wants a
+> def-use pass; and `xs: List[int] = mklist(id)` follows Rust (infer from the annotation) rather than
+> Go (no assignment-context inference at all), because Chezzi already infers `xs: List[int] = empty()`
+> that way.
+
 > **✅ §2c1 landed 2026-08-14 — a `spawn`ed task starts at the `spawn`, like Go's `go f()`, instead of
 > at its nursery's join.** `docs/gaps.md`'s `bare spawn: start time` row is CLOSED; `docs/future.md`
 > §2c1 is SHIPPED. Measured on the release binary: `print("A")` / `spawn: print("SPAWNED")` /
