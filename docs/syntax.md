@@ -504,9 +504,17 @@ that declaration is what the backend coerces from — not exceptions):
 - A **variadic** `float` param (`fn f(...zs: float)`) adapts its untyped int constants only when an
   untyped float constant sibling is present (`f(1, 2.5)` ✓, `f(1, 2)` ✗ — write `f(1.0, 2.0)`): the args
   are packed into a `List[float]` the callee prologue cannot coerce.
-- The element widening of a mixed-numeric-CONSTANT literal is a property of the LITERAL, so it applies in
-  every element context: `xs: List[Any] = [1, -2.5]` and `f(1, -2.5)` for `fn f(...xs: Any)` store
-  `1.0`, not `1`. A TYPED int element is never touched (`a := 1; xs: List[Any] = [a, -2.5]` keeps `1`).
+- The element widening of a mixed-numeric-CONSTANT literal needs a NUMERIC element type to ask for it.
+  An `Any` element SLOT declines it — at EVERY position the slot reaches a literal, so
+  `xs: List[Any] = [1, -2.5]`, `f([1, -2.5])` for `fn f(xs: List[Any])`, `f(1, -2.5)` for
+  `fn f(...xs: Any)`, a `List[Any]` struct-constructor argument and a `-> List[Any]` return all keep
+  the `1` an `int`, exactly as CPython's `[1, -2.5]` does. (`Any` is the empty top protocol, not a
+  numeric type, and the slot already sanctions the heterogeneous literal.) An alias spelling of the
+  top type decides the same way (`type A = Any; xs: List[A] = [1, -2.5]`), but a generic type param
+  named `Any` shadows the protocol and is not an `Any` slot. A TYPED int element is never touched
+  either way (`a := 1; xs: List[Any] = [a, -2.5]` keeps `1`), and the hint stays on the IMMEDIATE
+  literal — a nested one is un-annotated and unifies as usual (`n: List[Any] = [[1, -2.5]]` →
+  `[[1.0, -2.5]]`).
 
 Un-annotated, there is no type context, so **no** adaptation: `f := 2.5; xs := [1, f]` is an error
 (`list elements differ: int vs float`) — annotate `xs: List[float] = [1, f]`. Likewise a TYPED int

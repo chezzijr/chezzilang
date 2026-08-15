@@ -514,8 +514,14 @@ root marker (all fields default to unset, so `entrypoint` is required only for t
   The sink must be DECLARED `float`: a generic-erased slot (a method param declared `T` on a `Box[float]`)
   and a variadic `float` param's all-int-constant pack (`fn f(...zs: float)`; `f(1, 2)`) do NOT adapt —
   the backend has no declared `float` to coerce from.
-  The element widening belongs to the LITERAL, so it also fires where the element type is not `float`
-  (`xs: List[Any] = [1, -2.5]` stores `1.0`) — checker and backend agree there too. The compiler emits a real conversion
+  The element widening belongs to the LITERAL, but only where a NUMERIC element type asks for it: an
+  `Any` element SLOT declines it at every position the slot reaches a literal — an annotated `let`, a
+  call argument, a struct constructor argument, the synthesized variadic pack, a `return` — so
+  `xs: List[Any] = [1, -2.5]`, `f([1, -2.5])` for `fn f(xs: List[Any])` and `f(1, -2.5)` for
+  `fn f(...xs: Any)` all keep the `1` an `int`, as CPython does. `Any` is the empty top protocol, not a
+  numeric type, and the expected-type-directed path already sanctions the heterogeneous literal, so
+  nothing asks for the coercion. The checker records that verdict per literal and the type-blind
+  backend consumes it. The compiler emits a real conversion
   (`Op::CoerceFloat`) so the checked path and the parity harness are byte-identical across both engines.
   The checker's accepted set is a strict SUBSET of what the type-blind compiler can coerce (one shared
   predicate, `ast::const_num`), so no sink can hold a runtime `Int` under a static `float`. Lossy

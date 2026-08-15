@@ -61,6 +61,7 @@ impl Checker {
             witnesses: crate::checker::WitnessTable::default(),
             carriers: crate::checker::CarrierTable::new(),
             proto_eq_calls: crate::checker::ProtoEqTable::new(),
+            list_widen: crate::checker::ListWidenTable::new(),
             table_conflicts: Vec::new(),
             next_opt_tmp: 0,
             witness_scope: Vec::new(),

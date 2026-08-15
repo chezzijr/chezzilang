@@ -21,8 +21,8 @@ use std::fmt;
 pub use ty::Ty;
 use ty::compatible;
 pub use ty::{
-    CarrierKey, CarrierMode, CarrierTable, FnLabels, KeywordKey, KeywordTable, ProtoEqTable,
-    WitnessCallee, WitnessKey, WitnessSrc, WitnessTable,
+    CarrierKey, CarrierMode, CarrierTable, FnLabels, KeywordKey, KeywordTable, ListWidenTable,
+    ProtoEqTable, WitnessCallee, WitnessKey, WitnessSrc, WitnessTable,
 };
 
 /// The fully-resolved C signature of one `extern` fn, computed by the checker in the defining
@@ -200,23 +200,19 @@ fn float_elem_hint_ty(ty: &Ty) -> Option<crate::ast::ElemFloatHint> {
     }
 }
 
-/// The widen-SUPPRESSION twin of [`float_elem_hint_ty`]: a `let` annotated `List[Any]` declines the
-/// int→float element widen entirely (see [`crate::ast::ElemFloatHint::AnyElem`]).
+/// The widen-SUPPRESSION twin of [`float_elem_hint_ty`]: an expected slot type of `List[Any]`
+/// declines the int→float element widen entirely — `Any` is the empty TOP protocol, not a numeric
+/// type, and `infer_list`'s expected-type-directed path already sanctions the heterogeneous literal,
+/// so nothing asks for the coercion (CPython keeps `[1, 3.0]`).
 ///
-/// Gated on BOTH the syntactic `List[Any]` the backend matches (`FloatAliases::elem_hint`) and the
-/// resolved `Ty`, so the two sides decide identically in every case: an alias (`type A = Any`) fails
-/// the syntactic half on both, and a generic type param named `Any` fails the resolved half here
-/// exactly where the backend's `shadow` set fails it there. A one-sided suppression would be a
-/// checker-says-`float`/backend-stores-`int` hole in one direction and a cosmetic drift in the other.
-fn any_elem_hint_ty(
-    written: &crate::ast::Type,
-    resolved: &Ty,
-) -> Option<crate::ast::ElemFloatHint> {
-    let syntactic = matches!(written, crate::ast::Type::Generic(n, args, ..)
-        if n == "List" && args.len() == 1 && crate::ast::is_any_ty(&args[0]));
-    let is_any = matches!(resolved, Ty::List(e)
-        if matches!(&**e, Ty::Protocol(n, a) if n == "Any" && a.is_empty()));
-    (syntactic && is_any).then_some(crate::ast::ElemFloatHint::AnyElem)
+/// Keyed on the RESOLVED slot type only, so it is the same question at every position the slot type
+/// reaches a literal — an annotated `let`, a call argument, a struct constructor argument, the
+/// synthesized variadic pack, a `return`. A generic type param named `Any` resolves to `Ty::Param`
+/// and is therefore NOT a suppression, with no shadow set to maintain. The backend cannot re-derive
+/// any of this (it is type-blind); it consumes the verdict through [`ListWidenTable`].
+pub(crate) fn any_elem_slot(expected: Option<&Ty>) -> bool {
+    matches!(expected, Some(Ty::List(e))
+        if matches!(&**e, Ty::Protocol(n, a) if n == "Any" && a.is_empty()))
 }
 
 /// A short, surface-faithful label for a return-only extern `Type` in a marshallability error
@@ -931,6 +927,7 @@ pub fn resolve_call_tables(
     WitnessTable,
     CarrierTable,
     ProtoEqTable,
+    ListWidenTable,
     TableConflicts,
 ) {
     crate::on_frontend_stack_scoped(move || {
@@ -942,6 +939,7 @@ pub fn resolve_call_tables(
             std::mem::take(&mut c.witnesses),
             std::mem::take(&mut c.carriers),
             std::mem::take(&mut c.proto_eq_calls),
+            std::mem::take(&mut c.list_widen),
             std::mem::take(&mut c.table_conflicts),
         )
     })
@@ -964,6 +962,7 @@ pub fn resolve_call_tables_standalone(
     WitnessTable,
     CarrierTable,
     ProtoEqTable,
+    ListWidenTable,
     TableConflicts,
 ) {
     let id = crate::resolver::ModuleId(std::path::PathBuf::from("<main>"));
@@ -1972,6 +1971,11 @@ struct Checker {
     /// type). Recorded UNCONDITIONALLY, for the same reason [`Self::carriers`] is. See
     /// [`ProtoEqTable`].
     proto_eq_calls: ProtoEqTable,
+    /// Which mixed-numeric list LITERALS must DECLINE the int→float element widen, keyed by
+    /// [`carrier_key`] on the literal's own span and consumed verbatim by the compiler (which cannot
+    /// re-derive it: the decision is the SLOT's element type). Recorded UNCONDITIONALLY, for the same
+    /// reason [`Self::carriers`] is. See [`ListWidenTable`].
+    list_widen: ListWidenTable,
     /// W7-49 — side-table keys that were asked to hold two DIFFERENT decisions at once. Filled by
     /// [`record_call_table_entry`] (never by ordinary type errors) and returned alongside the three
     /// tables, because this pass DISCARDS its type errors — `self.error` would be swallowed here.

@@ -107,12 +107,13 @@ pub fn compile_graph(graph: &ModuleGraph) -> Result<Program, CompileError> {
     // witness params and what fills each witness at each call site. The compiler CONSUMES it — it
     // never re-derives which protocols carry a static requirement (that resolves through
     // imports/aliases/embeds, which is checker work).
-    let (kw, wt, ct, pe, conflicts) = crate::checker::resolve_call_tables(graph);
+    let (kw, wt, ct, pe, lw, conflicts) = crate::checker::resolve_call_tables(graph);
     reject_table_conflicts(conflicts)?;
     c.keyword_calls = kw;
     c.witnesses = wt;
     c.carriers = ct;
     c.proto_eq_calls = pe;
+    c.list_widen = lw;
     // Pass 0: collision pre-pass — assign runtime keys for module-scoped user types. A type name
     // declared in exactly one module keeps its BARE name (the common case → unchanged Display/print
     // output); a name declared in ≥2 modules that are BOTH in the program is disambiguated (the
@@ -183,12 +184,14 @@ pub fn compile_module_standalone(module: &Module) -> Result<Program, CompileErro
     // SINGLE-RESOLVER: extern C types come from the checker's standalone pass — the SAME resolver the
     // multi-file CLI uses (no second backend resolver exists). The backend reads this table verbatim.
     c.extern_sigs = crate::checker::resolve_extern_signatures_standalone(&module.stmts);
-    let (kw, wt, ct, pe, conflicts) = crate::checker::resolve_call_tables_standalone(&module.stmts);
+    let (kw, wt, ct, pe, lw, conflicts) =
+        crate::checker::resolve_call_tables_standalone(&module.stmts);
     reject_table_conflicts(conflicts)?;
     c.keyword_calls = kw;
     c.witnesses = wt;
     c.carriers = ct;
     c.proto_eq_calls = pe;
+    c.list_widen = lw;
     let toplevel = c.compile_module(0, module, &[], true, None)?;
     let global_slots = std::mem::take(&mut c.global_slots);
     // A synthetic module id so the run driver has something to key the namespace cache on.
@@ -307,6 +310,10 @@ struct Compiler {
     /// means "ordinary by-name call", which is the pre-W7-53 lowering. See
     /// [`crate::checker::ProtoEqTable`].
     proto_eq_calls: crate::checker::ProtoEqTable,
+    /// The checker's per-list-literal int→float element-widen verdict (see
+    /// [`crate::checker::ListWidenTable`]), consumed verbatim: the backend is type-blind and cannot
+    /// re-derive the SLOT element type that decides it. A MISS means "widen" — the pre-fix lowering.
+    list_widen: crate::checker::ListWidenTable,
     /// W7-43 — counter for the fresh `__optN` temp names the Option lowering mints, mirroring the
     /// checker's own. Frame-local and `__`-prefixed (unwritable by user code), so uniqueness within
     /// one compilation is all that is ever needed — and this makes it true by construction rather
@@ -404,18 +411,6 @@ impl FloatAliases {
                 if n == "Map" && args.len() == 2 && self.is_float(idx, &args[1], shadow) =>
             {
                 Some(crate::ast::ElemFloatHint::MapValue)
-            }
-            // `List[Any]` — the SUPPRESSION hint: nothing numeric asks for the widen, so the
-            // literal's own float sibling must not license it either. `!shadow.contains("Any")`
-            // because a generic type param named `Any` shadows the protocol (the checker resolves it
-            // to a `Ty::Param`, so its twin gate declines too).
-            Type::Generic(n, args, ..)
-                if n == "List"
-                    && args.len() == 1
-                    && crate::ast::is_any_ty(&args[0])
-                    && !shadow.contains("Any") =>
-            {
-                Some(crate::ast::ElemFloatHint::AnyElem)
             }
             _ => None,
         }
@@ -838,6 +833,7 @@ impl Compiler {
             witnesses: crate::checker::WitnessTable::default(),
             carriers: crate::checker::CarrierTable::new(),
             proto_eq_calls: crate::checker::ProtoEqTable::new(),
+            list_widen: crate::checker::ListWidenTable::new(),
             next_opt_tmp: 0,
             witness_locals: Vec::new(),
             pending_witnesses: Vec::new(),
@@ -3728,12 +3724,20 @@ impl Compiler {
             ExprKind::List(items) => {
                 // One-way int→float widening for THIS list: widen an element when the `List[float]`
                 // annotation says so OR the constant peephole fires (≥1 untyped float CONSTANT sibling
-                // → widen the untyped int CONSTANT siblings) — UNLESS a `List[Any]` annotation
-                // suppresses it, where the slot sanctions the mix and no numeric type asks for the
-                // widen. The checker accepts nothing else, and declines the widen on the same hint.
+                // → widen the untyped int CONSTANT siblings) — UNLESS the checker recorded that this
+                // literal sits in a `List[Any]` SLOT, where the slot sanctions the mix and no numeric
+                // type asks for the widen. That verdict is CONSUMED, never re-derived (the slot's
+                // element type is invisible here), and it is looked up under the SAME
+                // `literal_numeric_mix` gate the checker recorded it under, so the two cannot drift.
+                // A miss = widen, the pre-fix lowering.
                 let annotated = elem_hint == Some(crate::ast::ElemFloatHint::Elem);
-                let peephole = elem_hint != Some(crate::ast::ElemFloatHint::AnyElem)
-                    && literal_numeric_mix(items.iter());
+                let peephole = literal_numeric_mix(items.iter())
+                    && self.list_widen.get(&crate::checker::carrier_key(
+                        self.current_module_idx,
+                        self.kw_frag_ctx,
+                        self.kw_frag_ord,
+                        expr.span,
+                    )) != Some(&true);
                 for it in items {
                     self.compile_expr(fc, it)?;
                     if annotated || (peephole && crate::ast::untyped_int_const(it)) {

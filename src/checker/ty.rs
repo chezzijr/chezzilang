@@ -154,6 +154,25 @@ pub type CarrierTable = HashMap<CarrierKey, CarrierMode>;
 /// fix, never mis-apply it.
 pub type ProtoEqTable = HashMap<CarrierKey, bool>;
 
+/// Whether a mixed-numeric LIST LITERAL declines the int→float element widen, keyed exactly like
+/// [`CarrierKey`] but on the literal's OWN node span (a list literal is a primary expression, so its
+/// span is its own token range — it is never the shared primary span of a postfix/pipe chain link).
+///
+/// `true` = the slot's element type is the `Any` top protocol, so nothing numeric asks for the
+/// coercion and the backend must leave the int an int (CPython: `[1, 3.0]`). The backend is
+/// TYPE-BLIND and cannot re-derive this: the decision is the SLOT's element type, and a slot reaches
+/// a literal at an annotated `let`, a call argument (including a struct constructor argument and the
+/// synthesized variadic pack), and a `return` alike — one channel for every position, rather than one
+/// special case per position.
+///
+/// Recorded — and looked up — ONLY where [`crate::compiler::literal_numeric_mix`] fires, the one
+/// syntactic predicate both sides already share: a literal with nothing to widen has no decision to
+/// carry, so it never takes an entry and never risks the aliasing backstop. BOTH verdicts are
+/// recorded where it does fire, so [`crate::checker::record_call_table_entry`] can turn an aliased
+/// key into a hard error instead of silently applying one literal's verdict to another. A lookup MISS
+/// means "widen", which is the pre-fix lowering — a missing entry can only ever under-apply the fix.
+pub type ListWidenTable = HashMap<CarrierKey, bool>;
+
 /// Surface-only parameter labels on a function type (Swift SE-0111 keyword arguments through a
 /// function VALUE). They ride PARALLEL to a `Ty::Func`'s `params`, but participate in NO type
 /// identity: two function types differing only in labels are the SAME type (mutually assignable,

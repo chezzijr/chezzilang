@@ -1285,6 +1285,11 @@ impl Checker {
                 // hint drives THIS literal's element type and never leaks into a nested element
                 // call. `None` keeps the ordinary bottom-up inference.
                 let hint = self.expected_hint.take();
+                // The backend is type-blind: hand it this literal's widen verdict rather than let it
+                // re-derive the slot's element type. One record site ⇒ every position an expected
+                // `List[E]` reaches a literal (annotated `let`, call arg, struct ctor arg, the
+                // synthesized variadic pack, `return`) is served by one channel.
+                self.record_list_widen(expr.span, items, hint.as_ref());
                 self.infer_list(items, hint.as_ref(), elem_hint)
             }
             ExprKind::Tuple(items) => {
@@ -2306,9 +2311,12 @@ impl Checker {
         // Element widening runs FIRST, so the widened element type is what BOTH the expected-type
         // path and the bottom-up path see — the compiler's peephole coerces the same items regardless
         // of the slot, so the checker must not disagree with it in a variadic / un-annotated slot.
-        // A written `List[Any]` annotation is the one slot that suppresses the widen outright: the
-        // backend declines on the SAME hint (`ElemFloatHint::AnyElem`), so the two still agree.
-        if hint != Some(crate::ast::ElemFloatHint::AnyElem) {
+        // A `List[Any]` SLOT is the one context that suppresses the widen outright — at every
+        // position, not just an annotated `let`: `Any` is the empty top protocol, and the
+        // expected-type-directed path below already sanctions the mix, so nothing asks for the
+        // coercion. The backend declines on the SAME verdict, consumed through `ListWidenTable`
+        // (recorded by `record_list_widen` from this very `expected`), so the two cannot drift.
+        if !crate::checker::any_elem_slot(expected) {
             self.elem_widen(
                 items.iter(),
                 &mut tys,
@@ -3453,6 +3461,46 @@ impl Checker {
             key,
             mode,
             "'?.' lowering",
+            span,
+        );
+    }
+
+    /// Record ONE mixed-numeric list literal's int→float element-widen verdict for the backend (see
+    /// [`crate::checker::ListWidenTable`]). The backend is type-blind: it can see the literal's
+    /// syntax (`literal_numeric_mix`, shared verbatim below) but never the SLOT's element type, which
+    /// is the whole decision.
+    ///
+    /// Recorded only for a literal that has BOTH halves of a real decision:
+    /// - the syntactic half — `literal_numeric_mix` fires, so there is actually something to widen.
+    ///   Without it the verdict is inert on both sides, so recording one would only add aliasing
+    ///   surface for nothing;
+    /// - the type half — a SETTLED `List[E]` slot with a known `E`, the same gate `infer_list`'s
+    ///   expected-type-directed path uses. The checker types one expression more than once by design
+    ///   (the generic-argument prepass and `infer_fn_ret` both walk a body early, with slots still
+    ///   `Unknown`) — see [`Self::record_carrier`] for the same hazard — so an unsettled walk must not
+    ///   register as a decision that then conflicts with the settled one.
+    ///
+    /// Both verdicts are recorded where those hold, so an aliased key is a loud error rather than one
+    /// literal's verdict silently applied to another. A backend MISS means "widen": the pre-fix
+    /// lowering, so an unrecorded literal can only under-apply the fix.
+    fn record_list_widen(&mut self, span: Span, items: &[Expr], expected: Option<&Ty>) {
+        if !matches!(expected, Some(Ty::List(e)) if !e.is_unknown())
+            || !crate::compiler::literal_numeric_mix(items.iter())
+        {
+            return;
+        }
+        let key = crate::checker::carrier_key(
+            self.graph_module_idx,
+            self.kw_frag_ctx,
+            self.kw_frag_ord,
+            span,
+        );
+        crate::checker::record_call_table_entry(
+            &mut self.list_widen,
+            &mut self.table_conflicts,
+            key,
+            crate::checker::any_elem_slot(expected),
+            "list element-widening",
             span,
         );
     }

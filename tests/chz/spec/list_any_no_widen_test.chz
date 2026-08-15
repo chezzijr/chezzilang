@@ -39,3 +39,62 @@ test fn nested_literal_under_list_any_still_widens():
     # unifies to `List[float]` as usual.
     n: List[Any] = [[1, 3.0]]
     assert str(n) == "[[1.0, 3.0]]"
+
+# --- the SLOT, not the `let`: every position an expected `List[Any]` reaches a literal ---
+# The verdict rides the slot's element type, recorded per literal for the type-blind backend, so all
+# of these answer the same way the `let` above does. Before that, only the `let` did — the language
+# answered one question four different ways depending on where the literal sat.
+
+fn take_any(xs: List[Any]) -> str:
+    return str(xs)
+
+fn vari_any(...xs: Any) -> str:
+    return str(xs)
+
+fn ret_any() -> List[Any]:
+    return [1, 3.0]
+
+fn take_float(xs: List[float]) -> str:
+    return str(xs)
+
+fn vari_float(...xs: float) -> str:
+    return str(xs)
+
+fn ret_float() -> List[float]:
+    return [1, 3.0]
+
+struct AnyBox:
+    v: List[Any]
+
+test fn list_any_call_argument_keeps_int_element():
+    assert take_any([1, 3.0]) == "[1, 3.0]"
+
+test fn variadic_any_pack_keeps_int_element():
+    # `...xs: Any` desugars to a synthesized `List` literal at the variadic slot, so it is the same
+    # site as the call argument above — and must answer the same.
+    assert vari_any(1, 3.0) == "[1, 3.0]"
+
+test fn list_any_return_keeps_int_element():
+    assert str(ret_any()) == "[1, 3.0]"
+
+test fn list_any_struct_ctor_argument_keeps_int_element():
+    b := AnyBox([1, 3.0])
+    assert str(b.v) == "[1, 3.0]"
+
+test fn list_float_slots_all_still_widen():
+    # The narrowing must not spread to the genuinely numeric annotation at ANY of those positions.
+    assert take_float([1, 3.0]) == "[1.0, 3.0]"
+    assert vari_float(1, 3.0) == "[1.0, 3.0]"
+    assert str(ret_float()) == "[1.0, 3.0]"
+
+test fn list_any_slots_homogeneous_and_non_numeric_unchanged():
+    assert take_any([1, 2]) == "[1, 2]"
+    assert take_any([1, "a"]) == "[1, 'a']"
+
+test fn alias_of_any_element_keeps_int_element():
+    # The verdict is the RESOLVED slot type, so an alias spelling of the top type decides the same
+    # way the bare one does.
+    xs: List[AnyAlias] = [1, 3.0]
+    assert str(xs) == "[1, 3.0]"
+
+type AnyAlias = Any

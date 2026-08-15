@@ -10018,20 +10018,20 @@ fn widen_variadic_float_param_runs() {
     );
 }
 
-/// A mixed untyped-numeric-CONSTANT literal widens in every element context the backend cannot see a
-/// type for — the peephole is type-blind, so the CHECKER widens there too (it types the element
-/// `float`, which `Any` accepts) and nothing stores a value the static type does not describe.
+/// A mixed untyped-numeric-CONSTANT literal widens in every element context where a NUMERIC type
+/// asks for it — the peephole is type-blind, so the CHECKER widens there too (it types the element
+/// `float`) and nothing stores a value the static type does not describe.
 ///
-/// A WRITTEN `List[Any]` annotation is the exception: it is the one `Any` element slot the backend
-/// CAN see, so both sides decline the widen (`ElemFloatHint::AnyElem`) and the `int` survives, as in
-/// CPython's `xs = [1, -2.5]`. The variadic pack below carries no annotation the backend can read, so
-/// it still widens — the residual half of the same family (`docs/gaps.md`).
+/// An `Any` element SLOT is the exception, at every position it reaches a literal — an annotated
+/// `let`, a call argument, and the synthesized variadic pack alike: the checker records the verdict
+/// per literal and the backend consumes it, so both decline the widen and the `int` survives, as in
+/// CPython's `xs = [1, -2.5]`.
 #[test]
 fn widen_any_collection_const_mix_agrees() {
     widen_three_engines("xs: List[Any] = [1, -2.5]\nprint(xs)\n", "[1, -2.5]\n");
     widen_three_engines(
         "fn show(...xs: Any):\n    print(xs)\nshow(1, 2.0 + 0.5)\n",
-        "[1.0, 2.5]\n",
+        "[1, 2.5]\n",
     );
     // GUARD (the other direction): a TYPED int element is never touched — neither side widens it, so
     // it stays an `Int` under the `Any` element type.
