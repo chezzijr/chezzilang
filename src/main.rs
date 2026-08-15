@@ -33,15 +33,12 @@ COMMANDS:
 
 FLAGS:
     --errors=json    Emit type errors as JSON (for `check` / `run`)
-    --serial         Run on the cooperative single-thread VM (the frozen parity oracle)
-    --parallel       Select the OS-thread engine (now the DEFAULT; flag kept as a no-op)
-    --threads=N      Worker threads for the OS-thread engine (0 = all cores; env: CHEZZI_THREADS)
-    --check-parity   Run the program on BOTH engines (serial oracle + M:N) and report whether their
-                     output is byte-identical (exit 0 = parity OK; non-zero = divergence report)
-    --max-heap=N     (`test`, M:N engine only) Hard-abort any test whose live heap exceeds N bytes — a
-                     runaway-alloc guard, bucketed OVER-MEMORY (0/omitted = off; not with --serial)
-    --timeout=N      (`test`, M:N engine only) Hard-abort any test running longer than N ms — a
-                     wall-clock guard, bucketed TIMED-OUT (0/omitted = off; not with --serial)
+    --parallel       Accepted no-op alias (`run` only) — the engine is the default already
+    --threads=N      Worker threads for the engine (0 = all cores; env: CHEZZI_THREADS)
+    --max-heap=N     (`test`) Hard-abort any test whose live heap exceeds N bytes — a runaway-alloc
+                     guard, bucketed OVER-MEMORY (0/omitted = off)
+    --timeout=N      (`test`) Hard-abort any test running longer than N ms — a wall-clock guard,
+                     bucketed TIMED-OUT (0/omitted = off)
 
 `chezzi test` SELECTION + OUTPUT (all opt-in; default output is unchanged):
     -k, --filter S   Run only tests whose name (`fn` or `Suite::method`) contains substring S; the
@@ -56,8 +53,8 @@ FLAGS:
     --color=MODE     auto (default; on iff stdout is a tty) | always | never — colors the verdict tag.
 
 NOTE: flags must come BEFORE the file path. Anything after the file is passed
-      to the program as an argument, so `chezzi run prog.chz --serial` runs the
-      default parallel VM and hands `--serial` to the program. Use `chezzi run --serial prog.chz`.
+      to the program as an argument, so `chezzi run prog.chz --threads=4` hands
+      `--threads=4` to the program instead of sizing the engine. Use `chezzi run --threads=4 prog.chz`.
 ";
 
 fn main() -> ExitCode {
@@ -191,49 +188,29 @@ fn cmd_check(args: &[String]) -> ExitCode {
     }
 }
 
-/// `chezzi run [file] [--errors=json] [--serial] [--parallel] [--threads=N] [--check-parity]` —
-/// type-check first,
-/// then execute on the bytecode VM. With NO file argument, the project's manifest entrypoint is run:
-/// the project root is found by walking up from the cwd for `chezzi.toml`, and its
-/// `[project] entrypoint` (a dotted module path, e.g. `"src.main"`) is resolved root-relatively and
-/// run. The VM now runs the real OS-thread engine BY DEFAULT; `--serial` opts back into the
-/// cooperative single-thread VM (the frozen byte-identical oracle). `--parallel` is kept as an
-/// accepted no-op alias for the (now default) OS-thread engine. `--threads=N` (or the
-/// `CHEZZI_THREADS` env var) sizes the OS-thread engine's worker pool — `0` (or omitted) = all
-/// cores; the flag wins over the env var. `--check-parity` instead runs the program on BOTH engines
-/// (serial oracle + M:N) into buffered sinks and diffs them — the in-tree serial==M:N parity oracle
-/// as a one-command check; it is mutually exclusive with `--serial`/`--parallel`.
+/// `chezzi run [file] [--errors=json] [--parallel] [--threads=N]` — type-check first, then execute on
+/// the bytecode VM. With NO file argument, the project's manifest entrypoint is run: the project root
+/// is found by walking up from the cwd for `chezzi.toml`, and its `[project] entrypoint` (a dotted
+/// module path, e.g. `"src.main"`) is resolved root-relatively and run. The VM runs the real
+/// OS-thread (M:N) engine — the sole engine. `--parallel` is kept as an accepted no-op alias.
+/// `--threads=N` (or the `CHEZZI_THREADS` env var) sizes the engine's worker pool — `0` (or omitted)
+/// = all cores; the flag wins over the env var.
 fn cmd_run(args: &[String]) -> ExitCode {
     let mut path = None;
     let mut json = false;
-    // The OS-thread engine (bounded pool + condvar `recv`) is now the DEFAULT VM engine.
-    // `--serial` opts back into the cooperative single-thread VM (the frozen parity oracle).
-    let mut parallel = true;
-    // Track explicit `--parallel`/`--serial` so contradictory combos still error instead of
-    // silently picking one.
-    let mut saw_parallel = false;
-    let mut saw_serial = false;
-    // `--check-parity` runs the program on BOTH engines (serial oracle + M:N) and diffs their
-    // captured output — the test-only serial==M:N parity oracle, exposed as a one-command check.
-    let mut saw_check_parity = false;
-    // `--threads=N` worker count for the M:N engine (orthogonal to which engine runs). `0` = all
-    // cores. `None` = unset (fall through to `CHEZZI_THREADS`, then auto). The flag wins over env.
+    // `--threads=N` worker count for the engine. `0` = all cores. `None` = unset (fall through to
+    // `CHEZZI_THREADS`, then auto). The flag wins over env.
     let mut threads_flag: Option<usize> = None;
     // Positional args after the script path are the program's own args (std.os.args).
-    // GOTCHA: this means flags MUST precede the file — `chezzi run prog.chz --serial`
-    // treats `--serial` as a program arg (path is already set) and silently runs the
-    // default parallel VM. Correct form: `chezzi run --serial prog.chz`.
+    // GOTCHA: this means flags MUST precede the file — `chezzi run prog.chz --threads=4`
+    // treats `--threads=4` as a program arg (path is already set), not an engine size.
+    // Correct form: `chezzi run --threads=4 prog.chz`.
     let mut prog_args: Vec<String> = Vec::new();
     for arg in args {
         match arg.as_str() {
             _ if path.is_some() => prog_args.push(arg.clone()),
             "--errors=json" => json = true,
-            "--parallel" => saw_parallel = true,
-            "--check-parity" => saw_check_parity = true,
-            "--serial" => {
-                saw_serial = true;
-                parallel = false;
-            }
+            "--parallel" => {} // accepted no-op alias — the engine is the default already
             s if s.starts_with("--threads=") => {
                 let v = &s["--threads=".len()..];
                 match v.parse::<usize>() {
@@ -253,17 +230,6 @@ fn cmd_run(args: &[String]) -> ExitCode {
             other => path = Some(other.to_string()),
         }
     }
-    if saw_parallel && saw_serial {
-        eprintln!("chezzi run: --parallel and --serial are mutually exclusive");
-        return ExitCode::FAILURE;
-    }
-    if saw_check_parity && (saw_parallel || saw_serial) {
-        eprintln!(
-            "chezzi run: --check-parity runs BOTH engines and is mutually exclusive with --serial/--parallel"
-        );
-        return ExitCode::FAILURE;
-    }
-
     // No file argument → run the project manifest's entrypoint. Find the project root by walking up
     // from the cwd for `chezzi.toml`, parse it, and resolve `[project] entrypoint` (a dotted module
     // path) root-relatively. This keeps imports root-relative (build_graph walks up to the same
@@ -289,21 +255,11 @@ fn cmd_run(args: &[String]) -> ExitCode {
             },
         };
 
-    // Resolve the M:N worker count. An explicit `--threads` wins and errors if the parallel engine
-    // won't run (contradiction); otherwise `CHEZZI_THREADS` applies only when it actually will, so a
-    // stray env var never breaks `--serial`. `0`/unset both mean auto (all cores).
-    // `--check-parity` runs an M:N leg, so `--threads=N` legitimately sizes it (the serial leg
-    // ignores the count) — don't let the "no effect with --serial" guard fire for it.
-    let runs_parallel = parallel || saw_check_parity;
+    // Resolve the engine's worker count. An explicit `--threads` wins; otherwise `CHEZZI_THREADS`
+    // applies. `0`/unset both mean auto (all cores).
     if let Some(n) = threads_flag {
-        if !runs_parallel {
-            eprintln!(
-                "chezzi run: --threads sizes the parallel engine and has no effect with --serial (the cooperative single-thread engine)"
-            );
-            return ExitCode::FAILURE;
-        }
         vm::set_worker_count(n);
-    } else if runs_parallel && let Ok(raw) = std::env::var("CHEZZI_THREADS") {
+    } else if let Ok(raw) = std::env::var("CHEZZI_THREADS") {
         let s = raw.trim();
         if !s.is_empty() {
             match s.parse::<usize>() {
@@ -345,12 +301,6 @@ fn cmd_run(args: &[String]) -> ExitCode {
         }
     }
 
-    // `--check-parity`: run the SAME program on BOTH engines (serial oracle + M:N), buffer each
-    // leg's output, and diff — the in-tree serial==M:N parity oracle as a one-command user check.
-    if saw_check_parity {
-        return run_check_parity(&path, prog_args, entry_fn.as_deref(), root_override);
-    }
-
     // The CLI STREAMS: the VM writes each `print` straight to the real stdout as it happens (see
     // `HostConfig::stream`), so a prompt appears before its `read_line`, a long-running program is
     // not silent, and a spawned task's log is visible before its nursery joins. The lib helpers keep
@@ -361,7 +311,7 @@ fn cmd_run(args: &[String]) -> ExitCode {
     cfg.stream = true;
     let (errored, exit_code) = {
         let (_out, _err, result, code) =
-            vm::run_file_with_entry(p, cfg, parallel, entry_fn.as_deref(), root_override.clone());
+            vm::run_file_with_entry(p, cfg, true, entry_fn.as_deref(), root_override.clone());
         (
             result
                 .err()
@@ -404,106 +354,6 @@ fn cmd_run(args: &[String]) -> ExitCode {
     match errored {
         None => ExitCode::SUCCESS,
         Some(_) => ExitCode::FAILURE,
-    }
-}
-
-/// `chezzi run --check-parity <file>` — run the SAME program on BOTH engines (the cooperative serial
-/// oracle, then the M:N OS-thread engine), each into a BUFFERED sink, and diff the two captures the
-/// way the in-tree oracle `assert_file_parity` does: byte-identical stdout, byte-identical stderr,
-/// identical rendered terminal error (exit code ignored, matching the oracle). Identical → print the
-/// captured output once + `parity OK` (exit 0, even if BOTH engines errored identically). Diverged →
-/// a greppable side-by-side report + non-zero exit (a divergence is a signal to investigate:
-/// concurrency order-dependence, an airlock/scheduler fault, or an accepted --parallel-only path).
-///
-/// NOTE: both legs share the real process stdin fd and run sequentially, so a stdin-reading program
-/// diverges by construction (leg 2 sees EOF) — check-parity does not support stdin-reading programs.
-fn run_check_parity(
-    path: &str,
-    prog_args: Vec<String>,
-    entry_fn: Option<&str>,
-    root: Option<std::path::PathBuf>,
-) -> ExitCode {
-    use std::io::Write;
-    let p = std::path::Path::new(path);
-    // `stream` stays false (the `from_process` default) so out/err come back FULLY BUFFERED. Each leg
-    // needs its own config: `HostConfig` is not `Clone` and `from_process` consumes the Vec.
-    let cfg1 = native::HostConfig::from_process(prog_args.clone());
-    let cfg2 = native::HostConfig::from_process(prog_args);
-    // RAW BYTES, not the lossily-decoded capture: `from_utf8_lossy` is not injective, so two
-    // engines emitting DIFFERENT non-UTF-8 bytes (reachable since `write_bytes` went byte-exact,
-    // W6-9) would decode to the same U+FFFD run and be reported as parity OK. The flag's documented
-    // contract is byte-identical stdout, so it diffs bytes.
-    let (o1, e1, r1, _) = vm::run_file_bytes(p, cfg1, false, entry_fn, root.clone());
-    let (o2, e2, r2, _) = vm::run_file_bytes(p, cfg2, true, entry_fn, root);
-    // Compare terminal faults EXACTLY as the in-tree parity oracle does — `RunError`'s `Display`
-    // (`to_string()` = "runtime error ({span}): {message}"), NOT the full stack trace. The trace frames
-    // (`at <fn> (called at <site>)`) can legitimately differ between engines when M:N picks a different
-    // first-fault winner among tasks that fault identically, and the oracle holds such a program equal;
-    // diffing the trace here would false-report divergence. Mirror `assert_file_parity` (parity_tests.rs).
-    let err1 = r1.err().map(|e| e.to_string());
-    let err2 = r2.err().map(|e| e.to_string());
-
-    if o1 == o2 && e1 == e2 && err1 == err2 {
-        // Echo the capture as BYTES — the tool must reproduce the output of the command it checks.
-        let _ = std::io::stdout().write_all(&o1);
-        let _ = std::io::stdout().flush();
-        let _ = std::io::stderr().write_all(&e1);
-        if let Some(m) = &err1 {
-            eprintln!("{m}");
-        }
-        eprintln!("parity OK (serial == M:N)");
-        return ExitCode::SUCCESS;
-    }
-
-    // First differing stream wins the report: stdout, then stderr, then the terminal error.
-    eprintln!("parity DIVERGENCE (serial != M:N)");
-    if o1 != o2 {
-        report_stream_diff("stdout", &o1, &o2);
-    } else if e1 != e2 {
-        report_stream_diff("stderr", &e1, &e2);
-    } else {
-        let a = err1.as_deref().unwrap_or("<ok>");
-        let b = err2.as_deref().unwrap_or("<ok>");
-        eprintln!("  terminal error differs:");
-        eprintln!("    serial: {a}");
-        eprintln!("    M:N:    {b}");
-    }
-    ExitCode::FAILURE
-}
-
-/// Emit a greppable side-by-side report for a stream that differs between the two engines: the first
-/// differing line index, then both sides. Handles differing line counts (a missing line shows as
-/// `<none>`).
-fn report_stream_diff(stream: &str, serial: &[u8], mn: &[u8]) {
-    let a: Vec<&[u8]> = serial.split(|&b| b == b'\n').collect();
-    let b: Vec<&[u8]> = mn.split(|&b| b == b'\n').collect();
-    let n = a.len().max(b.len());
-    for i in 0..n {
-        let la = a.get(i).copied();
-        let lb = b.get(i).copied();
-        if la != lb {
-            eprintln!("  {stream} differs at line {}:", i + 1);
-            eprintln!("    serial: {}", show_line(la));
-            eprintln!("    M:N:    {}", show_line(lb));
-            return;
-        }
-    }
-    // Splitting on `\n` is injective, so differing streams always differ in some segment; keep a
-    // fallback rather than a panic.
-    eprintln!("  {stream} differs (trailing content):");
-    eprintln!("    serial: {serial:02x?}");
-    eprintln!("    M:N:    {mn:02x?}");
-}
-
-/// Render one side of a diverging line: the text when it is valid UTF-8, else a hex dump — a
-/// divergence can now be in bytes a lossy decode would erase (`ff` vs `fe` → the same U+FFFD).
-fn show_line(line: Option<&[u8]>) -> String {
-    match line {
-        None => "<none>".to_string(),
-        Some(l) => match std::str::from_utf8(l) {
-            Ok(s) => s.to_string(),
-            Err(_) => format!("{l:02x?}"),
-        },
     }
 }
 
@@ -550,8 +400,6 @@ fn resolve_entrypoint() -> Result<(String, Option<String>, std::path::PathBuf), 
 fn cmd_test(args: &[String]) -> ExitCode {
     use chezzi::test_runner::{RunOpts, Verbosity};
     let mut path: Option<String> = None;
-    let mut saw_serial = false;
-    let mut saw_parallel = false;
     let mut opts = RunOpts::default();
     let mut saw_quiet = false;
     let mut saw_verbose = false;
@@ -563,8 +411,6 @@ fn cmd_test(args: &[String]) -> ExitCode {
     while i < args.len() {
         let arg = args[i].as_str();
         match arg {
-            "--serial" => saw_serial = true,
-            "--parallel" => saw_parallel = true, // no-op alias: M:N is already the default
             "--fail-fast" => opts.fail_fast = true,
             "--show-output" => opts.show_output = true,
             "--errors=json" => opts.json = true,
@@ -626,10 +472,6 @@ fn cmd_test(args: &[String]) -> ExitCode {
         }
         i += 1;
     }
-    if saw_serial && saw_parallel {
-        eprintln!("chezzi test: --serial and --parallel are mutually exclusive");
-        return ExitCode::FAILURE;
-    }
     if saw_quiet && saw_verbose {
         eprintln!("chezzi test: -q and -v are mutually exclusive");
         return ExitCode::FAILURE;
@@ -652,29 +494,9 @@ fn cmd_test(args: &[String]) -> ExitCode {
     if opts.json {
         opts.color = false;
     }
-    // `--max-heap` is the M:N engine ONLY. The cooperative `--serial` engine shares ONE heap across
-    // the parent + every `spawn`/`parallel:` fiber, so a concurrent test's per-heap trip point differs
-    // from M:N's isolated-per-worker heaps — rather than ship that serial≠M:N divergence, restrict the
-    // flag to the default engine. (`--serial` is the parity oracle, slated for post-freeze removal.)
-    if opts.max_heap != 0 && saw_serial {
-        eprintln!(
-            "chezzi test: --max-heap requires the M:N engine and cannot be combined with --serial"
-        );
-        return ExitCode::FAILURE;
-    }
-    // `--timeout` is the M:N engine ONLY: a wall-clock trip is non-deterministic, so it cannot be
-    // parity-tested serial==M:N. Restrict it to the default engine rather than ship that divergence.
-    if opts.timeout_ms != 0 && saw_serial {
-        eprintln!(
-            "chezzi test: --timeout requires the M:N engine and cannot be combined with --serial"
-        );
-        return ExitCode::FAILURE;
-    }
     let root = path.unwrap_or_else(|| ".".to_string());
-    // Default engine is the M:N OS-thread VM — matching `chezzi run`, and forward-compatible with the
-    // post-JIT-freeze removal of the cooperative serial engine. `--serial` opts into it while it lives;
-    // the dual-engine serial==M:N check itself lives in the `cargo test` gate.
-    let report = test_runner::run_tests_opts(std::path::Path::new(&root), !saw_serial, opts);
+    // The engine is the M:N OS-thread VM, matching `chezzi run` — the sole engine.
+    let report = test_runner::run_tests_opts(std::path::Path::new(&root), true, opts);
     print!("{}", report.text);
     if report.passed {
         ExitCode::SUCCESS
