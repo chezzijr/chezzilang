@@ -3643,11 +3643,14 @@ impl Vm {
                 // …then JOIN, exactly like `shutdown`. Java's `shutdownNow` returns without
                 // waiting because it hands back the never-started tasks and you follow up with
                 // `awaitTermination`; Chezzi has no such follow-up call, so not waiting here
-                // would leave detached jobs running past a `shut` executor that the program-exit
-                // join deliberately SKIPS (`drain_live_executors` short-circuits on `shut`) — the
-                // program could exit mid-job. Cancelled jobs are swallowed by `reduce_task_slots`
-                // (their output still flushes at their slot), so this raises a fault only if a
-                // job genuinely faulted before the trip landed.
+                // would leave detached jobs running past a `shut` executor with the program
+                // still exiting mid-job. (`drain_live_executors` no longer treats `shut` alone as
+                // "already handled" — see `ExecutorCore::unreduced` — but that only closes the
+                // self-join hand-off; it still does not WAIT for a job this call has not joined
+                // itself, so skipping the join here would still be an exit-mid-job hazard.)
+                // Cancelled jobs are swallowed by `reduce_task_slots` (their output still flushes
+                // at their slot), so this raises a fault only if a job genuinely faulted before
+                // the trip landed.
                 self.join_eager_jobs(&core)?;
                 Ok(Value::nil())
             }

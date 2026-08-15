@@ -790,9 +790,13 @@ pub struct ExecutorCore {
     /// This core was marked `shut` by a join that will reduce NOTHING, so its submission slots are
     /// still owed a reduce. Set by exactly one site: `Vm::join_eager_jobs`, on entry, when the
     /// joining thread is itself one of this core's jobs (`slack > 0`) and therefore may not
-    /// `take_slots` — its own index is still live. Cleared by the two paths that discharge the debt:
-    /// the `take_slots` that finally reduces the vector, and a bail-out (which flushes what finished
-    /// and has no successor to promise).
+    /// `take_slots` — its own index is still live. Cleared by the two paths that actually discharge
+    /// the debt: the `take_slots` that finally reduces the vector (always `slack == 0`), and an
+    /// ORDINARY (non-self, `slack == 0`) bail-out, which flushes what finished and has no successor
+    /// to promise. A SELF-join's own bail (`slack > 0`) does **not** clear it — a self-join never
+    /// discharges the debt, bail or not, so clearing there would drop a mark this call did not set
+    /// (an earlier self-join may have left it true, promising a later join) and leave the vector
+    /// unreduced with nothing left to pick it up.
     ///
     /// Without it, `shut` was read as "already handled" and [`Vm::drain_live_executors`] skipped the
     /// core, dropping every sibling's buffered `out`/`stderr` and any fault they raised. Invisible

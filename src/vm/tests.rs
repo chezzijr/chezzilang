@@ -12487,10 +12487,15 @@ fn golden_try_recv_chz_matches_expected_and_interp() {
     let src = include_str!("../../examples/try_recv.chz");
     let expected = include_str!("../../examples/try_recv.expected");
     let vm_out = run_capture(src).expect("vm run");
+    let stress_out = run_capture_stress(src);
     assert_same_lines(expected, &vm_out);
     assert_same_lines(&vm_out, &run_capture(src).expect("M:N run"));
-    assert_same_lines(expected, &run_capture_stress(src));
-    for (label, out) in [("run", &vm_out), ("expected", &expected.to_string())] {
+    assert_same_lines(expected, &stress_out);
+    for (label, out) in [
+        ("run", &vm_out),
+        ("expected", &expected.to_string()),
+        ("stress", &stress_out),
+    ] {
         assert_eq!(
             out.lines().last(),
             Some("empty"),
@@ -14337,10 +14342,20 @@ print(\"after\")
 ///
 /// Measured on the pre-fix binary: the first program captured `"end\n"` (A and C silently lost,
 /// 10/10) and the second exited **Ok** with the sibling's assertion failure swallowed.
+///
+/// **Needs ≥2 free pool threads.** `closer` runs its OWN self-join (`ex.shutdown()`) synchronously
+/// on the worker thread that dispatched it, and that join waits for siblings `A`/`C`. With one free
+/// pool thread, `closer` occupies the only worker and `A`/`C` are queued-but-never-dispatched — the
+/// same `pool.rs` risk G3 bounded-pool starvation the sibling `Executor` deadlock tests already
+/// document — so the join never returns and this test hangs rather than failing. Measured: `taskset
+/// -c 0` (1 CPU) still running at 120 s; `taskset -c 0,1` (2 CPUs) passes in 0.00 s. Watchdogged so a
+/// starved host times out with a diagnosis instead of stalling the whole suite.
 #[test]
 fn a_self_shut_executor_still_has_its_slots_reduced_at_program_exit() {
-    let out = run_capture(
-        "
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(run_capture(
+            "
 import std.concurrency
 ex := Executor()
 done := Channel[int]()
@@ -14353,8 +14368,16 @@ ex.submit(fn(): print(\"C\"))
 done.recv()
 print(\"end\")
 ",
-    )
-    .expect("a job shutting down its own executor is healthy — see the self-join fix");
+        ));
+    });
+    let out = rx
+        .recv_timeout(std::time::Duration::from_secs(60))
+        .expect(
+            "a job shutting down its own executor must not hang — or this host has <2 free \
+             pool threads, in which case closer's self-join occupies the only worker and A/C are \
+             queued-but-undispatched (pool.rs risk G3)",
+        )
+        .expect("a job shutting down its own executor is healthy — see the self-join fix");
     // `end` first: `main` prints it before the exit drain, which is what then flushes the slots.
     // A before C is the W7-5c per-slot flush on the buffered sink, in SUBMISSION order — that half
     // IS ordered, unlike the streamed `chezzi run` path (see `EagerState`'s doc).
@@ -14364,8 +14387,10 @@ print(\"end\")
     );
 
     // The same hand-off carries FAULTS: a swallowed one exits 0 on a program that failed.
-    let (_out, res) = run_program(
-        "
+    let (tx2, rx2) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx2.send(run_program(
+            "
 import std.concurrency
 ex := Executor()
 done := Channel[int]()
@@ -14378,6 +14403,12 @@ ex.submit(boom)
 ex.submit(closer)
 done.recv()
 ",
+        ));
+    });
+    let (_out, res) = rx2.recv_timeout(std::time::Duration::from_secs(60)).expect(
+        "a job shutting down its own executor must not hang — or this host has <2 free pool \
+             threads, in which case closer's self-join occupies the only worker and boom is \
+             queued-but-undispatched (pool.rs risk G3)",
     );
     let msg = res
         .expect_err("the sibling job's assertion failure must reach the run, not be dropped")

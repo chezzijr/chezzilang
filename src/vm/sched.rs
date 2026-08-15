@@ -4203,12 +4203,19 @@ impl Vm {
             // embedder, `run_capture` — the slot IS the only copy.) `ExecutorCore::unreduced`, set
             // above, is the hand-off: the exit drain picks such a core up exactly once.
             if bail.is_some() {
-                // Debt discharged the only way a bail can: flush what finished, and CLEAR the mark —
-                // a self-join that bailed has no successor to promise, and re-joining at exit a core
-                // whose join just reported a deadlock would undo the "last chance to ask" reasoning
-                // below. This branch is why the mark cannot be inferred from "the slot vector is
-                // non-empty": `take_finished` is length-preserving, so it leaves one behind.
-                core.unreduced.store(false, Ordering::Release);
+                // Debt discharged the only way an ORDINARY (non-self) bail can: flush what finished,
+                // and CLEAR the mark — this thread was never going to `take_slots` on success either,
+                // so a bail truly has no successor to promise, and re-joining at exit a core whose
+                // join just reported a deadlock would undo the "last chance to ask" reasoning below.
+                // Gated on `slack == 0`: a SELF-join (`slack > 0`) never discharges the debt, bail or
+                // not — clearing here regardless of `slack` would drop a mark this call did not set
+                // (an earlier self-join left it true, promising a LATER join; this bail is not that
+                // join) and the exit drain would then skip a core still owed a reduce. This branch is
+                // why the mark cannot be inferred from "the slot vector is non-empty": `take_finished`
+                // is length-preserving, so it leaves one behind.
+                if slack == 0 {
+                    core.unreduced.store(false, Ordering::Release);
+                }
                 let done = g.take_finished();
                 drop(g);
                 for o in done {
@@ -4235,9 +4242,11 @@ impl Vm {
             // jobs never learn. That is not merely untidy: `Vm::do_call`'s blocking-native offload gates
             // on `cancel_requested()`, so a job part-way through a sequence of blocking calls would
             // launch the NEXT one after the run had already reported TIMED-OUT (measured: a fresh
-            // subprocess spawned at ~1.3 s under `--timeout=300`). The executor is already `shut` and
-            // this path deliberately leaves `unreduced` clear, so `drain_live_executors` will never
-            // revisit it — this is the last chance to ask.
+            // subprocess spawned at ~1.3 s under `--timeout=300`). The executor is already `shut`, and
+            // for an ORDINARY (non-self, `slack == 0`) join this path deliberately leaves `unreduced`
+            // clear, so `drain_live_executors` will never revisit it — this is the last chance to ask.
+            // A self-join's bail (`slack > 0`) leaves the mark exactly as it found it instead — see
+            // the `slack == 0` gate above the `unreduced.store(false, …)` a few lines up.
             //
             // It is a REQUEST, not a kill — a job with no cancellation checkpoint (an in-flight
             // `process.run` child, `docs/stdlib.md` §"blocking calls cannot be interrupted") still runs

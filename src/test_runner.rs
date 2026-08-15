@@ -795,6 +795,25 @@ mod tests {
 
     static COUNTER: AtomicU32 = AtomicU32::new(0);
 
+    /// Process-wide lock serializing the `--max-heap` tests that submit hundreds of jobs to a real
+    /// `Executor` (`vm::pool` is a single process-wide `OnceLock`, shared by every test in the
+    /// process — same shape as `native::rand::TEST_RNG_LOCK` / `vm::TEST_WORKER_LOCK`). Two of these
+    /// tests running concurrently (the default under `cargo test`'s multi-threaded harness) both
+    /// flood the ONE shared pool at once, so a job that would normally dispatch and finish almost
+    /// immediately instead queues behind a SIBLING test's few hundred jobs. That queue backlog is
+    /// real, accounted memory (`ExecutorCore::pending`), not a measurement bug — and it is
+    /// indistinguishable in total bytes from the retention regression these tests exist to catch
+    /// (both are `job_count × payload_size`), so no cap value or payload size can tell them apart
+    /// while they race. Measured: `executor_results_are_not_retained` alone passes 100% (10/10, both
+    /// `--test-threads=1` and full suite in isolation); run concurrently with its siblings below
+    /// (`cargo test --lib -- executor`, `--test-threads=4`, this file's shared pool under
+    /// contention) it failed **10/10**, OVER-MEMORY, even at 4× (32 MB) and did not clear until the
+    /// cap was widened to within shouting distance of the full 300 MB backlog (350 MB) — at which
+    /// point the cap can no longer catch a real regression either, so widening the margin was not a
+    /// fix, it was hiding the same failure at a bigger number. Serializing the family below is what
+    /// keeps the cap tight AND deterministic.
+    static EXEC_MEM_CAP_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     struct TmpDir(PathBuf);
     impl TmpDir {
         fn new() -> Self {
@@ -1228,6 +1247,8 @@ struct Suite:
     /// just a way to fail everything.
     #[test]
     fn over_memory_counts_an_executor_result_backlog() {
+        // Serialize against the other heavy `Executor` `--max-heap` tests — see the lock's doc.
+        let _lock = EXEC_MEM_CAP_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         const CAP: usize = 8_000_000;
         let d = TmpDir::new();
         // ~100 KB blob built once, CAPTURED by 300 jobs that each print it — 30 MB of buffered
@@ -1266,40 +1287,17 @@ struct Suite:
         }
     }
 
-    /// W7-27 — an `Executor` job's RETURN VALUE is not retained. `submit` returns nil (Chezzi has no
-    /// futures) and `reduce_task_slots` reads only `out`/`stderr`, yet the eager path kept every
-    /// result until `shutdown()`. Measured uncapped (`chezzi run`, peak RSS, 300 × ~1 MB discarded):
-    /// a job BUILDING its own payload **339 MB → 45 MB** against CPython 3.14.6
-    /// `ThreadPoolExecutor`'s **42 MB** with futures discarded identically; the CAPTURED program
-    /// this test runs **666 MB → 410 MB**, whose remainder is not results at all but 300 queued
-    /// `ReadyWorker`s each holding their own wire copy of the capture (`W7-26r`'s pool-queue sibling,
-    /// still open — which is exactly why the assertion below is the cap, not RSS).
-    ///
-    /// The cap is the in-tree PROXY for the retention claim: with `W7-26`'s accounting live, a
-    /// retained result backlog is what `--max-heap` sees, so this program is `OVER-MEMORY` pre-fix
-    /// (it *was* `over_memory_counts_an_executor_result_backlog`) and must now PASS. The capture is
-    /// deliberate: it is what wires bytes at each submit and paces the parent's sweeps. M:N only —
-    /// `--max-heap` is an M:N cap, and on `--serial` the same program trips on its queued closures.
-    #[test]
-    fn executor_results_are_not_retained() {
-        const CAP: usize = 8_000_000;
-        let d = TmpDir::new();
-        // ~1 MB blob, captured (so each submit wires it and paces the parent's sweeps) and RETURNED
-        // by 300 jobs. Nothing reads those 300 MB, so nothing may hold them.
-        let ex = d.write(
-            "ret_test.chz",
-            "import std.concurrency\n\ntest fn execret():\n    parts: List[str] = []\n    \
-             for i in range(100000):\n        parts.push(\"0123456789\")\n    \
-             blob := \"\".join(parts)\n    ex := Executor()\n    for i in range(300):\n        \
-             ex.submit(fn() -> str: blob)\n    ex.shutdown()\n    assert true\n",
-        );
-        let report = run_tests_capped(&ex, CAP);
-        assert!(
-            report.text.contains("PASS execret"),
-            "300 discarded ~1 MB job results must not be retained; report:\n{}",
-            report.text
-        );
-    }
+    // W7-27 — an `Executor` job's RETURN VALUE is not retained (`submit` returns nil, Chezzi has no
+    // futures, and `reduce_task_slots` reads only `out`/`stderr`). MOVED to its own process:
+    // `tests/executor_results_not_retained.rs`. At this test's 8 MB cap and ~1 MB per job, as few
+    // as 8 of its OWN 300 submissions sitting queued-but-not-dispatched trips the cap — genuine,
+    // correctly-accounted memory, not a measurement bug — so sharing this binary's ONE process-wide
+    // `vm::pool` with its ~65 `executor`-named lib-test siblings made it fail 10/10 under
+    // `RUST_TEST_THREADS=4`, and widening the cap only hid that (still 10/10 at 4× the cap; it did
+    // not clear until the cap was within shouting distance of the FULL backlog, at which point a
+    // genuine regression could no longer trip it either). See the new file's header for the full
+    // evidence and the `EXEC_MEM_CAP_LOCK` doc above for the sibling family this paired with before
+    // the move.
 
     /// W7-26r — the cap must be observed while the parent fiber is BLOCKED IN A JOIN, where it
     /// reaches no instruction boundary and so never sweeps. Both programs below build their payload
@@ -1319,6 +1317,8 @@ struct Suite:
     /// suite carry the 700 MB repro.
     #[test]
     fn over_memory_trips_while_the_parent_is_blocked_in_a_join() {
+        // Serialize against the other heavy `Executor` `--max-heap` tests — see the lock's doc.
+        let _lock = EXEC_MEM_CAP_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         const CAP: usize = 8_000_000;
         // `noisy()` captures NOTHING: it builds ~100 KB and prints it, so the retained bytes appear
         // only after the parent has already blocked in its join.
@@ -1389,6 +1389,8 @@ struct Suite:
     /// total is far under the cap, and no scheduling outcome can trip it.
     #[test]
     fn over_memory_counts_jobs_queued_but_not_started() {
+        // Serialize against the other heavy `Executor` `--max-heap` tests — see the lock's doc.
+        let _lock = EXEC_MEM_CAP_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         const CAP: usize = 8_000_000;
         // Only the jobs the pool has NOT started count, so the trip needs the queue to outgrow the
         // worker threads — hence a body that outlasts the submit loop.
