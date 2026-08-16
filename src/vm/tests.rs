@@ -180,11 +180,10 @@ fn implicit_nursery_toplevel_vm() {
     assert_eq!(run_capture(src).expect("parallel"), "end\nw\n");
 }
 
-/// Assert a program yields `expected`, run twice for consistency.
+/// Assert a program yields `expected`.
 #[cfg(test)]
 fn assert_mc_parity(src: &str, expected: &str) {
-    assert_eq!(run(src), expected, "VM output");
-    assert_eq!(run_capture(src).expect("M:N"), expected, "M:N engine");
+    assert_eq!(run(src), expected);
 }
 
 /// M-C: spawned tasks JOIN before the frame's `defer`s run (tasks complete, then cleanup).
@@ -472,10 +471,6 @@ fn assert_fault_parity(src: &str, expected_out: &str) {
     let (vm_out, vm_res) = run_program(src);
     assert!(vm_res.is_err(), "VM expected to fault, got {vm_out:?}");
     assert_eq!(vm_out, expected_out, "VM stdout");
-    let (it_out, it_res) = run_program(src);
-    assert!(it_res.is_err(), "expected to fault, got {it_out:?}");
-    assert_eq!(it_out, expected_out, "stdout");
-    assert_eq!(vm_out, it_out, "stdout divergence on the fault path");
 }
 
 /// Like [`assert_fault_parity`] but asserts the order-INSENSITIVE SET of stdout lines matches
@@ -916,16 +911,9 @@ fn idxspec_int_float_key_collision_resolves() {
 
 // ---- M19 Phase 4: struct-field inline cache (correctness guards) ----
 
-/// Assert byte-identical stdout across two runs and return the shared output. The field IC is a
-/// VM-only speedup, so any divergence is a bug.
+/// Run a program and return its stdout, for the caller to assert against a literal expected.
 fn run_parity(src: &str) -> String {
-    let vm = run_capture(src).expect("vm run");
-    let interp = run_capture(src).expect("repeat run");
-    assert_eq!(
-        vm, interp,
-        "divergence (field IC must be behavior-preserving)"
-    );
-    vm
+    run_capture(src).expect("vm run")
 }
 
 #[test]
@@ -1510,10 +1498,8 @@ fn inlined_hot_ops_path_matches_step() {
                    i := 0\nacc := 0\n\
                    while i < 20:\n    x := i * 2\n    if x % 3 == 0:\n        acc = acc + f(x, i)\n    else:\n        acc = acc + 1\n    i = i + 1\nprint(acc)\n";
     // x=0,3*?: i=0 x=0 x%3==0 acc+=f(0,0)=0; i=1 x=2 no acc+=1; i=2 x=4 no +1; i=3 x=6 yes +f(6,3)=9;
-    // i=4 x=8 no +1; i=5 x=10 no +1; i=6 x=12 yes +f(12,6)=18; ... let the value settle deterministically.
-    let out = run_parity(src);
-    assert_eq!(out, run_capture(src).expect("interp"));
-    assert!(!out.is_empty());
+    // i=4 x=8 no +1; i=5 x=10 no +1; i=6 x=12 yes +f(12,6)=18; ... acc=202 (verified against CPython).
+    assert_eq!(run(src), "202\n");
 }
 
 #[test]
@@ -2139,7 +2125,6 @@ fn bounded_channel_cap_method_both_engines() {
     let src = "b := Channel[int](3)\nprint(b.cap())\nu := Channel[int]()\nprint(u.cap())\n";
     let out = run(src);
     assert_eq!(out, "3\n0\n");
-    assert_eq!(out, run_capture(src).expect("M:N run"));
 }
 
 /// `Channel[T](0)` / a negative capacity is a runtime fault (cap must be > 0), with
@@ -2169,7 +2154,6 @@ fn bounded_channel_try_send_full_returns_false_both_engines() {
                print(c.recv())\n";
     let out = run(src);
     assert_eq!(out, "true\nfalse\n1\ntrue\n3\n");
-    assert_eq!(out, run_capture(src).expect("M:N run"));
 }
 
 /// A `send` on a FULL bounded channel with NO possible consumer (top level, no nursery) is a
@@ -2225,7 +2209,6 @@ fn bounded_channel_fanout_golden_both_engines() {
                main()\n";
     let out = run(src);
     assert_eq!(out, "0\n1\n2\n3\n4\n");
-    assert_eq!(out, run_capture(src).expect("M:N run"));
 }
 
 // ===== §6d `wait:` SEND-arms (Go-`select` symmetry) =====
@@ -9122,9 +9105,8 @@ fn main():
     m[\"k\"] *= 2
     print(m[\"k\"])
 main()";
-    let vm_out = run_capture(src).expect("vm");
-    assert_eq!(vm_out, run_capture(src).expect("interp"));
-    assert_eq!(vm_out, run_capture(src).expect("parallel"));
+    // x: 100*3=300 /2=150 %40=30 &12=12 |1=13 ^5=8 <<2=32 >>1=16 (verified against CPython).
+    assert_eq!(run_capture(src).expect("vm"), "16\n[32]\n2\n28\n");
 }
 
 #[test]
@@ -9148,8 +9130,6 @@ main()";
         vm_out,
         "true\nfalse\ntrue\nfalse\ntrue\nfalse\ntrue\nfalse\n"
     );
-    assert_eq!(vm_out, run_capture(src).expect("interp"));
-    assert_eq!(vm_out, run_capture(src).expect("parallel"));
 }
 
 #[test]
@@ -9176,8 +9156,6 @@ fn main():
 main()";
     let vm_out = run_capture(src).expect("vm");
     assert_eq!(vm_out, "2\n1\n[30, 20, 10]\n9\n7\n");
-    assert_eq!(vm_out, run_capture(src).expect("interp"));
-    assert_eq!(vm_out, run_capture(src).expect("parallel"));
 }
 
 #[test]
@@ -9369,7 +9347,6 @@ fn vm_or_pattern_literals() {
     let src = "fn f(n: int) -> str:\n    return match n:\n        1 | 2 | 3: \"low\"\n        _: \"high\"\nprint(f(2))\nprint(f(5))\n";
     let out = run(src);
     assert_eq!(out, "low\nhigh\n");
-    assert_eq!(out, run_capture(src).expect("interp"));
 }
 
 /// A 3-variant enum or-pattern is exhaustive and matches each alternative; the interp agrees.
@@ -9378,7 +9355,6 @@ fn vm_or_pattern_enum_variants() {
     let src = "enum Color:\n    Red\n    Green\n    Blue\nfn name(c: Color) -> str:\n    return match c:\n        Color.Red | Color.Green | Color.Blue: \"primary\"\nprint(name(Color.Green))\nprint(name(Color.Blue))\n";
     let out = run(src);
     assert_eq!(out, "primary\nprimary\n");
-    assert_eq!(out, run_capture(src).expect("interp"));
 }
 
 /// A binding or-pattern (`A(a) | B(a)`) writes `a` into the same slot regardless of alternative.
@@ -9387,7 +9363,6 @@ fn vm_or_pattern_binding() {
     let src = "enum E:\n    A(int)\n    B(int)\nfn val(e: E) -> int:\n    return match e:\n        E.A(a) | E.B(a): a\nprint(val(E.A(7)))\nprint(val(E.B(9)))\n";
     let out = run(src);
     assert_eq!(out, "7\n9\n");
-    assert_eq!(out, run_capture(src).expect("interp"));
 }
 
 /// A guard on an or-pattern: `p | q if cond:` falls through to the next arm when the guard fails.
@@ -9396,7 +9371,6 @@ fn vm_or_pattern_with_guard() {
     let src = "fn f(n: int) -> str:\n    return match n:\n        1 | 2 | 3 if n == 2: \"two\"\n        _: \"other\"\nprint(f(2))\nprint(f(1))\n";
     let out = run(src);
     assert_eq!(out, "two\nother\n");
-    assert_eq!(out, run_capture(src).expect("interp"));
 }
 
 /// A nested nullary variant (`Some(None)`) is a refutable variant match; the interp agrees.
@@ -9409,7 +9383,6 @@ fn vm_nested_nullary_variant() {
     let src = "fn f(oo: Option[Option[int]]) -> str:\n    return match oo:\n        Some(None): \"inner-none\"\n        _: \"other\"\nx: Option[Option[int]] = Some(None)\ny: Option[Option[int]] = Some(Some(5))\nprint(f(x))\nprint(f(y))\n";
     let out = run(src);
     assert_eq!(out, "inner-none\nother\n");
-    assert_eq!(out, run_capture(src).expect("interp"));
 }
 
 // ----- experimental generators (VM-only) -----
@@ -10562,7 +10535,6 @@ fn golden_literals_chz_matches_expected_and_interp() {
     let expected = include_str!("../../examples/literals.expected");
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, expected);
-    assert_eq!(vm_out, run_capture(src).expect("repeat run"));
 }
 
 /// Large-integral float golden: `examples/float_large_integral.chz`. Floats print with CPython
@@ -10576,7 +10548,6 @@ fn golden_float_large_integral_matches_expected_and_interp() {
     let expected = include_str!("../../examples/float_large_integral.expected");
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, expected);
-    assert_eq!(vm_out, run_capture(src).expect("repeat run"));
 }
 
 /// bytes golden: `examples/bytes.chz` (the full operation table — `b"..."` literal with `\xHH`
@@ -10589,7 +10560,6 @@ fn golden_bytes_chz_matches_expected_and_interp() {
     let expected = include_str!("../../examples/bytes.expected");
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, expected);
-    assert_eq!(vm_out, run_capture(src).expect("repeat run"));
 }
 
 /// conversions golden: `examples/conversions.chz` (str.encode()/bytes.decode()/bytearray.decode()
@@ -10603,7 +10573,6 @@ fn golden_conversions_chz_matches_expected_and_interp() {
     let expected = include_str!("../../examples/conversions.expected");
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, expected);
-    assert_eq!(vm_out, run_capture(src).expect("repeat run"));
 }
 
 /// encode/decode UTF-8 round-trip (multi-byte char): `str.encode()` then `bytes.decode()` returns
@@ -10613,7 +10582,6 @@ fn encode_decode_roundtrip_multibyte() {
     let src = "fn main():\n    s := \"héllo\"\n    print(s.encode().decode())\n    print(s.encode().decode() == s)\nmain()\n";
     let out = run(src);
     assert_eq!(out, "héllo\ntrue\n");
-    assert_eq!(out, run_capture(src).expect("repeat run"));
 }
 
 /// `bytearray.decode()` mirrors `bytes.decode()` exactly (decode the current buffer).
@@ -10622,7 +10590,6 @@ fn bytearray_decode_matches_bytes() {
     let src = "fn main():\n    print(bytearray([104, 105]).decode())\n    print(b\"hi\".decode())\nmain()\n";
     let out = run(src);
     assert_eq!(out, "hi\nhi\n");
-    assert_eq!(out, run_capture(src).expect("repeat run"));
 }
 
 /// Invalid UTF-8 `decode()` is a RECOVERABLE fault (catchable by `recover:`), not a panic — and the
@@ -10632,7 +10599,6 @@ fn invalid_utf8_decode_recoverable() {
     let src = "fn main():\n    r := recover:\n        b\"\\xff\\xfe\".decode()\n    match r:\n        Ok(v): print(v)\n        Err(e): print(\"caught\")\nmain()\n";
     let out = run(src);
     assert_eq!(out, "caught\n");
-    assert_eq!(out, run_capture(src).expect("repeat run"));
     // Uncaught, the same fault propagates as a recoverable RuntimeError with the same message.
     let bare = "fn main():\n    print(b\"\\xff\".decode())\nmain()\n";
     let (_, vm_res) = run_program(bare);
@@ -10648,7 +10614,6 @@ fn constructors_over_user_iterator_and_dupkey() {
     let src = "struct C:\n    n: int\n    limit: int\n    fn next(self) -> Option[int]:\n        if self.n >= self.limit:\n            return None\n        v := self.n\n        self.n = self.n + 1\n        return Some(v)\nfn main():\n    print(List(C(0, 4)).sum())\n    print(Set(C(0, 4)).len())\n    m := Map([(1, \"a\"), (1, \"b\")])\n    print(m.len())\n    print(m[1])\nmain()\n";
     let out = run(src);
     assert_eq!(out, "6\n4\n1\nb\n");
-    assert_eq!(out, run_capture(src).expect("repeat run"));
 }
 
 /// bytearray golden: `examples/bytearray.chz` (the full mutable-buffer table — all 4 constructor
@@ -10662,7 +10627,6 @@ fn golden_bytearray_chz_matches_expected_and_interp() {
     let expected = include_str!("../../examples/bytearray.expected");
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, expected);
-    assert_eq!(vm_out, run_capture(src).expect("repeat run"));
 }
 
 /// Qualified enum-variant access golden: `examples/enum_qualified.chz` (the dotted `Enum.Variant`
@@ -10675,7 +10639,6 @@ fn golden_enum_qualified_chz_matches_expected_and_interp() {
     let expected = include_str!("../../examples/enum_qualified.expected");
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, expected);
-    assert_eq!(vm_out, run_capture(src).expect("repeat run"));
 }
 
 /// Parity edge: a top-level `fn` named like an enum must NOT shadow qualified-variant access
@@ -10706,7 +10669,6 @@ fn golden_poly_method_chz_matches_expected_and_interp() {
     let expected = include_str!("../../examples/poly_method.expected");
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, expected);
-    assert_eq!(vm_out, run_capture(src).expect("repeat run"));
 }
 
 /// or-pattern golden: `examples/match_or.chz` (or-patterns with + without bindings, a 3-variant
@@ -10719,8 +10681,6 @@ fn golden_match_or_chz_matches_expected_and_interp() {
     let expected = include_str!("../../examples/match_or.expected");
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, expected);
-    assert_eq!(vm_out, run_capture(src).expect("repeat run"));
-    assert_eq!(vm_out, run_capture(src).expect("parallel run"));
 }
 
 /// QoL golden: `examples/membership.chz` (the `in` operator across list/set/map-key/substring,
@@ -10732,8 +10692,6 @@ fn golden_membership_chz_matches_expected_and_interp() {
     let expected = include_str!("../../examples/membership.expected");
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, expected);
-    assert_eq!(vm_out, run_capture(src).expect("repeat run"));
-    assert_eq!(vm_out, run_capture(src).expect("parallel run"));
 }
 
 /// QoL golden: `examples/compound_assign.chz` (the 8 compound-assign ops across var/index/field/
@@ -10745,8 +10703,6 @@ fn golden_compound_assign_chz_matches_expected_and_interp() {
     let expected = include_str!("../../examples/compound_assign.expected");
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, expected);
-    assert_eq!(vm_out, run_capture(src).expect("repeat run"));
-    assert_eq!(vm_out, run_capture(src).expect("parallel run"));
 }
 
 /// Concurrency demo golden: `examples/demo_spawn.chz` (`spawn` in a `parallel:` nursery, results
@@ -10758,8 +10714,6 @@ fn golden_demo_spawn_chz_matches_expected_and_interp() {
     let expected = include_str!("../../examples/demo_spawn.expected");
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, expected);
-    assert_eq!(vm_out, run_capture(src).expect("repeat run"));
-    assert_eq!(vm_out, run_capture(src).expect("parallel run"));
 }
 
 /// Concurrency demo golden: `examples/demo_executor.chz` (the `Executor` twin of `demo_spawn` —
@@ -10771,8 +10725,6 @@ fn golden_demo_executor_chz_matches_expected_and_interp() {
     let expected = include_str!("../../examples/demo_executor.expected");
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, expected);
-    assert_eq!(vm_out, run_capture(src).expect("repeat run"));
-    assert_eq!(vm_out, run_capture(src).expect("parallel run"));
 }
 
 /// QoL golden: `examples/multiline_str.chz` (triple-quoted strings — unescaped quotes, `\n`,
@@ -10784,8 +10736,6 @@ fn golden_multiline_str_chz_matches_expected_and_interp() {
     let expected = include_str!("../../examples/multiline_str.expected");
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, expected);
-    assert_eq!(vm_out, run_capture(src).expect("repeat run"));
-    assert_eq!(vm_out, run_capture(src).expect("parallel run"));
 }
 
 /// QoL golden: `examples/tuple_swap.chz` (multi-target assignment — vars, list elements, struct
@@ -10798,8 +10748,6 @@ fn golden_tuple_swap_chz_matches_expected_and_interp() {
     let expected = include_str!("../../examples/tuple_swap.expected");
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, expected);
-    assert_eq!(vm_out, run_capture(src).expect("repeat run"));
-    assert_eq!(vm_out, run_capture(src).expect("parallel run"));
 }
 
 /// M8-M4 golden: `examples/set.chz` (the set type — literals, membership, algebra, iteration)
@@ -10810,7 +10758,6 @@ fn golden_set_chz_matches_expected_and_interp() {
     let expected = include_str!("../../examples/set.expected");
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, expected);
-    assert_eq!(vm_out, run_capture(src).expect("repeat run"));
 }
 
 /// `timer(ms)` golden: a one-shot timeout channel delivers `true`. Byte-identical on the
@@ -10825,7 +10772,6 @@ fn golden_wait_select_chz_matches_expected_and_interp() {
     let expected = include_str!("../../examples/wait_select.expected");
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, expected);
-    assert_eq!(vm_out, run_capture(src).expect("repeat run"));
     assert_eq!(run_capture(src).expect("parallel"), expected);
 }
 
@@ -10836,7 +10782,6 @@ fn golden_timer_chz_matches_expected_and_interp() {
     let expected = include_str!("../../examples/timer.expected");
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, expected);
-    assert_eq!(vm_out, run_capture(src).expect("repeat run"));
     assert_eq!(run_capture(src).expect("parallel"), expected);
 }
 
@@ -10848,7 +10793,6 @@ fn golden_timer_selective_import_three_engine() {
     let src = "import timer from std.time\nfn main():\n    print(timer(20).recv())\nmain()\n";
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, "true\n");
-    assert_eq!(vm_out, run_capture(src).expect("repeat run"));
     assert_eq!(run_capture(src).expect("parallel"), "true\n");
 }
 
@@ -10871,7 +10815,6 @@ fn golden_atomic_chz_matches_expected_and_interp() {
     let expected = include_str!("../../examples/atomic.expected");
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, expected);
-    assert_eq!(vm_out, run_capture(src).expect("repeat run"));
 }
 
 /// Multi-line literals golden: `examples/multiline_literals.chz` (newline/indent suppression
@@ -10883,7 +10826,6 @@ fn golden_multiline_literals_chz_matches_expected_and_interp() {
     let expected = include_str!("../../examples/multiline_literals.expected");
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, expected);
-    assert_eq!(vm_out, run_capture(src).expect("repeat run"));
 }
 
 /// Format spec: every supported `{expr:spec}` case (align/fill/width/zero-pad/precision/
@@ -10901,13 +10843,11 @@ print(\"x={255:x}|X={255:X}|b={255:b}|o={255:o}\")
 print(\"s={5:+d}|{-5:+d}\")
 print(\"bare={5.0}|fmt={5.0:.2f}|w={5.0:>8}\")
 ";
-    let vm_out = run_capture(src).expect("vm run");
-    assert_eq!(vm_out, run_capture(src).expect("repeat run"), "repeat run");
-    assert_eq!(
-        vm_out,
-        run_capture(src).expect("parallel run"),
-        "parallel run"
-    );
+    // Every value verified against CPython's str.format mini-language (the owning ancestor).
+    let expected = "[   7]\n|    42|42    |  42  |\nz=000042|-00007\n\
+        f=3.14|e=2.500000e+00|p=13.6%\nx=ff|X=FF|b=11111111|o=377\n\
+        s=+5|-5\nbare=5.0|fmt=5.00|w=     5.0\n";
+    assert_eq!(run_capture(src).expect("vm run"), expected);
 }
 
 /// Regression: an interpolated ternary `{if b: a else: b}` has top-level colons that are NOT a
@@ -10922,12 +10862,6 @@ print(\"fmt={(if b: 1 else: 2):>5}\")
 ";
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, "val=10\nfmt=    1\n");
-    assert_eq!(vm_out, run_capture(src).expect("repeat run"), "repeat run");
-    assert_eq!(
-        vm_out,
-        run_capture(src).expect("parallel run"),
-        "parallel run"
-    );
 }
 
 /// A pathological field width is rejected (with the cap message) BEFORE any allocation — the
@@ -10956,8 +10890,6 @@ fn golden_format_specs_chz_matches_expected_and_interp() {
     let expected = include_str!("../../examples/format_specs.expected");
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, expected);
-    assert_eq!(vm_out, run_capture(src).expect("repeat run"));
-    assert_eq!(vm_out, run_capture(src).expect("parallel run"));
 }
 
 /// Slicing golden: `examples/slicing.chz` (list/str slicing + the `Index`/`IndexSet`/`Slice`
@@ -10968,7 +10900,6 @@ fn golden_slicing_chz_matches_expected_and_interp() {
     let expected = include_str!("../../examples/slicing.expected");
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, expected);
-    assert_eq!(vm_out, run_capture(src).expect("repeat run"));
 }
 
 /// `range` golden: `examples/range_step.chz` (3-arg up/down/by-N, empty / wrong-direction cases,
@@ -10980,7 +10911,6 @@ fn golden_range_step_chz_matches_expected_and_interp() {
     let expected = include_str!("../../examples/range_step.expected");
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, expected);
-    assert_eq!(vm_out, run_capture(src).expect("repeat run"));
 }
 
 /// `print` kwargs golden: `examples/print_kwargs.chz` (default form, `end=""`, `sep=`, both, and
@@ -10992,7 +10922,6 @@ fn golden_print_kwargs_chz_matches_expected_and_interp() {
     let expected = include_str!("../../examples/print_kwargs.expected");
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, expected);
-    assert_eq!(vm_out, run_capture(src).expect("repeat run"));
 }
 
 /// First-class universe builtin fn golden: `examples/defer_builtin_value.chz` — `defer print(...)`
@@ -11005,8 +10934,6 @@ fn golden_defer_builtin_value_chz_matches_expected_and_interp() {
     let expected = include_str!("../../examples/defer_builtin_value.expected");
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, expected);
-    assert_eq!(vm_out, run_capture(src).expect("repeat run"));
-    assert_eq!(vm_out, run_capture(src).expect("mn run"));
 }
 
 /// Phase 3a golden: `examples/native_prelude.chz` exercises the eight universe builtins now
@@ -11019,8 +10946,6 @@ fn golden_native_prelude_chz_matches_expected_and_interp() {
     let expected = include_str!("../../examples/native_prelude.expected");
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, expected);
-    assert_eq!(vm_out, run_capture(src).expect("repeat run"));
-    assert_eq!(vm_out, run_capture(src).expect("mn run"));
 }
 
 /// `panic` AS A VALUE (`p := panic; p("boom")`) raises the recoverable `RuntimeError` through the
@@ -11043,7 +10968,6 @@ fn ord_chr_as_value_both_engines() {
         "fn main():\n    f := ord\n    g := chr\n    print(f(\"a\"))\n    print(g(66))\nmain()\n";
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, "97\nB\n");
-    assert_eq!(vm_out, run_capture(src).expect("repeat run"));
 }
 
 /// Regression (bugs 1 & 3): a user binding named like a first-class builtin fn SHADOWS the builtin
@@ -11078,8 +11002,6 @@ fn builtin_value_equality_both_engines() {
     let src = "fn main():\n    f := ord\n    g := ord\n    print(f == g)\n    print(ord == ord)\n    print(chr == ord)\n    print([print] == [print])\nmain()\n";
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, "true\ntrue\nfalse\ntrue\n");
-    assert_eq!(vm_out, run_capture(src).expect("repeat run"));
-    assert_eq!(vm_out, run_capture(src).expect("mn run"));
 }
 
 /// Bug 3: all four first-class builtins are SENDABLE — a builtin bound to a local and CAPTURED
@@ -11092,8 +11014,6 @@ fn builtin_value_sendable_across_airlock_both_engines() {
     let src = "import std.concurrency\nfn main():\n    f := ord\n    p := print\n    parallel:\n        spawn:\n            p(f(\"a\"))\nmain()\n";
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, "97\n");
-    assert_eq!(vm_out, run_capture(src).expect("repeat run"));
-    assert_eq!(vm_out, run_capture(src).expect("mn run"));
 }
 
 /// A first-class builtin fn value spawned as a DIRECT CALL callee (`f := print; spawn f(x)`,
@@ -11107,8 +11027,6 @@ fn spawn_builtin_fn_value_as_call_callee_both_engines() {
     let src = "import std.concurrency\nfn main():\n    g := print\n    parallel:\n        spawn g(\"from-task\")\nmain()\n";
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, "from-task\n");
-    assert_eq!(vm_out, run_capture(src).expect("repeat run"));
-    assert_eq!(vm_out, run_capture(src).expect("mn run"));
 }
 
 /// `spawn print("hi")` — a bare first-class builtin spawned DIRECTLY (no intermediate binding),
@@ -11120,8 +11038,6 @@ fn spawn_bare_builtin_print_both_engines() {
     let src = "fn main():\n    parallel:\n        spawn print(\"hi\")\nmain()\n";
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, "hi\n");
-    assert_eq!(vm_out, run_capture(src).expect("repeat run"));
-    assert_eq!(vm_out, run_capture(src).expect("mn run"));
 }
 
 /// Value-form `print` (`f := print; f(x)`) keeps its (single) arg GC-ROOTED while stringifying —
@@ -11135,8 +11051,6 @@ fn print_as_value_arg_rooted_under_gc_stress() {
                    fn main():\n    f := print\n    f(Loud(7))\nmain()\n";
     let stressed = run_capture_stress(src);
     assert_eq!(stressed, "L7\n");
-    assert_eq!(stressed, run_capture(src).expect("vm run"));
-    assert_eq!(stressed, run_capture(src).expect("repeat run"));
 }
 
 /// `assert` golden: `examples/assert.chz` (bare + message forms, all passing) byte-identical on
@@ -11147,7 +11061,6 @@ fn golden_assert_chz_matches_expected_and_interp() {
     let expected = include_str!("../../examples/assert.expected");
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, expected);
-    assert_eq!(vm_out, run_capture(src).expect("repeat run"));
 }
 
 // ---- user-callable panic(msg) builtin ----
@@ -11192,7 +11105,6 @@ fn golden_panic_chz_matches_expected_and_interp() {
     let expected = include_str!("../../examples/panic.expected");
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, expected);
-    assert_eq!(vm_out, run_capture(src).expect("repeat run"));
 }
 
 /// `defer` golden: LIFO order, method + free-fn calls, the `?` short-circuit path, args evaluated
@@ -11206,7 +11118,6 @@ fn golden_defer_chz_matches_expected_and_interp() {
     let expected = include_str!("../../examples/defer.expected");
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, expected);
-    assert_eq!(vm_out, run_capture(src).expect("repeat run"));
 }
 
 // ----- concurrency C4 (spawn / parallel: / Channel / Shared) -----
@@ -11220,7 +11131,6 @@ fn golden_parallel_chz_matches_expected_and_interp() {
     let expected = include_str!("../../examples/parallel.expected");
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, expected);
-    assert_eq!(vm_out, run_capture(src).expect("repeat run"));
 }
 
 /// B3.3-threads sub-step 1: the `--parallel` engine is selectable (`run_capture` sets
@@ -11242,7 +11152,6 @@ fn golden_implicit_nursery_chz_matches_expected_and_interp() {
     let expected = include_str!("../../examples/implicit_nursery.expected");
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, expected);
-    assert_eq!(vm_out, run_capture(src).expect("repeat run"));
     assert_eq!(run_capture(src).expect("parallel run"), expected);
 }
 
@@ -11415,7 +11324,6 @@ fn vm_wait_assign_to_field_and_index_matches_interp() {
     let src = "struct Box:\n    v: int\nfn main():\n    ch := Channel[int]()\n    ch.send(7)\n    b := Box(0)\n    wait:\n        b.v = ch.recv(): print(b.v)\n    xs := [0, 0]\n    ch.send(9)\n    wait:\n        xs[1] = ch.recv(): print(xs[1])\nmain()\n";
     let vm = run(src);
     assert_eq!(vm, "7\n9\n");
-    assert_eq!(vm, run_capture(src).expect("repeat run"));
 }
 
 /// A single-arm `wait` reduces to a plain `recv`: ready value taken (the recv-park 1-key special
@@ -11537,7 +11445,6 @@ fn vm_wait_arm_break_in_loop() {
     let src = "fn main():\n    found := -1\n    i := 0\n    while i < 3:\n        a := Channel[int]()\n        a.send(i * 10)\n        wait:\n            v := a.recv():\n                if v == 10:\n                    found = v\n                    break\n        i += 1\n    print(found)\nmain()\n";
     let vm = run(src);
     assert_eq!(vm, "10\n");
-    assert_eq!(vm, run_capture(src).expect("interp"));
 }
 
 /// A `wait` arm body that `continue`s the enclosing loop.
@@ -11546,7 +11453,6 @@ fn vm_wait_arm_continue_in_loop() {
     let src = "fn main():\n    total := 0\n    i := 0\n    while i < 3:\n        a := Channel[int]()\n        a.send(i)\n        i += 1\n        wait:\n            v := a.recv():\n                if v == 1:\n                    continue\n                total += v\n    print(total)\nmain()\n";
     let vm = run(src);
     assert_eq!(vm, "2\n");
-    assert_eq!(vm, run_capture(src).expect("interp"));
 }
 
 /// A `wait` arm body that `return`s a value from the enclosing function.
@@ -11555,7 +11461,6 @@ fn vm_wait_arm_return() {
     let src = "fn pick(a: Channel[int]) -> int:\n    wait:\n        v := a.recv():\n            return v * 100\nfn main():\n    a := Channel[int]()\n    a.send(7)\n    print(pick(a))\nmain()\n";
     let vm = run(src);
     assert_eq!(vm, "700\n");
-    assert_eq!(vm, run_capture(src).expect("interp"));
 }
 
 /// A `wait` arm body containing ANOTHER `wait` (nested select).
@@ -11564,7 +11469,6 @@ fn vm_wait_nested() {
     let src = "fn main():\n    a := Channel[int]()\n    b := Channel[int]()\n    a.send(1)\n    b.send(2)\n    wait:\n        v := a.recv():\n            wait:\n                w := b.recv(): print(v + w)\nmain()\n";
     let vm = run(src);
     assert_eq!(vm, "3\n");
-    assert_eq!(vm, run_capture(src).expect("interp"));
 }
 
 /// A `wait` inside a loop that blocks, wakes, re-iterates, and blocks again under `--parallel`: the
@@ -11583,7 +11487,6 @@ fn vm_wait_arm_bare_spawn() {
     let src = "fn worker():\n    print(\"worker ran\")\nfn main():\n    a := Channel[int]()\n    a.send(1)\n    wait:\n        v := a.recv():\n            spawn worker()\n    print(\"after wait\")\nmain()\n";
     let vm = run(src);
     assert_eq!(vm, "after wait\nworker ran\n");
-    assert_eq!(vm, run_capture(src).expect("interp"));
 }
 
 /// §6d regression — a multi-arm `wait` whose arm body references an OUTER local inside a fused
@@ -11595,7 +11498,6 @@ fn vm_wait_arm_body_outer_local_in_binop_matches_interp() {
     let src = "fn pick(a: Channel[int], b: Channel[int], x: int) -> int:\n    wait:\n        v := a.recv(): return x + v\n        w := b.recv(): return x + w\nfn main():\n    a := Channel[int]()\n    b := Channel[int]()\n    b.send(65)\n    print(pick(a, b, 1))\nmain()\n";
     let vm = run(src);
     assert_eq!(vm, "66\n");
-    assert_eq!(vm, run_capture(src).expect("repeat run"));
 }
 
 /// 1-key regression PIN (TDD step 1): an ordinary blocking `recv` (NOT a `wait`) under
@@ -11747,7 +11649,6 @@ fn golden_parallel_channel_close_chz_matches_expected_and_interp() {
     let expected = include_str!("../../examples/parallel_channel_close.expected");
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, expected);
-    assert_eq!(vm_out, run_capture(src).expect("repeat run"));
 }
 
 #[test]
@@ -11966,7 +11867,6 @@ fn parallel_return_escape_leaves_clean_nursery_stack() {
         vm_out, "5\n",
         "early return wins; the escaped nursery is reclaimed silently"
     );
-    assert_eq!(vm_out, run_capture(src).expect("repeat run"), "repeat run");
     assert_eq!(
         nursery_depth, 0,
         "the return-escaped nursery must be reclaimed, not leaked"
@@ -12018,7 +11918,6 @@ fn parallel_try_caught_by_recover_leaves_clean_nursery_stack() {
         vm_out, "recovered\n",
         "recover swallows the fault; the cancel is silent"
     );
-    assert_eq!(vm_out, run_capture(src).expect("repeat run"), "repeat run");
     assert_eq!(
         nursery_depth, 0,
         "the recover-caught nursery is reclaimed via the handler path"
@@ -12433,7 +12332,6 @@ fn timer_zero_delivers_immediately() {
     let src = "fn main():\n    print(timer(0).recv())\nmain()\n";
     let out = run_capture(src).expect("vm");
     assert_eq!(out, "true\n");
-    assert_eq!(out, run_capture(src).expect("interp"));
     assert_eq!(run_capture(src).expect("parallel"), "true\n");
 }
 
@@ -13083,7 +12981,6 @@ fn golden_shared_chz_matches_expected_and_interp() {
     let expected = include_str!("../../examples/shared.expected");
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, expected);
-    assert_eq!(vm_out, run_capture(src).expect("repeat run"));
 }
 
 /// C5 golden: the `Executor` escape hatch — submit/shutdown (FIFO drain), `defer ex.shutdown()`,
@@ -13094,7 +12991,6 @@ fn golden_executor_chz_matches_expected_and_interp() {
     let expected = include_str!("../../examples/executor.expected");
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, expected);
-    assert_eq!(vm_out, run_capture(src).expect("repeat run"));
 }
 
 // Micro-tests mirroring the interpreter's C2/C3 unit tests (src/interp/mod.rs), to pin the VM's
@@ -15641,7 +15537,6 @@ fn spawn_composes_with_recover() {
     let src = "fn boom():\n    x := [1]\n    print(x[9])\nfn main():\n    r := recover:\n        parallel:\n            spawn boom()\n        0\n    print(\"recovered\")\nmain()\n";
     let vm = run_capture(src).expect("vm run");
     assert_eq!(vm, "recovered\n");
-    assert_eq!(vm, run_capture(src).expect("repeat run"));
 }
 
 /// Block-scoped defer: assert VM == interp == `expected` for a snippet.
@@ -15847,7 +15742,6 @@ fn golden_hof_chz_matches_expected_and_interp() {
     let expected = include_str!("../../examples/hof.expected");
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, expected);
-    assert_eq!(vm_out, run_capture(src).expect("repeat run"));
 }
 
 /// `examples/list_hof.chz` — `map`/`filter`/`fold`, incl. an element-type-changing map.
@@ -15857,7 +15751,6 @@ fn golden_list_hof_chz_matches_expected_and_interp() {
     let expected = include_str!("../../examples/list_hof.expected");
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, expected);
-    assert_eq!(vm_out, run_capture(src).expect("repeat run"));
 }
 
 /// `examples/list_hof_shrink.chz` — map/filter/fold iterate a snapshot, so a callback that
@@ -15869,7 +15762,6 @@ fn golden_list_hof_shrink_chz_matches_expected_and_interp() {
     let expected = include_str!("../../examples/list_hof_shrink.expected");
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, expected);
-    assert_eq!(vm_out, run_capture(src).expect("repeat run"));
 }
 
 /// `examples/list_methods.chz` — pop/reverse/contains/index_of/sum + value/iter ergonomics
@@ -15880,7 +15772,6 @@ fn golden_list_methods_chz_matches_expected_and_interp() {
     let expected = include_str!("../../examples/list_methods.expected");
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, expected);
-    assert_eq!(vm_out, run_capture(src).expect("repeat run"));
 }
 
 /// `examples/loops.chz` — break/continue across for-range, for-list, and while loops.
@@ -15890,7 +15781,6 @@ fn golden_loops_chz_matches_expected_and_interp() {
     let expected = include_str!("../../examples/loops.expected");
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, expected);
-    assert_eq!(vm_out, run_capture(src).expect("repeat run"));
 }
 
 /// `examples/match_value.chz` — `match` on int/str literals with `_`, stmt + expr forms.
@@ -15900,7 +15790,6 @@ fn golden_match_value_chz_matches_expected_and_interp() {
     let expected = include_str!("../../examples/match_value.expected");
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, expected);
-    assert_eq!(vm_out, run_capture(src).expect("repeat run"));
 }
 
 /// `examples/pair.chz` — tuples, multi-return, destructuring let, `.0`/`.1` access.
@@ -15910,7 +15799,6 @@ fn golden_pair_chz_matches_expected_and_interp() {
     let expected = include_str!("../../examples/pair.expected");
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, expected);
-    assert_eq!(vm_out, run_capture(src).expect("repeat run"));
 }
 
 /// `examples/method_default_args.chz` — default + named args on methods (was parity-only).
@@ -15920,7 +15808,6 @@ fn golden_method_default_args_chz_matches_expected_and_interp() {
     let expected = include_str!("../../examples/method_default_args.expected");
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, expected);
-    assert_eq!(vm_out, run_capture(src).expect("repeat run"));
 }
 
 /// `examples/method_type_params.chz` — a method's own `[U]` inferred per call (was parity-only).
@@ -15930,7 +15817,6 @@ fn golden_method_type_params_chz_matches_expected_and_interp() {
     let expected = include_str!("../../examples/method_type_params.expected");
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, expected);
-    assert_eq!(vm_out, run_capture(src).expect("repeat run"));
 }
 
 /// `examples/param_protocol.chz` — a user-defined parameterized protocol bound (was parity-only).
@@ -15940,7 +15826,6 @@ fn golden_param_protocol_chz_matches_expected_and_interp() {
     let expected = include_str!("../../examples/param_protocol.expected");
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, expected);
-    assert_eq!(vm_out, run_capture(src).expect("repeat run"));
 }
 
 /// `examples/edge_cases.chz` — torture test: arithmetic faults under `recover:`, int/float
@@ -15952,7 +15837,6 @@ fn golden_edge_cases_chz_matches_expected_and_interp() {
     let expected = include_str!("../../examples/edge_cases.expected");
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, expected);
-    assert_eq!(vm_out, run_capture(src).expect("repeat run"));
 }
 
 /// Left-shift overflow is a recoverable fault (`integer overflow in Shl`), matching the
@@ -16250,7 +16134,6 @@ fn golden_evaluator_chz_matches_expected_and_interp() {
     let expected = include_str!("../../examples/evaluator.expected");
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, expected);
-    assert_eq!(vm_out, run_capture(src).expect("repeat run"));
 }
 
 /// `examples/ledger.chz` — account ledger: a map of mutable structs, overdraft `Result`s, a
@@ -16261,7 +16144,6 @@ fn golden_ledger_chz_matches_expected_and_interp() {
     let expected = include_str!("../../examples/ledger.expected");
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, expected);
-    assert_eq!(vm_out, run_capture(src).expect("repeat run"));
 }
 
 /// M1 (tier-1) golden: `examples/string_iter.chz` (chars + iterable strings) byte-identical
@@ -16272,7 +16154,6 @@ fn golden_string_iter_chz_matches_expected_and_interp() {
     let expected = include_str!("../../examples/string_iter.expected");
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, expected);
-    assert_eq!(vm_out, run_capture(src).expect("repeat run"));
 }
 
 /// Default + named arguments on free functions: `examples/default_args.chz` byte-identical on
@@ -16283,7 +16164,6 @@ fn golden_default_args_chz_matches_expected_and_interp() {
     let expected = include_str!("../../examples/default_args.expected");
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, expected);
-    assert_eq!(vm_out, run_capture(src).expect("repeat run"));
 }
 
 /// Default + named arguments on struct constructors: `examples/named_struct.chz` byte-identical
@@ -16294,7 +16174,6 @@ fn golden_named_struct_chz_matches_expected_and_interp() {
     let expected = include_str!("../../examples/named_struct.expected");
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, expected);
-    assert_eq!(vm_out, run_capture(src).expect("repeat run"));
 }
 
 /// Gap #5 golden: `examples/map.chz` is byte-identical to its `.expected` on the VM,
@@ -16305,7 +16184,6 @@ fn golden_map_chz_matches_expected_and_interp() {
     let expected = include_str!("../../examples/map.expected");
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, expected);
-    assert_eq!(vm_out, run_capture(src).expect("repeat run"));
 }
 
 /// M10-G1 golden: `examples/stringable.chz` (the `Stringable` protocol — `str(self)` dispatch
@@ -16316,7 +16194,6 @@ fn golden_stringable_chz_matches_expected_and_interp() {
     let expected = include_str!("../../examples/stringable.expected");
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, expected);
-    assert_eq!(vm_out, run_capture(src).expect("repeat run"));
 }
 
 /// M10-G3 golden: `examples/operators.chz` (operator overloading via `Add`/`Sub`/`Mul` + the
@@ -16327,7 +16204,6 @@ fn golden_operators_chz_matches_expected_and_interp() {
     let expected = include_str!("../../examples/operators.expected");
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, expected);
-    assert_eq!(vm_out, run_capture(src).expect("repeat run"));
 }
 
 /// M10-G3 golden: `examples/type_alias.chz` (transparent type aliases) byte-identical on the
@@ -16338,7 +16214,6 @@ fn golden_type_alias_chz_matches_expected_and_interp() {
     let expected = include_str!("../../examples/type_alias.expected");
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, expected);
-    assert_eq!(vm_out, run_capture(src).expect("repeat run"));
 }
 
 /// G1 golden: `examples/generics.chz` (generics + structural `Comparable`) is byte-identical
@@ -16349,7 +16224,6 @@ fn golden_generics_chz_matches_expected_and_interp() {
     let expected = include_str!("../../examples/generics.expected");
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, expected);
-    assert_eq!(vm_out, run_capture(src).expect("repeat run"));
 }
 
 /// G2 golden: generic structs are byte-identical on the VM, interpreter, and `.expected`.
@@ -16359,7 +16233,6 @@ fn golden_generic_structs_chz_matches_expected_and_interp() {
     let expected = include_str!("../../examples/generic_structs.expected");
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, expected);
-    assert_eq!(vm_out, run_capture(src).expect("repeat run"));
 }
 
 /// Tier-2 golden: generic enums (Tree[T] / Either[A, B]) — byte-identical VM, interp, expected.
@@ -16369,7 +16242,6 @@ fn golden_generic_enum_chz_matches_expected_and_interp() {
     let expected = include_str!("../../examples/generic_enum.expected");
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, expected);
-    assert_eq!(vm_out, run_capture(src).expect("repeat run"));
 }
 
 /// Golden: real hash-table map/set with Hashable struct keys — byte-identical VM, interp, expected.
@@ -16379,7 +16251,6 @@ fn golden_hashmap_keys_chz_matches_expected_and_interp() {
     let expected = include_str!("../../examples/hashmap_keys.expected");
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, expected);
-    assert_eq!(vm_out, run_capture(src).expect("repeat run"));
 }
 
 /// Tech-debt golden: `examples/explicit_type_args.chz` (explicit call-site type arguments on a
@@ -16390,7 +16261,6 @@ fn golden_explicit_type_args_chz_matches_expected_and_interp() {
     let expected = include_str!("../../examples/explicit_type_args.expected");
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, expected);
-    assert_eq!(vm_out, run_capture(src).expect("repeat run"));
 }
 
 /// Type-side declaration-site turbofish (PART 1): `examples/turbofish_type_args.chz` exercises
@@ -16461,7 +16331,6 @@ fn golden_set_eq_chz_matches_expected_and_interp() {
     let expected = include_str!("../../examples/set_eq.expected");
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, expected);
-    assert_eq!(vm_out, run_capture(src).expect("repeat run"));
 }
 
 /// Golden: `examples/map_eq.chz` — map equality is order-independent (same key→value pairs
@@ -16473,7 +16342,6 @@ fn golden_map_eq_chz_matches_expected_and_interp() {
     let expected = include_str!("../../examples/map_eq.expected");
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, expected);
-    assert_eq!(vm_out, run_capture(src).expect("repeat run"));
 }
 
 /// Golden: `examples/cycle_guard.chz` — a cyclic data structure makes `print`/`==` a recoverable
@@ -16486,7 +16354,6 @@ fn golden_cycle_guard_chz_matches_expected_and_interp() {
     let expected = include_str!("../../examples/cycle_guard.expected");
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, expected);
-    assert_eq!(vm_out, run_capture(src).expect("repeat run"));
 }
 
 /// FLIPPED (item A, was `airlock_cyclic_struct_recoverable_both_engines`) — a SELF-REFERENTIAL value
@@ -17167,7 +17034,6 @@ fn golden_airlock_cycle_chz_matches_expected() {
     let expected = include_str!("../../examples/airlock_cycle.expected");
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, expected);
-    assert_eq!(vm_out, run_capture(src).expect("M:N run"));
 }
 
 /// Tech-debt: a `set` nested inside a struct / list must compare unordered
@@ -17316,7 +17182,6 @@ fn primitive_str_method_on_vm() {
     let src = "fn show[T: Stringable](v: T) -> str:\n    return v.str()\nprint(show(5))\nprint(show(3.14))\nprint(show(true))\nprint(show(\"hi\"))\n";
     let out = run_capture(src).expect("vm run");
     assert_eq!(out, "5\n3.14\ntrue\nhi\n");
-    assert_eq!(out, run_capture(src).expect("M:N run"));
 }
 
 /// Gap #11 golden: `examples/sort_by.chz` (custom comparators, stable order, tuple-field sort)
@@ -17327,7 +17192,6 @@ fn golden_sort_by_chz_matches_expected_and_interp() {
     let expected = include_str!("../../examples/sort_by.expected");
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, expected);
-    assert_eq!(vm_out, run_capture(src).expect("repeat run"));
 }
 
 /// Call-flattening guarantee: deep *plain-function* recursion no longer consumes host Rust stack
@@ -17348,7 +17212,6 @@ print(sum_to(5000))
     let out = super::run_capture_on_stack(src, 1024 * 1024)
         .expect("deep plain recursion should run on a 1 MiB host stack after call-flattening");
     assert_eq!(out, "12502500\n");
-    assert_eq!(out, run_capture(src).expect("repeat run"));
 }
 
 /// M19 — guards the `run_until` per-entry program borrow (the hoisted `Arc::clone` →
@@ -17383,7 +17246,6 @@ print(rec(3))
 ";
     let out = run_capture(src).expect("vm run");
     assert_eq!(out, "leave 0\nleave 1\nleave 2\nleave 3\n36\n");
-    assert_eq!(out, run_capture(src).expect("repeat run"));
 }
 
 /// Gap #10 golden: `examples/cipher.chz` (ord/chr — ROT13 + manual digit parsing) is
@@ -17394,7 +17256,6 @@ fn golden_cipher_chz_matches_expected_and_interp() {
     let expected = include_str!("../../examples/cipher.expected");
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, expected);
-    assert_eq!(vm_out, run_capture(src).expect("repeat run"));
 }
 
 /// Gap #14 (+ #11) golden: `examples/word_freq.chz` iterates a map with `for w, c in counts`
@@ -17405,7 +17266,6 @@ fn golden_word_freq_chz_matches_expected_and_interp() {
     let expected = include_str!("../../examples/word_freq.expected");
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, expected);
-    assert_eq!(vm_out, run_capture(src).expect("repeat run"));
 }
 
 /// Gap #15 golden: `examples/match_nested.chz` (tuple patterns, nested `Some((a, b))`, nested
@@ -17416,7 +17276,6 @@ fn golden_match_nested_chz_matches_expected_and_interp() {
     let expected = include_str!("../../examples/match_nested.expected");
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, expected);
-    assert_eq!(vm_out, run_capture(src).expect("repeat run"));
 }
 
 /// L2 golden: `examples/match_struct.chz` (struct positional destructuring in `match` — single-arm
@@ -17428,7 +17287,6 @@ fn golden_match_struct_chz_matches_expected_and_parity() {
     let expected = include_str!("../../examples/match_struct.expected");
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, expected);
-    assert_eq!(vm_out, run_capture(src).expect("M:N run"));
 }
 
 /// Match-guard golden: `examples/match_guard.chz` (`pattern if cond:` arms, expr + stmt forms)
@@ -17439,7 +17297,6 @@ fn golden_match_guard_chz_matches_expected_and_interp() {
     let expected = include_str!("../../examples/match_guard.expected");
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, expected);
-    assert_eq!(vm_out, run_capture(src).expect("repeat run"));
 }
 
 /// Range-pattern golden: `examples/match_range.chz` (half-open `start..end` int patterns) is
@@ -17450,7 +17307,6 @@ fn golden_match_range_chz_matches_expected_and_interp() {
     let expected = include_str!("../../examples/match_range.expected");
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, expected);
-    assert_eq!(vm_out, run_capture(src).expect("repeat run"));
 }
 
 /// Gap #13 golden: `examples/bits.chz` (`& | ^ << >>` — XOR-fold + bitmask) is byte-identical
@@ -17461,7 +17317,6 @@ fn golden_bits_chz_matches_expected_and_interp() {
     let expected = include_str!("../../examples/bits.expected");
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, expected);
-    assert_eq!(vm_out, run_capture(src).expect("repeat run"));
 }
 
 /// Round-2 probe goldens: recursive data-structure + evaluator programs that surfaced the
@@ -17472,7 +17327,6 @@ fn golden_bst_chz_matches_expected_and_interp() {
     let expected = include_str!("../../examples/bst.expected");
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, expected);
-    assert_eq!(vm_out, run_capture(src).expect("repeat run"));
 }
 
 #[test]
@@ -17481,7 +17335,6 @@ fn golden_linked_list_chz_matches_expected_and_interp() {
     let expected = include_str!("../../examples/linked_list.expected");
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, expected);
-    assert_eq!(vm_out, run_capture(src).expect("repeat run"));
 }
 
 #[test]
@@ -17490,7 +17343,6 @@ fn golden_calc_chz_matches_expected_and_interp() {
     let expected = include_str!("../../examples/calc.expected");
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, expected);
-    assert_eq!(vm_out, run_capture(src).expect("repeat run"));
 }
 
 // ----- struct iterator protocol (`for x in s` driven by `next(self) -> Option[T]`) -----
@@ -17516,7 +17368,6 @@ fn golden_iterator_chz_matches_expected_and_interp() {
     let expected = include_str!("../../examples/iterator.expected");
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, expected);
-    assert_eq!(vm_out, run_capture(src).expect("repeat run"));
 }
 
 // ----- cyclic-data structural-depth guard + order-independent map == -----

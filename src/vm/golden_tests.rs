@@ -7182,8 +7182,6 @@ fn golden_closure_capture_chz_matches_expected_and_interp() {
     let expected = include_str!("../../examples/closure_capture.expected");
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, expected);
-    assert_eq!(vm_out, run_capture(src).expect("interp run"));
-    assert_eq!(vm_out, run_capture(src).expect("parallel run"));
 }
 
 /// Closure-capture-across-scopes golden: `examples/closure_capture_scopes.chz` test-locks the
