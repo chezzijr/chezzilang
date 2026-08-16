@@ -528,7 +528,15 @@ fn cmd_test(args: &[String]) -> ExitCode {
     // Byte-exact (W6-9r item 4): `report.bytes`, not `report.text`, so a test's `--show-output`
     // capture reaches fd 1 unchanged — matching `chezzi run` (W6-9) and `go test`. No explicit flush:
     // the report always ends in `\n`, so the `LineWriter` flushes, same as `print!` did.
-    let _ = std::io::Write::write_all(&mut std::io::stdout(), &report.bytes);
+    // A write that failed for anything but a closed reader (`> /dev/full`, a closed fd): the report
+    // is genuinely truncated, so the run must not report success. A closed READER (`| head -1`) is a
+    // clean end — the test verdict's own exit code stands.
+    if let Err(e) = std::io::Write::write_all(&mut std::io::stdout(), &report.bytes)
+        && e.kind() != std::io::ErrorKind::BrokenPipe
+    {
+        eprintln!("chezzi test: cannot write stdout: {e}");
+        return ExitCode::FAILURE;
+    }
     if report.passed {
         ExitCode::SUCCESS
     } else {

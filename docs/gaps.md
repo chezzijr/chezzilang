@@ -3692,8 +3692,8 @@ wall-clock cap SHIPPED (2026-07-24, §3b #4):** the sibling of `--max-heap` — 
 `RuntimeError` marker machinery, but the trip is observed at the **loop back-edge** (`jump_checked`) — the
 hottest engine-independent checkpoint — so it catches BOTH the top-level test body (which runs outside the
 fiber scheduler) and `spawn`ed-task loops. **Zero clock reads when off** (the `deadline: Option` guard
-short-circuits before any `Instant::now()`; the read is throttled 1/1024 back-edges when on). **M:N-engine-
-only** (`--timeout` errors with `--serial`): a wall-clock trip is non-deterministic → no serial==M:N parity.
+short-circuits before any `Instant::now()`; the read is throttled 1/1024 back-edges when on). A wall-clock
+trip is non-deterministic, which is why the timeout-off output is what the byte-identity gate compares.
 **v1 limit (watchdog follow-up):** a test blocked in a native call (blocking syscall, `Channel.recv` with
 no traffic) or spinning in loop-free infinite recursion (hits the stack guard) is NOT caught — a true
 watchdog thread is the next seam. **Selection + output ergonomics SHIPPED (2026-07-24, §3b #5/#6/#7):**

@@ -1033,7 +1033,8 @@ fn buffered_stdout_write_bytes_is_byte_exact_mn() {
 
 /// `test --show-output` on a failing test that writes non-UTF-8 bytes to stdout must put the raw
 /// bytes on fd 1, indented under the failing test's report line, with no lossy replacement chars.
-fn test_show_output_is_byte_exact() {
+#[test]
+fn show_output_is_byte_exact() {
     let t = TmpDir::new();
     let entry = t.write(
         "boom_test.chz",
@@ -1057,7 +1058,69 @@ fn test_show_output_is_byte_exact() {
     );
 }
 
+/// M2 — a closed reader (`chezzi test --show-output | head -1`) is a clean end, not a truncation: the
+/// single end-of-run `report.bytes` write hits the already-closed pipe (deterministic here since we
+/// drop our read end before the child ever writes, same technique as `broken_pipe_terminates_with_fault`
+/// above), and a PASSING run must still report success — not fail, not panic — matching the distinction
+/// `chezzi run` already makes at its own stdout write site (`src/main.rs`, the `stream_error` check).
 #[test]
-fn test_show_output_is_byte_exact_mn() {
-    test_show_output_is_byte_exact();
+fn show_output_survives_closed_reader() {
+    let t = TmpDir::new();
+    let entry = t.write("ok_test.chz", "test fn t():\n    assert true\n");
+    let mut child = Command::new(env!("CARGO_BIN_EXE_chezzi"))
+        .args(["test", "--show-output"])
+        .arg(&entry)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn chezzi test --show-output");
+    drop(child.stdout.take()); // the reader is gone, as under `| head -1`
+    let out = child
+        .wait_with_output()
+        .expect("wait on chezzi test --show-output");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(!err.contains("panicked at"), "panicked: {err}");
+    assert!(
+        out.status.success(),
+        "a closed reader on a PASSING run must not report failure: {:?} (stderr: {err})",
+        out.status
+    );
+}
+
+/// M2, the regression itself: a write failure that is NOT a closed reader must NOT be silently
+/// swallowed into a SUCCESS exit — the report is genuinely truncated. Same technique and guard as
+/// `write_error_is_reported` above (`chezzi run`'s equivalent contract): `/dev/full` (ENOSPC) is
+/// world-writable, no root needed, so this is skipped only where the device node itself is absent.
+/// (A stdout fd opened READ-ONLY was tried first to dodge `/dev/full` per the original brief, but
+/// measured false-green on this toolchain: `std::io::Stdout::write_all` returns `Ok(())` on an EBADF
+/// fd — verified with a raw `write(2)` syscall probe showing the byte never lands while `write_all`
+/// still reports success — so that path can't distinguish pre/post-fix and was dropped.)
+/// Before the fix (`let _ = write_all(...)`) this exits 0 despite the write failing; after the fix it
+/// must exit non-zero.
+#[test]
+fn show_output_reports_failure_on_unwritable_stdout() {
+    let full = std::path::Path::new("/dev/full");
+    if !full.exists() {
+        return; // not Linux — nothing to assert against
+    }
+    let t = TmpDir::new();
+    let entry = t.write("ok_test.chz", "test fn t():\n    assert true\n");
+    let out = Command::new(env!("CARGO_BIN_EXE_chezzi"))
+        .args(["test", "--show-output"])
+        .arg(&entry)
+        .stdout(std::fs::File::create(full).unwrap())
+        .stderr(Stdio::piped())
+        .output()
+        .expect("run chezzi test --show-output");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(!err.contains("panicked at"), "panicked: {err}");
+    assert!(
+        !out.status.success(),
+        "an unwritable stdout reported SUCCESS: {:?} (stderr: {err})",
+        out.status
+    );
+    assert!(
+        err.contains("cannot write stdout"),
+        "no diagnostic for the failed write: {err}"
+    );
 }

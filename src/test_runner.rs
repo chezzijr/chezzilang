@@ -5,8 +5,8 @@
 //! `recover:` only hands back the fault *message*, not its `span`, so only Rust catching the
 //! `RuntimeError` directly gets the `.span` (hence `file:line`) the headline feature needs.
 //!
-//! Only the `assert` primitive is dual-engine (parity discipline); this orchestration is VM-only —
-//! its output is Rust-formatted `PASS/FAIL`, not Chezzi program stdout, so no golden parity applies.
+//! This orchestration's output is Rust-formatted `PASS/FAIL`, not Chezzi program stdout, so no golden
+//! parity applies.
 
 use crate::vm::Vm;
 use crate::vm::op::Program;
@@ -17,7 +17,10 @@ use std::time::{Duration, Instant};
 /// The outcome of a `chezzi test` run: the rendered report and whether everything passed.
 pub struct TestReport {
     /// The lossy render — what every string-matching consumer reads. Byte-identical to the
-    /// pre-change report for any UTF-8 capture.
+    /// pre-change report for any UTF-8 capture, EXCEPT a captured `"\r\n"`: the render loop moved
+    /// from `str::lines()` (which strips a trailing `\r`) to `split_inclusive(|&b| b == b'\n')`, so
+    /// `"a\r\n"` now renders `    a\r\n` where it used to render `    a\n` — the `\r` is the
+    /// program's real byte.
     pub text: String,
     // ponytail: a second copy of `bytes`; make it a `Cow` accessor if a report ever gets large.
     /// The byte-exact report the CLI writes to fd 1 (`--show-output` can carry non-UTF-8).
@@ -26,7 +29,7 @@ pub struct TestReport {
 }
 
 /// Report verbosity for the CLI ergonomics wave. `Normal` is the DEFAULT and its output is
-/// byte-identical to the pre-wave runner (the load-bearing invariant the dual-engine gate compares).
+/// byte-identical to the pre-wave runner (the load-bearing invariant the golden-output gate compares).
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
 pub enum Verbosity {
     /// One `PASS/FAIL/ERROR name (file[:line])` line per test, then the summary (today's output).
@@ -86,7 +89,7 @@ enum Verdict {
     },
     /// `chezzi test --timeout` — the test ran longer than the wall-clock cap and was hard-aborted at a
     /// loop back-edge. No meaningful source line (the abort fires at a checkpoint, not a statement).
-    /// M:N-engine-only; counts as failure.
+    /// Counts as failure.
     TimedOut {
         msg: String,
     },
@@ -535,14 +538,12 @@ fn render_json(
     s
 }
 
-/// Compile + run one `*_test.chz` file on the selected engine (`parallel`: `false` = cooperative
-/// serial VM, `true` = M:N OS-thread VM), returning a per-test outcome list (or a compile-error
-/// message for the whole file). Compilation is engine-independent and stays on the caller's thread;
-/// BOTH engine runs then dispatch on a [`crate::vm::on_vm_stack`] thread — the M:N scheduler needs
-/// the large VM stack, and the SERIAL VM needs it too for deep structural recursion (a cyclic-key
-/// `==` walks to `MAX_STRUCTURAL_DEPTH` = 10000 before faulting recoverably, which overflows the
-/// 8 MB main thread but not the 384 MB VM stack). This matches `chezzi run` (both engines run on
-/// [`crate::vm::run_file_with_entry`]'s VM-stack thread), so a `test` verdict mirrors a `run`.
+/// Compile + run one `*_test.chz` file, returning a per-test outcome list (or a compile-error
+/// message for the whole file). Compilation stays on the caller's thread; the run then dispatches on
+/// a [`crate::vm::on_vm_stack`] thread — a cyclic-key `==` walks to `MAX_STRUCTURAL_DEPTH` = 10000
+/// before faulting recoverably, which overflows the 8 MB main thread but not the 384 MB VM stack.
+/// This matches `chezzi run` (which also runs on [`crate::vm::run_file_with_entry`]'s VM-stack
+/// thread), so a `test` verdict mirrors a `run`.
 /// Returns `(per-test outcomes, count filtered out by `--filter`)` or a whole-file compile-error msg.
 fn run_file(file: &Path, opts: &RunOpts) -> Result<(Vec<Outcome>, usize), String> {
     let graph = crate::resolver::build_graph(file).map_err(|e| e.to_string())?;
@@ -1160,8 +1161,8 @@ struct Suite:
 
     #[test]
     fn over_memory_bucket_for_runaway_alloc() {
-        // A test that grows an unbounded list under a LOW cap must land in the OverMemory bucket on
-        // BOTH engines (serial == M:N) — the trip is deterministic-in-VM, not OS RSS.
+        // A test that grows an unbounded list under a LOW cap must land in the OverMemory bucket —
+        // the trip is deterministic-in-VM, not OS RSS.
         let d = TmpDir::new();
         // Push a fresh heap list each iteration: the cap is checked only at GC boundaries, and GC
         // fires on `Obj`-count growth — a loop pushing inline ints (no `Obj` alloc) would never
@@ -2977,10 +2978,9 @@ struct Suite:
 
     #[test]
     fn over_memory_buckets_across_spawn_on_both_engines() {
-        // A runaway alloc inside a `spawn`ed task must bucket OverMemory on BOTH engines. On M:N the
-        // task runs on a worker VM with its own heap, so the cap must be threaded onto the worker and
-        // the over-memory marker must cross the worker→parent fault boundary — else serial buckets
-        // OverMemory while M:N passes (a parity divergence).
+        // A runaway alloc inside a `spawn`ed task must bucket OverMemory. The task runs on a worker
+        // VM with its own heap, so the cap must be threaded onto the worker and the over-memory
+        // marker must cross the worker→parent fault boundary.
         let d = TmpDir::new();
         let f = d.write(
             "spawnmem_test.chz",
@@ -3005,7 +3005,7 @@ struct Suite:
     #[test]
     fn over_memory_concurrent_under_cap_passes_on_both_engines() {
         // The cap's guaranteed envelope on the low side: a CONCURRENT test whose tasks each stay well
-        // under a generous cap must PASS on both engines — no false trip. (The near-boundary aggregate
+        // under a generous cap must PASS — no false trip. (The near-boundary aggregate
         // case, where per-fiber allocation sums over the cap, is the documented per-heap divergence and
         // is deliberately NOT asserted here — see `docs/future.md §3b`.)
         let d = TmpDir::new();

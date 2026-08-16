@@ -718,10 +718,10 @@ impl Vm {
     /// `chezzi test --max-heap=<N>` — set the per-test live-heap cap in bytes (`0` = OFF, the
     /// default). A test whose live heap exceeds `N` is hard-aborted (bypassing `recover:`) and
     /// bucketed `OverMemory`. Deterministic-in-VM (not OS RSS). The trip point is a per-heap
-    /// high-water check, so a real runaway (unbounded growth) aborts on whichever heap runs it — the
-    /// same verdict on both engines. A CONCURRENT test near the boundary can differ (serial shares one
-    /// heap across parent + tasks; M:N isolates each worker heap) — a documented per-heap limit, see
-    /// `docs/future.md §3b`.
+    /// high-water check, so a real runaway (unbounded growth) aborts on whichever heap runs it. A
+    /// CONCURRENT test near the boundary can still slip through — each M:N worker isolates its own
+    /// heap, so per-fiber allocations that only sum over the cap may not trip — a documented per-heap
+    /// limit, see `docs/future.md §3b`.
     pub fn set_max_heap(&mut self, cap: usize) {
         self.heap.set_mem_cap(cap);
     }
@@ -1145,8 +1145,8 @@ impl Vm {
             // The cancel still unwinds like an uncaught fault that bypasses `recover:` — see the
             // post-step funnel below (`self.cancelled` ⇒ `unwind_deferred(base_level, false)`).
             //
-            // D3: reduction-counting preemption (M:N engine only — the cooperative engine is the
-            // frozen parity oracle and never preempts). Decrement the budget per dispatched op; at
+            // D3: reduction-counting preemption (M:N-worker fibers only — a cooperative fiber, sharing
+            // the host heap, is never preempted). Decrement the budget per dispatched op; at
             // exhaustion yield this worker so a queued sibling runs (round-robin fairness). A yielded
             // cancelled fiber observes the cancel at its next checkpoint. The
             // `native_reentry == 0` guard mirrors `recv`-park: a yield inside a native callback can't
@@ -1672,9 +1672,9 @@ impl Vm {
         // §2c1 — EVERY nursery on the M:N engine activates an EAGER sched NOW, so a `spawn`
         // in the body injects a LIVE fiber that runs concurrently with the rest of the body.
         // That is Go's `go f()`: the task starts at the `spawn`, and the join keeps its own
-        // (orthogonal) job of guaranteeing COMPLETION by the barrier. The cooperative engine
-        // stays lazy (queue-at-join → `None`) — it has one thread, so Go's semantics are
-        // unreachable on it by construction (`docs/future.md` §2b/§2c1).
+        // (orthogonal) job of guaranteeing COMPLETION by the barrier. A cooperative nursery (no
+        // worker shell, sharing the host heap) stays lazy (queue-at-join → `None`) — it has one
+        // thread, so Go's semantics are unreachable on it by construction (`docs/future.md` §2b/§2c1).
         //
         // `mn.is_some()` WAS the defect and is gone: a top-level nursery has no worker shell,
         // so it was lazy by construction and its tasks could not start until the join. A
@@ -2142,7 +2142,7 @@ impl Vm {
             //
             // `.get()` rather than `[]`: `module_objs` grows as modules RUN (and a worker's copy holds
             // only the modules that had run when it was snapshotted), so a not-yet-initialized definer
-            // must be a clean `RuntimeError` on both engines, never an index panic on a pool thread.
+            // must be a clean `RuntimeError`, never an index panic on a pool thread.
             // The module's globals themselves fault in lazily — the provider's own `GetGlobalSlot`
             // calls `ensure_module_faulted` — so nothing is forced here.
             // Callee-side default fill: the argument WAS supplied, so skip the compiled default.
