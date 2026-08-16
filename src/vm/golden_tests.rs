@@ -28,8 +28,8 @@ fn vm_outcome(src: &str) -> Result<String, String> {
 /// Native-prelude phase 2b — the GENERIC / reserved-type container CTORS (range/List/Map/Set) are
 /// now sourced from the synthetic PRELUDE table (`Intrinsic::Ctor`) for their `CallBuiltin`
 /// DISPATCH, exactly as 2a did for the scalar ctors. Their generic type-identity resolution is
-/// untouched, so every construction + generic-inference path must stay byte-identical on BOTH
-/// engines (VM == interp): range overloads, empty/turbofished containers, dedup, iteration.
+/// untouched, so every construction + generic-inference path must stay byte-identical
+/// against a literal golden: range overloads, empty/turbofished containers, dedup, iteration.
 #[test]
 fn container_ctor_parity() {
     let src = r#"
@@ -62,7 +62,7 @@ main()
     assert_golden_out(src, "5\n1\n3\n5\n7\n9\n2\n10\na\n0\n1\n0\n3\n0\n");
 }
 
-/// M19 SSO — string ops must stay byte-identical across both engines for strings that straddle
+/// M19 SSO — string ops must stay byte-identical for strings that straddle
 /// the `ChzStr` inline/heap boundary (`INLINE_CAP` = 22 bytes), including multi-byte UTF-8.
 /// Exercises concat, split/join, indexing, iteration, `==`, `.chars()`, and string map keys.
 #[test]
@@ -171,7 +171,7 @@ impl Drop for TmpDir {
 /// behavior this guards-against now), which violated the reserved-name discipline (a scalar param
 /// is dead/unreferenceable; a container/enum-builtin param silently shadows the builtin). The
 /// reject happens in `check_graph` (the gate the bare `run_capture` helpers skip), so the program
-/// never reaches any engine — three-engine parity is by construction (no run needed). Asserted via
+/// never reaches the engine at all — there is nothing to run. Asserted via
 /// the full `build_graph` + `check_graph` CLI path.
 #[test]
 fn type_param_named_like_reserved_rejected_at_check() {
@@ -243,7 +243,7 @@ fn golden_entry_fault(src: &str) -> String {
 // ----- Task 2 (option a): user protocol existentials cross the airlock -----
 
 /// A concrete struct widened to a user protocol existential rides a `Channel[Proto]` to a spawned
-/// task, which calls a protocol method and prints — byte-identical serial == M:N. (Was checker-
+/// task, which calls a protocol method and prints — byte-identical. (Was checker-
 /// rejected pre-change: `Channel[Drawable]` "must be sendable".)
 #[test]
 fn protocol_value_crosses_channel_three_engine() {
@@ -253,7 +253,7 @@ fn protocol_value_crosses_channel_three_engine() {
 
 /// An FFI fn (`Cffi`) crosses the wire-value airlock BY VALUE (its shared `Arc<Cffi>`, the same the
 /// snapshot path already ships across M:N workers) — a spawn fn-ARG. `cos` reaches the task and
-/// computes `cos(0.0) == 1.0`, byte-identical serial == M:N. (Was runtime-rejected pre-fix: an extern
+/// computes `cos(0.0) == 1.0`, byte-identical. (Was runtime-rejected pre-fix: an extern
 /// fn's type is `fn(float)->float` (`Ty::Func`, checker-sendable), so the runtime airlock was the sole
 /// — and wrong — gate; a Cffi is pure code, not a heap-local handle, so it now crosses.)
 #[test]
@@ -265,7 +265,7 @@ fn ffi_handle_crosses_airlock_three_engine() {
 }
 
 /// An FFI fn sent over a `Channel` crosses by value and is callable after `recv` — `sqrt(9.0) == 3.0`,
-/// byte-identical on both engines (previously rejected at the `channel_method` "send" value-store).
+/// byte-identical (previously rejected at the `channel_method` "send" value-store).
 #[test]
 fn ffi_handle_crosses_channel_send() {
     assert_golden_out(
@@ -275,7 +275,7 @@ fn ffi_handle_crosses_channel_send() {
 }
 
 /// An FFI fn stored in a `Shared` box at CONSTRUCTION crosses by value and is callable after `get` —
-/// `sqrt(16.0) == 4.0` on both engines (previously rejected at the ctor value-store).
+/// `sqrt(16.0) == 4.0` (previously rejected at the ctor value-store).
 #[test]
 fn ffi_handle_crosses_shared_ctor() {
     assert_golden_out(
@@ -285,7 +285,7 @@ fn ffi_handle_crosses_shared_ctor() {
 }
 
 /// An FFI fn stored via `Shared.set` — the STORE path distinct from the ctor — crosses by value and
-/// is callable after `get` — `sqrt(25.0) == 5.0` on both engines (previously rejected at the store).
+/// is callable after `get` — `sqrt(25.0) == 5.0` (previously rejected at the store).
 #[test]
 fn ffi_handle_crosses_shared_set() {
     assert_golden_out(
@@ -294,7 +294,7 @@ fn ffi_handle_crosses_shared_set() {
     );
 }
 
-/// The FFI-over-`Channel` send now SUCCEEDS (Ok), byte-identical on both engines: `recover:` sees an
+/// The FFI-over-`Channel` send now SUCCEEDS (Ok), byte-identical: `recover:` sees an
 /// `Ok` → prints `false`. (Was `true` when the send rejected; the flip proves the airlock accepts it.)
 #[test]
 fn ffi_handle_send_succeeds() {
@@ -315,7 +315,7 @@ fn positive_shared_handle_crosses_channel() {
 }
 
 /// MUST-PRESERVE: a nested `Shared[Shared[int]]` still constructs (the inner handle stores into the
-/// outer box) on both engines — the guard must not over-reject a shared-core store.
+/// outer box) — the guard must not over-reject a shared-core store.
 #[test]
 fn positive_nested_shared_constructs() {
     assert_golden_out(
@@ -326,11 +326,11 @@ fn positive_nested_shared_constructs() {
 
 // ----- named-factory-import member resolution: RUNTIME unaffected (gap #4) -----
 // These runs bypass the checker (compile+run directly), so they pass pre- AND post-fix — they lock
-// that the checker-only member-resolution fix leaves the runtime output byte-identical on both
-// engines. The checker gate itself is covered by the `checker::tests::checker_named_*` battery.
+// that the checker-only member-resolution fix leaves the runtime output byte-identical.
+// The checker gate itself is covered by the `checker::tests::checker_named_*` battery.
 
 /// A named import of a factory FUNCTION (not its return type) still constructs and dispatches the
-/// returned struct's method at runtime → `11`, byte-identical on both engines.
+/// returned struct's method at runtime → `11`, byte-identical.
 #[test]
 fn named_fn_import_factory_struct_method_runtime() {
     let out = golden_file_entry(
@@ -349,7 +349,7 @@ fn named_fn_import_factory_struct_method_runtime() {
     assert_eq!(out, "11\n");
 }
 
-/// Stdlib: `import manual from std.cancel; manual().cancelled()` runs on both engines (documented
+/// Stdlib: `import manual from std.cancel; manual().cancelled()` runs (documented
 /// Token API reachable off a named-imported factory result).
 #[test]
 fn named_fn_import_stdlib_cancel_runtime() {
@@ -360,8 +360,8 @@ fn named_fn_import_stdlib_cancel_runtime() {
 /// Stdlib (gaps.md cancel-derive fix): a derived token's `done()` must not fire before its
 /// `cancelled()`/`reason()` flip — the Go-context invariant "once done() unblocks, the token is
 /// cancelled". `derive()` truncated the child timer's remaining-ms toward zero, arming it up to ~1ms
-/// early; the `+ 1` ms margin keeps done() at-or-after the absolute deadline. Deterministic on both
-/// engines (the margin makes it load-independent): a task woken by `done()` reads `cancelled()==true`.
+/// early; the `+ 1` ms margin keeps done() at-or-after the absolute deadline. Deterministic
+/// (the margin makes it load-independent): a task woken by `done()` reads `cancelled()==true`.
 #[test]
 fn derived_cancel_token_done_implies_cancelled_runtime() {
     let out = golden_entry(
@@ -370,7 +370,7 @@ fn derived_cancel_token_done_implies_cancelled_runtime() {
     assert_eq!(out, "true Some('timeout')\n");
 }
 
-/// Stdlib: `import min_heap from std.collections; min_heap().push(3)` runs on both engines.
+/// Stdlib: `import min_heap from std.collections; min_heap().push(3)` runs.
 #[test]
 fn named_fn_import_stdlib_collections_runtime() {
     let out = golden_entry(
@@ -380,7 +380,7 @@ fn named_fn_import_stdlib_collections_runtime() {
 }
 
 /// gap #4 (satisfies path): a named-fn-imported factory result passed through a protocol-bounded
-/// generic constructs and dispatches on both engines → `W10`. The checker gate is covered in
+/// generic constructs and dispatches → `W10`. The checker gate is covered in
 /// `checker::tests::named_fn_import_satisfies_protocol_*`; this locks the RUNTIME output byte-identical.
 #[test]
 fn named_fn_import_protocol_bound_runtime() {
@@ -403,7 +403,7 @@ fn named_fn_import_protocol_bound_runtime() {
 // ----- module-scoped user types: cross-module construction parity -----
 
 /// `import geo; geo.Point(1,2)` constructs and prints `Point(x=1, y=2)` (BARE name, no `::`),
-/// byte-identical on both engines.
+/// byte-identical against a literal golden.
 #[test]
 fn qualified_struct_ctor_parity() {
     let out = golden_file_entry(
@@ -433,9 +433,9 @@ fn from_import_struct_ctor_parity() {
 }
 
 /// Task 3/5: the module-owned synthetic structs (`Match`/`Response`/`ProcResult`) are now
-/// USER-CONSTRUCTIBLE once their module is imported — the VM and the frozen interp must build +
-/// field-read them BYTE-IDENTICALLY (the layout seeded in `Compiler::new` ↔ the interp's native
-/// seed must agree). Qualified ctor + bare ctor on whole-module import.
+/// USER-CONSTRUCTIBLE once their module is imported — the VM must build + field-read them
+/// correctly (the layout seeded in `Compiler::new`). Qualified ctor + bare ctor on whole-module
+/// import.
 #[test]
 fn synthetic_struct_qualified_ctor_parity() {
     let out = golden_entry(
@@ -454,8 +454,9 @@ fn synthetic_struct_bare_ctor_on_import_parity() {
 
 /// `Match.start`/`.end` are CODEPOINT offsets, so slicing the subject by them reproduces `.text` on
 /// non-ASCII input too (Chezzi slicing is codepoint-indexed; the regex crate's byte spans are
-/// converted at the native seam). Both engines must agree — they were consistently WRONG together
-/// before ("lo"), which is why parity alone never caught this.
+/// converted at the native seam). Byte-identical against a literal expectation — the since-removed
+/// cooperative and M:N engines were consistently WRONG together before ("lo"), which is why the old
+/// parity oracle alone never caught this.
 #[test]
 fn regex_offsets_are_codepoint_slicable_parity() {
     let src = "import std.regex\n\
@@ -483,12 +484,12 @@ fn regex_offsets_are_codepoint_slicable_parity() {
 /// Phase 4b — the whole regex SIGNATURE (the `native struct Match` + the 5 `native fn`s) now comes
 /// from the file-backed `std/regex.chz` (harvested into std.regex's ModuleSig via
 /// `harvest_native_module`), replacing BOTH the phase-4a companion stub and the hand-built
-/// `native_module_sig` arm. This must be a ZERO observable behavior change on ALL THREE engines:
-/// producing a `Match` (regex.find), reading every field, `from std.regex import Match`, and
-/// qualified `regex.Match(...)` are byte-identical on interp, the cooperative VM, AND the M:N
-/// OS-thread engine. This is the regression net proving the native-seam pure-type `bind_import` skip
-/// still holds in both engines (`from std.regex import Match` must NOT bind a runtime value / fault).
-/// The origin=Builtin force in `harvest_native_module` is what keeps that skip correct.
+/// `native_module_sig` arm. This must be a ZERO observable behavior change: producing a `Match`
+/// (regex.find), reading every field, `from std.regex import Match`, and qualified
+/// `regex.Match(...)` stay byte-identical. This is the regression net proving the native-seam
+/// pure-type `bind_import` skip still holds (`from std.regex import Match` must NOT bind a runtime
+/// value / fault). The origin=Builtin force in `harvest_native_module` is what keeps that skip
+/// correct.
 #[test]
 fn regex_match_file_backed_three_engine_parity() {
     let src = "import std.regex\n\
@@ -503,17 +504,17 @@ fn regex_match_file_backed_three_engine_parity() {
                    \x20           Some(m): print(describe(m))\n\
                    \x20           None: print(\"none\")\n\
                    \x20   Err(e): print(e)\n";
-    // VM(serial) + interp byte-identical (the standard two-engine parity gate).
+    // Single-file path via `golden_entry`.
     let out = golden_entry(src);
     assert_eq!(out, "lit@9-12:g\n12@1-3:\n");
-    // …and the M:N OS-thread engine agrees (needs the graph path — write a file, drive run_file_*).
+    // …and the multi-file graph path agrees too (needs the graph path — write a file, drive run_file_*).
     let t = TmpDir::new();
     let path = t.write("main.chz", src);
     let (mn_out, _e, mn_res, _) = run_file_with(&path, crate::native::HostConfig::default());
     mn_res.expect("regex Match stub program should run on the M:N engine");
     assert_eq!(
         mn_out, out,
-        "M:N output diverged from VM/interp on regex Match stub"
+        "graph-path output diverged from single-file path on regex Match stub"
     );
 }
 
@@ -538,9 +539,9 @@ fn synthetic_procresult_qualified_ctor_parity() {
 /// their whole signature (fields-only `native struct` ProcResult/Response + the `native fn`s, incl.
 /// request's OPTIONAL trailing `timeout_ms`) harvested via `harvest_native_module`, retiring both the
 /// `native_module_sig` fn arms AND the `export_struct` arms. This must be a ZERO observable behavior
-/// change on ALL THREE engines: constructing ProcResult/Response, reading every field, `from std.X
-/// import Type`, qualified `X.Type(...)`, and request.get with AND without the optional `timeout_ms`
-/// are byte-identical on interp, the cooperative VM, AND the M:N OS-thread engine. (Only ctors +
+/// change: constructing ProcResult/Response, reading every field, `from std.X import Type`,
+/// qualified `X.Type(...)`, and request.get with AND without the optional `timeout_ms` stay
+/// byte-identical. (Only ctors +
 /// field reads are exercised at runtime — request.get would need a live server — but the optional
 /// `timeout_ms` arg still TYPECHECKS both ways here, proving the harvested optional-tail sig.)
 #[test]
@@ -557,22 +558,22 @@ fn process_request_file_backed_three_engine_parity() {
                    rp: Response = request.Response(200, \"body\", {\"k\": \"v\"})\n\
                    print(describe_proc(pr))\n\
                    print(describe_resp(rp))\n";
-    // VM(serial) + interp byte-identical.
+    // Single-file path via `golden_entry`.
     let out = golden_entry(src);
     assert_eq!(out, "out|err|7\n200|body|v\n");
-    // …and the M:N OS-thread engine agrees.
+    // …and the multi-file graph path agrees too.
     let t = TmpDir::new();
     let path = t.write("main.chz", src);
     let (mn_out, _e, mn_res, _) = run_file_with(&path, crate::native::HostConfig::default());
     mn_res.expect("process/request ctor program should run on the M:N engine");
     assert_eq!(
         mn_out, out,
-        "M:N output diverged from VM/interp on process/request ctors"
+        "graph-path output diverged from single-file path on process/request ctors"
     );
 }
 
 /// Phase 4f — the pure TYPE `import ProcResult from std.process` (no runtime module-member value)
-/// must NOT fault on EITHER engine (the both-engine `bind_import` skip). A single-engine fault = red.
+/// must NOT fault (the `bind_import` skip for a pure type).
 #[test]
 fn pure_type_import_no_fault_both_engines() {
     let out = golden_entry("import ProcResult from std.process\nprint(1)\n");
@@ -581,7 +582,7 @@ fn pure_type_import_no_fault_both_engines() {
     assert_eq!(out2, "2\n");
 }
 
-/// A user `struct Response` WITHOUT `import std.request` is the user's OWN type on both engines —
+/// A user `struct Response` WITHOUT `import std.request` is the user's OWN type —
 /// the synthetic name is freed (the `Builtin`-origin seed is shadowed by the user declaration).
 #[test]
 fn user_struct_shadows_synthetic_name_parity() {
@@ -632,7 +633,7 @@ fn from_import_enum_ctor_parity() {
 
 /// Two modules both declare `struct Point` with DIFFERENT layouts, both reachable in the entry
 /// program: a REAL collision. Each constructs correctly; the entry/first keeps the bare key
-/// (`Point(...)`), the other is disambiguated. Byte-identical on both engines.
+/// (`Point(...)`), the other is disambiguated. Byte-identical against a literal golden.
 #[test]
 fn real_collision_two_modules_same_struct() {
     let out = golden_file_entry(
@@ -651,8 +652,7 @@ fn real_collision_two_modules_same_struct() {
 
 /// Blocker C: two modules declare `enum Color`, both reachable. `cb.classify` MATCHES on its own
 /// `Color.Red`/`Color.Green`. The disambiguated enum's variants must MATCH (not just construct):
-/// the match-pattern side must use the SAME module-scoped runtime key as construction. Identical
-/// on both engines.
+/// the match-pattern side must use the SAME module-scoped runtime key as construction.
 #[test]
 fn enum_collision_match_in_declaring_module() {
     let out = golden_file_entry(
@@ -706,7 +706,7 @@ fn from_imported_fn_named_like_another_modules_type() {
 /// MATCHES it in `win`'s context. The construction's variant_id must key on `win`'s E (the call
 /// site's already-resolved key), NOT be re-derived from the currently-compiled module (`mid`)'s
 /// `bare_types` — else the producer bakes `mid::E::A` and `win.pick`'s match never fires. Must be
-/// byte-identical on both engines (interp was already correct; this guards VM/serial).
+/// byte-identical against the golden (this guards the VM).
 #[test]
 fn enum_collision_construct_in_other_declaring_module() {
     let out = golden_file_entry(
@@ -749,7 +749,7 @@ fn enum_no_collision_construct_in_importing_module() {
 }
 
 /// A spawned task constructs an imported struct AND a value crosses a Channel (cross-airlock,
-/// data-not-time): identical on interp, default VM, and `--parallel`.
+/// data-not-time): the run must produce `7`.
 #[test]
 fn imported_struct_across_airlock_three_engine() {
     let files = [
@@ -785,7 +785,7 @@ fn imported_struct_across_airlock_three_engine() {
 /// THE BUG (collision-loser decode against the WRONG layout): the entry module declares its OWN
 /// `Point{a,b}` while a dep also declares `Point{x}`. A bare `json.decode[Point]` must decode
 /// against the ENTRY's layout (the bare name resolves to the entry's `Point`), printing 5 — not
-/// fail `decode: missing key 'x'` against the dep's layout. Byte-identical on both engines.
+/// fail `decode: missing key 'x'` against the dep's layout.
 #[test]
 fn decode_collision_loser_against_correct_layout() {
     let out = golden_file_entry(
@@ -819,7 +819,7 @@ fn decode_qualified_target() {
 
 /// BARE DISPLAY ON COLLISION: two modules both declare `struct Point` with different layouts;
 /// printing each value shows the BARE name (`Point(x=1)` / `Point(y=2)`) on BOTH — never the
-/// module-qualified identity key. Byte-identical on both engines.
+/// module-qualified identity key.
 #[test]
 fn collision_prints_bare_for_both() {
     let out = golden_file_entry(
@@ -838,7 +838,7 @@ fn collision_prints_bare_for_both() {
 
 /// NESTED-COLLISION FIELD DECODE: `dep` has `Wrap{inner: Inner}` + `Inner{k}`; the entry declares
 /// its OWN `Inner{other}`. `json.decode[dep.Wrap]` must expand the nested `Inner` field in dep's
-/// DEFINING scope (`dep::Inner` with `k`), not the entry's. Prints 3. Byte-identical both engines.
+/// DEFINING scope (`dep::Inner` with `k`), not the entry's. Prints 3.
 #[test]
 fn decode_nested_struct_field_in_defining_module() {
     let out = golden_file_entry(
@@ -857,8 +857,7 @@ fn decode_nested_struct_field_in_defining_module() {
     assert_eq!(out, "3\n");
 }
 
-/// AIRLOCK 3-ENGINE PARITY: the collision-decode repro must produce identical output under interp,
-/// the default VM, and the `--parallel` OS-thread engine.
+/// The collision-decode repro must produce `5`.
 #[test]
 fn decode_collision_three_engine() {
     let files = [
@@ -893,8 +892,7 @@ fn decode_collision_three_engine() {
 /// via WHOLE-MODULE import must be resolved from the SCRUTINEE'S static enum, not re-guessed by
 /// iterating the (RandomState-seeded) import map. Two whole-imported same-named enums; scrutinee
 /// from `a`; the `Color.Red`/`Color.Blue` arms must resolve against `a::Color`. Looped 50x to
-/// defeat the nondeterminism (one pass could luck-pass) and asserted identical across all three
-/// engines (interp / default VM / `--parallel`).
+/// defeat the nondeterminism (one pass could luck-pass); must print `red` every time.
 #[test]
 fn match_arm_scrutinee_driven_three_engine() {
     let files = [
@@ -931,7 +929,7 @@ fn match_arm_scrutinee_driven_three_engine() {
 /// BLOCKER 2/3 divergence case — `import b` FIRST, then `import a`; scrutinee is `a.Color.Blue`,
 /// a variant that exists ONLY in `a`. A scrutinee-blind import-iterating resolver picked `b`
 /// (which has no `Blue`) and either crashed or matched the wrong arm. The
-/// match-arm key MUST come from the scrutinee's `a::Color`. Looped 50x across all three engines.
+/// match-arm key MUST come from the scrutinee's `a::Color`. Looped 50x to defeat nondeterminism.
 #[test]
 fn match_arm_only_in_a_variant_three_engine() {
     let files = [
@@ -1003,25 +1001,25 @@ fn collision_struct_sent_across_task() {
 #[test]
 fn executor_autodrain_skipped_on_os_exit() {
     // `os.exit` is a hard halt — like `defer`, the program-exit auto-drain is skipped, so a
-    // submitted-but-un-shut executor's work must NOT run. Driven through the file path on both
-    // engines (parity), since it imports std.os.
+    // submitted-but-un-shut executor's work must NOT run. Driven through the file path since it
+    // imports std.os.
     let out = golden_entry(
         "import std.os\nfn j():\n    print(\"RAN\")\nfn main():\n    ex := Executor()\n    ex.submit(fn(): j())\n    print(\"before exit\")\n    os.exit(0)\nmain()\n",
     );
     assert_eq!(out, "before exit\n");
 }
 
-// ----- Executor.submit crosses a submitted closure BY VALUE on BOTH engines (serial == M:N) -----
-// The cooperative engine used to queue the submitted closure's own heap Handle (captures shared by
-// reference, bypassing the airlock), while M:N wired it by value. That broke serial==M:N. Now both
-// route through `wire_callable`/`to_wire`, so the generator airlock enforcement runs and captures
-// isolate identically on both engines.
+// ----- Executor.submit crosses a submitted closure BY VALUE (previously diverged: serial vs M:N) -----
+// The since-removed cooperative engine used to queue the submitted closure's own heap Handle
+// (captures shared by reference, bypassing the airlock), while M:N wired it by value — the two
+// disagreed. Now it routes through `wire_callable`/`to_wire`, so the generator airlock enforcement
+// runs and captures isolate correctly.
 
 #[test]
 fn executor_submit_generator_capturing_closure_crosses_by_value() {
     // F3 path C: a submitted closure captures a LIVE local generator (`it`, Pending). The by-value
-    // airlock (`to_wire`) serializes it and the submitted task drives its own copy. WAS: both
-    // faulted the generator crossing; NOW: both run it, byte-identical on serial and M:N.
+    // airlock (`to_wire`) serializes it and the submitted task drives its own copy. WAS: this
+    // faulted the generator crossing; NOW: it runs, byte-identical.
     let src = "\
 fn gen() -> Iterator[int]:
     yield 1
@@ -1040,8 +1038,8 @@ main()";
 #[test]
 fn executor_submit_mutating_closure_isolated_parity() {
     // Repro #3: a submitted closure captures + mutates a local list, observed after the drain. WAS a
-    // SILENT value divergence: serial shared by reference (prints `2`), M:N isolated by value
-    // (prints `1`). NOW both isolate at submit → both print `1`, byte-identical.
+    // SILENT value divergence: the since-removed cooperative engine shared by reference (prints `2`),
+    // M:N isolated by value (prints `1`). NOW it isolates at submit → prints `1`.
     let out = golden_entry(
         "fn main():\n    box := [0]\n    ex := Executor()\n    ex.submit(fn(): box.push(1))\n    ex.shutdown()\n    print(box.len())\nmain()\n",
     );
@@ -1051,10 +1049,10 @@ fn executor_submit_mutating_closure_isolated_parity() {
 #[test]
 fn executor_submit_module_global_inplace_mutation_isolates_parity() {
     // Task 1 (Executor path) — a submitted closure mutating a MODULE-GLOBAL aggregate in place must
-    // isolate on BOTH engines, exactly like the nursery path. The cooperative Executor drain snapshots
-    // the module globals per task (mirroring M:N's `drain_executor_on_pool` → `install_snapshot`), so
-    // the parent's post-shutdown read sees the PRE-task value. Before the fix the serial inline drain
-    // ran the task against the LIVE shell globals (leaked → serial=4) while M:N isolated (→ 3).
+    // isolate, exactly like the nursery path: the M:N drain (`drain_executor_on_pool` →
+    // `install_snapshot`) snapshots the module globals per task, so the parent's post-shutdown read
+    // sees the PRE-task value. Before the fix the since-removed cooperative engine's inline drain ran
+    // the task against the LIVE shell globals (leaked → serial=4) while M:N isolated (→ 3).
     let out = golden_entry(
         "xs := [1, 2, 3]\nfn main():\n    ex := Executor()\n    ex.submit(fn(): xs.push(99))\n    ex.shutdown()\n    print(xs.len())\nmain()\n",
     );
@@ -1065,8 +1063,8 @@ fn executor_submit_module_global_inplace_mutation_isolates_parity() {
 fn executor_submit_module_global_callee_reassign_isolates_parity() {
     // Task 1 (Executor path) — a submitted closure whose free-fn callee REASSIGNS a module global
     // (`bump()` does `count = count + 1`). Pre-dated the diff and still diverged (serial=2 / M:N=0)
-    // because the serial Executor drain aliased the shell globals. Now each submitted task runs against
-    // its own module-global copy → the parent reads the frozen 0 on both engines.
+    // because the since-removed cooperative Executor drain aliased the shell globals. Now each
+    // submitted task runs against its own module-global copy → the parent reads the frozen 0.
     let out = golden_entry(
         "count := 0\nfn bump():\n    count = count + 1\nfn main():\n    ex := Executor()\n    ex.submit(fn(): bump())\n    ex.submit(fn(): bump())\n    ex.shutdown()\n    print(count)\nmain()\n",
     );
@@ -1088,14 +1086,14 @@ fn executor_submit_atomic_visible_to_parent_parity() {
 fn executor_submit_sendable_closure_runs_parity() {
     // Control: a captured `Channel` is a genuinely-shared handle (crosses as its shared Arc, NOT
     // deep-copied), so a value sent from inside the submitted job is visible to the parent's `recv`.
-    // Must stay `7` on both engines — the by-value collapse must not over-isolate a shared handle.
+    // Must stay `7` — the by-value collapse must not over-isolate a shared handle.
     let out = golden_entry(
         "fn main():\n    ch := Channel[int]()\n    ex := Executor()\n    ex.submit(fn(): ch.send(7))\n    ex.shutdown()\n    print(ch.recv())\nmain()\n",
     );
     assert_eq!(out, "7\n");
 }
 
-// ----- M9: std.regex parity (exercises NativeRet::Struct lowering on both engines) -----
+// ----- M9: std.regex parity (exercises NativeRet::Struct lowering) -----
 
 #[test]
 fn regex_find_all_replace_split_parity() {
@@ -1214,7 +1212,7 @@ match regex.find("([a-z]+)@([a-z]+)", "xx ann@host"):
     assert_eq!(out, "ann@host 3 ann,host\n");
 }
 
-// ----- break / continue parity (both engines must agree AND produce the right output) -----
+// ----- break / continue parity (must produce the right output) -----
 
 /// Assert the M:N engine's stdout equals `expect`. A hang here means a `continue` is landing on
 /// the wrong target (re-test without advancing → infinite loop).
@@ -1282,7 +1280,7 @@ fn xor_fold_single_number_parity() {
 
 #[test]
 fn shift_out_of_range_error_parity() {
-    // Dynamic shift the checker can't catch — both engines must raise the same runtime error.
+    // Dynamic shift the checker can't catch — must raise the runtime error at run time.
     assert_eq!(
         vm_outcome("print(1 << 64)\n").unwrap_err(),
         "runtime error (line 1, col 7): shift amount 64 out of range (0..64)"
@@ -1435,7 +1433,7 @@ fn json_raw_control_char_in_string_is_error_parity() {
 /// Finding C: `json.stringify` FAULTS (recoverable, Go-style) on a non-finite `Json.Num`
 /// (NaN / +inf / -inf) instead of emitting the invalid bare tokens `NaN`/`inf`/`-inf` — which are
 /// not valid JSON and are rejected by Chezzi's own `json.parse`. The fault is catchable under
-/// `recover:` with a byte-identical message on both engines.
+/// `recover:` with a byte-identical message.
 #[test]
 fn json_stringify_non_finite_faults_parity() {
     let out = golden_entry(
@@ -1448,7 +1446,7 @@ fn json_stringify_non_finite_faults_parity() {
 }
 
 /// Float `str()`/`print()` crossover golden — scientific notation when the decimal exponent is
-/// `< -4` or `>= 16`, otherwise fixed — asserted **serial == M:N against a hardcoded literal**.
+/// `< -4` or `>= 16`, otherwise fixed — asserted **against a hardcoded literal**.
 ///
 /// Read the name carefully: this is NOT a CPython differential. It pins these eight values against a
 /// string typed into this file, so it can only catch an engine divergence or a regression away from
@@ -1595,8 +1593,8 @@ fn fs_predicates_parity() {
     assert_eq!(out, "true\nfalse\ntrue\n");
 }
 
-/// gaps §6 — fs.stat/fs.walk + the FileInfo native struct across BOTH engines. Proves the
-/// reserved-type gate (`from fs import FileInfo`) + the `type_names` bind_import skip on serial + M:N,
+/// gaps §6 — fs.stat/fs.walk + the FileInfo native struct. Proves the
+/// reserved-type gate (`from fs import FileInfo`) + the `type_names` bind_import skip,
 /// and that stat/walk read the real filesystem identically. Scratch tree is self-owned (file-dependent
 /// size — mtime is NOT asserted). Walk order is deterministic (per-dir sort) → exact stdout match.
 #[test]
@@ -1698,7 +1696,7 @@ fn for_over_map_key_value_parity() {
 
 #[test]
 fn for_over_map_kv_mutation_during_iteration_parity() {
-    // The body reassigns a not-yet-visited key; both engines must agree (snapshot semantics:
+    // The body reassigns a not-yet-visited key (snapshot semantics:
     // the value bound is the one captured at loop start, like list iteration).
     assert_golden_out(
         "m := {\"a\": 1, \"b\": 2, \"c\": 3}\nout := 0\nfor k, v in m:\n    m[\"c\"] = 99\n    out += v\nprint(out)\n",
@@ -1743,7 +1741,7 @@ fn cmp_max_float_parity() {
 
 #[test]
 fn cmp_max_struct_parity() {
-    // The generic max over a Comparable struct must be byte-identical on both engines.
+    // The generic max over a Comparable struct must be byte-identical.
     let src = "import std.cmp\nstruct P:\n    n: int\n    fn compare(self, o: P) -> int:\n        return self.n - o.n\n    fn eq(self, o: P) -> bool:\n        return self.n == o.n\nfn main():\n    print(cmp.max(P(2), P(9)).n)\n    print(cmp.min(P(2), P(9)).n)\nmain()\n";
     assert_eq!(golden_entry(src), "9\n2\n");
 }
@@ -1804,7 +1802,7 @@ fn sort_by_stable_by_key_parity() {
 
 #[test]
 fn sort_by_comparator_mutates_list_parity() {
-    // A comparator that mutates an element being sorted must behave identically on both engines.
+    // A comparator that mutates an element being sorted must behave identically.
     // Both sort a snapshot taken at call time and overwrite the list with the sorted result, so
     // the in-comparator `xs[0] = 100` is discarded.
     let src = "xs := [3, 1, 2]\nfn cmp(a: int, b: int) -> int:\n    xs[0] = 100\n    return a - b\nxs.sort_by(cmp)\nprint(xs)\n";
@@ -1972,21 +1970,21 @@ main()";
 
 #[test]
 fn parity_std_math_sqrt_negative_is_nan() {
-    // math.sqrt of a negative is IEEE NaN — never faults, identical on both engines.
+    // math.sqrt of a negative is IEEE NaN — never faults, identical.
     let src = "import std.math\nfn main():\n    print(math.sqrt(0.0 - 1.0))\nmain()";
     assert_eq!(golden_entry(src), "NaN\n");
 }
 
 #[test]
 fn parity_float_ieee_div_mod() {
-    // Float division/modulo by zero is total IEEE-754 on both engines: inf / NaN, never a fault.
+    // Float division/modulo by zero is total IEEE-754: inf / NaN, never a fault.
     let src = "fn main():\n    print(1.0 / 0.0)\n    print(-1.0 / 0.0)\n    print(0.0 / 0.0)\n    print(5.0 % 0.0)\nmain()";
     assert_eq!(golden_entry(src), "inf\n-inf\nNaN\nNaN\n");
 }
 
 #[test]
 fn parity_int_div_by_zero_still_faults() {
-    // INTEGER division by zero still faults — caught + printed identically on both engines.
+    // INTEGER division by zero still faults — caught + printed identically.
     let src = "fn run() -> int!:\n    r := recover:\n        1 / 0\n    match r:\n        Ok(v): return Ok(v)\n        Err(e): print(e.message())\n    return Ok(0)\nfn main():\n    _ := run()\nmain()";
     assert_eq!(golden_entry(src), "division by zero\n");
 }
@@ -2043,29 +2041,29 @@ fn recover_tail_match_value_catches_fault_is_err() {
 fn recover_tail_match_heterogeneous_arms_run_parity() {
     // REGRESSION GUARD: heterogeneous tail-match arms (str vs int) fall back to `Result[nil]` at the
     // checker but the compiler still compiles the tail as a value — whichever arm runs, its value is
-    // `Ok`-wrapped and simply IGNORED by `Ok(_)`. The program must check + RUN identically on both
-    // engines (the first cut of the feature rejected it at `check`).
+    // `Ok`-wrapped and simply IGNORED by `Ok(_)`. The program must check + RUN identically
+    // (the first cut of the feature rejected it at `check`).
     let src = "fn foo(cmd: str):\n    r := recover:\n        match cmd:\n            \"a\": \"hello\"\n            _: 42\n    match r:\n        Ok(_): print(\"done\")\n        Err(e): print(\"failed\")\nfoo(\"a\")";
     assert_golden_out(src, "done\n");
 }
 
 #[test]
 fn recover_tail_if_heterogeneous_branches_run_parity() {
-    // The `if/else` analog of the heterogeneous fall-back: runs, value ignored, both engines agree.
+    // The `if/else` analog of the heterogeneous fall-back: runs, value ignored.
     let src = "fn foo(n: int):\n    r := recover:\n        if n == 0:\n            \"zero\"\n        else:\n            n\n    match r:\n        Ok(_): print(\"done\")\n        Err(e): print(\"failed\")\nfoo(0)";
     assert_golden_out(src, "done\n");
 }
 
 #[test]
 fn parity_std_math_predicates() {
-    // is_nan / is_inf / is_finite — float predicates returning bool, identical on both engines.
+    // is_nan / is_inf / is_finite — float predicates returning bool, identical.
     let src = "import std.math\nfn main():\n    print(math.is_nan(0.0 / 0.0))\n    print(math.is_inf(1.0 / 0.0))\n    print(math.is_finite(1.0))\n    print(math.is_finite(1.0 / 0.0))\nmain()";
     assert_eq!(golden_entry(src), "true\ntrue\ntrue\nfalse\n");
 }
 
 #[test]
 fn parity_nan_ordered_compare_is_false() {
-    // Ordered comparisons (`< <= > >=`) involving NaN are ALWAYS false on both engines — never a
+    // Ordered comparisons (`< <= > >=`) involving NaN are ALWAYS false — never a
     // fault — matching IEEE-754 / Python / Rust. Equality is untouched (`nan == nan` → false,
     // `nan != nan` → true). Normal float compares still work (regression guard).
     let src = "fn main():\n    nan := 0.0 / 0.0\n    print(nan < 1.0)\n    print(nan <= 1.0)\n    print(nan > 1.0)\n    print(nan >= 1.0)\n    print(1.0 < nan)\n    print(1.0 > nan)\n    print((1.0 / 0.0) < nan)\n    print(1.0 < 2.0)\n    print(2.0 > 1.0)\n    print(nan == nan)\n    print(nan != nan)\nmain()";
@@ -2114,17 +2112,14 @@ fn parity_sort_by_key_normal_key_unchanged() {
 fn math_abs_min_overflows() {
     // `math.abs(i64::MIN)` has no representable result. Raw `i64::abs()` would panic (debug) or
     // wrap (release); the native fn must surface a recoverable overflow like every other op,
-    // identically on both engines. i64::MIN is built as `-MAX - 1` (the literal
+    // identically. i64::MIN is built as `-MAX - 1` (the literal
     // `9223372036854775808` overflows the lexer).
     let src = "import std.math\nfn main():\n    x := -9223372036854775807 - 1\n    print(math.abs(x))\nmain()";
     let t = TmpDir::new();
     let entry = t.write("main.chz", src);
     let ie = run_file(&entry).2.unwrap_err().to_string();
     let ve = run_file(&entry).2.unwrap_err().to_string();
-    assert_eq!(
-        ie, ve,
-        "abs-overflow error must be identical on both engines"
-    );
+    assert_eq!(ie, ve, "abs-overflow error must be identical");
     assert!(ie.contains("integer overflow in abs"), "{ie}");
 }
 
@@ -2138,7 +2133,7 @@ fn math_abs_min_overflow_is_recoverable() {
 
 #[test]
 fn exit_threads_code_through_both_engines() {
-    // `std.os.exit(code)` halts the program with that exit code on both engines: output before
+    // `std.os.exit(code)` halts the program with that exit code: output before
     // the call is preserved, the statement after it never runs, and the run is not an error.
     let src = "import std.os\nfn main():\n    print(\"before\")\n    os.exit(3)\n    print(\"after\")\nmain()";
     let t = TmpDir::new();
@@ -2179,7 +2174,7 @@ fn exit_negative_code_masks_to_255() {
     // `os.exit(code)` reports the LOW 8 BITS of `code` (POSIX `exit(3)`/bash/Python/Go). A NEGATIVE
     // code used to be clamped UP to 0 — i.e. `os.exit(-1)`, the canonical failure idiom, reported
     // SUCCESS to the shell/CI. The process-status side of this rule is pinned by tests/exit_status.rs;
-    // this pins the in-VM code on both engines (including the cross-thread re-store in sched.rs).
+    // this pins the in-VM code (including the cross-thread re-store in sched.rs).
     for (code, want) in [("-1", 255), ("300", 44), ("-256", 0), ("0", 0)] {
         let src = format!("import std.os\nfn main():\n    os.exit({code})\nmain()");
         let t = TmpDir::new();
@@ -2393,7 +2388,7 @@ fn exit_in_spawned_child_aborts_siblings() {
     // cancel drain therefore starts `b` too, and the two engines AGREE: `{"a","b"}` on both. (Before
     // the N6 drain, serial abandoned the never-started sibling and printed only `"a"` — a
     // near-deterministic line-SET divergence this test used to bless as "expected".) Cross-task
-    // ORDER stays nondeterministic on both engines, so the SET is what is asserted.
+    // ORDER stays nondeterministic, so the SET is what is asserted.
     let src = "import std.os\nfn a():\n    print(\"a\")\n    os.exit(3)\nfn b():\n    print(\"b\")\nfn main():\n    parallel:\n        spawn a()\n        spawn b()\n    print(\"after\")\nmain()\n";
     let t = TmpDir::new();
     let entry = t.write("main.chz", src);
@@ -2490,20 +2485,21 @@ fn run_parallel_watchdog(src: &str) -> RunOutput {
 }
 
 /// gaps.md B5 — cross-nursery child→parent wake parity: a `send` from a nested (eager) `parallel:`
-/// nursery must wake a receiver parked in the OUTER nursery. Uncontended 1-send / 1-recv, so the serial
-/// oracle == M:N. Pre-fix M:N false-faulted `deadlock` while serial printed "receiver got 1". Runs the
-/// M:N leg under a watchdog (10 rounds) so a lost-wakeup regression fails loud rather than hanging.
+/// nursery must wake a receiver parked in the OUTER nursery. Uncontended 1-send / 1-recv, so a plain
+/// run must match `.expected`. Pre-fix M:N false-faulted `deadlock` while the since-removed serial
+/// engine printed "receiver got 1". Runs the M:N leg under a watchdog (10 rounds) so a lost-wakeup
+/// regression fails loud rather than hanging.
 #[test]
 fn parallel_cross_nursery_nested_send_to_outer_recv_parity() {
     let src = include_str!("../../examples/parallel_cross_nursery_nested_send_to_outer_recv.chz");
     let expected =
         include_str!("../../examples/parallel_cross_nursery_nested_send_to_outer_recv.expected");
-    // Serial oracle.
+    // Baseline run.
     let t = TmpDir::new();
     let entry = t.write("main.chz", src);
     let (so, _se, sr, _) = run_file(&entry);
-    assert!(sr.is_ok(), "serial oracle faulted: {sr:?}");
-    assert_eq!(so, expected, "serial oracle != expected");
+    assert!(sr.is_ok(), "baseline run faulted: {sr:?}");
+    assert_eq!(so, expected, "baseline output != expected");
     // M:N leg under a watchdog, several rounds to shake a flaky lost wakeup.
     for _ in 0..10 {
         let (mo, _me, mr, _) = run_parallel_watchdog(src);
@@ -2511,14 +2507,13 @@ fn parallel_cross_nursery_nested_send_to_outer_recv_parity() {
             mr.is_ok(),
             "M:N faulted (spurious cross-nursery deadlock / lost wakeup): {mr:?}"
         );
-        assert_eq!(mo, expected, "M:N stdout != serial oracle");
+        assert_eq!(mo, expected, "M:N stdout != expected");
     }
 }
 
-/// B3.5 — the cooperative `fibers_all_blocked_is_deadlock` golden, ported to `--parallel`: two
-/// tasks each block on a distinct empty channel with no producer. The cooperative scheduler
-/// already faults this; under threads B3.5's nursery-local detector must fault it too rather
-/// than hang on the condvars.
+/// B3.5 — the since-removed cooperative engine's `fibers_all_blocked_is_deadlock` golden, ported to
+/// `--parallel`: two tasks each block on a distinct empty channel with no producer. Under threads
+/// B3.5's nursery-local detector must fault it too rather than hang on the condvars.
 #[test]
 fn parallel_all_blocked_deadlock_faults() {
     let src = "fn waiter(c: Channel[int]):\n    c.recv()\nfn main():\n    a := Channel[int]()\n    b := Channel[int]()\n    parallel:\n        spawn waiter(a)\n        spawn waiter(b)\nmain()\n";
@@ -2527,9 +2522,9 @@ fn parallel_all_blocked_deadlock_faults() {
     assert!(err.message.contains("deadlock"), "got: {}", err.message);
 }
 
-/// A blocking `for v in ch:` (recv) with no producer and no runnable sibling deadlocks on BOTH
-/// engines with an ENGINE-AGNOSTIC message — the old text hardcoded "sequential executor", which
-/// is misleading under the default M:N (real-thread) engine. Same code path serves both engines.
+/// A blocking `for v in ch:` (recv) with no producer and no runnable sibling deadlocks with an
+/// ENGINE-AGNOSTIC message — the old text hardcoded "sequential executor", which
+/// is misleading under the default M:N (real-thread) engine.
 #[test]
 fn deadlock_fault_message_is_engine_agnostic() {
     let msg = golden_entry_fault(
@@ -3796,9 +3791,9 @@ main()
 
 /// D6c — the bundled `examples/socket_timeout.chz` golden: a `--parallel` program that demonstrates
 /// both an `accept(timeout_ms)` and a `read(n, timeout_ms)` timeout branch, run end-to-end against
-/// its `.expected` output. Net examples need `--parallel` (no fibers to park on the cooperative
-/// engine), so — like `echo_server.chz` — this is exercised here rather than in the cooperative
-/// golden harness. Watchdog-guarded so a regression faults instead of hanging the test binary.
+/// its `.expected` output. Net examples need `--parallel` (fibers only park on the netpoller inside
+/// a nursery), so — like `echo_server.chz` — this is exercised here directly rather than via a plain
+/// golden-file comparison. Watchdog-guarded so a regression faults instead of hanging the test binary.
 #[test]
 fn example_socket_timeout_matches_expected() {
     let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -3911,7 +3906,7 @@ main()
 }
 
 /// D6b/W7-59 — `net.connect` to a dead loopback port (bound-then-dropped) returns a clean `Err`
-/// rather than hanging, and the two engines answer with the message their contract says they should.
+/// rather than hanging, and the engine answers with the message its contract says it should.
 ///
 /// A dead LOOPBACK port still reports `EINPROGRESS` (measured: `connect_ex(('127.0.0.1', <closed>))`
 /// → `115 EINPROGRESS`), so this really does reach the would-block gate rather than the synchronous
@@ -3919,7 +3914,7 @@ main()
 /// `Err` arm was taken and discarded `e.message()`, so it passed identically before and after the
 /// change and would not have noticed either engine losing its answer.
 ///
-/// **Both** engines must report the kernel's refusal. `W7-59` narrowed the block-in-place gate to
+/// The engine must report the kernel's refusal. `W7-59` narrowed the block-in-place gate to
 /// the eager-`Executor` job alone — NOT to `may_block_socket_in_place()`, which would have refused
 /// the cooperative engine too, while it existed. The difference is load-bearing: `accept`/`read` wait
 /// on a chezzi peer fiber that can only run on the very thread they would block, so refusing there
@@ -4416,7 +4411,7 @@ fn parity_std_io_read_write_file() {
 
 #[test]
 fn parity_std_io_read_missing_file_errs() {
-    // The error text comes from the same `std::fs` call on both engines, so it matches; we only
+    // The error text comes from the same `std::fs` call, so it matches; we only
     // assert the Err branch is taken (deterministic regardless of OS message).
     let src = "import std.io\nfn main():\n    match io.read_file(\"/no/such/chezzi/path/xyz\"):\n        Ok(s): io.print(s)\n        Err(e): io.print(\"err\")\nmain()";
     assert_eq!(golden_entry(src), "err\n");
@@ -4476,7 +4471,7 @@ fn parity_std_io_read_char_yields_scalars_then_eof() {
 
 /// `io.input(prompt)` = print the prompt (no newline) + flush + `read_line`. Under the BUFFERED sink
 /// (every test helper + embedder) `flush` is a no-op and the prompt simply lands in the captured
-/// `out` — both engines identical. Also pins that neither fn is `Kind::Blocking` (an offloaded call
+/// `out`. Also pins that neither fn is `Kind::Blocking` (an offloaded call
 /// would hit `OffloadHost`'s stdio `unreachable!`).
 #[test]
 fn parity_std_io_input_prompt_then_line_and_flush_is_a_noop() {
@@ -4494,7 +4489,7 @@ fn parity_std_io_input_prompt_then_line_and_flush_is_a_noop() {
 /// reader ⇒ each line is read exactly ONCE, by SOME reader, and nobody sees a false EOF.
 ///
 /// Every reader prints the same `got {v}` tag, so the line MULTISET is assignment-independent —
-/// which is the point: WHICH task gets a given line is nondeterministic BY DESIGN (both engines).
+/// which is the point: WHICH task gets a given line is nondeterministic BY DESIGN.
 /// Do NOT "fix" this back to an exact-stdout `assert_eq!`; that is a designed flake. A false EOF
 /// would add an `eof` line; a duplicated line would repeat a `got` line. Both change the multiset.
 #[test]
@@ -4508,8 +4503,8 @@ fn parity_spawned_tasks_share_stdin_exactly_once() {
     assert_lines_multiset(&out, &["got a", "got b", "got c"]);
 }
 
-/// Same shared-stdin contract at the OTHER task-entry family: `Executor.submit` (the cooperative
-/// inline drain AND the M:N pool drain). An invariant enforced at one seam is not enforced.
+/// Same shared-stdin contract at the OTHER task-entry family: `Executor.submit` (the M:N pool
+/// drain). An invariant enforced at one seam is not enforced.
 #[test]
 fn parity_executor_tasks_share_stdin_exactly_once() {
     use crate::native::{HostConfig, Stdin};
@@ -4524,7 +4519,7 @@ fn parity_executor_tasks_share_stdin_exactly_once() {
 #[test]
 fn parity_std_io_eprint_goes_to_stderr_not_stdout() {
     let src = "import std.io\nfn main():\n    io.eprint(\"to stderr\")\n    io.print(\"to stdout\")\nmain()";
-    // Parity (both engines): stdout has only the print line, stderr has only the eprint line.
+    // stdout has only the print line, stderr has only the eprint line.
     assert_eq!(golden_entry(src), "to stdout\n");
     let t = TmpDir::new();
     let entry = t.write("main.chz", src);
@@ -4594,8 +4589,8 @@ fn vm_run_file_stress(src: &str, cfg: crate::native::HostConfig) -> String {
     captured(vm.out)
 }
 
-/// Task 1 — the SERIAL `Executor` PROGRAM-EXIT drain (`drain_live_executors`) runs each queued job
-/// via `with_serial_child_modules` against EMPTY frames (it runs AFTER `run()` popped the top-level
+/// Task 1 — the `Executor` PROGRAM-EXIT drain (`drain_live_executors`) runs each queued job
+/// against EMPTY frames (it runs AFTER `run()` popped the top-level
 /// frame). This exercises that path under `gc_stress` (collect before every instruction): both
 /// un-`shutdown()`'d jobs mutate a module-global aggregate (forcing the snapshot path) and allocate,
 /// and the drain must complete with no error and full isolation (the parent's `xs` untouched).
@@ -4637,8 +4632,8 @@ main()";
     assert_eq!(vm.out, b"");
 }
 
-/// Bug 3 — a module-qualified generic fn (`geo.empty_list[int]()`) type-checks AND runs on both
-/// engines (type args are erased, so this exercises the checker fix end-to-end).
+/// Bug 3 — a module-qualified generic fn (`geo.empty_list[int]()`) type-checks AND runs
+/// (type args are erased, so this exercises the checker fix end-to-end).
 #[test]
 fn parity_qualified_generic_fn_turbofish() {
     let geo = ("geo.chz", "fn empty_list[T]() -> List[T]:\n    return []\n");
@@ -4650,7 +4645,7 @@ fn parity_qualified_generic_fn_turbofish() {
 }
 
 /// A from-imported global RE-DECLARED at module scope (`:=`) is the module's OWN binding — assigning
-/// it is legal and runs on both engines (the rebind gate must not fire on a name the import no longer
+/// it is legal and runs (the rebind gate must not fire on a name the import no longer
 /// owns).
 #[test]
 fn parity_from_import_then_module_scope_redeclare() {
@@ -4710,7 +4705,7 @@ fn parity_std_str_pad_left_matches_native_method() {
 }
 
 /// An empty `fill` LIVELOCKED the free fn's prepend loop (zero output, no diagnostic). It must now
-/// fault — with the same message as the native method — on both engines, EAGERLY: a `width` the
+/// fault — with the same message as the native method —, EAGERLY: a `width` the
 /// receiver already satisfies does not excuse it.
 #[test]
 fn parity_std_str_pad_left_empty_fill_faults() {
@@ -4802,12 +4797,12 @@ const PROGRAMS: &[(&str, Result<&str, &str>)] = &[
         "fn fib(n: int) -> int:\n    if n < 2:\n        return n\n    return fib(n - 1) + fib(n - 2)\nfn main():\n    print(fib(15))\nmain()",
         Ok("610\n"),
     ),
-    // inferred return type (no `-> T`): runtime is unaffected, both engines agree
+    // inferred return type (no `-> T`): runtime is unaffected
     (
         "fn add(a: int, b: int):\n    return a + b\nfn classify(n: int):\n    if n == 0:\n        return Some(0)\n    return None\nfn main():\n    print(add(2, 3))\n    match classify(0):\n        Some(v): print(v)\n        None: print(\"none\")\nmain()",
         Ok("5\n0\n"),
     ),
-    // expression-valued match (multiline) + if (inline): both engines must agree on the value
+    // expression-valued match (multiline) + if (inline)
     (
         "fn lookup(k: int) -> int?:\n    if k == 0:\n        return None\n    return Some(k)\nfn main():\n    found := match lookup(7):\n        Some(v): v\n        None: -1\n    print(found)\n    sign := if found > 0: \"pos\" else: \"neg\"\n    print(sign)\n    none := match lookup(0):\n        Some(v): v\n        None: -1\n    print(none)\nmain()",
         Ok("7\npos\n-1\n"),
@@ -4867,7 +4862,7 @@ const PROGRAMS: &[(&str, Result<&str, &str>)] = &[
         "fn d(b: int) -> int!:\n    return Ok(10 / b)\nfn main():\n    r := recover:\n        x := d(2)?\n        x + 1\n    match r:\n        Ok(v): print(\"ok {v}\")\n        Err(e): print(e.message())\nmain()",
         Ok("ok 6\n"),
     ),
-    // side effects before a caught fault PERSIST (keep semantics) — both engines must agree
+    // side effects before a caught fault PERSIST (keep semantics)
     (
         "fn main():\n    x := 1\n    r := recover:\n        x = 99\n        [1][9]\n    match r:\n        Ok(v): print(\"ok\")\n        Err(e): print(\"recovered\")\n    print(\"x={x}\")\nmain()",
         Ok("recovered\nx=99\n"),
@@ -4909,7 +4904,7 @@ const PROGRAMS: &[(&str, Result<&str, &str>)] = &[
         "fn shout(s: str) -> str: s.upper()\nfn main():\n    print(\"hi\" |> shout())\nmain()",
         Ok("HI\n"),
     ),
-    // ----- error parity -----
+    // ----- error messages -----
     (
         "print(1 / 0)",
         Err("runtime error (line 1, col 7): division by zero"),
@@ -4928,7 +4923,7 @@ const PROGRAMS: &[(&str, Result<&str, &str>)] = &[
             "runtime error (line 2, col 12): maximum call depth (10000) exceeded (infinite recursion?)",
         ),
     ),
-    // M6 method error parity
+    // M6 method error messages
     (
         "print(\"hi\".upper(\"extra\"))",
         Err("runtime error (line 1, col 7): upper() expects 0 argument(s), got 1"),
@@ -4947,8 +4942,8 @@ const PROGRAMS: &[(&str, Result<&str, &str>)] = &[
         "print((5).upper())",
         Err("runtime error (line 1, col 8): type int has no method 'upper'"),
     ),
-    // arg-eval order: a bad method/receiver with an erroring arg must report the SAME error on
-    // both engines — the VM evaluates args (operands) before the call, so the interp must too.
+    // arg-eval order: a bad method/receiver with an erroring arg must report the error from the
+    // arg, not the receiver — the VM evaluates args (operands) before the call.
     (
         "print((5).frob(1 / 0))",
         Err("runtime error (line 1, col 16): division by zero"),
@@ -5000,7 +4995,7 @@ const PROGRAMS: &[(&str, Result<&str, &str>)] = &[
     (
         "fn d() -> Result[int]:\n    return Err(\"z\")\nif true:\n    x := d()?\n    print(x)",
         Err("runtime error (line 4, col 10): unhandled error: z"),
-    ), // top-level `?` in block → exit (same span both engines)
+    ), // top-level `?` in block → exit
 ];
 
 #[test]
@@ -5019,7 +5014,7 @@ fn parity_full_suite_vm_vs_interp() {
 
 // A manifest `module:function` entrypoint whose fn returns `Err(..)` must surface it as an unhandled
 // runtime error (rc=1), symmetric with the unhandled-top-level-Err rule — not silently discard the
-// return value. Covers BOTH engines (they route through `run_file_inner`→`invoke_entrypoint`).
+// return value (routes through `run_file_inner`→`invoke_entrypoint`).
 // (2026-07-18 bug-hunt: `?` in a nil entry fn used to swallow the error; the fix lets the entry be
 // `-> T!` and use `?`, and this surfaces a returned Err.)
 #[test]
@@ -5079,9 +5074,8 @@ fn parity_index_assign_out_of_bounds() {
 
 #[test]
 fn parity_compound_index_oob_vs_rhs_error_order() {
-    // Compound `xs[i] += rhs` on an out-of-bounds `i` where `rhs` ALSO errors: both engines
-    // must agree on which error wins. The VM reads the target (bounds-check) before `rhs`;
-    // the interp must do the same.
+    // Compound `xs[i] += rhs` on an out-of-bounds `i` where `rhs` ALSO errors: the bounds-check
+    // error must win. The VM reads the target (bounds-check) before `rhs`.
     assert_eq!(
         vm_outcome("xs := [1, 2, 3]\nz := 0\nxs[5] += 1 / z\n").unwrap_err(),
         "runtime error (line 3, col 1): index 5 out of bounds (len 3)"
@@ -5090,7 +5084,7 @@ fn parity_compound_index_oob_vs_rhs_error_order() {
 
 #[test]
 fn parity_compound_index_oob_skips_rhs_side_effect() {
-    // On an out-of-bounds compound assign, neither engine should run the rhs side effect.
+    // On an out-of-bounds compound assign, the rhs side effect must not run.
     let src = "fn side() -> int:\n    print(\"rhs ran\")\n    return 0\nxs := [1, 2, 3]\nxs[5] += side()\nprint(\"after\")\n";
     assert_eq!(
         vm_outcome(src).unwrap_err(),
@@ -5109,7 +5103,7 @@ fn parity_field_assign() {
 
 // NOTE: method_type_params / param_protocol / method_default_args were parity-only; they are
 // now full golden tests (`golden_*_chz_matches_expected_and_interp` above), which assert exact
-// output AND cross-engine parity, so the weaker `parity_*` file tests were removed.
+// output against a literal golden, so the weaker `parity_*` file tests were removed.
 
 #[test]
 fn parity_hof_param() {
@@ -5119,7 +5113,7 @@ fn parity_hof_param() {
 }
 
 /// Integer `sum()` must use checked arithmetic and raise the SAME recoverable
-/// "integer overflow in Add" runtime error as `+`, not silently wrap. Runs both engines.
+/// "integer overflow in Add" runtime error as `+`, not silently wrap.
 #[test]
 fn parity_list_sum_overflow() {
     let src = "print([9223372036854775807, 1].sum())\n";
@@ -5135,8 +5129,8 @@ fn parity_list_sum_overflow() {
     );
 }
 
-/// A list containing any float takes the float path — would-overflow ints must NOT fault and
-/// both engines must agree (guards against the int checked_add being hoisted above any_float).
+/// A list containing any float takes the float path — would-overflow ints must NOT fault
+/// (guards against the int checked_add being hoisted above any_float).
 #[test]
 fn parity_list_sum_mixed_float() {
     let src = "print([9223372036854775807, 1, 0.0].sum())\n";
@@ -5239,7 +5233,7 @@ fn parity_list_sort_by_nested_list_gc_stress() {
 fn parity_map_closure_free_generic_call() {
     // Bug D: `xs.map(fn(x): ident(x))` where `ident[T](x: T) -> T` type-checks to List[int] (the
     // closure-return loop-back recovers `map`'s `U` from the nested free generic call). Runtime is
-    // generic-erased, so both engines print the same `2`.
+    // generic-erased, so it prints `2`.
     let src = "fn ident[T](x: T) -> T:\n    return x\nfn main():\n    xs := [1, 2, 3]\n    ys := xs.map(fn(x): ident(x))\n    print(ys[0] + 1)\nmain()\n";
     assert_golden_out(src, "2\n");
     assert_eq!(vm_outcome(src).unwrap(), "2\n");
@@ -5249,8 +5243,7 @@ fn parity_map_closure_free_generic_call() {
 fn parity_fold_closure_free_generic_call() {
     // Bug D (adversarial-review fix): `xs.fold(0, fn(acc, x): ident(x))` where `ident[T](x: T) -> T`
     // type-checks (fold's `U` pinned `int` by `init`, closure body re-inferred `int`). The reducer
-    // returns the last element via identity → `s = 3`, `print(s + 1)` = `4`. Generic-erased runtime,
-    // so both engines print the same.
+    // returns the last element via identity → `s = 3`, `print(s + 1)` = `4`. Generic-erased runtime.
     let src = "fn ident[T](x: T) -> T:\n    return x\nfn main():\n    xs := [1, 2, 3]\n    s := xs.fold(0, fn(acc, x): ident(x))\n    print(s + 1)\nmain()\n";
     assert_golden_out(src, "4\n");
     assert_eq!(vm_outcome(src).unwrap(), "4\n");
@@ -5260,7 +5253,7 @@ fn parity_fold_closure_free_generic_call() {
 fn parity_free_fn_hof_map() {
     // Bug D free-fn analog: `mymap([1,2,3], fn(x): x*2)` where `mymap[U](..., fn(int)->U) -> List[U]`
     // type-checks to List[int] (the closure-return loop-back now runs on the free-fn path too). Runtime
-    // is generic-erased, so both engines print the same `3` (ys=[2,4,6], ys[0]+1).
+    // is generic-erased, so it prints `3` (ys=[2,4,6], ys[0]+1).
     let src = "fn mymap[U](xs: List[int], f: fn(int) -> U) -> List[U]:\n    return xs.map(f)\nfn main():\n    ys := mymap([1, 2, 3], fn(x): x * 2)\n    print(ys[0] + 1)\nmain()\n";
     assert_golden_out(src, "3\n");
     assert_eq!(vm_outcome(src).unwrap(), "3\n");
@@ -5269,7 +5262,7 @@ fn parity_free_fn_hof_map() {
 #[test]
 fn parity_free_fn_hof_apply_sibling() {
     // `apply[A,B](f: fn(A)->B, a: A) -> B` with `apply(fn(x): x*2, 5)`: A pinned int by the sibling
-    // value arg, B (return-only) recovered from the closure body → int, so `y + 1` = 11. Both engines.
+    // value arg, B (return-only) recovered from the closure body → int, so `y + 1` = 11.
     let src = "fn apply[A, B](f: fn(A) -> B, a: A) -> B:\n    return f(a)\nfn main():\n    y := apply(fn(x): x * 2, 5)\n    print(y + 1)\nmain()\n";
     assert_golden_out(src, "11\n");
     assert_eq!(vm_outcome(src).unwrap(), "11\n");
@@ -5280,7 +5273,7 @@ fn parity_free_fn_hof_sibling_closure_param() {
     // adversarial-review bug 1: `pair[T](f: fn()->T, g: fn(T)->int) -> int` with
     // `pair(fn(): 5, fn(x): x + 1)`. `T` is recovered from the FIRST closure's concrete return (int)
     // before the un-inferable-param probe runs, so the SECOND closure's `x: T` param is not rejected.
-    // Runtime is generic-erased → both engines print `6`.
+    // Runtime is generic-erased → prints `6`.
     let src = "fn pair[T](f: fn() -> T, g: fn(T) -> int) -> int:\n    return g(f())\nfn main():\n    print(pair(fn(): 5, fn(x): x + 1))\nmain()\n";
     assert_golden_out(src, "6\n");
     assert_eq!(vm_outcome(src).unwrap(), "6\n");
@@ -5303,7 +5296,7 @@ fn golden_hello_via_run_file() {
 /// touches EVERY concurrency primitive (Channel incl. bounded-cap/try_send backpressure, wait:,
 /// parallel: nursery, spawn, Executor incl. submit_result, Shared/RwShared/Atomic, concurrent
 /// collections, cancel, timer, and the airlock). It is deterministic by construction, so it is two
-/// tests at once: the 49 self-checks must all PASS (golden), and serial-VM must byte-match M:N.
+/// tests at once: the 49 self-checks must all PASS, and the output must byte-match `.expected`.
 #[test]
 fn golden_concurrent_jobs_both_engines() {
     let path = fixture("examples/concurrent_jobs.chz");
@@ -5339,8 +5332,8 @@ fn golden_mutate_via_run_file() {
 
 /// `examples/collection_ops.chz` — golden coverage of every collection operator (gap #3): list
 /// `+`/`*` and set `| & - ^` (multi-element, empty, type-correct mixes). Uses `std.io`, so it
-/// runs through `run_file` (module resolution) and asserts two-engine parity via
-/// `assert_file_parity` (VM==interp==expected).
+/// runs through `run_file` (module resolution) and asserts byte-identical output against
+/// `.expected`.
 #[test]
 fn golden_collection_ops_via_run_file() {
     let path = fixture("examples/collection_ops.chz");
@@ -5352,7 +5345,7 @@ fn golden_collection_ops_via_run_file() {
 
 /// Golden: `Self` usable in inherent struct/enum/newtype method signatures + bodies (not
 /// protocols-only). Runs end-to-end on the VM and byte-matches both the `.expected` file and the
-/// M:N engine (parity via `assert_file_parity`).
+/// M:N engine.
 #[test]
 fn golden_self_method_via_run_file() {
     let path = fixture("examples/self_method.chz");
@@ -5364,7 +5357,7 @@ fn golden_self_method_via_run_file() {
 
 /// Golden: the `Contains` operator protocol (L5) — `x in obj` dispatches to a user
 /// `contains(self, item) -> bool` on structs (incl. generic `Box[T]`) and enums. Byte-matches the
-/// `.expected` file and the M:N engine (parity via `assert_file_parity`).
+/// `.expected` file and the M:N engine.
 #[test]
 fn golden_contains_protocol_via_run_file() {
     let path = fixture("examples/contains_protocol.chz");
@@ -5376,7 +5369,7 @@ fn golden_contains_protocol_via_run_file() {
 
 /// Golden: compound assignment (`+=`/`-=`/…) honors struct/enum/newtype operator overloading —
 /// `a += V(10)` produces the same value as `a = a + V(10)`. Byte-matches the `.expected` file and
-/// the M:N engine (parity via `assert_file_parity`).
+/// the M:N engine.
 #[test]
 fn golden_compound_overload_via_run_file() {
     let path = fixture("examples/compound_overload.chz");
@@ -5457,9 +5450,8 @@ fn golden_os_queries() {
     );
 }
 
-/// chdir(abs) -> Ok on a real dir, Err on a missing one; serial==M:N (both run the same
-/// absolute `set_current_dir` in the same process, so the second sequential engine run is
-/// idempotent). Takes the fs scratch lock + restores cwd (chdir mutates PROCESS-GLOBAL cwd).
+/// chdir(abs) -> Ok on a real dir, Err on a missing one. Takes the fs scratch lock + restores
+/// cwd (chdir mutates PROCESS-GLOBAL cwd).
 #[test]
 fn golden_os_chdir() {
     let _g = crate::native::fs::FS_SCRATCH_LOCK
@@ -5474,8 +5466,8 @@ fn golden_os_chdir() {
 }
 
 /// environ() must yield keys in a DETERMINISTIC (sorted) order. The source is a std HashMap whose
-/// iteration order is randomized per-instance, so `os_environ` sorts before lowering — otherwise the
-/// two engines (each a separate HashMap) diverge in key order. This ITERATES the map (not key-index),
+/// iteration order is randomized per-instance, so `os_environ` sorts before lowering — otherwise two
+/// separate runs (each a fresh HashMap instance) could diverge in key order. This ITERATES the map (not key-index),
 /// exercising the ordering the three key-lookup tests never touch.
 #[test]
 fn golden_os_environ_deterministic_order() {
@@ -5502,11 +5494,10 @@ fn golden_os_environ_deterministic_order() {
     assert_eq!(out, "alpha\nbeta\ncee\ndee\neff\nmid\nqux\nzed\n");
 }
 
-/// setenv inside a spawned task must be visible to the parent after the nursery joins — on BOTH
-/// engines. The serial engine runs tasks on the shared parent Vm, so the write lands directly; the
+/// setenv inside a spawned task must be visible to the parent after the nursery joins. The
 /// M:N engine gives each worker a SHARED (Arc) handle to the one env map, not a per-worker clone, so
 /// the write survives back to the parent. Process-global env, like Python `os.environ` / Go
-/// `os.Setenv` (visible across threads). Without sharing, M:N prints "unset" and diverges from serial.
+/// `os.Setenv` (visible across threads). Without sharing, this would print "unset" instead.
 #[test]
 fn golden_os_setenv_visible_across_tasks() {
     let src = "import std.io\nimport std.os\nfn t():\n    os.setenv(\"TASKVAR\", \"fromtask\")\nfn main():\n    parallel:\n        spawn: t()\n    match os.env(\"TASKVAR\"):\n        Some(v): io.print(v)\n        None: io.print(\"unset\")\nmain()";
@@ -5516,8 +5507,8 @@ fn golden_os_setenv_visible_across_tasks() {
     );
 }
 
-/// Additive std.math trig/exp/log intrinsics run end-to-end on the VM and byte-match both the
-/// `.expected` file and the interpreter (parity via `assert_file_parity`).
+/// Additive std.math trig/exp/log intrinsics run end-to-end on the VM and byte-match the
+/// `.expected` file.
 #[test]
 fn golden_math_more_via_run_file() {
     let path = fixture("examples/math_more.chz");
@@ -5529,7 +5520,7 @@ fn golden_math_more_via_run_file() {
 
 /// `std.bisect` — binary search + sorted-insert over the full boundary matrix (empty, all-equal,
 /// both ends, duplicate left/right boundary, in-place insort). Runs end-to-end on the VM, byte-matches
-/// the `.expected` file and stays identical on the M:N engine (parity via `assert_file_parity`).
+/// the `.expected` file.
 #[test]
 fn golden_bisect_via_run_file() {
     let path = fixture("examples/bisect.chz");
@@ -5541,7 +5532,7 @@ fn golden_bisect_via_run_file() {
 
 /// `std.memoize` — `memoize1` caches per distinct argument (single-eval proven by a captured
 /// call-counter: two distinct args → counter == 2, cache hits do NOT re-run `f`). Runs end-to-end on
-/// the VM, byte-matches the `.expected` file and stays identical on the M:N engine.
+/// the VM, byte-matches the `.expected` file.
 #[test]
 fn golden_memoize_via_run_file() {
     let path = fixture("examples/memoize.chz");
@@ -5553,7 +5544,7 @@ fn golden_memoize_via_run_file() {
 
 /// `std.duration` — Go-like time spans (pure-Chezzi). `to_string`/`parse` across the shape space,
 /// parse round-trips, malformed → Err, accessors + arithmetic. Deterministic (no clock) → runs
-/// end-to-end on the VM, byte-matches the `.expected` file and stays identical on the M:N engine.
+/// end-to-end on the VM, byte-matches the `.expected` file.
 #[test]
 fn golden_duration_via_run_file() {
     let path = fixture("examples/duration.chz");
@@ -5568,7 +5559,7 @@ fn golden_duration_via_run_file() {
 /// `std.csv` — RFC 4180 parse/format round-trip over every hard case (embedded comma, `""` escaped
 /// quote, embedded newline in a quoted field, empty field, sandwiched empty record, unicode) plus
 /// direct parse asserts (empty input -> [], trailing separator -> no spurious record). Runs
-/// end-to-end on the VM, byte-matches the `.expected` file and stays identical on the M:N engine.
+/// end-to-end on the VM, byte-matches the `.expected` file.
 #[test]
 fn golden_csv_via_run_file() {
     let path = fixture("examples/csv.chz");
@@ -5580,7 +5571,7 @@ fn golden_csv_via_run_file() {
 
 /// `Channel.trip()` — the manual level-trigger latch (behind `std.cancel`'s `done()`). Tripping
 /// makes the channel permanently ready (`recv`/`try_recv` yield `true`, fanning out). Deterministic
-/// on every engine → golden + parity.
+/// on every engine → a golden test.
 #[test]
 fn golden_channel_trip_via_run_file() {
     let path = fixture("examples/channel_trip.chz");
@@ -5591,7 +5582,7 @@ fn golden_channel_trip_via_run_file() {
 }
 
 /// `std.cancel` — a manual token: `cancelled()`/`reason()` before/after `cancel()`, `done()`
-/// readiness, idempotent re-cancel. Pure `Shared`/latch, no timing → golden + parity on every engine.
+/// readiness, idempotent re-cancel. Pure `Shared`/latch, no timing → a golden test.
 #[test]
 fn golden_cancel_manual_via_run_file() {
     let path = fixture("examples/cancel_manual.chz");
@@ -5602,7 +5593,7 @@ fn golden_cancel_manual_via_run_file() {
 }
 
 /// `std.cancel` — timeouts + `wait:` integration (`done()` as a wait arm). All cases deterministic
-/// (pre-loaded channels / already-elapsed deadline) → golden + parity.
+/// (pre-loaded channels / already-elapsed deadline) → a golden test.
 #[test]
 fn golden_cancel_timeout_wait_via_run_file() {
     let path = fixture("examples/cancel_timeout_wait.chz");
@@ -5753,9 +5744,8 @@ fn cancel_derive_free_fn_form() {
     assert_eq!(out, "before: false\nafter: true\n");
 }
 
-/// `std.cancel` tree-propagation golden (VM): `examples/cancel_tree.chz` byte-matches `.expected`
-/// and stays identical to the interpreter (`assert_file_parity`). Deterministic (manual cancel +
-/// pre-ready/zero timers, same task) → golden on every engine.
+/// `std.cancel` tree-propagation golden (VM): `examples/cancel_tree.chz` byte-matches `.expected`.
+/// Deterministic (manual cancel + pre-ready/zero timers, same task) → a golden test.
 #[test]
 fn golden_cancel_tree_via_run_file() {
     let path = fixture("examples/cancel_tree.chz");
@@ -5765,9 +5755,9 @@ fn golden_cancel_tree_via_run_file() {
     assert_eq!(out, expected);
 }
 
-/// C-ABI FFI golden (VM twin of `interp::golden_ffi_chz`): the `extern "lib":` block calls
-/// `cos`/`sqrt` (libm) and `strlen` (libc) via dlopen+libffi on the VM, byte-matches `.expected`,
-/// and stays identical to the interpreter (`assert_file_parity`). Linux-only (needs libm/libc).
+/// C-ABI FFI golden: the `extern "lib":` block calls
+/// `cos`/`sqrt` (libm) and `strlen` (libc) via dlopen+libffi on the VM, byte-matches `.expected`.
+/// Linux-only (needs libm/libc).
 #[test]
 #[cfg(target_os = "linux")]
 fn golden_ffi_chz_via_run_file() {
@@ -5778,10 +5768,10 @@ fn golden_ffi_chz_via_run_file() {
     assert_eq!(out, expected);
 }
 
-/// C-ABI opaque `ptr` handle golden (VM twin of `interp::golden_ffi_ptr_chz`): the `extern "lib":`
+/// C-ABI opaque `ptr` handle golden: the `extern "lib":`
 /// block opens a libc `FILE*` (`fopen -> ptr`), hands the handle back to `fclose`, and detects a
-/// NULL handle via `std.ffi.is_null` / `== std.ffi.null()`. Byte-matches `.expected` and stays
-/// identical to the interpreter (`assert_file_parity`). Linux-only (needs libc).
+/// NULL handle via `std.ffi.is_null` / `== std.ffi.null()`. Byte-matches `.expected`.
+/// Linux-only (needs libc).
 #[test]
 #[cfg(target_os = "linux")]
 fn golden_ffi_ptr_chz_via_run_file() {
@@ -5792,11 +5782,10 @@ fn golden_ffi_ptr_chz_via_run_file() {
     assert_eq!(out, expected);
 }
 
-/// C struct BY VALUE golden (VM twin of `interp::golden_ffi_struct_chz`): the `extern "lib":`
+/// C struct BY VALUE golden: the `extern "lib":`
 /// block binds `div_t div(int, int)` — a libc fn taking two scalars and returning a small POD
 /// struct BY VALUE — to a Chezzi `struct DivT{quot, rem}`. `div(17, 5) == {3, 2}` (pure, always
-/// present). Byte-matches `.expected` and stays identical to the interpreter (`assert_file_parity`
-/// runs the serial VM + interp). The `--parallel`/M:N engine is NOT driven here; the returned
+/// present). Byte-matches `.expected`. The `--parallel`/M:N engine is NOT driven here; the returned
 /// `NativeRet::Struct` already crosses the M:N airlock by the same deep-copy std.regex uses, so the
 /// path is exercised, just not by this golden. Linux-only.
 #[test]
@@ -5809,11 +5798,10 @@ fn golden_ffi_struct_chz_via_run_file() {
     assert_eq!(out, expected);
 }
 
-/// CAPSTONE C-buffer FFI golden (VM twin of `interp::golden_ffi_qsort_chz`): sort a Chezzi list
+/// CAPSTONE C-buffer FFI golden: sort a Chezzi list
 /// with libc `qsort`, composing `ffi.alloc` + `store_int64_at` + a Chezzi `qsort` comparator
 /// callback (`load_int64` both `const void*` sides) + `load_int64_at` read-back + `defer ffi.free`.
-/// The marquee proof that callbacks + deref + alloc all compose. Byte-matches `.expected` and stays
-/// identical to the interpreter (`assert_file_parity` runs the serial VM + interp). Linux-only
+/// The marquee proof that callbacks + deref + alloc all compose. Byte-matches `.expected`. Linux-only
 /// (needs libc); the fixed 8-byte int64 stride matches the comparator on every LP64 unix.
 #[test]
 #[cfg(target_os = "linux")]
@@ -5825,7 +5813,7 @@ fn golden_ffi_qsort_chz_via_run_file() {
     assert_eq!(out, expected);
     // Also exercise the M:N `--parallel` engine: the qsort comparator re-enters the VM as a
     // libffi callback under worker pinning — the highest-risk callback+alloc composition, and
-    // the one path the cooperative-VM + interp parity above does not cover. Keeps the engine
+    // the one path the single-file golden above does not cover. Keeps the engine
     // matrix honest (the sibling deref test runs `--parallel` too).
     let (par_out, _par_err, par_res, _) =
         run_file_with(&path, crate::native::HostConfig::default());
@@ -5836,9 +5824,9 @@ fn golden_ffi_qsort_chz_via_run_file() {
     );
 }
 
-/// C-ABI deeper `str` returns golden (VM twin of `interp::golden_ffi_str_chz`): `strdup -> owned_str`
+/// C-ABI deeper `str` returns golden: `strdup -> owned_str`
 /// (owned `char*` copied into a Chezzi `str` AND freed) and `getenv -> str?` (NULL → `None`). Byte-
-/// matches `.expected` and stays identical to the interpreter (`assert_file_parity`). Linux-only.
+/// matches `.expected`. Linux-only.
 #[test]
 #[cfg(target_os = "linux")]
 fn golden_ffi_str_chz_via_run_file() {
@@ -5849,10 +5837,10 @@ fn golden_ffi_str_chz_via_run_file() {
     assert_eq!(out, expected);
 }
 
-/// C-ABI fixed-width integer marshalling golden (VM twin of `interp::golden_ffi_int_chz`): `atoi
+/// C-ABI fixed-width integer marshalling golden: `atoi
 /// -> int32` (sign-extend), `htonl(uint32) -> uint32` (zero-extend, high-bit positive), `abs(int8)
-/// -> int8` (signed round-trip + param truncation per a C cast). Byte-matches `.expected` and stays
-/// identical to the interpreter (`assert_file_parity`). Linux-only (needs libc).
+/// -> int8` (signed round-trip + param truncation per a C cast). Byte-matches `.expected`. Linux-only
+/// (needs libc).
 // The example's `htonl` lines encode little-endian oracles, so the golden is LE-gated.
 #[test]
 #[cfg(all(target_os = "linux", target_endian = "little"))]
@@ -5865,11 +5853,11 @@ fn golden_ffi_int_chz_via_run_file() {
 }
 
 /// A complete self-contained program (merge sort + binary search + stats over std.math) runs on
-/// the VM, byte-matches `.expected`, and stays identical to the interpreter.
+/// the VM, byte-matches `.expected`.
 #[test]
 fn golden_overflow_via_run_file() {
     // The integer-overflow policy, end-to-end: every overflow (arith, neg, div, math.abs) is a
-    // recoverable fault, identical on both engines.
+    // recoverable fault, identical.
     let path = fixture("examples/overflow.chz");
     let expected = std::fs::read_to_string(fixture("examples/overflow.expected")).unwrap();
     let (out, _err, res, _) = run_file(&path);
@@ -5898,7 +5886,7 @@ fn golden_stdlib_cmp_via_run_file() {
     assert_eq!(out, expected);
 }
 
-/// std.flag: `--name value` + `--count=3` `=`-form + a trailing positional, both engines.
+/// std.flag: `--name value` + `--count=3` `=`-form + a trailing positional.
 #[test]
 fn flag_parse_value_and_eq_form_parity() {
     let out = golden_entry(
@@ -5934,7 +5922,7 @@ fn flag_bool_presence_and_terminator_parity() {
     assert_eq!(out, "true\n--notaflag x\n");
 }
 
-/// std.flag: unknown flag / missing value / non-int are clean `Err`, never a fault, both engines.
+/// std.flag: unknown flag / missing value / non-int are clean `Err`, never a fault.
 #[test]
 fn flag_error_paths_parity() {
     let unknown = golden_entry(
@@ -6000,7 +5988,7 @@ fn golden_flag_demo_via_run_file() {
 /// std.log golden: `examples/log_demo.chz` exercises gating, all 4 level formats, set_level, an
 /// injectable prefix, the pure `format_line`, and stderr-default + stdout target in one program.
 /// Log lines land on STDERR, so `.expected` pins the STDERR stream; discrimination asserts prove the
-/// stream routing; and it stays identical on the serial + M:N engines (parity compares both streams).
+/// stream routing against both streams.
 #[test]
 fn golden_log_demo_via_run_file() {
     let path = fixture("examples/log_demo.chz");
@@ -6047,7 +6035,7 @@ fn golden_str_methods_via_run_file() {
 #[test]
 fn reduce_empty_list_faults_with_named_message() {
     let src = "import std.iter as iter\ne: List[int] = []\nprint(iter.reduce(e, fn(a: int, b: int) -> int: a + b))\n";
-    // Faults identically on both engines (`golden_entry_fault` asserts serial == M:N).
+    // Faults identically (`golden_entry_fault` asserts against a literal expectation).
     let e = golden_entry_fault(src);
     assert!(
         e.contains("reduce: empty list with no initial value"),
@@ -6132,7 +6120,7 @@ fn test_lazy_islice_consumes_exactly_stop() {
 
 // std.string.count with an EMPTY substring matches Python/Go (`len(s)+1`), not 0 (the old guard drifted
 // from both ancestors + from its own sibling `index_of(s,"")==0`). Both engines agreed on the wrong value
-// before the fix, so the parity oracle was blind — this pins the corrected value on both engines.
+// before the fix, so the parity oracle was blind — this pins the corrected value.
 #[test]
 fn string_count_empty_substring_matches_python() {
     let out = golden_entry(
@@ -6177,16 +6165,16 @@ fn test_lazy_imap_ifilter_compose() {
 }
 
 /// std.rand goldens — run as ONE test so they execute sequentially. The PRNG is a process-global
-/// (shared by VM + interp + every test in the run); two *separate* `#[test]`s seeding-then-drawing
+/// (shared by the VM + every test in the run); two *separate* `#[test]`s seeding-then-drawing
 /// would interleave on that global under the test harness's parallel runner and diverge. Drawn
 /// sequentially within one test body, each program's `rand.seed()`-then-draw stream is
-/// deterministic and byte-identical across engines (`assert_file_parity` checks VM == interp).
+/// deterministic and byte-identical against `.expected`.
 /// (This is the same concurrent-draw limit documented in docs/stdlib.md §std.rand — the goldens
 /// avoid it by serializing.)
 ///
 /// - `rand_seeded`: all four scalar fns (seed/int/float/bool), seeded → deterministic values.
 /// - `rand_shape`: UNSEEDED (OS-entropy path); asserts only range/shape, prints fixed "ok" lines
-///   (value-independent, so byte-identical across engines despite the nondeterministic seed).
+///   (value-independent, so byte-identical against `.expected` despite the nondeterministic seed).
 /// - `rand_iter`: std.iter `shuffle`/`choice`/`sample` (pure Chezzi over native `rand.int`).
 #[test]
 fn golden_rand_via_run_file() {
@@ -6211,7 +6199,7 @@ fn golden_rand_via_run_file() {
 
 /// std.path golden: `examples/path.chz` — the pure-Chezzi unix path-STRING ops
 /// (is_abs/is_rel/basename/dirname/split/ext/stem/with_ext/normalize/join), end-to-end on the
-/// VM, byte-identical to `.expected` and the interpreter (assert_file_parity == VM==interp).
+/// VM, byte-identical to `.expected`.
 #[test]
 fn golden_path_via_run_file() {
     let path = fixture("examples/path.chz");
@@ -6223,7 +6211,7 @@ fn golden_path_via_run_file() {
 
 /// std.datetime golden: `examples/datetime.chz` — the pure-Chezzi civil-calendar module
 /// (from_epoch/to_epoch/formatters/duration/leap/weekday on FIXED epochs only, no clock),
-/// end-to-end on the VM, byte-identical to `.expected` and the interpreter (assert_file_parity).
+/// end-to-end on the VM, byte-identical to `.expected`.
 #[test]
 fn golden_datetime_via_run_file() {
     let path = fixture("examples/datetime.chz");
@@ -6236,7 +6224,7 @@ fn golden_datetime_via_run_file() {
 /// std.concurrency.collection golden: `examples/concurrent_collection.chz` — the pure-Chezzi
 /// thread-safe `ConcurrentMap`/`ConcurrentCounter` wrappers over `RwShared[Map[...]]`. The program
 /// is DETERMINISTIC by construction (single-write-lock RMW for the counter, each-own-key for the
-/// map), so its output is identical on the VM, the interpreter (assert_file_parity), and (verified
+/// map), so its output is identical on the VM against `.expected`, and (verified
 /// manually) `--parallel`.
 #[test]
 fn golden_concurrent_collection_via_run_file() {
@@ -6250,7 +6238,7 @@ fn golden_concurrent_collection_via_run_file() {
 
 /// std.collections golden: `examples/collections.chz` — the pure-Chezzi Heap/Deque/Counter
 /// module (min/max heap + from_list, two-stack deque both ends, Counter most_common ties),
-/// end-to-end on the VM, byte-identical to `.expected` and the interpreter (assert_file_parity).
+/// end-to-end on the VM, byte-identical to `.expected`.
 #[test]
 fn golden_collections_via_run_file() {
     let path = fixture("examples/collections.chz");
@@ -6380,7 +6368,7 @@ fn golden_comprehensions_nested_via_run_file() {
 /// Stateful-iterator comprehension golden: `examples/comprehension_iter_state.chz` — a
 /// comprehension whose element/guard read a struct iterator's LIVE, per-`next()` state. The
 /// iterator must be driven lazily (interleaved with the body), so this byte-matches `.expected`
-/// and stays identical on interp + VM (regression for the eager-drain parity bug).
+/// (regression for the eager-drain bug).
 #[test]
 fn golden_comprehension_iter_state_via_run_file() {
     let path = fixture("examples/comprehension_iter_state.chz");
@@ -6439,7 +6427,7 @@ fn golden_optchain_via_run_file() {
 
 /// Runtime stack trace: a faulting nested call reports the error line + the call chain (innermost
 /// first) with each call's line. Asserted on the VM, and the interp must produce the IDENTICAL
-/// formatted trace (frames carry the same call-site spans on both engines).
+/// formatted trace (frames carry the same call-site spans).
 #[test]
 fn stack_trace_reports_call_chain_on_both_engines() {
     let path = fixture("examples/stack_trace.chz");
@@ -6457,7 +6445,7 @@ fn stack_trace_reports_call_chain_on_both_engines() {
         "got: {vm_fmt}"
     );
 
-    // Interp parity: identical formatted trace.
+    // Re-run: the formatted trace must be identical.
     let (_o, _er, ip_res, _) = run_file(&path);
     let ie = ip_res.expect_err("program should fault");
     let ip_fmt = format_trace(&ie.message, ie.span, &ie.trace);
@@ -6516,7 +6504,7 @@ fn recursion_trace_is_bounded_and_collapsed() {
     );
 }
 
-/// Gap #8 parity: the bounded/collapsed trace must be byte-identical across both engines.
+/// Gap #8: the bounded/collapsed trace must be byte-identical against the golden.
 #[test]
 fn recursion_trace_parity_vm_vs_interp() {
     let path = deep_recursion_fixture("parity");
@@ -6566,7 +6554,7 @@ fn format_trace_caps_distinct_name_chain() {
 
 /// Gap #8 cap boundary: with many short same-name runs the collapse emits `× N` markers; the cap
 /// must never split a marker from its `at` line (markers stay inside their entry). Every `× N`
-/// line must be immediately preceded by its `at` line, head and tail alike, and engines agree.
+/// line must be immediately preceded by its `at` line, head and tail alike.
 #[test]
 fn format_trace_cap_never_orphans_collapse_marker() {
     let span = Span::RUNTIME;
@@ -6639,8 +6627,8 @@ fn recovered_fault_does_not_pollute_later_trace() {
 }
 
 /// A `defer`red call that itself faults supersedes the original fault (Go semantics); the trace
-/// must reflect the DEFERRED fault's chain (deeper, includes the deferred fn), identically on
-/// both engines — not the original body fault's chain.
+/// must reflect the DEFERRED fault's chain (deeper, includes the deferred fn) —
+/// not the original body fault's chain.
 #[test]
 fn deferred_fault_trace_supersedes_on_both_engines() {
     let src = "fn boom() -> int:\n    return 1 / 0\nfn worker() -> int:\n    defer boom()\n    xs := [1, 2]\n    return xs[9]\nfn main():\n    print(worker())\nmain()\n";
@@ -6671,7 +6659,7 @@ fn deferred_fault_trace_supersedes_on_both_engines() {
 /// entry `Vm`, so the task's callee frames survived into `fault_trace` and printed `at boom` /
 /// `at <closure>` / `at main`, while M:N ran each task on an isolated worker `Vm` and discarded that
 /// worker's trace, printing only `at main`. Both engines now converge on `[main]` — matching a plain
-/// nursery-task panic (already `at main` on both engines, asserted by the neighbor guard below).
+/// nursery-task panic (already `at main`, asserted by the neighbor guard below).
 #[test]
 fn executor_task_fault_trace_matches_on_both_engines() {
     let dir = std::env::temp_dir().join("chezzi_b4_executor_trace");
@@ -6693,8 +6681,8 @@ fn executor_task_fault_trace_matches_on_both_engines() {
     assert_eq!(se.message, mn.message, "same fault message");
     assert_eq!(se.span, mn.span, "same fault location");
 
-    // Neighbor guard: a plain nursery-task panic (non-Executor) was already `at main` on both
-    // engines — the fix must not regress it.
+    // Neighbor guard: a plain nursery-task panic (non-Executor) was already `at main` —
+    // the fix must not regress it.
     let nu_src = "fn boom():\n    panic(\"kaboom\")\nfn main():\n    parallel:\n        spawn: boom()\nmain()\n";
     let nu_path = dir.join("nu.chz");
     std::fs::write(&nu_path, nu_src).unwrap();
@@ -6709,7 +6697,7 @@ fn executor_task_fault_trace_matches_on_both_engines() {
 
     // B4 review edge 1: IMPLICIT end-of-program drain (no `ex.shutdown()`) — the executor is
     // reaped by `drain_live_executors` AFTER `main` returned, so there is no enclosing `run_until`
-    // to re-capture at: both engines print the fault with an EMPTY trace. Parity holds (both []).
+    // to re-capture at: the fault prints with an EMPTY trace.
     let im_src = "import std.concurrency\nfn boom():\n    panic(\"kaboom\")\nfn main():\n    ex := Executor()\n    ex.submit(fn(): boom())\nmain()\n";
     let im_path = dir.join("implicit.chz");
     std::fs::write(&im_path, im_src).unwrap();
@@ -6816,7 +6804,7 @@ fn golden_tuple_match_via_run_file() {
 }
 
 /// `std.os.exit(code)` golden: `examples/exit.chz` halts at the negative branch with status 2.
-/// Byte-matches `.expected` on both engines and both report the same exit code.
+/// Byte-matches `.expected` and both report the same exit code.
 #[test]
 fn golden_exit_via_run_file() {
     let path = fixture("examples/exit.chz");
@@ -6869,7 +6857,7 @@ fn golden_knapsack_via_run_file() {
 }
 
 /// `Iterator[T]` golden: a generic fn bounded `[S: Iterator[T], T]` over list/str/set/struct,
-/// with the element type flowing into returns. Parity-checked across both engines.
+/// with the element type flowing into returns.
 #[test]
 fn golden_iterator_bound_via_run_file() {
     let path = fixture("examples/iterator_bound.chz");
@@ -6880,7 +6868,7 @@ fn golden_iterator_bound_via_run_file() {
 }
 
 /// Lazy iterator adapters (Take/Mapped over an infinite Count) — the no-`yield` story. The inner
-/// `self.inner.next()` recovers the element type through the `I: Iterator[T]` bound on both engines.
+/// `self.inner.next()` recovers the element type through the `I: Iterator[T]` bound.
 #[test]
 fn golden_iter_adapters_via_run_file() {
     let path = fixture("examples/iter_adapters.chz");
@@ -6971,7 +6959,7 @@ fn parity_map_compound_assign_missing_key_errors() {
 // ----- Hashable struct keys (hash-table map/set) -----
 
 /// A struct used as a map key but MISSING `hash()` is a checker error — but `run_capture` bypasses
-/// the checker, so the runtime must error consistently (not panic) on both engines.
+/// the checker, so the runtime must error consistently (not panic).
 #[test]
 fn parity_map_struct_key_missing_hash_errors() {
     let src = "\
@@ -6990,7 +6978,7 @@ main()";
 
 /// REGRESSION (AsInt relocation): a non-int LIST index now errors at runtime in `GetIndex`,
 /// with the SAME message the removed `AsInt` produced. The checker is bypassed by `run_capture`,
-/// so this exercises the relocated runtime validation on both engines.
+/// so this exercises the relocated runtime validation.
 #[test]
 fn parity_list_non_int_index_still_errors() {
     let src = "xs := [1, 2, 3]\nprint(xs[\"a\"])\n";
@@ -7056,8 +7044,8 @@ fn parity_tuple_element_access() {
 
 #[test]
 fn parity_tuple_element_out_of_range_errors() {
-    // The checker would catch `.2` statically, but `t` here is built so both engines hit the
-    // runtime bounds check with the identical message — parity on the error path.
+    // The checker would catch `.2` statically, but `t` here is built so the runtime bounds
+    // check fires with a clear message.
     assert_golden_out("t := (1, 2)\nprint(t.0)\nprint(t.1)\n", "1\n2\n");
 }
 
@@ -7093,19 +7081,19 @@ fn parity_tuple_heap_elements_gc_stress() {
     );
 }
 
-// ----- slicing + Index/IndexSet/Slice protocol dispatch (VM ↔ interp parity) -----
+// ----- slicing + Index/IndexSet/Slice protocol dispatch -----
 
 #[test]
 fn slice_list_and_str_parity() {
     assert_golden_out("print([1, 2, 3, 4, 5][1:3])\n", "[2, 3]\n");
     assert_golden_out("print(\"hello\"[0:2])\n", "he\n");
-    // Open bounds + step + reverse — both engines byte-identical.
+    // Open bounds + step + reverse.
     assert_golden_out("print([1, 2, 3, 4, 5][2:])\n", "[3, 4, 5]\n");
     assert_golden_out("print([1, 2, 3, 4, 5][:2])\n", "[1, 2]\n");
     assert_golden_out("print([1, 2, 3, 4, 5][::2])\n", "[1, 3, 5]\n");
     assert_golden_out("print([1, 2, 3, 4, 5][::-1])\n", "[5, 4, 3, 2, 1]\n");
     assert_golden_out("print(\"hello\"[::-1])\n", "olleh\n");
-    // Multibyte UTF-8 must round-trip through char-stepping (SSO/heap boundary) on both engines.
+    // Multibyte UTF-8 must round-trip through char-stepping (SSO/heap boundary).
     assert_golden_out("print(\"héllo\"[::-1])\n", "olléh\n");
     assert_golden_out("print(\"héllo\"[1:3])\n", "él\n");
 }
@@ -7124,7 +7112,7 @@ fn slice_clamped_parity() {
         vm_outcome("print([1, 2, 3][0 - 100])\n").unwrap_err(),
         "runtime error (line 1, col 7): index -100 out of bounds (len 3)"
     );
-    // Zero step faults with the same message in both engines.
+    // Zero step faults with a clear message.
     assert_eq!(
         vm_outcome("print([1, 2, 3][::0])\n").unwrap_err(),
         "runtime error (line 1, col 7): slice step cannot be zero"
@@ -7195,8 +7183,8 @@ fn slice_survives_gc_stress() {
 
 /// Closure-capture golden: `examples/closure_capture.chz` (one var, several vars, nested
 /// capture, a shared mutable box, HOF callbacks, and a hot-loop capture read) byte-identical on
-/// the VM, the interpreter, the `--parallel` engine, and its `.expected`. The two-engine parity
-/// is the oracle for M19 lever #3 (positional captures, HashMap → Vec<Value> by compile-time slot).
+/// the VM, the `--parallel` engine, and its `.expected`. This is the oracle for M19 lever #3
+/// (positional captures, HashMap → Vec<Value> by compile-time slot).
 #[test]
 fn golden_closure_capture_chz_matches_expected_and_interp() {
     let src = include_str!("../../examples/closure_capture.chz");
@@ -7374,7 +7362,7 @@ fn golden_capture_defer_latest() {
 }
 
 /// F3 / B2 (parity guard) — a closure capturing a by-reference local (a cell), invoked in a `spawn`
-/// task via `spawn f()`, produces the same result on both engines → `7` (post-join, exact-match).
+/// task via `spawn f()`, produces the same result → `7` (post-join, exact-match).
 /// A capture-bearing closure crosses the task boundary by DEEP value on BOTH engines
 /// (`do_spawn` → `cross_spawn_callee` → `wire_callable`/`from_wire`), matching the M:N
 /// `prepare_worker`/`to_snap` deep-copy — so the task's `f` and its cells are isolated from the
@@ -7410,7 +7398,7 @@ fn golden_capture_spawn_closure_mutates_isolated() {
     assert_eq!(
         out,
         run_capture(src).expect("parallel run"),
-        "serial vs M:N (capture-bearing closure crosses by deep value on both engines)"
+        "serial vs M:N (capture-bearing closure crosses by deep value)"
     );
 }
 
@@ -7440,7 +7428,7 @@ fn golden_capture_spawn_closure_owner_write_isolated() {
 /// F1 — THE ONE DELIBERATE DIVERGENCE FROM GO: a plain captured local sent into a `spawn` is
 /// snapshot-copied into an independent per-task cell (the airlock deep-copies it), so the task's
 /// `x = x + 1` mutates only its OWN copy — the parent's `x` stays `0` (Go shares+races → `1`). The
-/// print is post-join, so serial == M:N == `0` exactly (not order-sensitive). This is the
+/// print is post-join, so the value is `0` exactly (not order-sensitive). This is the
 /// memory-safety line; do NOT "fix" toward Go.
 #[test]
 fn golden_capture_spawn_isolated() {
@@ -7499,7 +7487,7 @@ fn golden_capture_shared_across_tasks() {
     let src = include_str!("../../examples/capture_shared_across_tasks.chz");
     let expected = include_str!("../../examples/capture_shared_across_tasks.expected");
     let out = golden_file_entry(&[("main.chz", src)], "main.chz");
-    assert_eq!(out, expected, "serial == M:N == .expected");
+    assert_eq!(out, expected, "== .expected");
 }
 
 /// F4 — two tasks capture the SAME `Shared` counter and each bump it; confirms N-tasks-1-Shared
@@ -7509,7 +7497,7 @@ fn golden_capture_shared_across_tasks_two() {
     let src = include_str!("../../examples/capture_shared_across_tasks_two.chz");
     let expected = include_str!("../../examples/capture_shared_across_tasks_two.expected");
     let out = golden_file_entry(&[("main.chz", src)], "main.chz");
-    assert_eq!(out, expected, "serial == M:N == .expected");
+    assert_eq!(out, expected, "== .expected");
 }
 
 /// D2 — recursion: each frame captures its OWN local into a fresh cell; the closure per frame reads
@@ -7531,7 +7519,7 @@ fn golden_capture_recursion_percall() {
 // recursive (letrec via cell), uniform by-reference capture — identical cell model to closures. -----
 
 /// NF#4 — recursion: a nested fn calls ITSELF (letrec: its name is bound into its own cell before
-/// the body captures it). `fact(5)` == `120` on both engines.
+/// the body captures it). `fact(5)` == `120`.
 #[test]
 fn nested_fn_recursion_parity() {
     let src = "\
@@ -7548,7 +7536,7 @@ main()";
 /// Identity-preserving airlock (`WireValue::Backref`): a self-recursive nested `fn` crossing the
 /// airlock has a `Closure -> Cell -> Closure` self-cycle; the wire form assigns the Closure/Cell ids
 /// and back-references the self-edge, and `from_wire` ties the knot back (placeholder-alloc → patch).
-/// `fact(5) == 120` on both engines — previously this rejected ("recursive local fn cannot be sent").
+/// `fact(5) == 120` — previously this rejected ("recursive local fn cannot be sent").
 #[test]
 fn airlock_recursive_local_fn_round_trips_parity() {
     let src = "\
@@ -7568,7 +7556,7 @@ main()";
 /// Identity-preserving airlock — a MUTUALLY-recursive closure PAIR (`Cell_even -> Closure_even ->
 /// Cell_odd -> Closure_odd -> Cell_even`, a 4-node cycle threaded through two Cells and two Closures)
 /// crosses the airlock inside a spawned task's captured environment and ties BOTH directions of the
-/// knot. `even(10) == true` on both engines. (Nested `fn`s can't forward-reference each other, so the
+/// knot. `even(10) == true`. (Nested `fn`s can't forward-reference each other, so the
 /// pair is built from reassigned fn-typed cells — the same closure/cell cycle a mutual `fn` would form.)
 #[test]
 fn airlock_mutually_recursive_pair_round_trips() {
@@ -7589,7 +7577,7 @@ main()";
 /// Identity-preserving airlock — a recursive nested `fn` that ALSO reads an outer local (`base`). Its
 /// capture graph has the self-cell (on the DFS stack → `Backref`) AND the `base`-cell (visited once,
 /// OFF the stack → inline deep copy). The visited-set distinguishes them: the self-edge round-trips as
-/// a cycle, the outer local as an independent copy. `f(3)` reads `base == 100` on both engines.
+/// a cycle, the outer local as an independent copy. `f(3)` reads `base == 100`.
 #[test]
 fn airlock_recursive_closure_captures_outer_local_round_trips() {
     let src = "\
@@ -7639,7 +7627,7 @@ main()";
 /// a cycle threaded through struct fields + lists) crosses the airlock as a `spawn` argument and round-
 /// trips (was `maximum structural depth exceeded`). The container arms now earn a `WireValue` id +
 /// `Backref` exactly like `Cell`/`Closure`, so the cycle is preserved instead of overflowing the cap.
-/// `use_it(a)` reads `a.val == 1` on both engines.
+/// `use_it(a)` reads `a.val == 1`.
 #[test]
 fn airlock_self_ref_struct_round_trips_both() {
     let src = "\
@@ -7661,7 +7649,7 @@ main()";
 
 /// Identity-preserving airlock, DATA path — a self-referential `list` (`xs.push(xs)`, a list holding
 /// itself) crosses a `Channel[List[List[int]]].send` and round-trips. The receiving task reads the
-/// first element (`10`) and that the self-slot is the list itself (`ys[1].len() == 2`) on both engines.
+/// first element (`10`) and that the self-slot is the list itself (`ys[1].len() == 2`).
 #[test]
 fn airlock_self_ref_list_round_trips_both() {
     let src = "\
@@ -7680,7 +7668,7 @@ main()";
 
 /// Identity-preserving airlock, DATA path — a self-referential `map` (a map whose value refers back to
 /// the map) crosses a `Channel` and round-trips using the CARRIED hash on reconstruction (never re-hashes
-/// a cyclic key/value). The task reads the leaf entry's self-length on both engines.
+/// a cyclic key/value). The task reads the leaf entry's self-length.
 #[test]
 fn airlock_self_ref_map_round_trips_both() {
     let src = "\
@@ -7704,7 +7692,7 @@ main()";
 /// preserved (its own id + `Backref`), the mixed cycle is no different from a pure `Cell`/`Closure`
 /// cycle — the old `nonpreserved_depth` mixed-cycle reject (commit e8dcad7) is deleted as dead. The
 /// closure `n.f = fn: n.x` closes `Closure -> Struct(n) -> Closure`; the task calls `n.f()` and reads
-/// `n.x == 5` on both engines.
+/// `n.x == 5`.
 #[test]
 fn airlock_mixed_struct_closure_cycle_round_trips_both() {
     let src = "struct Node:\n    f: fn() -> int\n    x: int\nfn main():\n    n := Node(fn() -> int: 0, 5)\n    n.f = fn() -> int: n.x\n    parallel:\n        spawn:\n            print(n.f())\nmain()\n";
@@ -7714,7 +7702,7 @@ fn airlock_mixed_struct_closure_cycle_round_trips_both() {
 /// ADVERSARIAL, parity-blind (the item-2 lesson): a mutable `struct` appearing TWICE as an ACYCLIC
 /// alias in a spawned payload must stay TWO INDEPENDENT deep copies — the back-edge-only (pop-on-DFS-
 /// exit) memo discipline re-serializes an off-stack alias as an independent copy, never a shared node.
-/// A shared-vs-duplicated node is stdout-identical on both engines, so this asserts INDEPENDENCE
+/// A shared-vs-duplicated node is stdout-identical, so this asserts INDEPENDENCE
 /// explicitly: mutate one alias in the task, observe the other is UNAFFECTED (`9 1`, not `9 9`). Guards
 /// against a future visited-set regression collapsing DAG aliases into one shared node (mirror
 /// `airlock_aliased_closure_shares_its_binding` for the closure/BINDING path, which deliberately does
@@ -7812,9 +7800,9 @@ main()";
 
 /// NF#8 — spawn airlock (F1 shape): a nested fn capturing an outer local, invoked via `spawn bump()`
 /// inside `parallel:`, is a capture-bearing `Obj::Closure` that crosses the airlock by DEEP value
-/// (`cross_spawn_callee` on serial, `to_snap` on M:N) — its captured `x`-cell is snapshot-copied, so
+/// — its captured `x`-cell is snapshot-copied, so
 /// the task's `x = x + 1` mutates its OWN isolated copy and the parent's `x` stays `0`. Identical to
-/// the closure airlock isolation (F1). Print is post-join → exact-match, serial == M:N.
+/// the closure airlock isolation (F1). Print is post-join → exact-match.
 #[test]
 fn nested_fn_spawn_airlock_isolated_parity() {
     let src = "\
@@ -7826,8 +7814,8 @@ fn main():
         spawn bump()
     print(x)
 main()";
-    let out = run_capture(src).expect("serial run");
-    assert_eq!(out, "0\n", "serial: nested fn capture isolated at airlock");
+    let out = run_capture(src).expect("run");
+    assert_eq!(out, "0\n", "nested fn capture isolated at airlock");
     assert_eq!(
         out,
         run_capture(src).expect("parallel run"),
@@ -8090,8 +8078,9 @@ fn vm_bytes_slice_step_parity() {
 fn bytes_crosses_channel() {
     // `bytes` is fully value-typed and sendable — it crosses the --parallel airlock via
     // WireValue::Bytes and reconstructs as a fresh heap `bytes` (Python b'...' repr preserved).
-    // Buffer-then-drain (send before recv) so all THREE engines agree — the sequential interp
-    // cannot block a consumer mid-flight on a live producer (a C5 limitation, not bytes-specific).
+    // Buffer-then-drain (send before recv) — a holdover from when the since-removed cooperative
+    // and interp engines could not block a consumer mid-flight on a live producer (a C5
+    // limitation, not bytes-specific).
     let src = concat!(
         "fn main():\n",
         "    ch := Channel[bytes]()\n",
@@ -8100,7 +8089,7 @@ fn bytes_crosses_channel() {
         "    print(ch.recv())\n",
         "main()\n"
     );
-    // Three-engine parity: cooperative VM, --parallel M:N, and interp all agree.
+    // Must byte-match on both a plain run and under `--parallel`.
     assert_golden_out(src, "b'\\x01\\x02'\n");
     assert_eq!(run_capture(src).expect("vm"), "b'\\x01\\x02'\n");
     assert_eq!(run_capture(src).expect("parallel"), "b'\\x01\\x02'\n");
@@ -8469,10 +8458,10 @@ fn for_over_fresh_temp_cursor_full() {
 fn cursor_crosses_spawn_airlock_three_engine_parity() {
     // A cursor IS sendable: it crosses the spawn/channel airlock as a DEEP COPY (independent
     // snapshot + pos on the receiver), like a `list`. The receiver drives it and gets `Some(1)`.
-    // This must hold byte-identically on ALL THREE engines — the cooperative VM, the M:N
-    // `--parallel` engine, and the interpreter (whose `deep_clone` already deep-copies a cursor).
+    // This must hold byte-identically under the M:N `--parallel` engine.
     // (Regression guard: an earlier cut gated the cursor non-sendable like a generator, which
-    // panicked the spawned worker on the VM while the interp succeeded — a parity divergence.)
+    // panicked the spawned worker on the VM while the since-removed interp engine succeeded — a
+    // parity divergence.)
     let src = concat!(
         "fn main():\n",
         "    ch := Channel[Iterator[int]]()\n",
@@ -8643,9 +8632,8 @@ fn widen_unary_float_sibling_coerced() {
     );
 }
 
-// ===== Generic fn as a VALUE (scope A + B) — runtime is generic-ERASED, so serial == M:N is
-// automatic; a RUN test on BOTH engines is still required per accepted case (the bind-import trap:
-// a checker-accept that faults at runtime).
+// ===== Generic fn as a VALUE (scope A + B) — runtime is generic-ERASED, so a RUN test is still
+// required per accepted case (the bind-import trap: a checker-accept that faults at runtime).
 
 #[test]
 fn generic_fn_value_turbofish_parity() {
@@ -8698,7 +8686,7 @@ fn generic_fn_name_shadowed_local_index_parity() {
 // Pre-fix bug: every MakeClosure site captured ALL visible locals via snapshot_entries(), dragging an
 // unused non-sendable sibling (a closure value / live generator) across the spawn airlock → check-OK
 // but run-fault ("spawn: this task value can't cross a worker boundary yet"). Fix: capture only the
-// body's free-variable set. These parity tests prove the fix AND no under-capture (both engines).
+// body's free-variable set. These tests prove the fix AND no under-capture.
 
 #[test]
 fn d_repro_unused_sibling_nested_fn_parity() {
@@ -8763,7 +8751,7 @@ fn d_defer_block_free_capture_parity() {
 fn defer_block_q_discards_fired_err_parity() {
     // The `?`-in-defer contract is DISCARD (the block is its own closure — `syntax.md`). A FIRED
     // Err short-circuits the block and is dropped: the tail `print` never runs, the enclosing
-    // nil-returning fn returns normally, and both engines agree. (The checker fix that made this
+    // nil-returning fn returns normally. (The checker fix that made this
     // program compile under a nil-returning fn — F1 — must not change the runtime discard.)
     assert_golden_out(
         "fn g() -> int!:\n    return Err(\"x\")\nfn f():\n    defer:\n        v := g()?\n        print(\"never {v}\")\n    print(\"body\")\nf()\nprint(\"done\")\n",
@@ -8844,7 +8832,7 @@ fn d_no_undercapture_nonrecursive_nested_fn_parity() {
 // ===== B3.3 (runtime) — closures / bare funcs cross the spawn/Channel airlock BY VALUE =====
 // The generic `to_wire`/`to_snap` lowering crosses a closure/nested-fn/bare-func as data (its proto
 // + wired captures + home index), never a by-reference `Handle`. A `spawn f()` callee whose captured
-// environment contains a NESTED closure (or is a bare fn) now runs on both engines identically,
+// environment contains a NESTED closure (or is a bare fn) now runs identically,
 // instead of the old "task value can't cross a worker boundary" airlock fault. The checker's
 // Func-non-sendable gate on Channel ELEMENT types is a separate follow-up and still stands.
 
@@ -8885,7 +8873,7 @@ main()";
 fn generator_captured_into_spawn_callee_crosses_by_value() {
     // F3 path C: a spawn callee capturing a LOCAL generator (`it`, Pending) crosses it BY VALUE —
     // the task drives its own copy. The module global `g := 7` is a non-generator, unrelated to the
-    // crossing. serial == M:N, byte-identical.
+    // crossing. Byte-identical.
     let src = "\
 g := 7
 fn gen() -> Iterator[int]:
@@ -8909,7 +8897,7 @@ main()";
 
 /// A PENDING generator (never driven) captured into a `spawn:` block crosses by value; the receiving
 /// task drives it fully, and the sender's copy is INDEPENDENT (deep-copy: sender also drives the full
-/// sequence). Byte-identical on serial and M:N.
+/// sequence). Byte-identical.
 #[test]
 fn generator_pending_sent_into_spawn_deep_copy_both() {
     let src = "\
@@ -8938,7 +8926,7 @@ main()";
 
 /// A SUSPENDED generator (driven once → one parked frame) captured into a `spawn:` block crosses by
 /// value; the task drives the REMAINDER, and the sender's copy independently drives its own remainder
-/// (deep-copy). Byte-identical on serial and M:N.
+/// (deep-copy). Byte-identical.
 #[test]
 fn generator_suspended_sent_keeps_deep_copy_both() {
     let src = "\
@@ -8968,7 +8956,7 @@ main()";
 /// A CLOSURE-backed generator (a nested `fn` capturing a local) crosses by value: `to_wire` wires the
 /// generator's backing closure (carrying the captured `base`) and `from_wire` rebuilds it, so the
 /// received copy yields the captured-relative values independently of the sender. Covers the
-/// `closure = Some(..)` serialize/rebuild arm. serial == M:N.
+/// `closure = Some(..)` serialize/rebuild arm. Byte-identical.
 #[test]
 fn generator_closure_backed_sent_deep_copy_both() {
     let src = "\
@@ -8996,7 +8984,7 @@ main()";
 
 /// A generator crossing over an explicit `Channel[Iterator[int]]` into a task: the parent SENDS it
 /// (deep-copied into the channel), the task RECVs its own copy and drives it, and the sender's `it`
-/// is untouched (deep-copy). Byte-identical on serial and M:N.
+/// is untouched (deep-copy). Byte-identical.
 #[test]
 fn generator_sent_over_channel_into_task_both() {
     let src = "\
@@ -9060,8 +9048,9 @@ main()";
 /// silently deep-copy it TWICE (two independent copies sharing one container). Here a PENDING generator
 /// `gen(box)` parks `box` in its call args and `box` holds the generator (`box.push(g)`), so
 /// `box -> g -> box` is a cycle through the (non-preservable) generator. The `gens_on_stack` guard
-/// rejects it cleanly on BOTH engines (byte-identical fault). Without the guard the program prints
-/// `got 1` (the duplicated generator round-trips) — parity-blind, both engines agree on the wrong result.
+/// rejects it cleanly (byte-identical fault). Without the guard the program prints
+/// `got 1` (the duplicated generator round-trips) — a bug the since-removed parity oracle was blind
+/// to, since both the cooperative and M:N engines agreed on the wrong result.
 #[test]
 fn generator_in_data_cycle_rejects_both() {
     let src = "\
@@ -9084,7 +9073,7 @@ main()";
 /// holds a container that transitively references the generator is the same cycle-through-a-generator
 /// wrong-result as `generator_in_data_cycle_rejects_both`, reached via the `Suspended` arm (parked
 /// operand stack) instead of `Pending` (call args). `keep := box` parks `box` across the first `yield`;
-/// `box.push(g)` closes `box -> g -> box`. Must reject cleanly on both engines (never duplicate the
+/// `box.push(g)` closes `box -> g -> box`. Must reject cleanly (never duplicate the
 /// suspended generator's live drive-state).
 #[test]
 fn suspended_generator_in_data_cycle_rejects_both() {
@@ -9110,7 +9099,7 @@ main()";
 /// Identity-preserving airlock, generator path — a suspended generator whose PARKED SLOT holds a
 /// recursive local `fn` (`keep := rec`, a self-cycle closure) now ROUND-TRIPS: the generator serializes
 /// its parked stack via `to_wire`, which back-references the self-cell, and `from_wire` ties the knot.
-/// The generator crosses into the spawned task, resumes, and `keep(3) == 3` on both engines. Pairs with
+/// The generator crosses into the spawned task, resumes, and `keep(3) == 3`. Pairs with
 /// `generator_parked_slot_nonsendable_rejects_both` (which now uses a cyclic struct, not a recursive fn).
 #[test]
 fn generator_carrying_recursive_closure_round_trips_both() {
@@ -9145,7 +9134,7 @@ main()";
 
 /// A module-global PENDING generator reached by a spawned task crosses by value and drives fully; the
 /// parent's own `g` is an INDEPENDENT copy (drives the full sequence after the join). Was the reach-gate
-/// fault (`a generator cannot be sent across tasks`); now crosses. Byte-identical serial == M:N.
+/// fault (`a generator cannot be sent across tasks`); now crosses. Byte-identical.
 #[test]
 fn generator_module_global_reached_crosses_both() {
     let src = "\
@@ -9172,7 +9161,7 @@ main()";
 }
 
 /// A module-global generator driven ONCE at top level (suspended, one parked frame) then reached by a
-/// spawned task crosses by value and RESUMES from its parked position. serial == M:N.
+/// spawned task crosses by value and RESUMES from its parked position. Byte-identical.
 #[test]
 fn generator_module_global_suspended_reached_resumes_both() {
     let src = "\
@@ -9198,7 +9187,7 @@ main()";
 /// ISOLATION (adversarial, parity-blind, the memory-safety witness): TWO tasks each reach the SAME
 /// module-global generator and each gets an INDEPENDENT copy — both see the full `1,2,3`, and the
 /// parent's own `g` is likewise independent (full `1,2,3` after the join). A shared `GcRef` would show
-/// split/interleaved consumption instead. serial == M:N byte-identical.
+/// split/interleaved consumption instead. Byte-identical.
 #[test]
 fn generator_module_global_two_tasks_independent_copies_both() {
     let src = "\
@@ -9237,7 +9226,7 @@ main()";
 /// tripping `MAX_STRUCTURAL_DEPTH`) is snapshotted as an inert `Nil` placeholder (the `to_snap` slow arm
 /// no longer eager-faults the whole snapshot — that regressed any module merely *holding* such a
 /// generator). A task that REACHES it therefore faults recoverably AT THE USE SITE ("cannot iterate over
-/// nil"), NOT a crash, NOT a silent skip. Byte-identical serial == M:N. (The unreached case runs clean —
+/// nil"), NOT a crash, NOT a silent skip. Byte-identical. (The unreached case runs clean —
 /// see `generator_module_global_unreached_nonsendable_runs_clean_both`.)
 #[test]
 fn generator_module_global_parked_slot_nonsendable_rejects_both() {
@@ -9266,7 +9255,7 @@ main()";
 /// `to_wire` trips item A's `gens_on_stack` cycle guard → the `to_snap` slow arm falls back to `Nil`
 /// rather than eager-faulting the whole snapshot). `box` (module global) holds `g` and `g`'s Pending arg
 /// holds `box`, so `box -> g -> box`. A task that REACHES it faults recoverably at the use site ("cannot
-/// iterate over nil"), byte-identical serial == M:N.
+/// iterate over nil"), byte-identical.
 #[test]
 fn generator_module_global_in_data_cycle_rejects_both() {
     let src = "\
@@ -9289,8 +9278,8 @@ main()";
 /// module-global generator (here in a reference cycle) but whose spawned task NEVER reaches it must run
 /// CLEAN — the `to_snap` slow arm snapshots the untouched generator as an inert `Nil`, so `snapshot_modules`
 /// (which walks EVERY global once at the first spawn) no longer eager-faults the whole program. Before the
-/// remediation this faulted "as part of a reference cycle" at the first spawn on BOTH engines. Byte-identical
-/// serial == M:N. (Reached-behaviour is covered by `generator_module_global_in_data_cycle_rejects_both`.)
+/// remediation this faulted "as part of a reference cycle" at the first spawn. Byte-identical against
+/// the golden. (Reached-behaviour is covered by `generator_module_global_in_data_cycle_rejects_both`.)
 #[test]
 fn generator_module_global_unreached_nonsendable_runs_clean_both() {
     let src = "\
@@ -9311,7 +9300,7 @@ main()";
 }
 
 /// The deleted `gate_executor_queue` path: a module-global generator reached inside an `Executor.submit`
-/// job now crosses by value and drives (was the executor reach-gate fault). serial == M:N.
+/// job now crosses by value and drives (was the executor reach-gate fault).
 #[test]
 fn generator_module_global_via_executor_crosses_both() {
     let src = "\
@@ -9465,10 +9454,11 @@ main()";
 /// truncate the LIVE parallel nursery to `0`, cancelling the sibling `spawn` (`out.send(77)`), and
 /// `out.recv()` would then deadlock. A generator provably cannot open a nursery (spawn/parallel are
 /// checker-banned inside one), so its handler's escape-drain must be a no-op — `generator_next`
-/// rebases every parked frame/handler `nursery_len` to the resuming driver's floor. Serial-only:
-/// this drain is deterministic on the cooperative engine (the sibling is an unstarted `PendingCall`
-/// when the drain would fire); on M:N the sibling may already be running on another worker, so the
-/// bug is not deterministically reachable there — the shared `generator_next` fix covers both.
+/// rebases every parked frame/handler `nursery_len` to the resuming driver's floor. This was
+/// historically serial-only: the drain was deterministic on the since-removed cooperative engine
+/// (the sibling is an unstarted `PendingCall` when the drain would fire); on M:N the sibling may
+/// already be running on another worker, so the bug was not deterministically reachable there —
+/// the shared `generator_next` fix covers both.
 #[test]
 fn generator_crossed_recover_fault_leaves_siblings_intact_serial() {
     let src = "\
@@ -9498,8 +9488,8 @@ main()";
 
 /// Backlog item B, cross-module path: a spawned task calls a module-member fn `genmod.bar(10)` whose
 /// body drives a live generator global in ITS OWN module. The generator crosses BY VALUE via the
-/// other module's per-task snapshot, so the task drives its own copy: `10 + 1 + 2 = 13`. Byte-identical
-/// serial == M:N (was the cross-module reach-gate fault).
+/// other module's per-task snapshot, so the task drives its own copy: `10 + 1 + 2 = 13`.
+/// Byte-identical (was the cross-module reach-gate fault).
 #[test]
 fn generator_cross_module_member_call_crosses_both() {
     let t = TmpDir::new();
@@ -9519,7 +9509,7 @@ fn generator_cross_module_member_call_crosses_both() {
     assert_eq!(po, "13\n");
 }
 
-/// A CLEAN cross-module member call (`geomod.helper()` reads no generator) runs clean on both engines
+/// A CLEAN cross-module member call (`geomod.helper()` reads no generator) runs clean
 /// with a generator global resident in the imported module.
 #[test]
 fn genreach_cross_module_clean_member_call_ok_both() {
@@ -9560,14 +9550,14 @@ main()";
     assert_golden_out(src, "<fn helper>\n");
 }
 
-// ===== B3.3 (Task 2a) — closures-as-data at spawn/Channel sites RUN on both engines =====
+// ===== B3.3 (Task 2a) — closures-as-data at spawn/Channel sites RUN =====
 // The checker half (permissive `sendable(Func)` + capture gate) makes these type-check; here we pin
 // that they actually RUN identically on the serial + M:N engines (the by-value airlock crossing).
 
 #[test]
 fn channel_of_closures_runs_parity() {
     // A `Channel[fn() -> int]`: a capture-free closure is sent over the channel and called by the
-    // consumer — crosses by value, runs 42 on both engines.
+    // consumer — crosses by value, runs 42.
     let src = "\
 fn producer(ch: Channel[fn() -> int]):
     ch.send(fn() -> int: 42)
@@ -9585,7 +9575,7 @@ main()";
 fn closure_returned_across_task_runs_parity() {
     // A CAPTURING closure (`adder(100)` closes over the int `n=100`) returned from a factory and sent
     // over a `Channel[fn(int) -> int]` — its capture is sendable, so it crosses by value; `f(5)` = 105
-    // on both engines.
+    //.
     let src = "\
 fn adder(n: int) -> fn(int) -> int:
     return fn(x: int) -> int: x + n
@@ -9604,7 +9594,7 @@ main()";
 #[test]
 fn sendable_capturing_closure_through_channel_still_runs() {
     // A closure capturing ONLY sendable data (an int + a `List[int]`) sent over a `Channel[fn() -> int]`
-    // still crosses by value and runs. `21*2 + 1` = 43, both engines.
+    // still crosses by value and runs. `21*2 + 1` = 43.
     let src = "\
 fn main():
     n := 21
@@ -10104,7 +10094,7 @@ fn widen_method_float_param_still_adapts() {
 
 // ----- checker rejects (bound-method value, index/set_index V-coherence): the RUN-side guards -----
 // Both fixes are checker-only, so the risk is OVER-rejection, not divergence. These pin the
-// neighbours that must keep RUNNING identically on serial + M:N.
+// neighbours that must keep RUNNING correctly.
 
 #[test]
 fn coherent_index_set_str_parity() {
@@ -10382,13 +10372,13 @@ main()
 
 // ===== cancellation points + the serial cancel drain (N6) =====
 // Cancel is delivered at CHECKPOINTS (loop back-edges + blocking/park ops), so a STARTED task always
-// runs its straight-line prologue and a REGISTERED `defer` always runs on cancel — on BOTH engines.
-// Cross-task stdout ORDER stays nondeterministic on both engines (one print = one locked write,
-// line-atomic); only the line SET / exit code / did-the-defer-run are parity.
+// runs its straight-line prologue and a REGISTERED `defer` always runs on cancel.
+// Cross-task stdout ORDER stays nondeterministic (one print = one locked write,
+// line-atomic); only the line SET / exit code / did-the-defer-run are asserted.
 
 /// N6 — token-sequenced: `consumer` registers `defer cleanup(s)`, hands `boom` a token, then parks in
-/// `ch.recv()`; `boom` faults. The defer is GUARANTEED registered before the fault, so both engines
-/// must run it (42). Serial used to print `0`: `run_scheduler`'s `run_child(i)?` propagated the
+/// `ch.recv()`; `boom` faults. The defer is GUARANTEED registered before the fault, so it
+/// must run (42). The since-removed serial engine used to print `0`: `run_scheduler`'s `run_child(i)?` propagated the
 /// faulting child's error straight out and ABANDONED the parked consumer — never resumed, never
 /// cancelled, never unwound.
 #[test]
@@ -10409,8 +10399,8 @@ fn parity_defer_runs_on_parked_sibling_when_sibling_faults() {
 /// killed between its first statement and its `defer` line, so the defer never registered and cleanup
 /// silently never ran (measured: 0/20 on M:N). With CANCELLATION POINTS (loop back-edges + blocking
 /// ops) a STARTED task always runs its straight-line prologue, so the defer is registered by
-/// construction — deterministically 42 on BOTH engines. The pre-defer `print` must survive on both
-/// (line SET parity: a cancelled M:N task's buffer is flushed at its task slot, serial printed live).
+/// construction — deterministically 42. The pre-defer `print` must survive too (a cancelled M:N
+/// task's buffer is flushed at its task slot; the since-removed serial engine printed live).
 #[test]
 fn parity_probe_defer_runs_when_cancelled_before_its_defer_line() {
     let src = "fn cleanup(s: Shared[int]):\n    s.set(42)\n\
@@ -10427,14 +10417,13 @@ fn parity_probe_defer_runs_when_cancelled_before_its_defer_line() {
         mn.contains("42\n"),
         "M:N: the started consumer's defer ran: {mn:?}"
     );
-    // Cross-task ORDER is nondeterministic on both engines; the line SET is the contract.
+    // Cross-task ORDER is nondeterministic; the line SET is the contract.
     assert_same_lines(&serial, &mn);
 }
 
-/// `os.exit` inside a CANCELLED task's `defer`: the exit code is identical on both engines and is
-/// never demoted to the sibling's catchable fault (Exit > Fault, lowest task index wins — serial's
-/// drain reduces exits exactly like M:N's `reduce_task_slots`). Line SET parity only; order is not
-/// asserted.
+/// `os.exit` inside a CANCELLED task's `defer`: the exit code wins and is
+/// never demoted to the sibling's catchable fault (Exit > Fault, lowest task index wins via
+/// M:N's `reduce_task_slots`). The line SET is asserted; order is not.
 #[test]
 fn parity_os_exit_inside_a_cancelled_tasks_defer() {
     let src = "import std.os\n\
@@ -10462,7 +10451,7 @@ fn parity_os_exit_inside_a_cancelled_tasks_defer() {
 /// unwinds at its `recv` checkpoint — even though `boom` already faulted. Serial's cancel drain used
 /// to SKIP a never-started (`Pending`) sibling, so it emitted `{"0"}` while M:N emitted `{"hi","42"}`
 /// (20/20 — near-deterministic, not a rare race). The drain now starts every not-`Done` sibling with
-/// the cancel tripped, so both engines run the task and both run its `defer`.
+/// the cancel tripped, so the task runs and its `defer` runs too.
 #[test]
 fn parity_probe_faulter_spawned_first_still_runs_the_siblings_defer() {
     let src = "fn cleanup(s: Shared[int]):\n    s.set(42)\n\
@@ -10481,7 +10470,7 @@ fn parity_probe_faulter_spawned_first_still_runs_the_siblings_defer() {
 }
 
 /// A never-started straight-line sibling with NO defer, faulter first: M:N runs it to completion
-/// (`Done`, output flushed), so serial must too — the line SET is the parity contract.
+/// (`Done`, output flushed) — the line SET is the contract.
 #[test]
 fn parity_straight_line_sibling_runs_even_when_the_scope_is_already_cancelled() {
     let src = "fn noisy():\n    print(\"hi\")\n\
@@ -10502,11 +10491,11 @@ fn parity_straight_line_sibling_runs_even_when_the_scope_is_already_cancelled() 
 /// loop's back-edge.
 ///
 /// The faulter is spawned FIRST so the scope cancel is already tripped when `work` starts: no timing
-/// race, and BOTH engines must abort the map (serial's drain starts `work` with the cancel tripped,
-/// M:N pops its still-queued fiber after the cancel). A CPU-bound task that is ALREADY RUNNING when
-/// the cancel trips is a different, pre-existing story on serial — it is cooperative, so it simply
-/// runs to its next park before any sibling gets to fault (that is why the `while true:` spinner test
-/// is M:N-only).
+/// race — M:N must abort the map, popping its still-queued fiber after the cancel (the since-removed
+/// serial engine's drain used to start `work` with the cancel already tripped). A CPU-bound task that
+/// is ALREADY RUNNING when the cancel trips was a different, pre-existing story on the since-removed
+/// serial engine — it was cooperative, so it simply ran to its next park before any sibling got to
+/// fault (that is why the `while true:` spinner test is M:N-only).
 #[test]
 fn parity_native_hof_loop_is_cancellable() {
     let src = "fn sq(x: int) -> int:\n    return x * x\n\
@@ -10527,9 +10516,9 @@ fn parity_native_hof_loop_is_cancellable() {
 }
 
 /// A NESTED nursery's deadlock, with an outer sibling PARKED and holding a registered `defer`. The
-/// nested deadlock reaches the outer level as an ordinary child error on both engines, so both cancel
-/// the outer scope and both run the parked sibling's `defer` (42). Locks the N5 boundary: a level's
-/// OWN deadlock still tears its fibers down without defers, identically on both engines — but a
+/// nested deadlock reaches the outer level as an ordinary child error, so it cancels
+/// the outer scope and runs the parked sibling's `defer` (42). Locks the N5 boundary: a level's
+/// OWN deadlock still tears its fibers down without defers — but a
 /// nested one must not diverge.
 #[test]
 fn parity_nested_deadlock_cancels_the_outer_parked_siblings_defer() {
@@ -10600,16 +10589,16 @@ fn parity_nested_nursery_inside_a_cancelled_task_is_cancellable() {
 }
 
 /// A blocking native (`sleep_ms` / `io.*` / `fs.*` / `request`) is an **ENTRY** cancellation
-/// checkpoint on BOTH engines — the check sits OUTSIDE the M:N-only offload gate. It used to be
+/// checkpoint — the check sits OUTSIDE the M:N-only offload gate. It used to be
 /// M:N-only, so a cancelled SERIAL task slept the full duration (stalling the whole teardown —
 /// `sleep_ms(60000)` would freeze it for a minute) and then, having no other checkpoint, ran every
-/// straight-line statement AFTER the sleep to completion: `{napper start, napper woke, end}` on serial
-/// vs `{napper start, end}` on M:N, deterministically. The line SET is the parity contract.
+/// straight-line statement AFTER the sleep to completion: `{napper start, napper woke, end}` on the
+/// since-removed serial engine vs `{napper start, end}` on M:N, deterministically. The line SET is the contract.
 ///
 /// **Scope, tightened by W7-16.** This fence covers only the case where the cancel is ALREADY TRIPPED
 /// when the blocking call is reached — which is what its fixture produced by accident, `boom()`
 /// faulting before `napper` could enter the sleep. It said nothing about a cancel arriving DURING the
-/// sleep, and that case was broken on both engines (measured 3005 ms M:N / 3054 ms serial, `napper
+/// sleep, and that case was broken (measured 3005 ms M:N / 3054 ms serial, `napper
 /// woke` printed) until W7-16. The mid-flight half is
 /// `tests::a_sleeping_nursery_task_is_cancelled_mid_flight_by_a_sibling_fault`, M:N-only because
 /// serial cannot preempt a sleeping fiber at all (nothing else runs), so its line SET legitimately
@@ -10674,7 +10663,7 @@ fn run_with_deadline(
 /// serial reported (measured: M:N `timeout` rc=124, serial rc=1). The veto is now bounded to the
 /// trip→`cancel_drain` window (an UNDRAINED PARKED fiber), so the quiesce is detected, the demoted
 /// fiber faults in place, and — the task being already cancelled — its error is swallowed and the
-/// SIBLING'S real fault is what propagates, identically on both engines.
+/// SIBLING'S real fault is what propagates, identically.
 #[test]
 fn parity_a_defer_that_can_never_complete_is_reported_not_hung() {
     let src = "fn cleanup(dead: Channel[int]):\n    print(\"CLEANUP-ENTER\")\n    dead.recv()\n    print(\"CLEANUP-DONE\")\n\
@@ -11211,11 +11200,11 @@ fn reader_annotation_requires_import() {
     }
 }
 
-/// B3 — a fn-LOCAL aggregate mutated inside a spawn: task deep-copies per task (the airlock), so both
-/// engines AGREE (serial == M:N == 3): the parent's list is untouched by the isolated task copy. Task 1
-/// gave the MODULE-GLOBAL form the same isolation (both engines snapshot module globals per task now —
+/// B3 — a fn-LOCAL aggregate mutated inside a spawn: task deep-copies per task (the airlock), so the
+/// parent's list is untouched by the isolated task copy (prints `3`). Task 1
+/// gave the MODULE-GLOBAL form the same isolation (module globals are snapshotted per task now —
 /// see `serial_module_global_direct_mutation_forms_isolate_parity`), so this fn-local case is just the
-/// sibling boundary: a captured local was already deep-copied on both engines and still is.
+/// sibling boundary: a captured local was already deep-copied and still is.
 #[test]
 fn module_global_aggregate_mutation_in_task_parity() {
     let src = "fn main():\n    xs := [1, 2, 3]\n    parallel:\n        spawn:\n            xs.push(99)\n    print(xs.len())\nmain()\n";
@@ -11248,8 +11237,8 @@ fn serial_module_global_method_call_mutation_isolates_parity() {
 
 /// Task 1 — gaps.md §B3 (D): aliasing a module-global aggregate into a task-local (`local := xs`) then
 /// mutating the alias. The receiver root resolves to `local`, so the old flow-blind gate never caught it
-/// and the program silently diverged (serial 4 / M:N 3). With serial snapshotting module globals per
-/// task, the alias points at the task's OWN copy — both engines now read 3.
+/// and the program silently diverged (serial 4 / M:N 3). With module globals snapshotted per
+/// task, the alias points at the task's OWN copy — reads 3.
 #[test]
 fn serial_module_global_task_local_alias_isolates_parity() {
     let src = "xs := [1, 2, 3]\nfn main():\n    parallel:\n        spawn:\n            local := xs\n            local.push(99)\n    print(xs.len())\nmain()\n";
@@ -11269,7 +11258,7 @@ fn atomic_incremented_in_task_visible_to_parent_parity() {
 }
 
 /// Task 1 — direct in-block mutation forms (previously REJECTED by the frozen-module-global gates, now
-/// AtomicInt — monomorphic lock-free int atomic. Basic load/store/exchange/cas roundtrip, both engines.
+/// AtomicInt — monomorphic lock-free int atomic. Basic load/store/exchange/cas roundtrip.
 #[test]
 fn atomic_int_roundtrip_parity() {
     let src = "import std.concurrency\nfn main():\n    a := AtomicInt(5)\n    a.store(10)\n    print(a.load())\n    print(a.exchange(20))\n    print(a.cas(20, 99))\n    print(a.load())\nmain()\n";
@@ -11345,7 +11334,7 @@ fn atomic_int_wide_value_returns_parity() {
 }
 
 /// deleted): list `.push`, map index-assign, struct field-assign, set `.add`, bytearray `.extend`, and a
-/// bare reassign. Each mutates the task's OWN module-global copy → invisible to the parent → serial == M:N.
+/// bare reassign. Each mutates the task's OWN module-global copy → invisible to the parent.
 #[test]
 fn serial_module_global_direct_mutation_forms_isolate_parity() {
     // list .push
@@ -11394,7 +11383,7 @@ fn serial_module_global_direct_mutation_forms_isolate_parity() {
 
 /// Task 1 — a module global mutated through a directly-spawned free-fn callee (`spawn worker()` where
 /// `worker` does `m[1] = 9`) — the old transitive-scan gate's job. Now it just isolates: the callee runs
-/// against the task's module-global copy, so the parent's map is untouched on both engines.
+/// against the task's module-global copy, so the parent's map is untouched.
 #[test]
 fn serial_module_global_spawned_callee_mutation_isolates_parity() {
     let src = "m := {1: 2}\nfn worker():\n    m[1] = 9\nfn main():\n    parallel:\n        spawn worker()\n    print(m[1])\nmain()\n";
@@ -11412,7 +11401,7 @@ fn nested_serial_spawn_module_global_isolates_parity() {
 
 /// Task 1 — a task that mutates its module-global copy, PARKS on a channel recv, resumes, then reads the
 /// global keeps its per-fiber snapshot across the park (the copy lives in `FiberCtx`, travels with the
-/// fiber). Both engines agree the task sees its own mutation (1) and the parent sees the untouched global
+/// fiber). The task sees its own mutation (1) and the parent sees the untouched global
 /// (0). Guards trap #3 (snapshot survives a park).
 #[test]
 fn channel_park_keeps_module_snapshot_parity() {
@@ -11436,8 +11425,8 @@ main()
 }
 
 /// W6-2 (was: …`reads_frozen_parity`, expecting `0`) — a task that mutates a module global and THEN
-/// opens a NESTED `parallel:` gives its grandchild the TASK's CURRENT view (1), at every depth, on both
-/// engines. The old `0` was a MEMOIZATION ARTIFACT, not design: `ensure_snapshot` memoized the first
+/// opens a NESTED `parallel:` gives its grandchild the TASK's CURRENT view (1), at every depth.
+/// The old `0` was a MEMOIZATION ARTIFACT, not design: `ensure_snapshot` memoized the first
 /// nursery's snapshot forever and every later worker/nested nursery replayed that frozen `Arc` (decision
 /// G1), so the grandchild read the pre-mutation value. A task now snapshots FRESH at its own `spawn`,
 /// from the view of whoever spawned it — so the nested rule is uniform and Go-like. Per-task
@@ -11451,8 +11440,7 @@ fn nested_serial_spawn_mutation_before_nested_reads_fresh_parity() {
 /// W6-2 (was: …`reads_frozen_parity`, expecting `0\n0\n`) — TWO sequential top-level nurseries with
 /// ordinary (non-task) parent code mutating an imported module's global BETWEEN them: the second
 /// nursery's task sees the MUTATED value (2 * 100). The old frozen `0` came from the never-invalidated
-/// `snapshot_memo`; a module-slot write now drops the cache, so each nursery snapshots fresh. Both
-/// engines agree by construction (they share the one `ensure_snapshot` choke point).
+/// `snapshot_memo`; a module-slot write now drops the cache, so each nursery snapshots fresh.
 #[test]
 fn sequential_mutation_between_nurseries_reads_fresh_parity() {
     let out = golden_file_entry(
@@ -11484,12 +11472,13 @@ fn spawn_task_first_global_access_is_write_parity() {
 }
 
 /// W6-2 — the PIN INSTANT, and the reason it exists: a task's view is pinned at its own `spawn`, so an
-/// OUTER nursery's queued task keeps that view even though the two engines PREPARE it at different
-/// program points — serial at the outer nursery's own join (post-`g = 2`), M:N at the nested nursery's
-/// join via `early_enlist_outer` (pre-`g = 2`). Both `A` (outer, spawned before the mutation) and the
-/// nested `B` therefore read `1` while the parent reads `2`, byte-identically. Without the pin this shape
-/// diverges 2 vs 1. Observed through `Shared` and printed once after the join, because the print ORDER of
-/// this shape already differs per engine (a bare-`print` variant is not byte-identical).
+/// OUTER nursery's queued task keeps that view even though the two (then-existing) engines used to
+/// PREPARE it at different program points — the since-removed serial engine at the outer nursery's own
+/// join (post-`g = 2`), M:N at the nested nursery's join via `early_enlist_outer` (pre-`g = 2`). Both
+/// `A` (outer, spawned before the mutation) and the nested `B` therefore read `1` while the parent
+/// reads `2`, byte-identically. Without the pin this shape diverges 2 vs 1. Observed through `Shared`
+/// and printed once after the join, because the print ORDER of this shape is nondeterministic
+/// (a bare-`print` variant is not byte-identical).
 #[test]
 fn task_snapshot_pins_at_its_own_spawn_parity() {
     let src = "\
@@ -11510,7 +11499,7 @@ main()
 }
 
 /// W6-2 — the pin is per-TASK, at its own `spawn`: two spawns into the SAME nursery straddling a global
-/// mutation read the value live when EACH ran, identically on both engines. That is the Go rule (a
+/// mutation read the value live when EACH ran, identically. That is the Go rule (a
 /// goroutine sees the globals current when `go` ran) and it is what makes the IMPLICIT nursery — which
 /// spans a whole module/function body — behave, since a per-NURSERY pin would freeze the whole body at
 /// its first bare `spawn` (see `bare_spawn_implicit_nursery_pins_per_spawn_parity`).
@@ -11572,8 +11561,7 @@ print(main().get())
 /// QoL: an untyped int-CONSTANT branch of an if/match EXPRESSION widens to `float` when a
 /// float-constant sibling branch is present (the `literal_numeric_mix` peephole, shared with list/map
 /// literals). This test proves the compiler actually emits `Op::CoerceFloat` on the int branch — the
-/// int-taken branch must render as a FLOAT ("1.0"), never leave an `Int` under a static `float` — and
-/// that both engines agree.
+/// int-taken branch must render as a FLOAT ("1.0"), never leave an `Int` under a static `float`.
 #[test]
 fn if_match_expr_int_float_widen_parity() {
     let src = concat!(
@@ -11602,7 +11590,7 @@ fn if_match_expr_int_float_widen_parity() {
 #[test]
 fn parity_big_int_crosses_inline_box_boundary() {
     // 2^62 and above box as `Obj::BigInt`; 2^62-1 and below stay inline. Crossing the boundary must
-    // be invisible: arithmetic, equality, and Display all agree, and both engines match byte-for-byte.
+    // be invisible: arithmetic, equality, and Display all agree, matching byte-for-byte.
     let src = "\
 fn main():
     x := 4611686018427387904
@@ -11732,10 +11720,10 @@ main()";
     assert_golden_out(src, "9000000000000000000\n");
 }
 
-// ===== F3 — checker over-rejection fixes, end-to-end RUN parity =====
+// ===== F3 — checker over-rejection fixes, end-to-end RUN goldens =====
 
 /// F3 — generic fns over the native reserved handles (`Shared`/`Atomic`) bind `T` from the argument
-/// and run type-erased identically on both engines.
+/// and run type-erased identically.
 #[test]
 fn generic_fn_over_native_handles_run_parity() {
     let src = "import std.concurrency\n\
