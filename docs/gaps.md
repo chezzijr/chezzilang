@@ -173,6 +173,9 @@ the way. Every item below has a row in the OPEN ITEMS table.
 - **W6-9r item 1** — its WON'T FIX rested on the ~60 cross-engine compare sites being scheduled for
   deletion. They were deleted. **Item 4 (the `captured()` DISPLAY boundary) stays OPEN on its own
   terms** — it is a property of the capture surface, not of the comparators.
+  *(Superseded later the same day: item 4 was CLOSED 2026-08-16 — `chezzi test --show-output` writes
+  `TestReport.bytes` byte-exactly. Kept as written because it records why the removal did not close
+  it; the index row is the authority.)*
 
 **Found and fixed WHILE doing it — four bugs the removal did not cause:**
 
