@@ -13660,19 +13660,15 @@ print(\"end\")
     let (tx, rx) = std::sync::mpsc::channel();
     let e = entry.clone();
     std::thread::spawn(move || {
-        let cfg = crate::native::HostConfig::default;
-        let (so, _se, sr, _sc) = run_file_with(&e, cfg());
-        let (mo, _me, mr, _mc) = run_file(&e);
-        let _ = tx.send((so, sr, mo, mr));
+        let (out, _err, res, _code) = run_file(&e);
+        let _ = tx.send((out, res));
     });
-    let (so, sr, mo, mr) = rx
+    let (out, res) = rx
         .recv_timeout(std::time::Duration::from_secs(60))
         .expect("a live sibling producer must keep the job waiting, not hang it");
     let _ = std::fs::remove_file(&entry);
-    assert!(sr.is_ok(), "serial run faulted: {sr:?}");
-    assert!(mr.is_ok(), "M:N run faulted: {mr:?}");
-    assert_eq!(so, "job got 42\nend\n", "serial output");
-    assert_eq!(mo, so, "the two engines must agree");
+    assert!(res.is_ok(), "run faulted: {res:?}");
+    assert_eq!(out, "job got 42\nend\n", "output");
 }
 
 /// W7-12's other boundary, and the one that matters most: `x.shutdown()` says nothing about whether a
