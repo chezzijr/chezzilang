@@ -100,7 +100,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > `cargo test` 20/20 targets green (lib 4153/0/2), `chezzi test tests/chz` 569/569, conformance 8/8,
 > clippy clean.
 
-> **✅ `W6-9r` closes in full — `chezzi test --show-output` is byte-exact, 2026-08-16 (3 commits).**
+> **✅ `W6-9r` closes in full — `chezzi test --show-output` is byte-exact, 2026-08-16 (6 commits).**
 > Item 4, the one residual left open by the `--serial` removal (`docs/gaps.md` `W6-9r`), is closed: a
 > failing test's captured stdout used to round-trip through `String::from_utf8_lossy` before printing,
 > so raw bytes written inside a `test fn` (`io.stdout().write_bytes(b"\xff\xfe")`) rendered as U+FFFD.
@@ -150,6 +150,21 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > `out_dead_reason` handling: every write failure, broken-pipe included, is `ExitCode::FAILURE` with
 > `stdout closed (broken pipe)` on stderr. `show_output_survives_closed_reader` (asserting success) is
 > now `show_output_reports_a_closed_reader` (asserting failure); `/dev/full` coverage is unchanged.
+> The panel filed 9 charges; the defence dismissed 6 with evidence and 3 were upheld — this one, plus
+> two sets of comments still calling the deleted `--serial`/`interp` parity oracles live
+> (`src/vm/exec.rs`, `src/vm/mod.rs`, `src/main.rs`, `src/native/rand.rs`), all fixed here. A tenth
+> self-comparison was found while checking them: `executor_job_keeps_waiting_when_shutdown_runs_beside_a_live_producer`
+> ran `run_file_with(e, HostConfig::default())` and `run_file(e)` — the same call, `run_file`'s own doc
+> says so — then asserted the two agreed. Collapsed to one run; its real literal assertion was already
+> there, so no coverage was lost. Same class as `b29a91d8`'s eight.
+>
+> **Left standing, deliberately, and NOT filed as a new row:** ~200 further `--serial` / "cooperative
+> engine" / "both engines" mentions across `src/vm/tests.rs`, `sched.rs`, `netio.rs`, `call.rs` and 121
+> in `golden_tests.rs` are naming drift in dated rationale prose, already recorded as remaining by the
+> serial-removal branch. Entangled with one structural question worth its own change: `FiberCtx.heap`
+> is an `Option<Heap>` whose `None` arm has **no production constructor left** (`src/vm/mod.rs:3999` is
+> the only one and always passes `Some(worker.heap)`); only five tests build it. Removing the `Option`
+> touches `swap_ctx` and GC rooting, so it is a separate change, not a comment sweep.
 >
 > Gate: `cargo test` **21 targets, 0 failed** (lib **4154 passed / 0 failed / 2 ignored**; **4369 Rust
 > tests** total, was 4337); `cargo clippy --all-targets -- -D warnings` clean; `./target/release/chezzi
