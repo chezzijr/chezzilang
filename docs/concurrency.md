@@ -824,8 +824,9 @@ dead recv-arm ready, would spin requeue→re-poll→re-park; but an **all-dead**
   `ParkedEntry::Recv` special case** (alloc-free, provably unchanged — regression test
   `vm_wait_single_arm_recv_park_unchanged_under_parallel`).
 - *A waiter with no worker loop* (the inline outermost-`parallel:` body): poll arms once in source order; first ready wins; else if `else`,
-  run it; else if any arm is timer-backed **and the waiter is a cooperative fiber** (it has no thread to
-  clamp; a party that owns its OS thread blocks in place with the timer clamped instead — W7-14),
+  run it; else if any arm is timer-backed **and the waiter has no worker loop to drive a park**
+  (`!can_block_in_place() && !timed_block`, netio.rs:2599 — a party that owns its OS thread blocks in
+  place with the timer clamped instead, `timed_block`, W7-14),
   inline-sleep to the soonest deadline and take that arm; else
   fault (all-closed or the existing deadlock fault). Deterministic → matches a worker-thread party's
   behavior **except** when a timer arm races a runnable sibling (`docs/gaps.md` N10, closed for the

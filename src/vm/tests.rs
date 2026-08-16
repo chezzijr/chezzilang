@@ -927,6 +927,18 @@ fn idxspec_int_float_key_collision_resolves() {
     // Int(3) and Float(3.0) hash identically (3.0.to_bits()) and are values_equal. The fast path
     // shortcuts only the HASH, never the candidates+values_equal probe, so a Float key inserted as
     // 3.0 is found by m[3] and vice-versa.
+    //
+    // DELIBERATE VM-level-only pin, not reachable through `chezzi run` — `idx_parity` calls
+    // `run_capture`, which compiles via `compile_module_standalone` and so SKIPS the checker
+    // (mod.rs:4693). That matters here because the real product can never build this map: `float`
+    // does not implement `Hashable` (`float_map_key_annotation_rejected`, checker/tests.rs:9053,
+    // rejects `Map[float, int]` itself with "must implement Hashable"), and even setting that aside,
+    // indexing an int-keyed map with a float key is its own rejection
+    // (`map_index_wrong_key_type_rejected`, checker/tests.rs:9047, "key"). Measured: `chezzi run` on
+    // this exact source produces 3 "map key must be int, found float" errors. So no Chezzi-legal
+    // program can ever put an Int key and a colliding Float key in the same map — this test exists
+    // purely to pin the Rust-level hash-bucket invariant (same hash bits =/=> skip the eq probe)
+    // that the fast path must preserve if that constraint is ever relaxed.
     idx_parity(
         "m := {}\nm[3] = \"int\"\nprint(m[3.0])\nm[3.0] = \"float\"\nprint(m[3])\nprint(m.len())\n",
         Ok("int\nfloat\n1\n"),
@@ -1034,7 +1046,10 @@ fn ic_struct_under_parallel_engine() {
                    p := Pt(3, 4)\n\
                    acc := 0\ni := 0\nwhile i < 100:\n    acc = acc + p.sum()\n    p.x = p.x + 1\n    i = i + 1\n\
                    print(acc)\nprint(p.x)\n";
-    assert_eq!(run_capture(src).expect("parallel"), run(src));
+    // Hand-derived: p.x reads 3, 4, 5, .., 102 across the 100 iterations (incremented AFTER each
+    // sum), so acc = sum_{k=0..99} ((3+k)+4) = 100*7 + (0+..+99) = 700 + 4950 = 5650; p.x ends at
+    // 3+100 = 103. Pure Chezzi-arithmetic, no ancestor semantics involved.
+    assert_eq!(run_capture(src).expect("parallel"), "5650\n103\n");
 }
 
 #[test]
@@ -1314,7 +1329,9 @@ fn method_ic_under_parallel_engine() {
     let src = "struct Pt:\n    x: int\n    y: int\n\n    fn sum(self) -> int:\n        return self.x + self.y\n\
                    p := Pt(3, 4)\nacc := 0\ni := 0\nwhile i < 100:\n    acc = acc + p.sum()\n    p.x = p.x + 1\n    i = i + 1\n\
                    print(acc)\nprint(p.x)\n";
-    assert_eq!(run_capture(src).expect("parallel"), run(src));
+    // Same arithmetic as `ic_struct_under_parallel_engine` (identical Pt(3,4)/sum/100-iter loop):
+    // acc = 700 + 4950 = 5650, p.x ends at 103.
+    assert_eq!(run_capture(src).expect("parallel"), "5650\n103\n");
 }
 
 #[test]
@@ -1392,7 +1409,6 @@ fn method_ic_survives_fiber_park_under_parallel() {
                    fn producer(ch: Channel[int]):\n    i := 0\n    while i < 4:\n        ch.send(i)\n        i = i + 1\n\
                    fn main():\n    ch := Channel[int]()\n    parallel:\n        spawn consumer(ch)\n        spawn producer(ch)\nmain()\n";
     // total = 4*1000 + (0+1+2+3) = 4006
-    assert_eq!(run_capture(src).expect("parallel"), run(src));
     assert_eq!(run(src), "4006\n");
 }
 
@@ -1713,12 +1729,7 @@ fn main():
 main()
 ";
     let vm = run_capture(src).expect("vm run");
-    let interp = run_capture(src).expect("repeat run");
     // Must be byte-identical (the hard rule).
-    assert_eq!(
-        vm, interp,
-        "VM vs interp divergence on stateful-iterator comprehension"
-    );
     // And the canonical (lazy/interleaved) result: each element reads the just-advanced `n`.
     assert_eq!(
         vm, "[1, 102, 203]\n[1, 1, 102, 102, 203, 203]\n",
@@ -5032,15 +5043,11 @@ fn extern_in_spawn_parallel_snapshot() {
                    r := ch.recv()\nprint(r)\n";
     let entry = write_temp_chz("ffi_spawn", src);
     let (vm_out, _e, vm_res, _) = run_file(&entry);
-    let (par_out, _pe, par_res, _) = run_file_with(&entry, crate::native::HostConfig::default());
+    let (_par_out, _pe, par_res, _) = run_file_with(&entry, crate::native::HostConfig::default());
     let _ = std::fs::remove_file(&entry);
     assert!(vm_res.is_ok(), "VM faulted: {vm_res:?}");
     assert!(par_res.is_ok(), "parallel engine faulted: {par_res:?}");
     assert_eq!(vm_out, "3.0\n");
-    assert_eq!(
-        vm_out, par_out,
-        "the two runs diverged on an extern-in-spawn call"
-    );
 }
 
 /// Regression (blocker): an extern fn with an explicit `-> nil` (void) return must RUN, not panic.
@@ -5075,7 +5082,7 @@ fn extern_cross_module_alias_runs() {
         )
         .unwrap();
     let (vm_out, _e, vm_res, _) = run_file(&entry);
-    let (par_out, _pe, par_res, _) = run_file_with(&entry, crate::native::HostConfig::default());
+    let (_par_out, _pe, par_res, _) = run_file_with(&entry, crate::native::HostConfig::default());
     let _ = std::fs::remove_dir_all(&dir);
     assert!(
         vm_res.is_ok(),
@@ -5086,10 +5093,6 @@ fn extern_cross_module_alias_runs() {
         "parallel engine faulted on cross-module alias extern: {par_res:?}"
     );
     assert_eq!(vm_out, "5\n");
-    assert_eq!(
-        vm_out, par_out,
-        "VM and --parallel diverged on a cross-module alias extern"
-    );
 }
 
 /// Module-qualified enum-variant patterns (`geo.Color.Red`) in match arms, symmetric with
@@ -5114,7 +5117,7 @@ fn match_module_qualified_variant_three_engine_parity() {
         .unwrap();
     let cfg = crate::native::HostConfig::default;
     let (vo, _ve, vr, _vc) = run_file_with(&entry, cfg());
-    let (po, _pe, pr, _pc) = run_file_with(&entry, cfg());
+    let (_po, _pe, pr, _pc) = run_file_with(&entry, cfg());
     let (io, _ie, ir, _ic) = run_file(&entry);
     let _ = std::fs::remove_dir_all(&dir);
     assert!(vr.is_ok(), "VM faulted: {vr:?}");
@@ -5122,7 +5125,6 @@ fn match_module_qualified_variant_three_engine_parity() {
     assert!(ir.is_ok(), "interp faulted: {ir:?}");
     let expected = "red\ngreen\n16\n9\nG\n";
     assert_eq!(vo, expected, "VM output");
-    assert_eq!(vo, po, "VM vs --parallel divergence");
     assert_eq!(vo, io, "VM vs interp divergence");
 }
 
@@ -5150,12 +5152,11 @@ fn struct_match_qualified_whole_module_runs_both_engines() {
         panic!("program must type-check, got: {errs:?}");
     }
     let (vo, _ve, vr, _vc) = run_file(&entry);
-    let (io, _ie, ir, _ic) = run_file(&entry);
+    let (_io, _ie, ir, _ic) = run_file(&entry);
     let _ = std::fs::remove_dir_all(&dir);
     assert!(vr.is_ok(), "VM faulted: {vr:?}");
     assert!(ir.is_ok(), "M:N engine faulted: {ir:?}");
     assert_eq!(vo, "7\n", "VM output");
-    assert_eq!(vo, io, "serial vs M:N divergence");
 }
 
 /// M24 Task 3 — a static-witness call ACROSS a module boundary must RUN,. Type-check
@@ -5193,7 +5194,7 @@ fn witness_cross_module_runs_both_engines() {
         panic!("program must type-check, got: {errs:?}");
     }
     let (vo, _ve, vr, _vc) = run_file(&entry);
-    let (io, _ie, ir, _ic) = run_file(&entry);
+    let (_io, _ie, ir, _ic) = run_file(&entry);
     let _ = std::fs::remove_dir_all(&dir);
     assert!(vr.is_ok(), "VM faulted: {vr:?}");
     assert!(ir.is_ok(), "M:N engine faulted: {ir:?}");
@@ -5201,7 +5202,6 @@ fn witness_cross_module_runs_both_engines() {
         vo, "7\n7\n7\n7\nloc\n7\n7\nloc\nloc\n7\n",
         "VM output (a wrong identity key faults, a wrong witness prints another type)"
     );
-    assert_eq!(vo, io, "serial vs M:N divergence");
 }
 
 /// M24 Task 5 — the same, for a witness declared BY A MEMBER: an instance method and a static method
@@ -5230,7 +5230,7 @@ fn witness_member_cross_module_runs_both_engines() {
         panic!("program must type-check, got: {errs:?}");
     }
     let (vo, _ve, vr, _vc) = run_file(&entry);
-    let (io, _ie, ir, _ic) = run_file(&entry);
+    let (_io, _ie, ir, _ic) = run_file(&entry);
     let _ = std::fs::remove_dir_all(&dir);
     assert!(vr.is_ok(), "VM faulted: {vr:?}");
     assert!(ir.is_ok(), "M:N engine faulted: {ir:?}");
@@ -5238,7 +5238,6 @@ fn witness_member_cross_module_runs_both_engines() {
         vo, "7\nloc\n7\nloc\n7\nloc\n",
         "VM output (a wrong identity key faults, a wrong witness builds the other type)"
     );
-    assert_eq!(vo, io, "serial vs M:N divergence");
 }
 
 // ===== M24-2 — a nested body captures `$w:T` only when it can REACH a witness =====
@@ -5364,9 +5363,7 @@ fn m24_2_a_nested_body_forwarding_through_a_member_keeps_its_witness() {
         "the program must type-check, or this test pins nothing `chezzi run` would accept"
     );
     let vo = run_capture(&src).expect("VM run");
-    let io = run_capture(&src).expect("M:N engine");
     assert_eq!(vo, "1\n", "VM output");
-    assert_eq!(vo, io, "serial vs M:N divergence");
 }
 
 /// M24-2 fix pass — the walk's `bound` set holds only the names bound INSIDE the nested body, so a
@@ -5405,12 +5402,11 @@ fn m24_2_a_parameter_shadowing_a_user_module_keeps_the_witness() {
         panic!("program must type-check, got: {errs:?}");
     }
     let (vo, _ve, vr, _vc) = run_file(&entry);
-    let (io, _ie, ir, _ic) = run_file(&entry);
+    let (_io, _ie, ir, _ic) = run_file(&entry);
     let _ = std::fs::remove_dir_all(&dir);
     assert!(vr.is_ok(), "VM faulted: {vr:?}");
     assert!(ir.is_ok(), "M:N engine faulted: {ir:?}");
     assert_eq!(vo, "14\n", "VM output");
-    assert_eq!(vo, io, "serial vs M:N divergence");
 }
 
 #[test]
@@ -5447,12 +5443,11 @@ fn m24_2_a_type_named_like_a_user_module_keeps_the_witness() {
         panic!("program must type-check, got: {errs:?}");
     }
     let (vo, _ve, vr, _vc) = run_file(&entry);
-    let (io, _ie, ir, _ic) = run_file(&entry);
+    let (_io, _ie, ir, _ic) = run_file(&entry);
     let _ = std::fs::remove_dir_all(&dir);
     assert!(vr.is_ok(), "VM faulted: {vr:?}");
     assert!(ir.is_ok(), "M:N engine faulted: {ir:?}");
     assert_eq!(vo, "0\n", "VM output");
-    assert_eq!(vo, io, "serial vs M:N divergence");
 }
 
 #[test]
@@ -5533,7 +5528,7 @@ print(probe())
         panic!("program must type-check, got: {errs:?}");
     }
     let (vo, _ve, vr, _vc) = run_file(&entry);
-    let (io, _ie, ir, _ic) = run_file(&entry);
+    let (_io, _ie, ir, _ic) = run_file(&entry);
     let _ = std::fs::remove_dir_all(&dir);
     assert!(vr.is_ok(), "VM faulted: {vr:?}");
     assert!(ir.is_ok(), "M:N engine faulted: {ir:?}");
@@ -5541,7 +5536,6 @@ print(probe())
         vo, "709\n201\n",
         "probe() is g(b=1, a=2) = h2(a=2, b=1) = 201; 102 means lib's permutation was applied"
     );
-    assert_eq!(vo, io, "serial vs M:N divergence");
 }
 
 /// W7-49 (2/3) — `CarrierTable`. An Option-mode `?.` inside `lib.chz`'s default-parameter
@@ -5593,7 +5587,7 @@ match probe():
         panic!("program must type-check, got: {errs:?}");
     }
     let (vo, _ve, vr, _vc) = run_file(&entry);
-    let (io, _ie, ir, _ic) = run_file(&entry);
+    let (_io, _ie, ir, _ic) = run_file(&entry);
     let _ = std::fs::remove_dir_all(&dir);
     assert!(
         vr.is_ok(),
@@ -5604,7 +5598,6 @@ match probe():
         vo, "3\n4\n",
         "lib's Option carrier is Some(3); main's Result carrier is \"wxyz\".len() = 4"
     );
-    assert_eq!(vo, io, "serial vs M:N divergence");
 }
 
 /// W7-49 (3/3) — `WitnessTable`. `lib.chz`'s default `empty[Counter]()` and `main.chz`'s
@@ -5682,7 +5675,7 @@ print(probe())
         panic!("program must type-check, got: {errs:?}");
     }
     let (vo, _ve, vr, _vc) = run_file(&entry);
-    let (io, _ie, ir, _ic) = run_file(&entry);
+    let (_io, _ie, ir, _ic) = run_file(&entry);
     let _ = std::fs::remove_dir_all(&dir);
     assert!(
         vr.is_ok(),
@@ -5693,7 +5686,6 @@ print(probe())
         vo, "7\noth\n",
         "f() witnesses Counter; probe() witnesses Other — a shared key builds Counter twice"
     );
-    assert_eq!(vo, io, "serial vs M:N divergence");
 }
 
 /// W7-51 — the W7-49 residual DISSOLVED, on the same source, byte for byte. The hole was that one
@@ -5749,7 +5741,7 @@ print(probe())
         panic!("program must type-check, got: {errs:?}");
     }
     let (vo, _ve, vr, _vc) = run_file(&entry);
-    let (io, _ie, ir, _ic) = run_file(&entry);
+    let (_io, _ie, ir, _ic) = run_file(&entry);
     let _ = std::fs::remove_dir_all(&dir);
     assert!(vr.is_ok(), "VM faulted: {vr:?}");
     assert!(ir.is_ok(), "M:N engine faulted: {ir:?}");
@@ -5757,7 +5749,6 @@ print(probe())
         vo, "709\n709\n",
         "the default is `g(a=7, b=9)` in lib, where `g` is `h`; probe's local `ba` is irrelevant"
     );
-    assert_eq!(vo, io, "serial vs M:N divergence");
 }
 
 // ===== W7-51 — a default resolves in the module that DECLARES it =====
@@ -5794,7 +5785,7 @@ fn a_cross_module_default_resolves_in_its_definer_not_the_caller() {
         panic!("program must type-check, got: {errs:?}");
     }
     let (vo, _ve, vr, _vc) = run_file(&entry);
-    let (io, _ie, ir, _ic) = run_file(&entry);
+    let (_io, _ie, ir, _ic) = run_file(&entry);
     let _ = std::fs::remove_dir_all(&dir);
     assert!(vr.is_ok(), "VM faulted: {vr:?}");
     assert!(ir.is_ok(), "M:N engine faulted: {ir:?}");
@@ -5802,7 +5793,6 @@ fn a_cross_module_default_resolves_in_its_definer_not_the_caller() {
         vo, "7\n99\n",
         "the default reads g's K (7), not the caller's (99); the caller's own K is untouched"
     );
-    assert_eq!(vo, io, "serial vs M:N divergence");
 }
 
 /// W7-51 (2/3) — a default that CALLS a function the definer declares and the caller never imports.
@@ -5824,7 +5814,7 @@ fn a_cross_module_default_may_call_the_definers_own_function() {
         panic!("program must type-check, got: {errs:?}");
     }
     let (vo, _ve, vr, _vc) = run_file(&entry);
-    let (io, _ie, ir, _ic) = run_file(&entry);
+    let (_io, _ie, ir, _ic) = run_file(&entry);
     let _ = std::fs::remove_dir_all(&dir);
     assert!(vr.is_ok(), "VM faulted: {vr:?}");
     assert!(ir.is_ok(), "M:N engine faulted: {ir:?}");
@@ -5832,7 +5822,6 @@ fn a_cross_module_default_may_call_the_definers_own_function() {
         vo, "3\n8\n",
         "the definer's own fn runs; an explicit arg bypasses it"
     );
-    assert_eq!(vo, io, "serial vs M:N divergence");
 }
 
 /// W7-51 (3/3) — a default that calls through the DEFINER'S OWN IMPORT, three modules deep and via a
@@ -5860,7 +5849,7 @@ fn a_cross_module_default_may_call_through_the_definers_import() {
         panic!("program must type-check, got: {errs:?}");
     }
     let (vo, _ve, vr, _vc) = run_file(&entry);
-    let (io, _ie, ir, _ic) = run_file(&entry);
+    let (_io, _ie, ir, _ic) = run_file(&entry);
     let _ = std::fs::remove_dir_all(&dir);
     assert!(vr.is_ok(), "VM faulted: {vr:?}");
     assert!(ir.is_ok(), "M:N engine faulted: {ir:?}");
@@ -5868,7 +5857,6 @@ fn a_cross_module_default_may_call_through_the_definers_import() {
         vo, "3\n",
         "the default resolves g's own import, not main's namespace"
     );
-    assert_eq!(vo, io, "serial vs M:N divergence");
 }
 
 /// W7-51 — a default that calls through the definer's own `import std.math`. The synthetic edge the
@@ -5893,12 +5881,11 @@ fn a_cross_module_default_may_call_through_the_definers_std_import() {
         panic!("program must type-check, got: {errs:?}");
     }
     let (vo, _ve, vr, _vc) = run_file(&entry);
-    let (io, _ie, ir, _ic) = run_file(&entry);
+    let (_io, _ie, ir, _ic) = run_file(&entry);
     let _ = std::fs::remove_dir_all(&dir);
     assert!(vr.is_ok(), "VM faulted: {vr:?}");
     assert!(ir.is_ok(), "M:N engine faulted: {ir:?}");
     assert_eq!(vo, "4.0\n1.5\n", "std.math resolves in g, not in main");
-    assert_eq!(vo, io, "serial vs M:N divergence");
 }
 
 /// W7-51 — the definer is a TRANSITIVE dependency: `main` imports `mid`, `mid` imports `deep`, and
@@ -5929,12 +5916,11 @@ fn a_default_from_a_transitive_dependency_resolves_in_its_definer() {
         panic!("program must type-check, got: {errs:?}");
     }
     let (vo, _ve, vr, _vc) = run_file(&entry);
-    let (io, _ie, ir, _ic) = run_file(&entry);
+    let (_io, _ie, ir, _ic) = run_file(&entry);
     let _ = std::fs::remove_dir_all(&dir);
     assert!(vr.is_ok(), "VM faulted: {vr:?}");
     assert!(ir.is_ok(), "M:N engine faulted: {ir:?}");
     assert_eq!(vo, "13\n", "deep's own dv() is 3, plus S.n = 10");
-    assert_eq!(vo, io, "serial vs M:N divergence");
 }
 
 /// W7-51 — a DIAMOND (`main` → {`l`, `r`} → `base`), asserted in BOTH orderings of `main`'s two
@@ -5985,7 +5971,7 @@ fn a_default_in_a_diamonds_shared_base_is_the_same_in_either_import_order() {
             panic!("[{tag}] program must type-check, got: {errs:?}");
         }
         let (vo, _ve, vr, _vc) = run_file(&entry);
-        let (io, _ie, ir, _ic) = run_file(&entry);
+        let (_io, _ie, ir, _ic) = run_file(&entry);
         let _ = std::fs::remove_dir_all(&dir);
         assert!(vr.is_ok(), "[{tag}] VM faulted: {vr:?}");
         assert!(ir.is_ok(), "[{tag}] M:N engine faulted: {ir:?}");
@@ -5993,7 +5979,6 @@ fn a_default_in_a_diamonds_shared_base_is_the_same_in_either_import_order() {
             vo, "13\n23\n900\n",
             "[{tag}] base's K (3) reaches both call sites; main's K is untouched"
         );
-        assert_eq!(vo, io, "[{tag}] serial vs M:N divergence");
     }
 }
 
@@ -6035,7 +6020,7 @@ fn a_method_default_from_a_sibling_module_resolves_in_its_definer() {
             panic!("[{tag}] program must type-check, got: {errs:?}");
         }
         let (vo, _ve, vr, _vc) = run_file(&entry);
-        let (io, _ie, ir, _ic) = run_file(&entry);
+        let (_io, _ie, ir, _ic) = run_file(&entry);
         let _ = std::fs::remove_dir_all(&dir);
         assert!(vr.is_ok(), "[{tag}] VM faulted: {vr:?}");
         assert!(ir.is_ok(), "[{tag}] M:N engine faulted: {ir:?}");
@@ -6044,7 +6029,6 @@ fn a_method_default_from_a_sibling_module_resolves_in_its_definer() {
             "[{tag}] the default must resolve in its DEFINER (a: 1 + 10), not the caller (z: 500); \
              `0104d57b` printed 510 and CPython prints 11"
         );
-        assert_eq!(vo, io, "[{tag}] serial vs M:N divergence");
     }
 }
 
@@ -6088,12 +6072,11 @@ fn a_defaulted_method_argument_is_reachable_through_a_protocol() {
             panic!("[{tag}] program must type-check, got: {errs:?}");
         }
         let (vo, _ve, vr, _vc) = run_file(&entry);
-        let (io, _ie, ir, _ic) = run_file(&entry);
+        let (_io, _ie, ir, _ic) = run_file(&entry);
         let _ = std::fs::remove_dir_all(&dir);
         assert!(vr.is_ok(), "[{tag}] VM faulted: {vr:?}");
         assert!(ir.is_ok(), "[{tag}] M:N engine faulted: {ir:?}");
         assert_eq!(vo, "12\n", "[{tag}] base and CPython both print 12");
-        assert_eq!(vo, io, "[{tag}] serial vs M:N divergence");
     }
 }
 
@@ -6136,12 +6119,11 @@ fn a_default_naming_an_import_the_caller_cannot_see_now_compiles_and_resolves_in
             panic!("[{tag}] must now type-check (was `unknown name 'u'`), got: {errs:?}");
         }
         let (vo, _ve, vr, _vc) = run_file(&entry);
-        let (io, _ie, ir, _ic) = run_file(&entry);
+        let (_io, _ie, ir, _ic) = run_file(&entry);
         let _ = std::fs::remove_dir_all(&dir);
         assert!(vr.is_ok(), "[{tag}] VM faulted: {vr:?}");
         assert!(ir.is_ok(), "[{tag}] M:N engine faulted: {ir:?}");
         assert_eq!(vo, "12\n", "[{tag}] definer's u.av() (11) + 1");
-        assert_eq!(vo, io, "[{tag}] serial vs M:N divergence");
     }
 }
 
@@ -6161,11 +6143,6 @@ fn a_default_fills_through_a_first_class_function_value() {
     )
     .expect("run");
     assert_eq!(out, "4\n9\n");
-    let p = run_capture(
-        "fn av() -> int:\n    return 4\nfn g(x: int = av()) -> int:\n    return x\nf := g\nprint(f())\nprint(f(9))\n",
-    )
-    .expect("run");
-    assert_eq!(out, p, "serial vs M:N divergence");
 
     // A partial suffix: only the omitted tail is filled.
     let out = run_capture(
@@ -6209,7 +6186,7 @@ fn a_generic_host_self_default_resolves_in_its_definer() {
         panic!("must type-check, got: {errs:?}");
     }
     let (vo, _e, vr, _c) = run_file(&entry);
-    let (io, _e2, ir, _c2) = run_file(&entry);
+    let (_io, _e2, ir, _c2) = run_file(&entry);
     let _ = std::fs::remove_dir_all(&dir);
     assert!(vr.is_ok(), "VM faulted: {vr:?}");
     assert!(ir.is_ok(), "M:N engine faulted: {ir:?}");
@@ -6217,7 +6194,6 @@ fn a_generic_host_self_default_resolves_in_its_definer() {
         vo, "definer\n0\n",
         "the generic-host `Self` default must resolve in its DEFINER, not the caller"
     );
-    assert_eq!(vo, io, "serial vs M:N divergence");
 }
 
 /// **The M:N half, and the one that a `chezzi check` cannot see.** A worker VM faults a module's
@@ -6251,12 +6227,11 @@ fn an_out_of_closure_default_resolves_on_an_m_n_worker() {
         panic!("must type-check, got: {errs:?}");
     }
     let (vo, _ve, vr, _vc) = run_file(&entry);
-    let (io, _ie, ir, _ic) = run_file(&entry);
+    let (_io, _ie, ir, _ic) = run_file(&entry);
     let _ = std::fs::remove_dir_all(&dir);
     assert!(vr.is_ok(), "VM faulted: {vr:?}");
     assert!(ir.is_ok(), "M:N engine faulted: {ir:?}");
     assert_eq!(vo, "12\n", "definer's u.av() (11) + 1 on a worker");
-    assert_eq!(vo, io, "serial vs M:N divergence");
 }
 
 /// The definer's module is still RUNNING when its own default is first needed: `a`'s toplevel calls
@@ -6287,12 +6262,11 @@ fn an_out_of_closure_default_resolves_while_its_definers_toplevel_is_running() {
         panic!("must type-check, got: {errs:?}");
     }
     let (vo, _ve, vr, _vc) = run_file(&entry);
-    let (io, _ie, ir, _ic) = run_file(&entry);
+    let (_io, _ie, ir, _ic) = run_file(&entry);
     let _ = std::fs::remove_dir_all(&dir);
     assert!(vr.is_ok(), "VM faulted: {vr:?}");
     assert!(ir.is_ok(), "M:N engine faulted: {ir:?}");
     assert_eq!(vo, "12\n");
-    assert_eq!(vo, io, "serial vs M:N divergence");
 }
 
 /// **The relaxed call-site typing is not a bypass.** An out-of-closure provider call is typed from
@@ -6365,12 +6339,11 @@ fn a_default_whose_name_the_caller_also_declares_reads_the_definers() {
             panic!("[{tag}] program must type-check, got: {errs:?}");
         }
         let (vo, _ve, vr, _vc) = run_file(&entry);
-        let (io, _ie, ir, _ic) = run_file(&entry);
+        let (_io, _ie, ir, _ic) = run_file(&entry);
         let _ = std::fs::remove_dir_all(&dir);
         assert!(vr.is_ok(), "[{tag}] VM faulted: {vr:?}");
         assert!(ir.is_ok(), "[{tag}] M:N engine faulted: {ir:?}");
         assert_eq!(vo, "11\n", "[{tag}] a's own av() (1) + 10; got: {vo}");
-        assert_eq!(vo, io, "[{tag}] serial vs M:N divergence");
     }
 }
 
@@ -6410,12 +6383,11 @@ fn a_method_default_from_an_imported_module_case(tag: &str, entry_src: &str) {
         panic!("program must type-check, got: {errs:?}");
     }
     let (vo, _ve, vr, _vc) = run_file(&entry);
-    let (io, _ie, ir, _ic) = run_file(&entry);
+    let (_io, _ie, ir, _ic) = run_file(&entry);
     let _ = std::fs::remove_dir_all(&dir);
     assert!(vr.is_ok(), "VM faulted: {vr:?}");
     assert!(ir.is_ok(), "M:N engine faulted: {ir:?}");
     assert_eq!(vo, "11\n", "[{tag}] a's own av() is 1, not z's 500");
-    assert_eq!(vo, io, "[{tag}] serial vs M:N divergence");
 }
 
 /// W7-51 item 5 — a provider frame in a stack trace is rendered as what it is. Its internal name is
@@ -6472,7 +6444,7 @@ fn a_cross_module_default_is_evaluated_per_call_in_the_definers_module() {
         panic!("program must type-check, got: {errs:?}");
     }
     let (vo, _ve, vr, _vc) = run_file(&entry);
-    let (io, _ie, ir, _ic) = run_file(&entry);
+    let (_io, _ie, ir, _ic) = run_file(&entry);
     let _ = std::fs::remove_dir_all(&dir);
     assert!(vr.is_ok(), "VM faulted: {vr:?}");
     assert!(ir.is_ok(), "M:N engine faulted: {ir:?}");
@@ -6480,7 +6452,6 @@ fn a_cross_module_default_is_evaluated_per_call_in_the_definers_module() {
         vo, "1\n2\n2\n100\n",
         "two omitting calls bump g's own counter twice; main's same-named global is untouched"
     );
-    assert_eq!(vo, io, "serial vs M:N divergence");
 }
 
 /// Entry-last backstop — when the ENTRY file IS the always-injected prelude stub
@@ -6495,13 +6466,12 @@ fn entry_is_always_linked_stub_runs_clean_three_engine() {
     let entry = manifest.join("std").join("prelude.chz");
     let cfg = crate::native::HostConfig::default;
     let (vo, _ve, vr, _vc) = run_file_with(&entry, cfg());
-    let (po, _pe, pr, _pc) = run_file_with(&entry, cfg());
+    let (_po, _pe, pr, _pc) = run_file_with(&entry, cfg());
     let (io, _ie, ir, _ic) = run_file(&entry);
     assert!(vr.is_ok(), "VM faulted on prelude.chz: {vr:?}");
     assert!(pr.is_ok(), "--parallel faulted on prelude.chz: {pr:?}");
     assert!(ir.is_ok(), "interp faulted on prelude.chz: {ir:?}");
     assert_eq!(vo, "", "VM stdout not empty on prelude.chz");
-    assert_eq!(vo, po, "VM vs --parallel divergence on prelude.chz");
     assert_eq!(vo, io, "VM vs interp divergence on prelude.chz");
 }
 
@@ -6519,13 +6489,12 @@ fn concurrency_whole_module_runs_both_engines() {
         )
         .unwrap();
     let (vo, _ve, vr, _vc) = run_file(&entry);
-    let (io, _ie, ir, _ic) = run_file(&entry);
+    let (_io, _ie, ir, _ic) = run_file(&entry);
     let _ = std::fs::remove_dir_all(&dir);
     assert!(vr.is_ok(), "VM faulted: {vr:?}");
     assert!(ir.is_ok(), "interp faulted: {ir:?}");
     let expected = "5\n1\n2\n";
     assert_eq!(vo, expected, "VM output");
-    assert_eq!(vo, io, "VM vs interp divergence");
 }
 
 /// Task 4 — CRITICAL FIX 2: a SELECTIVE `import Shared from std.concurrency` must RUN.
@@ -6543,7 +6512,7 @@ fn concurrency_from_import_runs_both_engines() {
     )
     .unwrap();
     let (vo, _ve, vr, _vc) = run_file(&entry);
-    let (io, _ie, ir, _ic) = run_file(&entry);
+    let (_io, _ie, ir, _ic) = run_file(&entry);
     let _ = std::fs::remove_dir_all(&dir);
     assert!(vr.is_ok(), "VM faulted (bind_import skip missing?): {vr:?}");
     assert!(
@@ -6551,7 +6520,6 @@ fn concurrency_from_import_runs_both_engines() {
         "interp faulted (bind_import skip missing?): {ir:?}"
     );
     assert_eq!(vo, "0\n", "VM output");
-    assert_eq!(vo, io, "VM vs interp divergence");
 }
 
 /// Gate `Socket`/`Listener` behind `import std.net` — a `Socket` carries no runtime module-member
@@ -6573,7 +6541,7 @@ fn net_from_import_runs_both_engines() {
         let entry = dir.join("main.chz");
         std::fs::write(&entry, src).unwrap();
         let (vo, _ve, vr, _vc) = run_file(&entry);
-        let (io, _ie, ir, _ic) = run_file(&entry);
+        let (_io, _ie, ir, _ic) = run_file(&entry);
         let _ = std::fs::remove_dir_all(&dir);
         assert!(vr.is_ok(), "VM faulted (bind_import skip missing?): {vr:?}");
         assert!(
@@ -6581,7 +6549,6 @@ fn net_from_import_runs_both_engines() {
             "interp faulted (bind_import skip missing?): {ir:?}"
         );
         assert_eq!(vo, "1\n", "VM output");
-        assert_eq!(vo, io, "VM vs interp divergence");
     }
 }
 
@@ -6599,12 +6566,11 @@ fn timer_whole_module_runs_both_engines() {
     )
     .unwrap();
     let (vo, _ve, vr, _vc) = run_file(&entry);
-    let (io, _ie, ir, _ic) = run_file(&entry);
+    let (_io, _ie, ir, _ic) = run_file(&entry);
     let _ = std::fs::remove_dir_all(&dir);
     assert!(vr.is_ok(), "VM faulted: {vr:?}");
     assert!(ir.is_ok(), "interp faulted: {ir:?}");
     assert_eq!(vo, "true\n", "VM output");
-    assert_eq!(vo, io, "VM vs interp divergence");
 }
 
 /// CRITICAL — a SELECTIVE `import timer from std.time` must RUN. `timer` is opcode-
@@ -6622,7 +6588,7 @@ fn timer_from_import_runs_both_engines() {
     )
     .unwrap();
     let (vo, _ve, vr, _vc) = run_file(&entry);
-    let (io, _ie, ir, _ic) = run_file(&entry);
+    let (_io, _ie, ir, _ic) = run_file(&entry);
     let _ = std::fs::remove_dir_all(&dir);
     assert!(vr.is_ok(), "VM faulted (bind_import skip missing?): {vr:?}");
     assert!(
@@ -6630,7 +6596,6 @@ fn timer_from_import_runs_both_engines() {
         "interp faulted (bind_import skip missing?): {ir:?}"
     );
     assert_eq!(vo, "true\n", "VM output");
-    assert_eq!(vo, io, "VM vs interp divergence");
 }
 
 /// Regression (blocker): a module-QUALIFIED struct type (`cdefs.DivT`) written at the extern
@@ -6658,8 +6623,8 @@ fn extern_qualified_return_struct_runs() {
     )
     .unwrap();
     let (vm_out, _e, vm_res, _) = run_file(&entry);
-    let (io, _ie, ir, _) = run_file(&entry);
-    let (par_out, _pe, par_res, _) = run_file_with(&entry, crate::native::HostConfig::default());
+    let (_io, _ie, ir, _) = run_file(&entry);
+    let (_par_out, _pe, par_res, _) = run_file_with(&entry, crate::native::HostConfig::default());
     let _ = std::fs::remove_dir_all(&dir);
     assert!(
         vm_res.is_ok(),
@@ -6674,14 +6639,6 @@ fn extern_qualified_return_struct_runs() {
         "parallel engine faulted on qualified return struct extern: {par_res:?}"
     );
     assert_eq!(vm_out, "3\n2\n");
-    assert_eq!(
-        vm_out, io,
-        "VM and interp diverged (qualified return struct)"
-    );
-    assert_eq!(
-        vm_out, par_out,
-        "VM and --parallel diverged (qualified return struct)"
-    );
 }
 
 /// Regression (blocker): a module-QUALIFIED width alias (`w3.Len`, `type Len = int32`) at both
@@ -6707,8 +6664,8 @@ fn extern_qualified_width_alias_param_runs() {
         )
         .unwrap();
     let (vm_out, _e, vm_res, _) = run_file(&entry);
-    let (io, _ie, ir, _) = run_file(&entry);
-    let (par_out, _pe, par_res, _) = run_file_with(&entry, crate::native::HostConfig::default());
+    let (_io, _ie, ir, _) = run_file(&entry);
+    let (_par_out, _pe, par_res, _) = run_file_with(&entry, crate::native::HostConfig::default());
     let _ = std::fs::remove_dir_all(&dir);
     assert!(
         vm_res.is_ok(),
@@ -6723,11 +6680,6 @@ fn extern_qualified_width_alias_param_runs() {
         "parallel engine faulted on qualified width-alias param extern: {par_res:?}"
     );
     assert_eq!(vm_out, "7\n");
-    assert_eq!(vm_out, io, "VM and interp diverged (qualified width param)");
-    assert_eq!(
-        vm_out, par_out,
-        "VM and --parallel diverged (qualified width param)"
-    );
 }
 
 /// Regression (blocker, the adversarial-panel find): a module-QUALIFIED width alias must resolve
@@ -6754,8 +6706,8 @@ fn extern_qualified_width_alias_param_collision_runs() {
     )
     .unwrap();
     let (vm_out, _e, vm_res, _) = run_file(&entry);
-    let (io, _ie, ir, _) = run_file(&entry);
-    let (par_out, _pe, par_res, _) = run_file_with(&entry, crate::native::HostConfig::default());
+    let (_io, _ie, ir, _) = run_file(&entry);
+    let (_par_out, _pe, par_res, _) = run_file_with(&entry, crate::native::HostConfig::default());
     let _ = std::fs::remove_dir_all(&dir);
     assert!(
         vm_res.is_ok(),
@@ -6772,14 +6724,6 @@ fn extern_qualified_width_alias_param_collision_runs() {
     assert_eq!(
         vm_out, "300\n",
         "qualified `w3.Len` must marshal as the DEFINING module's int64 (300), not the local int8 (44)"
-    );
-    assert_eq!(
-        vm_out, io,
-        "VM and interp diverged (colliding qualified width param)"
-    );
-    assert_eq!(
-        vm_out, par_out,
-        "VM and --parallel diverged (colliding qualified width param)"
     );
 }
 
@@ -6808,8 +6752,8 @@ fn extern_qualified_width_alias_chain_depth2_collision_runs() {
         )
         .unwrap();
     let (vm_out, _e, vm_res, _) = run_file(&entry);
-    let (io, _ie, ir, _) = run_file(&entry);
-    let (par_out, _pe, par_res, _) = run_file_with(&entry, crate::native::HostConfig::default());
+    let (_io, _ie, ir, _) = run_file(&entry);
+    let (_par_out, _pe, par_res, _) = run_file_with(&entry, crate::native::HostConfig::default());
     let _ = std::fs::remove_dir_all(&dir);
     assert!(
         vm_res.is_ok(),
@@ -6826,14 +6770,6 @@ fn extern_qualified_width_alias_chain_depth2_collision_runs() {
     assert_eq!(
         vm_out, "300\n",
         "chained `w3.Len -> Inner -> int64` must marshal as int64 (300), not the inner hop's colliding local int8 (44)"
-    );
-    assert_eq!(
-        vm_out, io,
-        "VM and interp diverged (chained qualified width param, depth 2)"
-    );
-    assert_eq!(
-        vm_out, par_out,
-        "VM and --parallel diverged (chained qualified width param, depth 2)"
     );
 }
 
@@ -6860,8 +6796,8 @@ fn extern_qualified_width_alias_chain_depth3_collision_runs() {
         )
         .unwrap();
     let (vm_out, _e, vm_res, _) = run_file(&entry);
-    let (io, _ie, ir, _) = run_file(&entry);
-    let (par_out, _pe, par_res, _) = run_file_with(&entry, crate::native::HostConfig::default());
+    let (_io, _ie, ir, _) = run_file(&entry);
+    let (_par_out, _pe, par_res, _) = run_file_with(&entry, crate::native::HostConfig::default());
     let _ = std::fs::remove_dir_all(&dir);
     assert!(
         vm_res.is_ok(),
@@ -6878,14 +6814,6 @@ fn extern_qualified_width_alias_chain_depth3_collision_runs() {
     assert_eq!(
         vm_out, "300\n",
         "depth-3 `w3.Len -> A -> B -> int64` must marshal as int64 (300), not the colliding local int8 (44)"
-    );
-    assert_eq!(
-        vm_out, io,
-        "VM and interp diverged (chained qualified width param, depth 3)"
-    );
-    assert_eq!(
-        vm_out, par_out,
-        "VM and --parallel diverged (chained qualified width param, depth 3)"
     );
 }
 
@@ -6981,8 +6909,8 @@ fn extern_qualified_width_alias_named_import_hop_collision_runs() {
     )
     .unwrap();
     let (vm_out, _e, vm_res, _) = run_file(&entry);
-    let (io, _ie, ir, _) = run_file(&entry);
-    let (par_out, _pe, par_res, _) = run_file_with(&entry, crate::native::HostConfig::default());
+    let (_io, _ie, ir, _) = run_file(&entry);
+    let (_par_out, _pe, par_res, _) = run_file_with(&entry, crate::native::HostConfig::default());
     let _ = std::fs::remove_dir_all(&dir);
     assert!(
         vm_res.is_ok(),
@@ -6999,14 +6927,6 @@ fn extern_qualified_width_alias_named_import_hop_collision_runs() {
     assert_eq!(
         vm_out, "300\n",
         "named-import-hop `w3.Len -> W(from widths) -> int64` must marshal as int64 (300), not main's colliding int8 (44)"
-    );
-    assert_eq!(
-        vm_out, io,
-        "VM and interp diverged (named-import-hop qualified width param)"
-    );
-    assert_eq!(
-        vm_out, par_out,
-        "VM and --parallel diverged (named-import-hop qualified width param)"
     );
 }
 
@@ -7037,8 +6957,8 @@ fn extern_qualified_return_struct_aliased_field_runs() {
         )
         .unwrap();
     let (vm_out, _e, vm_res, _) = run_file(&entry);
-    let (io, _ie, ir, _) = run_file(&entry);
-    let (par_out, _pe, par_res, _) = run_file_with(&entry, crate::native::HostConfig::default());
+    let (_io, _ie, ir, _) = run_file(&entry);
+    let (_par_out, _pe, par_res, _) = run_file_with(&entry, crate::native::HostConfig::default());
     let _ = std::fs::remove_dir_all(&dir);
     assert!(
         vm_res.is_ok(),
@@ -7055,14 +6975,6 @@ fn extern_qualified_return_struct_aliased_field_runs() {
     assert_eq!(
         vm_out, "3\n2\n",
         "qualified return struct whose fields use the defining module's local alias must marshal as two int32 (quot 3, rem 2)"
-    );
-    assert_eq!(
-        vm_out, io,
-        "VM and interp diverged (qualified return struct aliased fields)"
-    );
-    assert_eq!(
-        vm_out, par_out,
-        "VM and --parallel diverged (qualified return struct aliased fields)"
     );
 }
 
@@ -7112,8 +7024,8 @@ fn extern_qualified_width_alias_mixed_chain_collision_runs() {
         )
         .unwrap();
     let (vm_out, _e, vm_res, _) = run_file(&entry);
-    let (io, _ie, ir, _) = run_file(&entry);
-    let (par_out, _pe, par_res, _) = run_file_with(&entry, crate::native::HostConfig::default());
+    let (_io, _ie, ir, _) = run_file(&entry);
+    let (_par_out, _pe, par_res, _) = run_file_with(&entry, crate::native::HostConfig::default());
     let _ = std::fs::remove_dir_all(&dir);
     assert!(
         vm_res.is_ok(),
@@ -7130,14 +7042,6 @@ fn extern_qualified_width_alias_mixed_chain_collision_runs() {
     assert_eq!(
         vm_out, "300\n",
         "mixed chain (local -> named-import -> qualified) must marshal as int64 (300), not any colliding int8 hop (44)"
-    );
-    assert_eq!(
-        vm_out, io,
-        "VM and interp diverged (mixed-chain qualified width param)"
-    );
-    assert_eq!(
-        vm_out, par_out,
-        "VM and --parallel diverged (mixed-chain qualified width param)"
     );
 }
 
@@ -9122,7 +9026,11 @@ fn main():
     m[\"k\"] *= 2
     print(m[\"k\"])
 main()";
-    // x: 100*3=300 /2=150 %40=30 &12=12 |1=13 ^5=8 <<2=32 >>1=16 (verified against CPython).
+    // x: 100*3=300 /2=150 %40=30 &12=12 |1=13 ^5=8 <<2=32 >>1=16, hand-computed under Chezzi's
+    // OWN int semantics (`/` truncates by design, docs/syntax.md:1982) — NOT CPython-verified:
+    // measured, CPython's `/=` always promotes to float (`100*3/2` → `150.0`), so `x &= 12` two
+    // steps later raises `TypeError: unsupported operand type(s) for &=: 'float' and 'int'`; the
+    // sequence can't even run to completion under CPython's semantics, let alone match this golden.
     assert_eq!(run_capture(src).expect("vm"), "16\n[32]\n2\n28\n");
 }
 
@@ -9628,12 +9536,10 @@ fn golden_pass_noop_chz_matches_expected_and_interp() {
     let src = include_str!("../../examples/pass_noop.chz");
     let expected = include_str!("../../examples/pass_noop.expected");
     let vm_out = run_capture(src).expect("vm run");
-    let interp_out = run_capture(src).expect("repeat run");
     assert_eq!(
         vm_out, expected,
         "vm output drifted from pass_noop.expected"
     );
-    assert_eq!(vm_out, interp_out, "vm/interp divergence on pass_noop");
 }
 
 /// Empty-protocol golden: `protocol Foo:\n    pass` is an accept-all top type (structural over
@@ -9645,12 +9551,10 @@ fn golden_empty_protocol_chz_matches_expected_and_interp() {
     let src = include_str!("../../examples/empty_protocol.chz");
     let expected = include_str!("../../examples/empty_protocol.expected");
     let vm_out = run_capture(src).expect("vm run");
-    let interp_out = run_capture(src).expect("repeat run");
     assert_eq!(
         vm_out, expected,
         "vm output drifted from empty_protocol.expected"
     );
-    assert_eq!(vm_out, interp_out, "vm/interp divergence on empty_protocol");
 }
 
 /// Empty-struct golden: `struct S:\n    pass` has zero fields — `S()` constructs, prints `S()`,
@@ -9662,12 +9566,10 @@ fn golden_empty_struct_chz_matches_expected_and_interp() {
     let src = include_str!("../../examples/empty_struct.chz");
     let expected = include_str!("../../examples/empty_struct.expected");
     let vm_out = run_capture(src).expect("vm run");
-    let interp_out = run_capture(src).expect("repeat run");
     assert_eq!(
         vm_out, expected,
         "vm output drifted from empty_struct.expected"
     );
-    assert_eq!(vm_out, interp_out, "vm/interp divergence on empty_struct");
 }
 
 /// Container-constructor golden: `examples/container_ctor.chz` exercises `List[T]()` / `Map[K,V]()`
@@ -9679,12 +9581,10 @@ fn golden_container_ctor_chz_matches_expected_and_interp() {
     let src = include_str!("../../examples/container_ctor.chz");
     let expected = include_str!("../../examples/container_ctor.expected");
     let vm_out = run_capture(src).expect("vm run");
-    let interp_out = run_capture(src).expect("repeat run");
     assert_eq!(
         vm_out, expected,
         "vm output drifted from container_ctor.expected"
     );
-    assert_eq!(vm_out, interp_out, "vm/interp divergence on container_ctor");
 }
 
 /// First-class native-type golden: `examples/native_qualified.chz` exercises the ADDITIVE
@@ -9707,9 +9607,8 @@ fn golden_native_qualified_chz_matches_expected_and_interp() {
         vm_out, expected,
         "vm output drifted from native_qualified.expected"
     );
-    let (ip_out, _e2, ip_res, _) = run_file(&path);
+    let (_ip_out, _e2, ip_res, _) = run_file(&path);
     ip_res.expect("native_qualified.chz should run on the interp");
-    assert_eq!(vm_out, ip_out, "vm/interp divergence on native_qualified");
     let (mn_out, _e3, mn_res, _) = run_file_with(&path, crate::native::HostConfig::default());
     mn_res.expect("native_qualified.chz should run on the M:N engine");
     assert_eq!(mn_out, expected, "M:N output drifted on native_qualified");
@@ -9731,9 +9630,8 @@ fn golden_conditional_method_chz_matches_expected_and_interp() {
         vm_out, expected,
         "vm output drifted from conditional_method.expected"
     );
-    let (ip_out, _e2, ip_res, _) = run_file(&path);
+    let (_ip_out, _e2, ip_res, _) = run_file(&path);
     ip_res.expect("conditional_method.chz should run on the interp");
-    assert_eq!(vm_out, ip_out, "vm/interp divergence on conditional_method");
     let (mn_out, _e3, mn_res, _) = run_file_with(&path, crate::native::HostConfig::default());
     mn_res.expect("conditional_method.chz should run on the M:N engine");
     assert_eq!(mn_out, expected, "M:N output drifted on conditional_method");
@@ -9750,9 +9648,8 @@ fn golden_where_sort_sum_chz_matches_expected_and_interp() {
         vm_out, expected,
         "vm output drifted from where_sort_sum.expected"
     );
-    let (ip_out, _e2, ip_res, _) = run_file(&path);
+    let (_ip_out, _e2, ip_res, _) = run_file(&path);
     ip_res.expect("where_sort_sum.chz should run on the interp");
-    assert_eq!(vm_out, ip_out, "vm/interp divergence on where_sort_sum");
     let (mn_out, _e3, mn_res, _) = run_file_with(&path, crate::native::HostConfig::default());
     mn_res.expect("where_sort_sum.chz should run on the M:N engine");
     assert_eq!(mn_out, expected, "M:N output drifted on where_sort_sum");
@@ -9771,9 +9668,8 @@ fn golden_variadic_chz_matches_expected_and_interp() {
     let (vm_out, _e1, vm_res, _) = run_file(&path);
     vm_res.expect("variadic.chz should run on the VM");
     assert_eq!(vm_out, expected, "vm output drifted from variadic.expected");
-    let (ip_out, _e2, ip_res, _) = run_file(&path);
+    let (_ip_out, _e2, ip_res, _) = run_file(&path);
     ip_res.expect("variadic.chz should run on the interp");
-    assert_eq!(vm_out, ip_out, "vm/interp divergence on variadic");
     let (mn_out, _e3, mn_res, _) = run_file_with(&path, crate::native::HostConfig::default());
     mn_res.expect("variadic.chz should run on the M:N engine");
     assert_eq!(mn_out, expected, "M:N output drifted on variadic");
@@ -9806,9 +9702,8 @@ fn golden_std_native_4d_chz_matches_expected_and_interp() {
         vm_out, expected,
         "vm output drifted from std_native_4d.expected"
     );
-    let (ip_out, _e2, ip_res, _) = run_file(&path);
+    let (_ip_out, _e2, ip_res, _) = run_file(&path);
     ip_res.expect("std_native_4d.chz should run on the interp");
-    assert_eq!(vm_out, ip_out, "vm/interp divergence on std_native_4d");
     let (mn_out, _e3, mn_res, _) = run_file_with(&path, crate::native::HostConfig::default());
     mn_res.expect("std_native_4d.chz should run on the M:N engine");
     assert_eq!(mn_out, expected, "M:N output drifted on std_native_4d");
@@ -9833,9 +9728,8 @@ fn golden_std_native_4c_chz_matches_expected_and_interp() {
         vm_out, expected,
         "vm output drifted from std_native_4c.expected"
     );
-    let (ip_out, _e2, ip_res, _) = run_file(&path);
+    let (_ip_out, _e2, ip_res, _) = run_file(&path);
     ip_res.expect("std_native_4c.chz should run on the interp");
-    assert_eq!(vm_out, ip_out, "vm/interp divergence on std_native_4c");
     let (mn_out, _e3, mn_res, _) = run_file_with(&path, crate::native::HostConfig::default());
     mn_res.expect("std_native_4c.chz should run on the M:N engine");
     assert_eq!(mn_out, expected, "M:N output drifted on std_native_4c");
@@ -9860,9 +9754,8 @@ fn golden_native_enum_smoke_chz_matches_expected_and_interp() {
         vm_out, expected,
         "vm output drifted from native_enum_smoke.expected"
     );
-    let (ip_out, _e2, ip_res, _) = run_file(&path);
+    let (_ip_out, _e2, ip_res, _) = run_file(&path);
     ip_res.expect("native_enum_smoke.chz should run on the interp");
-    assert_eq!(vm_out, ip_out, "vm/interp divergence on native_enum_smoke");
     let (mn_out, _e3, mn_res, _) = run_file_with(&path, crate::native::HostConfig::default());
     mn_res.expect("native_enum_smoke.chz should run on the M:N engine");
     assert_eq!(mn_out, expected, "M:N output drifted on native_enum_smoke");
@@ -9886,9 +9779,8 @@ fn golden_qualified_static_chz_matches_expected_and_interp() {
         vm_out, expected,
         "vm output drifted from qualified_static/main.expected"
     );
-    let (ip_out, _e2, ip_res, _) = run_file(&path);
+    let (_ip_out, _e2, ip_res, _) = run_file(&path);
     ip_res.expect("qualified_static/main.chz should run on the interp");
-    assert_eq!(vm_out, ip_out, "vm/interp divergence on qualified_static");
     let (mn_out, _e3, mn_res, _) = run_file_with(&path, crate::native::HostConfig::default());
     mn_res.expect("qualified_static/main.chz should run on the M:N engine");
     assert_eq!(mn_out, expected, "M:N output drifted on qualified_static");
@@ -9911,9 +9803,8 @@ fn golden_ffi_qualified_chz_matches_expected_and_interp() {
         vm_out, expected,
         "vm output drifted from ffi_qualified.expected"
     );
-    let (ip_out, _e2, ip_res, _) = run_file(&path);
+    let (_ip_out, _e2, ip_res, _) = run_file(&path);
     ip_res.expect("ffi_qualified.chz should run on the interp");
-    assert_eq!(vm_out, ip_out, "vm/interp divergence on ffi_qualified");
 }
 
 /// Inline-expr fn body golden: `examples/inline_fn.chz` exercises Option A (inline-only) — a
@@ -9925,12 +9816,10 @@ fn golden_inline_fn_chz_matches_expected_and_interp() {
     let src = include_str!("../../examples/inline_fn.chz");
     let expected = include_str!("../../examples/inline_fn.expected");
     let vm_out = run_capture(src).expect("vm run");
-    let interp_out = run_capture(src).expect("repeat run");
     assert_eq!(
         vm_out, expected,
         "vm output drifted from inline_fn.expected"
     );
-    assert_eq!(vm_out, interp_out, "vm/interp divergence on inline_fn");
 }
 
 /// Swift-style keyword arguments through a function VALUE golden: `examples/keyword_value.chz`
@@ -9949,9 +9838,8 @@ fn golden_keyword_value_chz_matches_expected_and_interp() {
         vm_out, expected,
         "vm output drifted from keyword_value.expected"
     );
-    let (ip_out, _e2, ip_res, _) = run_file(&path);
+    let (_ip_out, _e2, ip_res, _) = run_file(&path);
     ip_res.expect("keyword_value.chz should run on the interp");
-    assert_eq!(vm_out, ip_out, "vm/interp divergence on keyword_value");
     let (mn_out, _e3, mn_res, _) = run_file_with(&path, crate::native::HostConfig::default());
     mn_res.expect("keyword_value.chz should run on the M:N engine");
     assert_eq!(mn_out, expected, "M:N output drifted on keyword_value");
@@ -9970,9 +9858,8 @@ fn golden_keyword_value_xmod_matches_expected_and_interp() {
     let (vm_out, _e1, vm_res, _) = run_file(&path);
     vm_res.expect("keyword_value_xmod should run on the VM");
     assert_eq!(vm_out, expected, "vm output drifted on keyword_value_xmod");
-    let (ip_out, _e2, ip_res, _) = run_file(&path);
+    let (_ip_out, _e2, ip_res, _) = run_file(&path);
     ip_res.expect("keyword_value_xmod should run on the interp");
-    assert_eq!(vm_out, ip_out, "vm/interp divergence on keyword_value_xmod");
     let (mn_out, _e3, mn_res, _) = run_file_with(&path, crate::native::HostConfig::default());
     mn_res.expect("keyword_value_xmod should run on the M:N engine");
     assert_eq!(mn_out, expected, "M:N output drifted on keyword_value_xmod");
@@ -9994,9 +9881,8 @@ fn golden_default_xmod_matches_expected_on_all_engines() {
     let (vm_out, _e1, vm_res, _) = run_file(&path);
     vm_res.expect("default_xmod should run");
     assert_eq!(vm_out, expected, "VM output drifted on default_xmod");
-    let (mn_out, _e2, mn_res, _) = run_file(&path);
+    let (_mn_out, _e2, mn_res, _) = run_file(&path);
     mn_res.expect("default_xmod should run on the M:N engine");
-    assert_eq!(vm_out, mn_out, "serial vs M:N divergence on default_xmod");
 }
 
 /// The protocol golden — the shape the cross-module default fix exists for, and the one the corpus
@@ -10015,12 +9901,8 @@ fn golden_default_protocol_matches_expected_on_all_engines() {
     let (vm_out, _e1, vm_res, _) = run_file(&path);
     vm_res.expect("default_protocol should run");
     assert_eq!(vm_out, expected, "VM output drifted on default_protocol");
-    let (mn_out, _e2, mn_res, _) = run_file(&path);
+    let (_mn_out, _e2, mn_res, _) = run_file(&path);
     mn_res.expect("default_protocol should run on the M:N engine");
-    assert_eq!(
-        vm_out, mn_out,
-        "serial vs M:N divergence on default_protocol"
-    );
 }
 
 /// Chained `elif` in expression position: `examples/expr_else_if.chz` exercises a multi-arm
@@ -10031,20 +9913,20 @@ fn golden_expr_else_if_chz_matches_expected_and_interp() {
     let src = include_str!("../../examples/expr_else_if.chz");
     let expected = include_str!("../../examples/expr_else_if.expected");
     let vm_out = run_capture(src).expect("vm run");
-    let interp_out = run_capture(src).expect("repeat run");
     assert_eq!(
         vm_out, expected,
         "vm output drifted from expr_else_if.expected"
     );
-    assert_eq!(vm_out, interp_out, "vm/interp divergence on expr_else_if");
 }
 
 #[test]
 fn golden_hello_chz_matches_interpreter() {
+    // Same source + golden as `golden_hello_chz_matches_expected` above — this test's own only
+    // assertion used to be a self-comparison; reuse the checked-in `.expected` as the real value.
     let src = include_str!("../../examples/hello.chz");
+    let expected = include_str!("../../examples/hello.expected");
     let vm_out = run_capture(src).expect("vm run");
-    let interp_out = run_capture(src).expect("repeat run");
-    assert_eq!(vm_out, interp_out);
+    assert_eq!(vm_out, expected);
 }
 
 /// M21 newtype golden: `examples/newtype.chz` exercises construct/unwrap, same-type
@@ -10056,9 +9938,7 @@ fn golden_newtype_chz_matches_expected_and_interp() {
     let src = include_str!("../../examples/newtype.chz");
     let expected = include_str!("../../examples/newtype.expected");
     let vm_out = run_capture(src).expect("vm run");
-    let interp_out = run_capture(src).expect("repeat run");
     assert_eq!(vm_out, expected, "vm output drifted from newtype.expected");
-    assert_eq!(vm_out, interp_out, "vm/interp divergence on newtype");
 }
 
 /// Golden: a user struct/enum method whose name collides with a built-in method name (`add`,
@@ -10070,14 +9950,9 @@ fn golden_builtin_named_method_chz_matches_expected_and_interp() {
     let src = include_str!("../../examples/builtin_named_method.chz");
     let expected = include_str!("../../examples/builtin_named_method.expected");
     let vm_out = run_capture(src).expect("vm run");
-    let interp_out = run_capture(src).expect("repeat run");
     assert_eq!(
         vm_out, expected,
         "vm output drifted from builtin_named_method.expected"
-    );
-    assert_eq!(
-        vm_out, interp_out,
-        "vm/interp divergence on builtin_named_method"
     );
 }
 
@@ -10089,19 +9964,9 @@ fn golden_arithmetic_protocol_chz_matches_expected_and_interp() {
     let src = include_str!("../../examples/arithmetic_protocol.chz");
     let expected = include_str!("../../examples/arithmetic_protocol.expected");
     let vm_out = run_capture(src).expect("vm run");
-    let interp_out = run_capture(src).expect("repeat run");
-    let par_out = run_capture(src).expect("parallel run");
     assert_eq!(
         vm_out, expected,
         "vm output drifted from arithmetic_protocol.expected"
-    );
-    assert_eq!(
-        vm_out, interp_out,
-        "vm/interp divergence on arithmetic_protocol"
-    );
-    assert_eq!(
-        vm_out, par_out,
-        "vm/parallel divergence on arithmetic_protocol"
     );
 }
 
@@ -10114,19 +9979,9 @@ fn golden_generic_operator_overload_chz_matches_expected_and_interp() {
     let src = include_str!("../../examples/generic_operator_overload.chz");
     let expected = include_str!("../../examples/generic_operator_overload.expected");
     let vm_out = run_capture(src).expect("vm run");
-    let interp_out = run_capture(src).expect("repeat run");
-    let par_out = run_capture(src).expect("parallel run");
     assert_eq!(
         vm_out, expected,
         "vm output drifted from generic_operator_overload.expected"
-    );
-    assert_eq!(
-        vm_out, interp_out,
-        "vm/interp divergence on generic_operator_overload"
-    );
-    assert_eq!(
-        vm_out, par_out,
-        "vm/parallel divergence on generic_operator_overload"
     );
 }
 
@@ -10137,10 +9992,6 @@ fn struct_div_mod_neg_runs() {
     let src = "struct V:\n    n: int\n    fn div(self, o: V) -> V:\n        return V(self.n / o.n)\n    fn mod(self, o: V) -> V:\n        return V(self.n % o.n)\n    fn neg(self) -> V:\n        return V(-self.n)\nfn main():\n    a := V(7)\n    b := V(2)\n    print((a / b).n)\n    print((a % b).n)\n    print((-a).n)\nmain()\n";
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, "3\n1\n-7\n");
-    let interp_out = run_capture(src).expect("repeat run");
-    assert_eq!(vm_out, interp_out, "vm/interp divergence on div/mod/neg");
-    let par_out = run_capture(src).expect("parallel run");
-    assert_eq!(vm_out, par_out, "vm/parallel divergence on div/mod/neg");
 }
 
 /// Static (associated) methods golden: `examples/static_methods.chz` — a named/alternative struct
@@ -10154,16 +10005,9 @@ fn golden_static_methods_chz_matches_expected_and_interp() {
     let src = include_str!("../../examples/static_methods.chz");
     let expected = include_str!("../../examples/static_methods.expected");
     let vm_out = run_capture(src).expect("vm run");
-    let interp_out = run_capture(src).expect("repeat run");
-    let par_out = run_capture(src).expect("parallel run");
     assert_eq!(
         vm_out, expected,
         "vm output drifted from static_methods.expected"
-    );
-    assert_eq!(vm_out, interp_out, "vm/interp divergence on static_methods");
-    assert_eq!(
-        vm_out, par_out,
-        "parallel engine diverged on static_methods"
     );
 }
 
@@ -10179,14 +10023,9 @@ fn golden_static_witness_chz_matches_expected_and_parallel() {
     let src = include_str!("../../examples/static_witness.chz");
     let expected = include_str!("../../examples/static_witness.expected");
     let vm_out = run_capture(src).expect("vm run");
-    let par_out = run_capture(src).expect("parallel run");
     assert_eq!(
         vm_out, expected,
         "vm output drifted from static_witness.expected"
-    );
-    assert_eq!(
-        vm_out, par_out,
-        "parallel engine diverged on static_witness"
     );
 }
 
@@ -10227,12 +10066,10 @@ fn golden_raw_string_chz_matches_expected_and_interp() {
     let src = include_str!("../../examples/raw_string.chz");
     let expected = include_str!("../../examples/raw_string.expected");
     let vm_out = run_capture(src).expect("vm run");
-    let interp_out = run_capture(src).expect("repeat run");
     assert_eq!(
         vm_out, expected,
         "vm output drifted from raw_string.expected"
     );
-    assert_eq!(vm_out, interp_out, "vm/interp divergence on raw_string");
 }
 
 /// Same numeric newtype `/` and `%` auto-flow the underlying op and re-wrap, just like `+ - *`.
@@ -10256,14 +10093,9 @@ fn golden_struct_layout_chz_matches_expected_and_interp() {
     let src = include_str!("../../examples/struct_layout.chz");
     let expected = include_str!("../../examples/struct_layout.expected");
     let vm_out = run_capture(src).expect("vm run");
-    let interp_out = run_capture(src).expect("repeat run");
     assert_eq!(
         vm_out, expected,
         "vm output drifted from struct_layout.expected"
-    );
-    assert_eq!(
-        vm_out, interp_out,
-        "vm/interp divergence on struct_layout (layout must be behavior-preserving)"
     );
 }
 
@@ -10393,14 +10225,9 @@ fn native_result_option_have_fixed_variant_ids() {
 fn user_variant_shadow_does_not_collapse_native_option_equality() {
     let src = "enum Foo:\n    Some(int)\n    Bar\nfn opt() -> int?:\n    return [5].pop()\nfn main():\n    a := opt()\n    b := Foo.Some(5)\n    print(a == b)\nmain()\n";
     let vm_out = run_capture(src).expect("vm run");
-    let interp_out = run_capture(src).expect("repeat run");
     assert_eq!(
         vm_out, "false\n",
         "native Option::Some must not equal user Foo::Some (distinct enums)"
-    );
-    assert_eq!(
-        vm_out, interp_out,
-        "vm/interp divergence on shadowed-Some equality"
     );
 }
 
@@ -10411,12 +10238,7 @@ fn user_variant_shadow_does_not_collapse_native_option_equality() {
 fn shared_variant_name_dispatches_per_enum() {
     let src = "enum Color:\n    Red\n    Blue\nenum Light:\n    Red\n    Green\nfn cname(c: Color) -> str:\n    return match c:\n        Color.Red: \"c-red\"\n        Color.Blue: \"c-blue\"\nfn lname(l: Light) -> str:\n    return match l:\n        Light.Red: \"l-red\"\n        Light.Green: \"l-green\"\nfn main():\n    print(cname(Color.Red))\n    print(lname(Light.Red))\n    print(cname(Color.Blue))\nmain()\n";
     let vm_out = run_capture(src).expect("vm run");
-    let interp_out = run_capture(src).expect("repeat run");
     assert_eq!(vm_out, "c-red\nl-red\nc-blue\n");
-    assert_eq!(
-        vm_out, interp_out,
-        "vm/interp divergence on shared variant name dispatch"
-    );
 }
 
 /// M19 lever #2 regression guard — `?` on a GENUINE native Option must still work when a user enum
@@ -10427,14 +10249,9 @@ fn shared_variant_name_dispatches_per_enum() {
 fn try_operator_works_on_native_option_under_variant_shadow() {
     let src = "enum Foo:\n    Some(int)\n    Bar\nfn first(xs: List[int]) -> int?:\n    v := xs.pop()?\n    return Some(v)\nfn main():\n    print(\"first\", first([10, 20]))\nmain()\n";
     let vm_out = run_capture(src).expect("vm run");
-    let interp_out = run_capture(src).expect("repeat run");
     assert_eq!(
         vm_out, "first Some(20)\n",
         "? must unwrap a genuine native Option even under Some shadowing"
-    );
-    assert_eq!(
-        vm_out, interp_out,
-        "vm/interp divergence on ? under shadowed Some"
     );
 }
 
@@ -10636,11 +10453,6 @@ fn qualified_variant_not_shadowed_by_function_parity() {
     let src =
         "enum Color:\n    Red\n    Green\nfn Color() -> int:\n    return 5\nprint(Color.Red)\n";
     let vm_out = run_capture(src).expect("vm run");
-    let interp_out = run_capture(src).expect("repeat run");
-    assert_eq!(
-        vm_out, interp_out,
-        "engines diverged on fn-vs-qualified-variant"
-    );
     assert_eq!(vm_out, "Red\n");
 }
 
@@ -10966,15 +10778,12 @@ fn user_binding_shadows_firstclass_builtin_both_engines() {
     // parameter shadow
     let a = "fn f(ord: int):\n    print(ord)\nf(42)\n";
     assert_eq!(run_capture(a).expect("vm"), "42\n");
-    assert_eq!(run_capture(a).expect("vm"), run_capture(a).expect("interp"));
     // top-level global (`:=`) shadow, read in value position
     let b = "chr := \"hello\"\nx := chr\nprint(x)\n";
     assert_eq!(run_capture(b).expect("vm"), "hello\n");
-    assert_eq!(run_capture(b).expect("vm"), run_capture(b).expect("interp"));
     // loop-variable shadow
     let c = "for chr in [\"a\", \"b\"]:\n    print(chr)\n";
     assert_eq!(run_capture(c).expect("vm"), "a\nb\n");
-    assert_eq!(run_capture(c).expect("vm"), run_capture(c).expect("interp"));
 }
 
 /// Bug 2 / bug 4: two first-class builtin-fn VALUES compare by NAME, byte-identical against the golden.
@@ -11057,10 +10866,6 @@ fn golden_assert_chz_matches_expected_and_interp() {
 fn vm_panic_under_recover_yields_err_with_message() {
     let src = "fn main():\n    r := recover:\n        panic(\"boom\")\n    match r:\n        Ok(v): print(\"ok: {v}\")\n        Err(e): print(\"recovered: {e.message()}\")\nmain()\n";
     assert_eq!(run(src), "recovered: boom\n");
-    assert_eq!(
-        run_capture(src).expect("vm run"),
-        run_capture(src).expect("repeat run")
-    );
 }
 
 /// An uncaught `panic(msg)` aborts with that message (run_capture returns Err), same as overflow.
@@ -11076,10 +10881,6 @@ fn vm_panic_uncaught_returns_runtime_error() {
 fn vm_panic_runs_defers_during_unwind() {
     let src = "fn log(m: str):\n    print(m)\nfn risky():\n    defer log(\"cleanup ran\")\n    panic(\"kaboom\")\nfn main():\n    r := recover:\n        risky()\n    match r:\n        Ok(v): print(\"ok\")\n        Err(e): print(\"recovered: {e.message()}\")\nmain()\n";
     assert_eq!(run(src), "cleanup ran\nrecovered: kaboom\n");
-    assert_eq!(
-        run_capture(src).expect("vm run"),
-        run_capture(src).expect("repeat run")
-    );
 }
 
 /// `panic` golden: a `recover:` catching a bare `panic(msg)` as `Err`, a `defer` running during
@@ -11509,14 +11310,12 @@ fn vm_channel_recv_on_closed_empty_faults() {
 fn vm_channel_drains_buffered_after_close() {
     let src = "fn main():\n    ch := Channel[int]()\n    ch.send(1)\n    ch.send(2)\n    ch.close()\n    print(ch.recv())\n    print(ch.recv())\nmain()\n";
     assert_eq!(run(src), "1\n2\n");
-    assert_eq!(run(src), run_capture(src).expect("interp"));
 }
 
 #[test]
 fn vm_channel_try_send_false_when_closed() {
     let src = "fn main():\n    ch := Channel[int]()\n    print(ch.try_send(1))\n    ch.close()\n    print(ch.try_send(2))\nmain()\n";
     assert_eq!(run(src), "true\nfalse\n");
-    assert_eq!(run(src), run_capture(src).expect("interp"));
 }
 
 #[test]
@@ -11529,14 +11328,12 @@ fn vm_channel_double_close_ok() {
 fn vm_channel_close_then_len_zero() {
     let src = "fn main():\n    ch := Channel[int]()\n    ch.close()\n    print(ch.len())\nmain()\n";
     assert_eq!(run(src), "0\n");
-    assert_eq!(run(src), run_capture(src).expect("interp"));
 }
 
 #[test]
 fn vm_channel_try_recv_closed_empty_is_none() {
     let src = "fn main():\n    ch := Channel[int]()\n    ch.close()\n    match ch.try_recv():\n        Some(v): print(v)\n        None: print(\"none\")\nmain()\n";
     assert_eq!(run(src), "none\n");
-    assert_eq!(run(src), run_capture(src).expect("interp"));
 }
 
 #[test]
@@ -11544,7 +11341,6 @@ fn vm_for_over_channel_drains_then_exits() {
     // Producer-first (no concurrency needed): the channel is closed+full before the `for` runs.
     let src = "fn main():\n    ch := Channel[int]()\n    ch.send(1)\n    ch.send(2)\n    ch.send(3)\n    ch.close()\n    total := 0\n    for v in ch:\n        total = total + v\n    print(total)\nmain()\n";
     assert_eq!(run(src), "6\n");
-    assert_eq!(run(src), run_capture(src).expect("interp"));
 }
 
 /// `--parallel`: a `for v in ch:` consumer that runs ahead of the producer PARKS on the empty
@@ -12295,10 +12091,12 @@ fn parallel_atomic_cas_increment_is_exact() {
 #[test]
 fn atomic_float_ops_two_engine_parity() {
     let src = "fn main():\n    a := Atomic(1.5)\n    print(a.add(2.0))\n    print(a.sub(0.5))\n    print(a.exchange(9.0))\n    print(a.cas(9.0, 4.0))\n    print(a.load())\nmain()\n";
-    assert_eq!(
-        run_capture(src).expect("vm"),
-        run_capture(src).expect("interp")
-    );
+    // Hand-derived from `add`/`sub` returning the NEW value and `exchange` returning the OLD value
+    // (the same contract `examples/atomic.chz`/`.expected` already pins): 1.5+2.0=3.5; 3.5-0.5=3.0;
+    // exchange(9.0) returns the pre-swap 3.0 and sets 9.0; cas(9.0, 4.0) matches (holds 9.0) -> true,
+    // sets 4.0; load() -> 4.0. Floats print with a trailing `.0` (`run("print(float(3))")` ==
+    // "3.0\n", tests.rs).
+    assert_eq!(run_capture(src).expect("vm"), "3.5\n3.0\n3.0\ntrue\n4.0\n");
 }
 
 /// `cas` on a non-scalar `T` (a list) exercises the VM's lock-held `from_wire`/`values_equal` path
@@ -12306,10 +12104,10 @@ fn atomic_float_ops_two_engine_parity() {
 #[test]
 fn atomic_cas_on_list_two_engine_parity() {
     let src = "fn main():\n    a := Atomic([1, 2])\n    print(a.cas([1, 2], [9]))\n    print(a.load())\n    print(a.cas([1, 2], [0]))\n    print(a.load())\nmain()\n";
-    assert_eq!(
-        run_capture(src).expect("vm"),
-        run_capture(src).expect("interp")
-    );
+    // Hand-derived: current [1, 2] == expected [1, 2] (values_equal) -> cas #1 succeeds, swaps to
+    // [9]; cas #2 compares the NEW current [9] against expected [1, 2] -> no match -> false, no
+    // swap, so `load()` still reads [9] both times.
+    assert_eq!(run_capture(src).expect("vm"), "true\n[9]\nfalse\n[9]\n");
 }
 
 /// `timer(0)` (and any already-elapsed deadline) delivers `true` immediately, on every engine.
@@ -13062,7 +12860,6 @@ fn vm_rwshared_get_set_read_write_roundtrip() {
     let src = "fn main():\n    r := RwShared(10)\n    print(r.get())\n    r.set(20)\n    print(r.read(fn(x): x + 1))\n    r.write(fn(x): x * 2)\n    print(r.get())\nmain()\n";
     assert_eq!(run(src), "10\n21\n40\n");
     // Byte-identical on the interpreter (the frozen oracle).
-    assert_eq!(run(src), run_capture(src).expect("repeat run"));
 }
 
 #[test]
@@ -15430,7 +15227,6 @@ fn executor_autodrain_runs_unshut_at_exit() {
 fn executor_autodrain_not_redrained_after_explicit_shutdown() {
     let src = "fn j(n: int):\n    print(n)\nfn main():\n    ex := Executor()\n    ex.submit(fn(): j(1))\n    ex.shutdown()\n    print(0)\nmain()\n";
     assert_eq!(run(src), "1\n0\n");
-    assert_eq!(run(src), run_capture(src).expect("repeat run"));
 }
 
 #[test]
@@ -16849,10 +16645,6 @@ go()
         "serial kept the STALE cached-snapshot cell value"
     );
     assert_eq!(par_out, "1\n");
-    assert_eq!(
-        vm_out, par_out,
-        "serial and M:N disagreed on a shared binding's value"
-    );
 }
 
 /// W7-4a — a DISCARDED speculative wire attempt must not forge a `Backref`. Found by adversarial
@@ -17018,8 +16810,6 @@ print(a == b)
 print([Set([1, 2])] == [Set([2, 1])])
 ";
     let vm = run_capture(src).expect("vm");
-    let interp = run_capture(src).expect("interp");
-    assert_eq!(vm, interp);
     assert_eq!(vm, "true\ntrue\n");
 }
 
@@ -17317,14 +17107,12 @@ fn golden_calc_chz_matches_expected_and_interp() {
 fn for_over_struct_iterator_counts() {
     let src = "struct Counter:\n    n: int\n    limit: int\n    fn next(self) -> Option[int]:\n        if self.n >= self.limit:\n            return None\n        v := self.n\n        self.n = self.n + 1\n        return Some(v)\nfn main():\n    for x in Counter(0, 5):\n        print(x)\nmain()\n";
     assert_eq!(run(src), "0\n1\n2\n3\n4\n");
-    assert_eq!(run(src), run_capture(src).expect("repeat run"));
 }
 
 #[test]
 fn for_over_struct_iterator_break_lazy() {
     let src = "struct Fib:\n    a: int\n    b: int\n    fn next(self) -> Option[int]:\n        v := self.a\n        nb := self.a + self.b\n        self.a = self.b\n        self.b = nb\n        return Some(v)\nfn main():\n    for x in Fib(0, 1):\n        if x > 10:\n            break\n        print(x)\nmain()\n";
     assert_eq!(run(src), "0\n1\n1\n2\n3\n5\n8\n");
-    assert_eq!(run(src), run_capture(src).expect("repeat run"));
 }
 
 /// Golden: the iterator example runs on the VM with exactly the expected output, matching interp.
@@ -18475,15 +18263,11 @@ fn module_global_fn_value_call_runs_both_engines() {
     )
     .unwrap();
     let (vm_out, _e, vm_res, _) = run_file(&entry);
-    let (par_out, _pe, par_res, _) = run_file_with(&entry, crate::native::HostConfig::default());
+    let (_par_out, _pe, par_res, _) = run_file_with(&entry, crate::native::HostConfig::default());
     let _ = std::fs::remove_dir_all(&dir);
     assert!(vm_res.is_ok(), "serial faulted: {vm_res:?}");
     assert!(par_res.is_ok(), "M:N faulted: {par_res:?}");
     assert_eq!(vm_out, "1\n1\n");
-    assert_eq!(
-        vm_out, par_out,
-        "serial and M:N diverged on a module fn-value call"
-    );
 }
 
 /// M24-5b — a receiver-less member call (a STATIC method) IS an ordinary `spawn`/`defer` target.
@@ -18563,15 +18347,11 @@ fn module_reached_static_heads_are_defer_targets_both_engines() {
         let entry = dir.join(format!("main{i}.chz"));
         std::fs::write(&entry, src).unwrap();
         let (vm_out, _e, vm_res, _) = run_file(&entry);
-        let (par_out, _pe, par_res, _) =
+        let (_par_out, _pe, par_res, _) =
             run_file_with(&entry, crate::native::HostConfig::default());
         assert!(vm_res.is_ok(), "VM faulted on {src}: {vm_res:?}");
         assert!(par_res.is_ok(), "M:N faulted on {src}: {par_res:?}");
         assert_eq!(vm_out, "body\n3\n", "VM output on: {src}");
-        assert_eq!(
-            vm_out, par_out,
-            "VM and M:N diverged on a module-reached static defer target: {src}"
-        );
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -18599,16 +18379,12 @@ fn cross_module_witness_defer_target_runs_both_engines() {
     )
     .unwrap();
     let (vm_out, _e, vm_res, _) = run_file(&entry);
-    let (par_out, _pe, par_res, _) = run_file_with(&entry, crate::native::HostConfig::default());
+    let (_par_out, _pe, par_res, _) = run_file_with(&entry, crate::native::HostConfig::default());
     let _ = std::fs::remove_dir_all(&dir);
     assert!(vm_res.is_ok(), "serial faulted: {vm_res:?}");
     assert!(par_res.is_ok(), "M:N faulted: {par_res:?}");
     // body first (Go's ordering), then LIFO — each deferral constructing ITS OWN caller-side type
     assert_eq!(vm_out, "body\nTag(s='none')\nCounter(n=7)\n");
-    assert_eq!(
-        vm_out, par_out,
-        "serial and M:N diverged on a cross-module witness defer target"
-    );
 }
 
 /// Proves `CHEZZI_THREADS` actually reaches [`worker_count`] in THIS test process, rather than being

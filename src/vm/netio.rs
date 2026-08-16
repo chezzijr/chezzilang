@@ -1887,8 +1887,9 @@ impl Vm {
                     self.park_recv(h);
                     return Ok(RecvStep::Parked);
                 }
-                // The top-level VM (or a fiber with no heap of its own) / an M:N callback
-                // (`native_reentry > 0`): inline-sleep to the deadline (single-thread, or an
+                // `mn.is_none()` (the top-level VM, the inline outermost-`parallel:` builder VM, or
+                // an eager `Executor` job's `Vm` — mod.rs:1101 enumerates the same three) / an M:N
+                // callback (`native_reentry > 0`): inline-sleep to the deadline (single-thread, or an
                 // already-blocking host-stack context), synthesise.
                 // Limitation (vs `sleep_ms`, which DEMOTES at `native_reentry > 0`): a `timer.recv()`
                 // reached inside a native callback under `--parallel` pins THIS worker for the timeout

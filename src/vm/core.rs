@@ -48,8 +48,9 @@ pub struct ChannelCore {
     /// recvs it once, in a `wait` arm). Delivery is handled at `recv` time in the receiver's own
     /// scheduler ([`Vm::chan_recv_step`]): an M:N worker outside a native callback
     /// (`mn.is_some() && native_reentry == 0`) schedules a background `send(true)` + parks; otherwise
-    /// (`mn.is_none()` — the top-level VM or the inline outermost-`parallel:` builder VM — or inside a
-    /// native callback, `native_reentry > 0`) it inline-sleeps to the deadline and synthesises `true`.
+    /// (`mn.is_none()` — the top-level VM, the inline outermost-`parallel:` builder VM, or an eager
+    /// `Executor` job's `Vm` — or inside a native callback, `native_reentry > 0`) it inline-sleeps to
+    /// the deadline and synthesises `true`.
     /// `None` for an ordinary `Channel[T]`.
     pub timer: Option<std::time::Instant>,
     /// `wait`-arm timed-park latch: set once (CAS false→true) when a `--parallel` `wait` arms the
