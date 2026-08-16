@@ -1058,13 +1058,15 @@ fn show_output_is_byte_exact() {
     );
 }
 
-/// M2 — a closed reader (`chezzi test --show-output | head -1`) is a clean end, not a truncation: the
-/// single end-of-run `report.bytes` write hits the already-closed pipe (deterministic here since we
-/// drop our read end before the child ever writes, same technique as `broken_pipe_terminates_with_fault`
-/// above), and a PASSING run must still report success — not fail, not panic — matching the distinction
-/// `chezzi run` already makes at its own stdout write site (`src/main.rs`, the `stream_error` check).
+/// M2 — a closed reader (`chezzi test --show-output | head -1`) truncates the report, same as any
+/// other stdout write failure: the single end-of-run `report.bytes` write hits the already-closed pipe
+/// (deterministic here since we drop our read end before the child ever writes, same technique as
+/// `broken_pipe_terminates_with_fault` above). Measured against the reference runners with a PASSING
+/// run piped into `head -1`: `go test -v` exits 141 (SIGPIPE), `pytest -s` exits 1 — neither treats a
+/// closed reader as a clean pass, so neither does `chezzi test`. Matches `chezzi run`'s own
+/// broken-pipe handling (`src/main.rs`, `out_dead_reason`).
 #[test]
-fn show_output_survives_closed_reader() {
+fn show_output_reports_a_closed_reader() {
     let t = TmpDir::new();
     let entry = t.write("ok_test.chz", "test fn t():\n    assert true\n");
     let mut child = Command::new(env!("CARGO_BIN_EXE_chezzi"))
@@ -1081,13 +1083,13 @@ fn show_output_survives_closed_reader() {
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(!err.contains("panicked at"), "panicked: {err}");
     assert!(
-        out.status.success(),
-        "a closed reader on a PASSING run must not report failure: {:?} (stderr: {err})",
+        !out.status.success(),
+        "a closed reader truncates the report and must not report success: {:?} (stderr: {err})",
         out.status
     );
     assert!(
-        !err.contains("cannot write stdout"),
-        "a closed reader must not be reported as a truncated write: {err}"
+        err.contains("stdout closed (broken pipe)"),
+        "no diagnostic for the closed reader: {err}"
     );
 }
 

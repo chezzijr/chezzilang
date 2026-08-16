@@ -7,16 +7,15 @@
 //! generic `list[T]` (forcing the split), and a native module name short-circuits a same-named
 //! `std/<name>.chz` file in the resolver (so scalars + helpers cannot share the `rand` namespace).
 //!
-//! State is a single PROCESS-GLOBAL `OnceLock<Mutex<u64>>` (NOT thread-local, NOT Host-side): all
-//! three engines (interp / cooperative VM / M:N) share one stream at the NativeFn seam, so any
-//! SEQUENTIAL draw sequence is byte-identical across engines (3-engine parity by construction). The
-//! global auto-seeds from OS entropy ([`super::crypto::os_entropy`] — portable across unix, with a
-//! time/address-mix fallback only where that fails) on first use; `seed(n)` overwrites it to make the
-//! stream deterministic.
+//! State is a single PROCESS-GLOBAL `OnceLock<Mutex<u64>>` (NOT thread-local, NOT Host-side): every
+//! task on the M:N engine shares one stream at the NativeFn seam, so any SEQUENTIAL draw sequence is
+//! byte-identical run to run. The global auto-seeds from OS entropy ([`super::crypto::os_entropy`] —
+//! portable across unix, with a time/address-mix fallback only where that fails) on first use;
+//! `seed(n)` overwrites it to make the stream deterministic.
 //!
-//! LIMIT (documented, not a bug): under `--parallel`, CONCURRENT draws from multiple tasks interleave
-//! nondeterministically on the shared global — so engines may diverge ONLY for concurrent draws. The
-//! goldens draw strictly sequentially to stay deterministic on all three engines.
+//! LIMIT (documented, not a bug): CONCURRENT draws from multiple tasks interleave nondeterministically
+//! on the shared global — so a run may diverge run-to-run ONLY for concurrent draws. The goldens draw
+//! strictly sequentially to stay deterministic.
 
 use super::{Host, HostError, Kind, NativeFn, NativeRet, expect_args};
 use std::sync::{Mutex, OnceLock};

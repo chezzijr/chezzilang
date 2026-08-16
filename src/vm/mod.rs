@@ -1,8 +1,7 @@
 //! Bytecode stack VM (M5) — the sole execution engine. Runs the [`Program`] produced by the
-//! compiler. Parity tests cross-check the two schedulers of this same `Vm` — the serial
-//! (`parallel=false`) cooperative oracle and the M:N (`parallel=true`) engine — byte-for-byte
-//! (the tree-walk interpreter that was the original parity oracle has been removed). M5a:
-//! handle-addressed values, no collector yet (the mark-sweep GC lands in M5b).
+//! compiler on its real-thread M:N scheduler (the cooperative `--serial` scheduler and the
+//! original tree-walk `interp` parity oracle have both been removed). M5a: handle-addressed
+//! values, no collector yet (the mark-sweep GC lands in M5b).
 
 mod blocking_pool;
 pub mod chzstr;
@@ -33,8 +32,7 @@ use crate::ast::Span;
 #[cfg(test)]
 use crate::{lexer, parser};
 
-/// A runtime error, with the source span it occurred at. Mirrors `interp::RuntimeError` (same
-/// `Display`) so the two engines' failures compare equal in parity tests.
+/// A runtime error, with the source span it occurred at.
 ///
 /// `is_assert` distinguishes an `assert` failure (the ONE intended failure signal of a `test fn`)
 /// from any other runtime fault (OOB, div-by-zero, missing key, native fault, …). It is set `true`
@@ -117,7 +115,7 @@ impl RuntimeError {
 /// EPIPE-as-an-error contract — though note Go splits BY FD NUMBER, fd 1/2 signalling and every other
 /// fd returning `EPIPE`, so that conflict is not actually forced). A `parallel:`/`spawn` nursery is
 /// unaffected either way — structured concurrency aborts siblings on ANY fault, by design, so the
-/// same program under `spawn` still terminates promptly on both engines.
+/// same program under `spawn` still terminates promptly.
 ///
 /// Not Executor-only despite the name: it is also `reduce_task_slots`'s hard-halt-over-ordinary error
 /// precedence predicate (W7-5 review Fix 1), and `reduce_task_slots` is shared by every M:N nursery
@@ -133,8 +131,7 @@ impl std::fmt::Display for RuntimeError {
     }
 }
 
-/// One frame of a runtime stack trace: a function and the call site that entered it. Mirrors
-/// `interp::TraceFrame`.
+/// One frame of a runtime stack trace: a function and the call site that entered it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TraceFrame {
     pub function: String,
@@ -142,8 +139,7 @@ pub struct TraceFrame {
 }
 
 /// A runtime error enriched with a stack trace, produced at the run boundary for an uncaught fault.
-/// `Display` matches [`RuntimeError`] exactly (message only — the trace is printed separately) so
-/// parity tests that compare error strings are unaffected. Mirrors `interp::RunError`.
+/// `Display` matches [`RuntimeError`] exactly (message only — the trace is printed separately).
 #[derive(Debug, Clone)]
 pub struct RunError {
     pub message: String,
@@ -176,12 +172,12 @@ impl std::fmt::Display for RunError {
 
 /// When rendering a stack trace, after run-collapsing show at most this many collapsed lines from
 /// the head (innermost — closest to the fault) and tail (outermost — includes `main`); the middle is
-/// elided. Bounds deep non-recursive chains. Mirrored byte-identically in `interp::format_trace`.
+/// elided. Bounds deep non-recursive chains.
 const TRACE_HEAD: usize = 10;
 const TRACE_TAIL: usize = 10;
 
 /// Render a runtime error plus its stack trace for the CLI: the error line, then one indented
-/// `  at <function> (<call site>)` line per frame, innermost first. Shared by both engines' drivers.
+/// `  at <function> (<call site>)` line per frame, innermost first.
 ///
 /// Two bounding transforms keep an infinite-recursion fault from flooding ~10_001 lines (gap #8):
 /// (1) runs of consecutive frames with the SAME function name collapse to the run's innermost `at`
@@ -232,8 +228,8 @@ pub fn format_trace(message: &str, span: Span, trace: &[TraceFrame]) -> String {
     s
 }
 
-/// Maximum user-function call depth — mirrors the serial-VM parity oracle, so infinite recursion is a clean
-/// runtime error rather than a host stack overflow.
+/// Maximum user-function call depth — infinite recursion is a clean runtime error rather than a host
+/// stack overflow.
 const MAX_CALL_DEPTH: usize = 10_000;
 
 /// Maximum structural-recursion depth for value display / equality — a cyclic data structure (e.g.
@@ -411,7 +407,7 @@ struct CallFrame {
     /// The closure object backing this frame, if it is a closure call (for `GetCaptured`).
     closure: Option<GcRef>,
     /// Whether this frame counts toward the call-depth limit (user calls do; module toplevels
-    /// don't, matching the serial-VM parity oracle).
+    /// don't).
     counted: bool,
     /// Module toplevel frame — an `Err`/`None` unhandled here (a `?` or a bare expression
     /// statement) is a top-level unhandled error that exits the program.
@@ -537,7 +533,7 @@ impl GeneratorCore {
 }
 
 /// The four set operators (gap #3): `|`→union, `&`→intersection, `-`→difference,
-/// `^`→symmetric-difference. Selects the algebra in `Vm::set_op` / `interp::set_op`.
+/// `^`→symmetric-difference. Selects the algebra in `Vm::set_op`.
 #[derive(Clone, Copy)]
 enum SetOp {
     Union,
@@ -623,11 +619,11 @@ impl PendingCall {
 /// A task queued on a nursery: the call itself plus the [`ModuleSnapshot`] PINNED at its `spawn`.
 ///
 /// W6-2 — the pin is per TASK, resolved EAGERLY in [`Vm::register_task`] (never deferred to a later
-/// hook), and replayed when the task is prepared (at its nursery's join on the serial engine, at that
-/// join OR at a nested nursery's `early_enlist_outer` on M:N). Resolving it at the `spawn` is what
-/// makes the two engines agree: `spawn` is a source position both reach, while "the next module-slot
-/// write, else the join" is not — the M:N per-connection EAGER nursery prepares a task the moment it
-/// is spawned, so a deferred pin diverged (serial 2 / M:N 1, flipping again on `--threads=1`).
+/// hook), and replayed when the task is prepared (at its nursery's join, OR at a nested nursery's
+/// `early_enlist_outer`). Resolving it at the `spawn` is deliberate: `spawn` is a single source
+/// position every task reaches, while "the next module-slot write, else the join" is not — the M:N
+/// per-connection EAGER nursery prepares a task the moment it is spawned, so a deferred pin gave a
+/// different snapshot depending on worker count (diverged between `--threads=1` and higher counts).
 ///
 /// The snapshot itself comes from [`Vm::ensure_snapshot`]'s cache, so consecutive spawns with no
 /// intervening cache invalidation (a global (re)binding, or a nursery open when the view holds a
@@ -750,9 +746,10 @@ pub struct Vm {
     /// Captured stdout. BYTES, not `String` (W6-9): `Writer.write_bytes` on an `io.stdout()` backing
     /// must be byte-exact like Python's `sys.stdout.buffer.write` / Go's `os.Stdout.Write`, and a
     /// `String` buffer forced a `from_utf8_lossy` hop. Decoded once, at the Rust capture boundary
-    /// ([`Vm::take_out`] and the `run_*` helpers) — and NEVER where two engines are compared: the
-    /// serial==M:N oracles diff these raw bytes via [`run_file_bytes`] ([`RunOutputRaw`]), because a
-    /// lossy decode maps `ff` and `fe` alike and would pass a byte-divergent run.
+    /// ([`Vm::take_out`] and the `run_*` helpers) — and NEVER where a comparison is made: a lossy
+    /// decode maps `ff` and `fe` alike and would blind any byte-level comparator, so callers that need
+    /// one (the CPython differential, `src/difftest/`) diff these raw bytes via [`run_file_bytes`]
+    /// ([`RunOutputRaw`]) instead.
     out: Vec<u8>,
     /// Captured stderr (written by `std.io.eprint`). Separate from `out` so streams don't mix.
     stderr: Vec<u8>,
@@ -4642,7 +4639,7 @@ fn captured(buf: Vec<u8>) -> String {
 }
 
 /// Run a single-file program from source on the dedicated VM thread; returns output produced so
-/// far + the outcome (test entry point, mirroring `interp::run_program`).
+/// far + the outcome (test entry point).
 #[cfg(test)]
 pub fn run_program(src: &str) -> (String, Result<(), RuntimeError>) {
     let (out, result) = run_program_bytes(src);
@@ -4939,9 +4936,9 @@ pub fn run_capture_nursery_len(src: &str) -> (Result<String, RuntimeError>, usiz
         .expect("VM thread panicked")
 }
 
-/// Run a multi-file program from its entry path on the dedicated VM thread. Mirrors
-/// `interp::run_file`: resolve the graph, compile it, run each module once in dependency order,
-/// then the entry's `main()`. Output produced so far is preserved alongside the outcome.
+/// Run a multi-file program from its entry path on the dedicated VM thread: resolve the graph,
+/// compile it, run each module once in dependency order, then the entry's `main()`. Output produced
+/// so far is preserved alongside the outcome.
 /// Convenience wrapper with the default (inert) host config. Test-only — the CLI uses
 /// [`run_file_with`] to pass a process-backed config.
 #[cfg(test)]
@@ -4967,11 +4964,11 @@ pub fn run_file_entry(entry: &std::path::Path, entry_fn: &str) -> RunOutput {
 pub type RunOutput = (String, String, Result<(), RunError>, Option<i32>);
 
 /// [`RunOutput`] with the sink's RAW BYTES — what the program actually emitted, before the lossy
-/// [`captured`] decode. The serial==M:N ORACLES take this one: `from_utf8_lossy` is not injective
-/// (`ff` and `fe` both become one U+FFFD), so diffing decoded captures would report `parity OK` for
-/// a run whose two engines put DIFFERENT bytes on fd 1 — and `Writer.write_bytes` (W6-9) is exactly
-/// what makes a non-UTF-8 capture reachable. Used by `chezzi run --check-parity` (`src/main.rs`) and
-/// the in-tree `assert_file_parity`; everything else keeps the `String` shape.
+/// [`captured`] decode: `from_utf8_lossy` is not injective (`ff` and `fe` both become one U+FFFD), so
+/// diffing decoded captures would blind any byte-level comparator to a genuinely divergent run — and
+/// `Writer.write_bytes` (W6-9) is exactly what makes a non-UTF-8 capture reachable. Callers that need
+/// a byte-exact comparison (the CPython differential, `src/difftest/`) take this one; everything else
+/// keeps the `String` shape.
 pub type RunOutputRaw = (Vec<u8>, Vec<u8>, Result<(), RunError>, Option<i32>);
 
 /// The [`captured`] decode applied to a whole [`RunOutputRaw`] — the one place the `Vec<u8>` sink
@@ -5007,8 +5004,8 @@ pub fn run_file_with_entry(
     to_str_output(run_file_bytes(entry, cfg, entry_fn, root))
 }
 
-/// [`run_file_with_entry`] without the lossy decode — the parity ORACLES' entry point (see
-/// [`RunOutputRaw`]). `chezzi run --check-parity` and `assert_file_parity` diff these bytes.
+/// [`run_file_with_entry`] without the lossy decode — the entry point for any caller that needs the
+/// raw bytes (see [`RunOutputRaw`]), e.g. a byte-exact test assertion or the CPython differential.
 pub fn run_file_bytes(
     entry: &std::path::Path,
     cfg: crate::native::HostConfig,

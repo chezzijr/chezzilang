@@ -138,10 +138,18 @@ Single source of truth for "what am I doing next." Update after every work sessi
 >
 > **A swallowed-stdout-write-error test could not be red→green the way it was first specified.**
 > `chezzi test --show-output | head -1` was GREEN both before and after the fix, because the pre-fix
-> `let _ =` already swallowed `BrokenPipe` unconditionally — a closed *reader* is not the failure mode
-> that mattered. A read-only fd was tried next as the induced-error source and **measured false-green**:
-> `std::io::Stdout::write_all` returns `Ok(())` on `EBADF` while a raw `write(2)` probe shows the byte
-> never lands, so the test would have passed for the wrong reason. `/dev/full` was the real repro.
+> `let _ =` already swallowed `BrokenPipe` unconditionally — at the time, a closed *reader* was treated
+> as not the failure mode that mattered. A read-only fd was tried next as the induced-error source and
+> **measured false-green**: `std::io::Stdout::write_all` returns `Ok(())` on `EBADF` while a raw
+> `write(2)` probe shows the byte never lands, so the test would have passed for the wrong reason.
+> `/dev/full` was the real repro.
+>
+> **Correction, same day (adversarial review):** the `BrokenPipe` carve-out above was itself the bug —
+> a closed reader truncates the report exactly like `/dev/full` does, and `go test`/`pytest` both fail a
+> passing run piped into `head -1` (141 SIGPIPE / exit 1). `chezzi test` now matches `chezzi run`'s own
+> `out_dead_reason` handling: every write failure, broken-pipe included, is `ExitCode::FAILURE` with
+> `stdout closed (broken pipe)` on stderr. `show_output_survives_closed_reader` (asserting success) is
+> now `show_output_reports_a_closed_reader` (asserting failure); `/dev/full` coverage is unchanged.
 >
 > Gate: `cargo test` **21 targets, 0 failed** (lib **4154 passed / 0 failed / 2 ignored**; **4369 Rust
 > tests** total, was 4337); `cargo clippy --all-targets -- -D warnings` clean; `./target/release/chezzi

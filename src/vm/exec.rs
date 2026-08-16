@@ -5,8 +5,8 @@ use super::*;
 
 impl Vm {
     /// The stdout sink. DEFAULT (`host.stream == false`) = append to the captured `out` buffer:
-    /// byte-identical to what every test helper, embedder and the serial-vs-M:N parity oracle has
-    /// always seen. STREAM (`chezzi run` only) = hand the whole `print` to the stdout writer thread
+    /// byte-identical to what every test helper and embedder has always seen. STREAM (`chezzi run`
+    /// only) = hand the whole `print` to the stdout writer thread
     /// ([`stream`]), which turns it into ONE `write_all` on the real handle: output appears when it
     /// happens, a `print` is line-atomic across tasks, and the fiber NEVER blocks in `write(2)` (a
     /// stalled reader must not pin a core worker — the D5 invariant).
@@ -29,8 +29,9 @@ impl Vm {
     /// `Writer.write_bytes` on an `io.stdout()` backing lands here so `b"\xff\xfe"` reaches the real
     /// handle unchanged (W6-9: it used to be decoded with `from_utf8_lossy` and emit two U+FFFD).
     /// The buffered sink is a `Vec<u8>` for the same reason; it decodes ONCE, at the Rust capture
-    /// boundary ([`Vm::take_out`] and the `run_*` helpers) — never where two engines are COMPARED
-    /// (the parity oracles diff `vm::run_file_bytes`' raw bytes; a lossy decode is not injective).
+    /// boundary ([`Vm::take_out`] and the `run_*` helpers) — never where a comparison is made (a
+    /// lossy decode is not injective, so it would blind the CPython differential and the
+    /// two-worker-count `tests/chz` gate, the surviving accidental-divergence detectors).
     pub(super) fn emit_out_bytes(&mut self, b: &[u8]) {
         if self.host.stream {
             // `write_out` counts the write itself, so `invoke_native` can ask "did THIS native emit
@@ -768,8 +769,8 @@ impl Vm {
     ///
     /// The buffered sink is bytes (W6-9); this is one of the CAPTURE boundaries where Rust needs a
     /// `String`, so it decodes lossily here. `chezzi run` (the path a program's stdout actually
-    /// reaches an fd) never passes through it and stays byte-exact. Not for comparing two engines'
-    /// output — that takes `vm::run_file_bytes` (see `vm::RunOutputRaw`).
+    /// reaches an fd) never passes through it and stays byte-exact. Not for a byte-level comparison —
+    /// that takes `vm::run_file_bytes` (see `vm::RunOutputRaw`).
     pub fn take_out(&mut self) -> String {
         String::from_utf8_lossy(&self.take_out_bytes()).into_owned()
     }

@@ -9,8 +9,9 @@
 
 // `src/main.rs` is a thin CLI shim over the `chezzi` **library** crate (`src/lib.rs`): the front-end
 // modules live there as `pub mod`s and compile once, so this binary declares no modules of its own —
-// it just imports the pieces the CLI body drives. (The grammar `conformance` suite and the two-engine
-// serial-VM/M:N-VM parity tests now live + run once in the lib's test target, not in this bin.)
+// it just imports the pieces the CLI body drives. (The grammar `conformance` suite and the VM's own
+// golden tests — `src/vm/golden_tests.rs`, the single-engine replacement for the deleted
+// serial-vs-M:N parity tests — now live + run once in the lib's test target, not in this bin.)
 use chezzi::{checker, lexer, manifest, native, parser, resolver, test_runner, vm};
 
 use std::process::ExitCode;
@@ -297,8 +298,8 @@ fn cmd_run(args: &[String]) -> ExitCode {
     // The CLI STREAMS: the VM writes each `print` straight to the real stdout as it happens (see
     // `HostConfig::stream`), so a prompt appears before its `read_line`, a long-running program is
     // not silent, and a spawned task's log is visible before its nursery joins. The lib helpers keep
-    // the buffered sink (the parity oracle), so `out`/`err` come back empty here. The native std
-    // modules read args/env/stdin from a process-backed config.
+    // the buffered sink instead, so `out`/`err` come back empty here. The native std modules read
+    // args/env/stdin from a process-backed config.
     let p = std::path::Path::new(&path);
     let mut cfg = native::HostConfig::from_process(prog_args);
     cfg.stream = true;
@@ -529,13 +530,18 @@ fn cmd_test(args: &[String]) -> ExitCode {
     // Byte-exact (W6-9r item 4): `report.bytes`, not `report.text`, so a test's `--show-output`
     // capture reaches fd 1 unchanged — matching `chezzi run` (W6-9) and `go test`. No explicit flush:
     // the report always ends in `\n`, so the `LineWriter` flushes, same as `print!` did.
-    // A write that failed for anything but a closed reader (`> /dev/full`, a closed fd): the report
-    // is genuinely truncated, so the run must not report success. A closed READER (`| head -1`) is a
-    // clean end — the test verdict's own exit code stands.
-    if let Err(e) = std::io::Write::write_all(&mut std::io::stdout(), &report.bytes)
-        && e.kind() != std::io::ErrorKind::BrokenPipe
-    {
-        eprintln!("chezzi test: cannot write stdout: {e}");
+    // ANY write failure — including a closed reader (`| head -1`) — truncates the report, so the run
+    // must not report success. Measured against the reference runners with a PASSING run piped into
+    // `head -1`: `go test -v` exits 141 (SIGPIPE), `pytest -s` exits 1 — neither treats a closed
+    // reader as a clean pass. Matches `chezzi run`'s own broken-pipe handling (see `out_dead_reason`
+    // above): a truncated report is a failure, full stop.
+    if let Err(e) = std::io::Write::write_all(&mut std::io::stdout(), &report.bytes) {
+        let why = if e.kind() == std::io::ErrorKind::BrokenPipe {
+            "stdout closed (broken pipe)".to_string()
+        } else {
+            format!("cannot write stdout: {e}")
+        };
+        eprintln!("chezzi test: {why}");
         return ExitCode::FAILURE;
     }
     if report.passed {
