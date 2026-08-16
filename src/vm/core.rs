@@ -46,9 +46,11 @@ pub struct ChannelCore {
     /// `timer(ms)` timeout channel: `Some(deadline)` iff this channel was built by `timer`. It is
     /// **level-triggered** — `recv` yields `true` on any call at/after the deadline (the typical use
     /// recvs it once, in a `wait` arm). Delivery is handled at `recv` time in the receiver's own
-    /// scheduler: `--parallel` schedules a background `send(true)` + parks; the top-level VM (or a
-    /// fiber with no heap of its own) / a native callback inline-sleeps to the deadline and
-    /// synthesises `true`. `None` for an ordinary `Channel[T]`.
+    /// scheduler ([`Vm::chan_recv_step`]): an M:N worker outside a native callback
+    /// (`mn.is_some() && native_reentry == 0`) schedules a background `send(true)` + parks; otherwise
+    /// (`mn.is_none()` — the top-level VM or the inline outermost-`parallel:` builder VM — or inside a
+    /// native callback, `native_reentry > 0`) it inline-sleeps to the deadline and synthesises `true`.
+    /// `None` for an ordinary `Channel[T]`.
     pub timer: Option<std::time::Instant>,
     /// `wait`-arm timed-park latch: set once (CAS false→true) when a `--parallel` `wait` arms the
     /// background `send_wake(true)` for this timer channel, so a re-park of the SAME wait (woken with
@@ -396,8 +398,8 @@ pub struct WriterCore {
 /// R2 — where a [`WriterCore`] sends bytes.
 /// * `File` — a `create`/`append` file writer. The `BufWriter` gives OS-level write buffering for free
 ///   and **flushes on drop**, so an unclosed file writer never silently loses data.
-/// * `Stdout`/`Stderr` — markers: a write ROUTES through [`Vm::emit_out`]/[`Vm::emit_err`] (the parity
-///   oracle `Vm.out` / the streaming-CLI sink), NEVER a raw fd — else capture/parity/streaming break.
+/// * `Stdout`/`Stderr` — markers: a write ROUTES through [`Vm::emit_out`]/[`Vm::emit_err`] (the
+///   captured `Vm.out` buffer / the streaming-CLI sink), NEVER a raw fd — else capture/streaming break.
 /// * `Buffered` — the Go `bufio.NewWriter` escape hatch: accumulate in `buf`, drain to `inner` on
 ///   flush / buffer-full / close. A file-backed tail — `inner=File` **or** a nested `inner=Buffered`
 ///   chain that bottoms out in one — is best-effort drained on drop by [`WriterCore`]'s `Drop`; a
@@ -560,7 +562,7 @@ impl EagerState {
     }
 
     /// Take the collected outcomes, leaving the slot vector empty. A second `shutdown` therefore
-    /// reduces an empty vector — a clean no-op, matching the serial engine's drained queue.
+    /// reduces an empty vector — a clean no-op.
     pub(super) fn take_slots(&mut self) -> Vec<Option<super::TaskOutcome>> {
         self.bytes = 0;
         self.dirty = false;

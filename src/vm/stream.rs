@@ -3,8 +3,8 @@
 // captures and compares (`assert_golden_out`).
 //
 // A fiber must never block in `write(2)`: an M:N core worker stuck in a full-pipe write runs no
-// other fiber (the D5 invariant — see `native::Kind::Blocking`), and the serial engine's single thread
-// would stop dead. So a streamed write is a queue push (never blocks, never syscalls) and ONE
+// other fiber (the D5 invariant — see `native::Kind::Blocking`). So a streamed write is a queue push
+// (never blocks, never syscalls) and ONE
 // background thread per stream owns the real handle: one message = one `write_all` + `flush` = a
 // `print` is line-atomic across tasks, the output is UNBUFFERED (a `print(x, end="")` progress marker
 // appears immediately; a killed program keeps every byte it produced), and stdout/stderr keep

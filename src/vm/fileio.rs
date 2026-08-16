@@ -118,7 +118,7 @@ impl Vm {
         };
         if let Some((inner, drained)) = drain {
             // Guard the WRITE, not the flush: an empty `write_to_core` on a `Stdout`/`Stderr` inner
-            // would hand `emit_out("")` to the parity-oracle sink / stream queue.
+            // would hand `emit_out("")` to the captured `Vm.out` buffer / stream queue.
             if !drained.is_empty() {
                 self.write_to_core(&inner, &drained).map_err(from_inner)?;
             }

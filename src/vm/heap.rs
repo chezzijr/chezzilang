@@ -957,7 +957,7 @@ impl Heap {
         // owning no `Obj` slot of its own, so it used to be counted nowhere and backlogged 304 MB
         // past an 8 MB cap). Gated on a live cap for the same reason the byte-aware GC pacing is
         // (`should_collect`): with `mem_cap == 0` `over_cap` is meaningless, so a `chezzi run`, a
-        // bench and the whole parity gate pay one `!= 0` load and ZERO extra walks — the walk is
+        // bench and the two-worker-count `tests/chz` gate pay one `!= 0` load and ZERO extra walks — the walk is
         // O(payload) per DIRTY core per sweep, on top of the mark pass's. A CLEAN core stays O(1)
         // either way. (`CHEZZI_HEAP_STATS`'s cap-off peak therefore still omits nested-core bytes,
         // exactly as it did before this fix.)

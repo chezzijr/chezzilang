@@ -555,7 +555,6 @@ impl Vm {
         let proto = *def
             .methods
             .get(method)
-            // Wording byte-identical to `interp::call_struct_method` (the engines parity-test stdout).
             .ok_or_else(|| self.err(format!("struct '{name}' has no method '{method}'"), span))?;
         let home = self.module_objs[def.module_idx];
         // Guarded (B1): `index`/`slice`/`set_index` overloads run from native opcode handlers whose
@@ -1412,7 +1411,7 @@ impl Vm {
     }
 
     /// `List()` → a fresh empty list (the `List[T]()` turbofish form; mirrors `Set()`); `List(it)` →
-    /// a list drained from ANY for-iterable. Mirrors `interp::Interp::builtin_list`.
+    /// a list drained from ANY for-iterable.
     pub(super) fn builtin_list(
         &mut self,
         args: &[Value],
@@ -1435,7 +1434,7 @@ impl Vm {
     }
 
     /// `Map(it)` → a map from an iterable of 2-tuples `(k, v)` (last-wins on dup keys, like the
-    /// `{k: v}` literal). Mirrors `interp::Interp::builtin_map`. A struct key's `hash()` re-enters the
+    /// `{k: v}` literal). A struct key's `hash()` re-enters the
     /// VM, so the in-flight key/value are rooted via `hash_key_rooted` while the building map is rooted.
     pub(super) fn builtin_map(
         &mut self,
@@ -1786,7 +1785,7 @@ impl Vm {
         Ok(Value::obj(self.heap.alloc(Obj::Str(s.into()))))
     }
 
-    /// `ord(s)` — codepoint of the first char of `s`. Mirrors `interp::builtins::ord` (errors too).
+    /// `ord(s)` — codepoint of the first char of `s`.
     pub(super) fn builtin_ord(
         &mut self,
         args: &[Value],
@@ -1808,7 +1807,7 @@ impl Vm {
         ))
     }
 
-    /// `chr(n)` — the 1-char str for codepoint `n`. Mirrors `interp::builtins::chr` (errors too).
+    /// `chr(n)` — the 1-char str for codepoint `n`.
     pub(super) fn builtin_chr(
         &mut self,
         args: &[Value],
@@ -1954,9 +1953,9 @@ impl Vm {
         }
     }
 
-    /// `Display` form, matching `interp::value::Value`'s `Display` exactly. Thin wrapper over the
-    /// depth-guarded worker — kept infallible so every error-message / `display_wire` caller is
-    /// unchanged; a cyclic structure renders as `<...>` here (the print path surfaces the error).
+    /// `Display` form. Thin wrapper over the depth-guarded worker — kept infallible so every
+    /// error-message / `display_wire` caller is unchanged; a cyclic structure renders as `<...>` here
+    /// (the print path surfaces the error).
     pub(super) fn display(&self, v: Value) -> String {
         self.display_guarded(v, 0)
             .unwrap_or_else(|_| "<...>".to_string())
@@ -2353,8 +2352,8 @@ impl Vm {
     /// Protocol-aware render for `print` / `str()` / interpolation: a struct with a self-only
     /// `str(self) -> str` method (the `Stringable` protocol) dispatches to it; everything else uses
     /// the default structural repr, recursing through `stringify` so nested structs honour the
-    /// protocol too. Mirrors `interp::Interp::stringify` exactly (parity-tested). Distinct from the
-    /// `&self` `display` above, which stays the pure structural form for error/debug text.
+    /// protocol too. Distinct from the `&self` `display` above, which stays the pure structural form
+    /// for error/debug text.
     pub(super) fn stringify(
         &mut self,
         v: Value,
@@ -2496,9 +2495,9 @@ impl Vm {
             // Boxed scalars stringify identically to the inline `Int`/`Float`.
             Obj::BigInt(n) => out.push_str(&n.to_string()),
             Obj::FloatBox(f) => out.push_str(&format_float(f)),
-            // `bytes` interpolates/prints as its Python `b'...'` repr (shared helper, engine-parity).
+            // `bytes` interpolates/prints as its Python `b'...'` repr (shared helper).
             Obj::Bytes(b) => out.push_str(&crate::slice::bytes_repr(&b)),
-            // `bytearray` interpolates/prints as `bytearray(b'...')` (shared helper, engine-parity).
+            // `bytearray` interpolates/prints as `bytearray(b'...')` (shared helper).
             Obj::ByteArray(b) => out.push_str(&crate::slice::bytearray_repr(&b)),
             Obj::List(items) => {
                 out.push('[');

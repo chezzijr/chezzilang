@@ -552,7 +552,7 @@ impl Vm {
     }
 
     /// If `v` is an unhandled error (`Err(..)`/`None`) reaching the top level, build the runtime
-    /// error that exits the program. Mirrors `interp::top_level_error` — message must be identical.
+    /// error that exits the program.
     pub(super) fn top_level_error(&self, v: Value, span: Span) -> Option<RuntimeError> {
         let h = v.as_obj()?;
         let Obj::Enum {
@@ -905,8 +905,8 @@ impl Vm {
                     }
                     // `std.net`'s `Socket`/`Listener` are TYPE-only imports with NO runtime module-member
                     // value: a `Socket` value comes from `connect`/`listen` and the type resolves directly
-                    // to `Ty::Socket`. Skip them — the native module has no such global by design. Mirrors
-                    // the interp `bind_import` skip (parity); without it `import Socket from std.net` faults.
+                    // to `Ty::Socket`. Skip them — the native module has no such global by design;
+                    // without this, `import Socket from std.net` faults.
                     if self.module_name(target_obj) == "std.net"
                         && matches!(member.as_str(), "Socket" | "Listener")
                     {
@@ -1147,8 +1147,8 @@ impl Vm {
             // The cancel still unwinds like an uncaught fault that bypasses `recover:` — see the
             // post-step funnel below (`self.cancelled` ⇒ `unwind_deferred(base_level, false)`).
             //
-            // D3: reduction-counting preemption (M:N-worker fibers only — a fiber with no heap of its
-            // own, sharing the host heap, is never preempted). Decrement the budget per dispatched op; at
+            // D3: reduction-counting preemption — gated on `self.mn` (an M:N worker shell running fibers
+            // off the shared queue); a shell with no sched in scope is never preempted. Decrement the budget per dispatched op; at
             // exhaustion yield this worker so a queued sibling runs (round-robin fairness). A yielded
             // cancelled fiber observes the cancel at its next checkpoint. The
             // `native_reentry == 0` guard mirrors `recv`-park: a yield inside a native callback can't
@@ -1460,9 +1460,9 @@ impl Vm {
         // even when no in-program handle remains.
         work.extend(self.executors.iter().copied());
         work.extend(self.module_objs.iter().copied());
-        // Task 1 — the shell's REAL module_objs while swapped out for a serial child-modules window
+        // Task 1 — the shell's REAL module_objs while swapped out for a child-modules window
         // (empty otherwise). Without this a safepoint GC during the window — when live frames don't root
-        // them (the serial `Executor` exit-drain runs with empty frames) — sweeps them → UAF on restore.
+        // them (an `Executor` exit-drain runs with empty frames) — sweeps them → UAF on restore.
         work.extend(self.pinned_module_roots.iter().copied());
         // M19 Phase 3 — interned `ConstStr` handles are roots: they're cached for reuse across pushes
         // of the same op, so they must never be swept out from under a later push. Heap-keyed, so this
@@ -2508,10 +2508,12 @@ impl Vm {
                     .unwrap_or_else(|e| e.into_inner())
                     .push(Arc::clone(&core));
                 let h = self.heap.alloc(Obj::Executor(core));
-                // Register for the program-exit auto-drain; the handle is also a GC root, so the
-                // executor's queued work survives even after every in-program handle is gone. Still
-                // the SERIAL engine's reap list (it drains through the handle, which it re-roots on
-                // the operand stack); on M:N the join goes through `exec_registry` instead.
+                // The handle is also a GC root here, so the executor's queued work survives even
+                // after every in-program handle is gone. `self.executors` is no longer itself walked
+                // to drain anything — that was the deleted `--serial` engine's own reap mechanism
+                // (draining through the handle, re-rooted on the operand stack); today it exists
+                // purely as this heap's GC root, and the program-exit join walks `exec_registry`
+                // (registered just above) instead.
                 self.executors.push(h);
                 self.push(Value::obj(h));
             }

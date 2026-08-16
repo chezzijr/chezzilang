@@ -260,13 +260,15 @@ impl Vm {
         // falls through to inline. Record the call + extracted primitive args; the worker loop hands
         // it to the pool ([`Disp::Offload`]) and `paused()` skips the (missing) result-push here. The
         // result is lowered + pushed by the worker that resumes the fiber after completion.
-        // CANCELLATION CHECKPOINT — a blocking op is a cancel-delivery point, on BOTH engines: it sits
-        // OUTSIDE the `mn.is_some()` offload gate below. Serial needs it every bit as much as M:N —
-        // it is the only checkpoint a `sleep_ms` / `io` / `fs` / `request` / `process` call offers, and
-        // without it a cancelled serial fiber (one the cancel drain re-drove, say) would run the
-        // blocking call to completion, stalling the whole teardown for its full duration, and then
-        // keep executing the straight-line statements after it — output M:N never produces. On M:N it
-        // also stops a post-cancel `sleep_ms` from delaying the teardown by the full sleep.
+        // CANCELLATION CHECKPOINT — a blocking op is a cancel-delivery point regardless of whether an
+        // M:N sched is in scope: it sits OUTSIDE the `mn.is_some()` offload gate below. A `mn == None`
+        // context (top-level `main`, the inline outermost-`parallel:` builder VM, an eager `Executor`
+        // job) needs it every bit as much as an M:N worker — it is the only checkpoint a `sleep_ms` /
+        // `io` / `fs` / `request` / `process` call offers, and without it a cancelled fiber (one the
+        // cancel drain re-drove, say) would run the blocking call to completion, stalling the whole
+        // teardown for its full duration, and then keep executing the straight-line statements after
+        // it. On an M:N worker it also stops a post-cancel `sleep_ms` from delaying the teardown by
+        // the full sleep.
         if self.native_reentry == 0 && kind.blocks() && self.cancel_requested() {
             self.cancelled = true;
             return Err(self.err("cancelled".to_string(), span));
@@ -337,8 +339,9 @@ impl Vm {
         {
             return self.demote_block_sleep(ms as u64, span);
         }
-        // W7-16 — every OTHER timed wait with `ms > 0`: an eager `Executor` job (`mn == None`), the top-level
-        // `main` thread on either engine, a serial nursery fiber, or a `mn == None` native callback.
+        // W7-16 — every OTHER timed wait with `ms > 0`: an eager `Executor` job (`mn == None`), the
+        // top-level `main` thread, the inline outermost-`parallel:` builder VM, or a `mn == None`
+        // native callback.
         // All of them used to reach `native::time::sleep_ms`'s bare `std::thread::sleep`, which is a
         // hole in every halt the loop it replaces would have checked: `shutdown_now()` at 50 ms against
         // a `sleep_ms(3000)` waited the full 3012 ms AND ran the job's post-sleep code, and
@@ -939,7 +942,6 @@ impl Vm {
         // `compare` on a primitive (int/float/str): they intrinsically satisfy `Comparable`, so an
         // erased generic body may call `.compare()` on a concrete primitive. Return the sign of the
         // ordering. Structs with their own `compare` fall through to the normal dispatch below.
-        // Mirrors `interp::eval_method_call`.
         if method == "compare" && args.len() == 1 {
             let is_prim = self.is_numeric(recv)
                 || matches!(recv.as_obj(), Some(h) if matches!(self.heap.get(h), Obj::Str(_)));
@@ -1227,8 +1229,7 @@ impl Vm {
         }
         // Built-in container methods, dispatched off the handle BEFORE the clone-match below so
         // `list.push`/`bytearray.push` mutate the heap object in place (the match clones the Obj):
-        //   `str`/`list`/`map`/`set` → `core_method` (M6; mirrors `interp::builtins::call_method`
-        //                              exactly — error strings included, parity-tested),
+        //   `str`/`list`/`map`/`set` → `core_method` (M6),
         //   `bytes`                  → `bytes_method` (immutable: only `decode() -> str`),
         //   `bytearray`              → `bytearray_method` (`len`/`push`/`pop`/`extend`/`decode`;
         //                              separate from `core_method`, same in-place `get_mut` discipline).

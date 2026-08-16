@@ -1391,8 +1391,7 @@ impl Vm {
     }
 
     /// `Channel[T]` methods (C2/C4): `send` (move-on-send, deep-copied in), `recv` (FIFO; empty =
-    /// deadlock fault under the sequential executor), `len`. Mirrors `interp::eval_channel_method` —
-    /// error strings byte-identical (parity-tested).
+    /// deadlock fault under the sequential executor), `len`.
     pub(super) fn channel_method(
         &mut self,
         h: GcRef,
@@ -1485,7 +1484,7 @@ impl Vm {
             "try_recv" => {
                 // A1: non-blocking poll. Unlike `recv` it never touches the scheduler /
                 // `native_reentry` / `suspend` / `ip` — it always returns immediately with an
-                // `Option`: `Some(v)` if queued, `None` if empty. Mirrors `interp::eval_channel_method`.
+                // `Option`: `Some(v)` if queued, `None` if empty.
                 self.arity_err("try_recv", args, 0, span)?;
                 let core = self.channel_core(h);
                 let popped = core.q.lock().unwrap().pop();
@@ -1778,8 +1777,7 @@ impl Vm {
     /// parked on a full `send` to it. No-op for an unbounded channel (no sender ever parks there — the
     /// common `recv` path pays only a `cap.is_none()` check). Routes exactly like `channel_send_wire`'s
     /// wake: an active sched (`mn` / `mn_enlist_sched`) → [`MnSched::recv_wake`]; else, with no
-    /// scheduler in scope, `wake_on_send` drains `blocked_on[key]` + notifies the core condvar (a
-    /// demoted sender).
+    /// scheduler in scope, [`Vm::wake_on_send`] wakes any other live sched's bucket for this channel.
     pub(super) fn wake_senders(&mut self, h: GcRef) {
         let core = self.channel_core(h);
         if core.cap.is_none() {
@@ -2358,9 +2356,9 @@ impl Vm {
     /// or block: an M:N snapshot-park, an M:N in-callback demote, or an in-place condvar wait for a
     /// party that owns its OS thread (an eager `Executor` job / top-level `main`, plus — for a TIMED
     /// wait only — either of those inside a native callback). A live timer arm is just another arm on
-    /// every one of those; only the inline outermost-`parallel:` builder mid-body, which has no thread
-    /// to clamp, still inline-sleeps to the soonest deadline (`gaps.md` N10, and W7-14 for why the
-    /// remaining inline-sleep is exactly that narrow).
+    /// every one of those; only the inline outermost-`parallel:` builder mid-body, for which
+    /// `owns_os_thread()` is false, still inline-sleeps to the soonest deadline (`gaps.md` N10, and
+    /// W7-14 for why the remaining inline-sleep is exactly that narrow).
     pub(super) fn op_wait_poll(&mut self, meta: &WaitMeta, span: Span) -> Result<(), RuntimeError> {
         // W7-17 — `--timeout` above the cancellation checkpoint and suppressed inside a `defer`, for
         // exactly the reasons `chan_recv_step` documents at the same seam: the deadline outranks a
@@ -2724,7 +2722,7 @@ impl Vm {
     }
 
     /// `Shared[T]` methods (C3/C4): `get` (copies out), `set` (copies in), `update` (read-modify-write
-    /// via the re-entrant call path). Mirrors `interp::eval_shared_method`. The box is re-rooted on
+    /// via the re-entrant call path). The box is re-rooted on
     /// the operand stack across `update`'s nested call (the receiver was popped in `do_method_call`).
     pub(super) fn shared_method(
         &mut self,
@@ -2776,15 +2774,15 @@ impl Vm {
     /// `RwShared[T]` methods: `get`/`set` (read/write-guarded copy out/in), `read(f)` (SHARED read
     /// guard: clone out, drop guard, run `f`, return its result — NO write-back), `write(f)`
     /// (EXCLUSIVE write guard: a write-locked read-modify-write, the `Shared.update` shape under a
-    /// `RwLock`). Mirrors `interp::eval_rwshared_method`. As with `Shared.update`, the lock guard is
+    /// `RwLock`). As with `Shared.update`, the lock guard is
     /// dropped across the user closure (a `RwLock` guard is not reentrant) and the receiver is
     /// re-rooted on the operand stack so the nested call's GC keeps the core's contents traced (the
     /// receiver was popped off the stack in `do_method_call`). `write`'s whole RMW is serialised
-    /// across threads by a separate `update_lock` (held only under `--parallel`) — the `RwLock` write
-    /// guard alone is NOT enough because it is dropped across the closure, so two writers could clone
-    /// the same base and lose an update (same discipline as `Shared.update`). A closure that
-    /// re-acquires the SAME box's write lock (or a write inside a read) deadlocks — a documented edge,
-    /// mirroring `Shared.update`'s same-box re-entry limit.
+    /// across threads by a separate `update_lock`, held UNCONDITIONALLY for the entire RMW — the
+    /// `RwLock` write guard alone is NOT enough because it is dropped across the closure, so two
+    /// writers could clone the same base and lose an update (same discipline as `Shared.update`). A
+    /// closure that re-acquires the SAME box's write lock (or a write inside a read) deadlocks — a
+    /// documented edge, mirroring `Shared.update`'s same-box re-entry limit.
     pub(super) fn rwshared_method(
         &mut self,
         h: GcRef,
@@ -3315,7 +3313,7 @@ impl Vm {
     /// `cas(expected, new) -> bool` (swap iff the box equals `expected`), `add`/`sub` (numeric RMW,
     /// returns the new value). Each is a single lock-op-unlock, so the RMW is atomic across threads —
     /// no user closure runs under the lock (unlike `Shared.update`), so no `update_lock` is needed.
-    /// Mirrors `interp::eval_atomic_method`. `add`/`sub` use the language's `checked_add`/`checked_sub`
+    /// `add`/`sub` use the language's `checked_add`/`checked_sub`
     /// (int overflow faults, like the `+`/`-` operators) and plain float arithmetic.
     pub(super) fn atomic_method(
         &mut self,
@@ -3492,8 +3490,7 @@ impl Vm {
 
     /// `Executor` methods (C5/escape hatch): `submit` (enqueue a detached task closure, rejected once
     /// shut), `shutdown` (graceful — drain FIFO via the re-entrant call path), `shutdown_now` (discard
-    /// pending). Mirrors `interp::eval_executor_method` — error strings byte-identical (parity-tested).
-    /// The executor handle is re-rooted on the operand stack across the drain, and each popped task is
+    /// pending). The executor handle is re-rooted on the operand stack across the drain, and each popped task is
     /// rooted across its nested call (the receiver was popped in `do_method_call`).
     pub(super) fn executor_method(
         &mut self,
@@ -3673,7 +3670,7 @@ impl Vm {
         }
     }
 
-    /// Mirrors `interp::Interp::drain_live_executors` (C5 / A2): at a clean program end, gracefully
+    /// C5 / A2 — at a clean program end, gracefully
     /// drain every `Executor` created but never explicitly `shutdown`/`shutdown_now`-ed, in creation
     /// order, reusing the shipped `shutdown` path (FIFO, run-all — every queued job runs and the
     /// lowest-submission-index fault propagates, W7-5). A hard `std.os.exit` is not drained (the

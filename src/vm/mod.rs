@@ -38,8 +38,8 @@ use crate::{lexer, parser};
 /// from any other runtime fault (OOB, div-by-zero, missing key, native fault, …). It is set `true`
 /// only by the `Op::Assert` arm; every other constructor leaves it `false` (the `Default`). The
 /// `chezzi test` runner reads it to bucket a fault as FAIL vs ERROR. It is deliberately NOT part of
-/// `Display` (which stays message+span only, byte-identical across engines) and the same fault
-/// yields the same flag on both schedulers, so parity is unaffected.
+/// `Display` (which stays message+span only) and the same fault deterministically yields the same
+/// flag every time.
 ///
 /// `is_over_memory` marks a `chezzi test --max-heap` hard-abort (the runaway-allocation guard). It is
 /// set at the abort site and FORCED onto whatever error emerges from the unwind, so it travels WITH
@@ -47,7 +47,7 @@ use crate::{lexer, parser};
 /// worker's fault crossing back to the parent. That marker (there is no per-VM flag) is what makes the
 /// abort un-catchable by `recover:` and correctly bucketed `OverMemory`: the `run_until` Err funnel
 /// bypasses `recover:` whenever it is set, and `verdict_from_fault` reads it first. Like `is_assert`,
-/// it is excluded from `Display`, so parity (error-string compare) is unaffected. Always `false` on the
+/// it is excluded from `Display`, so the error-string comparison is unaffected. Always `false` on the
 /// common path (`chezzi run`, and `--max-heap` off).
 ///
 /// `is_timed_out` marks a `chezzi test --timeout` wall-clock hard-abort. It rides the exact same
@@ -769,8 +769,9 @@ pub struct Vm {
     /// M19 Phase 4 — per-call-site struct-field inline caches, indexed by the `ic` id baked into
     /// `GetField`/`SetField` ops (dense `0..program.field_ic_sites`). Holds field indices, not
     /// `GcRef`s, so it carries no heap state: never snapshotted, never swapped in [`Vm::swap_ctx`].
-    /// A fiber with no heap of its own shares one `Vm` but runs sequentially (no race); an M:N-worker
-    /// fiber owns a separate `Vm` (no race). Each cell self-verifies, so sharing is always sound.
+    /// Safe because a worker shell's `Vm` runs one OS thread with one fiber swapped in at a time — many
+    /// fibers share the shell's `field_ic`, but never concurrently (no race). Each cell self-verifies,
+    /// so sharing is always sound.
     field_ic: Vec<IcCell>,
     /// M19 Phase 6 / N-way poly — per-call-site method inline caches, indexed by the `ic` id baked
     /// into `CallMethod` ops (dense `0..program.method_ic_sites`). Each site is an N-way
@@ -1105,9 +1106,10 @@ pub struct Vm {
     pinned_module_roots: Vec<GcRef>,
     /// D2b — set on an M:N **worker shell** to the scheduler of the `parallel:` nursery it is draining.
     /// `Some` flips the `recv`/`send` arms onto the park/wake protocol ([`MnSched`]) instead of the
-    /// legacy condvar-block; `None` on a fiber with no heap of its own, the top-level VM, and a
-    /// prepared task fiber's heap-only worker. Cloned onto each shell at enlistment
-    /// ([`Vm::run_mn_nursery`]).
+    /// legacy condvar-block; `None` on the top-level VM, the inline outermost-`parallel:` builder VM
+    /// (see [`Vm::mn_enlist_sched`] below — there is no scheduler loop driving the inline body), and
+    /// an eager `Executor` job's `Vm` (gets neither `mn` nor `mn_enlist_sched` from `spawn_worker`).
+    /// Cloned onto each shell at enlistment ([`Vm::run_mn_nursery`]).
     mn: Option<Arc<MnSched>>,
     /// Cross-nursery flat scheduler (M:N) — count of OUTER nurseries early-enlisted into the global
     /// sched by a nested builder but not yet reduced at their own `JoinNursery`. While > 0 the
@@ -1126,8 +1128,9 @@ pub struct Vm {
     /// on every schedule-in ([`Vm::run_one_fiber`]) and decremented at the `run_until` loop-top
     /// safepoint. Live per-VM scratch (like `pending_exit`/`cancelled`), NOT part of [`FiberCtx`]:
     /// it is reset per schedule, never preserved across a park. Only consulted under the M:N engine
-    /// (`mn.is_some()`); when `mn` is `None` (the top-level VM, or a fiber with no heap of its own)
-    /// there is no scheduler loop driving preemption, so it goes unused.
+    /// (`mn.is_some()`); when `mn` is `None` (the top-level VM, the inline outermost-`parallel:`
+    /// builder VM, or an eager `Executor` job's `Vm`) there is no scheduler loop driving preemption, so
+    /// it goes unused.
     reds: u32,
     /// D3 — transient signal: the safepoint set this when `reds` hit 0, asking the worker loop to
     /// requeue this fiber (round-robin) instead of treating its `run_until` return as a finish.
@@ -1440,7 +1443,7 @@ enum Lowered {
     /// `spawn f(args)` where `f` is a first-class builtin fn value (`Obj::Builtin`) — the callee is
     /// pure code (no captures, no home), so it crosses by name and the worker re-allocs a fresh
     /// `Obj::Builtin`, mirroring `Func`. Without this arm a builtin callee hit `prepare_worker`'s
-    /// reject `_` on the M:N engine only (serial/interp dispatch it directly) — a parity divergence.
+    /// reject `_` and could not be spawned at all.
     Builtin {
         name: Box<str>,
         args: Vec<WireValue>,
@@ -1633,9 +1636,8 @@ enum TaskOutcome {
     Done(WorkerResult),
     /// Observed the nursery cancel flag and unwound (a sibling faulted/exited first). Its buffered
     /// output is FLUSHED at its task-order slot, not dropped: with cancellation points a started task
-    /// always runs its prologue, so those bytes really were printed — and serial (which prints live
-    /// into the shared buffer) cannot un-print them. Dropping them here was a capture-mode-only
-    /// divergence from the serial engine's line SET.
+    /// always runs its prologue, so those bytes really were printed, and dropping them here would
+    /// silently un-print output the program genuinely produced.
     Cancelled { out: Vec<u8>, stderr: Vec<u8> },
     /// Called `std.os.exit(code)`. Buffered output is flushed, then the parent hard-halts with `code`.
     Exit {
@@ -2962,7 +2964,7 @@ impl MnSched {
         // that is still empty, so this re-check is the last chance to observe it; parking here strands
         // the fiber on a key nothing will ever wake and the deadlock detector (correctly) reaps it —
         // a SPURIOUS `deadlock:` fault. The requeue TERMINATES: the re-run `WaitPoll` hits `all_closed`
-        // and faults "wait: all channels closed" (what the serial engine already does), so unlike the
+        // and faults "wait: all channels closed", so unlike the
         // one-dead-among-live case there is no requeue→re-park spin.
         if !ready_now && !arms.is_empty() && !any_live {
             ready_now = true;
@@ -3690,7 +3692,7 @@ fn run_offload(
 /// timer thread, so a cancel or a `--timeout` reaches the sleeping fiber INSIDE the sleep instead of
 /// after it. Pre-fix this was one `submit_at(deadline, …)`: a nursery task sleeping 3 s ran the full
 /// 3 s through a sibling's fault at 50 ms and then printed its post-sleep line (measured 3005 ms; the
-/// existing parity fence only ever covered the *entry* checkpoint, where the fault precedes the call).
+/// existing cancellation checkpoint only ever covered the *entry* checkpoint, where the fault precedes the call).
 ///
 /// **Why re-arm rather than park where `cancel_drain` can reach it.** `cancel_drain` walks `c.parked`
 /// only, and filing this fiber there needs a claim-once token against the timer firing plus
@@ -3768,8 +3770,8 @@ impl SchedCore {
     /// dedups it so the flat slot is faulted and the fiber's SCOPE's `done` bumped exactly once.
     /// Each parked fiber's OWN buffered stdout/stderr (moved into `f.ctx.out`/`stderr` by `swap_ctx`
     /// when it parked) is carried into its `Deadlocked` slot, so `reduce_task_slots` flushes EVERY
-    /// parked buffer at its task-order slot — matching the serial engine, which printed those lines
-    /// live before the deadlock returned. A distinct `Deadlocked` outcome (not `Fault`) is what lets
+    /// parked buffer at its task-order slot — matching what a strictly sequential run would have
+    /// printed live before the deadlock returned. A distinct `Deadlocked` outcome (not `Fault`) is what lets
     /// the reduce flush ALL parked buffers here without disturbing the real-fault multi-fault path.
     fn flag_deadlock(&mut self, err: &RuntimeError) {
         let buckets: Vec<Vec<ParkedEntry>> = self.parked.drain().map(|(_, v)| v).collect();
@@ -3801,7 +3803,7 @@ impl SchedCore {
                     // `f.ctx.out` when it parked; the downstream `reduce_task_slots` flushes EVERY
                     // Deadlocked slot's buffer at its task-order slot (not just the lowest-index one,
                     // as with a real Fault), so with two-or-more parked fibers a higher-index
-                    // printer's output is preserved byte-identically to the serial engine.
+                    // printer's output is preserved byte-identically to a strictly sequential run.
                     // `task_index`/`scope_id` are Copy, read before the partial move of
                     // `f.ctx.out`/`f.ctx.stderr`.
                     let (ti, sid) = (f.task_index, f.scope_id);

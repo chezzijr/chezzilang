@@ -567,8 +567,7 @@ impl Vm {
 
     /// `[elem...] * n` — repeat the list `n` times into a fresh list (gap #3). `n <= 0` → empty.
     /// Guards the allocation against capacity overflow (a giant `n` would otherwise abort the
-    /// process via Vec's panic) — raises a RECOVERABLE fault, mirroring `str.repeat`. Mirrored
-    /// byte-for-byte in `interp::eval_binary`.
+    /// process via Vec's panic) — raises a RECOVERABLE fault, mirroring `str.repeat`.
     pub(super) fn list_repeat(
         &mut self,
         h: GcRef,
@@ -701,7 +700,7 @@ impl Vm {
 
     /// Arithmetic operator overloading: dispatch `+`/`-`/`*` on two structs to the receiver's
     /// `add`/`sub`/`mul(self, other) -> Self` method (the `Add`/`Sub`/`Mul` protocols). `l`/`r` are
-    /// passed as the call's args (rooted as the new frame's locals). Mirrors `interp::struct_arith`.
+    /// passed as the call's args (rooted as the new frame's locals).
     pub(super) fn struct_arith(
         &mut self,
         op: &Op,
@@ -1083,7 +1082,7 @@ impl Vm {
         }
         // Operator overloading: ordering on two structs dispatches to `compare(self, other) -> int`
         // (the `Comparable` protocol). The checker has verified conformance. Equality stays
-        // structural; only ordering is overloaded. Mirrors `interp::struct_ordering`.
+        // structural; only ordering is overloaded.
         if let (Some(hl), Some(hr)) = (l.as_obj(), r.as_obj())
             && matches!(self.heap.get(hl), Obj::Struct { .. } | Obj::Enum { .. })
             && matches!(self.heap.get(hr), Obj::Struct { .. } | Obj::Enum { .. })
@@ -1101,7 +1100,7 @@ impl Vm {
     /// incomparable TYPES (the `_ => None` fallthrough, e.g. str vs int) ⇒ keep the existing fault.
     /// `Ordering` has no "unordered" value, so the NaN case is special-cased here before the
     /// is_lt/is_le/is_gt/is_ge match — encoding it as a fake `Ordering` would make exactly one of the
-    /// four ops true. Mirrors `interp::eval_binary`'s `Lt|LtEq|Gt|GtEq` arm.
+    /// four ops true.
     pub(super) fn ordered_bool(
         &self,
         op: &Op,
@@ -1142,7 +1141,7 @@ impl Vm {
     }
 
     /// Dispatch an ordering operator on two structs to the receiver's `compare(self, other) -> int`
-    /// method, mapping the sign of the result to a boolean. Mirrors `interp::struct_ordering`.
+    /// method, mapping the sign of the result to a boolean.
     pub(super) fn struct_ordering(
         &mut self,
         op: &Op,
@@ -1164,7 +1163,6 @@ impl Vm {
 
     /// Call a struct's `compare(self, other) -> int` method and return the resulting `Ordering`.
     /// Shared by ordering operators (`struct_ordering`) and `list.sort()` over Comparable structs.
-    /// Mirrors `interp::struct_compare`.
     pub(super) fn struct_compare(
         &mut self,
         l: Value,
@@ -1589,7 +1587,7 @@ impl Vm {
     /// exactly: snapshot the elements into a heap list ROOTED on the operand stack, permute
     /// *indices* re-read from that rooted list per comparison (never holding unrooted `Value`s
     /// across a `compare` call), then write the result back. (Primitives use the faster
-    /// `value_order`, which never re-enters the VM.) Mirrors `interp::eval_list_sort`.
+    /// `value_order`, which never re-enters the VM.)
     pub(super) fn list_sort_structs(
         &mut self,
         src_h: GcRef,
@@ -2267,8 +2265,8 @@ impl Vm {
                     (Obj::Ptr(a), Obj::Ptr(b)) => Ok(a == b),
                     // Two first-class builtin-fn values are equal iff they name the SAME builtin. Each
                     // value-position use emits a fresh `Op::LoadBuiltin` → a distinct handle, so the
-                    // `ha == hb` identity short-circuit above never fires; compare by name to match the
-                    // interp (derived `PartialEq` on `Value::Builtin`'s `Rc<str>`) — VM==interp parity.
+                    // `ha == hb` identity short-circuit above never fires; compare by name instead
+                    // (derived `PartialEq` on the `Rc<str>` name).
                     (Obj::Builtin(a), Obj::Builtin(b)) => Ok(a == b),
                     // Boxed scalars compare by value, identically to the inline `Int`/`Float` arms.
                     (Obj::BigInt(a), Obj::BigInt(b)) => Ok(a == b),

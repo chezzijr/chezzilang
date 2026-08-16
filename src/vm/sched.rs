@@ -377,14 +377,14 @@ impl Vm {
         // sibling tasks already seeded as a scope so a nested nursery's owner could run them). Its
         // `tasks` were drained, so join = run the inline owner of that scope (drain any still-parked
         // siblings), wait, and reduce THAT scope's slot sub-range (preserving per-nursery-join flush
-        // order → parity). See `run_mn_nursery_nested`.
+        // order). See `run_mn_nursery_nested`.
         if let Some(scope_id) = mn_scope {
             self.join_enlisted_scope(scope_id)?;
             // A `spawn:` issued AFTER this nursery was enlisted refilled the drained `tasks` vec (the
             // enlist `take()` emptied it, but `mn_scopes[i]` stayed `Some`). Those late tasks were NOT
             // part of the enlisted scope — run them now, at the join, exactly as the lazy path below
-            // (coop runs nursery tasks at the join too; late spawns post-date the nested `inner()` join,
-            // so they have no live inner peer → parity holds). Falls through to the normal task path:
+            // (late spawns post-date the nested `inner()` join, so they have no live inner peer to
+            // race with). Falls through to the normal task path:
             // `run_mn_nursery` routes them to the HELD sched (if an outer scope is still enlisted) as a
             // fresh TRAILING scope — `register_scope_seeded` is append-only so the flat slots stay contiguous,
             // and it un-latches a stale `terminate` so the inline owner runs the late task instead of
@@ -476,8 +476,8 @@ impl Vm {
         let cancel = Arc::new(AtomicBool::new(false));
         let mut fibers = Vec::with_capacity(total);
         for (i, t) in tasks.into_iter().enumerate() {
-            // W6-2 — each task replays the snapshot pinned at its own spawn (the serial engine replays
-            // the same one). scope 0 — the outermost nursery.
+            // W6-2 — each task replays the snapshot pinned at its own spawn. scope 0 — the outermost
+            // nursery.
             fibers.push(
                 self.prepare_worker(t.call, Some(t.snap?), &t.cell_ids)?
                     .into_fiber(i, 0),
@@ -618,11 +618,11 @@ impl Vm {
             // gates non-crossable spawns, so this backstop normally never fires — but if it did, an early
             // `?` here must not leave a half-state). On `Err` the nursery is untouched (originals still in
             // `self.nurseries[i]`), no scope is registered (so no unseeded scope can hang `wait_for_scope`)
-            // and `mn_scopes`/`mn_enlisted` are unbumped — the fault propagates cleanly, matching coop.
+            // and `mn_scopes`/`mn_enlisted` are unbumped — the fault propagates cleanly.
             let clones: Vec<QueuedTask> = self.nurseries[i].clone();
             // W6-2 — each OUTER task replays the pin taken at ITS OWN spawn, never one taken here:
-            // enlisting happens at a NESTED nursery's join, an instant the serial engine never reaches,
-            // so snapshotting here would diverge for a global mutated in between.
+            // enlisting happens at a NESTED nursery's join, so snapshotting here would diverge for a
+            // global mutated in between.
             let mut prepared = Vec::with_capacity(total);
             for t in clones {
                 prepared.push(self.prepare_worker(t.call, Some(t.snap?), &t.cell_ids)?);
@@ -1156,9 +1156,9 @@ impl Vm {
                 // MUST go through `cancel_requested()`, never a raw `self.cancel` load: a `defer` body
                 // runs under `guarded` (native_reentry > 0), so a blocking op INSIDE cleanup (a
                 // `sock.close()`, a `ch.send()`, a `sleep`) lands here. A raw read fires on the already-
-                // tripped flag and truncates the defer mid-body — on M:N only, since serial runs the same
-                // call inline. The predicate's `deferring == 0` term is what keeps cleanup atomic, and it
-                // also folds in `cancel_outer` (an ENCLOSING scope's cancel), which a raw read misses.
+                // tripped flag and truncates the defer mid-body. The predicate's `deferring == 0` term
+                // is what keeps cleanup atomic, and it also folds in `cancel_outer` (an ENCLOSING
+                // scope's cancel), which a raw read misses.
                 if self.cancel_requested() {
                     self.cancelled = true;
                     c.running += 1;
@@ -1806,8 +1806,9 @@ impl Vm {
         // back-edge cancel check (`run_until`), `trip_cancel` (on this fiber's fault/exit), the demote
         // loops, and the netpoller `register` all read `self.cancel`, so it MUST track the running
         // fiber's scope — else an inner fault would trip the wrong scope and cancel an outer sibling.
-        // No-op when there is no active M:N scheduler (`mn` is `None`: the top-level VM, or a fiber
-        // with no heap of its own).
+        // `self.mn` is always `Some` here in practice — the only caller, `mn_worker_loop`, only ever
+        // runs a shell built by `spawn_shell`, which unconditionally sets `mn`. The `if let` is
+        // defensive, not a reachable no-op branch.
         if let Some(sched) = self.mn.clone() {
             let (scope_cancel, ancestors) = {
                 let c = sched.lock();
@@ -2084,16 +2085,17 @@ impl Vm {
                     //
                     // RESIDUAL RACE (intentionally not chased here — applies ONLY to a genuine
                     // multi-printer REAL-fault reduce; the multi-parked DEADLOCK case is handled by
-                    // the `Deadlocked` arm below, which flushes ALL parked buffers): this matches
-                    // serial byte-for-byte only when the faulting task is the
-                    // nursery's SOLE output-producer. With additional output-producing siblings the M:N result can
-                    // still diverge from serial's strict stop-at-first-fault order — a sibling that
-                    // reaches `Done` before the faulter's cancel-trip keeps its output (serial would
-                    // never have run it), and whether a lower-index sibling ends `Fault` vs `Cancelled`
-                    // (which selects the propagating fault) is itself a scheduler race. The
-                    // buffer-and-flush-per-task model cannot reconcile concurrency with serial's
-                    // sequential stop-at-fault, so multi-task-with-fault output ordering is a separate,
-                    // pre-existing nondeterminism, not asserted as parity (see the single-task test
+                    // the `Deadlocked` arm below, which flushes ALL parked buffers): this matches a
+                    // strictly sequential, stop-at-first-fault reference order byte-for-byte only when
+                    // the faulting task is the nursery's SOLE output-producer. With additional
+                    // output-producing siblings the M:N result can still diverge from that sequential
+                    // order — a sibling that reaches `Done` before the faulter's cancel-trip keeps its
+                    // output (a strictly sequential run would never have reached it), and whether a
+                    // lower-index sibling ends `Fault` vs `Cancelled` (which selects the propagating
+                    // fault) is itself a scheduler race. The buffer-and-flush-per-task model cannot
+                    // reconcile concurrency with a sequential stop-at-fault order, so multi-task-with-
+                    // fault output ordering is a separate, pre-existing nondeterminism (see the
+                    // single-producer case covered by the test
                     // `parallel_faulting_task_flushes_partial_output_3engine`).
                     if first_hard_fault.is_none() && executor_hard_halt(&err) {
                         first_hard_fault = Some(err.clone());
@@ -2108,8 +2110,8 @@ impl Vm {
                     // The M:N deadlock detector recorded EVERY still-parked fiber with this synthetic
                     // outcome (`flag_deadlock`). Unlike a real `Fault`, ALL parked buffers flush at
                     // their task-order slot (no `is_none()` gate) — so with two-or-more parked fibers
-                    // a higher-index printer's output is preserved, matching the serial engine which
-                    // printed those lines live before the deadlock returned. Only ONE deadlock error
+                    // a higher-index printer's output is preserved, matching what a strictly sequential
+                    // run would have printed live before the deadlock returned. Only ONE deadlock error
                     // propagates (the first, i.e. lowest task-order); a real fault/exit normally trips
                     // `terminate` before the detector fires, but the terminal `match` below applies a
                     // strict `Exit` > `Fault` > `Deadlocked` precedence so a mixed vector (were one to
@@ -2161,7 +2163,7 @@ impl Vm {
     }
 
     /// D0 — the `ChannelCore` identity (`Arc::as_ptr as usize`) behind a channel handle, the stable
-    /// key for [`Nursery::blocked_on`]. Stable across the distinct `GcRef`s sibling fibers hold for
+    /// key for `SchedCore::parked`. Stable across the distinct `GcRef`s sibling fibers hold for
     /// the same channel (`spawn` deep-clones the handle onto the shared `Arc`).
     pub(super) fn channel_core_ptr(&self, h: GcRef) -> usize {
         match self.heap.get(h) {
@@ -2372,9 +2374,9 @@ impl Vm {
     /// Deep-copy a value across a task airlock (`spawn` / `Channel.send` / `Shared` get-set):
     /// data — scalars, collections, structs, enums — is recursively cloned into fresh heap objects
     /// so a task can't share mutable state with the spawner. `str` (immutable), callables, modules,
-    /// and `Channel` / `Shared` handles pass by reference (the handle is what crosses). Mirrors
-    /// `interp::deep_clone` exactly. Allocates, but only at the instruction boundary that called it
-    /// (no GC runs mid-clone), so intermediate handles can't be collected.
+    /// and `Channel` / `Shared` handles pass by reference (the handle is what crosses). Allocates, but
+    /// only at the instruction boundary that called it (no GC runs mid-clone), so intermediate handles
+    /// can't be collected.
     ///
     /// Implemented as a [`WireValue`] round-trip — `to_wire` (read-only serialize) then `from_wire`
     /// (reconstruct into this heap). Byte-identical to the old direct deep-copy; the wire form is what
@@ -2513,7 +2515,7 @@ impl Vm {
         // threshold, so the cap failed OPEN. This is the one helper every cross-heap value store
         // routes through, so a new store path can't forget the charge (same argument as the
         // `ensure_crossable` guard above). GATED on a live cap: a cap-off run (every `chezzi run`,
-        // every bench, the whole parity gate) pays one `!= 0` branch and zero extra walks — the
+        // every bench, the two-worker-count `tests/chz` gate) pays one `!= 0` branch and zero extra walks — the
         // walk here is a SECOND `wire_summary` pass (the send path walks again when it caches the
         // core's summary), accepted rather than threading a precomputed summary through
         // `MnSched::send_wake`'s signature for a debug/CI guard. Monotonic pacing HINT, not
@@ -2598,8 +2600,9 @@ impl Vm {
                 // A first-class builtin fn crosses the airlock BY VALUE (its name) — pure code, no
                 // `GcRef` and no captured heap state, so it genuinely crosses an OS-thread boundary
                 // (unlike a `Func`/`Closure` handle). `from_wire` re-allocs a fresh `Obj::Builtin`;
-                // builtins are name-compared, so that is observationally identical. Works on the M:N
-                // engine (this path) and the serial engine (`SnapValue::Builtin`) alike.
+                // builtins are name-compared, so that is observationally identical. Works the same way
+                // on this airlock-cross path and on the separate module-snapshot replay path
+                // (`SnapValue::Builtin`).
                 Obj::Builtin(name) => WireValue::Builtin(name.clone()),
                 // B3.3: a closure crosses the airlock BY VALUE — its `proto` (shared via `Arc<Program>`),
                 // its captures wired recursively in slot order (paired with the proto's `capture_names`),
@@ -3603,8 +3606,8 @@ impl Vm {
         // `--parallel` task reading `std.os.args` / an env var sees the same values instead of inert
         // defaults (the B3.2 silent-divergence owe). `args` is read-only (deep-cloned). `env` is
         // SHARED (its `Arc::clone` hands over the same `Mutex`-guarded map, not a copy) so a task's
-        // `std.os.setenv` is visible to the parent + siblings — process-global env, matching the
-        // serial engine (one Vm, one map) and Python/Go. `stdin` is SHARED, not copied: `Stdin`'s clone
+        // `std.os.setenv` is visible to the parent + siblings — process-global env, matching
+        // Python/Go. `stdin` is SHARED, not copied: `Stdin`'s clone
         // hands over the same source (an `Arc` queue / the process-global locked handle), so a task's
         // `read_line` reads the one stream — a line goes to exactly ONE task, and no task is ever
         // handed a false EOF (Go's `os.Stdin` / Python's `sys.stdin`; which task gets a given line is
@@ -3696,13 +3699,13 @@ impl Vm {
     /// PHASE 1 of task preparation — lower a [`PendingCall`] to a heap-independent [`Lowered`] against
     /// the CURRENT (parent/shell) heap: home indices resolve against `self.module_objs`, and every
     /// crossing value goes through `to_wire`/`ensure_crossable` (rejecting a non-isolable callee). Split
-    /// out of [`Vm::prepare_worker`] so the serial engine can reuse the exact M:N lowering
-    /// — a behavior-preserving extraction.
+    /// out of [`Vm::prepare_worker`] as its own phase (historically so the since-removed `--serial`
+    /// engine could reuse the exact M:N lowering — a behavior-preserving extraction; today it has the
+    /// one caller).
     ///
     /// W7-4: ONE [`WireMemo`] spans the whole lowering (closure captures + args, or receiver + args),
     /// matched by ONE rebuild map in [`rebuild_ready`](Vm::rebuild_ready). Per-value memos re-split a
-    /// shared binding here even after `do_spawn` unified it, on BOTH engines (the serial child goes
-    /// through this same lowering). See [`deep_clone_all`](Vm::deep_clone_all) for the scope invariant.
+    /// shared binding here even after `do_spawn` unified it. See [`deep_clone_all`](Vm::deep_clone_all) for the scope invariant.
     /// **Serialize order must equal `rebuild_ready`'s reconstruct order**: whichever walk reaches a
     /// shared cell first emits its `WireValue::Cell` and the later one emits a `Backref`, so rebuilding
     /// in the other order would hit `from_wire_memo`'s `.expect` with an unregistered id. Here that
@@ -4585,8 +4588,8 @@ impl Vm {
         }
     }
 
-    /// Depth-counted worker behind [`Vm::to_snap`] — the serial engine never snapshots, so this is the
-    /// M:N module-global crossing path. Shares [`Vm::to_wire_depth`]'s cyclic-data guard: the same
+    /// Depth-counted worker behind [`Vm::to_snap`] — the M:N module-global crossing path. Shares
+    /// [`Vm::to_wire_depth`]'s cyclic-data guard: the same
     /// `MAX_STRUCTURAL_DEPTH` bound turns a cyclic module global into a recoverable `RuntimeError`
     /// (re-stamped with the real nursery span by `ensure_snapshot`) rather than a host `SIGABRT`. The
     /// fast path threads `depth` into `to_wire_depth` and every slow arm recurses at `depth + 1`, so
