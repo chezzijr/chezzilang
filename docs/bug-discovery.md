@@ -46,7 +46,7 @@ The remedy is twofold and is the core of this strategy:
 - **CPython bench harness** — `benches/run.chz` runs paired programs in `benches/chz/` (Chezzi) and `benches/py/` (Python) and compares **timing**. The paired programs seeded the output-differential oracle below.
 - **CPython differential oracle** — ✅ **built** (lever #2). `src/difftest/` generates random semantically-equivalent programs, renders each as both Chezzi and Python, runs both, and diffs stdout. Wired as the `tests/difftest.rs` CI gate (fixed seed range, reproducible) and the `src/bin/difffuzz` long-runner. See "Differential oracle" below.
 - **Front-end panic-fuzzer** — ✅ **built** (lever #1). `src/panicfuzz/` feeds adversarial / malformed inputs to `chezzi check` (lexer + parser + checker) under a wall-clock timeout and flags any Rust panic or signal crash. A stable, dependency-free **subprocess** harness (a stand-in for `cargo-fuzz`, which is unavailable here: no nightly + no `[lib]`). Wired as the `tests/panicfuzz.rs` CI gate (seeds `0..2000`) and the `src/bin/panicfuzz` long-runner. See "Panic-fuzz harness" below.
-- **DSA known-answer harness** — ✅ **built**. `judge/` runs hand-written competitive-programming solutions (`judge/problems/<slug>/solution.chz`) against known-correct CSES answers — a third oracle that catches *shared wrongness* both engines agree on, independent of CPython. The harness itself is written in Chezzi (`judge/run.chz`). See "DSA known-answer harness" below.
+- **DSA known-answer harness** — ✅ **built**. `judge/` runs hand-written competitive-programming solutions (`judge/problems/<slug>/solution.chz`) against known-correct CSES answers — a third oracle that catches *shared wrongness* invisible to both the VM's own implementation and CPython. The harness itself is written in Chezzi (`judge/run.chz`). See "DSA known-answer harness" below.
 - **Adversarial review pipeline** — `auto-task` (prosecute→defend→judge) + `post-merge-gate`. Good at vetting a *known* change; not a *discovery* tool.
 
 ## How real implementations find bugs
@@ -99,8 +99,8 @@ cases.
    *scheduling*, not over *randomly generated* programs, and it does not extend parity beyond the
    curated corpus the way this bullet's original idea would have; a generative version of this
    property remains unbuilt.)
-5. **Generative grammar fuzzer** from `grammar.bnf` → random *valid* programs → run both engines +
-   CPython. Complements #1 (which targets the error paths) by targeting the *accept* paths.
+5. **Generative grammar fuzzer** from `grammar.bnf` → random *valid* programs → run against CPython.
+   Complements #1 (which targets the error paths) by targeting the *accept* paths.
 6. **TSan / loom on the concurrency engine** — channels, `Shared`, `Executor`, netpoller under race
    detection / exhaustive interleaving.
 
@@ -143,10 +143,11 @@ written.
 code + simple non-recursive functions over `int`/`List`/`Map`/`str`/`tuple`/slicing, with conservative
 bounds (it *avoids* overflow, deep nesting, aliasing). It emits **no** generics, structs, enums, `match`,
 closures/HOF, protocols, `Result`/`Option`/`?`, recursion, or modules. So every bug in those features is
-invisible to it. The two-VM **parity** oracle is also blind here: both engines are the same `Vm`
-running identical bytecode for this sequential code, so they share bugs — parity catches *divergence*, never *shared wrongness*. A bug that both engines agree
-on **and** lives in an un-generated feature is undiscoverable by automation. That is exactly where the
-real bugs have been.
+invisible to it. (Historically, the two-VM **parity** oracle was blind here too: both engines were the
+same `Vm` running identical bytecode for this sequential code, so they shared bugs rather than
+diverging — parity caught *divergence*, never *shared wrongness*; that oracle is gone with `--serial`,
+see above.) A bug that lives in an un-generated feature is undiscoverable by the CPython differential
+alone. That is exactly where the real bugs have been.
 
 ### Bug taxonomy this audit targets
 
@@ -199,7 +200,7 @@ Every finding so far falls into one of these (use as a "what am I hunting" check
 | **Generics** | turbofish at decl vs use site; nested (`Map[str,List[int]]`); return-only param inference (`empty[T]()`); generic methods/static methods; protocol bounds + calling a bound method on a type param; recursive generic enums; arity/mismatch → clean error not panic |
 | **`match`/enums** | exhaustiveness with **guards** (`A if c` must NOT close A) and **refutable payloads** (`Some(0)`, `Pair(0,y)` must NOT close); nested single-variant *is* irrefutable; or-patterns binding consistency; redundant/duplicate arms; range patterns; match-as-expression divergent arms |
 | **Closures/defer/recover** | loop-variable capture (**fresh cell per iteration** — must NOT be late-binding); uniform by-reference capture (local/global all share the live binding — a closure write is visible outside); a plain capture into a `spawn` is an isolated per-task copy (F1 divergence); escaping closures; `defer` block shares by reference (sees latest) vs `defer f(x)` eager args; `recover` catching overflow/index/div0; re-panic in `recover` |
-| **Namespace/import gating** | redeclare a builtin type (`struct int`/`List`/`Socket`/`range`) → must be `reserved (builtin)`, never silently shadowed; bare std type without `import` → import hint; `import X from M` for a pure type runs on BOTH engines (the `bind_import` skip); reserved-name shadowing by var/param/type-param/field |
+| **Namespace/import gating** | redeclare a builtin type (`struct int`/`List`/`Socket`/`range`) → must be `reserved (builtin)`, never silently shadowed; bare std type without `import` → import hint; `import X from M` for a pure type runs at all (the `bind_import` skip); reserved-name shadowing by var/param/type-param/field |
 | **Import/path resolution** | cwd-sensitivity; nested `chezzi.toml` (entry-root vs import-root must agree); dotted paths; dir/file name collision; diamond re-import (top-level runs once?); a local module shadowing a `std.*` name; entrypoint `:fn` suffix forms; transitive-error attribution |
 | **Numeric/string/collection** | overflow at `*`/`pow`/shifts/`abs(MIN)`/fold; float `-NaN` via format-spec; div/mod sign + by-zero; slice neg-step/OOB/step-0; unicode index/len; **aliasing** (list-of-list shared ref, `b:=a`, captured-list mutation); NaN/inf in sort/keys/compare |
 
@@ -217,8 +218,9 @@ Every finding so far falls into one of these (use as a "what am I hunting" check
 - **Adversarially verify every fix — an over-broad fix over-rejects.** Twice this session a fix that
   closed the reported hole *also* rejected a legitimate neighbor (a nested single-variant match; a
   bound-param push). Always add a failing-then-green test for the *boundary* case the fix must NOT break.
-- **Parity-green is necessary, not sufficient.** Both engines agreeing only rules out divergence bugs;
-  it says nothing about shared wrongness. The external check (spec + CPython) is what catches those.
+- **Golden-green is necessary, not sufficient.** Passing the golden suite only proves the VM matches
+  its own recorded expectation; it says nothing about shared wrongness against the reference language.
+  The external check (spec + CPython) is what catches those.
 
 ## Panic-fuzz harness (`src/panicfuzz/`)
 
@@ -258,8 +260,8 @@ flips, truncation, duplicated / removed lines, inserted braces / colons / indent
 reports the **seed + the raw triggering input** (the input *is* the artifact — no shrink pass in v1),
 reproducible with `panicfuzz --seed N`.
 
-**Parity is N/A for this lever** — it exercises only the front-end's crash-safety; it never runs the
-VM, so the two-engine parity bar does not apply.
+**Correctness oracles don't apply to this lever** — it exercises only the front-end's crash-safety; it
+never runs the VM, so neither the golden suite nor the CPython differential is relevant here.
 
 How to run:
 
@@ -578,8 +580,8 @@ correct **by construction** — it deliberately keeps every int in a safe window
 overflow, never recurses, and only emits a cross-language-safe subset. That safety is exactly its
 blind spot: real algorithms live at the edges it avoids. The DSA harness runs **hand-written
 competitive-programming solutions** (deep recursion, big-int boundaries, heavy `List`/`Map`/`Set`
-churn, grids, slicing) against **known-correct answers** — so it catches *shared wrongness* the
-co-developed engines agree on, with an oracle that depends on neither engine nor CPython.
+churn, grids, slicing) against **known-correct answers** — so it catches *shared wrongness* invisible
+to both the VM's own implementation and CPython, with an oracle that depends on neither.
 
 - **Source of truth:** the CSES Problem Set. Each `judge/problems/<slug>/solution.chz` is a
   hand-written Chezzi solution reading stdin competitive-style (`std.io.read_line`). It is **vetted

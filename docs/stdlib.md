@@ -977,7 +977,7 @@ Reversible text codecs. Every function takes a `str` and operates on its **UTF-8
 - query string builder: `query_encode(params: Map[str, str]) -> str` assembles a `k=v&k2=v2` query
   string — both key and value are percent-encoded with the same `url_encode` escaper. Keys are
   **sorted by their RAW (pre-encoding) value** so the output is deterministic regardless of map
-  iteration order (a stable golden + 3-engine parity). An empty map yields `""` (no leading `?`);
+  iteration order (a stable golden). An empty map yields `""` (no leading `?`);
   `{"k": ""}` yields `"k="`. Compose `url + "?" + query_encode(params)`.
 - query parser (read-half): `query_decode(q: str) -> Map[str, str]` reverses `query_encode` for
   single-valued keys. Strips one leading `?`; splits on `&` (empty segments skipped); each segment
@@ -1359,10 +1359,11 @@ gap that bare `Executor.submit(f)` is fire-and-forget (returns nothing).
 | `Task.get` | `get(self) -> T` | block until the result is available, then return it. **Memoized** — idempotent, safe to call repeatedly (a second call returns the cache, not a second `recv`). |
 | `Task.done` | `done(self) -> bool` | whether the result has landed yet. Never blocks. |
 
-Canonical shape: submit every task, `shutdown()`, then `.get()` each. **Parity rule:** a `Task`'s value
-is deterministic (it is `f()`); only *when* it runs varies by engine — so `.get()` is byte-identical
-across runs **as long as you await in a fixed (e.g. submission) order**. There is deliberately no
-`join_next()`/select-on-completion API — completion order is nondeterministic and would break parity.
+Canonical shape: submit every task, `shutdown()`, then `.get()` each. **Determinism rule:** a `Task`'s
+value is deterministic (it is `f()`); only *when* it runs varies at runtime (the OS-thread workers race)
+— so `.get()` is byte-identical across runs **as long as you await in a fixed (e.g. submission) order**.
+There is deliberately no `join_next()`/select-on-completion API — completion order is nondeterministic
+and would break that determinism.
 
 ### `std.cmp` — ordering generics (`Comparable`)
 `max[T: Comparable](a, b) -> T` · `min[T: Comparable](a, b) -> T` ·

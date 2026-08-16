@@ -1,6 +1,6 @@
 # Chezzi — Language Gaps
 
-Limitations found writing real programs against both engines. **Open** entries carry what they block +
+Limitations found writing real programs. **Open** entries carry what they block +
 a fix sketch with `file:line`. Resolved gaps collapse to a one-line log — full detail in `PROGRESS.md`
 + cited `examples/*.chz`.
 
@@ -34,10 +34,10 @@ Last updated: 2026-06-23.
   closures / nested-fn names land. Fix: push capture floor in `infer_closure` → `cannot reassign captured
   binding` error.
 - **⚪ Module-scoped type error strings leak the qualified key** (verified 2026-06-20). A few defensive
-  errors interpolate raw `mod::Point` instead of bare display (`vm/mod.rs:12121`, `interp/mod.rs:4636/
-  4833/5003` + VM twins). No well-typed program reaches them (checker gates index/slice/iter on protocol
-  method). Strings are byte-identical with interp twins (parity-tested) → fix must touch all sites at
-  once. Fix: wrap key in `crate::compiler::bare_display(...)` in lockstep.
+  errors interpolate raw `mod::Point` instead of bare display (`vm/mod.rs:12121` + VM twins — the
+  `interp/mod.rs` sites once cited here are gone with that engine). No well-typed program reaches them
+  (checker gates index/slice/iter on protocol method). Fix: wrap key in
+  `crate::compiler::bare_display(...)` in lockstep across the surviving sites.
 
 ### 🟡 Stdlib breadth (low priority — library fill)
 
@@ -59,7 +59,7 @@ Current: `fs`/`io`/`os`/`process`/`time`/`request`/`regex`/`json`/`math`/`cmp`/`
   `str`/`Result[str]`-out; decode faults are catchable `Err`, never panic), `std.crypto`
   (`sha256` FIPS 180-4, `md5` RFC 1321 — lowercase-hex digests; MD5 for checksums/interop only, NOT
   secure), `std.uuid` (`v4` random + `uuid_seed` deterministic, RFC 4122; own process-global stream
-  reusing `std.rand`'s SplitMix64 step). All pure CPU (not in `is_blocking`), 3-engine parity at the
+  reusing `std.rand`'s SplitMix64 step). All pure CPU (not in `is_blocking`), verified at the
   NativeFn seam. **Deferred:** the str-only seam can't return raw bytes, so base64/hex `decode`
   UTF-8-validate their output — binary round-trip (e.g. an image → raw bytes) needs a bytes-arg/return
   seam expansion; `sha512`/`sha1`/`uuid-v7` not yet added. (See docs/stdlib.md §std.encoding/§std.crypto/§std.uuid.)
@@ -131,10 +131,10 @@ REPL, formatter, LSP, package manager/registry, debugger, doc comments + docgen.
 
 ### ⚙️ Performance + runtime backlog (M19 — detail in [`docs/future.md` §4] + [`docs/benchmarks.md`])
 
-M19 = pre-JIT perf, not a freeze. Every item here is **behavior-preserving + two-engine parity** (a VM
-speedup that diverges from interp is a bug). Gap to CPython 3.14: **~1.3×–3.5×** (worst `fib` 3.54×;
-`loop` 1.32× at dispatch floor), startup ~11× faster. Discipline: failing-then-green parity test → keep
-parity → measure `benches/run.chz` → record delta in `docs/benchmarks.md`. **Landed** (don't re-flag):
+M19 = pre-JIT perf, not a freeze. Every item here is **behavior-preserving** (a VM speedup that
+changes observable output is a bug). Gap to CPython 3.14: **~1.3×–3.5×** (worst `fib` 3.54×;
+`loop` 1.32× at dispatch floor), startup ~11× faster. Discipline: failing-then-green correctness test →
+keep the suite green → measure `benches/run.chz` → record delta in `docs/benchmarks.md`. **Landed** (don't re-flag):
 peephole/const-fold, superinstructions, global-slotting, `ConstStr` interning, struct-field IC, FxHash,
 SSO, method-call IC, inline-hot-ops, adaptive quickening (PEP 659), map/list-index specialization,
 positional struct/enum/closure layout (memory levers #1/#2/#3).
@@ -156,7 +156,7 @@ positional struct/enum/closure layout (memory levers #1/#2/#3).
   5. **Shrink `Obj` <88B** — guard `chzstr.rs:205`; box rare big variants. Trades against SSO — measure first.
   6. **HOF borrow-release clone** — `map`/`filter`/`fold` clone list to release heap borrow before
      `invoke_value`. Fix: `Vm` split (`&mut ExecState` + `&Heap`). Structural refactor.
-  7. **`for`-loop snapshot (`ListClone`) + per-char alloc** — parity-blocked by interp snapshot semantics.
+  7. **`for`-loop snapshot (`ListClone`) + per-char alloc** — blocked by the for-loop's own observable snapshot semantics.
   8. **Operand-stack 16B/Value traffic** → NaN-box (blocked) / register VM (low-ROI).
 
 - **🔵 End-game tracks** (only once language stopped moving):

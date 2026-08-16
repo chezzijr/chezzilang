@@ -769,7 +769,7 @@ only one engine**, so nothing here constrains the remaining steps 1–4.
    subscript-slice form moved to **Python `xs[a:b:c]`** with the full surface: open bounds, step, reverse
    `[::-1]`, and negative indexing (plain index faults out of range, slice bounds clamp — Python's
    asymmetry). `ExprKind::Slice { obj, start, end, step }` (each `Option`); one shared resolver in
-   `src/slice.rs` drives both engines. The `..` operator stays the for-loop/match range. See
+   `src/slice.rs` drives it. The `..` operator stays the for-loop/match range. See
    [`PROGRESS.md`](../PROGRESS.md) "Slice syntax → Python colon".
 3. ~~**Iterator protocol + generators (`yield`)**~~ — **iterator DONE; generators removed.** The
    `Iterator[T]` parameterized protocol shipped (M13): user structs usable in `for`, generic
@@ -812,7 +812,7 @@ only one engine**, so nothing here constrains the remaining steps 1–4.
     halt (unwinds past `recover:`, bypasses `defer`), with the code threaded through both run drivers +
     the CLI; exit-wins precedence holds under `--parallel`. The status is the POSIX **low 8 bits** of
     the code (`-1` → 255, `300` → 44). `examples/exit.chz`.
-11. ~~**Runtime stack traces**~~ — **DONE.** Error + call chain + line numbers, both engines
+11. ~~**Runtime stack traces**~~ — **DONE.** Error + call chain + line numbers
     (`37f374a`).
 
 12. **`ref T` / `Ref[T]` — transparent reference bindings — ⛔ REMOVED (2026-07-19).**
@@ -1106,7 +1106,7 @@ render ERROR too (whole file, before any test runs), counted separately as `file
    failure signal → any other runtime fault (OOB, div-zero, overflow, missing key, native fault) is by
    definition **unexpected** and renders **ERROR**, not FAIL — pytest's FAILED-vs-ERROR distinction
    ("wrong assumption" vs "code crashed"). **Landed:** `RuntimeError` (`src/vm/mod.rs`) carries a
-   `pub is_assert: bool` discriminator (default `false`; `Display` unchanged, so parity strings are
+   `pub is_assert: bool` discriminator (default `false`; `Display` unchanged, so error strings stay
    byte-identical), set `true` ONLY by the `Op::Assert` arm (`src/vm/exec.rs`). The runner's per-test
    `Outcome` now holds an extensible `Verdict` enum `{ Pass, Fail{line,msg}, Error{line,msg} }`
    (`src/test_runner.rs`): a free-test / test-method body fault routes assert→`Fail`, else→`Error`, and
@@ -1132,12 +1132,12 @@ render ERROR too (whole file, before any test runs), counted separately as `file
    own cleanup unwind is bounded too (its nested `run_until` re-trips and aborts it; `should_collect()`
    resets after each collect, so a non-allocating defer runs to completion). The abort stamps an
    **`is_over_memory` marker onto the `RuntimeError`** (mirrors `is_assert`, excluded from `Display` so
-   parity is unaffected) and forces it back on after every unwind, so it travels WITH the error across
+   golden output is unaffected) and forces it back on after every unwind, so it travels WITH the error across
    an enclosing **native-reentry** `run_until` (a HOF callback / operator overload / deferred call) AND a
    **`spawn`'d worker's** fault crossing back to the parent; the `run_until` Err funnel bypasses
    `recover:` whenever the marker is set, and `verdict_from_fault` reads `e.is_over_memory` first to
    bucket it. `spawn`/`parallel:` tasks are covered on M:N too — `spawn_worker` threads `mem_cap` onto
-   the worker's own heap, so a **runaway** alloc in a task trips and buckets on both engines. VM + runner
+   the worker's own heap, so a **runaway** alloc in a task trips and buckets it the same way. VM + runner
    + `main.rs` flag only — no checker/compiler change. **Off-heap wire storage IS counted (gaps.md
    W6-10, fixed 2026-07-27).** A value moved across the airlock into a `Channel`/`Shared`/`RwShared`/
    `Atomic`/`Executor` core lives as a `WireValue` in an `Arc` **outside every `Heap`**, so `live_bytes`
@@ -1166,7 +1166,7 @@ render ERROR too (whole file, before any test runs), counted separately as `file
    `since_gc`. It is a monotonic pacing HINT, never accounting (`live_bytes` stays the sole measure):
    a replacing store charges, a `recv` never decrements — net tracking would let a steady send/recv
    pipeline stall the trigger forever, i.e. fail open again. **Gated on `mem_cap != 0`**, so cap-off
-   pacing (every `chezzi run`, every bench, the whole parity gate) is bit-for-bit unchanged; a capped
+   pacing (every `chezzi run`, every bench, the whole test suite) is bit-for-bit unchanged; a capped
    run pays extra sweeps plus a second `wire_summary` walk per store (+11% measured, `docs/benchmarks.md`).
    Residual SAMPLING escapes were listed in gaps.md `W6-10s`, which is **CLOSED 2026-08-06** — its
    filed premise (uncharged by-hand airlock paths) did not survive re-derivation: the only one storing
@@ -1232,8 +1232,8 @@ render ERROR too (whole file, before any test runs), counted separately as `file
    than `MS` is **hard-aborted** (bypassing `recover:`) and bucketed `Verdict::TimedOut` (rendered
    `TIMED-OUT name (file) msg`, counts as failure, exit non-zero; summary appends `, T timed out` only
    when `T>0` so cap-off output is byte-identical). The abort stamps an **`is_timed_out` marker onto the
-   `RuntimeError`** — the exact machinery `is_over_memory` uses (excluded from `Display` so parity is
-   unaffected; forced back on after every unwind so it crosses native-reentry `run_until` + the
+   `RuntimeError`** — the exact machinery `is_over_memory` uses (excluded from `Display` so golden
+   output is unaffected; forced back on after every unwind so it crosses native-reentry `run_until` + the
    worker→parent boundary; the `run_until` Err funnel bypasses `recover:` whenever it is set;
    `verdict_from_fault` reads it first). **Observation site (the key difference from `--max-heap`):** the
    deadline is checked at the **loop back-edge** in `jump_checked` — the hottest engine-independent
@@ -1286,7 +1286,7 @@ render ERROR too (whole file, before any test runs), counted separately as `file
 
 **Migration note (corrects an earlier claim):** fault-path tests **are** portable in-language via
 `recover:` — `r := recover: <faulting expr>` yields `Err(e)` and `e.message()` gives the fault text, so
-`assert e.message().contains(...)` tests a fault without Rust (proven on both engines). The runner keeps
+`assert e.message().contains(...)` tests a fault without Rust (proven end-to-end). The runner keeps
 its *own* fault tests in Rust only because IT needs the fault `span` for `file:line`. So the "stays in
 Rust" set for the `tests/chz/` migration is just: gc-stress rooting (`run_capture_stress`), checker
 `rejects/ok` (compile-time), parser/lexer/bytecode internals, and concurrency timing — **not**
@@ -1430,7 +1430,7 @@ The original M5 baseline was ~4–6.5× over the then-existing (now-removed) tre
   measured neutral:** a struct **type-id guard** (stamp a numeric type id on `Obj::Struct`; guard on
   `obj.tid == cell.tid` — a pure-int compare with no name re-verify) replaced P4's name re-verify on a
   hit. It did *not* close the shallow-struct caveat (the cold-IC indirection, not the re-verify, is the
-  cost), but was kept: cheaper hot path, VM-only ⇒ parity-clean.
+  cost), but was kept: cheaper hot path, VM-only ⇒ behavior-preserving.
 - ✅ **Kill per-call clones in `invoke_value`** — *landed M19 Phase 1*: matches on `&Obj` (no whole-
   `Obj` / closure-`HashMap` clone) and drops the arity-check `name.clone()`. Cut `fib` −17%, `list`
   −22%.
@@ -1501,7 +1501,7 @@ The original M5 baseline was ~4–6.5× over the then-existing (now-removed) tre
   (2.50×) is also call-bound and would move. The fix is what CPython 3.11 did for its jump ("zero-cost
   frames"): make the bytecode `Op::Call` **push a frame and `continue` the existing `run_until` loop**,
   and `Op::Return` **pop + push the result and continue** — no Rust recursion, one `Arc::clone` per
-  whole `run_until` instead of per call. **Hard part / parity risk:** today pause/park (B1/D3),
+  whole `run_until` instead of per call. **Hard part / behavior-preservation risk:** today pause/park (B1/D3),
   `recover:` unwind, and `defer` all lean on Rust-stack unwinding through the nested `do_call`/`?`
   chain. A flat loop must instead park by leaving `self.frames` intact and breaking the loop (the M:N
   engine already saves/restores frame state via `FiberCtx`, so the machinery exists). **Keep the
@@ -1511,7 +1511,7 @@ The original M5 baseline was ~4–6.5× over the then-existing (now-removed) tre
   common recursive/bytecode call no longer does. Cheap warm-up that stands alone even without
   flattening: **hoist the per-call `Arc::clone`** (raw-pointer/restructure the program borrow) — a free
   few-percent on every call-bound bench. Blast radius is **VM-only**;
-  parity is testable against the existing fib / recover-in-recursion / defer-in-recursion / deep-
+  behavior-preservation is testable against the existing fib / recover-in-recursion / defer-in-recursion / deep-
   recursion-overflow goldens. Bigger than a Medium item, smaller than the register-VM rewrite below.
 - **NaN-boxing the `Value` — BLOCKED by full 64-bit ints (2026-06-12 reality-check).** The goal
   (16 B → 8 B, operand-stack cache density, moves `loop`/`list`/`fib`) is real, but `Value::Int` is a
@@ -1526,7 +1526,7 @@ The original M5 baseline was ~4–6.5× over the then-existing (now-removed) tre
   - **UPDATE 2026-07-18 — 8B-`Value` is now its own milestone (int-favoring pointer-tag, not NaN-box).**
     Design/plan in `~/.claude/plans/2026-07-18-8b-value-pointer-tag-*.md`: tag `Int` inline (`(n<<1)|1`,
     ±2^62), box the rare wide int (`Obj::BigInt`) and every `f64` (`Obj::FloatBox`). **Phase 0 scaffolding
-    landed** (parity-trivial, additive): `Heap::live_bytes()` + peak high-water probe behind
+    landed** (trivially behavior-preserving, additive): `Heap::live_bytes()` + peak high-water probe behind
     `CHEZZI_HEAP_STATS=1` (baseline: `benches/run.chz` peak_live_bytes=24277 at size_of_value=16), and the
     two GC-leaf `Obj` variants (`BigInt`/`FloatBox`, unused by real programs yet — reachable only from a
     unit test; `size_of::<Obj>()` stays 88). Phase 1 (the `struct Value(u64)` swap) is gated on the
@@ -1621,7 +1621,7 @@ The original M5 baseline was ~4–6.5× over the then-existing (now-removed) tre
    new-slot alloc arm. Three one-line helpers `is_marked`/`set_mark`/`clear_mark`; `mark()`/`sweep()`
    rewired to the bitset, EXACT current mark-then-sweep-and-clear protocol (survivors cleared in the
    sweep pass, holes never marked → post-sweep all bits 0). VM/GC-internal, no observable/checker change;
-   all GC-stress rooting + two-engine parity green. Saves the 8 B mark padding per slot (≈16 MB on the 2M
+   all GC-stress rooting green. Saves the 8 B mark padding per slot (≈16 MB on the 2M
    `many_struct` bench); the mark test-and-set also touches a compact word rather than a scattered slot
    byte. (Sweep still scans every slot's `obj` — the bitset does not avoid that.) RSS delta measured
    post-merge. See `docs/benchmarks.md`.
@@ -1637,14 +1637,14 @@ The original M5 baseline was ~4–6.5× over the then-existing (now-removed) tre
    to release the heap borrow before `invoke_value(&mut self, …)` — an N×16 B copy per HOF call. A `Vm`
    split (`&mut ExecState` + `&Heap`) lets the borrow coexist. Structural refactor, not a one-session lever.
 7. **`for`-loop snapshot (`ListClone`) + per-char alloc** — mandated by the for-loop's observable
-   snapshot semantics (identical on both engines); `alloc_char` (Phase 3) already halved the string case. Behavior-blocked.
+   snapshot semantics; `alloc_char` (Phase 3) already halved the string case. Behavior-blocked.
 8. **Operand-stack 16 B/Value traffic** → **DONE 2026-07-18: 8B pointer-tag Value shipped** (NaN-box was the wrong scheme; see the dedicated note above) / register VM (#8, low-ROI).
 
 **Land order:** **#1 ✅ → #3 ✅ → #2 ✅ — sequence complete** as **JIT groundwork** (the positional
 layouts the JIT codegen wants), each measured against `struct`/`hof`/`enum` (read suite-neutral — they're
 dispatch-bound, see caveat — with strong micro deltas: #1 −38%, #3 −45%, #2 −20%).
-#4 ✅ done (mark bit → parallel bitset, `Slot` 72→64 B). #5/#6 are principled cleanups, post-JIT. Same discipline throughout: failing-then-green parity test →
-keep two-engine parity → measure (`benches/run.chz`) → record the delta in `docs/benchmarks.md`.
+#4 ✅ done (mark bit → parallel bitset, `Slot` 72→64 B). #5/#6 are principled cleanups, post-JIT. Same discipline throughout: failing-then-green correctness test →
+keep the suite green (both worker counts) → measure (`benches/run.chz`) → record the delta in `docs/benchmarks.md`.
 
 **Highest payoff-per-effort (original M19 batch, all landed):** superinstructions + inline caching +
 peephole/const-fold. They attacked dispatch count and name lookup — the two actual costs — without
@@ -1672,9 +1672,8 @@ registers `AtomicInt` as a reserved `std.concurrency` type with int-only `load/s
 and gates the bare name behind `import std.concurrency`; runtime method dispatch on the new Obj.
 **CRITICAL:** `add`/`sub` MUST keep the i64-overflow FAULT via a `compare_exchange` CHECKED CAS-loop —
 NOT raw `fetch_add`/`fetch_sub` (they wrap silently = behavior regression). `SeqCst` ordering everywhere
-(matches the sequential consistency the Mutex gave → serial==M:N byte-identical). Tests on BOTH engines:
-overflow still faults; a high-contention `parallel:` counter (N tasks × M `add(1)` == N*M); serial==M:N
-and `--check-parity` green. Perf: the discarded generic attempt measured **1.85× under contention**
+(matches the sequential consistency the Mutex gave). Tests: overflow still faults; a high-contention
+`parallel:` counter (N tasks × M `add(1)` == N*M); the suite green. Perf: the discarded generic attempt measured **1.85× under contention**
 (uncontended ~flat); NOT on the M19 `fib`/`loop`/`primes` benches → gate on a **contention microbench**,
 record in `docs/benchmarks.md`, and if no measurable win SAY SO.
 
@@ -1685,7 +1684,7 @@ record in `docs/benchmarks.md`, and if no measurable win SAY SO.
 CAS-loop (keeps the i64-overflow fault, byte-identical `"integer overflow in Add/Sub"`), `SeqCst` on every
 op. **Perf: the contention win materialised — ~2.7× faster than Mutex-backed `Atomic` on an 8-way int
 counter** (16M adds: 1.73s vs 4.73s median; uncontended a wash), recorded in `docs/benchmarks.md §AtomicInt`.
-Tests (both engines): roundtrip, add/sub overflow fault, 8×10000 contention counter == 80000, `import
+Tests: roundtrip, add/sub overflow fault, 8×10000 contention counter == 80000, `import
 AtomicInt from std.concurrency` runs (reserved-name hole closed), bare-unlicensed = checker error.
 
 ### Post-M19 next levers (ranked — diagnosed 2026-06-12; **status updated 2026-06-13**)
@@ -1716,12 +1715,13 @@ gap but a JIT is the only path to *match/beat* it on tight compute.
    a fresh `run_until` — call-flatten only covered `do_call`'s plain-fn fast path (see its own follow-up
    note). Add a per-call-site monomorphic cache (`tid → proto`, the same shape as the landed `field_ic`)
    and push the method frame in place. Symmetric to the field IC; reuses that machinery.
-2. **✅ DONE (Phase 7, 2026-06-13) — landed as "inline hot ops"** *(moved every op-bound bench: `loop` −15%, `list` −17%, `primes` −8%, `fib` −6%)*. The inline-the-hottest-ops sub-lever shipped; the other two below (lazy `span`, serial/MN loop split) were left **unshipped** (predictably-false cheap branches, low payoff vs the inline win — revisit only if a profile shows them). **Trim per-op overhead in `run_until`** — three things run
-   **every instruction** that are pure overhead on the serial (default, benchmarked) engine:
+2. **✅ DONE (Phase 7, 2026-06-13) — landed as "inline hot ops"** *(moved every op-bound bench: `loop` −15%, `list` −17%, `primes` −8%, `fib` −6%)*. The inline-the-hottest-ops sub-lever shipped; the other two below (lazy `span`, the `mn.is_some()` branch split) were left **unshipped** (predictably-false cheap branches, low payoff vs the inline win — revisit only if a profile shows them). **Trim per-op overhead in `run_until`** — three things run
+   **every instruction** that are pure overhead on the no-scheduler (`mn.is_none()`) path the benchmarks exercise:
    - `span = proto_ref.lines[ip]` (`mod.rs:2157`) is loaded every op but used **only on fault** → pass
      `(pid, ip)` to the error path and reconstruct the span lazily there.
    - the `if self.mn.is_some()` reduction-count branch (`mod.rs:2137`) + the cancel check (`mod.rs:2122`)
-     are MN-only → split a lean serial loop body from the MN body (or hoist them off the serial back-edge).
+     only matter once a scheduler is installed → split a lean no-scheduler loop body from the
+     scheduler-installed body (or hoist them off the `mn.is_none()` back-edge).
    - `self.step(op, span)` is a **separate fn call per opcode** → inline the ~6 hottest ops (GetLocal, the
      superinstrs, Jump, Call, Return) directly in the loop, delegate the long tail to `step`.
 3. **⏸️ DEFERRED — no-gain (Phase 8 analysis, 2026-06-13).** **Call-site specialization for `Op::Call`** *(was aimed at `fib`)*. After the Phase 7 inline, `do_call`'s happy path is already lean (the deref a call-IC skips is ~2–3 instrs); fib's residual is frame-setup in `finish_frame`, which a dispatch cache doesn't touch — and a correct call-IC can't avoid a heap-specific callee handle ⇒ `swap_ctx` hazard for ~0 gain. fib's real lever is #4/#6. Each call re-checks Func/Closure/
@@ -1729,11 +1729,11 @@ gap but a JIT is the only path to *match/beat* it on tight compute.
 
 **Tier 2 — structural, medium→large:**
 
-4. **✅ v1 + CallMethod extension LANDED (2026-06-13).** **Adaptive opcode quickening (PEP 659)** *(the single most CPython-like lever)*. v1 specializes the un-fused generic binop arms (`Add..GtEq`, `Eq`/`NotEq`) to an int/int fast path behind a per-`Vm`, per-site `(proto,ip)` deopt guard (side table `quicken`/`quicken_base`, mirrors `field_ic`/`method_ic` — no `Op`/compiler/interp change ⇒ parity by construction). Measured **`primes` −7–8%**. **CallMethod extension (done):** the method-call IC's single `MethodIcCell` is widened to an N-way (4-way) `MethodIcSite` carrying the *same* one-way sticky-deopt discipline — a bounded-megamorphic site (≤4 receiver types) HITS a way per type and flattens; a 5th distinct type latches `sticky` and goes slow (now clone-free: borrows `Arc<Program>.structs` instead of cloning the whole `StructDef`). This **unifies** the field+method caches under one adaptive form (`GetIndex` is already covered by #5). Measured **`poly_method` −33% (6.0× → 4.28× CPython)** on a new megamorphic bench; side table still int-only (no `GcRef`) ⇒ parity by construction. After an op runs once, rewrite-in-place to a type-specialized form behind a deopt guard. **Constraint
+4. **✅ v1 + CallMethod extension LANDED (2026-06-13).** **Adaptive opcode quickening (PEP 659)** *(the single most CPython-like lever)*. v1 specializes the un-fused generic binop arms (`Add..GtEq`, `Eq`/`NotEq`) to an int/int fast path behind a per-`Vm`, per-site `(proto,ip)` deopt guard (side table `quicken`/`quicken_base`, mirrors `field_ic`/`method_ic` — no `Op`/compiler/interp change ⇒ behavior-preserving by construction). Measured **`primes` −7–8%**. **CallMethod extension (done):** the method-call IC's single `MethodIcCell` is widened to an N-way (4-way) `MethodIcSite` carrying the *same* one-way sticky-deopt discipline — a bounded-megamorphic site (≤4 receiver types) HITS a way per type and flattens; a 5th distinct type latches `sticky` and goes slow (now clone-free: borrows `Arc<Program>.structs` instead of cloning the whole `StructDef`). This **unifies** the field+method caches under one adaptive form (`GetIndex` is already covered by #5). Measured **`poly_method` −33% (6.0× → 4.28× CPython)** on a new megamorphic bench; side table still int-only (no `GcRef`) ⇒ behavior-preserving by construction. After an op runs once, rewrite-in-place to a type-specialized form behind a deopt guard. **Constraint
    (same one P2b/P4 hit):** bytecode is shared `Arc<Program>` read-only across `--parallel` workers, so
    quickened cells must live in a per-`Vm` side table keyed by site, not mutate the `Op`.
 5. **✅ DONE (2026-06-12).** **map/list index specialization** *(`list` −4%; `map` neutral — it's FxHashMap-probe-bound, not dispatch-bound, so the predicted `map` win needs a **denser int-keyed map** representation, a separate lever, not this tweak)*. `GetIndex`/`SetIndex`
-   got an Int-key fast path (skips `hash_key_rooted` rooting) + inline dispatch in the `run_until` hot arm; 7 `idxspec_*` parity guards.
+   got an Int-key fast path (skips `hash_key_rooted` rooting) + inline dispatch in the `run_until` hot arm; 7 `idxspec_*` regression guards.
 
 **Tier 3 — big, separate milestones:**
 
@@ -1748,16 +1748,16 @@ gap but a JIT is the only path to *match/beat* it on tight compute.
 **done** — #4 (v1 binops **and** the `CallMethod` N-way extension) + #5 (index spec **and** the denser
 int-keyed `map`) all landed. With both the `CallMethod` adaptive quickening and the denser `map`
 shipped, the high-ceiling play left is **#6 (Cranelift method-JIT)** as the JIT end-game (#7 8B-Value shipped 2026-07-18 via pointer-tag; NaN-box stays
-blocked; #8 register VM / gen-GC stays low-ROI). All steps: behavior-preserving, two-engine-parity-clean,
+blocked; #8 register VM / gen-GC stays low-ROI). All steps: behavior-preserving, golden-clean,
 measure-first, each targeting a named bench.
 
 **M19 Phase 1 done (2026-06-11):** peephole/const-fold + superinstructions + `invoke_value` clone
-kill — all behavior-preserving (1516 tests + full two-engine parity green). Results in
+kill — all behavior-preserving (1516 tests + the full suite green). Results in
 `docs/benchmarks.md`.
 
 **M19 Phase 2 done (2026-06-11):** in-place call args in `do_call` (per-call `Vec` gone, `fib` −13%)
-+ `stringify`-into-buffer for `BuildStr` (`str` −5%) — both behavior-preserving (1518 tests + full
-two-engine parity green, 4-agent S++ panel clean). Results in `docs/benchmarks.md`. Remaining `str`
++ `stringify`-into-buffer for `BuildStr` (`str` −5%) — both behavior-preserving (1518 tests + the full
+suite green, 4-agent S++ panel clean). Results in `docs/benchmarks.md`. Remaining `str`
 lever is `ConstStr` interning; the next dispatch win is inline caching (Phase 2b, below).
 
 ### M19 Phase 2b — inline caching via global-slotting (✅ landed 2026-06-11)
@@ -1788,6 +1788,6 @@ error messages). The read becomes a bounds-checked `Vec` index — no hashing, n
 (`ensure_module_faulted` / `fault_module` / the worker module snapshot) reconstructs a worker's home
 module on first access. Slot order must be **identical** between the parent's compiled module and any
 faulted worker copy, or a worker reads the wrong global. The snapshot (`to_snap`/`replay_snap`) and
-`ModuleInline`/`ModuleAlias` replay must round-trip slots, not names. This needs its own two-engine
-parity pass + the `--parallel` module-fault tests, so it is scheduled separately rather than bundled
+`ModuleInline`/`ModuleAlias` replay must round-trip slots, not names. This needs its own dedicated
+correctness pass + the `--parallel` module-fault tests, so it is scheduled separately rather than bundled
 with the Phase 2 allocation kills.
