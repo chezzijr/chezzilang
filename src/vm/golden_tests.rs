@@ -6658,7 +6658,7 @@ fn deferred_fault_trace_supersedes_on_both_engines() {
 /// backtrace frames. Previously the cooperative engine drained the submitted task INLINE on the
 /// entry `Vm`, so the task's callee frames survived into `fault_trace` and printed `at boom` /
 /// `at <closure>` / `at main`, while M:N ran each task on an isolated worker `Vm` and discarded that
-/// worker's trace, printing only `at main`. Both engines now converge on `[main]` — matching a plain
+/// worker's trace, printing only `at main`. The trace now prints `[main]` — matching a plain
 /// nursery-task panic (already `at main`, asserted by the neighbor guard below).
 #[test]
 fn executor_task_fault_trace_matches_on_both_engines() {
@@ -6671,11 +6671,11 @@ fn executor_task_fault_trace_matches_on_both_engines() {
     std::fs::write(&ex_path, ex_src).unwrap();
     let (_o, _e, se, _) = run_file(&ex_path);
     let (_o, _e, mn, _) = run_file(&ex_path);
-    let se = se.expect_err("serial should fault");
+    let se = se.expect_err("should fault");
     let mn = mn.expect_err("M:N should fault");
     let se_names: Vec<&str> = se.trace.iter().map(|f| f.function.as_str()).collect();
     let mn_names: Vec<&str> = mn.trace.iter().map(|f| f.function.as_str()).collect();
-    assert_eq!(se_names, vec!["main"], "serial Executor trace == [main]");
+    assert_eq!(se_names, vec!["main"], "Executor trace == [main]");
     assert_eq!(mn_names, vec!["main"], "M:N Executor trace == [main]");
     // Soundness invariants (message + location) stay identical across engines.
     assert_eq!(se.message, mn.message, "same fault message");
@@ -6688,11 +6688,11 @@ fn executor_task_fault_trace_matches_on_both_engines() {
     std::fs::write(&nu_path, nu_src).unwrap();
     let (_o, _e, nse, _) = run_file(&nu_path);
     let (_o, _e, nmn, _) = run_file(&nu_path);
-    let nse = nse.expect_err("serial nursery should fault");
+    let nse = nse.expect_err("nursery should fault");
     let nmn = nmn.expect_err("M:N nursery should fault");
     let nse_names: Vec<&str> = nse.trace.iter().map(|f| f.function.as_str()).collect();
     let nmn_names: Vec<&str> = nmn.trace.iter().map(|f| f.function.as_str()).collect();
-    assert_eq!(nse_names, vec!["main"], "serial nursery trace unchanged");
+    assert_eq!(nse_names, vec!["main"], "nursery trace unchanged");
     assert_eq!(nmn_names, vec!["main"], "M:N nursery trace unchanged");
 
     // B4 review edge 1: IMPLICIT end-of-program drain (no `ex.shutdown()`) — the executor is
@@ -6703,15 +6703,11 @@ fn executor_task_fault_trace_matches_on_both_engines() {
     std::fs::write(&im_path, im_src).unwrap();
     let (_o, _e, ise, _) = run_file(&im_path);
     let (_o, _e, imn, _) = run_file(&im_path);
-    let ise = ise.expect_err("serial implicit drain should fault");
+    let ise = ise.expect_err("implicit drain should fault");
     let imn = imn.expect_err("M:N implicit drain should fault");
     let ise_names: Vec<&str> = ise.trace.iter().map(|f| f.function.as_str()).collect();
     let imn_names: Vec<&str> = imn.trace.iter().map(|f| f.function.as_str()).collect();
-    assert_eq!(
-        ise_names,
-        Vec::<&str>::new(),
-        "serial implicit-drain trace empty"
-    );
+    assert_eq!(ise_names, Vec::<&str>::new(), "implicit-drain trace empty");
     assert_eq!(
         imn_names,
         Vec::<&str>::new(),
@@ -6721,22 +6717,18 @@ fn executor_task_fault_trace_matches_on_both_engines() {
     // B4 review edge 2 (the medium charge): `defer ex.shutdown()` while `main` is unwinding from
     // an outer panic. The drain must drop ONLY the inline task's frames, NOT the superseding outer
     // fault already captured — else serial nukes it to [] while M:N keeps [main] (re-introducing the
-    // serial != M:N divergence this fix exists to kill). The submitted task's fault supersedes; both
-    // engines report `kaboom` at `[main]`.
+    // serial != M:N divergence this fix exists to kill). The submitted task's fault supersedes; it
+    // reports `kaboom` at `[main]`.
     let df_src = "import std.concurrency\nfn boom():\n    panic(\"kaboom\")\nfn main():\n    ex := Executor()\n    ex.submit(fn(): boom())\n    defer ex.shutdown()\n    panic(\"outer\")\nmain()\n";
     let df_path = dir.join("defer_unwind.chz");
     std::fs::write(&df_path, df_src).unwrap();
     let (_o, _e, dse, _) = run_file(&df_path);
     let (_o, _e, dmn, _) = run_file(&df_path);
-    let dse = dse.expect_err("serial defer-unwind should fault");
+    let dse = dse.expect_err("defer-unwind should fault");
     let dmn = dmn.expect_err("M:N defer-unwind should fault");
     let dse_names: Vec<&str> = dse.trace.iter().map(|f| f.function.as_str()).collect();
     let dmn_names: Vec<&str> = dmn.trace.iter().map(|f| f.function.as_str()).collect();
-    assert_eq!(
-        dse_names,
-        vec!["main"],
-        "serial defer-unwind trace == [main]"
-    );
+    assert_eq!(dse_names, vec!["main"], "defer-unwind trace == [main]");
     assert_eq!(dmn_names, vec!["main"], "M:N defer-unwind trace == [main]");
     assert_eq!(dse.message, dmn.message, "defer-unwind same fault message");
     assert_eq!(dse.span, dmn.span, "defer-unwind same fault location");
@@ -7028,7 +7020,7 @@ fn parity_map_gc_stress_heap_keys_and_values() {
 
 // (Removed `bench_vm_faster_than_interp`: it timed the bytecode VM against the tree-walk
 // interpreter, which no longer exists. Perf tracking lives in `benches/run.chz` vs CPython and
-// `docs/benchmarks.md`; serial-vs-M:N output parity on loop-heavy code is covered by other tests.)
+// `docs/benchmarks.md`; correctness on loop-heavy code is covered by other tests.)
 
 // ===== gap #8: tuples + multi-return + destructuring =====
 
@@ -7361,9 +7353,9 @@ fn golden_capture_defer_latest() {
     );
 }
 
-/// F3 / B2 (parity guard) — a closure capturing a by-reference local (a cell), invoked in a `spawn`
+/// F3 / B2 — a closure capturing a by-reference local (a cell), invoked in a `spawn`
 /// task via `spawn f()`, produces the same result → `7` (post-join, exact-match).
-/// A capture-bearing closure crosses the task boundary by DEEP value on BOTH engines
+/// A capture-bearing closure crosses the task boundary by DEEP value
 /// (`do_spawn` → `cross_spawn_callee` → `wire_callable`/`from_wire`), matching the M:N
 /// `prepare_worker`/`to_snap` deep-copy — so the task's `f` and its cells are isolated from the
 /// parent's. See `golden_capture_spawn_closure_mutates_isolated` /
@@ -7374,19 +7366,20 @@ fn golden_capture_cell_closure_into_spawn() {
     let src = include_str!("../../examples/capture_cell_closure_into_spawn.chz");
     let expected = include_str!("../../examples/capture_cell_closure_into_spawn.expected");
     let out = run_capture(src).expect("vm run");
-    assert_eq!(out, expected, "serial vs .expected");
+    assert_eq!(out, expected, "vs .expected");
     assert_eq!(
         out,
         run_capture(src).expect("parallel run"),
-        "serial vs M:N (cell-bearing closure crosses consistently)"
+        "cell-bearing closure crosses consistently"
     );
 }
 
-/// F3 (mutation form) — the MEDIUM parity bug the first draft's F3 docstring wrongly declared
+/// F3 (mutation form) — the MEDIUM-severity bug the first draft's F3 docstring wrongly declared
 /// impossible. A closure `f := fn(): xs.push(2)` mutates its captured cell's INNER heap value (the
 /// list) via a method call — the cell is never rebound, so "closures are expression-only" does not
-/// save you. When `f` crosses `spawn f()` it must be a deep isolated copy on BOTH engines → the
-/// parent's `xs` stays `[1]`. Before the `cross_spawn_callee` deep-cross, serial shared `f` by handle
+/// save you. When `f` crosses `spawn f()` it must be a deep isolated copy → the
+/// parent's `xs` stays `[1]`. Before the `cross_spawn_callee` deep-cross, the since-removed serial
+/// engine shared `f` by handle
 /// and printed `[1, 2]` while M:N isolated and printed `[1]` (a real serial-vs-M:N divergence). The
 /// print is post-join → exact-match.
 #[test]
@@ -7394,19 +7387,20 @@ fn golden_capture_spawn_closure_mutates_isolated() {
     let src = include_str!("../../examples/capture_spawn_closure_mutates_isolated.chz");
     let expected = include_str!("../../examples/capture_spawn_closure_mutates_isolated.expected");
     let out = run_capture(src).expect("vm run");
-    assert_eq!(out, expected, "serial vs .expected (isolated push → [1])");
+    assert_eq!(out, expected, "vs .expected (isolated push → [1])");
     assert_eq!(
         out,
         run_capture(src).expect("parallel run"),
-        "serial vs M:N (capture-bearing closure crosses by deep value)"
+        "capture-bearing closure crosses by deep value"
     );
 }
 
-/// F3 (owner-write form) — the CRITICAL parity bug: a closure `f` READS a captured cell that the owner
+/// F3 (owner-write form) — the CRITICAL-severity bug: a closure `f` READS a captured cell that the owner
 /// MUTATES after `spawn f()`. Nesting `work()` under `main`'s `parallel:` forces the M:N eager
-/// nested-nursery path (wires the task at spawn time). Before the fix, serial shared `f` and read the
+/// nested-nursery path (wires the task at spawn time). Before the fix, the since-removed serial
+/// engine shared `f` and read the
 /// post-write value (`5`) at join while M:N read the spawn-time snapshot (`0`); now `cross_spawn_callee`
-/// snapshots the cell at spawn time on BOTH engines → `0`. `result` is a `Shared[int]` (crosses by
+/// snapshots the cell at spawn time → `0`. `result` is a `Shared[int]` (crosses by
 /// reference) so the task reports what it observed. Print is post-join → exact-match.
 #[test]
 fn golden_capture_spawn_closure_owner_write_isolated() {
@@ -7414,14 +7408,11 @@ fn golden_capture_spawn_closure_owner_write_isolated() {
     let expected =
         include_str!("../../examples/capture_spawn_closure_owner_write_isolated.expected");
     let out = run_capture(src).expect("vm run");
-    assert_eq!(
-        out, expected,
-        "serial vs .expected (spawn-time snapshot → 0)"
-    );
+    assert_eq!(out, expected, "vs .expected (spawn-time snapshot → 0)");
     assert_eq!(
         out,
         run_capture(src).expect("parallel run"),
-        "serial vs M:N (owner write after spawn is invisible to the task's isolated cell)"
+        "owner write after spawn is invisible to the task's isolated cell"
     );
 }
 
