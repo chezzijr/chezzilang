@@ -4,10 +4,11 @@
 # (instead of deadlock-faulting on the next `recv`, the old behaviour). `try_send` is the safe partner
 # of `send`: it returns `false` after close rather than faulting.
 #
-# Producer spawned FIRST so the sequential cooperative oracle (interp) runs it to completion — channel
-# closed + full — before the consumer iterates; under `--parallel` the consumer instead parks on the
-# empty channel and is woken by the producer's `send`/`close`. Both engines print the same total.
-# Run with: chezzi run examples/parallel_channel_close.chz  (or --parallel)
+# Regardless of invocation (`chezzi run` or `--parallel` — the same M:N engine either way), the
+# consumer parks on the empty channel until woken by the producer's `send`/`close`. The total is
+# order-independent (`1+2+3+4+5` sums the same no matter how the sends interleave with the drain),
+# so the golden holds under any interleaving.
+# Run with: chezzi run examples/parallel_channel_close.chz  (or --parallel, an accepted no-op alias)
 
 fn produce(ch: Channel[int]):
     for i in 1..6:

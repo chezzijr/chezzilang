@@ -12,8 +12,8 @@
 //! directly. `hmac_sha1`/`hmac_sha512` would need a block-size param (64 vs 128) + `&[u8]` adapters
 //! over the fixed-size digest arrays; add them here if a caller actually needs them.
 //!
-//! All are pure CPU transforms (no I/O) → [`super::Kind::Inline`] on their registry entry; they run inline on every
-//! engine (3-engine parity by construction at the NativeFn seam).
+//! All are pure CPU transforms (no I/O) → [`super::Kind::Inline`] on their registry entry; they run
+//! inline, by construction at the NativeFn seam.
 
 use super::{Host, HostError, Kind, NativeFn, NativeRet, expect_args};
 

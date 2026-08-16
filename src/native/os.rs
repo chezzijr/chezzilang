@@ -2,7 +2,7 @@
 //!
 //! Reads its data from the engine's injected [`super::HostConfig`] (args/env), never directly from
 //! the real process — so runs are deterministic and testable. `getcwd` queries the real working
-//! directory (an inherent process property, identical across both engines).
+//! directory (an inherent process property).
 //!
 //! `exit(code)` is a cooperative hard exit: it records the code on the host and returns an error
 //! sentinel that unwinds past any `recover:` to the top level, where the driver reports it as the
@@ -37,7 +37,7 @@ fn getcwd(h: &mut dyn Host) -> Result<NativeRet, HostError> {
     }
 }
 
-/// `getpid()` — the current process id (a real process property, identical across both engines).
+/// `getpid()` — the current process id (a real process property).
 fn getpid(h: &mut dyn Host) -> Result<NativeRet, HostError> {
     expect_args(h, "getpid", 0)?;
     Ok(NativeRet::Int(std::process::id() as i64))

@@ -239,7 +239,7 @@ parallel:
 t()
 ";
 
-/// Shared stdin, on the REAL process stdin (`Stdin::Real` — the parity tests only cover the injected
+/// Shared stdin, on the REAL process stdin (`Stdin::Real` — the golden tests only cover the injected
 /// `Lines` variant): three piped lines, two spawned readers + the entry reader ⇒ every line is read
 /// exactly ONCE, by SOME reader, and no reader sees a false EOF. This pins that `std::io::stdin()`'s
 /// internal lock really is line-atomic across the M:N engine's real worker threads.
@@ -275,7 +275,7 @@ io.print(io.read_all())
 
 /// `io.read_all()` on the REAL process stdin (`Stdin::Real`, not the injected `Lines` model): pipe a
 /// multi-line, multibyte-UTF-8 payload with NO trailing newline and assert the WHOLE stream comes
-/// back byte-exact (the injected-`Lines` parity test cannot observe this — it reconstructs a trailing
+/// back byte-exact (the injected-`Lines` golden test cannot observe this — it reconstructs a trailing
 /// `\n` the real stream lacks). `print` adds exactly one `\n`.
 fn read_all_reads_whole_stdin() {
     let t = TmpDir::new();

@@ -6,7 +6,7 @@
 #     at compute (called at line 18, col 11)
 #     at main (called at line 20, col 1)
 #
-# (This program intentionally faults — it exits non-zero. Both engines print the same trace.)
+# (This program intentionally faults — it exits non-zero. The trace is deterministic.)
 
 fn divide(a: int, b: int) -> int:
     return a / b

@@ -222,7 +222,7 @@ pub struct HostConfig {
     pub args: Vec<String>,
     /// The process environment. SHARED (`Arc<Mutex<…>>`), not deep-cloned, when an M:N worker is
     /// spawned (`sched.rs`) — so `std.os.setenv` from inside a task is visible to the parent and
-    /// siblings, matching the serial engine (one Vm, one map) and process-global env semantics
+    /// siblings, matching process-global env semantics
     /// (Python `os.environ` / Go `os.Setenv` are visible across threads). The `Mutex` guards the
     /// concurrent access from real OS-thread workers.
     pub env: std::sync::Arc<std::sync::Mutex<HashMap<String, String>>>,
@@ -230,7 +230,7 @@ pub struct HostConfig {
     /// STREAM the program's stdout/stderr straight to the process's real streams (one locked write
     /// per `print` → line-atomic), instead of accumulating into the VM's captured buffers. Only the
     /// `chezzi run` CLI sets this; `Default` = `false` = the BUFFERED sink, which is what every test
-    /// helper and every embedder gets — and what keeps the serial-vs-M:N parity oracle byte-identical.
+    /// helper and every embedder gets — and what keeps golden-test output byte-identical.
     pub stream: bool,
 }
 
@@ -268,10 +268,10 @@ pub struct HostError {
     pub message: String,
 }
 
-/// A value produced by a native function, in an engine-neutral form. The calling engine lowers this
-/// into its own `Value` once the native call returns — building `Rc`/`RefCell` lists (interp) or
-/// allocating heap objects (VM) at that point. `Ok`/`Err`/`Some`/`None` lower to the built-in
-/// `Result` / `Option` enums that both engines already register.
+/// A value produced by a native function, in a host-neutral form. The VM lowers this
+/// into its own `Value` once the native call returns — allocating heap objects at that point.
+/// `Ok`/`Err`/`Some`/`None` lower to the built-in
+/// `Result` / `Option` enums the VM already registers.
 #[derive(Debug, Clone, PartialEq)]
 pub enum NativeRet {
     Int(i64),
@@ -389,7 +389,7 @@ pub trait Host {
     /// with `args` the C scalars the C library handed back to the callback trampoline. The engine
     /// fetches its own closure value at that arg index (the cffi layer never sees an engine `Value`),
     /// runs it, and lowers the result back to an engine-neutral [`NativeRet`]. This is the one seam
-    /// that lets a `fn(...)`-typed extern param work on BOTH engines (the cffi layer builds a libffi
+    /// that lets a `fn(...)`-typed extern param work at all (the cffi layer builds a libffi
     /// trampoline whose userdata holds `*mut dyn Host` + `arg_index`; when C calls it the trampoline
     /// routes here). Sync, same-thread, scalar-only (callbacks #4): the closure fires inside the
     /// extern call on the calling thread (no GC rooting, no cross-thread hand-off). The default errors
@@ -468,7 +468,7 @@ pub trait Host {
     /// member of the W7-8 lossy-path family — `os.getcwd()` handed back a `str` naming nothing.
     fn os_getcwd(&self) -> Result<Vec<u8>, HostError>;
     /// ALL environment variables (from the same injected env `os_env` reads), sorted by key so the
-    /// map is deterministic on both engines (the backing store is a `HashMap` with per-instance
+    /// map is deterministic (the backing store is a `HashMap` with per-instance
     /// random iteration order). DEFAULTED to empty so only the real `VmHost` overrides — test/off-heap
     /// hosts inherit the inert default.
     fn os_environ(&self) -> Vec<(String, String)> {
@@ -516,7 +516,7 @@ pub enum Kind {
     /// never touches the heap, the stdout/stderr buffers, stdin, or os state during the blocking part
     /// (so [`Host`]'s I/O methods are `unreachable!` on the off-heap host). The set: `std.io`'s four
     /// file-seam members, all of `std.fs`, `std.request` (network) and `std.process` (subprocess).
-    /// Also a cancellation checkpoint on BOTH engines (see `vm/call.rs`).
+    /// Also a cancellation checkpoint (see `vm/call.rs`).
     Blocking,
     /// A wait whose **deadline we own** (`std.time.sleep_ms`): it rides the timer thread (park +
     /// deadline-wake) rather than a pool thread, and is a CONTINUOUS cancellation + `--timeout`
@@ -672,8 +672,8 @@ pub fn is_file_backed_native(name: &str) -> bool {
     )
 }
 
-/// The callable members of a native module, as `(name, fn, kind)`. Single source of truth shared by
-/// both engines (only the per-engine lowering and the checker's static signatures differ) — and, since
+/// The callable members of a native module, as `(name, fn, kind)`. Single source of truth for how each
+/// one is called (only the runtime's own value-lowering and the checker's static signatures differ) — and, since
 /// `future.md` §3c, the single source of truth for HOW each one is run too ([`Kind`]). Empty for an
 /// unknown name.
 pub fn native_members(module: &str) -> &'static [(&'static str, NativeFn, Kind)] {

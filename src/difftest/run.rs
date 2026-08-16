@@ -873,7 +873,7 @@ mod tests {
     /// so a green hang test could be proving something about a STALE binary, and nothing in these
     /// tests pins which one ran. This repo has a documented history of exactly that trap
     /// (CLAUDE.md's worktree/`CARGO_TARGET_DIR` warning: "the binary you verify SILENTLY LACKS
-    /// your change — a green two-engine run proving nothing"). Refuse instead.
+    /// your change — a green test run proving nothing"). Refuse instead.
     fn locate_chezzi_for_test() -> PathBuf {
         let exe = std::env::current_exe().expect("current_exe");
         let cand = exe

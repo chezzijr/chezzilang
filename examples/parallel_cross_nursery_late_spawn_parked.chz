@@ -5,7 +5,7 @@
 # which registers a fresh trailing scope on the HELD sched. If that register+seed were non-atomic, a
 # SENTINEL helper could read the gap (scope incomplete, awaiting_builder=false, runnable==0, O parked)
 # as a false quiesce and spuriously fault the parked O. Single sender / single receiver → no contention
-# → output is deterministic and MUST match the cooperative engine.
+# → output is deterministic.
 #
 # §2c1 — as with its sibling, the trailing-scope registration this guards is now reached only on the
 # lazy fallback: every M:N nursery is eager, so M1/M2 are injected live at their own `spawn`. The

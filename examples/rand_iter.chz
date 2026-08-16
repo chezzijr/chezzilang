@@ -1,6 +1,6 @@
 # examples/rand_iter.chz — std.iter random helpers (shuffle / choice / sample) golden. Seeds the
 # shared rand stream first, then draws STRICTLY SEQUENTIALLY so the output is deterministic and
-# byte-identical across all three engines (interp / cooperative VM / M:N --parallel).
+# byte-identical.
 
 import std.iter
 import std.rand

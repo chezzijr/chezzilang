@@ -1,6 +1,6 @@
 # Default + named arguments on methods (consistent with free functions / struct constructors).
-# The desugar pass fills omitted defaults and reorders named args at the call site, so both engines
-# see a plain positional call.
+# The desugar pass fills omitted defaults and reorders named args at the call site, so the compiler
+# sees a plain positional call.
 struct Greeter:
     who: str
 

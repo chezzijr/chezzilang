@@ -1,6 +1,6 @@
 # examples/path.chz — golden tour of std.path (unix path-STRING ops, pure-Chezzi).
 # Twin of examples/path_test.chz (the assert-based TDD table); this one prints so the golden
-# .expected locks the output AND VM==interp parity.
+# .expected locks the output.
 
 import std.path as p
 

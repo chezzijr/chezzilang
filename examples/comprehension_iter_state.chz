@@ -2,8 +2,8 @@
 # own field on each `next()`, and the element expression reads that field — so the result depends on
 # `next()` being driven LAZILY (one step, then the body, then the next step), exactly like a `for`
 # statement and like the bytecode VM's `compile_for`. Eagerly draining the iterator first would let
-# every element see the fully-advanced field (a VM/interp divergence). This example pins the lazy,
-# interleaved behavior across both engines.
+# every element see the fully-advanced field instead. This example pins the lazy,
+# interleaved behavior.
 
 struct Counter:
     n: int

@@ -1,6 +1,6 @@
 # examples/rand_seeded.chz — std.rand SEEDED golden. Seeds a fixed value, then draws all four
-# scalar fns STRICTLY SEQUENTIALLY in one main() so the output is deterministic across all three
-# engines (interp / cooperative VM / M:N --parallel) — the shared process-global RNG yields one
+# scalar fns STRICTLY SEQUENTIALLY in one main() so the output is deterministic — the shared
+# process-global RNG yields one
 # byte-identical stream for any sequential draw sequence. (CONCURRENT draws would interleave; that
 # is a documented limit, not a bug — see docs/stdlib.md §std.rand.)
 

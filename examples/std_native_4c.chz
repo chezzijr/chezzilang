@@ -1,9 +1,9 @@
-# Phase 4c three-engine parity golden: the file-backed std.ffi C-buffer surface
+# Phase 4c golden: the file-backed std.ffi C-buffer surface
 # (alloc / alloc_zeroed / store_int64_at / load_int64_at / store_int32_at / load_int32_at /
 # is_null / null / free). Every value is deterministic — pointer ADDRESSES are never printed, only
-# the round-tripped payload — so interp, the serial VM, and the M:N OS-thread engine must produce
+# the round-tripped payload — so the M:N OS-thread engine must produce
 # byte-identical stdout. The signatures now come from std/ffi.chz (bodyless `native fn` decls);
-# dispatch is unchanged (name-keyed `native_members("std.ffi")`), so all three engines agree.
+# dispatch is unchanged (name-keyed `native_members("std.ffi")`).
 import std.ffi
 
 fn main():

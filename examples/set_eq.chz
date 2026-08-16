@@ -1,5 +1,5 @@
 # examples/set_eq.chz — set equality is order-independent, even when a set is NESTED inside a
-# struct or list. Top-level `set ==` was already unordered on both engines; this pins the nested
+# struct or list. Top-level `set ==` was already unordered; this pins the nested
 # case (parity tech-debt fix). A set built in a different insertion order is still `==`.
 
 struct Tags:

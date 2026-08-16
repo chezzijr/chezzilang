@@ -363,10 +363,10 @@ print("after nursery")
 // `request_exit`, plus an exit rung at the two CPU-side checkpoints no blocking wait covers: the loop
 // back-edge (sampled 1/1024) and `guarded`'s native-HOF per-element re-entry.
 //
-// **M:N only, deliberately.** The serial engine does not dispatch an eager `Executor` job at `submit`
-// — it runs jobs at the exit drain — so on that engine the exiting party does not exist while the
-// nursery runs. These programs are outside the two-engine parity contract by construction; the serial
-// engine is unchanged by this fix (verified by hand on the release binary).
+// **M:N only, deliberately.** The removed `--serial` engine ran an eager `Executor` job at the exit
+// drain rather than at `submit`, so on that engine the exiting party never existed while the nursery
+// ran — these programs were outside the cross-engine parity contract by construction, and the fix
+// never touched the serial engine (verified by hand before it was removed).
 //
 // Every one asserts ELAPSED as well as the status: on the pre-fix binary shapes (b)/(c) already
 // returned 3.
@@ -674,8 +674,8 @@ print("after nursery")
     assert!(out.contains("after nursery"), "the nursery joined: {out:?}");
 }
 
-/// W7-57 review defect 1 — **a cancelled sibling's `defer` runs to COMPLETION**, and the two engines
-/// agree. This is the test `quiesce.rs` used to cite `exit_in_spawned_child_aborts_siblings` for; that
+/// W7-57 review defect 1 — **a cancelled sibling's `defer` runs to COMPLETION**. This is the test
+/// `quiesce.rs` used to cite `exit_in_spawned_child_aborts_siblings` for; that
 /// program contains no `defer` at all, so the citation pinned nothing.
 ///
 /// The first cut of the W7-57 rungs broke this two ways at once: M:N stopped running the defer while

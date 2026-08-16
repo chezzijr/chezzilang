@@ -1,6 +1,6 @@
 # examples/datetime.chz — std.datetime print-tour (pure-Chezzi civil calendar, UTC-only).
 # Fully DETERMINISTIC: uses only FIXED epoch values, never now()/the clock — so it is byte-identical
-# across all three engines (interp / VM / --parallel) and matches examples/datetime.expected.
+# and matches examples/datetime.expected.
 
 import std.datetime as dt
 

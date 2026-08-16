@@ -1,5 +1,5 @@
 # examples/match_value.chz — `match` on int/str/bool literals with a `_` wildcard,
-# exercising both the statement form and the expression form on both engines.
+# exercising both the statement form and the expression form.
 
 fn classify(n: int):
     match n:

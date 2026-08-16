@@ -19,7 +19,7 @@
 //!   sorted by raw value for determinism, empty map → "").
 //!
 //! All members are pure CPU str transforms (no I/O), so all are [`super::Kind::Inline`] on their registry entry — they run
-//! inline on every engine, giving 3-engine parity by construction at the NativeFn seam.
+//! inline, with no dispatch-order concern, by construction at the NativeFn seam.
 
 use super::{Host, HostError, Kind, NativeFn, NativeRet, expect_args};
 
@@ -229,8 +229,8 @@ fn url_encode(h: &mut dyn Host) -> Result<NativeRet, HostError> {
 /// `query_encode(params: map[str, str]) -> str` — assemble a `k=v&k2=v2` query string. Both key and
 /// value are percent-encoded (reusing [`percent_encode`], the same escaper as `url_encode`), pairs
 /// joined with `&` and key/value with `=`. Keys are SORTED by their RAW (pre-encoding) bytes so the
-/// output is deterministic regardless of map iteration order — giving a stable golden and 3-engine
-/// parity by construction. An empty map yields `""` (no leading `?`); the caller composes
+/// output is deterministic regardless of map iteration order — giving a stable golden
+/// by construction. An empty map yields `""` (no leading `?`); the caller composes
 /// `url + "?" + query_encode(params)`.
 fn query_encode(h: &mut dyn Host) -> Result<NativeRet, HostError> {
     expect_args(h, "query_encode", 1)?;

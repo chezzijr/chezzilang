@@ -1,6 +1,6 @@
 # examples/match_guard.chz — match guards `pattern if cond:`. An arm matches only when its
 # pattern binds AND the guard (a bool, with the bindings in scope) is true; else it falls through.
-# Exercises both the expression form (`return match`) and the statement form, on both engines.
+# Exercises both the expression form (`return match`) and the statement form.
 
 fn classify(n: int) -> str:
     return match n:

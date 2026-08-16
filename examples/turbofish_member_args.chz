@@ -1,7 +1,7 @@
 # turbofish at the DECLARATION site (PART 2, member-side). A member declares its OWN type args
 # (`fn make[U]`); they compose with the type-side args from PART 1 (`Box[int].`). Inference is the
 # default — turbofish only when the args can't bind a param. The combined form `Box[int].make[U](x)`
-# dispatches type-erased to the same static/method path. Three engines must agree byte-for-byte.
+# dispatches type-erased to the same static/method path. Output must be byte-for-byte deterministic.
 #
 # UNIFORM PARSE RULE: `recv.name[X](args)` parses as a method turbofish on ANY receiver — a bare
 # ident, a call result (`W(1).cast[str](..)`), a field (`h.w.cast[..]`), or an index (`xs[0].cast[..]`).

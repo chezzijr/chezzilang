@@ -5,7 +5,7 @@
 # Map() from a list of 2-tuples (with a last-wins duplicate key). No new syntax — all are
 # existing call/method productions. UTF-8 only (no encoding-name argument).
 
-# A finite user iterator (NOT a generator) so both engines agree.
+# A finite user iterator (NOT a generator).
 struct Counter:
     n: int
     limit: int

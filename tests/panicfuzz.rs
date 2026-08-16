@@ -8,7 +8,7 @@
 //! The invariant under test: feeding any malformed / adversarial input to `chezzi check` (the full
 //! front-end: lexer → parser → checker) yields a clean diagnostic — never a Rust panic, never a
 //! signal crash (SIGSEGV / SIGABRT / stack-overflow). This harness only exercises the front-end's
-//! crash-safety; it never runs the VM/interp, so the two-engine parity bar does not apply.
+//! crash-safety; it never runs the VM, so runtime-correctness bars do not apply here.
 
 #[path = "../src/panicfuzz/mod.rs"]
 mod panicfuzz;

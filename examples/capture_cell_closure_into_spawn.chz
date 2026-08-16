@@ -1,11 +1,11 @@
 # Uniform by-reference capture (F3 / B2 parity guard). A closure `f` that captures a by-reference
 # local (`x`, a cell) is invoked inside a `spawn` task via the call form `spawn f()`. Whichever way
-# the task's copy of `f` and its cell are reconstructed, BOTH engines must agree — the print is
-# post-join, so serial == M:N == `7` exactly.
+# the task's copy of `f` and its cell are reconstructed, the print is
+# post-join, so it prints `7` exactly.
 #
-# A capture-bearing closure crosses the `spawn` task boundary by DEEP value on BOTH engines
-# (`do_spawn` → `cross_spawn_callee` → `wire_callable`/`from_wire`), so the task's `f` and its captured
-# cell are an isolated per-task copy — matching the M:N engine's `prepare_worker`/`to_snap` deep-copy.
+# A capture-bearing closure crosses the `spawn` task boundary by DEEP value
+# (`do_spawn` → `cross_spawn_callee` → `wire_callable`/`from_wire` → `prepare_worker`/`to_snap`), so
+# the task's `f` and its captured cell are an isolated per-task copy.
 # This read-only case prints `7` either way; the mutation forms that make the deep-cross load-bearing
 # (a closure mutating a captured cell's inner heap value, or reading a cell the owner writes after
 # spawn) are in `capture_spawn_closure_mutates_isolated.chz` / `capture_spawn_closure_owner_write_isolated.chz`.
@@ -15,6 +15,6 @@ fn main():
     f := fn(): ch.send(x)
     parallel:
         spawn f()
-    print(ch.recv())            # 7 — serial == M:N
+    print(ch.recv())            # 7
 
 main()

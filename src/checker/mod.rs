@@ -4,7 +4,7 @@
 //! Design: pragmatic local inference (see `ty.rs`). Explicit function signatures give us call
 //! types for free; locals are inferred from their initializers. [`Ty::Unknown`] suppresses
 //! cascades. Two passes: pass 1 hoists every top-level declaration (so forward references work,
-//! matching the serial-VM parity oracle's hoist); pass 2 walks bodies and accumulates errors.
+//! matching how the compiler hoists top-level declarations); pass 2 walks bodies and accumulates errors.
 
 mod ty;
 
@@ -100,8 +100,8 @@ fn module_label(import: &Import) -> String {
     path.join(".")
 }
 
-/// `Result`/`Option` are builtin generic types — the `?` operator and the top-level-error logic in
-/// both engines key on these literal names, so a user type that shadows them would collide. Reject
+/// `Result`/`Option` are builtin generic types — the `?` operator and the top-level-error logic
+/// key on these literal names, so a user type that shadows them would collide. Reject
 /// the redefinition at declaration. `Iterator` is likewise reserved: as a value type it names the
 /// experimental generator existential (`Ty::Struct("Iterator", [T])`) that `iter_elem` / `.next()`
 /// typing key on, so a user `struct Iterator[T]` would be silently shadowed (and crash at runtime
@@ -230,9 +230,9 @@ fn describe_extern_type(t: &Type) -> String {
 }
 
 /// Names an `extern` C fn may NOT take: a builtin (`len`/`range`/`int`/`float`/`str`/`ord`/`chr`/
-/// `set`), `print`, or a runtime constructor (`Channel`/`Shared`/`RwShared`/`Atomic`/`timer`/`Executor`). Both
-/// backends resolve these names to a special op *before* a plain named call (`compiler::compile_call`
-/// / `interp::eval_call`), so an extern fn with one of these names is silently shadowed — dead code
+/// `set`), `print`, or a runtime constructor (`Channel`/`Shared`/`RwShared`/`Atomic`/`timer`/`Executor`). The
+/// compiler resolves these names to a special op *before* a plain named call (`compiler::compile_call`),
+/// so an extern fn with one of these names is silently shadowed — dead code
 /// that the compiler's eager `MakeCffi` would still `dlsym` (aborting on a symbol it can never call).
 /// Mirrors `compiler::is_builtin` + the constructor/`print` special cases. (Struct- and variant-name
 /// collisions are caught separately against the built registries, since those are user-declared.)
@@ -244,7 +244,7 @@ fn describe_extern_type(t: &Type) -> String {
 /// are NOT reserved — a user may shadow them — so they are intentionally out of this set and keep
 /// hovering `None` for v1.) Mirrors `compiler::is_builtin` + the constructor/`print` special cases.
 const RESERVED_CALLABLE: &[&str] = &[
-    // builtins (mirrors compiler::is_builtin / interp::builtins::is_builtin)
+    // builtins (mirrors compiler::is_builtin)
     "range",
     "int",
     "float",
@@ -336,9 +336,9 @@ pub(crate) enum Intrinsic {
 }
 
 /// One row of the (now HOLLOW) native-prelude METADATA table. Phase 3a split the concern: this table
-/// keeps only the name → intrinsic → first_class METADATA — the single source of truth read by the
-/// backends (`compiler::is_builtin`, `interp::builtins::is_builtin`, `is_firstclass_builtin_fn`), which
-/// have no module-graph access and need only intrinsic/first_class, never a `FnSig`. The SIGNATURES of
+/// keeps only the name → intrinsic → first_class METADATA — the single source of truth read by
+/// `compiler::is_builtin` / `is_firstclass_builtin_fn`, which have no module-graph access and need
+/// only intrinsic/first_class, never a `FnSig`. The SIGNATURES of
 /// the eight migrated builtins moved OUT to the always-linked `std/prelude.chz` `native fn`/`native
 /// ctor` decls (harvested into [`Checker::native_prelude_sigs`], read by [`Checker::builtin_sig`]).
 /// `print` is now file-backed too — a variadic `native fn print(...args: Any, sep, end)` decl in
@@ -875,8 +875,8 @@ pub fn resolve_extern_signatures(graph: &ModuleGraph) -> ExternTable {
 /// (`int32`) resolve as reserved leaves; local aliases/structs resolve from the parsed stmts; no
 /// qualified / named-import forms exist in single-file source, so nothing else is needed.
 ///
-/// Test-only: the single-file standalone compile/run paths (`compile_module_standalone`,
-/// `Interp::execute`) are `#[cfg(test)]`. The production CLI — single- AND multi-file — always goes
+/// Test-only: the single-file standalone compile/run path (`compile_module_standalone`)
+/// is `#[cfg(test)]`. The production CLI — single- AND multi-file — always goes
 /// through `build_graph` → `resolve_extern_signatures`.
 #[cfg(test)]
 pub fn resolve_extern_signatures_standalone(stmts: &[Stmt]) -> ExternTable {
@@ -950,8 +950,8 @@ pub fn resolve_call_tables(
 pub type TableConflicts = Vec<(Span, String)>;
 
 /// Resolve value-keyword calls for a SINGLE-FILE (standalone, source-string) program, through the
-/// EXACT SAME [`resolve_call_tables`] pass as the multi-file CLI (one resolver, both engines
-/// consume, module index `0`). Wraps `stmts` in a synthetic one-module graph, mirroring
+/// EXACT SAME [`resolve_call_tables`] pass as the multi-file CLI (one resolver, one consumer,
+/// module index `0`). Wraps `stmts` in a synthetic one-module graph, mirroring
 /// [`resolve_extern_signatures_standalone`]. Test-only (the standalone compile/run paths are
 /// `#[cfg(test)]`; production always goes through `build_graph`).
 #[cfg(test)]
@@ -988,8 +988,8 @@ pub fn resolve_call_tables_standalone(
 /// table on it would alias two distinct keyword calls into one slot (the later insert wins and the
 /// wrong permutation is applied — an out-of-range index or silent mis-routing). The FIRST named-arg
 /// VALUE expression is, by contrast, a distinct source node per call, so its span uniquely identifies
-/// the call WITHIN one lexed source (a module, or ONE interpolation fragment). Recording and BOTH
-/// backend lookups run this helper, so they agree on the key. Only used when `named` is non-empty
+/// the call WITHIN one lexed source (a module, or ONE interpolation fragment). Recording and the
+/// backend lookup run this helper, so they agree on the key. Only used when `named` is non-empty
 /// (the sole record/lookup condition), so `first()` is always `Some`; the `call_span` fallback is
 /// unreachable defensive code.
 pub fn keyword_key_span(named: &[(String, Expr)], call_span: Span) -> Span {
@@ -997,7 +997,7 @@ pub fn keyword_key_span(named: &[(String, Expr)], call_span: Span) -> Span {
 }
 
 /// Build the full [`KeywordKey`] for a value+keyword call: `(module, fragment-context span, fragment
-/// ordinal, first-named-arg span)`. The checker's record site and BOTH backend lookup sites call this
+/// ordinal, first-named-arg span)`. The checker's record site and the backend's lookup site call this
 /// one helper so they can never disagree on the key. `frag_ctx`/`frag_ord` are the interpolation
 /// fragment discriminators (inert `Span::default()`/`0` outside interpolation); see [`KeywordKey`].
 pub fn keyword_key(
@@ -1023,8 +1023,8 @@ pub fn keyword_key(
 /// expression spliced twice into the SAME module keeps one set of spans, so both splices share one
 /// key — and a default is cloned into the CALLER's scope, so a caller-side local can shadow the
 /// definer's global and the two splices can genuinely resolve differently. Overwriting there applies
-/// the second site's decision to the first: a silent wrong value under a green `chezzi check`,
-/// identical on both engines. Better loud than silent.
+/// the second site's decision to the first: a silent wrong value under a green `chezzi check`.
+/// Better loud than silent.
 ///
 /// It compares VALUES, never mere presence: a same-key/same-value re-insert is NORMAL and benign
 /// (two call sites omitting the same default, or one module re-checked), and a presence-checking
@@ -1429,7 +1429,7 @@ impl Checker {
             // The `.chz` decl is a checked source-of-truth MIRROR: assert the parsed+resolved variant set
             // byte-equals the inline `variants_of` maps so the two can't drift. Runs on the always-linked
             // prelude module; keeps `harvest_native_enum_table` production-live (no dead_code) AND is
-            // assert-only (no effect on resolution/output), so behavior + 3-engine parity are unchanged.
+            // assert-only (no effect on resolution/output), so behavior + output are unchanged.
             if lm.dotted == ["std", "prelude"] {
                 c.assert_native_enum_shape_matches(&lm.ast);
                 // Phase 5c-protocols — DRIFT GUARD (assert-only, resolution-inert). All 18 reserved
@@ -1439,7 +1439,7 @@ impl Checker {
                 // runtime source (conformance/operator-lowering/`check_bounds` untouched). Assert the
                 // parsed+resolved shape byte-equals the Rust seed so the two can't drift. Keeps
                 // `harvest_protocol_shape` production-live (no dead_code) AND is assert-only (no effect on
-                // resolution/output), so behavior + 3-engine parity are unchanged.
+                // resolution/output), so behavior + output are unchanged.
                 c.assert_native_protocol_shape_matches(&lm.ast);
             }
             // M24 — the manifest's `[project] entrypoint = "mod:fn"` names a function the runtime
@@ -1490,7 +1490,7 @@ impl Checker {
 
 /// The static type signatures of a native std module's members (M6c). This is the **third**
 /// lockstep table: it must agree with the runtime members in `src/native/<module>.rs` and the
-/// per-engine value lowering. `std.math` params are `float` (the language has no implicit int→float,
+/// runtime value lowering. `std.math` params are `float` (the language has no implicit int→float,
 /// so callers pass floats); `pi`/`e` are float constants.
 fn native_module_sig(name: &str) -> ModuleSig {
     // Only the residual opcode/type-license modules still have a hand-built arm (concurrency's ctor
@@ -2301,7 +2301,7 @@ struct Checker {
     /// binding's `(owning_scope_idx, name, kind, doc)` here INSTEAD of locking `hover_result`, then at
     /// the end-of-scope seam that OWNS the binding overwrite `hover_result` with the binding's FINAL
     /// (refined) type. The owning-scope index gates the finalize so an intervening inner fn/method seam
-    /// can't resolve it prematurely to the still-unrefined type. Probe-gated; parity-neutral.
+    /// can't resolve it prematurely to the still-unrefined type. Probe-gated; behavior-neutral.
     hover_pending: Option<(usize, String, HoverKind, Option<String>)>,
 }
 
@@ -2666,7 +2666,7 @@ fn prebuilt_protocols() -> HashMap<String, ProtocolInfo> {
             methods: vec![(
                 "slice".to_string(),
                 // Python-style: three `Option[int]` components (start/end/step), each `None` when
-                // omitted. Both engines always pass all three explicitly.
+                // omitted. The runtime always passes all three explicitly.
                 FnSig::plain(
                     vec![
                         Ty::Unknown,
@@ -3275,8 +3275,8 @@ fn op_sym(op: BinaryOp) -> &'static str {
     }
 }
 
-/// Built-in method signatures on `str` (M6). Must mirror the runtime handlers in both backends
-/// (`interp::builtins::call_method` and `vm::Vm::do_method_call`).
+/// Built-in method signatures on `str` (M6). Must mirror the runtime handler
+/// (`vm::Vm::do_method_call`).
 /// Find a control-flow statement that would escape a `recover:` / `defer:` / `spawn:` block — a
 /// `return`, or a `break`/`continue` not contained by a loop *inside* the block. Recurses through
 /// nested blocks but stops at nested `fn` declarations (their control flow is their own). `?` is an
@@ -4091,8 +4091,8 @@ mod graph_tests {
         );
     }
 
-    // 28. A *module-global* binding named like an enum does NOT shadow qualified access — both engines
-    // gate on locals/captures only, so the checker must too (else it validates a different program
+    // 28. A *module-global* binding named like an enum does NOT shadow qualified access — the VM
+    // gates on locals/captures only, so the checker must too (else it validates a different program
     // than the one that runs → runtime fault). `Color.Red` here is the variant (type Color), so
     // returning it as `int` is a *checker* error, not a clean compile + runtime crash.
     #[test]

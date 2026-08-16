@@ -127,8 +127,8 @@ pub struct ModuleGraph {
 /// module, the file stem for the entry — so the entry gets a real, non-empty key and a key is never
 /// the malformed `::Name`). Because two modules' labels can collide (an entry file `geo.chz` whose
 /// stem equals a one-segment import `geo`, or two like-named files in different dirs), any duplicate
-/// label is made unique by appending `#<idx>` (the module's graph index). Graph order is identical
-/// across every engine, so this tiebreak is deterministic — the parity invariant holds. Native
+/// label is made unique by appending `#<idx>` (the module's graph index). Graph order is
+/// deterministic, so this tiebreak is stable across runs. Native
 /// modules get a key too (harmless: they declare no user types, so it is never used to key one).
 pub fn module_keys(graph: &ModuleGraph) -> Vec<String> {
     let mut seen: HashMap<String, usize> = HashMap::new();
@@ -366,7 +366,7 @@ fn build_graph_impl(
         modules: b.order,
     };
     // ENTRY-LAST BACKSTOP: every positional-entry consumer (compiler `entry_idx = modules.len()-1`,
-    // both engines' `entry_home() = modules.last()`) derives the entry as the FINAL module, so the
+    // the VM's `entry_home() = modules.last()`) derives the entry as the FINAL module, so the
     // `modules.last() == graph.entry` invariant must hold. It normally does — the always-linked prelude
     // stub is import-free, so it precedes the entry DFS and the entry lands last. But when the ENTRY
     // file IS that stub (`chezzi run std/prelude.chz`), its own `b.visit(...)` is deduped by `visited`
@@ -374,7 +374,7 @@ fn build_graph_impl(
     // module to the tail (stable for all others → deps still precede dependents). Guarded on
     // `pos != len-1`, so the normal case (entry is a user file, already last) is a strict no-op — zero
     // behavior change. If `graph.entry` is somehow absent, leave the order untouched (no panic).
-    // Byte-identical across all engines ONLY because the always-linked stub emits no top-level output /
+    // Output stays byte-identical ONLY because the always-linked stub emits no top-level output /
     // declares no test fns — re-evaluate if a side-effecting always-linked stub is ever added.
     if let Some(pos) = graph.modules.iter().position(|m| m.id == graph.entry)
         && pos != graph.modules.len() - 1
@@ -382,7 +382,7 @@ fn build_graph_impl(
         let e = graph.modules.remove(pos);
         graph.modules.push(e);
     }
-    // Normalize named/default call arguments into positional ones, so the checker and both engines
+    // Normalize named/default call arguments into positional ones, so the checker and the VM
     // consume an identical, already-desugared AST.
     crate::desugar::run(&mut graph)?;
     Ok(graph)

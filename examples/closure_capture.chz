@@ -4,7 +4,7 @@
 # binding and sees/makes writes to it (a captured name is read positionally, a compile-time slot per
 # name resolved like struct fields; a boxed slot indirects through a heap cell so the sharing is live).
 # (See examples/closure_capture_scopes.chz for the by-reference rule end to end.) This file exercises
-# every LOCAL capture shape so the serial VM and the M:N `--parallel` engine stay byte-identical:
+# every LOCAL capture shape, pinning byte-identical output:
 #   - one captured var
 #   - several captured vars (distinct slots)
 #   - a nested closure capturing an enclosing closure's capture (CapSrc::Captured)

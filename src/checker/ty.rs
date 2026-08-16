@@ -523,7 +523,7 @@ pub fn compatible(expected: &Ty, actual: &Ty) -> bool {
         // `expected` admitting 0 arguments may be called with 0, so the `actual` stored into it must
         // accept 0 too. A value that requires MORE arguments than the slot promises is unsound —
         // `h := a; h = b` over `fn a(x: int = 1)` / `fn b(x: int)` type-checked clean and then faulted
-        // with `function 'b' expects 1 argument(s), got 0`, on both engines. The reverse is fine and
+        // with `function 'b' expects 1 argument(s), got 0`. The reverse is fine and
         // must stay accepted: a defaulted fn flows into a plain `fn(int) -> int` annotation, because
         // accepting fewer required arguments is strictly more permissive.
         (

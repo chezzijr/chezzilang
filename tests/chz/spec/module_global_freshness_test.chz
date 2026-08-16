@@ -101,12 +101,12 @@ test fn map_and_struct_globals_in_place():
     assert a.get() == 2, "task saw map len {a.get()}"
     assert b.get() == 7, "task saw p.x {b.get()}"
 
-# --- the pin instant is a SOURCE POSITION (one build per epoch, both engines) -------------------
+# --- the pin instant is a SOURCE POSITION (one build per epoch) -------------------
 #
 # In-place mutation writes no module slot, so nothing REFRESHES a task's view mid-nursery: every spawn
 # between two cache invalidations (a global assignment, or a nursery open) replays ONE build. Both
-# tasks below therefore see len 1 — the view built at the first spawn — on serial AND M:N, at every
-# `--threads`. An earlier cut refreshed the view at "the next slot write, else the join" instead, which
+# tasks below therefore see len 1 — the view built at the first spawn — at every
+# `--threads` count. An earlier cut refreshed the view at "the next slot write, else the join" instead, which
 # made the M:N EAGER per-connection path pin at the spawn and the lazy path pin later: the
 # since-removed cooperative engine
 # printed 2, bare `run` 1, and `--threads=1` flipped it back to 2.
@@ -141,7 +141,7 @@ test fn nested_nursery_in_a_task_pins_at_its_first_spawn():
     assert nq.len() == 1, "task mutation leaked: {nq.len()}"
 
 # A global ASSIGNMENT between two spawns of one nursery DOES refresh the view (rule 1 — the slot write
-# drops the cache), so the second task sees the new value. Same on both engines: the write is a source
+# drops the cache), so the second task sees the new value — the write is a source
 # position, not a scheduling artifact.
 sg: int = 1
 
@@ -263,7 +263,7 @@ test fn bare_spawns_see_the_global_live_at_their_own_spawn():
     assert b.get() == 42, "second bare spawn saw {b.get()}"
 
 # A bare `spawn` with an explicit `parallel:` after it: the inner join is where M:N EARLY-ENLISTS the
-# outer implicit nursery's task, so both engines pin there and a LATER write reaches neither task.
+# outer implicit nursery's task, so the task pins there and a LATER write reaches neither task.
 fn bare_then_nested(a: Shared[int], b: Shared[int]):
     spawn: a.set(egg)
     parallel:

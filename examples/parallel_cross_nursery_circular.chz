@@ -12,10 +12,10 @@
 # Output ORDER note: O and I live in DIFFERENT nurseries (O in main's outer, I in inner's), and each
 # nursery flushes its buffered task output at its OWN join (inner's join < main's join) — so the order
 # is "I got 1" then "O got 1", NOT the single-nursery case-C order. Both tasks complete; the runtime
-# wake order is O-then-I, but the buffered Decision-F flush is per-nursery-join (preserves engine parity).
+# wake order is O-then-I, but the buffered Decision-F flush is per-nursery-join.
 #
-# NOTE: under the cooperative engine (plain `run`, no --parallel) this STILL faults deadlock — the
-# cooperative-engine flatten is a separate, later commit. See docs/concurrency-tier-d.md "Open / deferred".
+# NOTE: `--parallel` is an accepted no-op alias — M:N is the only engine, so plain `run` succeeds too.
+# See docs/concurrency-tier-d.md "Open / deferred".
 fn inner(a: Channel[int], b: Channel[int]):
     spawn:
         a.send(1)

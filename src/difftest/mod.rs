@@ -1,7 +1,8 @@
 //! Differential-testing oracle: generate semantically-equivalent programs, render them as
-//! Chezzi and Python, run both, and diff stdout. Catches *shared* semantic bugs that the
-//! VM↔interp parity oracle structurally cannot (both engines were co-developed). See
-//! `docs/bug-discovery.md` lever #2.
+//! Chezzi and Python, run both, and diff stdout. Catches *shared* semantic bugs that comparing
+//! Chezzi against itself never could — the historical VM↔interp comparison, back when there were
+//! two engines, missed exactly these (both were co-developed, so they shared the same blind
+//! spots). See `docs/bug-discovery.md` lever #2.
 //!
 //! Self-contained: no `crate::` references, so the same sources compile into both the
 //! `tests/difftest.rs` CI gate and the `src/bin/difffuzz.rs` long-runner via `#[path]`.

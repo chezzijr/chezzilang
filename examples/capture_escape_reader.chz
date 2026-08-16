@@ -1,7 +1,7 @@
 # Uniform by-reference capture (D1): a captured local ESCAPES its defining frame. `make_reader`
 # returns a closure that reads `n`; the cell holding `n` is heap-allocated, so it outlives the
 # frame and the returned closure still reads it. Each call to `make_reader` gets a FRESH cell, so
-# `r` and `s` are independent. Matches Go's escaping-upvalue semantics. Serial == M:N.
+# `r` and `s` are independent. Matches Go's escaping-upvalue semantics.
 # (Go's increment-and-return counter needs a mutate-and-return closure body, which Chezzi's
 # expression-only closures can't express — mutate via a method call or a `defer:` block instead.)
 fn make_reader(v: int) -> fn() -> int:

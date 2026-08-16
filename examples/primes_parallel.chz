@@ -1,7 +1,8 @@
 # CPU-bound demo: count primes in [2, 2_000_000) split across 4 spawned tasks.
-# Same source runs on both engines:
-#   chezzi run            examples/primes_parallel.chz   # cooperative: tasks run one-by-one, 1 core
-#   chezzi run --parallel examples/primes_parallel.chz   # real threads: 4 tasks across cores
+# M:N is the only engine, so `--parallel` is an accepted no-op alias — both invocations run the
+# same real-thread scheduler, spreading the 4 tasks across cores:
+#   chezzi run            examples/primes_parallel.chz
+#   chezzi run --parallel examples/primes_parallel.chz
 # Each task counts a quarter-range and sends its count down a channel; the parent sums after join.
 
 fn is_prime(n: int) -> bool:

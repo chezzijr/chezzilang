@@ -45,7 +45,7 @@ test fn every_queued_job_runs_despite_a_fault():
     assert c.load() == 111, "every non-faulting job must run, got " + str(c.load())
 
 test fn the_lowest_index_fault_wins_not_the_first_to_fail():
-    # Both jobs fault; job 0's error must propagate on both engines because it was submitted first —
+    # Both jobs fault; job 0's error must propagate because it was submitted first —
     # not whichever failed first in wall-clock, which would be nondeterministic. "late boom" also
     # contains "boom", so assert on the discriminator.
     ex := Executor()
@@ -90,8 +90,8 @@ test fn the_queue_is_empty_after_a_faulting_drain():
 test fn a_pre_cancelled_token_stops_the_jobs():
     # The abort-siblings behaviour is not gone, it moved into the caller's hands. Cancel the token on
     # the main task BEFORE submitting/shutting down the queued jobs — no cancelling job is queued, so
-    # there is nothing to race: `guarded_bump` observes an already-cancelled token deterministically on
-    # both engines, unlike submitting `tok.cancel()` as job 0 and racing jobs 1/2 against it (M:N farms
+    # there is nothing to race: `guarded_bump` observes an already-cancelled token deterministically,
+    # unlike submitting `tok.cancel()` as job 0 and racing jobs 1/2 against it (M:N farms
     # `ready[1..]` to the pool before running `ready[0]` inline, so a hot pool thread can win that race).
     ex := Executor()
     tok := cancel.manual()

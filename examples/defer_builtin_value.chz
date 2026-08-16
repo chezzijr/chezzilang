@@ -1,6 +1,6 @@
 # First-class universe builtin FUNCTIONS (print / ord / chr / panic) as values.
 # `defer print(...)` is a bare first-class call (no wrapping); the same names also work in
-# value position (bound to a name, called back). Two-engine parity guard.
+# value position (bound to a name, called back).
 
 fn greet():
     defer print("World")   # runs at frame exit, LIFO

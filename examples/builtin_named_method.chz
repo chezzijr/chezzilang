@@ -2,7 +2,7 @@
 # method name (`add`, `map`) STILL gets named- and default-argument support, as long as the receiver's
 # struct type is statically known pre-type (a typed local, an inline ctor call, or a struct-returning
 # fn call). A genuine built-in receiver (List/Map) is untouched — the same names route to the builtin.
-# Two engines (VM + interp) and the .expected must all agree.
+# The VM's output and the `.expected` file must agree.
 
 struct Counter:
     n: int

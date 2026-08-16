@@ -1,7 +1,7 @@
 # Uniform by-reference capture (D2): a recursive fn where each frame captures its OWN local.
 # Every call to `rec` boxes its `x` into a fresh cell, so the closure `f` each frame builds reads
 # that frame's value — the deepest frame prints first as the recursion unwinds. Matches Go
-# (each activation has its own `x`). Serial == M:N (output is deterministic, single task).
+# (each activation has its own `x`). Output is deterministic (single task).
 fn rec(depth: int):
     x := depth
     f := fn() -> int: x

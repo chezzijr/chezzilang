@@ -1,9 +1,9 @@
 //! Shared Python-style format mini-language for `{expr:spec}` string interpolation.
 //!
-//! ONE source of truth used by BOTH engines (`compiler`/`vm` and `interp`): each engine does
+//! ONE source of truth used by the VM (`compiler`/`vm`): it does
 //! only (a) the `:`-split of the interpolation inner text ([`split_spec`]) and (b) classifying its
 //! own runtime `Value` into the neutral [`FmtArg`]. Spec parsing ([`parse`]) and rendering
-//! ([`apply`]) live here so there is a single source of truth for both VM schedulers.
+//! ([`apply`]) live here so there is a single source of truth.
 //!
 //! Supported mini-language (a coherent subset of Python's): `[[fill]align][sign][0][width][.precision][type]`
 //!  - align: `<` left, `>` right, `^` center; an optional `fill` char may precede the align.
@@ -218,7 +218,7 @@ fn is_type(c: char) -> bool {
 }
 
 /// Render `arg` per `spec` into `out`. Type/precision mismatches (e.g. `{s:d}`, `{s:.2f}`, zero-pad
-/// on a non-number) return a descriptive error — these are runtime errors in BOTH engines because
+/// on a non-number) return a descriptive error — these are runtime errors because
 /// they depend on the value's type. All padding is bounded by the already-capped `spec.width`.
 pub fn apply(spec: &FormatSpec, arg: FmtArg, out: &mut String) -> Result<(), String> {
     // 1) base render → `body`, plus an optional sign prefix that zero-padding must keep ahead of

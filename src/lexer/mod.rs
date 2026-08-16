@@ -156,7 +156,7 @@ pub enum Token {
 /// the CALLER's AST as a clone that keeps the DEFINING module's spans, so without `file` two
 /// unrelated call sites at the same `line:col` in two different files collapse onto one entry, the
 /// later `insert` wins, and the survivor's decision is applied to both — a silent wrong value under
-/// a green `chezzi check`, identical on both engines (parity is blind to it). See `docs/gaps.md`
+/// a green `chezzi check` (parity is blind to it). See `docs/gaps.md`
 /// **W7-49** for the measured repro. Deleting this field re-opens that hole silently.
 ///
 /// `0` = synthesized / standalone single-file lex (`tokenize`, the editor overlay, `chezzi tokens`);

@@ -1,8 +1,8 @@
 //! Shared Python-style slice + negative-index resolution.
 //!
-//! Both VM schedulers (serial + M:N) call into this one module so
-//! their slice/index semantics — including every clamp boundary and the `slice step cannot be zero`
-//! fault — stay byte-identical (the two schedulers are parity-tested on stdout/stderr). Derived from
+//! The VM's M:N scheduler calls into this one module so
+//! slice/index semantics — including every clamp boundary and the `slice step cannot be zero`
+//! fault — stay byte-identical regardless of worker count. Derived from
 //! CPython's `PySlice_GetIndicesEx` (`slice.indices`).
 
 /// Normalize a possibly-negative *plain* index `n` against length `len`, Python-style: a negative
@@ -20,15 +20,15 @@ pub fn norm_index(n: i64, len: usize) -> Option<usize> {
 
 /// Upper bound on the number of elements a `range()` call may materialize, to keep an absurd argument
 /// from exhausting memory. (A `for` loop over a `..` range is lazy and not subject to this; this only
-/// caps building an actual list — via `range()` or slicing a range value.) Shared by BOTH engines so
-/// the cap (and its fault message) is byte-identical.
+/// caps building an actual list — via `range()` or slicing a range value.) This is the single
+/// source every range-materializing call site checks, so the cap (and its fault message) is consistent.
 pub const MAX_RANGE_LEN: i64 = 10_000_000;
 
 /// Materialize `range(start, end, step)` into the concrete list of ints, half-open `[start, end)`.
 /// A positive `step` counts up, a negative `step` counts down (still excluding `end`); a
 /// wrong-direction step or `start == end` yields `[]`. Returns `Err` with the byte-identical runtime
 /// fault text for a zero step or an over-cap length. All arithmetic is done in `i128` so a huge span
-/// or `i64::MIN` bound/step can't overflow or panic (`i64::MIN.abs()` would). Shared by BOTH engines.
+/// or `i64::MIN` bound/step can't overflow or panic (`i64::MIN.abs()` would).
 pub fn range_values(start: i64, end: i64, step: i64) -> Result<Vec<i64>, String> {
     if step == 0 {
         return Err("range() step cannot be zero".to_string());
@@ -122,8 +122,8 @@ pub fn slice_indices(
 }
 
 /// Python `bytes` `repr`: `b'...'` with printable ASCII shown literally, `\n \t \r \\ \'` escaped,
-/// and every other byte as `\xHH` (lowercase hex). Shared by BOTH engines (VM `display_guarded` and
-/// interp `display_value`) so the `b'...'` representation is byte-identical across the engines —
+/// and every other byte as `\xHH` (lowercase hex). This is the single implementation `display_guarded`
+/// calls, so the `b'...'` representation is consistent everywhere bytes are rendered —
 /// `str(bytes)`, interpolation, and bare `print(bytes)` all route through this one function.
 pub fn bytes_repr(bytes: &[u8]) -> String {
     use std::fmt::Write;
@@ -150,8 +150,8 @@ pub fn bytes_repr(bytes: &[u8]) -> String {
 }
 
 /// Python `bytearray` `repr`: `bytearray(b'...')` — the bare `b'...'` of [`bytes_repr`] wrapped in
-/// `bytearray(...)`. Shared by BOTH engines (VM + interp) so the mutable buffer's `Display`/`str()`/
-/// interpolation are byte-identical, distinct from `bytes`' bare `b'...'`.
+/// `bytearray(...)`. This is the single implementation the VM calls, so the mutable buffer's
+/// `Display`/`str()`/interpolation stay consistent, distinct from `bytes`' bare `b'...'`.
 pub fn bytearray_repr(bytes: &[u8]) -> String {
     format!("bytearray({})", bytes_repr(bytes))
 }

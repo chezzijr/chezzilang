@@ -1,5 +1,5 @@
 # M6c demo: the standard library — native modules (std.io / std.math / std.os) and Chezzi-written
-# ones (std.string, std.cmp), all in one program, running identically on the serial and M:N VM engines.
+# ones (std.string, std.cmp), all in one program.
 
 import std.io
 import std.math

@@ -1,6 +1,6 @@
 # examples/enum_qualified.chz — qualified enum-variant access `Enum.Variant`: user-defined enum
 # variants must be written qualified everywhere — construction (nullary + payload) and `match` arms —
-# and both engines must agree (parity) and match the golden. A generic enum is included to pin that
+# and the runtime output must match the golden. A generic enum is included to pin that
 # the qualifier resolves to the right variant across type parameters.
 
 enum Color:

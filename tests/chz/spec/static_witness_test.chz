@@ -1161,7 +1161,7 @@ test fn a_parameter_shadowing_a_std_module_keeps_the_witness():
 # `import std.time` bind. A capture predicate that asks "does an enclosing VALUE binding shadow this
 # module?" sees nothing — a type is in no value table — reads the head as `std.time`, misses `make`
 # in that module's fns, and drops `$w:T`: clean `chezzi check`, then "internal: no type witness in
-# scope to forward as 'T' into the call to 'make'" on BOTH engines. That is why the predicate stopped
+# scope to forward as 'T' into the call to 'make'". That is why the predicate stopped
 # classifying the head at all: every field-headed call keeps every witness. The USER-module spelling
 # (`import Shape` beside `struct Shape`) is the multi-file half, in
 # `src/vm/tests.rs::m24_2_a_type_named_like_a_user_module_keeps_the_witness`.

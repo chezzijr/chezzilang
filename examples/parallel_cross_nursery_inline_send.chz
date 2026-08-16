@@ -12,7 +12,7 @@
 # Output order: "inner ran" flushes at inner's nested join (during the body, before the send); O's
 # output is buffered to its outer-nursery scope and flushes at the outer join, before "done".
 #
-# NOTE: under the cooperative engine (plain `run`) this STILL faults deadlock — case A is M:N-only.
+# NOTE: `--parallel` is an accepted no-op alias — M:N is the only engine, so plain `run` succeeds too.
 fn inner():
     spawn:
         print("inner ran")

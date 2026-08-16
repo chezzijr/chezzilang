@@ -95,7 +95,7 @@ fn bare_run_uses_manifest_root_not_nested() {
 }
 
 // 1b. Same assertion, second call through the CLI — pins the manifest-root resolution at the process
-//     boundary a second time (the library parity helpers cannot reproduce this bug).
+//     boundary a second time (the library golden helpers cannot reproduce this bug).
 #[test]
 fn bare_run_reruns_manifest_root_resolution() {
     let t = proj_silent();

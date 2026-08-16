@@ -73,7 +73,7 @@ fn list_dir(h: &mut dyn Host) -> Result<NativeRet, HostError> {
         Err(e) => return Ok(NativeRet::Err(format!("{}: {e}", shown(&path)))),
     };
     // Sorted as RAW BYTES (not decoded strings) so the order stays deterministic — required for
-    // serial==M:N parity — and is well-defined for a name that is not UTF-8 at all.
+    // byte-identical output regardless of worker count — and is well-defined for a name that is not UTF-8 at all.
     let mut names: Vec<Vec<u8>> = Vec::new();
     for entry in rd {
         match entry {
@@ -162,7 +162,7 @@ fn stat(h: &mut dyn Host) -> Result<NativeRet, HostError> {
 /// Recursively list every entry (files + dirs) strictly under `path`, as a flat list of full path
 /// strings. Each directory's entries are SORTED by name before pushing/recursing — this makes the
 /// order deterministic (`read_dir` yields filesystem-arbitrary order), which is REQUIRED for
-/// serial==M:N parity. Pre-order: a directory is listed before its children. A symlinked directory is
+/// byte-identical output regardless of worker count. Pre-order: a directory is listed before its children. A symlinked directory is
 /// LISTED but NOT descended (cycle guard). An unreadable root (or subdir) returns a recoverable `Err`.
 fn walk(h: &mut dyn Host) -> Result<NativeRet, HostError> {
     expect_args(h, "walk", 1)?;
@@ -388,7 +388,7 @@ fn same_file(a: &Path, b: &Path) -> bool {
 }
 
 /// Copy a file's contents (file-only). Faults if the source is missing. The byte count is dropped
-/// for parity-simplicity with `write_file`'s `Result[nil]` shape.
+/// to keep the return shape simple, matching `write_file`'s `Result[nil]` shape.
 ///
 /// Refuses a SAME-FILE copy (same path, or via a symlink/hardlink to one inode) with an `Err`,
 /// leaving the file untouched — `std::fs::copy` opens the destination `O_TRUNC`, so without this
@@ -899,7 +899,7 @@ mod tests {
     }
 
     /// `walk` recursively lists every entry under a root in a deterministic per-dir-sorted, dir-before-
-    /// children order (required for serial==M:N parity). The root itself is excluded.
+    /// children order (required for byte-identical output regardless of worker count). The root itself is excluded.
     #[test]
     fn fs_walk_recursive_sorted() {
         let tmp = TmpDir::new();
