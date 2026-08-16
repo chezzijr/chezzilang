@@ -1130,7 +1130,7 @@ impl Vm {
                     // every enclosing `run_until` (native re-entry) and the worker→parent fault
                     // boundary — that is what keeps the abort un-catchable by `recover:` (the Err
                     // funnel below bypasses `recover:` whenever the marker is set) and correctly
-                    // bucketed `OverMemory` on either engine.
+                    // bucketed `OverMemory`.
                     let rte = self
                         .unwind_deferred(base_level, false)
                         .map(RuntimeError::over_memory)
@@ -1557,7 +1557,7 @@ impl Vm {
 
     /// THE cancel predicate — every cancellation checkpoint (`jump_checked`'s loop back-edge,
     /// `guarded`'s native-HOF re-entry, the blocking-native offload, `chan_recv_step`, `op_wait_poll`,
-    /// [`Vm::demote_block_socket`], [`Vm::join_eager_jobs`]) asks exactly this, on BOTH engines. Two
+    /// [`Vm::demote_block_socket`], [`Vm::join_eager_jobs`]) asks exactly this. Two
     /// suppressions, both load-bearing:
     ///
     /// * `!self.cancelled` — latch: once the cancel unwind is in flight, a checkpoint inside it must
