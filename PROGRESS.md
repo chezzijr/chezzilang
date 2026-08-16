@@ -7,6 +7,46 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > and are kept verbatim — that is what this tracker is for. Since 2026-08-16 there is **one engine**
 > and no cross-engine gate; see the entry directly below.
 
+> **✅ `List.min` / `max` / `min_by` / `max_by` return `Option[T]`, 2026-08-17 — the last OPEN row in
+> `docs/gaps.md` is struck.** All four used to FAULT on an empty list (`runtime error: min() of empty
+> list`) while their siblings `first`/`last`/`pop` returned `Option[T]`. That is mixed lineage inside
+> one method family — Python's `min([])` → `ValueError` and Go's `slices.Max(nil)` panic for one half,
+> **Rust's `[].iter().min()` → `None`** for the other — and the `-> T` signature **hid** the failure, so
+> a caller wrote the crash with the type system silent. All four now answer `None`; the family is one
+> lineage (Rust) again.
+> **Measured, pre-change binary vs post:** `xs: List[int] = []` / `r := recover: xs.min()` printed
+> `Err(min() of empty list)`, and `match xs.min(): Some(v)…/None…` was a *type error: cannot match a
+> variant against int*. Post-fix the `recover:` is `Ok(None)`, the `match` takes the `None` arm, and
+> `[3,1,2].min() == Some(1)`.
+> **The signature WAS the type change** — the four sigs are single-sourced in `std/prelude.chz:72-75`
+> and harvested by the checker, so **no Rust checker edit was needed**, on either the flat path
+> (`min`/`max`) or the method-type-param path (`min_by`/`max_by`, `[K: Comparable]` →
+> `infer_generic_method`). The runtime is two helpers (`Vm::list_reduce_extreme`, `Vm::list_min_max_by`
+> in `src/vm/call.rs`): each empty-list `self.err(…)` became `alloc_enum("Option","None")`, and the
+> winning element is wrapped with `alloc_enum("Option","Some",…)` **before** the `self.pop()` unroots.
+> *That order is belt-and-braces and is documented as such rather than justified by an invented
+> hazard: `Heap::alloc` never collects — collection runs only at `run_until`'s instruction boundaries
+> — so the `Some` allocation cannot GC.* The GC-rooted-snapshot discipline, `order_key`, the NaN total
+> order and the first-seen tie-break are untouched. What IS load-bearing is the snapshot **root**, now
+> one hop longer-lived because the winner travels inside a `Some`: a shrinking comparator can leave the
+> extremum reachable only through the snapshot, pinned by the new
+> `gc_tests::min_max_some_payload_survives_gc` — **verified to discriminate**, since de-rooting the
+> snapshot turns it into *dangling GcRef (object was collected while still reachable)*.
+> **Two type shapes nothing else in the prelude had, pinned rather than assumed**
+> (`checker::tests::list_min_max_return_option_and_keep_their_bound`): a `where T: Comparable` bound
+> combined with an `Option` return (`sort` has the bound but returns `nil`; `first`/`last` return
+> `Option` with no bound) — the bound still rejects `[[1],[2]].min()` byte-identically to the
+> pre-change binary — and an `Option[T]` whose `T` comes from the **receiver** while `K` comes from the
+> closure, which `subst`'s `Ty::Option` arm does carry.
+> **Callers migrated with `??` and `match`** (there is deliberately no `.unwrap()` — `docs/gaps.md`
+> `L1`): `tests/chz/spec/list_test.chz`, `tests/chz/spec/newtype_test.chz`, `examples/list_methods.chz`
+> + its `.expected` golden, and `src/vm/tests.rs`, where the two empty-**fault** tests **invert** to
+> assert `None` and no fault. `tests/chz/README.md`'s fault-path example was `recover: [].min()`; it is
+> now `recover: [1,2].chunk(0)` — a replacement demo of a real remaining fault, not a mechanical edit.
+> **Gate:** `cargo test` all targets 0 failed (lib **4156 passed / 0 failed / 2 ignored**, 21 targets),
+> clippy `--all-targets -D warnings` clean, `chezzi test tests/chz` **569 → 571**, `examples/` goldens
+> byte-exact.
+
 > **✅ The `--serial` engine is REMOVED, 2026-08-16 (14 commits).** The cooperative single-thread VM,
 > the `--serial` and `--check-parity` flags, the cooperative scheduler and every per-engine fork are
 > gone. **The bytecode VM on its M:N scheduler is the sole engine.** `docs/future.md` §2b is marked
@@ -3987,7 +4027,8 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > contract (`Socket.read` refuses a binary payload rather than decoding it lossily). Still OPEN and
 > deliberately out of this batch: `List.min`/`max`/`min_by`/`max_by` faulting on empty while
 > `first`/`last`/`pop` return `Option[T]` — a surface break, own milestone (gaps.md 2026-07-24 entry,
-> re-confirmed 2026-07-26).
+> re-confirmed 2026-07-26). *[Superseded 2026-08-17 — that milestone shipped; all four now return
+> `Option[T]` and answer `None` on empty. See the top-of-file entry.]*
 
 > **✅ FIX (2026-07-25, gaps.md W6-2 + W6-19, both P0) — a task now snapshots the module globals FRESH at
 > its own `spawn`, at every depth; and a task's first-touch global WRITE no longer panics the M:N pool.**
@@ -5253,7 +5294,8 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > `std/prelude.chz` → name-keyed VM dispatch in `src/vm/call.rs`; zero new checker code — the generic
 > `Ty::List` arm harvests sigs, `where T: Comparable` enforced via `enforce_bounds`, `min_by`/`max_by`'s
 > `[K: Comparable]` routes through `infer_generic_method` exactly like `sort_by_key`): `min`/`max`
-> (`where T: Comparable`; first-seen tie; empty faults `min()/max() of empty list`; `NaN` uses `sort()`'s
+> (`where T: Comparable`; first-seen tie; empty faults `min()/max() of empty list` — *superseded
+> 2026-08-17: all four return `Option[T]`, empty is `None`*; `NaN` uses `sort()`'s
 > total order, never faults), `min_by`/`max_by` (`fn(T)->K` key, returns the extremal **element**),
 > `first`/`last` (`-> Option[T]`, `None` on empty), `reversed` (**new** list, receiver untouched — distinct
 > from in-place `reverse`), `insert(i,x)` (Python-clamps, never faults), `remove_at(i)` (returns the element,

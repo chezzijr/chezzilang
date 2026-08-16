@@ -69,10 +69,10 @@ native struct List[T]:
     native fn fold[U](self, init: U, f: fn(U, T) -> U) -> U
     native fn sort_by(self, cmp: fn(T, T) -> int) -> nil
     native fn sort_by_key[K: Comparable](self, f: fn(T) -> K) -> nil
-    native fn min(self) -> T where T: Comparable
-    native fn max(self) -> T where T: Comparable
-    native fn min_by[K: Comparable](self, f: fn(T) -> K) -> T
-    native fn max_by[K: Comparable](self, f: fn(T) -> K) -> T
+    native fn min(self) -> Option[T] where T: Comparable
+    native fn max(self) -> Option[T] where T: Comparable
+    native fn min_by[K: Comparable](self, f: fn(T) -> K) -> Option[T]
+    native fn max_by[K: Comparable](self, f: fn(T) -> K) -> Option[T]
     native fn first(self) -> Option[T]
     native fn last(self) -> Option[T]
     native fn reversed(self) -> List[T]

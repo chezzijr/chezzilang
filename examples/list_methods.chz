@@ -19,15 +19,24 @@ print([1, 2, 3, 4].sum())
 print([1.0, 2.5, 0.5].sum())
 
 # value/ergonomics methods (gaps.md §2)
-print([3, 1, 2].min())
-print([3, 1, 2].max())
+# min/max/min_by/max_by return Option[T] — None on empty, like first/last/pop
+print([3, 1, 2].min() ?? 0)
+print([3, 1, 2].max() ?? 0)
+empties: List[int] = []
+match empties.min():
+    Some(v): print("min {v}")
+    None: print("min of []: none")
 
 struct Item:
     weight: int
     name: str
 items := [Item(3, "box"), Item(1, "pin"), Item(2, "cup")]
-print(items.min_by(fn(it: Item) -> int: it.weight).name)
-print(items.max_by(fn(it: Item) -> int: it.weight).name)
+match items.min_by(fn(it: Item) -> int: it.weight):
+    Some(it): print(it.name)
+    None: print("none")
+match items.max_by(fn(it: Item) -> int: it.weight):
+    Some(it): print(it.name)
+    None: print("none")
 
 zs := [10, 20, 30]
 match zs.first():

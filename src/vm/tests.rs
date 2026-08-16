@@ -595,36 +595,31 @@ fn remove_at_oob_faults_both_engines() {
     assert_eq!(run_err(src), "index 9 out of bounds (len 3)");
 }
 
-/// `min`/`max` on an empty list faults byte-identically on both engines.
+/// `min`/`max` on an empty list answer `None` — NOT a fault. They return `Option[T]` like the
+/// sibling `first`/`last`/`pop` (Rust's `Iterator::min`), so the program runs to completion.
 #[test]
-fn min_max_empty_faults() {
-    let src = "xs: List[int] = []\nprint(\"before\")\nxs.min()\n";
-    assert_fault_parity(src, "before\n");
-    assert_eq!(run_err(src), "min() of empty list");
-    let src2 = "xs: List[int] = []\nprint(\"before\")\nxs.max()\n";
-    assert_fault_parity(src2, "before\n");
-    assert_eq!(run_err(src2), "max() of empty list");
+fn min_max_empty_is_none() {
+    let src = "xs: List[int] = []\nprint(\"before\")\nprint(xs.min() == None)\nprint(xs.max() == None)\nprint(xs.min() ?? -1)\n";
+    assert_mc_parity(src, "before\ntrue\ntrue\n-1\n");
 }
 
-/// `min_by`/`max_by` take a key extractor and return the ELEMENT with the extremal key (first-seen
-/// tie); empty faults on both engines.
+/// `min_by`/`max_by` take a key extractor and return `Some(<the ELEMENT with the extremal key>)`
+/// (first-seen tie).
 #[test]
 fn list_min_max_by_parity() {
     let src = "struct P:\n    k: int\n    tag: str\n\
                xs := [P(2, \"a\"), P(1, \"b\"), P(1, \"c\"), P(3, \"d\")]\n\
                fn key(p: P) -> int:\n    return p.k\n\
-               lo := xs.min_by(key)\n\
-               print(lo.tag)\n\
-               hi := xs.max_by(key)\n\
-               print(hi.tag)\n";
+               match xs.min_by(key):\n    Some(lo): print(lo.tag)\n    None: print(\"none\")\n\
+               match xs.max_by(key):\n    Some(hi): print(hi.tag)\n    None: print(\"none\")\n";
     assert_mc_parity(src, "b\nd\n");
 }
 
+/// …and `min_by`/`max_by` on an empty list answer `None` too, with no fault.
 #[test]
-fn min_max_by_empty_faults() {
-    let src = "xs: List[int] = []\nfn key(x: int) -> int:\n    return x\nprint(\"before\")\nxs.min_by(key)\n";
-    assert_fault_parity(src, "before\n");
-    assert_eq!(run_err(src), "min_by() of empty list");
+fn min_max_by_empty_is_none() {
+    let src = "xs: List[int] = []\nfn key(x: int) -> int:\n    return x\nprint(\"before\")\nprint(xs.min_by(key) == None)\nprint(xs.max_by(key) ?? -1)\n";
+    assert_mc_parity(src, "before\ntrue\n-1\n");
 }
 
 /// `min`/`max` scan a SNAPSHOT: a Comparable-struct element's `compare` that SHRINKS the receiver
@@ -636,12 +631,12 @@ fn min_max_shrinking_comparator_no_panic() {
     // snapshot scan still visits all three original elements → min by x = 1, on both engines.
     let min_src = "struct Point:\n    x: int\n    fn compare(self, other: Point) -> int:\n        pts.remove_at(0)\n        return self.x - other.x\n    fn eq(self, other: Point) -> bool:\n        return self.x == other.x\n\
                pts: List[Point] = [Point(3), Point(1), Point(2)]\n\
-               print(pts.min().x)\n";
+               match pts.min():\n    Some(p): print(p.x)\n    None: print(\"none\")\n";
     assert_mc_parity(min_src, "1\n");
     // Same for `max` (same `list_reduce_extreme` scan, is_max flipped) → max by x = 3.
     let max_src = "struct Q:\n    x: int\n    fn compare(self, other: Q) -> int:\n        qs.remove_at(0)\n        return self.x - other.x\n    fn eq(self, other: Q) -> bool:\n        return self.x == other.x\n\
                qs: List[Q] = [Q(3), Q(1), Q(2)]\n\
-               print(qs.max().x)\n";
+               match qs.max():\n    Some(q): print(q.x)\n    None: print(\"none\")\n";
     assert_mc_parity(max_src, "3\n");
 }
 

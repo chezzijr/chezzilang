@@ -50,12 +50,40 @@ test fn insert_remove_at():
 # ---- min / max ----
 
 test fn min_max_scalar():
-    assert [3, 1, 2].min() == 1
-    assert [3, 1, 2].max() == 3
-    assert [1.5, 0.5, 2.5].min() == 0.5
-    assert [1.5, 0.5, 2.5].max() == 2.5
-    assert ["pear", "apple", "kiwi"].min() == "apple"
-    assert ["pear", "apple", "kiwi"].max() == "pear"
+    assert [3, 1, 2].min() == Some(1)
+    assert [3, 1, 2].max() == Some(3)
+    assert [1.5, 0.5, 2.5].min() == Some(0.5)
+    assert [1.5, 0.5, 2.5].max() == Some(2.5)
+    assert ["pear", "apple", "kiwi"].min() == Some("apple")
+    assert ["pear", "apple", "kiwi"].max() == Some("pear")
+
+# Empty is `None`, NOT a fault — the whole family (`min`/`max`/`min_by`/`max_by`) matches its
+# `first`/`last`/`pop` siblings (Rust's `Iterator::min`), so no `recover:` is needed.
+test fn min_max_empty_is_none():
+    xs: List[int] = []
+    assert xs.min() == None
+    assert xs.max() == None
+    assert xs.min_by(fn(x: int) -> int: x) == None
+    assert xs.max_by(fn(x: int) -> int: x) == None
+    fs: List[float] = []
+    assert fs.min() == None
+    assert fs.max() == None
+    ss: List[str] = []
+    assert ss.min() == None
+    assert ss.max() == None
+    # `??` is the terse caller spelling (there is no `.unwrap()` by design)
+    assert (xs.min() ?? -1) == -1
+    assert (xs.max_by(fn(x: int) -> int: x) ?? -2) == -2
+
+# `min_by`/`max_by` return the ELEMENT whose key is extremal, wrapped in `Some`; first-seen ties.
+test fn min_max_by_scalar():
+    xs := [3, 1, 2]
+    assert xs.min_by(fn(x: int) -> int: -x) == Some(3)
+    assert xs.max_by(fn(x: int) -> int: -x) == Some(1)
+    # equal keys never displace the earlier element
+    ys := ["bb", "aa", "cc"]
+    assert ys.min_by(fn(s: str) -> int: s.len()) == Some("bb")
+    assert ys.max_by(fn(s: str) -> int: s.len()) == Some("bb")
 
 struct P:
     k: int
@@ -68,8 +96,16 @@ struct P:
 test fn min_max_comparable_struct():
     # first-seen tie-break for equal minima (P(1,"b") before P(1,"c"))
     xs := [P(2, "a"), P(1, "b"), P(1, "c"), P(3, "d")]
-    assert xs.min().tag == "b"
-    assert xs.max().tag == "d"
+    match xs.min():
+        Some(p): assert p.tag == "b"
+        None: assert false, "min of a non-empty list is Some"
+    match xs.max():
+        Some(p): assert p.tag == "d"
+        None: assert false, "max of a non-empty list is Some"
+    # …and a Comparable-struct element list that IS empty still answers None, no fault
+    es: List[P] = []
+    assert es.min() == None
+    assert es.max() == None
 
 # ---- unique / dedup ----
 

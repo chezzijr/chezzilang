@@ -2062,8 +2062,10 @@ impl Vm {
     /// `xs.min()` / `xs.max()` — the extremal element by natural order. A Comparable-struct element's
     /// `compare` re-enters the VM (may GC AND may mutate the source list), so the scan runs over a
     /// GC-rooted SNAPSHOT (mirrors [`Vm::list_sort_by_key`]/[`Vm::list_min_max_by`]) — never the live
-    /// source, whose length can change under a re-entrant comparator. Empty list faults. First-seen
-    /// tie-break (an equal element never displaces the earlier best), matching Python's `min`/`max`.
+    /// source, whose length can change under a re-entrant comparator. Returns `Option[T]` — `None` on
+    /// an empty list (Rust's `Iterator::min`/`max`, matching the sibling `first`/`last`/`pop`), NOT a
+    /// fault. First-seen tie-break (an equal element never displaces the earlier best), matching
+    /// Python's `min`/`max`.
     pub(super) fn list_reduce_extreme(
         &mut self,
         src_h: GcRef,
@@ -2075,8 +2077,7 @@ impl Vm {
             _ => unreachable!("list_reduce_extreme on non-list"),
         };
         if n == 0 {
-            let name = if is_max { "max" } else { "min" };
-            return Err(self.err(format!("{name}() of empty list"), span));
+            return Ok(self.alloc_enum("Option", "None", vec![]));
         }
         // A Comparable-struct element's `compare` re-enters user code, which may MUTATE (shrink) the
         // source list, so scan an immutable SNAPSHOT (mirrors `list_sort_by_key`/`list_min_max_by`) —
@@ -2115,12 +2116,20 @@ impl Vm {
             Obj::List(v) => v[best],
             _ => unreachable!(),
         };
-        self.pop(); // unroot snapshot
-        self.pop(); // unroot source
         if let Some(e) = err {
+            self.pop(); // unroot snapshot
+            self.pop(); // unroot source
             return Err(e);
         }
-        Ok(result)
+        // Wrap while the snapshot is still rooted. Belt-and-braces, NOT load-bearing today:
+        // collection only runs at `run_until`'s instruction boundaries, never inside `Heap::alloc`,
+        // and the scan's last re-entry is already over. Kept because a shrinking comparator can leave
+        // `result` reachable ONLY through the snapshot, so if anything between here and the caller's
+        // `push` ever re-enters the VM, this is the order that is already correct.
+        let some = self.alloc_enum("Option", "Some", vec![result]);
+        self.pop(); // unroot snapshot
+        self.pop(); // unroot source
+        Ok(some)
     }
 
     /// `xs.min_by(f)` / `xs.max_by(f)` — the ELEMENT whose derived key `f: fn(T) -> K` is extremal.
@@ -2128,7 +2137,8 @@ impl Vm {
     /// keys list are rooted so the re-entrant extractor (and a Comparable-struct key's `compare`) can
     /// GC freely. Keys are computed once per element; a linear argmin/argmax over the rooted keys picks
     /// the extremal index (first-seen tie), then the element at that index is read from the rooted
-    /// snapshot. Empty list faults.
+    /// snapshot. Returns `Option[T]` — `None` on an empty list (same lineage as `min`/`max`), NOT a
+    /// fault.
     pub(super) fn list_min_max_by(
         &mut self,
         src_h: GcRef,
@@ -2149,7 +2159,7 @@ impl Vm {
             _ => unreachable!("list_min_max_by on non-list"),
         };
         if n == 0 {
-            return Err(self.err(format!("{name}() of empty list"), span));
+            return Ok(self.alloc_enum("Option", "None", vec![]));
         }
         self.push(Value::obj(src_h)); // ROOT the source list
         let snap_h = {
@@ -2205,13 +2215,19 @@ impl Vm {
             Obj::List(v) => v[best],
             _ => unreachable!(),
         };
+        if let Some(e) = err {
+            self.pop(); // unroot keys
+            self.pop(); // unroot snapshot
+            self.pop(); // unroot source
+            return Err(e);
+        }
+        // Wrap while the snapshot is still rooted — see `list_reduce_extreme` for why that is
+        // belt-and-braces rather than load-bearing.
+        let some = self.alloc_enum("Option", "Some", vec![result]);
         self.pop(); // unroot keys
         self.pop(); // unroot snapshot
         self.pop(); // unroot source
-        if let Some(e) = err {
-            return Err(e);
-        }
-        Ok(result)
+        Ok(some)
     }
 
     /// Stable top-down merge sort over `idx` (positions into the rooted keys list `keys_h`), ordering

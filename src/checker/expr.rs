@@ -2895,11 +2895,12 @@ impl Checker {
                 }
                 // Every other method's sig is harvested from `std/prelude.chz`'s `native struct List[T]`
                 // (re-seeded by `seed_stdlib_structs`); the element type is substituted for `Ty::Param`.
-                // `sort`'s `where T: Comparable` bound (harvested onto the sig's `where_bounds`) is
-                // enforced here via `enforce_bounds` with the `T -> elem` substitution — the file-backed
+                // A `where T: Comparable` bound (harvested onto the sig's `where_bounds`) is enforced
+                // here via `enforce_bounds` with the `T -> elem` substitution — the file-backed
                 // replacement for the retired bespoke Comparable arm (int/float/str intrinsically, a
-                // struct via its `compare` method; `Ty::Unknown` tolerated). This is the ONLY List method
-                // carrying a where-clause today, so the enforcement is a no-op for every other method.
+                // struct via its `compare` method; `Ty::Unknown` tolerated). `sort`/`min`/`max`
+                // (`Comparable`) and `sum` (`Add`) are the List methods carrying a where-clause today —
+                // `min`/`max` pair one with an `Option[T]` return; it is a no-op for every other method.
                 if let Some(sig) =
                     self.native_handle_method("List", method, std::slice::from_ref(&elem))
                 {

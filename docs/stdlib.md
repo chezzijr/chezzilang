@@ -98,8 +98,8 @@ fault, by contrast, is raised identically by both.)
 | `map` | `(f: fn(T) -> U) -> List[U]` | Returns a new list. |
 | `filter` | `(pred: fn(T) -> bool) -> List[T]` | Returns a new list. |
 | `fold` | `(init: U, f: fn(U, T) -> U) -> U` | Left fold. |
-| `min` / `max` | `() -> T` | Smallest / largest element by natural order (`int`/`float`/`str` or a `Comparable` struct). Ties resolve to the first-seen element. Empty list **faults** (`min()`/`max() of empty list`). Float `NaN` uses the same total order as `sort()` — never faults. |
-| `min_by` / `max_by` | `(key: fn(T) -> K) -> T` | The **element** whose derived key `K` (orderable/`Comparable`) is smallest / largest; first-seen ties. Empty list faults. |
+| `min` / `max` | `() -> Option[T]` | Smallest / largest element by natural order (`int`/`float`/`str` or a `Comparable` struct), wrapped in `Some`. Ties resolve to the first-seen element. Empty list is `None` — never faults (same shape as `first`/`last`/`pop`; unwrap with `??` or `match`). Float `NaN` uses the same total order as `sort()`. |
+| `min_by` / `max_by` | `(key: fn(T) -> K) -> Option[T]` | The **element** whose derived key `K` (orderable/`Comparable`) is smallest / largest, wrapped in `Some`; first-seen ties. Empty list is `None`, never a fault. |
 | `first` / `last` | `() -> Option[T]` | The first / last element, `None` if empty. Non-mutating. |
 | `reversed` | `() -> List[T]` | Returns a **new** reversed list — the receiver is untouched (contrast in-place `reverse`). |
 | `insert` | `(i: int, x: T) -> nil` | *mutates* — insert `x` before index `i`. Python-clamped: `i > len` appends, negatives are length-relative and clamp to `0`; never faults. |

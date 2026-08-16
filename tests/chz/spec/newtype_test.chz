@@ -2,6 +2,7 @@
 #
 # A numeric `newtype` satisfies `Comparable` (checker grants it for numeric underlyings), so
 # `.sort()`/`.min()`/`.max()` on a `List[newtype]` must order by the wrapped scalar's NATIVE order —
+# (`.min()`/`.max()`/`.min_by`/`.max_by` return `Option[T]`, so the `?? <sentinel>` unwraps below.)
 # same as bare `<`/`>`. Regression guard for the value_order/compare newtype-unwrap fix.
 # Gated by `chz_suite_passes` (`tests/chz_suite.rs`).
 
@@ -21,8 +22,12 @@ test fn sort_int_newtype():
 
 test fn minmax_int_newtype():
     xs := [UserId(3), UserId(1), UserId(5), UserId(2)]
-    assert int(xs.min()) == 1
-    assert int(xs.max()) == 5
+    assert int(xs.min() ?? UserId(0)) == 1
+    assert int(xs.max() ?? UserId(0)) == 5
+    # empty is `None`, not a fault — same family rule as `first`/`last`/`pop`
+    es: List[UserId] = []
+    assert es.min() == None
+    assert es.max() == None
 
 # ---- sort/min/max on a List[newtype=float] ----
 
@@ -30,8 +35,8 @@ test fn sort_minmax_float_newtype():
     ys := [Score(2.5), Score(1.0), Score(3.25), Score(0.5)]
     ys.sort()
     assert [float(s) for s in ys] == [0.5, 1.0, 2.5, 3.25]
-    assert float(ys.min()) == 0.5
-    assert float(ys.max()) == 3.25
+    assert float(ys.min() ?? Score(0.0)) == 0.5
+    assert float(ys.max() ?? Score(0.0)) == 3.25
 
 # ---- must-preserve: bare `<`/`==` and explicit-key sort still correct ----
 
@@ -47,13 +52,13 @@ test fn newtype_positive_controls():
 
 test fn minmax_nan_float_newtype():
     xs := [Score(1.0), Score(math.nan), Score(2.0)]
-    assert float(xs.min()) == 1.0      # NaN sorts high via total_cmp, min is the 1.0 element
-    assert math.is_nan(float(xs.max()))  # max is the NaN element
+    assert float(xs.min() ?? Score(0.0)) == 1.0      # NaN sorts high via total_cmp, min is the 1.0 element
+    assert math.is_nan(float(xs.max() ?? Score(0.0)))  # max is the NaN element
 
 # ---- sort_by_key / min_by / max_by over a newtype=float NaN key: no fault, matches underlying ----
 
 test fn by_key_nan_float_newtype():
     ws := [Score(3.0), Score(math.nan), Score(1.0)]
     ws.sort_by_key(fn(s): s)
-    assert float(ws.min_by(fn(s): s)) == 1.0
-    assert math.is_nan(float(ws.max_by(fn(s): s)))
+    assert float(ws.min_by(fn(s): s) ?? Score(0.0)) == 1.0
+    assert math.is_nan(float(ws.max_by(fn(s): s) ?? Score(0.0)))

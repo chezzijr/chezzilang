@@ -1050,6 +1050,39 @@ v := pick(Wrap(1), Wrap(2))
     entry_rejects(src, "does not satisfy Comparable");
 }
 
+/// `List.min`/`max`/`min_by`/`max_by` return `Option[T]` (empty is `None`, not a fault) — two type
+/// shapes nothing else in `std/prelude.chz` had, so both are pinned here rather than assumed:
+/// (a) `min`/`max` combine a `where T: Comparable` bound with an `Option` return — the bound must
+///     still reject a non-Comparable element (`sort` had the bound but returns `nil`);
+/// (b) `min_by`/`max_by` carry their OWN `[K: Comparable]` type-param, so they route through
+///     `infer_generic_method`, and the `Option[T]`'s `T` comes from the RECEIVER, not from `K` —
+///     `subst` must map it (`Ty::Option(t) => Ty::option(subst(t, map))`).
+#[test]
+fn list_min_max_return_option_and_keep_their_bound() {
+    // (a) the where-bound still fires through the new `Option` return
+    rejects(
+        "xs := [[1], [2]]\nxs.min()\n",
+        "does not satisfy Comparable",
+    );
+    rejects(
+        "xs := [[1], [2]]\nxs.max()\n",
+        "does not satisfy Comparable",
+    );
+    // …and a Comparable element is still accepted
+    ok("xs := [3, 1, 2]\nprint(xs.min() ?? 0)\nprint(xs.max() ?? 0)\n");
+    // (b) the return really IS `Option[T]` with `T` from the receiver, at BOTH paths: a bare `T`
+    // annotation must be refused, an `Option[T]` one accepted.
+    for call in ["min()", "max()", "min_by(fn(x: int) -> int: x)"] {
+        rejects(
+            &format!("xs := [3, 1, 2]\nv: int = xs.{call}\n"),
+            "cannot assign Option[int] to variable of type int",
+        );
+        ok(&format!("xs := [3, 1, 2]\nv: Option[int] = xs.{call}\n"));
+    }
+    // the `min_by` key type `K` is independent of the element type — `Option[str]` here, from `T`
+    ok("xs := [\"bb\", \"a\"]\nv: Option[str] = xs.max_by(fn(s: str) -> int: s.len())\n");
+}
+
 #[test]
 fn redeclaring_add_rejected() {
     rejects(

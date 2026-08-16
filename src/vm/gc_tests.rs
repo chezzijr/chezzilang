@@ -925,3 +925,49 @@ fn deep_clone_all_rebuilds_at_exact_capacity() {
         out.len()
     );
 }
+
+/// `min`/`max`/`min_by`/`max_by` now return `Some(<extremum>)`, so the winning element travels one
+/// hop further than it used to. When a re-entrant `compare`/key extractor has REMOVED that element
+/// from the live receiver, the GC-rooted snapshot is the ONLY thing keeping it alive across the
+/// re-entry's collections, and the returned `Some` then carries an element the source no longer
+/// contains. **Verified to discriminate**: swapping either helper's `push(<snapshot>)` for a
+/// non-rooting push turns this into *dangling GcRef (object was collected while still reachable)*.
+/// (The `Some` allocation itself cannot collect — `Heap::alloc` never GCs; collection happens only
+/// at `run_until`'s instruction boundaries, which is why the wrap-before-unroot order in
+/// `list_reduce_extreme`/`list_min_max_by` is belt-and-braces rather than load-bearing.)
+#[test]
+fn min_max_some_payload_survives_gc() {
+    // `compare` shrinks the module-global receiver, so by the time the scan finishes the winner
+    // (`P(str(1), 1)`) is reachable ONLY through the rooted snapshot.
+    let min_src = "\
+struct P:
+    tag: str
+    k: int
+    fn compare(self, o: P) -> int:
+        pts.remove_at(0)
+        return self.k - o.k
+    fn eq(self, o: P) -> bool:
+        return self.k == o.k
+pts: List[P] = [P(str(3), 3), P(str(1), 1), P(str(2), 2)]
+fn main():
+    match pts.min():
+        Some(p): print(p.tag)
+        None: print(\"none\")
+main()";
+    assert_eq!(run_capture_stress(min_src), "1\n");
+    // …and the `min_by` path, whose key extractor does the shrinking.
+    let by_src = "\
+struct Q:
+    tag: str
+    k: int
+qs: List[Q] = [Q(str(3), 3), Q(str(1), 1), Q(str(2), 2)]
+fn key(q: Q) -> int:
+    qs.remove_at(0)
+    return q.k
+fn main():
+    match qs.min_by(key):
+        Some(q): print(q.tag)
+        None: print(\"none\")
+main()";
+    assert_eq!(run_capture_stress(by_src), "1\n");
+}
