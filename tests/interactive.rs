@@ -1085,6 +1085,10 @@ fn show_output_survives_closed_reader() {
         "a closed reader on a PASSING run must not report failure: {:?} (stderr: {err})",
         out.status
     );
+    assert!(
+        !err.contains("cannot write stdout"),
+        "a closed reader must not be reported as a truncated write: {err}"
+    );
 }
 
 /// M2, the regression itself: a write failure that is NOT a closed reader must NOT be silently

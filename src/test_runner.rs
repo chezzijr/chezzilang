@@ -5,8 +5,8 @@
 //! `recover:` only hands back the fault *message*, not its `span`, so only Rust catching the
 //! `RuntimeError` directly gets the `.span` (hence `file:line`) the headline feature needs.
 //!
-//! This orchestration's output is Rust-formatted `PASS/FAIL`, not Chezzi program stdout, so no golden
-//! parity applies.
+//! This orchestration's output is Rust-formatted `PASS/FAIL`, not Chezzi program stdout, so no
+//! golden-output gate applies.
 
 use crate::vm::Vm;
 use crate::vm::op::Program;
@@ -1172,26 +1172,25 @@ struct Suite:
             "test fn boom():\n    xs := []\n    for i in range(1000000):\n        xs.push([i])\n",
         );
         {
-            let parallel = true;
             let report = run_tests_capped(&f, 1_000_000);
             assert!(
                 !report.passed,
-                "over-memory must fail the run (parallel={parallel}); report:\n{}",
+                "over-memory must fail the run; report:\n{}",
                 report.text
             );
             assert!(
                 report.text.contains("OVER-MEMORY boom"),
-                "runaway alloc must render OVER-MEMORY (parallel={parallel}); report:\n{}",
+                "runaway alloc must render OVER-MEMORY; report:\n{}",
                 report.text
             );
             assert!(
                 report.text.contains("over-memory"),
-                "summary must count the bucket (parallel={parallel}); report:\n{}",
+                "summary must count the bucket; report:\n{}",
                 report.text
             );
             assert!(
                 !report.text.contains("FAIL boom") && !report.text.contains("ERROR boom"),
-                "must be OVER-MEMORY, not FAIL/ERROR (parallel={parallel}); report:\n{}",
+                "must be OVER-MEMORY, not FAIL/ERROR; report:\n{}",
                 report.text
             );
         }
@@ -1224,18 +1223,17 @@ struct Suite:
         );
         for (label, f) in [("backlog", &backlog), ("parked", &parked)] {
             {
-                let parallel = true;
                 let report = run_tests_capped(f, CAP);
                 assert!(
                     report.text.contains(&format!("OVER-MEMORY {label}")),
-                    "off-heap wire storage must trip the cap ({label}, parallel={parallel}); \
+                    "off-heap wire storage must trip the cap ({label}); \
                      report:\n{}",
                     report.text
                 );
                 assert!(
                     !report.text.contains(&format!("FAIL {label}"))
                         && !report.text.contains(&format!("ERROR {label}")),
-                    "must be OVER-MEMORY, not FAIL/ERROR ({label}, parallel={parallel}); \
+                    "must be OVER-MEMORY, not FAIL/ERROR ({label}); \
                      report:\n{}",
                     report.text
                 );
@@ -1275,23 +1273,22 @@ struct Suite:
              ex.submit(fn(): print(blob))\n    ex.shutdown()\n    assert true\n",
         );
         {
-            let parallel = true;
             let report = run_tests_capped(&ex, CAP);
             assert!(
                 report.text.contains("OVER-MEMORY execres"),
-                "an executor's buffered-output backlog must trip the cap (parallel={parallel}); \
+                "an executor's buffered-output backlog must trip the cap; \
                  report:\n{}",
                 report.text
             );
             assert!(
                 !report.text.contains("FAIL execres") && !report.text.contains("ERROR execres"),
-                "must be OVER-MEMORY, not FAIL/ERROR (parallel={parallel}); report:\n{}",
+                "must be OVER-MEMORY, not FAIL/ERROR; report:\n{}",
                 report.text
             );
             let generous = run_tests_capped(&ex, 4_000_000_000);
             assert!(
                 generous.text.contains("PASS execres"),
-                "the same program under a generous cap must still PASS (parallel={parallel}); \
+                "the same program under a generous cap must still PASS; \
                  report:\n{}",
                 generous.text
             );
@@ -1515,17 +1512,16 @@ struct Suite:
              s.get().send(blob)\n    assert true\n",
         );
         {
-            let parallel = true;
             let report = run_tests_capped(&nested, CAP);
             assert!(
                 report.text.contains("OVER-MEMORY nested"),
-                "a backlog behind a nested core must trip the cap (parallel={parallel}); \
+                "a backlog behind a nested core must trip the cap; \
                  report:\n{}",
                 report.text
             );
             assert!(
                 !report.text.contains("FAIL nested") && !report.text.contains("ERROR nested"),
-                "must be OVER-MEMORY, not FAIL/ERROR (parallel={parallel}); report:\n{}",
+                "must be OVER-MEMORY, not FAIL/ERROR; report:\n{}",
                 report.text
             );
         }
@@ -1560,18 +1556,16 @@ struct Suite:
         );
         for (label, f) in [("msg", &msg), ("ints", &ints)] {
             {
-                let parallel = true;
                 let report = run_tests_capped(f, CAP);
                 assert!(
                     report.text.contains(&format!("OVER-MEMORY {label}")),
-                    "off-heap growth must PACE a sweep so the cap is sampled ({label}, \
-                     parallel={parallel}); report:\n{}",
+                    "off-heap growth must PACE a sweep so the cap is sampled ({label}); report:\n{}",
                     report.text
                 );
                 assert!(
                     !report.text.contains(&format!("FAIL {label}"))
                         && !report.text.contains(&format!("ERROR {label}")),
-                    "must be OVER-MEMORY, not FAIL/ERROR ({label}, parallel={parallel}); \
+                    "must be OVER-MEMORY, not FAIL/ERROR ({label}); \
                      report:\n{}",
                     report.text
                 );
@@ -1913,18 +1907,17 @@ struct Suite:
             ("repgrow", &repf),
         ] {
             {
-                let parallel = true;
                 let report = run_tests_capped(f, CAP);
                 assert!(
                     report.text.contains(&format!("OVER-MEMORY {label}")),
                     "inline-scalar container growth must PACE a sweep so the cap is sampled \
-                     ({label}, parallel={parallel}); report:\n{}",
+                     ({label}); report:\n{}",
                     report.text
                 );
                 assert!(
                     !report.text.contains(&format!("FAIL {label}"))
                         && !report.text.contains(&format!("ERROR {label}")),
-                    "must be OVER-MEMORY, not FAIL/ERROR ({label}, parallel={parallel}); \
+                    "must be OVER-MEMORY, not FAIL/ERROR ({label}); \
                      report:\n{}",
                     report.text
                 );
@@ -1960,11 +1953,10 @@ struct Suite:
              assert hs.len() == 50\n",
         );
         {
-            let parallel = true;
             let report = run_tests_capped(&f, 8_000_000);
             assert!(
                 report.text.contains("PASS alias"),
-                "50 handles to one core must not multiply its payload (parallel={parallel}); \
+                "50 handles to one core must not multiply its payload; \
                  report:\n{}",
                 report.text
             );
@@ -2248,39 +2240,34 @@ struct Suite:
             ),
         ] {
             {
-                let parallel = true;
                 let d = TmpDir::new();
                 let f = d.write(name, body);
                 let t0 = std::time::Instant::now();
                 let report = run_tests_timed(&f, 0, 300);
                 let elapsed = t0.elapsed();
-                assert!(
-                    !report.passed,
-                    "{name} (parallel={parallel}):\n{}",
-                    report.text
-                );
+                assert!(!report.passed, "{name}:\n{}", report.text);
                 assert!(
                     report.text.contains("TIMED-OUT t"),
-                    "{name} (parallel={parallel}): --timeout must abort a SLEEPING test, not wait out \
+                    "{name}: --timeout must abort a SLEEPING test, not wait out \
                      its deadline; report:\n{}",
                     report.text
                 );
                 assert!(
                     !report.text.contains("SWALLOWED"),
-                    "{name} (parallel={parallel}): control must never fall through the aborted sleep; \
+                    "{name}: control must never fall through the aborted sleep; \
                      report:\n{}",
                     report.text
                 );
                 assert!(
                     !report.text.contains("deadlock"),
-                    "{name} (parallel={parallel}): a sleeper must never be judged a deadlock — its \
+                    "{name}: a sleeper must never be judged a deadlock — its \
                      wait always ends, so it is deliberately unregistered as a blocked party; \
                      report:\n{}",
                     report.text
                 );
                 assert!(
                     elapsed < std::time::Duration::from_millis(1500),
-                    "{name} (parallel={parallel}): the 300ms cap took {elapsed:?} (pre-fix: the full \
+                    "{name}: the 300ms cap took {elapsed:?} (pre-fix: the full \
                      3s sleep, reported PASS)"
                 );
             }
@@ -2304,7 +2291,6 @@ struct Suite:
             "import std.time\nfn nap():\n    defer print(\"cleanup ran\")\n    tm := time.timer(3000)\n    _ := tm.recv()\ntest fn t():\n    parallel:\n        spawn nap()\n    assert false, \"SWALLOWED\"\n",
         );
         {
-            let parallel = true;
             let report = run_tests_opts(
                 &f,
                 opts_with(|o| {
@@ -2314,12 +2300,12 @@ struct Suite:
             );
             assert!(
                 report.text.contains("TIMED-OUT t"),
-                "(parallel={parallel}) report:\n{}",
+                "report:\n{}",
                 report.text
             );
             assert!(
                 report.text.contains("cleanup ran"),
-                "(parallel={parallel}): a task the deadline aborted mid-park must still unwind its \
+                "a task the deadline aborted mid-park must still unwind its \
                  `defer`s — stopping promptly is not the same as cleaning up; report:\n{}",
                 report.text
             );
@@ -2342,7 +2328,6 @@ struct Suite:
             "import std.time\nch: Channel[int] = Channel[int](4)\ntest fn t():\n    defer:\n        print(\"DEFER-ENTERED\")\n        v := ch.recv()\n        print(\"DEFER-RECV {v}\")\n    ch.send(7)\n    time.sleep_ms(3000)\n",
         );
         {
-            let parallel = true;
             let report = run_tests_opts(
                 &f,
                 opts_with(|o| {
@@ -2352,12 +2337,12 @@ struct Suite:
             );
             assert!(
                 report.text.contains("TIMED-OUT t"),
-                "(parallel={parallel}) report:\n{}",
+                "report:\n{}",
                 report.text
             );
             assert!(
                 report.text.contains("DEFER-RECV 7"),
-                "(parallel={parallel}): the `--timeout` abort must not preempt a cleanup `recv` whose \
+                "the `--timeout` abort must not preempt a cleanup `recv` whose \
                  value is already queued — it does not block, so there is nothing for a hard halt to \
                  rescue; report:\n{}",
                 report.text
@@ -2378,23 +2363,22 @@ struct Suite:
             "import std.process\ntest fn t():\n    _ := process.cmd(\"sleep 1\")\n",
         );
         {
-            let parallel = true;
             let report = run_tests_timed(&f, 0, 300);
             assert!(
                 report.text.contains("TIMED-OUT t"),
-                "(parallel={parallel}): a test that overran its --timeout must not report PASS just \
+                "a test that overran its --timeout must not report PASS just \
                  because the blocking native could not be interrupted; report:\n{}",
                 report.text
             );
             assert!(
                 report.text.contains("could not be aborted"),
-                "(parallel={parallel}): the post-hoc bucket must read differently from the abort \
+                "the post-hoc bucket must read differently from the abort \
                  path; report:\n{}",
                 report.text
             );
             assert!(
                 report.text.contains("1 timed out") && !report.passed,
-                "(parallel={parallel}): summary/exit must treat it exactly like an aborted timeout; \
+                "summary/exit must treat it exactly like an aborted timeout; \
                  report:\n{}",
                 report.text
             );
@@ -2961,16 +2945,11 @@ struct Suite:
             "fn grow(x: int) -> int:\n    ys := []\n    for j in range(1000000):\n        ys.push([j])\n    return 0\ntest fn t():\n    r := recover: [1].map(grow)\n    assert true\n",
         );
         {
-            let parallel = true;
             let report = run_tests_capped(&f, 1_000_000);
-            assert!(
-                !report.passed,
-                "(parallel={parallel}) report:\n{}",
-                report.text
-            );
+            assert!(!report.passed, "report:\n{}", report.text);
             assert!(
                 report.text.contains("OVER-MEMORY t"),
-                "recover: must NOT catch an over-memory abort raised inside a HOF callback (parallel={parallel}); report:\n{}",
+                "recover: must NOT catch an over-memory abort raised inside a HOF callback; report:\n{}",
                 report.text
             );
         }
@@ -2987,16 +2966,11 @@ struct Suite:
             "fn runaway() -> int:\n    ys := []\n    for j in range(1000000):\n        ys.push([j])\n    return 0\ntest fn t():\n    parallel:\n        spawn runaway()\n",
         );
         {
-            let parallel = true;
             let report = run_tests_capped(&f, 1_000_000);
-            assert!(
-                !report.passed,
-                "(parallel={parallel}) report:\n{}",
-                report.text
-            );
+            assert!(!report.passed, "report:\n{}", report.text);
             assert!(
                 report.text.contains("OVER-MEMORY t"),
-                "a spawned task's runaway alloc must bucket OVER-MEMORY (parallel={parallel}); report:\n{}",
+                "a spawned task's runaway alloc must bucket OVER-MEMORY; report:\n{}",
                 report.text
             );
         }
@@ -3022,18 +2996,13 @@ struct Suite:
             \x20       spawn work()\n",
         );
         {
-            let parallel = true;
             let report = run_tests_capped(&f, 100_000_000);
             assert!(
                 report.passed,
-                "a concurrent test well under a generous cap must pass (parallel={parallel}); report:\n{}",
+                "a concurrent test well under a generous cap must pass; report:\n{}",
                 report.text
             );
-            assert!(
-                report.text.contains("PASS t"),
-                "(parallel={parallel}) report:\n{}",
-                report.text
-            );
+            assert!(report.text.contains("PASS t"), "report:\n{}", report.text);
         }
     }
 
@@ -3065,17 +3034,16 @@ struct Suite:
             \x20   assert sentinel.len() == 1\n",
         );
         {
-            let parallel = true;
             let report = run_tests_capped(&f, 1_000_000);
             assert!(
                 report.text.contains("OVER-MEMORY trip"),
-                "the tripping test must bucket OVER-MEMORY (parallel={parallel}); report:\n{}",
+                "the tripping test must bucket OVER-MEMORY; report:\n{}",
                 report.text
             );
             assert!(
                 report.text.contains("PASS defer_was_bounded"),
                 "the runaway defer must be cut short by the still-armed cap, so its post-alloc push \
-                 never runs (parallel={parallel}); report:\n{}",
+                 never runs; report:\n{}",
                 report.text
             );
         }

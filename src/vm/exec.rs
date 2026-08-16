@@ -1308,7 +1308,7 @@ impl Vm {
                 //
                 // `caught_here` is the CONSERVATIVE arm, not a load-bearing one: measured on the real
                 // binary, dropping it (`!(self.deferring > 0)`) leaves every test in
-                // `tests/chz/spec/cancel_defer_recover_test.chz` byte-identical on both engines — with
+                // `tests/chz/spec/cancel_defer_recover_test.chz` byte-identical — with
                 // no handler above `base_level` the fault returns `Err` either way. It is kept because
                 // it preserves the bypass in MORE cases (a cancelled task is more likely to die), which
                 // is the safe direction. Do not "simplify" it away without re-deriving that.
@@ -1672,9 +1672,7 @@ impl Vm {
         // §2c1 — EVERY nursery on the M:N engine activates an EAGER sched NOW, so a `spawn`
         // in the body injects a LIVE fiber that runs concurrently with the rest of the body.
         // That is Go's `go f()`: the task starts at the `spawn`, and the join keeps its own
-        // (orthogonal) job of guaranteeing COMPLETION by the barrier. A cooperative nursery (no
-        // worker shell, sharing the host heap) stays lazy (queue-at-join → `None`) — it has one
-        // thread, so Go's semantics are unreachable on it by construction (`docs/future.md` §2b/§2c1).
+        // (orthogonal) job of guaranteeing COMPLETION by the barrier (`docs/future.md` §2b/§2c1).
         //
         // `mn.is_some()` WAS the defect and is gone: a top-level nursery has no worker shell,
         // so it was lazy by construction and its tasks could not start until the join. A
