@@ -312,7 +312,7 @@ fn main():
 main()
 "#;
     for _ in 0..50 {
-        assert_fault_same_lines(src);
+        assert_fault_same_lines(src, "SET-LINE-1\nSET-LINE-2\n");
     }
 }
 
@@ -474,16 +474,15 @@ fn assert_fault_parity(src: &str, expected_out: &str) {
 }
 
 /// Like [`assert_fault_parity`] but asserts the order-INSENSITIVE SET of stdout lines matches
-/// (`assert_same_lines`), for a genuinely-racing multi-printer deadlock where the interleaving is
-/// nondeterministic under M:N. Both engines must fault. Goes through the `(stdout, result)` harness
-/// (NOT `run_capture`, which drops stdout on `Err`) so the parked buffers are observable.
+/// `expected_lines` (`assert_same_lines`), for a genuinely-racing multi-printer deadlock where the
+/// interleaving is nondeterministic under M:N. The run must fault. Goes through the
+/// `(stdout, result)` harness (NOT `run_capture`, which drops stdout on `Err`) so the parked
+/// buffers are observable.
 #[cfg(test)]
-fn assert_fault_same_lines(src: &str) {
+fn assert_fault_same_lines(src: &str, expected_lines: &str) {
     let (vm_out, vm_res) = run_program(src);
     assert!(vm_res.is_err(), "VM expected to fault, got {vm_out:?}");
-    let (mn_out, mn_res) = run_program(src);
-    assert!(mn_res.is_err(), "M:N expected to fault, got {mn_out:?}");
-    assert_same_lines(&vm_out, &mn_out);
+    assert_same_lines(&vm_out, expected_lines);
 }
 
 /// Parity gap fix (T1), §2c1 rewrite: an UNCAUGHT body fault reclaims the function's implicit
@@ -843,51 +842,75 @@ fn fxhash_set_dedup_and_ops() {
 // ---- M19 Tier-2: index-access specialization (behavior-preserving guards) ----
 // The Int-key fast path in `get_index`/`set_index` (skips the rooting that protects a struct
 // key's re-entrant hash) and the inline `GetIndex`/`SetIndex` dispatch are VM-only speedups, so
-// every result + error string must stay byte-identical. `idx_parity`
-// compares the full `Result` outcome (stdout OR error message). These pin the contract BEFORE the
-// change and stay green AFTER.
-fn idx_parity(src: &str) {
-    let vm = run_capture(src).map_err(|e| e.to_string());
-    let interp = run_capture(src).map_err(|e| e.to_string());
-    assert_eq!(
-        vm, interp,
-        "divergence (index specialization must be behavior-preserving):\n{src}"
-    );
+// every result + error string must stay byte-identical to what the general (pre-fast-path) match
+// produces. `idx_parity` asserts the run against a literal `expected`: `Ok(stdout)` for a clean
+// run, `Err(msg)` for a runtime fault (compared against the fault's `.message`, not its
+// span-carrying `Display`, since the span isn't the contract being pinned here).
+fn idx_parity(src: &str, expected: Result<&str, &str>) {
+    match (run_capture(src), expected) {
+        (Ok(out), Ok(want)) => assert_eq!(out, want),
+        (Err(e), Err(want)) => assert_eq!(e.message, want),
+        (Ok(out), Err(want)) => panic!("expected fault {want:?}, got Ok({out:?})"),
+        (Err(e), Ok(want)) => panic!("expected Ok({want:?}), got fault {e:?}"),
+    }
 }
 
 #[test]
 fn idxspec_int_map_get_hit_and_miss() {
     // Int-key map read: a present key returns its value; an absent key faults "key not found".
-    idx_parity("m := {1: 10, 2: 20}\nprint(m[1])\nprint(m[2])\n");
-    idx_parity("m := {1: 10}\nprint(m[99])\n"); // miss → "key not found", same
+    idx_parity(
+        "m := {1: 10, 2: 20}\nprint(m[1])\nprint(m[2])\n",
+        Ok("10\n20\n"),
+    );
+    idx_parity("m := {1: 10}\nprint(m[99])\n", Err("key not found"));
 }
 
 #[test]
 fn idxspec_int_map_set_overwrite_and_insert() {
     // Int-key map write: overwrite an existing entry, insert a new one; len + reads agree.
-    idx_parity("m := {1: 10}\nm[1] = 11\nm[2] = 20\nprint(m[1])\nprint(m[2])\nprint(m.len())\n");
+    idx_parity(
+        "m := {1: 10}\nm[1] = 11\nm[2] = 20\nprint(m[1])\nprint(m[2])\nprint(m.len())\n",
+        Ok("11\n20\n2\n"),
+    );
 }
 
 #[test]
 fn idxspec_int_list_get_set_in_bounds() {
-    idx_parity("xs := [5, 6, 7]\nprint(xs[0])\nxs[2] = 99\nprint(xs[2])\n");
+    idx_parity(
+        "xs := [5, 6, 7]\nprint(xs[0])\nxs[2] = 99\nprint(xs[2])\n",
+        Ok("5\n99\n"),
+    );
 }
 
 #[test]
 fn idxspec_list_out_of_bounds_message_exact() {
     // Both get and set must surface the exact same bounds message through the fast path's fallback.
-    idx_parity("xs := [1, 2, 3]\nprint(xs[5])\n");
-    idx_parity("xs := [1, 2, 3]\nxs[5] = 0\n");
-    idx_parity("xs := [1, 2, 3]\nprint(xs[-1])\n"); // negative → out of bounds, not a panic
+    idx_parity(
+        "xs := [1, 2, 3]\nprint(xs[5])\n",
+        Err("index 5 out of bounds (len 3)"),
+    );
+    idx_parity(
+        "xs := [1, 2, 3]\nxs[5] = 0\n",
+        Err("index 5 out of bounds (len 3)"),
+    );
+    // Negative indexing counts from the end (Python parity, docs/syntax.md); -1 on a 3-element
+    // list is IN range (the last element), not a fault — verified against CPython.
+    idx_parity("xs := [1, 2, 3]\nprint(xs[-1])\n", Ok("3\n"));
 }
 
 #[test]
 fn idxspec_non_int_map_keys_via_fallback() {
     // Str + bool keys must NOT take the Int fast path — they route through the unchanged general
     // match (content/scalar hash). Output + a str-key miss message stay identical.
-    idx_parity("m := {\"a\": 1, \"b\": 2}\nprint(m[\"a\"])\nprint(m[\"b\"])\n");
-    idx_parity("m := {true: 1, false: 0}\nprint(m[false])\nprint(m[true])\n");
-    idx_parity("m := {\"a\": 1}\nprint(m[\"z\"])\n"); // str miss → "key not found"
+    idx_parity(
+        "m := {\"a\": 1, \"b\": 2}\nprint(m[\"a\"])\nprint(m[\"b\"])\n",
+        Ok("1\n2\n"),
+    );
+    idx_parity(
+        "m := {true: 1, false: 0}\nprint(m[false])\nprint(m[true])\n",
+        Ok("0\n1\n"),
+    );
+    idx_parity("m := {\"a\": 1}\nprint(m[\"z\"])\n", Err("key not found"));
 }
 
 #[test]
@@ -896,7 +919,7 @@ fn idxspec_struct_index_protocol_via_fallback() {
     // NOT the List/Map Int fast path. The receiver kind (Struct) gates the fast path, not the key.
     let src = "struct Buf:\n    xs: List[int]\n    fn index(self, k: int) -> int:\n        return self.xs[k]\n    fn set_index(self, k: int, v: int):\n        self.xs[k] = v\n\
                    b := Buf([10, 20, 30])\nprint(b[0])\nb[1] = 99\nprint(b[1])\n";
-    idx_parity(src);
+    idx_parity(src, Ok("10\n99\n"));
 }
 
 #[test]
@@ -906,6 +929,7 @@ fn idxspec_int_float_key_collision_resolves() {
     // 3.0 is found by m[3] and vice-versa.
     idx_parity(
         "m := {}\nm[3] = \"int\"\nprint(m[3.0])\nm[3.0] = \"float\"\nprint(m[3])\nprint(m.len())\n",
+        Ok("int\nfloat\n1\n"),
     );
 }
 
@@ -2223,11 +2247,6 @@ fn golden_wait_send_both_engines() {
     let expected = include_str!("../../examples/wait_send.expected");
     let out = run(src);
     assert_eq!(out, expected, "output drifted from wait_send.expected");
-    assert_eq!(
-        out,
-        run_capture(src).expect("M:N run"),
-        "divergence on wait_send"
-    );
 }
 
 /// Stress the send-arm park + receiver-wake (the delicate M:N scheduler change): a bounded cap-1
@@ -2426,18 +2445,16 @@ fn bounded_channel_inline_builder_full_send_faults_not_hang() {
 
 // ----- std.concurrency.pmap: scoped parallel-map helpers (Item 2) -----
 
-/// Run `src` from a temp entry file on BOTH engines (a real graph resolve, so `import … from
-/// std.concurrency.pmap` pulls the embedded module) and assert identical stdout + clean run.
+/// Run `src` from a temp entry file (a real graph resolve, so `import … from
+/// std.concurrency.pmap` pulls the embedded module), for the caller to assert against a literal
+/// expected. Asserts the run itself was clean.
 #[cfg(test)]
 fn pmap_both(tag: &str, src: &str) -> String {
     let entry = write_temp_chz(tag, src);
-    let (s_out, _e, s_res, _c) = run_file(&entry);
-    let (m_out, _e2, m_res, _c2) = run_file_with(&entry, crate::native::HostConfig::default());
+    let (out, _e, res, _c) = run_file(&entry);
     let _ = std::fs::remove_file(&entry);
-    assert!(s_res.is_ok(), "serial faulted: {s_res:?}");
-    assert!(m_res.is_ok(), "M:N faulted: {m_res:?}");
-    assert_eq!(s_out, m_out, "serial vs M:N output diverged");
-    s_out
+    assert!(res.is_ok(), "faulted: {res:?}");
+    out
 }
 
 /// `pmap` returns results in SUBMISSION order (sort-by-index, never completion order) —
@@ -10184,20 +10201,9 @@ fn golden_newtype_generic_chz_matches_expected_and_interp() {
     let src = include_str!("../../examples/newtype_generic.chz");
     let expected = include_str!("../../examples/newtype_generic.expected");
     let vm_out = run_capture(src).expect("vm run");
-    let interp_out = run_capture(src).expect("repeat run");
     assert_eq!(
         vm_out, expected,
         "vm output drifted from newtype_generic.expected"
-    );
-    assert_eq!(
-        vm_out, interp_out,
-        "vm/interp divergence on newtype_generic"
-    );
-    // 3-engine bar (M21/M19): the M:N --parallel engine must agree too.
-    assert_eq!(
-        vm_out,
-        run_capture(src).expect("parallel run"),
-        "parallel drifted from vm on newtype_generic"
     );
 }
 
@@ -10471,19 +10477,9 @@ fn golden_enum_layout_chz_matches_expected_and_interp() {
     let src = include_str!("../../examples/enum_layout.chz");
     let expected = include_str!("../../examples/enum_layout.expected");
     let vm_out = run_capture(src).expect("vm run");
-    let interp_out = run_capture(src).expect("repeat run");
     assert_eq!(
         vm_out, expected,
         "vm output drifted from enum_layout.expected"
-    );
-    assert_eq!(
-        vm_out, interp_out,
-        "vm/interp divergence on enum_layout (variant-id must be behavior-preserving)"
-    );
-    assert_eq!(
-        vm_out,
-        run_capture(src).expect("parallel run"),
-        "parallel engine diverged on enum_layout (wire/snap variant-id rebuild)"
     );
 }
 
@@ -10513,16 +10509,6 @@ fn golden_enum_methods_chz_matches_expected_and_interp() {
     assert_eq!(
         vm_out, expected,
         "vm output drifted from enum_methods.expected"
-    );
-    assert_eq!(
-        vm_out,
-        run_capture(src).expect("repeat run"),
-        "vm/interp divergence on enum_methods (enum methods must be behavior-preserving)"
-    );
-    assert_eq!(
-        vm_out,
-        run_capture(src).expect("parallel run"),
-        "parallel engine diverged on enum_methods"
     );
 }
 
@@ -16280,16 +16266,6 @@ fn golden_turbofish_type_args_chz_matches_expected_and_interp() {
     );
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, expected, "vm output drifted from .expected");
-    assert_eq!(
-        vm_out,
-        run_capture(src).expect("repeat run"),
-        "interp drifted from vm"
-    );
-    assert_eq!(
-        vm_out,
-        run_capture(src).expect("parallel run"),
-        "parallel drifted from vm"
-    );
 }
 
 /// Member-side declaration-site turbofish (PART 2): `examples/turbofish_member_args.chz`
@@ -16311,16 +16287,6 @@ fn golden_turbofish_member_args_chz_matches_expected_and_interp() {
     );
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, expected, "vm output drifted from .expected");
-    assert_eq!(
-        vm_out,
-        run_capture(src).expect("repeat run"),
-        "interp drifted from vm"
-    );
-    assert_eq!(
-        vm_out,
-        run_capture(src).expect("parallel run"),
-        "parallel drifted from vm"
-    );
 }
 
 /// Tech-debt golden: `examples/set_eq.chz` (order-independent set equality incl. nested in a

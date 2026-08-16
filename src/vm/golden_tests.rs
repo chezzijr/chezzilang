@@ -7223,11 +7223,6 @@ fn golden_capture_outer_write() {
     let expected = include_str!("../../examples/capture_outer_write.expected");
     let out = run_capture(src).expect("vm run");
     assert_eq!(out, expected, "serial vs .expected");
-    assert_eq!(
-        out,
-        run_capture(src).expect("parallel run"),
-        "serial vs M:N"
-    );
 }
 
 /// A2 — a capturing (`defer:`) block WRITES a captured local; the write hits the shared cell (not a
@@ -7238,11 +7233,6 @@ fn golden_capture_closure_write() {
     let expected = include_str!("../../examples/capture_closure_write.expected");
     let out = run_capture(src).expect("vm run");
     assert_eq!(out, expected, "serial vs .expected");
-    assert_eq!(
-        out,
-        run_capture(src).expect("parallel run"),
-        "serial vs M:N"
-    );
 }
 
 /// A3 — sibling capturing blocks share one captured local: three write it, one reads it, all through
@@ -7253,11 +7243,6 @@ fn golden_capture_shared_counter() {
     let expected = include_str!("../../examples/capture_shared_counter.expected");
     let out = run_capture(src).expect("vm run");
     assert_eq!(out, expected, "serial vs .expected");
-    assert_eq!(
-        out,
-        run_capture(src).expect("parallel run"),
-        "serial vs M:N"
-    );
 }
 
 /// B1 — a two-level nested closure shares a grandparent local (transitive capture via
@@ -7268,11 +7253,6 @@ fn golden_capture_nested_grandparent() {
     let expected = include_str!("../../examples/capture_nested_grandparent.expected");
     let out = run_capture(src).expect("vm run");
     assert_eq!(out, expected, "serial vs .expected");
-    assert_eq!(
-        out,
-        run_capture(src).expect("parallel run"),
-        "serial vs M:N"
-    );
 }
 
 /// B1 coverage — a tuple-destructured local is boxed when captured; a closure over it sees a later
@@ -7283,11 +7263,6 @@ fn golden_capture_destructure() {
     let expected = include_str!("../../examples/capture_destructure.expected");
     let out = run_capture(src).expect("vm run");
     assert_eq!(out, expected, "serial vs .expected");
-    assert_eq!(
-        out,
-        run_capture(src).expect("parallel run"),
-        "serial vs M:N"
-    );
 }
 
 /// B1 coverage — a `match`-bound payload local captured by a closure in the arm boxes and escapes the
@@ -7298,11 +7273,6 @@ fn golden_capture_match_bind() {
     let expected = include_str!("../../examples/capture_match_bind.expected");
     let out = run_capture(src).expect("vm run");
     assert_eq!(out, expected, "serial vs .expected");
-    assert_eq!(
-        out,
-        run_capture(src).expect("parallel run"),
-        "serial vs M:N"
-    );
 }
 
 /// C1 — a captured loop variable rebinds into a FRESH cell each iteration (Go >=1.22), so the three
@@ -7313,11 +7283,6 @@ fn golden_capture_loop_var_fresh() {
     let expected = include_str!("../../examples/capture_loop_var_fresh.expected");
     let out = run_capture(src).expect("vm run");
     assert_eq!(out, expected, "serial vs .expected");
-    assert_eq!(
-        out,
-        run_capture(src).expect("parallel run"),
-        "serial vs M:N"
-    );
 }
 
 /// C2 — an accumulator declared OUTSIDE the loop is ONE shared cell (unlike the fresh-per-iteration
@@ -7328,11 +7293,6 @@ fn golden_capture_loop_accumulator() {
     let expected = include_str!("../../examples/capture_loop_accumulator.expected");
     let out = run_capture(src).expect("vm run");
     assert_eq!(out, expected, "serial vs .expected");
-    assert_eq!(
-        out,
-        run_capture(src).expect("parallel run"),
-        "serial vs M:N"
-    );
 }
 
 /// E1 — a `defer:` block shares the enclosing binding by reference and runs at frame exit, so it
@@ -7343,11 +7303,6 @@ fn golden_capture_defer_latest() {
     let expected = include_str!("../../examples/capture_defer_latest.expected");
     let out = run_capture(src).expect("vm run");
     assert_eq!(out, expected, "serial vs .expected");
-    assert_eq!(
-        out,
-        run_capture(src).expect("parallel run"),
-        "serial vs M:N"
-    );
 }
 
 /// F3 / B2 — a closure capturing a by-reference local (a cell), invoked in a `spawn`
@@ -7364,11 +7319,6 @@ fn golden_capture_cell_closure_into_spawn() {
     let expected = include_str!("../../examples/capture_cell_closure_into_spawn.expected");
     let out = run_capture(src).expect("vm run");
     assert_eq!(out, expected, "vs .expected");
-    assert_eq!(
-        out,
-        run_capture(src).expect("parallel run"),
-        "cell-bearing closure crosses consistently"
-    );
 }
 
 /// F3 (mutation form) — the MEDIUM-severity bug the first draft's F3 docstring wrongly declared
@@ -7385,11 +7335,6 @@ fn golden_capture_spawn_closure_mutates_isolated() {
     let expected = include_str!("../../examples/capture_spawn_closure_mutates_isolated.expected");
     let out = run_capture(src).expect("vm run");
     assert_eq!(out, expected, "vs .expected (isolated push → [1])");
-    assert_eq!(
-        out,
-        run_capture(src).expect("parallel run"),
-        "capture-bearing closure crosses by deep value"
-    );
 }
 
 /// F3 (owner-write form) — the CRITICAL-severity bug: a closure `f` READS a captured cell that the owner
@@ -7406,11 +7351,6 @@ fn golden_capture_spawn_closure_owner_write_isolated() {
         include_str!("../../examples/capture_spawn_closure_owner_write_isolated.expected");
     let out = run_capture(src).expect("vm run");
     assert_eq!(out, expected, "vs .expected (spawn-time snapshot → 0)");
-    assert_eq!(
-        out,
-        run_capture(src).expect("parallel run"),
-        "owner write after spawn is invisible to the task's isolated cell"
-    );
 }
 
 /// F1 — THE ONE DELIBERATE DIVERGENCE FROM GO: a plain captured local sent into a `spawn` is
@@ -7426,11 +7366,6 @@ fn golden_capture_spawn_isolated() {
     assert_eq!(
         out, expected,
         "serial vs .expected (isolated → 0, NOT Go's 1)"
-    );
-    assert_eq!(
-        out,
-        run_capture(src).expect("parallel run"),
-        "serial vs M:N (both isolate → 0)"
     );
 }
 
@@ -7461,11 +7396,6 @@ fn golden_capture_rebind_heap() {
     let expected = include_str!("../../examples/capture_rebind_heap.expected");
     let out = run_capture(src).expect("vm run");
     assert_eq!(out, expected, "serial vs .expected");
-    assert_eq!(
-        out,
-        run_capture(src).expect("parallel run"),
-        "serial vs M:N"
-    );
 }
 
 /// F2 — cross-task shared mutation uses `Shared[T]` (crosses by reference); N tasks over one `Shared`
@@ -7496,11 +7426,6 @@ fn golden_capture_recursion_percall() {
     let expected = include_str!("../../examples/capture_recursion_percall.expected");
     let out = run_capture(src).expect("vm run");
     assert_eq!(out, expected, "serial vs .expected");
-    assert_eq!(
-        out,
-        run_capture(src).expect("parallel run"),
-        "serial vs M:N"
-    );
 }
 
 // ----- Nested `fn` decls are first-class local closures-with-a-name: lexical nearest-scope,
@@ -7804,11 +7729,6 @@ fn main():
 main()";
     let out = run_capture(src).expect("run");
     assert_eq!(out, "0\n", "nested fn capture isolated at airlock");
-    assert_eq!(
-        out,
-        run_capture(src).expect("parallel run"),
-        "serial vs M:N (nested-fn closure crosses the airlock by deep value)"
-    );
 }
 
 /// NF#7b — loop-variable capture at MODULE TOP LEVEL (not inside a `fn`): a nested fn defined in a
@@ -7849,11 +7769,6 @@ fn golden_capture_escape_reader() {
     let expected = include_str!("../../examples/capture_escape_reader.expected");
     let out = run_capture(src).expect("vm run");
     assert_eq!(out, expected, "serial vs .expected");
-    assert_eq!(
-        out,
-        run_capture(src).expect("parallel run"),
-        "serial vs M:N"
-    );
 }
 
 #[test]
