@@ -165,7 +165,6 @@ impl Vm {
             snapshot_cells: std::sync::Arc::new(super::fxhash::FxHashMap::default()),
             snapshot_next_id: 0,
             snapshot_builds: 0,
-            pinned_module_roots: Vec::new(),
             mn: None,
         }
     }
@@ -246,6 +245,9 @@ impl Vm {
         // D2b — the same `Some` gate carries the fiber's remaining heap-keyed side state
         // (out/stderr/executors/intern), so they move atomically WITH the heap their `GcRef`s index.
         // A fiber with no heap of its own swaps none of that.
+        // GC: this atomicity is why a swapped-OUT `module_objs` needs no pin — it parks in `ctx`
+        // together with the heap it indexes, and `collect()` only ever walks the LIVE `self.heap`.
+        // The one production `FiberCtx` (`ReadyWorker::into_fiber`) always carries `heap: Some`.
         if let Some(ctx_heap) = ctx.heap.as_mut() {
             std::mem::swap(&mut self.heap, ctx_heap);
             std::mem::swap(&mut self.out, &mut ctx.out);
@@ -1460,10 +1462,6 @@ impl Vm {
         // even when no in-program handle remains.
         work.extend(self.executors.iter().copied());
         work.extend(self.module_objs.iter().copied());
-        // Task 1 — the shell's REAL module_objs while swapped out for a child-modules window
-        // (empty otherwise). Without this a safepoint GC during the window — when live frames don't root
-        // them (an `Executor` exit-drain runs with empty frames) — sweeps them → UAF on restore.
-        work.extend(self.pinned_module_roots.iter().copied());
         // M19 Phase 3 — interned `ConstStr` handles are roots: they're cached for reuse across pushes
         // of the same op, so they must never be swept out from under a later push. Heap-keyed, so this
         // roots the cache for *this* heap (an M:N fiber's cache swapped in with its heap).

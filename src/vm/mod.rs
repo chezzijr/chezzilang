@@ -1097,13 +1097,6 @@ pub struct Vm {
     /// `vm::tests::snapshot_cache_*`. NOT swapped per fiber — it is a per-VM statistic, not part of the
     /// module view.
     snapshot_builds: usize,
-    /// Task 1 — GC pin for the shell's REAL `module_objs` while they are swapped OUT of
-    /// `self.module_objs` during a child-modules window. `collect()` roots `self.module_objs` (the
-    /// child copy) but not the swapped-out shell modules; when the window runs with EMPTY frames
-    /// nothing else roots them, so an alloc-triggered safepoint GC would sweep them and the restore
-    /// would reinstall dangling `GcRef`s (use-after-free). Stashing them here — scanned by `collect()`
-    /// — keeps them live for the window. Empty outside such a window.
-    pinned_module_roots: Vec<GcRef>,
     /// D2b — set on an M:N **worker shell** to the scheduler of the `parallel:` nursery it is draining.
     /// `Some` flips the `recv`/`send` arms onto the park/wake protocol ([`MnSched`]) instead of the
     /// legacy condvar-block; `None` on the top-level VM, the inline outermost-`parallel:` builder VM

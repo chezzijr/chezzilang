@@ -4595,16 +4595,15 @@ fn vm_run_file_stress(src: &str, cfg: crate::native::HostConfig) -> String {
 /// un-`shutdown()`'d jobs mutate a module-global aggregate (forcing the snapshot path) and allocate,
 /// and the drain must complete with no error and full isolation (the parent's `xs` untouched).
 ///
-/// Defense-in-depth note on `pinned_module_roots`: on this empty-frames path the swapped-out shell
-/// `module_objs` are otherwise unrooted, so a mid-job collection frees them and the restore reinstalls
-/// dangling `GcRef`s. The pin keeps the invariant "`module_objs` is always valid". This test does NOT
-/// distinguish the pin (it still passes with the pin's root scan removed) because normal post-exit-
-/// drain flow never DEREFERENCES those refs — every downstream read uses the memoized, heap-
-/// independent snapshot, not `self.module_objs`. The pin is retained to close the latent hazard
-/// (a future caller that touches module globals after an empty-frames drain would UAF), matching the
-/// adversarial-review finding; it is not claimed to be caught by an assertion here.
+/// Historical note: this path used to carry a `pinned_module_roots` GC pin, because the cooperative
+/// `--serial` engine's `with_serial_child_modules` swapped the shell's REAL `module_objs` out into a
+/// plain local while a child copy ran in the SAME shared heap — unrooted across a safepoint. That
+/// window died with the engine (89f20591): under M:N the ONLY thing that swaps `module_objs` out of
+/// the VM is [`Vm::swap_ctx`], which moves the fiber's heap in the same call, so a swapped-out view
+/// always parks together with the heap its `GcRef`s index and `collect()` (which walks only the LIVE
+/// heap) can never sweep it. The pin was left writerless by that deletion and is gone too.
 #[test]
-fn serial_executor_exit_drain_module_globals_survive_gc_stress() {
+fn executor_exit_drain_module_globals_survive_gc_stress() {
     let src = "\
 import std.concurrency
 xs := [1, 2, 3]
