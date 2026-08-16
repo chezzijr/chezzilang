@@ -1022,3 +1022,42 @@ fn buffered_stdout_write_bytes_is_byte_exact() {
 fn buffered_stdout_write_bytes_is_byte_exact_mn() {
     buffered_stdout_write_bytes_is_byte_exact();
 }
+
+// ===== W6-9r item 4 — `chezzi test --show-output` must be byte-exact too =====
+//
+// `chezzi run` is byte-exact since W6-9; `chezzi test --show-output` still decoded a test's captured
+// stdout through `Vm::take_out` (`String::from_utf8_lossy`), so `\xff\xfe` rendered as two U+FFFD.
+// Only a real child process (this file's rationale, above) can witness the bytes on fd 1, and this
+// is the ONLY test that covers the CLI write site (`src/main.rs`) — the in-process `test_runner`
+// tests can pass even if that site still does `print!("{}", report.text)`.
+
+/// `test --show-output` on a failing test that writes non-UTF-8 bytes to stdout must put the raw
+/// bytes on fd 1, indented under the failing test's report line, with no lossy replacement chars.
+fn test_show_output_is_byte_exact() {
+    let t = TmpDir::new();
+    let entry = t.write(
+        "boom_test.chz",
+        "import std.io\ntest fn boom():\n    print(\"before\")\n    \
+         io.stdout().write_bytes(b\"\\xff\\xfe\")\n    assert false\n",
+    );
+    let out = Command::new(env!("CARGO_BIN_EXE_chezzi"))
+        .args(["test", "--show-output"])
+        .arg(&entry)
+        .output()
+        .expect("run chezzi test --show-output");
+    assert!(
+        out.stdout.windows(2).any(|w| w == [0xff, 0xfe]),
+        "--show-output must put the raw bytes on fd 1; stdout: {:?}",
+        out.stdout
+    );
+    assert!(
+        !out.stdout.windows(3).any(|w| w == [0xef, 0xbf, 0xbd]),
+        "--show-output must NOT lossily replace non-UTF-8 bytes; stdout: {:?}",
+        out.stdout
+    );
+}
+
+#[test]
+fn test_show_output_is_byte_exact_mn() {
+    test_show_output_is_byte_exact();
+}

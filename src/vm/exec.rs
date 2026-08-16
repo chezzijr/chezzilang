@@ -761,14 +761,24 @@ impl Vm {
     }
 
     /// `chezzi test` — take + clear whatever a test printed to stdout, resetting the buffer so the
-    /// next test starts clean (the runner currently discards it; the report is Rust-formatted).
+    /// next test starts clean. The documented LOSSY embedder accessor: kept for any consumer that
+    /// wants a `String` and accepts the `from_utf8_lossy` round-trip (e.g. a substring match against
+    /// captured output). The byte-exact sibling is [`Vm::take_out_bytes`] — `chezzi test
+    /// --show-output` uses that one so a test's raw stdout reaches fd 1 unchanged (W6-9r item 4).
     ///
     /// The buffered sink is bytes (W6-9); this is one of the CAPTURE boundaries where Rust needs a
     /// `String`, so it decodes lossily here. `chezzi run` (the path a program's stdout actually
     /// reaches an fd) never passes through it and stays byte-exact. Not for comparing two engines'
     /// output — that takes `vm::run_file_bytes` (see `vm::RunOutputRaw`).
     pub fn take_out(&mut self) -> String {
-        String::from_utf8_lossy(&std::mem::take(&mut self.out)).into_owned()
+        String::from_utf8_lossy(&self.take_out_bytes()).into_owned()
+    }
+
+    /// The byte-exact sibling of [`Vm::take_out`] — take + clear whatever a test printed to stdout,
+    /// with no UTF-8 hop. `chezzi test --show-output` uses this so non-UTF-8 captured stdout
+    /// (`b"\xff\xfe"`) reaches fd 1 unchanged, matching `chezzi run` (W6-9) and `go test`.
+    pub fn take_out_bytes(&mut self) -> Vec<u8> {
+        std::mem::take(&mut self.out)
     }
 
     /// `chezzi test` — drain anything the program left running (e.g. an Executor a test forgot to

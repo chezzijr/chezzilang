@@ -508,7 +508,8 @@ fn cmd_test(args: &[String]) -> ExitCode {
         Verbosity::Normal
     };
     // Resolve color: `always` forces on, `never` off, `auto` = stdout is a tty. The runner itself never
-    // probes the tty (it is a pure String producer the harness string-matches), so this is the ONE seam.
+    // probes the tty (its `report.text` is a pure String the harness string-matches; `report.bytes` is
+    // the byte-exact twin actually written below), so this is the ONE seam.
     opts.color = match color_mode {
         "always" => true,
         "never" => false,
@@ -524,7 +525,10 @@ fn cmd_test(args: &[String]) -> ExitCode {
     // why this wasn't wired before).
     apply_env_worker_count("test");
     let report = test_runner::run_tests_opts(std::path::Path::new(&root), opts);
-    print!("{}", report.text);
+    // Byte-exact (W6-9r item 4): `report.bytes`, not `report.text`, so a test's `--show-output`
+    // capture reaches fd 1 unchanged — matching `chezzi run` (W6-9) and `go test`. No explicit flush:
+    // the report always ends in `\n`, so the `LineWriter` flushes, same as `print!` did.
+    let _ = std::io::Write::write_all(&mut std::io::stdout(), &report.bytes);
     if report.passed {
         ExitCode::SUCCESS
     } else {

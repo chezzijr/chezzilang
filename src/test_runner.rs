@@ -16,7 +16,12 @@ use std::time::{Duration, Instant};
 
 /// The outcome of a `chezzi test` run: the rendered report and whether everything passed.
 pub struct TestReport {
+    /// The lossy render — what every string-matching consumer reads. Byte-identical to the
+    /// pre-change report for any UTF-8 capture.
     pub text: String,
+    // ponytail: a second copy of `bytes`; make it a `Cow` accessor if a report ever gets large.
+    /// The byte-exact report the CLI writes to fd 1 (`--show-output` can carry non-UTF-8).
+    pub bytes: Vec<u8>,
     pub passed: bool,
 }
 
@@ -98,7 +103,7 @@ struct Outcome {
     /// Wall-clock time the invoke took (always measured — negligible; surfaced only under `-v`/json).
     duration: Duration,
     /// The test's captured stdout — kept ONLY when `--show-output` is on (else empty, discarded).
-    captured_out: String,
+    captured_out: Vec<u8>,
 }
 
 /// The JSON status token for a verdict (mirrors `--errors=json` on `check`/`run` for CI consumers).
@@ -249,15 +254,19 @@ pub fn run_tests_opts(root: &Path, opts: RunOpts) -> TestReport {
     let files = match collect_test_files(root) {
         Ok(f) => f,
         Err(e) => {
+            let text = format!("chezzi test: {e}\n");
             return TestReport {
-                text: format!("chezzi test: {e}\n"),
+                bytes: text.clone().into_bytes(),
+                text,
                 passed: false,
             };
         }
     };
     if files.is_empty() {
+        let text = format!("no *_test.chz files found under {}\n", root.display());
         return TestReport {
-            text: format!("no *_test.chz files found under {}\n", root.display()),
+            bytes: text.clone().into_bytes(),
+            text,
             passed: false,
         };
     }
@@ -336,13 +345,17 @@ pub fn run_tests_opts(root: &Path, opts: RunOpts) -> TestReport {
             timed_out,
             filtered_out,
         );
-        return TestReport { text, passed };
+        return TestReport {
+            bytes: text.clone().into_bytes(),
+            text,
+            passed,
+        };
     }
 
-    let mut report = String::new();
+    let mut report = Vec::new();
     // File-level errors first (unchanged position + shape).
     for (file, msg) in &file_error_msgs {
-        report.push_str(&format!("ERROR {file}\n  {msg}\n"));
+        report.extend_from_slice(format!("ERROR {file}\n  {msg}\n").as_bytes());
     }
 
     match opts.verbosity {
@@ -360,8 +373,8 @@ pub fn run_tests_opts(root: &Path, opts: RunOpts) -> TestReport {
                 dots.push_str(&paint(&ch.to_string(), code, opts.color));
             }
             if !dots.is_empty() {
-                report.push_str(&dots);
-                report.push('\n');
+                report.extend_from_slice(dots.as_bytes());
+                report.push(b'\n');
             }
         }
         Verbosity::Normal | Verbosity::Verbose => {
@@ -371,91 +384,109 @@ pub fn run_tests_opts(root: &Path, opts: RunOpts) -> TestReport {
         }
     }
 
-    report.push_str(&format!(
-        "\n{total} test(s): {passed_count} passed, {failed} failed, {errored} errored"
-    ));
+    report.extend_from_slice(
+        format!("\n{total} test(s): {passed_count} passed, {failed} failed, {errored} errored")
+            .as_bytes(),
+    );
     // Off-by-default clauses: each stays absent unless its feature fired, so the common output is
     // byte-identical to the pre-wave runner.
     if over_memory > 0 {
-        report.push_str(&format!(", {over_memory} over-memory"));
+        report.extend_from_slice(format!(", {over_memory} over-memory").as_bytes());
     }
     if timed_out > 0 {
-        report.push_str(&format!(", {timed_out} timed out"));
+        report.extend_from_slice(format!(", {timed_out} timed out").as_bytes());
     }
     if file_errors > 0 {
-        report.push_str(&format!(", {file_errors} file error(s)"));
+        report.extend_from_slice(format!(", {file_errors} file error(s)").as_bytes());
     }
     if opts.filter.is_some() {
-        report.push_str(&format!(" ({filtered_out} filtered out)"));
+        report.extend_from_slice(format!(" ({filtered_out} filtered out)").as_bytes());
     }
     if no_tests_discovered {
-        report.push_str(" — no tests discovered");
+        report.extend_from_slice(" — no tests discovered".as_bytes());
     }
     if filter_no_match {
         // Safe: filter is Some here.
         let pat = opts.filter.as_deref().unwrap_or("");
-        report.push_str(&format!(" — no tests matched '{pat}'"));
+        report.extend_from_slice(format!(" — no tests matched '{pat}'").as_bytes());
     }
     // Total timing is `-v`-only (non-deterministic → never in default/quiet, which the gate compares).
     if opts.verbosity == Verbosity::Verbose {
         let total_ms: u128 = outcomes.iter().map(|o| o.duration.as_millis()).sum();
-        report.push_str(&format!(" in {total_ms}ms"));
+        report.extend_from_slice(format!(" in {total_ms}ms").as_bytes());
     }
-    report.push('\n');
+    report.push(b'\n');
 
     TestReport {
-        text: report,
+        text: String::from_utf8_lossy(&report).into_owned(),
+        bytes: report,
         passed,
     }
 }
 
 /// Render one per-test line into `report` for `Normal`/`Verbose`. Colorizes the tag, appends `-v`
 /// timing, and (when `--show-output`) the indented captured stdout under a non-pass line.
-fn render_line(report: &mut String, o: &Outcome, opts: &RunOpts) {
+fn render_line(report: &mut Vec<u8>, o: &Outcome, opts: &RunOpts) {
     let c = opts.color;
     match &o.verdict {
-        Verdict::Pass => {
-            report.push_str(&format!("{} {} ({})", paint("PASS", 32, c), o.name, o.file))
-        }
-        Verdict::Fail { line, msg } => report.push_str(&format!(
-            "{} {} ({}:{}) {}",
-            paint("FAIL", 31, c),
-            o.name,
-            o.file,
-            line,
-            msg
-        )),
-        Verdict::Error { line, msg } => report.push_str(&format!(
-            "{} {} ({}:{}) {}",
-            paint("ERROR", 31, c),
-            o.name,
-            o.file,
-            line,
-            msg
-        )),
-        Verdict::OverMemory { msg } => report.push_str(&format!(
-            "{} {} ({}) {}",
-            paint("OVER-MEMORY", 33, c),
-            o.name,
-            o.file,
-            msg
-        )),
-        Verdict::TimedOut { msg } => report.push_str(&format!(
-            "{} {} ({}) {}",
-            paint("TIMED-OUT", 33, c),
-            o.name,
-            o.file,
-            msg
-        )),
+        Verdict::Pass => report.extend_from_slice(
+            format!("{} {} ({})", paint("PASS", 32, c), o.name, o.file).as_bytes(),
+        ),
+        Verdict::Fail { line, msg } => report.extend_from_slice(
+            format!(
+                "{} {} ({}:{}) {}",
+                paint("FAIL", 31, c),
+                o.name,
+                o.file,
+                line,
+                msg
+            )
+            .as_bytes(),
+        ),
+        Verdict::Error { line, msg } => report.extend_from_slice(
+            format!(
+                "{} {} ({}:{}) {}",
+                paint("ERROR", 31, c),
+                o.name,
+                o.file,
+                line,
+                msg
+            )
+            .as_bytes(),
+        ),
+        Verdict::OverMemory { msg } => report.extend_from_slice(
+            format!(
+                "{} {} ({}) {}",
+                paint("OVER-MEMORY", 33, c),
+                o.name,
+                o.file,
+                msg
+            )
+            .as_bytes(),
+        ),
+        Verdict::TimedOut { msg } => report.extend_from_slice(
+            format!(
+                "{} {} ({}) {}",
+                paint("TIMED-OUT", 33, c),
+                o.name,
+                o.file,
+                msg
+            )
+            .as_bytes(),
+        ),
     }
     if opts.verbosity == Verbosity::Verbose {
-        report.push_str(&format!(" ({}ms)", o.duration.as_millis()));
+        report.extend_from_slice(format!(" ({}ms)", o.duration.as_millis()).as_bytes());
     }
-    report.push('\n');
+    report.push(b'\n');
     // `--show-output`: a failing test's captured stdout, indented, for debugging (pytest show-on-fail).
     if opts.show_output && !matches!(o.verdict, Verdict::Pass) && !o.captured_out.is_empty() {
-        for line in o.captured_out.lines() {
-            report.push_str(&format!("    {line}\n"));
+        for line in o.captured_out.split_inclusive(|&b| b == b'\n') {
+            report.extend_from_slice(b"    ");
+            report.extend_from_slice(line);
+            if line.last() != Some(&b'\n') {
+                report.push(b'\n');
+            }
         }
     }
 }
@@ -570,14 +601,14 @@ fn invoke_all(
         };
         let duration = start.elapsed();
         let verdict = apply_timeout_overrun(verdict, duration, opts);
-        let out = vm.take_out(); // stdout: discarded unless `--show-output` (kept reusable either way)
+        let out = vm.take_out_bytes(); // stdout: discarded unless `--show-output` (kept reusable either way)
         let non_pass = !matches!(verdict, Verdict::Pass);
         outcomes.push(Outcome {
             name: name.clone(),
             file: file_label.clone(),
             verdict,
             duration,
-            captured_out: if opts.show_output { out } else { String::new() },
+            captured_out: if opts.show_output { out } else { Vec::new() },
         });
         if opts.fail_fast && non_pass {
             vm.reap_after_tests();
@@ -642,7 +673,7 @@ fn run_suite(
                         msg: msg.to_string(),
                     },
                     duration: Duration::ZERO,
-                    captured_out: String::new(),
+                    captured_out: Vec::new(),
                 });
             }
         };
@@ -676,7 +707,7 @@ fn run_suite(
         if let Some(ap) = hook("after_all") {
             let _ = vm.invoke_suite_method(ap, instance);
         }
-        let _ = vm.take_out();
+        let _ = vm.take_out_bytes();
         return;
     }
 
@@ -721,7 +752,7 @@ fn run_suite(
         }
         let duration = start.elapsed();
         let verdict = apply_timeout_overrun(verdict, duration, opts);
-        let captured = vm.take_out();
+        let captured = vm.take_out_bytes();
         let non_pass = !matches!(verdict, Verdict::Pass);
         out.push(Outcome {
             name,
@@ -731,7 +762,7 @@ fn run_suite(
             captured_out: if opts.show_output {
                 captured
             } else {
-                String::new()
+                Vec::new()
             },
         });
         // `--fail-fast`: skip the remaining methods of this suite (after_all still runs below).
@@ -743,7 +774,7 @@ fn run_suite(
     // after_all? — runs after the last test method.
     if let Some(p) = hook("after_all") {
         let _ = vm.invoke_suite_method(p, instance);
-        let _ = vm.take_out();
+        let _ = vm.take_out_bytes();
     }
 }
 
@@ -3135,6 +3166,39 @@ struct Suite:
             !report.text.contains("gamma"),
             "fail-fast must skip the test after the first failure; report:\n{}",
             report.text
+        );
+    }
+
+    /// W6-9r item 4 — `--show-output` must render a failing test's captured stdout byte-exactly,
+    /// like `chezzi run` (W6-9) and `go test`. The pre-fix path decoded through
+    /// `Vm::take_out` (`String::from_utf8_lossy`), turning `\xff\xfe` into two U+FFFD.
+    #[test]
+    fn show_output_is_byte_exact_for_non_utf8_stdout() {
+        let d = TmpDir::new();
+        let f = d.write(
+            "boom_test.chz",
+            "import std.io\ntest fn boom():\n    print(\"before\")\n    \
+             io.stdout().write_bytes(b\"\\xff\\xfe\")\n    assert false\n",
+        );
+        let report = run_tests_opts(&f, opts_with(|o| o.show_output = true));
+        assert!(
+            report
+                .bytes
+                .windows(b"    before\n    \xff\xfe\n".len())
+                .any(|w| w == b"    before\n    \xff\xfe\n"),
+            "report.bytes must carry the raw bytes, indented, with no trailing newline coerced away; \
+             got: {:?}",
+            report.bytes
+        );
+        assert!(
+            report.text.contains('\u{fffd}'),
+            "report.text stays the documented lossy embedder accessor; got:\n{}",
+            report.text
+        );
+        assert!(
+            !report.bytes.windows(3).any(|w| w == [0xef, 0xbf, 0xbd]),
+            "report.bytes must NOT contain the lossy replacement-char encoding; got: {:?}",
+            report.bytes
         );
     }
 
