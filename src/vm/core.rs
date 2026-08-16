@@ -27,13 +27,14 @@ use std::sync::{Arc, Condvar, Mutex, RwLock};
 /// `send` wakes parked receivers (the not-full waiter set mirrors the not-empty one).
 ///
 /// B3.3-threads: `cv` is the real-OS-thread blocking primitive. A `recv` on an empty queue waits on
-/// `cv` (paired with `q`'s `Mutex`); a `send` `notify_all`s it after pushing. `cv` is **dead on the
-/// cooperative default engine** — there a `recv` parks the *fiber* (it never touches `cv`), so
-/// single-thread runs never wait on it. On the M:N engine a normal empty `recv` snapshot-parks the
-/// fiber (still no `cv`), BUT **D5 owe #3 Path C revives `cv`**: a `recv` reached inside a native
-/// callback can't snapshot-park, so the worker thread DEMOTES — it blocks in place on `cv` and resumes
-/// when a sibling `send` `notify_all`s it (`MnSched::send_wake` + the non-mn `send`). The wait loop
-/// re-checks the queue / cancel / terminate on every wake (spurious-wakeup-safe; bounded poll).
+/// `cv` (paired with `q`'s `Mutex`); a `send` `notify_all`s it after pushing. An ordinary M:N `recv`
+/// snapshot-parks the *fiber* instead and never touches `cv`. `cv` IS used by every party that
+/// blocks in place on its own thread: a party with no scheduler at all (top-level `main`, an eager
+/// `Executor` job — [`Vm::block_recv`]), and **D5 owe #3 Path C**, where a `recv` reached inside an
+/// M:N native callback can't snapshot-park, so the worker thread DEMOTES — it blocks in place on
+/// `cv` and resumes when a sibling `send` `notify_all`s it (`MnSched::send_wake` + the non-mn
+/// `send`). The wait loop re-checks the queue / cancel / terminate on every wake
+/// (spurious-wakeup-safe; bounded poll).
 #[derive(Debug, Default)]
 pub struct ChannelCore {
     pub q: Mutex<ChanState>,
@@ -45,8 +46,9 @@ pub struct ChannelCore {
     /// `timer(ms)` timeout channel: `Some(deadline)` iff this channel was built by `timer`. It is
     /// **level-triggered** — `recv` yields `true` on any call at/after the deadline (the typical use
     /// recvs it once, in a `wait` arm). Delivery is handled at `recv` time in the receiver's own
-    /// scheduler: `--parallel` schedules a background `send(true)` + parks; cooperative VM / interp /
-    /// callbacks inline-sleep to the deadline and synthesise `true`. `None` for an ordinary `Channel[T]`.
+    /// scheduler: `--parallel` schedules a background `send(true)` + parks; the top-level VM (or a
+    /// fiber with no heap of its own) / a native callback inline-sleeps to the deadline and
+    /// synthesises `true`. `None` for an ordinary `Channel[T]`.
     pub timer: Option<std::time::Instant>,
     /// `wait`-arm timed-park latch: set once (CAS false→true) when a `--parallel` `wait` arms the
     /// background `send_wake(true)` for this timer channel, so a re-park of the SAME wait (woken with
@@ -146,10 +148,8 @@ impl ChanState {
 /// promise of `Shared[T]` ("the single owner serialises writes, so the torn-write race is
 /// unrepresentable"). The value lock `v` cannot be held across the user closure (it would deadlock a
 /// closure that re-enters `get`/`set` on the same box — `Mutex` is not reentrant), so a **separate**
-/// `update_lock` serialises whole updates: held for the entire RMW *only under `--parallel`*, while
-/// `v` is still locked only for the brief read and the brief write-back. The cooperative engine
-/// never takes `update_lock` (single-thread; taking it would needlessly deadlock a same-box nested
-/// update that merely lost-updated before).
+/// `update_lock` serialises whole updates: held for the entire RMW, while `v` is still locked only
+/// for the brief read and the brief write-back.
 #[derive(Debug, Default)]
 pub struct SharedCore {
     pub v: Mutex<WireValue>,
@@ -184,12 +184,11 @@ impl SharedCore {
 /// `write`'s read-modify-write must be **atomic across threads** (the box's contract, exactly like
 /// `Shared.update`). The value lock `v` cannot be held across the user closure (a `RwLock` write guard
 /// is not reentrant — it would deadlock a closure that re-enters `get`/`set`/`read` on the same box),
-/// so a **separate** `update_lock` serialises whole writes: held for the entire RMW *only under
-/// `--parallel`*, while `v` is taken only for the brief read-out and the brief write-back. The
+/// so a **separate** `update_lock` serialises whole writes: held for the entire RMW, while `v` is
+/// taken only for the brief read-out and the brief write-back. The
 /// `RwLock` alone is NOT enough — because the write guard is dropped across the closure, two
-/// concurrent `write`s could otherwise clone the same base value and lose an update. The cooperative
-/// engine never takes `update_lock` (single-thread; it would needlessly deadlock a same-box nested
-/// write). A `--parallel` closure that re-enters `write` on the SAME box still deadlocks (a documented
+/// concurrent `write`s could otherwise clone the same base value and lose an update. A `--parallel`
+/// closure that re-enters `write` on the SAME box still deadlocks (a documented
 /// edge, mirroring `Shared.update`); a write-inside-a-read on the same box likewise deadlocks.
 #[derive(Debug, Default)]
 pub struct RwSharedCore {
@@ -250,7 +249,8 @@ impl AtomicCore {
 /// Go `atomic.Int64` style). Unlike [`AtomicCore`] (a `Mutex<WireValue>` holding an arbitrary sendable
 /// value), the value is statically int, so it can be a raw `std::sync::atomic::AtomicI64` — no lock, no
 /// runtime type-sniffing, no wider-T hole. `SeqCst` on every op preserves the sequential consistency the
-/// Mutex gave, so serial == M:N stays byte-identical. `add`/`sub` use a CHECKED compare_exchange CAS-loop
+/// Mutex gave — every op still appears to happen in some single global order. `add`/`sub` use a
+/// CHECKED compare_exchange CAS-loop
 /// (not raw `fetch_add`/`fetch_sub`, which wrap silently) to KEEP the i64-overflow fault.
 #[derive(Debug, Default)]
 pub struct AtomicIntCore {

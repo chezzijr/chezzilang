@@ -226,8 +226,8 @@ pub enum WireValue {
     /// shared `Arc<Program>`, so it is meaningful in any worker), its captures wired recursively, and
     /// its `home` as an index into the parent's `module_objs` (resolved via `Vm::home_index` at wire
     /// time, `None` for a home not in the table) — never a heap-local `GcRef`. As of B3.3 the GENERIC
-    /// `to_wire` also produces this arm (not just `Executor.submit`), so a closure crosses as data on
-    /// every airlock (spawn args/callees, Channel/Shared, module snapshot) on both engines identically.
+    /// `to_wire` also produces this arm (not just `Executor.submit`), so a closure crosses as data the
+    /// same way on every airlock (spawn args/callees, Channel/Shared, module snapshot).
     /// `from_wire` rebuilds the closure over the worker's reconstructed home module.
     Closure {
         /// Per-serialization identity (see [`WireValue::Backref`]) — a self-capturing recursive closure

@@ -112,8 +112,7 @@ impl WireMemo {
 impl Vm {
     /// `spawn f(args)` / `spawn recv.m(args)` — pop `argc(+1)` operands, deep-copy the args (and, for
     /// the method form, the receiver) across the airlock, and register the task on the innermost
-    /// nursery. The callee passes by handle (like `defer`); only data crosses the airlock. Mirrors
-    /// the serial-VM oracle's `exec_spawn`.
+    /// nursery. The callee passes by handle (like `defer`); only data crosses the airlock.
     pub(super) fn do_spawn(
         &mut self,
         method: Option<String>,
@@ -198,8 +197,8 @@ impl Vm {
 
     /// `spawn:` block — snapshot the captured bindings from the current frame (like `MakeClosure`),
     /// deep-copy each captured value across the airlock, build a zero-arg closure over the synthetic
-    /// block proto, and register it as a `Call` task. Mirrors the serial-VM oracle's `Task::Block`
-    /// (captured locals deep-copied; home globals by handle).
+    /// block proto, and register it as a `Call` task (captured locals deep-copied; home globals by
+    /// handle).
     pub(super) fn do_spawn_block(
         &mut self,
         proto: ProtoId,
@@ -271,10 +270,10 @@ impl Vm {
     /// the running sched — it runs concurrently with the rest of the body. The `task_index` is the
     /// scope's monotonic `next_index` (spawn order), so Decision-F output stays deterministic.
     /// Otherwise (lazy/top-level) push the [`QueuedTask`] for the join to drain. The checker guarantees
-    /// a `parallel:` is open, but we guard for parity with the serial-VM oracle's runtime error.
+    /// a `parallel:` is open, but we guard here anyway and return a runtime error instead of panicking.
     ///
-    /// W6-2 — THE PIN INSTANT: the task's module view is snapshotted HERE, at its own `spawn`, on both
-    /// engines and on both the eager and the lazy path. `ensure_snapshot`'s cache makes consecutive
+    /// W6-2 — THE PIN INSTANT: the task's module view is snapshotted HERE, at its own `spawn`, on
+    /// both the eager and the lazy path. `ensure_snapshot`'s cache makes consecutive
     /// spawns cheap; a build failure is CARRIED on the task and raised where it is prepared.
     pub(super) fn register_task(
         &mut self,
@@ -466,8 +465,8 @@ impl Vm {
     /// scheduler. So the builder EARLY-ENLISTS every still-pending OUTER nursery (from `self.nurseries`)
     /// as its own scope — seeding `O` so the nested owner, draining the GLOBAL queue, can RUN it (the
     /// cross-nursery wake). But each enlisted scope's OUTPUT is reduced at ITS OWN `JoinNursery` (NOT
-    /// here), so the per-nursery-join flush ORDER — and three-engine parity for non-blocking nested
-    /// spawns — is preserved. `self.mn_enlisted` counts those deferred scopes; `self.mn` stays installed
+    /// here), so the per-nursery-join flush ORDER for non-blocking nested spawns stays deterministic.
+    /// `self.mn_enlisted` counts those deferred scopes; `self.mn` stays installed
     /// until the LAST of them joins (`join_enlisted_scope` tears it down).
     pub(super) fn run_mn_nursery_outermost(
         &mut self,
@@ -601,14 +600,14 @@ impl Vm {
     /// current one on `self.nurseries`) into `sched` as its own scope: seed its sibling tasks as live
     /// fibers (so a nested owner draining the GLOBAL queue can run them — the cross-nursery wake), drain
     /// its `tasks` vec, and record the scope on `self.mn_scopes` + bump `self.mn_enlisted` so its OWN
-    /// `JoinNursery` reduces it (deferred — preserving per-nursery flush order and three-engine parity).
+    /// `JoinNursery` reduces it (deferred — preserving per-nursery flush order).
     /// Idempotent per nursery (skips any already-enlisted `Some(_)` and any empty one).
     pub(super) fn early_enlist_outer(&mut self, sched: &Arc<MnSched>) -> Result<(), RuntimeError> {
         // Independent/normal multi-level nesting is fully supported: every still-pending OUTER nursery is
         // enlisted as its own scope here, and the genuinely-CONTENDED case (2+ live receivers racing ONE
         // channel across nested nurseries) is NOT gated — it is concurrent-divergent by design (delivery
-        // order may differ from the cooperative engine, or it may deadlock-fault; suspendable concurrency
-        // is VM-only / divergent under `--parallel`, see PROGRESS.md). It must only never PANIC.
+        // order may vary between runs, or it may deadlock-fault; suspendable concurrency is VM-only,
+        // see PROGRESS.md). It must only never PANIC.
         for i in 0..self.nurseries.len() {
             if self.mn_scopes[i].is_some() || self.nurseries[i].is_empty() {
                 continue;
@@ -1062,7 +1061,7 @@ impl Vm {
         let sched = Arc::clone(
             self.mn
                 .as_ref()
-                .expect("demote_recv_block on the cooperative engine"),
+                .expect("demote_recv_block called with no active M:N scheduler (self.mn is None)"),
         );
         let core = self.channel_core(h);
         let ptr = self.channel_core_ptr(h);
@@ -1242,7 +1241,7 @@ impl Vm {
         let sched = Arc::clone(
             self.mn
                 .as_ref()
-                .expect("demote_wait_block on the cooperative engine"),
+                .expect("demote_wait_block called with no active M:N scheduler (self.mn is None)"),
         );
         // 1. Account running → blocked_native AND register EVERY arm channel, under core lock A, then
         //    notify so an idle puller re-evaluates the deadlock predicate now this fiber left `running`.
@@ -1403,11 +1402,10 @@ impl Vm {
         ms: u64,
         span: Span,
     ) -> Result<Value, RuntimeError> {
-        let sched = Arc::clone(
-            self.mn
-                .as_ref()
-                .expect("demote_block_sleep on the cooperative engine"),
-        );
+        let sched =
+            Arc::clone(self.mn.as_ref().expect(
+                "demote_block_sleep called with no active M:N scheduler (self.mn is None)",
+            ));
         // 1. Account running → inflight under the core lock, then notify idle pullers (a worker sitting in
         //    an untimed `cv.wait` re-evaluates now that this fiber left `running`).
         {
@@ -1663,11 +1661,10 @@ impl Vm {
     /// recv/sleep demote also uses — one spawn + one eventual exit per demoted thread). On OS-refuse, un-roll
     /// the accounting and fault cleanly so the join still completes. Mirrors [`Vm::demote_block_sleep`] 1–2.
     pub(super) fn demote_socket_enter(&mut self, span: Span) -> Result<(), RuntimeError> {
-        let sched = Arc::clone(
-            self.mn
-                .as_ref()
-                .expect("demote_socket_enter on the cooperative engine"),
-        );
+        let sched =
+            Arc::clone(self.mn.as_ref().expect(
+                "demote_socket_enter called with no active M:N scheduler (self.mn is None)",
+            ));
         {
             let mut c = sched.lock();
             c.running -= 1;
@@ -1697,11 +1694,10 @@ impl Vm {
     /// running` (the `+1` is essential — the fiber's next dispatch does `running -= 1`, which would
     /// underflow without this restore). Mirrors [`Vm::demote_block_sleep`] step 4.
     pub(super) fn demote_socket_exit(&mut self) {
-        let sched = Arc::clone(
-            self.mn
-                .as_ref()
-                .expect("demote_socket_exit on the cooperative engine"),
-        );
+        let sched =
+            Arc::clone(self.mn.as_ref().expect(
+                "demote_socket_exit called with no active M:N scheduler (self.mn is None)",
+            ));
         let mut c = sched.lock();
         c.running += 1;
         sched.inflight.fetch_sub(1, Ordering::Relaxed);
@@ -1739,8 +1735,7 @@ impl Vm {
     }
 
     /// D2b — a worker shell's lifetime: pull a runnable fiber, run it to its next park/finish, settle,
-    /// repeat until the scheduler terminates. Generalizes the cooperative [`Vm::run_child`] to a
-    /// shared run queue + park set across threads.
+    /// repeat until the scheduler terminates, over a shared run queue + park set across threads.
     /// Cross-nursery flat scheduler — `owner_scope` is the scope this worker is the INLINE OWNER of
     /// (it returns when that scope completes — scope-scoped owner stop), or [`SENTINEL_SCOPE`] for a
     /// FARMED helper / drainer (which never self-stops, only on global terminate). The fiber it runs may
@@ -1811,7 +1806,8 @@ impl Vm {
         // back-edge cancel check (`run_until`), `trip_cancel` (on this fiber's fault/exit), the demote
         // loops, and the netpoller `register` all read `self.cancel`, so it MUST track the running
         // fiber's scope — else an inner fault would trip the wrong scope and cancel an outer sibling.
-        // No-op for the cooperative engine / a non-fiber run (`mn` is `None` there).
+        // No-op when there is no active M:N scheduler (`mn` is `None`: the top-level VM, or a fiber
+        // with no heap of its own).
         if let Some(sched) = self.mn.clone() {
             let (scope_cancel, ancestors) = {
                 let c = sched.lock();
@@ -1985,8 +1981,8 @@ impl Vm {
 
     /// D2b — classify a finished fiber's run into a [`TaskOutcome`] (the M:N analogue of
     /// [`ReadyWorker::run_outcome`]). Unlike the legacy path it uses `start_task`/`run_until` and
-    /// **discards the task's return value**, matching the cooperative parity oracle (which never
-    /// inspects a task's return). Trips the shared cancel flag on a fault/exit so siblings abort. The
+    /// **discards the task's return value** (a spawned task's return is never observable to its
+    /// caller). Trips the shared cancel flag on a fault/exit so siblings abort. The
     /// fiber's `out`/`stderr` are taken from the live (swapped-in) shell buffers.
     pub(super) fn classify_mn_outcome(&mut self, res: Result<(), RuntimeError>) -> TaskOutcome {
         if let Some(code) = self.pending_exit {
@@ -2021,14 +2017,14 @@ impl Vm {
     }
 
     /// B3.3-threads / D2b — reduce a nursery's per-task outcome slots (task order) into the join's
-    /// result, flushing output and applying `Exit`-over-`Fault` precedence. Shared by the legacy pool
-    /// engine ([`run_workers_on_pool`]) and the M:N engine ([`run_mn_nursery`]).
+    /// result, flushing output and applying `Exit`-over-`Fault` precedence. Called from the M:N
+    /// nursery join paths ([`run_mn_nursery`] and friends).
     ///
     /// Every slot flushes its buffered output at its task-order slot, unconditionally, regardless of
     /// outcome kind: `Done`, `Exit` (decision F), `Fault` (W7-5c — EVERY faulting task's output flushes,
-    /// not just the lowest-index one), `Cancelled`, and `Deadlocked` all write their bytes. This matches
-    /// the cooperative/interp oracle, which prints a task's partial output live before it
-    /// unwinds/cancels/aborts and can't un-print it. The outcome kinds differ only in which error (if
+    /// not just the lowest-index one), `Cancelled`, and `Deadlocked` all write their bytes — so a
+    /// task's already-printed partial output is preserved rather than dropped when it
+    /// unwinds/cancels/aborts. The outcome kinds differ only in which error (if
     /// any) they contribute to the terminal result — `Cancelled` never contributes one; see the
     /// precedence below for the rest. The fault-free goldens only ever hit `Done`, so they stay
     /// byte-identical. A `Deadlocked` slot (the M:N deadlock-abort synthetic outcome — every parked
@@ -2088,8 +2084,8 @@ impl Vm {
                     //
                     // RESIDUAL RACE (intentionally not chased here — applies ONLY to a genuine
                     // multi-printer REAL-fault reduce; the multi-parked DEADLOCK case is handled by
-                    // the `Deadlocked` arm below, which flushes ALL parked buffers): this matches the
-                    // cooperative/interp oracle byte-for-byte only when the faulting task is the
+                    // the `Deadlocked` arm below, which flushes ALL parked buffers): this matches
+                    // serial byte-for-byte only when the faulting task is the
                     // nursery's SOLE output-producer. With additional output-producing siblings the M:N result can
                     // still diverge from serial's strict stop-at-first-fault order — a sibling that
                     // reaches `Done` before the faulter's cancel-trip keeps its output (serial would
@@ -2128,7 +2124,7 @@ impl Vm {
                     // A cancelled task's buffered output flushes at its task-order slot (it really
                     // printed those bytes — with cancellation points a started task always completes
                     // its prologue), matching serial, which prints live and cannot un-print. Cross-task
-                    // ORDER stays nondeterministic on both engines; the line SET is the contract.
+                    // ORDER stays nondeterministic; the line SET is the contract.
                     self.out.extend_from_slice(&out);
                     self.stderr.extend_from_slice(&stderr);
                 }
@@ -2166,7 +2162,7 @@ impl Vm {
 
     /// D0 — the `ChannelCore` identity (`Arc::as_ptr as usize`) behind a channel handle, the stable
     /// key for [`Nursery::blocked_on`]. Stable across the distinct `GcRef`s sibling fibers hold for
-    /// the same channel (cooperative `spawn` deep-clones the handle onto the shared `Arc`).
+    /// the same channel (`spawn` deep-clones the handle onto the shared `Arc`).
     pub(super) fn channel_core_ptr(&self, h: GcRef) -> usize {
         match self.heap.get(h) {
             Obj::Channel(core) => Arc::as_ptr(core) as usize,
@@ -2888,10 +2884,9 @@ impl Vm {
                         }
                         GenState::Done => WireGenState::Done,
                         GenState::Suspended => {
-                            // CHECKER-UNREACHABLE HARD ARMS — reject cleanly (same code path on both
-                            // engines → byte-identical error) rather than silently mis-serialize.
-                            // Neither shape can arise from checker-valid source; these are defensive
-                            // guards against the type-blind compiler path (see the parity tests).
+                            // CHECKER-UNREACHABLE HARD ARMS — reject cleanly rather than silently
+                            // mis-serialize. Neither shape can arise from checker-valid source; these
+                            // are defensive guards against the type-blind compiler path.
                             //  - multi-frame (a): `yield` only fires in the generator's own body frame
                             //    (`in_generator` resets at every fn/closure boundary), so a suspended
                             //    generator always has exactly one frame.
@@ -3001,10 +2996,9 @@ impl Vm {
                 // A cursor crosses by value as a DEEP COPY (like `List`): wire each snapshot item and
                 // carry `pos`. It is plain data (a `Vec` + index), so — unlike a generator — it is
                 // genuinely sendable, and `from_wire` rebuilds an independent cursor on the other side.
-                // This matches the serial-VM parity oracle, whose `deep_clone` already deep-copies a cursor across
-                // the airlock; gating it here (the old behavior) diverged VM from interp. Recursing
-                // through items means a cursor over a non-sendable element faults recoverably, like a
-                // `list` of that element would.
+                // `deep_clone` already deep-copies a cursor the same way across the airlock for
+                // `spawn`, so there is no separate gate here. Recursing through items means a cursor
+                // over a non-sendable element faults recoverably, like a `list` of that element would.
                 Obj::Iter { items, pos } => {
                     if let Some(&id) = memo.path.get(&h) {
                         WireValue::Backref(id)
@@ -3202,8 +3196,7 @@ impl Vm {
     ) -> Value {
         match w {
             // Re-create on the DESTINATION heap: `make_int` re-inlines or re-boxes (wide) and
-            // `box_float` re-boxes — identically on both engines, so the airlock round-trip is
-            // representation-stable across serial/M:N.
+            // `box_float` re-boxes, so the airlock round-trip is representation-stable.
             WireValue::Int(n) => self.make_int(n),
             WireValue::Float(f) => self.box_float(f),
             WireValue::Bool(b) => Value::bool(b),
@@ -3404,7 +3397,8 @@ impl Vm {
             // B3.6: rebuild a submitted closure by value over the worker's reconstructed home module
             // (the `proto` is shared via `Arc<Program>`; captures reconstruct bottom-up into this heap).
             // `worker_home` resolves the home index against this VM's `module_objs` (the rebuilt graph
-            // in a pool worker, or the live graph in a cooperative same-heap drain). TIE THE KNOT like
+            // in a pool worker, or the live graph directly when running with no heap of its own).
+            // TIE THE KNOT like
             // the `Cell` arm: resolve `home` and alloc a placeholder `Closure` with `Nil` captures,
             // register its `id`, THEN recurse the captures (a nested `Backref(id)` resolves to this
             // handle), and patch the captured slots. `worker_home`/`from_wire_memo` may `alloc` but never
@@ -3531,12 +3525,12 @@ impl Vm {
         // `chezzi test --max-heap` — thread the per-test live-heap cap onto the worker's OWN heap, so a
         // RUNAWAY alloc in a `spawn`/`parallel:` task trips the guard on the M:N engine too (a fresh
         // `Vm::new` heap defaults to cap-off). This is what gives the cap its cross-engine guarantee: a
-        // real runaway trips on whichever heap runs it. It does NOT make the trip point identical for a
-        // *near-boundary* concurrent test — the cooperative engine shares one heap (parent-baseline + Σ
-        // tasks) while each M:N worker's heap is measured alone, so a task allocating just under the cap
-        // (plus a parent baseline) trips on serial but not M:N. That per-heap divergence is inherent and
-        // documented (`docs/future.md §3b`); a cross-engine aggregate would need non-deterministic global
-        // RSS. `0` when the cap is off, so the common path is untouched.
+        // real runaway trips on whichever heap runs it. It does NOT make the trip point precisely
+        // predictable for a *near-boundary* concurrent test — each M:N worker's heap is measured alone
+        // (not the whole run's aggregate), so a task's near-cap allocation trips independent of any
+        // sibling's. That per-heap accounting is inherent and documented (`docs/future.md §3b`); a
+        // cross-worker aggregate would need non-deterministic global RSS. `0` when the cap is off, so
+        // the common path is untouched.
         worker.set_max_heap(self.heap.mem_cap());
         // …and something actually LOOKS at it, but NOT from here. A worker heap is BORN with its
         // task's payload already rebuilt into it, and `should_collect` counts OBJECTS: a `List[int]`
@@ -4355,8 +4349,9 @@ impl Vm {
     /// still builds exactly one snapshot for the run, and a spawn storm inside one nursery builds one.
     ///
     /// On a WORKER/fiber view the globals fault in lazily, so materialize the whole view first: without
-    /// that a re-snapshot would read EMPTY slots and recreate W6-2 one level down. Free on the top-level
-    /// / cooperative engine (nothing is lazy there — `module_snapshot` is `None`).
+    /// that a re-snapshot would read EMPTY slots and recreate W6-2 one level down. Free on the
+    /// top-level VM, and on a fiber with no heap of its own (nothing is lazy there — `module_snapshot`
+    /// is `None`).
     ///
     /// Fallible: a module global that is a frame-holding generator cannot be snapshotted (its parked
     /// frames reference the parent heap). `to_wire`/`to_snap` stamp the airlock fault with a
@@ -4623,8 +4618,8 @@ impl Vm {
         // (backlog item B): `to_wire` serializes a generator BY VALUE (F3 path C — proto + backing
         // closure + deep-copied parked slots), and `from_wire` rebuilds a FRESH independent
         // `GeneratorCore` on the WORKER heap (no shared parent `GcRef`), so a per-task by-value copy is
-        // memory-safe AND `serial == M:N` by construction (each task already gets its own frozen
-        // per-task module-global snapshot — F1). A non-sendable parked slot / reference cycle makes
+        // memory-safe by construction (each task already gets its own frozen per-task module-global
+        // snapshot — F1). A non-sendable parked slot / reference cycle makes
         // `to_wire` Err → we fall to the slow arm, which re-raises that real reject.
         // W7-4: SPECULATIVE — the attempt is discarded when the value carries a handle, so the memo
         // must be rolled back on that branch (`try_wire_speculative`).
@@ -4784,8 +4779,8 @@ impl Vm {
             //     it never sends (a regression: `snapshot_modules` walks EVERY global once, reached or
             //     not). `Nil` keeps the snapshot infallible and inert: a task that never touches the
             //     generator runs clean, and one that DOES reach it faults at the use site (iterating a
-            //     `Nil` is not iterable) — "fault only when reached", `serial == M:N` by construction
-            //     (both engines snapshot from the same memoized frozen copy).
+            //     `Nil` is not iterable) — "fault only when reached" by construction (every task
+            //     snapshots from the same memoized frozen copy).
             // W7-4: also SPECULATIVE (the `Nil` branch discards it) — same rollback discipline, and
             // it must use the SHARED memo on the kept branch or its ids would collide with the ones the
             // module's other globals minted, aliasing unrelated nodes on replay.
@@ -4943,10 +4938,10 @@ impl Vm {
     }
 
     /// D1 — if this is a worker VM (a snapshot is installed), ensure the module that owns `home` has
-    /// been faulted in before its globals are read. No-op on the top-level / cooperative VM (no
-    /// snapshot — `module_objs` are the real, already-populated modules), so those engines are
-    /// untouched. Called at every module-global read site (`GetGlobal`, the `GetCaptured` home
-    /// fallback, module member access, and a `module.fn(...)` call).
+    /// been faulted in before its globals are read. No-op on the top-level VM, and on a fiber with no
+    /// heap of its own (no snapshot — `module_objs` are the real, already-populated modules), so those
+    /// views are untouched. Called at every module-global read site (`GetGlobal`, the `GetCaptured`
+    /// home fallback, module member access, and a `module.fn(...)` call).
     pub(super) fn ensure_module_faulted(&mut self, home: GcRef) {
         if self.module_snapshot.is_none() {
             return;

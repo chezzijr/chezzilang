@@ -142,7 +142,7 @@ impl Vm {
 
     /// M19 Tier-2 — adaptive quickening for `Eq`/`NotEq` (never fused, so always reached here). The
     /// int fast path uses EXACT `x == y` (i64), matching `values_equal_guarded`'s exact `(Int,Int)`
-    /// arm — both engines run this same code, so two-engine parity holds. (It formerly replicated the
+    /// arm. (It formerly replicated the
     /// lossy `as_f64(x) == as_f64(y)`, which wrongly equated distinct ints above 2^53.) `negate` flips
     /// the result for `NotEq`. The generic path is [`Self::eq_operator`], shared with the kept
     /// `Op::Eq`/`Op::NotEq` `step` arms. A struct/enum operand fails `as_int_inline`, so a site warmed
@@ -615,7 +615,7 @@ impl Vm {
     /// `union`/`intersection`/`difference` set methods (vm:7918) using the cached per-element
     /// hashes (no re-hashing; membership may still dispatch a user `eq`). `^` (symmetric-difference) has no method form:
     /// it is the union of (mine ∉ other) THEN (other ∉ mine), in that canonical insertion order so
-    /// the result's print order is deterministic and parity-equal with the serial-VM oracle.
+    /// the result's print order is deterministic.
     pub(super) fn set_op(
         &mut self,
         op: SetOp,
@@ -882,7 +882,7 @@ impl Vm {
     }
 
     /// Bitwise / shift ops — int-only (gap #13). Shift amounts outside `0..64` are a runtime error
-    /// (Rust would otherwise panic), with a message identical to the serial-VM oracle's.
+    /// (Rust would otherwise panic).
     pub(super) fn bitwise(&mut self, op: &Op, span: Span) -> Result<(), RuntimeError> {
         let r = self.pop();
         let l = self.pop();
@@ -1271,8 +1271,7 @@ impl Vm {
             .ok_or_else(|| self.err(format!("unknown struct type '{name}'"), span))?;
         // A ZERO-FIELD struct with no `hash` method hashes to a constant (0): it has no state, so
         // there is nothing to hash. `==`'s type-tag guard keeps distinct empty-struct types unequal
-        // despite the shared hash. Mirrors the checker's zero-field `Hashable` intrinsic and the
-        // serial-VM oracle's identical constant (two-engine parity).
+        // despite the shared hash. Mirrors the checker's zero-field `Hashable` intrinsic.
         if def.fields.is_empty() && !def.methods.contains_key("hash") {
             return Ok(0);
         }

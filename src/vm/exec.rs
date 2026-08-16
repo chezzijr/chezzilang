@@ -191,7 +191,7 @@ impl Vm {
     }
 
     /// B3.4 — set this VM's nursery cancel flag (if it runs under one), so sibling workers abort.
-    /// No-op on the cooperative engine / top-level VM (`cancel` is `None`).
+    /// No-op when this VM runs under no nursery (`cancel` is `None`) — e.g. the top-level VM.
     pub(super) fn trip_cancel(&self) {
         if let Some(c) = &self.cancel {
             c.store(true, Ordering::Relaxed);
@@ -231,8 +231,8 @@ impl Vm {
         std::mem::swap(&mut self.snapshot_memo, &mut ctx.snapshot_memo);
         // W7-4a — the snapshot rebuild map describes the SAME view, so it travels with it. Unlike the
         // two `Arc<ModuleSnapshot>`s above it IS heap-keyed (`GcRef` values), exactly like
-        // `module_objs` just above: for an M:N fiber it indexes the heap swapped below, for a
-        // cooperative one the shared heap. Either way it moves atomically with its view.
+        // `module_objs` just above: for an M:N fiber it indexes the heap swapped below, for a fiber
+        // with no heap of its own the shared heap. Either way it moves atomically with its view.
         std::mem::swap(&mut self.snapshot_rebuild, &mut ctx.snapshot_rebuild);
         // W7-4c — the snapshot cell registry is heap-keyed too (its KEYS are `GcRef`s into the heap the
         // snapshot was built from), so it travels with the same view for the same reason.
@@ -241,19 +241,19 @@ impl Vm {
         // Split them and a fiber resuming on a fresher shell re-mints ids its own registry already
         // uses, merging two unrelated bindings.
         std::mem::swap(&mut self.snapshot_next_id, &mut ctx.snapshot_next_id);
-        // D2a — an M:N fiber (`Some`) owns its heap; swap it with the host's. A cooperative fiber
-        // (`None`) shares the single `Vm::heap` (decision A), so its heap is left untouched and the
-        // cooperative engine stays byte-identical by construction. D2b — the same `Some` gate carries
-        // the fiber's remaining heap-keyed side state (out/stderr/executors/intern), so they move
-        // atomically WITH the heap their `GcRef`s index. A cooperative fiber swaps none of that.
+        // D2a — an M:N fiber (`Some`) owns its heap; swap it with the host's. A fiber with no heap of
+        // its own (`None`) shares the single `Vm::heap` (decision A), so its heap is left untouched.
+        // D2b — the same `Some` gate carries the fiber's remaining heap-keyed side state
+        // (out/stderr/executors/intern), so they move atomically WITH the heap their `GcRef`s index.
+        // A fiber with no heap of its own swaps none of that.
         if let Some(ctx_heap) = ctx.heap.as_mut() {
             std::mem::swap(&mut self.heap, ctx_heap);
             std::mem::swap(&mut self.out, &mut ctx.out);
             std::mem::swap(&mut self.stderr, &mut ctx.stderr);
             std::mem::swap(&mut self.executors, &mut ctx.executors);
             // M19 Phase 3 — the intern cache's `GcRef`s index this fiber's OWN heap, so it MUST travel
-            // atomically with the heap (same heap-keyed argument as `module_objs`). A cooperative fiber
-            // (`heap: None`) never reaches here and keeps aliasing the shell's cache.
+            // atomically with the heap (same heap-keyed argument as `module_objs`). A fiber with no
+            // heap of its own (`heap: None`) never reaches here and keeps aliasing the shell's cache.
             std::mem::swap(&mut self.str_intern, &mut ctx.str_intern);
             // D6b — a mid-flight `connect` parked on writability swaps WITH its fiber (it owns the
             // connecting fd that the netpoller is watching; it must not be left on the shell where the
@@ -276,7 +276,7 @@ impl Vm {
     /// (`yield_now`). Both unwind every nested `run_until` / call site the SAME way — propagate up
     /// WITHOUT popping a result or pushing a sentinel — so every "callee paused" gate tests this, not
     /// `suspend` alone. (`yield_now` is only ever set under the M:N engine — the safepoint gates it on
-    /// `mn.is_some()` — so the cooperative engine, where it is always false, is unchanged by
+    /// `mn.is_some()` — so a run with no M:N scheduler, where it is always false, is unchanged by
     /// construction.)
     pub(super) fn paused(&self) -> bool {
         self.suspend.is_some()
@@ -409,8 +409,9 @@ impl Vm {
     // ----- experimental generators (VM-only) -----
 
     /// Swap the live execution context (frames/stack/depth/base/handlers) with a parked [`GenCtx`].
-    /// Smaller sibling of [`Vm::swap_ctx`]: a generator shares the host heap (like a cooperative
-    /// fiber, decision A) and cannot open nurseries/spawn (checker-forbidden), so none of the
+    /// Smaller sibling of [`Vm::swap_ctx`]: a generator shares the host heap (the same share-by-ref,
+    /// decision A, as a fiber with no heap of its own) and cannot open nurseries/spawn
+    /// (checker-forbidden), so none of the
     /// heap-keyed or nursery state moves.
     pub(super) fn swap_gen_ctx(&mut self, ctx: &mut GenCtx) {
         std::mem::swap(&mut self.frames, &mut ctx.frames);
@@ -1094,9 +1095,9 @@ impl Vm {
     pub(super) fn run_until(&mut self, base_level: usize) -> Result<(), RuntimeError> {
         // M19 — hoist the per-entry `Arc::clone(&self.program)`: borrow the program by raw
         // pointer instead of bumping the refcount. `self.program` is an immutable
-        // `Arc<Program>` set once in `Vm::new` and NEVER reassigned (cooperative `spawn` /
-        // `--parallel` workers each build their own `Vm`; `swap_ctx` swaps heap/frames/stack,
-        // not `program`), so the pointee outlives this loop and the borrow is disjoint from
+        // `Arc<Program>` set once in `Vm::new` and NEVER reassigned (M:N workers each build
+        // their own `Vm`; `swap_ctx` swaps heap/frames/stack, not `program`), so the pointee
+        // outlives this loop and the borrow is disjoint from
         // the `&mut self` fields `step` mutates (`step` only reads program data). Post-flatten
         // this entry is hit per top-level run + per native re-entry (HOF callbacks, operator
         // overloads, deferred calls) + per fiber resume — so the saved atomic shows on
@@ -1146,8 +1147,8 @@ impl Vm {
             // The cancel still unwinds like an uncaught fault that bypasses `recover:` — see the
             // post-step funnel below (`self.cancelled` ⇒ `unwind_deferred(base_level, false)`).
             //
-            // D3: reduction-counting preemption (M:N-worker fibers only — a cooperative fiber, sharing
-            // the host heap, is never preempted). Decrement the budget per dispatched op; at
+            // D3: reduction-counting preemption (M:N-worker fibers only — a fiber with no heap of its
+            // own, sharing the host heap, is never preempted). Decrement the budget per dispatched op; at
             // exhaustion yield this worker so a queued sibling runs (round-robin fairness). A yielded
             // cancelled fiber observes the cancel at its next checkpoint. The
             // `native_reentry == 0` guard mirrors `recv`-park: a yield inside a native callback can't
@@ -2358,7 +2359,7 @@ impl Vm {
                 // `for v in ch:` step: pop a value (parking on empty-open exactly like `recv`) and push
                 // `Some(v)`, or push `None` once the channel is closed-and-drained (the loop's clean
                 // exit). Runs at the loop top, never inside a native callback (`native_reentry == 0`),
-                // so it takes the snapshot-park / cooperative-park / fault paths — never the demote path.
+                // so it takes the snapshot-park / block-in-place / fault paths — never the demote path.
                 let v = self.pop();
                 let Some(h) = v.as_obj() else {
                     return Err(self.err("`for` over a non-channel value".to_string(), span));
