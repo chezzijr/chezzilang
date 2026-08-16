@@ -36,7 +36,7 @@ cargo build --release    # compile (release; the VM is only fast optimized)
 # Tests: `src/main.rs` (the `chezzi` CLI) is a thin shim over the `chezzi` library crate (src/lib.rs,
 # the front-end + editor tooling), so the front-end compiles ONCE and its unit tests + goldens +
 # conformance run ONCE (in the lib test target). `cargo test` is the normal full command.
-cargo test                       # FULL pre-commit suite: lib unit suite + parity + conformance + integration
+cargo test                       # FULL pre-commit suite: lib unit suite + goldens + conformance + integration
 # ^ includes `tests/chezzi_threads_cli.rs`: with `--serial` gone, the standing differential is
 #   `tests/chz` (569 Chezzi behavioural tests) run at TWO worker counts (default + `CHEZZI_THREADS=2`)
 #   via the built binary, each its own process/pool. NOT a gate over the ~4150 Rust lib tests — that
@@ -102,7 +102,7 @@ UPDATE_EDITOR_ASSETS=1 cargo test --test editor_tmlanguage    # regenerate the V
   module's `native_module_sig` and gate the bare name behind `import` via the per-module licensing set
   (mirror FFI `imported_ffi_types` / `imported_concurrency` / `imported_time`); keep runtime ctor/opcode
   dispatch unchanged (the gate is checker-only name resolution). A pure type/ctor with no runtime module-member value also needs the `bind_import` skip in
-  the vm, or `from M import X` faults at runtime — cover it with a test that RUNS the program (serial + M:N).
+  the vm, or `from M import X` faults at runtime — cover it with a test that RUNS the program.
   A global reserved name is a one-way ratchet: moving it out later breaks every example + grammar.bnf.
 - **A new native fn's `MEMBERS` entry is `(name, fn, Kind)` — the third element is not paperwork.**
   `native::Kind` says how the engine RUNS it: `Inline` (pure CPU, or it touches host stdio/os state),
@@ -140,9 +140,10 @@ UPDATE_EDITOR_ASSETS=1 cargo test --test editor_tmlanguage    # regenerate the V
   `tests/chz/README.md`.
 - **ONE ENGINE.** The bytecode VM on its M:N scheduler is the sole engine — the tree-walk interpreter
   and the cooperative `--serial` VM are both **removed** (`--serial` since 2026-08-16). There are no
-  per-engine test-helper pairs any more: `run_capture`/`run_program`/`run_file` (and the `parity_*`
-  helpers, which keep their historical names) all run the one engine and compare against a **literal
-  golden**. A helper that runs the program twice and diffs the two runs against each other proves
+  per-engine test-helper pairs any more: `run_capture`/`run_program`/`run_file` (and the golden
+  helpers — `src/vm/golden_tests.rs`, `assert_golden_out`/`golden_entry*`, renamed from the historical
+  `parity_tests.rs`/`assert_parity*` on 2026-08-16) all run the one engine and compare against a
+  **literal golden**. A helper that runs the program twice and diffs the two runs against each other proves
   nothing — give it a real expectation.
 - **CORRECTNESS IS JUDGED AGAINST THE ANCESTOR — there is no engine agreement to hide behind.**
   With one engine there is no cross-engine oracle at all, so "both engines agree" is not merely a weak
