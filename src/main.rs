@@ -45,7 +45,8 @@ FLAGS:
                      summary notes how many were filtered out. Zero matches = clear failure.
     --fail-fast      Stop at the first non-pass verdict (deterministic order: sorted files, then each
                      file's free tests, then each suite's methods, all in declaration order).
-    --show-output    Surface a FAILING test's captured stdout, indented under its line (default: discard).
+    --show-output    Surface a FAILING test's captured stdout byte-exactly, indented under its line
+                     (default: discard).
     --errors=json    Emit ONLY a JSON document ({tests:[{name,file,line?,status,duration_ms}],totals})
                      for CI/editors — suppresses the human PASS/FAIL lines (mirrors `check --errors=json`).
     -q, --quiet      Dots (`.`/`F`/`E`/`M`/`T`) per test + the summary only (no per-test lines).

@@ -1262,7 +1262,13 @@ render ERROR too (whole file, before any test runs), counted separately as `file
 6. **stdout capture option. SHIPPED (2026-07-24).** `--show-output` surfaces a FAILING test's captured
    stdout, indented under its `FAIL`/`ERROR`/etc. line (pytest show-on-failure). Default still discards
    (assert-on-value is the intended path); a passing test's stdout is never shown. Kept in the `Outcome`
-   only when the flag is on (bounded to the run).
+   only when the flag is on (bounded to the run). **Byte-exact, SHIPPED (2026-08-16).** The captured
+   stdout used to round-trip through `String::from_utf8_lossy`, so non-UTF-8 bytes (e.g.
+   `io.stdout().write_bytes(b"\xff\xfe")`) rendered as U+FFFD; `Vm::take_out_bytes()` + `TestReport.bytes`
+   now carry the raw bytes straight to fd 1, matching `chezzi run` and measured `go test` (go1.26.6) —
+   `pytest`/CPython 3.14 deliberately replaces invalid bytes instead (`_pytest/capture.py:492-496`), but
+   Chezzi already commits to byte-exact on `run`, so `test` followed to stay self-consistent. `W6-9r`
+   item 4, `docs/gaps.md`.
 7. **Better options + output format. SHIPPED (2026-07-24).**
    - Verbosity: `-q`/`--quiet` (dots `.`/`F`/`E`/`M`/`T` + summary only) vs default per-line vs
      `-v`/`--verbose` (per-line + per-test `(Nms)` timing + a total). `-q`/`-v` are mutually exclusive.

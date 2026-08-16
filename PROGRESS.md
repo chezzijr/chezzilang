@@ -100,6 +100,56 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > `cargo test` 20/20 targets green (lib 4153/0/2), `chezzi test tests/chz` 569/569, conformance 8/8,
 > clippy clean.
 
+> **✅ `W6-9r` closes in full — `chezzi test --show-output` is byte-exact, 2026-08-16 (3 commits).**
+> Item 4, the one residual left open by the `--serial` removal (`docs/gaps.md` `W6-9r`), is closed: a
+> failing test's captured stdout used to round-trip through `String::from_utf8_lossy` before printing,
+> so raw bytes written inside a `test fn` (`io.stdout().write_bytes(b"\xff\xfe")`) rendered as U+FFFD.
+> `Vm::take_out_bytes()` now sits beside the (kept) lossy `Vm::take_out()`; `Outcome.captured_out` and
+> the report buffer became `Vec<u8>`; `TestReport` gained `pub bytes: Vec<u8>` beside its unchanged
+> `pub text: String`; `src/main.rs` writes `report.bytes` with `write_all` instead of printing
+> `report.text`. `text` stayed byte-identical for any UTF-8 capture (every byte the runner itself
+> contributes is ASCII, which terminates a maximal invalid subsequence), so all 260 existing `.text`
+> consumers needed no change.
+>
+> **Measured 2026-08-16 — a runner test that prints `before\n`, writes raw bytes `ff fe`, then fails:**
+>
+> | runner | bytes on the failure line |
+> |---|---|
+> | `go test` (go1.26.6) | `62 65 66 6f 72 65 0a **ff fe** 2d 2d 2d 20 46 41 49 4c…` — byte-exact |
+> | `pytest` 9.0.3 / CPython 3.14 | `62 65 66 6f 72 65 0a **ef bf bd ef bf bd** 0a…` — U+FFFD ×2 |
+> | `chezzi test --show-output` (before) | U+FFFD ×2, matching pytest |
+> | `chezzi test --show-output` (after) | `ff fe`, matching Go |
+>
+> The two ancestors disagree, and pytest's split is deliberate: `_pytest/capture.py:492-496` wraps the
+> FD-capture tmpfile in `EncodedFile(..., errors="replace")`. Chezzi followed **Go**, because Chezzi is
+> already byte-exact on `chezzi run` — staying lossy on `chezzi test` would make one binary disagree with
+> itself about the same program's bytes, which is worse than pytest's self-consistent lossy choice.
+> One real behavior change on UTF-8 input: `str::lines()` strips a trailing `\r`, so a test printing
+> `"a\r\n"` now renders `    a\r\n` instead of `    a\n` — the program's real byte. `--errors=json` never
+> carried captured stdout at all, so there was never a byte question on that path.
+>
+> **A stale comment turned live-false during the fix, caught by task-2 review (Critical).** An earlier
+> commit on this branch reworded a dead `--serial` sentence in `op_enter_nursery` (`src/vm/exec.rs`) —
+> instead of deleting it, the reword pointed it at the *live* eager/lazy nursery split and called the
+> "no worker shell" nursery lazy, while `let eager = self.mn.is_none() || worker_count() >= 2;` twenty
+> lines below makes exactly that case unconditionally eager. It read as documentation of an
+> already-fixed defect. Fixed by deleting the sentence, not rewording it again. **Lesson: a stale
+> comment about a deleted feature is moot; rewording it to point at live code can turn it false.**
+>
+> **A swallowed-stdout-write-error test could not be red→green the way it was first specified.**
+> `chezzi test --show-output | head -1` was GREEN both before and after the fix, because the pre-fix
+> `let _ =` already swallowed `BrokenPipe` unconditionally — a closed *reader* is not the failure mode
+> that mattered. A read-only fd was tried next as the induced-error source and **measured false-green**:
+> `std::io::Stdout::write_all` returns `Ok(())` on `EBADF` while a raw `write(2)` probe shows the byte
+> never lands, so the test would have passed for the wrong reason. `/dev/full` was the real repro.
+>
+> Gate: `cargo test` **21 targets, 0 failed** (lib **4154 passed / 0 failed / 2 ignored**; **4369 Rust
+> tests** total, was 4337); `cargo clippy --all-targets -- -D warnings` clean; `./target/release/chezzi
+> test tests/chz` **569/569** at the default worker count and at `CHEZZI_THREADS=2`. End-to-end on the
+> release binary, the fixture above: `chezzi test --show-output` → `… 62 65 66 6f 72 65 0a 20 20 20 20
+> **ff fe** 0a` (four-space indent, raw bytes); `chezzi run` on the same writes →
+> `62 65 66 6f 72 65 0a **ff fe**`.
+
 > **✅ M24's last four residuals CLOSED + the generic-function-value family, 2026-08-15 (21 commits).**
 > `docs/gaps.md` rows **M24-1, M24-2, M24-5, M24-7** are all struck through FIXED, and **no new row was
 > filed** — every defect found while fixing them was closed in-branch. Gate at merge: 18 targets,
