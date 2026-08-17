@@ -90,7 +90,10 @@ Diagnostics appear automatically via `textDocument/publishDiagnostics` on open/c
 > diagnostics/quickfix list even for an unopened buffer). When the same broken module is imported from
 > several buffers you have open at once, its diagnostics are the UNION of what every one of those
 > buffers currently reports — fixing your import in one buffer doesn't clear the squiggle while another
-> open buffer still imports the same broken module.
+> open buffer still imports the same broken module. Closing a buffer always drops its contribution to
+> that union (even if a check triggered just before the close is still in flight when it finishes) and
+> re-publishes what's left, so a closed buffer's squiggle never lingers on a module you're no longer
+> even editing.
 
 ---
 

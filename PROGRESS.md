@@ -7,6 +7,56 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > and are kept verbatim — that is what this tracker is for. Since 2026-08-16 there is **one engine**
 > and no cross-engine gate; see the entry directly below.
 
+> **✅ Adversarial-review fix wave on `feat/span-file-and-stdlib-contracts`, 2026-08-18 — the LSP's
+> diagnostic publish is now atomic with its delivery, and a closed buffer can no longer be resurrected as
+> a diagnostic source.** Three isolated prosecutors reviewing the branch (the file-naming work above,
+> including the union-diagnostics landing) filed two related charges on `chezzi-lsp.rs`'s
+> `Backend::publish`: **(F1)** the union was computed under the `published` lock but the resulting
+> `client.publish_diagnostics(...)` sends happened AFTER the lock was released — since tower-lsp
+> dispatches notification handlers concurrently (vendored `tower-lsp-0.20.0/src/transport.rs`:
+> `DEFAULT_MAX_CONCURRENCY = 4`, `.buffer_unordered(...)`) and `publish_diagnostics` carries
+> `version: None` (the client can't reject a stale delivery), two publishes for buffers sharing a target
+> module could compute in one order and deliver in the other. **(F2)** `did_close` removed a URI from
+> the map and republished without it, but `did_change`/`did_open` never checked whether a URI was still
+> open before unconditionally re-`insert`ing it — a `did_change` whose diagnostics computation finished
+> after a concurrent `did_close` for the same URI would resurrect the closed buffer as a live source,
+> with nothing left to ever clear it (no future event targets a closed buffer). Fix: both bugs are one
+> design flaw, so one fix — `published: HashMap<...>` became `published: Mutex<Published>` with
+> `open: HashSet<Url>` alongside the existing per-source map; `did_open` marks a URI open BEFORE the
+> (unlocked) diagnostics computation starts, `did_close` removes it, and the decide-then-send sequence
+> (`decide_publish`/`decide_close`, factored out as pure sync fns for deterministic unit testing) now
+> runs under ONE continuous hold of the lock — declining outright (no insert, no send) for a URI no
+> longer in `open`, and holding the `tokio::sync::Mutex` across the `publish_diagnostics` awaits so
+> "last update wins" is true at the client, not just in the map (serializes diagnostic delivery — the
+> correct trade for a diagnostics server; `docs` stays a separate lock, never held alongside `published`,
+> per a still-standing earlier review). A fourth charge — that rendering an absolute path for an
+> out-of-cwd (e.g. `std/`) fault is itself an information leak — was **ruled not a defect**: both owning
+> ancestors do the same (measured: CPython prints an absolute stdlib path, Go prints an absolute path on
+> every frame); the REAL gap was that `tests/run_stack_trace_paths.rs`'s
+> `std_module_fault_names_the_std_file_not_a_bare_line` only asserted `contains("flag.chz:")`, which
+> passes for a relative, absolute, or bare-filename rendering alike — fixed test-only, now asserting BOTH
+> the std-module headline renders absolute and the project-local call-site frame renders relative, in one
+> run. Plus a trivial fifth: `src/native/math.rs`'s `lcm` comment cited a stale line number for `lcm`
+> below it (drifted from `:250` to its real `:254`) — deleted rather than corrected, since the fn name
+> alone can't rot. On the concurrency fix's own test story: a black-box stdio integration test (send
+> `didChange` immediately followed by `didClose`, no wait between, for the sole source of a shared
+> diagnostic) could NOT be made to force the adversarial interleaving on demand — measured empirically,
+> not assumed: `Server::serve` runs `read_input`/`process_server_tasks`/`print_output` as three futures
+> joined into ONE task, not one tokio task per request, and a `did_change` computing diagnostics over an
+> 80,000-line payload (a plain `chezzi check` on that shape measures ~0.5s) still always finished before
+> a `did_close` sent right after it started, across every trial — `buffer_unordered`'s cooperative
+> scheduling only yields at a real suspension point, which this path evidently never hits here. So the
+> deterministic regression coverage lives at the unit level instead —
+> `decide_publish_declines_a_uri_that_closed_first` and
+> `decide_publish_after_a_racing_close_never_resurrects_the_source` in `chezzi-lsp.rs`'s own
+> `#[cfg(test)] mod tests` construct the exact `Published` state a losing race would produce and assert
+> `decide_publish` declines, with no timing dependency (confirmed to fail against the pre-fix logic by
+> temporarily reverting the open-check and re-running); the stdio test stays as the next-best end-to-end
+> pin for the ordinary (non-adversarial) case. `editors/README.md`'s diagnostics-union paragraph gained a
+> sentence: closing a buffer always drops its contribution even if a check triggered just before the
+> close is still in flight. Gate: `cargo test` full suite green, `cargo test --features lsp --test
+> lsp_smoke` green (11 tests, one new), `cargo clippy --all-targets --features lsp -- -D warnings` clean.
+>
 > **📋 EXTERNAL DOGFOOD PASS filed, 2026-08-17 — `docs/gaps.md` W8-1..W8-20, and the table is no longer
 > empty.** Ten developers new to Chezzi, one area each, **343 Chezzi programs vs 45 reference programs**
 > (Python/Go/Rust), nothing taken on the docs' word — their counts and darwin timings, not re-run here.

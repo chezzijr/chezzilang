@@ -667,3 +667,97 @@ fn did_close_clears_a_cross_module_diagnostic_it_was_the_sole_source_for() {
         "expected an EMPTY diagnostics array clearing badmod once its sole source closed: {closed_msg}"
     );
 }
+
+/// F1/F2 end-to-end regression (adversarial review 2026-08-18) — a `did_change` fired immediately
+/// followed (no wait in between; both notifications are written back-to-back over the same stdio pipe,
+/// before any response to either) by a `did_close`, for the SOLE source of a shared diagnostic, through
+/// the REAL stdio subprocess.
+///
+/// tower-lsp's own architecture is described as concurrent (vendored `tower-lsp-0.20.0/src/
+/// transport.rs`: `DEFAULT_MAX_CONCURRENCY = 4`, `.buffer_unordered(...)`), and that description is why
+/// this was charged as a race in the first place. But `Server::serve` runs `read_input`,
+/// `process_server_tasks` and `print_output` as THREE FUTURES JOINED INTO ONE TASK (`join!`), not one
+/// tokio task per request — measured empirically here (not guessed): a `did_change` on a payload big
+/// enough to make its unlocked `chezzi::editor::diagnostics()` call take >100ms (80,000 lines; a plain
+/// `chezzi check` on that shape measured ~0.5s) STILL always finished before a `did_close` sent
+/// immediately after it even started, across every trial. `buffer_unordered`'s cooperative scheduling
+/// only yields to a sibling future at a REAL suspension point (a full/rendezvous channel, e.g. an
+/// awaited send), and this repo's handlers evidently don't hit one on this path in this build — so this
+/// stdio harness cannot force the adversarial interleaving on demand.
+///
+/// The deterministic proof therefore lives at the unit level instead: `decide_publish`/`decide_close`
+/// in `chezzi-lsp.rs` are the pure, synchronous core of the decide-then-send sequence, factored out
+/// specifically so the F2 race (a `did_close` that removed `uri` from `open` before a late `publish`
+/// call reaches the same lock) can be reproduced by CONSTRUCTING that exact `Published` state directly,
+/// with no timing dependency — see `decide_publish_declines_a_uri_that_closed_first` and
+/// `decide_close_clears_open_and_by_source` in that file's `#[cfg(test)] mod tests`.
+///
+/// This test stays as the next-best THING THIS HARNESS CAN pin: the ordinary (non-adversarial) case —
+/// close-follows-change for the sole source of a shared diagnostic — must settle to empty end to end,
+/// through the real subprocess, real transport, and real `Client::publish_diagnostics` calls.
+#[test]
+fn did_change_then_did_close_settles_to_the_closed_state_e2e() {
+    let (mut stdin, rx, _guard, _init_resp) = start_server();
+
+    let dir = std::env::temp_dir().join(format!("chezzi_lsp_f1f2_race_{}", std::process::id()));
+    std::fs::create_dir_all(dir.join("core")).unwrap();
+    let badmod_path = dir.join("core").join("badmod.chz");
+    std::fs::write(&badmod_path, "y: int = \"oops\"\n").unwrap();
+    let badmod_uri = format!(
+        "file://{}",
+        std::fs::canonicalize(&badmod_path).unwrap().display()
+    );
+    let app_uri = format!("file://{}/app.chz", dir.display());
+
+    send(
+        &mut stdin,
+        &format!(
+            r#"{{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{{"textDocument":{{"uri":"{app_uri}","languageId":"chezzi","version":1,"text":"import core.badmod\n"}}}}}}"#
+        ),
+    );
+    wait_for_uri_diagnostics(&rx, &badmod_uri)
+        .unwrap_or_else(|| panic!("no publishDiagnostics for {badmod_uri} after didOpen"));
+
+    // Fire didChange (same broken content — still imports badmod) and didClose BACK TO BACK, with no
+    // wait for any response in between.
+    send(
+        &mut stdin,
+        &format!(
+            r#"{{"jsonrpc":"2.0","method":"textDocument/didChange","params":{{"textDocument":{{"uri":"{app_uri}","version":2}},"contentChanges":[{{"text":"import core.badmod\n"}}]}}}}"#
+        ),
+    );
+    send(
+        &mut stdin,
+        &format!(
+            r#"{{"jsonrpc":"2.0","method":"textDocument/didClose","params":{{"textDocument":{{"uri":"{app_uri}"}}}}}}"#
+        ),
+    );
+
+    // Drain messages for badmod's URI until the burst settles (2s of silence), remembering the LAST
+    // one seen — the client-observed final state must be empty.
+    let mut last: Option<String> = None;
+    let overall_deadline = std::time::Instant::now() + Duration::from_secs(20);
+    loop {
+        if std::time::Instant::now() >= overall_deadline {
+            break;
+        }
+        match rx.recv_timeout(Duration::from_secs(2)) {
+            Ok(msg) => {
+                if msg.contains("textDocument/publishDiagnostics") && msg.contains(&badmod_uri) {
+                    last = Some(msg);
+                }
+            }
+            Err(_) => break, // 2s of silence: the burst has settled.
+        }
+    }
+
+    let _ = std::fs::remove_dir_all(&dir);
+
+    let last_msg = last.unwrap_or_else(|| {
+        panic!("no publishDiagnostics observed for {badmod_uri} after the didChange/didClose burst")
+    });
+    assert!(
+        last_msg.contains("\"diagnostics\":[]"),
+        "the settled state for {badmod_uri} must be EMPTY once its sole source closed: {last_msg}"
+    );
+}
