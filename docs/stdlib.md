@@ -24,7 +24,7 @@ Conventions used below:
 | `float` | `float(x) -> float` | Convert from `float`/`int`/`str`. Bad string raises — for `None`-on-failure use `s.to_float() -> float?`. |
 | `bool` | `bool(x) -> bool` | Truthiness cast (never faults on a scalar). `int`: `0` → `false`, else `true`. `float`: `0.0`/`-0.0` → `false`, `NaN` → `true` (Python parity), else `true`. `bool`: identity. `str`: `""` → `false`, else `true` (non-empty is truthy — **not** a parse, so `bool(" ")` is `true`). |
 | `str` | `str(x) -> str` | Stringify an `int`/`float`/`bool` (and more — see the `Stringable` protocol in `syntax.md`). Scalars (`int`/`float`/`bool`/`str`) also intrinsically satisfy the `Stringable` protocol, so `[T: Stringable]` generics accept them. A string NESTED inside a container / struct field / enum payload renders as its Python `repr` — quoted and escaped (`str(["a", "b"])` is `['a', 'b']`) — while a bare string stays its own characters (`str("a")` is `a`). See `syntax.md` §"A nested `str` is quoted". |
-| `ord` | `ord(s) -> int` | Unicode codepoint of the first character of `s`. |
+| `ord` | `ord(s) -> int` | Unicode codepoint of `s`, which must be exactly **one character** (`ord("é")` → 233; `ord("ab")` faults, like Python). |
 | `chr` | `chr(code) -> str` | One-character string for codepoint `code`. |
 | `panic` | `panic(msg) -> never` | Raise a recoverable fault (caught by the nearest `recover:`, else aborts). Bottom-typed. |
 
@@ -56,6 +56,7 @@ here is recoverable (`r := recover: <expr>`), and the ones with a carrier siblin
 | `int(s)` / `float(s)` on a bad string | `int(): cannot parse 'abc' as an integer` | `ValueError: invalid literal for int() with base 10: 'abc'` | **`s.parse_int()`/`parse_float() -> Result`**, `s.to_int()/to_float() -> Option` |
 | `chr(code)` out of range | `chr(): -1 is not a valid Unicode codepoint` | `ValueError: chr() arg not in range(0x110000)` | — |
 | `ord(s)` on `""` | `ord() of an empty string` | `TypeError: ord() expected a character, but string of length 0 found` | — |
+| `ord(s)` on a multi-**character** string | `ord() expects a 1-character str, got 2 characters` | `TypeError: ord() expected a character, but string of length 2 found` | — |
 | `s.split("")` | `split: sep must not be empty` | `ValueError: empty separator` | — |
 | `b.decode()` on invalid UTF-8 | `invalid UTF-8 in decode()` | `UnicodeDecodeError: 'utf-8' codec can't decode byte 0xff…` | **`b.decode_lossy()`** (Python `decode(errors="replace")`) |
 | `rand.int(lo, hi)`, `hi <= lo` | `rand.int(lo, hi): hi must be > lo` | `ValueError: empty range in randint(5, 1)` | — |
@@ -64,11 +65,18 @@ here is recoverable (`r := recover: <expr>`), and the ones with a carrier siblin
 | integer overflow | `integer overflow in Add` | *(upward divergence — Python ints are arbitrary-precision; Chezzi's i64 faults recoverably rather than wrapping)* | — |
 | `crypto.secure_bytes(n)`, `n` out of range | `secure_bytes: n must be >= 0, got -1` | *(deliberate fail-closed — a crypto primitive must not silently produce fewer bytes)* | — |
 
-Two entries people expect to find here are **not** faults at all:
-`",".join(xs)` on a non-`str` element is a **static type error** in Chezzi (`expected List[str], found
-List[int]`) where Python raises `TypeError` at runtime; and `ord(s)` on a **multi-character** string
-returns the first codepoint (`ord("ab")` → `97`) where Python raises `TypeError` — a known divergence,
-recorded here rather than silently fixed.
+One entry people expect to find here is **not** a fault at all: `",".join(xs)` on a non-`str` element
+is a **static type error** in Chezzi (`expected List[str], found List[int]`) where Python raises
+`TypeError` at runtime.
+
+The `ord(s)` multi-character row above was a **silent wrong answer** until it was fixed: `ord("ab")`
+returned `97` (the first codepoint) with rc=0, where CPython 3.14 raises `TypeError`. The count is
+**characters, not bytes** — `ord("é")` is `233` (one char, two bytes) and `ord("éa")` faults.
+
+`chr(code)` is measured aligned on everything except **lone surrogates**: `chr(0xD800)` faults in
+Chezzi where CPython returns `'\ud800'`. That is a consequence of Chezzi `str` being UTF-8 (which
+cannot represent a lone surrogate), and it is a loud recoverable fault, not a wrong value — the
+opposite failure mode from the `ord` defect. Negative and `> 0x10FFFF` both fault in both languages.
 
 `Reader.read_line()`'s non-UTF-8 fault is a fourth kind of case, documented in full in the `std.io`
 section below ("`Reader` (R2b)"): there Chezzi is deliberately **louder** than Python, which raises

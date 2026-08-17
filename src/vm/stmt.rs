@@ -1785,7 +1785,13 @@ impl Vm {
         Ok(Value::obj(self.heap.alloc(Obj::Str(s.into()))))
     }
 
-    /// `ord(s)` — codepoint of the first char of `s`.
+    /// `ord(s)` — codepoint of the ONE character of `s`.
+    ///
+    /// The length that matters is CHARACTERS, not bytes: `ord("é")` is 233 (one char, two bytes) and
+    /// `ord("éa")` faults. A multi-char string used to return the first char's codepoint silently
+    /// (measured: `ord("ab")` → 97), where CPython 3.14 raises `TypeError: ord() expected a
+    /// character, but string of length 2 found` — a plausible wrong value with rc=0, so it faulted
+    /// nothing and reported nothing. Now it faults like the ancestor (recoverably, via `recover:`).
     pub(super) fn builtin_ord(
         &mut self,
         args: &[Value],
@@ -1796,9 +1802,17 @@ impl Vm {
         if let Some(h) = v.as_obj()
             && let Obj::Str(s) = self.heap.get(h)
         {
-            return match s.chars().next() {
-                Some(c) => Ok(Value::int(c as i64)),
-                None => Err(self.err("ord() of an empty string".to_string(), span)),
+            let mut it = s.chars();
+            return match (it.next(), it.next()) {
+                (Some(c), None) => Ok(Value::int(c as i64)),
+                (None, _) => Err(self.err("ord() of an empty string".to_string(), span)),
+                (Some(_), Some(_)) => {
+                    let n = s.chars().count();
+                    Err(self.err(
+                        format!("ord() expects a 1-character str, got {n} characters"),
+                        span,
+                    ))
+                }
             };
         }
         Err(self.err(
