@@ -3037,8 +3037,11 @@ warning (line 4, col 5): the Result returned by 'g' is discarded — bind it (`r
 
 A warning is **non-fatal**: the program still type-checks and the exit code is unchanged. The escapes
 are Rust's — *bind* the value (`r := g()`, then inspect it) or *discard it explicitly* (`_ := g()`),
-which puts the intent on the page. (The hint spells the call back only when the callee is a plain
-name; for a method call — `xs.pop()` — it stays elided as `r := …`.)
+which puts the intent on the page. (The hint spells the call back only when it can be reproduced from
+the callee name alone — a plain **nullary** call like `g()`. A call **with arguments** (`takes(1, "a")`)
+and a **method call** (`xs.pop()`) both stay elided as `r := …`, because a spelled-back
+`r := takes()` would not compile; the message already names the callee, which is what points at the
+culprit.)
 
 > ⚠️ **`_ := g()` at the top level DISABLES the runtime check.** The check runs on a bare expression
 > statement; binding the value — to `_` or to anything else — is the language taking your word that

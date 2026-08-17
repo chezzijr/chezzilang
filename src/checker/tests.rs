@@ -243,6 +243,19 @@ fn discarded_carrier_warns() {
         &format!("{o}fn f():\n    x := o()\n    x\nf()\n"),
         "bind it (`r := …`)",
     );
+    // A hint the user cannot TYPE is worse than no hint. The spelled-back form dropped the call's
+    // ARGUMENTS, so `takes(1, "a")` suggested `r := takes()` — which is itself a type error
+    // (`'takes' expects 2 argument(s), got 0`). Only a nullary plain-name call is reproducible from
+    // the callee name alone; anything with arguments elides like the method-call case.
+    warns(
+        "fn takes(n: int, s: str) -> Result[int, Error]:\n    return Ok(n)\nfn f():\n    takes(1, \"a\")\nf()\n",
+        "bind it (`r := …`), or discard it explicitly (`_ := …`)",
+    );
+    // …and the subject still names the callee, which is what points at the culprit.
+    warns(
+        "fn takes(n: int, s: str) -> Result[int, Error]:\n    return Ok(n)\nfn f():\n    takes(1, \"a\")\nf()\n",
+        "the Result returned by 'takes' is discarded",
+    );
 }
 
 /// The scope correction. At **module top level** the runtime already checks a dropped carrier:

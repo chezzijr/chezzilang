@@ -2852,14 +2852,22 @@ impl Checker {
                     _ => return,
                 };
                 // Name the callee when there is one, so the warning points at the culprit rather
-                // than at a line. For a plain `g()` the whole call is in hand, so the fix hint
-                // spells it (`r := g()`); for a METHOD call it stays elided (`…`), because
-                // reconstructing the receiver expression from the AST would be guesswork.
+                // than at a line. The hint has to be code the user can actually TYPE, so it spells
+                // the call back only when the call is genuinely reproducible from the callee name
+                // alone — a plain NULLARY `g()`. With arguments, `format!("{name}()")` dropped them
+                // and emitted a hint that does not compile: `takes(1, "a")` suggested `r := takes()`,
+                // which is `'takes' expects 2 argument(s), got 0`. Reconstructing an argument list
+                // (or a METHOD call's receiver) from the AST would be guesswork, so both elide to
+                // `…` — the subject already names the callee, which is what points at the culprit.
                 let (subject, fix) = match &e.kind {
-                    ExprKind::Call { callee, .. } => match &callee.kind {
+                    ExprKind::Call { callee, args, .. } => match &callee.kind {
                         ExprKind::Ident(name) => (
                             format!("the {carrier} returned by '{name}'"),
-                            format!("{name}()"),
+                            if args.is_empty() {
+                                format!("{name}()")
+                            } else {
+                                "…".to_string()
+                            },
                         ),
                         ExprKind::Field { name, .. } => {
                             (format!("the {carrier} returned by '{name}'"), "…".into())
