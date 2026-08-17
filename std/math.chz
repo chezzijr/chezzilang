@@ -40,6 +40,10 @@ native fn is_finite(x: float) -> bool
 # Number theory / integer math (Python `math` semantics). `sign` is numeric-polymorphic like `abs`
 # (int->int / float->float), reattached via MODULE_NUMERIC_POLY. `factorial`/`comb`/`perm`/
 # `parse_int_base` return `Result[int]` — a clean `Err` (never a fault) on a bad domain or i64 overflow.
+# `gcd`/`lcm` (and `abs` on an `int`) are NOT in that Result-returning group: an i64 overflow there
+# faults recoverably (`integer overflow in gcd` / `integer overflow in lcm` / `integer overflow in abs`)
+# — CPython's `math.gcd`/`math.lcm`/`abs` never overflow (arbitrary precision), so this is the same
+# upward divergence as the language-wide integer-overflow fault, not a new rule.
 native fn gcd(a: int, b: int) -> int
 native fn lcm(a: int, b: int) -> int
 # `divmod` is a BODIED Chezzi fn living alongside the native decls in this same file (the hybrid
@@ -50,6 +54,10 @@ native fn lcm(a: int, b: int) -> int
 fn divmod(a: int, b: int) -> (int, int):
     return (a / b, a % b)
 native fn sign(x: float) -> float
+# Truncate toward zero to an `int` (Python `math.trunc`). Faults recoverably on a non-finite `x`
+# (`trunc(): NaN is out of integer range` / `trunc(): inf is out of integer range`) or one outside i64
+# range (`trunc(): 9223372036854776000 is out of integer range`) — CPython raises `ValueError`/
+# `OverflowError` at the same two boundaries.
 native fn trunc(x: float) -> int
 native fn hypot(x: float, y: float) -> float
 native fn cbrt(x: float) -> float

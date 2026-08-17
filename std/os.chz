@@ -52,6 +52,10 @@ fn temp_dir() -> path.Path:
 # (process-global, like Python/Go). Children spawned via `std.process.cmd` still inherit the REAL
 # process env (that axis is unchanged).
 native fn environ() -> Map[str, str]
+# `nil`, never `Result` — an invalid `key`/`value` (e.g. a key containing `=`) is accepted silently
+# (this writes an in-process `Map`, not the real OS environment, so there is nothing to reject). Go's
+# `os.Setenv` returns `error` there and CPython's `os.environ[...]` raises `ValueError: illegal
+# environment variable name` (measured) — both a divergence.
 native fn setenv(key: str, value: str) -> nil
 # `chdir` mutates the REAL process cwd (like `getcwd` reads it). Process-global: shared by all M:N
 # workers, so a task's `chdir` affects sibling tasks' relative paths (Python/Go have the same ceiling).

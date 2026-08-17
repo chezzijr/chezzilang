@@ -60,6 +60,10 @@ native struct Atomic[T]:
     native fn store(self, v: T) -> nil
     native fn exchange(self, v: T) -> T
     native fn cas(self, expected: T, new: T) -> bool
+    # An `int` `T` FAULTS `integer overflow in Add`/`integer overflow in Sub` on i64 overflow (same
+    # checked path `AtomicInt` uses below). Go's `atomic.Int64.Add` WRAPS and never panics — a stated
+    # divergence for concurrency specifically, justified by Chezzi's language-wide recoverable-overflow
+    # rule (measured, Go 1.26: `add(i64::MAX, 1)` wraps to `i64::MIN`).
     native fn add(self, v: T) -> T
     native fn sub(self, v: T) -> T
 

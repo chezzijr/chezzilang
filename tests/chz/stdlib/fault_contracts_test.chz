@@ -1,0 +1,251 @@
+# tests/chz/stdlib/fault_contracts_test.chz — pins the second-round rows of docs/stdlib.md §1
+# "Which failures fault, and why they are not `Result`s".
+#
+# Each `test fn` below is the exact program that MEASURED the message quoted in the docs table (B2,
+# 2026-08-18) — every assert is byte-for-byte what the binary printed, not a message read off source.
+# Where a message embeds a value (`got 7`, `len 3`), the whole string is asserted, so a later change
+# that silently drops the operand from the message fails this suite, not just the docs.
+#
+# Three rows from that table CANNOT be pinned here and are skipped with a comment below instead of a
+# `test fn`:
+#   * `ffi.load_*`/`ffi.free` on a bad pointer — a SIGSEGV, not a recoverable Chezzi fault. There is
+#     nothing for `recover:` to catch, and a test that triggered it would kill the runner.
+#   * `crypto.token_hex`/`crypto.secure_bytes`/`uuid.v4` entropy-unavailable — there is no way to force
+#     `getrandom`/`/dev/urandom` to fail from user code in this environment (an OS-level condition).
+#   * `io.read_all()` on non-UTF-8 stdin — measured by hand (`printf 'a\xffb' | chezzi run ...`), but
+#     the `chezzi test` harness has no per-test stdin-feeding mechanism to pin it here.
+#
+# Run: `cargo run -- test tests/chz/`. Gated by `chz_suite_passes` (`tests/chz_suite.rs`).
+
+import std.math
+import std.json
+import std.crypto
+import std.flag
+import std.string as s
+import std.datetime as dt
+import std.path
+import std.os
+import std.concurrency
+
+test fn range_faults():
+    r1 := recover: range(0, 5, 0)
+    match r1:
+        Ok(_): assert false, "step 0 must fault"
+        Err(e): assert e.message() == "range() step cannot be zero"
+    # a computed length past the 10M cap faults BEFORE materializing (no OOM/hang)
+    r2 := recover: range(0, 20000000)
+    match r2:
+        Ok(_): assert false, "20M elements must exceed the cap"
+        Err(e): assert e.message() == "range() length 20000000 exceeds the maximum of 10000000"
+
+test fn math_number_theory_overflow():
+    r1 := recover: math.lcm(9223372036854775807, 9223372036854775806)
+    match r1:
+        Ok(_): assert false, "lcm must overflow i64"
+        Err(e): assert e.message() == "integer overflow in lcm"
+    r2 := recover: math.gcd(-9223372036854775807 - 1, 0)
+    match r2:
+        Ok(_): assert false, "gcd(i64::MIN, 0) must overflow i64"
+        Err(e): assert e.message() == "integer overflow in gcd"
+    r3 := recover: math.abs(-9223372036854775807 - 1)
+    match r3:
+        Ok(_): assert false, "abs(i64::MIN) must overflow i64"
+        Err(e): assert e.message() == "integer overflow in abs"
+
+test fn math_trunc_faults():
+    r1 := recover: math.trunc(math.nan)
+    match r1:
+        Ok(_): assert false, "trunc(NaN) must fault"
+        Err(e): assert e.message() == "trunc(): NaN is out of integer range"
+    r2 := recover: math.trunc(math.inf)
+    match r2:
+        Ok(_): assert false, "trunc(inf) must fault"
+        Err(e): assert e.message() == "trunc(): inf is out of integer range"
+    # one past i64::MAX as a float (2**63) — out of i64 range, not non-finite
+    r3 := recover: math.trunc(9223372036854775808.0)
+    match r3:
+        Ok(_): assert false, "trunc(2**63) must fault"
+        Err(e): assert e.message() == "trunc(): 9223372036854776000 is out of integer range"
+
+test fn math_divmod_zero_faults():
+    r := recover: math.divmod(10, 0)
+    match r:
+        Ok(_): assert false, "divmod by zero must fault"
+        Err(e): assert e.message() == "division by zero"
+
+test fn list_sum_overflow_faults():
+    r := recover: [9223372036854775807, 1].sum()
+    match r:
+        Ok(_): assert false, "sum overflow must fault"
+        Err(e): assert e.message() == "integer overflow in Add"
+
+test fn string_repeat_overflow_faults():
+    # receiver method form
+    r1 := recover: "ab".repeat(9223372036854775807)
+    match r1:
+        Ok(_): assert false, "huge repeat must fault"
+        Err(e): assert e.message() == "string repeat capacity overflow"
+    # std.string free-fn form (delegates to the same native method)
+    r2 := recover: s.repeat("ab", 9223372036854775807)
+    match r2:
+        Ok(_): assert false, "huge repeat must fault"
+        Err(e): assert e.message() == "string repeat capacity overflow"
+
+test fn string_pad_left_faults():
+    r1 := recover: "a".pad_left(4, "")
+    match r1:
+        Ok(_): assert false, "empty fill must fault"
+        Err(e): assert e.message() == "pad_left: fill must not be empty"
+    r2 := recover: s.pad_left("a", 4, "")
+    match r2:
+        Ok(_): assert false, "empty fill must fault"
+        Err(e): assert e.message() == "pad_left: fill must not be empty"
+    # huge width on the NATIVE receiver method faults with a capacity guard. The pure-Chezzi
+    # `std.string.pad_left` free fn has NO such guard on a huge width (it loops unboundedly instead of
+    # faulting — measured, times out) — see the comment on `fn pad_left` in std/string.chz. That
+    # divergence is a documented gap, not something this test can safely exercise (it would hang).
+    r3 := recover: "a".pad_left(9223372036854775807, "x")
+    match r3:
+        Ok(_): assert false, "huge width must fault"
+        Err(e): assert e.message() == "string pad capacity overflow"
+
+test fn string_split_rsplit_empty_sep_faults():
+    r1 := recover: s.split("abc", "")
+    match r1:
+        Ok(_): assert false, "empty sep must fault"
+        Err(e): assert e.message() == "split: sep must not be empty"
+    r2 := recover: s.rsplit("abc", "")
+    match r2:
+        Ok(_): assert false, "empty sep must fault"
+        Err(e): assert e.message() == "rsplit: sep must not be empty"
+
+test fn crypto_token_hex_out_of_range_faults():
+    r1 := recover: crypto.token_hex(-1)
+    match r1:
+        Ok(_): assert false, "negative n must fault"
+        Err(e): assert e.message() == "token_hex: n must be >= 0, got -1"
+    r2 := recover: crypto.token_hex(1048577)
+    match r2:
+        Ok(_): assert false, "n over the 1MiB cap must fault"
+        Err(e): assert e.message() == "token_hex: n exceeds the 1048576-byte cap, got 1048577"
+
+test fn path_decode_invalid_utf8_faults():
+    # `path_type_test.chz` already covers decode()'s fault (loosely, via `.contains`) and str()'s lossy
+    # sibling byte-exactly; this pins the EXACT message the loose check there doesn't.
+    r := recover: path.Path(b"a\xffb").decode()
+    match r:
+        Ok(_): assert false, "non-UTF-8 path must fault on decode()"
+        Err(e): assert e.message() == "invalid UTF-8 in decode()"
+
+test fn datetime_days_in_month_faults():
+    r1 := recover: dt.days_in_month(2024, 0)
+    match r1:
+        Ok(_): assert false, "month 0 must fault"
+        Err(e): assert e.message() == "days_in_month: month out of range: 0"
+    r2 := recover: dt.days_in_month(2024, 13)
+    match r2:
+        Ok(_): assert false, "month 13 must fault"
+        Err(e): assert e.message() == "days_in_month: month out of range: 13"
+
+test fn datetime_weekday_name_faults():
+    r1 := recover: dt.weekday_name(-1)
+    match r1:
+        Ok(_): assert false, "wd -1 must fault"
+        Err(e): assert e.message() == "weekday_name: wd must be 0..6 (0=Sunday), got -1"
+    r2 := recover: dt.weekday_name(7)
+    match r2:
+        Ok(_): assert false, "wd 7 must fault"
+        Err(e): assert e.message() == "weekday_name: wd must be 0..6 (0=Sunday), got 7"
+
+test fn datetime_fdiv_fmod_zero_faults():
+    r1 := recover: dt.fdiv(10, 0)
+    match r1:
+        Ok(_): assert false, "fdiv by zero must fault"
+        Err(e): assert e.message() == "division by zero"
+    r2 := recover: dt.fmod(10, 0)
+    match r2:
+        Ok(_): assert false, "fmod by zero must fault"
+        Err(e): assert e.message() == "division by zero"
+
+test fn datetime_to_uint_overflow_faults():
+    r := recover: dt.to_uint("999999999999999999999999999999")
+    match r:
+        Ok(_): assert false, "long digit string must overflow i64"
+        Err(e): assert e.message() == "integer overflow in Mul"
+
+test fn atomic_add_sub_overflow_faults():
+    a := Atomic(9223372036854775807)
+    r1 := recover: a.add(1)
+    match r1:
+        Ok(_): assert false, "Atomic[int].add overflow must fault"
+        Err(e): assert e.message() == "integer overflow in Add"
+    ai := AtomicInt(9223372036854775807)
+    r2 := recover: ai.add(1)
+    match r2:
+        Ok(_): assert false, "AtomicInt.add overflow must fault"
+        Err(e): assert e.message() == "integer overflow in Add"
+    ai2 := AtomicInt(-9223372036854775807 - 1)
+    r3 := recover: ai2.sub(1)
+    match r3:
+        Ok(_): assert false, "AtomicInt.sub overflow must fault"
+        Err(e): assert e.message() == "integer overflow in Sub"
+
+test fn channel_send_recv_closed_faults():
+    ch := Channel[int]()
+    ch.close()
+    r1 := recover: ch.send(1)
+    match r1:
+        Ok(_): assert false, "send on a closed channel must fault"
+        Err(e): assert e.message() == "send on a closed channel"
+    ch2 := Channel[int]()
+    ch2.close()
+    r2 := recover: ch2.recv()
+    match r2:
+        Ok(_): assert false, "recv on a closed+drained channel must fault"
+        Err(e): assert e.message() == "receive on a closed channel"
+
+test fn json_stringify_faults():
+    r1 := recover: json.stringify(Json.Num(math.nan))
+    match r1:
+        Ok(_): assert false, "NaN must fault"
+        Err(e): assert e.message() == "cannot serialize non-finite float to JSON"
+    r2 := recover: json.stringify(Json.Num(math.inf))
+    match r2:
+        Ok(_): assert false, "inf must fault"
+        Err(e): assert e.message() == "cannot serialize non-finite float to JSON"
+    j: Json = Json.Num(1.0)
+    i := 0
+    while i < 2500:
+        j = Json.Arr([j])
+        i += 1
+    r3 := recover: json.stringify(j)
+    match r3:
+        Ok(_): assert false, "past the depth ceiling must fault"
+        Err(e): assert e.message() == "json.stringify: exceeded max depth"
+
+test fn flag_get_unregistered_faults():
+    fs := flag.new()
+    r1 := recover: fs.get_str("nope")
+    match r1:
+        Ok(_): assert false, "unregistered str flag must fault"
+        Err(e): assert e.message() == "flag: unregistered str flag --nope"
+    r2 := recover: fs.get_bool("nope")
+    match r2:
+        Ok(_): assert false, "unregistered bool flag must fault"
+        Err(e): assert e.message() == "flag: unregistered bool flag --nope"
+    r3 := recover: fs.get_int("nope")
+    match r3:
+        Ok(_): assert false, "unregistered int flag must fault"
+        Err(e): assert e.message() == "flag: unregistered int flag --nope"
+
+# `os.setenv` is the "swallow" direction, not a fault — it never validates its key/value (it writes an
+# in-process Map, not the real OS environment), so a key Python/Go would reject is silently accepted.
+# Pinning the SILENCE, not a message.
+test fn os_setenv_never_faults_on_a_bad_key():
+    r := recover: os.setenv("BAD=KEY", "v")
+    match r:
+        Ok(_): assert true
+        Err(_): assert false, "setenv must not fault, even on a key Python/Go would reject"
+    match os.environ().get("BAD=KEY"):
+        Some(v): assert v == "v"
+        None: assert false, "the bad key must still be written"

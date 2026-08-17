@@ -27,6 +27,10 @@ fn reverse(s: str) -> str:
 # `width` at or below `s.len()` returns `s` unchanged. A multi-char `fill` is a repeating cycle
 # truncated to fit ("a", 4, "xy" -> "xyxa"). An empty `fill` can never reach `width`, so it faults
 # rather than looping forever.
+# UNLIKE the native `s.pad_left(...)` RECEIVER method (which faults `string pad capacity overflow` on
+# a huge `width` — see docs/stdlib.md's fault table), this pure-Chezzi loop has no capacity guard: a
+# huge `width` just runs the `while` unboundedly instead of faulting (measured: times out rather than
+# erroring). Not fixed here — flagged as a gap, not silently patched over.
 fn pad_left(s: str, width: int, fill: str) -> str:
     if fill.len() == 0:
         panic("pad_left: fill must not be empty")

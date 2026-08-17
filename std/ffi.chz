@@ -26,6 +26,10 @@ native fn is_null(p: ptr) -> bool
 # --- loads: read C-owned memory behind a `ptr`. Each has a base form `(ptr) -> T` and an
 #     `_at(ptr, off: int) -> T` byte-offset form. Every int width loads as `int`, float widths as
 #     `float`, and `bool`/`ptr`/`str` as their own kind. A NULL base is a recoverable runtime error.
+#     A non-null but DANGLING, MISALIGNED, or out-of-bounds `ptr` is NOT: it is a raw C dereference,
+#     so it is a SIGSEGV (or silent memory corruption) like the equivalent `ctypes`/`cgo` call — there
+#     is nothing for `recover:` to catch, unlike every other fault in this file/docs/stdlib.md's fault
+#     table. `store_*`/`alloc`/`free` below carry the identical hazard.
 native fn load_int(p: ptr) -> int
 native fn load_int_at(p: ptr, off: int) -> int
 native fn load_int8(p: ptr) -> int
