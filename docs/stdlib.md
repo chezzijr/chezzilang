@@ -80,7 +80,7 @@ primitives are Go's, not Python's.
 | `[...].sum()`, i64 overflow across the fold | `integer overflow in Add` | *(upward divergence — Python's `sum()` is arbitrary-precision; same family as the `integer overflow` row above)* | — |
 | `s.repeat(n)` / `std.string.repeat(s, n)`, capacity overflow | `string repeat capacity overflow` | `OverflowError: repeated string is too long` (`"x" * n`) | — |
 | `s.pad_left(w, fill)`, empty `fill` | `pad_left: fill must not be empty` | `TypeError: The fill character must be exactly one character long` (`str.ljust`) | — |
-| `s.pad_left(w, fill)`, huge `w` (capacity overflow) | `string pad capacity overflow` | `MemoryError` (`str.ljust` with a huge width actually tries to allocate) | — |
+| `s.pad_left(w, fill)` / `string.pad_left(s, w, fill)`, huge `w` (capacity overflow) | `string pad capacity overflow` | `MemoryError` (`str.ljust` with a huge width actually tries to allocate) | — |
 | `std.string.split(s, "")` / `std.string.rsplit(s, "")` | `split: sep must not be empty` / `rsplit: sep must not be empty` | `ValueError: empty separator` | — (free-fn siblings of the `s.split("")` row above) |
 | `crypto.token_hex(n)`, `n` out of range | `token_hex: n must be >= 0, got -1` / `token_hex: n exceeds the 1048576-byte cap, got …` | `ValueError: negative argument not allowed` (`secrets.token_hex`; no upper cap in Python) | — |
 | `uuid.v4()`, OS entropy unavailable | *(not measured — no way to force `getrandom`/`/dev/urandom` to fail in this environment)* | `OSError` from `os.urandom` (same entropy source `crypto.secure_bytes`/`token_hex` share) | — |
@@ -177,11 +177,13 @@ than the Python analogue; there is nothing to fix.
 The `ends_with`/`replace`/`repeat`/`reverse`/`pad_left`/`index_of`/`count`/`strip_prefix`/`strip_suffix`/`split_lines`
 methods are receiver-method aliases of the identically-named `std.string` free fns — `s.replace(a, b)` and
 `text.replace(s, a, b)` (after `import std.string as text`) are byte-identical for valid inputs; the free fns
-keep working. (Two safety divergences, both because only the native method can probe the allocator:
-`s.repeat(n)` raises a recoverable `string repeat capacity overflow` fault for a huge `n` rather than
-allocating until it aborts; and `s.pad_left(w, f)` likewise raises a recoverable `string pad capacity
-overflow` fault for a huge `w`, while the `std.string` free fn grows until the process dies. The empty-`fill`
-fault, by contrast, is raised identically by both.)
+keep working. **There is no longer any safety divergence between the two spellings** — as of 2026-08-18
+`std.string.repeat` and `std.string.pad_left` *delegate* to their native receiver methods rather than
+re-implementing the loop, so a huge `n`/`width` raises the same recoverable `string repeat capacity
+overflow` / `string pad capacity overflow` fault either way. Before that, only the native method could
+probe the allocator: the free fns grew a string in a `while` loop until the process died (`repeat`) or
+hung indefinitely (`pad_left`, measured still running at 15s). `tests/chz/stdlib/fault_contracts_test.chz`
+pins both spellings against each other so they cannot drift apart again.
 
 ### `List[T]`
 | Method | Signature | Notes |
