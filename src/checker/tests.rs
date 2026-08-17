@@ -17845,6 +17845,33 @@ fn refine_erroring_push_arg_reports_once() {
 }
 
 #[test]
+fn refine_erroring_arg_on_unrefinable_receiver_reports_once() {
+    // Same rollback, but on the receiver kinds that fall through `refine_receiver`'s SHAPE match
+    // (only List/Set are refinable): the speculative arg-infer had already run, so a `Map`/`Option`
+    // receiver leaked its diagnostics and the real dispatch path reported them a SECOND time.
+    for src in [
+        "fn main():\n m := {}\n m.insert(nope)\nmain()",
+        "fn main():\n m := {}\n m.extend(nope)\nmain()",
+        "fn main():\n o := None\n o.insert(nope)\nmain()",
+    ] {
+        let errs = check_src(src);
+        let unknown = errs
+            .iter()
+            .filter(|e| e.message.contains("unknown name 'nope'"))
+            .count();
+        assert_eq!(
+            unknown, 1,
+            "expected exactly one 'unknown name' for {src:?}, got: {errs:?}"
+        );
+        // The real "no method" diagnostic must survive the rollback.
+        assert!(
+            errs.iter().any(|e| e.message.contains("has no method")),
+            "lost the real diagnostic for {src:?}: {errs:?}"
+        );
+    }
+}
+
+#[test]
 fn refine_erroring_index_key_reports_once() {
     // Same rollback for the index-assign refine path (`m[undefined_k] = 1`).
     let errs = check_src("fn main():\n m := {}\n m[undefined_k] = 1\nmain()");
