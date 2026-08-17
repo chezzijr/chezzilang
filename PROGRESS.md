@@ -62,6 +62,48 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > `"src.main:main"`) and recommended `chezzi run src/main.chz`, which is a **silent no-op, rc=0**.
 > Every code snippet added was executed before it was written down.
 >
+> **✅ A5 review fix wave, 2026-08-18 (`feat/span-file-and-stdlib-contracts`, CLOSED) — the per-module
+> publish below (commit `d6cb3147`) shipped one Critical regression and three Important gaps; all four
+> now fixed.** **F1 (Critical, regression)** — the `Err(e)` arm's entry-vs-imported guard used RAW path
+> equality (`p.as_path() != path`); `ResolveError::path` for the entry's OWN failure is
+> `canonical_or_abs(entry_abs)`, which resolves symlinks whenever the file exists, while the LSP's
+> `path` (from `uri.to_file_path()`) never touches disk — so on any project reached through a symlinked
+> component (macOS `/tmp`→`/private/tmp`, a Nix store path, a Docker bind mount) the guard wrongly took
+> the imported-module arm for the ENTRY's own error: it read a stale on-disk copy instead of the live
+> buffer and tagged `Diag::file` with the canonical path, which `publish` maps to a URI nothing is
+> listening on — the diagnostic silently vanished. Fixed by making `resolver::canonical_or_abs`
+> `pub(crate)` and normalizing both sides before comparing (one extra `stat`, same order of cost as the
+> `read_to_string` the imported-module branch already does; the `Ok(graph)` arm's numeric-file-id match
+> stays untouched, still zero canonicalize calls). Proven with a REAL symlinked directory + an entry file
+> that exists on disk with deliberately STALE content vs. a differing live buffer
+> (`editor::tests::entry_own_error_survives_a_symlinked_project_path`, `#[cfg(unix)]`) — this failed on
+> pre-fix HEAD with `file: Some(".../real/app.chz")` (should be `None`) and `end_col: 14` (should be `7`,
+> the buggy read overran into the stale text's 8-char word at the error column). **F2 (Important)** — the
+> per-edited-buffer `reported: Mutex<HashMap<Url, HashSet<Url>>>` set correctly avoided a global-clear
+> false-positive, but its residual (filed as a known limitation, not fixed, in the original task) was
+> real: two open buffers importing the same broken module, and fixing one buffer's own import sent an
+> EMPTY array to the shared module's URI even though the other still legitimately reported there — an
+> ordinary missing per-source merge, not a protocol limit. **F3 (Important)** — `did_close` only forgot
+> the closed URI's text, leaving a cross-module squiggle it was the sole source for permanently orphaned.
+> Both closed by the SAME restructure: `reported` → `published: Mutex<HashMap<Url /* source */,
+> HashMap<Url /* target */, Vec<Diagnostic>>>>`; a publish for source S replaces S's whole entry, then
+> republishes the UNION (over every source, in SORTED-uri order for determinism) for every target in
+> S's old-or-new target set — merging in whatever another open buffer still reports, and clearing a
+> target no source reports any more. `did_close` now runs the identical remove-then-republish-affected
+> step for the closed URI (which, as a side effect, also clears the closed buffer's OWN squiggle, not
+> just its cross-module ones — a free consequence of the shared merge structure, not extra code). A
+> `ponytail:` comment on `published` names the remaining ceiling: the union is a linear scan over every
+> open source per publish/close, un-indexed. **F4 (Important, docs)** — `editors/README.md` gained a
+> paragraph on cross-module diagnostics: reported in the file it belongs to, an unopened imported module
+> still gets `publishDiagnostics` for its URI, and (post-F2) a module imported from several open buffers
+> shows the union. Tests: `tests/lsp_smoke.rs::shared_imported_module_diagnostic_survives_until_the_
+> last_reporting_buffer_is_fixed` (F2 — two buffers on one shared broken module; fixing one alone by
+> dropping its import must not clear the other's), `did_close_clears_a_cross_module_diagnostic_it_was_
+> the_sole_source_for` (F3). Gate: `cargo test` full suite green, `cargo test --features lsp --test
+> lsp_smoke` **10/10** (7 pre-existing + 1 from the original A5 task + F2 + F3), `cargo clippy
+> --all-targets --features lsp -- -D warnings` clean. Full verbatim run output + before/after evidence:
+> session report in the fix-wave's scratchpad.
+>
 > **✅ The LSP now publishes each diagnostic to the buffer it actually belongs to, 2026-08-18
 > (`feat/span-file-and-stdlib-contracts`, CLOSED — the editor-path consumer W8-15's fix note left
 > open).** As filed: `chezzi-lsp` ran the real resolve→check pipeline over the whole module graph, then

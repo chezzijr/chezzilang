@@ -830,8 +830,10 @@ fn abs(p: &Path) -> PathBuf {
 }
 
 /// Canonicalize if the file exists; otherwise fall back to an absolute, lexically-normalized path
-/// (so a missing module still gets a stable id for the error path).
-fn canonical_or_abs(p: &Path) -> PathBuf {
+/// (so a missing module still gets a stable id for the error path). `pub(crate)`: also used by
+/// `editor::diagnostics_inner` to compare a resolve error's self-attributed path against the caller's
+/// raw entry path — see that call site for why a raw comparison is unsound.
+pub(crate) fn canonical_or_abs(p: &Path) -> PathBuf {
     std::fs::canonicalize(p).unwrap_or_else(|_| normalize(&abs(p)))
 }
 

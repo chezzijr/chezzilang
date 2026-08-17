@@ -39,36 +39,42 @@ struct Backend {
     client: Client,
     /// Live document text, keyed by URI. `tokio::sync::Mutex` (no extra dep) — contention is trivial.
     docs: tokio::sync::Mutex<HashMap<Url, String>>,
-    /// The set of target URIs each EDITED buffer's diagnostics were last grouped onto (including the
-    /// edited URI itself), keyed by the edited URI. Scoped per-edited-buffer (not one global set) so
-    /// that fixing one buffer's cross-module error never clears a diagnostic another open buffer is
-    /// still legitimately reporting against the same shared imported module.
-    reported: tokio::sync::Mutex<HashMap<Url, HashSet<Url>>>,
+    /// Per SOURCE buffer, the diagnostics that buffer's last check produced, grouped by TARGET uri.
+    /// A target URI is published as the UNION across every source that currently reports on it —
+    /// `publishDiagnostics` replaces a URI's whole array, so a server with cross-file diagnostics MUST
+    /// merge here or one buffer's publish silently erases another's (A5/F2: two open buffers importing
+    /// the same broken module must each keep the other's squiggle alive on that module's URI).
+    /// ponytail: the union is recomputed by a linear scan over every open source on every publish/close
+    /// — fine for an editor session's open-buffer count, not indexed. Upgrade to a target→sources
+    /// reverse index if a project with many simultaneously-open buffers on one shared broken module
+    /// ever makes this measurably slow.
+    published: tokio::sync::Mutex<HashMap<Url, HashMap<Url, Vec<Diagnostic>>>>,
 }
 
 impl Backend {
     /// Type-check `text` (the buffer at `uri`) and publish diagnostics to the URI each ACTUALLY
     /// belongs to (`chezzi::editor::Diag::file`, mapped to a URI via `Url::from_file_path` — falling
     /// back to the edited `uri` for an entry-module diagnostic, `None`, or a path that fails to convert,
-    /// so a diagnostic is never dropped). The edited `uri` always gets a publish, even an empty one, so
-    /// fixing the last error in the open file clears its own squiggle. Any URI this buffer's PREVIOUS
-    /// publish reported on but this one does not is cleared with an empty vector — otherwise a squiggle
-    /// in a file the user isn't editing (a cross-module error) never disappears once they fix it.
+    /// so a diagnostic is never dropped). The edited `uri` always gets an entry, even empty, so fixing
+    /// the last error in the open file still clears its own squiggle. Replaces `uri`'s own entry in
+    /// `published`, then republishes the UNION over every source for each target `uri` used to report
+    /// on before or reports on now — merging in every other open buffer that still legitimately reports
+    /// on a shared target, and clearing a target no source reports on any more.
     async fn publish(&self, uri: Url, text: &str) {
         let path = uri
             .to_file_path()
             .unwrap_or_else(|_| std::path::PathBuf::from(uri.path()));
         let diags = chezzi::editor::diagnostics(&path, text);
 
-        let mut groups: HashMap<Url, Vec<Diagnostic>> = HashMap::new();
-        groups.entry(uri.clone()).or_default();
+        let mut new_targets: HashMap<Url, Vec<Diagnostic>> = HashMap::new();
+        new_targets.entry(uri.clone()).or_default();
         for d in diags {
             let target = d
                 .file
                 .as_deref()
                 .and_then(|p| Url::from_file_path(p).ok())
                 .unwrap_or_else(|| uri.clone());
-            groups.entry(target).or_default().push(Diagnostic {
+            new_targets.entry(target).or_default().push(Diagnostic {
                 range: Range {
                     start: Position::new(d.line, d.col),
                     end: Position::new(d.end_line, d.end_col),
@@ -83,25 +89,43 @@ impl Backend {
             });
         }
 
-        let new_targets: HashSet<Url> = groups.keys().cloned().collect();
-        let stale: Vec<Url> = {
-            let mut reported = self.reported.lock().await;
-            let previous = reported.remove(&uri).unwrap_or_default();
-            reported.insert(uri.clone(), new_targets.clone());
-            previous
-                .into_iter()
-                .filter(|u| !new_targets.contains(u))
-                .collect()
+        let unions = {
+            let mut published = self.published.lock().await;
+            let old_targets = published.remove(&uri).unwrap_or_default();
+            let mut affected: HashSet<Url> = old_targets.keys().cloned().collect();
+            affected.extend(new_targets.keys().cloned());
+            published.insert(uri.clone(), new_targets);
+            union_targets_locked(&published, affected)
         };
-        for stale_uri in stale {
-            self.client
-                .publish_diagnostics(stale_uri, Vec::new(), None)
-                .await;
-        }
-        for (target, diags) in groups {
+        for (target, diags) in unions {
             self.client.publish_diagnostics(target, diags, None).await;
         }
     }
+}
+
+/// Compute the UNION of every source's diagnostics for each of `targets`, iterating sources in
+/// SORTED uri order so the merged array's element order is deterministic across publishes (a client
+/// must not see a shared module's diagnostics reorder on every unrelated keystroke). Caller must
+/// already hold `published`'s lock (so the read is a consistent snapshot with whatever update it just
+/// made).
+fn union_targets_locked(
+    published: &HashMap<Url, HashMap<Url, Vec<Diagnostic>>>,
+    targets: HashSet<Url>,
+) -> Vec<(Url, Vec<Diagnostic>)> {
+    let mut sources: Vec<&Url> = published.keys().collect();
+    sources.sort();
+    targets
+        .into_iter()
+        .map(|target| {
+            let mut merged = Vec::new();
+            for source in &sources {
+                if let Some(diags) = published[*source].get(&target) {
+                    merged.extend(diags.iter().cloned());
+                }
+            }
+            (target, merged)
+        })
+        .collect()
 }
 
 #[tower_lsp::async_trait]
@@ -181,7 +205,21 @@ impl LanguageServer for Backend {
     }
 
     async fn did_close(&self, params: DidCloseTextDocumentParams) {
-        self.docs.lock().await.remove(&params.text_document.uri);
+        let uri = params.text_document.uri;
+        self.docs.lock().await.remove(&uri);
+
+        // F3: a closed buffer stops contributing to `published` entirely — republish the UNION
+        // (over the still-open sources) for every target this buffer used to report on, so a
+        // cross-module squiggle whose only source just closed is cleared instead of orphaned.
+        let unions = {
+            let mut published = self.published.lock().await;
+            let old_targets = published.remove(&uri).unwrap_or_default();
+            let affected: HashSet<Url> = old_targets.keys().cloned().collect();
+            union_targets_locked(&published, affected)
+        };
+        for (target, diags) in unions {
+            self.client.publish_diagnostics(target, diags, None).await;
+        }
     }
 
     async fn semantic_tokens_full(
@@ -346,7 +384,7 @@ async fn main() {
     let (service, socket) = LspService::new(|client| Backend {
         client,
         docs: tokio::sync::Mutex::new(HashMap::new()),
-        reported: tokio::sync::Mutex::new(HashMap::new()),
+        published: tokio::sync::Mutex::new(HashMap::new()),
     });
     Server::new(stdin, stdout, socket).serve(service).await;
 }

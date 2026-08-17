@@ -62,16 +62,20 @@ fn diagnostics_inner(path: &Path, source: &str) -> Vec<Diag> {
         // OTHER file than the entry `path` we were given, the failure is inside an IMPORTED module, and
         // must be reported against THAT module's text, not the live entry buffer's.
         //
-        // ponytail: raw path equality, not identity through a canonicalized comparison — deliberately,
-        // per this module's "never canonicalize" rule (that's a filesystem hit per diagnostic). The
-        // resolver only canonicalizes a path that EXISTS on disk (`canonical_or_abs`), so this is exact
-        // whenever `path` is already in the form the resolver would produce (true for every caller here:
-        // the LSP passes an already-absolute `uri.to_file_path()`, and the test fixtures below construct
-        // absolute paths with no `.`/`..` components). The only way this misattributes is an unresolved
-        // symlink IN THE ENTRY PATH ITSELF on a real on-disk file — canonicalize would net exactly one
-        // more component-fix in that one case; upgrade if that's ever observed for real, not before.
+        // F1 fix (was a raw `p.as_path() != path` — a Critical regression): `e.path` for the ENTRY's own
+        // failure is `id.0 = canonical_or_abs(entry_abs)`, which resolves symlinks whenever the file
+        // exists on disk; `path` (from the LSP's `uri.to_file_path()`) never touches disk. On any project
+        // reached through a symlinked path component the two differ even though it IS the entry, so raw
+        // equality wrongly took the imported-module arm for the entry's own error — reading a stale
+        // on-disk copy instead of the live buffer, and tagging `file: Some(canonical_path)`, which
+        // `chezzi-lsp::publish` maps to a URI nothing is listening on. Normalize BOTH sides through the
+        // same `canonical_or_abs` before comparing, so the comparison is exact rather than heuristic.
+        // This arm produces exactly one diagnostic per call (and the imported-module branch already does
+        // a `std::fs::read_to_string`), so the extra `stat` here is the same order of cost, not a new one.
+        // Do NOT canonicalize elsewhere — `graph_diag` below still matches by the resolver's own numeric
+        // `Span::file` id, never by path, so it stays exempt from this filesystem hit.
         Err(e) => match &e.path {
-            Some(p) if p.as_path() != path => {
+            Some(p) if resolver::canonical_or_abs(p) != resolver::canonical_or_abs(path) => {
                 let mut cache = std::collections::HashMap::new();
                 vec![module_text_diag(
                     &mut cache,
@@ -2413,5 +2417,87 @@ mod tests {
         // OWN line 1 ("x := = 5"), not the entry's ("import core.badmod").
         assert_eq!(d.line, 0);
         assert_eq!(d.col, 5);
+    }
+
+    /// F1 (Critical regression) — the `Err(e)` arm decided entry-vs-imported with RAW path equality
+    /// (`p.as_path() != path`). `e.path` for the entry's OWN parse failure is `id.0 =
+    /// canonical_or_abs(entry_abs)`, which resolves symlinks whenever the file exists; the caller's
+    /// `path` (from `uri.to_file_path()`) never does. So on a project reached through a symlinked
+    /// component the two differ even though it IS the entry, the guard wrongly takes the
+    /// imported-module arm, and the entry's own error is (a) computed against a stale on-disk read
+    /// instead of the live buffer, and (b) tagged `file: Some(canonical_path)`, which
+    /// `chezzi-lsp::publish` maps to a DIFFERENT URI than the one the editor has open — the diagnostic
+    /// is published where nothing listens and silently vanishes.
+    ///
+    /// Repro: a real symlinked directory, an entry file that EXISTS on disk with stale content, and a
+    /// live (unsaved) buffer that differs from that stale content but has a parse error at the same
+    /// structural position. `expected` is computed by running the SAME live source through an ordinary
+    /// (non-symlinked, non-existent-on-disk) path — that's what a correct implementation must also
+    /// produce for the symlinked entry: `file: None`, and a range computed from the LIVE buffer, not
+    /// the stale disk text (the disk text is deliberately built so a wrong-source read is detectable —
+    /// its char at the error column starts an 8-char word, so a buggy end_col overruns to 14 instead of
+    /// the live buffer's 7).
+    #[cfg(unix)]
+    #[test]
+    fn entry_own_error_survives_a_symlinked_project_path() {
+        use std::os::unix::fs::symlink;
+
+        let base =
+            std::env::temp_dir().join(format!("chezzi_editor_a5_symlink_{}", std::process::id()));
+        let real_dir = base.join("real");
+        let link_dir = base.join("link");
+        std::fs::create_dir_all(&real_dir).unwrap();
+
+        // Stale on-disk content: deliberately NOT what the live buffer holds, and its char at the
+        // error column (index 6) starts a long word — so misreading it produces a clearly wrong,
+        // over-long end_col instead of a merely-off-by-one one.
+        let stale_disk_src = "012345abcdefgh\n";
+        let entry_real = real_dir.join("app.chz");
+        std::fs::write(&entry_real, stale_disk_src).unwrap();
+
+        symlink(&real_dir, &link_dir).unwrap();
+        let entry_via_symlink = link_dir.join("app.chz");
+
+        // Live (unsaved) buffer: same broken-`:=` shape as `diag_parse_error_pos`'s fixture
+        // ("x := = 5"), with the identifier lengthened by one char so its error column (7, 1-based)
+        // lands on the stale disk text's word-starting index.
+        let live_src = "xx := = 5\n";
+
+        // Control: the SAME live source at an ordinary path with nothing on disk — ground truth for
+        // what the symlinked entry's diagnostic must also look like.
+        let expected = diagnostics(
+            Path::new("/nonexistent/chezzi_editor/control_app.chz"),
+            live_src,
+        );
+        let actual = diagnostics(&entry_via_symlink, live_src);
+        let _ = std::fs::remove_dir_all(&base);
+
+        assert_eq!(
+            expected.len(),
+            1,
+            "control fixture should produce exactly one diagnostic: {expected:?}"
+        );
+        assert_eq!(
+            actual.len(),
+            1,
+            "expected exactly one diagnostic: {actual:?}"
+        );
+        let (e, a) = (&expected[0], &actual[0]);
+
+        assert_eq!(
+            a.file, None,
+            "the entry's OWN parse error must be attributed to the live buffer (file: None), not \
+             misrouted to the imported-module arm because canonicalize() resolved the symlink; got {a:?}"
+        );
+        assert_eq!(a.line, e.line);
+        assert_eq!(
+            a.col, e.col,
+            "start column must be computed from the LIVE buffer, not the stale on-disk copy"
+        );
+        assert_eq!(
+            a.end_col, e.end_col,
+            "range must be computed from the LIVE buffer, not the stale on-disk copy"
+        );
+        assert_eq!(a.message, e.message);
     }
 }
