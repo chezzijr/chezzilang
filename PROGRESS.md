@@ -62,7 +62,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 >
 > **✅ SESSION 2026-08-17 — the diagnostic pass (`feat/diagnostic-pass-w8-2-airlock`): two warning
 > rules, one silent-wrong-answer fix, one stdlib fault-surface audit.** Branch-final gate: `cargo test`
-> **21 targets / 4404 passed / 0 failed / 3 ignored** (lib **4186/0/2**), `cargo test conformance`
+> **21 targets / 4406 passed / 0 failed / 3 ignored** (lib **4188/0/2**), `cargo test conformance`
 > **8/8**, clippy `--all-targets -D warnings` clean, `chezzi test tests/chz` **590 passed / 0 failed**
 > at the default worker count **and** at `CHEZZI_THREADS=2` (**zero** warning lines from the suite at
 > either count), `chezzi docs` renders. Rows closed in `docs/gaps.md`: **W8-2** and the un-numbered
