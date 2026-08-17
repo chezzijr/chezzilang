@@ -157,6 +157,19 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > **Gate:** `cargo test` all targets 0 failed (lib **4156 passed / 0 failed / 2 ignored**, 21 targets),
 > clippy `--all-targets -D warnings` clean, `chezzi test tests/chz` **569 → 571**, `examples/` goldens
 > byte-exact.
+>
+> **Branch-final gate, after the merge with `main`'s comment sweep (`1455fadd`):** `cargo test`
+> **21 targets / 4375 passed / 0 failed** (lib **4160/0/2**), clippy `--all-targets -D warnings`
+> clean, `chezzi test tests/chz` **586** at the default worker count AND at `CHEZZI_THREADS=2`,
+> verified on the primary checkout's freshly-built binary, not only the worktree's.
+>
+> **Three hidden-failure sites the same audit found were DEFERRED BY DECISION, not filed as work for
+> anyone else** — `Channel.recv()` on a closed channel, `index_of`'s `-1` sentinel, and
+> `Reader.read_line`'s fault-beside-an-`Option`. Each is a surface break wanting its own milestone.
+> Recorded with the measured Go/Python/Rust table — and with the reason each was deferred — in
+> **`docs/gaps.md`, "Considered and DEFERRED BY DECISION, 2026-08-17"**, directly under the ledger
+> table. They are deliberately NOT ledger rows: that table means "open bugs to fix now", and these are
+> settled scope decisions. Read that entry before re-deriving any of them from scratch.
 
 > **✅ The dead-engine comment/doc sweep + the self-comparison purge, 2026-08-17 (11 commits).**
 > The `--serial`/`interp` removals left ~1750 lines across the tree still describing the deleted

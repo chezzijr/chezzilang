@@ -162,6 +162,38 @@ a protocol existential is strictly invariant in its args, same as `List`/`Map`/a
 back to `sort()`'s total order for NaN, so a `±0.0` pair compares Equal by the method while `sort()`
 orders `-0.0 < +0.0` (`spec.md`); `--max-heap`/`--timeout` are M:N-only by design.
 
+**Considered and DEFERRED BY DECISION, 2026-08-17** — three hidden-failure sites found by the same
+stdlib audit that closed the `min`/`max` row. They are **real drift**, not known-limits, so they are
+recorded here rather than struck: each is a surface break wanting its own milestone, and the decision
+to defer was taken deliberately (not for lack of a fix) so that a small, reviewable branch could ship.
+Deliberately **not** added to the ledger table above — that table is open *bugs to fix now*, and
+adding them would misrepresent settled scope decisions as outstanding work. Promote a row if and when
+one is scheduled. Ancestors measured 2026-08-17 on this box (Go 1.26, CPython 3, rustc), Chezzi on the
+merged `main` binary:
+
+| site | Chezzi | Python | Rust | Go |
+|---|---|---|---|---|
+| `ch.recv()` on a closed+drained channel | **faults** `receive on a closed channel` | — | — | `v, ok := <-ch` → `0, false`, **no panic** |
+| `List.index_of(missing)` | `-1` | `list.index` **raises** `ValueError` | `iter().position` → `None` | — |
+| `str.index_of(missing)` | `-1` | `str.find` → `-1` | `str::find` → `None` | — |
+| `Reader.read_line()` non-UTF-8 | **faults** beside its `Option` | — | — | — |
+
+1. **`Channel.recv()` → `Option[T]`.** `Channel` is Go-lineage and Go's close protocol is
+   `v, ok := <-ch`; Chezzi faults instead. `try_recv() -> Option[T]` already exists and answers `None`
+   on a closed channel (measured), so the shape is available — but changing `recv`'s return type
+   breaks every channel program, and Chezzi has no zero value for `T` to hand back the way Go does.
+   Its own milestone.
+2. **`index_of`'s `-1` sentinel → `Option[int]`.** Note the two halves differ, which the first pass
+   missed: `str.index_of → -1` **is** Python-faithful (`str.find`), but **`List.index_of → -1` has no
+   ancestor at all** — Python's `list.index` raises and Rust's `position` returns `None`. The
+   Option-shaped sibling `List.position(pred) -> Option[int]` already exists. The list half is the
+   real drift; fixing only it would split a symmetric-looking pair, which is why this wants a design
+   pass rather than a patch.
+3. **`Reader.read_line()` → `Result[Option[str]]`.** Today `None` means EOF and a genuine failure
+   (non-UTF-8, mid-read I/O error) is a **fault sitting beside** the `Option`. `docs/stdlib.md` states
+   the reason outright — *"an `Option` can't carry the error"* — which is an argument for `Result`
+   wrapping the `Option`, not for a fault. Touches the whole `Reader`/`lines()` surface.
+
 ## Session log — 2026-08-16 (serial-engine removal: 2 rows closed, 1 dissolved, 6 fixes found doing it)
 
 The `--serial` cooperative engine, the `--check-parity` flag, the cooperative scheduler and every
