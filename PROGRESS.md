@@ -59,7 +59,8 @@ Single source of truth for "what am I doing next." Update after every work sessi
 >
 > **✅ W8-2 — the first warning rule: a discarded `Result`/`Option`, 2026-08-17.** A bare expression
 > statement whose type is `Result`/`Option` warns *"the Result returned by 'g' is discarded — bind it
-> (`r := …`), or discard it explicitly (`_ := …`)"*, following Rust's `unused_must_use`. Non-fatal: the
+> (`r := g()`), or discard it explicitly (`_ := g()`)"*, following Rust's `unused_must_use` (the hint
+> spells the call back for a plain-name callee; a method call keeps `r := …`). Non-fatal: the
 > program still checks clean and the exit code is unchanged. **It fires only where the value is
 > genuinely lost — inside a non-top-level proto** (a `fn` body, a `spawn:` block, a `defer:` block).
 > At **module top level** it stays silent, because `Op::PopExprStmt` already calls `top_level_error`
@@ -70,8 +71,13 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > `recover:` the abort is caught and surfaces as `r = Err(…)`). Excluded on purpose: `defer f.close()`
 > (Go's canonical unchecked idiom), an inline-expr fn body and a value-block tail (both are implicit
 > returns, not drops), and `?`/`??` (which yield the unwrapped payload). `o()?.len()` *does* warn —
-> optional chaining re-wraps. Corpus: 11 `_ :=` sites, all inside `fn`/`test fn` bodies. Docs:
-> `syntax.md` §9 (position table), `spec.md` entry model.
+> optional chaining re-wraps. `spawn g()` (the call form) is excluded like `defer` — a spawned task's
+> return value is discarded by construction. A carrier laundered through a **type parameter**
+> (`fn drop_it[T](x: T): x`) also escapes the rule: the statement's type is `T`, not a carrier —
+> measured silent, rc=0, and Rust is identical (`T` carries no `#[must_use]`). Corpus: 11 `_ :=` sites,
+> all inside `fn`/`test fn` bodies. `chezzi test` prints each distinct warning **once per invocation**
+> (each `*_test.chz` is its own entry graph, so a shared `lib.chz`'s warning used to print once per
+> importer). Docs: `syntax.md` §9 (position table), `spec.md` entry model.
 >
 > **✅ The checker has a WARNING severity, 2026-08-17 — plumbing (the rule above is its first user).** The
 > checker could report hard errors and nothing else, so the two diagnostics queued behind it

@@ -2976,12 +2976,13 @@ f()
 ```
 
 ```
-warning (line 4, col 5): the Result returned by 'g' is discarded — bind it (`r := …`), or discard it explicitly (`_ := …`)
+warning (line 4, col 5): the Result returned by 'g' is discarded — bind it (`r := g()`), or discard it explicitly (`_ := g()`)
 ```
 
 A warning is **non-fatal**: the program still type-checks and the exit code is unchanged. The escapes
 are Rust's — *bind* the value (`r := g()`, then inspect it) or *discard it explicitly* (`_ := g()`),
-which puts the intent on the page.
+which puts the intent on the page. (The hint spells the call back only when the callee is a plain
+name; for a method call — `xs.pop()` — it stays elided as `r := …`.)
 
 > ⚠️ **`_ := g()` at the top level DISABLES the runtime check.** The check runs on a bare expression
 > statement; binding the value — to `_` or to anything else — is the language taking your word that
@@ -3000,6 +3001,8 @@ and nothing warns (inside a `recover:` the resulting abort is caught and surface
 | nested in `recover:` | caught → `r = Err('unhandled error: …')` | no |
 | inside a `spawn:` block or a `defer:` block | silently swallowed | **yes** |
 | anywhere inside a `fn` body | silently swallowed | **yes** |
+| `defer g()` / `spawn g()` — the **call** forms, in any position | silently swallowed | no — *deliberate*, see below |
+| the drop happens on a value typed by a **type parameter** (`fn drop_it[T](x: T): x`) | silently swallowed | no — *a known limit*, see below |
 
 The warning fires wherever the statement's own type is a carrier, so it also skips the positions where
 a bare carrier expression isn't a drop at all: an inline-expr body (`fn f() -> T!: g()`, an implicit
@@ -3009,7 +3012,24 @@ warn — optional chaining re-wraps, so the result is still an `Option`.
 
 **`defer` is deliberately excluded.** `defer f.close()` never warns even though `close` returns a
 `Result`: `defer f.Close()` is Go's canonical unchecked idiom and the ancestor for the statement. Bind
-it inside a wrapper function if you do want the error.
+it inside a wrapper function if you do want the error. The **call form** of `spawn` (`spawn g()`) is
+excluded for the same reason — a spawned task's return value is discarded by construction. Both are
+real silent swallows; both stay silent on purpose. (The **block** forms — `defer:` / `spawn:` — do
+warn: their bodies are ordinary statements, not the fire-and-forget call.)
+
+**A carrier laundered through a type parameter escapes the rule.** The warning fires on the
+*statement's own type*, so a generic that swallows its argument is invisible to it:
+
+```chezzi
+fn g() -> Result[int, Error]: return Err("E")
+fn drop_it[T](x: T):
+    x                  # type is `T`, not a carrier — NO warning
+drop_it(g())           # prints "after", rc=0; the Err is gone
+print("after")
+```
+
+This matches Rust exactly — a `T` carries no `#[must_use]`, so `fn drop_it<T>(x: T) { x; }` is silent
+there too. It is a known limit of the rule, not a defect.
 
 ### `recover:` — the panic-recovery boundary
 

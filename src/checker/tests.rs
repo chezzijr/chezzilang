@@ -223,11 +223,25 @@ fn discarded_carrier_warns() {
         &format!("{o}fn f():\n    x := o()\n    x\nf()\n"),
         "the Option value here is discarded",
     );
-    // Every message carries both escapes, or it is not actionable.
-    warns(&format!("{g}fn f():\n    g()\nf()\n"), "bind it (`r := …`)");
+    // Every message carries both escapes, or it is not actionable — and for a plain `g()` callee
+    // the hint spells the call back rather than eliding it.
     warns(
         &format!("{g}fn f():\n    g()\nf()\n"),
-        "discard it explicitly (`_ := …`)",
+        "bind it (`r := g()`)",
+    );
+    warns(
+        &format!("{g}fn f():\n    g()\nf()\n"),
+        "discard it explicitly (`_ := g()`)",
+    );
+    // A METHOD call keeps the elision: reconstructing the receiver expression would be guesswork.
+    warns(
+        "fn f():\n    xs := [1, 2]\n    xs.pop()\nf()\n",
+        "bind it (`r := …`)",
+    );
+    // …as does a non-call carrier, which has no callee name at all.
+    warns(
+        &format!("{o}fn f():\n    x := o()\n    x\nf()\n"),
+        "bind it (`r := …`)",
     );
 }
 
@@ -337,6 +351,10 @@ fn a_carrier_that_is_not_discarded_does_not_warn() {
     //    canonical unchecked idiom, and the corpus has 27 of them.
     no_warn(&format!("{g}fn f():\n    defer g()\n    print(1)\nf()\n"));
     no_warn(&format!("{g}defer g()\nprint(1)\n"));
+    // …and `spawn <call>`, the same fire-and-forget shape: a spawned task's return value is
+    // discarded by construction (measured: `parallel:\n    spawn g()` with `g()` returning `Err`
+    // prints the following statement and exits 0). Silent on purpose, like `defer`.
+    no_warn(&format!("{g}parallel:\n    spawn g()\nprint(1)\n"));
 }
 
 /// The `-> nil` / `-> bool` methods a naive "bare method call statement" rule would drown in. None of

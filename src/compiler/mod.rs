@@ -7126,6 +7126,9 @@ struct FnComp {
 }
 
 impl FnComp {
+    /// A NEW `is_toplevel = false` proto that can hold a user statement needs a matching checker
+    /// flag in the W8-2 discarded-carrier gate (`src/checker/sig.rs`, the `StmtKind::Expr` arm):
+    /// its statements are invisible to `Op::PopExprStmt`'s top-level check, so the drop is silent.
     fn new(name: String, arity: usize, is_toplevel: bool) -> Self {
         FnComp {
             name,

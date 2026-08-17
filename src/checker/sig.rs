@@ -2838,33 +2838,40 @@ impl Checker {
                 // off `check_fn_body`), and a value-block's trailing expression (inferred directly
                 // by `infer_recover` / the value-`match`/`if` tails). `?`/`??`/`?.` already yield
                 // the UNWRAPPED payload, so they are not carriers here.
+                // `infer` runs FIRST and unconditionally — it is what type-checks the expression;
+                // the gate below only decides whether to warn about its type.
+                let t = self.infer(e);
                 if !(self.in_fn_body || self.in_spawn_block || self.in_defer_block) {
-                    self.infer(e);
                     return;
                 }
-                let carrier = match self.infer(e) {
+                let carrier = match t {
                     Ty::Result(..) => "Result",
                     Ty::Option(_) => "Option",
                     // `Unknown` lands here too: an already-reported expression must not cascade.
                     _ => return,
                 };
                 // Name the callee when there is one, so the warning points at the culprit rather
-                // than at a line. The fix hint stays elided (`…`) either way — spelling the whole
-                // call back would mean reconstructing a method receiver.
-                let subject = match &e.kind {
+                // than at a line. For a plain `g()` the whole call is in hand, so the fix hint
+                // spells it (`r := g()`); for a METHOD call it stays elided (`…`), because
+                // reconstructing the receiver expression from the AST would be guesswork.
+                let (subject, fix) = match &e.kind {
                     ExprKind::Call { callee, .. } => match &callee.kind {
-                        ExprKind::Ident(name) | ExprKind::Field { name, .. } => {
-                            format!("the {carrier} returned by '{name}'")
+                        ExprKind::Ident(name) => (
+                            format!("the {carrier} returned by '{name}'"),
+                            format!("{name}()"),
+                        ),
+                        ExprKind::Field { name, .. } => {
+                            (format!("the {carrier} returned by '{name}'"), "…".into())
                         }
-                        _ => format!("the {carrier} value here"),
+                        _ => (format!("the {carrier} value here"), "…".to_string()),
                     },
-                    _ => format!("the {carrier} value here"),
+                    _ => (format!("the {carrier} value here"), "…".to_string()),
                 };
                 self.warn(
                     e.span,
                     format!(
-                        "{subject} is discarded — bind it (`r := …`), or discard it explicitly \
-                         (`_ := …`)"
+                        "{subject} is discarded — bind it (`r := {fix}`), or discard it explicitly \
+                         (`_ := {fix}`)"
                     ),
                 );
             }
