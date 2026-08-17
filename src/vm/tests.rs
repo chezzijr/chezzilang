@@ -9622,6 +9622,18 @@ fn vm_generator_struct_method() {
     assert_eq!(run(src), "5\n6\n");
 }
 
+/// `List[<numeric newtype>].sum()` folds through `newtype_arith`, which ALLOCATES a fresh
+/// `Obj::NewType` per element — so the running accumulator lives only in a Rust local between
+/// collections and must be rooted. Under GC stress (a collection at every allocation) a missing root
+/// shows up as a wrong total or a use-after-free, neither of which a Chezzi `assert` can provoke.
+/// The empty case additionally pins that the compiler-minted `T(0)` seed survives.
+#[test]
+fn vm_newtype_sum_fold_survives_gc_stress() {
+    let src = "newtype Cents = int\nfn main():\n    xs := [Cents(i) for i in range(0, 200)]\n    print(int(xs.sum()))\n    e: List[Cents] = []\n    print(int(e.sum()))\nmain()\n";
+    assert_eq!(run_capture_stress(src), "19900\n0\n");
+    assert_eq!(run(src), "19900\n0\n");
+}
+
 /// A generator yielding heap values (strings) survives GC stress between/within `.next()` calls:
 /// the suspended frames + yielded objects must stay rooted across collections.
 #[test]

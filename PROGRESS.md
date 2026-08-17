@@ -47,8 +47,11 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > `src/checker/expr.rs` comment naming the deleted `interp` engine corrected. Tests:
 > `tests/chz/spec/newtype_test.chz` **+6** (non-empty/empty int, float both ways, overflow fault,
 > two-sums-in-one-line/one-interpolation aliasing backstop, plain-list controls) + `src/checker/tests.rs`
-> **+3** (return type is the newtype not the underlying; the str/method, nested and generic rejections).
-> **Gate:** `cargo test --lib` **4156 → 4159 passed / 0 failed / 2 ignored**, full `cargo test` all
+> **+3** (return type is the newtype not the underlying; the str/method, nested and generic rejections)
+> + `src/vm/tests.rs` **+1** GC-STRESS (`vm_newtype_sum_fold_survives_gc_stress`: the fold allocates a
+> fresh `Obj::NewType` per element, so the running accumulator lives only in a Rust local between
+> collections — a missing root is a wrong total or a use-after-free that no Chezzi `assert` can provoke).
+> **Gate:** `cargo test --lib` **4156 → 4160 passed / 0 failed / 2 ignored**, full `cargo test` all
 > targets 0 failed, `cargo clippy --all-targets -- -D warnings` clean, `chezzi test tests/chz`
 > **576 → 582** (same at `CHEZZI_THREADS=2`).
 
