@@ -2069,6 +2069,12 @@ impl Checker {
             // reading it inside the task is an error — the read-side counterpart to the reassignment
             // gate. Module globals/imports are excluded (`is_local_capture`): they resolve in every
             // task like free functions, so reading an imported module here is fine.
+            // W8-3 — the mirror image: a read in the PARENT of a binding whose only write is inside a
+            // `spawn:` body. The airlock copy means that write never lands here, so the read silently
+            // sees the pre-spawn value (the filed repro's `for r in results:` ran zero iterations and
+            // skipped every assertion inside it, rc=0). Warning, not an error — the semantics are
+            // deliberate (`docs/syntax.md` §11b).
+            self.report_spawn_stale_read(name, span);
             if self.is_local_capture(name) && !self.sendable(&ty) {
                 self.error(
                     span,

@@ -403,6 +403,197 @@ fn no_warn_on_a_clean_program() {
     no_warn("print(1)\n");
 }
 
+// ===== W8-3 — the airlock-staleness warning (a task-side write read after the join) =====
+//
+// Every shape below was MEASURED on the release binary before the rule was written; the warn/silent
+// split is that table, not a guess. Task-side write → value after the join:
+//   reassign 0 · push 0 · `xs[i]=v` 0 · `p.f=v` 1(unchanged) · `m[k]=v` 1(unchanged) ·
+//   top-level spawn 0 · implicit nursery 0 · module global 0     → LOST, warn
+//   `Shared.update` 1 · `Channel.send` 7 · `defer:` block push 1 · parent overwrite 2 → visible, silent
+//
+// The filed defect's failure mode is why it ranks: `for r in results:` over the stale empty list ran
+// ZERO iterations, so every `assert` inside was skipped and the program exited 0.
+
+/// The `docs/gaps.md` repro itself, plus the other three lvalue shapes. The warning must name the
+/// binding and cite the line of the write inside the task.
+#[test]
+fn a_task_side_write_read_after_the_join_warns() {
+    // Reassignment — the filed repro.
+    warns(
+        "fn f():\n    results: List[str] = []\n    parallel:\n        spawn:\n            results = [\"a\"]\n    print(results.len())\nf()\n",
+        "'results' is read here, but its only write is inside a `spawn:` block (line 5)",
+    );
+    // Mutator method call.
+    warns(
+        "fn f():\n    xs: List[int] = []\n    parallel:\n        spawn:\n            xs.push(1)\n    print(xs.len())\nf()\n",
+        "'xs' is read here",
+    );
+    // Index assign.
+    warns(
+        "fn f():\n    xs := [0]\n    parallel:\n        spawn:\n            xs[0] = 9\n    print(xs[0])\nf()\n",
+        "'xs' is read here",
+    );
+    // Field assign — a captured struct deep-copies across the airlock too.
+    warns(
+        "struct P:\n    x: int\nfn f():\n    p := P(1)\n    parallel:\n        spawn:\n            p.x = 9\n    print(p.x)\nf()\n",
+        "'p' is read here",
+    );
+    // Map key assign.
+    warns(
+        "fn f():\n    m := {\"a\": 1}\n    parallel:\n        spawn:\n            m[\"a\"] = 9\n    print(m[\"a\"])\nf()\n",
+        "'m' is read here",
+    );
+    // An IMPLICIT nursery (a bare `spawn:` with no `parallel:`) is the same airlock.
+    warns(
+        "fn f():\n    xs: List[int] = []\n    spawn:\n        xs.push(1)\n    print(xs.len())\nf()\n",
+        "'xs' is read here",
+    );
+}
+
+/// At MODULE TOP LEVEL the binding is scope 0, and this is exactly where the sibling W8-2 rule stays
+/// silent because the runtime backstops it. There is NO backstop here — measured, the program prints
+/// 0 and exits 0 with nothing reported — so the rule uses `is_captured` (which includes scope 0)
+/// rather than `is_local_capture`. Same for a module global captured by a task inside a fn.
+#[test]
+fn a_task_side_write_warns_at_module_top_level_and_on_a_module_global() {
+    warns(
+        "results: List[int] = []\nparallel:\n    spawn:\n        results.push(1)\nprint(results.len())\n",
+        "'results' is read here",
+    );
+    warns(
+        "g: List[int] = []\nfn f():\n    parallel:\n        spawn:\n            g.push(1)\n    print(g.len())\nf()\n",
+        "'g' is read here",
+    );
+}
+
+/// The false-positive guard, and the highest-value case in the rule: the handle types cross the
+/// airlock BY HANDLE, so a task-side write through one IS visible after the join (measured:
+/// `Shared` 1, `Channel` 7). Telling someone their correct `Shared` code is broken is worse than the
+/// missing warning, so `mutates_receiver` is keyed on the receiver TYPE and none of them is in it.
+#[test]
+fn a_write_through_a_handle_type_never_warns() {
+    entry_no_warn(
+        "import std.concurrency\nfn f():\n    s := Shared(0)\n    parallel:\n        spawn:\n            s.update(fn(x: int) -> int: x + 1)\n    print(s.get())\nf()\n",
+    );
+    entry_no_warn(
+        "fn f():\n    ch := Channel[int](1)\n    parallel:\n        spawn:\n            ch.send(7)\n    print(ch.recv())\nf()\n",
+    );
+    entry_no_warn(
+        "import std.concurrency\nfn f():\n    s := RwShared(0)\n    parallel:\n        spawn:\n            s.set(3)\n    print(s.get())\nf()\n",
+    );
+    entry_no_warn(
+        "import std.concurrency\nfn f():\n    a := AtomicInt(0)\n    parallel:\n        spawn:\n            a.add(1)\n    print(a.load())\nf()\n",
+    );
+    // The `Shared` REWRITE of the filed repro — the very fix the warning's hint recommends must
+    // itself be silent, or the diagnostic sends the user in a circle.
+    entry_no_warn(
+        "import std.concurrency\nfn f():\n    out := Shared(0)\n    parallel:\n        spawn:\n            out.set(2)\n    print(out.get())\nf()\n",
+    );
+}
+
+/// Every "does not fire" claim, with the neighbours its premise implies (per
+/// `widening-untested-by-its-own-suite`): swap the order, add an unused statement, move the read a
+/// block deeper.
+#[test]
+fn the_airlock_warning_stays_silent_where_the_write_is_not_lost() {
+    // A `defer:` block runs in the SAME task and shares the enclosing cell (measured: visible).
+    no_warn(
+        "fn g(xs: List[int]):\n    fn inner():\n        defer:\n            xs.push(1)\n    inner()\n    print(xs.len())\ng([])\n",
+    );
+    // A task-LOCAL write (declared inside the task) is not a capture at all.
+    no_warn(
+        "fn f():\n    parallel:\n        spawn:\n            xs: List[int] = []\n            xs.push(1)\n            print(xs.len())\nf()\n",
+    );
+    // A captured write never read outside the task.
+    no_warn(
+        "fn f():\n    xs: List[int] = []\n    parallel:\n        spawn:\n            xs.push(1)\n    print(1)\nf()\n",
+    );
+    // A read only INSIDE the task — the copy IS what is being read there.
+    no_warn(
+        "fn f():\n    xs: List[int] = []\n    parallel:\n        spawn:\n            xs.push(1)\n            print(xs.len())\nf()\n",
+    );
+    // A parent-side overwrite supersedes the lost write (measured: prints the parent's 2).
+    no_warn(
+        "fn f():\n    xs: List[int] = []\n    parallel:\n        spawn:\n            xs.push(1)\n    xs = [5, 6]\n    print(xs.len())\nf()\n",
+    );
+    // …and so does a parent-side MUTATION, which routes through the other taint site.
+    no_warn(
+        "fn f():\n    xs: List[int] = []\n    parallel:\n        spawn:\n            xs.push(1)\n    xs.push(5)\n    print(xs.len())\nf()\n",
+    );
+    // …and a parent-side INDEX assign, which untaints before its own receiver read reports.
+    no_warn(
+        "fn f():\n    xs := [0]\n    parallel:\n        spawn:\n            xs[0] = 9\n    xs[0] = 1\n    print(xs[0])\nf()\n",
+    );
+    // A nested `fn` declared inside the task writing its OWN local.
+    no_warn(
+        "fn f():\n    parallel:\n        spawn:\n            fn h():\n                ys: List[int] = []\n                ys.push(1)\n                print(ys.len())\n            h()\n    print(1)\nf()\n",
+    );
+    // NEIGHBOUR (order swap): the read placed BEFORE the spawn is a declared ceiling — lexical order,
+    // not dataflow. Silent, and the write that follows taints nothing that is ever read.
+    no_warn(
+        "fn f():\n    xs: List[int] = []\n    print(xs.len())\n    parallel:\n        spawn:\n            xs.push(1)\nf()\n",
+    );
+    // NEIGHBOUR (unused statement inserted between write and read): still one warning, not two, and
+    // an unrelated binding in between must not be tainted — covered by the count assertion below.
+    // NEIGHBOUR (no spawn at all): the same statements without the task must stay silent.
+    no_warn("fn f():\n    xs: List[int] = []\n    xs.push(1)\n    print(xs.len())\nf()\n");
+    // NEIGHBOUR (a NON-mutating method inside the task): reading a capture in a task is not a write.
+    no_warn(
+        "fn f():\n    xs := [1]\n    parallel:\n        spawn:\n            print(xs.len())\n    print(xs.len())\nf()\n",
+    );
+    // NEIGHBOUR: `unique`/`dedup`/`merge` RETURN a new collection (`std/prelude.chz`) — the near
+    // misses the mutator grep ruled out. Their result is discarded, which is fine here.
+    no_warn(
+        "fn f():\n    xs := [1, 1]\n    parallel:\n        spawn:\n            ys := xs.unique()\n            print(ys.len())\n    print(xs.len())\nf()\n",
+    );
+    // NEIGHBOUR: `str.reverse` shares a NAME with `List.reverse` but returns a new `str` — the reason
+    // `mutates_receiver` is keyed on the receiver type, not the name alone.
+    no_warn(
+        "fn f():\n    s := \"ab\"\n    parallel:\n        spawn:\n            print(s.reverse())\n    print(s)\nf()\n",
+    );
+}
+
+/// The read a block DEEPER than the spawn still reports — the taint lives on the checker, not on a
+/// scope, so an `if`/`for` body after the join is not an escape.
+#[test]
+fn a_stale_read_nested_in_a_later_block_still_warns() {
+    warns(
+        "fn f():\n    xs: List[int] = []\n    parallel:\n        spawn:\n            xs.push(1)\n    if true:\n        print(xs.len())\nf()\n",
+        "'xs' is read here",
+    );
+    // The filed failure mode itself: the `for` head reads the stale (empty) list.
+    warns(
+        "fn f():\n    results: List[str] = []\n    parallel:\n        spawn:\n            results.push(\"a\")\n    for r in results:\n        print(r)\nf()\n",
+        "'results' is read here",
+    );
+}
+
+/// Reported exactly ONCE. Two ways this rule could double-report: the checker's speculative
+/// return-type inference walks a body whose diagnostics are rolled back and then walks it again for
+/// real (`diag_rollback` truncates `warnings`, and the taint is re-derived on the second walk), and a
+/// second read of the same name after the first report (the entry is consumed).
+#[test]
+fn the_airlock_warning_is_reported_exactly_once() {
+    // No declared return type on `f` → the speculative inference pass runs over this body.
+    let src = "fn f():\n    xs: List[int] = []\n    parallel:\n        spawn:\n            xs.push(1)\n    print(xs.len())\n    print(xs.len())\n    n := xs.len()\n    print(n)\nf()\n";
+    let (errs, warns) = warn_src(src);
+    assert!(errs.is_empty(), "expected no type errors, got: {errs:?}");
+    assert_eq!(
+        warns.len(),
+        1,
+        "expected exactly one warning, got: {warns:?}"
+    );
+}
+
+/// One function's taint must not leak into the next: the map is taken and restored around every fn
+/// body, so a second function reading a same-named binding of its own is clean.
+#[test]
+fn the_airlock_taint_does_not_leak_across_function_bodies() {
+    no_warn(
+        "fn writer():\n    xs: List[int] = []\n    parallel:\n        spawn:\n            xs.push(1)\nfn reader():\n    xs: List[int] = []\n    print(xs.len())\nwriter()\nreader()\n",
+    );
+}
+
 /// Type-check a source string after running the desugar pass (call normalization: named args,
 /// omitted defaults, variadic collapse — and, before W7-43, `?.`/`??` carrier lowering, which is
 /// now the CHECKER's job). Production always desugars before the checker (`resolver::build_graph`);
@@ -7054,6 +7245,17 @@ fn check_entry(src: &str) -> Vec<CheckError> {
 fn entry_ok(src: &str) {
     let errs = check_entry(src);
     assert!(errs.is_empty(), "expected no type errors, got: {errs:?}");
+}
+
+/// [`no_warn`], but through `build_graph` — the only wire that resolves a native std import, so it is
+/// what a rule whose negative cases need `Shared`/`RwShared`/`Atomic` has to use.
+fn entry_no_warn(src: &str) {
+    let t = TmpDir::new();
+    let entry = t.write("main.chz", src);
+    let graph = crate::resolver::build_graph(&entry).expect("resolve should succeed");
+    let (res, warns) = check_graph_diags(&graph, None);
+    assert!(res.is_ok(), "expected no type errors, got: {res:?}");
+    assert!(warns.is_empty(), "expected no warnings, got: {warns:?}");
 }
 
 /// Bug 4B — a module bind (aliased OR the un-aliased last path segment) whose name is a reserved

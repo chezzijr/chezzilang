@@ -3283,6 +3283,13 @@ impl Checker {
         // task is no longer rejected: spawning deep-copies module globals per task, so the write hits
         // the task's OWN copy. Gate
         // deleted alongside the sibling method-mutation + reassign gates (see `infer_method_call`).
+        //
+        // W8-3 — but the write IS invisible to the parent, and nothing said so. Taint the root
+        // binding here (inside a task) / untaint it (in the parent) for every lvalue shape at once:
+        // this `match` is the sole lvalue dispatch, its `Tuple` arm recurses back into `check_assign`
+        // per element, and the ident/index/field arms all write THROUGH the same root binding. Done
+        // before the arms run so a parent-side `xs[0] = v` untaints ahead of its own receiver read.
+        self.note_assign_root(target);
         match &target.kind {
             ExprKind::Ident(name) => {
                 let Some(var_ty) = self.lookup(name) else {
@@ -3994,6 +4001,11 @@ impl Checker {
         // …nor a spawn block: a fn DECLARED inside a `spawn:` has its own caller, so a `?` in its
         // body targets it normally (W7-48).
         let saved_in_spawn = std::mem::replace(&mut self.in_spawn_block, false);
+        // W8-3 — …and the airlock-staleness taint is per-frame: a nested fn DECLARED inside a task
+        // is checked with `in_spawn_block` false, so an enclosing task's pending taint left visible
+        // here would report against a read in a body that is not the parent's. Taken and restored
+        // 1:1, which also keeps one function's taint out of the next.
+        let saved_stale = std::mem::take(&mut self.spawn_stale);
         // M24 — the witness params whose `$w:T` binding this body can reach, and the name the
         // contract's fn-half keys them under. A MODULE-LEVEL FREE fn keys on its own name; a MEMBER
         // (Task 5 — a method or static method declaring its own `[T]`) keys on `<type key>.<method>`,
@@ -4209,6 +4221,7 @@ impl Checker {
         self.recover_depth = saved_recover;
         self.in_defer_block = saved_in_defer;
         self.in_spawn_block = saved_in_spawn;
+        self.spawn_stale = saved_stale;
         self.witness_scope = saved_witness_scope;
         self.exit_type_params(saved_tps);
     }

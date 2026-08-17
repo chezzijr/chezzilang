@@ -396,6 +396,35 @@ Two rules cover everything:
    forgetting `Shared` is a harmless logic bug (an isolated stale value) rather than a data race —
    Chezzi has no borrow checker to prove a shared mutation is locked, so the safe default is to copy.
 
+**The checker WARNS when that copy silently costs you a value.** A captured binding whose only write
+is inside a `spawn:` body, read again after the join, is a **non-fatal warning** on stderr naming the
+binding and citing the write's line (exit code unchanged — the semantics above are deliberate, so this
+is a warning, not an error). It exists because of the failure mode: a `for r in results:` over the
+stale (still-empty) list runs **zero** iterations, so every `assert` inside is skipped and the program
+exits `0` — a green test that tested nothing.
+
+```chezzi
+results: List[str] = []
+parallel:
+    spawn:
+        results = ["ok", "ok"]     # ← warning cites this line
+for r in results:                  # 'results' is read here, but its only write is inside a `spawn:` block
+    assert r == "ok"               # zero iterations before the warning existed
+```
+
+It covers a reassignment, a compound assign, `xs[i] = v`, `p.field = v`, `m[k] = v`, and the in-place
+container mutators (`push`/`pop`/`insert`/`remove_at`/`extend`/`sort`/`sort_by`/`sort_by_key`/
+`reverse` on a list, `remove`/`update` on a map, `add`/`remove` on a set, `push`/`pop` on a bytearray).
+It stays **silent** where the write really does survive: through a `Shared`/`RwShared`/`Atomic`/
+`AtomicInt`/`Channel`/`Executor`/`Socket`/`Listener`/`Writer`/`Reader` handle (those cross by handle),
+inside a `defer:` block (same task, no airlock), when the parent overwrites the binding before reading
+it, and when the read happens only inside the task.
+
+Two deliberate ceilings: the warning is **per function body**, so a module global written in a task in
+one function and read in another is not flagged (it *is* flagged when both happen in the same body, or
+at module top level); and it is **lexical**, so a read placed textually *before* the `spawn:` is not
+flagged even though the write cannot reach it either.
+
 **Mutating a captured local.** A **closure body is a single expression** (`fn(x): expr`), so a closure
 cannot contain a reassignment statement — `fn(): n = n + 1` is a *parse error*. Three ways to write
 through a captured binding: (a) a **method call**, which *is* an expression, so a closure can mutate a

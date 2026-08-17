@@ -2291,6 +2291,20 @@ impl Checker {
         // else (a struct/enum method call ignores it, as before).
         hint: Option<&Ty>,
     ) -> Ty {
+        // W8-3 — an in-place mutation (`xs.push(v)`, `m.remove(k)`, …) is a WRITE through the
+        // receiver binding, so it taints inside a `spawn:` body and untaints in the parent, exactly
+        // like `check_assign`'s lvalue arms. Recorded from `lookup` BEFORE `infer(obj)` runs, for the
+        // same ordering reason: the receiver read below must not report a taint this very statement
+        // supersedes. Simple-`Ident` receivers only (`xss[0].push(v)` — same documented limitation as
+        // `refine_receiver` below), and `mutates_receiver` is type-keyed so the handle types, whose
+        // task-side writes ARE visible, never taint.
+        if let ExprKind::Ident(name) = &obj.kind
+            && let Some(rty) = self.lookup(name)
+            && mutates_receiver(&rty, method)
+        {
+            let name = name.clone();
+            self.note_task_write(&name, obj.span);
+        }
         let obj_ty = self.infer(obj);
         // Refine-on-first-use: if `obj` is a simple variable whose type has an `Unknown` element/
         // key/value/type-arg slot (an empty literal / nullary variant / native `None`), and this is

@@ -2245,6 +2245,14 @@ struct Checker {
     /// floor is a **captured** binding — read-only inside the task (assigning to it is an error).
     /// Empty outside any `spawn:` block.
     capture_floors: Vec<usize>,
+    /// W8-3 — captured LOCALS whose only write so far happened inside a `spawn:` task body, mapped to
+    /// the span of that write. A task's captures cross the airlock as an independent deep copy
+    /// (measured: every write shape below is invisible after the join — see `note_task_write`), so a
+    /// later read in the PARENT reads the pre-spawn value and the task's work is silently lost. The
+    /// entry is dropped by a parent-side write to the same name (the parent overwrote it, so the read
+    /// is fine) and by the read that reports it (one warning per name — no spam). Saved/restored
+    /// around every `fn` body so one function's taint cannot leak into the next.
+    spawn_stale: HashMap<String, Span>,
     /// B3.3 (Task 2a) — per-scope side-table of the NON-SENDABLE LOCAL captures of each
     /// closure/nested-fn value declared in that scope, keyed by the bound name. Mirrors `scopes`
     /// index-for-index (pushed/popped by `push_scope`/`pop_scope`). Populated at the closure/nested-fn
@@ -3511,6 +3519,47 @@ const READER_METHODS: &[&str] = &["read_line", "read_bytes", "close"];
 const EXECUTOR_METHODS: &[&str] = &["submit", "shutdown", "shutdown_now"];
 const BYTES_METHODS: &[&str] = &["decode", "decode_lossy", "len"];
 const BYTEARRAY_METHODS: &[&str] = &["len", "push", "pop", "decode"];
+
+/// W8-3 — does `method` MUTATE its receiver in place (as opposed to returning a new value)? Keyed on
+/// the receiver's type as well as the name, because the same name means different things per type
+/// (`str.reverse` returns a new `str`; `List.reverse` mutates. `Shared.update`/`Map.update` likewise).
+///
+/// Enumerated from the declarations, not from memory: every entry below is a `native fn` in
+/// `std/prelude.chz` whose receiver is the mutated container —
+/// `grep -n 'native fn (push|pop|insert|remove_at|extend|sort|sort_by|sort_by_key|reverse|dedup|
+/// unique|remove|merge|update|add|clear|discard)\b' std/prelude.chz` — cross-checked against the
+/// `*_METHODS` tables above for reachability. That grep is also what rules the near-misses OUT:
+/// `unique`/`dedup`/`merge` return a fresh collection (`-> List[T]` / `-> Map[K, V]`), and `clear` /
+/// `discard` do not exist at all.
+///
+/// The handle types (`Channel`/`Shared`/`RwShared`/`Atomic`/`Executor`/`Socket`/`Listener`/`Writer`/
+/// `Reader`) are absent BY DESIGN and must stay absent: they cross the airlock by handle, so a
+/// task-side `s.update(...)` / `ch.send(v)` IS visible to the parent (measured) and warning about it
+/// would be a false alarm on correct code.
+///
+/// ponytail: builtin containers only. A USER struct method that mutates `self` (`p.bump()`) is not
+/// detected — nothing in the checker says which methods mutate, and treating every struct method as a
+/// write would false-positive on every getter. Upgrade path: a `self`-mutation summary per method.
+fn mutates_receiver(recv: &Ty, method: &str) -> bool {
+    match recv {
+        Ty::List(_) => matches!(
+            method,
+            "push"
+                | "pop"
+                | "reverse"
+                | "extend"
+                | "sort"
+                | "sort_by"
+                | "sort_by_key"
+                | "insert"
+                | "remove_at"
+        ),
+        Ty::Map(..) => matches!(method, "remove" | "update"),
+        Ty::Set(_) => matches!(method, "add" | "remove"),
+        Ty::ByteArray => matches!(method, "push" | "pop"),
+        _ => false,
+    }
+}
 
 // The bespoke `str_method_sig` / `bytes_method_sig` / `bytearray_method_sig` arms are RETIRED (phase
 // 5a-containers): every one of their FLAT sigs is now declared as a body-less `native fn` method inside a

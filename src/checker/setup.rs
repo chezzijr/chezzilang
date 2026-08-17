@@ -98,6 +98,7 @@ impl Checker {
             current_module_label: None,
             loop_depth: 0,
             capture_floors: Vec::new(),
+            spawn_stale: HashMap::new(),
             current_module_is_stdlib: false,
             net_socket_seed: None,
             net_listener_seed: None,
@@ -2020,6 +2021,80 @@ impl Checker {
             }
         }
         false
+    }
+
+    /// W8-3 — record (or clear) the airlock-staleness taint for the binding an assignment TARGET
+    /// writes through. The root of an lvalue chain is the binding that crosses the airlock, so
+    /// `xs[i] = v`, `p.f = v` and `a.b[0].c = v` all resolve to `xs`/`p`/`a`; a `Tuple` target is not
+    /// handled here because `check_assign` recurses into this same path once per element.
+    ///
+    /// Called at the TOP of `check_assign`, before the per-arm code infers the target's receiver: a
+    /// parent-side `xs[0] = v` must untaint *first*, so the receiver read it then performs cannot
+    /// report a write the parent has just superseded.
+    pub(super) fn note_assign_root(&mut self, target: &Expr) {
+        let mut e = target;
+        loop {
+            match &e.kind {
+                ExprKind::Index { obj, .. } | ExprKind::Field { obj, .. } => e = obj,
+                ExprKind::Ident(name) => {
+                    let name = name.clone();
+                    self.note_task_write(&name, target.span);
+                    return;
+                }
+                _ => return,
+            }
+        }
+    }
+    /// W8-3 — a WRITE to `name`. Inside a `spawn:` body a write to a captured local is lost at the
+    /// join (measured: reassign / `push` / `xs[i]=v` / `p.f=v` / `m[k]=v` all read back the pre-spawn
+    /// value), so taint it with the write's span; in the parent the same write SUPERSEDES any pending
+    /// taint, so drop it. The first write inside the task wins the citation.
+    ///
+    /// A `defer:` block deliberately does not reach here as a task write: it runs in the SAME task and
+    /// shares the enclosing cell (measured: visible), and `in_spawn_block` is false there.
+    pub(super) fn note_task_write(&mut self, name: &str, span: Span) {
+        if !self.in_spawn_block {
+            self.spawn_stale.remove(name);
+            return;
+        }
+        // `is_captured`, NOT `is_local_capture`: a captured module GLOBAL deep-copies into the task
+        // identically (measured: `g.push(1)` in a task leaves `g.len() == 0` after the join), and the
+        // whole `gaps.md` repro written at module TOP LEVEL — where the binding IS scope 0 — is the
+        // shape with no runtime backstop at all. The scope-0 exclusion `is_local_capture` draws exists
+        // for the READ-sendability gate (an imported module resolves per-task like a free function),
+        // which is a different question from "does this write survive the join". Tracking a global
+        // costs nothing extra here because the taint is taken/restored per fn body, so a claim never
+        // crosses a function boundary.
+        //
+        // ponytail: that per-fn scoping IS the ceiling — a global written in a task in `f` and read in
+        // `g` is not flagged. Upgrade path: a module-level pass, not this source-order walk.
+        if self.is_captured(name) {
+            self.spawn_stale.entry(name.to_string()).or_insert(span);
+        }
+    }
+    /// W8-3 — a READ of `name` in the PARENT while its only write is inside a `spawn:` body: the read
+    /// sees the pre-spawn value. Reports once (the entry is consumed) at the read span, citing the
+    /// write.
+    ///
+    /// ponytail: LEXICAL order, not dataflow — a read placed textually *before* the `spawn:` is not
+    /// flagged even though the write still cannot reach it. Upgrade path: a real CFG, which this
+    /// single source-order statement walk deliberately is not.
+    pub(super) fn report_spawn_stale_read(&mut self, name: &str, span: Span) {
+        if self.in_spawn_block {
+            return; // inside the task the copy IS the value being read — nothing is lost
+        }
+        let Some(write) = self.spawn_stale.remove(name) else {
+            return;
+        };
+        self.warn(
+            span,
+            format!(
+                "'{name}' is read here, but its only write is inside a `spawn:` block (line {}) — a \
+                 captured binding crosses the task airlock as an independent copy, so that write is \
+                 not visible after the join (carry the value out on a Channel, or use a Shared)",
+                write.line
+            ),
+        );
     }
 
     /// Does `name` resolve to the MODULE scope (index 0) — i.e. is it a module-level binding rather

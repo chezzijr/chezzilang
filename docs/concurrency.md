@@ -92,6 +92,14 @@ print(counter)                     # 0  — to actually share, use a Shared[int]
 **Module globals isolate per task.** A `spawn`ed task gets its own deep copy of every
 module global (and of every captured local) — mutating one inside a task never propagates out.
 
+**The checker warns when you read the lost value.** Writing a captured binding inside a `spawn:` body
+and reading it again after the join emits a non-fatal warning naming the binding and citing the write's
+line (exit code unchanged — the isolation is deliberate). A `Shared`/`RwShared`/`Atomic`/`AtomicInt`/
+`Channel` write is silent: those cross by handle, so the write really is visible. Two ceilings: the
+warning is per function body (a global written in a task in one function and read in another is not
+flagged), and it is lexical (a read placed textually before the `spawn:` is not flagged). Full rules:
+[`syntax.md` §capture](syntax.md).
+
 **The copy is taken FRESH, per task, at its `spawn` — at every depth.** A task sees the values current
 when it was spawned (the Go rule: a goroutine reads whatever a package-level var holds when `go` runs).
 So a global first initialized *after* an earlier nursery is visible, a mutation by ordinary sequential
