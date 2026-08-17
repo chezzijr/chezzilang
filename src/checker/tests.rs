@@ -40,9 +40,6 @@ fn warn_src(src: &str) -> (Vec<CheckError>, Vec<CheckError>) {
 /// Assert the source type-checks CLEAN and emits a warning containing `needle`. The clean assertion
 /// is load-bearing: without it the helper cannot tell a warning from an error, and every rule built
 /// on it would pass while emitting a hard error.
-// No rule emits a warning yet — the two that will (docs/gaps.md W8-2 and the airlock trap) land next.
-// DELETE THIS ATTRIBUTE when the first of them lands and calls this helper.
-#[allow(dead_code)]
 fn warns(src: &str, needle: &str) {
     let (errs, warns) = warn_src(src);
     assert!(errs.is_empty(), "expected no type errors, got: {errs:?}");
@@ -132,11 +129,11 @@ fn diag_rollback_discards_speculative_warnings_and_keeps_the_rest() {
 /// The graph entry point keeps the channels apart: warnings never reach the `Result`, and an
 /// erroring program's `Err` carries only `Severity::Error`.
 ///
-/// RESIDUAL, stated precisely: the take-and-return plumbing is unasserted until the first rule lands.
-/// Both assertions below expect an EMPTY warning vec, so replacing `check_graph_diags`' `let warnings
-/// = std::mem::take(&mut c.warnings);` with `Vec::new()` — deleting the wire that carries warnings out
-/// of the entry point — still passes the whole suite. Closing it needs a producer, not an injection
-/// seam; the first rule's `warns(...)` test closes it end to end.
+/// The third case is the one that pins the PLUMBING: a warning program returns `Ok(())` **alongside a
+/// non-empty warning vec**, so replacing `check_graph_diags`' `let warnings = std::mem::take(&mut
+/// c.warnings);` with `Vec::new()` now fails here. It has to be spelled out at THIS entry point —
+/// `warns`/`no_warn` go through the single-module `check_diags`, which is a different (test-only)
+/// wire, and the CLI / LSP / test runner all land on this one.
 #[test]
 fn check_graph_diags_keeps_warnings_out_of_the_result() {
     let t = TmpDir::new();
@@ -145,14 +142,191 @@ fn check_graph_diags_keeps_warnings_out_of_the_result() {
     let graph = crate::resolver::build_graph(&clean).expect("resolve should succeed");
     let (res, warns) = check_graph_diags(&graph, None);
     assert!(res.is_ok(), "clean program should check clean: {res:?}");
-    assert!(warns.is_empty(), "no rule warns yet, got: {warns:?}");
+    assert!(warns.is_empty(), "clean program warns: {warns:?}");
 
     let bad = t.write("bad.chz", "x: int = \"s\"\nprint(x)\n");
     let graph = crate::resolver::build_graph(&bad).expect("resolve should succeed");
     let (res, warns) = check_graph_diags(&graph, None);
     let errs = res.expect_err("should not type-check");
     assert!(errs.iter().all(|e| e.severity == Severity::Error));
-    assert!(warns.is_empty(), "no rule warns yet, got: {warns:?}");
+    assert!(warns.is_empty(), "erroring program warns: {warns:?}");
+
+    let warned = t.write(
+        "warned.chz",
+        "fn g() -> Result[int, Error]:\n    return Ok(1)\nfn f():\n    g()\nf()\n",
+    );
+    let graph = crate::resolver::build_graph(&warned).expect("resolve should succeed");
+    let (res, warns) = check_graph_diags(&graph, None);
+    assert!(res.is_ok(), "a warning must not fail the check: {res:?}");
+    assert_eq!(warns.len(), 1, "got: {warns:?}");
+    assert_eq!(warns[0].severity, Severity::Warning);
+    assert!(warns[0].message.contains("is discarded"), "got: {warns:?}");
+}
+
+// ===== W8-2 — the discarded-`Result`/`Option` warning (`sig.rs`, the `StmtKind::Expr` arm) =====
+
+/// A `Result`/`Option` dropped on the floor. Fatal at module top level (`unhandled error`, rc=1),
+/// silently swallowed inside a function — the asymmetry filed as `docs/gaps.md` W8-2. Rust owns both
+/// carriers, marks them `#[must_use]`, and warns on the drop wherever it happens. Every case here
+/// still type-checks CLEAN (that is `warns`' first assertion), so the exit code is unchanged.
+#[test]
+fn discarded_carrier_warns() {
+    let g = "fn g() -> Result[int, Error]:\n    return Ok(1)\n";
+    let o = "fn o() -> int?:\n    return Some(1)\n";
+    // Inside a function body — the position that is silent today.
+    warns(
+        &format!("{g}fn f():\n    g()\nf()\n"),
+        "the Result returned by 'g' is discarded",
+    );
+    warns(
+        &format!("{o}fn f():\n    o()\nf()\n"),
+        "the Option returned by 'o' is discarded",
+    );
+    // …and at module top level, where the runtime already aborts. Same span the runtime's
+    // `unhandled error` reports, so the two diagnostics point at the same character.
+    warns(&format!("{g}g()\n"), "the Result returned by 'g'");
+    // Nested one level deeper, both block kinds — the runtime aborts here too.
+    warns(&format!("{g}if true:\n    g()\n"), "the Result returned");
+    warns(
+        &format!("{g}for i in 0..1:\n    g()\n"),
+        "the Result returned",
+    );
+    // Nested inside a function, both block kinds — the neighbours of the fn-body case above.
+    warns(
+        &format!("{g}fn f():\n    if true:\n        g()\nf()\n"),
+        "the Result returned",
+    );
+    warns(
+        &format!("{g}fn f():\n    for i in 0..1:\n        g()\nf()\n"),
+        "the Result returned",
+    );
+    // A method call names the METHOD, not the receiver expression.
+    warns(
+        "fn f():\n    xs := [1, 2]\n    xs.pop()\nf()\n",
+        "the Option returned by 'pop' is discarded",
+    );
+    // Not a call, so there is no callee to name — the message falls back to the position.
+    warns(
+        &format!("{o}fn f():\n    x := o()\n    x\nf()\n"),
+        "the Option value here is discarded",
+    );
+    // Every message carries both escapes, or it is not actionable.
+    warns(&format!("{g}g()\n"), "bind it (`r := …`)");
+    warns(&format!("{g}g()\n"), "discard it explicitly (`_ := …`)");
+}
+
+/// The escapes. `_` is an ordinary identifier in LET position (it is special-cased only in pattern
+/// position and as a `wait:` arm target), so `_ := g()` parses as a plain `StmtKind::Let` and never
+/// reaches the `StmtKind::Expr` arm at all — no special-casing in the rule, asserted rather than
+/// assumed. Binding for real is the other escape.
+#[test]
+fn a_bound_carrier_does_not_warn() {
+    let g = "fn g() -> Result[int, Error]:\n    return Ok(1)\n";
+    no_warn(&format!("{g}fn f():\n    _ := g()\nf()\n"));
+    no_warn(&format!("{g}fn f():\n    r := g()\n    print(r)\nf()\n"));
+    no_warn(&format!("{g}_ := g()\n"));
+    // The neighbours: `_` shadowed/reassigned, and `_` in the nested positions that warn above.
+    no_warn(&format!(
+        "{g}fn f():\n    if true:\n        _ := g()\nf()\n"
+    ));
+    no_warn(&format!(
+        "{g}fn f():\n    for i in 0..1:\n        _ := g()\nf()\n"
+    ));
+    // A carrier consumed by `match` / `?` is handled, not discarded.
+    no_warn(&format!(
+        "{g}fn f():\n    match g():\n        Ok(v): print(v)\n        Err(e): print(e.message())\nf()\n"
+    ));
+    no_warn(&format!(
+        "{g}fn f() -> Result[int, Error]:\n    v := g()?\n    return Ok(v)\nprint(f())\n"
+    ));
+}
+
+/// The four positions where a bare carrier expression is NOT a drop. Each is inferred off a path
+/// other than `check_stmt`'s `StmtKind::Expr` arm, and a warning in any of them would fire on
+/// correct, idiomatic code.
+#[test]
+fn a_carrier_that_is_not_discarded_does_not_warn() {
+    let g = "fn g() -> Result[int, Error]:\n    return Ok(1)\n";
+    // 1. An inline-expr body implicitly RETURNS its expression (`check_fn_body`, not `check_stmt`).
+    no_warn(&format!(
+        "{g}fn f() -> Result[int, Error]: g()\nprint(f())\n"
+    ));
+    // …and the same body written as an explicit `return`, its neighbour.
+    no_warn(&format!(
+        "{g}fn f() -> Result[int, Error]:\n    return g()\nprint(f())\n"
+    ));
+    // 2. The trailing expression of a `recover:` block IS the block's value (`infer_recover`).
+    no_warn(&format!(
+        "{g}fn f():\n    r := recover:\n        g()\n    print(r)\nf()\n"
+    ));
+    // …and its two value-tail siblings, a trailing value-`match` and a trailing value-`if`.
+    no_warn(&format!(
+        "{g}fn f(n: int):\n    r := recover:\n        match n:\n            0: g()\n            _: g()\n    print(r)\nf(0)\n"
+    ));
+    no_warn(&format!(
+        "{g}fn f(n: int):\n    r := recover:\n        if n == 0:\n            g()\n        else:\n            g()\n    print(r)\nf(0)\n"
+    ));
+    // The order matters: a carrier in a NON-final position of the same block is a real drop.
+    warns(
+        &format!("{g}fn f():\n    r := recover:\n        g()\n        1\n    print(r)\nf()\n"),
+        "the Result returned by 'g' is discarded",
+    );
+    // 3. `?` / `??` yield the UNWRAPPED payload, so the statement's type is not a carrier.
+    no_warn(&format!(
+        "{g}fn f() -> Result[int, Error]:\n    g()?\n    return Ok(2)\nprint(f())\n"
+    ));
+    no_warn("fn o() -> int?:\n    return Some(1)\nfn f():\n    o() ?? 0\nf()\n");
+    // `?.` is the exception in that family and DOES warn: optional chaining re-wraps, so
+    // `o()?.len()` is an `int?` and dropping it drops a carrier. Rust agrees (`Option::map` is
+    // `#[must_use]`). Pinned here, next to its siblings, because the shape reads like theirs.
+    warns(
+        "fn o() -> str?:\n    return Some(\"a\")\nfn f():\n    o()?.len()\nf()\n",
+        "the Option value here is discarded",
+    );
+    // 4. `defer` is its own statement arm and stays excluded on purpose — `defer f.Close()` is Go's
+    //    canonical unchecked idiom, and the corpus has 27 of them.
+    no_warn(&format!("{g}fn f():\n    defer g()\n    print(1)\nf()\n"));
+    no_warn(&format!("{g}defer g()\nprint(1)\n"));
+}
+
+/// The `-> nil` / `-> bool` methods a naive "bare method call statement" rule would drown in. None of
+/// them returns a carrier, so none may warn — a false positive on `ch.send(v)` would cost the whole
+/// diagnostic its credibility.
+#[test]
+fn a_non_carrier_statement_does_not_warn() {
+    no_warn("fn f():\n    ch := Channel[int](1)\n    ch.send(1)\n    ch.close()\nf()\n");
+    no_warn("fn f():\n    s := {1, 2}\n    s.remove(1)\nf()\n"); // Set.remove -> bool
+    no_warn("fn f():\n    xs := [1]\n    xs.push(2)\n    print(xs)\nf()\n");
+    no_warn("fn f():\n    print(1)\nf()\n");
+    // A void call in the very positions that warn for a carrier.
+    no_warn("fn v():\n    print(1)\nif true:\n    v()\nfor i in 0..1:\n    v()\n");
+}
+
+/// An `Unknown`-typed expression statement stays silent: it has already produced a hard error, and a
+/// warning on top of it is cascade noise. Cannot go through `no_warn` (which requires a clean check),
+/// so it asserts on both channels directly.
+#[test]
+fn an_unknown_expression_statement_does_not_warn() {
+    let (errs, warns) = warn_src("fn f():\n    nosuch()\nf()\n");
+    assert!(!errs.is_empty(), "expected a hard error");
+    assert!(warns.is_empty(), "expected no warning, got: {warns:?}");
+}
+
+/// The rule sits inside the checker's speculative-inference machinery: a function with NO declared
+/// return type is inferred by a probe pass whose diagnostics are rolled back, then checked for real
+/// in pass 2. Reporting once is the whole contract — `diag_rollback` truncating `errors` alone (its
+/// shape before Task 0) makes this exactly 2.
+#[test]
+fn a_warning_under_return_inference_is_reported_once() {
+    let src = "fn g() -> Result[int, Error]:\n    return Ok(1)\n\
+               fn f():\n    g()\nfn h():\n    f()\nh()\n";
+    let (errs, warns) = warn_src(src);
+    assert!(errs.is_empty(), "expected no type errors, got: {errs:?}");
+    assert_eq!(
+        warns.len(),
+        1,
+        "expected exactly one warning, got: {warns:?}"
+    );
 }
 
 /// Exercise the `no_warn` helper itself on the simplest clean program.

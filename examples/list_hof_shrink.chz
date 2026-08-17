@@ -4,19 +4,19 @@
 
 xs := [1, 2, 3, 4, 5]
 fn dbl(x: int) -> int:
-    xs.pop()
+    _ := xs.pop()
     return x * 2
 print(xs.map(dbl))   # snapshot of original 5 elems -> [2, 4, 6, 8, 10]
 
 ys := [1, 2, 3, 4, 5]
 fn even(x: int) -> bool:
-    ys.pop()
+    _ := ys.pop()
     return x % 2 == 0
 print(ys.filter(even))   # original 1..5 -> evens kept -> [2, 4]
 
 zs := [1, 2, 3, 4, 5]
 fn add(acc: int, x: int) -> int:
-    zs.pop()
+    _ := zs.pop()
     return acc + x
 print(zs.fold(0, add))   # sum of original 1..5 -> 15
 

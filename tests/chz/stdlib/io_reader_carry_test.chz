@@ -59,7 +59,7 @@ test fn read_line_fault_is_sticky_not_skipping():
     match io.open(p):
         Err(e): assert false, e.message()
         Ok(r):
-            r.read_line()
+            _ := r.read_line()
             x := recover: r.read_line()
             match x:
                 Ok(_): assert false, "expected a fault"
@@ -111,7 +111,7 @@ test fn close_discards_the_carry():
             match x:
                 Ok(_): assert false, "expected a fault"
                 Err(e): pass
-            r.close()
+            _ := r.close()
             match r.read_bytes(100):
                 Ok(b): assert false, "a carry must not be served past close, got " + str(b)
                 Err(e): assert e.message().contains("closed"), e.message()

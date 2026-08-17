@@ -233,7 +233,7 @@ struct Mut:
         # fire on the TRUE compare only — the position the caller is about to use
         if r and mut_armed.len() > 0:
             mut_armed.remove_at(0)
-            mut_map.remove(Mut(0))
+            _ := mut_map.remove(Mut(0))
             mut_set.remove(Mut(0))
         return r
 

@@ -920,10 +920,6 @@ impl Checker {
     /// A NON-FATAL diagnostic: reported alongside the errors but never in the `Err` arm, so the exit
     /// code is unchanged. Shares `error`'s module attribution — a warning raised while checking an
     /// imported module must name it, exactly like an error from the same position.
-    // No rule emits one yet; the two that will (docs/gaps.md W8-2 and the airlock trap) land next.
-    // DELETE THIS ATTRIBUTE when the first of them lands — it exists only because the channel has no
-    // producer, and leaving it on hides a genuinely-unused `warn` later.
-    #[allow(dead_code)]
     pub(super) fn warn(&mut self, span: Span, message: impl Into<String>) {
         let message = self.attribute(message);
         self.warnings.push(CheckError::warning(message, span));

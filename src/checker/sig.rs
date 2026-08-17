@@ -2810,7 +2810,41 @@ impl Checker {
             // `pass` — a no-op statement; nothing to check.
             StmtKind::Pass => {}
             StmtKind::Expr(e) => {
-                self.infer(e);
+                // W8-2 — a DISCARDED `Result`/`Option` is fatal at module top level (`unhandled
+                // error`, rc=1) but silently swallowed inside a function body. Rust owns both types
+                // and marks them `#[must_use]`, warning on the drop wherever it happens with
+                // `let _ = …` as the escape; this is that warning, non-fatal so the exit code is
+                // unchanged. Deliberately NOT reached by: `defer f.close()` (its own arm above —
+                // Go's canonical unchecked idiom), a `fn f(): g()` inline-expr body (an implicit
+                // return, inferred off `check_fn_body`), and a value-block's trailing expression
+                // (inferred directly by `infer_recover` / the value-`match`/`if` tails). `?`/`??`/
+                // `?.` already yield the UNWRAPPED payload, so they are not carriers here.
+                // The span is `e.span` — the same position the runtime's `unhandled error` reports.
+                let carrier = match self.infer(e) {
+                    Ty::Result(..) => "Result",
+                    Ty::Option(_) => "Option",
+                    // `Unknown` lands here too: an already-reported expression must not cascade.
+                    _ => return,
+                };
+                // Name the callee when there is one, so the warning points at the culprit rather
+                // than at a line. The fix hint stays elided (`…`) either way — spelling the whole
+                // call back would mean reconstructing a method receiver.
+                let subject = match &e.kind {
+                    ExprKind::Call { callee, .. } => match &callee.kind {
+                        ExprKind::Ident(name) | ExprKind::Field { name, .. } => {
+                            format!("the {carrier} returned by '{name}'")
+                        }
+                        _ => format!("the {carrier} value here"),
+                    },
+                    _ => format!("the {carrier} value here"),
+                };
+                self.warn(
+                    e.span,
+                    format!(
+                        "{subject} is discarded — bind it (`r := …`), or discard it explicitly \
+                         (`_ := …`)"
+                    ),
+                );
             }
             StmtKind::Assert { cond, msg } => {
                 self.expect_bool(cond, "assert condition");
