@@ -1,7 +1,7 @@
 # std.os — operating-system interface, declared in Chezzi (phase 4d).
 #
 # FILE-BACKED, IMPORT-GATED native module (like std.regex). Functions are in scope ONLY after
-# `import std.os` (or a `from std.os import …`) or qualified as `os.getcwd`. The resolver loads this
+# `import std.os` (or an `import … from std.os`) or qualified as `os.getcwd`. The resolver loads this
 # real file (keeping the `native` marker); the checker harvests the `native fn` decls below as the
 # module's SIGNATURE source — retiring the hand-built `native_module_sig` os arm.
 #

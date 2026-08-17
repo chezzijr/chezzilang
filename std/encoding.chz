@@ -1,7 +1,7 @@
 # std.encoding — reversible text codecs, declared in Chezzi (phase 4e).
 #
 # FILE-BACKED, IMPORT-GATED native module (same pattern as std/regex.chz). Its functions are in scope
-# ONLY after `import std.encoding` (or a `from std.encoding import …`). The resolver loads this real file
+# ONLY after `import std.encoding` (or an `import … from std.encoding`). The resolver loads this real file
 # (keeping the `native` marker), and the checker harvests the `native fn` declarations below as the
 # module's SIGNATURE source — retiring the hand-built `native_module_sig` encoding arm.
 #

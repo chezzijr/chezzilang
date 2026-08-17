@@ -561,7 +561,8 @@
             | <postfix> "LPAREN" "RPAREN"
             | <postfix> "LPAREN" <argList> "RPAREN"
             | <postfix> "DOT" "IDENT"
-            | <postfix> "DOT" "INT"
+            | <postfix> "DOT" "INT"                         # tuple element: `t.0` (literal index, read-only —
+                                                            # NOT in <lvalue>, and `t[0]` is a type error)
             | <postfix> "LBRACKET" <subscript> "RBRACKET"   # plain index (no colon) or a Python slice
             | <postfix> "LBRACKET" <typeList> "RBRACKET" "LPAREN" "RPAREN"
             | <postfix> "LBRACKET" <typeList> "RBRACKET" "LPAREN" <exprList> "RPAREN"

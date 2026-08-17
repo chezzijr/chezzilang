@@ -1,3 +1,5 @@
+# LINUX library names. On macOS swap every `libc.so.6`/`libm.so.6` for `libSystem.B.dylib`
+# (dlopen takes the name verbatim — see docs/syntax.md §12b).
 extern "libm.so.6":
     fn cos(x: float) -> float
     fn sqrt(x: float) -> float

@@ -574,10 +574,10 @@ fn cmd_init(args: &[String]) -> ExitCode {
         Ok(()) => {
             println!("chezzi: scaffolded a new project in {}", path.display());
             println!(
-                "  chezzi.toml          project manifest (entrypoint = \"src.main\" — drives bare `chezzi run`)"
+                "  chezzi.toml          project manifest (entrypoint = \"src.main:main\" — drives bare `chezzi run`)"
             );
             println!(
-                "  src/main.chz         entry script  — run with: chezzi run (from {dir}) or chezzi run {dir}/src/main.chz",
+                "  src/main.chz         entry script  — run with: chezzi run (from {dir}). NOTE `chezzi run {dir}/src/main.chz` runs the file's TOP LEVEL only, so it will NOT call main()",
             );
             println!(
                 "  src/main_test.chz    example test   — run with: chezzi test {}",

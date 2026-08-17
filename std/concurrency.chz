@@ -2,7 +2,7 @@
 #
 # FILE-BACKED, IMPORT-GATED native module (like std/net.chz). Its native TYPES (`Shared`/`RwShared`/
 # `Atomic`/`Executor`) are in scope ONLY after `import std.concurrency` (bare `Shared`/`RwShared`/
-# `Atomic`/`Executor`) or a `from std.concurrency import …`. The resolver loads this real file (keeping
+# `Atomic`/`Executor`) or an `import … from std.concurrency`. The resolver loads this real file (keeping
 # the `native` marker), and the checker harvests the `native struct` declarations below as the module's
 # SIGNATURE source — retiring the hand-built `native_module_sig` concurrency arm AND the bespoke
 # `shared_method_sig`/`rwshared_method_sig`/`atomic_method_sig`/`executor_method_sig` method arms (their

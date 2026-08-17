@@ -7,6 +7,51 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > and are kept verbatim — that is what this tracker is for. Since 2026-08-16 there is **one engine**
 > and no cross-engine gate; see the entry directly below.
 
+> **📋 EXTERNAL DOGFOOD PASS filed, 2026-08-17 — `docs/gaps.md` W8-1..W8-20, and the table is no longer
+> empty.** Ten developers new to Chezzi, one area each, **343 Chezzi programs vs 45 reference programs**
+> (Python/Go/Rust), nothing taken on the docs' word. All twenty findings **re-reproduced on Linux at
+> `c197d128`** before filing. Only **W8-18 (the twelve doc-drift rows) is CLOSED — fixed in this commit**;
+> W8-1..W8-17, W8-19, W8-20 are **open** and are now the top of the pre-JIT queue.
+>
+> **The shape:** semantics are in good shape (40+ CPython differentials → **one** differing byte, `NaN`
+> casing; a 7,000-op `std.collections` fuzz → zero mismatches; `defer`/`panic`/`recover` byte-identical
+> to Go), and the layer *around* the semantics is not — **six silent wrong answers** (W8-1 interpolation
+> eats `{n}` regex quantifiers · W8-2 a discarded `Result` is fatal at top level and silent inside a fn ·
+> W8-3 `Shared.set` inside `update` loses the write · W8-4 `sort_by_key` callback mutations vanish ·
+> W8-5 `json.parse` depth kills the process despite its `Result` · W8-6 `regex` `\1` silently emits
+> literal backslashes), a **scheduler whose default is its slowest setting** (W8-7; `--threads=1`
+> actually runs **two** workers — W8-8, which invalidates every rationale in the tree citing a
+> `CHEZZI_THREADS=1` measurement), and a **diagnostics layer with no caret, no `help:`, and no "did you
+> mean" anywhere** (W8-13..W8-17).
+>
+> **META-FINDING, and the reason this is in PROGRESS and not just gaps.md: not one of W8-1..W8-17 was
+> reachable by the standing gates.** 4375 Rust tests + 586 Chezzi tests at two worker counts + the
+> CPython differential + conformance were **all green** throughout. A silent wrong answer has no
+> assertion to fail; no gate measures performance; no gate reads a *message*; no gate executes prose;
+> and W8-11 shows a detector scoped narrower than its surface (the FFI goldens are
+> `#[cfg(target_os = "linux")]`, so `cargo test` is green on a Mac with the **entire FFI surface
+> unexercised**). Carry into the freeze: **a green suite measures the assertions you thought to write.**
+> The detectors that did earn their keep are the ones comparing against something outside this repo —
+> which is CLAUDE.md's ancestor rule paying out, and the argument for `docs/future.md` §2b's unbuilt
+> Go-paired-programs differential. **Fix order** is in the session log; short version: the six silent
+> wrong answers, then W8-8 before W8-7, then Levenshtein suggestions, then `assert` operand values +
+> a `file` key in `--errors=json`.
+>
+> **Docs fixed in this commit (W8-18, all twelve):** `import X from M` is the named-import form and
+> `from M import X` is a parse error (`syntax.md` §12, `stdlib.md`, `CLAUDE.md`, 16 `std/*.chz` headers) ·
+> structs are **reference** values, stated in `syntax.md` §7 for the first time, with the three-model
+> map (keys snapshot / everything else aliases / the spawn airlock copies) · §`std.regex` names **RE2**
+> and its four Python differences · the float-repr guarantee carves out `NaN` casing · tuple `t.0` is
+> documented (`syntax.md` §2 + a `grammar.bnf:564` comment) · `for` iterates a **snapshot of the spine**
+> (`syntax.md` §6) · FFI is Linux-only, noted in `syntax.md` §12b **and all seven `examples/ffi*.chz`** ·
+> `net.listen`/`connect` return `Result` · `std.datetime` is a strict **subset** of `fromisoformat` ·
+> `std.json` has no `encode` inverse and `parse` needs `recover:` on untrusted input (and
+> `examples/json_dynamic.chz`'s "never a crash" was flatly false) · `concurrency.md`'s `spawn`-in-a-fn
+> error example now compiles · the bytes table gains `extend` + slicing. Plus two behaviour-adjacent
+> string fixes: `chezzi init`'s banner advertised `entrypoint = "src.main"` (the manifest says
+> `"src.main:main"`) and recommended `chezzi run src/main.chz`, which is a **silent no-op, rc=0**.
+> Every code snippet added was executed before it was written down.
+>
 > **✅ `os.hostname() -> Option[str]`, 2026-08-17 — no more silent `""` on syscall failure.** The
 > native `hostname` (`src/native/os.rs:55`) fell back to `String::new()` on a nonzero
 > `libc::gethostname` return; that's a silent wrong answer, indistinguishable from a real (if absurd)

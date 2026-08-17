@@ -3,6 +3,8 @@
 #   • `str?`       : a nullable `char*` — NULL becomes `None` instead of a hard fault.
 # To the program, `owned_str` is just a `str`; `str?` is an `Option[str]`. Both are return-only.
 
+# LINUX library name — on macOS use "libSystem.B.dylib" (docs/syntax.md §12b).
+
 extern "libc.so.6":
     # `strdup` returns a freshly malloc'd copy of its argument — owned, so we free it after copying.
     fn strdup(s: str) -> owned_str

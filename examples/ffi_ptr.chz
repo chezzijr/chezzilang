@@ -4,6 +4,8 @@
 # and the `null`/`is_null` vocabulary all live in `std.ffi` — import what you use.
 import ptr, null, is_null from std.ffi
 
+# LINUX library name — on macOS use "libSystem.B.dylib" (docs/syntax.md §12b).
+
 extern "libc.so.6":
     fn fopen(path: str, mode: str) -> ptr
     fn fclose(f: ptr) -> int

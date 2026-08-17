@@ -1,7 +1,7 @@
 # std.fs — filesystem operations, declared in Chezzi (phase 4d).
 #
 # FILE-BACKED, IMPORT-GATED native module (like std.regex). Functions are in scope ONLY after
-# `import std.fs` (or a `from std.fs import …`) or qualified as `fs.exists`. The resolver loads this
+# `import std.fs` (or an `import … from std.fs`) or qualified as `fs.exists`. The resolver loads this
 # real file (keeping the `native` marker); the checker harvests the `native fn` decls below as the
 # module's SIGNATURE source — retiring the hand-built `native_module_sig` fs arm.
 #
@@ -33,7 +33,7 @@ native struct FileInfo:
 # literal, a `bytes`, a `bytearray` or a `path.Path` all work with no annotation) and re-wraps a
 # returned path into `path.Path`. Going through bytes is what makes a non-UTF-8 filename survive: it
 # used to be decoded lossily and come back U+FFFD-substituted, naming nothing (W7-8).
-# The `_` is CONVENTION ONLY — there is no privacy mechanism, so `from std.fs import _exists` works.
+# The `_` is CONVENTION ONLY — there is no privacy mechanism, so `import _exists from std.fs` works.
 native fn _list_dir(path: bytes) -> Result[List[bytes]]
 native fn _exists(path: bytes) -> bool
 native fn _is_file(path: bytes) -> bool

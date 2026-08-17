@@ -2,7 +2,7 @@
 #
 # FILE-BACKED, IMPORT-GATED native module. Unlike the always-linked universe prelude (std/prelude.chz),
 # std.regex is a NORMAL importable module: its native type + functions are in scope ONLY after
-# `import std.regex` (bare `Match`/`find`) or a `from std.regex import …`. The resolver loads this real
+# `import std.regex` (bare `Match`/`find`) or an `import … from std.regex`. The resolver loads this real
 # file (keeping the `native` marker), and the checker harvests the `native struct` + `native fn`
 # declarations below as the module's SIGNATURE source — retiring both the phase-4a companion stub
 # (std/regex.stub.chz) and the hand-built `native_module_sig` regex arm.

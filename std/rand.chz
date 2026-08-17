@@ -1,7 +1,7 @@
 # std.rand — SplitMix64 pseudo-random scalars, declared in Chezzi (phase 4d).
 #
 # FILE-BACKED, IMPORT-GATED native module (like std.regex). Functions are in scope ONLY after
-# `import std.rand` (or a `from std.rand import …`) or qualified as `rand.int`. The resolver loads this
+# `import std.rand` (or an `import … from std.rand`) or qualified as `rand.int`. The resolver loads this
 # real file (keeping the `native` marker); the checker harvests the `native fn` decls below as the
 # module's SIGNATURE source — retiring the hand-built `native_module_sig` rand arm.
 #

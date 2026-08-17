@@ -5,6 +5,8 @@
 # Run with: chezzi run examples/ffi_qualified.chz
 import std.ffi
 
+# LINUX library name — on macOS use "libSystem.B.dylib" (docs/syntax.md §12b).
+
 extern "libc.so.6":
     fn abs(x: ffi.int32) -> ffi.int32
 

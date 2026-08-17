@@ -102,7 +102,7 @@ UPDATE_EDITOR_ASSETS=1 cargo test --test editor_tmlanguage    # regenerate the V
   module's `native_module_sig` and gate the bare name behind `import` via the per-module licensing set
   (mirror FFI `imported_ffi_types` / `imported_concurrency` / `imported_time`); keep runtime ctor/opcode
   dispatch unchanged (the gate is checker-only name resolution). A pure type/ctor with no runtime module-member value also needs the `bind_import` skip in
-  the vm, or `from M import X` faults at runtime — cover it with a test that RUNS the program.
+  the vm, or `import X from M` faults at runtime — cover it with a test that RUNS the program.
   A global reserved name is a one-way ratchet: moving it out later breaks every example + grammar.bnf.
 - **A new native fn's `MEMBERS` entry is `(name, fn, Kind)` — the third element is not paperwork.**
   `native::Kind` says how the engine RUNS it: `Inline` (pure CPU, or it touches host stdio/os state),
@@ -177,7 +177,20 @@ See **[`PROGRESS.md`](PROGRESS.md)** — single source of truth for "what's next
 
 Right now: **pre-JIT/pre-freeze bug-hunt + drift-fix hunt** is the active phase (Go-concurrency,
 checker↔runtime, and IO drift — live ledger in `docs/gaps.md`), with **M19 — Perf track** paused
-in-progress alongside it. Both share the same bar: **behavior-preserving** on every change — a VM
+in-progress alongside it.
+
+> **START HERE (2026-08-17): `docs/gaps.md` W8-1..W8-20 — the external dogfood pass.** 19 open rows,
+> the first findings in this repo produced by people with **no model of the implementation**, and they
+> are disjoint from waves 1–7 (which were almost all soundness). Six are **silent wrong answers**, two
+> are the **scheduler** (`--threads=1` runs *two* workers, and the default worker count is the *slowest*
+> setting — fix **W8-8 before W8-7**, because rationales elsewhere in the tree cite `CHEZZI_THREADS=1`
+> measurements that were taken two-wide), five are **diagnostics**. **None of them was reachable by the
+> standing gates** — a silent wrong answer has no assertion to fail, no gate measures performance, no
+> gate reads a message, no gate executes prose, and the FFI goldens are `#[cfg(target_os = "linux")]` so
+> `cargo test` is green on a Mac with the whole FFI surface unexercised. Read the pass's session log
+> before working any row; several share one fix.
+
+Both share the same bar: **behavior-preserving** on every change — a VM
 speedup that changes observable output, or that only holds at one worker count, is a bug, not a win.
 (Since 2026-08-16 there is no second engine to diff against; the standing accidental-divergence
 detectors are the CPython differential and the two-worker-count run of `tests/chz`.)

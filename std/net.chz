@@ -1,8 +1,8 @@
 # std.net — minimal TCP client/server, declared in Chezzi (phase 4c-net).
 #
 # FILE-BACKED, IMPORT-GATED native module (like std/regex.chz). Its native TYPES (`Socket`/`Listener`)
-# + functions are in scope ONLY after `import std.net` (bare `Socket`/`Listener`) or a `from std.net
-# import …`. The resolver loads this real file (keeping the `native` marker), and the checker harvests
+# + functions are in scope ONLY after `import std.net` (bare `Socket`/`Listener`) or an `import … from std.net`.
+# The resolver loads this real file (keeping the `native` marker), and the checker harvests
 # the `native struct` + `native fn` declarations below as the module's SIGNATURE source — retiring the
 # hand-built `native_module_sig` net arm AND the bespoke `socket_method_sig`/`listener_method_sig`
 # method arms (their sigs now come from the `native fn` methods below, harvested into each type's method

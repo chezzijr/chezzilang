@@ -2,7 +2,7 @@
 # (phase 4c).
 #
 # FILE-BACKED, IMPORT-GATED native module (same pattern as std/regex.chz, std/math.chz). Its functions
-# are in scope ONLY after `import std.ffi` (or a `from std.ffi import …`), qualified as `ffi.null()` etc.
+# are in scope ONLY after `import std.ffi` (or an `import … from std.ffi`), qualified as `ffi.null()` etc.
 # The resolver loads this real file (keeping the `native` marker), and the checker harvests the
 # `native fn` declarations below as the module's SIGNATURE source — retiring the callable half of the
 # hand-built `native_module_sig` ffi arm.

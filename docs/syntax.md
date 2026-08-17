@@ -169,6 +169,22 @@ t := (
 A parenthesised expression is grouping; a trailing comma makes a tuple, so **`(x)` is just `x`**
 while **`(x,)` is a one-element tuple**.
 
+**Tuple elements are read positionally with `.0`, `.1`, … (Rust's spelling), never `t[0]`.** The index
+must be a literal — it is part of the type, not a runtime value — and tuples are **immutable**, so
+`.N` is read-only:
+
+```chezzi
+t := ("a", 1)
+print(t.0)        # a
+print(t.1)        # 1
+# t[0]  → type error: cannot index into (str, int)   (a tuple is not Indexable)
+# t.0 = "b"  → type error: cannot assign to field '0' of (str, int)
+a, b := t         # destructuring is the other way in — see §3
+```
+
+Destructuring (`a, b := t`, or `for a, b in pairs`) is usually what you want; `.N` matters where you
+can't bind names — inside a single-expression closure, for instance `xs.sort_by_key(fn(p) -> int: p.1)`.
+
 ## 3. Variables & types
 
 ```chezzi
@@ -1129,6 +1145,17 @@ for k, v in counts:    # iterate a map's entries → key + value
 for a, b in pairs:     # destructure a List[(A, B)] — N names over a List[tupleN]
     print("{a}:{b}")   # (one name binds the whole tuple). enumerate/zip live in std.iter.
 
+# `for` over a List/Map/Set iterates a SNAPSHOT of the SPINE, taken once when the loop starts —
+# shallow: the elements are the same objects (mutating a struct element IS visible), but pushing,
+# popping or inserting inside the body cannot change how many steps run, and the new entries are
+# never visited. This is a deliberate DIVERGENCE from Python, which detects the mutation and raises:
+m := {"a": 1}
+for k in m.keys():         # runs ONCE. Chezzi: 1 visit, m.len() ends at 2, rc=0.
+    m["b"] = 2             # CPython: RuntimeError: dictionary changed size during iteration
+# The snapshot means the mutation is SAFE (no fault, no aliasing bug) — it is just INVISIBLE to this
+# loop. Collect the additions and apply them after the loop if you need to see them. Same rule for a
+# `.iter()` cursor (below) and for the callback methods listed under "snapshotting" in stdlib.md.
+
 # A user struct is iterable too: give it `next(self) -> Option[T]` and `for` drives it lazily,
 # calling next() each step until it returns None (so an infinite iterator + `break` terminates).
 struct Counter:
@@ -1349,6 +1376,23 @@ print(p.dist())         # method call
 ```
 
 No inheritance (by design). Composition only.
+
+**Struct instances are REFERENCE values (Python's object model, not Go's).** `q := p` binds the *same*
+instance — it does not copy — so a write through either name is visible through both, and passing a
+struct to a function lets the callee mutate the caller's value. Same for a struct stored in a `List`
+or as a `Map` **value**:
+
+```chezzi
+q := p
+q.x = 99
+print(p.x)              # 99  — one object, two names (CPython prints 99; Go would print 3)
+```
+
+There is **no `copy`/`clone`** — duplicate by re-constructing (`Point(p.x, p.y)`). The one place a
+struct *is* snapshotted is as a `Map`/`Set` **key** or a `Set` **element** (see §"Keys are value types
+(Go model)" under Maps) — so keys are the language's single value-semantics island; everything else is
+by reference. A `spawn:`/`parallel:` boundary is a third model again: values cross **by copy** through
+the airlock (§11b).
 
 **Methods are not first-class values.** `p.dist` is not an expression — a method exists only to be
 **called** (`p.dist()`); there is no bound-method value. To pass one around, wrap it in a closure:
@@ -2917,6 +2961,22 @@ a bare top-level expression statement that evaluates to one (e.g. `compute()` wh
 or a top-level `?` that hits one — terminates the program with `unhandled error: <detail>` and a
 non-zero exit code. *Binding* the value handles it (`r := compute()` keeps running; inspect `r`).
 
+**But the SAME discarded call inside a function is silently swallowed** — this is an asymmetry, and a
+known defect (`docs/gaps.md` **W8-2**):
+
+```chezzi
+fn g() -> Result[int, Error]: return Err("E")
+fn f():
+    g()                # silently discarded: check is clean, run is clean, rc=0
+f()
+g()                    # top level: runtime error … unhandled error: E, rc=1
+```
+
+Nesting doesn't change it either way: a `g()` inside a top-level `if`/`for` still aborts, and a `g()`
+anywhere inside a function body still vanishes. Rust warns on the drop wherever it happens
+(`unused_must_use`, escape `let _ = …`); Chezzi does not warn at all yet. Until it does, **bind every
+`Result`/`Option` you mean to discard** (`_ := g()`) so the intent is on the page.
+
 ### `recover:` — the panic-recovery boundary
 
 `Result`/`?` handle *expected* errors. A **runtime fault** — index-out-of-bounds, divide-by-zero,
@@ -3182,6 +3242,20 @@ a parsed manifest**: the toolchain reads its `[project]` keys (`name`/`version` 
 (`[section]` headers, `key = "value"` string pairs, `#` comments); an empty `chezzi.toml` is a valid
 root marker with no entrypoint.
 
+> **Manifest mode cannot forward program arguments — this blocks the CLI use case.** Program args are
+> only recognised *after* a file path, and there is **no `--` terminator**, so from a scaffolded project:
+>
+> ```
+> $ chezzi run --dir logs      → chezzi run: unknown flag '--dir'
+> $ chezzi run -- --dir logs   → chezzi run: unknown flag '--'
+> ```
+>
+> `go run . --dir x`, `python -m pkg --dir x` and `cargo run -- --dir x` all forward. Until this is
+> fixed (`docs/gaps.md` **W8-10**), a CLI must be run in the **file** form — `chezzi run src/main.chz
+> --dir logs` — which runs the top level only, so drop the `:main` suffix from `entrypoint` and end
+> `src/main.chz` with an explicit `main()` call. Note the trap that pairs with this: the file form of a
+> `:main` project is a **silent no-op with `rc=0`** (top level runs, `main` is never called).
+
 ## 10. Strings & interpolation
 
 ```chezzi
@@ -3191,6 +3265,19 @@ print("hi {name}, age {age}")     # {expr} interpolates
 print("sum: {a + b}")             # any expression
 print("brace: {{not interpolated}}")   # '{{' / '}}' = literal braces
 ```
+
+> **Interpolation is ALWAYS on, which silently eats regex quantifiers.** `"\\d{4}-\\d{2}"` is not the
+> pattern you typed — `{4}` and `{2}` are interpolation holes, so the string is `\d4-\d2`. That is still
+> a *valid* regex (a digit then a literal `4`), so it compiles, matches nothing, and reports nothing:
+>
+> ```chezzi
+> print("\\d{4}-\\d{2}")     # \d4-\d2      (python3: \d{4}-\d{2})
+> print(r"\d{4}-\d{2}")      # \d{4}-\d{2}  ← use this
+> ```
+>
+> **Use a raw string `r"…"` for anything containing `{n}`** — regexes above all, but also format
+> templates and JSON fragments. Doubling the brace (`"\\d{{4}}"`) works too but reads worse.
+> (`docs/gaps.md` **W8-1**.)
 
 **Quote styles.** A string may be delimited by `"…"` or `'…'`; the two are fully interchangeable —
 same `str` type, same escapes, same interpolation. Inside a double-quoted string `'` is a literal
@@ -3317,7 +3404,11 @@ slice (`{m["a:b"]}`, `{xs[1:2]}`) is *not* the spec separator. **Ternaries:** a 
 ternary `{if b: a else: b}` works (its colons are part of the expression, not a spec); to attach a
 spec to a ternary, **parenthesize** it — `{(if b: 1 else: 2):>5}`.
 
-**Plain float formatting matches CPython `repr()`/`str()` exactly.** A bare float — `print(x)`,
+**Plain float formatting matches CPython `repr()`/`str()` exactly, with ONE exception: `NaN` casing.**
+Chezzi prints `NaN` where CPython prints `nan` (`inf`/`-inf` agree). It is the single differing byte
+across the whole float surface, and it differs on **every** path — bare `print`, `str()`,
+interpolation, container element, `{x:.2f}`, `{x:>8}`. Test against `NaN`, or compare with
+`math.is_nan` instead of a string. (`docs/gaps.md` **W8-18**.) A bare float — `print(x)`,
 `str(x)`, or a `{x}` interpolation with no spec — uses **scientific notation when the decimal
 exponent is `< -4` or `>= 16`**, and fixed-point otherwise. So `1e16` prints `1e+16`, `1e15` prints
 `1000000000000000.0`, `0.00001` prints `1e-05`, `1.5e300` prints `1.5e+300`, and `-2.5e-8` prints
@@ -3664,7 +3755,11 @@ The reserved set is the builtin callables + reserved type names + `nil` + the bu
 reserved scalar/ctor name.) A collision with a *user-declared* type of the same name is not covered by
 this rule — name your modules and your types apart.
 
-**`from M import X` is a SNAPSHOT** (Python-identical): the value is copied into this module at import
+**The named-import form is `import X from M`, not Python's `from M import X`** — the module path comes
+*last*, so every import statement starts with the `import` keyword (`from` at statement start is a
+parse error: *unexpected 'from' in expression*). Semantics are Python's; only the word order differs.
+
+**`import X from M` is a SNAPSHOT** (Python-identical): the value is copied into this module at import
 time. A later write to the module's own global (`M.bump()`) is **not** visible through the bare name —
 read `M.COUNT` for the live value. A **container** is the same heap object, so mutating *through* the
 binding works; **rebinding** it is rejected (consistent with the qualified form, where `st.COUNT = 5`
@@ -3747,8 +3842,16 @@ block (indentation, not braces — `{` is a map literal) lists body-less C signa
 module-global callable, bound at module init by `dlopen` + `dlsym` and dispatched at runtime via
 `libffi`. A missing library or symbol fails at startup.
 
+> **The library name is passed straight to `dlopen`, so it is PLATFORM-SPECIFIC and NOT portable.**
+> Every example below and in `examples/ffi*.chz` spells the Linux glibc names `libc.so.6` / `libm.so.6`;
+> on **macOS** those do not exist and the block dies at module init with a `dlopen` failure — use
+> `libSystem.B.dylib` (it carries both libc and libm). There is no per-platform selection syntax and no
+> `libc`-alias resolution: pick the name for the host you run on. Note the repo's FFI goldens are
+> `#[cfg(target_os = "linux")]`, so `cargo test` is **green on a Mac with the entire FFI surface
+> unexercised** — don't read a green suite as evidence FFI works there (`docs/gaps.md` **W8-11**).
+
 ```chezzi
-extern "libm.so.6":
+extern "libm.so.6":         # macOS: "libSystem.B.dylib"
     fn cos(x: float) -> float
     fn sqrt(x: float) -> float
 

@@ -9,6 +9,8 @@ struct DivT:
     quot: int32
     rem: int32
 
+# LINUX library name — on macOS use "libSystem.B.dylib" (docs/syntax.md §12b).
+
 extern "libc.so.6":
     fn div(numer: int32, denom: int32) -> DivT
 

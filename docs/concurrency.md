@@ -230,9 +230,12 @@ This is **structured concurrency**, the modern consensus that postdates Go: Pyth
 
   ```chezzi
   fn worker():
-      spawn helper()       # ✗ error: no parallel: in THIS function. (Even if main() has one,
-                           #    helper must not outlive worker — open a parallel: here.)
+      spawn helper()       # OK since implicit nurseries landed: `worker` gets its OWN implicit
+                           # nursery and joins helper at its return. It does NOT reach main()'s.
   ```
+  **This used to be an error and no longer is** — the rule it enforces is unchanged, but implicit
+  nurseries satisfy it by *giving* `worker` a nursery rather than by rejecting the `spawn`. The
+  invariant is the same either way: `helper` cannot outlive `worker`.
   Both Java `StructuredTaskScope` and Elixir guarantee a task can't outlive its scope; this rule
   gives Chezzi the same.
 
@@ -1056,10 +1059,18 @@ faults (`docs/gaps.md` **N8/N9**): a task cancelled mid-loop emits a different *
 run, because how far it got before the cancel landed is a scheduling fact. This is **not a bug to fix**.
 (Historically the same shape *hung* on the since-removed cooperative `--serial` engine — the spinner
 never yielded, so the faulting sibling never got the thread to trip the cancel. That engine is gone;
-**`--threads=1`** is the safe single-thread mode, still the OS-thread M:N engine, where the kernel
-preempts the spinner and it faults promptly — verified 0/15 hangs.) Lifting the limit would
+**`--threads=1`** is the preemption-safe low-worker mode, still the OS-thread M:N engine, where the
+kernel preempts the spinner and it faults promptly — verified 0/15 hangs.) Lifting the limit would
 require teaching the cooperative scheduler to time-slice a *running* fiber (its own milestone), which
 `--threads=1` already makes unnecessary for users.
+
+> **`--threads=1` does NOT serialize — it runs TWO workers.** Measured (`docs/gaps.md` **W8-8**): 8
+> CPU-bound tasks at `--threads=1` burn 5.09 s of user time in 2.57 s wall (**1.98 cores**), byte-identical
+> to `--threads=2`; `--threads=3` gives 2.98 cores. So `--threads=1` is *not* a way to serialize a flaky
+> concurrency repro, and any claim elsewhere in these docs justified as "measured at `CHEZZI_THREADS=1`"
+> was measured **two-wide** — including the `connect`-in-`Executor` starvation argument. Related:
+> **W8-7** — worker count is *inversely* correlated with throughput on a small nursery, so the default
+> (all cores) is the slowest setting, not the fastest.
 
 ### 6c'. `Channel.trip()` — the manual level-trigger latch
 

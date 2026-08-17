@@ -27,7 +27,9 @@ match json.parse(src):
     Err(e):
         print("parse failed: " + e.message())
 
-# Errors come back as Err, never a crash.
+# Malformed syntax comes back as Err, never a crash. ONE exception: `parse` is recursive-descent, so
+# deeply-NESTED input (thousands of open brackets) exhausts the call-depth cap and aborts the process
+# despite this Result. Wrap it in `recover:` for untrusted input — see docs/stdlib.md §std.json.
 match json.parse("[1, 2,]"):
     Ok(j): print(json.stringify(j))
     Err(e): print("error: " + e.message())

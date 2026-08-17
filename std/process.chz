@@ -1,8 +1,8 @@
 # std.process — subprocess execution, declared in Chezzi (phase 4f).
 #
 # FILE-BACKED, IMPORT-GATED native module (like std/regex.chz). Its native TYPE (`ProcResult`) +
-# functions are in scope ONLY after `import std.process` (bare `ProcResult`) or a `from std.process
-# import …`. The resolver loads this real file (keeping the `native` marker), and the checker harvests
+# functions are in scope ONLY after `import std.process` (bare `ProcResult`) or an `import … from std.process`.
+# The resolver loads this real file (keeping the `native` marker), and the checker harvests
 # the `native struct` + `native fn` declarations below as the module's SIGNATURE source — retiring both
 # the hand-built `native_module_sig` process arm AND its `export_struct` ProcResult arm.
 #

@@ -1,7 +1,7 @@
 # std.time — wall-clock + monotonic time, declared in Chezzi (phase 4e).
 #
 # FILE-BACKED, IMPORT-GATED native module (same pattern as std/regex.chz). Its functions are in scope
-# ONLY after `import std.time` (or a `from std.time import …`). The resolver loads this real file
+# ONLY after `import std.time` (or an `import … from std.time`). The resolver loads this real file
 # (keeping the `native` marker), and the checker harvests the `native fn` declarations below as the
 # module's SIGNATURE source — retiring the callable half of the hand-built `native_module_sig` time arm.
 #

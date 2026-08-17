@@ -1,8 +1,8 @@
 # std.request — HTTP client, declared in Chezzi (phase 4f).
 #
 # FILE-BACKED, IMPORT-GATED native module (like std/regex.chz). Its native TYPE (`Response`) +
-# functions are in scope ONLY after `import std.request` (bare `Response`) or a `from std.request
-# import …`. The resolver loads this real file (keeping the `native` marker), and the checker harvests
+# functions are in scope ONLY after `import std.request` (bare `Response`) or an `import … from std.request`.
+# The resolver loads this real file (keeping the `native` marker), and the checker harvests
 # the `native struct` + `native fn` declarations below as the module's SIGNATURE source — retiring both
 # the hand-built `native_module_sig` request arm AND its `export_struct` Response arm.
 #

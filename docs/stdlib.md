@@ -113,10 +113,25 @@ fault, by contrast, is raised identically by both.)
 | `count` | `(pred: fn(T) -> bool) -> int` | Number of elements satisfying `pred`. |
 | `position` | `(pred: fn(T) -> bool) -> Option[int]` | Index of the **first** element satisfying `pred` (`None` if none). |
 
-The predicate/callback methods — `map`/`filter`/`fold`/`take_while`/`drop_while`/`count`/`position` —
-iterate over a **snapshot** of the receiver's elements taken at call time: a callback that mutates the
-receiver (e.g. `xs.pop()`/`xs.push(..)`) does not change the iteration sequence (and never faults).
-Same as comprehensions and Python `map`/`filter`.
+The predicate/callback methods — `map`/`filter`/`fold`/`take_while`/`drop_while`/`count`/`position`,
+**and `sort`/`sort_by`/`sort_by_key`** — iterate over a **snapshot** of the receiver's elements taken at
+call time: a callback that mutates the receiver (e.g. `xs.pop()`/`xs.push(..)`) does not change the
+iteration sequence (and never faults). Same as comprehensions and Python `map`/`filter`, **and a
+deliberate divergence from Python for the three `sort` variants**, which detect the mutation and raise
+`ValueError: list modified during sort`. In Chezzi the pushes/pops a comparator makes are **discarded
+when the sort writes the reordered snapshot back**, silently and with `rc=0`:
+
+```chezzi
+w := [3, 1, 2]
+fn bump(x: int) -> int:
+    w.push(100)         # three pushes — all lost
+    return x
+w.sort_by_key(bump)
+print(w)                # [1, 2, 3]   (CPython: ValueError)
+```
+
+Keep callbacks pure; if you need both, sort a copy and merge after. (`docs/gaps.md` **W8-4** — the
+divergence is filed, not settled: "fault like Python" is the likelier resolution.)
 
 ### `Map[K, V]`
 | Method | Signature | Notes |
@@ -159,8 +174,11 @@ Index a map with `m[k]` (read/write); iterate with `for k, v in m:`.
 | both | `len` | `() -> int` | Byte count. |
 | `bytearray` | `push` | `(byte: int) -> nil` | *mutates* — append a byte (0–255). |
 | `bytearray` | `pop` | `() -> Option[int]` | *mutates* — remove & return last byte. |
+| `bytearray` | `extend` | `(other: bytes \| bytearray) -> nil` | *mutates* — append all of `other`. |
 
-Index either with `b[i]` (byte as `int`); `bytearray` also supports `b[i] = byte`.
+Index either with `b[i]` (byte as `int`); `bytearray` also supports `b[i] = byte`. **Both types slice**
+(`b[1:3]`), and a slice keeps the receiver's type — `bytes[1:3]` is `bytes`, `bytearray[1:3]` is a fresh
+`bytearray`. (`syntax.md` §2's type table lists the same surface; the two used to disagree.)
 
 A `bytearray` is **not** assignable to a `bytes` slot (it is mutable — an alias under an immutable
 `bytes` type would change under you). Convert with **`bytes(ba)`** (an explicit copy, exactly like
@@ -214,14 +232,27 @@ throwaway, not the box, and is silently lost. Mutate via `update` (or `set` a wh
 `RwShared`/`Atomic`; *unlike* a plain in-task `struct` field, whose reads alias the live value but can't cross a spawn.
 `update(f)` runs `f` **under the box's exclusive write lock** (read-modify-write is atomic against other
 tasks — this is why it exists over a `get`-then-`set`, which races). **Reentrancy limit:** `f` must not
-touch the **same** box — calling `s.update`/`s.set`/`s.get` on `s` from inside `s.update`'s own `f`
-re-acquires a lock it already holds and **self-deadlocks** — it hangs. Mutate a *different* box, or restructure so the nested step runs after `update` returns.
+touch the **same** box. Mutate a *different* box, or restructure so the nested step runs after `update`
+returns. What actually happens if you do is **three different things, and only one of them tells you** —
+measured, at every worker count (`docs/gaps.md` **W8-3**):
+
+| from inside `s.update(f)` / `rw.write(f)` | measured |
+|---|---|
+| `s.get()` (or `rw.read(g)`) | **succeeds, returning the PRE-guard value** — a stale read, no signal |
+| `s.set(x)` | **the write is SILENTLY LOST, `rc=0`** — the guard's own return value overwrites it (`Shared(10)` + `set(99)` nested in an `update(+1)` ends at **11**) |
+| `s.update(g)` / `rw.write(g)` — the same guard nested | **hangs forever**, and the deadlock detector does **not** report it (it catches its other three shapes in ms) |
+
+Only the third is the documented self-deadlock. The first two are why this is a limit you must respect
+rather than one the runtime enforces for you. (`rw.write` nested inside `rw.read` is the one legal
+crossing — it takes the write lock and persists.)
 
 ### `RwShared[T]` — cross-task read-write cell (many readers OR one writer)
 `get() -> T` · `set(x: T) -> nil` · `read(f: fn(T) -> R) -> R` (shared read guard; returns `f`'s
 result, no write-back) · `write(f: fn(T) -> T) -> nil` (exclusive write guard; `Shared.update` under
 the write lock). Reach for it over `Shared` when reads dominate. Same reentrancy limit as
-`Shared.update`: a closure that re-acquires the **same** box's write lock deadlocks. Constructed
+`Shared.update`, with the same three measured outcomes (see the table above): a nested `write` inside
+`write` hangs, a nested `read`/`get` reads the pre-guard value, a nested `set` is silently lost.
+Constructed
 value-first: `RwShared(v)`; an optional turbofish pins (and is checked against) the element type —
 `RwShared[T](v)` (a mismatch like `RwShared[str](0)` is a type error).
 
@@ -659,7 +690,7 @@ bytes**, so a filename that is not valid UTF-8 round-trips (`fs.exists(fs.list_d
 > **Internal byte seam.** Each path-taking native is declared once, `_`-prefixed and typed `bytes`
 > (`_exists`, `_list_dir`, `_read_file`, `_getcwd`, …); the public name is a bodied pure-Chezzi
 > wrapper that does `_native(p.as_path())` and re-wraps a returned path into `path.Path`. The `_` is
-> **convention only** — there is no privacy mechanism, so `from std.fs import _exists` works. Call the
+> **convention only** — there is no privacy mechanism, so `import _exists from std.fs` works. Call the
 > public name.
 
 **Queries:** `list_dir(p) -> Result[List[Path]]` (entry names, sorted by raw bytes) ·
@@ -809,8 +840,30 @@ slicing being codepoint-indexed; `groups` are capture groups 1..n; a non-partici
 is `""`).
 `is_match(pattern, subject) -> Result[bool]` · `find(pattern, subject) -> Result[Option[Match]]` ·
 `find_all(pattern, subject) -> Result[List[Match]]` · `replace_all(pattern, subject, repl) -> Result[str]` ·
-`split(pattern, subject) -> Result[List[str]]`. A bad pattern is `Err`. Patterns are ordinary
-strings, so a literal backslash is doubled: `"\\d+"`, `"\\."`.
+`split(pattern, subject) -> Result[List[str]]`. A bad pattern is `Err`.
+
+**Write patterns as RAW strings — `r"\d{4}"`, not `"\\d{4}"`.** Interpolation is always on in a normal
+string, so `{4}` is an interpolation **hole**, not a quantifier: `"\\d{4}-\\d{2}"` becomes `\d4-\d2`,
+which is still a *valid* regex (a digit then a literal `4`), so it compiles, matches nothing, and
+reports no problem anywhere. In `r"…"` a backslash is literal and braces are inert, which is also why
+this is the one place the doubled-backslash form (`"\\d+"`, `"\\."`) is a trap rather than a style
+choice. (`docs/gaps.md` **W8-1**.)
+
+**The dialect is RE2 (the Rust `regex` crate), not Python's `re`.** Four differences bite in order of
+how often:
+
+- **Replacement is `$1` / `${name}`, Rust-style — Python's `\1` is NOT an escape and emits literal
+  backslashes with no error.** `replace_all(r"(\d+)-(\d+)", "10-20", r"$2/$1")` → `Ok('20/10')`;
+  the same call with `r"\2/\1"` → `Ok('\\2/\\1')`. Silent, `Ok`, plausible-looking. (**W8-6**.)
+- **Argument order is `(pattern, subject, repl)`** — the *replacement is last*, the reverse of
+  `re.sub(pattern, repl, subject)`. Both are `str`, so swapping them type-checks.
+- **No lookaround and no backreferences** (RE2 has linear-time guarantees precisely because it drops
+  them): `r"(?<=a)b"` and `r"(a)\1"` each come back `Err("regex parse error: … not supported")`.
+  Rewrite with an explicit group + `Match.groups`. The payoff is no ReDoS — `(a+)+$` over 30 `a`s is
+  ~0.01 s here vs ~24 s in CPython `re`.
+- **`split` drops capture groups, Python keeps them**: `split(r"(,)", "a,b")` → `Ok(['a', 'b'])` where
+  `re.split` gives `['a', ',', 'b']`. Named groups `(?<name>…)` may be *written* but there is no
+  read-by-name accessor — index `Match.groups` positionally.
 
 ### `std.request`
 Returns use `struct Response { status: int, body: str, headers: Map[str, str] }` (header names
@@ -841,8 +894,10 @@ here — so a 404/500 error page can't masquerade as a successful download — a
 caps a download at 64MB (a larger body is an `Err`); for status/headers on a text response, use `get`.
 
 ### `std.net`
-Non-blocking TCP (scheduler-aware). `connect(addr: "host:port") -> Socket` ·
-`listen(addr: "host:port") -> Listener`. Socket/Listener methods are in §3. See `concurrency.md`.
+Non-blocking TCP (scheduler-aware). `connect(addr: "host:port") -> Result[Socket]` ·
+`listen(addr: "host:port") -> Result[Listener]` — **both return `Result`** (bind/DNS/refused failures
+are the `Err`); match or `?` them, the bare handle is never handed back. Socket/Listener methods are in
+§3. See `concurrency.md`.
 The `Socket`/`Listener` TYPE names require `import std.net` to use bare in an annotation (whole-module,
 or `import Socket from std.net`) — they are reserved names, not global builtins.
 **Text and binary:** `Socket.read -> Result[str]` decodes UTF-8 and never lossily (see §3) — a split
@@ -1199,7 +1254,7 @@ struct DateTime:
 | `to_date_string` | `(dt) -> str` | `"YYYY-MM-DD"`. |
 | `to_time_string` | `(dt) -> str` | `"HH:MM:SS"`. |
 | `to_string` | `(dt) -> str` | `std.time.format` style `"YYYY-MM-DD HH:MM:SS"`. |
-| `parse_iso8601` | `(s: str) -> Result[DateTime]` | The **inverse** of `to_iso8601`: parse ISO-8601 / RFC-3339 (matches Python `datetime.fromisoformat`). Accepts `"YYYY-MM-DD"` (date-only, midnight), `"YYYY-MM-DDTHH:MM:SS"` (naive == UTC), a `'T'` **or** `' '` date/time separator, an optional trailing `'Z'` or `'+HH:MM'`/`'-HH:MM'` offset (**normalized to UTC**, per Go `time.Parse`), and an optional `.fff` fractional part (**validated then truncated** — `DateTime.second` is an int, no sub-second storage). Malformed or out-of-range fields (month 13, day 32, hour 25, second 60, non-digits, wrong widths) are a **clean `Err`**, never a fault. Every field is **width-checked**: month/day/time are exactly 2 digits and the year is **4+** digits (mirroring `to_iso8601`, which pads to 4 and emits more for an extended year) — so `"24-01-01"` is an `Err`, not year 24. Round-trips: `parse_iso8601(to_iso8601(dt)) == dt` for every year of 9 digits or fewer (a wider year — only reachable from an epoch near the `int` limit — exceeds the parser's overflow bound and `Err`s). |
+| `parse_iso8601` | `(s: str) -> Result[DateTime]` | The **inverse** of `to_iso8601`: parse ISO-8601 / RFC-3339 — a **strict SUBSET** of Python's `datetime.fromisoformat`, which is looser: three common forms Python accepts are an `Err` here — `"2024-01-01T12:34"` (no seconds), `"20240101T123456Z"` (basic/compact format), and `"+0530"` (offset without a colon). Only the accepted-forms list that follows is a contract. Accepts `"YYYY-MM-DD"` (date-only, midnight), `"YYYY-MM-DDTHH:MM:SS"` (naive == UTC), a `'T'` **or** `' '` date/time separator, an optional trailing `'Z'` or `'+HH:MM'`/`'-HH:MM'` offset (**normalized to UTC**, per Go `time.Parse`), and an optional `.fff` fractional part (**validated then truncated** — `DateTime.second` is an int, no sub-second storage). Malformed or out-of-range fields (month 13, day 32, hour 25, second 60, non-digits, wrong widths) are a **clean `Err`**, never a fault. Every field is **width-checked**: month/day/time are exactly 2 digits and the year is **4+** digits (mirroring `to_iso8601`, which pads to 4 and emits more for an extended year) — so `"24-01-01"` is an `Err`, not year 24. Round-trips: `parse_iso8601(to_iso8601(dt)) == dt` for every year of 9 digits or fewer (a wider year — only reachable from an epoch near the `int` limit — exceeds the parser's overflow bound and `Err`s). |
 | `add_seconds` | `(epoch, n) -> int` | `epoch + n`. |
 | `add_days` | `(epoch, n) -> int` | `epoch + n*86400` (negative `n` subtracts). |
 | `diff_seconds` | `(a, b) -> int` | `a - b`. |
@@ -1411,7 +1466,14 @@ plain struct over a single int of **milliseconds**.
   optional leading `+`/`-`, one or more `<number><unit>` groups (units `h`/`m`/`s`/`ms`, unordered and
   summed), decimal magnitudes (`"1.5h"`, `".5s"`, `"0.25s"`), and a bare `"0"`. Malformed input (empty,
   no unit, unknown unit, multiple dots, trailing dot, oversized magnitude) is a **clean `Err`**, never a
-  fault. Round-trips exactly (`parse(d.to_string())` ⇒ `d`) because the source is integer ms.
+  fault. Round-trips exactly (`parse(d.to_string())` ⇒ `d`) for every magnitude the parser accepts —
+  **but the accept bound is a DIGIT COUNT, not a value, so the round-trip breaks at the `int` extremes
+  and the bound is unit-blind.** The guard is `intpart.len() > 12` (`std/duration.chz:142`), sized for
+  the worst unit (`h`, ×3 600 000) and applied to every unit, so `"100000000000h"` (12 digits,
+  3.6e17 ms) is `Ok` while the five-orders-smaller `"2562047788015ms"` (13 digits, 2.5e12 ms) is
+  `Err("duration out of range")`. Consequently `parse(millis(i64::MAX).to_string())` — whose text is
+  `"2562047788015h12m55.807s"` — `Err`s. Go's `time.ParseDuration` round-trips
+  `time.Duration(math.MaxInt64)` fine. (`docs/gaps.md` **W8-9**.)
 - **`since(start: float) -> Duration`** — elapsed since a `time.monotonic()` reading (imports native
   `std.time`; floors to whole ms). **`sleep(d: Duration)`** — delegates to native `sleep_ms`.
 
@@ -1525,6 +1587,20 @@ enum Json:
 `as_bool(j) -> Option[bool]` · `as_float(j) -> Option[float]` · `as_int(j) -> Option[int]` ·
 `as_str(j) -> Option[str]` · `as_object(j) -> Option[Map[str, Json]]` · `as_array(j) -> Option[List[Json]]` ·
 `get(j, key) -> Option[Json]` · `at(j, i) -> Option[Json]` · `len(j) -> int`.
+
+> **`parse`'s `Result` is NOT total — deep nesting still kills the process.** `std.json` is
+> recursive-descent in pure Chezzi, so nesting depth in the *input* becomes recursion depth in your
+> program: `"[" * 100_000 + "]" * 100_000` blows the call-depth cap and aborts with `rc=1` even though
+> the caller matches `Ok`/`Err` correctly. Depth ~2 000 parses fine; the exact threshold is not a
+> documented contract. **Wrap `parse` in `recover:` when the input is untrusted** —
+> `r := recover: json.parse(s)` turns it into a catchable `Err("maximum call depth (10000) exceeded")`.
+> Go's `encoding/json` returns `exceeded max depth` and CPython raises a catchable `RecursionError`,
+> so this is a divergence from both ancestors, filed as `docs/gaps.md` **W8-5** (a depth counter
+> returning `Err` is the fix that makes the `Result` contract total).
+
+> **There is no `encode`/`dumps` inverse of `decode[T]`.** Serialization goes the long way: build a
+> `Json.Obj`/`Json.Arr` tree by hand, then `stringify` it. A struct → JSON round-trip is therefore
+> asymmetric (`decode[T]` one line in, hand-built variants out) — `docs/gaps.md` **W8-20**.
 
 Every JSON number is stored as an f64, so `as_int` and `json.decode[int]` are **total** at the
 float→int boundary — neither ever saturates silently to a wildly-wrong value nor faults: a number
