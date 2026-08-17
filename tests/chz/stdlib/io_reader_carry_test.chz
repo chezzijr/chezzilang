@@ -7,6 +7,15 @@
 # Every Reader read path shares the carry: `read_line` (sticky — it re-decodes and re-faults rather
 # than skipping), `read_bytes` (drains it, a carry-only short read), `lines()` (a pure-Chezzi
 # generator over `read_line`, so it inherits both), `close()` (discards it).
+#
+# WHICH ANCESTOR THIS PINS (measured 2026-08-17 — see the `Reader` section of `docs/stdlib.md`):
+# NEITHER ancestor's exact mechanics, because neither is available. CPython's `readline()` raises once
+# and then silently reports EOF forever (it loses the valid line before the bad one AND every line
+# after), so "Chezzi should advance like Python" is backwards — Python does not advance, it goes quiet.
+# Go's `bufio.Scanner` does advance, but only because a Go `string` may hold invalid UTF-8 and a Chezzi
+# `str` may not. What IS pinned is the project rule the two measurements pick between,
+# `correct > silent > wrong`: fault loudly and keep every byte reachable. Do not relax these asserts
+# into a skip without re-running both ancestors.
 # Temp paths carry the pid AND the test name (the suite runs concurrently under M:N).
 # Run: `cargo run -- test tests/chz/`. Gated by `chz_suite_passes` (`tests/chz_suite.rs`).
 
@@ -65,7 +74,9 @@ test fn read_line_fault_is_sticky_not_skipping():
                 Ok(_): assert false, "expected a fault"
                 Err(e): pass
             # A second read_line re-decodes the SAME carried bytes and re-faults — it must not skip
-            # ahead to line3 (that would be the same data loss, one call later).
+            # ahead to line3 (that would be the same data loss, one call later). Measured ancestor:
+            # CPython's second `readline()` returns `''` — a SILENT EOF over data still in the file —
+            # so re-faulting is the louder half of `correct > silent > wrong`, not a divergence to fix.
             y := recover: r.read_line()
             match y:
                 Ok(l): assert false, "the fault must be sticky, got " + str(l)

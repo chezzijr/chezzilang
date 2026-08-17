@@ -38,6 +38,42 @@ Conventions used below:
 | `bytes(x)` | `bytes` | Convert a `bytes` / `bytearray` / `List[int]` to `bytes`. To UTF-8 encode a `str`, use `s.encode()` (Python's `bytes(str)` also errors without an encoding). Literal: `b"..."`. |
 | `bytearray()` | `bytearray` | Empty growable byte buffer. |
 
+### Which failures fault, and why they are not `Result`s
+
+Chezzi uses `Option`/`Result` "so the caller knows it could fail", so it is fair to ask why the calls
+below **fault** instead of returning a carrier. They were all audited on 2026-08-17 against the
+ancestor that owns them, and each one **matches** it — the reference language raises there too, so a
+carrier would be the divergence, not the fix. This table is the recorded negative result: **do not
+re-run this audit, and do not convert these to `Result` without new ancestor evidence.** Every fault
+here is recoverable (`r := recover: <expr>`), and the ones with a carrier sibling name it.
+
+| Chezzi | Fault message | Ancestor (measured, CPython 3.14) | Carrier alternative |
+|--------|---------------|-----------------------------------|---------------------|
+| `xs[i]`, `s[i]` out of range | `index 5 out of bounds (len 3)` | `IndexError: list index out of range` / `string index out of range` | — (`first`/`last`/`get`) |
+| `m[k]`, key absent | `key not found` | `KeyError: 'zz'` | **`m.get(k) -> Option[V]`** (Python `dict.get` → `None`) |
+| `xs.remove_at(i)` out of range | `index 9 out of bounds (len 3)` | `IndexError: pop index out of range` | — |
+| `xs.chunk(n)` / `xs.windows(n)`, `n <= 0` | `chunk/window size must be positive, got 0` | `ValueError: n must be at least one` (`itertools.batched`) | — |
+| `int(s)` / `float(s)` on a bad string | `int(): cannot parse 'abc' as an integer` | `ValueError: invalid literal for int() with base 10: 'abc'` | **`s.parse_int()`/`parse_float() -> Result`**, `s.to_int()/to_float() -> Option` |
+| `chr(code)` out of range | `chr(): -1 is not a valid Unicode codepoint` | `ValueError: chr() arg not in range(0x110000)` | — |
+| `ord(s)` on `""` | `ord() of an empty string` | `TypeError: ord() expected a character, but string of length 0 found` | — |
+| `s.split("")` | `split: sep must not be empty` | `ValueError: empty separator` | — |
+| `b.decode()` on invalid UTF-8 | `invalid UTF-8 in decode()` | `UnicodeDecodeError: 'utf-8' codec can't decode byte 0xff…` | **`b.decode_lossy()`** (Python `decode(errors="replace")`) |
+| `rand.int(lo, hi)`, `hi <= lo` | `rand.int(lo, hi): hi must be > lo` | `ValueError: empty range in randint(5, 1)` | — |
+| `a / b`, `a % b` with `b == 0` | `division by zero` / `modulo by zero` | `ZeroDivisionError: division by zero` | — |
+| `a << n` with `n` out of range | `shift amount -1 out of range (0..64)` | `ValueError: negative shift count` | — |
+| integer overflow | `integer overflow in Add` | *(upward divergence — Python ints are arbitrary-precision; Chezzi's i64 faults recoverably rather than wrapping)* | — |
+| `crypto.secure_bytes(n)`, `n` out of range | `secure_bytes: n must be >= 0, got -1` | *(deliberate fail-closed — a crypto primitive must not silently produce fewer bytes)* | — |
+
+Two entries people expect to find here are **not** faults at all:
+`",".join(xs)` on a non-`str` element is a **static type error** in Chezzi (`expected List[str], found
+List[int]`) where Python raises `TypeError` at runtime; and `ord(s)` on a **multi-character** string
+returns the first codepoint (`ord("ab")` → `97`) where Python raises `TypeError` — a known divergence,
+recorded here rather than silently fixed.
+
+`Reader.read_line()`'s non-UTF-8 fault is a fourth kind of case, documented in full in the `std.io`
+section below ("`Reader` (R2b)"): there Chezzi is deliberately **louder** than Python, which raises
+once and then silently reports EOF over data that is still in the file.
+
 ---
 
 ## 2. Methods on built-in types
@@ -58,7 +94,7 @@ Conventions used below:
 | `repeat` | `(n: int) -> str` | `n <= 0` → `""`. Raises a recoverable `string repeat capacity overflow` fault if `n * len` would exceed allocatable capacity. |
 | `reverse` | `() -> str` | Reversed copy (by codepoint). |
 | `pad_left` | `(width: int, fill: str) -> str` | Left-pad to `width` codepoints; never shrinks (`width` ≤ len → unchanged). A multi-char `fill` is a repeating cycle truncated to fit, so the result is **exactly** `width` codepoints (`"a".pad_left(4, "xy")` → `"xyxa"`). An empty `fill` raises a recoverable `pad_left: fill must not be empty` fault. Raises a recoverable `string pad capacity overflow` fault if the pad would exceed allocatable capacity. |
-| `index_of` | `(sub: str) -> int` | First **codepoint** index, `-1` if absent, `0` for empty `sub`. |
+| `index_of` | `(sub: str) -> int` | First **codepoint** index, `-1` if absent, `0` for empty `sub`. A **sentinel, not a carrier** — see the `-1` hazard under `List.index_of`. |
 | `count` | `(sub: str) -> int` | Non-overlapping occurrences; empty `sub` → codepoint length + 1 (`"abc".count("")` → `4`), matching Python/Go/`std.string.count`. |
 | `strip` | `() -> str` | Trim alias (strip leading/trailing whitespace). |
 | `strip_prefix` | `(p: str) -> str` | Remove `p` from the front if present, else unchanged. |
@@ -88,7 +124,7 @@ fault, by contrast, is raised identically by both.)
 | `pop` | `() -> Option[T]` | *mutates* — remove & return last (`None` if empty). |
 | `reverse` | `() -> nil` | *mutates* — reverse in place. |
 | `contains` | `(x: T) -> bool` | |
-| `index_of` | `(x: T) -> int` | First index, or `-1`. |
+| `index_of` | `(x: T) -> int` | First index, or `-1`. A **sentinel, not a carrier** — see the `-1` hazard below. |
 | `concat` | `(other: List[T]) -> List[T]` | Returns a **new** list. Operator form: `a + b`. |
 | `extend` | `(other: List[T]) -> nil` | *mutates* — append all of `other`. |
 | `sum` | `() -> T` | Numeric lists (`int`→`int`), or a list of a **scalar numeric `newtype`** — `List[Cents]` (`newtype Cents = int`) sums to `Cents`, and an **empty** one to `Cents(0)`, matching Go's `type Cents int`. Integer sums use checked add — overflow raises a recoverable `integer overflow in Add`, never wraps (the newtype path uses the underlying's same checked op); any-float lists accumulate to `float` (may reach `inf`). A newtype OF a newtype, a generic newtype and a non-numeric one (`newtype Name = str`) are rejected, exactly as their `+` is. |
@@ -111,7 +147,17 @@ fault, by contrast, is raised identically by both.)
 | `take_while` | `(pred: fn(T) -> bool) -> List[T]` | Returns a **new** list of the leading prefix while `pred` holds (stops at the first false). |
 | `drop_while` | `(pred: fn(T) -> bool) -> List[T]` | Returns a **new** list of the suffix after the leading prefix where `pred` holds. |
 | `count` | `(pred: fn(T) -> bool) -> int` | Number of elements satisfying `pred`. |
-| `position` | `(pred: fn(T) -> bool) -> Option[int]` | Index of the **first** element satisfying `pred` (`None` if none). |
+| `position` | `(pred: fn(T) -> bool) -> Option[int]` | Index of the **first** element satisfying `pred` (`None` if none). The **carrier** twin of `index_of` — a miss is `None`, not a usable `-1`. |
+
+> **The `-1` miss hazard (`List.index_of`, `str.index_of`).** These two return a **sentinel**, not a
+> carrier, and indexing is Python-negative — so `xs[xs.index_of(v)]` on a miss silently yields the
+> **last** element instead of faulting. Measured Chezzi: `[1,2,3][[1,2,3].index_of(9)]` → `3`;
+> `"hello"["hello".index_of("zz")]` → `'o'`. Python has the identical trap:
+> `'hello'['hello'.find('zz')]` → `'o'`. The sentinel therefore **stays** — but reach for the carrier
+> when a miss must not be silently usable: `List.position(pred) -> Option[int]`, `Map.get(k) ->
+> Option[V]`, or a plain `contains` guard. (Note Python's *list* twin, `list.index(x)`, raises
+> `ValueError` instead — the `-1` here is Chezzi applying one uniform shape to `List` and `str`, not
+> `List` inheriting Python's.)
 
 The predicate/callback methods — `map`/`filter`/`fold`/`take_while`/`drop_while`/`count`/`position`,
 **and `sort`/`sort_by`/`sort_by_key`** — iterate over a **snapshot** of the receiver's elements taken at
@@ -537,7 +583,7 @@ opened by `open(path)`): stream a large file line- or chunk-by-chunk instead of 
 
 | Method | Signature | Notes |
 |--------|-----------|-------|
-| `read_line` | `() -> Option[str]` | One line; trailing `\n` (and a preceding `\r`) **stripped**; `None` at EOF. Matches the module-level `read_line()`. A mid-read I/O error or non-UTF-8 file is a clean **fault** pointing at `read_bytes` (an `Option` can't carry the error, like `read_file`). The non-UTF-8 fault is **non-destructive** — see the carry rule below. |
+| `read_line` | `() -> Option[str]` | **Three** outcomes, not the two the `Option` spells: one line (trailing `\n`, and a preceding `\r`, **stripped**; matches the module-level `read_line()`), `None` at EOF, or a clean **fault** on a mid-read I/O error / non-UTF-8 line, pointing at `read_bytes` (an `Option` can't carry the error, like `read_file`). The non-UTF-8 fault is **non-destructive** — see the carry rule below. |
 | `read_bytes` | `(n: int) -> Result[bytes]` | At-most-`n` bytes (exactly `n` until a short final chunk); **empty bytes = EOF**; `Err` on closed / I/O. The binary + error-distinguishing escape hatch. `n <= 0` → `Ok(b"")`. Drains a pending **carry** first, without touching the fd. |
 | `close` | `() -> Result[nil]` | Release the fd, and discard any carry. Idempotent; a read after `close` is a clean `Err` (`read_bytes`) / fault (`read_line`), never a panic. |
 | `lines` | `() -> Iterator[str]` | **Lazy** line stream — `for ln in r.lines():` (Python `for l in f` / Go `bufio.Scanner` / Rust `BufRead::lines`). A generator over `read_line()`: each line is fetched on demand (the file is **not** snapshotted; an early `break` stops reading), trailing `\n`/`\r` stripped, ends at EOF. A mid-read non-UTF-8 fault surfaces exactly as `read_line`, carry included. |
@@ -561,6 +607,17 @@ opened by `open(path)`): stream a large file line- or chunk-by-chunk instead of 
     same way, so `read_bytes` gets it back instead of it vanishing with the fault. That carry is
     **not** self-healing — an interrupted line is a *truncated* one, so `read_line` re-raises the I/O
     error until the bytes are drained rather than handing back a fragment as if it were a whole line.
+
+  **Why sticky rather than skip-ahead — the ancestors, measured** (2026-08-17, on
+  `b"alpha\nbad\xff\xfebytes\ngamma\n"`). CPython 3.14 `open(p,'r')` is the *worse* of the two options,
+  not the better one: the **first** `readline()` raises `UnicodeDecodeError` — `"alpha"` is lost too,
+  because `TextIOWrapper` decodes a whole chunk at a time — and every `readline()` after that returns
+  `''`, a **silent EOF claim** over `"gamma"`, which is still in the file. Go's `bufio.Scanner` does
+  advance (`Scan()` returns true three times, `Text()` gives back `"bad\xff\xfebytes"` verbatim with
+  `sc.Err() == nil`), but only because a Go `string` may hold invalid UTF-8; a Chezzi `str` may not, so
+  that option is not available here. Chezzi returns `Some("alpha")`, then faults — loudly, repeatedly,
+  and with every byte still recoverable through `read_bytes`. That is `correct > silent > wrong`, so the
+  stickiness **stays**: it is not a bug to be fixed into a skip.
 
   ```chezzi
   # /tmp/bin.dat == b"line1\nA\xffB\nline3\n"
