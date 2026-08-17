@@ -3,6 +3,16 @@
 
 use super::*;
 
+/// A snapshot of the lengths of BOTH diagnostic channels, taken by [`Checker::diag_mark`] and undone
+/// by [`Checker::diag_rollback`]. `errors` is public within the checker because several sites also
+/// ask "did the probe ERROR?" (a cascade-suppression signal — a warning is not an error and must not
+/// answer it); `warnings` is only ever compared by the rollback itself.
+#[derive(Clone, Copy)]
+pub(super) struct DiagMark {
+    pub(super) errors: usize,
+    warnings: usize,
+}
+
 impl Checker {
     pub(super) fn new() -> Self {
         let mut c = Checker {
@@ -911,10 +921,31 @@ impl Checker {
     /// code is unchanged. Shares `error`'s module attribution — a warning raised while checking an
     /// imported module must name it, exactly like an error from the same position.
     // No rule emits one yet; the two that will (docs/gaps.md W8-2 and the airlock trap) land next.
+    // DELETE THIS ATTRIBUTE when the first of them lands — it exists only because the channel has no
+    // producer, and leaving it on hides a genuinely-unused `warn` later.
     #[allow(dead_code)]
     pub(super) fn warn(&mut self, span: Span, message: impl Into<String>) {
         let message = self.attribute(message);
         self.warnings.push(CheckError::warning(message, span));
+    }
+
+    /// Snapshot BOTH diagnostic channels for the speculative-inference idiom: mark, run a probe
+    /// re-inference, [`Checker::diag_rollback`] everything the probe emitted so the REAL path reports
+    /// it exactly once. Pair them — never truncate a channel by hand — because the pair is what keeps
+    /// the two vectors in step. `warnings` is the reason this exists: a rule that warns inside a fn
+    /// body would otherwise fire twice (return-inference pass, then pass 2) and would also fire from
+    /// speculative branches whose errors are correctly discarded.
+    pub(super) fn diag_mark(&self) -> DiagMark {
+        DiagMark {
+            errors: self.errors.len(),
+            warnings: self.warnings.len(),
+        }
+    }
+
+    /// Discard every diagnostic — error AND warning — recorded since `m`. See [`Checker::diag_mark`].
+    pub(super) fn diag_rollback(&mut self, m: DiagMark) {
+        self.errors.truncate(m.errors);
+        self.warnings.truncate(m.warnings);
     }
 
     /// Attribute a diagnostic to the module currently being checked (graph path only). Shared by

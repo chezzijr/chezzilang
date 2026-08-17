@@ -351,7 +351,7 @@ impl Checker {
         sig: &FnSig,
         finalize: bool,
     ) -> Ty {
-        let mark = self.errors.len();
+        let mark = self.diag_mark();
         let saved_tps = self.enter_type_params(&decl.type_params);
         // `Self` in this body/inline-expr resolves to the enclosing type (`None` for a free fn, which
         // correctly resets an enclosing method's binding when a nested fn is inference-checked).
@@ -437,8 +437,10 @@ impl Checker {
         // Did the body inference itself emit an error (undefined name, bad call, …)? If so the real
         // diagnostic surfaces in pass 2, so a residual `Unknown`/conflict here is a CASCADE, not a
         // genuine un-inferable return — suppress the finalize error to avoid piling on.
-        let body_had_err = self.errors.len() > mark;
-        self.errors.truncate(mark); // discard inference-time errors; pass 2 re-reports them for real
+        let body_had_err = self.errors.len() > mark.errors;
+        // Discard inference-time diagnostics; pass 2 re-reports them for real. BOTH channels: a
+        // warning raised inside this body would otherwise be emitted here AND again in pass 2.
+        self.diag_rollback(mark);
         // A GENERATOR's return type is `Iterator[T]`, `T` inferred by strict-first-yield — NOT the
         // folded `return` branches (a generator's `return`s are bare, contributing only `Nil`). Route
         // to the dedicated helper before the value-return fold below.
@@ -2113,9 +2115,9 @@ impl Checker {
                     // read) and double-infer a Field/Index receiver. `check_assign` below is the sole
                     // validator of the target, so snapshot+truncate any errors this probe produces
                     // (mirrors the generic-arg recovery idiom).
-                    let mark = self.errors.len();
+                    let mark = self.diag_mark();
                     let target_ty = self.infer(target);
-                    self.errors.truncate(mark);
+                    self.diag_rollback(mark);
                     if matches!(target_ty, Ty::Func { .. }) {
                         self.infer_arg(value, Some(&target_ty))
                     } else {
@@ -2668,7 +2670,7 @@ impl Checker {
                             ..
                         } = &e.kind
                         {
-                            let checkpoint = self.errors.len();
+                            let checkpoint = self.diag_mark();
                             let mut bad: Vec<(Span, String)> = Vec::new();
                             if let ExprKind::Field { obj, .. } = &callee.kind {
                                 let rty = self.infer(obj);
@@ -2714,7 +2716,7 @@ impl Checker {
                                     ));
                                 }
                             }
-                            self.errors.truncate(checkpoint);
+                            self.diag_rollback(checkpoint);
                             for (sp, msg) in bad {
                                 self.error(sp, msg);
                             }

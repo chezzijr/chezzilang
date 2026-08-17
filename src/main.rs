@@ -171,9 +171,10 @@ fn cmd_check(args: &[String]) -> ExitCode {
     // entry module a project cannot start reports it.
     let (outcome, warns) = type_check(&path, None, EntryGate::FromManifest);
     // `check`'s stdout IS the diagnostic document, so in machine mode the warnings ride the single
-    // array the arms below print; in plain text they precede the verdict on stderr.
+    // array the arms below print; in plain text they precede the verdict on stderr. Exactly one of
+    // the two — the `!json` guard is what keeps a warning from being printed on both streams.
     if !json {
-        report_check_warnings(&warns, false);
+        report_check_warnings(&warns);
     }
     match outcome {
         CheckOutcome::Ok => {
@@ -291,11 +292,14 @@ fn cmd_run(args: &[String]) -> ExitCode {
         None => EntryGate::Script,
     };
     let (outcome, warns) = type_check(&path, root_override.as_deref(), gate);
-    report_check_warnings(&warns, json);
+    // `run`'s stdout belongs to the PROGRAM, so a warning goes to stderr in both modes — unguarded,
+    // unlike `check` above. The `&[]` below is the other half of that decision: were the warnings
+    // also folded into the stdout array, the same diagnostic would print twice, on two streams.
+    report_check_warnings(&warns);
     match outcome {
         CheckOutcome::Ok => {}
         CheckOutcome::Errors(errs) => {
-            report_check_errors(&errs, &warns, json);
+            report_check_errors(&errs, &[], json);
             return ExitCode::FAILURE;
         }
         CheckOutcome::Fatal {
@@ -997,26 +1001,28 @@ fn diags_json(diags: &[checker::CheckError]) -> String {
     format!("[{}]", items.join(","))
 }
 
-/// Print non-fatal checker warnings to **stderr** — stdout carries the command's own output (a
-/// `chezzi run` program's prints, `chezzi check`'s verdict), and a warning must never be mistaken
-/// for either. Machine mode renders them in the same object shape as errors, told apart by
-/// `severity`.
-fn report_check_warnings(warns: &[checker::CheckError], json: bool) {
-    if warns.is_empty() {
-        return;
-    }
-    if json {
-        eprintln!("{}", diags_json(warns));
-    } else {
-        for w in warns {
-            eprintln!("{w}");
-        }
+/// Print non-fatal checker warnings as plain text on **stderr**. Always plain text, even under
+/// `--errors=json`: the only caller that reaches here in machine mode is `chezzi run`, whose stdout
+/// belongs to the program and whose stderr is shared with the program's own — a JSON array there
+/// could not be parsed out of that stream anyway, and rendering one would only invite a consumer to
+/// try. The machine-readable path for warnings is `chezzi check --errors=json`, which puts them in
+/// the ONE array on stdout ([`report_check_errors`]) and never calls this.
+///
+/// Which stream carries a warning, per command, and why:
+/// * `chezzi check` — stdout IS the diagnostic document. Machine mode: the stdout array, beside the
+///   errors. Plain text: here, on stderr, above the verdict. Exactly one of the two, ever.
+/// * `chezzi run` / `chezzi test` — stdout belongs to the running program. Always here, on stderr,
+///   in both modes; the stdout array stays errors-only so nothing is reported twice.
+fn report_check_warnings(warns: &[checker::CheckError]) {
+    for w in warns {
+        eprintln!("{w}");
     }
 }
 
 /// Print type errors as plain text (default) or a JSON array (`--errors=json`). `warns` rides the
 /// SAME json array (a machine consumer gets one document, keyed by `severity`); in plain text the
-/// caller has already put them on stderr, and the trailing count stays errors-only.
+/// caller has already put them on stderr, and the trailing count stays errors-only. Pass `&[]` from
+/// any command whose warnings already went to stderr — see [`report_check_warnings`].
 fn report_check_errors(errs: &[checker::CheckError], warns: &[checker::CheckError], json: bool) {
     if json {
         let all: Vec<checker::CheckError> = warns.iter().chain(errs).cloned().collect();

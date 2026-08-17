@@ -41,6 +41,7 @@ fn warn_src(src: &str) -> (Vec<CheckError>, Vec<CheckError>) {
 /// is load-bearing: without it the helper cannot tell a warning from an error, and every rule built
 /// on it would pass while emitting a hard error.
 // No rule emits a warning yet — the two that will (docs/gaps.md W8-2 and the airlock trap) land next.
+// DELETE THIS ATTRIBUTE when the first of them lands and calls this helper.
 #[allow(dead_code)]
 fn warns(src: &str, needle: &str) {
     let (errs, warns) = warn_src(src);
@@ -92,8 +93,50 @@ fn warn_is_a_separate_non_fatal_channel() {
     assert_eq!(c.errors[1].message, "in module 'core.db': attributed");
 }
 
+/// The speculative-inference idiom — mark, run a probe re-inference, roll back — must cover the
+/// WARNING channel too. A dozen sites in the checker probe an expression only to learn its type and
+/// then discard what the probe reported, because the real path re-runs it and reports for keeps; a
+/// warning left behind by such a probe (or by an abandoned branch) double-reports. Written at the
+/// `Checker` level because no rule warns yet: with `diag_rollback` truncating `errors` alone, the
+/// first assertion below sees 2 warnings.
+#[test]
+fn diag_rollback_discards_speculative_warnings_and_keeps_the_rest() {
+    let span = Span {
+        line: 1,
+        col: 1,
+        file: 0,
+    };
+    let mut c = Checker::new();
+    // Recorded BEFORE the speculative window — must survive the rollback.
+    c.warn(span, "kept");
+    c.error(span, "kept");
+    let mark = c.diag_mark();
+    c.warn(span, "speculative");
+    c.error(span, "speculative");
+    c.diag_rollback(mark);
+    assert_eq!(
+        c.warnings.len(),
+        1,
+        "the speculative warning must be rolled back, got: {:?}",
+        c.warnings
+    );
+    assert_eq!(c.errors.len(), 1, "got: {:?}", c.errors);
+    assert_eq!(c.warnings[0].message, "kept");
+    assert_eq!(c.errors[0].message, "kept");
+    // A rollback to a mark taken on empty channels clears both.
+    let zero = Checker::new().diag_mark();
+    c.diag_rollback(zero);
+    assert!(c.warnings.is_empty() && c.errors.is_empty());
+}
+
 /// The graph entry point keeps the channels apart: warnings never reach the `Result`, and an
 /// erroring program's `Err` carries only `Severity::Error`.
+///
+/// RESIDUAL, stated precisely: the take-and-return plumbing is unasserted until the first rule lands.
+/// Both assertions below expect an EMPTY warning vec, so replacing `check_graph_diags`' `let warnings
+/// = std::mem::take(&mut c.warnings);` with `Vec::new()` — deleting the wire that carries warnings out
+/// of the entry point — still passes the whole suite. Closing it needs a producer, not an injection
+/// seam; the first rule's `warns(...)` test closes it end to end.
 #[test]
 fn check_graph_diags_keeps_warnings_out_of_the_result() {
     let t = TmpDir::new();

@@ -966,7 +966,7 @@ impl Checker {
         // (c) determine the supplied ELEMENT type from a slot-supplying mutator's args.
         // `push(x)`/`add(x)`/`insert(x)` supply the element directly; `extend(xs)` supplies a
         // list/set whose element refines ours.
-        let mark = self.errors.len();
+        let mark = self.diag_mark();
         let elem = match method {
             "push" | "add" | "insert" => args.first().map(|a| self.infer_value(a)),
             "extend" => args.first().map(|a| match self.infer_value(a) {
@@ -987,8 +987,8 @@ impl Checker {
         // (d) cascade invariant: if inferring the arg itself reported an error, don't refine — and
         // roll back the speculative diagnostics so the real dispatch path (check_args) reports them
         // exactly once. Leaving them here double-reports an erroring arg (e.g. `xs.push(undefined)`).
-        if self.errors.len() != mark {
-            self.errors.truncate(mark);
+        if self.errors.len() != mark.errors {
+            self.diag_rollback(mark);
             return;
         }
         // A shape that is itself Unknown supplies nothing concrete; merge is a no-op, bail early.
@@ -1035,14 +1035,14 @@ impl Checker {
         }
         // The supplied shape mirrors the receiver kind: `Map(idx, val)` for a map, `List(val)` for a
         // list (index type is the int position, irrelevant to the element slot).
-        let mark = self.errors.len();
+        let mark = self.diag_mark();
         let shape = match &obj_ty {
             Ty::Map(..) => Ty::map(self.infer(index), val_ty.clone()),
             Ty::List(..) => Ty::list(val_ty.clone()),
             _ => return,
         };
-        if self.errors.len() != mark {
-            self.errors.truncate(mark); // roll back the speculative index-infer diagnostics; the
+        if self.errors.len() != mark.errors {
+            self.diag_rollback(mark); // roll back the speculative index-infer diagnostics; the
             return; // real index-assign path re-infers + reports them once (no double-report)
         }
         let merged = merge_unknown(&obj_ty, &shape);

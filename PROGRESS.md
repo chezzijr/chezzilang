@@ -83,6 +83,24 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > `check_graph_diags` test that no warning leaks into either arm, and a CLI test pinning the unchanged
 > clean/error cases plus the new key (`tests/check_errors_json.rs`).
 >
+> **✅ …then hardened before it got a producer, same day.** Two holes, both invisible while nothing
+> warns. (1) **The speculative-rollback idiom had no `warnings` counterpart.** Nine sites in
+> `src/checker/{sig,proto,expr,pattern}.rs` mark `self.errors.len()`, run a probe re-inference, then
+> `errors.truncate(mark)` because the real path re-reports for keeps — the new vec was invisible to
+> every one of them, so the first rule that warned inside a fn body would have fired twice
+> (return-inference pass, then pass 2) and from abandoned branches too. Replaced by ONE pair,
+> `Checker::diag_mark() -> DiagMark` / `diag_rollback(m)`, covering both vecs; all nine sites route
+> through it (the four that also ask "did the probe ERROR?" read `m.errors`, since a warning must not
+> answer that question). The one mark that is NOT a rollback site (`pattern.rs`'s `closure_mark` — the
+> closure body is checked exactly once, so its diagnostics stay) keeps the raw length and says so.
+> (2) **`chezzi run --errors=json` double-reported a warning**, printing a warning array to stderr and
+> folding the same warnings into the stdout array. Routing is now stated per command and each
+> diagnostic appears once: `check`'s stdout IS the diagnostic document (machine mode → the one stdout
+> array, plain text → stderr, never both), while `run`/`test` stdout belongs to the PROGRAM (always
+> stderr, both modes, and the stdout array stays errors-only). `report_check_warnings` lost its JSON
+> branch with it — its only machine-mode caller is `run`, whose stderr is shared with the program's, so
+> a JSON array there could never be parsed back out.
+>
 > **✅ `os.hostname() -> Option[str]`, 2026-08-17 — no more silent `""` on syscall failure.** The
 > native `hostname` (`src/native/os.rs:55`) fell back to `String::new()` on a nonzero
 > `libc::gethostname` return; that's a silent wrong answer, indistinguishable from a real (if absurd)

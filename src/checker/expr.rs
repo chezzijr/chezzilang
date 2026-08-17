@@ -3248,9 +3248,9 @@ impl Checker {
                             // error). `check_args` already inferred the closure (emitting any body
                             // errors); this is a RECOVERY-ONLY re-inference, so snapshot + truncate to
                             // avoid double-reporting those same body errors.
-                            let mark = self.errors.len();
+                            let mark = self.diag_mark();
                             let recovered = args.first().map(|arg| self.infer_value(arg));
-                            self.errors.truncate(mark);
+                            self.diag_rollback(mark);
                             if let Some(Ty::Func { ret, .. }) = recovered {
                                 return *ret;
                             }
@@ -3604,13 +3604,13 @@ impl Checker {
             .map(|a| {
                 self.generic_fn_value_prepass = repins && matches!(a.kind, ExprKind::Ident(_));
                 if matches!(a.kind, ExprKind::Closure { .. }) {
-                    let mark = self.errors.len();
+                    let mark = self.diag_mark();
                     // Keep the closure's unannotated params `Unknown` in the unification prepass —
                     // the free-body scan (sources #2/#3) must not pin them here (see the field doc).
                     let saved = std::mem::replace(&mut self.generic_arg_prepass, true);
                     let t = self.infer_value(a);
                     self.generic_arg_prepass = saved;
-                    self.errors.truncate(mark);
+                    self.diag_rollback(mark);
                     t
                 } else {
                     self.infer_value(a)
@@ -3684,15 +3684,15 @@ impl Checker {
         // free-scan/annotation-required path — so the "params bound to `Unknown`" trial actually
         // checks the body with `Unknown` params (no spurious "cannot infer parameter").
         let saved = std::mem::replace(&mut self.generic_arg_prepass, prepass);
-        let mark = self.errors.len();
+        let mark = self.diag_mark();
         for &i in idxs {
             if let (Some(decl), Some(arg)) = (decl_tys.get(i), args.get(i)) {
                 let expected = subst(decl, sub);
                 self.infer_arg(arg, Some(&expected));
             }
         }
-        let errored = self.errors.len() > mark;
-        self.errors.truncate(mark);
+        let errored = self.errors.len() > mark.errors;
+        self.diag_rollback(mark);
         self.generic_arg_prepass = saved;
         errored
     }

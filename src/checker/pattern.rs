@@ -908,9 +908,9 @@ impl Checker {
             // `self.infer(call)` below re-infers the same `obj` sub-expression and would re-report
             // them, doubling a diagnostic (e.g. an undefined receiver → two "undefined variable"s).
             // Mirrors the RwShared `read` recovery-only re-inference idiom.
-            let mark = self.errors.len();
+            let mark = self.diag_mark();
             let recv_ty = self.infer(obj);
-            self.errors.truncate(mark);
+            self.diag_rollback(mark);
             match recv_ty {
                 Ty::Channel(_) | Ty::Unknown => {}
                 other => {
@@ -4220,6 +4220,9 @@ impl Checker {
         // Mark BEFORE param binding so the free-closure finalize (below) is suppressed if EITHER an
         // un-inferable PARAM (`cannot infer type of parameter`) or the body emits a real error — a
         // residual `Unknown` return is then a cascade, not a genuine un-inferable return.
+        // NOT a speculative-rollback site (hence the raw length, not `diag_mark`): the closure body is
+        // checked exactly ONCE here, so its diagnostics — errors and any future warning alike — stay.
+        // This mark is only read, to answer "did the body error?".
         let closure_mark = self.errors.len();
         self.push_scope();
         let param_tys: Vec<Ty> = params
